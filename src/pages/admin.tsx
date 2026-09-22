@@ -7,8 +7,10 @@ import {
   Plus,
   RefreshCw,
   Search,
+  ShieldBan,
   SlidersHorizontal,
   Network,
+  Zap,
   CheckCircle2,
   XCircle,
   Trash2,
@@ -70,12 +72,15 @@ const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
   { key: "ai", label: "AI 中转站", desc: "NewAPI 账号与 API Key" },
   { key: "frp", label: "内网穿透", desc: "frp 隧道申请" },
   { key: "profile", label: "个人名片", desc: "对外展示的个人主页" },
+  { key: "proxy", label: "代理节点", desc: "代理订阅与节点" },
 ]
 
 import type {
   AdminFrpApplication,
   AdminFrpNode,
+  ReservedSubdomain,
   AdminInvite,
+  AdminProxySubscription,
   AdminSettings,
   AdminUser,
   AdminUserDetail,
@@ -130,7 +135,25 @@ export default function AdminPage() {
     ai: true,
     frp: true,
     profile: true,
+    proxy: true,
   })
+
+  // 子域名配额编辑
+  const [quotaDraft, setQuotaDraft] = React.useState<string | null>(null)
+  const [globalQuota, setGlobalQuota] = React.useState(5)
+  const [subQuota, setSubQuota] = React.useState("5")
+
+  // 编辑邀请码权限
+  const [permInvite, setPermInvite] = React.useState<AdminInvite | null>(null)
+  const [permDraft, setPermDraft] = React.useState<Permissions | null>(null)
+  const [permBusy, setPermBusy] = React.useState(false)
+
+  // 保留子域名
+  const [reserved, setReserved] = React.useState<ReservedSubdomain[]>([])
+  const [reservedLoading, setReservedLoading] = React.useState(false)
+  const [reservedName, setReservedName] = React.useState("")
+  const [reservedNote, setReservedNote] = React.useState("")
+  const [reservedBusy, setReservedBusy] = React.useState(false)
 
   // 全局设置
   const [settingsStats, setSettingsStats] =
@@ -309,6 +332,72 @@ export default function AdminPage() {
     }
   }
 
+  // ---- 代理节点订阅源 ----
+
+  const [proxySubs, setProxySubs] = React.useState<AdminProxySubscription[]>([])
+  const [proxyLoading, setProxyLoading] = React.useState(false)
+  const [proxyBusy, setProxyBusy] = React.useState(false)
+  const [proxyOpen, setProxyOpen] = React.useState(false)
+  const [proxyForm, setProxyForm] = React.useState({
+    id: "",
+    name: "",
+    region: "",
+    url: "",
+    protocol: "mixed",
+    status: "unknown",
+    statusNote: "",
+    enabled: true,
+    sortOrder: "0",
+    note: "",
+  })
+
+  const loadProxy = React.useCallback(async () => {
+    setProxyLoading(true)
+    try {
+      const res = await adminApi.listProxySubscriptions()
+      setProxySubs(res.subscriptions)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "加载订阅源失败")
+    } finally {
+      setProxyLoading(false)
+    }
+  }, [])
+
+  const handleSaveProxy = async () => {
+    setProxyBusy(true)
+    try {
+      await adminApi.upsertProxySubscription({
+        id: proxyForm.id || undefined,
+        name: proxyForm.name,
+        region: proxyForm.region,
+        url: proxyForm.url,
+        protocol: proxyForm.protocol,
+        status: proxyForm.status,
+        statusNote: proxyForm.statusNote,
+        enabled: proxyForm.enabled,
+        sortOrder: Number(proxyForm.sortOrder),
+        note: proxyForm.note,
+      })
+      toast.success("订阅源已保存")
+      setProxyOpen(false)
+      await loadProxy()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "保存失败")
+    } finally {
+      setProxyBusy(false)
+    }
+  }
+
+  const handleDeleteProxy = async (id: string) => {
+    try {
+      await adminApi.deleteProxySubscription(id)
+      toast.success("订阅源已删除")
+      await loadProxy()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "删除失败")
+    }
+  }
+
   // ---- 全局设置 ----
 
   const loadSettings = React.useCallback(async () => {
@@ -338,6 +427,8 @@ export default function AdminPage() {
       setNewapiGroup(s.newapi_group ?? "default")
       setNewapiUnlimited(s.newapi_unlimited_quota === "1")
       setNewapiEnabled(s.newapi_enabled === "1")
+      setGlobalQuota(Number(s.subdomain_quota_default ?? 5))
+      setSubQuota(s.subdomain_quota_default ?? "5")
       setFrpEnabled(s.frp_enabled === "1")
       setFrpCoreUrl(s.frp_core_url ?? "")
       setFrpNotifyEmail(s.frp_admin_notify_email ?? "")
@@ -373,6 +464,87 @@ export default function AdminPage() {
     }
   }
 
+  const handleSaveQuota = async () => {
+    if (!detail) return
+    setBusy(true)
+    try {
+      const raw = (quotaDraft ?? "").trim()
+      const res = await adminApi.updateUser(detail.user.username, {
+        // 留空表示恢复全局默认（传 null）
+        maxSubdomains: raw === "" ? null : Number(raw),
+      })
+      setDetail(res)
+      toast.success("配额已更新")
+      void load()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "保存失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const openInvitePerms = (inv: AdminInvite) => {
+    setPermInvite(inv)
+    setPermDraft({ ...inv.permissions })
+  }
+
+  const handleSaveInvitePerms = async () => {
+    if (!permInvite || !permDraft) return
+    setPermBusy(true)
+    try {
+      await adminApi.updateInvite(permInvite.id, { permissions: permDraft })
+      toast.success("权限已更新（只影响之后注册的新账号）")
+      setPermInvite(null)
+      setPermDraft(null)
+      void loadInvites()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "保存失败")
+    } finally {
+      setPermBusy(false)
+    }
+  }
+
+  const loadReserved = React.useCallback(async () => {
+    setReservedLoading(true)
+    try {
+      const res = await adminApi.listReserved()
+      setReserved(res.reserved)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "加载保留域名失败")
+    } finally {
+      setReservedLoading(false)
+    }
+  }, [])
+
+  const handleAddReserved = async () => {
+    if (!reservedName.trim()) return
+    setReservedBusy(true)
+    try {
+      const res = await adminApi.addReserved({
+        name: reservedName,
+        note: reservedNote || undefined,
+      })
+      setReserved(res.reserved)
+      setReservedName("")
+      setReservedNote("")
+      toast.success("已加入保留列表")
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "添加失败")
+    } finally {
+      setReservedBusy(false)
+    }
+  }
+
+  const handleRemoveReserved = async (name: string) => {
+    try {
+      const res = await adminApi.removeReserved(name)
+      setReserved(res.reserved)
+      toast.success(`已取消保留 ${name}`)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "移除失败")
+    }
+  }
+
   const handleRecalculate = async () => {
     setSettingsBusy(true)
     try {
@@ -397,6 +569,12 @@ export default function AdminPage() {
     try {
       const res = await adminApi.getUser(username)
       setDetail(res)
+      // 配额草稿：有覆盖则显示该值，否则留空表示「用全局默认」
+      setQuotaDraft(
+        res.user.maxSubdomains === null || res.user.maxSubdomains === undefined
+          ? ""
+          : String(res.user.maxSubdomains)
+      )
       setDetailUser(username)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "加载详情失败")
@@ -477,7 +655,7 @@ export default function AdminPage() {
         description={`已注册用户 ${users.length} 个 · 邀请码 ${invites.length} 个`}
       />
 
-      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp() }}>
+      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp(); if (v === "proxy") void loadProxy(); if (v === "reserved") void loadReserved() }}>
         <TabsList className="mb-4">
           <TabsTrigger value="users">
             <Users className="mr-1.5 h-3.5 w-3.5" />
@@ -490,6 +668,14 @@ export default function AdminPage() {
           <TabsTrigger value="frp">
             <Network className="mr-1.5 h-3.5 w-3.5" />
             内网穿透
+          </TabsTrigger>
+          <TabsTrigger value="proxy">
+            <Zap className="mr-1.5 h-3.5 w-3.5" />
+            代理节点
+          </TabsTrigger>
+          <TabsTrigger value="reserved">
+            <ShieldBan className="mr-1.5 h-3.5 w-3.5" />
+            保留域名
           </TabsTrigger>
           <TabsTrigger value="settings">
             <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
@@ -623,9 +809,10 @@ export default function AdminPage() {
                   <TableRow>
                     <TableHead>邀请码</TableHead>
                     <TableHead>已用 / 上限</TableHead>
+                    <TableHead>权限</TableHead>
                     <TableHead>创建时间</TableHead>
                     <TableHead>状态</TableHead>
-                    <TableHead className="w-12" />
+                    <TableHead className="w-20" />
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -642,6 +829,28 @@ export default function AdminPage() {
                         <TableCell>
                           {inv.usedCount} / {inv.maxUses}
                         </TableCell>
+                        <TableCell>
+                          <button
+                            type="button"
+                            className="flex flex-wrap gap-1 text-left"
+                            onClick={() => openInvitePerms(inv)}
+                            title="点击编辑权限"
+                          >
+                            {FEATURES.filter((f) => inv.permissions[f.key]).length ===
+                            FEATURES.length ? (
+                              <Badge variant="secondary">全部</Badge>
+                            ) : FEATURES.filter((f) => inv.permissions[f.key]).length ===
+                              0 ? (
+                              <Badge variant="destructive">无</Badge>
+                            ) : (
+                              FEATURES.filter((f) => inv.permissions[f.key]).map((f) => (
+                                <Badge key={f.key} variant="outline">
+                                  {f.label}
+                                </Badge>
+                              ))
+                            )}
+                          </button>
+                        </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {fmtTime(inv.createdAt)}
                         </TableCell>
@@ -655,14 +864,26 @@ export default function AdminPage() {
                           )}
                         </TableCell>
                         <TableCell>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                            onClick={() => void handleDeleteInvite(inv)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
+                          <div className="flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground"
+                              onClick={() => openInvitePerms(inv)}
+                              title="编辑权限"
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                              onClick={() => void handleDeleteInvite(inv)}
+                              title="删除"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
                     )
@@ -905,11 +1126,239 @@ export default function AdminPage() {
           )}
         </TabsContent>
 
+        <TabsContent value="proxy">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-muted-foreground">
+              维护代理订阅源：用户启用「代理节点」后即可看到所有已启用的订阅源。
+            </p>
+            <Button
+              size="sm"
+              onClick={() => {
+                setProxyForm({
+                  id: "",
+                  name: "",
+                  region: "",
+                  url: "",
+                  protocol: "mixed",
+                  status: "unknown",
+                  statusNote: "",
+                  enabled: true,
+                  sortOrder: "0",
+                  note: "",
+                })
+                setProxyOpen(true)
+              }}
+            >
+              <Plus className="h-4 w-4" />
+              添加订阅源
+            </Button>
+          </div>
+
+          {proxyLoading ? (
+            <LoadingBlock />
+          ) : proxySubs.length === 0 ? (
+            <EmptyState
+              title="还没有订阅源"
+              description="添加一个代理订阅链接（vless / vmess / trojan / ss）。"
+            />
+          ) : (
+            <div className="rounded-lg border bg-card">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>名称</TableHead>
+                    <TableHead>订阅链接</TableHead>
+                    <TableHead>协议</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead>启用</TableHead>
+                    <TableHead className="w-28" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {proxySubs.map((s) => (
+                    <TableRow key={s.id}>
+                      <TableCell className="text-sm">
+                        {s.name}
+                        {s.region && (
+                          <span className="ml-1 text-xs text-muted-foreground">
+                            {s.region}
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell className="max-w-[260px] truncate font-mono text-xs">
+                        {s.url}
+                      </TableCell>
+                      <TableCell className="text-xs">{s.protocol}</TableCell>
+                      <TableCell>
+                        {s.status === "online" ? (
+                          <Badge variant="success">运行中</Badge>
+                        ) : s.status === "offline" ? (
+                          <Badge variant="destructive">不可用</Badge>
+                        ) : s.status === "maintenance" ? (
+                          <Badge variant="secondary">维护中</Badge>
+                        ) : (
+                          <Badge variant="outline">未知</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {s.enabled ? (
+                          <Badge variant="success">公开</Badge>
+                        ) : (
+                          <Badge variant="secondary">停用</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              setProxyForm({
+                                id: s.id,
+                                name: s.name,
+                                region: s.region ?? "",
+                                url: s.url,
+                                protocol: s.protocol,
+                                status: s.status,
+                                statusNote: s.statusNote ?? "",
+                                enabled: s.enabled,
+                                sortOrder: String(s.sortOrder),
+                                note: s.note ?? "",
+                              })
+                              setProxyOpen(true)
+                            }}
+                          >
+                            编辑
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() => void handleDeleteProxy(s.id)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="reserved">
+          <div className="mb-4 space-y-3">
+            <p className="text-sm text-muted-foreground">
+              名单中的名称不允许用户创建为一级子域名（即使位数合规）。
+              邮箱前缀与用户名不受此名单影响。
+            </p>
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="space-y-1">
+                <Label htmlFor="rname" className="text-xs">名称</Label>
+                <Input
+                  id="rname"
+                  placeholder="brand"
+                  className="w-40"
+                  value={reservedName}
+                  onChange={(e) => setReservedName(e.target.value.toLowerCase())}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="rnote" className="text-xs">备注（可选）</Label>
+                <Input
+                  id="rnote"
+                  placeholder="用途说明"
+                  className="w-48"
+                  value={reservedNote}
+                  onChange={(e) => setReservedNote(e.target.value)}
+                />
+              </div>
+              <Button onClick={() => void handleAddReserved()} disabled={reservedBusy || !reservedName.trim()}>
+                {reservedBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                <Plus className="h-4 w-4" />
+                添加
+              </Button>
+            </div>
+          </div>
+
+          {reservedLoading ? (
+            <LoadingBlock />
+          ) : reserved.length === 0 ? (
+            <EmptyState title="没有保留域名" description="添加后用户将无法创建同名一级子域名。" />
+          ) : (
+            <div className="rounded-lg border bg-card">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>名称</TableHead>
+                    <TableHead>完整域名</TableHead>
+                    <TableHead>备注</TableHead>
+                    <TableHead className="w-12" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {reserved.map((r) => (
+                    <TableRow key={r.name}>
+                      <TableCell className="font-mono text-sm">{r.name}</TableCell>
+                      <TableCell className="font-mono text-xs text-muted-foreground">
+                        {r.name}.doulor.cn
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {r.note ?? "—"}
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                          onClick={() => void handleRemoveReserved(r.name)}
+                          title="取消保留"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </TabsContent>
+
         <TabsContent value="settings">
           {settingsLoading ? (
             <LoadingBlock />
           ) : (
             <div className="space-y-6">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">子域名配额</CardTitle>
+                  <CardDescription>
+                    每个用户默认可创建的一级子域名数量（不含注册时分配的主域名）。
+                    可在成员详情里为单个用户单独调整。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="subQuota">默认数量</Label>
+                    <Input
+                      id="subQuota"
+                      type="number"
+                      min={0}
+                      max={100}
+                      className="w-32"
+                      value={subQuota}
+                      onChange={(e) => setSubQuota(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      一级子域名形如 xxx.doulor.cn（至少 3 位）；其下还可各建 5 个二级域名。
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">网盘配额</CardTitle>
@@ -1095,6 +1544,61 @@ export default function AdminPage() {
           )}
         </TabsContent>
       </Tabs>
+
+      {/* 编辑邀请码权限 */}
+      <Dialog
+        open={permInvite !== null}
+        onOpenChange={(o) => {
+          if (!o) {
+            setPermInvite(null)
+            setPermDraft(null)
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>编辑邀请码权限</DialogTitle>
+            <DialogDescription>
+              {permInvite?.code} · 只影响之后用该码注册的新账号；
+              已注册用户的权限请在其详情里单独修改。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {FEATURES.map((f) => (
+              <div
+                key={f.key}
+                className="flex items-center justify-between rounded-md border px-4 py-3"
+              >
+                <div className="space-y-0.5">
+                  <p className="text-sm font-medium">{f.label}</p>
+                  <p className="text-xs text-muted-foreground">{f.desc}</p>
+                </div>
+                <Switch
+                  checked={permDraft?.[f.key] ?? false}
+                  onCheckedChange={(v) =>
+                    setPermDraft((d) => (d ? { ...d, [f.key]: v } : d))
+                  }
+                />
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setPermInvite(null)
+                setPermDraft(null)
+              }}
+            >
+              取消
+            </Button>
+            <Button onClick={() => void handleSaveInvitePerms()} disabled={permBusy}>
+              {permBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 添加邀请码 */}
       <Dialog open={inviteOpen} onOpenChange={setInviteOpen}>
@@ -1292,6 +1796,41 @@ export default function AdminPage() {
                         />
                       </div>
                     ))}
+                  </div>
+                </section>
+
+                <section>
+                  <h3 className="mb-2 text-sm font-medium">子域名配额</h3>
+                  <div className="rounded-md border p-3">
+                    <div className="flex items-center gap-3">
+                      <Input
+                        type="number"
+                        min={0}
+                        max={100}
+                        className="w-24"
+                        value={quotaDraft ?? ""}
+                        placeholder="默认"
+                        disabled={busy || detail.user.username === user?.username}
+                        onChange={(e) => setQuotaDraft(e.target.value)}
+                      />
+                      <span className="text-xs text-muted-foreground">
+                        个一级子域名（留空 = 用全局默认）
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="ml-auto"
+                        disabled={busy || detail.user.username === user?.username}
+                        onClick={() => void handleSaveQuota()}
+                      >
+                        保存
+                      </Button>
+                    </div>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      当前有效配额：
+                      {detail.user.maxSubdomains ?? globalQuota} 个
+                      {detail.user.maxSubdomains === null && "（全局默认）"}
+                    </p>
                   </div>
                 </section>
 
@@ -1499,6 +2038,139 @@ export default function AdminPage() {
             </Button>
             <Button onClick={() => void handleSaveNode()} disabled={frpBusy}>
               {frpBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 代理订阅源编辑 */}
+      <Dialog open={proxyOpen} onOpenChange={setProxyOpen}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{proxyForm.id ? "编辑订阅源" : "添加订阅源"}</DialogTitle>
+            <DialogDescription>
+              订阅链接会被 Worker 抓取并解析成节点；剩余流量 / 到期日取决于订阅源
+              是否在响应里附带信息（解析不到时用户端显示「未知」）。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>名称</Label>
+                <Input
+                  value={proxyForm.name}
+                  onChange={(e) =>
+                    setProxyForm((f) => ({ ...f, name: e.target.value }))
+                  }
+                  placeholder="香港中继"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>地区说明</Label>
+                <Input
+                  value={proxyForm.region}
+                  onChange={(e) =>
+                    setProxyForm((f) => ({ ...f, region: e.target.value }))
+                  }
+                  placeholder="香港"
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>订阅链接</Label>
+              <Input
+                value={proxyForm.url}
+                onChange={(e) =>
+                  setProxyForm((f) => ({ ...f, url: e.target.value }))
+                }
+                placeholder="https://example.com/api/v1/client/subscribe?token=..."
+                className="font-mono text-xs"
+              />
+              <p className="text-xs text-muted-foreground">
+                需要鉴权的订阅可在 Worker secret 里配置 PROXY_API_TOKEN，
+                抓取时会自动带上 Authorization: Bearer。
+              </p>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="space-y-2">
+                <Label>协议</Label>
+                <Input
+                  value={proxyForm.protocol}
+                  onChange={(e) =>
+                    setProxyForm((f) => ({ ...f, protocol: e.target.value }))
+                  }
+                  placeholder="mixed"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>排序</Label>
+                <Input
+                  type="number"
+                  value={proxyForm.sortOrder}
+                  onChange={(e) =>
+                    setProxyForm((f) => ({ ...f, sortOrder: e.target.value }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>节点状态</Label>
+                <Select
+                  value={proxyForm.status}
+                  onValueChange={(v) =>
+                    setProxyForm((f) => ({ ...f, status: v }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="online">运行中</SelectItem>
+                    <SelectItem value="offline">不可用</SelectItem>
+                    <SelectItem value="maintenance">维护中</SelectItem>
+                    <SelectItem value="unknown">未知</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>状态说明（可选）</Label>
+              <Input
+                value={proxyForm.statusNote}
+                onChange={(e) =>
+                  setProxyForm((f) => ({ ...f, statusNote: e.target.value }))
+                }
+                placeholder="例如：机房维护至 22:00"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>备注（可选）</Label>
+              <Input
+                value={proxyForm.note}
+                onChange={(e) =>
+                  setProxyForm((f) => ({ ...f, note: e.target.value }))
+                }
+              />
+            </div>
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium">对该订阅源启用</p>
+                <p className="text-xs text-muted-foreground">
+                  停用后用户看不到这个订阅源（不影响其它订阅源）
+                </p>
+              </div>
+              <Switch
+                checked={proxyForm.enabled}
+                onCheckedChange={(v) => setProxyForm((f) => ({ ...f, enabled: v }))}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setProxyOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={() => void handleSaveProxy()} disabled={proxyBusy}>
+              {proxyBusy && <Loader2 className="h-4 w-4 animate-spin" />}
               保存
             </Button>
           </DialogFooter>

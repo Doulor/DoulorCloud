@@ -140,6 +140,8 @@ export interface AdminUserDetail {
     role: string
     status: string
     permissions: Permissions
+    /** 用户级子域名配额覆盖；null = 用全局默认 */
+    maxSubdomains: number | null
     createdAt: string
     updatedAt: string
   }
@@ -351,13 +353,14 @@ export interface AdminFrpNode extends FrpNode {
 
 // ---- 功能权限 ----
 
-export type FeatureKey = "r2" | "ai" | "frp" | "profile"
+export type FeatureKey = "r2" | "ai" | "frp" | "profile" | "proxy"
 
 export interface Permissions {
   r2: boolean
   ai: boolean
   frp: boolean
   profile: boolean
+  proxy: boolean
 }
 
 export const FEATURE_LABELS: Record<FeatureKey, string> = {
@@ -365,6 +368,7 @@ export const FEATURE_LABELS: Record<FeatureKey, string> = {
   ai: "AI 中转站",
   frp: "内网穿透",
   profile: "个人名片",
+  proxy: "代理节点",
 }
 
 // ---- 管理员全局设置 ----
@@ -435,4 +439,67 @@ export interface ProfileOverview {
   contactTypes: ContactType[]
   r2Configured: boolean
   limits: { avatar: number; background: number; music: number }
+}
+
+// ---- 代理节点 ----
+
+export type ProxyNodeStatus = "online" | "offline" | "maintenance" | "unknown"
+
+/** 解析后的单个代理节点 */
+export interface ProxyNode {
+  name: string
+  /** vless / vmess / trojan / ss / unknown */
+  protocol: string
+  server: string
+  port: number | null
+  region: string | null
+  /** 用户可直接复制到客户端的原始节点链接 */
+  raw: string
+  /** 解析出的配置字段（uuid / password / security / sni / flow…） */
+  details: Record<string, string>
+}
+
+export interface ProxySubscription {
+  id: string
+  name: string
+  region: string | null
+  url: string
+  protocol: string
+  status: ProxyNodeStatus
+  statusNote: string | null
+  note: string | null
+  lastSyncedAt: string | null
+  /** 抓取/解析失败的提示（成功则为 null） */
+  fetchError?: string | null
+  /** 节点列表（订阅源解析结果） */
+  nodes: ProxyNode[]
+  /** 订阅源附带的流量/到期信息；解析不到则为 null */
+  usage: { used: string | null; total: string | null; expire: string | null }
+}
+
+export interface ProxyOverview {
+  featureEnabled: boolean
+  /** 用户是否已手动启用（启用时才显示节点列表） */
+  activated: boolean
+  /** 前端内嵌「使用协议」的版本 */
+  consentVersion: number
+  /** 用户已同意的协议版本（enable 时写入） */
+  consentedVersion: number
+  subscriptions: ProxySubscription[]
+}
+
+/** 管理端订阅源（含停用开关与最近错误） */
+export interface AdminProxySubscription extends Omit<ProxySubscription, "nodes" | "usage"> {
+  enabled: boolean
+  sortOrder: number
+  lastError: string | null
+}
+
+
+// ---- 保留子域名（管理员维护） ----
+
+export interface ReservedSubdomain {
+  name: string
+  note: string | null
+  createdAt: string
 }

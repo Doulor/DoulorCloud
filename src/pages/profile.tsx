@@ -348,6 +348,81 @@ export default function ProfilePage() {
               固定使用你的用户名。改名请到「设置 → 修改用户名」，名片地址会一并更新。
             </p>
           </div>
+
+          <Separator />
+
+          {/* 自定义域名：与默认地址放在一起，便于对照 */}
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <p className="text-sm font-medium">自定义域名</p>
+              <p className="text-xs text-muted-foreground">
+                绑定一个自己的子域名直接打开名片，例如{" "}
+                <span className="font-mono">card.doulor.cn</span>
+              </p>
+            </div>
+<CardHeader>
+          <CardTitle className="text-base">自定义域名</CardTitle>
+          <CardDescription>
+            用一个自己的子域名直接打开名片，例如 <span className="font-mono">card.{profile?.slug ?? "you"}.doulor.cn</span>
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {profile?.fqdn ? (
+            <div className="flex items-center justify-between rounded-md border px-4 py-3">
+              <span className="font-mono text-sm">{profile.fqdn}</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground hover:text-destructive"
+                onClick={async () => {
+                  try {
+                    await profileApi.unbindDomain()
+                    await load()
+                    toast.success("已解绑")
+                  } catch (err) {
+                    toast.error(err instanceof HttpError ? err.message : "解绑失败")
+                  }
+                }}
+              >
+                解绑
+              </Button>
+            </div>
+          ) : (data?.availableSubdomains.length ?? 0) === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              没有可用的子域名。请先到「域名」创建，或确认它没有被网盘直链占用。
+            </p>
+          ) : (
+            <div className="space-y-2">
+              <Label>选择一个子域名</Label>
+              <div className="flex flex-wrap gap-2">
+                {data?.availableSubdomains.map((s) => (
+                  <Button
+                    key={s.id}
+                    variant="outline"
+                    size="sm"
+                    className="font-mono text-xs"
+                    onClick={async () => {
+                      try {
+                        const res = await profileApi.bindDomain(s.id)
+                        await load()
+                        toast.success(
+                          res.dnsCreated
+                            ? "已绑定，DNS 生效约需 1-2 分钟"
+                            : "已绑定"
+                        )
+                      } catch (err) {
+                        toast.error(err instanceof HttpError ? err.message : "绑定失败")
+                      }
+                    }}
+                  >
+                    {s.fqdn}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
+        </CardContent>
+          </div>
         </CardContent>
       </Card>
 
@@ -692,71 +767,6 @@ export default function ProfilePage() {
         </CardContent>
       </Card>
 
-      {/* 自定义域名 */}
-      <Card className="mb-6">
-        <CardHeader>
-          <CardTitle className="text-base">自定义域名</CardTitle>
-          <CardDescription>
-            用一个自己的子域名直接打开名片，例如 <span className="font-mono">card.{profile?.slug ?? "you"}.doulor.cn</span>
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {profile?.fqdn ? (
-            <div className="flex items-center justify-between rounded-md border px-4 py-3">
-              <span className="font-mono text-sm">{profile.fqdn}</span>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-muted-foreground hover:text-destructive"
-                onClick={async () => {
-                  try {
-                    await profileApi.unbindDomain()
-                    await load()
-                    toast.success("已解绑")
-                  } catch (err) {
-                    toast.error(err instanceof HttpError ? err.message : "解绑失败")
-                  }
-                }}
-              >
-                解绑
-              </Button>
-            </div>
-          ) : (data?.availableSubdomains.length ?? 0) === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              没有可用的子域名。请先到「域名」创建，或确认它没有被网盘直链占用。
-            </p>
-          ) : (
-            <div className="space-y-2">
-              <Label>选择一个子域名</Label>
-              <div className="flex flex-wrap gap-2">
-                {data?.availableSubdomains.map((s) => (
-                  <Button
-                    key={s.id}
-                    variant="outline"
-                    size="sm"
-                    className="font-mono text-xs"
-                    onClick={async () => {
-                      try {
-                        const res = await profileApi.bindDomain(s.id)
-                        await load()
-                        toast.success(
-                          res.dnsCreated
-                            ? "已绑定，DNS 生效约需 1-2 分钟"
-                            : "已绑定"
-                        )
-                      } catch (err) {
-                        toast.error(err instanceof HttpError ? err.message : "绑定失败")
-                      }
-                    }}
-                  >
-                    {s.fqdn}
-                  </Button>
-                ))}
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
     </div>
   )
 }

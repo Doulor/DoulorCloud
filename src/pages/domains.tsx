@@ -38,7 +38,6 @@ import { useAuth } from "@/hooks/use-auth"
 import type { DnsRecord, DnsRecordType, Subdomain } from "@/types"
 
 const RECORD_TYPES: DnsRecordType[] = ["A", "AAAA", "CNAME", "TXT", "MX"]
-const MAX_SUBDOMAINS = 5
 
 function StatusBadge({ status }: { status: DnsRecord["status"] }) {
   if (status === "active") return <Badge variant="success">active</Badge>
@@ -56,6 +55,10 @@ export default function DomainsPage() {
   const [selected, setSelected] = React.useState<Subdomain | null>(null)
   const [records, setRecords] = React.useState<DnsRecord[]>([])
   const [loading, setLoading] = React.useState(true)
+  // 配额由服务端下发（用户级覆盖 > 全局设置 > 默认 5）
+  const [quota, setQuota] = React.useState(5)
+  const [childQuota, setChildQuota] = React.useState(5)
+  const [minNameLen, setMinNameLen] = React.useState(3)
   const [saving, setSaving] = React.useState(false)
   const [deletingId, setDeletingId] = React.useState<string | null>(null)
 
@@ -78,6 +81,9 @@ export default function DomainsPage() {
     try {
       const res = await domainApi.list()
       setSubdomains(res.subdomains)
+      setQuota(res.limit)
+      setChildQuota(res.childLimit)
+      if (res.minRootNameLength) setMinNameLen(res.minRootNameLength)
       const target =
         res.subdomains.find((s) => s.id === keepId) ??
         res.subdomains.find((s) => s.name === "@") ??
@@ -191,7 +197,7 @@ export default function DomainsPage() {
   // 一级子域名（parentId 为空，含 '@' 主域名）
   const rootSubs = subdomains.filter((s) => !s.parentId)
   const childrenOf = (id: string) => subdomains.filter((s) => s.parentId === id)
-  const canAddRoot = rootSubs.length < MAX_SUBDOMAINS
+  const canAddRoot = rootSubs.length < quota
   // 选中子域名的 fqdn 即 DNS 记录的基准（例如 xxx1.doulor.cn）
   const base = selected ? selected.fqdn : ownDomain
 
@@ -208,7 +214,7 @@ export default function DomainsPage() {
           <div className="text-sm font-medium">
             我的域名
             <span className="ml-2 text-xs font-normal text-muted-foreground">
-              {rootSubs.length} / {MAX_SUBDOMAINS} 个一级域名（含主域名）
+              {rootSubs.length} / {quota} 个一级域名（含主域名）
             </span>
           </div>
           <Button
@@ -232,7 +238,7 @@ export default function DomainsPage() {
           ) : (
             rootSubs.map((sub) => {
               const children = childrenOf(sub.id)
-              const canAddChild = children.length < MAX_SUBDOMAINS
+              const canAddChild = children.length < childQuota
               return (
                 <div key={sub.id} className="space-y-1.5">
                   {/* 一级 */}
@@ -276,7 +282,7 @@ export default function DomainsPage() {
                       title={
                         canAddChild
                           ? `在 ${sub.name} 下添加子域名`
-                          : `每个域名下最多 ${MAX_SUBDOMAINS} 个`
+                          : `每个域名下最多 ${childQuota} 个`
                       }
                     >
                       <Plus className="h-3 w-3" />
@@ -440,7 +446,7 @@ export default function DomainsPage() {
             <div className="flex items-center gap-1">
               <Input
                 id="subName"
-                placeholder="xxx1"
+                placeholder={parentFor ? "profile" : "xxx"}
                 value={subName}
                 onChange={(e) => setSubName(e.target.value)}
                 className="flex-1"
@@ -449,6 +455,18 @@ export default function DomainsPage() {
                 .{parentFor ? parentFor.fqdn : rootDomain}
               </span>
             </div>
+            {/* 一级子域名有最短位数限制；二级是用户自己的细分空间，不限 */}
+            {!parentFor && (
+              <p className="text-xs text-muted-foreground">
+                一级子域名至少 {minNameLen} 个字符（如 xxx.{rootDomain}），
+                且不能使用平台保留的名称。
+              </p>
+            )}
+            {parentFor && (
+              <p className="text-xs text-muted-foreground">
+                这是 {parentFor.fqdn} 之下的二级域名，无位数限制。
+              </p>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpenSub(false)}>

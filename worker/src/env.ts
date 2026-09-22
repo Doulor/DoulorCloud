@@ -29,4 +29,9 @@ export interface Env {
   NEWAPI_BASE_URL?: string
   NEWAPI_ADMIN_TOKEN?: string // Root 访问令牌（Secret）
   NEWAPI_ADMIN_USER_ID?: string // 令牌对应的用户 id，默认 1
+
+  // ---- 代理节点 ----
+  // 订阅链接可能需要鉴权（部分订阅系统要求 Authorization 头）；
+  // 配置后 Worker 抓取订阅源时会带上 Bearer 头。
+  PROXY_API_TOKEN?: string
 }

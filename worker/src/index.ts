@@ -11,6 +11,7 @@ import * as newapiHandlers from "./handlers/newapi"
 import * as settingsHandlers from "./handlers/settings"
 import * as frpHandlers from "./handlers/frp"
 import * as profileHandlers from "./handlers/profile"
+import * as proxyHandlers from "./handlers/proxy"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
 
@@ -124,8 +125,28 @@ async function route(env: Env, request: Request): Promise<Response> {
   }
 
   const adminInviteMatch = routePath.match(/^\/admin\/invites\/([^/]+)$/)
+  if (adminInviteMatch && method === "PUT") {
+    return adminHandlers.updateInvite(env, request, decodeURIComponent(adminInviteMatch[1]))
+  }
   if (adminInviteMatch && method === "DELETE") {
     return adminHandlers.deleteInvite(env, request, decodeURIComponent(adminInviteMatch[1]))
+  }
+
+  // Admin: 保留子域名
+  if (routePath === "/admin/reserved-subdomains" && method === "GET") {
+    return adminHandlers.listReserved(env, request)
+  }
+  if (routePath === "/admin/reserved-subdomains" && method === "POST") {
+    return adminHandlers.addReserved(env, request)
+  }
+
+  const reservedMatch = routePath.match(/^\/admin\/reserved-subdomains\/([^/]+)$/)
+  if (reservedMatch && method === "DELETE") {
+    return adminHandlers.removeReserved(
+      env,
+      request,
+      decodeURIComponent(reservedMatch[1])
+    )
   }
 
   // Admin: 全局设置 / 网盘运维
@@ -331,6 +352,37 @@ async function route(env: Env, request: Request): Promise<Response> {
       env,
       request,
       decodeURIComponent(adminFrpNodeMatch[1])
+    )
+  }
+
+  // ---- 代理节点 ----
+  if (routePath === "/proxy" && method === "GET") {
+    return proxyHandlers.getProxyOverview(env, request)
+  }
+  if (routePath === "/proxy/enable" && method === "POST") {
+    return proxyHandlers.enableProxy(env, request)
+  }
+  if (routePath === "/proxy/disable" && method === "POST") {
+    return proxyHandlers.disableProxy(env, request)
+  }
+  if (routePath === "/proxy/check" && method === "POST") {
+    return proxyHandlers.checkProxySubscription(env, request)
+  }
+
+  // ---- 管理端：代理节点 ----
+  if (routePath === "/admin/proxy/subscriptions" && method === "GET") {
+    return proxyHandlers.listProxySubscriptions(env, request)
+  }
+  if (routePath === "/admin/proxy/subscriptions" && method === "POST") {
+    return proxyHandlers.upsertProxySubscription(env, request)
+  }
+
+  const adminProxyMatch = routePath.match(/^\/admin\/proxy\/subscriptions\/([^/]+)$/)
+  if (adminProxyMatch && method === "DELETE") {
+    return proxyHandlers.deleteProxySubscription(
+      env,
+      request,
+      decodeURIComponent(adminProxyMatch[1])
     )
   }
 

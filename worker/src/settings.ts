@@ -24,6 +24,10 @@ export const SETTING_DEFAULTS = {
   newapi_unlimited_quota: "0",
   /** NewAPI quota 与美元换算：quota_per_unit */
   newapi_quota_per_unit: "500000",
+  /** 每个用户默认可创建的一级子域名数量（可被 users.max_subdomains 覆盖） */
+  subdomain_quota_default: "5",
+  /** 代理节点功能总开关 */
+  proxy_enabled: "1",
   /** frp 内网穿透总开关 */
   frp_enabled: "1",
   /** frp 核心包下载地址（可由后台替换） */

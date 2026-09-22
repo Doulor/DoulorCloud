@@ -1,8 +1,9 @@
 import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
-import { isReservedName } from "../reserved-names"
+import { isReservedName, isReservedSubdomain } from "../reserved-names"
 import { requireUser } from "../auth"
 import { cfListDnsRecords, cfDeleteDnsRecord } from "../cloudflare"
+import { getSettingNumber } from "../settings"
 import type { Env } from "../env"
 
 /**
@@ -12,8 +13,11 @@ import type { Env } from "../env"
  * 配额：一级（含 '@' 主域名）最多 5 个；**每个**子域名之下再各最多 5 个。
  * fqdn 始终存完整域名，因此 DNS 记录、名片/网盘绑定等既有逻辑无需改动。
  */
-const MAX_ROOT_SUBDOMAINS = 5
+/** 一级子域名默认配额（真实值取自 app_settings.subdomain_quota_default） */
+/** 每个一级之下可再建的子域名数 */
 const MAX_CHILDREN = 5
+/** 一级子域名的最短长度（x.doulor.cn / xx.doulor.cn 不允许） */
+const MIN_ROOT_NAME_LENGTH = 3
 
 interface SubdomainRow {
   id: string
@@ -45,10 +49,21 @@ export async function listSubdomains(env: Env, request: Request): Promise<Respon
     .bind(user.id)
     .all<SubdomainRow>()
 
+  // 实际配额：用户级覆盖 > 全局设置 > 默认值
+  const perUser = await env.DB.prepare(
+    "SELECT max_subdomains FROM users WHERE id = ?"
+  )
+    .bind(user.id)
+    .first<{ max_subdomains: number | null }>()
+  const limit =
+    perUser?.max_subdomains ??
+    (await getSettingNumber(env, "subdomain_quota_default"))
+
   return json({
     subdomains: (rows.results ?? []).map(toPublicSubdomain),
-    limit: MAX_ROOT_SUBDOMAINS,
+    limit,
     childLimit: MAX_CHILDREN,
+    minRootNameLength: MIN_ROOT_NAME_LENGTH,
   })
 }
 
@@ -74,7 +89,10 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
 
   // 解析父级（可选）
   let parent: SubdomainRow | null = null
+  let fqdn: string
+
   if (body.parentId) {
+    // ---- 二级及以下：yyy.xxx.doulor.cn ----
     parent = await env.DB.prepare(
       "SELECT * FROM subdomains WHERE id = ? AND user_id = ?"
     )
@@ -82,50 +100,64 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
       .first<SubdomainRow>()
     if (!parent) throw new ApiError(404, "父级子域名不存在", "NOT_FOUND")
 
-    // 父级本身是 '@' 主域名时，其下创建的就是一级子域名（配额按一级算）
+    // 二级不限位数（用户明确要求：x.xxx.doulor.cn 是允许的）
     const siblings = await env.DB.prepare(
       "SELECT COUNT(*) AS c FROM subdomains WHERE parent_id = ?"
     )
       .bind(parent.id)
       .first<{ c: number }>()
-
     if ((siblings?.c ?? 0) >= MAX_CHILDREN) {
       throw new ApiError(
         400,
-        `${parent.name} 之下最多可创建 ${MAX_CHILDREN} 个子域名`,
+        `${parent.fqdn} 之下最多可创建 ${MAX_CHILDREN} 个子域名`,
         "LIMIT_REACHED"
       )
     }
+
+    // 管理员的保留名单只约束一级（二级是用户自己的细分空间）
+    fqdn = `${name}.${parent.fqdn}`
   } else {
-    // 一级：统计 parent_id 为 NULL 的数量（含 '@' 主域名）
-    const count = await env.DB.prepare(
+    // ---- 一级：xxx.doulor.cn（根域直系）----
+    // 位数限制：x.doulor.cn / xx.doulor.cn 不允许，至少 3 位
+    if (name.length < MIN_ROOT_NAME_LENGTH) {
+      throw new ApiError(
+        400,
+        `一级子域名至少需要 ${MIN_ROOT_NAME_LENGTH} 个字符`,
+        "NAME_TOO_SHORT"
+      )
+    }
+
+    // 管理员的保留名单：即使位数合规也拒绝
+    if (await isReservedSubdomain(env.DB, name)) {
+      throw new ApiError(400, "该子域名已被保留", "RESERVED_SUBDOMAIN")
+    }
+
+    // 配额：用户级覆盖优先，否则用全局设置（默认 5）
+    const perUser = await env.DB.prepare(
+      "SELECT max_subdomains FROM users WHERE id = ?"
+    )
+      .bind(user.id)
+      .first<{ max_subdomains: number | null }>()
+
+    const globalQuota = await getSettingNumber(env, "subdomain_quota_default")
+    const quota = perUser?.max_subdomains ?? globalQuota
+
+    // 一级数量 = 该用户名下所有「根域直系」的域名（含注册时分配的 'xxx.doulor.cn' 主域名）
+    const used = await env.DB.prepare(
       "SELECT COUNT(*) AS c FROM subdomains WHERE user_id = ? AND parent_id IS NULL"
     )
       .bind(user.id)
       .first<{ c: number }>()
-
-    if ((count?.c ?? 0) >= MAX_ROOT_SUBDOMAINS) {
+    if ((used?.c ?? 0) >= quota) {
       throw new ApiError(
         400,
-        `最多可拥有 ${MAX_ROOT_SUBDOMAINS} 个一级子域名（含主域名）`,
+        `最多可创建 ${quota} 个一级子域名（当前 ${used?.c ?? 0} 个）`,
         "LIMIT_REACHED"
       )
     }
 
-    // 一级子域名挂在用户的命名空间之下：name.<用户名>.doulor.cn
-    // （不是 name.doulor.cn —— 那是根域直系，属于平台自身，不能发给用户）
-    parent = await env.DB.prepare(
-      "SELECT * FROM subdomains WHERE user_id = ? AND name = '@' LIMIT 1"
-    )
-      .bind(user.id)
-      .first<SubdomainRow>()
-    if (!parent) {
-      throw new ApiError(400, "尚未分配主域名，无法创建子域名", "NO_PRIMARY_DOMAIN")
-    }
+    fqdn = `${name}.${env.ROOT_DOMAIN.toLowerCase()}`
   }
-
-  // 完整域名：一级是 name.<用户名>.doulor.cn；子级是 name.<父 fqdn>
-  const fqdn = `${name}.${parent.fqdn}`
 
   const exists = await env.DB.prepare(
     "SELECT id FROM subdomains WHERE fqdn = ? COLLATE NOCASE LIMIT 1"

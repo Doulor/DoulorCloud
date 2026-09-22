@@ -91,3 +91,39 @@ export const RESERVED_NAMES = new Set([
 export function isReservedName(name: string): boolean {
   return RESERVED_NAMES.has(name.trim().toLowerCase())
 }
+/**
+ * 数据库中的保留子域名（管理员可在面板里增删）。
+ *
+ * 与上面的静态 RESERVED_NAMES 的区别：
+ *   - RESERVED_NAMES：写死的平台标识（mail/api/cloud…），任何场景都禁止
+ *   - 本表：管理员为「给特定用途留位」而配置的名称（blog/dev/www…），
+ *     仅限制**子域名**创建，不影响用户名与邮箱前缀的既有规则
+ *
+ * 即使位数合规也拒绝，这是用户明确要求的语义。
+ */
+export async function isReservedSubdomain(
+  db: D1Database,
+  name: string
+): Promise<boolean> {
+  const n = name.trim().toLowerCase()
+  if (!n) return false
+  const row = await db
+    .prepare("SELECT name FROM reserved_subdomains WHERE name = ? COLLATE NOCASE LIMIT 1")
+    .bind(n)
+    .first()
+  return !!row
+}
+
+/** 读取全部保留子域名（管理面板展示用） */
+export async function listReservedSubdomains(
+  db: D1Database
+): Promise<{ name: string; note: string | null; createdAt: string }[]> {
+  const rows = await db
+    .prepare("SELECT name, note, created_at FROM reserved_subdomains ORDER BY name ASC")
+    .all<{ name: string; note: string | null; created_at: string }>()
+  return (rows.results ?? []).map((r) => ({
+    name: r.name,
+    note: r.note,
+    createdAt: r.created_at,
+  }))
+}

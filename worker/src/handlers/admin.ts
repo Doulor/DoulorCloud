@@ -13,6 +13,7 @@ import { isNewApiConfigured, getCurrencyInfo } from "../newapi-client"
 import { sendMail, renderMail } from "../mailer"
 import { cfListDestinations } from "../cloudflare"
 import { normalizePermissions, parsePermissions } from "../permissions"
+import { listReservedSubdomains } from "../reserved-names"
 import { purgeUserStorage, recalculateUsage } from "./storage"
 
 /**
@@ -30,6 +31,8 @@ interface AdminUserRow {
   role: string
   status: string
   permissions: string | null
+  /** 用户级子域名配额覆盖；NULL = 用全局默认 */
+  max_subdomains?: number | null
   created_at: string
   updated_at: string
 }
@@ -98,6 +101,7 @@ async function userDetail(env: Env, user: AdminUserRow) {
       role: user.role,
       status: user.status,
       permissions: parsePermissions(user.permissions),
+      maxSubdomains: user.max_subdomains ?? null,
       createdAt: user.created_at,
       updatedAt: user.updated_at,
     },
@@ -116,7 +120,7 @@ async function userDetail(env: Env, user: AdminUserRow) {
 export async function listUsers(env: Env, request: Request): Promise<Response> {
   await requireAdmin(env, request)
   const rows = await env.DB.prepare(
-    `SELECT u.id, u.username, u.email, u.namespace, u.role, u.status, u.permissions, u.created_at,
+    `SELECT u.id, u.username, u.email, u.namespace, u.role, u.status, u.permissions, u.max_subdomains, u.created_at,
             (SELECT COUNT(*) FROM subdomains s WHERE s.user_id = u.id) AS subdomain_count,
             (SELECT COUNT(*) FROM dns_records d JOIN domains dm ON d.domain_id = dm.id WHERE dm.user_id = u.id) AS dns_count,
             (SELECT COUNT(*) FROM mailboxes mb WHERE mb.user_id = u.id) AS mailbox_count,
@@ -134,6 +138,7 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
       role: r.role,
       status: r.status,
       permissions: parsePermissions(r.permissions as string | null),
+      maxSubdomains: (r.max_subdomains as number | null) ?? null,
       createdAt: r.created_at,
       subdomainCount: r.subdomain_count,
       dnsCount: r.dns_count,
@@ -157,6 +162,8 @@ export async function updateUser(env: Env, request: Request, username: string): 
     status?: string
     role?: string
     permissions?: unknown
+    /** 该用户可创建的一级子域名数量；null 表示恢复为全局默认 */
+    maxSubdomains?: number | null
   }
 
   const user = await targetUser(env, username)
@@ -176,6 +183,22 @@ export async function updateUser(env: Env, request: Request, username: string): 
       ? null
       : JSON.stringify(normalizePermissions(body.permissions))
 
+  // 子域名配额：undefined 保持原值；null 清除覆盖（回落到全局默认）
+  let quotaUpdate = false
+  let quotaValue: number | null = null
+  if (body.maxSubdomains !== undefined) {
+    quotaUpdate = true
+    if (body.maxSubdomains === null) {
+      quotaValue = null
+    } else {
+      const n = Math.trunc(Number(body.maxSubdomains))
+      if (!Number.isFinite(n) || n < 0 || n > 100) {
+        throw new ApiError(400, "子域名配额需为 0-100 的整数", "INVALID_INPUT")
+      }
+      quotaValue = n
+    }
+  }
+
   await env.DB.prepare(
     "UPDATE users SET status = COALESCE(?, status), role = COALESCE(?, role), permissions = COALESCE(?, permissions), updated_at = ? WHERE id = ?"
   )
@@ -187,6 +210,12 @@ export async function updateUser(env: Env, request: Request, username: string): 
       user.id
     )
     .run()
+
+  if (quotaUpdate) {
+    await env.DB.prepare("UPDATE users SET max_subdomains = ? WHERE id = ?")
+      .bind(quotaValue, user.id)
+      .run()
+  }
 
   const updated = await targetUser(env, username)
   return json(await userDetail(env, updated))
@@ -576,4 +605,142 @@ export async function purgeStorage(env: Env, request: Request, username: string)
   )
 
   return json({ deleted })
+}
+// ---- 邀请码权限编辑 ----
+
+/**
+ * PUT /api/admin/invites/:id —— 修改邀请码（权限 / 可用次数）
+ *
+ * 语义说明：权限只影响**之后**用该码注册的新账号；
+ * 已注册用户的权限存在 users.permissions，需在成员详情里单独改。
+ */
+export async function updateInvite(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+  const body = (await request.json()) as {
+    permissions?: unknown
+    maxUses?: number
+  }
+
+  const existing = await env.DB.prepare("SELECT * FROM invite_codes WHERE id = ?")
+    .bind(id)
+    .first<InviteRow>()
+  if (!existing) {
+    throw new ApiError(404, "邀请码不存在", "NOT_FOUND")
+  }
+
+  const maxUses =
+    body.maxUses === undefined
+      ? existing.max_uses
+      : Math.min(Math.max(Math.trunc(Number(body.maxUses) || 1), 1), 1000)
+
+  // permissions 传 null 表示恢复「全部允许」
+  const perms =
+    body.permissions === undefined
+      ? existing.permissions
+      : body.permissions === null
+        ? null
+        : JSON.stringify(normalizePermissions(body.permissions))
+
+  await env.DB.prepare(
+    "UPDATE invite_codes SET max_uses = ?, permissions = ? WHERE id = ?"
+  )
+    .bind(maxUses, perms, id)
+    .run()
+
+  await recordAudit(
+    env,
+    admin.id,
+    "admin.invite.update",
+    `邀请码 ${existing.code}: maxUses=${maxUses}, permissions=${perms ?? "全部允许"}`,
+    request.headers.get("CF-Connecting-IP")
+  )
+
+  const updated = await env.DB.prepare("SELECT * FROM invite_codes WHERE id = ?")
+    .bind(id)
+    .first<InviteRow>()
+  return json({ invite: toPublicInvite(updated!) })
+}
+
+// ---- 保留子域名（管理员可增删） ----
+
+// GET /api/admin/reserved-subdomains
+export async function listReserved(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  await requireAdmin(env, request)
+  return json({ reserved: await listReservedSubdomains(env.DB) })
+}
+
+// POST /api/admin/reserved-subdomains —— { name, note? }
+export async function addReserved(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+  const body = (await request.json()) as { name?: string; note?: string }
+
+  const name = (body.name ?? "").trim().toLowerCase().replace(/\.doulor\.cn$/i, "")
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name)) {
+    throw new ApiError(400, "名称只能包含小写字母、数字和连字符", "INVALID_NAME")
+  }
+
+  const exists = await env.DB.prepare(
+    "SELECT name FROM reserved_subdomains WHERE name = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(name)
+    .first()
+  if (exists) {
+    throw new ApiError(409, "该名称已在保留列表中", "CONFLICT")
+  }
+
+  await env.DB.prepare(
+    "INSERT INTO reserved_subdomains (name, note, created_at) VALUES (?, ?, ?)"
+  )
+    .bind(name, body.note?.trim().slice(0, 100) ?? null, new Date().toISOString())
+    .run()
+
+  await recordAudit(
+    env,
+    admin.id,
+    "admin.reserved.add",
+    `保留子域名 ${name}`,
+    request.headers.get("CF-Connecting-IP")
+  )
+
+  return json({ reserved: await listReservedSubdomains(env.DB) }, 201)
+}
+
+// DELETE /api/admin/reserved-subdomains/:name
+export async function removeReserved(
+  env: Env,
+  request: Request,
+  name: string
+): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+  const target = decodeURIComponent(name).trim().toLowerCase()
+
+  const exists = await env.DB.prepare(
+    "SELECT name FROM reserved_subdomains WHERE name = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(target)
+    .first()
+  if (!exists) {
+    throw new ApiError(404, "该名称不在保留列表中", "NOT_FOUND")
+  }
+
+  await env.DB.prepare("DELETE FROM reserved_subdomains WHERE name = ? COLLATE NOCASE")
+    .bind(target)
+    .run()
+
+  await recordAudit(
+    env,
+    admin.id,
+    "admin.reserved.remove",
+    `取消保留 ${target}`,
+    request.headers.get("CF-Connecting-IP")
+  )
+
+  return json({ reserved: await listReservedSubdomains(env.DB) })
 }

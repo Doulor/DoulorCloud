@@ -24,6 +24,9 @@ import {
   type Profile,
   type ProfileContact,
   type ProfileOverview,
+  type ReservedSubdomain,
+  type ProxyOverview,
+  type AdminProxySubscription,
   type Subdomain,
   type User,
 } from "@/types"
@@ -171,9 +174,12 @@ export const dnsApi = {
 
 export const domainApi = {
   list: () =>
-    request<{ subdomains: Subdomain[]; limit: number; childLimit: number }>(
-      "/subdomains"
-    ),
+    request<{
+      subdomains: Subdomain[]
+      limit: number
+      childLimit: number
+      minRootNameLength: number
+    }>("/subdomains"),
 
   /** parentId 省略 → 建一级子域名；指定 → 在该子域名下建子子域名 */
   create: (payload: { name: string; parentId?: string }) =>
@@ -196,7 +202,13 @@ export const adminApi = {
 
   updateUser: (
     username: string,
-    payload: { status?: string; role?: string; permissions?: Permissions }
+    payload: {
+      status?: string
+      role?: string
+      permissions?: Permissions
+      /** null = 恢复全局默认 */
+      maxSubdomains?: number | null
+    }
   ) =>
     request<AdminUserDetail>(`/admin/users/${encodeURIComponent(username)}`, {
       method: "PUT",
@@ -227,6 +239,31 @@ export const adminApi = {
 
   deleteInvite: (id: string) =>
     request<void>(`/admin/invites/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  /** 修改邀请码权限 / 可用次数（只影响之后注册的新账号） */
+  updateInvite: (
+    id: string,
+    payload: { permissions?: Partial<Permissions> | null; maxUses?: number }
+  ) =>
+    request<{ invite: AdminInvite }>(
+      `/admin/invites/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(payload) }
+    ),
+
+  listReserved: () =>
+    request<{ reserved: ReservedSubdomain[] }>("/admin/reserved-subdomains"),
+
+  addReserved: (payload: { name: string; note?: string }) =>
+    request<{ reserved: ReservedSubdomain[] }>("/admin/reserved-subdomains", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  removeReserved: (name: string) =>
+    request<{ reserved: ReservedSubdomain[] }>(
+      `/admin/reserved-subdomains/${encodeURIComponent(name)}`,
+      { method: "DELETE" }
+    ),
 
   getSettings: () => request<AdminSettings>("/admin/settings"),
 
@@ -274,6 +311,21 @@ export const adminApi = {
     request<{ released: number }>("/admin/frp/ports/release", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+
+  // 代理节点订阅源
+  listProxySubscriptions: () =>
+    request<{ subscriptions: AdminProxySubscription[] }>("/admin/proxy/subscriptions"),
+
+  upsertProxySubscription: (payload: Record<string, unknown>) =>
+    request<{ subscription: AdminProxySubscription }>("/admin/proxy/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteProxySubscription: (id: string) =>
+    request<void>(`/admin/proxy/subscriptions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
     }),
 }
 
@@ -465,6 +517,29 @@ export const frpApi = {
 
   cancel: (id: string) =>
     request<void>("/frp/cancel", { method: "POST", body: JSON.stringify({ id }) }),
+}
+
+// ---- 代理节点 ----
+
+export const proxyApi = {
+  overview: () => request<ProxyOverview>("/proxy"),
+
+  /** 启用（须携带同意标记 + 协议版本） */
+  enable: (consentVersion: number) =>
+    request<{ activated: boolean }>("/proxy/enable", {
+      method: "POST",
+      body: JSON.stringify({ consent: true, consentVersion }),
+    }),
+
+  disable: () =>
+    request<{ activated: boolean }>("/proxy/disable", { method: "POST" }),
+
+  /** 对订阅源做探活测延迟 */
+  check: (id: string) =>
+    request<{ latencyMs: number | null; ok: boolean; message?: string }>(
+      "/proxy/check",
+      { method: "POST", body: JSON.stringify({ id }) }
+    ),
 }
 
 // ---- Email（收件箱） ----
