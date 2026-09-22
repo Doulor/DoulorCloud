@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Globe, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react"
+import { CornerDownRight, Globe, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -62,6 +62,8 @@ export default function DomainsPage() {
   const [openSub, setOpenSub] = React.useState(false)
   const [openDns, setOpenDns] = React.useState(false)
   const [subName, setSubName] = React.useState("")
+  // 非空表示「在该子域名之下创建子子域名」
+  const [parentFor, setParentFor] = React.useState<Subdomain | null>(null)
   const [form, setForm] = React.useState({
     name: "",
     type: "A" as DnsRecordType,
@@ -112,9 +114,13 @@ export default function DomainsPage() {
   const handleCreateSubdomain = async () => {
     setSaving(true)
     try {
-      const res = await domainApi.create({ name: subName })
-      toast.success(`子域名已创建`)
+      const res = await domainApi.create({
+        name: subName,
+        parentId: parentFor?.id,
+      })
+      toast.success(`已创建 ${res.subdomain.fqdn}`)
       setSubName("")
+      setParentFor(null)
       setOpenSub(false)
       await loadSubdomains(res.subdomain.id)
     } catch (err) {
@@ -182,7 +188,10 @@ export default function DomainsPage() {
     }
   }
 
-  const canAddSub = subdomains.length < MAX_SUBDOMAINS
+  // 一级子域名（parentId 为空，含 '@' 主域名）
+  const rootSubs = subdomains.filter((s) => !s.parentId)
+  const childrenOf = (id: string) => subdomains.filter((s) => s.parentId === id)
+  const canAddRoot = rootSubs.length < MAX_SUBDOMAINS
   // 选中子域名的 fqdn 即 DNS 记录的基准（例如 xxx1.doulor.cn）
   const base = selected ? selected.fqdn : ownDomain
 
@@ -199,51 +208,114 @@ export default function DomainsPage() {
           <div className="text-sm font-medium">
             我的域名
             <span className="ml-2 text-xs font-normal text-muted-foreground">
-              {subdomains.length} / {MAX_SUBDOMAINS} 个（含主域名）
+              {rootSubs.length} / {MAX_SUBDOMAINS} 个一级域名（含主域名）
             </span>
           </div>
-          <Button size="sm" onClick={() => setOpenSub(true)} disabled={!canAddSub}>
+          <Button
+            size="sm"
+            onClick={() => {
+              setParentFor(null)
+              setSubName("")
+              setOpenSub(true)
+            }}
+            disabled={!canAddRoot}
+          >
             <Plus className="h-4 w-4" />
             添加
           </Button>
         </div>
-        <div className="flex flex-wrap gap-2 p-3">
+        <div className="space-y-3 p-3">
           {loading && subdomains.length === 0 ? (
             <LoadingBlock />
           ) : subdomains.length === 0 ? (
             <p className="px-2 py-6 text-sm text-muted-foreground">还没有域名</p>
           ) : (
-            subdomains.map((sub) => (
-              <div
-                key={sub.id}
-                className={`group flex items-center gap-2 rounded-md border px-3 py-2 transition-colors ${
-                  selected?.id === sub.id ? "bg-accent" : "hover:bg-accent/50"
-                }`}
-              >
-                <button
-                  type="button"
-                  className="font-mono text-sm"
-                  onClick={() => setSelected(sub)}
-                >
-                  {sub.fqdn}
-                </button>
-                {sub.name === "@" ? (
-                  <Badge variant="outline">主域名</Badge>
-                ) : (
-                  <button
-                    type="button"
-                    className="hidden text-muted-foreground hover:text-destructive group-hover:block"
-                    onClick={() => void handleDeleteSubdomain(sub)}
+            rootSubs.map((sub) => {
+              const children = childrenOf(sub.id)
+              const canAddChild = children.length < MAX_SUBDOMAINS
+              return (
+                <div key={sub.id} className="space-y-1.5">
+                  {/* 一级 */}
+                  <div
+                    className={`group flex items-center gap-2 rounded-md border px-3 py-2 transition-colors ${
+                      selected?.id === sub.id ? "bg-accent" : "hover:bg-accent/50"
+                    }`}
                   >
-                    {deletingId === sub.id ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <button
+                      type="button"
+                      className="font-mono text-sm"
+                      onClick={() => setSelected(sub)}
+                    >
+                      {sub.fqdn}
+                    </button>
+                    {sub.name === "@" ? (
+                      <Badge variant="outline">主域名</Badge>
                     ) : (
-                      <Trash2 className="h-3.5 w-3.5" />
+                      <button
+                        type="button"
+                        className="hidden text-muted-foreground hover:text-destructive group-hover:block"
+                        onClick={() => void handleDeleteSubdomain(sub)}
+                      >
+                        {deletingId === sub.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-3.5 w-3.5" />
+                        )}
+                      </button>
                     )}
-                  </button>
-                )}
-              </div>
-            ))
+                    {/* 在一级之下加子子域名 */}
+                    <button
+                      type="button"
+                      className="ml-auto hidden items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground group-hover:inline-flex"
+                      onClick={() => {
+                        setParentFor(sub)
+                        setSubName("")
+                        setOpenSub(true)
+                      }}
+                      disabled={!canAddChild}
+                      title={
+                        canAddChild
+                          ? `在 ${sub.name} 下添加子域名`
+                          : `每个域名下最多 ${MAX_SUBDOMAINS} 个`
+                      }
+                    >
+                      <Plus className="h-3 w-3" />
+                      子域名
+                    </button>
+                  </div>
+
+                  {/* 子子域名 */}
+                  {children.map((child) => (
+                    <div
+                      key={child.id}
+                      className={`group ml-4 flex items-center gap-2 rounded-md border px-3 py-1.5 transition-colors ${
+                        selected?.id === child.id ? "bg-accent" : "hover:bg-accent/50"
+                      }`}
+                    >
+                      <CornerDownRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <button
+                        type="button"
+                        className="font-mono text-sm"
+                        onClick={() => setSelected(child)}
+                      >
+                        {child.fqdn}
+                      </button>
+                      <button
+                        type="button"
+                        className="hidden text-muted-foreground hover:text-destructive group-hover:block"
+                        onClick={() => void handleDeleteSubdomain(child)}
+                      >
+                        {deletingId === child.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )
+            })
           )}
         </div>
       </div>
@@ -345,12 +417,22 @@ export default function DomainsPage() {
       )}
 
       {/* 添加子域名 */}
-      <Dialog open={openSub} onOpenChange={setOpenSub}>
+      <Dialog
+        open={openSub}
+        onOpenChange={(o) => {
+          setOpenSub(o)
+          if (!o) setParentFor(null)
+        }}
+      >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>添加子域名</DialogTitle>
+            <DialogTitle>
+              {parentFor ? `在 ${parentFor.fqdn} 下添加` : "添加子域名"}
+            </DialogTitle>
             <DialogDescription>
-              新的子域名会直接创建在 {rootDomain} 之下。
+              {parentFor
+                ? `新域名会形如 xxx.${parentFor.fqdn}`
+                : `新域名会直接创建在 ${rootDomain} 之下。`}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
@@ -364,7 +446,7 @@ export default function DomainsPage() {
                 className="flex-1"
               />
               <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                .{rootDomain}
+                .{parentFor ? parentFor.fqdn : rootDomain}
               </span>
             </div>
           </div>

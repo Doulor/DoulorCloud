@@ -1,6 +1,6 @@
 import { ApiError, json } from "../http"
 import { requireFeatureUser } from "../auth"
-import { isReservedName } from "../reserved-names"
+
 import { isR2Configured, putObject, deleteObject, getObject } from "../r2"
 import { attachCustomDomain, detachCustomDomain } from "../custom-domain"
 import type { Env } from "../env"
@@ -230,26 +230,10 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
   const row = await loadProfile(env, user.id)
   const body = (await request.json()) as Record<string, unknown>
 
-  // slug：仅允许未发布时修改，避免已分享出去的链接失效之后又被改走
-  let slug = row.slug
-  if (typeof body.slug === "string") {
-    const next = body.slug.trim().toLowerCase()
-    if (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(next)) {
-      throw new ApiError(400, "名片地址只能包含小写字母、数字和连字符", "INVALID_SLUG")
-    }
-    if (isReservedName(next)) {
-      throw new ApiError(400, "该名片地址为系统保留名称", "RESERVED_NAME")
-    }
-    if (next !== row.slug) {
-      const taken = await env.DB.prepare(
-        "SELECT user_id FROM profiles WHERE slug = ? COLLATE NOCASE LIMIT 1"
-      )
-        .bind(next)
-        .first()
-      if (taken) throw new ApiError(409, "该名片地址已被占用", "CONFLICT")
-      slug = next
-    }
-  }
+  // 名片地址固定等于用户名，不提供修改入口。
+  // 理由：分享出去的链接必须长期有效；用户改名走「设置 → 修改用户名」，
+  // 那时会同步更新此处的 slug（见 changeUsername）。
+  const slug = row.slug
 
   const str = (v: unknown, max: number): string | null => {
     if (typeof v !== "string") return null
@@ -502,11 +486,22 @@ export async function bindProfileDomain(
   }
 
   const sub = await env.DB.prepare(
-    "SELECT id, fqdn FROM subdomains WHERE id = ? AND user_id = ?"
+    "SELECT id, fqdn, name FROM subdomains WHERE id = ? AND user_id = ?"
   )
     .bind(subdomainId, user.id)
-    .first<{ id: string; fqdn: string }>()
+    .first<{ id: string; fqdn: string; name: string }>()
   if (!sub) throw new ApiError(404, "子域名不存在", "NOT_FOUND")
+
+  // 禁止绑定根域：doulor.cn 是整站入口（静态站点自定义域 + 多条邮件/API 路由），
+  // 绑给名片会让整个站点无法访问。绑定根域的请求会被 CF 路由层面拦不住，
+  // 必须在这里拒绝。
+  if (sub.fqdn.toLowerCase() === env.ROOT_DOMAIN.toLowerCase()) {
+    throw new ApiError(
+      400,
+      "根域名是平台入口，不能绑定给名片。请使用子域名（如 card.doulor.cn）",
+      "ROOT_DOMAIN_FORBIDDEN"
+    )
+  }
 
   // 与网盘直链互斥：同一子域名只能指向一种服务
   const usedByStorage = await env.DB.prepare(

@@ -170,9 +170,13 @@ export const dnsApi = {
 // ---- 子域名 ----
 
 export const domainApi = {
-  list: () => request<{ subdomains: Subdomain[]; limit: number }>("/subdomains"),
+  list: () =>
+    request<{ subdomains: Subdomain[]; limit: number; childLimit: number }>(
+      "/subdomains"
+    ),
 
-  create: (payload: { name: string }) =>
+  /** parentId 省略 → 建一级子域名；指定 → 在该子域名下建子子域名 */
+  create: (payload: { name: string; parentId?: string }) =>
     request<{ subdomain: Subdomain }>("/subdomains", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -249,12 +253,7 @@ export const adminApi = {
       `/admin/frp/applications?status=${encodeURIComponent(status)}`
     ),
 
-  reviewFrp: (payload: {
-    id: string
-    action: "approve" | "reject"
-    note?: string
-    metadatasToken?: string
-  }) =>
+  reviewFrp: (payload: { id: string; action: "approve" | "reject"; note?: string }) =>
     request<{ ok: boolean; status: string }>("/admin/frp/review", {
       method: "POST",
       body: JSON.stringify(payload),

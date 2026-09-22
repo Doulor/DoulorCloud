@@ -137,9 +137,15 @@ export default function ProfilePage() {
   }, [load])
 
   const profile = data?.profile
+  // 自定义域名优先；否则用站内路径。用 profile.profilePath（服务端算好的）
+  // 而不是本地 form.slug，避免未保存时显示错地址。
   const publicUrl = profile?.fqdn
     ? `https://${profile.fqdn}`
-    : `https://cloud.doulor.cn/profile/${form.slug}`
+    : `${window.location.origin}${profile?.profilePath ?? ""}`
+
+  // 误绑根域的保护提示：根域是整站入口，绑给名片会让站点打不开
+  const boundToRootDomain =
+    !!profile?.fqdn && profile.fqdn === window.location.hostname.replace(/^cloud\./, "")
 
   const handleEnable = async () => {
     setEnabling(true)
@@ -319,21 +325,27 @@ export default function ProfilePage() {
               </a>
             </Button>
           </div>
+          {boundToRootDomain && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2">
+              <p className="text-xs font-medium text-destructive">
+                当前绑定的是根域名 {profile?.fqdn}
+              </p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                根域名是平台入口，绑给名片会导致整站无法访问。请在下方「自定义域名」解绑后，
+                改用子域名（如 card.doulor.cn）。
+              </p>
+            </div>
+          )}
           <div className="space-y-2">
-            <Label htmlFor="slug">名片地址</Label>
+            <Label>名片地址</Label>
             <div className="flex items-center gap-1">
               <span className="shrink-0 font-mono text-xs text-muted-foreground">
                 /profile/
               </span>
-              <Input
-                id="slug"
-                value={form.slug}
-                onChange={(e) => setForm((f) => ({ ...f, slug: e.target.value }))}
-                className="flex-1 font-mono"
-              />
+              <Input readOnly value={profile?.slug ?? ""} className="flex-1 font-mono" />
             </div>
             <p className="text-xs text-muted-foreground">
-              改动后旧链接会失效，已分享出去的话请谨慎。
+              固定使用你的用户名。改名请到「设置 → 修改用户名」，名片地址会一并更新。
             </p>
           </div>
         </CardContent>

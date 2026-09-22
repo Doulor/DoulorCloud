@@ -201,6 +201,21 @@ export async function changeUsername(env: Env, request: Request): Promise<Respon
   }
 
   const now = new Date().toISOString()
+
+  // 名片地址固定跟随用户名：改名时一并更新 slug，避免旧名片链接 404。
+  // 若新 slug 已被他人占用（理论上不可能，因为上面已查过同名冲突），
+  // 则保留原 slug，由用户自行处理。
+  const slugTaken = await env.DB.prepare(
+    "SELECT user_id FROM profiles WHERE slug = ? COLLATE NOCASE AND user_id != ? LIMIT 1"
+  )
+    .bind(next, user.id)
+    .first()
+  const slugUpdate = slugTaken
+    ? env.DB.prepare("UPDATE profiles SET updated_at = ? WHERE user_id = ?").bind(now, user.id)
+    : env.DB.prepare(
+        "UPDATE profiles SET slug = ?, updated_at = ? WHERE user_id = ?"
+      ).bind(next, now, user.id)
+
   await env.DB.batch([
     env.DB.prepare(
       "UPDATE users SET username = ?, updated_at = ? WHERE id = ?"
@@ -208,6 +223,7 @@ export async function changeUsername(env: Env, request: Request): Promise<Respon
     env.DB.prepare(
       "INSERT INTO username_changes (id, user_id, old_username, new_username, created_at) VALUES (?, ?, ?, ?, ?)"
     ).bind(uuid(), user.id, user.username, next, now),
+    slugUpdate,
   ])
 
   await audit(env, user.id, "user.rename", `${user.username} → ${next}`)
