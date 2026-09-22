@@ -48,7 +48,13 @@ interface FrpApplicationRow {
   status: string
   review_note: string | null
   reviewed_at: string | null
+  metadatas_token: string | null
   created_at: string
+}
+
+/** 取某节点的 frps auth.token（仅用于给本人已通过的申请生成配置） */
+function authTokenOf(nodes: FrpNodeRow[], nodeId: string): string | null {
+  return nodes.find((n) => n.id === nodeId)?.auth_token ?? null
 }
 
 /** 对外暴露的节点信息：**不含** auth.token（那是 frps 服务端密钥） */
@@ -212,7 +218,7 @@ export async function getFrpOverview(env: Env, request: Request): Promise<Respon
 
   const apps = await env.DB.prepare(
     `SELECT id, node_id, frp_user, ports, tunnels, notify_email, remark,
-            status, review_note, reviewed_at, created_at
+            status, review_note, reviewed_at, metadatas_token, created_at
        FROM frp_applications WHERE user_id = ? ORDER BY created_at DESC`
   )
     .bind(user.id)
@@ -239,11 +245,15 @@ export async function getFrpOverview(env: Env, request: Request): Promise<Respon
     ;(takenPorts[p.node_id] ??= []).push(p.remote_port)
   }
 
+  const activated = await isActivated(env, user.id)
+
   return json({
     featureEnabled: settings.frp_enabled === "1",
+    /** 用户是否已手动启用（与网盘/中转站一致：启用后才显示功能界面） */
+    activated,
     coreUrl: settings.frp_core_url,
-    nodes: (nodes.results ?? []).map(toPublicNode),
-    applications: (apps.results ?? []).map((a) => ({
+    nodes: activated ? (nodes.results ?? []).map(toPublicNode) : [],
+    applications: !activated ? [] : (apps.results ?? []).map((a) => ({
       id: a.id,
       nodeId: a.node_id,
       frpUser: a.frp_user,
@@ -255,12 +265,63 @@ export async function getFrpOverview(env: Env, request: Request): Promise<Respon
       reviewNote: a.review_note,
       reviewedAt: a.reviewed_at,
       createdAt: a.created_at,
+      // 生成 config.toml 需要的两项令牌：
+      //   metadatas.token —— 该申请的令牌（审批时确定）
+      //   auth.token      —— 节点的 frps 共享密钥（仅下发给本人的已通过申请）
+      metadatasToken: a.metadatas_token,
+      authToken: a.status === "approved" ? authTokenOf(nodes.results ?? [], String(a.node_id)) : null,
     })),
     myPorts,
     takenPorts,
     // 可用于接收结果通知的邮箱
-    notifyOptions: await notifyOptions(env, user),
+    notifyOptions: activated ? await notifyOptions(env, user) : [],
   })
+}
+
+/** 该用户是否已启用内网穿透 */
+async function isActivated(env: Env, userId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT enabled FROM frp_accounts WHERE user_id = ?"
+  )
+    .bind(userId)
+    .first<{ enabled: number }>()
+  return row?.enabled === 1
+}
+
+/**
+ * POST /api/frp/enable —— 手动启用（与网盘开通、中转站开通一致）
+ * 启用后才展示节点与申请入口。
+ */
+export async function enableFrp(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "frp")
+  const settings = await getSettings(env)
+  if (settings.frp_enabled !== "1") {
+    throw new ApiError(403, "内网穿透功能已关闭", "FEATURE_DISABLED")
+  }
+
+  const now = new Date().toISOString()
+  await env.DB.prepare(
+    `INSERT INTO frp_accounts (user_id, enabled, created_at, updated_at)
+     VALUES (?, 1, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET enabled = 1, updated_at = excluded.updated_at`
+  )
+    .bind(user.id, now, now)
+    .run()
+
+  await audit(env, user.id, "frp.enable", "启用内网穿透")
+  return json({ activated: true })
+}
+
+/** POST /api/frp/disable —— 关闭（保留已通过申请的端口占用） */
+export async function disableFrp(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "frp")
+  await env.DB.prepare(
+    "UPDATE frp_accounts SET enabled = 0, updated_at = ? WHERE user_id = ?"
+  )
+    .bind(new Date().toISOString(), user.id)
+    .run()
+  await audit(env, user.id, "frp.disable", "关闭内网穿透")
+  return json({ activated: false })
 }
 
 /** 该用户可选的「结果通知邮箱」列表 */
@@ -293,6 +354,10 @@ export async function applyFrp(env: Env, request: Request): Promise<Response> {
   const settings = await getSettings(env)
   if (settings.frp_enabled !== "1") {
     throw new ApiError(403, "内网穿透功能已关闭", "FEATURE_DISABLED")
+  }
+
+  if (!(await isActivated(env, user.id))) {
+    throw new ApiError(400, "请先启用内网穿透功能", "NOT_ACTIVATED")
   }
 
   const body = (await request.json()) as {
@@ -481,6 +546,7 @@ export async function listFrpApplications(
       status: a.status,
       reviewNote: a.review_note,
       reviewedAt: a.reviewed_at,
+      metadatasToken: a.metadatas_token,
       createdAt: a.created_at,
     })),
   })
@@ -501,6 +567,8 @@ export async function reviewFrpApplication(
     id?: string
     action?: "approve" | "reject"
     note?: string
+    /** 与该用户在 frps-panel 里创建的 token 保持一致；留空则自动生成 */
+    metadatasToken?: string
   }
 
   const app = await env.DB.prepare(
@@ -540,6 +608,23 @@ export async function reviewFrpApplication(
       )
     }
 
+    // metadatas.token：优先用管理员填写的值（需与 frps-panel 里一致），
+    // 留空则按「节点前缀 + 序号」自动生成
+    let metadatasToken = (body.metadatasToken ?? "").trim()
+    if (!metadatasToken) {
+      const node = await env.DB.prepare(
+        "SELECT token_prefix FROM frp_nodes WHERE id = ?"
+      )
+        .bind(app.node_id)
+        .first<{ token_prefix: string }>()
+      const seq = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM frp_applications WHERE node_id = ? AND status = 'approved'"
+      )
+        .bind(app.node_id)
+        .first<{ c: number }>()
+      metadatasToken = `${node?.token_prefix ?? ""}${(seq?.c ?? 0) + 1}`
+    }
+
     await env.DB.batch([
       ...ports.map((p) =>
         env.DB.prepare(
@@ -549,9 +634,10 @@ export async function reviewFrpApplication(
       ),
       env.DB.prepare(
         `UPDATE frp_applications
-            SET status = 'approved', review_note = ?, reviewed_by = ?, reviewed_at = ?
+            SET status = 'approved', review_note = ?, reviewed_by = ?, reviewed_at = ?,
+                metadatas_token = ?
           WHERE id = ?`
-      ).bind(note, admin.id, now, app.id),
+      ).bind(note, admin.id, now, metadatasToken, app.id),
     ])
   } else {
     await env.DB.prepare(
@@ -571,7 +657,18 @@ export async function reviewFrpApplication(
   )
 
   // 结果通知申请人（失败不阻断审核结果落库）
-  await notifyApplicant(env, app, approve, note, ports)
+  const fresh = await env.DB.prepare(
+    "SELECT metadatas_token FROM frp_applications WHERE id = ?"
+  )
+    .bind(app.id)
+    .first<{ metadatas_token: string | null }>()
+  await notifyApplicant(
+    env,
+    { ...app, metadatas_token: fresh?.metadatas_token ?? null },
+    approve,
+    note,
+    ports
+  )
 
   return json({ ok: true, status: approve ? "approved" : "rejected" })
 }
@@ -591,6 +688,7 @@ async function notifyApplicant(
         `账号：${app.frp_user}`,
         `密码：${app.frp_password}`,
         `可用端口：${ports.join("、")}`,
+        `metadatas.token：${app.metadatas_token ?? "（未设置）"}`,
         `隧道：${tunnels.map((t) => `${t.name}(${t.type} ${t.remotePort}→${t.localPort})`).join("、") || "无"}`,
         note ? `管理员备注：${note}` : "",
         "请到 Doulor Cloud 的内网穿透页面生成 config.toml，并替换到 frp 核心目录后启动。",

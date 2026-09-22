@@ -208,6 +208,9 @@ async function route(env: Env, request: Request): Promise<Response> {
   if (routePath === "/profile" && method === "GET") {
     return profileHandlers.getProfile(env, request)
   }
+  if (routePath === "/profile/enable" && method === "POST") {
+    return profileHandlers.enableProfile(env, request)
+  }
   if (routePath === "/profile" && method === "PUT") {
     return profileHandlers.updateProfile(env, request)
   }
@@ -291,6 +294,12 @@ async function route(env: Env, request: Request): Promise<Response> {
   // ---- frp 内网穿透 ----
   if (routePath === "/frp" && method === "GET") {
     return frpHandlers.getFrpOverview(env, request)
+  }
+  if (routePath === "/frp/enable" && method === "POST") {
+    return frpHandlers.enableFrp(env, request)
+  }
+  if (routePath === "/frp/disable" && method === "POST") {
+    return frpHandlers.disableFrp(env, request)
   }
   if (routePath === "/frp/apply" && method === "POST") {
     return frpHandlers.applyFrp(env, request)

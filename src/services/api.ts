@@ -249,7 +249,12 @@ export const adminApi = {
       `/admin/frp/applications?status=${encodeURIComponent(status)}`
     ),
 
-  reviewFrp: (payload: { id: string; action: "approve" | "reject"; note?: string }) =>
+  reviewFrp: (payload: {
+    id: string
+    action: "approve" | "reject"
+    note?: string
+    metadatasToken?: string
+  }) =>
     request<{ ok: boolean; status: string }>("/admin/frp/review", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -439,6 +444,12 @@ export const newapiApi = {
 export const frpApi = {
   overview: () => request<FrpOverview>("/frp"),
 
+  enable: () =>
+    request<{ activated: boolean }>("/frp/enable", { method: "POST" }),
+
+  disable: () =>
+    request<{ activated: boolean }>("/frp/disable", { method: "POST" }),
+
   apply: (payload: {
     nodeId: string
     frpUser: string
@@ -502,6 +513,10 @@ export const emailApi = {
 
 export const profileApi = {
   get: () => request<ProfileOverview>("/profile"),
+
+  /** 开通名片（与网盘/中转站一致：点击开通才创建记录） */
+  enable: () =>
+    request<{ enabled: boolean; slug?: string }>("/profile/enable", { method: "POST" }),
 
   update: (payload: Partial<{
     slug: string

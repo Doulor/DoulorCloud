@@ -437,9 +437,33 @@ export async function getSettingsHandler(env: Env, request: Request): Promise<Re
     ? await getCurrencyInfo(env)
     : { symbol: "$", code: "USD", perUnit: Number(settings.newapi_quota_per_unit) }
 
+  // 可选的通知邮箱（下拉选择用）：
+  //   - 平台已验证的转发目标地址（Cloudflare 免费额度内可直接发信）
+  //   - 所有管理员的真实邮箱
+  let verifiedDestinations: string[] = []
+  try {
+    const dests = await cfListDestinations(env)
+    verifiedDestinations = dests
+      .filter((d) => d.verified !== null)
+      .map((d) => d.email)
+  } catch (err) {
+    console.error("读取已验证目标地址失败:", err)
+  }
+
+  const adminEmails = await env.DB.prepare(
+    "SELECT email FROM users WHERE role = 'admin' AND email != '' ORDER BY username"
+  ).all<{ email: string }>()
+
+  const options = new Set<string>(verifiedDestinations)
+  for (const r of adminEmails.results ?? []) options.add(r.email)
+  // 站点域名邮箱也列出（本域内自有邮箱，可作为通知接收方）
+  for (const d of verifiedDestinations) options.add(d)
+
   return json({
     settings,
     currency: { symbol: currency.symbol, code: currency.code },
+    /** 可作为「管理员通知邮箱」的候选项 */
+    notifyEmailOptions: [...options],
     stats: {
       storageAccounts: infos[0]?.c ?? 0,
       storageUsedBytes: infos[0]?.used ?? 0,

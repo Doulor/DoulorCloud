@@ -307,10 +307,16 @@ export interface FrpApplication {
   reviewNote: string | null
   reviewedAt: string | null
   createdAt: string
+  /** 生成 config 所需的 metadatas.token（审批时确定） */
+  metadatasToken: string | null
+  /** 节点的 frps auth.token；仅本人的已通过申请会下发 */
+  authToken: string | null
 }
 
 export interface FrpOverview {
   featureEnabled: boolean
+  /** 用户是否已手动启用（启用后才显示节点与申请入口） */
+  activated: boolean
   coreUrl: string
   nodes: FrpNode[]
   applications: FrpApplication[]
@@ -353,6 +359,8 @@ export const FEATURE_LABELS: Record<FeatureKey, string> = {
 export interface AdminSettings {
   settings: Record<string, string>
   currency: { symbol: string; code: string }
+  /** 可作为「管理员通知邮箱」的候选项 */
+  notifyEmailOptions: string[]
   stats: {
     storageAccounts: number
     storageUsedBytes: number
@@ -406,7 +414,9 @@ export interface Profile {
 }
 
 export interface ProfileOverview {
-  profile: Profile
+  /** 是否已开通名片（未开通时 profile 为 null，前端显示开通引导页） */
+  enabled: boolean
+  profile: Profile | null
   availableSubdomains: { id: string; name: string; fqdn: string }[]
   themes: string[]
   contactTypes: ContactType[]

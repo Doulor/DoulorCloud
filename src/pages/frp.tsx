@@ -5,6 +5,7 @@ import {
   Download,
   FileCode2,
   Loader2,
+  Network,
   Plus,
   Server,
   Trash2,
@@ -81,15 +82,17 @@ const STATUS_BADGE: Record<
 function buildConfig(
   node: FrpNode,
   app: FrpApplication,
-  tokenValue: string
+  metadatasToken: string,
+  authToken: string
 ): string {
   const lines: string[] = []
   lines.push(`serverAddr = "${node.serverAddr}"`)
   lines.push(`serverPort = ${node.serverPort}`)
   lines.push("")
-  lines.push(`auth.token = "${node.serverAddr ? tokenValue : tokenValue}"`)
+  lines.push(`auth.token = "${authToken}"`)
   lines.push("")
   lines.push(`user = "${app.frpUser}"`)
+  lines.push(`metadatas.token = "${metadatasToken}"`)
   lines.push("")
 
   if (app.tunnels.length === 0) {
@@ -208,6 +211,32 @@ export default function FrpPage() {
   const patchTunnel = (i: number, patch: Partial<FrpTunnel>) =>
     setTunnels((prev) => prev.map((t, idx) => (idx === i ? { ...t, ...patch } : t)))
 
+  const handleEnable = async () => {
+    setBusy(true)
+    try {
+      await frpApi.enable()
+      toast.success("已启用内网穿透")
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "启用失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleDisable = async () => {
+    setBusy(true)
+    try {
+      await frpApi.disable()
+      toast.success("已关闭内网穿透（已通过的端口占用仍保留）")
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "操作失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const handleApply = async () => {
     setBusy(true)
     try {
@@ -251,7 +280,13 @@ export default function FrpPage() {
       return
     }
     setConfigApp(app)
-    setConfigText(buildConfig(node, app, node.serverAddr))
+    if (!app.authToken) {
+      toast.error("缺少节点密钥，请联系管理员")
+      return
+    }
+    setConfigText(
+      buildConfig(node, app, app.metadatasToken ?? "", app.authToken)
+    )
   }
 
   const copyConfig = async () => {
@@ -295,6 +330,40 @@ export default function FrpPage() {
     )
   }
 
+  // 未启用：与网盘/中转站一致，先让用户手动启用
+  if (!data.activated) {
+    return (
+      <div>
+        <PageHeader title="内网穿透" description="frp 内网穿透" />
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Network className="h-4 w-4 text-muted-foreground" />
+              启用内网穿透
+            </CardTitle>
+            <CardDescription>
+              启用后可以选择节点、申请账号与端口，并生成 config.toml。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <ul className="space-y-1.5 text-sm text-muted-foreground">
+              <li>· 第一步：下载 frp 核心包并解压</li>
+              <li>· 第二步：选择节点，提交账号 / 端口 / 隧道申请</li>
+              <li>· 第三步：管理员审核通过后，生成 config.toml 替换到核心目录</li>
+            </ul>
+            <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+              申请需要人工审核，结果会发送到你选择的邮箱（本站邮箱或已验证的真实邮箱）。
+            </div>
+            <Button onClick={() => void handleEnable()} disabled={busy}>
+              {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+              启用内网穿透
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
   const approved = data.applications.filter((a) => a.status === "approved")
 
   return (
@@ -302,6 +371,11 @@ export default function FrpPage() {
       <PageHeader
         title="内网穿透"
         description="把本机服务通过 frp 暴露到公网"
+        actions={
+          <Button variant="outline" size="sm" onClick={() => void handleDisable()} disabled={busy}>
+            关闭功能
+          </Button>
+        }
       />
 
       <div className="space-y-6">

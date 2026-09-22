@@ -145,6 +145,10 @@ export default function AdminPage() {
   const [newapiGroup, setNewapiGroup] = React.useState("default")
   const [newapiUnlimited, setNewapiUnlimited] = React.useState(false)
   const [newapiEnabled, setNewapiEnabled] = React.useState(true)
+  const [frpEnabled, setFrpEnabled] = React.useState(true)
+  const [frpCoreUrl, setFrpCoreUrl] = React.useState("")
+  const [frpNotifyEmail, setFrpNotifyEmail] = React.useState("")
+  const [notifyEmailOptions, setNotifyEmailOptions] = React.useState<string[]>([])
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -212,6 +216,7 @@ export default function AdminPage() {
   const [frpBusy, setFrpBusy] = React.useState(false)
   const [frpStatus, setFrpStatus] = React.useState("pending")
   const [frpNote, setFrpNote] = React.useState("")
+  const [frpToken, setFrpToken] = React.useState("")
   const [nodeOpen, setNodeOpen] = React.useState(false)
   const [nodeForm, setNodeForm] = React.useState({
     id: "",
@@ -249,13 +254,19 @@ export default function AdminPage() {
   ) => {
     setFrpBusy(true)
     try {
-      await adminApi.reviewFrp({ id: app.id, action, note: frpNote })
+      await adminApi.reviewFrp({
+        id: app.id,
+        action,
+        note: frpNote,
+        metadatasToken: frpToken,
+      })
       toast.success(
         action === "approve"
           ? `已通过，结果已邮件通知 ${app.notifyEmail}`
           : `已拒绝，结果已邮件通知 ${app.notifyEmail}`
       )
       setFrpNote("")
+      setFrpToken("")
       await loadFrp()
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "操作失败")
@@ -329,6 +340,10 @@ export default function AdminPage() {
       setNewapiGroup(s.newapi_group ?? "default")
       setNewapiUnlimited(s.newapi_unlimited_quota === "1")
       setNewapiEnabled(s.newapi_enabled === "1")
+      setFrpEnabled(s.frp_enabled === "1")
+      setFrpCoreUrl(s.frp_core_url ?? "")
+      setFrpNotifyEmail(s.frp_admin_notify_email ?? "")
+      setNotifyEmailOptions(res.notifyEmailOptions ?? [])
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "加载设置失败")
     } finally {
@@ -347,6 +362,9 @@ export default function AdminPage() {
         newapi_group: newapiGroup,
         newapi_unlimited_quota: newapiUnlimited,
         newapi_enabled: newapiEnabled,
+        frp_enabled: frpEnabled,
+        frp_core_url: frpCoreUrl,
+        frp_admin_notify_email: frpNotifyEmail,
       })
       toast.success("设置已保存")
       await loadSettings()
@@ -748,6 +766,11 @@ export default function AdminPage() {
                               备注：{a.remark}
                             </p>
                           )}
+                          {a.metadatasToken && (
+                            <p className="font-mono text-xs text-muted-foreground">
+                              metadatas.token: {a.metadatasToken}
+                            </p>
+                          )}
                           {a.reviewNote && (
                             <p className="text-xs text-muted-foreground">
                               审批意见：{a.reviewNote}
@@ -778,16 +801,34 @@ export default function AdminPage() {
                       </div>
                     </div>
                   ))}
-                  <div className="space-y-2">
-                    <Label htmlFor="frpNote">
-                      审批意见（可选，会随结果邮件发出）
-                    </Label>
-                    <Input
-                      id="frpNote"
-                      placeholder="例如：已在中转站建号 / 端口冲突请重选"
-                      value={frpNote}
-                      onChange={(e) => setFrpNote(e.target.value)}
-                    />
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="frpNote">
+                        审批意见（可选，会随结果邮件发出）
+                      </Label>
+                      <Input
+                        id="frpNote"
+                        placeholder="例如：已在中转站建号 / 端口冲突请重选"
+                        value={frpNote}
+                        onChange={(e) => setFrpNote(e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="frpToken">
+                        metadatas.token（留空自动生成）
+                      </Label>
+                      <Input
+                        id="frpToken"
+                        placeholder="与 frps-panel 里该用户的 token 保持一致"
+                        value={frpToken}
+                        onChange={(e) => setFrpToken(e.target.value)}
+                        className="font-mono text-xs"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        会写进用户生成的 config.toml；需与你在面板里创建的
+                        token 一致，否则用户连不上。
+                      </p>
+                    </div>
                   </div>
                 </div>
               )}
@@ -930,6 +971,64 @@ export default function AdminPage() {
                     <RefreshCw className="h-3.5 w-3.5" />
                     重算所有用户用量
                   </Button>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">内网穿透</CardTitle>
+                  <CardDescription>
+                    核心包下载地址与「新申请」通知邮箱。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="frpCoreUrl">frp 核心包下载地址</Label>
+                    <Input
+                      id="frpCoreUrl"
+                      value={frpCoreUrl}
+                      onChange={(e) => setFrpCoreUrl(e.target.value)}
+                      className="font-mono text-xs"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="frpNotify">管理员通知邮箱</Label>
+                    <Select
+                      value={frpNotifyEmail || "__none__"}
+                      onValueChange={(v) =>
+                        setFrpNotifyEmail(v === "__none__" ? "" : v)
+                      }
+                    >
+                      <SelectTrigger id="frpNotify">
+                        <SelectValue placeholder="选择接收申请的邮箱" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none__">不接收通知</SelectItem>
+                        {notifyEmailOptions.map((e) => (
+                          <SelectItem key={e} value={e}>
+                            {e}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      用户提交内网穿透申请时会发信到这里。
+                      候选项来自「已在 Cloudflare 验证的邮箱」与「管理员的真实邮箱」；
+                      留空则不发送通知。
+                    </p>
+                  </div>
+                  <div className="flex items-center justify-between rounded-md border p-3">
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium">启用内网穿透</p>
+                      <p className="text-xs text-muted-foreground">
+                        关闭后用户无法启用或提交申请
+                      </p>
+                    </div>
+                    <Switch
+                      checked={frpEnabled}
+                      onCheckedChange={setFrpEnabled}
+                    />
+                  </div>
                 </CardContent>
               </Card>
 
