@@ -27,6 +27,9 @@ import {
   type ReservedSubdomain,
   type ProxyOverview,
   type AdminProxySubscription,
+  type TempboxBatch,
+  type TempboxConfig,
+  type TempboxCreated,
   type Subdomain,
   type User,
 } from "@/types"
@@ -371,8 +374,12 @@ export const settingsApi = {
 export const storageApi = {
   overview: () => request<StorageOverview>("/storage"),
 
-  enable: () =>
-    request<{ account: StorageAccount }>("/storage/enable", { method: "POST" }),
+  /** 开通网盘；必须传协议版本，服务端会校验是否已同意 */
+  enable: (consentVersion: number) =>
+    request<{ account: StorageAccount }>("/storage/enable", {
+      method: "POST",
+      body: JSON.stringify({ consent: true, consentVersion }),
+    }),
 
   disable: () => request<{ ok: boolean }>("/storage/disable", { method: "POST" }),
 
@@ -490,6 +497,34 @@ export const newapiApi = {
     request<void>(`/dev/key/${encodeURIComponent(id)}`, { method: "DELETE" }),
 }
 
+// ---- 临时分享箱 ----
+
+export const tempboxApi = {
+  config: () => request<TempboxConfig>("/tempbox/config"),
+
+  create: () =>
+    request<TempboxCreated>("/tempbox/create", { method: "POST" }),
+
+  get: (code: string) =>
+    request<TempboxBatch>(`/tempbox/${encodeURIComponent(code)}`),
+
+  /** 申请预签名上传地址（浏览器直传 R2） */
+  uploadUrl: (code: string, filename: string, size: number) =>
+    request<{ uploadUrl: string; key: string; filename: string; code: string }>(
+      `/tempbox/${encodeURIComponent(code)}/upload-url`,
+      { method: "POST", body: JSON.stringify({ filename, size }) }
+    ),
+
+  commit: (code: string, key: string) =>
+    request<{ filename: string; size: number; fileCount: number; totalBytes: number }>(
+      `/tempbox/${encodeURIComponent(code)}/commit`,
+      { method: "POST", body: JSON.stringify({ key }) }
+    ),
+
+  remove: (code: string) =>
+    request<void>(`/tempbox/${encodeURIComponent(code)}`, { method: "DELETE" }),
+}
+
 // ---- frp 内网穿透 ----
 
 export const frpApi = {
@@ -603,6 +638,9 @@ export const profileApi = {
     musicAutoplay: boolean
     theme: string
     accent: string
+    effects: string[]
+    intro: string
+    font: string
     contacts: ProfileContact[]
   }>) =>
     request<{ profile: Profile }>("/profile", {

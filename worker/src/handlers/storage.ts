@@ -36,6 +36,13 @@ import type { Env } from "../env"
 
 const MARKER_SUFFIX = "/" // 目录占位对象，如 "ruben/"
 
+/**
+ * 网盘「使用协议」版本。与前端 STORAGE_CONSENT_VERSION 保持一致。
+ * 用户点「开通网盘」前必须勾选同意，服务端记录同意的版本；
+ * 提升此数字即要求所有用户重新同意（与代理节点同一套机制）。
+ */
+export const STORAGE_CONSENT_VERSION = 1
+
 interface StorageAccountRow {
   user_id: string
   prefix: string
@@ -45,6 +52,9 @@ interface StorageAccountRow {
   enabled: number
   /** 默认分享前缀：storage_prefixes.id；为空则用 /dl/<用户名>/ */
   default_prefix_id?: string | null
+  /** 已同意的协议版本；NULL = 老账号（协议系统上线前开通） */
+  consent_version?: number | null
+  consented_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -178,6 +188,10 @@ export async function getStorage(env: Env, request: Request): Promise<Response> 
         ? `${url.origin}/dl/${account.prefix}`
         : null,
     availableSubdomains: subdomains.results ?? [],
+    /** 前端内嵌协议文本的版本；不一致时前端应提示重新确认 */
+    consentVersion: STORAGE_CONSENT_VERSION,
+    /** 已同意的协议版本（enable 时写入）；0 表示从未同意 */
+    consentedVersion: account?.consent_version ?? 0,
   })
 }
 
@@ -219,7 +233,11 @@ export async function setDefaultPrefix(env: Env, request: Request): Promise<Resp
   return json({ defaultPrefixId: prefixId })
 }
 
-/** POST /api/storage/enable —— 开通（建立以用户名命名的目录） */
+/**
+ * POST /api/storage/enable —— 开通（建立以用户名命名的目录）
+ * body: { consent: true, consentVersion: STORAGE_CONSENT_VERSION }
+ * 必须勾选同意使用协议，服务端才写入启用状态。
+ */
 export async function enableStorage(env: Env, request: Request): Promise<Response> {
   const user = await requireFeatureUser(env, request, "r2")
   if (!isR2Configured(env)) {
@@ -229,15 +247,32 @@ export async function enableStorage(env: Env, request: Request): Promise<Respons
     throw new ApiError(403, "网盘功能已关闭", "FEATURE_DISABLED")
   }
 
+  // 协议同意校验：不信任前端，必须显式传 consent 且版本匹配
+  const body = (await request.json().catch(() => ({}))) as {
+    consent?: unknown
+    consentVersion?: unknown
+  }
+  if (body.consent !== true) {
+    throw new ApiError(400, "请先阅读并勾选同意使用协议", "CONSENT_REQUIRED")
+  }
+  const version = Math.trunc(Number(body.consentVersion))
+  if (version !== STORAGE_CONSENT_VERSION) {
+    throw new ApiError(400, "使用协议已更新，请重新阅读并同意", "CONSENT_VERSION_MISMATCH")
+  }
+
+  const now = new Date().toISOString()
+
   const existing = await loadAccount(env, user.id)
   if (existing) {
-    // 已开通：重新启用即可（保留原有文件）
+    // 已开通：重新启用即可（保留原有文件），同时刷新协议同意记录
     await env.DB.prepare(
-      "UPDATE storage_accounts SET enabled = 1, quota_bytes = ?, updated_at = ? WHERE user_id = ?"
+      "UPDATE storage_accounts SET enabled = 1, quota_bytes = ?, consent_version = ?, consented_at = ?, updated_at = ? WHERE user_id = ?"
     )
       .bind(
         await getSettingNumber(env, "storage_quota_bytes"),
-        new Date().toISOString(),
+        STORAGE_CONSENT_VERSION,
+        now,
+        now,
         user.id
       )
       .run()
@@ -248,14 +283,14 @@ export async function enableStorage(env: Env, request: Request): Promise<Respons
 
   const prefix = user.username.toLowerCase()
   const quota = await getSettingNumber(env, "storage_quota_bytes")
-  const now = new Date().toISOString()
 
   await env.DB.prepare(
     `INSERT INTO storage_accounts
-       (user_id, prefix, quota_bytes, used_bytes, file_count, enabled, created_at, updated_at)
-     VALUES (?, ?, ?, 0, 0, 1, ?, ?)`
+       (user_id, prefix, quota_bytes, used_bytes, file_count, enabled,
+        consent_version, consented_at, created_at, updated_at)
+     VALUES (?, ?, ?, 0, 0, 1, ?, ?, ?, ?)`
   )
-    .bind(user.id, prefix, quota, now, now)
+    .bind(user.id, prefix, quota, STORAGE_CONSENT_VERSION, now, now, now)
     .run()
 
   // 目录占位对象，使 R2 控制台里能看到以用户名命名的目录

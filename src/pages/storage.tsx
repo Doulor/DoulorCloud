@@ -1,17 +1,5 @@
 import * as React from "react"
-import {
-  Cloud,
-  Copy,
-  ExternalLink,
-  Globe,
-  HardDrive,
-  Loader2,
-  Power,
-  RefreshCw,
-  Trash2,
-  Upload,
-  X,
-} from "lucide-react"
+import { Cloud, Copy, ExternalLink, Globe, HardDrive, Loader2, Power, RefreshCw, ScrollText, Trash2, Upload, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -53,6 +41,40 @@ import {
 } from "@/components/ui/table"
 import { storageApi, HttpError } from "@/services/api"
 import type { StorageObject, StorageOverview } from "@/types"
+/**
+ * 网盘「使用协议」。版本须与后端 STORAGE_CONSENT_VERSION 一致。
+ * 用户点「开通网盘」前必须勾选同意，服务端校验通过才会写入启用状态。
+ * 目的：明确禁止存放违规内容、违规后果自负并可能永久封号，降低平台责任。
+ */
+const STORAGE_CONSENT_VERSION = 1
+
+const STORAGE_AGREEMENT = [
+  {
+    title: "一、服务性质",
+    body: "本模块仅为你提供文件存储与公开直链分享服务。本站不保证存储永久可用、不被删除或数据不丢失，请自行保留重要文件的备份。",
+  },
+  {
+    title: "二、禁止存放的内容",
+    body: "严禁上传、存储或分享下列内容：① 儿童色情及任何涉及未成年人的色情内容；② 色情、低俗内容（R18）；③ 恐怖主义、极端暴力、血腥内容；④ 盗版软件、影视、音乐、电子书及其他侵犯他人著作权的资源；⑤ 赌博、诈骗、传销等违法信息；⑥ 恶意软件、木马、病毒、钓鱼页面；⑦ 侵犯他人隐私或含有他人敏感个人信息的内容；⑧ 其他违反中华人民共和国法律法规及你所在地法律的内容。",
+  },
+  {
+    title: "三、违规处理",
+    body: "一经发现或经举报核实存在上述内容，本站将立即删除相关文件、停用你的网盘功能，并视情节严重程度对你作出警告、限制功能直至【永久封禁账号】的处理，且不予恢复。构成违法犯罪的，本站将配合有权机关提供必要信息。",
+  },
+  {
+    title: "四、你的责任",
+    body: "你须对通过本服务上传、存储、分享的全部内容及由此产生的全部后果独立承担法律责任。因你上传的内容导致本站被第三方索赔、行政处罚或产生其他损失的，你有义务予以赔偿。",
+  },
+  {
+    title: "五、直链公开性",
+    body: "直链是公开的，任何拿到链接的人都能访问。请勿存放隐私文件、证件照、密钥等敏感信息。你应为自己的分享行为负责。",
+  },
+  {
+    title: "六、免责与配合",
+    body: "本站有权在收到有效投诉或依法配合调查时，无需事先通知即删除相关文件并停用账号。管理员有权调整配额、限速或在任何时候关闭整个功能。",
+  },
+]
+
 
 /** 与 Worker 端 settings.ts 的 formatBytes 保持一致的展示逻辑 */
 function formatBytes(bytes: number): string {
@@ -95,6 +117,9 @@ export default function StoragePage() {
   const [objects, setObjects] = React.useState<StorageObject[]>([])
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
+  // 协议同意（开通前必须勾选）
+  const [consent, setConsent] = React.useState(false)
+  const [agreementOpen, setAgreementOpen] = React.useState(false)
   const [uploading, setUploading] = React.useState<Uploading[]>([])
   const [uploadActive, setUploadActive] = React.useState(false)
   const [dragging, setDragging] = React.useState(false)
@@ -126,9 +151,13 @@ export default function StoragePage() {
   }, [load])
 
   const handleEnable = async () => {
+    if (!consent) {
+      toast.error("请先阅读并勾选同意使用协议")
+      return
+    }
     setBusy(true)
     try {
-      await storageApi.enable()
+      await storageApi.enable(STORAGE_CONSENT_VERSION)
       toast.success("网盘已开通")
       await load(true)
     } catch (err) {
@@ -146,7 +175,8 @@ export default function StoragePage() {
         await storageApi.disable()
         toast.success("已关闭直链（文件保留）")
       } else {
-        await storageApi.enable()
+        // 重新启用同样要带协议版本：若协议已升级，服务端会要求重新同意
+        await storageApi.enable(STORAGE_CONSENT_VERSION)
         toast.success("已重新启用")
       }
       await load(true)
@@ -368,12 +398,119 @@ export default function StoragePage() {
               <li>· 可绑定自己的二级域名作为前缀（如 blog.doulor.cn/a.png）</li>
               <li>· 直链是公开的，拿到链接的人都能访问，请勿存放隐私文件</li>
             </ul>
-            <Button onClick={() => void handleEnable()} disabled={busy}>
+
+            <div className="rounded-md border bg-muted/40 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2">
+                  <ScrollText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                  <div>
+                    <p className="text-sm font-medium">
+                      使用协议（版本 {STORAGE_CONSENT_VERSION}）
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      开通即表示你已阅读并同意以下条款，包括禁止存放违规内容。
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setAgreementOpen(true)}
+                >
+                  查看全文
+                </Button>
+              </div>
+            </div>
+
+            <label className="flex cursor-pointer items-start gap-2 rounded-md border p-3">
+              <input
+                type="checkbox"
+                checked={consent}
+                onChange={(e) => setConsent(e.target.checked)}
+                className="mt-0.5 h-4 w-4"
+              />
+              <span className="text-sm text-muted-foreground">
+                我已阅读并同意《网盘使用协议》（版本 {STORAGE_CONSENT_VERSION}），
+                承诺不存放 R18、恐怖暴力、盗版等违规内容
+              </span>
+            </label>
+
+            <Button onClick={() => void handleEnable()} disabled={busy || !consent}>
               {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-              开通网盘
+              同意并开通
             </Button>
           </CardContent>
         </Card>
+
+        <AgreementDialog open={agreementOpen} onOpenChange={setAgreementOpen} />
+      </div>
+    )
+  }
+
+  // 协议版本过期（老账号或协议升级）→ 与未开通一样，强制重新阅读并同意
+  const needReconsent =
+    overview.account !== null &&
+    (overview.consentedVersion ?? 0) < overview.consentVersion
+
+  if (needReconsent) {
+    return (
+      <div>
+        <PageHeader title="网盘" description="R2 直链网盘" />
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ScrollText className="h-4 w-4 text-muted-foreground" />
+              网盘使用协议已更新
+            </CardTitle>
+            <CardDescription>
+              协议已更新到版本 {overview.consentVersion}，请重新阅读并勾选同意后继续使用。
+              你已有的文件不会受影响。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="rounded-md border bg-muted/40 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2">
+                  <ScrollText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                  <div>
+                    <p className="text-sm font-medium">
+                      使用协议（版本 {overview.consentVersion}）
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      同意即表示你已阅读并接受全部条款。
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setAgreementOpen(true)}
+                >
+                  查看全文
+                </Button>
+              </div>
+            </div>
+
+            <label className="flex cursor-pointer items-start gap-2 rounded-md border p-3">
+              <input
+                type="checkbox"
+                checked={consent}
+                onChange={(e) => setConsent(e.target.checked)}
+                className="mt-0.5 h-4 w-4"
+              />
+              <span className="text-sm text-muted-foreground">
+                我已阅读并同意《网盘使用协议》（版本 {overview.consentVersion}）
+              </span>
+            </label>
+
+            <Button onClick={() => void handleEnable()} disabled={busy || !consent}>
+              {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+              同意并继续
+            </Button>
+          </CardContent>
+        </Card>
+
+        <AgreementDialog open={agreementOpen} onOpenChange={setAgreementOpen} />
       </div>
     )
   }
@@ -389,6 +526,16 @@ export default function StoragePage() {
       <PageHeader
         title="网盘"
         description={`目录 ${account.prefix}/ · ${account.fileCount} 个文件`}
+        actions={
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setAgreementOpen(true)}
+          >
+            <ScrollText className="h-4 w-4" />
+            使用协议
+          </Button>
+        }
       />
 
       <div className="space-y-6">
@@ -749,5 +896,36 @@ export default function StoragePage() {
         </DialogContent>
       </Dialog>
     </div>
+  )
+}
+/** 协议全文弹窗（与代理节点的 AgreementDialog 同构） */
+function AgreementDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[80vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>网盘使用协议（版本 {STORAGE_CONSENT_VERSION}）</DialogTitle>
+          <DialogDescription>
+            开通网盘前请完整阅读。勾选同意即表示你接受全部条款。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          {STORAGE_AGREEMENT.map((sec) => (
+            <section key={sec.title}>
+              <h3 className="mb-1 text-sm font-medium">{sec.title}</h3>
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                {sec.body}
+              </p>
+            </section>
+          ))}
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }

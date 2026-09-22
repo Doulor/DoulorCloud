@@ -209,6 +209,10 @@ export interface StorageObject {
 
 export interface StorageOverview {
   configured: boolean
+  /** 前端内嵌协议文本的版本 */
+  consentVersion: number
+  /** 已同意的协议版本；0 = 从未同意（或老账号） */
+  consentedVersion: number
   featureEnabled: boolean
   customDomainSupported: boolean
   account: StorageAccount | null
@@ -423,11 +427,20 @@ export interface Profile {
   musicAutoplay: boolean
   theme: string
   accent: string | null
+  effects: string[]
+  intro: string
+  font: string
   contacts: ProfileContact[]
   subdomainId: string | null
   fqdn: string | null
   profilePath: string
   updatedAt: string
+}
+
+export interface ProfileOption {
+  id: string
+  label: string
+  desc: string
 }
 
 export interface ProfileOverview {
@@ -436,6 +449,13 @@ export interface ProfileOverview {
   profile: Profile | null
   availableSubdomains: { id: string; name: string; fqdn: string }[]
   themes: string[]
+  effects: string[]
+  intros: string[]
+  fonts: string[]
+  themeOptions: ProfileOption[]
+  effectOptions: ProfileOption[]
+  introOptions: ProfileOption[]
+  fontOptions: ProfileOption[]
   contactTypes: ContactType[]
   r2Configured: boolean
   limits: { avatar: number; background: number; music: number }
@@ -493,6 +513,37 @@ export interface AdminProxySubscription extends Omit<ProxySubscription, "nodes" 
   enabled: boolean
   sortOrder: number
   lastError: string | null
+}
+
+// ---- 临时分享箱 ----
+
+export interface TempboxConfig {
+  enabled: boolean
+  defaultMinutes: number
+  maxFileBytes: number
+  maxFiles: number
+  uploadRequiresLogin: boolean
+}
+
+export interface TempboxFile {
+  name: string
+  size: number
+  lastModified: string | null
+}
+
+export interface TempboxBatch {
+  code: string
+  expireAt: string
+  remainingMinutes: number
+  fileCount: number
+  totalBytes: number
+  files: TempboxFile[]
+}
+
+export interface TempboxCreated {
+  code: string
+  expireAt: string
+  minutes: number
 }
 
 
