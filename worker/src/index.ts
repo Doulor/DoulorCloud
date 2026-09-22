@@ -299,6 +299,14 @@ export default {
     try {
       const url = new URL(request.url)
 
+      // 强制 HTTPS：会话 cookie 带 Secure 标志，HTTP 下浏览器会拒绝保存，
+      // 表现为「登录接口 200 却立刻被踢回登录页」，且清缓存/换域名都无效。
+      // 静态站点侧由根目录的 site-worker.js 做同样的事。
+      if (url.protocol === "http:") {
+        url.protocol = "https:"
+        return Response.redirect(url.toString(), 301)
+      }
+
       // 公开直链：/dl/<用户名>/<文件名>（无需鉴权）
       if (url.pathname.startsWith("/dl/")) {
         return await storageHandlers.serveDirectLink(
