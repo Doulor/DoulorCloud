@@ -1,0 +1,863 @@
+/**
+ * R2 直链网盘。
+ *
+ * 存储模型：R2 桶 `network` 内，每个用户一个顶层目录 = 用户名（storage_accounts.prefix）。
+ * 配额与文件数记账在 D1，实际上传/读取都以 R2 为准。
+ *
+ * 直链有两种形态：
+ *   1. 默认：https://mail.doulor.cn/dl/<用户名>/<文件名>（无需任何额外配置）
+ *   2. 自定义二级域名：https://<子域名>/<文件名>
+ *      storage_prefixes 把某个子域名映射到同一份 R2 目录（通常就是该子域名本身）；
+ *      需要 Worker Routes 权限把该域名指到本 Worker，未配置时前端自动隐藏入口。
+ *
+ * 桶保持私有：所有下载都经本 Worker 反代（跨账户无法使用 R2 自定义域）。
+ */
+import { ApiError, json } from "../http"
+import { uuid } from "../crypto"
+import { requireUser } from "../auth"
+import {
+  deleteObject,
+  getObject,
+  headObject,
+  isR2Configured,
+  listObjects,
+  presign,
+  putObject,
+  deletePrefix,
+  type R2Object,
+} from "../r2"
+import { audit, getSettingBool, getSettingNumber, getSettings } from "../settings"
+import {
+  cfCreateDnsRecord,
+  cfDeleteDnsRecord,
+  cfListDnsRecords,
+} from "../cloudflare"
+import type { Env } from "../env"
+
+const MARKER_SUFFIX = "/" // 目录占位对象，如 "ruben/"
+
+interface StorageAccountRow {
+  user_id: string
+  prefix: string
+  quota_bytes: number
+  used_bytes: number
+  file_count: number
+  enabled: number
+  created_at: string
+  updated_at: string
+}
+
+function toPublicAccount(row: StorageAccountRow, directLinkBase: string) {
+  return {
+    prefix: row.prefix,
+    quotaBytes: row.quota_bytes,
+    usedBytes: row.used_bytes,
+    fileCount: row.file_count,
+    enabled: row.enabled === 1,
+    createdAt: row.created_at,
+    directLinkBase: `${directLinkBase}/${row.prefix}`,
+  }
+}
+
+async function loadAccount(
+  env: Env,
+  userId: string
+): Promise<StorageAccountRow | null> {
+  return env.DB.prepare("SELECT * FROM storage_accounts WHERE user_id = ?")
+    .bind(userId)
+    .first<StorageAccountRow>()
+}
+
+/** 校验用户对某个 R2 key 的所有权（key 必须落在其 prefix 目录内） */
+function assertKeyOwned(account: StorageAccountRow, key: string): void {
+  if (!key.startsWith(`${account.prefix}/`) || key.includes("..")) {
+    throw new ApiError(403, "无权访问该文件", "FORBIDDEN")
+  }
+}
+
+/** 清洗文件名：去掉路径分隔与控制字符，防止目录穿越 */
+export function sanitizeFilename(input: string): string {
+  const cleaned = input
+    .replace(/[\\/]+/g, "_")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/^\.+/, "")
+    .trim()
+  const limited = cleaned.slice(0, 200)
+  return limited || `file-${Date.now()}`
+}
+
+/**
+ * 重算某用户的实际用量（以 R2 为准）。
+ * 用于开通时初始化，以及记账被异常流程弄脏后的校正。
+ */
+async function recalculateUsage(
+  env: Env,
+  account: StorageAccountRow
+): Promise<{ usedBytes: number; fileCount: number }> {
+  let usedBytes = 0
+  let fileCount = 0
+  let cursor: string | undefined
+
+  for (let round = 0; round < 50; round++) {
+    const page = await listObjects(env, `${account.prefix}/`, {
+      limit: 1000,
+      cursor,
+    })
+    for (const obj of page.objects) {
+      if (obj.key.endsWith(MARKER_SUFFIX)) continue
+      usedBytes += obj.size
+      fileCount++
+    }
+    if (!page.truncated || !page.cursor) break
+    cursor = page.cursor
+  }
+
+  await env.DB.prepare(
+    "UPDATE storage_accounts SET used_bytes = ?, file_count = ?, updated_at = ? WHERE user_id = ?"
+  )
+    .bind(usedBytes, fileCount, new Date().toISOString(), account.user_id)
+    .run()
+
+  account.used_bytes = usedBytes
+  account.file_count = fileCount
+  return { usedBytes, fileCount }
+}
+
+// ---- 账户状态 ----
+
+/** GET /api/storage —— 开通状态、配额、直链前缀、自定义域名 */
+export async function getStorage(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const url = new URL(request.url)
+  const settings = await getSettings(env)
+  const configured = isR2Configured(env)
+  const account = configured ? await loadAccount(env, user.id) : null
+
+  const prefixes = account
+    ? await env.DB.prepare(
+        "SELECT id, fqdn, r2_prefix, created_at FROM storage_prefixes WHERE user_id = ? ORDER BY created_at ASC"
+      )
+        .bind(user.id)
+        .all<{ id: string; fqdn: string; r2_prefix: string; created_at: string }>()
+    : { results: [] as { id: string; fqdn: string; r2_prefix: string; created_at: string }[] }
+
+  // 可绑定的子域名（排除主域名 '@' 和已绑定的）
+  const subdomains = account
+    ? await env.DB.prepare(
+        `SELECT s.id, s.name, s.fqdn FROM subdomains s
+          WHERE s.user_id = ? AND s.name != '@'
+            AND s.id NOT IN (SELECT subdomain_id FROM storage_prefixes WHERE user_id = ?)
+          ORDER BY s.created_at ASC`
+      )
+        .bind(user.id, user.id)
+        .all<{ id: string; name: string; fqdn: string }>()
+    : { results: [] as { id: string; name: string; fqdn: string }[] }
+
+  return json({
+    configured,
+    featureEnabled: settings.storage_enabled === "1",
+    // 自定义域名需要 Doulor 账户的 Worker Routes 权限
+    customDomainSupported: Boolean(env.CF_WORKERS_TOKEN),
+    account: account ? toPublicAccount(account, `${url.origin}/dl`) : null,
+    defaultQuotaBytes: Number(settings.storage_quota_bytes),
+    maxFileBytes: Number(settings.storage_max_file_bytes),
+    prefixes: prefixes.results ?? [],
+    availableSubdomains: subdomains.results ?? [],
+  })
+}
+
+/** POST /api/storage/enable —— 开通（建立以用户名命名的目录） */
+export async function enableStorage(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  if (!isR2Configured(env)) {
+    throw new ApiError(503, "网盘存储未配置", "R2_NOT_CONFIGURED")
+  }
+  if (!(await getSettingBool(env, "storage_enabled"))) {
+    throw new ApiError(403, "网盘功能已关闭", "FEATURE_DISABLED")
+  }
+
+  const existing = await loadAccount(env, user.id)
+  if (existing) {
+    // 已开通：重新启用即可（保留原有文件）
+    await env.DB.prepare(
+      "UPDATE storage_accounts SET enabled = 1, quota_bytes = ?, updated_at = ? WHERE user_id = ?"
+    )
+      .bind(
+        await getSettingNumber(env, "storage_quota_bytes"),
+        new Date().toISOString(),
+        user.id
+      )
+      .run()
+    const updated = await loadAccount(env, user.id)
+    const url = new URL(request.url)
+    return json({ account: toPublicAccount(updated!, `${url.origin}/dl`) })
+  }
+
+  const prefix = user.username.toLowerCase()
+  const quota = await getSettingNumber(env, "storage_quota_bytes")
+  const now = new Date().toISOString()
+
+  await env.DB.prepare(
+    `INSERT INTO storage_accounts
+       (user_id, prefix, quota_bytes, used_bytes, file_count, enabled, created_at, updated_at)
+     VALUES (?, ?, ?, 0, 0, 1, ?, ?)`
+  )
+    .bind(user.id, prefix, quota, now, now)
+    .run()
+
+  // 目录占位对象，使 R2 控制台里能看到以用户名命名的目录
+  try {
+    await putObject(env, `${prefix}/`, "", "application/x-directory")
+  } catch (err) {
+    // 占位对象失败不影响使用（R2 上传时会自动建目录）
+    console.error("目录占位对象创建失败:", err)
+  }
+
+  await audit(env, user.id, "storage.enable", `开通网盘，目录 ${prefix}/`)
+
+  const account = await loadAccount(env, user.id)
+  const url = new URL(request.url)
+  return json({ account: toPublicAccount(account!, `${url.origin}/dl`) }, 201)
+}
+
+/** POST /api/storage/disable —— 关闭直链（保留文件，重新启用后恢复） */
+export async function disableStorage(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const account = await loadAccount(env, user.id)
+  if (!account) {
+    throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+  }
+
+  await env.DB.prepare(
+    "UPDATE storage_accounts SET enabled = 0, updated_at = ? WHERE user_id = ?"
+  )
+    .bind(new Date().toISOString(), user.id)
+    .run()
+
+  await audit(env, user.id, "storage.disable", `关闭网盘直链 ${account.prefix}/`)
+  return json({ ok: true })
+}
+
+// ---- 文件操作 ----
+
+/** GET /api/storage/objects —— 列出文件（以 R2 为准） */
+export async function listStorageObjects(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+
+  const url = new URL(request.url)
+  const cursor = url.searchParams.get("cursor") ?? undefined
+  const page = await listObjects(env, `${account.prefix}/`, {
+    limit: 200,
+    cursor,
+  })
+
+  const objects = page.objects
+    .filter((o) => !o.key.endsWith(MARKER_SUFFIX))
+    .map((o) => toPublicObject(o, account.prefix))
+
+  return json({
+    objects,
+    cursor: page.cursor,
+    truncated: page.truncated,
+    usedBytes: account.used_bytes,
+    quotaBytes: account.quota_bytes,
+  })
+}
+
+function toPublicObject(obj: R2Object, prefix: string) {
+  const filename = obj.key.slice(prefix.length + 1)
+  return {
+    key: obj.key,
+    filename,
+    size: obj.size,
+    lastModified: obj.lastModified,
+    etag: obj.etag,
+  }
+}
+
+/**
+ * POST /api/storage/upload-url —— 申请预签名上传地址。
+ * 浏览器直传 R2：可显示真实进度，且不受 Worker 请求体大小限制。
+ */
+export async function createUploadUrl(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+  if (account.enabled !== 1) {
+    throw new ApiError(403, "网盘已关闭，请先启用", "STORAGE_DISABLED")
+  }
+
+  const body = (await request.json()) as {
+    filename?: string
+    size?: number
+    contentType?: string
+  }
+
+  const filename = sanitizeFilename(body.filename ?? "")
+  const size = Math.max(0, Math.trunc(Number(body.size ?? 0)))
+  const maxFile = await getSettingNumber(env, "storage_max_file_bytes")
+
+  if (size > maxFile) {
+    throw new ApiError(
+      400,
+      `单个文件不能超过 ${Math.round(maxFile / 1024 / 1024)} MB`,
+      "FILE_TOO_LARGE"
+    )
+  }
+
+  // 同名文件已存在时按覆盖处理，配额只算增量
+  const key = `${account.prefix}/${filename}`
+  const existing = await headObject(env, key)
+  const delta = size - (existing?.size ?? 0)
+
+  if (account.used_bytes + delta > account.quota_bytes) {
+    throw new ApiError(
+      400,
+      `存储空间不足（已用 ${account.used_bytes} / ${account.quota_bytes} 字节）`,
+      "QUOTA_EXCEEDED"
+    )
+  }
+
+  const uploadUrl = await presign(env, "PUT", key, 3600)
+
+  return json({
+    uploadUrl,
+    key,
+    filename,
+    directLink: `/dl/${encodeURIComponent(account.prefix)}/${encodeURIComponent(filename)}`,
+  })
+}
+
+/**
+ * POST /api/storage/commit —— 上传完成后登记。
+ * 用 HEAD 读取 R2 中的真实大小（不信任前端传值），再更新记账。
+ */
+export async function commitUpload(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+
+  const body = (await request.json()) as { key?: string; contentType?: string }
+  const key = body.key ?? ""
+  assertKeyOwned(account, key)
+
+  const head = await headObject(env, key)
+  if (!head) {
+    throw new ApiError(404, "上传未完成或文件不存在", "NOT_FOUND")
+  }
+
+  const filename = key.slice(account.prefix.length + 1)
+  const now = new Date().toISOString()
+
+  const prev = await env.DB.prepare(
+    "SELECT size FROM storage_objects WHERE r2_key = ? AND user_id = ?"
+  )
+    .bind(key, user.id)
+    .first<{ size: number }>()
+
+  const delta = head.size - (prev?.size ?? 0)
+
+  if (account.used_bytes + delta > account.quota_bytes) {
+    // 超额：删掉刚上传的文件，保持账实一致
+    await deleteObject(env, key)
+    throw new ApiError(400, "存储空间不足，上传已取消", "QUOTA_EXCEEDED")
+  }
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO storage_objects (id, user_id, r2_key, filename, size, content_type, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(r2_key) DO UPDATE SET size = excluded.size, content_type = excluded.content_type`
+    ).bind(
+      uuid(),
+      user.id,
+      key,
+      filename,
+      head.size,
+      body.contentType ?? head.contentType ?? null,
+      now
+    ),
+    env.DB.prepare(
+      `UPDATE storage_accounts
+          SET used_bytes = used_bytes + ?,
+              file_count = (SELECT COUNT(*) FROM storage_objects WHERE user_id = ?),
+              updated_at = ?
+        WHERE user_id = ?`
+    ).bind(delta, user.id, now, user.id),
+  ])
+
+  const updated = await loadAccount(env, user.id)
+  return json({
+    object: { key, filename, size: head.size },
+    usedBytes: updated?.used_bytes ?? 0,
+    quotaBytes: updated?.quota_bytes ?? account.quota_bytes,
+  })
+}
+
+/** DELETE /api/storage/object?key=xxx —— 删除文件 */
+export async function deleteStorageObject(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+
+  const key = new URL(request.url).searchParams.get("key") ?? ""
+  assertKeyOwned(account, key)
+
+  const prev = await env.DB.prepare(
+    "SELECT size FROM storage_objects WHERE r2_key = ? AND user_id = ?"
+  )
+    .bind(key, user.id)
+    .first<{ size: number }>()
+
+  await deleteObject(env, key)
+
+  const now = new Date().toISOString()
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM storage_objects WHERE r2_key = ? AND user_id = ?").bind(
+      key,
+      user.id
+    ),
+    env.DB.prepare(
+      `UPDATE storage_accounts
+          SET used_bytes = MAX(0, used_bytes - ?),
+              file_count = (SELECT COUNT(*) FROM storage_objects WHERE user_id = ?),
+              updated_at = ?
+        WHERE user_id = ?`
+    ).bind(prev?.size ?? 0, user.id, now, user.id),
+  ])
+
+  return new Response(null, { status: 204 })
+}
+
+/** GET /api/storage/download?key=xxx —— 鉴权下载（供后台预览） */
+export async function downloadStorageObject(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+
+  const key = new URL(request.url).searchParams.get("key") ?? ""
+  assertKeyOwned(account, key)
+
+  return proxyObject(env, key, request, false)
+}
+
+// ---- 自定义直链前缀 ----
+
+/** POST /api/storage/domain —— 绑定 / 解绑自定义二级域名 */
+export async function bindStorageDomain(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+
+  const body = (await request.json()) as {
+    subdomainId?: string
+    action?: "bind" | "unbind"
+  }
+
+  if (body.action === "unbind") {
+    const prefixId = body.subdomainId ?? ""
+    const existing = await env.DB.prepare(
+      "SELECT * FROM storage_prefixes WHERE id = ? AND user_id = ?"
+    )
+      .bind(prefixId, user.id)
+      .first<{ id: string; fqdn: string }>()
+    if (!existing) throw new ApiError(404, "绑定不存在", "NOT_FOUND")
+
+    // 移除 Worker Route（失败不阻断，路由可能已不存在）
+    try {
+      await removeWorkerRoute(env, existing.fqdn)
+    } catch (err) {
+      console.error("移除 Worker Route 失败:", err)
+    }
+
+    // 移除绑定期间自动创建的 DNS 占位记录，否则该子域名会一直解析到本站
+    // 且 deleteSubdomain 的冲突检测会认为它仍被占用。
+    // 用户在绑定期自行添加的记录也一并清理，避免留下悬空解析。
+    try {
+      const records = await cfListDnsRecords(env, env.ZONE_ID, existing.fqdn)
+      for (const record of records) {
+        await cfDeleteDnsRecord(env, env.ZONE_ID, record.id)
+      }
+    } catch (err) {
+      console.error("移除直链域名 DNS 记录失败:", err)
+    }
+
+    await env.DB.prepare("DELETE FROM storage_prefixes WHERE id = ?")
+      .bind(existing.id)
+      .run()
+    await audit(env, user.id, "storage.domain.unbind", `解绑直链域名 ${existing.fqdn}`)
+    return json({ ok: true })
+  }
+
+  // 绑定
+  const subdomainId = body.subdomainId ?? ""
+  const sub = await env.DB.prepare(
+    "SELECT id, name, fqdn FROM subdomains WHERE id = ? AND user_id = ?"
+  )
+    .bind(subdomainId, user.id)
+    .first<{ id: string; name: string; fqdn: string }>()
+  if (!sub) throw new ApiError(403, "无权使用该子域名", "FORBIDDEN")
+  if (sub.name === "@") {
+    throw new ApiError(400, "主域名不能作为直链前缀", "INVALID_SUBDOMAIN")
+  }
+
+  if (!env.CF_WORKERS_TOKEN) {
+    throw new ApiError(
+      503,
+      "自定义直链域名未启用（管理员需配置 CF_WORKERS_TOKEN）",
+      "CUSTOM_DOMAIN_UNAVAILABLE"
+    )
+  }
+
+  const taken = await env.DB.prepare(
+    "SELECT id FROM storage_prefixes WHERE fqdn = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(sub.fqdn)
+    .first()
+  if (taken) throw new ApiError(409, "该域名已绑定了直链", "CONFLICT")
+
+  // 该域名上不能已有用户自己建的 DNS 记录（避免抢走他的站点）
+  const dns = await env.DB.prepare(
+    "SELECT id FROM dns_records WHERE fqdn = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(sub.fqdn)
+    .first()
+  if (dns) {
+    throw new ApiError(
+      409,
+      "该子域名已存在 DNS 记录，请先删除或改用其它子域名",
+      "CONFLICT"
+    )
+  }
+
+  // 1. 先建 DNS 记录：doulor.cn 上没有泛解析，只有 Worker Route 的话
+  //    该域名根本不会被解析到 Cloudflare，浏览器会直接连接失败。
+  //    用 AAAA 100:: 占位并开启代理（与平台上其它 Worker 路由域名一致）。
+  //    若该域名已有解析（例如管理员手工建过），则跳过，不覆盖既有配置。
+  const existingCf = await cfListDnsRecords(env, env.ZONE_ID, sub.fqdn)
+  const ensuredDns = existingCf.length > 0
+  if (!ensuredDns) {
+    try {
+      await cfCreateDnsRecord(env, env.ZONE_ID, {
+        type: "AAAA",
+        name: sub.fqdn,
+        content: "100::",
+        ttl: 1,
+        proxied: true,
+      })
+    } catch (err) {
+      console.error("直链域名 DNS 记录创建失败:", sub.fqdn, err)
+      throw new ApiError(
+        502,
+        "无法为该子域名创建 DNS 解析记录，请稍后重试",
+        "CF_ERROR"
+      )
+    }
+  }
+
+  // 2. 再把该域名指到本 Worker
+  let route: string | null = null
+  try {
+    route = await createWorkerRoute(env, sub.fqdn)
+  } catch (err) {
+    // 路由创建失败则回滚刚建的 DNS 记录，避免留下解析不到内容的空域名
+    if (!ensuredDns) {
+      try {
+        const created = await cfListDnsRecords(env, env.ZONE_ID, sub.fqdn)
+        for (const record of created) {
+          await cfDeleteDnsRecord(env, env.ZONE_ID, record.id)
+        }
+      } catch (cleanupErr) {
+        console.error("回滚 DNS 记录失败:", sub.fqdn, cleanupErr)
+      }
+    }
+    throw err
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO storage_prefixes (id, user_id, subdomain_id, fqdn, r2_prefix, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
+      uuid(),
+      user.id,
+      sub.id,
+      sub.fqdn,
+      account.prefix,
+      new Date().toISOString()
+    )
+    .run()
+
+  await audit(
+    env,
+    user.id,
+    "storage.domain.bind",
+    `绑定直链域名 ${sub.fqdn} -> ${account.prefix}/ (dns ${ensuredDns ? "已存在" : "已创建"}, route ${route ?? "n/a"})`
+  )
+
+  return json(
+    {
+      prefix: {
+        fqdn: sub.fqdn,
+        r2Prefix: account.prefix,
+        // DNS 与证书生效需要一点时间，前端据此提示用户稍候
+        dnsCreated: !ensuredDns,
+      },
+    },
+    201
+  )
+}
+
+// ---- Cloudflare Worker Routes（把自定义域名指向本 Worker）----
+
+async function cfWorkersApi(
+  env: Env,
+  path: string,
+  init: RequestInit = {}
+): Promise<Response> {
+  if (!env.CF_WORKERS_TOKEN) {
+    throw new ApiError(503, "未配置 CF_WORKERS_TOKEN", "CUSTOM_DOMAIN_UNAVAILABLE")
+  }
+  return fetch(`https://api.cloudflare.com/client/v4${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${env.CF_WORKERS_TOKEN}`,
+      "Content-Type": "application/json",
+      ...(init.headers ?? {}),
+    },
+  })
+}
+
+async function listWorkerRoutes(env: Env): Promise<
+  { id: string; pattern: string; script?: string }[]
+> {
+  const res = await cfWorkersApi(env, `/zones/${env.ZONE_ID}/workers/routes`)
+  const data = (await res.json()) as {
+    result?: { id: string; pattern: string; script?: string }[]
+  }
+  return data.result ?? []
+}
+
+async function createWorkerRoute(
+  env: Env,
+  fqdn: string
+): Promise<string | null> {
+  const script = env.WORKER_NAME ?? "doulor-mail-api"
+  const pattern = `${fqdn}/*`
+
+  const existing = (await listWorkerRoutes(env)).find(
+    (r) => r.pattern.toLowerCase() === pattern.toLowerCase()
+  )
+  if (existing) return existing.id
+
+  const res = await cfWorkersApi(env, `/zones/${env.ZONE_ID}/workers/routes`, {
+    method: "POST",
+    body: JSON.stringify({ pattern, script }),
+  })
+  const data = (await res.json()) as {
+    result?: { id?: string }
+    errors?: { message: string }[]
+    success?: boolean
+  }
+  if (!data.success || !data.result?.id) {
+    throw new ApiError(
+      502,
+      data.errors?.[0]?.message ?? "创建 Worker Route 失败",
+      "CF_ERROR"
+    )
+  }
+  return data.result.id
+}
+
+async function removeWorkerRoute(env: Env, fqdn: string): Promise<void> {
+  const pattern = `${fqdn}/*`
+  const existing = (await listWorkerRoutes(env)).find(
+    (r) => r.pattern.toLowerCase() === pattern.toLowerCase()
+  )
+  if (!existing) return
+  await cfWorkersApi(env, `/zones/${env.ZONE_ID}/workers/routes/${existing.id}`, {
+    method: "DELETE",
+  })
+}
+
+// ---- 公开直链反代 ----
+
+/**
+ * 把 R2 对象流式返回给客户端。
+ * 公开直链（public=true）不鉴权，但要求账户处于启用状态 —— 关闭网盘后直链即失效。
+ */
+async function proxyObject(
+  env: Env,
+  key: string,
+  request: Request,
+  publicLink: boolean
+): Promise<Response> {
+  const range = request.headers.get("Range") ?? undefined
+  const method = request.method.toUpperCase()
+
+  // HEAD：只回元信息（部分客户端/预览会用）
+  if (method === "HEAD") {
+    const head = await headObject(env, key)
+    if (!head) return new Response(null, { status: 404 })
+    return new Response(null, {
+      status: 200,
+      headers: {
+        "Content-Length": String(head.size),
+        "Content-Type": head.contentType ?? "application/octet-stream",
+        "Accept-Ranges": "bytes",
+      },
+    })
+  }
+
+  const upstream = await getObject(env, key, range)
+  const headers = new Headers()
+  for (const name of [
+    "content-type",
+    "content-length",
+    "etag",
+    "last-modified",
+    "content-range",
+    "accept-ranges",
+  ]) {
+    const value = upstream.headers.get(name)
+    if (value) headers.set(name, value)
+  }
+
+  // 直链是公开且内容可变的：用较短的缓存时间，兼顾 CDN 与更新及时性
+  headers.set("Cache-Control", publicLink ? "public, max-age=300" : "private, no-store")
+  headers.set("X-Content-Type-Options", "nosniff")
+
+  // 允许站点内嵌引用（图片/视频），否则浏览器会因同源策略无法展示
+  headers.set("Access-Control-Allow-Origin", "*")
+
+  return new Response(upstream.body, { status: upstream.status, headers })
+}
+
+/**
+ * GET /dl/<前缀>/<文件名> —— 默认直链。
+ * 校验账户启用状态后反代 R2。
+ */
+export async function serveDirectLink(
+  env: Env,
+  request: Request,
+  rest: string
+): Promise<Response> {
+  if (!isR2Configured(env)) {
+    throw new ApiError(503, "网盘存储未配置", "R2_NOT_CONFIGURED")
+  }
+
+  const segments = rest.split("/").filter(Boolean)
+  if (segments.length < 2) {
+    throw new ApiError(404, "直链格式不正确", "NOT_FOUND")
+  }
+
+  const prefix = decodeURIComponent(segments[0]).toLowerCase()
+  const filename = segments.slice(1).map(decodeURIComponent).join("/")
+
+  const account = await env.DB.prepare(
+    "SELECT * FROM storage_accounts WHERE prefix = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(prefix)
+    .first<StorageAccountRow>()
+
+  if (!account || account.enabled !== 1) {
+    throw new ApiError(404, "文件不存在", "NOT_FOUND")
+  }
+
+  return proxyObject(env, `${account.prefix}/${filename}`, request, true)
+}
+
+/**
+ * 自定义域名直链：请求 Host 命中 storage_prefixes 时调用。
+ * 路径即文件名（支持子目录）。
+ */
+export async function serveHostedDirectLink(
+  env: Env,
+  request: Request,
+  fqdn: string
+): Promise<Response> {
+  if (!isR2Configured(env)) {
+    throw new ApiError(503, "网盘存储未配置", "R2_NOT_CONFIGURED")
+  }
+
+  const mapping = await env.DB.prepare(
+    "SELECT * FROM storage_prefixes WHERE fqdn = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(fqdn)
+    .first<{ id: string; user_id: string; r2_prefix: string }>()
+
+  if (!mapping) return new Response("Not Found", { status: 404 })
+
+  const account = await env.DB.prepare(
+    "SELECT * FROM storage_accounts WHERE user_id = ?"
+  )
+    .bind(mapping.user_id)
+    .first<StorageAccountRow>()
+
+  if (!account || account.enabled !== 1) {
+    return new Response("Not Found", { status: 404 })
+  }
+
+  const path = new URL(request.url).pathname.replace(/^\/+/, "")
+  if (!path) {
+    // 根路径给一个极简说明页，避免直接 404 让人困惑
+    return new Response(
+      `<!doctype html><meta charset="utf-8"><title>${fqdn}</title>
+<body style="font-family:system-ui;padding:2rem;max-width:40rem;margin:auto">
+<h1 style="font-size:1.1rem">${fqdn}</h1>
+<p style="color:#666">这是 Doulor Cloud 的 R2 直链域名。请直接访问具体文件路径，例如
+<code>/${encodeURIComponent(account.prefix)}/example.png</code>。</p>
+</body>`,
+      { headers: { "Content-Type": "text/html; charset=utf-8" } }
+    )
+  }
+
+  return proxyObject(env, `${account.prefix}/${path}`, request, true)
+}
+
+/** 判断 Host 是否为一个已绑定的自定义直链域名 */
+export async function isHostedDirectLinkHost(
+  env: Env,
+  host: string
+): Promise<boolean> {
+  if (!isR2Configured(env)) return false
+  const row = await env.DB.prepare(
+    "SELECT id FROM storage_prefixes WHERE fqdn = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(host)
+    .first()
+  return Boolean(row)
+}
+
+/** 清空某用户全部文件（管理员用） */
+export async function purgeUserStorage(env: Env, userId: string): Promise<number> {
+  const account = await loadAccount(env, userId)
+  if (!account) return 0
+  const deleted = await deletePrefix(env, `${account.prefix}/`)
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM storage_objects WHERE user_id = ?").bind(userId),
+    env.DB.prepare(
+      "UPDATE storage_accounts SET used_bytes = 0, file_count = 0, updated_at = ? WHERE user_id = ?"
+    ).bind(new Date().toISOString(), userId),
+  ])
+  return deleted
+}
+
+export { recalculateUsage }

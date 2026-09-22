@@ -1,0 +1,14 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+.env
+.env.*
+.wrangler
+.dev.vars
+
+.dev.vars*
+!.dev.vars.example
+!.env.example
+.playwright-cli/

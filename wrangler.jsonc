@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "doulor-mail",
+  "compatibility_date": "2026-09-18",
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+  "routes": [
+    {
+      "pattern": "mail.doulor.cn",
+      "custom_domain": true
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+# 复制为 .dev.vars 并填入真实值（本地开发用，切勿提交到 git）
+# .dev.vars 已在 .gitignore 中排除
+
+# 会话签名密钥（任意长随机字符串，例如 `openssl rand -hex 32`）
+SESSION_SECRET=
+
+# Cloudflare API Token（DNS 编辑权限，仅存在于 Worker 端）
+CLOUDFLARE_API_TOKEN=
+
+# 根域名对应的 Cloudflare Zone ID
+ZONE_ID=
+
+# 根域名
+ROOT_DOMAIN=doulor.cn
+
+# 初始邀请码（逗号分隔，用于首次注册）
+ADMIN_INVITE_CODES=

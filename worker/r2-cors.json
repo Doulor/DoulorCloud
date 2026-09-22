@@ -1,0 +1,18 @@
+{
+  "rules": [
+    {
+      "allowed": {
+        "origins": [
+          "https://mail.doulor.cn",
+          "https://doulor.cn",
+          "http://localhost:5173",
+          "http://127.0.0.1:5173"
+        ],
+        "methods": ["GET", "PUT", "HEAD"],
+        "headers": ["*"]
+      },
+      "exposeHeaders": ["ETag", "Content-Length", "Content-Range"],
+      "maxAgeSeconds": 3600
+    }
+  ]
+}

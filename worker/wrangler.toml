@@ -1,0 +1,39 @@
+name = "doulor-mail-api"
+main = "src/index.ts"
+compatibility_date = "2026-09-21"
+
+# D1
+[[d1_databases]]
+binding = "DB"
+database_name = "doulor-mail"
+database_id = "9ae6127c-75f7-4688-bbe3-31ed856859c5"
+
+# 路由：裸域与应用域的 /api/* 都指向本 Worker
+[[routes]]
+pattern = "doulor.cn/api/*"
+zone_name = "doulor.cn"
+
+[[routes]]
+pattern = "mail.doulor.cn/api/*"
+zone_name = "doulor.cn"
+
+# R2 直链：/dl/<用户名>/<文件名> 需要由本 Worker 反代
+# （mail.doulor.cn 其余路径仍由静态站点 Worker 处理，更精确的路由优先）
+[[routes]]
+pattern = "mail.doulor.cn/dl/*"
+zone_name = "doulor.cn"
+
+[[routes]]
+pattern = "doulor.cn/dl/*"
+zone_name = "doulor.cn"
+
+# Email Workers：Cloudflare Email Routing 入站
+[email]
+type = "send_email"
+name = "doulor-mail-api"
+allowed_destination_addresses = ["doulor.cn"]
+
+[vars]
+ROOT_DOMAIN = "doulor.cn"
+ZONE_ID = "141ef5bed7dae38f4ffa094809bf0998"
+ACCOUNT_ID = "83fdea7d910cbc683e6d53fa6baf45ab"

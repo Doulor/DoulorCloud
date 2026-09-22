@@ -1,0 +1,590 @@
+import * as React from "react"
+import {
+  AlertTriangle,
+  Bot,
+  Copy,
+  KeyRound,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  Trash2,
+  Wallet,
+} from "lucide-react"
+import { toast } from "sonner"
+
+import { PageHeader } from "@/components/page-header"
+import { EmptyState } from "@/components/empty-state"
+import { LoadingBlock } from "@/components/loading-block"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { newapiApi, HttpError } from "@/services/api"
+import type { NewApiKey, NewApiStatus } from "@/types"
+
+function fmtTime(iso: string | null) {
+  if (!iso) return "—"
+  return new Date(iso).toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  })
+}
+
+export default function AiPage() {
+  const [status, setStatus] = React.useState<NewApiStatus | null>(null)
+  const [keys, setKeys] = React.useState<NewApiKey[]>([])
+  const [loading, setLoading] = React.useState(true)
+  const [busy, setBusy] = React.useState(false)
+  const [syncing, setSyncing] = React.useState(false)
+  const [deletingKeyId, setDeletingKeyId] = React.useState<string | null>(null)
+
+  // 开通
+  const [bindOpen, setBindOpen] = React.useState(false)
+  const [password, setPassword] = React.useState("")
+  const [confirm, setConfirm] = React.useState("")
+
+  // 新建 Key
+  const [keyOpen, setKeyOpen] = React.useState(false)
+  const [keyName, setKeyName] = React.useState("")
+  /** 完整 key 只在创建时展示一次，不落库 */
+  const [createdKey, setCreatedKey] = React.useState<string | null>(null)
+
+  /** 拉取状态与 Key 列表；silent 用于对话框流程中刷新，避免整页 loading 卸载弹窗 */
+  const load = React.useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
+    try {
+      const res = await newapiApi.status()
+      setStatus(res)
+      if (res.account) {
+        const k = await newapiApi.listKeys()
+        setKeys(k.keys)
+      } else {
+        setKeys([])
+      }
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "加载失败")
+    } finally {
+      if (!silent) setLoading(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    void load()
+  }, [load])
+
+  const copyText = async (text: string, label = "已复制") => {
+    try {
+      await navigator.clipboard.writeText(text)
+      toast.success(label)
+    } catch {
+      toast.error("复制失败，请手动选择复制")
+    }
+  }
+
+  const handleBind = async () => {
+    if (password !== confirm) {
+      toast.error("两次输入的密码不一致")
+      return
+    }
+    setBusy(true)
+    try {
+      await newapiApi.bind(password)
+      toast.success("AI 中转站已开通")
+      setBindOpen(false)
+      setPassword("")
+      setConfirm("")
+      // 静默刷新：非静默会整页 loading，把弹窗和错误提示一起卸载掉
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "开通失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleSync = async () => {
+    if (syncing) return
+    setSyncing(true)
+    try {
+      await newapiApi.sync()
+      await load(true)
+      toast.success("已同步额度")
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "同步失败")
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const handleCreateKey = async () => {
+    setBusy(true)
+    try {
+      const res = await newapiApi.createKey(keyName)
+      setCreatedKey(res.key.fullKey)
+      setKeyName("")
+      // 静默刷新列表，不能让整页 loading 卸载掉展示完整 Key 的弹窗
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "创建失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleDeleteKey = async (key: NewApiKey) => {
+    if (deletingKeyId) return
+    setDeletingKeyId(key.id)
+    try {
+      await newapiApi.removeKey(key.id)
+      toast.success("Key 已删除")
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "删除失败")
+    } finally {
+      setDeletingKeyId(null)
+    }
+  }
+
+  const handleSyncKeys = async () => {
+    if (syncing) return
+    setSyncing(true)
+    try {
+      const res = await newapiApi.syncKeys()
+      setKeys(res.keys)
+      toast.success(
+        res.added > 0 ? `已同步 ${res.added} 个 Key` : "没有新的 Key"
+      )
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "同步失败")
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div>
+        <PageHeader title="AI 中转站" description="NewAPI 集成" />
+        <LoadingBlock />
+      </div>
+    )
+  }
+
+  if (!status?.configured) {
+    return (
+      <div>
+        <PageHeader title="AI 中转站" description="NewAPI 集成" />
+        <EmptyState
+          title="AI 中转站尚未配置"
+          description="管理员还未配置 NewAPI 凭据，请稍后再试。"
+        />
+      </div>
+    )
+  }
+
+  if (!status.featureEnabled) {
+    return (
+      <div>
+        <PageHeader title="AI 中转站" description="NewAPI 集成" />
+        <EmptyState
+          title="功能已关闭"
+          description="管理员暂时关闭了 AI 中转站功能。"
+        />
+      </div>
+    )
+  }
+
+  // 未开通
+  if (!status.account) {
+    return (
+      <div>
+        <PageHeader title="AI 中转站" description="统一的大模型 API 入口" />
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Sparkles className="h-4 w-4 text-muted-foreground" />
+              开通 AI 中转站
+            </CardTitle>
+            <CardDescription>
+              将为你创建 NewAPI 账号（{status.eligibleEmail}），附赠试用额度
+              {status.currencySymbol}
+              {status.trialQuotaUsd}。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <ul className="space-y-1.5 text-sm text-muted-foreground">
+              <li>· 账号邮箱固定为 {status.eligibleEmail}（仅限本站邮箱）</li>
+              <li>· 密码由你自己设置，本站不会保存你的密码</li>
+              <li>· 开通后可查看可用模型并自助创建 API Key</li>
+              <li>· 开通时需等待一封验证码邮件，通常几秒内到达</li>
+            </ul>
+            <Button onClick={() => setBindOpen(true)}>
+              <Sparkles className="h-4 w-4" />
+              立即开通
+            </Button>
+          </CardContent>
+        </Card>
+
+        <BindDialog
+          open={bindOpen}
+          onOpenChange={setBindOpen}
+          email={status.eligibleEmail}
+          password={password}
+          confirm={confirm}
+          setPassword={setPassword}
+          setConfirm={setConfirm}
+          busy={busy}
+          onConfirm={() => void handleBind()}
+        />
+      </div>
+    )
+  }
+
+  const account = status.account
+
+  return (
+    <div>
+      <PageHeader
+        title="AI 中转站"
+        description={`账号 ${account.username} · ${account.email}`}
+      />
+
+      <div className="space-y-6">
+        {/* 额度 */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Wallet className="h-4 w-4 text-muted-foreground" />
+                  额度
+                </CardTitle>
+                <CardDescription>
+                  剩余 {status.currencySymbol}
+                  {account.quotaUsd.toFixed(4)} · 已用 {status.currencySymbol}
+                  {account.usedUsd.toFixed(4)} · 请求 {account.requestCount} 次
+                </CardDescription>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void handleSync()}
+                disabled={syncing}
+              >
+                {syncing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+                同步
+              </Button>
+            </div>
+          </CardHeader>
+          {account.syncedAt && (
+            <CardContent>
+              <p className="text-xs text-muted-foreground">
+                最后同步：{fmtTime(account.syncedAt)}
+                {account.group ? ` · 分组 ${account.group}` : ""}
+              </p>
+            </CardContent>
+          )}
+        </Card>
+
+        {/* API Key */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <KeyRound className="h-4 w-4 text-muted-foreground" />
+                  API Key
+                </CardTitle>
+                <CardDescription>
+                  用于调用 OpenAI 兼容接口，完整 Key 只在创建时显示一次。
+                </CardDescription>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void handleSyncKeys()}
+                  disabled={syncing}
+                >
+                  {syncing ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  )}
+                  同步
+                </Button>
+                <Button size="sm" onClick={() => setKeyOpen(true)}>
+                  <Plus className="h-3.5 w-3.5" />
+                  新建 Key
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {keys.length === 0 ? (
+              <EmptyState
+                title="还没有 API Key"
+                description="创建一个 Key 即可开始调用模型。"
+              />
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>名称</TableHead>
+                    <TableHead>Key</TableHead>
+                    <TableHead>创建时间</TableHead>
+                    <TableHead className="w-24" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {keys.map((k) => (
+                    <TableRow key={k.id}>
+                      <TableCell className="text-sm">{k.name}</TableCell>
+                      <TableCell className="font-mono text-xs text-muted-foreground">
+                        {k.maskedKey}
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {fmtTime(k.createdAt)}
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                          onClick={() => void handleDeleteKey(k)}
+                          disabled={deletingKeyId !== null}
+                          title="删除"
+                        >
+                          {deletingKeyId === k.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* 模型列表 */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Bot className="h-4 w-4 text-muted-foreground" />
+              可用模型（{status.models.length}）
+            </CardTitle>
+            <CardDescription>
+              在任意 OpenAI 兼容客户端中把 Base URL 设为 NewAPI 地址即可使用。
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {status.models.length === 0 ? (
+              <p className="text-sm text-muted-foreground">暂无可用模型</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {status.models.map((m) => (
+                  <Badge
+                    key={m}
+                    variant="secondary"
+                    className="cursor-pointer font-mono text-xs"
+                    onClick={() => void copyText(m, `已复制模型名 ${m}`)}
+                  >
+                    {m}
+                  </Badge>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <AlertTriangle className="h-4 w-4 text-muted-foreground" />
+              使用方式
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm text-muted-foreground">
+            <p>Base URL：https://api.doulor.cn/v1</p>
+            <p>API Key：填上面创建的 Key（完整值只在创建时显示）</p>
+            <p className="text-xs">
+              密码与账号信息可在 NewAPI 站点自行修改；本站不保存你的密码。
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* 新建 Key */}
+      <Dialog
+        open={keyOpen}
+        onOpenChange={(open) => {
+          setKeyOpen(open)
+          if (!open) setCreatedKey(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>新建 API Key</DialogTitle>
+            <DialogDescription>
+              {createdKey
+                ? "请立即复制保存，关闭后无法再次查看完整 Key。"
+                : "给这个 Key 起个名字，便于日后分辨用途。"}
+            </DialogDescription>
+          </DialogHeader>
+
+          {createdKey ? (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <Input readOnly value={createdKey} className="font-mono text-xs" />
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => void copyText(createdKey, "API Key 已复制")}
+                >
+                  <Copy className="h-4 w-4" />
+                </Button>
+              </div>
+              <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
+                完整 Key 仅此一次显示，服务端不保存，请务必现在复制。
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <Label htmlFor="keyName">名称</Label>
+              <Input
+                id="keyName"
+                placeholder="例如 chatbox、my-script"
+                value={keyName}
+                onChange={(e) => setKeyName(e.target.value)}
+              />
+            </div>
+          )}
+
+          <DialogFooter>
+            {createdKey ? (
+              <Button onClick={() => setKeyOpen(false)}>完成</Button>
+            ) : (
+              <>
+                <Button variant="outline" onClick={() => setKeyOpen(false)}>
+                  取消
+                </Button>
+                <Button onClick={() => void handleCreateKey()} disabled={busy}>
+                  {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+                  创建
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+interface BindDialogProps {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  email: string
+  password: string
+  confirm: string
+  setPassword: (v: string) => void
+  setConfirm: (v: string) => void
+  busy: boolean
+  onConfirm: () => void
+}
+
+function BindDialog({
+  open,
+  onOpenChange,
+  email,
+  password,
+  confirm,
+  setPassword,
+  setConfirm,
+  busy,
+  onConfirm,
+}: BindDialogProps) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>开通 AI 中转站</DialogTitle>
+          <DialogDescription>
+            将创建 NewAPI 账号 {email}，请设置一个密码。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="aiPassword">NewAPI 密码</Label>
+            <Input
+              id="aiPassword"
+              type="password"
+              placeholder="至少 8 位"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="aiConfirm">确认密码</Label>
+            <Input
+              id="aiConfirm"
+              type="password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+            />
+          </div>
+          <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+            开通需要接收一封验证码邮件到 {email}，本站会自动读取并完成验证，
+            通常几秒内完成，请保持页面打开。
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button
+            onClick={onConfirm}
+            disabled={busy || password.length < 8 || password !== confirm}
+          >
+            {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+            {busy ? "开通中…" : "开通"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
