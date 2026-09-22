@@ -33,6 +33,10 @@ interface FrpNodeRow {
   enabled: number
   sort_order: number
   note: string | null
+  /** 节点状态：online | offline | maintenance | unknown（管理员手动维护） */
+  status: string
+  status_note: string | null
+  status_updated_at: string | null
 }
 
 interface FrpApplicationRow {
@@ -48,7 +52,6 @@ interface FrpApplicationRow {
   status: string
   review_note: string | null
   reviewed_at: string | null
-  metadatas_token: string | null
   created_at: string
 }
 
@@ -70,6 +73,9 @@ function toPublicNode(row: FrpNodeRow) {
     maxPorts: row.max_ports,
     enabled: row.enabled === 1,
     note: row.note,
+    status: row.status || "unknown",
+    statusNote: row.status_note,
+    statusUpdatedAt: row.status_updated_at,
   }
 }
 
@@ -217,8 +223,8 @@ export async function getFrpOverview(env: Env, request: Request): Promise<Respon
   ).all<FrpNodeRow>()
 
   const apps = await env.DB.prepare(
-    `SELECT id, node_id, frp_user, ports, tunnels, notify_email, remark,
-            status, review_note, reviewed_at, metadatas_token, created_at
+    `SELECT id, node_id, frp_user, frp_password, ports, tunnels, notify_email, remark,
+            status, review_note, reviewed_at, created_at
        FROM frp_applications WHERE user_id = ? ORDER BY created_at DESC`
   )
     .bind(user.id)
@@ -257,6 +263,8 @@ export async function getFrpOverview(env: Env, request: Request): Promise<Respon
       id: a.id,
       nodeId: a.node_id,
       frpUser: a.frp_user,
+      // 用户自己的密码：生成 config.toml 时需要（作为 metadatas.token）
+      frpPassword: a.frp_password,
       ports: parseJsonArray<number>(a.ports as string, []),
       tunnels: parseJsonArray<Tunnel>(a.tunnels as string, []),
       notifyEmail: a.notify_email,
@@ -265,11 +273,13 @@ export async function getFrpOverview(env: Env, request: Request): Promise<Respon
       reviewNote: a.review_note,
       reviewedAt: a.reviewed_at,
       createdAt: a.created_at,
-      // 生成 config.toml 需要的两项令牌：
-      //   metadatas.token —— 该申请的令牌（审批时确定）
+      // 生成 config.toml 所需：
       //   auth.token      —— 节点的 frps 共享密钥（仅下发给本人的已通过申请）
-      metadatasToken: a.metadatas_token,
-      authToken: a.status === "approved" ? authTokenOf(nodes.results ?? [], String(a.node_id)) : null,
+      //   metadatas.token —— **就是申请时填写的密码**，无需另存
+      configAuthToken:
+        a.status === "approved"
+          ? authTokenOf(nodes.results ?? [], String(a.node_id))
+          : null,
     })),
     myPorts,
     takenPorts,
@@ -444,6 +454,8 @@ export async function applyFrp(env: Env, request: Request): Promise<Response> {
     username: user.username,
     nodeName: node.name,
     frpUser,
+    // 密码即 metadatas.token：管理员要在 frps-panel 里用同样的值建号
+    frpPassword,
     ports,
     tunnels,
     notifyEmail,
@@ -460,6 +472,7 @@ async function notifyAdmin(
     username: string
     nodeName: string
     frpUser: string
+    frpPassword: string
     ports: number[]
     tunnels: Tunnel[]
     notifyEmail: string
@@ -476,6 +489,7 @@ async function notifyAdmin(
       `用户：${info.username}`,
       `节点：${info.nodeName}`,
       `账号：${info.frpUser}`,
+      `密码（即 metadatas.token，请在 frps-panel 用同样的值建号）：${info.frpPassword}`,
       `端口：${info.ports.join("、")}`,
       `隧道：${info.tunnels.length} 条`,
       `结果通知邮箱：${info.notifyEmail}`,
@@ -546,7 +560,6 @@ export async function listFrpApplications(
       status: a.status,
       reviewNote: a.review_note,
       reviewedAt: a.reviewed_at,
-      metadatasToken: a.metadatas_token,
       createdAt: a.created_at,
     })),
   })
@@ -567,8 +580,6 @@ export async function reviewFrpApplication(
     id?: string
     action?: "approve" | "reject"
     note?: string
-    /** 与该用户在 frps-panel 里创建的 token 保持一致；留空则自动生成 */
-    metadatasToken?: string
   }
 
   const app = await env.DB.prepare(
@@ -608,23 +619,9 @@ export async function reviewFrpApplication(
       )
     }
 
-    // metadatas.token：优先用管理员填写的值（需与 frps-panel 里一致），
-    // 留空则按「节点前缀 + 序号」自动生成
-    let metadatasToken = (body.metadatasToken ?? "").trim()
-    if (!metadatasToken) {
-      const node = await env.DB.prepare(
-        "SELECT token_prefix FROM frp_nodes WHERE id = ?"
-      )
-        .bind(app.node_id)
-        .first<{ token_prefix: string }>()
-      const seq = await env.DB.prepare(
-        "SELECT COUNT(*) AS c FROM frp_applications WHERE node_id = ? AND status = 'approved'"
-      )
-        .bind(app.node_id)
-        .first<{ c: number }>()
-      metadatasToken = `${node?.token_prefix ?? ""}${(seq?.c ?? 0) + 1}`
-    }
-
+    // metadatas.token 就是用户申请时填写的密码 —— 不要另行生成。
+    // 用户会把这个密码在 frps-panel 里作为自己的 token，并写进 config.toml；
+    // 两者必须是同一个值，否则连不上。
     await env.DB.batch([
       ...ports.map((p) =>
         env.DB.prepare(
@@ -634,10 +631,9 @@ export async function reviewFrpApplication(
       ),
       env.DB.prepare(
         `UPDATE frp_applications
-            SET status = 'approved', review_note = ?, reviewed_by = ?, reviewed_at = ?,
-                metadatas_token = ?
+            SET status = 'approved', review_note = ?, reviewed_by = ?, reviewed_at = ?
           WHERE id = ?`
-      ).bind(note, admin.id, now, metadatasToken, app.id),
+      ).bind(note, admin.id, now, app.id),
     ])
   } else {
     await env.DB.prepare(
@@ -657,18 +653,7 @@ export async function reviewFrpApplication(
   )
 
   // 结果通知申请人（失败不阻断审核结果落库）
-  const fresh = await env.DB.prepare(
-    "SELECT metadatas_token FROM frp_applications WHERE id = ?"
-  )
-    .bind(app.id)
-    .first<{ metadatas_token: string | null }>()
-  await notifyApplicant(
-    env,
-    { ...app, metadatas_token: fresh?.metadatas_token ?? null },
-    approve,
-    note,
-    ports
-  )
+  await notifyApplicant(env, app, approve, note, ports)
 
   return json({ ok: true, status: approve ? "approved" : "rejected" })
 }
@@ -688,7 +673,7 @@ async function notifyApplicant(
         `账号：${app.frp_user}`,
         `密码：${app.frp_password}`,
         `可用端口：${ports.join("、")}`,
-        `metadatas.token：${app.metadatas_token ?? "（未设置）"}`,
+        `metadatas.token（即你申请时填的密码）：${app.frp_password}`,
         `隧道：${tunnels.map((t) => `${t.name}(${t.type} ${t.remotePort}→${t.localPort})`).join("、") || "无"}`,
         note ? `管理员备注：${note}` : "",
         "请到 Doulor Cloud 的内网穿透页面生成 config.toml，并替换到 frp 核心目录后启动。",
@@ -747,6 +732,8 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
     enabled?: boolean
     sortOrder?: number
     note?: string
+    status?: string
+    statusNote?: string
   }
 
   const name = (body.name ?? "").trim()
@@ -776,19 +763,25 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
     enabled: body.enabled === false ? 0 : 1,
     sortOrder: Math.trunc(Number(body.sortOrder ?? 0)),
     note: (body.note ?? "").trim() || null,
+    status: ["online", "offline", "maintenance", "unknown"].includes(body.status ?? "")
+      ? (body.status as string)
+      : "unknown",
+    statusNote: (body.statusNote ?? "").trim() || null,
   }
 
   if (body.id) {
     await env.DB.prepare(
       `UPDATE frp_nodes SET name=?, region=?, server_addr=?, server_port=?,
               auth_token=?, token_prefix=?, port_min=?, port_max=?, max_ports=?,
-              enabled=?, sort_order=?, note=?, updated_at=?
+              enabled=?, sort_order=?, note=?, status=?, status_note=?,
+              status_updated_at=?, updated_at=?
         WHERE id=?`
     )
       .bind(
         values.name, values.region, values.serverAddr, values.serverPort,
         values.authToken, values.tokenPrefix, values.portMin, values.portMax,
-        values.maxPorts, values.enabled, values.sortOrder, values.note, now,
+        values.maxPorts, values.enabled, values.sortOrder, values.note,
+        values.status, values.statusNote, now, now,
         body.id
       )
       .run()
@@ -799,13 +792,15 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
   await env.DB.prepare(
     `INSERT INTO frp_nodes
        (id, name, region, server_addr, server_port, auth_token, token_prefix,
-        port_min, port_max, max_ports, enabled, sort_order, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        port_min, port_max, max_ports, enabled, sort_order, note,
+        status, status_note, status_updated_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       id, values.name, values.region, values.serverAddr, values.serverPort,
       values.authToken, values.tokenPrefix, values.portMin, values.portMax,
-      values.maxPorts, values.enabled, values.sortOrder, values.note, now, now
+      values.maxPorts, values.enabled, values.sortOrder, values.note,
+      values.status, values.statusNote, now, now, now
     )
     .run()
 
@@ -830,6 +825,7 @@ export async function listFrpNodes(env: Env, request: Request): Promise<Response
       authToken: n.auth_token,
       tokenPrefix: n.token_prefix,
       usedPorts: usedMap[n.id] ?? 0,
+      statusNote: n.status_note,
     })),
   })
 }

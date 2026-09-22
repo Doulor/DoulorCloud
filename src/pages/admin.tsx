@@ -3,6 +3,7 @@ import {
   Ban,
   KeyRound,
   Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -218,7 +219,6 @@ export default function AdminPage() {
   const [frpBusy, setFrpBusy] = React.useState(false)
   const [frpStatus, setFrpStatus] = React.useState("pending")
   const [frpNote, setFrpNote] = React.useState("")
-  const [frpToken, setFrpToken] = React.useState("")
   const [nodeOpen, setNodeOpen] = React.useState(false)
   const [nodeForm, setNodeForm] = React.useState({
     id: "",
@@ -232,6 +232,8 @@ export default function AdminPage() {
     portMax: "50000",
     maxPorts: "5",
     note: "",
+    status: "unknown",
+    statusNote: "",
   })
 
   const loadFrp = React.useCallback(async () => {
@@ -256,19 +258,13 @@ export default function AdminPage() {
   ) => {
     setFrpBusy(true)
     try {
-      await adminApi.reviewFrp({
-        id: app.id,
-        action,
-        note: frpNote,
-        metadatasToken: frpToken,
-      })
+      await adminApi.reviewFrp({ id: app.id, action, note: frpNote })
       toast.success(
         action === "approve"
           ? `已通过，结果已邮件通知 ${app.notifyEmail}`
           : `已拒绝，结果已邮件通知 ${app.notifyEmail}`
       )
       setFrpNote("")
-      setFrpToken("")
       await loadFrp()
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "操作失败")
@@ -292,6 +288,8 @@ export default function AdminPage() {
         portMax: Number(nodeForm.portMax),
         maxPorts: Number(nodeForm.maxPorts),
         note: nodeForm.note,
+        status: nodeForm.status,
+        statusNote: nodeForm.statusNote,
       })
       toast.success("节点已保存")
       setNodeOpen(false)
@@ -561,6 +559,17 @@ export default function AdminPage() {
                   <TableCell>
                     <div className="flex items-center gap-1">
                       <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 gap-1 px-2 text-xs"
+                        onClick={() => void openDetail(u.username)}
+                        disabled={busy}
+                        title="编辑该用户"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        编辑
+                      </Button>
+                      <Button
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8 text-muted-foreground"
@@ -700,6 +709,8 @@ export default function AdminPage() {
                   portMax: "50000",
                   maxPorts: "5",
                   note: "",
+                  status: "unknown",
+                  statusNote: "",
                 })
                 setNodeOpen(true)
               }}
@@ -768,11 +779,6 @@ export default function AdminPage() {
                               备注：{a.remark}
                             </p>
                           )}
-                          {a.metadatasToken && (
-                            <p className="font-mono text-xs text-muted-foreground">
-                              metadatas.token: {a.metadatasToken}
-                            </p>
-                          )}
                           {a.reviewNote && (
                             <p className="text-xs text-muted-foreground">
                               审批意见：{a.reviewNote}
@@ -803,34 +809,21 @@ export default function AdminPage() {
                       </div>
                     </div>
                   ))}
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label htmlFor="frpNote">
-                        审批意见（可选，会随结果邮件发出）
-                      </Label>
-                      <Input
-                        id="frpNote"
-                        placeholder="例如：已在中转站建号 / 端口冲突请重选"
-                        value={frpNote}
-                        onChange={(e) => setFrpNote(e.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="frpToken">
-                        metadatas.token（留空自动生成）
-                      </Label>
-                      <Input
-                        id="frpToken"
-                        placeholder="与 frps-panel 里该用户的 token 保持一致"
-                        value={frpToken}
-                        onChange={(e) => setFrpToken(e.target.value)}
-                        className="font-mono text-xs"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        会写进用户生成的 config.toml；需与你在面板里创建的
-                        token 一致，否则用户连不上。
-                      </p>
-                    </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="frpNote">
+                      审批意见（可选，会随结果邮件发出）
+                    </Label>
+                    <Input
+                      id="frpNote"
+                      placeholder="例如：已在 frps-panel 建号 / 端口冲突请重选"
+                      value={frpNote}
+                      onChange={(e) => setFrpNote(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      提示：在 frps-panel 建号时，请把用户申请里填的
+                      <strong>密码</strong>原样作为该用户的 token
+                      （它就是 config.toml 里的 metadatas.token）。
+                    </p>
                   </div>
                 </div>
               )}
@@ -888,6 +881,8 @@ export default function AdminPage() {
                                     portMax: String(n.portMax),
                                     maxPorts: String(n.maxPorts),
                                     note: n.note ?? "",
+                                    status: n.status ?? "unknown",
+                                    statusNote: n.statusNote ?? "",
                                   })
                                   setNodeOpen(true)
                                 }}
@@ -1474,6 +1469,38 @@ export default function AdminPage() {
                 value={nodeForm.note}
                 onChange={(e) => setNodeForm((f) => ({ ...f, note: e.target.value }))}
               />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>节点状态</Label>
+                <Select
+                  value={nodeForm.status}
+                  onValueChange={(v) => setNodeForm((f) => ({ ...f, status: v }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="online">运行中</SelectItem>
+                    <SelectItem value="offline">不可用</SelectItem>
+                    <SelectItem value="maintenance">维护中</SelectItem>
+                    <SelectItem value="unknown">状态未知</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  用户在节点列表会看到该状态；不可用/维护中时无法提交申请。
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label>状态说明（可选）</Label>
+                <Input
+                  value={nodeForm.statusNote}
+                  onChange={(e) =>
+                    setNodeForm((f) => ({ ...f, statusNote: e.target.value }))
+                  }
+                  placeholder="例如：机房维护至 22:00"
+                />
+              </div>
             </div>
           </div>
           <DialogFooter>

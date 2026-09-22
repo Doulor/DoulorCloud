@@ -26,6 +26,8 @@ export interface Subdomain {
   id: string
   name: string
   fqdn: string
+  /** null = 一级子域名；否则为父级 id（构成子子域名层级） */
+  parentId?: string | null
   status: "active" | "pending" | "error"
   createdAt: string
 }
@@ -274,6 +276,8 @@ export interface NewApiPreflight {
 
 // ---- frp 内网穿透 ----
 
+export type FrpNodeStatus = "online" | "offline" | "maintenance" | "unknown"
+
 export interface FrpNode {
   id: string
   name: string
@@ -285,6 +289,10 @@ export interface FrpNode {
   maxPorts: number
   enabled: boolean
   note: string | null
+  /** 节点状态（管理员手动维护；见 HANDOFF 中「为什么不做自动探测」） */
+  status: FrpNodeStatus
+  statusNote: string | null
+  statusUpdatedAt: string | null
 }
 
 export interface FrpTunnel {
@@ -299,6 +307,8 @@ export interface FrpApplication {
   id: string
   nodeId: string
   frpUser: string
+  /** 申请时填写的密码；即 config.toml 里的 metadatas.token */
+  frpPassword: string
   ports: number[]
   tunnels: FrpTunnel[]
   notifyEmail: string
@@ -307,10 +317,12 @@ export interface FrpApplication {
   reviewNote: string | null
   reviewedAt: string | null
   createdAt: string
-  /** 生成 config 所需的 metadatas.token（审批时确定） */
-  metadatasToken: string | null
-  /** 节点的 frps auth.token；仅本人的已通过申请会下发 */
-  authToken: string | null
+  /**
+   * 节点的 frps 共享密钥（config 里的 auth.token）；
+   * 仅本人的「已通过」申请会下发。
+   * 注意：config 里的 metadatas.token 就是申请时填的密码（frpPassword），无需另存。
+   */
+  configAuthToken: string | null
 }
 
 export interface FrpOverview {

@@ -75,6 +75,28 @@ const STATUS_BADGE: Record<
   rejected: { label: "未通过", variant: "destructive" },
 }
 
+const NODE_STATUS: Record<
+  FrpNode["status"],
+  { label: string; variant: "success" | "secondary" | "destructive" | "outline" }
+> = {
+  online: { label: "运行中", variant: "success" },
+  offline: { label: "不可用", variant: "destructive" },
+  maintenance: { label: "维护中", variant: "secondary" },
+  unknown: { label: "状态未知", variant: "outline" },
+}
+
+function NodeStatusBadge({ node }: { node: FrpNode }) {
+  const cfg = NODE_STATUS[node.status] ?? NODE_STATUS.unknown
+  return (
+    <Badge variant={cfg.variant} className="text-xs">
+      {node.status === "online" && (
+        <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-current" />
+      )}
+      {cfg.label}
+    </Badge>
+  )
+}
+
 /**
  * 生成 frpc 的 config.toml。
  * 按用户实际被批准的端口/隧道拼装，用户直接替换到核心目录即可。
@@ -280,12 +302,13 @@ export default function FrpPage() {
       return
     }
     setConfigApp(app)
-    if (!app.authToken) {
+    if (!app.configAuthToken) {
       toast.error("缺少节点密钥，请联系管理员")
       return
     }
+    // metadatas.token 就是申请时填写的密码
     setConfigText(
-      buildConfig(node, app, app.metadatasToken ?? "", app.authToken)
+      buildConfig(node, app, app.frpPassword, app.configAuthToken)
     )
   }
 
@@ -424,13 +447,14 @@ export default function FrpPage() {
                       className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"
                     >
                       <div className="space-y-0.5">
-                        <p className="text-sm font-medium">
+                        <p className="flex items-center gap-2 text-sm font-medium">
                           {n.name}
                           {n.region && (
-                            <span className="ml-2 text-xs text-muted-foreground">
+                            <span className="text-xs text-muted-foreground">
                               {n.region}
                             </span>
                           )}
+                          <NodeStatusBadge node={n} />
                         </p>
                         <p className="font-mono text-xs text-muted-foreground">
                           {n.serverAddr}:{n.serverPort} · 端口 {n.portMin}-
@@ -438,6 +462,16 @@ export default function FrpPage() {
                         </p>
                         {n.note && (
                           <p className="text-xs text-muted-foreground">{n.note}</p>
+                        )}
+                        {n.status === "offline" && (
+                          <p className="text-xs text-destructive">
+                            该节点当前不可用，请选择其它节点
+                          </p>
+                        )}
+                        {n.statusNote && (
+                          <p className="text-xs text-muted-foreground">
+                            {n.statusNote}
+                          </p>
                         )}
                       </div>
                       <div className="flex items-center gap-2">
@@ -448,6 +482,7 @@ export default function FrpPage() {
                         )}
                         <Button
                           size="sm"
+                          disabled={n.status === "offline" || n.status === "maintenance"}
                           onClick={() => {
                             setForm((f) => ({ ...f, nodeId: n.id }))
                             setSelectedPorts([])
@@ -455,7 +490,7 @@ export default function FrpPage() {
                             setApplyOpen(true)
                           }}
                         >
-                          申请账号
+                          {n.status === "maintenance" ? "维护中" : "申请账号"}
                         </Button>
                       </div>
                     </div>
@@ -690,7 +725,8 @@ function ApplyDialog({
                 }
               />
               <p className="text-xs text-muted-foreground">
-                会写入 config.toml，请勿使用你在别处的重要密码。
+                该密码会作为 config.toml 里的 <code>metadatas.token</code>，
+                也是管理员在 frps-panel 为你建号时使用的 token，请牢记。
               </p>
             </div>
           </div>
