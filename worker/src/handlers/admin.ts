@@ -12,6 +12,7 @@ import { isR2Configured } from "../r2"
 import { isNewApiConfigured, getCurrencyInfo } from "../newapi-client"
 import { sendMail, renderMail } from "../mailer"
 import { cfListDestinations } from "../cloudflare"
+import { normalizePermissions, parsePermissions } from "../permissions"
 import { purgeUserStorage, recalculateUsage } from "./storage"
 
 /**
@@ -28,6 +29,7 @@ interface AdminUserRow {
   namespace: string
   role: string
   status: string
+  permissions: string | null
   created_at: string
   updated_at: string
 }
@@ -95,6 +97,7 @@ async function userDetail(env: Env, user: AdminUserRow) {
       namespace: user.namespace,
       role: user.role,
       status: user.status,
+      permissions: parsePermissions(user.permissions),
       createdAt: user.created_at,
       updatedAt: user.updated_at,
     },
@@ -113,7 +116,7 @@ async function userDetail(env: Env, user: AdminUserRow) {
 export async function listUsers(env: Env, request: Request): Promise<Response> {
   await requireAdmin(env, request)
   const rows = await env.DB.prepare(
-    `SELECT u.id, u.username, u.email, u.namespace, u.role, u.status, u.created_at,
+    `SELECT u.id, u.username, u.email, u.namespace, u.role, u.status, u.permissions, u.created_at,
             (SELECT COUNT(*) FROM subdomains s WHERE s.user_id = u.id) AS subdomain_count,
             (SELECT COUNT(*) FROM dns_records d JOIN domains dm ON d.domain_id = dm.id WHERE dm.user_id = u.id) AS dns_count,
             (SELECT COUNT(*) FROM mailboxes mb WHERE mb.user_id = u.id) AS mailbox_count,
@@ -130,6 +133,7 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
       namespace: r.namespace,
       role: r.role,
       status: r.status,
+      permissions: parsePermissions(r.permissions as string | null),
       createdAt: r.created_at,
       subdomainCount: r.subdomain_count,
       dnsCount: r.dns_count,
@@ -149,7 +153,11 @@ export async function getUser(env: Env, request: Request, username: string): Pro
 // PUT /api/admin/users/:username —— 更新用户状态（封禁/解封/设管理员）
 export async function updateUser(env: Env, request: Request, username: string): Promise<Response> {
   await requireAdmin(env, request)
-  const body = (await request.json()) as { status?: string; role?: string }
+  const body = (await request.json()) as {
+    status?: string
+    role?: string
+    permissions?: unknown
+  }
 
   const user = await targetUser(env, username)
   if (body.status && !["active", "suspended"].includes(body.status)) {
@@ -162,10 +170,22 @@ export async function updateUser(env: Env, request: Request, username: string): 
     throw new ApiError(400, "不可修改主管理员", "FORBIDDEN")
   }
 
+  // 权限：只有显式传入时才更新（null 保持原值）
+  const perms =
+    body.permissions === undefined || body.permissions === null
+      ? null
+      : JSON.stringify(normalizePermissions(body.permissions))
+
   await env.DB.prepare(
-    "UPDATE users SET status = COALESCE(?, status), role = COALESCE(?, role), updated_at = ? WHERE id = ?"
+    "UPDATE users SET status = COALESCE(?, status), role = COALESCE(?, role), permissions = COALESCE(?, permissions), updated_at = ? WHERE id = ?"
   )
-    .bind(body.status ?? null, body.role ?? null, new Date().toISOString(), user.id)
+    .bind(
+      body.status ?? null,
+      body.role ?? null,
+      perms,
+      new Date().toISOString(),
+      user.id
+    )
     .run()
 
   const updated = await targetUser(env, username)
@@ -234,6 +254,7 @@ interface InviteRow {
   max_uses: number
   used_count: number
   expires_at: string | null
+  permissions: string | null
   created_at: string
 }
 
@@ -244,6 +265,7 @@ function toPublicInvite(row: InviteRow) {
     maxUses: row.max_uses,
     usedCount: row.used_count,
     expiresAt: row.expires_at,
+    permissions: parsePermissions(row.permissions),
     createdAt: row.created_at,
     createdBy: row.created_by ?? null,
   }
@@ -262,7 +284,11 @@ export async function listInvites(env: Env, request: Request): Promise<Response>
 // POST /api/admin/invites —— 创建邀请码
 export async function createInvite(env: Env, request: Request): Promise<Response> {
   const admin = await requireAdmin(env, request)
-  const body = (await request.json()) as { code?: string; maxUses?: number }
+  const body = (await request.json()) as {
+    code?: string
+    maxUses?: number
+    permissions?: unknown
+  }
 
   const code = (body.code ?? "").trim().toUpperCase()
   if (!/^[A-Z0-9_-]{3,32}$/.test(code)) {
@@ -279,11 +305,21 @@ export async function createInvite(env: Env, request: Request): Promise<Response
     throw new ApiError(409, "该邀请码已存在", "CONFLICT")
   }
 
+  // 该码注册出的账号默认拥有哪些功能权限（未指定 = 全部允许）
+  const permissions = normalizePermissions(body.permissions)
+
   const id = uuid()
   await env.DB.prepare(
-    "INSERT INTO invite_codes (id, code, created_by, max_uses, used_count, created_at) VALUES (?, ?, ?, ?, 0, ?)"
+    "INSERT INTO invite_codes (id, code, created_by, max_uses, used_count, permissions, created_at) VALUES (?, ?, ?, ?, 0, ?, ?)"
   )
-    .bind(id, code, admin.id, maxUses, new Date().toISOString())
+    .bind(
+      id,
+      code,
+      admin.id,
+      maxUses,
+      JSON.stringify(permissions),
+      new Date().toISOString()
+    )
     .run()
 
   const row = await env.DB.prepare("SELECT * FROM invite_codes WHERE id = ?")

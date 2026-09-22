@@ -7,8 +7,12 @@ import {
   type DnsRecord,
   type DnsRecordType,
   type Mailbox,
+  type AdminFrpApplication,
+  type AdminFrpNode,
   type EmailSettings,
+  type FrpOverview,
   type MailMessage,
+  type Permissions,
   type MeResponse,
   type NewApiKey,
   type NewApiPreflight,
@@ -17,6 +21,9 @@ import {
   type StorageObject,
   type StorageOverview,
   type StoragePrefixCreated,
+  type Profile,
+  type ProfileContact,
+  type ProfileOverview,
   type Subdomain,
   type User,
 } from "@/types"
@@ -183,7 +190,10 @@ export const adminApi = {
   getUser: (username: string) =>
     request<AdminUserDetail>(`/admin/users/${encodeURIComponent(username)}`),
 
-  updateUser: (username: string, payload: { status?: string; role?: string }) =>
+  updateUser: (
+    username: string,
+    payload: { status?: string; role?: string; permissions?: Permissions }
+  ) =>
     request<AdminUserDetail>(`/admin/users/${encodeURIComponent(username)}`, {
       method: "PUT",
       body: JSON.stringify(payload),
@@ -201,7 +211,11 @@ export const adminApi = {
 
   listInvites: () => request<{ invites: AdminInvite[] }>("/admin/invites"),
 
-  createInvite: (payload: { code: string; maxUses?: number }) =>
+  createInvite: (payload: {
+    code: string
+    maxUses?: number
+    permissions?: Permissions
+  }) =>
     request<{ invite: AdminInvite }>("/admin/invites", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -228,6 +242,35 @@ export const adminApi = {
       `/admin/storage/purge/${encodeURIComponent(username)}`,
       { method: "POST" }
     ),
+
+  // frp 内网穿透
+  listFrpApplications: (status = "pending") =>
+    request<{ applications: AdminFrpApplication[] }>(
+      `/admin/frp/applications?status=${encodeURIComponent(status)}`
+    ),
+
+  reviewFrp: (payload: { id: string; action: "approve" | "reject"; note?: string }) =>
+    request<{ ok: boolean; status: string }>("/admin/frp/review", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  listFrpNodes: () => request<{ nodes: AdminFrpNode[] }>("/admin/frp/nodes"),
+
+  upsertFrpNode: (payload: Record<string, unknown>) =>
+    request<{ id: string }>("/admin/frp/nodes", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteFrpNode: (id: string) =>
+    request<void>(`/admin/frp/nodes/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  releaseFrpPorts: (payload: { username: string; nodeId: string }) =>
+    request<{ released: number }>("/admin/frp/ports/release", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 }
 
 // ---- 账户设置（真实邮箱验证 / 改名 / 改邮箱 / 通知开关）----
@@ -391,6 +434,29 @@ export const newapiApi = {
     request<void>(`/dev/key/${encodeURIComponent(id)}`, { method: "DELETE" }),
 }
 
+// ---- frp 内网穿透 ----
+
+export const frpApi = {
+  overview: () => request<FrpOverview>("/frp"),
+
+  apply: (payload: {
+    nodeId: string
+    frpUser: string
+    frpPassword: string
+    ports: number[]
+    tunnels: { name: string; type: string; localIP: string; localPort: number; remotePort: number }[]
+    notifyEmail: string
+    remark?: string
+  }) =>
+    request<{ application: { id: string; status: string; createdAt: string } }>(
+      "/frp/apply",
+      { method: "POST", body: JSON.stringify(payload) }
+    ),
+
+  cancel: (id: string) =>
+    request<void>("/frp/cancel", { method: "POST", body: JSON.stringify({ id }) }),
+}
+
 // ---- Email（收件箱） ----
 
 export const emailApi = {
@@ -429,5 +495,69 @@ export const emailApi = {
   deleteMessage: (mailboxId: string, messageId: string) =>
     request<void>(`/mailbox/${mailboxId}/messages/${messageId}`, {
       method: "DELETE",
+    }),
+}
+
+// ---- 个人名片 ----
+
+export const profileApi = {
+  get: () => request<ProfileOverview>("/profile"),
+
+  update: (payload: Partial<{
+    slug: string
+    displayName: string
+    bio: string
+    avatarUrl: string
+    backgroundUrl: string
+    musicUrl: string
+    musicTitle: string
+    musicAutoplay: boolean
+    theme: string
+    accent: string
+    contacts: ProfileContact[]
+  }>) =>
+    request<{ profile: Profile }>("/profile", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  publish: (published: boolean) =>
+    request<{ published: boolean }>("/profile/publish", {
+      method: "POST",
+      body: JSON.stringify({ published }),
+    }),
+
+  /** 上传头像 / 背景 / 音乐（原始字节直传，Content-Type 决定扩展名） */
+  uploadAsset: async (kind: "avatar" | "background" | "music", file: File) => {
+    const res = await fetch(`/api/profile/asset?kind=${kind}`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+    })
+    const data = await res.json().catch(() => null)
+    if (!res.ok) {
+      throw new HttpError(
+        res.status,
+        (data as ApiError | null)?.error ?? `上传失败 (${res.status})`,
+        (data as ApiError | null)?.code
+      )
+    }
+    return data as { key: string; kind: string }
+  },
+
+  deleteAsset: (kind: "avatar" | "background" | "music") =>
+    request<{ ok: boolean }>(`/profile/asset?kind=${kind}`, { method: "DELETE" }),
+
+  bindDomain: (subdomainId: string) =>
+    request<{ fqdn: string; dnsCreated: boolean }>("/profile/domain", {
+      method: "POST",
+      body: JSON.stringify({ subdomainId, action: "bind" }),
+    }),
+
+  unbindDomain: () =>
+    request<{ ok: boolean }>("/profile/domain", {
+      method: "POST",
+      body: JSON.stringify({ action: "unbind" }),
     }),
 }

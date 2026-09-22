@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Inbox, Loader2, Mail, Plus, RotateCcw, Settings, Trash2 } from "lucide-react"
+import { AlertTriangle, Inbox, Loader2, Mail, Plus, RotateCcw, Settings, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -528,6 +528,25 @@ export default function EmailPage() {
               转发目标需要先验证：保存后请到该邮箱点击 Cloudflare
               发来的确认链接，验证通过后才会开始转发。
             </p>
+
+            {/* 转发进垃圾箱的说明：这是用户最常反馈的问题 */}
+            <div className="flex gap-2 rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div className="space-y-1">
+                <p className="font-medium text-foreground">
+                  收不到转发邮件？请先检查垃圾邮件文件夹
+                </p>
+                <p>
+                  转发属于「二次投递」，对方邮箱（尤其 QQ / 163 / Gmail）
+                  容易判为垃圾邮件。请到垃圾箱找一下，并把发件人标记为
+                  「非垃圾邮件」或加入白名单，之后就会正常进入收件箱。
+                </p>
+                <p>
+                  若长期收不到，建议改用支持自动转发的邮箱（如 Gmail），
+                  或在此处改填其他邮箱。
+                </p>
+              </div>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setForwardBox(null)}>

@@ -14,6 +14,8 @@ import DomainsPage from "@/pages/domains"
 import EmailPage from "@/pages/email"
 import StoragePage from "@/pages/storage"
 import AiPage from "@/pages/ai"
+import FrpPage from "@/pages/frp"
+import ProfilePage from "@/pages/profile"
 import SettingsPage from "@/pages/settings"
 import AdminPage from "@/pages/admin"
 import NotFoundPage from "@/pages/not-found"
@@ -87,6 +89,8 @@ export default function App() {
         <Route path="email" element={<EmailPage />} />
         <Route path="storage" element={<StoragePage />} />
         <Route path="ai" element={<AiPage />} />
+        <Route path="frp" element={<FrpPage />} />
+        <Route path="profile" element={<ProfilePage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="admin" element={<AdminPage />} />
       </Route>

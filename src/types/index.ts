@@ -10,6 +10,8 @@ export interface User {
   emailVerified: boolean
   /** 是否接收站内通知邮件 */
   notifyEnabled: boolean
+  /** 功能权限 */
+  permissions: Permissions
   createdAt: string
 }
 
@@ -113,6 +115,7 @@ export interface AdminUser {
   dnsCount: number
   mailboxCount: number
   mailCount: number
+  permissions: Permissions
 }
 
 export interface AdminInvite {
@@ -121,6 +124,7 @@ export interface AdminInvite {
   maxUses: number
   usedCount: number
   expiresAt: string | null
+  permissions: Permissions
   createdAt: string
   createdBy: string | null
 }
@@ -133,6 +137,7 @@ export interface AdminUserDetail {
     namespace: string
     role: string
     status: string
+    permissions: Permissions
     createdAt: string
     updatedAt: string
   }
@@ -267,6 +272,82 @@ export interface NewApiPreflight {
   hasMailbox: boolean
 }
 
+// ---- frp 内网穿透 ----
+
+export interface FrpNode {
+  id: string
+  name: string
+  region: string | null
+  serverAddr: string
+  serverPort: number
+  portMin: number
+  portMax: number
+  maxPorts: number
+  enabled: boolean
+  note: string | null
+}
+
+export interface FrpTunnel {
+  name: string
+  type: "tcp" | "udp"
+  localIP: string
+  localPort: number
+  remotePort: number
+}
+
+export interface FrpApplication {
+  id: string
+  nodeId: string
+  frpUser: string
+  ports: number[]
+  tunnels: FrpTunnel[]
+  notifyEmail: string
+  remark: string | null
+  status: "pending" | "approved" | "rejected"
+  reviewNote: string | null
+  reviewedAt: string | null
+  createdAt: string
+}
+
+export interface FrpOverview {
+  featureEnabled: boolean
+  coreUrl: string
+  nodes: FrpNode[]
+  applications: FrpApplication[]
+  myPorts: Record<string, number[]>
+  takenPorts: Record<string, number[]>
+  notifyOptions: { email: string; kind: "site" | "real" }[]
+}
+
+/** 管理端申请（含密码） */
+export interface AdminFrpApplication extends FrpApplication {
+  siteUsername: string
+  nodeName: string
+  frpPassword: string
+}
+
+export interface AdminFrpNode extends FrpNode {
+  authToken: string
+  tokenPrefix: string
+  usedPorts: number
+}
+
+// ---- 功能权限 ----
+
+export type FeatureKey = "r2" | "ai" | "frp"
+
+export interface Permissions {
+  r2: boolean
+  ai: boolean
+  frp: boolean
+}
+
+export const FEATURE_LABELS: Record<FeatureKey, string> = {
+  r2: "直链网盘",
+  ai: "AI 中转站",
+  frp: "内网穿透",
+}
+
 // ---- 管理员全局设置 ----
 
 export interface AdminSettings {
@@ -280,4 +361,55 @@ export interface AdminSettings {
     newapiAccounts: number
     newapiKeys: number
   }
+}
+// ---- 个人名片 ----
+
+export type ContactType =
+  | "email"
+  | "qq"
+  | "wechat"
+  | "bilibili"
+  | "discord"
+  | "telegram"
+  | "youtube"
+  | "github"
+  | "x"
+  | "custom"
+
+export interface ProfileContact {
+  type: ContactType
+  value: string
+  label?: string
+  visible?: boolean
+}
+
+export interface Profile {
+  slug: string
+  published: boolean
+  displayName: string | null
+  bio: string | null
+  avatarKey: string | null
+  avatarUrl: string | null
+  backgroundKey: string | null
+  backgroundUrl: string | null
+  musicKey: string | null
+  musicUrl: string | null
+  musicTitle: string | null
+  musicAutoplay: boolean
+  theme: string
+  accent: string | null
+  contacts: ProfileContact[]
+  subdomainId: string | null
+  fqdn: string | null
+  profilePath: string
+  updatedAt: string
+}
+
+export interface ProfileOverview {
+  profile: Profile
+  availableSubdomains: { id: string; name: string; fqdn: string }[]
+  themes: string[]
+  contactTypes: ContactType[]
+  r2Configured: boolean
+  limits: { avatar: number; background: number; music: number }
 }

@@ -9,6 +9,9 @@ import * as adminHandlers from "./handlers/admin"
 import * as storageHandlers from "./handlers/storage"
 import * as newapiHandlers from "./handlers/newapi"
 import * as settingsHandlers from "./handlers/settings"
+import * as frpHandlers from "./handlers/frp"
+import * as profileHandlers from "./handlers/profile"
+import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
 
 export interface WorkerContext {
@@ -201,6 +204,29 @@ async function route(env: Env, request: Request): Promise<Response> {
     )
   }
 
+  // ---- 个人名片 ----
+  if (routePath === "/profile" && method === "GET") {
+    return profileHandlers.getProfile(env, request)
+  }
+  if (routePath === "/profile" && method === "PUT") {
+    return profileHandlers.updateProfile(env, request)
+  }
+  if (routePath === "/profile/publish" && method === "POST") {
+    return profileHandlers.setPublished(env, request)
+  }
+  if (routePath === "/profile/asset" && method === "POST") {
+    return profileHandlers.uploadAsset(env, request)
+  }
+  if (routePath === "/profile/asset" && method === "DELETE") {
+    return profileHandlers.deleteAsset(env, request)
+  }
+  if (routePath === "/profile/asset" && method === "GET") {
+    return profileHandlers.readOwnAsset(env, request)
+  }
+  if (routePath === "/profile/domain" && method === "POST") {
+    return profileHandlers.bindProfileDomain(env, request)
+  }
+
   // ---- R2 直链网盘 ----
   if (routePath === "/storage" && method === "GET") {
     return storageHandlers.getStorage(env, request)
@@ -262,6 +288,43 @@ async function route(env: Env, request: Request): Promise<Response> {
     return newapiHandlers.changePassword(env, request)
   }
 
+  // ---- frp 内网穿透 ----
+  if (routePath === "/frp" && method === "GET") {
+    return frpHandlers.getFrpOverview(env, request)
+  }
+  if (routePath === "/frp/apply" && method === "POST") {
+    return frpHandlers.applyFrp(env, request)
+  }
+  if (routePath === "/frp/cancel" && method === "POST") {
+    return frpHandlers.cancelFrp(env, request)
+  }
+
+  // ---- 管理端：frp ----
+  if (routePath === "/admin/frp/applications" && method === "GET") {
+    return frpHandlers.listFrpApplications(env, request)
+  }
+  if (routePath === "/admin/frp/review" && method === "POST") {
+    return frpHandlers.reviewFrpApplication(env, request)
+  }
+  if (routePath === "/admin/frp/nodes" && method === "GET") {
+    return frpHandlers.listFrpNodes(env, request)
+  }
+  if (routePath === "/admin/frp/nodes" && method === "POST") {
+    return frpHandlers.upsertFrpNode(env, request)
+  }
+  if (routePath === "/admin/frp/ports/release" && method === "POST") {
+    return frpHandlers.releaseFrpPorts(env, request)
+  }
+
+  const adminFrpNodeMatch = routePath.match(/^\/admin\/frp\/nodes\/([^/]+)$/)
+  if (adminFrpNodeMatch && method === "DELETE") {
+    return frpHandlers.deleteFrpNode(
+      env,
+      request,
+      decodeURIComponent(adminFrpNodeMatch[1])
+    )
+  }
+
   const devKeyMatch = routePath.match(/^\/dev\/key\/([^/]+)$/)
   if (devKeyMatch && method === "DELETE") {
     return newapiHandlers.removeKey(
@@ -314,6 +377,56 @@ export default {
           request,
           url.pathname.slice(4)
         )
+      }
+
+      // 名片资源：/p/<用户名>/<avatar|background|music>（公开，无需鉴权）
+      const assetMatch = url.pathname.match(/^\/p\/([^/]+)\/([a-z]+)$/)
+      if (assetMatch && request.method === "GET") {
+        return await profileHandlers.serveAssetByUsername(
+          env,
+          decodeURIComponent(assetMatch[1]),
+          assetMatch[2]
+        )
+      }
+
+      // 公开名片页：/profile/<slug>
+      const pubMatch = url.pathname.match(/^\/profile\/([^/]+)\/?$/)
+      if (pubMatch && request.method === "GET") {
+        const profile = await profileHandlers.loadPublicProfile(env, {
+          slug: decodeURIComponent(pubMatch[1]),
+        })
+        return profile
+          ? new Response(renderProfileHtml(profile), {
+              headers: {
+                "Content-Type": "text/html; charset=utf-8",
+                "Cache-Control": "public, max-age=60",
+              },
+            })
+          : new Response(renderNotFoundHtml(), {
+              status: 404,
+              headers: { "Content-Type": "text/html; charset=utf-8" },
+            })
+      }
+
+      // 自定义名片域名：Host 命中 profiles.fqdn 时，该域名下所有路径都渲染名片。
+      // 仅对本站已知入口之外的 Host 查询，避免给 /api/* 等请求白加一次 DB 查询。
+      const host = url.hostname.toLowerCase()
+      const isAppHost =
+        host === env.ROOT_DOMAIN.toLowerCase() ||
+        host === "cloud." + env.ROOT_DOMAIN.toLowerCase() ||
+        host.endsWith(".workers.dev")
+      if (!isAppHost) {
+        const hostProfile = await profileHandlers.loadPublicProfile(env, {
+          fqdn: host,
+        })
+        if (hostProfile) {
+          return new Response(renderProfileHtml(hostProfile), {
+            headers: {
+              "Content-Type": "text/html; charset=utf-8",
+              "Cache-Control": "public, max-age=60",
+            },
+          })
+        }
       }
 
       // 自定义直链域名（Host 命中 storage_prefixes）

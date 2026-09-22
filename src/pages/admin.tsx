@@ -7,6 +7,9 @@ import {
   RefreshCw,
   Search,
   SlidersHorizontal,
+  Network,
+  CheckCircle2,
+  XCircle,
   Trash2,
   UserCheck,
   Users,
@@ -21,6 +24,14 @@ import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import { Separator } from "@/components/ui/separator"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   Card,
   CardContent,
@@ -52,13 +63,25 @@ import {
 } from "@/components/ui/table"
 import { adminApi, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
+/** 可授权的功能（与后端 permissions.ts 的 FEATURES 保持一致） */
+const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
+  { key: "r2", label: "直链网盘", desc: "R2 存储与直链分享" },
+  { key: "ai", label: "AI 中转站", desc: "NewAPI 账号与 API Key" },
+  { key: "frp", label: "内网穿透", desc: "frp 隧道申请" },
+]
+
 import type {
+  AdminFrpApplication,
+  AdminFrpNode,
   AdminInvite,
   AdminSettings,
   AdminUser,
   AdminUserDetail,
+  FeatureKey,
   MailMessage,
+  Permissions,
 } from "@/types"
+import { FEATURE_LABELS } from "@/types"
 
 /** 与 Worker 端 settings.ts 的 formatBytes 保持一致 */
 function formatBytes(bytes: number): string {
@@ -100,6 +123,11 @@ export default function AdminPage() {
   const [inviteCode, setInviteCode] = React.useState("")
   const [inviteMax, setInviteMax] = React.useState("1")
   const [inviteBusy, setInviteBusy] = React.useState(false)
+  const [invitePerms, setInvitePerms] = React.useState<Permissions>({
+    r2: true,
+    ai: true,
+    frp: true,
+  })
 
   // 全局设置
   const [settingsStats, setSettingsStats] =
@@ -152,6 +180,7 @@ export default function AdminPage() {
       await adminApi.createInvite({
         code: inviteCode,
         maxUses: Number(inviteMax) || 1,
+        permissions: invitePerms,
       })
       toast.success("邀请码已创建")
       setInviteCode("")
@@ -170,6 +199,102 @@ export default function AdminPage() {
       await adminApi.deleteInvite(invite.id)
       toast.success("邀请码已删除")
       void loadInvites()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "删除失败")
+    }
+  }
+
+  // ---- frp 内网穿透审核 ----
+
+  const [frpApps, setFrpApps] = React.useState<AdminFrpApplication[]>([])
+  const [frpNodes, setFrpNodes] = React.useState<AdminFrpNode[]>([])
+  const [frpLoading, setFrpLoading] = React.useState(false)
+  const [frpBusy, setFrpBusy] = React.useState(false)
+  const [frpStatus, setFrpStatus] = React.useState("pending")
+  const [frpNote, setFrpNote] = React.useState("")
+  const [nodeOpen, setNodeOpen] = React.useState(false)
+  const [nodeForm, setNodeForm] = React.useState({
+    id: "",
+    name: "",
+    region: "",
+    serverAddr: "",
+    serverPort: "7000",
+    authToken: "",
+    tokenPrefix: "",
+    portMin: "20000",
+    portMax: "50000",
+    maxPorts: "5",
+    note: "",
+  })
+
+  const loadFrp = React.useCallback(async () => {
+    setFrpLoading(true)
+    try {
+      const [apps, nodes] = await Promise.all([
+        adminApi.listFrpApplications(frpStatus),
+        adminApi.listFrpNodes(),
+      ])
+      setFrpApps(apps.applications)
+      setFrpNodes(nodes.nodes)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "加载失败")
+    } finally {
+      setFrpLoading(false)
+    }
+  }, [frpStatus])
+
+  const handleReview = async (
+    app: AdminFrpApplication,
+    action: "approve" | "reject"
+  ) => {
+    setFrpBusy(true)
+    try {
+      await adminApi.reviewFrp({ id: app.id, action, note: frpNote })
+      toast.success(
+        action === "approve"
+          ? `已通过，结果已邮件通知 ${app.notifyEmail}`
+          : `已拒绝，结果已邮件通知 ${app.notifyEmail}`
+      )
+      setFrpNote("")
+      await loadFrp()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "操作失败")
+    } finally {
+      setFrpBusy(false)
+    }
+  }
+
+  const handleSaveNode = async () => {
+    setFrpBusy(true)
+    try {
+      await adminApi.upsertFrpNode({
+        id: nodeForm.id || undefined,
+        name: nodeForm.name,
+        region: nodeForm.region,
+        serverAddr: nodeForm.serverAddr,
+        serverPort: Number(nodeForm.serverPort),
+        authToken: nodeForm.authToken,
+        tokenPrefix: nodeForm.tokenPrefix,
+        portMin: Number(nodeForm.portMin),
+        portMax: Number(nodeForm.portMax),
+        maxPorts: Number(nodeForm.maxPorts),
+        note: nodeForm.note,
+      })
+      toast.success("节点已保存")
+      setNodeOpen(false)
+      await loadFrp()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "保存失败")
+    } finally {
+      setFrpBusy(false)
+    }
+  }
+
+  const handleDeleteNode = async (id: string) => {
+    try {
+      await adminApi.deleteFrpNode(id)
+      toast.success("节点已删除")
+      await loadFrp()
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "删除失败")
     }
@@ -280,6 +405,27 @@ export default function AdminPage() {
     }
   }
 
+  /** 切换某用户的功能权限（管理员在成员详情里调整） */
+  const handleTogglePermission = async (key: FeatureKey, value: boolean) => {
+    if (!detail) return
+    setBusy(true)
+    try {
+      const nextPerms = { ...detail.user.permissions, [key]: value }
+      const res = await adminApi.updateUser(detail.user.username, {
+        permissions: nextPerms,
+      })
+      setDetail(res)
+      toast.success(
+        `${FEATURE_LABELS[key]}已${value ? "开启" : "关闭"}`
+      )
+      void load()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "操作失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const handleToggleStatus = (u: AdminUser) =>
     handleToggleStatusByName(u.username, u.status)
 
@@ -315,7 +461,7 @@ export default function AdminPage() {
         description={`已注册用户 ${users.length} 个 · 邀请码 ${invites.length} 个`}
       />
 
-      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings() }}>
+      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp() }}>
         <TabsList className="mb-4">
           <TabsTrigger value="users">
             <Users className="mr-1.5 h-3.5 w-3.5" />
@@ -324,6 +470,10 @@ export default function AdminPage() {
           <TabsTrigger value="invites">
             <KeyRound className="mr-1.5 h-3.5 w-3.5" />
             邀请码
+          </TabsTrigger>
+          <TabsTrigger value="frp">
+            <Network className="mr-1.5 h-3.5 w-3.5" />
+            内网穿透
           </TabsTrigger>
           <TabsTrigger value="settings">
             <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
@@ -496,6 +646,231 @@ export default function AdminPage() {
           )}
         </TabsContent>
 
+        <TabsContent value="frp">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Select value={frpStatus} onValueChange={setFrpStatus}>
+                <SelectTrigger className="w-32">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="pending">待审核</SelectItem>
+                  <SelectItem value="approved">已通过</SelectItem>
+                  <SelectItem value="rejected">已拒绝</SelectItem>
+                  <SelectItem value="all">全部</SelectItem>
+                </SelectContent>
+              </Select>
+              <Button variant="outline" size="sm" onClick={() => void loadFrp()}>
+                <RefreshCw className="h-3.5 w-3.5" />
+                刷新
+              </Button>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => {
+                setNodeForm({
+                  id: "",
+                  name: "",
+                  region: "",
+                  serverAddr: "",
+                  serverPort: "7000",
+                  authToken: "",
+                  tokenPrefix: "",
+                  portMin: "20000",
+                  portMax: "50000",
+                  maxPorts: "5",
+                  note: "",
+                })
+                setNodeOpen(true)
+              }}
+            >
+              <Plus className="h-4 w-4" />
+              添加节点
+            </Button>
+          </div>
+
+          {frpLoading ? (
+            <LoadingBlock />
+          ) : (
+            <div className="space-y-4">
+              {frpApps.length === 0 ? (
+                <EmptyState
+                  title="没有符合条件的申请"
+                  description="用户在内网穿透页面提交申请后会出现在这里。"
+                />
+              ) : (
+                <div className="space-y-3">
+                  {frpApps.map((a) => (
+                    <div key={a.id} className="rounded-lg border bg-card p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="space-y-1">
+                          <p className="text-sm font-medium">
+                            {a.siteUsername}
+                            <span className="ml-2 font-mono text-xs text-muted-foreground">
+                              {a.frpUser}
+                            </span>
+                            <Badge
+                              variant={
+                                a.status === "pending"
+                                  ? "secondary"
+                                  : a.status === "approved"
+                                    ? "success"
+                                    : "destructive"
+                              }
+                              className="ml-2"
+                            >
+                              {a.status === "pending"
+                                ? "待审核"
+                                : a.status === "approved"
+                                  ? "已通过"
+                                  : "已拒绝"}
+                            </Badge>
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            节点 {a.nodeName} · 端口 {a.ports.join(", ")} · 密码{" "}
+                            <code className="font-mono">{a.frpPassword}</code>
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            通知邮箱 {a.notifyEmail} · {fmtTime(a.createdAt)}
+                          </p>
+                          {a.tunnels.length > 0 && (
+                            <p className="font-mono text-xs text-muted-foreground">
+                              {a.tunnels
+                                .map(
+                                  (t) =>
+                                    `${t.name}(${t.type} ${t.remotePort}->${t.localPort})`
+                                )
+                                .join("、")}
+                            </p>
+                          )}
+                          {a.remark && (
+                            <p className="text-xs text-muted-foreground">
+                              备注：{a.remark}
+                            </p>
+                          )}
+                          {a.reviewNote && (
+                            <p className="text-xs text-muted-foreground">
+                              审批意见：{a.reviewNote}
+                            </p>
+                          )}
+                        </div>
+                        {a.status === "pending" && (
+                          <div className="flex items-center gap-2">
+                            <Button
+                              size="sm"
+                              onClick={() => void handleReview(a, "approve")}
+                              disabled={frpBusy}
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              通过
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void handleReview(a, "reject")}
+                              disabled={frpBusy}
+                            >
+                              <XCircle className="h-3.5 w-3.5" />
+                              拒绝
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  <div className="space-y-2">
+                    <Label htmlFor="frpNote">
+                      审批意见（可选，会随结果邮件发出）
+                    </Label>
+                    <Input
+                      id="frpNote"
+                      placeholder="例如：已在中转站建号 / 端口冲突请重选"
+                      value={frpNote}
+                      onChange={(e) => setFrpNote(e.target.value)}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <Separator />
+
+              <div>
+                <h3 className="mb-2 text-sm font-medium">
+                  节点（{frpNodes.length}）
+                </h3>
+                <div className="rounded-lg border bg-card">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>名称</TableHead>
+                        <TableHead>serverAddr</TableHead>
+                        <TableHead>端口范围</TableHead>
+                        <TableHead>已占用</TableHead>
+                        <TableHead className="w-28" />
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {frpNodes.map((n) => (
+                        <TableRow key={n.id}>
+                          <TableCell className="text-sm">
+                            {n.name}
+                            {n.region && (
+                              <span className="ml-1 text-xs text-muted-foreground">
+                                {n.region}
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell className="font-mono text-xs">
+                            {n.serverAddr}:{n.serverPort}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {n.portMin}-{n.portMax}（最多 {n.maxPorts}）
+                          </TableCell>
+                          <TableCell className="text-xs">{n.usedPorts}</TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                  setNodeForm({
+                                    id: n.id,
+                                    name: n.name,
+                                    region: n.region ?? "",
+                                    serverAddr: n.serverAddr,
+                                    serverPort: String(n.serverPort),
+                                    authToken: n.authToken,
+                                    tokenPrefix: n.tokenPrefix,
+                                    portMin: String(n.portMin),
+                                    portMax: String(n.portMax),
+                                    maxPorts: String(n.maxPorts),
+                                    note: n.note ?? "",
+                                  })
+                                  setNodeOpen(true)
+                                }}
+                              >
+                                编辑
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                onClick={() => void handleDeleteNode(n.id)}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+            </div>
+          )}
+        </TabsContent>
+
         <TabsContent value="settings">
           {settingsLoading ? (
             <LoadingBlock />
@@ -659,6 +1034,29 @@ export default function AdminPage() {
                 onChange={(e) => setInviteMax(e.target.value)}
               />
             </div>
+            <div className="space-y-3">
+              <Label>该码注册的账号可用功能</Label>
+              {FEATURES.map((f) => (
+                <div
+                  key={f.key}
+                  className="flex items-center justify-between rounded-md border p-3"
+                >
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">{f.label}</p>
+                    <p className="text-xs text-muted-foreground">{f.desc}</p>
+                  </div>
+                  <Switch
+                    checked={invitePerms[f.key]}
+                    onCheckedChange={(v) =>
+                      setInvitePerms((prev) => ({ ...prev, [f.key]: v }))
+                    }
+                  />
+                </div>
+              ))}
+              <p className="text-xs text-muted-foreground">
+                未勾选的功能，用该码注册的账号将无法使用（管理员可事后在成员详情里调整）。
+              </p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setInviteOpen(false)}>
@@ -781,6 +1179,30 @@ export default function AdminPage() {
                   </div>
                 </section>
 
+                <section>
+                  <h3 className="mb-2 text-sm font-medium">功能权限</h3>
+                  <div className="space-y-2">
+                    {FEATURES.map((f) => (
+                      <div
+                        key={f.key}
+                        className="flex items-center justify-between rounded-md border p-3"
+                      >
+                        <div className="space-y-0.5">
+                          <p className="text-sm font-medium">{f.label}</p>
+                          <p className="text-xs text-muted-foreground">{f.desc}</p>
+                        </div>
+                        <Switch
+                          checked={detail.user.permissions[f.key]}
+                          disabled={busy || detail.user.username === user?.username}
+                          onCheckedChange={(v) =>
+                            void handleTogglePermission(f.key, v)
+                          }
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
                 <div className="flex justify-end gap-2 border-t pt-4">
                   <Button
                     variant="outline"
@@ -833,6 +1255,135 @@ export default function AdminPage() {
               </pre>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* frp 节点编辑 */}
+      <Dialog open={nodeOpen} onOpenChange={setNodeOpen}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{nodeForm.id ? "编辑节点" : "添加节点"}</DialogTitle>
+            <DialogDescription>
+              serverAddr / serverPort / auth.token 会写进用户生成的 config.toml。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>名称</Label>
+                <Input
+                  value={nodeForm.name}
+                  onChange={(e) => setNodeForm((f) => ({ ...f, name: e.target.value }))}
+                  placeholder="北京"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>地区说明</Label>
+                <Input
+                  value={nodeForm.region}
+                  onChange={(e) => setNodeForm((f) => ({ ...f, region: e.target.value }))}
+                  placeholder="北京地区"
+                />
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>serverAddr</Label>
+                <Input
+                  value={nodeForm.serverAddr}
+                  onChange={(e) =>
+                    setNodeForm((f) => ({ ...f, serverAddr: e.target.value }))
+                  }
+                  placeholder="firef.qzz.io"
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>serverPort</Label>
+                <Input
+                  type="number"
+                  value={nodeForm.serverPort}
+                  onChange={(e) =>
+                    setNodeForm((f) => ({ ...f, serverPort: e.target.value }))
+                  }
+                />
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>auth.token</Label>
+                <Input
+                  value={nodeForm.authToken}
+                  onChange={(e) =>
+                    setNodeForm((f) => ({ ...f, authToken: e.target.value }))
+                  }
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>metadatas.token 前缀</Label>
+                <Input
+                  value={nodeForm.tokenPrefix}
+                  onChange={(e) =>
+                    setNodeForm((f) => ({ ...f, tokenPrefix: e.target.value }))
+                  }
+                  placeholder="D"
+                  className="font-mono text-xs"
+                />
+                <p className="text-xs text-muted-foreground">
+                  实际 token = 前缀 + 账号序号，用于在面板区分用户。
+                </p>
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="space-y-2">
+                <Label>端口下限</Label>
+                <Input
+                  type="number"
+                  value={nodeForm.portMin}
+                  onChange={(e) =>
+                    setNodeForm((f) => ({ ...f, portMin: e.target.value }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>端口上限</Label>
+                <Input
+                  type="number"
+                  value={nodeForm.portMax}
+                  onChange={(e) =>
+                    setNodeForm((f) => ({ ...f, portMax: e.target.value }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>每账号最多端口</Label>
+                <Input
+                  type="number"
+                  value={nodeForm.maxPorts}
+                  onChange={(e) =>
+                    setNodeForm((f) => ({ ...f, maxPorts: e.target.value }))
+                  }
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>备注</Label>
+              <Input
+                value={nodeForm.note}
+                onChange={(e) => setNodeForm((f) => ({ ...f, note: e.target.value }))}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setNodeOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={() => void handleSaveNode()} disabled={frpBusy}>
+              {frpBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+              保存
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

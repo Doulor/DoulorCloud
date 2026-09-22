@@ -24,6 +24,12 @@ export const SETTING_DEFAULTS = {
   newapi_unlimited_quota: "0",
   /** NewAPI quota 与美元换算：quota_per_unit */
   newapi_quota_per_unit: "500000",
+  /** frp 内网穿透总开关 */
+  frp_enabled: "1",
+  /** frp 核心包下载地址（可由后台替换） */
+  frp_core_url: "https://r2data.doulor.cn/Firef%20Frp.zip",
+  /** 管理员接收「新申请」通知的邮箱；为空则不发通知 */
+  frp_admin_notify_email: "",
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS
