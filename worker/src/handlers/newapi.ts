@@ -16,7 +16,7 @@
  */
 import { ApiError, json } from "../http"
 import { encryptSecret, decryptSecret, uuid } from "../crypto"
-import { requireUser } from "../auth"
+import { requireUser, type UserRow } from "../auth"
 import {
   adminSetQuota,
   createApiKey,
@@ -28,10 +28,13 @@ import {
   getUserSelf,
   isNewApiConfigured,
   listModels,
+  listPricing,
   listTokens,
   login,
+  redeemCode,
   registerUser,
   requestEmailCode,
+  changePassword as changePasswordRemote,
 } from "../newapi-client"
 import { audit, getSettings } from "../settings"
 import type { Env } from "../env"
@@ -183,8 +186,16 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
   }
 
   // 未开通就不必拉模型列表，避免无谓地消耗 NewAPI 的速率限制
+  // 未开通也要给出可用分组（前端用于说明默认/付费分组的差异）
   if (!account) {
-    return json({ ...base, models: [] })
+    const pricing = await listPricing(env)
+    return json({
+      ...base,
+      models: [],
+      modelGroups: [],
+      availableGroups: collectGroups(pricing),
+      groupModels: {},
+    })
   }
 
   let models: string[] = []
@@ -195,7 +206,38 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     console.error("获取模型列表失败:", err)
   }
 
-  return json({ ...base, models })
+  // 按分组归类模型（默认分组 / 付费分组分开显示）
+  const pricing = await listPricing(env)
+  const availableGroups = collectGroups(pricing)
+  const groupModels: Record<string, string[]> = {}
+  for (const g of availableGroups) {
+    groupModels[g] = pricing
+      .filter((p) => p.groups.includes(g) && models.includes(p.model))
+      .map((p) => p.model)
+  }
+
+  return json({
+    ...base,
+    models,
+    /** 可用分组名列表（顺序：默认分组在前） */
+    availableGroups,
+    /** 分组 → 该分组可用模型；仅包含用户可用的模型 */
+    groupModels,
+    /** 用户当前账号所属分组 */
+    accountGroup: account.group_name,
+  })
+}
+
+/** 收集全部分组名，默认分组排在最前 */
+function collectGroups(pricing: { groups: string[] }[]): string[] {
+  const set = new Set<string>()
+  for (const p of pricing) for (const g of p.groups) set.add(g)
+  const all = [...set]
+  return all.sort((a, b) => {
+    if (a === "default") return -1
+    if (b === "default") return 1
+    return a.localeCompare(b, "zh-CN")
+  })
 }
 
 async function decryptAccountToken(
@@ -248,6 +290,86 @@ export async function syncAccount(env: Env, request: Request): Promise<Response>
 
 // ---- 开通 ----
 
+/**
+ * 绑定 NewAPI 中已存在的同名账号。
+ * 用用户输入的密码登录校验；成功则换取长期 access token 并落库。
+ */
+async function bindExistingAccount(
+  env: Env,
+  user: UserRow,
+  remote: { id: number; username: string; email?: string },
+  password: string,
+  secret: string
+): Promise<Response> {
+  const settings = await getSettings(env)
+
+  let session
+  try {
+    session = await login(env, remote.username, password)
+  } catch {
+    // 不区分「账号不存在」与「密码错误」，避免账号枚举
+    throw new ApiError(
+      401,
+      "密码错误：该用户名在中转站已存在，请输入该账号的密码完成绑定",
+      "INVALID_PASSWORD"
+    )
+  }
+
+  if (!session.session) {
+    throw new ApiError(
+      502,
+      "登录成功但未返回会话，无法生成访问令牌",
+      "NEWAPI_ERROR"
+    )
+  }
+
+  const accessToken = await generateAccessToken(env, session.session, session.userId)
+  const self = await getUserSelf(env, accessToken, session.userId).catch(() => null)
+  const now = new Date().toISOString()
+
+  await env.DB.prepare(
+    `INSERT INTO newapi_accounts
+       (user_id, newapi_user_id, username, email, enc_token, group_name, quota, used_quota, request_count, synced_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
+      user.id,
+      session.userId,
+      remote.username,
+      self?.email || remote.email || "",
+      await encryptSecret(accessToken, secret),
+      self?.group ?? settings.newapi_group,
+      self?.quota ?? 0,
+      self?.used_quota ?? 0,
+      self?.request_count ?? 0,
+      now,
+      now
+    )
+    .run()
+
+  await audit(
+    env,
+    user.id,
+    "newapi.bind_existing",
+    `绑定已有的 NewAPI 账号 ${remote.username} (id ${session.userId})`
+  )
+
+  return json(
+    {
+      account: {
+        newapiUserId: session.userId,
+        username: remote.username,
+        email: self?.email ?? "",
+        quota: self?.quota ?? 0,
+        usedQuota: self?.used_quota ?? 0,
+        group: self?.group ?? settings.newapi_group,
+        boundExisting: true,
+      },
+    },
+    201
+  )
+}
+
 /** POST /api/dev/bind —— 开通 AI 中转站账号 */
 export async function bindAccount(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
@@ -292,15 +414,14 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
     )
   }
 
-  // NewAPI 侧同名账号已存在时无法再绑定邮箱（Register 拒绝已存在的用户名），
-  // 提前拦下给出明确提示，避免白跑一遍验证码流程
+  // NewAPI 侧已存在同名账号：允许用「输入该账号密码」的方式直接绑定。
+  //
+  // 为什么不能像新账号那样走注册：NewAPI 的 Register 拒绝已存在的用户名，
+  // 因此无法为既有账号补写 email。改为登录验证密码 → 换 access token → 绑定。
+  // 这是「我已经在中转站有账号了」场景的正解。
   const remoteExisting = await findUserByUsername(env, username)
   if (remoteExisting) {
-    throw new ApiError(
-      409,
-      `NewAPI 中已存在同名账号「${username}」。请先在 NewAPI 后台删除或改名后再开通（本站无法为已有账号补写邮箱）`,
-      "REMOTE_USER_EXISTS"
-    )
+    return bindExistingAccount(env, user, remoteExisting, password, secret)
   }
 
   // 1. 用本站的 <用户名>@doulor.cn 邮箱自助注册 —— 一步同时建号并绑定邮箱
@@ -429,11 +550,23 @@ export async function createKey(env: Env, request: Request): Promise<Response> {
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
 
-  const body = (await request.json()) as { name?: string }
+  const body = (await request.json()) as { name?: string; group?: string }
   const name = (body.name ?? "").trim().slice(0, 50) || `doulor-${user.username}`
 
+  // 分组：默认使用 default 分组；用户也可选付费分组。
+  // 必须是 NewAPI 侧真实存在的分组，避免建出用不了的 Key。
+  const pricing = await listPricing(env)
+  const availableGroups = collectGroups(pricing)
+  const defaultGroup = availableGroups.includes("default")
+    ? "default"
+    : (availableGroups[0] ?? "")
+  const group = (body.group ?? "").trim() || defaultGroup
+  if (availableGroups.length > 0 && !availableGroups.includes(group)) {
+    throw new ApiError(400, "无效的分组", "INVALID_GROUP")
+  }
+
   const { token, userId } = await decryptAccountToken(env, account)
-  const created = await createApiKey(env, token, userId, name)
+  const created = await createApiKey(env, token, userId, name, group)
 
   const now = new Date().toISOString()
   await env.DB.prepare(
@@ -443,13 +576,19 @@ export async function createKey(env: Env, request: Request): Promise<Response> {
     .bind(uuid(), user.id, created.tokenId, name, created.maskedKey, now)
     .run()
 
-  await audit(env, user.id, "newapi.key.create", `创建 API Key「${name}」`)
+  await audit(
+    env,
+    user.id,
+    "newapi.key.create",
+    `创建 API Key「${name}」（分组 ${group || "默认"}）`
+  )
 
   return json(
     {
       key: {
         tokenId: created.tokenId,
         name,
+        group,
         // 完整 key 仅此一次下发，服务端不保存
         fullKey: created.fullKey,
         maskedKey: created.maskedKey,
@@ -547,4 +686,101 @@ export async function syncKeys(env: Env, request: Request): Promise<Response> {
       createdAt: r.created_at,
     })),
   })
+}
+// ---- 额度兑换 ----
+
+/**
+ * POST /api/dev/redeem —— 用兑换码（邀请码）充值额度。
+ * 兑换码由管理员在 NewAPI 后台生成；本站只做转发与额度同步。
+ */
+export async function redeem(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
+
+  const body = (await request.json()) as { code?: string }
+  const code = (body.code ?? "").trim()
+  if (!code) throw new ApiError(400, "请输入兑换码", "INVALID_INPUT")
+  if (code.length > 128) throw new ApiError(400, "兑换码过长", "INVALID_INPUT")
+
+  const { token, userId } = await decryptAccountToken(env, account)
+  const result = await redeemCode(env, token, userId, code)
+
+  // 兑换成功后立即同步最新额度，前端无需再点一次同步
+  let quota = account.quota
+  try {
+    const self = await getUserSelf(env, token, userId)
+    quota = self.quota ?? account.quota
+    await env.DB.prepare(
+      `UPDATE newapi_accounts
+          SET quota = ?, used_quota = ?, request_count = ?, synced_at = ?
+        WHERE user_id = ?`
+    )
+      .bind(
+        quota,
+        self.used_quota ?? account.used_quota,
+        self.request_count ?? account.request_count,
+        new Date().toISOString(),
+        user.id
+      )
+      .run()
+  } catch (err) {
+    console.error("兑换后同步额度失败:", err)
+  }
+
+  await audit(
+    env,
+    user.id,
+    "newapi.redeem",
+    `兑换码充值 +${result.added} quota`
+  )
+
+  const currency = await getCurrencyInfo(env)
+  return json({
+    added: result.added,
+    addedDisplay: Math.round((result.added / currency.perUnit) * 10000) / 10000,
+    currencySymbol: currency.symbol,
+    quota,
+    message: "兑换成功",
+  })
+}
+
+// ---- 修改中转站密码 ----
+
+/**
+ * POST /api/dev/password —— 修改 NewAPI 账号密码。
+ * 需提供原密码校验；修改后 NewAPI 侧的登录态会失效，但已存的
+ * access token 仍可用于代建 Key（不受影响）。
+ */
+export async function changePassword(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
+
+  const body = (await request.json()) as {
+    currentPassword?: string
+    newPassword?: string
+  }
+  const currentPassword = body.currentPassword ?? ""
+  const newPassword = body.newPassword ?? ""
+
+  if (!currentPassword) {
+    throw new ApiError(400, "请输入当前密码", "INVALID_INPUT")
+  }
+  if (newPassword.length < 8) {
+    throw new ApiError(400, "新密码至少需要 8 位", "WEAK_PASSWORD")
+  }
+
+  const { token, userId } = await decryptAccountToken(env, account)
+  await changePasswordRemote(
+    env,
+    token,
+    userId,
+    account.username,
+    currentPassword,
+    newPassword
+  )
+
+  await audit(env, user.id, "newapi.password.change", "修改中转站密码")
+  return json({ ok: true, message: "中转站密码已修改" })
 }

@@ -360,7 +360,8 @@ export async function createApiKey(
   env: Env,
   accessToken: string,
   userId: number,
-  name: string
+  name: string,
+  group = ""
 ): Promise<{ tokenId: number; fullKey: string; maskedKey: string }> {
   const before = await listTokens(env, accessToken, userId)
   const existingIds = new Set(before.map((t) => t.id))
@@ -375,7 +376,9 @@ export async function createApiKey(
       model_limits_enabled: false,
       model_limits: "",
       allow_ips: "",
-      group: "",
+      // 分组决定该 Key 能用哪些渠道（可用分组来自 /api/pricing 的 enable_groups）
+      group: group || "",
+      cross_group_retry: false,
     }),
   })
   await unwrap(createRes, "创建 Key")
@@ -441,4 +444,98 @@ export function extractVerificationCode(text: string): string | null {
     if (m) return m[1]
   }
   return null
+}
+
+/**
+ * 修改 NewAPI 密码（用户自助）。
+ *
+ * 源码（rc.15 UpdateSelf）要点：
+ *   - 需同时传 `password`（新）与 `original_password`（旧，用于校验）
+ *   - `currentUser.Password != ""` 时才校验原密码；且 cleanUser 只落
+ *     Id/Username/Password/DisplayName，其它字段不会被动到
+ */
+export async function changePassword(
+  env: Env,
+  accessToken: string,
+  userId: number,
+  username: string,
+  originalPassword: string,
+  newPassword: string
+): Promise<void> {
+  const res = await asUser(env, accessToken, userId, "/api/user/self", {
+    method: "PUT",
+    body: JSON.stringify({
+      username,
+      password: newPassword,
+      original_password: originalPassword,
+    }),
+  })
+  await unwrap(res, "修改密码", (msg) => /原密码错误/.test(msg))
+}
+
+/**
+ * 用兑换码（邀请码）充值额度。
+ * 源码（rc.15 TopUp）：请求体字段名为 `key`，成功时 `data` 为增加的额度数值。
+ */
+export async function redeemCode(
+  env: Env,
+  accessToken: string,
+  userId: number,
+  code: string
+): Promise<{ added: number; message: string }> {
+  const res = await asUser(env, accessToken, userId, "/api/user/topup", {
+    method: "POST",
+    body: JSON.stringify({ key: code.trim() }),
+  })
+  interface RedeemEnvelope {
+    success?: boolean
+    message?: string
+    data?: number
+  }
+  const text = await res.text()
+  let body: RedeemEnvelope | null = null
+  try {
+    body = JSON.parse(text) as RedeemEnvelope
+  } catch {
+    body = null
+  }
+  if (!body || body.success === false) {
+    // 兑换码无效/已用过等属于用户输入问题，直接回传 NewAPI 的说明
+    throw new ApiError(
+      400,
+      body?.message || `兑换失败（HTTP ${res.status}）`,
+      "REDEEM_FAILED"
+    )
+  }
+  return { added: Number(body.data ?? 0), message: body.message ?? "" }
+}
+
+/**
+ * 读取模型 → 可用分组映射（公开接口，无需鉴权）。
+ *
+ * `/api/pricing` 返回每个模型的 `enable_groups`，据此可以把「默认分组」与
+ * 「付费分组」的可用模型分开列出。失败时返回空数组，不影响主流程。
+ */
+export async function listPricing(
+  env: Env
+): Promise<{ model: string; groups: string[] }[]> {
+  try {
+    const res = await newApiFetch(env, "/api/pricing", {
+      method: "GET",
+      auth: "none",
+    })
+    const data = await unwrap<
+      { model_name?: string; enable_groups?: string[] }[]
+    >(res, "读取模型分组")
+    if (!Array.isArray(data)) return []
+    return data
+      .filter((m) => m?.model_name)
+      .map((m) => ({
+        model: m.model_name as string,
+        groups: Array.isArray(m.enable_groups) ? m.enable_groups : [],
+      }))
+  } catch (err) {
+    console.error("读取模型分组失败:", err)
+    return []
+  }
 }

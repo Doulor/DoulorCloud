@@ -8,7 +8,7 @@ import {
   requireUser,
   sessionCookie,
   clearedSessionCookie,
-  getSessionToken,
+  getSessionTokens,
   toPublicUser,
   type UserRow,
 } from "../auth"
@@ -211,9 +211,14 @@ export async function login(env: Env, request: Request): Promise<Response> {
 }
 
 export async function logout(env: Env, request: Request): Promise<Response> {
+  const tokens = getSessionTokens(request)
   await destroySession(env, request)
   const res = new Response(null, { status: 204 })
-  res.headers.set("Set-Cookie", clearedSessionCookie())
+  // 逐个清除同名 cookie，避免残留导致下次登录被判为未登录
+  const count = Math.max(tokens.length, 1)
+  for (let i = 0; i < count; i++) {
+    res.headers.append("Set-Cookie", clearedSessionCookie())
+  }
   return res
 }
 
@@ -340,18 +345,22 @@ export async function changePassword(env: Env, request: Request): Promise<Respon
   const passwordHash = await hashPassword(newPassword)
   const now = new Date().toISOString()
 
-  // 使除当前会话外的所有会话失效
-  const currentToken = getSessionToken(request)
-  const currentHash = currentToken ? await hashToken(currentToken) : null
+  // 使除当前会话外的所有会话失效。
+  // 必须保留**全部**当前 cookie 对应的会话：浏览器可能同时持有多个同名
+  // doulor_session，只保留第一个会把用户真正在用的那个删掉，表现为
+  // 「改完密码立刻被登出」。
+  const currentTokens = getSessionTokens(request)
+  const currentHashes = await Promise.all(currentTokens.map((t) => hashToken(t)))
+  const keepPlaceholders = currentHashes.map(() => "?").join(", ")
 
   await env.DB.batch([
     env.DB.prepare(
       "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?"
     ).bind(passwordHash, now, user.id),
-    currentHash
+    currentHashes.length > 0
       ? env.DB.prepare(
-          "DELETE FROM sessions WHERE user_id = ? AND token_hash != ?"
-        ).bind(user.id, currentHash)
+          `DELETE FROM sessions WHERE user_id = ? AND token_hash NOT IN (${keepPlaceholders})`
+        ).bind(user.id, ...currentHashes)
       : env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(user.id),
     env.DB.prepare(
       "INSERT INTO audit_logs (id, user_id, action, detail, ip, created_at) VALUES (?, ?, 'password.change', ?, ?, ?)"

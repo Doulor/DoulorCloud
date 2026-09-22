@@ -252,6 +252,12 @@ async function route(env: Env, request: Request): Promise<Response> {
   if (routePath === "/dev/key" && method === "POST") {
     return newapiHandlers.createKey(env, request)
   }
+  if (routePath === "/dev/redeem" && method === "POST") {
+    return newapiHandlers.redeem(env, request)
+  }
+  if (routePath === "/dev/password" && method === "POST") {
+    return newapiHandlers.changePassword(env, request)
+  }
 
   const devKeyMatch = routePath.match(/^\/dev\/key\/([^/]+)$/)
   if (devKeyMatch && method === "DELETE") {
