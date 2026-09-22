@@ -54,7 +54,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { newapiApi, HttpError } from "@/services/api"
-import type { NewApiKey, NewApiStatus } from "@/types"
+import type { NewApiKey, NewApiPreflight, NewApiStatus } from "@/types"
 
 function fmtTime(iso: string | null) {
   if (!iso) return "—"
@@ -76,6 +76,8 @@ export default function AiPage() {
 
   // 开通
   const [bindOpen, setBindOpen] = React.useState(false)
+  const [preflight, setPreflight] = React.useState<NewApiPreflight | null>(null)
+  const [preflightLoading, setPreflightLoading] = React.useState(false)
   const [password, setPassword] = React.useState("")
   const [confirm, setConfirm] = React.useState("")
 
@@ -127,8 +129,24 @@ export default function AiPage() {
     }
   }
 
+  /** 打开开通弹窗前先探测：中转站是否已有同名账号 */
+  const openBind = async () => {
+    setPreflightLoading(true)
+    setBindOpen(true)
+    try {
+      setPreflight(await newapiApi.preflight())
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "无法连接中转站")
+      setBindOpen(false)
+    } finally {
+      setPreflightLoading(false)
+    }
+  }
+
   const handleBind = async () => {
-    if (password !== confirm) {
+    // 新账号流程需要确认两次密码；绑定已有账号只有一个密码框
+    const isBindExisting = Boolean(preflight?.exists)
+    if (!isBindExisting && password !== confirm) {
       toast.error("两次输入的密码不一致")
       return
     }
@@ -302,7 +320,7 @@ export default function AiPage() {
               <li>· 开通后可查看可用模型并自助创建 API Key</li>
               <li>· 开通时需等待一封验证码邮件，通常几秒内到达</li>
             </ul>
-            <Button onClick={() => setBindOpen(true)}>
+            <Button onClick={() => void openBind()}>
               <Sparkles className="h-4 w-4" />
               立即开通
             </Button>
@@ -311,7 +329,16 @@ export default function AiPage() {
 
         <BindDialog
           open={bindOpen}
-          onOpenChange={setBindOpen}
+          onOpenChange={(o) => {
+            setBindOpen(o)
+            if (!o) {
+              setPreflight(null)
+              setPassword("")
+              setConfirm("")
+            }
+          }}
+          preflight={preflight}
+          preflightLoading={preflightLoading}
           email={status.eligibleEmail}
           password={password}
           confirm={confirm}
@@ -771,6 +798,8 @@ export default function AiPage() {
 interface BindDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  preflight: NewApiPreflight | null
+  preflightLoading: boolean
   email: string
   password: string
   confirm: string
@@ -783,6 +812,8 @@ interface BindDialogProps {
 function BindDialog({
   open,
   onOpenChange,
+  preflight,
+  preflightLoading,
   email,
   password,
   confirm,
@@ -791,50 +822,111 @@ function BindDialog({
   busy,
   onConfirm,
 }: BindDialogProps) {
+  const exists = Boolean(preflight?.exists)
+  // 探测尚未返回时不渲染表单，避免用户先填了再被告知流程不同
+  const ready = !preflightLoading && preflight !== null
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>开通 AI 中转站</DialogTitle>
+          <DialogTitle>
+            {exists ? "绑定已有中转站账号" : "开通 AI 中转站"}
+          </DialogTitle>
           <DialogDescription>
-            将创建 NewAPI 账号 {email}，请设置一个密码。
+            {!ready
+              ? "正在检查中转站账号…"
+              : exists
+                ? `中转站已存在账号「${preflight?.username}」，验证密码后即可绑定。`
+                : `将创建 NewAPI 账号 ${email}，请设置一个密码。`}
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="aiPassword">NewAPI 密码</Label>
-            <Input
-              id="aiPassword"
-              type="password"
-              placeholder="至少 8 位"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
+
+        {!ready ? (
+          <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            正在检查…
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="aiConfirm">确认密码</Label>
-            <Input
-              id="aiConfirm"
-              type="password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-            />
+        ) : (
+          <div className="space-y-4">
+            {exists ? (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="aiPassword">中转站账号密码</Label>
+                  <Input
+                    id="aiPassword"
+                    type="password"
+                    autoComplete="current-password"
+                    placeholder="输入该账号在中转站的密码"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                </div>
+                <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+                  该账号是你在中转站已有的账号，本站只保存访问令牌（不保存密码），
+                  用于代你管理 API Key。邮箱与额度保持中转站现状，不再发放试用额度。
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="aiPassword">设置密码</Label>
+                  <Input
+                    id="aiPassword"
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder="至少 8 位"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="aiConfirm">确认密码</Label>
+                  <Input
+                    id="aiConfirm"
+                    type="password"
+                    autoComplete="new-password"
+                    value={confirm}
+                    onChange={(e) => setConfirm(e.target.value)}
+                  />
+                </div>
+                {!preflight?.hasMailbox ? (
+                  <div className="flex gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    <div>
+                      需要先创建 <code>{email}</code> 收件箱才能开通
+                      （用于接收注册验证码）。请到「邮箱」页添加主邮箱。
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+                    开通需要接收一封验证码邮件到 {email}，本站会自动读取并完成验证，
+                    通常几秒内完成，请保持页面打开。
+                  </div>
+                )}
+              </>
+            )}
           </div>
-          <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-            开通需要接收一封验证码邮件到 {email}，本站会自动读取并完成验证，
-            通常几秒内完成，请保持页面打开。
-          </div>
-        </div>
+        )}
+
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             取消
           </Button>
           <Button
             onClick={onConfirm}
-            disabled={busy || password.length < 8 || password !== confirm}
+            disabled={
+              busy ||
+              !ready ||
+              password.length < 8 ||
+              // 仅新账号流程需要两次输入一致
+              (!exists && password !== confirm) ||
+              // 新账号流程要求收件箱存在，否则后端必然报错
+              (!exists && preflight?.hasMailbox === false)
+            }
           >
             {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-            {busy ? "开通中…" : "开通"}
+            {busy ? "处理中…" : exists ? "验证并绑定" : "开通"}
           </Button>
         </DialogFooter>
       </DialogContent>

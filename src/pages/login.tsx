@@ -28,7 +28,27 @@ export default function LoginPage() {
     try {
       const res = await authApi.login({ identifier, password })
       setUser(res.user)
-      toast.success("登录成功")
+
+      // 关键校验：登录接口返回 200 不代表浏览器真的存下了会话 cookie。
+      // 若浏览器阻止了 Cookie（隐私模式、站点数据被禁、第三方 Cookie 策略等），
+      // 紧接着的 /api/me 会 401，用户会被静默踢回登录页，形成「怎么都登不进去」
+      // 且没有任何错误提示。这里主动验证一次，把原因明确告诉用户。
+      try {
+        await authApi.me()
+      } catch {
+        setUser(null)
+        setError(
+          "登录成功，但浏览器没有保存登录状态。请检查：① 是否禁用了本站的 Cookie / 站点数据；② 是否处于无痕或隐私模式；③ 是否通过 https 访问。"
+        )
+        return
+      }
+
+      const incomplete = res.user.emailVerified === false
+      if (incomplete) {
+        toast.warning("登录成功，建议前往「设置」验证真实邮箱")
+      } else {
+        toast.success("登录成功")
+      }
       navigate(from, { replace: true })
     } catch (err) {
       setError(err instanceof HttpError ? err.message : "登录失败，请稍后重试")
@@ -84,6 +104,102 @@ export default function LoginPage() {
           登录
         </Button>
       </form>
+
+      <Diagnostics />
     </AuthShell>
+  )
+}
+
+/**
+ * 环境自检。
+ * 手机浏览器往往没有开发者工具，登录失败时无法排查。
+ * 这里直接暴露关键前提：能否写 Cookie、是否 https、是否无痕模式。
+ * 默认折叠，点击展开。
+ */
+function Diagnostics() {
+  const [open, setOpen] = React.useState(false)
+  const [cookieOk, setCookieOk] = React.useState<boolean | null>(null)
+
+  React.useEffect(() => {
+    try {
+      // HttpOnly cookie 由服务端下发，JS 只能验证「非 HttpOnly」的写入能力。
+      // 若连这个都写不进去，说明站点数据被完全禁止。
+      document.cookie = "__doulor_probe=1; Path=/; SameSite=Lax"
+      const ok = document.cookie.includes("__doulor_probe=1")
+      setCookieOk(ok)
+      // 清理探针
+      document.cookie = "__doulor_probe=; Path=/; Max-Age=0"
+    } catch {
+      setCookieOk(false)
+    }
+  }, [])
+
+  const isHttps = window.location.protocol === "https:"
+  const hasStorage = (() => {
+    try {
+      window.localStorage.setItem("__probe", "1")
+      window.localStorage.removeItem("__probe")
+      return true
+    } catch {
+      return false
+    }
+  })()
+
+  const allGood = cookieOk === true && isHttps && hasStorage
+
+  return (
+    <div className="mt-6 border-t pt-4">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full text-left text-xs text-muted-foreground hover:text-foreground"
+      >
+        {allGood ? "环境检测正常" : "⚠️ 环境检测发现问题"} · 点击{open ? "收起" : "展开"}
+      </button>
+      {open && (
+        <dl className="mt-3 space-y-1.5 text-xs">
+          <DiagRow label="HTTPS 访问" ok={isHttps} hint={isHttps ? "" : "请用 https:// 打开本站"} />
+          <DiagRow
+            label="允许写入 Cookie"
+            ok={cookieOk === true}
+            hint={cookieOk === true ? "" : "浏览器阻止了本站 Cookie / 站点数据"}
+          />
+          <DiagRow
+            label="本地存储可用"
+            ok={hasStorage}
+            hint={hasStorage ? "" : "可能处于无痕或隐私模式"}
+          />
+          <div className="pt-1 text-muted-foreground">
+            当前域名：<span className="font-mono">{window.location.host}</span>
+          </div>
+          {!allGood && (
+            <p className="pt-2 text-muted-foreground">
+              若「允许写入 Cookie」为否：请在本站设置里允许 Cookie／站点数据，
+              或关闭无痕模式。iOS 还需检查「设置 → Safari → 阻止所有 Cookie」
+              与「隐私 → 网站数据」。
+            </p>
+          )}
+        </dl>
+      )}
+    </div>
+  )
+}
+
+function DiagRow({
+  label,
+  ok,
+  hint,
+}: {
+  label: string
+  ok: boolean
+  hint: string
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className={ok ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}>
+        {ok ? "正常" : `异常${hint ? `（${hint}）` : ""}`}
+      </dd>
+    </div>
   )
 }

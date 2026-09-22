@@ -11,6 +11,7 @@ import {
   type MailMessage,
   type MeResponse,
   type NewApiKey,
+  type NewApiPreflight,
   type NewApiStatus,
   type StorageAccount,
   type StorageObject,
@@ -71,14 +72,20 @@ async function request<T>(
   const data = await res.json().catch(() => null)
 
   if (!res.ok) {
-    // 会话失效：仅广播事件清空用户态（RequireAuth 会以 SPA 方式跳登录页）。
-    // 不用 window.location 整页跳转，避免和 React 状态导航竞争造成登录循环。
-    if (res.status === 401 && !path.startsWith("/login") && !path.startsWith("/register")) {
-      notifySessionExpired()
-    }
     const message =
       (data as ApiError | null)?.error ?? `请求失败 (${res.status})`
     const code = (data as ApiError | null)?.code
+
+    // 仅在「会话本身失效」时清空用户态。
+    // 不能对所有 401 一律登出：登录密码错误、修改密码时当前密码错误
+    // 同样是 401（code=INVALID_CREDENTIALS），误判会把正常用户直接踢下线。
+    const sessionExpired =
+      res.status === 401 && (code === undefined || code === "UNAUTHORIZED")
+
+    if (sessionExpired) {
+      notifySessionExpired()
+    }
+
     throw new HttpError(res.status, message, code)
   }
 
@@ -336,6 +343,9 @@ export const storageApi = {
 
 export const newapiApi = {
   status: () => request<NewApiStatus>("/dev/status"),
+
+  /** 开通前探测：该用户名在中转站是否已存在 */
+  preflight: () => request<NewApiPreflight>("/dev/preflight"),
 
   bind: (password: string) =>
     request<{ account: Record<string, unknown> }>("/dev/bind", {

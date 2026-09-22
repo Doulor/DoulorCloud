@@ -256,6 +256,17 @@ export interface NewApiKey {
   group?: string
 }
 
+/** 开通前探测：决定展示「绑定已有账号」还是「创建新账号」 */
+export interface NewApiPreflight {
+  featureEnabled: boolean
+  username: string
+  eligibleEmail: string
+  /** 中转站是否已存在同名账号 */
+  exists: boolean
+  /** 主邮箱是否存在（新账号注册需收验证码） */
+  hasMailbox: boolean
+}
+
 // ---- 管理员全局设置 ----
 
 export interface AdminSettings {

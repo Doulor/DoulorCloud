@@ -291,6 +291,48 @@ export async function syncAccount(env: Env, request: Request): Promise<Response>
 // ---- 开通 ----
 
 /**
+ * GET /api/dev/preflight —— 开通前的账号探测。
+ *
+ * 决定前端该展示哪套流程，避免让用户猜：
+ *   - 中转站已有同名账号 → 展示「绑定已有账号」（输入该账号密码）
+ *   - 没有 → 展示「创建新账号」（自己设置密码）
+ *
+ * 只回传「是否存在」与最小信息，**不泄露**该账号的邮箱、额度等资料
+ * （判断依据是本站用户名，但任何登录用户都能探测任意名字，故只回布尔值）。
+ */
+export async function preflight(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const settings = await getSettings(env)
+
+  const base = {
+    featureEnabled: settings.newapi_enabled === "1",
+    username: user.username,
+    eligibleEmail: `${user.username}@${env.ROOT_DOMAIN}`,
+  }
+
+  if (!isNewApiConfigured(env) || settings.newapi_enabled !== "1") {
+    return json({ ...base, exists: false, hasMailbox: false })
+  }
+
+  let exists = false
+  try {
+    exists = Boolean(await findUserByUsername(env, user.username))
+  } catch (err) {
+    // 探测失败不阻断：按「不存在」处理，后续绑定/注册仍会给出真实错误
+    console.error("探测 NewAPI 账号失败:", err)
+  }
+
+  // 新账号注册需要能收到验证码邮件，因此需要主邮箱已存在
+  const mailbox = await env.DB.prepare(
+    "SELECT id FROM mailboxes WHERE address = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(`${user.username}@${env.ROOT_DOMAIN}`.toLowerCase())
+    .first()
+
+  return json({ ...base, exists, hasMailbox: Boolean(mailbox) })
+}
+
+/**
  * 绑定 NewAPI 中已存在的同名账号。
  * 用用户输入的密码登录校验；成功则换取长期 access token 并落库。
  */
@@ -310,7 +352,7 @@ async function bindExistingAccount(
     // 不区分「账号不存在」与「密码错误」，避免账号枚举
     throw new ApiError(
       401,
-      "密码错误：该用户名在中转站已存在，请输入该账号的密码完成绑定",
+      "密码错误：该用户名在中转站已存在且属于你，请输入该账号的密码完成绑定（不是新设密码）",
       "INVALID_PASSWORD"
     )
   }

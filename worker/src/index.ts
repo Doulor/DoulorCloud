@@ -240,6 +240,9 @@ async function route(env: Env, request: Request): Promise<Response> {
   if (routePath === "/dev/sync" && method === "POST") {
     return newapiHandlers.syncAccount(env, request)
   }
+  if (routePath === "/dev/preflight" && method === "GET") {
+    return newapiHandlers.preflight(env, request)
+  }
   if (routePath === "/dev/bind" && method === "POST") {
     return newapiHandlers.bindAccount(env, request)
   }
