@@ -346,7 +346,6 @@ export interface AdminFrpApplication extends FrpApplication {
 
 export interface AdminFrpNode extends FrpNode {
   authToken: string
-  tokenPrefix: string
   usedPorts: number
 }
 

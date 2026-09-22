@@ -26,7 +26,6 @@ interface FrpNodeRow {
   server_addr: string
   server_port: number
   auth_token: string
-  token_prefix: string
   port_min: number
   port_max: number
   max_ports: number
@@ -725,7 +724,6 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
     serverAddr?: string
     serverPort?: number
     authToken?: string
-    tokenPrefix?: string
     portMin?: number
     portMax?: number
     maxPorts?: number
@@ -756,7 +754,6 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
     serverAddr,
     serverPort,
     authToken: (body.authToken ?? "").trim(),
-    tokenPrefix: (body.tokenPrefix ?? "").trim(),
     portMin,
     portMax,
     maxPorts,
@@ -772,14 +769,14 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
   if (body.id) {
     await env.DB.prepare(
       `UPDATE frp_nodes SET name=?, region=?, server_addr=?, server_port=?,
-              auth_token=?, token_prefix=?, port_min=?, port_max=?, max_ports=?,
+              auth_token=?, port_min=?, port_max=?, max_ports=?,
               enabled=?, sort_order=?, note=?, status=?, status_note=?,
               status_updated_at=?, updated_at=?
         WHERE id=?`
     )
       .bind(
         values.name, values.region, values.serverAddr, values.serverPort,
-        values.authToken, values.tokenPrefix, values.portMin, values.portMax,
+        values.authToken, values.portMin, values.portMax,
         values.maxPorts, values.enabled, values.sortOrder, values.note,
         values.status, values.statusNote, now, now,
         body.id
@@ -791,14 +788,14 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
   const id = uuid()
   await env.DB.prepare(
     `INSERT INTO frp_nodes
-       (id, name, region, server_addr, server_port, auth_token, token_prefix,
+       (id, name, region, server_addr, server_port, auth_token,
         port_min, port_max, max_ports, enabled, sort_order, note,
         status, status_note, status_updated_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       id, values.name, values.region, values.serverAddr, values.serverPort,
-      values.authToken, values.tokenPrefix, values.portMin, values.portMax,
+      values.authToken, values.portMin, values.portMax,
       values.maxPorts, values.enabled, values.sortOrder, values.note,
       values.status, values.statusNote, now, now, now
     )
@@ -823,7 +820,6 @@ export async function listFrpNodes(env: Env, request: Request): Promise<Response
     nodes: (rows.results ?? []).map((n) => ({
       ...toPublicNode(n),
       authToken: n.auth_token,
-      tokenPrefix: n.token_prefix,
       usedPorts: usedMap[n.id] ?? 0,
       statusNote: n.status_note,
     })),

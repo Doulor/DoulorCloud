@@ -227,7 +227,6 @@ export default function AdminPage() {
     serverAddr: "",
     serverPort: "7000",
     authToken: "",
-    tokenPrefix: "",
     portMin: "20000",
     portMax: "50000",
     maxPorts: "5",
@@ -283,7 +282,6 @@ export default function AdminPage() {
         serverAddr: nodeForm.serverAddr,
         serverPort: Number(nodeForm.serverPort),
         authToken: nodeForm.authToken,
-        tokenPrefix: nodeForm.tokenPrefix,
         portMin: Number(nodeForm.portMin),
         portMax: Number(nodeForm.portMax),
         maxPorts: Number(nodeForm.maxPorts),
@@ -704,7 +702,6 @@ export default function AdminPage() {
                   serverAddr: "",
                   serverPort: "7000",
                   authToken: "",
-                  tokenPrefix: "",
                   portMin: "20000",
                   portMax: "50000",
                   maxPorts: "5",
@@ -876,7 +873,6 @@ export default function AdminPage() {
                                     serverAddr: n.serverAddr,
                                     serverPort: String(n.serverPort),
                                     authToken: n.authToken,
-                                    tokenPrefix: n.tokenPrefix,
                                     portMin: String(n.portMin),
                                     portMax: String(n.portMax),
                                     maxPorts: String(n.maxPorts),
@@ -1417,17 +1413,11 @@ export default function AdminPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label>metadatas.token 前缀</Label>
-                <Input
-                  value={nodeForm.tokenPrefix}
-                  onChange={(e) =>
-                    setNodeForm((f) => ({ ...f, tokenPrefix: e.target.value }))
-                  }
-                  placeholder="D"
-                  className="font-mono text-xs"
-                />
+                <Label>auth.token 说明</Label>
                 <p className="text-xs text-muted-foreground">
-                  实际 token = 前缀 + 账号序号，用于在面板区分用户。
+                  auth.token 是 frps 服务端的共享密钥，所有用户相同。
+                  每个用户自己的 <code>metadatas.token</code> 由用户在申请时自设，
+                  无需在此配置。
                 </p>
               </div>
             </div>
