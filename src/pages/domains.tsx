@@ -459,7 +459,7 @@ export default function DomainsPage() {
                 id="content"
                 placeholder={
                   form.type === "MX"
-                    ? "mail.doulor.cn"
+                    ? "cloud.doulor.cn"
                     : form.type === "TXT"
                       ? '"value"'
                       : "192.0.2.10"

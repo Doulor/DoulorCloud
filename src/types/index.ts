@@ -239,6 +239,12 @@ export interface NewApiStatus {
   group: string
   account: NewApiAccount | null
   models: string[]
+  /** 可用分组（默认分组在前） */
+  availableGroups: string[]
+  /** 分组 → 该分组可用模型 */
+  groupModels: Record<string, string[]>
+  /** 账号当前所属分组 */
+  accountGroup: string | null
 }
 
 export interface NewApiKey {
@@ -247,6 +253,7 @@ export interface NewApiKey {
   name: string
   maskedKey: string
   createdAt: string
+  group?: string
 }
 
 // ---- 管理员全局设置 ----

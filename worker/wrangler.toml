@@ -14,13 +14,13 @@ pattern = "doulor.cn/api/*"
 zone_name = "doulor.cn"
 
 [[routes]]
-pattern = "mail.doulor.cn/api/*"
+pattern = "cloud.doulor.cn/api/*"
 zone_name = "doulor.cn"
 
 # R2 直链：/dl/<用户名>/<文件名> 需要由本 Worker 反代
-# （mail.doulor.cn 其余路径仍由静态站点 Worker 处理，更精确的路由优先）
+# （cloud.doulor.cn 其余路径仍由静态站点 Worker 处理，更精确的路由优先）
 [[routes]]
-pattern = "mail.doulor.cn/dl/*"
+pattern = "cloud.doulor.cn/dl/*"
 zone_name = "doulor.cn"
 
 [[routes]]

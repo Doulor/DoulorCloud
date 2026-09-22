@@ -143,7 +143,7 @@ export function clearedSessionCookie(): string {
  * 解析请求中的会话 token。
  *
  * 注意：浏览器可能同时持有**多个同名 cookie**（例如用户先访问过裸域
- * `doulor.cn` 再访问 `mail.doulor.cn`，两者 cookie 相互独立；或历史遗留的
+ * `doulor.cn` 再访问 `cloud.doulor.cn`，两者 cookie 相互独立；或历史遗留的
  * 失效 cookie 未被清除）。此时 `Cookie` 头会包含多个 `doulor_session=...`。
  *
  * 旧实现用 `.find()` 只取第一个，一旦那个恰好是失效的，即使用户刚刚登录成功

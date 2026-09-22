@@ -354,10 +354,27 @@ export const newapiApi = {
     }),
 
   /** 创建 Key —— 完整 key 只在这条响应里返回，之后无法再取回 */
-  createKey: (name: string) =>
+  createKey: (name: string, group?: string) =>
     request<{ key: NewApiKey & { fullKey: string } }>("/dev/key", {
       method: "POST",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, group }),
+    }),
+
+  /** 用兑换码（邀请码）充值额度 */
+  redeem: (code: string) =>
+    request<{
+      added: number
+      addedDisplay: number
+      currencySymbol: string
+      quota: number
+      message: string
+    }>("/dev/redeem", { method: "POST", body: JSON.stringify({ code }) }),
+
+  /** 修改中转站密码 */
+  changePassword: (payload: { currentPassword: string; newPassword: string }) =>
+    request<{ ok: boolean; message: string }>("/dev/password", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
 
   removeKey: (id: string) =>

@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   Bot,
   Copy,
+  ExternalLink,
+  Gift,
   KeyRound,
   Loader2,
   Plus,
@@ -19,6 +21,14 @@ import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { Separator } from "@/components/ui/separator"
 import { Label } from "@/components/ui/label"
 import {
   Card,
@@ -72,6 +82,16 @@ export default function AiPage() {
   // 新建 Key
   const [keyOpen, setKeyOpen] = React.useState(false)
   const [keyName, setKeyName] = React.useState("")
+  const [keyGroup, setKeyGroup] = React.useState("default")
+
+  // 兑换码
+  const [redeemCode, setRedeemCode] = React.useState("")
+  const [redeemBusy, setRedeemBusy] = React.useState(false)
+
+  // 改中转站密码
+  const [aiPwOpen, setAiPwOpen] = React.useState(false)
+  const [aiPw, setAiPw] = React.useState({ current: "", next: "", confirm: "" })
+  const [aiPwBusy, setAiPwBusy] = React.useState(false)
   /** 完整 key 只在创建时展示一次，不落库 */
   const [createdKey, setCreatedKey] = React.useState<string | null>(null)
 
@@ -145,7 +165,7 @@ export default function AiPage() {
   const handleCreateKey = async () => {
     setBusy(true)
     try {
-      const res = await newapiApi.createKey(keyName)
+      const res = await newapiApi.createKey(keyName, keyGroup)
       setCreatedKey(res.key.fullKey)
       setKeyName("")
       // 静默刷新列表，不能让整页 loading 卸载掉展示完整 Key 的弹窗
@@ -154,6 +174,44 @@ export default function AiPage() {
       toast.error(err instanceof HttpError ? err.message : "创建失败")
     } finally {
       setBusy(false)
+    }
+  }
+
+  const handleRedeem = async () => {
+    if (!redeemCode.trim()) return
+    setRedeemBusy(true)
+    try {
+      const res = await newapiApi.redeem(redeemCode.trim())
+      toast.success(
+        `兑换成功：+${res.currencySymbol}${res.addedDisplay}`
+      )
+      setRedeemCode("")
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "兑换失败")
+    } finally {
+      setRedeemBusy(false)
+    }
+  }
+
+  const handleAiPassword = async () => {
+    if (aiPw.next !== aiPw.confirm) {
+      toast.error("两次输入的新密码不一致")
+      return
+    }
+    setAiPwBusy(true)
+    try {
+      await newapiApi.changePassword({
+        currentPassword: aiPw.current,
+        newPassword: aiPw.next,
+      })
+      toast.success("中转站密码已修改")
+      setAiPwOpen(false)
+      setAiPw({ current: "", next: "", confirm: "" })
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "修改失败")
+    } finally {
+      setAiPwBusy(false)
     }
   }
 
@@ -400,7 +458,7 @@ export default function AiPage() {
           </CardContent>
         </Card>
 
-        {/* 模型列表 */}
+        {/* 模型列表：按分组分类 */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -408,41 +466,141 @@ export default function AiPage() {
               可用模型（{status.models.length}）
             </CardTitle>
             <CardDescription>
-              在任意 OpenAI 兼容客户端中把 Base URL 设为 NewAPI 地址即可使用。
+              按分组分类显示。点击模型名可复制；不同分组的计费与可用渠道不同。
             </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
             {status.models.length === 0 ? (
               <p className="text-sm text-muted-foreground">暂无可用模型</p>
             ) : (
-              <div className="flex flex-wrap gap-2">
-                {status.models.map((m) => (
-                  <Badge
-                    key={m}
-                    variant="secondary"
-                    className="cursor-pointer font-mono text-xs"
-                    onClick={() => void copyText(m, `已复制模型名 ${m}`)}
-                  >
-                    {m}
-                  </Badge>
-                ))}
-              </div>
+              status.availableGroups.map((g) => {
+                const list = status.groupModels[g] ?? []
+                if (list.length === 0) return null
+                return (
+                  <div key={g} className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">{g} 分组</span>
+                      <Badge variant="secondary" className="text-xs">
+                        {list.length} 个模型
+                      </Badge>
+                      {status.accountGroup === g && (
+                        <Badge variant="success" className="text-xs">
+                          当前账号
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {list.map((m) => (
+                        <Badge
+                          key={`${g}-${m}`}
+                          variant="outline"
+                          className="cursor-pointer font-mono text-xs"
+                          onClick={() => void copyText(m, `已复制模型名 ${m}`)}
+                        >
+                          {m}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })
             )}
           </CardContent>
         </Card>
 
+        {/* 额度兑换 */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Gift className="h-4 w-4 text-muted-foreground" />
+              兑换码充值
+            </CardTitle>
+            <CardDescription>
+              输入兑换码（邀请码）为你的中转站额度充值。
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex gap-2">
+              <Input
+                placeholder="输入兑换码"
+                value={redeemCode}
+                onChange={(e) => setRedeemCode(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleRedeem()
+                }}
+              />
+              <Button
+                onClick={() => void handleRedeem()}
+                disabled={redeemBusy || !redeemCode.trim()}
+              >
+                {redeemBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                兑换
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* 使用方式：baseURL 显眼 + 跳转中转站 */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-              使用方式
+              接入信息
             </CardTitle>
+            <CardDescription>
+              在任意 OpenAI 兼容客户端中填入以下两项即可使用。
+            </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2 text-sm text-muted-foreground">
-            <p>Base URL：https://api.doulor.cn/v1</p>
-            <p>API Key：填上面创建的 Key（完整值只在创建时显示）</p>
-            <p className="text-xs">
-              密码与账号信息可在 NewAPI 站点自行修改；本站不保存你的密码。
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>Base URL</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  readOnly
+                  value="https://api.doulor.cn/v1"
+                  className="font-mono text-sm"
+                />
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() =>
+                    void copyText("https://api.doulor.cn/v1", "Base URL 已复制")
+                  }
+                  title="复制"
+                >
+                  <Copy className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>API Key</Label>
+              <p className="text-xs text-muted-foreground">
+                填上面创建的 Key（完整值只在创建时显示一次）
+              </p>
+            </div>
+            <Separator />
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" size="sm" asChild>
+                <a
+                  href="https://api.doulor.cn"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  前往中转站本站
+                </a>
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setAiPwOpen(true)}
+              >
+                <KeyRound className="h-3.5 w-3.5" />
+                修改中转站密码
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              充值、渠道、日志等复杂操作请前往中转站本站完成。
             </p>
           </CardContent>
         </Card>
@@ -483,6 +641,7 @@ export default function AiPage() {
               </div>
             </div>
           ) : (
+            <>
             <div className="space-y-2">
               <Label htmlFor="keyName">名称</Label>
               <Input
@@ -492,6 +651,28 @@ export default function AiPage() {
                 onChange={(e) => setKeyName(e.target.value)}
               />
             </div>
+            {status.availableGroups.length > 0 && (
+              <div className="space-y-2">
+                <Label htmlFor="keyGroup">分组</Label>
+                <Select value={keyGroup} onValueChange={setKeyGroup}>
+                  <SelectTrigger id="keyGroup">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {status.availableGroups.map((g) => (
+                      <SelectItem key={g} value={g}>
+                        {g}
+                        {g === "default" ? "（默认）" : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  分组决定该 Key 可用的模型与计费方式。
+                </p>
+              </div>
+            )}
+            </>
           )}
 
           <DialogFooter>
@@ -508,6 +689,78 @@ export default function AiPage() {
                 </Button>
               </>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 修改中转站密码 */}
+      <Dialog
+        open={aiPwOpen}
+        onOpenChange={(open) => {
+          setAiPwOpen(open)
+          if (!open) setAiPw({ current: "", next: "", confirm: "" })
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>修改中转站密码</DialogTitle>
+            <DialogDescription>
+              需要当前密码验证；修改后不影响已创建的 API Key。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="aiPwCurrent">当前密码</Label>
+              <Input
+                id="aiPwCurrent"
+                type="password"
+                autoComplete="current-password"
+                value={aiPw.current}
+                onChange={(e) =>
+                  setAiPw((f) => ({ ...f, current: e.target.value }))
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="aiPwNext">新密码</Label>
+              <Input
+                id="aiPwNext"
+                type="password"
+                autoComplete="new-password"
+                value={aiPw.next}
+                onChange={(e) => setAiPw((f) => ({ ...f, next: e.target.value }))}
+              />
+              <p className="text-xs text-muted-foreground">至少 8 位</p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="aiPwConfirm">确认新密码</Label>
+              <Input
+                id="aiPwConfirm"
+                type="password"
+                autoComplete="new-password"
+                value={aiPw.confirm}
+                onChange={(e) =>
+                  setAiPw((f) => ({ ...f, confirm: e.target.value }))
+                }
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAiPwOpen(false)}>
+              取消
+            </Button>
+            <Button
+              onClick={() => void handleAiPassword()}
+              disabled={
+                aiPwBusy ||
+                !aiPw.current ||
+                aiPw.next.length < 8 ||
+                aiPw.next !== aiPw.confirm
+              }
+            >
+              {aiPwBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+              确认修改
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

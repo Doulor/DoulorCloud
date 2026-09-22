@@ -11,7 +11,7 @@
   },
   "routes": [
     {
-      "pattern": "mail.doulor.cn",
+      "pattern": "cloud.doulor.cn",
       "custom_domain": true
     }
   ]
