@@ -74,6 +74,33 @@ const THEME_LABEL: Record<string, string> = {
   dark: "暗夜",
 }
 
+/** 一行可复制的地址：显示 + 复制 + 新窗口打开 */
+function AddressRow({ url }: { url: string }) {
+  const [done, setDone] = React.useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url)
+      setDone(true)
+      setTimeout(() => setDone(false), 1500)
+    } catch {
+      toast.error("复制失败，请手动复制")
+    }
+  }
+  return (
+    <div className="flex items-center gap-2">
+      <Input readOnly value={url} className="font-mono text-xs" />
+      <Button variant="outline" size="icon" onClick={() => void copy()} aria-label="复制">
+        {done ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+      </Button>
+      <Button variant="outline" size="icon" asChild aria-label="打开">
+        <a href={url} target="_blank" rel="noopener noreferrer">
+          <ExternalLink className="h-4 w-4" />
+        </a>
+      </Button>
+    </div>
+  )
+}
+
 function formatBytes(n: number) {
   return n >= 1024 * 1024 ? `${Math.round(n / 1024 / 1024)} MB` : `${Math.round(n / 1024)} KB`
 }
@@ -84,7 +111,6 @@ export default function ProfilePage() {
   const [saving, setSaving] = React.useState(false)
   const [enabling, setEnabling] = React.useState(false)
   const [uploading, setUploading] = React.useState<string | null>(null)
-  const [copied, setCopied] = React.useState(false)
 
   const [form, setForm] = React.useState({
     slug: "",
@@ -137,11 +163,10 @@ export default function ProfilePage() {
   }, [load])
 
   const profile = data?.profile
-  // 自定义域名优先；否则用站内路径。用 profile.profilePath（服务端算好的）
-  // 而不是本地 form.slug，避免未保存时显示错地址。
-  const publicUrl = profile?.fqdn
-    ? `https://${profile.fqdn}`
-    : `${window.location.origin}${profile?.profilePath ?? ""}`
+  // 默认地址：始终存在（服务端算好的 profilePath），与是否绑自定义域无关
+  const defaultUrl = `${window.location.origin}${profile?.profilePath ?? ""}`
+  // 自定义域名地址（未绑定时为 null）
+  const customUrl = profile?.fqdn ? `https://${profile.fqdn}` : null
 
   // 误绑根域的保护提示：根域是整站入口，绑给名片会让站点打不开
   const boundToRootDomain =
@@ -218,15 +243,6 @@ export default function ProfilePage() {
     setContacts((c) => c.map((x, idx) => (idx === i ? { ...x, ...patch } : x)))
   }
 
-  const copyUrl = async () => {
-    try {
-      await navigator.clipboard.writeText(publicUrl)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {
-      toast.error("复制失败，请手动复制")
-    }
-  }
 
   if (loading) {
     return (
@@ -313,116 +329,77 @@ export default function ProfilePage() {
             </div>
           </div>
         </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex items-center gap-2">
-            <Input readOnly value={publicUrl} className="font-mono text-xs" />
-            <Button variant="outline" size="icon" onClick={() => void copyUrl()} aria-label="复制链接">
-              {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-            </Button>
-            <Button variant="outline" size="icon" asChild aria-label="打开名片">
-              <a href={publicUrl} target="_blank" rel="noopener noreferrer">
-                <ExternalLink className="h-4 w-4" />
-              </a>
-            </Button>
-          </div>
-          {boundToRootDomain && (
-            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2">
-              <p className="text-xs font-medium text-destructive">
-                当前绑定的是根域名 {profile?.fqdn}
-              </p>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                根域名是平台入口，绑给名片会导致整站无法访问。请在下方「自定义域名」解绑后，
-                改用子域名（如 card.doulor.cn）。
-              </p>
-            </div>
-          )}
+        <CardContent className="space-y-4">
+          {/* 默认地址：始终显示（不受是否绑定自定义域影响） */}
           <div className="space-y-2">
-            <Label>名片地址</Label>
-            <div className="flex items-center gap-1">
-              <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                /profile/
-              </span>
-              <Input readOnly value={profile?.slug ?? ""} className="flex-1 font-mono" />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              固定使用你的用户名。改名请到「设置 → 修改用户名」，名片地址会一并更新。
-            </p>
+            <Label>默认地址</Label>
+            <AddressRow url={defaultUrl} />
           </div>
 
-          <Separator />
-
-          {/* 自定义域名：与默认地址放在一起，便于对照 */}
-          <div className="space-y-3">
-            <div className="space-y-1">
-              <p className="text-sm font-medium">自定义域名</p>
+          {/* 自定义域名：绑定后额外显示一行，两者并存 */}
+          <div className="space-y-2">
+            <Label>自定义域名</Label>
+            {profile?.fqdn ? (
+              <>
+                <AddressRow url={customUrl!} />
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground hover:text-destructive"
+                  onClick={async () => {
+                    try {
+                      await profileApi.unbindDomain()
+                      await load()
+                      toast.success("已解绑")
+                    } catch (err) {
+                      toast.error(err instanceof HttpError ? err.message : "解绑失败")
+                    }
+                  }}
+                >
+                  解绑该域名
+                </button>
+              </>
+            ) : (data?.availableSubdomains.length ?? 0) === 0 ? (
               <p className="text-xs text-muted-foreground">
-                绑定一个自己的子域名直接打开名片，例如{" "}
-                <span className="font-mono">card.doulor.cn</span>
+                没有可用的子域名。请先到「域名」创建，或确认它没有被网盘直链占用。
               </p>
-            </div>
-<CardHeader>
-          <CardTitle className="text-base">自定义域名</CardTitle>
-          <CardDescription>
-            用一个自己的子域名直接打开名片，例如 <span className="font-mono">card.{profile?.slug ?? "you"}.doulor.cn</span>
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {profile?.fqdn ? (
-            <div className="flex items-center justify-between rounded-md border px-4 py-3">
-              <span className="font-mono text-sm">{profile.fqdn}</span>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-muted-foreground hover:text-destructive"
-                onClick={async () => {
-                  try {
-                    await profileApi.unbindDomain()
-                    await load()
-                    toast.success("已解绑")
-                  } catch (err) {
-                    toast.error(err instanceof HttpError ? err.message : "解绑失败")
-                  }
-                }}
-              >
-                解绑
-              </Button>
-            </div>
-          ) : (data?.availableSubdomains.length ?? 0) === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              没有可用的子域名。请先到「域名」创建，或确认它没有被网盘直链占用。
-            </p>
-          ) : (
-            <div className="space-y-2">
-              <Label>选择一个子域名</Label>
+            ) : (
               <div className="flex flex-wrap gap-2">
-                {data?.availableSubdomains.map((s) => (
+                {data?.availableSubdomains.map((sub) => (
                   <Button
-                    key={s.id}
+                    key={sub.id}
                     variant="outline"
                     size="sm"
                     className="font-mono text-xs"
                     onClick={async () => {
                       try {
-                        const res = await profileApi.bindDomain(s.id)
+                        const res = await profileApi.bindDomain(sub.id)
                         await load()
                         toast.success(
-                          res.dnsCreated
-                            ? "已绑定，DNS 生效约需 1-2 分钟"
-                            : "已绑定"
+                          res.dnsCreated ? "已绑定，DNS 生效约需 1-2 分钟" : "已绑定"
                         )
                       } catch (err) {
                         toast.error(err instanceof HttpError ? err.message : "绑定失败")
                       }
                     }}
                   >
-                    {s.fqdn}
+                    {sub.fqdn}
                   </Button>
                 ))}
               </div>
+            )}
+          </div>
+
+          {boundToRootDomain && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2">
+              <p className="text-xs font-medium text-destructive">
+                当前绑定的是根域名 {profile?.fqdn}
+              </p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                根域名是平台入口，绑给名片会导致整站无法访问。请解绑后改用子域名
+                （如 card.doulor.cn）。
+              </p>
             </div>
           )}
-        </CardContent>
-          </div>
         </CardContent>
       </Card>
 
