@@ -60,7 +60,7 @@ export async function register(env: Env, request: Request): Promise<Response> {
       LIMIT 1`
   )
     .bind(inviteCode, new Date().toISOString())
-    .first<{ id: string }>()
+    .first<{ id: string; permissions: string | null }>()
 
   if (!invite) {
     throw new ApiError(400, "邀请码无效或已用完", "INVALID_INVITE")

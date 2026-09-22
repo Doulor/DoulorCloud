@@ -16,7 +16,7 @@
  */
 import { ApiError, json } from "../http"
 import { encryptSecret, decryptSecret, uuid } from "../crypto"
-import { requireUser, type UserRow } from "../auth"
+import { requireFeatureUser, type UserRow } from "../auth"
 import {
   adminSetQuota,
   createApiKey,
@@ -149,7 +149,7 @@ async function consumeCodeMessage(
 
 /** GET /api/dev/status —— 开通状态、额度、模型列表 */
 export async function getStatus(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "ai")
   const settings = await getSettings(env)
   const configured = isNewApiConfigured(env)
   const account = configured ? await loadAccount(env, user.id) : null
@@ -251,7 +251,7 @@ async function decryptAccountToken(
 
 /** POST /api/dev/sync —— 拉取最新额度用量 */
 export async function syncAccount(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "ai")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
 
@@ -301,7 +301,7 @@ export async function syncAccount(env: Env, request: Request): Promise<Response>
  * （判断依据是本站用户名，但任何登录用户都能探测任意名字，故只回布尔值）。
  */
 export async function preflight(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "ai")
   const settings = await getSettings(env)
 
   const base = {
@@ -414,7 +414,7 @@ async function bindExistingAccount(
 
 /** POST /api/dev/bind —— 开通 AI 中转站账号 */
 export async function bindAccount(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "ai")
   if (!isNewApiConfigured(env)) {
     throw new ApiError(503, "AI 中转站未配置", "NEWAPI_NOT_CONFIGURED")
   }
@@ -569,7 +569,7 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
 
 /** GET /api/dev/keys —— 已创建的 Key（掩码） */
 export async function listKeys(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "ai")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
 
@@ -592,7 +592,7 @@ export async function listKeys(env: Env, request: Request): Promise<Response> {
 
 /** POST /api/dev/key —— 创建 API Key（完整 key 只返回这一次） */
 export async function createKey(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "ai")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
 
@@ -651,7 +651,7 @@ export async function removeKey(
   request: Request,
   id: string
 ): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "ai")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
 
@@ -681,7 +681,7 @@ export async function removeKey(
  * 只登记本站未见过的 token，key 仍为掩码形式。
  */
 export async function syncKeys(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "ai")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
 
@@ -740,7 +740,7 @@ export async function syncKeys(env: Env, request: Request): Promise<Response> {
  * 兑换码由管理员在 NewAPI 后台生成；本站只做转发与额度同步。
  */
 export async function redeem(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "ai")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
 
@@ -799,7 +799,7 @@ export async function redeem(env: Env, request: Request): Promise<Response> {
  * access token 仍可用于代建 Key（不受影响）。
  */
 export async function changePassword(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "ai")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
 

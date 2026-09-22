@@ -14,7 +14,7 @@
  */
 import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
-import { requireUser } from "../auth"
+import { requireFeatureUser } from "../auth"
 import {
   deleteObject,
   getObject,
@@ -130,7 +130,7 @@ async function recalculateUsage(
 
 /** GET /api/storage —— 开通状态、配额、直链前缀、自定义域名 */
 export async function getStorage(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "r2")
   const url = new URL(request.url)
   const settings = await getSettings(env)
   const configured = isR2Configured(env)
@@ -186,7 +186,7 @@ export async function getStorage(env: Env, request: Request): Promise<Response> 
  * body: { prefixId: string | null }；null 表示恢复为 /dl/<用户名>/。
  */
 export async function setDefaultPrefix(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "r2")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
 
@@ -221,7 +221,7 @@ export async function setDefaultPrefix(env: Env, request: Request): Promise<Resp
 
 /** POST /api/storage/enable —— 开通（建立以用户名命名的目录） */
 export async function enableStorage(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "r2")
   if (!isR2Configured(env)) {
     throw new ApiError(503, "网盘存储未配置", "R2_NOT_CONFIGURED")
   }
@@ -275,7 +275,7 @@ export async function enableStorage(env: Env, request: Request): Promise<Respons
 
 /** POST /api/storage/disable —— 关闭直链（保留文件，重新启用后恢复） */
 export async function disableStorage(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "r2")
   const account = await loadAccount(env, user.id)
   if (!account) {
     throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
@@ -298,7 +298,7 @@ export async function listStorageObjects(
   env: Env,
   request: Request
 ): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "r2")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
 
@@ -341,7 +341,7 @@ export async function createUploadUrl(
   env: Env,
   request: Request
 ): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "r2")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
   if (account.enabled !== 1) {
@@ -394,7 +394,7 @@ export async function createUploadUrl(
  * 用 HEAD 读取 R2 中的真实大小（不信任前端传值），再更新记账。
  */
 export async function commitUpload(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "r2")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
 
@@ -460,7 +460,7 @@ export async function deleteStorageObject(
   env: Env,
   request: Request
 ): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "r2")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
 
@@ -498,7 +498,7 @@ export async function downloadStorageObject(
   env: Env,
   request: Request
 ): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "r2")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
 
@@ -515,7 +515,7 @@ export async function bindStorageDomain(
   env: Env,
   request: Request
 ): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireFeatureUser(env, request, "r2")
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
 

@@ -1,6 +1,7 @@
 import { ApiError } from "./http"
 import type { Env } from "./env"
 import { hashToken, generateToken, uuid } from "./crypto"
+import { parsePermissions, requireFeature, type Feature } from "./permissions"
 
 export interface UserRow {
   id: string
@@ -15,6 +16,8 @@ export interface UserRow {
   /** 是否接收站内通知邮件 */
   notify_enabled?: number
   email_verify_requested_at?: string | null
+  /** 功能权限 JSON（NULL=全开，见 permissions.ts） */
+  permissions?: string | null
   created_at: string
   updated_at: string
 }
@@ -39,6 +42,7 @@ export function toPublicUser(row: UserRow) {
     role: row.role ?? "user",
     emailVerified: row.email_verified === 1,
     notifyEnabled: row.notify_enabled !== 0,
+    permissions: parsePermissions(row.permissions),
     createdAt: row.created_at,
   }
 }
@@ -161,4 +165,21 @@ export function getSessionTokens(request: Request): string[] {
     .filter((c) => c.startsWith(prefix))
     .map((c) => c.slice(prefix.length))
     .filter((v) => v.length > 0)
+}
+
+/**
+ * 要求登录 + 具备指定功能权限。
+ * 所有与某个付费/受限功能相关的接口都应走这里，
+ * 而不是只调 requireUser —— 权限必须由服务端强制，绝不信任前端。
+ */
+export async function requireFeatureUser(
+  env: Env,
+  request: Request,
+  feature: Feature
+): Promise<UserRow> {
+  const user = await requireUser(env, request)
+  // 管理员始终放行，便于排查问题
+  if (user.role === "admin") return user
+  requireFeature(parsePermissions(user.permissions), feature)
+  return user
 }
