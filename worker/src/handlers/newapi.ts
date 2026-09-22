@@ -400,7 +400,21 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
   const email = `${user.username}@${env.ROOT_DOMAIN}`.toLowerCase()
   const username = user.username
 
-  // 邮箱必须真实存在，否则无法收到验证码
+  // NewAPI 侧已存在同名账号：允许用「输入该账号密码」的方式直接绑定。
+  //
+  // 为什么不能像新账号那样走注册：NewAPI 的 Register 拒绝已存在的用户名，
+  // 因此无法为既有账号补写 email。改为登录验证密码 → 换 access token → 绑定。
+  // 这是「我已经在中转站有账号了」场景的正解。
+  //
+  // 注意：绑定既有账号**不经过注册流程、也不需要读验证码**，
+  // 因此必须在「要求收件箱」之前分流 —— 否则用户会被一个用不到的
+  // 前置条件挡住（该收件箱仅用于接收注册验证码）。
+  const remoteExisting = await findUserByUsername(env, username)
+  if (remoteExisting) {
+    return bindExistingAccount(env, user, remoteExisting, password, secret)
+  }
+
+  // 邮箱必须真实存在，否则无法收到注册验证码
   const mailbox = await env.DB.prepare(
     "SELECT id FROM mailboxes WHERE address = ? COLLATE NOCASE LIMIT 1"
   )
@@ -412,16 +426,6 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
       `需要先创建 ${email} 收件箱才能开通（用于接收验证码）`,
       "NO_MAILBOX"
     )
-  }
-
-  // NewAPI 侧已存在同名账号：允许用「输入该账号密码」的方式直接绑定。
-  //
-  // 为什么不能像新账号那样走注册：NewAPI 的 Register 拒绝已存在的用户名，
-  // 因此无法为既有账号补写 email。改为登录验证密码 → 换 access token → 绑定。
-  // 这是「我已经在中转站有账号了」场景的正解。
-  const remoteExisting = await findUserByUsername(env, username)
-  if (remoteExisting) {
-    return bindExistingAccount(env, user, remoteExisting, password, secret)
   }
 
   // 1. 用本站的 <用户名>@doulor.cn 邮箱自助注册 —— 一步同时建号并绑定邮箱
