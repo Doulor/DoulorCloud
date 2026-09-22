@@ -50,7 +50,8 @@ const baseNav = [
 
 /**
  * 底部固定区：紧贴账户信息上方，与上方主体功能之间留出空白。
- * 自上而下为 设置 → 管理 → 捐献，因此后两者需要倒序插入。
+ * 顺序按「从下往上」定义：最底部是设置，往上依次是管理、捐献。
+ * 因此数组按自上而下书写为 [捐献, 管理, 设置]。
  */
 const settingsNav = { to: "/dashboard/settings", label: "设置", icon: Settings, end: false }
 const adminNav = { to: "/dashboard/admin", label: "管理", icon: ShieldCheck, end: false }
@@ -72,10 +73,11 @@ export function DashboardLayout() {
   }
 
   const isAdmin = user?.role === "admin"
-  // 底部队列：设置在最上，管理居中（仅管理员），捐献最下
+  // 底部队列（自上而下）：捐献 → 管理（仅管理员）→ 设置
+  // 即「从下往上」为 设置 → 管理 → 捐献，设置紧贴账户信息
   const bottomNav = isAdmin
-    ? [settingsNav, adminNav, donationNav]
-    : [settingsNav, donationNav]
+    ? [donationNav, adminNav, settingsNav]
+    : [donationNav, settingsNav]
   const initials = user?.username?.slice(0, 1).toUpperCase() ?? "U"
 
   const renderNavItem = (item: {
