@@ -6,6 +6,10 @@ export interface User {
   email: string
   namespace: string
   role: "user" | "admin"
+  /** 真实邮箱是否已验证（验证后才能作转发目标、接收通知） */
+  emailVerified: boolean
+  /** 是否接收站内通知邮件 */
+  notifyEnabled: boolean
   createdAt: string
 }
 
@@ -150,6 +154,15 @@ export const isApiError = (value: unknown): value is ApiError =>
   "error" in value &&
   typeof (value as ApiError).error === "string"
 
+// ---- 账户设置 ----
+
+export interface EmailSettings {
+  email: string
+  verified: boolean
+  notifyEnabled: boolean
+  canForwardToRealEmail: boolean
+}
+
 // ---- R2 直链网盘 ----
 
 export interface StorageAccount {
@@ -158,6 +171,7 @@ export interface StorageAccount {
   usedBytes: number
   fileCount: number
   enabled: boolean
+  defaultPrefixId: string | null
   createdAt: string
   directLinkBase: string
 }
@@ -192,6 +206,10 @@ export interface StorageOverview {
   defaultQuotaBytes: number
   maxFileBytes: number
   prefixes: StoragePrefix[]
+  /** 默认分享前缀；null 表示用 /dl/<用户名>/ */
+  defaultPrefix: StoragePrefix | null
+  /** 可直接复制的分享基址（由服务端按默认前缀算好） */
+  shareBase: string | null
   availableSubdomains: { id: string; name: string; fqdn: string }[]
 }
 

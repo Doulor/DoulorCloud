@@ -1,4 +1,5 @@
 import { ApiError, json } from "./http"
+import { getSessionTokens, clearedSessionCookie } from "./auth"
 import type { Env } from "./env"
 import * as authHandlers from "./handlers/auth"
 import * as dnsHandlers from "./handlers/dns"
@@ -7,6 +8,7 @@ import * as subdomainHandlers from "./handlers/subdomains"
 import * as adminHandlers from "./handlers/admin"
 import * as storageHandlers from "./handlers/storage"
 import * as newapiHandlers from "./handlers/newapi"
+import * as settingsHandlers from "./handlers/settings"
 import { incomingEmail } from "./email-delivery"
 
 export interface WorkerContext {
@@ -36,6 +38,23 @@ async function route(env: Env, request: Request): Promise<Response> {
   }
   if (routePath === "/password" && method === "PUT") {
     return authHandlers.changePassword(env, request)
+  }
+
+  // 账户设置：真实邮箱验证 / 通知开关 / 改名 / 改邮箱
+  if (routePath === "/settings/email" && method === "GET") {
+    return settingsHandlers.getEmailSettings(env, request)
+  }
+  if (routePath === "/settings/email/verify" && method === "POST") {
+    return settingsHandlers.verifyRealEmail(env, request)
+  }
+  if (routePath === "/settings/email" && method === "PUT") {
+    return settingsHandlers.changeRealEmail(env, request)
+  }
+  if (routePath === "/settings/notify" && method === "PUT") {
+    return settingsHandlers.updateNotifySetting(env, request)
+  }
+  if (routePath === "/settings/username" && method === "PUT") {
+    return settingsHandlers.changeUsername(env, request)
   }
 
   // DNS
@@ -107,6 +126,13 @@ async function route(env: Env, request: Request): Promise<Response> {
   }
 
   // Admin: 全局设置 / 网盘运维
+  // 出站邮件连通性自检（管理员）：验证 send_email 绑定与发送域名 Onboard 状态
+  if (routePath === "/admin/mail-test" && method === "POST") {
+    return adminHandlers.testMail(env, request)
+  }
+  if (routePath === "/admin/mail-status" && method === "GET") {
+    return adminHandlers.mailStatus(env, request)
+  }
   if (routePath === "/admin/settings" && method === "GET") {
     return adminHandlers.getSettingsHandler(env, request)
   }
@@ -203,6 +229,9 @@ async function route(env: Env, request: Request): Promise<Response> {
   if (routePath === "/storage/domain" && method === "POST") {
     return storageHandlers.bindStorageDomain(env, request)
   }
+  if (routePath === "/storage/default-prefix" && method === "POST") {
+    return storageHandlers.setDefaultPrefix(env, request)
+  }
 
   // ---- AI 中转站（NewAPI）----
   if (routePath === "/dev/status" && method === "GET") {
@@ -277,7 +306,22 @@ export default {
       return await route(env, request)
     } catch (err) {
       if (err instanceof ApiError) {
-        return json({ error: err.message, code: err.code }, err.status)
+        const res = json({ error: err.message, code: err.code }, err.status)
+        // 仅在「会话本身失效」时清除 cookie。
+        // 注意不能用 status===401 一刀切：登录密码错误、修改密码时当前密码错误
+        // 也是 401（INVALID_CREDENTIALS），清 cookie 会把正常用户踢下线。
+        if (
+          err.status === 401 &&
+          (err.code === "UNAUTHORIZED" || err.code === "SESSION_EXPIRED")
+        ) {
+          const tokens = getSessionTokens(request)
+          // 浏览器可能同时持有多个同名 cookie，逐个下发清除指令
+          const count = Math.max(tokens.length, 1)
+          for (let i = 0; i < count; i++) {
+            res.headers.append("Set-Cookie", clearedSessionCookie())
+          }
+        }
+        return res
       }
       console.error("Unhandled error:", err)
       return json({ error: "服务器内部错误", code: "INTERNAL" }, 500)

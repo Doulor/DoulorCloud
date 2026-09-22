@@ -10,6 +10,8 @@ import {
 } from "../settings"
 import { isR2Configured } from "../r2"
 import { isNewApiConfigured, getCurrencyInfo } from "../newapi-client"
+import { sendMail, renderMail } from "../mailer"
+import { cfListDestinations } from "../cloudflare"
 import { purgeUserStorage, recalculateUsage } from "./storage"
 
 /**
@@ -303,6 +305,79 @@ export async function deleteInvite(env: Env, request: Request, id: string): Prom
 
   await env.DB.prepare("DELETE FROM invite_codes WHERE id = ?").bind(id).run()
   return new Response(null, { status: 204 })
+}
+
+/**
+ * POST /api/admin/mail-test —— 出站邮件自检。
+ *
+ * 区分两种发送能力（成本与前提不同）：
+ *   - 「验证码 / 账号找回」：发给**已验证的目标地址**，Cloudflare **免费**且无需 Onboard
+ *   - 「公告群发」：需要先 Onboard 发送域名（付费），否则只能发已验证地址
+ */
+export async function testMail(env: Env, request: Request): Promise<Response> {
+  await requireAdmin(env, request)
+  const body = (await request.json().catch(() => ({}))) as { to?: string }
+  const to = (body.to ?? "").trim()
+  if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+    throw new ApiError(400, "请提供有效的收件邮箱", "INVALID_EMAIL")
+  }
+
+  const { text, html } = renderMail("Doulor Cloud 邮件自检", [
+    "如果你收到这封邮件，说明 Worker 的出站邮件已配置成功。",
+    "此功能用于：真实邮箱验证、账号找回、以及站内通知。",
+  ])
+
+  try {
+    await sendMail(env, { to, subject: "Doulor Cloud 邮件自检", text, html })
+  } catch (err) {
+    if (err instanceof ApiError) {
+      return json({ ok: false, code: err.code, error: err.message }, err.status)
+    }
+    throw err
+  }
+
+  return json({ ok: true, message: `已发送至 ${to}` })
+}
+
+/**
+ * GET /api/admin/mail-status —— 邮件发送能力现状。
+ * 供管理面板与前端判断「哪些邮件功能当前可用」。
+ */
+export async function mailStatus(env: Env, request: Request): Promise<Response> {
+  await requireAdmin(env, request)
+
+  let verified: { email: string; verifiedAt: string | null }[] = []
+  let listError: string | null = null
+  try {
+    const list = await cfListDestinations(env)
+    verified = list
+      .filter((d) => d.verified !== null)
+      .map((d) => ({ email: d.email, verifiedAt: d.verified }))
+  } catch (err) {
+    listError = err instanceof Error ? err.message : String(err)
+  }
+
+  const counts = await env.DB.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM users) AS users,
+       (SELECT COUNT(*) FROM users WHERE email_verified = 1) AS verified_users,
+       (SELECT COUNT(*) FROM users WHERE notify_enabled = 1) AS notify_on`
+  ).first<{ users: number; verified_users: number; notify_on: number }>()
+
+  return json({
+    bindingConfigured: Boolean(env.EMAIL),
+    // 已验证目标地址数量决定「验证码/找回」能发给多少人
+    verifiedDestinations: verified,
+    listError,
+    users: counts?.users ?? 0,
+    verifiedUsers: counts?.verified_users ?? 0,
+    notifySubscribers: counts?.notify_on ?? 0,
+    // 群发公告需要 Onboard 发送域名（付费）；未 Onboard 时只能发已验证地址
+    canBroadcast: false,
+    note:
+      "未 Onboard 发送域名时，只能发往「已验证目标地址」（免费）；" +
+      "群发公告需在 Cloudflare 面板 Onboard Email Sending（付费）。",
+  })
 }
 
 // ---- 全局设置（网盘配额 / AI 试用额度等）----

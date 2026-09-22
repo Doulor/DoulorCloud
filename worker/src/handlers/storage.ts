@@ -43,6 +43,8 @@ interface StorageAccountRow {
   used_bytes: number
   file_count: number
   enabled: number
+  /** 默认分享前缀：storage_prefixes.id；为空则用 /dl/<用户名>/ */
+  default_prefix_id?: string | null
   created_at: string
   updated_at: string
 }
@@ -54,6 +56,7 @@ function toPublicAccount(row: StorageAccountRow, directLinkBase: string) {
     usedBytes: row.used_bytes,
     fileCount: row.file_count,
     enabled: row.enabled === 1,
+    defaultPrefixId: row.default_prefix_id ?? null,
     createdAt: row.created_at,
     directLinkBase: `${directLinkBase}/${row.prefix}`,
   }
@@ -153,6 +156,10 @@ export async function getStorage(env: Env, request: Request): Promise<Response> 
         .all<{ id: string; name: string; fqdn: string }>()
     : { results: [] as { id: string; name: string; fqdn: string }[] }
 
+  const list = prefixes.results ?? []
+  const defaultPrefix =
+    list.find((p) => p.id === account?.default_prefix_id) ?? null
+
   return json({
     configured,
     featureEnabled: settings.storage_enabled === "1",
@@ -161,9 +168,55 @@ export async function getStorage(env: Env, request: Request): Promise<Response> 
     account: account ? toPublicAccount(account, `${url.origin}/dl`) : null,
     defaultQuotaBytes: Number(settings.storage_quota_bytes),
     maxFileBytes: Number(settings.storage_max_file_bytes),
-    prefixes: prefixes.results ?? [],
+    prefixes: list,
+    // 默认分享前缀（null = 用 /dl/<用户名>/）
+    defaultPrefix,
+    // 直接给前端一个可复制的分享基址，省去它自己拼接
+    shareBase: defaultPrefix
+      ? `https://${defaultPrefix.fqdn}`
+      : account
+        ? `${url.origin}/dl/${account.prefix}`
+        : null,
     availableSubdomains: subdomains.results ?? [],
   })
+}
+
+/**
+ * POST /api/storage/default-prefix —— 设置默认分享链接前缀。
+ * body: { prefixId: string | null }；null 表示恢复为 /dl/<用户名>/。
+ */
+export async function setDefaultPrefix(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+
+  const body = (await request.json()) as { prefixId?: string | null }
+  const prefixId = body.prefixId ?? null
+
+  if (prefixId !== null) {
+    // 必须属于当前用户，避免把别人的域名设成自己的默认前缀
+    const owned = await env.DB.prepare(
+      "SELECT id, fqdn FROM storage_prefixes WHERE id = ? AND user_id = ?"
+    )
+      .bind(prefixId, user.id)
+      .first<{ id: string; fqdn: string }>()
+    if (!owned) throw new ApiError(403, "无权使用该前缀", "FORBIDDEN")
+  }
+
+  await env.DB.prepare(
+    "UPDATE storage_accounts SET default_prefix_id = ?, updated_at = ? WHERE user_id = ?"
+  )
+    .bind(prefixId, new Date().toISOString(), user.id)
+    .run()
+
+  await audit(
+    env,
+    user.id,
+    "storage.default_prefix",
+    prefixId ? `默认分享前缀设为 ${prefixId}` : "默认分享前缀恢复为默认路径"
+  )
+
+  return json({ defaultPrefixId: prefixId })
 }
 
 /** POST /api/storage/enable —— 开通（建立以用户名命名的目录） */

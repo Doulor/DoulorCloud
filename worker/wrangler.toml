@@ -27,11 +27,26 @@ zone_name = "doulor.cn"
 pattern = "doulor.cn/dl/*"
 zone_name = "doulor.cn"
 
-# Email Workers：Cloudflare Email Routing 入站
-[email]
-type = "send_email"
-name = "doulor-mail-api"
-allowed_destination_addresses = ["doulor.cn"]
+# 出站邮件：Cloudflare Email Service 的 send_email 绑定。
+#
+# 注意语法是 `[[send_email]]`（数组表）—— 早期这里误写成 `[email]`，
+# wrangler 只当作未知字段忽略，绑定从未生效过。
+#
+# 限制（官方文档 2026-09 实测）：
+#   - 发送域名必须在面板 Compute > Email Service > Email Sending 里 Onboard；
+#     **在完成 onboard 之前，只能发往账户内“已验证的 destination address”**。
+#     因此「验证真实邮箱」「找回账号」「发公告」都依赖它。
+#   - 发件地址必须属于已 onboard 的域名。
+#
+# 安全：不设 allowed_destination_addresses —— 那会把绑定限制成只能发给
+# doulor.cn（即只能发给自己），正好与需求相反。改为用 allowed_sender_addresses
+# 限定发件人，收件人交由运行时校验（见 mailer.ts）。
+[[send_email]]
+name = "EMAIL"
+allowed_sender_addresses = [
+  "no-reply@doulor.cn",
+  "support@doulor.cn",
+]
 
 [vars]
 ROOT_DOMAIN = "doulor.cn"

@@ -18,6 +18,7 @@ import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -156,11 +157,33 @@ export default function StoragePage() {
     }
   }
 
+  /**
+   * 生成文件直链。
+   * 若用户设置了「默认分享前缀」，则用 https://<子域名>/<文件名>，
+   * 否则回退到 https://<站点>/dl/<用户名>/<文件名>。
+   */
   const directLinkFor = (filename: string) => {
     if (!overview?.account) return ""
+    const enc = encodeURIComponent(filename)
+    if (overview.defaultPrefix) {
+      return `https://${overview.defaultPrefix.fqdn}/${enc}`
+    }
     return `${window.location.origin}/dl/${encodeURIComponent(
       overview.account.prefix
-    )}/${encodeURIComponent(filename)}`
+    )}/${enc}`
+  }
+
+  const handleSetDefaultPrefix = async (prefixId: string | null) => {
+    setBusy(true)
+    try {
+      await storageApi.setDefaultPrefix(prefixId)
+      toast.success(prefixId ? "已设为默认分享前缀" : "已恢复默认直链前缀")
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "设置失败")
+    } finally {
+      setBusy(false)
+    }
   }
 
   const copyText = async (text: string) => {
@@ -431,46 +454,88 @@ export default function StoragePage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
+            {/* 当前默认分享前缀（复制直链时使用） */}
             <div className="flex items-center gap-2">
-              <Input readOnly value={`${account.directLinkBase}/`} className="font-mono text-xs" />
+              <Input
+                readOnly
+                value={`${overview.shareBase ?? account.directLinkBase}/`}
+                className="font-mono text-xs"
+              />
               <Button
                 variant="outline"
                 size="icon"
-                onClick={() => void copyText(`${account.directLinkBase}/`)}
+                onClick={() =>
+                  void copyText(`${overview.shareBase ?? account.directLinkBase}/`)
+                }
                 title="复制"
               >
                 <Copy className="h-4 w-4" />
               </Button>
             </div>
+            <p className="text-xs text-muted-foreground">
+              {overview.defaultPrefix
+                ? `默认分享前缀：${overview.defaultPrefix.fqdn}`
+                : "默认分享前缀：站点直链路径（可在下方绑定域名后设为默认）"}
+            </p>
 
             {overview.prefixes.length > 0 && (
               <div className="space-y-2">
-                {overview.prefixes.map((p) => (
-                  <div key={p.id} className="flex items-center gap-2">
-                    <Input
-                      readOnly
-                      value={`https://${p.fqdn}/`}
-                      className="font-mono text-xs"
-                    />
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      onClick={() => void copyText(`https://${p.fqdn}/`)}
-                      title="复制"
-                    >
-                      <Copy className="h-4 w-4" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="text-muted-foreground hover:text-destructive"
-                      onClick={() => void handleUnbind(p.id)}
-                      title="解绑"
-                    >
-                      <X className="h-4 w-4" />
-                    </Button>
-                  </div>
-                ))}
+                {overview.prefixes.map((p) => {
+                  const isDefault = account.defaultPrefixId === p.id
+                  return (
+                    <div key={p.id} className="flex items-center gap-2">
+                      <Input
+                        readOnly
+                        value={`https://${p.fqdn}/`}
+                        className="font-mono text-xs"
+                      />
+                      {isDefault ? (
+                        <Badge variant="success" className="shrink-0">
+                          默认
+                        </Badge>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="shrink-0"
+                          onClick={() => void handleSetDefaultPrefix(p.id)}
+                          disabled={busy}
+                          title="设为复制直链时使用的默认前缀"
+                        >
+                          设为默认
+                        </Button>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        onClick={() => void copyText(`https://${p.fqdn}/`)}
+                        title="复制"
+                      >
+                        <Copy className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="text-muted-foreground hover:text-destructive"
+                        onClick={() => void handleUnbind(p.id)}
+                        title="解绑"
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  )
+                })}
+                {account.defaultPrefixId && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-muted-foreground"
+                    onClick={() => void handleSetDefaultPrefix(null)}
+                    disabled={busy}
+                  >
+                    恢复为站点默认直链
+                  </Button>
+                )}
               </div>
             )}
 

@@ -7,6 +7,7 @@ import {
   type DnsRecord,
   type DnsRecordType,
   type Mailbox,
+  type EmailSettings,
   type MailMessage,
   type MeResponse,
   type NewApiKey,
@@ -16,6 +17,7 @@ import {
   type StorageOverview,
   type StoragePrefixCreated,
   type Subdomain,
+  type User,
 } from "@/types"
 
 /**
@@ -221,6 +223,43 @@ export const adminApi = {
     ),
 }
 
+// ---- 账户设置（真实邮箱验证 / 改名 / 改邮箱 / 通知开关）----
+
+export const settingsApi = {
+  getEmail: () => request<EmailSettings>("/settings/email"),
+
+  /** action 省略 = 发起验证；status = 查询状态（前端轮询） */
+  verifyEmail: (action?: "status") =>
+    request<{ email: string; verified: boolean; message?: string }>(
+      "/settings/email/verify",
+      { method: "POST", body: JSON.stringify(action ? { action } : {}) }
+    ),
+
+  /** 修改真实邮箱：先 request 触发验证邮件，再 confirm 落库 */
+  changeEmail: (payload: {
+    email: string
+    password: string
+    action: "request" | "confirm"
+  }) =>
+    request<{ user: User; email?: string; verified?: boolean; message?: string }>(
+      "/settings/email",
+      { method: "PUT", body: JSON.stringify(payload) }
+    ),
+
+  setNotify: (enabled: boolean) =>
+    request<{ notifyEnabled: boolean }>("/settings/notify", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+
+  /** 修改用户名（需密码确认；网盘目录等不会自动迁移） */
+  changeUsername: (payload: { username: string; password: string }) =>
+    request<{ user: User; warnings: { note: string } }>("/settings/username", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+}
+
 // ---- R2 直链网盘 ----
 
 export const storageApi = {
@@ -283,6 +322,13 @@ export const storageApi = {
     request<{ ok: boolean }>("/storage/domain", {
       method: "POST",
       body: JSON.stringify({ subdomainId: id, action: "unbind" }),
+    }),
+
+  /** 设置默认分享前缀；传 null 恢复为 /dl/<用户名>/ */
+  setDefaultPrefix: (prefixId: string | null) =>
+    request<{ defaultPrefixId: string | null }>("/storage/default-prefix", {
+      method: "POST",
+      body: JSON.stringify({ prefixId }),
     }),
 }
 

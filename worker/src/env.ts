@@ -1,5 +1,7 @@
 export interface Env {
   DB: D1Database
+  /** 出站邮件绑定（Cloudflare Email Service，见 wrangler.toml 的 [[send_email]]） */
+  EMAIL?: SendEmail
   CLOUDFLARE_API_TOKEN?: string // 普通环境变量
   CLOUDFLARE_API_TOKEN_SECRET?: string // 推荐：Secret（优先）
   ZONE_ID: string

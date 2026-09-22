@@ -5,7 +5,6 @@ import { requireUser, type UserRow } from "../auth"
 import {
   cfCreateEmailRule,
   cfDeleteEmailRule,
-  cfEnsureDestination,
   cfListDestinations,
 } from "../cloudflare"
 import type { Env } from "../env"
@@ -191,20 +190,9 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
     throw new ApiError(409, "该邮箱已被使用", "CONFLICT")
   }
 
-  // 默认转发到账户邮箱（若账户邮箱本身是本站邮箱，则不设转发，防止循环）
-  const userEmail = user.email.toLowerCase()
-  const defaultForwarding = userEmail.endsWith(`@${env.ROOT_DOMAIN.toLowerCase()}`)
-    ? null
-    : JSON.stringify([userEmail])
-
-  // 注册为 Cloudflare destination（未验证会自动向该邮箱发验证邮件）
-  if (defaultForwarding) {
-    try {
-      await cfEnsureDestination(env, userEmail)
-    } catch (err) {
-      console.error("默认转发地址注册失败:", userEmail, err)
-    }
-  }
+  // 默认不自动设置转发：只有「在设置里验证过的真实邮箱」才能作转发目标。
+  // 注册时的邮箱尚未验证，因此这里不再自动填入（用户验证后可在邮箱页选择）。
+  const defaultForwarding = null
 
   const id = uuid()
   const now = new Date().toISOString()
@@ -243,15 +231,21 @@ export async function updateMailbox(env: Env, request: Request, id: string): Pro
 
   const targets = validateForwarding(body.forwardingTo ?? [], env.ROOT_DOMAIN)
 
-  // 注册为 Cloudflare destination address（未验证的会自动收到验证邮件）
-  const forwardingStatus: { email: string; verified: boolean }[] = []
-  for (const target of targets) {
-    try {
-      const dest = await cfEnsureDestination(env, target)
-      forwardingStatus.push({ email: target, verified: dest.verified !== null })
-    } catch (err) {
-      console.error("转发地址注册失败:", target, err)
-      forwardingStatus.push({ email: target, verified: false })
+  // 只有「在设置里验证过的真实邮箱」才能作为转发目标。
+  // 未验证的地址不仅 Cloudflare 会拒绝转发，还会让用户误以为配置成功。
+  if (targets.length > 0) {
+    const verified = await loadVerifiedSet(env)
+    // 查询失败时按「全部未验证」处理 —— 宁可拒绝，也不要写入一个转发不了的配置
+    const verifiedSet = verified ?? new Set<string>()
+    const unverified = targets.filter((t) => !verifiedSet.has(t.toLowerCase()))
+    if (unverified.length > 0) {
+      throw new ApiError(
+        400,
+        verified === undefined
+          ? "暂时无法确认邮箱验证状态，请稍后重试"
+          : `以下邮箱尚未验证，请先到「设置」完成真实邮箱验证：${unverified.join("、")}`,
+        "FORWARD_TARGET_NOT_VERIFIED"
+      )
     }
   }
 
@@ -260,9 +254,13 @@ export async function updateMailbox(env: Env, request: Request, id: string): Pro
     .run()
 
   const updated = await requireMailbox(env, user, id)
+  const afterSet = (await loadVerifiedSet(env)) ?? new Set<string>()
   return json({
     mailbox: await toPublicMailbox(env, user, updated),
-    forwardingStatus,
+    forwardingStatus: targets.map((t) => ({
+      email: t,
+      verified: afterSet.has(t.toLowerCase()),
+    })),
   })
 }
 
