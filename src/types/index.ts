@@ -85,6 +85,26 @@ export interface DashboardStats {
   dnsRecords: number
   mailboxes: number
   emailForwards: number
+  // 网盘（概览用量卡用；未开通时 usedBytes=0、quotaBytes=0）
+  storageUsedBytes: number
+  storageQuotaBytes: number
+}
+
+export interface RecentStorageFile {
+  id: string
+  filename: string
+  r2Key: string
+  size: number
+  createdAt: string
+}
+
+export interface Announcement {
+  id: string
+  title: string
+  body: string
+  category: string
+  pinned: boolean
+  createdAt: string
 }
 
 export interface RecentMessage {
@@ -103,6 +123,7 @@ export interface MeResponse {
   mailboxLimit?: number
   recentActivity: AuditLog[]
   recentMessages?: RecentMessage[]
+  recentStorageFiles?: RecentStorageFile[]
 }
 
 export interface AdminUser {

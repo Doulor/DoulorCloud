@@ -361,6 +361,22 @@ export async function markMessage(
   return new Response(null, { status: 204 })
 }
 
+/**
+ * POST /api/mailbox/read-all —— 把当前用户所有未读邮件标为已读。
+ * 不限某个 mailbox，覆盖该用户名下全部收件箱。
+ */
+export async function markAllRead(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  // messages 通过 mailbox_id 关联到 mailboxes.user_id，一次 UPDATE 覆盖
+  const result = await env.DB.prepare(
+    `UPDATE messages SET read = 1
+     WHERE read = 0 AND mailbox_id IN (SELECT id FROM mailboxes WHERE user_id = ?)`
+  )
+    .bind(user.id)
+    .run()
+  return json({ updated: result.meta?.changes ?? 0 })
+}
+
 // DELETE /api/mailbox/:id/messages/:messageId —— 删除消息
 export async function deleteMessage(
   env: Env,

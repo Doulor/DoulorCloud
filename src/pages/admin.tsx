@@ -275,7 +275,7 @@ export default function AdminPage() {
   const loadDonations = React.useCallback(async () => {
     setDonationLoading(true)
     try {
-      const res = await donationApi.list()
+      const res = await donationApi.listAll()
       setDonations(res.donations)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "加载捐献申请失败")

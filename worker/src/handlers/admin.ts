@@ -37,7 +37,7 @@ interface AdminUserRow {
   updated_at: string
 }
 
-async function requireAdmin(env: Env, request: Request): Promise<AdminUserRow> {
+export async function requireAdmin(env: Env, request: Request): Promise<AdminUserRow> {
   const admin = (await requireUser(env, request)) as AdminUserRow
   if (admin.role !== "admin") {
     throw new ApiError(403, "需要管理员权限", "FORBIDDEN")

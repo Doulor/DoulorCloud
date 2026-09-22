@@ -4,8 +4,10 @@ import {
   type AdminUser,
   type AdminUserDetail,
   type ApiError,
+  type Announcement,
   type DnsRecord,
   type DnsRecordType,
+  type Donation,
   type DonationOverview,
   type Mailbox,
   type AdminFrpApplication,
@@ -617,6 +619,10 @@ export const emailApi = {
       body: JSON.stringify({ read }),
     }),
 
+  /** 一键全部已读：把该用户所有 mailbox 的未读标已读 */
+  markAllRead: () =>
+    request<{ updated: number }>("/mailbox/read-all", { method: "POST" }),
+
   deleteMessage: (mailboxId: string, messageId: string) =>
     request<void>(`/mailbox/${mailboxId}/messages/${messageId}`, {
       method: "DELETE",
@@ -714,9 +720,53 @@ export const donationApi = {
   cancel: (id: string) =>
     request<void>(`/donations/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
+  /** 管理端：全部申请（含完整 payload，管理页核验资源用） */
+  listAll: () =>
+    request<{ donations: Donation[]; typeLabels: Record<string, string> }>(
+      "/admin/donations"
+    ),
+
   review: (id: string, action: "approve" | "reject", note?: string) =>
     request<{ ok: boolean; status: string }>("/admin/donations/review", {
       method: "POST",
       body: JSON.stringify({ id, action, note }),
+    }),
+}
+
+// ---- 公告 / 网站动态 ----
+
+export const announcementApi = {
+  /** 登录用户：最近 5 条公告（pinned 优先） */
+  list: () => request<{ announcements: Announcement[] }>("/announcements"),
+
+  // 管理端
+  listAll: () =>
+    request<{ announcements: Announcement[] }>("/admin/announcements"),
+
+  create: (payload: {
+    title: string
+    body: string
+    category?: string
+    pinned?: boolean
+  }) =>
+    request<{ announcement: Announcement }>("/admin/announcements", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  update: (id: string, payload: Partial<{
+    title: string
+    body: string
+    category: string
+    pinned: boolean
+  }>) =>
+    request<{ announcement: Announcement }>(
+      `/admin/announcements/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(payload) }
+    ),
+
+  remove: (id: string) =>
+    request<{ ok: boolean }>(`/admin/announcements/${encodeURIComponent(id)}`, {
+      method: "DELETE",
     }),
 }

@@ -265,6 +265,25 @@ export async function me(env: Env, request: Request): Promise<Response> {
     .bind(user.id)
     .first<{ c: number }>()
 
+  // 网盘：已用字节、配额（概览网盘用量卡用；文件数/最近文件见下方 recentStorageFiles）
+  const storageUsed = await env.DB.prepare(
+    "SELECT COALESCE(SUM(size), 0) AS c FROM storage_objects WHERE user_id = ?"
+  )
+    .bind(user.id)
+    .first<{ c: number }>()
+  const storageAccount = await env.DB.prepare(
+    "SELECT quota_bytes FROM storage_accounts WHERE user_id = ?"
+  )
+    .bind(user.id)
+    .first<{ quota_bytes: number | null }>()
+
+  // 网盘最近 3 个文件（概览卡展示文件名 + 直链）
+  const recentStorageFiles = await env.DB.prepare(
+    "SELECT id, filename, r2_key, size, created_at FROM storage_objects WHERE user_id = ? ORDER BY created_at DESC LIMIT 3"
+  )
+    .bind(user.id)
+    .all<{ id: string; filename: string; r2_key: string; size: number; created_at: string }>()
+
   const recentMessages = await env.DB.prepare(
     `SELECT m.id, m.from_address, m.subject, m.read, m.received_at
        FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id
@@ -298,7 +317,18 @@ export async function me(env: Env, request: Request): Promise<Response> {
       dnsRecords: dnsCount?.c ?? 0,
       mailboxes: mailboxCount?.c ?? 0,
       emailForwards: 0,
+      // 网盘（未开通：usedBytes 0、quotaBytes 0）
+      storageUsedBytes: storageUsed?.c ?? 0,
+      storageQuotaBytes: storageAccount?.quota_bytes ?? 0,
     },
+    // 网盘最近 3 个文件（概览卡展示文件名 + 直链复制）
+    recentStorageFiles: (recentStorageFiles.results ?? []).map((f) => ({
+      id: f.id,
+      filename: f.filename,
+      r2Key: f.r2_key,
+      size: f.size,
+      createdAt: f.created_at,
+    })),
     subdomainLimit: 5,
     mailboxLimit: 3,
     recentMessages: (recentMessages.results ?? []).map((m) => ({

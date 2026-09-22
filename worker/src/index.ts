@@ -14,6 +14,7 @@ import * as frpHandlers from "./handlers/frp"
 import * as profileHandlers from "./handlers/profile"
 import * as proxyHandlers from "./handlers/proxy"
 import * as tempboxHandlers from "./handlers/tempbox"
+import * as announcementHandlers from "./handlers/announcements"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
 
@@ -136,7 +137,7 @@ async function route(env: Env, request: Request): Promise<Response> {
 
   // Admin: 捐献审核
   if (routePath === "/admin/donations" && method === "GET") {
-    return donationHandlers.listDonations(env, request)
+    return donationHandlers.listAllDonations(env, request)
   }
   if (routePath === "/admin/donations/review" && method === "POST") {
     return donationHandlers.reviewDonation(env, request)
@@ -167,6 +168,33 @@ async function route(env: Env, request: Request): Promise<Response> {
   if (routePath === "/admin/mail-status" && method === "GET") {
     return adminHandlers.mailStatus(env, request)
   }
+
+  // 公告 / 网站动态（管理员 CRUD，普通用户只读最近几条）
+  if (routePath === "/announcements" && method === "GET") {
+    return announcementHandlers.listAnnouncements(env, request)
+  }
+  if (routePath === "/admin/announcements" && method === "GET") {
+    return announcementHandlers.listAllAnnouncements(env, request)
+  }
+  if (routePath === "/admin/announcements" && method === "POST") {
+    return announcementHandlers.createAnnouncement(env, request)
+  }
+  const announcementMatch = routePath.match(/^\/admin\/announcements\/([^/]+)$/)
+  if (announcementMatch && method === "PUT") {
+    return announcementHandlers.updateAnnouncement(
+      env,
+      request,
+      decodeURIComponent(announcementMatch[1])
+    )
+  }
+  if (announcementMatch && method === "DELETE") {
+    return announcementHandlers.deleteAnnouncement(
+      env,
+      request,
+      decodeURIComponent(announcementMatch[1])
+    )
+  }
+
   if (routePath === "/admin/settings" && method === "GET") {
     return adminHandlers.getSettingsHandler(env, request)
   }
@@ -233,6 +261,11 @@ async function route(env: Env, request: Request): Promise<Response> {
       decodeURIComponent(messageReadMatch[1]),
       decodeURIComponent(messageReadMatch[2])
     )
+  }
+
+  // 一键全部已读：把该用户所有 mailbox 的未读标已读
+  if (routePath === "/mailbox/read-all" && method === "POST") {
+    return emailHandlers.markAllRead(env, request)
   }
 
   // ---- 捐献 ----

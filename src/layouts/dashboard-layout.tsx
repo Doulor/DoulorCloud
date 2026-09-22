@@ -35,6 +35,7 @@ import { useAuth } from "@/hooks/use-auth"
 import { authApi } from "@/services/api"
 import { cn } from "@/lib/utils"
 
+/** 主体功能，排在侧边栏上部 */
 const baseNav = [
   { to: "/dashboard", label: "概览", icon: LayoutDashboard, end: true },
   { to: "/dashboard/domains", label: "域名", icon: Globe, end: false },
@@ -45,13 +46,15 @@ const baseNav = [
   { to: "/dashboard/proxy", label: "代理节点", icon: Zap, end: false },
   { to: "/dashboard/tempbox", label: "临时分享箱", icon: Package, end: false },
   { to: "/dashboard/profile", label: "个人名片", icon: Contact, end: false },
-  { to: "/dashboard/settings", label: "设置", icon: Settings, end: false },
-  { to: "/dashboard/donations", label: "捐献", icon: Heart, end: false },
 ]
 
-const adminNav = [
-  { to: "/dashboard/admin", label: "管理", icon: ShieldCheck, end: false },
-]
+/**
+ * 底部固定区：紧贴账户信息上方，与上方主体功能之间留出空白。
+ * 自上而下为 设置 → 管理 → 捐献，因此后两者需要倒序插入。
+ */
+const settingsNav = { to: "/dashboard/settings", label: "设置", icon: Settings, end: false }
+const adminNav = { to: "/dashboard/admin", label: "管理", icon: ShieldCheck, end: false }
+const donationNav = { to: "/dashboard/donations", label: "捐献", icon: Heart, end: false }
 
 export function DashboardLayout() {
   const { user, setUser } = useAuth()
@@ -69,8 +72,38 @@ export function DashboardLayout() {
   }
 
   const isAdmin = user?.role === "admin"
-  const nav = isAdmin ? [...baseNav, ...adminNav] : baseNav
+  // 底部队列：设置在最上，管理居中（仅管理员），捐献最下
+  const bottomNav = isAdmin
+    ? [settingsNav, adminNav, donationNav]
+    : [settingsNav, donationNav]
   const initials = user?.username?.slice(0, 1).toUpperCase() ?? "U"
+
+  const renderNavItem = (item: {
+    to: string
+    label: string
+    icon: React.ElementType
+    end: boolean
+  }) => {
+    const active = item.end
+      ? location.pathname === item.to
+      : location.pathname.startsWith(item.to)
+    return (
+      <Link
+        key={item.to}
+        to={item.to}
+        onClick={() => setOpen(false)}
+        className={cn(
+          "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+          active
+            ? "bg-accent text-foreground"
+            : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+        )}
+      >
+        <item.icon className="h-4 w-4" />
+        {item.label}
+      </Link>
+    )
+  }
 
   const sidebar = (
     <div className="flex h-full flex-col gap-6 px-3 py-4">
@@ -78,29 +111,15 @@ export function DashboardLayout() {
         <Logo />
       </div>
       <nav className="flex flex-col gap-1">
-        {nav.map((item) => {
-          const active = item.end
-            ? location.pathname === item.to
-            : location.pathname.startsWith(item.to)
-          return (
-            <Link
-              key={item.to}
-              to={item.to}
-              onClick={() => setOpen(false)}
-              className={cn(
-                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                active
-                  ? "bg-accent text-foreground"
-                  : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-              )}
-            >
-              <item.icon className="h-4 w-4" />
-              {item.label}
-            </Link>
-          )
-        })}
+        {baseNav.map((item) => renderNavItem(item))}
       </nav>
-      <div className="mt-auto flex flex-col gap-2 px-3">
+
+      {/* 底部固定区：与上方功能之间留白，紧贴账户信息 */}
+      <div className="mt-auto flex flex-col gap-1 pt-6">
+        {bottomNav.map((item) => renderNavItem(item))}
+      </div>
+
+      <div className="flex flex-col gap-2 px-3">
         <Separator className="mb-2" />
         <div className="flex items-center gap-3">
           <Avatar className="h-8 w-8">

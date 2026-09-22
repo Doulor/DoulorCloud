@@ -35,19 +35,34 @@ const DONATION_TYPES: Record<string, Feature> = {
   proxy: "proxy",
 }
 
-function toPublicDonation(row: DonationRow, username: string) {
-  let payload = null
+/** 敏感字段：用户端列表一律不返回（管理端核验时才需要） */
+const SENSITIVE_KEYS = ["apiKey", "baseUrl", "subUrls", "configYml", "password", "token"]
+
+function toPublicDonation(
+  row: DonationRow,
+  username: string,
+  opts: { redactPayload?: boolean } = {}
+) {
+  let payload: unknown = null
   try {
     payload = JSON.parse(row.payload)
   } catch {
     // fallthrough
   }
+
+  if (opts.redactPayload && payload && typeof payload === "object") {
+    const copy = { ...(payload as Record<string, unknown>) }
+    for (const k of SENSITIVE_KEYS) delete copy[k]
+    payload = copy
+  }
+
   return {
     id: row.id,
     type: row.type,
     username,
     payload,
-    notifyEmail: row.notify_email,
+    // 通知邮箱也只在管理端返回
+    notifyEmail: opts.redactPayload ? undefined : row.notify_email,
     remark: row.remark,
     status: row.status,
     reviewNote: row.review_note,
@@ -68,26 +83,62 @@ async function requireAdminUser(env: Env, request: Request): Promise<UserRow> {
  * GET /api/donations —— 当前用户的捐献记录
  * 普通用户：只看自己的；管理员看全部
  */
+/**
+ * GET /api/donations —— 用户端列表：**只返回自己的申请**。
+ *
+ * 管理员看全部是管理页的职责（/api/admin/donations），
+ * 这里绝不能因为调用者是管理员就把别人的申请也返回：
+ * 那会让管理员的用户端看到他人申请，且带出 payload（可能含 API Key、
+ * 订阅链接等敏感凭据）与通知邮箱。
+ */
 export async function listDonations(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  const isAdmin = user.role === "admin"
 
-  const sql = isAdmin
-    ? `SELECT d.*, u.username FROM donations d JOIN users u ON u.id = d.user_id ORDER BY d.created_at DESC`
-    : `SELECT d.*, u.username FROM donations d JOIN users u ON u.id = d.user_id WHERE d.user_id = ? ORDER BY d.created_at DESC`
-
-  const stmt = env.DB.prepare(sql)
-  const query = isAdmin ? stmt : stmt.bind(user.id)
-  const rows = await query.all<DonationRow & { username: string }>()
+  const rows = await env.DB.prepare(
+    `SELECT * FROM donations WHERE user_id = ? ORDER BY created_at DESC`
+  )
+    .bind(user.id)
+    .all<DonationRow>()
 
   return json({
-    donations: (rows.results ?? []).map((r) => toPublicDonation(r, r.username)),
+    // 用户端不回显敏感凭据（API Key / 订阅链接等）——列表只用于看状态与撤回，
+    // 提交后无需再次展示；这也避免他人（含管理员误操作）在用户端读取到凭据。
+    donations: (rows.results ?? []).map((r) =>
+      toPublicDonation(r, user.username, { redactPayload: true })
+    ),
     types: Object.keys(DONATION_TYPES),
     typeLabels: Object.fromEntries(
       Object.entries(DONATION_TYPES).map(([t, f]) => [t, FEATURE_LABELS[f]])
     ),
     // 用户当前权限（前端据此判断哪些功能需要捐献）
     permissions: parsePermissions(user.permissions),
+  })
+}
+
+/**
+ * GET /api/admin/donations —— 管理端列表：全部申请，含完整 payload
+ * （管理页需要看 API Key / 订阅链接来核验资源是否可用）。
+ */
+export async function listAllDonations(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const admin = await requireUser(env, request)
+  if (admin.role !== "admin") {
+    throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
+  }
+
+  const rows = await env.DB.prepare(
+    `SELECT d.*, u.username FROM donations d
+       JOIN users u ON u.id = d.user_id
+      ORDER BY d.created_at DESC`
+  ).all<DonationRow & { username: string }>()
+
+  return json({
+    donations: (rows.results ?? []).map((r) => toPublicDonation(r, r.username)),
+    typeLabels: Object.fromEntries(
+      Object.entries(DONATION_TYPES).map(([t, f]) => [t, FEATURE_LABELS[f]])
+    ),
   })
 }
 
@@ -109,11 +160,9 @@ export async function createDonation(env: Env, request: Request): Promise<Respon
   }
 
   const feature = DONATION_TYPES[type]
-  // 已经有该权限的用户不需要捐献
-  const perms = parsePermissions(user.permissions)
-  if (perms[feature]) {
-    throw new ApiError(400, "你已拥有该功能权限，无需捐献", "ALREADY_PERMITTED")
-  }
+  // 注意：**已拥有权限的用户也允许捐献**（用户明确要求）。
+  // 未解锁者会从受限页面被引导过来；已解锁者也可主动贡献资源。
+  // 批准时只是把对应 feature 再置为 true，对已解锁用户无副作用。
 
   // 校验 payload
   if (!body.payload || typeof body.payload !== "object") {

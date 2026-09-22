@@ -66,12 +66,9 @@ export default function DonationPage() {
   }, [load])
 
   const perms = data?.permissions
-  const needsDonation = data
-    ? Object.entries(data.typeLabels).filter(([_type, _label]) => {
-        const idx = _type as keyof Permissions
-        return !(perms?.[idx] ?? false)
-      })
-    : []
+  // 全部三种资源都可捐献（已解锁的用户也能主动贡献），
+  // 只是未解锁的会标注出来，方便知道贡献哪个能解锁什么。
+  const allTypes = data ? Object.entries(data.typeLabels) : []
 
   return (
     <div>
@@ -89,18 +86,25 @@ export default function DonationPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          {needsDonation.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              你已拥有全部功能权限，感谢支持。
-            </p>
+          {allTypes.length === 0 ? (
+            <p className="text-sm text-muted-foreground">加载中…</p>
           ) : (
-            needsDonation.map(([type, label]) => (
+            allTypes.map(([type, label]) => {
+              const unlocked = perms?.[type as keyof Permissions] ?? false
+              return (
               <div
                 key={type}
                 className="flex items-center justify-between rounded-md border px-4 py-3"
               >
                 <div className="space-y-0.5">
-                  <p className="text-sm font-medium">{label}</p>
+                  <p className="flex items-center gap-2 text-sm font-medium">
+                    {label}
+                    {unlocked ? (
+                      <Badge variant="success">已解锁</Badge>
+                    ) : (
+                      <Badge variant="secondary">未解锁</Badge>
+                    )}
+                  </p>
                   <p className="text-xs text-muted-foreground">
                     {TYPE_META[type]?.desc}
                   </p>
@@ -110,7 +114,8 @@ export default function DonationPage() {
                   贡献
                 </Button>
               </div>
-            ))
+              )
+            })
           )}
         </CardContent>
       </Card>
