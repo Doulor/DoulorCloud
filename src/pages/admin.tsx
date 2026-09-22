@@ -68,6 +68,7 @@ const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
   { key: "r2", label: "直链网盘", desc: "R2 存储与直链分享" },
   { key: "ai", label: "AI 中转站", desc: "NewAPI 账号与 API Key" },
   { key: "frp", label: "内网穿透", desc: "frp 隧道申请" },
+  { key: "profile", label: "个人名片", desc: "对外展示的个人主页" },
 ]
 
 import type {
@@ -127,6 +128,7 @@ export default function AdminPage() {
     r2: true,
     ai: true,
     frp: true,
+    profile: true,
   })
 
   // 全局设置

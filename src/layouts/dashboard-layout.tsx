@@ -39,7 +39,7 @@ const baseNav = [
   { to: "/dashboard/storage", label: "网盘", icon: HardDrive, end: false },
   { to: "/dashboard/ai", label: "AI 中转站", icon: Sparkles, end: false },
   { to: "/dashboard/frp", label: "内网穿透", icon: Network, end: false },
-  { to: "/dashboard/profile", label: "名片", icon: Contact, end: false },
+  { to: "/dashboard/profile", label: "个人名片", icon: Contact, end: false },
   { to: "/dashboard/settings", label: "设置", icon: Settings, end: false },
 ]
 

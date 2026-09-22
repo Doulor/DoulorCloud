@@ -1,0 +1,620 @@
+import { ApiError, json } from "../http"
+import { requireFeatureUser } from "../auth"
+import { isReservedName } from "../reserved-names"
+import { isR2Configured, putObject, deleteObject, getObject } from "../r2"
+import { attachCustomDomain, detachCustomDomain } from "../custom-domain"
+import type { Env } from "../env"
+
+/**
+ * 个人名片。
+ *
+ * 两种入口：
+ *   1. 默认路径 https://cloud.doulor.cn/profile/<slug>  → 由 index.ts 渲染 HTML
+ *   2. 自定义域名（用户把自己某个子域名绑到名片，与网盘直链互斥）
+ *
+ * 资源存 R2：profiles/<用户名>/avatar|background|music.<ext>
+ * 用户名做目录名，便于归档与清理（改用户名不会自动迁移，与网盘行为一致）。
+ */
+
+const MAX_AVATAR_BYTES = 5 * 1024 * 1024 // 5 MiB
+const MAX_BACKGROUND_BYTES = 10 * 1024 * 1024 // 10 MiB
+const MAX_MUSIC_BYTES = 20 * 1024 * 1024 // 20 MiB
+
+const IMAGE_TYPES: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+}
+const AUDIO_TYPES: Record<string, string> = {
+  "audio/mpeg": "mp3",
+  "audio/mp4": "m4a",
+  "audio/ogg": "ogg",
+  "audio/wav": "wav",
+  "audio/x-wav": "wav",
+}
+
+export const THEMES = [
+  "minimal",
+  "gradient",
+  "glass",
+  "terminal",
+  "card",
+  "dark",
+] as const
+
+/** 支持的联系方式类型。服务端据此把用户输入拼成可点击链接。 */
+export const CONTACT_TYPES = [
+  "email",
+  "qq",
+  "wechat",
+  "bilibili",
+  "discord",
+  "telegram",
+  "youtube",
+  "github",
+  "x",
+  "custom",
+] as const
+
+type ContactType = (typeof CONTACT_TYPES)[number]
+
+interface Contact {
+  type: ContactType
+  value: string
+  label?: string
+  visible?: boolean
+}
+
+interface ProfileRow {
+  user_id: string
+  slug: string
+  published: number
+  display_name: string | null
+  bio: string | null
+  avatar_key: string | null
+  avatar_url: string | null
+  background_key: string | null
+  background_url: string | null
+  music_key: string | null
+  music_url: string | null
+  music_title: string | null
+  music_autoplay: number
+  theme: string
+  accent: string | null
+  contacts: string
+  subdomain_id: string | null
+  fqdn: string | null
+  created_at: string
+  updated_at: string
+}
+
+export function parseContacts(raw: string): Contact[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((c): c is Contact => {
+      if (!c || typeof c !== "object") return false
+      const o = c as Record<string, unknown>
+      return (
+        typeof o.type === "string" &&
+        (CONTACT_TYPES as readonly string[]).includes(o.type) &&
+        typeof o.value === "string"
+      )
+    })
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 读取用户的 profile 行；不存在返回 null。
+ * 「是否已开通名片」以此判断，与 storage_accounts / newapi_accounts 一致。
+ */
+async function findProfile(env: Env, userId: string): Promise<ProfileRow | null> {
+  return await env.DB.prepare("SELECT * FROM profiles WHERE user_id = ?")
+    .bind(userId)
+    .first<ProfileRow>()
+}
+
+async function loadProfile(env: Env, userId: string): Promise<ProfileRow> {
+  const row = await findProfile(env, userId)
+  if (!row) {
+    throw new ApiError(404, "尚未开通名片", "NOT_ENABLED")
+  }
+  return row
+}
+
+/**
+ * 开通名片。
+ * 照 storage_accounts 的做法：点开通时才建记录。
+ */
+export async function enableProfile(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "profile")
+
+  const existing = await findProfile(env, user.id)
+  if (existing) {
+    return json({ enabled: true })
+  }
+
+  // slug 默认取用户名；若被占用（例如他人先用了这个 slug）则追加后缀
+  let slug = user.username.toLowerCase()
+  const taken = await env.DB.prepare(
+    "SELECT user_id FROM profiles WHERE slug = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(slug)
+    .first()
+  if (taken) {
+    slug = `${slug}-${Math.random().toString(36).slice(2, 6)}`
+  }
+
+  const now = new Date().toISOString()
+  await env.DB.prepare(
+    `INSERT INTO profiles (user_id, slug, published, contacts, theme, created_at, updated_at)
+     VALUES (?, ?, 0, '[]', 'minimal', ?, ?)`
+  )
+    .bind(user.id, slug, now, now)
+    .run()
+
+  return json({ enabled: true, slug }, 201)
+}
+
+function toPublicProfile(row: ProfileRow, slugOrFqdn: { profilePath: string }) {
+  return {
+    slug: row.slug,
+    published: row.published === 1,
+    displayName: row.display_name,
+    bio: row.bio,
+    // 前端预览时用；公开页由服务端直接拼实际 URL
+    avatarKey: row.avatar_key,
+    avatarUrl: row.avatar_url,
+    backgroundKey: row.background_key,
+    backgroundUrl: row.background_url,
+    musicKey: row.music_key,
+    musicUrl: row.music_url,
+    musicTitle: row.music_title,
+    musicAutoplay: row.music_autoplay === 1,
+    theme: row.theme,
+    accent: row.accent,
+    contacts: parseContacts(row.contacts),
+    subdomainId: row.subdomain_id,
+    fqdn: row.fqdn,
+    profilePath: slugOrFqdn.profilePath,
+    updatedAt: row.updated_at,
+  }
+}
+
+// ---- 编辑接口（需登录） ----
+
+// GET /api/profile —— 读取自己的名片（未开通时 enabled=false，前端据此显示开通引导页）
+export async function getProfile(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "profile")
+  const row = await findProfile(env, user.id)
+
+  const meta = {
+    themes: THEMES,
+    contactTypes: CONTACT_TYPES,
+    r2Configured: isR2Configured(env),
+    limits: {
+      avatar: MAX_AVATAR_BYTES,
+      background: MAX_BACKGROUND_BYTES,
+      music: MAX_MUSIC_BYTES,
+    },
+  }
+
+  if (!row) {
+    return json({ enabled: false, profile: null, availableSubdomains: [], ...meta })
+  }
+
+  // 可绑定的子域名（排除已被网盘直链占用的）
+  const subs = await env.DB.prepare(
+    `SELECT s.id, s.name, s.fqdn FROM subdomains s
+      WHERE s.user_id = ?
+        AND NOT EXISTS (SELECT 1 FROM storage_prefixes sp WHERE sp.subdomain_id = s.id)
+      ORDER BY s.created_at ASC`
+  )
+    .bind(user.id)
+    .all<{ id: string; name: string; fqdn: string }>()
+
+  return json({
+    enabled: true,
+    profile: toPublicProfile(row, { profilePath: `/profile/${row.slug}` }),
+    availableSubdomains: subs.results ?? [],
+    ...meta,
+  })
+}
+
+// PUT /api/profile —— 更新资料
+export async function updateProfile(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "profile")
+  const row = await loadProfile(env, user.id)
+  const body = (await request.json()) as Record<string, unknown>
+
+  // slug：仅允许未发布时修改，避免已分享出去的链接失效之后又被改走
+  let slug = row.slug
+  if (typeof body.slug === "string") {
+    const next = body.slug.trim().toLowerCase()
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(next)) {
+      throw new ApiError(400, "名片地址只能包含小写字母、数字和连字符", "INVALID_SLUG")
+    }
+    if (isReservedName(next)) {
+      throw new ApiError(400, "该名片地址为系统保留名称", "RESERVED_NAME")
+    }
+    if (next !== row.slug) {
+      const taken = await env.DB.prepare(
+        "SELECT user_id FROM profiles WHERE slug = ? COLLATE NOCASE LIMIT 1"
+      )
+        .bind(next)
+        .first()
+      if (taken) throw new ApiError(409, "该名片地址已被占用", "CONFLICT")
+      slug = next
+    }
+  }
+
+  const str = (v: unknown, max: number): string | null => {
+    if (typeof v !== "string") return null
+    const t = v.trim()
+    return t === "" ? null : t.slice(0, max)
+  }
+
+  // 联系方式：只接受白名单类型，值做长度限制
+  let contactsJson = row.contacts
+  if (Array.isArray(body.contacts)) {
+    const cleaned: Contact[] = []
+    for (const c of body.contacts) {
+      if (!c || typeof c !== "object") continue
+      const o = c as Record<string, unknown>
+      const type = String(o.type ?? "")
+      if (!(CONTACT_TYPES as readonly string[]).includes(type)) continue
+      const value = String(o.value ?? "").trim().slice(0, 500)
+      if (!value) continue
+      cleaned.push({
+        type: type as ContactType,
+        value,
+        label: typeof o.label === "string" ? o.label.trim().slice(0, 40) : undefined,
+        visible: o.visible !== false,
+      })
+      if (cleaned.length >= 20) break
+    }
+    contactsJson = JSON.stringify(cleaned)
+  }
+
+  const theme =
+    typeof body.theme === "string" && (THEMES as readonly string[]).includes(body.theme)
+      ? body.theme
+      : row.theme
+
+  await env.DB.prepare(
+    `UPDATE profiles SET
+       slug = ?, display_name = ?, bio = ?,
+       avatar_url = ?, background_url = ?, music_url = ?, music_title = ?,
+       music_autoplay = ?, theme = ?, accent = ?, contacts = ?, updated_at = ?
+     WHERE user_id = ?`
+  )
+    .bind(
+      slug,
+      body.displayName === undefined ? row.display_name : str(body.displayName, 40),
+      body.bio === undefined ? row.bio : str(body.bio, 200),
+      body.avatarUrl === undefined ? row.avatar_url : str(body.avatarUrl, 1000),
+      body.backgroundUrl === undefined ? row.background_url : str(body.backgroundUrl, 1000),
+      body.musicUrl === undefined ? row.music_url : str(body.musicUrl, 1000),
+      body.musicTitle === undefined ? row.music_title : str(body.musicTitle, 80),
+      body.musicAutoplay === undefined ? row.music_autoplay : body.musicAutoplay ? 1 : 0,
+      theme,
+      body.accent === undefined ? row.accent : str(body.accent, 20),
+      contactsJson,
+      new Date().toISOString(),
+      user.id
+    )
+    .run()
+
+  const updated = await loadProfile(env, user.id)
+  return json({ profile: toPublicProfile(updated, { profilePath: `/profile/${updated.slug}` }) })
+}
+
+// POST /api/profile/publish —— 启用/停用对外可见
+export async function setPublished(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "profile")
+  const row = await loadProfile(env, user.id)
+  const body = (await request.json()) as { published?: boolean }
+  const published = body.published ? 1 : 0
+
+  if (published && !row.display_name) {
+    throw new ApiError(400, "启用前请先填写昵称", "DISPLAY_NAME_REQUIRED")
+  }
+
+  await env.DB.prepare(
+    "UPDATE profiles SET published = ?, updated_at = ? WHERE user_id = ?"
+  )
+    .bind(published, new Date().toISOString(), user.id)
+    .run()
+
+  return json({ published: published === 1 })
+}
+
+// ---- 资源上传 ----
+
+/**
+ * POST /api/profile/asset?kind=avatar|background|music
+ * 原始字节直传（Content-Type 决定扩展名），存入 profiles/<用户名>/<kind>.<ext>
+ */
+export async function uploadAsset(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "profile")
+  if (!isR2Configured(env)) {
+    throw new ApiError(503, "存储未配置，无法上传", "R2_NOT_CONFIGURED")
+  }
+
+  const url = new URL(request.url)
+  const kind = url.searchParams.get("kind") ?? ""
+  if (!["avatar", "background", "music"].includes(kind)) {
+    throw new ApiError(400, "不支持的类型", "INVALID_KIND")
+  }
+
+  const contentType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim()
+  const isImage = kind !== "music"
+  const table = isImage ? IMAGE_TYPES : AUDIO_TYPES
+  const ext = table[contentType]
+  if (!ext) {
+    throw new ApiError(
+      400,
+      isImage ? "仅支持 JPG / PNG / WebP / GIF 图片" : "仅支持 MP3 / M4A / OGG / WAV 音频",
+      "INVALID_TYPE"
+    )
+  }
+
+  const limit =
+    kind === "avatar"
+      ? MAX_AVATAR_BYTES
+      : kind === "background"
+        ? MAX_BACKGROUND_BYTES
+        : MAX_MUSIC_BYTES
+
+  const buf = await request.arrayBuffer()
+  if (buf.byteLength === 0) {
+    throw new ApiError(400, "文件为空", "INVALID_INPUT")
+  }
+  if (buf.byteLength > limit) {
+    throw new ApiError(
+      400,
+      `文件过大，上限 ${Math.round(limit / 1024 / 1024)} MB`,
+      "TOO_LARGE"
+    )
+  }
+
+  const key = `profiles/${user.username}/${kind}.${ext}`
+  await putObject(env, key, buf, contentType)
+
+  // 换扩展名时清掉旧的（如 png → jpg）
+  for (const oldExt of Object.values(table)) {
+    if (oldExt === ext) continue
+    const oldKey = `profiles/${user.username}/${kind}.${oldExt}`
+    try {
+      await deleteObject(env, oldKey)
+    } catch {
+      // 不存在则忽略
+    }
+  }
+
+  const column =
+    kind === "avatar" ? "avatar_key" : kind === "background" ? "background_key" : "music_key"
+  await env.DB.prepare(
+    `UPDATE profiles SET ${column} = ?, updated_at = ? WHERE user_id = ?`
+  )
+    .bind(key, new Date().toISOString(), user.id)
+    .run()
+
+  return json({ key, kind })
+}
+
+/** DELETE /api/profile/asset?kind=... —— 移除已上传的资源 */
+export async function deleteAsset(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "profile")
+  const url = new URL(request.url)
+  const kind = url.searchParams.get("kind") ?? ""
+  if (!["avatar", "background", "music"].includes(kind)) {
+    throw new ApiError(400, "不支持的类型", "INVALID_KIND")
+  }
+
+  const column =
+    kind === "avatar" ? "avatar_key" : kind === "background" ? "background_key" : "music_key"
+
+  if (isR2Configured(env)) {
+    for (const ext of ["jpg", "png", "webp", "gif", "mp3", "m4a", "ogg", "wav"]) {
+      try {
+        await deleteObject(env, `profiles/${user.username}/${kind}.${ext}`)
+      } catch {
+        // 忽略
+      }
+    }
+  }
+
+  await env.DB.prepare(
+    `UPDATE profiles SET ${column} = NULL, updated_at = ? WHERE user_id = ?`
+  )
+    .bind(new Date().toISOString(), user.id)
+    .run()
+
+  return json({ ok: true })
+}
+
+/**
+ * GET /api/profile/asset?kind=... —— 读取自己的资源（仅用于编辑器预览）
+ * 公开页面的资源由 /p/<用户名>/<kind> 提供，见 serveProfileAsset。
+ */
+export async function readOwnAsset(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "profile")
+  return serveAssetByUsername(env, user.username, new URL(request.url).searchParams.get("kind") ?? "")
+}
+
+/** 按用户名 + 类型返回 R2 对象（公开可读，用于名片页展示） */
+export async function serveAssetByUsername(
+  env: Env,
+  username: string,
+  kind: string
+): Promise<Response> {
+  if (!["avatar", "background", "music"].includes(kind)) {
+    return new Response("Not Found", { status: 404 })
+  }
+  if (!isR2Configured(env)) {
+    return new Response("Not Found", { status: 404 })
+  }
+  for (const ext of ["jpg", "png", "webp", "gif", "mp3", "m4a", "ogg", "wav"]) {
+    try {
+      return await getObject(env, `profiles/${username}/${kind}.${ext}`)
+    } catch {
+      continue
+    }
+  }
+  return new Response("Not Found", { status: 404 })
+}
+
+// ---- 自定义域名绑定 ----
+
+// POST /api/profile/domain —— { subdomainId } 绑定；{ action: "unbind" } 解绑
+export async function bindProfileDomain(
+  env: Env,
+  request: Request,
+  subdomainIdFromPath?: string
+): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "profile")
+  const row = await loadProfile(env, user.id)
+  const body = (await request.json().catch(() => ({}))) as {
+    subdomainId?: string
+    action?: string
+  }
+  const action = body.action ?? (subdomainIdFromPath ? "bind" : "")
+
+  if (action === "unbind") {
+    if (row.fqdn) {
+      await detachCustomDomain(env, row.fqdn)
+    }
+    await env.DB.prepare(
+      "UPDATE profiles SET subdomain_id = NULL, fqdn = NULL, updated_at = ? WHERE user_id = ?"
+    )
+      .bind(new Date().toISOString(), user.id)
+      .run()
+    return json({ ok: true })
+  }
+
+  const subdomainId = body.subdomainId ?? subdomainIdFromPath
+  if (!subdomainId) {
+    throw new ApiError(400, "缺少子域名", "INVALID_INPUT")
+  }
+
+  const sub = await env.DB.prepare(
+    "SELECT id, fqdn FROM subdomains WHERE id = ? AND user_id = ?"
+  )
+    .bind(subdomainId, user.id)
+    .first<{ id: string; fqdn: string }>()
+  if (!sub) throw new ApiError(404, "子域名不存在", "NOT_FOUND")
+
+  // 与网盘直链互斥：同一子域名只能指向一种服务
+  const usedByStorage = await env.DB.prepare(
+    "SELECT id FROM storage_prefixes WHERE subdomain_id = ? OR fqdn = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(sub.id, sub.fqdn)
+    .first()
+  if (usedByStorage) {
+    throw new ApiError(
+      409,
+      "该子域名已绑定网盘直链，请先在「网盘」中解绑",
+      "CONFLICT"
+    )
+  }
+
+  const usedByOtherProfile = await env.DB.prepare(
+    "SELECT user_id FROM profiles WHERE fqdn = ? COLLATE NOCASE AND user_id != ? LIMIT 1"
+  )
+    .bind(sub.fqdn, user.id)
+    .first()
+  if (usedByOtherProfile) {
+    throw new ApiError(409, "该域名已被其他名片使用", "CONFLICT")
+  }
+
+  // 该域名上不能已有用户自建的 DNS 记录（避免抢走他的站点）
+  const dns = await env.DB.prepare(
+    "SELECT id FROM dns_records WHERE fqdn = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(sub.fqdn)
+    .first()
+  if (dns) {
+    throw new ApiError(
+      409,
+      "该子域名已存在 DNS 记录，请先删除后再绑定",
+      "CONFLICT"
+    )
+  }
+
+  const { dnsCreated } = await attachCustomDomain(env, sub.fqdn)
+
+  await env.DB.prepare(
+    "UPDATE profiles SET subdomain_id = ?, fqdn = ?, updated_at = ? WHERE user_id = ?"
+  )
+    .bind(sub.id, sub.fqdn, new Date().toISOString(), user.id)
+    .run()
+
+  return json({ fqdn: sub.fqdn, dnsCreated }, 201)
+}
+
+// ---- 公开数据（无需登录，供公开页/预览使用） ----
+
+export interface PublicProfile {
+  slug: string
+  username: string
+  displayName: string | null
+  bio: string | null
+  theme: string
+  accent: string | null
+  avatar: string | null
+  background: string | null
+  music: string | null
+  musicTitle: string | null
+  musicAutoplay: boolean
+  contacts: Contact[]
+}
+
+/**
+ * 按 slug 或自定义域名取出公开名片数据。
+ * 未发布、或用户被停用一律返回 null（调用方转 404，不泄露存在性）。
+ */
+export async function loadPublicProfile(
+  env: Env,
+  key: { slug?: string; fqdn?: string }
+): Promise<PublicProfile | null> {
+  const where = key.fqdn ? "p.fqdn = ? COLLATE NOCASE" : "p.slug = ? COLLATE NOCASE"
+  const value = key.fqdn ?? key.slug ?? ""
+
+  const row = await env.DB.prepare(
+    `SELECT p.*, u.username, u.status AS user_status
+       FROM profiles p JOIN users u ON u.id = p.user_id
+      WHERE ${where} LIMIT 1`
+  )
+    .bind(value)
+    .first<ProfileRow & { username: string; user_status: string }>()
+
+  if (!row) return null
+  if (row.published !== 1 || row.user_status !== "active") return null
+
+  // 资源优先用上传的 R2 对象，其次外链
+  const assetUrl = (kind: string, key: string | null, url: string | null) => {
+    if (key) return `/p/${row.username}/${kind}`
+    return url ?? null
+  }
+
+  return {
+    slug: row.slug,
+    username: row.username,
+    displayName: row.display_name,
+    bio: row.bio,
+    theme: row.theme,
+    accent: row.accent,
+    avatar: assetUrl("avatar", row.avatar_key, row.avatar_url),
+    background: assetUrl("background", row.background_key, row.background_url),
+    music: assetUrl("music", row.music_key, row.music_url),
+    musicTitle: row.music_title,
+    musicAutoplay: row.music_autoplay === 1,
+    contacts: parseContacts(row.contacts).filter((c) => c.visible !== false),
+  }
+}
+
+export type { Contact }

@@ -12,20 +12,21 @@
  */
 import { ApiError } from "./http"
 
-export const FEATURES = ["r2", "ai", "frp"] as const
+export const FEATURES = ["r2", "ai", "frp", "profile"] as const
 export type Feature = (typeof FEATURES)[number]
 
 export const FEATURE_LABELS: Record<Feature, string> = {
   r2: "直链网盘",
   ai: "AI 中转站",
   frp: "内网穿透",
+  profile: "个人名片",
 }
 
 export type Permissions = Record<Feature, boolean>
 
 /** 全开（老数据 / 未指定时的默认值） */
 export function allPermissions(): Permissions {
-  return { r2: true, ai: true, frp: true }
+  return { r2: true, ai: true, frp: true, profile: true }
 }
 
 /** 解析权限 JSON；NULL / 非法值按「全开」处理 */

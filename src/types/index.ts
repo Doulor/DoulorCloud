@@ -340,18 +340,20 @@ export interface AdminFrpNode extends FrpNode {
 
 // ---- 功能权限 ----
 
-export type FeatureKey = "r2" | "ai" | "frp"
+export type FeatureKey = "r2" | "ai" | "frp" | "profile"
 
 export interface Permissions {
   r2: boolean
   ai: boolean
   frp: boolean
+  profile: boolean
 }
 
 export const FEATURE_LABELS: Record<FeatureKey, string> = {
   r2: "直链网盘",
   ai: "AI 中转站",
   frp: "内网穿透",
+  profile: "个人名片",
 }
 
 // ---- 管理员全局设置 ----

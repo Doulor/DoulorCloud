@@ -27,6 +27,27 @@ zone_name = "doulor.cn"
 pattern = "doulor.cn/dl/*"
 zone_name = "doulor.cn"
 
+# 个人名片：
+#   /profile/<slug>  — 公开名片页（服务端渲染 HTML）
+#   /p/<用户名>/<资源> — 名片的头像/背景/音乐
+# 这两条必须存在：静态站点 Worker 的 SPA catch-all 会把未匹配路径全部吃掉，
+# 不加精确路由的话 /profile/* 会返回站点首页而不是名片。
+[[routes]]
+pattern = "cloud.doulor.cn/profile/*"
+zone_name = "doulor.cn"
+
+[[routes]]
+pattern = "cloud.doulor.cn/p/*"
+zone_name = "doulor.cn"
+
+[[routes]]
+pattern = "doulor.cn/profile/*"
+zone_name = "doulor.cn"
+
+[[routes]]
+pattern = "doulor.cn/p/*"
+zone_name = "doulor.cn"
+
 # 出站邮件：Cloudflare Email Service 的 send_email 绑定。
 #
 # 注意语法是 `[[send_email]]`（数组表）—— 早期这里误写成 `[email]`，
