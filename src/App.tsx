@@ -17,7 +17,9 @@ import AiPage from "@/pages/ai"
 import FrpPage from "@/pages/frp"
 import ProfilePage from "@/pages/profile"
 import ProxyPage from "@/pages/proxy"
+import TempboxPage from "@/pages/tempbox"
 import SettingsPage from "@/pages/settings"
+import DonationPage from "@/pages/donations"
 import AdminPage from "@/pages/admin"
 import NotFoundPage from "@/pages/not-found"
 
@@ -92,10 +94,15 @@ export default function App() {
         <Route path="ai" element={<AiPage />} />
         <Route path="frp" element={<FrpPage />} />
         <Route path="proxy" element={<ProxyPage />} />
+        <Route path="tempbox" element={<TempboxPage />} />
         <Route path="profile" element={<ProfilePage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="donations" element={<DonationPage />} />
         <Route path="admin" element={<AdminPage />} />
       </Route>
+
+      {/* 临时分享箱公开页（无需登录） */}
+      <Route path="t" element={<TempboxPage />} />
 
       <Route path="*" element={<NotFoundPage />} />
     </Routes>

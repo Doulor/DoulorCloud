@@ -1,6 +1,7 @@
 import * as React from "react"
 import {
   AlertTriangle,
+  ChevronDown,
   Copy,
   Loader2,
   RefreshCw,
@@ -11,6 +12,7 @@ import {
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
+import { FeatureLockedNotice } from "@/components/feature-locked-notice"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
@@ -160,6 +162,13 @@ export default function ProxyPage() {
   const [checkResult, setCheckResult] = React.useState<
     Record<string, { latencyMs: number | null; ok: boolean; message?: string }>
   >({})
+  /** 展开的订阅源（默认收起节点列表，点击表头展开） */
+  const [expandedSubs, setExpandedSubs] = React.useState<Record<string, boolean>>({})
+  /** 展开的节点配置（默认收起，点击节点行展开） */
+  const [expandedNodes, setExpandedNodes] = React.useState<Record<string, boolean>>({})
+
+  // 无权限（403 FEATURE_NOT_PERMITTED）：整页显示提示 + 捐献入口
+  const [locked, setLocked] = React.useState(false)
 
   const load = React.useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
@@ -172,6 +181,10 @@ export default function ProxyPage() {
         toast.error("使用协议已更新，请重新阅读并同意")
       }
     } catch (err) {
+      if (err instanceof HttpError && err.code === "FEATURE_NOT_PERMITTED") {
+        setLocked(true)
+        return
+      }
       toast.error(err instanceof HttpError ? err.message : "加载失败")
     } finally {
       if (!silent) setLoading(false)
@@ -227,6 +240,16 @@ export default function ProxyPage() {
     } finally {
       setCheckingId(null)
     }
+  }
+
+  if (locked) {
+    return (
+      <FeatureLockedNotice
+        feature="proxy"
+        featureLabel="代理节点"
+        description="你的账号未被授予「代理节点」权限。站长资源有限，该服务暂未全量开放。"
+      />
+    )
   }
 
   if (loading) {
@@ -354,12 +377,21 @@ export default function ProxyPage() {
         <div className="space-y-6">
           {subs.map((sub) => {
             const result = checkResult[sub.id]
+            const subKey = `sub-${sub.id}`
+            const subExpanded = expandedSubs[subKey] ?? false
             return (
               <Card key={sub.id}>
-                <CardHeader>
+                <CardHeader className="cursor-pointer select-none" onClick={() =>
+                  setExpandedSubs((prev) => ({ ...prev, [subKey]: !subExpanded }))
+                }>
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="space-y-1">
                       <div className="flex flex-wrap items-center gap-2">
+                        <ChevronDown
+                          className={`h-4 w-4 text-muted-foreground transition-transform ${
+                            subExpanded ? "" : "-rotate-90"
+                          }`}
+                        />
                         <CardTitle className="flex items-center gap-2 text-base">
                           <Server className="h-4 w-4 text-muted-foreground" />
                           {sub.name}
@@ -395,7 +427,10 @@ export default function ProxyPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => void handleCheck(sub)}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void handleCheck(sub)
+                        }}
                         disabled={checkingId === sub.id}
                       >
                         {checkingId === sub.id ? (
@@ -408,7 +443,10 @@ export default function ProxyPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => void copyText(sub.url, "订阅链接已复制")}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void copyText(sub.url, "订阅链接已复制")
+                        }}
                       >
                         <Copy className="h-3.5 w-3.5" />
                         复制订阅
@@ -417,7 +455,8 @@ export default function ProxyPage() {
                   </div>
                 </CardHeader>
 
-                <CardContent className="space-y-3">
+                {subExpanded && (
+                  <CardContent className="space-y-3">
                   {sub.fetchError ? (
                     <div className="flex gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
                       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -456,40 +495,62 @@ export default function ProxyPage() {
                     </p>
                   ) : (
                     <div className="space-y-2">
-                      {sub.nodes.map((node, i) => (
-                        <div key={`${node.name}-${i}`} className="rounded-md border p-3">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex min-w-0 items-center gap-2">
-                              <span className="truncate text-sm font-medium">
-                                {node.name || `节点 ${i + 1}`}
-                              </span>
-                              <Badge
-                                variant={PROTOCOL_BADGE_VARIANT[node.protocol] ?? "outline"}
-                                className="font-mono text-xs"
-                              >
-                                {node.protocol}
-                              </Badge>
-                              {node.region && (
-                                <Badge variant="outline" className="text-xs">
-                                  {node.region}
-                                </Badge>
-                              )}
-                            </div>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="text-muted-foreground"
-                              onClick={() => void copyText(node.raw, "节点链接已复制")}
+                      {sub.nodes.map((node, i) => {
+                        const nodeKey = `${sub.id}-${i}`
+                        const nodeExpanded = expandedNodes[nodeKey] ?? false
+                        return (
+                          <div key={nodeKey} className="rounded-md border p-3">
+                            <div
+                              className="flex cursor-pointer select-none flex-wrap items-center justify-between gap-2"
+                              onClick={() =>
+                                setExpandedNodes((prev) => ({
+                                  ...prev,
+                                  [nodeKey]: !nodeExpanded,
+                                }))
+                              }
                             >
-                              <Copy className="h-3.5 w-3.5" />
-                              复制链接
-                            </Button>
+                              <div className="flex min-w-0 items-center gap-2">
+                                <ChevronDown
+                                  className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
+                                    nodeExpanded ? "" : "-rotate-90"
+                                  }`}
+                                />
+                                <span className="truncate text-sm font-medium">
+                                  {node.name || `节点 ${i + 1}`}
+                                </span>
+                                <Badge
+                                  variant={PROTOCOL_BADGE_VARIANT[node.protocol] ?? "outline"}
+                                  className="font-mono text-xs"
+                                >
+                                  {node.protocol}
+                                </Badge>
+                                {node.region && (
+                                  <Badge variant="outline" className="text-xs">
+                                    {node.region}
+                                  </Badge>
+                                )}
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-muted-foreground"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  void copyText(node.raw, "节点链接已复制")
+                                }}
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                                复制链接
+                              </Button>
+                            </div>
+                            {nodeExpanded && (
+                              <div className="mt-2 border-t pt-2">
+                                <NodeDetails node={node} />
+                              </div>
+                            )}
                           </div>
-                          <div className="mt-2">
-                            <NodeDetails node={node} />
-                          </div>
-                        </div>
-                      ))}
+                        )
+                      })}
                     </div>
                   )}
 
@@ -497,6 +558,7 @@ export default function ProxyPage() {
                     <p className="text-xs text-muted-foreground">{sub.note}</p>
                   )}
                 </CardContent>
+                )}
               </Card>
             )
           })}

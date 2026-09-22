@@ -23,6 +23,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Separator } from "@/components/ui/separator"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Select,
   SelectContent,
@@ -38,6 +39,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { profileApi, HttpError } from "@/services/api"
+import { cn } from "@/lib/utils"
 import type { ContactType, ProfileContact, ProfileOverview } from "@/types"
 
 /** 联系方式的展示名、输入提示与「只填原始值」的说明 */
@@ -66,12 +68,87 @@ const CONTACT_META: Record<
 }
 
 const THEME_LABEL: Record<string, string> = {
-  minimal: "极简",
-  gradient: "渐变",
-  glass: "毛玻璃",
-  terminal: "终端",
-  card: "卡片",
-  dark: "暗夜",
+  void: "虚空",
+  neon: "霓虹",
+  glass: "玻璃",
+  aurora: "极光",
+  cyber: "赛博",
+  blossom: "绽放",
+}
+
+/**
+ * 主题缩略图预览：用内联 style 还原各主题风格，实时反映 accent 色。
+ * 服务端只渲染 HTML，前端管理界面用迷你 CSS 卡片做所见即所得。
+ */
+const THEME_PREVIEW: Record<
+  string,
+  {
+    accent: string
+    container: (a: string) => React.CSSProperties
+    avatar: (a: string) => React.CSSProperties
+    name: () => React.CSSProperties
+    link: (a: string) => React.CSSProperties
+  }
+> = {
+  void: {
+    accent: "#6366f1",
+    container: () => ({ background: "#000" }),
+    avatar: (a) => ({ boxShadow: `0 0 8px ${a}`, border: `2px solid ${a}55` }),
+    name: () => ({ background: "#e5e5e5" }),
+    link: () => ({ background: "rgba(255,255,255,.06)" }),
+  },
+  neon: {
+    accent: "#22d3ee",
+    container: (a) => ({ background: "#0a0a0f", border: `1px solid ${a}66`, boxShadow: `0 0 10px ${a}33` }),
+    avatar: (a) => ({ border: `2px solid ${a}`, boxShadow: `0 0 6px ${a}88` }),
+    name: () => ({ background: "#f5f5f7" }),
+    link: (a) => ({ background: "transparent", border: `1px solid ${a}44` }),
+  },
+  glass: {
+    accent: "#a78bfa",
+    container: () => ({ background: "linear-gradient(135deg,#1e1b4b,#0f172a)", border: "1px solid rgba(255,255,255,.2)" }),
+    avatar: () => ({ border: "2px solid rgba(255,255,255,.6)" }),
+    name: () => ({ background: "rgba(255,255,255,.7)" }),
+    link: () => ({ background: "rgba(255,255,255,.18)" }),
+  },
+  aurora: {
+    accent: "#ec4899",
+    container: () => ({ background: "linear-gradient(135deg,#6366f1,#ec4899,#f59e0b)", border: "1px solid rgba(255,255,255,.15)" }),
+    avatar: () => ({ border: "2px solid rgba(255,255,255,.7)" }),
+    name: () => ({ background: "rgba(255,255,255,.85)" }),
+    link: () => ({ background: "rgba(255,255,255,.2)" }),
+  },
+  cyber: {
+    accent: "#4ade80",
+    container: (a) => ({ background: "#080812", border: `1px solid ${a}44` }),
+    avatar: (a) => ({ borderRadius: 3, border: `2px solid ${a}66` }),
+    name: () => ({ background: "#c7f9cc" }),
+    link: (a) => ({ background: "rgba(255,255,255,.05)", border: `1px solid ${a}33`, borderRadius: 2 }),
+  },
+  blossom: {
+    accent: "#ec4899",
+    container: () => ({ background: "#fff", border: "1px solid #fce7f3", boxShadow: "0 4px 12px rgba(244,114,182,.15)" }),
+    avatar: () => ({ border: "2px solid #fff", boxShadow: "0 2px 6px rgba(244,114,182,.25)" }),
+    name: () => ({ background: "#831843" }),
+    link: () => ({ background: "#fff", border: "1px solid #f9a8d4" }),
+  },
+}
+
+function ThemeThumbnail({ theme, accent }: { theme: string; accent: string }) {
+  const preview = THEME_PREVIEW[theme] ?? THEME_PREVIEW.void
+  const a = accent && /^#[0-9a-f]{3,8}$/i.test(accent) ? accent : preview.accent
+  const ls = preview.link(a)
+  return (
+    <div
+      className="flex h-20 flex-col items-center justify-center gap-1.5 overflow-hidden rounded-md px-2 py-2"
+      style={preview.container(a)}
+    >
+      <div className="h-4 w-4 rounded-full" style={{ ...preview.avatar(a), background: a }} />
+      <div className="h-1 w-9 rounded-full" style={preview.name()} />
+      <div className="h-1.5 w-14 rounded-[2px]" style={ls} />
+      <div className="h-1.5 w-10 rounded-[2px]" style={ls} />
+    </div>
+  )
 }
 
 /** 一行可复制的地址：显示 + 复制 + 新窗口打开 */
@@ -121,8 +198,13 @@ export default function ProfilePage() {
     musicUrl: "",
     musicTitle: "",
     musicAutoplay: false,
-    theme: "minimal",
+    musicCoverUrl: "",
+    theme: "void",
     accent: "",
+    effects: [] as string[],
+    intro: "none",
+    font: "system",
+    layout: "center",
   })
   const [contacts, setContacts] = React.useState<ProfileContact[]>([])
   const [published, setPublished] = React.useState(false)
@@ -146,8 +228,13 @@ export default function ProfilePage() {
         musicUrl: p.musicUrl ?? "",
         musicTitle: p.musicTitle ?? "",
         musicAutoplay: p.musicAutoplay,
+        musicCoverUrl: p.musicCoverUrl ?? "",
         theme: p.theme,
         accent: p.accent ?? "",
+        effects: p.effects ?? [],
+        intro: p.intro ?? "none",
+        font: p.font ?? "system",
+        layout: p.layout ?? "center",
       })
       setContacts(p.contacts)
       setPublished(p.published)
@@ -209,7 +296,7 @@ export default function ProfilePage() {
   }
 
   const handleUpload = async (
-    kind: "avatar" | "background" | "music",
+    kind: "avatar" | "background" | "music" | "music-cover",
     file: File | undefined
   ) => {
     if (!file) return
@@ -225,7 +312,7 @@ export default function ProfilePage() {
     }
   }
 
-  const handleRemoveAsset = async (kind: "avatar" | "background" | "music") => {
+  const handleRemoveAsset = async (kind: "avatar" | "background" | "music" | "music-cover") => {
     try {
       await profileApi.deleteAsset(kind)
       await load()
@@ -241,6 +328,18 @@ export default function ProfilePage() {
 
   const updateContact = (i: number, patch: Partial<ProfileContact>) => {
     setContacts((c) => c.map((x, idx) => (idx === i ? { ...x, ...patch } : x)))
+  }
+
+  // 动效勾选：particles 与 rain 互斥（共用 canvas 层）
+  const toggleEffect = (id: string, checked: boolean) => {
+    setForm((f) => {
+      if (!checked) return { ...f, effects: f.effects.filter((e) => e !== id) }
+      const blocked = id === "particles" ? "rain" : id === "rain" ? "particles" : null
+      const next = blocked
+        ? [...f.effects.filter((e) => e !== blocked), id]
+        : [...f.effects, id]
+      return { ...f, effects: Array.from(new Set(next)) }
+    })
   }
 
 
@@ -420,11 +519,13 @@ export default function ProfilePage() {
           </div>
           <div className="space-y-2">
             <Label htmlFor="bio">个性签名</Label>
-            <Input
+            <Textarea
               id="bio"
-              placeholder="一句话介绍自己"
+              placeholder="一句话介绍自己（支持换行）"
               value={form.bio}
               onChange={(e) => setForm((f) => ({ ...f, bio: e.target.value }))}
+              rows={3}
+              className="resize-none"
             />
           </div>
         </CardContent>
@@ -557,35 +658,165 @@ export default function ProfilePage() {
 
           <Separator />
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label>主题风格</Label>
-              <Select
-                value={form.theme}
-                onValueChange={(v) => setForm((f) => ({ ...f, theme: v }))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {(data?.themes ?? []).map((t) => (
-                    <SelectItem key={t} value={t}>
-                      {THEME_LABEL[t] ?? t}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+          {/* 主题：缩略图卡片网格，所见即所得 */}
+          <div className="space-y-2">
+            <Label>主题风格</Label>
+            <div className="grid grid-cols-3 gap-2.5">
+              {(data?.themes ?? []).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setForm((f) => ({ ...f, theme: t }))}
+                  className={cn(
+                    "relative rounded-lg border-2 p-1.5 transition-all",
+                    form.theme === t
+                      ? "border-primary ring-2 ring-primary/20"
+                      : "border-border hover:border-primary/50"
+                  )}
+                >
+                  <ThemeThumbnail theme={t} accent={form.accent} />
+                  <span className="mt-1 block text-center text-xs font-medium">
+                    {THEME_LABEL[t] ?? t}
+                  </span>
+                </button>
+              ))}
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="accent">主题色（可选）</Label>
-              <Input
-                id="accent"
-                placeholder="#6366f1"
-                value={form.accent}
-                onChange={(e) => setForm((f) => ({ ...f, accent: e.target.value }))}
-                className="font-mono text-xs"
-              />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="accent">主题色（可选）</Label>
+            <Input
+              id="accent"
+              placeholder="#6366f1"
+              value={form.accent}
+              onChange={(e) => setForm((f) => ({ ...f, accent: e.target.value }))}
+              className="font-mono text-xs"
+            />
+          </div>
+
+          <Separator />
+
+          {/* 排版：与主题独立混搭，只改变布局方式 */}
+          <div className="space-y-2">
+            <Label>排版</Label>
+            <div className="grid grid-cols-2 gap-2">
+              {(data?.layoutOptions ?? []).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setForm((f) => ({ ...f, layout: opt.id }))}
+                  className={cn(
+                    "rounded-lg border p-2.5 text-left transition-all",
+                    form.layout === opt.id
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:border-primary/50"
+                  )}
+                >
+                  <div className="text-sm font-medium">{opt.label}</div>
+                  <div className="text-xs text-muted-foreground">{opt.desc}</div>
+                </button>
+              ))}
             </div>
+          </div>
+
+          <Separator />
+
+          {/* 动效：独立勾选，可与主题自由混搭；particles/rain 互斥 */}
+          <div className="space-y-2">
+            <Label>动效（可多选，与主题混搭）</Label>
+            <div className="grid grid-cols-2 gap-2">
+              {(data?.effectOptions ?? []).map((opt) => {
+                const checked = form.effects.includes(opt.id)
+                // 互斥：选了 particles 则禁用 rain，反之同理
+                const blockedBy =
+                  opt.id === "particles"
+                    ? form.effects.includes("rain")
+                    : opt.id === "rain"
+                      ? form.effects.includes("particles")
+                      : false
+                return (
+                  <label
+                    key={opt.id}
+                    className={cn(
+                      "flex items-start gap-2 rounded-lg border p-2.5 transition-all",
+                      checked ? "border-primary bg-primary/5" : "border-border",
+                      blockedBy && "cursor-not-allowed opacity-40"
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={checked}
+                      disabled={blockedBy}
+                      onChange={(e) => toggleEffect(opt.id, e.target.checked)}
+                    />
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium">{opt.label}</div>
+                      <div className="text-xs text-muted-foreground">{opt.desc}</div>
+                    </div>
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+
+          <Separator />
+
+          {/* 开屏动画：单选，与主题/动效独立混搭 */}
+          <div className="space-y-2">
+            <Label>开屏动画</Label>
+            <div className="grid grid-cols-2 gap-2">
+              {(data?.introOptions ?? []).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setForm((f) => ({ ...f, intro: opt.id }))}
+                  className={cn(
+                    "rounded-lg border p-2.5 text-left transition-all",
+                    form.intro === opt.id
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:border-primary/50"
+                  )}
+                >
+                  <div className="text-sm font-medium">{opt.label}</div>
+                  <div className="text-xs text-muted-foreground">{opt.desc}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <Separator />
+
+          {/* 字体：单选，每个选项用对应字体渲染自身标签做即时预览 */}
+          <div className="space-y-2">
+            <Label>字体（英文标题装饰，中文回退系统字体）</Label>
+            <div className="grid grid-cols-3 gap-2">
+              {(data?.fontOptions ?? []).map((opt) => {
+                const family =
+                  opt.id === "system"
+                    ? undefined
+                    : `'${opt.label}', sans-serif`
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setForm((f) => ({ ...f, font: opt.id }))}
+                    style={family ? { fontFamily: family } : undefined}
+                    className={cn(
+                      "rounded-lg border px-2 py-2 text-center text-sm transition-all",
+                      form.font === opt.id
+                        ? "border-primary bg-primary/5"
+                        : "border-border hover:border-primary/50"
+                    )}
+                  >
+                    {opt.label}
+                  </button>
+                )
+              })}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              字体仅作用于英文与数字；中文字符会自动回退到系统字体。实际效果请在公开页查看。
+            </p>
           </div>
         </CardContent>
       </Card>
@@ -651,6 +882,59 @@ export default function ProfilePage() {
               placeholder="曲名"
               value={form.musicTitle}
               onChange={(e) => setForm((f) => ({ ...f, musicTitle: e.target.value }))}
+            />
+          </div>
+
+          {/* 专辑封面：上传或外链，在播放器左侧显示 */}
+          <div className="space-y-2">
+            <Label>专辑封面（可选）</Label>
+            <div className="flex items-center gap-3">
+              {profile?.musicCoverKey || form.musicCoverUrl ? (
+                <img
+                  src={
+                    profile?.musicCoverKey
+                      ? `/api/profile/asset?kind=music-cover`
+                      : form.musicCoverUrl
+                  }
+                  alt="封面"
+                  className="h-14 w-14 rounded-md border object-cover"
+                />
+              ) : (
+                <div className="flex h-14 w-14 items-center justify-center rounded-md border bg-muted">
+                  <Music className="h-5 w-5 text-muted-foreground" />
+                </div>
+              )}
+              <div className="flex flex-col gap-1.5">
+                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs hover:bg-accent">
+                  {uploading === "music-cover" ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Upload className="h-3.5 w-3.5" />
+                  )}
+                  上传封面
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,image/gif"
+                    className="hidden"
+                    onChange={(e) => void handleUpload("music-cover", e.target.files?.[0])}
+                  />
+                </label>
+                {profile?.musicCoverKey && (
+                  <button
+                    type="button"
+                    className="text-left text-xs text-muted-foreground hover:text-destructive"
+                    onClick={() => void handleRemoveAsset("music-cover")}
+                  >
+                    移除已上传
+                  </button>
+                )}
+              </div>
+            </div>
+            <Input
+              placeholder="或粘贴封面图片链接"
+              value={form.musicCoverUrl}
+              onChange={(e) => setForm((f) => ({ ...f, musicCoverUrl: e.target.value }))}
+              className="text-xs"
             />
           </div>
 

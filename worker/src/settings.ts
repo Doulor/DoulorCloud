@@ -28,6 +28,16 @@ export const SETTING_DEFAULTS = {
   subdomain_quota_default: "5",
   /** 代理节点功能总开关 */
   proxy_enabled: "1",
+  /** 临时分享箱总开关 */
+  tempbox_enabled: "1",
+  /** 临时分享箱默认保存时长（分钟） */
+  tempbox_default_minutes: "30",
+  /** 临时分享箱单文件上限（字节，默认 256 MiB） */
+  tempbox_max_file_bytes: "268435456",
+  /** 临时分享箱每批次文件数上限 */
+  tempbox_max_files: "20",
+  /** 临时分享箱上传是否必须登录（1=默认，访客只可查看/下载） */
+  tempbox_upload_requires_login: "1",
   /** frp 内网穿透总开关 */
   frp_enabled: "1",
   /** frp 核心包下载地址（可由后台替换） */

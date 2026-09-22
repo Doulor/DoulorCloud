@@ -16,6 +16,7 @@ import {
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
+import { FeatureLockedNotice } from "@/components/feature-locked-notice"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
@@ -98,6 +99,9 @@ export default function AiPage() {
   const [createdKey, setCreatedKey] = React.useState<string | null>(null)
 
   /** 拉取状态与 Key 列表；silent 用于对话框流程中刷新，避免整页 loading 卸载弹窗 */
+  // 无权限（403 FEATURE_NOT_PERMITTED）：整页显示提示 + 捐献入口
+  const [locked, setLocked] = React.useState(false)
+
   const load = React.useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
@@ -110,6 +114,10 @@ export default function AiPage() {
         setKeys([])
       }
     } catch (err) {
+      if (err instanceof HttpError && err.code === "FEATURE_NOT_PERMITTED") {
+        setLocked(true)
+        return
+      }
       toast.error(err instanceof HttpError ? err.message : "加载失败")
     } finally {
       if (!silent) setLoading(false)
@@ -261,6 +269,16 @@ export default function AiPage() {
     } finally {
       setSyncing(false)
     }
+  }
+
+  if (locked) {
+    return (
+      <FeatureLockedNotice
+        feature="ai"
+        featureLabel="AI 中转站"
+        description="你的账号未被授予「AI 中转站」权限。站长资源有限，该服务暂未全量开放。"
+      />
+    )
   }
 
   if (loading) {

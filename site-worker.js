@@ -34,6 +34,18 @@ export default {
       )
     }
 
-    return env.ASSETS.fetch(request)
+    var res = env.ASSETS.fetch(request)
+
+    // 字体走 CORS 严格模式：自定义域名（如 card.doulor.cn）访问名片时，
+    // 字体从 cloud.doulor.cn/fonts/*.woff2 加载会被浏览器拒绝。字体公开可读，
+    // 追加 Access-Control-Allow-Origin: * 即可。其他路径不加，保持默认行为。
+    if (url.pathname.startsWith("/fonts/")) {
+      var r = res instanceof Promise ? await res : res
+      var copy = new Response(r.body, r)
+      copy.headers.set("Access-Control-Allow-Origin", "*")
+      return copy
+    }
+
+    return res
   },
 }

@@ -2,51 +2,34 @@ name = "doulor-mail-api"
 main = "src/index.ts"
 compatibility_date = "2026-09-21"
 
+# 不在配置文件里声明 [[routes]]。
+#
+# 原因（重要）：wrangler deploy 会用配置文件里的 routes **覆盖**该 Worker 在
+# Cloudflare 上的全部路由触发器——即「配置里没列出的 Route 会被删掉」。
+# 本项目有「用户动态绑定自定义域名」的能力（名片 / 网盘直链，见
+# custom-domain.ts 的 attachCustomDomain，通过 API 增删 Route），这些动态
+# Route 不可能写死在配置里，于是每次 deploy 都会把它们清空，表现为绑定的
+# 自定义域名访问报 522/523（DNS 橙云正常但无 Route 匹配）。
+#
+# 官方文档明确：配置文件**不声明** routes 时，deploy 不会触碰 dashboard/API
+# 已建的路由。故这里不声明，全部 Route 由 CF dashboard + 运行时 API 维护。
+# 另加 workers_dev = false，不暴露 *.workers.dev 预览域名。
+#
+# 当前线上应存在的固定 Route（如被误删需手动在 dashboard 重建，均指向 doulor-mail-api）：
+#   doulor.cn/api/*          cloud.doulor.cn/api/*
+#   doulor.cn/dl/*           cloud.doulor.cn/dl/*
+#   doulor.cn/profile/*      cloud.doulor.cn/profile/*
+#   doulor.cn/p/*            cloud.doulor.cn/p/*
+# 动态 Route（由 attachCustomDomain / detachCustomDomain 维护）：
+#   <用户绑定的子域名>/*  如 xxx.doulor.cn/*、abc.doulor.cn/*
+workers_dev = false
+
 # D1
 [[d1_databases]]
 binding = "DB"
 database_name = "doulor-mail"
 database_id = "9ae6127c-75f7-4688-bbe3-31ed856859c5"
 
-# 路由：裸域与应用域的 /api/* 都指向本 Worker
-[[routes]]
-pattern = "doulor.cn/api/*"
-zone_name = "doulor.cn"
-
-[[routes]]
-pattern = "cloud.doulor.cn/api/*"
-zone_name = "doulor.cn"
-
-# R2 直链：/dl/<用户名>/<文件名> 需要由本 Worker 反代
-# （cloud.doulor.cn 其余路径仍由静态站点 Worker 处理，更精确的路由优先）
-[[routes]]
-pattern = "cloud.doulor.cn/dl/*"
-zone_name = "doulor.cn"
-
-[[routes]]
-pattern = "doulor.cn/dl/*"
-zone_name = "doulor.cn"
-
-# 个人名片：
-#   /profile/<slug>  — 公开名片页（服务端渲染 HTML）
-#   /p/<用户名>/<资源> — 名片的头像/背景/音乐
-# 这两条必须存在：静态站点 Worker 的 SPA catch-all 会把未匹配路径全部吃掉，
-# 不加精确路由的话 /profile/* 会返回站点首页而不是名片。
-[[routes]]
-pattern = "cloud.doulor.cn/profile/*"
-zone_name = "doulor.cn"
-
-[[routes]]
-pattern = "cloud.doulor.cn/p/*"
-zone_name = "doulor.cn"
-
-[[routes]]
-pattern = "doulor.cn/profile/*"
-zone_name = "doulor.cn"
-
-[[routes]]
-pattern = "doulor.cn/p/*"
-zone_name = "doulor.cn"
 
 # 出站邮件：Cloudflare Email Service 的 send_email 绑定。
 #

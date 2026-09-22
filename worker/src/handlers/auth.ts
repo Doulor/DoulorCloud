@@ -134,8 +134,8 @@ export async function register(env: Env, request: Request): Promise<Response> {
         WHERE id = ? AND used_count < max_uses`
     ).bind(invite.id),
     env.DB.prepare(
-      "INSERT INTO users (id, username, email, password_hash, namespace, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)"
-    ).bind(id, username, email, passwordHash, username, now, now),
+      "INSERT INTO users (id, username, email, password_hash, namespace, status, permissions, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)"
+    ).bind(id, username, email, passwordHash, username, invite.permissions ?? null, now, now),
     env.DB.prepare(
       "INSERT INTO domains (id, user_id, name, zone_id, status, created_at) VALUES (?, ?, ?, ?, 'active', ?)"
     ).bind(uuid(), id, requestedFqdn, env.ZONE_ID, now),
@@ -164,6 +164,10 @@ export async function register(env: Env, request: Request): Promise<Response> {
     namespace: username,
     role: "user",
     status: "active",
+    // 必须带上邀请码推导出的权限：漏掉会让 toPublicUser 回退到「全开」，
+    // 导致新注册用户界面显示权限全开（与库中实际权限不符），
+    // 直到刷新页面重新 /me 才恢复正确。
+    permissions: invite.permissions ?? null,
     created_at: now,
     updated_at: now,
   }

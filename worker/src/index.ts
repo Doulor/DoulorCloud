@@ -9,9 +9,11 @@ import * as adminHandlers from "./handlers/admin"
 import * as storageHandlers from "./handlers/storage"
 import * as newapiHandlers from "./handlers/newapi"
 import * as settingsHandlers from "./handlers/settings"
+import * as donationHandlers from "./handlers/donations"
 import * as frpHandlers from "./handlers/frp"
 import * as profileHandlers from "./handlers/profile"
 import * as proxyHandlers from "./handlers/proxy"
+import * as tempboxHandlers from "./handlers/tempbox"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
 
@@ -132,6 +134,14 @@ async function route(env: Env, request: Request): Promise<Response> {
     return adminHandlers.deleteInvite(env, request, decodeURIComponent(adminInviteMatch[1]))
   }
 
+  // Admin: 捐献审核
+  if (routePath === "/admin/donations" && method === "GET") {
+    return donationHandlers.listDonations(env, request)
+  }
+  if (routePath === "/admin/donations/review" && method === "POST") {
+    return donationHandlers.reviewDonation(env, request)
+  }
+
   // Admin: 保留子域名
   if (routePath === "/admin/reserved-subdomains" && method === "GET") {
     return adminHandlers.listReserved(env, request)
@@ -223,6 +233,18 @@ async function route(env: Env, request: Request): Promise<Response> {
       decodeURIComponent(messageReadMatch[1]),
       decodeURIComponent(messageReadMatch[2])
     )
+  }
+
+  // ---- 捐献 ----
+  if (routePath === "/donations" && method === "GET") {
+    return donationHandlers.listDonations(env, request)
+  }
+  if (routePath === "/donations" && method === "POST") {
+    return donationHandlers.createDonation(env, request)
+  }
+  const donationMatch = routePath.match(/^\/donations\/([^/]+)$/)
+  if (donationMatch && method === "DELETE") {
+    return donationHandlers.cancelDonation(env, request, decodeURIComponent(donationMatch[1]))
   }
 
   // ---- 个人名片 ----
@@ -386,6 +408,40 @@ async function route(env: Env, request: Request): Promise<Response> {
     )
   }
 
+  // ---- 临时分享箱（tempbox）----
+  // 公开：config / 查看 / 下载 不需要登录
+  if (routePath === "/tempbox/config" && method === "GET") {
+    return tempboxHandlers.getTempboxConfig(env, request)
+  }
+  if (routePath === "/tempbox/create" && method === "POST") {
+    return tempboxHandlers.createTempbox(env, request)
+  }
+  // 需登录 / 管理员：上传与删除
+  const tempboxUploadMatch = routePath.match(/^\/tempbox\/([^/]+)\/upload-url$/)
+  if (tempboxUploadMatch && method === "POST") {
+    return tempboxHandlers.createTempboxUploadUrl(env, request, decodeURIComponent(tempboxUploadMatch[1]))
+  }
+  const tempboxCommitMatch = routePath.match(/^\/tempbox\/([^/]+)\/commit$/)
+  if (tempboxCommitMatch && method === "POST") {
+    return tempboxHandlers.commitTempboxUpload(env, request, decodeURIComponent(tempboxCommitMatch[1]))
+  }
+  const tempboxBatchMatch = routePath.match(/^\/tempbox\/([^/]+)$/)
+  if (tempboxBatchMatch && method === "GET") {
+    return tempboxHandlers.getTempbox(env, request, decodeURIComponent(tempboxBatchMatch[1]))
+  }
+  if (tempboxBatchMatch && method === "DELETE") {
+    return tempboxHandlers.deleteTempbox(env, request, decodeURIComponent(tempboxBatchMatch[1]))
+  }
+  const tempboxFileMatch = routePath.match(/^\/tempbox\/([^/]+)\/([^/]+)$/)
+  if (tempboxFileMatch && (method === "GET" || method === "HEAD")) {
+    return tempboxHandlers.downloadTempboxFile(
+      env,
+      request,
+      decodeURIComponent(tempboxFileMatch[1]),
+      decodeURIComponent(tempboxFileMatch[2])
+    )
+  }
+
   const devKeyMatch = routePath.match(/^\/dev\/key\/([^/]+)$/)
   if (devKeyMatch && method === "DELETE") {
     return newapiHandlers.removeKey(
@@ -440,8 +496,8 @@ export default {
         )
       }
 
-      // 名片资源：/p/<用户名>/<avatar|background|music>（公开，无需鉴权）
-      const assetMatch = url.pathname.match(/^\/p\/([^/]+)\/([a-z]+)$/)
+      // 名片资源：/p/<用户名>/<avatar|background|music|music-cover>（公开，无需鉴权）
+      const assetMatch = url.pathname.match(/^\/p\/([^/]+)\/([a-z-]+)$/)
       if (assetMatch && request.method === "GET") {
         return await profileHandlers.serveAssetByUsername(
           env,

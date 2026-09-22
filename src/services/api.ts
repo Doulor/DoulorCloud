@@ -6,6 +6,7 @@ import {
   type ApiError,
   type DnsRecord,
   type DnsRecordType,
+  type DonationOverview,
   type Mailbox,
   type AdminFrpApplication,
   type AdminFrpNode,
@@ -502,8 +503,12 @@ export const newapiApi = {
 export const tempboxApi = {
   config: () => request<TempboxConfig>("/tempbox/config"),
 
-  create: () =>
-    request<TempboxCreated>("/tempbox/create", { method: "POST" }),
+  /** 创建批次；传 text 时为纯文本互传（文字存 D1，不走 R2） */
+  create: (text?: string) =>
+    request<TempboxCreated>("/tempbox/create", {
+      method: "POST",
+      body: JSON.stringify({ text: text ?? "" }),
+    }),
 
   get: (code: string) =>
     request<TempboxBatch>(`/tempbox/${encodeURIComponent(code)}`),
@@ -641,6 +646,8 @@ export const profileApi = {
     effects: string[]
     intro: string
     font: string
+    layout: string
+    musicCoverUrl: string
     contacts: ProfileContact[]
   }>) =>
     request<{ profile: Profile }>("/profile", {
@@ -654,8 +661,8 @@ export const profileApi = {
       body: JSON.stringify({ published }),
     }),
 
-  /** 上传头像 / 背景 / 音乐（原始字节直传，Content-Type 决定扩展名） */
-  uploadAsset: async (kind: "avatar" | "background" | "music", file: File) => {
+  /** 上传头像 / 背景 / 音乐 / 音乐封面（原始字节直传，Content-Type 决定扩展名） */
+  uploadAsset: async (kind: "avatar" | "background" | "music" | "music-cover", file: File) => {
     const res = await fetch(`/api/profile/asset?kind=${kind}`, {
       method: "POST",
       credentials: "include",
@@ -673,7 +680,7 @@ export const profileApi = {
     return data as { key: string; kind: string }
   },
 
-  deleteAsset: (kind: "avatar" | "background" | "music") =>
+  deleteAsset: (kind: "avatar" | "background" | "music" | "music-cover") =>
     request<{ ok: boolean }>(`/profile/asset?kind=${kind}`, { method: "DELETE" }),
 
   bindDomain: (subdomainId: string) =>
@@ -686,5 +693,30 @@ export const profileApi = {
     request<{ ok: boolean }>("/profile/domain", {
       method: "POST",
       body: JSON.stringify({ action: "unbind" }),
+    }),
+}
+
+// ---- 捐献 ----
+
+export const donationApi = {
+  list: () => request<DonationOverview>("/donations"),
+
+  create: (payload: {
+    type: "ai" | "frp" | "proxy"
+    payload: unknown
+    remark?: string
+  }) =>
+    request<{ id: string; status: string }>("/donations", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  cancel: (id: string) =>
+    request<void>(`/donations/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  review: (id: string, action: "approve" | "reject", note?: string) =>
+    request<{ ok: boolean; status: string }>("/admin/donations/review", {
+      method: "POST",
+      body: JSON.stringify({ id, action, note }),
     }),
 }

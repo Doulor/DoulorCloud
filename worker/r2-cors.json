@@ -3,6 +3,7 @@
     {
       "allowed": {
         "origins": [
+          "https://cloud.doulor.cn",
           "https://mail.doulor.cn",
           "https://doulor.cn",
           "http://localhost:5173",

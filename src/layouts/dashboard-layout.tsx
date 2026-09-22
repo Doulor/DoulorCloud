@@ -10,14 +10,16 @@ import {
   Menu,
   X,
   HardDrive,
-  Sparkles,
+  Heart,  Sparkles,
   Contact,
   Network,
   Zap,
+  Package,
 } from "lucide-react"
 
 import { Logo } from "@/components/logo"
 import { ThemeToggle } from "@/components/theme-toggle"
+import { ScrollToTop } from "@/components/scroll-to-top"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import {
@@ -41,8 +43,10 @@ const baseNav = [
   { to: "/dashboard/ai", label: "AI 中转站", icon: Sparkles, end: false },
   { to: "/dashboard/frp", label: "内网穿透", icon: Network, end: false },
   { to: "/dashboard/proxy", label: "代理节点", icon: Zap, end: false },
+  { to: "/dashboard/tempbox", label: "临时分享箱", icon: Package, end: false },
   { to: "/dashboard/profile", label: "个人名片", icon: Contact, end: false },
   { to: "/dashboard/settings", label: "设置", icon: Settings, end: false },
+  { to: "/dashboard/donations", label: "捐献", icon: Heart, end: false },
 ]
 
 const adminNav = [
@@ -180,6 +184,7 @@ export function DashboardLayout() {
         <main className="mx-auto w-full max-w-6xl px-4 py-8 lg:px-8">
           <Outlet />
         </main>
+        <ScrollToTop />
       </div>
     </div>
   )

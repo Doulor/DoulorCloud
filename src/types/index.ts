@@ -425,11 +425,14 @@ export interface Profile {
   musicUrl: string | null
   musicTitle: string | null
   musicAutoplay: boolean
+  musicCoverKey: string | null
+  musicCoverUrl: string | null
   theme: string
   accent: string | null
   effects: string[]
   intro: string
   font: string
+  layout: string
   contacts: ProfileContact[]
   subdomainId: string | null
   fqdn: string | null
@@ -452,10 +455,12 @@ export interface ProfileOverview {
   effects: string[]
   intros: string[]
   fonts: string[]
+  layouts: string[]
   themeOptions: ProfileOption[]
   effectOptions: ProfileOption[]
   introOptions: ProfileOption[]
   fontOptions: ProfileOption[]
+  layoutOptions: ProfileOption[]
   contactTypes: ContactType[]
   r2Configured: boolean
   limits: { avatar: number; background: number; music: number }
@@ -538,12 +543,17 @@ export interface TempboxBatch {
   fileCount: number
   totalBytes: number
   files: TempboxFile[]
+  /** 是否纯文本批次（文字存 D1，不走 R2） */
+  isText?: boolean
+  /** 纯文本内容（isText=true 时返回） */
+  textContent?: string | null
 }
 
 export interface TempboxCreated {
   code: string
   expireAt: string
   minutes: number
+  isText?: boolean
 }
 
 
@@ -553,4 +563,26 @@ export interface ReservedSubdomain {
   name: string
   note: string | null
   createdAt: string
+}
+
+// ---- 捐献 ----
+
+export interface Donation {
+  id: string
+  type: "ai" | "frp" | "proxy"
+  username: string
+  payload: unknown
+  notifyEmail: string
+  remark: string | null
+  status: "pending" | "approved" | "rejected"
+  reviewNote: string | null
+  createdAt: string
+  reviewedAt: string | null
+}
+
+export interface DonationOverview {
+  donations: Donation[]
+  types: string[]
+  typeLabels: Record<string, string>
+  permissions: Permissions
 }

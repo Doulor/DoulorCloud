@@ -3,6 +3,7 @@ import { Cloud, Copy, ExternalLink, Globe, HardDrive, Loader2, Power, RefreshCw,
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
+import { FeatureLockedNotice } from "@/components/feature-locked-notice"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
@@ -128,6 +129,9 @@ export default function StoragePage() {
   const fileInputRef = React.useRef<HTMLInputElement>(null)
 
   /** 拉取概览与文件列表；silent 用于上传/删除后刷新，避免整页 loading 闪烁 */
+  // 无权限（403 FEATURE_NOT_PERMITTED）：整页显示提示 + 捐献入口
+  const [locked, setLocked] = React.useState(false)
+
   const load = React.useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
@@ -140,6 +144,10 @@ export default function StoragePage() {
         setObjects([])
       }
     } catch (err) {
+      if (err instanceof HttpError && err.code === "FEATURE_NOT_PERMITTED") {
+        setLocked(true)
+        return
+      }
       toast.error(err instanceof HttpError ? err.message : "加载网盘信息失败")
     } finally {
       if (!silent) setLoading(false)
@@ -354,6 +362,16 @@ export default function StoragePage() {
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "解绑失败")
     }
+  }
+
+  if (locked) {
+    return (
+      <FeatureLockedNotice
+        feature="r2"
+        featureLabel="直链网盘"
+        description="你的账号未被授予「直链网盘」权限。站长资源有限，该服务暂未全量开放。"
+      />
+    )
   }
 
   if (loading) {

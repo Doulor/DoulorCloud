@@ -3,6 +3,7 @@ import { ArrowRight } from "lucide-react"
 
 import { Logo } from "@/components/logo"
 import { ThemeToggle } from "@/components/theme-toggle"
+import { ScrollToTop } from "@/components/scroll-to-top"
 import { Button } from "@/components/ui/button"
 import { useAuth } from "@/hooks/use-auth"
 import { cn } from "@/lib/utils"
@@ -62,6 +63,8 @@ export function LandingLayout() {
       <main className="flex-1">
         <Outlet />
       </main>
+
+      <ScrollToTop />
 
       <footer className="border-t">
         <div className="mx-auto flex w-full max-w-6xl flex-col items-center justify-between gap-4 px-4 py-8 text-sm text-muted-foreground sm:flex-row lg:px-8">

@@ -35,12 +35,102 @@ const AUDIO_TYPES: Record<string, string> = {
 }
 
 export const THEMES = [
-  "minimal",
-  "gradient",
+  "void",
+  "neon",
   "glass",
-  "terminal",
-  "card",
-  "dark",
+  "aurora",
+  "cyber",
+  "blossom",
+] as const
+
+/**
+ * 独立勾选的常驻动效。与主题不绑定，用户自由混搭组合。
+ * particles 与 rain 互斥（共用 canvas 层），渲染层会保留 particles。
+ */
+export const EFFECTS = [
+  "particles",
+  "tilt",
+  "glitch",
+  "glow",
+  "rain",
+  "sparkle",
+] as const
+
+/**
+ * 开屏动画。enter/portal 为交互式（点击进入主界面），fade/slide 为非交互式（自动进入）。
+ * 与主题、动效独立混搭。
+ */
+export const INTROS = ["none", "enter", "portal", "fade", "slide"] as const
+
+/**
+ * 自托管字体。仅英文/拉丁字符集，中文回退系统字体栈。
+ * 字体文件在静态站点 /fonts/<id>.woff2，名片页用绝对 URL 引用。
+ */
+export const FONTS = [
+  "system",
+  "space",
+  "orbitron",
+  "jetbrains",
+  "audiowide",
+  "playfair",
+  "cinzel",
+  "poppins",
+  "bebas",
+] as const
+
+/** 带标签/描述的选项列表，供前端选择器渲染。与服务端白名单同源，避免前后端不一致。 */
+export const THEME_OPTIONS = [
+  { id: "void", label: "虚空", desc: "纯黑虚空，accent 辉光勾勒" },
+  { id: "neon", label: "霓虹", desc: "合成波霓虹辉光" },
+  { id: "glass", label: "玻璃", desc: "毛玻璃拟态" },
+  { id: "aurora", label: "极光", desc: "流动多色渐变" },
+  { id: "cyber", label: "赛博", desc: "HUD 网格切角" },
+  { id: "blossom", label: "绽放", desc: "浅色优雅粉色" },
+] as const
+
+export const EFFECT_OPTIONS = [
+  { id: "particles", label: "粒子连线", desc: "浮动粒子与连线背景" },
+  { id: "tilt", label: "3D 倾斜", desc: "鼠标移动时卡片倾斜" },
+  { id: "glitch", label: "文字故障", desc: "名称文字故障跳动" },
+  { id: "glow", label: "脉冲发光", desc: "按钮呼吸发光" },
+  { id: "rain", label: "代码雨", desc: "Matrix 风格下落字符" },
+  { id: "sparkle", label: "星光闪烁", desc: "随机闪烁亮点" },
+] as const
+
+export const INTRO_OPTIONS = [
+  { id: "none", label: "无", desc: "直接显示内容" },
+  { id: "enter", label: "点击进入", desc: "点击后展示内容（交互式）" },
+  { id: "portal", label: "传送门", desc: "旋转传送门，点击进入（交互式）" },
+  { id: "fade", label: "渐入", desc: "内容自动淡入（非交互式）" },
+  { id: "slide", label: "上滑", desc: "内容自动上滑（非交互式）" },
+] as const
+
+export const FONT_OPTIONS = [
+  { id: "system", label: "系统默认", desc: "不引入外部字体" },
+  { id: "space", label: "Space Grotesk", desc: "现代几何无衬线" },
+  { id: "orbitron", label: "Orbitron", desc: "未来科技感" },
+  { id: "jetbrains", label: "JetBrains Mono", desc: "等宽开发者" },
+  { id: "audiowide", label: "Audiowide", desc: "赛博霓虹" },
+  { id: "playfair", label: "Playfair Display", desc: "优雅高对比衬线" },
+  { id: "cinzel", label: "Cinzel", desc: "古典标题" },
+  { id: "poppins", label: "Poppins", desc: "几何圆润" },
+  { id: "bebas", label: "Bebas Neue", desc: "窄高标题" },
+] as const
+
+/**
+ * 排版预设。与主题/动效/字体/开屏独立混搭，只改变 .wrap 的布局方式。
+ *   center = 居中卡片（传统纵向居中）
+ *   side   = 侧栏型（头像在左，信息在右）
+ *   split  = 分屏型（背景大图 + 浮层信息）
+ *   plain  = 极简列（无容器，纯文字）
+ */
+export const LAYOUTS = ["center", "side", "split", "plain"] as const
+
+export const LAYOUT_OPTIONS = [
+  { id: "center", label: "居中卡片", desc: "传统纵向居中 link-in-bio" },
+  { id: "side", label: "侧栏型", desc: "头像在左，信息在右，像个人主页" },
+  { id: "split", label: "分屏型", desc: "背景大图 + 浮层信息" },
+  { id: "plain", label: "极简列", desc: "无容器，纯文字排版" },
 ] as const
 
 /** 支持的联系方式类型。服务端据此把用户输入拼成可点击链接。 */
@@ -80,8 +170,14 @@ interface ProfileRow {
   music_url: string | null
   music_title: string | null
   music_autoplay: number
+  music_cover_key: string | null
+  music_cover_url: string | null
   theme: string
   accent: string | null
+  effects: string
+  intro: string
+  font: string
+  layout: string
   contacts: string
   subdomain_id: string | null
   fqdn: string | null
@@ -102,6 +198,22 @@ export function parseContacts(raw: string): Contact[] {
         typeof o.value === "string"
       )
     })
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 解析 effects JSON 数组，只保留白名单内的 id。
+ * 渲染层（profile-page.ts）负责处理 particles/rain 互斥。
+ */
+export function parseEffects(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((e): e is string => typeof e === "string")
+      .filter((e) => (EFFECTS as readonly string[]).includes(e))
   } catch {
     return []
   }
@@ -150,8 +262,8 @@ export async function enableProfile(env: Env, request: Request): Promise<Respons
 
   const now = new Date().toISOString()
   await env.DB.prepare(
-    `INSERT INTO profiles (user_id, slug, published, contacts, theme, created_at, updated_at)
-     VALUES (?, ?, 0, '[]', 'minimal', ?, ?)`
+    `INSERT INTO profiles (user_id, slug, published, contacts, theme, effects, intro, font, layout, created_at, updated_at)
+     VALUES (?, ?, 0, '[]', 'void', '[]', 'none', 'system', 'center', ?, ?)`
   )
     .bind(user.id, slug, now, now)
     .run()
@@ -174,8 +286,14 @@ function toPublicProfile(row: ProfileRow, slugOrFqdn: { profilePath: string }) {
     musicUrl: row.music_url,
     musicTitle: row.music_title,
     musicAutoplay: row.music_autoplay === 1,
+    musicCoverKey: row.music_cover_key,
+    musicCoverUrl: row.music_cover_url,
     theme: row.theme,
     accent: row.accent,
+    effects: parseEffects(row.effects),
+    intro: row.intro,
+    font: row.font,
+    layout: row.layout,
     contacts: parseContacts(row.contacts),
     subdomainId: row.subdomain_id,
     fqdn: row.fqdn,
@@ -193,6 +311,15 @@ export async function getProfile(env: Env, request: Request): Promise<Response> 
 
   const meta = {
     themes: THEMES,
+    effects: EFFECTS,
+    intros: INTROS,
+    fonts: FONTS,
+    layouts: LAYOUTS,
+    themeOptions: THEME_OPTIONS,
+    effectOptions: EFFECT_OPTIONS,
+    introOptions: INTRO_OPTIONS,
+    fontOptions: FONT_OPTIONS,
+    layoutOptions: LAYOUT_OPTIONS,
     contactTypes: CONTACT_TYPES,
     r2Configured: isR2Configured(env),
     limits: {
@@ -268,11 +395,38 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
       ? body.theme
       : row.theme
 
+  // 动效：只接受白名单内的 id；渲染层处理 particles/rain 互斥
+  let effectsJson = row.effects
+  if (Array.isArray(body.effects)) {
+    const cleaned = body.effects
+      .filter((e): e is string => typeof e === "string")
+      .filter((e) => (EFFECTS as readonly string[]).includes(e))
+    // 去重，保留顺序
+    const dedup = Array.from(new Set(cleaned))
+    effectsJson = JSON.stringify(dedup)
+  }
+
+  const intro =
+    typeof body.intro === "string" && (INTROS as readonly string[]).includes(body.intro)
+      ? body.intro
+      : row.intro
+
+  const font =
+    typeof body.font === "string" && (FONTS as readonly string[]).includes(body.font)
+      ? body.font
+      : row.font
+
+  const layout =
+    typeof body.layout === "string" && (LAYOUTS as readonly string[]).includes(body.layout)
+      ? body.layout
+      : row.layout
+
   await env.DB.prepare(
     `UPDATE profiles SET
        slug = ?, display_name = ?, bio = ?,
        avatar_url = ?, background_url = ?, music_url = ?, music_title = ?,
-       music_autoplay = ?, theme = ?, accent = ?, contacts = ?, updated_at = ?
+       music_autoplay = ?, music_cover_url = ?, theme = ?, accent = ?, effects = ?,
+       intro = ?, font = ?, layout = ?, contacts = ?, updated_at = ?
      WHERE user_id = ?`
   )
     .bind(
@@ -284,8 +438,13 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
       body.musicUrl === undefined ? row.music_url : str(body.musicUrl, 1000),
       body.musicTitle === undefined ? row.music_title : str(body.musicTitle, 80),
       body.musicAutoplay === undefined ? row.music_autoplay : body.musicAutoplay ? 1 : 0,
+      body.musicCoverUrl === undefined ? row.music_cover_url : str(body.musicCoverUrl, 1000),
       theme,
       body.accent === undefined ? row.accent : str(body.accent, 20),
+      effectsJson,
+      intro,
+      font,
+      layout,
       contactsJson,
       new Date().toISOString(),
       user.id
@@ -319,7 +478,7 @@ export async function setPublished(env: Env, request: Request): Promise<Response
 // ---- 资源上传 ----
 
 /**
- * POST /api/profile/asset?kind=avatar|background|music
+ * POST /api/profile/asset?kind=avatar|background|music|music-cover
  * 原始字节直传（Content-Type 决定扩展名），存入 profiles/<用户名>/<kind>.<ext>
  */
 export async function uploadAsset(env: Env, request: Request): Promise<Response> {
@@ -330,7 +489,7 @@ export async function uploadAsset(env: Env, request: Request): Promise<Response>
 
   const url = new URL(request.url)
   const kind = url.searchParams.get("kind") ?? ""
-  if (!["avatar", "background", "music"].includes(kind)) {
+  if (!["avatar", "background", "music", "music-cover"].includes(kind)) {
     throw new ApiError(400, "不支持的类型", "INVALID_KIND")
   }
 
@@ -346,8 +505,9 @@ export async function uploadAsset(env: Env, request: Request): Promise<Response>
     )
   }
 
+  // 音乐封面与头像同上限（5 MiB）
   const limit =
-    kind === "avatar"
+    kind === "avatar" || kind === "music-cover"
       ? MAX_AVATAR_BYTES
       : kind === "background"
         ? MAX_BACKGROUND_BYTES
@@ -380,7 +540,13 @@ export async function uploadAsset(env: Env, request: Request): Promise<Response>
   }
 
   const column =
-    kind === "avatar" ? "avatar_key" : kind === "background" ? "background_key" : "music_key"
+    kind === "avatar"
+      ? "avatar_key"
+      : kind === "background"
+        ? "background_key"
+        : kind === "music-cover"
+          ? "music_cover_key"
+          : "music_key"
   await env.DB.prepare(
     `UPDATE profiles SET ${column} = ?, updated_at = ? WHERE user_id = ?`
   )
@@ -395,12 +561,18 @@ export async function deleteAsset(env: Env, request: Request): Promise<Response>
   const user = await requireFeatureUser(env, request, "profile")
   const url = new URL(request.url)
   const kind = url.searchParams.get("kind") ?? ""
-  if (!["avatar", "background", "music"].includes(kind)) {
+  if (!["avatar", "background", "music", "music-cover"].includes(kind)) {
     throw new ApiError(400, "不支持的类型", "INVALID_KIND")
   }
 
   const column =
-    kind === "avatar" ? "avatar_key" : kind === "background" ? "background_key" : "music_key"
+    kind === "avatar"
+      ? "avatar_key"
+      : kind === "background"
+        ? "background_key"
+        : kind === "music-cover"
+          ? "music_cover_key"
+          : "music_key"
 
   if (isR2Configured(env)) {
     for (const ext of ["jpg", "png", "webp", "gif", "mp3", "m4a", "ogg", "wav"]) {
@@ -436,7 +608,7 @@ export async function serveAssetByUsername(
   username: string,
   kind: string
 ): Promise<Response> {
-  if (!["avatar", "background", "music"].includes(kind)) {
+  if (!["avatar", "background", "music", "music-cover"].includes(kind)) {
     return new Response("Not Found", { status: 404 })
   }
   if (!isR2Configured(env)) {
@@ -560,9 +732,14 @@ export interface PublicProfile {
   bio: string | null
   theme: string
   accent: string | null
+  effects: string[]
+  intro: string
+  font: string
+  layout: string
   avatar: string | null
   background: string | null
   music: string | null
+  musicCover: string | null
   musicTitle: string | null
   musicAutoplay: boolean
   contacts: Contact[]
@@ -603,9 +780,14 @@ export async function loadPublicProfile(
     bio: row.bio,
     theme: row.theme,
     accent: row.accent,
+    effects: parseEffects(row.effects),
+    intro: row.intro,
+    font: row.font,
+    layout: row.layout,
     avatar: assetUrl("avatar", row.avatar_key, row.avatar_url),
     background: assetUrl("background", row.background_key, row.background_url),
     music: assetUrl("music", row.music_key, row.music_url),
+    musicCover: assetUrl("music-cover", row.music_cover_key, row.music_cover_url),
     musicTitle: row.music_title,
     musicAutoplay: row.music_autoplay === 1,
     contacts: parseContacts(row.contacts).filter((c) => c.visible !== false),

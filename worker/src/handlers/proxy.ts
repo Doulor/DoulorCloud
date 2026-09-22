@@ -389,26 +389,32 @@ async function syncSubscription(
 }
 
 /**
- * 自动识别订阅源的协议与地区（管理员无需手动选择）。
+ * 自动识别订阅源的协议、地区与当前状态（管理员无需手动选择）。
  * 协议：抓取订阅文本解析节点后按出现频次取最常见协议；
- * 地区：优先取订阅 URL 里的地区参数，其次取节点名里最常出现的地区。
- * 识别失败时返回 null，让管理员手填兜底。
+ * 地区：优先取订阅 URL 里的地区参数，其次取节点名里最常出现的地区；
+ * 状态：订阅地址能抓到内容 → online，否则 → offline。
+ * 识别失败（抓不到 / 压不出节点）时协议地区回落到 null，由管理员手填兜底；状态仍给出 online/offline。
  */
 export async function detectSubscriptionProfile(
   env: Env,
   row: Pick<ProxySubscriptionRow, "id" | "url">
-): Promise<{ protocol: string | null; region: string | null }> {
+): Promise<{ protocol: string | null; region: string | null; ok: boolean }> {
   let text = ""
+  let ok = false
   try {
     const res = await fetchSubscriptionText(env, row.url)
-    if (!res.ok) return { protocol: null, region: null }
-    text = res.text
+    if (res.ok) {
+      text = res.text
+      ok = true
+    }
   } catch {
-    return { protocol: null, region: null }
+    // 网络错误 → ok=false，协议/地区未知，状态 offline
   }
 
-  const nodes = parseSubscription(text)
-  if (nodes.length === 0) return { protocol: null, region: null }
+  const nodes = ok ? parseSubscription(text) : []
+  if (nodes.length === 0) {
+    return { protocol: null, region: null, ok }
+  }
 
   // 协议：最常见协议
   const counts: Record<string, number> = {}
@@ -437,41 +443,23 @@ export async function detectSubscriptionProfile(
   } catch {
     // 忽略 URL 解析失败
   }
-  // URL 里没有 → 取节点名里最常出现的地区
+  // URL 里没有 → 从节点名里出现的地区做统计：
+  //   - 只有一种地区 → 用该地区
+  //   - 出现多种地区（含「综合」）→ 显示「综合」
   if (!region) {
     const regionCounts: Record<string, number> = {}
     for (const n of nodes) {
       if (n.region) regionCounts[n.region] = (regionCounts[n.region] ?? 0) + 1
     }
-    let rbest = 0
-    for (const [r, c] of Object.entries(regionCounts)) {
-      if (c > rbest) {
-        rbest = c
-        region = r
-      }
+    const distinct = Object.keys(regionCounts)
+    if (distinct.length === 1) {
+      region = distinct[0]
+    } else if (distinct.length > 1) {
+      region = "综合"
     }
   }
 
-  return { protocol, region }
-}
-
-/**
- * 抓取订阅源、解析节点并「自动识别」协议与地区，然后落库。
- * 管理员新建订阅源时调用：识别失败时保留数据库原值（或置 unknown / null 由管理员补填）。
- */
-export async function autoDetectAndSave(
-  env: Env,
-  row: Pick<ProxySubscriptionRow, "id" | "url">
-): Promise<{ protocol: string; region: string | null; detected: boolean }> {
-  const { protocol, region } = await detectSubscriptionProfile(env, row)
-  const finalProtocol = protocol ?? "mixed"
-  const now = new Date().toISOString()
-  await env.DB.prepare(
-    "UPDATE proxy_subscriptions SET protocol = ?, region = ?, status = 'online', last_error = NULL, updated_at = ? WHERE id = ?"
-  )
-    .bind(finalProtocol, region, now, row.id)
-    .run()
-  return { protocol: finalProtocol, region, detected: protocol !== null }
+  return { protocol, region, ok }
 }
 
 // ---- 用户侧接口 ----
@@ -674,14 +662,21 @@ export async function upsertProxySubscription(
   // 识别失败时回落到手填值 / 默认值。
   const auto = await detectSubscriptionProfile(env, { id: body.id ?? "", url })
   const now = new Date().toISOString()
+
+  // 未显式传入协议/地区/状态时，用自动识别结果；识别失败回落到默认值
+  const protocolInput = (body.protocol ?? "").trim()
+  const regionInput = (body.region ?? "").trim()
+  const statusInput = (body.status ?? "").trim()
   const values = {
     name,
-    region: (body.region ?? "").trim() || auto.region || null,
+    region: regionInput || auto.region || null,
     url,
-    protocol: (body.protocol ?? "").trim() || auto.protocol || "mixed",
-    status: ["online", "offline", "maintenance", "unknown"].includes(body.status ?? "")
-      ? (body.status as string)
-      : "online",
+    protocol: protocolInput.slice(0, 20) || auto.protocol || "mixed",
+    status: ["online", "offline", "maintenance", "unknown"].includes(statusInput)
+      ? statusInput
+      : auto.ok
+        ? "online"
+        : "offline",
     statusNote: (body.statusNote ?? "").trim() || null,
     enabled: body.enabled === false ? 0 : 1,
     sortOrder: Math.trunc(Number(body.sortOrder ?? 0)),

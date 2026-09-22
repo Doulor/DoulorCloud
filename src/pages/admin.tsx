@@ -16,6 +16,7 @@ import {
   Trash2,
   UserCheck,
   Users,
+  Heart,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -64,7 +65,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { adminApi, HttpError } from "@/services/api"
+import { adminApi, donationApi, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 /** 可授权的功能（与后端 permissions.ts 的 FEATURES 保持一致） */
 const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
@@ -78,6 +79,7 @@ const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
 import type {
   AdminFrpApplication,
   AdminFrpNode,
+  Donation,
   ReservedSubdomain,
   AdminInvite,
   AdminProxySubscription,
@@ -175,6 +177,12 @@ export default function AdminPage() {
   const [frpCoreUrl, setFrpCoreUrl] = React.useState("")
   const [frpNotifyEmail, setFrpNotifyEmail] = React.useState("")
   const [notifyEmailOptions, setNotifyEmailOptions] = React.useState<string[]>([])
+  // 临时分享箱
+  const [tempboxEnabled, setTempboxEnabled] = React.useState(true)
+  const [tempboxMinutes, setTempboxMinutes] = React.useState("30")
+  const [tempboxMaxFileMb, setTempboxMaxFileMb] = React.useState("256")
+  const [tempboxMaxFiles, setTempboxMaxFiles] = React.useState("20")
+  const [tempboxUploadLogin, setTempboxUploadLogin] = React.useState(true)
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -257,6 +265,45 @@ export default function AdminPage() {
     status: "unknown",
     statusNote: "",
   })
+
+  // ---- 捐献审核 ----
+  const [donations, setDonations] = React.useState<Donation[]>([])
+  const [donationLoading, setDonationLoading] = React.useState(false)
+  const [donationNote, setDonationNote] = React.useState("")
+  const [donationBusy, setDonationBusy] = React.useState(false)
+
+  const loadDonations = React.useCallback(async () => {
+    setDonationLoading(true)
+    try {
+      const res = await donationApi.list()
+      setDonations(res.donations)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "加载捐献申请失败")
+    } finally {
+      setDonationLoading(false)
+    }
+  }, [])
+
+  const handleReviewDonation = async (
+    d: Donation,
+    action: "approve" | "reject"
+  ) => {
+    setDonationBusy(true)
+    try {
+      await donationApi.review(d.id, action, donationNote || undefined)
+      toast.success(
+        action === "approve"
+          ? `已通过，${d.username} 的对应功能已解锁`
+          : "已拒绝，结果已邮件通知申请人"
+      )
+      setDonationNote("")
+      await loadDonations()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "操作失败")
+    } finally {
+      setDonationBusy(false)
+    }
+  }
 
   const loadFrp = React.useCallback(async () => {
     setFrpLoading(true)
@@ -371,8 +418,9 @@ export default function AdminPage() {
         name: proxyForm.name,
         region: proxyForm.region,
         url: proxyForm.url,
-        protocol: proxyForm.protocol,
-        status: proxyForm.status,
+        // 协议/状态留空时交给服务端自动识别
+        protocol: proxyForm.protocol.trim() || undefined,
+        status: proxyForm.status === "unknown" ? undefined : proxyForm.status,
         statusNote: proxyForm.statusNote,
         enabled: proxyForm.enabled,
         sortOrder: Number(proxyForm.sortOrder),
@@ -433,6 +481,13 @@ export default function AdminPage() {
       setFrpCoreUrl(s.frp_core_url ?? "")
       setFrpNotifyEmail(s.frp_admin_notify_email ?? "")
       setNotifyEmailOptions(res.notifyEmailOptions ?? [])
+      setTempboxEnabled(s.tempbox_enabled === "1")
+      setTempboxMinutes(s.tempbox_default_minutes ?? "30")
+      setTempboxMaxFileMb(
+        String(Math.round(Number(s.tempbox_max_file_bytes ?? 268435456) / 1024 / 1024))
+      )
+      setTempboxMaxFiles(s.tempbox_max_files ?? "20")
+      setTempboxUploadLogin(s.tempbox_upload_requires_login === "1")
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "加载设置失败")
     } finally {
@@ -454,6 +509,11 @@ export default function AdminPage() {
         frp_enabled: frpEnabled,
         frp_core_url: frpCoreUrl,
         frp_admin_notify_email: frpNotifyEmail,
+        tempbox_enabled: tempboxEnabled,
+        tempbox_default_minutes: Math.round(Number(tempboxMinutes) || 30),
+        tempbox_max_file_bytes: Math.round(Number(tempboxMaxFileMb) * 1024 * 1024),
+        tempbox_max_files: Math.round(Number(tempboxMaxFiles) || 20),
+        tempbox_upload_requires_login: tempboxUploadLogin,
       })
       toast.success("设置已保存")
       await loadSettings()
@@ -655,7 +715,7 @@ export default function AdminPage() {
         description={`已注册用户 ${users.length} 个 · 邀请码 ${invites.length} 个`}
       />
 
-      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp(); if (v === "proxy") void loadProxy(); if (v === "reserved") void loadReserved() }}>
+      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp(); if (v === "proxy") void loadProxy(); if (v === "reserved") void loadReserved(); if (v === "donations") void loadDonations() }}>
         <TabsList className="mb-4">
           <TabsTrigger value="users">
             <Users className="mr-1.5 h-3.5 w-3.5" />
@@ -676,6 +736,10 @@ export default function AdminPage() {
           <TabsTrigger value="reserved">
             <ShieldBan className="mr-1.5 h-3.5 w-3.5" />
             保留域名
+          </TabsTrigger>
+          <TabsTrigger value="donations">
+            <Heart className="mr-1.5 h-3.5 w-3.5" />
+            捐献
           </TabsTrigger>
           <TabsTrigger value="settings">
             <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
@@ -1139,7 +1203,7 @@ export default function AdminPage() {
                   name: "",
                   region: "",
                   url: "",
-                  protocol: "mixed",
+                  protocol: "",
                   status: "unknown",
                   statusNote: "",
                   enabled: true,
@@ -1323,6 +1387,105 @@ export default function AdminPage() {
                   ))}
                 </TableBody>
               </Table>
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="donations">
+          <div className="mb-4 flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              用户贡献资源以解锁功能。通过后会自动为其开通对应权限，并邮件通知申请人。
+            </p>
+            <Button variant="outline" size="sm" onClick={() => void loadDonations()}>
+              <RefreshCw className="h-4 w-4" />
+              刷新
+            </Button>
+          </div>
+
+          <div className="mb-4 space-y-2">
+            <Label htmlFor="donationNote">审批回复（可选，会随结果邮件发出）</Label>
+            <Input
+              id="donationNote"
+              placeholder="例如：渠道已验证可用，已为你开通 / 订阅链接已失效，请更换后重试"
+              value={donationNote}
+              onChange={(e) => setDonationNote(e.target.value)}
+            />
+          </div>
+
+          {donationLoading ? (
+            <LoadingBlock />
+          ) : donations.length === 0 ? (
+            <EmptyState
+              title="还没有捐献申请"
+              description="用户在「捐献」页面提交后会出现在这里。"
+            />
+          ) : (
+            <div className="space-y-3">
+              {donations.map((d) => (
+                <div key={d.id} className="rounded-lg border bg-card p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0 space-y-1.5">
+                      <p className="text-sm font-medium">
+                        {d.username}
+                        <Badge variant="outline" className="ml-2">
+                          {DONATION_LABEL[d.type] ?? d.type}
+                        </Badge>
+                        <Badge
+                          variant={
+                            d.status === "pending"
+                              ? "secondary"
+                              : d.status === "approved"
+                                ? "success"
+                                : "destructive"
+                          }
+                          className="ml-2"
+                        >
+                          {d.status === "pending"
+                            ? "待审核"
+                            : d.status === "approved"
+                              ? "已通过"
+                              : "已拒绝"}
+                        </Badge>
+                      </p>
+                      <DonationDetail type={d.type} payload={d.payload} />
+                      <p className="text-xs text-muted-foreground">
+                        通知邮箱 {d.notifyEmail} · {fmtTime(d.createdAt)}
+                      </p>
+                      {d.remark && (
+                        <p className="text-xs text-muted-foreground">
+                          备注：{d.remark}
+                        </p>
+                      )}
+                      {d.reviewNote && (
+                        <p className="text-xs text-muted-foreground">
+                          审批回复：{d.reviewNote}
+                        </p>
+                      )}
+                    </div>
+                    {d.status === "pending" && (
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => void handleReviewDonation(d, "approve")}
+                          disabled={donationBusy}
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          通过并解锁
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleReviewDonation(d, "reject")}
+                          disabled={donationBusy}
+                        >
+                          <XCircle className="h-3.5 w-3.5" />
+                          拒绝
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </TabsContent>
@@ -1529,6 +1692,73 @@ export default function AdminPage() {
                     <Switch
                       checked={newapiEnabled}
                       onCheckedChange={setNewapiEnabled}
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">临时分享箱</CardTitle>
+                  <CardDescription>
+                    无需注册即可查看/下载，上传权限可单独控制；文件到点自动失效。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="tempboxMinutes">默认保存时长（分钟）</Label>
+                      <Input
+                        id="tempboxMinutes"
+                        type="number"
+                        min={1}
+                        value={tempboxMinutes}
+                        onChange={(e) => setTempboxMinutes(e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="tempboxMaxFile">单次上传上限（MB）</Label>
+                      <Input
+                        id="tempboxMaxFile"
+                        type="number"
+                        min={1}
+                        value={tempboxMaxFileMb}
+                        onChange={(e) => setTempboxMaxFileMb(e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="tempboxMaxFiles">每接收码文件数上限</Label>
+                      <Input
+                        id="tempboxMaxFiles"
+                        type="number"
+                        min={1}
+                        value={tempboxMaxFiles}
+                        onChange={(e) => setTempboxMaxFiles(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between rounded-md border p-3">
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium">上传需登录</p>
+                      <p className="text-xs text-muted-foreground">
+                        关闭后访客无需登录也可上传（查看/下载始终无需登录）
+                      </p>
+                    </div>
+                    <Switch
+                      checked={tempboxUploadLogin}
+                      onCheckedChange={setTempboxUploadLogin}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between rounded-md border p-3">
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium">启用临时分享箱</p>
+                      <p className="text-xs text-muted-foreground">
+                        关闭后页面提示不可用，已生成的内容照常失效
+                      </p>
+                    </div>
+                    <Switch
+                      checked={tempboxEnabled}
+                      onCheckedChange={setTempboxEnabled}
                     />
                   </div>
                 </CardContent>
@@ -2093,15 +2323,18 @@ export default function AdminPage() {
               </p>
             </div>
             <div className="grid gap-4 sm:grid-cols-3">
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <Label>协议</Label>
                 <Input
                   value={proxyForm.protocol}
                   onChange={(e) =>
                     setProxyForm((f) => ({ ...f, protocol: e.target.value }))
                   }
-                  placeholder="mixed"
+                  placeholder="留空自动识别"
                 />
+                <p className="text-xs text-muted-foreground">
+                  留空则保存时自动从订阅内容识别
+                </p>
               </div>
               <div className="space-y-2">
                 <Label>排序</Label>
@@ -2113,7 +2346,7 @@ export default function AdminPage() {
                   }
                 />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <Label>节点状态</Label>
                 <Select
                   value={proxyForm.status}
@@ -2131,6 +2364,9 @@ export default function AdminPage() {
                     <SelectItem value="unknown">未知</SelectItem>
                   </SelectContent>
                 </Select>
+                <p className="text-xs text-muted-foreground">
+                  留空则保存时按订阅 URL 能否访问自动判定
+                </p>
               </div>
             </div>
             <div className="space-y-2">
@@ -2176,6 +2412,55 @@ export default function AdminPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  )
+}
+
+const DONATION_LABEL: Record<string, string> = {
+  ai: "AI 渠道",
+  frp: "内网穿透",
+  proxy: "代理订阅",
+}
+
+/** 按类型渲染捐献详情（payload 结构随类型不同） */
+function DonationDetail({ type, payload }: { type: string; payload: unknown }) {
+  const p = (payload ?? {}) as Record<string, unknown>
+  const rows: [string, string][] = []
+
+  if (type === "ai") {
+    if (p.baseUrl) rows.push(["Base URL", String(p.baseUrl)])
+    if (p.apiKey) rows.push(["API Key", String(p.apiKey)])
+    const models = Array.isArray(p.models) ? p.models.join("、") : p.models
+    if (models) rows.push(["可用模型", String(models)])
+  } else if (type === "frp") {
+    if (p.nodeStatus) rows.push(["渠道状态", String(p.nodeStatus)])
+    const channels = Array.isArray(p.channels) ? p.channels.length : 0
+    if (channels) rows.push(["渠道数", String(channels)])
+  } else if (type === "proxy") {
+    const subs = Array.isArray(p.subUrls) ? p.subUrls : []
+    if (subs.length) rows.push(["订阅链接", subs.join("、")])
+    if (p.nodeCount) rows.push(["节点数", String(p.nodeCount)])
+  }
+
+  const configYml = typeof p.configYml === "string" ? p.configYml : ""
+
+  return (
+    <div className="space-y-1">
+      {rows.map(([k, v]) => (
+        <p key={k} className="break-all font-mono text-xs text-muted-foreground">
+          {k}：{v}
+        </p>
+      ))}
+      {configYml && (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted-foreground">
+            查看 config.yml
+          </summary>
+          <pre className="mt-1 max-h-56 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px] leading-relaxed">
+            {configYml}
+          </pre>
+        </details>
+      )}
     </div>
   )
 }

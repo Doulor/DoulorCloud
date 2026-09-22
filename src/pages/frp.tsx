@@ -14,6 +14,7 @@ import {
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
+import { FeatureLockedNotice } from "@/components/feature-locked-notice"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
@@ -156,6 +157,9 @@ export default function FrpPage() {
   const [configApp, setConfigApp] = React.useState<FrpApplication | null>(null)
   const [configText, setConfigText] = React.useState("")
 
+  // 无权限（403 FEATURE_NOT_PERMITTED）：整页显示提示 + 捐献入口
+  const [locked, setLocked] = React.useState(false)
+
   const load = React.useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
@@ -168,6 +172,10 @@ export default function FrpPage() {
         }))
       }
     } catch (err) {
+      if (err instanceof HttpError && err.code === "FEATURE_NOT_PERMITTED") {
+        setLocked(true)
+        return
+      }
       toast.error(err instanceof HttpError ? err.message : "加载失败")
     } finally {
       if (!silent) setLoading(false)
@@ -330,6 +338,16 @@ export default function FrpPage() {
     a.click()
     URL.revokeObjectURL(url)
     toast.success("config.toml 已下载")
+  }
+
+  if (locked) {
+    return (
+      <FeatureLockedNotice
+        feature="frp"
+        featureLabel="内网穿透"
+        description="你的账号未被授予「内网穿透」权限。站长资源有限，该服务暂未全量开放。"
+      />
+    )
   }
 
   if (loading) {
