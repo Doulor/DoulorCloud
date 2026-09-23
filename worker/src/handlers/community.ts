@@ -4,6 +4,7 @@ import { decodeCursor, encodeCursor, groupComments, canPostAgain, type RawCommen
 import { uuid } from "../crypto"
 import { getSettingNumber } from "../settings"
 import { sendMail, renderMail, isMailerConfigured } from "../mailer"
+import { isStorageConfigured, putObject, getPlatformBucketId } from "../r2"
 import type { Env } from "../env"
 
 const DEFAULT_LIMIT = 20
@@ -311,4 +312,30 @@ export async function markRead(env: Env, request: Request): Promise<Response> {
     await env.DB.prepare(`UPDATE notifications SET read=1 WHERE user_id=? AND id IN (${ph})`).bind(user.id, ...body.ids).run()
   }
   return json({ ok: true })
+}
+
+const IMAGE_TYPES: Record<string, string> = {
+  "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
+}
+
+/** POST /api/community/posts/:id/images —— 上传单张压缩后图片 */
+export async function uploadPostImage(env: Env, request: Request, id: string): Promise<Response> {
+  const user = await requireUser(env, request)
+  if (!(await isStorageConfigured(env))) throw new ApiError(503, "存储未配置", "R2_NOT_CONFIGURED")
+  const post = await env.DB.prepare("SELECT user_id FROM posts WHERE id=?").bind(id).first<{ user_id: string }>()
+  if (!post) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
+  if (post.user_id !== user.id) throw new ApiError(403, "无权", "FORBIDDEN")
+
+  const ct = (request.headers.get("Content-Type") ?? "").split(";")[0].trim()
+  const ext = IMAGE_TYPES[ct]
+  if (!ext) throw new ApiError(400, "仅支持 JPG/PNG/WebP/GIF", "INVALID_TYPE")
+  const maxBytes = await getSettingNumber(env, "community_image_max_bytes")
+  const buf = await request.arrayBuffer()
+  if (buf.byteLength === 0 || buf.byteLength > maxBytes) {
+    throw new ApiError(400, `图片需在 ${Math.round(maxBytes / 1024)} KB 以内`, "TOO_LARGE")
+  }
+  const bucketId = await getPlatformBucketId(env)
+  const key = `community/${id}/${uuid()}.${ext}`
+  await putObject(env, key, buf, ct, bucketId)
+  return json({ key })
 }

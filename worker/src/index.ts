@@ -461,6 +461,10 @@ async function route(
   if (communityCommentsMatch && method === "POST") {
     return communityHandlers.createComment(env, request, decodeURIComponent(communityCommentsMatch[1]))
   }
+  const communityImageMatch = routePath.match(/^\/community\/posts\/([^/]+)\/images$/)
+  if (communityImageMatch && method === "POST") {
+    return communityHandlers.uploadPostImage(env, request, decodeURIComponent(communityImageMatch[1]))
+  }
 
   // ---- 通知 ----
   if (routePath === "/notifications" && method === "GET") {

@@ -59,6 +59,10 @@ export const SETTING_DEFAULTS = {
   frp_admin_notify_email: "",
   /** 社区发帖最多图片数 */
   community_post_max_images: "9",
+  /** 社区广场总开关 */
+  community_enabled: "1",
+  /** 压缩后单张图片上限（字节，默认 1 MiB） */
+  community_image_max_bytes: "1048576",
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS
