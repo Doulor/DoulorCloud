@@ -12,6 +12,10 @@ export interface User {
   notifyEnabled: boolean
   /** 功能权限 */
   permissions: Permissions
+  /** 中文昵称（未设置时为 null） */
+  nickname: string | null
+  /** 是否设置了头像 */
+  hasAvatar: boolean
   createdAt: string
 }
 
@@ -505,11 +509,14 @@ export interface AchievementProgress {
   desc: string
   /** 图标标识，前端映射成 lucide 图标 */
   icon: string
+  /** 获取途径 */
+  how: string
   /** 是否单级成就 */
   single: boolean
   /** 分级成就的阈值与等级名 */
   tiers?: number[]
   tierNames?: string[]
+  tierReqs?: string[]
   /** 当前进度值 */
   value: number
   /** 已达成的等级数（0 = 未解锁） */
@@ -518,6 +525,10 @@ export interface AchievementProgress {
   maxed: boolean
   /** 下一等级阈值（无则 null） */
   nextTier: number | null
+  /** 首次解锁时间（未解锁为 null） */
+  unlockedAt: string | null
+  /** 各等级的解锁时间（索引 = 等级-1，未解锁为 null） */
+  unlockedLevels: (string | null)[]
 }
 
 export interface AchievementsResponse {
@@ -686,6 +697,8 @@ export interface MyInvitesOverview {
   invites: MyInvite[]
   featureLabels: Record<string, string>
   quotaFeatures: string[]
+  /** 当前被设为「基础权限」的模块（不消耗模块额度） */
+  basicFeatures: string[]
 }
 
 /** 管理端：某用户的额度概况（含邀请码数量） */
@@ -707,6 +720,8 @@ export interface AdminInviteQuotasResponse {
   users: AdminInviteQuota[]
   featureLabels: Record<string, string>
   quotaFeatures: string[]
+  /** 当前被设为「基础权限」的模块（不消耗模块额度） */
+  basicFeatures: string[]
   baseQuota: number
 }
 
@@ -716,4 +731,74 @@ export interface AdminUserInviteQuotaResponse {
   invites: MyInvite[]
   featureLabels: Record<string, string>
   quotaFeatures: string[]
+  /** 当前被设为「基础权限」的模块（不消耗模块额度） */
+  basicFeatures: string[]
+}
+
+// ---- R2 多桶管理（管理员） ----
+
+export interface R2BucketUser {
+  userId: string
+  username: string
+  prefix: string
+  usedBytes: number
+  quotaBytes: number
+  fileCount: number
+  enabled: boolean
+}
+
+export interface R2BucketStats {
+  users: number
+  usedBytes: number
+  /** 容量上限 = 人数上限 × 每人配额 */
+  capacityBytes: number
+  fileCount: number
+  /** 该桶占免费额度（10 GB）的百分比 */
+  storagePercent: number
+}
+
+export interface R2Bucket {
+  id: string
+  name: string
+  accountId: string | null
+  endpoint: string
+  bucketName: string
+  maxUsers: number
+  quotaPerUser: number
+  enabled: boolean
+  sortOrder: number
+  /** 'user' = 用户网盘桶；'platform' = 平台数据桶（名片/分享箱） */
+  kind: string
+  hasAnalyticsToken: boolean
+  createdAt: string
+  stats: R2BucketStats
+  users: R2BucketUser[]
+}
+
+export interface R2FreeTier {
+  storageBytes: number
+  classAOps: number
+  classBOps: number
+}
+
+export interface R2BucketsResponse {
+  buckets: R2Bucket[]
+  /** 未纳入多桶管理的老用户（走 env 默认桶），未配置时为 null */
+  legacyBucket: R2Bucket | null
+  freeTier: R2FreeTier
+  assignableBuckets: { id: string; name: string }[]
+  /** 平台数据桶 id（名片/分享箱存这里），未配置为 null */
+  platformBucketId: string | null
+}
+
+export interface R2Operations {
+  configured: boolean
+  reason?: string
+  error?: string
+  since?: string
+  classA?: number
+  classB?: number
+  classAPercent?: number
+  classBPercent?: number
+  freeTier: { classAOps: number; classBOps: number }
 }

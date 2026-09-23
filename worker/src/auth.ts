@@ -18,6 +18,10 @@ export interface UserRow {
   email_verify_requested_at?: string | null
   /** 功能权限 JSON（NULL=全开，见 permissions.ts） */
   permissions?: string | null
+  /** 中文昵称（可空，未设置时回退显示 username） */
+  nickname?: string | null
+  /** 头像在 R2 的对象键（可空） */
+  avatar_key?: string | null
   created_at: string
   updated_at: string
 }
@@ -43,6 +47,8 @@ export function toPublicUser(row: UserRow) {
     emailVerified: row.email_verified === 1,
     notifyEnabled: row.notify_enabled !== 0,
     permissions: parsePermissions(row.permissions),
+    nickname: row.nickname ?? null,
+    hasAvatar: Boolean(row.avatar_key),
     createdAt: row.created_at,
   }
 }
