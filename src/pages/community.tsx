@@ -209,12 +209,14 @@ function PostActions({
   onShare,
   onDelete,
   detail,
+  basePath,
 }: {
   post: Post
   onLike: () => void
   onShare: () => void
   onDelete?: () => void
   detail?: boolean
+  basePath: string
 }) {
   return (
     <div
@@ -235,7 +237,7 @@ function PostActions({
       </button>
       {!detail && (
         <Link
-          to={`/community/${post.id}`}
+          to={`${basePath}/${post.id}`}
           className="flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors hover:bg-accent hover:text-foreground"
         >
           <MessageCircle className="h-4 w-4" />
@@ -267,11 +269,13 @@ function PostCard({
   onLike,
   onShare,
   onDelete,
+  basePath,
 }: {
   post: Post
   onLike: (p: Post) => void
   onShare: (p: Post) => void
   onDelete: (p: Post) => void
+  basePath: string
 }) {
   return (
     <article className="group relative overflow-hidden rounded-xl border bg-card p-4 transition-all hover:border-border/80 hover:shadow-sm">
@@ -289,6 +293,7 @@ function PostCard({
           onLike={() => onLike(post)}
           onShare={() => onShare(post)}
           onDelete={post.isMine ? () => onDelete(post) : undefined}
+          basePath={basePath}
         />
       </div>
     </article>
@@ -298,10 +303,12 @@ function PostCard({
 function CommentItem({
   node,
   postId,
+  basePath,
   onReplied,
 }: {
   node: CommentNode
   postId: string
+  basePath: string
   onReplied: () => void
 }) {
   const { user } = useAuth()
@@ -313,7 +320,7 @@ function CommentItem({
 
   const submit = async () => {
     if (!user) {
-      navigate("/login", { state: { from: `/community/${postId}` } })
+      navigate("/login", { state: { from: `${basePath}/${postId}` } })
       return
     }
     if (!text.trim()) return
@@ -432,16 +439,18 @@ function CommentItem({
 function CommentTree({
   comments,
   postId,
+  basePath,
   onReplied,
 }: {
   comments: CommentNode[]
   postId: string
+  basePath: string
   onReplied: () => void
 }) {
   return (
     <div className="space-y-3">
       {comments.map((c) => (
-        <CommentItem key={c.id} node={c} postId={postId} onReplied={onReplied} />
+        <CommentItem key={c.id} node={c} postId={postId} basePath={basePath} onReplied={onReplied} />
       ))}
     </div>
   )
@@ -452,6 +461,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
   const [comments, setComments] = React.useState<CommentNode[]>([])
   const [loading, setLoading] = React.useState(true)
   const { user } = useAuth()
+  const basePath = inDashboard ? "/dashboard/community" : "/community"
   const navigate = useNavigate()
   const [text, setText] = React.useState("")
   const [busy, setBusy] = React.useState(false)
@@ -489,7 +499,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
   /** 点赞：乐观更新，失败回滚 */
   const handleLike = async () => {
     if (!user) {
-      navigate("/login", { state: { from: `/community/${id}` } })
+      navigate("/login", { state: { from: `${basePath}/${id}` } })
       return
     }
     if (!post) return
@@ -527,7 +537,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
     try {
       await communityApi.deletePost(id)
       toast.success("已删除")
-      navigate(inDashboard ? "/dashboard/community" : "/community")
+      navigate(basePath)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "删除失败")
     }
@@ -535,7 +545,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
 
   const submitComment = async () => {
     if (!user) {
-      navigate("/login", { state: { from: `/community/${id}` } })
+      navigate("/login", { state: { from: `${basePath}/${id}` } })
       return
     }
     if (!text.trim()) return
@@ -575,7 +585,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
       <Button
         variant="ghost"
         size="sm"
-        onClick={() => navigate(inDashboard ? "/dashboard/community" : "/community")}
+        onClick={() => navigate(basePath)}
       >
         <ArrowLeft className="h-4 w-4" /> 返回广场
       </Button>
@@ -597,6 +607,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
             onShare={handleShare}
             onDelete={post.isMine ? handleDelete : undefined}
             detail
+            basePath={basePath}
           />
         </div>
       </article>
@@ -614,7 +625,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
             还没有评论，来说点什么？
           </div>
         ) : (
-          <CommentTree comments={comments} postId={id} onReplied={reloadComments} />
+          <CommentTree comments={comments} postId={id} basePath={basePath} onReplied={reloadComments} />
         )}
       </div>
 
@@ -643,7 +654,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
         </div>
       ) : (
         <p className="text-sm text-muted-foreground">
-          <Link to="/login" state={{ from: `/community/${id}` }} className="text-primary underline">
+          <Link to="/login" state={{ from: `${basePath}/${id}` }} className="text-primary underline">
             登录
           </Link>{" "}
           后可评论。
@@ -654,7 +665,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
 }
 
 /** 发帖入口：点击占位条展开，支持图片与表情 */
-function PostComposer({ onPosted }: { onPosted: () => void }) {
+function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: string }) {
   const { user } = useAuth()
   const [open, setOpen] = React.useState(false)
   const [draft, setDraft] = React.useState("")
@@ -681,7 +692,7 @@ function PostComposer({ onPosted }: { onPosted: () => void }) {
       <div className="mb-5 rounded-xl border bg-card p-4 text-sm text-muted-foreground">
         <Link
           to="/login"
-          state={{ from: "/dashboard/community" }}
+          state={{ from: basePath }}
           className="font-medium text-primary underline"
         >
           登录
@@ -965,7 +976,7 @@ function SidePanel({ stats }: { stats: CommunityStats | null }) {
           关于社区
         </h3>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          Doulor Cloud 社区广场是邀请制小圈子的交流区。内容公开可浏览，发帖与互动需登录。
+          Doulor Cloud 社区广场是邀请制的交流区。内容公开可浏览，发帖与互动需登录。
           请友好交流，违规内容将被管理员移除。
         </p>
       </div>
@@ -975,6 +986,7 @@ function SidePanel({ stats }: { stats: CommunityStats | null }) {
 
 export default function CommunityPage({ inDashboard = false }: { inDashboard?: boolean }) {
   const { user } = useAuth()
+  const basePath = inDashboard ? "/dashboard/community" : "/community"
   const { id } = useParams<{ id: string }>()
   const [posts, setPosts] = React.useState<Post[]>([])
   const [cursor, setCursor] = React.useState<string | undefined>(undefined)
@@ -1027,7 +1039,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
   const navigate = useNavigate()
   const requireLogin = () => {
     if (!user) {
-      navigate("/login", { state: { from: "/dashboard/community" } })
+      navigate("/login", { state: { from: basePath } })
       return false
     }
     return true
@@ -1106,6 +1118,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
       <div className="flex gap-6">
         <div className="min-w-0 flex-1">
           <PostComposer
+            basePath={basePath}
             onPosted={() => {
               void load()
               void loadStats()
@@ -1129,6 +1142,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
                   onLike={handleLike}
                   onShare={handleShare}
                   onDelete={handleDelete}
+                  basePath={basePath}
                 />
               ))}
               {cursor && (

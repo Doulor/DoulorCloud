@@ -19,11 +19,13 @@ import {
   deleteObject,
   getObject,
   headObject,
-  isR2Configured,
+  isStorageConfigured,
   listObjects,
   presign,
   putObject,
+  supportsPresign,
   deletePrefix,
+  pickBucketForNewUser,
   type R2Object,
 } from "../r2"
 import { audit, getSettingBool, getSettingNumber, getSettings } from "../settings"
@@ -43,6 +45,9 @@ const MARKER_SUFFIX = "/" // 目录占位对象，如 "ruben/"
  */
 export const STORAGE_CONSENT_VERSION = 1
 
+/** 管理员配额「不限」哨兵值（1 PiB，实际用不完）。前端见到应显示「不限」 */
+const ADMIN_UNLIMITED_QUOTA = 1024 ** 5
+
 interface StorageAccountRow {
   user_id: string
   prefix: string
@@ -55,6 +60,8 @@ interface StorageAccountRow {
   /** 已同意的协议版本；NULL = 老账号（协议系统上线前开通） */
   consent_version?: number | null
   consented_at?: string | null
+  /** 归属的 R2 桶（r2_buckets.id）；NULL = 未纳入多桶管理，走 env 默认桶 */
+  bucket_id?: string | null
   created_at: string
   updated_at: string
 }
@@ -115,6 +122,7 @@ async function recalculateUsage(
     const page = await listObjects(env, `${account.prefix}/`, {
       limit: 1000,
       cursor,
+      bucketId: account.bucket_id,
     })
     for (const obj of page.objects) {
       if (obj.key.endsWith(MARKER_SUFFIX)) continue
@@ -143,7 +151,7 @@ export async function getStorage(env: Env, request: Request): Promise<Response> 
   const user = await requireFeatureUser(env, request, "r2")
   const url = new URL(request.url)
   const settings = await getSettings(env)
-  const configured = isR2Configured(env)
+  const configured = await isStorageConfigured(env)
   const account = configured ? await loadAccount(env, user.id) : null
 
   const prefixes = account
@@ -240,7 +248,7 @@ export async function setDefaultPrefix(env: Env, request: Request): Promise<Resp
  */
 export async function enableStorage(env: Env, request: Request): Promise<Response> {
   const user = await requireFeatureUser(env, request, "r2")
-  if (!isR2Configured(env)) {
+  if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "网盘存储未配置", "R2_NOT_CONFIGURED")
   }
   if (!(await getSettingBool(env, "storage_enabled"))) {
@@ -269,7 +277,8 @@ export async function enableStorage(env: Env, request: Request): Promise<Respons
       "UPDATE storage_accounts SET enabled = 1, quota_bytes = ?, consent_version = ?, consented_at = ?, updated_at = ? WHERE user_id = ?"
     )
       .bind(
-        await getSettingNumber(env, "storage_quota_bytes"),
+        // 管理员配额不限（哨兵值）
+        user.role === "admin" ? ADMIN_UNLIMITED_QUOTA : await getSettingNumber(env, "storage_quota_bytes"),
         STORAGE_CONSENT_VERSION,
         now,
         now,
@@ -282,26 +291,41 @@ export async function enableStorage(env: Env, request: Request): Promise<Respons
   }
 
   const prefix = user.username.toLowerCase()
-  const quota = await getSettingNumber(env, "storage_quota_bytes")
+  const defaultQuota = await getSettingNumber(env, "storage_quota_bytes")
+
+  // 自动均衡分配桶：有可用桶则记下归属，并用该桶的「每人配额」覆盖全局默认值。
+  // 全部桶都满（或未配置多桶）时 bucket_id 为 null → 回退 env 默认桶。
+  const picked = await pickBucketForNewUser(env)
+  const bucketId = picked?.id ?? null
+  // 管理员配额不限（哨兵值）；普通用户取桶配置的每人配额，回退全局默认
+  const quota =
+    user.role === "admin"
+      ? ADMIN_UNLIMITED_QUOTA
+      : (picked?.quotaPerUser ?? defaultQuota)
 
   await env.DB.prepare(
     `INSERT INTO storage_accounts
        (user_id, prefix, quota_bytes, used_bytes, file_count, enabled,
-        consent_version, consented_at, created_at, updated_at)
-     VALUES (?, ?, ?, 0, 0, 1, ?, ?, ?, ?)`
+        consent_version, consented_at, bucket_id, created_at, updated_at)
+     VALUES (?, ?, ?, 0, 0, 1, ?, ?, ?, ?, ?)`
   )
-    .bind(user.id, prefix, quota, STORAGE_CONSENT_VERSION, now, now, now)
+    .bind(user.id, prefix, quota, STORAGE_CONSENT_VERSION, now, bucketId, now, now)
     .run()
 
   // 目录占位对象，使 R2 控制台里能看到以用户名命名的目录
   try {
-    await putObject(env, `${prefix}/`, "", "application/x-directory")
+    await putObject(env, `${prefix}/`, "", "application/x-directory", bucketId)
   } catch (err) {
     // 占位对象失败不影响使用（R2 上传时会自动建目录）
     console.error("目录占位对象创建失败:", err)
   }
 
-  await audit(env, user.id, "storage.enable", `开通网盘，目录 ${prefix}/`)
+  await audit(
+    env,
+    user.id,
+    "storage.enable",
+    `开通网盘，目录 ${prefix}/${bucketId ? `（桶 ${bucketId}）` : ""}`
+  )
 
   const account = await loadAccount(env, user.id)
   const url = new URL(request.url)
@@ -342,6 +366,7 @@ export async function listStorageObjects(
   const page = await listObjects(env, `${account.prefix}/`, {
     limit: 200,
     cursor,
+    bucketId: account.bucket_id,
   })
 
   const objects = page.objects
@@ -391,7 +416,11 @@ export async function createUploadUrl(
 
   const filename = sanitizeFilename(body.filename ?? "")
   const size = Math.max(0, Math.trunc(Number(body.size ?? 0)))
-  const maxFile = await getSettingNumber(env, "storage_max_file_bytes")
+  // 管理员不受单文件大小限制（仍受 Worker 请求体上限约束）
+  const maxFile =
+    user.role === "admin"
+      ? ADMIN_UNLIMITED_QUOTA
+      : await getSettingNumber(env, "storage_max_file_bytes")
 
   if (size > maxFile) {
     throw new ApiError(
@@ -403,7 +432,7 @@ export async function createUploadUrl(
 
   // 同名文件已存在时按覆盖处理，配额只算增量
   const key = `${account.prefix}/${filename}`
-  const existing = await headObject(env, key)
+  const existing = await headObject(env, key, account.bucket_id)
   const delta = size - (existing?.size ?? 0)
 
   if (account.used_bytes + delta > account.quota_bytes) {
@@ -414,7 +443,10 @@ export async function createUploadUrl(
     )
   }
 
-  const uploadUrl = await presign(env, "PUT", key, 3600)
+  const uploadUrl = (await supportsPresign(env, account.bucket_id))
+    ? await presign(env, "PUT", key, 3600, account.bucket_id)
+    : // token 模式不支持预签名：改走 Worker 转发上传（见 proxyUpload）
+      `/api/storage/proxy-upload?key=${encodeURIComponent(key)}`
 
   return json({
     uploadUrl,
@@ -422,6 +454,47 @@ export async function createUploadUrl(
     filename,
     directLink: `/dl/${encodeURIComponent(account.prefix)}/${encodeURIComponent(filename)}`,
   })
+}
+
+/**
+ * PUT /api/storage/proxy-upload?key=xxx —— Workered 中转上传。
+ *
+ * 仅在桶使用 API Token 凭据（不支持预签名）时启用：
+ * 前端仍走同样的「PUT 文件到 uploadUrl」流程，请求打到 Worker 再转发给 R2。
+ * 代价是文件经 Worker 内存中转，受 Worker 请求体上限约束。
+ */
+export async function proxyUpload(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "r2")
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+  if (account.enabled !== 1) {
+    throw new ApiError(403, "网盘已关闭，请先启用", "STORAGE_DISABLED")
+  }
+
+  const key = new URL(request.url).searchParams.get("key") ?? ""
+  assertKeyOwned(account, key)
+
+  const contentType = request.headers.get("Content-Type") ?? "application/octet-stream"
+  const buf = await request.arrayBuffer()
+  if (buf.byteLength === 0) {
+    throw new ApiError(400, "文件为空", "INVALID_INPUT")
+  }
+
+  // 管理员不受单文件大小限制（仍受 Worker 请求体上限约束）
+  const maxFile =
+    user.role === "admin"
+      ? ADMIN_UNLIMITED_QUOTA
+      : await getSettingNumber(env, "storage_max_file_bytes")
+  if (buf.byteLength > maxFile) {
+    throw new ApiError(
+      400,
+      `单个文件不能超过 ${Math.round(maxFile / 1024 / 1024)} MB`,
+      "FILE_TOO_LARGE"
+    )
+  }
+
+  await putObject(env, key, buf, contentType, account.bucket_id)
+  return json({ ok: true, key, size: buf.byteLength })
 }
 
 /**
@@ -437,7 +510,7 @@ export async function commitUpload(env: Env, request: Request): Promise<Response
   const key = body.key ?? ""
   assertKeyOwned(account, key)
 
-  const head = await headObject(env, key)
+  const head = await headObject(env, key, account.bucket_id)
   if (!head) {
     throw new ApiError(404, "上传未完成或文件不存在", "NOT_FOUND")
   }
@@ -455,7 +528,7 @@ export async function commitUpload(env: Env, request: Request): Promise<Response
 
   if (account.used_bytes + delta > account.quota_bytes) {
     // 超额：删掉刚上传的文件，保持账实一致
-    await deleteObject(env, key)
+    await deleteObject(env, key, account.bucket_id)
     throw new ApiError(400, "存储空间不足，上传已取消", "QUOTA_EXCEEDED")
   }
 
@@ -508,7 +581,7 @@ export async function deleteStorageObject(
     .bind(key, user.id)
     .first<{ size: number }>()
 
-  await deleteObject(env, key)
+  await deleteObject(env, key, account.bucket_id)
 
   const now = new Date().toISOString()
   await env.DB.batch([
@@ -540,7 +613,7 @@ export async function downloadStorageObject(
   const key = new URL(request.url).searchParams.get("key") ?? ""
   assertKeyOwned(account, key)
 
-  return proxyObject(env, key, request, false)
+  return proxyObject(env, key, request, false, account.bucket_id)
 }
 
 // ---- 自定义直链前缀 ----
@@ -795,14 +868,15 @@ async function proxyObject(
   env: Env,
   key: string,
   request: Request,
-  publicLink: boolean
+  publicLink: boolean,
+  bucketId?: string | null
 ): Promise<Response> {
   const range = request.headers.get("Range") ?? undefined
   const method = request.method.toUpperCase()
 
   // HEAD：只回元信息（部分客户端/预览会用）
   if (method === "HEAD") {
-    const head = await headObject(env, key)
+    const head = await headObject(env, key, bucketId)
     if (!head) return new Response(null, { status: 404 })
     return new Response(null, {
       status: 200,
@@ -814,7 +888,7 @@ async function proxyObject(
     })
   }
 
-  const upstream = await getObject(env, key, range)
+  const upstream = await getObject(env, key, range, bucketId)
   const headers = new Headers()
   for (const name of [
     "content-type",
@@ -847,7 +921,7 @@ export async function serveDirectLink(
   request: Request,
   rest: string
 ): Promise<Response> {
-  if (!isR2Configured(env)) {
+  if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "网盘存储未配置", "R2_NOT_CONFIGURED")
   }
 
@@ -869,7 +943,7 @@ export async function serveDirectLink(
     throw new ApiError(404, "文件不存在", "NOT_FOUND")
   }
 
-  return proxyObject(env, `${account.prefix}/${filename}`, request, true)
+  return proxyObject(env, `${account.prefix}/${filename}`, request, true, account.bucket_id)
 }
 
 /**
@@ -881,7 +955,7 @@ export async function serveHostedDirectLink(
   request: Request,
   fqdn: string
 ): Promise<Response> {
-  if (!isR2Configured(env)) {
+  if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "网盘存储未配置", "R2_NOT_CONFIGURED")
   }
 
@@ -917,7 +991,7 @@ export async function serveHostedDirectLink(
     )
   }
 
-  return proxyObject(env, `${account.prefix}/${path}`, request, true)
+  return proxyObject(env, `${account.prefix}/${path}`, request, true, account.bucket_id)
 }
 
 /** 判断 Host 是否为一个已绑定的自定义直链域名 */
@@ -925,7 +999,7 @@ export async function isHostedDirectLinkHost(
   env: Env,
   host: string
 ): Promise<boolean> {
-  if (!isR2Configured(env)) return false
+  if (!(await isStorageConfigured(env))) return false
   const row = await env.DB.prepare(
     "SELECT id FROM storage_prefixes WHERE fqdn = ? COLLATE NOCASE LIMIT 1"
   )
@@ -938,7 +1012,7 @@ export async function isHostedDirectLinkHost(
 export async function purgeUserStorage(env: Env, userId: string): Promise<number> {
   const account = await loadAccount(env, userId)
   if (!account) return 0
-  const deleted = await deletePrefix(env, `${account.prefix}/`)
+  const deleted = await deletePrefix(env, `${account.prefix}/`, 50, account.bucket_id)
   await env.DB.batch([
     env.DB.prepare("DELETE FROM storage_objects WHERE user_id = ?").bind(userId),
     env.DB.prepare(

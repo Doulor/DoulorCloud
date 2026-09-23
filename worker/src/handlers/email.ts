@@ -10,6 +10,8 @@ import {
 import type { Env } from "../env"
 
 const MAX_MAILBOXES_PER_USER = 3
+/** 管理员「不限」哨兵值（前端见到显示「不限」） */
+const ADMIN_UNLIMITED_MAILBOXES = 999999
 
 interface MailboxRow {
   id: string
@@ -152,7 +154,9 @@ export async function listMailboxes(env: Env, request: Request): Promise<Respons
   for (const row of rows.results ?? []) {
     mailboxes.push(await toPublicMailbox(env, user, row, verifiedSet))
   }
-  return json({ mailboxes })
+  // 邮箱数量上限（管理员不限，999999 作为哨兵值，前端显示「不限」）
+  const limit = user.role === "admin" ? ADMIN_UNLIMITED_MAILBOXES : MAX_MAILBOXES_PER_USER
+  return json({ mailboxes, limit })
 }
 
 // POST /api/mailbox —— 添加邮箱地址（{ localPart }），最多 3 个
@@ -175,7 +179,7 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
     .bind(user.id)
     .first<{ c: number }>()
 
-  if ((count?.c ?? 0) >= MAX_MAILBOXES_PER_USER) {
+  if (user.role !== "admin" && (count?.c ?? 0) >= MAX_MAILBOXES_PER_USER) {
     throw new ApiError(400, `每个用户最多 ${MAX_MAILBOXES_PER_USER} 个邮箱`, "LIMIT_REACHED")
   }
 

@@ -2,8 +2,13 @@
  * R2 存储客户端（S3 兼容 API + AWS SigV4 签名）。
  *
  * 为什么不用 `[[r2_buckets]]` 绑定：
- *   R2 桶 `network` 位于 adoulor 账户，而本 Worker 部署在 Doulor 账户，
- *   Cloudflare 不支持跨账户绑定，只能走 S3 兼容接口。
+ *   桶分布在不同 Cloudflare 账户（adoulor / bdoulor），而本 Worker 部署在 Doulor 账户，
+ *   跨账户无法绑定，只能走 S3 兼容接口。
+ *
+ * 多桶支持：
+ *   - `bucketId` 为空 → 用 env 里的默认桶（R2_S3_* 四个变量），兼容历史配置
+ *   - `bucketId` 指定 → 从 D1 `r2_buckets` 读配置并解密 S3 凭据
+ *   免费额度每账户 10 GB，多桶用于横向扩容（详见 migrations/0022）。
  *
  * 因此这里用 WebCrypto 手写 SigV4（不引入 aws4fetch 等依赖）。
  * 签名逻辑与已用 Python 原型验证过的实现一致：
@@ -13,6 +18,7 @@
  * 不使用 r2.dev 公开地址（R2 自定义域必须与桶同账户，跨账户无法绑定）。
  */
 import { ApiError } from "./http"
+import { decryptSecret } from "./crypto"
 import type { Env } from "./env"
 
 const REGION = "auto"
@@ -22,11 +28,92 @@ const UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"
 interface R2Config {
   endpoint: string
   bucket: string
+  /** 传输模式：s3 = S3 签名（AK/SK）；token = Cloudflare REST API */
+  mode: "s3" | "token"
   accessKeyId: string
   secretAccessKey: string
+  /** token 模式下的账户 ID（从 endpoint 或桶记录推导） */
+  accountId?: string
 }
 
-function r2Config(env: Env): R2Config {
+/**
+ * 从 S3 endpoint 推导账户 ID。
+ * 形如 https://<account_id>.r2.cloudflarestorage.com
+ */
+function accountIdFromEndpoint(endpoint: string): string | null {
+  const m = /^https?:\/\/([0-9a-f]{32})\.r2\.cloudflarestorage\.com/i.exec(endpoint)
+  return m ? m[1] : null
+}
+
+/**
+ * 判断凭据类型。
+ * Cloudflare API Token 以 `cfut_` 开头且比 S3 的 Access Key ID（32 位 hex）长得多，
+ * 用户在「Access Key ID」字段里填 token 时自动切到 REST API 模式。
+ */
+function isApiToken(credential: string): boolean {
+  return credential.startsWith("cfut_") || credential.startsWith("cfat_")
+}
+
+/** 桶配置行（r2_buckets 表） */
+export interface R2BucketRow {
+  id: string
+  name: string
+  account_id: string | null
+  endpoint: string
+  bucket_name: string
+  /** 加密的凭据；空字符串表示「用全局 R2_API_TOKEN」 */
+  access_key_id_enc: string
+  secret_key_enc: string
+  analytics_token_enc: string | null
+  max_users: number
+  quota_per_user: number
+  enabled: number
+  sort_order: number
+  /** 'user' = 用户网盘桶（参与多人分配）；'platform' = 平台数据（名片/分享箱） */
+  kind: string
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * 平台数据桶 id 缓存。
+ * 平台桶只有一个，且每个请求都会用到（名片资源、分享箱），
+ * 缓存可避免每次请求都查 D1。Worker isolate 复用时生效。
+ */
+let platformBucketCache: { id: string | null; at: number } | null = null
+
+/**
+ * 取平台数据桶的 id（kind='platform' 且启用）。
+ *
+ * 未配置平台桶时返回 null —— 调用方回退到 env 默认桶，
+ * 保证在管理员配置平台桶之前，名片/分享箱仍能正常工作。
+ */
+export async function getPlatformBucketId(env: Env): Promise<string | null> {
+  // 缓存 60 秒，兼顾性能与「刚配置完就能生效」
+  const now = Date.now()
+  if (platformBucketCache && now - platformBucketCache.at < 60_000) {
+    return platformBucketCache.id
+  }
+  try {
+    const row = await env.DB.prepare(
+      "SELECT id FROM r2_buckets WHERE kind = 'platform' AND enabled = 1 ORDER BY sort_order ASC LIMIT 1"
+    ).first<{ id: string }>()
+    platformBucketCache = { id: row?.id ?? null, at: now }
+    return row?.id ?? null
+  } catch {
+    // 迁移尚未执行（表/列不存在）时不要炸，回退默认桶
+    platformBucketCache = { id: null, at: now }
+    return null
+  }
+}
+
+/** 清除平台桶缓存（管理员改动桶配置后调用） */
+export function invalidatePlatformBucketCache(): void {
+  platformBucketCache = null
+}
+
+/** 从 env 读默认桶（历史配置，bucketId 为空时使用） */
+function envConfig(env: Env): R2Config {
   const endpoint = env.R2_S3_ENDPOINT
   const bucket = env.R2_BUCKET
   const accessKeyId = env.R2_S3_ACCESS_KEY_ID
@@ -40,14 +127,94 @@ function r2Config(env: Env): R2Config {
     )
   }
 
+  const cleanEndpoint = endpoint.replace(/\/+$/, "")
   return {
-    endpoint: endpoint.replace(/\/+$/, ""),
+    endpoint: cleanEndpoint,
     bucket,
+    mode: isApiToken(accessKeyId) ? "token" : "s3",
     accessKeyId,
     secretAccessKey,
+    accountId: accountIdFromEndpoint(cleanEndpoint) ?? undefined,
   }
 }
 
+/**
+ * 解析桶配置。
+ * bucketId 为空 → env 默认桶；否则查 D1 r2_buckets 并解密凭据。
+ */
+async function resolveBucket(env: Env, bucketId?: string | null): Promise<R2Config> {
+  if (!bucketId) return envConfig(env)
+
+  if (!env.SESSION_SECRET) {
+    throw new ApiError(503, "未配置 SESSION_SECRET，无法读取桶凭据", "R2_NOT_CONFIGURED")
+  }
+  const row = await env.DB.prepare("SELECT * FROM r2_buckets WHERE id = ?")
+    .bind(bucketId)
+    .first<R2BucketRow>()
+  if (!row) {
+    throw new ApiError(404, `桶 ${bucketId} 不存在`, "R2_BUCKET_NOT_FOUND")
+  }
+
+  let accessKeyId = ""
+  let secretAccessKey = ""
+  // 凭据字段非空才解密；为空表示「用全局 R2_API_TOKEN」
+  try {
+    if (row.access_key_id_enc) {
+      accessKeyId = await decryptSecret(row.access_key_id_enc, env.SESSION_SECRET)
+    }
+    if (row.secret_key_enc) {
+      secretAccessKey = await decryptSecret(row.secret_key_enc, env.SESSION_SECRET)
+    }
+  } catch {
+    throw new ApiError(
+      500,
+      `桶 ${row.name} 的凭据无法解密（SESSION_SECRET 可能已变更）`,
+      "R2_CREDENTIAL_DECRYPT_FAILED"
+    )
+  }
+
+  const cleanEndpoint = row.endpoint.replace(/\/+$/, "")
+  const accountId = row.account_id || accountIdFromEndpoint(cleanEndpoint) || undefined
+
+  // 没有桶级凭据时回退到全局 token（推荐做法：一个 token 覆盖所有账户）
+  const globalToken = env.R2_API_TOKEN ?? ""
+  const effectiveCredential = accessKeyId || globalToken
+
+  if (!effectiveCredential) {
+    throw new ApiError(
+      503,
+      `桶 ${row.name} 未配置凭据，且未设置全局 R2_API_TOKEN`,
+      "R2_NOT_CONFIGURED"
+    )
+  }
+
+  const mode = isApiToken(effectiveCredential) ? "token" : "s3"
+
+  if (mode === "token" && !accountId) {
+    throw new ApiError(
+      500,
+      `桶 ${row.name} 使用 API Token 模式，但无法确定账户 ID（请填写「账户 ID」字段，或让 endpoint 符合 <account>.r2.cloudflarestorage.com 格式）`,
+      "R2_ACCOUNT_ID_MISSING"
+    )
+  }
+
+  return {
+    endpoint: cleanEndpoint,
+    bucket: row.bucket_name,
+    mode,
+    accessKeyId: effectiveCredential,
+    secretAccessKey: secretAccessKey || effectiveCredential,
+    accountId,
+  }
+}
+
+/**
+ * 是否配了 R2（同步检查，只看 env 默认桶）。
+ *
+ * ⚠️ 多桶改造后**不应再用于鉴权判断** —— 桶配置在 D1 里，env 可能完全是空的。
+ * 请改用异步的 `isStorageConfigured(env)`。保留此函数仅供「env 是否有默认桶」的
+ * 局部判断（例如桶列表里是否展示「默认桶」条目）。
+ */
 export function isR2Configured(env: Env): boolean {
   return Boolean(
     env.R2_S3_ENDPOINT &&
@@ -55,6 +222,102 @@ export function isR2Configured(env: Env): boolean {
       env.R2_S3_ACCESS_KEY_ID &&
       env.R2_S3_SECRET_ACCESS_KEY
   )
+}
+
+/**
+ * 存储是否可用（异步，正确版本）。
+ * env 有默认桶 **或** D1 里有启用中的桶（含全局 R2_API_TOKEN 兜底）即视为可用。
+ */
+export async function isStorageConfigured(env: Env): Promise<boolean> {
+  if (isR2Configured(env)) return true
+  return hasManagedBuckets(env)
+}
+
+/** 是否配了多桶（r2_buckets 表里有启用中的桶） */
+export async function hasManagedBuckets(env: Env): Promise<boolean> {
+  try {
+    const row = await env.DB.prepare(
+      "SELECT 1 AS c FROM r2_buckets WHERE enabled = 1 LIMIT 1"
+    ).first<{ c: number }>()
+    return Boolean(row)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 列出所有桶配置（管理端用，含加密凭据，调用方不得直接下发前端）。
+ */
+export async function listBuckets(env: Env): Promise<R2BucketRow[]> {
+  const res = await env.DB.prepare(
+    "SELECT * FROM r2_buckets ORDER BY sort_order ASC, created_at ASC"
+  ).all<R2BucketRow>()
+  return res.results ?? []
+}
+
+/**
+ * 取单个桶配置并解密凭据（管理端校验连通性用）。
+ */
+export async function getBucketCredentials(
+  env: Env,
+  id: string
+): Promise<{ row: R2BucketRow; analyticsToken: string | null }> {
+  const row = await env.DB.prepare("SELECT * FROM r2_buckets WHERE id = ?")
+    .bind(id)
+    .first<R2BucketRow>()
+  if (!row) throw new ApiError(404, "桶不存在", "NOT_FOUND")
+
+  let analyticsToken: string | null = null
+  if (row.analytics_token_enc && env.SESSION_SECRET) {
+    try {
+      analyticsToken = await decryptSecret(row.analytics_token_enc, env.SESSION_SECRET)
+    } catch {
+      analyticsToken = null
+    }
+  }
+  return { row, analyticsToken }
+}
+
+/**
+ * 自动均衡分配：选一个「已分配人数最少且未达上限」的桶。
+ *
+ * - 只在启用中的桶里选
+ * - 按 (人数 / 上限) 比例升序，优先填相对空闲的桶
+ * - 全部满则返回 null，由调用方报错提示管理员加桶
+ */
+export async function pickBucketForNewUser(
+  env: Env
+): Promise<{ id: string; quotaPerUser: number } | null> {
+  // 只考虑用户网盘桶（kind='user'），平台数据桶不参与分配
+  const buckets = await env.DB.prepare(
+    "SELECT * FROM r2_buckets WHERE enabled = 1 AND kind = 'user' ORDER BY sort_order ASC, created_at ASC"
+  ).all<R2BucketRow>()
+  const list = buckets.results ?? []
+  if (list.length === 0) return null
+
+  // 一次查清各桶已分配人数，避免 N 次往返
+  const counts = await env.DB.prepare(
+    `SELECT bucket_id, COUNT(*) AS c FROM storage_accounts
+      WHERE bucket_id IS NOT NULL GROUP BY bucket_id`
+  ).all<{ bucket_id: string; c: number }>()
+  const used = new Map((counts.results ?? []).map((r) => [r.bucket_id, r.c]))
+
+  let best: R2BucketRow | null = null
+  let bestRatio = Infinity
+  let bestCount = Infinity
+  for (const b of list) {
+    const n = used.get(b.id) ?? 0
+    if (n >= b.max_users) continue
+    const ratio = b.max_users > 0 ? n / b.max_users : Infinity
+    // 比例相同时取绝对人数少的（避免大桶被优先塞满）
+    if (ratio < bestRatio || (ratio === bestRatio && n < bestCount)) {
+      best = b
+      bestRatio = ratio
+      bestCount = n
+    }
+  }
+
+  return best ? { id: best.id, quotaPerUser: best.quota_per_user } : null
 }
 
 // ---- 基础工具 ----
@@ -188,14 +451,51 @@ async function signRequest(
   }
 }
 
-async function r2Fetch(
-  env: Env,
+// ---- Cloudflare REST API 传输（token 模式）----
+
+/** REST API 的基础路径 */
+function cfApiBase(cfg: R2Config): string {
+  return `https://api.cloudflare.com/client/v4/accounts/${cfg.accountId}/r2/buckets/${cfg.bucket}`
+}
+
+/**
+ * 用 Cloudflare REST API 操作对象。
+ *
+ * 与 S3 的关键差异：
+ *   - 列表返回 JSON（不是 XML），字段名是下划线风格
+ *   - 单个对象的 GET 也带完整的 content-length / etag
+ *   - **不支持预签名 URL**（见 presign 的降级逻辑）
+ */
+async function cfApiFetch(
+  cfg: R2Config,
   method: string,
   key: string,
   query: Record<string, string | number | undefined> = {},
   init: RequestInit = {}
 ): Promise<Response> {
-  const cfg = r2Config(env)
+  const base = cfApiBase(cfg)
+  const url = key ? `${base}/objects/${encodeS3Path(key)}` : `${base}/objects`
+  const qs = encodeQuery(query)
+  const headers = new Headers(init.headers)
+  headers.set("Authorization", `Bearer ${cfg.accessKeyId}`)
+
+  return fetch(qs ? `${url}?${qs}` : url, { ...init, method, headers })
+}
+
+async function r2Fetch(
+  env: Env,
+  method: string,
+  key: string,
+  query: Record<string, string | number | undefined> = {},
+  init: RequestInit = {},
+  bucketId?: string | null
+): Promise<Response> {
+  const cfg = await resolveBucket(env, bucketId)
+
+  if (cfg.mode === "token") {
+    return cfApiFetch(cfg, method, key, query, init)
+  }
+
   const path = key ? `/${cfg.bucket}/${key}` : `/${cfg.bucket}`
   const headers = new Headers(init.headers)
   const extra: Record<string, string> = {}
@@ -234,15 +534,55 @@ export interface R2Object {
 export async function listObjects(
   env: Env,
   prefix: string,
-  options: { limit?: number; cursor?: string; delimiter?: string } = {}
+  options: { limit?: number; cursor?: string; delimiter?: string; bucketId?: string | null } = {}
 ): Promise<{ objects: R2Object[]; cursor: string | null; truncated: boolean }> {
-  const res = await r2Fetch(env, "GET", "", {
-    "list-type": "2",
-    prefix,
-    "max-keys": options.limit ?? 100,
-    "continuation-token": options.cursor,
-    delimiter: options.delimiter,
-  })
+  const cfg = await resolveBucket(env, options.bucketId)
+
+  if (cfg.mode === "token") {
+    const res = await cfApiFetch(cfg, "GET", "", {
+      per_page: options.limit ?? 100,
+      prefix,
+      cursor: options.cursor,
+    })
+    await r2OrError(res, "列目录")
+    const body = (await res.json()) as {
+      result?: {
+        key: string
+        size: number
+        last_modified?: string
+        etag?: string
+        http_metadata?: { contentType?: string }
+      }[]
+      result_info?: { cursor?: string; is_truncated?: boolean }
+    }
+    return {
+      objects: (body.result ?? []).map((o) => ({
+        key: o.key,
+        size: o.size ?? 0,
+        lastModified: o.last_modified ?? null,
+        etag: o.etag ?? null,
+        contentType: o.http_metadata?.contentType ?? null,
+      })),
+      cursor: body.result_info?.cursor ?? null,
+      truncated: Boolean(body.result_info?.is_truncated),
+    }
+  }
+
+  // S3 模式：XML 响应
+  const res = await r2Fetch(
+    env,
+    "GET",
+    "",
+    {
+      "list-type": "2",
+      prefix,
+      "max-keys": options.limit ?? 100,
+      "continuation-token": options.cursor,
+      delimiter: options.delimiter,
+    },
+    {},
+    options.bucketId
+  )
   await r2OrError(res, "列目录")
 
   const xml = await res.text()
@@ -291,11 +631,12 @@ function decodeXmlEntities(s: string): string {
 export async function getObject(
   env: Env,
   key: string,
-  range?: string
+  range?: string,
+  bucketId?: string | null
 ): Promise<Response> {
   const headers: Record<string, string> = {}
   if (range) headers.Range = range
-  const res = await r2Fetch(env, "GET", key, {}, { headers })
+  const res = await r2Fetch(env, "GET", key, {}, { headers }, bucketId)
   if (res.status === 404) {
     throw new ApiError(404, "文件不存在", "NOT_FOUND")
   }
@@ -305,9 +646,10 @@ export async function getObject(
 /** 获取对象元信息（HEAD，不拉正文） */
 export async function headObject(
   env: Env,
-  key: string
+  key: string,
+  bucketId?: string | null
 ): Promise<{ size: number; contentType: string | null } | null> {
-  const res = await r2Fetch(env, "HEAD", key)
+  const res = await r2Fetch(env, "HEAD", key, {}, {}, bucketId)
   if (res.status === 404) return null
   await r2OrError(res, "读取元信息")
   return {
@@ -320,17 +662,29 @@ export async function putObject(
   env: Env,
   key: string,
   body: ArrayBuffer | Uint8Array | string,
-  contentType = "application/octet-stream"
+  contentType = "application/octet-stream",
+  bucketId?: string | null
 ): Promise<void> {
-  const res = await r2Fetch(env, "PUT", key, {}, {
-    body: body as BodyInit,
-    headers: { "Content-Type": contentType },
-  })
+  const res = await r2Fetch(
+    env,
+    "PUT",
+    key,
+    {},
+    {
+      body: body as BodyInit,
+      headers: { "Content-Type": contentType },
+    },
+    bucketId
+  )
   await r2OrError(res, "上传")
 }
 
-export async function deleteObject(env: Env, key: string): Promise<void> {
-  const res = await r2Fetch(env, "DELETE", key)
+export async function deleteObject(
+  env: Env,
+  key: string,
+  bucketId?: string | null
+): Promise<void> {
+  const res = await r2Fetch(env, "DELETE", key, {}, {}, bucketId)
   // S3 语义：删不存在的对象也返回 204
   await r2OrError(res, "删除")
 }
@@ -339,16 +693,18 @@ export async function deleteObject(env: Env, key: string): Promise<void> {
 export async function deletePrefix(
   env: Env,
   prefix: string,
-  maxRounds = 50
+  maxRounds = 50,
+  bucketId?: string | null
 ): Promise<number> {
   let deleted = 0
   for (let round = 0; round < maxRounds; round++) {
     const { objects, cursor, truncated } = await listObjects(env, prefix, {
       limit: 1000,
+      bucketId,
     })
     if (objects.length === 0) break
     for (const obj of objects) {
-      await deleteObject(env, obj.key)
+      await deleteObject(env, obj.key, bucketId)
       deleted++
     }
     if (!truncated || !cursor) break
@@ -359,16 +715,43 @@ export async function deletePrefix(
 // ---- 预签名 URL（浏览器直传 / 直链下载）----
 
 /**
+ * 该桶是否支持预签名直传。
+ * token 模式（Cloudflare REST API）**不支持**生成签名 URL，
+ * 此时上传要改由 Worker 转发（见 handlers/storage.ts 的 /api/storage/upload）。
+ */
+export async function supportsPresign(
+  env: Env,
+  bucketId?: string | null
+): Promise<boolean> {
+  try {
+    const cfg = await resolveBucket(env, bucketId)
+    return cfg.mode === "s3"
+  } catch {
+    return false
+  }
+}
+
+/**
  * 生成预签名 URL。
  * 上传用它可绕过 Worker 请求体限制并让浏览器显示真实上传进度。
+ *
+ * ⚠️ 仅 S3 模式可用。token 模式会抛错，调用方应先检查 supportsPresign()。
  */
 export async function presign(
   env: Env,
   method: "PUT" | "GET",
   key: string,
-  expiresIn = 3600
+  expiresIn = 3600,
+  bucketId?: string | null
 ): Promise<string> {
-  const cfg = r2Config(env)
+  const cfg = await resolveBucket(env, bucketId)
+  if (cfg.mode === "token") {
+    throw new ApiError(
+      501,
+      "该桶使用 API Token 凭据，不支持预签名直传（请走 Worker 转发上传）",
+      "PRESIGN_UNSUPPORTED"
+    )
+  }
   const { amzDate, dateStamp } = amzDates()
   const scope = `${dateStamp}/${REGION}/${SERVICE}/aws4_request`
   const path = `/${cfg.bucket}/${key}`

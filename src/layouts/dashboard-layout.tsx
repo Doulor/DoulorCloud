@@ -17,6 +17,7 @@ import {
   Package,
   Trophy,
   MessagesSquare,
+  LogIn,
 } from "lucide-react"
 
 import { Logo } from "@/components/logo"
@@ -61,7 +62,13 @@ const adminNav = { to: "/dashboard/admin", label: "管理", icon: ShieldCheck, e
 const achievementNav = { to: "/dashboard/achievements", label: "成就", icon: Trophy, end: false }
 const donationNav = { to: "/dashboard/donations", label: "捐献", icon: Heart, end: false }
 
-export function DashboardLayout() {
+export function DashboardLayout({
+  allowGuest = false,
+  children,
+}: {
+  allowGuest?: boolean
+  children?: React.ReactNode
+}) {
   const { user, setUser } = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
@@ -92,10 +99,15 @@ export function DashboardLayout() {
     const active = item.end
       ? location.pathname === item.to
       : location.pathname.startsWith(item.to)
+    // 游客态：除社区广场（公开可浏览）外的入口都引导去登录页（带 from 回跳）
+    const guestBlocked = allowGuest && !user && item.to !== "/dashboard/community"
+    const to = guestBlocked ? "/login" : item.to
+    const state = guestBlocked ? { from: item.to } : undefined
     return (
       <Link
         key={item.to}
-        to={item.to}
+        to={to}
+        state={state}
         onClick={() => setOpen(false)}
         className={cn(
           "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
@@ -126,46 +138,65 @@ export function DashboardLayout() {
 
       <div className="flex flex-col gap-2 px-3">
         <Separator className="mb-2" />
-        <div className="flex items-center gap-3">
-          <UserAvatar
-            username={user?.username ?? ""}
-            nickname={user?.nickname}
-            hasAvatar={user?.hasAvatar}
-          />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium">{user?.username}</p>
-            <p className="truncate text-xs text-muted-foreground">
-              {user?.namespace}.doulor.cn
-            </p>
+        {user ? (
+          <div className="flex items-center gap-3">
+            <UserAvatar
+              username={user.username}
+              nickname={user.nickname}
+              hasAvatar={user.hasAvatar}
+            />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">{user.username}</p>
+              <p className="truncate text-xs text-muted-foreground">
+                {user.namespace}.doulor.cn
+              </p>
+            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  aria-label="账户菜单"
+                >
+                  <Settings className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuLabel>{user.email}</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => navigate("/dashboard/settings")}>
+                  <Settings className="h-4 w-4" />
+                  账户设置
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={handleLogout}
+                  className="text-destructive focus:text-destructive"
+                >
+                  <LogOut className="h-4 w-4" />
+                  退出登录
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8"
-                aria-label="账户菜单"
-              >
-                <Settings className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuLabel>{user?.email}</DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => navigate("/dashboard/settings")}>
-                <Settings className="h-4 w-4" />
-                账户设置
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={handleLogout}
-                className="text-destructive focus:text-destructive"
-              >
-                <LogOut className="h-4 w-4" />
-                退出登录
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+        ) : (
+          <div className="flex items-center gap-3">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border bg-muted text-muted-foreground">
+              <LogIn className="h-4 w-4" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">未登录</p>
+              <p className="truncate text-xs text-muted-foreground">登录后可发帖互动</p>
+            </div>
+            <Button
+              size="sm"
+              className="h-8 shrink-0"
+              onClick={() => navigate("/login", { state: { from: location.pathname } })}
+            >
+              登录
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -189,12 +220,23 @@ export function DashboardLayout() {
           </Button>
           <div className="ml-auto flex items-center gap-2">
             <ThemeToggle />
-            <UserAvatar
-              username={user?.username ?? ""}
-              nickname={user?.nickname}
-              hasAvatar={user?.hasAvatar}
-              className="h-7 w-7 lg:hidden"
-            />
+            {user ? (
+              <UserAvatar
+                username={user.username}
+                nickname={user.nickname}
+                hasAvatar={user.hasAvatar}
+                className="h-7 w-7 lg:hidden"
+              />
+            ) : (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="lg:hidden"
+                onClick={() => navigate("/login", { state: { from: location.pathname } })}
+              >
+                登录
+              </Button>
+            )}
           </div>
         </header>
 
@@ -211,7 +253,7 @@ export function DashboardLayout() {
         )}
 
         <main className="mx-auto w-full max-w-6xl px-4 py-8 lg:px-8">
-          <Outlet />
+          {children ?? <Outlet />}
         </main>
         <ScrollToTop />
       </div>

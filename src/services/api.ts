@@ -968,6 +968,7 @@ export const r2AdminApi = {
 // ---- 社区广场 ----
 
 export const communityApi = {
+  getConfig: () => request<{ guestAccess: boolean; enabled: boolean }>("/community/config"),
   listPosts: (cursor?: string) =>
     request<{ posts: Post[]; nextCursor: string | null }>(
       `/community/posts${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`

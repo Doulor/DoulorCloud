@@ -18,6 +18,8 @@ import type { Env } from "../env"
 const MAX_CHILDREN = 5
 /** 一级子域名的最短长度（x.doulor.cn / xx.doulor.cn 不允许） */
 const MIN_ROOT_NAME_LENGTH = 3
+/** 表示「无限制」的哨兵值（管理员不受配额约束）。前端见到它应显示「不限」 */
+const ADMIN_UNLIMITED = 999999
 
 interface SubdomainRow {
   id: string
@@ -49,15 +51,17 @@ export async function listSubdomains(env: Env, request: Request): Promise<Respon
     .bind(user.id)
     .all<SubdomainRow>()
 
-  // 实际配额：用户级覆盖 > 全局设置 > 默认值
+  // 实际配额：用户级覆盖 > 全局设置 > 默认值（管理员不受限）
   const perUser = await env.DB.prepare(
     "SELECT max_subdomains FROM users WHERE id = ?"
   )
     .bind(user.id)
     .first<{ max_subdomains: number | null }>()
   const limit =
-    perUser?.max_subdomains ??
-    (await getSettingNumber(env, "subdomain_quota_default"))
+    user.role === "admin"
+      ? ADMIN_UNLIMITED
+      : (perUser?.max_subdomains ??
+         (await getSettingNumber(env, "subdomain_quota_default")))
 
   return json({
     subdomains: (rows.results ?? []).map(toPublicSubdomain),
@@ -106,7 +110,7 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
     )
       .bind(parent.id)
       .first<{ c: number }>()
-    if ((siblings?.c ?? 0) >= MAX_CHILDREN) {
+    if (user.role !== "admin" && (siblings?.c ?? 0) >= MAX_CHILDREN) {
       throw new ApiError(
         400,
         `${parent.fqdn} 之下最多可创建 ${MAX_CHILDREN} 个子域名`,
@@ -118,8 +122,8 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
     fqdn = `${name}.${parent.fqdn}`
   } else {
     // ---- 一级：xxx.doulor.cn（根域直系）----
-    // 位数限制：x.doulor.cn / xx.doulor.cn 不允许，至少 3 位
-    if (name.length < MIN_ROOT_NAME_LENGTH) {
+    // 位数限制：x.doulor.cn / xx.doulor.cn 不允许，至少 3 位（管理员不受限）
+    if (user.role !== "admin" && name.length < MIN_ROOT_NAME_LENGTH) {
       throw new ApiError(
         400,
         `一级子域名至少需要 ${MIN_ROOT_NAME_LENGTH} 个字符`,
@@ -140,7 +144,11 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
       .first<{ max_subdomains: number | null }>()
 
     const globalQuota = await getSettingNumber(env, "subdomain_quota_default")
-    const quota = perUser?.max_subdomains ?? globalQuota
+    // 管理员不受配额限制（用一个足够大的数字表示「无限制」，前端据此显示）
+    const quota =
+      user.role === "admin"
+        ? ADMIN_UNLIMITED
+        : (perUser?.max_subdomains ?? globalQuota)
 
     // 一级数量 = 该用户名下所有「根域直系」的域名（含注册时分配的 'xxx.doulor.cn' 主域名）
     const used = await env.DB.prepare(
@@ -148,7 +156,7 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
     )
       .bind(user.id)
       .first<{ c: number }>()
-    if ((used?.c ?? 0) >= quota) {
+    if (user.role !== "admin" && (used?.c ?? 0) >= quota) {
       throw new ApiError(
         400,
         `最多可创建 ${quota} 个一级子域名（当前 ${used?.c ?? 0} 个）`,

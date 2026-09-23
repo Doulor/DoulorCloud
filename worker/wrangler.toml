@@ -24,6 +24,9 @@ compatibility_date = "2026-09-21"
 #   <用户绑定的子域名>/*  如 xxx.doulor.cn/*、abc.doulor.cn/*
 workers_dev = false
 
+# 显式声明账户，避免多账户下 wrangler 交互式选择失败
+account_id = "83fdea7d910cbc683e6d53fa6baf45ab"
+
 # D1
 [[d1_databases]]
 binding = "DB"

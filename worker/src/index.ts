@@ -443,6 +443,9 @@ async function route(
   }
 
   // ---- 社区（公开可读）----
+  if (routePath === "/community/config" && method === "GET") {
+    return communityHandlers.communityConfig(env, request)
+  }
   if (routePath === "/community/posts" && method === "GET") {
     return communityHandlers.listPosts(env, request)
   }
@@ -731,6 +734,16 @@ export default {
       const avatarMatch = url.pathname.match(/^\/u\/([^/]+)\/avatar$/)
       if (avatarMatch) {
         return identityHandlers.serveAvatar(env, decodeURIComponent(avatarMatch[1]))
+      }
+
+      // 社区帖子图片：/c/<postId>/<filename>（公开，走平台桶）
+      const communityImgMatch = url.pathname.match(/^\/c\/([^/]+)\/([^/]+)$/)
+      if (communityImgMatch) {
+        return communityHandlers.serveCommunityImage(
+          env,
+          decodeURIComponent(communityImgMatch[1]),
+          decodeURIComponent(communityImgMatch[2])
+        )
       }
 
       // 名片资源：/p/<用户名>/<avatar|background|music|music-cover>（公开，无需鉴权）

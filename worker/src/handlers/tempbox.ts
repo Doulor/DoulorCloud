@@ -16,7 +16,7 @@
 import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
 import { requireUser, type UserRow } from "../auth"
-import { getObject, headObject, isR2Configured, listObjects, presign, deleteObject, deletePrefix } from "../r2"
+import { getObject, headObject, isStorageConfigured, listObjects, presign, deleteObject, deletePrefix, getPlatformBucketId, putObject, supportsPresign } from "../r2"
 import { sanitizeFilename } from "./storage"
 import { getSettings, getSettingNumber } from "../settings"
 import type { Env } from "../env"
@@ -25,6 +25,10 @@ const R2_PREFIX = "temporary"
 
 /** 纯文本的最大长度（约 64 KB，适合互传小文字） */
 const MAX_TEXT_BYTES = 64 * 1024
+
+/** 管理员「不限」哨兵值（分享箱的文件数/单文件大小对所有人生效，
+ *  但管理员不受限——避免自己测试时被自己设的规则挡住） */
+const ADMIN_UNLIMITED = 1024 ** 5
 
 interface TempboxBatchRow {
   id: string
@@ -52,7 +56,7 @@ async function loadBatch(env: Env, code: string): Promise<TempboxBatchRow | null
 /** 惰性清理：删除已过期批次的所有 R2 对象与记录 */
 async function purgeExpiredBatch(env: Env, code: string): Promise<void> {
   try {
-    await deletePrefix(env, `${R2_PREFIX}/${code}/`)
+    await deletePrefix(env, `${R2_PREFIX}/${code}/`, 50, await getPlatformBucketId(env))
   } catch (err) {
     console.error("清理过期临时箱失败:", code, err)
   }
@@ -139,7 +143,7 @@ export async function createTempbox(env: Env, request: Request): Promise<Respons
     if (text.length > MAX_TEXT_BYTES) {
       throw new ApiError(400, "文字内容过长", "TEXT_TOO_LONG")
     }
-  } else if (!isR2Configured(env)) {
+  } else if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "存储未配置", "R2_NOT_CONFIGURED")
   }
 
@@ -166,14 +170,20 @@ export async function createTempboxUploadUrl(
   request: Request,
   code: string
 ): Promise<Response> {
-  if (!isR2Configured(env)) {
+  if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "存储未配置", "R2_NOT_CONFIGURED")
   }
-  await requireUploader(env, request)
+  const uploader = await requireUploader(env, request)
   await assertBatchAlive(env, code)
 
-  const maxFileBytes = await getSettingNumber(env, "tempbox_max_file_bytes")
-  const maxFiles = await getSettingNumber(env, "tempbox_max_files")
+  // 管理员不受分享箱配额限制
+  const isAdmin = uploader?.role === "admin"
+  const maxFileBytes = isAdmin
+    ? ADMIN_UNLIMITED
+    : await getSettingNumber(env, "tempbox_max_file_bytes")
+  const maxFiles = isAdmin
+    ? ADMIN_UNLIMITED
+    : await getSettingNumber(env, "tempbox_max_files")
 
   const body = (await request.json()) as { filename?: string; size?: number }
   const filename = sanitizeFilename(body.filename ?? "")
@@ -193,8 +203,50 @@ export async function createTempboxUploadUrl(
   }
 
   const key = `${R2_PREFIX}/${code}/${filename}`
-  const uploadUrl = await presign(env, "PUT", key, 3600)
+  const platformBucket = await getPlatformBucketId(env)
+  const uploadUrl = (await supportsPresign(env, platformBucket))
+    ? await presign(env, "PUT", key, 3600, platformBucket)
+    : `/api/tempbox/${encodeURIComponent(code)}/proxy-upload?key=${encodeURIComponent(key)}`
   return json({ uploadUrl, key, filename, code })
+}
+
+/**
+ * PUT /api/tempbox/:code/proxy-upload?key=xxx —— Worker 中转上传。
+ * token 模式（无预签名）时的降级路径，见 storage.ts 的同名实现。
+ */
+export async function proxyTempboxUpload(
+  env: Env,
+  request: Request,
+  code: string
+): Promise<Response> {
+  await requireUploader(env, request)
+  await assertBatchAlive(env, code)
+
+  const key = new URL(request.url).searchParams.get("key") ?? ""
+  if (!key.startsWith(`${R2_PREFIX}/${code}/`)) {
+    throw new ApiError(403, "非法的文件路径", "FORBIDDEN")
+  }
+
+  // 管理员不受大小限制
+  const maxFileBytes =
+    (await requireUploader(env, request))?.role === "admin"
+      ? ADMIN_UNLIMITED
+      : await getSettingNumber(env, "tempbox_max_file_bytes")
+  const contentType = request.headers.get("Content-Type") ?? "application/octet-stream"
+  const buf = await request.arrayBuffer()
+  if (buf.byteLength === 0) {
+    throw new ApiError(400, "文件为空", "INVALID_INPUT")
+  }
+  if (buf.byteLength > maxFileBytes) {
+    throw new ApiError(
+      400,
+      `单个文件不能超过 ${Math.round(maxFileBytes / 1024 / 1024)} MB`,
+      "FILE_TOO_LARGE"
+    )
+  }
+
+  await putObject(env, key, buf, contentType, await getPlatformBucketId(env))
+  return json({ ok: true, key, size: buf.byteLength })
 }
 
 /** POST /api/tempbox/:code/commit —— 上传完成后登记（校验真实大小） */
@@ -212,13 +264,17 @@ export async function commitTempboxUpload(
     throw new ApiError(403, "非法的文件路径", "FORBIDDEN")
   }
 
-  const head = await headObject(env, key)
+  const platformBucket = await getPlatformBucketId(env)
+  const head = await headObject(env, key, platformBucket)
   if (!head) throw new ApiError(404, "上传未完成或文件不存在", "NOT_FOUND")
 
-  const maxFileBytes = await getSettingNumber(env, "tempbox_max_file_bytes")
+  const maxFileBytes =
+    (await requireUploader(env, request))?.role === "admin"
+      ? ADMIN_UNLIMITED
+      : await getSettingNumber(env, "tempbox_max_file_bytes")
   if (head.size > maxFileBytes) {
     // 超额：删掉刚上传的对象，保持账实一致
-    await deleteObject(env, key)
+    await deleteObject(env, key, platformBucket)
     throw new ApiError(400, "文件超过大小限制，已取消", "FILE_TOO_LARGE")
   }
 
@@ -264,11 +320,14 @@ export async function getTempbox(
     })
   }
 
-  if (!isR2Configured(env)) {
+  if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "存储未配置", "R2_NOT_CONFIGURED")
   }
 
-  const page = await listObjects(env, `${R2_PREFIX}/${code}/`, { limit: 1000 })
+  const page = await listObjects(env, `${R2_PREFIX}/${code}/`, {
+    limit: 1000,
+    bucketId: await getPlatformBucketId(env),
+  })
   const files = page.objects.filter((o) => !o.key.endsWith("/")).map(toFileInfo)
 
   return json({
@@ -294,7 +353,7 @@ export async function downloadTempboxFile(
   filename: string
 ): Promise<Response> {
   await assertBatchAlive(env, code)
-  if (!isR2Configured(env)) {
+  if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "存储未配置", "R2_NOT_CONFIGURED")
   }
   // 防目录穿越：filename 不允许包含路径分隔符 / \
@@ -304,9 +363,10 @@ export async function downloadTempboxFile(
 
   const key = `${R2_PREFIX}/${code}/${filename}`
   const method = request.method.toUpperCase()
+  const platformBucket = await getPlatformBucketId(env)
 
   if (method === "HEAD") {
-    const head = await headObject(env, key)
+    const head = await headObject(env, key, platformBucket)
     if (!head) throw new ApiError(404, "文件不存在", "NOT_FOUND")
     return new Response(null, {
       status: 200,
@@ -320,7 +380,7 @@ export async function downloadTempboxFile(
   }
 
   const range = request.headers.get("Range") ?? undefined
-  const upstream = await getObject(env, key, range)
+  const upstream = await getObject(env, key, range, platformBucket)
   const headers = new Headers()
   for (const name of [
     "content-type",
@@ -368,7 +428,7 @@ export async function deleteTempbox(
     throw new ApiError(403, "只能删除自己创建的临时分享", "FORBIDDEN")
   }
 
-  await deletePrefix(env, `${R2_PREFIX}/${code}/`)
+  await deletePrefix(env, `${R2_PREFIX}/${code}/`, 50, await getPlatformBucketId(env))
   await env.DB.prepare("DELETE FROM tempbox_batches WHERE code = ? COLLATE NOCASE")
     .bind(code)
     .run()

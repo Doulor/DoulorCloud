@@ -15,6 +15,7 @@ import { sendMail, renderMail } from "../mailer"
 import {
   grantQuotaForDonation,
   INVITE_BONUS_PER_DONATION,
+  isBasicFeature,
   QUOTA_FEATURE_LABELS,
   type QuotaFeature,
 } from "../quotas"
@@ -315,13 +316,19 @@ export async function reviewDonation(env: Env, request: Request): Promise<Respon
 
   // 通知申请人
   try {
+    const basic = await isBasicFeature(env, quotaFeature)
+    // 基础权限模块的人人可授，获批时无需发放模块额度，文案也要同步去掉
+    const quotaLine = basic
+      ? `同时获得 ${INVITE_BONUS_PER_DONATION} 个邀请码创建额度` +
+        `（「${QUOTA_FEATURE_LABELS[quotaFeature] ?? FEATURE_LABELS[feature]}」已是基础权限，人人可授）。`
+      : `同时获得 ${INVITE_BONUS_PER_DONATION} 个邀请码创建额度，` +
+        `以及 1 个「${QUOTA_FEATURE_LABELS[quotaFeature] ?? FEATURE_LABELS[feature]}」权限额度` +
+        "（创建邀请码时可授予该权限）。"
     const lines = approve
       ? [
           `捐献类型：${FEATURE_LABELS[feature]}`,
           "你的捐献申请已通过审核，对应功能权限已解锁。",
-          `同时获得 ${INVITE_BONUS_PER_DONATION} 个邀请码创建额度，` +
-            `以及 1 个「${QUOTA_FEATURE_LABELS[quotaFeature] ?? FEATURE_LABELS[feature]}」权限额度` +
-            "（创建邀请码时可授予该权限）。",
+          quotaLine,
           note ? `管理员备注：${note}` : "",
           "请到 Doulor Cloud 的「捐献」页面查看额度并创建邀请码。",
         ]

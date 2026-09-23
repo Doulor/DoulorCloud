@@ -14,12 +14,20 @@ export interface Env {
   email?: ForwardableEmailMessage
 
   // ---- R2 直链网盘（S3 兼容 API）----
-  // 桶 `network` 位于 adoulor 账户，与本 Worker（Doulor 账户）跨账户，
-  // 无法用 [[r2_buckets]] 绑定，因此走 S3 接口 + SigV4。
+  // ⚠️ 多桶配置存 D1 的 r2_buckets 表（见 migrations/0023），**日常无需这些 env 变量**。
+  // 以下 4 项是「默认桶」兜底：仅当某用户的 storage_accounts.bucket_id 为 NULL
+  // （未纳入多桶管理）时才用到。当前线上所有用户都已分配具体桶，故它们可留空。
   R2_S3_ENDPOINT?: string
   R2_BUCKET?: string
   R2_S3_ACCESS_KEY_ID?: string
   R2_S3_SECRET_ACCESS_KEY?: string
+  // 全局 R2 凭据（唯一的 R2 token）：一个 Cloudflare API Token 覆盖所有账户。
+  // 用途：
+  //   1. 桶操作 —— 桶记录里凭据留空时回退到这里（新增桶无需重复填凭据）
+  //   2. 读 A/B 类操作数 —— 桶记录里 analytics_token_enc 可覆盖
+  // 所需权限：Account → Workers R2 Storage → Edit
+  //           Account → Account Analytics → Read（读操作数）
+  R2_API_TOKEN?: string
   // 可选：Doulor 账户 token，含 Zone → Workers Routes → Edit，
   // 用于把自定义二级域名指到本 Worker（未配置时该功能自动隐藏）
   CF_WORKERS_TOKEN?: string

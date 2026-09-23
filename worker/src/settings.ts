@@ -68,6 +68,8 @@ export const SETTING_DEFAULTS = {
   community_post_max_images: "9",
   /** 社区广场总开关 */
   community_enabled: "1",
+  /** 是否允许访客（未登录）浏览社区广场 */
+  community_guest_access: "1",
   /** 压缩后单张图片上限（字节，默认 1 MiB） */
   community_image_max_bytes: "1048576",
 } as const

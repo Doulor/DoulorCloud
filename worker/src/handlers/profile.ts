@@ -1,7 +1,7 @@
 import { ApiError, json } from "../http"
 import { requireFeatureUser } from "../auth"
 
-import { isR2Configured, putObject, deleteObject, getObject } from "../r2"
+import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
 import { attachCustomDomain, detachCustomDomain } from "../custom-domain"
 import type { Env } from "../env"
 
@@ -322,7 +322,7 @@ export async function getProfile(env: Env, request: Request): Promise<Response> 
     fontOptions: FONT_OPTIONS,
     layoutOptions: LAYOUT_OPTIONS,
     contactTypes: CONTACT_TYPES,
-    r2Configured: isR2Configured(env),
+    r2Configured: await isStorageConfigured(env),
     limits: {
       avatar: MAX_AVATAR_BYTES,
       background: MAX_BACKGROUND_BYTES,
@@ -484,7 +484,7 @@ export async function setPublished(env: Env, request: Request): Promise<Response
  */
 export async function uploadAsset(env: Env, request: Request): Promise<Response> {
   const user = await requireFeatureUser(env, request, "profile")
-  if (!isR2Configured(env)) {
+  if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "存储未配置，无法上传", "R2_NOT_CONFIGURED")
   }
 
@@ -527,14 +527,15 @@ export async function uploadAsset(env: Env, request: Request): Promise<Response>
   }
 
   const key = `profiles/${user.username}/${kind}.${ext}`
-  await putObject(env, key, buf, contentType)
+  const platformBucket = await getPlatformBucketId(env)
+  await putObject(env, key, buf, contentType, platformBucket)
 
   // 换扩展名时清掉旧的（如 png → jpg）
   for (const oldExt of Object.values(table)) {
     if (oldExt === ext) continue
     const oldKey = `profiles/${user.username}/${kind}.${oldExt}`
     try {
-      await deleteObject(env, oldKey)
+      await deleteObject(env, oldKey, platformBucket)
     } catch {
       // 不存在则忽略
     }
@@ -575,10 +576,11 @@ export async function deleteAsset(env: Env, request: Request): Promise<Response>
           ? "music_cover_key"
           : "music_key"
 
-  if (isR2Configured(env)) {
+  if (await isStorageConfigured(env)) {
+    const platformBucket = await getPlatformBucketId(env)
     for (const ext of ["jpg", "png", "webp", "gif", "mp3", "m4a", "ogg", "wav"]) {
       try {
-        await deleteObject(env, `profiles/${user.username}/${kind}.${ext}`)
+        await deleteObject(env, `profiles/${user.username}/${kind}.${ext}`, platformBucket)
       } catch {
         // 忽略
       }
@@ -612,12 +614,13 @@ export async function serveAssetByUsername(
   if (!["avatar", "background", "music", "music-cover"].includes(kind)) {
     return new Response("Not Found", { status: 404 })
   }
-  if (!isR2Configured(env)) {
+  if (!(await isStorageConfigured(env))) {
     return new Response("Not Found", { status: 404 })
   }
+  const platformBucket = await getPlatformBucketId(env)
   for (const ext of ["jpg", "png", "webp", "gif", "mp3", "m4a", "ogg", "wav"]) {
     try {
-      return await getObject(env, `profiles/${username}/${kind}.${ext}`)
+      return await getObject(env, `profiles/${username}/${kind}.${ext}`, undefined, platformBucket)
     } catch {
       continue
     }

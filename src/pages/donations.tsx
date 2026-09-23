@@ -223,6 +223,7 @@ export default function DonationPage() {
                   <p className="text-xs text-muted-foreground">模块权限额度（可转授）</p>
                   <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
                     {invites.quotaFeatures.map((f) => {
+                      const isBasic = invites.basicFeatures?.includes(f) ?? false
                       const remain =
                         invites.quota.featureRemaining[
                           f as keyof typeof invites.quota.featureRemaining
@@ -230,22 +231,28 @@ export default function DonationPage() {
                       return (
                         <span key={f} className="text-sm">
                           {invites.featureLabels[f]}
-                          <span
-                            className={
-                              'ml-1 font-semibold ' +
-                              (remain > 0
-                                ? 'text-emerald-600 dark:text-emerald-400'
-                                : 'text-muted-foreground')
-                            }
-                          >
-                            {remain}
-                          </span>
+                          {isBasic ? (
+                            <Badge variant="outline" className="ml-1.5 align-middle">
+                              基础
+                            </Badge>
+                          ) : (
+                            <span
+                              className={
+                                'ml-1 font-semibold ' +
+                                (remain > 0
+                                  ? 'text-emerald-600 dark:text-emerald-400'
+                                  : 'text-muted-foreground')
+                              }
+                            >
+                              {remain}
+                            </span>
+                          )}
                         </span>
                       )
                     })}
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    创建邀请码时勾选模块权限会消耗对应额度
+                    基础权限模块人人可授，不消耗额度；受限模块勾选时会消耗对应额度
                   </p>
                 </div>
               </div>
@@ -282,7 +289,14 @@ export default function DonationPage() {
                         </Button>
                         <Badge variant="outline">域名 · 邮箱 · 名片</Badge>
                         {extra.map((f) => (
-                          <Badge key={f} variant="secondary">
+                          <Badge
+                            key={f}
+                            variant={
+                              invites.basicFeatures?.includes(f)
+                                ? "outline"
+                                : "secondary"
+                            }
+                          >
                             {invites.featureLabels[f]}
                           </Badge>
                         ))}
@@ -383,7 +397,8 @@ export default function DonationPage() {
           <DialogHeader>
             <DialogTitle>创建邀请码</DialogTitle>
             <DialogDescription>
-              基础权限含域名、邮箱、个人名片。勾选模块权限会消耗对应额度。
+              基础权限含域名、邮箱、个人名片，以及标记为「基础」的模块（不消耗额度）。
+              勾选受限模块会消耗对应额度。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -400,12 +415,14 @@ export default function DonationPage() {
             <div className="space-y-2">
               <Label>附加模块权限</Label>
               {invites?.quotaFeatures.map((f) => {
+                const isBasic = invites.basicFeatures?.includes(f) ?? false
                 const remain =
                   invites.quota.featureRemaining[
                     f as keyof typeof invites.quota.featureRemaining
                   ]
                 const checked = inviteFeatures.includes(f)
-                const disabled = !checked && remain < 1
+                // 基础权限模块无需额度，始终可勾选
+                const disabled = !checked && !isBasic && remain < 1
                 return (
                   <label
                     key={f}
@@ -430,9 +447,13 @@ export default function DonationPage() {
                     <span className="flex-1 text-sm">
                       {invites.featureLabels[f]}
                     </span>
-                    <span className="text-xs text-muted-foreground">
-                      剩余 {remain}
-                    </span>
+                    {isBasic ? (
+                      <Badge variant="outline">基础权限</Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">
+                        剩余 {remain}
+                      </span>
+                    )}
                   </label>
                 )
               })}
@@ -440,7 +461,11 @@ export default function DonationPage() {
             <p className="text-xs text-muted-foreground">
               本次将消耗 1 个邀请码额度
               {inviteFeatures.length > 0 &&
-                `，以及 ${inviteFeatures.length} 个模块额度`}
+                `，以及 ${
+                  inviteFeatures.filter(
+                    (f) => !(invites?.basicFeatures?.includes(f) ?? false)
+                  ).length
+                } 个受限模块额度`}
               。当前剩余 {invites?.quota.inviteRemaining ?? 0} 个邀请码额度。
             </p>
           </div>

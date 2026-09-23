@@ -16,7 +16,7 @@ import type { Env } from "../env"
 
 /**
  * 累计登录/访问控制台的次数（用于「常客」成就）。
- * 节流：同一用户 1 小时内只计一次。失败静默，不影响主流程。
+ * 节流：同一用户 10 分钟内只计一次。失败静默，不影响主流程。
  */
 async function bumpVisit(env: Env, userId: string): Promise<void> {
   try {
@@ -28,7 +28,7 @@ async function bumpVisit(env: Env, userId: string): Promise<void> {
       .first<{ visit_count: number; last_visit_at: string | null }>()
 
     const last = row?.last_visit_at ? new Date(row.last_visit_at).getTime() : 0
-    if (now - last < 3600_000) return
+    if (now - last < 600_000) return
 
     const iso = new Date(now).toISOString()
     if (row) {
@@ -261,11 +261,19 @@ export async function logout(env: Env, request: Request): Promise<Response> {
   return res
 }
 
-export async function me(env: Env, request: Request): Promise<Response> {
+export async function me(
+  env: Env,
+  request: Request,
+  ctx?: ExecutionContext
+): Promise<Response> {
   const user = await requireUser(env, request)
 
-  // 访问计数：同一用户 1 小时内只计一次（节流），用于「常客」成就
-  void bumpVisit(env, user.id)
+  // 访问计数：同一用户 10 分钟内只计一次（节流），用于「常客」成就。
+  // 必须走 ctx.waitUntil —— 直接 void 的话，Worker 返回响应后会取消该 Promise，
+  // 计数永远不会落库（这正是「常客一直不涨」的原因）。
+  const visit = bumpVisit(env, user.id)
+  if (ctx) ctx.waitUntil(visit)
+  else void visit
 
   const domain = await env.DB.prepare(
     "SELECT * FROM domains WHERE user_id = ? LIMIT 1"
@@ -367,8 +375,9 @@ export async function me(env: Env, request: Request): Promise<Response> {
       size: f.size,
       createdAt: f.created_at,
     })),
-    subdomainLimit: 5,
-    mailboxLimit: 3,
+    // 管理员不受配额限制（999999 作为「不限」哨兵值，前端据此显示）
+    subdomainLimit: user.role === "admin" ? 999999 : 5,
+    mailboxLimit: user.role === "admin" ? 999999 : 3,
     recentMessages: (recentMessages.results ?? []).map((m) => ({
       id: m.id,
       from: m.from_address,

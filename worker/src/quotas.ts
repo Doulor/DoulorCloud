@@ -3,19 +3,21 @@
  *
  * 两套额度互相独立：
  *   * 邀请码额度 —— 能创建多少个邀请码（基础 3 个 + 每笔获批捐献 +2）
- *   * 模块额度   —— 能为邀请码授予多少个「进阶模块」权限
+ *   * 模块额度   —— 能为邀请码授予多少个「受限模块」权限
  *                  （每笔获批捐献，对应模块 +1）
  *
- * 基础权限（个人名片）不消耗模块额度；域名与邮箱本就不受限，无需授权。
+ * 模块可被管理员设为「基础权限」或「受限模式」（app_settings.invite_basic_features）：
+ *   * 基础权限：创建邀请码时可直接勾选，**不消耗模块额度**。
+ *   * 受限模式：需消耗对应模块额度（由捐献获批或管理员发放获得）。
  *
  * 额度只影响「能给邀请码授什么」，与 users.permissions（自己能用什么）无关。
  * 捐献获批时两者同时增加：自己解锁 + 获得可转授的额度。
  */
 import { ApiError } from "./http"
-import { getSettingNumber } from "./settings"
+import { getSetting, getSettingNumber } from "./settings"
 import type { Env } from "./env"
 
-/** 需要消耗模块额度的功能（profile 是基础权限，不消耗） */
+/** 可被授予的模块（profile 恒为基础权限，不在此列；域名/邮箱无需授权） */
 export const QUOTA_FEATURES = ["r2", "ai", "frp", "proxy"] as const
 export type QuotaFeature = (typeof QUOTA_FEATURES)[number]
 
@@ -28,6 +30,32 @@ export const QUOTA_FEATURE_LABELS: Record<QuotaFeature, string> = {
 
 /** 每笔获批捐献赠送的邀请码额度 */
 export const INVITE_BONUS_PER_DONATION = 2
+
+/** 解析 invite_basic_features（逗号分隔模块名）为布尔集合；非法值按默认「r2」处理 */
+export function parseBasicFeatures(raw: string | undefined | null): Set<QuotaFeature> {
+  const out = new Set<QuotaFeature>()
+  for (const seg of String(raw ?? "r2").split(",")) {
+    const f = seg.trim() as QuotaFeature
+    if ((QUOTA_FEATURES as readonly string[]).includes(f)) out.add(f)
+  }
+  if (out.size === 0) out.add("r2")
+  return out
+}
+
+/** 读取当前被设为「基础权限」的模块集合（每次调用读库，管理员改设置即时生效） */
+export async function getBasicFeatures(env: Env): Promise<Set<QuotaFeature>> {
+  const raw = await getSetting(env, "invite_basic_features")
+  return parseBasicFeatures(raw)
+}
+
+/** 某模块当前是否为基础权限 */
+export async function isBasicFeature(
+  env: Env,
+  feature: QuotaFeature
+): Promise<boolean> {
+  const basic = await getBasicFeatures(env)
+  return basic.has(feature)
+}
 
 export type FeatureCounts = Record<QuotaFeature, number>
 
@@ -114,6 +142,8 @@ export async function loadUserQuota(env: Env, userId: string): Promise<UserQuota
  * 抽取成独立函数是为了让「校验 → 扣减」在一次调用里完成，
  * 避免调用方漏检或重复扣减。
  *
+ * 基础权限模块**不消耗模块额度**（只消耗 1 个邀请码额度）。
+ *
  * @param needs 本次创建需要的模块权限集合（来自 QUOTA_FEATURES）
  */
 export async function consumeQuotaForInvite(
@@ -133,7 +163,11 @@ export async function consumeQuotaForInvite(
 
   // 同一模块在同一码里只算一次（去重）
   const unique = [...new Set(needs)]
+  // 只对「受限模式」的模块校验并扣减模块额度
+  const restricted: QuotaFeature[] = []
   for (const f of unique) {
+    if (await isBasicFeature(env, f)) continue
+    restricted.push(f)
     if (quota.featureRemaining[f] < 1) {
       throw new ApiError(
         400,
@@ -144,7 +178,7 @@ export async function consumeQuotaForInvite(
   }
 
   const nextFeatureUsed = { ...quota.featureUsed }
-  for (const f of unique) nextFeatureUsed[f] += 1
+  for (const f of restricted) nextFeatureUsed[f] += 1
 
   await env.DB.prepare(
     "UPDATE users SET invite_quota_used = ?, feature_quota_used = ?, updated_at = ? WHERE id = ?"
@@ -161,6 +195,10 @@ export async function consumeQuotaForInvite(
 /**
  * 退还额度（删除未使用的邀请码时调用）。
  * 只退还尚未被使用过的码，避免「建码 → 让人用掉 → 删码 → 再建」的循环刷额度。
+ *
+ * 基础权限模块创建时不消耗模块额度（feature_used 保持 0），这里一律退回——
+ * 对基础模块最多减到 0，无害；但对「创建时受限、删除时已被改为基础」的码，
+ * 依然能把当时消耗的额度退回来，不会让用户白掉额度。
  */
 export async function refundQuotaForInvite(
   env: Env,
@@ -186,7 +224,10 @@ export async function refundQuotaForInvite(
     .run()
 }
 
-/** 捐献获批时发放额度：+2 邀请码额度，+1 对应模块额度 */
+/**
+ * 捐献获批时发放额度：+2 邀请码额度。
+ * 仅「受限模式」的模块再 +1 对应模块额度；基础权限模块本就人人都能授，无需转授额度。
+ */
 export async function grantQuotaForDonation(
   env: Env,
   userId: string,
@@ -195,7 +236,10 @@ export async function grantQuotaForDonation(
   const quota = await loadUserQuota(env, userId)
 
   const nextQuota = { ...quota.featureQuota }
-  if ((QUOTA_FEATURES as readonly string[]).includes(feature)) {
+  if (
+    (QUOTA_FEATURES as readonly string[]).includes(feature) &&
+    !(await isBasicFeature(env, feature as QuotaFeature))
+  ) {
     nextQuota[feature as QuotaFeature] += 1
   }
 
@@ -211,7 +255,11 @@ export async function grantQuotaForDonation(
     .run()
 }
 
-/** 从邀请码的权限对象里取出消耗了模块额度的部分 */
+/**
+ * 从邀请码的权限对象里取出涉及模块额度的部分（权限为 true 的 QUOTA_FEATURES）。
+ * 注意：这里不过滤基础权限模块——是否该退还由调用方配合当前设置判断
+ * （见 refundQuotaForInvite 内的 getBasicFeatures 过滤）。
+ */
 export function quotaFeaturesOf(permissions: {
   [k: string]: boolean
 }): QuotaFeature[] {

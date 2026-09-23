@@ -101,7 +101,7 @@ export default function RegisterPage() {
             required
           />
           <p className="text-xs text-muted-foreground">
-            域名邮箱收到的邮件将转发到此邮箱，之后可在「邮箱」页修改。
+            域名邮箱收到的邮件将转发到此邮箱，之后需在「设置」页验证。
           </p>
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
@@ -129,7 +129,7 @@ export default function RegisterPage() {
           </div>
         </div>
         <div className="space-y-2">
-          <Label htmlFor="inviteCode">邀请码</Label>
+          <Label htmlFor="inviteCode">邀请码(必填)</Label>
           <Input
             id="inviteCode"
             placeholder="输入邀请码"

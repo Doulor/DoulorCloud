@@ -2,7 +2,7 @@ import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
 import { decodeCursor, encodeCursor, groupComments, canPostAgain, type RawComment } from "../community-logic"
 import { uuid } from "../crypto"
-import { getSettingNumber } from "../settings"
+import { getSettingNumber, getSettingBool } from "../settings"
 import { sendMail, renderMail, isMailerConfigured } from "../mailer"
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
 import type { Env } from "../env"
@@ -62,12 +62,32 @@ async function optionalViewer(env: Env, request: Request): Promise<{ id: string 
   try { return await requireUser(env, request) } catch { return null }
 }
 
+/**
+ * 社区读取访问控制：返回 viewer（未登录则为 null）。
+ * 管理员在后台关闭「允许访客访问」后，匿名请求一律拒绝（401）。
+ */
+async function readViewer(env: Env, request: Request): Promise<{ id: string } | null> {
+  const viewer = await optionalViewer(env, request)
+  if (!viewer && !(await getSettingBool(env, "community_guest_access"))) {
+    throw new ApiError(401, "请登录后访问社区广场", "LOGIN_REQUIRED")
+  }
+  return viewer
+}
+
+/** GET /api/community/config —— 公开配置（访客访问开关、广场开关） */
+export async function communityConfig(env: Env, _request: Request): Promise<Response> {
+  return json({
+    guestAccess: await getSettingBool(env, "community_guest_access"),
+    enabled: await getSettingBool(env, "community_enabled"),
+  })
+}
+
 /** GET /api/community/posts?cursor=&limit= */
 export async function listPosts(env: Env, request: Request): Promise<Response> {
   const url = new URL(request.url)
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? DEFAULT_LIMIT) || DEFAULT_LIMIT, 1), 50)
   const cursor = url.searchParams.get("cursor")
-  const viewer = await optionalViewer(env, request)
+  const viewer = await readViewer(env, request)
 
   let where = "p.deleted_at IS NULL"
   const binds: unknown[] = []
@@ -102,7 +122,7 @@ export async function listPosts(env: Env, request: Request): Promise<Response> {
 
 /** GET /api/community/posts/:id */
 export async function getPost(env: Env, request: Request, id: string): Promise<Response> {
-  const viewer = await optionalViewer(env, request)
+  const viewer = await readViewer(env, request)
   const r = await env.DB.prepare(
     `SELECT p.*, u.username, u.nickname, u.avatar_key, u.role AS author_role
        FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?`
@@ -117,7 +137,8 @@ export async function getPost(env: Env, request: Request, id: string): Promise<R
 }
 
 /** GET /api/community/posts/:id/comments */
-export async function listComments(env: Env, _request: Request, id: string): Promise<Response> {
+export async function listComments(env: Env, request: Request, id: string): Promise<Response> {
+  await readViewer(env, request)
   const rows = await env.DB.prepare(
     `SELECT c.*, u.username, u.nickname, u.avatar_key, u.role AS author_role,
             ru.username AS reply_to_username
@@ -377,7 +398,8 @@ export async function uploadPostImage(env: Env, request: Request, id: string): P
  * 右侧动态栏用：今日新帖数、本周活跃用户（发帖最多 top 5）、帖子总数。
  * 全部走冗余字段/索引，避免 COUNT(*) 全表扫描。
  */
-export async function communityStats(env: Env, _request: Request): Promise<Response> {
+export async function communityStats(env: Env, request: Request): Promise<Response> {
+  await readViewer(env, request)
   const now = new Date()
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
   const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString()

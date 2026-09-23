@@ -3,6 +3,7 @@
   "name": "doulor-mail",
   "compatibility_date": "2026-09-18",
   "main": "site-worker.js",
+  "account_id": "83fdea7d910cbc683e6d53fa6baf45ab",
   "observability": {
     "enabled": true
   },

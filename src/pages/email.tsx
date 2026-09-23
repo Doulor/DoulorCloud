@@ -28,7 +28,11 @@ import { cn } from "@/lib/utils"
 import { emailApi, HttpError } from "@/services/api"
 import type { Mailbox, MailMessage } from "@/types"
 
-const MAX_MAILBOXES = 3
+/** 邮箱数量上限的兜底值（真实值由后端 GET /api/mailbox 的 limit 返回，
+ *  管理员为 999999 哨兵值 → 界面显示「不限」） */
+const FALLBACK_MAILBOX_LIMIT = 3
+/** 后端表示「不限」的哨兵值 */
+const UNLIMITED_LIMIT = 999999
 
 function fmtTime(iso: string) {
   const d = new Date(iso)
@@ -48,6 +52,7 @@ export default function EmailPage() {
   const pendingMessage = searchParams.get("message")
 
   const [mailboxes, setMailboxes] = React.useState<Mailbox[]>([])
+  const [mailboxLimit, setMailboxLimit] = React.useState(FALLBACK_MAILBOX_LIMIT)
   const [selected, setSelected] = React.useState<Mailbox | null>(null)
   const [messages, setMessages] = React.useState<MailMessage[]>([])
   const [opened, setOpened] = React.useState<MailMessage | null>(null)
@@ -72,6 +77,7 @@ export default function EmailPage() {
     try {
       const res = await emailApi.list()
       setMailboxes(res.mailboxes)
+      if (typeof res.limit === "number") setMailboxLimit(res.limit)
       // 优先级：显式指定 > query 参数 ?mailbox= > 主邮箱 > 第一个
       const target =
         res.mailboxes.find((m) => m.id === selectId) ??
@@ -291,13 +297,18 @@ export default function EmailPage() {
     }
   }
 
-  const canAdd = mailboxes.length < MAX_MAILBOXES
+  const unlimited = mailboxLimit >= UNLIMITED_LIMIT
+  const canAdd = unlimited || mailboxes.length < mailboxLimit
 
   return (
     <div>
       <PageHeader
         title="邮箱"
-        description={`${mailboxes.length} / ${MAX_MAILBOXES} 个地址`}
+        description={
+          unlimited
+            ? `${mailboxes.length} 个地址（管理员不限）`
+            : `${mailboxes.length} / ${mailboxLimit} 个地址`
+        }
         actions={
           <div className="flex items-center gap-2">
             {totalUnread > 0 && (

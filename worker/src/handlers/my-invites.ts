@@ -3,11 +3,12 @@
  *
  * 与管理员创建的区别：
  *   * 只能创建「自己用」，权限受额度限制
- *   * 基础权限固定含「个人名片」（域名/邮箱本就不受限，无需授权）
- *   * 附加 r2 / ai / frp / proxy 会消耗对应模块的转授额度
+ *   * 基础权限固定含「个人名片」（域名/邮箱本就不受限，无需授权），
+ *     以及管理员设为「基础权限」的模块（invite_basic_features，默认 r2）
+ *   * 受限模式模块（ai / frp / proxy 等）附加会消耗对应模块的转授额度
  *   * 每个码只能用一次（max_uses = 1）—— 额度语义即「能拉几个人」
  *
- * 额度来源见 quotas.ts：基础 3 个 + 每笔获批捐献 +2，且捐献对应模块 +1。
+ * 额度来源见 quotas.ts：基础 3 个 + 每笔获批捐献 +2，且受限模块 +1。
  */
 import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
@@ -16,6 +17,7 @@ import { parsePermissions, type Permissions } from "../permissions"
 import {
   QUOTA_FEATURES,
   QUOTA_FEATURE_LABELS,
+  getBasicFeatures,
   loadUserQuota,
   consumeQuotaForInvite,
   refundQuotaForInvite,
@@ -35,14 +37,14 @@ interface InviteRow {
   created_at: string
 }
 
-/** 基础权限：仅个人名片（其余模块需消耗额度） */
-function basePermissions(): Permissions {
+/** 基础权限：个人名片 + 管理员设为「基础权限」的模块 */
+function basePermissions(basic: Set<QuotaFeature>): Permissions {
   return {
-    r2: false,
-    ai: false,
-    frp: false,
+    r2: basic.has("r2"),
+    ai: basic.has("ai"),
+    frp: basic.has("frp"),
     profile: true,
-    proxy: false,
+    proxy: basic.has("proxy"),
   }
 }
 
@@ -87,13 +89,15 @@ export async function listMyInvites(env: Env, request: Request): Promise<Respons
     // 前端据此渲染权限勾选项与余额
     featureLabels: QUOTA_FEATURE_LABELS,
     quotaFeatures: QUOTA_FEATURES,
+    basicFeatures: [...(await getBasicFeatures(env))],
   })
 }
 
 /**
  * POST /api/my-invites —— 创建邀请码
  * body: { code?, features?: QuotaFeature[] }
- *   features 省略 → 只含基础权限（个人名片），不消耗模块额度
+ *   features 省略 → 只含基础权限（个人名片 + 管理员设为基础权限的模块），
+ *   基础权限模块不消耗模块额度，受限模块才消耗对应额度
  */
 export async function createMyInvite(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
@@ -102,8 +106,9 @@ export async function createMyInvite(env: Env, request: Request): Promise<Respon
     features?: unknown
   }
 
-  // 权限：基础 + 用户勾选的模块
-  const perms = basePermissions()
+  // 权限：基础（个人名片 + 基础权限模块）+ 用户勾选的受限模块
+  const basic = await getBasicFeatures(env)
+  const perms = basePermissions(basic)
   const requested: QuotaFeature[] = []
   if (Array.isArray(body.features)) {
     for (const raw of body.features) {

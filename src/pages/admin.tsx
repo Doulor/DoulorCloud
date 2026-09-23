@@ -276,6 +276,7 @@ export default function AdminPage() {
   const [communityUserFilter, setCommunityUserFilter] = React.useState("")
   // 社区广场设置
   const [communityEnabled, setCommunityEnabled] = React.useState(true)
+  const [communityGuestAccess, setCommunityGuestAccess] = React.useState(true)
   const [communityPostMaxImages, setCommunityPostMaxImages] = React.useState("9")
   const [communityImageMaxKb, setCommunityImageMaxKb] = React.useState("1024")
 
@@ -618,6 +619,7 @@ export default function AdminPage() {
       setTempboxMaxFiles(s.tempbox_max_files ?? "20")
       setTempboxUploadLogin(s.tempbox_upload_requires_login === "1")
       setCommunityEnabled(s.community_enabled === "1")
+      setCommunityGuestAccess(s.community_guest_access !== "0")
       setCommunityPostMaxImages(s.community_post_max_images ?? "9")
       setCommunityImageMaxKb(
         String(Math.round(Number(s.community_image_max_bytes ?? 1048576) / 1024))
@@ -656,6 +658,7 @@ export default function AdminPage() {
         tempbox_max_files: Math.round(Number(tempboxMaxFiles) || 20),
         tempbox_upload_requires_login: tempboxUploadLogin,
         community_enabled: communityEnabled,
+        community_guest_access: communityGuestAccess,
         community_post_max_images: Math.round(Number(communityPostMaxImages) || 9),
         community_image_max_bytes: Math.round(Number(communityImageMaxKb) * 1024),
         // 邀请码模块权限：基础 vs 受限，逗号分隔
@@ -2980,6 +2983,18 @@ export default function AdminPage() {
                         onChange={(e) => setCommunityImageMaxKb(e.target.value)}
                       />
                     </div>
+                  </div>
+                  <div className="flex items-center justify-between rounded-md border p-3">
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium">允许访客访问帖子广场</p>
+                      <p className="text-xs text-muted-foreground">
+                        关闭后未登录用户访问社区会被引导去登录页
+                      </p>
+                    </div>
+                    <Switch
+                      checked={communityGuestAccess}
+                      onCheckedChange={setCommunityGuestAccess}
+                    />
                   </div>
                   <div className="flex items-center justify-between rounded-md border p-3">
                     <div className="space-y-0.5">

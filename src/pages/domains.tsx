@@ -214,7 +214,9 @@ export default function DomainsPage() {
           <div className="text-sm font-medium">
             我的域名
             <span className="ml-2 text-xs font-normal text-muted-foreground">
-              {rootSubs.length} / {quota} 个一级域名（含主域名）
+              {quota >= 999999
+                ? `${rootSubs.length} 个一级域名（管理员不限）`
+                : `${rootSubs.length} / ${quota} 个一级域名（含主域名）`}
             </span>
           </div>
           <Button

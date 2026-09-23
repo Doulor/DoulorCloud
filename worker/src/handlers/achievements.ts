@@ -27,11 +27,18 @@ interface AchievementDef {
   desc: string
   /** 图标标识，前端映射成 lucide 图标 */
   icon: string
+  /** 获取途径：如何达成这个成就 */
+  how: string
   /** 分级成就的阈值（升序）；单级成就为 undefined */
   tiers?: number[]
   /** 分级成就各等级的名称 */
   tierNames?: string[]
+  /** 分级成就各等级的具体要求描述 */
+  tierReqs?: string[]
 }
+
+/** 「元老」判定：注册时间排在前 N 名 */
+const VETERAN_TOP_N = 20
 
 /** 成就定义表。新增成就只需在此追加。 */
 const ACHIEVEMENTS: AchievementDef[] = [
@@ -41,24 +48,28 @@ const ACHIEVEMENTS: AchievementDef[] = [
     name: "云端仓库",
     desc: "开通直链网盘",
     icon: "hard-drive",
+    how: "在「网盘」页面点击开通，同意使用协议即可解锁。",
   },
   {
     id: "ai_enable",
     name: "智核接入",
     desc: "开通 AI 中转站",
     icon: "sparkles",
+    how: "在「AI 中转站」页面绑定或创建账号（需已开通你的站内邮箱）。",
   },
   {
     id: "profile_enable",
     name: "数字名片",
     desc: "开通个人名片",
     icon: "contact",
+    how: "在「个人名片」页面点击开通。",
   },
   {
     id: "domain_bind",
     name: "域名主权",
     desc: "为网盘直链或名片绑定自定义域名",
     icon: "globe",
+    how: "在「网盘」或「个人名片」页面绑定一个自己的子域名作为访问入口。",
   },
   // ---- 资源积累（分级） ----
   {
@@ -66,24 +77,30 @@ const ACHIEVEMENTS: AchievementDef[] = [
     name: "开疆拓土",
     desc: "创建子域名",
     icon: "globe",
+    how: "在「域名」页面添加子域名（注册时分配的主域名不计入）。",
     tiers: [1, 3, 5],
     tierNames: ["初出茅庐", "渐入佳境", "疆域辽阔"],
+    tierReqs: ["创建 1 个子域名", "创建 3 个子域名", "创建 5 个子域名"],
   },
   {
     id: "mailbox",
     name: "信箱林立",
     desc: "添加邮箱地址",
     icon: "mail",
+    how: "在「邮箱」页面添加地址（注册时的主邮箱计入）。",
     tiers: [1, 3],
     tierNames: ["首个信箱", "多线并行"],
+    tierReqs: ["拥有 1 个邮箱地址", "拥有 3 个邮箱地址"],
   },
   {
     id: "dns",
     name: "解析大师",
     desc: "创建 DNS 记录",
     icon: "network",
+    how: "在「域名」页面为子域名添加 DNS 记录。",
     tiers: [1, 5, 20],
     tierNames: ["初次解析", "熟练运维", "解析宗师"],
+    tierReqs: ["创建 1 条 DNS 记录", "创建 5 条 DNS 记录", "创建 20 条 DNS 记录"],
   },
   // ---- 使用深度（分级） ----
   {
@@ -91,16 +108,20 @@ const ACHIEVEMENTS: AchievementDef[] = [
     name: "常客",
     desc: "访问控制台",
     icon: "log-in",
+    how: "登录并访问控制台，同一小时内只计一次。",
     tiers: [10, 100, 1000],
     tierNames: ["初来乍到", "熟门熟路", "常驻居民"],
+    tierReqs: ["访问 10 次", "访问 100 次", "访问 1000 次"],
   },
   {
     id: "profile_view",
     name: "声名远扬",
     desc: "名片被访问",
     icon: "eye",
+    how: "分享你的个人名片，每次有人打开就 +1。",
     tiers: [10, 100, 1000],
     tierNames: ["小有名气", "广为人知", "名动四方"],
+    tierReqs: ["名片被访问 10 次", "名片被访问 100 次", "名片被访问 1000 次"],
   },
   // ---- 特殊 ----
   {
@@ -108,36 +129,79 @@ const ACHIEVEMENTS: AchievementDef[] = [
     name: "见信如晤",
     desc: "收到第一封邮件",
     icon: "inbox",
+    how: "有人向你的站内邮箱发信，或注册时收到验证码邮件即可解锁。",
   },
   {
     id: "veteran",
     name: "元老",
     desc: "首批注册用户",
     icon: "crown",
+    how: `注册时间排在全站前 ${VETERAN_TOP_N} 名。`,
   },
   {
     id: "loyal",
     name: "坚守者",
     desc: "注册满一年",
     icon: "calendar",
+    how: "从注册之日算起，持续使用本平台。",
     tiers: [30, 365],
     tierNames: ["满月", "周年"],
+    tierReqs: ["注册满 30 天", "注册满 365 天"],
   },
 ]
 
-/** 「元老」判定：注册时间排在前 N 名 */
-const VETERAN_TOP_N = 20
+/**
+ * 记录新解锁的等级（首次达成时写库，保留最早时间）。
+ * 只插入不存在的 (user, achievement, level)，已存在的不动。
+ * 失败静默——成就展示不应因写库失败而中断。
+ */
+async function recordUnlocks(
+  env: Env,
+  userId: string,
+  result: AchievementProgress[]
+): Promise<void> {
+  const now = new Date().toISOString()
+  const stmts = []
+  for (const a of result) {
+    if (a.single) {
+      if (a.level >= 1) {
+        stmts.push(
+          env.DB.prepare(
+            "INSERT OR IGNORE INTO user_achievements (user_id, achievement_id, level, unlocked_at) VALUES (?, ?, 1, ?)"
+          ).bind(userId, a.id, now)
+        )
+      }
+    } else {
+      for (let lv = 1; lv <= a.level; lv++) {
+        stmts.push(
+          env.DB.prepare(
+            "INSERT OR IGNORE INTO user_achievements (user_id, achievement_id, level, unlocked_at) VALUES (?, ?, ?, ?)"
+          ).bind(userId, a.id, lv, now)
+        )
+      }
+    }
+  }
+  if (stmts.length === 0) return
+  try {
+    await env.DB.batch(stmts)
+  } catch {
+    // 忽略：写库失败不影响成就计算与展示
+  }
+}
 
 export interface AchievementProgress {
   id: string
   name: string
   desc: string
   icon: string
+  /** 获取途径 */
+  how: string
   /** 是否单级成就 */
   single: boolean
   /** 分级成就的阈值与等级名 */
   tiers?: number[]
   tierNames?: string[]
+  tierReqs?: string[]
   /** 当前进度值 */
   value: number
   /** 已达成的等级数（0 = 未解锁）；单级成就为 0 或 1 */
@@ -146,6 +210,10 @@ export interface AchievementProgress {
   maxed: boolean
   /** 下一等级阈值（无则 null） */
   nextTier: number | null
+  /** 首次解锁时间（未解锁为 null；历史最高等级可能高于当前等级） */
+  unlockedAt: string | null
+  /** 各等级的解锁时间（数组索引 = 等级-1，未解锁为 null） */
+  unlockedLevels: (string | null)[]
 }
 
 export async function getAchievements(env: Env, request: Request): Promise<Response> {
@@ -244,11 +312,14 @@ export async function getAchievements(env: Env, request: Request): Promise<Respo
         name: def.name,
         desc: def.desc,
         icon: def.icon,
+        how: def.how,
         single: true,
         value,
         level: unlocked ? 1 : 0,
         maxed: unlocked,
         nextTier: null,
+        unlockedAt: null,
+        unlockedLevels: [],
       }
     }
     const level = def.tiers.filter((t) => value >= t).length
@@ -258,15 +329,49 @@ export async function getAchievements(env: Env, request: Request): Promise<Respo
       name: def.name,
       desc: def.desc,
       icon: def.icon,
+      how: def.how,
       single: false,
       tiers: def.tiers,
       tierNames: def.tierNames,
+      tierReqs: def.tierReqs,
       value,
       level,
       maxed: nextTier === null,
       nextTier,
+      unlockedAt: null,
+      unlockedLevels: [],
     }
   })
+
+  // 记录新解锁（首次达成某等级时写库），并读回所有历史解锁时间
+  await recordUnlocks(env, user.id, result)
+
+  // 回填解锁时间到结果
+  const unlockRows = await env.DB.prepare(
+    "SELECT achievement_id, level, unlocked_at FROM user_achievements WHERE user_id = ?"
+  )
+    .bind(user.id)
+    .all<{ achievement_id: string; level: number; unlocked_at: string }>()
+
+  const unlockMap = new Map<string, Map<number, string>>()
+  for (const r of unlockRows.results ?? []) {
+    if (!unlockMap.has(r.achievement_id)) unlockMap.set(r.achievement_id, new Map())
+    unlockMap.get(r.achievement_id)!.set(r.level, r.unlocked_at)
+  }
+  for (const a of result) {
+    const m = unlockMap.get(a.id)
+    if (!m) continue
+    // 单级成就：等级 1 即解锁
+    if (a.single) {
+      a.unlockedAt = m.get(1) ?? null
+    } else {
+      const maxLevel = a.tiers?.length ?? 0
+      a.unlockedLevels = Array.from({ length: maxLevel }, (_, i) => m.get(i + 1) ?? null)
+      // unlockedAt 取最高已解锁等级的时间（有历史记录时）
+      const times = a.unlockedLevels.filter((t): t is string => !!t)
+      a.unlockedAt = times.length ? times[times.length - 1] : null
+    }
+  }
 
   const unlocked = result.filter((a) => a.level > 0).length
 
