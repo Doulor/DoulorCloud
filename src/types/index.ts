@@ -447,6 +447,45 @@ export interface ProfileContact {
   visible?: boolean
 }
 
+/** 名片模块 id（与后端 MODULE_TYPES 同源） */
+export type ProfileModuleId =
+  | "identity"
+  | "status"
+  | "tags"
+  | "quote"
+  | "links"
+  | "timeline"
+  | "gallery"
+  | "music"
+  | "stats"
+
+/** 大事记条目 */
+export interface ProfileTimelineItem {
+  date: string
+  title: string
+  desc: string
+}
+
+/** 图片墙条目 */
+export interface ProfileGalleryItem {
+  url: string
+  caption: string
+}
+
+/**
+ * 名片模块配置（开关 + 顺序 + 各自数据）。
+ * items 的形态由 id 决定：tags=string[]、timeline=ProfileTimelineItem[]、
+ * gallery=ProfileGalleryItem[]；quote 用 text/author；status 用 emoji/text。
+ */
+export interface ProfileModule {
+  id: ProfileModuleId
+  enabled: boolean
+  items?: (string | ProfileTimelineItem | ProfileGalleryItem)[]
+  text?: string
+  author?: string
+  emoji?: string
+}
+
 export interface Profile {
   slug: string
   published: boolean
@@ -467,8 +506,10 @@ export interface Profile {
   effects: string[]
   intro: string
   font: string
+  cjkFont: string
   layout: string
   contacts: ProfileContact[]
+  modules: ProfileModule[]
   subdomainId: string | null
   fqdn: string | null
   profilePath: string
@@ -491,11 +532,14 @@ export interface ProfileOverview {
   intros: string[]
   fonts: string[]
   layouts: string[]
+  cjkFonts: string[]
   themeOptions: ProfileOption[]
   effectOptions: ProfileOption[]
   introOptions: ProfileOption[]
   fontOptions: ProfileOption[]
   layoutOptions: ProfileOption[]
+  cjkFontOptions: ProfileOption[]
+  moduleOptions: ProfileOption[]
   contactTypes: ContactType[]
   r2Configured: boolean
   limits: { avatar: number; background: number; music: number }

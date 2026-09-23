@@ -3,6 +3,7 @@ import { requireFeatureUser } from "../auth"
 
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
 import { attachCustomDomain, detachCustomDomain } from "../custom-domain"
+import { renderProfileHtml } from "../profile-page"
 import type { Env } from "../env"
 
 /**
@@ -41,11 +42,16 @@ export const THEMES = [
   "aurora",
   "cyber",
   "blossom",
+  "paper",
+  "ink",
+  "terminal",
+  "solar",
+  "royal",
 ] as const
 
 /**
  * 独立勾选的常驻动效。与主题不绑定，用户自由混搭组合。
- * particles 与 rain 互斥（共用 canvas 层），渲染层会保留 particles。
+ * particles / rain / sakura / snow 共用 canvas 层，互斥（保留最先出现的一个）。
  */
 export const EFFECTS = [
   "particles",
@@ -54,13 +60,19 @@ export const EFFECTS = [
   "glow",
   "rain",
   "sparkle",
+  "sakura",
+  "snow",
+  "float",
 ] as const
 
+/** 共用 canvas 层的动效，组内互斥 */
+export const CANVAS_EFFECTS = ["particles", "rain", "sakura", "snow"] as const
+
 /**
- * 开屏动画。enter/portal 为交互式（点击进入主界面），fade/slide 为非交互式（自动进入）。
+ * 开屏动画。enter/portal 为交互式（点击进入主界面），fade/slide/typewriter 为非交互式（自动进入）。
  * 与主题、动效独立混搭。
  */
-export const INTROS = ["none", "enter", "portal", "fade", "slide"] as const
+export const INTROS = ["none", "enter", "portal", "fade", "slide", "typewriter"] as const
 
 /**
  * 自托管字体。仅英文/拉丁字符集，中文回退系统字体栈。
@@ -80,12 +92,17 @@ export const FONTS = [
 
 /** 带标签/描述的选项列表，供前端选择器渲染。与服务端白名单同源，避免前后端不一致。 */
 export const THEME_OPTIONS = [
-  { id: "void", label: "虚空", desc: "纯黑虚空，accent 辉光勾勒" },
-  { id: "neon", label: "霓虹", desc: "合成波霓虹辉光" },
-  { id: "glass", label: "玻璃", desc: "毛玻璃拟态" },
-  { id: "aurora", label: "极光", desc: "流动多色渐变" },
+  { id: "void", label: "虚空", desc: "纯黑留白，辉光点睛" },
+  { id: "neon", label: "霓虹", desc: "合成波夜色，霓虹描边" },
+  { id: "glass", label: "玻璃", desc: "毛玻璃拟态，轻盈通透" },
+  { id: "aurora", label: "极光", desc: "流动渐变光带" },
   { id: "cyber", label: "赛博", desc: "HUD 网格切角" },
-  { id: "blossom", label: "绽放", desc: "浅色优雅粉色" },
+  { id: "blossom", label: "绽放", desc: "浅色樱粉，柔和细腻" },
+  { id: "paper", label: "纸刊", desc: "米色纸面，杂志衬线排版" },
+  { id: "ink", label: "水墨", desc: "宣纸墨字，朱印落款" },
+  { id: "terminal", label: "终端", desc: "荧光绿屏，等宽扫描线" },
+  { id: "solar", label: "暖阳", desc: "奶油暖调，圆润亲和" },
+  { id: "royal", label: "紫金", desc: "深紫描金，典雅华丽" },
 ] as const
 
 export const EFFECT_OPTIONS = [
@@ -95,6 +112,9 @@ export const EFFECT_OPTIONS = [
   { id: "glow", label: "脉冲发光", desc: "按钮呼吸发光" },
   { id: "rain", label: "代码雨", desc: "Matrix 风格下落字符" },
   { id: "sparkle", label: "星光闪烁", desc: "随机闪烁亮点" },
+  { id: "sakura", label: "樱花飘落", desc: "粉色花瓣随风飘落" },
+  { id: "snow", label: "落雪", desc: "雪花缓缓飘落堆积" },
+  { id: "float", label: "元素漂浮", desc: "卡片与头像轻轻浮动" },
 ] as const
 
 export const INTRO_OPTIONS = [
@@ -103,6 +123,7 @@ export const INTRO_OPTIONS = [
   { id: "portal", label: "传送门", desc: "旋转传送门，点击进入（交互式）" },
   { id: "fade", label: "渐入", desc: "内容自动淡入（非交互式）" },
   { id: "slide", label: "上滑", desc: "内容自动上滑（非交互式）" },
+  { id: "typewriter", label: "打字机", desc: "逐字打出昵称后进入（非交互式）" },
 ] as const
 
 export const FONT_OPTIONS = [
@@ -118,20 +139,213 @@ export const FONT_OPTIONS = [
 ] as const
 
 /**
- * 排版预设。与主题/动效/字体/开屏独立混搭，只改变 .wrap 的布局方式。
+ * 排版预设。与主题/动效/字体/开屏独立混搭，改变页面结构而不只是配色。
  *   center = 居中卡片（传统纵向居中）
- *   side   = 侧栏型（头像在左，信息在右）
+ *   side   = 侧栏型（身份在左，模块在右）
  *   split  = 分屏型（背景大图 + 浮层信息）
- *   plain  = 极简列（无容器，纯文字）
+ *   plain  = 极简列（无容器，纯文字排版）
+ *   bento  = 网格拼贴（模块以磁贴平铺）
+ *   banner = 横幅头图（顶部大图 + 下挂头像，杂志封面感）
  */
-export const LAYOUTS = ["center", "side", "split", "plain"] as const
+export const LAYOUTS = ["center", "side", "split", "plain", "bento", "banner"] as const
 
 export const LAYOUT_OPTIONS = [
   { id: "center", label: "居中卡片", desc: "传统纵向居中 link-in-bio" },
-  { id: "side", label: "侧栏型", desc: "头像在左，信息在右，像个人主页" },
+  { id: "side", label: "侧栏型", desc: "身份在左，模块在右，像个人主页" },
   { id: "split", label: "分屏型", desc: "背景大图 + 浮层信息" },
   { id: "plain", label: "极简列", desc: "无容器，纯文字排版" },
+  { id: "bento", label: "网格拼贴", desc: "模块以磁贴平铺，信息密度高" },
+  { id: "banner", label: "横幅头图", desc: "顶部大图横幅，杂志封面感" },
 ] as const
+
+/**
+ * 中文正文字体栈（英文标题字由 font 选项控制，二者独立）。
+ * 只用系统字体栈，不引入 CJK webfont（体积太大）。
+ */
+export const CJK_FONTS = ["system", "song", "kai", "yuan"] as const
+
+export const CJK_FONT_OPTIONS = [
+  { id: "system", label: "默认黑体", desc: "跟随系统，现代清爽" },
+  { id: "song", label: "宋体", desc: "衬线书卷气，适合长文" },
+  { id: "kai", label: "楷体", desc: "手写温润，适配国风" },
+  { id: "yuan", label: "圆体", desc: "圆润亲和（缺字体时自动回退）" },
+] as const
+
+/**
+ * 名片模块。页面由模块组装而成：可开关、可排序。
+ *   identity / stats 位置固定（头部 / 页脚），status 跟随身份区，
+ *   其余模块在编辑器和公开页中按 modules 数组顺序排列。
+ */
+export const MODULE_TYPES = [
+  "identity",
+  "status",
+  "tags",
+  "quote",
+  "links",
+  "timeline",
+  "gallery",
+  "music",
+  "stats",
+] as const
+
+export const MODULE_OPTIONS = [
+  { id: "identity", label: "身份信息", desc: "头像、昵称与签名，固定在头部" },
+  { id: "status", label: "当前状态", desc: "昵称下方的小状态签" },
+  { id: "tags", label: "兴趣标签", desc: "一组关键词标签" },
+  { id: "quote", label: "名言", desc: "一句喜欢的话与出处" },
+  { id: "links", label: "联系方式", desc: "社交链接按钮" },
+  { id: "timeline", label: "大事记", desc: "按时间排列的经历" },
+  { id: "gallery", label: "图片墙", desc: "外链图片组成的网格" },
+  { id: "music", label: "音乐播放器", desc: "设置背景音乐后自动出现" },
+  { id: "stats", label: "访问统计", desc: "页脚的加入时间与访问量" },
+] as const
+
+/** 大事记条目 */
+export interface TimelineItem {
+  date: string
+  title: string
+  desc: string
+}
+
+/** 图片墙条目 */
+export interface GalleryItem {
+  url: string
+  caption: string
+}
+
+/**
+ * 名片模块配置。存 D1 modules 列（JSON 数组），数组顺序即展示顺序。
+ * items 的具体形态由 id 决定：tags=string[]、timeline=TimelineItem[]、gallery=GalleryItem[]。
+ */
+export interface ProfileModule {
+  id: string
+  enabled: boolean
+  items?: (string | TimelineItem | GalleryItem)[]
+  text?: string
+  author?: string
+  emoji?: string
+}
+
+/**
+ * 校验并清洗 modules 数组。保存（updateProfile）与渲染（parseModules）共用，
+ * 保证写入与读出走同一套白名单与长度限制。
+ */
+export function sanitizeModules(input: unknown): ProfileModule[] {
+  if (!Array.isArray(input)) return []
+  const out: ProfileModule[] = []
+  const seen = new Set<string>()
+  const str = (v: unknown, max: number): string | undefined => {
+    if (typeof v !== "string") return undefined
+    const t = v.trim()
+    return t === "" ? undefined : t.slice(0, max)
+  }
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") continue
+    const o = raw as Record<string, unknown>
+    const id = String(o.id ?? "")
+    if (!(MODULE_TYPES as readonly string[]).includes(id)) continue
+    if (seen.has(id)) continue
+    seen.add(id)
+    const mod: ProfileModule = { id, enabled: o.enabled !== false }
+
+    if (id === "tags" && Array.isArray(o.items)) {
+      const items = o.items
+        .filter((s): s is string => typeof s === "string")
+        .map((s) => s.trim().slice(0, 12))
+        .filter(Boolean)
+        .slice(0, 12)
+      if (items.length > 0) mod.items = items
+    }
+    if (id === "timeline" && Array.isArray(o.items)) {
+      const items: TimelineItem[] = []
+      for (const it of o.items) {
+        if (!it || typeof it !== "object") continue
+        const t = it as Record<string, unknown>
+        const title = str(t.title, 30)
+        if (!title) continue
+        items.push({
+          date: str(t.date, 20) ?? "",
+          title,
+          desc: str(t.desc, 80) ?? "",
+        })
+        if (items.length >= 8) break
+      }
+      if (items.length > 0) mod.items = items
+    }
+    if (id === "gallery" && Array.isArray(o.items)) {
+      const items: GalleryItem[] = []
+      for (const it of o.items) {
+        if (!it || typeof it !== "object") continue
+        const g = it as Record<string, unknown>
+        const url = str(g.url, 1000)
+        // 只允许 https 图片，挡掉 javascript: 等危险协议
+        if (!url || !/^https:\/\//i.test(url)) continue
+        items.push({ url, caption: str(g.caption, 20) ?? "" })
+        if (items.length >= 9) break
+      }
+      if (items.length > 0) mod.items = items
+    }
+    if (id === "quote") {
+      const text = str(o.text, 80)
+      if (text) {
+        mod.text = text
+        const author = str(o.author, 20)
+        if (author) mod.author = author
+      }
+    }
+    if (id === "status") {
+      const text = str(o.text, 30)
+      if (text) {
+        mod.text = text
+        const emoji = str(o.emoji, 8)
+        if (emoji) mod.emoji = emoji
+      }
+    }
+    out.push(mod)
+  }
+  return out
+}
+
+/** 解析 modules JSON 列，只保留白名单内的合法数据。 */
+export function parseModules(raw: string | null | undefined): ProfileModule[] {
+  if (!raw) return []
+  try {
+    return sanitizeModules(JSON.parse(raw))
+  } catch {
+    return []
+  }
+}
+
+/** 清洗联系方式数组（updateProfile / previewProfile 共用）。 */
+export function sanitizeContacts(input: unknown): Contact[] {
+  if (!Array.isArray(input)) return []
+  const cleaned: Contact[] = []
+  for (const c of input) {
+    if (!c || typeof c !== "object") continue
+    const o = c as Record<string, unknown>
+    const type = String(o.type ?? "")
+    if (!(CONTACT_TYPES as readonly string[]).includes(type)) continue
+    const value = String(o.value ?? "").trim().slice(0, 500)
+    if (!value) continue
+    cleaned.push({
+      type: type as ContactType,
+      value,
+      label: typeof o.label === "string" ? o.label.trim().slice(0, 40) : undefined,
+      visible: o.visible !== false,
+    })
+    if (cleaned.length >= 20) break
+  }
+  return cleaned
+}
+
+/** 清洗动效 id 数组（updateProfile / previewProfile 共用），去重保序。 */
+export function sanitizeEffects(input: unknown): string[] {
+  if (!Array.isArray(input)) return []
+  const cleaned = input
+    .filter((e): e is string => typeof e === "string")
+    .filter((e) => (EFFECTS as readonly string[]).includes(e))
+  return Array.from(new Set(cleaned))
+}
 
 /** 支持的联系方式类型。服务端据此把用户输入拼成可点击链接。 */
 export const CONTACT_TYPES = [
@@ -179,6 +393,8 @@ interface ProfileRow {
   font: string
   layout: string
   contacts: string
+  modules: string
+  cjk_font: string
   subdomain_id: string | null
   fqdn: string | null
   view_count: number
@@ -295,7 +511,9 @@ function toPublicProfile(row: ProfileRow, slugOrFqdn: { profilePath: string }) {
     intro: row.intro,
     font: row.font,
     layout: row.layout,
+    cjkFont: row.cjk_font ?? "system",
     contacts: parseContacts(row.contacts),
+    modules: parseModules(row.modules),
     subdomainId: row.subdomain_id,
     fqdn: row.fqdn,
     profilePath: slugOrFqdn.profilePath,
@@ -316,11 +534,14 @@ export async function getProfile(env: Env, request: Request): Promise<Response> 
     intros: INTROS,
     fonts: FONTS,
     layouts: LAYOUTS,
+    cjkFonts: CJK_FONTS,
     themeOptions: THEME_OPTIONS,
     effectOptions: EFFECT_OPTIONS,
     introOptions: INTRO_OPTIONS,
     fontOptions: FONT_OPTIONS,
     layoutOptions: LAYOUT_OPTIONS,
+    cjkFontOptions: CJK_FONT_OPTIONS,
+    moduleOptions: MODULE_OPTIONS,
     contactTypes: CONTACT_TYPES,
     r2Configured: await isStorageConfigured(env),
     limits: {
@@ -372,23 +593,7 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
   // 联系方式：只接受白名单类型，值做长度限制
   let contactsJson = row.contacts
   if (Array.isArray(body.contacts)) {
-    const cleaned: Contact[] = []
-    for (const c of body.contacts) {
-      if (!c || typeof c !== "object") continue
-      const o = c as Record<string, unknown>
-      const type = String(o.type ?? "")
-      if (!(CONTACT_TYPES as readonly string[]).includes(type)) continue
-      const value = String(o.value ?? "").trim().slice(0, 500)
-      if (!value) continue
-      cleaned.push({
-        type: type as ContactType,
-        value,
-        label: typeof o.label === "string" ? o.label.trim().slice(0, 40) : undefined,
-        visible: o.visible !== false,
-      })
-      if (cleaned.length >= 20) break
-    }
-    contactsJson = JSON.stringify(cleaned)
+    contactsJson = JSON.stringify(sanitizeContacts(body.contacts))
   }
 
   const theme =
@@ -396,15 +601,10 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
       ? body.theme
       : row.theme
 
-  // 动效：只接受白名单内的 id；渲染层处理 particles/rain 互斥
+  // 动效：只接受白名单内的 id；渲染层处理 canvas 类动效互斥
   let effectsJson = row.effects
   if (Array.isArray(body.effects)) {
-    const cleaned = body.effects
-      .filter((e): e is string => typeof e === "string")
-      .filter((e) => (EFFECTS as readonly string[]).includes(e))
-    // 去重，保留顺序
-    const dedup = Array.from(new Set(cleaned))
-    effectsJson = JSON.stringify(dedup)
+    effectsJson = JSON.stringify(sanitizeEffects(body.effects))
   }
 
   const intro =
@@ -422,12 +622,24 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
       ? body.layout
       : row.layout
 
+  const cjkFont =
+    typeof body.cjkFont === "string" &&
+    (CJK_FONTS as readonly string[]).includes(body.cjkFont)
+      ? body.cjkFont
+      : (row.cjk_font ?? "system")
+
+  // 模块：数组顺序即展示顺序，逐项白名单清洗
+  let modulesJson = row.modules ?? "[]"
+  if (Array.isArray(body.modules)) {
+    modulesJson = JSON.stringify(sanitizeModules(body.modules))
+  }
+
   await env.DB.prepare(
     `UPDATE profiles SET
        slug = ?, display_name = ?, bio = ?,
        avatar_url = ?, background_url = ?, music_url = ?, music_title = ?,
        music_autoplay = ?, music_cover_url = ?, theme = ?, accent = ?, effects = ?,
-       intro = ?, font = ?, layout = ?, contacts = ?, updated_at = ?
+       intro = ?, font = ?, layout = ?, cjk_font = ?, contacts = ?, modules = ?, updated_at = ?
      WHERE user_id = ?`
   )
     .bind(
@@ -446,7 +658,9 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
       intro,
       font,
       layout,
+      cjkFont,
       contactsJson,
+      modulesJson,
       new Date().toISOString(),
       user.id
     )
@@ -454,6 +668,73 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
 
   const updated = await loadProfile(env, user.id)
   return json({ profile: toPublicProfile(updated, { profilePath: `/profile/${updated.slug}` }) })
+}
+
+/**
+ * POST /api/profile/preview —— 编辑器实时预览。
+ *
+ * 把「尚未保存的表单」按与 updateProfile 完全相同的规则清洗后，直接用
+ * renderProfileHtml 渲染成公开页 HTML 返回；不落库、不计访客数。
+ * 编辑器用 <iframe srcdoc> 展示，做到真正的所见即所得。
+ *
+ * baseHref：srcdoc iframe 是 opaque origin，相对路径（/p/…、/fonts/…）
+ * 无法解析，因此渲染时注入 <base href="<站点源>"> 让资源走绝对地址。
+ */
+export async function previewProfile(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "profile")
+  const row = await loadProfile(env, user.id)
+  const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
+
+  const str = (v: unknown, max: number): string | null => {
+    if (typeof v !== "string") return null
+    const t = v.trim()
+    return t === "" ? null : t.slice(0, max)
+  }
+  const inList = (v: unknown, list: readonly string[], fallback: string) =>
+    typeof v === "string" && list.includes(v) ? v : fallback
+
+  // 资源：已上传的优先（/p/<用户名>/<kind>），否则用表单里的外链（未传该字段时回退已存外链）
+  const asset = (kind: string, key: string | null, urlField: unknown, urlCol: string | null) => {
+    if (key) return `/p/${user.username}/${kind}`
+    return urlField === undefined ? urlCol : str(urlField, 1000)
+  }
+
+  const profile: PublicProfile = {
+    slug: row.slug,
+    username: user.username,
+    displayName:
+      body.displayName === undefined ? row.display_name : str(body.displayName, 40),
+    bio: body.bio === undefined ? row.bio : str(body.bio, 200),
+    theme: inList(body.theme, THEMES, row.theme),
+    accent: body.accent === undefined ? row.accent : str(body.accent, 20),
+    effects: Array.isArray(body.effects)
+      ? sanitizeEffects(body.effects)
+      : parseEffects(row.effects),
+    intro: inList(body.intro, INTROS, row.intro),
+    font: inList(body.font, FONTS, row.font),
+    cjkFont: inList(body.cjkFont, CJK_FONTS, row.cjk_font ?? "system"),
+    layout: inList(body.layout, LAYOUTS, row.layout),
+    avatar: asset("avatar", row.avatar_key, body.avatarUrl, row.avatar_url),
+    background: asset("background", row.background_key, body.backgroundUrl, row.background_url),
+    music: asset("music", row.music_key, body.musicUrl, row.music_url),
+    musicCover: asset("music-cover", row.music_cover_key, body.musicCoverUrl, row.music_cover_url),
+    musicTitle: body.musicTitle === undefined ? row.music_title : str(body.musicTitle, 80),
+    musicAutoplay:
+      body.musicAutoplay === undefined ? row.music_autoplay === 1 : Boolean(body.musicAutoplay),
+    contacts: (Array.isArray(body.contacts)
+      ? sanitizeContacts(body.contacts)
+      : parseContacts(row.contacts)
+    ).filter((c) => c.visible !== false),
+    modules: Array.isArray(body.modules)
+      ? sanitizeModules(body.modules)
+      : parseModules(row.modules),
+    registeredAt: user.created_at ?? null,
+    viewCount: row.view_count ?? 0,
+  }
+
+  const origin = new URL(request.url).origin
+  const html = renderProfileHtml(profile, { baseHref: origin })
+  return json({ html })
 }
 
 // POST /api/profile/publish —— 启用/停用对外可见
@@ -739,6 +1020,7 @@ export interface PublicProfile {
   effects: string[]
   intro: string
   font: string
+  cjkFont: string
   layout: string
   avatar: string | null
   background: string | null
@@ -747,6 +1029,8 @@ export interface PublicProfile {
   musicTitle: string | null
   musicAutoplay: boolean
   contacts: Contact[]
+  /** 组装页面的模块（开关 + 顺序 + 各自数据） */
+  modules: ProfileModule[]
   /** 用户注册时间（ISO）—— 名片页小字展示 */
   registeredAt: string | null
   /** 名片被访问的累计次数 */
@@ -791,6 +1075,7 @@ export async function loadPublicProfile(
     effects: parseEffects(row.effects),
     intro: row.intro,
     font: row.font,
+    cjkFont: row.cjk_font ?? "system",
     layout: row.layout,
     avatar: assetUrl("avatar", row.avatar_key, row.avatar_url),
     background: assetUrl("background", row.background_key, row.background_url),
@@ -799,6 +1084,7 @@ export async function loadPublicProfile(
     musicTitle: row.music_title,
     musicAutoplay: row.music_autoplay === 1,
     contacts: parseContacts(row.contacts).filter((c) => c.visible !== false),
+    modules: parseModules(row.modules),
     registeredAt: row.user_created_at ?? null,
     viewCount: row.view_count ?? 0,
   }

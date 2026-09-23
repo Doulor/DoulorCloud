@@ -34,6 +34,7 @@ import {
   type FeatureCounts,
   type Profile,
   type ProfileContact,
+  type ProfileModule,
   type ProfileOverview,
   type R2BucketsResponse,
   type R2Operations,
@@ -716,12 +717,21 @@ export const profileApi = {
     effects: string[]
     intro: string
     font: string
+    cjkFont: string
     layout: string
     musicCoverUrl: string
     contacts: ProfileContact[]
+    modules: ProfileModule[]
   }>) =>
     request<{ profile: Profile }>("/profile", {
       method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 实时预览：把未保存的表单渲染成公开页 HTML（不落库、不计访客数） */
+  preview: (payload: Record<string, unknown>) =>
+    request<{ html: string }>("/profile/preview", {
+      method: "POST",
       body: JSON.stringify(payload),
     }),
 
