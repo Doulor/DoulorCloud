@@ -192,6 +192,39 @@ export async function getCurrencyInfo(
   }
 }
 
+export interface NewApiHealth {
+  online: boolean
+  /** 探测耗时（毫秒）；离线时为 -1 */
+  latencyMs: number
+  /** 站点版本号（在线时从 /api/status 读取） */
+  version: string | null
+}
+
+/**
+ * 中转站健康检查：调公开的 /api/status 测连通性与延迟。
+ * 不抛错——离线也返回 { online:false }，供前端显示「在线/离线」徽章。
+ */
+export async function checkHealth(env: Env): Promise<NewApiHealth> {
+  if (!isNewApiConfigured(env)) {
+    return { online: false, latencyMs: -1, version: null }
+  }
+  const startedAt = Date.now()
+  try {
+    const res = await newApiFetch(env, "/api/status", {
+      method: "GET",
+      auth: "none",
+    })
+    const data = await unwrap<Record<string, unknown>>(res, "健康检查")
+    return {
+      online: true,
+      latencyMs: Date.now() - startedAt,
+      version: data?.version ? String(data.version) : null,
+    }
+  } catch {
+    return { online: false, latencyMs: -1, version: null }
+  }
+}
+
 /**
  * 请求发送邮箱验证码（无需鉴权）。
  * 验证码由 NewAPI 服务端生成并邮件发送到本站域名邮箱，本站随后从收件箱读取。

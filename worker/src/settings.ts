@@ -26,6 +26,8 @@ export const SETTING_DEFAULTS = {
   newapi_quota_per_unit: "500000",
   /** 每个用户默认可创建的一级子域名数量（可被 users.max_subdomains 覆盖） */
   subdomain_quota_default: "5",
+  /** 每个用户默认的邀请码创建额度（捐献会额外增加，见 quotas.ts） */
+  invite_quota_base: "3",
   /** 代理节点功能总开关 */
   proxy_enabled: "1",
   /** 临时分享箱总开关 */

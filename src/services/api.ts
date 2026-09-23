@@ -5,6 +5,7 @@ import {
   type AdminUserDetail,
   type ApiError,
   type Announcement,
+  type AchievementsResponse,
   type DnsRecord,
   type DnsRecordType,
   type Donation,
@@ -24,6 +25,13 @@ import {
   type StorageObject,
   type StorageOverview,
   type StoragePrefixCreated,
+
+  type AdminInviteQuotasResponse,
+  type AdminUserInviteQuotaResponse,
+  type MyInvite,
+  type MyInvitesOverview,
+  type UserQuota,
+  type FeatureCounts,
   type Profile,
   type ProfileContact,
   type ProfileOverview,
@@ -232,6 +240,31 @@ export const adminApi = {
     ),
 
   listInvites: () => request<{ invites: AdminInvite[] }>("/admin/invites"),
+
+  /** 所有用户的邀请码额度概况 */
+  listInviteQuotas: () =>
+    request<AdminInviteQuotasResponse>("/admin/invite-quotas"),
+
+  /** 单个用户的额度 + 其创建的邀请码 */
+  getUserInviteQuota: (username: string) =>
+    request<AdminUserInviteQuotaResponse>(
+      `/admin/users/${encodeURIComponent(username)}/invite-quota`
+    ),
+
+  /** 调整额度（补偿/纠错/手动发放） */
+  updateUserInviteQuota: (
+    username: string,
+    payload: {
+      inviteBonus?: number
+      inviteUsed?: number
+      featureQuota?: Partial<FeatureCounts>
+      featureUsed?: Partial<FeatureCounts>
+    }
+  ) =>
+    request<AdminUserInviteQuotaResponse>(
+      `/admin/users/${encodeURIComponent(username)}/invite-quota`,
+      { method: "PUT", body: JSON.stringify(payload) }
+    ),
 
   createInvite: (payload: {
     code: string
@@ -769,4 +802,29 @@ export const announcementApi = {
     request<{ ok: boolean }>(`/admin/announcements/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
+}
+
+// ---- 成就系统 ----
+
+export const achievementApi = {
+  list: () => request<AchievementsResponse>("/achievements"),
+}
+
+// ---- 我的邀请码（用户自助）----
+
+export const myInviteApi = {
+  list: () => request<MyInvitesOverview>("/my-invites"),
+
+  /** features 省略 = 只含基础权限（个人名片），不消耗模块额度 */
+  create: (payload: { code?: string; features?: string[] }) =>
+    request<{ invite: MyInvite; quota: UserQuota }>("/my-invites", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  remove: (id: string) =>
+    request<{ quota: UserQuota; refunded: boolean }>(
+      `/my-invites/${encodeURIComponent(id)}`,
+      { method: "DELETE" }
+    ),
 }

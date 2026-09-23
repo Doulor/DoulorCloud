@@ -20,6 +20,7 @@ import ProxyPage from "@/pages/proxy"
 import TempboxPage from "@/pages/tempbox"
 import SettingsPage from "@/pages/settings"
 import DonationPage from "@/pages/donations"
+import AchievementsPage from "@/pages/achievements"
 import AdminPage from "@/pages/admin"
 import NotFoundPage from "@/pages/not-found"
 
@@ -96,6 +97,7 @@ export default function App() {
         <Route path="proxy" element={<ProxyPage />} />
         <Route path="tempbox" element={<TempboxPage />} />
         <Route path="profile" element={<ProfilePage />} />
+        <Route path="achievements" element={<AchievementsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="donations" element={<DonationPage />} />
         <Route path="admin" element={<AdminPage />} />

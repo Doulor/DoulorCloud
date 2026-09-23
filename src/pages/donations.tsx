@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Heart, Loader2, Plus, Send, Trash2 } from "lucide-react"
+import { Check, Copy, Heart, Loader2, Plus, Send, Ticket, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -25,8 +25,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
-import { donationApi, HttpError } from "@/services/api"
-import type { DonationOverview, Permissions } from "@/types"
+import { donationApi, myInviteApi, HttpError } from "@/services/api"
+import type { DonationOverview, MyInvite, MyInvitesOverview, Permissions } from "@/types"
 
 const TYPE_META: Record<string, { label: string; desc: string }> = {
   ai: { label: "AI 中转站", desc: "贡献一个模型渠道，让其他用户也能用" },
@@ -64,6 +64,65 @@ export default function DonationPage() {
   React.useEffect(() => {
     void load()
   }, [load])
+
+  // 我的邀请码（额度 + 列表）
+  const [invites, setInvites] = React.useState<MyInvitesOverview | null>(null)
+  const [inviteOpen, setInviteOpen] = React.useState(false)
+  const [inviteCode, setInviteCode] = React.useState("")
+  const [inviteFeatures, setInviteFeatures] = React.useState<string[]>([])
+  const [inviteBusy, setInviteBusy] = React.useState(false)
+  const [copiedCode, setCopiedCode] = React.useState<string | null>(null)
+
+  const loadInvites = React.useCallback(async () => {
+    try {
+      setInvites(await myInviteApi.list())
+    } catch {
+      // 静默：额度区加载失败不影响捐献主流程
+    }
+  }, [])
+
+  React.useEffect(() => {
+    void loadInvites()
+  }, [loadInvites])
+
+  const handleCreateInvite = async () => {
+    setInviteBusy(true)
+    try {
+      await myInviteApi.create({
+        code: inviteCode.trim() || undefined,
+        features: inviteFeatures,
+      })
+      toast.success("邀请码已创建")
+      setInviteOpen(false)
+      setInviteCode("")
+      setInviteFeatures([])
+      await loadInvites()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "创建失败")
+    } finally {
+      setInviteBusy(false)
+    }
+  }
+
+  const handleDeleteInvite = async (inv: MyInvite) => {
+    try {
+      const res = await myInviteApi.remove(inv.id)
+      toast.success(res.refunded ? "已删除，额度已退还" : "已删除（该码已被使用，额度不退还）")
+      await loadInvites()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "删除失败")
+    }
+  }
+
+  const copyCode = async (code: string) => {
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopiedCode(code)
+      setTimeout(() => setCopiedCode(null), 1500)
+    } catch {
+      toast.error("复制失败，请手动复制")
+    }
+  }
 
   const perms = data?.permissions
   // 全部三种资源都可捐献（已解锁的用户也能主动贡献），
@@ -116,6 +175,138 @@ export default function DonationPage() {
               </div>
               )
             })
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 我的邀请码：额度 + 创建 + 列表 */}
+      <Card className="mb-6">
+        <CardHeader>
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Ticket className="h-4 w-4 text-muted-foreground" />
+                我的邀请码
+              </CardTitle>
+              <CardDescription>
+                每人默认 {invites?.quota.inviteBase ?? 3} 个额度；
+                每笔捐献获批再 +2 个额度，并获得 1 个对应模块的权限额度。
+              </CardDescription>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => setInviteOpen(true)}
+              disabled={(invites?.quota.inviteRemaining ?? 0) < 1}
+            >
+              <Plus className="h-4 w-4" />
+              创建
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {invites && (
+            <>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-md border px-4 py-3">
+                  <p className="text-xs text-muted-foreground">邀请码额度</p>
+                  <p className="mt-1 text-lg font-semibold">
+                    {invites.quota.inviteRemaining}
+                    <span className="ml-1 text-sm font-normal text-muted-foreground">
+                      / {invites.quota.inviteTotal}
+                    </span>
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    基础 {invites.quota.inviteBase} + 捐献 {invites.quota.inviteBonus}
+                  </p>
+                </div>
+                <div className="rounded-md border px-4 py-3">
+                  <p className="text-xs text-muted-foreground">模块权限额度（可转授）</p>
+                  <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+                    {invites.quotaFeatures.map((f) => {
+                      const remain =
+                        invites.quota.featureRemaining[
+                          f as keyof typeof invites.quota.featureRemaining
+                        ]
+                      return (
+                        <span key={f} className="text-sm">
+                          {invites.featureLabels[f]}
+                          <span
+                            className={
+                              'ml-1 font-semibold ' +
+                              (remain > 0
+                                ? 'text-emerald-600 dark:text-emerald-400'
+                                : 'text-muted-foreground')
+                            }
+                          >
+                            {remain}
+                          </span>
+                        </span>
+                      )
+                    })}
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    创建邀请码时勾选模块权限会消耗对应额度
+                  </p>
+                </div>
+              </div>
+
+              {invites.invites.length === 0 ? (
+                <p className="py-2 text-sm text-muted-foreground">
+                  还没有创建过邀请码。
+                </p>
+              ) : (
+                <div className="divide-y rounded-md border">
+                  {invites.invites.map((inv) => {
+                    const extra = invites.quotaFeatures.filter(
+                      (f) => inv.permissions[f as keyof Permissions]
+                    )
+                    const used = inv.usedCount >= inv.maxUses
+                    return (
+                      <div
+                        key={inv.id}
+                        className="flex flex-wrap items-center gap-2 px-4 py-2.5"
+                      >
+                        <span className="font-mono text-sm">{inv.code}</span>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground"
+                          onClick={() => void copyCode(inv.code)}
+                          title="复制"
+                        >
+                          {copiedCode === inv.code ? (
+                            <Check className="h-3.5 w-3.5" />
+                          ) : (
+                            <Copy className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                        <Badge variant="outline">域名 · 邮箱 · 名片</Badge>
+                        {extra.map((f) => (
+                          <Badge key={f} variant="secondary">
+                            {invites.featureLabels[f]}
+                          </Badge>
+                        ))}
+                        <Badge variant={used ? 'destructive' : 'success'}>
+                          {used ? '已使用' : '未使用'}
+                        </Badge>
+                        <span className="ml-auto text-xs text-muted-foreground">
+                          {fmtTime(inv.createdAt)}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                          onClick={() => void handleDeleteInvite(inv)}
+                          title={used ? '删除（额度不退还）' : '删除并退还额度'}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </>
           )}
         </CardContent>
       </Card>
@@ -185,6 +376,85 @@ export default function DonationPage() {
           }}
         />
       )}
+
+      {/* 创建邀请码 */}
+      <Dialog open={inviteOpen} onOpenChange={setInviteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>创建邀请码</DialogTitle>
+            <DialogDescription>
+              基础权限含域名、邮箱、个人名片。勾选模块权限会消耗对应额度。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="invCode">邀请码（留空自动生成）</Label>
+              <Input
+                id="invCode"
+                placeholder="DC-XXXX-XXXX"
+                value={inviteCode}
+                onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
+                className="font-mono"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>附加模块权限</Label>
+              {invites?.quotaFeatures.map((f) => {
+                const remain =
+                  invites.quota.featureRemaining[
+                    f as keyof typeof invites.quota.featureRemaining
+                  ]
+                const checked = inviteFeatures.includes(f)
+                const disabled = !checked && remain < 1
+                return (
+                  <label
+                    key={f}
+                    className={
+                      'flex items-center gap-3 rounded-md border px-4 py-2.5 ' +
+                      (disabled ? 'opacity-50' : 'cursor-pointer')
+                    }
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={checked}
+                      disabled={disabled}
+                      onChange={(e) =>
+                        setInviteFeatures((prev) =>
+                          e.target.checked
+                            ? [...prev, f]
+                            : prev.filter((x) => x !== f)
+                        )
+                      }
+                    />
+                    <span className="flex-1 text-sm">
+                      {invites.featureLabels[f]}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      剩余 {remain}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              本次将消耗 1 个邀请码额度
+              {inviteFeatures.length > 0 &&
+                `，以及 ${inviteFeatures.length} 个模块额度`}
+              。当前剩余 {invites?.quota.inviteRemaining ?? 0} 个邀请码额度。
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setInviteOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={() => void handleCreateInvite()} disabled={inviteBusy}>
+              {inviteBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+              创建
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

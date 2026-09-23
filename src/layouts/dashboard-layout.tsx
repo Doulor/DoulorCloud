@@ -15,6 +15,7 @@ import {
   Network,
   Zap,
   Package,
+  Trophy,
 } from "lucide-react"
 
 import { Logo } from "@/components/logo"

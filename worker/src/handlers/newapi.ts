@@ -34,6 +34,7 @@ import {
   redeemCode,
   registerUser,
   requestEmailCode,
+  checkHealth,
   changePassword as changePasswordRemote,
 } from "../newapi-client"
 import { audit, getSettings } from "../settings"
@@ -160,6 +161,9 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     : { symbol: "$", code: "USD", perUnit: Number(settings.newapi_quota_per_unit) }
   const perUnit = currency.perUnit
 
+  // 中转站健康状态（在线/离线 + 延迟），供界面顶部徽章显示
+  const health = await checkHealth(env)
+
   const base = {
     configured,
     featureEnabled: settings.newapi_enabled === "1",
@@ -169,6 +173,7 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     currencyCode: currency.code,
     trialQuotaUsd: quotaToDisplay(Number(settings.newapi_trial_quota), perUnit),
     group: settings.newapi_group,
+    health,
     account: account
       ? {
           newapiUserId: account.newapi_user_id,

@@ -263,6 +263,13 @@ export interface NewApiAccount {
   syncedAt: string | null
 }
 
+export interface NewApiHealth {
+  online: boolean
+  /** 探测耗时（毫秒）；离线时为 -1 */
+  latencyMs: number
+  version: string | null
+}
+
 export interface NewApiStatus {
   configured: boolean
   featureEnabled: boolean
@@ -280,6 +287,8 @@ export interface NewApiStatus {
   groupModels: Record<string, string[]>
   /** 账号当前所属分组 */
   accountGroup: string | null
+  /** 中转站健康状态（在线/离线 + 延迟 + 版本） */
+  health: NewApiHealth
 }
 
 export interface NewApiKey {
@@ -488,6 +497,35 @@ export interface ProfileOverview {
   limits: { avatar: number; background: number; music: number }
 }
 
+// ---- 成就系统 ----
+
+export interface AchievementProgress {
+  id: string
+  name: string
+  desc: string
+  /** 图标标识，前端映射成 lucide 图标 */
+  icon: string
+  /** 是否单级成就 */
+  single: boolean
+  /** 分级成就的阈值与等级名 */
+  tiers?: number[]
+  tierNames?: string[]
+  /** 当前进度值 */
+  value: number
+  /** 已达成的等级数（0 = 未解锁） */
+  level: number
+  /** 是否完全达成（最高级） */
+  maxed: boolean
+  /** 下一等级阈值（无则 null） */
+  nextTier: number | null
+}
+
+export interface AchievementsResponse {
+  achievements: AchievementProgress[]
+  summary: { unlocked: number; total: number }
+  registeredAt: string | null
+}
+
 // ---- 代理节点 ----
 
 export type ProxyNodeStatus = "online" | "offline" | "maintenance" | "unknown"
@@ -607,4 +645,75 @@ export interface DonationOverview {
   types: string[]
   typeLabels: Record<string, string>
   permissions: Permissions
+}
+
+// ---- 邀请码额度 ----
+
+/** 需要消耗转授额度的模块 */
+export interface FeatureCounts {
+  r2: number
+  ai: number
+  frp: number
+  proxy: number
+}
+
+export interface UserQuota {
+  /** 基础额度（全局设置） */
+  inviteBase: number
+  /** 捐献累计获得 */
+  inviteBonus: number
+  /** 合计可创建数 */
+  inviteTotal: number
+  inviteUsed: number
+  inviteRemaining: number
+  featureQuota: FeatureCounts
+  featureUsed: FeatureCounts
+  featureRemaining: FeatureCounts
+}
+
+export interface MyInvite {
+  id: string
+  code: string
+  maxUses: number
+  usedCount: number
+  expiresAt: string | null
+  permissions: Permissions
+  createdAt: string
+}
+
+export interface MyInvitesOverview {
+  quota: UserQuota
+  invites: MyInvite[]
+  featureLabels: Record<string, string>
+  quotaFeatures: string[]
+}
+
+/** 管理端：某用户的额度概况（含邀请码数量） */
+export interface AdminInviteQuota {
+  id: string
+  username: string
+  inviteBase: number
+  inviteBonus: number
+  inviteTotal: number
+  inviteUsed: number
+  inviteRemaining: number
+  featureQuota: FeatureCounts
+  featureUsed: FeatureCounts
+  featureRemaining: FeatureCounts
+  inviteCount: number
+}
+
+export interface AdminInviteQuotasResponse {
+  users: AdminInviteQuota[]
+  featureLabels: Record<string, string>
+  quotaFeatures: string[]
+  baseQuota: number
+}
+
+export interface AdminUserInviteQuotaResponse {
+  username: string
+  quota: UserQuota
+  invites: MyInvite[]
+  featureLabels: Record<string, string>
+  quotaFeatures: string[]
 }

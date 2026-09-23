@@ -14,6 +14,41 @@ import {
 } from "../auth"
 import type { Env } from "../env"
 
+/**
+ * 累计登录/访问控制台的次数（用于「常客」成就）。
+ * 节流：同一用户 1 小时内只计一次。失败静默，不影响主流程。
+ */
+async function bumpVisit(env: Env, userId: string): Promise<void> {
+  try {
+    const now = Date.now()
+    const row = await env.DB.prepare(
+      "SELECT visit_count, last_visit_at FROM user_stats WHERE user_id = ?"
+    )
+      .bind(userId)
+      .first<{ visit_count: number; last_visit_at: string | null }>()
+
+    const last = row?.last_visit_at ? new Date(row.last_visit_at).getTime() : 0
+    if (now - last < 3600_000) return
+
+    const iso = new Date(now).toISOString()
+    if (row) {
+      await env.DB.prepare(
+        "UPDATE user_stats SET visit_count = visit_count + 1, last_visit_at = ? WHERE user_id = ?"
+      )
+        .bind(iso, userId)
+        .run()
+    } else {
+      await env.DB.prepare(
+        "INSERT INTO user_stats (user_id, visit_count, last_visit_at) VALUES (?, 1, ?)"
+      )
+        .bind(userId, iso)
+        .run()
+    }
+  } catch {
+    // 计数失败不影响登录态返回
+  }
+}
+
 function isValidUsername(username: string): boolean {
   return /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(username)
 }
@@ -228,6 +263,9 @@ export async function logout(env: Env, request: Request): Promise<Response> {
 
 export async function me(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
+
+  // 访问计数：同一用户 1 小时内只计一次（节流），用于「常客」成就
+  void bumpVisit(env, user.id)
 
   const domain = await env.DB.prepare(
     "SELECT * FROM domains WHERE user_id = ? LIMIT 1"

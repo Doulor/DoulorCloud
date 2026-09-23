@@ -10,11 +10,13 @@ import * as storageHandlers from "./handlers/storage"
 import * as newapiHandlers from "./handlers/newapi"
 import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
+import * as myInviteHandlers from "./handlers/my-invites"
 import * as frpHandlers from "./handlers/frp"
 import * as profileHandlers from "./handlers/profile"
 import * as proxyHandlers from "./handlers/proxy"
 import * as tempboxHandlers from "./handlers/tempbox"
 import * as announcementHandlers from "./handlers/announcements"
+import * as achievementHandlers from "./handlers/achievements"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
 
@@ -132,7 +134,30 @@ async function route(env: Env, request: Request): Promise<Response> {
     return adminHandlers.updateInvite(env, request, decodeURIComponent(adminInviteMatch[1]))
   }
   if (adminInviteMatch && method === "DELETE") {
-    return adminHandlers.deleteInvite(env, request, decodeURIComponent(adminInviteMatch[1]))
+    // 走「带额度退还」版本：删掉用户自助创建且未使用的码时，
+    // 把额度还给创建者，避免用户白掉额度
+    return adminHandlers.adminDeleteInviteWithRefund(
+      env,
+      request,
+      decodeURIComponent(adminInviteMatch[1])
+    )
+  }
+
+  // ---- 我的邀请码（用户自助）----
+  if (routePath === "/my-invites" && method === "GET") {
+    return myInviteHandlers.listMyInvites(env, request)
+  }
+  if (routePath === "/my-invites" && method === "POST") {
+    return myInviteHandlers.createMyInvite(env, request)
+  }
+
+  const myInviteMatch = routePath.match(/^\/my-invites\/([^/]+)$/)
+  if (myInviteMatch && method === "DELETE") {
+    return myInviteHandlers.deleteMyInvite(
+      env,
+      request,
+      decodeURIComponent(myInviteMatch[1])
+    )
   }
 
   // Admin: 捐献审核
@@ -141,6 +166,29 @@ async function route(env: Env, request: Request): Promise<Response> {
   }
   if (routePath === "/admin/donations/review" && method === "POST") {
     return donationHandlers.reviewDonation(env, request)
+  }
+
+  // Admin: 用户邀请码额度
+  if (routePath === "/admin/invite-quotas" && method === "GET") {
+    return adminHandlers.listInviteQuotas(env, request)
+  }
+
+  const quotaUserMatch = routePath.match(
+    /^\/admin\/users\/([^/]+)\/invite-quota$/
+  )
+  if (quotaUserMatch && method === "GET") {
+    return adminHandlers.getUserInviteQuota(
+      env,
+      request,
+      decodeURIComponent(quotaUserMatch[1])
+    )
+  }
+  if (quotaUserMatch && method === "PUT") {
+    return adminHandlers.updateUserInviteQuota(
+      env,
+      request,
+      decodeURIComponent(quotaUserMatch[1])
+    )
   }
 
   // Admin: 保留子域名
@@ -175,6 +223,11 @@ async function route(env: Env, request: Request): Promise<Response> {
   // 公告 / 网站动态（管理员 CRUD，普通用户只读最近几条）
   if (routePath === "/announcements" && method === "GET") {
     return announcementHandlers.listAnnouncements(env, request)
+  }
+
+  // 成就系统
+  if (routePath === "/achievements" && method === "GET") {
+    return achievementHandlers.getAchievements(env, request)
   }
   if (routePath === "/admin/announcements" && method === "GET") {
     return announcementHandlers.listAllAnnouncements(env, request)
@@ -545,20 +598,22 @@ export default {
       // 公开名片页：/profile/<slug>
       const pubMatch = url.pathname.match(/^\/profile\/([^/]+)\/?$/)
       if (pubMatch && request.method === "GET") {
-        const profile = await profileHandlers.loadPublicProfile(env, {
-          slug: decodeURIComponent(pubMatch[1]),
+        const slug = decodeURIComponent(pubMatch[1])
+        const profile = await profileHandlers.loadPublicProfile(env, { slug })
+        if (profile) {
+          // 访客量 +1（失败静默，不影响渲染）
+          void profileHandlers.bumpProfileView(env, slug)
+          return new Response(renderProfileHtml(profile), {
+            headers: {
+              "Content-Type": "text/html; charset=utf-8",
+              "Cache-Control": "public, max-age=60",
+            },
+          })
+        }
+        return new Response(renderNotFoundHtml(), {
+          status: 404,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
         })
-        return profile
-          ? new Response(renderProfileHtml(profile), {
-              headers: {
-                "Content-Type": "text/html; charset=utf-8",
-                "Cache-Control": "public, max-age=60",
-              },
-            })
-          : new Response(renderNotFoundHtml(), {
-              status: 404,
-              headers: { "Content-Type": "text/html; charset=utf-8" },
-            })
       }
 
       // 自定义名片域名：Host 命中 profiles.fqdn 时，该域名下所有路径都渲染名片。
@@ -573,6 +628,7 @@ export default {
           fqdn: host,
         })
         if (hostProfile) {
+          void profileHandlers.bumpProfileView(env, hostProfile.slug)
           return new Response(renderProfileHtml(hostProfile), {
             headers: {
               "Content-Type": "text/html; charset=utf-8",

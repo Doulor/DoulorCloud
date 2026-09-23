@@ -3,6 +3,7 @@ import {
   Ban,
   KeyRound,
   Loader2,
+  Ticket,
   Pencil,
   Plus,
   Megaphone,
@@ -81,6 +82,9 @@ const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
 import type {
   AdminFrpApplication,
   AdminFrpNode,
+  AdminInviteQuotasResponse,
+  AdminUserInviteQuotaResponse,
+  FeatureCounts,
   Donation,
   ReservedSubdomain,
   Announcement,
@@ -152,6 +156,14 @@ export default function AdminPage() {
   const [permInvite, setPermInvite] = React.useState<AdminInvite | null>(null)
   const [permDraft, setPermDraft] = React.useState<Permissions | null>(null)
   const [permBusy, setPermBusy] = React.useState(false)
+
+  // 用户邀请码额度
+  const [inviteQuotas, setInviteQuotas] =
+    React.useState<AdminInviteQuotasResponse | null>(null)
+  const [inviteQuotaLoading, setInviteQuotaLoading] = React.useState(false)
+  const [quotaDetail, setQuotaDetail] =
+    React.useState<AdminUserInviteQuotaResponse | null>(null)
+  const [quotaDetailBusy, setQuotaDetailBusy] = React.useState(false)
 
   // 保留子域名
   const [reserved, setReserved] = React.useState<ReservedSubdomain[]>([])
@@ -580,6 +592,48 @@ export default function AdminPage() {
     }
   }
 
+  const loadInviteQuotas = React.useCallback(async () => {
+    setInviteQuotaLoading(true)
+    try {
+      setInviteQuotas(await adminApi.listInviteQuotas())
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "加载额度失败")
+    } finally {
+      setInviteQuotaLoading(false)
+    }
+  }, [])
+
+  const openQuotaDetail = async (username: string) => {
+    setQuotaDetailBusy(true)
+    try {
+      setQuotaDetail(await adminApi.getUserInviteQuota(username))
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "加载详情失败")
+    } finally {
+      setQuotaDetailBusy(false)
+    }
+  }
+
+  const handleAdjustQuota = async (
+    username: string,
+    payload: {
+      inviteBonus?: number
+      featureQuota?: Partial<FeatureCounts>
+    }
+  ) => {
+    setQuotaDetailBusy(true)
+    try {
+      const res = await adminApi.updateUserInviteQuota(username, payload)
+      setQuotaDetail(res)
+      toast.success("额度已更新")
+      void loadInviteQuotas()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "更新失败")
+    } finally {
+      setQuotaDetailBusy(false)
+    }
+  }
+
   const loadReserved = React.useCallback(async () => {
     setReservedLoading(true)
     try {
@@ -783,7 +837,7 @@ export default function AdminPage() {
         description={`已注册用户 ${users.length} 个 · 邀请码 ${invites.length} 个`}
       />
 
-      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp(); if (v === "proxy") void loadProxy(); if (v === "reserved") void loadReserved(); if (v === "donations") void loadDonations(); if (v === "announcements") void loadAnnouncements() }}>
+      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp(); if (v === "proxy") void loadProxy(); if (v === "reserved") void loadReserved(); if (v === "donations") void loadDonations(); if (v === "announcements") void loadAnnouncements(); if (v === "inviteQuotas") void loadInviteQuotas() }}>
         <TabsList className="mb-4">
           <TabsTrigger value="users">
             <Users className="mr-1.5 h-3.5 w-3.5" />
@@ -792,6 +846,10 @@ export default function AdminPage() {
           <TabsTrigger value="invites">
             <KeyRound className="mr-1.5 h-3.5 w-3.5" />
             邀请码
+          </TabsTrigger>
+          <TabsTrigger value="inviteQuotas">
+            <Ticket className="mr-1.5 h-3.5 w-3.5" />
+            用户邀请码
           </TabsTrigger>
           <TabsTrigger value="frp">
             <Network className="mr-1.5 h-3.5 w-3.5" />
@@ -1384,6 +1442,89 @@ export default function AdminPage() {
           )}
         </TabsContent>
 
+        <TabsContent value="inviteQuotas">
+          <p className="mb-4 text-sm text-muted-foreground">
+            每个用户默认可创建 {inviteQuotas?.baseQuota ?? 3} 个邀请码；
+            每笔捐献获批再 +2 个额度，并获得 1 个对应模块的权限额度。
+            点「详情」可查看该用户创建的邀请码并调整额度。
+          </p>
+
+          {inviteQuotaLoading ? (
+            <LoadingBlock />
+          ) : (inviteQuotas?.users.length ?? 0) === 0 ? (
+            <EmptyState title="还没有数据" description="用户注册后会出现在这里。" />
+          ) : (
+            <div className="rounded-lg border bg-card">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>用户</TableHead>
+                    <TableHead>邀请码额度</TableHead>
+                    <TableHead>模块权限额度（剩余）</TableHead>
+                    <TableHead>已创建</TableHead>
+                    <TableHead className="w-20" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {inviteQuotas!.users.map((u) => (
+                    <TableRow key={u.id}>
+                      <TableCell className="font-mono text-sm">
+                        {u.username}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        <span className="font-semibold">{u.inviteRemaining}</span>
+                        <span className="text-muted-foreground">
+                          {" / "}
+                          {u.inviteTotal}
+                        </span>
+                        <span className="ml-2 text-xs text-muted-foreground">
+                          （基础 {u.inviteBase} + 捐献 {u.inviteBonus}）
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        <div className="flex flex-wrap gap-x-3 gap-y-1">
+                          {inviteQuotas!.quotaFeatures.map((f) => {
+                            const remain =
+                              u.featureRemaining[
+                                f as keyof typeof u.featureRemaining
+                              ]
+                            return (
+                              <span key={f}>
+                                {inviteQuotas!.featureLabels[f]}{" "}
+                                <span
+                                  className={
+                                    remain > 0
+                                      ? "font-semibold text-emerald-600 dark:text-emerald-400"
+                                      : "text-muted-foreground"
+                                  }
+                                >
+                                  {remain}
+                                </span>
+                              </span>
+                            )
+                          })}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-sm">{u.inviteCount}</TableCell>
+                      <TableCell>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-8 text-xs"
+                          disabled={quotaDetailBusy}
+                          onClick={() => void openQuotaDetail(u.username)}
+                        >
+                          详情
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </TabsContent>
+
         <TabsContent value="reserved">
           <div className="mb-4 space-y-3">
             <p className="text-sm text-muted-foreground">
@@ -1964,6 +2105,161 @@ export default function AdminPage() {
               保存
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 用户邀请码详情 */}
+      <Dialog
+        open={quotaDetail !== null}
+        onOpenChange={(o) => {
+          if (!o) setQuotaDetail(null)
+        }}
+      >
+        <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+          {quotaDetail && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="font-mono">
+                  {quotaDetail.username} 的邀请码额度
+                </DialogTitle>
+                <DialogDescription>
+                  可手动调整额度用于补偿或纠错；输入框失去焦点即保存。
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="space-y-4">
+                <div className="rounded-md border p-3">
+                  <p className="text-sm font-medium">邀请码额度</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    剩余 {quotaDetail.quota.inviteRemaining} / 共{" "}
+                    {quotaDetail.quota.inviteTotal}（基础{" "}
+                    {quotaDetail.quota.inviteBase} + 捐献{" "}
+                    {quotaDetail.quota.inviteBonus}），已用{" "}
+                    {quotaDetail.quota.inviteUsed}
+                  </p>
+                  <div className="mt-2 flex items-center gap-2">
+                    <Label className="text-xs">捐献额度</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      className="h-8 w-24"
+                      disabled={quotaDetailBusy}
+                      defaultValue={quotaDetail.quota.inviteBonus}
+                      onBlur={(e) =>
+                        void handleAdjustQuota(quotaDetail.username, {
+                          inviteBonus: Number(e.target.value),
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="rounded-md border p-3">
+                  <p className="text-sm font-medium">模块权限额度</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    决定该用户能给邀请码授予多少模块权限
+                  </p>
+                  <div className="mt-2 space-y-2">
+                    {quotaDetail.quotaFeatures.map((f) => (
+                      <div key={f} className="flex items-center gap-2">
+                        <Label className="w-24 text-xs">
+                          {quotaDetail.featureLabels[f]}
+                        </Label>
+                        <Input
+                          type="number"
+                          min={0}
+                          className="h-8 w-24"
+                          disabled={quotaDetailBusy}
+                          defaultValue={
+                            quotaDetail.quota.featureQuota[
+                              f as keyof typeof quotaDetail.quota.featureQuota
+                            ]
+                          }
+                          onBlur={(e) =>
+                            void handleAdjustQuota(quotaDetail.username, {
+                              featureQuota: {
+                                [f]: Number(e.target.value),
+                              } as Partial<FeatureCounts>,
+                            })
+                          }
+                        />
+                        <span className="text-xs text-muted-foreground">
+                          已用{" "}
+                          {
+                            quotaDetail.quota.featureUsed[
+                              f as keyof typeof quotaDetail.quota.featureUsed
+                            ]
+                          }
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <section>
+                  <h3 className="mb-2 text-sm font-medium">
+                    该用户创建的邀请码（{quotaDetail.invites.length}）
+                  </h3>
+                  {quotaDetail.invites.length === 0 ? (
+                    <p className="rounded-md border px-3 py-4 text-sm text-muted-foreground">
+                      无
+                    </p>
+                  ) : (
+                    <div className="divide-y rounded-md border">
+                      {quotaDetail.invites.map((inv) => {
+                        const extra = quotaDetail.quotaFeatures.filter(
+                          (f) => inv.permissions[f as keyof Permissions]
+                        )
+                        const used = inv.usedCount >= inv.maxUses
+                        return (
+                          <div
+                            key={inv.id}
+                            className="flex flex-wrap items-center gap-2 px-3 py-2 text-xs"
+                          >
+                            <span className="font-mono">{inv.code}</span>
+                            <Badge variant="outline">域名 · 邮箱 · 名片</Badge>
+                            {extra.map((f) => (
+                              <Badge key={f} variant="secondary">
+                                {quotaDetail.featureLabels[f]}
+                              </Badge>
+                            ))}
+                            <Badge variant={used ? "destructive" : "success"}>
+                              {used ? "已使用" : "未使用"}
+                            </Badge>
+                            <span className="ml-auto text-muted-foreground">
+                              {fmtTime(inv.createdAt)}
+                            </span>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                              title="删除（未使用的会退还额度）"
+                              onClick={async () => {
+                                try {
+                                  await adminApi.deleteInvite(inv.id)
+                                  toast.success("已删除")
+                                  void openQuotaDetail(quotaDetail.username)
+                                  void loadInviteQuotas()
+                                } catch (err) {
+                                  toast.error(
+                                    err instanceof HttpError
+                                      ? err.message
+                                      : "删除失败"
+                                  )
+                                }
+                              }}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </section>
+              </div>
+            </>
+          )}
         </DialogContent>
       </Dialog>
 

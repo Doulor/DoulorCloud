@@ -181,6 +181,7 @@ interface ProfileRow {
   contacts: string
   subdomain_id: string | null
   fqdn: string | null
+  view_count: number
   created_at: string
   updated_at: string
 }
@@ -743,6 +744,10 @@ export interface PublicProfile {
   musicTitle: string | null
   musicAutoplay: boolean
   contacts: Contact[]
+  /** 用户注册时间（ISO）—— 名片页小字展示 */
+  registeredAt: string | null
+  /** 名片被访问的累计次数 */
+  viewCount: number
 }
 
 /**
@@ -757,12 +762,12 @@ export async function loadPublicProfile(
   const value = key.fqdn ?? key.slug ?? ""
 
   const row = await env.DB.prepare(
-    `SELECT p.*, u.username, u.status AS user_status
+    `SELECT p.*, u.username, u.status AS user_status, u.created_at AS user_created_at
        FROM profiles p JOIN users u ON u.id = p.user_id
       WHERE ${where} LIMIT 1`
   )
     .bind(value)
-    .first<ProfileRow & { username: string; user_status: string }>()
+    .first<ProfileRow & { username: string; user_status: string; user_created_at: string }>()
 
   if (!row) return null
   if (row.published !== 1 || row.user_status !== "active") return null
@@ -791,6 +796,24 @@ export async function loadPublicProfile(
     musicTitle: row.music_title,
     musicAutoplay: row.music_autoplay === 1,
     contacts: parseContacts(row.contacts).filter((c) => c.visible !== false),
+    registeredAt: row.user_created_at ?? null,
+    viewCount: row.view_count ?? 0,
+  }
+}
+
+/**
+ * 名片被访问时累计访客量（公开页每次渲染 +1）。
+ * 失败静默——计数不应影响名片正常展示。
+ */
+export async function bumpProfileView(env: Env, slug: string): Promise<void> {
+  try {
+    await env.DB.prepare(
+      "UPDATE profiles SET view_count = view_count + 1 WHERE slug = ? COLLATE NOCASE"
+    )
+      .bind(slug)
+      .run()
+  } catch {
+    // 忽略：计数失败不影响页面
   }
 }
 

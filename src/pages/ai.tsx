@@ -55,7 +55,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { newapiApi, HttpError } from "@/services/api"
-import type { NewApiKey, NewApiPreflight, NewApiStatus } from "@/types"
+import type { NewApiHealth, NewApiKey, NewApiPreflight, NewApiStatus } from "@/types"
 
 function fmtTime(iso: string | null) {
   if (!iso) return "—"
@@ -65,6 +65,29 @@ function fmtTime(iso: string | null) {
     hour: "2-digit",
     minute: "2-digit",
   })
+}
+
+/** 中转站在线/离线徽章，含延迟与版本 */
+function HealthBadge({ health }: { health?: NewApiHealth }) {
+  if (!health) return null
+  return (
+    <div className="flex items-center gap-2">
+      <Badge variant={health.online ? "success" : "destructive"} className="gap-1.5">
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${
+            health.online ? "bg-emerald-500" : "bg-destructive"
+          }`}
+        />
+        {health.online ? "在线" : "离线"}
+      </Badge>
+      {health.online && (
+        <span className="text-xs text-muted-foreground">
+          {health.latencyMs}ms
+          {health.version ? ` · v${health.version}` : ""}
+        </span>
+      )}
+    </div>
+  )
 }
 
 export default function AiPage() {
@@ -318,7 +341,11 @@ export default function AiPage() {
   if (!status.account) {
     return (
       <div>
-        <PageHeader title="AI 中转站" description="统一的大模型 API 入口" />
+        <PageHeader
+          title="AI 中转站"
+          description="统一的大模型 API 入口"
+          actions={<HealthBadge health={status.health} />}
+        />
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -376,6 +403,7 @@ export default function AiPage() {
       <PageHeader
         title="AI 中转站"
         description={`账号 ${account.username} · ${account.email}`}
+        actions={<HealthBadge health={status.health} />}
       />
 
       <div className="space-y-6">

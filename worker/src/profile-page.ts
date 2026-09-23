@@ -220,6 +220,7 @@ a{color:inherit;text-decoration:none}
 .link svg{width:18px;height:18px;flex-shrink:0}
 .link .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .footer{margin-top:32px;text-align:center;font-size:11px;opacity:.4}
+.meta{margin-top:20px;text-align:center;font-size:11px;opacity:.4;letter-spacing:.02em}
 .bg{position:fixed;inset:0;z-index:0;background-size:cover;background-position:center}
 .bg::after{content:"";position:absolute;inset:0;background:var(--bg-overlay)}
 .player{display:flex;align-items:center;gap:12px;margin-top:22px;padding:10px 14px;border-radius:var(--player-radius);font-size:12px;background:var(--player-bg);border:var(--player-border)}
@@ -358,6 +359,7 @@ body.layout-plain .avatar,body.layout-plain .avatar-fallback{margin:0;width:64px
 body.layout-plain .name,body.layout-plain .bio{text-align:left}
 body.layout-plain .name{font-size:26px}
 body.layout-plain .links{margin-top:24px}
+body.layout-plain .meta{text-align:left}
 body.layout-plain .link{border:0;border-bottom:1px solid rgba(128,128,128,.15);border-radius:0;padding:10px 2px}
 body.layout-plain .link:hover{transform:none;background:transparent;border-bottom-color:var(--accent)}
 body.layout-plain .player{margin-top:24px}
@@ -678,6 +680,19 @@ export function renderProfileHtml(p: PublicProfile): string {
   const fxLayer = effectsHtml(fx)
   const introLayer = introHtml(intro)
 
+  // 注册时间 + 访客量（小字，放在页脚）
+  const regDate = p.registeredAt
+    ? new Date(p.registeredAt).toLocaleDateString("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      })
+    : null
+  const metaParts: string[] = []
+  if (regDate) metaParts.push(`加入于 ${regDate}`)
+  metaParts.push(`${p.viewCount} 次访问`)
+  const metaLine = `<p class="meta">${esc(metaParts.join(" · "))}</p>`
+
   // 交互式 intro：初始 .wrap 无 visible（JS 点击后加）；非交互式/none：CSS animation 或直接显示
   const wrapVisibleClass = intro === "enter" || intro === "portal" ? "" : " visible"
 
@@ -715,6 +730,7 @@ ${introLayer}
     ${p.bio ? `<p class="bio">${esc(p.bio)}</p>` : ""}
     ${links ? `<nav class="links">${links}</nav>` : ""}
     ${player}
+    ${metaLine}
   </div>
 </div>
 <script>${js}</script>

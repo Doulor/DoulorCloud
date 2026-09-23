@@ -14,6 +14,14 @@ import { sendMail, renderMail } from "../mailer"
 import { cfListDestinations } from "../cloudflare"
 import { normalizePermissions, parsePermissions } from "../permissions"
 import { listReservedSubdomains } from "../reserved-names"
+import { getSettingNumber } from "../settings"
+import {
+  QUOTA_FEATURES,
+  QUOTA_FEATURE_LABELS,
+  parseCounts,
+  refundQuotaForInvite,
+  quotaFeaturesOf,
+} from "../quotas"
 import { purgeUserStorage, recalculateUsage } from "./storage"
 
 /**
@@ -33,6 +41,12 @@ interface AdminUserRow {
   permissions: string | null
   /** 用户级子域名配额覆盖；NULL = 用全局默认 */
   max_subdomains?: number | null
+  /** 邀请码额度（捐献累计获得 / 已消耗） */
+  invite_quota_bonus?: number | null
+  invite_quota_used?: number | null
+  /** 模块转授额度与消耗（JSON） */
+  feature_quota?: string | null
+  feature_quota_used?: string | null
   created_at: string
   updated_at: string
 }
@@ -768,4 +782,258 @@ export async function removeReserved(
   )
 
   return json({ reserved: await listReservedSubdomains(env.DB) })
+}
+
+// ---- 用户邀请码额度 ----
+
+interface InviteQuotaRow {
+  id: string
+  code: string
+  created_by: string | null
+  max_uses: number
+  used_count: number
+  expires_at: string | null
+  permissions: string | null
+  created_at: string
+}
+
+function toAdminInvite(row: InviteQuotaRow) {
+  return {
+    id: row.id,
+    code: row.code,
+    maxUses: row.max_uses,
+    usedCount: row.used_count,
+    expiresAt: row.expires_at,
+    permissions: parsePermissions(row.permissions),
+    createdAt: row.created_at,
+  }
+}
+
+/**
+ * GET /api/admin/invite-quotas —— 所有用户的额度概况
+ * 列表页只需额度与码数量，不含码内容（点进详情才拉）。
+ */
+export async function listInviteQuotas(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  await requireAdmin(env, request)
+
+  const rows = await env.DB.prepare(
+    `SELECT u.id, u.username, u.invite_quota_bonus, u.invite_quota_used,
+            u.feature_quota, u.feature_quota_used,
+            (SELECT COUNT(*) FROM invite_codes ic WHERE ic.created_by = u.id) AS invite_count
+       FROM users u
+      ORDER BY u.created_at DESC`
+  ).all<{
+    id: string
+    username: string
+    invite_quota_bonus: number | null
+    invite_quota_used: number | null
+    feature_quota: string | null
+    feature_quota_used: string | null
+    invite_count: number
+  }>()
+
+  const base = await getSettingNumber(env, "invite_quota_base")
+
+  const users = []
+  for (const r of rows.results ?? []) {
+    const bonus = Math.max(0, r.invite_quota_bonus ?? 0)
+    const used = Math.max(0, r.invite_quota_used ?? 0)
+    const total = base + bonus
+    const fq = parseCounts(r.feature_quota)
+    const fu = parseCounts(r.feature_quota_used)
+    const remaining: Record<string, number> = {}
+    for (const f of QUOTA_FEATURES) remaining[f] = Math.max(0, fq[f] - fu[f])
+
+    users.push({
+      id: r.id,
+      username: r.username,
+      inviteBase: base,
+      inviteBonus: bonus,
+      inviteTotal: total,
+      inviteUsed: used,
+      inviteRemaining: Math.max(0, total - used),
+      featureQuota: fq,
+      featureUsed: fu,
+      featureRemaining: remaining,
+      inviteCount: r.invite_count,
+    })
+  }
+
+  return json({
+    users,
+    featureLabels: QUOTA_FEATURE_LABELS,
+    quotaFeatures: QUOTA_FEATURES,
+    baseQuota: base,
+  })
+}
+
+/**
+ * GET /api/admin/users/:username/invite-quota —— 单个用户的额度 + 其创建的邀请码
+ */
+export async function getUserInviteQuota(
+  env: Env,
+  request: Request,
+  username: string
+): Promise<Response> {
+  await requireAdmin(env, request)
+  const user = await targetUser(env, username)
+
+  const rows = await env.DB.prepare(
+    "SELECT * FROM invite_codes WHERE created_by = ? ORDER BY created_at DESC"
+  )
+    .bind(user.id)
+    .all<InviteQuotaRow>()
+
+  const bonus = Math.max(0, user.invite_quota_bonus ?? 0)
+  const used = Math.max(0, user.invite_quota_used ?? 0)
+  const base = await getSettingNumber(env, "invite_quota_base")
+  const total = base + bonus
+  const fq = parseCounts(user.feature_quota)
+  const fu = parseCounts(user.feature_quota_used)
+  const remaining: Record<string, number> = {}
+  for (const f of QUOTA_FEATURES) remaining[f] = Math.max(0, fq[f] - fu[f])
+
+  return json({
+    username: user.username,
+    quota: {
+      inviteBase: base,
+      inviteBonus: bonus,
+      inviteTotal: total,
+      inviteUsed: used,
+      inviteRemaining: Math.max(0, total - used),
+      featureQuota: fq,
+      featureUsed: fu,
+      featureRemaining: remaining,
+    },
+    invites: (rows.results ?? []).map(toAdminInvite),
+    featureLabels: QUOTA_FEATURE_LABELS,
+    quotaFeatures: QUOTA_FEATURES,
+  })
+}
+
+/**
+ * PUT /api/admin/users/:username/invite-quota —— 调整额度
+ * body: { inviteBonus?, inviteUsed?, featureQuota?, featureUsed? }
+ * 传整数即设为该值（用于补偿、纠错、手动发放）。省略则不改。
+ */
+export async function updateUserInviteQuota(
+  env: Env,
+  request: Request,
+  username: string
+): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+  const body = (await request.json().catch(() => ({}))) as {
+    inviteBonus?: unknown
+    inviteUsed?: unknown
+    featureQuota?: unknown
+    featureUsed?: unknown
+  }
+
+  const user = await targetUser(env, username)
+  const sets: string[] = []
+  const binds: unknown[] = []
+
+  const asCount = (v: unknown, label: string): number => {
+    const n = Math.trunc(Number(v))
+    if (!Number.isFinite(n) || n < 0 || n > 10000) {
+      throw new ApiError(400, `${label}需为 0-10000 的整数`, "INVALID_INPUT")
+    }
+    return n
+  }
+
+  if (body.inviteBonus !== undefined) {
+    sets.push("invite_quota_bonus = ?")
+    binds.push(asCount(body.inviteBonus, "邀请码额度"))
+  }
+  if (body.inviteUsed !== undefined) {
+    sets.push("invite_quota_used = ?")
+    binds.push(asCount(body.inviteUsed, "已用邀请码额度"))
+  }
+  // 模块额度：只覆盖传入的键，其余保留原值
+  if (body.featureQuota !== undefined) {
+    const cur = parseCounts(user.feature_quota)
+    for (const f of QUOTA_FEATURES) {
+      const raw = (body.featureQuota as Record<string, unknown>)[f]
+      if (raw !== undefined) cur[f] = asCount(raw, `${QUOTA_FEATURE_LABELS[f]}额度`)
+    }
+    sets.push("feature_quota = ?")
+    binds.push(JSON.stringify(cur))
+  }
+  if (body.featureUsed !== undefined) {
+    const cur = parseCounts(user.feature_quota_used)
+    for (const f of QUOTA_FEATURES) {
+      const raw = (body.featureUsed as Record<string, unknown>)[f]
+      if (raw !== undefined) cur[f] = asCount(raw, `已用${QUOTA_FEATURE_LABELS[f]}额度`)
+    }
+    sets.push("feature_quota_used = ?")
+    binds.push(JSON.stringify(cur))
+  }
+
+  if (sets.length === 0) {
+    throw new ApiError(400, "没有需要修改的字段", "INVALID_INPUT")
+  }
+
+  sets.push("updated_at = ?")
+  binds.push(new Date().toISOString())
+  binds.push(user.id)
+
+  await env.DB.prepare(
+    `UPDATE users SET ${sets.join(", ")} WHERE id = ?`
+  )
+    .bind(...binds)
+    .run()
+
+  await recordAudit(
+    env,
+    admin.id,
+    "admin.invite_quota.update",
+    `调整 ${username} 的邀请码额度`,
+    request.headers.get("CF-Connecting-IP")
+  )
+
+  return getUserInviteQuota(env, request, username)
+}
+
+/**
+ * DELETE /api/admin/invites/:id 已存在（管理员可删任意邀请码）。
+ * 这里额外提供「带额度退还」的删除：管理员删除用户创建的码时，
+ * 若该码未被使用过，把额度退还给创建者，避免用户白掉额度。
+ */
+export async function adminDeleteInviteWithRefund(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+
+  const row = await env.DB.prepare("SELECT * FROM invite_codes WHERE id = ?")
+    .bind(id)
+    .first<InviteQuotaRow | null>()
+  if (!row) {
+    throw new ApiError(404, "邀请码不存在", "NOT_FOUND")
+  }
+
+  // 只有「用户自助创建且未使用」的码才退还额度（管理员自建的不涉及额度）
+  if (row.created_by && row.used_count === 0) {
+    await refundQuotaForInvite(
+      env,
+      row.created_by,
+      quotaFeaturesOf(parsePermissions(row.permissions))
+    )
+  }
+
+  await env.DB.prepare("DELETE FROM invite_codes WHERE id = ?").bind(id).run()
+
+  await recordAudit(
+    env,
+    admin.id,
+    "admin.invite.delete",
+    `删除邀请码 ${row.code}`,
+    request.headers.get("CF-Connecting-IP")
+  )
+
+  return new Response(null, { status: 204 })
 }

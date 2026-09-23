@@ -12,6 +12,12 @@ import {
   type Feature,
 } from "../permissions"
 import { sendMail, renderMail } from "../mailer"
+import {
+  grantQuotaForDonation,
+  INVITE_BONUS_PER_DONATION,
+  QUOTA_FEATURE_LABELS,
+  type QuotaFeature,
+} from "../quotas"
 import type { Env } from "../env"
 
 interface DonationRow {
@@ -269,6 +275,7 @@ export async function reviewDonation(env: Env, request: Request): Promise<Respon
   const note = (body.note ?? "").trim().slice(0, 500) || null
   const now = new Date().toISOString()
   const feature = DONATION_TYPES[app.type] as Feature
+  const quotaFeature = feature as QuotaFeature
 
   if (approve) {
     // 解锁权限：把对应 feature 置为 true
@@ -284,6 +291,11 @@ export async function reviewDonation(env: Env, request: Request): Promise<Respon
         "UPDATE users SET permissions = ?, updated_at = ? WHERE id = ?"
       ).bind(permsStr, now, app.user_id),
     ])
+
+    // 发放邀请码额度：+2 邀请码额度，且 +1 对应模块的可转授额度。
+    // 放在 permissions 更新之后，失败会让整次审核报错，避免「权限给了但额度没给」
+    // 的静默不一致（管理员可重试）。
+    await grantQuotaForDonation(env, app.user_id, feature)
   } else {
     await env.DB.prepare(
       `UPDATE donations SET status = 'rejected', review_note = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?`
@@ -307,8 +319,11 @@ export async function reviewDonation(env: Env, request: Request): Promise<Respon
       ? [
           `捐献类型：${FEATURE_LABELS[feature]}`,
           "你的捐献申请已通过审核，对应功能权限已解锁。",
+          `同时获得 ${INVITE_BONUS_PER_DONATION} 个邀请码创建额度，` +
+            `以及 1 个「${QUOTA_FEATURE_LABELS[quotaFeature] ?? FEATURE_LABELS[feature]}」权限额度` +
+            "（创建邀请码时可授予该权限）。",
           note ? `管理员备注：${note}` : "",
-          "请到 Doulor Cloud 对应功能页面查看。",
+          "请到 Doulor Cloud 的「捐献」页面查看额度并创建邀请码。",
         ]
       : [
           `捐献类型：${FEATURE_LABELS[feature]}`,
