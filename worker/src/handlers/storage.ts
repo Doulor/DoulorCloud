@@ -864,6 +864,29 @@ async function removeWorkerRoute(env: Env, fqdn: string): Promise<void> {
  * 把 R2 对象流式返回给客户端。
  * 公开直链（public=true）不鉴权，但要求账户处于启用状态 —— 关闭网盘后直链即失效。
  */
+/**
+ * 允许「内联展示」的内容类型白名单。
+ *
+ * 为什么要收口（2026-09-23 安全审计，P1）：
+ *   直链是**任何用户都能往自己前缀里写文件**的公开出口，而 `proxyObject` 原先把
+ *   R2 里存的 `content-type` 原样透传给浏览器。于是攻击者只要上传一个
+ *   `evil.html`（`Content-Type: text/html`，预签名 PUT 时 Content-Type 不参与签名，
+ *   完全可控）并分享 `https://cloud.doulor.cn/dl/<他>/evil.html`，脚本就会在
+ *   **应用主源**上执行：以受害者身份调用 /api/*（同源自动带 cookie），
+ *   读取其全部邮件、改 DNS、删子域名……等同于账户接管。
+ *   `nosniff` 拦不住 —— 服务端已经明确声明了 text/html。
+ *
+ * 做法与本仓库 `handlers/tempbox.ts` 的下载接口一致：只有确定安全的类型才 inline，
+ * 其余一律当二进制附件下发。
+ */
+const INLINE_PREFIXES = ["image/", "video/", "audio/"]
+const INLINE_EXACT = ["text/plain", "application/pdf"]
+
+function isInlineSafe(contentType: string): boolean {
+  const t = contentType.split(";")[0].trim().toLowerCase()
+  return INLINE_EXACT.includes(t) || INLINE_PREFIXES.some((p) => t.startsWith(p))
+}
+
 async function proxyObject(
   env: Env,
   key: string,
@@ -908,6 +931,18 @@ async function proxyObject(
 
   // 允许站点内嵌引用（图片/视频），否则浏览器会因同源策略无法展示
   headers.set("Access-Control-Allow-Origin", "*")
+
+  // 类型收口：非白名单类型一律降级为二进制附件，避免用户上传的 HTML/SVG
+  // 在本站主源上被执行（存储型 XSS）。直链面向任意外部访客，必须假定内容不可信。
+  const upstreamType = headers.get("content-type") ?? "application/octet-stream"
+  if (!isInlineSafe(upstreamType)) {
+    const filename = key.split("/").pop() ?? "file"
+    headers.set("Content-Type", "application/octet-stream")
+    headers.set(
+      "Content-Disposition",
+      `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`
+    )
+  }
 
   return new Response(upstream.body, { status: upstream.status, headers })
 }

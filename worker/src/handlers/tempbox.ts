@@ -1,13 +1,15 @@
 /**
  * 临时分享箱（tempbox）。
  *
- * 与网盘的区别：内容临时、匿名可看、4 位接收码解锁。
+ * 与网盘的区别：内容临时、匿名可看、接收码解锁。
  *   - 存储：R2 桶 `network` 下的 `temporary/<接收码>/<文件名>`（与网盘/名片目录隔离）
  *   - 元信息：D1 `tempbox_batches`（code、过期时间、创建者、文件数/字节）
  *   - 过期：采用「惰性清理」——访问/下载时若发现已过期，删除该批次 R2 对象并返回 404
+ *     （另有每小时一次的定时任务主动清理，见 maintenance.ts）
+ *   - 接收码：8 位字母数字（`crypto` 随机）；旧的 4 位数字码仍兼容
  *
  * 权限：
- *   - 查看 / 下载：**无需登录**（访客输入接收码即可解锁）
+ *   - 查看 / 下载：**无需登录**（访客输入接收码即可解锁），但按 IP 限流
  *   - 上传 / 提交：默认需登录（`tempbox_upload_requires_login`，管理员可关闭）
  *   - 删除：仅创建者本人或管理员
  *
@@ -16,6 +18,7 @@
 import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
 import { requireUser, type UserRow } from "../auth"
+import { guardRateLimit, clientIp } from "../ratelimit"
 import { getObject, headObject, isStorageConfigured, listObjects, presign, deleteObject, deletePrefix, getPlatformBucketId, putObject, supportsPresign } from "../r2"
 import { sanitizeFilename } from "./storage"
 import { getSettings, getSettingNumber } from "../settings"
@@ -77,9 +80,32 @@ async function assertBatchAlive(env: Env, code: string): Promise<TempboxBatchRow
 }
 
 /** 生成唯一 4 位数字接收码 */
+/**
+ * 接收码字母表：去掉容易看错的 0/O、1/I（32 个字符，正好整除 256，
+ * 用 `byte % 32` 取字符不会引入取模偏置）。
+ */
+const CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+const CODE_LENGTH = 8
+/** 公开读取接口限流：同一 IP 10 分钟 60 次（约合 150 小时才能试完 9000 个旧码） */
+const CODE_LOOKUP_LIMIT = 60
+const CODE_LOOKUP_WINDOW_SECONDS = 600
+
+/**
+ * 生成接收码。
+ *
+ * ⚠️ 2026-09-23 安全审计（P1）：原实现是 `String(Math.floor(1000 + Math.random() * 9000))`
+ * —— **只有 9000 种可能，且用的是非密码学的 Math.random()**。而查看/下载接口无需登录、
+ * 当时也没有任何限流，所以把 9000 个码跑一遍就能拿走所有人正在互传的文件与纯文本
+ * （用户会自然地把它当密码用）。现改为 `crypto` 随机 + 8 位字母数字（约 1.1 万亿种组合）。
+ *
+ * 兼容性：旧的 4 位数字码**仍然可以正常解锁**（查库是字符串匹配，与长度无关），
+ * 存量批次会在到期后被惰性清理掉，不需要数据迁移。
+ */
 async function generateCode(env: Env): Promise<string> {
-  for (let i = 0; i < 50; i++) {
-    const code = String(Math.floor(1000 + Math.random() * 9000))
+  for (let i = 0; i < 20; i++) {
+    const bytes = crypto.getRandomValues(new Uint8Array(CODE_LENGTH))
+    let code = ""
+    for (const b of bytes) code += CODE_ALPHABET[b % CODE_ALPHABET.length]
     const exists = await env.DB.prepare(
       "SELECT id FROM tempbox_batches WHERE code = ? LIMIT 1"
     )
@@ -298,9 +324,18 @@ export async function commitTempboxUpload(
 /** GET /api/tempbox/:code —— 批次信息 + 文件列表（纯文本批次还带 textContent） */
 export async function getTempbox(
   env: Env,
-  _request: Request,
+  request: Request,
   code: string
 ): Promise<Response> {
+  // 限流：这是"拿接收码猜内容"的主要入口。fail-open（表未建时放行）。
+  await guardRateLimit(
+    env,
+    `tempbox:lookup:ip:${clientIp(request)}`,
+    CODE_LOOKUP_LIMIT,
+    CODE_LOOKUP_WINDOW_SECONDS,
+    "接收码尝试过于频繁"
+  )
+
   const batch = await assertBatchAlive(env, code)
 
   // 纯文本批次：不需要 R2
@@ -352,6 +387,15 @@ export async function downloadTempboxFile(
   code: string,
   filename: string
 ): Promise<Response> {
+  // 与 getTempbox 共用同一个限流桶：否则可以绕开列表接口直接猜「码 + 文件名」下载
+  await guardRateLimit(
+    env,
+    `tempbox:lookup:ip:${clientIp(request)}`,
+    CODE_LOOKUP_LIMIT,
+    CODE_LOOKUP_WINDOW_SECONDS,
+    "接收码尝试过于频繁"
+  )
+
   await assertBatchAlive(env, code)
   if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "存储未配置", "R2_NOT_CONFIGURED")

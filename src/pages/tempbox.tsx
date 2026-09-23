@@ -175,9 +175,10 @@ export default function TempboxPage() {
   }, [load])
 
   const handleUnlock = async () => {
-    const code = codeInput.trim()
-    if (!/^\d{4}$/.test(code)) {
-      toast.error("请输入 4 位数字接收码")
+    const code = codeInput.trim().toUpperCase()
+    // 新码是 8 位字母数字；旧的 4 位数字码仍然兼容（服务端按字符串匹配）
+    if (!/^[A-Z0-9]{4,12}$/.test(code)) {
+      toast.error("请输入接收码")
       return
     }
     setBusy(true)
@@ -340,7 +341,7 @@ export default function TempboxPage() {
     <div>
       <PageHeader
         title="临时分享箱"
-        description="上传文件生成 4 位接收码，对方输入接收码即可查看/下载；到点自动清除。"
+        description="上传文件生成接收码（8 位字母数字），对方输入接收码即可查看/下载；到点自动清除。"
       />
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -356,13 +357,11 @@ export default function TempboxPage() {
           <CardContent className="space-y-4">
             <div className="flex gap-2">
               <Input
-                placeholder="4 位数字接收码"
-                maxLength={4}
-                inputMode="numeric"
-                pattern="[0-9]*"
-                className="w-40 font-mono text-lg tracking-widest"
+                placeholder="输入接收码"
+                maxLength={12}
+                className="w-48 font-mono text-lg tracking-widest uppercase"
                 value={codeInput}
-                onChange={(e) => setCodeInput(e.target.value.replace(/\D/g, ""))}
+                onChange={(e) => setCodeInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ""))}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") void handleUnlock()
                 }}

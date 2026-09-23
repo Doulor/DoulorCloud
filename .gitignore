@@ -12,3 +12,6 @@ dist-ssr
 !.dev.vars.example
 !.env.example
 .playwright-cli/
+
+# 工作区本地数据（记忆文件、名片走查截图/Demo、浏览器临时目录等）
+.workbuddy/
