@@ -12,8 +12,12 @@
     "routes:fix": "node scripts/check-routes.mjs --fix"
   },
   "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.2.3",
     "@cloudflare/workers-types": "^5.20260921.0",
+    "@vitest/runner": "4.1.11",
+    "@vitest/snapshot": "4.1.11",
     "typescript": "^7.0.2",
+    "vitest": "4.1.11",
     "wrangler": "^4.0.0"
   },
   "dependencies": {
