@@ -446,6 +446,9 @@ async function route(
   if (routePath === "/community/posts" && method === "GET") {
     return communityHandlers.listPosts(env, request)
   }
+  if (routePath === "/community/stats" && method === "GET") {
+    return communityHandlers.communityStats(env, request)
+  }
   // commentsMatch 必须在 postMatch 之前，否则 /posts/<id>/comments 会被
   // postMatch 的 ^/community/posts/([^/]+)$ 截获
   const communityCommentsMatch = routePath.match(/^\/community\/posts\/([^/]+)\/comments$/)

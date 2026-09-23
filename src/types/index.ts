@@ -845,6 +845,19 @@ export interface Notification {
   created_at: string
 }
 
+export interface CommunityActiveUser {
+  username: string
+  nickname: string | null
+  hasAvatar: boolean
+  posts: number
+}
+
+export interface CommunityStats {
+  todayCount: number
+  totalCount: number
+  activeUsers: CommunityActiveUser[]
+}
+
 export interface AdminCommunityPost {
   id: string
   body: string

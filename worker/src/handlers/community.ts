@@ -339,3 +339,43 @@ export async function uploadPostImage(env: Env, request: Request, id: string): P
   await putObject(env, key, buf, ct, bucketId)
   return json({ key })
 }
+
+/**
+ * GET /api/community/stats —— 社区动态概览（匿名可读）。
+ * 右侧动态栏用：今日新帖数、本周活跃用户（发帖最多 top 5）、帖子总数。
+ * 全部走冗余字段/索引，避免 COUNT(*) 全表扫描。
+ */
+export async function communityStats(env: Env, _request: Request): Promise<Response> {
+  const now = new Date()
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString()
+
+  // 今日新帖数：扫 created_at 索引，deleted_at IS NULL
+  const today = await env.DB.prepare(
+    "SELECT COUNT(*) c FROM posts WHERE created_at >= ? AND deleted_at IS NULL"
+  ).bind(todayStart).first<{ c: number }>()
+
+  // 帖子总数
+  const total = await env.DB.prepare(
+    "SELECT COUNT(*) c FROM posts WHERE deleted_at IS NULL"
+  ).first<{ c: number }>()
+
+  // 本周活跃用户：发帖最多 top 5（带头像/昵称）
+  const active = await env.DB.prepare(
+    `SELECT u.username, u.nickname, u.avatar_key, COUNT(p.id) AS posts
+       FROM posts p JOIN users u ON u.id = p.user_id
+      WHERE p.created_at >= ? AND p.deleted_at IS NULL
+      GROUP BY u.id ORDER BY posts DESC LIMIT 5`
+  ).bind(weekAgo).all<{ username: string; nickname: string | null; avatar_key: string | null; posts: number }>()
+
+  return json({
+    todayCount: today?.c ?? 0,
+    totalCount: total?.c ?? 0,
+    activeUsers: (active.results ?? []).map((r) => ({
+      username: r.username,
+      nickname: r.nickname ?? null,
+      hasAvatar: Boolean(r.avatar_key),
+      posts: r.posts,
+    })),
+  })
+}

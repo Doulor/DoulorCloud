@@ -48,6 +48,7 @@ import {
   type Post,
   type CommentNode,
   type Notification,
+  type CommunityStats,
   type AdminCommunityPost,
 } from "@/types"
 
@@ -971,6 +972,7 @@ export const communityApi = {
     request<{ posts: Post[]; nextCursor: string | null }>(
       `/community/posts${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`
     ),
+  getStats: () => request<CommunityStats>("/community/stats"),
   getPost: (id: string) => request<{ post: Post }>(`/community/posts/${encodeURIComponent(id)}`),
   getComments: (id: string) =>
     request<{ comments: CommentNode[] }>(`/community/posts/${encodeURIComponent(id)}/comments`),
