@@ -589,6 +589,17 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
       continue
     }
 
+    // reserved_nicknames：逗号分隔的昵称保留词，允许清空（空串写入）
+    if (key === "reserved_nicknames") {
+      const parts = String(raw)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => s.slice(0, 16))
+      values[key] = parts.join(",").slice(0, 500)
+      continue
+    }
+
     values[key] = str.slice(0, 100)
   }
 

@@ -22,6 +22,7 @@ import {
   Heart,
   MessagesSquare,
   RotateCcw,
+  X,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -178,6 +179,10 @@ export default function AdminPage() {
   const [reservedName, setReservedName] = React.useState("")
   const [reservedNote, setReservedNote] = React.useState("")
   const [reservedBusy, setReservedBusy] = React.useState(false)
+  // 昵称保留词（与保留域名同页管理）
+  const [nickReserved, setNickReserved] = React.useState<string[]>([])
+  const [nickReservedInput, setNickReservedInput] = React.useState("")
+  const [nickReservedBusy, setNickReservedBusy] = React.useState(false)
 
   // 公告 / 网站动态
   const [announcements, setAnnouncements] = React.useState<Announcement[]>([])
@@ -753,10 +758,19 @@ export default function AdminPage() {
   const loadReserved = React.useCallback(async () => {
     setReservedLoading(true)
     try {
-      const res = await adminApi.listReserved()
+      const [res, s] = await Promise.all([
+        adminApi.listReserved(),
+        adminApi.getSettings(),
+      ])
       setReserved(res.reserved)
+      setNickReserved(
+        (s.settings.reserved_nicknames ?? "")
+          .split(",")
+          .map((x: string) => x.trim())
+          .filter(Boolean)
+      )
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载保留域名失败")
+      toast.error(err instanceof HttpError ? err.message : "加载保留名失败")
     } finally {
       setReservedLoading(false)
     }
@@ -789,6 +803,33 @@ export default function AdminPage() {
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "移除失败")
     }
+  }
+
+  // 昵称保留词：增/删都直接写 settings.reserved_nicknames
+  const saveNickReserved = async (next: string[]) => {
+    setNickReservedBusy(true)
+    try {
+      await adminApi.updateSettings({ reserved_nicknames: next.join(",") })
+      setNickReserved(next)
+      toast.success("保留词已更新")
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "保存失败")
+    } finally {
+      setNickReservedBusy(false)
+    }
+  }
+  const handleAddNickReserved = async () => {
+    const w = nickReservedInput.trim()
+    if (!w) return
+    if (nickReserved.some((x) => x.toLowerCase() === w.toLowerCase())) {
+      toast.error("该保留词已存在")
+      return
+    }
+    await saveNickReserved([...nickReserved, w])
+    setNickReservedInput("")
+  }
+  const handleRemoveNickReserved = (w: string) => {
+    void saveNickReserved(nickReserved.filter((x) => x !== w))
   }
 
   // ---- 公告 ----
@@ -1198,7 +1239,7 @@ export default function AdminPage() {
           </TabsTrigger>
           <TabsTrigger value="reserved">
             <ShieldBan className="mr-1.5 h-3.5 w-3.5" />
-            保留域名
+            保留名
           </TabsTrigger>
           <TabsTrigger value="donations">
             <Heart className="mr-1.5 h-3.5 w-3.5" />
@@ -1877,6 +1918,13 @@ export default function AdminPage() {
         </TabsContent>
 
         <TabsContent value="reserved">
+          {/* 保留域名 */}
+          <div className="mb-2 flex items-center gap-2">
+            <h3 className="text-sm font-medium">保留域名</h3>
+            <span className="text-xs text-muted-foreground">
+              命中后用户无法创建同名一级子域名
+            </span>
+          </div>
           <div className="mb-4 space-y-3">
             <p className="text-sm text-muted-foreground">
               名单中的名称不允许用户创建为一级子域名（即使位数合规）。
@@ -1953,6 +2001,68 @@ export default function AdminPage() {
               </Table>
             </div>
           )}
+
+          {/* 昵称保留词 */}
+          <div className="mt-8 mb-2 flex items-center gap-2">
+            <h3 className="text-sm font-medium">昵称保留词</h3>
+            <span className="text-xs text-muted-foreground">
+              命中后普通用户无法用该昵称（管理员自身不受限）
+            </span>
+          </div>
+          <div className="space-y-3">
+            <p className="text-xs text-muted-foreground">
+              用户设置昵称时，命中此列表的昵称会被拒绝。基础保留词（管理员、站长、admin 等）
+              硬编码无法删除。管理员自己设昵称时跳过此名单，但仍禁止含「doulor」。
+            </p>
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="space-y-1">
+                <Label htmlFor="rnick" className="text-xs">保留词</Label>
+                <Input
+                  id="rnick"
+                  placeholder="小助手"
+                  className="w-40"
+                  value={nickReservedInput}
+                  onChange={(e) => setNickReservedInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault()
+                      void handleAddNickReserved()
+                    }
+                  }}
+                />
+              </div>
+              <Button
+                onClick={() => void handleAddNickReserved()}
+                disabled={nickReservedBusy || !nickReservedInput.trim()}
+              >
+                {nickReservedBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                <Plus className="h-4 w-4" />
+                添加
+              </Button>
+            </div>
+            {nickReserved.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {nickReserved.map((w) => (
+                  <Badge
+                    key={w}
+                    variant="secondary"
+                    className="gap-1 py-1 pl-2.5 pr-1.5"
+                  >
+                    <span className="font-mono">{w}</span>
+                    <button
+                      onClick={() => handleRemoveNickReserved(w)}
+                      className="rounded-sm p-0.5 hover:bg-background hover:text-foreground"
+                      aria-label={`移除 ${w}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">还没有附加保留词。</p>
+            )}
+          </div>
         </TabsContent>
 
         <TabsContent value="donations">

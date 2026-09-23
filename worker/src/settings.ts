@@ -39,6 +39,13 @@ export const SETTING_DEFAULTS = {
    * 其余模块（ai/frp/proxy）默认受限，靠捐献获取额度。
    */
   invite_basic_features: "r2",
+  /**
+   * 昵称附加保留词（逗号分隔，大小写不敏感）。
+   * 与「保留域名」同在管理面板「保留名」标签管理。
+   * 基础保留词（管理员/站长/admin 等）硬编码在 identity.ts，无法删除。
+   * 管理员自己设昵称时跳过这些检查，不会被自己的名单挡住。
+   */
+  reserved_nicknames: "",
   /** 代理节点功能总开关 */
   proxy_enabled: "1",
   /** 临时分享箱总开关 */

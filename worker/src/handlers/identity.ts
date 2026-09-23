@@ -1,6 +1,13 @@
 import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
-import { validateNicknameFormat, AVATAR_TYPES, avatarKey } from "../identity"
+import {
+  validateNicknameFormat,
+  isReservedNickname,
+  parseReservedNicknames,
+  AVATAR_TYPES,
+  avatarKey,
+} from "../identity"
+import { getSetting } from "../settings"
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
 import type { Env } from "../env"
 
@@ -17,14 +24,22 @@ export async function updateNickname(env: Env, request: Request): Promise<Respon
     return json({ nickname: null })
   }
 
+  // 格式校验（字符集/长度）
   if (!validateNicknameFormat(nick)) {
-    throw new ApiError(400, "昵称为 2-16 位中文/英文/数字/下划线，且不能含保留词", "INVALID_NICKNAME")
+    throw new ApiError(400, "昵称为 2-16 位中文/英文/数字/下划线", "INVALID_NICKNAME")
   }
 
-  // 禁止与管理员 username 重名（防冒充管理员）
+  const isAdmin = user.role === "admin"
+  // 保留词：管理员自己设时跳过（防自我限制），但仍禁含 doulor
+  const extra = parseReservedNicknames(await getSetting(env, "reserved_nicknames"))
+  if (isReservedNickname(nick, extra, isAdmin)) {
+    throw new ApiError(400, "该昵称包含保留词，请换一个", "NICKNAME_RESERVED")
+  }
+
+  // 禁止与「其他」管理员 username 重名（防冒充管理员）；管理员自己除外
   const adminHit = await env.DB.prepare(
-    "SELECT 1 FROM users WHERE role = 'admin' AND username = ? COLLATE NOCASE LIMIT 1"
-  ).bind(nick).first()
+    "SELECT 1 FROM users WHERE role = 'admin' AND id != ? AND username = ? COLLATE NOCASE LIMIT 1"
+  ).bind(user.id, nick).first()
   if (adminHit) {
     throw new ApiError(409, "该昵称与管理员账号冲突，请换一个", "NICKNAME_CONFLICT")
   }
