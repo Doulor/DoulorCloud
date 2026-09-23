@@ -28,6 +28,17 @@ export const SETTING_DEFAULTS = {
   subdomain_quota_default: "5",
   /** 每个用户默认的邀请码创建额度（捐献会额外增加，见 quotas.ts） */
   invite_quota_base: "3",
+  /**
+   * 各模块在邀请码里是「基础权限」还是「受限模式」。逗号分隔的模块名列表。
+   *
+   *   基础权限：创建邀请码时可直接勾选，**不消耗模块额度**。
+   *   受限模式：需消耗对应模块额度（由捐献获批或管理员发放获得）。
+   *
+   * 默认只有 r2 是基础权限 —— R2 由站长自持，无人能「捐献」网盘资源，
+   * 若纳入额度体系则该额度永远为 0，形成死路。
+   * 其余模块（ai/frp/proxy）默认受限，靠捐献获取额度。
+   */
+  invite_basic_features: "r2",
   /** 代理节点功能总开关 */
   proxy_enabled: "1",
   /** 临时分享箱总开关 */
@@ -46,6 +57,8 @@ export const SETTING_DEFAULTS = {
   frp_core_url: "https://r2data.doulor.cn/Firef%20Frp.zip",
   /** 管理员接收「新申请」通知的邮箱；为空则不发通知 */
   frp_admin_notify_email: "",
+  /** 社区发帖最多图片数 */
+  community_post_max_images: "9",
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS

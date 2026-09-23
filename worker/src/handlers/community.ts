@@ -1,6 +1,8 @@
 import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
-import { decodeCursor, encodeCursor, groupComments, type RawComment } from "../community-logic"
+import { decodeCursor, encodeCursor, groupComments, canPostAgain, type RawComment } from "../community-logic"
+import { uuid } from "../crypto"
+import { getSettingNumber } from "../settings"
 import type { Env } from "../env"
 
 const DEFAULT_LIMIT = 20
@@ -128,4 +130,121 @@ export async function listComments(env: Env, _request: Request, id: string): Pro
     likeCount: c.like_count as number,
   }))
   return json({ comments: groupComments(comments as unknown as RawComment[]) })
+}
+
+const POST_COOLDOWN_SEC = 60
+const COMMENT_COOLDOWN_SEC = 10
+
+/** POST /api/community/posts */
+export async function createPost(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const body = (await request.json().catch(() => ({}))) as { body?: string; images?: string[] }
+  const text = (body.body ?? "").trim()
+  if (!text) throw new ApiError(400, "内容不能为空", "INVALID_INPUT")
+  if (text.length > 5000) throw new ApiError(400, "内容过长（上限 5000 字）", "TOO_LARGE")
+
+  const last = await env.DB.prepare("SELECT created_at FROM posts WHERE user_id=? ORDER BY created_at DESC LIMIT 1")
+    .bind(user.id).first<{ created_at: string }>()
+  if (!canPostAgain(last?.created_at ?? null, POST_COOLDOWN_SEC)) {
+    throw new ApiError(429, "发帖太频繁，请稍后再试", "RATE_LIMITED")
+  }
+
+  const maxImages = await getSettingNumber(env, "community_post_max_images")
+  const images = Array.isArray(body.images) ? body.images.slice(0, maxImages) : []
+  const id = uuid()
+  const now = new Date().toISOString()
+  await env.DB.prepare(
+    "INSERT INTO posts (id, user_id, channel, body, images, created_at) VALUES (?, ?, 'general', ?, ?, ?)"
+  ).bind(id, user.id, text, images.length ? JSON.stringify(images) : null, now).run()
+  return json({ post: { id } }, 201)
+}
+
+/** POST /api/community/posts/:id/like —— 幂等切换 */
+export async function toggleLike(env: Env, request: Request, id: string): Promise<Response> {
+  const user = await requireUser(env, request)
+  const existing = await env.DB.prepare(
+    "SELECT 1 FROM post_likes WHERE user_id=? AND target_type='post' AND target_id=?"
+  ).bind(user.id, id).first()
+  if (existing) {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM post_likes WHERE user_id=? AND target_type='post' AND target_id=?").bind(user.id, id),
+      env.DB.prepare("UPDATE posts SET like_count = MAX(0, like_count - 1) WHERE id=?").bind(id),
+    ])
+    return json({ liked: false, likeCount: await likeCount(env, id) })
+  }
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO post_likes (user_id, target_type, target_id, created_at) VALUES (?, 'post', ?, ?)").bind(user.id, id, new Date().toISOString()),
+    env.DB.prepare("UPDATE posts SET like_count = like_count + 1 WHERE id=?").bind(id),
+  ])
+  return json({ liked: true, likeCount: await likeCount(env, id) })
+}
+
+async function likeCount(env: Env, id: string): Promise<number> {
+  const r = await env.DB.prepare("SELECT like_count FROM posts WHERE id=?").bind(id).first<{ like_count: number }>()
+  return r?.like_count ?? 0
+}
+
+/** POST /api/community/posts/:id/share —— 转发计数 +1，不写新帖 */
+export async function sharePost(env: Env, request: Request, id: string): Promise<Response> {
+  await requireUser(env, request)
+  await env.DB.prepare("UPDATE posts SET share_count = share_count + 1 WHERE id=? AND deleted_at IS NULL").bind(id).run()
+  const r = await env.DB.prepare("SELECT share_count FROM posts WHERE id=?").bind(id).first<{share_count:number}>()
+  return json({ shareCount: r?.share_count ?? 0 })
+}
+
+/** POST /api/community/posts/:id/comments */
+export async function createComment(env: Env, request: Request, id: string): Promise<Response> {
+  const user = await requireUser(env, request)
+  const body = (await request.json().catch(() => ({}))) as { body?: string; parentId?: string; replyToUserId?: string }
+  const text = (body.body ?? "").trim()
+  if (!text) throw new ApiError(400, "评论不能为空", "INVALID_INPUT")
+  if (text.length > 1000) throw new ApiError(400, "评论过长", "TOO_LARGE")
+
+  const post = await env.DB.prepare("SELECT user_id FROM posts WHERE id=? AND deleted_at IS NULL").bind(id).first<{ user_id: string }>()
+  if (!post) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
+
+  const last = await env.DB.prepare("SELECT created_at FROM post_comments WHERE user_id=? ORDER BY created_at DESC LIMIT 1").bind(user.id).first<{created_at:string}>()
+  if (!canPostAgain(last?.created_at ?? null, COMMENT_COOLDOWN_SEC)) {
+    throw new ApiError(429, "评论太频繁", "RATE_LIMITED")
+  }
+
+  let parentId: string | null = null
+  if (body.parentId) {
+    const parent = await env.DB.prepare("SELECT id, parent_id FROM post_comments WHERE id=? AND post_id=? AND deleted_at IS NULL").bind(body.parentId, id).first<{ id: string; parent_id: string | null }>()
+    if (!parent) throw new ApiError(400, "父评论不存在", "INVALID_PARENT")
+    if (parent.parent_id !== null) throw new ApiError(400, "最多两层嵌套", "NEST_TOO_DEEP")
+    parentId = parent.id
+  }
+  const cid = uuid()
+  const now = new Date().toISOString()
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO post_comments (id, post_id, user_id, parent_id, reply_to_user_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).bind(cid, id, user.id, parentId, body.replyToUserId ?? null, text, now),
+    env.DB.prepare("UPDATE posts SET comment_count = comment_count + 1 WHERE id=?").bind(id),
+  ])
+
+  await maybeNotify(env, {
+    type: "post_comment", postId: id, commentId: cid, actorId: user.id,
+    recipientId: post.user_id, replyToUserId: body.replyToUserId,
+  })
+  return json({ comment: { id: cid } }, 201)
+}
+
+/** DELETE /api/community/posts/:id —— 作者或管理员软删 */
+export async function deletePost(env: Env, request: Request, id: string): Promise<Response> {
+  const user = await requireUser(env, request)
+  const row = await env.DB.prepare("SELECT user_id FROM posts WHERE id=?").bind(id).first<{ user_id: string }>()
+  if (!row) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
+  if (row.user_id !== user.id && user.role !== "admin") throw new ApiError(403, "无权删除", "FORBIDDEN")
+  await env.DB.prepare("UPDATE posts SET deleted_at=? WHERE id=?").bind(new Date().toISOString(), id).run()
+  return json({ ok: true })
+}
+
+/** 占位：通知逻辑 Task 16 实现 */
+async function maybeNotify(_env: Env, _args: {
+  type: string; postId: string; commentId: string; actorId: string;
+  recipientId: string; replyToUserId?: string
+}): Promise<void> {
+  // Task 16 实现
 }

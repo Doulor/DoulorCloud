@@ -443,6 +443,25 @@ async function route(
     return communityHandlers.getPost(env, request, decodeURIComponent(communityPostMatch[1]))
   }
 
+  // ---- 社区（需登录写入）----
+  if (routePath === "/community/posts" && method === "POST") {
+    return communityHandlers.createPost(env, request)
+  }
+  const communityLikeMatch = routePath.match(/^\/community\/posts\/([^/]+)\/like$/)
+  if (communityLikeMatch && method === "POST") {
+    return communityHandlers.toggleLike(env, request, decodeURIComponent(communityLikeMatch[1]))
+  }
+  const communityShareMatch = routePath.match(/^\/community\/posts\/([^/]+)\/share$/)
+  if (communityShareMatch && method === "POST") {
+    return communityHandlers.sharePost(env, request, decodeURIComponent(communityShareMatch[1]))
+  }
+  if (communityPostMatch && method === "DELETE") {
+    return communityHandlers.deletePost(env, request, decodeURIComponent(communityPostMatch[1]))
+  }
+  if (communityCommentsMatch && method === "POST") {
+    return communityHandlers.createComment(env, request, decodeURIComponent(communityCommentsMatch[1]))
+  }
+
   // ---- R2 直链网盘 ----
   if (routePath === "/storage" && method === "GET") {
     return storageHandlers.getStorage(env, request)
