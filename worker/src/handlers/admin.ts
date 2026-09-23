@@ -17,6 +17,7 @@ import {
   getAdminCredentialInfo,
   saveAdminCredential,
   verifyAdminCredential,
+  probeAdminCredential,
   maskToken,
 } from "../newapi-client"
 import { sendMail, renderMail } from "../mailer"
@@ -465,6 +466,11 @@ export async function testNewApi(env: Env, request: Request): Promise<Response> 
 export async function getNewApiAdminConfig(env: Env, request: Request): Promise<Response> {
   await requireAdmin(env, request)
   const info = await getAdminCredentialInfo(env)
+
+  // 顺带做一次真实的连通性探测（管理面板打开即知令牌是否还有效，
+  // 不必等用户去建 Key 才发现失效）。失败不影响本响应。
+  const health = await probeAdminCredential(env)
+
   return json({
     baseUrl: env.NEWAPI_BASE_URL ?? null,
     source: info.source,
@@ -472,6 +478,7 @@ export async function getNewApiAdminConfig(env: Env, request: Request): Promise<
     adminUserId: info.adminUserId,
     updatedAt: info.updatedAt,
     configured: await isNewApiConfigured(env),
+    health,
   })
 }
 
@@ -512,12 +519,12 @@ export async function updateNewApiAdminConfig(env: Env, request: Request): Promi
     )
   }
 
-  await saveAdminCredential(env, token, adminUserId)
+  const { healedAccounts } = await saveAdminCredential(env, token, adminUserId)
   await recordAudit(
     env,
     admin.id,
     "admin.newapi.credential.update",
-    `更新中转站管理员凭据（user id ${adminUserId}，令牌 ${maskToken(token)}）`,
+    `更新中转站管理员凭据（user id ${adminUserId}，令牌 ${maskToken(token)}，同步修复绑定 ${healedAccounts} 条）`,
     request.headers.get("CF-Connecting-IP")
   )
 
@@ -528,7 +535,11 @@ export async function updateNewApiAdminConfig(env: Env, request: Request): Promi
     maskedToken: info.maskedToken,
     adminUserId: info.adminUserId,
     updatedAt: info.updatedAt,
-    message: "令牌已验证并保存，立即生效",
+    healedAccounts,
+    message:
+      healedAccounts > 0
+        ? "令牌已验证并保存；同时修复了该账号在本站的绑定（NewAPI 里管理员令牌与 root 用户的令牌是同一份）"
+        : "令牌已验证并保存，立即生效",
   })
 }
 

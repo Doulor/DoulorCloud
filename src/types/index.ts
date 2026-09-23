@@ -446,6 +446,8 @@ export interface AdminNewApiConfig {
   /** 库内凭据更新时间（source=db 时才有） */
   updatedAt: string | null
   configured: boolean
+  /** 用当前凭据真实探测一次管理接口的结果（判断令牌是否已被轮换失效） */
+  health: { ok: boolean; message: string }
 }
 // ---- 个人名片 ----
 

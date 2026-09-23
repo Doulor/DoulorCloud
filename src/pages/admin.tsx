@@ -743,6 +743,7 @@ export default function AdminPage() {
       )
       setNewapiNewToken("") // 明文用完即弃，不留内存
       toast.success(res.message || "令牌已更新并生效")
+      void loadNewApiConfig()
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "令牌验证失败")
     } finally {
@@ -2783,6 +2784,22 @@ export default function AdminPage() {
                         {newapiCred?.updatedAt
                           ? ` · 更新于 ${new Date(newapiCred.updatedAt).toLocaleString("zh-CN")}`
                           : ""}
+                      </p>
+                      {/* 真实探测一次管理接口：NewAPI 的令牌会被后台轮换，
+                          不主动测就只能等用户建 Key 时才发现已经失效 */}
+                      <p className="flex items-center gap-1.5">
+                        <span className="text-muted-foreground">连通性</span>
+                        {newapiCred?.health?.ok ? (
+                          <span className="flex items-center gap-1 text-emerald-600">
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            令牌有效
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1 text-destructive">
+                            <XCircle className="h-3.5 w-3.5" />
+                            {newapiCred?.health?.message || "未知"}
+                          </span>
+                        )}
                       </p>
                     </div>
 

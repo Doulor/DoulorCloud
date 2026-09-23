@@ -400,6 +400,8 @@ export const adminApi = {
       maskedToken: string | null
       adminUserId: string
       updatedAt: string | null
+      /** 顺带修复的本站绑定条数（管理员令牌与 root 用户令牌在 NewAPI 侧是同一份） */
+      healedAccounts: number
       message: string
     }>("/admin/newapi/config", {
       method: "PUT",

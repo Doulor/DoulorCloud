@@ -710,15 +710,37 @@ export async function getAdminCredentialInfo(
 }
 
 /**
+ * 用「当前生效的凭据」做一次管理员级连通性探测。
+ * 供管理面板显示「令牌是否还有效」——NewAPI 的令牌会被后台轮换，
+ * 不主动探测就只能等用户建 Key 时才发现已经 401。
+ * 不抛错：未配置或失败都返回 { ok: false, message }。
+ */
+export async function probeAdminCredential(
+  env: Env
+): Promise<{ ok: boolean; message: string }> {
+  const { token, userId } = await resolveAdminCredentials(env)
+  if (!token) return { ok: false, message: "未配置管理员令牌" }
+  return verifyAdminCredential(env, token, userId)
+}
+
+/**
  * 更新管理员凭据（写 D1，加密存储），并立即使缓存失效。
  * 写入前不校验令牌有效性 —— 由调用方（admin 端点）先做一次真实调用来验证，
  * 此处只负责落库，避免「验证逻辑」与「存储逻辑」纠缠。
+ *
+ * ⚠️ 顺带自愈 root 自己的账号绑定：
+ * NewAPI 里「系统访问令牌」与 root 用户自己的 `users.access_token` 是**同一个字段**
+ * （见 rc.15 的 GenerateAccessToken → user.SetAccessToken + Update）。因此在后台
+ * 重新生成系统访问令牌，会同时把 root 自己那份用户级令牌顶掉 —— 表现为
+ * newapi_accounts 里 root 那一行突然 401，而其他用户不受影响。
+ * 既然管理员令牌就是 root 的用户令牌，这里把它同步写回该账号，
+ * 让「更新管理员令牌」一步就把 root 的绑定一起修好。
  */
 export async function saveAdminCredential(
   env: Env,
   token: string,
   adminUserId: string
-): Promise<void> {
+): Promise<{ healedAccounts: number }> {
   if (!env.SESSION_SECRET) {
     throw new ApiError(
       503,
@@ -726,6 +748,7 @@ export async function saveAdminCredential(
       "NOT_CONFIGURED"
     )
   }
+  const now = new Date().toISOString()
   await env.DB.prepare(
     `INSERT INTO newapi_admin_credentials (id, enc_token, admin_user_id, updated_at)
      VALUES (1, ?, ?, ?)
@@ -734,13 +757,20 @@ export async function saveAdminCredential(
        admin_user_id = excluded.admin_user_id,
        updated_at = excluded.updated_at`
   )
-    .bind(
-      await encryptSecret(token, env.SESSION_SECRET),
-      adminUserId,
-      new Date().toISOString()
-    )
+    .bind(await encryptSecret(token, env.SESSION_SECRET), adminUserId, now)
     .run()
   invalidateAdminCredentialCache()
+
+  // 该管理员令牌所属用户若在本站也绑定过中转站账号，用同一把令牌把它刷新
+  // （两者在 NewAPI 侧是同一份凭据，不同步就会留下一个必然失效的旧值）
+  const uid = Number(adminUserId)
+  if (!Number.isFinite(uid) || uid <= 0) return { healedAccounts: 0 }
+  const healed = await env.DB.prepare(
+    "UPDATE newapi_accounts SET enc_token = ?, synced_at = ? WHERE newapi_user_id = ?"
+  )
+    .bind(await encryptSecret(token, env.SESSION_SECRET), now, uid)
+    .run()
+  return { healedAccounts: healed.meta?.changes ?? 0 }
 }
 
 /**
