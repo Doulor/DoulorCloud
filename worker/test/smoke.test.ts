@@ -7,4 +7,11 @@ describe("smoke", () => {
     const names = (r.results ?? []).map((x) => x.name)
     expect(names).toContain("users")
   })
+
+  it("identity migration 0023 applied", async () => {
+    const cols = await env.DB.prepare("PRAGMA table_info(users)").all<{ name: string }>()
+    const names = (cols.results ?? []).map((c) => c.name)
+    expect(names).toContain("nickname")
+    expect(names).toContain("avatar_key")
+  })
 })
