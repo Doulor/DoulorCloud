@@ -1,6 +1,6 @@
 import * as React from "react"
 import { useSearchParams } from "react-router-dom"
-import { AlertTriangle, CheckCheck, Inbox, Loader2, Mail, Plus, RotateCcw, Settings, Trash2 } from "lucide-react"
+import { AlertTriangle, CheckCheck, Inbox, Loader2, Mail, Plus, Reply, RotateCcw, Send, Settings, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Card,
   CardContent,
@@ -212,6 +213,18 @@ export default function EmailPage() {
     } finally {
       setBusy(false)
     }
+  }
+
+  /**
+   * 回信：以当前邮箱地址发出。
+   * 收件人由服务端从原邮件推导（前端不传，避免这个接口被当成开放中继），
+   * 这里只提交正文。失败时**抛出**给调用方做行内提示 —— 后端会把 Cloudflare
+   * 的失败原因翻成人话（如"请先完成 Email Sending Onboard"），吞掉就会误导用户。
+   */
+  const handleReply = async (text: string) => {
+    if (!selected || !opened) throw new Error("邮件未打开，请重新进入该邮件")
+    const res = await emailApi.reply(selected.id, opened.id, text)
+    toast.success(`已发送给 ${res.to}`)
   }
 
   const handleDeleteMessage = async (messageId: string) => {
@@ -425,6 +438,7 @@ export default function EmailPage() {
               }}
               onMarkUnread={() => void handleMarkUnread()}
               onDelete={() => void handleDeleteMessage(opened.id)}
+              onReply={handleReply}
             />
           ) : (
             <div className="overflow-hidden rounded-lg border bg-card">
@@ -639,6 +653,7 @@ function MailMessageView({
   onBack,
   onMarkUnread,
   onDelete,
+  onReply,
 }: {
   mailbox: Mailbox
   message: MailMessage
@@ -647,7 +662,60 @@ function MailMessageView({
   onBack: () => void
   onMarkUnread: () => void
   onDelete: () => void
+  onReply: (text: string) => Promise<void>
 }) {
+  const [replyOpen, setReplyOpen] = React.useState(false)
+  const [replyText, setReplyText] = React.useState("")
+  const [sending, setSending] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
+
+  /**
+   * 免付费的「回信」替代路径：用本机邮件客户端回复（mailto）。
+   *
+   * 为什么需要：网页直接发信必须先完成 Cloudflare Email Sending 域名 Onboard，
+   * 而那是**付费**功能。没 Onboard 时，直接发送只能发到账户内"已验证的收件地址"，
+   * 给任意外部来信人回信必然失败 —— 与其让用户每次都撞一次错误，
+   * 不如给一个立刻能用的出口：点一下就把收件人/主题/原文引用填进本机邮箱，
+   * 在那边点发送（发件人是用户自己的真实邮箱）。
+   *
+   * 原文引用截断到 ~1200 字：mailto 的 URL 长度在部分客户端有限制。
+   */
+  const replyToAddress = React.useMemo(() => {
+    const angled = /<([^>]+)>/.exec(message.from ?? "")
+    const candidate = (angled ? angled[1] : (message.from ?? "")).trim()
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate) ? candidate : ""
+  }, [message.from])
+
+  const mailtoHref = React.useMemo(() => {
+    if (!replyToAddress) return ""
+    const subject = /^re\s*:/i.test(message.subject ?? "")
+      ? message.subject
+      : `Re: ${message.subject || "(无主题)"}`
+    const quoted = (message.body ?? "").slice(0, 1200)
+    const body = quoted
+      ? `\n\n---------- 原邮件 ----------\n来自：${message.from}\n\n${quoted}`
+      : ""
+    return `mailto:${replyToAddress}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+  }, [replyToAddress, message.subject, message.body, message.from])
+
+  const handleSend = async () => {
+    const text = replyText.trim()
+    if (!text || sending) return
+    setSending(true)
+    setError(null)
+    try {
+      await onReply(text)
+      // 成功后收起并清空：邮件已经发出，留着草稿会让人以为还没发
+      setReplyText("")
+      setReplyOpen(false)
+    } catch (err) {
+      // 保留正文，让用户可以改完重试（例如先去 Onboard 再回来点一次）
+      setError(err instanceof HttpError ? err.message : "发送失败，请稍后重试")
+    } finally {
+      setSending(false)
+    }
+  }
+
   return (
     <Card>
       <CardHeader>
@@ -667,6 +735,14 @@ function MailMessageView({
         </div>
       </CardHeader>
       <div className="flex items-center gap-2 px-6 pb-4">
+        <Button
+          variant={replyOpen ? "secondary" : "outline"}
+          size="sm"
+          onClick={() => setReplyOpen((v) => !v)}
+        >
+          <Reply className="h-3.5 w-3.5" />
+          回信
+        </Button>
         <Button variant="outline" size="sm" onClick={onMarkUnread}>
           <Mail className="h-3.5 w-3.5" />
           标为未读
@@ -686,7 +762,7 @@ function MailMessageView({
           删除
         </Button>
       </div>
-      <CardContent>
+      <CardContent className="space-y-4">
         {loadingBody ? (
           <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -696,6 +772,70 @@ function MailMessageView({
           <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed">
             {message.body || "（无正文内容）"}
           </pre>
+        )}
+
+        {replyOpen && (
+          <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+              <div className="flex items-center gap-2">
+                <Reply className="h-3.5 w-3.5" />
+                以 <span className="font-medium text-foreground">{mailbox.address}</span> 发送
+                {message.from ? <> 给 <span className="font-medium text-foreground">{message.from}</span></> : null}
+              </div>
+              {mailtoHref && (
+                <Button asChild variant="outline" size="sm">
+                  <a href={mailtoHref}>改用我的邮箱回复</a>
+                </Button>
+              )}
+            </div>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              下面的「发送」需要 Cloudflare 完成 Email Sending 域名 Onboard（付费功能）才能发给任意外部邮箱；
+              未开通时只能发往账户内已验证的收件地址。发不出去就点上面的
+              <span className="font-medium text-foreground">「改用我的邮箱回复」</span>
+              —— 免费、立刻可用（会在你本机邮箱里打开，收件人与原文已填好）。
+            </p>
+            <Textarea
+              value={replyText}
+              onChange={(e) => setReplyText(e.target.value)}
+              placeholder="输入回信内容（纯文本）…"
+              rows={6}
+              maxLength={20000}
+              disabled={sending}
+              className="resize-y bg-background"
+            />
+            {error && (
+              <p className="flex items-start gap-2 text-xs text-destructive">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>{error}</span>
+              </p>
+            )}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {replyText.length} / 20000
+              </span>
+              <div className="flex gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setReplyOpen(false)
+                    setError(null)
+                  }}
+                  disabled={sending}
+                >
+                  收起
+                </Button>
+                <Button size="sm" onClick={() => void handleSend()} disabled={sending || !replyText.trim()}>
+                  {sending ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Send className="h-3.5 w-3.5" />
+                  )}
+                  发送
+                </Button>
+              </div>
+            </div>
+          </div>
         )}
       </CardContent>
     </Card>

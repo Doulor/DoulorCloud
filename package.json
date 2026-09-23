@@ -6,8 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "npm run build && wrangler dev",
-    "deploy": "npm run build && wrangler deploy"
+    "preview": "npm run build && wrangler dev --config wrangler.jsonc",
+    "deploy": "npm run build && wrangler deploy --config wrangler.jsonc --name doulor-mail",
+    "deploy:api": "cd worker && npm run deploy",
+    "check:handlers": "cd worker && npm run check:handlers"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

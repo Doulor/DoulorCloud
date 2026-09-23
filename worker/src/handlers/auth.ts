@@ -1,5 +1,6 @@
 import { ApiError, json } from "../http"
-import { hashPassword, verifyPassword, uuid, hashToken } from "../crypto"
+import { hashPassword, verifyPassword, needsPasswordRehash, uuid, hashToken } from "../crypto"
+import { clientIp, normalizeKeyPart, guardRateLimit } from "../ratelimit"
 import { isReservedName } from "../reserved-names"
 import { cfCreateEmailRule, cfEnsureDestination } from "../cloudflare"
 import {
@@ -53,6 +54,22 @@ function isValidUsername(username: string): boolean {
   return /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(username)
 }
 
+/**
+ * 限流护栏已抽到 ratelimit.ts 的 guardRateLimit()（email handler 也要用，
+ * 避免两处各写一份 try/catch 导致 fail-open 行为漂移）。这里只保留策略常量。
+ */
+
+/** 登录：同一 IP 15 分钟 30 次（防广撒网）、同一账号 15 分钟 10 次（防定向爆破） */
+const LOGIN_IP_LIMIT = 30
+const LOGIN_IDENTIFIER_LIMIT = 10
+const LOGIN_WINDOW_SECONDS = 15 * 60
+/** 注册：同一 IP 1 小时 10 次（邀请码猜测 + 批量注册） */
+const REGISTER_IP_LIMIT = 10
+const REGISTER_WINDOW_SECONDS = 60 * 60
+/** 改密码：同一账号 15 分钟 20 次（「当前密码」校验同样是爆破面） */
+const PASSWORD_ATTEMPT_LIMIT = 20
+const PASSWORD_WINDOW_SECONDS = 15 * 60
+
 function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
 }
@@ -69,6 +86,15 @@ export async function register(env: Env, request: Request): Promise<Response> {
   const email = body.email?.trim().toLowerCase() ?? ""
   const password = body.password ?? ""
   const inviteCode = body.inviteCode?.trim() ?? ""
+
+  // 限流：注册是「邀请码 + 用户名」的猜测面，且会写入 D1 与 Cloudflare 侧资源
+  await guardRateLimit(
+    env,
+    `register:ip:${clientIp(request)}`,
+    REGISTER_IP_LIMIT,
+    REGISTER_WINDOW_SECONDS,
+    "注册过于频繁"
+  )
 
   if (!isValidUsername(username)) {
     throw new ApiError(400, "用户名只能包含小写字母、数字和连字符", "INVALID_USERNAME")
@@ -227,6 +253,23 @@ export async function login(env: Env, request: Request): Promise<Response> {
     throw new ApiError(400, "请输入用户名和密码", "INVALID_CREDENTIALS")
   }
 
+  // 限流：登录是本站最大的爆破面（口令此前无失败锁定）。
+  // 两个维度各记一次 —— IP 维度挡「一个 IP 打很多账号」，账号维度挡「很多 IP 打一个账号」。
+  await guardRateLimit(
+    env,
+    `login:ip:${clientIp(request)}`,
+    LOGIN_IP_LIMIT,
+    LOGIN_WINDOW_SECONDS,
+    "登录尝试过于频繁"
+  )
+  await guardRateLimit(
+    env,
+    `login:id:${normalizeKeyPart(identifier)}`,
+    LOGIN_IDENTIFIER_LIMIT,
+    LOGIN_WINDOW_SECONDS,
+    "该账号登录尝试过于频繁"
+  )
+
   const user = await env.DB.prepare(
     "SELECT * FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE LIMIT 1"
   )
@@ -238,6 +281,22 @@ export async function login(env: Env, request: Request): Promise<Response> {
   }
   if (user.status !== "active") {
     throw new ApiError(403, "账户已被停用", "SUSPENDED")
+  }
+
+  // 口令哈希透明升级：旧格式（单次 SHA-256）或迭代次数偏低的哈希，
+  // 在本次登录成功（已证明知道明文口令）时用当前算法重写一次。
+  // 包 try/catch：升级失败绝不能让已经验证通过的登录失败。
+  if (needsPasswordRehash(user.password_hash)) {
+    try {
+      const upgraded = await hashPassword(password)
+      await env.DB.prepare(
+        "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?"
+      )
+        .bind(upgraded, new Date().toISOString(), user.id)
+        .run()
+    } catch (err) {
+      console.error("口令哈希升级失败（登录不受影响）:", user.username, err)
+    }
   }
 
   const token = await createSession(env, user.id)
@@ -269,11 +328,16 @@ export async function me(
   const user = await requireUser(env, request)
 
   // 访问计数：同一用户 10 分钟内只计一次（节流），用于「常客」成就。
+  //
   // 必须走 ctx.waitUntil —— 直接 void 的话，Worker 返回响应后会取消该 Promise，
   // 计数永远不会落库（这正是「常客一直不涨」的原因）。
+  //
+  // 合并备注：本处与 WorkBuddy 工作区提交的修复重合（两边独立修了同一个 bug），
+  // 保留更稳的写法 —— 未传 ctx 时同步等待（便于单测直接调用）。
+  // bumpVisit 自身已吞异常，无需额外 .catch。
   const visit = bumpVisit(env, user.id)
   if (ctx) ctx.waitUntil(visit)
-  else void visit
+  else await visit
 
   const domain = await env.DB.prepare(
     "SELECT * FROM domains WHERE user_id = ? LIMIT 1"
@@ -413,6 +477,15 @@ export async function changePassword(env: Env, request: Request): Promise<Respon
   if (!currentPassword) {
     throw new ApiError(400, "请输入当前密码", "INVALID_INPUT")
   }
+
+  // 限流：「当前密码」校验在会话被盗后是最后一层保护，必须防爆破
+  await guardRateLimit(
+    env,
+    `password:user:${user.id}`,
+    PASSWORD_ATTEMPT_LIMIT,
+    PASSWORD_WINDOW_SECONDS,
+    "尝试过于频繁"
+  )
   if (newPassword.length < 8) {
     throw new ApiError(400, "新密码至少需要 8 位", "WEAK_PASSWORD")
   }

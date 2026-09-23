@@ -680,6 +680,17 @@ export const emailApi = {
     request<void>(`/mailbox/${mailboxId}/messages/${messageId}`, {
       method: "DELETE",
     }),
+
+  /**
+   * 以用户自己的域名邮箱身份回信。
+   * 收件人与发件人都由服务端从原邮件 / 邮箱归属推导，前端**不传**收件人，
+   * 避免这个接口被当成开放中继使用。
+   */
+  reply: (mailboxId: string, messageId: string, text: string) =>
+    request<{ ok: boolean; to: string; subject: string; messageId: string | null }>(
+      `/mailbox/${mailboxId}/messages/${messageId}/reply`,
+      { method: "POST", body: JSON.stringify({ text }) }
+    ),
 }
 
 // ---- 个人名片 ----

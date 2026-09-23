@@ -4,12 +4,14 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --config wrangler.toml",
+    "deploy": "wrangler deploy --config wrangler.toml --name doulor-mail-api",
     "db:init": "wrangler d1 execute doulor-mail --file=./schema.sql",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "check:handlers": "node scripts/check-handlers.mjs",
+    "check": "node scripts/check-handlers.mjs && tsc --noEmit",
     "routes:check": "node scripts/check-routes.mjs",
     "routes:fix": "node scripts/check-routes.mjs --fix"
   },

@@ -28,6 +28,36 @@ export interface SendMailInput {
   html?: string
 }
 
+/**
+ * 把 Cloudflare 的发送错误转成可操作的中文业务错误。
+ *
+ * 单独抽出来是因为「回信」与「通知」要走完全一样的错误分类 ——
+ * 否则用户看到的提示会不一致（一个说"请先 Onboard"，另一个只说"发送失败"）。
+ */
+function mapSendError(err: unknown): ApiError {
+  const e = err as { code?: string; message?: string }
+  const code = e?.code ?? ""
+  const message = e?.message ?? String(err)
+  console.error("发送邮件失败:", code, message)
+
+  // 收件人不在账户已验证列表里 —— Onboard 之前最常见的失败，必须给出可操作提示
+  if (/E_RECIPIENT_NOT_VERIFIED|destination address is not a verified|not a verified address|not verified/i.test(`${code} ${message}`)) {
+    return new ApiError(
+      400,
+      "该收件邮箱尚未验证：请先在 Cloudflare 完成 Email Sending 域名 Onboard（Compute → Email Service → Email Sending），完成后即可发往任意邮箱",
+      "RECIPIENT_NOT_VERIFIED"
+    )
+  }
+  if (/E_SENDER_NOT_VERIFIED|sender address is not/i.test(`${code} ${message}`)) {
+    return new ApiError(
+      400,
+      "发件地址未通过验证：请先在 Cloudflare 完成 Email Sending 域名 Onboard",
+      "SENDER_NOT_VERIFIED"
+    )
+  }
+  return new ApiError(502, `邮件发送失败：${message}`, "MAIL_SEND_FAILED")
+}
+
 export function isMailerConfigured(env: Env): boolean {
   return Boolean(env.EMAIL)
 }
@@ -54,28 +84,66 @@ export async function sendMail(env: Env, input: SendMailInput): Promise<void> {
       html: input.html,
     })
   } catch (err) {
-    const e = err as { code?: string; message?: string }
-    const code = e?.code ?? ""
-    const message = e?.message ?? String(err)
-    console.error("发送邮件失败:", input.to, code, message)
+    throw mapSendError(err)
+  }
+}
 
-    // 收件人不在账户已验证列表里 —— 这是最常见的失败，必须给出可操作的提示
-    if (/E_RECIPIENT_NOT_VERIFIED|destination address is not a verified|not a verified address|not verified/i.test(`${code} ${message}`)) {
-      throw new ApiError(
-        400,
-        "该收件邮箱尚未验证：请先在 Cloudflare 完成 Email Sending 域名 Onboard（Compute → Email Service → Email Sending），完成后即可发往任意邮箱",
-        "RECIPIENT_NOT_VERIFIED"
-      )
-    }
-    if (/E_SENDER_NOT_VERIFIED|sender address is not/i.test(`${code} ${message}`)) {
-      throw new ApiError(
-        400,
-        "发件地址未通过验证：请先在 Cloudflare 完成 Email Sending 域名 Onboard",
-        "SENDER_NOT_VERIFIED"
-      )
-    }
+export interface SendReplyInput {
+  /** 发件地址：用户本人的域名邮箱（如 alice@doulor.cn） */
+  from: string
+  to: string
+  subject: string
+  text: string
+  /** 原邮件的 Message-ID，用于给邮件客户端串成同一会话 */
+  inReplyTo?: string | null
+}
 
-    throw new ApiError(502, `邮件发送失败：${message}`, "MAIL_SEND_FAILED")
+/**
+ * 以用户自己的域名邮箱身份回复一封邮件（网页端「回信」）。
+ *
+ * 与 sendMail 的区别：
+ *   1. 发件人是**用户自己的邮箱地址**，不是 no-reply@；
+ *   2. 带上 `In-Reply-To` / `References`，让对方邮件客户端把两封信归到同一会话；
+ *   3. 不设 HTML 正文 —— 纯文本足够，且避免用户输入被当 HTML 渲染的 XSS 风险。
+ *
+ * ⚠️ 前置条件（部署侧，不是代码能解决的）：
+ *   `worker/wrangler.toml` 的 `[[send_email]].allowed_sender_addresses` 若只列了
+ *   no-reply@/support@，则**从这里发出的信会被 Cloudflare 拒绝**（发件地址不在白名单）。
+ *   要支持"用户以自己的地址回信"，必须删掉该键（或确认 CF 是否支持通配）。
+ *   该键的取舍见 HANDOFF §4 与 docs/审计报告 §七。
+ *
+ * ⚠️ 另外：在 Email Sending 域名 Onboard 之前，CF 只允许发往账户内已验证的
+ *   destination address。所以本功能在 Onboard 完成后才能真正对任意外部地址生效。
+ */
+export async function sendReply(
+  env: Env,
+  input: SendReplyInput
+): Promise<{ messageId: string | null }> {
+  if (!env.EMAIL) {
+    throw new ApiError(
+      503,
+      "邮件发送未配置（缺少 send_email 绑定）",
+      "MAIL_NOT_CONFIGURED"
+    )
+  }
+
+  const headers: Record<string, string> = {}
+  if (input.inReplyTo) {
+    headers["In-Reply-To"] = input.inReplyTo
+    headers["References"] = input.inReplyTo
+  }
+
+  try {
+    const result = await env.EMAIL.send({
+      from: { email: input.from, name: input.from.split("@")[0] },
+      to: input.to,
+      subject: input.subject,
+      text: input.text,
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    })
+    return { messageId: result?.messageId ?? null }
+  } catch (err) {
+    throw mapSendError(err)
   }
 }
 

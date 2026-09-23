@@ -48,12 +48,30 @@ database_id = "9ae6127c-75f7-4688-bbe3-31ed856859c5"
 # 安全：不设 allowed_destination_addresses —— 那会把绑定限制成只能发给
 # doulor.cn（即只能发给自己），正好与需求相反。改为用 allowed_sender_addresses
 # 限定发件人，收件人交由运行时校验（见 mailer.ts）。
-[[send_email]]
-name = "EMAIL"
+#
+# ⚠️ 2026-09-23：发件白名单**保持原样**（no-reply@ / support@）。
+#
+#   背景：原先为了让「网页端以用户自己的邮箱回信」可行，曾把本键删掉。
+#   但站长确认**不做 Email Sending 域名 Onboard（需付费）**，而在 Onboard 之前
+#   Cloudflare 只允许发往账户内「已验证的 destination address」，回信本来就发不到
+#   任意外部地址 —— 那删除本键就**只有放宽风险、没有实际收益**，故恢复原状。
+#
+#   等哪天做了 Onboard，再删掉本键（或确认 CF 是否支持 `*@doulor.cn` 通配），
+#   用户才能以自己的地址回信。运行时仍会校验发件人（见 mailer.ts 的 sendReply）。
 allowed_sender_addresses = [
   "no-reply@doulor.cn",
   "support@doulor.cn",
 ]
+[[send_email]]
+name = "EMAIL"
+
+[triggers]
+# 定时运维（worker/src/maintenance.ts）：
+#   每小时 :17 清理过期分享箱（D1 + R2 对象）、过期会话、过期限流窗口，
+#   并做网盘记账自检与大表行数预警；“深度模式”（额外清理 90 天前审计日志）
+#   在 UTC 03:xx 那一次自动触发。
+# 选 :17 而不是 :00 是为了避开整点的全局调度高峰。
+crons = ["17 * * * *"]
 
 [vars]
 ROOT_DOMAIN = "doulor.cn"
