@@ -16,13 +16,14 @@ import {
   Zap,
   Package,
   Trophy,
+  MessagesSquare,
 } from "lucide-react"
 
 import { Logo } from "@/components/logo"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { ScrollToTop } from "@/components/scroll-to-top"
 import { Button } from "@/components/ui/button"
-import { Avatar, AvatarFallback } from "@/components/ui/avatar"
+import { UserAvatar } from "@/components/user-avatar"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -47,6 +48,7 @@ const baseNav = [
   { to: "/dashboard/proxy", label: "代理节点", icon: Zap, end: false },
   { to: "/dashboard/tempbox", label: "临时分享箱", icon: Package, end: false },
   { to: "/dashboard/profile", label: "个人名片", icon: Contact, end: false },
+  { to: "/dashboard/community", label: "社区广场", icon: MessagesSquare, end: false },
 ]
 
 /**
@@ -56,6 +58,7 @@ const baseNav = [
  */
 const settingsNav = { to: "/dashboard/settings", label: "设置", icon: Settings, end: false }
 const adminNav = { to: "/dashboard/admin", label: "管理", icon: ShieldCheck, end: false }
+const achievementNav = { to: "/dashboard/achievements", label: "成就", icon: Trophy, end: false }
 const donationNav = { to: "/dashboard/donations", label: "捐献", icon: Heart, end: false }
 
 export function DashboardLayout() {
@@ -74,12 +77,11 @@ export function DashboardLayout() {
   }
 
   const isAdmin = user?.role === "admin"
-  // 底部队列（自上而下）：捐献 → 管理（仅管理员）→ 设置
-  // 即「从下往上」为 设置 → 管理 → 捐献，设置紧贴账户信息
+  // 底部队列（自上而下）：捐献 → 成就 → 管理（仅管理员）→ 设置
+  // 即「从下往上」为 设置 → 管理 → 成就 → 捐献，设置紧贴账户信息
   const bottomNav = isAdmin
-    ? [donationNav, adminNav, settingsNav]
-    : [donationNav, settingsNav]
-  const initials = user?.username?.slice(0, 1).toUpperCase() ?? "U"
+    ? [donationNav, achievementNav, adminNav, settingsNav]
+    : [donationNav, achievementNav, settingsNav]
 
   const renderNavItem = (item: {
     to: string
@@ -125,9 +127,11 @@ export function DashboardLayout() {
       <div className="flex flex-col gap-2 px-3">
         <Separator className="mb-2" />
         <div className="flex items-center gap-3">
-          <Avatar className="h-8 w-8">
-            <AvatarFallback>{initials}</AvatarFallback>
-          </Avatar>
+          <UserAvatar
+            username={user?.username ?? ""}
+            nickname={user?.nickname}
+            hasAvatar={user?.hasAvatar}
+          />
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium">{user?.username}</p>
             <p className="truncate text-xs text-muted-foreground">
@@ -185,9 +189,12 @@ export function DashboardLayout() {
           </Button>
           <div className="ml-auto flex items-center gap-2">
             <ThemeToggle />
-            <Avatar className="h-7 w-7 lg:hidden">
-              <AvatarFallback>{initials}</AvatarFallback>
-            </Avatar>
+            <UserAvatar
+              username={user?.username ?? ""}
+              nickname={user?.nickname}
+              hasAvatar={user?.hasAvatar}
+              className="h-7 w-7 lg:hidden"
+            />
           </div>
         </header>
 
