@@ -91,7 +91,12 @@ function queryD1Fqdns() {
 function fixedRoutes() {
   const hosts = [`cloud.${ROOT_DOMAIN}`, ROOT_DOMAIN]
   const paths = ["/api/*", "/dl/*", "/profile/*", "/p/*"]
-  return hosts.flatMap((h) => paths.map((p) => `${h}${p}`))
+  // /u/*（账户头像）与 /c/*（社区帖子图片）仅在 cloud 子域，走 API Worker
+  const cloudOnlyPaths = ["/u/*", "/c/*"]
+  return [
+    ...hosts.flatMap((h) => paths.map((p) => `${h}${p}`)),
+    ...cloudOnlyPaths.map((p) => `cloud.${ROOT_DOMAIN}${p}`),
+  ]
 }
 
 async function main() {

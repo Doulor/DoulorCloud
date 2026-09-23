@@ -4,7 +4,7 @@ import { decodeCursor, encodeCursor, groupComments, canPostAgain, type RawCommen
 import { uuid } from "../crypto"
 import { getSettingNumber } from "../settings"
 import { sendMail, renderMail, isMailerConfigured } from "../mailer"
-import { isStorageConfigured, putObject, getPlatformBucketId } from "../r2"
+import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
 import type { Env } from "../env"
 
 const DEFAULT_LIMIT = 20
@@ -26,6 +26,18 @@ interface PostRow {
 }
 
 function toPostDto(r: PostRow, viewerLiked: boolean, isMine: boolean) {
+  // images 存的是 R2 key（community/<postId>/<filename>），转成可访问 URL
+  let images: string[] = []
+  if (r.images) {
+    try {
+      images = (JSON.parse(r.images) as string[]).map((key) => {
+        const filename = key.split("/").pop() ?? key
+        return `/c/${r.id}/${filename}`
+      })
+    } catch {
+      images = []
+    }
+  }
   return {
     id: r.id,
     author: {
@@ -35,7 +47,7 @@ function toPostDto(r: PostRow, viewerLiked: boolean, isMine: boolean) {
       hasAvatar: Boolean(r.avatar_key),
     },
     body: r.body,
-    images: r.images ? (JSON.parse(r.images) as string[]) : [],
+    images,
     likeCount: r.like_count,
     commentCount: r.comment_count,
     shareCount: r.share_count,
@@ -318,7 +330,10 @@ const IMAGE_TYPES: Record<string, string> = {
   "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
 }
 
-/** POST /api/community/posts/:id/images —— 上传单张压缩后图片 */
+/**
+ * POST /api/community/posts/:id/images —— 上传单张压缩后图片。
+ * 返回 key（入库用）与 url（可直接访问，形如 /c/<postId>/<filename>）。
+ */
 export async function uploadPostImage(env: Env, request: Request, id: string): Promise<Response> {
   const user = await requireUser(env, request)
   if (!(await isStorageConfigured(env))) throw new ApiError(503, "存储未配置", "R2_NOT_CONFIGURED")
@@ -335,9 +350,26 @@ export async function uploadPostImage(env: Env, request: Request, id: string): P
     throw new ApiError(400, `图片需在 ${Math.round(maxBytes / 1024)} KB 以内`, "TOO_LARGE")
   }
   const bucketId = await getPlatformBucketId(env)
-  const key = `community/${id}/${uuid()}.${ext}`
+  const filename = `${uuid()}.${ext}`
+  const key = `community/${id}/${filename}`
   await putObject(env, key, buf, ct, bucketId)
-  return json({ key })
+
+  // 上传成功后把 key 追加进 posts.images（发帖流程是「先建帖、后逐张传图」）
+  const postRow = await env.DB.prepare("SELECT images FROM posts WHERE id=?").bind(id).first<{ images: string | null }>()
+  let images: string[] = []
+  if (postRow?.images) {
+    try { images = JSON.parse(postRow.images) as string[] } catch { images = [] }
+  }
+  const maxImages = await getSettingNumber(env, "community_post_max_images")
+  if (images.length >= maxImages) {
+    // 超限：删掉刚传的对象并报错
+    try { await deleteObject(env, key, bucketId) } catch {}
+    throw new ApiError(400, `每帖最多 ${maxImages} 张图片`, "TOO_MANY_IMAGES")
+  }
+  images.push(key)
+  await env.DB.prepare("UPDATE posts SET images = ? WHERE id = ?").bind(JSON.stringify(images), id).run()
+
+  return json({ key, url: `/c/${id}/${filename}` })
 }
 
 /**
@@ -378,4 +410,27 @@ export async function communityStats(env: Env, _request: Request): Promise<Respo
       posts: r.posts,
     })),
   })
+}
+
+/**
+ * GET /c/<postId>/<filename> —— 帖子图片公开读取（走 Host 分发层，非 /api）。
+ * 图片存平台桶 `community/<postId>/<filename>`，任何人可读（与帖子正文同可见性）。
+ */
+export async function serveCommunityImage(
+  env: Env,
+  postId: string,
+  filename: string
+): Promise<Response> {
+  // filename 限制：只允许 <uuid>.<ext>，防路径穿越
+  if (!/^[a-zA-Z0-9-]+\.(jpg|jpeg|png|webp|gif)$/i.test(filename)) {
+    return new Response("Not Found", { status: 404 })
+  }
+  if (!(await isStorageConfigured(env))) return new Response("Not Found", { status: 404 })
+  const bucketId = await getPlatformBucketId(env)
+  const key = `community/${postId}/${filename}`
+  try {
+    return await getObject(env, key, undefined, bucketId)
+  } catch {
+    return new Response("Not Found", { status: 404 })
+  }
 }
