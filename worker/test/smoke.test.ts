@@ -14,4 +14,13 @@ describe("smoke", () => {
     expect(names).toContain("nickname")
     expect(names).toContain("avatar_key")
   })
+
+  it("community migration 0024 applied", async () => {
+    const r = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table'").all<{ name: string }>()
+    const names = (r.results ?? []).map((x) => x.name)
+    expect(names).toContain("posts")
+    expect(names).toContain("post_comments")
+    expect(names).toContain("post_likes")
+    expect(names).toContain("notifications")
+  })
 })
