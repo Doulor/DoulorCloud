@@ -462,6 +462,17 @@ async function route(
     return communityHandlers.createComment(env, request, decodeURIComponent(communityCommentsMatch[1]))
   }
 
+  // ---- 通知 ----
+  if (routePath === "/notifications" && method === "GET") {
+    return communityHandlers.listNotifications(env, request)
+  }
+  if (routePath === "/notifications/unread-count" && method === "GET") {
+    return communityHandlers.unreadCount(env, request)
+  }
+  if (routePath === "/notifications/read" && method === "POST") {
+    return communityHandlers.markRead(env, request)
+  }
+
   // ---- R2 直链网盘 ----
   if (routePath === "/storage" && method === "GET") {
     return storageHandlers.getStorage(env, request)

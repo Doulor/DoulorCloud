@@ -3,6 +3,7 @@ import { requireUser } from "../auth"
 import { decodeCursor, encodeCursor, groupComments, canPostAgain, type RawComment } from "../community-logic"
 import { uuid } from "../crypto"
 import { getSettingNumber } from "../settings"
+import { sendMail, renderMail, isMailerConfigured } from "../mailer"
 import type { Env } from "../env"
 
 const DEFAULT_LIMIT = 20
@@ -241,10 +242,73 @@ export async function deletePost(env: Env, request: Request, id: string): Promis
   return json({ ok: true })
 }
 
-/** 占位：通知逻辑 Task 16 实现 */
-async function maybeNotify(_env: Env, _args: {
-  type: string; postId: string; commentId: string; actorId: string;
-  recipientId: string; replyToUserId?: string
+/** 写一条通知；不给自己发；写库/邮件失败静默 */
+async function maybeNotify(env: Env, args: {
+  type: "post_comment" | "comment_reply"
+  postId: string
+  commentId: string
+  actorId: string
+  recipientId: string
+  replyToUserId?: string
 }): Promise<void> {
-  // Task 16 实现
+  // 给帖子作者发 post_comment（评论自己的帖子 → 不通知）
+  if (args.recipientId !== args.actorId) {
+    try {
+      await env.DB.prepare(
+        "INSERT INTO notifications (id, user_id, type, actor_id, post_id, comment_id, read, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)"
+      ).bind(uuid(), args.recipientId, args.type, args.actorId, args.postId, args.commentId, new Date().toISOString()).run()
+    } catch {}
+    await maybeSendMail(env, args.recipientId, args.postId)
+  }
+
+  // 若是回复某人，且那人不是帖子作者、不是自己 → 给那人也发 comment_reply
+  if (args.replyToUserId && args.replyToUserId !== args.actorId && args.replyToUserId !== args.recipientId) {
+    try {
+      await env.DB.prepare(
+        "INSERT INTO notifications (id, user_id, type, actor_id, post_id, comment_id, read, created_at) VALUES (?, ?, 'comment_reply', ?, ?, ?, 0, ?)"
+      ).bind(uuid(), args.replyToUserId, args.actorId, args.postId, args.commentId, new Date().toISOString()).run()
+    } catch {}
+    await maybeSendMail(env, args.replyToUserId, args.postId)
+  }
+}
+
+async function maybeSendMail(env: Env, recipientId: string, postId: string): Promise<void> {
+  if (!isMailerConfigured(env)) return
+  const u = await env.DB.prepare("SELECT email, email_verified, notify_enabled FROM users WHERE id=?").bind(recipientId).first<{ email: string; email_verified: number; notify_enabled: number }>()
+  if (!u || !u.email_verified || !u.notify_enabled) return
+  const link = `https://cloud.doulor.cn/community/${postId}`
+  const { text, html } = renderMail("你在 Doulor Cloud 社区有新互动", [
+    "有人回复了你的帖子或评论。",
+    `查看：${link}`,
+  ])
+  try { await sendMail(env, { to: u.email, subject: "【Doulor Cloud】社区新互动", text, html }) } catch {}
+}
+
+/** GET /api/notifications */
+export async function listNotifications(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const rows = await env.DB.prepare(
+    "SELECT id, type, actor_id, post_id, comment_id, read, created_at FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 50"
+  ).bind(user.id).all()
+  return json({ notifications: rows.results ?? [] })
+}
+
+/** GET /api/notifications/unread-count */
+export async function unreadCount(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const r = await env.DB.prepare("SELECT COUNT(*) c FROM notifications WHERE user_id=? AND read=0").bind(user.id).first<{ c: number }>()
+  return json({ count: r?.c ?? 0 })
+}
+
+/** POST /api/notifications/read */
+export async function markRead(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const body = (await request.json().catch(() => ({}))) as { ids?: string[]; all?: boolean }
+  if (body.all) {
+    await env.DB.prepare("UPDATE notifications SET read=1 WHERE user_id=?").bind(user.id).run()
+  } else if (Array.isArray(body.ids) && body.ids.length > 0) {
+    const ph = body.ids.map(() => "?").join(",")
+    await env.DB.prepare(`UPDATE notifications SET read=1 WHERE user_id=? AND id IN (${ph})`).bind(user.id, ...body.ids).run()
+  }
+  return json({ ok: true })
 }
