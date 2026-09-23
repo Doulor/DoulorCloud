@@ -87,6 +87,19 @@ async function unwrap<T>(
     if (tolerate && tolerate(message)) {
       return (body?.data ?? ({} as T)) as T
     }
+    // 401 / 令牌无效：给专属 code，便于前端与管理员定位是令牌问题
+    // （可能是管理员令牌 NEWAPI_ADMIN_TOKEN 失效，或用户 access token 失效，
+    //   由调用方的 what 上下文区分）
+    if (
+      res.status === 401 ||
+      /invalid access token|unauthorized/i.test(message)
+    ) {
+      throw new ApiError(
+        502,
+        `NewAPI ${what}失败：令牌无效或已过期（${message || "Unauthorized"}）。若是管理员操作，请在 NewAPI「个人设置 → 安全设置 → 系统访问令牌」生成 root 账户的访问令牌，再用 wrangler secret put NEWAPI_ADMIN_TOKEN 更新`,
+        "NEWAPI_TOKEN_INVALID"
+      )
+    }
     throw new ApiError(
       502,
       `NewAPI ${what}失败: ${message || `HTTP ${res.status}`}`,

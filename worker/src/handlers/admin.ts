@@ -9,7 +9,7 @@ import {
   audit as recordAudit,
 } from "../settings"
 import { isR2Configured } from "../r2"
-import { isNewApiConfigured, getCurrencyInfo } from "../newapi-client"
+import { isNewApiConfigured, getCurrencyInfo, findUserByUsername } from "../newapi-client"
 import { sendMail, renderMail } from "../mailer"
 import { cfListDestinations } from "../cloudflare"
 import { normalizePermissions, parsePermissions } from "../permissions"
@@ -402,6 +402,31 @@ export async function testMail(env: Env, request: Request): Promise<Response> {
   }
 
   return json({ ok: true, message: `已发送至 ${to}` })
+}
+
+/**
+ * GET /api/admin/newapi-test —— 诊断 NewAPI 管理员令牌是否有效。
+ * 调 /api/user/search（需 admin 权限），返回连通状态与具体错误，便于排查。
+ */
+export async function testNewApi(env: Env, request: Request): Promise<Response> {
+  await requireAdmin(env, request)
+  if (!isNewApiConfigured(env)) {
+    return json({ ok: false, configured: false, error: "NewAPI 未配置（缺少 BASE_URL 或 ADMIN_TOKEN）" })
+  }
+  try {
+    // 用 admin token 调一个最轻量的管理接口
+    const user = await findUserByUsername(env, "doulor")
+    return json({
+      ok: true,
+      configured: true,
+      message: user ? `令牌有效，查询到账号 #${user.id}` : "令牌有效，查询接口正常（无匹配账号）",
+    })
+  } catch (err) {
+    if (err instanceof ApiError) {
+      return json({ ok: false, configured: true, code: err.code, error: err.message })
+    }
+    return json({ ok: false, configured: true, error: String(err) })
+  }
 }
 
 /**

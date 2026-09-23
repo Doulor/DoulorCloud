@@ -1,11 +1,13 @@
 import * as React from "react"
-import { AlertTriangle, Inbox, Loader2, Mail, Plus, RotateCcw, Settings, Trash2 } from "lucide-react"
+import { useSearchParams } from "react-router-dom"
+import { AlertTriangle, CheckCheck, Inbox, Loader2, Mail, Plus, RotateCcw, Settings, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -41,6 +43,10 @@ function fmtTime(iso: string) {
 type View = "list" | "message"
 
 export default function EmailPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const pendingMailbox = searchParams.get("mailbox")
+  const pendingMessage = searchParams.get("message")
+
   const [mailboxes, setMailboxes] = React.useState<Mailbox[]>([])
   const [selected, setSelected] = React.useState<Mailbox | null>(null)
   const [messages, setMessages] = React.useState<MailMessage[]>([])
@@ -66,8 +72,10 @@ export default function EmailPage() {
     try {
       const res = await emailApi.list()
       setMailboxes(res.mailboxes)
+      // 优先级：显式指定 > query 参数 ?mailbox= > 主邮箱 > 第一个
       const target =
         res.mailboxes.find((m) => m.id === selectId) ??
+        (pendingMailbox ? res.mailboxes.find((m) => m.id === pendingMailbox) : null) ??
         res.mailboxes.find((m) => m.primary) ??
         res.mailboxes[0] ??
         null
@@ -77,7 +85,7 @@ export default function EmailPage() {
     } finally {
       setLoadingMailboxes(false)
     }
-  }, [])
+  }, [pendingMailbox])
 
   const loadMessages = React.useCallback(async (mailboxId: string) => {
     setLoadingMessages(true)
@@ -101,6 +109,22 @@ export default function EmailPage() {
   React.useEffect(() => {
     if (selected) void loadMessages(selected.id)
   }, [selected?.id, loadMessages])
+
+  // 带 ?message= 跳转过来：messages 加载后自动打开该邮件，然后清掉 query
+  React.useEffect(() => {
+    if (!pendingMessage || !selected || loadingMessages) return
+    const target = messages.find((m) => m.id === pendingMessage)
+    if (target) {
+      void handleOpenMessage(target)
+      // 清除 query 参数，避免刷新又触发
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev)
+        next.delete("mailbox")
+        next.delete("message")
+        return next
+      })
+    }
+  }, [pendingMessage, messages, selected, loadingMessages])
 
   // 更新本地未读数（邮件已读时）
   /**
@@ -151,6 +175,8 @@ export default function EmailPage() {
     }
   }
 
+  const totalUnread = mailboxes.reduce((sum, m) => sum + (m.unread ?? 0), 0)
+
   const handleMarkUnread = async () => {
     if (!opened || !selected) return
     setMessages((prev) => prev.map((m) => (m.id === opened.id ? { ...m, read: false } : m)))
@@ -162,6 +188,23 @@ export default function EmailPage() {
       toast.success("已标记为未读")
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "操作失败")
+    }
+  }
+
+  // 一键全部已读：把所有 mailbox 的未读标已读
+  const handleMarkAllRead = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const res = await emailApi.markAllRead()
+      // 本地：所有邮箱未读清零、当前列表全标已读
+      setMailboxes((prev) => prev.map((m) => ({ ...m, unread: 0 })))
+      setMessages((prev) => prev.map((m) => ({ ...m, read: true })))
+      toast.success(`已标记 ${res.updated} 封邮件为已读`)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "操作失败")
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -256,10 +299,24 @@ export default function EmailPage() {
         title="邮箱"
         description={`${mailboxes.length} / ${MAX_MAILBOXES} 个地址`}
         actions={
-          <Button onClick={() => setAddOpen(true)} disabled={!canAdd}>
-            <Plus className="h-4 w-4" />
-            添加邮箱
-          </Button>
+          <div className="flex items-center gap-2">
+            {totalUnread > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void handleMarkAllRead()}
+                disabled={busy}
+              >
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCheck className="h-4 w-4" />}
+                全部已读
+                <Badge variant="secondary" className="ml-1">{totalUnread}</Badge>
+              </Button>
+            )}
+            <Button onClick={() => setAddOpen(true)} disabled={!canAdd}>
+              <Plus className="h-4 w-4" />
+              添加邮箱
+            </Button>
+          </div>
         }
       />
 

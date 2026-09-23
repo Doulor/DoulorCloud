@@ -5,6 +5,7 @@ import {
   Loader2,
   Pencil,
   Plus,
+  Megaphone,
   RefreshCw,
   Search,
   ShieldBan,
@@ -22,6 +23,7 @@ import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
+import { Textarea } from "@/components/ui/textarea"
 import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -65,7 +67,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { adminApi, donationApi, HttpError } from "@/services/api"
+import { adminApi, announcementApi, donationApi, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 /** 可授权的功能（与后端 permissions.ts 的 FEATURES 保持一致） */
 const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
@@ -81,6 +83,7 @@ import type {
   AdminFrpNode,
   Donation,
   ReservedSubdomain,
+  Announcement,
   AdminInvite,
   AdminProxySubscription,
   AdminSettings,
@@ -156,6 +159,19 @@ export default function AdminPage() {
   const [reservedName, setReservedName] = React.useState("")
   const [reservedNote, setReservedNote] = React.useState("")
   const [reservedBusy, setReservedBusy] = React.useState(false)
+
+  // 公告 / 网站动态
+  const [announcements, setAnnouncements] = React.useState<Announcement[]>([])
+  const [announcementLoading, setAnnouncementLoading] = React.useState(false)
+  const [announcementOpen, setAnnouncementOpen] = React.useState(false)
+  const [announcementBusy, setAnnouncementBusy] = React.useState(false)
+  const [annDraft, setAnnDraft] = React.useState<{
+    id: string | null
+    title: string
+    body: string
+    category: string
+    pinned: boolean
+  }>({ id: null, title: "", body: "", category: "general", pinned: false })
 
   // 全局设置
   const [settingsStats, setSettingsStats] =
@@ -605,6 +621,58 @@ export default function AdminPage() {
     }
   }
 
+  // ---- 公告 ----
+  const loadAnnouncements = React.useCallback(async () => {
+    setAnnouncementLoading(true)
+    try {
+      const res = await announcementApi.listAll()
+      setAnnouncements(res.announcements)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "加载公告失败")
+    } finally {
+      setAnnouncementLoading(false)
+    }
+  }, [])
+
+  const openAnnouncementDialog = (a?: Announcement) => {
+    setAnnDraft(
+      a
+        ? { id: a.id, title: a.title, body: a.body, category: a.category, pinned: a.pinned }
+        : { id: null, title: "", body: "", category: "general", pinned: false }
+    )
+    setAnnouncementOpen(true)
+  }
+
+  const handleSaveAnnouncement = async () => {
+    if (!annDraft.title.trim() || !annDraft.body.trim()) return
+    setAnnouncementBusy(true)
+    try {
+      if (annDraft.id) {
+        await announcementApi.update(annDraft.id, annDraft)
+        toast.success("已更新")
+      } else {
+        await announcementApi.create(annDraft)
+        toast.success("已发布")
+      }
+      setAnnouncementOpen(false)
+      void loadAnnouncements()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "保存失败")
+    } finally {
+      setAnnouncementBusy(false)
+    }
+  }
+
+  const handleDeleteAnnouncement = async (id: string) => {
+    try {
+      await announcementApi.remove(id)
+      void loadAnnouncements()
+      toast.success("已删除")
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "删除失败")
+    }
+  }
+
   const handleRecalculate = async () => {
     setSettingsBusy(true)
     try {
@@ -715,7 +783,7 @@ export default function AdminPage() {
         description={`已注册用户 ${users.length} 个 · 邀请码 ${invites.length} 个`}
       />
 
-      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp(); if (v === "proxy") void loadProxy(); if (v === "reserved") void loadReserved(); if (v === "donations") void loadDonations() }}>
+      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp(); if (v === "proxy") void loadProxy(); if (v === "reserved") void loadReserved(); if (v === "donations") void loadDonations(); if (v === "announcements") void loadAnnouncements() }}>
         <TabsList className="mb-4">
           <TabsTrigger value="users">
             <Users className="mr-1.5 h-3.5 w-3.5" />
@@ -740,6 +808,10 @@ export default function AdminPage() {
           <TabsTrigger value="donations">
             <Heart className="mr-1.5 h-3.5 w-3.5" />
             捐献
+          </TabsTrigger>
+          <TabsTrigger value="announcements">
+            <Megaphone className="mr-1.5 h-3.5 w-3.5" />
+            公告
           </TabsTrigger>
           <TabsTrigger value="settings">
             <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
@@ -1490,6 +1562,71 @@ export default function AdminPage() {
           )}
         </TabsContent>
 
+        <TabsContent value="announcements">
+          <div className="mb-4 flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              发布网站动态，用户在概览页可见（pinned 优先，最多展示 5 条）
+            </p>
+            <Button size="sm" onClick={() => openAnnouncementDialog()}>
+              <Plus className="h-4 w-4" />
+              发布公告
+            </Button>
+          </div>
+          {announcementLoading ? (
+            <LoadingBlock />
+          ) : announcements.length === 0 ? (
+            <EmptyState
+              icon={Megaphone}
+              title="还没有公告"
+              description="发布公告后，用户会在概览页「网站动态」看到。"
+            />
+          ) : (
+            <div className="space-y-3">
+              {announcements.map((a) => (
+                <Card key={a.id}>
+                  <CardContent className="p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-center gap-2">
+                          {a.pinned && <Badge variant="success">置顶</Badge>}
+                          <Badge variant="secondary">{a.category}</Badge>
+                          <span className="text-xs text-muted-foreground">
+                            {new Date(a.createdAt).toLocaleString("zh-CN")}
+                          </span>
+                        </div>
+                        <p className="text-sm font-medium">{a.title}</p>
+                        <p className="whitespace-pre-wrap text-xs text-muted-foreground">
+                          {a.body}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7"
+                          onClick={() => openAnnouncementDialog(a)}
+                          aria-label="编辑"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                          onClick={() => void handleDeleteAnnouncement(a.id)}
+                          aria-label="删除"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
+        </TabsContent>
+
         <TabsContent value="settings">
           {settingsLoading ? (
             <LoadingBlock />
@@ -1891,6 +2028,81 @@ export default function AdminPage() {
             <Button onClick={() => void handleCreateInvite()} disabled={inviteBusy}>
               {inviteBusy && <Loader2 className="h-4 w-4 animate-spin" />}
               创建
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 公告编辑弹窗 */}
+      <Dialog open={announcementOpen} onOpenChange={setAnnouncementOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{annDraft.id ? "编辑公告" : "发布公告"}</DialogTitle>
+            <DialogDescription>
+              用户在概览页「网站动态」可见，pinned 优先展示。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="annTitle">标题</Label>
+              <Input
+                id="annTitle"
+                placeholder="如：新增内网穿透节点"
+                value={annDraft.title}
+                onChange={(e) => setAnnDraft((d) => ({ ...d, title: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="annBody">正文</Label>
+              <Textarea
+                id="annBody"
+                placeholder="支持换行"
+                rows={4}
+                value={annDraft.body}
+                onChange={(e) => setAnnDraft((d) => ({ ...d, body: e.target.value }))}
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label>分类</Label>
+                <Select
+                  value={annDraft.category}
+                  onValueChange={(v) => setAnnDraft((d) => ({ ...d, category: v }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="general">公告</SelectItem>
+                    <SelectItem value="frp">内网穿透</SelectItem>
+                    <SelectItem value="ai">AI 中转站</SelectItem>
+                    <SelectItem value="proxy">代理节点</SelectItem>
+                    <SelectItem value="storage">网盘</SelectItem>
+                    <SelectItem value="profile">名片</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-end">
+                <div className="flex w-full items-center justify-between rounded-md border p-3">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">置顶</p>
+                    <p className="text-xs text-muted-foreground">优先展示在概览</p>
+                  </div>
+                  <Switch
+                    checked={annDraft.pinned}
+                    onCheckedChange={(v) => setAnnDraft((d) => ({ ...d, pinned: v }))}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAnnouncementOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={() => void handleSaveAnnouncement()} disabled={announcementBusy}>
+              {announcementBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+              {annDraft.id ? "保存" : "发布"}
             </Button>
           </DialogFooter>
         </DialogContent>

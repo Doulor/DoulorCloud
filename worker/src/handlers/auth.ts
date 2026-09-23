@@ -285,13 +285,13 @@ export async function me(env: Env, request: Request): Promise<Response> {
     .all<{ id: string; filename: string; r2_key: string; size: number; created_at: string }>()
 
   const recentMessages = await env.DB.prepare(
-    `SELECT m.id, m.from_address, m.subject, m.read, m.received_at
+    `SELECT m.id, m.from_address, m.subject, m.read, m.received_at, m.mailbox_id
        FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id
       WHERE mb.user_id = ?
       ORDER BY m.received_at DESC LIMIT 5`
   )
     .bind(user.id)
-    .all<{ id: string; from_address: string; subject: string; read: number; received_at: string }>()
+    .all<{ id: string; from_address: string; subject: string; read: number; received_at: string; mailbox_id: string }>()
 
   const recent = await env.DB.prepare(
     "SELECT id, action, detail, created_at FROM audit_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 5"
@@ -337,6 +337,7 @@ export async function me(env: Env, request: Request): Promise<Response> {
       subject: m.subject,
       read: m.read === 1,
       receivedAt: m.received_at,
+      mailboxId: m.mailbox_id,
     })),
     recentActivity: (recent.results ?? []).map((r) => ({
       id: r.id,

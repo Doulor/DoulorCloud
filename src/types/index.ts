@@ -113,6 +113,7 @@ export interface RecentMessage {
   subject: string
   read: boolean
   receivedAt: string
+  mailboxId: string
 }
 
 export interface MeResponse {

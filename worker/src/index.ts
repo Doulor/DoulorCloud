@@ -165,6 +165,9 @@ async function route(env: Env, request: Request): Promise<Response> {
   if (routePath === "/admin/mail-test" && method === "POST") {
     return adminHandlers.testMail(env, request)
   }
+  if (routePath === "/admin/newapi-test" && method === "GET") {
+    return adminHandlers.testNewApi(env, request)
+  }
   if (routePath === "/admin/mail-status" && method === "GET") {
     return adminHandlers.mailStatus(env, request)
   }
