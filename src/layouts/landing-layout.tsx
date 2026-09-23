@@ -18,18 +18,18 @@ export function LandingLayout() {
         <div className="mx-auto flex h-14 w-full max-w-6xl items-center gap-4 px-4 lg:px-8">
           <Logo />
           <nav className="ml-6 hidden items-center gap-1 md:flex">
-            <a
-              href="#features"
+            <Link
+              to="/#features"
               className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
             >
               功能
-            </a>
-            <a
-              href="#how"
+            </Link>
+            <Link
+              to="/#how"
               className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
             >
               原理
-            </a>
+            </Link>
           </nav>
           <div className="ml-auto flex items-center gap-2">
             <ThemeToggle />

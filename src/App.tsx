@@ -22,6 +22,7 @@ import SettingsPage from "@/pages/settings"
 import DonationPage from "@/pages/donations"
 import AchievementsPage from "@/pages/achievements"
 import AdminPage from "@/pages/admin"
+import CommunityPage from "@/pages/community"
 import NotFoundPage from "@/pages/not-found"
 
 function FullScreenLoader() {
@@ -77,6 +78,8 @@ export default function App() {
             </RedirectIfAuthed>
           }
         />
+        <Route path="community" element={<CommunityPage />} />
+        <Route path="community/:id" element={<CommunityPage />} />
       </Route>
 
       <Route
@@ -97,6 +100,8 @@ export default function App() {
         <Route path="proxy" element={<ProxyPage />} />
         <Route path="tempbox" element={<TempboxPage />} />
         <Route path="profile" element={<ProfilePage />} />
+        <Route path="community" element={<CommunityPage inDashboard />} />
+        <Route path="community/:id" element={<CommunityPage inDashboard />} />
         <Route path="achievements" element={<AchievementsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="donations" element={<DonationPage />} />
