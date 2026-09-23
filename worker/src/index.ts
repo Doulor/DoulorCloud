@@ -76,6 +76,12 @@ async function route(
   if (routePath === "/settings/nickname" && method === "PUT") {
     return identityHandlers.updateNickname(env, request)
   }
+  if (routePath === "/settings/avatar" && method === "POST") {
+    return identityHandlers.uploadAvatar(env, request)
+  }
+  if (routePath === "/settings/avatar" && method === "DELETE") {
+    return identityHandlers.deleteAvatar(env, request)
+  }
 
   // DNS
   if (routePath === "/dns" && method === "GET") {
@@ -652,6 +658,12 @@ export default {
           request,
           url.pathname.slice(4)
         )
+      }
+
+      // 公开头像：/u/<username>/avatar（无需鉴权，走平台桶）
+      const avatarMatch = url.pathname.match(/^\/u\/([^/]+)\/avatar$/)
+      if (avatarMatch) {
+        return identityHandlers.serveAvatar(env, decodeURIComponent(avatarMatch[1]))
       }
 
       // 名片资源：/p/<用户名>/<avatar|background|music|music-cover>（公开，无需鉴权）
