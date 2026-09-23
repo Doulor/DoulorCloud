@@ -140,17 +140,6 @@ async function route(
     )
   }
 
-  // 网页端回信：以用户自己的域名邮箱身份发出（本平台唯一的对外发信出口）
-  const messageReplyMatch = routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)\/reply$/)
-  if (messageReplyMatch && method === "POST") {
-    return emailHandlers.replyMessage(
-      env,
-      request,
-      decodeURIComponent(messageReplyMatch[1]),
-      decodeURIComponent(messageReplyMatch[2])
-    )
-  }
-
   // Admin: 邀请码
   if (routePath === "/admin/invites" && method === "GET") {
     return adminHandlers.listInvites(env, request)
@@ -411,6 +400,17 @@ async function route(
     )
   }
 
+  // 网页端回信：以用户自己的域名邮箱身份发出（本平台唯一的对外发信出口）
+  const messageReplyMatch = routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)\/reply$/)
+  if (messageReplyMatch && method === "POST") {
+    return emailHandlers.replyMessage(
+      env,
+      request,
+      decodeURIComponent(messageReplyMatch[1]),
+      decodeURIComponent(messageReplyMatch[2])
+    )
+  }
+
   // 一键全部已读：把该用户所有 mailbox 的未读标已读
   if (routePath === "/mailbox/read-all" && method === "POST") {
     return emailHandlers.markAllRead(env, request)
@@ -437,6 +437,9 @@ async function route(
   }
   if (routePath === "/profile" && method === "PUT") {
     return profileHandlers.updateProfile(env, request)
+  }
+  if (routePath === "/profile/preview" && method === "POST") {
+    return profileHandlers.previewProfile(env, request)
   }
   if (routePath === "/profile/publish" && method === "POST") {
     return profileHandlers.setPublished(env, request)

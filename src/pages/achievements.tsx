@@ -8,7 +8,6 @@ import {
   Globe,
   HardDrive,
   Inbox,
-  Loader2,
   LogIn,
   Mail,
   Network,
