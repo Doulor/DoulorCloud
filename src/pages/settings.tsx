@@ -32,8 +32,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { authApi, settingsApi, HttpError } from "@/services/api"
+import { authApi, identityApi, settingsApi, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
+import { UserAvatar } from "@/components/user-avatar"
 import type { EmailSettings } from "@/types"
 
 export default function SettingsPage() {
@@ -60,6 +61,12 @@ export default function SettingsPage() {
     password: "",
     step: "request" as "request" | "confirm",
   })
+
+  // 昵称与头像
+  const avatarInputRef = React.useRef<HTMLInputElement>(null)
+  const [nickDraft, setNickDraft] = React.useState(user?.nickname ?? "")
+  const [hasAvatar, setHasAvatar] = React.useState(user?.hasAvatar ?? false)
+  const [nickBusy, setNickBusy] = React.useState(false)
 
   const loadEmailSettings = React.useCallback(async () => {
     try {
@@ -268,6 +275,115 @@ export default function SettingsPage() {
                     : "—"}
                 </span>
               </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* 昵称与头像 */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">昵称与头像</CardTitle>
+            <CardDescription>
+              社区与侧边栏会展示昵称；未设置时显示用户名。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center gap-4">
+              <UserAvatar
+                username={user?.username ?? ""}
+                nickname={nickDraft || null}
+                hasAvatar={hasAvatar}
+                className="h-16 w-16"
+              />
+              <div className="space-y-2">
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/gif"
+                  ref={avatarInputRef}
+                  className="hidden"
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0]
+                    if (!f) return
+                    try {
+                      await identityApi.uploadAvatar(f)
+                      setHasAvatar(true)
+                      if (user) setUser({ ...user, hasAvatar: true })
+                      toast.success("头像已更新")
+                    } catch (err) {
+                      toast.error(
+                        err instanceof HttpError ? err.message : "上传失败"
+                      )
+                    }
+                  }}
+                />
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => avatarInputRef.current?.click()}
+                  >
+                    上传头像
+                  </Button>
+                  {hasAvatar && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive"
+                      onClick={async () => {
+                        try {
+                          await identityApi.deleteAvatar()
+                          setHasAvatar(false)
+                          if (user) setUser({ ...user, hasAvatar: false })
+                          toast.success("头像已删除")
+                        } catch (err) {
+                          toast.error(
+                            err instanceof HttpError ? err.message : "删除失败"
+                          )
+                        }
+                      }}
+                    >
+                      删除头像
+                    </Button>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  支持 JPG/PNG/WebP/GIF，上限 2 MB
+                </p>
+              </div>
+            </div>
+            <div className="flex items-end gap-2">
+              <div className="flex-1 space-y-2">
+                <Label htmlFor="nick">昵称</Label>
+                <Input
+                  id="nick"
+                  value={nickDraft}
+                  onChange={(e) => setNickDraft(e.target.value)}
+                  placeholder="2-16 位中文/英文/数字/下划线"
+                  maxLength={16}
+                />
+              </div>
+              <Button
+                disabled={nickBusy}
+                onClick={async () => {
+                  setNickBusy(true)
+                  try {
+                    const res = await identityApi.updateNickname(
+                      nickDraft.trim()
+                    )
+                    setNickDraft(res.nickname ?? "")
+                    if (user) setUser({ ...user, nickname: res.nickname })
+                    toast.success("昵称已更新")
+                  } catch (err) {
+                    toast.error(
+                      err instanceof HttpError ? err.message : "保存失败"
+                    )
+                  } finally {
+                    setNickBusy(false)
+                  }
+                }}
+              >
+                保存
+              </Button>
             </div>
           </CardContent>
         </Card>

@@ -35,6 +35,8 @@ import {
   type Profile,
   type ProfileContact,
   type ProfileOverview,
+  type R2BucketsResponse,
+  type R2Operations,
   type ReservedSubdomain,
   type ProxyOverview,
   type AdminProxySubscription,
@@ -827,4 +829,120 @@ export const myInviteApi = {
       `/my-invites/${encodeURIComponent(id)}`,
       { method: "DELETE" }
     ),
+}
+
+// ---- 身份资料（昵称 / 头像）----
+
+export const identityApi = {
+  updateNickname: (nickname: string) =>
+    request<{ nickname: string | null }>("/settings/nickname", {
+      method: "PUT",
+      body: JSON.stringify({ nickname }),
+    }),
+
+  uploadAvatar: (file: File) => {
+    const headers = new Headers()
+    headers.set("Content-Type", file.type)
+    return request<{ key: string }>("/settings/avatar", {
+      method: "POST",
+      body: file,
+      headers,
+    })
+  },
+
+  deleteAvatar: () =>
+    request<{ ok: boolean }>("/settings/avatar", { method: "DELETE" }),
+}
+
+// ---- R2 多桶管理（管理员） ----
+
+export const r2AdminApi = {
+  /** 桶列表 + 用量概览 + 各桶用户 */
+  buckets: () => request<R2BucketsResponse>("/admin/r2/buckets"),
+
+  /** 用全局 token 自动发现所有账户及其桶 */
+  discover: () =>
+    request<{
+      available: boolean
+      reason?: string
+      accounts: {
+        id: string
+        name: string
+        buckets: { name: string; createdAt: string | null; imported: boolean }[]
+      }[]
+    }>("/admin/r2/discover"),
+
+  create: (payload: {
+    id: string
+    name: string
+    accountId?: string
+    endpoint: string
+    bucketName: string
+    accessKeyId: string
+    secretAccessKey: string
+    analyticsToken?: string
+    maxUsers?: number
+    quotaPerUser?: number
+    sortOrder?: number
+    /** 'user' = 用户网盘桶；'platform' = 平台数据桶 */
+    kind?: string
+  }) =>
+    request<{ ok: boolean; id: string }>("/admin/r2/buckets", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  update: (id: string, payload: Partial<{
+    name: string
+    accountId: string
+    endpoint: string
+    bucketName: string
+    accessKeyId: string
+    secretAccessKey: string
+    analyticsToken: string
+    maxUsers: number
+    quotaPerUser: number
+    sortOrder: number
+    enabled: boolean
+    kind: string
+  }>) =>
+    request<{ ok: boolean }>(`/admin/r2/buckets/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  remove: (id: string) =>
+    request<{ ok: boolean }>(`/admin/r2/buckets/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  test: (id: string) =>
+    request<{ ok: boolean; message?: string; error?: string; objectCount?: number }>(
+      `/admin/r2/buckets/${encodeURIComponent(id)}/test`,
+      { method: "POST" }
+    ),
+
+  writeTest: (id: string) =>
+    request<{ ok: boolean; message?: string; error?: string }>(
+      `/admin/r2/buckets/${encodeURIComponent(id)}/write-test`,
+      { method: "POST" }
+    ),
+
+  /** A/B 类操作数（未配置 Analytics 令牌时 configured:false） */
+  operations: (id: string) =>
+    request<R2Operations>(`/admin/r2/buckets/${encodeURIComponent(id)}/operations`),
+
+  /** 改派用户到指定桶（bucketId 为空 = 回到默认桶） */
+  assign: (username: string, bucketId: string) =>
+    request<{ ok: boolean }>("/admin/r2/assign", {
+      method: "PUT",
+      body: JSON.stringify({ username, bucketId }),
+    }),
+
+  /** 把所有未分配桶的用户一次性迁入指定桶 */
+  assignAll: (bucketId: string, force = false) =>
+    request<{ ok: boolean; moved: number }>("/admin/r2/assign-all", {
+      method: "PUT",
+      body: JSON.stringify({ bucketId, force }),
+    }),
 }
