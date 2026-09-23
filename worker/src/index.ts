@@ -19,6 +19,7 @@ import * as tempboxHandlers from "./handlers/tempbox"
 import * as announcementHandlers from "./handlers/announcements"
 import * as r2AdminHandlers from "./handlers/r2-admin"
 import * as achievementHandlers from "./handlers/achievements"
+import * as communityHandlers from "./handlers/community"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
 
@@ -425,6 +426,21 @@ async function route(
   }
   if (routePath === "/profile/domain" && method === "POST") {
     return profileHandlers.bindProfileDomain(env, request)
+  }
+
+  // ---- 社区（公开可读）----
+  if (routePath === "/community/posts" && method === "GET") {
+    return communityHandlers.listPosts(env, request)
+  }
+  // commentsMatch 必须在 postMatch 之前，否则 /posts/<id>/comments 会被
+  // postMatch 的 ^/community/posts/([^/]+)$ 截获
+  const communityCommentsMatch = routePath.match(/^\/community\/posts\/([^/]+)\/comments$/)
+  if (communityCommentsMatch && method === "GET") {
+    return communityHandlers.listComments(env, request, decodeURIComponent(communityCommentsMatch[1]))
+  }
+  const communityPostMatch = routePath.match(/^\/community\/posts\/([^/]+)$/)
+  if (communityPostMatch && method === "GET") {
+    return communityHandlers.getPost(env, request, decodeURIComponent(communityPostMatch[1]))
   }
 
   // ---- R2 直链网盘 ----
