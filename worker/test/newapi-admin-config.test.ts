@@ -64,6 +64,8 @@ describe("GET /api/admin/newapi/config", () => {
 
   it("返回当前来源与掩码，不下发明文", async () => {
     const admin = await makeUser({ role: "admin" })
+    // 该接口会顺带探测一次连通性，打桩避免测试依赖真实网络
+    restore = stubNewApi(() => jsonResponse({ success: true, message: "", data: [] }))
     const res = await fetchSelf(authRequest(admin, "/api/admin/newapi/config"))
     expect(res.status).toBe(200)
     const data = await res.json<{
@@ -72,13 +74,26 @@ describe("GET /api/admin/newapi/config", () => {
       configured: boolean
       adminUserId: string
       baseUrl: string | null
+      health: { ok: boolean }
     }>()
     expect(data.source).toBe("env")
     expect(data.configured).toBe(true)
     expect(data.baseUrl).toBe(BASE)
+    expect(data.health.ok).toBe(true)
     // 掩码形如 abcd********wxyz，且不含完整令牌
     expect(data.maskedToken).toMatch(/^\S{4}\*{8}\S{4}$/)
     expect(JSON.stringify(data)).not.toContain(env.NEWAPI_ADMIN_TOKEN!)
+  })
+
+  it("令牌失效时 health 报告具体错误", async () => {
+    const admin = await makeUser({ role: "admin" })
+    restore = stubNewApi(() =>
+      jsonResponse({ success: false, message: "Unauthorized, invalid access token" })
+    )
+    const res = await fetchSelf(authRequest(admin, "/api/admin/newapi/config"))
+    const data = await res.json<{ health: { ok: boolean; message: string } }>()
+    expect(data.health.ok).toBe(false)
+    expect(data.health.message).toContain("invalid access token")
   })
 })
 
@@ -145,11 +160,41 @@ describe("PUT /api/admin/newapi/config", () => {
     expect(row?.admin_user_id).toBe("7")
 
     // 后续调用改用库内凭据（缓存已失效）
+    restore = stubNewApi(() => jsonResponse({ success: true, message: "", data: [] }))
     const after = await fetchSelf(authRequest(admin, "/api/admin/newapi/config"))
     const info = await after.json<{ source: string; adminUserId: string; maskedToken: string }>()
     expect(info.source).toBe("db")
     expect(info.adminUserId).toBe("7")
     expect(info.maskedToken).toBe(`new-${"*".repeat(8)}efgh`)
+  })
+
+  it("保存时同步修复同 id 的账号绑定（管理员令牌 = root 用户令牌）", async () => {
+    const admin = await makeUser({ role: "admin" })
+    // 造一条 id=1 的账号绑定，enc_token 故意留旧值
+    await env.DB.prepare(
+      `INSERT INTO newapi_accounts
+         (user_id, newapi_user_id, username, email, enc_token, group_name, quota, used_quota, request_count, synced_at, created_at)
+       VALUES (?, 1, 'root', 'root@doulor.cn', 'v1:old:token', 'default', 0, 0, 0, NULL, ?)`
+    ).bind(admin.id, new Date().toISOString()).run()
+
+    restore = stubNewApi(() => jsonResponse({ success: true, message: "", data: [] }))
+    const token = "fresh-root-token-abcdefgh"
+    const res = await fetchSelf(
+      authRequest(admin, "/api/admin/newapi/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, adminUserId: "1" }),
+      })
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json<{ healedAccounts: number }>()
+    expect(body.healedAccounts).toBe(1)
+
+    const row = await env.DB.prepare(
+      "SELECT enc_token FROM newapi_accounts WHERE newapi_user_id = 1"
+    ).first<{ enc_token: string }>()
+    expect(row?.enc_token.startsWith("v1:")).toBe(true)
+    expect(row?.enc_token).not.toBe("v1:old:token")
   })
 
   it("空令牌被拒（400）", async () => {
