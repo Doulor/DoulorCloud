@@ -844,3 +844,15 @@ export interface Notification {
   read: boolean
   created_at: string
 }
+
+export interface AdminCommunityPost {
+  id: string
+  body: string
+  created_at: string
+  deleted_at: string | null
+  like_count: number
+  comment_count: number
+  share_count: number
+  username: string
+  nickname: string | null
+}

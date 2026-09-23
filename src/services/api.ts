@@ -48,6 +48,7 @@ import {
   type Post,
   type CommentNode,
   type Notification,
+  type AdminCommunityPost,
 } from "@/types"
 
 /**
@@ -371,6 +372,19 @@ export const adminApi = {
     request<void>(`/admin/proxy/subscriptions/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
+
+  // 社区管理
+  listCommunityPosts: (params?: { user?: string; includeDeleted?: boolean }) => {
+    const sp = new URLSearchParams()
+    if (params?.user) sp.set("user", params.user)
+    if (params?.includeDeleted) sp.set("includeDeleted", "1")
+    const qs = sp.toString()
+    return request<{ posts: AdminCommunityPost[] }>(`/admin/community/posts${qs ? `?${qs}` : ""}`)
+  },
+  deleteCommunityPost: (id: string) =>
+    request<{ ok: boolean }>(`/admin/community/posts/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  restoreCommunityPost: (id: string) =>
+    request<{ ok: boolean }>(`/admin/community/posts/${encodeURIComponent(id)}/restore`, { method: "POST" }),
 }
 
 // ---- 账户设置（真实邮箱验证 / 改名 / 改邮箱 / 通知开关）----
@@ -625,7 +639,7 @@ export const proxyApi = {
 // ---- Email（收件箱） ----
 
 export const emailApi = {
-  list: () => request<{ mailboxes: Mailbox[] }>("/mailbox"),
+  list: () => request<{ mailboxes: Mailbox[]; limit: number }>("/mailbox"),
 
   create: (payload: { localPart: string }) =>
     request<{ mailbox: Mailbox }>("/mailbox", {

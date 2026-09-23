@@ -7,6 +7,7 @@ import {
   Pencil,
   Plus,
   Megaphone,
+  Database,
   RefreshCw,
   Search,
   ShieldBan,
@@ -19,6 +20,8 @@ import {
   UserCheck,
   Users,
   Heart,
+  MessagesSquare,
+  RotateCcw,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -68,7 +71,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { adminApi, announcementApi, donationApi, HttpError } from "@/services/api"
+import { adminApi, announcementApi, donationApi, r2AdminApi, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 /** 可授权的功能（与后端 permissions.ts 的 FEATURES 保持一致） */
 const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
@@ -88,6 +91,9 @@ import type {
   Donation,
   ReservedSubdomain,
   Announcement,
+  R2Bucket,
+  R2BucketsResponse,
+  R2Operations,
   AdminInvite,
   AdminProxySubscription,
   AdminSettings,
@@ -96,6 +102,7 @@ import type {
   FeatureKey,
   MailMessage,
   Permissions,
+  AdminCommunityPost,
 } from "@/types"
 import { FEATURE_LABELS } from "@/types"
 
@@ -185,6 +192,44 @@ export default function AdminPage() {
     pinned: boolean
   }>({ id: null, title: "", body: "", category: "general", pinned: false })
 
+  // R2 多桶管理
+  const [r2Data, setR2Data] = React.useState<R2BucketsResponse | null>(null)
+  const [r2Loading, setR2Loading] = React.useState(false)
+  const [r2Ops, setR2Ops] = React.useState<Record<string, R2Operations>>({})
+  const [r2BucketOpen, setR2BucketOpen] = React.useState(false)
+  const [r2Busy, setR2Busy] = React.useState(false)
+  /** 正在编辑的桶 id；null = 新建 */
+  const [r2EditId, setR2EditId] = React.useState<string | null>(null)
+  const [r2Draft, setR2Draft] = React.useState({
+    id: "",
+    name: "",
+    accountId: "",
+    endpoint: "",
+    bucketName: "",
+    accessKeyId: "",
+    secretAccessKey: "",
+    analyticsToken: "",
+    maxUsers: "8",
+    quotaPerUser: "1073741824",
+    sortOrder: "0",
+    kind: "user",
+  })
+  /** 用户改派：{ 用户名: 目标桶 id } 的临时选择 */
+  const [assignTarget, setAssignTarget] = React.useState<Record<string, string>>({})
+  /** 自动发现的账户与桶（用全局 token 拉取） */
+  const [r2Discovered, setR2Discovered] = React.useState<{
+    available: boolean
+    reason?: string
+    accounts: {
+      id: string
+      name: string
+      buckets: { name: string; createdAt: string | null; imported: boolean }[]
+    }[]
+  } | null>(null)
+  const [r2DiscoverLoading, setR2DiscoverLoading] = React.useState(false)
+  /** 选中的「账户|桶名」组合 */
+  const [r2Pick, setR2Pick] = React.useState("")
+
   // 全局设置
   const [settingsStats, setSettingsStats] =
     React.useState<AdminSettings["stats"] | null>(null)
@@ -211,6 +256,23 @@ export default function AdminPage() {
   const [tempboxMaxFileMb, setTempboxMaxFileMb] = React.useState("256")
   const [tempboxMaxFiles, setTempboxMaxFiles] = React.useState("20")
   const [tempboxUploadLogin, setTempboxUploadLogin] = React.useState(true)
+  // 邀请码模块权限：基础权限（不消耗额度）vs 受限模式
+  const [inviteBasic, setInviteBasic] = React.useState<Record<string, boolean>>({
+    r2: true,
+    ai: false,
+    frp: false,
+    proxy: false,
+  })
+
+  // ---- 社区管理 ----
+  const [communityPosts, setCommunityPosts] = React.useState<AdminCommunityPost[]>([])
+  const [communityLoading, setCommunityLoading] = React.useState(false)
+  const [communityShowDeleted, setCommunityShowDeleted] = React.useState(false)
+  const [communityUserFilter, setCommunityUserFilter] = React.useState("")
+  // 社区广场设置
+  const [communityEnabled, setCommunityEnabled] = React.useState(true)
+  const [communityPostMaxImages, setCommunityPostMaxImages] = React.useState("9")
+  const [communityImageMaxKb, setCommunityImageMaxKb] = React.useState("1024")
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -474,6 +536,40 @@ export default function AdminPage() {
     }
   }
 
+  // ---- 社区管理 ----
+
+  const loadCommunity = React.useCallback(async () => {
+    setCommunityLoading(true)
+    try {
+      const res = await adminApi.listCommunityPosts({ includeDeleted: communityShowDeleted, user: communityUserFilter || undefined })
+      setCommunityPosts(res.posts)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "加载失败")
+    } finally {
+      setCommunityLoading(false)
+    }
+  }, [communityShowDeleted, communityUserFilter])
+
+  const handleDeleteCommunityPost = async (id: string) => {
+    try {
+      await adminApi.deleteCommunityPost(id)
+      toast.success("帖子已删除")
+      await loadCommunity()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "删除失败")
+    }
+  }
+
+  const handleRestoreCommunityPost = async (id: string) => {
+    try {
+      await adminApi.restoreCommunityPost(id)
+      toast.success("帖子已恢复")
+      await loadCommunity()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "恢复失败")
+    }
+  }
+
   // ---- 全局设置 ----
 
   const loadSettings = React.useCallback(async () => {
@@ -516,6 +612,18 @@ export default function AdminPage() {
       )
       setTempboxMaxFiles(s.tempbox_max_files ?? "20")
       setTempboxUploadLogin(s.tempbox_upload_requires_login === "1")
+      setCommunityEnabled(s.community_enabled === "1")
+      setCommunityPostMaxImages(s.community_post_max_images ?? "9")
+      setCommunityImageMaxKb(
+        String(Math.round(Number(s.community_image_max_bytes ?? 1048576) / 1024))
+      )
+      const basicRaw = (s.invite_basic_features ?? "r2").split(",").map((x) => x.trim()).filter(Boolean)
+      setInviteBasic({
+        r2: basicRaw.includes("r2"),
+        ai: basicRaw.includes("ai"),
+        frp: basicRaw.includes("frp"),
+        proxy: basicRaw.includes("proxy"),
+      })
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "加载设置失败")
     } finally {
@@ -542,6 +650,14 @@ export default function AdminPage() {
         tempbox_max_file_bytes: Math.round(Number(tempboxMaxFileMb) * 1024 * 1024),
         tempbox_max_files: Math.round(Number(tempboxMaxFiles) || 20),
         tempbox_upload_requires_login: tempboxUploadLogin,
+        community_enabled: communityEnabled,
+        community_post_max_images: Math.round(Number(communityPostMaxImages) || 9),
+        community_image_max_bytes: Math.round(Number(communityImageMaxKb) * 1024),
+        // 邀请码模块权限：基础 vs 受限，逗号分隔
+        invite_basic_features: Object.entries(inviteBasic)
+          .filter(([, on]) => on)
+          .map(([k]) => k)
+          .join(","),
       })
       toast.success("设置已保存")
       await loadSettings()
@@ -727,6 +843,227 @@ export default function AdminPage() {
     }
   }
 
+  // ---- R2 多桶 ----
+  const loadR2 = React.useCallback(async () => {
+    setR2Loading(true)
+    try {
+      const res = await r2AdminApi.buckets()
+      setR2Data(res)
+      // 顺带拉各桶的操作数（未配置 token 的会返回 configured:false）
+      const ops: Record<string, R2Operations> = {}
+      await Promise.all(
+        res.buckets
+          .filter((b) => b.id)
+          .map(async (b) => {
+            try {
+              ops[b.id] = await r2AdminApi.operations(b.id)
+            } catch {
+              // 忽略单桶失败，不影响整体
+            }
+          })
+      )
+      setR2Ops(ops)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "加载 R2 桶失败")
+    } finally {
+      setR2Loading(false)
+    }
+  }, [])
+
+  const openR2BucketDialog = (
+    bucket?: R2Bucket,
+    prefill?: { endpoint?: string; bucketName?: string }
+  ) => {
+    if (bucket) {
+      setR2EditId(bucket.id)
+      setR2Draft({
+        id: bucket.id,
+        name: bucket.name,
+        accountId: bucket.accountId ?? "",
+        endpoint: bucket.endpoint,
+        bucketName: bucket.bucketName,
+        accessKeyId: "",
+        secretAccessKey: "",
+        analyticsToken: "",
+        maxUsers: String(bucket.maxUsers),
+        quotaPerUser: String(bucket.quotaPerUser),
+        sortOrder: String(bucket.sortOrder),
+        kind: bucket.kind ?? "user",
+      })
+    } else {
+      setR2EditId(null)
+      setR2Draft({
+        id: "",
+        name: "",
+        accountId: "",
+        endpoint: prefill?.endpoint ?? "",
+        bucketName: prefill?.bucketName ?? "",
+        accessKeyId: "",
+        secretAccessKey: "",
+        analyticsToken: "",
+        maxUsers: "8",
+        quotaPerUser: "1073741824",
+        sortOrder: "0",
+        kind: "user",
+      })
+      setR2Pick("")
+      // 新建时拉一次可选桶列表（用全局 token 自动发现）
+      void loadR2Discover()
+    }
+    setR2BucketOpen(true)
+  }
+
+  /** 用全局 token 拉取所有账户及其桶 */
+  const loadR2Discover = React.useCallback(async () => {
+    setR2DiscoverLoading(true)
+    try {
+      const res = await r2AdminApi.discover()
+      setR2Discovered(res)
+    } catch (err) {
+      setR2Discovered({
+        available: false,
+        reason: err instanceof HttpError ? err.message : "自动发现失败",
+        accounts: [],
+      })
+    } finally {
+      setR2DiscoverLoading(false)
+    }
+  }, [])
+
+  /** 选中某个「账户|桶」后自动填充 endpoint / 桶名 / 账户 ID / 默认名称 */
+  const handlePickBucket = (value: string) => {
+    setR2Pick(value)
+    const [accountId, bucketName] = value.split("|")
+    if (!accountId || !bucketName) return
+    const acc = r2Discovered?.accounts.find((a) => a.id === accountId)
+    setR2Draft((d) => ({
+      ...d,
+      accountId,
+      bucketName,
+      endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+      // 名称/ id 建议值，用户可改
+      name: d.name || `${acc?.name ?? accountId.slice(0, 8)} / ${bucketName}`,
+      id: d.id || bucketName.replace(/[^a-z0-9_-]/gi, "").slice(0, 40),
+    }))
+  }
+
+  const handleSaveR2Bucket = async () => {
+    if (!r2Draft.name.trim() || !r2Draft.endpoint.trim() || !r2Draft.bucketName.trim()) {
+      toast.error(
+        r2Pick || r2EditId
+          ? "名称不能为空"
+          : "请先从上方选择一个桶（或展开「高级选项」手动填写端点与桶名）"
+      )
+      return
+    }
+    setR2Busy(true)
+    try {
+      const base = {
+        name: r2Draft.name,
+        accountId: r2Draft.accountId || undefined,
+        endpoint: r2Draft.endpoint,
+        bucketName: r2Draft.bucketName,
+        maxUsers: Number(r2Draft.maxUsers) || 8,
+        quotaPerUser: Number(r2Draft.quotaPerUser) || 1073741824,
+        sortOrder: Number(r2Draft.sortOrder) || 0,
+      }
+      if (r2EditId) {
+        await r2AdminApi.update(r2EditId, {
+          ...base,
+          kind: r2Draft.kind,
+          // 留空表示不修改凭据
+          ...(r2Draft.accessKeyId ? { accessKeyId: r2Draft.accessKeyId } : {}),
+          ...(r2Draft.secretAccessKey ? { secretAccessKey: r2Draft.secretAccessKey } : {}),
+          ...(r2Draft.analyticsToken ? { analyticsToken: r2Draft.analyticsToken } : {}),
+        })
+        toast.success("已更新")
+      } else {
+        if (!r2Draft.id.trim()) {
+          toast.error("新建时必须填 id")
+          setR2Busy(false)
+          return
+        }
+        await r2AdminApi.create({
+          ...base,
+          id: r2Draft.id,
+          kind: r2Draft.kind,
+          accessKeyId: r2Draft.accessKeyId,
+          secretAccessKey: r2Draft.secretAccessKey,
+          ...(r2Draft.analyticsToken ? { analyticsToken: r2Draft.analyticsToken } : {}),
+        })
+        toast.success("已创建")
+      }
+      setR2BucketOpen(false)
+      void loadR2()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "保存失败")
+    } finally {
+      setR2Busy(false)
+    }
+  }
+
+  const handleDeleteR2Bucket = async (id: string, name: string) => {
+    if (!confirm(`确定删除桶「${name}」？仍有用户分配时会被拒绝。`)) return
+    try {
+      await r2AdminApi.remove(id)
+      void loadR2()
+      toast.success("已删除")
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "删除失败")
+    }
+  }
+
+  const handleTestR2Bucket = async (id: string, write: boolean) => {
+    try {
+      const res = write ? await r2AdminApi.writeTest(id) : await r2AdminApi.test(id)
+      if (res.ok) toast.success(res.message ?? "连通正常")
+      else toast.error(res.error ?? "测试失败")
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "测试失败")
+    }
+  }
+
+  const handleAssignBucket = async (username: string, bucketId: string) => {
+    try {
+      await r2AdminApi.assign(username, bucketId)
+      void loadR2()
+      toast.success(`已把 ${username} 改派到 ${bucketId || "默认桶"}`)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "改派失败")
+    }
+  }
+
+  /** 把所有未分配用户一次性迁入某桶（接管 env 默认桶时用） */
+  const handleAssignAll = async (bucketId: string, bucketName: string) => {
+    if (
+      !confirm(
+        `把全部「未分配桶」的用户迁入「${bucketName}」？\n\n` +
+          `只改数据库归属，不搬文件。若该桶与默认桶指向同一物理桶则完全安全。`
+      )
+    )
+      return
+    try {
+      const res = await r2AdminApi.assignAll(bucketId)
+      void loadR2()
+      toast.success(`已迁入 ${res.moved} 个用户`)
+    } catch (err) {
+      if (err instanceof HttpError && err.code === "BUCKET_FULL") {
+        // 超上限：明确告知后可强制
+        if (confirm(`${err.message}\n\n仍要强制迁移吗？`)) {
+          try {
+            const res = await r2AdminApi.assignAll(bucketId, true)
+            void loadR2()
+            toast.success(`已强制迁入 ${res.moved} 个用户`)
+          } catch (e2) {
+            toast.error(e2 instanceof HttpError ? e2.message : "迁移失败")
+          }
+        }
+        return
+      }
+      toast.error(err instanceof HttpError ? err.message : "迁移失败")
+    }
+  }
+
   const handleRecalculate = async () => {
     setSettingsBusy(true)
     try {
@@ -837,7 +1174,7 @@ export default function AdminPage() {
         description={`已注册用户 ${users.length} 个 · 邀请码 ${invites.length} 个`}
       />
 
-      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp(); if (v === "proxy") void loadProxy(); if (v === "reserved") void loadReserved(); if (v === "donations") void loadDonations(); if (v === "announcements") void loadAnnouncements(); if (v === "inviteQuotas") void loadInviteQuotas() }}>
+      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp(); if (v === "proxy") void loadProxy(); if (v === "reserved") void loadReserved(); if (v === "donations") void loadDonations(); if (v === "announcements") void loadAnnouncements(); if (v === "inviteQuotas") void loadInviteQuotas(); if (v === "r2") void loadR2(); if (v === "community") void loadCommunity() }}>
         <TabsList className="mb-4">
           <TabsTrigger value="users">
             <Users className="mr-1.5 h-3.5 w-3.5" />
@@ -870,6 +1207,14 @@ export default function AdminPage() {
           <TabsTrigger value="announcements">
             <Megaphone className="mr-1.5 h-3.5 w-3.5" />
             公告
+          </TabsTrigger>
+          <TabsTrigger value="r2">
+            <Database className="mr-1.5 h-3.5 w-3.5" />
+            R2 存储
+          </TabsTrigger>
+          <TabsTrigger value="community">
+            <MessagesSquare className="mr-1.5 h-3.5 w-3.5" />
+            社区
           </TabsTrigger>
           <TabsTrigger value="settings">
             <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
@@ -1488,18 +1833,24 @@ export default function AdminPage() {
                               u.featureRemaining[
                                 f as keyof typeof u.featureRemaining
                               ]
+                            const isBasic =
+                              inviteQuotas!.basicFeatures?.includes(f) ?? false
                             return (
                               <span key={f}>
                                 {inviteQuotas!.featureLabels[f]}{" "}
-                                <span
-                                  className={
-                                    remain > 0
-                                      ? "font-semibold text-emerald-600 dark:text-emerald-400"
-                                      : "text-muted-foreground"
-                                  }
-                                >
-                                  {remain}
-                                </span>
+                                {isBasic ? (
+                                  <Badge variant="outline">基础</Badge>
+                                ) : (
+                                  <span
+                                    className={
+                                      remain > 0
+                                        ? "font-semibold text-emerald-600 dark:text-emerald-400"
+                                        : "text-muted-foreground"
+                                    }
+                                  >
+                                    {remain}
+                                  </span>
+                                )}
                               </span>
                             )
                           })}
@@ -1764,6 +2115,453 @@ export default function AdminPage() {
                   </CardContent>
                 </Card>
               ))}
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="r2">
+          <div className="mb-4 flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              多桶横向扩容：免费额度每账户 10 GB。用户开通网盘时自动分配到人数最少的桶，
+              每桶人数上限与每人配额可随时调整。
+            </p>
+            <Button size="sm" onClick={() => openR2BucketDialog()}>
+              <Plus className="h-4 w-4" />
+              添加桶
+            </Button>
+          </div>
+
+          {r2Loading ? (
+            <LoadingBlock />
+          ) : !r2Data || (r2Data.buckets.length === 0 && !r2Data.legacyBucket) ? (
+            <EmptyState
+              icon={Database}
+              title="还没有配置 R2 桶"
+              description="添加桶后，新开通网盘的用户会被自动分配。"
+            />
+          ) : (
+            <div className="space-y-4">
+              {/* 免费额度图例 */}
+              <div className="flex flex-wrap items-center gap-4 rounded-lg border bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">Cloudflare 免费额度（每月）</span>
+                <span>存储 {formatBytes(r2Data.freeTier.storageBytes)}</span>
+                <span>A 类操作 {r2Data.freeTier.classAOps.toLocaleString()}</span>
+                <span>B 类操作 {r2Data.freeTier.classBOps.toLocaleString()}</span>
+              </div>
+
+              {/* 各桶卡片 */}
+              {[...r2Data.buckets, ...(r2Data.legacyBucket ? [r2Data.legacyBucket] : [])].map(
+                (b) => {
+                  const s = b.stats
+                  const userPct = b.maxUsers ? Math.min((s.users / b.maxUsers) * 100, 100) : 0
+                  const capacityPct =
+                    s.capacityBytes > 0 ? Math.min((s.usedBytes / s.capacityBytes) * 100, 100) : 0
+                  const ops = b.id ? r2Ops[b.id] : undefined
+                  return (
+                    <Card key={b.id || "legacy"}>
+                      <CardHeader>
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="space-y-1">
+                            <CardTitle className="flex items-center gap-2 text-base">
+                              <Database className="h-4 w-4 text-muted-foreground" />
+                              {b.name}
+                              {b.kind === "platform" && (
+                                <Badge variant="secondary">平台数据</Badge>
+                              )}
+                              {!b.enabled && <Badge variant="secondary">已停用</Badge>}
+                              {b.id === "" && <Badge variant="outline">默认桶</Badge>}
+                            </CardTitle>
+                            <CardDescription className="font-mono text-xs">
+                              {b.bucketName}
+                              {b.accountId ? ` · ${b.accountId.slice(0, 8)}…` : ""}
+                              {b.id === "" && " · 来自环境变量，未纳入数据库管理"}
+                            </CardDescription>
+                          </div>
+                          {b.id !== "" ? (
+                            <div className="flex items-center gap-1.5">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => void handleTestR2Bucket(b.id, false)}
+                              >
+                                连通测试
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => void handleTestR2Bucket(b.id, true)}
+                              >
+                                读写测试
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8"
+                                onClick={() => openR2BucketDialog(b)}
+                                aria-label="编辑"
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                onClick={() => void handleDeleteR2Bucket(b.id, b.name)}
+                                aria-label="删除"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          ) : (
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() =>
+                                  openR2BucketDialog(undefined, {
+                                    endpoint: b.endpoint,
+                                    bucketName: b.bucketName,
+                                  })
+                                }
+                              >
+                                <Plus className="h-3.5 w-3.5" />
+                                纳入管理
+                              </Button>
+                              {r2Data.assignableBuckets.length > 0 && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => {
+                                    const first = r2Data.assignableBuckets[0]
+                                    void handleAssignAll(first.id, first.name)
+                                  }}
+                                >
+                                  用户迁入 {r2Data.assignableBuckets[0].name}
+                                </Button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        {/* 存储用量：占免费额度百分比 */}
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="text-muted-foreground">存储占用（免费额度）</span>
+                            <span className="font-medium">
+                              {formatBytes(s.usedBytes)}
+                              <span className="ml-1 text-xs text-muted-foreground">
+                                / {formatBytes(r2Data.freeTier.storageBytes)}（
+                                {s.storagePercent.toFixed(1)}%）
+                              </span>
+                            </span>
+                          </div>
+                          <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
+                            <div
+                              className={`h-full rounded-full transition-all ${
+                                s.storagePercent > 85
+                                  ? "bg-destructive"
+                                  : s.storagePercent > 60
+                                    ? "bg-amber-500"
+                                    : "bg-primary"
+                              }`}
+                              style={{ width: `${s.storagePercent}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* 容量分配 + 人数分配：仅用户网盘桶有意义 */}
+                        {b.kind !== "platform" && b.maxUsers > 0 && (
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="text-muted-foreground">容量分配</span>
+                              <span className="font-medium">
+                                {formatBytes(s.usedBytes)}
+                                <span className="ml-1 text-xs text-muted-foreground">
+                                  / {formatBytes(s.capacityBytes)}（{capacityPct.toFixed(1)}%）
+                                </span>
+                              </span>
+                            </div>
+                            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                              <div
+                                className="h-full rounded-full bg-emerald-500 transition-all"
+                                style={{ width: `${capacityPct}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 人数分配 */}
+                        {b.kind === "platform" ? (
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="rounded-md border px-3 py-2">
+                              <p className="text-xs text-muted-foreground">用途</p>
+                              <p className="text-sm font-semibold">名片 + 分享箱</p>
+                            </div>
+                            <div className="rounded-md border px-3 py-2">
+                              <p className="text-xs text-muted-foreground">文件数</p>
+                              <p className="text-sm font-semibold">{s.fileCount}</p>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                            <div className="rounded-md border px-3 py-2">
+                              <p className="text-xs text-muted-foreground">已分配用户</p>
+                              <p className="text-sm font-semibold">
+                                {s.users} / {b.maxUsers || "—"}
+                              </p>
+                            </div>
+                            <div className="rounded-md border px-3 py-2">
+                              <p className="text-xs text-muted-foreground">文件数</p>
+                              <p className="text-sm font-semibold">{s.fileCount}</p>
+                            </div>
+                            <div className="rounded-md border px-3 py-2">
+                              <p className="text-xs text-muted-foreground">每人配额</p>
+                              <p className="text-sm font-semibold">
+                                {formatBytes(b.quotaPerUser)}
+                              </p>
+                            </div>
+                            <div className="rounded-md border px-3 py-2">
+                              <p className="text-xs text-muted-foreground">人数占用</p>
+                              <p className="text-sm font-semibold">{userPct.toFixed(0)}%</p>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* A/B 类操作数 */}
+                        {b.id !== "" && (
+                          <div className="space-y-2 rounded-md border p-3">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-medium">本月操作数</span>
+                              {!ops?.configured && (
+                                <span className="text-xs text-muted-foreground">
+                                  {ops?.reason ?? "未接入 Analytics"}
+                                </span>
+                              )}
+                              {ops?.error && (
+                                <span className="text-xs text-destructive">
+                                  {ops.error.slice(0, 60)}
+                                </span>
+                              )}
+                            </div>
+                            {ops?.configured && !ops.error && (
+                              <>
+                                <div className="space-y-1">
+                                  <div className="flex items-center justify-between text-xs">
+                                    <span className="text-muted-foreground">A 类操作</span>
+                                    <span>
+                                      {(ops.classA ?? 0).toLocaleString()} /{" "}
+                                      {ops.freeTier.classAOps.toLocaleString()}（
+                                      {(ops.classAPercent ?? 0).toFixed(1)}%）
+                                    </span>
+                                  </div>
+                                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                                    <div
+                                      className={`h-full rounded-full ${
+                                        (ops.classAPercent ?? 0) > 85
+                                          ? "bg-destructive"
+                                          : "bg-primary"
+                                      }`}
+                                      style={{ width: `${ops.classAPercent ?? 0}%` }}
+                                    />
+                                  </div>
+                                </div>
+                                <div className="space-y-1">
+                                  <div className="flex items-center justify-between text-xs">
+                                    <span className="text-muted-foreground">B 类操作</span>
+                                    <span>
+                                      {(ops.classB ?? 0).toLocaleString()} /{" "}
+                                      {ops.freeTier.classBOps.toLocaleString()}（
+                                      {(ops.classBPercent ?? 0).toFixed(1)}%）
+                                    </span>
+                                  </div>
+                                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                                    <div
+                                      className={`h-full rounded-full ${
+                                        (ops.classBPercent ?? 0) > 85
+                                          ? "bg-destructive"
+                                          : "bg-emerald-500"
+                                      }`}
+                                      style={{ width: `${ops.classBPercent ?? 0}%` }}
+                                    />
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        )}
+
+                        {/* 用户列表 + 改派 */}
+                        {b.users.length > 0 && (
+                          <div className="space-y-1">
+                            <p className="text-xs font-medium text-muted-foreground">
+                              已分配用户（点击「改派」可迁移到其他桶，仅改归属不搬文件）
+                            </p>
+                            <div className="divide-y rounded-md border">
+                              {b.users.map((u) => (
+                                <div
+                                  key={u.userId}
+                                  className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm"
+                                >
+                                  <div className="flex min-w-0 items-center gap-2">
+                                    <span className="font-mono">{u.username}</span>
+                                    {!u.enabled && (
+                                      <Badge variant="secondary" className="text-xs">
+                                        已停用
+                                      </Badge>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-xs text-muted-foreground">
+                                      {formatBytes(u.usedBytes)} / {formatBytes(u.quotaBytes)} ·{" "}
+                                      {u.fileCount} 文件
+                                    </span>
+                                    {b.id !== "" && (
+                                      <>
+                                        <Select
+                                          value={assignTarget[u.username] ?? b.id}
+                                          onValueChange={(v) =>
+                                            setAssignTarget((p) => ({
+                                              ...p,
+                                              [u.username]: v,
+                                            }))
+                                          }
+                                        >
+                                          <SelectTrigger className="h-7 w-32 text-xs">
+                                            <SelectValue />
+                                          </SelectTrigger>
+                                          <SelectContent>
+                                            {r2Data.assignableBuckets.map((ab) => (
+                                              <SelectItem key={ab.id} value={ab.id}>
+                                                {ab.name}
+                                              </SelectItem>
+                                            ))}
+                                          </SelectContent>
+                                        </Select>
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          className="h-7 text-xs"
+                                          onClick={() =>
+                                            void handleAssignBucket(
+                                              u.username,
+                                              assignTarget[u.username] ?? b.id
+                                            )
+                                          }
+                                        >
+                                          改派
+                                        </Button>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  )
+                }
+              )}
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="community">
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <div className="relative max-w-xs flex-1">
+              <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder="按用户名筛选"
+                value={communityUserFilter}
+                onChange={(e) => setCommunityUserFilter(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") void loadCommunity() }}
+                className="pl-8"
+              />
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <Switch
+                checked={communityShowDeleted}
+                onCheckedChange={(v) => { setCommunityShowDeleted(v); }}
+              />
+              显示已删帖
+            </label>
+            <Button variant="outline" size="sm" onClick={() => void loadCommunity()}>
+              <RefreshCw className="h-4 w-4" />
+              刷新
+            </Button>
+          </div>
+
+          {communityLoading ? (
+            <LoadingBlock />
+          ) : communityPosts.length === 0 ? (
+            <EmptyState
+              icon={MessagesSquare}
+              title="没有帖子"
+              description="当前筛选条件下没有社区帖子。"
+            />
+          ) : (
+            <div className="rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-32">作者</TableHead>
+                    <TableHead>内容</TableHead>
+                    <TableHead className="w-28">时间</TableHead>
+                    <TableHead className="w-28">互动</TableHead>
+                    <TableHead className="w-20">状态</TableHead>
+                    <TableHead className="w-24">操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {communityPosts.map((p) => (
+                    <TableRow key={p.id}>
+                      <TableCell className="font-medium">
+                        {p.nickname || p.username}
+                        <div className="text-xs text-muted-foreground">@{p.username}</div>
+                      </TableCell>
+                      <TableCell className="max-w-xs truncate" title={p.body}>
+                        {p.body}
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {fmtTime(p.created_at)}
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {p.like_count} 赞 · {p.comment_count} 评 · {p.share_count} 转
+                      </TableCell>
+                      <TableCell>
+                        {p.deleted_at ? (
+                          <Badge variant="destructive">已删</Badge>
+                        ) : (
+                          <Badge variant="secondary">正常</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {p.deleted_at ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void handleRestoreCommunityPost(p.id)}
+                          >
+                            <RotateCcw className="h-4 w-4" />
+                            恢复
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void handleDeleteCommunityPost(p.id)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            删除
+                          </Button>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
             </div>
           )}
         </TabsContent>
@@ -2042,6 +2840,91 @@ export default function AdminPage() {
                 </CardContent>
               </Card>
 
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">社区广场</CardTitle>
+                  <CardDescription>
+                    用户发帖、评论、点赞的公共社区；关闭后页面提示不可用。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="communityPostMaxImages">每帖图片上限</Label>
+                      <Input
+                        id="communityPostMaxImages"
+                        type="number"
+                        min={0}
+                        max={9}
+                        value={communityPostMaxImages}
+                        onChange={(e) => setCommunityPostMaxImages(e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="communityImageMaxKb">单图大小上限（KB）</Label>
+                      <Input
+                        id="communityImageMaxKb"
+                        type="number"
+                        min={1}
+                        value={communityImageMaxKb}
+                        onChange={(e) => setCommunityImageMaxKb(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between rounded-md border p-3">
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium">启用社区广场</p>
+                      <p className="text-xs text-muted-foreground">
+                        关闭后用户无法访问社区页面
+                      </p>
+                    </div>
+                    <Switch
+                      checked={communityEnabled}
+                      onCheckedChange={setCommunityEnabled}
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">邀请码模块权限</CardTitle>
+                  <CardDescription>
+                    每个模块可设为「基础权限」或「受限模式」。
+                    基础权限：创建邀请码时人人可勾选，不消耗模块额度。
+                    受限模式：需消耗模块额度（捐献获批或手动发放）。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {Object.keys(inviteBasic).map((f) => (
+                    <div
+                      key={f}
+                      className="flex items-center justify-between rounded-md border p-3"
+                    >
+                      <div className="space-y-0.5">
+                        <p className="text-sm font-medium">
+                          {FEATURE_LABELS[f as FeatureKey] ?? f}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {inviteBasic[f]
+                            ? "基础权限：创建邀请码时人人可勾选，不消耗模块额度"
+                            : "受限模式：勾选需消耗模块额度（捐献获批或管理员发放）"}
+                        </p>
+                      </div>
+                      <Switch
+                        checked={inviteBasic[f] ?? false}
+                        onCheckedChange={(v) =>
+                          setInviteBasic((prev) => ({ ...prev, [f]: v }))
+                        }
+                      />
+                    </div>
+                  ))}
+                  <p className="text-xs text-muted-foreground">
+                    基础权限的模块不消耗额度；受限模块靠捐献或手动发放获取转授额度。
+                  </p>
+                </CardContent>
+              </Card>
+
               <div className="flex justify-end">
                 <Button onClick={() => void handleSaveSettings()} disabled={settingsBusy}>
                   {settingsBusy && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -2160,39 +3043,51 @@ export default function AdminPage() {
                     决定该用户能给邀请码授予多少模块权限
                   </p>
                   <div className="mt-2 space-y-2">
-                    {quotaDetail.quotaFeatures.map((f) => (
-                      <div key={f} className="flex items-center gap-2">
-                        <Label className="w-24 text-xs">
-                          {quotaDetail.featureLabels[f]}
-                        </Label>
-                        <Input
-                          type="number"
-                          min={0}
-                          className="h-8 w-24"
-                          disabled={quotaDetailBusy}
-                          defaultValue={
-                            quotaDetail.quota.featureQuota[
-                              f as keyof typeof quotaDetail.quota.featureQuota
-                            ]
-                          }
-                          onBlur={(e) =>
-                            void handleAdjustQuota(quotaDetail.username, {
-                              featureQuota: {
-                                [f]: Number(e.target.value),
-                              } as Partial<FeatureCounts>,
-                            })
-                          }
-                        />
-                        <span className="text-xs text-muted-foreground">
-                          已用{" "}
-                          {
-                            quotaDetail.quota.featureUsed[
-                              f as keyof typeof quotaDetail.quota.featureUsed
-                            ]
-                          }
-                        </span>
-                      </div>
-                    ))}
+                    {quotaDetail.quotaFeatures.map((f) => {
+                      const isBasic =
+                        quotaDetail.basicFeatures?.includes(f) ?? false
+                      return (
+                        <div key={f} className="flex items-center gap-2">
+                          <Label className="w-24 text-xs">
+                            {quotaDetail.featureLabels[f]}
+                          </Label>
+                          {isBasic ? (
+                            <span className="text-xs text-muted-foreground">
+                              基础权限（不消耗额度）
+                            </span>
+                          ) : (
+                            <>
+                              <Input
+                                type="number"
+                                min={0}
+                                className="h-8 w-24"
+                                disabled={quotaDetailBusy}
+                                defaultValue={
+                                  quotaDetail.quota.featureQuota[
+                                    f as keyof typeof quotaDetail.quota.featureQuota
+                                  ]
+                                }
+                                onBlur={(e) =>
+                                  void handleAdjustQuota(quotaDetail.username, {
+                                    featureQuota: {
+                                      [f]: Number(e.target.value),
+                                    } as Partial<FeatureCounts>,
+                                  })
+                                }
+                              />
+                              <span className="text-xs text-muted-foreground">
+                                已用{" "}
+                                {
+                                  quotaDetail.quota.featureUsed[
+                                    f as keyof typeof quotaDetail.quota.featureUsed
+                                  ]
+                                }
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
 
@@ -2219,7 +3114,14 @@ export default function AdminPage() {
                             <span className="font-mono">{inv.code}</span>
                             <Badge variant="outline">域名 · 邮箱 · 名片</Badge>
                             {extra.map((f) => (
-                              <Badge key={f} variant="secondary">
+                              <Badge
+                                key={f}
+                                variant={
+                                  quotaDetail.basicFeatures?.includes(f)
+                                    ? "outline"
+                                    : "secondary"
+                                }
+                              >
                                 {quotaDetail.featureLabels[f]}
                               </Badge>
                             ))}
@@ -2399,6 +3301,206 @@ export default function AdminPage() {
             <Button onClick={() => void handleSaveAnnouncement()} disabled={announcementBusy}>
               {announcementBusy && <Loader2 className="h-4 w-4 animate-spin" />}
               {annDraft.id ? "保存" : "发布"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* R2 桶编辑弹窗 */}
+      <Dialog open={r2BucketOpen} onOpenChange={setR2BucketOpen}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{r2EditId ? "编辑 R2 桶" : "添加 R2 桶"}</DialogTitle>
+            <DialogDescription>
+              {r2EditId
+                ? "凭据与端点一般无需改动，通常只调人数上限与每人配额。"
+                : "直接选一个桶即可 —— 端点、账户 ID 会自动填好，凭据用全局 token 无需填写。"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            {/* 新建时：从已发现的桶里选（大幅简化填写） */}
+            {!r2EditId && (
+              <div className="space-y-2">
+                <Label>选择桶</Label>
+                {r2DiscoverLoading ? (
+                  <p className="text-xs text-muted-foreground">正在读取账户与桶…</p>
+                ) : r2Discovered?.available ? (
+                  <>
+                    <Select value={r2Pick} onValueChange={handlePickBucket}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="选择一个桶" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {r2Discovered.accounts.flatMap((a) =>
+                          a.buckets.map((b) => (
+                            <SelectItem
+                              key={`${a.id}|${b.name}`}
+                              value={`${a.id}|${b.name}`}
+                              disabled={b.imported}
+                            >
+                              {a.name} / {b.name}
+                              {b.imported ? "（已导入）" : ""}
+                            </SelectItem>
+                          ))
+                        )}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      列表来自全局 token 可访问的所有账户。也可以跳过此项，在下面手动填写。
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {r2Discovered?.reason ?? "无法自动发现，请在下面手动填写"}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* 桶类型：决定用途 */}
+            <div className="space-y-2">
+              <Label>桶类型</Label>
+              <Select
+                value={r2Draft.kind}
+                onValueChange={(v) => setR2Draft((d) => ({ ...d, kind: v }))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="user">用户网盘桶（存用户文件，参与分配）</SelectItem>
+                  <SelectItem value="platform">平台数据桶（存名片/分享箱，全局唯一）</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {r2Draft.kind === "platform"
+                  ? "平台数据桶只应有一个：存 profiles/（名片头像/背景/音乐）与 temporary/（分享箱）。不参与用户分配、不占用户配额。"
+                  : "用户网盘桶：存 <用户名>/ 前缀的文件，新用户开通时自动分配到人数最少的桶。"}
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label htmlFor="r2id">标识 id</Label>
+                <Input
+                  id="r2id"
+                  placeholder="b2"
+                  value={r2Draft.id}
+                  disabled={Boolean(r2EditId)}
+                  onChange={(e) => setR2Draft((d) => ({ ...d, id: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="r2name">显示名</Label>
+                <Input
+                  id="r2name"
+                  placeholder="2 号桶 network2"
+                  value={r2Draft.name}
+                  onChange={(e) => setR2Draft((d) => ({ ...d, name: e.target.value }))}
+                />
+              </div>
+            </div>
+            <details className="rounded-md border" open={Boolean(r2EditId) || !r2Discovered?.available}>
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground">
+                高级选项（端点 / 桶名 / 账户 ID / 凭据）— 选桶后已自动填好，一般无需改动
+              </summary>
+              <div className="space-y-4 border-t px-3 pb-3 pt-3">
+                <div className="space-y-2">
+                  <Label htmlFor="r2endpoint">S3 Endpoint</Label>
+                  <Input
+                    id="r2endpoint"
+                    placeholder="https://<account>.r2.cloudflarestorage.com"
+                    className="font-mono text-xs"
+                    value={r2Draft.endpoint}
+                    onChange={(e) => setR2Draft((d) => ({ ...d, endpoint: e.target.value }))}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="r2bucket">桶名</Label>
+                    <Input
+                      id="r2bucket"
+                      placeholder="network2"
+                      className="font-mono text-xs"
+                      value={r2Draft.bucketName}
+                      onChange={(e) => setR2Draft((d) => ({ ...d, bucketName: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="r2account">账户 ID</Label>
+                    <Input
+                      id="r2account"
+                      placeholder="d20b3b86…"
+                      className="font-mono text-xs"
+                      value={r2Draft.accountId}
+                      onChange={(e) => setR2Draft((d) => ({ ...d, accountId: e.target.value }))}
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="r2ak">Access Key ID</Label>
+                  <Input
+                    id="r2ak"
+                    placeholder={r2EditId ? "留空则不修改" : "留空 = 用全局 R2_API_TOKEN"}
+                    className="font-mono text-xs"
+                    value={r2Draft.accessKeyId}
+                    onChange={(e) => setR2Draft((d) => ({ ...d, accessKeyId: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="r2sk">Secret Access Key</Label>
+                  <Input
+                    id="r2sk"
+                    type="password"
+                    placeholder={r2EditId ? "留空则不修改" : "留空 = 用全局 R2_API_TOKEN"}
+                    className="font-mono text-xs"
+                    value={r2Draft.secretAccessKey}
+                    onChange={(e) => setR2Draft((d) => ({ ...d, secretAccessKey: e.target.value }))}
+                  />
+                </div>
+              </div>
+            </details>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-2">
+                <Label htmlFor="r2max">人数上限</Label>
+                <Input
+                  id="r2max"
+                  type="number"
+                  min={1}
+                  value={r2Draft.maxUsers}
+                  onChange={(e) => setR2Draft((d) => ({ ...d, maxUsers: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="r2quota">每人配额（字节）</Label>
+                <Input
+                  id="r2quota"
+                  type="number"
+                  min={0}
+                  value={r2Draft.quotaPerUser}
+                  onChange={(e) => setR2Draft((d) => ({ ...d, quotaPerUser: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="r2sort">排序</Label>
+                <Input
+                  id="r2sort"
+                  type="number"
+                  value={r2Draft.sortOrder}
+                  onChange={(e) => setR2Draft((d) => ({ ...d, sortOrder: e.target.value }))}
+                />
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              每人配额 1073741824 字节 = 1 GiB。容量上限 = 人数上限 × 每人配额。
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setR2BucketOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={() => void handleSaveR2Bucket()} disabled={r2Busy}>
+              {r2Busy && <Loader2 className="h-4 w-4 animate-spin" />}
+              {r2EditId ? "保存" : "创建"}
             </Button>
           </DialogFooter>
         </DialogContent>

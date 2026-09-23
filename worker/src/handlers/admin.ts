@@ -5,10 +5,11 @@ import type { Env } from "../env"
 import {
   SETTING_DEFAULTS,
   getSettings,
+  getSetting,
   updateSettings,
   audit as recordAudit,
 } from "../settings"
-import { isR2Configured } from "../r2"
+import { isStorageConfigured } from "../r2"
 import { isNewApiConfigured, getCurrencyInfo, findUserByUsername } from "../newapi-client"
 import { sendMail, renderMail } from "../mailer"
 import { cfListDestinations } from "../cloudflare"
@@ -18,6 +19,7 @@ import { getSettingNumber } from "../settings"
 import {
   QUOTA_FEATURES,
   QUOTA_FEATURE_LABELS,
+  parseBasicFeatures,
   parseCounts,
   refundQuotaForInvite,
   quotaFeaturesOf,
@@ -571,6 +573,22 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
       continue
     }
 
+    // invite_basic_features：逗号分隔的模块名，校验只含合法模块
+    if (key === "invite_basic_features") {
+      const parts = str.split(",").map((s) => s.trim()).filter(Boolean)
+      for (const p of parts) {
+        if (!(QUOTA_FEATURES as readonly string[]).includes(p)) {
+          throw new ApiError(
+            400,
+            `基础权限模块只支持：${QUOTA_FEATURES.join("、")}`,
+            "INVALID_INPUT"
+          )
+        }
+      }
+      values[key] = parts.join(",")
+      continue
+    }
+
     values[key] = str.slice(0, 100)
   }
 
@@ -595,7 +613,7 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
 // POST /api/admin/storage/recalculate —— 以 R2 实际内容重算所有用户用量
 export async function recalculateStorage(env: Env, request: Request): Promise<Response> {
   const admin = await requireAdmin(env, request)
-  if (!isR2Configured(env)) {
+  if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "网盘存储未配置", "R2_NOT_CONFIGURED")
   }
 
@@ -608,6 +626,7 @@ export async function recalculateStorage(env: Env, request: Request): Promise<Re
       used_bytes: number
       file_count: number
       enabled: number
+      bucket_id?: string | null
       created_at: string
       updated_at: string
     }>()
@@ -866,6 +885,7 @@ export async function listInviteQuotas(
     users,
     featureLabels: QUOTA_FEATURE_LABELS,
     quotaFeatures: QUOTA_FEATURES,
+    basicFeatures: [...parseBasicFeatures(await getSetting(env, "invite_basic_features"))],
     baseQuota: base,
   })
 }
@@ -911,6 +931,7 @@ export async function getUserInviteQuota(
     invites: (rows.results ?? []).map(toAdminInvite),
     featureLabels: QUOTA_FEATURE_LABELS,
     quotaFeatures: QUOTA_FEATURES,
+    basicFeatures: [...parseBasicFeatures(await getSetting(env, "invite_basic_features"))],
   })
 }
 
@@ -1036,4 +1057,39 @@ export async function adminDeleteInviteWithRefund(
   )
 
   return new Response(null, { status: 204 })
+}
+
+// ---- 社区管理 ----
+
+/** GET /api/admin/community/posts?user=&includeDeleted= */
+export async function adminListPosts(env: Env, request: Request): Promise<Response> {
+  await requireAdmin(env, request)
+  const url = new URL(request.url)
+  const includeDeleted = url.searchParams.get("includeDeleted") === "1"
+  const user = url.searchParams.get("user")
+  let q = `SELECT p.id, p.body, p.created_at, p.deleted_at, p.like_count, p.comment_count, p.share_count, u.username, u.nickname FROM posts p JOIN users u ON u.id = p.user_id`
+  const binds: unknown[] = []
+  const where: string[] = []
+  if (!includeDeleted) where.push("p.deleted_at IS NULL")
+  if (user) { where.push("u.username = ? COLLATE NOCASE"); binds.push(user) }
+  if (where.length) q += " WHERE " + where.join(" AND ")
+  q += " ORDER BY p.created_at DESC LIMIT 100"
+  const rows = await env.DB.prepare(q).bind(...binds).all()
+  return json({ posts: rows.results ?? [] })
+}
+
+/** DELETE /api/admin/community/posts/:id —— 管理员软删 */
+export async function adminDeletePost(env: Env, request: Request, id: string): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+  await env.DB.prepare("UPDATE posts SET deleted_at=? WHERE id=?").bind(new Date().toISOString(), id).run()
+  await recordAudit(env, admin.id, "admin.community.post.delete", `删帖 ${id}`, request.headers.get("CF-Connecting-IP"))
+  return json({ ok: true })
+}
+
+/** POST /api/admin/community/posts/:id/restore */
+export async function adminRestorePost(env: Env, request: Request, id: string): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+  await env.DB.prepare("UPDATE posts SET deleted_at=NULL WHERE id=?").bind(id).run()
+  await recordAudit(env, admin.id, "admin.community.post.restore", `恢复帖 ${id}`, request.headers.get("CF-Connecting-IP"))
+  return json({ ok: true })
 }

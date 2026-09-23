@@ -323,6 +323,20 @@ async function route(
   if (routePath === "/admin/settings" && method === "PUT") {
     return adminHandlers.updateSettingsHandler(env, request)
   }
+
+  // ---- 社区管理 ----
+  if (routePath === "/admin/community/posts" && method === "GET") {
+    return adminHandlers.adminListPosts(env, request)
+  }
+  const adminCommunityRestoreMatch = routePath.match(/^\/admin\/community\/posts\/([^/]+)\/restore$/)
+  if (adminCommunityRestoreMatch && method === "POST") {
+    return adminHandlers.adminRestorePost(env, request, decodeURIComponent(adminCommunityRestoreMatch[1]))
+  }
+  const adminCommunityPostMatch = routePath.match(/^\/admin\/community\/posts\/([^/]+)$/)
+  if (adminCommunityPostMatch && method === "DELETE") {
+    return adminHandlers.adminDeletePost(env, request, decodeURIComponent(adminCommunityPostMatch[1]))
+  }
+
   if (routePath === "/admin/storage/recalculate" && method === "POST") {
     return adminHandlers.recalculateStorage(env, request)
   }
