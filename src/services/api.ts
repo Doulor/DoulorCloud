@@ -45,6 +45,9 @@ import {
   type TempboxCreated,
   type Subdomain,
   type User,
+  type Post,
+  type CommentNode,
+  type Notification,
 } from "@/types"
 
 /**
@@ -945,4 +948,46 @@ export const r2AdminApi = {
       method: "PUT",
       body: JSON.stringify({ bucketId, force }),
     }),
+}
+
+// ---- 社区广场 ----
+
+export const communityApi = {
+  listPosts: (cursor?: string) =>
+    request<{ posts: Post[]; nextCursor: string | null }>(
+      `/community/posts${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`
+    ),
+  getPost: (id: string) => request<{ post: Post }>(`/community/posts/${encodeURIComponent(id)}`),
+  getComments: (id: string) =>
+    request<{ comments: CommentNode[] }>(`/community/posts/${encodeURIComponent(id)}/comments`),
+  createPost: (body: string, images: string[] = []) =>
+    request<{ post: { id: string } }>("/community/posts", {
+      method: "POST", body: JSON.stringify({ body, images }),
+    }),
+  uploadImage: (postId: string, file: File) => {
+    const headers = new Headers()
+    headers.set("Content-Type", file.type)
+    return request<{ key: string }>(`/community/posts/${encodeURIComponent(postId)}/images`, {
+      method: "POST", body: file, headers,
+    })
+  },
+  toggleLike: (id: string) =>
+    request<{ liked: boolean; likeCount: number }>(`/community/posts/${encodeURIComponent(id)}/like`, { method: "POST" }),
+  share: (id: string) =>
+    request<{ shareCount: number }>(`/community/posts/${encodeURIComponent(id)}/share`, { method: "POST" }),
+  comment: (id: string, body: string, parentId?: string, replyToUserId?: string) =>
+    request<{ comment: { id: string } }>(`/community/posts/${encodeURIComponent(id)}/comments`, {
+      method: "POST", body: JSON.stringify({ body, parentId, replyToUserId }),
+    }),
+  deletePost: (id: string) => request<{ ok: boolean }>(`/community/posts/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  deleteComment: (id: string) => request<{ ok: boolean }>(`/community/comments/${encodeURIComponent(id)}`, { method: "DELETE" }),
+}
+
+// ---- 通知 ----
+
+export const notificationApi = {
+  list: () => request<{ notifications: Notification[] }>("/notifications"),
+  unreadCount: () => request<{ count: number }>("/notifications/unread-count"),
+  markRead: (ids?: string[], all?: boolean) =>
+    request<{ ok: boolean }>("/notifications/read", { method: "POST", body: JSON.stringify({ ids, all }) }),
 }

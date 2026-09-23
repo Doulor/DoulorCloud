@@ -802,3 +802,45 @@ export interface R2Operations {
   classBPercent?: number
   freeTier: { classAOps: number; classBOps: number }
 }
+
+// ---- 社区广场 & 通知 ----
+
+export interface CommunityAuthor {
+  username: string
+  nickname: string | null
+  isAdmin: boolean
+  hasAvatar: boolean
+}
+
+export interface Post {
+  id: string
+  author: CommunityAuthor
+  body: string
+  images: string[]
+  likeCount: number
+  commentCount: number
+  shareCount: number
+  liked: boolean
+  isMine: boolean
+  createdAt: string
+}
+
+export interface CommentNode {
+  id: string
+  body: string
+  createdAt: string
+  author: CommunityAuthor
+  replyTo: string | null
+  likeCount: number
+  replies: CommentNode[]
+}
+
+export interface Notification {
+  id: string
+  type: string
+  actor_id: string | null
+  post_id: string | null
+  comment_id: string | null
+  read: boolean
+  created_at: string
+}
