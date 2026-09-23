@@ -235,6 +235,12 @@ async function route(
   if (routePath === "/admin/newapi-test" && method === "GET") {
     return adminHandlers.testNewApi(env, request)
   }
+  if (routePath === "/admin/newapi/config" && method === "GET") {
+    return adminHandlers.getNewApiAdminConfig(env, request)
+  }
+  if (routePath === "/admin/newapi/config" && method === "PUT") {
+    return adminHandlers.updateNewApiAdminConfig(env, request)
+  }
   if (routePath === "/admin/mail-status" && method === "GET") {
     return adminHandlers.mailStatus(env, request)
   }

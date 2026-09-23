@@ -15,7 +15,20 @@ export default defineConfig(async () => {
       cloudflareTest({
         wrangler: { configPath: "./wrangler.toml" },
         miniflare: {
-          bindings: { TEST_MIGRATIONS: migrations, TEST_SCHEMA_STATEMENTS: schemaStatements },
+          bindings: {
+            TEST_MIGRATIONS: migrations,
+            TEST_SCHEMA_STATEMENTS: schemaStatements,
+            // NewAPI 相关测试所需的最小绑定：
+            //   - BASE_URL：否则 config() 直接因缺地址短路
+            //   - ADMIN_TOKEN / ADMIN_USER_ID：模拟「凭据来自 Worker Secret」，用于验证
+            //     「库内无行时回落 env」这条路径
+            //   - SESSION_SECRET：加密入库的管理员凭据要它派生 AES-GCM 密钥
+            // 值均为假值；测试里所有发往 NewAPI 的出站请求都被打桩接管。
+            NEWAPI_BASE_URL: "https://api.doulor.cn",
+            NEWAPI_ADMIN_TOKEN: "test-env-admin-token-1234",
+            NEWAPI_ADMIN_USER_ID: "1",
+            SESSION_SECRET: "test-session-secret-for-unit-tests",
+          },
         },
       }),
     ],

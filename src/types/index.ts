@@ -426,6 +426,27 @@ export interface AdminSettings {
     newapiKeys: number
   }
 }
+
+// ---- 中转站管理员凭据（令牌可在管理面板在线更新）----
+
+/**
+ * 凭据来源：
+ *   - `db`：管理面板写入的（优先，可在网页更新）
+ *   - `env`：Worker Secret（NEWAPI_ADMIN_TOKEN）
+ *   - `none`：都未配置
+ */
+export type AdminNewApiCredentialSource = "db" | "env" | "none"
+
+export interface AdminNewApiConfig {
+  baseUrl: string | null
+  source: AdminNewApiCredentialSource
+  /** 掩码后的令牌（如 abcd********wxyz）；未配置为 null。明文不下发 */
+  maskedToken: string | null
+  adminUserId: string
+  /** 库内凭据更新时间（source=db 时才有） */
+  updatedAt: string | null
+  configured: boolean
+}
 // ---- 个人名片 ----
 
 export type ContactType =

@@ -10,7 +10,15 @@ import {
   audit as recordAudit,
 } from "../settings"
 import { isStorageConfigured } from "../r2"
-import { isNewApiConfigured, getCurrencyInfo, findUserByUsername } from "../newapi-client"
+import {
+  isNewApiConfigured,
+  getCurrencyInfo,
+  findUserByUsername,
+  getAdminCredentialInfo,
+  saveAdminCredential,
+  verifyAdminCredential,
+  maskToken,
+} from "../newapi-client"
 import { sendMail, renderMail } from "../mailer"
 import { cfListDestinations } from "../cloudflare"
 import { normalizePermissions, parsePermissions } from "../permissions"
@@ -426,8 +434,8 @@ export async function testMail(env: Env, request: Request): Promise<Response> {
  */
 export async function testNewApi(env: Env, request: Request): Promise<Response> {
   await requireAdmin(env, request)
-  if (!isNewApiConfigured(env)) {
-    return json({ ok: false, configured: false, error: "NewAPI 未配置（缺少 BASE_URL 或 ADMIN_TOKEN）" })
+  if (!(await isNewApiConfigured(env))) {
+    return json({ ok: false, configured: false, error: "NewAPI 未配置（缺少 BASE_URL 或管理员令牌）" })
   }
   try {
     // 用 admin token 调一个最轻量的管理接口
@@ -443,6 +451,85 @@ export async function testNewApi(env: Env, request: Request): Promise<Response> 
     }
     return json({ ok: false, configured: true, error: String(err) })
   }
+}
+
+/**
+ * GET /api/admin/newapi/config —— 中转站管理员凭据现状。
+ *
+ * NewAPI 的「系统访问令牌」可在其后台被随时重新生成（每生成一次就覆盖旧值），
+ * 旧令牌立即失效，本站所有管理员级调用随之 401。因此这里把「当前用的是哪份凭据、
+ * 掩码、何时更新、是否还有效」一次性告诉管理面板，并允许在网页上直接换新。
+ *
+ * 只回掩码，明文绝不下发。
+ */
+export async function getNewApiAdminConfig(env: Env, request: Request): Promise<Response> {
+  await requireAdmin(env, request)
+  const info = await getAdminCredentialInfo(env)
+  return json({
+    baseUrl: env.NEWAPI_BASE_URL ?? null,
+    source: info.source,
+    maskedToken: info.maskedToken,
+    adminUserId: info.adminUserId,
+    updatedAt: info.updatedAt,
+    configured: await isNewApiConfigured(env),
+  })
+}
+
+/**
+ * PUT /api/admin/newapi/config —— 更新中转站管理员凭据。
+ *
+ * body: { token?: string; adminUserId?: string }
+ *
+ * 先做一次真实的 ADMIN 级调用验证令牌，通过后才加密落库（避免把错令牌写进去，
+ * 那样会把原本可用的环境变量凭据也一起顶掉）。验证失败直接 400 且不落库。
+ */
+export async function updateNewApiAdminConfig(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+  const body = (await request.json().catch(() => ({}))) as {
+    token?: string
+    adminUserId?: string
+  }
+
+  const token = (body.token ?? "").trim()
+  if (!token) throw new ApiError(400, "请填写新的访问令牌", "INVALID_INPUT")
+  if (token.length > 256) throw new ApiError(400, "令牌长度异常", "INVALID_INPUT")
+
+  const adminUserId = (body.adminUserId ?? "").trim() || "1"
+  if (!/^\d{1,10}$/.test(adminUserId)) {
+    throw new ApiError(400, "用户 id 需为数字", "INVALID_INPUT")
+  }
+
+  // 先验证：用这份令牌真的调一次管理员接口
+  const check = await verifyAdminCredential(env, token, adminUserId)
+  if (!check.ok) {
+    return json(
+      {
+        ok: false,
+        code: "NEWAPI_TOKEN_INVALID",
+        error: `令牌验证失败：${check.message}`,
+      },
+      400
+    )
+  }
+
+  await saveAdminCredential(env, token, adminUserId)
+  await recordAudit(
+    env,
+    admin.id,
+    "admin.newapi.credential.update",
+    `更新中转站管理员凭据（user id ${adminUserId}，令牌 ${maskToken(token)}）`,
+    request.headers.get("CF-Connecting-IP")
+  )
+
+  const info = await getAdminCredentialInfo(env)
+  return json({
+    ok: true,
+    source: info.source,
+    maskedToken: info.maskedToken,
+    adminUserId: info.adminUserId,
+    updatedAt: info.updatedAt,
+    message: "令牌已验证并保存，立即生效",
+  })
 }
 
 /**
@@ -503,7 +590,7 @@ export async function getSettingsHandler(env: Env, request: Request): Promise<Re
   ])
 
   // 试用额度的币种跟随 NewAPI 站点设置，管理面板标签需与之一致
-  const currency = isNewApiConfigured(env)
+  const currency = (await isNewApiConfigured(env))
     ? await getCurrencyInfo(env)
     : { symbol: "$", code: "USD", perUnit: Number(settings.newapi_quota_per_unit) }
 

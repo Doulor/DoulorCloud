@@ -14,34 +14,96 @@
  *   4. 额度用 `POST /api/user/manage` 的 add_quota（mode: override = 绝对赋值）。
  */
 import { ApiError } from "./http"
+import { decryptSecret, encryptSecret } from "./crypto"
 import type { Env } from "./env"
 
 interface NewApiConfig {
   baseUrl: string
-  adminToken: string
+  /** 可能为 null（公开接口不需要它；需要鉴权的调用由 newApiFetch 拦截） */
+  adminToken: string | null
   adminUserId: string
 }
 
-function config(env: Env): NewApiConfig {
+/**
+ * 管理员凭据的来源：
+ *   - `db`：管理面板写入的（优先）—— NewAPI 的「系统访问令牌」随时可能被后台
+ *     轮换，改一次就得重跑 wrangler secret 太别扭，因此允许网页端直接更新
+ *   - `env`：Worker Secret（NEWAPI_ADMIN_TOKEN / NEWAPI_ADMIN_USER_ID）
+ *   - `none`：都没有
+ */
+export type AdminCredentialSource = "db" | "env" | "none"
+
+const CREDENTIAL_CACHE_MS = 5000
+let credentialCache: {
+  at: number
+  token: string | null
+  userId: string
+  source: AdminCredentialSource
+} | null = null
+
+/**
+ * 解析管理员凭据：D1 单据优先，无则回落 env。
+ *
+ * 加一层 5 秒内存缓存：中转站一次页面加载会连调 getCurrencyInfo / checkHealth /
+ * listPricing 等多个接口，每个都要凭据，不缓存会白白多读几次 D1 单行。
+ * 更新凭据时主动失效本进程缓存；其他 isolate 最多晚 5 秒感知。
+ */
+async function resolveAdminCredentials(
+  env: Env
+): Promise<{ token: string | null; userId: string; source: AdminCredentialSource }> {
+  const now = Date.now()
+  if (credentialCache && now - credentialCache.at < CREDENTIAL_CACHE_MS) {
+    return credentialCache
+  }
+
+  let token: string | null = env.NEWAPI_ADMIN_TOKEN ?? null
+  let userId = env.NEWAPI_ADMIN_USER_ID ?? "1"
+  let source: AdminCredentialSource = token ? "env" : "none"
+
+  // 库里的凭据用 SESSION_SECRET 派生的密钥加密；缺密钥则只能用 env
+  if (env.SESSION_SECRET) {
+    try {
+      const row = await env.DB.prepare(
+        "SELECT enc_token, admin_user_id FROM newapi_admin_credentials WHERE id = 1"
+      ).first<{ enc_token: string; admin_user_id: string }>()
+      if (row) {
+        token = await decryptSecret(row.enc_token, env.SESSION_SECRET)
+        userId = row.admin_user_id || "1"
+        source = "db"
+      }
+    } catch (err) {
+      // 解密失败（如 SESSION_SECRET 换过）不应让全站 AI 功能挂掉，回落到 env
+      console.error("读取中转站管理员凭据失败，回落到环境变量:", err)
+    }
+  }
+
+  credentialCache = { at: now, token, userId, source }
+  return credentialCache
+}
+
+async function config(env: Env): Promise<NewApiConfig> {
   const baseUrl = env.NEWAPI_BASE_URL
-  const adminToken = env.NEWAPI_ADMIN_TOKEN
-  if (!baseUrl || !adminToken) {
+  if (!baseUrl) {
     throw new ApiError(
       503,
-      "AI 中转站未配置（缺少 NewAPI 凭据）",
+      "AI 中转站未配置（缺少 NEWAPI_BASE_URL）",
       "NEWAPI_NOT_CONFIGURED"
     )
   }
+  const { token, userId } = await resolveAdminCredentials(env)
   return {
     baseUrl: baseUrl.replace(/\/+$/, ""),
-    adminToken,
-    adminUserId: env.NEWAPI_ADMIN_USER_ID ?? "1",
+    adminToken: token,
+    adminUserId: userId,
   }
 }
 
-export function isNewApiConfigured(env: Env): boolean {
-  return Boolean(env.NEWAPI_BASE_URL && env.NEWAPI_ADMIN_TOKEN)
+/** 站点地址与管理员令牌是否都已具备（决定 AI 功能可用性） */
+export async function isNewApiConfigured(env: Env): Promise<boolean> {
+  if (!env.NEWAPI_BASE_URL) return false
+  return Boolean((await resolveAdminCredentials(env)).token)
 }
+
 
 /** NewAPI 的响应信封：{ success, message, data } */
 interface Envelope<T> {
@@ -55,11 +117,18 @@ async function newApiFetch(
   path: string,
   init: RequestInit & { auth?: "admin" | "none" } = {}
 ): Promise<Response> {
-  const cfg = config(env)
+  const cfg = await config(env)
   const headers = new Headers(init.headers)
   headers.set("Content-Type", "application/json")
 
   if (init.auth !== "none") {
+    if (!cfg.adminToken) {
+      throw new ApiError(
+        503,
+        "AI 中转站未配置管理员令牌",
+        "NEWAPI_NOT_CONFIGURED"
+      )
+    }
     headers.set("Authorization", `Bearer ${cfg.adminToken}`)
     headers.set("New-Api-User", cfg.adminUserId)
   }
@@ -96,7 +165,7 @@ async function unwrap<T>(
     ) {
       throw new ApiError(
         502,
-        `NewAPI ${what}失败：令牌无效或已过期（${message || "Unauthorized"}）。若是管理员操作，请在 NewAPI「个人设置 → 安全设置 → 系统访问令牌」生成 root 账户的访问令牌，再用 wrangler secret put NEWAPI_ADMIN_TOKEN 更新`,
+        `NewAPI ${what}失败：令牌无效或已过期（${message || "Unauthorized"}）。若是管理员操作，请在管理面板「中转站」标签用 root 账户的新访问令牌更新（NewAPI 后台「个人设置 → 安全设置 → 系统访问令牌」可生成/重置）`,
         "NEWAPI_TOKEN_INVALID"
       )
     }
@@ -205,7 +274,7 @@ export interface NewApiHealth {
  * 不抛错——离线也返回 { online:false }，供前端显示「在线/离线」徽章。
  */
 export async function checkHealth(env: Env): Promise<NewApiHealth> {
-  if (!isNewApiConfigured(env)) {
+  if (!(await isNewApiConfigured(env))) {
     return { online: false, latencyMs: -1, version: null }
   }
   const startedAt = Date.now()
@@ -330,7 +399,7 @@ async function asUser(
   path: string,
   init: RequestInit = {}
 ): Promise<Response> {
-  const cfg = config(env)
+  const cfg = await config(env)
   const headers = new Headers(init.headers)
   headers.set("Content-Type", "application/json")
   headers.set("Authorization", `Bearer ${accessToken}`)
@@ -583,5 +652,138 @@ export async function listPricing(
   } catch (err) {
     console.error("读取模型分组失败:", err)
     return []
+  }
+}
+
+// ---- 管理员凭据（管理面板可在线更新）----
+
+/** 清除进程内凭据缓存；写入新凭据后必须调用，否则后续调用仍用旧值 */
+function invalidateAdminCredentialCache(): void {
+  credentialCache = null
+}
+
+/**
+ * 强制下次重新解析凭据。写入路径已自动调用；导出仅供测试与运维脚本
+ * 在直接改库后让本进程立即感知（其他 isolate 最多等 CREDENTIAL_CACHE_MS）。
+ */
+export function resetAdminCredentialCache(): void {
+  invalidateAdminCredentialCache()
+}
+
+/** 掩码展示：<前4>****<后4>，不足以掩码时全星号 */
+export function maskToken(token: string): string {
+  if (token.length <= 8) return "*".repeat(Math.max(token.length, 4))
+  return `${token.slice(0, 4)}${"*".repeat(8)}${token.slice(-4)}`
+}
+
+export interface AdminCredentialInfo {
+  source: AdminCredentialSource
+  /** 掩码后的令牌；未配置时为 null。明文绝不下发 */
+  maskedToken: string | null
+  adminUserId: string
+  /** 库内凭据的更新时间（source=db 时才有） */
+  updatedAt: string | null
+}
+
+/** 读取当前生效的管理员凭据信息（不含明文） */
+export async function getAdminCredentialInfo(
+  env: Env
+): Promise<AdminCredentialInfo> {
+  const { token, userId, source } = await resolveAdminCredentials(env)
+  let updatedAt: string | null = null
+  if (source === "db") {
+    try {
+      const row = await env.DB.prepare(
+        "SELECT updated_at FROM newapi_admin_credentials WHERE id = 1"
+      ).first<{ updated_at: string }>()
+      updatedAt = row?.updated_at ?? null
+    } catch {
+      updatedAt = null
+    }
+  }
+  return {
+    source,
+    maskedToken: token ? maskToken(token) : null,
+    adminUserId: userId,
+    updatedAt,
+  }
+}
+
+/**
+ * 更新管理员凭据（写 D1，加密存储），并立即使缓存失效。
+ * 写入前不校验令牌有效性 —— 由调用方（admin 端点）先做一次真实调用来验证，
+ * 此处只负责落库，避免「验证逻辑」与「存储逻辑」纠缠。
+ */
+export async function saveAdminCredential(
+  env: Env,
+  token: string,
+  adminUserId: string
+): Promise<void> {
+  if (!env.SESSION_SECRET) {
+    throw new ApiError(
+      503,
+      "未配置 SESSION_SECRET，无法安全保存管理员凭据",
+      "NOT_CONFIGURED"
+    )
+  }
+  await env.DB.prepare(
+    `INSERT INTO newapi_admin_credentials (id, enc_token, admin_user_id, updated_at)
+     VALUES (1, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       enc_token = excluded.enc_token,
+       admin_user_id = excluded.admin_user_id,
+       updated_at = excluded.updated_at`
+  )
+    .bind(
+      await encryptSecret(token, env.SESSION_SECRET),
+      adminUserId,
+      new Date().toISOString()
+    )
+    .run()
+  invalidateAdminCredentialCache()
+}
+
+/**
+ * 用给定的令牌做一次管理员级调用，验证其有效性（不落库）。
+ * 调 `/api/user/search`（ADMIN 权限）+ `New-Api-User` 头，与真实业务同一鉴权路径。
+ */
+export async function verifyAdminCredential(
+  env: Env,
+  token: string,
+  adminUserId: string
+): Promise<{ ok: boolean; message: string }> {
+  const baseUrl = env.NEWAPI_BASE_URL
+  if (!baseUrl) {
+    return { ok: false, message: "未配置 NEWAPI_BASE_URL" }
+  }
+  try {
+    const res = await fetch(
+      `${baseUrl.replace(/\/+$/, "")}/api/user/search?keyword=${encodeURIComponent("doulor")}`,
+      {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "New-Api-User": adminUserId,
+        },
+      }
+    )
+    const text = await res.text()
+    let body: { success?: boolean; message?: string } | null = null
+    try {
+      body = JSON.parse(text) as { success?: boolean; message?: string }
+    } catch {
+      body = null
+    }
+    if (body?.success) return { ok: true, message: "令牌有效" }
+    return {
+      ok: false,
+      message: body?.message || `HTTP ${res.status}：${text.slice(0, 200)}`,
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : String(err),
+    }
   }
 }

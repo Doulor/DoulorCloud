@@ -152,7 +152,7 @@ async function consumeCodeMessage(
 export async function getStatus(env: Env, request: Request): Promise<Response> {
   const user = await requireFeatureUser(env, request, "ai")
   const settings = await getSettings(env)
-  const configured = isNewApiConfigured(env)
+  const configured = await isNewApiConfigured(env)
   const account = configured ? await loadAccount(env, user.id) : null
 
   // 币种与换算率以 NewAPI 站点为准
@@ -315,7 +315,7 @@ export async function preflight(env: Env, request: Request): Promise<Response> {
     eligibleEmail: `${user.username}@${env.ROOT_DOMAIN}`,
   }
 
-  if (!isNewApiConfigured(env) || settings.newapi_enabled !== "1") {
+  if (!(await isNewApiConfigured(env)) || settings.newapi_enabled !== "1") {
     return json({ ...base, exists: false, hasMailbox: false })
   }
 
@@ -420,7 +420,7 @@ async function bindExistingAccount(
 /** POST /api/dev/bind —— 开通 AI 中转站账号 */
 export async function bindAccount(env: Env, request: Request): Promise<Response> {
   const user = await requireFeatureUser(env, request, "ai")
-  if (!isNewApiConfigured(env)) {
+  if (!(await isNewApiConfigured(env))) {
     throw new ApiError(503, "AI 中转站未配置", "NEWAPI_NOT_CONFIGURED")
   }
 

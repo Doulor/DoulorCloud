@@ -196,3 +196,15 @@ CREATE TABLE IF NOT EXISTS newapi_keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_newapi_keys_user ON newapi_keys(user_id, created_at DESC);
+
+-- AI 中转站：管理员凭据（可在管理面板在线更新，优先于 Worker Secret）
+-- NewAPI 的「系统访问令牌」随时可能被后台轮换，一旦失效则所有管理员级调用
+-- （建号 / 查账号 / 设额度 / 健康检查）全部 401，只能重跑 wrangler secret put。
+-- 单行表（id 恒为 1）；令牌用 SESSION_SECRET 派生的 AES-GCM 加密存储，明文不落库。
+-- 本表无行时回落到 env.NEWAPI_ADMIN_TOKEN / NEWAPI_ADMIN_USER_ID（故不影响既有部署）。
+CREATE TABLE IF NOT EXISTS newapi_admin_credentials (
+  id            INTEGER PRIMARY KEY CHECK (id = 1),
+  enc_token     TEXT NOT NULL,
+  admin_user_id TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);

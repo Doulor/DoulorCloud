@@ -51,6 +51,8 @@ import {
   type Notification,
   type CommunityStats,
   type AdminCommunityPost,
+  type AdminNewApiConfig,
+  type AdminNewApiCredentialSource,
 } from "@/types"
 
 /**
@@ -387,6 +389,22 @@ export const adminApi = {
     request<{ ok: boolean }>(`/admin/community/posts/${encodeURIComponent(id)}`, { method: "DELETE" }),
   restoreCommunityPost: (id: string) =>
     request<{ ok: boolean }>(`/admin/community/posts/${encodeURIComponent(id)}/restore`, { method: "POST" }),
+
+  // 中转站管理员凭据（令牌轮换后可在网页上直接更新）
+  getNewApiConfig: () => request<AdminNewApiConfig>("/admin/newapi/config"),
+
+  updateNewApiConfig: (payload: { token: string; adminUserId?: string }) =>
+    request<{
+      ok: boolean
+      source: AdminNewApiCredentialSource
+      maskedToken: string | null
+      adminUserId: string
+      updatedAt: string | null
+      message: string
+    }>("/admin/newapi/config", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
 }
 
 // ---- 账户设置（真实邮箱验证 / 改名 / 改邮箱 / 通知开关）----

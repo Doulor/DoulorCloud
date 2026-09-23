@@ -23,6 +23,7 @@ import {
   MessagesSquare,
   RotateCcw,
   X,
+  Sparkles,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -104,6 +105,7 @@ import type {
   MailMessage,
   Permissions,
   AdminCommunityPost,
+  AdminNewApiConfig,
 } from "@/types"
 import { FEATURE_LABELS } from "@/types"
 
@@ -251,6 +253,14 @@ export default function AdminPage() {
   const [newapiGroup, setNewapiGroup] = React.useState("default")
   const [newapiUnlimited, setNewapiUnlimited] = React.useState(false)
   const [newapiEnabled, setNewapiEnabled] = React.useState(true)
+
+  // ---- 中转站管理员凭据（令牌轮换后可在网页更新）----
+  const [newapiCred, setNewapiCred] = React.useState<AdminNewApiConfig | null>(null)
+  const [newapiCredLoading, setNewapiCredLoading] = React.useState(false)
+  const [newapiCredBusy, setNewapiCredBusy] = React.useState(false)
+  /** 待更新的新令牌（明文只存在于当前输入框，提交后立即清空） */
+  const [newapiNewToken, setNewapiNewToken] = React.useState("")
+  const [newapiUserId, setNewapiUserId] = React.useState("1")
   const [frpEnabled, setFrpEnabled] = React.useState(true)
   const [frpCoreUrl, setFrpCoreUrl] = React.useState("")
   const [frpNotifyEmail, setFrpNotifyEmail] = React.useState("")
@@ -692,6 +702,51 @@ export default function AdminPage() {
       toast.error(err instanceof HttpError ? err.message : "保存失败")
     } finally {
       setBusy(false)
+    }
+  }
+
+  // ---- 中转站管理员凭据 ----
+
+  const loadNewApiConfig = React.useCallback(async () => {
+    setNewapiCredLoading(true)
+    try {
+      const res = await adminApi.getNewApiConfig()
+      setNewapiCred(res)
+      setNewapiUserId(res.adminUserId || "1")
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "读取中转站凭据失败")
+    } finally {
+      setNewapiCredLoading(false)
+    }
+  }, [])
+
+  const handleUpdateNewApiToken = async () => {
+    const token = newapiNewToken.trim()
+    if (!token) {
+      toast.error("请粘贴 NewAPI 的新访问令牌")
+      return
+    }
+    setNewapiCredBusy(true)
+    try {
+      const res = await adminApi.updateNewApiConfig({ token, adminUserId: newapiUserId })
+      setNewapiCred((prev) =>
+        prev
+          ? {
+              ...prev,
+              source: res.source,
+              maskedToken: res.maskedToken,
+              adminUserId: res.adminUserId,
+              updatedAt: res.updatedAt,
+              configured: true,
+            }
+          : prev
+      )
+      setNewapiNewToken("") // 明文用完即弃，不留内存
+      toast.success(res.message || "令牌已更新并生效")
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "令牌验证失败")
+    } finally {
+      setNewapiCredBusy(false)
     }
   }
 
@@ -1218,7 +1273,7 @@ export default function AdminPage() {
         description={`已注册用户 ${users.length} 个 · 邀请码 ${invites.length} 个`}
       />
 
-      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp(); if (v === "proxy") void loadProxy(); if (v === "reserved") void loadReserved(); if (v === "donations") void loadDonations(); if (v === "announcements") void loadAnnouncements(); if (v === "inviteQuotas") void loadInviteQuotas(); if (v === "r2") void loadR2(); if (v === "community") void loadCommunity() }}>
+      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp(); if (v === "proxy") void loadProxy(); if (v === "reserved") void loadReserved(); if (v === "donations") void loadDonations(); if (v === "announcements") void loadAnnouncements(); if (v === "inviteQuotas") void loadInviteQuotas(); if (v === "r2") void loadR2(); if (v === "community") void loadCommunity(); if (v === "newapi") { void loadSettings(); void loadNewApiConfig() } }}>
         <TabsList className="mb-4">
           <TabsTrigger value="users">
             <Users className="mr-1.5 h-3.5 w-3.5" />
@@ -1259,6 +1314,10 @@ export default function AdminPage() {
           <TabsTrigger value="community">
             <MessagesSquare className="mr-1.5 h-3.5 w-3.5" />
             社区
+          </TabsTrigger>
+          <TabsTrigger value="newapi">
+            <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+            中转站
           </TabsTrigger>
           <TabsTrigger value="settings">
             <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
@@ -2679,6 +2738,170 @@ export default function AdminPage() {
           )}
         </TabsContent>
 
+        <TabsContent value="newapi">
+          <div className="space-y-6">
+            {/* 管理员凭据：NewAPI 的「系统访问令牌」会被后台轮换，旧令牌立即失效，
+                这里允许直接在网页上验证并替换，不必重跑 wrangler secret put。 */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">管理员凭据（系统访问令牌）</CardTitle>
+                <CardDescription>
+                  NewAPI 后台每次「生成 / 重新生成」系统访问令牌都会覆盖旧值，旧令牌随即失效，
+                  本站的管理员级调用（建号、查账号、设额度、健康检查）会全部报令牌无效。
+                  在此粘贴新令牌即可恢复，无需重新部署。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {newapiCredLoading ? (
+                  <LoadingBlock />
+                ) : (
+                  <>
+                    <div className="space-y-1 rounded-md border p-3 text-sm">
+                      <div className="flex items-center gap-2">
+                        <span className="text-muted-foreground">当前来源</span>
+                        {newapiCred?.source === "db" ? (
+                          <Badge variant="secondary">管理面板设置（优先）</Badge>
+                        ) : newapiCred?.source === "env" ? (
+                          <Badge variant="outline">Worker 环境变量</Badge>
+                        ) : (
+                          <Badge variant="destructive">未配置</Badge>
+                        )}
+                        {newapiCred?.configured ? (
+                          <Badge variant="secondary">已启用</Badge>
+                        ) : (
+                          <Badge variant="destructive">不可用</Badge>
+                        )}
+                      </div>
+                      <p className="text-muted-foreground">
+                        站点地址：{newapiCred?.baseUrl || "（未配置 NEWAPI_BASE_URL）"}
+                      </p>
+                      <p className="font-mono text-xs">
+                        当前令牌：{newapiCred?.maskedToken ?? "（未设置）"}
+                      </p>
+                      <p className="text-muted-foreground">
+                        令牌所属用户 id：{newapiCred?.adminUserId ?? "1"}
+                        {newapiCred?.updatedAt
+                          ? ` · 更新于 ${new Date(newapiCred.updatedAt).toLocaleString("zh-CN")}`
+                          : ""}
+                      </p>
+                    </div>
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2 sm:col-span-2">
+                        <Label htmlFor="newapiNewToken">新的访问令牌</Label>
+                        <Input
+                          id="newapiNewToken"
+                          type="password"
+                          autoComplete="off"
+                          placeholder="在 NewAPI「个人设置 → 安全设置 → 系统访问令牌」复制"
+                          value={newapiNewToken}
+                          onChange={(e) => setNewapiNewToken(e.target.value)}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          提交前会先真实调用一次中转站管理接口验证；验证不通过不会覆盖现有凭据。
+                          令牌加密存储，明文不回传。
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="newapiAdminUserId">令牌所属用户 id</Label>
+                        <Input
+                          id="newapiAdminUserId"
+                          inputMode="numeric"
+                          value={newapiUserId}
+                          onChange={(e) => setNewapiUserId(e.target.value)}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          root 账户通常为 1；该值会作为 New-Api-User 头下发。
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end">
+                      <Button
+                        onClick={() => void handleUpdateNewApiToken()}
+                        disabled={newapiCredBusy || !newapiNewToken.trim()}
+                      >
+                        {newapiCredBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                        验证并更新令牌
+                      </Button>
+                    </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* 开通策略：与原「设置」标签里的 AI 中转站卡片同一份状态 */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">AI 中转站</CardTitle>
+                <CardDescription>
+                  仅影响新开通的账号。当前{" "}
+                  {settingsStats?.newapiAccounts ?? 0} 个账号、
+                  {settingsStats?.newapiKeys ?? 0} 个 Key。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="trialQuota">
+                      新账号试用额度（{currencySymbol}）
+                    </Label>
+                    <Input
+                      id="trialQuota"
+                      type="number"
+                      min={0}
+                      step="0.5"
+                      value={trialQuotaUsd}
+                      onChange={(e) => setTrialQuotaUsd(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="newapiGroup">默认分组</Label>
+                    <Input
+                      id="newapiGroup"
+                      value={newapiGroup}
+                      onChange={(e) => setNewapiGroup(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between rounded-md border p-3">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">新账号不限额度</p>
+                    <p className="text-xs text-muted-foreground">
+                      开启后忽略上面的试用额度
+                    </p>
+                  </div>
+                  <Switch
+                    checked={newapiUnlimited}
+                    onCheckedChange={setNewapiUnlimited}
+                  />
+                </div>
+                <div className="flex items-center justify-between rounded-md border p-3">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">启用 AI 中转站</p>
+                    <p className="text-xs text-muted-foreground">
+                      关闭后用户无法开通或创建 Key
+                    </p>
+                  </div>
+                  <Switch
+                    checked={newapiEnabled}
+                    onCheckedChange={setNewapiEnabled}
+                  />
+                </div>
+                <div className="flex justify-end">
+                  <Button
+                    onClick={() => void handleSaveSettings()}
+                    disabled={settingsBusy}
+                  >
+                    {settingsBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                    保存设置
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
         <TabsContent value="settings">
           {settingsLoading ? (
             <LoadingBlock />
@@ -2821,66 +3044,6 @@ export default function AdminPage() {
                     <Switch
                       checked={frpEnabled}
                       onCheckedChange={setFrpEnabled}
-                    />
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base">AI 中转站</CardTitle>
-                  <CardDescription>
-                    仅影响新开通的账号。当前{" "}
-                    {settingsStats?.newapiAccounts ?? 0} 个账号、
-                    {settingsStats?.newapiKeys ?? 0} 个 Key。
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label htmlFor="trialQuota">
-                        新账号试用额度（{currencySymbol}）
-                      </Label>
-                      <Input
-                        id="trialQuota"
-                        type="number"
-                        min={0}
-                        step="0.5"
-                        value={trialQuotaUsd}
-                        onChange={(e) => setTrialQuotaUsd(e.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="newapiGroup">默认分组</Label>
-                      <Input
-                        id="newapiGroup"
-                        value={newapiGroup}
-                        onChange={(e) => setNewapiGroup(e.target.value)}
-                      />
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between rounded-md border p-3">
-                    <div className="space-y-0.5">
-                      <p className="text-sm font-medium">新账号不限额度</p>
-                      <p className="text-xs text-muted-foreground">
-                        开启后忽略上面的试用额度
-                      </p>
-                    </div>
-                    <Switch
-                      checked={newapiUnlimited}
-                      onCheckedChange={setNewapiUnlimited}
-                    />
-                  </div>
-                  <div className="flex items-center justify-between rounded-md border p-3">
-                    <div className="space-y-0.5">
-                      <p className="text-sm font-medium">启用 AI 中转站</p>
-                      <p className="text-xs text-muted-foreground">
-                        关闭后用户无法开通或创建 Key
-                      </p>
-                    </div>
-                    <Switch
-                      checked={newapiEnabled}
-                      onCheckedChange={setNewapiEnabled}
                     />
                   </div>
                 </CardContent>
