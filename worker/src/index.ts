@@ -13,9 +13,11 @@ import * as donationHandlers from "./handlers/donations"
 import * as myInviteHandlers from "./handlers/my-invites"
 import * as frpHandlers from "./handlers/frp"
 import * as profileHandlers from "./handlers/profile"
+import * as identityHandlers from "./handlers/identity"
 import * as proxyHandlers from "./handlers/proxy"
 import * as tempboxHandlers from "./handlers/tempbox"
 import * as announcementHandlers from "./handlers/announcements"
+import * as r2AdminHandlers from "./handlers/r2-admin"
 import * as achievementHandlers from "./handlers/achievements"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
@@ -25,7 +27,11 @@ export interface WorkerContext {
   request: Request
 }
 
-async function route(env: Env, request: Request): Promise<Response> {
+async function route(
+  env: Env,
+  request: Request,
+  ctx?: ExecutionContext
+): Promise<Response> {
   const url = new URL(request.url)
   const path = url.pathname.replace(/\/+$/, "") || "/"
   const method = request.method.toUpperCase()
@@ -43,7 +49,7 @@ async function route(env: Env, request: Request): Promise<Response> {
     return authHandlers.logout(env, request)
   }
   if (routePath === "/me" && method === "GET") {
-    return authHandlers.me(env, request)
+    return authHandlers.me(env, request, ctx)
   }
   if (routePath === "/password" && method === "PUT") {
     return authHandlers.changePassword(env, request)
@@ -64,6 +70,11 @@ async function route(env: Env, request: Request): Promise<Response> {
   }
   if (routePath === "/settings/username" && method === "PUT") {
     return settingsHandlers.changeUsername(env, request)
+  }
+
+  // ---- 身份（昵称/头像）----
+  if (routePath === "/settings/nickname" && method === "PUT") {
+    return identityHandlers.updateNickname(env, request)
   }
 
   // DNS
@@ -251,6 +262,54 @@ async function route(env: Env, request: Request): Promise<Response> {
     )
   }
 
+  // R2 多桶管理
+  if (routePath === "/admin/r2/buckets" && method === "GET") {
+    return r2AdminHandlers.listR2Buckets(env, request)
+  }
+  if (routePath === "/admin/r2/discover" && method === "GET") {
+    return r2AdminHandlers.discoverBuckets(env, request)
+  }
+  if (routePath === "/admin/r2/buckets" && method === "POST") {
+    return r2AdminHandlers.createR2Bucket(env, request)
+  }
+  if (routePath === "/admin/r2/assign" && method === "PUT") {
+    return r2AdminHandlers.assignUserBucket(env, request)
+  }
+  if (routePath === "/admin/r2/assign-all" && method === "PUT") {
+    return r2AdminHandlers.assignAllUnassigned(env, request)
+  }
+  const r2BucketMatch = routePath.match(/^\/admin\/r2\/buckets\/([^/]+)$/)
+  if (r2BucketMatch && method === "PUT") {
+    return r2AdminHandlers.updateR2Bucket(
+      env,
+      request,
+      decodeURIComponent(r2BucketMatch[1])
+    )
+  }
+  if (r2BucketMatch && method === "DELETE") {
+    return r2AdminHandlers.deleteR2Bucket(
+      env,
+      request,
+      decodeURIComponent(r2BucketMatch[1])
+    )
+  }
+  const r2BucketActionMatch = routePath.match(
+    /^\/admin\/r2\/buckets\/([^/]+)\/(test|write-test|operations)$/
+  )
+  if (r2BucketActionMatch) {
+    const bucketId = decodeURIComponent(r2BucketActionMatch[1])
+    const action = r2BucketActionMatch[2]
+    if (action === "test" && method === "POST") {
+      return r2AdminHandlers.testR2Bucket(env, request, bucketId)
+    }
+    if (action === "write-test" && method === "POST") {
+      return r2AdminHandlers.writeTestR2Bucket(env, request, bucketId)
+    }
+    if (action === "operations" && method === "GET") {
+      return r2AdminHandlers.getR2Operations(env, request, bucketId)
+    }
+  }
+
   if (routePath === "/admin/settings" && method === "GET") {
     return adminHandlers.getSettingsHandler(env, request)
   }
@@ -377,6 +436,10 @@ async function route(env: Env, request: Request): Promise<Response> {
   }
   if (routePath === "/storage/upload-url" && method === "POST") {
     return storageHandlers.createUploadUrl(env, request)
+  }
+  // Worker 中转上传（token 模式无预签名时的降级路径）
+  if (routePath === "/storage/proxy-upload" && method === "PUT") {
+    return storageHandlers.proxyUpload(env, request)
   }
   if (routePath === "/storage/commit" && method === "POST") {
     return storageHandlers.commitUpload(env, request)
@@ -514,6 +577,12 @@ async function route(env: Env, request: Request): Promise<Response> {
   if (tempboxCommitMatch && method === "POST") {
     return tempboxHandlers.commitTempboxUpload(env, request, decodeURIComponent(tempboxCommitMatch[1]))
   }
+  // Worker 中转上传（token 模式无预签名时的降级路径）。
+  // 必须放在下面的 tempboxFileMatch 之前，否则 "proxy-upload" 会被当成文件名。
+  const tempboxProxyMatch = routePath.match(/^\/tempbox\/([^/]+)\/proxy-upload$/)
+  if (tempboxProxyMatch && method === "PUT") {
+    return tempboxHandlers.proxyTempboxUpload(env, request, decodeURIComponent(tempboxProxyMatch[1]))
+  }
   const tempboxBatchMatch = routePath.match(/^\/tempbox\/([^/]+)$/)
   if (tempboxBatchMatch && method === "GET") {
     return tempboxHandlers.getTempbox(env, request, decodeURIComponent(tempboxBatchMatch[1]))
@@ -564,7 +633,7 @@ async function hostedDirectLink(
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     try {
       const url = new URL(request.url)
 
@@ -601,8 +670,9 @@ export default {
         const slug = decodeURIComponent(pubMatch[1])
         const profile = await profileHandlers.loadPublicProfile(env, { slug })
         if (profile) {
-          // 访客量 +1（失败静默，不影响渲染）
-          void profileHandlers.bumpProfileView(env, slug)
+          // 访客量 +1。必须 waitUntil：Worker 返回响应后会取消游离的 Promise，
+          // 「void fn()」不会真正执行（这正是访客量一直是 0 的原因）。
+          ctx.waitUntil(profileHandlers.bumpProfileView(env, slug))
           return new Response(renderProfileHtml(profile), {
             headers: {
               "Content-Type": "text/html; charset=utf-8",
@@ -628,7 +698,7 @@ export default {
           fqdn: host,
         })
         if (hostProfile) {
-          void profileHandlers.bumpProfileView(env, hostProfile.slug)
+          ctx.waitUntil(profileHandlers.bumpProfileView(env, hostProfile.slug))
           return new Response(renderProfileHtml(hostProfile), {
             headers: {
               "Content-Type": "text/html; charset=utf-8",
@@ -642,7 +712,7 @@ export default {
       const hosted = await hostedDirectLink(env, request)
       if (hosted) return hosted
 
-      return await route(env, request)
+      return await route(env, request, ctx)
     } catch (err) {
       if (err instanceof ApiError) {
         const res = json({ error: err.message, code: err.code }, err.status)
