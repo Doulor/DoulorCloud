@@ -217,3 +217,34 @@ export function quotaFeaturesOf(permissions: {
 }): QuotaFeature[] {
   return QUOTA_FEATURES.filter((f) => permissions[f] === true)
 }
+
+/**
+ * 解析「基础权限」（app_settings.invite_basic_features，逗号分隔的模块名）。
+ *
+ * 语义（见 settings.ts 的 invite_basic_features 注释）：
+ *   基础权限：创建邀请码时可直接勾选，**不消耗模块额度**；
+ *   受限模式：需消耗对应模块额度（由捐献获批或管理员发放获得）。
+ *   默认值 `"r2"` —— R2 由站长自持、无人能捐献，若纳入额度体系该额度永远为 0。
+ *
+ * ⚠️ 本函数是**补上的缺失实现**（2026-09-23 审计）：
+ *   `handlers/admin.ts` 自提交 d524961 起就 `import { parseBasicFeatures } from "../quotas"`
+ *   并把结果放进 `/admin/invite-quotas` 的响应里，但 quotas.ts 从未提供该函数 ——
+ *   这导致 worker 端从那时起就无法通过类型检查。
+ *   这里按调用点的契约实现（返回可迭代、可 `[...]` 展开的集合）。
+ *   若「邀请码额度」方向的作者另有既定实现，请以其版本为准并替换本段。
+ *
+ * 容错：空值 / 非法值一律按「无基础权限」处理（宁严不宽 —— 不会白送额度）。
+ */
+export function parseBasicFeatures(
+  raw: string | null | undefined
+): Set<QuotaFeature> {
+  const out = new Set<QuotaFeature>()
+  if (!raw) return out
+  for (const piece of String(raw).split(",")) {
+    const name = piece.trim().toLowerCase()
+    if ((QUOTA_FEATURES as readonly string[]).includes(name)) {
+      out.add(name as QuotaFeature)
+    }
+  }
+  return out
+}

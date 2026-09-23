@@ -7,9 +7,16 @@ import {
   cfDeleteEmailRule,
   cfListDestinations,
 } from "../cloudflare"
+import { sendReply, isMailerConfigured } from "../mailer"
+import { guardRateLimit } from "../ratelimit"
+import { audit } from "../settings"
 import type { Env } from "../env"
 
 const MAX_MAILBOXES_PER_USER = 3
+/** 回信正文上限（字符）：够写长信，又不至于把 D1 单值撑爆 */
+const MAX_REPLY_CHARS = 20_000
+/** 回信限流：每人每小时 20 封（防止账号被盗后当日志中继/发垃圾信） */
+const REPLY_LIMIT_PER_HOUR = 20
 
 interface MailboxRow {
   id: string
@@ -30,6 +37,8 @@ interface MessageRow {
   text_body: string
   read: number
   received_at: string
+  /** 原邮件的 RFC Message-ID（0029 迁移新增），回信时用于串会话 */
+  rfc_message_id?: string | null
 }
 
 function parseForwarding(raw: string | null): string[] {
@@ -399,4 +408,127 @@ export async function deleteMessage(
 
   await env.DB.prepare("DELETE FROM messages WHERE id = ?").bind(messageId).run()
   return new Response(null, { status: 204 })
+}
+
+// ---- 网页端回信（出站邮件）----
+
+/**
+ * 从 `名字 <a@b.com>` / `<a@b.com>` / `a@b.com` 里取出纯地址。
+ * 解析不出来就返回空串 —— 调用方据此拒绝，**绝不做任何猜测或兜底**，
+ * 免得把信发到一个自己想当然的地址上。
+ */
+function extractAddress(raw: string): string {
+  const angled = /<([^>]+)>/.exec(raw ?? "")
+  const candidate = (angled ? angled[1] : (raw ?? "")).trim().toLowerCase()
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate)) return ""
+  if (candidate.length > 254) return ""
+  return candidate
+}
+
+/** 生成回复主题：已有 Re: 前缀就不重复叠加（避免 Re: Re: Re:） */
+function replySubject(subject: string): string {
+  const s = (subject ?? "").trim()
+  if (!s) return "Re: (无主题)"
+  return /^re\s*:/i.test(s) ? s : `Re: ${s}`
+}
+
+/**
+ * POST /api/mailbox/:id/messages/:mid/reply —— 以用户自己的域名邮箱身份回信。
+ *
+ * 防滥用设计（这是本平台唯一的"对外发信"出口，必须收口）：
+ *   1. 只能回**已在自己收件箱里**的邮件（requireMailbox + 反查 mailbox_id）；
+ *   2. 收件人只能取自原邮件的发件人，**不接受前端传入** —— 否则就成了开放中继；
+ *   3. 禁止回本站域名（防止转发成环把收件箱变成回环放大器）；
+ *   4. 每人每小时 20 封（fail-open 限流）；
+ *   5. 纯文本正文，不拼 HTML（避免用户输入被当 HTML 渲染）。
+ */
+export async function replyMessage(
+  env: Env,
+  request: Request,
+  mailboxId: string,
+  messageId: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const mailbox = await requireMailbox(env, user, mailboxId)
+
+  if (!isMailerConfigured(env)) {
+    throw new ApiError(
+      503,
+      "邮件发送未配置（缺少 send_email 绑定）",
+      "MAIL_NOT_CONFIGURED"
+    )
+  }
+
+  const row = await env.DB.prepare(
+    "SELECT * FROM messages WHERE id = ? AND mailbox_id = ?"
+  )
+    .bind(messageId, mailbox.id)
+    .first<MessageRow>()
+
+  if (!row) {
+    throw new ApiError(404, "邮件不存在", "NOT_FOUND")
+  }
+
+  const body = (await request.json().catch(() => ({}))) as {
+    text?: unknown
+    subject?: unknown
+  }
+  const text = typeof body.text === "string" ? body.text.trim() : ""
+  if (!text) {
+    throw new ApiError(400, "回信内容不能为空", "INVALID_INPUT")
+  }
+  if (text.length > MAX_REPLY_CHARS) {
+    throw new ApiError(
+      400,
+      `回信内容过长（上限 ${MAX_REPLY_CHARS} 字）`,
+      "TOO_LARGE"
+    )
+  }
+
+  const to = extractAddress(row.from_address)
+  if (!to) {
+    throw new ApiError(
+      400,
+      "无法识别原邮件的发件地址，请改用真实邮箱回复",
+      "NO_REPLY_TARGET"
+    )
+  }
+  if (to.endsWith(`@${env.ROOT_DOMAIN.toLowerCase()}`)) {
+    throw new ApiError(
+      400,
+      "不能回复本站域名邮箱（防止转发成环）",
+      "REPLY_LOOP"
+    )
+  }
+
+  await guardRateLimit(
+    env,
+    `email:reply:user:${user.id}`,
+    REPLY_LIMIT_PER_HOUR,
+    3600,
+    "回信过于频繁"
+  )
+
+  const subject =
+    typeof body.subject === "string" && body.subject.trim()
+      ? body.subject.trim().slice(0, 300)
+      : replySubject(row.subject)
+
+  const sent = await sendReply(env, {
+    from: mailbox.address,
+    to,
+    subject,
+    text,
+    inReplyTo: row.rfc_message_id ?? null,
+  })
+
+  await audit(
+    env,
+    user.id,
+    "email.reply",
+    `${mailbox.address} → ${to}`,
+    request.headers.get("CF-Connecting-IP")
+  )
+
+  return json({ ok: true, to, subject, messageId: sent.messageId })
 }

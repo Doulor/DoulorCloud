@@ -22,6 +22,7 @@ import * as achievementHandlers from "./handlers/achievements"
 import * as communityHandlers from "./handlers/community"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
+import { runMaintenance } from "./maintenance"
 
 export interface WorkerContext {
   env: Env
@@ -136,6 +137,17 @@ async function route(
       request,
       decodeURIComponent(adminMessageMatch[1]),
       decodeURIComponent(adminMessageMatch[2])
+    )
+  }
+
+  // 网页端回信：以用户自己的域名邮箱身份发出（本平台唯一的对外发信出口）
+  const messageReplyMatch = routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)\/reply$/)
+  if (messageReplyMatch && method === "POST") {
+    return emailHandlers.replyMessage(
+      env,
+      request,
+      decodeURIComponent(messageReplyMatch[1]),
+      decodeURIComponent(messageReplyMatch[2])
     )
   }
 
@@ -818,5 +830,28 @@ export default {
   // Email Workers 入站路由：Cloudflare Email Routing 转发到此
   async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
     await incomingEmail(message, env)
+  },
+  /**
+   * 定时运维：由 Cloudflare Cron Triggers 触发（配置见 wrangler.toml 的 [triggers]）。
+   *
+   * 用 ctx.waitUntil 而不是直接 await：scheduled 处理器同样有墙钟限制，
+   * 交给 waitUntil 让调用方尽早返回、任务在后台跑完（与 fetch 里的做法一致）。
+   *
+   * 每天 UTC 03:xx 的那一次升级为「深度模式」（额外清理 90 天前的审计日志），
+   * 其余每小时只做常规清理，保持每次运行的 D1 写入量很小。
+   */
+  async scheduled(
+    controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext
+  ): Promise<void> {
+    const deep = new Date(controller.scheduledTime).getUTCHours() === 3
+    ctx.waitUntil(
+      runMaintenance(env, { deep }).then((report) => {
+        if (report.warnings.length > 0) {
+          console.warn("运维自检告警:", report.warnings.join(" | "))
+        }
+      })
+    )
   },
 }

@@ -94,6 +94,7 @@ export async function incomingEmail(
   let subject = ""
   let fromAddress = envelopeFrom
   let text = ""
+  let rfcMessageId: string | null = null
   try {
     const rawBuffer = await readRaw(message.raw, MAX_RAW_BYTES)
     const parsed = await PostalMime.parse(rawBuffer)
@@ -107,6 +108,9 @@ export async function incomingEmail(
     if (!text && parsed.html) {
       text = htmlToText(parsed.html)
     }
+    // 保存 Message-ID：网页端回信时要靠它写 In-Reply-To，让对方的邮件客户端
+    // 把来回两封归到同一会话。取不到就留 null（回信仍可发送，只是不串会话）。
+    rfcMessageId = parsed.messageId?.trim() || null
   } catch (err) {
     console.error("邮件解析失败（仍入库）:", err)
     subject = message.headers.get("subject") ?? ""
@@ -117,8 +121,8 @@ export async function incomingEmail(
 
   // 1. 存入收件箱
   await env.DB.prepare(
-    `INSERT INTO messages (id, mailbox_id, from_address, subject, text_body, read, received_at)
-     VALUES (?, ?, ?, ?, ?, 0, ?)`
+    `INSERT INTO messages (id, mailbox_id, from_address, subject, text_body, read, received_at, rfc_message_id)
+     VALUES (?, ?, ?, ?, ?, 0, ?, ?)`
   )
     .bind(
       messageId,
@@ -128,7 +132,8 @@ export async function incomingEmail(
       // 必须截断：原文最大 2MB，直接入库会超出 D1 单值上限导致插入失败，
       // 而插入失败会让 Email Routing 重投，形成重复投递
       text.slice(0, MAX_BODY_CHARS),
-      now
+      now,
+      rfcMessageId ? rfcMessageId.slice(0, 500) : null
     )
     .run()
 
