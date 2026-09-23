@@ -8,6 +8,8 @@
     "deploy": "wrangler deploy",
     "db:init": "wrangler d1 execute doulor-mail --file=./schema.sql",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "routes:check": "node scripts/check-routes.mjs",
     "routes:fix": "node scripts/check-routes.mjs --fix"
   },
