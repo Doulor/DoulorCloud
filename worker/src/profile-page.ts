@@ -55,12 +55,24 @@ function contactLink(c: Contact): { href: string | null; label: string; icon: st
         label: c.label || (isUrl ? "微信" : `微信 ${v}`),
         icon: "wechat",
       }
-    case "bilibili":
+    case "bilibili": {
+      // B 站用户空间只认数字 UID，而用户常把带前缀或整条链接的值粘进来：
+      //   "UID:1307574205"、"uid: 1307574205"、"https://space.bilibili.com/1307574205"
+      // 直接 encodeURIComponent 会把冒号编成 %3A，跳过去必然 404
+      // （线上 card.doulor.cn 就出现过 /UID%3A1307574205）。
+      // 这里先剥掉链接前缀与「uid:」前缀，再要求剩下的是纯数字：
+      // 认不出来（比如误填了用户名）就不给链接，宁可不可点也不要指向陌生人。
+      const uid = v
+        .replace(/^https?:\/\/space\.bilibili\.com\//i, "")
+        .replace(/uid\s*:\s*/gi, "")
+        .trim()
+      const isUid = /^\d+$/.test(uid)
       return {
-        href: `https://space.bilibili.com/${encodeURIComponent(v)}`,
-        label: c.label || `Bilibili ${v}`,
+        href: isUid ? `https://space.bilibili.com/${uid}` : null,
+        label: c.label || `Bilibili ${isUid ? uid : v}`,
         icon: "bilibili",
       }
+    }
     case "discord":
       return {
         href: isUrl ? v : `https://discord.gg/${encodeURIComponent(v)}`,

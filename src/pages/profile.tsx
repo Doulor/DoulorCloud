@@ -68,7 +68,11 @@ const CONTACT_META: Record<
     placeholder: "微信号，或二维码图片链接",
     hint: "微信无跳转链接；填图片链接可展示二维码",
   },
-  bilibili: { label: "Bilibili", placeholder: "1307574205", hint: "只填 UID" },
+  bilibili: {
+    label: "Bilibili",
+    placeholder: "1307574205",
+    hint: "填数字 UID 即可，带 UID: 前缀或整条空间链接也能识别",
+  },
   discord: {
     label: "Discord",
     placeholder: "邀请码，或完整邀请链接",
