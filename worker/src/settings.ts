@@ -40,6 +40,17 @@ export const SETTING_DEFAULTS = {
    */
   invite_basic_features: "r2",
   /**
+   * 免权限访问的模块（逗号分隔的模块名列表）。
+   *
+   * 设置后该模块**不再要求用户权限**，没有权限的人也能访问/启用 ——
+   * 用于把某个模块对所有人开放，而不必逐个改用户的 permissions。
+   *
+   * 空串 = 全部按权限卡（默认）。它只旁路「访问时的权限校验」这一层，
+   * 不改 users.permissions，也不影响各模块自己的全局总开关（*_enabled），
+   * 与 invite_basic_features（管「建码时能否勾选」）是两件事。
+   */
+  open_features: "",
+  /**
    * 昵称附加保留词（逗号分隔，大小写不敏感）。
    * 与「保留域名」同在管理面板「保留名」标签管理。
    * 基础保留词（管理员/站长/admin 等）硬编码在 identity.ts，无法删除。

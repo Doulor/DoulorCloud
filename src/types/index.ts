@@ -392,13 +392,16 @@ export interface AdminFrpNode extends FrpNode {
 
 // ---- 功能权限 ----
 
-export type FeatureKey = "r2" | "ai" | "frp" | "profile" | "proxy"
+/**
+ * 受权限控制的模块（与后端 permissions.ts 的 FEATURES 一致）。
+ * ⚠️ 不含「个人名片」：名片不消耗资源，已从权限体系移出、全量开放。
+ */
+export type FeatureKey = "r2" | "ai" | "frp" | "proxy"
 
 export interface Permissions {
   r2: boolean
   ai: boolean
   frp: boolean
-  profile: boolean
   proxy: boolean
 }
 
@@ -406,7 +409,6 @@ export const FEATURE_LABELS: Record<FeatureKey, string> = {
   r2: "直链网盘",
   ai: "AI 中转站",
   frp: "内网穿透",
-  profile: "个人名片",
   proxy: "代理节点",
 }
 

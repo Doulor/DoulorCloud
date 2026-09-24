@@ -75,12 +75,15 @@ import {
 } from "@/components/ui/table"
 import { adminApi, announcementApi, donationApi, r2AdminApi, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
-/** 可授权的功能（与后端 permissions.ts 的 FEATURES 保持一致） */
+/**
+ * 可授权的功能（与后端 permissions.ts 的 FEATURES 保持一致）。
+ * ⚠️ 不含「个人名片」：名片不消耗资源，已从权限体系移出、全量开放，
+ * 因此创建/编辑邀请码与成员详情里都不再出现名片开关。
+ */
 const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
   { key: "r2", label: "直链网盘", desc: "R2 存储与直链分享" },
   { key: "ai", label: "AI 中转站", desc: "NewAPI 账号与 API Key" },
   { key: "frp", label: "内网穿透", desc: "frp 隧道申请" },
-  { key: "profile", label: "个人名片", desc: "对外展示的个人主页" },
   { key: "proxy", label: "代理节点", desc: "代理订阅与节点" },
 ]
 
@@ -153,7 +156,6 @@ export default function AdminPage() {
     r2: true,
     ai: true,
     frp: true,
-    profile: true,
     proxy: true,
   })
 
@@ -274,6 +276,13 @@ export default function AdminPage() {
   // 邀请码模块权限：基础权限（不消耗额度）vs 受限模式
   const [inviteBasic, setInviteBasic] = React.useState<Record<string, boolean>>({
     r2: true,
+    ai: false,
+    frp: false,
+    proxy: false,
+  })
+  // 免权限访问：打开后该模块不再要求用户权限（没有权限的人也能用）
+  const [openFeatures, setOpenFeatures] = React.useState<Record<string, boolean>>({
+    r2: false,
     ai: false,
     frp: false,
     proxy: false,
@@ -641,6 +650,14 @@ export default function AdminPage() {
         frp: basicRaw.includes("frp"),
         proxy: basicRaw.includes("proxy"),
       })
+      // 免权限访问：后端存空串表示「全部按权限卡」
+      const openRaw = (s.open_features ?? "").split(",").map((x) => x.trim()).filter(Boolean)
+      setOpenFeatures({
+        r2: openRaw.includes("r2"),
+        ai: openRaw.includes("ai"),
+        frp: openRaw.includes("frp"),
+        proxy: openRaw.includes("proxy"),
+      })
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "加载设置失败")
     } finally {
@@ -673,6 +690,11 @@ export default function AdminPage() {
         community_image_max_bytes: Math.round(Number(communityImageMaxKb) * 1024),
         // 邀请码模块权限：基础 vs 受限，逗号分隔
         invite_basic_features: Object.entries(inviteBasic)
+          .filter(([, on]) => on)
+          .map(([k]) => k)
+          .join(","),
+        // 免权限访问的模块，逗号分隔；全关时发空串（后端允许空串 = 全部按权限卡）
+        open_features: Object.entries(openFeatures)
           .filter(([, on]) => on)
           .map(([k]) => k)
           .join(","),
@@ -3226,6 +3248,45 @@ export default function AdminPage() {
                   ))}
                   <p className="text-xs text-muted-foreground">
                     基础权限的模块不消耗额度；受限模块靠捐献或手动发放获取转授额度。
+                  </p>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">免权限访问</CardTitle>
+                  <CardDescription>
+                    打开某个模块，则该模块不再检查用户权限 —— 没有该权限的人也能正常访问、开通与使用，
+                    相当于把该模块对所有人开放。默认全关（按权限卡）。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {Object.keys(openFeatures).map((f) => (
+                    <div
+                      key={f}
+                      className="flex items-center justify-between rounded-md border p-3"
+                    >
+                      <div className="space-y-0.5">
+                        <p className="text-sm font-medium">
+                          {FEATURE_LABELS[f as FeatureKey] ?? f}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {openFeatures[f]
+                            ? "已开放：任何人都能访问与启用，不检查该模块权限"
+                            : "按权限卡：需拥有该模块权限才能访问（管理员不受限）"}
+                        </p>
+                      </div>
+                      <Switch
+                        checked={openFeatures[f] ?? false}
+                        onCheckedChange={(v) =>
+                          setOpenFeatures((prev) => ({ ...prev, [f]: v }))
+                        }
+                      />
+                    </div>
+                  ))}
+                  <p className="text-xs text-muted-foreground">
+                    只旁路「访问时的权限校验」：不会改动任何用户的权限数据，关掉开关即恢复按权限卡。
+                    也不影响各模块自己的「启用」总开关，与上方邀请码权限设置互不相关。
                   </p>
                 </CardContent>
               </Card>

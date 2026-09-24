@@ -43,7 +43,6 @@ function basePermissions(basic: Set<QuotaFeature>): Permissions {
     r2: basic.has("r2"),
     ai: basic.has("ai"),
     frp: basic.has("frp"),
-    profile: true,
     proxy: basic.has("proxy"),
   }
 }

@@ -22,7 +22,7 @@ import {
 } from "../newapi-client"
 import { sendMail, renderMail } from "../mailer"
 import { cfListDestinations } from "../cloudflare"
-import { normalizePermissions, parsePermissions } from "../permissions"
+import { normalizePermissions, parsePermissions, FEATURES } from "../permissions"
 import { listReservedSubdomains } from "../reserved-names"
 import { getSettingNumber } from "../settings"
 import {
@@ -658,22 +658,29 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
       continue
     }
 
-    const str = String(raw).trim()
-    if (str === "") continue
+    // 以下两个「逗号分隔模块名」的设置必须排在 `str === "" continue` 之前：
+    // 前端在「全部关掉」时正好发送空串，若被当成空值跳过，就永远清不掉
+    // （表现为：把开关全关掉、点保存，刷新后开关又自己弹回来了）。
 
-    // 数值型设置必须是非负整数，避免写入脏数据
-    if (/bytes|quota|count/i.test(key)) {
-      const n = Number(str)
-      if (!Number.isFinite(n) || n < 0) {
-        throw new ApiError(400, `设置项 ${key} 需要非负数值`, "INVALID_INPUT")
+    // open_features：免权限访问的模块，空串 = 全部按权限卡
+    if (key === "open_features") {
+      const parts = String(raw).split(",").map((s) => s.trim()).filter(Boolean)
+      for (const p of parts) {
+        if (!(FEATURES as readonly string[]).includes(p)) {
+          throw new ApiError(
+            400,
+            `免权限模块只支持：${FEATURES.join("、")}`,
+            "INVALID_INPUT"
+          )
+        }
       }
-      values[key] = String(Math.trunc(n))
+      values[key] = parts.join(",")
       continue
     }
 
-    // invite_basic_features：逗号分隔的模块名，校验只含合法模块
+    // invite_basic_features：建码时人人可勾（不消耗额度）的模块，空串 = 全部受限
     if (key === "invite_basic_features") {
-      const parts = str.split(",").map((s) => s.trim()).filter(Boolean)
+      const parts = String(raw).split(",").map((s) => s.trim()).filter(Boolean)
       for (const p of parts) {
         if (!(QUOTA_FEATURES as readonly string[]).includes(p)) {
           throw new ApiError(
@@ -684,6 +691,19 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
         }
       }
       values[key] = parts.join(",")
+      continue
+    }
+
+    const str = String(raw).trim()
+    if (str === "") continue
+
+    // 数值型设置必须是非负整数，避免写入脏数据
+    if (/bytes|quota|count/i.test(key)) {
+      const n = Number(str)
+      if (!Number.isFinite(n) || n < 0) {
+        throw new ApiError(400, `设置项 ${key} 需要非负数值`, "INVALID_INPUT")
+      }
+      values[key] = String(Math.trunc(n))
       continue
     }
 

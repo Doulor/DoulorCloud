@@ -1,7 +1,7 @@
 import { ApiError } from "./http"
 import type { Env } from "./env"
 import { hashToken, generateToken, uuid } from "./crypto"
-import { parsePermissions, requireFeature, type Feature } from "./permissions"
+import { parsePermissions, requireFeature, hasFeature, isFeatureOpen, type Feature } from "./permissions"
 
 export interface UserRow {
   id: string
@@ -175,8 +175,12 @@ export function getSessionTokens(request: Request): string[] {
 
 /**
  * 要求登录 + 具备指定功能权限。
- * 所有与某个付费/受限功能相关的接口都应走这里，
+ * 所有与某个受限功能相关的接口都应走这里，
  * 而不是只调 requireUser —— 权限必须由服务端强制，绝不信任前端。
+ *
+ * 管理员可把模块设为「免权限访问」（管理面板，存 app_settings.open_features），
+ * 此时该模块不再检查用户权限。注意这与管理员角色放行是两件事：前者对所有人放行，
+ * 后者只放行管理员自己。
  */
 export async function requireFeatureUser(
   env: Env,
@@ -186,6 +190,12 @@ export async function requireFeatureUser(
   const user = await requireUser(env, request)
   // 管理员始终放行，便于排查问题
   if (user.role === "admin") return user
-  requireFeature(parsePermissions(user.permissions), feature)
+  const perms = parsePermissions(user.permissions)
+  if (!hasFeature(perms, feature)) {
+    // 只在「被卡住」时才读免权限总开关：有权限的用户（绝大多数）走不到这里，
+    // 因此这条查询不构成热点路径的额外开销，也就不需要缓存。
+    if (await isFeatureOpen(env, feature)) return user
+    requireFeature(perms, feature)
+  }
   return user
 }

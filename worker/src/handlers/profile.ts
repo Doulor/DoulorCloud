@@ -1,5 +1,6 @@
 import { ApiError, json } from "../http"
-import { requireFeatureUser } from "../auth"
+// 个人名片不消耗资源，已从权限体系移出（全量开放）：这里只需登录，不再校验功能权限
+import { requireUser } from "../auth"
 
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
 import { attachCustomDomain, detachCustomDomain } from "../custom-domain"
@@ -459,7 +460,7 @@ async function loadProfile(env: Env, userId: string): Promise<ProfileRow> {
  * 照 storage_accounts 的做法：点开通时才建记录。
  */
 export async function enableProfile(env: Env, request: Request): Promise<Response> {
-  const user = await requireFeatureUser(env, request, "profile")
+  const user = await requireUser(env, request)
 
   const existing = await findProfile(env, user.id)
   if (existing) {
@@ -525,7 +526,7 @@ function toPublicProfile(row: ProfileRow, slugOrFqdn: { profilePath: string }) {
 
 // GET /api/profile —— 读取自己的名片（未开通时 enabled=false，前端据此显示开通引导页）
 export async function getProfile(env: Env, request: Request): Promise<Response> {
-  const user = await requireFeatureUser(env, request, "profile")
+  const user = await requireUser(env, request)
   const row = await findProfile(env, user.id)
 
   const meta = {
@@ -575,7 +576,7 @@ export async function getProfile(env: Env, request: Request): Promise<Response> 
 
 // PUT /api/profile —— 更新资料
 export async function updateProfile(env: Env, request: Request): Promise<Response> {
-  const user = await requireFeatureUser(env, request, "profile")
+  const user = await requireUser(env, request)
   const row = await loadProfile(env, user.id)
   const body = (await request.json()) as Record<string, unknown>
 
@@ -681,7 +682,7 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
  * 无法解析，因此渲染时注入 <base href="<站点源>"> 让资源走绝对地址。
  */
 export async function previewProfile(env: Env, request: Request): Promise<Response> {
-  const user = await requireFeatureUser(env, request, "profile")
+  const user = await requireUser(env, request)
   const row = await loadProfile(env, user.id)
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
 
@@ -739,7 +740,7 @@ export async function previewProfile(env: Env, request: Request): Promise<Respon
 
 // POST /api/profile/publish —— 启用/停用对外可见
 export async function setPublished(env: Env, request: Request): Promise<Response> {
-  const user = await requireFeatureUser(env, request, "profile")
+  const user = await requireUser(env, request)
   const row = await loadProfile(env, user.id)
   const body = (await request.json()) as { published?: boolean }
   const published = body.published ? 1 : 0
@@ -764,7 +765,7 @@ export async function setPublished(env: Env, request: Request): Promise<Response
  * 原始字节直传（Content-Type 决定扩展名），存入 profiles/<用户名>/<kind>.<ext>
  */
 export async function uploadAsset(env: Env, request: Request): Promise<Response> {
-  const user = await requireFeatureUser(env, request, "profile")
+  const user = await requireUser(env, request)
   if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "存储未配置，无法上传", "R2_NOT_CONFIGURED")
   }
@@ -841,7 +842,7 @@ export async function uploadAsset(env: Env, request: Request): Promise<Response>
 
 /** DELETE /api/profile/asset?kind=... —— 移除已上传的资源 */
 export async function deleteAsset(env: Env, request: Request): Promise<Response> {
-  const user = await requireFeatureUser(env, request, "profile")
+  const user = await requireUser(env, request)
   const url = new URL(request.url)
   const kind = url.searchParams.get("kind") ?? ""
   if (!["avatar", "background", "music", "music-cover"].includes(kind)) {
@@ -882,7 +883,7 @@ export async function deleteAsset(env: Env, request: Request): Promise<Response>
  * 公开页面的资源由 /p/<用户名>/<kind> 提供，见 serveProfileAsset。
  */
 export async function readOwnAsset(env: Env, request: Request): Promise<Response> {
-  const user = await requireFeatureUser(env, request, "profile")
+  const user = await requireUser(env, request)
   return serveAssetByUsername(env, user.username, new URL(request.url).searchParams.get("kind") ?? "")
 }
 
@@ -917,7 +918,7 @@ export async function bindProfileDomain(
   request: Request,
   subdomainIdFromPath?: string
 ): Promise<Response> {
-  const user = await requireFeatureUser(env, request, "profile")
+  const user = await requireUser(env, request)
   const row = await loadProfile(env, user.id)
   const body = (await request.json().catch(() => ({}))) as {
     subdomainId?: string
