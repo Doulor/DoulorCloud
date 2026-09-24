@@ -61,8 +61,12 @@ const CONTACT_META: Record<
   ContactType,
   { label: string; placeholder: string; hint?: string }
 > = {
-  email: { label: "邮箱", placeholder: "you@example.com" },
-  qq: { label: "QQ", placeholder: "2737855297", hint: "只填 QQ 号" },
+  email: { label: "邮箱", placeholder: "you@example.com", hint: "填邮箱地址即可" },
+  qq: {
+    label: "QQ",
+    placeholder: "2737855297",
+    hint: "填 QQ 号即可，带 QQ: 前缀也能识别",
+  },
   wechat: {
     label: "微信",
     placeholder: "微信号，或二维码图片链接",
@@ -78,11 +82,27 @@ const CONTACT_META: Record<
     placeholder: "邀请码，或完整邀请链接",
     hint: "个人主页无固定链接，建议用服务器邀请链接",
   },
-  telegram: { label: "Telegram", placeholder: "username", hint: "填用户名即可，@ 可省略" },
-  youtube: { label: "YouTube", placeholder: "@channel 或频道链接" },
-  github: { label: "GitHub", placeholder: "username" },
-  x: { label: "X / Twitter", placeholder: "@username" },
-  custom: { label: "自定义链接", placeholder: "https://…" },
+  telegram: {
+    label: "Telegram",
+    placeholder: "username",
+    hint: "填用户名即可，@ 与整条 t.me 链接都能识别",
+  },
+  youtube: {
+    label: "YouTube",
+    placeholder: "@channel 或频道链接",
+    hint: "填 @handle 或整条 youtube.com 频道链接",
+  },
+  github: {
+    label: "GitHub",
+    placeholder: "username",
+    hint: "填用户名即可，@ 与整条主页链接都能识别",
+  },
+  x: {
+    label: "X / Twitter",
+    placeholder: "@username",
+    hint: "填用户名即可，@ 与整条主页链接都能识别",
+  },
+  custom: { label: "自定义链接", placeholder: "https://…", hint: "需是完整链接" },
 }
 
 const THEME_LABEL: Record<string, string> = {

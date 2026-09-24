@@ -28,93 +28,168 @@ import type {
   GalleryItem,
 } from "./handlers/profile"
 
+/** 正则转义——域名里的点号拼进 RegExp 前必须转义，否则 `t.me` 会匹配 `tXme` */
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+/**
+ * 把用户填的联系方式值归一化成「平台裸标识」（用户名 / UID / handle）。
+ *
+ * 用户在输入框里实际会填的形态远多于提示词要求的：
+ *   "Doulor" / "@Doulor" / "https://github.com/Doulor" / "github.com/Doulor" / "GitHub: Doulor"
+ * 旧实现只对部分平台做了 isUrl 判断，其余直接拼前缀，于是生成
+ *   https://t.me/https%3A%2F%2Ft.me%2FDoulor
+ * 这类必然打不开的链接 —— 线上 B 站那条 /UID%3A1307574205 是同一个病根。
+ *
+ * @param hosts 该平台的域名（用于把粘进来的链接还原成裸标识）；无个人主页形态的平台传 []
+ * @returns 裸标识；无法识别时返回空串，调用方据此**不给链接**（宁可不可点，也别指向陌生人）
+ */
+function bareId(raw: string, hosts: string[]): string {
+  let s = raw.trim()
+  if (!s) return ""
+
+  const hostAlt = hosts.map(escapeRe).join("|")
+  // 剥「协议 + www + 平台域名」；也认无协议的裸域名写法（t.me/foo）
+  const stripHost = (t: string): string =>
+    hostAlt
+      ? t.replace(new RegExp(`^(?:https?://)?(?:www\\.)?(?:${hostAlt})/+`, "i"), "")
+      : t
+
+  // 该平台没有可还原的链接形态：填了 URL 也认不出标识，交给调用方拒绝
+  if (!hostAlt && /^https?:\/\//i.test(s)) return ""
+
+  // 先剥平台域名，再剥「前缀:」标签。两者会叠加（"GitHub: https://github.com/foo"），
+  // 所以来回剥两轮。
+  s = stripHost(s)
+  // 「前缀:」写法（UID:1307574205、GitHub: Doulor、Telegram：Doulor），中英文冒号都认。
+  // 标识本身不可能含冒号，所以在第一个冒号处截断是安全的。
+  s = s.replace(/^[^\s:：/]{1,24}\s*[:：]\s*/, "")
+  s = stripHost(s)
+
+  // 剥完平台域名后仍带着「域名/」形态 → 用户填的是别的站点的地址，认不出裸标识。
+  // 直接放行会拼出 github.com/example.com 这类同样打不开的链接，不如拒绝。
+  if (/^[^\s/]+\.[a-z]{2,}\//i.test(s)) return ""
+
+  // 剥开头的 @（Telegram / X / YouTube 的 handle 常带 @）
+  s = s.replace(/^@+/, "")
+
+  // 丢掉路径与查询串的剩余部分（github.com/foo/repo → foo）
+  s = s.replace(/[/?#].*$/, "")
+
+  return s.trim()
+}
+
 /**
  * 把联系方式拼成可点击链接。
  * 服务端拼接的好处：用户只需填原始值（QQ 号 / UID / 用户名），
  * 避免在前端各处重复实现拼接规则、也防止用户填出 javascript: 之类的危险协议。
  *
- * 显示文字统一为「平台名 + 值」（如 `QQ 123`、`Telegram @xx`、`邮箱 a@b.c`）；
- * 用户填了自定义 label 时以 label 优先；值是完整 URL 时只显示平台名，
- * 否则整条长链接会把按钮撑破。
+ * 显示文字统一为「平台名 + 归一化后的值」；用户填了自定义 label 时以 label 优先。
+ * 识别不出裸标识的平台一律不给 href（渲染成不可点的文本）。
  */
 function contactLink(c: Contact): { href: string | null; label: string; icon: string } {
   const v = c.value.trim()
-  const isUrl = /^https?:\/\//i.test(v)
   switch (c.type) {
-    case "email":
-      return { href: `mailto:${v}`, label: c.label || `邮箱 ${v}`, icon: "mail" }
-    case "qq":
+    case "email": {
+      // 用户可能把 "mailto:" 或「邮箱:」也一起粘进来
+      const addr = v
+        .replace(/^mailto:/i, "")
+        .replace(/^[^\s:：@]{1,24}\s*[:：]\s*/, "")
+        .trim()
+      const ok = /^[^\s@]+@[^\s@]+$/.test(addr)
       return {
-        href: `https://res.abeim.cn/api/qq/?qq=${encodeURIComponent(v)}`,
-        label: c.label || `QQ ${v}`,
+        href: ok ? `mailto:${addr}` : null,
+        label: c.label || `邮箱 ${addr || v}`,
+        icon: "mail",
+      }
+    }
+    case "qq": {
+      // QQ 的头像 API 只认数字号；带前缀（"QQ: 123"）或整条链接都先归一化
+      const qq = bareId(v, [])
+      const ok = /^\d{4,12}$/.test(qq)
+      return {
+        href: ok ? `https://res.abeim.cn/api/qq/?qq=${qq}` : null,
+        label: c.label || `QQ ${ok ? qq : v}`,
         icon: "qq",
       }
+    }
     case "wechat":
+      // 微信没有可跳转的个人主页，只支持填二维码图片链接
       return {
-        href: isUrl ? v : null,
-        label: c.label || (isUrl ? "微信" : `微信 ${v}`),
+        href: /^https?:\/\//i.test(v) ? v : null,
+        label: c.label || (/^https?:\/\//i.test(v) ? "微信" : `微信 ${v}`),
         icon: "wechat",
       }
     case "bilibili": {
-      // B 站用户空间只认数字 UID，而用户常把带前缀或整条链接的值粘进来：
-      //   "UID:1307574205"、"uid: 1307574205"、"https://space.bilibili.com/1307574205"
-      // 直接 encodeURIComponent 会把冒号编成 %3A，跳过去必然 404
-      // （线上 card.doulor.cn 就出现过 /UID%3A1307574205）。
-      // 这里先剥掉链接前缀与「uid:」前缀，再要求剩下的是纯数字：
-      // 认不出来（比如误填了用户名）就不给链接，宁可不可点也不要指向陌生人。
-      const uid = v
-        .replace(/^https?:\/\/space\.bilibili\.com\//i, "")
-        .replace(/uid\s*:\s*/gi, "")
-        .trim()
-      const isUid = /^\d+$/.test(uid)
+      // B 站用户空间只认数字 UID（space.bilibili.com/<uid>）。
+      // b23.tv 短链无法在服务端还原成 UID，因此会被下面的数字校验挡掉 —— 符合预期。
+      const uid = bareId(v, ["space.bilibili.com", "bilibili.com", "b23.tv"])
+      const ok = /^\d+$/.test(uid)
       return {
-        href: isUid ? `https://space.bilibili.com/${uid}` : null,
-        label: c.label || `Bilibili ${isUid ? uid : v}`,
+        href: ok ? `https://space.bilibili.com/${uid}` : null,
+        label: c.label || `Bilibili ${ok ? uid : v}`,
         icon: "bilibili",
       }
     }
-    case "discord":
+    case "discord": {
+      // 邀请码可能来自 discord.gg/CODE 或 discord.com/invite/CODE
+      // （长域名写在前面，正则择先匹配）
+      const code = bareId(v, ["discord.gg", "discord.com/invite", "discord.com"])
       return {
-        href: isUrl ? v : `https://discord.gg/${encodeURIComponent(v)}`,
-        label: c.label || (isUrl ? "Discord" : `Discord ${v}`),
+        href: code ? `https://discord.gg/${encodeURIComponent(code)}` : null,
+        label: c.label || `Discord ${code || v}`,
         icon: "discord",
       }
+    }
     case "telegram": {
-      const handle = v.replace(/^@/, "")
+      const handle = bareId(v, ["t.me", "telegram.me"])
       return {
-        href: `https://t.me/${encodeURIComponent(handle)}`,
-        label: c.label || `Telegram @${handle}`,
+        href: handle ? `https://t.me/${encodeURIComponent(handle)}` : null,
+        label: c.label || `Telegram ${handle ? `@${handle}` : v}`,
         icon: "telegram",
       }
     }
-    case "youtube":
+    case "youtube": {
+      // YouTube 的频道链接有多种合法形态（/@handle、/channel/UCxxx、/c/Name），
+      // 没法像别的平台那样「剥出裸标识再拼回去」，识别到链接就整条采用。
+      // 只认 youtube.com：youtu.be 是视频短链，转成频道地址必然错，不如不给。
+      const url = v.match(/^(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/(\S+)$/i)
+      if (url) {
+        return {
+          href: `https://www.youtube.com/${url[1]}`,
+          label: c.label || "YouTube",
+          icon: "youtube",
+        }
+      }
+      const id = bareId(v, [])
       return {
-        href: isUrl
-          ? v
-          : v.startsWith("@")
-            ? `https://youtube.com/${encodeURIComponent(v)}`
-            : `https://youtube.com/@${encodeURIComponent(v)}`,
-        label: c.label || (isUrl ? "YouTube" : `YouTube ${v}`),
+        href: id ? `https://youtube.com/@${encodeURIComponent(id)}` : null,
+        label: c.label || `YouTube ${id ? `@${id}` : v}`,
         icon: "youtube",
       }
-    case "github":
+    }
+    case "github": {
+      const id = bareId(v, ["github.com"])
       return {
-        href: isUrl ? v : `https://github.com/${encodeURIComponent(v)}`,
-        label: c.label || (isUrl ? "GitHub" : `GitHub ${v}`),
+        href: id ? `https://github.com/${encodeURIComponent(id)}` : null,
+        label: c.label || `GitHub ${id || v}`,
         icon: "github",
       }
+    }
     case "x": {
-      const handle = v.replace(/^@/, "")
+      const handle = bareId(v, ["x.com", "twitter.com"])
       return {
-        href: `https://x.com/${encodeURIComponent(handle)}`,
-        label: c.label || `X @${handle}`,
+        href: handle ? `https://x.com/${encodeURIComponent(handle)}` : null,
+        label: c.label || `X ${handle ? `@${handle}` : v}`,
         icon: "x",
       }
     }
     case "custom":
     default:
+      // 自定义链接无法猜测归属，只接受完整 URL
       return {
-        href: isUrl ? v : null,
+        href: /^https?:\/\//i.test(v) ? v : null,
         label: c.label || v,
         icon: "link",
       }
