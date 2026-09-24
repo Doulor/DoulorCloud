@@ -9,6 +9,7 @@ import {
 } from "../identity"
 import { getSetting } from "../settings"
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
+import { guardRateLimit } from "../ratelimit"
 import type { Env } from "../env"
 
 /** PUT /api/settings/nickname —— 设置或清空昵称 */
@@ -57,6 +58,9 @@ export async function updateNickname(env: Env, request: Request): Promise<Respon
 /** POST /api/settings/avatar —— 原图直传（≤2 MB） */
 export async function uploadAvatar(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
+  // 每次上传会写 1 个对象并尝试删除 4 个旧扩展名对象，都是 R2 计费操作；
+  // 加限流避免被反复调用刷操作数。头像不会频繁更换，20 次/分钟足够。
+  await guardRateLimit(env, `avatar:${user.id}`, 20, 60, "头像上传过于频繁")
   if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "存储未配置，无法上传", "R2_NOT_CONFIGURED")
   }

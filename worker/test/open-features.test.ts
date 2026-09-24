@@ -73,7 +73,10 @@ describe("免权限访问开关", () => {
     const u = await makeUser()
     await setPermissions(u.id, NO_R2_AI)
     await setSetting("open_features", "ai")
-    await fetchSelf(authRequest(u, "/api/dev/status"))
+    // 用 /api/storage 而不是 /api/dev/status：后者会真的去请求线上 NewAPI
+    // 做健康检查（测试里没打桩），网络稍慢就撞 5 秒超时，形成偶发失败。
+    // 本用例只想验证「一次受权限管制的请求不会改写 permissions」，用 storage 等价。
+    await fetchSelf(authRequest(u, "/api/storage"))
 
     const row = await env.DB.prepare("SELECT permissions FROM users WHERE id = ?")
       .bind(u.id)

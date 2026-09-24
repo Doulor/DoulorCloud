@@ -34,9 +34,27 @@ import {
   cfDeleteDnsRecord,
   cfListDnsRecords,
 } from "../cloudflare"
+import { guardRateLimit } from "../ratelimit"
 import type { Env } from "../env"
 
 const MARKER_SUFFIX = "/" // 目录占位对象，如 "ruben/"
+
+/**
+ * 上传类接口的限流额度。
+ *
+ * 为什么需要：上传接口都会真实触发 R2 的写入操作（Class A，按次计费），
+ * 而登录用户（含被泄露的账号）可以高频调用 createUploadUrl / commitUpload
+ * 反复触发 headObject 与记账查询。配额只限制「总量」，拦不住短时间内的密集请求。
+ *
+ * 额度取 60 次 / 分钟 —— 正常人上传文件达不到这个频率，
+ * 但批量上传（多图/多文件）也不会被误伤。
+ */
+const UPLOAD_RATE_LIMIT = 60
+const UPLOAD_RATE_WINDOW = 60
+
+async function guardUploadRate(env: Env, userId: string): Promise<void> {
+  await guardRateLimit(env, `upload:${userId}`, UPLOAD_RATE_LIMIT, UPLOAD_RATE_WINDOW, "上传过于频繁")
+}
 
 /**
  * 网盘「使用协议」版本。与前端 STORAGE_CONSENT_VERSION 保持一致。
@@ -402,6 +420,7 @@ export async function createUploadUrl(
   request: Request
 ): Promise<Response> {
   const user = await requireFeatureUser(env, request, "r2")
+  await guardUploadRate(env, user.id)
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
   if (account.enabled !== 1) {
@@ -465,6 +484,7 @@ export async function createUploadUrl(
  */
 export async function proxyUpload(env: Env, request: Request): Promise<Response> {
   const user = await requireFeatureUser(env, request, "r2")
+  await guardUploadRate(env, user.id)
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
   if (account.enabled !== 1) {
@@ -503,6 +523,7 @@ export async function proxyUpload(env: Env, request: Request): Promise<Response>
  */
 export async function commitUpload(env: Env, request: Request): Promise<Response> {
   const user = await requireFeatureUser(env, request, "r2")
+  await guardUploadRate(env, user.id)
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
 

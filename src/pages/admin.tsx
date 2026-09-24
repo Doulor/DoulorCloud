@@ -1,4 +1,5 @@
 import * as React from "react"
+import { Link } from "react-router-dom"
 import {
   Ban,
   KeyRound,
@@ -22,14 +23,31 @@ import {
   Heart,
   MessagesSquare,
   RotateCcw,
+  PlugZap,
   X,
   Sparkles,
+  Unplug,
+  AlertCircle,
+  BarChart3,
+  ArrowLeft,
+  ExternalLink,
 } from "lucide-react"
 import { toast } from "sonner"
+
+// OAuth 应用的 UI 本体单独放一个文件，避免继续撑大本文件
+// （本文件已 4500+ 行，且可能有其他改动同时在动它）。
+import { OAuthAdminPanel } from "./admin-oauth"
+import { AnalyticsPanel } from "./admin-analytics"
 
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { Textarea } from "@/components/ui/textarea"
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+  TooltipProvider,
+} from "@/components/ui/tooltip"
 import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -62,8 +80,6 @@ import {
 import {
   Tabs,
   TabsContent,
-  TabsList,
-  TabsTrigger,
 } from "@/components/ui/tabs"
 import {
   Table,
@@ -73,7 +89,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { adminApi, announcementApi, donationApi, r2AdminApi, HttpError } from "@/services/api"
+import {
+  adminApi,
+  announcementApi,
+  donationApi,
+  r2AdminApi,
+  wb2apiApi,
+  HttpError,
+} from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 /**
  * 可授权的功能（与后端 permissions.ts 的 FEATURES 保持一致）。
@@ -109,6 +132,10 @@ import type {
   Permissions,
   AdminCommunityPost,
   AdminNewApiConfig,
+  AdminWb2ApiConfig,
+  AdminWb2ApiBinding,
+  AdminWb2ApiPool,
+  RecommendedTier,
 } from "@/types"
 import { FEATURE_LABELS } from "@/types"
 
@@ -134,12 +161,85 @@ function fmtTime(iso: string) {
   })
 }
 
+/** 管理面板左侧导航的单个项 */
+function NavItem({
+  active,
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  active: boolean
+  icon: React.ComponentType<{ className?: string }>
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-sm transition-colors " +
+        (active
+          ? "bg-accent font-medium text-foreground"
+          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground")
+      }
+    >
+      <Icon className="h-4 w-4 shrink-0" />
+      <span className="truncate">{label}</span>
+    </button>
+  )
+}
+
+/** 管理面板左侧导航的分组（带小标题 + 分隔） */
+function NavGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="mt-3 first:mt-0">
+      <p className="mb-1 px-2.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/60">
+        {label}
+      </p>
+      <div className="flex flex-col gap-0.5">{children}</div>
+    </div>
+  )
+}
+
+/** realm（cn/global）→ 中文标签 */
+function realmLabel(realm: string | null | undefined): string {
+  if (realm === "global") return "国际版"
+  if (realm === "cn") return "国内版"
+  return "未知"
+}
+
+/** 用户列表里的布尔列：开通打勾，未开通画叉（居中对齐，无多余留白） */
+function BoolMark({ on, title }: { on: boolean; title?: string }) {
+  return (
+    <span
+      className="inline-flex items-center justify-center"
+      title={title ?? (on ? "已开通" : "未开通")}
+    >
+      {on ? (
+        <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+      ) : (
+        <XCircle className="h-4 w-4 text-muted-foreground/40" />
+      )}
+    </span>
+  )
+}
+
+/** 名片的公开访问地址：绑了自定义域名优先，否则回落到 /profile/<slug> */
+function profilePublicUrl(slug: string | null, fqdn: string | null): string | null {
+  if (fqdn) return `https://${fqdn}`
+  if (slug) return `${window.location.origin}/profile/${encodeURIComponent(slug)}`
+  return null
+}
+
 export default function AdminPage() {
   const { user } = useAuth()
   const [users, setUsers] = React.useState<AdminUser[]>([])
   const [filter, setFilter] = React.useState("")
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
+  // 管理面板当前激活的 tab（受控，供「更多」下拉切换）
+  const [activeTab, setActiveTab] = React.useState("users")
 
   const [detail, setDetail] = React.useState<AdminUserDetail | null>(null)
   const [detailUser, setDetailUser] = React.useState<string>("")
@@ -163,6 +263,9 @@ export default function AdminPage() {
   const [quotaDraft, setQuotaDraft] = React.useState<string | null>(null)
   const [globalQuota, setGlobalQuota] = React.useState(5)
   const [subQuota, setSubQuota] = React.useState("5")
+
+  // 用户详情里的昵称编辑（与配额一样先存草稿，点保存才提交）
+  const [nickDraft, setNickDraft] = React.useState("")
 
   // 编辑邀请码权限
   const [permInvite, setPermInvite] = React.useState<AdminInvite | null>(null)
@@ -199,7 +302,8 @@ export default function AdminPage() {
     body: string
     category: string
     pinned: boolean
-  }>({ id: null, title: "", body: "", category: "general", pinned: false })
+    popupMode: "none" | "once" | "every"
+  }>({ id: null, title: "", body: "", category: "general", pinned: false, popupMode: "none" })
 
   // R2 多桶管理
   const [r2Data, setR2Data] = React.useState<R2BucketsResponse | null>(null)
@@ -255,6 +359,10 @@ export default function AdminPage() {
   const [newapiGroup, setNewapiGroup] = React.useState("default")
   const [newapiUnlimited, setNewapiUnlimited] = React.useState(false)
   const [newapiEnabled, setNewapiEnabled] = React.useState(true)
+  /** 推荐模型分档（管理员维护，用户在 AI 页看到的就是这份） */
+  const [recommendedTiers, setRecommendedTiers] = React.useState<RecommendedTier[]>([])
+  /** 候选模型名（来自中转站 pricing），用于「添加模型」下拉 */
+  const [modelOptions, setModelOptions] = React.useState<string[]>([])
 
   // ---- 中转站管理员凭据（令牌轮换后可在网页更新）----
   const [newapiCred, setNewapiCred] = React.useState<AdminNewApiConfig | null>(null)
@@ -263,6 +371,23 @@ export default function AdminPage() {
   /** 待更新的新令牌（明文只存在于当前输入框，提交后立即清空） */
   const [newapiNewToken, setNewapiNewToken] = React.useState("")
   const [newapiUserId, setNewapiUserId] = React.useState("1")
+
+  // ---- WorkBuddy 反代账号捐献（登录即解锁 AI 权限）----
+  const [wb2apiConfig, setWb2apiConfig] = React.useState<AdminWb2ApiConfig | null>(null)
+  const [wb2apiBindings, setWb2apiBindings] = React.useState<AdminWb2ApiBinding[]>([])
+  const [wb2apiPool, setWb2apiPool] = React.useState<AdminWb2ApiPool | null>(null)
+  const [wb2apiLoading, setWb2apiLoading] = React.useState(false)
+  const [wb2apiBusy, setWb2apiBusy] = React.useState(false)
+  /** 待更新的网关访问密钥（明文只在输入框，提交后立即清空） */
+  const [wb2apiNewKey, setWb2apiNewKey] = React.useState("")
+  /** 移除确认弹窗：记录待摘的绑定 + 是否同时收回 ai 权限 */
+  const [wb2apiRemoving, setWb2apiRemoving] = React.useState<AdminWb2ApiBinding | null>(null)
+  const [wb2apiRevokeAi, setWb2apiRevokeAi] = React.useState(false)
+  /** 通道开关与限额（走全局设置接口，与其它开关一起保存） */
+  const [wb2apiEnabled, setWb2apiEnabled] = React.useState(true)
+  const [wb2apiMaxBindings, setWb2apiMaxBindings] = React.useState("3")
+  const [wb2apiBaseUrl, setWb2apiBaseUrl] = React.useState("")
+  const [wb2apiRealm, setWb2apiRealm] = React.useState<"cn" | "global">("cn")
   const [frpEnabled, setFrpEnabled] = React.useState(true)
   const [frpCoreUrl, setFrpCoreUrl] = React.useState("")
   const [frpNotifyEmail, setFrpNotifyEmail] = React.useState("")
@@ -286,6 +411,12 @@ export default function AdminPage() {
     ai: false,
     frp: false,
     proxy: false,
+  })
+  // 自动审核：打开后该模块的捐献提交即自动审核（r2 没有捐献，不在列表里）
+  const [autoReview, setAutoReview] = React.useState<Record<string, boolean>>({
+    ai: true,
+    frp: false,
+    proxy: true,
   })
 
   // ---- 社区管理 ----
@@ -384,8 +515,13 @@ export default function AdminPage() {
   // ---- 捐献审核 ----
   const [donations, setDonations] = React.useState<Donation[]>([])
   const [donationLoading, setDonationLoading] = React.useState(false)
-  const [donationNote, setDonationNote] = React.useState("")
   const [donationBusy, setDonationBusy] = React.useState(false)
+  // 待审核目标 + 理由弹窗
+  const [reviewTarget, setReviewTarget] = React.useState<{
+    donation: Donation
+    action: "approve" | "reject"
+  } | null>(null)
+  const [reviewNote, setReviewNote] = React.useState("")
 
   const loadDonations = React.useCallback(async () => {
     setDonationLoading(true)
@@ -403,18 +539,77 @@ export default function AdminPage() {
     d: Donation,
     action: "approve" | "reject"
   ) => {
+    // 打开理由弹窗，由用户在弹窗里填理由后确认
+    setReviewNote("")
+    setReviewTarget({ donation: d, action })
+  }
+
+  const confirmReview = async () => {
+    if (!reviewTarget) return
     setDonationBusy(true)
     try {
-      await donationApi.review(d.id, action, donationNote || undefined)
+      await donationApi.review(
+        reviewTarget.donation.id,
+        reviewTarget.action,
+        reviewNote.trim() || undefined
+      )
       toast.success(
-        action === "approve"
-          ? `已通过，${d.username} 的对应功能已解锁`
+        reviewTarget.action === "approve"
+          ? `已通过，${reviewTarget.donation.username} 的对应功能已解锁`
           : "已拒绝，结果已邮件通知申请人"
       )
-      setDonationNote("")
+      setReviewTarget(null)
+      setReviewNote("")
       await loadDonations()
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "操作失败")
+    } finally {
+      setDonationBusy(false)
+    }
+  }
+
+  /** 撤销已审核的捐献：回到待审核，若权限因此捐献获得则自动收回 */
+  const handleRevokeDonation = async (d: Donation) => {
+    const extra =
+      d.type === "ai"
+        ? "，并把它接入中转站的渠道删掉"
+        : d.type === "proxy"
+          ? "，并把它导入节点池的订阅源移出去"
+          : ""
+    if (!confirm(`撤销「${d.username}」的捐献审核？\n\n撤销后回到待审核；若该捐献授予过权限，会自动收回${extra}。`)) return
+    setDonationBusy(true)
+    try {
+      const res = await donationApi.revoke(d.id)
+      const parts = [res.revokedPermission ? "已撤销并收回权限" : "已撤销（该捐献未授予新权限）"]
+      if (res.releasedChannel) parts.push("中转站渠道已删除")
+      if (res.releasedSubscriptions) parts.push(`已移出 ${res.releasedSubscriptions} 个订阅源`)
+      toast.success(parts.join("，"))
+      await loadDonations()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "操作失败")
+    } finally {
+      setDonationBusy(false)
+    }
+  }
+
+  /**
+   * 人工复核：用原始 payload 重试接入中转站。
+   *
+   * 不改单据状态 —— 接入成功后管理员再点「复核通过」放行，
+   * 那时审核会复用刚建好的渠道，不会重复创建。
+   */
+  const handleProvisionDonation = async (d: Donation) => {
+    setDonationBusy(true)
+    try {
+      const res = await donationApi.provision(d.id)
+      if (res.ok) {
+        toast.success(res.detail ? `渠道已接入：${res.detail}` : "渠道已接入中转站")
+      } else {
+        toast.error(res.detail || res.message || "接入失败")
+      }
+      await loadDonations()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "接入失败")
     } finally {
       setDonationBusy(false)
     }
@@ -624,6 +819,18 @@ export default function AdminPage() {
       setNewapiGroup(s.newapi_group ?? "default")
       setNewapiUnlimited(s.newapi_unlimited_quota === "1")
       setNewapiEnabled(s.newapi_enabled === "1")
+      // 反代账号捐献通道
+      setWb2apiEnabled(s.wb2api_enabled === "1")
+      setWb2apiMaxBindings(s.wb2api_max_bindings ?? "3")
+      setWb2apiBaseUrl(s.wb2api_base_url ?? "")
+      setWb2apiRealm(s.wb2api_realm === "global" ? "global" : "cn")
+      // 推荐模型分档：坏 JSON 一律当空，不能让一个脏设置项把整个设置页打崩
+      try {
+        const parsed = JSON.parse(s.newapi_recommended_models ?? "[]")
+        setRecommendedTiers(Array.isArray(parsed) ? (parsed as RecommendedTier[]) : [])
+      } catch {
+        setRecommendedTiers([])
+      }
       setGlobalQuota(Number(s.subdomain_quota_default ?? 5))
       setSubQuota(s.subdomain_quota_default ?? "5")
       setFrpEnabled(s.frp_enabled === "1")
@@ -658,12 +865,25 @@ export default function AdminPage() {
         frp: openRaw.includes("frp"),
         proxy: openRaw.includes("proxy"),
       })
+      // 自动审核：后端存空串表示「全部转人工」
+      const autoRaw = (s.auto_review_features ?? "").split(",").map((x) => x.trim()).filter(Boolean)
+      setAutoReview({
+        ai: autoRaw.includes("ai"),
+        frp: autoRaw.includes("frp"),
+        proxy: autoRaw.includes("proxy"),
+      })
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "加载设置失败")
     } finally {
       setSettingsLoading(false)
     }
   }, [])
+
+  // 详情弹窗里的 AI 余额要按服务端的 quota 换算率与币种显示，这两项来自
+  // 全局设置。进页面就拉一次，避免管理员没点过「设置」标签时用默认值算错。
+  React.useEffect(() => {
+    void loadSettings()
+  }, [loadSettings])
 
   const handleSaveSettings = async () => {
     setSettingsBusy(true)
@@ -676,6 +896,17 @@ export default function AdminPage() {
         newapi_group: newapiGroup,
         newapi_unlimited_quota: newapiUnlimited,
         newapi_enabled: newapiEnabled,
+        // JSON 字符串：后端对该键有专门分支（先解析再 sanitize），
+        // 不走通用的「截断到 100 字」；空数组会序列化成 "[]" 正常写入。
+        newapi_recommended_models: JSON.stringify(
+          recommendedTiers
+            .map((t) => ({
+              tier: t.tier.trim(),
+              desc: t.desc.trim(),
+              models: t.models.map((m) => m.trim()).filter(Boolean),
+            }))
+            .filter((t) => t.tier && t.models.length > 0)
+        ),
         frp_enabled: frpEnabled,
         frp_core_url: frpCoreUrl,
         frp_admin_notify_email: frpNotifyEmail,
@@ -698,6 +929,16 @@ export default function AdminPage() {
           .filter(([, on]) => on)
           .map(([k]) => k)
           .join(","),
+        // 自动审核的模块，逗号分隔；全关时发空串 = 全部转人工
+        auto_review_features: Object.entries(autoReview)
+          .filter(([, on]) => on)
+          .map(([k]) => k)
+          .join(","),
+        // 反代账号捐献通道
+        wb2api_enabled: wb2apiEnabled,
+        wb2api_max_bindings: String(Math.max(1, Math.round(Number(wb2apiMaxBindings) || 3))),
+        wb2api_base_url: wb2apiBaseUrl.trim(),
+        wb2api_realm: wb2apiRealm,
       })
       toast.success("设置已保存")
       await loadSettings()
@@ -740,7 +981,83 @@ export default function AdminPage() {
     } finally {
       setNewapiCredLoading(false)
     }
+    // 模型候选单独拉：失败只是没有下拉可选（降级为手输），不该弹错误打扰管理员
+    try {
+      const m = await adminApi.listNewApiModels()
+      setModelOptions(m.models)
+    } catch {
+      setModelOptions([])
+    }
   }, [])
+
+  // ---- WorkBuddy 反代账号捐献 ----
+
+  const loadWb2api = React.useCallback(async () => {
+    setWb2apiLoading(true)
+    try {
+      const cfg = await wb2apiApi.getConfig()
+      setWb2apiConfig(cfg)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "读取反代网关配置失败")
+    } finally {
+      setWb2apiLoading(false)
+    }
+    // 绑定列表与池概览各自容错：一个失败不该让整页空白
+    try {
+      const b = await wb2apiApi.listBindings()
+      setWb2apiBindings(b.bindings)
+    } catch {
+      setWb2apiBindings([])
+    }
+    try {
+      const p = await wb2apiApi.getPool()
+      setWb2apiPool(p.pool)
+    } catch {
+      setWb2apiPool(null)
+    }
+  }, [])
+
+  const handleSaveWb2apiKey = async () => {
+    const key = wb2apiNewKey.trim()
+    if (!key) {
+      toast.error("请粘贴反代网关面板的访问密钥")
+      return
+    }
+    setWb2apiBusy(true)
+    try {
+      const res = await wb2apiApi.saveConfig(key)
+      setWb2apiNewKey("") // 明文用完即弃，不留内存
+      toast.success(res.message || "密钥已更新并生效")
+      void loadWb2api()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "密钥验证失败")
+    } finally {
+      setWb2apiBusy(false)
+    }
+  }
+
+  const handleRemoveWb2apiBinding = async () => {
+    const b = wb2apiRemoving
+    if (!b) return
+    setWb2apiBusy(true)
+    try {
+      const res = await wb2apiApi.removeBinding(b.id, wb2apiRevokeAi)
+      toast.success(
+        res.aiRevoked
+          ? "已移除绑定，并收回了该用户的 AI 权限"
+          : "已移除绑定（保留其 AI 权限）"
+      )
+      if (res.upstreamWarning) {
+        toast.warning(`网关侧移除失败：${res.upstreamWarning}`)
+      }
+      setWb2apiRemoving(null)
+      void loadWb2api()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "移除失败")
+    } finally {
+      setWb2apiBusy(false)
+    }
+  }
 
   const handleUpdateNewApiToken = async () => {
     const token = newapiNewToken.trim()
@@ -929,8 +1246,8 @@ export default function AdminPage() {
   const openAnnouncementDialog = (a?: Announcement) => {
     setAnnDraft(
       a
-        ? { id: a.id, title: a.title, body: a.body, category: a.category, pinned: a.pinned }
-        : { id: null, title: "", body: "", category: "general", pinned: false }
+        ? { id: a.id, title: a.title, body: a.body, category: a.category, pinned: a.pinned, popupMode: a.popupMode }
+        : { id: null, title: "", body: "", category: "general", pinned: false, popupMode: "none" }
     )
     setAnnouncementOpen(true)
   }
@@ -1216,9 +1533,63 @@ export default function AdminPage() {
           ? ""
           : String(res.user.maxSubdomains)
       )
+      setNickDraft(res.user.nickname ?? "")
       setDetailUser(username)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "加载详情失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 保存昵称（留空 = 清空）；与用户自助改名共用同一套后端校验 */
+  const handleSaveNickname = async () => {
+    if (!detail) return
+    setBusy(true)
+    try {
+      const res = await adminApi.updateUser(detail.user.username, {
+        nickname: nickDraft.trim() === "" ? null : nickDraft.trim(),
+      })
+      setDetail(res)
+      toast.success(nickDraft.trim() === "" ? "昵称已清空" : "昵称已更新")
+      void load()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "保存失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 切换邮箱验证 / 通知开关 */
+  const handleToggleUserFlag = async (
+    field: "emailVerified" | "notifyEnabled",
+    value: boolean
+  ) => {
+    if (!detail) return
+    setBusy(true)
+    try {
+      const res = await adminApi.updateUser(detail.user.username, { [field]: value })
+      setDetail(res)
+      const label = field === "emailVerified" ? "邮箱验证" : "通知邮件"
+      toast.success(`${label}已${value ? "开启" : "关闭"}`)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "操作失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 切换角色（admin / user）；主管理员在后端被拒 */
+  const handleToggleRole = async (nextRole: "admin" | "user") => {
+    if (!detail) return
+    setBusy(true)
+    try {
+      const res = await adminApi.updateUser(detail.user.username, { role: nextRole })
+      setDetail(res)
+      toast.success(nextRole === "admin" ? "已设为管理员" : "已降为普通用户")
+      void load()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "操作失败")
     } finally {
       setBusy(false)
     }
@@ -1289,6 +1660,23 @@ export default function AdminPage() {
     }
   }
 
+  /** 切换管理面板 tab：切到对应标签时懒加载该标签的数据 */
+  const handleTabChange = (v: string) => {
+    setActiveTab(v)
+    if (v === "invites") void loadInvites()
+    if (v === "settings") void loadSettings()
+    if (v === "frp") void loadFrp()
+    if (v === "proxy") void loadProxy()
+    if (v === "reserved") void loadReserved()
+    if (v === "donations") { void loadDonations(); void loadWb2api() }
+    if (v === "announcements") void loadAnnouncements()
+    if (v === "inviteQuotas") void loadInviteQuotas()
+    if (v === "r2") void loadR2()
+    if (v === "community") void loadCommunity()
+    if (v === "newapi") { void loadSettings(); void loadNewApiConfig() }
+    if (v === "wb2api") void loadWb2api()
+  }
+
   return (
     <div>
       <PageHeader
@@ -1296,58 +1684,47 @@ export default function AdminPage() {
         description={`已注册用户 ${users.length} 个 · 邀请码 ${invites.length} 个`}
       />
 
-      <Tabs defaultValue="users" onValueChange={(v) => { if (v === "invites") void loadInvites(); if (v === "settings") void loadSettings(); if (v === "frp") void loadFrp(); if (v === "proxy") void loadProxy(); if (v === "reserved") void loadReserved(); if (v === "donations") void loadDonations(); if (v === "announcements") void loadAnnouncements(); if (v === "inviteQuotas") void loadInviteQuotas(); if (v === "r2") void loadR2(); if (v === "community") void loadCommunity(); if (v === "newapi") { void loadSettings(); void loadNewApiConfig() } }}>
-        <TabsList className="mb-4">
-          <TabsTrigger value="users">
-            <Users className="mr-1.5 h-3.5 w-3.5" />
-            用户
-          </TabsTrigger>
-          <TabsTrigger value="invites">
-            <KeyRound className="mr-1.5 h-3.5 w-3.5" />
-            邀请码
-          </TabsTrigger>
-          <TabsTrigger value="inviteQuotas">
-            <Ticket className="mr-1.5 h-3.5 w-3.5" />
-            用户邀请码
-          </TabsTrigger>
-          <TabsTrigger value="frp">
-            <Network className="mr-1.5 h-3.5 w-3.5" />
-            内网穿透
-          </TabsTrigger>
-          <TabsTrigger value="proxy">
-            <Zap className="mr-1.5 h-3.5 w-3.5" />
-            代理节点
-          </TabsTrigger>
-          <TabsTrigger value="reserved">
-            <ShieldBan className="mr-1.5 h-3.5 w-3.5" />
-            保留名
-          </TabsTrigger>
-          <TabsTrigger value="donations">
-            <Heart className="mr-1.5 h-3.5 w-3.5" />
-            捐献
-          </TabsTrigger>
-          <TabsTrigger value="announcements">
-            <Megaphone className="mr-1.5 h-3.5 w-3.5" />
-            公告
-          </TabsTrigger>
-          <TabsTrigger value="r2">
-            <Database className="mr-1.5 h-3.5 w-3.5" />
-            R2 存储
-          </TabsTrigger>
-          <TabsTrigger value="community">
-            <MessagesSquare className="mr-1.5 h-3.5 w-3.5" />
-            社区
-          </TabsTrigger>
-          <TabsTrigger value="newapi">
-            <Sparkles className="mr-1.5 h-3.5 w-3.5" />
-            中转站
-          </TabsTrigger>
-          <TabsTrigger value="settings">
-            <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />
-            设置
-          </TabsTrigger>
-        </TabsList>
+      <Tabs value={activeTab} onValueChange={handleTabChange}>
+        <div className="flex flex-col gap-6 lg:flex-row">
+          {/* 左侧二级导航 */}
+          <aside className="w-full shrink-0 lg:w-48">
+            <Link
+              to="/dashboard"
+              className="mb-3 inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              返回控制台
+            </Link>
 
+            <nav className="flex flex-col gap-0.5">
+              <NavItem active={activeTab === "users"} icon={Users} label="用户" onClick={() => handleTabChange("users")} />
+              <NavGroup label="账号与邀请">
+                <NavItem active={activeTab === "invites"} icon={KeyRound} label="邀请码" onClick={() => handleTabChange("invites")} />
+                <NavItem active={activeTab === "inviteQuotas"} icon={Ticket} label="用户邀请码" onClick={() => handleTabChange("inviteQuotas")} />
+                <NavItem active={activeTab === "reserved"} icon={ShieldBan} label="保留名" onClick={() => handleTabChange("reserved")} />
+              </NavGroup>
+              <NavGroup label="资源服务">
+                <NavItem active={activeTab === "frp"} icon={Network} label="内网穿透" onClick={() => handleTabChange("frp")} />
+                <NavItem active={activeTab === "proxy"} icon={Zap} label="代理节点" onClick={() => handleTabChange("proxy")} />
+                <NavItem active={activeTab === "donations"} icon={Heart} label="捐献" onClick={() => handleTabChange("donations")} />
+                <NavItem active={activeTab === "wb2api"} icon={Unplug} label="反代账号" onClick={() => handleTabChange("wb2api")} />
+              </NavGroup>
+              <NavGroup label="内容与运营">
+                <NavItem active={activeTab === "announcements"} icon={Megaphone} label="公告" onClick={() => handleTabChange("announcements")} />
+                <NavItem active={activeTab === "community"} icon={MessagesSquare} label="社区" onClick={() => handleTabChange("community")} />
+                <NavItem active={activeTab === "r2"} icon={Database} label="R2 存储" onClick={() => handleTabChange("r2")} />
+              </NavGroup>
+              <NavGroup label="系统">
+                <NavItem active={activeTab === "newapi"} icon={Sparkles} label="中转站" onClick={() => handleTabChange("newapi")} />
+                <NavItem active={activeTab === "oauth"} icon={KeyRound} label="OAuth 应用" onClick={() => handleTabChange("oauth")} />
+                <NavItem active={activeTab === "analytics"} icon={BarChart3} label="网站统计" onClick={() => handleTabChange("analytics")} />
+                <NavItem active={activeTab === "settings"} icon={SlidersHorizontal} label="设置" onClick={() => handleTabChange("settings")} />
+              </NavGroup>
+            </nav>
+          </aside>
+
+          {/* 右侧内容区 */}
+          <div className="min-w-0 flex-1">
         <TabsContent value="users">
           <div className="mb-4 relative max-w-sm">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -1369,11 +1746,13 @@ export default function AdminPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>用户</TableHead>
-                <TableHead>命名空间</TableHead>
-                <TableHead>子域名</TableHead>
-                <TableHead>DNS</TableHead>
-                <TableHead>邮箱</TableHead>
-                <TableHead>邮件</TableHead>
+                <TableHead>邀请码</TableHead>
+                <TableHead>创建时间</TableHead>
+                <TableHead className="text-center">网盘</TableHead>
+                <TableHead className="text-center">AI 中转站</TableHead>
+                <TableHead className="text-center">内网穿透</TableHead>
+                <TableHead className="text-center">代理节点</TableHead>
+                <TableHead className="text-center">个人名片</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead className="w-24" />
               </TableRow>
@@ -1392,12 +1771,70 @@ export default function AdminPage() {
                     </button>
                   </TableCell>
                   <TableCell className="font-mono text-xs">
-                    {u.namespace}.doulor.cn
+                    {u.inviteCode ? (
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              className="font-mono text-xs text-primary hover:underline"
+                            >
+                              {u.inviteCode}
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <p>
+                              创建者：{u.inviteCreatedBy ?? "未知"}
+                            </p>
+                            <p className="text-muted-foreground">
+                              {u.inviteCreatedAt
+                                ? fmtTime(u.inviteCreatedAt)
+                                : "时间未知"}
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
                   </TableCell>
-                  <TableCell>{u.subdomainCount}</TableCell>
-                  <TableCell>{u.dnsCount}</TableCell>
-                  <TableCell>{u.mailboxCount}</TableCell>
-                  <TableCell>{u.mailCount}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {fmtTime(u.createdAt)}
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <BoolMark on={u.storageEnabled} />
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <BoolMark on={u.aiEnabled} />
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <BoolMark on={u.frpEnabled} />
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <BoolMark on={u.proxyEnabled} />
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <div className="flex items-center justify-center gap-1.5">
+                      <BoolMark on={u.profileEnabled} />
+                      {u.profileEnabled &&
+                        (() => {
+                          const url = profilePublicUrl(u.profileSlug, u.profileFqdn)
+                          return url ? (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 text-muted-foreground"
+                              asChild
+                              title="打开公开名片页"
+                            >
+                              <a href={url} target="_blank" rel="noopener noreferrer">
+                                <ExternalLink className="h-3.5 w-3.5" />
+                              </a>
+                            </Button>
+                          ) : null
+                        })()}
+                    </div>
+                  </TableCell>
                   <TableCell>
                     {u.status === "active" ? (
                       <Badge variant="success">active</Badge>
@@ -1824,7 +2261,7 @@ export default function AdminPage() {
           ) : proxySubs.length === 0 ? (
             <EmptyState
               title="还没有订阅源"
-              description="添加一个代理订阅链接（vless / vmess / trojan / ss）。"
+              description="添加一个代理订阅链接（vless / vmess / trojan / ss / ssr / anytls / hysteria2 / tuic）。"
             />
           ) : (
             <div className="rounded-lg border bg-card">
@@ -2161,16 +2598,6 @@ export default function AdminPage() {
             </Button>
           </div>
 
-          <div className="mb-4 space-y-2">
-            <Label htmlFor="donationNote">审批回复（可选，会随结果邮件发出）</Label>
-            <Input
-              id="donationNote"
-              placeholder="例如：渠道已验证可用，已为你开通 / 订阅链接已失效，请更换后重试"
-              value={donationNote}
-              onChange={(e) => setDonationNote(e.target.value)}
-            />
-          </div>
-
           {donationLoading ? (
             <LoadingBlock />
           ) : donations.length === 0 ? (
@@ -2207,6 +2634,14 @@ export default function AdminPage() {
                         </Badge>
                       </p>
                       <DonationDetail type={d.type} payload={d.payload} />
+                      {d.type === "ai" && (
+                        <p className="text-xs text-muted-foreground">
+                          {d.channelId !== null && d.channelId !== undefined
+                            ? `中转站渠道 #${d.channelId} 已接入`
+                            : "尚未接入中转站渠道"}
+                          {d.autoReviewed && " · 本次为系统自动审核"}
+                        </p>
+                      )}
                       <p className="text-xs text-muted-foreground">
                         通知邮箱 {d.notifyEmail} · {fmtTime(d.createdAt)}
                       </p>
@@ -2216,7 +2651,7 @@ export default function AdminPage() {
                         </p>
                       )}
                       {d.reviewNote && (
-                        <p className="text-xs text-muted-foreground">
+                        <p className="whitespace-pre-wrap text-xs text-muted-foreground">
                           审批回复：{d.reviewNote}
                         </p>
                       )}
@@ -2242,11 +2677,163 @@ export default function AdminPage() {
                         </Button>
                       </div>
                     )}
+                    {d.status === "rejected" && (
+                      <div className="flex shrink-0 items-center gap-2">
+                        {/* AI 渠道可以「先用原始信息重试接入」；代理/内网穿透没有
+                            可重试的自动动作，直接人工放行即可 */}
+                        {d.type === "ai" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void handleProvisionDonation(d)}
+                            disabled={donationBusy}
+                          >
+                            <PlugZap className="h-3.5 w-3.5" />
+                            复核：重试接入
+                          </Button>
+                        )}
+                        <Button
+                          size="sm"
+                          onClick={() => void handleReviewDonation(d, "approve")}
+                          disabled={donationBusy}
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          复核通过
+                        </Button>
+                      </div>
+                    )}
+                    {d.status === "approved" && (
+                      <div className="flex shrink-0 items-center">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-muted-foreground hover:text-destructive"
+                          onClick={() => void handleRevokeDonation(d)}
+                          disabled={donationBusy}
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" />
+                          撤销并重新审核
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
           )}
+
+          {/* 反代账号贡献：免审核通道，登录即生效，这里只做观察与摘除 */}
+          <div className="mt-6 border-t pt-6">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-medium">反代账号贡献</h3>
+                <p className="text-xs text-muted-foreground">
+                  用户登录 WorkBuddy 账号即自动生效，无需审核。这里用于观察与摘除。
+                </p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => void loadWb2api()}>
+                <RefreshCw className="h-4 w-4" />
+                刷新
+              </Button>
+            </div>
+            {wb2apiBindings.length === 0 ? (
+              <EmptyState
+                icon={Unplug}
+                title="还没有反代账号贡献"
+                description="用户在「捐献」页登录 WorkBuddy 账号后会出现在这里。"
+              />
+            ) : (
+              <div className="divide-y rounded-md border">
+                {wb2apiBindings.map((b) => (
+                  <div
+                    key={b.id}
+                    className="flex flex-wrap items-center gap-2 px-4 py-3"
+                  >
+                    <span className="text-sm font-medium">{b.username}</span>
+                    <span className="text-sm">{b.nickname || b.uid}</span>
+                    <Badge variant="outline">{realmLabel(b.realm)}</Badge>
+                    <Badge variant={b.status === "active" ? "success" : "secondary"}>
+                      {b.status === "active" ? "使用中" : "已移除"}
+                    </Badge>
+                    <Badge variant={b.grantedAi ? "outline" : "secondary"}>
+                      {b.grantedAi ? "AI 权限由本次授予" : "未授予（此前已有）"}
+                    </Badge>
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      {fmtTime(b.createdAt)}
+                    </span>
+                    {b.status === "active" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-muted-foreground hover:text-destructive"
+                        onClick={() => {
+                          setWb2apiRevokeAi(b.grantedAi)
+                          setWb2apiRemoving(b)
+                        }}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        摘除
+                      </Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 审核理由弹窗 */}
+          <Dialog open={reviewTarget !== null} onOpenChange={(o) => !o && setReviewTarget(null)}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>
+                  {reviewTarget?.action === "approve" ? "通过捐献" : "拒绝捐献"}
+                </DialogTitle>
+                <DialogDescription>
+                  用户「{reviewTarget?.donation.username}」的捐献
+                  {reviewTarget?.action === "approve"
+                    ? "将通过并解锁对应功能。"
+                    : "将被拒绝。"}
+                  {reviewTarget?.action === "approve" &&
+                    reviewTarget.donation.type === "ai" &&
+                    (reviewTarget.donation.channelId === null ||
+                      reviewTarget.donation.channelId === undefined) &&
+                    "该 AI 捐献尚未接入中转站，通过时会自动尝试创建渠道并测试。"}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-2">
+                <Label htmlFor="reviewNote">
+                  {reviewTarget?.action === "approve" ? "审批回复（可选）" : "拒绝理由（可选，建议填写）"}
+                </Label>
+                <Textarea
+                  id="reviewNote"
+                  rows={3}
+                  placeholder={
+                    reviewTarget?.action === "reject"
+                      ? "例如：渠道已失效 / 订阅链接无法使用，请更换后重新提交"
+                      : "例如：渠道已验证可用，已为你开通"
+                  }
+                  value={reviewNote}
+                  onChange={(e) => setReviewNote(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  会随结果邮件一并通知申请人。
+                </p>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setReviewTarget(null)} disabled={donationBusy}>
+                  取消
+                </Button>
+                <Button
+                  variant={reviewTarget?.action === "reject" ? "destructive" : "default"}
+                  onClick={() => void confirmReview()}
+                  disabled={donationBusy}
+                >
+                  {donationBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  确认{reviewTarget?.action === "approve" ? "通过" : "拒绝"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </TabsContent>
 
         <TabsContent value="announcements">
@@ -2938,7 +3525,484 @@ export default function AdminPage() {
                 </div>
               </CardContent>
             </Card>
+
+            {/* 推荐模型：用户在 AI 页看到的「第一梯队 / 第二梯队」就是这份 */}
+            <Card>
+              <CardHeader>
+                <div className="flex items-start justify-between gap-4">
+                  <div className="space-y-1">
+                    <CardTitle className="text-base">推荐模型</CardTitle>
+                    <CardDescription>
+                      用户在「AI 中转站」页看到的推荐分档。数组顺序即梯队顺序
+                      （第一梯队在最上），梯队之间会显示向下的箭头。留空则不显示该区块。
+                      本标签页的设置共用一份提交，任一处保存都会一并写入。
+                    </CardDescription>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setRecommendedTiers((t) => [
+                        ...t,
+                        { tier: `第${t.length + 1}梯队`, desc: "", models: [] },
+                      ])
+                    }
+                    disabled={recommendedTiers.length >= 8}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    添加梯队
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {recommendedTiers.length === 0 ? (
+                  <p className="rounded-md border border-dashed py-6 text-center text-sm text-muted-foreground">
+                    还没有推荐分档。点右上角「添加梯队」开始配置。
+                  </p>
+                ) : (
+                  recommendedTiers.map((t, i) => (
+                    <div key={i} className="space-y-3 rounded-lg border p-3.5">
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] font-semibold text-muted-foreground">
+                          {i + 1}
+                        </span>
+                        <Input
+                          value={t.tier}
+                          placeholder="梯队名，如：第一梯队"
+                          maxLength={20}
+                          className="h-8 flex-1"
+                          onChange={(e) =>
+                            setRecommendedTiers((list) =>
+                              list.map((x, idx) =>
+                                idx === i ? { ...x, tier: e.target.value } : x
+                              )
+                            )
+                          }
+                        />
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                          onClick={() =>
+                            setRecommendedTiers((list) =>
+                              list.filter((_, idx) => idx !== i)
+                            )
+                          }
+                          title="删除该梯队"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+
+                      <Input
+                        value={t.desc}
+                        placeholder="一句话说明（可选），如：综合最强，日常首选"
+                        maxLength={120}
+                        className="h-8 text-sm"
+                        onChange={(e) =>
+                          setRecommendedTiers((list) =>
+                            list.map((x, idx) =>
+                              idx === i ? { ...x, desc: e.target.value } : x
+                            )
+                          )
+                        }
+                      />
+
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap gap-1.5">
+                          {t.models.length === 0 ? (
+                            <span className="text-xs text-muted-foreground">
+                              还没有模型
+                            </span>
+                          ) : (
+                            t.models.map((m) => (
+                              <Badge
+                                key={m}
+                                variant="outline"
+                                className="gap-1 font-mono text-xs"
+                              >
+                                {m}
+                                <button
+                                  type="button"
+                                  className="text-muted-foreground hover:text-destructive"
+                                  onClick={() =>
+                                    setRecommendedTiers((list) =>
+                                      list.map((x, idx) =>
+                                        idx === i
+                                          ? {
+                                              ...x,
+                                              models: x.models.filter((mm) => mm !== m),
+                                            }
+                                          : x
+                                      )
+                                    )
+                                  }
+                                  aria-label={`移除 ${m}`}
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              </Badge>
+                            ))
+                          )}
+                        </div>
+                        {/* 候选来自中转站 pricing；拉不到时降级为手输 */}
+                        {modelOptions.length > 0 ? (
+                          <div className="flex gap-2">
+                            <Select
+                              value=""
+                              onValueChange={(m) =>
+                                setRecommendedTiers((list) =>
+                                  list.map((x, idx) =>
+                                    idx === i && !x.models.includes(m)
+                                      ? { ...x, models: [...x.models, m] }
+                                      : x
+                                  )
+                                )
+                              }
+                            >
+                              <SelectTrigger className="h-8 flex-1 text-xs">
+                                <SelectValue placeholder="从中转站模型里选择…" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {modelOptions
+                                  .filter((m) => !t.models.includes(m))
+                                  .map((m) => (
+                                    <SelectItem key={m} value={m} className="font-mono text-xs">
+                                      {m}
+                                    </SelectItem>
+                                  ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        ) : (
+                          <Input
+                            placeholder="手动输入模型名后按回车添加"
+                            className="h-8 font-mono text-xs"
+                            onKeyDown={(e) => {
+                              if (e.key !== "Enter") return
+                              e.preventDefault()
+                              const v = e.currentTarget.value.trim()
+                              if (!v) return
+                              setRecommendedTiers((list) =>
+                                list.map((x, idx) =>
+                                  idx === i && !x.models.includes(v)
+                                    ? { ...x, models: [...x.models, v] }
+                                    : x
+                                )
+                              )
+                              e.currentTarget.value = ""
+                            }}
+                          />
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+                {/* 推荐模型走的是同一个 handleSaveSettings（整个 newapi 标签页共用一份
+                    payload），但只靠上面「AI 中转站」卡片里那个按钮太不显眼，这里再给一个
+                    就近入口。 */}
+                <div className="flex justify-end">
+                  <Button
+                    onClick={() => void handleSaveSettings()}
+                    disabled={settingsBusy}
+                  >
+                    {settingsBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                    保存推荐模型
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
           </div>
+        </TabsContent>
+
+        <TabsContent value="wb2api">
+          <div className="space-y-6">
+            {/* 通道开关与限额：走全局设置接口，与「设置」标签一起保存 */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">捐献通道设置</CardTitle>
+                <CardDescription>
+                  关闭通道后，捐献页不再显示「反代账号」卡（已绑定的账号仍留在网关池中）。
+                  这些设置与「设置」标签共用同一个保存接口，改完点下面的保存即可。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between rounded-md border px-4 py-3">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">开启捐献通道</p>
+                    <p className="text-xs text-muted-foreground">
+                      允许用户登录 WorkBuddy 账号换取 AI 中转站权限
+                    </p>
+                  </div>
+                  <Switch checked={wb2apiEnabled} onCheckedChange={setWb2apiEnabled} />
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="wb2apiLimit">每人可绑定上限</Label>
+                    <Input
+                      id="wb2apiLimit"
+                      type="number"
+                      min={1}
+                      value={wb2apiMaxBindings}
+                      onChange={(e) => setWb2apiMaxBindings(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      绑定即自动解锁 AI 权限且免审核，故需要上限防止刷额度
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="wb2apiBaseUrl">网关地址</Label>
+                    <Input
+                      id="wb2apiBaseUrl"
+                      placeholder="https://wb2api.doulor.cn"
+                      value={wb2apiBaseUrl}
+                      onChange={(e) => setWb2apiBaseUrl(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      留空则用内置默认值
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>对接域</Label>
+                    <Select
+                      value={wb2apiRealm}
+                      onValueChange={(v) => setWb2apiRealm(v as "cn" | "global")}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="cn">国内版（cn）</SelectItem>
+                        <SelectItem value="global">国际版（global）</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      决定用户贡献的 WorkBuddy 账号对接哪个域，默认国内版。
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  onClick={() => void handleSaveSettings()}
+                  disabled={settingsBusy}
+                >
+                  {settingsBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                  保存通道设置
+                </Button>
+              </CardContent>
+            </Card>
+
+            {/* 网关访问密钥：反代网关面板的 api_key 可能被随时改，允许在网页上验证并替换 */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">网关访问密钥</CardTitle>
+                <CardDescription>
+                  捐献页让用户登录自己的 WorkBuddy {realmLabel(wb2apiRealm)}账号来解锁 AI 权限，
+                  本站需要持有反代网关面板的访问密钥（Bearer）才能代为发起登录与轮询。
+                  密钥会先做一次真实探测，通过后才加密入库。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {wb2apiLoading ? (
+                  <LoadingBlock />
+                ) : (
+                  <>
+                    <div className="flex flex-wrap items-center gap-2 text-sm">
+                      <Badge
+                        variant={
+                          wb2apiConfig?.source === "db"
+                            ? "success"
+                            : wb2apiConfig?.source === "env"
+                              ? "secondary"
+                              : "destructive"
+                        }
+                      >
+                        {wb2apiConfig?.source === "db"
+                          ? "已在线配置"
+                          : wb2apiConfig?.source === "env"
+                            ? "来自环境变量"
+                            : "未配置"}
+                      </Badge>
+                      <span className="font-mono text-xs text-muted-foreground">
+                        {wb2apiConfig?.maskedApiKey ?? "（无）"}
+                      </span>
+                      {wb2apiConfig?.updatedAt && (
+                        <span className="text-xs text-muted-foreground">
+                          更新于 {fmtTime(wb2apiConfig.updatedAt)}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 text-sm">
+                      <span className="text-muted-foreground">网关地址：</span>
+                      <span className="font-mono text-xs">
+                        {wb2apiConfig?.baseUrl || "（未配置）"}
+                      </span>
+                      <span className="text-muted-foreground">
+                        · 通道{wb2apiConfig?.enabled ? "已开启" : "已关闭"} ·
+                        每人上限 {wb2apiConfig?.limit ?? "-"}
+                      </span>
+                    </div>
+
+                    {wb2apiConfig?.health && (
+                      <p
+                        className={
+                          "flex items-start gap-2 text-sm " +
+                          (wb2apiConfig.health.ok
+                            ? "text-emerald-600 dark:text-emerald-400"
+                            : "text-destructive")
+                        }
+                      >
+                        {wb2apiConfig.health.ok ? (
+                          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+                        ) : (
+                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                        )}
+                        {wb2apiConfig.health.message}
+                      </p>
+                    )}
+
+                    <div className="space-y-2">
+                      <Label htmlFor="wb2apiKey">更新访问密钥</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          id="wb2apiKey"
+                          type="password"
+                          placeholder="粘贴反代网关面板的 api_key"
+                          value={wb2apiNewKey}
+                          onChange={(e) => setWb2apiNewKey(e.target.value)}
+                        />
+                        <Button
+                          onClick={() => void handleSaveWb2apiKey()}
+                          disabled={wb2apiBusy || !wb2apiNewKey.trim()}
+                        >
+                          {wb2apiBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                          保存
+                        </Button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* 账号池概览：直接读网关的池状态，确认捐献的账号是否真的进池 */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">网关账号池</CardTitle>
+                <CardDescription>
+                  账号池健康度来自网关自身，用于确认捐献的账号已正常入池。
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {!wb2apiPool ? (
+                  <p className="text-sm text-muted-foreground">
+                    暂无数据（密钥未配置或网关不可达）
+                  </p>
+                ) : (
+                  <>
+                    <div className="mb-4 flex flex-wrap gap-4 text-sm">
+                      <span>
+                        总数 <span className="font-semibold">{wb2apiPool.total}</span>
+                      </span>
+                      <span className="text-emerald-600 dark:text-emerald-400">
+                        可用 <span className="font-semibold">{wb2apiPool.healthy}</span>
+                      </span>
+                      <span className="text-amber-600 dark:text-amber-400">
+                        冷却 <span className="font-semibold">{wb2apiPool.cooling}</span>
+                      </span>
+                      <span className="text-muted-foreground">
+                        禁用 <span className="font-semibold">{wb2apiPool.disabled}</span>
+                      </span>
+                    </div>
+                    {wb2apiPool.accounts.length > 0 && (
+                      <div className="divide-y rounded-md border">
+                        {wb2apiPool.accounts.map((a) => (
+                          <div
+                            key={a.uid}
+                            className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm"
+                          >
+                            <span>{a.nickname || a.uid}</span>
+                            {a.realm && <Badge variant="outline">{realmLabel(a.realm)}</Badge>}
+                            <span className="ml-auto font-mono text-xs text-muted-foreground">
+                              {typeof a.credits === "number" ? `积分 ${a.credits}` : ""}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* 绑定列表：谁捐了哪个账号，可摘除 */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  捐献绑定（{wb2apiBindings.length}）
+                </CardTitle>
+                <CardDescription>
+                  摘除绑定时会尝试从网关账号池移除该账号。
+                  「AI 权限」一列表示该绑定当时是否新授予了权限 ——
+                  若该用户还有其它捐献依据（其他绑定 / 已通过的 AI 渠道捐献），
+                  默认会保留其权限，可在弹窗中勾选强制收回。
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {wb2apiBindings.length === 0 ? (
+                  <EmptyState
+                    icon={Unplug}
+                    title="还没有捐献绑定"
+                    description="用户在「捐献」页登录 WorkBuddy 账号后会出现在这里。"
+                  />
+                ) : (
+                  <div className="divide-y rounded-md border">
+                    {wb2apiBindings.map((b) => (
+                      <div
+                        key={b.id}
+                        className="flex flex-wrap items-center gap-2 px-4 py-3"
+                      >
+                        <span className="text-sm font-medium">{b.username}</span>
+                        <span className="text-sm">{b.nickname || b.uid}</span>
+                        <Badge variant={b.status === "active" ? "success" : "secondary"}>
+                          {b.status === "active" ? "使用中" : "已移除"}
+                        </Badge>
+                        <Badge variant={b.grantedAi ? "outline" : "secondary"}>
+                          {b.grantedAi ? "AI 权限由本次授予" : "未授予（此前已有）"}
+                        </Badge>
+                        <span className="ml-auto text-xs text-muted-foreground">
+                          {fmtTime(b.createdAt)}
+                        </span>
+                        {b.status === "active" && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-muted-foreground hover:text-destructive"
+                            onClick={() => {
+                              // 默认勾选 = 服务端的自动判定结果（无其他依据则收回）
+                              setWb2apiRevokeAi(b.grantedAi)
+                              setWb2apiRemoving(b)
+                            }}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            摘除
+                          </Button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="oauth">
+          <OAuthAdminPanel />
+        </TabsContent>
+
+        <TabsContent value="analytics">
+          <AnalyticsPanel />
         </TabsContent>
 
         <TabsContent value="settings">
@@ -3291,6 +4355,50 @@ export default function AdminPage() {
                 </CardContent>
               </Card>
 
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">捐献自动审核</CardTitle>
+                  <CardDescription>
+                    打开某个模块后，用户提交该模块的捐献会**当场自动审核**（能用的自动通过并解锁，
+                    全部无效则自动拒绝并写明原因），不再进管理员的待审核队列。关闭则回到人工审核。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {Object.keys(autoReview).map((f) => (
+                    <div
+                      key={f}
+                      className="flex items-center justify-between rounded-md border p-3"
+                    >
+                      <div className="space-y-0.5">
+                        <p className="text-sm font-medium">
+                          {FEATURE_LABELS[f as FeatureKey] ?? f}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {f === "ai"
+                            ? "自动探测上游 + 逐个测模型，只留可用的；全不可用则自动拒绝"
+                            : f === "proxy"
+                              ? "逐个真实拉取订阅链接，能解析出节点的才导入；全无效则自动拒绝"
+                              : "仅校验 config.yml 的语法与必填字段（frpc↔frps 是私有 TCP 协议，Worker 只能发 HTTP，验证不了连通性）"}
+                        </p>
+                      </div>
+                      <Switch
+                        checked={autoReview[f] ?? false}
+                        onCheckedChange={(v) =>
+                          setAutoReview((prev) => ({ ...prev, [f]: v }))
+                        }
+                      />
+                    </div>
+                  ))}
+                  <p className="text-xs text-muted-foreground">
+                    AI 与代理能「真的调一次」验证可用性，判定可靠；内网穿透的 config.yml
+                    虽指向公网 frps，但 frpc↔frps 是私有 TCP 协议、不是 HTTP，
+                    本站后端出站只能发 HTTP/HTTPS、连不了 TCP 端口，验证不了连通性，
+                    只能做语法/字段静态校验。默认建议保持关闭。
+                    自动拒绝的单据仍可在「捐献」页里人工复核通过。
+                  </p>
+                </CardContent>
+              </Card>
+
               <div className="flex justify-end">
                 <Button onClick={() => void handleSaveSettings()} disabled={settingsBusy}>
                   {settingsBusy && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -3300,7 +4408,58 @@ export default function AdminPage() {
             </div>
           )}
         </TabsContent>
+          </div>
+        </div>
       </Tabs>
+
+      {/* 摘除反代捐献绑定 */}
+      <Dialog
+        open={wb2apiRemoving !== null}
+        onOpenChange={(o) => {
+          if (!o) setWb2apiRemoving(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>摘除捐献绑定</DialogTitle>
+            <DialogDescription>
+              将从网关账号池移除 {wb2apiRemoving?.nickname || wb2apiRemoving?.uid}
+              （捐献者 {wb2apiRemoving?.username}）。
+              网关侧移除失败时本地仍会标记为已移除，并提示失败原因。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <label className="flex cursor-pointer items-start gap-3 rounded-md border px-4 py-3">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4"
+                checked={wb2apiRevokeAi}
+                onChange={(e) => setWb2apiRevokeAi(e.target.checked)}
+              />
+              <span className="text-sm">
+                同时收回该用户的「AI 中转站」权限
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  默认按「还有其它捐献依据就保留」自动判定。
+                  若该用户的权限来自邀请码（本站无法溯源），需要在此手动勾选才会收回。
+                </span>
+              </span>
+            </label>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setWb2apiRemoving(null)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void handleRemoveWb2apiBinding()}
+              disabled={wb2apiBusy}
+            >
+              {wb2apiBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+              确认摘除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 编辑邀请码权限 */}
       <Dialog
@@ -3537,7 +4696,7 @@ export default function AdminPage() {
           <DialogHeader>
             <DialogTitle>添加邀请码</DialogTitle>
             <DialogDescription>
-              分享给朋友用于注册。
+              分享给他人用于注册。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -3658,6 +4817,26 @@ export default function AdminPage() {
                   />
                 </div>
               </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>弹窗提醒</Label>
+              <Select
+                value={annDraft.popupMode}
+                onValueChange={(v) => setAnnDraft((d) => ({ ...d, popupMode: v as "none" | "once" | "every" }))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">不弹窗（仅概览显示）</SelectItem>
+                  <SelectItem value="once">仅弹窗一次</SelectItem>
+                  <SelectItem value="every">每次进入都弹（可「不再显示」）</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                弹窗提醒登录用户。用户关闭后，「仅一次」不再出现；「每次都弹」时用户可自行选择「不再显示」。
+              </p>
             </div>
           </div>
           <DialogFooter>
@@ -3880,7 +5059,7 @@ export default function AdminPage() {
           }
         }}
       >
-        <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+        <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
           {detail && (
             <>
               <DialogHeader>
@@ -3896,11 +5075,281 @@ export default function AdminPage() {
                   )}
                 </DialogTitle>
                 <DialogDescription>
+                  {detail.user.nickname ? `${detail.user.nickname} · ` : ""}
                   {detail.user.email} · 注册于 {fmtTime(detail.user.createdAt)}
                 </DialogDescription>
               </DialogHeader>
 
               <div className="space-y-4">
+                {/* ---- 账号：昵称 / 邮箱验证 / 通知 / 角色 ---- */}
+                <section>
+                  <h3 className="mb-2 text-sm font-medium">账号</h3>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3 rounded-md border p-3">
+                      <Input
+                        className="max-w-xs"
+                        value={nickDraft}
+                        placeholder="未设置昵称"
+                        disabled={busy || detail.user.username === user?.username}
+                        onChange={(e) => setNickDraft(e.target.value)}
+                      />
+                      <span className="text-xs text-muted-foreground">
+                        展示昵称（2-16 位中文/英文/数字/下划线，留空 = 清空）
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="ml-auto"
+                        disabled={busy || detail.user.username === user?.username}
+                        onClick={() => void handleSaveNickname()}
+                      >
+                        保存
+                      </Button>
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-md border p-3">
+                      <div className="space-y-0.5">
+                        <p className="text-sm font-medium">邮箱已验证</p>
+                        <p className="text-xs text-muted-foreground">
+                          {detail.user.email} · 验证后才能接收转发与通知
+                        </p>
+                      </div>
+                      <Switch
+                        checked={detail.user.emailVerified}
+                        disabled={busy || detail.user.username === user?.username}
+                        onCheckedChange={(v) =>
+                          void handleToggleUserFlag("emailVerified", v)
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-md border p-3">
+                      <div className="space-y-0.5">
+                        <p className="text-sm font-medium">接收通知邮件</p>
+                        <p className="text-xs text-muted-foreground">
+                          审批结果、系统公告等平台邮件的开关
+                        </p>
+                      </div>
+                      <Switch
+                        checked={detail.user.notifyEnabled}
+                        disabled={busy || detail.user.username === user?.username}
+                        onCheckedChange={(v) =>
+                          void handleToggleUserFlag("notifyEnabled", v)
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-md border p-3">
+                      <div className="space-y-0.5">
+                        <p className="text-sm font-medium">管理员</p>
+                        <p className="text-xs text-muted-foreground">
+                          设为管理员后可使用整个管理面板
+                        </p>
+                      </div>
+                      <Switch
+                        checked={detail.user.role === "admin"}
+                        disabled={busy || detail.user.username === user?.username}
+                        onCheckedChange={(v) =>
+                          void handleToggleRole(v ? "admin" : "user")
+                        }
+                      />
+                    </div>
+                  </div>
+                </section>
+
+                {/* ---- 各模块用量与开通状态 ---- */}
+                <section>
+                  <h3 className="mb-2 text-sm font-medium">模块开通与用量</h3>
+                  <div className="rounded-md border">
+                    {/* 网盘 */}
+                    <div className="border-b px-3 py-2 text-xs last:border-b-0">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium">直链网盘</span>
+                        {detail.storage ? (
+                          <Badge variant={detail.storage.enabled ? "success" : "secondary"}>
+                            {detail.storage.enabled ? "已开通" : "已停用"}
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline">未开通</Badge>
+                        )}
+                      </div>
+                      {detail.storage && (
+                        <p className="mt-1 text-muted-foreground">
+                          {detail.storage.prefix}/ · {formatBytes(detail.storage.usedBytes)} /{" "}
+                          {formatBytes(detail.storage.quotaBytes)} · {detail.storage.fileCount} 个文件
+                          {detail.storage.bucketName && ` · 桶 ${detail.storage.bucketName}`}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* AI 中转站 */}
+                    <div className="border-b px-3 py-2 text-xs last:border-b-0">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium">AI 中转站</span>
+                        {detail.newapi ? (
+                          <Badge variant="success">已开通</Badge>
+                        ) : (
+                          <Badge variant="outline">未开通</Badge>
+                        )}
+                      </div>
+                      {detail.newapi && (
+                        <p className="mt-1 text-muted-foreground">
+                          #{detail.newapi.newapiUserId} · 余额{" "}
+                          {currencySymbol}
+                          {(detail.newapi.quota / quotaPerUnit).toFixed(2)} · 已用{" "}
+                          {currencySymbol}
+                          {(detail.newapi.usedQuota / quotaPerUnit).toFixed(2)} ·{" "}
+                          {detail.newapi.requestCount} 次请求
+                          {detail.newapi.syncedAt && ` · 同步于 ${fmtTime(detail.newapi.syncedAt)}`}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* 内网穿透 */}
+                    <div className="border-b px-3 py-2 text-xs last:border-b-0">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium">内网穿透</span>
+                        {detail.frp ? (
+                          <Badge variant={detail.frp.enabled ? "success" : "secondary"}>
+                            {detail.frp.enabled ? "已启用" : "已关闭"}
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline">未启用</Badge>
+                        )}
+                      </div>
+                      {(detail.frpPorts.length > 0 || detail.frpApplications.length > 0) && (
+                        <div className="mt-1 space-y-1 text-muted-foreground">
+                          {detail.frpPorts.length > 0 && (
+                            <p>
+                              占用端口：
+                              {detail.frpPorts
+                                .map((p) => `${p.nodeName ?? "节点"} ${p.remotePort}`)
+                                .join("、")}
+                            </p>
+                          )}
+                          {detail.frpApplications.slice(0, 5).map((a) => (
+                            <p key={a.id}>
+                              申请 {a.ports.join("/")} · {a.status}
+                              {a.reviewNote && ` · ${a.reviewNote}`}
+                              {" · "}
+                              {fmtTime(a.createdAt)}
+                            </p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 代理节点 */}
+                    <div className="px-3 py-2 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium">代理节点</span>
+                        {detail.proxy ? (
+                          <Badge variant={detail.proxy.enabled ? "success" : "secondary"}>
+                            {detail.proxy.enabled ? "已启用" : "已关闭"}
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline">未启用</Badge>
+                        )}
+                      </div>
+                      {detail.proxy?.consentedAt && (
+                        <p className="mt-1 text-muted-foreground">
+                          已同意使用协议 v{detail.proxy.consentVersion} ·{" "}
+                          {fmtTime(detail.proxy.consentedAt)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                {/* ---- 个人名片 ---- */}
+                <section>
+                  <h3 className="mb-2 text-sm font-medium">个人名片</h3>
+                  <div className="rounded-md border p-3 text-xs">
+                    {detail.profile ? (
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <Badge variant={detail.profile.published ? "success" : "secondary"}>
+                            {detail.profile.published ? "已启用" : "未启用"}
+                          </Badge>
+                          <span className="text-muted-foreground">
+                            {detail.profile.displayName ?? "未设置展示名"}
+                          </span>
+                          {(() => {
+                            const url = profilePublicUrl(
+                              detail.profile.slug,
+                              detail.profile.fqdn
+                            )
+                            return url ? (
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="ml-auto inline-flex items-center gap-1 text-primary hover:underline"
+                              >
+                                打开
+                                <ExternalLink className="h-3 w-3" />
+                              </a>
+                            ) : null
+                          })()}
+                        </div>
+                        <p className="text-muted-foreground">
+                          {detail.profile.fqdn ?? `/profile/${detail.profile.slug}`} ·
+                          访问 {detail.profile.viewCount} 次 · 更新于{" "}
+                          {fmtTime(detail.profile.updatedAt)}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-muted-foreground">未开通名片</p>
+                    )}
+                  </div>
+                </section>
+
+                {/* ---- 邀请码 / 模块额度 ---- */}
+                <section>
+                  <h3 className="mb-2 text-sm font-medium">邀请码与模块额度</h3>
+                  <div className="rounded-md border p-3 text-xs">
+                    <p className="text-muted-foreground">
+                      邀请码：共 {detail.quota.inviteTotal} 个（基础{" "}
+                      {detail.quota.inviteBase} + 捐献 {detail.quota.inviteBonus}）· 已用{" "}
+                      {detail.quota.inviteUsed} · 剩余 {detail.quota.inviteRemaining}
+                    </p>
+                    <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
+                      {Object.keys(detail.quota.featureQuota).map((f) => (
+                        <div key={f} className="flex items-center justify-between">
+                          <span>{detail.quota.featureLabels[f] ?? f}</span>
+                          <span className="text-muted-foreground">
+                            {detail.quota.featureRemaining[f]} / {detail.quota.featureQuota[f]}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+
+                {/* ---- 最近活动 ---- */}
+                <section>
+                  <h3 className="mb-2 text-sm font-medium">
+                    最近活动（{detail.activity.length}）
+                  </h3>
+                  <div className="rounded-md border">
+                    {detail.activity.length === 0 ? (
+                      <p className="px-3 py-4 text-sm text-muted-foreground">无</p>
+                    ) : (
+                      detail.activity.map((a) => (
+                        <div
+                          key={a.id}
+                          className="flex items-center justify-between border-b px-3 py-2 text-xs last:border-b-0"
+                        >
+                          <span className="truncate">{a.detail || a.action}</span>
+                          <span className="ml-2 shrink-0 text-muted-foreground">
+                            {fmtTime(a.createdAt)}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </section>
+
                 <section>
                   <h3 className="mb-2 text-sm font-medium">子域名（{detail.subdomains.length}）</h3>
                   <div className="flex flex-wrap gap-2">

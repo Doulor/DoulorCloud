@@ -1,10 +1,12 @@
-import { ApiError, json } from "../http"
+import { ApiError, json, SAFE_JSON_HEADERS } from "../http"
 import { requireUser } from "../auth"
 import { decodeCursor, encodeCursor, groupComments, canPostAgain, type RawComment } from "../community-logic"
 import { uuid } from "../crypto"
 import { getSettingNumber, getSettingBool } from "../settings"
 import { sendMail, renderMail, isMailerConfigured } from "../mailer"
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
+import { guardRateLimit } from "../ratelimit"
+import { getLinkPreview } from "../link-preview"
 import type { Env } from "../env"
 
 const DEFAULT_LIMIT = 20
@@ -19,6 +21,8 @@ interface PostRow {
   share_count: number
   deleted_at: string | null
   created_at: string
+  updated_at: string | null
+  edit_count: number
   username: string
   nickname: string | null
   avatar_key: string | null
@@ -54,6 +58,8 @@ function toPostDto(r: PostRow, viewerLiked: boolean, isMine: boolean) {
     liked: viewerLiked,
     isMine,
     createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    editCount: r.edit_count ?? 0,
   }
 }
 
@@ -100,7 +106,8 @@ export async function listPosts(env: Env, request: Request): Promise<Response> {
   }
 
   const rows = await env.DB.prepare(
-    `SELECT p.*, u.username, u.nickname, u.avatar_key, u.role AS author_role
+    `SELECT p.*, u.username, u.nickname, u.avatar_key, u.role AS author_role,
+            (SELECT COUNT(*) FROM post_edits e WHERE e.post_id = p.id) AS edit_count
        FROM posts p JOIN users u ON u.id = p.user_id
       WHERE ${where}
       ORDER BY p.created_at DESC, p.id DESC
@@ -124,7 +131,8 @@ export async function listPosts(env: Env, request: Request): Promise<Response> {
 export async function getPost(env: Env, request: Request, id: string): Promise<Response> {
   const viewer = await readViewer(env, request)
   const r = await env.DB.prepare(
-    `SELECT p.*, u.username, u.nickname, u.avatar_key, u.role AS author_role
+    `SELECT p.*, u.username, u.nickname, u.avatar_key, u.role AS author_role,
+            (SELECT COUNT(*) FROM post_edits e WHERE e.post_id = p.id) AS edit_count
        FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?`
   ).bind(id).first<PostRow>()
   if (!r || r.deleted_at) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
@@ -134,6 +142,92 @@ export async function getPost(env: Env, request: Request, id: string): Promise<R
       ).bind(viewer.id, id).first()))
     : false
   return json({ post: toPostDto(r, liked, viewer?.id === r.user_id) })
+}
+
+/**
+ * GET /api/community/link-preview?url=... —— 链接预览。
+ *
+ * 社区 markdown 里的链接要渲染成「富卡片」，需要拿到目标 URL 的
+ * 标题/描述/图片。两类：
+ *   - 本站帖子链接（cloud.doulor.cn/community/:id 等）→ 直接查 D1，快且稳
+ *   - 外站链接 → 抓取 OG 标签（带缓存，见 link-preview.ts）
+ *
+ * 返回 { preview } 或 { preview: null }（拿不到就回退普通链接）。
+ * 需登录（社区本身是登录可见，预览接口也收在鉴权内）。
+ */
+export async function linkPreview(env: Env, request: Request): Promise<Response> {
+  await requireUser(env, request)
+  const url = new URL(request.url)
+  const raw = url.searchParams.get("url") ?? ""
+  if (!raw) {
+    throw new ApiError(400, "缺少 url 参数", "INVALID_PARAMS")
+  }
+
+  // 本站帖子链接：直接查库
+  const internal = await previewInternalPost(env, raw)
+  if (internal) {
+    return json({ preview: internal })
+  }
+
+  // 外站链接：抓取 OG
+  const preview = await getLinkPreview(env, raw)
+  return json({ preview })
+}
+
+/**
+ * 识别并预览本站帖子链接。
+ * 形如 https://cloud.doulor.cn/community/<id>、/dashboard/community/<id> 等，
+ * 提取帖子 id 后查库返回标题/作者/摘要。
+ */
+async function previewInternalPost(
+  env: Env,
+  rawUrl: string
+): Promise<{
+  title: string
+  description: string | null
+  image: string | null
+  siteName: string
+  internal: true
+  postId: string
+} | null> {
+  const match = /\/community\/([A-Za-z0-9_-]+)/.exec(rawUrl)
+  if (!match) return null
+
+  const postId = match[1]
+  const r = await env.DB.prepare(
+    `SELECT p.body, p.images, u.username, u.nickname
+       FROM posts p JOIN users u ON u.id = p.user_id
+      WHERE p.id = ? AND p.deleted_at IS NULL`
+  )
+    .bind(postId)
+    .first<{ body: string; images: string | null; username: string; nickname: string | null }>()
+
+  if (!r) return null
+
+  // 摘要：正文前 80 字，去掉换行
+  const summary = r.body.replace(/\s+/g, " ").trim().slice(0, 80)
+  const author = r.nickname ?? r.username
+  let image: string | null = null
+  if (r.images) {
+    try {
+      const keys = JSON.parse(r.images) as string[]
+      if (keys.length > 0) {
+        const filename = keys[0].split("/").pop() ?? keys[0]
+        image = `/c/${postId}/${filename}`
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return {
+    title: `@${author} 的帖子`,
+    description: summary || "（无正文）",
+    image,
+    siteName: "Doulor Cloud 社区",
+    internal: true,
+    postId,
+  }
 }
 
 /** GET /api/community/posts/:id/comments */
@@ -192,6 +286,62 @@ export async function createPost(env: Env, request: Request): Promise<Response> 
     "INSERT INTO posts (id, user_id, channel, body, images, created_at) VALUES (?, ?, 'general', ?, ?, ?)"
   ).bind(id, user.id, text, images.length ? JSON.stringify(images) : null, now).run()
   return json({ post: { id } }, 201)
+}
+
+/**
+ * PUT /api/community/posts/:id —— 编辑自己的帖子。
+ * 仅作者本人（或管理员）可编辑；每次编辑存一条历史（body_before 快照 + 时间）。
+ */
+export async function updatePost(env: Env, request: Request, id: string): Promise<Response> {
+  const user = await requireUser(env, request)
+  const row = await env.DB.prepare(
+    "SELECT user_id, body FROM posts WHERE id=? AND deleted_at IS NULL"
+  ).bind(id).first<{ user_id: string; body: string }>()
+  if (!row) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
+  if (row.user_id !== user.id && user.role !== "admin") {
+    throw new ApiError(403, "无权编辑该帖子", "FORBIDDEN")
+  }
+
+  const body = (await request.json().catch(() => ({}))) as { body?: string }
+  const text = (body.body ?? "").trim()
+  if (!text) throw new ApiError(400, "内容不能为空", "INVALID_INPUT")
+  if (text.length > 5000) throw new ApiError(400, "内容过长（上限 5000 字）", "TOO_LARGE")
+  if (text === row.body) {
+    // 内容没变，不产生一次无意义的历史
+    return json({ ok: true, unchanged: true })
+  }
+
+  const now = new Date().toISOString()
+  await env.DB.batch([
+    // 存编辑前快照
+    env.DB.prepare(
+      "INSERT INTO post_edits (id, post_id, editor_id, body_before, created_at) VALUES (?, ?, ?, ?, ?)"
+    ).bind(uuid(), id, user.id, row.body, now),
+    // 更新正文 + 编辑时间
+    env.DB.prepare("UPDATE posts SET body = ?, updated_at = ? WHERE id = ?")
+      .bind(text, now, id),
+  ])
+
+  return json({ ok: true, updatedAt: now })
+}
+
+/**
+ * GET /api/community/posts/:id/edits —— 编辑历史（时间列表）。
+ * 仅作者本人/管理员可见（编辑历史属于作者隐私，但管理员为溯源可看）。
+ */
+export async function listPostEdits(env: Env, request: Request, id: string): Promise<Response> {
+  const user = await requireUser(env, request)
+  const row = await env.DB.prepare("SELECT user_id FROM posts WHERE id=?").bind(id)
+    .first<{ user_id: string }>()
+  if (!row) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
+  if (row.user_id !== user.id && user.role !== "admin") {
+    throw new ApiError(403, "无权查看编辑历史", "FORBIDDEN")
+  }
+  const edits = await env.DB.prepare(
+    "SELECT created_at FROM post_edits WHERE post_id = ? ORDER BY created_at DESC"
+  ).bind(id).all<{ created_at: string }>()
+
+  return json({ edits: (edits.results ?? []).map((e) => ({ editedAt: e.created_at })) })
 }
 
 /** POST /api/community/posts/:id/like —— 幂等切换 */
@@ -322,9 +472,30 @@ async function maybeSendMail(env: Env, recipientId: string, postId: string): Pro
 export async function listNotifications(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
   const rows = await env.DB.prepare(
-    "SELECT id, type, actor_id, post_id, comment_id, read, created_at FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 50"
+    `SELECT n.id, n.type, n.actor_id, n.post_id, n.comment_id, n.read, n.created_at,
+            a.username AS actor_username, a.nickname AS actor_nickname,
+            p.body AS post_body, p.deleted_at AS post_deleted
+       FROM notifications n
+       LEFT JOIN users a ON a.id = n.actor_id
+       LEFT JOIN posts p ON p.id = n.post_id
+      WHERE n.user_id = ?
+      ORDER BY n.created_at DESC LIMIT 50`
   ).bind(user.id).all()
-  return json({ notifications: rows.results ?? [] })
+  return json({
+    notifications: (rows.results ?? []).map((r: Record<string, unknown>) => ({
+      id: r.id,
+      type: r.type,
+      actorUsername: r.actor_username ?? null,
+      actorNickname: r.actor_nickname ?? null,
+      postId: r.post_id,
+      commentId: r.comment_id,
+      read: r.read === 1,
+      createdAt: r.created_at,
+      // 帖子摘要（帖子被删则置 null，前端据此显示「帖子已删除」）
+      postPreview: r.post_deleted ? null : ((r.post_body as string) ?? "").replace(/\s+/g, " ").slice(0, 60),
+      postDeleted: r.post_deleted != null,
+    })),
+  })
 }
 
 /** GET /api/notifications/unread-count */
@@ -357,6 +528,9 @@ const IMAGE_TYPES: Record<string, string> = {
  */
 export async function uploadPostImage(env: Env, request: Request, id: string): Promise<Response> {
   const user = await requireUser(env, request)
+  // 每次上传都写入 R2（计费操作）。社区单帖最多 9 图，取 40 次/分钟：
+  // 一张一张传够用，又拦得住脚本化的密集调用。
+  await guardRateLimit(env, `post-image:${user.id}`, 40, 60, "图片上传过于频繁")
   if (!(await isStorageConfigured(env))) throw new ApiError(503, "存储未配置", "R2_NOT_CONFIGURED")
   const post = await env.DB.prepare("SELECT user_id FROM posts WHERE id=?").bind(id).first<{ user_id: string }>()
   if (!post) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
@@ -396,42 +570,136 @@ export async function uploadPostImage(env: Env, request: Request, id: string): P
 /**
  * GET /api/community/stats —— 社区动态概览（匿名可读）。
  * 右侧动态栏用：今日新帖数、本周活跃用户（发帖最多 top 5）、帖子总数。
- * 全部走冗余字段/索引，避免 COUNT(*) 全表扫描。
+ *
+ * 缓存策略：统计结果对所有访客完全相同，且不是实时性要求高的数据，
+ * 因此放进 Cache API 缓存 60 秒。这是匿名可读接口（最容易被刷），
+ * 缓存后重复请求不再落到 D1。
+ *
+ * 注意两点：
+ *   1. 权限校验（readViewer）必须在缓存之前执行，否则访客开关一改，
+ *      缓存里的旧结果会让本该 401 的请求继续返回数据；
+ *   2. 缓存 key 用固定的内部 URL，不能直接用 request.url ——
+ *      否则不同 query 串会各占一份缓存。
  */
-export async function communityStats(env: Env, request: Request): Promise<Response> {
+const STATS_CACHE_TTL_SECONDS = 60
+
+/**
+ * GET /api/community/new-posts-count —— 「我看过之后新增」的帖子数。
+ * 侧边栏「社区广场」入口的灰色角标用。需登录（社区本身登录可见）。
+ *
+ * 口径（改过一次，见迁移 0043）：
+ *   - 看过：count(posts where created_at > users.community_seen_at)
+ *   - 没看过：回落「最近 24 小时」，避免老用户一上线就看到一个积累很久的大数字
+ *   - 不算自己发的帖子 —— 自己发的不需要「去读」
+ *   - 进社区页面时前端调 POST /community/seen 刷新 community_seen_at，角标随之为 0
+ *
+ * 旧口径是「全站最近 24 小时新帖数」，跟「读没读过」无关，
+ * 表现为：点进去读完，角标还在（用户反馈过这个问题）。
+ */
+export async function newPostsCount(env: Env, request: Request): Promise<Response> {
+  const me = await requireUser(env, request)
+
+  const row = await env.DB.prepare(
+    "SELECT community_seen_at FROM users WHERE id = ?"
+  )
+    .bind(me.id)
+    .first<{ community_seen_at: string | null }>()
+
+  const since =
+    row?.community_seen_at ??
+    new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+
+  const r = await env.DB.prepare(
+    `SELECT COUNT(*) c FROM posts
+      WHERE created_at > ? AND deleted_at IS NULL AND user_id <> ?`
+  )
+    .bind(since, me.id)
+    .first<{ c: number }>()
+
+  return json({ count: r?.c ?? 0 })
+}
+
+/**
+ * POST /api/community/seen —— 记下「我刚打开过社区」。
+ *
+ * 单独一个端点而不是塞进列表接口的副作用：列表接口会被
+ * 「加载更多 / 切换标签」反复调用，把它变成写操作会让缓存与语义都变脏。
+ * 由社区页面挂载时调用一次，同时前端立即把角标清零（不等下一次轮询）。
+ */
+export async function markCommunitySeen(env: Env, request: Request): Promise<Response> {
+  const me = await requireUser(env, request)
+  await env.DB.prepare("UPDATE users SET community_seen_at = ? WHERE id = ?")
+    .bind(new Date().toISOString(), me.id)
+    .run()
+  return json({ ok: true })
+}
+
+export async function communityStats(
+  env: Env,
+  request: Request,
+  ctx?: ExecutionContext
+): Promise<Response> {
   await readViewer(env, request)
+  // caches.default 只在自定义域名/生产环境下可用；本地或单测环境可能没有，
+  // 取不到就退化为不缓存，不影响功能。
+  const cacheKey = new Request("https://cache.internal/community/stats", { method: "GET" })
+  const cache = typeof caches !== "undefined" ? caches.default : undefined
+
+  if (cache) {
+    const hit = await cache.match(cacheKey)
+    if (hit) return hit
+  }
+
   const now = new Date()
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
   const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
-  // 今日新帖数：扫 created_at 索引，deleted_at IS NULL
-  const today = await env.DB.prepare(
-    "SELECT COUNT(*) c FROM posts WHERE created_at >= ? AND deleted_at IS NULL"
-  ).bind(todayStart).first<{ c: number }>()
+  // 三条统计互不依赖，放进一个 batch 省掉串行往返
+  const [todayRes, totalRes, activeRes] = await env.DB.batch([
+    env.DB.prepare("SELECT COUNT(*) c FROM posts WHERE created_at >= ? AND deleted_at IS NULL").bind(
+      todayStart
+    ),
+    env.DB.prepare("SELECT COUNT(*) c FROM posts WHERE deleted_at IS NULL"),
+    env.DB.prepare(
+      `SELECT u.username, u.nickname, u.avatar_key, COUNT(p.id) AS posts
+         FROM posts p JOIN users u ON u.id = p.user_id
+        WHERE p.created_at >= ? AND p.deleted_at IS NULL
+        GROUP BY u.id ORDER BY posts DESC LIMIT 5`
+    ).bind(weekAgo),
+  ])
 
-  // 帖子总数
-  const total = await env.DB.prepare(
-    "SELECT COUNT(*) c FROM posts WHERE deleted_at IS NULL"
-  ).first<{ c: number }>()
+  const todayCount =
+    (todayRes as { results?: { c: number }[] }).results?.[0]?.c ?? 0
+  const totalCount =
+    (totalRes as { results?: { c: number }[] }).results?.[0]?.c ?? 0
+  const activeUsers = (
+    (activeRes as {
+      results?: { username: string; nickname: string | null; avatar_key: string | null; posts: number }[]
+    }).results ?? []
+  ).map((r) => ({
+    username: r.username,
+    nickname: r.nickname ?? null,
+    hasAvatar: Boolean(r.avatar_key),
+    posts: r.posts,
+  }))
 
-  // 本周活跃用户：发帖最多 top 5（带头像/昵称）
-  const active = await env.DB.prepare(
-    `SELECT u.username, u.nickname, u.avatar_key, COUNT(p.id) AS posts
-       FROM posts p JOIN users u ON u.id = p.user_id
-      WHERE p.created_at >= ? AND p.deleted_at IS NULL
-      GROUP BY u.id ORDER BY posts DESC LIMIT 5`
-  ).bind(weekAgo).all<{ username: string; nickname: string | null; avatar_key: string | null; posts: number }>()
-
-  return json({
-    todayCount: today?.c ?? 0,
-    totalCount: total?.c ?? 0,
-    activeUsers: (active.results ?? []).map((r) => ({
-      username: r.username,
-      nickname: r.nickname ?? null,
-      hasAvatar: Boolean(r.avatar_key),
-      posts: r.posts,
-    })),
+  const body = JSON.stringify({ todayCount, totalCount, activeUsers })
+  const res = new Response(body, {
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": `public, max-age=${STATS_CACHE_TTL_SECONDS}`,
+      ...SAFE_JSON_HEADERS,
+    },
   })
+
+  // 写缓存用 waitUntil：不阻塞响应；clone 是因为响应体只能被读一次
+  if (cache) {
+    const write = cache.put(cacheKey, res.clone())
+    if (ctx) ctx.waitUntil(write)
+    else await write
+  }
+
+  return res
 }
 
 /**

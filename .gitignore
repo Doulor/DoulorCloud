@@ -8,6 +8,9 @@ dist-ssr
 .wrangler
 .dev.vars
 
+# TypeScript 增量编译缓存（构建产物，不该入库）
+*.tsbuildinfo
+
 .dev.vars*
 !.dev.vars.example
 !.env.example

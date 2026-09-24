@@ -10,6 +10,11 @@ import {
   type DnsRecordType,
   type Donation,
   type DonationOverview,
+  type DonationProvisionResult,
+  type DonationSubmitResult,
+  type AiProbeResult,
+  type VoucherOverview,
+  type RedeemResult,
   type Mailbox,
   type AdminFrpApplication,
   type AdminFrpNode,
@@ -48,11 +53,21 @@ import {
   type User,
   type Post,
   type CommentNode,
+  type LinkPreview,
+  type AnalyticsOverview,
+  type ChatMessage,
+  type ChatPresenceUser,
   type Notification,
   type CommunityStats,
   type AdminCommunityPost,
   type AdminNewApiConfig,
   type AdminNewApiCredentialSource,
+  type Wb2ApiStatus,
+  type Wb2ApiLoginStart,
+  type Wb2ApiLoginPoll,
+  type AdminWb2ApiBinding,
+  type AdminWb2ApiConfig,
+  type AdminWb2ApiPool,
 } from "@/types"
 
 /**
@@ -82,6 +97,19 @@ export class HttpError extends Error {
     this.status = status
     this.code = code
   }
+}
+
+/**
+ * 统一从异常里取用户可读的错误文案。
+ * 用法：toast.error(errMsg(err, "发布失败"))
+ *
+ * 服务端返回的 ApiError 文案是给用户看的，直接用；
+ * 其余（网络断开、JSON 解析失败等）用调用方给的兜底文案。
+ */
+export function errMsg(err: unknown, fallback: string): string {
+  if (err instanceof HttpError && err.message) return err.message
+  if (err instanceof TypeError) return "网络连接失败，请检查网络后重试"
+  return fallback
 }
 
 async function request<T>(
@@ -121,6 +149,13 @@ async function request<T>(
     }
 
     throw new HttpError(res.status, message, code)
+  }
+
+  // 200 但响应体不是 JSON（例如静态站点把 /api 请求兜底成了 index.html）。
+  // 此时 data 是 null，若直接返回会让调用方在 `res.posts` 上抛 TypeError，
+  // 用户看到的是白屏而不是可理解的错误。这里统一转成 HttpError。
+  if (data === null) {
+    throw new HttpError(res.status, "服务响应异常，请检查网络或稍后重试", "INVALID_RESPONSE")
   }
 
   return data as T
@@ -232,6 +267,10 @@ export const adminApi = {
       permissions?: Permissions
       /** null = 恢复全局默认 */
       maxSubdomains?: number | null
+      /** 展示昵称；null / 空串 = 清空 */
+      nickname?: string | null
+      emailVerified?: boolean
+      notifyEnabled?: boolean
     }
   ) =>
     request<AdminUserDetail>(`/admin/users/${encodeURIComponent(username)}`, {
@@ -407,6 +446,9 @@ export const adminApi = {
       method: "PUT",
       body: JSON.stringify(payload),
     }),
+
+  /** 中转站全部模型名（推荐模型编辑器下拉用；失败返回空数组） */
+  listNewApiModels: () => request<{ models: string[] }>("/admin/newapi/models"),
 }
 
 // ---- 账户设置（真实邮箱验证 / 改名 / 改邮箱 / 通知开关）----
@@ -761,8 +803,11 @@ export const profileApi = {
       body: JSON.stringify({ published }),
     }),
 
-  /** 上传头像 / 背景 / 音乐 / 音乐封面（原始字节直传，Content-Type 决定扩展名） */
-  uploadAsset: async (kind: "avatar" | "background" | "music" | "music-cover", file: File) => {
+  /** 上传头像 / 背景 / 音乐 / 音乐封面 / 图片墙单张（原始字节直传，Content-Type 决定扩展名） */
+  uploadAsset: async (
+    kind: "avatar" | "background" | "music" | "music-cover" | "gallery",
+    file: File
+  ) => {
     const res = await fetch(`/api/profile/asset?kind=${kind}`, {
       method: "POST",
       credentials: "include",
@@ -777,7 +822,8 @@ export const profileApi = {
         (data as ApiError | null)?.code
       )
     }
-    return data as { key: string; kind: string }
+    // gallery 额外返回 { id, url }，其余只返回 { key, kind }
+    return data as { key: string; kind: string; id?: string; url?: string }
   },
 
   deleteAsset: (kind: "avatar" | "background" | "music" | "music-cover") =>
@@ -806,7 +852,19 @@ export const donationApi = {
     payload: unknown
     remark?: string
   }) =>
-    request<{ id: string; status: string }>("/donations", {
+    request<DonationSubmitResult>("/donations", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /**
+   * 探测 AI 捐献的上游，取回可选模型列表。
+   * 服务端会真的去请求该地址的 `/v1/models`，所以它同时也是「地址与密钥是否可用」的校验。
+   * `format` 控制按哪种接口格式探测：auto 两种都试，也可强制只试其中一种
+   * （上游可能只实现了 Anthropic 原生接口，OpenAI 格式必然失败）。
+   */
+  probeAi: (payload: { baseUrl: string; apiKey: string; format?: string }) =>
+    request<AiProbeResult>("/donations/ai/probe", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
@@ -825,6 +883,92 @@ export const donationApi = {
       method: "POST",
       body: JSON.stringify({ id, action, note }),
     }),
+
+  revoke: (id: string) =>
+    request<{
+      ok: boolean
+      revokedPermission: boolean
+      releasedChannel?: boolean
+      /** 撤销代理捐献时移出节点池的订阅源数量 */
+      releasedSubscriptions?: number
+    }>(`/admin/donations/${encodeURIComponent(id)}/revoke`, { method: "POST" }),
+
+  /**
+   * 人工复核：用同一份 payload 重试把 AI 捐献的渠道接进中转站。
+   * 不改单据状态 —— 放行与否仍由 `review` 决定。
+   */
+  provision: (id: string) =>
+    request<DonationProvisionResult>(
+      `/admin/donations/${encodeURIComponent(id)}/provision`,
+      { method: "POST" }
+    ),
+}
+
+// ---- 权限兑换码 ----
+
+export const voucherApi = {
+  /** 我持有的未使用券 + 可选模块（含是否已拥有） */
+  list: () => request<VoucherOverview>("/vouchers"),
+
+  /**
+   * 兑换。`code` 既可以是券码，也可以是别人给的邀请码
+   * （服务端先当券查、再当邀请码查）；`feature` 只在「自选券」时需要。
+   */
+  redeem: (payload: { code: string; feature?: string }) =>
+    request<RedeemResult>("/vouchers/redeem", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+}
+
+// ---- WorkBuddy 反代账号捐献（登录即解锁 AI 权限，免审核）----
+
+export const wb2apiApi = {
+  /** 通道状态 + 当前用户的绑定列表 */
+  status: () => request<Wb2ApiStatus>("/wb2api/status"),
+
+  /**
+   * 发起登录，拿到授权链接。
+   * 服务端强制要求 acknowledged=true —— 它是「用户已被明确告知账号会进共享池」的证据。
+   */
+  loginStart: () =>
+    request<Wb2ApiLoginStart>("/wb2api/login/start", {
+      method: "POST",
+      body: JSON.stringify({ acknowledged: true }),
+    }),
+
+  /** 轮询登录结果（前端每 3 秒调一次） */
+  loginPoll: (sessionId: string) =>
+    request<Wb2ApiLoginPoll>(
+      `/wb2api/login/poll?session=${encodeURIComponent(sessionId)}`
+    ),
+
+  // 管理端
+  listBindings: () =>
+    request<{ bindings: AdminWb2ApiBinding[] }>("/admin/wb2api/bindings"),
+
+  /**
+   * 摘掉一个绑定。`revokeAi` 省略时由服务端按「有其他依据就保留」自动判定；
+   * 显式传布尔值可覆盖（用于处理邀请码那种无法溯源的情况）。
+   */
+  removeBinding: (id: string, revokeAi?: boolean) =>
+    request<{ ok: boolean; aiRevoked: boolean; upstreamWarning: string | null }>(
+      `/admin/wb2api/bindings/${encodeURIComponent(id)}/remove`,
+      {
+        method: "POST",
+        body: JSON.stringify(revokeAi === undefined ? {} : { revokeAi }),
+      }
+    ),
+
+  getConfig: () => request<AdminWb2ApiConfig>("/admin/wb2api/config"),
+
+  saveConfig: (apiKey: string) =>
+    request<{ ok: boolean; message: string }>("/admin/wb2api/config", {
+      method: "PUT",
+      body: JSON.stringify({ apiKey }),
+    }),
+
+  getPool: () => request<{ pool: AdminWb2ApiPool }>("/admin/wb2api/pool"),
 }
 
 // ---- 公告 / 网站动态 ----
@@ -842,6 +986,7 @@ export const announcementApi = {
     body: string
     category?: string
     pinned?: boolean
+    popupMode?: "none" | "once" | "every"
   }) =>
     request<{ announcement: Announcement }>("/admin/announcements", {
       method: "POST",
@@ -853,6 +998,7 @@ export const announcementApi = {
     body: string
     category: string
     pinned: boolean
+    popupMode: "none" | "once" | "every"
   }>) =>
     request<{ announcement: Announcement }>(
       `/admin/announcements/${encodeURIComponent(id)}`,
@@ -1015,6 +1161,9 @@ export const communityApi = {
       `/community/posts${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`
     ),
   getStats: () => request<CommunityStats>("/community/stats"),
+  newPostsCount: () => request<{ count: number }>("/community/new-posts-count"),
+  /** 记下「我刚打开过社区」—— 侧边栏新帖角标据此清零 */
+  markSeen: () => request<{ ok: boolean }>("/community/seen", { method: "POST" }),
   getPost: (id: string) => request<{ post: Post }>(`/community/posts/${encodeURIComponent(id)}`),
   getComments: (id: string) =>
     request<{ comments: CommentNode[] }>(`/community/posts/${encodeURIComponent(id)}/comments`),
@@ -1038,7 +1187,39 @@ export const communityApi = {
       method: "POST", body: JSON.stringify({ body, parentId, replyToUserId }),
     }),
   deletePost: (id: string) => request<{ ok: boolean }>(`/community/posts/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  updatePost: (id: string, body: string) =>
+    request<{ ok: boolean; unchanged?: boolean; updatedAt?: string }>(`/community/posts/${encodeURIComponent(id)}`, {
+      method: "PUT", body: JSON.stringify({ body }),
+    }),
+  listEdits: (id: string) =>
+    request<{ edits: { editedAt: string }[] }>(`/community/posts/${encodeURIComponent(id)}/edits`),
+  /** 链接预览：返回目标 URL 的标题/描述/图片（拿不到则 preview=null） */
+  linkPreview: (url: string) =>
+    request<{ preview: LinkPreview | null }>(`/community/link-preview?url=${encodeURIComponent(url)}`),
   deleteComment: (id: string) => request<{ ok: boolean }>(`/community/comments/${encodeURIComponent(id)}`, { method: "DELETE" }),
+}
+
+// ---- 网站统计（管理员）----
+
+export const analyticsApi = {
+  overview: (days = 7) =>
+    request<AnalyticsOverview>(`/admin/analytics?days=${days}`),
+}
+
+// ---- 公共聊天室 ----
+
+export const chatApi = {
+  list: (after?: string) =>
+    request<{ messages: ChatMessage[] }>(
+      `/chat/messages${after ? `?after=${encodeURIComponent(after)}` : ""}`
+    ),
+  send: (body: string) =>
+    request<{ message: ChatMessage }>("/chat/messages", {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    }),
+  heartbeat: () => request<{ ok: boolean }>("/chat/heartbeat", { method: "POST" }),
+  presence: () => request<{ online: ChatPresenceUser[] }>("/chat/presence"),
 }
 
 // ---- 通知 ----
@@ -1048,4 +1229,123 @@ export const notificationApi = {
   unreadCount: () => request<{ count: number }>("/notifications/unread-count"),
   markRead: (ids?: string[], all?: boolean) =>
     request<{ ok: boolean }>("/notifications/read", { method: "POST", body: JSON.stringify({ ids, all }) }),
+}
+
+// ---- OAuth 授权服务器（Doulor Cloud 作为身份提供方）----
+//
+// 类型定义放在这里而不是 types/index.ts：本组接口自成一体，
+// 也避免与同时改 types/index.ts 的另一处改动互相干扰。
+
+/** 接入本站登录的第三方应用（管理端视角，不含任何密钥字段） */
+export interface OAuthClient {
+  id: string
+  clientId: string
+  name: string
+  redirectUris: string[]
+  scopes: string
+  disabled: boolean
+  ownerUserId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** 同意页展示信息 */
+export interface OAuthAuthorizeContext {
+  clientName: string
+  clientId: string
+  scopes: string[]
+  alreadyGranted: boolean
+}
+
+/** 我授权过的应用 */
+export interface OAuthGrant {
+  clientId: string
+  name: string
+  scopes: string[]
+  createdAt: string
+}
+
+/** 授权请求参数（同意页与 authorize 端点共用同一套参数名） */
+export interface OAuthAuthorizeParams {
+  client_id: string
+  redirect_uri: string
+  scope?: string | null
+  state?: string | null
+  response_type?: string | null
+  code_challenge?: string | null
+  code_challenge_method?: string | null
+}
+
+export const oauthApi = {
+  /** 同意页：拉取「谁在申请什么权限」 */
+  context: (params: OAuthAuthorizeParams) => {
+    const q = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) {
+      if (v) q.set(k, String(v))
+    }
+    return request<OAuthAuthorizeContext>(`/oauth/authorize/context?${q.toString()}`)
+  },
+
+  /** 同意页：允许 / 拒绝。返回要跳去的地址（由前端自己跳，便于先清理临时状态） */
+  decide: (params: OAuthAuthorizeParams & { approve: boolean }) =>
+    request<{ redirectTo: string }>("/oauth/authorize/decision", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+
+  /** 我授权过的应用 */
+  grants: () => request<{ grants: OAuthGrant[] }>("/oauth/grants"),
+
+  /** 撤销对某个应用的授权（同时作废其令牌） */
+  revoke: (clientId: string) =>
+    request<{ ok: boolean }>(`/oauth/grants/${encodeURIComponent(clientId)}`, {
+      method: "DELETE",
+    }),
+}
+
+export const oauthAdminApi = {
+  list: () => request<{ clients: OAuthClient[] }>("/admin/oauth/clients"),
+
+  /**
+   * 创建应用。⚠️ 返回的 `clientSecret` 明文**只此一次**，
+   * 库里只存哈希，之后无法再取回（丢了只能重置）。
+   */
+  create: (payload: {
+    name: string
+    redirectUris: string[]
+    scopes?: string
+    allowHttp?: boolean
+  }) =>
+    request<{ client: OAuthClient; clientSecret: string }>("/admin/oauth/clients", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  update: (
+    id: string,
+    payload: {
+      name?: string
+      redirectUris?: string[]
+      scopes?: string
+      disabled?: boolean
+      allowHttp?: boolean
+    }
+  ) =>
+    request<{ client: OAuthClient | null }>(
+      `/admin/oauth/clients/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(payload) }
+    ),
+
+  /** 重置密钥，返回新的明文（同样只此一次） */
+  resetSecret: (id: string) =>
+    request<{ clientSecret: string }>(
+      `/admin/oauth/clients/${encodeURIComponent(id)}/secret`,
+      { method: "POST" }
+    ),
+
+  /** 删除应用（连带作废其全部令牌与授权记录） */
+  remove: (id: string) =>
+    request<{ ok: boolean }>(`/admin/oauth/clients/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
 }

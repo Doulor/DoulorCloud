@@ -65,13 +65,42 @@ async function mailboxStats(env: Env, mailboxId: string) {
   return { total: s?.total ?? 0, unread: s?.unread ?? 0 }
 }
 
+/**
+ * 一次查出该用户所有邮箱的统计，避免在列表里逐个邮箱查一遍（N+1）。
+ * 返回 mailboxId -> stats 的映射；没有邮件的邮箱不会出现在结果里，调用方需兜底 0。
+ */
+async function mailboxStatsBatch(
+  env: Env,
+  userId: string
+): Promise<Map<string, { total: number; unread: number }>> {
+  const rows = await env.DB.prepare(
+    `SELECT m.mailbox_id AS mailbox_id,
+            COUNT(*) AS total,
+            COALESCE(SUM(m.read = 0), 0) AS unread
+       FROM messages m
+       JOIN mailboxes mb ON mb.id = m.mailbox_id
+      WHERE mb.user_id = ?
+      GROUP BY m.mailbox_id`
+  )
+    .bind(userId)
+    .all<{ mailbox_id: string; total: number; unread: number }>()
+
+  const map = new Map<string, { total: number; unread: number }>()
+  for (const r of rows.results ?? []) {
+    map.set(r.mailbox_id, { total: r.total, unread: r.unread })
+  }
+  return map
+}
+
 async function toPublicMailbox(
   env: Env,
   user: UserRow,
   row: MailboxRow,
-  verifiedSet?: Set<string>
+  verifiedSet?: Set<string>,
+  precomputedStats?: { total: number; unread: number }
 ) {
-  const stats = await mailboxStats(env, row.id)
+  // 列表场景传入批量算好的统计，避免每个邮箱一次查询；单条场景仍按需查询
+  const stats = precomputedStats ?? (await mailboxStats(env, row.id))
   const forwardingTo = parseForwarding(row.forwarding_to)
   return {
     id: row.id,
@@ -158,10 +187,16 @@ export async function listMailboxes(env: Env, request: Request): Promise<Respons
     .bind(user.id)
     .all<MailboxRow>()
 
-  const verifiedSet = await loadVerifiedSet(env)
+  // 统计与验证状态各自只需一次查询/一次外部调用，并行发出
+  const [verifiedSet, statsMap] = await Promise.all([
+    loadVerifiedSet(env),
+    mailboxStatsBatch(env, user.id),
+  ])
   const mailboxes = []
   for (const row of rows.results ?? []) {
-    mailboxes.push(await toPublicMailbox(env, user, row, verifiedSet))
+    mailboxes.push(
+      await toPublicMailbox(env, user, row, verifiedSet, statsMap.get(row.id) ?? { total: 0, unread: 0 })
+    )
   }
   // 邮箱数量上限（管理员不限，999999 作为哨兵值，前端显示「不限」）
   const limit = user.role === "admin" ? ADMIN_UNLIMITED_MAILBOXES : MAX_MAILBOXES_PER_USER

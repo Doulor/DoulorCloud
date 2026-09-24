@@ -26,6 +26,8 @@ import type { Env } from "./env"
 import { deletePrefix } from "./r2"
 import { sendMail, renderMail, isMailerConfigured } from "./mailer"
 import { uuid } from "./crypto"
+import { purgeExpiredOAuth } from "./oauth-provider"
+import { syncPermissionState } from "./handlers/newapi"
 
 /** 过期会话保留期（天）：留一点用于排查"刚掉线"的投诉 */
 const SESSION_RETENTION_DAYS = 7
@@ -48,6 +50,8 @@ const TABLE_WARN_ROWS: Record<string, number> = {
   storage_objects: 100_000,
   sessions: 50_000,
   rate_limits: 50_000,
+  oauth_codes: 50_000,
+  oauth_tokens: 50_000,
 }
 
 export interface MaintenanceReport {
@@ -59,6 +63,12 @@ export interface MaintenanceReport {
   sessionsDeleted: number
   auditLogsDeleted: number
   rateLimitsDeleted: number
+  /** 已清理的 OAuth 过期授权码 / 令牌数 */
+  oauthPurged: { codes: number; tokens: number }
+  /** NewAPI 权限同步结果（孤儿清理 / 禁用 / 启用） */
+  newapiSync: { removedOrphans: number; disabled: number; enabled: number; errors: string[] }
+  /** 已清理的过期反代登录会话数（state 15 分钟即失效，不清会持续堆积） */
+  wb2apiSessionsDeleted: number
   /** 网盘记账与实际记录数不一致的用户（只报告，不自动修） */
   storageMismatches: { prefix: string; fileCount: number; actual: number; usedBytes: number }[]
   tableRows: Record<string, number>
@@ -304,6 +314,61 @@ export async function runMaintenance(
     }
   }
 
+  // 4) OAuth 过期数据（授权码 60 秒、令牌 1 小时，都很短命但会持续堆积）
+  //
+  // 为什么必须在这里清：oauth_codes 每次授权都会插一行，oauth_tokens 每次登录
+  // 换码都会插一行。不清的话，即使它们早已失效也永远留在表里，
+  // 最终拖高 D1 的行读计费（见步骤 6 的大表预警）。
+  let oauthPurged = { codes: 0, tokens: 0 }
+  try {
+    if (dryRun) {
+      const now = new Date().toISOString()
+      const c = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM oauth_codes WHERE expires_at < ? OR used = 1"
+      )
+        .bind(now)
+        .first<{ n: number }>()
+      const t = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM oauth_tokens WHERE expires_at < ?"
+      )
+        .bind(now)
+        .first<{ n: number }>()
+      oauthPurged = { codes: c?.n ?? 0, tokens: t?.n ?? 0 }
+    } else {
+      oauthPurged = await purgeExpiredOAuth(env)
+    }
+  } catch (err) {
+    // 表未迁移：只记日志。OAuth 清理失败不该让整个运维任务报错
+    console.error("OAuth 过期数据清理失败（表可能未迁移）:", err)
+  }
+
+  // 4b) 过期的反代登录会话
+  //
+  // 与 OAuth 同理：每次「发起登录」都插一行，而网关的 state 15 分钟就失效，
+  // 不清的话（尤其是用户点了就走、没回来轮询的那些）会一直堆着。
+  let wb2apiSessionsDeleted = 0
+  try {
+    const cutoff = daysAgoIso(1)
+    if (dryRun) {
+      const r = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM wb2api_login_sessions WHERE expires_at < ?"
+      )
+        .bind(cutoff)
+        .first<{ c: number }>()
+      wb2apiSessionsDeleted = r?.c ?? 0
+    } else {
+      const r = await env.DB.prepare(
+        "DELETE FROM wb2api_login_sessions WHERE expires_at < ?"
+      )
+        .bind(cutoff)
+        .run()
+      wb2apiSessionsDeleted = r.meta?.changes ?? 0
+    }
+  } catch (err) {
+    // 表未迁移：只记日志
+    console.error("反代登录会话清理失败（表可能未迁移）:", err)
+  }
+
   // 5) 网盘记账自检（只报告）
   const storageMismatches = await findStorageMismatches(env)
   if (storageMismatches.length > 0) {
@@ -318,7 +383,27 @@ export async function runMaintenance(
     )
   }
 
-  // 6) 大表行数预警（D1 按行读计费，大表是最贵的地方）
+  // 6) NewAPI 权限同步（孤儿清理 + 权限对齐封禁/解封）
+  let newapiSync = { removedOrphans: 0, disabled: 0, enabled: 0, errors: [] as string[] }
+  if (!dryRun) {
+    // 只有真正执行时才同步：dry-run 不能去改动 NewAPI 侧账号状态
+    try {
+      const r = await syncPermissionState(env)
+      newapiSync = { ...r }
+      if (r.disabled > 0 || r.enabled > 0 || r.removedOrphans > 0) {
+        warnings.push(
+          `NewAPI 权限同步：清理孤儿 ${r.removedOrphans}、禁用 ${r.disabled}、启用 ${r.enabled}`
+        )
+      }
+      if (r.errors.length > 0) {
+        errors.push(`NewAPI 权限同步有 ${r.errors.length} 项失败：${r.errors.slice(0, 3).join("；")}`)
+      }
+    } catch (err) {
+      errors.push(`NewAPI 权限同步失败: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  // 7) 大表行数预警（D1 按行读计费，大表是最贵的地方）
   const tableRows = await collectTableRows(env)
   for (const [table, rows] of Object.entries(tableRows)) {
     const limit = TABLE_WARN_ROWS[table]
@@ -340,6 +425,9 @@ export async function runMaintenance(
     sessionsDeleted,
     auditLogsDeleted,
     rateLimitsDeleted,
+    oauthPurged,
+    newapiSync,
+    wb2apiSessionsDeleted,
     storageMismatches,
     tableRows,
     warnings,

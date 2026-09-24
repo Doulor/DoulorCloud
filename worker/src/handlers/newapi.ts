@@ -1,29 +1,33 @@
 /**
  * AI 中转站（NewAPI 集成）。
  *
- * 开通流程（每一步都是实测确认过的）：
- *   1. 管理员建号 `POST /api/user/`（该接口会丢弃 email，只建账号）
- *   2. 用管理员身份调用自助注册 `POST /api/user/register` 并带上验证码 ——
- *      这是**唯一**能把 email 写进 NewAPI 的途径。
- *      验证码由 NewAPI 发到 `<用户名>@doulor.cn`，而本站正是该域名的收件方，
- *      因此可以从 D1 的收件箱里读出验证码。
- *      （已验证：/api/verification 生成的验证码会真的投递进本站收件箱）
- *   3. 用管理员接口把额度调整为试用额度（add_quota + mode=override）
- *   4. 服务端登录换 session，再换长期 access token，加密后存库
+ * 开通流程（OIDC + 复用 cloud 密码）：
+ *   1. 用户在 NewAPI 用「Doulor Cloud 登录」（OIDC）—— 这一步在 NewAPI 建号
+ *      并写入 oidc_id（= 本站 users.id）。
+ *   2. 回到本站点「开通」：输入 Doulor Cloud 密码。
+ *   3. 本站校验该密码确实是 cloud 密码，再按用户名在 NewAPI 找到账号，
+ *      验证其 oidc_id 等于当前用户 id（防止绑定到别人的同名账号）。
+ *   4. 用管理员接口 `PUT /api/user` 给该账号补上这个密码（NewAPI 负责哈希）。
+ *   5. 服务端用「用户名 + 密码」登录换 session，再换长期 access token，加密存库。
  *
- * 用户密码只在第 1、2 步短暂使用，绝不落库。access token 加密存储，
+ * 为什么必须补一个密码：NewAPI 只能用「密码登录得到的 session」换取
+ * access token（`/api/user/token` 需要 UserAuth + session），而本站代用户
+ * 建 Key、查额度都依赖这个 token。OIDC 账号本身没有密码，所以要用
+ * 「复用的 cloud 密码」补上，实现两边同一个密码。
+ *
+ * 明文密码只在第 3、4 步短暂出现，绝不落库。access token 加密存储，
  * 仅用于代用户创建 API Key；用户可在 NewAPI 后台随时吊销。
  */
 import { ApiError, json } from "../http"
-import { encryptSecret, decryptSecret, uuid } from "../crypto"
-import { requireFeatureUser, type UserRow } from "../auth"
+import { encryptSecret, decryptSecret, uuid, verifyPassword } from "../crypto"
+import { requireFeatureUser } from "../auth"
 import {
   adminSetQuota,
+  adminSetUserPassword,
+  adminSetUserStatus,
   createApiKey,
   deleteApiKey,
-  extractVerificationCode,
   findUserByUsername,
-  generateAccessToken,
   getCurrencyInfo,
   getUserSelf,
   isNewApiConfigured,
@@ -32,12 +36,12 @@ import {
   listTokens,
   login,
   redeemCode,
-  registerUser,
-  requestEmailCode,
   checkHealth,
   changePassword as changePasswordRemote,
 } from "../newapi-client"
-import { audit, getSettings } from "../settings"
+import { audit, getSetting, getSettings, parseRecommendedModels } from "../settings"
+import { hasFeature, parsePermissions, parseOpenFeatures } from "../permissions"
+import { requireAdmin } from "./admin"
 import type { Env } from "../env"
 
 function requireEncryptionSecret(env: Env): string {
@@ -84,68 +88,6 @@ function quotaToDisplay(quota: number, perUnit: number): number {
   return Math.round((quota / perUnit) * 10000) / 10000
 }
 
-/**
- * 在本站收件箱里等待 NewAPI 的验证码邮件。
- *
- * 同一个收件箱会堆积历史验证码邮件（用户可能反复触发），而 NewAPI 只认最新
- * 那一次下发的码，因此必须排除请求验证码之前就存在的邮件，否则会读到过期码。
- * NewAPI 是同步发信的，通常几秒内到达；最多轮询 attempts 次。
- */
-async function waitForVerificationCode(
-  env: Env,
-  email: string,
-  ignoreBefore: number,
-  attempts = 20,
-  intervalMs = 3000
-): Promise<{ code: string; messageId: string } | null> {
-  for (let i = 0; i < attempts; i++) {
-    const row = await env.DB.prepare(
-      `SELECT m.id, m.text_body, m.subject, m.received_at FROM messages m
-         JOIN mailboxes mb ON m.mailbox_id = mb.id
-        WHERE mb.address = ? COLLATE NOCASE
-        ORDER BY m.received_at DESC
-        LIMIT 10`
-    )
-      .bind(email)
-      .all<{
-        id: string
-        text_body: string
-        subject: string
-        received_at: string
-      }>()
-
-    for (const msg of row.results ?? []) {
-      // 只接受本次请求之后到达的邮件
-      if (new Date(msg.received_at).getTime() <= ignoreBefore) continue
-      const code = extractVerificationCode(`${msg.subject}\n${msg.text_body}`)
-      if (code) return { code, messageId: msg.id }
-    }
-
-    if (i < attempts - 1) {
-      await new Promise((resolve) => setTimeout(resolve, intervalMs))
-    }
-  }
-  return null
-}
-
-/**
- * 清理用于开通的验证码邮件：核销后从收件箱删除，避免堆在用户邮箱里。
- * 失败不影响主流程。
- */
-async function consumeCodeMessage(
-  env: Env,
-  mailboxId: string,
-  messageId: string
-): Promise<void> {
-  try {
-    await env.DB.prepare("DELETE FROM messages WHERE id = ? AND mailbox_id = ?")
-      .bind(messageId, mailboxId)
-      .run()
-  } catch (err) {
-    console.error("清理验证码邮件失败:", err)
-  }
-}
-
 // ---- 状态 ----
 
 /** GET /api/dev/status —— 开通状态、额度、模型列表 */
@@ -174,6 +116,8 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     trialQuotaUsd: quotaToDisplay(Number(settings.newapi_trial_quota), perUnit),
     group: settings.newapi_group,
     health,
+    /** 管理员维护的推荐模型分档（数组顺序即梯队顺序） */
+    recommended: parseRecommendedModels(settings.newapi_recommended_models),
     account: account
       ? {
           newapiUserId: account.newapi_user_id,
@@ -211,14 +155,35 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     console.error("获取模型列表失败:", err)
   }
 
-  // 按分组归类模型（默认分组 / 付费分组分开显示）
+  // 按分组归类模型（默认分组 / 付费分组 / 捐献分组分开显示）
   const pricing = await listPricing(env)
   const availableGroups = collectGroups(pricing)
+
+  // 「捐献」分组：模型名以 donation 开头的，统一归到这里，
+  // 不再出现在 default / 付费分组里（管理员用来标记「捐献解锁的模型」）。
+  const isDonationModel = (name: string) => /^donation/i.test(name)
+  const donationModels = new Set(
+    pricing
+      .filter((p) => models.includes(p.model) && isDonationModel(p.model))
+      .map((p) => p.model)
+  )
+
   const groupModels: Record<string, string[]> = {}
   for (const g of availableGroups) {
     groupModels[g] = pricing
-      .filter((p) => p.groups.includes(g) && models.includes(p.model))
+      .filter(
+        (p) =>
+          p.groups.includes(g) &&
+          models.includes(p.model) &&
+          !donationModels.has(p.model)
+      )
       .map((p) => p.model)
+  }
+
+  // 有捐献模型时才追加「捐献」分组（排在最后）
+  if (donationModels.size > 0) {
+    availableGroups.push("donation")
+    groupModels["donation"] = Array.from(donationModels)
   }
 
   return json({
@@ -230,6 +195,8 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     groupModels,
     /** 用户当前账号所属分组 */
     accountGroup: account.group_name,
+    /** 管理员维护的推荐模型分档（数组顺序即梯队顺序） */
+    recommended: parseRecommendedModels(settings.newapi_recommended_models),
   })
 }
 
@@ -299,11 +266,11 @@ export async function syncAccount(env: Env, request: Request): Promise<Response>
  * GET /api/dev/preflight —— 开通前的账号探测。
  *
  * 决定前端该展示哪套流程，避免让用户猜：
- *   - 中转站已有同名账号 → 展示「绑定已有账号」（输入该账号密码）
- *   - 没有 → 展示「创建新账号」（自己设置密码）
+ *   - 中转站已有同名账号、且已用 OIDC 绑定（oidc_id === 本站用户 id）
+ *     → 可以直接补密码开通
+ *   - 没有 / 未 OIDC 绑定 → 先引导用户去中转站用 Doulor Cloud 登录
  *
- * 只回传「是否存在」与最小信息，**不泄露**该账号的邮箱、额度等资料
- * （判断依据是本站用户名，但任何登录用户都能探测任意名字，故只回布尔值）。
+ * 只回传「是否存在」与「是否已 OIDC 绑定」，**不泄露**该账号的邮箱、额度等资料。
  */
 export async function preflight(env: Env, request: Request): Promise<Response> {
   const user = await requireFeatureUser(env, request, "ai")
@@ -312,109 +279,24 @@ export async function preflight(env: Env, request: Request): Promise<Response> {
   const base = {
     featureEnabled: settings.newapi_enabled === "1",
     username: user.username,
-    eligibleEmail: `${user.username}@${env.ROOT_DOMAIN}`,
   }
 
   if (!(await isNewApiConfigured(env)) || settings.newapi_enabled !== "1") {
-    return json({ ...base, exists: false, hasMailbox: false })
+    return json({ ...base, exists: false, oidcBound: false })
   }
 
   let exists = false
+  let oidcBound = false
   try {
-    exists = Boolean(await findUserByUsername(env, user.username))
+    const remote = await findUserByUsername(env, user.username)
+    exists = Boolean(remote)
+    oidcBound = remote?.oidc_id === user.id
   } catch (err) {
-    // 探测失败不阻断：按「不存在」处理，后续绑定/注册仍会给出真实错误
+    // 探测失败不阻断：按「不存在」处理，后续绑定仍会给出真实错误
     console.error("探测 NewAPI 账号失败:", err)
   }
 
-  // 新账号注册需要能收到验证码邮件，因此需要主邮箱已存在
-  const mailbox = await env.DB.prepare(
-    "SELECT id FROM mailboxes WHERE address = ? COLLATE NOCASE LIMIT 1"
-  )
-    .bind(`${user.username}@${env.ROOT_DOMAIN}`.toLowerCase())
-    .first()
-
-  return json({ ...base, exists, hasMailbox: Boolean(mailbox) })
-}
-
-/**
- * 绑定 NewAPI 中已存在的同名账号。
- * 用用户输入的密码登录校验；成功则换取长期 access token 并落库。
- */
-async function bindExistingAccount(
-  env: Env,
-  user: UserRow,
-  remote: { id: number; username: string; email?: string },
-  password: string,
-  secret: string
-): Promise<Response> {
-  const settings = await getSettings(env)
-
-  let session
-  try {
-    session = await login(env, remote.username, password)
-  } catch {
-    // 不区分「账号不存在」与「密码错误」，避免账号枚举
-    throw new ApiError(
-      401,
-      "密码错误：该用户名在中转站已存在且属于你，请输入该账号的密码完成绑定（不是新设密码）",
-      "INVALID_PASSWORD"
-    )
-  }
-
-  if (!session.session) {
-    throw new ApiError(
-      502,
-      "登录成功但未返回会话，无法生成访问令牌",
-      "NEWAPI_ERROR"
-    )
-  }
-
-  const accessToken = await generateAccessToken(env, session.session, session.userId)
-  const self = await getUserSelf(env, accessToken, session.userId).catch(() => null)
-  const now = new Date().toISOString()
-
-  await env.DB.prepare(
-    `INSERT INTO newapi_accounts
-       (user_id, newapi_user_id, username, email, enc_token, group_name, quota, used_quota, request_count, synced_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  )
-    .bind(
-      user.id,
-      session.userId,
-      remote.username,
-      self?.email || remote.email || "",
-      await encryptSecret(accessToken, secret),
-      self?.group ?? settings.newapi_group,
-      self?.quota ?? 0,
-      self?.used_quota ?? 0,
-      self?.request_count ?? 0,
-      now,
-      now
-    )
-    .run()
-
-  await audit(
-    env,
-    user.id,
-    "newapi.bind_existing",
-    `绑定已有的 NewAPI 账号 ${remote.username} (id ${session.userId})`
-  )
-
-  return json(
-    {
-      account: {
-        newapiUserId: session.userId,
-        username: remote.username,
-        email: self?.email ?? "",
-        quota: self?.quota ?? 0,
-        usedQuota: self?.used_quota ?? 0,
-        group: self?.group ?? settings.newapi_group,
-        boundExisting: true,
-      },
-    },
-    201
-  )
+  return json({ ...base, exists, oidcBound })
 }
 
 /** POST /api/dev/bind —— 开通 AI 中转站账号 */
@@ -440,95 +322,57 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
     throw new ApiError(400, "密码至少需要 8 位", "WEAK_PASSWORD")
   }
 
-  // 先确认具备加密密钥再产生任何副作用，避免建了账号却存不下凭据
-  const secret = requireEncryptionSecret(env)
+  // ⚠️ 「复用 cloud 密码」：先验证用户输入的确实是本站密码，
+  // 才把它同步设到 NewAPI。这样开通后两边共用同一个密码。
+  if (!(await verifyPassword(password, user.password_hash))) {
+    throw new ApiError(401, "密码错误：请输入你的 Doulor Cloud 登录密码", "INVALID_PASSWORD")
+  }
 
-  // 强制使用本站域名的邮箱，这是唯一的邮箱来源
-  const email = `${user.username}@${env.ROOT_DOMAIN}`.toLowerCase()
+  // 先确认具备加密密钥再产生任何副作用
+  const secret = requireEncryptionSecret(env)
   const username = user.username
 
-  // NewAPI 侧已存在同名账号：允许用「输入该账号密码」的方式直接绑定。
-  //
-  // 为什么不能像新账号那样走注册：NewAPI 的 Register 拒绝已存在的用户名，
-  // 因此无法为既有账号补写 email。改为登录验证密码 → 换 access token → 绑定。
-  // 这是「我已经在中转站有账号了」场景的正解。
-  //
-  // 注意：绑定既有账号**不经过注册流程、也不需要读验证码**，
-  // 因此必须在「要求收件箱」之前分流 —— 否则用户会被一个用不到的
-  // 前置条件挡住（该收件箱仅用于接收注册验证码）。
-  const remoteExisting = await findUserByUsername(env, username)
-  if (remoteExisting) {
-    return bindExistingAccount(env, user, remoteExisting, password, secret)
-  }
-
-  // 邮箱必须真实存在，否则无法收到注册验证码
-  const mailbox = await env.DB.prepare(
-    "SELECT id FROM mailboxes WHERE address = ? COLLATE NOCASE LIMIT 1"
-  )
-    .bind(email)
-    .first<{ id: string }>()
-  if (!mailbox) {
-    throw new ApiError(
-      400,
-      `需要先创建 ${email} 收件箱才能开通（用于接收验证码）`,
-      "NO_MAILBOX"
-    )
-  }
-
-  // 1. 用本站的 <用户名>@doulor.cn 邮箱自助注册 —— 一步同时建号并绑定邮箱
-  //    这是唯一能写入 email 的途径，因此必须放在最前面
-  const requestedAt = Date.now()
-  await requestEmailCode(env, email)
-
-  // 2. 从自己的收件箱里读出新收到的验证码
-  const found = await waitForVerificationCode(env, email, requestedAt)
-  if (!found) {
-    throw new ApiError(
-      504,
-      "未能在收件箱中收到 NewAPI 的验证码邮件，请稍后重试",
-      "CODE_TIMEOUT"
-    )
-  }
-
-  try {
-    await registerUser(env, username, password, email, found.code)
-  } finally {
-    // 无论成功与否都核销掉验证码邮件，不留在用户收件箱里
-    await consumeCodeMessage(env, mailbox.id, found.messageId)
-  }
-
-  // 3. 定位账号并设置试用额度
+  // 找到 NewAPI 侧账号。它必须是「用 OIDC 登录」创建出来的 ——
+  // 即该账号的 oidc_id 等于当前 cloud 用户的 id。
   const remote = await findUserByUsername(env, username)
   if (!remote) {
-    throw new ApiError(502, "NewAPI 账号创建后未能查到该用户", "NEWAPI_ERROR")
+    throw new ApiError(
+      409,
+      "中转站里还没有你的账号。请先点击「去中转站用 Doulor Cloud 登录」完成授权，再回来开通",
+      "OIDC_NOT_BOUND"
+    )
+  }
+  if (remote.oidc_id !== user.id) {
+    throw new ApiError(
+      409,
+      "中转站里的同名账号不是用 Doulor Cloud 登录创建的，无法安全绑定。请先在中转站用 Doulor Cloud 登录该账号",
+      "OIDC_MISMATCH"
+    )
   }
 
-  const unlimited = settings.newapi_unlimited_quota === "1"
+  const settings2 = await getSettings(env)
+  const unlimited = settings2.newapi_unlimited_quota === "1"
+
+  // 1. 给 OIDC 账号补一个密码（= 复用的 cloud 密码），
+  //    之后才能用它登录换 access token
+  await adminSetUserPassword(env, remote.id, username, password)
+
+  // 2. 设试用额度
   if (!unlimited) {
     await adminSetQuota(
       env,
       remote.id,
-      Number(settings.newapi_trial_quota),
+      Number(settings2.newapi_trial_quota),
       "override"
     )
   }
 
-  // 4. 登录换取长期 access token（用于后续代用户建 Key）
-  const session = await login(env, username, password)
-  if (!session.session) {
-    throw new ApiError(
-      502,
-      "NewAPI 登录成功但未返回会话，无法生成访问令牌",
-      "NEWAPI_ERROR"
-    )
-  }
-  const accessToken = await generateAccessToken(
-    env,
-    session.session,
-    session.userId
-  )
+  // 3. 登录直接拿长期 access token（rc.40 起登录响应里直接返回 access_token）
+  const loginResult = await login(env, username, password)
+  const accessToken = loginResult.accessToken
 
   const now = new Date().toISOString()
+  const email = `${username}@${env.ROOT_DOMAIN}`.toLowerCase()
 
   await env.DB.prepare(
     `INSERT INTO newapi_accounts
@@ -537,12 +381,12 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
   )
     .bind(
       user.id,
-      session.userId,
+      loginResult.userId,
       username,
       email,
       await encryptSecret(accessToken, secret),
-      settings.newapi_group,
-      unlimited ? 0 : Number(settings.newapi_trial_quota),
+      settings2.newapi_group,
+      unlimited ? 0 : Number(settings2.newapi_trial_quota),
       now,
       now
     )
@@ -552,17 +396,17 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
     env,
     user.id,
     "newapi.bind",
-    `开通 AI 中转站账号 ${username} (id ${session.userId})，邮箱 ${email}`
+    `开通 AI 中转站账号 ${username} (id ${loginResult.userId})，通过 OIDC 绑定并复用 cloud 密码`
   )
 
   return json(
     {
       account: {
-        newapiUserId: session.userId,
+        newapiUserId: loginResult.userId,
         username,
         email,
-        quota: unlimited ? 0 : Number(settings.newapi_trial_quota),
-        group: settings.newapi_group,
+        quota: unlimited ? 0 : Number(settings2.newapi_trial_quota),
+        group: settings2.newapi_group,
         unlimited,
       },
     },
@@ -834,4 +678,135 @@ export async function changePassword(env: Env, request: Request): Promise<Respon
 
   await audit(env, user.id, "newapi.password.change", "修改中转站密码")
   return json({ ok: true, message: "中转站密码已修改" })
+}
+
+// ---- 权限同步（供定时运维调用）----
+
+/**
+ * 判断某用户「当前是否应该有 AI 中转站权限」。
+ *
+ * 与 `requireFeatureUser` 的判据**完全一致**，绝不能在这里另写一套逻辑，
+ * 否则会出现「云上能访问、但这里判定无权限」或反之的漂移：
+ *   1. 管理员始终放行（豁免）
+ *   2. 有 ai 功能权限 → 放行
+ *   3. ai 在「免权限开放」列表（open_features）里 → 放行
+ */
+function shouldHaveAiAccess(
+  role: string,
+  permissionsRaw: string | null | undefined,
+  openFeatures: Set<string>
+): boolean {
+  if (role === "admin") return true
+  const perms = parsePermissions(permissionsRaw)
+  if (hasFeature(perms, "ai")) return true
+  return openFeatures.has("ai")
+}
+
+export interface NewApiSyncResult {
+  /** 账号已不存在、被清理的 cloud 记录数 */
+  removedOrphans: number
+  /** 本次被禁用的账号数 */
+  disabled: number
+  /** 本次被启用的账号数 */
+  enabled: number
+  /** 处理过程中出错的信息（不阻断，只记录） */
+  errors: string[]
+}
+
+/**
+ * 每小时一次的「NewAPI 权限同步」。
+ *
+ * 做两件事：
+ *   1. **孤儿清理**：cloud 的 newapi_accounts 记录指向的 NewAPI 账号若已不存在
+ *      （用户在中转站被删了），删掉 cloud 侧记录 → 用户界面回到「未开通」。
+ *   2. **权限对齐**：用户的 cloud ai 权限被收回（或免权限开关关闭）时，
+ *      在 NewAPI 侧 disable 该账号（其 API Key 立即失效）；
+ *      权限恢复时再 enable 回来。
+ *
+ * ⚠️ 为什么放定时任务而不是实时：权限变更最长延迟 1 小时生效，可接受；
+ * 且 NewAPI 的 disable 会清 token 缓存，代价不低，不宜高频触发。
+ * 管理员（admin）永远豁免，不会被禁用。
+ */
+export async function syncPermissionState(env: Env): Promise<NewApiSyncResult> {
+  const result: NewApiSyncResult = {
+    removedOrphans: 0,
+    disabled: 0,
+    enabled: 0,
+    errors: [],
+  }
+
+  if (!(await isNewApiConfigured(env))) return result
+
+  const openFeatures = parseOpenFeatures(
+    (await getSetting(env, "open_features")) ?? ""
+  )
+
+  // 拉取所有已开通的 cloud 用户及其 NewAPI 账号
+  const rows = await env.DB.prepare(
+    `SELECT na.user_id, na.newapi_user_id, na.username,
+            u.role, u.permissions
+       FROM newapi_accounts na
+       JOIN users u ON u.id = na.user_id
+      WHERE u.status = 'active'`
+  ).all<{
+    user_id: string
+    newapi_user_id: number
+    username: string
+    role: string
+    permissions: string | null
+  }>()
+
+  for (const row of rows.results ?? []) {
+    try {
+      // 1) 孤儿检测：按用户名查 NewAPI，查不到（或 id 对不上）就删 cloud 记录
+      const remote = await findUserByUsername(env, row.username)
+      if (!remote || remote.id !== row.newapi_user_id) {
+        await env.DB.prepare(
+          "DELETE FROM newapi_accounts WHERE user_id = ?"
+        )
+          .bind(row.user_id)
+          .run()
+        result.removedOrphans++
+        continue
+      }
+
+      // 2) 权限对齐
+      const shouldHave = shouldHaveAiAccess(
+        row.role,
+        row.permissions,
+        openFeatures
+      )
+      const remoteDisabled = remote.status === 2 // NewAPI 里 status=2 是禁用
+
+      if (shouldHave && remoteDisabled) {
+        await adminSetUserStatus(env, row.newapi_user_id, "enable")
+        result.enabled++
+      } else if (!shouldHave && !remoteDisabled) {
+        await adminSetUserStatus(env, row.newapi_user_id, "disable")
+        result.disabled++
+      }
+    } catch (err) {
+      result.errors.push(
+        `${row.username}: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
+
+  return result
+}
+
+/**
+ * POST /api/admin/newapi/sync-permissions —— 管理员手动触发一次权限同步。
+ *
+ * 定时任务每小时跑一次，但管理员可能想立即看到效果（例如刚删了某个
+ * NewAPI 账号、或刚收回某人权限，想马上清理/封禁）。这个接口立即执行
+ * 一次 syncPermissionState 并返回结果，方便验证与排障。
+ */
+export async function adminSyncPermissions(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  await requireAdmin(env, request)
+  const result = await syncPermissionState(env)
+  return json({ ...result })
 }

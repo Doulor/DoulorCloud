@@ -35,7 +35,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Separator } from "@/components/ui/separator"
 import { useAuth } from "@/hooks/use-auth"
-import { authApi } from "@/services/api"
+import { authApi, communityApi } from "@/services/api"
 import { cn } from "@/lib/utils"
 
 /** 主体功能，排在侧边栏上部 */
@@ -73,6 +73,46 @@ export function DashboardLayout({
   const location = useLocation()
   const navigate = useNavigate()
   const [open, setOpen] = React.useState(false)
+  // 社区「N 条新帖子」角标（我看过之后别人新增的帖子）
+  const [newPosts, setNewPosts] = React.useState(0)
+  // 是否正停在社区（含帖子详情）—— 是的话角标立刻归零并记已读
+  const onCommunity = location.pathname.startsWith("/dashboard/community")
+
+  React.useEffect(() => {
+    if (!user) {
+      setNewPosts(0)
+      return
+    }
+    let cancelled = false
+
+    // 已经站在社区页面（含帖子详情）上 ⇒ 当场算已读：
+    //   1) 落库（之后切到别的页面，角标也不会复活）
+    //   2) 本地立刻清零 —— 只靠 60 秒轮询的话，用户会以为「还是没消掉」
+    // 这一支**不轮询**：人就在页面上，此时冒出角标只会让人困惑
+    // （用户反馈的原始问题就是「一直显示」）。
+    if (onCommunity) {
+      communityApi
+        .markSeen()
+        .then(() => !cancelled && setNewPosts(0))
+        .catch(() => {})
+      return () => {
+        cancelled = true
+      }
+    }
+
+    const tick = () => {
+      communityApi
+        .newPostsCount()
+        .then((r) => !cancelled && setNewPosts(r.count))
+        .catch(() => {})
+    }
+    tick()
+    const t = setInterval(tick, 60000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [user, onCommunity])
 
   const handleLogout = async () => {
     try {
@@ -118,21 +158,29 @@ export function DashboardLayout({
       >
         <item.icon className="h-4 w-4" />
         {item.label}
+        {item.to === "/dashboard/community" && newPosts > 0 && (
+          <span className="ml-auto rounded-full bg-muted px-1.5 text-[11px] leading-5 text-muted-foreground">
+            {newPosts > 99 ? "99+" : newPosts}
+          </span>
+        )}
       </Link>
     )
   }
 
   const sidebar = (
-    <div className="flex h-full flex-col gap-6 px-3 py-4">
-      <div className="px-3 pt-1">
-        <Logo />
+    <div className="flex h-full flex-col gap-6 pb-4">
+      {/* Logo 区与顶栏同高（h-14）并各带一条 border-b，两条线在同一水平线上
+          连成一条；Logo 垂直居中后副标题离下边界有约 13px 留白，不再贴线。
+          左右内边距下移到各区块，让分隔线横贯侧边栏整个宽度。 */}
+      <div className="flex h-14 shrink-0 items-center border-b px-3">
+        <Logo tagline />
       </div>
-      <nav className="flex flex-col gap-1">
+      <nav className="flex flex-col gap-1 px-3">
         {baseNav.map((item) => renderNavItem(item))}
       </nav>
 
       {/* 底部固定区：与上方功能之间留白，紧贴账户信息 */}
-      <div className="mt-auto flex flex-col gap-1 pt-6">
+      <div className="mt-auto flex flex-col gap-1 px-3 pt-6">
         {bottomNav.map((item) => renderNavItem(item))}
       </div>
 

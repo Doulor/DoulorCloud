@@ -1,30 +1,47 @@
 import * as React from "react"
 import { Navigate, Route, Routes, useLocation, useParams } from "react-router-dom"
+import { Loader2 } from "lucide-react"
 
 import { LandingLayout } from "@/layouts/landing-layout"
 import { DashboardLayout } from "@/layouts/dashboard-layout"
 import { useAuth } from "@/hooks/use-auth"
 import { communityApi } from "@/services/api"
 import { Skeleton } from "@/components/ui/skeleton"
+import { AnalyticsTracker } from "@/components/analytics-tracker"
+import { CursorGlow } from "@/components/cursor-effect"
 
+// 首屏必需的页面（访客第一眼就要看到）保持同步导入
 import LandingPage from "@/pages/landing"
 import LoginPage from "@/pages/login"
 import RegisterPage from "@/pages/register"
-import DashboardPage from "@/pages/dashboard"
-import DomainsPage from "@/pages/domains"
-import EmailPage from "@/pages/email"
-import StoragePage from "@/pages/storage"
-import AiPage from "@/pages/ai"
-import FrpPage from "@/pages/frp"
-import ProfilePage from "@/pages/profile"
-import ProxyPage from "@/pages/proxy"
-import TempboxPage from "@/pages/tempbox"
-import SettingsPage from "@/pages/settings"
-import DonationPage from "@/pages/donations"
-import AchievementsPage from "@/pages/achievements"
-import AdminPage from "@/pages/admin"
-import CommunityPage from "@/pages/community"
 import NotFoundPage from "@/pages/not-found"
+
+// 其余页面按路由懒加载：不登录的访客不必为管理后台等重页面付出下载与解析成本。
+// 其中 admin.tsx 单个文件就有 4000+ 行，是首屏包体的最大来源。
+const DashboardPage = React.lazy(() => import("@/pages/dashboard"))
+const DomainsPage = React.lazy(() => import("@/pages/domains"))
+const EmailPage = React.lazy(() => import("@/pages/email"))
+const StoragePage = React.lazy(() => import("@/pages/storage"))
+const AiPage = React.lazy(() => import("@/pages/ai"))
+const FrpPage = React.lazy(() => import("@/pages/frp"))
+const ProfilePage = React.lazy(() => import("@/pages/profile"))
+const ProxyPage = React.lazy(() => import("@/pages/proxy"))
+const TempboxPage = React.lazy(() => import("@/pages/tempbox"))
+const OAuthConsentPage = React.lazy(() => import("@/pages/oauth-consent"))
+const SettingsPage = React.lazy(() => import("@/pages/settings"))
+const DonationPage = React.lazy(() => import("@/pages/donations"))
+const AchievementsPage = React.lazy(() => import("@/pages/achievements"))
+const AdminPage = React.lazy(() => import("@/pages/admin"))
+const CommunityPage = React.lazy(() => import("@/pages/community"))
+const ChatPage = React.lazy(() => import("@/pages/chat"))
+
+function PageLoader() {
+  return (
+    <div className="flex min-h-[60vh] items-center justify-center">
+      <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+    </div>
+  )
+}
 
 function FullScreenLoader() {
   return (
@@ -89,6 +106,17 @@ function CommunityRedirect() {
 }
 
 export default function App() {
+  // 懒加载页面的加载态。放在 Routes 外层统一兜住，页面切换时只闪一个转圈。
+  return (
+    <React.Suspense fallback={<PageLoader />}>
+      <AnalyticsTracker />
+      <CursorGlow />
+      <AppRoutes />
+    </React.Suspense>
+  )
+}
+
+function AppRoutes() {
   return (
     <Routes>
       <Route element={<LandingLayout />}>
@@ -129,6 +157,7 @@ export default function App() {
         <Route path="profile" element={<ProfilePage />} />
         <Route path="community" element={<CommunityPage inDashboard />} />
         <Route path="community/:id" element={<CommunityPage inDashboard />} />
+        <Route path="chat" element={<ChatPage />} />
         <Route path="achievements" element={<AchievementsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="donations" element={<DonationPage />} />
@@ -137,6 +166,14 @@ export default function App() {
 
       {/* 临时分享箱公开页（无需登录） */}
       <Route path="t" element={<TempboxPage />} />
+
+      {/*
+        OAuth 同意页：必须是公开路由，不能放进 DashboardGate。
+        第三方站点把用户送来时，用户可能还没登录 —— 那种情况由
+        /api/oauth/authorize 先 302 到登录页，登录后再回到 authorize，最终才到本页。
+        若把它关在 DashboardGate 后面，未登录用户会在这里被二次拦截、丢掉回跳链路。
+      */}
+      <Route path="oauth/consent" element={<OAuthConsentPage />} />
 
       <Route path="*" element={<NotFoundPage />} />
     </Routes>

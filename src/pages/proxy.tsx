@@ -33,6 +33,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { proxyApi, HttpError } from "@/services/api"
+import { fmtTime } from "@/lib/format"
 import type { ProxyNode, ProxyOverview, ProxySubscription } from "@/types"
 
 /**
@@ -83,19 +84,11 @@ const PROTOCOL_BADGE_VARIANT: Record<
   trojan: "secondary",
   ss: "secondary",
   ssr: "secondary",
+  anytls: "secondary",
+  hysteria: "secondary",
+  hysteria2: "secondary",
+  tuic: "secondary",
   unknown: "outline",
-}
-
-function fmtTime(iso: string | null) {
-  if (!iso) return "—"
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return "—"
-  return d.toLocaleString("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  })
 }
 
 function copyText(text: string, label = "已复制") {

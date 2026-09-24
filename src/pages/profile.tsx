@@ -44,6 +44,7 @@ import {
 } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { profileApi, HttpError } from "@/services/api"
+import { compressImage } from "@/lib/image-compress"
 import { cn } from "@/lib/utils"
 import type {
   ContactType,
@@ -1602,18 +1603,67 @@ function GalleryEditor({
   const items = (module.items ?? []).filter(
     (x): x is ProfileGalleryItem => typeof x === "object" && x !== null && "url" in x
   )
+  const [busy, setBusy] = React.useState(false)
+  const fileRef = React.useRef<HTMLInputElement>(null)
+
   const setItem = (i: number, patch: Partial<ProfileGalleryItem>) => {
     onChange({ items: items.map((it, idx) => (idx === i ? { ...it, ...patch } : it)) })
   }
+
+  /** 本地选图 → 压缩 → 上传，拿回相对 URL 存进模块配置 */
+  const handleFiles = async (files: FileList | null) => {
+    if (!files?.length) return
+    const room = 9 - items.length
+    if (room <= 0) return
+    setBusy(true)
+    const added: ProfileGalleryItem[] = []
+    try {
+      for (const file of Array.from(files).slice(0, room)) {
+        const compressed = await compressImage(file, 1600, 0.82).catch(() => file)
+        const res = await profileApi.uploadAsset("gallery", compressed)
+        if (res.url) added.push({ url: res.url, caption: "" })
+      }
+      if (added.length) {
+        onChange({ items: [...items, ...added] })
+        toast.success(`已上传 ${added.length} 张图片`)
+      }
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "上传失败")
+      // 部分成功也要落盘，避免已上传的图丢失
+      if (added.length) onChange({ items: [...items, ...added] })
+    } finally {
+      setBusy(false)
+      if (fileRef.current) fileRef.current.value = ""
+    }
+  }
+
   return (
     <div className="space-y-2">
       <p className="text-xs text-muted-foreground">
-        仅支持 https 图片链接，最多 9 张，展示为三列网格。
+        可直接从本机上传（自动压缩），也可粘贴 https 图片链接。最多 9 张，展示为三列网格。
       </p>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp,image/gif"
+        multiple
+        className="hidden"
+        onChange={(e) => void handleFiles(e.target.files)}
+      />
       {items.map((it, i) => (
         <div key={i} className="flex items-center gap-2 rounded-md border p-2.5">
+          {it.url && (
+            <img
+              src={it.url}
+              alt=""
+              className="h-10 w-10 shrink-0 rounded border object-cover"
+              onError={(e) => {
+                e.currentTarget.style.visibility = "hidden"
+              }}
+            />
+          )}
           <Input
-            placeholder="https://…/photo.jpg"
+            placeholder="https://…/photo.jpg 或本机上传"
             value={it.url}
             onChange={(e) => setItem(i, { url: e.target.value })}
             className="flex-1 font-mono text-xs"
@@ -1638,14 +1688,25 @@ function GalleryEditor({
         </div>
       ))}
       {items.length < 9 && (
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => onChange({ items: [...items, { url: "", caption: "" }] })}
-        >
-          <Plus className="h-4 w-4" />
-          添加图片
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => fileRef.current?.click()}
+          >
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+            {busy ? "上传中…" : "上传图片"}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => onChange({ items: [...items, { url: "", caption: "" }] })}
+          >
+            <Plus className="h-4 w-4" />
+            粘贴链接
+          </Button>
+        </div>
       )}
     </div>
   )
@@ -1667,12 +1728,12 @@ function ModuleConfigEditor({
       return (
         <div className="space-y-2">
           <Textarea
-            placeholder="一句喜欢的话"
+            placeholder="一句喜欢的话（可换行，最多 5 行）"
             value={module.text ?? ""}
             onChange={(e) => onChange({ text: e.target.value })}
-            rows={2}
-            className="resize-none"
-            maxLength={80}
+            rows={4}
+            className="resize-y"
+            maxLength={200}
           />
           <Input
             placeholder="出处 / 作者（可选）"

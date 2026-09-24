@@ -108,7 +108,44 @@ export interface Announcement {
   body: string
   category: string
   pinned: boolean
+  /** 弹窗模式：none（不弹）/ once（仅一次）/ every（每次都弹） */
+  popupMode: "none" | "once" | "every"
   createdAt: string
+}
+
+/** 链接预览元数据（markdown 里的链接渲染成卡片用） */
+export interface LinkPreview {
+  title: string
+  description: string | null
+  image: string | null
+  siteName: string | null
+}
+
+/** 网站统计概览（管理面板） */
+export interface AnalyticsOverview {
+  summary: { pv: number; uv: number }
+  byDay: { date: string; pv: number; uv: number }[]
+  byPath: { path: string; pv: number; uv: number }[]
+  byReferrer: { referrer: string; pv: number }[]
+}
+
+/** 聊天室消息 */
+export interface ChatMessage {
+  id: string
+  userId: string
+  username: string
+  nickname: string | null
+  hasAvatar: boolean
+  body: string
+  createdAt: string
+}
+
+/** 聊天室在线用户 */
+export interface ChatPresenceUser {
+  userId: string
+  username: string
+  nickname: string | null
+  hasAvatar: boolean
 }
 
 export interface RecentMessage {
@@ -139,11 +176,27 @@ export interface AdminUser {
   role: string
   status: string
   createdAt: string
-  subdomainCount: number
-  dnsCount: number
-  mailboxCount: number
-  mailCount: number
+  /** 直链网盘：已开通且启用 */
+  storageEnabled: boolean
+  /** AI 中转站：已开通 */
+  aiEnabled: boolean
+  /** 内网穿透：已启用 */
+  frpEnabled: boolean
+  /** 代理节点：已启用 */
+  proxyEnabled: boolean
+  /** 个人名片：已启用对外展示 */
+  profileEnabled: boolean
+  /** 名片 slug（用于拼 /profile/<slug> 公开地址） */
+  profileSlug: string | null
+  /** 名片绑定的自定义域名（优先于 slug 地址） */
+  profileFqdn: string | null
   permissions: Permissions
+  /** 注册时使用的邀请码（老用户或码已删除时为 null） */
+  inviteCode: string | null
+  /** 邀请码创建者用户名 */
+  inviteCreatedBy: string | null
+  /** 邀请码创建时间 */
+  inviteCreatedAt: string | null
 }
 
 export interface AdminInvite {
@@ -163,8 +216,16 @@ export interface AdminUserDetail {
     username: string
     email: string
     namespace: string
+    /** 展示昵称；null = 未设置 */
+    nickname: string | null
     role: string
     status: string
+    /** 邮箱是否已验证 */
+    emailVerified: boolean
+    /** 是否接收平台通知邮件 */
+    notifyEnabled: boolean
+    /** 是否已上传自定义头像 */
+    hasAvatar: boolean
     permissions: Permissions
     /** 用户级子域名配额覆盖；null = 用全局默认 */
     maxSubdomains: number | null
@@ -176,6 +237,84 @@ export interface AdminUserDetail {
   mailboxes: Mailbox[]
   messages: MailMessage[]
   sessions: { id: string; expires_at: string; created_at: string }[]
+  /** 网盘（未开通为 null） */
+  storage: AdminUserStorage | null
+  /** AI 中转站（未开通为 null；额度为 D1 同步快照） */
+  newapi: AdminUserNewApi | null
+  /** 内网穿透启用状态（未启用过为 null） */
+  frp: { enabled: boolean; createdAt: string; updatedAt: string } | null
+  frpApplications: AdminUserFrpApplication[]
+  frpPorts: { remotePort: number; nodeName: string | null; createdAt: string }[]
+  /** 代理节点启用状态（未启用过为 null） */
+  proxy: {
+    enabled: boolean
+    consentVersion: number
+    consentedAt: string | null
+    createdAt: string
+    updatedAt: string
+  } | null
+  /** 个人名片（未开通为 null） */
+  profile: {
+    slug: string
+    published: boolean
+    fqdn: string | null
+    viewCount: number
+    displayName: string | null
+    createdAt: string
+    updatedAt: string
+  } | null
+  /** 邀请码额度 + 模块转授额度 */
+  quota: AdminUserQuota
+  /** 最近 20 条审计日志 */
+  activity: AuditLog[]
+}
+
+export interface AdminUserStorage {
+  prefix: string
+  quotaBytes: number
+  usedBytes: number
+  fileCount: number
+  enabled: boolean
+  bucketId: string | null
+  bucketName: string | null
+  createdAt: string
+}
+
+export interface AdminUserNewApi {
+  newapiUserId: number
+  username: string
+  email: string
+  group: string | null
+  /** NewAPI 的 quota 单位（500000 = $1），前端按 quotaPerUnit 换算 */
+  quota: number
+  usedQuota: number
+  requestCount: number
+  syncedAt: string | null
+  createdAt: string
+}
+
+export interface AdminUserFrpApplication {
+  id: string
+  status: string
+  frpUser: string
+  ports: number[]
+  notifyEmail: string
+  remark: string | null
+  reviewNote: string | null
+  reviewedAt: string | null
+  createdAt: string
+}
+
+export interface AdminUserQuota {
+  inviteBase: number
+  inviteBonus: number
+  inviteTotal: number
+  inviteUsed: number
+  inviteRemaining: number
+  featureQuota: Record<string, number>
+  featureUsed: Record<string, number>
+  featureRemaining: Record<string, number>
+  featureLabels: Record<string, string>
 }
 
 export interface ApiError {
@@ -274,6 +413,15 @@ export interface NewApiHealth {
   version: string | null
 }
 
+/** 推荐模型的一个梯队（由管理员在管理面板维护） */
+export interface RecommendedTier {
+  /** 梯队名，如「第一梯队」 */
+  tier: string
+  /** 一句话说明，可空 */
+  desc: string
+  models: string[]
+}
+
 export interface NewApiStatus {
   configured: boolean
   featureEnabled: boolean
@@ -293,6 +441,8 @@ export interface NewApiStatus {
   accountGroup: string | null
   /** 中转站健康状态（在线/离线 + 延迟 + 版本） */
   health: NewApiHealth
+  /** 管理员维护的推荐模型分档（数组顺序即梯队顺序） */
+  recommended: RecommendedTier[]
 }
 
 export interface NewApiKey {
@@ -308,11 +458,10 @@ export interface NewApiKey {
 export interface NewApiPreflight {
   featureEnabled: boolean
   username: string
-  eligibleEmail: string
   /** 中转站是否已存在同名账号 */
   exists: boolean
-  /** 主邮箱是否存在（新账号注册需收验证码） */
-  hasMailbox: boolean
+  /** 该账号是否已用 Doulor Cloud 登录（OIDC）绑定（oidc_id === 本站用户 id） */
+  oidcBound: boolean
 }
 
 // ---- frp 内网穿透 ----
@@ -613,7 +762,7 @@ export type ProxyNodeStatus = "online" | "offline" | "maintenance" | "unknown"
 /** 解析后的单个代理节点 */
 export interface ProxyNode {
   name: string
-  /** vless / vmess / trojan / ss / unknown */
+  /** vless / vmess / trojan / ss / ssr / anytls / hysteria2 / tuic / unknown */
   protocol: string
   server: string
   port: number | null
@@ -716,8 +865,83 @@ export interface Donation {
   remark: string | null
   status: "pending" | "approved" | "rejected"
   reviewNote: string | null
+  /** 系统自动接入的 NewAPI 渠道 id；null = 尚未接入中转站 */
+  channelId?: number | null
+  /** 这次审核是否为系统自动完成（AI 类型捐献走自动化） */
+  autoReviewed?: boolean
   createdAt: string
   reviewedAt: string | null
+}
+
+/** AI 捐献的上游探测结果（自动获取模型列表） */
+export interface AiProbeResult {
+  ok: boolean
+  /** 规范化后的上游地址（已去掉尾部 /v1） */
+  baseUrl: string
+  channelType: number | null
+  channelTypeName: string
+  models: string[]
+  message: string
+  /** 依次尝试过的接口格式及结果（失败时用来判断该换哪种格式） */
+  attempts?: { type: number; name: string; ok: boolean; error: string }[]
+}
+
+/** 提交捐献后的返回（AI 类型可能当场就自动通过/拒绝） */
+export interface DonationSubmitResult {
+  id: string
+  status: "pending" | "approved" | "rejected"
+  autoReviewed: boolean
+  reviewNote: string | null
+  channelId: number | null
+  /** 首次捐献成功时附带的「自选权限」券码 */
+  voucherCode?: string | null
+}
+
+// ---- 权限兑换码 ----
+
+/**
+ * 我持有的一个「码」。
+ *
+ * 产品语义上**邀请码和兑换券是同一种东西**：都能发给别人
+ * （新用户注册 / 让对方补权限），也都能自己用。所以后端把两者合成一个列表返回。
+ */
+export interface MyCode {
+  id: string
+  code: string
+  /** invite = 邀请码；voucher = 券（首捐奖励等） */
+  kind: "invite" | "voucher"
+  /** 自带哪些模块；自选券为空数组 */
+  features: string[]
+  /** true = 自选，使用时挑一个模块 */
+  selfSelect: boolean
+  /** 能否发给别人用 */
+  transferable: boolean
+  note: string | null
+  createdAt: string
+}
+
+export interface VoucherOverview {
+  codes: MyCode[]
+  /** 可兑的模块；owned 表示当前是否已拥有（自选项只列还没开的） */
+  features: { key: string; label: string; owned: boolean }[]
+}
+
+export interface RedeemResult {
+  ok: boolean
+  /** 码的来源：兑换券 / 邀请码 */
+  kind: "voucher" | "invite"
+  /** 实际开通的模块 key */
+  granted: string[]
+  permissions: Permissions
+  code: string
+}
+
+/** 人工复核接入渠道的结果 */
+export interface DonationProvisionResult {
+  ok: boolean
+  channelId: number | null
+  message: string
+  detail?: string
 }
 
 export interface DonationOverview {
@@ -725,6 +949,112 @@ export interface DonationOverview {
   types: string[]
   typeLabels: Record<string, string>
   permissions: Permissions
+  /** AI 捐献一次最多可选多少个模型（每个都要真调一次验证可用性） */
+  maxAiModels?: number
+  /** 代理捐献一次最多可提交多少个订阅链接（每个都要真拉一次） */
+  maxSubUrls?: number
+  /** WorkBuddy 反代账号捐献通道（免审核，登录成功即解锁 ai） */
+  wb2api: Wb2ApiDonationBlock
+}
+
+// ---- WorkBuddy 反代账号捐献 ----
+
+/** 一条绑定：用户捐献（登录）的一个 WorkBuddy 账号 */
+export interface Wb2ApiBinding {
+  id: string
+  /** 网关侧 WorkBuddy 账号 uid */
+  uid: string
+  nickname: string | null
+  realm: string
+  status: "active" | "removed"
+  createdAt: string
+  removedAt: string | null
+}
+
+/** 捐献页用的通道概况（随 GET /api/donations 一起返回） */
+export interface Wb2ApiDonationBlock {
+  /** 管理员是否开启该通道 */
+  enabled: boolean
+  /** 网关访问密钥是否已配置 */
+  configured: boolean
+  /** 每人可绑定上限 */
+  limit: number
+  used: number
+  remaining: number
+  /** 当前对接的域：'cn' 国内版 / 'global' 国际版 */
+  realm: string
+  bindings: Wb2ApiBinding[]
+  /** 该通道解锁的功能模块 */
+  feature: string
+}
+
+/** GET /api/wb2api/status */
+export interface Wb2ApiStatus {
+  enabled: boolean
+  configured: boolean
+  limit: number
+  used: number
+  remaining: number
+  bindings: Wb2ApiBinding[]
+}
+
+/** POST /api/wb2api/login/start */
+export interface Wb2ApiLoginStart {
+  sessionId: string
+  url: string
+  realm: string
+}
+
+/** GET /api/wb2api/login/poll 的结果快照 */
+export interface Wb2ApiLoginResult {
+  uid: string
+  nickname: string | null
+  credits: number | null
+  creditsTotal: number | null
+  /** 该账号此前已绑定过（幂等返回，未重复授权） */
+  alreadyBound: boolean
+  /** 本次是否新授予了 ai 权限 */
+  aiGranted: boolean
+}
+
+export interface Wb2ApiLoginPoll {
+  status: "pending" | "done" | "failed"
+  message?: string
+  result?: Wb2ApiLoginResult
+}
+
+/** 管理端：绑定列表（含用户名） */
+export interface AdminWb2ApiBinding extends Wb2ApiBinding {
+  username: string
+  /** 该绑定当时是否新授予了 ai 权限 */
+  grantedAi: boolean
+}
+
+/** 管理端：网关凭据与连通性 */
+export interface AdminWb2ApiConfig {
+  baseUrl: string
+  source: "db" | "env" | "none"
+  /** 掩码后的密钥；未配置为 null。明文不下发 */
+  maskedApiKey: string | null
+  updatedAt: string | null
+  configured: boolean
+  enabled: boolean
+  limit: number
+  health: { ok: boolean; message: string }
+}
+
+/** 管理端：网关账号池概览 */
+export interface AdminWb2ApiPool {
+  total: number
+  healthy: number
+  cooling: number
+  disabled: number
+  accounts: {
+    uid: string
+    nickname?: string
+    realm?: string
+    credits?: number
+  }[]
 }
 
 // ---- 邀请码额度 ----
@@ -892,6 +1222,10 @@ export interface Post {
   liked: boolean
   isMine: boolean
   createdAt: string
+  /** 最近编辑时间（未编辑过为 null） */
+  updatedAt: string | null
+  /** 编辑次数 */
+  editCount: number
 }
 
 export interface CommentNode {
@@ -907,11 +1241,15 @@ export interface CommentNode {
 export interface Notification {
   id: string
   type: string
-  actor_id: string | null
-  post_id: string | null
-  comment_id: string | null
+  actorUsername: string | null
+  actorNickname: string | null
+  postId: string | null
+  commentId: string | null
   read: boolean
-  created_at: string
+  createdAt: string
+  /** 帖子摘要（帖子被删则为 null） */
+  postPreview: string | null
+  postDeleted: boolean
 }
 
 export interface CommunityActiveUser {

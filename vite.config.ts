@@ -26,4 +26,29 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // 把不常变的第三方库单独拆包：用户重新访问时命中浏览器缓存，
+        // 只有业务代码变化的那部分需要重新下载。
+        //
+        // 注意：本项目用 Vite 8（Rolldown 内核），manualChunks **只接受函数**，
+        // 传对象会报 "manualChunks is not a function"。别改回对象写法。
+        manualChunks(id: string) {
+          if (!id.includes("node_modules")) return
+          if (/[\\/]node_modules[\\/](react|react-dom|react-router|react-router-dom)[\\/]/.test(id)) {
+            return "vendor-react"
+          }
+          if (
+            /[\\/]node_modules[\\/](lucide-react|sonner|class-variance-authority|clsx|tailwind-merge)[\\/]/.test(
+              id
+            )
+          ) {
+            return "vendor-ui"
+          }
+          return "vendor"
+        },
+      },
+    },
+  },
 })

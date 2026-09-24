@@ -31,14 +31,31 @@ export const QUOTA_FEATURE_LABELS: Record<QuotaFeature, string> = {
 /** 每笔获批捐献赠送的邀请码额度 */
 export const INVITE_BONUS_PER_DONATION = 2
 
-/** 解析 invite_basic_features（逗号分隔模块名）为布尔集合；非法值按默认「r2」处理 */
+/**
+ * 解析 invite_basic_features（逗号分隔模块名）为布尔集合。
+ *
+ * ⚠️ 这里必须区分「设置项没配」和「显式配成空」：
+ *   - `null` / `undefined`（设置项真的缺失）→ 回落到默认的 `r2`
+ *   - **空串（管理员把开关全关掉后保存）→ 空集合**，即全部按受限模式
+ *
+ * 曾经的写法是 `String(raw ?? "r2")` 再在末尾 `if (out.size === 0) out.add("r2")`，
+ * 于是空串和缺失走了同一条路 —— **空串被强行塞回 r2**。
+ * 表现为：管理面板里「直链网盘」的开关无论怎么关，创建邀请码时它都显示
+ * 「基础权限 · 不消耗额度」。存库其实是正确的（值就是 ""），错在读取这一步。
+ *
+ * 除 null/undefined 外一律**按字面解析**：库里存什么就是什么，
+ * 认不出的名字直接丢掉（写入口 admin.updateSettingsHandler 已校验过名字）。
+ * 不再对「非空但认不出」做特殊兜底 —— 那种「猜用户意图」的兜底正是上面这个
+ * bug 的来源：任何兜底都会让某个开关变得关不掉。
+ */
 export function parseBasicFeatures(raw: string | undefined | null): Set<QuotaFeature> {
+  if (raw === null || raw === undefined) return new Set<QuotaFeature>(["r2"])
+
   const out = new Set<QuotaFeature>()
-  for (const seg of String(raw ?? "r2").split(",")) {
+  for (const seg of raw.split(",")) {
     const f = seg.trim() as QuotaFeature
     if ((QUOTA_FEATURES as readonly string[]).includes(f)) out.add(f)
   }
-  if (out.size === 0) out.add("r2")
   return out
 }
 

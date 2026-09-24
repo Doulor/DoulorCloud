@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Link, useLocation, useNavigate } from "react-router-dom"
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom"
 import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -9,12 +9,19 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { authApi, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
+import { safeNextPath } from "@/lib/safe-next"
 
 export default function LoginPage() {
   const { setUser } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
-  const from = (location.state as { from?: string } | null)?.from ?? "/dashboard"
+  const [searchParams] = useSearchParams()
+  // 优先用 ?next=（OAuth 授权流程靠它「登录后跳回 authorize」），
+  // 其次用路由 state.from（原有的受保护页面回跳），最后回落到面板首页。
+  const from =
+    safeNextPath(searchParams.get("next")) ??
+    (location.state as { from?: string } | null)?.from ??
+    "/dashboard"
 
   const [identifier, setIdentifier] = React.useState("")
   const [password, setPassword] = React.useState("")

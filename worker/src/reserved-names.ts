@@ -15,6 +15,8 @@ export const RESERVED_NAMES = new Set([
   // 应用入口域名 cloud.doulor.cn：若不拦截，用户可抢注该名字，
   // 导致平台自身入口被占用、或直链域名绑定冲突（绑定会创建 <fqdn>/* 路由）。
   "cloud",
+  // WorkBuddy 反代网关的自建域名 wb2api.doulor.cn：同上，必须保留。
+  "wb2api",
   "smtp",
   "imap",
   "pop",

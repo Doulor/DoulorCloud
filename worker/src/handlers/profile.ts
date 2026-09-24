@@ -1,6 +1,7 @@
 import { ApiError, json } from "../http"
 // 个人名片不消耗资源，已从权限体系移出（全量开放）：这里只需登录，不再校验功能权限
 import { requireUser } from "../auth"
+import { guardRateLimit } from "../ratelimit"
 
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
 import { attachCustomDomain, detachCustomDomain } from "../custom-domain"
@@ -279,17 +280,21 @@ export function sanitizeModules(input: unknown): ProfileModule[] {
         if (!it || typeof it !== "object") continue
         const g = it as Record<string, unknown>
         const url = str(g.url, 1000)
-        // 只允许 https 图片，挡掉 javascript: 等危险协议
-        if (!url || !/^https:\/\//i.test(url)) continue
+        // 允许本站在线上传的相对地址（/p/<用户名>/gallery/<id>）与 https 外链，
+        // 其余协议（javascript:、data: 等）一律拒绝。
+        if (!url || !(/^https:\/\//i.test(url) || /^\/p\/[^/]+\/gallery\/[a-z0-9-]+$/i.test(url))) {
+          continue
+        }
         items.push({ url, caption: str(g.caption, 20) ?? "" })
         if (items.length >= 9) break
       }
       if (items.length > 0) mod.items = items
     }
     if (id === "quote") {
-      const text = str(o.text, 80)
+      // 允许换行（渲染时转 <br>），因此长度上限放宽到 200、最多 5 行
+      const text = str(o.text, 200)
       if (text) {
-        mod.text = text
+        mod.text = text.split(/\r\n|\r|\n/).slice(0, 5).join("\n")
         const author = str(o.author, 20)
         if (author) mod.author = author
       }
@@ -761,18 +766,22 @@ export async function setPublished(env: Env, request: Request): Promise<Response
 // ---- 资源上传 ----
 
 /**
- * POST /api/profile/asset?kind=avatar|background|music|music-cover
- * 原始字节直传（Content-Type 决定扩展名），存入 profiles/<用户名>/<kind>.<ext>
+ * POST /api/profile/asset?kind=avatar|background|music|music-cover|gallery
+ * 原始字节直传（Content-Type 决定扩展名）。
+ * 前四种存 profiles/<用户名>/<kind>.<ext>（单例，覆盖旧值）；
+ * gallery 存 profiles/<用户名>/gallery/<id>.<ext>（多张，id 随机，返回公开 URL）。
  */
 export async function uploadAsset(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
+  // 上传会真实写入 R2（计费操作），加限流防止被高频调用刷操作数
+  await guardRateLimit(env, `profile-upload:${user.id}`, 60, 60, "上传过于频繁")
   if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "存储未配置，无法上传", "R2_NOT_CONFIGURED")
   }
 
   const url = new URL(request.url)
   const kind = url.searchParams.get("kind") ?? ""
-  if (!["avatar", "background", "music", "music-cover"].includes(kind)) {
+  if (!["avatar", "background", "music", "music-cover", "gallery"].includes(kind)) {
     throw new ApiError(400, "不支持的类型", "INVALID_KIND")
   }
 
@@ -794,7 +803,9 @@ export async function uploadAsset(env: Env, request: Request): Promise<Response>
       ? MAX_AVATAR_BYTES
       : kind === "background"
         ? MAX_BACKGROUND_BYTES
-        : MAX_MUSIC_BYTES
+        : kind === "gallery"
+          ? MAX_AVATAR_BYTES
+          : MAX_MUSIC_BYTES
 
   const buf = await request.arrayBuffer()
   if (buf.byteLength === 0) {
@@ -806,6 +817,17 @@ export async function uploadAsset(env: Env, request: Request): Promise<Response>
       `文件过大，上限 ${Math.round(limit / 1024 / 1024)} MB`,
       "TOO_LARGE"
     )
+  }
+
+  // 图片墙：一次一张，随机 id 命名，避免覆盖；不入 D1，URL 由前端存进模块配置
+  if (kind === "gallery") {
+    // 图墙可连传多张，给个宽松上限挡住刷盘（正常用户连传 9 张不会触发）
+    await guardRateLimit(env, `profile:gallery:${user.id}`, 30, 300, "上传太频繁")
+    const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16)
+    const gKey = `profiles/${user.username}/gallery/${id}.${ext}`
+    const platformBucket = await getPlatformBucketId(env)
+    await putObject(env, gKey, buf, contentType, platformBucket)
+    return json({ key: gKey, kind, id, url: `/p/${user.username}/gallery/${id}` })
   }
 
   const key = `profiles/${user.username}/${kind}.${ext}`
@@ -903,6 +925,37 @@ export async function serveAssetByUsername(
   for (const ext of ["jpg", "png", "webp", "gif", "mp3", "m4a", "ogg", "wav"]) {
     try {
       return await getObject(env, `profiles/${username}/${kind}.${ext}`, undefined, platformBucket)
+    } catch {
+      continue
+    }
+  }
+  return new Response("Not Found", { status: 404 })
+}
+
+/**
+ * 图片墙单张：/p/<用户名>/gallery/<id>（公开可读）。
+ * id 由上传时生成（16 位十六进制），此处做白名单字符校验防路径穿越。
+ */
+export async function serveGalleryImage(
+  env: Env,
+  username: string,
+  id: string
+): Promise<Response> {
+  if (!/^[a-f0-9]{8,32}$/.test(id)) {
+    return new Response("Not Found", { status: 404 })
+  }
+  if (!(await isStorageConfigured(env))) {
+    return new Response("Not Found", { status: 404 })
+  }
+  const platformBucket = await getPlatformBucketId(env)
+  for (const ext of ["jpg", "png", "webp", "gif"]) {
+    try {
+      return await getObject(
+        env,
+        `profiles/${username}/gallery/${id}.${ext}`,
+        undefined,
+        platformBucket
+      )
     } catch {
       continue
     }

@@ -41,7 +41,7 @@ const base: PublicProfile = {
     { id: "identity", enabled: true },
     { id: "status", enabled: true, emoji: "🎧", text: "在听雨声写代码" },
     { id: "tags", enabled: true, items: ["摄影", "手冲咖啡", "开源", "骑行", "科幻"] },
-    { id: "quote", enabled: true, text: "慢慢来，比较快。", author: "佚名" },
+    { id: "quote", enabled: true, text: "慢慢来，比较快。\n——写给三年前的自己", author: "佚名" },
     { id: "links", enabled: true },
     {
       id: "timeline",

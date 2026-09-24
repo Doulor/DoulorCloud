@@ -32,12 +32,17 @@ import type {
  * 把联系方式拼成可点击链接。
  * 服务端拼接的好处：用户只需填原始值（QQ 号 / UID / 用户名），
  * 避免在前端各处重复实现拼接规则、也防止用户填出 javascript: 之类的危险协议。
+ *
+ * 显示文字统一为「平台名 + 值」（如 `QQ 123`、`Telegram @xx`、`邮箱 a@b.c`）；
+ * 用户填了自定义 label 时以 label 优先；值是完整 URL 时只显示平台名，
+ * 否则整条长链接会把按钮撑破。
  */
 function contactLink(c: Contact): { href: string | null; label: string; icon: string } {
   const v = c.value.trim()
+  const isUrl = /^https?:\/\//i.test(v)
   switch (c.type) {
     case "email":
-      return { href: `mailto:${v}`, label: c.label || v, icon: "mail" }
+      return { href: `mailto:${v}`, label: c.label || `邮箱 ${v}`, icon: "mail" }
     case "qq":
       return {
         href: `https://res.abeim.cn/api/qq/?qq=${encodeURIComponent(v)}`,
@@ -46,8 +51,8 @@ function contactLink(c: Contact): { href: string | null; label: string; icon: st
       }
     case "wechat":
       return {
-        href: /^https?:\/\//i.test(v) ? v : null,
-        label: c.label || `微信 ${v}`,
+        href: isUrl ? v : null,
+        label: c.label || (isUrl ? "微信" : `微信 ${v}`),
         icon: "wechat",
       }
     case "bilibili":
@@ -58,50 +63,46 @@ function contactLink(c: Contact): { href: string | null; label: string; icon: st
       }
     case "discord":
       return {
-        href: /^https?:\/\//i.test(v)
-          ? v
-          : `https://discord.gg/${encodeURIComponent(v)}`,
-        label: c.label || "Discord",
+        href: isUrl ? v : `https://discord.gg/${encodeURIComponent(v)}`,
+        label: c.label || (isUrl ? "Discord" : `Discord ${v}`),
         icon: "discord",
       }
     case "telegram": {
       const handle = v.replace(/^@/, "")
       return {
         href: `https://t.me/${encodeURIComponent(handle)}`,
-        label: c.label || `@${handle}`,
+        label: c.label || `Telegram @${handle}`,
         icon: "telegram",
       }
     }
     case "youtube":
       return {
-        href: /^https?:\/\//i.test(v)
+        href: isUrl
           ? v
           : v.startsWith("@")
             ? `https://youtube.com/${encodeURIComponent(v)}`
             : `https://youtube.com/@${encodeURIComponent(v)}`,
-        label: c.label || `YouTube ${v}`,
+        label: c.label || (isUrl ? "YouTube" : `YouTube ${v}`),
         icon: "youtube",
       }
     case "github":
       return {
-        href: /^https?:\/\//i.test(v)
-          ? v
-          : `https://github.com/${encodeURIComponent(v)}`,
-        label: c.label || `GitHub ${v}`,
+        href: isUrl ? v : `https://github.com/${encodeURIComponent(v)}`,
+        label: c.label || (isUrl ? "GitHub" : `GitHub ${v}`),
         icon: "github",
       }
     case "x": {
       const handle = v.replace(/^@/, "")
       return {
         href: `https://x.com/${encodeURIComponent(handle)}`,
-        label: c.label || `@${handle}`,
+        label: c.label || `X @${handle}`,
         icon: "x",
       }
     }
     case "custom":
     default:
       return {
-        href: /^https?:\/\//i.test(v) ? v : null,
+        href: isUrl ? v : null,
         label: c.label || v,
         icon: "link",
       }
@@ -117,6 +118,14 @@ function esc(s: string | null | undefined): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;")
+}
+
+/**
+ * 转义后再把换行变成 <br>——用于名言等允许换行的多行文本。
+ * 必须先 esc 再替换：这样用户输入的 < 已被转义，插入的 <br> 不会被二次转义。
+ */
+function escMultiline(s: string | null | undefined): string {
+  return esc(s).replace(/\r\n|\r|\n/g, "<br>")
 }
 
 /** 只允许安全的 URL 进入 src/href（再次兜底，防 javascript:） */
@@ -988,6 +997,52 @@ function introJs(intro: string, name: string): string {
   return ""
 }
 
+/**
+ * 头像圆角化后写回 <link rel="icon">。
+ *
+ * 为什么要跑 JS：favicon 没有 CSS 可用，圆角只能先把图画进 canvas（clip 出圆角矩形）
+ * 再 toDataURL 回填 href。浏览器不允许给 favicon 加样式，这是唯一办法。
+ *
+ * 兜底策略（任一环节失败都保持原图，绝不出现"图标消失"）：
+ *   - 跨域头像 + 对方没发 CORS 头 → img 加载失败 → 原 href 不动；
+ *   - canvas 被污染 → toDataURL 抛错 → catch 吞掉。
+ * 只对 rel="icon" 生效；apple-touch-icon 不做——iOS 自己会套 squircle 蒙版，
+ * 预圆角反而会在白底上露出四个缺口。
+ */
+function faviconJs(url: string): string {
+  const safe = JSON.stringify(url).replace(/</g, "\\u003c")
+  return `(function(){
+    var link=document.getElementById('favicon');
+    if(!link||!window.HTMLCanvasElement)return;
+    var img=new Image();
+    img.crossOrigin='anonymous';
+    img.onload=function(){
+      try{
+        var s=128,c=document.createElement('canvas');
+        c.width=s;c.height=s;
+        var x=c.getContext('2d');
+        if(!x)return;
+        var r=s*0.24;               /* 不大不小：约 iOS squircle 的圆角比例 */
+        x.beginPath();
+        x.moveTo(r,0); x.lineTo(s-r,0); x.quadraticCurveTo(s,0,s,r);
+        x.lineTo(s,s-r); x.quadraticCurveTo(s,s,s-r,s);
+        x.lineTo(r,s); x.quadraticCurveTo(0,s,0,s-r);
+        x.lineTo(0,r); x.quadraticCurveTo(0,0,r,0);
+        x.closePath();
+        x.save(); x.clip();
+        /* cover 裁剪：非正方形头像按短边铺满，避免拉伸变形 */
+        var iw=img.naturalWidth||img.width, ih=img.naturalHeight||img.height;
+        if(!iw||!ih)return;
+        var k=Math.max(s/iw,s/ih), dw=iw*k, dh=ih*k;
+        x.drawImage(img,(s-dw)/2,(s-dh)/2,dw,dh);
+        x.restore();
+        link.href=c.toDataURL('image/png');
+      }catch(e){}
+    };
+    img.src=${safe};
+  })();`
+}
+
 /** 背景音乐播放器 JS：播放/暂停 + 进度条 + 时间显示 + 点击跳转。 */
 function musicPlayerJs(): string {
   return `(function(){
@@ -1142,7 +1197,7 @@ function renderModule(m: ProfileModule, p: PublicProfile): string {
     }
     case "quote": {
       const author = m.author ? `<cite>—— ${esc(m.author)}</cite>` : ""
-      return `<section class="mod mod-quote"><h2 class="mod-title">${MODULE_TITLES.quote}</h2><blockquote class="quote"><p>${esc(m.text)}</p>${author}</blockquote></section>`
+      return `<section class="mod mod-quote"><h2 class="mod-title">${MODULE_TITLES.quote}</h2><blockquote class="quote"><p>${escMultiline(m.text)}</p>${author}</blockquote></section>`
     }
     case "links": {
       const links = p.contacts
@@ -1220,6 +1275,14 @@ export function renderProfileHtml(
   // 公开页资源走站内路径；字体自托管，自定义域名下也用绝对 URL（/fonts/* 已加 CORS）
   const origin = "https://cloud.doulor.cn"
 
+  // 站点图标用用户头像（没有头像时回落到站点默认 favicon）。
+  // 不写 type：上传头像可能是 jpg/png/webp/gif，服务端不额外查扩展名，交给浏览器嗅探。
+  // 头像用相对路径即可——自定义域名下 /p/* 同样路由到本 Worker，自己域名自己取图。
+  // 默认 favicon 则必须写绝对地址：它是静态站点的资源，自定义域名上没有。
+  const favicon = avatar || `${origin}/favicon.png`
+  // 只有用户头像才圆角化；站点默认图标本身就是设计好的，不再加工
+  const faviconRounded = Boolean(avatar)
+
   // 背景层：glass 用模糊层；banner 布局时背景图挪进头图横幅，不再全屏铺
   const isBanner = p.layout === "banner"
   const blurLayer =
@@ -1282,7 +1345,11 @@ export function renderProfileHtml(
     effectsCss(fx) +
     introCss(intro)
 
-  const js = musicPlayerJs() + effectsJs(fx) + introJs(intro, name)
+  const js =
+    (faviconRounded ? faviconJs(favicon) : "") +
+    musicPlayerJs() +
+    effectsJs(fx) +
+    introJs(intro, name)
 
   const baseTag = opts?.baseHref ? `<base href="${esc(opts.baseHref)}">` : ""
 
@@ -1293,6 +1360,8 @@ export function renderProfileHtml(
 ${baseTag}
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>${esc(name)}</title>
+<link rel="icon" id="favicon" href="${esc(favicon)}">
+<link rel="apple-touch-icon" href="${esc(favicon)}">
 <meta name="description" content="${esc(p.bio || `${name} 的个人名片`)}">
 <meta property="og:title" content="${esc(name)}">
 <meta property="og:description" content="${esc(p.bio || "")}">

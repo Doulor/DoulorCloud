@@ -1,10 +1,12 @@
 import * as React from "react"
+import { useSearchParams } from "react-router-dom"
 import {
   Box,
   Copy,
   Download,
   FileText,
   Image as ImageIcon,
+  Link2,
   Loader2,
   Lock,
   Upload,
@@ -41,20 +43,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { tempboxApi, HttpError } from "@/services/api"
+import { formatBytes } from "@/lib/format"
 import { useAuth } from "@/hooks/use-auth"
 import type { TempboxBatch, TempboxConfig } from "@/types"
-
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  const units = ["KB", "MB", "GB", "TB"]
-  let v = n / 1024
-  let i = 0
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024
-    i++
-  }
-  return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`
-}
 
 /** 文件名 → 是否可以内联预览（图片 / 纯文本） */
 function isPreviewable(name: string): boolean {
@@ -114,7 +105,7 @@ function TransferList({ items }: { items: TransferItem[] }) {
                 ) : it.status === "done" ? (
                   <span className="text-emerald-600">完成</span>
                 ) : it.status === "uploading" ? (
-                  `${pct}% · ${fmtBytes(it.sent)} / ${fmtBytes(it.size)}`
+                  `${pct}% · ${formatBytes(it.sent)} / ${formatBytes(it.size)}`
                 ) : (
                   "等待中"
                 )}
@@ -141,6 +132,7 @@ function TransferList({ items }: { items: TransferItem[] }) {
 
 export default function TempboxPage() {
   const { user } = useAuth()
+  const [searchParams] = useSearchParams()
   const [config, setConfig] = React.useState<TempboxConfig | null>(null)
   const [loading, setLoading] = React.useState(true)
 
@@ -174,24 +166,49 @@ export default function TempboxPage() {
     void load()
   }, [load])
 
-  const handleUnlock = async () => {
-    const code = codeInput.trim().toUpperCase()
-    // 新码是 8 位字母数字；旧的 4 位数字码仍然兼容（服务端按字符串匹配）
-    if (!/^[A-Z0-9]{4,12}$/.test(code)) {
-      toast.error("请输入接收码")
-      return
-    }
-    setBusy(true)
-    try {
-      setBatch(await tempboxApi.get(code))
-      setPreviewText(null)
-    } catch (err) {
-      setBatch(null)
-      toast.error(err instanceof HttpError ? err.message : "解锁失败")
-    } finally {
-      setBusy(false)
-    }
-  }
+  /**
+   * 解锁接收码。`raw` 用于「从分享链接进入」时直接把码传进来，
+   * 省略则用输入框里的值（手动输入 / 点按钮都走这条）。
+   */
+  const unlock = React.useCallback(
+    async (raw?: string) => {
+      const code = (raw ?? codeInput).trim().toUpperCase()
+      // 现用 6 位数字；历史上出现过 4 位数字与 8 位字母数字，服务端按字符串匹配，
+      // 所以这里放宽到 4–12 位字母数字，让所有旧码都还能解锁。
+      if (!/^[A-Z0-9]{4,12}$/.test(code)) {
+        toast.error("请输入接收码")
+        return
+      }
+      setBusy(true)
+      try {
+        setBatch(await tempboxApi.get(code))
+        setPreviewText(null)
+      } catch (err) {
+        setBatch(null)
+        toast.error(err instanceof HttpError ? err.message : "解锁失败")
+      } finally {
+        setBusy(false)
+      }
+    },
+    [codeInput]
+  )
+
+  const handleUnlock = () => void unlock()
+
+  /**
+   * 分享链接进入：`/t?code=123456` 自动填入并解锁。
+   * 用 ref 防止 React StrictMode 下 effect 跑两次、白白多打一次接口
+   * （那会白白消耗限流额度）。
+   */
+  const autoUnlocked = React.useRef(false)
+  React.useEffect(() => {
+    if (autoUnlocked.current) return
+    const fromUrl = searchParams.get("code")?.trim().toUpperCase() ?? ""
+    if (!fromUrl) return
+    autoUnlocked.current = true
+    setCodeInput(fromUrl)
+    void unlock(fromUrl)
+  }, [searchParams, unlock])
 
   /** 批量上传文件（一次选择多个；共用一个接收码，逐个回报进度） */
   const uploadFiles = async (files: File[]) => {
@@ -310,6 +327,27 @@ export default function TempboxPage() {
     }
   }
 
+  /**
+   * 分享链接：接收码进 URL，对方点开自动填入并解锁，完全不用手输。
+   *
+   * ⚠️ 路径必须是 `/t`（无需登录的公开页），**不是** `/tempbox`
+   * —— 后者只存在于 `/dashboard/tempbox`（需登录），访客打开会撞到 404。
+   * 用 `window.location.origin` 而不是写死域名，本地/其他域名部署也能用。
+   */
+  const shareUrl = createdCode
+    ? `${window.location.origin}/t?code=${encodeURIComponent(createdCode)}`
+    : ""
+
+  const copyShareLink = async () => {
+    if (!shareUrl) return
+    try {
+      await navigator.clipboard.writeText(shareUrl)
+      toast.success("分享链接已复制")
+    } catch {
+      toast.error("复制失败，请手动复制")
+    }
+  }
+
   const fileDownloadUrl = (code: string, name: string) =>
     `/api/tempbox/${encodeURIComponent(code)}/${encodeURIComponent(name)}`
 
@@ -341,7 +379,7 @@ export default function TempboxPage() {
     <div>
       <PageHeader
         title="临时分享箱"
-        description="上传文件生成接收码（8 位字母数字），对方输入接收码即可查看/下载；到点自动清除。"
+        description="生成 6 位接收码分享文件或文字；把分享链接发给对方，点开即看；到点自动清除。"
       />
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -395,7 +433,7 @@ export default function TempboxPage() {
                     <Badge variant="success">纯文本</Badge>
                   ) : (
                     <Badge variant="outline">
-                      {batch.fileCount} 个文件 · {fmtBytes(batch.totalBytes)}
+                      {batch.fileCount} 个文件 · {formatBytes(batch.totalBytes)}
                     </Badge>
                   )}
                 </div>
@@ -436,7 +474,7 @@ export default function TempboxPage() {
                           )}
                           <span className="truncate text-sm">{f.name}</span>
                           <span className="shrink-0 text-xs text-muted-foreground">
-                            {fmtBytes(f.size)}
+                            {formatBytes(f.size)}
                           </span>
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
@@ -515,17 +553,21 @@ export default function TempboxPage() {
                     {createdCode}
                   </p>
                   <p className="mt-2 text-xs text-muted-foreground">
-                    告诉对方这个 4 位码，或直接分享本页面。
+                    把分享链接发给对方，点开就会自动填入并解锁，不用手输。
                   </p>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="mt-3"
-                    onClick={() => void copyCode()}
-                  >
-                    <Copy className="h-3.5 w-3.5" />
-                    复制接收码
-                  </Button>
+                  <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                    <Button variant="outline" size="sm" onClick={() => void copyShareLink()}>
+                      <Link2 className="h-3.5 w-3.5" />
+                      复制分享链接
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => void copyCode()}>
+                      <Copy className="h-3.5 w-3.5" />
+                      只复制码
+                    </Button>
+                  </div>
+                  <p className="mt-2 break-all px-1 font-mono text-[11px] text-muted-foreground/70">
+                    {shareUrl}
+                  </p>
                 </div>
                 {batch?.isText ? (
                   <p className="text-xs text-muted-foreground">

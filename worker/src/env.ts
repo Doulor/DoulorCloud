@@ -42,4 +42,11 @@ export interface Env {
   // 订阅链接可能需要鉴权（部分订阅系统要求 Authorization 头）；
   // 配置后 Worker 抓取订阅源时会带上 Bearer 头。
   PROXY_API_TOKEN?: string
+
+  // ---- WorkBuddy 反代网关捐献通道 ----
+  // 网关自身面板的访问密钥（Bearer）。作为 D1 单行表 wb2api_credentials 的
+  // 回落：管理员可在管理面板在线更新（优先），也可用 wrangler secret put 配置。
+  WB2API_API_KEY?: string
+  /** 网关站点地址的 env 兜底（正常走 app_settings.wb2api_base_url） */
+  WB2API_BASE_URL?: string
 }

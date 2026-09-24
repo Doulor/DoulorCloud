@@ -74,6 +74,38 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+/* 图片加载占位骨架的扫光动画 */
+@keyframes image-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@utility shimmer {
+  position: relative;
+  overflow: hidden;
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background-image: linear-gradient(
+      90deg,
+      transparent 0,
+      color-mix(in oklab, var(--foreground) 7%, transparent) 50%,
+      transparent 100%
+    );
+    animation: image-shimmer 1.4s infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer::after {
+    animation: none;
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -87,3 +119,214 @@
     -webkit-text-size-adjust: 100%;
   }
 }
+
+/* ---- Markdown 渲染样式（社区帖子/评论）---- */
+/* react-markdown 只把语法转成 HTML 标签，不带样式；这里补齐视觉层级。 */
+.markdown-body {
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+/* 标题 */
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 1.2em 0 0.5em;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.markdown-body h1 {
+  font-size: 1.5em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--border);
+}
+.markdown-body h2 {
+  font-size: 1.3em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--border);
+}
+.markdown-body h3 {
+  font-size: 1.15em;
+}
+.markdown-body h4 {
+  font-size: 1em;
+}
+.markdown-body h5,
+.markdown-body h6 {
+  font-size: 0.9em;
+}
+
+/* 段落 */
+.markdown-body p {
+  margin: 0.6em 0;
+}
+
+/* 列表 */
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.6em 0;
+  padding-left: 1.6em;
+}
+.markdown-body ul {
+  list-style: disc;
+}
+.markdown-body ol {
+  list-style: decimal;
+}
+.markdown-body li {
+  margin: 0.25em 0;
+}
+.markdown-body li > ul,
+.markdown-body li > ol {
+  margin: 0.25em 0;
+}
+
+/* 引用块 */
+.markdown-body blockquote {
+  margin: 0.8em 0;
+  padding: 0.4em 1em;
+  border-left: 3px solid var(--border);
+  color: var(--muted-foreground);
+  background: color-mix(in oklab, var(--muted) 50%, transparent);
+  border-radius: 0 0.375rem 0.375rem 0;
+}
+.markdown-body blockquote > :first-child {
+  margin-top: 0;
+}
+.markdown-body blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* 行内代码 */
+.markdown-body code {
+  padding: 0.15em 0.4em;
+  border-radius: 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.875em;
+  background: color-mix(in oklab, var(--muted) 80%, transparent);
+  border: 1px solid var(--border);
+}
+
+/* 代码块 */
+.markdown-body pre {
+  margin: 0.8em 0;
+  padding: 0.9em 1em;
+  overflow-x: auto;
+  border-radius: 0.5rem;
+  background: color-mix(in oklab, var(--muted) 80%, transparent);
+  border: 1px solid var(--border);
+}
+.markdown-body pre code {
+  padding: 0;
+  background: transparent;
+  border: none;
+  font-size: 0.85em;
+  line-height: 1.55;
+}
+
+/* 链接 */
+.markdown-body a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.markdown-body a:hover {
+  opacity: 0.8;
+}
+
+/* 表格 */
+.markdown-body table {
+  margin: 0.8em 0;
+  border-collapse: collapse;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.markdown-body th,
+.markdown-body td {
+  padding: 0.4em 0.8em;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.markdown-body th {
+  font-weight: 600;
+  background: color-mix(in oklab, var(--muted) 70%, transparent);
+}
+
+/* 分隔线 */
+.markdown-body hr {
+  margin: 1.2em 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+/* 图片 */
+.markdown-body img {
+  max-width: 100%;
+  border-radius: 0.5rem;
+}
+
+/* 任务列表 */
+.markdown-body input[type="checkbox"] {
+  margin-right: 0.4em;
+}
+
+/* ---- 鼠标跟随光晕（仅暗色主题）----
+ * 一层盖住整个视口的层：背景取 --foreground，整层压低透明度，再用 mask 只在
+ * 光标周围"开一个洞"让它显出来。页面其余部分**亮度完全不变** —— 暗色主题下
+ * 光标处被微微提亮，像一盏跟手的台灯。
+ *
+ * 浅色模式不生效（用户明确要求）：亮色下这层是"暗晕"，作用与"提亮"相反，
+ * 且浅色页面本身亮度高，叠加只会显得脏。闸门做两层：
+ *   1. 组件侧 —— 非 dark 时直接不挂载、不跑 rAF（省掉整条渲染链）；
+ *   2. 这里 —— 只给 `.dark` 下的 `[data-visible="1"]` 赋透明度，兜底防漏。
+ *
+ * 注意：刻意用 `background + opacity + mask` 而不是 `color-mix()` 内联渐变。
+ * 构建期 Lightning CSS 会把 color-mix 里 `calc(var(--x) * 100%)` 这种运行时
+ * 无法求值的 alpha 丢掉，产物退化成不透明色块（已实测踩到）。
+ *
+ * 三个可调旋钮（改这里即可，无需动组件）：
+ *   --glow-radius  光晕半径（越小越聚焦）
+ *   --glow-core    中心实心占比（0.35 = 半径 35% 以内最强，之后向外渐隐）
+ *   --glow-alpha   中心强度（0.055 已很克制；觉得太淡就往上加）
+ */
+.cursor-glow {
+  --glow-radius: 150px;
+  --glow-core: 0.35;
+  --glow-alpha: 0.055;
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: var(--foreground);
+  /* 初始隐藏：由组件的 data-visible 切换，避免用内联 opacity 覆盖 --glow-alpha */
+  opacity: 0;
+  transition: opacity 300ms ease;
+  -webkit-mask-image: radial-gradient(
+    circle var(--glow-radius) at var(--cursor-x, 50%) var(--cursor-y, 50%),
+    #000 0%,
+    #000 calc(var(--glow-core) * 100%),
+    transparent 100%
+  );
+  mask-image: radial-gradient(
+    circle var(--glow-radius) at var(--cursor-x, 50%) var(--cursor-y, 50%),
+    #000 0%,
+    #000 calc(var(--glow-core) * 100%),
+    transparent 100%
+  );
+}
+
+.dark .cursor-glow[data-visible="1"] {
+  opacity: var(--glow-alpha);
+}
+

@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_mailbox ON messages(mailbox_id, received_at DESC);
+-- 未读数统计按 (mailbox_id, read) 过滤，单独建索引避免回表（见 0031 迁移）
+CREATE INDEX IF NOT EXISTS idx_messages_mailbox_read ON messages(mailbox_id, read);
 
 -- 审计日志表
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -208,3 +210,109 @@ CREATE TABLE IF NOT EXISTS newapi_admin_credentials (
   admin_user_id TEXT NOT NULL,
   updated_at    TEXT NOT NULL
 );
+
+-- ============ WorkBuddy 反代网关捐献（登录即解锁 AI 权限）============
+-- 用户登录自己的 WorkBuddy 国际版账号 → 账号进入网关共享池 → 自动解锁 ai 权限。
+-- 免管理员审核，故不走 donations 的「提交 → pending → 审核」流程，单独建表。
+-- 详见 worker/migrations/0034_wb2api.sql 的说明；此处供全新安装使用。
+
+-- 绑定关系：谁捐了哪个 WorkBuddy 账号
+CREATE TABLE IF NOT EXISTS wb2api_bindings (
+  id                    TEXT PRIMARY KEY,
+  user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  uid                   TEXT NOT NULL,
+  nickname              TEXT,
+  realm                 TEXT NOT NULL DEFAULT 'global',
+  status                TEXT NOT NULL DEFAULT 'active',   -- active | removed
+  granted_ai_permission INTEGER NOT NULL DEFAULT 0,
+  acknowledged_ip       TEXT,
+  created_at            TEXT NOT NULL,
+  removed_at            TEXT,
+  removed_by            TEXT REFERENCES users(id) ON DELETE SET NULL
+);
+-- 同一 WorkBuddy 账号只能被绑一次（重复登录走幂等，跨用户抢注则拒绝）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wb2api_bindings_uid ON wb2api_bindings(uid);
+CREATE INDEX IF NOT EXISTS idx_wb2api_bindings_user ON wb2api_bindings(user_id, status);
+
+-- 登录会话：本站自己的 session_id 下发前端，网关 state 只存服务端；
+-- 同时缓存 done/failed 终态（网关 poll 成功后 state 即失效，重复 poll 只会 404）。
+CREATE TABLE IF NOT EXISTS wb2api_login_sessions (
+  id             TEXT PRIMARY KEY,   -- sha256(session_id 明文)
+  user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  upstream_state TEXT NOT NULL,
+  realm          TEXT NOT NULL DEFAULT 'global',
+  status         TEXT NOT NULL DEFAULT 'pending',  -- pending | done | failed
+  result_json    TEXT,
+  message        TEXT,
+  acknowledged_ip TEXT,
+  created_at     TEXT NOT NULL,
+  expires_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wb2api_sessions_expires ON wb2api_login_sessions(expires_at);
+
+-- 网关 api_key（面板可在线更新；单行表，无行时回落 env.WB2API_API_KEY）
+CREATE TABLE IF NOT EXISTS wb2api_credentials (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  enc_api_key TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+
+-- ============ OAuth 2.0 授权服务器（Doulor Cloud 作为身份提供方）============
+-- 让自有站点（NewAPI 等）通过 Doulor Cloud 账号登录。
+-- ⚠️ 方向：别的站点来接我们，不是我们接别人。
+-- 详见 worker/migrations/0033_oauth_provider.sql 的说明与
+-- docs/新功能-对外开放OAuth登录(身份提供方).md。
+-- 与迁移文件保持一致；此处供全新安装使用。
+
+CREATE TABLE IF NOT EXISTS oauth_clients (
+  id                 TEXT PRIMARY KEY,
+  client_id          TEXT NOT NULL UNIQUE,
+  client_secret_hash TEXT NOT NULL,
+  name               TEXT NOT NULL,
+  redirect_uris      TEXT NOT NULL,
+  scopes             TEXT NOT NULL DEFAULT 'openid profile email',
+  owner_user_id      TEXT REFERENCES users(id) ON DELETE SET NULL,
+  disabled           INTEGER NOT NULL DEFAULT 0,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_codes (
+  id                     TEXT PRIMARY KEY,
+  code_hash              TEXT NOT NULL UNIQUE,
+  client_id              TEXT NOT NULL,
+  user_id                TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  redirect_uri           TEXT NOT NULL,
+  scopes                 TEXT NOT NULL,
+  code_challenge         TEXT,
+  code_challenge_method  TEXT,
+  expires_at             TEXT NOT NULL,
+  used                   INTEGER NOT NULL DEFAULT 0,
+  created_at             TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+  id         TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE,
+  client_id  TEXT NOT NULL,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  scopes     TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  revoked    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS oauth_grants (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  client_id  TEXT NOT NULL,
+  scopes     TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(user_id, client_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_codes_client ON oauth_codes(client_id);
+CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires ON oauth_codes(expires_at);
+CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user ON oauth_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_oauth_tokens_expires ON oauth_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_oauth_grants_user ON oauth_grants(user_id, client_id);

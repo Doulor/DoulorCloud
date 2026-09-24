@@ -28,6 +28,7 @@ interface AnnouncementRow {
   body: string
   category: string
   pinned: number
+  popup_mode: string
   created_at: string
 }
 
@@ -38,6 +39,7 @@ function toAnnouncement(r: AnnouncementRow) {
     body: r.body,
     category: r.category,
     pinned: r.pinned === 1,
+    popupMode: r.popup_mode ?? "none",
     createdAt: r.created_at,
   }
 }
@@ -79,6 +81,7 @@ export async function createAnnouncement(
     body?: string
     category?: string
     pinned?: boolean
+    popupMode?: string
   }
   const title = (body.title ?? "").trim().slice(0, 100)
   const text = (body.body ?? "").trim().slice(0, 1000)
@@ -90,13 +93,15 @@ export async function createAnnouncement(
     (ANNOUNCEMENT_CATEGORIES as readonly string[]).includes(body.category)
       ? body.category
       : "general"
+  const popupMode =
+    body.popupMode === "once" || body.popupMode === "every" ? body.popupMode : "none"
   const id = uuid()
   const now = new Date().toISOString()
   await env.DB.prepare(
-    `INSERT INTO announcements (id, title, body, category, pinned, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
+    `INSERT INTO announcements (id, title, body, category, pinned, popup_mode, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(id, title, text, category, body.pinned ? 1 : 0, now)
+    .bind(id, title, text, category, body.pinned ? 1 : 0, popupMode, now)
     .run()
   return json({ announcement: toAnnouncement(await loadOne(env, id)) }, 201)
 }
@@ -114,6 +119,7 @@ export async function updateAnnouncement(
     body?: string
     category?: string
     pinned?: boolean
+    popupMode?: string
   }
   const title =
     body.title !== undefined ? (body.title as string).trim().slice(0, 100) : existing.title
@@ -125,10 +131,14 @@ export async function updateAnnouncement(
       ? body.category
       : existing.category
   const pinned = body.pinned !== undefined ? (body.pinned ? 1 : 0) : existing.pinned
+  const popupMode =
+    body.popupMode === "once" || body.popupMode === "every" || body.popupMode === "none"
+      ? body.popupMode
+      : existing.popup_mode
   await env.DB.prepare(
-    `UPDATE announcements SET title = ?, body = ?, category = ?, pinned = ? WHERE id = ?`
+    `UPDATE announcements SET title = ?, body = ?, category = ?, pinned = ?, popup_mode = ? WHERE id = ?`
   )
-    .bind(title, text, category, pinned, id)
+    .bind(title, text, category, pinned, popupMode, id)
     .run()
   return json({ announcement: toAnnouncement(await loadOne(env, id)) })
 }

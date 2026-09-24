@@ -195,8 +195,8 @@ export async function register(env: Env, request: Request): Promise<Response> {
         WHERE id = ? AND used_count < max_uses`
     ).bind(invite.id),
     env.DB.prepare(
-      "INSERT INTO users (id, username, email, password_hash, namespace, status, permissions, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)"
-    ).bind(id, username, email, passwordHash, username, invite.permissions ?? null, now, now),
+      "INSERT INTO users (id, username, email, password_hash, namespace, status, permissions, invite_code_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)"
+    ).bind(id, username, email, passwordHash, username, invite.permissions ?? null, invite.id, now, now),
     env.DB.prepare(
       "INSERT INTO domains (id, user_id, name, zone_id, status, created_at) VALUES (?, ?, ?, ?, 'active', ?)"
     ).bind(uuid(), id, requestedFqdn, env.ZONE_ID, now),
@@ -339,75 +339,97 @@ export async function me(
   if (ctx) ctx.waitUntil(visit)
   else await visit
 
+  // 概览页需要的统计/列表共 11 项。原先逐条 await，等于 11 次串行往返；
+  // D1 的 batch() 在一个往返里把这些语句一起发出去（语句内部仍是串行执行，
+  // 省掉的是网络往返开销）。这是 /api/me，每次页面加载都会调，收益明显。
+  //
+  // 注意：domain 的查询结果被 dnsCount 依赖（要用 domain.id），
+  // 不能放进同一个 batch，因此先取 domain，再把它之后的所有查询打包。
   const domain = await env.DB.prepare(
     "SELECT * FROM domains WHERE user_id = ? LIMIT 1"
   )
     .bind(user.id)
     .first<{ id: string; name: string; status: string; created_at: string }>()
 
-  const dnsCount = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM dns_records WHERE domain_id = ?"
+  const [
+    dnsRes,
+    mailRes,
+    unreadRes,
+    subdomainRes,
+    mailboxRes,
+    storageUsedRes,
+    storageAccountRes,
+    recentStorageRes,
+    recentMessagesRes,
+    recentRes,
+  ] = await env.DB.batch(
+    [
+      env.DB.prepare("SELECT COUNT(*) AS c FROM dns_records WHERE domain_id = ?").bind(
+        domain?.id ?? ""
+      ),
+      env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id WHERE mb.user_id = ?"
+      ).bind(user.id),
+      env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id WHERE mb.user_id = ? AND m.read = 0"
+      ).bind(user.id),
+      env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM subdomains WHERE user_id = ? AND name != '@'"
+      ).bind(user.id),
+      env.DB.prepare("SELECT COUNT(*) AS c FROM mailboxes WHERE user_id = ?").bind(user.id),
+      env.DB.prepare(
+        "SELECT COALESCE(SUM(size), 0) AS c FROM storage_objects WHERE user_id = ?"
+      ).bind(user.id),
+      env.DB.prepare("SELECT quota_bytes FROM storage_accounts WHERE user_id = ?").bind(
+        user.id
+      ),
+      env.DB.prepare(
+        "SELECT id, filename, r2_key, size, created_at FROM storage_objects WHERE user_id = ? ORDER BY created_at DESC LIMIT 3"
+      ).bind(user.id),
+      env.DB.prepare(
+        `SELECT m.id, m.from_address, m.subject, m.read, m.received_at, m.mailbox_id
+           FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id
+          WHERE mb.user_id = ?
+          ORDER BY m.received_at DESC LIMIT 5`
+      ).bind(user.id),
+      env.DB.prepare(
+        "SELECT id, action, detail, created_at FROM audit_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 5"
+      ).bind(user.id),
+    ] as D1PreparedStatement[]
   )
-    .bind(domain?.id ?? "")
-    .first<{ c: number }>()
 
-  const mailCount = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id WHERE mb.user_id = ?"
-  )
-    .bind(user.id)
-    .first<{ c: number }>()
+  // batch 返回顺序与传入一致。D1Result 的泛型是联合的，逐项取用时收敛到具体结构。
+  const num = (r: unknown) => ((r as { results?: { c?: number }[] }).results?.[0]?.c ?? 0)
+  const rowsOf = <T,>(r: unknown): T[] =>
+    ((r as { results?: T[] }).results ?? []) as T[]
 
-  const unreadCount = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id WHERE mb.user_id = ? AND m.read = 0"
+  const dnsRecords = num(dnsRes)
+  const emails = num(mailRes)
+  const unread = num(unreadRes)
+  const subdomains = num(subdomainRes)
+  const mailboxes = num(mailboxRes)
+  const storageUsedBytes = num(storageUsedRes)
+  const storageQuotaBytes =
+    (storageAccountRes as { results?: { quota_bytes: number | null }[] }).results?.[0]
+      ?.quota_bytes ?? 0
+  const recentStorageFiles = rowsOf<{
+    id: string
+    filename: string
+    r2_key: string
+    size: number
+    created_at: string
+  }>(recentStorageRes)
+  const recentMessages = rowsOf<{
+    id: string
+    from_address: string
+    subject: string
+    read: number
+    received_at: string
+    mailbox_id: string
+  }>(recentMessagesRes)
+  const recent = rowsOf<{ id: string; action: string; detail: string; created_at: string }>(
+    recentRes
   )
-    .bind(user.id)
-    .first<{ c: number }>()
-
-  const subdomainCount = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM subdomains WHERE user_id = ? AND name != '@'"
-  )
-    .bind(user.id)
-    .first<{ c: number }>()
-
-  const mailboxCount = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM mailboxes WHERE user_id = ?"
-  )
-    .bind(user.id)
-    .first<{ c: number }>()
-
-  // 网盘：已用字节、配额（概览网盘用量卡用；文件数/最近文件见下方 recentStorageFiles）
-  const storageUsed = await env.DB.prepare(
-    "SELECT COALESCE(SUM(size), 0) AS c FROM storage_objects WHERE user_id = ?"
-  )
-    .bind(user.id)
-    .first<{ c: number }>()
-  const storageAccount = await env.DB.prepare(
-    "SELECT quota_bytes FROM storage_accounts WHERE user_id = ?"
-  )
-    .bind(user.id)
-    .first<{ quota_bytes: number | null }>()
-
-  // 网盘最近 3 个文件（概览卡展示文件名 + 直链）
-  const recentStorageFiles = await env.DB.prepare(
-    "SELECT id, filename, r2_key, size, created_at FROM storage_objects WHERE user_id = ? ORDER BY created_at DESC LIMIT 3"
-  )
-    .bind(user.id)
-    .all<{ id: string; filename: string; r2_key: string; size: number; created_at: string }>()
-
-  const recentMessages = await env.DB.prepare(
-    `SELECT m.id, m.from_address, m.subject, m.read, m.received_at, m.mailbox_id
-       FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id
-      WHERE mb.user_id = ?
-      ORDER BY m.received_at DESC LIMIT 5`
-  )
-    .bind(user.id)
-    .all<{ id: string; from_address: string; subject: string; read: number; received_at: string; mailbox_id: string }>()
-
-  const recent = await env.DB.prepare(
-    "SELECT id, action, detail, created_at FROM audit_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 5"
-  )
-    .bind(user.id)
-    .all<{ id: string; action: string; detail: string; created_at: string }>()
 
   return json({
     user: toPublicUser(user),
@@ -421,18 +443,18 @@ export async function me(
       : null,
     stats: {
       domains: domain ? 1 : 0,
-      subdomains: subdomainCount?.c ?? 0,
-      emails: mailCount?.c ?? 0,
-      unread: unreadCount?.c ?? 0,
-      dnsRecords: dnsCount?.c ?? 0,
-      mailboxes: mailboxCount?.c ?? 0,
+      subdomains,
+      emails,
+      unread,
+      dnsRecords,
+      mailboxes,
       emailForwards: 0,
       // 网盘（未开通：usedBytes 0、quotaBytes 0）
-      storageUsedBytes: storageUsed?.c ?? 0,
-      storageQuotaBytes: storageAccount?.quota_bytes ?? 0,
+      storageUsedBytes,
+      storageQuotaBytes,
     },
     // 网盘最近 3 个文件（概览卡展示文件名 + 直链复制）
-    recentStorageFiles: (recentStorageFiles.results ?? []).map((f) => ({
+    recentStorageFiles: recentStorageFiles.map((f) => ({
       id: f.id,
       filename: f.filename,
       r2Key: f.r2_key,
@@ -442,7 +464,7 @@ export async function me(
     // 管理员不受配额限制（999999 作为「不限」哨兵值，前端据此显示）
     subdomainLimit: user.role === "admin" ? 999999 : 5,
     mailboxLimit: user.role === "admin" ? 999999 : 3,
-    recentMessages: (recentMessages.results ?? []).map((m) => ({
+    recentMessages: recentMessages.map((m) => ({
       id: m.id,
       from: m.from_address,
       subject: m.subject,
@@ -450,7 +472,7 @@ export async function me(
       receivedAt: m.received_at,
       mailboxId: m.mailbox_id,
     })),
-    recentActivity: (recent.results ?? []).map((r) => ({
+    recentActivity: recent.map((r) => ({
       id: r.id,
       action: r.action,
       detail: r.detail,

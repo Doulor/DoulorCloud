@@ -8,5 +8,7 @@ declare namespace Cloudflare {
     NEWAPI_ADMIN_TOKEN: string
     NEWAPI_ADMIN_USER_ID: string
     SESSION_SECRET: string
+    // WorkBuddy 反代网关测试用假绑定（见 vitest.config.ts）
+    WB2API_API_KEY: string
   }
 }

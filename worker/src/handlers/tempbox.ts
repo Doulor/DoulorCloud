@@ -6,7 +6,9 @@
  *   - 元信息：D1 `tempbox_batches`（code、过期时间、创建者、文件数/字节）
  *   - 过期：采用「惰性清理」——访问/下载时若发现已过期，删除该批次 R2 对象并返回 404
  *     （另有每小时一次的定时任务主动清理，见 maintenance.ts）
- *   - 接收码：8 位字母数字（`crypto` 随机）；旧的 4 位数字码仍兼容
+ *   - 接收码：6 位数字（`crypto` 随机，90 万种）；任何旧码仍兼容
+ *   - 分享：前端生成 `/t?code=xxxxxx` 链接（`/t` 是无需登录的公开页），
+ *     对方点开自动填入并解锁
  *
  * 权限：
  *   - 查看 / 下载：**无需登录**（访客输入接收码即可解锁），但按 IP 限流
@@ -79,14 +81,29 @@ async function assertBatchAlive(env: Env, code: string): Promise<TempboxBatchRow
   return batch
 }
 
-/** 生成唯一 4 位数字接收码 */
 /**
- * 接收码字母表：去掉容易看错的 0/O、1/I（32 个字符，正好整除 256，
- * 用 `byte % 32` 取字符不会引入取模偏置）。
+ * 接收码取值范围：100000–999999，共 90 万种。
+ *
+ * 不用 000000–999999 是**故意**的：省掉前导零这一整类问题
+ * （口头转述时容易漏、数字输入框可能吞掉、从 Excel 复制会丢）。
+ * 代价是少 10% 的取值空间，对枚举难度没有实质影响。
  */
-const CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-const CODE_LENGTH = 8
-/** 公开读取接口限流：同一 IP 10 分钟 60 次（约合 150 小时才能试完 9000 个旧码） */
+const CODE_MIN = 100000
+const CODE_SPAN = 900000
+
+/**
+ * 公开读取接口限流：同一 IP 10 分钟 60 次。
+ *
+ * ⚠️ 这个桶由「解锁」和「下载」**共用**，是有意为之：
+ *   - 下载接口也接受接收码，如果给它单独放宽额度，它就成了更松的枚举探针。
+ *     而且两条路径的报错文案不同（「接收码不存在或已失效」vs「文件不存在」），
+ *     攻击者据此可以判断猜中的码是否真实存在。所以必须共桶。
+ *   - 60 这个数值是按「一个箱子最多 20 个文件」定的：取一次列表 + 下载满 20 个文件
+ *     约 21 次请求，60 留了约 3 倍余量。**再往下压会误伤正常下载。**
+ *
+ * 因此缩短接收码时，安全余量靠的是取值空间而不是限流：
+ * 6 位数字（90 万）比原 4 位数字（9 千）多 100 倍。
+ */
 const CODE_LOOKUP_LIMIT = 60
 const CODE_LOOKUP_WINDOW_SECONDS = 600
 
@@ -96,16 +113,21 @@ const CODE_LOOKUP_WINDOW_SECONDS = 600
  * ⚠️ 2026-09-23 安全审计（P1）：原实现是 `String(Math.floor(1000 + Math.random() * 9000))`
  * —— **只有 9000 种可能，且用的是非密码学的 Math.random()**。而查看/下载接口无需登录、
  * 当时也没有任何限流，所以把 9000 个码跑一遍就能拿走所有人正在互传的文件与纯文本
- * （用户会自然地把它当密码用）。现改为 `crypto` 随机 + 8 位字母数字（约 1.1 万亿种组合）。
+ * （用户会自然地把它当密码用）。审计后先改成 8 位字母数字（约 1.1 万亿种）。
  *
- * 兼容性：旧的 4 位数字码**仍然可以正常解锁**（查库是字符串匹配，与长度无关），
+ * ⚠️ 2026-09-24 调整：8 位字母数字虽然安全，但用户反馈「太长太难记」。
+ * 改为 **6 位数字（`crypto` 随机，90 万种）**，并配一条分享链接
+ * （见前端 tempbox 页：`/t?code=xxxxxx`），让对方点开即用、根本不用手输。
+ * 安全余量：比 4 位数字多 100 倍取值空间；配合 30 分钟有效期与 60 次/10 分钟限流，
+ * 单个 IP 在一个箱子的生命周期内只能试约 180 个码（命中率 0.02%），
+ * 1 万个 IP 的僵尸网络也只有约 27% —— 相对 4 位数字（必然被撞开）是决定性的改善。
+ *
+ * 兼容性：**任何旧接收码仍然可以正常解锁**（查库是字符串匹配，与长度/字符集无关），
  * 存量批次会在到期后被惰性清理掉，不需要数据迁移。
  */
 async function generateCode(env: Env): Promise<string> {
   for (let i = 0; i < 20; i++) {
-    const bytes = crypto.getRandomValues(new Uint8Array(CODE_LENGTH))
-    let code = ""
-    for (const b of bytes) code += CODE_ALPHABET[b % CODE_ALPHABET.length]
+    const code = randomNumericCode()
     const exists = await env.DB.prepare(
       "SELECT id FROM tempbox_batches WHERE code = ? LIMIT 1"
     )
@@ -114,6 +136,25 @@ async function generateCode(env: Env): Promise<string> {
     if (!exists) return code
   }
   throw new ApiError(500, "生成接收码失败，请重试", "INTERNAL")
+}
+
+/**
+ * 用密码学随机数取一个 6 位码。
+ *
+ * 用**拒绝采样**而不是直接 `uint32 % CODE_SPAN`：2^32 不是 900000 的整数倍，
+ * 直接取模会让数值最小的那几个码概率略高。偏差本身极小，但没必要留这个尾巴。
+ * 拒绝概率约 0.004%，实际上几乎不会重试。
+ */
+function randomNumericCode(): string {
+  const MAX_EXCLUSIVE = 0x100000000
+  const LIMIT = Math.floor(MAX_EXCLUSIVE / CODE_SPAN) * CODE_SPAN
+  const buf = new Uint32Array(1)
+  let v: number
+  do {
+    crypto.getRandomValues(buf)
+    v = buf[0]
+  } while (v >= LIMIT)
+  return String(CODE_MIN + (v % CODE_SPAN))
 }
 
 /** 校验上传是否被允许；需要登录时返回 user，否则返回 null */

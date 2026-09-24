@@ -212,6 +212,8 @@ export interface NewApiUser {
   group?: string
   role?: number
   status?: number
+  /** OIDC 绑定标识（= Doulor Cloud 的 users.id，即我方 OAuth 的 sub） */
+  oidc_id?: string
 }
 
 /** 调整额度：mode=override 为绝对赋值，add / subtract 为增减 */
@@ -231,6 +233,51 @@ export async function adminSetQuota(
     }),
   })
   await unwrap(res, "设置额度")
+}
+
+/**
+ * 管理员启用 / 禁用用户（`POST /api/user/manage` 的 enable / disable）。
+ *
+ * ⚠️ disable 不仅禁止登录，还会**清掉该用户所有 token 的缓存**，使其
+ * 已创建的 API Key 立即失效 —— 这正是「cloud 收回权限 → 中转站 key 失效」
+ * 所依赖的机制。
+ * 根用户（root）不能被禁用，会返回错误；调用者角色需高于目标用户。
+ */
+export async function adminSetUserStatus(
+  env: Env,
+  userId: number,
+  action: "enable" | "disable"
+): Promise<void> {
+  const res = await newApiFetch(env, "/api/user/manage", {
+    method: "POST",
+    body: JSON.stringify({ id: userId, action }),
+  })
+  await unwrap(res, action === "enable" ? "启用账号" : "禁用账号")
+}
+
+/**
+ * 管理员给指定用户设置/重置密码（`PUT /api/user`）。
+ *
+ * ⚠️ 明文密码只在这里短暂出现，用于「OIDC 开通后给账号补一个密码」，
+ * 从而让本站能用「用户名 + 密码」登录换取 access token（代用户建 Key 依赖它）。
+ * NewAPI 的 UpdateUser 接口只要 `id` + `password`，明文传入、由它自己哈希；
+ * 不需要旧密码，也不校验 role 变更（我们这里不碰 role）。
+ */
+export async function adminSetUserPassword(
+  env: Env,
+  userId: number,
+  username: string,
+  password: string
+): Promise<void> {
+  const res = await newApiFetch(env, "/api/user", {
+    method: "PUT",
+    body: JSON.stringify({
+      id: userId,
+      username,
+      password,
+    }),
+  })
+  await unwrap(res, "设置账号密码")
 }
 
 // ---- 用户自助注册（公开路由）----
@@ -272,6 +319,10 @@ export interface NewApiHealth {
 /**
  * 中转站健康检查：调公开的 /api/status 测连通性与延迟。
  * 不抛错——离线也返回 { online:false }，供前端显示「在线/离线」徽章。
+ *
+ * 必须带超时：这个探测是「AI 中转站」页面每次加载都要等的，
+ * 而它没有任何兜底——地址被防火墙黑洞（连不上也断不开）时会一直挂着，
+ * 页面就一直转圈。5 秒拿不到结果直接当离线，比挂死强。
  */
 export async function checkHealth(env: Env): Promise<NewApiHealth> {
   if (!(await isNewApiConfigured(env))) {
@@ -282,6 +333,7 @@ export async function checkHealth(env: Env): Promise<NewApiHealth> {
     const res = await newApiFetch(env, "/api/status", {
       method: "GET",
       auth: "none",
+      signal: AbortSignal.timeout(5000),
     })
     const data = await unwrap<Record<string, unknown>>(res, "健康检查")
     return {
@@ -340,14 +392,16 @@ export async function registerUser(
 
 export interface LoginResult {
   userId: number
-  session: string | null
+  accessToken: string
   username?: string
 }
 
 /**
- * 用户登录，返回 user id 与会话 cookie。
- * 会话 cookie 用于随后调用 /api/user/token 换取长期 access token
- * （该接口需要 UserAuth + session，Bearer 无法替代）。
+ * 用户登录，返回 user id 与访问令牌。
+ *
+ * ⚠️ NewAPI rc.40 起登录响应**直接返回 access_token**（不再需要「session cookie
+ * → /api/user/token」两步换令牌），用户信息也从 data 顶层移到了 data.user。
+ * 这里兼容新旧两种结构，并直接取登录返回的 access_token。
  */
 export async function login(
   env: Env,
@@ -359,17 +413,25 @@ export async function login(
     body: JSON.stringify({ username, password }),
     auth: "none",
   })
-  const data = await unwrap<{ id: number; username?: string }>(res, "登录")
+  const data = await unwrap<{
+    id?: number
+    username?: string
+    access_token?: string
+    user?: { id: number; username?: string }
+  }>(res, "登录")
 
-  // 从 Set-Cookie 中取出 session（Worker 环境无自动 cookie jar）
-  const setCookie = res.headers.get("Set-Cookie") ?? ""
-  const match = /(?:^|,\s*)session=([^;]+)/.exec(setCookie)
-  const session = match ? `session=${match[1]}` : null
+  // 兼容新旧两种响应结构
+  const userId = data.user?.id ?? data.id
+  const remoteUsername = data.user?.username ?? data.username
+  const accessToken = data.access_token ?? ""
 
-  if (!data?.id) {
+  if (!userId) {
     throw new ApiError(502, "NewAPI 登录未返回用户 ID", "NEWAPI_ERROR")
   }
-  return { userId: data.id, session, username: data.username }
+  if (!accessToken) {
+    throw new ApiError(502, "NewAPI 登录未返回访问令牌", "NEWAPI_ERROR")
+  }
+  return { userId, accessToken, username: remoteUsername }
 }
 
 /** 生成/获取用户的长期 access token */
@@ -653,6 +715,216 @@ export async function listPricing(
     console.error("读取模型分组失败:", err)
     return []
   }
+}
+
+// ---- 渠道管理（管理员接口，用于「AI 渠道捐献」自动化）----
+//
+// 口径已对 NewAPI v1.0.0-rc.40 源码核对（controller/channel.go + router/channel-router.go）：
+//   - 新建：`POST /api/channel/`，body `{ mode:"single", channel:{...} }`
+//   - 列表：`GET /api/channel/`，返回 `{ items, total, page, page_size, type_counts }`
+//   - 测试：`GET /api/channel/test/:id`，**始终 200**，靠 body 的 success 判定
+//   - 删除：`DELETE /api/channel/:id`
+//   - 新增只需 `key` 非空 + 模型名 ≤255 字符（validateChannel 的 isAdd 分支）
+//
+// ⚠️ `model_mapping` 的方向（relay/helper/model_mapped.go 实证）：
+//     键 = 客户端请求的模型名，值 = 实际发给上游的模型名。
+//     所以「给捐献模型加前缀」要写成 `{"donation-x": "x"}`。
+
+/** 渠道状态常量（common/constants.go） */
+export const CHANNEL_STATUS_ENABLED = 1
+export const CHANNEL_STATUS_MANUALLY_DISABLED = 2
+
+export interface NewApiChannel {
+  id: number
+  name: string
+  type: number
+  status: number
+  /** 逗号分隔的模型名 */
+  models: string
+  group: string
+  base_url?: string | null
+}
+
+/**
+ * 读取渠道列表（管理员）。
+ *
+ * 只取自动化要用的字段。NewAPI 会 `Omit("key")`，所以这里拿不到密钥，
+ * 也不需要 —— 密钥在创建时由我方提供。
+ */
+export async function listChannels(env: Env): Promise<NewApiChannel[]> {
+  const res = await newApiFetch(env, "/api/channel/?page_size=1000", {
+    method: "GET",
+  })
+  const data = await unwrap<
+    NewApiChannel[] | { items?: NewApiChannel[] }
+  >(res, "读取渠道列表")
+  const list = Array.isArray(data) ? data : (data.items ?? [])
+  return list.filter((c) => c && typeof c.id === "number")
+}
+
+export interface NewApiChannelInput {
+  name: string
+  type: number
+  key: string
+  baseUrl: string
+  /** 逗号分隔的模型名（对外暴露的名字，已带 donation- 前缀） */
+  models: string
+  /** JSON 字符串：{"对外模型名": "上游真实模型名"} */
+  modelMapping: string
+  group: string
+  /** 渠道测试默认用的模型名（填上游真实模型名最稳） */
+  testModel?: string
+  /**
+   * 渠道标签。NewAPI 的渠道列表有「标签模式」，同一 tag 的渠道会归成一组 ——
+   * 这就是我们用来给捐献渠道做「文件夹」的机制。
+   */
+  tag?: string
+}
+
+/** 新建一个单密钥渠道 */
+export async function addChannel(
+  env: Env,
+  input: NewApiChannelInput
+): Promise<void> {
+  const res = await newApiFetch(env, "/api/channel/", {
+    method: "POST",
+    body: JSON.stringify({
+      mode: "single",
+      channel: {
+        name: input.name,
+        type: input.type,
+        key: input.key,
+        base_url: input.baseUrl,
+        models: input.models,
+        model_mapping: input.modelMapping,
+        group: input.group,
+        status: CHANNEL_STATUS_ENABLED,
+        weight: 0,
+        ...(input.testModel ? { test_model: input.testModel } : {}),
+        ...(input.tag ? { tag: input.tag } : {}),
+      },
+    }),
+  })
+  await unwrap(res, "创建渠道")
+}
+
+/**
+ * 只改渠道的模型列表与重定向表（`PUT /api/channel/`）。
+ *
+ * ⚠️ 只传这两个字段是**刻意**的：NewAPI 的 `UpdateChannel` 最终走
+ * `DB.Model(channel).Updates(channel)`，GORM 对结构体只更新**非零值**，
+ * 所以没传的字段（name / key / base_url / group…）原样保留。
+ * 反过来，如果为了「保险」把整条渠道都传回去，就要连带传 `status` ——
+ * 而 `UpdateChannel` 明确拒绝 body 里出现 `status`（直接报参数错误）。
+ *
+ * 用途：逐个测完上游模型后，把不可用的从渠道里剔掉。
+ */
+export async function updateChannelModels(
+  env: Env,
+  channelId: number,
+  models: string,
+  modelMapping: string
+): Promise<void> {
+  const res = await newApiFetch(env, "/api/channel/", {
+    method: "PUT",
+    body: JSON.stringify({
+      id: channelId,
+      models,
+      model_mapping: modelMapping,
+    }),
+  })
+  await unwrap(res, "更新渠道模型")
+}
+
+/**
+ * 把上游/中转站返回的报错压成一行可读文本。
+ *
+ * 上游的报错经常是**整页 HTML**（最典型：上游挂了 Cloudflare，把中转站服务器的
+ * IP 当成攻击拦了，返回 403 + 一大段 `<!DOCTYPE html>`）。原样写进
+ * `donations.review_note` 会：① 撑爆字段；② 用户和邮件里看到的全是标签，
+ * 完全不知道该干什么。所以识别出 HTML 后只留「站点 + Ray ID」这两个能拿去找上游
+ * 运维的信息。
+ */
+export function summarizeUpstreamError(msg: string, max = 240): string {
+  const raw = (msg ?? "").trim()
+  if (!raw) return ""
+  if (/<!doctype html|<html[\s>]/i.test(raw)) {
+    const host = /unable to access<\/span>\s*([^<]+)</i.exec(raw)?.[1]?.trim()
+    const ray = /Ray ID:\s*<strong>([^<]+)<\/strong>/i.exec(raw)?.[1]?.trim()
+    return [
+      "[上游返回 HTML 错误页，通常是被 Cloudflare 拦截]",
+      host ? `站点 ${host}` : "",
+      ray ? `Ray ID ${ray}` : "",
+      "把这两项给上游运维即可定位",
+    ]
+      .filter(Boolean)
+      .join("；")
+  }
+  const flat = raw.replace(/\s+/g, " ")
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat
+}
+
+/**
+ * 测试渠道连通性（可指定模型）。
+ *
+ * **不抛错**：NewAPI 的这个接口永远返回 HTTP 200，成功与否只看 body 的 success。
+ * 失败原因（上游 401 / 模型不存在 / 余额不足）都在 message 里，需要原样带给管理员。
+ *
+ * ⚠️ 必须自带超时：一次捐献要逐个模型测试，最坏情况下每个都卡住的话，
+ * 整个提交会拖到客户端超时。超时按「未通过」算，并给出可读的原因。
+ */
+export async function testChannel(
+  env: Env,
+  channelId: number,
+  model?: string,
+  timeoutMs = 10000
+): Promise<{ ok: boolean; message: string; time: number }> {
+  const qs = model ? `?model=${encodeURIComponent(model)}` : ""
+  let res: Response
+  try {
+    res = await newApiFetch(env, `/api/channel/test/${channelId}${qs}`, {
+      method: "GET",
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === "TimeoutError"
+    return {
+      ok: false,
+      message: timedOut
+        ? `测试超时（超过 ${Math.round(timeoutMs / 1000)} 秒无响应）`
+        : err instanceof Error
+          ? err.message
+          : String(err),
+      time: timeoutMs / 1000,
+    }
+  }
+  const text = await res.text()
+  let body: { success?: boolean; message?: string; time?: number } | null = null
+  try {
+    body = JSON.parse(text) as { success?: boolean; message?: string; time?: number }
+  } catch {
+    body = null
+  }
+  if (!body) {
+    return {
+      ok: false,
+      message: `HTTP ${res.status}：${summarizeUpstreamError(text, 200)}`,
+      time: 0,
+    }
+  }
+  return {
+    ok: body.success === true,
+    message: summarizeUpstreamError(body.message ?? ""),
+    time: Number(body.time ?? 0),
+  }
+}
+
+/** 删除渠道（撤销捐献时收回资源用） */
+export async function deleteChannel(env: Env, channelId: number): Promise<void> {
+  const res = await newApiFetch(env, `/api/channel/${channelId}`, {
+    method: "DELETE",
+  })
+  await unwrap(res, "删除渠道")
 }
 
 // ---- 管理员凭据（管理面板可在线更新）----

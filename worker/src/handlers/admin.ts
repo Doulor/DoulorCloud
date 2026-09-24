@@ -7,6 +7,7 @@ import {
   getSettings,
   getSetting,
   updateSettings,
+  sanitizeRecommendedModels,
   audit as recordAudit,
 } from "../settings"
 import { isStorageConfigured } from "../r2"
@@ -18,11 +19,17 @@ import {
   saveAdminCredential,
   verifyAdminCredential,
   probeAdminCredential,
+  listPricing,
   maskToken,
 } from "../newapi-client"
 import { sendMail, renderMail } from "../mailer"
 import { cfListDestinations } from "../cloudflare"
 import { normalizePermissions, parsePermissions, FEATURES } from "../permissions"
+import {
+  validateNicknameFormat,
+  isReservedNickname,
+  parseReservedNicknames,
+} from "../identity"
 import { listReservedSubdomains } from "../reserved-names"
 import { getSettingNumber } from "../settings"
 import {
@@ -52,6 +59,14 @@ interface AdminUserRow {
   permissions: string | null
   /** 用户级子域名配额覆盖；NULL = 用全局默认 */
   max_subdomains?: number | null
+  /** 展示用昵称（社区/名片），NULL = 未设置 */
+  nickname?: string | null
+  /** 邮箱是否已验证（验证后才能在设置里改真实收件地址等） */
+  email_verified?: number | null
+  /** 是否接收平台通知邮件 */
+  notify_enabled?: number | null
+  /** 头像 R2 key（NULL = 未上传，前端回落到 /u/<username>/avatar） */
+  avatar_key?: string | null
   /** 邀请码额度（捐献累计获得 / 已消耗） */
   invite_quota_bonus?: number | null
   invite_quota_used?: number | null
@@ -80,18 +95,26 @@ async function targetUser(env: Env, username: string): Promise<AdminUserRow> {
   return user
 }
 
+/**
+ * 用户详情。
+ *
+ * 列表页只看「各模块是否开通」，明细全部收敛到这里：
+ *   * 账号：昵称/邮箱验证/通知开关/头像，以及角色与状态
+ *   * 模块：网盘（用量配额桶）、AI 中转站（额度与请求数）、
+ *           内网穿透（启用状态 + 申请/端口）、代理节点（启用与协议同意）
+ *   * 名片：published / slug / 自定义域名 / 访问次数
+ *   * 额度：邀请码额度 + 各模块转授额度
+ *   * 活动：最近 20 条审计日志
+ *
+ * 注意：AI 中转站的 quota / used_quota 取 D1 里的同步快照（由 maintenance 定期
+ * 拉取），不在这里实时打 NewAPI 接口 —— 管理面板打开详情不应产生外部请求。
+ */
 async function userDetail(env: Env, user: AdminUserRow) {
   const subdomains = await env.DB.prepare(
     "SELECT id, name, fqdn, status, created_at FROM subdomains WHERE user_id = ? ORDER BY created_at ASC"
   )
     .bind(user.id)
     .all()
-
-  const dnsIds = new Set<string>()
-  const domainRows = await env.DB.prepare("SELECT id FROM domains WHERE user_id = ?")
-    .bind(user.id)
-    .all<{ id: string }>()
-  for (const d of domainRows.results ?? []) dnsIds.add(d.id)
 
   const dns = await env.DB.prepare(
     "SELECT id, subdomain_id, name, fqdn, type, content, ttl, proxied, status, created_at FROM dns_records WHERE domain_id IN (SELECT id FROM domains WHERE user_id = ?) ORDER BY created_at ASC LIMIT 200"
@@ -117,14 +140,134 @@ async function userDetail(env: Env, user: AdminUserRow) {
     .bind(user.id)
     .all()
 
+  // ---- 各模块明细 ----
+  const storage = await env.DB.prepare(
+    `SELECT sa.prefix, sa.quota_bytes, sa.used_bytes, sa.file_count, sa.enabled,
+            sa.bucket_id, sa.created_at, b.name AS bucket_name
+       FROM storage_accounts sa
+       LEFT JOIN r2_buckets b ON b.id = sa.bucket_id
+      WHERE sa.user_id = ?`
+  )
+    .bind(user.id)
+    .first<{
+      prefix: string
+      quota_bytes: number
+      used_bytes: number
+      file_count: number
+      enabled: number
+      bucket_id: string | null
+      bucket_name: string | null
+      created_at: string
+    }>()
+
+  const newapi = await env.DB.prepare(
+    `SELECT newapi_user_id, username, email, group_name, quota, used_quota,
+            request_count, synced_at, created_at
+       FROM newapi_accounts WHERE user_id = ?`
+  )
+    .bind(user.id)
+    .first<{
+      newapi_user_id: number
+      username: string
+      email: string
+      group_name: string | null
+      quota: number
+      used_quota: number
+      request_count: number
+      synced_at: string | null
+      created_at: string
+    }>()
+
+  const frp = await env.DB.prepare(
+    "SELECT enabled, created_at, updated_at FROM frp_accounts WHERE user_id = ?"
+  )
+    .bind(user.id)
+    .first<{ enabled: number; created_at: string; updated_at: string }>()
+
+  const frpApplications = await env.DB.prepare(
+    `SELECT id, status, frp_user, ports, notify_email, remark, review_note,
+            reviewed_at, created_at
+       FROM frp_applications WHERE user_id = ? ORDER BY created_at DESC LIMIT 20`
+  )
+    .bind(user.id)
+    .all<{
+      id: string
+      status: string
+      frp_user: string
+      ports: string
+      notify_email: string
+      remark: string | null
+      review_note: string | null
+      reviewed_at: string | null
+      created_at: string
+    }>()
+
+  const frpPorts = await env.DB.prepare(
+    `SELECT p.remote_port, p.created_at, n.name AS node_name
+       FROM frp_ports p
+       LEFT JOIN frp_nodes n ON n.id = p.node_id
+      WHERE p.user_id = ? ORDER BY p.remote_port ASC`
+  )
+    .bind(user.id)
+    .all<{ remote_port: number; created_at: string; node_name: string | null }>()
+
+  const proxy = await env.DB.prepare(
+    "SELECT enabled, consent_version, consented_at, created_at, updated_at FROM proxy_activation WHERE user_id = ?"
+  )
+    .bind(user.id)
+    .first<{
+      enabled: number
+      consent_version: number
+      consented_at: string | null
+      created_at: string
+      updated_at: string
+    }>()
+
+  const profile = await env.DB.prepare(
+    `SELECT slug, published, fqdn, view_count, display_name, created_at, updated_at
+       FROM profiles WHERE user_id = ?`
+  )
+    .bind(user.id)
+    .first<{
+      slug: string
+      published: number
+      fqdn: string | null
+      view_count: number
+      display_name: string | null
+      created_at: string
+      updated_at: string
+    }>()
+
+  // ---- 额度 ----
+  const inviteBase = await getSettingNumber(env, "invite_quota_base")
+  const inviteBonus = Math.max(0, user.invite_quota_bonus ?? 0)
+  const inviteUsed = Math.max(0, user.invite_quota_used ?? 0)
+  const featureQuota = parseCounts(user.feature_quota)
+  const featureUsed = parseCounts(user.feature_quota_used)
+  const featureRemaining: Record<string, number> = {}
+  for (const f of QUOTA_FEATURES) {
+    featureRemaining[f] = Math.max(0, featureQuota[f] - featureUsed[f])
+  }
+
+  // ---- 最近活动 ----
+  const activity = await env.DB.prepare(
+    "SELECT id, action, detail, created_at FROM audit_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 20"
+  )
+    .bind(user.id)
+    .all<{ id: string; action: string; detail: string | null; created_at: string }>()
+
   return {
     user: {
       id: user.id,
       username: user.username,
       email: user.email,
       namespace: user.namespace,
+      nickname: user.nickname ?? null,
       role: user.role,
       status: user.status,
+      emailVerified: (user.email_verified ?? 0) === 1,
+      notifyEnabled: (user.notify_enabled ?? 1) === 1,
+      hasAvatar: Boolean(user.avatar_key),
       permissions: parsePermissions(user.permissions),
       maxSubdomains: user.max_subdomains ?? null,
       createdAt: user.created_at,
@@ -138,6 +281,102 @@ async function userDetail(env: Env, user: AdminUserRow) {
     })),
     messages: mails.results ?? [],
     sessions: sessions.results ?? [],
+    storage: storage
+      ? {
+          prefix: storage.prefix,
+          quotaBytes: storage.quota_bytes,
+          usedBytes: storage.used_bytes,
+          fileCount: storage.file_count,
+          enabled: storage.enabled === 1,
+          bucketId: storage.bucket_id,
+          bucketName: storage.bucket_name,
+          createdAt: storage.created_at,
+        }
+      : null,
+    newapi: newapi
+      ? {
+          newapiUserId: newapi.newapi_user_id,
+          username: newapi.username,
+          email: newapi.email,
+          group: newapi.group_name,
+          quota: newapi.quota,
+          usedQuota: newapi.used_quota,
+          requestCount: newapi.request_count,
+          syncedAt: newapi.synced_at,
+          createdAt: newapi.created_at,
+        }
+      : null,
+    frp: frp
+      ? {
+          enabled: frp.enabled === 1,
+          createdAt: frp.created_at,
+          updatedAt: frp.updated_at,
+        }
+      : null,
+    frpApplications: (frpApplications.results ?? []).map((a) => ({
+      id: a.id,
+      status: a.status,
+      frpUser: a.frp_user,
+      ports: parseJsonArray(a.ports),
+      notifyEmail: a.notify_email,
+      remark: a.remark,
+      reviewNote: a.review_note,
+      reviewedAt: a.reviewed_at,
+      createdAt: a.created_at,
+    })),
+    frpPorts: (frpPorts.results ?? []).map((p) => ({
+      remotePort: p.remote_port,
+      nodeName: p.node_name,
+      createdAt: p.created_at,
+    })),
+    proxy: proxy
+      ? {
+          enabled: proxy.enabled === 1,
+          consentVersion: proxy.consent_version,
+          consentedAt: proxy.consented_at,
+          createdAt: proxy.created_at,
+          updatedAt: proxy.updated_at,
+        }
+      : null,
+    profile: profile
+      ? {
+          slug: profile.slug,
+          published: profile.published === 1,
+          fqdn: profile.fqdn,
+          viewCount: profile.view_count,
+          displayName: profile.display_name,
+          createdAt: profile.created_at,
+          updatedAt: profile.updated_at,
+        }
+      : null,
+    quota: {
+      inviteBase,
+      inviteBonus,
+      inviteTotal: inviteBase + inviteBonus,
+      inviteUsed,
+      inviteRemaining: Math.max(0, inviteBase + inviteBonus - inviteUsed),
+      featureQuota,
+      featureUsed,
+      featureRemaining,
+      featureLabels: QUOTA_FEATURE_LABELS,
+    },
+    activity: (activity.results ?? []).map((a) => ({
+      id: a.id,
+      action: a.action,
+      detail: a.detail ?? "",
+      createdAt: a.created_at,
+    })),
+  }
+}
+
+/** 解析 JSON 数组字段（如 frp_applications.ports）；损坏数据回退为空数组 */
+function parseJsonArray(raw: string | null): number[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === "number") : []
+  } catch {
+    return []
   }
 }
 
@@ -145,12 +384,25 @@ async function userDetail(env: Env, user: AdminUserRow) {
 export async function listUsers(env: Env, request: Request): Promise<Response> {
   await requireAdmin(env, request)
   const rows = await env.DB.prepare(
+    // 列表只展示「各模块是否已开通」与「名片是否已启用」，不再回传子域名/DNS/
+    // 邮箱/邮件的计数 —— 那些明细在用户详情里看。四个模块的判定与各 handler
+    // 里的 isActivated / loadAccount 完全一致（有记录 **且** enabled=1）。
     `SELECT u.id, u.username, u.email, u.namespace, u.role, u.status, u.permissions, u.max_subdomains, u.created_at,
-            (SELECT COUNT(*) FROM subdomains s WHERE s.user_id = u.id) AS subdomain_count,
-            (SELECT COUNT(*) FROM dns_records d JOIN domains dm ON d.domain_id = dm.id WHERE dm.user_id = u.id) AS dns_count,
-            (SELECT COUNT(*) FROM mailboxes mb WHERE mb.user_id = u.id) AS mailbox_count,
-            (SELECT COUNT(*) FROM messages m JOIN mailboxes mb2 ON m.mailbox_id = mb2.id WHERE mb2.user_id = u.id) AS mail_count
+            u.invite_code_id,
+            ic.code AS invite_code,
+            ic.created_at AS invite_created_at,
+            creator.username AS invite_created_by,
+            EXISTS(SELECT 1 FROM storage_accounts sa WHERE sa.user_id = u.id AND sa.enabled = 1) AS storage_on,
+            EXISTS(SELECT 1 FROM newapi_accounts na WHERE na.user_id = u.id) AS ai_on,
+            EXISTS(SELECT 1 FROM frp_accounts fa WHERE fa.user_id = u.id AND fa.enabled = 1) AS frp_on,
+            EXISTS(SELECT 1 FROM proxy_activation pa WHERE pa.user_id = u.id AND pa.enabled = 1) AS proxy_on,
+            p.published AS profile_published,
+            p.slug AS profile_slug,
+            p.fqdn AS profile_fqdn
        FROM users u
+       LEFT JOIN invite_codes ic ON ic.id = u.invite_code_id
+       LEFT JOIN users creator ON creator.id = ic.created_by
+       LEFT JOIN profiles p ON p.user_id = u.id
       ORDER BY u.created_at DESC`
   ).all()
 
@@ -165,10 +417,19 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
       permissions: parsePermissions(r.permissions as string | null),
       maxSubdomains: (r.max_subdomains as number | null) ?? null,
       createdAt: r.created_at,
-      subdomainCount: r.subdomain_count,
-      dnsCount: r.dns_count,
-      mailboxCount: r.mailbox_count,
-      mailCount: r.mail_count,
+      // 邀请码溯源：老用户没有 invite_code_id（或码已删除），回退为 null
+      inviteCode: (r.invite_code as string | null) ?? null,
+      inviteCreatedBy: (r.invite_created_by as string | null) ?? null,
+      inviteCreatedAt: (r.invite_created_at as string | null) ?? null,
+      // 各模块的实际开通状态（有记录且 enabled=1）
+      storageEnabled: Number(r.storage_on) === 1,
+      aiEnabled: Number(r.ai_on) === 1,
+      frpEnabled: Number(r.frp_on) === 1,
+      proxyEnabled: Number(r.proxy_on) === 1,
+      // 个人名片：未建记录时 published 为 NULL → 视为未启用
+      profileEnabled: Number(r.profile_published) === 1,
+      profileSlug: (r.profile_slug as string | null) ?? null,
+      profileFqdn: (r.profile_fqdn as string | null) ?? null,
     })),
   })
 }
@@ -180,7 +441,7 @@ export async function getUser(env: Env, request: Request, username: string): Pro
   return json(await userDetail(env, user))
 }
 
-// PUT /api/admin/users/:username —— 更新用户状态（封禁/解封/设管理员）
+// PUT /api/admin/users/:username —— 更新用户状态（封禁/解封/设管理员/昵称等）
 export async function updateUser(env: Env, request: Request, username: string): Promise<Response> {
   await requireAdmin(env, request)
   const body = (await request.json()) as {
@@ -189,6 +450,12 @@ export async function updateUser(env: Env, request: Request, username: string): 
     permissions?: unknown
     /** 该用户可创建的一级子域名数量；null 表示恢复为全局默认 */
     maxSubdomains?: number | null
+    /** 展示昵称；null 或空串表示清空 */
+    nickname?: string | null
+    /** 邮箱是否已验证 */
+    emailVerified?: boolean
+    /** 是否接收平台通知邮件 */
+    notifyEnabled?: boolean
   }
 
   const user = await targetUser(env, username)
@@ -239,6 +506,51 @@ export async function updateUser(env: Env, request: Request, username: string): 
   if (quotaUpdate) {
     await env.DB.prepare("UPDATE users SET max_subdomains = ? WHERE id = ?")
       .bind(quotaValue, user.id)
+      .run()
+  }
+
+  // 昵称：null/空串清空；非空则校验格式与占用（复用身份模块的规则，
+  // 与用户自助改名保持一致 —— 管理员也不能绕过「doulor」这类平台保留词）
+  if (body.nickname !== undefined) {
+    const nick = (body.nickname ?? "").trim()
+    if (nick === "") {
+      await env.DB.prepare("UPDATE users SET nickname = NULL, updated_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), user.id)
+        .run()
+    } else {
+      if (!validateNicknameFormat(nick)) {
+        throw new ApiError(400, "昵称为 2-16 位中文/英文/数字/下划线", "INVALID_NICKNAME")
+      }
+      const extra = parseReservedNicknames(await getSetting(env, "reserved_nicknames"))
+      if (isReservedNickname(nick, extra, user.role === "admin")) {
+        throw new ApiError(400, "该昵称包含保留词，请换一个", "NICKNAME_RESERVED")
+      }
+      try {
+        await env.DB.prepare("UPDATE users SET nickname = ?, updated_at = ? WHERE id = ?")
+          .bind(nick, new Date().toISOString(), user.id)
+          .run()
+      } catch {
+        throw new ApiError(409, "该昵称已被占用", "NICKNAME_TAKEN")
+      }
+    }
+  }
+
+  // 邮箱验证 / 通知开关：布尔字段，显式传入才改
+  const flagSets: string[] = []
+  const flagBinds: unknown[] = []
+  if (body.emailVerified !== undefined) {
+    flagSets.push("email_verified = ?")
+    flagBinds.push(body.emailVerified ? 1 : 0)
+  }
+  if (body.notifyEnabled !== undefined) {
+    flagSets.push("notify_enabled = ?")
+    flagBinds.push(body.notifyEnabled ? 1 : 0)
+  }
+  if (flagSets.length > 0) {
+    flagSets.push("updated_at = ?")
+    flagBinds.push(new Date().toISOString(), user.id)
+    await env.DB.prepare(`UPDATE users SET ${flagSets.join(", ")} WHERE id = ?`)
+      .bind(...flagBinds)
       .run()
   }
 
@@ -483,6 +795,21 @@ export async function getNewApiAdminConfig(env: Env, request: Request): Promise<
 }
 
 /**
+ * GET /api/admin/newapi/models —— 中转站当前的全部模型名（供推荐模型编辑器下拉选择）。
+ *
+ * 走公开的 /api/pricing，不需要管理员令牌；失败返回空数组而非报错 ——
+ * 下拉是辅助功能，拿不到时管理员仍可手动输入模型名。
+ */
+export async function listNewApiModels(env: Env, request: Request): Promise<Response> {
+  await requireAdmin(env, request)
+  const pricing = await listPricing(env)
+  const models = [...new Set(pricing.map((p) => p.model))].sort((a, b) =>
+    a.localeCompare(b)
+  )
+  return json({ models })
+}
+
+/**
  * PUT /api/admin/newapi/config —— 更新中转站管理员凭据。
  *
  * body: { token?: string; adminUserId?: string }
@@ -658,6 +985,24 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
       continue
     }
 
+    // newapi_recommended_models：推荐模型分档。允许传数组（前端直接传对象）
+    // 或 JSON 字符串；统一走 sanitizeRecommendedModels 清洗后序列化。
+    // 必须排在下面的 `str === ""` 与通用 `str.slice(0,100)` 之前：
+    //  - 传空数组 [] 时 String([]) === ""，会被当成「空值跳过」，导致清空不掉；
+    //  - 传 JSON 字符串会被截断成无效串。
+    if (key === "newapi_recommended_models") {
+      let parsed: unknown = raw
+      if (typeof raw === "string") {
+        try {
+          parsed = JSON.parse(raw)
+        } catch {
+          throw new ApiError(400, "推荐模型格式不是合法 JSON", "INVALID_INPUT")
+        }
+      }
+      values[key] = JSON.stringify(sanitizeRecommendedModels(parsed))
+      continue
+    }
+
     // 以下两个「逗号分隔模块名」的设置必须排在 `str === "" continue` 之前：
     // 前端在「全部关掉」时正好发送空串，若被当成空值跳过，就永远清不掉
     // （表现为：把开关全关掉、点保存，刷新后开关又自己弹回来了）。
@@ -704,6 +1049,38 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
         throw new ApiError(400, `设置项 ${key} 需要非负数值`, "INVALID_INPUT")
       }
       values[key] = String(Math.trunc(n))
+      continue
+    }
+
+    // wb2api_max_bindings：每人可绑定的反代账号数，必须 ≥ 1
+    // （不能走上面的通用数值分支：0 会让通道彻底不可用，且通用分支允许 0）
+    if (key === "wb2api_max_bindings") {
+      const n = Number(str)
+      if (!Number.isFinite(n) || n < 1) {
+        throw new ApiError(400, "每人可绑定上限至少为 1", "INVALID_INPUT")
+      }
+      values[key] = String(Math.trunc(n))
+      continue
+    }
+
+    // wb2api_base_url：网关地址。必须是 http(s) 绝对地址。
+    // 留空 = 用内置默认值 —— 空串已在上面 `str === "" continue` 处跳过，
+    // 即「提交空串」等价于不修改本项（前端也提示了「留空则用内置默认值」）。
+    if (key === "wb2api_base_url") {
+      if (!/^https?:\/\//i.test(str)) {
+        throw new ApiError(400, "网关地址需以 http(s):// 开头", "INVALID_INPUT")
+      }
+      values[key] = str.replace(/\/+$/, "").slice(0, 200)
+      continue
+    }
+
+    // wb2api_realm：反代网关对接的域，只允许 cn（国内版）或 global（国际版）。
+    if (key === "wb2api_realm") {
+      const v = str.toLowerCase()
+      if (v !== "cn" && v !== "global") {
+        throw new ApiError(400, "反代域只支持 cn 或 global", "INVALID_INPUT")
+      }
+      values[key] = v
       continue
     }
 

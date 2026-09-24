@@ -26,6 +26,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
+import { fmtMailTime } from "@/lib/format"
 import { emailApi, HttpError } from "@/services/api"
 import type { Mailbox, MailMessage } from "@/types"
 
@@ -34,16 +35,6 @@ import type { Mailbox, MailMessage } from "@/types"
 const FALLBACK_MAILBOX_LIMIT = 3
 /** 后端表示「不限」的哨兵值 */
 const UNLIMITED_LIMIT = 999999
-
-function fmtTime(iso: string) {
-  const d = new Date(iso)
-  const today = new Date()
-  const sameDay = d.toDateString() === today.toDateString()
-  if (sameDay) {
-    return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
-  }
-  return d.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })
-}
 
 type View = "list" | "message"
 
@@ -496,7 +487,7 @@ export default function EmailPage() {
                         </p>
                       </div>
                       <span className="shrink-0 text-xs text-muted-foreground">
-                        {fmtTime(m.receivedAt)}
+                        {fmtMailTime(m.receivedAt)}
                       </span>
                     </button>
                   ))

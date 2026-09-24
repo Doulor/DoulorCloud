@@ -104,6 +104,25 @@ export default {
       copy.headers.set("Access-Control-Allow-Origin", "*")
     }
 
+    // 缓存策略（关键）：
+    //   - HTML（index.html 与 SPA 兜底的任何前端路由）→ 永不缓存。
+    //     这是 SPA 部署后「旧入口引用已删除的旧 chunk」报
+    //     「Failed to fetch dynamically imported module」的根因：
+    //     若 index.html 被浏览器/边缘缓存，部署新版本后用户仍拿到旧入口，
+    //     去请求已被新构建替换掉（hash 变化）的旧 JS → 404。
+    //   - 带 hash 的静态资源（/assets/*.js|css|woff2|png、字体、favicon）
+    //     → 长期缓存，文件名带内容 hash，内容变了名字就变，永不冲突。
+    const isStaticAsset =
+      url.pathname.startsWith("/assets/") ||
+      url.pathname.startsWith("/fonts/") ||
+      url.pathname === "/favicon.png"
+    if (!isStaticAsset) {
+      copy.headers.set("Cache-Control", "no-cache, no-store, must-revalidate")
+      copy.headers.set("Pragma", "no-cache")
+    } else {
+      copy.headers.set("Cache-Control", "public, max-age=31536000, immutable")
+    }
+
     return copy
   },
 }

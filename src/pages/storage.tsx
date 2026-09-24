@@ -41,6 +41,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { storageApi, HttpError } from "@/services/api"
+import { formatBytes, fmtTime } from "@/lib/format"
 import type { StorageObject, StorageOverview } from "@/types"
 /**
  * 网盘「使用协议」。版本须与后端 STORAGE_CONSENT_VERSION 一致。
@@ -77,30 +78,7 @@ const STORAGE_AGREEMENT = [
 ]
 
 
-/** 与 Worker 端 settings.ts 的 formatBytes 保持一致的展示逻辑 */
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  const units = ["KB", "MB", "GB", "TB"]
-  let value = bytes / 1024
-  let i = 0
-  while (value >= 1024 && i < units.length - 1) {
-    value /= 1024
-    i++
-  }
-  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[i]}`
-}
-
-function fmtTime(iso: string | null) {
-  if (!iso) return "—"
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return "—"
-  return d.toLocaleString("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  })
-}
+/** 与 Worker 端 settings.ts 的 formatBytes 保持一致的展示逻辑（实现见 @/lib/format） */
 
 /**
  * 上传中的进度状态。
@@ -127,6 +105,9 @@ export default function StoragePage() {
   const [domainOpen, setDomainOpen] = React.useState(false)
   const [selectedSub, setSelectedSub] = React.useState("")
   const fileInputRef = React.useRef<HTMLInputElement>(null)
+  // 分页：后端每次最多返回 200 个对象并带一个 cursor，接上它才能看到第 201 个之后的文件
+  const [cursor, setCursor] = React.useState<string | null>(null)
+  const [loadingMore, setLoadingMore] = React.useState(false)
 
   /** 拉取概览与文件列表；silent 用于上传/删除后刷新，避免整页 loading 闪烁 */
   // 无权限（403 FEATURE_NOT_PERMITTED）：整页显示提示 + 捐献入口
@@ -140,8 +121,10 @@ export default function StoragePage() {
       if (res.account) {
         const list = await storageApi.list()
         setObjects(list.objects)
+        setCursor(list.truncated ? list.cursor : null)
       } else {
         setObjects([])
+        setCursor(null)
       }
     } catch (err) {
       if (err instanceof HttpError && err.code === "FEATURE_NOT_PERMITTED") {
@@ -153,6 +136,27 @@ export default function StoragePage() {
       if (!silent) setLoading(false)
     }
   }, [])
+
+  /** 追加下一页。按 key 去重，因为翻页期间可能有新文件被上传。 */
+  const loadMore = async () => {
+    if (!cursor || loadingMore) return
+    setLoadingMore(true)
+    try {
+      const res = await storageApi.list(cursor)
+      setObjects((prev) => {
+        const seen = new Set(prev.map((o) => o.key))
+        return [...prev, ...res.objects.filter((o) => !seen.has(o.key))]
+      })
+      setCursor(res.truncated ? res.cursor : null)
+      setOverview((prev) =>
+        prev ? { ...prev, usedBytes: res.usedBytes, quotaBytes: res.quotaBytes } : prev
+      )
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "加载更多失败")
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   React.useEffect(() => {
     void load()
@@ -805,67 +809,88 @@ export default function StoragePage() {
                 description="上传第一个文件后，这里会显示直链。"
               />
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>文件名</TableHead>
-                    <TableHead>大小</TableHead>
-                    <TableHead>上传时间</TableHead>
-                    <TableHead className="w-32" />
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {objects.map((o) => {
-                    const link = directLinkFor(o.filename)
-                    return (
-                      <TableRow key={o.key}>
-                        <TableCell className="max-w-xs truncate font-mono text-xs">
-                          {o.filename}
-                        </TableCell>
-                        <TableCell className="text-sm">
-                          {formatBytes(o.size)}
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {fmtTime(o.lastModified)}
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex items-center gap-1">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-muted-foreground"
-                              onClick={() => void copyText(link)}
-                              title="复制直链"
-                            >
-                              <Copy className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-muted-foreground"
-                              asChild
-                              title="打开直链"
-                            >
-                              <a href={link} target="_blank" rel="noreferrer">
-                                <ExternalLink className="h-4 w-4" />
-                              </a>
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                              onClick={() => void handleDelete(o)}
-                              title="删除"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    )
-                  })}
-                </TableBody>
-              </Table>
+              <>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>文件名</TableHead>
+                      <TableHead>大小</TableHead>
+                      <TableHead>上传时间</TableHead>
+                      <TableHead className="w-32" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {objects.map((o) => {
+                      const link = directLinkFor(o.filename)
+                      return (
+                        <TableRow key={o.key}>
+                          <TableCell className="max-w-xs truncate font-mono text-xs">
+                            {o.filename}
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {formatBytes(o.size)}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {fmtTime(o.lastModified)}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground"
+                                onClick={() => void copyText(link)}
+                                title="复制直链"
+                              >
+                                <Copy className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground"
+                                asChild
+                                title="打开直链"
+                              >
+                                <a href={link} target="_blank" rel="noreferrer">
+                                  <ExternalLink className="h-4 w-4" />
+                                </a>
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                onClick={() => void handleDelete(o)}
+                                title="删除"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+                {cursor && (
+                  <div className="mt-3 flex justify-center">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void loadMore()}
+                      disabled={loadingMore}
+                    >
+                      {loadingMore ? (
+                        <>
+                          <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                          加载中…
+                        </>
+                      ) : (
+                        "加载更多"
+                      )}
+                    </Button>
+                  </div>
+                )}
+              </>
             )}
           </CardContent>
         </Card>

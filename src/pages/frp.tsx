@@ -53,19 +53,8 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { frpApi, HttpError } from "@/services/api"
+import { fmtTime } from "@/lib/format"
 import type { FrpApplication, FrpNode, FrpOverview, FrpTunnel } from "@/types"
-
-function fmtTime(iso: string | null) {
-  if (!iso) return "—"
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return "—"
-  return d.toLocaleString("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  })
-}
 
 const STATUS_BADGE: Record<
   FrpApplication["status"],

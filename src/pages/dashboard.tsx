@@ -50,8 +50,17 @@ import {
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Markdown } from "@/components/markdown"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
-import { authApi, newapiApi, profileApi, announcementApi } from "@/services/api"
+import { formatBytesShort } from "@/lib/format"
+import { authApi, newapiApi, profileApi, announcementApi, errMsg } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 import type {
   Announcement,
@@ -61,14 +70,6 @@ import type {
 } from "@/types"
 
 const NEWAPI_BASE_URL = "https://api.doulor.cn/v1"
-
-function formatBytes(n: number) {
-  if (!n) return "0 B"
-  if (n >= 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`
-  if (n >= 1024 * 1024) return `${Math.round(n / 1024 / 1024)} MB`
-  if (n >= 1024) return `${Math.round(n / 1024)} KB`
-  return `${n} B`
-}
 
 function useCopy() {
   const [copied, setCopied] = React.useState<string | null>(null)
@@ -96,7 +97,9 @@ function AiCard() {
     newapiApi
       .status()
       .then((res: NewApiStatus) => !cancelled && setStatus(res))
-      .catch(() => {})
+      .catch((err) => {
+        if (!cancelled) toast.error(errMsg(err, "AI 服务状态加载失败"))
+      })
       .finally(() => !cancelled && setLoading(false))
     return () => {
       cancelled = true
@@ -195,7 +198,9 @@ function ProfileCard({ compact = false }: { compact?: boolean }) {
     profileApi
       .get()
       .then((res) => !cancelled && setData(res))
-      .catch(() => {})
+      .catch((err) => {
+        if (!cancelled) toast.error(errMsg(err, "个人名片加载失败"))
+      })
       .finally(() => !cancelled && setLoading(false))
     return () => {
       cancelled = true
@@ -390,9 +395,9 @@ function StorageCard({ data, loading }: { data: MeResponse | null; loading: bool
           <>
             <div className="space-y-2">
               <div className="flex items-center justify-between text-sm">
-                <span className="font-medium">{formatBytes(used)}</span>
+                <span className="font-medium">{formatBytesShort(used)}</span>
                 <span className="text-muted-foreground">
-                  / {unlimited ? "不限（管理员）" : formatBytes(quota)}
+                  / {unlimited ? "不限（管理员）" : formatBytesShort(quota)}
                 </span>
               </div>
               {!unlimited && (
@@ -416,7 +421,7 @@ function StorageCard({ data, loading }: { data: MeResponse | null; loading: bool
                       <span className="truncate font-mono text-xs">{f.filename}</span>
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-muted-foreground">
-                          {formatBytes(f.size)}
+                          {formatBytesShort(f.size)}
                         </span>
                         <Button
                           variant="ghost"
@@ -444,6 +449,77 @@ function StorageCard({ data, loading }: { data: MeResponse | null; loading: bool
   )
 }
 
+/**
+ * 公告弹窗：根据公告的 popup_mode 决定是否弹、怎么弹。
+ *
+ * 记忆策略（存 localStorage，不落库）：
+ *   - once 模式：关闭后记录「已看过」，不再弹
+ *   - every 模式：每次进入都弹，但用户可点「不再显示」永久屏蔽
+ * localStorage 键：doulor:ann-seen:<id>（已看/已屏蔽）
+ */
+function AnnouncementPopup() {
+  const [popup, setPopup] = React.useState<Announcement | null>(null)
+
+  React.useEffect(() => {
+    let cancelled = false
+    announcementApi
+      .list()
+      .then((res) => {
+        if (cancelled) return
+        // 找第一个需要弹的公告
+        const target = res.announcements.find((a) => {
+          if (a.popupMode === "none") return false
+          const seen = localStorage.getItem(`doulor:ann-seen:${a.id}`)
+          return !seen
+        })
+        if (target) setPopup(target)
+      })
+      .catch(() => {
+        /* 弹窗加载失败静默，不影响概览 */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (!popup) return null
+
+  const close = (permanent = false) => {
+    if (permanent || popup.popupMode === "once") {
+      // 「不再显示」或 once 关闭 → 记录已看，永不再弹
+      localStorage.setItem(`doulor:ann-seen:${popup.id}`, "1")
+    }
+    // every 模式的普通关闭：不记录，下次进入还会弹
+    setPopup(null)
+  }
+
+  return (
+    <Dialog open={true} onOpenChange={(o) => !o && close(false)}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{popup.title}</DialogTitle>
+        </DialogHeader>
+        <div className="max-h-72 overflow-y-auto">
+          <Markdown>{popup.body}</Markdown>
+        </div>
+        <DialogFooter className="flex-col gap-2 sm:flex-row sm:justify-between">
+          {popup.popupMode === "every" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => close(true)}
+              className="text-muted-foreground"
+            >
+              不再显示
+            </Button>
+          )}
+          <Button onClick={() => close(false)}>知道了</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /** 网站动态卡：公告列表 */
 function AnnouncementsCard() {
   const [items, setItems] = React.useState<Announcement[]>([])
@@ -454,7 +530,9 @@ function AnnouncementsCard() {
     announcementApi
       .list()
       .then((res) => !cancelled && setItems(res.announcements))
-      .catch(() => {})
+      .catch((err) => {
+        if (!cancelled) toast.error(errMsg(err, "公告加载失败"))
+      })
       .finally(() => !cancelled && setLoading(false))
     return () => {
       cancelled = true
@@ -860,7 +938,9 @@ export default function DashboardPage() {
     authApi
       .me()
       .then((res) => !cancelled && setData(res))
-      .catch(() => {})
+      .catch((err) => {
+        if (!cancelled) toast.error(errMsg(err, "账号信息加载失败"))
+      })
       .finally(() => !cancelled && setLoading(false))
     return () => {
       cancelled = true
@@ -925,6 +1005,7 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
+      <AnnouncementPopup />
       <PageHeader
         title={`欢迎回来，${user?.username ?? ""}`}
         description={`${user?.namespace}.doulor.cn`}

@@ -10,6 +10,8 @@ import * as storageHandlers from "./handlers/storage"
 import * as newapiHandlers from "./handlers/newapi"
 import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
+import * as voucherHandlers from "./handlers/vouchers"
+import * as wb2apiHandlers from "./handlers/wb2api"
 import * as myInviteHandlers from "./handlers/my-invites"
 import * as frpHandlers from "./handlers/frp"
 import * as profileHandlers from "./handlers/profile"
@@ -20,6 +22,9 @@ import * as announcementHandlers from "./handlers/announcements"
 import * as r2AdminHandlers from "./handlers/r2-admin"
 import * as achievementHandlers from "./handlers/achievements"
 import * as communityHandlers from "./handlers/community"
+import * as analyticsHandlers from "./handlers/analytics"
+import * as chatHandlers from "./handlers/chat"
+import * as oauthHandlers from "./handlers/oauth"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
 import { runMaintenance } from "./maintenance"
@@ -27,6 +32,1679 @@ import { runMaintenance } from "./maintenance"
 export interface WorkerContext {
   env: Env
   request: Request
+}
+
+/**
+ * 路由表：一个条目 = 一条接口。
+ *
+ * 顺序即匹配优先级，跟原来 if-chain 的书写顺序一一对应 —— 冲突的路径
+ * （如 /community/posts/<id>/comments 必须排在 /community/posts/<id> 前）靠顺序保证。
+ * 新接口追加到对应分组末尾即可，不用再在 800 行的 if-chain 里找位置。
+ *
+ * 表由 buildRoutes() 返回，因为闭包要捕获 env / request / ctx。
+ */
+type Handler<T> = (m: T) => Response | Promise<Response>
+
+type RouteRule =
+  | { kind: "exact"; path: string; method: string; handle: Handler<void> }
+  | {
+      kind: "regex"
+      match: (p: string) => RegExpMatchArray | null
+      methods: string[]
+      handle: Handler<RegExpMatchArray>
+    }
+  | {
+      kind: "branch"
+      match: (p: string) => RegExpMatchArray | null
+      handle: (m: RegExpMatchArray, method: string) => Response | Promise<Response> | null
+    }
+
+function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteRule[] {
+  return [
+  {
+    kind: "exact",
+    path: "/register",
+    method: "POST",
+    handle: () =>
+      authHandlers.register(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/login",
+    method: "POST",
+    handle: () =>
+      authHandlers.login(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/logout",
+    method: "POST",
+    handle: () =>
+      authHandlers.logout(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/me",
+    method: "GET",
+    handle: () =>
+      authHandlers.me(env, request, ctx),
+  },
+
+  {
+    kind: "exact",
+    path: "/password",
+    method: "PUT",
+    handle: () =>
+      authHandlers.changePassword(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/settings/email",
+    method: "GET",
+    handle: () =>
+      settingsHandlers.getEmailSettings(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/settings/email/verify",
+    method: "POST",
+    handle: () =>
+      settingsHandlers.verifyRealEmail(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/settings/email",
+    method: "PUT",
+    handle: () =>
+      settingsHandlers.changeRealEmail(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/settings/notify",
+    method: "PUT",
+    handle: () =>
+      settingsHandlers.updateNotifySetting(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/settings/username",
+    method: "PUT",
+    handle: () =>
+      settingsHandlers.changeUsername(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/settings/nickname",
+    method: "PUT",
+    handle: () =>
+      identityHandlers.updateNickname(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/settings/avatar",
+    method: "POST",
+    handle: () =>
+      identityHandlers.uploadAvatar(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/settings/avatar",
+    method: "DELETE",
+    handle: () =>
+      identityHandlers.deleteAvatar(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dns",
+    method: "GET",
+    handle: () =>
+      dnsHandlers.listDns(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dns",
+    method: "POST",
+    handle: () =>
+      dnsHandlers.createDns(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/dns\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (dnsMatch: RegExpMatchArray) =>
+      dnsHandlers.updateDns(env, request, decodeURIComponent(dnsMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/dns\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (dnsMatch: RegExpMatchArray) =>
+      dnsHandlers.deleteDns(env, request, decodeURIComponent(dnsMatch[1])),
+  },
+
+  {
+    kind: "exact",
+    path: "/subdomains",
+    method: "GET",
+    handle: () =>
+      subdomainHandlers.listSubdomains(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/subdomains",
+    method: "POST",
+    handle: () =>
+      subdomainHandlers.createSubdomain(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/subdomains\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (subdomainMatch: RegExpMatchArray) =>
+      subdomainHandlers.deleteSubdomain(env, request, decodeURIComponent(subdomainMatch[1])),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/users",
+    method: "GET",
+    handle: () =>
+      adminHandlers.listUsers(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/users\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (adminUserMatch: RegExpMatchArray) =>
+      adminHandlers.getUser(env, request, decodeURIComponent(adminUserMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/users\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (adminUserMatch: RegExpMatchArray) =>
+      adminHandlers.updateUser(env, request, decodeURIComponent(adminUserMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/users\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (adminUserMatch: RegExpMatchArray) =>
+      adminHandlers.deleteUser(env, request, decodeURIComponent(adminUserMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/users\/([^/]+)\/messages\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (adminMessageMatch: RegExpMatchArray) =>
+      adminHandlers.getUserMessage(
+      env,
+      request,
+      decodeURIComponent(adminMessageMatch[1]),
+      decodeURIComponent(adminMessageMatch[2])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/invites",
+    method: "GET",
+    handle: () =>
+      adminHandlers.listInvites(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/invites",
+    method: "POST",
+    handle: () =>
+      adminHandlers.createInvite(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/invites\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (adminInviteMatch: RegExpMatchArray) =>
+      adminHandlers.updateInvite(env, request, decodeURIComponent(adminInviteMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/invites\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (adminInviteMatch: RegExpMatchArray) =>
+      
+      
+      adminHandlers.adminDeleteInviteWithRefund(
+      env,
+      request,
+      decodeURIComponent(adminInviteMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/my-invites",
+    method: "GET",
+    handle: () =>
+      myInviteHandlers.listMyInvites(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/my-invites",
+    method: "POST",
+    handle: () =>
+      myInviteHandlers.createMyInvite(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/my-invites\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (myInviteMatch: RegExpMatchArray) =>
+      myInviteHandlers.deleteMyInvite(
+      env,
+      request,
+      decodeURIComponent(myInviteMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/donations",
+    method: "GET",
+    handle: () =>
+      donationHandlers.listAllDonations(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/donations/review",
+    method: "POST",
+    handle: () =>
+      donationHandlers.reviewDonation(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/donations\/([^/]+)\/revoke$/),
+    methods: ["POST"],
+    handle: (donationMatch: RegExpMatchArray) =>
+      donationHandlers.revokeDonation(env, request, decodeURIComponent(donationMatch[1])),
+  },
+
+  // 人工复核：重试把 AI 捐献的渠道接进中转站
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/donations\/([^/]+)\/provision$/),
+    methods: ["POST"],
+    handle: (donationMatch: RegExpMatchArray) =>
+      donationHandlers.provisionDonation(env, request, decodeURIComponent(donationMatch[1])),
+  },
+
+  // ---- 管理端：WorkBuddy 反代账号捐献 ----
+  {
+    kind: "exact",
+    path: "/admin/wb2api/bindings",
+    method: "GET",
+    handle: () =>
+      wb2apiHandlers.adminListBindings(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/wb2api\/bindings\/([^/]+)\/remove$/),
+    methods: ["POST"],
+    handle: (wb2apiRemoveMatch: RegExpMatchArray) =>
+      wb2apiHandlers.adminRemoveBinding(
+        env,
+        request,
+        decodeURIComponent(wb2apiRemoveMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/wb2api/config",
+    method: "GET",
+    handle: () =>
+      wb2apiHandlers.adminGetConfig(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/wb2api/config",
+    method: "PUT",
+    handle: () =>
+      wb2apiHandlers.adminUpdateConfig(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/wb2api/pool",
+    method: "GET",
+    handle: () =>
+      wb2apiHandlers.adminGetPool(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/invite-quotas",
+    method: "GET",
+    handle: () =>
+      adminHandlers.listInviteQuotas(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(
+    /^\/admin\/users\/([^/]+)\/invite-quota$/
+  ),
+    methods: ["GET"],
+    handle: (quotaUserMatch: RegExpMatchArray) =>
+      adminHandlers.getUserInviteQuota(
+      env,
+      request,
+      decodeURIComponent(quotaUserMatch[1])
+      ),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(
+    /^\/admin\/users\/([^/]+)\/invite-quota$/
+  ),
+    methods: ["PUT"],
+    handle: (quotaUserMatch: RegExpMatchArray) =>
+      adminHandlers.updateUserInviteQuota(
+      env,
+      request,
+      decodeURIComponent(quotaUserMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/reserved-subdomains",
+    method: "GET",
+    handle: () =>
+      adminHandlers.listReserved(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/reserved-subdomains",
+    method: "POST",
+    handle: () =>
+      adminHandlers.addReserved(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/reserved-subdomains\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (reservedMatch: RegExpMatchArray) =>
+      adminHandlers.removeReserved(
+      env,
+      request,
+      decodeURIComponent(reservedMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/mail-test",
+    method: "POST",
+    handle: () =>
+      adminHandlers.testMail(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/newapi-test",
+    method: "GET",
+    handle: () =>
+      adminHandlers.testNewApi(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/newapi/config",
+    method: "GET",
+    handle: () =>
+      adminHandlers.getNewApiAdminConfig(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/newapi/config",
+    method: "PUT",
+    handle: () =>
+      adminHandlers.updateNewApiAdminConfig(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/newapi/models",
+    method: "GET",
+    handle: () =>
+      adminHandlers.listNewApiModels(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/newapi/sync-permissions",
+    method: "POST",
+    handle: () =>
+      newapiHandlers.adminSyncPermissions(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/analytics/track",
+    method: "POST",
+    handle: () =>
+      analyticsHandlers.track(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/analytics",
+    method: "GET",
+    handle: () =>
+      analyticsHandlers.overview(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/mail-status",
+    method: "GET",
+    handle: () =>
+      adminHandlers.mailStatus(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/announcements",
+    method: "GET",
+    handle: () =>
+      announcementHandlers.listAnnouncements(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/achievements",
+    method: "GET",
+    handle: () =>
+      achievementHandlers.getAchievements(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/announcements",
+    method: "GET",
+    handle: () =>
+      announcementHandlers.listAllAnnouncements(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/announcements",
+    method: "POST",
+    handle: () =>
+      announcementHandlers.createAnnouncement(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/announcements\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (announcementMatch: RegExpMatchArray) =>
+      announcementHandlers.updateAnnouncement(
+      env,
+      request,
+      decodeURIComponent(announcementMatch[1])
+      ),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/announcements\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (announcementMatch: RegExpMatchArray) =>
+      announcementHandlers.deleteAnnouncement(
+      env,
+      request,
+      decodeURIComponent(announcementMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/r2/buckets",
+    method: "GET",
+    handle: () =>
+      r2AdminHandlers.listR2Buckets(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/r2/discover",
+    method: "GET",
+    handle: () =>
+      r2AdminHandlers.discoverBuckets(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/r2/buckets",
+    method: "POST",
+    handle: () =>
+      r2AdminHandlers.createR2Bucket(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/r2/assign",
+    method: "PUT",
+    handle: () =>
+      r2AdminHandlers.assignUserBucket(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/r2/assign-all",
+    method: "PUT",
+    handle: () =>
+      r2AdminHandlers.assignAllUnassigned(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/r2\/buckets\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (r2BucketMatch: RegExpMatchArray) =>
+      r2AdminHandlers.updateR2Bucket(
+      env,
+      request,
+      decodeURIComponent(r2BucketMatch[1])
+      ),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/r2\/buckets\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (r2BucketMatch: RegExpMatchArray) =>
+      r2AdminHandlers.deleteR2Bucket(
+      env,
+      request,
+      decodeURIComponent(r2BucketMatch[1])
+      ),
+  },
+
+  {
+    kind: "branch",
+    match: (routePath: string) => routePath.match(
+    /^\/admin\/r2\/buckets\/([^/]+)\/(test|write-test|operations)$/
+  ),
+    handle: (r2BucketActionMatch: RegExpMatchArray, method: string) => {
+      const bucketId = decodeURIComponent(r2BucketActionMatch[1])
+      const action = r2BucketActionMatch[2]
+      if (action === "test" && method === "POST") {
+        return r2AdminHandlers.testR2Bucket(env, request, bucketId)
+      }
+      else if (action === "write-test" && method === "POST") {
+        return r2AdminHandlers.writeTestR2Bucket(env, request, bucketId)
+      }
+      else if (action === "operations" && method === "GET") {
+        return r2AdminHandlers.getR2Operations(env, request, bucketId)
+      }
+      return null
+    },
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/settings",
+    method: "GET",
+    handle: () =>
+      adminHandlers.getSettingsHandler(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/settings",
+    method: "PUT",
+    handle: () =>
+      adminHandlers.updateSettingsHandler(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/community/posts",
+    method: "GET",
+    handle: () =>
+      adminHandlers.adminListPosts(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/community\/posts\/([^/]+)\/restore$/),
+    methods: ["POST"],
+    handle: (adminCommunityRestoreMatch: RegExpMatchArray) =>
+      adminHandlers.adminRestorePost(env, request, decodeURIComponent(adminCommunityRestoreMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/community\/posts\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (adminCommunityPostMatch: RegExpMatchArray) =>
+      adminHandlers.adminDeletePost(env, request, decodeURIComponent(adminCommunityPostMatch[1])),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/storage/recalculate",
+    method: "POST",
+    handle: () =>
+      adminHandlers.recalculateStorage(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/storage\/purge\/([^/]+)$/),
+    methods: ["POST"],
+    handle: (adminPurgeMatch: RegExpMatchArray) =>
+      adminHandlers.purgeStorage(
+      env,
+      request,
+      decodeURIComponent(adminPurgeMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/mailbox",
+    method: "GET",
+    handle: () =>
+      emailHandlers.listMailboxes(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/mailbox",
+    method: "POST",
+    handle: () =>
+      emailHandlers.createMailbox(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (mailboxMatch: RegExpMatchArray) =>
+      emailHandlers.updateMailbox(env, request, decodeURIComponent(mailboxMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (mailboxMatch: RegExpMatchArray) =>
+      emailHandlers.deleteMailbox(env, request, decodeURIComponent(mailboxMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)\/messages$/),
+    methods: ["GET"],
+    handle: (mailboxMessagesMatch: RegExpMatchArray) =>
+      emailHandlers.listMessages(env, request, decodeURIComponent(mailboxMessagesMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (messageMatch: RegExpMatchArray) =>
+      emailHandlers.getMessage(
+      env,
+      request,
+      decodeURIComponent(messageMatch[1]),
+      decodeURIComponent(messageMatch[2])
+      ),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (messageMatch: RegExpMatchArray) =>
+      emailHandlers.deleteMessage(
+      env,
+      request,
+      decodeURIComponent(messageMatch[1]),
+      decodeURIComponent(messageMatch[2])
+      ),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)\/read$/),
+    methods: ["POST"],
+    handle: (messageReadMatch: RegExpMatchArray) =>
+      emailHandlers.markMessage(
+      env,
+      request,
+      decodeURIComponent(messageReadMatch[1]),
+      decodeURIComponent(messageReadMatch[2])
+      ),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)\/reply$/),
+    methods: ["POST"],
+    handle: (messageReplyMatch: RegExpMatchArray) =>
+      emailHandlers.replyMessage(
+      env,
+      request,
+      decodeURIComponent(messageReplyMatch[1]),
+      decodeURIComponent(messageReplyMatch[2])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/mailbox/read-all",
+    method: "POST",
+    handle: () =>
+      emailHandlers.markAllRead(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/donations",
+    method: "GET",
+    handle: () =>
+      donationHandlers.listDonations(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/donations",
+    method: "POST",
+    handle: () =>
+      donationHandlers.createDonation(env, request),
+  },
+
+  // 探测上游取模型列表（AI 渠道捐献：自动获取模型让用户勾选）
+  // 必须排在下面的 /donations/:id 正则之前 —— 虽然 `[^/]+` 匹配不到两段路径，
+  // 但保持「更具体的在前」这条约定，避免以后把正则放宽时被吃掉。
+  {
+    kind: "exact",
+    path: "/donations/ai/probe",
+    method: "POST",
+    handle: () =>
+      donationHandlers.probeAiUpstream(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/donations\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (donationMatch: RegExpMatchArray) =>
+      donationHandlers.cancelDonation(env, request, decodeURIComponent(donationMatch[1])),
+  },
+
+  // ---- 权限兑换码（首捐奖励券 / 用邀请码补权限）----
+  {
+    kind: "exact",
+    path: "/vouchers",
+    method: "GET",
+    handle: () =>
+      voucherHandlers.listMyVouchers(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/vouchers/redeem",
+    method: "POST",
+    handle: () =>
+      voucherHandlers.redeem(env, request),
+  },
+
+  // ---- WorkBuddy 反代账号捐献（登录即解锁 AI 权限，免审核）----
+  {
+    kind: "exact",
+    path: "/wb2api/status",
+    method: "GET",
+    handle: () =>
+      wb2apiHandlers.getStatus(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/wb2api/login/start",
+    method: "POST",
+    handle: () =>
+      wb2apiHandlers.loginStart(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/wb2api/login/poll",
+    method: "GET",
+    handle: () =>
+      wb2apiHandlers.loginPoll(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/profile",
+    method: "GET",
+    handle: () =>
+      profileHandlers.getProfile(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/profile/enable",
+    method: "POST",
+    handle: () =>
+      profileHandlers.enableProfile(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/profile",
+    method: "PUT",
+    handle: () =>
+      profileHandlers.updateProfile(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/profile/preview",
+    method: "POST",
+    handle: () =>
+      profileHandlers.previewProfile(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/profile/publish",
+    method: "POST",
+    handle: () =>
+      profileHandlers.setPublished(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/profile/asset",
+    method: "POST",
+    handle: () =>
+      profileHandlers.uploadAsset(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/profile/asset",
+    method: "DELETE",
+    handle: () =>
+      profileHandlers.deleteAsset(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/profile/asset",
+    method: "GET",
+    handle: () =>
+      profileHandlers.readOwnAsset(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/profile/domain",
+    method: "POST",
+    handle: () =>
+      profileHandlers.bindProfileDomain(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/community/config",
+    method: "GET",
+    handle: () =>
+      communityHandlers.communityConfig(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/community/new-posts-count",
+    method: "GET",
+    handle: () =>
+      communityHandlers.newPostsCount(env, request),
+  },
+  // 标记「我刚打开过社区」，用于把新帖角标清零
+  {
+    kind: "exact",
+    path: "/community/seen",
+    method: "POST",
+    handle: () =>
+      communityHandlers.markCommunitySeen(env, request),
+  },
+
+  // ---- 公共聊天室 ----
+  {
+    kind: "exact",
+    path: "/chat/messages",
+    method: "GET",
+    handle: () =>
+      chatHandlers.listMessages(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/chat/messages",
+    method: "POST",
+    handle: () =>
+      chatHandlers.sendMessage(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/chat/heartbeat",
+    method: "POST",
+    handle: () =>
+      chatHandlers.heartbeat(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/chat/presence",
+    method: "GET",
+    handle: () =>
+      chatHandlers.presence(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/community/posts",
+    method: "GET",
+    handle: () =>
+      communityHandlers.listPosts(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/community/stats",
+    method: "GET",
+    handle: () =>
+      communityHandlers.communityStats(env, request, ctx),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)\/comments$/),
+    methods: ["GET"],
+    handle: (communityCommentsMatch: RegExpMatchArray) =>
+      communityHandlers.listComments(env, request, decodeURIComponent(communityCommentsMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (communityPostMatch: RegExpMatchArray) =>
+      communityHandlers.getPost(env, request, decodeURIComponent(communityPostMatch[1])),
+  },
+
+  {
+    kind: "exact",
+    path: "/community/posts",
+    method: "POST",
+    handle: () =>
+      communityHandlers.createPost(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)\/like$/),
+    methods: ["POST"],
+    handle: (communityLikeMatch: RegExpMatchArray) =>
+      communityHandlers.toggleLike(env, request, decodeURIComponent(communityLikeMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)\/share$/),
+    methods: ["POST"],
+    handle: (communityShareMatch: RegExpMatchArray) =>
+      communityHandlers.sharePost(env, request, decodeURIComponent(communityShareMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (communityPostMatch: RegExpMatchArray) =>
+      communityHandlers.deletePost(env, request, decodeURIComponent(communityPostMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (communityPostMatch: RegExpMatchArray) =>
+      communityHandlers.updatePost(env, request, decodeURIComponent(communityPostMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)\/edits$/),
+    methods: ["GET"],
+    handle: (communityPostMatch: RegExpMatchArray) =>
+      communityHandlers.listPostEdits(env, request, decodeURIComponent(communityPostMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)\/comments$/),
+    methods: ["POST"],
+    handle: (communityCommentsMatch: RegExpMatchArray) =>
+      communityHandlers.createComment(env, request, decodeURIComponent(communityCommentsMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)\/images$/),
+    methods: ["POST"],
+    handle: (communityImageMatch: RegExpMatchArray) =>
+      communityHandlers.uploadPostImage(env, request, decodeURIComponent(communityImageMatch[1])),
+  },
+
+  {
+    kind: "exact",
+    path: "/notifications",
+    method: "GET",
+    handle: () =>
+      communityHandlers.listNotifications(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/notifications/unread-count",
+    method: "GET",
+    handle: () =>
+      communityHandlers.unreadCount(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/notifications/read",
+    method: "POST",
+    handle: () =>
+      communityHandlers.markRead(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage",
+    method: "GET",
+    handle: () =>
+      storageHandlers.getStorage(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/enable",
+    method: "POST",
+    handle: () =>
+      storageHandlers.enableStorage(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/disable",
+    method: "POST",
+    handle: () =>
+      storageHandlers.disableStorage(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/objects",
+    method: "GET",
+    handle: () =>
+      storageHandlers.listStorageObjects(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/upload-url",
+    method: "POST",
+    handle: () =>
+      storageHandlers.createUploadUrl(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/proxy-upload",
+    method: "PUT",
+    handle: () =>
+      storageHandlers.proxyUpload(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/commit",
+    method: "POST",
+    handle: () =>
+      storageHandlers.commitUpload(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/object",
+    method: "DELETE",
+    handle: () =>
+      storageHandlers.deleteStorageObject(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/download",
+    method: "GET",
+    handle: () =>
+      storageHandlers.downloadStorageObject(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/domain",
+    method: "POST",
+    handle: () =>
+      storageHandlers.bindStorageDomain(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/default-prefix",
+    method: "POST",
+    handle: () =>
+      storageHandlers.setDefaultPrefix(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dev/status",
+    method: "GET",
+    handle: () =>
+      newapiHandlers.getStatus(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dev/sync",
+    method: "POST",
+    handle: () =>
+      newapiHandlers.syncAccount(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dev/preflight",
+    method: "GET",
+    handle: () =>
+      newapiHandlers.preflight(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dev/bind",
+    method: "POST",
+    handle: () =>
+      newapiHandlers.bindAccount(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dev/keys",
+    method: "GET",
+    handle: () =>
+      newapiHandlers.listKeys(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dev/keys/sync",
+    method: "POST",
+    handle: () =>
+      newapiHandlers.syncKeys(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dev/key",
+    method: "POST",
+    handle: () =>
+      newapiHandlers.createKey(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dev/redeem",
+    method: "POST",
+    handle: () =>
+      newapiHandlers.redeem(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dev/password",
+    method: "POST",
+    handle: () =>
+      newapiHandlers.changePassword(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/frp",
+    method: "GET",
+    handle: () =>
+      frpHandlers.getFrpOverview(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/frp/enable",
+    method: "POST",
+    handle: () =>
+      frpHandlers.enableFrp(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/frp/disable",
+    method: "POST",
+    handle: () =>
+      frpHandlers.disableFrp(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/frp/apply",
+    method: "POST",
+    handle: () =>
+      frpHandlers.applyFrp(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/frp/cancel",
+    method: "POST",
+    handle: () =>
+      frpHandlers.cancelFrp(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/frp/applications",
+    method: "GET",
+    handle: () =>
+      frpHandlers.listFrpApplications(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/frp/review",
+    method: "POST",
+    handle: () =>
+      frpHandlers.reviewFrpApplication(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/frp/nodes",
+    method: "GET",
+    handle: () =>
+      frpHandlers.listFrpNodes(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/frp/nodes",
+    method: "POST",
+    handle: () =>
+      frpHandlers.upsertFrpNode(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/frp/ports/release",
+    method: "POST",
+    handle: () =>
+      frpHandlers.releaseFrpPorts(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/frp\/nodes\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (adminFrpNodeMatch: RegExpMatchArray) =>
+      frpHandlers.deleteFrpNode(
+      env,
+      request,
+      decodeURIComponent(adminFrpNodeMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/proxy",
+    method: "GET",
+    handle: () =>
+      proxyHandlers.getProxyOverview(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/proxy/enable",
+    method: "POST",
+    handle: () =>
+      proxyHandlers.enableProxy(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/proxy/disable",
+    method: "POST",
+    handle: () =>
+      proxyHandlers.disableProxy(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/proxy/check",
+    method: "POST",
+    handle: () =>
+      proxyHandlers.checkProxySubscription(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/proxy/subscriptions",
+    method: "GET",
+    handle: () =>
+      proxyHandlers.listProxySubscriptions(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/proxy/subscriptions",
+    method: "POST",
+    handle: () =>
+      proxyHandlers.upsertProxySubscription(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/proxy\/subscriptions\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (adminProxyMatch: RegExpMatchArray) =>
+      proxyHandlers.deleteProxySubscription(
+      env,
+      request,
+      decodeURIComponent(adminProxyMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/tempbox/config",
+    method: "GET",
+    handle: () =>
+      tempboxHandlers.getTempboxConfig(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/tempbox/create",
+    method: "POST",
+    handle: () =>
+      tempboxHandlers.createTempbox(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/tempbox\/([^/]+)\/upload-url$/),
+    methods: ["POST"],
+    handle: (tempboxUploadMatch: RegExpMatchArray) =>
+      tempboxHandlers.createTempboxUploadUrl(env, request, decodeURIComponent(tempboxUploadMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/tempbox\/([^/]+)\/commit$/),
+    methods: ["POST"],
+    handle: (tempboxCommitMatch: RegExpMatchArray) =>
+      tempboxHandlers.commitTempboxUpload(env, request, decodeURIComponent(tempboxCommitMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/tempbox\/([^/]+)\/proxy-upload$/),
+    methods: ["PUT"],
+    handle: (tempboxProxyMatch: RegExpMatchArray) =>
+      tempboxHandlers.proxyTempboxUpload(env, request, decodeURIComponent(tempboxProxyMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/tempbox\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (tempboxBatchMatch: RegExpMatchArray) =>
+      tempboxHandlers.getTempbox(env, request, decodeURIComponent(tempboxBatchMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/tempbox\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (tempboxBatchMatch: RegExpMatchArray) =>
+      tempboxHandlers.deleteTempbox(env, request, decodeURIComponent(tempboxBatchMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/tempbox\/([^/]+)\/([^/]+)$/),
+    methods: ["GET", "HEAD"],
+    handle: (tempboxFileMatch: RegExpMatchArray) =>
+      tempboxHandlers.downloadTempboxFile(
+      env,
+      request,
+      decodeURIComponent(tempboxFileMatch[1]),
+      decodeURIComponent(tempboxFileMatch[2])
+      ),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/dev\/key\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (devKeyMatch: RegExpMatchArray) =>
+      newapiHandlers.removeKey(
+      env,
+      request,
+      decodeURIComponent(devKeyMatch[1])
+      ),
+  },
+
+  // ================= OAuth 2.0 授权服务器（Doulor Cloud 作为身份提供方）=================
+  //
+  // ⚠️ 为什么全部挂在 /api 下、而不是根级的 /oauth/authorize：
+  //   本站在 Cloudflare 上跑两个 Worker。API Worker 只被挂了
+  //   api/* dl/* p/* u/* c/* profile/* 这几条 Route（见 worker/wrangler.toml 注释，
+  //   路由由 dashboard 管理，不写进配置文件以免部署时清掉动态自定义域名路由）。
+  //   实测：/oauth/* 与 /.well-known/* 都会落到**静态 Worker**，被 SPA 兜底成 index.html。
+  //   OIDC 规范允许 issuer 带路径，故 issuer 取 https://cloud.doulor.cn/api
+  //   ⇒ 走已有的 api/* Route，**不需要改动任何线上路由**，风险最低。
+  //
+  // ⚠️ 二期若想在根级提供漂亮 URL（/oauth/authorize），需在 dashboard 加
+  //   cloud.doulor.cn/oauth/* 与 /.well-known/* 两条 Route 指向本 Worker，
+  //   但必须把 SPA 的同意页路径从 /oauth/* 里排除掉，否则同意页会被这里截走。
+
+  {
+    kind: "exact",
+    path: "/.well-known/openid-configuration",
+    method: "GET",
+    handle: () => oauthHandlers.openidConfiguration(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/oauth/authorize",
+    method: "GET",
+    handle: () => oauthHandlers.authorize(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/oauth/token",
+    method: "POST",
+    handle: () => oauthHandlers.token(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/oauth/userinfo",
+    method: "GET",
+    handle: () => oauthHandlers.userinfo(env, request),
+  },
+  // 同意页展示与决策（需登录，给本站 SPA 用）
+  {
+    kind: "exact",
+    path: "/oauth/authorize/context",
+    method: "GET",
+    handle: () => oauthHandlers.authorizeContext(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/oauth/authorize/decision",
+    method: "POST",
+    handle: () => oauthHandlers.authorizeDecision(env, request),
+  },
+  // 用户自助：查看/撤销已授权应用
+  {
+    kind: "exact",
+    path: "/oauth/grants",
+    method: "GET",
+    handle: () => oauthHandlers.listMyGrants(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/oauth\/grants\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (oauthGrantMatch: RegExpMatchArray) =>
+      oauthHandlers.revokeMyGrant(
+      env,
+      request,
+      decodeURIComponent(oauthGrantMatch[1])
+      ),
+  },
+  // 管理端：OAuth 应用管理
+  {
+    kind: "exact",
+    path: "/admin/oauth/clients",
+    method: "GET",
+    handle: () => oauthHandlers.adminListClients(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/oauth/clients",
+    method: "POST",
+    handle: () => oauthHandlers.adminCreateClient(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/oauth\/clients\/([^/]+)\/secret$/),
+    methods: ["POST"],
+    handle: (oauthSecretMatch: RegExpMatchArray) =>
+      oauthHandlers.adminResetClientSecret(
+      env,
+      request,
+      decodeURIComponent(oauthSecretMatch[1])
+      ),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/oauth\/clients\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (oauthClientMatch: RegExpMatchArray) =>
+      oauthHandlers.adminUpdateClient(
+      env,
+      request,
+      decodeURIComponent(oauthClientMatch[1])
+      ),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/oauth\/clients\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (oauthClientMatch: RegExpMatchArray) =>
+      oauthHandlers.adminDeleteClient(
+      env,
+      request,
+      decodeURIComponent(oauthClientMatch[1])
+      ),
+  },
+  ]
+}
+
+/** 按声明顺序查找并执行匹配的接口；无匹配返回 null（由调用方抛 404）。 */
+async function dispatch(
+  env: Env,
+  request: Request,
+  routePath: string,
+  method: string,
+  ctx?: ExecutionContext
+): Promise<Response | null> {
+  for (const r of buildRoutes(env, request, ctx)) {
+    if (r.kind === "exact") {
+      if (routePath === r.path && method === r.method) return r.handle()
+      continue
+    }
+    if (r.kind === "regex") {
+      if (!r.methods.includes(method)) continue
+      const m = r.match(routePath)
+      if (!m) continue
+      return r.handle(m)
+    }
+    // branch：一个正则覆盖多个动作，内部自行判断命中哪个（未命中返回 null）
+    const mb = r.match(routePath)
+    if (!mb) continue
+    const res = r.handle(mb, method)
+    if (res) return res
+  }
+  return null
 }
 
 async function route(
@@ -40,674 +1718,12 @@ async function route(
 
   const routePath = path.startsWith("/api") ? path.slice(4) : path
 
-  // Auth
-  if (routePath === "/register" && method === "POST") {
-    return authHandlers.register(env, request)
-  }
-  if (routePath === "/login" && method === "POST") {
-    return authHandlers.login(env, request)
-  }
-  if (routePath === "/logout" && method === "POST") {
-    return authHandlers.logout(env, request)
-  }
-  if (routePath === "/me" && method === "GET") {
-    return authHandlers.me(env, request, ctx)
-  }
-  if (routePath === "/password" && method === "PUT") {
-    return authHandlers.changePassword(env, request)
-  }
-
-  // 账户设置：真实邮箱验证 / 通知开关 / 改名 / 改邮箱
-  if (routePath === "/settings/email" && method === "GET") {
-    return settingsHandlers.getEmailSettings(env, request)
-  }
-  if (routePath === "/settings/email/verify" && method === "POST") {
-    return settingsHandlers.verifyRealEmail(env, request)
-  }
-  if (routePath === "/settings/email" && method === "PUT") {
-    return settingsHandlers.changeRealEmail(env, request)
-  }
-  if (routePath === "/settings/notify" && method === "PUT") {
-    return settingsHandlers.updateNotifySetting(env, request)
-  }
-  if (routePath === "/settings/username" && method === "PUT") {
-    return settingsHandlers.changeUsername(env, request)
-  }
-
-  // ---- 身份（昵称/头像）----
-  if (routePath === "/settings/nickname" && method === "PUT") {
-    return identityHandlers.updateNickname(env, request)
-  }
-  if (routePath === "/settings/avatar" && method === "POST") {
-    return identityHandlers.uploadAvatar(env, request)
-  }
-  if (routePath === "/settings/avatar" && method === "DELETE") {
-    return identityHandlers.deleteAvatar(env, request)
-  }
-
-  // DNS
-  if (routePath === "/dns" && method === "GET") {
-    return dnsHandlers.listDns(env, request)
-  }
-  if (routePath === "/dns" && method === "POST") {
-    return dnsHandlers.createDns(env, request)
-  }
-
-  const dnsMatch = routePath.match(/^\/dns\/([^/]+)$/)
-  if (dnsMatch && method === "PUT") {
-    return dnsHandlers.updateDns(env, request, decodeURIComponent(dnsMatch[1]))
-  }
-  if (dnsMatch && method === "DELETE") {
-    return dnsHandlers.deleteDns(env, request, decodeURIComponent(dnsMatch[1]))
-  }
-
-  // Subdomains
-  if (routePath === "/subdomains" && method === "GET") {
-    return subdomainHandlers.listSubdomains(env, request)
-  }
-  if (routePath === "/subdomains" && method === "POST") {
-    return subdomainHandlers.createSubdomain(env, request)
-  }
-
-  const subdomainMatch = routePath.match(/^\/subdomains\/([^/]+)$/)
-  if (subdomainMatch && method === "DELETE") {
-    return subdomainHandlers.deleteSubdomain(env, request, decodeURIComponent(subdomainMatch[1]))
-  }
-
-  // Admin
-  if (routePath === "/admin/users" && method === "GET") {
-    return adminHandlers.listUsers(env, request)
-  }
-
-  const adminUserMatch = routePath.match(/^\/admin\/users\/([^/]+)$/)
-  if (adminUserMatch && method === "GET") {
-    return adminHandlers.getUser(env, request, decodeURIComponent(adminUserMatch[1]))
-  }
-  if (adminUserMatch && method === "PUT") {
-    return adminHandlers.updateUser(env, request, decodeURIComponent(adminUserMatch[1]))
-  }
-  if (adminUserMatch && method === "DELETE") {
-    return adminHandlers.deleteUser(env, request, decodeURIComponent(adminUserMatch[1]))
-  }
-
-  const adminMessageMatch = routePath.match(/^\/admin\/users\/([^/]+)\/messages\/([^/]+)$/)
-  if (adminMessageMatch && method === "GET") {
-    return adminHandlers.getUserMessage(
-      env,
-      request,
-      decodeURIComponent(adminMessageMatch[1]),
-      decodeURIComponent(adminMessageMatch[2])
-    )
-  }
-
-  // Admin: 邀请码
-  if (routePath === "/admin/invites" && method === "GET") {
-    return adminHandlers.listInvites(env, request)
-  }
-  if (routePath === "/admin/invites" && method === "POST") {
-    return adminHandlers.createInvite(env, request)
-  }
-
-  const adminInviteMatch = routePath.match(/^\/admin\/invites\/([^/]+)$/)
-  if (adminInviteMatch && method === "PUT") {
-    return adminHandlers.updateInvite(env, request, decodeURIComponent(adminInviteMatch[1]))
-  }
-  if (adminInviteMatch && method === "DELETE") {
-    // 走「带额度退还」版本：删掉用户自助创建且未使用的码时，
-    // 把额度还给创建者，避免用户白掉额度
-    return adminHandlers.adminDeleteInviteWithRefund(
-      env,
-      request,
-      decodeURIComponent(adminInviteMatch[1])
-    )
-  }
-
-  // ---- 我的邀请码（用户自助）----
-  if (routePath === "/my-invites" && method === "GET") {
-    return myInviteHandlers.listMyInvites(env, request)
-  }
-  if (routePath === "/my-invites" && method === "POST") {
-    return myInviteHandlers.createMyInvite(env, request)
-  }
-
-  const myInviteMatch = routePath.match(/^\/my-invites\/([^/]+)$/)
-  if (myInviteMatch && method === "DELETE") {
-    return myInviteHandlers.deleteMyInvite(
-      env,
-      request,
-      decodeURIComponent(myInviteMatch[1])
-    )
-  }
-
-  // Admin: 捐献审核
-  if (routePath === "/admin/donations" && method === "GET") {
-    return donationHandlers.listAllDonations(env, request)
-  }
-  if (routePath === "/admin/donations/review" && method === "POST") {
-    return donationHandlers.reviewDonation(env, request)
-  }
-
-  // Admin: 用户邀请码额度
-  if (routePath === "/admin/invite-quotas" && method === "GET") {
-    return adminHandlers.listInviteQuotas(env, request)
-  }
-
-  const quotaUserMatch = routePath.match(
-    /^\/admin\/users\/([^/]+)\/invite-quota$/
-  )
-  if (quotaUserMatch && method === "GET") {
-    return adminHandlers.getUserInviteQuota(
-      env,
-      request,
-      decodeURIComponent(quotaUserMatch[1])
-    )
-  }
-  if (quotaUserMatch && method === "PUT") {
-    return adminHandlers.updateUserInviteQuota(
-      env,
-      request,
-      decodeURIComponent(quotaUserMatch[1])
-    )
-  }
-
-  // Admin: 保留子域名
-  if (routePath === "/admin/reserved-subdomains" && method === "GET") {
-    return adminHandlers.listReserved(env, request)
-  }
-  if (routePath === "/admin/reserved-subdomains" && method === "POST") {
-    return adminHandlers.addReserved(env, request)
-  }
-
-  const reservedMatch = routePath.match(/^\/admin\/reserved-subdomains\/([^/]+)$/)
-  if (reservedMatch && method === "DELETE") {
-    return adminHandlers.removeReserved(
-      env,
-      request,
-      decodeURIComponent(reservedMatch[1])
-    )
-  }
-
-  // Admin: 全局设置 / 网盘运维
-  // 出站邮件连通性自检（管理员）：验证 send_email 绑定与发送域名 Onboard 状态
-  if (routePath === "/admin/mail-test" && method === "POST") {
-    return adminHandlers.testMail(env, request)
-  }
-  if (routePath === "/admin/newapi-test" && method === "GET") {
-    return adminHandlers.testNewApi(env, request)
-  }
-  if (routePath === "/admin/newapi/config" && method === "GET") {
-    return adminHandlers.getNewApiAdminConfig(env, request)
-  }
-  if (routePath === "/admin/newapi/config" && method === "PUT") {
-    return adminHandlers.updateNewApiAdminConfig(env, request)
-  }
-  if (routePath === "/admin/mail-status" && method === "GET") {
-    return adminHandlers.mailStatus(env, request)
-  }
-
-  // 公告 / 网站动态（管理员 CRUD，普通用户只读最近几条）
-  if (routePath === "/announcements" && method === "GET") {
-    return announcementHandlers.listAnnouncements(env, request)
-  }
-
-  // 成就系统
-  if (routePath === "/achievements" && method === "GET") {
-    return achievementHandlers.getAchievements(env, request)
-  }
-  if (routePath === "/admin/announcements" && method === "GET") {
-    return announcementHandlers.listAllAnnouncements(env, request)
-  }
-  if (routePath === "/admin/announcements" && method === "POST") {
-    return announcementHandlers.createAnnouncement(env, request)
-  }
-  const announcementMatch = routePath.match(/^\/admin\/announcements\/([^/]+)$/)
-  if (announcementMatch && method === "PUT") {
-    return announcementHandlers.updateAnnouncement(
-      env,
-      request,
-      decodeURIComponent(announcementMatch[1])
-    )
-  }
-  if (announcementMatch && method === "DELETE") {
-    return announcementHandlers.deleteAnnouncement(
-      env,
-      request,
-      decodeURIComponent(announcementMatch[1])
-    )
-  }
-
-  // R2 多桶管理
-  if (routePath === "/admin/r2/buckets" && method === "GET") {
-    return r2AdminHandlers.listR2Buckets(env, request)
-  }
-  if (routePath === "/admin/r2/discover" && method === "GET") {
-    return r2AdminHandlers.discoverBuckets(env, request)
-  }
-  if (routePath === "/admin/r2/buckets" && method === "POST") {
-    return r2AdminHandlers.createR2Bucket(env, request)
-  }
-  if (routePath === "/admin/r2/assign" && method === "PUT") {
-    return r2AdminHandlers.assignUserBucket(env, request)
-  }
-  if (routePath === "/admin/r2/assign-all" && method === "PUT") {
-    return r2AdminHandlers.assignAllUnassigned(env, request)
-  }
-  const r2BucketMatch = routePath.match(/^\/admin\/r2\/buckets\/([^/]+)$/)
-  if (r2BucketMatch && method === "PUT") {
-    return r2AdminHandlers.updateR2Bucket(
-      env,
-      request,
-      decodeURIComponent(r2BucketMatch[1])
-    )
-  }
-  if (r2BucketMatch && method === "DELETE") {
-    return r2AdminHandlers.deleteR2Bucket(
-      env,
-      request,
-      decodeURIComponent(r2BucketMatch[1])
-    )
-  }
-  const r2BucketActionMatch = routePath.match(
-    /^\/admin\/r2\/buckets\/([^/]+)\/(test|write-test|operations)$/
-  )
-  if (r2BucketActionMatch) {
-    const bucketId = decodeURIComponent(r2BucketActionMatch[1])
-    const action = r2BucketActionMatch[2]
-    if (action === "test" && method === "POST") {
-      return r2AdminHandlers.testR2Bucket(env, request, bucketId)
-    }
-    if (action === "write-test" && method === "POST") {
-      return r2AdminHandlers.writeTestR2Bucket(env, request, bucketId)
-    }
-    if (action === "operations" && method === "GET") {
-      return r2AdminHandlers.getR2Operations(env, request, bucketId)
-    }
-  }
-
-  if (routePath === "/admin/settings" && method === "GET") {
-    return adminHandlers.getSettingsHandler(env, request)
-  }
-  if (routePath === "/admin/settings" && method === "PUT") {
-    return adminHandlers.updateSettingsHandler(env, request)
-  }
-
-  // ---- 社区管理 ----
-  if (routePath === "/admin/community/posts" && method === "GET") {
-    return adminHandlers.adminListPosts(env, request)
-  }
-  const adminCommunityRestoreMatch = routePath.match(/^\/admin\/community\/posts\/([^/]+)\/restore$/)
-  if (adminCommunityRestoreMatch && method === "POST") {
-    return adminHandlers.adminRestorePost(env, request, decodeURIComponent(adminCommunityRestoreMatch[1]))
-  }
-  const adminCommunityPostMatch = routePath.match(/^\/admin\/community\/posts\/([^/]+)$/)
-  if (adminCommunityPostMatch && method === "DELETE") {
-    return adminHandlers.adminDeletePost(env, request, decodeURIComponent(adminCommunityPostMatch[1]))
-  }
-
-  if (routePath === "/admin/storage/recalculate" && method === "POST") {
-    return adminHandlers.recalculateStorage(env, request)
-  }
-
-  const adminPurgeMatch = routePath.match(/^\/admin\/storage\/purge\/([^/]+)$/)
-  if (adminPurgeMatch && method === "POST") {
-    return adminHandlers.purgeStorage(
-      env,
-      request,
-      decodeURIComponent(adminPurgeMatch[1])
-    )
-  }
-
-  // Email（收件箱 + 消息）
-  if (routePath === "/mailbox" && method === "GET") {
-    return emailHandlers.listMailboxes(env, request)
-  }
-  if (routePath === "/mailbox" && method === "POST") {
-    return emailHandlers.createMailbox(env, request)
-  }
-
-  const mailboxMatch = routePath.match(/^\/mailbox\/([^/]+)$/)
-  if (mailboxMatch && method === "PUT") {
-    return emailHandlers.updateMailbox(env, request, decodeURIComponent(mailboxMatch[1]))
-  }
-  if (mailboxMatch && method === "DELETE") {
-    return emailHandlers.deleteMailbox(env, request, decodeURIComponent(mailboxMatch[1]))
-  }
-
-  const mailboxMessagesMatch = routePath.match(/^\/mailbox\/([^/]+)\/messages$/)
-  if (mailboxMessagesMatch && method === "GET") {
-    return emailHandlers.listMessages(env, request, decodeURIComponent(mailboxMessagesMatch[1]))
-  }
-
-  const messageMatch = routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)$/)
-  if (messageMatch && method === "GET") {
-    return emailHandlers.getMessage(
-      env,
-      request,
-      decodeURIComponent(messageMatch[1]),
-      decodeURIComponent(messageMatch[2])
-    )
-  }
-  if (messageMatch && method === "DELETE") {
-    return emailHandlers.deleteMessage(
-      env,
-      request,
-      decodeURIComponent(messageMatch[1]),
-      decodeURIComponent(messageMatch[2])
-    )
-  }
-
-  const messageReadMatch = routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)\/read$/)
-  if (messageReadMatch && method === "POST") {
-    return emailHandlers.markMessage(
-      env,
-      request,
-      decodeURIComponent(messageReadMatch[1]),
-      decodeURIComponent(messageReadMatch[2])
-    )
-  }
-
-  // 网页端回信：以用户自己的域名邮箱身份发出（本平台唯一的对外发信出口）
-  const messageReplyMatch = routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)\/reply$/)
-  if (messageReplyMatch && method === "POST") {
-    return emailHandlers.replyMessage(
-      env,
-      request,
-      decodeURIComponent(messageReplyMatch[1]),
-      decodeURIComponent(messageReplyMatch[2])
-    )
-  }
-
-  // 一键全部已读：把该用户所有 mailbox 的未读标已读
-  if (routePath === "/mailbox/read-all" && method === "POST") {
-    return emailHandlers.markAllRead(env, request)
-  }
-
-  // ---- 捐献 ----
-  if (routePath === "/donations" && method === "GET") {
-    return donationHandlers.listDonations(env, request)
-  }
-  if (routePath === "/donations" && method === "POST") {
-    return donationHandlers.createDonation(env, request)
-  }
-  const donationMatch = routePath.match(/^\/donations\/([^/]+)$/)
-  if (donationMatch && method === "DELETE") {
-    return donationHandlers.cancelDonation(env, request, decodeURIComponent(donationMatch[1]))
-  }
-
-  // ---- 个人名片 ----
-  if (routePath === "/profile" && method === "GET") {
-    return profileHandlers.getProfile(env, request)
-  }
-  if (routePath === "/profile/enable" && method === "POST") {
-    return profileHandlers.enableProfile(env, request)
-  }
-  if (routePath === "/profile" && method === "PUT") {
-    return profileHandlers.updateProfile(env, request)
-  }
-  if (routePath === "/profile/preview" && method === "POST") {
-    return profileHandlers.previewProfile(env, request)
-  }
-  if (routePath === "/profile/publish" && method === "POST") {
-    return profileHandlers.setPublished(env, request)
-  }
-  if (routePath === "/profile/asset" && method === "POST") {
-    return profileHandlers.uploadAsset(env, request)
-  }
-  if (routePath === "/profile/asset" && method === "DELETE") {
-    return profileHandlers.deleteAsset(env, request)
-  }
-  if (routePath === "/profile/asset" && method === "GET") {
-    return profileHandlers.readOwnAsset(env, request)
-  }
-  if (routePath === "/profile/domain" && method === "POST") {
-    return profileHandlers.bindProfileDomain(env, request)
-  }
-
-  // ---- 社区（公开可读）----
-  if (routePath === "/community/config" && method === "GET") {
-    return communityHandlers.communityConfig(env, request)
-  }
-  if (routePath === "/community/posts" && method === "GET") {
-    return communityHandlers.listPosts(env, request)
-  }
-  if (routePath === "/community/stats" && method === "GET") {
-    return communityHandlers.communityStats(env, request)
-  }
-  // commentsMatch 必须在 postMatch 之前，否则 /posts/<id>/comments 会被
-  // postMatch 的 ^/community/posts/([^/]+)$ 截获
-  const communityCommentsMatch = routePath.match(/^\/community\/posts\/([^/]+)\/comments$/)
-  if (communityCommentsMatch && method === "GET") {
-    return communityHandlers.listComments(env, request, decodeURIComponent(communityCommentsMatch[1]))
-  }
-  const communityPostMatch = routePath.match(/^\/community\/posts\/([^/]+)$/)
-  if (communityPostMatch && method === "GET") {
-    return communityHandlers.getPost(env, request, decodeURIComponent(communityPostMatch[1]))
-  }
-
-  // ---- 社区（需登录写入）----
-  if (routePath === "/community/posts" && method === "POST") {
-    return communityHandlers.createPost(env, request)
-  }
-  const communityLikeMatch = routePath.match(/^\/community\/posts\/([^/]+)\/like$/)
-  if (communityLikeMatch && method === "POST") {
-    return communityHandlers.toggleLike(env, request, decodeURIComponent(communityLikeMatch[1]))
-  }
-  const communityShareMatch = routePath.match(/^\/community\/posts\/([^/]+)\/share$/)
-  if (communityShareMatch && method === "POST") {
-    return communityHandlers.sharePost(env, request, decodeURIComponent(communityShareMatch[1]))
-  }
-  if (communityPostMatch && method === "DELETE") {
-    return communityHandlers.deletePost(env, request, decodeURIComponent(communityPostMatch[1]))
-  }
-  if (communityCommentsMatch && method === "POST") {
-    return communityHandlers.createComment(env, request, decodeURIComponent(communityCommentsMatch[1]))
-  }
-  const communityImageMatch = routePath.match(/^\/community\/posts\/([^/]+)\/images$/)
-  if (communityImageMatch && method === "POST") {
-    return communityHandlers.uploadPostImage(env, request, decodeURIComponent(communityImageMatch[1]))
-  }
-
-  // ---- 通知 ----
-  if (routePath === "/notifications" && method === "GET") {
-    return communityHandlers.listNotifications(env, request)
-  }
-  if (routePath === "/notifications/unread-count" && method === "GET") {
-    return communityHandlers.unreadCount(env, request)
-  }
-  if (routePath === "/notifications/read" && method === "POST") {
-    return communityHandlers.markRead(env, request)
-  }
-
-  // ---- R2 直链网盘 ----
-  if (routePath === "/storage" && method === "GET") {
-    return storageHandlers.getStorage(env, request)
-  }
-  if (routePath === "/storage/enable" && method === "POST") {
-    return storageHandlers.enableStorage(env, request)
-  }
-  if (routePath === "/storage/disable" && method === "POST") {
-    return storageHandlers.disableStorage(env, request)
-  }
-  if (routePath === "/storage/objects" && method === "GET") {
-    return storageHandlers.listStorageObjects(env, request)
-  }
-  if (routePath === "/storage/upload-url" && method === "POST") {
-    return storageHandlers.createUploadUrl(env, request)
-  }
-  // Worker 中转上传（token 模式无预签名时的降级路径）
-  if (routePath === "/storage/proxy-upload" && method === "PUT") {
-    return storageHandlers.proxyUpload(env, request)
-  }
-  if (routePath === "/storage/commit" && method === "POST") {
-    return storageHandlers.commitUpload(env, request)
-  }
-  if (routePath === "/storage/object" && method === "DELETE") {
-    return storageHandlers.deleteStorageObject(env, request)
-  }
-  if (routePath === "/storage/download" && method === "GET") {
-    return storageHandlers.downloadStorageObject(env, request)
-  }
-  if (routePath === "/storage/domain" && method === "POST") {
-    return storageHandlers.bindStorageDomain(env, request)
-  }
-  if (routePath === "/storage/default-prefix" && method === "POST") {
-    return storageHandlers.setDefaultPrefix(env, request)
-  }
-
-  // ---- AI 中转站（NewAPI）----
-  if (routePath === "/dev/status" && method === "GET") {
-    return newapiHandlers.getStatus(env, request)
-  }
-  if (routePath === "/dev/sync" && method === "POST") {
-    return newapiHandlers.syncAccount(env, request)
-  }
-  if (routePath === "/dev/preflight" && method === "GET") {
-    return newapiHandlers.preflight(env, request)
-  }
-  if (routePath === "/dev/bind" && method === "POST") {
-    return newapiHandlers.bindAccount(env, request)
-  }
-  if (routePath === "/dev/keys" && method === "GET") {
-    return newapiHandlers.listKeys(env, request)
-  }
-  if (routePath === "/dev/keys/sync" && method === "POST") {
-    return newapiHandlers.syncKeys(env, request)
-  }
-  if (routePath === "/dev/key" && method === "POST") {
-    return newapiHandlers.createKey(env, request)
-  }
-  if (routePath === "/dev/redeem" && method === "POST") {
-    return newapiHandlers.redeem(env, request)
-  }
-  if (routePath === "/dev/password" && method === "POST") {
-    return newapiHandlers.changePassword(env, request)
-  }
-
-  // ---- frp 内网穿透 ----
-  if (routePath === "/frp" && method === "GET") {
-    return frpHandlers.getFrpOverview(env, request)
-  }
-  if (routePath === "/frp/enable" && method === "POST") {
-    return frpHandlers.enableFrp(env, request)
-  }
-  if (routePath === "/frp/disable" && method === "POST") {
-    return frpHandlers.disableFrp(env, request)
-  }
-  if (routePath === "/frp/apply" && method === "POST") {
-    return frpHandlers.applyFrp(env, request)
-  }
-  if (routePath === "/frp/cancel" && method === "POST") {
-    return frpHandlers.cancelFrp(env, request)
-  }
-
-  // ---- 管理端：frp ----
-  if (routePath === "/admin/frp/applications" && method === "GET") {
-    return frpHandlers.listFrpApplications(env, request)
-  }
-  if (routePath === "/admin/frp/review" && method === "POST") {
-    return frpHandlers.reviewFrpApplication(env, request)
-  }
-  if (routePath === "/admin/frp/nodes" && method === "GET") {
-    return frpHandlers.listFrpNodes(env, request)
-  }
-  if (routePath === "/admin/frp/nodes" && method === "POST") {
-    return frpHandlers.upsertFrpNode(env, request)
-  }
-  if (routePath === "/admin/frp/ports/release" && method === "POST") {
-    return frpHandlers.releaseFrpPorts(env, request)
-  }
-
-  const adminFrpNodeMatch = routePath.match(/^\/admin\/frp\/nodes\/([^/]+)$/)
-  if (adminFrpNodeMatch && method === "DELETE") {
-    return frpHandlers.deleteFrpNode(
-      env,
-      request,
-      decodeURIComponent(adminFrpNodeMatch[1])
-    )
-  }
-
-  // ---- 代理节点 ----
-  if (routePath === "/proxy" && method === "GET") {
-    return proxyHandlers.getProxyOverview(env, request)
-  }
-  if (routePath === "/proxy/enable" && method === "POST") {
-    return proxyHandlers.enableProxy(env, request)
-  }
-  if (routePath === "/proxy/disable" && method === "POST") {
-    return proxyHandlers.disableProxy(env, request)
-  }
-  if (routePath === "/proxy/check" && method === "POST") {
-    return proxyHandlers.checkProxySubscription(env, request)
-  }
-
-  // ---- 管理端：代理节点 ----
-  if (routePath === "/admin/proxy/subscriptions" && method === "GET") {
-    return proxyHandlers.listProxySubscriptions(env, request)
-  }
-  if (routePath === "/admin/proxy/subscriptions" && method === "POST") {
-    return proxyHandlers.upsertProxySubscription(env, request)
-  }
-
-  const adminProxyMatch = routePath.match(/^\/admin\/proxy\/subscriptions\/([^/]+)$/)
-  if (adminProxyMatch && method === "DELETE") {
-    return proxyHandlers.deleteProxySubscription(
-      env,
-      request,
-      decodeURIComponent(adminProxyMatch[1])
-    )
-  }
-
-  // ---- 临时分享箱（tempbox）----
-  // 公开：config / 查看 / 下载 不需要登录
-  if (routePath === "/tempbox/config" && method === "GET") {
-    return tempboxHandlers.getTempboxConfig(env, request)
-  }
-  if (routePath === "/tempbox/create" && method === "POST") {
-    return tempboxHandlers.createTempbox(env, request)
-  }
-  // 需登录 / 管理员：上传与删除
-  const tempboxUploadMatch = routePath.match(/^\/tempbox\/([^/]+)\/upload-url$/)
-  if (tempboxUploadMatch && method === "POST") {
-    return tempboxHandlers.createTempboxUploadUrl(env, request, decodeURIComponent(tempboxUploadMatch[1]))
-  }
-  const tempboxCommitMatch = routePath.match(/^\/tempbox\/([^/]+)\/commit$/)
-  if (tempboxCommitMatch && method === "POST") {
-    return tempboxHandlers.commitTempboxUpload(env, request, decodeURIComponent(tempboxCommitMatch[1]))
-  }
-  // Worker 中转上传（token 模式无预签名时的降级路径）。
-  // 必须放在下面的 tempboxFileMatch 之前，否则 "proxy-upload" 会被当成文件名。
-  const tempboxProxyMatch = routePath.match(/^\/tempbox\/([^/]+)\/proxy-upload$/)
-  if (tempboxProxyMatch && method === "PUT") {
-    return tempboxHandlers.proxyTempboxUpload(env, request, decodeURIComponent(tempboxProxyMatch[1]))
-  }
-  const tempboxBatchMatch = routePath.match(/^\/tempbox\/([^/]+)$/)
-  if (tempboxBatchMatch && method === "GET") {
-    return tempboxHandlers.getTempbox(env, request, decodeURIComponent(tempboxBatchMatch[1]))
-  }
-  if (tempboxBatchMatch && method === "DELETE") {
-    return tempboxHandlers.deleteTempbox(env, request, decodeURIComponent(tempboxBatchMatch[1]))
-  }
-  const tempboxFileMatch = routePath.match(/^\/tempbox\/([^/]+)\/([^/]+)$/)
-  if (tempboxFileMatch && (method === "GET" || method === "HEAD")) {
-    return tempboxHandlers.downloadTempboxFile(
-      env,
-      request,
-      decodeURIComponent(tempboxFileMatch[1]),
-      decodeURIComponent(tempboxFileMatch[2])
-    )
-  }
-
-  const devKeyMatch = routePath.match(/^\/dev\/key\/([^/]+)$/)
-  if (devKeyMatch && method === "DELETE") {
-    return newapiHandlers.removeKey(
-      env,
-      request,
-      decodeURIComponent(devKeyMatch[1])
-    )
-  }
+  const res = await dispatch(env, request, routePath, method, ctx)
+  if (res) return res
 
   throw new ApiError(404, "接口不存在", "NOT_FOUND")
 }
+
 
 /**
  * 自定义直链域名的入口。
@@ -764,6 +1780,17 @@ export default {
           env,
           decodeURIComponent(communityImgMatch[1]),
           decodeURIComponent(communityImgMatch[2])
+        )
+      }
+
+      // 图片墙资源：/p/<用户名>/gallery/<id>（公开，无需鉴权）；必须排在下面
+      // 的两段式 assetMatch 之前，否则 /gallery/<id> 不匹配、会被漏掉。
+      const galleryMatch = url.pathname.match(/^\/p\/([^/]+)\/gallery\/([a-z0-9-]+)$/)
+      if (galleryMatch && request.method === "GET") {
+        return await profileHandlers.serveGalleryImage(
+          env,
+          decodeURIComponent(galleryMatch[1]),
+          galleryMatch[2]
         )
       }
 

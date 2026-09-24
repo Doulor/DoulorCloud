@@ -1,7 +1,8 @@
 import * as React from "react"
 import {
-  AlertTriangle,
+  ArrowDown,
   Bot,
+  ChevronDown,
   Copy,
   ExternalLink,
   Gift,
@@ -55,17 +56,14 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { newapiApi, HttpError } from "@/services/api"
-import type { NewApiHealth, NewApiKey, NewApiPreflight, NewApiStatus } from "@/types"
-
-function fmtTime(iso: string | null) {
-  if (!iso) return "—"
-  return new Date(iso).toLocaleString("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  })
-}
+import { fmtTime } from "@/lib/format"
+import type {
+  NewApiHealth,
+  NewApiKey,
+  NewApiPreflight,
+  NewApiStatus,
+  RecommendedTier,
+} from "@/types"
 
 /** 中转站在线/离线徽章，含延迟与版本 */
 function HealthBadge({ health }: { health?: NewApiHealth }) {
@@ -90,6 +88,74 @@ function HealthBadge({ health }: { health?: NewApiHealth }) {
   )
 }
 
+/**
+ * 推荐模型分档：管理员在管理面板维护，此处按梯队从高到低纵向排列，
+ * 梯队之间用向下的箭头连接，直观表达「首选 → 备选 → 兜底」的推荐次序。
+ */
+function RecommendedModels({
+  tiers,
+  onCopy,
+}: {
+  tiers: RecommendedTier[]
+  onCopy: (model: string) => void
+}) {
+  return (
+    <div className="space-y-1">
+      {tiers.map((t, i) => {
+        // 颜色随梯队递减：第一梯队最醒目，越往后越淡
+        const tone =
+          i === 0
+            ? "border-primary/50 bg-primary/5"
+            : i === 1
+              ? "border-border bg-muted/40"
+              : "border-border bg-muted/20"
+        return (
+          <React.Fragment key={`${t.tier}-${i}`}>
+            <div className={`rounded-lg border p-3.5 ${tone}`}>
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold ${
+                    i === 0
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted-foreground/20 text-muted-foreground"
+                  }`}
+                >
+                  {i + 1}
+                </span>
+                <span className="text-sm font-semibold">{t.tier}</span>
+                <Badge variant="secondary" className="text-xs">
+                  {t.models.length} 个
+                </Badge>
+              </div>
+              {t.desc && (
+                <p className="mt-1.5 pl-7 text-xs text-muted-foreground">{t.desc}</p>
+              )}
+              <div className="mt-2.5 flex flex-wrap gap-1.5 pl-7">
+                {t.models.map((m) => (
+                  <Badge
+                    key={m}
+                    variant="outline"
+                    className="cursor-pointer bg-background font-mono text-xs"
+                    onClick={() => onCopy(m)}
+                    title="点击复制模型名"
+                  >
+                    {m}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+            {i < tiers.length - 1 && (
+              <div className="flex justify-center py-0.5">
+                <ArrowDown className="h-4 w-4 text-muted-foreground/50" />
+              </div>
+            )}
+          </React.Fragment>
+        )
+      })}
+    </div>
+  )
+}
+
 export default function AiPage() {
   const [status, setStatus] = React.useState<NewApiStatus | null>(null)
   const [keys, setKeys] = React.useState<NewApiKey[]>([])
@@ -103,12 +169,17 @@ export default function AiPage() {
   const [preflight, setPreflight] = React.useState<NewApiPreflight | null>(null)
   const [preflightLoading, setPreflightLoading] = React.useState(false)
   const [password, setPassword] = React.useState("")
-  const [confirm, setConfirm] = React.useState("")
+  /** OAuth 授权弹窗引用（用于轮询期间检查是否被关闭） */
+  const oauthPopupRef = React.useRef<Window | null>(null)
+  /** 是否正在等待用户在弹窗里完成授权 */
+  const [awaitingOAuth, setAwaitingOAuth] = React.useState(false)
 
   // 新建 Key
   const [keyOpen, setKeyOpen] = React.useState(false)
   const [keyName, setKeyName] = React.useState("")
   const [keyGroup, setKeyGroup] = React.useState("default")
+  /** 全部模型清单默认折叠：推荐分档已给出选择建议，完整清单是查漏用途 */
+  const [modelsOpen, setModelsOpen] = React.useState(false)
 
   // 兑换码
   const [redeemCode, setRedeemCode] = React.useState("")
@@ -160,12 +231,22 @@ export default function AiPage() {
     }
   }
 
-  /** 打开开通弹窗前先探测：中转站是否已有同名账号 */
+  /**
+   * 打开开通弹窗：先探测，若已 OIDC 绑定则直接进入「输密码」；
+   * 否则自动弹窗让用户去中转站授权，并轮询等待授权完成。
+   */
   const openBind = async () => {
     setPreflightLoading(true)
     setBindOpen(true)
     try {
-      setPreflight(await newapiApi.preflight())
+      const p = await newapiApi.preflight()
+      setPreflight(p)
+      if (p.oidcBound) {
+        // 已经授权过了，直接进输密码步骤
+        setAwaitingOAuth(false)
+      } else {
+        startOAuthPopup()
+      }
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "无法连接中转站")
       setBindOpen(false)
@@ -174,11 +255,71 @@ export default function AiPage() {
     }
   }
 
+  /** 打开中转站授权弹窗，并开始轮询等待 oidc 绑定完成 */
+  const startOAuthPopup = () => {
+    setAwaitingOAuth(true)
+    // 打开中转站登录页（用户在里面点「用 Doulor Cloud 登录」）
+    // 弹窗不能直接跳我们的 /oauth/authorize —— state 由 NewAPI 生成，
+    // 必须让它自己发起 OAuth 流程。
+    const w = window.open("https://api.doulor.cn/sign-in", "doulor_oauth", "width=480,height=680")
+    oauthPopupRef.current = w
+    pollOAuth()
+  }
+
+  /**
+   * 轮询检测中转站账号是否已通过 OIDC 绑定。
+   * 一旦 oidcBound 变 true，自动切到「输入密码」步骤。
+   * 弹窗被用户关掉则停止轮询（提示用户可手动重试）。
+   */
+  const pollOAuth = async () => {
+    for (let i = 0; i < 40; i++) {
+      // 弹窗被关了就不再轮询（除非已经绑定成功）
+      const popup = oauthPopupRef.current
+      if (popup && popup.closed) {
+        // 弹窗关了，做最后一次检查：可能刚好授权完成
+        try {
+          const p = await newapiApi.preflight()
+          if (p.oidcBound) {
+            setPreflight(p)
+            setAwaitingOAuth(false)
+            return
+          }
+        } catch {
+          /* ignore */
+        }
+        setAwaitingOAuth(false)
+        toast.info("已关闭授权窗口。可点「重新打开」再次授权。")
+        return
+      }
+
+      try {
+        const p = await newapiApi.preflight()
+        if (p.oidcBound) {
+          // 授权完成：尝试关闭弹窗，然后自动切到「输入密码」步骤
+          try {
+            popup?.close()
+          } catch {
+            /* 跨域关闭可能失败，忽略 —— 用户可手动关弹窗 */
+          }
+          oauthPopupRef.current = null
+          setPreflight(p)
+          setAwaitingOAuth(false)
+          return
+        }
+      } catch {
+        /* 轮询失败静默，下一轮再试 */
+      }
+
+      // 每 2 秒轮询一次，最多 80 秒
+      await new Promise((r) => setTimeout(r, 2000))
+    }
+    setAwaitingOAuth(false)
+  }
+
   const handleBind = async () => {
-    // 新账号流程需要确认两次密码；绑定已有账号只有一个密码框
-    const isBindExisting = Boolean(preflight?.exists)
-    if (!isBindExisting && password !== confirm) {
-      toast.error("两次输入的密码不一致")
+    // 复用 cloud 密码，只输入一次
+    if (password.length < 8) {
+      toast.error("请输入你的 Doulor Cloud 登录密码")
       return
     }
     setBusy(true)
@@ -187,7 +328,6 @@ export default function AiPage() {
       toast.success("AI 中转站已开通")
       setBindOpen(false)
       setPassword("")
-      setConfirm("")
       // 静默刷新：非静默会整页 loading，把弹窗和错误提示一起卸载掉
       await load(true)
     } catch (err) {
@@ -353,17 +493,16 @@ export default function AiPage() {
               开通 AI 中转站
             </CardTitle>
             <CardDescription>
-              将为你创建 NewAPI 账号（{status.eligibleEmail}），附赠试用额度
+              用你的 Doulor Cloud 账号登录中转站，附赠试用额度
               {status.currencySymbol}
               {status.trialQuotaUsd}。
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <ul className="space-y-1.5 text-sm text-muted-foreground">
-              <li>· 账号邮箱固定为 {status.eligibleEmail}（仅限本站邮箱）</li>
-              <li>· 密码由你自己设置，本站不会保存你的密码</li>
+              <li>· 用 Doulor Cloud 账号登录中转站，无需单独注册</li>
+              <li>· 开通时复用你的 Doulor Cloud 登录密码</li>
               <li>· 开通后可查看可用模型并自助创建 API Key</li>
-              <li>· 开通时需等待一封验证码邮件，通常几秒内到达</li>
             </ul>
             <Button onClick={() => void openBind()}>
               <Sparkles className="h-4 w-4" />
@@ -379,17 +518,16 @@ export default function AiPage() {
             if (!o) {
               setPreflight(null)
               setPassword("")
-              setConfirm("")
+              setAwaitingOAuth(false)
             }
           }}
           preflight={preflight}
           preflightLoading={preflightLoading}
-          email={status.eligibleEmail}
+          awaitingOAuth={awaitingOAuth}
           password={password}
-          confirm={confirm}
           setPassword={setPassword}
-          setConfirm={setConfirm}
           busy={busy}
+          onReopenOAuth={() => startOAuthPopup()}
           onConfirm={() => void handleBind()}
         />
       </div>
@@ -407,58 +545,48 @@ export default function AiPage() {
       />
 
       <div className="space-y-6">
-        {/* 额度 */}
+        {/* 接入信息：Base URL + API Key 管理融合在一起 —— 新用户第一件事就是"怎么用" */}
         <Card>
           <CardHeader>
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Wallet className="h-4 w-4 text-muted-foreground" />
-                  额度
-                </CardTitle>
-                <CardDescription>
-                  剩余 {status.currencySymbol}
-                  {account.quotaUsd.toFixed(4)} · 已用 {status.currencySymbol}
-                  {account.usedUsd.toFixed(4)} · 请求 {account.requestCount} 次
-                </CardDescription>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void handleSync()}
-                disabled={syncing}
-              >
-                {syncing ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-3.5 w-3.5" />
-                )}
-                同步
-              </Button>
-            </div>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <KeyRound className="h-4 w-4 text-muted-foreground" />
+              接入信息
+            </CardTitle>
+            <CardDescription>
+              在任意 OpenAI 兼容客户端中填入 Base URL 与 API Key 即可使用。
+            </CardDescription>
           </CardHeader>
-          {account.syncedAt && (
-            <CardContent>
-              <p className="text-xs text-muted-foreground">
-                最后同步：{fmtTime(account.syncedAt)}
-                {account.group ? ` · 分组 ${account.group}` : ""}
-              </p>
-            </CardContent>
-          )}
-        </Card>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>Base URL</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  readOnly
+                  value="https://api.doulor.cn/v1"
+                  className="font-mono text-sm"
+                />
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() =>
+                    void copyText("https://api.doulor.cn/v1", "Base URL 已复制")
+                  }
+                  title="复制"
+                >
+                  <Copy className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
 
-        {/* API Key */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-start justify-between gap-4">
+            <Separator />
+
+            {/* API Key：创建与管理，与 Base URL 同卡 */}
+            <div className="flex items-center justify-between gap-2">
               <div>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <KeyRound className="h-4 w-4 text-muted-foreground" />
-                  API Key
-                </CardTitle>
-                <CardDescription>
+                <Label>API Key</Label>
+                <p className="text-xs text-muted-foreground">
                   用于调用 OpenAI 兼容接口，完整 Key 只在创建时显示一次。
-                </CardDescription>
+                </p>
               </div>
               <div className="flex gap-2">
                 <Button
@@ -480,8 +608,7 @@ export default function AiPage() {
                 </Button>
               </div>
             </div>
-          </CardHeader>
-          <CardContent>
+
             {keys.length === 0 ? (
               <EmptyState
                 title="还没有 API Key"
@@ -528,57 +655,155 @@ export default function AiPage() {
                 </TableBody>
               </Table>
             )}
+
+            <Separator />
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" size="sm" asChild>
+                <a href="https://api.doulor.cn" target="_blank" rel="noreferrer">
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  前往中转站本站
+                </a>
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setAiPwOpen(true)}
+              >
+                <KeyRound className="h-3.5 w-3.5" />
+                修改中转站密码
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              充值、渠道、日志等复杂操作请前往中转站本站完成。
+            </p>
           </CardContent>
         </Card>
 
-        {/* 模型列表：按分组分类 */}
+        {/* 推荐模型：管理员在管理面板维护的分档，帮用户跳过"模型名一长串看不懂" */}
+        {status.recommended.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Sparkles className="h-4 w-4 text-muted-foreground" />
+                推荐模型
+              </CardTitle>
+              <CardDescription>
+                按综合能力与稳定性分档，从上到下依次递减。点击模型名可复制。
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <RecommendedModels
+                tiers={status.recommended}
+                onCopy={(m) => void copyText(m, `已复制模型名 ${m}`)}
+              />
+            </CardContent>
+          </Card>
+        )}
+
+        {/* 额度 */}
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Bot className="h-4 w-4 text-muted-foreground" />
-              可用模型（{status.models.length}）
-            </CardTitle>
-            <CardDescription>
-              按分组分类显示。点击模型名可复制；不同分组的计费与可用渠道不同。
-            </CardDescription>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Wallet className="h-4 w-4 text-muted-foreground" />
+                  额度
+                </CardTitle>
+                <CardDescription>
+                  剩余 {status.currencySymbol}
+                  {account.quotaUsd.toFixed(4)} · 已用 {status.currencySymbol}
+                  {account.usedUsd.toFixed(4)} · 请求 {account.requestCount} 次
+                </CardDescription>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void handleSync()}
+                disabled={syncing}
+              >
+                {syncing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+                同步
+              </Button>
+            </div>
           </CardHeader>
-          <CardContent className="space-y-4">
-            {status.models.length === 0 ? (
-              <p className="text-sm text-muted-foreground">暂无可用模型</p>
-            ) : (
-              status.availableGroups.map((g) => {
-                const list = status.groupModels[g] ?? []
-                if (list.length === 0) return null
-                return (
-                  <div key={g} className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium">{g} 分组</span>
-                      <Badge variant="secondary" className="text-xs">
-                        {list.length} 个模型
-                      </Badge>
-                      {status.accountGroup === g && (
-                        <Badge variant="success" className="text-xs">
-                          当前账号
+          {account.syncedAt && (
+            <CardContent>
+              <p className="text-xs text-muted-foreground">
+                最后同步：{fmtTime(account.syncedAt)}
+                {account.group ? ` · 分组 ${account.group}` : ""}
+              </p>
+            </CardContent>
+          )}
+        </Card>
+
+        {/* 全部模型：默认折叠。推荐分档已给出选择建议，完整清单是「查漏」用途 */}
+        <Card>
+          <CardHeader
+            className="cursor-pointer select-none"
+            onClick={() => setModelsOpen((v) => !v)}
+          >
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Bot className="h-4 w-4 text-muted-foreground" />
+                  全部可用模型（{status.models.length}）
+                </CardTitle>
+                <CardDescription>
+                  按分组分类显示，点击模型名可复制。不同分组的计费与可用渠道不同。
+                </CardDescription>
+              </div>
+              <ChevronDown
+                className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
+                  modelsOpen ? "rotate-180" : ""
+                }`}
+              />
+            </div>
+          </CardHeader>
+          {modelsOpen && (
+            <CardContent className="space-y-4">
+              {status.models.length === 0 ? (
+                <p className="text-sm text-muted-foreground">暂无可用模型</p>
+              ) : (
+                status.availableGroups.map((g) => {
+                  const list = status.groupModels[g] ?? []
+                  if (list.length === 0) return null
+                  const label = g === "donation" ? "捐献" : g === "default" ? "默认" : g
+                  return (
+                    <div key={g} className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">{label} 分组</span>
+                        <Badge variant="secondary" className="text-xs">
+                          {list.length} 个模型
                         </Badge>
-                      )}
+                        {status.accountGroup === g && (
+                          <Badge variant="success" className="text-xs">
+                            当前账号
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {list.map((m) => (
+                          <Badge
+                            key={`${g}-${m}`}
+                            variant="outline"
+                            className="cursor-pointer font-mono text-xs"
+                            onClick={() => void copyText(m, `已复制模型名 ${m}`)}
+                          >
+                            {m}
+                          </Badge>
+                        ))}
+                      </div>
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      {list.map((m) => (
-                        <Badge
-                          key={`${g}-${m}`}
-                          variant="outline"
-                          className="cursor-pointer font-mono text-xs"
-                          onClick={() => void copyText(m, `已复制模型名 ${m}`)}
-                        >
-                          {m}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-                )
-              })
-            )}
-          </CardContent>
+                  )
+                })
+              )}
+            </CardContent>
+          )}
         </Card>
 
         {/* 额度兑换 */}
@@ -613,70 +838,6 @@ export default function AiPage() {
           </CardContent>
         </Card>
 
-        {/* 使用方式：baseURL 显眼 + 跳转中转站 */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-              接入信息
-            </CardTitle>
-            <CardDescription>
-              在任意 OpenAI 兼容客户端中填入以下两项即可使用。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label>Base URL</Label>
-              <div className="flex items-center gap-2">
-                <Input
-                  readOnly
-                  value="https://api.doulor.cn/v1"
-                  className="font-mono text-sm"
-                />
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={() =>
-                    void copyText("https://api.doulor.cn/v1", "Base URL 已复制")
-                  }
-                  title="复制"
-                >
-                  <Copy className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label>API Key</Label>
-              <p className="text-xs text-muted-foreground">
-                填上面创建的 Key（完整值只在创建时显示一次）
-              </p>
-            </div>
-            <Separator />
-            <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" asChild>
-                <a
-                  href="https://api.doulor.cn"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  <ExternalLink className="h-3.5 w-3.5" />
-                  前往中转站本站
-                </a>
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setAiPwOpen(true)}
-              >
-                <KeyRound className="h-3.5 w-3.5" />
-                修改中转站密码
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              充值、渠道、日志等复杂操作请前往中转站本站完成。
-            </p>
-          </CardContent>
-        </Card>
       </div>
 
       {/* 新建 Key */}
@@ -846,12 +1007,11 @@ interface BindDialogProps {
   onOpenChange: (open: boolean) => void
   preflight: NewApiPreflight | null
   preflightLoading: boolean
-  email: string
+  awaitingOAuth: boolean
   password: string
-  confirm: string
   setPassword: (v: string) => void
-  setConfirm: (v: string) => void
   busy: boolean
+  onReopenOAuth: () => void
   onConfirm: () => void
 }
 
@@ -860,31 +1020,30 @@ function BindDialog({
   onOpenChange,
   preflight,
   preflightLoading,
-  email,
+  awaitingOAuth,
   password,
-  confirm,
   setPassword,
-  setConfirm,
   busy,
+  onReopenOAuth,
   onConfirm,
 }: BindDialogProps) {
-  const exists = Boolean(preflight?.exists)
   // 探测尚未返回时不渲染表单，避免用户先填了再被告知流程不同
   const ready = !preflightLoading && preflight !== null
+  const oidcBound = Boolean(preflight?.oidcBound)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>
-            {exists ? "绑定已有中转站账号" : "开通 AI 中转站"}
-          </DialogTitle>
+          <DialogTitle>开通 AI 中转站</DialogTitle>
           <DialogDescription>
             {!ready
               ? "正在检查中转站账号…"
-              : exists
-                ? `中转站已存在账号「${preflight?.username}」，验证密码后即可绑定。`
-                : `将创建 NewAPI 账号 ${email}，请设置一个密码。`}
+              : awaitingOAuth
+                ? "请在打开的窗口里用 Doulor Cloud 登录，完成后这里会自动继续。"
+                : oidcBound
+                  ? "中转站账号已就绪，输入你的 Doulor Cloud 密码即可完成开通。"
+                  : "需要先到中转站用 Doulor Cloud 登录创建账号。"}
           </DialogDescription>
         </DialogHeader>
 
@@ -893,65 +1052,51 @@ function BindDialog({
             <Loader2 className="h-4 w-4 animate-spin" />
             正在检查…
           </div>
+        ) : awaitingOAuth ? (
+          <div className="space-y-4">
+            <div className="flex items-center gap-3 rounded-md border bg-muted/40 p-4 text-sm text-muted-foreground">
+              <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" />
+              <div>
+                正在等待授权完成… 在弹出窗口里点「用 Doulor Cloud 登录」并允许后，
+                本页会自动继续，无需手动操作。
+              </div>
+            </div>
+            <Button variant="outline" size="sm" className="w-full" onClick={onReopenOAuth}>
+              <ExternalLink className="h-3.5 w-3.5" />
+              没看到窗口？重新打开
+            </Button>
+          </div>
+        ) : oidcBound ? (
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="aiPassword">你的 Doulor Cloud 登录密码</Label>
+              <Input
+                id="aiPassword"
+                type="password"
+                autoComplete="current-password"
+                placeholder="输入你登录 Doulor Cloud 时用的那个密码（不是新设密码）"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+            <div className="rounded-md border border-primary/30 bg-primary/5 p-3 text-xs">
+              <p className="font-medium">
+                这里填的是你<b>已经在用的 Doulor Cloud 密码</b>，不是让你新设一个。
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                系统会验证它，然后同步为你中转站账号的密码，之后两边共用同一个密码。
+              </p>
+            </div>
+          </div>
         ) : (
           <div className="space-y-4">
-            {exists ? (
-              <>
-                <div className="space-y-2">
-                  <Label htmlFor="aiPassword">中转站账号密码</Label>
-                  <Input
-                    id="aiPassword"
-                    type="password"
-                    autoComplete="current-password"
-                    placeholder="输入该账号在中转站的密码"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                  />
-                </div>
-                <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-                  该账号是你在中转站已有的账号，本站只保存访问令牌（不保存密码），
-                  用于代你管理 API Key。邮箱与额度保持中转站现状，不再发放试用额度。
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="space-y-2">
-                  <Label htmlFor="aiPassword">设置密码</Label>
-                  <Input
-                    id="aiPassword"
-                    type="password"
-                    autoComplete="new-password"
-                    placeholder="至少 8 位"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="aiConfirm">确认密码</Label>
-                  <Input
-                    id="aiConfirm"
-                    type="password"
-                    autoComplete="new-password"
-                    value={confirm}
-                    onChange={(e) => setConfirm(e.target.value)}
-                  />
-                </div>
-                {!preflight?.hasMailbox ? (
-                  <div className="flex gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
-                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                    <div>
-                      需要先创建 <code>{email}</code> 收件箱才能开通
-                      （用于接收注册验证码）。请到「邮箱」页添加主邮箱。
-                    </div>
-                  </div>
-                ) : (
-                  <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-                    开通需要接收一封验证码邮件到 {email}，本站会自动读取并完成验证，
-                    通常几秒内完成，请保持页面打开。
-                  </div>
-                )}
-              </>
-            )}
+            <div className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+              中转站里还没有用 Doulor Cloud 登录创建的账号。
+            </div>
+            <Button variant="outline" className="w-full" onClick={onReopenOAuth}>
+              <ExternalLink className="h-4 w-4" />
+              前往中转站登录
+            </Button>
           </div>
         )}
 
@@ -959,21 +1104,15 @@ function BindDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             取消
           </Button>
-          <Button
-            onClick={onConfirm}
-            disabled={
-              busy ||
-              !ready ||
-              password.length < 8 ||
-              // 仅新账号流程需要两次输入一致
-              (!exists && password !== confirm) ||
-              // 新账号流程要求收件箱存在，否则后端必然报错
-              (!exists && preflight?.hasMailbox === false)
-            }
-          >
-            {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-            {busy ? "处理中…" : exists ? "验证并绑定" : "开通"}
-          </Button>
+          {oidcBound && !awaitingOAuth && (
+            <Button
+              onClick={onConfirm}
+              disabled={busy || password.length < 8}
+            >
+              {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+              {busy ? "处理中…" : "开通"}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
