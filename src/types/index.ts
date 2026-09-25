@@ -682,6 +682,12 @@ export interface Profile {
   font: string
   cjkFont: string
   layout: string
+  /** 缩放模式：'auto' 内容超出屏幕时自动缩小，'off' 固定用 scaleManual */
+  scaleMode: string
+  /** 自动缩放下限（百分比） */
+  scaleMin: number
+  /** 基准缩放比例（百分比） */
+  scaleManual: number
   contacts: ProfileContact[]
   modules: ProfileModule[]
   subdomainId: string | null
@@ -715,6 +721,11 @@ export interface ProfileOverview {
   cjkFontOptions: ProfileOption[]
   moduleOptions: ProfileOption[]
   contactTypes: ContactType[]
+  /** 缩放模式白名单与选项（与服务端同源） */
+  scaleModes: string[]
+  scaleModeOptions: ProfileOption[]
+  scaleMinRange: { min: number; max: number }
+  scaleManualRange: { min: number; max: number }
   r2Configured: boolean
   limits: { avatar: number; background: number; music: number }
 }

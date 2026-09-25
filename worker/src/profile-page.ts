@@ -326,11 +326,16 @@ const BASE_CSS = `
   --gallery-radius:10px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%}
+/* html/body 不设 height:100%：设了之后 body 高度被钉死在视口高，
+   而 flex 的 justify-content:center 在内容溢出时会把溢出量**平均分到上下两侧**，
+   上侧那部分滚不到（scrollTop 不能为负）→ 模块一多，头像和昵称就永久看不见了。
+   改成 height:auto 让 body 随内容增长；再配 safe center 兜底：
+   safe 关键字规定「溢出时按 start 对齐」，即退化成从顶部开始、可正常滚动。 */
+html,body{height:auto}
 body{
   font-family:var(--font-body);
   -webkit-font-smoothing:antialiased;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  display:flex;flex-direction:column;align-items:center;justify-content:safe center;
   min-height:100vh;min-height:100dvh;padding:28px 22px;
   overflow-x:hidden;
   background:var(--bg);color:var(--text);
@@ -341,6 +346,14 @@ body::before{
 }
 a{color:inherit;text-decoration:none}
 .wrap{width:100%;max-width:460px;position:relative;z-index:1}
+
+/* ---- 自动缩放 ----
+   为什么用 zoom 而不是 transform:scale：
+   transform 只改变绘制结果，**布局高度不变**，缩完页面底下仍留一大段
+   空白滚动区；zoom 参与布局计算，文档高度会跟着缩，滚动条长度才正确。
+   而且 zoom 在 Chrome/Safari/Firefox(126+) 都已支持，本项目面向现代浏览器。
+   基准值由内联样式 --pz 注入（见 renderProfileHtml），默认 1。 */
+.wrap{zoom:var(--pz,1)}
 
 /* ---- 身份区 ---- */
 .hero{display:flex;flex-direction:column;align-items:center;text-align:center}
@@ -697,7 +710,7 @@ body.layout-side .status-pill{margin-top:12px}
   body.layout-side .hero{position:static;flex-basis:auto;align-items:center;text-align:center}
 }`,
   split: `
-body.layout-split{justify-content:flex-end;padding-bottom:8vh;padding-top:48px}
+body.layout-split{justify-content:safe flex-end;padding-bottom:8vh;padding-top:48px}
 body.layout-split .wrap{max-width:500px;padding:32px 26px;border-radius:24px;
   background:rgba(8,8,14,.58);border:1px solid rgba(255,255,255,.1);
   -webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);
@@ -1130,6 +1143,62 @@ function faviconJs(url: string): string {
   })();`
 }
 
+/**
+ * 自动缩放 JS：内容超出视口时把 .wrap 整体缩小到刚好放下。
+ *
+ * 为什么在客户端算而不是服务端：
+ *   视口高度只有浏览器知道（手机 667 / 桌面 1080 差一倍），服务端渲染时
+ *   无法确定该缩多少。故把「模式 + 两个比例」注入页面，由 JS 现场量高度。
+ *
+ * 算法（一次算完，不做迭代）：
+ *   1. 读 .wrap 的 offsetHeight 作为「自然高度」——实测它**不受 zoom 影响**
+ *      （zoom 只影响 getBoundingClientRect），所以可以边缩放边量，不会自激。
+ *   2. 可用高度 = 视口高 - 上下内边距；比例 = 可用 / 自然高。
+ *   3. 夹到 [scaleMin, scaleManual]：auto 模式**只缩不放**，
+ *      内容不长时算出来 ≥ scaleManual，取 scaleManual 即观感与不缩放一致。
+ *
+ * 触发时机：load / resize / 字体加载完成后（字体换了行高会变）。
+ * 用 ResizeObserver 监听 .wrap 自身的自然高度变化（如图片加载完），
+ * 但只在「高度真的变了」时重算，避免 zoom 引起的回调形成死循环。
+ */
+function autoscaleJs(mode: string, minPct: number, manualPct: number): string {
+  const cfg = JSON.stringify({
+    mode,
+    min: minPct / 100,
+    manual: manualPct / 100,
+  }).replace(/</g, "\\u003c")
+  return `(function(){
+    var cfg=${cfg};
+    var wrap=document.querySelector('.wrap');
+    if(!wrap)return;
+    var lastNatural=0;
+    function apply(){
+      var natural=wrap.offsetHeight;      /* 不受 zoom 影响 */
+      if(!natural)return;
+      lastNatural=natural;
+      if(cfg.mode!=='auto'){wrap.style.setProperty('--pz',cfg.manual);return;}
+      var cs=getComputedStyle(document.body);
+      var avail=window.innerHeight-parseFloat(cs.paddingTop)-parseFloat(cs.paddingBottom);
+      /* 页面底部还可能有横向滚动条等占位，留 2px 余量避免「差一点」又出滚动条 */
+      var ratio=avail>0?Math.min(cfg.manual,(avail-2)/natural):cfg.manual;
+      if(ratio>cfg.manual)ratio=cfg.manual;
+      if(ratio<cfg.min)ratio=cfg.min;
+      wrap.style.setProperty('--pz',String(Math.round(ratio*1000)/1000));
+    }
+    apply();
+    addEventListener('resize',apply,{passive:true});
+    /* 字体/图片加载完高度会变，重算一次（这两个事件都只触发有限次） */
+    addEventListener('load',apply);
+    if(document.fonts&&document.fonts.ready)document.fonts.ready.then(apply);
+    /* 只监听自然高度变化；zoom 不改变 offsetHeight，故不会自激 */
+    if(window.ResizeObserver){
+      new ResizeObserver(function(){
+        if(wrap.offsetHeight!==lastNatural)apply();
+      }).observe(wrap);
+    }
+  })();`
+}
+
 /** 背景音乐播放器 JS：播放/暂停 + 进度条 + 时间显示 + 点击跳转。 */
 function musicPlayerJs(): string {
   return `(function(){
@@ -1436,7 +1505,12 @@ export function renderProfileHtml(
     (faviconRounded ? faviconJs(favicon) : "") +
     musicPlayerJs() +
     effectsJs(fx) +
-    introJs(intro, name)
+    introJs(intro, name) +
+    autoscaleJs(
+      p.scaleMode ?? "auto",
+      p.scaleMin ?? 50,
+      p.scaleManual ?? 100
+    )
 
   const baseTag = opts?.baseHref ? `<base href="${esc(opts.baseHref)}">` : ""
 

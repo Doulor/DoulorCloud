@@ -405,6 +405,9 @@ export default function ProfilePage() {
     font: "system",
     cjkFont: "system",
     layout: "center",
+    scaleMode: "auto",
+    scaleMin: 50,
+    scaleManual: 100,
   })
   const [contacts, setContacts] = React.useState<ProfileContact[]>([])
   const [modules, setModules] = React.useState<ProfileModule[]>(() => normalizeModules([]))
@@ -440,6 +443,9 @@ export default function ProfilePage() {
         font: p.font ?? "system",
         cjkFont: p.cjkFont ?? "system",
         layout: p.layout ?? "center",
+        scaleMode: p.scaleMode ?? "auto",
+        scaleMin: p.scaleMin ?? 50,
+        scaleManual: p.scaleManual ?? 100,
       })
       setContacts(p.contacts)
       setModules(normalizeModules(p.modules))
@@ -786,6 +792,89 @@ export default function ProfilePage() {
                       </button>
                     ))}
                   </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">自动缩放</CardTitle>
+                  <CardDescription>
+                    模块开得多时内容会超出屏幕。开启后按屏幕高度自动缩小，一屏放下
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {(data?.scaleModeOptions ?? []).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setForm((f) => ({ ...f, scaleMode: opt.id }))}
+                        className={cn(
+                          "rounded-lg border p-3 text-left transition-all",
+                          form.scaleMode === opt.id
+                            ? "border-primary bg-primary/5"
+                            : "border-border hover:border-primary/50"
+                        )}
+                      >
+                        <div className="text-sm font-medium">{opt.label}</div>
+                        <div className="mt-0.5 text-xs text-muted-foreground">{opt.desc}</div>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="scaleManual">
+                        {form.scaleMode === "auto" ? "起始比例" : "显示比例"}
+                      </Label>
+                      <span className="font-mono text-sm text-muted-foreground">
+                        {form.scaleManual}%
+                      </span>
+                    </div>
+                    <input
+                      id="scaleManual"
+                      type="range"
+                      min={data?.scaleManualRange.min ?? 50}
+                      max={data?.scaleManualRange.max ?? 150}
+                      step={5}
+                      value={form.scaleManual}
+                      onChange={(e) =>
+                        setForm((f) => ({ ...f, scaleManual: Number(e.target.value) }))
+                      }
+                      className="h-2 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {form.scaleMode === "auto"
+                        ? "自动缩放只在这个比例基础上继续缩小，不会放大 —— 内容不长时观感与不缩放一致。"
+                        : "固定按这个比例显示，内容超出屏幕时需要滚动查看。"}
+                    </p>
+                  </div>
+
+                  {form.scaleMode === "auto" && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label htmlFor="scaleMin">最小比例</Label>
+                        <span className="font-mono text-sm text-muted-foreground">
+                          {form.scaleMin}%
+                        </span>
+                      </div>
+                      <input
+                        id="scaleMin"
+                        type="range"
+                        min={data?.scaleMinRange.min ?? 30}
+                        max={data?.scaleMinRange.max ?? 100}
+                        step={5}
+                        value={form.scaleMin}
+                        onChange={(e) =>
+                          setForm((f) => ({ ...f, scaleMin: Number(e.target.value) }))
+                        }
+                        className="h-2 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        内容再多也不会小于这个比例，避免文字小到看不清。设成 100% 等于关闭自动缩放。
+                      </p>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
 

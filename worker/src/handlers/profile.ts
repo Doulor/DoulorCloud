@@ -161,6 +161,44 @@ export const LAYOUT_OPTIONS = [
 ] as const
 
 /**
+ * 缩放模式。
+ *   off  = 固定比例，始终用 scale_manual
+ *   auto = 内容超出视口时在 scale_manual 基础上继续缩小，下限 scale_min
+ *
+ * 「超出才缩」是刻意的：内容不长的名片算出来就是 scale_manual（默认 100%），
+ * 观感与不做缩放完全一致，不会出现「短名片被放大到失真」。
+ */
+export const SCALE_MODES = ["off", "auto"] as const
+
+export const SCALE_MODE_OPTIONS = [
+  { id: "auto", label: "自动适配", desc: "内容超出屏幕时自动缩小，一屏放下" },
+  { id: "off", label: "固定比例", desc: "始终按下面设定的比例显示" },
+] as const
+
+/** 缩放比例的取值范围（百分比）。与前端滑杆的 min/max 同源。 */
+export const SCALE_MIN_RANGE = { min: 30, max: 100 } as const
+export const SCALE_MANUAL_RANGE = { min: 50, max: 150 } as const
+
+/** 认不出的缩放模式一律按 auto（对用户最有利：内容放不下时会自动缩） */
+function normalizeScaleMode(raw: string | null | undefined): string {
+  return (SCALE_MODES as readonly string[]).includes(raw ?? "") ? (raw as string) : "auto"
+}
+
+/** 把百分比夹到合法区间；非数字用兜底值（不信任历史数据） */
+function clampScale(
+  raw: number | null | undefined,
+  range: { min: number; max: number },
+  fallback: number
+): number {
+  // ⚠️ 必须先挡掉 null：Number(null) === 0 是有限数，会一路夹到下限，
+  // 表现为「表单传了 null 就被悄悄改成 50%」而不是保持默认。
+  if (raw === null || raw === undefined || typeof raw === "boolean") return fallback
+  const n = Math.trunc(Number(raw))
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(range.max, Math.max(range.min, n))
+}
+
+/**
  * 中文正文字体栈（英文标题字由 font 选项控制，二者独立）。
  * 只用系统字体栈，不引入 CJK webfont（体积太大）。
  */
@@ -404,6 +442,12 @@ interface ProfileRow {
   subdomain_id: string | null
   fqdn: string | null
   view_count: number
+  /** 自动缩放模式：'off' 固定用 scale_manual，'auto' 超出视口时按比例缩小 */
+  scale_mode: string
+  /** 自动缩放的下限（百分比），避免内容过多时文字小到不可读 */
+  scale_min: number
+  /** 基准缩放比例（百分比），两种模式下都是起点 */
+  scale_manual: number
   created_at: string
   updated_at: string
 }
@@ -518,6 +562,9 @@ function toPublicProfile(row: ProfileRow, slugOrFqdn: { profilePath: string }) {
     font: row.font,
     layout: row.layout,
     cjkFont: row.cjk_font ?? "system",
+    scaleMode: normalizeScaleMode(row.scale_mode),
+    scaleMin: clampScale(row.scale_min, SCALE_MIN_RANGE, 50),
+    scaleManual: clampScale(row.scale_manual, SCALE_MANUAL_RANGE, 100),
     contacts: parseContacts(row.contacts),
     modules: parseModules(row.modules),
     subdomainId: row.subdomain_id,
@@ -549,6 +596,10 @@ export async function getProfile(env: Env, request: Request): Promise<Response> 
     cjkFontOptions: CJK_FONT_OPTIONS,
     moduleOptions: MODULE_OPTIONS,
     contactTypes: CONTACT_TYPES,
+    scaleModes: SCALE_MODES,
+    scaleModeOptions: SCALE_MODE_OPTIONS,
+    scaleMinRange: SCALE_MIN_RANGE,
+    scaleManualRange: SCALE_MANUAL_RANGE,
     r2Configured: await isStorageConfigured(env),
     limits: {
       avatar: MAX_AVATAR_BYTES,
@@ -634,6 +685,21 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
       ? body.cjkFont
       : (row.cjk_font ?? "system")
 
+  // 缩放：模式走白名单，两个比例做区间夹取（不信任前端）
+  const scaleMode =
+    typeof body.scaleMode === "string" &&
+    (SCALE_MODES as readonly string[]).includes(body.scaleMode)
+      ? body.scaleMode
+      : normalizeScaleMode(row.scale_mode)
+  const scaleMin =
+    body.scaleMin === undefined
+      ? clampScale(row.scale_min, SCALE_MIN_RANGE, 50)
+      : clampScale(body.scaleMin as number, SCALE_MIN_RANGE, 50)
+  const scaleManual =
+    body.scaleManual === undefined
+      ? clampScale(row.scale_manual, SCALE_MANUAL_RANGE, 100)
+      : clampScale(body.scaleManual as number, SCALE_MANUAL_RANGE, 100)
+
   // 模块：数组顺序即展示顺序，逐项白名单清洗
   let modulesJson = row.modules ?? "[]"
   if (Array.isArray(body.modules)) {
@@ -645,7 +711,8 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
        slug = ?, display_name = ?, bio = ?,
        avatar_url = ?, background_url = ?, music_url = ?, music_title = ?,
        music_autoplay = ?, music_cover_url = ?, theme = ?, accent = ?, effects = ?,
-       intro = ?, font = ?, layout = ?, cjk_font = ?, contacts = ?, modules = ?, updated_at = ?
+       intro = ?, font = ?, layout = ?, cjk_font = ?, contacts = ?, modules = ?,
+       scale_mode = ?, scale_min = ?, scale_manual = ?, updated_at = ?
      WHERE user_id = ?`
   )
     .bind(
@@ -667,6 +734,9 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
       cjkFont,
       contactsJson,
       modulesJson,
+      scaleMode,
+      scaleMin,
+      scaleManual,
       new Date().toISOString(),
       user.id
     )
@@ -720,6 +790,15 @@ export async function previewProfile(env: Env, request: Request): Promise<Respon
     font: inList(body.font, FONTS, row.font),
     cjkFont: inList(body.cjkFont, CJK_FONTS, row.cjk_font ?? "system"),
     layout: inList(body.layout, LAYOUTS, row.layout),
+    scaleMode: inList(body.scaleMode, SCALE_MODES, normalizeScaleMode(row.scale_mode)),
+    scaleMin:
+      body.scaleMin === undefined
+        ? clampScale(row.scale_min, SCALE_MIN_RANGE, 50)
+        : clampScale(body.scaleMin as number, SCALE_MIN_RANGE, 50),
+    scaleManual:
+      body.scaleManual === undefined
+        ? clampScale(row.scale_manual, SCALE_MANUAL_RANGE, 100)
+        : clampScale(body.scaleManual as number, SCALE_MANUAL_RANGE, 100),
     avatar: asset("avatar", row.avatar_key, body.avatarUrl, row.avatar_url),
     background: asset("background", row.background_key, body.backgroundUrl, row.background_url),
     music: asset("music", row.music_key, body.musicUrl, row.music_url),
@@ -1076,6 +1155,12 @@ export interface PublicProfile {
   font: string
   cjkFont: string
   layout: string
+  /** 缩放模式：'off' | 'auto'（见 SCALE_MODES） */
+  scaleMode: string
+  /** 自动缩放下限（百分比） */
+  scaleMin: number
+  /** 基准缩放比例（百分比） */
+  scaleManual: number
   avatar: string | null
   background: string | null
   music: string | null
@@ -1131,6 +1216,9 @@ export async function loadPublicProfile(
     font: row.font,
     cjkFont: row.cjk_font ?? "system",
     layout: row.layout,
+    scaleMode: normalizeScaleMode(row.scale_mode),
+    scaleMin: clampScale(row.scale_min, SCALE_MIN_RANGE, 50),
+    scaleManual: clampScale(row.scale_manual, SCALE_MANUAL_RANGE, 100),
     avatar: assetUrl("avatar", row.avatar_key, row.avatar_url),
     background: assetUrl("background", row.background_key, row.background_url),
     music: assetUrl("music", row.music_key, row.music_url),
