@@ -1,4 +1,4 @@
-# Doulor Cloud（荧烛云）
+# Doulor Cloud
 
 > 一站式云端资源分发平台 —— 二级域名、域名邮箱、直链网盘、个人名片（Bento 空间）与 AI API 中转站。
 > 线上实例：[cloud.doulor.cn](https://cloud.doulor.cn)
