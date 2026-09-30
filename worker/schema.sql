@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS dns_records (
   cf_id       TEXT,                                -- Cloudflare DNS record id
   name        TEXT NOT NULL,                       -- e.g. blog（相对前缀）
   fqdn        TEXT NOT NULL,                       -- blog.ruben.doulor.cn
-  type        TEXT NOT NULL,                       -- A | AAAA | CNAME | TXT | MX
+  type        TEXT NOT NULL,                       -- A | AAAA | CNAME | TXT | MX | SRV
   content     TEXT NOT NULL,
   ttl         INTEGER NOT NULL DEFAULT 1,
   proxied     INTEGER NOT NULL DEFAULT 0,
@@ -177,6 +177,13 @@ CREATE TABLE IF NOT EXISTS newapi_accounts (
   username        TEXT NOT NULL,                 -- NewAPI 侧用户名
   email           TEXT NOT NULL,                 -- <username>@doulor.cn
   enc_token       TEXT NOT NULL,                 -- AES-GCM 加密的 access token
+  -- 加密的明文密码：缓存 token 失效时用它自动重登续期（可空）
+  -- ⚠️ 2026-09-30 补齐：本文件是**基线**建表语句，先于 migrations 执行，
+  --    而 migrations/0005 用的是 `CREATE TABLE IF NOT EXISTS` ⇒ 这里少一列，
+  --    测试库里就永远没这一列（线上是有的），表现为
+  --    「table newapi_accounts has no column named enc_password」。
+  --    以后改这里的表结构，务必同步改 migrations/0005_storage_ai.sql。
+  enc_password    TEXT,
   group_name      TEXT,
   quota           INTEGER NOT NULL DEFAULT 0,
   used_quota      INTEGER NOT NULL DEFAULT 0,
@@ -257,6 +264,52 @@ CREATE TABLE IF NOT EXISTS wb2api_credentials (
   updated_at  TEXT NOT NULL
 );
 
+-- ============ CLI2API 反代绑定通道（第二条，与 wb2api 并列）============
+-- 用户登录自己的 Qoder / WorkBuddy / Trae 账号 → 账号进入 cli2api 共享池
+-- → 自动解锁本站「AI 中转站」权限。免管理员审核，单独建表。
+-- 详见 worker/migrations/0058_cli2api.sql 的说明；此处供全新安装使用。
+
+-- 绑定关系：谁贡献了哪个 cli2api 账号
+CREATE TABLE IF NOT EXISTS cli2api_bindings (
+  id                    TEXT PRIMARY KEY,
+  user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id            TEXT NOT NULL,
+  provider              TEXT NOT NULL,
+  region                TEXT NOT NULL,
+  nickname              TEXT,
+  status                TEXT NOT NULL DEFAULT 'active',
+  granted_ai_permission INTEGER NOT NULL DEFAULT 0,
+  acknowledged_ip       TEXT,
+  created_at            TEXT NOT NULL,
+  removed_at            TEXT,
+  removed_by            TEXT REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cli2api_bindings_account ON cli2api_bindings(account_id);
+CREATE INDEX IF NOT EXISTS idx_cli2api_bindings_user ON cli2api_bindings(user_id, status);
+
+-- 登录会话：account_id 也要记，会话过期/失败时得把那个空账号删掉
+CREATE TABLE IF NOT EXISTS cli2api_login_sessions (
+  id              TEXT PRIMARY KEY,
+  user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id      TEXT NOT NULL,
+  provider        TEXT NOT NULL,
+  region          TEXT NOT NULL,
+  auth_url        TEXT,
+  status          TEXT NOT NULL DEFAULT 'pending',
+  message         TEXT,
+  acknowledged_ip TEXT,
+  created_at      TEXT NOT NULL,
+  expires_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cli2api_sessions_expires ON cli2api_login_sessions(expires_at);
+
+-- console key（= 该实例的管理员密钥，不是客户端 key），加密落库
+CREATE TABLE IF NOT EXISTS cli2api_credentials (
+  id              INTEGER PRIMARY KEY CHECK (id = 1),
+  enc_console_key TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
 -- ============ OAuth 2.0 授权服务器（Doulor Cloud 作为身份提供方）============
 -- 让自有站点（NewAPI 等）通过 Doulor Cloud 账号登录。
 -- ⚠️ 方向：别的站点来接我们，不是我们接别人。
@@ -316,3 +369,101 @@ CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires ON oauth_codes(expires_at);
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user ON oauth_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_expires ON oauth_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_oauth_grants_user ON oauth_grants(user_id, client_id);
+
+-- ---- 0047: AI 捐献失败模型的重试记录 ----
+-- 见 migrations/0047_donation_model_retries.sql 的说明。
+CREATE TABLE IF NOT EXISTS donation_model_retries (
+  donation_id   TEXT NOT NULL REFERENCES donations(id) ON DELETE CASCADE,
+  model         TEXT NOT NULL,
+  channel_id    INTEGER NOT NULL,
+  status        TEXT NOT NULL,
+  reason        TEXT,
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  last_tried_at TEXT NOT NULL,
+  next_retry_at TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  PRIMARY KEY (donation_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dmr_due ON donation_model_retries(status, next_retry_at);
+
+-- ---- 0051: 用户反馈（私有工单 + 管理员回复）----
+-- 见 migrations/0051_feedback.sql 的说明。
+CREATE TABLE IF NOT EXISTS feedback (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  category    TEXT NOT NULL,                      -- bug | feature | donation | other
+  title       TEXT NOT NULL,
+  body        TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'pending',    -- pending | processing | resolved | closed
+  admin_reply TEXT,
+  replied_at  TEXT,
+  replied_by  TEXT REFERENCES users(id) ON DELETE SET NULL,
+  user_read   INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback(status, created_at DESC);
+
+-- ---- 0068: 消息箱 + 活动系统 ----
+-- 见 migrations/0068_user_messages_and_events.sql 的说明。
+--
+-- ⚠️ notifications 表**不在此处重建**：它由 0024_community.sql 建表，
+-- 0068 用 ALTER TABLE 加列（category/title/body/link/payload/dedup_key）。
+-- ALTER 不幂等，写进基线会让「schema.sql + 迁移链」的测试环境重复加列而报错，
+-- 所以基线只保留**新增的表**（CREATE TABLE IF NOT EXISTS 幂等）。
+
+CREATE TABLE IF NOT EXISTS events (
+  id               TEXT PRIMARY KEY,
+  title            TEXT NOT NULL,
+  body             TEXT NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'draft',  -- draft | active | ended | archived
+  starts_at        TEXT,
+  ends_at          TEXT,
+  reward_label     TEXT,
+  reward_type      TEXT NOT NULL DEFAULT 'none',
+  reward_params    TEXT,
+  condition_type   TEXT NOT NULL DEFAULT 'always',
+  condition_params TEXT,
+  created_by       TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_status ON events(status, starts_at, ends_at);
+
+CREATE TABLE IF NOT EXISTS event_claims (
+  id            TEXT PRIMARY KEY,
+  event_id      TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  user_id       TEXT NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+  reward_type   TEXT NOT NULL,
+  reward_status TEXT NOT NULL DEFAULT 'pending',  -- pending | granted | manual | failed
+  reward_detail TEXT,
+  claimed_at    TEXT NOT NULL,
+  granted_at    TEXT,
+  granted_by    TEXT REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_claims_unique ON event_claims(event_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_event_claims_user ON event_claims(user_id, claimed_at DESC);
+
+-- ---- 0071: 公告邮件群发队列 ----
+-- 见 migrations/0071_announcement_mail_queue.sql 的说明。
+-- announcements 的 mail_status/mail_total/... 五列由该迁移 ALTER 加上，不在此重复
+-- （ALTER 不幂等，写进基线会让「schema.sql + 迁移链」的测试环境重复加列而报错）。
+CREATE TABLE IF NOT EXISTS announcement_mail_queue (
+  id            TEXT PRIMARY KEY,
+  announcement_id TEXT NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
+  user_id       TEXT REFERENCES users(id) ON DELETE SET NULL,
+  email         TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'pending',  -- pending | sent | failed
+  error         TEXT,
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  sent_at       TEXT,
+  created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_amq_pending ON announcement_mail_queue(announcement_id, status);
+CREATE INDEX IF NOT EXISTS idx_amq_status ON announcement_mail_queue(status, created_at);

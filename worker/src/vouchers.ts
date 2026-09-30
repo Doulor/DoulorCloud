@@ -18,8 +18,10 @@ import {
   FEATURES,
   FEATURE_LABELS,
   parsePermissions,
+  grantFeaturesSql,
   type Feature,
 } from "./permissions"
+import { ensureNewApiAccountEnabled } from "./newapi-access"
 import type { Env } from "./env"
 
 /** 首捐奖励券的来源标记（也是「一辈子只发一张」的幂等键） */
@@ -65,11 +67,27 @@ export async function grantFeatures(
   features: Feature[]
 ): Promise<void> {
   if (features.length === 0) return
-  const perms = await loadPermissions(env, userId)
-  for (const f of features) perms[f] = true
-  await env.DB.prepare("UPDATE users SET permissions = ?, updated_at = ? WHERE id = ?")
-    .bind(JSON.stringify(perms), new Date().toISOString(), userId)
+
+  // ⚠️ 2026-09-26 审计：原先是「读出 permissions → 在 JS 里合并 → 整列写回」。
+  // 同时兑两张券时，两个请求各自基于旧快照写回绝对值，后写的一方会把先写方
+  // 刚授予的模块整列覆盖掉 —— 表现为「兑了两张券却只生效一张」。
+  // 改用 json_set 在原列上只动目标键，D1/SQLite 单条语句原子生效。
+  await env.DB.prepare(
+    `UPDATE users SET permissions = ${grantFeaturesSql(features)}, updated_at = ? WHERE id = ?`
+  )
+    .bind(new Date().toISOString(), userId)
     .run()
+
+  // 给到 `ai` 时顺带确保中转站账号是启用的（写在权限落库**之后**：权限才是主操作）。
+  //
+  // 与捐献审核那条路（handlers/donations.ts）是同一个洞的不同入口：商汤巡检
+  // 收回 ai 时会连带 disable 中转站账号，用户后来通过**兑换码 / 积分商城**
+  // 把 ai 拿回来，账号却还是禁用 —— 表现成「有权限但调不通」。
+  // 放在这里是因为「授予权限」在本文件只有这一个函数，堵一处覆盖两条路。
+  // 该函数内部自己 try/catch，失败不影响授权本身。
+  if (features.includes("ai")) {
+    await ensureNewApiAccountEnabled(env, userId)
+  }
 }
 
 /** 校验一个模块名是否合法（前端传进来的东西不能信） */

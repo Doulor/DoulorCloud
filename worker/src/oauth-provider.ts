@@ -21,7 +21,7 @@
  *   picture            → 本站头像地址（scope 含 profile 且用户有头像时）
  */
 import { ApiError } from "./http"
-import { generateToken, hashToken, uuid } from "./crypto"
+import { generateToken, hashToken, uuid, timingSafeEqual } from "./crypto"
 import type { Env } from "./env"
 
 // ---- 常量 ----
@@ -309,6 +309,18 @@ export async function updateClient(
   await env.DB.prepare(`UPDATE oauth_clients SET ${sets.join(", ")} WHERE id = ?`)
     .bind(...binds)
     .run()
+
+  // ⚠️ 2026-09-25 审计（L14）：停用应用必须**同时作废它已签发的令牌**。
+  // 原先只把 `oauth_clients.disabled` 置 1，而 `verifyAccessToken` 根本不看这个标志 ——
+  // 于是「管理员停用了一个应用」之后，它手上的 access_token 仍能继续调
+  // `/userinfo` 直到自然过期（最长 1 小时）。停用应当是立即生效的。
+  if (patch.disabled === true) {
+    await env.DB.prepare(
+      "UPDATE oauth_tokens SET revoked = 1 WHERE client_id = ? AND revoked = 0"
+    )
+      .bind(row.client_id)
+      .run()
+  }
 }
 
 /** 重置密钥：返回新的明文，旧的立即失效 */
@@ -341,14 +353,21 @@ export async function deleteClient(env: Env, id: string): Promise<void> {
   ])
 }
 
-/** 校验 client_secret（token 端点用）。时间安全比较由哈希后比对天然满足。 */
+/**
+ * 校验 client_secret（token 端点用）。
+ *
+ * ⚠️ 2026-09-25 审计（L18）：原先用 `===` 比较两个 SHA-256 十六进制摘要，
+ * 注释还写着「时间安全比较由哈希后比对天然满足」—— 这个说法是错的：
+ * `===` 在第一个不同字符处短路，仍然泄露前缀匹配长度。
+ * 摘要不可逆让它实际不可利用，但仓库里本来就有 `timingSafeEqual`，没有理由不复用。
+ */
 export async function verifyClientSecret(
   client: OAuthClientRow,
   secret: string
 ): Promise<boolean> {
   if (!secret) return false
   const actual = await hashToken(secret)
-  return actual === client.client_secret_hash
+  return timingSafeEqual(actual, client.client_secret_hash)
 }
 
 // ---- 授权码 ----
@@ -488,8 +507,16 @@ export async function verifyAccessToken(
   token: string
 ): Promise<{ userId: string; clientId: string; scopes: string } | null> {
   if (!token) return null
+  // ⚠️ 2026-09-25 审计（L14）：连表看应用的停用状态。
+  // `updateClient` 现在会在停用时顺手作废令牌，但那只覆盖「本次之后」；
+  // 历史上已经签发、且当时没被作废的令牌仍要在校验时兜住。
+  // 停用一个应用应该是立即生效的，不能依赖签发时刻的状态。
   const row = await env.DB.prepare(
-    "SELECT * FROM oauth_tokens WHERE token_hash = ? LIMIT 1"
+    `SELECT t.client_id, t.user_id, t.scopes, t.expires_at, t.revoked,
+            COALESCE(c.disabled, 0) AS client_disabled
+       FROM oauth_tokens t
+       LEFT JOIN oauth_clients c ON c.client_id = t.client_id
+      WHERE t.token_hash = ? LIMIT 1`
   )
     .bind(await hashToken(token))
     .first<{
@@ -498,11 +525,37 @@ export async function verifyAccessToken(
       scopes: string
       expires_at: string
       revoked: number
+      client_disabled: number
     }>()
   if (!row) return null
   if (row.revoked === 1) return null
+  if (row.client_disabled === 1) return null
   if (new Date(row.expires_at).getTime() < Date.now()) return null
   return { userId: row.user_id, clientId: row.client_id, scopes: row.scopes }
+}
+
+/**
+ * 作废某用户的**全部** OAuth 令牌（2026-09-25 审计 L14）。
+ *
+ * 用在「改密码」这类「假定账号已泄露、需要切断一切既有授权」的动作上。
+ * 原先改密码只删 `sessions`，OAuth 令牌不受影响 —— 攻击者拿到的 access_token
+ * 在改密码之后仍能继续调 `/userinfo`（最长 1 小时）。
+ *
+ * 注意**没有**接到「登出」上：登出是日常操作，把用户所有已授权的
+ * 第三方集成一起打断是明显的功能回归，不是修复。
+ * 用户主动「吊销全部授权」需要一个新路由（`index.ts` 目前由另一个 AI 占用），
+ * 已记为待办。
+ */
+export async function revokeAllUserTokens(
+  env: Env,
+  userId: string
+): Promise<number> {
+  const res = await env.DB.prepare(
+    "UPDATE oauth_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0"
+  )
+    .bind(userId)
+    .run()
+  return res.meta?.changes ?? 0
 }
 
 // ---- 授权记忆 ----

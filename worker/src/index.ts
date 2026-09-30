@@ -12,22 +12,41 @@ import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
 import * as voucherHandlers from "./handlers/vouchers"
 import * as wb2apiHandlers from "./handlers/wb2api"
+import * as cli2apiHandlers from "./handlers/cli2api"
 import * as myInviteHandlers from "./handlers/my-invites"
 import * as frpHandlers from "./handlers/frp"
 import * as profileHandlers from "./handlers/profile"
 import * as identityHandlers from "./handlers/identity"
 import * as proxyHandlers from "./handlers/proxy"
+import * as cfQuotaHandlers from "./handlers/cf-quota"
 import * as tempboxHandlers from "./handlers/tempbox"
 import * as announcementHandlers from "./handlers/announcements"
+import * as funLinkHandlers from "./handlers/fun-links"
+import * as funLinkProbeHandlers from "./handlers/fun-link-probe"
+import * as titleHandlers from "./handlers/titles"
 import * as r2AdminHandlers from "./handlers/r2-admin"
 import * as achievementHandlers from "./handlers/achievements"
 import * as communityHandlers from "./handlers/community"
+import * as appNotifyHandlers from "./handlers/app-notify"
+import * as spaceHandlers from "./handlers/space"
 import * as analyticsHandlers from "./handlers/analytics"
+import * as auditHandlers from "./handlers/audit"
 import * as chatHandlers from "./handlers/chat"
 import * as oauthHandlers from "./handlers/oauth"
+import * as feedbackHandlers from "./handlers/feedback"
+import * as eventHandlers from "./handlers/events"
+import * as pointHandlers from "./handlers/points"
+import * as attentionHandlers from "./handlers/attention"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
 import { runMaintenance } from "./maintenance"
+import { processScheduledPublishes } from "./scheduled-publish"
+
+/**
+ * 「到点发布」专用的 cron 表达式（每分钟）。必须与 wrangler.toml 的 [triggers] crons 一致 ——
+ * scheduled 处理器靠它区分「每小时的完整运维」和「每分钟的发布 tick」。
+ */
+const SCHEDULED_PUBLISH_CRON = "* * * * *"
 
 export interface WorkerContext {
   env: Env
@@ -61,12 +80,43 @@ type RouteRule =
 
 function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteRule[] {
   return [
+  // ⚠️ 临时诊断端点（2026-10-01，验证 D1 读复制是否落到副本后**立即删除**）
+  {
+    kind: "exact",
+    path: "/admin/d1-probe",
+    method: "GET",
+    handle: async () => {
+      const { requireUser } = await import("./auth")
+      const me = await requireUser(env, request)
+      if (me.role !== "root" && me.role !== "admin") {
+        throw new ApiError(403, "无权限", "FORBIDDEN")
+      }
+      const db = env.DB as unknown as {
+        withSession?: (m?: string) => { prepare: (q: string) => { run: () => Promise<{ meta: unknown }> } }
+      }
+      const session = typeof db.withSession === "function" ? db.withSession("first-primary") : (env.DB as unknown as { prepare: (q: string) => { run: () => Promise<{ meta: unknown }> } })
+      const first = await session.prepare("SELECT 1 AS x").run()
+      const second = await session
+        .prepare("SELECT value FROM app_settings LIMIT 1")
+        .run()
+      const third = await session.prepare("SELECT id FROM users LIMIT 1").run()
+      return json({ q1: first.meta, q2: second.meta, q3: third.meta })
+    },
+  },
   {
     kind: "exact",
     path: "/register",
     method: "POST",
     handle: () =>
       authHandlers.register(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/register-status",
+    method: "GET",
+    handle: () =>
+      authHandlers.registerStatus(env),
   },
 
   {
@@ -99,6 +149,22 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "PUT",
     handle: () =>
       authHandlers.changePassword(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/password/forgot",
+    method: "POST",
+    handle: () =>
+      authHandlers.forgotPassword(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/password/reset",
+    method: "POST",
+    handle: () =>
+      authHandlers.resetPassword(env, request),
   },
 
   {
@@ -139,6 +205,22 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "PUT",
     handle: () =>
       settingsHandlers.changeUsername(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/settings/account/delete-code",
+    method: "POST",
+    handle: () =>
+      settingsHandlers.requestDeleteCode(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/settings/account/delete",
+    method: "POST",
+    handle: () =>
+      settingsHandlers.deleteOwnAccount(env, request),
   },
 
   {
@@ -365,6 +447,24 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       donationHandlers.provisionDonation(env, request, decodeURIComponent(donationMatch[1])),
   },
 
+  // 重试该单里「没通过测试」的模型（限流/超时的可能已恢复）
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/donations\/([^/]+)\/retry-models$/),
+    methods: ["POST"],
+    handle: (donationMatch: RegExpMatchArray) =>
+      donationHandlers.retryDonationModelsNow(env, request, decodeURIComponent(donationMatch[1])),
+  },
+
+  // 重新拉上游模型列表并补全渠道（救重试表存在之前的历史单）
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/donations\/([^/]+)\/refetch-models$/),
+    methods: ["POST"],
+    handle: (donationMatch: RegExpMatchArray) =>
+      donationHandlers.refetchDonationModelsNow(env, request, decodeURIComponent(donationMatch[1])),
+  },
+
   // ---- 管理端：WorkBuddy 反代账号捐献 ----
   {
     kind: "exact",
@@ -409,6 +509,52 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "GET",
     handle: () =>
       wb2apiHandlers.adminGetPool(env, request),
+  },
+
+  // ---- 管理端：CLI2API 反代账号捐献 ----
+  {
+    kind: "exact",
+    path: "/admin/cli2api/bindings",
+    method: "GET",
+    handle: () =>
+      cli2apiHandlers.adminListBindings(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/cli2api\/bindings\/([^/]+)\/remove$/),
+    methods: ["POST"],
+    handle: (cli2apiRemoveMatch: RegExpMatchArray) =>
+      cli2apiHandlers.adminRemoveBinding(
+        env,
+        request,
+        decodeURIComponent(cli2apiRemoveMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/cli2api/config",
+    method: "GET",
+    handle: () =>
+      cli2apiHandlers.adminGetConfig(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/cli2api/config",
+    method: "PUT",
+    handle: () =>
+      cli2apiHandlers.adminSaveConfig(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/cli2api/pool",
+    method: "GET",
+    handle: () =>
+      cli2apiHandlers.adminGetPool(env, request),
   },
 
   {
@@ -521,6 +667,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: () =>
       newapiHandlers.adminSyncPermissions(env, request),
   },
+  {
+    kind: "exact",
+    path: "/admin/sensenova/audit",
+    method: "POST",
+    // 手动跑一次商汤 Key 巡检；默认只预演，带 {"apply":true} 才真动手
+    handle: () =>
+      donationHandlers.adminAuditSenseNovaKeys(env, request),
+  },
 
   {
     kind: "exact",
@@ -539,10 +693,34 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
 
   {
     kind: "exact",
+    path: "/admin/analytics/users",
+    method: "GET",
+    handle: () =>
+      analyticsHandlers.userOverview(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/audit",
+    method: "GET",
+    handle: () =>
+      auditHandlers.listAudit(env, request),
+  },
+
+  {
+    kind: "exact",
     path: "/admin/mail-status",
     method: "GET",
     handle: () =>
       adminHandlers.mailStatus(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/mail/brevo-quota",
+    method: "GET",
+    handle: () =>
+      adminHandlers.getBrevoQuota(env, request),
   },
 
   {
@@ -561,6 +739,45 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       achievementHandlers.getAchievements(env, request),
   },
 
+  // ---- 个人空间（公开主页）----
+  //
+  // ⚠️ 顺序有意义：`/space/<用户名>/card` 必须排在 `/space/<用户名>` 之前，
+  // 否则 `card` 会被当成用户名（路由表是按数组顺序匹配的）。
+  //
+  // 这两个读接口**无需登录**：空间页是给人分享的（社区里点头像就进得来）。
+  // 访客能看什么由服务端裁切：帖子看「允许访客访问社区」开关，
+  // 捐献详情一律打码（见 handlers/space.ts 的隐私说明）。
+  {
+    kind: "branch",
+    match: (routePath: string) => routePath.match(/^\/space\/([^/]+)\/card$/),
+    // branch 里必须自己判 method，未命中要返回 null（否则会把其它方法吞掉）
+    handle: (spaceCardMatch: RegExpMatchArray, method: string) =>
+      method === "GET"
+        ? spaceHandlers.getSpaceCard(env, request, decodeURIComponent(spaceCardMatch[1]))
+        : null,
+  },
+  {
+    kind: "branch",
+    match: (routePath: string) => routePath.match(/^\/space\/([^/]+)$/),
+    handle: (spaceMatch: RegExpMatchArray, method: string) =>
+      method === "GET"
+        ? spaceHandlers.getSpace(env, request, decodeURIComponent(spaceMatch[1]))
+        : null,
+  },
+  // 我自己的展示设置（要登录）
+  {
+    kind: "exact",
+    path: "/my-space",
+    method: "GET",
+    handle: () => spaceHandlers.getMySpace(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/my-space",
+    method: "PUT",
+    handle: () => spaceHandlers.updateMySpace(env, request),
+  },
+
   {
     kind: "exact",
     path: "/admin/announcements",
@@ -574,7 +791,20 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/admin/announcements",
     method: "POST",
     handle: () =>
-      announcementHandlers.createAnnouncement(env, request),
+      announcementHandlers.createAnnouncement(env, request, ctx),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/announcements\/([^/]+)\/resend$/),
+    methods: ["POST"],
+    handle: (announcementResendMatch: RegExpMatchArray) =>
+      announcementHandlers.resendAnnouncementMails(
+        env,
+        request,
+        decodeURIComponent(announcementResendMatch[1]),
+        ctx
+      ),
   },
 
   {
@@ -585,7 +815,8 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       announcementHandlers.updateAnnouncement(
       env,
       request,
-      decodeURIComponent(announcementMatch[1])
+      decodeURIComponent(announcementMatch[1]),
+      ctx
       ),
   },
 
@@ -599,6 +830,141 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       request,
       decodeURIComponent(announcementMatch[1])
       ),
+  },
+
+  // ---- 有趣的网页分享（工具箱里的精选外链，内容由管理面板维护）----
+  {
+    kind: "exact",
+    path: "/fun-links",
+    method: "GET",
+    handle: () => funLinkHandlers.listFunLinks(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/fun-links",
+    method: "GET",
+    handle: () => funLinkHandlers.adminListFunLinks(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/fun-links",
+    method: "POST",
+    handle: () => funLinkHandlers.createFunLink(env, request),
+  },
+
+  // 自动识别：服务端去把对方的标题 / 描述 / 图标抓回来（管理面板「自动识别」按钮）
+  {
+    kind: "exact",
+    path: "/admin/fun-links/probe",
+    method: "POST",
+    handle: () => funLinkProbeHandlers.probeFunLink(env, request),
+  },
+
+  // 图标代理：只认库里存过的图标地址，不是开放代理
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/fun-links\/icon\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (iconMatch: RegExpMatchArray) =>
+      funLinkProbeHandlers.getFunLinkIcon(env, request, decodeURIComponent(iconMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/fun-links\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (funLinkMatch: RegExpMatchArray) =>
+      funLinkHandlers.updateFunLink(env, request, decodeURIComponent(funLinkMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/fun-links\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (funLinkMatch: RegExpMatchArray) =>
+      funLinkHandlers.deleteFunLink(env, request, decodeURIComponent(funLinkMatch[1])),
+  },
+
+  // ---- 自定义称号（徽章式，管理面板维护 + 授予指定用户）----
+  {
+    kind: "exact",
+    path: "/admin/titles",
+    method: "GET",
+    handle: () => titleHandlers.listTitles(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/titles",
+    method: "POST",
+    handle: () => titleHandlers.createTitle(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/titles\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (titleMatch: RegExpMatchArray) =>
+      titleHandlers.updateTitle(env, request, decodeURIComponent(titleMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/titles\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (titleMatch: RegExpMatchArray) =>
+      titleHandlers.deleteTitle(env, request, decodeURIComponent(titleMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/titles\/([^/]+)\/grant$/),
+    methods: ["POST"],
+    handle: (titleMatch: RegExpMatchArray) =>
+      titleHandlers.grantTitle(env, request, decodeURIComponent(titleMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/titles\/([^/]+)\/revoke$/),
+    methods: ["POST"],
+    handle: (titleMatch: RegExpMatchArray) =>
+      titleHandlers.revokeTitle(env, request, decodeURIComponent(titleMatch[1])),
+  },
+
+  // ---- 用户反馈（私有工单；管理端回复）----
+  {
+    kind: "exact",
+    path: "/admin/feedback",
+    method: "GET",
+    handle: () =>
+      feedbackHandlers.listAllFeedback(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/feedback/reply",
+    method: "POST",
+    handle: () =>
+      feedbackHandlers.replyFeedback(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/feedback/status",
+    method: "POST",
+    handle: () =>
+      feedbackHandlers.setFeedbackStatus(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/feedback/delete",
+    method: "POST",
+    handle: () =>
+      feedbackHandlers.deleteFeedback(env, request),
   },
 
   {
@@ -747,6 +1113,25 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   },
 
   {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/storage\/quota\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (adminStorageQuotaMatch: RegExpMatchArray) =>
+      adminHandlers.updateStorageQuota(
+        env,
+        request,
+        decodeURIComponent(adminStorageQuotaMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/storage/sync-quota",
+    method: "POST",
+    handle: () => adminHandlers.syncStorageQuotas(env, request),
+  },
+
+  {
     kind: "exact",
     path: "/mailbox",
     method: "GET",
@@ -760,6 +1145,34 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       emailHandlers.createMailbox(env, request),
+  },
+
+  // ⚠️ 这两条临时邮箱路由必须排在下面的 `/mailbox/:id` 正则之前。
+  // 虽然 `/mailbox/temp` 用的是 POST、而那条正则可变方法只有 PUT/DELETE，
+  // 眼下不会真的撞上，但把它写在前面才是「读一眼就知道不冲突」的顺序。
+  {
+    kind: "exact",
+    path: "/mailbox/temp",
+    method: "POST",
+    handle: () =>
+      emailHandlers.createTempMailbox(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mailbox\/temp\/([^/]+)\/refresh$/),
+    methods: ["POST"],
+    handle: (tempRefreshMatch: RegExpMatchArray) =>
+      emailHandlers.refreshTempMailbox(env, request, decodeURIComponent(tempRefreshMatch[1])),
+  },
+
+  // 转发目标验证：必须排在下面的 /mailbox/:id 正则之前（否则被 :id 吃掉）
+  {
+    kind: "exact",
+    path: "/mailbox/forward-verify",
+    method: "POST",
+    handle: () =>
+      emailHandlers.verifyForwardTarget(env, request),
   },
 
   {
@@ -881,6 +1294,62 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       donationHandlers.cancelDonation(env, request, decodeURIComponent(donationMatch[1])),
   },
 
+  // ---- 用户反馈（私有工单）----
+  // /feedback/read 必须排在下面 /feedback 的 POST 之前：两者路径不同（前者多一段），
+  // 但保持「更具体的在前」这条约定，免得以后加 /feedback/:id 时顺序被搞混。
+  {
+    kind: "exact",
+    path: "/feedback/read",
+    method: "POST",
+    handle: () =>
+      feedbackHandlers.markFeedbackRead(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/feedback/upload-image",
+    method: "POST",
+    handle: () =>
+      feedbackHandlers.uploadFeedbackImage(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/feedback\/image\/([^/]+)\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (m: RegExpMatchArray) =>
+      feedbackHandlers.serveFeedbackImage(
+        env,
+        request,
+        decodeURIComponent(m[1]),
+        decodeURIComponent(m[2])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/feedback/reply",
+    method: "POST",
+    handle: () =>
+      feedbackHandlers.replyMyFeedback(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/feedback",
+    method: "GET",
+    handle: () =>
+      feedbackHandlers.listMyFeedback(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/feedback",
+    method: "POST",
+    handle: () =>
+      feedbackHandlers.createFeedback(env, request),
+  },
+
   // ---- 权限兑换码（首捐奖励券 / 用邀请码补权限）----
   {
     kind: "exact",
@@ -923,6 +1392,31 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       wb2apiHandlers.loginPoll(env, request),
   },
 
+  // ---- CLI2API 反代账号捐献（第二条，登录即解锁 AI 权限，免审核）----
+  {
+    kind: "exact",
+    path: "/cli2api/status",
+    method: "GET",
+    handle: () =>
+      cli2apiHandlers.getStatus(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/cli2api/login/start",
+    method: "POST",
+    handle: () =>
+      cli2apiHandlers.loginStart(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/cli2api/login/poll",
+    method: "GET",
+    handle: () =>
+      cli2apiHandlers.loginPoll(env, request),
+  },
+
   {
     kind: "exact",
     path: "/profile",
@@ -945,6 +1439,22 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "PUT",
     handle: () =>
       profileHandlers.updateProfile(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/profile/music/search",
+    method: "GET",
+    handle: () =>
+      profileHandlers.searchMusicTracks(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/profile/music/lyrics",
+    method: "GET",
+    handle: () =>
+      profileHandlers.fetchMusicLyrics(env, request),
   },
 
   {
@@ -1009,6 +1519,19 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: () =>
       communityHandlers.newPostsCount(env, request),
   },
+  // 链接预览卡片（markdown.tsx 的 LinkCard 会调）。
+  //
+  // ⚠️ 2026-09-25 审计（F4）：handler 早就写好了、还带 M9 的限流，
+  // 但**路由一直没接** —— 前端调用固定 404，被 `.catch` 吞掉后回退成普通链接，
+  // 表现为「链接卡片功能做了但从来不出卡片」，且没有任何报错提示。
+  // index.ts 之前被另一个 AI 占用，所以只记在 check-api-paths.mjs 的 KNOWN_GAPS 里。
+  {
+    kind: "exact",
+    path: "/community/link-preview",
+    method: "GET",
+    handle: () =>
+      communityHandlers.linkPreview(env, request),
+  },
   // 标记「我刚打开过社区」，用于把新帖角标清零
   {
     kind: "exact",
@@ -1016,6 +1539,13 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       communityHandlers.markCommunitySeen(env, request),
+  },
+  // 角标汇总：侧边栏（社区/聊天室/反馈/管理）与管理面板各栏目共用一次请求
+  {
+    kind: "exact",
+    path: "/attention",
+    method: "GET",
+    handle: () => attentionHandlers.getAttention(env, request),
   },
 
   // ---- 公共聊天室 ----
@@ -1046,6 +1576,22 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "GET",
     handle: () =>
       chatHandlers.presence(env, request),
+  },
+  // 侧边栏「聊天室」角标：我看过之后的新消息数
+  {
+    kind: "exact",
+    path: "/chat/unread",
+    method: "GET",
+    handle: () =>
+      chatHandlers.unreadCount(env, request),
+  },
+  // 标记「我刚打开过聊天室」，用于把新消息角标清零
+  {
+    kind: "exact",
+    path: "/chat/seen",
+    method: "POST",
+    handle: () =>
+      chatHandlers.markChatSeen(env, request),
   },
 
   {
@@ -1160,12 +1706,270 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       communityHandlers.unreadCount(env, request),
   },
 
+  // 网页侧「零配置通知」用：只取最新一条未读（比拉整个列表轻）
+  {
+    kind: "exact",
+    path: "/notifications/latest",
+    method: "GET",
+    handle: () =>
+      communityHandlers.latestNotification(env, request),
+  },
+
   {
     kind: "exact",
     path: "/notifications/read",
     method: "POST",
     handle: () =>
       communityHandlers.markRead(env, request),
+  },
+
+  // ---- App 端通知（WebToApp 打包的安卓 App，用轮询前台服务拉取）----
+  {
+    kind: "exact",
+    path: "/app/notifications",
+    method: "GET",
+    handle: () =>
+      appNotifyHandlers.pullAppNotifications(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/app/notify-token",
+    method: "GET",
+    handle: () =>
+      appNotifyHandlers.getAppNotifyToken(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/app/notify-token/rotate",
+    method: "POST",
+    handle: () =>
+      appNotifyHandlers.rotateAppNotifyToken(env, request),
+  },
+
+  // ---- 活动系统（消息中心「活动推广」）----
+  {
+    kind: "exact",
+    path: "/events",
+    method: "GET",
+    handle: () => eventHandlers.listEvents(env, request),
+  },
+  // 单个活动（公开）：活动分享链接 /activity/:id 用它拉数据
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/events\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (eventGetMatch: RegExpMatchArray) =>
+      eventHandlers.getEvent(env, request, decodeURIComponent(eventGetMatch[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/events\/([^/]+)\/claim$/),
+    methods: ["POST"],
+    handle: (eventClaimMatch: RegExpMatchArray) =>
+      eventHandlers.claimEvent(env, request, decodeURIComponent(eventClaimMatch[1])),
+  },
+  {
+    kind: "exact",
+    path: "/admin/events",
+    method: "GET",
+    handle: () => eventHandlers.listAllEvents(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/events",
+    method: "POST",
+    handle: () => eventHandlers.createEvent(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/events\/([^/]+)\/claims\/([^/]+)\/grant$/),
+    methods: ["POST"],
+    handle: (eventGrantMatch: RegExpMatchArray) =>
+      eventHandlers.grantEventClaim(
+        env,
+        request,
+        decodeURIComponent(eventGrantMatch[1]),
+        decodeURIComponent(eventGrantMatch[2])
+      ),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/events\/([^/]+)\/claims$/),
+    methods: ["GET"],
+    handle: (eventClaimsMatch: RegExpMatchArray) =>
+      eventHandlers.listEventClaims(env, request, decodeURIComponent(eventClaimsMatch[1])),
+  },
+  // 抽奖开奖（手动）：从报名者里随机抽人发积分；已开过奖会返回 409
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/events\/([^/]+)\/draw$/),
+    methods: ["POST"],
+    handle: (eventDrawMatch: RegExpMatchArray) =>
+      eventHandlers.adminDrawEvent(env, request, decodeURIComponent(eventDrawMatch[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/events\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (eventMatch: RegExpMatchArray) =>
+      eventHandlers.updateEvent(env, request, decodeURIComponent(eventMatch[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/events\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (eventMatch: RegExpMatchArray) =>
+      eventHandlers.deleteEvent(env, request, decodeURIComponent(eventMatch[1])),
+  },
+
+  // ---- 积分系统（余额 / 流水 / 兑换中转站余额）----
+  {
+    kind: "exact",
+    path: "/points",
+    method: "GET",
+    handle: () => pointHandlers.getPoints(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/points/redeem",
+    method: "POST",
+    handle: () => pointHandlers.redeem(env, request),
+  },
+  // 用户间转账（只需转出方确认，凭用户名转给对方）
+  {
+    kind: "exact",
+    path: "/points/transfer",
+    method: "POST",
+    handle: () => pointHandlers.transfer(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/points",
+    method: "GET",
+    handle: () => pointHandlers.listPointsOverview(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/points/adjust",
+    method: "POST",
+    handle: () => pointHandlers.adjustPoints(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/points\/([^/]+)\/history$/),
+    methods: ["GET"],
+    handle: (pointHistMatch: RegExpMatchArray) =>
+      pointHandlers.userPointHistory(env, request, decodeURIComponent(pointHistMatch[1])),
+  },
+
+  // ---- 积分商城（商品 / 订单 / 兑换配置）----
+  {
+    kind: "exact",
+    path: "/points/shop/buy",
+    method: "POST",
+    handle: () => pointHandlers.buyShopProduct(env, request),
+  },
+
+  // ---- 用户商城（用户自己上架 / 交付 / 确认收货）----
+  {
+    kind: "exact",
+    path: "/points/products",
+    method: "POST",
+    handle: () => pointHandlers.createMyProduct(env, request),
+  },
+  {
+    // 带方法分流必须用 branch：regex kind 的 handle 只收 1 个参数，拿不到 method
+    kind: "branch",
+    match: (routePath: string) => routePath.match(/^\/points\/products\/([^/]+)$/),
+    handle: (myProductMatch: RegExpMatchArray, method: string) => {
+      const id = decodeURIComponent(myProductMatch[1])
+      if (method === "PUT") return pointHandlers.updateMyProduct(env, request, id)
+      if (method === "DELETE") return pointHandlers.deleteMyProduct(env, request, id)
+      return null
+    },
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/points\/orders\/([^/]+)\/deliver$/),
+    methods: ["POST"],
+    handle: (myOrderDeliverMatch: RegExpMatchArray) =>
+      pointHandlers.sellerDeliver(env, request, decodeURIComponent(myOrderDeliverMatch[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/points\/orders\/([^/]+)\/confirm$/),
+    methods: ["POST"],
+    handle: (myOrderConfirmMatch: RegExpMatchArray) =>
+      pointHandlers.confirmReceipt(env, request, decodeURIComponent(myOrderConfirmMatch[1])),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/points/shop",
+    method: "GET",
+    handle: () => pointHandlers.getShopAdmin(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/points/config",
+    method: "PUT",
+    handle: () => pointHandlers.savePointsConfig(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/points/backfill-donations",
+    method: "POST",
+    handle: () => pointHandlers.backfillDonations(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/points/backfill-donations/topup",
+    method: "POST",
+    handle: () => pointHandlers.topUpDonations(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/points/products",
+    method: "POST",
+    handle: () => pointHandlers.createShopProduct(env, request),
+  },
+  {
+    kind: "branch",
+    match: (routePath: string) => routePath.match(/^\/admin\/points\/products\/([^/]+)$/),
+    handle: (shopProductMatch: RegExpMatchArray, method: string) => {
+      const id = decodeURIComponent(shopProductMatch[1])
+      if (method === "PUT") return pointHandlers.updateShopProduct(env, request, id)
+      if (method === "DELETE") return pointHandlers.deleteShopProduct(env, request, id)
+      return null
+    },
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/points\/products\/([^/]+)\/review$/),
+    methods: ["POST"],
+    handle: (shopReviewMatch: RegExpMatchArray) =>
+      pointHandlers.reviewShopProduct(env, request, decodeURIComponent(shopReviewMatch[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/points\/orders\/([^/]+)\/deliver$/),
+    methods: ["POST"],
+    handle: (shopOrderMatch: RegExpMatchArray) =>
+      pointHandlers.deliverShopOrder(env, request, decodeURIComponent(shopOrderMatch[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/points\/orders\/([^/]+)\/settle$/),
+    methods: ["POST"],
+    handle: (shopSettleMatch: RegExpMatchArray) =>
+      pointHandlers.settleShopOrder(env, request, decodeURIComponent(shopSettleMatch[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/points\/orders\/([^/]+)\/cancel$/),
+    methods: ["POST"],
+    handle: (shopCancelMatch: RegExpMatchArray) =>
+      pointHandlers.cancelShopOrder(env, request, decodeURIComponent(shopCancelMatch[1])),
   },
 
   {
@@ -1322,6 +2126,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
 
   {
     kind: "exact",
+    path: "/dev/subscribe",
+    method: "POST",
+    handle: () =>
+      newapiHandlers.grantSubscription(env, request),
+  },
+
+  {
+    kind: "exact",
     path: "/dev/password",
     method: "POST",
     handle: () =>
@@ -1382,6 +2194,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       frpHandlers.reviewFrpApplication(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/frp/review-revoke",
+    method: "POST",
+    handle: () =>
+      frpHandlers.revokeFrpApplication(env, request),
   },
 
   {
@@ -1450,6 +2270,35 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       proxyHandlers.checkProxySubscription(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/proxy/latency",
+    method: "POST",
+    handle: () =>
+      proxyHandlers.testProxyNodeLatency(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/proxy\/subscriptions\/([^/]+)\/reveal$/),
+    methods: ["POST"],
+    handle: (proxyRevealMatch: RegExpMatchArray) =>
+      proxyHandlers.revealProxySubscriptionUrl(
+        env,
+        request,
+        decodeURIComponent(proxyRevealMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/cloudflare/quota",
+    method: "GET",
+    handle: () =>
+      cfQuotaHandlers.getCloudflareQuota(env, request),
   },
 
   {
@@ -1745,8 +2594,34 @@ async function hostedDirectLink(
   return storageHandlers.serveHostedDirectLink(env, request, host)
 }
 
+/**
+ * 给每个请求包一层 D1 读复制会话。
+ *
+ * 背景（2026-10-01）：线上 D1 已开启 read replication，读可被就近副本服务，
+ * 但必须保证「先主库、后副本」的顺序语义，否则会出现「刚登录的下一个请求
+ * 读不到会话行 → 被踢回登录页」这类问题：
+ *   · `first-primary` —— 本请求的**第一条**查询走主库，之后同一请求内的查询
+ *     带着 bookmark，可落到就近副本（跨境用户单次往返 ~150ms → ~10ms）；
+ *   · 写语句在会话内始终走主库；同一请求里「写后读」也保证读到自己的写。
+ * 绑定不支持 withSession（老 runtime / 本地 miniflare 之外的实现）时原样返回。
+ */
+function withD1ReadReplication(env: Env): Env {
+  const db = env.DB as unknown as { withSession?: (mode?: string) => unknown }
+  if (!db || typeof db.withSession !== "function") return env
+  try {
+    const session = db.withSession("first-primary")
+    return new Proxy(env, {
+      get: (target, prop) =>
+        prop === "DB" ? session : (target as unknown as Record<string | symbol, unknown>)[prop],
+    }) as Env
+  } catch {
+    return env
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    env = withD1ReadReplication(env)
     try {
       const url = new URL(request.url)
 
@@ -1872,7 +2747,19 @@ export default {
         }
         return res
       }
-      console.error("Unhandled error:", err)
+      // ⚠️ 必须带上「哪个方法 + 哪条路径」：这个兜底只回一句「服务器内部错误」给用户，
+      // 日志是唯一能定位的线索。2026-09-30 排查「自定义 AI 渠道捐献报服务器内部错误」时，
+      // 就是缺了这条信息 —— 只能靠对比业务表的入库空档去反推是哪个接口。
+      // ⚠️ 路径里可能带 ID，但**不能记 query string**（捐献/兑换类接口会把密钥放进去）。
+      // 解析路径要包一层 try：这里已经在处理未捕获异常了，
+      // 若 request.url 本身畸形再抛一次，就绕过了这个兜底（变成 CF 的 1101）。
+      let pathForLog = "?"
+      try {
+        pathForLog = new URL(request.url).pathname
+      } catch {
+        /* 保持 "?" */
+      }
+      console.error(`Unhandled error [${request.method} ${pathForLog}]:`, err)
       return json({ error: "服务器内部错误", code: "INTERNAL" }, 500)
     }
   },
@@ -1881,19 +2768,33 @@ export default {
     await incomingEmail(message, env)
   },
   /**
-   * 定时运维：由 Cloudflare Cron Triggers 触发（配置见 wrangler.toml 的 [triggers]）。
+   * 定时任务：由 Cloudflare Cron Triggers 触发（配置见 wrangler.toml 的 [triggers]）。
+   *
+   * 有**两条** cron，靠 controller.cron 区分：
+   *   - `* * * * *`（每分钟）→ 只跑「到点发布」：定时公告 / 定时活动到点后上线。
+   *     任务本身极轻（无任务时就是两条 SELECT），所以给到分钟级精度；
+   *     若混进每小时那套运维（含 COUNT(*) 全表扫），成本会被放大 60 倍。
+   *   - `17 * * * *`（每小时）→ 完整运维（runMaintenance，内部也会兜底跑一次到点发布）。
    *
    * 用 ctx.waitUntil 而不是直接 await：scheduled 处理器同样有墙钟限制，
    * 交给 waitUntil 让调用方尽早返回、任务在后台跑完（与 fetch 里的做法一致）。
    *
-   * 每天 UTC 03:xx 的那一次升级为「深度模式」（额外清理 90 天前的审计日志），
-   * 其余每小时只做常规清理，保持每次运行的 D1 写入量很小。
+   * 每天 UTC 03:xx 的那一次运维升级为「深度模式」（额外清理 90 天前的审计日志）。
    */
   async scheduled(
     controller: ScheduledController,
     env: Env,
     ctx: ExecutionContext
   ): Promise<void> {
+    if (controller.cron === SCHEDULED_PUBLISH_CRON) {
+      ctx.waitUntil(
+        processScheduledPublishes(env, ctx).then((r) => {
+          if (r.errors > 0) console.warn("到点发布有失败项:", JSON.stringify(r))
+        })
+      )
+      return
+    }
+
     const deep = new Date(controller.scheduledTime).getUTCHours() === 3
     ctx.waitUntil(
       runMaintenance(env, { deep }).then((report) => {

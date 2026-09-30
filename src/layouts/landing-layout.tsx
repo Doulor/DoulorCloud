@@ -3,18 +3,25 @@ import { ArrowRight } from "lucide-react"
 
 import { Logo } from "@/components/logo"
 import { ThemeToggle } from "@/components/theme-toggle"
+import { LangToggle } from "@/components/lang-toggle"
 import { ScrollToTop } from "@/components/scroll-to-top"
+import { PageEnter } from "@/components/page-enter"
 import { Button } from "@/components/ui/button"
 import { useAuth } from "@/hooks/use-auth"
+import { useT } from "@/i18n"
 import { cn } from "@/lib/utils"
 
 export function LandingLayout() {
   const { user } = useAuth()
   const location = useLocation()
+  const { t } = useT()
 
   return (
-    <div className="flex min-h-screen flex-col bg-background">
-      <header className="sticky top-0 z-20 border-b bg-background/80 backdrop-blur">
+    <div className="flex min-h-screen flex-col">
+      {/* 这层刻意不铺 bg-background：底色由 body 提供，云纹背景画在 body 上，
+          这里再铺一次不透明色就会把它整块盖住。
+          顶栏用 glass-panel —— 与控制台一致的亚克力面板（原先只有 bg-background/80 + backdrop-blur）。 */}
+      <header className="glass-panel sticky top-0 z-20 border-b">
         <div className="mx-auto flex h-14 w-full max-w-6xl items-center gap-4 px-4 lg:px-8">
           <Logo />
           <nav className="ml-6 hidden items-center gap-1 md:flex">
@@ -22,21 +29,22 @@ export function LandingLayout() {
               to="/#features"
               className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
             >
-              功能
+              {t("landing.features")}
             </Link>
             <Link
               to="/#how"
               className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
             >
-              原理
+              {t("landing.how")}
             </Link>
           </nav>
           <div className="ml-auto flex items-center gap-2">
+            <LangToggle />
             <ThemeToggle />
             {user ? (
               <Button asChild>
                 <Link to="/dashboard">
-                  进入控制台
+                  {t("landing.enterDashboard")}
                   <ArrowRight className="h-4 w-4" />
                 </Link>
               </Button>
@@ -48,11 +56,11 @@ export function LandingLayout() {
                     state={{ from: location.pathname }}
                     className={cn("hidden sm:inline-flex")}
                   >
-                    登录
+                    {t("nav.login")}
                   </Link>
                 </Button>
                 <Button asChild>
-                  <Link to="/register">注册</Link>
+                  <Link to="/register">{t("nav.register")}</Link>
                 </Button>
               </>
             )}
@@ -61,7 +69,10 @@ export function LandingLayout() {
       </header>
 
       <main className="flex-1">
-        <Outlet />
+        {/* 页面内容渐入：只包内容区，顶栏在外面 ⇒ 切页时顶栏不会跟着闪 */}
+        <PageEnter>
+          <Outlet />
+        </PageEnter>
       </main>
 
       <ScrollToTop />
@@ -71,7 +82,11 @@ export function LandingLayout() {
           <div className="flex items-center gap-2">
             <Logo className="text-sm" />
           </div>
-          <p>© {new Date().getFullYear()} Doulor Cloud</p>
+          <div className="flex items-center gap-4">
+            <Link to="/terms" className="hover:text-foreground">{t("legal.terms")}</Link>
+            <Link to="/privacy" className="hover:text-foreground">{t("legal.privacy")}</Link>
+            <p>© {new Date().getFullYear()} Doulor Cloud</p>
+          </div>
         </div>
       </footer>
     </div>

@@ -16,25 +16,30 @@ export interface RawComment {
   user_id: string
   parent_id: string | null
   body: string
-  created_at: string
+  createdAt: string
 }
 
 export interface CommentNode extends RawComment {
-  replies: RawComment[]
+  replies: CommentNode[]
 }
 
-/** 把平铺评论按 parent_id 分成两层：根 + 其下回复 */
+/**
+ * 把平铺评论按 parent_id 递归建成任意深度的树。
+ *
+ * 输入由 SQL `ORDER BY created_at ASC` 保证按时间正序，树内各级 replies 也自然
+ * 保持正序（Map 按插入顺序遍历）。parent_id 指向已删除或不存在的评论时，
+ * 该节点会退化为根节点展示，不丢失数据。
+ */
 export function groupComments(comments: RawComment[]): CommentNode[] {
-  const roots = comments.filter((c) => !c.parent_id)
-  const byParent = new Map<string, RawComment[]>()
-  for (const c of comments) {
-    if (c.parent_id) {
-      const arr = byParent.get(c.parent_id) ?? []
-      arr.push(c)
-      byParent.set(c.parent_id, arr)
-    }
+  const nodes = new Map<string, CommentNode>()
+  const roots: CommentNode[] = []
+  for (const c of comments) nodes.set(c.id, { ...c, replies: [] })
+  for (const node of nodes.values()) {
+    const parent = node.parent_id ? nodes.get(node.parent_id) : undefined
+    if (parent) parent.replies.push(node)
+    else roots.push(node)
   }
-  return roots.map((r) => ({ ...r, replies: byParent.get(r.id) ?? [] }))
+  return roots
 }
 
 /** 防刷屏：给定该用户最近一条记录时间，返回是否允许再发。now 默认当前时间。 */

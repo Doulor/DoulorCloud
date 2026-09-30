@@ -27,7 +27,17 @@ import {
   putObject,
   type R2BucketRow,
 } from "../r2"
+import { fetchWithTimeout, mapLimit } from "../async-utils"
 import type { Env } from "../env"
+
+/** CF 管理 API 超时（2026-09-25 审计 H15） */
+const CF_API_TIMEOUT_MS = 15_000
+
+/**
+ * 「读取 CF 账户列表并逐个列桶」的并发上限（2026-09-25 审计 M21）。
+ * 4 个并发足够快，又不会触发 CF API 的速率限制。
+ */
+const R2_ACCOUNT_LIST_CONCURRENCY = 4
 
 /** 免费额度基线（Cloudflare R2 免费层），用于计算占比 */
 const FREE_TIER = {
@@ -92,9 +102,10 @@ export async function listR2Buckets(env: Env, request: Request): Promise<Respons
   const aggMap = new Map((agg.results ?? []).map((r) => [r.bucket_id ?? "", r]))
 
   // 每个桶的用户明细（一次查全，前端按桶分组）
+  // role 一起带上：前端「同步存量用户配额」要预告「谁会被改」，而管理员是被跳过的
   const users = await env.DB.prepare(
     `SELECT sa.user_id, sa.prefix, sa.used_bytes, sa.quota_bytes, sa.file_count,
-            sa.bucket_id, sa.enabled, u.username
+            sa.bucket_id, sa.enabled, u.username, u.role
        FROM storage_accounts sa
        JOIN users u ON u.id = sa.user_id
       ORDER BY sa.used_bytes DESC`
@@ -107,6 +118,7 @@ export async function listR2Buckets(env: Env, request: Request): Promise<Respons
     bucket_id: string | null
     enabled: number
     username: string
+    role: string
   }>()
 
   const usersByBucket = new Map<string, typeof users.results>()
@@ -142,6 +154,7 @@ export async function listR2Buckets(env: Env, request: Request): Promise<Respons
         quotaBytes: u.quota_bytes,
         fileCount: u.file_count,
         enabled: u.enabled === 1,
+        role: u.role,
       })),
     }
   })
@@ -155,6 +168,7 @@ export async function listR2Buckets(env: Env, request: Request): Promise<Respons
     quotaBytes: u.quota_bytes,
     fileCount: u.file_count,
     enabled: u.enabled === 1,
+    role: u.role,
   }))
   const legacyAgg = aggMap.get("")
   const legacyBucket = isR2Configured(env)
@@ -221,9 +235,10 @@ export async function discoverBuckets(env: Env, request: Request): Promise<Respo
 
   let accounts: { id: string; name: string }[] = []
   try {
-    const res = await fetch("https://api.cloudflare.com/client/v4/accounts?per_page=50", {
+    // 带超时（2026-09-25 审计 H15）
+    const res = await fetchWithTimeout("https://api.cloudflare.com/client/v4/accounts?per_page=50", {
       headers: { Authorization: `Bearer ${token}` },
-    })
+    }, CF_API_TIMEOUT_MS)
     const data = (await res.json()) as {
       success?: boolean
       result?: { id: string; name: string }[]
@@ -245,29 +260,32 @@ export async function discoverBuckets(env: Env, request: Request): Promise<Respo
     })
   }
 
-  // 逐个账户列桶（并行，但限制并发避免触发速率限制）
-  const detail = await Promise.all(
-    accounts.map(async (a) => {
-      try {
-        const res = await fetch(
-          `https://api.cloudflare.com/client/v4/accounts/${a.id}/r2/buckets?per_page=100`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        )
-        const data = (await res.json()) as {
-          success?: boolean
-          result?: { buckets?: { name: string; creation_date?: string }[] }
-        }
-        const buckets = (data.result?.buckets ?? []).map((b) => ({
-          name: b.name,
-          createdAt: b.creation_date ?? null,
-          imported: knownKeys.has(`${a.id}|${b.name}`),
-        }))
-        return { id: a.id, name: a.name, buckets }
-      } catch {
-        return { id: a.id, name: a.name, buckets: [] }
+  // 逐个账户列桶。
+  // ⚠️ 2026-09-25 审计（M21）：原注释写着「并行，但限制并发避免触发速率限制」，
+  // 代码却是裸的 `Promise.all` —— **没有任何并发上限**。账户数一多（或 CF 返回
+  // 大量账户）就会瞬间打出几十个并发请求，直接撞上 CF 的 API 速率限制，
+  // 而且其中每个都可能在无超时的情况下挂住。现在用 mapLimit 真正限并发 + 超时。
+  const detail = await mapLimit(accounts, R2_ACCOUNT_LIST_CONCURRENCY, async (a) => {
+    try {
+      const res = await fetchWithTimeout(
+        `https://api.cloudflare.com/client/v4/accounts/${a.id}/r2/buckets?per_page=100`,
+        { headers: { Authorization: `Bearer ${token}` } },
+        CF_API_TIMEOUT_MS
+      )
+      const data = (await res.json()) as {
+        success?: boolean
+        result?: { buckets?: { name: string; creation_date?: string }[] }
       }
-    })
-  )
+      const buckets = (data.result?.buckets ?? []).map((b) => ({
+        name: b.name,
+        createdAt: b.creation_date ?? null,
+        imported: knownKeys.has(`${a.id}|${b.name}`),
+      }))
+      return { id: a.id, name: a.name, buckets }
+    } catch {
+      return { id: a.id, name: a.name, buckets: [] }
+    }
+  })
 
   return json({ available: true, accounts: detail })
 }
@@ -597,7 +615,8 @@ export async function getR2Operations(
     }`
 
   try {
-    const res = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+    // 带超时（2026-09-25 审计 H15）
+    const res = await fetchWithTimeout("https://api.cloudflare.com/client/v4/graphql", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${analyticsToken}`,
@@ -607,7 +626,7 @@ export async function getR2Operations(
         query,
         variables: { accountTag: row.account_id, bucket: row.bucket_name, dateGeq },
       }),
-    })
+    }, CF_API_TIMEOUT_MS)
     const data = (await res.json()) as {
       data?: {
         viewer?: {

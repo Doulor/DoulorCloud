@@ -24,6 +24,18 @@ import type { Env } from "./env"
 
 /** 出站超时：网关短 RPC 都是毫秒级，8 秒足够；避免上游挂死拖垮请求 */
 const FETCH_TIMEOUT_MS = 8000
+/**
+ * `login/poll` 专用超时，远长于上面的通用值。
+ *
+ * 原因：网关的 poll 在「登录刚完成」那一次**不是**短 RPC —— 它同步跑完整套收尾才返回
+ * （取 token → 取账号 → 凭证落盘 → 热加载进池 → 签到 → 余额刷新，见网关
+ * `internal/panel/login.go` 的 loginPoll）。后两步要真打腾讯上游，实测该网关连纯内存的
+ * `/healthz` 都要 1.6s，poll 串行打 4 次上游很容易突破 8s。
+ *
+ * 用通用 8s 会 abort，而网关的 handler 不受客户端断开影响、照样把账号 `Pool.Add` 进池
+ * ⇒ 现象是「账号已进共享池，但本站没拿到 uid、没授 ai 权限，重试又被池去重拦下」。
+ */
+const POLL_TIMEOUT_MS = 30_000
 /** 响应体上限：网关返回的都是小 JSON（账号列表可能稍大），1 MiB 足够 */
 const MAX_FETCH_BYTES = 1024 * 1024
 const CREDENTIAL_CACHE_MS = 5000
@@ -150,7 +162,8 @@ export class Wb2UnauthorizedError extends Error {
 async function wb2Fetch<T>(
   env: Env,
   path: string,
-  init: RequestInit = {}
+  init: RequestInit = {},
+  timeoutMs: number = FETCH_TIMEOUT_MS
 ): Promise<T> {
   const cfg = await resolveWb2ApiConfig(env)
   if (!cfg.apiKey) {
@@ -167,7 +180,7 @@ async function wb2Fetch<T>(
   if (init.body) headers.set("Content-Type", "application/json")
 
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   let res: Response
   try {
     res = await fetch(`${cfg.baseUrl}${path}`, {
@@ -177,6 +190,15 @@ async function wb2Fetch<T>(
       redirect: "follow",
     })
   } catch (err) {
+    // abort 是本站自己的超时（上游没回），不是网络错误；文案要能区分，
+    // 否则前端只能看到 Node/undici 的「The operation was aborted」。
+    if (controller.signal.aborted) {
+      throw new ApiError(
+        504,
+        `反代网关响应超时（${Math.round(timeoutMs / 1000)} 秒）`,
+        "WB2API_TIMEOUT"
+      )
+    }
     const msg = err instanceof Error ? err.message : String(err)
     throw new ApiError(
       502,
@@ -293,9 +315,15 @@ export async function wb2Poll(env: Env, state: string): Promise<Wb2PollResult> {
     realm?: string
     credits?: number
     credits_total?: number
-  }>(env, `/panel/api/login/poll?state=${encodeURIComponent(state)}`, {
-    method: "GET",
-  })
+  }>(
+    env,
+    `/panel/api/login/poll?state=${encodeURIComponent(state)}`,
+    { method: "GET" },
+    // 登录成功那一次 poll 会同步跑完「落盘 + 热加载 + 签到 + 余额刷新」，
+    // 远慢于其它短 RPC —— 必须给足超时，否则 abort 后网关照样把账号加进池、
+    // 本站却拿不到 uid（见 POLL_TIMEOUT_MS 注释）。
+    POLL_TIMEOUT_MS
+  )
 
   if (!data.done) {
     return { done: false, pendingMessage: data.message ?? "waiting for login" }

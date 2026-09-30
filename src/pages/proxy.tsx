@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ChevronDown,
   Copy,
+  Gauge,
   Loader2,
   RefreshCw,
   ScrollText,
@@ -34,7 +35,67 @@ import {
 } from "@/components/ui/dialog"
 import { proxyApi, HttpError } from "@/services/api"
 import { fmtTime } from "@/lib/format"
-import type { ProxyNode, ProxyOverview, ProxySubscription } from "@/types"
+import type {
+  ProxyNode,
+  ProxyNodeLatency,
+  ProxyOverview,
+  ProxySubscription,
+} from "@/types"
+
+/**
+ * 能被服务端 TCP 握手测速的协议（与后端 proxy-latency.ts 的 TCP_PROTOCOLS 对齐）。
+ * hysteria / hysteria2 / tuic 走 QUIC/UDP，Worker 建不了 UDP 连接 —— 必须显示
+ * 「不支持测速」而不是「不可用」（没能验证 ≠ 不可用）。
+ */
+const LATENCY_TESTABLE_PROTOCOLS = new Set([
+  "vless",
+  "vmess",
+  "trojan",
+  "ss",
+  "ssr",
+  "anytls",
+])
+
+function canTestLatency(protocol: string): boolean {
+  return LATENCY_TESTABLE_PROTOCOLS.has((protocol ?? "").toLowerCase())
+}
+
+/** 一批测多少个节点 —— 必须与后端 MAX_LATENCY_BATCH 一致（平台并发连接限制） */
+const LATENCY_BATCH = 16
+
+/**
+ * 延迟徽标。
+ * 分级参照 Clash 的习惯（绿/黄/灰），但**失败不标红**：服务端握不上手
+ * 可能只是本站出网到该节点不通，标红会让人误以为节点坏了。
+ */
+function LatencyBadge({ latency, testable }: { latency?: ProxyNodeLatency; testable: boolean }) {
+  if (!testable) {
+    return (
+      <span className="text-xs text-muted-foreground" title="该协议走 QUIC/UDP，服务端无法测速">
+        不支持测速
+      </span>
+    )
+  }
+  if (!latency) {
+    return <span className="text-xs text-muted-foreground">未测速</span>
+  }
+  if (!latency.ok) {
+    return (
+      <span className="text-xs text-muted-foreground" title={latency.reason}>
+        测不到
+      </span>
+    )
+  }
+  const ms = latency.latencyMs ?? 0
+  // 与项目里其它地方一致用 emerald / amber（不用 green）
+  const cls =
+    ms < 150 ? "text-emerald-600" : ms < 400 ? "text-amber-600" : "text-orange-600"
+  return (
+    <span className={`font-mono text-xs ${cls}`} title="服务端 TCP 握手耗时">
+      {ms} ms
+    </span>
+  )
+}
 
 /**
  * 代理节点「使用协议」。版本与后端 PROXY_CONSENT_VERSION 一致。
@@ -159,9 +220,36 @@ export default function ProxyPage() {
   const [expandedSubs, setExpandedSubs] = React.useState<Record<string, boolean>>({})
   /** 展开的节点配置（默认收起，点击节点行展开） */
   const [expandedNodes, setExpandedNodes] = React.useState<Record<string, boolean>>({})
+  /** 逐节点测速结果：`<订阅id>-<节点下标>` → 结果 */
+  const [nodeLatency, setNodeLatency] = React.useState<Record<string, ProxyNodeLatency>>({})
+  /** 正在测速的订阅源 id */
+  const [latencySubId, setLatencySubId] = React.useState<string | null>(null)
+  /** 测速进度文案（如「32/143」） */
+  const [latencyProgress, setLatencyProgress] = React.useState("")
 
   // 无权限（403 FEATURE_NOT_PERMITTED）：整页显示提示 + 捐献入口
   const [locked, setLocked] = React.useState(false)
+  /** 正在向服务端索取原始订阅链接的订阅源 id（服务端按天限 3 次） */
+  const [revealingId, setRevealingId] = React.useState<string | null>(null)
+
+  /**
+   * 索取并复制订阅源**原始链接**。
+   *
+   * ⚠️ 2026-09-26：列表接口已不再下发 url（它内嵌机场订阅 token），
+   * 必须显式调 revealSubscription 按需获取，服务端每天限 3 次。
+   */
+  const handleCopySubscription = async (id: string) => {
+    if (revealingId) return
+    setRevealingId(id)
+    try {
+      const res = await proxyApi.revealSubscription(id)
+      await copyText(res.url, `订阅链接已复制，今天还可获取 ${res.remaining} 次`)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "获取订阅链接失败")
+    } finally {
+      setRevealingId(null)
+    }
+  }
 
   const load = React.useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
@@ -232,6 +320,63 @@ export default function ProxyPage() {
       toast.error(err instanceof HttpError ? err.message : "检测失败")
     } finally {
       setCheckingId(null)
+    }
+  }
+
+  /**
+   * 对订阅里的**逐个节点**测延迟。
+   *
+   * 服务端一次只测十几条（Cloudflare 每次请求最多 6 个并发连接，
+   * 见 proxy-latency.ts 顶部说明），所以这里分批循环、边测边把结果填进列表，
+   * 让人能看到进度而不是干等。
+   */
+  const handleLatencyTest = async (sub: ProxySubscription) => {
+    if (latencySubId) return
+    setLatencySubId(sub.id)
+    setLatencyProgress("")
+    try {
+      let offset = 0
+      let done = 0
+      let testable = sub.nodes.length
+      let ok = 0
+      let fastest: number | null = null
+      const seen = new Set<number>()
+
+      for (let guard = 0; guard < 200; guard++) {
+        const res = await proxyApi.latency(sub.id, offset, LATENCY_BATCH)
+        testable = res.testable
+        if (res.results.length === 0) break
+        for (const r of res.results) {
+          seen.add(r.index)
+          if (r.ok) {
+            ok += 1
+            if (r.latencyMs != null && (fastest === null || r.latencyMs < fastest)) {
+              fastest = r.latencyMs
+            }
+          }
+          const key = `${sub.id}-${r.index}`
+          setNodeLatency((prev) => ({ ...prev, [key]: r }))
+        }
+        done = seen.size
+        setLatencyProgress(`${done}/${testable}`)
+        // offset 是「可测速节点列表」里的位置，不是节点下标 —— 只按已测条数推进
+        offset += res.results.length
+        if (res.results.length < res.limit || done >= testable) break
+      }
+
+      if (testable === 0) {
+        toast.message("该订阅里的节点都不支持服务端测速（QUIC/UDP 协议）")
+      } else {
+        toast.success(
+          `测速完成：${ok}/${testable} 个节点可连` +
+            (fastest != null ? `，最快 ${fastest} ms` : "")
+        )
+      }
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "测速失败")
+    } finally {
+      setLatencySubId(null)
+      setLatencyProgress("")
     }
   }
 
@@ -422,26 +567,53 @@ export default function ProxyPage() {
                         size="sm"
                         onClick={(e) => {
                           e.stopPropagation()
-                          void handleCheck(sub)
+                          void handleLatencyTest(sub)
                         }}
-                        disabled={checkingId === sub.id}
+                        disabled={latencySubId === sub.id || sub.nodes.length === 0}
+                        title="对订阅里的每个节点做 TCP 握手测速"
                       >
-                        {checkingId === sub.id ? (
+                        {latencySubId === sub.id ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         ) : (
-                          <Zap className="h-3.5 w-3.5" />
+                          <Gauge className="h-3.5 w-3.5" />
                         )}
-                        测延迟
+                        节点测速
+                        {latencySubId === sub.id && latencyProgress
+                          ? ` ${latencyProgress}`
+                          : ""}
                       </Button>
                       <Button
                         variant="outline"
                         size="sm"
                         onClick={(e) => {
                           e.stopPropagation()
-                          void copyText(sub.url, "订阅链接已复制")
+                          void handleCheck(sub)
                         }}
+                        disabled={checkingId === sub.id}
+                        title="只测订阅地址本身能不能拉到（不测节点）"
                       >
-                        <Copy className="h-3.5 w-3.5" />
+                        {checkingId === sub.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Zap className="h-3.5 w-3.5" />
+                        )}
+                        订阅探活
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={revealingId === sub.id}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void handleCopySubscription(sub.id)
+                        }}
+                        title="获取订阅源的原始链接（每个账号每天最多 3 次）"
+                      >
+                        {revealingId === sub.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
                         复制订阅
                       </Button>
                     </div>
@@ -455,7 +627,7 @@ export default function ProxyPage() {
                       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                       <div>
                         订阅地址抓取失败：{sub.fetchError}。请检查订阅链接是否有效，
-                        或稍后点「测延迟」重试。
+                        或稍后点「订阅探活」重试。
                       </div>
                     </div>
                   ) : null}
@@ -522,6 +694,10 @@ export default function ProxyPage() {
                                     {node.region}
                                   </Badge>
                                 )}
+                                <LatencyBadge
+                                  latency={nodeLatency[nodeKey]}
+                                  testable={canTestLatency(node.protocol)}
+                                />
                               </div>
                               <Button
                                 variant="ghost"
@@ -559,8 +735,10 @@ export default function ProxyPage() {
       )}
 
       <p className="mt-6 text-xs text-muted-foreground">
-        节点延迟为对订阅地址的 HTTP 探活结果（近似值），不代表节点实际网络质量。
-        剩余流量与到期日以订阅源返回为准。
+        节点的「XX ms」是**本站服务器**到该节点地址的 TCP 握手耗时（用于分辨死节点与慢节点），
+        不是你在本机用客户端实测的速度，也没有经过节点转发，因此只作参考 —— 以你本地客户端的
+        「延迟测试」为准。QUIC/UDP 协议的节点（hysteria2 / tuic）服务端无法测速。
+        「测不到」只代表本站连不上，不代表节点不可用。剩余流量与到期日以订阅源返回为准。
       </p>
 
       <AgreementDialog open={agreementOpen} onOpenChange={setAgreementOpen} />

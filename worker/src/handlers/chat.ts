@@ -13,7 +13,29 @@ import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
 import { uuid } from "../crypto"
 import { guardRateLimit, clientIp } from "../ratelimit"
+import { getSettingBool } from "../settings"
 import type { Env } from "../env"
+
+/**
+ * 聊天室门禁：登录 + 总开关打开（管理员放行）。
+ *
+ * ⚠️ 2026-09-30：`chat_enabled` 是应急开关 —— D1 行写额度被打满、连写一行
+ *    把它关掉都做不到，所以用「默认关 + 部署」落地。关闭时普通用户一律
+ *    403 CHAT_DISABLED（前端据此显示「聊天室已关闭」并停止轮询）。
+ *    关闭状态反而更省读额度：一次设置读取 ≈ 1 行读，替代原来的整页消息查询。
+ */
+async function requireChatUser(
+  env: Env,
+  request: Request
+): Promise<ReturnType<typeof requireUser>> {
+  const user = await requireUser(env, request)
+  if (user.role !== "admin" && user.role !== "root") {
+    if (!(await getSettingBool(env, "chat_enabled"))) {
+      throw new ApiError(403, "聊天室已关闭", "CHAT_DISABLED")
+    }
+  }
+  return user
+}
 
 /** 在线判定窗口：最近 N 秒内有心跳 */
 const ONLINE_WINDOW_SECONDS = 120
@@ -24,37 +46,83 @@ const MAX_BODY = 2000
 /** 拉取的历史消息上限 */
 const MAX_MESSAGES = 100
 
-/** GET /api/chat/messages?after=<id>&limit= */
+/**
+ * 游标编码：`<created_at>|<id>`（两者都按升序比较）。
+ *
+ * ⚠️ 2026-09-25 审计（H12）—— 这里原本直接把**消息 id** 当游标用：
+ *   `WHERE m.id > ? ORDER BY m.id ASC` / `ORDER BY id DESC LIMIT ?`。
+ * 但 `chat_messages.id` 是 `uuid()` 生成的 **v4 随机 UUID**（见 sendMessage），
+ * 它既不单调也不按时间排序。后果：
+ *   1. 「拉最新 50 条」实际返回的是**随机 50 条**，不是最新的；
+ *   2. 增量轮询 `id > lastId` 会随机跳过大量消息、同时重复推送旧消息 ——
+ *      聊天室看起来就是「消息时有时无、顺序错乱」。
+ * 现在改为按 `(created_at, id)` 元组排序与比较（created_at 是 ISO 8601
+ * 定长字符串，字典序 == 时间序；id 只用于同一毫秒内的稳定去重）。
+ *
+ * 长期更干净的做法是给表加一个 `seq INTEGER PRIMARY KEY AUTOINCREMENT`
+ * 之类的单调列，但那要改 worker/schema.sql（当前由另一个 AI 占用），
+ * 见修复清单待办项。
+ */
+function encodeCursor(createdAt: string, id: string): string {
+  return `${createdAt}|${id}`
+}
+
+function decodeCursor(raw: string): { createdAt: string; id: string } | null {
+  const sep = raw.lastIndexOf("|")
+  if (sep <= 0) return null
+  const createdAt = raw.slice(0, sep)
+  const id = raw.slice(sep + 1)
+  if (!createdAt || !id) return null
+  if (Number.isNaN(new Date(createdAt).getTime())) return null
+  return { createdAt, id }
+}
+
+/** GET /api/chat/messages?after=<游标或消息id>&limit= */
 export async function listMessages(env: Env, request: Request): Promise<Response> {
-  await requireUser(env, request)
+  await requireChatUser(env, request)
   const url = new URL(request.url)
   const after = url.searchParams.get("after") ?? ""
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 50) || 50, 1), MAX_MESSAGES)
 
-  // 带 after 则增量拉取（只取比 after 新的）；否则拉最新 N 条
+  // 游标优先按新格式解析；解析不出来再当成**消息 id**（旧前端就是这样传的）
+  // 反查它的 created_at，从而不必改动前端与 api.ts 的接口形状。
+  let cursor = after ? decodeCursor(after) : null
+  if (after && !cursor) {
+    const row = await env.DB.prepare("SELECT created_at FROM chat_messages WHERE id = ?")
+      .bind(after)
+      .first<{ created_at: string }>()
+    if (row) cursor = { createdAt: row.created_at, id: after }
+  }
+
+  // 带 after 则增量拉取（只取比游标新的）；否则拉最新 N 条
   let rows
-  if (after) {
+  if (cursor) {
     rows = await env.DB.prepare(
       `SELECT m.id, m.user_id, m.body, m.created_at, u.username, u.nickname, u.avatar_key
          FROM chat_messages m JOIN users u ON u.id = m.user_id
-        WHERE m.id > ?
-        ORDER BY m.id ASC LIMIT ?`
+        WHERE m.created_at > ? OR (m.created_at = ? AND m.id > ?)
+        ORDER BY m.created_at ASC, m.id ASC LIMIT ?`
     )
-      .bind(after, limit)
+      .bind(cursor.createdAt, cursor.createdAt, cursor.id, limit)
       .all()
   } else {
     rows = await env.DB.prepare(
       `SELECT m.id, m.user_id, m.body, m.created_at, u.username, u.nickname, u.avatar_key
-         FROM (SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?) m
+         FROM (SELECT * FROM chat_messages ORDER BY created_at DESC, id DESC LIMIT ?) m
          JOIN users u ON u.id = m.user_id
-        ORDER BY m.id ASC`
+        ORDER BY m.created_at ASC, m.id ASC`
     )
       .bind(limit)
       .all()
   }
 
+  const messages = (rows.results ?? []).map(toMessage)
+  const last = messages[messages.length - 1]
   return json({
-    messages: (rows.results ?? []).map(toMessage),
+    messages,
+    // 新增字段：前端可以改用 nextCursor 作为下一次的 after（当前前端仍传消息 id，
+    // 服务端已能正确解析，两者都支持）
+    nextCursor: last ? encodeCursor(String(last.createdAt), String(last.id)) : after || null,
   })
 }
 
@@ -72,7 +140,7 @@ function toMessage(r: Record<string, unknown>) {
 
 /** POST /api/chat/messages —— 发消息 */
 export async function sendMessage(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireChatUser(env, request)
   await guardRateLimit(
     env,
     `chat:send:ip:${clientIp(request)}`,
@@ -117,7 +185,7 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
 
 /** POST /api/chat/heartbeat —— 心跳（前端每 30 秒一次） */
 export async function heartbeat(env: Env, request: Request): Promise<Response> {
-  const user = await requireUser(env, request)
+  const user = await requireChatUser(env, request)
   const now = new Date().toISOString()
   await env.DB.prepare(
     `INSERT INTO chat_presence (user_id, last_seen_at) VALUES (?, ?)
@@ -130,7 +198,7 @@ export async function heartbeat(env: Env, request: Request): Promise<Response> {
 
 /** GET /api/chat/presence —— 在线用户（头像堆叠用） */
 export async function presence(env: Env, request: Request): Promise<Response> {
-  await requireUser(env, request)
+  await requireChatUser(env, request)
   const cutoff = new Date(Date.now() - ONLINE_WINDOW_SECONDS * 1000).toISOString()
   const rows = await env.DB.prepare(
     `SELECT p.user_id, p.last_seen_at, u.username, u.nickname, u.avatar_key
@@ -150,3 +218,47 @@ export async function presence(env: Env, request: Request): Promise<Response> {
     })),
   })
 }
+
+/**
+ * GET /api/chat/unread —— 「我看过之后」的新消息数（侧边栏角标用）。
+ *
+ * 口径与社区广场的 new-posts-count（迁移 0043）完全一致：
+ *   - 看过：count(chat_messages where created_at > users.chat_seen_at)
+ *   - 没看过（chat_seen_at 为 NULL，含上线前的老用户）：回落「最近 24 小时」，
+ *     避免一上线就弹出一个积累了很久的大数字
+ *   - 不算自己发的消息 —— 自己发的不需要「去读」
+ *   - 进聊天室时前端调 POST /chat/seen 刷新 chat_seen_at，角标随之为 0
+ */
+export async function unreadCount(env: Env, request: Request): Promise<Response> {
+  const me = await requireChatUser(env, request)
+
+  const row = await env.DB.prepare("SELECT chat_seen_at FROM users WHERE id = ?")
+    .bind(me.id)
+    .first<{ chat_seen_at: string | null }>()
+
+  const since =
+    row?.chat_seen_at ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+
+  const r = await env.DB.prepare(
+    "SELECT COUNT(*) c FROM chat_messages WHERE created_at > ? AND user_id <> ?"
+  )
+    .bind(since, me.id)
+    .first<{ c: number }>()
+
+  return json({ count: r?.c ?? 0 })
+}
+
+/**
+ * POST /api/chat/seen —— 记下「我刚打开过聊天室」，把角标清零。
+ *
+ * 单独一个端点而不是塞进 listMessages 的副作用：消息列表会被 2 秒轮询反复调用，
+ * 把它变成写操作会让缓存与语义都变脏（同社区 markCommunitySeen 的理由）。
+ */
+export async function markChatSeen(env: Env, request: Request): Promise<Response> {
+  const me = await requireChatUser(env, request)
+  await env.DB.prepare("UPDATE users SET chat_seen_at = ? WHERE id = ?")
+    .bind(new Date().toISOString(), me.id)
+    .run()
+  return json({ ok: true })
+}
+

@@ -3,12 +3,49 @@
 // 这条链路的风险集中在「谁能用、能开什么、会不会重复」三件事上，
 // 所以用例围绕边界写：自己建的码不能自用、已拥有的模块不能重复开、
 // 一张券只能用一次、首捐券一辈子只有一张。
-import { describe, it, expect, beforeEach } from "vitest"
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest"
 import { env } from "cloudflare:workers"
 import { authRequest, fetchSelf, makeUser, setPermissions, type TestUser } from "./helpers"
 import { uuid } from "../src/crypto"
 import { grantFirstDonationVoucher } from "../src/vouchers"
 import { parsePermissions } from "../src/permissions"
+
+/**
+ * 打桩 NewAPI 的出站请求。
+ *
+ * `grantFeatures()` 在授予 `ai` 时会顺带调 NewAPI「启用账号」—— 修的是
+ * 「商汤巡检把账号禁用、用户后来通过兑换码把 ai 拿回来，账号却还是禁用」这个 bug。
+ *
+ * ⚠️ 必须打桩：测试环境里 `NEWAPI_BASE_URL` 是 vitest.config.ts 里的假绑定
+ * `https://api.doulor.cn`，**但那个域名真实存在**，不打桩就会真发一次出站请求
+ * （实测 ~1.3 秒 + 401），既拖慢用例又往上打无谓流量。
+ */
+const NEWAPI_BASE = "https://api.doulor.cn"
+/** 记录「调 NewAPI 启用/禁用账号」的调用，供用例断言 */
+let manageCalls: Array<{ id: number; action: string }> = []
+const originalFetch = globalThis.fetch
+
+beforeAll(() => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+    if (url.startsWith(NEWAPI_BASE)) {
+      if (url.includes("/api/user/manage")) {
+        const body = JSON.parse((init?.body as string) ?? "{}") as Record<string, unknown>
+        manageCalls.push({ id: Number(body.id), action: String(body.action) })
+      }
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    }
+    return originalFetch(input as RequestInfo, init)
+  }) as unknown as typeof fetch
+})
+
+afterAll(() => {
+  globalThis.fetch = originalFetch
+})
 
 /** 直接塞一张券 */
 async function seedVoucher(opts: {
@@ -97,6 +134,7 @@ beforeEach(async () => {
   // 券/邀请码都是跨用例可查的表，清掉避免互相干扰
   await env.DB.prepare("DELETE FROM vouchers").run()
   await env.DB.prepare("DELETE FROM invite_codes").run()
+  manageCalls = []
 })
 
 describe("首捐奖励券", () => {
@@ -375,5 +413,69 @@ describe("兑换接口的鉴权", () => {
     const code = await seedVoucher({ owner: user.id, feature: "ai" })
     const { res } = await redeem(user, code.toLowerCase())
     expect(res.status).toBe(200)
+  })
+})
+
+/**
+ * 「拿回 ai 权限时把被禁用的中转站账号一并启用」。
+ *
+ * 修的是站长 2026-09-30 报的 bug：商汤 Key 巡检收回 ai 权限时会连带 disable
+ * 中转站账号（让用户已建的 API Key 立即失效），但用户后来通过**兑换码 / 积分商城**
+ * 把 ai 拿回来时，账号却还躺在禁用状态 —— 表现成「有权限但调不通」。
+ */
+describe("授予 ai 时启用中转站账号", () => {
+  /** 塞一条 newapi_accounts，模拟「已开通中转站」 */
+  async function seedAccount(userId: string, newapiUserId: number, username: string) {
+    await env.DB.prepare(
+      `INSERT INTO newapi_accounts
+         (user_id, newapi_user_id, username, email, enc_token, group_name, quota, used_quota, request_count, synced_at, created_at)
+       VALUES (?, ?, ?, ?, 'enc', 'default', 0, 0, 0, NULL, ?)`
+    )
+      .bind(userId, newapiUserId, username, `${username}@doulor.cn`, new Date().toISOString())
+      .run()
+  }
+
+  it("兑到 ai 权限 → 顺带调 NewAPI 启用该账号", async () => {
+    const user = await makeUser()
+    await setPermissions(
+      user.id,
+      JSON.stringify({ r2: false, ai: false, frp: false, proxy: false })
+    )
+    await seedAccount(user.id, 9101, user.username)
+
+    const code = await seedVoucher({ owner: user.id, feature: "ai" })
+    const { res, body } = await redeem(user, code)
+    expect(res.status).toBe(200)
+    expect(body.granted).toEqual(["ai"])
+    expect(manageCalls).toContainEqual({ id: 9101, action: "enable" })
+  })
+
+  it("没开通中转站时不发请求，也不影响兑换", async () => {
+    const user = await makeUser()
+    await setPermissions(
+      user.id,
+      JSON.stringify({ r2: false, ai: false, frp: false, proxy: false })
+    )
+
+    const code = await seedVoucher({ owner: user.id, feature: "ai" })
+    const { res, body } = await redeem(user, code)
+    expect(res.status).toBe(200)
+    expect(body.granted).toEqual(["ai"])
+    expect(manageCalls).toHaveLength(0)
+  })
+
+  it("授予非 ai 模块时不去碰中转站账号", async () => {
+    const user = await makeUser()
+    await setPermissions(
+      user.id,
+      JSON.stringify({ r2: false, ai: false, frp: false, proxy: false })
+    )
+    await seedAccount(user.id, 9102, user.username)
+
+    const code = await seedVoucher({ owner: user.id, feature: "proxy" })
+    const { res, body } = await redeem(user, code)
+    expect(res.status).toBe(200)
+    expect(body.granted).toEqual(["proxy"])
+    expect(manageCalls).toHaveLength(0)
   })
 })

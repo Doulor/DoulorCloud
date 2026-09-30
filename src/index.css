@@ -3,6 +3,26 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* 全站正文字体：Outfit（自托管可变字体，32 KB，一个文件覆盖所有字重）。
+ *
+ * ⚠️ unicode-range 只含拉丁字符集 —— 中文不在范围内，会自动回退到下面的系统字体栈
+ * （苹方 / 微软雅黑）。这样既拿到自定义字体的观感，又不用背负几 MB 的中文字体。
+ * 这是站上「个人名片」模块一直在用的做法（见 worker/src/profile-page.ts 的 fontFaceCss）。
+ * 若去掉 unicode-range，浏览器会把中文也交给 Outfit，而 Outfit 没有中文字形 ⇒ 中文变豆腐块。 */
+@font-face {
+  font-family: "Outfit";
+  src: url("/fonts/outfit-var.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+2000-206F, U+20AC, U+2122, U+2190-2193;
+}
+
+:root {
+  --font-app: "Outfit", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+}
+
 :root {
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -49,6 +69,7 @@
 }
 
 @theme inline {
+  --font-sans: var(--font-app);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -106,17 +127,162 @@
   }
 }
 
+/* 角色徽章流光：管理员金色（role-sheen）、站长红色更浓（role-sheen-strong） */
+@keyframes role-sheen {
+  0% {
+    transform: translateX(-160%) skewX(-20deg);
+  }
+  60%,
+  100% {
+    transform: translateX(260%) skewX(-20deg);
+  }
+}
+
+@utility role-sheen {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    width: 50%;
+    background: linear-gradient(
+      100deg,
+      transparent 20%,
+      rgba(255, 255, 255, 0.75) 50%,
+      transparent 80%
+    );
+    transform: translateX(-160%) skewX(-20deg);
+    animation: role-sheen 3.2s ease-in-out infinite;
+    pointer-events: none;
+  }
+}
+
+@utility role-sheen-strong {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    width: 70%;
+    background: linear-gradient(
+      100deg,
+      transparent 10%,
+      rgba(255, 255, 255, 0.95) 50%,
+      transparent 90%
+    );
+    transform: translateX(-160%) skewX(-20deg);
+    animation: role-sheen 1.8s ease-in-out infinite;
+    pointer-events: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .role-sheen::after,
+  .role-sheen-strong::after {
+    animation: none;
+  }
+}
+
+/* 角色徽章描边流光：沿四周循环流动的光斑（管理员金色 / 站长红色更浓）。
+ * 用 conic-gradient 角度动画做「描边」，外层 padding 出 1.5px 边框，
+ * 内层实心徽章盖住中间，只露四周这条会转的光带。 */
+@property --ring-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes role-ring-spin {
+  to {
+    --ring-angle: 360deg;
+  }
+}
+
+/*
+ * 描边用「徽章背景的同色系、但浅一档」的颜色：
+ *   - 不能和徽章背景同色（深金/深红）→ 看着像外溢一圈，很奇怪；
+ *   - 不能用纯白 → 站点背景本身浅色，白光斑没有对比（等于看不见）；
+ *   - 也不能用灰底 → 一圈灰边太厚重。
+ * 所以：整圈铺淡金/淡粉作底，同色系更亮的一档作流动光斑，
+ * 两种主题下都有色相差异、看得见，又不会显得粗。
+ */
+@utility role-ring {
+  /* 管理员：淡金底(amber-100) + 浅金光斑(amber-300) */
+  background: conic-gradient(
+    from var(--ring-angle),
+    rgba(254, 243, 199, 1) 0deg,
+    rgba(252, 211, 77, 1) 50deg,
+    rgba(254, 243, 199, 1) 105deg,
+    rgba(254, 243, 199, 1) 180deg,
+    rgba(252, 211, 77, 1) 230deg,
+    rgba(254, 243, 199, 1) 285deg,
+    rgba(254, 243, 199, 1) 360deg
+  );
+  animation: role-ring-spin 3s linear infinite;
+}
+
+@utility role-ring-strong {
+  /* 站长：淡粉底(rose-100) + 浅红光斑(rose-400) */
+  background: conic-gradient(
+    from var(--ring-angle),
+    rgba(254, 226, 232, 1) 0deg,
+    rgba(251, 113, 133, 1) 50deg,
+    rgba(254, 226, 232, 1) 105deg,
+    rgba(254, 226, 232, 1) 180deg,
+    rgba(251, 113, 133, 1) 230deg,
+    rgba(254, 226, 232, 1) 285deg,
+    rgba(254, 226, 232, 1) 360deg
+  );
+  animation: role-ring-spin 1.8s linear infinite;
+}
+
+/*
+ * 自定义称号徽章的描边流光：结构与 role-ring 完全一致，只是颜色
+ * 不写死 —— 由组件内联设置 --title-ring-base / --title-ring-spot
+ * （JS 按称号主色混白算好，见 src/lib/color.ts）。
+ * 动画复用 role-ring-spin（@property --ring-angle 已在上面注册）。
+ */
+@utility title-ring {
+  background: conic-gradient(
+    from var(--ring-angle),
+    var(--title-ring-base) 0deg,
+    var(--title-ring-spot) 50deg,
+    var(--title-ring-base) 105deg,
+    var(--title-ring-base) 180deg,
+    var(--title-ring-spot) 230deg,
+    var(--title-ring-base) 285deg,
+    var(--title-ring-base) 360deg
+  );
+  animation: role-ring-spin 3s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .role-ring,
+  .role-ring-strong,
+  .title-ring {
+    animation: none;
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
   body {
     @apply bg-background text-foreground;
-    font-feature-settings: "cv11", "ss01";
-    font-variation-settings: "opsz" 32;
+    /* 这里原本是 font-feature-settings:"cv11","ss01" 与 font-variation-settings:"opsz" 32，
+       那两条是 Inter 专用的（cv11/ss01 是它的 OpenType 特性、opsz 是它的光学尺寸轴），
+       全站字体换成 Outfit 后这两个特性都不存在，留着只会让人误以为有作用，故移除。 */
   }
   html {
     -webkit-text-size-adjust: 100%;
+    font-family: var(--font-app);
   }
 }
 
@@ -328,5 +494,188 @@
 
 .dark .cursor-glow[data-visible="1"] {
   opacity: var(--glow-alpha);
+}
+
+
+/* 公告弹窗：明显的滚动条 */
+.announcement-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground)) transparent;
+}
+.announcement-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+.announcement-scroll::-webkit-scrollbar-track {
+  background: hsl(var(--muted));
+  border-radius: 8px;
+}
+.announcement-scroll::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground));
+  border-radius: 8px;
+  border: 2px solid hsl(var(--muted));
+}
+.announcement-scroll::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--foreground));
+}
+
+/* ==========================================================================
+   动效：页面内容渐入
+   （开屏动画的样式不在这里 —— 它写在 index.html 里，因为必须早于 JS 就渲染出来）
+   ========================================================================== */
+
+/* ---- 页面内容渐入：路由切换 / 刷新时，页面区块依次淡入上浮 ----
+ * 只作用于「页面根元素的子元素」（= 页面里的各个区块）。
+ * 外壳（侧边栏 / 顶栏）包在 .page-enter 外面，不参与 —— 否则点导航时整个侧边栏都会闪。 */
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.page-enter > * > * {
+  animation: page-enter 0.42s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.page-enter > * > *:nth-child(1) {
+  animation-delay: 0s;
+}
+.page-enter > * > *:nth-child(2) {
+  animation-delay: 0.03s;
+}
+.page-enter > * > *:nth-child(3) {
+  animation-delay: 0.06s;
+}
+.page-enter > * > *:nth-child(4) {
+  animation-delay: 0.09s;
+}
+.page-enter > * > *:nth-child(5) {
+  animation-delay: 0.12s;
+}
+.page-enter > * > *:nth-child(6) {
+  animation-delay: 0.15s;
+}
+.page-enter > * > *:nth-child(7) {
+  animation-delay: 0.18s;
+}
+.page-enter > * > *:nth-child(8) {
+  animation-delay: 0.21s;
+}
+.page-enter > * > *:nth-child(n + 9) {
+  animation-delay: 0.24s;
+}
+
+/* 系统开了「减少动态效果」：直接关掉（开屏动画在 index.html 里也做了同样的处理） */
+@media (prefers-reduced-motion: reduce) {
+  .page-enter > * > * {
+    animation: none;
+  }
+}
+
+/* ==========================================================================
+   数据就绪：骨架 → 内容 的交叉淡化（配合 components/data-fade.tsx）
+   两层用 grid 叠在同一个格子里 ⇒ 容器高度自动取两者较高的那个，
+   既不用写死高度也不用 absolute，交接期间不会跳。
+   ========================================================================== */
+.data-fade {
+  display: grid;
+}
+.data-fade > * {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+.data-fade-out {
+  opacity: 0;
+  transition: opacity 0.34s ease;
+}
+.data-fade-in {
+  animation: data-fade-in 0.34s ease both;
+}
+@keyframes data-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .data-fade-out {
+    transition: none;
+  }
+  .data-fade-in {
+    animation: none;
+  }
+}
+
+/* ==========================================================================
+   云纹背景（Doulor-mail-bg-mark）
+   把站上的云图标做成规则交错的底纹，铺满整张页面。
+   用 body::before 而不是加 DOM 节点 —— 不动任何组件结构，也不会被页面内容遮住
+   （z-index:-1 让它落在 body 背景之上、所有内容之下）。
+   形状走 mask、颜色交给 background-color ⇒ 明暗主题各写一个色值即可。
+
+   ⚠️⚠️ 两条会「静默把云纹整块盖掉」的红线，改背景相关样式前务必先看这里：
+     1. **绝不要给 `html` 设 background**。一旦 html 有背景，body 的背景就不再传播到画布，
+        而会作为普通块级背景在「负 z-index 后代」之后绘制 —— 正好压住这一层，云纹直接消失。
+        （2026-09-29 踩过：为了防开屏白闪给 html 加底色，结果云纹全没了，且不报任何错。）
+     2. **也不要给 body 设不透明的 background**。它同样会盖住这层。
+        底色要么留在 html 上（画布层）、要么就交给 body 的默认传播行为，二选一，别同时来。
+   ========================================================================== */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-color: oklch(0.145 0 0 / 1.7%);
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%27730%27%20height%3D%27730%27%20viewBox%3D%270%200%20730%20730%27%3E%3Cg%20transform%3D%27translate%28182.50%2C182.50%29%20rotate%280.00%29%20scale%2815.0000%29%20translate%28-12%2C-11%29%27%3E%3Cpath%20d%3D%27M17.5%2019H9a7%207%200%201%201%206.71-9h1.79a4.5%204.5%200%201%201%200%209Z%27%20fill%3D%27none%27%20stroke%3D%27black%27%20stroke-width%3D%272.40%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%2F%3E%3C%2Fg%3E%3Cg%20transform%3D%27translate%28547.50%2C547.50%29%20rotate%280.00%29%20scale%2815.0000%29%20translate%28-12%2C-11%29%27%3E%3Cpath%20d%3D%27M17.5%2019H9a7%207%200%201%201%206.71-9h1.79a4.5%204.5%200%201%201%200%209Z%27%20fill%3D%27none%27%20stroke%3D%27black%27%20stroke-width%3D%272.40%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%27730%27%20height%3D%27730%27%20viewBox%3D%270%200%20730%20730%27%3E%3Cg%20transform%3D%27translate%28182.50%2C182.50%29%20rotate%280.00%29%20scale%2815.0000%29%20translate%28-12%2C-11%29%27%3E%3Cpath%20d%3D%27M17.5%2019H9a7%207%200%201%201%206.71-9h1.79a4.5%204.5%200%201%201%200%209Z%27%20fill%3D%27none%27%20stroke%3D%27black%27%20stroke-width%3D%272.40%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%2F%3E%3C%2Fg%3E%3Cg%20transform%3D%27translate%28547.50%2C547.50%29%20rotate%280.00%29%20scale%2815.0000%29%20translate%28-12%2C-11%29%27%3E%3Cpath%20d%3D%27M17.5%2019H9a7%207%200%201%201%206.71-9h1.79a4.5%204.5%200%201%201%200%209Z%27%20fill%3D%27none%27%20stroke%3D%27black%27%20stroke-width%3D%272.40%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E");
+  -webkit-mask-repeat: repeat;
+  mask-repeat: repeat;
+  -webkit-mask-size: 730px 730px;
+  mask-size: 730px 730px;
+}
+html.dark body::before {
+  background-color: oklch(0.985 0 0 / 2%);
+}
+
+/* ==========================================================================
+   亚克力（玻璃）面板
+   顶栏原本就有（bg-background/80 + backdrop-blur），这里把同一套手感推广到侧边栏与卡片。
+   用 color-mix 从 --card 派生透明度 ⇒ 明暗主题自动适配。三档：
+     · glass-panel    顶栏（中等）：68% + blur 14px
+     · glass-sidebar  侧边栏（轻度）：86% + blur 10px
+     · glass-card     卡片（轻度）：86% + blur 6px
+   ⚠️ backdrop-filter 有性能代价，卡片数量多且已有跟随鼠标的光效，所以卡片模糊最小。
+   ========================================================================== */
+.glass-panel {
+  background: color-mix(in oklab, var(--card) 68%, transparent);
+  -webkit-backdrop-filter: blur(14px) saturate(1.5);
+  backdrop-filter: blur(14px) saturate(1.5);
+}
+/* 侧边栏：透明度与卡片同为「轻度」，但模糊给大一些 —— 大面板上模糊不够就看不出玻璃感。 */
+.glass-sidebar {
+  background: color-mix(in oklab, var(--card) 86%, transparent);
+  -webkit-backdrop-filter: blur(10px) saturate(1.3);
+  backdrop-filter: blur(10px) saturate(1.3);
+}
+.glass-card {
+  background: color-mix(in oklab, var(--card) 86%, transparent);
+  -webkit-backdrop-filter: blur(6px) saturate(1.2);
+  backdrop-filter: blur(6px) saturate(1.2);
+}
+/* 深色主题下补一道顶边高光 —— 只有透明度 + 模糊会显得像磨砂塑料，
+   这一笔才是「玻璃」的关键。浅色主题下白高光看不出来，所以只在暗色下加。 */
+html.dark .glass-panel {
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / 9%);
+}
+html.dark .glass-sidebar {
+  box-shadow: inset -1px 0 0 oklch(1 0 0 / 6%);
+}
+html.dark .glass-card {
+  box-shadow: 0 1px 2px oklch(0 0 0 / 8%), inset 0 1px 0 oklch(1 0 0 / 7%);
 }
 

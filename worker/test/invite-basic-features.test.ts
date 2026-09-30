@@ -135,3 +135,37 @@ describe("基础权限开关影响创建邀请码", () => {
     expect(after.quota.featureRemaining.r2).toBe(1)
   })
 })
+
+// 管理端「邀请码」栏目改成与「用户」栏目同口径：表头 UID + 用户名/邮箱/域名，
+// 顶部搜索要能按这三样过滤 —— 所以列表接口必须把 uid / email / namespace 一并带出。
+describe("管理端邀请码额度列表：UID / 邮箱 / 域名", () => {
+  it("每行带出 uid、username、email、namespace", async () => {
+    const admin = await makeUser({ role: "admin" })
+    const user = await makeUser({ username: "quotauser" })
+
+    const res = await fetchSelf(authRequest(admin, "/api/admin/invite-quotas"))
+    expect(res.status).toBe(200)
+    const body = await res.json<{
+      users: {
+        id: string
+        uid: number | null
+        username: string
+        email: string
+        namespace: string
+      }[]
+    }>()
+    const row = body.users.find((u) => u.id === user.id)
+    expect(row).toBeDefined()
+    expect(row?.username).toBe("quotauser")
+    expect(row?.email).toBe("quotauser@doulor.cn")
+    expect(row?.namespace).toBe("quotauser")
+    // uid 由迁移 0070 引入，makeUser 未显式赋值时为 null，但字段必须存在
+    expect(row && "uid" in row).toBe(true)
+  })
+
+  it("非管理员不能拉取 → 403", async () => {
+    const user = await makeUser()
+    const res = await fetchSelf(authRequest(user, "/api/admin/invite-quotas"))
+    expect(res.status).toBe(403)
+  })
+})

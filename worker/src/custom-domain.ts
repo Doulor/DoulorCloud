@@ -15,7 +15,11 @@ import {
   cfDeleteDnsRecord,
   cfListDnsRecords,
 } from "./cloudflare"
+import { fetchWithTimeout } from "./async-utils"
 import type { Env } from "./env"
+
+/** 绑定自定义域名的 CF API 超时（2026-09-25 审计 H15） */
+const CF_WORKERS_API_TIMEOUT_MS = 15_000
 
 async function cfWorkersApi(
   env: Env,
@@ -29,14 +33,18 @@ async function cfWorkersApi(
       "CF_NOT_CONFIGURED"
     )
   }
-  return fetch(`https://api.cloudflare.com/client/v4${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${env.CF_WORKERS_TOKEN}`,
-      "Content-Type": "application/json",
-      ...(init.headers ?? {}),
+  return fetchWithTimeout(
+    `https://api.cloudflare.com/client/v4${path}`,
+    {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${env.CF_WORKERS_TOKEN}`,
+        "Content-Type": "application/json",
+        ...(init.headers ?? {}),
+      },
     },
-  })
+    CF_WORKERS_API_TIMEOUT_MS
+  )
 }
 
 async function listWorkerRoutes(
@@ -112,6 +120,25 @@ export async function attachCustomDomain(
   return { dnsCreated }
 }
 
+/**
+ * 判断一条 DNS 记录是不是**我们自己**创建的占位解析。
+ *
+ * 本站绑定自定义域名时统一建 `AAAA 100::`（橙云代理）作为占位
+ * （见 `attachCustomDomain` 与 `handlers/storage.ts` 的绑定分支）。
+ *
+ * ⚠️ 为什么必须区分「我们的」和「用户的」（2026-09-25 审计 M14b）：
+ *   解绑逻辑原先把该名字下的**所有**记录全删掉。但用户完全可能为同一个子域名
+ *   配了 MX / TXT（邮件收信）等记录 —— 解绑一个网盘直链或名片，代价却是
+ *   把这个子域名的邮件能力抹掉。那些记录是用户的资产，不该由解绑动作处置。
+ *   所以清理时只删这个谓词认得的记录，其余一律保留。
+ */
+export function isPlaceholderDnsRecord(record: {
+  type: string
+  content: string
+}): boolean {
+  return record.type === "AAAA" && record.content === "100::"
+}
+
 /** 解绑自定义域名：移除 Route 与绑定期间自动创建的 DNS 记录 */
 export async function detachCustomDomain(env: Env, fqdn: string): Promise<void> {
   const pattern = `${fqdn}/*`
@@ -130,10 +157,14 @@ export async function detachCustomDomain(env: Env, fqdn: string): Promise<void> 
     console.error("移除 Worker Route 失败:", fqdn, err)
   }
 
-  // 清掉占位 DNS，否则该域名会一直解析到本站，且冲突检测会认为仍被占用
+  // 清掉**占位** DNS，否则该域名会一直解析到本站，且冲突检测会认为仍被占用。
+  // 只删我们自己建的 AAAA 100::，用户自建的记录（含 MX/TXT）保留 —— 见 M14b。
   try {
     const records = await cfListDnsRecords(env, env.ZONE_ID, fqdn)
-    for (const r of records) await cfDeleteDnsRecord(env, env.ZONE_ID, r.id)
+    for (const r of records) {
+      if (!isPlaceholderDnsRecord(r)) continue
+      await cfDeleteDnsRecord(env, env.ZONE_ID, r.id)
+    }
   } catch (err) {
     console.error("移除自定义域名 DNS 记录失败:", fqdn, err)
   }

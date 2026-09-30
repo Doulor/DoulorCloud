@@ -183,19 +183,94 @@ describe("YouTube", () => {
 })
 
 describe("QQ", () => {
-  it("纯数字号 → 头像 API", () => {
-    expect(hrefOf("qq", "2737855297")).toBe("https://res.abeim.cn/api/qq/?qq=2737855297")
+  // 注意：hrefOf() 是正则抓 HTML 属性原文、不做实体解码，所以这里断言的是
+  // 转义后的 &amp; —— 顺便也把「属性转义正确」这件事一起锁住。
+  const QQ_2737855297 =
+    "https://wpa.qq.com/msgrd?v=3&amp;uin=2737855297&amp;site=qq&amp;menu=yes"
+
+  it("纯数字号 → 腾讯官方跳转页", () => {
+    expect(hrefOf("qq", "2737855297")).toBe(QQ_2737855297)
   })
 
   it("「QQ: 123」前缀标签剥掉（修复前会把冒号编码进 qq 参数）", () => {
-    expect(hrefOf("qq", "QQ: 2737855297")).toBe(
-      "https://res.abeim.cn/api/qq/?qq=2737855297"
+    expect(hrefOf("qq", "QQ: 2737855297")).toBe(QQ_2737855297)
+  })
+
+  it("粘贴 qm 短链 → 整条采用（加好友正道，token 无法从号码反推）", () => {
+    expect(hrefOf("qq", "https://qm.qq.com/q/5uAkInIOJi")).toBe(
+      "https://qm.qq.com/q/5uAkInIOJi"
     )
   })
 
-  it("非数字不给链接", () => {
+  it("粘贴 qm 二维码页链接 → 同样整条采用", () => {
+    expect(hrefOf("qq", "https://qm.qq.com/cgi-bin/qm/qr?k=8KcB6KHSxZMlPtENVU6GaqSlawQL1G7c")).toBe(
+      "https://qm.qq.com/cgi-bin/qm/qr?k=8KcB6KHSxZMlPtENVU6GaqSlawQL1G7c"
+    )
+  })
+
+  it("qm 链接的 http 版本升级为 https、去掉尾部斜杠", () => {
+    expect(hrefOf("qq", "http://qm.qq.com/q/5uAkInIOJi/")).toBe(
+      "https://qm.qq.com/q/5uAkInIOJi"
+    )
+  })
+
+  it("粘贴带文案的整段内容 → 从文本里提取出链接本体", () => {
+    // 用户从 QQ 里复制出来的真实形态是「点击链接加我为QQ好友：https://…」
+    expect(
+      hrefOf("qq", "点击链接加我为QQ好友：https://qm.qq.com/q/5uAkInIOJi")
+    ).toBe("https://qm.qq.com/q/5uAkInIOJi")
+  })
+
+  it("带文案 + 有 label 时，纯数字 label 自动补 QQ 前缀", () => {
+    // 用户把 QQ 号填进「显示文字」栏，自动补成「QQ 2737855297」，
+    // 与旁边「GitHub Doulor」等条目对齐，而不是孤零零一个数字
+    expect(
+      labelOf("qq", "点击链接加我为QQ好友：https://qm.qq.com/q/5uAkInIOJi", "2737855297")
+    ).toBe("QQ 2737855297")
+  })
+
+  it("label 已经带了 QQ 前缀 → 不重复加", () => {
+    expect(
+      labelOf("qq", "https://qm.qq.com/q/5uAkInIOJi", "QQ 2737855297")
+    ).toBe("QQ 2737855297")
+  })
+
+  it("label 是自定义文字（非纯数字）→ 原样保留，不强行加 QQ 前缀", () => {
+    expect(
+      labelOf("qq", "https://qm.qq.com/q/5uAkInIOJi", "加我备注来意")
+    ).toBe("加我备注来意")
+  })
+
+  it("纯数字号（不走 qm 链接）+ 纯数字 label → 同样补 QQ 前缀", () => {
+    expect(labelOf("qq", "2737855297", "2737855297")).toBe("QQ 2737855297")
+  })
+
+  it("带文案但没填 label 时，自动从内容里识别数字号作显示文字", () => {
+    // 极端情况：文案里恰好带了号（这里没有，所以退回「QQ」）；常规文案不含号 → 显示「QQ」
+    expect(
+      labelOf("qq", "点击链接加我为QQ好友：https://qm.qq.com/q/5uAkInIOJi")
+    ).toBe("QQ")
+  })
+
+  it("文案里带 QQ 号时自动取它作显示文字（没填 label 的兜底）", () => {
+    expect(
+      labelOf("qq", "加我好友 2737855297 https://qm.qq.com/q/5uAkInIOJi")
+    ).toBe("QQ 2737855297")
+  })
+
+  // 2026-09-25：第三方 res.abeim.cn 全线失联（80/443 均拒绝连接），
+  // 线上所有 QQ 名片按钮都点不开。这条护栏防止再被改回去。
+  it("不指向任何第三方跳转服务", () => {
+    const href = hrefOf("qq", "2737855297") ?? ""
+    expect(href).not.toContain("abeim")
+    expect(href).toMatch(/^https:\/\/wpa\.qq\.com\//)
+  })
+
+  it("非数字、也非 qm 链接 → 不给链接", () => {
     expect(hrefOf("qq", "not-a-number")).toBeNull()
     expect(hrefOf("qq", "user.qzone.qq.com/2737855297")).toBeNull()
+    // 长得像 qm 但不是合法路径的，也不该放行
+    expect(hrefOf("qq", "https://qm.qq.com/evil")).toBeNull()
   })
 })
 
@@ -243,7 +318,10 @@ describe("多平台混排（回归护栏）", () => {
     expect(html).toContain('href="https://github.com/Doulor"')
     expect(html).toContain('href="https://t.me/doulor"')
     expect(html).toContain('href="https://space.bilibili.com/1307574205"')
-    expect(html).toContain('href="https://res.abeim.cn/api/qq/?qq=2737855297"')
+    // HTML 属性里的 & 会被 esc() 转成 &amp;，这是正确行为
+    expect(html).toContain(
+      'href="https://wpa.qq.com/msgrd?v=3&amp;uin=2737855297&amp;site=qq&amp;menu=yes"'
+    )
     // 不该出现任何被二次编码的痕迹
     expect(html).not.toContain("%3A")
     expect(html).not.toContain("%2F")

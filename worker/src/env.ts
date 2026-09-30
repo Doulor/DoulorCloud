@@ -10,6 +10,15 @@ export interface Env {
   EMAIL_WORKER_NAME?: string // Email Routing 规则指向的 Worker 名，默认 doulor-mail-api
   ADMIN_INVITE_CODES?: string // comma-separated seed invite codes
   SESSION_SECRET?: string // 用于派生 AES-GCM 密钥（加密第三方长期凭据）
+  /**
+   * OIDC 协议元数据的规范来源（如 `https://cloud.doulor.cn`），可留空。
+   *
+   * ⚠️ 2026-09-25 审计（L19）：不配置时 issuer / picture 会回落到
+   * 「请求的 Host」——通过 `*.workers.dev` 访问就会宣告另一个 issuer。
+   * 见 handlers/oauth.ts 的 canonicalOrigin()：本机调试与自定义域名会自动处理，
+   * 只有需要强制指定（例如自定义域名与 ROOT_DOMAIN 不同源）时才设这一项。
+   */
+  OAUTH_ISSUER_ORIGIN?: string
   // Email Workers 注入的入站邮件消息（仅 /_email/incoming 路由）
   email?: ForwardableEmailMessage
 
@@ -49,4 +58,13 @@ export interface Env {
   WB2API_API_KEY?: string
   /** 网关站点地址的 env 兜底（正常走 app_settings.wb2api_base_url） */
   WB2API_BASE_URL?: string
+
+  // ---- CLI2API 反代网关捐献通道（第二条，与 wb2api 并列）----
+  // ⚠️ 这是该实例的 **console key（管理员密钥）**，不是给客户端用的 API key ——
+  // cli2api 的 `/api/*` 全部要求它，泄露等于整个账号池被拿走。
+  // 作为 D1 单行表 cli2api_credentials 的回落：管理员可在管理面板在线更新（优先），
+  // 也可用 `wrangler secret put CLI2API_CONSOLE_KEY` 配置。
+  CLI2API_CONSOLE_KEY?: string
+  /** 网关站点地址的 env 兜底（正常走 app_settings.cli2api_base_url） */
+  CLI2API_BASE_URL?: string
 }

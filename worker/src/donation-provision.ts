@@ -29,6 +29,7 @@ import type { Env } from "./env"
 import {
   addChannel,
   deleteChannel,
+  getChannel,
   listChannels,
   testChannel,
   updateChannelModels,
@@ -107,7 +108,7 @@ export function validateUpstreamUrl(raw: string): { baseUrl: string; host: strin
 }
 
 /** 把上游 /v1/models 的各种返回形态揉成一个字符串数组 */
-function extractModelIds(payload: unknown): string[] {
+export function extractModelIds(payload: unknown): string[] {
   const out: string[] = []
   const push = (v: unknown) => {
     if (typeof v === "string" && v.trim()) out.push(v.trim())
@@ -255,20 +256,52 @@ export async function probeUpstream(
 
 export interface ProvisionResult {
   ok: boolean
-  /** 创建成功的渠道 id；失败时为 null（失败的渠道已被删除） */
+  /**
+   * 渠道 id。
+   *
+   * ⚠️ `ok: false` **不代表一定没有渠道**：唯一例外是「全部模型都不确定」
+   * （见 provisionDonationChannel 的收尾规则）—— 那种情况渠道被刻意保留、
+   * 转人工审核，此时 channelId 有效。其余失败情形渠道已被删除，为 null。
+   */
   channelId: number | null
+  /**
+   * 这次失败是不是**确定性**的 —— 只有 `true` 才允许自动拒绝。
+   *
+   * 用户的明确要求（2026-09-25）：「自动判断错了的不能直接算失败，
+   * 应该由人工手动审核确定失败才算失败」。理由是本模块能观察到的一切
+   * （上游 401/403、超时、中转站故障、读不到渠道列表）**都可能只是这次不巧**，
+   * 而不是资源不可用；误拒的代价（丢掉一个真的资源、用户以为站点坏了）
+   * 远大于误转人工（管理员多点一次按钮）。
+   *
+   * 判据：
+   *   - `true`：失败原因只关于**我们自己的输入规则**（如模型名全部非法），
+   *     与上游可用性无关 —— 重试或换格式都不会变；
+   *   - `false`：其余一切（上游报错、超时、平台侧故障、定位不到渠道、回滚）
+   *     ⇒ 调用方**必须转人工**，不得自动拒绝。
+   */
+  definitive: boolean
   /** 面向用户的结论（通过/失败原因） */
   message: string
   /** 面向管理员的细节（NewAPI 原始报错、被剔除的模型） */
   detail: string
   /** 测试通过的模型（上游真实名） */
   passed: string[]
-  /** 未通过的模型及原因 */
+  /** 未通过的模型及原因（含 uncertain 与 failed，便于调用方落库） */
   failed: { model: string; reason: string }[]
+  /**
+   * 「不确定」的模型：限流 / 超时 / 网络抖动 —— 这些失败**不能证明模型不可用**，
+   * 因此保留在渠道里，并交给重试任务确认。
+   */
+  uncertain: { model: string; reason: string }[]
 }
 
-/** 清洗上游模型名：去掉空值/重复，挡掉会破坏逗号分隔或超出长度的名字 */
-function sanitizeModels(models: string[]): {
+/**
+ * 清洗上游模型名：去掉空值/重复，挡掉会破坏逗号分隔或超出长度的名字。
+ *
+ * 长度上限按「加前缀后」算（`DONATION_MODEL_PREFIX` 的长度）—— 对不加前缀的
+ * 调用方（如商汤）偏保守，但这只是拒绝几个超长名字，代价可以忽略。
+ */
+export function sanitizeModels(models: string[]): {
   models: string[]
   rejected: string[]
 } {
@@ -322,6 +355,46 @@ function formatFailures(
 }
 
 /**
+ * 把测试失败的原因分成两类。
+ *
+ * 为什么必须分：`testChannel` 的失败可能是「模型真的不可用」（401 / 模型不存在），
+ * 也可能是「**这次调用**没成功」（429 限流、10 秒超时、网络抖动）—— 后者完全
+ * 不能证明模型不可用。此前两者一律从渠道里剔除，导致「当时抖了一下」的模型被
+ * 永久排除（用户实测：一个上游 9 个模型只有 1 个通过，其余全是超时）。
+ *
+ * 归类规则：
+ *   - 限流 / 超时 / 网络类 → `uncertain`（保留在渠道里，交给重试任务确认）
+ *   - 鉴权 / 模型不存在类 → `failed`（真的不可用，剔除）
+ *   - **无法判定一律按 `uncertain`** —— 保守取向：宁可留一个暂时不可用的模型
+ *     （用户调用会失败，但重试任务会把它清掉），也不要误删一个本来可用的模型
+ *     （删了就只能靠人工重新拉取才能补回）。
+ */
+export function classifyTestFailure(message: string): "failed" | "uncertain" {
+  const m = (message ?? "").toLowerCase()
+
+  // 鉴权 / 权限 / 模型不存在 —— 确定性失败，重试也不会好
+  if (
+    /unauthorized|forbidden|invalid[_ -]?(api[_ -]?)?key|无权限|没有权限|鉴权失败/.test(m) ||
+    /\b401\b|\b403\b/.test(m) ||
+    /不存在|not found|无可用渠道|不支持|unsupported|unknown model|model[_ -]?not/.test(m)
+  ) {
+    return "failed"
+  }
+
+  // 限流 / 超时 / 网络 —— 不确定，可能只是这次不巧
+  if (
+    /\b429\b|rate[_ -]?limit|too many|限流|频率|请求过频/.test(m) ||
+    /超时|timeout|timed out/.test(m) ||
+    /fetch failed|econnreset|econnrefused|network|网络|connection|socket hang up/.test(m)
+  ) {
+    return "uncertain"
+  }
+
+  // 认不出来：宁可留着（重试任务会兜底），也不误删
+  return "uncertain"
+}
+
+/**
  * 建渠道 → **逐个模型测试** → 只保留可用模型。
  *
  * 为什么要逐个测：上游的 `/v1/models` 只是「声称支持」，实际经常有个别模型
@@ -329,8 +402,10 @@ function formatFailures(
  * 一起进中转站，用户调它时报错 —— 而这正是用户反馈过的问题。
  *
  * 收尾规则：
- *   - 全部不可用 → **删掉渠道并拒绝**（不留一个必然报错的渠道）
- *   - 部分可用 → 把不可用的从渠道里剔掉（`PUT` 只改 models / model_mapping）
+ *   - 全部不可用 → **删掉渠道**（不留一个必然报错的），但**交由人工复核定案**
+ *     —— 绝不自动拒绝，见 `definitive`
+ *   - 一个都没通过但全是「不确定」→ 渠道保留，转人工（重试任务会继续确认）
+ *   - 部分可用 → 把**确定失败**的从渠道里剔掉，保留 passed + uncertain
  *   - 全部可用 → 原样保留
  */
 export async function provisionDonationChannel(
@@ -356,6 +431,10 @@ export async function provisionDonationChannel(
       detail: rejected.length ? `被拒绝的模型名：${rejected.join("、")}` : "",
       passed: [],
       failed: [],
+      uncertain: [],
+      // 唯一确定性失败：模型名不合我们的规则（含逗号/超长/去重后为空），
+      // 与「上游到底能不能用」无关，换格式或重试都不会变。
+      definitive: true,
     }
   }
 
@@ -397,6 +476,9 @@ export async function provisionDonationChannel(
       detail: err instanceof Error ? err.message : String(err),
       passed: [],
       failed: [],
+      uncertain: [],
+      // 这是**平台侧**故障（中转站挂/令牌失效/接口报错），绝不能算用户的资源不可用
+      definitive: false,
     }
   }
 
@@ -418,6 +500,8 @@ export async function provisionDonationChannel(
       detail: err instanceof Error ? err.message : String(err),
       passed: [],
       failed: [],
+      uncertain: [],
+      definitive: false,
     }
   }
 
@@ -429,6 +513,8 @@ export async function provisionDonationChannel(
       detail: `渠道名：${name}`,
       passed: [],
       failed: [],
+      uncertain: [],
+      definitive: false,
     }
   }
 
@@ -439,12 +525,23 @@ export async function provisionDonationChannel(
   })
 
   const passed = results.filter((r) => r.ok).map((r) => r.model)
-  const failed = results
+  const allFailed = results
     .filter((r) => !r.ok)
     .map((r) => ({ model: r.model, reason: r.reason || "未通过" }))
+  // 失败再分两类：不确定的（限流/超时/网络）保留，确定失败的（401/模型不存在）剔除
+  const uncertain = allFailed.filter(
+    (f) => classifyTestFailure(f.reason) === "uncertain"
+  )
+  const failed = allFailed.filter((f) => classifyTestFailure(f.reason) === "failed")
 
-  // 全部不可用 → 不留半坏的渠道
-  if (passed.length === 0) {
+  // ---- 收尾规则（三种情形）----
+
+  // ① 全失败（一个通过、一个不确定都没有）→ 删掉渠道（不留必然报错的），
+  //    但**不自动拒绝** —— 转人工。见 definitive 的说明：这里的「失败」全部来自
+  //    上游的报错文案，而同一份资源换个接口格式/换个时间很可能就是好的
+  //    （实测过 `api.justwoker.icu`：OpenAI 路径被上游 Cloudflare 403、
+  //    Anthropic 路径正常）。自动拒绝等于把一个真资源判死。
+  if (passed.length === 0 && uncertain.length === 0) {
     try {
       await deleteChannel(env, channelId)
     } catch (err) {
@@ -458,19 +555,43 @@ export async function provisionDonationChannel(
       )}」格式调用）`,
       detail:
         formatFailures(failed) +
-        "。若确认模型名没问题，多半是接口格式选错了，换另一种格式再提交一次",
+        "。若确认模型名没问题，多半是接口格式选错了，管理员可换另一种格式复核",
       passed: [],
       failed,
+      uncertain: [],
+      definitive: false,
     }
   }
 
-  // 部分可用 → 把不通的剔掉（只改 models / model_mapping，其余字段不动）
+  // ② 一个都没通过，但全是「不确定」→ 渠道保留、**转人工**，不自动放行。
+  //
+  // 为什么不直接批准：渠道里一个模型都没验证过。429 通常说明 Key 有效，但
+  // 「全模型 429」也可能是 Key 无效或上游整体故障 —— 自动放行等于把完全未验证的
+  // 渠道推给所有用户。保留渠道是为了不丢模型（重试任务会确认它们），
+  // 转人工是让管理员拍板。
+  if (passed.length === 0) {
+    return {
+      ok: false,
+      channelId, // ← 有效！调用方据此把 id 落到单据，转人工审核
+      message: `${models.length} 个模型全部未能验证（限流或超时，不代表不可用）`,
+      detail:
+        `${formatFailures(uncertain)}。这些失败都是限流/超时/网络抖动，` +
+        "不能证明模型不可用，已全部保留在渠道里待重试确认。",
+      passed: [],
+      failed,
+      uncertain,
+      definitive: false,
+    }
+  }
+
+  // ③ 有模型通过 → 剔除确定失败的，保留 passed + uncertain
+  const kept = [...passed, ...uncertain.map((u) => u.model)]
   if (failed.length > 0) {
-    const keptExposed = passed.map((m) =>
+    const keptExposed = kept.map((m) =>
       m.startsWith(DONATION_MODEL_PREFIX) ? m : DONATION_MODEL_PREFIX + m
     )
     const keptMapping = Object.fromEntries(
-      passed.map((m, i) => [keptExposed[i], m])
+      kept.map((m, i) => [keptExposed[i], m])
     )
     try {
       await updateChannelModels(
@@ -493,22 +614,32 @@ export async function provisionDonationChannel(
         detail: err instanceof Error ? err.message : String(err),
         passed,
         failed,
+        uncertain,
+        definitive: false,
       }
     }
   }
 
   const format = channelTypeLabel(opts.channelType)
   const summary =
-    failed.length > 0
-      ? `渠道「${name}」已加入中转站（${failed.length > 0 ? `${passed.length}/${models.length}` : passed.length} 个模型通过测试，${format}，分组 ${group}）`
+    failed.length > 0 || uncertain.length > 0
+      ? `渠道「${name}」已加入中转站（${passed.length}/${models.length} 个模型通过测试，${format}，分组 ${group}）`
       : `渠道「${name}」已加入中转站（${passed.length} 个模型，${format}，分组 ${group}）`
+  const tails = [
+    failed.length > 0 ? `不可用：${formatFailures(failed)}` : "",
+    uncertain.length > 0
+      ? `待重试（限流/超时，已保留在渠道里）：${formatFailures(uncertain)}`
+      : "",
+  ].filter(Boolean)
   return {
     ok: true,
     channelId,
     message: "渠道可用性校验通过",
-    detail: failed.length > 0 ? `${summary}。未通过：${formatFailures(failed)}` : summary,
+    detail: tails.length > 0 ? `${summary}。${tails.join("；")}` : summary,
     passed,
     failed,
+    uncertain,
+    definitive: true,
   }
 }
 
@@ -533,3 +664,378 @@ export async function releaseDonationChannel(
 export const CHANNEL_TEST_HINT = `渠道测试由中转站实际发起一次对话请求，通常 1–${Math.round(
   CHANNEL_TEST_HINT_MS / 1000
 )} 秒内返回。`
+
+// ---------------------------------------------------------------------------
+// 失败模型的重试与补全
+// ---------------------------------------------------------------------------
+
+/**
+ * 重试退避（小时），下标 = 已尝试次数。
+ *
+ * 为什么需要退避：一个模型可能是**长期**不可用（上游没渠道 / 名字是别名），
+ * 若每小时都试一次，纯属浪费上游请求配额。递增退避兼顾两个诉求：
+ * 「早期快速确认」+「长期不再打扰」。1h → 2h → 4h → 8h → 24h，5 次后放弃。
+ */
+const RETRY_BACKOFF_HOURS = [1, 2, 4, 8, 24]
+
+/** 最多重试多少次（用尽后标记 exhausted，不再入选） */
+export const MAX_MODEL_RETRIES = RETRY_BACKOFF_HOURS.length
+
+/**
+ * 单次批处理上限。
+ *
+ * 每个模型要发 1 次 `testChannel`（命中时再加 1 次 `updateChannelModels`）。
+ * Cloudflare 免费版单请求子请求上限 50，而 `runMaintenance` 已有约 15 个 ——
+ * 取 5 留足余量。定时任务每小时跑一次，5 个/次也够用（重试记录本来就不多）。
+ */
+export const RETRY_BATCH = 5
+
+/** 单条重试记录（对应 donation_model_retries 表一行） */
+interface RetryRow {
+  donation_id: string
+  model: string
+  channel_id: number
+  status: string
+  reason: string | null
+  attempts: number
+}
+
+export interface RetryResult {
+  /** 本轮恢复成功、已并回渠道的模型 */
+  recovered: string[]
+  /**
+   * 有模型恢复的捐献单据 id（去重）。
+   *
+   * 用途：把「全模型不确定 → 转人工」的单据自动推进到已通过。
+   * 那种单据的判据是 status='pending' + newapi_channel_id 有值（见
+   * `autoProvisionAiDonation`），只要有一个模型被重试确认可用，就说明
+   * Key 与上游都是好的 —— 没必要让管理员再点一次。这里只把 id 交出去，
+   * **由调用方决定怎么推进**（donation-provision 不该反过来依赖 handler）。
+   */
+  recoveredDonations: string[]
+  /** 仍不确定（本轮又失败，还有重试机会） */
+  stillUncertain: number
+  /** 重试次数用尽或渠道已消失，已放弃 */
+  exhausted: number
+  errors: string[]
+}
+
+/**
+ * 重试「没通过测试」的模型，通过的并回渠道。
+ *
+ * 由定时任务（maintenance 步骤 7）与管理员手动按钮共同调用。
+ *
+ * 设计边界：
+ *   - **只加不删**：恢复时把模型并进渠道现有 models 里，不动其他模型 ——
+ *     免得因为一次重试把管理员手工调过的模型列表覆盖掉；
+ *   - 渠道已被删除（撤销捐献）→ 直接标 exhausted，不反复试；
+ *   - `dryRun` 只统计不写库，供上线前观察。
+ */
+export async function retryDonationModels(
+  env: Env,
+  opts: { donationId?: string; dryRun?: boolean; limit?: number } = {}
+): Promise<RetryResult> {
+  const out: RetryResult = {
+    recovered: [],
+    recoveredDonations: [],
+    stillUncertain: 0,
+    exhausted: 0,
+    errors: [],
+  }
+  const limit = Math.max(1, Math.min(opts.limit ?? RETRY_BATCH, 50))
+  const now = new Date().toISOString()
+
+  let rows: RetryRow[] = []
+  try {
+    const sql = opts.donationId
+      ? `SELECT donation_id, model, channel_id, status, reason, attempts
+           FROM donation_model_retries
+          WHERE donation_id = ? AND status IN ('uncertain','failed')
+          ORDER BY next_retry_at ASC LIMIT ?`
+      : `SELECT donation_id, model, channel_id, status, reason, attempts
+           FROM donation_model_retries
+          WHERE status IN ('uncertain','failed') AND next_retry_at <= ?
+          ORDER BY next_retry_at ASC LIMIT ?`
+    const stmt = opts.donationId
+      ? env.DB.prepare(sql).bind(opts.donationId, limit)
+      : env.DB.prepare(sql).bind(now, limit)
+    const r = await stmt.all<RetryRow>()
+    rows = r.results ?? []
+  } catch (err) {
+    // 表未迁移（0047 未应用）不该让定时任务整体失败
+    out.errors.push(`读取重试记录失败: ${err instanceof Error ? err.message : String(err)}`)
+    return out
+  }
+
+  if (rows.length === 0) return out
+
+  // 按渠道分组，避免同一渠道被并发 PUT 互相覆盖
+  const byChannel = new Map<number, RetryRow[]>()
+  for (const row of rows) {
+    const list = byChannel.get(row.channel_id) ?? []
+    list.push(row)
+    byChannel.set(row.channel_id, list)
+  }
+
+  for (const [channelId, list] of byChannel) {
+    // 先确认渠道还在（撤销捐献会删渠道）。
+    // 用单查：列表接口每页最多 100 条，渠道一多就可能漏掉目标 id，
+    // 会被误判成「渠道已不存在」而把待重试记录全部判死。
+    let channelModels: string | null = null
+    try {
+      const ch = await getChannel(env, channelId)
+      if (!ch) {
+        for (const row of list) {
+          if (!opts.dryRun) {
+            await markRetry(env, row, "exhausted", "渠道已不存在（捐献可能已被撤销）", now)
+          }
+          out.exhausted += 1
+        }
+        continue
+      }
+      channelModels = ch.models
+    } catch (err) {
+      out.errors.push(
+        `读取渠道 ${channelId} 失败: ${err instanceof Error ? err.message : String(err)}`
+      )
+      continue
+    }
+
+    // 逐条测试（渠道内串行：够用，且不会打爆上游）
+    const recoveredHere: string[] = []
+    for (const row of list) {
+      const r = await testChannel(env, channelId, row.model, TEST_TIMEOUT_MS)
+      if (r.ok) {
+        recoveredHere.push(row.model)
+        out.recovered.push(row.model)
+        if (!out.recoveredDonations.includes(row.donation_id)) {
+          out.recoveredDonations.push(row.donation_id)
+        }
+        if (!opts.dryRun) {
+          await markRetry(env, row, "recovered", r.message || "重试通过", now)
+        }
+        continue
+      }
+
+      const attempts = row.attempts + 1
+      const giveUp = attempts >= MAX_MODEL_RETRIES
+      if (giveUp) out.exhausted += 1
+      else out.stillUncertain += 1
+      if (!opts.dryRun) {
+        await markRetry(
+          env,
+          row,
+          giveUp ? "exhausted" : "uncertain",
+          r.message || "未通过",
+          now,
+          attempts
+        )
+      }
+    }
+
+    // 把本轮恢复的模型并回渠道（只加不删）
+    if (recoveredHere.length > 0 && !opts.dryRun) {
+      try {
+        const existing = (channelModels ?? "")
+          .split(",")
+          .map((m) => m.trim())
+          .filter(Boolean)
+        const merged = Array.from(new Set([...existing, ...recoveredHere]))
+        const mapping = Object.fromEntries(merged.map((m) => [m, m]))
+        await updateChannelModels(env, channelId, merged.join(","), JSON.stringify(mapping))
+      } catch (err) {
+        out.errors.push(
+          `把恢复的模型并回渠道 ${channelId} 失败: ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+    }
+  }
+
+  return out
+}
+
+/** 写入一条重试记录的终态与下次重试时间 */
+async function markRetry(
+  env: Env,
+  row: RetryRow,
+  status: string,
+  reason: string,
+  nowIso: string,
+  attempts?: number
+): Promise<void> {
+  const n = attempts ?? row.attempts
+  const backoff = RETRY_BACKOFF_HOURS[Math.min(n, RETRY_BACKOFF_HOURS.length - 1)]
+  const next = new Date(Date.now() + backoff * 3600_000).toISOString()
+  try {
+    await env.DB.prepare(
+      `UPDATE donation_model_retries
+          SET status = ?, reason = ?, attempts = ?, last_tried_at = ?, next_retry_at = ?
+        WHERE donation_id = ? AND model = ?`
+    )
+      .bind(status, reason.slice(0, 300), n, nowIso, next, row.donation_id, row.model)
+      .run()
+  } catch (err) {
+    console.error("更新重试记录失败:", row.donation_id, row.model, err)
+  }
+}
+
+/**
+ * 重新拉取上游模型列表，把渠道里缺的模型补上。
+ *
+ * 为什么需要它（而不只是 retryDonationModels）：重试只能覆盖**落过库**的模型。
+ * 而在这张表存在之前，失败的模型名只写进了 `donations.review_note` 文本，
+ * 没有结构化记录 —— 那些历史单的模型已无从得知，只能重新拉一次上游列表，
+ * 与渠道当前内容做差集，再逐个验证补进去。
+ *
+ * 场景：管理员在面板上对一笔已通过的 AI 捐献点「补全模型」。
+ */
+export async function refetchDonationModels(
+  env: Env,
+  donationId: string
+): Promise<{
+  ok: boolean
+  added: string[]
+  stillMissing: { model: string; reason: string }[]
+  message: string
+}> {
+  const app = await env.DB.prepare(
+    "SELECT payload, newapi_channel_id FROM donations WHERE id = ?"
+  )
+    .bind(donationId)
+    .first<{ payload: string; newapi_channel_id: number | null }>()
+
+  if (!app) return { ok: false, added: [], stillMissing: [], message: "捐献记录不存在" }
+  if (!app.newapi_channel_id) {
+    return { ok: false, added: [], stillMissing: [], message: "该捐献尚未接入渠道，无法补全" }
+  }
+  const channelId = app.newapi_channel_id
+
+  let payload: { baseUrl?: string; apiKey?: string } = {}
+  try {
+    payload = JSON.parse(app.payload) as typeof payload
+  } catch {
+    return { ok: false, added: [], stillMissing: [], message: "捐献 payload 解析失败" }
+  }
+  const baseUrl = (payload.baseUrl ?? "").trim()
+  const apiKey = (payload.apiKey ?? "").trim()
+  if (!baseUrl || !apiKey) {
+    return { ok: false, added: [], stillMissing: [], message: "缺少上游地址或密钥，无法重新拉取" }
+  }
+
+  // 拉上游当前的全量模型
+  let upstreamModels: string[] = []
+  try {
+    const probe = await probeUpstream(baseUrl, apiKey, "openai")
+    if (!probe.ok) {
+      return { ok: false, added: [], stillMissing: [], message: `拉取上游模型失败：${probe.message}` }
+    }
+    upstreamModels = probe.models
+  } catch (err) {
+    return {
+      ok: false,
+      added: [],
+      stillMissing: [],
+      message: `拉取上游模型出错：${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+
+  // 渠道当前有哪些模型
+  let current: string[] = []
+  try {
+    const ch = await getChannel(env, channelId)
+    if (!ch) {
+      return { ok: false, added: [], stillMissing: [], message: "渠道已不存在（可能已被撤销）" }
+    }
+    current = ch.models
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean)
+  } catch (err) {
+    return {
+      ok: false,
+      added: [],
+      stillMissing: [],
+      message: `读取渠道失败：${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+
+  // 差集：上游有、渠道没有的（去掉 donation- 前缀再比）
+  const currentBase = new Set(
+    current.map((m) =>
+      m.startsWith(DONATION_MODEL_PREFIX) ? m.slice(DONATION_MODEL_PREFIX.length) : m
+    )
+  )
+  const missing = upstreamModels.filter((m) => !currentBase.has(m))
+  if (missing.length === 0) {
+    return { ok: true, added: [], stillMissing: [], message: "渠道已包含上游全部模型，无需补全" }
+  }
+
+  // 逐个验证后并入
+  const added: string[] = []
+  const stillMissing: { model: string; reason: string }[] = []
+  const results = await mapLimit(missing, TEST_CONCURRENCY, async (model) => {
+    const r = await testChannel(env, channelId, model, TEST_TIMEOUT_MS)
+    return { model, ok: r.ok, reason: r.message }
+  })
+
+  for (const r of results) {
+    if (r.ok) added.push(r.model)
+    else stillMissing.push({ model: r.model, reason: r.reason || "未通过" })
+  }
+
+  if (added.length > 0) {
+    try {
+      const merged = Array.from(new Set([...current, ...added]))
+      const mapping = Object.fromEntries(merged.map((m) => [m, m]))
+      await updateChannelModels(env, channelId, merged.join(","), JSON.stringify(mapping))
+    } catch (err) {
+      return {
+        ok: false,
+        added: [],
+        stillMissing,
+        message: `验证通过 ${added.length} 个，但写回渠道失败：${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      }
+    }
+  }
+
+  // 仍缺的落库，交给定时重试（下次就不用再手动点）
+  const nowIso = new Date().toISOString()
+  for (const m of stillMissing) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO donation_model_retries
+           (donation_id, model, channel_id, status, reason, attempts, last_tried_at, next_retry_at, created_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+         ON CONFLICT(donation_id, model) DO UPDATE SET
+           status = excluded.status, reason = excluded.reason, next_retry_at = excluded.next_retry_at`
+      )
+        .bind(
+          donationId,
+          m.model,
+          channelId,
+          classifyTestFailure(m.reason) === "failed" ? "failed" : "uncertain",
+          m.reason.slice(0, 300),
+          nowIso,
+          new Date(Date.now() + 3600_000).toISOString(),
+          nowIso
+        )
+        .run()
+    } catch (err) {
+      console.error("落库补全失败的模型出错:", donationId, m.model, err)
+    }
+  }
+
+  return {
+    ok: true,
+    added,
+    stillMissing,
+    message:
+      added.length > 0
+        ? `已补入 ${added.length} 个模型${
+            stillMissing.length > 0 ? `；${stillMissing.length} 个仍不可用（已排入重试）` : ""
+          }`
+        : `上游有 ${missing.length} 个模型不在渠道里，但逐个测试都没通过（已排入重试）`,
+  }
+}

@@ -1,5 +1,12 @@
 import { ApiError } from "./http"
+import { fetchWithTimeout } from "./async-utils"
 import type { Env } from "./env"
+
+/**
+ * 调用 Cloudflare 管理 API 的超时（2026-09-25 审计 H15）。
+ * 15 秒：CF 控制面偶尔慢，但绝不该慢到把 Worker 请求挂住。
+ */
+const CF_API_TIMEOUT_MS = 15_000
 
 /**
  * 调用 Cloudflare API。
@@ -23,14 +30,19 @@ export async function callCloudflare(
 ): Promise<Response> {
   const token = await resolveApiToken(env)
   const url = `https://api.cloudflare.com/client/v4${path}`
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      ...(init.headers ?? {}),
+  // 带超时（2026-09-25 审计 H15）：CF API 卡住时不能把 Worker 请求一起挂死
+  const res = await fetchWithTimeout(
+    url,
+    {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        ...(init.headers ?? {}),
+      },
     },
-  })
+    CF_API_TIMEOUT_MS
+  )
 
   if (!res.ok) {
     const body = (await res.text()).slice(0, 300)
@@ -39,17 +51,40 @@ export async function callCloudflare(
   return res
 }
 
+/**
+ * Cloudflare DNS 记录的写入载荷。
+ *
+ * 为什么 `content` 是可选的：SRV 记录**必须**用 `data` 对象传
+ * （CF 文档的 SRV 示例里只有 data，没有 content），其余类型用 content。
+ * 传错形态 CF 会报参数错误，所以调用方要按类型二选一。
+ */
+export interface CfDnsRecordPayload {
+  type: string
+  name: string
+  /** A/AAAA/CNAME/TXT/MX 用；SRV 不用（改用 data） */
+  content?: string
+  ttl: number
+  proxied: boolean
+  /** MX 与 SRV 共用：值小者优先 */
+  priority?: number
+  /**
+   * SRV 专有字段。
+   *
+   * 按 CF 官方示例，`service` / `proto` **不放在这里** —— 它们已经体现在
+   * 顶层 `name` 里（形如 `_sip._tcp.example.com`），data 只放这四个。
+   */
+  data?: {
+    priority: number
+    weight: number
+    port: number
+    target: string
+  }
+}
+
 export async function cfCreateDnsRecord(
   env: Env,
   zoneId: string,
-  payload: {
-    type: string
-    name: string
-    content: string
-    ttl: number
-    proxied: boolean
-    priority?: number
-  }
+  payload: CfDnsRecordPayload
 ): Promise<{ id: string }> {
   const res = await callCloudflare(env, `/zones/${zoneId}/dns_records`, {
     method: "POST",
@@ -73,14 +108,7 @@ export async function cfUpdateDnsRecord(
   env: Env,
   zoneId: string,
   cfId: string,
-  payload: {
-    type: string
-    name: string
-    content: string
-    ttl: number
-    proxied: boolean
-    priority?: number
-  }
+  payload: CfDnsRecordPayload
 ): Promise<void> {
   await callCloudflare(env, `/zones/${zoneId}/dns_records/${cfId}`, {
     method: "PUT",
@@ -126,38 +154,13 @@ export async function cfListDnsRecords(
 }
 
 /**
- * Email Routing 规则（入站邮件 → Window Worker）。
- * 创建后该地址（如 test@doulor.cn）的入站邮件会调用本 Worker 的 email() 处理器。
+ * 删除一条 Email Routing 规则。
+ *
+ * ⚠️ 2026-09-26：这里**只保留删除，没有对应的创建函数**了 ——
+ * 线上 catch-all 已改为「Send to a Worker」，所有 *@doulor.cn 的信都会进本 Worker
+ * （由代码查 mailboxes 表决定去处），因此不再逐地址建规则（那是「每域 200 条」的硬配额）。
+ * 保留删除是为了摘掉**历史遗留**的规则（线上尚存数十条），以及删号时的资源回收。
  */
-export async function cfCreateEmailRule(
-  env: Env,
-  zoneId: string,
-  address: string,
-  workerName: string
-): Promise<string> {
-  const res = await callCloudflare(env, `/zones/${zoneId}/email/routing/rules`, {
-    method: "POST",
-    body: JSON.stringify({
-      matchers: [{ type: "literal", field: "to", value: address }],
-      actions: [{ type: "worker", value: [workerName] }],
-      enabled: true,
-      name: `Doulor Cloud: ${address}`,
-    }),
-  })
-  const data = (await res.json()) as {
-    result?: { id?: string }
-    errors?: { message: string }[]
-  }
-  if (!data.result?.id) {
-    throw new ApiError(
-      502,
-      data.errors?.[0]?.message ?? "创建 Email Routing 规则失败",
-      "CF_ERROR"
-    )
-  }
-  return data.result.id
-}
-
 export async function cfDeleteEmailRule(
   env: Env,
   zoneId: string,
@@ -166,27 +169,6 @@ export async function cfDeleteEmailRule(
   await callCloudflare(env, `/zones/${zoneId}/email/routing/rules/${ruleId}`, {
     method: "DELETE",
   })
-}
-
-export async function cfListEmailRules(
-  env: Env,
-  zoneId: string
-): Promise<{ id: string; matchers: { value: string }[] }[]> {
-  const res = await callCloudflare(env, `/zones/${zoneId}/email/routing/rules?per_page=100`, {
-    method: "GET",
-  })
-  const data = (await res.json()) as {
-    result?: { id: string; matchers: { value: string }[] }[]
-    errors?: { message: string }[]
-  }
-  if (!data.result) {
-    throw new ApiError(
-      502,
-      data.errors?.[0]?.message ?? "获取 Email Routing 规则失败",
-      "CF_ERROR"
-    )
-  }
-  return data.result
 }
 
 // ---- Email Routing destination addresses（转发目标必须先验证） ----
@@ -198,16 +180,36 @@ export interface CfDestination {
 }
 
 export async function cfListDestinations(env: Env): Promise<CfDestination[]> {
-  const res = await callCloudflare(
-    env,
-    `/accounts/${await resolveAccountId(env)}/email/routing/addresses?per_page=200`,
-    { method: "GET" }
-  )
-  const data = (await res.json()) as { result?: CfDestination[]; errors?: { message: string }[] }
-  if (!data.result) {
-    throw new ApiError(502, data.errors?.[0]?.message ?? "获取转发地址失败", "CF_ERROR")
+  // 分页拉全：destination 是账户级的，线上已超过 200 条。若只拉一页，
+  // 老地址（创建早、排在后面）会被截断，其 verified 状态就「消失」，
+  // 导致已验证的转发邮箱被误报成「待验证」（2026-09-27 实测踩到）。
+  // ⚠️ per_page 最大 50（CF 文档明确），超过会被拒或截断。
+  const all: CfDestination[] = []
+  let page = 1
+  for (;;) {
+    const res = await callCloudflare(
+      env,
+      `/accounts/${await resolveAccountId(env)}/email/routing/addresses?per_page=50&page=${page}`,
+      { method: "GET" }
+    )
+    const data = (await res.json()) as {
+      result?: CfDestination[]
+      result_info?: { total_pages?: number }
+      errors?: { message: string }[]
+    }
+    if (!data.result) {
+      throw new ApiError(
+        502,
+        data.errors?.[0]?.message ?? "获取转发地址失败",
+        "CF_ERROR"
+      )
+    }
+    all.push(...data.result)
+    const totalPages = data.result_info?.total_pages ?? 1
+    if (data.result.length === 0 || page >= totalPages) break
+    page++
   }
-  return data.result
+  return all
 }
 
 /**
@@ -235,6 +237,36 @@ export async function cfEnsureDestination(
     throw new ApiError(502, data.errors?.[0]?.message ?? "注册转发地址失败", "CF_ERROR")
   }
   return data.result
+}
+
+/**
+ * 删除一个转发目标地址。
+ *
+ * 为什么需要它（2026-09-25 审计 M10）：
+ *   Cloudflare 的 destination 是**账户级**的，`verified` 也只属于账户而不属于某个用户。
+ *   而本站的 `users.email_verified` 直接采信这个全局 `verified` 标志
+ *   （见 handlers/settings.ts 的 destinationStatus）。于是：
+ *     用户 A 验证过 a@x.com → A 改成 a2@x.com（**旧地址仍留在账户里且仍是 verified**）
+ *     → 攻击者 B 用 a@x.com 注册 → 调一次 action:"status" → email_verified = 1，
+ *     而 B **从未**能读取那个邮箱。
+ *   `email_verified` 会经 OAuth /userinfo 以 `email_verified: true` 暴露给依赖方，
+ *   也是 FRP 的准入条件，所以这是可用的身份伪造。
+ *
+ *   改邮箱时把旧 destination 从账户里删掉，就能消除「弃用但仍 verified」这一状态，
+ *   使攻击者必须真的点开 Cloudflare 发往该邮箱的验证信（只有邮箱主人收得到）。
+ *
+ * 失败不阻断：删不掉最多是保留原有风险，而阻断会让用户改不了邮箱。
+ */
+export async function cfDeleteDestination(env: Env, email: string): Promise<boolean> {
+  const list = await cfListDestinations(env)
+  const found = list.find((d) => d.email.toLowerCase() === email.toLowerCase())
+  if (!found) return false
+  await callCloudflare(
+    env,
+    `/accounts/${await resolveAccountId(env)}/email/routing/addresses/${found.id}`,
+    { method: "DELETE" }
+  )
+  return true
 }
 
 async function resolveAccountId(env: Env): Promise<string> {

@@ -107,9 +107,22 @@ export async function getPlatformBucketId(env: Env): Promise<string | null> {
   }
 }
 
-/** 清除平台桶缓存（管理员改动桶配置后调用） */
+/**
+ * 「有没有启用中的桶」缓存。
+ *
+ * ⚠️ 2026-10-01 性能：`hasManagedBuckets` 被 `isStorageConfigured` 在**每个**
+ * 网盘/直链/名片/分享箱请求上调用一次。线上 D1 统计里
+ * `SELECT 1 FROM r2_buckets WHERE enabled = 1 LIMIT 1` 一天跑了 **17.5 万次**
+ * （全库最频繁的查询），每次都是整整一次 D1 往返（跨境用户 ~170ms）。
+ * 而它只是在问「管理员配过桶没有」—— 配置变更极少，缓存 60 秒即可。
+ * 与 platformBucketCache 同样靠 `invalidatePlatformBucketCache()` 失效。
+ */
+let managedBucketsCache: { value: boolean; at: number } | null = null
+
+/** 清除桶相关缓存（管理员改动桶配置后调用）：平台桶 id + 「有没有启用中的桶」 */
 export function invalidatePlatformBucketCache(): void {
   platformBucketCache = null
+  managedBucketsCache = null
 }
 
 /** 从 env 读默认桶（历史配置，bucketId 为空时使用） */
@@ -233,14 +246,21 @@ export async function isStorageConfigured(env: Env): Promise<boolean> {
   return hasManagedBuckets(env)
 }
 
-/** 是否配了多桶（r2_buckets 表里有启用中的桶） */
+/** 是否配了多桶（r2_buckets 表里有启用中的桶）。结果缓存 60 秒（见 managedBucketsCache） */
 export async function hasManagedBuckets(env: Env): Promise<boolean> {
+  const now = Date.now()
+  if (managedBucketsCache && now - managedBucketsCache.at < 60_000) {
+    return managedBucketsCache.value
+  }
   try {
     const row = await env.DB.prepare(
       "SELECT 1 AS c FROM r2_buckets WHERE enabled = 1 LIMIT 1"
     ).first<{ c: number }>()
-    return Boolean(row)
+    const value = Boolean(row)
+    managedBucketsCache = { value, at: now }
+    return value
   } catch {
+    // 出错（迁移未执行等）时不缓存，下次请求重试
     return false
   }
 }
@@ -510,12 +530,26 @@ async function r2Fetch(
   })
 }
 
+/**
+ * 把上游 R2/CF 的错误转成 ApiError。
+ *
+ * ⚠️ 2026-09-25 审计（低）：原实现把上游错误正文截 300 字符**拼进客户端可见的
+ * message**，而 index.ts 又会把 `err.message` 原样放进 JSON 响应。于是匿名
+ * 调用者（`/dl/<前缀>/..%2f..%2fx` 这类会签名失配的请求）能看到 R2 原始错误
+ * XML —— 里面含桶名与对象键；S3 兼容端的 `SignatureDoesNotMatch` 还常常回显
+ * `AWSAccessKeyId`（凭据标识，不是密钥）。
+ *
+ * 现在：正文只写进 Worker 日志（`wrangler tail` 可查），响应里只给状态码。
+ */
 async function r2OrError(res: Response, what: string): Promise<Response> {
   if (res.ok) return res
-  const body = (await res.text().catch(() => "")).slice(0, 300)
+  const body = (await res.text().catch(() => "")).slice(0, 500)
+  if (body) {
+    console.error(`[r2] ${what}失败 status=${res.status} body=${body}`)
+  }
   throw new ApiError(
     502,
-    `R2 ${what}失败: ${res.status}${body ? ` ${body}` : ""}`,
+    `R2 ${what}失败（上游状态 ${res.status}）`,
     "R2_ERROR"
   )
 }
@@ -643,12 +677,34 @@ export async function getObject(
   return r2OrError(res, "下载")
 }
 
-/** 获取对象元信息（HEAD，不拉正文） */
+/**
+ * 获取对象元信息（不拉正文）。
+ *
+ * ⚠️ 2026-09-27 线上故障修复：Cloudflare REST API（token 模式）的对象端点**不支持 HEAD**
+ * —— 对它发 HEAD 直接返回 `405 Method Not Allowed`，于是所有 HEAD 直链都变成 502
+ * 「R2 读取元信息失败（上游状态 405）」。（同一个坑早在本仓库里记过两次：
+ * `worker/scripts/migrate-r2.mjs:85` 写着「R2 REST API 没有 HEAD，用 GET 只读头」，
+ * 审计报告 P3-4 / 路线图 M11 也预警过 headObject 在 token 模式下会失效。）
+ *
+ * token 模式因此改用「按精确 key 列一条」替代：
+ *   - REST 的 list 直接带 `size`，不像 GET 那样可能以 chunked 返回、拿不到 content-length
+ *   - REST 的 list 还带 `http_metadata`，正好就是我们要的 contentType
+ * prefix 精确等于 key 时，字典序最小的必然是它自己 ⇒ 取第一条并比对 key 即可。
+ */
 export async function headObject(
   env: Env,
   key: string,
   bucketId?: string | null
 ): Promise<{ size: number; contentType: string | null } | null> {
+  const cfg = await resolveBucket(env, bucketId)
+
+  if (cfg.mode === "token") {
+    const { objects } = await listObjects(env, key, { limit: 1, bucketId })
+    const hit = objects[0]?.key === key ? objects[0] : null
+    if (!hit) return null
+    return { size: hit.size, contentType: hit.contentType }
+  }
+
   const res = await r2Fetch(env, "HEAD", key, {}, {}, bucketId)
   if (res.status === 404) return null
   await r2OrError(res, "读取元信息")
@@ -736,13 +792,26 @@ export async function supportsPresign(
  * 上传用它可绕过 Worker 请求体限制并让浏览器显示真实上传进度。
  *
  * ⚠️ 仅 S3 模式可用。token 模式会抛错，调用方应先检查 supportsPresign()。
+ *
+ * `contentLength`（2026-09-25 审计 P0-6 修复）：
+ *   原实现固定 `X-Amz-SignedHeaders: "host"`，**Content-Length 不参与签名**，
+ *   于是调用方按客户端声明的 size 做完配额校验后，客户端可以拿同一个 URL
+ *   PUT 任意大小的对象 —— 只要事后不调 /api/storage/commit，used_bytes
+ *   永不增长、storage_objects 也没有行，但对象已经在 R2 里且可公开下载。
+ *   定时运维只做 D1 侧自检、不枚举 R2，所以这些孤儿对象永远不会被回收。
+ *
+ *   把 content-length 纳入签名后，R2 会校验请求头与签名一致：
+ *   实际字节数与申请时声明的不符 → 403，上传根本落不了盘。
+ *   浏览器/XHR 对 File/Blob 请求体总是自动带正确的 Content-Length，
+ *   且它是 forbidden header（不受 CORS 预检影响），所以正常上传不受影响。
  */
 export async function presign(
   env: Env,
   method: "PUT" | "GET",
   key: string,
   expiresIn = 3600,
-  bucketId?: string | null
+  bucketId?: string | null,
+  contentLength?: number
 ): Promise<string> {
   const cfg = await resolveBucket(env, bucketId)
   if (cfg.mode === "token") {
@@ -757,12 +826,28 @@ export async function presign(
   const path = `/${cfg.bucket}/${key}`
   const host = new URL(cfg.endpoint).host
 
+  // 参与签名的请求头：host 始终签；PUT 且调用方给了确切字节数时连 content-length 一起签。
+  const headersToSign: Record<string, string> = { host }
+  if (
+    method === "PUT" &&
+    typeof contentLength === "number" &&
+    Number.isFinite(contentLength) &&
+    contentLength >= 0
+  ) {
+    headersToSign["content-length"] = String(Math.trunc(contentLength))
+  }
+  const signedHeaderNames = Object.keys(headersToSign).sort()
+  const canonicalHeaders = signedHeaderNames
+    .map((h) => `${h}:${headersToSign[h]}\n`)
+    .join("")
+  const signedHeaders = signedHeaderNames.join(";")
+
   const query: Record<string, string | number> = {
     "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
     "X-Amz-Credential": `${cfg.accessKeyId}/${scope}`,
     "X-Amz-Date": amzDate,
     "X-Amz-Expires": Math.min(Math.max(expiresIn, 60), 604800),
-    "X-Amz-SignedHeaders": "host",
+    "X-Amz-SignedHeaders": signedHeaders,
   }
 
   const canonicalUri = encodeS3Path(path)
@@ -771,8 +856,8 @@ export async function presign(
     method,
     canonicalUri,
     canonicalQuery,
-    `host:${host}\n`,
-    "host",
+    canonicalHeaders,
+    signedHeaders,
     UNSIGNED_PAYLOAD,
   ].join("\n")
 
@@ -789,6 +874,8 @@ export async function presign(
   }
   const signature = toHex(await hmac(signingKey, stringToSign))
 
-  // 预签名只签 host；其余请求头（如 Content-Type）由浏览器自由设置，CORS 已放行
+  // Content-Type 仍不参与签名：浏览器自由设置，CORS 已放行。
+  // 它的安全影响由「下发时的类型收口」兜底（见 worker/src/content-type.ts），
+  // 而不是靠签名 —— 否则 charset 之类的细微差异会让正常上传失败。
   return `${cfg.endpoint}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`
 }

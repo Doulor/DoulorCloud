@@ -2,7 +2,9 @@ import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
 import { isReservedName, isReservedSubdomain } from "../reserved-names"
 import { requireUser } from "../auth"
+import { guardRateLimit } from "../ratelimit"
 import { cfListDnsRecords, cfDeleteDnsRecord } from "../cloudflare"
+import { detachCustomDomain } from "../custom-domain"
 import { getSettingNumber } from "../settings"
 import type { Env } from "../env"
 
@@ -31,13 +33,21 @@ interface SubdomainRow {
   created_at: string
 }
 
-function toPublicSubdomain(row: SubdomainRow) {
+function toPublicSubdomain(row: SubdomainRow, recordCount = 0) {
   return {
     id: row.id,
     name: row.name,
     fqdn: row.fqdn,
     parentId: row.parent_id ?? null,
     status: row.status,
+    /**
+     * 该域名下**直接挂的** DNS 记录数（不含子子域名的）。
+     *
+     * 为什么只算直接的：列表里每个子域名各有自己一行（缩进表示层级），
+     * 若父行把后代的记录也算进去，「父行 5 条 + 子行 3 条」会让人以为
+     * 一共有 8 条，而实际只有 5 条。各算各的才对得上每行点进去看到的列表。
+     */
+    recordCount,
     createdAt: row.created_at,
   }
 }
@@ -51,6 +61,24 @@ export async function listSubdomains(env: Env, request: Request): Promise<Respon
     .bind(user.id)
     .all<SubdomainRow>()
 
+  // 每个子域名各有多少条 DNS 记录。
+  //
+  // 为什么一次 GROUP BY 而不是逐个 COUNT：这是列表页，子域名可能有十几个，
+  // 逐个查就是 N+1（每次 D1 查询都计费且要往返）。一条聚合查询拿全量，
+  // JOIN 到 subdomains 是为了只统计当前用户的（dns_records 是全表）。
+  const counts = await env.DB.prepare(
+    `SELECT r.subdomain_id AS sid, COUNT(*) AS c
+       FROM dns_records r
+       JOIN subdomains s ON s.id = r.subdomain_id
+      WHERE s.user_id = ?
+      GROUP BY r.subdomain_id`
+  )
+    .bind(user.id)
+    .all<{ sid: string; c: number }>()
+  const countBySub = new Map(
+    (counts.results ?? []).map((r) => [r.sid, Number(r.c ?? 0)])
+  )
+
   // 实际配额：用户级覆盖 > 全局设置 > 默认值（管理员不受限）
   const perUser = await env.DB.prepare(
     "SELECT max_subdomains FROM users WHERE id = ?"
@@ -58,13 +86,15 @@ export async function listSubdomains(env: Env, request: Request): Promise<Respon
     .bind(user.id)
     .first<{ max_subdomains: number | null }>()
   const limit =
-    user.role === "admin"
+    user.role === "admin" || user.role === "root"
       ? ADMIN_UNLIMITED
       : (perUser?.max_subdomains ??
          (await getSettingNumber(env, "subdomain_quota_default")))
 
   return json({
-    subdomains: (rows.results ?? []).map(toPublicSubdomain),
+    subdomains: (rows.results ?? []).map((r) =>
+      toPublicSubdomain(r, countBySub.get(r.id) ?? 0)
+    ),
     limit,
     childLimit: MAX_CHILDREN,
     minRootNameLength: MIN_ROOT_NAME_LENGTH,
@@ -79,6 +109,8 @@ export async function listSubdomains(env: Env, request: Request): Promise<Respon
  */
 export async function createSubdomain(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
+  // ⚠️ 2026-09-26 审计：创建会调 cfListDnsRecords 查 CF，原先零限流。
+  await guardRateLimit(env, `subdomain:create:user:${user.id}`, 10, 60, "创建子域名过于频繁，请稍后再试")
   const body = (await request.json()) as { name?: string; parentId?: string }
 
   const name = (body.name ?? "").trim().toLowerCase().replace(/\.$/, "")
@@ -110,7 +142,7 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
     )
       .bind(parent.id)
       .first<{ c: number }>()
-    if (user.role !== "admin" && (siblings?.c ?? 0) >= MAX_CHILDREN) {
+    if (user.role !== "admin" && user.role !== "root" && (siblings?.c ?? 0) >= MAX_CHILDREN) {
       throw new ApiError(
         400,
         `${parent.fqdn} 之下最多可创建 ${MAX_CHILDREN} 个子域名`,
@@ -123,7 +155,7 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
   } else {
     // ---- 一级：xxx.doulor.cn（根域直系）----
     // 位数限制：x.doulor.cn / xx.doulor.cn 不允许，至少 3 位（管理员不受限）
-    if (user.role !== "admin" && name.length < MIN_ROOT_NAME_LENGTH) {
+    if (user.role !== "admin" && user.role !== "root" && name.length < MIN_ROOT_NAME_LENGTH) {
       throw new ApiError(
         400,
         `一级子域名至少需要 ${MIN_ROOT_NAME_LENGTH} 个字符`,
@@ -144,9 +176,9 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
       .first<{ max_subdomains: number | null }>()
 
     const globalQuota = await getSettingNumber(env, "subdomain_quota_default")
-    // 管理员不受配额限制（用一个足够大的数字表示「无限制」，前端据此显示）
+    // 管理员/站长不受配额限制（用一个足够大的数字表示「无限制」，前端据此显示）
     const quota =
-      user.role === "admin"
+      user.role === "admin" || user.role === "root"
         ? ADMIN_UNLIMITED
         : (perUser?.max_subdomains ?? globalQuota)
 
@@ -156,7 +188,7 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
     )
       .bind(user.id)
       .first<{ c: number }>()
-    if (user.role !== "admin" && (used?.c ?? 0) >= quota) {
+    if (user.role !== "admin" && user.role !== "root" && (used?.c ?? 0) >= quota) {
       throw new ApiError(
         400,
         `最多可创建 ${quota} 个一级子域名（当前 ${used?.c ?? 0} 个）`,
@@ -208,6 +240,9 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
 // DELETE /api/subdomains/:id —— 删除子域名（主域名不可删；其后代级联删除）
 export async function deleteSubdomain(env: Env, request: Request, id: string): Promise<Response> {
   const user = await requireUser(env, request)
+  // ⚠️ 2026-09-26 审计：删除会遍历全部后代并逐个 detachCustomDomain（删 Route + DNS），
+  // 是本次几个接口里最重的，原先零限流。
+  await guardRateLimit(env, `subdomain:delete:user:${user.id}`, 10, 60, "删除子域名过于频繁，请稍后再试")
   const existing = await env.DB.prepare("SELECT * FROM subdomains WHERE id = ?")
     .bind(id)
     .first<SubdomainRow>()
@@ -269,6 +304,39 @@ export async function deleteSubdomain(env: Env, request: Request, id: string): P
         console.error("删除 Cloudflare DNS 记录失败:", record.cf_id, err)
       }
     }
+  }
+
+  // ⚠️ 2026-09-25 审计（M13）：上面只清理了 `dns_records` 里**有登记**的记录。
+  // 但绑定自定义域名时自动创建的占位解析（AAAA 100::）与 Worker Route
+  // **从不写入 dns_records**，所以删掉子域名后它们仍然留在 Cloudflare：
+  //   1. 该 fqdn 继续解析到本站、Route 继续指向本 Worker —— 名字被删了却还在服务；
+  //   2. createSubdomain 的 CF 冲突检测会认为它仍被占用，
+  //      于是这个域名**连原主人都再也分配不回来**。
+  // 对每个待删子域名补一次完整的解绑（Route + 占位 DNS）。
+  // 失败不阻断：删除本身是用户意图，CF 侧的残留可以再修。
+  for (const subId of toDelete) {
+    const sub = byId.get(subId)
+    if (!sub) continue
+    try {
+      await detachCustomDomain(env, sub.fqdn)
+    } catch (err) {
+      console.error("删除子域名时解绑自定义域名失败:", sub.fqdn, err)
+    }
+  }
+
+  // 名片与网盘直链都记了 fqdn：`subdomain_id` 会随外键置空，但 `fqdn` 不会，
+  // 留下的话这个域名会被 M14a/M14b 的互斥检查永久占用。
+  const ids = [...toDelete]
+  const placeholders = ids.map(() => "?").join(",")
+  if (ids.length > 0) {
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE profiles SET fqdn = NULL, subdomain_id = NULL WHERE subdomain_id IN (${placeholders})`
+      ).bind(...ids),
+      env.DB.prepare(
+        `DELETE FROM storage_prefixes WHERE subdomain_id IN (${placeholders})`
+      ).bind(...ids),
+    ])
   }
 
   // 删父行即可级联删除后代（parent_id 上有 ON DELETE CASCADE）

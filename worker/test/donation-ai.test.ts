@@ -1,4 +1,9 @@
-// AI 渠道捐献自动化：探测上游 → 建渠道 → 测试 → 自动通过 / 自动拒绝。
+// AI 渠道捐献自动化：探测上游 → 建渠道 → 逐个模型测试 → 自动通过 / 转人工。
+//
+// ⚠️ 2026-09-25 起**不再自动拒绝**：用户明确要求「自动判断错了的不能直接算失败，
+// 应该由人工手动审核确定失败才算失败」。只有 definitive 的失败（失败原因只关乎
+// 我们自己的输入规则，如模型名全部非法）才自动拒绝，其余一律 pending 转人工。
+// 因此本文件里「失败」场景断言的都是 `pending` 而不是 `rejected`。
 //
 // 这些用例用打桩的 fetch 跑完整 HTTP 流程，因为这条链路的真实风险不在于
 // 某个函数算错，而在于**状态机**：谁解锁了权限、失败时有没有留下半坏的渠道、
@@ -201,6 +206,8 @@ describe("POST /donations/ai/probe", () => {
 function stubNewApiChannelFlow(opts: {
   /** true/false 对全部模型一致；传函数则按模型名逐个决定（用于「部分可用」场景） */
   testOk: boolean | ((model: string) => boolean)
+  /** 模拟「中转站建渠道接口报错」——平台侧故障，用于验证不得据此拒绝用户 */
+  failCreate?: boolean
 }) {
   let created: {
     id: number
@@ -229,6 +236,9 @@ function stubNewApiChannelFlow(opts: {
     }
 
     if (method === "POST" && url.endsWith("/api/channel/")) {
+      if (opts.failCreate) {
+        return jsonResponse({ success: false, message: "database is locked" }, 500)
+      }
       const posted = findLastCall("POST")
       const ch = (posted?.body as { channel?: Record<string, unknown> })?.channel
       created = {
@@ -262,6 +272,18 @@ function stubNewApiChannelFlow(opts: {
       return jsonResponse({ success: true, message: "" })
     }
 
+    // ⚠️ 单查优先于列表：`GET /api/channel/:id` 的 data 是**单个渠道对象**，
+    //    不是列表信封。列表那条用 includes 匹配，会连单查一起吞掉
+    //    （2026-09-30：`getChannel()` 改成单查后必须先拦这一条）。
+    const single = url.match(/\/api\/channel\/(\d+)(?:\?.*)?$/)
+    if (method === "GET" && single && !url.includes("/api/channel/test/")) {
+      const id = Number(single[1])
+      if (created && created.id === id) {
+        return jsonResponse({ success: true, message: "", data: created })
+      }
+      return jsonResponse({ success: false, message: "record not found" })
+    }
+
     if (method === "GET" && url.includes("/api/channel/")) {
       return jsonResponse({
         success: true,
@@ -270,7 +292,7 @@ function stubNewApiChannelFlow(opts: {
           items: created ? [created] : [],
           total: created ? 1 : 0,
           page: 1,
-          page_size: 1000,
+          page_size: 100,
           type_counts: {},
         },
       })
@@ -337,15 +359,19 @@ describe("POST /donations —— AI 自动接入", () => {
     expect(channel.tag).toBe("捐献")
   })
 
-  it("全部模型都测不过 → 自动拒绝、不解锁权限、并把半坏的渠道删掉", async () => {
+  it("全部模型都测不过 → **不自动拒绝**，转人工复核；半坏的渠道仍要删掉", async () => {
     const user = await makeDonor()
     stubFetch((url) => (url.startsWith(UPSTREAM) ? upstreamModels(["gpt-4o", "gpt-4o-mini"]) : undefined))
     stubNewApiChannelFlow({ testOk: false })
 
     const { body } = await submitAiDonation(user, UPSTREAM, ["gpt-4o", "gpt-4o-mini"])
-    expect(body.status).toBe("rejected")
+    // 用户的明确要求（2026-09-25）：「自动判断错了的不能直接算失败，
+    // 应该由人工手动审核确定失败才算失败」。上游的报错文案可能只是这次不巧
+    // （实测过：同一上游 OpenAI 路径被 403、Anthropic 路径正常）。
+    expect(body.status).toBe("pending")
     expect(body.channelId).toBeNull()
     expect(body.reviewNote).toContain("全部未通过可用性测试")
+    expect(body.reviewNote).toContain("转人工复核")
     // 每个模型各自的失败原因都要带给管理员，否则没法判断是 key 错还是个别模型不可用
     expect(body.reviewNote).toContain("gpt-4o")
     expect(body.reviewNote).toContain("gpt-4o-mini")
@@ -354,12 +380,28 @@ describe("POST /donations —— AI 自动接入", () => {
     expect(perms.ai).toBe(false)
 
     const row = await readDonation(body.id)
-    expect(row?.status).toBe("rejected")
+    expect(row?.status).toBe("pending")
     expect(row?.auto_reviewed).toBe(1)
     expect(row?.newapi_channel_id).toBeNull()
 
-    // 关键：失败的渠道不能留在 NewAPI 里
+    // 但渠道不能留在 NewAPI 里：它全是坏模型，会让模型列表出现
+    // 「看着能用、一调就报错」的条目。删掉后管理员复核通过时会重建。
     expect(calls.some((c) => c.method === "DELETE" && c.url.includes("/api/channel/"))).toBe(true)
+  })
+
+  it("中转站建渠道失败（平台侧故障）→ 转人工，绝不判用户失败", async () => {
+    const user = await makeDonor()
+    stubFetch((url) => (url.startsWith(UPSTREAM) ? upstreamModels(["gpt-4o"]) : undefined))
+    stubNewApiChannelFlow({ testOk: true, failCreate: true })
+
+    const { body } = await submitAiDonation(user)
+    expect(body.status).toBe("pending")
+    expect(String(body.reviewNote)).toContain("创建渠道失败")
+    expect(String(body.reviewNote)).toContain("转人工复核")
+    expect((await readPerms(user.id)).ai).toBe(false)
+    const row = await readDonation(body.id)
+    expect(row?.status).toBe("pending")
+    expect(row?.newapi_channel_id).toBeNull()
   })
 
   it("只有部分模型可用 → 只把可用的留在渠道里（PUT 剔除坏的）", async () => {
@@ -422,6 +464,51 @@ describe("POST /donations —— AI 自动接入", () => {
     const second = await submitAiDonation(user)
     expect(second.res.status).toBe(409)
   })
+
+  // ---- 防重复校验的实现方式（2026-09-30 线上事故）----
+  //
+  // 这两条锁的不是「重复被拒」本身，而是**判定方式**：
+  //   旧写法 `payload LIKE '%"baseUrl":"<地址>"%'` 有两个致命问题 ——
+  //   ① D1 的 LIKE 模式上限只有 50 字符，固定前缀 `%"baseUrl":"` + `"%` 占 15 个，
+  //      **地址一过 35 字符就报 `LIKE or GLOB pattern too complex` ⇒ 500**，
+  //      且校验在 INSERT 之前，单子根本进不了库（管理端查不到任何痕迹）。
+  //      线上被 `https://opc.fiime.cn/api/model-service`（38 字符）触发。
+  //   ② `_` / `%` 是 LIKE 通配符，地址里带它们会误判。
+  // ⚠️ ①在本地 miniflare 复现不了（本地 SQLite 上限是 50000），只有线上才会炸；
+  //    所以这里能真正守住的是 ②，①靠 sql-like.test.ts 的护栏 + 线上回顾。
+
+  it("长上游地址（>35 字符）能正常提交，不再 500", async () => {
+    const user = await makeDonor()
+    // 与线上那次事故完全一致的地址（38 字符）
+    const longUrl = "https://opc.fiime.cn/api/model-service"
+    stubFetch((url) => (url.startsWith(longUrl) ? upstreamModels(["gpt-4o"]) : undefined))
+    stubNewApiChannelFlow({ testOk: true })
+
+    const { res } = await submitAiDonation(user, longUrl)
+    expect(res.status).toBeLessThan(400)
+
+    // 同一个长地址再提一次仍然要能正常判重（说明长地址也能走到比对逻辑）
+    const second = await submitAiDonation(user, longUrl)
+    expect(second.res.status).toBe(409)
+  })
+
+  it("上游地址里的 `_` 不再被当成 LIKE 通配符（旧写法会误判成重复）", async () => {
+    const user = await makeDonor()
+    stubFetch((url) =>
+      url.startsWith("https://abc.") || url.startsWith("https://a_c.")
+        ? upstreamModels(["gpt-4o"])
+        : undefined
+    )
+    stubNewApiChannelFlow({ testOk: true })
+
+    const first = await submitAiDonation(user, "https://abc.example.com")
+    expect(first.res.status).toBeLessThan(400)
+
+    // `a_c` 与已存的 `abc` 只差一个字符，而 LIKE 里 `_` 匹配任意单字符 ⇒
+    // 旧写法会把这条判成「已经提交过」，用户明明填的是另一个上游却被拒。
+    const second = await submitAiDonation(user, "https://a_c.example.com")
+    expect(second.res.status).not.toBe(409)
+  })
 })
 
 describe("POST /admin/donations/:id/revoke —— 收回资源", () => {
@@ -457,7 +544,8 @@ describe("POST /admin/donations/:id/provision —— 人工复核", () => {
     stubNewApiChannelFlow({ testOk: false })
 
     const { body } = await submitAiDonation(donor)
-    expect(body.status).toBe("rejected")
+    // 自动校验失败 → 转人工（不再自动拒绝），管理员据此复核
+    expect(body.status).toBe("pending")
 
     // 上游恢复（清掉打桩，换成测试通过）
     stubNewApiChannelFlow({ testOk: true })
@@ -477,20 +565,20 @@ describe("POST /admin/donations/:id/provision —— 人工复核", () => {
 
     // 复核只接渠道，不改状态（放行仍要点「复核通过」）
     const row = await readDonation(body.id)
-    expect(row?.status).toBe("rejected")
+    expect(row?.status).toBe("pending")
     expect(row?.newapi_channel_id).toBe(101)
     const perms = await readPerms(donor.id)
     expect(perms.ai).toBe(false)
   })
 
-  it("复核放行：批准被自动拒绝的单据时复用已接入的渠道，不重复创建", async () => {
+  it("复核放行：批准自动校验未通过的单据时复用已接入的渠道，不重复创建", async () => {
     const admin = await makeUser({ role: "admin" })
     const donor = await makeDonor()
     stubFetch((url) => (url.startsWith(UPSTREAM) ? upstreamModels(["gpt-4o"]) : undefined))
     stubNewApiChannelFlow({ testOk: false })
 
     const { body } = await submitAiDonation(donor)
-    expect(body.status).toBe("rejected")
+    expect(body.status).toBe("pending")
 
     stubNewApiChannelFlow({ testOk: true })
     await fetchSelf(

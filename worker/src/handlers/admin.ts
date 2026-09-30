@@ -9,6 +9,7 @@ import {
   updateSettings,
   sanitizeRecommendedModels,
   audit as recordAudit,
+  type SettingKey,
 } from "../settings"
 import { isStorageConfigured } from "../r2"
 import {
@@ -21,8 +22,10 @@ import {
   probeAdminCredential,
   listPricing,
   maskToken,
+  adminSetUserStatus,
 } from "../newapi-client"
-import { sendMail, renderMail } from "../mailer"
+import { sendMail, renderMail, parseBrevoKeys } from "../mailer"
+import { fetchWithTimeout } from "../async-utils"
 import { cfListDestinations } from "../cloudflare"
 import { normalizePermissions, parsePermissions, FEATURES } from "../permissions"
 import {
@@ -38,13 +41,15 @@ import {
   parseBasicFeatures,
   parseCounts,
   refundQuotaForInvite,
-  quotaFeaturesOf,
+  quotaFeaturesFromStored,
 } from "../quotas"
 import { purgeUserStorage, recalculateUsage } from "./storage"
+import { normalizeBaseUrl } from "../donation-provision"
+import { purgeUserExternalResources } from "../user-cleanup"
 
 /**
  * 管理员接口。
- * 所有端点先检查 role === 'admin'（成员），
+ * 所有端点先检查 role 是 admin 或 root（root = 站长，拥有 admin 全部权限），
  * 操作用户对象时以 username 定位（绝不接受被操作用户的 session）。
  */
 
@@ -67,6 +72,8 @@ interface AdminUserRow {
   notify_enabled?: number | null
   /** 头像 R2 key（NULL = 未上传，前端回落到 /u/<username>/avatar） */
   avatar_key?: string | null
+  /** 展示用编号（按注册顺序，迁移 0070；老数据可能为 NULL） */
+  uid?: number | null
   /** 邀请码额度（捐献累计获得 / 已消耗） */
   invite_quota_bonus?: number | null
   invite_quota_used?: number | null
@@ -79,7 +86,8 @@ interface AdminUserRow {
 
 export async function requireAdmin(env: Env, request: Request): Promise<AdminUserRow> {
   const admin = (await requireUser(env, request)) as AdminUserRow
-  if (admin.role !== "admin") {
+  // root（站长）与 admin 都放行；root 拥有 admin 的全部权限
+  if (admin.role !== "admin" && admin.role !== "root") {
     throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
   }
   return admin
@@ -387,7 +395,7 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
     // 列表只展示「各模块是否已开通」与「名片是否已启用」，不再回传子域名/DNS/
     // 邮箱/邮件的计数 —— 那些明细在用户详情里看。四个模块的判定与各 handler
     // 里的 isActivated / loadAccount 完全一致（有记录 **且** enabled=1）。
-    `SELECT u.id, u.username, u.email, u.namespace, u.role, u.status, u.permissions, u.max_subdomains, u.created_at,
+    `SELECT u.id, u.uid, u.username, u.email, u.namespace, u.role, u.status, u.permissions, u.max_subdomains, u.created_at,
             u.invite_code_id,
             ic.code AS invite_code,
             ic.created_at AS invite_created_at,
@@ -406,32 +414,82 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
       ORDER BY u.created_at DESC`
   ).all()
 
-  return json({
-    users: (rows.results ?? []).map((r: Record<string, unknown>) => ({
-      id: r.id,
-      username: r.username,
-      email: r.email,
-      namespace: r.namespace,
-      role: r.role,
-      status: r.status,
-      permissions: parsePermissions(r.permissions as string | null),
-      maxSubdomains: (r.max_subdomains as number | null) ?? null,
-      createdAt: r.created_at,
-      // 邀请码溯源：老用户没有 invite_code_id（或码已删除），回退为 null
-      inviteCode: (r.invite_code as string | null) ?? null,
-      inviteCreatedBy: (r.invite_created_by as string | null) ?? null,
-      inviteCreatedAt: (r.invite_created_at as string | null) ?? null,
-      // 各模块的实际开通状态（有记录且 enabled=1）
-      storageEnabled: Number(r.storage_on) === 1,
-      aiEnabled: Number(r.ai_on) === 1,
-      frpEnabled: Number(r.frp_on) === 1,
-      proxyEnabled: Number(r.proxy_on) === 1,
-      // 个人名片：未建记录时 published 为 NULL → 视为未启用
-      profileEnabled: Number(r.profile_published) === 1,
-      profileSlug: (r.profile_slug as string | null) ?? null,
-      profileFqdn: (r.profile_fqdn as string | null) ?? null,
-    })),
-  })
+  const activeUsers = (rows.results ?? []).map((r: Record<string, unknown>) => ({
+    id: r.id,
+    // 按注册顺序的展示用编号（migration 0070 加的 users.uid）；老数据可能为 null
+    uid: (r.uid as number | null) ?? null,
+    username: r.username,
+    email: r.email,
+    namespace: r.namespace,
+    role: r.role,
+    status: r.status,
+    permissions: parsePermissions(r.permissions as string | null),
+    maxSubdomains: (r.max_subdomains as number | null) ?? null,
+    createdAt: r.created_at,
+    // 邀请码溯源：老用户没有 invite_code_id（或码已删除），回退为 null
+    inviteCode: (r.invite_code as string | null) ?? null,
+    inviteCreatedBy: (r.invite_created_by as string | null) ?? null,
+    inviteCreatedAt: (r.invite_created_at as string | null) ?? null,
+    // 各模块的实际开通状态（有记录且 enabled=1）
+    storageEnabled: Number(r.storage_on) === 1,
+    aiEnabled: Number(r.ai_on) === 1,
+    frpEnabled: Number(r.frp_on) === 1,
+    proxyEnabled: Number(r.proxy_on) === 1,
+    // 个人名片：未建记录时 published 为 NULL → 视为未启用
+    profileEnabled: Number(r.profile_published) === 1,
+    profileSlug: (r.profile_slug as string | null) ?? null,
+    profileFqdn: (r.profile_fqdn as string | null) ?? null,
+    deleted: false,
+    deletedAt: null as string | null,
+    deletedReason: null as string | null,
+  }))
+
+  // 已注销/被删的用户：从 deleted_users 取留痕，作为只读行附在列表末尾。
+  // 这样管理员能查到「某人注销过」，但用户名/邮箱已释放、可被重新注册。
+  const tombstones = await env.DB.prepare(
+    `SELECT id, uid, username, email, namespace, role, reason, created_at, deleted_at
+       FROM deleted_users
+      ORDER BY deleted_at DESC`
+  ).all<{
+    id: string
+    uid: number | null
+    username: string
+    email: string
+    namespace: string | null
+    role: string | null
+    reason: string
+    created_at: string | null
+    deleted_at: string
+  }>()
+
+  const deletedUsers = (tombstones.results ?? []).map((t) => ({
+    id: t.id,
+    uid: t.uid ?? null,
+    username: t.username,
+    email: t.email,
+    namespace: t.namespace ?? "",
+    role: t.role ?? "user",
+    status: "deleted",
+    // 留痕行不参与鉴权，权限一律视为无（避免误导）
+    permissions: { r2: false, ai: false, frp: false, proxy: false },
+    maxSubdomains: null as number | null,
+    createdAt: t.created_at ?? t.deleted_at,
+    inviteCode: null as string | null,
+    inviteCreatedBy: null as string | null,
+    inviteCreatedAt: null as string | null,
+    storageEnabled: false,
+    aiEnabled: false,
+    frpEnabled: false,
+    proxyEnabled: false,
+    profileEnabled: false,
+    profileSlug: null as string | null,
+    profileFqdn: null as string | null,
+    deleted: true,
+    deletedAt: t.deleted_at,
+    deletedReason: t.reason,
+  }))
+
+  return json({ users: [...activeUsers, ...deletedUsers] })
 }
 
 // GET /api/admin/users/:username —— 用户详情（子域名/DNS/邮箱/邮件/会话）
@@ -443,7 +501,7 @@ export async function getUser(env: Env, request: Request, username: string): Pro
 
 // PUT /api/admin/users/:username —— 更新用户状态（封禁/解封/设管理员/昵称等）
 export async function updateUser(env: Env, request: Request, username: string): Promise<Response> {
-  await requireAdmin(env, request)
+  const operator = await requireAdmin(env, request)
   const body = (await request.json()) as {
     status?: string
     role?: string
@@ -462,11 +520,33 @@ export async function updateUser(env: Env, request: Request, username: string): 
   if (body.status && !["active", "suspended"].includes(body.status)) {
     throw new ApiError(400, "无效的状态", "INVALID_INPUT")
   }
-  if (body.role && !["user", "admin"].includes(body.role)) {
+  if (body.role && !["user", "admin", "root"].includes(body.role)) {
     throw new ApiError(400, "无效的角色", "INVALID_INPUT")
   }
-  if (user.username.toLowerCase() === "doulor") {
-    throw new ApiError(400, "不可修改主管理员", "FORBIDDEN")
+
+  /**
+   * 角色/状态修改的权限边界（2026-09-25 引入 root 角色后收紧）：
+   *
+   * 1. **root（站长）凌驾于一切**：任何非 root 操作者（包括 admin）都不能修改
+   *    root 的任何字段、封禁/解封 root、也不能删 root。用「目标角色是 root」判断，
+   *    不再依赖硬编码用户名 doulor。
+   * 2. **只有 root 能改角色**：把别人设成 admin / 撤销 admin / 设成 root，
+   *    都是 root 的专属动作。普通 admin 无权变更任何人的 role（否则 admin
+   *    可以互提、甚至把自己提成 root）。
+   *
+   * 判断顺序很重要：先看「目标是 root 且操作者不是 root」直接拒绝（最强保护），
+   * 再看「body.role 变化且操作者不是 root」拒绝。
+   */
+  if (user.role === "root" && operator.role !== "root") {
+    throw new ApiError(403, "站长账户不可被修改", "FORBIDDEN")
+  }
+  const roleChanging = body.role !== undefined && body.role !== user.role
+  if (roleChanging && operator.role !== "root") {
+    throw new ApiError(403, "只有站长可以变更角色", "FORBIDDEN")
+  }
+  // root 不能把另一个 root 降级（理论上只有一个 root，双保险）
+  if (roleChanging && user.role === "root") {
+    throw new ApiError(403, "站长账户的角色不可变更", "FORBIDDEN")
   }
 
   // 权限：只有显式传入时才更新（null 保持原值）
@@ -474,6 +554,13 @@ export async function updateUser(env: Env, request: Request, username: string): 
     body.permissions === undefined || body.permissions === null
       ? null
       : JSON.stringify(normalizePermissions(body.permissions))
+
+  // 记录「本次是否真的改了 status、改成什么」—— 用于封禁/解封时连带处理 NewAPI 账户。
+  // 注意：body.status 通过校验后只可能是 "active" 或 "suspended"。
+  const statusChanged =
+    body.status !== undefined && body.status !== user.status
+      ? (body.status as "active" | "suspended")
+      : null
 
   // 子域名配额：undefined 保持原值；null 清除覆盖（回落到全局默认）
   let quotaUpdate = false
@@ -503,6 +590,54 @@ export async function updateUser(env: Env, request: Request, username: string): 
     )
     .run()
 
+  // 封禁/解封联动 NewAPI 账户（2026-09-25 新增）。
+  //
+  // 需求：技术封禁 cloud 账户时，连带封禁他在中转站（NewAPI）里对应的账户，
+  //      使其 API Key 立即失效（NewAPI 的 disable 会清 token 缓存）。
+  // 解封时对称地 enable 回来。
+  //
+  // 设计取舍：
+  //   - 只在「本次确实改了 status」时触发，避免每次编辑昵称/权限都白调一次 NewAPI。
+  //   - NewAPI 未配置、或该用户没开通中转站账户时静默跳过（没有可禁的对象）。
+  //   - **NewAPI 调用失败不阻断 cloud 侧封禁**：cloud 的 status 是主操作、已经落库；
+  //     NewAPI 只是附带同步，失败时记审计日志、不向上抛错 —— 否则管理员会看到
+  //     「封禁失败」，但用户其实已经被 cloud 侧停用了，反而误以为没封成。
+  if (statusChanged) {
+    const account = await env.DB.prepare(
+      "SELECT newapi_user_id FROM newapi_accounts WHERE user_id = ?"
+    )
+      .bind(user.id)
+      .first<{ newapi_user_id: number }>()
+
+    if (account && (await isNewApiConfigured(env))) {
+      try {
+        await adminSetUserStatus(
+          env,
+          account.newapi_user_id,
+          statusChanged === "suspended" ? "disable" : "enable"
+        )
+        await recordAudit(
+          env,
+          user.id,
+          statusChanged === "suspended" ? "admin.newapi.suspend" : "admin.newapi.activate",
+          `cloud ${statusChanged} → NewAPI 账户 #${account.newapi_user_id} 已同步${
+            statusChanged === "suspended" ? "禁用" : "启用"
+          }`
+        )
+      } catch (err) {
+        // 附带同步失败：只记审计，不回滚、不抛错（cloud 封禁已生效）
+        await recordAudit(
+          env,
+          user.id,
+          "admin.newapi.sync_failed",
+          `cloud ${statusChanged} 已生效，但 NewAPI 账户 #${account.newapi_user_id} 同步失败：${
+            err instanceof Error ? err.message : String(err)
+          }`
+        )
+      }
+    }
+  }
+
   if (quotaUpdate) {
     await env.DB.prepare("UPDATE users SET max_subdomains = ? WHERE id = ?")
       .bind(quotaValue, user.id)
@@ -522,7 +657,7 @@ export async function updateUser(env: Env, request: Request, username: string): 
         throw new ApiError(400, "昵称为 2-16 位中文/英文/数字/下划线", "INVALID_NICKNAME")
       }
       const extra = parseReservedNicknames(await getSetting(env, "reserved_nicknames"))
-      if (isReservedNickname(nick, extra, user.role === "admin")) {
+      if (isReservedNickname(nick, extra, user.role === "admin" || user.role === "root")) {
         throw new ApiError(400, "该昵称包含保留词，请换一个", "NICKNAME_RESERVED")
       }
       try {
@@ -558,15 +693,57 @@ export async function updateUser(env: Env, request: Request, username: string): 
   return json(await userDetail(env, updated))
 }
 
-// DELETE /api/admin/users/:username —— 删除用户（级联）
+// DELETE /api/admin/users/:username —— 删除用户（级联 + 回收外部资源）
 export async function deleteUser(env: Env, request: Request, username: string): Promise<Response> {
-  await requireAdmin(env, request)
+  const admin = await requireAdmin(env, request)
   const user = await targetUser(env, username)
-  if (user.username.toLowerCase() === "doulor") {
-    throw new ApiError(400, "不可删除主管理员", "FORBIDDEN")
+  // root（站长）不可被删除（原来靠硬编码 doulor，现改成按 root 角色判断）
+  if (user.role === "root") {
+    throw new ApiError(403, "站长账户不可被删除", "FORBIDDEN")
   }
 
+  // ⚠️ 2026-09-26 审计：原实现只执行一句 `DELETE FROM users` —— CF Email Routing 规则、
+  // DNS / Worker Route、R2 对象、NewAPI 渠道与 Key、WorkBuddy 网关账号全部变成
+  // 收不回的孤儿（线上邮箱路由规则已用到 189/200）。
+  // 清理必须在删 users 行**之前**完成，否则 mailboxes / dns_records / subdomains
+  // 里的句柄会随 CASCADE 一起消失，之后就再也取不到了。
+  const cleanup = await purgeUserExternalResources(env, user.id, user.username)
+
+  // 留痕：管理员删号同样先写墓碑再删行（管理端列表以「已注销用户」展示）。
+  // 与自助注销共用 deleted_users 表，reason 区分来源。
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO deleted_users
+       (id, uid, username, email, namespace, role, reason, deleted_by, created_at, deleted_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'admin', ?, ?, ?)`
+  )
+    .bind(
+      user.id,
+      user.uid ?? null,
+      user.username,
+      user.email,
+      user.namespace ?? null,
+      user.role,
+      admin.id,
+      user.created_at ?? null,
+      new Date().toISOString()
+    )
+    .run()
+
   await env.DB.prepare("DELETE FROM users WHERE id = ?").bind(user.id).run()
+
+  await recordAudit(
+    env,
+    admin.id,
+    "admin.user.delete",
+    `删除用户 ${user.username}。清理：邮箱规则 ${cleanup.emailRules}、DNS 记录 ${cleanup.dnsRecords}、` +
+      `自定义域 ${cleanup.customDomains}、R2 对象 ${cleanup.storageObjects}、` +
+      `捐献渠道 ${cleanup.releasedChannels}、订阅源 ${cleanup.releasedSubscriptions}、` +
+      `frp 节点 ${cleanup.releasedFrpNodes}、反代账号 ${cleanup.wb2Removed}、` +
+      `CLI2API 账号 ${cleanup.cli2Removed}` +
+      `${cleanup.newapiDisabled ? "、已禁用 NewAPI 账号" : ""}` +
+      `${cleanup.errors.length > 0 ? `。⚠️ ${cleanup.errors.length} 项未清理成功：${cleanup.errors.join("；")}` : ""}`
+  )
+
   return new Response(null, { status: 204 })
 }
 
@@ -724,13 +901,13 @@ export async function testMail(env: Env, request: Request): Promise<Response> {
     throw new ApiError(400, "请提供有效的收件邮箱", "INVALID_EMAIL")
   }
 
-  const { text, html } = renderMail("Doulor Cloud 邮件自检", [
+  const { text, html } = renderMail("【Doulor Cloud】邮件自检", [
     "如果你收到这封邮件，说明 Worker 的出站邮件已配置成功。",
     "此功能用于：真实邮箱验证、账号找回、以及站内通知。",
   ])
 
   try {
-    await sendMail(env, { to, subject: "Doulor Cloud 邮件自检", text, html })
+    await sendMail(env, { to, subject: "【Doulor Cloud】邮件自检", text, html })
   } catch (err) {
     if (err instanceof ApiError) {
       return json({ ok: false, code: err.code, error: err.message }, err.status)
@@ -913,10 +1090,59 @@ export async function mailStatus(env: Env, request: Request): Promise<Response> 
 
 // ---- 全局设置（网盘配额 / AI 试用额度等）----
 
+/**
+ * 「只写不读」的密钥类设置项。
+ *
+ * 这些值绝不能出现在任何回包里，也不能进审计日志 —— 管理面板会展示审计日志，
+ * 落明文等于把密钥摊开给所有管理员看。
+ */
+const SECRET_SETTING_KEYS = new Set<string>(["posta_key", "brevo_api_key"])
+
+/** 把密钥类设置项清空后再回显（GET 与 PUT 共用同一套规则，避免只修一处） */
+function maskSecrets(
+  settings: Record<SettingKey, string>
+): Record<SettingKey, string> {
+  const out = { ...settings }
+  for (const k of SECRET_SETTING_KEYS) out[k as SettingKey] = ""
+  return out
+}
+
+/**
+ * 把一把 Key 中间打码后给管理面板「列表」用（明文永不回包）。
+ * 留头留尾是为了让管理员能分辨「列表里哪把是哪把」——
+ * Brevo Key 全都是 `xkeysib-` 开头，只留开头几位的区分度为零。
+ */
+function maskKeyForDisplay(key: string): string {
+  const k = key.trim()
+  if (k.length <= 12) return `${k.slice(0, 3)}****`
+  return `${k.slice(0, 12)}****${k.slice(-6)}`
+}
+
+/** 邮件通道密钥的展示信息（明文不返回；GET 与 PUT 共用） */
+function mailSecretsOf(settings: Record<SettingKey, string>): {
+  postaConfigured: boolean
+  brevoConfigured: boolean
+  brevoKeyCount: number
+  /** 已配置的 Brevo Key 列表（中间打码，顺序 = 轮询顺序） */
+  brevoKeys: string[]
+} {
+  const brevoKeys = parseBrevoKeys(settings.brevo_api_key)
+  return {
+    postaConfigured: Boolean(settings.posta_key),
+    brevoConfigured: brevoKeys.length > 0,
+    brevoKeyCount: brevoKeys.length,
+    brevoKeys: brevoKeys.map(maskKeyForDisplay),
+  }
+}
+
 // GET /api/admin/settings —— 读取全部可配置项
 export async function getSettingsHandler(env: Env, request: Request): Promise<Response> {
   await requireAdmin(env, request)
   const settings = await getSettings(env)
+
+  // 邮件通道的密钥「只写不读」：GET 不返回明文，前端用是否已配置来判断。
+  // 明文只在前端 PUT 时写入（留空则保持原值，见 updateSettingsHandler 的空串跳过逻辑）。
+  const safeSettings = maskSecrets(settings)
 
   const infos = await Promise.all([
     env.DB.prepare(
@@ -946,7 +1172,7 @@ export async function getSettingsHandler(env: Env, request: Request): Promise<Re
   }
 
   const adminEmails = await env.DB.prepare(
-    "SELECT email FROM users WHERE role = 'admin' AND email != '' ORDER BY username"
+    "SELECT email FROM users WHERE role IN ('admin', 'root') AND email != '' ORDER BY username"
   ).all<{ email: string }>()
 
   const options = new Set<string>(verifiedDestinations)
@@ -955,10 +1181,12 @@ export async function getSettingsHandler(env: Env, request: Request): Promise<Re
   for (const d of verifiedDestinations) options.add(d)
 
   return json({
-    settings,
+    settings: safeSettings,
     currency: { symbol: currency.symbol, code: currency.code },
     /** 可作为「管理员通知邮箱」的候选项 */
     notifyEmailOptions: [...options],
+    /** 邮件通道密钥是否已配置（明文不返回）；Brevo 额外给出 Key 把数与打码列表 */
+    mailSecrets: mailSecretsOf(settings),
     stats: {
       storageAccounts: infos[0]?.c ?? 0,
       storageUsedBytes: infos[0]?.used ?? 0,
@@ -1039,8 +1267,90 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
       continue
     }
 
+    // open_registration_until：限时开放注册的截止时间（ISO）。
+    // **空串是合法值**（= 不限时，只要总开关开着就一直开放），必须排在
+    // `str === "" continue` 之前，否则管理员清空截止时间后永远清不掉。
+    // 统一规范化成 toISOString() 形态，前端提交的本地时间也在这里落成 UTC。
+    if (key === "open_registration_until") {
+      const v = String(raw).trim()
+      if (v === "") {
+        values[key] = ""
+        continue
+      }
+      const t = Date.parse(v)
+      if (!Number.isFinite(t)) {
+        throw new ApiError(400, "开放注册截止时间格式不正确", "INVALID_INPUT")
+      }
+      values[key] = new Date(t).toISOString()
+      continue
+    }
+
+    // sensenova_channel_id：商汤 Key 要并入的渠道 ID，必须是正整数。
+    // 必须排在 `str === "" continue` 之前：**空串是合法值**（= 通道未配置，
+    // 捐献转人工），若被当成空值跳过，管理员就永远清不掉这个配置。
+    if (key === "sensenova_channel_id") {
+      const v = String(raw).trim()
+      if (v === "") {
+        values[key] = ""
+        continue
+      }
+      const n = Number(v)
+      if (!Number.isInteger(n) || n <= 0) {
+        throw new ApiError(
+          400,
+          "商汤接入渠道 ID 必须是正整数（在中转站渠道列表里能看到）",
+          "INVALID_INPUT"
+        )
+      }
+      values[key] = String(n)
+      continue
+    }
+
+    // brevo_api_key：支持多把 Key（多账号额度叠加）。前端**从不拿到明文**
+    //（GET 只回打码串），所以提交的是「保留 + 新增」协议：
+    //   keep:<n>  → 保留当前第 n 把（1 起，顺序同 GET 返回的列表）
+    //   其它片段   → 新 Key 原文
+    //   整串为空   → 清空全部（管理员把 Key 全删了）
+    // ⚠️ 必须排在下面 `str === "" continue` 之前：空串在这里是「清空」而不是「不改」。
+    // 必须单独处理：通用兜底会把它截断到 100 字符，而单把 Brevo Key 就有 89 字符。
+    if (key === "brevo_api_key") {
+      const current = parseBrevoKeys(await getSetting(env, "brevo_api_key"))
+      const out: string[] = []
+      for (const part of String(raw)
+        .split(/[\s,;]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)) {
+        const m = /^keep:(\d+)$/.exec(part)
+        if (m) {
+          const idx = Number(m[1]) - 1
+          if (idx >= 0 && idx < current.length) out.push(current[idx])
+          continue
+        }
+        out.push(part)
+      }
+      // 去重：同一把粘两遍没有意义，还会在轮询里浪费一次尝试
+      const joined = [...new Set(out)].join(",")
+      if (joined.length > 2000) {
+        throw new ApiError(400, "Brevo Key 过多或过长", "INVALID_INPUT")
+      }
+      values[key] = joined
+      continue
+    }
+
     const str = String(raw).trim()
     if (str === "") continue
+
+    // cf_plan：Cloudflare 账号套餐（额度面板口径）。只认三个固定值 ——
+    // 走通用分支会变成「任意字符串都能存」，面板拿到认不出的值只能回落免费版，
+    // 管理员会以为「我明明选过付费版」。
+    if (key === "cf_plan") {
+      const v = str.toLowerCase()
+      if (v !== "auto" && v !== "free" && v !== "paid") {
+        throw new ApiError(400, "套餐只支持 auto / free / paid", "INVALID_INPUT")
+      }
+      values[key] = v
+      continue
+    }
 
     // 数值型设置必须是非负整数，避免写入脏数据
     if (/bytes|quota|count/i.test(key)) {
@@ -1084,6 +1394,17 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
       continue
     }
 
+    // sensenova_base_url：商汤上游地址。必须是 http(s) 绝对地址。
+    // 复用 normalizeBaseUrl 的规则（去尾斜杠 + 剥一层 /v1）—— 管理员很可能
+    // 把 `https://token.sensenova.cn/v1` 整段粘进来，不退掉就会拼成 `.../v1/v1/models`。
+    if (key === "sensenova_base_url") {
+      if (!/^https?:\/\//i.test(str)) {
+        throw new ApiError(400, "商汤地址需以 http(s):// 开头", "INVALID_INPUT")
+      }
+      values[key] = normalizeBaseUrl(str).slice(0, 200)
+      continue
+    }
+
     // reserved_nicknames：逗号分隔的昵称保留词，允许清空（空串写入）
     if (key === "reserved_nicknames") {
       const parts = String(raw)
@@ -1107,13 +1428,20 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
     env,
     admin.id,
     "admin.settings.update",
+    // 审计日志里**不能落密钥明文**（审计日志是持久的、还会展示给管理员看）。
+    // 记「改动了哪一项」即可，值本身不记。
     Object.entries(values)
-      .map(([k, v]) => `${k}=${v}`)
+      .map(([k, v]) => `${k}=${SECRET_SETTING_KEYS.has(k) ? "***" : v}`)
       .join(", "),
     request.headers.get("CF-Connecting-IP")
   )
 
-  return json({ settings: await getSettings(env) })
+  // 回显时同样抹掉密钥明文：GET 已经脱敏，PUT 不能成为另一个泄漏口
+  // （前端只用这个响应判断成功与否，不读内容）。
+  // 一并回 mailSecrets：Brevo Key 列表是「改完立刻生效」的，前端拿到新的打码列表
+  // 就能就地更新，不必整页重载设置（重载会把其它未保存的编辑冲掉）。
+  const fresh = await getSettings(env)
+  return json({ settings: maskSecrets(fresh), mailSecrets: mailSecretsOf(fresh) })
 }
 
 // POST /api/admin/storage/recalculate —— 以 R2 实际内容重算所有用户用量
@@ -1169,6 +1497,131 @@ export async function purgeStorage(env: Env, request: Request, username: string)
   )
 
   return json({ deleted })
+}
+
+// ---- 网盘配额（存量用户）----
+//
+// `storage_accounts.quota_bytes` 是**开通那一刻写死的快照**：改桶的「每人配额」只影响
+// 之后新开通的人，存量用户不会跟着变。所以存量必须靠下面两个入口改：
+//   · 单个用户 —— 成员详情里直接改；
+//   · 批量 —— 把所有存量用户的配额刷成「所属桶的每人配额」（没桶归属则回落全局默认）。
+
+/** PUT /api/admin/storage/quota/:username —— 改单个用户的网盘配额（字节） */
+export async function updateStorageQuota(
+  env: Env,
+  request: Request,
+  username: string
+): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+  const user = await targetUser(env, username)
+
+  const body = (await request.json().catch(() => ({}))) as { quotaBytes?: unknown }
+  const quotaBytes = Math.trunc(Number(body.quotaBytes))
+  if (!Number.isFinite(quotaBytes) || quotaBytes < 0) {
+    throw new ApiError(400, "配额必须是不小于 0 的整数（字节）", "INVALID_INPUT")
+  }
+
+  const account = await env.DB.prepare(
+    "SELECT quota_bytes, used_bytes FROM storage_accounts WHERE user_id = ?"
+  )
+    .bind(user.id)
+    .first<{ quota_bytes: number; used_bytes: number }>()
+  if (!account) throw new ApiError(404, "该用户还没开通网盘", "NOT_FOUND")
+
+  await env.DB.prepare(
+    "UPDATE storage_accounts SET quota_bytes = ?, updated_at = ? WHERE user_id = ?"
+  )
+    .bind(quotaBytes, new Date().toISOString(), user.id)
+    .run()
+
+  await recordAudit(
+    env,
+    admin.id,
+    "admin.storage.quota",
+    `把 ${username} 的网盘配额从 ${account.quota_bytes} 改为 ${quotaBytes} 字节`,
+    request.headers.get("CF-Connecting-IP")
+  )
+
+  // 配额低于已用量不阻止操作（不删文件），但要让前端能提示「该用户已超额、传不了新东西」
+  return json({
+    quotaBytes,
+    usedBytes: account.used_bytes,
+    overQuota: account.used_bytes > quotaBytes,
+  })
+}
+
+/**
+ * POST /api/admin/storage/sync-quota —— 把存量用户的配额刷成「所属桶的每人配额」。
+ *
+ * 只动普通用户：admin/root 开通时写的是「不限量」哨兵值，不该被刷成 512 MB。
+ * 桶被删/停用或用户没有桶归属时，回落全局 `storage_quota_bytes`。
+ */
+export async function syncStorageQuotas(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+
+  const bucketRows = await env.DB.prepare(
+    "SELECT id, quota_per_user FROM r2_buckets WHERE kind = 'user' AND enabled = 1"
+  ).all<{ id: string; quota_per_user: number }>()
+  const byBucket = new Map((bucketRows.results ?? []).map((b) => [b.id, b.quota_per_user]))
+  const fallback = await getSettingNumber(env, "storage_quota_bytes")
+
+  const rows = await env.DB.prepare(
+    `SELECT sa.user_id, sa.quota_bytes, sa.used_bytes, sa.bucket_id, u.username, u.role
+       FROM storage_accounts sa JOIN users u ON u.id = sa.user_id`
+  ).all<{
+    user_id: string
+    quota_bytes: number
+    used_bytes: number
+    bucket_id: string | null
+    username: string
+    role: string
+  }>()
+
+  const now = new Date().toISOString()
+  const changed: { username: string; from: number; to: number; overQuota: boolean }[] = []
+  let skippedAdmins = 0
+  let failed = 0
+
+  for (const r of rows.results ?? []) {
+    if (r.role === "admin" || r.role === "root") {
+      skippedAdmins++
+      continue
+    }
+    const target = (r.bucket_id ? byBucket.get(r.bucket_id) : undefined) ?? fallback
+    if (!target || target === r.quota_bytes) continue
+    try {
+      await env.DB.prepare(
+        "UPDATE storage_accounts SET quota_bytes = ?, updated_at = ? WHERE user_id = ?"
+      )
+        .bind(target, now, r.user_id)
+        .run()
+      changed.push({
+        username: r.username,
+        from: r.quota_bytes,
+        to: target,
+        overQuota: r.used_bytes > target,
+      })
+    } catch {
+      failed++
+    }
+  }
+
+  await recordAudit(
+    env,
+    admin.id,
+    "admin.storage.sync_quota",
+    `同步存量网盘配额：更新 ${changed.length} 个（跳过管理员 ${skippedAdmins}、失败 ${failed}）`,
+    request.headers.get("CF-Connecting-IP")
+  )
+
+  return json({
+    updated: changed.length,
+    skippedAdmins,
+    failed,
+    overQuota: changed.filter((c) => c.overQuota).length,
+    // 回执只带前 200 条，避免极端情况下响应过大
+    changed: changed.slice(0, 200),
+  })
 }
 // ---- 邀请码权限编辑 ----
 
@@ -1345,14 +1798,18 @@ export async function listInviteQuotas(
   await requireAdmin(env, request)
 
   const rows = await env.DB.prepare(
-    `SELECT u.id, u.username, u.invite_quota_bonus, u.invite_quota_used,
+    `SELECT u.id, u.uid, u.username, u.email, u.namespace,
+            u.invite_quota_bonus, u.invite_quota_used,
             u.feature_quota, u.feature_quota_used,
             (SELECT COUNT(*) FROM invite_codes ic WHERE ic.created_by = u.id) AS invite_count
        FROM users u
       ORDER BY u.created_at DESC`
   ).all<{
     id: string
+    uid: number | null
     username: string
+    email: string
+    namespace: string
     invite_quota_bonus: number | null
     invite_quota_used: number | null
     feature_quota: string | null
@@ -1374,7 +1831,11 @@ export async function listInviteQuotas(
 
     users.push({
       id: r.id,
+      // 与用户列表同口径：展示编号 + 用户名 + 邮箱 + 命名空间，供顶部搜索用
+      uid: r.uid ?? null,
       username: r.username,
+      email: r.email,
+      namespace: r.namespace,
       inviteBase: base,
       inviteBonus: bonus,
       inviteTotal: total,
@@ -1545,10 +2006,20 @@ export async function adminDeleteInviteWithRefund(
 
   // 只有「用户自助创建且未使用」的码才退还额度（管理员自建的不涉及额度）
   if (row.created_by && row.used_count === 0) {
+    // ⚠️ 2026-09-25 审计（L25）：这里原本是
+    //   quotaFeaturesOf(parsePermissions(row.permissions))
+    // 而 `parsePermissions(null)` 返回的是 **allPermissions()（全开）** ——
+    // 于是一个 `permissions = NULL` 的邀请码被删除时，退还的模块集合会变成
+    // 全部四个模块，等于凭空给用户加额度（越删越多）。
+    //
+    // `quotaFeaturesFromStored` 对 null/坏 JSON 返回 **空数组**：
+    // 「不知道当初发了什么」时退还 0 个，方向上是安全的（少退不越权）。
+    // 用户自助创建的码在 my-invites.ts 里始终写入 JSON，不会走到 null 分支；
+    // 这条兜底针对的是历史遗留行与手工插库。
     await refundQuotaForInvite(
       env,
       row.created_by,
-      quotaFeaturesOf(parsePermissions(row.permissions))
+      quotaFeaturesFromStored(row.permissions)
     )
   }
 
@@ -1598,4 +2069,128 @@ export async function adminRestorePost(env: Env, request: Request, id: string): 
   await env.DB.prepare("UPDATE posts SET deleted_at=NULL WHERE id=?").bind(id).run()
   await recordAudit(env, admin.id, "admin.community.post.restore", `恢复帖 ${id}`, request.headers.get("CF-Connecting-IP"))
   return json({ ok: true })
+}
+
+/* ------------------------------------------------------------------ *
+ * Brevo 剩余额度（邮件通道）
+ *
+ * 为什么要有：Brevo 免费版按**账号**限 300 封/天，用完后发信接口返回
+ * `max_emails_per_day_exceeded`。管理员需要提前知道「今天还剩多少」，
+ * 而不是等群发失败才发现。配了多把 Key（多账号）时按把分别展示 ——
+ * 一眼看出哪把已见底、哪把还能用，这正是「额度叠加」的实际状态。
+ *
+ * 数据来源：`GET https://api.brevo.com/v3/account` 的 `plan[].credits`
+ * （免费版 creditsType=sendLimit，credits 即**当日剩余**封数）。
+ *
+ * ⚠️ 该接口受 Brevo 的「IP 白名单」限制：某个子账号若开了 IP 校验，
+ *    我们（以及 Cloudflare）的出口 IP 不在名单里，就会返回
+ *    `unrecognised IP address`。这种情况**必须如实展示错误原因**，
+ *    绝不能显示成 0 —— 否则会被误读成「额度用完了」。子账号需要在
+ *    Brevo 后台关掉 IP 校验，或把出口 IP 加进白名单。
+ * ------------------------------------------------------------------ */
+
+/** Brevo `/v3/account` 响应的相关字段 */
+interface BrevoAccountBody {
+  email?: string
+  message?: string
+  code?: string
+  plan?: { type?: string; credits?: number; creditsType?: string }[]
+}
+
+/** 单个 Brevo Key 的额度 */
+export interface BrevoKeyQuota {
+  /** 第几把（从 1 起，按配置里的顺序） */
+  index: number
+  ok: boolean
+  /** 账号邮箱（用于区分是哪个小号）；读不到时为 null */
+  email: string | null
+  /** 套餐类型，如 free */
+  plan: string | null
+  /** 当日剩余封数 */
+  credits: number | null
+  /** credits 的含义，如 sendLimit */
+  creditsType: string | null
+  /** 读不到时的原因（会直接显示给管理员） */
+  error: string | null
+}
+
+export interface BrevoQuotaOverview {
+  /** 免费版单账号每日额度，用于画进度条 */
+  freeDailyLimit: number
+  keys: BrevoKeyQuota[]
+  /** 所有能读到的 Key 的剩余之和 */
+  totalRemaining: number
+  /** 能读到的 Key 数 / 总数 */
+  okCount: number
+  totalCount: number
+  generatedAt: string
+}
+
+/** 免费版单账号每日上限（Brevo 免费档 300 封/天） */
+const BREVO_FREE_DAILY = 300
+
+/** 查一把 Key 的剩余额度（只读；失败不抛错，把原因塞进 error） */
+async function probeBrevoKey(key: string, index: number): Promise<BrevoKeyQuota> {
+  const base: BrevoKeyQuota = {
+    index,
+    ok: false,
+    email: null,
+    plan: null,
+    credits: null,
+    creditsType: null,
+    error: null,
+  }
+  try {
+    const res = await fetchWithTimeout(
+      "https://api.brevo.com/v3/account",
+      { headers: { "api-key": key, accept: "application/json" } },
+      10_000
+    )
+    const text = await res.text()
+    let body: BrevoAccountBody | null = null
+    try {
+      body = JSON.parse(text) as BrevoAccountBody
+    } catch {
+      body = null
+    }
+
+    if (!res.ok) {
+      // Brevo 的不合法 IP 会返回 401 + 一段英文说明，翻译成人话给管理员看
+      const raw = body?.message ?? text.slice(0, 160)
+      base.error = /unrecognised IP/i.test(raw)
+        ? "该子账号开启了 IP 校验，我们的出口 IP 不在白名单里 —— 需在 Brevo 后台关闭 IP 校验（否则这把 Key 发不出信）"
+        : `Brevo 返回 ${res.status}：${raw}`
+      return base
+    }
+
+    const plan = body?.plan?.[0]
+    base.ok = true
+    base.email = body?.email ?? null
+    base.plan = plan?.type ?? null
+    base.credits = typeof plan?.credits === "number" ? plan.credits : null
+    base.creditsType = plan?.creditsType ?? null
+    return base
+  } catch (err) {
+    base.error = `请求 Brevo 失败：${err instanceof Error ? err.message : String(err)}`
+    return base
+  }
+}
+
+/** GET /api/admin/mail/brevo-quota —— 每把 Brevo Key 的当日剩余额度 */
+export async function getBrevoQuota(env: Env, request: Request): Promise<Response> {
+  await requireAdmin(env, request)
+  const keys = parseBrevoKeys(await getSetting(env, "brevo_api_key"))
+
+  const quota = await Promise.all(keys.map((k, i) => probeBrevoKey(k, i + 1)))
+  const okOnes = quota.filter((q) => q.ok && typeof q.credits === "number")
+
+  const out: BrevoQuotaOverview = {
+    freeDailyLimit: BREVO_FREE_DAILY,
+    keys: quota,
+    totalRemaining: okOnes.reduce((sum, q) => sum + (q.credits ?? 0), 0),
+    okCount: okOnes.length,
+    totalCount: quota.length,
+    generatedAt: new Date().toISOString(),
+  }
+  return json(out)
 }

@@ -3,9 +3,12 @@
  *
  * 任何「服务端去请求用户填的地址」的功能都必须过这里 —— 那是 SSRF 面：
  * 攻击者可以让服务器去访问它自己网络里的东西（内网服务、云元数据端点…）。
- * 当前有两处用到：
+ * 当前用到的地方：
  *   - AI 渠道捐献的上游探测（`donation-provision.ts`）
  *   - 代理订阅捐献的订阅校验（`handlers/proxy.ts`）
+ *   - 社区 / 公告里裸链接的卡片预览（`link-preview.ts`）
+ *   - 工具箱「网页分享」的自动识别与图标代理（`handlers/fun-link-probe.ts`）
+ *   - 商汤 Key 巡检（`sensenova.ts`）
  */
 
 /** 本机 / 内网 / 链路本地地址的字面量前缀 */
@@ -20,7 +23,7 @@ const PRIVATE_HOST_RE =
  * 也访问不到内网地址。这一层是为了挡住明显的探测请求、并给出清晰报错。
  */
 export function isPrivateOrLocalHost(host: string): boolean {
-  const h = (host ?? "").trim().toLowerCase()
+  const h = (host ?? "").trim().toLowerCase().replace(/^\[|\]$/g, "")
   if (!h) return true
   if (PRIVATE_HOST_RE.test(h)) return true
   // 172.16 – 172.31
@@ -29,8 +32,16 @@ export function isPrivateOrLocalHost(host: string): boolean {
     const n = Number(m[1])
     if (n >= 16 && n <= 31) return true
   }
+  // 100.64 – 100.127：运营商级 NAT（CGNAT），公网上路由不到
+  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(h)) return true
+  // 224 – 255：多播（224/4）与保留（240/4）。注意 220–223 是正常公网段，别一起拦了。
+  if (/^(22[4-9]|23\d|24\d|25[0-5])\./.test(h)) return true
+  // 特殊用途域名后缀：mDNS / 内网域名 / 私有用例
+  if (/\.(local|localhost|internal|home\.arpa)$/.test(h)) return true
   // 纯 IPv6 回环 / 未指定
   if (h === "::1" || h === "::") return true
+  // 其它 IPv6 字面量（形如 fe80::1、fc00::1）——正常站点用不到，一律拒
+  if (h.includes(":")) return true
   return false
 }
 

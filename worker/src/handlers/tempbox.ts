@@ -17,16 +17,92 @@
  *
  * 单次上传上限与默认保存时长都由管理员在「设置」里调整。
  */
-import { ApiError, json } from "../http"
+import { ApiError, json, readBodyCapped } from "../http"
 import { uuid } from "../crypto"
 import { requireUser, type UserRow } from "../auth"
 import { guardRateLimit, clientIp } from "../ratelimit"
 import { getObject, headObject, isStorageConfigured, listObjects, presign, deleteObject, deletePrefix, getPlatformBucketId, putObject, supportsPresign } from "../r2"
 import { sanitizeFilename } from "./storage"
-import { getSettings, getSettingNumber } from "../settings"
+import { contentDispositionFor } from "../content-type"
+import { getSettings, getSettingBool, getSettingNumber } from "../settings"
 import type { Env } from "../env"
 
 const R2_PREFIX = "temporary"
+
+/**
+ * 上传侧限流额度（2026-09-25 审计 H1 修复）。
+ *
+ * 原状况：`create` / `upload-url` / `proxy-upload` / `commit` 四个写接口
+ * **一个限流都没有**（对比网盘 storage.ts 有 `guardUploadRate`、
+ * 名片 identity.ts 也有）。而分享箱的默认额度是 256MiB × 20 文件/批次，
+ * 批次数量不限、也没有「已用字节」概念 —— 任一登录用户都能把平台桶刷满
+ * （R2 免费额度只有 10GB，且与网盘、社区图片共享）。
+ *
+ * 额度取值依据「一个批次最多 20 个文件」：
+ *   - upload-url / commit：60 次 / 10 分钟 = 够传满 3 个整批，正常使用碰不到；
+ *   - create：20 次 / 小时（建批次比传文件稀疏得多）。
+ * 再叠加下面的「同时存活批次数」与「存活总字节数」两道硬闸。
+ */
+const TEMPBOX_UPLOAD_URL_LIMIT = 60
+const TEMPBOX_COMMIT_LIMIT = 60
+const TEMPBOX_UPLOAD_WINDOW_SECONDS = 600
+const TEMPBOX_CREATE_LIMIT = 20
+const TEMPBOX_CREATE_WINDOW_SECONDS = 3600
+
+/**
+ * 单个登录用户同时存活的批次数上限。
+ * 默认 256MiB × 20 文件/批次 = 5GiB/批次，所以必须限制批次数，
+ * 否则「批次数量不限」本身就等于「存储不限」。
+ */
+const TEMPBOX_MAX_LIVE_BATCHES = 10
+
+/**
+ * 单个登录用户同时存活的总字节上限（2 GiB）。
+ *
+ * 为什么按用户而不是按批次：批次可以无限建，按批次限制没有意义。
+ * 为什么取 2 GiB：远小于 R2 免费额度 10GB，保证「一个人刷满」不会
+ * 把整个平台的网盘/社区图片一起挤爆；同时正常互传小文件根本到不了。
+ * 管理员不受此限制（避免自己测试时被挡住）。
+ */
+const TEMPBOX_MAX_LIVE_BYTES = 2 * 1024 ** 3
+
+/** 上传侧限流：登录用户按 userId，未登录（开放上传时）按 IP */
+async function guardTempboxUpload(
+  env: Env,
+  request: Request,
+  user: UserRow | null,
+  kind: "url" | "commit" | "create"
+): Promise<void> {
+  const who = user ? `user:${user.id}` : `ip:${clientIp(request)}`
+  const [limit, window] =
+    kind === "create"
+      ? [TEMPBOX_CREATE_LIMIT, TEMPBOX_CREATE_WINDOW_SECONDS]
+      : kind === "commit"
+        ? [TEMPBOX_COMMIT_LIMIT, TEMPBOX_UPLOAD_WINDOW_SECONDS]
+        : [TEMPBOX_UPLOAD_URL_LIMIT, TEMPBOX_UPLOAD_WINDOW_SECONDS]
+  await guardRateLimit(
+    env,
+    `tempbox:${kind}:${who}`,
+    limit,
+    window,
+    "上传过于频繁，请稍后再试"
+  )
+}
+
+/** 该用户当前存活（未过期）批次的文件数与字节数合计 */
+async function liveUsage(
+  env: Env,
+  userId: string
+): Promise<{ batches: number; bytes: number }> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS batches, COALESCE(SUM(total_bytes), 0) AS bytes
+       FROM tempbox_batches
+      WHERE creator_user_id = ? AND expire_at > ?`
+  )
+    .bind(userId, new Date().toISOString())
+    .first<{ batches: number; bytes: number }>()
+  return { batches: row?.batches ?? 0, bytes: row?.bytes ?? 0 }
+}
 
 /** 纯文本的最大长度（约 64 KB，适合互传小文字） */
 const MAX_TEXT_BYTES = 64 * 1024
@@ -70,13 +146,27 @@ async function purgeExpiredBatch(env: Env, code: string): Promise<void> {
     .run()
 }
 
+/**
+ * 公开读取接口的 404 文案 —— **所有路径必须用同一句**。
+ *
+ * ⚠️ 2026-09-25 审计（L3）：原先「码不存在」回「接收码不存在或已失效」，
+ * 而「码对但文件名不对」回「文件不存在」。两者状态码与 code 都是 404 / NOT_FOUND，
+ * 只有 message 不同 —— 于是攻击者猜中一个真实存在的码时，会因为文案变化而**确知**它存在，
+ * 枚举从「猜码」退化成「确认码」。
+ *
+ * 共用限流桶（CODE_LOOKUP_LIMIT）只能把枚举速度压下来，**掩盖不了文案差异**，
+ * 所以文案也必须统一。代价是「码对、文件名错」时提示不够精确 ——
+ * 但该接口是匿名可访问的，宁可牺牲一点文案精确度。
+ */
+const TEMPBOX_NOT_FOUND = "接收码不存在或已失效"
+
 /** 已过期的批次：清理后一律视为不存在 */
 async function assertBatchAlive(env: Env, code: string): Promise<TempboxBatchRow> {
   const batch = await loadBatch(env, code)
-  if (!batch) throw new ApiError(404, "接收码不存在或已失效", "NOT_FOUND")
+  if (!batch) throw new ApiError(404, TEMPBOX_NOT_FOUND, "NOT_FOUND")
   if (isExpired(batch)) {
     await purgeExpiredBatch(env, batch.code)
-    throw new ApiError(404, "接收码不存在或已失效", "NOT_FOUND")
+    throw new ApiError(404, TEMPBOX_NOT_FOUND, "NOT_FOUND")
   }
   return batch
 }
@@ -198,10 +288,27 @@ export async function getTempboxConfig(env: Env, _request: Request): Promise<Res
  * 若 body 带 text 则同时存为纯文本（文字不占 R2）。
  */
 export async function createTempbox(env: Env, request: Request): Promise<Response> {
-  if (!(await getSettings(env)).tempbox_enabled) {
+  // ⚠️ 2026-09-25 审计（F1）：原实现是 `if (!(await getSettings(env)).tempbox_enabled)`。
+  // settings 里的值**全是字符串**，所以 `"0"` 是 truthy → `!"0"` === false →
+  // 管理员在设置页把分享箱关掉（存成 "0"）后，这个开关**根本关不掉**。
+  // 全仓只有这一处用真值判断，其余都走 getSettingBool（它按 "1" 判定）。
+  if (!(await getSettingBool(env, "tempbox_enabled"))) {
     throw new ApiError(403, "临时分享箱已关闭", "FEATURE_DISABLED")
   }
   const user = await requireUploader(env, request)
+  await guardTempboxUpload(env, request, user, "create")
+
+  // 同时存活的批次数上限（见 TEMPBOX_MAX_LIVE_BATCHES 的说明）
+  if (user && user.role !== "admin" && user.role !== "root") {
+    const usage = await liveUsage(env, user.id)
+    if (usage.batches >= TEMPBOX_MAX_LIVE_BATCHES) {
+      throw new ApiError(
+        429,
+        `同时最多保留 ${TEMPBOX_MAX_LIVE_BATCHES} 个未过期的分享箱，请先等旧的分箱过期或手动删除`,
+        "TOO_MANY_BATCHES"
+      )
+    }
+  }
 
   const body = (await request.json().catch(() => ({}))) as { text?: unknown }
   const text = typeof body.text === "string" ? body.text.trim() : ""
@@ -241,10 +348,11 @@ export async function createTempboxUploadUrl(
     throw new ApiError(503, "存储未配置", "R2_NOT_CONFIGURED")
   }
   const uploader = await requireUploader(env, request)
+  await guardTempboxUpload(env, request, uploader, "url")
   await assertBatchAlive(env, code)
 
-  // 管理员不受分享箱配额限制
-  const isAdmin = uploader?.role === "admin"
+  // 管理员/站长不受分享箱配额限制
+  const isAdmin = uploader?.role === "admin" || uploader?.role === "root"
   const maxFileBytes = isAdmin
     ? ADMIN_UNLIMITED
     : await getSettingNumber(env, "tempbox_max_file_bytes")
@@ -272,7 +380,9 @@ export async function createTempboxUploadUrl(
   const key = `${R2_PREFIX}/${code}/${filename}`
   const platformBucket = await getPlatformBucketId(env)
   const uploadUrl = (await supportsPresign(env, platformBucket))
-    ? await presign(env, "PUT", key, 3600, platformBucket)
+    ? // 把 content-length 纳入签名（见 r2.ts 的 presign 与 P0-6）：
+      // 否则可以声明 size=1 过校验，再用同一个 URL PUT 任意大小的对象。
+      await presign(env, "PUT", key, 3600, platformBucket, size)
     : `/api/tempbox/${encodeURIComponent(code)}/proxy-upload?key=${encodeURIComponent(key)}`
   return json({ uploadUrl, key, filename, code })
 }
@@ -286,7 +396,9 @@ export async function proxyTempboxUpload(
   request: Request,
   code: string
 ): Promise<Response> {
-  await requireUploader(env, request)
+  // 原先这里连调了 3 次 requireUploader（等于 3 次会话查询），合并成一次
+  const uploader = await requireUploader(env, request)
+  await guardTempboxUpload(env, request, uploader, "url")
   await assertBatchAlive(env, code)
 
   const key = new URL(request.url).searchParams.get("key") ?? ""
@@ -294,22 +406,36 @@ export async function proxyTempboxUpload(
     throw new ApiError(403, "非法的文件路径", "FORBIDDEN")
   }
 
-  // 管理员不受大小限制
+  // 管理员/站长不受大小限制
   const maxFileBytes =
-    (await requireUploader(env, request))?.role === "admin"
+    uploader?.role === "admin" || uploader?.role === "root"
       ? ADMIN_UNLIMITED
       : await getSettingNumber(env, "tempbox_max_file_bytes")
   const contentType = request.headers.get("Content-Type") ?? "application/octet-stream"
-  const buf = await request.arrayBuffer()
+  // ⚠️ 2026-09-26 审计：原先「先整体读进内存再判大小」。tempbox 在
+  // `tempbox_upload_requires_login` 关闭时匿名可传，打满内存更划算。
+  // `readBodyCapped` 先看 Content-Length 快速拒绝，读完再复核真实长度。
+  const buf = await readBodyCapped(
+    request,
+    maxFileBytes,
+    `单个文件不能超过 ${Math.round(maxFileBytes / 1024 / 1024)} MB`,
+    400,
+    "FILE_TOO_LARGE"
+  )
   if (buf.byteLength === 0) {
     throw new ApiError(400, "文件为空", "INVALID_INPUT")
   }
-  if (buf.byteLength > maxFileBytes) {
-    throw new ApiError(
-      400,
-      `单个文件不能超过 ${Math.round(maxFileBytes / 1024 / 1024)} MB`,
-      "FILE_TOO_LARGE"
-    )
+
+  // 落盘前先判存活总字节（token 模式下字节已在内存里，能提前拦掉）
+  if (uploader && uploader.role !== "admin" && uploader.role !== "root") {
+    const usage = await liveUsage(env, uploader.id)
+    if (usage.bytes + buf.byteLength > TEMPBOX_MAX_LIVE_BYTES) {
+      throw new ApiError(
+        413,
+        "临时分享箱的暂存总量已满，请等旧的分箱过期后再传",
+        "TEMPBOX_QUOTA_EXCEEDED"
+      )
+    }
   }
 
   await putObject(env, key, buf, contentType, await getPlatformBucketId(env))
@@ -322,8 +448,9 @@ export async function commitTempboxUpload(
   request: Request,
   code: string
 ): Promise<Response> {
-  await requireUploader(env, request)
-  await assertBatchAlive(env, code)
+  const uploader = await requireUploader(env, request)
+  await guardTempboxUpload(env, request, uploader, "commit")
+  const batch = await assertBatchAlive(env, code)
 
   const body = (await request.json().catch(() => ({}))) as { key?: string }
   const key = body.key ?? ""
@@ -335,28 +462,61 @@ export async function commitTempboxUpload(
   const head = await headObject(env, key, platformBucket)
   if (!head) throw new ApiError(404, "上传未完成或文件不存在", "NOT_FOUND")
 
-  const maxFileBytes =
-    (await requireUploader(env, request))?.role === "admin"
-      ? ADMIN_UNLIMITED
-      : await getSettingNumber(env, "tempbox_max_file_bytes")
+  const isAdmin = uploader?.role === "admin" || uploader?.role === "root"
+  const maxFileBytes = isAdmin
+    ? ADMIN_UNLIMITED
+    : await getSettingNumber(env, "tempbox_max_file_bytes")
+  const maxFiles = isAdmin
+    ? ADMIN_UNLIMITED
+    : await getSettingNumber(env, "tempbox_max_files")
   if (head.size > maxFileBytes) {
     // 超额：删掉刚上传的对象，保持账实一致
     await deleteObject(env, key, platformBucket)
     throw new ApiError(400, "文件超过大小限制，已取消", "FILE_TOO_LARGE")
   }
 
+  // ⚠️ 2026-09-25 审计（L4）：原实现是 `file_count = file_count + 1`，**不幂等**。
+  // 同一个 key 重复调 commit 就能把计数刷高，同时让 upload-url 里的
+  // `file_count >= maxFiles` 判断失效（该判断与实际写入之间是 TOCTOU）。
+  // 改成以 R2 实际内容为准重算 —— 幂等、自愈，顺带把 maxFiles 真正执行到位。
+  const page = await listObjects(env, `${R2_PREFIX}/${code}/`, {
+    limit: 1000,
+    bucketId: platformBucket,
+  })
+  const objects = page.objects.filter((o) => !o.key.endsWith("/"))
+  const fileCount = objects.length
+  const totalBytes = objects.reduce((s, o) => s + o.size, 0)
+
+  if (fileCount > maxFiles) {
+    await deleteObject(env, key, platformBucket)
+    throw new ApiError(400, `每个接收码最多 ${maxFiles} 个文件，已取消`, "TOO_MANY_FILES")
+  }
+
+  // 存活总字节上限：只算本批次新增的部分，避免重复 commit 时被重复计入
+  if (uploader && !isAdmin) {
+    const usage = await liveUsage(env, uploader.id)
+    const delta = Math.max(0, totalBytes - (batch.total_bytes ?? 0))
+    if (usage.bytes + delta > TEMPBOX_MAX_LIVE_BYTES) {
+      await deleteObject(env, key, platformBucket)
+      throw new ApiError(
+        413,
+        "临时分享箱的暂存总量已满，请等旧的分箱过期后再传",
+        "TEMPBOX_QUOTA_EXCEEDED"
+      )
+    }
+  }
+
   await env.DB.prepare(
-    "UPDATE tempbox_batches SET file_count = file_count + 1, total_bytes = total_bytes + ? WHERE code = ?"
+    "UPDATE tempbox_batches SET file_count = ?, total_bytes = ? WHERE code = ?"
   )
-    .bind(head.size, code)
+    .bind(fileCount, totalBytes, code)
     .run()
 
-  const updated = await loadBatch(env, code)
   return json({
     filename: key.slice(`${R2_PREFIX}/${code}/`.length),
     size: head.size,
-    fileCount: updated?.file_count ?? 0,
-    totalBytes: updated?.total_bytes ?? 0,
+    fileCount,
+    totalBytes,
   })
 }
 
@@ -450,22 +610,46 @@ export async function downloadTempboxFile(
   const method = request.method.toUpperCase()
   const platformBucket = await getPlatformBucketId(env)
 
+  // ⚠️ 2026-09-25 审计（P0-1）：原 HEAD 分支把 R2 里存的原始 Content-Type
+  // 直接回给匿名调用者（绕过类型收口），GET 分支则用
+  // `contentType.startsWith("image/")` 判内联 —— 而 `image/svg+xml` 命中该前缀。
+  // 分享箱的接收码是**创建者自己生成的**（不需要猜），所以「上传 evil.svg →
+  // 分享 /api/tempbox/<自己的码>/evil.svg」是一条完整的同源 XSS 利用链。
+  // 现在两条分支都走 content-type.ts 的统一判定（已排除 SVG 与 +xml）。
   if (method === "HEAD") {
     const head = await headObject(env, key, platformBucket)
-    if (!head) throw new ApiError(404, "文件不存在", "NOT_FOUND")
+    if (!head) throw new ApiError(404, TEMPBOX_NOT_FOUND, "NOT_FOUND")
+    const { contentType, contentDisposition } = contentDispositionFor(
+      head.contentType,
+      filename
+    )
     return new Response(null, {
       status: 200,
       headers: {
         "Content-Length": String(head.size),
-        "Content-Type": head.contentType ?? "application/octet-stream",
+        "Content-Type": contentType,
+        "Content-Disposition": contentDisposition,
         "Accept-Ranges": "bytes",
+        "X-Content-Type-Options": "nosniff",
         "Access-Control-Allow-Origin": "*",
       },
     })
   }
 
   const range = request.headers.get("Range") ?? undefined
-  const upstream = await getObject(env, key, range, platformBucket)
+  // ⚠️ 2026-09-25 审计（L3）：`getObject` 对缺失对象抛的是「文件不存在」，
+  // 而「码不存在」抛的是「接收码不存在或已失效」—— 文案不同就等于告诉攻击者
+  // 「这个码是真实存在的，只是文件名猜错了」。GET 是更常被用来枚举的路径，
+  // 所以这里必须把 404 文案也统一掉。
+  let upstream: Response
+  try {
+    upstream = await getObject(env, key, range, platformBucket)
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) {
+      throw new ApiError(404, TEMPBOX_NOT_FOUND, "NOT_FOUND")
+    }
+    throw err
+  }
   const headers = new Headers()
   for (const name of [
     "content-type",
@@ -482,19 +666,16 @@ export async function downloadTempboxFile(
   headers.set("Access-Control-Allow-Origin", "*")
   headers.set("X-Content-Type-Options", "nosniff")
 
-  // 图片与纯文本内联预览；其余强制下载
-  const contentType = headOfType(upstream.headers.get("content-type") ?? "")
-  if (contentType.startsWith("image/") || contentType === "text/plain") {
-    headers.set("Content-Disposition", "inline")
-  } else {
-    headers.set("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`)
-  }
+  // 白名单内的类型（图片/音视频/纯文本/PDF）内联预览；其余强制下载。
+  // 判定见 worker/src/content-type.ts —— 已排除 SVG / HTML / 一切 +xml。
+  const { contentType, contentDisposition } = contentDispositionFor(
+    headers.get("content-type"),
+    filename
+  )
+  headers.set("Content-Type", contentType)
+  headers.set("Content-Disposition", contentDisposition)
 
   return new Response(upstream.body, { status: upstream.status, headers })
-}
-
-function headOfType(ct: string): string {
-  return ct.split(";")[0].trim().toLowerCase()
 }
 
 // ---- 删除（创建者本人或管理员）----
@@ -509,7 +690,7 @@ export async function deleteTempbox(
   const batch = await loadBatch(env, code)
   if (!batch) throw new ApiError(404, "接收码不存在或已失效", "NOT_FOUND")
 
-  if (user.role !== "admin" && (!batch.creator_user_id || batch.creator_user_id !== user.id)) {
+  if (user.role !== "admin" && user.role !== "root" && (!batch.creator_user_id || batch.creator_user_id !== user.id)) {
     throw new ApiError(403, "只能删除自己创建的临时分享", "FORBIDDEN")
   }
 

@@ -27,7 +27,38 @@ import { mapLimit } from "../async-utils"
 import { assertPublicHttpUrl } from "../url-guard"
 import { requireUser, requireFeatureUser, type UserRow } from "../auth"
 import { audit, getSettings } from "../settings"
+import { guardRateLimit, hitRateLimit } from "../ratelimit"
+import {
+  MAX_LATENCY_BATCH,
+  latencyTargets,
+  measureNodes,
+} from "../proxy-latency"
 import type { Env } from "../env"
+
+/**
+ * 出站抓取限流（2026-09-25 审计 H8）。
+ *
+ * `getProxyOverview` 每次请求都会对**全部可见订阅源各发一次外网 fetch**，
+ * `checkProxySubscription` 也会探测一次外网；两者原先都没有任何限流。
+ * 于是任意有 proxy 权限的用户循环调用就能：
+ *   - 把订阅服务商当放大/骚扰目标；
+ *   - 烧掉自己的 Worker 子请求额度（免费计划 50 子请求/请求）。
+ *
+ * 额度按「请求次数」而不是「fetch 次数」计：一次页面加载不管有几个订阅源
+ * 都只算一次，所以 30 次/分钟对正常使用非常宽松。
+ */
+const PROXY_FETCH_LIMIT = 30
+const PROXY_FETCH_WINDOW_SECONDS = 60
+
+async function guardProxyFetch(env: Env, userId: string): Promise<void> {
+  await guardRateLimit(
+    env,
+    `proxy:fetch:user:${userId}`,
+    PROXY_FETCH_LIMIT,
+    PROXY_FETCH_WINDOW_SECONDS,
+    "操作过于频繁，请稍后再试"
+  )
+}
 
 /** 用户「确认启用」时必须同意的协议版本。前端内嵌文本版本须与此一致。 */
 export const PROXY_CONSENT_VERSION = 1
@@ -74,7 +105,11 @@ function toPublicSubscription(row: ProxySubscriptionRow) {
     id: row.id,
     name: row.name,
     region: row.region,
-    url: row.url,
+    // ⚠️ 2026-09-26 审计（承接 09-25 的 H7，本次做了决策）：这里**刻意不返回 `url`**。
+    // 订阅源 URL 内嵌机场服务商的订阅 token；一旦随列表一次性下发到前端，
+    // 任何有 proxy 权限的用户都能从响应里（根本不用点按钮、不必开界面）
+    // 直接读到并转发给站外，耗尽管理员的机场套餐。
+    // 需要原始链接时走 `POST /api/proxy/subscriptions/:id/reveal`（按用户按天限流）。
     protocol: row.protocol,
     status: row.status,
     statusNote: row.status_note,
@@ -103,50 +138,139 @@ async function visibleSubscriptions(env: Env): Promise<ProxySubscriptionRow[]> {
 
 // ---- 抓取订阅源 ----
 
-/** 抓取订阅 URL 的原始文本（带 Authorization Bearer；超时保护） */
+/**
+ * 流式读取响应体，超过 `max` 字节立即中止并返回 null。
+ *
+ * ⚠️ 2026-09-25 审计（H8）：原实现是 `await res.arrayBuffer()` **之后**才比对
+ * MAX_FETCH_BYTES —— 恶意订阅源可以用一个超大响应把 Worker 内存打满，
+ * 大小检查形同虚设（它只在事后判定，不能阻止缓冲）。
+ */
+async function readCapped(res: Response, max: number): Promise<Uint8Array | null> {
+  const body = res.body
+  if (!body) return new Uint8Array(0)
+  const reader = body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!value) continue
+    total += value.byteLength
+    if (total > max) {
+      // 超限立刻断开，不再继续下载
+      await reader.cancel().catch(() => {})
+      return null
+    }
+    chunks.push(value)
+  }
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return out
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+/** 手动跟随的最大跳数（超过即判失败，避免重定向环） */
+const MAX_REDIRECT_HOPS = 4
+
+/**
+ * 抓取订阅 URL 的原始文本。
+ *
+ * ⚠️ 2026-09-25 审计（P0-3 / H5）—— 这个方法同时服务两类调用方，
+ * 而原实现把它们当成了同一类：
+ *
+ *   1. **管理员配置的**订阅源（proxy_subscriptions.url）：该带凭据；
+ *   2. **用户提交的** URL（捐献审核走 verifySubscriptionUrls）：**绝不能**带凭据。
+ *
+ *   原实现无条件注入 `Authorization: Bearer ${env.PROXY_API_TOKEN}`，
+ *   而用户 URL 那条路径只过了 assertPublicHttpUrl 就直接发出去 ——
+ *   任何登录用户提交一笔 type=proxy 的捐献、把 subUrls 指向自己的服务器，
+ *   就能一次请求取走平台第三方订阅系统的长期凭据。
+ *   现在由调用方通过 `withCredentials` 明确声明，用户 URL 一律 false。
+ *
+ *   同时把 `redirect: "follow"` 改成**手动逐跳跟随**：
+ *   原先只有首跳过了 assertPublicHttpUrl，一个 302 就能把请求引到
+ *   169.254.169.254 / 127.0.0.1 / 内网地址，首跳校验形同虚设。
+ *   现在每一跳都重新校验，且**凭据只在第一跳发送**（跨主机重定向不携带 token）。
+ */
 async function fetchSubscriptionText(
   env: Env,
-  url: string
+  url: string,
+  withCredentials: boolean
 ): Promise<{ text: string; ok: boolean; status: number }> {
-  const headers: Record<string, string> = {
-    "User-Agent": "DoulorCloud/1.0",
-  }
-  if (env.PROXY_API_TOKEN) {
-    headers.Authorization = `Bearer ${env.PROXY_API_TOKEN}`
-  }
+  let current = url
 
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers,
-      signal: controller.signal,
-      redirect: "follow",
-    })
+  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+    // 每一跳都校验：首跳由调用方或这里校验，重定向目标同样必须过闸
+    try {
+      assertPublicHttpUrl(current, "订阅链接")
+    } catch {
+      return { text: "", ok: false, status: 403 }
+    }
+
+    const headers: Record<string, string> = {
+      "User-Agent": "DoulorCloud/1.0",
+    }
+    // 凭据只发给「第一跳 + 管理员配置的地址」，绝不跟着重定向走
+    if (withCredentials && hop === 0 && env.PROXY_API_TOKEN) {
+      headers.Authorization = `Bearer ${env.PROXY_API_TOKEN}`
+    }
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+    let res: Response
+    try {
+      res = await fetch(current, {
+        method: "GET",
+        headers,
+        signal: controller.signal,
+        redirect: "manual",
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+
+    if (REDIRECT_STATUSES.has(res.status)) {
+      const location = res.headers.get("Location")
+      if (!location) return { text: "", ok: false, status: res.status }
+      let next: string
+      try {
+        next = new URL(location, current).toString()
+      } catch {
+        return { text: "", ok: false, status: res.status }
+      }
+      current = next
+      continue
+    }
+
     if (!res.ok) {
       return { text: "", ok: false, status: res.status }
     }
-    const buf = await res.arrayBuffer()
-    if (buf.byteLength > MAX_FETCH_BYTES) {
+
+    const buf = await readCapped(res, MAX_FETCH_BYTES)
+    if (!buf) {
       return { text: "", ok: false, status: 413 }
     }
     // 按 UTF-8 解码（节点配置基本是纯 ASCII + base64，用 utf-8 足够）
-    const text = new TextDecoder("utf-8").decode(buf)
-    return { text, ok: true, status: res.status }
-  } finally {
-    clearTimeout(timer)
+    return { text: new TextDecoder("utf-8").decode(buf), ok: true, status: res.status }
   }
+
+  // 跳数用尽
+  return { text: "", ok: false, status: 310 }
 }
 
 /** 对订阅 URL 做探活，返回近似延迟（毫秒），失败返回 null */
 async function probeSubscriptionUrl(
   env: Env,
-  url: string
+  url: string,
+  withCredentials: boolean
 ): Promise<{ latencyMs: number | null; ok: boolean; message?: string }> {
   const start = Date.now()
   try {
-    const { ok, status } = await fetchSubscriptionText(env, url)
+    const { ok, status } = await fetchSubscriptionText(env, url, withCredentials)
     const latencyMs = Date.now() - start
     if (!ok) {
       return {
@@ -512,17 +636,442 @@ function regionFromName(name: string): string | null {
   return null
 }
 
+// ---- 结构化订阅：Clash YAML / sing-box JSON / sspanel JSON ----
+//
+// 为什么必须支持：自动审核的判据是「能解析出至少一个节点」。而机场给的
+// 「Clash 订阅」是 YAML、「sing-box 订阅」是 JSON，**都不是 URI 列表** ——
+// 走逐行解析只会得到一堆 `protocol:"unknown"` 的条目，一过 `usableNodes()`
+// 就是 0 个节点，于是**一份在 Clash 里用得好好的订阅会被判「没有解析出任何节点」
+// 并自动拒绝**。
+//
+// 实测（本文件改动前）：Clash YAML 里 3 个真实节点 → 可用 0；
+// sing-box JSON 同理。这与当初「只认 4 种协议导致 anytls/hysteria2 订阅被误拒」
+// 是同一类 bug。
+//
+// 做法：先把结构化格式**还原成等价的节点链接**（vless:// / vmess:// / …），
+// 再交给现成的 `parseNodeLink` 统一解析。好处是只维护一套节点语义，
+// 而且 `ProxyNodeInfo.raw`（给用户复制进客户端的原始链接）依旧是真实可用的链接。
+
+/** Clash / sing-box 的 `type` → 本项目协议名（两家命名不同，都归一到这里） */
+const CLASH_TYPE_TO_PROTOCOL: Record<string, string> = {
+  vmess: "vmess",
+  vless: "vless",
+  trojan: "trojan",
+  ss: "ss",
+  shadowsocks: "ss",
+  ssr: "ssr",
+  anytls: "anytls",
+  hysteria: "hysteria",
+  hysteria2: "hysteria2",
+  hy2: "hysteria2",
+  tuic: "tuic",
+}
+
+/** base64（UTF-8 语义）—— vmess / ss / ssr 链接要内嵌 base64 */
+function toBase64Utf8(text: string): string {
+  const bytes = new TextEncoder().encode(text)
+  let bin = ""
+  for (const b of bytes) bin += String.fromCharCode(b)
+  return btoa(bin)
+}
+
+/** URL-safe base64（ssr 的查询参数用它，避免 `=`/`+` 被二次编码破坏） */
+function toBase64UrlUtf8(text: string): string {
+  return toBase64Utf8(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+}
+
+/** 去掉包裹的引号与方括号（Clash 的 `"香港"`、`[h3]`） */
+function unquote(v: string): string {
+  let s = (v ?? "").trim()
+  if (s.startsWith("[") && s.endsWith("]")) s = s.slice(1, -1).trim()
+  if (s.length >= 2 && ((s[0] === '"' && s.endsWith('"')) || (s[0] === "'" && s.endsWith("'")))) {
+    s = s.slice(1, -1)
+  }
+  return s.trim()
+}
+
+/**
+ * 解析 `{a: 1, b: {c: 2}}` 形态的 inline map → 扁平 map。
+ * 嵌套一律用 `.` 连接（`b.c`）—— Clash 用嵌套表达 ws-opts / reality-opts。
+ * 拆分时要跳过引号内与括号内的逗号，否则 `{name: "a,b"}` 会被撕开。
+ */
+function parseFlowMap(src: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  const inner = src.trim().replace(/^\{/, "").replace(/\}$/, "")
+  const parts: string[] = []
+  let depth = 0
+  let quote = ""
+  let cur = ""
+  for (const ch of inner) {
+    if (quote) {
+      cur += ch
+      if (ch === quote) quote = ""
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      cur += ch
+      continue
+    }
+    if (ch === "{" || ch === "[") depth += 1
+    if (ch === "}" || ch === "]") depth -= 1
+    if (ch === "," && depth === 0) {
+      parts.push(cur)
+      cur = ""
+      continue
+    }
+    cur += ch
+  }
+  if (cur.trim()) parts.push(cur)
+
+  for (const part of parts) {
+    const i = part.indexOf(":")
+    if (i <= 0) continue
+    const k = part.slice(0, i).trim()
+    const v = part.slice(i + 1).trim()
+    if (!k) continue
+    if (v.startsWith("{")) {
+      for (const [sk, sv] of Object.entries(parseFlowMap(v))) out[`${k}.${sk}`] = sv
+    } else {
+      out[k] = unquote(v)
+    }
+  }
+  return out
+}
+
+/**
+ * 抽出 Clash 配置 `proxies:` 段里的每个节点 → 扁平 map。
+ * 两种写法都支持（机场导出的两种都常见）：
+ *   - flow：  `- {name: 香港, type: vless, server: a.com, port: 443}`
+ *   - block：`- name: 香港` / `  type: vless` / `  server: a.com`
+ * 只读 `proxies:` 段，遇到下一个顶层键（`proxy-groups:` / `rules:`）就停。
+ */
+function parseClashProxies(text: string): Record<string, string>[] {
+  const lines = text.split(/\r?\n/)
+  let start = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (/^proxies\s*:\s*$/.test(lines[i] ?? "")) {
+      start = i
+      break
+    }
+  }
+  if (start < 0) return []
+
+  const entries: Record<string, string>[] = []
+  let cur: Record<string, string> | null = null
+  // 缩进前缀栈：Clash 用嵌套写 ws-opts / reality-opts，扁平化时拼成 `父.子`
+  let prefix = ""
+  let prefixIndent = -1
+
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i] ?? ""
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith("#")) continue
+    const indent = line.length - line.trimStart().length
+    if (indent === 0) break // 回到顶层 → proxies 段结束
+
+    if (trimmed.startsWith("- ")) {
+      if (cur) entries.push(cur)
+      cur = {}
+      prefix = ""
+      prefixIndent = -1
+      const rest = trimmed.slice(2).trim()
+      if (rest.startsWith("{")) {
+        Object.assign(cur, parseFlowMap(rest))
+      } else {
+        const i2 = rest.indexOf(":")
+        if (i2 > 0) {
+          const k = rest.slice(0, i2).trim()
+          const v = rest.slice(i2 + 1).trim()
+          if (!v) {
+            prefix = k
+            prefixIndent = indent
+          } else if (k) {
+            cur[k] = unquote(v)
+          }
+        }
+      }
+      continue
+    }
+
+    if (!cur) continue
+    if (indent <= prefixIndent) {
+      prefix = ""
+      prefixIndent = -1
+    }
+    const i2 = trimmed.indexOf(":")
+    if (i2 <= 0) continue
+    const k = trimmed.slice(0, i2).trim()
+    if (!k) continue
+    const v = trimmed.slice(i2 + 1).trim()
+    const key = prefix ? `${prefix}.${k}` : k
+    if (!v) {
+      prefix = key
+      prefixIndent = indent
+      continue
+    }
+    cur[key] = unquote(v)
+  }
+  if (cur) entries.push(cur)
+  return entries
+}
+
+/**
+ * 把「归一化后的节点字段」拼回一条节点链接。
+ *
+ * 输入统一用 Clash 的字段名（sing-box 的适配器负责翻译过来），
+ * 这样两个来源共用一套拼接逻辑，不会出现「Clash 支持、sing-box 漏字段」的漂移。
+ * 认不出协议、或缺 server/port 时返回 null（调用方会跳过它）。
+ */
+function buildNodeLink(p: Record<string, string>): string | null {
+  const protocol = CLASH_TYPE_TO_PROTOCOL[(p.type ?? "").toLowerCase()]
+  if (!protocol) return null
+  const server = p.server ?? ""
+  const port = p.port ?? ""
+  if (!server || !port) return null
+  const name = p.name ?? ""
+  const tls = /^(true|1|yes)$/i.test(p.tls ?? "")
+
+  const q = new URLSearchParams()
+  if (tls) q.set("security", "tls")
+  const sni = p.servername || p.sni || ""
+  if (sni) q.set("sni", sni)
+  const network = p.network ?? ""
+  if (network && network !== "tcp") q.set("type", network)
+  const path = p["ws-opts.path"] || p["grpc-opts.grpc-service-name"] || ""
+  if (network === "ws" && path) q.set("path", path)
+  const host = p["ws-opts.headers.Host"] || p["ws-opts.headers.host"] || ""
+  if (host) q.set("host", host)
+  if (p.flow) q.set("flow", p.flow)
+  if (p["client-fingerprint"]) q.set("fp", p["client-fingerprint"])
+  if (p.alpn) q.set("alpn", p.alpn)
+  if (/^(true|1)$/i.test(p["skip-cert-verify"] ?? "")) q.set("allowInsecure", "1")
+  if (p.obfs) q.set("obfs", p.obfs)
+  if (p["obfs-password"]) q.set("obfs-password", p["obfs-password"])
+  if (p["reality-opts.public-key"]) {
+    q.set("security", "reality")
+    q.set("pbk", p["reality-opts.public-key"])
+    if (p["reality-opts.short-id"]) q.set("sid", p["reality-opts.short-id"])
+  }
+  const query = q.toString()
+  const suffix = `${query ? `?${query}` : ""}${name ? `#${encodeURIComponent(name)}` : ""}`
+
+  switch (protocol) {
+    case "vless":
+      if (!p.uuid) return null
+      return `vless://${p.uuid}@${server}:${port}${suffix}`
+    case "trojan":
+      if (!p.password) return null
+      return `trojan://${encodeURIComponent(p.password)}@${server}:${port}${suffix}`
+    case "anytls":
+      if (!p.password) return null
+      return `anytls://${encodeURIComponent(p.password)}@${server}:${port}${suffix}`
+    case "hysteria2":
+      return `hysteria2://${encodeURIComponent(p.password ?? "")}@${server}:${port}${suffix}`
+    case "hysteria": {
+      // v1 的认证在 query（auth），没有 userinfo —— 与 parseAuthorityLink 的读法对齐
+      const h = new URLSearchParams()
+      if (p.password) h.set("auth", p.password)
+      if (p.sni) h.set("peer", p.sni)
+      if (p.obfs) h.set("obfs", p.obfs)
+      return `hysteria://${server}:${port}?${h.toString()}${
+        name ? `#${encodeURIComponent(name)}` : ""
+      }`
+    }
+    case "tuic": {
+      const cred = p.uuid ? `${p.uuid}:${p.password ?? ""}` : (p.password ?? "")
+      return `tuic://${cred}@${server}:${port}${suffix}`
+    }
+    case "ss": {
+      const method = p.cipher || p.method || ""
+      if (!method) return null
+      return `ss://${toBase64Utf8(`${method}:${p.password ?? ""}`)}@${server}:${port}${
+        name ? `#${encodeURIComponent(name)}` : ""
+      }`
+    }
+    case "ssr": {
+      const method = p.cipher || p.method || ""
+      if (!method) return null
+      const payload = [
+        server,
+        port,
+        p.protocol || "origin",
+        method,
+        p.obfs || "plain",
+        toBase64UrlUtf8(p.password ?? ""),
+      ].join(":")
+      const ssrQ: string[] = []
+      if (name) ssrQ.push(`remarks=${toBase64UrlUtf8(name)}`)
+      if (p["obfs-param"]) ssrQ.push(`obfsparam=${toBase64UrlUtf8(p["obfs-param"])}`)
+      if (p["protocol-param"]) ssrQ.push(`protoparam=${toBase64UrlUtf8(p["protocol-param"])}`)
+      return `ssr://${toBase64UrlUtf8(`${payload}/?${ssrQ.join("&")}`)}`
+    }
+    case "vmess": {
+      if (!p.uuid) return null
+      const obj: Record<string, string> = {
+        v: "2",
+        ps: name,
+        add: server,
+        port,
+        id: p.uuid,
+        aid: p.alterId || "0",
+        scy: p.scy || p.cipher || "auto",
+        net: network || "tcp",
+        type: "none",
+        tls: tls ? "tls" : "",
+      }
+      if (network === "ws" && path) obj.path = path
+      if (host) obj.host = host
+      if (sni) obj.sni = sni
+      return `vmess://${toBase64Utf8(JSON.stringify(obj))}`
+    }
+    default:
+      return null
+  }
+}
+
+/**
+ * sing-box outbound / sspanel server → Clash 字段名，交给 buildNodeLink 统一拼接。
+ * 只翻译我们真正会用到的字段，认不出的一律丢弃（宁可少一个节点，也不要造错链接）。
+ */
+function structuredObjectToClashKeys(o: Record<string, unknown>): Record<string, string> {
+  const p: Record<string, string> = {}
+  const set = (k: string, v: unknown): void => {
+    if (typeof v === "string" && v.trim()) p[k] = v.trim()
+    else if (typeof v === "number") p[k] = String(v)
+  }
+
+  set("type", o.type)
+  set("name", o.tag ?? o.remarks ?? o.name ?? o.ps)
+  set("server", o.server)
+  set("port", o.server_port ?? o.port)
+  if (!p.port && typeof o.server_ports === "string") {
+    // hysteria2 的端口跳跃（"20000:30000"）：取起始端口，够识别与展示
+    const first = o.server_ports.split(/[-,:]/)[0]
+    if (first) p.port = first
+  }
+  set("uuid", o.uuid ?? o.id)
+  set("password", o.password)
+  set("cipher", o.method ?? o.cipher)
+  set("alterId", o.alter_id ?? o.aid)
+  set("scy", o.security ?? o.scy)
+  set("flow", o.flow)
+  set("sni", o.sni)
+
+  // sspanel 的 servers[] 只有 method/password，没有 type —— 按 ss 处理
+  if (!p.type && (p.cipher || p.method)) p.type = "ss"
+
+  const tls = (o.tls ?? {}) as Record<string, unknown>
+  if (tls.enabled === true) p.tls = "true"
+  else if (o.tls === true) p.tls = "true"
+  set("servername", tls.server_name)
+  if (tls.insecure === true) p["skip-cert-verify"] = "true"
+  if (Array.isArray(tls.alpn)) {
+    p.alpn = tls.alpn.filter((x): x is string => typeof x === "string").join(",")
+  }
+
+  const tr = (o.transport ?? {}) as Record<string, unknown>
+  set("network", tr.type)
+  set("ws-opts.path", tr.path)
+  const headers = (tr.headers ?? {}) as Record<string, unknown>
+  set("ws-opts.headers.Host", headers.Host ?? headers.host)
+
+  const obfs = (o.obfs ?? {}) as Record<string, unknown>
+  if (typeof obfs === "object" && obfs !== null) {
+    set("obfs", obfs.type)
+    set("obfs-password", obfs.password)
+  } else {
+    set("obfs", o.obfs)
+  }
+  // Clash 的 ssr / hysteria v1 用连字符键名
+  set("obfs-param", o["obfs-param"])
+  set("protocol-param", o["protocol-param"])
+  set("auth-str", o["auth-str"])
+  if (!p.password && typeof o["auth-str"] === "string") p.password = o["auth-str"]
+
+  return p
+}
+
+/** 宽容 JSON 解析：不是对象/数组、或解析失败都返回 null */
+function tryParseJson(text: string): unknown {
+  const s = text.trim()
+  if (!s.startsWith("{") && !s.startsWith("[")) return null
+  try {
+    return JSON.parse(s)
+  } catch {
+    return null
+  }
+}
+
+/** 从各种「订阅根对象」里找出节点数组（sing-box outbounds / Clash proxies / sspanel servers） */
+function collectNodeObjects(obj: unknown): Record<string, unknown>[] {
+  const isObj = (x: unknown): x is Record<string, unknown> =>
+    !!x && typeof x === "object" && !Array.isArray(x)
+  if (Array.isArray(obj)) return obj.filter(isObj)
+  if (!isObj(obj)) return []
+  for (const key of ["outbounds", "proxies", "servers", "nodes"]) {
+    const v = obj[key]
+    if (Array.isArray(v)) return v.filter(isObj)
+  }
+  return []
+}
+
+/** 整体 base64 包裹的结构化配置（少数站会这么干） */
+function tryDecodeStructuredBase64(text: string): string | null {
+  const clean = text.replace(/\s/g, "")
+  if (clean.length < 16 || clean.length > 4_000_000) return null
+  if (!/^[A-Za-z0-9+/=_-]+$/.test(clean)) return null
+  const decoded = tryBase64(clean)
+  if (!decoded) return null
+  // 只有「解码出来确实是一份配置」才接受 —— 否则任意 base64 都会被当订阅
+  if (/^\s*proxies\s*:/m.test(decoded)) return decoded
+  const t = decoded.trim()
+  if (t.startsWith("{") || t.startsWith("[")) return decoded
+  return null
+}
+
+/**
+ * 把结构化订阅解析成节点链接数组；认不出则返回空数组（调用方回落逐行解析）。
+ *
+ * ⚠️ 闸门必须严：返回非空就代表「这确实是一份订阅」。所以要么命中
+ * `proxies:` 段，要么解析出的对象里真的有带 server 的节点 —— 一份 HTML
+ * 页面、一个 API 错误 JSON 都过不了这里（`buildNodeLink` 会全部返回 null）。
+ */
+function structuredLinkList(text: string): string[] {
+  const candidates = [text.trim()]
+  const decoded = tryDecodeStructuredBase64(text)
+  if (decoded) candidates.push(decoded)
+
+  for (const cand of candidates) {
+    if (/^\s*proxies\s*:/m.test(cand)) {
+      const links = parseClashProxies(cand)
+        .map(buildNodeLink)
+        .filter((l): l is string => !!l)
+      if (links.length > 0) return links
+    }
+    const obj = tryParseJson(cand)
+    if (obj) {
+      const links = collectNodeObjects(obj)
+        .map((o) => buildNodeLink(structuredObjectToClashKeys(o)))
+        .filter((l): l is string => !!l)
+      if (links.length > 0) return links
+    }
+  }
+  return []
+}
+
 /**
  * 解析订阅文本 → 节点数组。
- * 支持整体 base64（v2board 常见）与逐行 node 链接。
+ *
+ * 支持：整体 base64 的 URI 列表（v2board 常见）、逐行 node 链接、
+ * 以及**结构化订阅**（Clash YAML / sing-box JSON / sspanel JSON）。
+ * 结构化在前 —— 它们不是 URI 列表，逐行解析只会得到一堆 unknown。
  */
 export function parseSubscription(text: string): ProxyNodeInfo[] {
   const trimmed = text.trim()
   if (!trimmed) return []
 
-  const nodes: ProxyNodeInfo[] = []
-
-  const tryDecode = (input: string): string | null => {
+  const tryDecodeUriList = (input: string): string | null => {
     const clean = input.replace(/\s/g, "")
     if (!/^[A-Za-z0-9+/=_-]+$/.test(clean) || clean.length < 8) return null
     const decoded = tryBase64(clean)
@@ -531,9 +1080,10 @@ export function parseSubscription(text: string): ProxyNodeInfo[] {
     return null
   }
 
-  const decodedWhole = tryDecode(trimmed)
-  const source = decodedWhole ?? trimmed
+  const structured = structuredLinkList(trimmed)
+  const source = structured.length > 0 ? structured.join("\n") : (tryDecodeUriList(trimmed) ?? trimmed)
 
+  const nodes: ProxyNodeInfo[] = []
   for (const line of source.split(/\r?\n/)) {
     const l = line.trim()
     if (!l || l.startsWith("#") || l.startsWith("//")) continue
@@ -600,7 +1150,7 @@ async function syncSubscription(
   env: Env,
   row: ProxySubscriptionRow
 ): Promise<{ nodes: ProxyNodeInfo[]; usage: { used: string | null; total: string | null; expire: string | null } }> {
-  const { text, ok } = await fetchSubscriptionText(env, row.url)
+  const { text, ok } = await fetchSubscriptionText(env, row.url, true)
   if (!ok) {
     throw new ApiError(502, "订阅地址无法访问", "PROXY_FETCH_FAILED")
   }
@@ -689,7 +1239,7 @@ export async function detectSubscriptionProfile(
   let text = ""
   let ok = false
   try {
-    const res = await fetchSubscriptionText(env, row.url)
+    const res = await fetchSubscriptionText(env, row.url, true)
     if (res.ok) {
       text = res.text
       ok = true
@@ -719,6 +1269,14 @@ export interface SubscriptionCheck {
   region: string | null
   /** ok=false 时的原因（面向用户，要写得能指导他改） */
   error: string
+  /**
+   * 这次失败是不是「**没能验证**」而不是「确定不可用」。
+   *
+   * 超时 / 网络错误 / 5xx / 429 / 响应体超本站上限 —— 这些只能说明
+   * 「这次没能拿到内容」，**证明不了链接不可用**。调用方（自动审核）
+   * 必须据此转人工，绝不能自动拒绝：误拒一份好订阅，用户只会觉得站点坏了。
+   */
+  uncertain: boolean
 }
 
 /**
@@ -739,47 +1297,67 @@ export async function verifySubscriptionUrls(
 ): Promise<SubscriptionCheck[]> {
   return mapLimit(urls, SUB_CHECK_CONCURRENCY, async (raw) => {
     const url = (raw ?? "").trim()
-    const bad = (error: string): SubscriptionCheck => ({
+    const bad = (error: string, uncertain = false): SubscriptionCheck => ({
       url,
       ok: false,
       nodeCount: 0,
       protocol: null,
       region: null,
       error,
+      uncertain,
     })
 
     try {
       assertPublicHttpUrl(url, "订阅链接")
     } catch (err) {
+      // 链接本身不合法（非 http/https、指向内网）→ 确定性失败，重试也没用
       return bad(err instanceof Error ? err.message : String(err))
     }
 
-    let res: { text: string; ok: boolean; status: number }
-    try {
-      res = await fetchSubscriptionText(env, url)
-    } catch (err) {
-      return bad(
-        `拉取失败：${err instanceof Error ? err.message : String(err)}`
-      )
+    // 抖动重试一次：订阅站偶发 5xx / 连接被重置很常见，一次失败就判死太狠
+    const isTransientStatus = (s: number): boolean => s >= 500 || s === 429 || s === 408
+    let res: { text: string; ok: boolean; status: number } | null = null
+    let lastError = ""
+    for (let attempt = 0; attempt < 2 && !res; attempt++) {
+      try {
+        // ⚠️ withCredentials: false —— 这是**用户提交**的地址（捐献审核路径）。
+        // 绝不能把平台的 PROXY_API_TOKEN 发给它（2026-09-25 审计 P0-3）。
+        const got = await fetchSubscriptionText(env, url, false)
+        if (got.ok || !isTransientStatus(got.status)) res = got
+        else lastError = `HTTP ${got.status}`
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err)
+      }
     }
+    if (!res) {
+      return bad(`拉取失败：${lastError || "请求失败"}`, true)
+    }
+
     if (!res.ok) {
-      return bad(
-        res.status === 413
-          ? "订阅内容超过 5 MB，暂不支持"
-          : `订阅地址无法访问（HTTP ${res.status}）`
-      )
+      // 404/410 = 链接确实没了（确定性）；其余一律按「没能验证」处理 ——
+      // 403/401 很可能是订阅站在拦我们的 User-Agent 或风控，
+      // 413 是**我们自己**的 5 MB 上限，都不能算用户的链接不可用。
+      if (res.status === 404 || res.status === 410) {
+        return bad(`订阅地址不存在（HTTP ${res.status}），链接可能已被删除或过期`)
+      }
+      if (res.status === 413) {
+        return bad("订阅内容超过本站 5 MB 的校验上限，无法自动验证", true)
+      }
+      return bad(`订阅地址返回 HTTP ${res.status}，可能被订阅站拒绝或临时故障`, true)
     }
 
     const nodes = usableNodes(parseSubscription(res.text))
     if (nodes.length === 0) {
+      const looksHtml = /<html[\s>]|<!doctype html/i.test(res.text)
       return bad(
-        "订阅内容里没有解析出任何节点（链接可能已失效，或该订阅用了暂不支持的协议。" +
-          "已支持：vless / vmess / trojan / ss / ssr / anytls / hysteria2 / tuic）"
-      )
+        looksHtml
+          ? "订阅地址返回的是网页而不是节点列表（订阅站可能要求带客户端标识访问，或该链接是落地页）"
+          : "订阅内容里没有解析出任何节点（链接可能已失效，或该订阅用了暂不支持的协议。" +
+              "已支持：vless / vmess / trojan / ss / ssr / anytls / hysteria2 / tuic）")
     }
 
     const { protocol, region } = profileFromNodes(nodes, url)
-    return { url, ok: true, nodeCount: nodes.length, protocol, region, error: "" }
+    return { url, ok: true, nodeCount: nodes.length, protocol, region, error: "", uncertain: false }
   })
 }
 
@@ -788,6 +1366,7 @@ export async function verifySubscriptionUrls(
 /** GET /api/proxy —— 总览：启用状态 + 可见订阅源 + 解析后的节点 */
 export async function getProxyOverview(env: Env, request: Request): Promise<Response> {
   const user = await requireFeatureUser(env, request, "proxy")
+  await guardProxyFetch(env, user.id)
   const settings = await getSettings(env)
   const activated = await isActivated(env, user.id)
 
@@ -888,7 +1467,14 @@ export async function disableProxy(env: Env, request: Request): Promise<Response
  * body: { id }；只允许探活已启用的订阅源。
  */
 export async function checkProxySubscription(env: Env, request: Request): Promise<Response> {
-  await requireFeatureUser(env, request, "proxy")
+  const user = await requireFeatureUser(env, request, "proxy")
+  // ⚠️ 2026-09-25 审计（H8）：补上 isActivated 校验。
+  // 其他用户侧接口（getProxyOverview）都先看 isActivated，这里原先没有 ——
+  // 没启用功能的用户也能借这个接口触发对管理员订阅源的外网探测。
+  if (!(await isActivated(env, user.id))) {
+    throw new ApiError(403, "请先启用代理节点功能", "NOT_ACTIVATED")
+  }
+  await guardProxyFetch(env, user.id)
   const body = (await request.json().catch(() => ({}))) as { id?: string }
   const id = body.id ?? ""
 
@@ -905,7 +1491,7 @@ export async function checkProxySubscription(env: Env, request: Request): Promis
     throw new ApiError(403, "无权访问该订阅源", "FORBIDDEN")
   }
 
-  const result = await probeSubscriptionUrl(env, row.url)
+  const result = await probeSubscriptionUrl(env, row.url, true)
 
   if (result.ok) {
     await env.DB.prepare(
@@ -918,11 +1504,153 @@ export async function checkProxySubscription(env: Env, request: Request): Promis
   return json(result)
 }
 
+/**
+ * POST /api/proxy/latency —— **逐节点**测延迟（TCP 握手）。
+ *
+ * body: `{ id, offset?, limit? }`
+ *   - `id`：订阅源 id。**地址不从客户端拿** —— 服务端自己重新抓该订阅再解析，
+ *     这样入参里就没有任意 host:port，天然没有 SSRF 面。
+ *   - `offset` / `limit`：在「可测速节点」列表里取哪一段。前端按批循环调用
+ *     （平台每次请求最多 6 个并发连接，一次全测完会超限）。
+ *
+ * 返回里每个结果都带**原始节点下标**，前端据此把延迟填回对应那一行。
+ *
+ * ⚠️ 为什么不下「不可用」的结论：握手失败可能是本站 Worker 出网到该节点不通
+ * （Cloudflare 封了部分目标 IP），也可能该节点只放行特定来源。所以失败一律是
+ * 中性的「测不到」。这与捐献审核是同一条原则：**没能验证 ≠ 不可用**。
+ */
+export async function testProxyNodeLatency(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "proxy")
+  if (!(await isActivated(env, user.id))) {
+    throw new ApiError(403, "请先启用代理节点功能", "NOT_ACTIVATED")
+  }
+  // 单独计数：一次「全部测速」会打十几次请求，用 fetch 那个桶（30/分钟）会误伤
+  await guardRateLimit(
+    env,
+    `proxy:latency:user:${user.id}`,
+    60,
+    60,
+    "测速过于频繁，请稍等片刻再试"
+  )
+
+  const body = (await request.json().catch(() => ({}))) as {
+    id?: string
+    offset?: number
+    limit?: number
+  }
+  const id = (body.id ?? "").trim()
+  if (!id) throw new ApiError(400, "缺少订阅源 id", "INVALID_ID")
+
+  const row = await visibleSubscriptions(env).then((list) => list.find((r) => r.id === id))
+  if (!row) throw new ApiError(404, "订阅源不存在或已停用", "NOT_FOUND")
+
+  let text = ""
+  try {
+    // 与订阅同步路径一致：这是**管理员配置**的地址 ⇒ 带凭据
+    const res = await fetchSubscriptionText(env, row.url, true)
+    if (!res.ok) {
+      throw new ApiError(502, `订阅地址无法访问（HTTP ${res.status}）`, "PROXY_FETCH_FAILED")
+    }
+    text = res.text
+  } catch (err) {
+    if (err instanceof ApiError) throw err
+    throw new ApiError(
+      502,
+      `订阅地址抓取失败：${err instanceof Error ? err.message : String(err)}`,
+      "PROXY_FETCH_FAILED"
+    )
+  }
+
+  const nodes = usableNodes(parseSubscription(text))
+  const allTargets = latencyTargets(nodes)
+  const offset = Math.max(0, Math.trunc(Number(body.offset ?? 0)) || 0)
+  const limit = Math.min(
+    MAX_LATENCY_BATCH,
+    Math.max(1, Math.trunc(Number(body.limit ?? MAX_LATENCY_BATCH)) || MAX_LATENCY_BATCH)
+  )
+  const slice = allTargets.slice(offset, offset + limit)
+
+  let results: Awaited<ReturnType<typeof measureNodes>> = []
+  try {
+    results = await measureNodes(slice)
+  } catch (err) {
+    // 平台不支持 connect()（或其它运行时异常）→ 如实说，别让前端以为节点全挂了
+    console.error("节点测速失败:", err)
+    throw new ApiError(503, "服务端暂时无法做节点测速，请稍后再试", "LATENCY_UNAVAILABLE")
+  }
+
+  return json({
+    /** 这个订阅里一共有多少节点 */
+    total: nodes.length,
+    /** 其中有多少个是「能用 TCP 握手测」的（其余是 QUIC/UDP，测不了） */
+    testable: allTargets.length,
+    offset,
+    limit,
+    tested: results.length,
+    results: results.map((r) => ({
+      index: r.index,
+      ok: r.ok,
+      latencyMs: r.latencyMs,
+      reason: r.reason,
+    })),
+  })
+}
+
+/** 每个用户每天最多可以「获取原始订阅链接」的次数 */
+const REVEAL_LIMIT_PER_DAY = 3
+/** 与 rate_limits 的固定窗口语义一致：窗口按 UTC 零点对齐 */
+const REVEAL_WINDOW_SECONDS = 86400
+
+/**
+ * POST /api/proxy/subscriptions/:id/reveal —— 按需下发订阅源原始 URL。
+ *
+ * ⚠️ 2026-09-26 审计（承接 09-25 的 H7）：原先 `GET /api/proxy` 会把每个订阅源的
+ * 原始 URL（内嵌机场服务商的订阅 token）一次性下发给**所有**有 proxy 权限的用户。
+ * 光在前端限制「复制」按钮是没用的 —— 用户开 DevTools 就能从响应里读到全部 URL。
+ * 所以改成：列表接口不再返回 `url`，只在显式获取时下发，并按用户按天限流。
+ */
+export async function revealProxySubscriptionUrl(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "proxy")
+
+  const rl = await hitRateLimit(
+    env,
+    `proxy:reveal:user:${user.id}`,
+    REVEAL_LIMIT_PER_DAY,
+    REVEAL_WINDOW_SECONDS
+  )
+  if (!rl.ok) {
+    throw new ApiError(
+      429,
+      `今天获取订阅链接的次数已用完（每天 ${rl.limit} 次），请明天再试`,
+      "RATE_LIMITED"
+    )
+  }
+
+  // 只允许拿到「启用中」的订阅源，避免用 id 探到已停用 / 已删除的
+  const row = await env.DB.prepare(
+    "SELECT * FROM proxy_subscriptions WHERE id = ? AND enabled = 1"
+  )
+    .bind(id)
+    .first<ProxySubscriptionRow>()
+  if (!row) throw new ApiError(404, "订阅源不存在", "NOT_FOUND")
+
+  return json({
+    id: row.id,
+    url: row.url,
+    /** 今日还可获取的次数（已扣掉本次） */
+    remaining: Math.max(0, rl.limit - rl.count),
+  })
+}
+
 // ---- 管理端 ----
 
 async function requireAdminUser(env: Env, request: Request): Promise<UserRow> {
   const user = await requireUser(env, request)
-  if (user.role !== "admin") {
+  if (user.role !== "admin" && user.role !== "root") {
     throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
   }
   return user
@@ -931,6 +1659,8 @@ async function requireAdminUser(env: Env, request: Request): Promise<UserRow> {
 function toAdminSubscription(row: ProxySubscriptionRow) {
   return {
     ...toPublicSubscription(row),
+    // 管理端要能编辑订阅源，所以必须带上原始 URL（仅管理员接口可见）
+    url: row.url,
     enabled: row.enabled === 1,
     lastError: row.last_error,
     lastSyncedAt: row.last_synced_at,
@@ -977,6 +1707,20 @@ export async function upsertProxySubscription(
   if (!url) throw new ApiError(400, "请填写订阅链接", "INVALID_INPUT")
   if (!/^https?:\/\//i.test(url)) {
     throw new ApiError(400, "订阅链接必须是 http/https 地址", "INVALID_INPUT")
+  }
+  // ⚠️ 2026-09-25 审计（H8）：管理端地址原先只做了 scheme 检查，
+  // 而 detectSubscriptionProfile 会立刻带 Bearer 去 fetch 它 ——
+  // 内网地址（169.254.169.254 / 127.0.0.1 / 10.x）会被直接请求。
+  // 只有管理员能写这条数据、且写操作有审计，所以这是纵深防御而非越权，
+  // 但既然是「服务端请求用户提供的地址」，就该和其他出站路径同一口径。
+  try {
+    assertPublicHttpUrl(url, "订阅链接")
+  } catch (err) {
+    throw new ApiError(
+      400,
+      err instanceof Error ? err.message : "订阅链接不合法",
+      "INVALID_INPUT"
+    )
   }
 
   // 自动识别：协议与地区交给 Worker 抓取订阅后推断。

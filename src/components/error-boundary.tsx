@@ -2,6 +2,7 @@ import * as React from "react"
 import { AlertTriangle, RotateCw } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { isChunkLoadError, reloadOnceForChunkError } from "@/lib/chunk-error"
 
 interface State {
   error: Error | null
@@ -24,6 +25,12 @@ export class ErrorBoundary extends React.Component<
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     // 线上没有错误上报服务，先落到控制台，便于用户反馈时排查
     console.error("[ErrorBoundary]", error, info.componentStack)
+
+    // 部署后旧 chunk 404（React.lazy 失败会走到这里）：自动刷新换到新版本，
+    // 不等用户点按钮。触发了刷新就把错误状态清掉，免得闪一下错误页。
+    if (reloadOnceForChunkError(error)) {
+      this.setState({ error: null })
+    }
   }
 
   render() {
@@ -32,13 +39,15 @@ export class ErrorBoundary extends React.Component<
 
     return (
       <div className="flex min-h-screen items-center justify-center px-6">
-        <div className="w-full max-w-md rounded-xl border bg-card p-6 text-center">
+        <div className="glass-card w-full max-w-md rounded-xl border p-6 text-center">
           <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-destructive/10">
             <AlertTriangle className="h-5 w-5 text-destructive" />
           </div>
           <h1 className="text-base font-semibold">页面出错了</h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
-            页面渲染时遇到异常，可以刷新重试。如果反复出现，请把下面的信息反馈给管理员。
+            {isChunkLoadError(error)
+              ? "站点刚更新过版本，已自动尝试刷新但没恢复。再点一次「刷新页面」即可。"
+              : "页面渲染时遇到异常，可以刷新重试。如果反复出现，请把下面的信息反馈给管理员。"}
           </p>
           <pre className="mt-3 max-h-32 overflow-auto rounded-lg bg-muted/50 p-2.5 text-left text-xs text-muted-foreground">
             {error.message || String(error)}

@@ -15,6 +15,7 @@ import { uuid } from "../crypto"
 import { requireUser, requireFeatureUser, type UserRow } from "../auth"
 import { sendMail, renderMail } from "../mailer"
 import { audit, getSetting, getSettings } from "../settings"
+import { isFrpAuthMode } from "../frp-config"
 import type { Env } from "../env"
 
 const MAX_TUNNELS = 20
@@ -36,6 +37,12 @@ interface FrpNodeRow {
   status: string
   status_note: string | null
   status_updated_at: string | null
+  /** 鉴权方式：none | token | token_user | custom（迁移 0054） */
+  auth_mode: string | null
+  /** 参数化后的配置模板（迁移 0054；空则用内置生成器） */
+  config_template: string | null
+  /** 来源捐献（迁移 0054；手工建节点为 NULL） */
+  source_donation_id: string | null
 }
 
 interface FrpApplicationRow {
@@ -59,6 +66,24 @@ function authTokenOf(nodes: FrpNodeRow[], nodeId: string): string | null {
   return nodes.find((n) => n.id === nodeId)?.auth_token ?? null
 }
 
+/**
+ * 该节点的鉴权方式**是否需要「每用户账号 + 密码」**。
+ *
+ *   `token_user` — 全局 token + frps 鉴权插件：需要。密码就是 `metadatas.token`，
+ *                  管理员还要拿同样的值去 frps-panel 建号。
+ *   `custom`     — 第三方 / 自定义插件，字段不可预知：**保守当作需要**。
+ *   `token`      — 服务端只有一个全局 `auth.token`，没有按用户区分的账号：**不需要**。
+ *   `none`       — 完全无鉴权：**不需要**。
+ *
+ * ⚠️ 为什么必须区分（2026-09-30 站长反馈）：不需要账号的节点如果照样强制填密码，
+ *   用户只能凭空编一个**永远用不到**的密码；管理员收到的通知里还会写着
+ *   「请在 frps-panel 用同样的值建号」—— 等于骗管理员去建一个根本没有用的号。
+ *   tangwz 那台全局 authtoken 的节点就是这么把人卡住的。
+ */
+function needsUserAccount(authMode: string): boolean {
+  return authMode === "token_user" || authMode === "custom"
+}
+
 /** 对外暴露的节点信息：**不含** auth.token（那是 frps 服务端密钥） */
 function toPublicNode(row: FrpNodeRow) {
   return {
@@ -75,6 +100,7 @@ function toPublicNode(row: FrpNodeRow) {
     status: row.status || "unknown",
     statusNote: row.status_note,
     statusUpdatedAt: row.status_updated_at,
+    authMode: row.auth_mode || "token",
   }
 }
 
@@ -252,6 +278,12 @@ export async function getFrpOverview(env: Env, request: Request): Promise<Respon
 
   const activated = await isActivated(env, user.id)
 
+  // 每个节点的安全配置模板（已参数化、剥掉个人凭据），供前端渲染 config.toml
+  const templates: Record<string, string> = {}
+  for (const n of nodes.results ?? []) {
+    if (n.config_template) templates[n.id] = n.config_template
+  }
+
   return json({
     featureEnabled: settings.frp_enabled === "1",
     /** 用户是否已手动启用（与网盘/中转站一致：启用后才显示功能界面） */
@@ -278,6 +310,11 @@ export async function getFrpOverview(env: Env, request: Request): Promise<Respon
       configAuthToken:
         a.status === "approved"
           ? authTokenOf(nodes.results ?? [], String(a.node_id))
+          : null,
+      // 配置模板（已参数化、剥掉捐献者个人凭据）；空则前端用内置生成器
+      configTemplate:
+        a.status === "approved"
+          ? (templates[String(a.node_id)] ?? null)
           : null,
     })),
     myPorts,
@@ -386,8 +423,9 @@ export async function applyFrp(env: Env, request: Request): Promise<Response> {
     .first<FrpNodeRow>()
   if (!node) throw new ApiError(404, "节点不存在或已停用", "NOT_FOUND")
 
-  // frp 账号名：默认用本站用户名，允许自定义但需合法
-  const frpUser = (body.frpUser ?? user.username).trim()
+  // frp 账号名：留空就用本站用户名（前端在免账号的节点上会隐藏这两个输入框，
+  // 传过来的是空串 —— 所以这里用 `||` 而不是 `??`，空串也要回落默认值）
+  const frpUser = (body.frpUser || user.username).trim()
   if (!/^[A-Za-z0-9_-]{2,32}$/.test(frpUser)) {
     throw new ApiError(
       400,
@@ -396,9 +434,27 @@ export async function applyFrp(env: Env, request: Request): Promise<Response> {
     )
   }
 
-  const frpPassword = body.frpPassword ?? ""
-  if (frpPassword.length < 6 || frpPassword.length > 64) {
-    throw new ApiError(400, "密码长度需在 6-64 位之间", "WEAK_PASSWORD")
+  // 密码只有「需要每用户账号」的节点才要（见 needsUserAccount）：
+  //   token / none 模式下只有一个服务端全局密钥，没有按用户区的账号，
+  //   密码纯粹是多余的 —— 一律存空串，生成的 config.toml 会把
+  //   `user` / `metadatas.token` 两行自动删掉（前端 buildConfig 的 emptyKeys）。
+  const needAccount = needsUserAccount(node.auth_mode ?? "")
+  let frpPassword = ""
+  if (needAccount) {
+    frpPassword = body.frpPassword ?? ""
+    if (frpPassword.length < 6 || frpPassword.length > 64) {
+      throw new ApiError(400, "密码长度需在 6-64 位之间", "WEAK_PASSWORD")
+    }
+    // ⚠️ 与 frps-panel 的建号规则对齐：密码只能 ASCII 可打印字符、不含空格，
+    // 只允许 `_!@#$%^&*()` 这些半角符号。否则本站放过了、管理员去面板建号时
+    // 才发现不合规（中文全角「！」这类会在面板侧被拒），得回头让用户改。
+    if (!/^[A-Za-z0-9_!@#$%^&*().-]+$/.test(frpPassword)) {
+      throw new ApiError(
+        400,
+        "密码不能包含空格或中文等字符，允许字母、数字和这些符号：_!@#$%^&*().-",
+        "INVALID_FRP_PASSWORD"
+      )
+    }
   }
 
   // 同一节点不允许有未处理的重复申请
@@ -445,7 +501,9 @@ export async function applyFrp(env: Env, request: Request): Promise<Response> {
     env,
     user.id,
     "frp.apply",
-    `申请 ${node.name} 节点，账号 ${frpUser}，端口 ${ports.join(",")}`
+    `申请 ${node.name} 节点，` +
+      (needAccount ? `账号 ${frpUser}，` : "免账号（该节点只用服务端全局 token），") +
+      `端口 ${ports.join(",")}`
   )
 
   // 邮件通知管理员（失败不阻断申请）
@@ -455,6 +513,7 @@ export async function applyFrp(env: Env, request: Request): Promise<Response> {
     frpUser,
     // 密码即 metadatas.token：管理员要在 frps-panel 里用同样的值建号
     frpPassword,
+    needAccount,
     ports,
     tunnels,
     notifyEmail,
@@ -472,6 +531,8 @@ async function notifyAdmin(
     nodeName: string
     frpUser: string
     frpPassword: string
+    /** 该节点是否需要「每用户账号」；false 时通知里不提建号 */
+    needAccount: boolean
     ports: number[]
     tunnels: Tunnel[]
     notifyEmail: string
@@ -487,8 +548,14 @@ async function notifyAdmin(
     const { text, html } = renderMail("新的内网穿透申请", [
       `用户：${info.username}`,
       `节点：${info.nodeName}`,
-      `账号：${info.frpUser}`,
-      `密码（即 metadatas.token，请在 frps-panel 用同样的值建号）：${info.frpPassword}`,
+      // 免账号的节点（全局 token / 无鉴权）不要提「账号」「去建号」——
+      // 那会让管理员去 frps-panel 建一个根本用不到的号。
+      info.needAccount
+        ? `账号：${info.frpUser}`
+        : `账号：不需要（该节点只用服务端全局 auth.token）`,
+      info.needAccount
+        ? `密码（即 metadatas.token，请在 frps-panel 用同样的值建号）：${info.frpPassword}`
+        : "",
       `端口：${info.ports.join("、")}`,
       `隧道：${info.tunnels.length} 条`,
       `结果通知邮箱：${info.notifyEmail}`,
@@ -533,7 +600,8 @@ export async function listFrpApplications(
   const status = url.searchParams.get("status") ?? "pending"
 
   const rows = await env.DB.prepare(
-    `SELECT a.*, u.username AS site_username, n.name AS node_name
+    `SELECT a.*, u.username AS site_username, n.name AS node_name,
+            n.auth_mode AS node_auth_mode
        FROM frp_applications a
        JOIN users u ON a.user_id = u.id
        JOIN frp_nodes n ON a.node_id = n.id
@@ -552,6 +620,8 @@ export async function listFrpApplications(
       nodeName: a.node_name,
       frpUser: a.frp_user,
       frpPassword: a.frp_password,
+      /** 是否需要「每用户账号」——false 时前端不该展示密码、也不提要建号 */
+      needAccount: needsUserAccount(String(a.node_auth_mode ?? "")),
       ports: parseJsonArray<number>(a.ports as string, []),
       tunnels: parseJsonArray<Tunnel>(a.tunnels as string, []),
       notifyEmail: a.notify_email,
@@ -657,6 +727,49 @@ export async function reviewFrpApplication(
   return json({ ok: true, status: approve ? "approved" : "rejected" })
 }
 
+/**
+ * POST /api/admin/frp/review-revoke —— 撤销已审核的申请，回到待审核。
+ *
+ * 批准时已经占用了端口（写进 frp_ports），撤销要对称地把这些占用删掉，
+ * 否则这些端口会被永久占着、别人再也选不到。
+ * 只允许从 approved/rejected 撤销；pending 本来就待审，无需撤销。
+ */
+export async function revokeFrpApplication(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const admin = await requireAdminUser(env, request)
+  const body = (await request.json()) as { id?: string }
+
+  const app = await env.DB.prepare(
+    `SELECT a.*, u.username AS site_username
+       FROM frp_applications a
+       JOIN users u ON a.user_id = u.id
+      WHERE a.id = ?`
+  )
+    .bind(body.id ?? "")
+    .first<FrpApplicationRow & { site_username: string }>()
+  if (!app) throw new ApiError(404, "申请不存在", "NOT_FOUND")
+  if (app.status === "pending") {
+    throw new ApiError(409, "该申请本就待审核", "INVALID_STATE")
+  }
+
+  await env.DB.batch([
+    // 释放端口占用
+    env.DB.prepare("DELETE FROM frp_ports WHERE application_id = ?").bind(app.id),
+    // 回到待审核，清空审核痕迹
+    env.DB.prepare(
+      `UPDATE frp_applications
+          SET status = 'pending', review_note = NULL, reviewed_by = NULL, reviewed_at = NULL
+        WHERE id = ?`
+    ).bind(app.id),
+  ])
+
+  await audit(env, admin.id, "frp.revoke", `${app.site_username} 的申请撤销（${app.node_id}）`)
+
+  return json({ ok: true, status: "pending" })
+}
+
 /** 给申请人发结果邮件 */
 async function notifyApplicant(
   env: Env,
@@ -666,13 +779,28 @@ async function notifyApplicant(
   ports: number[]
 ): Promise<void> {
   const tunnels = parseJsonArray<Tunnel>(app.tunnels, [])
+
+  // 是否需要「每用户账号」由**节点的鉴权方式**决定（见 needsUserAccount）：
+  // 免账号的节点（全局 token / 无鉴权）不要在邮件里写账号密码、更不要提
+  // metadatas.token —— 那会让申请人以为还得去建号，实际配置里根本没有这两行。
+  const nodeRow = approved
+    ? await env.DB.prepare("SELECT auth_mode FROM frp_nodes WHERE id = ?")
+        .bind(app.node_id)
+        .first<{ auth_mode: string }>()
+    : null
+  const needAccount = needsUserAccount(nodeRow?.auth_mode ?? "")
+
   const lines = approved
     ? [
         `节点：${app.node_name}`,
-        `账号：${app.frp_user}`,
-        `密码：${app.frp_password}`,
+        ...(needAccount
+          ? [
+              `账号：${app.frp_user}`,
+              `密码：${app.frp_password}`,
+              `metadatas.token（即你申请时填的密码）：${app.frp_password}`,
+            ]
+          : ["鉴权：该节点只用服务端全局 auth.token，不需要账号密码。"]),
         `可用端口：${ports.join("、")}`,
-        `metadatas.token（即你申请时填的密码）：${app.frp_password}`,
         `隧道：${tunnels.map((t) => `${t.name}(${t.type} ${t.remotePort}→${t.localPort})`).join("、") || "无"}`,
         note ? `管理员备注：${note}` : "",
         "请到 Doulor Cloud 的内网穿透页面生成 config.toml，并替换到 frp 核心目录后启动。",
@@ -703,10 +831,10 @@ async function notifyApplicant(
   }
 }
 
-/** 管理员校验（与 handlers/admin.ts 同口径） */
+/** 管理员校验（与 handlers/admin.ts 同口径，root 也放行） */
 async function requireAdminUser(env: Env, request: Request): Promise<UserRow> {
   const user = await requireUser(env, request)
-  if (user.role !== "admin") {
+  if (user.role !== "admin" && user.role !== "root") {
     throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
   }
   return user
@@ -732,6 +860,7 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
     note?: string
     status?: string
     statusNote?: string
+    authMode?: string
   }
 
   const name = (body.name ?? "").trim()
@@ -746,6 +875,7 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
   }
   const maxPorts = Math.min(Math.max(Math.trunc(Number(body.maxPorts ?? 5)), 1), 50)
   const serverPort = Math.trunc(Number(body.serverPort ?? 7000))
+  const authMode = isFrpAuthMode(body.authMode) ? body.authMode : "token"
   const now = new Date().toISOString()
 
   const values = {
@@ -764,6 +894,7 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
       ? (body.status as string)
       : "unknown",
     statusNote: (body.statusNote ?? "").trim() || null,
+    authMode,
   }
 
   if (body.id) {
@@ -771,14 +902,14 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
       `UPDATE frp_nodes SET name=?, region=?, server_addr=?, server_port=?,
               auth_token=?, port_min=?, port_max=?, max_ports=?,
               enabled=?, sort_order=?, note=?, status=?, status_note=?,
-              status_updated_at=?, updated_at=?
+              status_updated_at=?, auth_mode=?, updated_at=?
         WHERE id=?`
     )
       .bind(
         values.name, values.region, values.serverAddr, values.serverPort,
         values.authToken, values.portMin, values.portMax,
         values.maxPorts, values.enabled, values.sortOrder, values.note,
-        values.status, values.statusNote, now, now,
+        values.status, values.statusNote, now, values.authMode, now,
         body.id
       )
       .run()
@@ -790,14 +921,14 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
     `INSERT INTO frp_nodes
        (id, name, region, server_addr, server_port, auth_token,
         port_min, port_max, max_ports, enabled, sort_order, note,
-        status, status_note, status_updated_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        status, status_note, status_updated_at, auth_mode, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       id, values.name, values.region, values.serverAddr, values.serverPort,
       values.authToken, values.portMin, values.portMax,
       values.maxPorts, values.enabled, values.sortOrder, values.note,
-      values.status, values.statusNote, now, now, now
+      values.status, values.statusNote, now, values.authMode, now, now
     )
     .run()
 
@@ -820,6 +951,8 @@ export async function listFrpNodes(env: Env, request: Request): Promise<Response
     nodes: (rows.results ?? []).map((n) => ({
       ...toPublicNode(n),
       authToken: n.auth_token,
+      configTemplate: n.config_template,
+      sourceDonationId: n.source_donation_id,
       usedPorts: usedMap[n.id] ?? 0,
       statusNote: n.status_note,
     })),

@@ -128,7 +128,15 @@ function toHex(bytes: Uint8Array): string {
     .join("")
 }
 
-function timingSafeEqual(a: string, b: string): boolean {
+/**
+ * 恒定时间字符串比较。
+ *
+ * 2026-09-25 审计（L18）改为导出：`oauth-provider.ts` 的 `verifyClientSecret`
+ * 原先用 `===` 比 SHA-256 十六进制摘要，注释还写着「时间安全比较由哈希后比对天然满足」——
+ * 这个说法是**错的**：`===` 在第一个不同字符处就短路，仍然泄露「前缀匹配了多少位」。
+ * 摘要不可逆使得它实际不可利用，但既然这个函数本来就在仓库里，没有理由不复用。
+ */
+export function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false
   let diff = 0
   for (let i = 0; i < a.length; i++) {

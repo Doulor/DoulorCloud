@@ -4,25 +4,187 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Doulor Cloud — 一站式云端平台，域名与服务开箱即用。" />
-    <link rel="icon" type="image/png" href="/favicon.png" />
-    <link rel="apple-touch-icon" href="/favicon.png" />
+    <link rel="icon" type="image/png" href="/favicon.png?v=2" />
+    <link rel="apple-touch-icon" href="/favicon.png?v=2" />
     <title>Doulor Cloud</title>
+
+    <!--
+      尽早确定主题，必须在首帧之前执行。
+      原先是靠 React 的 useEffect 给 <html> 打 dark 类，那要等 1.6 MB 的 JS 下载执行完 ——
+      深色模式的用户会先看到一帧白底（开屏动画恰好在这段时间里，所以特别明显）。
+      规则与 hooks/use-theme.ts 保持一致：存过的优先，否则跟随系统。
+    -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem("doulor-theme")
+          var prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches
+          var dark = saved === "dark" || ((!saved || saved === "system") && prefersDark)
+          document.documentElement.classList.toggle("dark", dark)
+        } catch (e) {
+          /* 隐私模式下 localStorage 可能抛错；拿不到就按浅色走，不阻塞渲染 */
+        }
+      })()
+    </script>
 
     <!-- Open Graph：分享到 QQ / 微信 / Telegram 等时渲染的链接卡片 -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Doulor Cloud" />
     <meta property="og:title" content="Doulor Cloud — 一站式云端平台" />
     <meta property="og:description" content="域名、邮箱、网盘、AI 等，一个账号开箱即用。" />
-    <meta property="og:image" content="https://cloud.doulor.cn/favicon.png" />
+    <meta property="og:image" content="https://cloud.doulor.cn/favicon.png?v=2" />
     <meta property="og:url" content="https://cloud.doulor.cn" />
     <!-- Twitter/X 卡片兼容（也回退用 og 标签） -->
     <meta name="twitter:card" content="summary" />
     <meta name="twitter:title" content="Doulor Cloud — 一站式云端平台" />
     <meta name="twitter:description" content="域名、邮箱、网盘、AI 等，一个账号开箱即用。" />
-    <meta name="twitter:image" content="https://cloud.doulor.cn/favicon.png" />
+    <meta name="twitter:image" content="https://cloud.doulor.cn/favicon.png?v=2" />
+
+    <!--
+      开屏动画的样式。刻意内联在这里、而不是放进 src/index.css：
+      这段 HTML 在 <body> 里，浏览器一解析到就渲染，不必等 JS 下载执行
+      （线上 vendor 包有 1.6 MB，等 React 挂载要一两秒 —— 那时页面都出来了，再盖一层就没意义了）。
+      只在整页加载 / 刷新时出现一次：SPA 路由切换不会重新加载本文件，所以不需要任何额外判断。
+      云用的是站上同一个图标（lucide Cloud），放大到 160px、不带外框。
+    -->
+    <style>
+      @keyframes boot-splash-draw {
+        to {
+          stroke-dashoffset: 0;
+        }
+      }
+      @keyframes boot-splash-name {
+        0% {
+          opacity: 0;
+        }
+        11% {
+          opacity: 1;
+        }
+        64% {
+          opacity: 1;
+        }
+        100% {
+          opacity: 0;
+        }
+      }
+      @keyframes boot-splash-out {
+        from {
+          opacity: 1;
+          transform: scale(1);
+        }
+        to {
+          opacity: 0;
+          transform: scale(1.5);
+        }
+      }
+      @keyframes boot-splash-bg-out {
+        to {
+          opacity: 0;
+        }
+      }
+      .splash {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      /* ⚠️ 这里刻意用写死的颜色、不用 var(--background)：
+         开屏必须在 CSS 文件下载完之前就能正确渲染，而变量定义在按需加载的样式表里，
+         否则会回落到 fallback —— 深色模式下就是「白底一闪」。
+         深浅两套值通过上面的 html.dark 切换；数值与 src/index.css 的
+         --background / --foreground 一致（浅色 oklch(1 0 0) / oklch(0.145 0 0)，
+         深色反之）。 */
+      .splash-bg {
+        position: absolute;
+        inset: 0;
+        background: #ffffff;
+        animation: boot-splash-bg-out 0.3s ease 0.94s both;
+      }
+      html.dark .splash-bg {
+        background: #0a0a0a;
+      }
+      .splash-wrap {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 22px;
+      }
+      .splash-cloud {
+        color: #0a0a0a;
+        animation: boot-splash-out 0.45s cubic-bezier(0.4, 0, 0.2, 1) 0.87s both;
+      }
+      html.dark .splash-cloud {
+        color: #fafafa;
+      }
+      .splash-cloud svg {
+        width: 160px;
+        height: 160px;
+        overflow: visible;
+      }
+      /* 55.39 是这条 path 的实测长度（getTotalLength）。写大了会「画完了还在空走」，写小了会画不满。 */
+      .splash-cloud path {
+        stroke-dasharray: 55.39;
+        stroke-dashoffset: 55.39;
+        animation: boot-splash-draw 0.72s cubic-bezier(0.3, 0.4, 0.6, 0.8) both;
+      }
+      .splash-name {
+        font-size: 30px;
+        font-weight: 500;
+        letter-spacing: -0.02em;
+        color: #0a0a0a;
+        animation: boot-splash-name 1.36s ease both;
+      }
+      html.dark .splash-name {
+        color: #fafafa;
+      }
+      @media (max-width: 480px) {
+        .splash-cloud svg {
+          width: 112px;
+          height: 112px;
+        }
+        .splash-name {
+          font-size: 24px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .splash {
+          display: none;
+        }
+      }
+    </style>
   </head>
   <body>
+    <!-- 开屏动画本体：不经过 React，页面一解析就显示 -->
+    <div class="splash" id="boot-splash" aria-hidden="true">
+      <div class="splash-bg"></div>
+      <div class="splash-wrap">
+        <div class="splash-cloud">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+          </svg>
+        </div>
+        <div class="splash-name">Doulor Cloud</div>
+      </div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      // 动画播完（1.32s）就从 DOM 里摘掉：虽然那时已经全透明，但留着会挡住鼠标点击。
+      setTimeout(function () {
+        var el = document.getElementById("boot-splash");
+        if (el) el.remove();
+      }, 1500);
+    </script>
   </body>
 </html>

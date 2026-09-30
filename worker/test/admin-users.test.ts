@@ -8,9 +8,10 @@
 //   1. 列表只回开通状态，且判定口径与各 handler 的 isActivated 一致
 //      （有记录 **且** enabled=1，名片以 published=1 为准）；
 //   2. 详情带上模块用量、额度与最近活动，供弹窗渲染。
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, afterEach, vi } from "vitest"
 import { env } from "cloudflare:workers"
 import { makeUser, authRequest, fetchSelf } from "./helpers"
+import { resetAdminCredentialCache } from "../src/newapi-client"
 
 interface ListUser {
   username: string
@@ -249,23 +250,16 @@ describe("PUT /api/admin/users/:username —— 新增的可编辑项", () => {
     expect(user.notifyEnabled).toBe(false)
   })
 
-  it("切换角色 admin / user", async () => {
-    const admin = await makeUser({ role: "admin" })
+  it("切换角色 admin / user（root 专属）", async () => {
+    const root = await makeUser({ role: "root" })
     const u = await makeUser()
-    await put(admin, u.username, { role: "admin" })
-    let body = await detail(admin, u.username)
+    await put(root, u.username, { role: "admin" })
+    let body = await detail(root, u.username)
     expect((body.user as { role: string }).role).toBe("admin")
 
-    await put(admin, u.username, { role: "user" })
-    body = await detail(admin, u.username)
+    await put(root, u.username, { role: "user" })
+    body = await detail(root, u.username)
     expect((body.user as { role: string }).role).toBe("user")
-  })
-
-  it("主管理员不可改", async () => {
-    const admin = await makeUser({ role: "admin" })
-    await makeUser({ username: "doulor" })
-    expect((await put(admin, "doulor", { nickname: "换个名" })).status).toBe(400)
-    expect((await put(admin, "doulor", { role: "user" })).status).toBe(400)
   })
 
   it("只改昵称不会顺带清掉权限（COALESCE 语义）", async () => {
@@ -277,5 +271,256 @@ describe("PUT /api/admin/users/:username —— 新增的可编辑项", () => {
     const user = body.user as { permissions: Record<string, boolean> }
     expect(user.permissions.r2).toBe(false)
     expect(user.permissions.ai).toBe(true)
+  })
+})
+
+// ---- 封禁/解封联动 NewAPI 账户（2026-09-25 新增）----
+//
+// 需求：技术封禁 cloud 账户时，连带 disable 他在 NewAPI 里的账户（API Key 立即失效），
+// 解封时 enable 回来。这里锁定三条关键语义：
+//   1. 封禁 → 调 NewAPI manage{action:disable}；解封 → enable（对称）
+//   2. 只改昵称/权限（status 没变）→ 不触发任何 NewAPI 调用
+//   3. NewAPI 调用失败 → cloud 侧封禁照常生效（不回滚、不抛错）
+
+describe("封禁/解封联动 NewAPI 账户", () => {
+  const BASE = "https://api.doulor.cn"
+
+  let restore: (() => void) | null = null
+  let manageCalls: Array<{ body: Record<string, unknown> }> = []
+
+  function stubNewApi(opts: { failManage?: boolean } = {}) {
+    const original = globalThis.fetch
+    manageCalls = []
+    const stub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (url.startsWith(BASE)) {
+        if (url.includes("/api/user/manage")) {
+          if (opts.failManage) {
+            return new Response(JSON.stringify({ success: false, message: "上游拒绝" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            })
+          }
+          manageCalls.push({ body: JSON.parse((init?.body as string) ?? "{}") })
+          return new Response(JSON.stringify({ success: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        }
+        return new Response(JSON.stringify({ success: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return original(input as RequestInfo, init)
+    }) as unknown as typeof fetch
+    globalThis.fetch = stub
+    restore = () => {
+      globalThis.fetch = original
+    }
+  }
+
+  afterEach(() => {
+    restore?.()
+    restore = null
+    resetAdminCredentialCache()
+    vi.restoreAllMocks()
+  })
+
+  /** 给用户塞一条 newapi_accounts，模拟「已开通中转站」 */
+  async function seedAccount(userId: string, newapiUserId: number, username: string) {
+    await env.DB.prepare(
+      `INSERT INTO newapi_accounts
+         (user_id, newapi_user_id, username, email, enc_token, group_name, quota, used_quota, request_count, synced_at, created_at)
+       VALUES (?, ?, ?, ?, 'enc', 'default', 0, 0, 0, NULL, ?)`
+    )
+      .bind(userId, newapiUserId, username, `${username}@doulor.cn`, new Date().toISOString())
+      .run()
+  }
+
+  async function put(admin: { cookie: string }, username: string, payload: unknown) {
+    return fetchSelf(
+      authRequest(admin, `/api/admin/users/${username}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+    )
+  }
+
+  it("封禁 → 调 NewAPI disable", async () => {
+    const admin = await makeUser({ role: "admin" })
+    const u = await makeUser()
+    await seedAccount(u.id, 5001, u.username)
+    stubNewApi()
+
+    const res = await put(admin, u.username, { status: "suspended" })
+    expect(res.status).toBe(200)
+    expect(manageCalls).toHaveLength(1)
+    expect(manageCalls[0].body).toMatchObject({ id: 5001, action: "disable" })
+  })
+
+  it("解封 → 调 NewAPI enable（对称）", async () => {
+    const admin = await makeUser({ role: "admin" })
+    const u = await makeUser()
+    await seedAccount(u.id, 5002, u.username)
+    stubNewApi()
+
+    await put(admin, u.username, { status: "suspended" })
+    await put(admin, u.username, { status: "active" })
+    expect(manageCalls).toHaveLength(2)
+    expect(manageCalls[0].body.action).toBe("disable")
+    expect(manageCalls[1].body.action).toBe("enable")
+  })
+
+  /**
+   * 「按用户名对齐」这条分支（`POST /api/admin/newapi/sync-permissions`）。
+   *
+   * 只验证「范围收窄 + SQL 绑定 + 响应形状」：传一个不存在的用户名时，
+   * 查询返回 0 行 ⇒ 一个 NewAPI 请求都不该发（这也是它能安全用于单用户修复的原因 ——
+   * 全量同步会逐个用户调 NewAPI，线上 170+ 个账号直接撞满 subrequest 上限）。
+   * 真正的「启用被禁用账号」由线上对 pillbox 的修复验证。
+   */
+  it("按用户名对齐：只查这一个用户，查不到就不发任何请求", async () => {
+    const admin = await makeUser({ role: "admin" })
+    stubNewApi()
+
+    const res = await fetchSelf(
+      authRequest(admin, "/api/admin/newapi/sync-permissions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: "no-such-user-xyz" }),
+      })
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json<{
+      username: string | null
+      enabled: number
+      disabled: number
+      removedOrphans: number
+      errors: string[]
+    }>()
+    expect(body.username).toBe("no-such-user-xyz")
+    expect(body.enabled).toBe(0)
+    expect(body.disabled).toBe(0)
+    expect(body.removedOrphans).toBe(0)
+    expect(body.errors).toEqual([])
+    expect(manageCalls).toHaveLength(0)
+  })
+
+  it("只改昵称（status 未变）→ 不触发任何 NewAPI 调用", async () => {
+    const admin = await makeUser({ role: "admin" })
+    const u = await makeUser()
+    await seedAccount(u.id, 5003, u.username)
+    stubNewApi()
+
+    await put(admin, u.username, { nickname: "改名" })
+    expect(manageCalls).toHaveLength(0)
+  })
+
+  it("没有 NewAPI 账户的用户封禁 → 静默跳过（不报错）", async () => {
+    const admin = await makeUser({ role: "admin" })
+    const u = await makeUser() // 不开通 NewAPI
+    stubNewApi()
+
+    const res = await put(admin, u.username, { status: "suspended" })
+    expect(res.status).toBe(200)
+    expect(manageCalls).toHaveLength(0)
+  })
+
+  it("NewAPI 调用失败 → cloud 封禁照常生效，不抛错", async () => {
+    const admin = await makeUser({ role: "admin" })
+    const u = await makeUser()
+    await seedAccount(u.id, 5004, u.username)
+    stubNewApi({ failManage: true })
+
+    const res = await put(admin, u.username, { status: "suspended" })
+    // cloud 侧封禁是主操作，必须成功返回
+    expect(res.status).toBe(200)
+
+    // 库里 status 已真的改成 suspended（证明没被 NewAPI 失败回滚）
+    const row = await env.DB.prepare("SELECT status FROM users WHERE id = ?")
+      .bind(u.id)
+      .first<{ status: string }>()
+    expect(row?.status).toBe("suspended")
+  })
+})
+
+// ---- root（站长）角色权限边界（2026-09-25 新增）----
+//
+// root 是凌驾于 admin 的角色：拥有 admin 全部权限，但 admin 无法修改/删除 root，
+// 且只有 root 能变更角色。这里锁定这些边界，防止以后有人「顺手」把 root 当普通 admin 处理。
+
+describe("root（站长）角色权限边界", () => {
+  /** 造一个 root + 一个普通 admin，方便对比 */
+  async function seedRoot(): Promise<{ root: { cookie: string; username: string } }> {
+    const root = await makeUser({ role: "root", username: `root_${Math.random().toString(36).slice(2, 8)}` })
+    return { root }
+  }
+
+  async function put(operator: { cookie: string }, username: string, payload: unknown) {
+    return fetchSelf(
+      authRequest(operator, `/api/admin/users/${username}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+    )
+  }
+
+  async function del(operator: { cookie: string }, username: string) {
+    return fetchSelf(
+      authRequest(operator, `/api/admin/users/${username}`, { method: "DELETE" })
+    )
+  }
+
+  it("admin 不能修改 root 的任何字段（昵称）", async () => {
+    const { root } = await seedRoot()
+    const admin = await makeUser({ role: "admin" })
+    expect((await put(admin, root.username, { nickname: "篡改" })).status).toBe(403)
+  })
+
+  it("admin 不能封禁 root", async () => {
+    const { root } = await seedRoot()
+    const admin = await makeUser({ role: "admin" })
+    expect((await put(admin, root.username, { status: "suspended" })).status).toBe(403)
+  })
+
+  it("admin 不能把 root 降为普通用户", async () => {
+    const { root } = await seedRoot()
+    const admin = await makeUser({ role: "admin" })
+    expect((await put(admin, root.username, { role: "user" })).status).toBe(403)
+  })
+
+  it("admin 不能删除 root", async () => {
+    const { root } = await seedRoot()
+    const admin = await makeUser({ role: "admin" })
+    expect((await del(admin, root.username)).status).toBe(403)
+  })
+
+  it("admin 不能变更任何人的角色（不能互提/降级）", async () => {
+    const admin = await makeUser({ role: "admin" })
+    const u = await makeUser()
+    // admin 想把普通用户提为 admin → 被拒
+    expect((await put(admin, u.username, { role: "admin" })).status).toBe(403)
+    // admin 想把另一个 admin 降级 → 也被拒
+    const admin2 = await makeUser({ role: "admin" })
+    expect((await put(admin, admin2.username, { role: "user" })).status).toBe(403)
+  })
+
+  it("root 可以提别人为 admin / 撤销 admin", async () => {
+    const { root } = await seedRoot()
+    const u = await makeUser()
+    expect((await put(root, u.username, { role: "admin" })).status).toBe(200)
+
+    const admin = await makeUser({ role: "admin" })
+    expect((await put(root, admin.username, { role: "user" })).status).toBe(200)
+  })
+
+  it("root 角色不可被变更（即使是 root 自己也不能把另一个 root 降级）", async () => {
+    const { root } = await seedRoot()
+    const root2 = await makeUser({ role: "root" })
+    expect((await put(root, root2.username, { role: "user" })).status).toBe(403)
   })
 })

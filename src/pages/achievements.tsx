@@ -1,23 +1,10 @@
 import * as React from "react"
-import {
-  Award,
-  Calendar,
-  Contact,
-  Crown,
-  Eye,
-  Globe,
-  HardDrive,
-  Inbox,
-  LogIn,
-  Mail,
-  Network,
-  RefreshCw,
-  Sparkles,
-  Trophy,
-} from "lucide-react"
+import { Link } from "react-router-dom"
+import { RefreshCw, RotateCw, Trophy, UserRound, WifiOff } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
+import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -38,6 +25,9 @@ import {
 } from "@/components/ui/dialog"
 import { Separator } from "@/components/ui/separator"
 import { cn } from "@/lib/utils"
+import { formatBytes } from "@/lib/format"
+import { achievementIcon } from "@/lib/achievement-icons"
+import { useAuth } from "@/hooks/use-auth"
 import type { AchievementProgress, AchievementsResponse } from "@/types"
 
 /** 格式化解锁时间 */
@@ -52,19 +42,9 @@ function fmtUnlock(iso: string | null): string {
   })
 }
 
-/** 后端 icon 标识 → lucide 图标 */
-const ICONS: Record<string, React.ElementType> = {
-  "hard-drive": HardDrive,
-  sparkles: Sparkles,
-  contact: Contact,
-  globe: Globe,
-  mail: Mail,
-  network: Network,
-  "log-in": LogIn,
-  eye: Eye,
-  inbox: Inbox,
-  crown: Crown,
-  calendar: Calendar,
+/** 按成就自己声明的格式渲染进度数字（网盘容量要按 MB/GB 显示） */
+function fmtValue(a: AchievementProgress, n: number): string {
+  return a.valueFormat === "bytes" ? formatBytes(n) : String(n)
 }
 
 /** 单个成就勋章卡（可点击查看详情） */
@@ -75,7 +55,7 @@ function AchievementCard({
   a: AchievementProgress
   onClick: () => void
 }) {
-  const Icon = ICONS[a.icon] ?? Award
+  const Icon = achievementIcon(a.icon)
   const unlocked = a.level > 0
   const tierName = a.tierNames?.[Math.max(0, a.level - 1)] ?? null
 
@@ -139,7 +119,7 @@ function AchievementCard({
                     />
                   </div>
                   <p className="text-[10px] text-muted-foreground">
-                    {a.value} / {a.nextTier}
+                    {fmtValue(a, a.value)} / {fmtValue(a, a.nextTier)}
                   </p>
                 </>
               ) : (
@@ -168,7 +148,7 @@ function AchievementDetailDialog({
   onClose: () => void
 }) {
   if (!a) return null
-  const Icon = ICONS[a.icon] ?? Award
+  const Icon = achievementIcon(a.icon)
   const unlocked = a.level > 0
 
   return (
@@ -238,7 +218,7 @@ function AchievementDetailDialog({
                           Lv.{lv} {a.tierNames?.[i] ?? ""}
                         </p>
                         <p className="text-xs text-muted-foreground">
-                          {a.tierReqs?.[i] ?? `达成 ${tier}`}
+                          {a.tierReqs?.[i] ?? `达成 ${fmtValue(a, tier)}`}
                         </p>
                       </div>
                       <div className="shrink-0 text-right">
@@ -248,7 +228,7 @@ function AchievementDetailDialog({
                           </Badge>
                         ) : (
                           <span className="text-xs text-muted-foreground">
-                            {a.value} / {tier}
+                            {fmtValue(a, a.value)} / {fmtValue(a, tier)}
                           </span>
                         )}
                         {reached && unlockedAt && (
@@ -270,17 +250,24 @@ function AchievementDetailDialog({
 }
 
 export default function AchievementsPage() {
+  const { user } = useAuth()
+  const username = user?.username ?? ""
   const [data, setData] = React.useState<AchievementsResponse | null>(null)
   const [loading, setLoading] = React.useState(true)
+  const [failed, setFailed] = React.useState(false)
   const [selected, setSelected] = React.useState<AchievementProgress | null>(null)
 
   const load = React.useCallback(async () => {
     setLoading(true)
+    setFailed(false)
     try {
       const res = await achievementApi.list()
       setData(res)
     } catch (err) {
+      // ⚠️ 2026-09-26：失败不再伪装成「零成就」——原先只 toast，`data` 保持 null
+      // 就一路渲染成空成就墙，用户以为是自己没解锁任何成就。
       toast.error(err instanceof HttpError ? err.message : "加载成就失败")
+      setFailed(true)
     } finally {
       setLoading(false)
     }
@@ -299,9 +286,43 @@ export default function AchievementsPage() {
     )
   }
 
+  if (failed) {
+    return (
+      <div>
+        <PageHeader title="成就" description="记录你在 Doulor Cloud 的足迹" />
+        <EmptyState
+          icon={WifiOff}
+          title="成就加载失败"
+          description="网络或服务异常，请稍后重试。"
+          action={
+            <Button variant="outline" size="sm" onClick={() => void load()}>
+              <RotateCw className="h-4 w-4" /> 重试
+            </Button>
+          }
+        />
+      </div>
+    )
+  }
+
   const achievements = data?.achievements ?? []
-  const summary = data?.summary ?? { unlocked: 0, total: 0 }
+  const groups = data?.groups ?? []
+  const summary = data?.summary ?? { unlocked: 0, total: 0, points: 0, maxPoints: 0 }
+  const title = data?.title ?? { name: "初来乍到", min: 0, next: null, nextName: null }
   const pct = summary.total > 0 ? (summary.unlocked / summary.total) * 100 : 0
+
+  // 每个分组的进度（组内已解锁 / 组内总数）
+  const groupStats = groups.map((g) => {
+    const inGroup = achievements.filter((a) => a.group === g.id)
+    return {
+      ...g,
+      total: inGroup.length,
+      unlocked: inGroup.filter((a) => a.level > 0).length,
+      items: inGroup,
+    }
+  })
+  // 没有分组的成就（后端加了新分组但前端还没更新时不至于整块消失）
+  const knownGroups = new Set(groups.map((g) => g.id))
+  const orphans = achievements.filter((a) => !knownGroups.has(a.group))
 
   return (
     <div>
@@ -309,13 +330,24 @@ export default function AchievementsPage() {
         title="成就"
         description="记录你在 Doulor Cloud 的足迹"
         actions={
-          <Button variant="outline" size="icon" onClick={() => void load()} aria-label="刷新">
-            <RefreshCw className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* 成就要别人看得到才有意思 —— 直接给个入口去自己的空间（徽章墙在那儿） */}
+            {username && (
+              <Button variant="outline" size="sm" asChild>
+                <Link to={`/space/${encodeURIComponent(username)}`}>
+                  <UserRound className="h-4 w-4" />
+                  我的空间
+                </Link>
+              </Button>
+            )}
+            <Button variant="outline" size="icon" onClick={() => void load()} aria-label="刷新">
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+          </div>
         }
       />
 
-      {/* 总览 */}
+      {/* 总览：称号 + 点数 + 分组进度 */}
       <Card className="mb-6">
         <CardHeader>
           <div className="flex items-start justify-between gap-4">
@@ -325,7 +357,8 @@ export default function AchievementsPage() {
                 成就进度
               </CardTitle>
               <CardDescription>
-                已解锁 {summary.unlocked} / {summary.total} 个成就
+                已解锁 {summary.unlocked} / {summary.total} 个成就 · 成就点{" "}
+                {summary.points} / {summary.maxPoints}
               </CardDescription>
             </div>
             <span className="text-2xl font-semibold tracking-tight">
@@ -333,29 +366,96 @@ export default function AchievementsPage() {
             </span>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          {/* 称号 */}
+          <div className="flex flex-wrap items-center gap-3 rounded-md border px-4 py-3">
+            <Badge variant="secondary" className="shrink-0">
+              当前称号
+            </Badge>
+            <span className="text-lg font-semibold tracking-tight">{title.name}</span>
+            {title.next !== null && (
+              <span className="text-xs text-muted-foreground">
+                再积 {title.next - summary.points} 点到「{title.nextName}」
+              </span>
+            )}
+            {title.next === null && (
+              <span className="text-xs text-muted-foreground">已达最高称号</span>
+            )}
+          </div>
+
           <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
             <div
               className="h-full rounded-full bg-primary transition-all"
               style={{ width: `${pct}%` }}
             />
           </div>
+
+          {/* 分组进度 */}
+          {groupStats.length > 1 && (
+            <div className="grid gap-2 sm:grid-cols-2">
+              {groupStats.map((g) => (
+                <div key={g.id} className="space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-medium">{g.label}</span>
+                    <span className="text-muted-foreground">
+                      {g.unlocked} / {g.total}
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary/70 transition-all"
+                      style={{
+                        width: `${g.total > 0 ? (g.unlocked / g.total) * 100 : 0}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           {data?.registeredAt && (
-            <p className="mt-3 text-xs text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               加入于 {new Date(data.registeredAt).toLocaleDateString("zh-CN")}
             </p>
           )}
         </CardContent>
       </Card>
 
-      {/* 勋章墙 */}
+      {/* 勋章墙（按分组） */}
       {achievements.length === 0 ? (
         <p className="py-12 text-center text-sm text-muted-foreground">暂无成就</p>
       ) : (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-          {achievements.map((a) => (
-            <AchievementCard key={a.id} a={a} onClick={() => setSelected(a)} />
-          ))}
+        <div className="space-y-8">
+          {groupStats
+            .filter((g) => g.items.length > 0)
+            .map((g) => (
+              <section key={g.id} className="space-y-3">
+                <div className="flex items-baseline gap-2">
+                  <h2 className="text-sm font-semibold">{g.label}</h2>
+                  <span className="text-xs text-muted-foreground">{g.desc}</span>
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    {g.unlocked} / {g.total}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+                  {g.items.map((a) => (
+                    <AchievementCard key={a.id} a={a} onClick={() => setSelected(a)} />
+                  ))}
+                </div>
+              </section>
+            ))}
+
+          {orphans.length > 0 && (
+            <section className="space-y-3">
+              <h2 className="text-sm font-semibold">其他</h2>
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+                {orphans.map((a) => (
+                  <AchievementCard key={a.id} a={a} onClick={() => setSelected(a)} />
+                ))}
+              </div>
+            </section>
+          )}
         </div>
       )}
 

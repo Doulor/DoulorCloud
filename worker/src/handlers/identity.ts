@@ -1,4 +1,4 @@
-import { ApiError, json } from "../http"
+import { ApiError, json, readBodyCapped } from "../http"
 import { requireUser } from "../auth"
 import {
   validateNicknameFormat,
@@ -9,6 +9,7 @@ import {
 } from "../identity"
 import { getSetting } from "../settings"
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
+import { hardenUserContentResponse } from "../content-type"
 import { guardRateLimit } from "../ratelimit"
 import type { Env } from "../env"
 
@@ -30,16 +31,16 @@ export async function updateNickname(env: Env, request: Request): Promise<Respon
     throw new ApiError(400, "昵称为 2-16 位中文/英文/数字/下划线", "INVALID_NICKNAME")
   }
 
-  const isAdmin = user.role === "admin"
-  // 保留词：管理员自己设时跳过（防自我限制），但仍禁含 doulor
+  const isAdmin = user.role === "admin" || user.role === "root"
+  // 保留词：管理员/站长自己设时跳过（防自我限制），但仍禁含 doulor
   const extra = parseReservedNicknames(await getSetting(env, "reserved_nicknames"))
   if (isReservedNickname(nick, extra, isAdmin)) {
     throw new ApiError(400, "该昵称包含保留词，请换一个", "NICKNAME_RESERVED")
   }
 
-  // 禁止与「其他」管理员 username 重名（防冒充管理员）；管理员自己除外
+  // 禁止与「其他」管理员/站长 username 重名（防冒充）；管理员自己除外
   const adminHit = await env.DB.prepare(
-    "SELECT 1 FROM users WHERE role = 'admin' AND id != ? AND username = ? COLLATE NOCASE LIMIT 1"
+    "SELECT 1 FROM users WHERE role IN ('admin', 'root') AND id != ? AND username = ? COLLATE NOCASE LIMIT 1"
   ).bind(user.id, nick).first()
   if (adminHit) {
     throw new ApiError(409, "该昵称与管理员账号冲突，请换一个", "NICKNAME_CONFLICT")
@@ -70,9 +71,11 @@ export async function uploadAvatar(env: Env, request: Request): Promise<Response
     throw new ApiError(400, "仅支持 JPG / PNG / WebP / GIF", "INVALID_TYPE")
   }
   const MAX = 2 * 1024 * 1024
-  const buf = await request.arrayBuffer()
+  // ⚠️ 2026-09-26 审计：原先 `await request.arrayBuffer()` 是「先整体读进内存再判大小」，
+  // 任意登录用户发一个接近 100MB 的 body 就能打满 Worker 的 128MB 内存。
+  // `readBodyCapped` 先看 Content-Length 快速拒绝，读完再复核真实长度（http.ts）。
+  const buf = await readBodyCapped(request, MAX, "文件过大，上限 2 MB", 400, "TOO_LARGE")
   if (buf.byteLength === 0) throw new ApiError(400, "文件为空", "INVALID_INPUT")
-  if (buf.byteLength > MAX) throw new ApiError(400, "文件过大，上限 2 MB", "TOO_LARGE")
 
   const bucketId = await getPlatformBucketId(env)
   const key = avatarKey(user.username, ext)
@@ -108,7 +111,13 @@ export async function serveAvatar(env: Env, username: string): Promise<Response>
   if (!user?.avatar_key) return new Response("Not Found", { status: 404 })
   const bucketId = await getPlatformBucketId(env)
   try {
-    return await getObject(env, user.avatar_key, undefined, bucketId)
+    const res = await getObject(env, user.avatar_key, undefined, bucketId)
+    // ⚠️ 2026-09-25 审计（低）：这里原先把 R2 响应**原样透传**，
+    // Content-Type 完全来自对象的存储元数据。头像是公开接口，
+    // 一旦有对象以 text/html 或 image/svg+xml 落进 avatar_key，
+    // 就会在应用主源上被当文档渲染。上传侧虽有扩展名白名单，
+    // 但公开读取接口不应该依赖写入侧的校验（纵深防御）。
+    return hardenUserContentResponse(res, user.avatar_key.split("/").pop() || "avatar")
   } catch {
     return new Response("Not Found", { status: 404 })
   }

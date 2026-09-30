@@ -29,3 +29,30 @@ export async function mapLimit<T, R>(
   )
   return out
 }
+
+/**
+ * 带超时的 fetch（2026-09-25 审计 H15）。
+ *
+ * 为什么必须有：Cloudflare Workers 的 `fetch` **默认没有超时**。
+ * 上游只要保持连接不返回（半开连接、慢速攻击、卡死的服务商 API），
+ * 这个 Worker 请求就会一直挂到平台层的 wall-clock 上限（免费计划 CPU 之外
+ * 还有整体请求时长限制），期间占住一个并发位。多个请求同时挂住 = 全站变慢。
+ * 全仓此前有 5 处裸 `fetch()` 都属这类（cloudflare.ts / newapi-client.ts /
+ * custom-domain.ts / r2-admin.ts）。
+ *
+ * 注意：超时抛出的错误与网络错误一样是 `AbortError`/`TypeError`，
+ * 调用方原有的 try/catch 与错误映射逻辑无需改动。
+ */
+export async function fetchWithTimeout(
+  input: string,
+  init: RequestInit = {},
+  timeoutMs = 10_000
+): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}

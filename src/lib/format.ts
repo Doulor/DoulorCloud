@@ -90,3 +90,9 @@ export function formatBytesShort(n: number): string {
   if (n >= 1024) return `${Math.round(n / 1024)} KB`
   return `${n} B`
 }
+
+/** 用户 UID 展示：不足三位补零（001），超过 999 显示实际位数；空值返回 "" */
+export function fmtUid(uid: number | null | undefined): string {
+  if (uid == null) return ""
+  return `#${String(uid).padStart(3, "0")}`
+}

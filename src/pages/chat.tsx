@@ -1,7 +1,8 @@
 /**
  * 公共聊天室。
  *
- * 实时性：2 秒轮询新消息；在线：每 30 秒心跳一次。
+ * 实时性：5 秒轮询新消息（且只在页面可见时轮询，见 src/lib/visible-interval.ts）；
+ * 在线：每 60 秒心跳一次。
  * 登录后可发言；未登录只能看（发送会引导登录）。
  */
 import * as React from "react"
@@ -12,9 +13,11 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { UserAvatar } from "@/components/user-avatar"
+import { UserCardPopover } from "@/components/user-card"
 import { useAuth } from "@/hooks/use-auth"
-import { chatApi, errMsg } from "@/services/api"
+import { chatApi, errMsg, HttpError } from "@/services/api"
 import { relTime } from "@/lib/format"
+import { setVisibleInterval } from "@/lib/visible-interval"
 import type { ChatMessage, ChatPresenceUser } from "@/types"
 
 export default function ChatPage() {
@@ -26,6 +29,14 @@ export default function ChatPage() {
   const [draft, setDraft] = React.useState("")
   const [sending, setSending] = React.useState(false)
   const [loading, setLoading] = React.useState(true)
+  /** 首屏加载失败（用于区分「加载失败」与「真的还没人发言」） */
+  const [failed, setFailed] = React.useState(false)
+  /**
+   * 聊天室被管理员关闭（后端 403 CHAT_DISABLED）。
+   * 置位后**停止一切轮询与心跳** —— 2026-09-30 额度告急时，关闭状态下的
+   * 每次轮询虽然只花 1 行读，但完全不发才是最省的。
+   */
+  const [chatOff, setChatOff] = React.useState(false)
 
   const listRef = React.useRef<HTMLDivElement>(null)
   const lastIdRef = React.useRef<string | null>(null)
@@ -46,8 +57,16 @@ export default function ChatPage() {
         }
         lastIdRef.current = res.messages[res.messages.length - 1].id
       }
-    } catch {
-      /* 轮询失败静默 */
+    } catch (err) {
+      // 管理员关了聊天室：进入「已关闭」状态，effect 会据此停掉所有轮询
+      if (err instanceof HttpError && err.code === "CHAT_DISABLED") {
+        setChatOff(true)
+        return
+      }
+      // ⚠️ 2026-09-26：首屏失败要能让用户看见，否则会和「真的还没人发言」
+      // 混在一起（界面显示「还没有消息，来说第一句吧」）。
+      // 后续轮询失败仍保持静默，避免网络抖动时反复弹错。
+      if (initial) setFailed(true)
     } finally {
       if (initial) setLoading(false)
     }
@@ -63,22 +82,27 @@ export default function ChatPage() {
   }, [])
 
   React.useEffect(() => {
+    // 聊天室已关闭：什么都不轮询（cleanup 已在上一轮把定时器清掉）
+    if (chatOff) return
     void poll(true)
     void pollPresence()
-    const msgTimer = setInterval(() => void poll(false), 2000)
-    const presenceTimer = setInterval(() => void pollPresence(), 10000)
+    if (user) void chatApi.heartbeat().catch(() => {})
+    // ⚠️ 2026-09-30 降频：CF Workers 免费额度 10 万请求/天，当日实测已到 93.6%，
+    //    聊天页轮询是最大头（2s 拉消息 = 4.3 万次/天/人）。改成 5s / 30s / 60s，
+    //    并且**只在页面可见时跑**（见 src/lib/visible-interval.ts），
+    //    切回标签页会立刻刷一次，不会看到旧数据。
+    const stopMessages = setVisibleInterval(() => void poll(false), 5000)
+    const stopPresence = setVisibleInterval(() => void pollPresence(), 30000)
     // 心跳：只有登录用户才报（表示「我在聊天室」）
-    let hbTimer: ReturnType<typeof setInterval> | undefined
-    if (user) {
-      void chatApi.heartbeat().catch(() => {})
-      hbTimer = setInterval(() => void chatApi.heartbeat().catch(() => {}), 30000)
-    }
+    const stopHeartbeat = user
+      ? setVisibleInterval(() => void chatApi.heartbeat().catch(() => {}), 60000)
+      : undefined
     return () => {
-      clearInterval(msgTimer)
-      clearInterval(presenceTimer)
-      if (hbTimer) clearInterval(hbTimer)
+      stopMessages()
+      stopPresence()
+      stopHeartbeat?.()
     }
-  }, [poll, pollPresence, user])
+  }, [poll, pollPresence, user, chatOff])
 
   // 新消息自动滚到底部
   React.useEffect(() => {
@@ -160,9 +184,32 @@ export default function ChatPage() {
 
       {/* 消息流 */}
       <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto py-4">
-        {loading ? (
+        {chatOff ? (
+          <div className="flex flex-col items-center gap-1.5 py-10 text-center">
+            <p className="text-sm font-medium">聊天室已关闭</p>
+            <p className="max-w-xs text-xs text-muted-foreground">
+              管理员暂时关闭了聊天室（通常是站点资源紧张时用来省流量的应急措施），
+              恢复后无需任何操作，这里会自动恢复。
+            </p>
+          </div>
+        ) : loading ? (
           <div className="flex justify-center py-8">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : failed && messages.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 py-8 text-sm text-muted-foreground">
+            <p>消息加载失败，请检查网络后重试。</p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setFailed(false)
+                setLoading(true)
+                void poll(true)
+              }}
+            >
+              重试
+            </Button>
           </div>
         ) : messages.length === 0 ? (
           <p className="py-8 text-center text-sm text-muted-foreground">
@@ -173,7 +220,15 @@ export default function ChatPage() {
             {messages.map((m) => (
               <div key={m.id} className="flex gap-2.5">
                 <div className="shrink-0">
-                  <UserAvatar username={m.username} nickname={m.nickname} hasAvatar={m.hasAvatar} className="h-8 w-8" />
+                  {/* 点头像弹小卡片（可跳到对方个人空间） */}
+                  <UserCardPopover
+                    username={m.username}
+                    nickname={m.nickname}
+                    hasAvatar={m.hasAvatar}
+                    className="block"
+                  >
+                    <UserAvatar username={m.username} nickname={m.nickname} hasAvatar={m.hasAvatar} className="h-8 w-8" />
+                  </UserCardPopover>
                 </div>
                 <div className="min-w-0">
                   <div className="flex items-baseline gap-2">
@@ -199,10 +254,11 @@ export default function ChatPage() {
               void send()
             }
           }}
-          placeholder={user ? "说点什么…（Enter 发送）" : "登录后可发言"}
+          placeholder={chatOff ? "聊天室已关闭" : user ? "说点什么…（Enter 发送）" : "登录后可发言"}
           className="flex-1"
+          disabled={chatOff}
         />
-        <Button onClick={() => void send()} disabled={sending || !draft.trim()}>
+        <Button onClick={() => void send()} disabled={chatOff || sending || !draft.trim()}>
           {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
           发送
         </Button>

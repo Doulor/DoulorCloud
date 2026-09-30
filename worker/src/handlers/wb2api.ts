@@ -15,9 +15,15 @@
 import { ApiError, json } from "../http"
 import { generateToken, hashToken, uuid } from "../crypto"
 import { requireUser, type UserRow } from "../auth"
-import { parsePermissions, type Feature } from "../permissions"
-import { audit, getSetting, getSettingNumber } from "../settings"
+import {
+  parsePermissions,
+  featurePermissionSql,
+  featurePermittedGuard,
+  type Feature,
+} from "../permissions"
+import { audit, getSetting, getSettingBool, getSettingNumber } from "../settings"
 import { clientIp, guardRateLimit } from "../ratelimit"
+import { grantDonationReward } from "../points"
 import { sendMail, renderMail } from "../mailer"
 import {
   getWb2ApiCredentialInfo,
@@ -32,12 +38,29 @@ import {
   wb2RemoveAccount,
   wb2Start,
 } from "../wb2api-client"
+import { grantInviteReward } from "../invite-rewards"
 import type { Env } from "../env"
 
 /** 本站登录会话与网关 state 的 15 分钟有效期对齐 */
 const SESSION_TTL_MS = 15 * 60 * 1000
 
-// realm 由设置项 wb2api_realm 决定（默认国内版 'cn'），见 wb2api-client.ts 的 resolveRealm
+/** 允许对接的上游域（与设置项 wb2api_realm 的取值域一致） */
+const REALMS = ["cn", "global"] as const
+type Realm = (typeof REALMS)[number]
+
+/**
+ * 归一化「这次登录对接哪个域」。
+ *
+ * 2026-09-30 起改为**用户自选**（站长要求）：捐献时自己挑国内版 / 国际版，
+ * 不再被管理员的全站设置定死。设置项 `wb2api_realm` 退化为**默认选中项**。
+ *
+ * 返回 null 表示「没选 / 选了非法值」→ 调用方回落到管理员默认。
+ * 必须服务端校验：前端传什么都得在这收口，否则等于给了个任意字符串。
+ */
+function normalizeRealm(v: unknown): Realm | null {
+  const s = String(v ?? "").trim().toLowerCase()
+  return (REALMS as readonly string[]).includes(s) ? (s as Realm) : null
+}
 
 interface BindingRow {
   id: string
@@ -62,13 +85,15 @@ interface SessionRow {
   result_json: string | null
   message: string | null
   acknowledged_ip: string | null
+  /** 发起登录那一刻的网关池 uid 快照（JSON 数组）；老会话为 null */
+  pool_uids_json: string | null
   created_at: string
   expires_at: string
 }
 
 async function requireAdminUser(env: Env, request: Request): Promise<UserRow> {
   const user = await requireUser(env, request)
-  if (user.role !== "admin") {
+  if (user.role !== "admin" && user.role !== "root") {
     throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
   }
   return user
@@ -140,7 +165,10 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
 /**
  * POST /api/wb2api/login/start —— 发起登录，返回授权链接。
  *
- * body: { acknowledged: true }
+ * body: { acknowledged: true, realm?: "cn" | "global" }
+ *
+ * `realm` 是**用户自选**的上游域（2026-09-30 起）：国内版 / 国际版由捐献者自己挑，
+ * 不传或传非法值时回落到设置项 `wb2api_realm`（管理员设的默认）。
  *
  * `acknowledged` **必须在服务端校验**并连同来源 IP 落审计：这是「用户已被明确
  * 告知账号会进共享池、且可能被自动化任务使用」的证据，不能只靠前端勾选框。
@@ -149,6 +177,7 @@ export async function loginStart(env: Env, request: Request): Promise<Response> 
   const user = await requireUser(env, request)
   const body = (await request.json().catch(() => ({}))) as {
     acknowledged?: unknown
+    realm?: unknown
   }
 
   if (body.acknowledged !== true) {
@@ -192,7 +221,27 @@ export async function loginStart(env: Env, request: Request): Promise<Response> 
     )
   }
 
-  const started = await wb2Start(env)
+  // 用户自选的上游域；没选或非法 → 用管理员设的默认（wb2Start 内部读 wb2api_realm）
+  const chosenRealm = normalizeRealm(body.realm)
+
+  const started = await wb2Start(env, chosenRealm ?? undefined)
+
+  // 拍一张「此刻网关池里有哪些账号」的快照，随会话落库。
+  //
+  // 为什么不在 poll 时查池：网关的 login/poll 会**先**把登录成功的账号
+  // `Pool.Add` 进池、**再**返回结果（见网关 internal/panel/login.go）。等本站
+  // poll 拿到 uid 时，这个账号必然已在池中 —— 事后查池无法区分「用户带来的新账号」
+  // 与「本来就在池里的账号」。快照必须取在「用户还没登录完」之前。
+  //
+  // 查询失败不阻断（网关抖动时不能让整个登录流程挂掉）：快照落 null，
+  // poll 时按「未知」处理 —— 允许绑定但不发邀请奖励。
+  let poolUidsJson: string | null = null
+  try {
+    const overview = await wb2Overview(env)
+    poolUidsJson = JSON.stringify(overview.accounts.map((a) => a.uid))
+  } catch (err) {
+    console.error("拍网关池快照失败，本次绑定将不发邀请奖励:", err)
+  }
 
   // 本站 session_id 下发前端，网关 state 只留在服务端：
   // state 就是换取 token 的凭据，泄露给他人等于把账号送人。
@@ -200,8 +249,9 @@ export async function loginStart(env: Env, request: Request): Promise<Response> 
   const now = new Date()
   await env.DB.prepare(
     `INSERT INTO wb2api_login_sessions
-       (id, user_id, upstream_state, realm, status, acknowledged_ip, created_at, expires_at)
-     VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`
+       (id, user_id, upstream_state, realm, status, acknowledged_ip,
+        pool_uids_json, created_at, expires_at)
+     VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)`
   )
     .bind(
       await hashToken(sessionId),
@@ -209,6 +259,7 @@ export async function loginStart(env: Env, request: Request): Promise<Response> 
       started.state,
       started.realm,
       ip,
+      poolUidsJson,
       now.toISOString(),
       new Date(now.getTime() + SESSION_TTL_MS).toISOString()
     )
@@ -218,7 +269,7 @@ export async function loginStart(env: Env, request: Request): Promise<Response> 
     env,
     user.id,
     "wb2api.login.start",
-    `发起反代账号登录（realm=${started.realm}）`,
+    `发起反代账号登录（realm=${started.realm}${chosenRealm ? "，用户自选" : "，用管理员默认"}）`,
     ip
   )
 
@@ -290,6 +341,16 @@ export async function loginPoll(env: Env, request: Request): Promise<Response> {
         "WB2API_UNAUTHORIZED"
       )
     }
+    // 超时（本站主动放弃等待）：网关那一次 poll 可能仍在跑，也可能已经完成
+    // 落盘 + 热加载 —— 它的 handler 不因客户端断开而停止。所以这里必须给出
+    // 可操作的文案：让用户重新发起一次登录即可完成绑定（重新登录同一账号会命中
+    // 幂等/新快照逻辑，不会再被池去重挡死）。
+    if (err instanceof ApiError && err.code === "WB2API_TIMEOUT") {
+      const msg =
+        "反代网关响应超时。你的账号可能已加入共享池，请关闭后重新发起一次登录即可完成绑定"
+      await failSession(env, sess.id, msg)
+      return json({ status: "failed", message: msg })
+    }
     throw err
   }
 
@@ -312,8 +373,11 @@ export async function loginPoll(env: Env, request: Request): Promise<Response> {
 
 /** 把会话标记为失败（终态缓存，避免下次再打上游） */
 async function failSession(env: Env, id: string, message: string): Promise<void> {
+  // 只在仍是 pending 时才落 failed：poll 可能被并发调用（前端 3 秒轮询 + 单次
+  // poll 本身可能跑十几秒，两个请求会重叠），其中一个成功写了 done 之后，
+  // 另一个拿到的只是「state 已失效」——若无条件覆盖，会把成功结果抹成失败。
   await env.DB.prepare(
-    "UPDATE wb2api_login_sessions SET status = 'failed', message = ? WHERE id = ?"
+    "UPDATE wb2api_login_sessions SET status = 'failed', message = ? WHERE id = ? AND status = 'pending'"
   )
     .bind(message, id)
     .run()
@@ -323,6 +387,22 @@ function parseResult(raw: string | null): Record<string, unknown> | null {
   if (!raw) return null
   try {
     return JSON.parse(raw) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 解析 start 时拍的网关池 uid 快照。
+ *
+ * 返回 null 表示「快照不可用」（老会话没有这列、或内容坏了）——调用方按
+ * 「未知」处理：不阻断绑定，但不发邀请奖励。空数组是合法值（发起登录时池是空的）。
+ */
+function parsePoolSnapshot(raw: string | null): string[] | null {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? (parsed as string[]) : null
   } catch {
     return null
   }
@@ -353,6 +433,28 @@ async function completeBinding(
   )
     .bind(info.uid)
     .first<BindingRow>()
+
+  // 「登录前是否已在网关池里」——决定这次绑定算不算「带来新资源」（影响邀请奖励）。
+  //
+  // 用 start 时拍的快照判断，**不能**现在查池：网关 poll 是先 `Pool.Add` 进池、
+  // 再返回结果的，此刻查池必然命中自己刚登进去的账号（历史 bug：于是所有正常绑定
+  // 都被误判为「重复绑定」直接拒绝，账号却已经进了池，用户永久卡死）。
+  //
+  // 快照缺失（老会话 / 拍快照时网关抖动）按「未知」处理：不阻断绑定，但不发奖励。
+  const poolUids = parsePoolSnapshot(sess.pool_uids_json)
+  const inPoolBefore = poolUids ? poolUids.includes(info.uid) : null
+  if (inPoolBefore === null) {
+    console.warn("会话缺少网关池快照，本次绑定不发邀请奖励:", sess.id)
+  } else if (inPoolBefore && !existing) {
+    // 池里本来就有、绑定表里却没登记 —— 通常是管理员手动加进池的账号，或历史遗留。
+    // 用户确实登录了它，所以照常绑定 + 授权限；只是没带来新资源，不发邀请奖励。
+    await audit(
+      env,
+      user.id,
+      "wb2api.login.pool_existing",
+      `绑定了一个登录前就已在池中的账号 uid=${info.uid}（照常绑定，不发邀请奖励）`
+    )
+  }
 
   if (existing && existing.user_id !== user.id) {
     const msg = "该 WorkBuddy 账号已被其他用户绑定"
@@ -400,10 +502,10 @@ async function completeBinding(
     throw new ApiError(409, msg, "WB2API_LIMIT_REACHED")
   }
 
-  // 记录「本次绑定是否真的把 ai 从无变有」——移除时据此判断该不该收回
-  const perms = parsePermissions(user.permissions)
-  const aiGranted = !perms.ai
-  if (aiGranted) perms.ai = true
+  // 记录「本次绑定是否真的把 ai 从无变有」——移除时据此判断该不该收回。
+  // ⚠️ 判断基于会话用户的快照（并发下可能偏保守）；写回走原子 json_set，
+  // 不会覆盖并发写入的其他模块权限。
+  const aiGranted = !parsePermissions(user.permissions).ai
 
   const id = uuid()
   const now = new Date().toISOString()
@@ -426,8 +528,8 @@ async function completeBinding(
     ...(aiGranted
       ? [
           env.DB.prepare(
-            "UPDATE users SET permissions = ?, updated_at = ? WHERE id = ?"
-          ).bind(JSON.stringify(perms), now, user.id),
+            `UPDATE users SET permissions = ${featurePermissionSql("ai", true)}, updated_at = ? WHERE id = ?`
+          ).bind(now, user.id),
         ]
       : []),
   ])
@@ -453,6 +555,30 @@ async function completeBinding(
     `反代账号已绑定 uid=${info.uid} nickname=${info.nickname ?? "-"}` +
       (aiGranted ? "（已解锁 AI 中转站权限）" : "（用户已有该权限，未重复授予）")
   )
+
+  // 捐献奖励积分：判据与下面的邀请奖励**完全一致** —— 只有「这次真的带来了新资源」
+  // （登录前不在网关池里）才发。绑一个管理员早就手工加进池的账号不算贡献，
+  // 池快照缺失（老会话）时也按「未知」处理不发（与邀请奖励同一取舍）。
+  //
+  // ⚠️ 不能只看「新建了绑定行」：池里本来就有、绑定表却没登记的情况是存在的，
+  //    那时新建的只是一行绑定记录，用户并没有给池子添任何东西。
+  if (inPoolBefore === false) {
+    await grantDonationReward(env, {
+      userId: user.id,
+      kind: "workbuddy",
+      dedupKey: `wb2api:${id}`,
+      detail: "WorkBuddy 反代账号捐献奖励",
+    })
+  }
+
+  // 邀请奖励：必须同时满足「真的从无到有解锁了 AI 权限」与「带来的是新资源」
+  // （登录前不在池里）。已解锁的人重复绑定、或绑一个本来就在池里的账号，都不算新资源。
+  if (aiGranted && inPoolBefore === false) {
+    const planId = await getSettingNumber(env, "invite_reward_plan_id")
+    if (planId && planId > 0) {
+      await grantInviteReward(env, user, planId)
+    }
+  }
 
   // 通知邮件失败不影响绑定结果（权限已生效，只是少一封告知）
   try {
@@ -557,21 +683,15 @@ export async function adminRemoveBinding(
   const revoke = typeof body.revokeAi === "boolean" ? body.revokeAi : !keep
   let aiRevoked = false
   if (revoke) {
-    const target = await env.DB.prepare(
-      "SELECT permissions FROM users WHERE id = ?"
+    // 只有「原本确实开了 ai」才需要收回 —— 守卫写进 WHERE，用 changes 判定结果。
+    // 这样既省掉一次 SELECT，也不会整列覆盖并发写入的其他模块权限。
+    const res = await env.DB.prepare(
+      `UPDATE users SET permissions = ${featurePermissionSql("ai", false)}, updated_at = ?
+        WHERE id = ? AND ${featurePermittedGuard("ai")}`
     )
-      .bind(binding.user_id)
-      .first<{ permissions: string | null }>()
-    const perms = parsePermissions(target?.permissions ?? null)
-    if (perms.ai) {
-      perms.ai = false
-      await env.DB.prepare(
-        "UPDATE users SET permissions = ?, updated_at = ? WHERE id = ?"
-      )
-        .bind(JSON.stringify(perms), now, binding.user_id)
-        .run()
-      aiRevoked = true
-    }
+      .bind(now, binding.user_id)
+      .run()
+    aiRevoked = (res.meta?.changes ?? 0) > 0
   }
 
   await audit(
@@ -691,12 +811,21 @@ export async function adminGetPool(
 /**
  * 供 donations.ts 复用：把通道概况塞进 `GET /api/donations` 的响应，
  * 让捐献页一次请求就拿到「能不能捐 / 捐了几个」。
+ *
+ * `realm` 自 2026-09-30 起是**默认选中项**（管理员设的），用户可以在捐献时改选 ——
+ * 前端拿它做初始值，实际以 `loginStart` 收到的参数为准。
+ *
+ * `visible` 是**纯展示开关**（`wb2api_donation_visible`，2026-09-30 加）：
+ * 关掉后只对「还没有任何绑定」的用户隐藏卡片 —— 通道本身照常工作，
+ * 已绑定的用户仍看得到卡片以便撤销绑定。与 `enabled`（通道总开关）不是一回事。
  */
 export async function wb2apiDonationBlock(
   env: Env,
   userId: string
 ): Promise<{
   enabled: boolean
+  /** 是否在捐献页显示入口（关掉 + 无绑定 ⇒ 前端整卡隐藏） */
+  visible: boolean
   configured: boolean
   limit: number
   used: number
@@ -707,6 +836,7 @@ export async function wb2apiDonationBlock(
   feature: Feature
 }> {
   const { enabled, limit } = await channelConfig(env)
+  const visible = await getSettingBool(env, "wb2api_donation_visible")
   const configured = await isWb2ApiConfigured(env)
   const realm = (await getSetting(env, "wb2api_realm")).trim().toLowerCase() === "global"
     ? "global"
@@ -721,6 +851,7 @@ export async function wb2apiDonationBlock(
 
   return {
     enabled,
+    visible,
     configured,
     limit,
     used,

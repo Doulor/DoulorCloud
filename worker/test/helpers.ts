@@ -11,7 +11,7 @@ export interface TestUser {
 /** 注册一个用户并返回带 session cookie 的请求头 */
 export async function makeUser(opts: {
   username?: string
-  role?: "user" | "admin"
+  role?: "user" | "admin" | "root"
 } = {}): Promise<TestUser> {
   const username = opts.username ?? `u_${Math.random().toString(36).slice(2, 8)}`
   const id = uuid()

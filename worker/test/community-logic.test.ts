@@ -14,10 +14,12 @@ describe("cursor", () => {
 
 describe("groupComments", () => {
   const comments = [
-    { id: "c1", post_id: "p1", user_id: "u1", parent_id: null, body: "根1", created_at: "t1" },
-    { id: "c2", post_id: "p1", user_id: "u2", parent_id: "c1", body: "回1", created_at: "t2" },
-    { id: "c3", post_id: "p1", user_id: "u3", parent_id: "c1", body: "回2", created_at: "t3" },
-    { id: "c4", post_id: "p1", user_id: "u1", parent_id: null, body: "根2", created_at: "t4" },
+    { id: "c1", post_id: "p1", user_id: "u1", parent_id: null, body: "根1", createdAt: "t1" },
+    { id: "c2", post_id: "p1", user_id: "u2", parent_id: "c1", body: "回1", createdAt: "t2" },
+    { id: "c3", post_id: "p1", user_id: "u3", parent_id: "c1", body: "回2", createdAt: "t3" },
+    { id: "c4", post_id: "p1", user_id: "u1", parent_id: null, body: "根2", createdAt: "t4" },
+    { id: "c5", post_id: "p1", user_id: "u2", parent_id: "c2", body: "回1的子回复", createdAt: "t5" },
+    { id: "c6", post_id: "p1", user_id: "u3", parent_id: "c5", body: "回1的孙回复", createdAt: "t6" },
   ]
   it("groups roots with their replies (depth 2)", () => {
     const tree = groupComments(comments as any)
@@ -26,6 +28,21 @@ describe("groupComments", () => {
     expect(tree[0].replies).toHaveLength(2)
     expect(tree[1].id).toBe("c4")
     expect(tree[1].replies).toHaveLength(0)
+  })
+  it("builds arbitrarily deep nesting", () => {
+    const tree = groupComments(comments as any)
+    const c1 = tree.find((n) => n.id === "c1")!
+    const c2 = c1.replies.find((n) => n.id === "c2")!
+    const c5 = c2.replies[0]
+    expect(c5.id).toBe("c5")
+    expect(c5.replies[0].id).toBe("c6")
+  })
+  it("treats orphan reply as root", () => {
+    const tree = groupComments([
+      { id: "orphan", post_id: "p1", user_id: "u1", parent_id: "missing", body: "x", createdAt: "t1" },
+    ] as any)
+    expect(tree).toHaveLength(1)
+    expect(tree[0].id).toBe("orphan")
   })
 })
 

@@ -22,7 +22,9 @@ import { ApiError, json } from "../http"
 import { encryptSecret, decryptSecret, uuid, verifyPassword } from "../crypto"
 import { requireFeatureUser } from "../auth"
 import {
+  adminGrantSubscription,
   adminSetQuota,
+  adminSetUserGroup,
   adminSetUserPassword,
   adminSetUserStatus,
   createApiKey,
@@ -33,7 +35,10 @@ import {
   isNewApiConfigured,
   listModels,
   listPricing,
+  listAllUserSubscriptions,
+  listSubscriptionPlans,
   listTokens,
+  listUserSubscriptions,
   login,
   redeemCode,
   checkHealth,
@@ -41,6 +46,7 @@ import {
 } from "../newapi-client"
 import { audit, getSetting, getSettings, parseRecommendedModels } from "../settings"
 import { hasFeature, parsePermissions, parseOpenFeatures } from "../permissions"
+import { guardRateLimit } from "../ratelimit"
 import { requireAdmin } from "./admin"
 import type { Env } from "../env"
 
@@ -61,6 +67,7 @@ interface NewApiAccountRow {
   username: string
   email: string
   enc_token: string
+  enc_password: string | null
   group_name: string | null
   quota: number
   used_quota: number
@@ -93,18 +100,32 @@ function quotaToDisplay(quota: number, perUnit: number): number {
 /** GET /api/dev/status —— 开通状态、额度、模型列表 */
 export async function getStatus(env: Env, request: Request): Promise<Response> {
   const user = await requireFeatureUser(env, request, "ai")
-  const settings = await getSettings(env)
-  const configured = await isNewApiConfigured(env)
-  const account = configured ? await loadAccount(env, user.id) : null
+  // ⚠️ 2026-10-01 性能：这三项互不依赖（两个设置读取 + 一个账号行），
+  // 原来是三次串行 D1 往返；并行后只花最慢的那一次。
+  const [settings, configured, accountRow] = await Promise.all([
+    getSettings(env),
+    isNewApiConfigured(env),
+    loadAccount(env, user.id),
+  ])
+  const account = configured ? accountRow : null
 
-  // 币种与换算率以 NewAPI 站点为准
-  const currency = configured
-    ? await getCurrencyInfo(env)
-    : { symbol: "$", code: "USD", perUnit: Number(settings.newapi_quota_per_unit) }
+  // ⚠️ 同样并行：币种 / 健康 / 定价互不依赖，且三者都有 TTL 缓存
+  // （见 newapi-client.ts 的 newapiGlobalCache）。原先是串行 3 次
+  // 「Worker→CF→隧道→VPS1」往返，首屏要等 3 倍时间。
+  const [currency, health, pricing] = await Promise.all([
+    // 币种与换算率以 NewAPI 站点为准
+    configured
+      ? getCurrencyInfo(env)
+      : Promise.resolve({
+          symbol: "$",
+          code: "USD",
+          perUnit: Number(settings.newapi_quota_per_unit),
+        }),
+    // 中转站健康状态（在线/离线 + 延迟），供界面顶部徽章显示
+    checkHealth(env),
+    listPricing(env),
+  ])
   const perUnit = currency.perUnit
-
-  // 中转站健康状态（在线/离线 + 延迟），供界面顶部徽章显示
-  const health = await checkHealth(env)
 
   const base = {
     configured,
@@ -113,6 +134,8 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     eligibleEmail: `${user.username}@${env.ROOT_DOMAIN}`,
     currencySymbol: currency.symbol,
     currencyCode: currency.code,
+    /** quota ↔ 金额的换算率（前端把订阅额度换算成金额展示） */
+    quotaPerUnit: perUnit,
     trialQuotaUsd: quotaToDisplay(Number(settings.newapi_trial_quota), perUnit),
     group: settings.newapi_group,
     health,
@@ -130,6 +153,12 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
           usedUsd: quotaToDisplay(account.used_quota, perUnit),
           group: account.group_name,
           syncedAt: account.synced_at,
+          /**
+           * 是否已完成密码绑定（有真实 access token，可代建 Key）。
+           * 自动认领的账号 enc_token 是哨兵值 NO_TOKEN，只能「显示已开通」，
+           * 但建 Key / 查额度会失败，必须回来走 bindAccount 补密码。
+           */
+          bound: account.enc_token !== NO_TOKEN_SENTINEL,
         }
       : null,
   }
@@ -137,27 +166,37 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
   // 未开通就不必拉模型列表，避免无谓地消耗 NewAPI 的速率限制
   // 未开通也要给出可用分组（前端用于说明默认/付费分组的差异）
   if (!account) {
-    const pricing = await listPricing(env)
     return json({
       ...base,
       models: [],
       modelGroups: [],
       availableGroups: collectGroups(pricing),
       groupModels: {},
+      // 未开通必然没有订阅；字段要给全，前端按类型直接读（不做 undefined 兜底）
+      subscription: null,
+      subscriptions: [],
+      freePlanId: Number(settings.newapi_free_plan_id ?? "0"),
     })
   }
 
   let models: string[] = []
   try {
-    const { token, userId } = await decryptAccountToken(env, account)
-    models = await listModels(env, token, userId)
+    models = await runWithUserToken(env, account, (token, userId) =>
+      listModels(env, token, userId)
+    )
   } catch (err) {
     console.error("获取模型列表失败:", err)
   }
 
-  // 按分组归类模型（默认分组 / 付费分组 / 捐献分组分开显示）
-  const pricing = await listPricing(env)
-  const availableGroups = collectGroups(pricing)
+  // 按分组归类模型。展示的分组由设置项 newapi_visible_groups 控制（默认只 default），
+  // donation（捐献）分组始终动态追加 —— 这样「∞」等管理员专用分组不会暴露给普通用户。
+  // （pricing 已在函数开头与币种/健康并行取好，见上面的 Promise.all）
+  const allGroups = collectGroups(pricing)
+  const visible = (settings.newapi_visible_groups ?? "default")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const availableGroups = allGroups.filter((g) => visible.includes(g))
 
   // 「捐献」分组：模型名以 donation 开头的，统一归到这里，
   // 不再出现在 default / 付费分组里（管理员用来标记「捐献解锁的模型」）。
@@ -186,6 +225,66 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     groupModels["donation"] = Array.from(donationModels)
   }
 
+  // 全部活跃订阅：一个用户可能同时持有多张（免费套餐 + 各档邀请/奖励套餐）。
+  // 消费时按 `end_time asc, id asc` 逐张接力，所以「总额度 = 各张之和」。
+  // 前端要按**套餐类型**分段展示这个总额，因此这里把整份列表按 plan_id 合并后交出去。
+  //
+  // 合并口径：同类多张订阅合并成一条（额度相加、张数累加、有效期取最晚一张），
+  // 这样进度条上一个颜色 = 一个套餐，语义稳定。
+  let subscriptions: {
+    planId: number
+    /** 套餐名（取自套餐表；取不到时降级成「套餐 #id」） */
+    title: string
+    amountTotal: number
+    amountUsed: number
+    endTime: number
+    nextResetTime: number
+    /** 该套餐名下有几张订阅 */
+    count: number
+  }[] = []
+  /** 免费套餐订阅（按设置项 newapi_free_plan_id 定位），未领取为 null */
+  let subscription: (typeof subscriptions)[number] | null = null
+  const freePlanId = Number(settings.newapi_free_plan_id ?? "0")
+  try {
+    const [active, plans] = await Promise.all([
+      listAllUserSubscriptions(env, account.newapi_user_id),
+      listSubscriptionPlans(env),
+    ])
+    const titleOf = new Map(plans.map((p) => [p.planId, p.title]))
+
+    const byPlan = new Map<number, (typeof subscriptions)[number]>()
+    for (const s of active) {
+      const cur = byPlan.get(s.planId)
+      if (cur) {
+        cur.amountTotal += s.amountTotal
+        cur.amountUsed += s.amountUsed
+        cur.count += 1
+        // 有效期取最晚的一张：合并后「有效期至」应表示这份额度最后什么时候失效
+        cur.endTime = Math.max(cur.endTime, s.endTime)
+        // 各张的重置时刻本应对齐（都是 UTC 次日 0 点），取最早的一个更保守
+        cur.nextResetTime =
+          cur.nextResetTime > 0 && s.nextResetTime > 0
+            ? Math.min(cur.nextResetTime, s.nextResetTime)
+            : cur.nextResetTime || s.nextResetTime
+      } else {
+        byPlan.set(s.planId, {
+          planId: s.planId,
+          title: titleOf.get(s.planId) || `套餐 #${s.planId}`,
+          amountTotal: s.amountTotal,
+          amountUsed: s.amountUsed,
+          endTime: s.endTime,
+          nextResetTime: s.nextResetTime,
+          count: 1,
+        })
+      }
+    }
+    // 顺序固定按 plan_id 升序：颜色与分段的对应关系不随额度变化而漂移
+    subscriptions = [...byPlan.values()].sort((a, b) => a.planId - b.planId)
+    subscription = subscriptions.find((s) => s.planId === freePlanId) ?? null
+  } catch (err) {
+    console.error("查询订阅失败:", err)
+  }
+
   return json({
     ...base,
     models,
@@ -197,6 +296,12 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     accountGroup: account.group_name,
     /** 管理员维护的推荐模型分档（数组顺序即梯队顺序） */
     recommended: parseRecommendedModels(settings.newapi_recommended_models),
+    /** 免费套餐订阅，未领取为 null */
+    subscription,
+    /** 免费套餐的 plan_id：前端据此把「免费」与「邀请/奖励」订阅分开展示 */
+    freePlanId,
+    /** 全部活跃订阅（按套餐类型合并），供奖励订阅卡片分段展示 */
+    subscriptions,
   })
 }
 
@@ -212,13 +317,119 @@ function collectGroups(pricing: { groups: string[] }[]): string[] {
   })
 }
 
-async function decryptAccountToken(
+/** 哨兵值：自动认领（用户已在 NewAPI 有号但未回来完成密码绑定）时占位。
+ *  这类账号「显示已开通」成立，但没有真实 access token，代建 Key / 查额度会失败，
+ *  届时引导用户走完整 bindAccount 补密码。 */
+const NO_TOKEN_SENTINEL = "NO_TOKEN"
+
+/** 已解析出来的用户凭据（NewAPI access token + 该账号在 NewAPI 的 id） */
+interface UserCreds {
+  token: string
+  userId: number
+}
+
+/** 解析缓存的 access token；没有缓存 / 解密失败一律返回 null（不抛错） */
+async function readCachedCreds(
   env: Env,
   account: NewApiAccountRow
-): Promise<{ token: string; userId: number }> {
+): Promise<UserCreds | null> {
+  if (!account.enc_token || account.enc_token === NO_TOKEN_SENTINEL) return null
+  try {
+    const token = await decryptSecret(account.enc_token, requireEncryptionSecret(env))
+    return token ? { token, userId: account.newapi_user_id } : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 用绑定时存的加密密码向 NewAPI 重新登录，换一个**最新**的 access token，
+ * 并顺手刷新缓存。只有「缓存 token 已失效」或「压根没有缓存」时才走到这里。
+ */
+async function loginWithStoredPassword(
+  env: Env,
+  account: NewApiAccountRow
+): Promise<UserCreds> {
   const secret = requireEncryptionSecret(env)
-  const token = await decryptSecret(account.enc_token, secret)
-  return { token, userId: account.newapi_user_id }
+
+  let password = ""
+  if (account.enc_password) {
+    try {
+      password = await decryptSecret(account.enc_password, secret)
+    } catch {
+      password = ""
+    }
+  }
+  // 没有密码可用（自动认领的存量账号）→ 只能引导用户手动重新绑定
+  if (!password) {
+    throw new ApiError(
+      401,
+      "你的中转站登录已失效，请重新输入密码绑定",
+      "USER_TOKEN_EXPIRED"
+    )
+  }
+
+  const fresh = await login(env, account.username, password)
+  await env.DB.prepare(
+    "UPDATE newapi_accounts SET enc_token = ?, synced_at = ? WHERE user_id = ?"
+  )
+    .bind(
+      await encryptSecret(fresh.accessToken, secret),
+      new Date().toISOString(),
+      account.user_id
+    )
+    .run()
+  return { token: fresh.accessToken, userId: fresh.userId ?? account.newapi_user_id }
+}
+
+/**
+ * 以「用户身份」执行一次 NewAPI 操作 —— 所有需要用户 access token 的地方都必须走这里。
+ *
+ * ⚠️ 2026-09-30 线上事故修复：**不要改回「每次操作都先重登换 token」**。
+ *
+ * 旧实现每次都先用存的密码 `POST /api/user/login` 换最新 token（理由写的是
+ * 「NewAPI 的 login token 会过期/被吊销，缓存不可靠，多一次 login 开销可接受」）。
+ * 但那个「开销」根本不是开销问题：NewAPI 的 `CriticalRateLimit` 是**按来源 IP**
+ * 限流的（`CRITICAL_RATE_LIMIT`，本站当时为 60 次 / 20 分钟），而本站**所有服务端
+ * 调用都从同一个 Cloudflare 出口 IP 发出** ⇒ 全体用户共用同一个桶。
+ * 加上 AI 页面一次加载就会触发「拉模型 / 列 Key / 同步额度」三次取 token，
+ * 实测 login 请求量长期顶在阈值上（90 分钟 276 次，其中 108 次被 429 拒），
+ * 于是用户「开通中转站 / 输密码确认」时被限流打回 —— 而 NewAPI 的限流响应体是
+ * **空的**（`Content-Length: 0`），前端只能显示一句毫无线索的 `HTTP 429`。
+ *
+ * 现在改为：**先用缓存 token，只有它真的失效（NewAPI 明确回 token 无效）才重登一次并重试**。
+ * 正常路径下 login 次数从「每次操作 1 次」降到「几乎为 0」，同时保留自愈能力：
+ * 缓存被 disable/enable、转组等操作吊销时，用户无感（不会被迫重新绑定）。
+ */
+async function runWithUserToken<T>(
+  env: Env,
+  account: NewApiAccountRow,
+  fn: (token: string, userId: number) => Promise<T>
+): Promise<T> {
+  const cached = await readCachedCreds(env, account)
+  if (cached) {
+    try {
+      return await fn(cached.token, cached.userId)
+    } catch (err) {
+      // 只有「token 无效」才值得重登；限流 / 网络 / 业务错误原样抛出
+      if (!(err instanceof ApiError) || err.code !== "NEWAPI_TOKEN_INVALID") throw err
+    }
+  }
+  const fresh = await loginWithStoredPassword(env, account)
+  return fn(fresh.token, fresh.userId)
+}
+
+/** 把「用户 access token 失效」统一转成 USER_TOKEN_EXPIRED，前端据此弹出重新绑定框。
+ *  其余错误原样抛出。 */
+function mapUserTokenError(err: unknown): unknown {
+  if (err instanceof ApiError && err.code === "NEWAPI_TOKEN_INVALID") {
+    return new ApiError(
+      401,
+      "你的中转站登录已失效，请重新输入密码绑定",
+      "USER_TOKEN_EXPIRED"
+    )
+  }
+  return err
 }
 
 /** POST /api/dev/sync —— 拉取最新额度用量 */
@@ -227,8 +438,14 @@ export async function syncAccount(env: Env, request: Request): Promise<Response>
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
 
-  const { token, userId } = await decryptAccountToken(env, account)
-  const self = await getUserSelf(env, token, userId)
+  let self
+  try {
+    self = await runWithUserToken(env, account, (token, userId) =>
+      getUserSelf(env, token, userId)
+    )
+  } catch (err) {
+    throw mapUserTokenError(err)
+  }
   const currency = await getCurrencyInfo(env)
   const now = new Date().toISOString()
 
@@ -312,7 +529,9 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
   }
 
   const existing = await loadAccount(env, user.id)
-  if (existing) {
+  // 已真绑定（有真实 access token）→ 拒绝重复开通。
+  // 但「自动认领」的账号 enc_token 是哨兵值 NO_TOKEN，允许继续走补密码流程。
+  if (existing && existing.enc_token !== NO_TOKEN_SENTINEL) {
     throw new ApiError(409, "你已经开通过 AI 中转站了", "ALREADY_BOUND")
   }
 
@@ -321,6 +540,18 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
   if (password.length < 8) {
     throw new ApiError(400, "密码至少需要 8 位", "WEAK_PASSWORD")
   }
+
+  // 限流（2026-09-30 补）：这一步在校验「用户的 cloud 登录密码」，是本模块
+  // 唯一可被在线爆破的密码校验点 —— 会话被盗后攻击者能无限次试密码，
+  // 一旦命中就等价于拿到该用户在 NewAPI 的账号。此前这里完全没有限流，
+  // 与 `handlers/auth.ts` 的改密码接口（有 20 次/15 分钟）严重不对称。
+  await guardRateLimit(
+    env,
+    `newapi-bind:user:${user.id}`,
+    10,
+    600,
+    "密码尝试过于频繁，请稍后再试"
+  )
 
   // ⚠️ 「复用 cloud 密码」：先验证用户输入的确实是本站密码，
   // 才把它同步设到 NewAPI。这样开通后两边共用同一个密码。
@@ -367,6 +598,25 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
     )
   }
 
+  // 2.5 转组必须在「换 access token」之前做。
+  // NewAPI 的 EditWithTx 里 group 变化会触发 AuthVersion++ 并吊销该用户所有
+  // session/access token；若放在 login 之后，会把刚换到的 token 立刻吊销，
+  // 表现为「绑定成功但建 Key 报 not logged in」。先转组、再 login，token 才能拿到
+  // group 已定型之后的版本。
+  // 失败不阻断开通主流程，只记审计（group 默认值在多数场景本来就一致）。
+  try {
+    await adminSetUserGroup(env, remote.id, username, settings2.newapi_group)
+  } catch (err) {
+    await audit(
+      env,
+      user.id,
+      "newapi.group_sync_failed",
+      `开通时转组到 ${settings2.newapi_group} 失败：${
+        err instanceof Error ? err.message : String(err)
+      }`
+    )
+  }
+
   // 3. 登录直接拿长期 access token（rc.40 起登录响应里直接返回 access_token）
   const loginResult = await login(env, username, password)
   const accessToken = loginResult.accessToken
@@ -376,8 +626,17 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
 
   await env.DB.prepare(
     `INSERT INTO newapi_accounts
-       (user_id, newapi_user_id, username, email, enc_token, group_name, quota, used_quota, request_count, synced_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`
+       (user_id, newapi_user_id, username, email, enc_token, enc_password, group_name, quota, used_quota, request_count, synced_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET
+       newapi_user_id = excluded.newapi_user_id,
+       username = excluded.username,
+       email = excluded.email,
+       enc_token = excluded.enc_token,
+       enc_password = excluded.enc_password,
+       group_name = excluded.group_name,
+       quota = excluded.quota,
+       synced_at = excluded.synced_at`
   )
     .bind(
       user.id,
@@ -385,6 +644,7 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
       username,
       email,
       await encryptSecret(accessToken, secret),
+      await encryptSecret(password, secret),
       settings2.newapi_group,
       unlimited ? 0 : Number(settings2.newapi_trial_quota),
       now,
@@ -398,6 +658,29 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
     "newapi.bind",
     `开通 AI 中转站账号 ${username} (id ${loginResult.userId})，通过 OIDC 绑定并复用 cloud 密码`
   )
+
+  // 开通后自动领免费订阅（plan_id 由设置项 newapi_free_plan_id 决定，0 = 不自动开）。
+  // 失败不阻断开通主流程（账号已建、已绑），只记审计 —— 用户仍可在页面手动领。
+  const freePlanId = Number(settings2.newapi_free_plan_id ?? "0")
+  if (Number.isFinite(freePlanId) && freePlanId > 0) {
+    try {
+      const sub = await adminGrantSubscription(env, loginResult.userId, freePlanId)
+      await audit(
+        env,
+        user.id,
+        "newapi.subscribe",
+        `开通时自动领取免费订阅（套餐 ${freePlanId}）${sub.message ? "：" + sub.message : ""}`
+      )
+    } catch (err) {
+      console.error("开通后自动领订阅失败:", err)
+      await audit(
+        env,
+        user.id,
+        "newapi.subscribe_failed",
+        `开通后自动领订阅失败：${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
 
   return json(
     {
@@ -445,23 +728,27 @@ export async function createKey(env: Env, request: Request): Promise<Response> {
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
 
+  // 必须先领取免费订阅才能创建 Key（免费额度来自订阅的每日发放）
+  const sub = await listUserSubscriptions(env, account.newapi_user_id)
+  if (!sub) {
+    throw new ApiError(403, "请先领取免费订阅，再创建 API Key", "SUBSCRIPTION_REQUIRED")
+  }
+
   const body = (await request.json()) as { name?: string; group?: string }
   const name = (body.name ?? "").trim().slice(0, 50) || `doulor-${user.username}`
 
-  // 分组：默认使用 default 分组；用户也可选付费分组。
-  // 必须是 NewAPI 侧真实存在的分组，避免建出用不了的 Key。
-  const pricing = await listPricing(env)
-  const availableGroups = collectGroups(pricing)
-  const defaultGroup = availableGroups.includes("default")
-    ? "default"
-    : (availableGroups[0] ?? "")
-  const group = (body.group ?? "").trim() || defaultGroup
-  if (availableGroups.length > 0 && !availableGroups.includes(group)) {
-    throw new ApiError(400, "无效的分组", "INVALID_GROUP")
-  }
+  // 分组固定为 default（免费分组），不允许用户自选付费/其他分组。
+  // 用户侧的免费额度来自订阅，付费分组由管理员单独开通。
+  const group = "default"
 
-  const { token, userId } = await decryptAccountToken(env, account)
-  const created = await createApiKey(env, token, userId, name, group)
+  let created
+  try {
+    created = await runWithUserToken(env, account, (token, userId) =>
+      createApiKey(env, token, userId, name, group)
+    )
+  } catch (err) {
+    throw mapUserTokenError(err)
+  }
 
   const now = new Date().toISOString()
   await env.DB.prepare(
@@ -511,11 +798,14 @@ export async function removeKey(
     .first<{ id: string; token_id: number; name: string }>()
   if (!row) throw new ApiError(404, "Key 不存在", "NOT_FOUND")
 
-  const { token, userId } = await decryptAccountToken(env, account)
   try {
-    await deleteApiKey(env, token, userId, row.token_id)
+    await runWithUserToken(env, account, (token, userId) =>
+      deleteApiKey(env, token, userId, row.token_id)
+    )
   } catch (err) {
-    // NewAPI 侧已删除时不阻断本地清理
+    // NewAPI 侧已删除时不阻断本地清理（但 token 失效仍要转给前端引导重绑）
+    const mapped = mapUserTokenError(err)
+    if (mapped !== err) throw mapped
     console.error("NewAPI 删除 Key 失败:", err)
   }
 
@@ -534,8 +824,14 @@ export async function syncKeys(env: Env, request: Request): Promise<Response> {
   const account = await loadAccount(env, user.id)
   if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
 
-  const { token, userId } = await decryptAccountToken(env, account)
-  const remote = await listTokens(env, token, userId)
+  let remote
+  try {
+    remote = await runWithUserToken(env, account, (token, userId) =>
+      listTokens(env, token, userId)
+    )
+  } catch (err) {
+    throw mapUserTokenError(err)
+  }
 
   const known = await env.DB.prepare(
     "SELECT token_id FROM newapi_keys WHERE user_id = ?"
@@ -598,8 +894,19 @@ export async function redeem(env: Env, request: Request): Promise<Response> {
   if (!code) throw new ApiError(400, "请输入兑换码", "INVALID_INPUT")
   if (code.length > 128) throw new ApiError(400, "兑换码过长", "INVALID_INPUT")
 
-  const { token, userId } = await decryptAccountToken(env, account)
-  const result = await redeemCode(env, token, userId, code)
+  let result
+  // 记下实际用到的凭据，供下方「兑换后同步额度」复用（少一次取 token）
+  let token = ""
+  let userId = account.newapi_user_id
+  try {
+    result = await runWithUserToken(env, account, (t, u) => {
+      token = t
+      userId = u
+      return redeemCode(env, t, u, code)
+    })
+  } catch (err) {
+    throw mapUserTokenError(err)
+  }
 
   // 兑换成功后立即同步最新额度，前端无需再点一次同步
   let quota = account.quota
@@ -640,6 +947,39 @@ export async function redeem(env: Env, request: Request): Promise<Response> {
   })
 }
 
+// ---- 领取免费订阅 ----
+
+/**
+ * POST /api/dev/subscribe —— 给当前用户开通「免费套餐」订阅（免支付，立即生效）。
+ * 订阅发放周期额度（如每天 ¥1000），是「免费额度」的正规机制。
+ * 套餐 id 来自设置项 newapi_free_plan_id（默认 1），0 表示未配置免费套餐。
+ */
+export async function grantSubscription(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "ai")
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
+
+  const settings = await getSettings(env)
+  const planId = Number(settings.newapi_free_plan_id ?? "0")
+  if (!Number.isFinite(planId) || planId <= 0) {
+    throw new ApiError(503, "暂未开放免费订阅", "NO_FREE_PLAN")
+  }
+
+  const result = await adminGrantSubscription(env, account.newapi_user_id, planId)
+  if (!result.ok) {
+    throw new ApiError(502, `开通订阅失败：${result.message}`, "NEWAPI_ERROR")
+  }
+
+  await audit(
+    env,
+    user.id,
+    "newapi.subscribe",
+    `领取免费订阅（套餐 ${planId}）${result.message ? "：" + result.message : ""}`
+  )
+
+  return json({ message: result.message || "已领取免费订阅" })
+}
+
 // ---- 修改中转站密码 ----
 
 /**
@@ -666,15 +1006,30 @@ export async function changePassword(env: Env, request: Request): Promise<Respon
     throw new ApiError(400, "新密码至少需要 8 位", "WEAK_PASSWORD")
   }
 
-  const { token, userId } = await decryptAccountToken(env, account)
-  await changePasswordRemote(
+  // 限流（2026-09-30 补）：`currentPassword` 会被送到 NewAPI 校验，
+  // 不放行就是又一个可无限爆破的口令校验点。
+  await guardRateLimit(
     env,
-    token,
-    userId,
-    account.username,
-    currentPassword,
-    newPassword
+    `newapi-password:user:${user.id}`,
+    10,
+    600,
+    "密码尝试过于频繁，请稍后再试"
   )
+
+  try {
+    await runWithUserToken(env, account, (token, userId) =>
+      changePasswordRemote(
+        env,
+        token,
+        userId,
+        account.username,
+        currentPassword,
+        newPassword
+      )
+    )
+  } catch (err) {
+    throw mapUserTokenError(err)
+  }
 
   await audit(env, user.id, "newapi.password.change", "修改中转站密码")
   return json({ ok: true, message: "中转站密码已修改" })
@@ -696,7 +1051,7 @@ function shouldHaveAiAccess(
   permissionsRaw: string | null | undefined,
   openFeatures: Set<string>
 ): boolean {
-  if (role === "admin") return true
+  if (role === "admin" || role === "root") return true
   const perms = parsePermissions(permissionsRaw)
   if (hasFeature(perms, "ai")) return true
   return openFeatures.has("ai")
@@ -727,7 +1082,10 @@ export interface NewApiSyncResult {
  * 且 NewAPI 的 disable 会清 token 缓存，代价不低，不宜高频触发。
  * 管理员（admin）永远豁免，不会被禁用。
  */
-export async function syncPermissionState(env: Env): Promise<NewApiSyncResult> {
+export async function syncPermissionState(
+  env: Env,
+  opts: { username?: string } = {}
+): Promise<NewApiSyncResult> {
   const result: NewApiSyncResult = {
     removedOrphans: 0,
     disabled: 0,
@@ -741,14 +1099,22 @@ export async function syncPermissionState(env: Env): Promise<NewApiSyncResult> {
     (await getSetting(env, "open_features")) ?? ""
   )
 
-  // 拉取所有已开通的 cloud 用户及其 NewAPI 账号
-  const rows = await env.DB.prepare(
+  // 拉取已开通的 cloud 用户及其 NewAPI 账号。
+  //
+  // ⚠️ `opts.username` 是「只对齐某一个人」用的，**不是**可选的优化：
+  //    全量同步要逐个用户调一次 NewAPI，线上已有 170+ 个账号，直接撞满 Worker
+  //    的 subrequest 上限（这正是这个定时任务被停掉的原因，见 maintenance.ts 第 6 条）。
+  //    所以「某个用户的账号状态不对」时，管理端必须能把范围收窄到 1 个人（1~2 次 subrequest）。
+  const sql =
     `SELECT na.user_id, na.newapi_user_id, na.username,
             u.role, u.permissions
        FROM newapi_accounts na
        JOIN users u ON u.id = na.user_id
-      WHERE u.status = 'active'`
-  ).all<{
+      WHERE u.status = 'active'` +
+    (opts.username ? " AND na.username = ? COLLATE NOCASE" : "")
+
+  const stmt = env.DB.prepare(sql)
+  const rows = await (opts.username ? stmt.bind(opts.username) : stmt).all<{
     user_id: string
     newapi_user_id: number
     username: string
@@ -807,6 +1173,17 @@ export async function adminSyncPermissions(
   request: Request
 ): Promise<Response> {
   await requireAdmin(env, request)
-  const result = await syncPermissionState(env)
-  return json({ ...result })
+
+  // 可选：只对齐**一个**用户（`?username=` 或 body `{username}`）。
+  // 不带就是全量 —— 线上 170+ 个账号会撞 subrequest 上限，除非确实需要，
+  // 否则管理端一律带用户名调（成员详情的「对齐中转站状态」按钮就是这么用的）。
+  const url = new URL(request.url)
+  let username = (url.searchParams.get("username") ?? "").trim()
+  if (!username) {
+    const body = (await request.json().catch(() => ({}))) as { username?: unknown }
+    username = typeof body.username === "string" ? body.username.trim() : ""
+  }
+
+  const result = await syncPermissionState(env, username ? { username } : {})
+  return json({ ...result, username: username || null })
 }

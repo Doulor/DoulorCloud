@@ -938,6 +938,9 @@ export default function StoragePage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 顶部「使用协议」按钮打开的协议全文弹窗 */}
+      <AgreementDialog open={agreementOpen} onOpenChange={setAgreementOpen} />
     </div>
   )
 }

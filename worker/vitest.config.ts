@@ -24,6 +24,10 @@ export default defineConfig(async () => {
             //     「库内无行时回落 env」这条路径
             //   - SESSION_SECRET：加密入库的管理员凭据要它派生 AES-GCM 密钥
             // 值均为假值；测试里所有发往 NewAPI 的出站请求都被打桩接管。
+            // Cloudflare 管理 API：额度面板要它才不短路（resolveApiToken）。
+            // 值必须是假的 —— 测试里所有发往 api.cloudflare.com 的请求都被打桩。
+            ACCOUNT_ID: "test-account-id",
+            CLOUDFLARE_API_TOKEN: "test-cf-api-token-1234",
             NEWAPI_BASE_URL: "https://api.doulor.cn",
             NEWAPI_ADMIN_TOKEN: "test-env-admin-token-1234",
             NEWAPI_ADMIN_USER_ID: "1",

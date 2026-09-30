@@ -40,6 +40,7 @@ import {
 import { CSS } from "@dnd-kit/utilities"
 
 import { PageHeader } from "@/components/page-header"
+import { DataFade } from "@/components/data-fade"
 import {
   Card,
   CardContent,
@@ -60,7 +61,7 @@ import {
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import { formatBytesShort } from "@/lib/format"
-import { authApi, newapiApi, profileApi, announcementApi, errMsg } from "@/services/api"
+import { authApi, newapiApi, profileApi, announcementApi, errMsg, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 import type {
   Announcement,
@@ -98,7 +99,12 @@ function AiCard() {
       .status()
       .then((res: NewApiStatus) => !cancelled && setStatus(res))
       .catch((err) => {
-        if (!cancelled) toast.error(errMsg(err, "AI 服务状态加载失败"))
+        if (cancelled) return
+        // 无权限（未解锁 AI 中转站）是新用户的正常状态，静默显示「未绑定」，不弹错误
+        if (err instanceof HttpError && err.code === "FEATURE_NOT_PERMITTED") {
+          return
+        }
+        toast.error(errMsg(err, "AI 服务状态加载失败"))
       })
       .finally(() => !cancelled && setLoading(false))
     return () => {
@@ -130,9 +136,8 @@ function AiCard() {
         </Button>
       </CardHeader>
       <CardContent className="space-y-3">
-        {loading ? (
-          <Skeleton className="h-20 w-full" />
-        ) : !acc ? (
+        <DataFade loading={loading} skeleton={<Skeleton className="h-20 w-full" />}>
+        {!acc ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
             尚未绑定 AI 中转站，前往开通
           </p>
@@ -158,6 +163,50 @@ function AiCard() {
                 <p className="text-sm font-semibold">{acc.requestCount ?? 0}</p>
               </div>
             </div>
+            {status?.subscription ? (
+              <div className="rounded-md border p-3">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">免费订阅 · 今日剩余</span>
+                  <span className="font-medium">
+                    {symbol}
+                    {(
+                      (status.subscription.amountTotal -
+                        status.subscription.amountUsed) /
+                      500000
+                    ).toFixed(2)}
+                  </span>
+                </div>
+                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-primary"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        Math.max(
+                          0,
+                          ((status.subscription.amountTotal -
+                            status.subscription.amountUsed) /
+                            status.subscription.amountTotal) *
+                            100
+                        )
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-md border p-3 text-xs text-muted-foreground">
+                尚未领取免费订阅，领取后每天自动发放额度。
+                <Button
+                  variant="link"
+                  size="sm"
+                  className="h-auto p-0"
+                  asChild
+                >
+                  <Link to="/dashboard/ai">去领取</Link>
+                </Button>
+              </div>
+            )}
             <div className="flex items-center gap-2 rounded-md border px-3 py-2">
               <span className="text-xs text-muted-foreground">Base URL</span>
               <code className="flex-1 truncate font-mono text-xs">{NEWAPI_BASE_URL}</code>
@@ -182,7 +231,7 @@ function AiCard() {
               )}
             </div>
           </>
-        )}
+        )}</DataFade>
       </CardContent>
     </Card>
   )
@@ -232,9 +281,8 @@ function ProfileCard({ compact = false }: { compact?: boolean }) {
         )}
       </CardHeader>
       <CardContent className={compact ? "min-h-0 flex-1 flex flex-col justify-center" : ""}>
-        {loading ? (
-          <Skeleton className="h-20 w-full" />
-        ) : !p ? (
+        <DataFade loading={loading} skeleton={<Skeleton className="h-20 w-full" />}>
+        {!p ? (
           <div className="space-y-3">
             <p className="py-2 text-center text-sm text-muted-foreground">
               还没开通个人名片
@@ -268,7 +316,7 @@ function ProfileCard({ compact = false }: { compact?: boolean }) {
               <Copy className="h-3.5 w-3.5" />
             </Button>
           </div>
-        )}
+        )}</DataFade>
       </CardContent>
     </Card>
   )
@@ -313,13 +361,12 @@ function RecentMailCard({
         </div>
       </CardHeader>
       <CardContent className={compact ? "min-h-0 flex-1 overflow-y-auto" : ""}>
-        {loading ? (
-          <div className="space-y-2">
+        <DataFade loading={loading} skeleton={<div className="space-y-2">
             <Skeleton className="h-8 w-full" />
             <Skeleton className="h-8 w-full" />
             <Skeleton className="h-8 w-full" />
-          </div>
-        ) : shown.length ? (
+          </div>}>
+        {shown.length ? (
           <div className="space-y-1">
             {shown.map((m) => (
               <Link
@@ -348,7 +395,7 @@ function RecentMailCard({
           <p className="py-6 text-center text-sm text-muted-foreground">
             还没有收到邮件
           </p>
-        )}
+        )}</DataFade>
       </CardContent>
     </Card>
   )
@@ -385,9 +432,8 @@ function StorageCard({ data, loading }: { data: MeResponse | null; loading: bool
         </Button>
       </CardHeader>
       <CardContent className="space-y-3">
-        {loading ? (
-          <Skeleton className="h-20 w-full" />
-        ) : !enabled ? (
+        <DataFade loading={loading} skeleton={<Skeleton className="h-20 w-full" />}>
+        {!enabled ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
             网盘未开通，前往管理页开通
           </p>
@@ -443,7 +489,7 @@ function StorageCard({ data, loading }: { data: MeResponse | null; loading: bool
               </div>
             )}
           </>
-        )}
+        )}</DataFade>
       </CardContent>
     </Card>
   )
@@ -495,11 +541,11 @@ function AnnouncementPopup() {
 
   return (
     <Dialog open={true} onOpenChange={(o) => !o && close(false)}>
-      <DialogContent>
+      <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{popup.title}</DialogTitle>
         </DialogHeader>
-        <div className="max-h-72 overflow-y-auto">
+        <div className="announcement-scroll max-h-[60vh] overflow-y-auto pr-3">
           <Markdown>{popup.body}</Markdown>
         </div>
         <DialogFooter className="flex-col gap-2 sm:flex-row sm:justify-between">
@@ -560,12 +606,11 @@ function AnnouncementsCard() {
         </div>
       </CardHeader>
       <CardContent>
-        {loading ? (
-          <div className="space-y-2">
+        <DataFade loading={loading} skeleton={<div className="space-y-2">
             <Skeleton className="h-10 w-full" />
             <Skeleton className="h-10 w-full" />
-          </div>
-        ) : items.length === 0 ? (
+          </div>}>
+        {items.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">
             暂无动态
           </p>
@@ -587,7 +632,7 @@ function AnnouncementsCard() {
               </div>
             ))}
           </div>
-        )}
+        )}</DataFade>
       </CardContent>
     </Card>
   )
@@ -614,10 +659,14 @@ function ResourceBadges({ data, loading }: { data: MeResponse | null; loading: b
             <it.icon className="h-3.5 w-3.5 text-muted-foreground" />
           </div>
           <div className="min-w-0">
+            {/* 这里刻意不用 DataFade：它是块级容器，会给这一行平添 2px 高度、顶动下方的标签。
+                徽章数字只需一个淡入，直接用动画类。 */}
             {loading ? (
               <Skeleton className="h-5 w-8" />
             ) : (
-              <p className="text-lg font-semibold leading-none tracking-tight">{it.value}</p>
+              <p className="animate-in fade-in duration-300 text-lg font-semibold leading-none tracking-tight">
+                {it.value}
+              </p>
             )}
             <p className="mt-1 text-xs text-muted-foreground">{it.label}</p>
           </div>
@@ -672,12 +721,11 @@ function RecentActivityCard({ data, loading }: { data: MeResponse | null; loadin
         </div>
       </CardHeader>
       <CardContent>
-        {loading ? (
-          <div className="space-y-2">
+        <DataFade loading={loading} skeleton={<div className="space-y-2">
             <Skeleton className="h-8 w-full" />
             <Skeleton className="h-8 w-full" />
-          </div>
-        ) : items.length === 0 ? (
+          </div>}>
+        {items.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">暂无活动记录</p>
         ) : (
           <div className="space-y-1">
@@ -689,7 +737,7 @@ function RecentActivityCard({ data, loading }: { data: MeResponse | null; loadin
                 <div className="min-w-0 flex-1">
                   <span className="text-muted-foreground">{a.action}</span>
                   {a.detail && (
-                    <span className="ml-2 truncate text-xs text-muted-foreground/70">
+                    <span className="ml-2 block truncate text-xs text-muted-foreground/70">
                       {a.detail}
                     </span>
                   )}
@@ -700,7 +748,7 @@ function RecentActivityCard({ data, loading }: { data: MeResponse | null; loadin
               </div>
             ))}
           </div>
-        )}
+        )}</DataFade>
       </CardContent>
     </Card>
   )
@@ -845,8 +893,15 @@ function SortableColumn({
   return (
     <div
       ref={setNodeRef}
+      // ⚠️ min-w-0 不能删（2026-09-29 修）：这一列是 grid 的子项，而 grid/flex 子项默认
+      // min-width:auto —— 意思是「最小宽度 = 内容的最小内容宽度」，**不允许收缩**。
+      // 卡片里的 truncate 元素（white-space:nowrap）在没有确定宽度可依时，其最小内容宽度
+      // 等于「整段文本不换行时的宽度」，这个宽度会一路上传，把整个列（乃至页面）撑爆。
+      // 表现就是站长看到的那样：卡片加载前是骨架屏（宽度小）版式正常，**一加载完就变宽**，
+      // 并把顶栏顶出去。min-w-0 把「最小宽度」改回 0，列宽就严格等于容器宽，
+      // 里面的 truncate 也才有确定宽度可用、才会正常出省略号。
       className={cn(
-        "space-y-6 rounded-xl p-1 transition-colors",
+        "min-w-0 space-y-6 rounded-xl p-1 transition-colors",
         editing && isOver && "bg-primary/5"
       )}
     >

@@ -19,6 +19,7 @@ import * as React from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkBreaks from "remark-breaks"
+import { FunLinkIcon } from "@/components/fun-link-icon"
 import { communityApi } from "@/services/api"
 import type { LinkPreview } from "@/types"
 
@@ -30,6 +31,13 @@ function LinkCard({ href }: { href: string }) {
   const [preview, setPreview] = React.useState<LinkPreview | null | undefined>(
     previewCache.get(href)
   )
+  /** og:image 加载失败时回退到站点图标（别留一块空白把文字挤到左边） */
+  const [imageFailed, setImageFailed] = React.useState(false)
+  const imageUrl = preview?.image ?? ""
+
+  React.useEffect(() => {
+    setImageFailed(false)
+  }, [imageUrl])
 
   React.useEffect(() => {
     if (previewCache.has(href)) return
@@ -79,23 +87,27 @@ function LinkCard({ href }: { href: string }) {
   }
 
   // 有预览：渲染卡片
+  //
+  // 左侧永远占一块（80×80）：有 og:image 就铺大图，没有就用站点图标，
+  // 连图标都没有（或加载失败）时回退成首字母色块 —— 否则文字会紧贴卡片
+  // 左边缘，看着像坏了（QQ 群邀请页这类没 og:image 的页面以前就是这样）。
   return (
     <a
       href={href}
       target="_blank"
       rel="noopener noreferrer nofollow"
-      className="mt-2 flex gap-3 overflow-hidden rounded-lg border bg-card transition-colors hover:bg-accent/40"
+      className="glass-card mt-2 flex gap-3 overflow-hidden rounded-lg border transition-colors hover:bg-accent/40"
     >
-      {preview.image && (
+      {preview.image && !imageFailed ? (
         <img
           src={preview.image}
           alt=""
           loading="lazy"
           className="h-20 w-20 shrink-0 object-cover"
-          onError={(e) => {
-            ;(e.target as HTMLImageElement).style.display = "none"
-          }}
+          onError={() => setImageFailed(true)}
         />
+      ) : (
+        <FunLinkIcon src={preview.icon} title={preview.title} size={80} className="rounded-none" />
       )}
       <div className="min-w-0 flex-1 py-2 pr-3">
         <p className="truncate text-sm font-medium text-foreground">{preview.title}</p>

@@ -155,11 +155,37 @@ export async function loadUserQuota(env: Env, userId: string): Promise<UserQuota
 }
 
 /**
- * 校验并消耗额度以创建邀请码。
- * 抽取成独立函数是为了让「校验 → 扣减」在一次调用里完成，
- * 避免调用方漏检或重复扣减。
+ * `feature_quota_used` / `feature_quota` 的「安全 JSON 读写」SQL 表达式。
  *
- * 基础权限模块**不消耗模块额度**（只消耗 1 个邀请码额度）。
+ * 为什么不能直接写 `json_set(feature_quota_used, …)`：
+ *   1. 这两列**可空**（`0021_invite_quotas.sql:21,23` 都没有 NOT NULL），
+ *      而 `json_set(NULL, …)` 的结果是 **NULL** —— 等于把整个计数抹掉；
+ *   2. 历史数据里可能存在 `parseCounts()` 特意容错的那种损坏 JSON，
+ *      而 `json_extract` 遇到它**直接抛错**，会把请求打成 500。
+ *
+ * 所以统一先过 `json_valid` 兜底成 `{}`，与 `parseCounts()` 的「宁可少算」口径一致。
+ */
+const FEATURE_USED_JSON =
+  "CASE WHEN json_valid(feature_quota_used) THEN feature_quota_used ELSE '{}' END"
+const FEATURE_QUOTA_JSON =
+  "CASE WHEN json_valid(feature_quota) THEN feature_quota ELSE '{}' END"
+
+/**
+ * 校验并消耗额度以创建邀请码。
+ *
+ * ⚠️ 2026-09-25 审计（M1，旧 P2-5）：原实现是典型的**读-改-写**——
+ * `loadUserQuota()` 读出 `invite_quota_used`，在 JS 里 `+1`，再写回**绝对值**。
+ * 并发两次建码时两个请求都读到 0、都判定「还有额度」、都写回 1：
+ * 结果**建出 2 个码却只扣了 1 个额度**，模块额度同理。
+ * （邀请码的**消费**侧早就用条件 UPDATE 做对了，额度记账一直没对齐。）
+ *
+ * 修法与 P0-5 同一套路：把「校验 + 扣减」压进**一条** UPDATE。
+ * 单条 SQL 在 SQLite 里是原子的，守卫条件（`used < total`）在 WHERE 里求值，
+ * 所以并发时只有一个请求能改到行，另一个拿到 `changes === 0`。
+ *
+ * 为什么把邀请码额度与全部模块额度放进**同一条**语句：
+ * 分多条就会有「邀请码额度扣了、模块额度不够」的半成品状态，
+ * 而回滚已经改掉的计数很容易写错。一条语句要么全成、要么全不动。
  *
  * @param needs 本次创建需要的模块权限集合（来自 QUOTA_FEATURES）
  */
@@ -170,14 +196,6 @@ export async function consumeQuotaForInvite(
 ): Promise<void> {
   const quota = await loadUserQuota(env, userId)
 
-  if (quota.inviteRemaining < 1) {
-    throw new ApiError(
-      400,
-      `邀请码额度已用完（共 ${quota.inviteTotal} 个，已用 ${quota.inviteUsed} 个）。捐献资源可获得更多额度`,
-      "INVITE_QUOTA_EXCEEDED"
-    )
-  }
-
   // 同一模块在同一码里只算一次（去重）
   const unique = [...new Set(needs)]
   // 只对「受限模式」的模块校验并扣减模块额度
@@ -185,28 +203,61 @@ export async function consumeQuotaForInvite(
   for (const f of unique) {
     if (await isBasicFeature(env, f)) continue
     restricted.push(f)
-    if (quota.featureRemaining[f] < 1) {
-      throw new ApiError(
-        400,
-        `「${QUOTA_FEATURE_LABELS[f]}」权限额度不足。捐献该模块资源可获得额度`,
-        "FEATURE_QUOTA_EXCEEDED"
-      )
-    }
   }
 
-  const nextFeatureUsed = { ...quota.featureUsed }
-  for (const f of restricted) nextFeatureUsed[f] += 1
+  // 先做无副作用的预检，好让正常路径（非并发）给出精确的错误信息。
+  // 真正的把关在下面的原子 UPDATE —— 预检只是为了消息好看。
+  if (quota.inviteRemaining < 1) throw inviteQuotaError(quota)
+  for (const f of restricted) {
+    if (quota.featureRemaining[f] < 1) throw featureQuotaError(f)
+  }
 
-  await env.DB.prepare(
-    "UPDATE users SET invite_quota_used = ?, feature_quota_used = ?, updated_at = ? WHERE id = ?"
+  let jsonExpr = FEATURE_USED_JSON
+  const guards = ["COALESCE(invite_quota_used, 0) < ?"]
+  const guardBinds: unknown[] = [quota.inviteTotal]
+  for (const f of restricted) {
+    jsonExpr = `json_set(${jsonExpr}, '$.${f}', COALESCE(json_extract(${jsonExpr}, '$.${f}'), 0) + 1)`
+    // 守卫一律读**原始列**（SQLite 的 WHERE 在 SET 之前求值），保证是「扣减前」的值
+    guards.push(`COALESCE(json_extract(${FEATURE_USED_JSON}, '$.${f}'), 0) < ?`)
+    guardBinds.push(quota.featureQuota[f])
+  }
+
+  const res = await env.DB.prepare(
+    `UPDATE users
+        SET invite_quota_used = COALESCE(invite_quota_used, 0) + 1,
+            feature_quota_used = ${jsonExpr},
+            updated_at = ?
+      WHERE id = ? AND ${guards.join(" AND ")}`
   )
-    .bind(
-      quota.inviteUsed + 1,
-      JSON.stringify(nextFeatureUsed),
-      new Date().toISOString(),
-      userId
-    )
+    .bind(new Date().toISOString(), userId, ...guardBinds)
     .run()
+
+  if ((res.meta?.changes ?? 0) === 0) {
+    // 守卫没过。可能是并发时别人先扣掉了，也可能是用户行不存在。
+    // 重新读一次，给出准确原因（错误路径不追求性能）。
+    const fresh = await loadUserQuota(env, userId)
+    if (fresh.inviteRemaining < 1) throw inviteQuotaError(fresh)
+    for (const f of restricted) {
+      if (fresh.featureRemaining[f] < 1) throw featureQuotaError(f)
+    }
+    throw new ApiError(404, "用户不存在", "NOT_FOUND")
+  }
+}
+
+function inviteQuotaError(quota: UserQuota): ApiError {
+  return new ApiError(
+    400,
+    `邀请码额度已用完（共 ${quota.inviteTotal} 个，已用 ${quota.inviteUsed} 个）。捐献资源可获得更多额度`,
+    "INVITE_QUOTA_EXCEEDED"
+  )
+}
+
+function featureQuotaError(f: QuotaFeature): ApiError {
+  return new ApiError(
+    400,
+    `「${QUOTA_FEATURE_LABELS[f]}」权限额度不足。捐献该模块资源可获得额度`,
+    "FEATURE_QUOTA_EXCEEDED"
+  )
 }
 
 /**
@@ -216,69 +267,99 @@ export async function consumeQuotaForInvite(
  * 基础权限模块创建时不消耗模块额度（feature_used 保持 0），这里一律退回——
  * 对基础模块最多减到 0，无害；但对「创建时受限、删除时已被改为基础」的码，
  * 依然能把当时消耗的额度退回来，不会让用户白掉额度。
+ *
+ * ⚠️ 同样按 M1 改为**相对扣减**（`MAX(0, used - 1)`）：原实现写绝对值，
+ * 会把并发发生的扣减/发放整个覆盖掉。
  */
 export async function refundQuotaForInvite(
   env: Env,
   userId: string,
   gaveFeatures: QuotaFeature[]
 ): Promise<void> {
-  const quota = await loadUserQuota(env, userId)
-
-  const nextFeatureUsed = { ...quota.featureUsed }
+  let jsonExpr = FEATURE_USED_JSON
   for (const f of [...new Set(gaveFeatures)]) {
-    nextFeatureUsed[f] = Math.max(0, nextFeatureUsed[f] - 1)
+    jsonExpr = `json_set(${jsonExpr}, '$.${f}', MAX(0, COALESCE(json_extract(${jsonExpr}, '$.${f}'), 0) - 1))`
   }
 
   await env.DB.prepare(
-    "UPDATE users SET invite_quota_used = ?, feature_quota_used = ?, updated_at = ? WHERE id = ?"
+    `UPDATE users
+        SET invite_quota_used = MAX(0, COALESCE(invite_quota_used, 0) - 1),
+            feature_quota_used = ${jsonExpr},
+            updated_at = ?
+      WHERE id = ?`
   )
-    .bind(
-      Math.max(0, quota.inviteUsed - 1),
-      JSON.stringify(nextFeatureUsed),
-      new Date().toISOString(),
-      userId
-    )
+    .bind(new Date().toISOString(), userId)
     .run()
 }
 
 /**
  * 捐献获批时发放额度：+2 邀请码额度。
  * 仅「受限模式」的模块再 +1 对应模块额度；基础权限模块本就人人都能授，无需转授额度。
+ *
+ * ⚠️ 同样按 M1 改为**相对累加**，不再先读后写：
+ * 原实现下「发放」与「消费」并发时，谁后写谁的结果生效，
+ * 会静默丢掉另一次计数（管理员批了一笔捐献，用户却看不到额度增加）。
  */
 export async function grantQuotaForDonation(
   env: Env,
   userId: string,
   feature: string
 ): Promise<void> {
-  const quota = await loadUserQuota(env, userId)
+  const isQuotaFeature = (QUOTA_FEATURES as readonly string[]).includes(feature)
 
-  const nextQuota = { ...quota.featureQuota }
-  if (
-    (QUOTA_FEATURES as readonly string[]).includes(feature) &&
-    !(await isBasicFeature(env, feature as QuotaFeature))
-  ) {
-    nextQuota[feature as QuotaFeature] += 1
+  let quotaExpr = FEATURE_QUOTA_JSON
+  if (isQuotaFeature && !(await isBasicFeature(env, feature as QuotaFeature))) {
+    const f = feature as QuotaFeature
+    quotaExpr = `json_set(${quotaExpr}, '$.${f}', COALESCE(json_extract(${quotaExpr}, '$.${f}'), 0) + 1)`
   }
 
   await env.DB.prepare(
-    "UPDATE users SET invite_quota_bonus = ?, feature_quota = ?, updated_at = ? WHERE id = ?"
+    `UPDATE users
+        SET invite_quota_bonus = COALESCE(invite_quota_bonus, 0) + ?,
+            feature_quota = ${quotaExpr},
+            updated_at = ?
+      WHERE id = ?`
   )
-    .bind(
-      quota.inviteBonus + INVITE_BONUS_PER_DONATION,
-      JSON.stringify(nextQuota),
-      new Date().toISOString(),
-      userId
-    )
+    .bind(INVITE_BONUS_PER_DONATION, new Date().toISOString(), userId)
     .run()
 }
 
 /**
- * 从邀请码的权限对象里取出涉及模块额度的部分（权限为 true 的 QUOTA_FEATURES）。
- * 注意：这里不过滤基础权限模块——是否该退还由调用方配合当前设置判断
- * （见 refundQuotaForInvite 内的 getBasicFeatures 过滤）。
+ * ⚠️ 2026-09-25 审计（L25）：这里原先有一个
+ *   `quotaFeaturesOf(permissions: { [k: string]: boolean }): QuotaFeature[]`
+ * 已**删除**。它是 L25 那个 bug 的直接入口：签名要求调用方先拿到一个
+ * 「权限对象」，而唯一的拿法就是 `parsePermissions(row.permissions)` ——
+ * 偏偏 `parsePermissions(null)` 的语义是「**全开**」（为兼容老用户，
+ * 见 permissions.ts:10），于是删掉一个 `permissions` 为 NULL 的历史邀请码
+ * 会一次退还全部 4 个模块额度，「建码 → 删码」循环即可凭空刷额度。
+ *
+ * 两个调用点（my-invites.ts、handlers/admin.ts）都已改用下面这个
+ * 直接吃**库里原始文本**的版本。把它删掉而不是留着，是为了让
+ * 「先 parsePermissions 再取特征」这条错路在类型层面就走不通 ——
+ * 留着它，下一个人还会照着旧代码写回去。
  */
-export function quotaFeaturesOf(permissions: {
-  [k: string]: boolean
-}): QuotaFeature[] {
-  return QUOTA_FEATURES.filter((f) => permissions[f] === true)
+
+/**
+ * 从**库里存的原始 JSON 文本**解析出该邀请码实际消耗过额度的模块。
+ *
+ * ⚠️ 2026-09-25 审计（L25）：退还额度的调用点原先写的是
+ * `quotaFeaturesOf(parsePermissions(row.permissions))`，而
+ * `parsePermissions(null)` 的语义是「**全开**」（为了兼容老用户，见 permissions.ts:10）。
+ * 于是删掉一个 `permissions` 为 NULL 的历史邀请码会**一次退还全部 4 个模块额度** ——
+ * 「建码 → 删码」循环就能凭空刷出模块额度。
+ *
+ * 退还方向必须**保守**：只有明确写着 `true` 的才算消耗过。
+ * NULL / 空串 / 损坏 JSON 一律按「没消耗过任何模块额度」处理（只退 1 个邀请码额度）。
+ */
+export function quotaFeaturesFromStored(
+  raw: string | null | undefined
+): QuotaFeature[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (typeof parsed !== "object" || parsed === null) return []
+    return QUOTA_FEATURES.filter((f) => parsed[f] === true)
+  } catch {
+    return []
+  }
 }

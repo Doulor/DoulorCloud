@@ -105,12 +105,55 @@ function contactLink(c: Contact): { href: string | null; label: string; icon: st
       }
     }
     case "qq": {
-      // QQ 的头像 API 只认数字号；带前缀（"QQ: 123"）或整条链接都先归一化
-      const qq = bareId(v, [])
+      // QQ 加好友链接的两种来源，体验和用途完全不同，所以**先区分再处理**：
+      //
+      // 1. 用户粘贴 QQ 里「分享」得到的加好友内容。真实形态常带一段文案，例如
+      //      「点击链接加我为QQ好友：https://qm.qq.com/q/5uAkInIOJi」
+      //    也可能直接是链接本体（短链 /q/xxx，或二维码页 cgi-bin/qm/qr?k=…）。
+      //    这是**加好友的正道**——腾讯内部用加密 token 验证「本人主动分享的邀请」，
+      //    扫/点开后是「加好友」而不是「咨询客服」。token 无法用 QQ 号反推，
+      //    只能用户分享时拿一次。⇒ 用正则从整段文本里**搜索**出链接本体。
+      //
+      // 2. 只填了 QQ 数字号。这时只能用 `wpa.qq.com/msgrd`，但它是腾讯给
+      //    **商家/商户**用的客服通道，点开是「请选择沟通方式 / 唤起客户端」，
+      //    不是加好友、也不是个人主页。体验差但聊胜于无（至少能唤起 QQ 客户端）。
+      //    注意：填错号码就会跳到「不知道什么地方」，那是号码错了，不是链接问题。
+      //
+      // ⚠️ 2026-09-25 历史：曾硬编码第三方 `res.abeim.cn/api/qq/`（该域名已全线失联）。
+      const trimmed = v.trim()
+
+      // QQ 显示文字归一化：用户填纯数字（QQ 号）时自动补「QQ 」前缀，
+      // 与旁边「GitHub Doulor」「Bilibili 1307574205」等条目对齐；
+      // 已含「QQ」字样或自定义文字则原样保留，避免「QQ QQ 123」这类重复。
+      const qqLabel = (raw: string): string => {
+        const t = raw.trim()
+        if (!t) return t
+        if (/^qq\b/i.test(t)) return t // 已带 QQ 前缀
+        if (/^\d{4,12}$/.test(t)) return `QQ ${t}` // 纯数字 → 补前缀
+        return t
+      }
+
+      // 从整段文本里找 qm 链接本体（允许前后带「点击链接加我为QQ好友：」之类文案）
+      const qmLnk = trimmed.match(/https?:\/\/(?:www\.)?qm\.qq\.com\/(?:q\/[A-Za-z0-9_-]+|cgi-bin\/qm\/qr\?k=[A-Za-z0-9_-]+)/i)
+      if (qmLnk) {
+        // 强制 https，去掉可能粘进来的尾随斜杠/标点
+        const url = qmLnk[0].replace(/^http:/i, "https:").replace(/[\/.,，。]+$/, "")
+        // 显示文字：用户填了 label（通常是 QQ 号，方便别人不用点也能看到直接搜）优先；
+        // 否则尝试从内容里识别数字号；再退化成「QQ」
+        const num = trimmed.match(/\b\d{4,12}\b/)
+        return {
+          href: url,
+          label: qqLabel(c.label ?? "") || (num ? `QQ ${num[0]}` : "QQ"),
+          icon: "qq",
+        }
+      }
+
+      // 否则走数字号（带前缀 "QQ: 123" 也归一化）。该接口只认数字号。
+      const qq = bareId(trimmed, [])
       const ok = /^\d{4,12}$/.test(qq)
       return {
-        href: ok ? `https://res.abeim.cn/api/qq/?qq=${qq}` : null,
-        label: c.label || `QQ ${ok ? qq : v}`,
+        href: ok ? `https://wpa.qq.com/msgrd?v=3&uin=${qq}&site=qq&menu=yes` : null,
+        label: qqLabel(c.label ?? "") || `QQ ${ok ? qq : v}`,
         icon: "qq",
       }
     }
@@ -215,11 +258,21 @@ function escMultiline(s: string | null | undefined): string {
   return esc(s).replace(/\r\n|\r|\n/g, "<br>")
 }
 
-/** 只允许安全的 URL 进入 src/href（再次兜底，防 javascript:） */
+/**
+ * 只允许安全的 URL 进入 src/href（再次兜底，防 javascript:）。
+ *
+ * ⚠️ 2026-09-25 审计（L9）：原判断是 `t.startsWith("/")`，于是
+ * `//evil.com/x`（协议相对 URL）也被放行 —— 浏览器会把它当
+ * `https://evil.com/x` 处理。虽然 https 外链本来就是允许的，
+ * 但这里放行的是**看起来像站内相对路径**的字符串，容易被用来做
+ * 「本站域名开头的钓鱼链接」（`cloud.doulor.cn/u/x` 上显示的是站内路径，
+ * 点开却去了外站）。现在显式排除以 `//` 或 `/\` 开头的形式。
+ */
 function safeUrl(u: string | null): string | null {
   if (!u) return null
   const t = u.trim()
-  if (/^https?:\/\//i.test(t) || t.startsWith("/")) return t
+  if (/^https?:\/\//i.test(t)) return t
+  if (t.startsWith("/") && !/^\/[/\\]/.test(t)) return t
   return null
 }
 
@@ -373,6 +426,19 @@ a{color:inherit;text-decoration:none}
 .mod-title{font-size:var(--mod-title-size);font-weight:600;letter-spacing:var(--mod-title-ls);text-transform:uppercase;color:var(--mod-title-color,var(--text-dim));margin-bottom:14px;display:flex;align-items:center;gap:12px}
 .mod-title::after{content:"";flex:1;height:1px;background:var(--mod-title-rule)}
 
+/* 模块宽度（桌面端）。
+   只有当**有模块显式设过宽度**时，.mods 才从单列流式切成两列网格 —— 用 :has() 做开关，
+   于是老数据（没人设过宽度）逐像素保持原样，不存在「上线后所有人名片集体变样」。
+   ⚠️ 默认必须写成「所有模块先跨满整行，只有设了 half 的才占一列」。
+   反过来写（「只有设了 full 的才跨列」）会踩坑：没设宽度的模块身上**没有** data-size 属性，
+   不匹配任何规则，于是掉进 grid 的默认行为占 1 列 —— 变成半宽，比改动前更糟。
+   ⚠️ 排除 bento：那个骨架自己把 .mods 设成 display:contents，两列网格由它自己管。 */
+@media(min-width:641px){
+  body:not(.layout-bento) .mods:has(>[data-size]){display:grid;grid-template-columns:1fr 1fr;gap:var(--mod-gap)}
+  body:not(.layout-bento) .mods>.mod{grid-column:1/-1}
+  body:not(.layout-bento) .mods>[data-size="half"]{grid-column:span 1}
+}
+
 /* 联系方式 */
 .links{display:flex;flex-direction:column;gap:10px}
 .link{display:flex;align-items:center;gap:12px;padding:13px 16px;border-radius:var(--link-radius);font-size:14px;
@@ -412,6 +478,24 @@ a{color:inherit;text-decoration:none}
 .gallery figure:hover figcaption{opacity:1}
 
 /* 音乐播放器 */
+/* 音乐模块。
+   用 grid + 容器查询实现「歌词在播放器下面还是右边」：
+   网格本身常驻两列，默认两个子元素都跨满整行 ⇒ 上下排，与改动前视觉一致；
+   只有**模块自身**够宽时，才在容器查询里把两者分到左右两列。
+   ⚠️ 容器查询只能选中容器的**后代**，不能选中容器自己 —— 所以 grid 必须常驻在 .mod-music 上，
+   不能写进 @container 里（那样 .mod-music 不是它自己的后代，规则永远不生效）。
+   ⚠️ 容器是「模块自身宽度」而非视口宽度：同一个模块在 center 骨架里 460px、
+   在 bento 整宽里 780px，按视口宽度判断会判错。 */
+.mod-music{container-type:inline-size;display:grid;grid-template-columns:1fr 1fr;gap:0}
+.mod-music>audio{display:none}
+.mod-music>.player,.mod-music>.lyrics{grid-column:1/-1}
+/* 够宽才并排。620px 以下播放器分不到一半宽度，标题会被挤成省略号，不如上下排。
+   间距用 margin 而不是 grid gap：gap 写在容器自己身上，容器查询改不了它（只能改后代），
+   常驻 row-gap 又会让上下排时平白多出一段空隙。 */
+@container (min-width:620px){
+  .mod-music>.player{grid-column:1}
+  .mod-music>.lyrics{grid-column:2;margin-top:0;margin-left:12px}
+}
 .player{display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:var(--player-radius);font-size:12px;background:var(--player-bg);border:var(--player-border)}
 .player button{width:34px;height:34px;border-radius:50%;border:0;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:var(--player-btn-bg,var(--accent));color:var(--player-btn-color,#fff)}
 .player button svg{width:14px;height:14px}
@@ -425,8 +509,35 @@ a{color:inherit;text-decoration:none}
 .player .track .fill{height:100%;width:0;border-radius:2px;background:var(--accent);transition:width .1s linear}
 .player .time{font-size:10px;opacity:.55;font-variant-numeric:tabular-nums;flex-shrink:0}
 
+/* 歌词面板
+   配色全部复用各主题已有的 --player-* 变量，因此不用给 10 个主题各写一份。
+   无时间轴的纯文本歌词走 .lyrics-plain，去掉逐行高亮相关的样式。 */
+.lyrics{margin-top:8px;padding:8px 14px;border-radius:var(--player-radius);background:var(--player-bg);border:var(--player-border);overflow:hidden}
+/* 歌词面板只展示「当前行 + 下一行」：高度 = 2 × 行高 + 行间距。
+   ⚠️ 高度里的 em 必须落在 .lrc-inner **自己**身上。字号以前只写在 .lrc-line 上，
+   .lrc-inner 只继承页面基准字号（16px）⇒ calc(2*1.9em+12px) 按 16px 算成 73px，
+   而两行实际只占 ~46px，底下空一大截，卡片显得又高又空、歌词只占一点点。
+   现在把 font-size/line-height 提到 .lrc-inner，em 与行高同源，两行刚好填满。 */
+.lrc-inner{position:relative;font-size:12px;line-height:1.75;height:calc(2 * 1.75em + 4px);overflow:hidden}
+/* ⚠️ 基准 opacity 必须是 0：同一时刻只有 .on / .pre 两行可见。
+   以前写成 .42，于是**所有**没被标记的歌词都停在 translateY(0) 上 ——
+   全部叠在卡片最顶上、一直显示，这就是「歌词全堆在最上面」的根因。 */
+.lrc-line{position:absolute;left:0;right:0;font-size:inherit;line-height:inherit;text-align:center;color:var(--text);opacity:0;transition:transform .3s ease,opacity .18s ease;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 两行：上=当前(高亮)，下=下一行(半透明)。用 transform 定位，避免 layout 抖动 */
+.lrc-line.on{opacity:1;font-weight:600;transform:translateY(0)}
+.lrc-line.pre{opacity:.42;transform:translateY(calc(1.75em + 2px))}
+/* 没有时间轴的纯文本歌词：整段静态展示（那段文字直接放在 .lrc-inner 里，没有 .lrc-line 子元素），
+   不参与「两行」同步，也不受上面的 opacity:0 影响 */
+.lyrics-plain .lrc-inner{height:auto;line-height:1.9;text-align:center;color:var(--text);opacity:.72;white-space:pre-wrap}
+/* 「歌词在下面还是右边」的规则在 .mod-music 那段（需要容器查询，且容器不能选中自己） */
+
 /* 页脚统计 */
 .stats{margin-top:34px;text-align:center;font-size:11px;color:var(--text-dim);opacity:.85;letter-spacing:.06em}
+/* 署名行：始终渲染（不随「页脚统计」模块开关），紧跟 stats 时收紧间距 */
+.attribution{margin-top:34px;text-align:center;font-size:11px;color:var(--text-dim);opacity:.85;letter-spacing:.06em}
+.stats + .attribution{margin-top:10px}
+.attribution a{color:inherit;text-decoration:underline;text-underline-offset:2px}
+.attribution a:hover{color:var(--accent)}
 
 /* 背景图层 */
 .bg{position:fixed;inset:0;z-index:0;background-size:cover;background-position:center}
@@ -701,13 +812,22 @@ function cjkFontCss(cjkFont: string): string {
  */
 const LAYOUT_CSS: Record<string, string> = {
   side: `
-body.layout-side .wrap{max-width:780px;display:flex;gap:44px;align-items:flex-start}
-body.layout-side .hero{flex:0 0 240px;position:sticky;top:28px;align-items:flex-start;text-align:left}
-body.layout-side .mods{flex:1;min-width:0;margin-top:4px}
+/* 用 grid 而不是 flex：.wrap 的直接子元素除了 .hero / .mods 之外还有 .stats、
+   .attribution 两个 <footer>（DOM 是共用的，改不了顺序）。用 flex 时这四个会挤在
+   同一行里互相压缩，模块区被压成几像素宽 —— 必须显式分列分格。 */
+body.layout-side .wrap{max-width:820px;display:grid;
+  grid-template-columns:250px minmax(0,1fr);column-gap:44px;align-items:start}
+body.layout-side .hero{grid-column:1;grid-row:1/span 3;
+  position:sticky;top:28px;align-items:flex-start;text-align:left}
+body.layout-side .mods{grid-column:2;grid-row:1;min-width:0;margin-top:4px}
+/* 页脚两行跟在模块列下面，不再横跨整页、也不参与左栏 */
+body.layout-side .stats{grid-column:2;grid-row:2}
+body.layout-side .attribution{grid-column:2;grid-row:3}
 body.layout-side .status-pill{margin-top:12px}
 @media(max-width:640px){
-  body.layout-side .wrap{flex-direction:column;gap:26px}
-  body.layout-side .hero{position:static;flex-basis:auto;align-items:center;text-align:center}
+  body.layout-side .wrap{grid-template-columns:minmax(0,1fr);column-gap:0;row-gap:26px}
+  body.layout-side .hero{grid-column:1;grid-row:auto;position:static;align-items:center;text-align:center}
+  body.layout-side .mods,body.layout-side .stats,body.layout-side .attribution{grid-column:1;grid-row:auto}
 }`,
   split: `
 body.layout-split{justify-content:safe flex-end;padding-bottom:8vh;padding-top:48px}
@@ -741,8 +861,19 @@ body.layout-bento .mod{
   background:var(--mod-bg,rgba(127,127,140,.07));border:var(--mod-border,1px solid rgba(127,127,140,.12));
   border-radius:var(--mod-radius,18px);padding:18px;box-shadow:var(--mod-shadow,none);
   -webkit-backdrop-filter:var(--mod-blur,none);backdrop-filter:var(--mod-blur,none)}
-body.layout-bento .mod-gallery,body.layout-bento .mod-timeline,body.layout-bento .mod-links{grid-column:1/-1}
+/* 宽内容模块跨满整行：音乐卡是「封面 + 标题 + 进度条」的横排条，半宽会挤掉标题和时间，
+   且只有它一个模块时孤零零占左半边，很不对称 —— 所以和图片墙/大事记/联系方式一样跨列。 */
+body.layout-bento .mod-gallery,body.layout-bento .mod-timeline,body.layout-bento .mod-links,body.layout-bento .mod-music{grid-column:1/-1}
+/* 用户显式设过宽度时以用户为准，覆盖上面按模块类型写死的名单。
+   必须放在名单**之后**：同 specificity 时后者胜。
+   ⚠️ 但下面那条 :only-child 兜底 specificity 更高，会压过这里 —— 这是故意的：
+   「只有一个模块却只占半宽」比「用户想设半宽」更突兀，那种情况一律铺满整行。 */
+body.layout-bento .mod[data-size="half"]{grid-column:span 1}
+body.layout-bento .mod[data-size="full"]{grid-column:1/-1}
+/* 兜底：任何模块单独存在时都铺满整行，避免「只有一个小卡却只占半宽」的突兀感 */
+body.layout-bento .mods>.mod:only-child{grid-column:1/-1}
 body.layout-bento .stats{grid-column:1/-1;margin-top:8px}
+body.layout-bento .attribution{grid-column:1/-1;margin-top:8px}
 @media(max-width:640px){
   body.layout-bento .wrap{grid-template-columns:1fr}
   body.layout-bento .mod{grid-column:1/-1}
@@ -759,6 +890,7 @@ body.layout-banner .id-text{padding:0 30px;margin-top:16px}
 body.layout-banner .name{margin-top:0}
 body.layout-banner .mods{margin-top:30px;padding:0 30px}
 body.layout-banner .stats{padding:0 30px}
+body.layout-banner .attribution{padding:0 30px}
 @media(max-width:560px){
   body.layout-banner .avatar-wrap,body.layout-banner .id-text,body.layout-banner .mods,body.layout-banner .stats{padding-left:20px;padding-right:20px}
 }`,
@@ -1199,7 +1331,73 @@ function autoscaleJs(mode: string, minPct: number, manualPct: number): string {
   })();`
 }
 
-/** 背景音乐播放器 JS：播放/暂停 + 进度条 + 时间显示 + 点击跳转。 */
+/**
+ * 解析 LRC 歌词文本。
+ *
+ * 在**服务端**解析而不是丢给浏览器，有三个好处：
+ *   1. 前端 JS 只需比较 `data-t` 与 currentTime，不用带一个解析器；
+ *   2. 歌词文本走统一的 `esc()` 转义，不会出现「歌词里带 HTML 就注入」的口子；
+ *   3. 解析失败（用户手填的纯文本歌词）在渲染时就决定了降级方案。
+ *
+ * 时间标签支持 `[mm:ss]`、`[mm:ss.xx]`、`[mm:ss.xxx]`；
+ * 一行多个标签（`[00:12.34][01:20.00]歌词`）会展开成多条 —— 这是 LRC 的合法写法，
+ * 常见于副歌复用。
+ *
+ * `[ti:...]` `[ar:...]` `[by:...]` 这类元信息标签不会命中（要求标签内是数字开头）。
+ */
+function parseLrc(raw: string): { time: number; text: string }[] {
+  const out: { time: number; text: string }[] = []
+  for (const line of raw.split(/\r\n|\r|\n/)) {
+    const stamps = line.matchAll(/\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g)
+    const found: number[] = []
+    for (const m of stamps) {
+      const minute = Number(m[1])
+      const second = Number(m[2])
+      if (!Number.isFinite(minute) || !Number.isFinite(second)) continue
+      const fracRaw = m[3] ?? ""
+      // 两位是百分秒（.52），三位是毫秒（.520）—— 差一个数量级，必须分开算
+      const frac =
+        fracRaw.length === 3
+          ? Number(fracRaw) / 1000
+          : fracRaw.length > 0
+            ? Number(fracRaw) / 100
+            : 0
+      found.push(minute * 60 + second + frac)
+    }
+    if (found.length === 0) continue
+    const text = line.replace(/\[[^\]]*\]/g, "").trim()
+    if (!text) continue
+    for (const time of found) out.push({ time, text })
+  }
+  return out.sort((a, b) => a.time - b.time)
+}
+
+/**
+ * 歌词面板 HTML。
+ *
+ * 两种形态：
+ *   - 带时间轴 → 每行一个 `.lrc-line[data-t]`，由客户端 JS 做高亮 + 滚动
+ *   - 没有时间轴（用户手填的纯文本）→ 静态展示，不参与同步，也不报错
+ *
+ * `data-t` 固定用 toFixed(2)：避免浮点数的长尾（`12.340000000000002`）浪费字节，
+ * 也避免前端 parseFloat 时出现意外的精度差。
+ */
+function lyricsBlock(lyrics: string | null): string {
+  const raw = (lyrics ?? "").trim()
+  if (!raw) return ""
+
+  const timed = parseLrc(raw)
+  if (timed.length === 0) {
+    return `<div class="lyrics lyrics-plain" id="plyrics"><div class="lrc-inner">${escMultiline(raw)}</div></div>`
+  }
+
+  const lines = timed
+    .map((l) => `<div class="lrc-line" data-t="${l.time.toFixed(2)}">${esc(l.text)}</div>`)
+    .join("")
+  return `<div class="lyrics" id="plyrics"><div class="lrc-inner">${lines}</div></div>`
+}
+
+/** 背景音乐播放器 JS：播放/暂停 + 进度条 + 时间显示 + 点击跳转 + 歌词同步。 */
 function musicPlayerJs(): string {
   return `(function(){
     var audio=document.getElementById('bgm'),btn=document.getElementById('pp');
@@ -1216,14 +1414,42 @@ function musicPlayerJs(): string {
     });
     audio.addEventListener('pause',function(){playing=false;sync()});
     audio.addEventListener('play',function(){playing=true;sync()});
+
+    /* ---- 歌词同步 ---- */
+    var lyr=document.getElementById('plyrics');
+    var rows=lyr?[].slice.call(lyr.querySelectorAll('.lrc-line')):[];
+    var times=rows.map(function(el){return parseFloat(el.getAttribute('data-t'))||0});
+    var idx=-2;
+    /* 只展示「当前行 + 下一行」：给当前行加 .on，下一行加 .pre，其余靠 CSS 的 opacity:0 藏起。
+       用 CSS transform 定位两行（而不是滚动容器），所以不需要滚动条与防抢滚动。
+       ⚠️ idx 初值必须是 -2，不能是 -1：歌曲开头（还没唱到第一句）算出的 i 就是 -1，
+       若初值也是 -1，首次 syncLyrics 会命中 i===idx 直接 return，一个 class 都不打
+       ⇒ 歌词框一片空白。 */
+    function syncLyrics(){
+      if(!rows.length)return;
+      var t=audio.currentTime||0,i=-1;
+      /* 容忍 0.15s 提前量：歌词一般标在这句开始唱的时刻，零延迟切换会显得晚半拍 */
+      for(var k=0;k<times.length;k++){if(times[k]<=t+0.15)i=k;else break}
+      if(i===idx)return;
+      /* i<0 = 还没唱到第一句：当前行留空，把第一句当「下一行」先亮出来，否则框是空的 */
+      var cur=i, nxt=(i<rows.length-1)?i+1:-1;
+      for(var r=0;r<rows.length;r++){
+        rows[r].classList.toggle('on', r===cur);
+        rows[r].classList.toggle('pre', r===nxt);
+      }
+      idx=i;
+    }
+
     function update(){
       if(!fill)return;
       var cur=audio.currentTime||0,dur=audio.duration||0;
       fill.style.width=(dur>0?(cur/dur*100):0)+'%';
       if(time)time.textContent=fmt(cur)+(dur>0?' / '+fmt(dur):'');
+      syncLyrics();
     }
     audio.addEventListener('timeupdate',update);
     audio.addEventListener('loadedmetadata',update);
+    audio.addEventListener('seeked',syncLyrics);
     if(track){
       track.addEventListener('click',function(e){
         var dur=audio.duration||0;if(!dur)return;
@@ -1342,6 +1568,17 @@ function galleryItems(m: ProfileModule): GalleryItem[] {
   )
 }
 
+/**
+ * 给模块的 `<section>` 补上 `data-size`（只在显式设过宽度时输出）。
+ *
+ * 刻意放在外层而不是逐个改 renderModule 的 6 个 return —— 那样要改 6 处，
+ * 将来加新模块极易漏。找不到目标串就原样返回（music 无音频源时会返回空串）。
+ */
+function withSize(html: string, m: ProfileModule): string {
+  if (!m.size) return html
+  return html.replace('<section class="mod', `<section data-size="${m.size}" class="mod`)
+}
+
 /** 渲染中间区的单个模块（调用方保证 enabled 且有内容）。 */
 function renderModule(m: ProfileModule, p: PublicProfile): string {
   switch (m.id) {
@@ -1403,6 +1640,7 @@ function renderModule(m: ProfileModule, p: PublicProfile): string {
         </div>
         <button id="pp" aria-label="播放/暂停">${icon("youtube")}</button>
       </div>
+      ${lyricsBlock(p.musicLyrics)}
       <audio id="bgm" src="${esc(music)}" loop ${p.musicAutoplay ? "autoplay" : ""} preload="metadata"></audio></section>`
     }
     default:
@@ -1466,12 +1704,18 @@ export function renderProfileHtml(
         day: "2-digit",
       })
     : null
+  // UID：按注册顺序的编号，不足三位补零（001）；超过 999 就显示实际位数
+  const uidText = p.uid != null ? `#${String(p.uid).padStart(3, "0")}` : null
   const metaParts: string[] = []
+  if (uidText) metaParts.push(`UID ${uidText}`)
   if (regDate) metaParts.push(`加入于 ${regDate}`)
   metaParts.push(`${p.viewCount} 次访问`)
   const statsLine = mods.stats
     ? `<footer class="stats">${esc(metaParts.join(" · "))}</footer>`
     : ""
+
+  // 署名行：品牌标识，**始终渲染**（不随「页脚统计」模块开关，跟统计小字另起一行）
+  const attributionLine = `<footer class="attribution">来源于 <a href="https://cloud.doulor.cn/" target="_blank" rel="noopener noreferrer">Doulor Cloud</a></footer>`
 
   // 交互式 intro：初始 .wrap 无 visible（JS 点击后加）；非交互式/none：CSS animation 或直接显示
   const wrapVisibleClass = intro === "enter" || intro === "portal" || intro === "typewriter" ? "" : " visible"
@@ -1491,7 +1735,7 @@ export function renderProfileHtml(
     ? `${bannerImg}<div class="avatar-wrap">${avatarHtml}</div><div class="id-text"><h1 class="name">${esc(name)}${sealHtml}</h1>${p.bio ? `<p class="bio">${esc(p.bio)}</p>` : ""}${statusHtml}</div>`
     : `<div class="avatar-wrap">${avatarHtml}</div><div class="id-text"><h1 class="name">${esc(name)}${sealHtml}</h1>${p.bio ? `<p class="bio">${esc(p.bio)}</p>` : ""}${statusHtml}</div>`
 
-  const modsHtml = mods.middle.map((m) => renderModule(m, p)).join("")
+  const modsHtml = mods.middle.map((m) => withSize(renderModule(m, p), m)).join("")
 
   const css =
     themeCss(p.theme, p.accent) +
@@ -1538,6 +1782,7 @@ ${introLayer}
   <header class="hero">${heroInner}</header>
   ${modsHtml ? `<main class="mods">${modsHtml}</main>` : ""}
   ${statsLine}
+  ${attributionLine}
 </div>
 <script>${js}</script>
 </body>

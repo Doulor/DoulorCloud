@@ -1,15 +1,12 @@
 import { ApiError, json } from "../http"
-import { uuid } from "../crypto"
+import { uuid, hashToken } from "../crypto"
 import { isReservedName } from "../reserved-names"
 import { requireUser, type UserRow } from "../auth"
-import {
-  cfCreateEmailRule,
-  cfDeleteEmailRule,
-  cfListDestinations,
-} from "../cloudflare"
-import { sendReply, isMailerConfigured } from "../mailer"
+import { cfDeleteEmailRule } from "../cloudflare"
+import { sendReply, sendMail, renderMail, isMailerConfigured } from "../mailer"
 import { guardRateLimit } from "../ratelimit"
 import { audit } from "../settings"
+import { encodeCursor, decodeCursor } from "../community-logic"
 import type { Env } from "../env"
 
 const MAX_MAILBOXES_PER_USER = 3
@@ -20,6 +17,28 @@ const MAX_REPLY_CHARS = 20_000
 /** 回信限流：每人每小时 20 封（防止账号被盗后当日志中继/发垃圾信） */
 const REPLY_LIMIT_PER_HOUR = 20
 
+/**
+ * 临时邮箱：额度**独立**，不占用 MAX_MAILBOXES_PER_USER 的 3 个名额。
+ * 限制的是「同时存在几个」，而不是一生存量 —— 因为它的语义是用完就换。
+ * 站点主定成 1：临时邮箱一次一个，用完换新即可。
+ */
+const MAX_TEMP_MAILBOXES_PER_USER = 1
+/** 临时邮箱前缀长度：32^8 ≈ 1.1e12 种组合，够随机又便于复制粘贴 */
+const TEMP_LOCAL_PART_LENGTH = 8
+/**
+ * 临时邮箱前缀字符集：**刻意去掉 l / o / 0 / 1**。
+ * 这种地址最常见的用法是被念给别人、或在另一台设备上手工输入，
+ * 而这四个字符（小写 L、数字 1、字母 o、数字 0）在多数等宽字体里无法区分。
+ * 恰好 32 个字符 = 2^5，所以 `字节 % 32` 不会产生取模偏置。
+ */
+const TEMP_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789"
+/**
+ * 临时邮箱「新建 + 刷新」共用一个限流桶（每人每小时 60 次）。
+ * 每次操作都会写 D1 并调用一次 Cloudflare API，不限流就等于把控制面配额
+ * 交给一个登录账号随便刷。
+ */
+const TEMP_WRITE_LIMIT_PER_HOUR = 60
+
 interface MailboxRow {
   id: string
   user_id: string
@@ -29,6 +48,8 @@ interface MailboxRow {
   rule_id: string | null
   last_forward_error: string | null
   created_at: string
+  /** 1 = 临时邮箱（迁移 0051 新增）。未迁移的旧库读出来是 undefined，按 0 处理 */
+  is_temp?: number
 }
 
 interface MessageRow {
@@ -41,6 +62,20 @@ interface MessageRow {
   received_at: string
   /** 原邮件的 RFC Message-ID（0029 迁移新增），回信时用于串会话 */
   rfc_message_id?: string | null
+}
+
+/**
+ * 生成一个临时邮箱前缀（密码学随机）。
+ *
+ * ⚠️ 不要换成 Math.random()：这个地址是「收信入口」，可预测的话
+ * 别人就能猜出下一个人会拿到什么地址，从而提前把垃圾邮件投进去。
+ */
+function randomTempLocalPart(): string {
+  const bytes = new Uint8Array(TEMP_LOCAL_PART_LENGTH)
+  crypto.getRandomValues(bytes)
+  let out = ""
+  for (const b of bytes) out += TEMP_ALPHABET[b % TEMP_ALPHABET.length]
+  return out
 }
 
 function parseForwarding(raw: string | null): string[] {
@@ -106,6 +141,8 @@ async function toPublicMailbox(
     id: row.id,
     address: row.address,
     primary: row.address === `${user.username}@${env.ROOT_DOMAIN}`.toLowerCase(),
+    /** true = 临时邮箱：前端据此分组展示，并隐藏「转发设置」入口 */
+    isTemp: row.is_temp === 1,
     forwardingTo,
     // null = 未知（拉取失败），前端应提示「状态未知」而非谎报已验证
     forwardingVerified: forwardingTo.map((t) =>
@@ -119,17 +156,33 @@ async function toPublicMailbox(
   }
 }
 
-/** 拉取账户级已验证 destination 集合；失败时返回 undefined 表示「未知」 */
-async function loadVerifiedSet(env: Env): Promise<Set<string> | undefined> {
-  try {
-    const dests = await cfListDestinations(env)
-    return new Set(
-      dests.filter((d) => d.verified !== null).map((d) => d.email.toLowerCase())
+/**
+ * 拉取「当前用户已验证的转发目标」集合。
+ *
+ * 来源有两类：
+ *   1. 用户通过「转发目标验证」（发验证码到目标邮箱、回填）验证过的邮箱
+ *      —— 存 forwarding_verifications 表，支持任意邮箱（朋友的邮箱也能绑）。
+ *   2. 用户自己的账号邮箱若已 email_verified=1，也算已验证（老用户兼容，
+ *      他们当年验证过账号邮箱，且转发到自己账号邮箱本来就是最常见的用法）。
+ */
+async function loadVerifiedTargets(env: Env, userId: string): Promise<Set<string>> {
+  const [rows, userRow] = await Promise.all([
+    env.DB.prepare(
+      "SELECT target_email FROM forwarding_verifications WHERE user_id = ?"
     )
-  } catch (err) {
-    console.error("获取转发地址验证状态失败:", err)
-    return undefined
+      .bind(userId)
+      .all<{ target_email: string }>(),
+    env.DB.prepare("SELECT email, email_verified FROM users WHERE id = ?")
+      .bind(userId)
+      .first<{ email: string; email_verified: number }>(),
+  ])
+  const set = new Set(
+    (rows.results ?? []).map((r) => r.target_email.toLowerCase())
+  )
+  if (userRow && userRow.email_verified === 1 && userRow.email) {
+    set.add(userRow.email.toLowerCase())
   }
+  return set
 }
 
 function toPublicMessage(row: MessageRow) {
@@ -187,9 +240,9 @@ export async function listMailboxes(env: Env, request: Request): Promise<Respons
     .bind(user.id)
     .all<MailboxRow>()
 
-  // 统计与验证状态各自只需一次查询/一次外部调用，并行发出
+  // 统计与验证状态各自只需一次查询，并行发出
   const [verifiedSet, statsMap] = await Promise.all([
-    loadVerifiedSet(env),
+    loadVerifiedTargets(env, user.id),
     mailboxStatsBatch(env, user.id),
   ])
   const mailboxes = []
@@ -198,9 +251,13 @@ export async function listMailboxes(env: Env, request: Request): Promise<Respons
       await toPublicMailbox(env, user, row, verifiedSet, statsMap.get(row.id) ?? { total: 0, unread: 0 })
     )
   }
-  // 邮箱数量上限（管理员不限，999999 作为哨兵值，前端显示「不限」）
-  const limit = user.role === "admin" ? ADMIN_UNLIMITED_MAILBOXES : MAX_MAILBOXES_PER_USER
-  return json({ mailboxes, limit })
+  // 邮箱数量上限（管理员/站长不限，999999 作为哨兵值，前端显示「不限」）
+  const limit = user.role === "admin" || user.role === "root" ? ADMIN_UNLIMITED_MAILBOXES : MAX_MAILBOXES_PER_USER
+  // 临时邮箱额度独立计算。直接数上面已查出的行，不再多打一次 D1 查询。
+  const tempUsed = (rows.results ?? []).filter((r) => r.is_temp === 1).length
+  const tempLimit =
+    user.role === "admin" || user.role === "root" ? ADMIN_UNLIMITED_MAILBOXES : MAX_TEMP_MAILBOXES_PER_USER
+  return json({ mailboxes, limit, tempLimit, tempUsed })
 }
 
 // POST /api/mailbox —— 添加邮箱地址（{ localPart }），最多 3 个
@@ -217,13 +274,14 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
     throw new ApiError(400, "该邮箱前缀为系统保留名称", "RESERVED_NAME")
   }
 
+  // ⚠️ 必须带 is_temp = 0：临时邮箱有自己的额度，不能挤占这 3 个名额
   const count = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM mailboxes WHERE user_id = ?"
+    "SELECT COUNT(*) AS c FROM mailboxes WHERE user_id = ? AND is_temp = 0"
   )
     .bind(user.id)
     .first<{ c: number }>()
 
-  if (user.role !== "admin" && (count?.c ?? 0) >= MAX_MAILBOXES_PER_USER) {
+  if (user.role !== "admin" && user.role !== "root" && (count?.c ?? 0) >= MAX_MAILBOXES_PER_USER) {
     throw new ApiError(400, `每个用户最多 ${MAX_MAILBOXES_PER_USER} 个邮箱`, "LIMIT_REACHED")
   }
 
@@ -245,23 +303,14 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
   const id = uuid()
   const now = new Date().toISOString()
 
-  // 为入站邮件创建 Email Routing 规则（地址 → 本 Worker）；失败不阻断邮箱创建，稍后可回填
-  let ruleId: string | null = null
-  try {
-    ruleId = await cfCreateEmailRule(
-      env,
-      env.ZONE_ID,
-      address,
-      env.EMAIL_WORKER_NAME ?? "doulor-mail-api"
-    )
-  } catch (err) {
-    console.error("Email Routing 规则创建失败（邮箱仍已创建）:", address, err)
-  }
-
+  // ⚠️ 2026-09-26：**不再逐条创建 Cloudflare Email Routing 规则**。
+  // 线上 catch-all 已改为「Send to a Worker」，所有 *@doulor.cn 的信都会进本 Worker，
+  // 由代码查 mailboxes 表决定去处 —— 逐地址建规则是历史包袱，还占「每域 200 条」硬配额。
+  // 所以新邮箱的 rule_id 一律为 NULL；删除路径仍会摘掉历史遗留的规则（见 purgeMailbox）。
   await env.DB.prepare(
-    "INSERT INTO mailboxes (id, user_id, address, forwarding_to, rule_id, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    "INSERT INTO mailboxes (id, user_id, address, forwarding_to, created_at) VALUES (?, ?, ?, ?, ?)"
   )
-    .bind(id, user.id, address, defaultForwarding, ruleId, now)
+    .bind(id, user.id, address, defaultForwarding, now)
     .run()
 
   const row = await env.DB.prepare("SELECT * FROM mailboxes WHERE id = ?")
@@ -279,19 +328,14 @@ export async function updateMailbox(env: Env, request: Request, id: string): Pro
 
   const targets = validateForwarding(body.forwardingTo ?? [], env.ROOT_DOMAIN)
 
-  // 只有「在设置里验证过的真实邮箱」才能作为转发目标。
-  // 未验证的地址不仅 Cloudflare 会拒绝转发，还会让用户误以为配置成功。
+  // 只有「已验证的转发目标」才能绑定（发验证码到目标邮箱、回填验证）。
   if (targets.length > 0) {
-    const verified = await loadVerifiedSet(env)
-    // 查询失败时按「全部未验证」处理 —— 宁可拒绝，也不要写入一个转发不了的配置
-    const verifiedSet = verified ?? new Set<string>()
+    const verifiedSet = await loadVerifiedTargets(env, user.id)
     const unverified = targets.filter((t) => !verifiedSet.has(t.toLowerCase()))
     if (unverified.length > 0) {
       throw new ApiError(
         400,
-        verified === undefined
-          ? "暂时无法确认邮箱验证状态，请稍后重试"
-          : `以下邮箱尚未验证，请先到「设置」完成真实邮箱验证：${unverified.join("、")}`,
+        `以下邮箱尚未验证，请先发验证码完成验证：${unverified.join("、")}`,
         "FORWARD_TARGET_NOT_VERIFIED"
       )
     }
@@ -302,7 +346,7 @@ export async function updateMailbox(env: Env, request: Request, id: string): Pro
     .run()
 
   const updated = await requireMailbox(env, user, id)
-  const afterSet = (await loadVerifiedSet(env)) ?? new Set<string>()
+  const afterSet = await loadVerifiedTargets(env, user.id)
   return json({
     mailbox: await toPublicMailbox(env, user, updated),
     forwardingStatus: targets.map((t) => ({
@@ -310,6 +354,118 @@ export async function updateMailbox(env: Env, request: Request, id: string): Pro
       verified: afterSet.has(t.toLowerCase()),
     })),
   })
+}
+
+/** 生成 6 位数字验证码（100000–999999，crypto 随机 + 拒绝采样） */
+function generateVerifyCode(): string {
+  const MAX_EXCLUSIVE = 0x100000000
+  const SPAN = 900000
+  const LIMIT = Math.floor(MAX_EXCLUSIVE / SPAN) * SPAN
+  const buf = new Uint32Array(1)
+  let v = 0
+  do {
+    crypto.getRandomValues(buf)
+    v = buf[0]
+  } while (v >= LIMIT)
+  return String(100000 + (v % SPAN))
+}
+
+// POST /api/mailbox/forward-verify —— 发起 / 确认转发目标验证
+export async function verifyForwardTarget(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const body = (await request.json().catch(() => ({}))) as {
+    email?: string
+    action?: string
+    code?: string
+  }
+  const email = (body.email ?? "").trim().toLowerCase()
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new ApiError(400, "邮箱格式不正确", "INVALID_EMAIL")
+  }
+  if (email.endsWith(`@${env.ROOT_DOMAIN.toLowerCase()}`)) {
+    throw new ApiError(400, "不能转发到本站域名邮箱", "INVALID_EMAIL")
+  }
+
+  // 确认验证：回填验证码
+  if (body.action === "confirm") {
+    const code = String(body.code ?? "").trim()
+    if (!/^\d{6}$/.test(code)) {
+      throw new ApiError(400, "请输入 6 位数字验证码", "INVALID_CODE")
+    }
+    const row = await env.DB.prepare(
+      "SELECT code_hash, expires_at, attempts FROM forward_verify_codes WHERE user_id = ? AND target_email = ?"
+    )
+      .bind(user.id, email)
+      .first<{ code_hash: string; expires_at: string; attempts: number }>()
+    if (!row || new Date(row.expires_at).getTime() < Date.now()) {
+      throw new ApiError(400, "验证码已过期，请重新发送", "CODE_EXPIRED")
+    }
+    if (row.attempts >= 5) {
+      throw new ApiError(400, "尝试次数过多，请重新发送", "TOO_MANY_ATTEMPTS")
+    }
+    if ((await hashToken(code)) !== row.code_hash) {
+      await env.DB.prepare(
+        "UPDATE forward_verify_codes SET attempts = attempts + 1 WHERE user_id = ? AND target_email = ?"
+      )
+        .bind(user.id, email)
+        .run()
+      throw new ApiError(400, "验证码错误", "INVALID_CODE")
+    }
+    const now = new Date().toISOString()
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO forwarding_verifications (user_id, target_email, verified_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(user_id, target_email) DO UPDATE SET verified_at = excluded.verified_at`
+      ).bind(user.id, email, now),
+      env.DB.prepare(
+        "DELETE FROM forward_verify_codes WHERE user_id = ? AND target_email = ?"
+      ).bind(user.id, email),
+    ])
+    await audit(env, user.id, "mailbox.forward.verify", `验证转发目标 ${email}`)
+    return json({ email, verified: true })
+  }
+
+  // 发起验证：生成验证码发到目标邮箱。限流防轰炸。
+  await guardRateLimit(
+    env,
+    `forward-verify:user:${user.id}`,
+    10,
+    3600,
+    "转发验证请求过于频繁，请稍后再试"
+  )
+
+  const code = generateVerifyCode()
+  const now = new Date().toISOString()
+  const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString()
+  await env.DB.prepare(
+    `INSERT INTO forward_verify_codes (user_id, target_email, code_hash, expires_at, attempts, created_at)
+     VALUES (?, ?, ?, ?, 0, ?)
+     ON CONFLICT(user_id, target_email) DO UPDATE SET code_hash = excluded.code_hash,
+       expires_at = excluded.expires_at, attempts = 0, created_at = excluded.created_at`
+  )
+    .bind(user.id, email, await hashToken(code), expiresAt, now)
+    .run()
+
+  const { text, html } = renderMail("验证转发目标邮箱", [
+    `用户 ${user.username} 想把 doulor.cn 邮箱的邮件转发到 ${email}。`,
+    `验证码是：${code}`,
+    "验证码 10 分钟内有效。如果不是你本人操作，请忽略本邮件。",
+  ])
+  try {
+    await sendMail(env, {
+      to: email,
+      subject: "【Doulor Cloud】转发目标验证码",
+      text,
+      html,
+    })
+  } catch (err) {
+    console.error("发送转发验证码失败:", email, err)
+    throw new ApiError(502, "发送验证码失败，请稍后重试", "MAIL_SEND_FAILED")
+  }
+
+  return json({ email, verified: false, message: "验证码已发送到该邮箱，请查收" })
 }
 
 // DELETE /api/mailbox/:id —— 删除邮箱（主邮箱不可删）
@@ -322,6 +478,26 @@ export async function deleteMailbox(env: Env, request: Request, id: string): Pro
     throw new ApiError(400, "主邮箱不可删除", "PRIMARY_MAILBOX")
   }
 
+  await purgeMailbox(env, mailbox)
+  return new Response(null, { status: 204 })
+}
+
+/**
+ * 删除一个邮箱：先摘掉 Cloudflare 路由规则，再删表行。
+ *
+ * ⚠️ 2026-09-26：现在**不再逐条建 Cloudflare 路由规则**（catch-all 已由本 Worker 接管），
+ * 但历史邮箱名下的规则还挂在 Cloudflare 上（线上尚存数十条），所以仍然要摘掉 ——
+ * 否则它们会一直占着「每个域 200 条路由规则」的硬配额，而用户以为早就失效了。
+ * 悬空的 rule_id 会返回 `ID not found`，属正常情况，忽略即可。
+ *
+ * 抽成函数是因为「删除邮箱」与「刷新临时邮箱」的清理部分必须完全一致。
+ *
+ * messages 行靠 ON DELETE CASCADE 一并清除（schema 已声明），
+ * 所以刷新临时邮箱会顺带清掉旧地址收到的邮件，不会在 D1 里堆垃圾。
+ */
+async function purgeMailbox(env: Env, mailbox: MailboxRow): Promise<void> {
+  // 规则删除失败不阻断：表行必须删掉，否则用户界面上会出现「删不掉的邮箱」。
+  // 残留规则只会让旧地址继续把信投进 Worker，而 Worker 查不到 mailboxes 行时会直接拒收。
   if (mailbox.rule_id) {
     try {
       await cfDeleteEmailRule(env, env.ZONE_ID, mailbox.rule_id)
@@ -330,11 +506,137 @@ export async function deleteMailbox(env: Env, request: Request, id: string): Pro
     }
   }
 
-  await env.DB.prepare("DELETE FROM mailboxes WHERE id = ?").bind(id).run()
-  return new Response(null, { status: 204 })
+  await env.DB.prepare("DELETE FROM mailboxes WHERE id = ?").bind(mailbox.id).run()
 }
 
-// GET /api/mailbox/:id/messages —— 消息列表（不含正文）
+// POST /api/mailbox/temp —— 生成一个临时邮箱（额度与普通邮箱独立）
+export async function createTempMailbox(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+
+  await guardRateLimit(
+    env,
+    `mailbox:temp:write:${user.id}`,
+    TEMP_WRITE_LIMIT_PER_HOUR,
+    3600,
+    "临时邮箱操作过于频繁"
+  )
+
+  const count = await env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM mailboxes WHERE user_id = ? AND is_temp = 1"
+  )
+    .bind(user.id)
+    .first<{ c: number }>()
+
+  if (user.role !== "admin" && user.role !== "root" && (count?.c ?? 0) >= MAX_TEMP_MAILBOXES_PER_USER) {
+    throw new ApiError(
+      400,
+      `临时邮箱最多同时存在 ${MAX_TEMP_MAILBOXES_PER_USER} 个，请先删除或刷新已有的`,
+      "LIMIT_REACHED"
+    )
+  }
+
+  const created = await insertTempMailbox(env, user.id)
+  return json({ mailbox: await toPublicMailbox(env, user, created) }, 201)
+}
+
+/**
+ * POST /api/mailbox/temp/:id/refresh —— 换一个地址（旧地址立即作废）
+ *
+ * 语义上「刷新」是**删除旧邮箱并新建一个**，而不是在原行上改地址：
+ *   1. 旧地址收到的邮件属于上一个身份，留着会让收件箱混进「上个马甲」的信；
+ *      删行后 messages 随级联一起清掉，也让 D1 不积累垃圾邮件。
+ *   2. 旧的 Cloudflare 路由规则必须摘掉，否则旧地址依然收信。
+ */
+export async function refreshTempMailbox(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const mailbox = await requireMailbox(env, user, id)
+
+  if (mailbox.is_temp !== 1) {
+    // 普通邮箱不能刷新地址：它的地址是用户自己取的，改掉等于静默删除
+    throw new ApiError(400, "只有临时邮箱可以刷新地址", "NOT_TEMP_MAILBOX")
+  }
+
+  await guardRateLimit(
+    env,
+    `mailbox:temp:write:${user.id}`,
+    TEMP_WRITE_LIMIT_PER_HOUR,
+    3600,
+    "临时邮箱操作过于频繁"
+  )
+
+  // 先删后建：若中间失败，用户只是少了一个临时邮箱（可再点一次生成），
+  // 不会出现「两个邮箱抢同一个地址」或额度被凭空占掉的情况。
+  await purgeMailbox(env, mailbox)
+
+  const created = await insertTempMailbox(env, user.id)
+  return json({ mailbox: await toPublicMailbox(env, user, created) }, 201)
+}
+
+/**
+ * 生成并落库一个临时邮箱（含 Cloudflare 路由规则）。
+ *
+ * 抽出来给「新建」与「刷新」共用：两者的创建部分必须逐字一致，
+ * 否则刷新出来的邮箱可能出现「少了某个字段」这类只在刷新路径上复现的问题
+ * （例如没建 CF 规则，表现为收不到信）。
+ */
+async function insertTempMailbox(env: Env, userId: string): Promise<MailboxRow> {
+  const root = env.ROOT_DOMAIN.toLowerCase()
+
+  // 随机前缀可能撞上：① 系统保留名（admin / postmaster 之类）
+  // ② 已存在的地址（含其他用户的主邮箱和临时邮箱）。
+  // 概率极低，但不检查就会直接命中 UNIQUE 约束抛 500，所以重试几次。
+  let address: string | null = null
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const localPart = randomTempLocalPart()
+    if (isReservedName(localPart)) continue
+    const candidate = `${localPart}@${root}`
+    const exists = await env.DB.prepare(
+      "SELECT id FROM mailboxes WHERE address = ? COLLATE NOCASE LIMIT 1"
+    )
+      .bind(candidate)
+      .first()
+    if (!exists) {
+      address = candidate
+      break
+    }
+  }
+  if (!address) {
+    // 5 次都撞上，几乎只可能是 D1 出了问题，如实报错让用户重试
+    throw new ApiError(500, "生成临时邮箱失败，请重试", "INTERNAL")
+  }
+
+  const id = uuid()
+  const now = new Date().toISOString()
+  // 与普通邮箱一致：不再逐条建 Cloudflare 规则（catch-all 已由本 Worker 接管）。
+  // forwarding_to 恒为 NULL：临时邮箱不提供转发配置，避免被当成转发跳板。
+  await env.DB.prepare(
+    "INSERT INTO mailboxes (id, user_id, address, forwarding_to, created_at, is_temp) VALUES (?, ?, ?, NULL, ?, 1)"
+  )
+    .bind(id, userId, address, now)
+    .run()
+
+  const row = await env.DB.prepare("SELECT * FROM mailboxes WHERE id = ?")
+    .bind(id)
+    .first<MailboxRow>()
+  return row!
+}
+
+/**
+ * 消息列表每页条数。
+ *
+ * ⚠️ 2026-09-25 审计（M16）：这个接口原先写死 `LIMIT 100` 且**没有游标**，
+ * 于是收件箱超过 100 封之后，旧邮件在界面上**永久不可达**，而且接口也不告知
+ * 自己截断了 —— 用户只会觉得「邮件丢了」。这里保持默认 100 不变
+ * （第一页行为与修复前完全一致，不制造回归），只是把「下一页」暴露出来。
+ */
+const MESSAGES_DEFAULT_LIMIT = 100
+const MESSAGES_MAX_LIMIT = 100
+
+// GET /api/mailbox/:id/messages?cursor=&limit= —— 消息列表（不含正文）
 export async function listMessages(
   env: Env,
   request: Request,
@@ -343,14 +645,43 @@ export async function listMessages(
   const user = await requireUser(env, request)
   const mailbox = await requireMailbox(env, user, mailboxId)
 
+  const url = new URL(request.url)
+  const rawLimit = Number(url.searchParams.get("limit") ?? MESSAGES_DEFAULT_LIMIT)
+  const limit = Math.min(
+    Math.max(Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : MESSAGES_DEFAULT_LIMIT, 1),
+    MESSAGES_MAX_LIMIT
+  )
+  const cursor = url.searchParams.get("cursor")
+
+  let where = "mailbox_id = ?"
+  const binds: unknown[] = [mailbox.id]
+  if (cursor) {
+    const c = decodeCursor(cursor)
+    if (c) {
+      // 复合游标 (received_at, id) 双键降序 —— 与 community.ts 的列表同一套做法。
+      // 只按 received_at 翻页是错的：同一时间戳上的多封邮件会被整批跳过，
+      // 而邮件是**批量到达**的（同一次投递/导入时间戳完全相同），这个场景很常见。
+      where += " AND (received_at < ? OR (received_at = ? AND id < ?))"
+      binds.push(c.createdAt, c.createdAt, c.id)
+    }
+  }
+
   const rows = await env.DB.prepare(
     `SELECT id, mailbox_id, from_address, subject, '' AS text_body, read, received_at
-       FROM messages WHERE mailbox_id = ? ORDER BY received_at DESC LIMIT 100`
+       FROM messages WHERE ${where}
+      ORDER BY received_at DESC, id DESC
+      LIMIT ?`
   )
-    .bind(mailbox.id)
+    .bind(...binds, limit)
     .all<MessageRow>()
 
-  return json({ messages: (rows.results ?? []).map(toPublicMessage) })
+  const messages = rows.results ?? []
+  const last = messages[messages.length - 1]
+  // 只有「恰好取满一页」才可能还有下一页（与 community.ts 的判定一致）
+  const nextCursor =
+    messages.length === limit && last ? encodeCursor(last.received_at, last.id) : null
+
+  return json({ messages: messages.map(toPublicMessage), nextCursor })
 }
 
 // GET /api/mailbox/:id/messages/:messageId —— 单条消息（含正文，自动标已读）
@@ -455,12 +786,35 @@ export async function deleteMessage(
  * 从 `名字 <a@b.com>` / `<a@b.com>` / `a@b.com` 里取出纯地址。
  * 解析不出来就返回空串 —— 调用方据此拒绝，**绝不做任何猜测或兜底**，
  * 免得把信发到一个自己想当然的地址上。
+ *
+ * ⚠️ 2026-09-25 审计（H3）：原实现只做 `/^[^\s@]+@[^\s@]+\.[^\s@]+$/` 格式校验，
+ * 于是两类伪造都能通过：
+ *   1. `"victim@good.com" <attacker@evil.com>` —— 界面（含前端 mailto）可能把
+ *      display name 里的地址当作收件人展示，而实际发信地址是尖括号里那个。
+ *      用户以为在回复 A，其实发给了 B。
+ *   2. `a@b.com <c@d.com> x <e@f.com>` —— 多个尖括号组时只取第一个，
+ *      一个畸形 From 头就能把回信路由到任意地址。
+ * 现在：多个尖括号组一律拒绝；display name 里若出现与尖括号地址**不同**的
+ * 邮箱，也一律拒绝（这是「看起来要发给 A、实际发给 B」的典型形态）。
  */
 function extractAddress(raw: string): string {
-  const angled = /<([^>]+)>/.exec(raw ?? "")
-  const candidate = (angled ? angled[1] : (raw ?? "")).trim().toLowerCase()
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate)) return ""
+  const input = raw ?? ""
+  const angledAll = input.match(/<[^>]*>/g) ?? []
+  // 多个尖括号组 = 畸形 / 伪造，直接拒绝
+  if (angledAll.length > 1) return ""
+
+  const angled = /<([^>]+)>/.exec(input)
+  const candidate = (angled ? angled[1] : input).trim().toLowerCase()
   if (candidate.length > 254) return ""
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate)) return ""
+
+  // display name 里若另有邮箱且与真实地址不同，视为诱导性伪造
+  if (angled) {
+    const displayName = input.slice(0, angled.index ?? 0)
+    const lookalike = /[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+/.exec(displayName)
+    if (lookalike && lookalike[0].trim().toLowerCase() !== candidate) return ""
+  }
+
   return candidate
 }
 

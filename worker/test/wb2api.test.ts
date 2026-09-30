@@ -10,8 +10,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { env } from "cloudflare:workers"
 import { makeUser, authRequest, fetchSelf, setSetting } from "./helpers"
 import { resetWb2ApiCache } from "../src/wb2api-client"
+import { getPointsBalance } from "../src/points"
 
 const BASE = "https://wb2api.doulor.cn"
+const NEWAPI = "https://api.doulor.cn"
 
 interface StubCall {
   url: string
@@ -22,8 +24,27 @@ let calls: StubCall[] = []
 let restore: (() => void) | null = null
 
 /**
- * 打桩出站 fetch：只接管发往反代网关的请求，其余（含 SELF.fetch 内部调用）透传。
+ * 发起登录时网关池里有哪些账号 —— 本站会在这个时点拍快照。
+ *
+ * 用例通过设置它来模拟「账号登录前是否已在池中」；默认空池。
+ */
+let poolUids: string[] = []
+
+/** 发给 NewAPI 的调用（邀请奖励要给它开订阅）；未配置时一律 404 */
+let newapiCalls: StubCall[] = []
+let newapiHandler:
+  | ((url: string, init?: RequestInit) => Response)
+  | null = null
+
+/** 模拟「拍池快照时网关不可达」：overview 直接 500 */
+let overviewFails = false
+
+/**
+ * 打桩出站 fetch：只接管发往反代网关与 NewAPI 的请求，其余（含 SELF.fetch 内部调用）透传。
  * 记录每次调用便于断言「终态命中缓存后不再打上游」。
+ *
+ * `/panel/api/overview`（池快照）由本函数统一应答，避免每个用例重复处理；
+ * 需要控制池内容的用例改 `poolUids` 即可。
  */
 function stubWb2Api(
   handler: (url: string, init?: RequestInit) => Response | Promise<Response>
@@ -38,7 +59,25 @@ function stubWb2Api(
           : input.url
     if (url.startsWith(BASE)) {
       calls.push({ url, method: init?.method ?? "GET" })
+      if (url.includes("/panel/api/overview")) {
+        if (overviewFails) {
+          return jsonResponse({ ok: false, error: "boom" }, 500)
+        }
+        return jsonResponse({
+          ok: true,
+          total: poolUids.length,
+          healthy: poolUids.length,
+          cooling: 0,
+          disabled: 0,
+          accounts: poolUids.map((uid) => ({ uid })),
+        })
+      }
       return handler(url, init)
+    }
+    if (url.startsWith(NEWAPI)) {
+      newapiCalls.push({ url, method: init?.method ?? "GET" })
+      if (newapiHandler) return newapiHandler(url, init)
+      return jsonResponse({ success: false, message: "not stubbed" }, 404)
     }
     return original(input as RequestInfo, init)
   }) as unknown as typeof fetch
@@ -46,6 +85,11 @@ function stubWb2Api(
   restore = () => {
     globalThis.fetch = original
   }
+}
+
+/** 只数发往 poll 的调用（start 会顺带查一次池快照，不能算进来） */
+function pollCalls(): number {
+  return calls.filter((c) => c.url.includes("/panel/api/login/poll")).length
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -96,16 +140,56 @@ async function aiPermission(userId: string): Promise<boolean> {
   return JSON.parse(row.permissions).ai === true
 }
 
+/**
+ * 造一对「被邀请人 + 邀请人」：被邀请人用邀请人的码注册（users.invite_code_id），
+ * 邀请人已开通中转站（newapi_accounts 有行，否则发不了订阅）。
+ */
+async function seedInviteeWithInviter(): Promise<{
+  invitee: Awaited<ReturnType<typeof makeUser>>
+  inviterId: string
+}> {
+  const inviter = await makeUser()
+  const now = new Date().toISOString()
+  const codeId = `code-${inviter.id}`
+  await env.DB.prepare(
+    "INSERT INTO invite_codes (id, code, created_by, max_uses, used_count, created_at) VALUES (?, ?, ?, 10, 1, ?)"
+  )
+    .bind(codeId, `CODE${inviter.id.slice(0, 8)}`, inviter.id, now)
+    .run()
+  // newapi_user_id 有唯一索引 —— 用例共用同一 D1，取随机数避免撞号
+  const newapiUserId = Math.floor(Math.random() * 1_000_000) + 1000
+  await env.DB.prepare(
+    `INSERT INTO newapi_accounts (user_id, newapi_user_id, username, email, enc_token, quota, used_quota, request_count, created_at)
+     VALUES (?, ?, ?, ?, 'x', 0, 0, 0, ?)`
+  )
+    .bind(inviter.id, newapiUserId, inviter.username, `${inviter.username}@doulor.cn`, now)
+    .run()
+
+  const invitee = await makeUser()
+  await env.DB.prepare("UPDATE users SET invite_code_id = ? WHERE id = ?")
+    .bind(codeId, invitee.id)
+    .run()
+  return { invitee, inviterId: inviter.id }
+}
+
 beforeEach(async () => {
   calls = []
+  newapiCalls = []
+  newapiHandler = null
+  poolUids = []
+  overviewFails = false
   // 凭据走 5 秒内存缓存且测试共用同一 isolate —— 每个用例都从干净状态开始
   resetWb2ApiCache()
   // 限流计数表也在同一 isolate 里累积：start 有 IP 维度限额（10 次/10 分钟），
   // 用例多跑几轮就会撞上，清空后每个用例从零开始。
   await env.DB.prepare("DELETE FROM rate_limits").run()
+  // 邀请奖励记录是全局表，用例之间会互相干扰（同一被邀请人只发一次）
+  await env.DB.prepare("DELETE FROM invite_rewards").run()
   // 用例之间可能改过限额，重置为默认
   await setSetting("wb2api_max_bindings", "3")
   await setSetting("wb2api_enabled", "1")
+  await setSetting("invite_reward_enabled", "1")
+  await setSetting("invite_reward_plan_id", "2")
 })
 
 afterEach(() => {
@@ -179,6 +263,76 @@ describe("POST /api/wb2api/login/start", () => {
     // 上游 state 绝不能出现在响应里（它是换取 token 的凭据）
     expect(JSON.stringify(body)).not.toContain("st-1")
   })
+
+  // ---- realm 由捐献者自选（2026-09-30 起）----
+
+  /** 打桩并记录每次 start 请求里上游收到的 realm */
+  function stubStartCapturing(seen: string[]): void {
+    stubWb2Api((url, init) => {
+      if (url.includes("/login/start")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { realm?: string }
+        seen.push(String(body.realm))
+        return jsonResponse({ ok: true, url: "https://example.com/oauth", state: "st-1" })
+      }
+      return jsonResponse({ ok: true, done: false, message: "login ing" })
+    })
+  }
+
+  it("用户选了国际版 → 上游收到 global，响应与会话落库都是 global", async () => {
+    const u = await makeUser()
+    const seen: string[] = []
+    stubStartCapturing(seen)
+
+    const res = await fetchSelf(
+      authRequest(u, "/api/wb2api/login/start", {
+        method: "POST",
+        body: JSON.stringify({ acknowledged: true, realm: "global" }),
+      })
+    )
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { realm: string }).realm).toBe("global")
+    expect(seen).toEqual(["global"])
+
+    // 会话必须落库成 global —— poll 成功后绑定行存的是这里的值
+    const row = await env.DB.prepare(
+      "SELECT realm FROM wb2api_login_sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1"
+    )
+      .bind(u.id)
+      .first<{ realm: string }>()
+    expect(row?.realm).toBe("global")
+  })
+
+  it("不传 realm → 用管理员设的默认（wb2api_realm）", async () => {
+    const u = await makeUser()
+    const seen: string[] = []
+    await setSetting("wb2api_realm", "global")
+    stubStartCapturing(seen)
+
+    const res = await fetchSelf(
+      authRequest(u, "/api/wb2api/login/start", {
+        method: "POST",
+        body: JSON.stringify({ acknowledged: true }),
+      })
+    )
+    expect(res.status).toBe(200)
+    expect(seen).toEqual(["global"])
+  })
+
+  it("realm 传非法值 → 忽略并回落默认，绝不把任意字符串透给上游", async () => {
+    const u = await makeUser()
+    const seen: string[] = []
+    await setSetting("wb2api_realm", "cn")
+    stubStartCapturing(seen)
+
+    const res = await fetchSelf(
+      authRequest(u, "/api/wb2api/login/start", {
+        method: "POST",
+        body: JSON.stringify({ acknowledged: true, realm: "'; DROP TABLE users--" }),
+      })
+    )
+    expect(res.status).toBe(200)
+    expect(seen).toEqual(["cn"])
+  })
 })
 
 describe("GET /api/wb2api/login/poll", () => {
@@ -243,6 +397,130 @@ describe("GET /api/wb2api/login/poll", () => {
       .bind(u.id)
       .first<{ invite_quota_bonus: number | null }>()
     expect(quota?.invite_quota_bonus ?? 0).toBe(0)
+  })
+
+  it("带来新账号 → 发捐献奖励积分（WorkBuddy 默认 10 分）", async () => {
+    const u = await makeUser()
+    stubWb2Api((url) => {
+      if (url.includes("/login/start")) {
+        return jsonResponse({ ok: true, url: "https://example.com/oauth", state: "st-1" })
+      }
+      return jsonResponse({ ok: true, done: true, uid: "uid-points", nickname: "n" })
+    })
+
+    const sid = await startLogin(u)
+    expect((await poll(u, sid)).body.status).toBe("done")
+
+    expect(await getPointsBalance(env, u.id)).toBe(10)
+    const tx = await env.DB.prepare(
+      "SELECT reason, detail, delta FROM point_transactions WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1"
+    )
+      .bind(u.id)
+      .first<{ reason: string; detail: string; delta: number }>()
+    expect(tx?.reason).toBe("donation")
+    expect(tx?.delta).toBe(10)
+    expect(tx?.detail).toContain("WorkBuddy")
+  })
+
+  it("登录前已在池中的账号 → 照常绑定，但不发捐献奖励积分", async () => {
+    const u = await makeUser()
+    // 这个账号登录前就已经在网关池里（管理员手动加的），用户并没有给池子添东西
+    poolUids = ["uid-points-pool"]
+    stubWb2Api((url) => {
+      if (url.includes("/login/start")) {
+        return jsonResponse({ ok: true, url: "https://example.com/oauth", state: "st-1" })
+      }
+      return jsonResponse({ ok: true, done: true, uid: "uid-points-pool", nickname: "n" })
+    })
+
+    const sid = await startLogin(u)
+    expect((await poll(u, sid)).body.status).toBe("done")
+
+    expect(await getPointsBalance(env, u.id)).toBe(0)
+  })
+
+  it("登录前已在池中的账号 → 照常绑定 + 授权限，但不发邀请奖励", async () => {
+    const { invitee, inviterId } = await seedInviteeWithInviter()
+    await env.DB.prepare("UPDATE users SET permissions = ? WHERE id = ?")
+      .bind(JSON.stringify({ r2: true, ai: false, frp: true, profile: true, proxy: true }), invitee.id)
+      .run()
+    // 登录前这个账号就已经在网关池里（管理员手动加的 / 历史遗留）
+    poolUids = ["uid-in-pool"]
+    stubWb2Api((url) => {
+      if (url.includes("/login/start")) {
+        return jsonResponse({ ok: true, url: "https://example.com/oauth", state: "st-1" })
+      }
+      return jsonResponse({ ok: true, done: true, uid: "uid-in-pool", nickname: "n" })
+    })
+
+    const sid = await startLogin(invitee)
+    const r = await poll(invitee, sid)
+
+    // 不再拒绝（历史 bug：账号已进池、本站却没落库，用户重试被自己挡死）
+    expect(r.body.status).toBe("done")
+    expect(await aiPermission(invitee.id)).toBe(true)
+    const n = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM wb2api_bindings WHERE uid = 'uid-in-pool'"
+    ).first<{ c: number }>()
+    expect(n?.c).toBe(1)
+    // 没带来新资源 → 不给邀请人发订阅
+    expect(newapiCalls).toHaveLength(0)
+    const reward = await env.DB.prepare(
+      "SELECT 1 AS x FROM invite_rewards WHERE invitee_user_id = ?"
+    )
+      .bind(invitee.id)
+      .first()
+    expect(reward).toBeNull()
+    expect(inviterId).toBeTruthy()
+  })
+
+  it("登录前不在池中（带来新账号）→ 发邀请奖励订阅给邀请人", async () => {
+    const { invitee, inviterId } = await seedInviteeWithInviter()
+    await env.DB.prepare("UPDATE users SET permissions = ? WHERE id = ?")
+      .bind(JSON.stringify({ r2: true, ai: false, frp: true, profile: true, proxy: true }), invitee.id)
+      .run()
+    poolUids = [] // 空池 ⇒ 这个账号是用户带来的
+    stubWb2Api((url) => {
+      if (url.includes("/login/start")) {
+        return jsonResponse({ ok: true, url: "https://example.com/oauth", state: "st-1" })
+      }
+      return jsonResponse({ ok: true, done: true, uid: "uid-new", nickname: "n" })
+    })
+    newapiHandler = () => jsonResponse({ success: true, message: "ok" })
+
+    const sid = await startLogin(invitee)
+    await poll(invitee, sid)
+
+    // 给邀请人开了一张订阅（套餐 2）
+    const subCall = newapiCalls.find((c) => c.url.includes("/subscriptions"))
+    expect(subCall).toBeTruthy()
+    const reward = await env.DB.prepare(
+      "SELECT inviter_user_id, plan_id FROM invite_rewards WHERE invitee_user_id = ?"
+    )
+      .bind(invitee.id)
+      .first<{ inviter_user_id: string; plan_id: number }>()
+    expect(reward?.inviter_user_id).toBe(inviterId)
+    expect(reward?.plan_id).toBe(2)
+  })
+
+  it("池快照查询失败 → 不阻断绑定，但不发奖励", async () => {
+    const { invitee } = await seedInviteeWithInviter()
+    await env.DB.prepare("UPDATE users SET permissions = ? WHERE id = ?")
+      .bind(JSON.stringify({ r2: true, ai: false, frp: true, profile: true, proxy: true }), invitee.id)
+      .run()
+    // overview 挂掉：快照落 null
+    overviewFails = true
+    stubWb2Api((url) => {
+      if (url.includes("/login/start")) {
+        return jsonResponse({ ok: true, url: "https://example.com/oauth", state: "st-1" })
+      }
+      return jsonResponse({ ok: true, done: true, uid: "uid-nosnap", nickname: "n" })
+    })
+
+    const sid = await startLogin(invitee)
+    const r = await poll(invitee, sid)
+    expect(r.body.status).toBe("done")
+    expect(newapiCalls).toHaveLength(0)
   })
 
   it("终态缓存：done 之后重复 poll 不再打上游", async () => {
@@ -318,7 +596,8 @@ describe("GET /api/wb2api/login/poll", () => {
       "SELECT COUNT(*) AS c FROM wb2api_bindings WHERE uid = 'uid-dup'"
     ).first<{ c: number }>()
     expect(n?.c).toBe(1)
-    expect(pollCount).toBe(2)
+    // 两次登录各 poll 一次（start 里的池快照查询不算）
+    expect(pollCalls()).toBe(2)
   })
 
   it("不同用户抢绑同一账号 → 409，且不动原绑主", async () => {

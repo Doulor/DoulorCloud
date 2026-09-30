@@ -1,0 +1,23 @@
+-- 0077_points_delivery_params.sql
+-- 积分商城：给商品加「交付参数」列，支持更多自动交付方式。
+--
+-- 背景：原先 delivery 只有两种，参数只有 `quota_yuan` 一个专用列。
+-- 现在要支持「授予模块权限 / 开通中转站订阅 / 增加邀请码额度」三种新的
+-- 自动交付方式，各自参数形态不同（模块名 / 套餐 id / 数量）。
+--
+-- 为什么不给每种方式加一个专用列：交付方式会持续增加，每加一种就 ALTER 一次表，
+-- 还得同步改订单快照逻辑。用一个 JSON 装各类型自己的参数，加新类型只需改
+-- 校验与交付函数（见 points-shop.ts 的 sanitizeProductInput / deliverAuto）。
+--
+-- ⚠️ 与 quota_yuan **并存**，不要删那个列：最早的 quota 类型用它，
+--    线上已有商品与历史订单都在读。
+--
+-- 取值示例：
+--   {"feature":"ai"}      delivery='feature'        授予「AI 中转站」权限
+--   {"planId":2}          delivery='subscription'   开通 NewAPI 套餐 2
+--   {"count":2}           delivery='invite_quota'   邀请码创建额度 +2
+--   NULL                  delivery='quota' / 'manual'
+--
+-- ⚠️ SQLite 的 ALTER TABLE ADD COLUMN 没有 IF NOT EXISTS，只能跑一次。
+
+ALTER TABLE point_products ADD COLUMN delivery_params TEXT;

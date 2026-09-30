@@ -1,5 +1,5 @@
 /**
- * 链接预览：把 URL 解析成「富链接卡片」所需的元数据（标题 / 描述 / 图片 / 站点名）。
+ * 链接预览：把 URL 解析成「富链接卡片」所需的元数据（标题 / 描述 / 图片 / 图标 / 站点名）。
  *
  * 为什么在 Worker 端做：浏览器前端受 CORS 限制，不能直接抓取外站；
  * Worker 无此限制，由它去抓目标 URL 的 HTML 并解析 Open Graph 标签。
@@ -8,11 +8,34 @@
  * 缓存：同一 URL 被多人引用时不能反复抓，解析结果存 D1（link_previews 表），
  * 过期后重新抓取以反映目标站点内容更新。
  *
+ * 图片与图标的区别（2026-09-29 补）：
+ *   - `image` = og:image，大图，卡片左侧铺满；
+ *   - `icon`  = 站点 favicon，小图。
+ *   很多页面（如 QQ 群邀请页 `qm.qq.com/q/xxx`）只有 title 没有 og:image，
+ *   这时用 icon 补一个图标位，卡片不至于空着一块。
+ *
  * ⚠️ 安全：
  *   - 只抓 http/https，拒绝其它协议（file://、javascript: 等）。
  *   - 目标响应过大直接放弃（限制抓取字节数），防止被塞超大文件拖垮 Worker。
- *   - 解析用正则而非完整 HTML 解析器，够用且不引入重量级依赖。
+ *   - 解析用正则而非完整 HTML 解析器（见 `html-meta.ts`），够用且不引入重量级依赖。
+ *
+ * ⚠️ 2026-09-25 审计（H5）：上面这三条**没有一条覆盖 SSRF**，而
+ * `url-guard.ts` 的模块契约明确写着「**任何**服务端请求用户地址的
+ * 功能都必须过 assertPublicHttpUrl」—— 本文件此前连 import 都没有，
+ * 于是任何登录用户都能让 Worker 去请求 169.254.169.254 / 127.0.0.1 /
+ * 10.x 内网地址，并用「能不能取到 title」当盲探针。同时
+ * `redirect: "follow"` 让首跳校验（即使补上）也能被一个 302 绕过。
+ * 现在：入口先过 assertPublicHttpUrl，重定向改为手动逐跳校验。
  */
+import { assertPublicHttpUrl } from "./url-guard"
+import {
+  extractIconUrl,
+  extractTitle,
+  parseAttrs,
+  readTextCapped,
+  resolveAbsolute,
+  tidy,
+} from "./html-meta"
 import type { Env } from "./env"
 
 /** 预览缓存的有效期（天） */
@@ -24,10 +47,17 @@ const MAX_FETCH_BYTES = 512 * 1024
 /** 抓取超时（毫秒） */
 const FETCH_TIMEOUT_MS = 5000
 
+/** 手动跟随的最大重定向跳数 */
+const MAX_REDIRECT_HOPS = 3
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+
 export interface LinkPreview {
   title: string
   description: string | null
+  /** og:image —— 大图 */
   image: string | null
+  /** 站点图标（favicon）—— 没有大图时用它顶上 */
+  icon: string | null
   siteName: string | null
 }
 
@@ -46,64 +76,77 @@ export function normalizeUrl(raw: string): string | null {
   return url.toString()
 }
 
-/** 从 HTML 文本里提取 og 标签值（也回退到 title / meta description） */
-function extractMeta(html: string): LinkPreview {
-  const getMeta = (prop: string): string | null => {
-    // 优先 og:xxx，其次 name=xxx
-    const patterns = [
-      new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']*)["']`, "i"),
-      new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${prop}["']`, "i"),
-    ]
-    for (const p of patterns) {
-      const m = p.exec(html)
-      if (m && m[1]) return decodeEntities(m[1])
-    }
-    return null
+/** 从 HTML 里提取预览信息；相对地址（og:image / favicon）按 baseUrl 补全 */
+function extractMeta(html: string, baseUrl: string): LinkPreview {
+  const metas = html.match(/<meta\b[^>]*>/gi) ?? []
+  const metaMap = new Map<string, string>()
+  for (const tag of metas) {
+    const attrs = parseAttrs(tag)
+    // property 优先于 name：og 系列用 property，description 用 name，
+    // 但也有站点两者写反，所以两个都认（键就是属性值本身）
+    const key = (attrs.property || attrs.name || "").trim().toLowerCase()
+    const value = tidy(attrs.content ?? "")
+    if (key && value && !metaMap.has(key)) metaMap.set(key, value)
   }
+  const meta = (k: string): string | null => metaMap.get(k) ?? null
 
-  const title =
-    getMeta("og:title") ??
-    getMeta("twitter:title") ??
-    /<title[^>]*>([^<]*)<\/title>/i.exec(html)?.[1]?.trim() ??
-    null
-  const description = getMeta("og:description") ?? getMeta("twitter:description") ?? getMeta("description")
-  const image = getMeta("og:image") ?? getMeta("twitter:image")
-  const siteName = getMeta("og:site_name")
+  const title = meta("og:title") ?? meta("twitter:title") ?? extractTitle(html)
+  const description =
+    meta("og:description") ?? meta("twitter:description") ?? meta("description")
+  const imageRaw = meta("og:image") ?? meta("twitter:image")
 
   return {
     title: title || "",
     description: description || null,
-    image: image || null,
-    siteName: siteName || null,
+    // og:image 可能是相对路径，补全；data: 之类会被 resolveAbsolute 丢掉
+    image: imageRaw ? resolveAbsolute(imageRaw, baseUrl) || null : null,
+    icon: extractIconUrl(html, baseUrl) || null,
+    siteName: meta("og:site_name"),
   }
-}
-
-/** 解码常见 HTML 实体（&amp; &lt; &quot; &#39;） */
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, " ")
 }
 
 /** 抓取并解析一个外站 URL 的预览信息 */
 async function fetchPreview(url: string): Promise<LinkPreview | null> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-  try {
-    const res = await fetch(url, {
-      redirect: "follow",
-      signal: controller.signal,
-      headers: {
-        // 伪装成普通浏览器，避免部分站点对非浏览器 UA 返回 403
-        "User-Agent":
-          "Mozilla/5.0 (compatible; DoulorCloudBot/1.0; +https://cloud.doulor.cn)",
-        Accept: "text/html,application/xhtml+xml",
-      },
-    })
+  // 手动逐跳跟随重定向：每一跳都必须过 SSRF 闸（redirect: "follow" 做不到）
+  let current = url
+  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+    try {
+      assertPublicHttpUrl(current, "链接")
+    } catch {
+      return null
+    }
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+    let res: Response
+    try {
+      res = await fetch(current, {
+        redirect: "manual",
+        signal: controller.signal,
+        headers: {
+          // 伪装成普通浏览器，避免部分站点对非浏览器 UA 返回 403
+          "User-Agent":
+            "Mozilla/5.0 (compatible; DoulorCloudBot/1.0; +https://cloud.doulor.cn)",
+          Accept: "text/html,application/xhtml+xml",
+        },
+      })
+    } catch {
+      return null
+    } finally {
+      clearTimeout(timer)
+    }
+
+    if (REDIRECT_STATUSES.has(res.status)) {
+      const location = res.headers.get("Location")
+      if (!location) return null
+      try {
+        current = new URL(location, current).toString()
+      } catch {
+        return null
+      }
+      continue
+    }
+
     // 只处理 HTML
     const contentType = res.headers.get("Content-Type") ?? ""
     if (!contentType.includes("text/html") && !contentType.includes("application/xhtml")) {
@@ -111,39 +154,14 @@ async function fetchPreview(url: string): Promise<LinkPreview | null> {
     }
     if (!res.ok) return null
 
-    const reader = res.body?.getReader()
-    if (!reader) return null
-
-    let received = 0
-    const chunks: Uint8Array[] = []
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      received += value.byteLength
-      chunks.push(value)
-      if (received >= MAX_FETCH_BYTES) break
-    }
-
-    const html = new TextDecoder().decode(concatBytes(chunks, received))
-    const meta = extractMeta(html)
+    const html = await readTextCapped(res, MAX_FETCH_BYTES)
+    const meta = extractMeta(html, current)
     // 连标题都拿不到就没意义
     if (!meta.title) return null
     return meta
-  } catch {
-    return null
-  } finally {
-    clearTimeout(timer)
   }
-}
-
-function concatBytes(chunks: Uint8Array[], total: number): Uint8Array {
-  const out = new Uint8Array(total)
-  let offset = 0
-  for (const c of chunks) {
-    out.set(c, offset)
-    offset += c.byteLength
-  }
-  return out
+  // 跳数用尽
+  return null
 }
 
 /**
@@ -157,13 +175,14 @@ export async function getLinkPreview(env: Env, rawUrl: string): Promise<LinkPrev
 
   // 先查缓存
   const cached = await env.DB.prepare(
-    "SELECT title, description, image, site_name, fetched_at FROM link_previews WHERE url = ?"
+    "SELECT title, description, image, icon, site_name, fetched_at FROM link_previews WHERE url = ?"
   )
     .bind(url)
     .first<{
       title: string
       description: string | null
       image: string | null
+      icon: string | null
       site_name: string | null
       fetched_at: string
     }>()
@@ -175,6 +194,7 @@ export async function getLinkPreview(env: Env, rawUrl: string): Promise<LinkPrev
       title: cached.title,
       description: cached.description,
       image: cached.image,
+      icon: cached.icon ?? null,
       siteName: cached.site_name,
     }
   }
@@ -185,16 +205,25 @@ export async function getLinkPreview(env: Env, rawUrl: string): Promise<LinkPrev
 
   // 写缓存（有就覆盖，同时刷新 fetched_at）
   await env.DB.prepare(
-    `INSERT INTO link_previews (url, title, description, image, site_name, fetched_at)
-          VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO link_previews (url, title, description, image, icon, site_name, fetched_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(url) DO UPDATE SET
           title = excluded.title,
           description = excluded.description,
           image = excluded.image,
+          icon = excluded.icon,
           site_name = excluded.site_name,
           fetched_at = excluded.fetched_at`
   )
-    .bind(url, meta.title, meta.description, meta.image, meta.siteName, new Date(now).toISOString())
+    .bind(
+      url,
+      meta.title,
+      meta.description,
+      meta.image,
+      meta.icon,
+      meta.siteName,
+      new Date(now).toISOString()
+    )
     .run()
 
   return meta

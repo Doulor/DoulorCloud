@@ -53,6 +53,48 @@ function originOf(request: Request): string {
 }
 
 /**
+ * OIDC **协议元数据**的规范来源（issuer、picture 用它；重定向不用）。
+ *
+ * ⚠️ 2026-09-25 审计（L19）：原先 issuer / picture 直接取
+ * `new URL(request.url).origin`，也就是**由 Host 头决定**。于是同一个部署
+ * 通过 `*.workers.dev` 访问时，发现文档会宣告一个**完全不同的 issuer**：
+ *   · OIDC 客户端把 discovery 的 issuer 与它缓存/校验的值做严格比对，
+ *     多 issuer 会让「自动发现」时好时坏，且极难排查；
+ *   · 更根本的是，它把**请求方可控的 Host** 变成了协议元数据的一部分 ——
+ *     协议层不该信任 Host。
+ *
+ * 优先级：
+ *   1. `OAUTH_ISSUER_ORIGIN`（显式配置，最优先，去掉尾部斜杠）；
+ *   2. 本机调试（localhost / 127.0.0.1 / [::1] / *.localhost）→ 用请求本身，
+ *      否则 `wrangler dev` 上根本没法自测；
+ *   3. `*.workers.dev` → 回落到正式站点 `https://cloud.<ROOT_DOMAIN>`，
+ *      不让预览域名污染协议元数据；
+ *   4. 其余（自定义域名）→ 用请求 origin，兼容多域名/自建部署。
+ *
+ * 注意**重定向**（`/login?next=`、`/oauth/consent`）仍然用 `originOf(request)`：
+ * 用户此刻确实在浏览那个 origin，把他跳到另一个域名上是错的。
+ * 只有「对外宣告的协议元数据」才必须收敛到规范来源。
+ */
+function canonicalOrigin(env: Env, request: Request): string {
+  const configured = env.OAUTH_ISSUER_ORIGIN?.trim()
+  if (configured) return configured.replace(/\/+$/, "")
+
+  const url = new URL(request.url)
+  const host = url.hostname.toLowerCase()
+  const isLocal =
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "[::1]" ||
+    host === "::1" ||
+    host.endsWith(".localhost")
+  if (isLocal) return url.origin
+
+  if (host.endsWith(".workers.dev")) return `https://cloud.${env.ROOT_DOMAIN}`
+
+  return url.origin
+}
+
+/**
  * OAuth 端点的根地址。
  *
  * ⚠️ 必须带 `/api` —— 见 index.ts 路由表里的长注释：本站的 API Worker 只被挂了
@@ -60,8 +102,8 @@ function originOf(request: Request): string {
  * 被 SPA 兜底成 index.html。所以整套协议端点都在 /api 之下，
  * OIDC 规范允许 issuer 带路径，issuer 就是这里返回的值。
  */
-function oauthBase(request: Request): string {
-  return `${originOf(request)}/api`
+function oauthBase(env: Env, request: Request): string {
+  return `${canonicalOrigin(env, request)}/api`
 }
 
 /** 给回调地址追加查询参数。用 URL 对象而不是字符串拼接，避免踩到已有参数/编码。 */
@@ -83,7 +125,17 @@ h1{font-size:18px;margin:0 0 8px}p{color:#71717a;font-size:14px;margin:0;line-he
 <body><div class="card"><h1>授权失败</h1><p>${escapeHtml(message)}</p></div></body></html>`
   return new Response(body, {
     status,
-    headers: { "Content-Type": "text/html; charset=utf-8" },
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      // ⚠️ 2026-09-25 审计（L20）：这是全站唯一一处 Worker 直接渲染 HTML 的响应，
+      // 而它**没有带任何安全头**（JSON 响应走 `json()` 会自动带 SAFE_JSON_HEADERS）。
+      // 虽然页面本身已经对 message 做了转义，但少一层纵深防御没有理由 ——
+      // 补上 nosniff（防止按内容嗅探类型）与 no-referrer（防止把带参数的
+      // 授权 URL 通过 Referer 泄漏给第三方）。
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+      "Cache-Control": "no-store",
+    },
   })
 }
 
@@ -124,10 +176,10 @@ function oauthError(
  * 服务端之间调用（且我们只支持 client_secret_post 的机密客户端），故不给它们开 CORS。
  */
 export async function openidConfiguration(
-  _env: Env,
+  env: Env,
   request: Request
 ): Promise<Response> {
-  return new Response(JSON.stringify(discoveryDocument(oauthBase(request))), {
+  return new Response(JSON.stringify(discoveryDocument(oauthBase(env, request))), {
     status: 200,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
@@ -186,12 +238,18 @@ export async function authorize(env: Env, request: Request): Promise<Response> {
       302
     )
   }
-  // PKCE：只支持 S256，带 challenge 就必须带对应 method
-  if (codeChallenge && codeChallengeMethod !== "S256") {
+  // PKCE：只支持 S256，且 challenge / method 必须成对出现（L15）
+  // 与同意页共用 validatePkce()，避免两处规则漂移 —— 这里只是把
+  // 抛出的 ApiError 换成按规范「带 error 回跳」的响应形式。
+  let pkceChallenge: string | null
+  try {
+    pkceChallenge = validatePkce(codeChallenge, codeChallengeMethod)
+  } catch (err) {
+    const description = err instanceof ApiError ? err.message : "PKCE 参数不合法"
     return Response.redirect(
       appendQuery(redirectUri, {
         error: "invalid_request",
-        error_description: "code_challenge_method 只支持 S256",
+        error_description: description,
         state,
       }),
       302
@@ -215,8 +273,9 @@ export async function authorize(env: Env, request: Request): Promise<Response> {
       userId,
       redirectUri,
       scopes: scope,
-      codeChallenge,
-      codeChallengeMethod,
+      // 用校验过的值，保证与同意页路径完全一致
+      codeChallenge: pkceChallenge,
+      codeChallengeMethod: pkceChallenge ? codeChallengeMethod : null,
     })
     return Response.redirect(appendQuery(redirectUri, { code, state }), 302)
   }
@@ -227,7 +286,43 @@ export async function authorize(env: Env, request: Request): Promise<Response> {
 
 // ---- 同意页用到的两个站内接口 ----
 
-/** 解析并校验授权请求参数，供同意页展示。需登录。 */
+/**
+ * PKCE 参数校验（2026-09-25 审计 L15）—— **两个授权入口必须共用这一份**。
+ *
+ * 原状况：校验只写在 `authorize()` 里，而 `authorizeDecision()`（同意页提交）
+ * 直接把 `params.get("code_challenge_method")` 原样透传给 `issueCode`。
+ * 于是走同意页这条路时：
+ *   - `code_challenge_method=plain` 会被照单全收入库；
+ *   - 而兑换端只认 S256 → 这个 code **永远兑换不成功**（用户看到的是「授权失败」，
+ *     排查时完全想不到是同意页少了一次校验）；
+ *   - 同时 `code_challenge_method` 带了、`code_challenge` 没带也会被放行，
+ *     等于把 PKCE 静默降级成「无 PKCE」—— 拦截到 code 的人可以直接兑换。
+ *
+ * RFC 7636：`code_challenge` 与 `code_challenge_method` 必须成对出现；
+ * 本站只支持 S256。返回 null 表示「本次不使用 PKCE」。
+ */
+function validatePkce(
+  codeChallenge: string | null,
+  codeChallengeMethod: string | null
+): string | null {
+  if (!codeChallenge && !codeChallengeMethod) return null
+  if (codeChallengeMethod !== "S256") {
+    throw new ApiError(
+      400,
+      "code_challenge_method 只支持 S256",
+      "INVALID_REQUEST"
+    )
+  }
+  if (!codeChallenge) {
+    throw new ApiError(
+      400,
+      "code_challenge_method 与 code_challenge 必须同时提供",
+      "INVALID_REQUEST"
+    )
+  }
+  return codeChallenge
+}
+
 async function parseAuthorizeRequest(
   env: Env,
   params: URLSearchParams
@@ -236,11 +331,19 @@ async function parseAuthorizeRequest(
   redirectUri: string
   scope: string
   state: string
+  codeChallenge: string | null
+  codeChallengeMethod: string | null
 }> {
   const clientId = params.get("client_id") ?? ""
   const redirectUri = params.get("redirect_uri") ?? ""
   const state = params.get("state") ?? ""
   const scope = normalizeScopes(params.get("scope"))
+  const codeChallengeMethod = params.get("code_challenge_method")
+  // 校验在**这里**做，而不是在各调用点 —— 这是本次修复的要点
+  const codeChallenge = validatePkce(
+    params.get("code_challenge"),
+    codeChallengeMethod
+  )
 
   if (!clientId || !redirectUri) {
     throw new ApiError(400, "缺少 client_id 或 redirect_uri", "INVALID_REQUEST")
@@ -254,7 +357,14 @@ async function parseAuthorizeRequest(
   }
   assertScopesAllowed(scope)
 
-  return { client, redirectUri, scope, state }
+  return {
+    client,
+    redirectUri,
+    scope,
+    state,
+    codeChallenge,
+    codeChallengeMethod: codeChallenge ? codeChallengeMethod : null,
+  }
 }
 
 /** GET /api/oauth/authorize/context —— 同意页展示「谁在申请什么」 */
@@ -304,7 +414,8 @@ export async function authorizeDecision(
     if (typeof v === "string" && v) params.set(key, v)
   }
 
-  const { client, redirectUri, scope, state } = await parseAuthorizeRequest(env, params)
+  const { client, redirectUri, scope, state, codeChallenge, codeChallengeMethod } =
+    await parseAuthorizeRequest(env, params)
 
   // 拒绝：按规范带 error 回跳，不发任何令牌
   if (body.approve !== true) {
@@ -321,8 +432,10 @@ export async function authorizeDecision(
     userId: user.id,
     redirectUri,
     scopes: scope,
-    codeChallenge: params.get("code_challenge"),
-    codeChallengeMethod: params.get("code_challenge_method"),
+    // ⚠️ L15：必须用 parseAuthorizeRequest **校验过**的值，
+    // 不能再从原始 params 里取（那样等于绕过校验）
+    codeChallenge,
+    codeChallengeMethod,
   })
 
   return json({ redirectTo: appendQuery(redirectUri, { code, state }) })
@@ -437,7 +550,14 @@ export async function userinfo(env: Env, request: Request): Promise<Response> {
   const info = await verifyAccessToken(env, m[1].trim())
   if (!info) return unauthorized()
 
-  const payload = await buildUserInfo(env, info.userId, info.scopes, originOf(request))
+  // L19：picture 用**规范来源**而不是请求 origin —— 头像地址一旦跟着 Host 变，
+  // 同一个用户在客户端侧就会被当成两个不同的人（缓存与去重都会出问题）。
+  const payload = await buildUserInfo(
+    env,
+    info.userId,
+    info.scopes,
+    canonicalOrigin(env, request)
+  )
   if (!payload) return unauthorized()
 
   return json(payload)

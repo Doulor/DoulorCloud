@@ -12,7 +12,7 @@
  *
  * 桶保持私有：所有下载都经本 Worker 反代（跨账户无法使用 R2 自定义域）。
  */
-import { ApiError, json } from "../http"
+import { ApiError, json, safeDecode, readBodyCapped } from "../http"
 import { uuid } from "../crypto"
 import { requireFeatureUser } from "../auth"
 import {
@@ -35,6 +35,8 @@ import {
   cfListDnsRecords,
 } from "../cloudflare"
 import { guardRateLimit } from "../ratelimit"
+import { contentDispositionFor } from "../content-type"
+import { isPlaceholderDnsRecord } from "../custom-domain"
 import type { Env } from "../env"
 
 const MARKER_SUFFIX = "/" // 目录占位对象，如 "ruben/"
@@ -108,9 +110,22 @@ async function loadAccount(
 
 /** 校验用户对某个 R2 key 的所有权（key 必须落在其 prefix 目录内） */
 function assertKeyOwned(account: StorageAccountRow, key: string): void {
-  if (!key.startsWith(`${account.prefix}/`) || key.includes("..")) {
+  if (!key.startsWith(`${account.prefix}/`)) {
     throw new ApiError(403, "无权访问该文件", "FORBIDDEN")
   }
+  // ⚠️ 2026-09-25 审计（低）：原实现用 `key.includes("..")` 判穿越，会**误伤合法文件名**。
+  // sanitizeFilename 只去掉**前导**点，所以 `a..b.png` 能通过 createUploadUrl 并成功直传，
+  // 但随后 commitUpload / deleteStorageObject 一律 403 —— 结果是既不计入 used_bytes、
+  // 也删不掉的孤儿对象（用户界面上看得到，却永远删不掉）。
+  // 正确做法是按路径段判断：只有恰好等于 `..`（或 `.`）的段才是穿越。
+  if (hasDotSegment(key)) {
+    throw new ApiError(403, "无权访问该文件", "FORBIDDEN")
+  }
+}
+
+/** key 中是否含有 `.` / `..` 这类路径穿越段（按段判断，不误伤 `a..b.png`） */
+function hasDotSegment(key: string): boolean {
+  return key.split("/").some((seg) => seg === ".." || seg === ".")
 }
 
 /** 清洗文件名：去掉路径分隔与控制字符，防止目录穿越 */
@@ -118,6 +133,9 @@ export function sanitizeFilename(input: string): string {
   const cleaned = input
     .replace(/[\\/]+/g, "_")
     .replace(/[\u0000-\u001f\u007f]/g, "")
+    // 收敛连续点：`..` 与 `...` 都要压成一个点，否则会撞上 hasDotSegment
+    // 的段判断（`a..b.png` 合法，但 `..png` 这类仍应被归一化掉）
+    .replace(/\.{2,}/g, ".")
     .replace(/^\.+/, "")
     .trim()
   const limited = cleaned.slice(0, 200)
@@ -295,8 +313,10 @@ export async function enableStorage(env: Env, request: Request): Promise<Respons
       "UPDATE storage_accounts SET enabled = 1, quota_bytes = ?, consent_version = ?, consented_at = ?, updated_at = ? WHERE user_id = ?"
     )
       .bind(
-        // 管理员配额不限（哨兵值）
-        user.role === "admin" ? ADMIN_UNLIMITED_QUOTA : await getSettingNumber(env, "storage_quota_bytes"),
+        // 管理员/站长配额不限（哨兵值）
+        user.role === "admin" || user.role === "root"
+          ? ADMIN_UNLIMITED_QUOTA
+          : await getSettingNumber(env, "storage_quota_bytes"),
         STORAGE_CONSENT_VERSION,
         now,
         now,
@@ -317,18 +337,37 @@ export async function enableStorage(env: Env, request: Request): Promise<Respons
   const bucketId = picked?.id ?? null
   // 管理员配额不限（哨兵值）；普通用户取桶配置的每人配额，回退全局默认
   const quota =
-    user.role === "admin"
+    user.role === "admin" || user.role === "root"
       ? ADMIN_UNLIMITED_QUOTA
       : (picked?.quotaPerUser ?? defaultQuota)
 
-  await env.DB.prepare(
-    `INSERT INTO storage_accounts
-       (user_id, prefix, quota_bytes, used_bytes, file_count, enabled,
-        consent_version, consented_at, bucket_id, created_at, updated_at)
-     VALUES (?, ?, ?, 0, 0, 1, ?, ?, ?, ?, ?)`
-  )
-    .bind(user.id, prefix, quota, STORAGE_CONSENT_VERSION, now, bucketId, now, now)
-    .run()
+  // ⚠️ 2026-09-25 审计（M12）：`storage_accounts.prefix` 是 UNIQUE，而它的值
+  // 取自用户名。注册预检现在会拦住「旧存储仍占用该名字」的情况
+  // （见 handlers/auth.ts 的 conflicts 批次），但仍有两条残余路径：
+  //   1. 同一用户并发点两次「开通网盘」；
+  //   2. 预检之后、INSERT 之前有人释放/占用了同名 prefix。
+  // 原实现直接让 UNIQUE 冲突冒泡成 500，用户看到的是一个无法理解的错误。
+  // 这里兜底成明确的 409，让前端能给出「该用户名下的存储命名空间已被占用」的提示。
+  try {
+    await env.DB.prepare(
+      `INSERT INTO storage_accounts
+         (user_id, prefix, quota_bytes, used_bytes, file_count, enabled,
+          consent_version, consented_at, bucket_id, created_at, updated_at)
+       VALUES (?, ?, ?, 0, 0, 1, ?, ?, ?, ?, ?)`
+    )
+      .bind(user.id, prefix, quota, STORAGE_CONSENT_VERSION, now, bucketId, now, now)
+      .run()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (/UNIQUE|constraint/i.test(message)) {
+      throw new ApiError(
+        409,
+        "该用户名对应的存储命名空间已被占用（可能是改名后遗留的旧存储），请联系管理员",
+        "PREFIX_TAKEN"
+      )
+    }
+    throw err
+  }
 
   // 目录占位对象，使 R2 控制台里能看到以用户名命名的目录
   try {
@@ -437,7 +476,7 @@ export async function createUploadUrl(
   const size = Math.max(0, Math.trunc(Number(body.size ?? 0)))
   // 管理员不受单文件大小限制（仍受 Worker 请求体上限约束）
   const maxFile =
-    user.role === "admin"
+    user.role === "admin" || user.role === "root"
       ? ADMIN_UNLIMITED_QUOTA
       : await getSettingNumber(env, "storage_max_file_bytes")
 
@@ -463,7 +502,9 @@ export async function createUploadUrl(
   }
 
   const uploadUrl = (await supportsPresign(env, account.bucket_id))
-    ? await presign(env, "PUT", key, 3600, account.bucket_id)
+    ? // content-length 参与签名（见 r2.ts 的 presign）：否则客户端可以声明
+      // size=1 通过配额校验，再用同一个预签名 URL PUT 任意大小的对象。
+      await presign(env, "PUT", key, 3600, account.bucket_id, size)
     : // token 模式不支持预签名：改走 Worker 转发上传（见 proxyUpload）
       `/api/storage/proxy-upload?key=${encodeURIComponent(key)}`
 
@@ -495,22 +536,35 @@ export async function proxyUpload(env: Env, request: Request): Promise<Response>
   assertKeyOwned(account, key)
 
   const contentType = request.headers.get("Content-Type") ?? "application/octet-stream"
-  const buf = await request.arrayBuffer()
+
+  // 管理员不受单文件大小限制（仍受 Worker 请求体上限约束）
+  const maxFile =
+    user.role === "admin" || user.role === "root"
+      ? ADMIN_UNLIMITED_QUOTA
+      : await getSettingNumber(env, "storage_max_file_bytes")
+
+  // ⚠️ 2026-09-26 审计：原先是「先整体读进内存再判大小」（`arrayBuffer()` → 比对 maxFile），
+  // 单请求即可放大到 100MB 级内存。`readBodyCapped` 先看 Content-Length 快速拒绝，
+  // 读完再复核真实长度。上限必须先算出来，所以上面两步调换了顺序。
+  const buf = await readBodyCapped(
+    request,
+    maxFile,
+    `单个文件不能超过 ${Math.round(maxFile / 1024 / 1024)} MB`,
+    400,
+    "FILE_TOO_LARGE"
+  )
   if (buf.byteLength === 0) {
     throw new ApiError(400, "文件为空", "INVALID_INPUT")
   }
 
-  // 管理员不受单文件大小限制（仍受 Worker 请求体上限约束）
-  const maxFile =
-    user.role === "admin"
-      ? ADMIN_UNLIMITED_QUOTA
-      : await getSettingNumber(env, "storage_max_file_bytes")
-  if (buf.byteLength > maxFile) {
-    throw new ApiError(
-      400,
-      `单个文件不能超过 ${Math.round(maxFile / 1024 / 1024)} MB`,
-      "FILE_TOO_LARGE"
-    )
+  // ⚠️ 2026-09-25 审计（P0-6 的配套）：token 模式走 Worker 转发时，
+  // 字节数**已经在内存里**，所以这里能在落盘前就把配额判掉 —— 与预签名
+  // 直传不同（那条路径的大小由客户端声明，见 r2.ts 的 presign 签名改动）。
+  // 注意记账仍由 commitUpload 完成，这里只是「不满足配额就别写进 R2」。
+  const existing = await headObject(env, key, account.bucket_id)
+  const delta = buf.byteLength - (existing?.size ?? 0)
+  if (account.used_bytes + delta > account.quota_bytes) {
+    throw new ApiError(400, "存储空间不足，上传已取消", "QUOTA_EXCEEDED")
   }
 
   await putObject(env, key, buf, contentType, account.bucket_id)
@@ -553,7 +607,7 @@ export async function commitUpload(env: Env, request: Request): Promise<Response
     throw new ApiError(400, "存储空间不足，上传已取消", "QUOTA_EXCEEDED")
   }
 
-  await env.DB.batch([
+  const res = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO storage_objects (id, user_id, r2_key, filename, size, content_type, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -567,14 +621,34 @@ export async function commitUpload(env: Env, request: Request): Promise<Response
       body.contentType ?? head.contentType ?? null,
       now
     ),
+    // ⚠️ 2026-09-26 审计：配额守卫必须写进 WHERE。上面的前置检查基于
+    // `account` 的内存快照，两个并发上传会各自通过它，把 used_bytes 推过配额。
     env.DB.prepare(
       `UPDATE storage_accounts
           SET used_bytes = used_bytes + ?,
               file_count = (SELECT COUNT(*) FROM storage_objects WHERE user_id = ?),
               updated_at = ?
-        WHERE user_id = ?`
-    ).bind(delta, user.id, now, user.id),
+        WHERE user_id = ? AND used_bytes + ? <= quota_bytes`
+    ).bind(delta, user.id, now, user.id, delta),
   ])
+
+  // 守卫没过 ⇒ 并发下别人先占满了配额。补偿：撤掉刚写的记账与文件
+  // （覆盖上传的场景要把 size 还原成旧值，不能直接删行）。
+  if ((res[1]?.meta?.changes ?? 0) === 0) {
+    if (prev) {
+      await env.DB.prepare(
+        "UPDATE storage_objects SET size = ? WHERE r2_key = ? AND user_id = ?"
+      )
+        .bind(prev.size, key, user.id)
+        .run()
+    } else {
+      await env.DB.prepare("DELETE FROM storage_objects WHERE r2_key = ? AND user_id = ?")
+        .bind(key, user.id)
+        .run()
+    }
+    await deleteObject(env, key, account.bucket_id)
+    throw new ApiError(400, "存储空间不足，上传已取消", "QUOTA_EXCEEDED")
+  }
 
   const updated = await loadAccount(env, user.id)
   return json({
@@ -671,10 +745,20 @@ export async function bindStorageDomain(
 
     // 移除绑定期间自动创建的 DNS 占位记录，否则该子域名会一直解析到本站
     // 且 deleteSubdomain 的冲突检测会认为它仍被占用。
-    // 用户在绑定期自行添加的记录也一并清理，避免留下悬空解析。
+    //
+    // ⚠️ 2026-09-25 审计（M14b）：原实现把该名字下的**所有** DNS 记录全删掉，
+    // 注释写着「用户在绑定期自行添加的记录也一并清理，避免留下悬空解析」。
+    // 但这条规则会连用户为这个子域名配的 **MX / TXT（邮件）** 记录一起删掉 ——
+    // 解绑一个网盘直链前缀，代价是把这个子域名的邮件收信能力抹掉。
+    // 那些记录是用户自己的资产，不该由「解绑直链」这个动作处置。
+    //
+    // 现在只删**我们自己建的那种占位记录**：AAAA + `100::`
+    // （与下面绑定分支 cfCreateDnsRecord 的参数一一对应）。
+    // 用户自行添加的记录一律保留 —— 它们本来就指向别处，不存在「悬空」问题。
     try {
       const records = await cfListDnsRecords(env, env.ZONE_ID, existing.fqdn)
       for (const record of records) {
+        if (!isPlaceholderDnsRecord(record)) continue
         await cfDeleteDnsRecord(env, env.ZONE_ID, record.id)
       }
     } catch (err) {
@@ -714,6 +798,27 @@ export async function bindStorageDomain(
     .bind(sub.fqdn)
     .first()
   if (taken) throw new ApiError(409, "该域名已绑定了直链", "CONFLICT")
+
+  // ⚠️ 2026-09-25 审计（M14a）：与个人名片互斥 —— **这个方向原先漏了检查**。
+  //
+  // `bindProfileDomain`（profile.ts:1159-1171）会拒绝已被网盘直链占用的子域名，
+  // 但网盘这边从不检查名片。于是同一个子域名可以同时绑给「名片」和「直链」：
+  //   - 实际生效的是名片（路由优先级），网盘直链静默失效，用户以为配好了；
+  //   - 更糟的是之后解绑网盘时，会把该名字上的 Worker Route 与占位 DNS 一起删掉，
+  //     连带把**名片**的域名打坏。
+  // 互斥必须是双向的，只查一边等于没查。
+  const usedByProfile = await env.DB.prepare(
+    "SELECT user_id FROM profiles WHERE fqdn = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(sub.fqdn)
+    .first()
+  if (usedByProfile) {
+    throw new ApiError(
+      409,
+      "该子域名已绑定个人名片，请先在「名片」中解绑",
+      "CONFLICT"
+    )
+  }
 
   // 该域名上不能已有用户自己建的 DNS 记录（避免抢走他的站点）
   const dns = await env.DB.prepare(
@@ -897,16 +1002,12 @@ async function removeWorkerRoute(env: Env, fqdn: string): Promise<void> {
  *   读取其全部邮件、改 DNS、删子域名……等同于账户接管。
  *   `nosniff` 拦不住 —— 服务端已经明确声明了 text/html。
  *
- * 做法与本仓库 `handlers/tempbox.ts` 的下载接口一致：只有确定安全的类型才 inline，
- * 其余一律当二进制附件下发。
+ * ⚠️ 2026-09-25 审计（P0）：上面那次修复**只堵住了 text/html，漏了 SVG**。
+ *   原实现是 `INLINE_PREFIXES = ["image/", ...]`，而 `image/svg+xml` 命中
+ *   `image/` 前缀 → 仍然 inline → 同一条利用链换个扩展名就复现了。
+ *   现在判定逻辑已抽到 `worker/src/content-type.ts`（全站唯一事实源），
+ *   那里先过精确黑名单、再过 `+xml` 后缀闸，最后才套前缀白名单。
  */
-const INLINE_PREFIXES = ["image/", "video/", "audio/"]
-const INLINE_EXACT = ["text/plain", "application/pdf"]
-
-function isInlineSafe(contentType: string): boolean {
-  const t = contentType.split(";")[0].trim().toLowerCase()
-  return INLINE_EXACT.includes(t) || INLINE_PREFIXES.some((p) => t.startsWith(p))
-}
 
 async function proxyObject(
   env: Env,
@@ -917,17 +1018,32 @@ async function proxyObject(
 ): Promise<Response> {
   const range = request.headers.get("Range") ?? undefined
   const method = request.method.toUpperCase()
+  const filename = key.split("/").pop() || "file"
 
   // HEAD：只回元信息（部分客户端/预览会用）
+  //
+  // ⚠️ 2026-09-25 审计（低）：HEAD 分支原先**完全绕过了类型收口**，
+  // 把 R2 里存的原始 Content-Type（可能是 image/svg+xml / text/html）
+  // 直接回给任何匿名调用者，与 GET 的行为不一致。HEAD 没有正文所以
+  // 不能直接触发 XSS，但会泄露对象的真实存储类型，也会让 CDN/客户端
+  // 对同一 URL 做出与 GET 不同的缓存与嗅探判断。现在两条分支共用同一套头部。
   if (method === "HEAD") {
     const head = await headObject(env, key, bucketId)
     if (!head) return new Response(null, { status: 404 })
+    const { contentType, contentDisposition } = contentDispositionFor(
+      head.contentType,
+      filename
+    )
     return new Response(null, {
       status: 200,
       headers: {
         "Content-Length": String(head.size),
-        "Content-Type": head.contentType ?? "application/octet-stream",
+        "Content-Type": contentType,
+        "Content-Disposition": contentDisposition,
         "Accept-Ranges": "bytes",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": publicLink ? "public, max-age=300" : "private, no-store",
+        "Access-Control-Allow-Origin": "*",
       },
     })
   }
@@ -955,15 +1071,13 @@ async function proxyObject(
 
   // 类型收口：非白名单类型一律降级为二进制附件，避免用户上传的 HTML/SVG
   // 在本站主源上被执行（存储型 XSS）。直链面向任意外部访客，必须假定内容不可信。
-  const upstreamType = headers.get("content-type") ?? "application/octet-stream"
-  if (!isInlineSafe(upstreamType)) {
-    const filename = key.split("/").pop() ?? "file"
-    headers.set("Content-Type", "application/octet-stream")
-    headers.set(
-      "Content-Disposition",
-      `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`
-    )
-  }
+  // 判定逻辑见 worker/src/content-type.ts（含 image/svg+xml 的修复）。
+  const { contentType, contentDisposition } = contentDispositionFor(
+    headers.get("content-type"),
+    filename
+  )
+  headers.set("Content-Type", contentType)
+  headers.set("Content-Disposition", contentDisposition)
 
   return new Response(upstream.body, { status: upstream.status, headers })
 }
@@ -986,8 +1100,17 @@ export async function serveDirectLink(
     throw new ApiError(404, "直链格式不正确", "NOT_FOUND")
   }
 
-  const prefix = decodeURIComponent(segments[0]).toLowerCase()
-  const filename = segments.slice(1).map(decodeURIComponent).join("/")
+  // safeDecode：非法百分号编码（`%zz`、孤立 `%`）此前会抛 URIError → 500，
+  // 语义上应为 400；顺带在解码后立刻拒绝路径穿越段。
+  const prefix = safeDecode(segments[0]).toLowerCase()
+  const filename = segments
+    .slice(1)
+    .map(safeDecode)
+    .join("/")
+
+  if (hasDotSegment(filename)) {
+    throw new ApiError(404, "文件不存在", "NOT_FOUND")
+  }
 
   const account = await env.DB.prepare(
     "SELECT * FROM storage_accounts WHERE prefix = ? COLLATE NOCASE LIMIT 1"

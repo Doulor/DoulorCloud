@@ -11,11 +11,14 @@
  * 正确处理 RFC 2047 编码主题、quoted-printable/base64、HTML-only 邮件。
  */
 import PostalMime from "postal-mime"
+import { sendMail, renderMail } from "./mailer"
 import type { Env } from "./env"
 
 const MAX_RAW_BYTES = 2 * 1024 * 1024
 /** 单封信正文入库上限（字符），避免超出 D1 单值限制导致插入失败并触发重投 */
 const MAX_BODY_CHARS = 256 * 1024
+/** HTML 转纯文本的输入上限：线性扫描已经很快，这里只是兜底防止无谓开销 */
+const MAX_HTML_CHARS = 512 * 1024
 
 async function readRaw(
   raw: ReadableStream<Uint8Array>,
@@ -43,19 +46,107 @@ async function readRaw(
   return all.buffer
 }
 
-/** HTML → 纯文本（保留基本段落结构） */
-function htmlToText(html: string): string {
-  return html
-    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
+/**
+ * HTML → 纯文本（保留基本段落结构）。
+ *
+ * ⚠️ 2026-09-25 审计（P0-4）：原实现第一行是
+ *   `.replace(/<(script|style)[\s\S]*?<\/\1>/gi, "")`
+ * —— 惰性量词 + 反向引用 + 交替。当正文里出现大量**没有闭合标签**的
+ * `<script`/`<style` 起始位置时，正则引擎在每个起始位置都要一路扫到串尾，
+ * 退化成 O(n²)。实测（Node，同一函数）：
+ *   200KB → 1.8s，400KB → 7.8s，800KB → 32.6s（约 4.2×/倍）
+ * 而入站邮件的读入上限是 2MB（MAX_RAW_BYTES），且这条路径**无需登录、
+ * 无需邀请码**：任何人往任意 *@doulor.cn 发一封约 1MB、全是 `<style>` 的
+ * HTML 邮件，就能让该次投递超 CPU 上限失败 → Email Routing 重投 → 反复烧 CPU。
+ *
+ * 现在改成**单遍线性扫描**（逐字符判断是否在标签内），复杂度 O(n)，
+ * 且不再依赖任何惰性量词/反向引用。同时把输入截到 512KB 兜底。
+ */
+const BLOCK_TAGS = new Set([
+  "p",
+  "div",
+  "tr",
+  "li",
+  "ul",
+  "ol",
+  "table",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "blockquote",
+  "section",
+  "article",
+  "header",
+  "footer",
+  "br",
+])
+
+/** 标签名允许的字符（A-Z a-z 0-9） */
+function isTagNameChar(code: number): boolean {
+  return (
+    (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
+  )
+}
+
+function decodeEntities(input: string): string {
+  return input
     .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
-    .replace(/&#(\d+);/g, (_m, code: string) => String.fromCharCode(Number(code)))
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&#(\d{1,7});/g, (_m, code: string) => {
+      const n = Number(code)
+      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : ""
+    })
+    .replace(/&amp;/gi, "&")
+}
+
+function htmlToText(html: string): string {
+  // 上限兜底：即使调用方传进来 2MB，也不会让单次投递做无谓的大量工作
+  const src = html.length > MAX_HTML_CHARS ? html.slice(0, MAX_HTML_CHARS) : html
+  const n = src.length
+  const out: string[] = []
+  let i = 0
+  // 正在跳过的原始文本元素名（script/style）；非 null 时丢弃其间所有内容
+  let skipping: string | null = null
+
+  while (i < n) {
+    const lt = src.indexOf("<", i)
+    if (lt < 0) {
+      if (!skipping) out.push(src.slice(i))
+      break
+    }
+    if (!skipping) out.push(src.slice(i, lt))
+
+    let j = lt + 1
+    const closing = src.charCodeAt(j) === 47 // '/'
+    if (closing) j++
+    const nameStart = j
+    while (j < n && isTagNameChar(src.charCodeAt(j))) j++
+    const name = src.slice(nameStart, j).toLowerCase()
+    const gt = src.indexOf(">", j)
+    const tagEnd = gt < 0 ? n : gt + 1
+
+    if (skipping) {
+      if (closing && name === skipping) skipping = null
+      i = tagEnd
+      continue
+    }
+    if (!closing && (name === "script" || name === "style")) {
+      skipping = name
+      i = tagEnd
+      continue
+    }
+    if (BLOCK_TAGS.has(name)) out.push("\n")
+    i = tagEnd
+  }
+
+  return decodeEntities(out.join(""))
     .replace(/\n{3,}/g, "\n\n")
     .replace(/[ \t]+\n/g, "\n")
     .trim()
@@ -86,6 +177,15 @@ export async function incomingEmail(
     }>()
 
   if (!mailbox) {
+    // 这个地址没有建过邮箱。
+    //
+    // 2026-09-25 起 Cloudflare 的 catch-all 改由本 Worker 接管（在此之前它是自己
+    // 转发到某个真实邮箱的，这类信根本到不了这里），所以这条分支现在会真的被走到 ——
+    // 拼错的地址、别人随手发的地址都会经过这里。
+    //
+    // 处理方式：**拒收**（发信人会收到「收件人不存在」的退信）。
+    // 这是刻意的选择，别改成静默丢弃：静默丢信会让群发者以为地址有效、继续发，
+    // 而退信能立刻告诉写错地址的人「这个地址不存在」。
     message.setReject("收件人不存在")
     return
   }
@@ -100,8 +200,17 @@ export async function incomingEmail(
     const parsed = await PostalMime.parse(rawBuffer)
     subject = parsed.subject ?? ""
     if (parsed.from?.address) {
-      fromAddress = parsed.from.name
-        ? `${parsed.from.name} <${parsed.from.address}>`
+      // ⚠️ 2026-09-25 审计（H3）：显示名里**不能保留尖括号**。
+      // 这里拼出来的是 `from_address` 这一列，而网页端「回信」会用
+      // `extractAddress()` 取其中第一段 `<...>` 当收件人。发件人只要把
+      // From 头写成 `"Foo <attacker@evil.com>" <real@good.com>`，
+      // 解析后就会拼成 `Foo <attacker@evil.com> <real@good.com>` ——
+      // 用户点「回信」，收件人被静默换成攻击者的地址（前端 mailto: 路径
+      // 更是立刻可用，且用的是用户本人的真实邮箱）。
+      // 去掉 <> 后，这一列里有且只有一对尖括号 = 真实地址。
+      const safeName = (parsed.from.name ?? "").replace(/[<>]/g, "").trim()
+      fromAddress = safeName
+        ? `${safeName} <${parsed.from.address}>`
         : parsed.from.address
     }
     text = (parsed.text ?? "").trim()
@@ -118,6 +227,30 @@ export async function incomingEmail(
 
   const now = new Date().toISOString()
   const messageId = crypto.randomUUID()
+
+  // ⚠️ 2026-09-25 审计（L11）：入库前先按 Message-ID 去重。
+  //
+  // 为什么会走到这里：`incomingEmail` 一旦抛错，Email Routing 会**重投**同一封邮件，
+  // 而 `messages` 表没有唯一约束，于是收件箱出现重复邮件。
+  // 下面的 bookkeeping UPDATE 已经补了 try/catch（消除最主要的重投触发点），
+  // 但仍有一个兜不住的窗口：Worker 在 INSERT 成功之后、函数返回之前被 CPU/墙钟杀掉
+  // （本文件顶部就记着"投递不能失败"这条约束）。此时重投会再插一行。
+  //
+  // 用 `rfc_message_id` 判重是安全的：RFC 5322 要求它全局唯一，
+  // 重投的正是**同一封**邮件（值完全相同）。取不到 Message-ID 时为 null，
+  // 此时不做判重 —— 宁可偶尔重复，也不能误吞真实邮件。
+  if (rfcMessageId) {
+    const dup = await env.DB.prepare(
+      "SELECT id FROM messages WHERE mailbox_id = ? AND rfc_message_id = ? LIMIT 1"
+    )
+      .bind(mailbox.id, rfcMessageId.slice(0, 500))
+      .first<{ id: string }>()
+    if (dup) {
+      // 已处理过：插入与转发都跳过，避免收件箱和转发各重复一次
+      console.warn("重复投递，已忽略:", rfcMessageId, recipient)
+      return
+    }
+  }
 
   // 1. 存入收件箱
   await env.DB.prepare(
@@ -159,7 +292,19 @@ export async function incomingEmail(
     const failures: string[] = []
     for (const target of forwardTargets) {
       try {
-        await message.forward(target)
+        // 用多通道发信转发（Posta/Brevo/CF），能发任意邮箱，
+        // 不再受 Cloudflare「只能转发到已验证 destination」的限制。
+        // subject 加 Fwd 前缀、正文附原始发件人，让对方能看出原邮件出处。
+        const { text: fwdText, html: fwdHtml } = renderMail(
+          `Fwd: ${subject || "(无主题)"}`,
+          [`转发自 ${fromAddress}`, "", text || "(无正文)"],
+        )
+        await sendMail(env, {
+          to: target,
+          subject: `Fwd: ${subject || "(无主题)"}`,
+          text: fwdText,
+          html: fwdHtml,
+        })
         anyForwarded = true
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -167,24 +312,34 @@ export async function incomingEmail(
         console.error(`转发失败 ${recipient} -> ${target}:`, err)
       }
     }
-    // 只在真正转发成功时才记时间戳（避免界面上「已转发」的假象）
-    if (anyForwarded) {
-      await env.DB.prepare("UPDATE mailboxes SET last_forwarded_at = ? WHERE id = ?")
-        .bind(now, mailbox.id)
-        .run()
-    }
-    if (failures.length > 0) {
-      await env.DB.prepare(
-        "UPDATE mailboxes SET last_forward_error = ? WHERE id = ?"
-      )
-        .bind(failures.join("; ").slice(0, 500), mailbox.id)
-        .run()
-    } else {
-      await env.DB.prepare(
-        "UPDATE mailboxes SET last_forward_error = NULL WHERE id = ?"
-      )
-        .bind(mailbox.id)
-        .run()
+    // ⚠️ 2026-09-25 审计（L11）：下面三条 bookkeeping UPDATE 原先**没有 try/catch**，
+    // 而更下方写审计日志的那条**有** —— 注释还明确写着「此处抛错会让整个 email() 失败，
+    // Email Routing 会重投该邮件 → 收件箱出现重复邮件」。
+    // 同一个函数里，一条被保护、三条没有，是明显的遗漏：
+    // D1 抖动一下就会重投，而重投会再插一行邮件（收件箱重复）。
+    // 「记录转发状态」是**辅助信息**，绝不能因为它失败就丢掉一封邮件。
+    try {
+      // 只在真正转发成功时才记时间戳（避免界面上「已转发」的假象）
+      if (anyForwarded) {
+        await env.DB.prepare("UPDATE mailboxes SET last_forwarded_at = ? WHERE id = ?")
+          .bind(now, mailbox.id)
+          .run()
+      }
+      if (failures.length > 0) {
+        await env.DB.prepare(
+          "UPDATE mailboxes SET last_forward_error = ? WHERE id = ?"
+        )
+          .bind(failures.join("; ").slice(0, 500), mailbox.id)
+          .run()
+      } else {
+        await env.DB.prepare(
+          "UPDATE mailboxes SET last_forward_error = NULL WHERE id = ?"
+        )
+          .bind(mailbox.id)
+          .run()
+      }
+    } catch (err) {
+      console.error("转发状态记录失败（不影响投递）:", mailbox.id, err)
     }
   }
 

@@ -4,8 +4,12 @@
  * 独立文件（同 admin-oauth.tsx 的考量）：admin.tsx 已 4500+ 行，
  * 且有其他改动可能在动它。UI 本体放这里，admin.tsx 只插 3 行挂载。
  *
- * 展示：总 PV/UV、按天趋势、页面热度 Top、来源分析。
- * 图表不引入重库，用纯 CSS 条形图（数据量小，够用且轻）。
+ * 两个分页：
+ *   1. 访问统计（TrafficPanel）—— 访客侧：PV/UV、趋势、页面热度、来源；
+ *   2. 用户数据（UserAnalyticsPanel，独立文件）—— 用户侧：功能开通率、构成、
+ *      新增趋势、资源占用、捐献与社区活跃度。
+ *
+ * 图表不引入重库，用纯 CSS 条形图 / SVG 环形 / conic-gradient 饼图（数据量小，够用且轻）。
  */
 import * as React from "react"
 import { toast } from "sonner"
@@ -15,6 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { LoadingBlock } from "@/components/loading-block"
 import { analyticsApi, errMsg } from "@/services/api"
+import { UserAnalyticsPanel } from "./admin-analytics-users"
 import type { AnalyticsOverview } from "@/types"
 
 /** 相对时间（今天/昨天/N 天前） */
@@ -27,9 +32,9 @@ function dayLabel(date: string): string {
   return `${date.slice(5)}`
 }
 
-export function AnalyticsPanel() {
+/** 访问统计（访客侧） */
+function TrafficPanel({ days }: { days: string }) {
   const [data, setData] = React.useState<AnalyticsOverview | null>(null)
-  const [days, setDays] = React.useState("7")
   const [loading, setLoading] = React.useState(true)
 
   const load = React.useCallback(async () => {
@@ -55,38 +60,26 @@ export function AnalyticsPanel() {
 
   return (
     <div className="space-y-6">
-      {/* 时间范围 + 总览 */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Card className="px-5 py-4">
-            <div className="flex items-center gap-3">
-              <Eye className="h-5 w-5 text-muted-foreground" />
-              <div>
-                <p className="text-xs text-muted-foreground">浏览量（PV）</p>
-                <p className="text-2xl font-semibold tabular-nums">{data.summary.pv}</p>
-              </div>
+      {/* 总览 */}
+      <div className="flex flex-wrap items-center gap-4">
+        <Card className="px-5 py-4">
+          <div className="flex items-center gap-3">
+            <Eye className="h-5 w-5 text-muted-foreground" />
+            <div>
+              <p className="text-xs text-muted-foreground">浏览量（PV）</p>
+              <p className="text-2xl font-semibold tabular-nums">{data.summary.pv}</p>
             </div>
-          </Card>
-          <Card className="px-5 py-4">
-            <div className="flex items-center gap-3">
-              <Users className="h-5 w-5 text-muted-foreground" />
-              <div>
-                <p className="text-xs text-muted-foreground">独立访客（UV）</p>
-                <p className="text-2xl font-semibold tabular-nums">{data.summary.uv}</p>
-              </div>
+          </div>
+        </Card>
+        <Card className="px-5 py-4">
+          <div className="flex items-center gap-3">
+            <Users className="h-5 w-5 text-muted-foreground" />
+            <div>
+              <p className="text-xs text-muted-foreground">独立访客（UV）</p>
+              <p className="text-2xl font-semibold tabular-nums">{data.summary.uv}</p>
             </div>
-          </Card>
-        </div>
-        <Select value={days} onValueChange={setDays}>
-          <SelectTrigger className="w-36">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="7">近 7 天</SelectItem>
-            <SelectItem value="30">近 30 天</SelectItem>
-            <SelectItem value="90">近 90 天</SelectItem>
-          </SelectContent>
-        </Select>
+          </div>
+        </Card>
       </div>
 
       {/* 趋势图（纯 CSS 条形图） */}
@@ -186,6 +179,53 @@ export function AnalyticsPanel() {
           </CardContent>
         </Card>
       </div>
+    </div>
+  )
+}
+
+export function AnalyticsPanel() {
+  const [tab, setTab] = React.useState<"traffic" | "users">("traffic")
+  const [days, setDays] = React.useState("7")
+
+  const tabs: { key: "traffic" | "users"; label: string }[] = [
+    { key: "traffic", label: "访问统计" },
+    { key: "users", label: "用户数据" },
+  ]
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {/* 分页切换 */}
+        <div className="flex gap-1 rounded-lg border p-1">
+          {tabs.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setTab(t.key)}
+              className={
+                "rounded-md px-3 py-1.5 text-sm transition-colors " +
+                (tab === t.key
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground")
+              }
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <Select value={days} onValueChange={setDays}>
+          <SelectTrigger className="w-36">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="7">近 7 天</SelectItem>
+            <SelectItem value="30">近 30 天</SelectItem>
+            <SelectItem value="90">近 90 天</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      {tab === "traffic" ? <TrafficPanel days={days} /> : <UserAnalyticsPanel days={days} />}
     </div>
   )
 }

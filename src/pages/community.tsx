@@ -26,9 +26,13 @@ import {
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
+import { DataFade } from "@/components/data-fade"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { UserAvatar } from "@/components/user-avatar"
+import { UserCardPopover } from "@/components/user-card"
+import { RoleBadge } from "@/components/role-badge"
+import { CustomTitleBadge } from "@/components/custom-title-badge"
 import { Markdown } from "@/components/markdown"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -250,25 +254,34 @@ function AuthorLine({ post, size = "sm" }: { post: Post; size?: "sm" | "md" }) {
   const av = size === "md" ? "h-10 w-10" : "h-9 w-9"
   return (
     <div className="flex min-w-0 items-center gap-2.5">
-      <UserAvatar
+      {/* 点头像/名字弹出小卡片，可跳转到对方的个人空间 */}
+      <UserCardPopover
         username={post.author.username}
         nickname={post.author.nickname}
         hasAvatar={post.author.hasAvatar}
-        className={av}
-      />
-      <div className="min-w-0 leading-tight">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-sm font-semibold">
-            {post.author.nickname ?? post.author.username}
-          </span>
-          {post.author.isAdmin && (
-            <Badge variant="secondary" className="h-5 shrink-0 px-1.5 text-[10px]">
-              管理员
-            </Badge>
-          )}
-          <span className="truncate text-xs text-muted-foreground">@{post.author.username}</span>
+        className="flex min-w-0 items-center gap-2.5 text-left"
+      >
+        <UserAvatar
+          username={post.author.username}
+          nickname={post.author.nickname}
+          hasAvatar={post.author.hasAvatar}
+          className={av}
+        />
+        <div className="min-w-0 leading-tight">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate text-sm font-semibold">
+              {post.author.nickname ?? post.author.username}
+            </span>
+            {post.author.isAdmin && (
+              <RoleBadge role={post.author.isRoot ? "root" : "admin"} />
+            )}
+            {post.author.customTitle && (
+              <CustomTitleBadge title={post.author.customTitle} />
+            )}
+            <span className="truncate text-xs text-muted-foreground">@{post.author.username}</span>
+          </div>
         </div>
-      </div>
+      </UserCardPopover>
       <span className="ml-auto shrink-0 text-xs text-muted-foreground" title={fmtTime(post.createdAt)}>
         {relTime(post.createdAt)}
       </span>
@@ -299,7 +312,10 @@ function PostActions({
       }
     >
       <button
-        onClick={onLike}
+        onClick={(e) => {
+          e.stopPropagation()
+          onLike()
+        }}
         className={
           "flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors hover:bg-accent " +
           (post.liked ? "text-red-500" : "hover:text-red-500")
@@ -316,6 +332,7 @@ function PostActions({
       {!detail && (
         <Link
           to={`${basePath}/${post.id}`}
+          onClick={(e) => e.stopPropagation()}
           className="flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors hover:bg-accent hover:text-foreground"
           aria-label="查看评论"
         >
@@ -324,7 +341,10 @@ function PostActions({
         </Link>
       )}
       <button
-        onClick={onShare}
+        onClick={(e) => {
+          e.stopPropagation()
+          onShare()
+        }}
         className="flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors hover:bg-accent hover:text-foreground"
         aria-label="分享并复制链接"
       >
@@ -333,7 +353,10 @@ function PostActions({
       </button>
       {onDelete && (
         <button
-          onClick={onDelete}
+          onClick={(e) => {
+            e.stopPropagation()
+            onDelete()
+          }}
           className="ml-auto flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors hover:bg-accent hover:text-destructive"
           aria-label="删除帖子"
         >
@@ -358,8 +381,12 @@ function PostCard({
   onDelete: (p: Post) => void
   basePath: string
 }) {
+  const navigate = useNavigate()
   return (
-    <article className="group relative overflow-hidden rounded-xl border bg-card p-4 transition-all hover:border-border/80 hover:shadow-sm">
+    <article
+      onClick={() => navigate(`${basePath}/${post.id}`)}
+      className="group relative cursor-pointer overflow-hidden rounded-xl border bg-card p-4 transition-all hover:border-border/80 hover:shadow-sm"
+    >
       <span className="absolute inset-y-0 left-0 w-1 rounded-l-xl bg-gradient-to-b from-primary/40 to-primary/10" />
       <div className="min-w-0 pl-2">
         <AuthorLine post={post} />
@@ -386,11 +413,13 @@ function CommentItem({
   postId,
   basePath,
   onReplied,
+  depth = 0,
 }: {
   node: CommentNode
   postId: string
   basePath: string
   onReplied: () => void
+  depth?: number
 }) {
   const { user } = useAuth()
   const navigate = useNavigate()
@@ -420,24 +449,41 @@ function CommentItem({
 
   const insertEmoji = useEmojiInsert(taRef, text, setText)
 
+  // 深层嵌套时停止左侧缩进，避免在手机上越缩越窄成一条缝
+  const indent = depth < 6
+
   return (
     <div className="overflow-hidden rounded-lg border bg-card p-3">
       <div className="flex min-w-0 items-center gap-2">
-        <UserAvatar
+        <UserCardPopover
           username={node.author.username}
           nickname={node.author.nickname}
           hasAvatar={node.author.hasAvatar}
-          className="h-7 w-7"
-        />
-        <span className="truncate text-sm font-medium">
-          {node.author.nickname ?? node.author.username}
-        </span>
-        <span className="truncate text-xs text-muted-foreground">@{node.author.username}</span>
+          className="flex min-w-0 items-center gap-2 text-left"
+        >
+          <UserAvatar
+            username={node.author.username}
+            nickname={node.author.nickname}
+            hasAvatar={node.author.hasAvatar}
+            className="h-7 w-7"
+          />
+          <span className="truncate text-sm font-medium">
+            {node.author.nickname ?? node.author.username}
+          </span>
+          <span className="truncate text-xs text-muted-foreground">@{node.author.username}</span>
+        </UserCardPopover>
+        {node.author.isAdmin && <RoleBadge role={node.author.isRoot ? "root" : "admin"} />}
+        {node.author.customTitle && <CustomTitleBadge title={node.author.customTitle} />}
         <span className="ml-auto shrink-0 text-xs text-muted-foreground" title={fmtTime(node.createdAt)}>
           {relTime(node.createdAt)}
         </span>
       </div>
       <div className="mt-1.5">
+        {node.replyTo && (
+          <span className="mb-0.5 block text-xs text-muted-foreground">
+            回复 <span className="text-primary">@{node.replyTo}</span>
+          </span>
+        )}
         <Markdown>{node.body}</Markdown>
       </div>
       {user && (
@@ -473,32 +519,16 @@ function CommentItem({
         </div>
       )}
       {node.replies.length > 0 && (
-        <div className="mt-3 space-y-2 border-l-2 border-border pl-3">
+        <div className={"mt-3 space-y-2 " + (indent ? "border-l-2 border-border pl-3" : "")}>
           {node.replies.map((r) => (
-            <div key={r.id} className="overflow-hidden rounded-md bg-muted/40 p-2.5">
-              <div className="flex min-w-0 items-center gap-2">
-                <UserAvatar
-                  username={r.author.username}
-                  nickname={r.author.nickname}
-                  hasAvatar={r.author.hasAvatar}
-                  className="h-6 w-6"
-                />
-                <span className="truncate text-sm font-medium">
-                  {r.author.nickname ?? r.author.username}
-                </span>
-                {r.replyTo && (
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    回复 <span className="text-primary">@{r.replyTo}</span>
-                  </span>
-                )}
-                <span className="ml-auto shrink-0 text-xs text-muted-foreground" title={fmtTime(r.createdAt)}>
-                  {relTime(r.createdAt)}
-                </span>
-              </div>
-              <div className="mt-1 text-sm">
-                <Markdown>{r.body}</Markdown>
-              </div>
-            </div>
+            <CommentItem
+              key={r.id}
+              node={r}
+              postId={postId}
+              basePath={basePath}
+              onReplied={onReplied}
+              depth={depth + 1}
+            />
           ))}
         </div>
       )}
@@ -522,6 +552,51 @@ function CommentTree({
       {comments.map((c) => (
         <CommentItem key={c.id} node={c} postId={postId} basePath={basePath} onReplied={onReplied} />
       ))}
+    </div>
+  )
+}
+
+/** 帖子详情加载骨架：与最终布局一致，避免跳转时整屏空白 + 转圈 */
+function PostDetailSkeleton() {
+  return (
+    <div className="mx-auto w-full max-w-3xl space-y-4">
+      <div className="h-8 w-24 animate-pulse rounded-md bg-muted/60" />
+      <article className="overflow-hidden rounded-xl border bg-card">
+        <div className="border-b bg-muted/30 px-4 py-3">
+          <div className="flex items-center gap-2.5">
+            <div className="h-10 w-10 shrink-0 animate-pulse rounded-full bg-muted" />
+            <div className="space-y-1.5">
+              <div className="h-3.5 w-28 animate-pulse rounded bg-muted" />
+              <div className="h-3 w-16 animate-pulse rounded bg-muted/70" />
+            </div>
+          </div>
+        </div>
+        <div className="min-w-0 space-y-2.5 p-4">
+          <div className="h-3.5 w-full animate-pulse rounded bg-muted" />
+          <div className="h-3.5 w-5/6 animate-pulse rounded bg-muted" />
+          <div className="h-3.5 w-2/3 animate-pulse rounded bg-muted/70" />
+        </div>
+        <div className="border-t px-4 py-2">
+          <div className="h-6 w-40 animate-pulse rounded bg-muted/60" />
+        </div>
+      </article>
+      <div>
+        <div className="mb-3 h-4 w-16 animate-pulse rounded bg-muted" />
+        <div className="space-y-3">
+          {[0, 1].map((i) => (
+            <div key={i} className="rounded-lg border bg-card p-3">
+              <div className="flex items-center gap-2">
+                <div className="h-7 w-7 shrink-0 animate-pulse rounded-full bg-muted" />
+                <div className="h-3 w-24 animate-pulse rounded bg-muted" />
+              </div>
+              <div className="mt-2.5 space-y-1.5">
+                <div className="h-3 w-full animate-pulse rounded bg-muted/70" />
+                <div className="h-3 w-1/2 animate-pulse rounded bg-muted/50" />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }
@@ -696,7 +771,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
 
   const insertEmoji = useEmojiInsert(taRef, text, setText)
 
-  if (loading) return <LoadingBlock />
+  if (loading) return <PostDetailSkeleton />
 
   if (failed && !post) {
     return (
@@ -733,7 +808,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
   }
 
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-4">
+    <div className="mx-auto w-full max-w-3xl space-y-4 animate-in fade-in-0 duration-300">
       <Button
         variant="ghost"
         size="sm"
@@ -1266,7 +1341,12 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
       return
     }
     const tick = () => {
-      void notificationApi.unreadCount().then((r) => setUnread(r.count)).catch(() => {})
+      // 只取社交分类的未读数：消息箱上线后 notifications 里还有系统/公告/活动消息，
+      // 直接用总数会让社区角标虚高
+      void notificationApi
+        .unreadCount()
+        .then((r) => setUnread(r.byCategory.social))
+        .catch(() => {})
     }
     tick()
     const t = setInterval(tick, 30000)
@@ -1291,7 +1371,8 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
     setNotifOpen(true)
     setNotifLoading(true)
     try {
-      const res = await notificationApi.list()
+      // 只拉社交分类：社区页的通知弹窗不该混入系统/公告/活动消息
+      const res = await notificationApi.list({ category: "social" })
       setNotifs(res.notifications)
     } catch (err) {
       toast.error(errMsg(err, "加载通知失败"))
@@ -1302,6 +1383,16 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
 
   /** 点击某条通知：跳转到对应帖子详情，并标记已读 */
   const openNotification = async (n: Notification) => {
+    // 反馈回复通知没有 postId（关联的是反馈单，不是帖子），单独跳反馈页。
+    // 放在最前面判断：否则会被下面「没有 postId 就 return」直接吞掉，
+    // 表现为「有通知、点了没反应」。
+    if (n.type === "feedback_reply") {
+      setNotifOpen(false)
+      await notificationApi.markRead([n.id])
+      setUnread((u) => Math.max(0, u - 1))
+      navigate("/dashboard/feedback")
+      return
+    }
     if (!n.postId || n.postDeleted) return
     setNotifOpen(false)
     await notificationApi.markRead([n.id])
@@ -1403,9 +1494,8 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
             }}
           />
 
-          {loading ? (
-            <LoadingBlock />
-          ) : failed ? (
+          <DataFade loading={loading} skeleton={<LoadingBlock />}>
+          {failed ? (
             <EmptyState
               icon={WifiOff}
               title="帖子加载失败"
@@ -1446,7 +1536,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
                 </Button>
               )}
             </div>
-          )}
+          )}</DataFade>
         </div>
 
         <SidePanel stats={stats} />
@@ -1474,7 +1564,14 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
             <div className="max-h-80 space-y-2 overflow-y-auto">
               {notifs.map((n) => {
                 const name = n.actorNickname || n.actorUsername || "有人"
-                const verb = n.type === "comment_reply" ? "回复了你的评论" : "评论了你的帖子"
+                // feedback_reply 是「管理员回复了我的反馈」——没有帖子可跳，
+                // 点击直接进反馈页（见 openNotification 的首个分支）
+                const verb =
+                  n.type === "feedback_reply"
+                    ? "回复了你的反馈"
+                    : n.type === "comment_reply"
+                      ? "回复了你的评论"
+                      : "评论了你的帖子"
                 return (
                   <button
                     key={n.id}
@@ -1495,11 +1592,15 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
                         <span className="ml-auto h-2 w-2 shrink-0 rounded-full bg-primary" />
                       )}
                     </div>
-                    {n.postPreview && (
+                    {n.commentPreview ? (
+                      <p className="mt-1.5 line-clamp-3 rounded-md bg-muted/50 px-2.5 py-1.5 text-sm text-foreground/90">
+                        {n.commentPreview}
+                      </p>
+                    ) : n.postPreview ? (
                       <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
                         {n.postPreview}
                       </p>
-                    )}
+                    ) : null}
                     {n.postDeleted && (
                       <p className="mt-1 text-xs text-muted-foreground">原帖已删除</p>
                     )}

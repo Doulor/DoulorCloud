@@ -11,7 +11,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check:handlers": "node scripts/check-handlers.mjs",
-    "check": "node scripts/check-handlers.mjs && tsc --noEmit",
+    "check:settings": "node scripts/check-settings.mjs",
+    "check:paths": "node scripts/check-api-paths.mjs",
+    "check:deadcode": "node scripts/check-unused-exports.mjs",
+    "check:guards": "node scripts/check-handlers.mjs && node scripts/check-settings.mjs && node scripts/check-api-paths.mjs && node scripts/check-unused-exports.mjs",
+    "check": "node scripts/check-handlers.mjs && node scripts/check-settings.mjs && node scripts/check-api-paths.mjs && node scripts/check-unused-exports.mjs && tsc --noEmit",
     "routes:check": "node scripts/check-routes.mjs",
     "routes:fix": "node scripts/check-routes.mjs --fix"
   },

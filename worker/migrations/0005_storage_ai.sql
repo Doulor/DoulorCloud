@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS newapi_accounts (
   username        TEXT NOT NULL,                 -- NewAPI 侧用户名
   email           TEXT NOT NULL,                 -- <username>@doulor.cn
   enc_token       TEXT NOT NULL,                 -- AES-GCM 加密的 access token
+  enc_password    TEXT,                          -- AES-GCM 加密的明文密码（token 失效时自动重登续期用；可空）
   group_name      TEXT,
   quota           INTEGER NOT NULL DEFAULT 0,
   used_quota      INTEGER NOT NULL DEFAULT 0,

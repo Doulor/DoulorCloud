@@ -16,5 +16,35 @@ dist-ssr
 !.env.example
 .playwright-cli/
 
-# 工作区本地数据（记忆文件、名片走查截图/Demo、浏览器临时目录等）
+# ---- 以下为本地工作区产物：本仓库只发布源码 ----
+
+# 记忆 / 运维记录 / 浏览器临时目录
 .workbuddy/
+.workbuddy-*
+*.log
+
+# 开发与运维工具（真机验收脚本、探针、部署脚本；仅本地保留）
+# 例外：包脚本 check:i18n 依赖的校验器随源码发布
+scripts/*
+!scripts/check-i18n.mjs
+docs/
+HANDOFF.md
+
+# 数据导出与备份（含真实数据，绝不入库）
+backups/
+*.dump
+*.sql.gz
+db_emails_raw.json
+.tmp-d1.json
+
+# 无头浏览器走查产物与预览
+/*.png
+/*.html
+bg-preview/
+data-preview/
+font-preview/
+motion-preview/
+dist-new/
+
+# CI 工作流引用内部文档且依赖线上环境，暂不随开源仓库发布
+.github/

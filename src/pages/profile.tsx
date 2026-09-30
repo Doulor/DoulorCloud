@@ -12,6 +12,7 @@ import {
   Music,
   Plus,
   RefreshCw,
+  Search,
   Trash2,
   Upload,
   UserRound,
@@ -52,6 +53,7 @@ import type {
   ProfileGalleryItem,
   ProfileModule,
   ProfileModuleId,
+  ProfileMusicTrack,
   ProfileOverview,
   ProfileTimelineItem,
 } from "@/types"
@@ -64,8 +66,8 @@ const CONTACT_META: Record<
   email: { label: "邮箱", placeholder: "you@example.com", hint: "填邮箱地址即可" },
   qq: {
     label: "QQ",
-    placeholder: "2737855297",
-    hint: "填 QQ 号即可，带 QQ: 前缀也能识别",
+    placeholder: "点击链接加我为QQ好友：https://qm.qq.com/q/xxx",
+    hint: "一定要直接粘贴 QQ 里「分享」的整段内容，会自动识别出链接,必须是从QQ分享时得到的链接而不是QQ号!!! QQ 号可以填进「显示文字」栏，别人不用点也能看到号直接搜",
   },
   wechat: {
     label: "微信",
@@ -398,6 +400,8 @@ export default function ProfilePage() {
     musicTitle: "",
     musicAutoplay: false,
     musicCoverUrl: "",
+    musicSource: "",
+    musicLyrics: "",
     theme: "void",
     accent: "",
     effects: [] as string[],
@@ -415,6 +419,17 @@ export default function ProfilePage() {
 
   const [previewHtml, setPreviewHtml] = React.useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = React.useState(false)
+  /**
+   * 预览视口。
+   *
+   * 为什么需要它：预览栏固定 440px 宽，**永远触发名片页的窄屏媒体查询**
+   * （断点是 640/560px）—— 用户在编辑器里看到的始终是手机版，
+   * 到电脑上打开却是另一副样子（bento 变单列、side 变上下堆叠）。
+   * 横版模式把 iframe 撑到 1280px 再等比缩回容器里，让他能看到真实的桌面布局。
+   */
+  const [previewMode, setPreviewMode] = React.useState<"portrait" | "landscape">("portrait")
+  const previewBoxRef = React.useRef<HTMLDivElement | null>(null)
+  const [previewBox, setPreviewBox] = React.useState({ w: 0, h: 0 })
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -436,6 +451,8 @@ export default function ProfilePage() {
         musicTitle: p.musicTitle ?? "",
         musicAutoplay: p.musicAutoplay,
         musicCoverUrl: p.musicCoverUrl ?? "",
+        musicSource: p.musicSource ?? "",
+        musicLyrics: p.musicLyrics ?? "",
         theme: p.theme,
         accent: p.accent ?? "",
         effects: p.effects ?? [],
@@ -487,12 +504,24 @@ export default function ProfilePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form, contacts, modules, hasProfile])
 
+  // 横版预览要把 1280px 宽的 iframe 等比缩进容器，得先知道容器的真实尺寸。
+  // 用 ResizeObserver 而不是一次性测量：预览栏宽度会随窗口/侧边栏变化。
+  React.useEffect(() => {
+    const el = previewBoxRef.current
+    if (!el) return
+    const sync = () => setPreviewBox({ w: el.clientWidth, h: el.clientHeight })
+    sync()
+    const ro = new ResizeObserver(sync)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
   const handleEnable = async () => {
     setEnabling(true)
     try {
       await profileApi.enable()
       await load()
-      toast.success("名片已开通，接下来填写资料并点「启用」对外展示")
+      toast.success("名片已开通，已经对外显示了（可在「对外展示」里关闭）")
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "开通失败")
     } finally {
@@ -530,6 +559,14 @@ export default function ProfilePage() {
     if (!file) return
     setUploading(kind)
     try {
+      // 上传音乐前先摘掉「搜索歌曲」。
+      // 服务端取用顺序是「搜索歌曲 > 上传文件 > 外链」，库里若还留着来源，
+      // 用户会看到「上传成功了，但放出来还是那首歌」这种说不通的故障。
+      // 只发这一个字段：后端把 undefined 当「保持不变」，所以不会覆盖
+      // 表单里其它还没保存的改动。
+      if (kind === "music" && form.musicSource) {
+        await profileApi.update({ musicSource: "" })
+      }
       await profileApi.uploadAsset(kind, file)
       await load()
       toast.success("上传成功")
@@ -548,6 +585,74 @@ export default function ProfilePage() {
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "移除失败")
     }
+  }
+
+  // ---- 音乐搜索 ----
+
+  /**
+   * 按歌名搜歌。
+   *
+   * 搜索结果里**没有播放地址**（音频源给的地址带时效签名，只有服务端能
+   * 在播放时实时解析）。这里能落库的只有 `source`（如 `netease:123`）。
+   */
+  const [musicQuery, setMusicQuery] = React.useState("")
+  const [musicResults, setMusicResults] = React.useState<ProfileMusicTrack[]>([])
+  const [musicSearching, setMusicSearching] = React.useState(false)
+
+  const handleSearchMusic = async () => {
+    const q = musicQuery.trim()
+    if (!q) return
+    setMusicSearching(true)
+    try {
+      const res = await profileApi.searchMusic(q)
+      setMusicResults(res.tracks)
+      // 「没搜到」和「服务挂了」要给不同提示：前者换关键词，后者改用上传/外链
+      if (res.tracks.length === 0) {
+        toast.info("没搜到这首歌，换个关键词，或改用下面的上传 / 外链")
+      }
+    } catch (err) {
+      setMusicResults([])
+      toast.error(err instanceof HttpError ? err.message : "搜索失败")
+    } finally {
+      setMusicSearching(false)
+    }
+  }
+
+  /**
+   * 选中一首歌。只填表单，**不删**用户原有的上传文件和外链 ——
+   * 服务端按「搜索歌曲 > 上传 > 外链」取用，清掉 `musicSource` 就能回到原来那首。
+   */
+  const pickMusicTrack = async (t: ProfileMusicTrack) => {
+    setForm((f) => ({
+      ...f,
+      musicSource: t.source,
+      // 标题带上歌手：名片上「歌名 - 歌手」比光有歌名清楚得多
+      musicTitle: t.artist ? `${t.title} - ${t.artist}` : t.title,
+      // 搜索结果的封面是长期有效的地址，可以直接存
+      musicCoverUrl: t.cover ?? "",
+    }))
+    setMusicResults([])
+    setMusicQuery("")
+
+    // 歌词单独取：歌词库与音频源是两套曲库，要靠「歌名+歌手」去对。
+    // 取不到就留空（用户可手填），绝不因为它失败而取消选歌。
+    try {
+      const res = await profileApi.fetchLyrics(t.title, t.artist)
+      if (res.lyrics) {
+        setForm((f) => ({ ...f, musicLyrics: res.lyrics as string }))
+        toast.success("已选择，歌词也一并取到了")
+      } else {
+        toast.success("已选择（没找到歌词，可手动填写）")
+      }
+    } catch {
+      toast.success("已选择（歌词没取到，可手动填写）")
+    }
+  }
+
+  /** 清除搜索选择：播放源回到用户自己上传/粘贴的音频（不会被删除） */
+  const clearMusicSource = () => {
+    setForm((f) => ({ ...f, musicSource: "" }))
+    toast.success("已改回自定义音频")
   }
 
   const addContact = () => {
@@ -617,7 +722,8 @@ export default function ProfilePage() {
               <li>· 默认地址：{window.location.origin}/profile/&lt;你的用户名&gt;</li>
               <li>· 支持 QQ、Bilibili、Telegram、GitHub、邮箱等，填写原始值即可自动生成链接</li>
               <li>· 模块可开关、可排序，皮肤 × 骨架 × 字体 × 动效自由混搭</li>
-              <li>· 开通后默认不对外展示，需要再手动点「启用」</li>
+              <li>· 开通后立即对外展示，任何拿到链接的人都能访问</li>
+              <li>· 还没想好内容？可以在「对外展示」里先关掉，等填好了再打开</li>
             </ul>
             <Button onClick={() => void handleEnable()} disabled={enabling}>
               {enabling && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -630,6 +736,13 @@ export default function ProfilePage() {
   }
 
   const limits = data?.limits
+
+  /** 横版预览模拟的视口宽度：1280px（名片内容最宽 820px，足够触发全部桌面断点） */
+  const LANDSCAPE_WIDTH = 1280
+  // 容器还没测出宽度时按 440px（预览栏的固定宽度）估一个，避免首帧闪成满尺寸
+  const previewScale = Math.min(1, (previewBox.w || 440) / LANDSCAPE_WIDTH)
+  // iframe 高度要除以缩放比，缩放后视觉高度才等于容器高度
+  const previewFrameH = previewBox.h > 0 ? previewBox.h / previewScale : 520 / previewScale
 
   return (
     <div>
@@ -1139,7 +1252,8 @@ export default function ProfilePage() {
             {/* ============ 模块 ============ */}
             <TabsContent value="modules" className="space-y-3">
               <p className="text-sm text-muted-foreground">
-                名片由模块组装而成：开关决定显示与否，中间几个模块可用箭头调整顺序。
+                名片由模块组装而成：开关决定显示与否，中间几个模块可用箭头调整顺序、
+                用右侧下拉选择宽度。宽度只在**电脑端**生效（≥641px），两个「半宽」模块会自动并排。
                 启用但还没填内容的模块不会出现在名片上。
               </p>
               {modules.map((m, idx) => {
@@ -1178,6 +1292,29 @@ export default function ProfilePage() {
                             <div className="text-xs text-muted-foreground">{meta?.desc}</div>
                           </div>
                         </div>
+                        {/* 宽度只在桌面端（≥641px）生效，且只对中间区模块有意义：
+                            identity/status 在头部、stats 在页脚，位置固定，宽度管不着。 */}
+                        {isMiddle && (
+                          <Select
+                            value={m.size ?? "auto"}
+                            onValueChange={(v) =>
+                              updateModule(m.id, {
+                                size: v === "auto" ? undefined : (v as "half" | "full"),
+                              })
+                            }
+                          >
+                            <SelectTrigger className="w-[92px]" aria-label="模块宽度">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {(data?.moduleSizeOptions ?? []).map((o) => (
+                                <SelectItem key={o.id} value={o.id}>
+                                  {o.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        )}
                         <Switch
                           checked={m.enabled}
                           disabled={m.id === "identity"}
@@ -1245,10 +1382,10 @@ export default function ProfilePage() {
                             className="flex-1"
                           />
                           <Input
-                            placeholder="显示文字（可选）"
+                            placeholder={c.type === "qq" ? "显示文字（填 QQ 号）" : "显示文字（可选）"}
                             value={c.label ?? ""}
                             onChange={(e) => updateContact(i, { label: e.target.value })}
-                            className="w-32"
+                            className="w-36"
                           />
                           <Switch
                             checked={c.visible !== false}
@@ -1283,11 +1420,96 @@ export default function ProfilePage() {
                     背景音乐
                   </CardTitle>
                   <CardDescription>
-                    上传音频文件，或粘贴外部直链（需是可直接播放的音频地址）
+                    搜索歌名自动取回音频、封面与歌词；也可以自己上传音频文件或粘贴直链
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="flex items-center gap-3">
+                  {/* ---- 搜索歌曲 ---- */}
+                  <div className="space-y-2">
+                    <Label htmlFor="musicQuery">搜索歌曲</Label>
+                    <div className="flex gap-2">
+                      <Input
+                        id="musicQuery"
+                        placeholder="输入歌名，例如：起风了"
+                        value={musicQuery}
+                        onChange={(e) => setMusicQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault()
+                            void handleSearchMusic()
+                          }
+                        }}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        disabled={musicSearching || !musicQuery.trim()}
+                        onClick={() => void handleSearchMusic()}
+                      >
+                        {musicSearching ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Search className="h-4 w-4" />
+                        )}
+                        搜索
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      选中的歌曲由服务端在播放时实时取地址，所以换源不会让老名片失效。
+                    </p>
+                  </div>
+
+                  {musicResults.length > 0 && (
+                    <ul className="divide-y overflow-hidden rounded-md border">
+                      {musicResults.map((t) => (
+                        <li key={t.source}>
+                          <button
+                            type="button"
+                            className="flex w-full items-center gap-3 p-2 text-left hover:bg-accent"
+                            onClick={() => void pickMusicTrack(t)}
+                          >
+                            {t.cover ? (
+                              <img
+                                src={t.cover}
+                                alt=""
+                                className="h-10 w-10 shrink-0 rounded border object-cover"
+                              />
+                            ) : (
+                              <div className="h-10 w-10 shrink-0 rounded border bg-muted" />
+                            )}
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-sm">{t.title}</span>
+                              <span className="block truncate text-xs text-muted-foreground">
+                                {t.artist}
+                                {t.album ? ` · ${t.album}` : ""}
+                              </span>
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  {form.musicSource ? (
+                    <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2">
+                      <span className="min-w-0 flex-1 truncate text-xs">
+                        当前使用搜索到的歌曲
+                        {form.musicTitle ? `：${form.musicTitle}` : ""}
+                      </span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="shrink-0"
+                        onClick={clearMusicSource}
+                      >
+                        改回自定义音频
+                      </Button>
+                    </div>
+                  ) : null}
+
+                  <div className="flex items-center gap-3 border-t pt-4">
+                    <span className="text-sm font-medium">或自定义音频</span>
                     <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-2 text-sm hover:bg-accent">
                       {uploading === "music" ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -1390,6 +1612,34 @@ export default function ProfilePage() {
                       onChange={(e) => setForm((f) => ({ ...f, musicCoverUrl: e.target.value }))}
                       className="text-xs"
                     />
+                  </div>
+
+                  {/* 歌词：搜索选中时会自动填好，也可以手写或整个删掉 */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="musicLyrics">歌词（可选）</Label>
+                      {form.musicLyrics ? (
+                        <button
+                          type="button"
+                          className="text-xs text-muted-foreground hover:text-destructive"
+                          onClick={() => setForm((f) => ({ ...f, musicLyrics: "" }))}
+                        >
+                          清空歌词
+                        </button>
+                      ) : null}
+                    </div>
+                    <Textarea
+                      id="musicLyrics"
+                      rows={6}
+                      className="font-mono text-xs"
+                      placeholder={"[00:12.34] 第一句歌词\n[00:16.00] 第二句歌词"}
+                      value={form.musicLyrics}
+                      onChange={(e) => setForm((f) => ({ ...f, musicLyrics: e.target.value }))}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      带 <code>[mm:ss.xx]</code> 时间标记的歌词会在名片页随播放滚动高亮；
+                      不带时间标记则静态显示。搜索选中时会自动填。
+                    </p>
                   </div>
 
                   <div className="flex items-center justify-between rounded-md border px-4 py-3">
@@ -1513,7 +1763,7 @@ export default function ProfilePage() {
         {/* 右：实时预览 */}
         <div className="min-w-0">
           <div className="xl:sticky xl:top-6">
-            <div className="mb-2 flex items-center justify-between">
+            <div className="mb-2 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <Eye className="h-4 w-4 text-muted-foreground" />
                 实时预览
@@ -1521,31 +1771,74 @@ export default function ProfilePage() {
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                 )}
               </div>
-              {published && (
-                <Button variant="ghost" size="sm" asChild>
-                  <a href={defaultUrl} target="_blank" rel="noopener noreferrer">
-                    打开公开页
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
-                </Button>
-              )}
+              <div className="flex items-center gap-2">
+                <div className="flex items-center rounded-md border p-0.5">
+                  <Button
+                    variant={previewMode === "portrait" ? "secondary" : "ghost"}
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => setPreviewMode("portrait")}
+                  >
+                    竖版
+                  </Button>
+                  <Button
+                    variant={previewMode === "landscape" ? "secondary" : "ghost"}
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => setPreviewMode("landscape")}
+                  >
+                    横版
+                  </Button>
+                </div>
+                {published && (
+                  <Button variant="ghost" size="sm" asChild>
+                    <a href={defaultUrl} target="_blank" rel="noopener noreferrer">
+                      打开公开页
+                      <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                  </Button>
+                )}
+              </div>
             </div>
-            <div className="overflow-hidden rounded-xl border bg-neutral-950 shadow-sm">
+            <div
+              ref={previewBoxRef}
+              className="relative h-[70vh] min-h-[520px] overflow-hidden rounded-xl border bg-neutral-950 shadow-sm"
+            >
               {previewHtml ? (
-                <iframe
-                  title="名片实时预览"
-                  sandbox="allow-scripts allow-popups"
-                  srcDoc={previewHtml}
-                  className="h-[70vh] min-h-[520px] w-full border-0"
-                />
+                previewMode === "portrait" ? (
+                  <iframe
+                    title="名片实时预览"
+                    sandbox="allow-scripts allow-popups"
+                    srcDoc={previewHtml}
+                    className="h-full w-full border-0"
+                  />
+                ) : (
+                  /* 横版：iframe 内部按 1280px 布局（触发桌面断点），再整体缩进容器里。
+                     外层 overflow-hidden 负责裁掉缩放后溢出的部分。 */
+                  <iframe
+                    title="名片实时预览（横版）"
+                    sandbox="allow-scripts allow-popups"
+                    srcDoc={previewHtml}
+                    style={{
+                      width: LANDSCAPE_WIDTH,
+                      height: previewFrameH,
+                      transform: `scale(${previewScale})`,
+                      transformOrigin: "top left",
+                    }}
+                    className="border-0"
+                  />
+                )
               ) : (
-                <div className="flex h-[70vh] min-h-[520px] items-center justify-center">
+                <div className="flex h-full items-center justify-center">
                   <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
                 </div>
               )}
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
-              预览由服务端按线上同样的方式渲染；未保存的改动也会实时反映，不计访客数。
+              {previewMode === "portrait"
+                ? "竖版预览（手机宽度）。名片在电脑上会用更宽的布局，切到「横版」可查看。"
+                : `横版预览：按 ${LANDSCAPE_WIDTH}px 宽的电脑屏幕渲染后等比缩小，字偏小，看的是整体布局。`}
+              {" "}预览由服务端按线上同样的方式渲染，未保存的改动也会实时反映，不计访客数。
             </p>
           </div>
         </div>
@@ -1706,6 +1999,20 @@ function TimelineEditor({
   )
 }
 
+/**
+ * 编辑器里图片墙缩略图的地址。
+ *
+ * ⚠️ 2026-09-25 审计（L10）：`/p/<用户名>/gallery/<id>` 现在对**未发布**的
+ * 名片只放行本人（否则草稿内容其实是公开可读的）。但那个路由是公开路由、
+ * 拿不到会话，所以编辑器预览必须改走带会话的
+ * `/api/profile/asset?kind=gallery&id=<id>`（服务端按当前登录用户解析目录）。
+ * 存储的值仍然是公开 URL，发布后公开页照常可读。
+ */
+function galleryPreviewSrc(url: string): string {
+  const m = /^\/p\/[^/]+\/gallery\/([a-z0-9-]+)$/i.exec(url)
+  return m ? `/api/profile/asset?kind=gallery&id=${m[1]}` : url
+}
+
 function GalleryEditor({
   module,
   onChange,
@@ -1767,7 +2074,7 @@ function GalleryEditor({
         <div key={i} className="flex items-center gap-2 rounded-md border p-2.5">
           {it.url && (
             <img
-              src={it.url}
+              src={galleryPreviewSrc(it.url)}
               alt=""
               className="h-10 w-10 shrink-0 rounded border object-cover"
               onError={(e) => {

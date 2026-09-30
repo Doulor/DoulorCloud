@@ -1,4 +1,5 @@
 import * as React from "react"
+import { useNavigate, Link } from "react-router-dom"
 import {
   ArrowDown,
   Bot,
@@ -6,12 +7,14 @@ import {
   Copy,
   ExternalLink,
   Gift,
+  Info,
   KeyRound,
   Loader2,
   Plus,
   RefreshCw,
   Sparkles,
   Trash2,
+  Trophy,
   Wallet,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -23,13 +26,6 @@ import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Label } from "@/components/ui/label"
 import {
@@ -55,6 +51,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import { newapiApi, HttpError } from "@/services/api"
 import { fmtTime } from "@/lib/format"
 import type {
@@ -62,6 +64,7 @@ import type {
   NewApiKey,
   NewApiPreflight,
   NewApiStatus,
+  NewApiSubscriptionGroup,
   RecommendedTier,
 } from "@/types"
 
@@ -156,13 +159,288 @@ function RecommendedModels({
   )
 }
 
+/** 订阅下次重置时间（unix 秒）→ 友好文案 */
+function formatResetTime(ts: number): string {
+  if (!ts) return "—"
+  const d = new Date(ts * 1000)
+  const now = new Date()
+  const isToday = d.toDateString() === now.toDateString()
+  const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(
+    d.getMinutes()
+  ).padStart(2, "0")}`
+  if (isToday) return `今天 ${hhmm}`
+  const tomorrow = new Date(now)
+  tomorrow.setDate(now.getDate() + 1)
+  if (d.toDateString() === tomorrow.toDateString()) return `明天 ${hhmm}`
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${hhmm}`
+}
+
+/** NewAPI quota 单位 → 站点金额（换算率由服务端下发，见 status.quotaPerUnit） */
+function fmtAmount(quota: number, symbol: string, perUnit: number): string {
+  if (!perUnit) return `${symbol}0.00`
+  return `${symbol}${(quota / perUnit).toFixed(2)}`
+}
+
+/** 订阅有效期（unix 秒）→ 日期文案 */
+function formatExpiry(ts: number): string {
+  if (!ts) return "—"
+  const d = new Date(ts * 1000)
+  if (Number.isNaN(d.getTime())) return "—"
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`
+}
+
+/**
+ * 分段进度条的颜色池：按套餐顺序循环取用 —— **一个颜色 = 一个套餐**。
+ *
+ * 每个颜色成对出现：`solid` 画「剩余」，`faded` 画「已用」。同色系的两档
+ * 让「这段属于哪个套餐」在部分消耗后依然一目了然（比跨段盖一层灰罩准确）。
+ *
+ * 颜色走中性灰阶 + 一个暖琥珀点缀，与站点「黑白灰 + 暖橙」的整体风格一致，
+ * 避免冷调的蓝/绿/紫在页面上显得突兀。
+ */
+const SEGMENT_COLORS = [
+  { solid: "bg-zinc-600 dark:bg-zinc-300", faded: "bg-zinc-600/20 dark:bg-zinc-300/20" },
+  { solid: "bg-stone-500 dark:bg-stone-400", faded: "bg-stone-500/20 dark:bg-stone-400/20" },
+  { solid: "bg-amber-600 dark:bg-amber-500", faded: "bg-amber-600/20 dark:bg-amber-500/20" },
+  { solid: "bg-neutral-500 dark:bg-neutral-400", faded: "bg-neutral-500/20 dark:bg-neutral-400/20" },
+  { solid: "bg-stone-600 dark:bg-stone-300", faded: "bg-stone-600/20 dark:bg-stone-300/20" },
+]
+
+/**
+ * 其他订阅卡片：把全部**非免费**的活跃订阅（邀请奖励、成就奖励等）汇总成
+ * 一条总额度，并用分段进度条区分「哪一段属于哪个套餐」。
+ *
+ * 为什么按套餐合并、而不是一张订阅一段：NewAPI 里同一套餐可以有多张订阅
+ * （每邀请一个人就多开一张），逐张画会出现多段同色相邻、图例也冗长。
+ * 合并后颜色含义稳定，且新增套餐会自动出现在这里，无需改代码。
+ */
+function RewardSubscriptionsCard({
+  groups,
+  symbol,
+  perUnit,
+}: {
+  groups: NewApiSubscriptionGroup[]
+  symbol: string
+  perUnit: number
+}) {
+  const total = groups.reduce((sum, g) => sum + g.amountTotal, 0)
+  const used = groups.reduce((sum, g) => sum + g.amountUsed, 0)
+  const remaining = Math.max(0, total - used)
+  // 各张订阅的重置时刻本应对齐（统一 UTC 次日 0 点），取最早的一个更保守
+  const nextReset = groups.reduce(
+    (min, g) =>
+      g.nextResetTime > 0 && (min === 0 || g.nextResetTime < min)
+        ? g.nextResetTime
+        : min,
+    0
+  )
+  // 有效期取最晚的一张：表示「这份额度最迟什么时候失效」
+  const expiry = groups.reduce((max, g) => Math.max(max, g.endTime), 0)
+  const [infoOpen, setInfoOpen] = React.useState(false)
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Wallet className="h-4 w-4 text-muted-foreground" />
+          其他订阅
+          <button
+            type="button"
+            onClick={() => setInfoOpen(true)}
+            className="rounded-full text-muted-foreground transition-colors hover:text-foreground"
+            title="其他订阅是什么？"
+          >
+            <Info className="h-4 w-4" />
+          </button>
+        </CardTitle>
+        <CardDescription>
+          通过邀请好友、完成成就等获得的额外额度，与免费订阅叠加使用 ——
+          消费时逐张接力，互不浪费。
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {groups.length === 0 ? (
+          <div className="space-y-3">
+            <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+              还没有额外订阅额度。邀请好友捐献 AI 渠道、绑定 WorkBuddy 账号，
+              或完成成就积累成就点，都能获得额外额度。
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" asChild>
+                <Link to="/dashboard/donations?tab=invite">
+                  <Gift className="h-4 w-4" />
+                  去邀请好友
+                </Link>
+              </Button>
+              <Button variant="outline" size="sm" asChild>
+                <Link to="/dashboard/achievements">
+                  <Trophy className="h-4 w-4" />
+                  去完成成就
+                </Link>
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div>
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground">今日剩余额度</span>
+                <span className="font-medium">
+                  {fmtAmount(remaining, symbol, perUnit)}
+                  {" / "}
+                  {fmtAmount(total, symbol, perUnit)}
+                </span>
+              </div>
+              {/* 分段进度条：每段宽度 = 该套餐额度占比；段内左侧实色为剩余、右侧淡色为已用。
+                  段与段之间留出间隙、各自独立圆角胶囊，一眼分清「哪个套餐还剩多少」。
+                  悬停任意一段可看该套餐的额度 / 剩余 / 重置 / 有效期。 */}
+              <TooltipProvider delayDuration={100}>
+                <div className="mt-1.5 flex h-2.5 w-full gap-1">
+                  {groups.map((g, i) => {
+                    const c = SEGMENT_COLORS[i % SEGMENT_COLORS.length]
+                    const planRemaining = Math.max(0, g.amountTotal - g.amountUsed)
+                    return (
+                      <Tooltip key={g.planId}>
+                        <TooltipTrigger asChild>
+                          <div
+                            className={`relative h-full overflow-hidden rounded-full ${c.faded}`}
+                            style={{ flexGrow: g.amountTotal, flexBasis: 0 }}
+                          >
+                            <div
+                              className={`absolute inset-y-0 left-0 rounded-full ${c.solid}`}
+                              style={{
+                                width: `${(planRemaining / g.amountTotal) * 100}%`,
+                              }}
+                            />
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p className="font-medium">{g.title}</p>
+                          <p>
+                            额度 {fmtAmount(g.amountTotal, symbol, perUnit)} · 剩余{" "}
+                            {fmtAmount(planRemaining, symbol, perUnit)}
+                          </p>
+                          {g.count > 1 && <p>共 {g.count} 张订阅</p>}
+                          <p>下次重置 {formatResetTime(g.nextResetTime)}</p>
+                          <p>有效期至 {formatExpiry(g.endTime)}</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    )
+                  })}
+                </div>
+              </TooltipProvider>
+              {/* 图例：颜色 ↔ 套餐，不悬停也能对上号 */}
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+                {groups.map((g, i) => (
+                  <span
+                    key={g.planId}
+                    className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                  >
+                    <span
+                      className={`h-2 w-2 shrink-0 rounded-full ${
+                        SEGMENT_COLORS[i % SEGMENT_COLORS.length].solid
+                      }`}
+                    />
+                    {g.title}
+                    <span className="text-muted-foreground/70">剩</span>
+                    <span className="tabular-nums">
+                      {fmtAmount(Math.max(0, g.amountTotal - g.amountUsed), symbol, perUnit)}
+                    </span>
+                    {g.count > 1 && <span>· {g.count} 张</span>}
+                  </span>
+                ))}
+              </div>
+            </div>
+            {/* 下次重置：各套餐可能不同（邀请每天、成就每周），时间不同则分别列出 */}
+            {groups.length <= 1 ||
+            groups.every((g) => g.nextResetTime === groups[0].nextResetTime) ? (
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground">下次重置</span>
+                <span className="font-medium tabular-nums">
+                  {formatResetTime(nextReset)}
+                </span>
+              </div>
+            ) : (
+              groups.map((g) => (
+                <div key={g.planId} className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">{g.title} 重置</span>
+                  <span className="font-medium tabular-nums">
+                    {formatResetTime(g.nextResetTime)}
+                  </span>
+                </div>
+              ))
+            )}
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">有效期至</span>
+              <span className="font-medium tabular-nums">{formatExpiry(expiry)}</span>
+            </div>
+            <Separator />
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" asChild>
+                <Link to="/dashboard/donations?tab=invite">
+                  <Gift className="h-4 w-4" />
+                  去邀请好友
+                </Link>
+              </Button>
+              <Button variant="outline" size="sm" asChild>
+                <Link to="/dashboard/achievements">
+                  <Trophy className="h-4 w-4" />
+                  去完成成就
+                </Link>
+              </Button>
+            </div>
+          </>
+        )}
+      </CardContent>
+
+      {/* 其他订阅的说明弹窗 */}
+      <Dialog open={infoOpen} onOpenChange={setInfoOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>其他订阅是什么？</DialogTitle>
+            <DialogDescription>
+              除免费订阅外，你还能通过以下方式获得额外额度，与免费订阅叠加使用。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 text-sm">
+            <div className="space-y-1.5">
+              <p className="font-medium text-foreground">邀请好友</p>
+              <p className="text-muted-foreground">
+                好友用你的邀请码注册，并解锁 AI 中转站后，你获得对应奖励：
+              </p>
+              <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
+                <li>绑定 WorkBuddy 反代账号 → 「wb邀请套餐」每天 ¥500</li>
+                <li>捐献 AI 渠道 / 商汤 Key 并通过审核 → 「邀请套餐」每天 ¥200</li>
+              </ul>
+              <p className="text-xs text-muted-foreground">每个好友只计一次奖励。</p>
+            </div>
+            <div className="space-y-1.5">
+              <p className="font-medium text-foreground">成就奖励</p>
+              <p className="text-muted-foreground">
+                每积累 10 点成就点，自动获得一份「成就奖励」订阅。
+              </p>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              以上额度的重置周期可能不同（邀请通常每天重置、成就可能每周重置），
+              以卡片上各套餐标注的重置时间为准。
+            </p>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  )
+}
+
 export default function AiPage() {
+  const navigate = useNavigate()
   const [status, setStatus] = React.useState<NewApiStatus | null>(null)
   const [keys, setKeys] = React.useState<NewApiKey[]>([])
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
   const [syncing, setSyncing] = React.useState(false)
   const [deletingKeyId, setDeletingKeyId] = React.useState<string | null>(null)
+  /** 订阅下次重置的倒计时文案（每秒刷新） */
+  const [resetCountdown, setResetCountdown] = React.useState<string | null>(null)
 
   // 开通
   const [bindOpen, setBindOpen] = React.useState(false)
@@ -177,13 +455,13 @@ export default function AiPage() {
   // 新建 Key
   const [keyOpen, setKeyOpen] = React.useState(false)
   const [keyName, setKeyName] = React.useState("")
-  const [keyGroup, setKeyGroup] = React.useState("default")
   /** 全部模型清单默认折叠：推荐分档已给出选择建议，完整清单是查漏用途 */
   const [modelsOpen, setModelsOpen] = React.useState(false)
 
   // 兑换码
   const [redeemCode, setRedeemCode] = React.useState("")
   const [redeemBusy, setRedeemBusy] = React.useState(false)
+  const [subscribing, setSubscribing] = React.useState(false)
 
   // 改中转站密码
   const [aiPwOpen, setAiPwOpen] = React.useState(false)
@@ -222,6 +500,40 @@ export default function AiPage() {
     void load()
   }, [load])
 
+  // 订阅下次重置倒计时：每秒刷新
+  React.useEffect(() => {
+    const next = status?.subscription?.nextResetTime
+    if (!next) {
+      setResetCountdown(null)
+      return
+    }
+    const tick = () => {
+      const diff = next * 1000 - Date.now()
+      if (diff <= 0) {
+        setResetCountdown("即将重置")
+        return
+      }
+      const totalSec = Math.floor(diff / 1000)
+      const h = Math.floor(totalSec / 3600)
+      const m = Math.floor((totalSec % 3600) / 60)
+      const s = totalSec % 60
+      setResetCountdown(`${h} 小时 ${m} 分 ${s} 秒`)
+    }
+    tick()
+    const t = setInterval(tick, 1000)
+    return () => clearInterval(t)
+  }, [status?.subscription?.nextResetTime])
+
+  // 自动认领（account 存在但 bound=false）的用户：进入页面即强制弹出密码绑定，
+  // 不允许直接使用界面。只触发一次，避免每次 status 变化都重复弹。
+  const autoOpenedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (!status || status.account?.bound !== false) return
+    if (autoOpenedRef.current) return
+    autoOpenedRef.current = true
+    void openBind()
+  }, [status])
+
   const copyText = async (text: string, label = "已复制") => {
     try {
       await navigator.clipboard.writeText(text)
@@ -229,6 +541,23 @@ export default function AiPage() {
     } catch {
       toast.error("复制失败，请手动选择复制")
     }
+  }
+
+  /** 用户 access token 失效（被 NewAPI 吊销/过期）→ 直接弹出输密码框重新绑定 */
+  const handleTokenExpired = () => {
+    toast.error("你的中转站登录已失效，请重新输入密码绑定")
+    // 用户已经 OIDC 绑定过（只是 token 失效），直接构造「已绑定」状态弹输密码框，
+    // 不依赖 preflight 探测（探测若失败会把弹窗关掉，导致「没输入密码的地方」）。
+    setPreflight({
+      featureEnabled: true,
+      username: "",
+      exists: true,
+      oidcBound: true,
+    })
+    setAwaitingOAuth(false)
+    setPreflightLoading(false)
+    setPassword("")
+    setBindOpen(true)
   }
 
   /**
@@ -345,6 +674,10 @@ export default function AiPage() {
       await load(true)
       toast.success("已同步额度")
     } catch (err) {
+      if (err instanceof HttpError && err.code === "USER_TOKEN_EXPIRED") {
+        handleTokenExpired()
+        return
+      }
       toast.error(err instanceof HttpError ? err.message : "同步失败")
     } finally {
       setSyncing(false)
@@ -354,12 +687,20 @@ export default function AiPage() {
   const handleCreateKey = async () => {
     setBusy(true)
     try {
-      const res = await newapiApi.createKey(keyName, keyGroup)
+      const res = await newapiApi.createKey(keyName)
       setCreatedKey(res.key.fullKey)
       setKeyName("")
       // 静默刷新列表，不能让整页 loading 卸载掉展示完整 Key 的弹窗
       await load(true)
     } catch (err) {
+      if (err instanceof HttpError && err.code === "USER_TOKEN_EXPIRED") {
+        handleTokenExpired()
+        return
+      }
+      if (err instanceof HttpError && err.code === "SUBSCRIPTION_REQUIRED") {
+        toast.error("请先领取免费订阅，再创建 API Key")
+        return
+      }
       toast.error(err instanceof HttpError ? err.message : "创建失败")
     } finally {
       setBusy(false)
@@ -380,6 +721,19 @@ export default function AiPage() {
       toast.error(err instanceof HttpError ? err.message : "兑换失败")
     } finally {
       setRedeemBusy(false)
+    }
+  }
+
+  const handleSubscribe = async () => {
+    setSubscribing(true)
+    try {
+      const res = await newapiApi.subscribe()
+      toast.success(res.message || "已领取免费订阅")
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "领取失败")
+    } finally {
+      setSubscribing(false)
     }
   }
 
@@ -477,8 +831,9 @@ export default function AiPage() {
     )
   }
 
-  // 未开通
-  if (!status.account) {
+  // 未开通，或「自动认领了但还没绑密码」：都要求完成密码绑定，否则不允许进入。
+  // 后者（account 存在但 bound=false）也需要走 BindDialog，只是文案用「补密码」。
+  if (!status.account || !status.account.bound) {
     return (
       <div>
         <PageHeader
@@ -490,23 +845,28 @@ export default function AiPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Sparkles className="h-4 w-4 text-muted-foreground" />
-              开通 AI 中转站
+              {status.account ? "完成密码绑定" : "开通 AI 中转站"}
             </CardTitle>
             <CardDescription>
-              用你的 Doulor Cloud 账号登录中转站，附赠试用额度
-              {status.currencySymbol}
-              {status.trialQuotaUsd}。
+              {status.account
+                ? "你的中转站账号已就绪，输入 Doulor Cloud 密码完成绑定后即可使用。"
+                : "用你的 Doulor Cloud 账号登录中转站，附赠试用额度 " +
+                  status.currencySymbol +
+                  status.trialQuotaUsd +
+                  "。"}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <ul className="space-y-1.5 text-sm text-muted-foreground">
-              <li>· 用 Doulor Cloud 账号登录中转站，无需单独注册</li>
-              <li>· 开通时复用你的 Doulor Cloud 登录密码</li>
-              <li>· 开通后可查看可用模型并自助创建 API Key</li>
-            </ul>
+            {!status.account && (
+              <ul className="space-y-1.5 text-sm text-muted-foreground">
+                <li>· 用 Doulor Cloud 账号登录中转站，无需单独注册</li>
+                <li>· 开通时复用你的 Doulor Cloud 登录密码</li>
+                <li>· 开通后可查看可用模型并自助创建 API Key</li>
+              </ul>
+            )}
             <Button onClick={() => void openBind()}>
               <Sparkles className="h-4 w-4" />
-              立即开通
+              {status.account ? "立即绑定" : "立即开通"}
             </Button>
           </CardContent>
         </Card>
@@ -519,6 +879,7 @@ export default function AiPage() {
               setPreflight(null)
               setPassword("")
               setAwaitingOAuth(false)
+              navigate("/dashboard")
             }
           }}
           preflight={preflight}
@@ -529,6 +890,13 @@ export default function AiPage() {
           busy={busy}
           onReopenOAuth={() => startOAuthPopup()}
           onConfirm={() => void handleBind()}
+          onCancel={() => {
+            setBindOpen(false)
+            setPreflight(null)
+            setPassword("")
+            setAwaitingOAuth(false)
+            navigate("/dashboard")
+          }}
         />
       </div>
     )
@@ -545,6 +913,95 @@ export default function AiPage() {
       />
 
       <div className="space-y-6">
+        {/* 免费订阅 —— 放在最上：必须领订阅才能建 Key，是第一优先操作 */}
+        <Card className="border-primary/40">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Sparkles className="h-4 w-4 text-primary" />
+              免费订阅
+            </CardTitle>
+            <CardDescription>
+              必须先领取免费订阅，才能创建 API Key 并调用模型。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {status.subscription ? (
+              <div className="space-y-3">
+                <div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">今日剩余额度</span>
+                    <span className="font-medium">
+                      {fmtAmount(
+                        status.subscription.amountTotal -
+                          status.subscription.amountUsed,
+                        status.currencySymbol,
+                        status.quotaPerUnit
+                      )}
+                      {" / "}
+                      {fmtAmount(
+                        status.subscription.amountTotal,
+                        status.currencySymbol,
+                        status.quotaPerUnit
+                      )}
+                    </span>
+                  </div>
+                  <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary transition-all"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          Math.max(
+                            0,
+                            ((status.subscription.amountTotal -
+                              status.subscription.amountUsed) /
+                              status.subscription.amountTotal) *
+                              100
+                          )
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">下次重置</span>
+                  <span className="font-medium tabular-nums">
+                    {resetCountdown !== null ? resetCountdown : formatResetTime(status.subscription.nextResetTime)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">有效期至</span>
+                  <span className="font-medium tabular-nums">
+                    {formatExpiry(status.subscription.endTime)}
+                  </span>
+                </div>
+                <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+                  订阅规则：免费订阅每天自动发放额度（默认 ¥1000，按次计费、每次 ¥1），
+                  当天额度用完则需等次日重置。额度长期有效，持续到订阅到期。
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+                  订阅规则：领取免费订阅后，每天自动发放额度（默认 ¥1000），
+                  按次计费、每次调用扣 ¥1。未领取订阅将无法创建 Key 和调用模型。
+                </div>
+                <Button onClick={() => void handleSubscribe()} disabled={subscribing}>
+                  {subscribing && <Loader2 className="h-4 w-4 animate-spin" />}
+                  领取免费订阅
+                </Button>
+              </>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* 其他订阅（邀请/成就等）—— 紧随免费订阅：额度叠加消费，放在一起才看得出总量 */}
+        <RewardSubscriptionsCard
+          groups={status.subscriptions.filter((s) => s.planId !== status.freePlanId)}
+          symbol={status.currencySymbol}
+          perUnit={status.quotaPerUnit}
+        />
+
         {/* 接入信息：Base URL + API Key 管理融合在一起 —— 新用户第一件事就是"怎么用" */}
         <Card>
           <CardHeader>
@@ -701,14 +1158,14 @@ export default function AiPage() {
           </Card>
         )}
 
-        {/* 额度 */}
+        {/* 钱包余额 */}
         <Card>
           <CardHeader>
             <div className="flex items-start justify-between gap-4">
               <div>
                 <CardTitle className="flex items-center gap-2 text-base">
                   <Wallet className="h-4 w-4 text-muted-foreground" />
-                  额度
+                  钱包余额
                 </CardTitle>
                 <CardDescription>
                   剩余 {status.currencySymbol}
@@ -885,27 +1342,10 @@ export default function AiPage() {
                 onChange={(e) => setKeyName(e.target.value)}
               />
             </div>
-            {status.availableGroups.length > 0 && (
-              <div className="space-y-2">
-                <Label htmlFor="keyGroup">分组</Label>
-                <Select value={keyGroup} onValueChange={setKeyGroup}>
-                  <SelectTrigger id="keyGroup">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {status.availableGroups.map((g) => (
-                      <SelectItem key={g} value={g}>
-                        {g}
-                        {g === "default" ? "（默认）" : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  分组决定该 Key 可用的模型与计费方式。
-                </p>
-              </div>
-            )}
+            <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+              该 Key 固定属于 <span className="font-medium text-foreground">default（免费）</span> 分组，
+              额度来自你的免费订阅每日发放。付费分组需联系管理员单独开通。
+            </div>
             </>
           )}
 
@@ -1013,6 +1453,8 @@ interface BindDialogProps {
   busy: boolean
   onReopenOAuth: () => void
   onConfirm: () => void
+  /** 点「取消」：关闭弹窗并跳回概览 */
+  onCancel: () => void
 }
 
 function BindDialog({
@@ -1026,6 +1468,7 @@ function BindDialog({
   busy,
   onReopenOAuth,
   onConfirm,
+  onCancel,
 }: BindDialogProps) {
   // 探测尚未返回时不渲染表单，避免用户先填了再被告知流程不同
   const ready = !preflightLoading && preflight !== null
@@ -1101,7 +1544,7 @@ function BindDialog({
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+          <Button variant="outline" onClick={onCancel}>
             取消
           </Button>
           {oidcBound && !awaitingOAuth && (

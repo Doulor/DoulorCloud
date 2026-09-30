@@ -1,11 +1,13 @@
-import { ApiError, json } from "../http"
+import { ApiError, json, readBodyCapped } from "../http"
 // 个人名片不消耗资源，已从权限体系移出（全量开放）：这里只需登录，不再校验功能权限
 import { requireUser } from "../auth"
 import { guardRateLimit } from "../ratelimit"
 
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
+import { hardenUserContentResponse } from "../content-type"
 import { attachCustomDomain, detachCustomDomain } from "../custom-domain"
 import { renderProfileHtml } from "../profile-page"
+import { isValidSource, resolveAudioUrl, searchMusic, fetchLyrics } from "../music-api"
 import type { Env } from "../env"
 
 /**
@@ -228,6 +230,34 @@ export const MODULE_TYPES = [
   "stats",
 ] as const
 
+/**
+ * 模块宽度（桌面端两列网格里的占位）。
+ *
+ *   half = 半宽（占一列，两个相邻的 half 自动并排）
+ *   full = 整宽（跨满整行）
+ *
+ * ⚠️ 只在**桌面端**（≥641px）生效；移动端一律单列，宽度设置被忽略。
+ *
+ * ⚠️ 而且**只在有人显式设过宽度时** `.mods` 才切成两列网格（CSS 用 `:has()` 做开关）——
+ * 老数据没人设过 size，布局与改动前逐像素一致，不存在「上线后所有人名片都变样」。
+ *
+ * ⚠️ 默认值（不写 size）由**骨架的 CSS** 决定，服务端不重复定义，避免两处默认规则跑偏：
+ *   - 网格拼贴（bento）：标签/名言默认半宽，其余模块整宽（与改动前写死的名单一致）；
+ *   - 其余骨架：默认全部整宽（单列流式，与改动前一致）。
+ */
+export const MODULE_SIZES = ["half", "full"] as const
+
+/**
+ * 宽度选项（编辑器下拉用）。
+ * `auto` 不是合法 size（不在 MODULE_SIZES 里）⇒ sanitizeModules 会直接忽略它，
+ * 等价于「不写 size 字段」，正是「跟随骨架默认」该有的效果。
+ */
+export const MODULE_SIZE_OPTIONS = [
+  { id: "auto", label: "自动", desc: "跟随骨架默认" },
+  { id: "half", label: "半宽", desc: "占一列" },
+  { id: "full", label: "整宽", desc: "跨满整行" },
+] as const
+
 export const MODULE_OPTIONS = [
   { id: "identity", label: "身份信息", desc: "头像、昵称与签名，固定在头部" },
   { id: "status", label: "当前状态", desc: "昵称下方的小状态签" },
@@ -264,6 +294,8 @@ export interface ProfileModule {
   text?: string
   author?: string
   emoji?: string
+  /** 桌面端宽度。缺省 = 跟随骨架默认（见 MODULE_SIZES 注释） */
+  size?: "half" | "full"
 }
 
 /**
@@ -287,6 +319,12 @@ export function sanitizeModules(input: unknown): ProfileModule[] {
     if (seen.has(id)) continue
     seen.add(id)
     const mod: ProfileModule = { id, enabled: o.enabled !== false }
+
+    // 宽度：只认白名单。**空串/缺省一律不写字段** —— 前端「自动」选项会传 ""，
+    // 这里必须把它当成「跟随骨架默认」，而不是存成一个非法值。
+    if (typeof o.size === "string" && (MODULE_SIZES as readonly string[]).includes(o.size)) {
+      mod.size = o.size as "half" | "full"
+    }
 
     if (id === "tags" && Array.isArray(o.items)) {
       const items = o.items
@@ -430,6 +468,10 @@ interface ProfileRow {
   music_autoplay: number
   music_cover_key: string | null
   music_cover_url: string | null
+  /** 搜索来源标记，形如 'netease:1330348068'；NULL = 用户自定义（上传或外链） */
+  music_source: string | null
+  /** 歌词全文（LRC，含时间轴） */
+  music_lyrics: string | null
   theme: string
   accent: string | null
   effects: string
@@ -507,6 +549,13 @@ async function loadProfile(env: Env, userId: string): Promise<ProfileRow> {
 /**
  * 开通名片。
  * 照 storage_accounts 的做法：点开通时才建记录。
+ *
+ * ⚠️ `published` 直接给 1 —— 开通即对外显示，不再要求用户再手动点一次「启用」。
+ * 没有昵称也能显示（公开页用用户名兜底），所以这里不再拦。
+ *
+ * 但**「开通了」不等于「真的做了名片」**：这条空行会让 `has_profile` 活动条件
+ * 变得人人可过。所以 event-rewards.ts 的 `has_profile` 判据同步升级为
+ * 「已发布 **且** 填了昵称」，别只改这里。
  */
 export async function enableProfile(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
@@ -530,12 +579,12 @@ export async function enableProfile(env: Env, request: Request): Promise<Respons
   const now = new Date().toISOString()
   await env.DB.prepare(
     `INSERT INTO profiles (user_id, slug, published, contacts, theme, effects, intro, font, layout, created_at, updated_at)
-     VALUES (?, ?, 0, '[]', 'void', '[]', 'none', 'system', 'center', ?, ?)`
+     VALUES (?, ?, 1, '[]', 'void', '[]', 'none', 'system', 'center', ?, ?)`
   )
     .bind(user.id, slug, now, now)
     .run()
 
-  return json({ enabled: true, slug }, 201)
+  return json({ enabled: true, published: true, slug }, 201)
 }
 
 function toPublicProfile(row: ProfileRow, slugOrFqdn: { profilePath: string }) {
@@ -555,6 +604,10 @@ function toPublicProfile(row: ProfileRow, slugOrFqdn: { profilePath: string }) {
     musicAutoplay: row.music_autoplay === 1,
     musicCoverKey: row.music_cover_key,
     musicCoverUrl: row.music_cover_url,
+    // 搜索来的音乐：编辑器要靠它回显「已选中某首歌」，并据此判断
+    // 播放地址该走 /p/<用户名>/music 实时解析、而不是用 musicUrl
+    musicSource: row.music_source,
+    musicLyrics: row.music_lyrics,
     theme: row.theme,
     accent: row.accent,
     effects: parseEffects(row.effects),
@@ -595,6 +648,7 @@ export async function getProfile(env: Env, request: Request): Promise<Response> 
     layoutOptions: LAYOUT_OPTIONS,
     cjkFontOptions: CJK_FONT_OPTIONS,
     moduleOptions: MODULE_OPTIONS,
+    moduleSizeOptions: MODULE_SIZE_OPTIONS,
     contactTypes: CONTACT_TYPES,
     scaleModes: SCALE_MODES,
     scaleModeOptions: SCALE_MODE_OPTIONS,
@@ -706,11 +760,36 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
     modulesJson = JSON.stringify(sanitizeModules(body.modules))
   }
 
+  /**
+   * 音乐来源：搜索来的歌存 `music_source`（形如 'netease:1330348068'）。
+   *
+   * 入库前严格校验 —— 这个值之后会被拼进对第三方接口的请求，
+   * 「白名单平台 + 纯数字 id」是唯一防线。
+   *
+   * 非法值按「清空」处理而不是抛错：用户手改了表单里那段文本但没重新选歌时，
+   * 静默回到「自定义」比弹一个他看不懂的错误更合理。
+   *
+   * 刻意**不**去动 music_url / music_key —— 换来源必须可逆：
+   * 清掉来源后，用户自己上传或粘贴的音频自动恢复生效（优先级见 loadPublicProfile）。
+   */
+  const musicSource =
+    body.musicSource === undefined
+      ? row.music_source
+      : (() => {
+          const raw = str(body.musicSource, 80)
+          return raw && isValidSource(raw) ? raw : null
+        })()
+
+  // 歌词：LRC 文本。上限 20 KB —— 再长的「歌词」一定是异常数据。
+  const musicLyrics =
+    body.musicLyrics === undefined ? row.music_lyrics : str(body.musicLyrics, 20000)
+
   await env.DB.prepare(
     `UPDATE profiles SET
        slug = ?, display_name = ?, bio = ?,
        avatar_url = ?, background_url = ?, music_url = ?, music_title = ?,
-       music_autoplay = ?, music_cover_url = ?, theme = ?, accent = ?, effects = ?,
+       music_autoplay = ?, music_cover_url = ?, music_source = ?, music_lyrics = ?,
+       theme = ?, accent = ?, effects = ?,
        intro = ?, font = ?, layout = ?, cjk_font = ?, contacts = ?, modules = ?,
        scale_mode = ?, scale_min = ?, scale_manual = ?, updated_at = ?
      WHERE user_id = ?`
@@ -725,6 +804,8 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
       body.musicTitle === undefined ? row.music_title : str(body.musicTitle, 80),
       body.musicAutoplay === undefined ? row.music_autoplay : body.musicAutoplay ? 1 : 0,
       body.musicCoverUrl === undefined ? row.music_cover_url : str(body.musicCoverUrl, 1000),
+      musicSource,
+      musicLyrics,
       theme,
       body.accent === undefined ? row.accent : str(body.accent, 20),
       effectsJson,
@@ -775,6 +856,32 @@ export async function previewProfile(env: Env, request: Request): Promise<Respon
     return urlField === undefined ? urlCol : str(urlField, 1000)
   }
 
+  // 预览时的音乐来源（与 updateProfile 完全同一套校验）
+  const previewSource =
+    body.musicSource === undefined
+      ? isValidSource(row.music_source ?? "")
+        ? row.music_source
+        : null
+      : (() => {
+          const raw = str(body.musicSource, 80)
+          return raw && isValidSource(raw) ? raw : null
+        })()
+
+  /**
+   * 预览用的音频地址。
+   *
+   * 这里**可以**把带时效签名的真实地址直接内联进 HTML —— 预览是「一次性」的：
+   * 不落库、不计访客数、响应不缓存，地址过期时用户早就关掉预览了。
+   *
+   * 公开页则绝不能这么做：那个 HTML 带 `Cache-Control: max-age=60`，
+   * 而且一份 HTML 会长期存在于各层缓存里，内联一个 20 分钟就失效的地址
+   * 等于给访客埋雷。公开页一律走 `/p/<用户名>/music` 实时解析。
+   */
+  const previewMusic = previewSource
+    ? ((await resolveAudioUrl(previewSource)) ??
+      asset("music", row.music_key, body.musicUrl, row.music_url))
+    : asset("music", row.music_key, body.musicUrl, row.music_url)
+
   const profile: PublicProfile = {
     slug: row.slug,
     username: user.username,
@@ -801,11 +908,14 @@ export async function previewProfile(env: Env, request: Request): Promise<Respon
         : clampScale(body.scaleManual as number, SCALE_MANUAL_RANGE, 100),
     avatar: asset("avatar", row.avatar_key, body.avatarUrl, row.avatar_url),
     background: asset("background", row.background_key, body.backgroundUrl, row.background_url),
-    music: asset("music", row.music_key, body.musicUrl, row.music_url),
+    music: previewMusic,
     musicCover: asset("music-cover", row.music_cover_key, body.musicCoverUrl, row.music_cover_url),
     musicTitle: body.musicTitle === undefined ? row.music_title : str(body.musicTitle, 80),
     musicAutoplay:
       body.musicAutoplay === undefined ? row.music_autoplay === 1 : Boolean(body.musicAutoplay),
+    musicSource: previewSource,
+    musicLyrics:
+      body.musicLyrics === undefined ? row.music_lyrics : str(body.musicLyrics, 20000),
     contacts: (Array.isArray(body.contacts)
       ? sanitizeContacts(body.contacts)
       : parseContacts(row.contacts)
@@ -814,6 +924,7 @@ export async function previewProfile(env: Env, request: Request): Promise<Respon
       ? sanitizeModules(body.modules)
       : parseModules(row.modules),
     registeredAt: user.created_at ?? null,
+    uid: user.uid ?? null,
     viewCount: row.view_count ?? 0,
   }
 
@@ -823,15 +934,16 @@ export async function previewProfile(env: Env, request: Request): Promise<Respon
 }
 
 // POST /api/profile/publish —— 启用/停用对外可见
+//
+// 不再要求「先填昵称」：开通时就已经是对外可见状态（enableProfile 直接 published=1），
+// 这里再拦一道自相矛盾 —— 用户会发现「明明是开着的，关掉再打开却打不开了」。
+// 没有昵称时公开页用用户名兜底，页面不会开天窗。
+// 真正需要「必须填了东西」的地方是活动领奖条件（has_profile），已在那边单独把关。
 export async function setPublished(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  const row = await loadProfile(env, user.id)
+  await loadProfile(env, user.id)
   const body = (await request.json()) as { published?: boolean }
   const published = body.published ? 1 : 0
-
-  if (published && !row.display_name) {
-    throw new ApiError(400, "启用前请先填写昵称", "DISPLAY_NAME_REQUIRED")
-  }
 
   await env.DB.prepare(
     "UPDATE profiles SET published = ?, updated_at = ? WHERE user_id = ?"
@@ -843,6 +955,75 @@ export async function setPublished(env: Env, request: Request): Promise<Response
 }
 
 // ---- 资源上传 ----
+
+/**
+ * GET /api/profile/music/search?q=<歌名> —— 按歌名搜索歌曲（需登录）。
+ *
+ * 三个刻意的约束：
+ *   1. **必须登录**：这是对第三方服务的代理调用。不登录就能用的话，
+ *      本站会变成别人白嫖的搜索接口，还可能让对方按 IP 把我们封掉。
+ *   2. **必须限流**：同上；第三方接口自己也有配额，被刷爆等于功能永久失效。
+ *   3. 失败返回 502 而不是 500，并把原因带上：搜索服务挂掉和「真的没这首歌」
+ *      是两件事，前端要能给出不同提示（前者引导用户改用上传/外链）。
+ *
+ * 注意这里只做搜索，**不返回任何播放地址** —— 播放地址是带时效签名的，
+ * 交给 `/p/<用户名>/music` 在播放时实时解析。搜索响应里给出去的地址
+ * 一定会被前端存起来，那正是我们要避免的。
+ */
+export async function searchMusicTracks(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  await guardRateLimit(
+    env,
+    `profile-music-search:${user.id}`,
+    30,
+    60,
+    "搜索过于频繁，请稍后再试"
+  )
+
+  const q = (new URL(request.url).searchParams.get("q") ?? "").trim()
+  if (!q) return json({ tracks: [] })
+  if (q.length > 80) {
+    throw new ApiError(400, "搜索关键词过长")
+  }
+
+  try {
+    return json({ tracks: await searchMusic(q) })
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : "未知错误"
+    throw new ApiError(502, `音乐搜索暂时不可用：${detail}`)
+  }
+}
+
+/**
+ * GET /api/profile/music/lyrics?title=<歌名>&artist=<歌手> —— 取歌词（需登录）。
+ *
+ * 为什么按「歌名+歌手」而不是按歌曲 id 取：歌词库（LRCLIB）与音频源（网易云）
+ * 是两套完全独立的曲库，没有共同的 id 可以对应。搜索结果里本来就有歌名和歌手，
+ * 直接拿来查是最稳的。
+ *
+ * 取不到一律返回 `{lyrics: null}` 而不是报错：歌词是可选增强，
+ * 不该因为它取不到就让「选歌」这个主流程中断。
+ */
+export async function fetchMusicLyrics(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  await guardRateLimit(
+    env,
+    `profile-music-lyrics:${user.id}`,
+    30,
+    60,
+    "操作过于频繁，请稍后再试"
+  )
+
+  const params = new URL(request.url).searchParams
+  const title = (params.get("title") ?? "").trim()
+  const artist = (params.get("artist") ?? "").trim()
+  if (!title) return json({ lyrics: null })
+  if (title.length > 120 || artist.length > 120) {
+    throw new ApiError(400, "参数过长")
+  }
+
+  return json({ lyrics: await fetchLyrics(title, artist) })
+}
 
 /**
  * POST /api/profile/asset?kind=avatar|background|music|music-cover|gallery
@@ -886,16 +1067,18 @@ export async function uploadAsset(env: Env, request: Request): Promise<Response>
           ? MAX_AVATAR_BYTES
           : MAX_MUSIC_BYTES
 
-  const buf = await request.arrayBuffer()
+  // ⚠️ 2026-09-25 审计（L29）：原先是「先 `await request.arrayBuffer()`
+  // 把整个请求体读进内存，再比对大小」—— 校验发生在内存已经花掉之后。
+  // `readBodyCapped` 先看 Content-Length 快速拒绝，读完再复核真实长度。
+  const buf = await readBodyCapped(
+    request,
+    limit,
+    `文件过大，上限 ${Math.round(limit / 1024 / 1024)} MB`,
+    400,
+    "TOO_LARGE"
+  )
   if (buf.byteLength === 0) {
     throw new ApiError(400, "文件为空", "INVALID_INPUT")
-  }
-  if (buf.byteLength > limit) {
-    throw new ApiError(
-      400,
-      `文件过大，上限 ${Math.round(limit / 1024 / 1024)} MB`,
-      "TOO_LARGE"
-    )
   }
 
   // 图片墙：一次一张，随机 id 命名，避免覆盖；不入 D1，URL 由前端存进模块配置
@@ -980,23 +1163,118 @@ export async function deleteAsset(env: Env, request: Request): Promise<Response>
 }
 
 /**
+ * 名片资源是否可对外提供（2026-09-25 审计 L10）。
+ *
+ * 原状况：`loadPublicProfile` 已经用 `published !== 1 || user_status !== "active"`
+ * 把**页面**挡住了，但 `/p/<用户名>/<kind>` 与 `/p/<用户名>/gallery/<id>`
+ * 这两个资源接口**完全没有检查** —— 只要知道用户名，未发布名片的头像、
+ * 背景图、背景音乐、图片墙全都照常返回。用户「先传图、暂不发布」的草稿
+ * 内容其实是公开可读的。
+ *
+ * 现在：未发布（或用户已停用）时，除**本人**以外一律 404。
+ */
+async function isProfilePubliclyReadable(
+  env: Env,
+  username: string,
+  viewerId: string | null
+): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT p.user_id, p.published, u.status AS user_status
+       FROM users u LEFT JOIN profiles p ON p.user_id = u.id
+      WHERE u.username = ? COLLATE NOCASE LIMIT 1`
+  )
+    .bind(username)
+    .first<{ user_id: string | null; published: number | null; user_status: string }>()
+
+  if (!row) return false
+  // 本人始终可以看自己的资源（编辑器预览）
+  if (viewerId && row.user_id === viewerId) return true
+  return row.published === 1 && row.user_status === "active"
+}
+
+/**
  * GET /api/profile/asset?kind=... —— 读取自己的资源（仅用于编辑器预览）
  * 公开页面的资源由 /p/<用户名>/<kind> 提供，见 serveProfileAsset。
+ *
+ * `kind=gallery&id=<id>`：图片墙单张的**本人预览**通道。
+ * 为什么需要它：`/p/<用户名>/gallery/<id>` 现在对未发布名片只放行本人，
+ * 而那个路由拿不到请求（无法鉴权），所以编辑器预览必须走这条带会话的接口。
  */
 export async function readOwnAsset(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  return serveAssetByUsername(env, user.username, new URL(request.url).searchParams.get("kind") ?? "")
+  const params = new URL(request.url).searchParams
+  const kind = params.get("kind") ?? ""
+  if (kind === "gallery") {
+    return serveGalleryObject(env, user.username, params.get("id") ?? "")
+  }
+  return serveAssetByUsername(env, user.username, kind, user.id)
 }
 
-/** 按用户名 + 类型返回 R2 对象（公开可读，用于名片页展示） */
+/**
+ * 取某人名片上「搜索来的音乐」的来源标记；没有或格式非法返回 null。
+ *
+ * 只取这一个字段而不是整行：这个函数只在公开资源路径上被调用，
+ * 少读一点用户数据、少一层把它带进响应体的机会。
+ */
+async function loadMusicSourceByUsername(
+  env: Env,
+  username: string
+): Promise<string | null> {
+  const row = await env.DB.prepare(
+    `SELECT p.music_source AS music_source
+       FROM profiles p JOIN users u ON u.id = p.user_id
+      WHERE u.username = ? COLLATE NOCASE LIMIT 1`
+  )
+    .bind(username)
+    .first<{ music_source: string | null }>()
+  const src = row?.music_source ?? ""
+  return isValidSource(src) ? src : null
+}
+
+/** 按用户名 + 类型返回 R2 对象（公开可读，用于名片页展示；未发布仅本人可见） */
 export async function serveAssetByUsername(
   env: Env,
   username: string,
-  kind: string
+  kind: string,
+  viewerId: string | null = null
 ): Promise<Response> {
   if (!["avatar", "background", "music", "music-cover"].includes(kind)) {
     return new Response("Not Found", { status: 404 })
   }
+  // 未发布的名片不对外提供资源（2026-09-25 审计 L10）
+  if (!(await isProfilePubliclyReadable(env, username, viewerId))) {
+    return new Response("Not Found", { status: 404 })
+  }
+
+  /**
+   * 搜索来的音乐：库里只有 `netease:<id>`，既没有 R2 对象也没有外链。
+   * 这里实时解析成带时效签名的真实地址，用 302 把浏览器送过去。
+   *
+   * ⚠️ 这一段必须排在 `isStorageConfigured` 判断**之前**：这条路径完全不需要 R2，
+   * 没配存储的站点、以及从没上传过文件的用户，同样应该能听到搜索来的歌。
+   *
+   * 解析失败时不直接 404 —— 继续往下走，尝试用户自己上传的 R2 文件。
+   * 这样第三方服务挂掉时，那些「既上传过又选过歌」的用户不至于彻底静音。
+   */
+  if (kind === "music") {
+    const source = await loadMusicSourceByUsername(env, username)
+    if (source) {
+      const url = await resolveAudioUrl(source)
+      if (url) {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            Location: url,
+            // 地址带时效签名（约 20 分钟失效），绝不能让浏览器或中间层缓存这次跳转。
+            // 若哪天误改成可缓存，回放就会命中一个已失效的签名地址，
+            // 表现为「第一次能播、过一会儿就播不了」这种极难排查的故障。
+            "Cache-Control": "no-store, must-revalidate",
+          },
+        })
+      }
+    }
+  }
+
   if (!(await isStorageConfigured(env))) {
     return new Response("Not Found", { status: 404 })
   }
@@ -1012,10 +1290,11 @@ export async function serveAssetByUsername(
 }
 
 /**
- * 图片墙单张：/p/<用户名>/gallery/<id>（公开可读）。
+ * 读取 `profiles/<用户名>/gallery/<id>.<ext>` 的 R2 对象。
  * id 由上传时生成（16 位十六进制），此处做白名单字符校验防路径穿越。
+ * **不含任何鉴权** —— 调用方负责判断「这个人有没有权限看」。
  */
-export async function serveGalleryImage(
+async function serveGalleryObject(
   env: Env,
   username: string,
   id: string
@@ -1029,17 +1308,34 @@ export async function serveGalleryImage(
   const platformBucket = await getPlatformBucketId(env)
   for (const ext of ["jpg", "png", "webp", "gif"]) {
     try {
-      return await getObject(
+      const res = await getObject(
         env,
         `profiles/${username}/gallery/${id}.${ext}`,
         undefined,
         platformBucket
       )
+      // 类型收口 + nosniff：公开读取接口不依赖写入侧校验（纵深防御）
+      return hardenUserContentResponse(res, `${id}.${ext}`)
     } catch {
       continue
     }
   }
   return new Response("Not Found", { status: 404 })
+}
+
+/**
+ * 图片墙单张：/p/<用户名>/gallery/<id>（公开可读，未发布名片仅本人可见）。
+ */
+export async function serveGalleryImage(
+  env: Env,
+  username: string,
+  id: string
+): Promise<Response> {
+  // 未发布的名片不对外提供图片墙（2026-09-25 审计 L10）
+  if (!(await isProfilePubliclyReadable(env, username, null))) {
+    return new Response("Not Found", { status: 404 })
+  }
+  return serveGalleryObject(env, username, id)
 }
 
 // ---- 自定义域名绑定 ----
@@ -1163,15 +1459,29 @@ export interface PublicProfile {
   scaleManual: number
   avatar: string | null
   background: string | null
+  /**
+   * 播放器该用的音频地址。三种来源，语义各不相同：
+   *   - 上传到 R2 → `/p/<用户名>/music`（静态文件）
+   *   - 用户外链   → 直接就是那个 URL
+   *   - 搜索来的   → 同样是 `/p/<用户名>/music`，但该路径在服务端会
+   *                  **实时解析**成带时效签名的第三方地址（解析结果绝不入库）。
+   * 前两者与第三方无关，只有第三种会在解析失败时静默 404（播放器不响）。
+   */
   music: string | null
   musicCover: string | null
   musicTitle: string | null
   musicAutoplay: boolean
+  /** 搜索来源标记（'netease:<id>'）；用户自定义时为 null */
+  musicSource: string | null
+  /** 歌词（LRC 文本）；可为空 */
+  musicLyrics: string | null
   contacts: Contact[]
   /** 组装页面的模块（开关 + 顺序 + 各自数据） */
   modules: ProfileModule[]
   /** 用户注册时间（ISO）—— 名片页小字展示 */
   registeredAt: string | null
+  /** 用户 UID（按注册顺序从 1 开始，展示层补零成 001）；名片页小字展示 */
+  uid: number | null
   /** 名片被访问的累计次数 */
   viewCount: number
 }
@@ -1188,12 +1498,12 @@ export async function loadPublicProfile(
   const value = key.fqdn ?? key.slug ?? ""
 
   const row = await env.DB.prepare(
-    `SELECT p.*, u.username, u.status AS user_status, u.created_at AS user_created_at
+    `SELECT p.*, u.username, u.status AS user_status, u.created_at AS user_created_at, u.uid AS user_uid
        FROM profiles p JOIN users u ON u.id = p.user_id
       WHERE ${where} LIMIT 1`
   )
     .bind(value)
-    .first<ProfileRow & { username: string; user_status: string; user_created_at: string }>()
+    .first<ProfileRow & { username: string; user_status: string; user_created_at: string; user_uid: number | null }>()
 
   if (!row) return null
   if (row.published !== 1 || row.user_status !== "active") return null
@@ -1203,6 +1513,25 @@ export async function loadPublicProfile(
     if (key) return `/p/${row.username}/${kind}`
     return url ?? null
   }
+
+  /**
+   * 音频地址单独处理：搜索来的歌没有 key 也没有 url，但**复用与上传音频同一个
+   * 路径** `/p/<用户名>/music`，由 serveAssetByUsername 实时解析。
+   *
+   * 为什么不新开一个带 source 参数的公开端点：
+   *   1. 自定义名片域名下的加载规则与其它资源完全一致，不必额外配路由；
+   *   2. 别人没法拿它当「任意歌曲解析代理」刷 —— 只有名片真实在用的那首歌
+   *      才解析得出来，参数里根本没有 id 可以换。
+   *
+   * 优先级 **搜索歌曲 > 上传文件 > 外链**：
+   *   选了搜索歌曲就以它为准；把选择清掉，自动回到用户自己上传的音频。
+   *   这样「换来源」永远是可逆的 —— 反过来（上传优先）就必须删掉 R2 里的文件
+   *   才能听到新选的歌，用户想换回去就没了。
+   */
+  const musicSource = isValidSource(row.music_source ?? "") ? row.music_source : null
+  const music = musicSource || row.music_key
+    ? `/p/${row.username}/music`
+    : row.music_url
 
   return {
     slug: row.slug,
@@ -1221,13 +1550,16 @@ export async function loadPublicProfile(
     scaleManual: clampScale(row.scale_manual, SCALE_MANUAL_RANGE, 100),
     avatar: assetUrl("avatar", row.avatar_key, row.avatar_url),
     background: assetUrl("background", row.background_key, row.background_url),
-    music: assetUrl("music", row.music_key, row.music_url),
+    music,
     musicCover: assetUrl("music-cover", row.music_cover_key, row.music_cover_url),
     musicTitle: row.music_title,
     musicAutoplay: row.music_autoplay === 1,
+    musicSource,
+    musicLyrics: row.music_lyrics,
     contacts: parseContacts(row.contacts).filter((c) => c.visible !== false),
     modules: parseModules(row.modules),
     registeredAt: row.user_created_at ?? null,
+    uid: row.user_uid ?? null,
     viewCount: row.view_count ?? 0,
   }
 }

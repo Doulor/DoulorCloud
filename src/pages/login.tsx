@@ -7,6 +7,7 @@ import { AuthShell, AuthFooterLink } from "@/components/auth-shell"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { TermsDialog } from "@/components/terms-dialog"
 import { authApi, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 import { safeNextPath } from "@/lib/safe-next"
@@ -27,6 +28,7 @@ export default function LoginPage() {
   const [password, setPassword] = React.useState("")
   const [error, setError] = React.useState<string | null>(null)
   const [loading, setLoading] = React.useState(false)
+  const [termsOpen, setTermsOpen] = React.useState(false)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -55,6 +57,19 @@ export default function LoginPage() {
         toast.warning("登录成功，建议前往「设置」验证真实邮箱")
       } else {
         toast.success("登录成功")
+      }
+
+      // ⚠️ 2026-09-25 审计（F5）：`next` 指向 **API 路由**时必须整页跳转。
+      //
+      // OAuth 授权流程是这样的：第三方把用户送到 `/api/oauth/authorize?...`，
+      // 该端点在用户未登录时 302 到 `/login?next=%2Fapi%2Foauth%2Fauthorize...`。
+      // 而 `/api/*` 是 **Worker 的路由**，不是 React Router 的页面路由 ——
+      // 原来一律 `navigate(from)` 做客户端跳转，结果被 `*` 兜底成 404 页，
+      // 用户登录后卡在「页面不存在」，OAuth 授权永远走不完。
+      // 改成整页跳转，让浏览器重新请求 Worker，由它继续 302 到同意页。
+      if (from.startsWith("/api/")) {
+        window.location.assign(from)
+        return
       }
       navigate(from, { replace: true })
     } catch (err) {
@@ -90,7 +105,7 @@ export default function LoginPage() {
           <div className="flex items-center justify-between">
             <Label htmlFor="password">密码</Label>
             <Link
-              to="/login"
+              to="/forgot-password"
               className="text-xs text-muted-foreground hover:text-foreground"
             >
               忘记密码？
@@ -110,7 +125,19 @@ export default function LoginPage() {
           {loading && <Loader2 className="h-4 w-4 animate-spin" />}
           登录
         </Button>
+        <p className="text-center text-xs text-muted-foreground">
+          点击「登录」即表示你已阅读并同意{" "}
+          <button
+            type="button"
+            className="text-foreground underline underline-offset-2 hover:text-primary"
+            onClick={() => setTermsOpen(true)}
+          >
+            《服务条款》
+          </button>
+        </p>
       </form>
+
+      <TermsDialog open={termsOpen} onOpenChange={setTermsOpen} />
 
       <Diagnostics />
     </AuthShell>

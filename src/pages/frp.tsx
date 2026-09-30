@@ -89,39 +89,73 @@ function NodeStatusBadge({ node }: { node: FrpNode }) {
 
 /**
  * 生成 frpc 的 config.toml。
- * 按用户实际被批准的端口/隧道拼装，用户直接替换到核心目录即可。
+ *
+ * 优先用服务端下发的**参数化模板**（捐献者提供的 frpc.toml 样例剥掉个人凭据后得到），
+ * 这样带鉴权插件 / 自定义字段的服务器也能生成正确配置；模板为空时回落到内置生成器。
+ * 占位符：{serverAddr} {serverPort} {authToken} {user} {password} {proxies}。
  */
 function buildConfig(
   node: FrpNode,
   app: FrpApplication,
   metadatasToken: string,
-  authToken: string
+  authToken: string,
+  template: string | null
 ): string {
-  const lines: string[] = []
-  lines.push(`serverAddr = "${node.serverAddr}"`)
-  lines.push(`serverPort = ${node.serverPort}`)
-  lines.push("")
-  lines.push(`auth.token = "${authToken}"`)
-  lines.push("")
-  lines.push(`user = "${app.frpUser}"`)
-  lines.push(`metadatas.token = "${metadatasToken}"`)
-  lines.push("")
+  const proxiesBlock =
+    app.tunnels.length === 0
+      ? "# 你还没有添加隧道，请在网页上添加后重新生成"
+      : app.tunnels
+          .map((t) =>
+            [
+              "[[proxies]]",
+              `name = "${t.name}"`,
+              `type = "${t.type}"`,
+              `localIP = "${t.localIP}"`,
+              `localPort = ${t.localPort}`,
+              `remotePort = ${t.remotePort}`,
+              "",
+            ].join("\n")
+          )
+          .join("")
 
-  if (app.tunnels.length === 0) {
-    lines.push("# 你还没有添加隧道，请在网页上添加后重新生成")
-  }
-  for (const t of app.tunnels) {
-    lines.push("[[proxies]]")
-    lines.push(`name = "${t.name}"`)
-    lines.push(`type = "${t.type}"`)
-    lines.push(`localIP = "${t.localIP}"`)
-    lines.push(`localPort = ${t.localPort}`)
-    lines.push(`remotePort = ${t.remotePort}`)
-    lines.push("")
+  const values: Record<string, string> = {
+    "{serverAddr}": node.serverAddr,
+    "{serverPort}": String(node.serverPort),
+    "{authToken}": authToken.trim(),
+    "{user}": app.frpUser,
+    "{password}": metadatasToken,
   }
 
-  lines.push(`# 由 Doulor Cloud 生成 · ${new Date().toLocaleString("zh-CN")}`)
-  return lines.join("\n")
+  // 没有模板 → 用内置生成器（与后端 frp-config.ts 的 DEFAULT_FRP_TEMPLATE 一致）
+  const tpl =
+    (template ?? "").trim() ||
+    [
+      'serverAddr = "{serverAddr}"',
+      "serverPort = {serverPort}",
+      "",
+      'auth.token = "{authToken}"',
+      "",
+      'user = "{user}"',
+      'metadatas.token = "{password}"',
+    ].join("\n")
+
+  // 值为空的占位符 → 删掉整行（`auth.token = ""` 会让 frpc 直接连不上）
+  const emptyKeys = ["{serverAddr}", "{serverPort}", "{authToken}", "{user}", "{password}"]
+    .filter((ph) => !values[ph])
+  let body = tpl
+    .split("\n")
+    .filter((line) => !emptyKeys.some((ph) => line.includes(ph)))
+    .join("\n")
+
+  for (const [ph, v] of Object.entries(values)) {
+    body = body.split(ph).join(v)
+  }
+
+  body = body.includes("{proxies}")
+    ? body.split("{proxies}").join(proxiesBlock)
+    : `${body}\n\n${proxiesBlock}`
+
+  return `${body.replace(/\n{3,}/g, "\n\n").trimEnd()}\n\n# 由 Doulor Cloud 生成 · ${new Date().toLocaleString("zh-CN")}\n`
 }
 
 export default function FrpPage() {
@@ -305,7 +339,7 @@ export default function FrpPage() {
     }
     // metadatas.token 就是申请时填写的密码
     setConfigText(
-      buildConfig(node, app, app.frpPassword, app.configAuthToken)
+      buildConfig(node, app, app.frpPassword, app.configAuthToken, app.configTemplate)
     )
   }
 
@@ -698,6 +732,13 @@ function ApplyDialog({
   busy,
   onConfirm,
 }: ApplyDialogProps) {
+  // 这个节点要不要填「每用户账号 + 密码」——与后端 needsUserAccount() 同一个判断：
+  //   token_user / custom → 需要
+  //   token（只用全局 auth.token）/ none（无鉴权）→ **不需要**
+  // node 还没加载出来时保守地当作需要（别把该填的字段藏掉）。
+  const needAccount =
+    !node || node.authMode === "token_user" || node.authMode === "custom"
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[88vh] max-w-2xl overflow-y-auto">
@@ -709,34 +750,49 @@ function ApplyDialog({
         </DialogHeader>
 
         <div className="space-y-5">
-          {/* 账号 */}
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="frpUser">账号名</Label>
-              <Input
-                id="frpUser"
-                placeholder="字母/数字/_-"
-                value={form.frpUser}
-                onChange={(e) => setForm((f) => ({ ...f, frpUser: e.target.value }))}
-              />
+          {/* 账号密码：**只有需要「每用户账号」的节点才要填**（2026-09-30 修）。
+              全局 auth.token / 无鉴权的节点上没有按用户区分的账号，填了也用不上：
+              后端不会存，生成的 config.toml 里也不会出现 user / metadatas.token。 */}
+          {needAccount ? (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="frpUser">账号名</Label>
+                <Input
+                  id="frpUser"
+                  placeholder="字母/数字/_-"
+                  value={form.frpUser}
+                  onChange={(e) => setForm((f) => ({ ...f, frpUser: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="frpPw">密码</Label>
+                <Input
+                  id="frpPw"
+                  type="text"
+                  placeholder="6-64 位"
+                  value={form.frpPassword}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, frpPassword: e.target.value }))
+                  }
+                />
+                <p className="text-xs text-muted-foreground">
+                  该密码会作为 config.toml 里的 <code>metadatas.token</code>，
+                  也是管理员在 frps-panel 为你建号时使用的 token，请牢记。
+                  只允许字母、数字和半角符号 <code>_!@#$%^&amp;*().-</code>，不要用空格或中文符号。
+                </p>
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="frpPw">密码</Label>
-              <Input
-                id="frpPw"
-                type="text"
-                placeholder="6-64 位"
-                value={form.frpPassword}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, frpPassword: e.target.value }))
-                }
-              />
-              <p className="text-xs text-muted-foreground">
-                该密码会作为 config.toml 里的 <code>metadatas.token</code>，
-                也是管理员在 frps-panel 为你建号时使用的 token，请牢记。
-              </p>
+          ) : (
+            <div className="rounded-md border border-dashed px-4 py-3 text-xs text-muted-foreground">
+              这个节点
+              <span className="text-foreground">不需要账号和密码</span>
+              {node?.authMode === "none"
+                ? "（它没有开启任何鉴权）"
+                : "（它只用服务端全局 auth.token 鉴权）"}
+              —— 直接选端口提交即可，生成的配置里也不会出现{" "}
+              <code>user</code> / <code>metadatas.token</code> 这两行。
             </div>
-          </div>
+          )}
 
           {/* 端口 */}
           <div className="space-y-2">

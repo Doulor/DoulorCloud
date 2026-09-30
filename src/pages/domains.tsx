@@ -37,7 +37,10 @@ import { dnsApi, domainApi, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 import type { DnsRecord, DnsRecordType, Subdomain } from "@/types"
 
-const RECORD_TYPES: DnsRecordType[] = ["A", "AAAA", "CNAME", "TXT", "MX"]
+const RECORD_TYPES: DnsRecordType[] = ["A", "AAAA", "CNAME", "TXT", "MX", "SRV"]
+
+/** SRV 的协议选项。RFC 2782 里这两个是实际会被用到的（其余少见，不列以免误导） */
+const SRV_PROTOS = ["tcp", "udp"]
 
 function StatusBadge({ status }: { status: DnsRecord["status"] }) {
   if (status === "active") return <Badge variant="success">active</Badge>
@@ -74,6 +77,13 @@ export default function DomainsPage() {
     ttl: "1",
     proxied: false,
     priority: "",
+    // SRV 专有字段。service / proto 分开填、由服务端拼成记录名
+    // （`_service._proto.name`），前端不重复那套下划线与顺序规则。
+    srvService: "",
+    srvProto: "tcp",
+    srvWeight: "0",
+    srvPort: "",
+    srvTarget: "",
   })
 
   const loadSubdomains = React.useCallback(async (keepId?: string) => {
@@ -151,11 +161,29 @@ export default function DomainsPage() {
   }
 
   const resetForm = () =>
-    setForm({ name: "", type: "A", content: "", ttl: "1", proxied: false, priority: "" })
+    setForm({
+      name: "",
+      type: "A",
+      content: "",
+      ttl: "1",
+      proxied: false,
+      priority: "",
+      srvService: "",
+      srvProto: "tcp",
+      srvWeight: "0",
+      srvPort: "",
+      srvTarget: "",
+    })
 
   const handleCreateDns = async () => {
     if (!selected) return
-    if (!form.content || (!form.name && selected.name !== "@")) {
+    // SRV 不填「内容」（由 service/proto/权重/端口/目标推导），校验分开走
+    if (form.type === "SRV") {
+      if (!form.srvService.trim() || !form.srvPort.trim() || !form.srvTarget.trim()) {
+        toast.error("请填写服务名、端口和目标主机")
+        return
+      }
+    } else if (!form.content || (!form.name && selected.name !== "@")) {
       toast.error("请填写记录名称和内容")
       return
     }
@@ -169,10 +197,20 @@ export default function DomainsPage() {
         ttl: form.ttl === "1" ? 1 : Number(form.ttl),
         proxied: form.proxied,
         priority: form.priority ? Number(form.priority) : undefined,
+        ...(form.type === "SRV"
+          ? {
+              srvService: form.srvService.trim(),
+              srvProto: form.srvProto,
+              srvWeight: Number(form.srvWeight) || 0,
+              srvPort: Number(form.srvPort),
+              srvTarget: form.srvTarget.trim(),
+            }
+          : {}),
       })
       toast.success("DNS 记录已创建")
       setOpenDns(false)
       resetForm()
+      bumpRecordCount(selected.id, 1)
       void loadRecords(selected.id)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "创建失败")
@@ -181,11 +219,30 @@ export default function DomainsPage() {
     }
   }
 
+  /**
+   * 本地调整某个域名的解析条数。
+   *
+   * 为什么不重新拉整个域名列表：增删一条 DNS 记录后，重拉 `loadSubdomains`
+   * 会把 `loading` 置真，右侧的解析列表整块闪一下 LoadingBlock —— 为了一行
+   * 数字付这个代价不值得。这里就地改数字，下一次真正加载域名列表时自然对齐。
+   */
+  const bumpRecordCount = (subdomainId: string, delta: number) => {
+    setSubdomains((prev) =>
+      prev.map((s) =>
+        s.id === subdomainId
+          ? { ...s, recordCount: Math.max(0, (s.recordCount ?? 0) + delta) }
+          : s
+      )
+    )
+  }
+
   const handleDeleteDns = async (record: DnsRecord) => {
     setDeletingId(record.id)
     try {
       await dnsApi.remove(record.id)
       toast.success("DNS 记录已删除")
+      // 优先按记录自己的归属改数字；老数据 subdomainId 可能为空，退回当前选中项
+      bumpRecordCount(record.subdomainId ?? selected?.id ?? "", -1)
       void loadRecords(selected?.id)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : "删除失败")
@@ -243,16 +300,25 @@ export default function DomainsPage() {
               const canAddChild = children.length < childQuota
               return (
                 <div key={sub.id} className="space-y-1.5">
-                  {/* 一级 */}
+                  {/* 一级。
+                      整块可点选（而不是只有域名文字）：一行里能点的区域越大越好点。
+                      外层用 div + onClick 而非 button —— 里面已经有删除/加子域名两个
+                      真按钮，HTML 不允许按钮嵌套按钮。
+                      键盘可达性靠域名文字那个 button 保住（Tab 聚焦 + Enter 触发），
+                      鼠标则点整块任意位置都行。 */}
                   <div
-                    className={`group flex items-center gap-2 rounded-md border px-3 py-2 transition-colors ${
+                    onClick={() => setSelected(sub)}
+                    className={`group flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 transition-colors ${
                       selected?.id === sub.id ? "bg-accent" : "hover:bg-accent/50"
                     }`}
                   >
                     <button
                       type="button"
                       className="font-mono text-sm"
-                      onClick={() => setSelected(sub)}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setSelected(sub)
+                      }}
                     >
                       {sub.fqdn}
                     </button>
@@ -262,7 +328,11 @@ export default function DomainsPage() {
                       <button
                         type="button"
                         className="hidden text-muted-foreground hover:text-destructive group-hover:block"
-                        onClick={() => void handleDeleteSubdomain(sub)}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void handleDeleteSubdomain(sub)
+                        }}
+                        title="删除该域名"
                       >
                         {deletingId === sub.id ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -271,11 +341,17 @@ export default function DomainsPage() {
                         )}
                       </button>
                     )}
+                    {/* 该域名下挂了几条解析。只算**直接挂的**，不含子子域名的 ——
+                        列表里父子各占一行，各算各的才对得上点进去看到的那份列表 */}
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {sub.recordCount ?? 0} 条解析
+                    </span>
                     {/* 在一级之下加子子域名 */}
                     <button
                       type="button"
                       className="ml-auto hidden items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground group-hover:inline-flex"
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.stopPropagation()
                         setParentFor(sub)
                         setSubName("")
                         setOpenSub(true)
@@ -296,7 +372,8 @@ export default function DomainsPage() {
                   {children.map((child) => (
                     <div
                       key={child.id}
-                      className={`group ml-4 flex items-center gap-2 rounded-md border px-3 py-1.5 transition-colors ${
+                      onClick={() => setSelected(child)}
+                      className={`group ml-4 flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 transition-colors ${
                         selected?.id === child.id ? "bg-accent" : "hover:bg-accent/50"
                       }`}
                     >
@@ -304,14 +381,24 @@ export default function DomainsPage() {
                       <button
                         type="button"
                         className="font-mono text-sm"
-                        onClick={() => setSelected(child)}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setSelected(child)
+                        }}
                       >
                         {child.fqdn}
                       </button>
+                      <span className="shrink-0 text-xs text-muted-foreground">
+                        {child.recordCount ?? 0} 条解析
+                      </span>
                       <button
                         type="button"
-                        className="hidden text-muted-foreground hover:text-destructive group-hover:block"
-                        onClick={() => void handleDeleteSubdomain(child)}
+                        className="ml-auto hidden text-muted-foreground hover:text-destructive group-hover:block"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void handleDeleteSubdomain(child)
+                        }}
+                        title="删除该域名"
                       >
                         {deletingId === child.id ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -493,27 +580,77 @@ export default function DomainsPage() {
           </DialogHeader>
 
           <div className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="name">名称</Label>
-              <div className="flex items-center gap-1">
-                <Input
-                  id="name"
-                  placeholder={selected?.name === "@" ? "blog" : "@"}
-                  value={form.name}
-                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                  className="flex-1"
-                />
-                <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                  .{base}
-                </span>
+            {form.type !== "SRV" ? (
+              <div className="space-y-2">
+                <Label htmlFor="name">名称</Label>
+                <div className="flex items-center gap-1">
+                  <Input
+                    id="name"
+                    placeholder={selected?.name === "@" ? "blog" : "@"}
+                    value={form.name}
+                    onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                    className="flex-1"
+                  />
+                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                    .{base}
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  实际记录：
+                  <span className="font-mono">
+                    {(form.name || "@")}.{base}
+                  </span>
+                </p>
               </div>
-              <p className="text-xs text-muted-foreground">
-                实际记录：
-                <span className="font-mono">
-                  {(form.name || "@")}.{base}
-                </span>
-              </p>
-            </div>
+            ) : (
+              <div className="space-y-2">
+                <Label htmlFor="srvService">服务</Label>
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    id="srvService"
+                    placeholder="sip"
+                    value={form.srvService}
+                    onChange={(e) => setForm((f) => ({ ...f, srvService: e.target.value }))}
+                  />
+                  <Select
+                    value={form.srvProto}
+                    onValueChange={(v) => setForm((f) => ({ ...f, srvProto: v }))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {SRV_PROTOS.map((p) => (
+                        <SelectItem key={p} value={p}>
+                          {p.toUpperCase()}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {/* 服务标签之后、基准域名之前的那一段（可留空 = 直接挂在 {base} 下） */}
+                <div className="flex items-center gap-1 pt-1">
+                  <Input
+                    id="name"
+                    placeholder="（可留空）"
+                    value={form.name}
+                    onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                    className="flex-1"
+                  />
+                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                    .{base}
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  实际记录：
+                  <span className="font-mono">
+                    _{form.srvService.replace(/^_+/, "") || "service"}._
+                    {form.srvProto}
+                    {form.name ? `.${form.name}` : ""}.{base}
+                  </span>
+                </p>
+              </div>
+            )}
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
@@ -555,21 +692,70 @@ export default function DomainsPage() {
               </div>
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="content">内容</Label>
-              <Input
-                id="content"
-                placeholder={
-                  form.type === "MX"
-                    ? "cloud.doulor.cn"
-                    : form.type === "TXT"
-                      ? '"value"'
-                      : "192.0.2.10"
-                }
-                value={form.content}
-                onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))}
-              />
-            </div>
+            {form.type !== "SRV" ? (
+              <div className="space-y-2">
+                <Label htmlFor="content">内容</Label>
+                <Input
+                  id="content"
+                  placeholder={
+                    form.type === "MX"
+                      ? "cloud.doulor.cn"
+                      : form.type === "TXT"
+                        ? '"value"'
+                        : "192.0.2.10"
+                  }
+                  value={form.content}
+                  onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))}
+                />
+              </div>
+            ) : (
+              <>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="srvPriority">优先级</Label>
+                    <Input
+                      id="srvPriority"
+                      type="number"
+                      placeholder="10"
+                      value={form.priority}
+                      onChange={(e) => setForm((f) => ({ ...f, priority: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="srvWeight">权重</Label>
+                    <Input
+                      id="srvWeight"
+                      type="number"
+                      placeholder="0"
+                      value={form.srvWeight}
+                      onChange={(e) => setForm((f) => ({ ...f, srvWeight: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="srvPort">端口</Label>
+                    <Input
+                      id="srvPort"
+                      type="number"
+                      placeholder="5060"
+                      value={form.srvPort}
+                      onChange={(e) => setForm((f) => ({ ...f, srvPort: e.target.value }))}
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="srvTarget">目标主机</Label>
+                  <Input
+                    id="srvTarget"
+                    placeholder="server.example.com"
+                    value={form.srvTarget}
+                    onChange={(e) => setForm((f) => ({ ...f, srvTarget: e.target.value }))}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    提供服务的主机名。优先级数值小的先被使用；同优先级内按权重分配流量。
+                  </p>
+                </div>
+              </>
+            )}
 
             {form.type === "MX" && (
               <div className="space-y-2">
