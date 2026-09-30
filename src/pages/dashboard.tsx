@@ -63,6 +63,7 @@ import { cn } from "@/lib/utils"
 import { formatBytesShort } from "@/lib/format"
 import { authApi, newapiApi, profileApi, announcementApi, errMsg, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
+import { useT, tStatic } from "@/i18n"
 import type {
   Announcement,
   MeResponse,
@@ -73,15 +74,16 @@ import type {
 const NEWAPI_BASE_URL = "https://api.doulor.cn/v1"
 
 function useCopy() {
+  const { t } = useT()
   const [copied, setCopied] = React.useState<string | null>(null)
   const copy = async (text: string, label: string) => {
     try {
       await navigator.clipboard.writeText(text)
       setCopied(label)
-      toast.success(`${label} 已复制`)
+      toast.success(t("dash.copy.copied", { label }))
       setTimeout(() => setCopied(null), 1500)
     } catch {
-      toast.error("复制失败，请手动复制")
+      toast.error(t("dash.copy.failed"))
     }
   }
   return { copied, copy }
@@ -89,6 +91,7 @@ function useCopy() {
 
 /** AI 中转站详情卡：额度 + Base URL + Key 列表 */
 function AiCard() {
+  const { t } = useT()
   const [status, setStatus] = React.useState<NewApiStatus | null>(null)
   const [loading, setLoading] = React.useState(true)
   const { copied, copy } = useCopy()
@@ -104,7 +107,7 @@ function AiCard() {
         if (err instanceof HttpError && err.code === "FEATURE_NOT_PERMITTED") {
           return
         }
-        toast.error(errMsg(err, "AI 服务状态加载失败"))
+        toast.error(errMsg(err, t("dash.err.aiStatus")))
       })
       .finally(() => !cancelled && setLoading(false))
     return () => {
@@ -122,15 +125,15 @@ function AiCard() {
         <div className="space-y-1">
           <CardTitle className="flex items-center gap-2 text-base">
             <Sparkles className="h-4 w-4 text-muted-foreground" />
-            AI 中转站
+            {t("dash.ai.card")}
           </CardTitle>
           <CardDescription>
-            {loading ? "加载中…" : acc ? "额度与用量" : "未绑定"}
+            {loading ? t("common.loading") : acc ? t("dash.ai.bound") : t("dash.ai.unbound")}
           </CardDescription>
         </div>
         <Button variant="ghost" size="sm" asChild>
           <Link to="/dashboard/ai">
-            管理
+            {t("dash.manage")}
             <ArrowRight className="h-4 w-4" />
           </Link>
         </Button>
@@ -139,34 +142,34 @@ function AiCard() {
         <DataFade loading={loading} skeleton={<Skeleton className="h-20 w-full" />}>
         {!acc ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
-            尚未绑定 AI 中转站，前往开通
+            {t("dash.ai.notBound")}
           </p>
         ) : (
           <>
             <div className="grid grid-cols-3 gap-2 rounded-md border p-3 text-center">
               <div>
-                <p className="text-xs text-muted-foreground">剩余</p>
+                <p className="text-xs text-muted-foreground">{t("dash.remaining")}</p>
                 <p className="text-sm font-semibold">
                   {symbol}
                   {remaining.toFixed(4)}
                 </p>
               </div>
               <div>
-                <p className="text-xs text-muted-foreground">已用</p>
+                <p className="text-xs text-muted-foreground">{t("dash.used")}</p>
                 <p className="text-sm font-semibold">
                   {symbol}
                   {(acc.usedUsd ?? 0).toFixed(4)}
                 </p>
               </div>
               <div>
-                <p className="text-xs text-muted-foreground">请求</p>
+                <p className="text-xs text-muted-foreground">{t("dash.requests")}</p>
                 <p className="text-sm font-semibold">{acc.requestCount ?? 0}</p>
               </div>
             </div>
             {status?.subscription ? (
               <div className="rounded-md border p-3">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-muted-foreground">免费订阅 · 今日剩余</span>
+                  <span className="text-muted-foreground">{t("dash.sub.freeToday")}</span>
                   <span className="font-medium">
                     {symbol}
                     {(
@@ -196,14 +199,14 @@ function AiCard() {
               </div>
             ) : (
               <div className="rounded-md border p-3 text-xs text-muted-foreground">
-                尚未领取免费订阅，领取后每天自动发放额度。
+                {t("dash.sub.notClaimed")}
                 <Button
                   variant="link"
                   size="sm"
                   className="h-auto p-0"
                   asChild
                 >
-                  <Link to="/dashboard/ai">去领取</Link>
+                  <Link to="/dashboard/ai">{t("dash.sub.claim")}</Link>
                 </Button>
               </div>
             )}
@@ -215,7 +218,7 @@ function AiCard() {
                 size="icon"
                 className="h-6 w-6"
                 onClick={() => void copy(NEWAPI_BASE_URL, "Base URL")}
-                aria-label="复制 Base URL"
+                aria-label={t("dash.ai.copyBaseUrl")}
               >
                 {copied === "Base URL" ? (
                   <Check className="h-3.5 w-3.5" />
@@ -225,7 +228,7 @@ function AiCard() {
               </Button>
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
-              <Badge variant="secondary">{status?.models.length ?? 0} 模型</Badge>
+              <Badge variant="secondary">{t("dash.ai.models", { n: status?.models.length ?? 0 })}</Badge>
               {status?.accountGroup && (
                 <Badge variant="outline">{status.accountGroup}</Badge>
               )}
@@ -239,6 +242,7 @@ function AiCard() {
 
 /** 名片预览卡：头像 + 昵称 + 签名 + 查看按钮 */
 function ProfileCard({ compact = false }: { compact?: boolean }) {
+  const { t } = useT()
   const [data, setData] = React.useState<ProfileOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
 
@@ -248,7 +252,7 @@ function ProfileCard({ compact = false }: { compact?: boolean }) {
       .get()
       .then((res) => !cancelled && setData(res))
       .catch((err) => {
-        if (!cancelled) toast.error(errMsg(err, "个人名片加载失败"))
+        if (!cancelled) toast.error(errMsg(err, t("dash.err.profile")))
       })
       .finally(() => !cancelled && setLoading(false))
     return () => {
@@ -265,16 +269,16 @@ function ProfileCard({ compact = false }: { compact?: boolean }) {
         <div className="space-y-1">
           <CardTitle className="flex items-center gap-2 text-base">
             <Contact className="h-4 w-4 text-muted-foreground" />
-            个人名片
+            {t("dash.profile.card")}
           </CardTitle>
           <CardDescription>
-            {loading ? "加载中…" : p ? "你的对外主页" : "未开通"}
+            {loading ? t("common.loading") : p ? t("dash.profile.subtitle") : t("dash.notOpened")}
           </CardDescription>
         </div>
         {p && (
           <Button variant="ghost" size="sm" asChild>
             <a href={publicUrl} target="_blank" rel="noopener noreferrer">
-              查看
+              {t("dash.view")}
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
           </Button>
@@ -285,10 +289,10 @@ function ProfileCard({ compact = false }: { compact?: boolean }) {
         {!p ? (
           <div className="space-y-3">
             <p className="py-2 text-center text-sm text-muted-foreground">
-              还没开通个人名片
+              {t("dash.profile.empty")}
             </p>
             <Button asChild size="sm" variant="outline" className="w-full">
-              <Link to="/dashboard/profile">前往开通</Link>
+              <Link to="/dashboard/profile">{t("dash.profile.open")}</Link>
             </Button>
           </div>
         ) : (
@@ -300,18 +304,18 @@ function ProfileCard({ compact = false }: { compact?: boolean }) {
             />
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">
-                {p.displayName ?? "未设置昵称"}
+                {p.displayName ?? t("dash.profile.noNickname")}
               </p>
               <p className="truncate text-xs text-muted-foreground">
-                {p.bio || "未设置签名"}
+                {p.bio || t("dash.profile.noBio")}
               </p>
             </div>
             <Button
               variant="ghost"
               size="icon"
               className="h-7 w-7"
-              onClick={() => void navigator.clipboard.writeText(publicUrl).then(() => toast.success("名片链接已复制"))}
-              aria-label="复制名片链接"
+              onClick={() => void navigator.clipboard.writeText(publicUrl).then(() => toast.success(t("dash.profile.linkCopied")))}
+              aria-label={t("dash.profile.copyLink")}
             >
               <Copy className="h-3.5 w-3.5" />
             </Button>
@@ -332,6 +336,7 @@ function RecentMailCard({
   loading: boolean
   compact?: boolean
 }) {
+  const { t } = useT()
   const unread = data?.stats?.unread ?? 0
   const messages = data?.recentMessages ?? []
   const shown = compact ? messages.slice(0, 3) : messages
@@ -341,20 +346,20 @@ function RecentMailCard({
         <div className="space-y-1">
           <CardTitle className="flex items-center gap-2 text-base">
             <Mail className="h-4 w-4 text-muted-foreground" />
-            最近邮件
+            {t("dash.mail.card")}
           </CardTitle>
-          <CardDescription>收件箱动态</CardDescription>
+          <CardDescription>{t("dash.mail.desc")}</CardDescription>
         </div>
         <div className="flex items-center gap-2">
           {unread > 0 && (
             <Badge variant="success" className="gap-1">
               <Inbox className="h-3 w-3" />
-              {unread} 未读
+              {t("dash.mail.unread", { n: unread })}
             </Badge>
           )}
           <Button variant="ghost" size="sm" asChild>
             <Link to="/dashboard/email">
-              查看全部
+              {t("dash.mail.viewAll")}
               <ArrowRight className="h-4 w-4" />
             </Link>
           </Button>
@@ -378,7 +383,7 @@ function RecentMailCard({
                   {!m.read && (
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-foreground" />
                   )}
-                  <span className="truncate">{m.subject || "无主题"}</span>
+                  <span className="truncate">{m.subject || t("dash.mail.noSubject")}</span>
                 </div>
                 <span className="ml-2 shrink-0 text-xs text-muted-foreground">
                   {new Date(m.receivedAt).toLocaleString("zh-CN", {
@@ -393,7 +398,7 @@ function RecentMailCard({
           </div>
         ) : (
           <p className="py-6 text-center text-sm text-muted-foreground">
-            还没有收到邮件
+            {t("dash.mail.empty")}
           </p>
         )}</DataFade>
       </CardContent>
@@ -403,6 +408,7 @@ function RecentMailCard({
 
 /** 网盘用量卡：进度条 + 最近文件 */
 function StorageCard({ data, loading }: { data: MeResponse | null; loading: boolean }) {
+  const { t } = useT()
   const { copied, copy } = useCopy()
   const used = data?.stats?.storageUsedBytes ?? 0
   const quota = data?.stats?.storageQuotaBytes ?? 0
@@ -418,15 +424,15 @@ function StorageCard({ data, loading }: { data: MeResponse | null; loading: bool
         <div className="space-y-1">
           <CardTitle className="flex items-center gap-2 text-base">
             <HardDrive className="h-4 w-4 text-muted-foreground" />
-            网盘
+            {t("dash.storage.card")}
           </CardTitle>
           <CardDescription>
-            {loading ? "加载中…" : enabled ? "用量与最近文件" : "未开通"}
+            {loading ? t("common.loading") : enabled ? t("dash.storage.subtitle") : t("dash.notOpened")}
           </CardDescription>
         </div>
         <Button variant="ghost" size="sm" asChild>
           <Link to="/dashboard/storage">
-            管理
+            {t("dash.manage")}
             <ArrowRight className="h-4 w-4" />
           </Link>
         </Button>
@@ -435,7 +441,7 @@ function StorageCard({ data, loading }: { data: MeResponse | null; loading: bool
         <DataFade loading={loading} skeleton={<Skeleton className="h-20 w-full" />}>
         {!enabled ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
-            网盘未开通，前往管理页开通
+            {t("dash.storage.notOpened")}
           </p>
         ) : (
           <>
@@ -443,7 +449,7 @@ function StorageCard({ data, loading }: { data: MeResponse | null; loading: bool
               <div className="flex items-center justify-between text-sm">
                 <span className="font-medium">{formatBytesShort(used)}</span>
                 <span className="text-muted-foreground">
-                  / {unlimited ? "不限（管理员）" : formatBytesShort(quota)}
+                  / {unlimited ? t("dash.storage.unlimited") : formatBytesShort(quota)}
                 </span>
               </div>
               {!unlimited && (
@@ -473,10 +479,10 @@ function StorageCard({ data, loading }: { data: MeResponse | null; loading: bool
                           variant="ghost"
                           size="icon"
                           className="h-6 w-6"
-                          onClick={() => void copy(dlUrl, "直链")}
-                          aria-label="复制直链"
+                          onClick={() => void copy(dlUrl, t("dash.copy.label.direct"))}
+                          aria-label={t("dash.storage.copyLink")}
                         >
-                          {copied === "直链" ? (
+                          {copied === t("dash.copy.label.direct") ? (
                             <Check className="h-3 w-3" />
                           ) : (
                             <Copy className="h-3 w-3" />
@@ -504,6 +510,7 @@ function StorageCard({ data, loading }: { data: MeResponse | null; loading: bool
  * localStorage 键：doulor:ann-seen:<id>（已看/已屏蔽）
  */
 function AnnouncementPopup() {
+  const { t } = useT()
   const [popup, setPopup] = React.useState<Announcement | null>(null)
 
   React.useEffect(() => {
@@ -556,10 +563,10 @@ function AnnouncementPopup() {
               onClick={() => close(true)}
               className="text-muted-foreground"
             >
-              不再显示
+              {t("dash.dialog.hideForever")}
             </Button>
           )}
-          <Button onClick={() => close(false)}>知道了</Button>
+          <Button onClick={() => close(false)}>{t("dash.dialog.gotIt")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -568,6 +575,7 @@ function AnnouncementPopup() {
 
 /** 网站动态卡：公告列表 */
 function AnnouncementsCard() {
+  const { t } = useT()
   const [items, setItems] = React.useState<Announcement[]>([])
   const [loading, setLoading] = React.useState(true)
 
@@ -577,7 +585,7 @@ function AnnouncementsCard() {
       .list()
       .then((res) => !cancelled && setItems(res.announcements))
       .catch((err) => {
-        if (!cancelled) toast.error(errMsg(err, "公告加载失败"))
+        if (!cancelled) toast.error(errMsg(err, t("dash.err.announcements")))
       })
       .finally(() => !cancelled && setLoading(false))
     return () => {
@@ -586,12 +594,12 @@ function AnnouncementsCard() {
   }, [])
 
   const categoryLabel: Record<string, string> = {
-    general: "公告",
-    frp: "内网穿透",
-    ai: "AI 中转站",
-    proxy: "代理节点",
-    storage: "网盘",
-    profile: "名片",
+    general: t("dash.cat.general"),
+    frp: t("dash.cat.frp"),
+    ai: t("dash.cat.ai"),
+    proxy: t("dash.cat.proxy"),
+    storage: t("dash.cat.storage"),
+    profile: t("dash.cat.profile"),
   }
 
   return (
@@ -600,9 +608,9 @@ function AnnouncementsCard() {
         <div className="space-y-1">
           <CardTitle className="flex items-center gap-2 text-base">
             <Megaphone className="h-4 w-4 text-muted-foreground" />
-            网站动态
+            {t("dash.news.card")}
           </CardTitle>
-          <CardDescription>最近更新与公告</CardDescription>
+          <CardDescription>{t("dash.news.desc")}</CardDescription>
         </div>
       </CardHeader>
       <CardContent>
@@ -612,14 +620,14 @@ function AnnouncementsCard() {
           </div>}>
         {items.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">
-            暂无动态
+            {t("dash.news.empty")}
           </p>
         ) : (
           <div className="space-y-3">
             {items.map((a) => (
               <div key={a.id} className="space-y-1">
                 <div className="flex items-center gap-2">
-                  {a.pinned && <Badge variant="success">置顶</Badge>}
+                  {a.pinned && <Badge variant="success">{t("dash.news.pinned")}</Badge>}
                   <Badge variant="secondary">{categoryLabel[a.category] ?? a.category}</Badge>
                   <span className="ml-auto text-xs text-muted-foreground">
                     {new Date(a.createdAt).toLocaleDateString("zh-CN")}
@@ -640,12 +648,13 @@ function AnnouncementsCard() {
 
 /** 资源快览徽章行：紧凑横排几个核心数字，点击跳转，既是概览也是导航 */
 function ResourceBadges({ data, loading }: { data: MeResponse | null; loading: boolean }) {
+  const { t } = useT()
   const stats = data?.stats
   const items = [
-    { label: "子域名", value: stats?.subdomains ?? 0, icon: Globe, to: "/dashboard/domains" },
-    { label: "未读", value: stats?.unread ?? 0, icon: Mail, to: "/dashboard/email" },
+    { label: t("dash.stat.subdomains"), value: stats?.subdomains ?? 0, icon: Globe, to: "/dashboard/domains" },
+    { label: t("dash.stat.unread"), value: stats?.unread ?? 0, icon: Mail, to: "/dashboard/email" },
     { label: "DNS", value: stats?.dnsRecords ?? 0, icon: Network, to: "/dashboard/domains" },
-    { label: "邮箱", value: stats?.mailboxes ?? 0, icon: Inbox, to: "/dashboard/email" },
+    { label: t("dash.stat.mailboxes"), value: stats?.mailboxes ?? 0, icon: Inbox, to: "/dashboard/email" },
   ]
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -678,17 +687,18 @@ function ResourceBadges({ data, loading }: { data: MeResponse | null; loading: b
 
 /** 快捷操作入口：常用动作直达 */
 function QuickActions() {
+  const { t } = useT()
   const actions = [
-    { label: "发邮件", icon: Mail, to: "/dashboard/email" },
-    { label: "传文件", icon: Upload, to: "/dashboard/storage" },
-    { label: "建子域名", icon: Plus, to: "/dashboard/domains" },
-    { label: "充额度", icon: Zap, to: "/dashboard/ai" },
+    { label: t("dash.quick.mail"), icon: Mail, to: "/dashboard/email" },
+    { label: t("dash.quick.upload"), icon: Upload, to: "/dashboard/storage" },
+    { label: t("dash.quick.domain"), icon: Plus, to: "/dashboard/domains" },
+    { label: t("dash.quick.topup"), icon: Zap, to: "/dashboard/ai" },
   ]
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">快捷操作</CardTitle>
-        <CardDescription>常用动作直达</CardDescription>
+        <CardTitle className="text-base">{t("dash.quick.title")}</CardTitle>
+        <CardDescription>{t("dash.quick.desc")}</CardDescription>
       </CardHeader>
       <CardContent>
         <div className="grid grid-cols-2 gap-2">
@@ -708,6 +718,7 @@ function QuickActions() {
 
 /** 最近活动：audit_logs 的最近操作记录 */
 function RecentActivityCard({ data, loading }: { data: MeResponse | null; loading: boolean }) {
+  const { t } = useT()
   const items = data?.recentActivity ?? []
   return (
     <Card>
@@ -715,9 +726,9 @@ function RecentActivityCard({ data, loading }: { data: MeResponse | null; loadin
         <div className="space-y-1">
           <CardTitle className="flex items-center gap-2 text-base">
             <History className="h-4 w-4 text-muted-foreground" />
-            最近活动
+            {t("dash.activity.card")}
           </CardTitle>
-          <CardDescription>你的操作记录</CardDescription>
+          <CardDescription>{t("dash.activity.desc")}</CardDescription>
         </div>
       </CardHeader>
       <CardContent>
@@ -726,7 +737,7 @@ function RecentActivityCard({ data, loading }: { data: MeResponse | null; loadin
             <Skeleton className="h-8 w-full" />
           </div>}>
         {items.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">暂无活动记录</p>
+          <p className="py-6 text-center text-sm text-muted-foreground">{t("dash.activity.empty")}</p>
         ) : (
           <div className="space-y-1">
             {items.map((a) => (
@@ -768,14 +779,27 @@ const CARD_IDS = [
 ] as const
 type CardId = (typeof CARD_IDS)[number]
 
-const CARD_LABELS: Record<CardId, string> = {
-  mail: "最近邮件",
-  storage: "网盘",
-  activity: "最近活动",
-  ai: "AI 中转站",
-  profile: "个人名片",
-  announcements: "网站动态",
-  quick: "快捷操作",
+/**
+ * 卡片名。必须是**函数**而不是常量映射：tStatic 在「调用时」读当前语言，
+ * 写成模块级常量会在模块加载时被冻结成初始语言，切语言后不跟着变。
+ */
+function cardLabel(id: CardId): string {
+  switch (id) {
+    case "mail":
+      return tStatic("dash.mail.card")
+    case "storage":
+      return tStatic("dash.storage.card")
+    case "activity":
+      return tStatic("dash.activity.card")
+    case "ai":
+      return tStatic("dash.ai.card")
+    case "profile":
+      return tStatic("dash.profile.card")
+    case "announcements":
+      return tStatic("dash.news.card")
+    case "quick":
+      return tStatic("dash.quick.title")
+  }
 }
 
 /** 布局：两列各自的卡片顺序 */
@@ -857,7 +881,7 @@ function SortableCard({
       {editing && !isDragging && (
         <div className="absolute -top-2 left-3 z-10 flex items-center gap-1 rounded-full border bg-background px-2 py-0.5 text-xs shadow-sm">
           <GripVertical className="h-3 w-3 text-muted-foreground" />
-          {CARD_LABELS[id]}
+          {cardLabel(id)}
         </div>
       )}
       <div
@@ -885,6 +909,7 @@ function SortableColumn({
   editing: boolean
   render: (id: CardId) => React.ReactNode
 }) {
+  const { t } = useT()
   const { setNodeRef, isOver } = useDroppable({
     id: `column:${col}`,
     disabled: !editing,
@@ -919,7 +944,7 @@ function SortableColumn({
           )}
         >
           {ids.length === 0 && (
-            <span className="mx-auto text-xs text-muted-foreground">空列 · 把卡片拖到这里</span>
+            <span className="mx-auto text-xs text-muted-foreground">{t("dash.layout.emptyCol")}</span>
           )}
         </div>
       )}
@@ -974,6 +999,7 @@ function reorderLayout(
 }
 
 export default function DashboardPage() {
+  const { t } = useT()
   const { user } = useAuth()
   const [data, setData] = React.useState<MeResponse | null>(null)
   const [loading, setLoading] = React.useState(true)
@@ -994,7 +1020,7 @@ export default function DashboardPage() {
       .me()
       .then((res) => !cancelled && setData(res))
       .catch((err) => {
-        if (!cancelled) toast.error(errMsg(err, "账号信息加载失败"))
+        if (!cancelled) toast.error(errMsg(err, t("dash.err.me")))
       })
       .finally(() => !cancelled && setLoading(false))
     return () => {
@@ -1062,7 +1088,7 @@ export default function DashboardPage() {
     <div className="space-y-6">
       <AnnouncementPopup />
       <PageHeader
-        title={`欢迎回来，${user?.username ?? ""}`}
+        title={t("dash.welcome", { name: user?.username ?? "" })}
         description={`${user?.namespace}.doulor.cn`}
         actions={
           <div className="flex items-center gap-2">
@@ -1072,11 +1098,11 @@ export default function DashboardPage() {
                 size="sm"
                 onClick={() => {
                   setLayout(DEFAULT_LAYOUT)
-                  toast.success("已恢复默认布局")
+                  toast.success(t("dash.layout.reset"))
                 }}
               >
                 <RotateCcw className="h-3.5 w-3.5" />
-                重置
+                {t("dash.layout.resetBtn")}
               </Button>
             )}
             <Button
@@ -1085,7 +1111,7 @@ export default function DashboardPage() {
               onClick={() => setEditing((v) => !v)}
             >
               <Pencil className="h-3.5 w-3.5" />
-              {editing ? "完成" : "编辑布局"}
+              {editing ? t("dash.layout.done") : t("dash.layout.edit")}
             </Button>
           </div>
         }
@@ -1096,7 +1122,7 @@ export default function DashboardPage() {
 
       {editing && (
         <p className="rounded-md border border-dashed bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
-          拖动卡片可调整位置与所在列，其余卡片会实时让位；松手即保存（记录在本机）。
+          {t("dash.layout.hint")}
         </p>
       )}
 

@@ -10,6 +10,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
+import { useT } from "@/i18n"
 
 /**
  * 头像裁剪器：把任意比例的原图裁成正方形，避免非方形头像被 object-cover 拉伸变形。
@@ -45,6 +46,7 @@ export function AvatarCropper({
   onCancel: () => void
   onConfirm: (result: AvatarCropResult) => void
 }) {
+  const { t } = useT()
   const canvasRef = React.useRef<HTMLCanvasElement>(null)
   const imgRef = React.useRef<HTMLImageElement | null>(null)
   const [natural, setNatural] = React.useState<{ w: number; h: number } | null>(null)
@@ -172,13 +174,13 @@ export function AvatarCropper({
       out.width = Math.round(ss)
       out.height = Math.round(ss)
       const octx = out.getContext("2d")
-      if (!octx) throw new Error("canvas 不可用")
+      if (!octx) throw new Error("canvas unavailable")
       octx.drawImage(imgRef.current, sx, sy, ss, ss, 0, 0, out.width, out.height)
 
       // GIF 不能可靠编码，退化成 png
       const mime = file.type === "image/gif" ? "image/png" : file.type
       const blob = await new Promise<Blob>((resolve, reject) => {
-        out.toBlob((b) => (b ? resolve(b) : reject(new Error("裁剪失败"))), mime, 0.92)
+        out.toBlob((b) => (b ? resolve(b) : reject(new Error("crop failed"))), mime, 0.92)
       })
       onConfirm({ blob, type: mime })
     } catch (err) {
@@ -192,16 +194,14 @@ export function AvatarCropper({
     <Dialog open onOpenChange={(o) => !o && onCancel()}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>调整头像</DialogTitle>
-          <DialogDescription>
-            拖动方框选择要保留的区域，头像会裁成正方形。
-          </DialogDescription>
+          <DialogTitle>{t("crop.title")}</DialogTitle>
+          <DialogDescription>{t("crop.desc")}</DialogDescription>
         </DialogHeader>
 
         <div className="flex flex-col items-center gap-3">
           {!state || !natural ? (
             <div className="flex h-64 w-64 items-center justify-center text-sm text-muted-foreground">
-              加载中…
+              {t("common.loading")}
             </div>
           ) : (
             <canvas
@@ -215,7 +215,7 @@ export function AvatarCropper({
           )}
 
           <div className="flex w-full items-center gap-3">
-            <Label className="shrink-0 text-xs text-muted-foreground">裁剪范围</Label>
+            <Label className="shrink-0 text-xs text-muted-foreground">{t("crop.range")}</Label>
             <Input
               type="range"
               min={40}
@@ -239,10 +239,10 @@ export function AvatarCropper({
 
         <DialogFooter>
           <Button variant="outline" onClick={onCancel} disabled={busy}>
-            取消
+            {t("common.cancel")}
           </Button>
           <Button onClick={doConfirm} disabled={busy || !state}>
-            {busy ? "处理中…" : "确定"}
+            {busy ? t("crop.processing") : t("common.confirm")}
           </Button>
         </DialogFooter>
       </DialogContent>

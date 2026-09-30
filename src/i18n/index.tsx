@@ -45,8 +45,29 @@ interface I18nValue {
 
 const I18nContext = React.createContext<I18nValue | null>(null)
 
+/**
+ * 当前语言的模块级镜像。
+ *
+ * 为什么要它：hooks 只能在组件里用，而有些地方取词发生在
+ * 「class 组件（错误边界）」「模块级工具函数（toast 文案）」里。
+ * Provider 每次渲染都会把它同步成最新语言。
+ */
+let currentLang: Lang = "zh"
+
+/** 取词（非 hook 版本）：给 class 组件与组件外代码用；组件里请优先 useT() */
+export function tStatic(key: string, vars?: Record<string, string | number>): string {
+  const raw = DICTS[currentLang][key] ?? DICTS.zh[key] ?? key
+  if (!vars) return raw
+  return raw.replace(/\{(\w+)\}/g, (m, name) =>
+    vars[name] !== undefined ? String(vars[name]) : m
+  )
+}
+
 export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [lang, setLangState] = React.useState<Lang>(() => detectInitialLang())
+
+  // 让 tStatic 也能拿到当前语言（含首帧：Provider 渲染时写入）
+  currentLang = lang
 
   const setLang = React.useCallback((l: Lang) => {
     setLangState(l)

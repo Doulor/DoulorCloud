@@ -3,6 +3,7 @@ import { AlertTriangle, RotateCw } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { isChunkLoadError, reloadOnceForChunkError } from "@/lib/chunk-error"
+import { tStatic } from "@/i18n"
 
 interface State {
   error: Error | null
@@ -43,18 +44,18 @@ export class ErrorBoundary extends React.Component<
           <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-destructive/10">
             <AlertTriangle className="h-5 w-5 text-destructive" />
           </div>
-          <h1 className="text-base font-semibold">页面出错了</h1>
+          <h1 className="text-base font-semibold">{tStatic("error.title")}</h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
             {isChunkLoadError(error)
-              ? "站点刚更新过版本，已自动尝试刷新但没恢复。再点一次「刷新页面」即可。"
-              : "页面渲染时遇到异常，可以刷新重试。如果反复出现，请把下面的信息反馈给管理员。"}
+              ? tStatic("error.chunkHint")
+              : tStatic("error.genericHint")}
           </p>
           <pre className="mt-3 max-h-32 overflow-auto rounded-lg bg-muted/50 p-2.5 text-left text-xs text-muted-foreground">
             {error.message || String(error)}
           </pre>
           <div className="mt-4 flex justify-center gap-2">
             <Button size="sm" onClick={() => window.location.reload()}>
-              <RotateCw className="h-4 w-4" /> 刷新页面
+              <RotateCw className="h-4 w-4" /> {tStatic("error.reload")}
             </Button>
             <Button
               size="sm"
@@ -64,7 +65,7 @@ export class ErrorBoundary extends React.Component<
                 window.location.href = "/"
               }}
             >
-              回到首页
+              {tStatic("error.backHome")}
             </Button>
           </div>
         </div>

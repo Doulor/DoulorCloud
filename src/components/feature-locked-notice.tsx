@@ -3,6 +3,7 @@ import { Lock, HeartHandshake } from "lucide-react"
 
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
+import { useT } from "@/i18n"
 import {
   Card,
   CardContent,
@@ -29,36 +30,36 @@ export function FeatureLockedNotice({
   featureLabel: string
   description?: string
 }) {
+  const { t } = useT()
   return (
     <div>
-      <PageHeader title={featureLabel} description="功能未开放" />
+      <PageHeader title={featureLabel} description={t("locked.subtitle")} />
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <Lock className="h-4 w-4 text-muted-foreground" />
-            该功能暂未向你开放
+            {t("locked.title")}
           </CardTitle>
           <CardDescription>
-            {description ??
-              `你的账号未被授予「${featureLabel}」权限。站长资源有限，该服务暂未全量开放。`}
+            {description ?? t("locked.desc", { feature: featureLabel })}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="rounded-md border bg-muted/40 p-4">
             <p className="flex items-center gap-2 text-sm font-medium">
               <HeartHandshake className="h-4 w-4 text-muted-foreground" />
-              如何解锁
+              {t("locked.howToUnlock")}
             </p>
             <p className="mt-1.5 text-sm text-muted-foreground">
-              如果你愿意贡献自己的资源（例如 AI 渠道、穿透配置、代理订阅），
-              提交捐献申请经管理员审核通过后，该功能会自动为你解锁。
+              {t("locked.unlockHint")}
             </p>
           </div>
           <Button asChild>
-            <Link to="/dashboard/donations">前往捐献</Link>
+            <Link to="/dashboard/donations">{t("locked.goDonate")}</Link>
           </Button>
           <p className="text-xs text-muted-foreground">
-            功能标识：<span className="font-mono">{feature}</span>
+            {t("locked.featureId")}
+            <span className="font-mono">{feature}</span>
           </p>
         </CardContent>
       </Card>
