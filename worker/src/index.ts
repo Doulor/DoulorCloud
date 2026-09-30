@@ -80,29 +80,6 @@ type RouteRule =
 
 function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteRule[] {
   return [
-  // ⚠️ 临时诊断端点（2026-10-01，验证 D1 读复制是否落到副本后**立即删除**）
-  {
-    kind: "exact",
-    path: "/admin/d1-probe",
-    method: "GET",
-    handle: async () => {
-      const { requireUser } = await import("./auth")
-      const me = await requireUser(env, request)
-      if (me.role !== "root" && me.role !== "admin") {
-        throw new ApiError(403, "无权限", "FORBIDDEN")
-      }
-      const db = env.DB as unknown as {
-        withSession?: (m?: string) => { prepare: (q: string) => { run: () => Promise<{ meta: unknown }> } }
-      }
-      const session = typeof db.withSession === "function" ? db.withSession("first-primary") : (env.DB as unknown as { prepare: (q: string) => { run: () => Promise<{ meta: unknown }> } })
-      const first = await session.prepare("SELECT 1 AS x").run()
-      const second = await session
-        .prepare("SELECT value FROM app_settings LIMIT 1")
-        .run()
-      const third = await session.prepare("SELECT id FROM users LIMIT 1").run()
-      return json({ q1: first.meta, q2: second.meta, q3: third.meta })
-    },
-  },
   {
     kind: "exact",
     path: "/register",
