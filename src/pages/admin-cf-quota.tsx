@@ -65,6 +65,7 @@ function urgencyOf(percent: number, kind: "hard" | "included" | null): Urgency {
 
 /** 最近 N 天用量的小柱状图（纯 CSS，按自身最大值归一） */
 function MiniBars({ item }: { item: CfQuotaItem }) {
+  const { t } = useT()
   const history = item.history ?? []
   if (history.length < 2) return null
   const max = Math.max(1, ...history.map((h) => h.value))
@@ -74,7 +75,7 @@ function MiniBars({ item }: { item: CfQuotaItem }) {
   )
   return (
     <div className="mt-2">
-      <div className="flex h-8 items-end gap-[2px]" title={`最近 ${history.length} 天用量`}>
+      <div className="flex h-8 items-end gap-[2px]" title={t("cq.barsTitle", { n: history.length })}>
         {history.map((h) => {
           const pct = (h.value / max) * 100
           return (
@@ -159,12 +160,12 @@ function QuotaRow({ item, paid }: { item: CfQuotaItem; paid: boolean }) {
         <div className="flex items-center justify-between gap-2">
           <span className="text-sm font-medium">{item.label}</span>
           <Badge variant="outline" className="text-xs">
-            读不到
+            {t("bq.unreadable")}
           </Badge>
         </div>
         {item.error && <p className="mt-1 text-xs text-destructive">{item.error}</p>}
         <p className="mt-1 text-[11px] text-muted-foreground">
-          该项读不到不影响其它项。{item.period}
+          {t("cq.errOne", { period: item.period })}
         </p>
       </div>
     )
@@ -209,7 +210,7 @@ function QuotaRow({ item, paid }: { item: CfQuotaItem; paid: boolean }) {
       <p className="mt-1 text-[11px] text-muted-foreground">{item.period}</p>
       {paid && (item.costUsd ?? 0) > 0 && (
         <p className="mt-1 text-[11px] font-medium text-amber-600">
-          本项已超额，估算 {fmtUsd(item.costUsd as number)}
+          {t("cq.overage", { usd: fmtUsd(item.costUsd as number) })}
           {item.overageNote ? `（${item.overageNote}）` : ""}
         </p>
       )}
@@ -222,10 +223,10 @@ function QuotaRow({ item, paid }: { item: CfQuotaItem; paid: boolean }) {
 }
 
 const PLAN_SOURCE_TEXT: Record<CfPlanSource, string> = {
-  manual: "手动指定",
-  subscription: "订阅接口",
-  usage: "用量推断",
-  default: "未能确认，默认按免费版",
+  manual: "cq.source.manual",
+  subscription: "cq.source.subscription",
+  usage: "cq.source.usage",
+  default: "cq.source.default",
 }
 
 /** 套餐选择器 —— 自动判定可能落到「无法确认」，必须给手动纠正的入口 */
@@ -236,28 +237,29 @@ function PlanPicker({
   current: string
   onSaved: (fresh: boolean) => void
 }) {
+  const { t } = useT()
   const [saving, setSaving] = React.useState<string | null>(null)
   const options: { value: string; label: string; hint: string }[] = [
-    { value: "auto", label: "自动判定", hint: "先读订阅接口，读不到再用用量反证" },
-    { value: "free", label: "免费版", hint: "按「每天」的硬上限显示" },
-    { value: "paid", label: "付费版", hint: "按「每月」的套餐含量 + 费用显示" },
+    { value: "auto", label: "cq.plan.auto", hint: "cq.plan.autoHint" },
+    { value: "free", label: "cq.plan.free", hint: "cq.plan.freeHint" },
+    { value: "paid", label: "cq.plan.paid", hint: "cq.plan.paidHint" },
   ]
   const save = async (value: string) => {
     if (value === current) return
     setSaving(value)
     try {
       await adminApi.updateSettings({ cf_plan: value })
-      toast.success("套餐已更新，正在重新读取额度…")
+      toast.success(t("cq.ok.planSaved"))
       onSaved(true)
     } catch (err) {
-      toast.error(errMsg(err, "保存套餐失败"))
+      toast.error(errMsg(err, t("cq.err.savePlan")))
     } finally {
       setSaving(null)
     }
   }
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <span className="text-xs text-muted-foreground">额度口径：</span>
+      <span className="text-xs text-muted-foreground">{t("cq.scope")}</span>
       {options.map((o) => {
         const active = o.value === current
         return (
@@ -284,6 +286,7 @@ function PlanPicker({
 }
 
 export function CfQuotaPanel() {
+  const { t } = useT()
   const [data, setData] = React.useState<CfQuotaOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [refreshing, setRefreshing] = React.useState(false)
@@ -294,7 +297,7 @@ export function CfQuotaPanel() {
     try {
       setData(await adminApi.cloudflareQuota(fresh))
     } catch (err) {
-      toast.error(errMsg(err, "加载 Cloudflare 额度失败"))
+      toast.error(errMsg(err, t("cq.err.load")))
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -308,7 +311,7 @@ export function CfQuotaPanel() {
   if (loading || !data) return <LoadingBlock />
 
   const paid = data.plan === "paid"
-  const planLabel = paid ? "付费版 Workers Paid" : "免费版 Free"
+  const planLabel = paid ? t("cq.labelPaid") : t("cq.labelFree")
 
   return (
     <div className="space-y-6">
@@ -319,15 +322,15 @@ export function CfQuotaPanel() {
               {planLabel}
             </Badge>
             <span className="text-[11px] text-muted-foreground">
-              判定依据：{PLAN_SOURCE_TEXT[data.planSource] ?? data.planSource}
+              {t("cq.basis", { source: t(PLAN_SOURCE_TEXT[data.planSource] ?? data.planSource) })}
             </span>
           </div>
           <p className="mt-1.5 text-xs text-muted-foreground">{data.planNote}</p>
           <p className="mt-1 text-[11px] text-muted-foreground">
-            上限对照官方文档（核对于 2026-09-30）；用量数据来自分析接口，可能有几分钟延迟。
+            {t("cq.docNote")}
           </p>
           <p className="mt-0.5 text-[11px] text-muted-foreground">
-            账号 {data.accountId} · 读取于 {fmtDateTime(data.generatedAt)}
+            {t("cq.accountLine", { id: data.accountId, at: fmtDateTime(data.generatedAt) })}
           </p>
         </div>
         <Button
@@ -337,16 +340,18 @@ export function CfQuotaPanel() {
           disabled={refreshing}
         >
           <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
-          刷新
+          {t("common.refresh")}
         </Button>
       </div>
 
       <div className="rounded-md border p-3">
         <PlanPicker current={data.planSetting} onSaved={(f) => void load(f)} />
         <p className="mt-2 text-[11px] text-muted-foreground">
-          免费版是<span className="font-medium text-foreground">每天</span>的硬上限，撞上就直接中断服务（站点会挂）；
-          付费版是<span className="font-medium text-foreground">每月</span>的套餐含量，超出只按量计费、不会断服。
-          所以两套数字必须选对 —— 选错会误报红色告警，或把真正会中断的上限藏起来。
+          {t("cq.explain.a")}
+          <span className="font-medium text-foreground">{t("cq.explain.day")}</span>
+          {t("cq.explain.b")}
+          <span className="font-medium text-foreground">{t("cq.explain.month")}</span>
+          {t("cq.explain.c")}
         </p>
       </div>
 
@@ -355,15 +360,15 @@ export function CfQuotaPanel() {
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <CircleDollarSign className="h-4 w-4" />
-              本月估算费用
+              {t("cq.cost.title")}
               <span className="font-mono text-lg text-primary">
                 {fmtUsd(data.estimatedCostUsd)}
               </span>
             </CardTitle>
             <CardDescription className="text-xs">
-              含 $5 月度订阅底价 + 各项超额。这是<span className="font-medium text-foreground">估算</span>：
-              Cloudflare 对用量按计费单位向上取整，且 CPU 时间、日志写入等未采集的计量项不在这里，
-              真实账单以 Cloudflare 后台为准。
+              {t("cq.cost.desc.a")}
+              <span className="font-medium text-foreground">{t("cq.cost.desc.est")}</span>
+              {t("cq.cost.desc.b")}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-1">
@@ -388,11 +393,11 @@ export function CfQuotaPanel() {
       {data.highlights.length > 0 && (
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">额度占用总览</CardTitle>
+            <CardTitle className="text-base">{t("cq.overview")}</CardTitle>
             <CardDescription className="text-xs">
               {paid
-                ? "按「本月至今 / 套餐含量」计算，占比越高说明越快进入计费区（付费版超量不会中断服务）。"
-                : "按「今天 / 每日上限」计算，占比越高越快撞到硬上限（撞上后服务直接失败）。"}
+                ? t("cq.overviewHint.paid")
+                : t("cq.overviewHint.free")}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -437,11 +442,11 @@ export function CfQuotaPanel() {
         <Wand2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
         <div className="space-y-1">
           <p>
-            <span className="font-medium text-foreground">降低用量的三处抓手（按本项目的实际影响排序）：</span>
+            <span className="font-medium text-foreground">{t("cq.tips.title")}</span>
           </p>
-          <p>1. 前端轮询频率 —— 聊天室/收件箱的定时刷新是请求数的最大来源，降频比优化接口划算得多。</p>
-          <p>2. D1 行读 —— 加索引、避免全表扫描；漏了索引的查询会按**扫描行数**计费，不是返回行数。</p>
-          <p>3. R2 Class B —— 图片/附件的读取次数；能走 CDN 缓存就别直连桶。</p>
+          <p>{t("cq.tips.1")}</p>
+          <p>{t("cq.tips.2")}</p>
+          <p>{t("cq.tips.3")}</p>
         </div>
       </div>
     </div>
