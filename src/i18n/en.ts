@@ -2224,4 +2224,19 @@ export const en: Record<MessageKey, string> = {
   "nf.desc": "The page you're looking for may have been moved or deleted.",
   "nf.backHome": "Back to home",
 
+  // —— 顶栏 / 零散组件 ——
+  "mb.title": "Messages",
+  "mb.aria": "Messages ({n} unread)",
+  "pb.title": "My points",
+  "pb.aria": "My points: {n}",
+  "stt.aria": "Back to top",
+  "logo.tagline": "A community steadily marching toward communism",
+  "ts2.localNote": "This tool runs entirely in your browser — nothing is uploaded to the server.",
+
+  // —— 法律文本标题 ——
+  "legal.termsTitle": "Doulor Cloud Terms of Service",
+  "legal.privacyTitle": "Doulor Cloud Privacy Policy",
+  "legal.updatedAt": "Updated 2026-09-27 · Effective 2026-09-27",
+  "legal.privacyUpdatedAt": "Updated 2026-09-27",
+
 }

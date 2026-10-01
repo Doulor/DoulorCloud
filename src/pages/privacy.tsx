@@ -1,11 +1,13 @@
 import { PrivacyContent } from "@/components/legal-content"
+import { useT } from "@/i18n"
 
 export default function PrivacyPage() {
+  const { t } = useT()
   return (
     <div className="mx-auto w-full max-w-3xl px-4 py-10 lg:px-8">
-      <h1 className="text-xl font-semibold">Doulor Cloud 隐私政策</h1>
+      <h1 className="text-xl font-semibold">{t("legal.privacyTitle")}</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        更新日期：2026 年 9 月 27 日
+        {t("legal.privacyUpdatedAt")}
       </p>
       <div className="mt-6">
         <PrivacyContent />

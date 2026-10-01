@@ -5,6 +5,7 @@ import { Coins } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAuth } from "@/hooks/use-auth"
 import { pointsApi } from "@/services/api"
+import { useT } from "@/i18n"
 
 /**
  * 积分变动广播：积分页兑换成功后调用，顶栏徽章据此立即刷新。
@@ -23,6 +24,7 @@ export function notifyPointsChanged() {
 
 /** 顶栏积分余额徽章：显示当前积分，点击进入积分页。未登录不渲染。 */
 export function PointsBadge() {
+  const { t } = useT()
   const { user } = useAuth()
   const navigate = useNavigate()
   const [balance, setBalance] = React.useState<number | null>(null)
@@ -61,8 +63,8 @@ export function PointsBadge() {
       size="sm"
       className="h-8 gap-1.5 px-2"
       onClick={() => navigate("/dashboard/points")}
-      aria-label={`我的积分：${balance}`}
-      title="我的积分"
+      aria-label={t("pb.aria", { n: balance })}
+      title={t("pb.title")}
     >
       <Coins className="h-4 w-4 text-amber-500" />
       <span className="text-sm font-medium tabular-nums">{balance}</span>

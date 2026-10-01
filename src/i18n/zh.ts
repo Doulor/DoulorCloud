@@ -2137,6 +2137,21 @@ export const zh = {
   "nf.title": "页面不存在",
   "nf.desc": "你访问的页面可能已被移动或删除。",
   "nf.backHome": "返回首页",
+
+  // —— 顶栏 / 零散组件 ——
+  "mb.title": "消息",
+  "mb.aria": "消息（{n} 条未读）",
+  "pb.title": "我的积分",
+  "pb.aria": "我的积分：{n}",
+  "stt.aria": "回到顶部",
+  "logo.tagline": "一个不断向共产主义靠拢的社区",
+  "ts2.localNote": "本工具在你的浏览器本地运行，文件不会上传到服务器",
+
+  // —— 法律文本标题 ——
+  "legal.termsTitle": "Doulor Cloud 服务条款",
+  "legal.privacyTitle": "Doulor Cloud 隐私政策",
+  "legal.updatedAt": "更新日期：2026 年 9 月 27 日 · 生效日期：2026 年 9 月 27 日",
+  "legal.privacyUpdatedAt": "更新日期：2026 年 9 月 27 日",
 } as const
 
 export type MessageKey = keyof typeof zh
