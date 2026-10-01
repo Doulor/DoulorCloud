@@ -129,6 +129,7 @@ function toRows(text: string): CharRow[] {
 }
 
 export default function UnicodeConvertTool() {
+  const { t } = useT()
   const [mode, setMode] = React.useState<Mode>("escape")
   const [input, setInput] = React.useState("")
   const [output, setOutput] = React.useState("")
