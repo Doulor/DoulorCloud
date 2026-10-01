@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { canvasToBlob, createCanvas, downloadBlob, loadImageFile } from "@/lib/toolbox/utils"
+import { useT } from "@/i18n"
 
 interface Item {
   id: string
@@ -25,6 +26,7 @@ interface Item {
 type Dir = "v" | "h"
 
 export default function ImageStitchTool() {
+  const { t } = useT()
   const [items, setItems] = React.useState<Item[]>([])
   const [dir, setDir] = React.useState<Dir>("v")
   const [gap, setGap] = React.useState(0)
@@ -50,7 +52,7 @@ export default function ImageStitchTool() {
       setItems((prev) => [...prev, ...loaded])
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "图片打开失败")
+      setError(e instanceof Error ? e.message : t("is.err.open"))
     }
   }
 
@@ -171,9 +173,9 @@ export default function ImageStitchTool() {
         format === "png" ? "image/png" : "image/jpeg",
         format === "jpeg" ? 0.92 : undefined
       )
-      downloadBlob(blob, `拼接长图-${Date.now()}.${format === "png" ? "png" : "jpg"}`)
+      downloadBlob(blob, t("is.fileName", { ts: Date.now(), ext: format === "png" ? "png" : "jpg" }))
     } catch (e) {
-      setError(e instanceof Error ? e.message : "导出失败")
+      setError(e instanceof Error ? e.message : t("is.err.export"))
     } finally {
       setBusy(false)
     }
@@ -183,18 +185,18 @@ export default function ImageStitchTool() {
 
   return (
     <ToolShell
-      title="长图拼接"
-      description="把多张截图按顺序拼成一张长图，聊天记录、网页截图、发票都能拼。"
+      title={t("toolbox.imageStitch.name")}
+      description={t("is.desc")}
       wide
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <ToolSection title={`图片列表（${items.length}）`}>
+        <ToolSection title={t("is.listTitle", { n: items.length })}>
           <FileDrop
             accept="image/*"
             multiple
             onFiles={(f) => void add(f)}
-            label="点击选择图片，可一次选多张"
-            hint="按选择顺序排列，之后还能上下调整"
+            label={t("is.pickLabel")}
+            hint={t("is.pickHint")}
             className="py-6"
           />
 
@@ -217,7 +219,7 @@ export default function ImageStitchTool() {
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7"
-                    aria-label="上移"
+                    aria-label={t("ip.moveUp")}
                     disabled={i === 0}
                     onClick={() => move(i, -1)}
                   >
@@ -227,7 +229,7 @@ export default function ImageStitchTool() {
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7"
-                    aria-label="下移"
+                    aria-label={t("ip.moveDown")}
                     disabled={i === items.length - 1}
                     onClick={() => move(i, 1)}
                   >
@@ -237,7 +239,7 @@ export default function ImageStitchTool() {
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                    aria-label="移除"
+                    aria-label={t("common.delete")}
                     onClick={() => remove(it.id)}
                   >
                     <X className="h-3.5 w-3.5" />
@@ -250,32 +252,32 @@ export default function ImageStitchTool() {
           {preview && (
             <div className="mt-4 space-y-2 border-t pt-4">
               <p className="text-xs text-muted-foreground">
-                预览（已按比例缩小，导出为原始尺寸）
+                {t("is.previewHint")}
               </p>
               <div className="flex justify-center overflow-hidden rounded-lg border bg-muted/30 p-2">
-                <img src={preview} alt="拼接预览" className="h-auto max-h-[520px] w-auto max-w-full" />
+                <img src={preview} alt={t("is.alt.preview")} className="h-auto max-h-[520px] w-auto max-w-full" />
               </div>
             </div>
           )}
         </ToolSection>
 
-        <ToolSection title="拼接设置">
+        <ToolSection title={t("is.section.settings")}>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">方向</Label>
+              <Label className="text-xs text-muted-foreground">{t("is.direction")}</Label>
               <Select value={dir} onValueChange={(v) => setDir(v as Dir)}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="v">纵向拼接（从上到下）</SelectItem>
-                  <SelectItem value="h">横向拼接（从左到右）</SelectItem>
+                  <SelectItem value="v">{t("is.dir.vertical")}</SelectItem>
+                  <SelectItem value="h">{t("is.dir.horizontal")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">间隔 {gap}px</Label>
+              <Label className="text-xs text-muted-foreground">{t("is.gap", { n: gap })}</Label>
               <input
                 type="range"
                 min={0}
@@ -287,7 +289,7 @@ export default function ImageStitchTool() {
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">间隔与留白颜色</Label>
+              <Label className="text-xs text-muted-foreground">{t("is.gapColor")}</Label>
               <Input type="color" value={bg} onChange={(e) => setBg(e.target.value)} className="h-9 p-1" />
             </div>
 
@@ -299,36 +301,36 @@ export default function ImageStitchTool() {
                 className="mt-0.5 h-4 w-4 accent-primary"
               />
               <span>
-                统一尺寸
+                {t("is.unify")}
                 <span className="block text-xs text-muted-foreground">
-                  勾选后所有图对齐同一边，拼出来更整齐；不勾选则按原尺寸居中
+                  {t("is.unifyHint")}
                 </span>
               </span>
             </label>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">输出格式</Label>
+              <Label className="text-xs text-muted-foreground">{t("is.outFormat")}</Label>
               <Select value={format} onValueChange={(v) => setFormat(v as "png" | "jpeg")}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="png">PNG · 无损</SelectItem>
-                  <SelectItem value="jpeg">JPG · 体积小</SelectItem>
+                  <SelectItem value="png">{t("is.fmt.png")}</SelectItem>
+                  <SelectItem value="jpeg">{t("is.fmt.jpeg")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             {lay && (
               <p className="text-xs text-muted-foreground">
-                成品尺寸 {Math.round(lay.W)} × {Math.round(lay.H)}
+                {t("is.resultSize", { w: Math.round(lay.W), h: Math.round(lay.H) })}
               </p>
             )}
             {error && <p className="text-xs text-destructive">{error}</p>}
 
             <Button className="w-full" disabled={items.length === 0 || busy} onClick={() => void download()}>
               <Download className="h-4 w-4" />
-              {busy ? "导出中…" : "下载拼接结果"}
+              {busy ? t("is.exporting") : t("is.download")}
             </Button>
           </div>
         </ToolSection>

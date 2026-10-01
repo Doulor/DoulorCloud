@@ -15,8 +15,10 @@ import {
 } from "@/components/ui/select"
 import { baseName, canvasToBlob, createCanvas, downloadBlob, loadImageFile } from "@/lib/toolbox/utils"
 import { blobToBytes, createZip, type ZipEntry } from "@/lib/toolbox/zip"
+import { useT } from "@/i18n"
 
 export default function ImageGridTool() {
+  const { t } = useT()
   const [file, setFile] = React.useState<File | null>(null)
   const [srcUrl, setSrcUrl] = React.useState<string | null>(null)
   const [rows, setRows] = React.useState(3)
@@ -41,7 +43,7 @@ export default function ImageGridTool() {
       })
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "图片打开失败")
+      setError(e instanceof Error ? e.message : t("ig.err.open"))
     }
   }
 
@@ -52,7 +54,7 @@ export default function ImageGridTool() {
     try {
       const tw = Math.floor(img.naturalWidth / cols)
       const th = Math.floor(img.naturalHeight / rows)
-      if (tw < 1 || th < 1) throw new Error("格子太多，单格尺寸不足 1 像素")
+      if (tw < 1 || th < 1) throw new Error(t("ig.err.tooMany"))
 
       const next: { url: string; name: string; blob: Blob }[] = []
       const stem = baseName(file?.name ?? "image")
@@ -81,7 +83,7 @@ export default function ImageGridTool() {
       })
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "切图失败")
+      setError(e instanceof Error ? e.message : t("ig.err.slice"))
     } finally {
       setBusy(false)
     }
@@ -94,7 +96,7 @@ export default function ImageGridTool() {
       const entries: ZipEntry[] = []
       for (const t of tiles) entries.push({ name: t.name, data: await blobToBytes(t.blob) })
       const zip = createZip(entries)
-      downloadBlob(zip, `${baseName(file?.name ?? "image")}_切图.zip`)
+      downloadBlob(zip, `${baseName(file?.name ?? t("ig.fallbackName"))}${t("ig.zipSuffix")}.zip`)
     } finally {
       setBusy(false)
     }
@@ -110,17 +112,17 @@ export default function ImageGridTool() {
 
   return (
     <ToolShell
-      title="九宫格切图"
-      description="把一张图切成 N × N 小图，发朋友圈、小红书时按顺序发出去就是完整一张。"
+      title={t("toolbox.imageGrid.name")}
+      description={t("ig.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <ToolSection title="原图与切分预览">
+        <ToolSection title={t("ig.section.preview")}>
           {!srcUrl ? (
             <FileDrop accept="image/*" onFiles={(f) => void handleFiles(f)} />
           ) : (
             <div className="space-y-3">
               <div className="relative mx-auto w-full max-w-[420px] overflow-hidden rounded-lg border">
-                <img src={srcUrl} alt="原图" className="block w-full" />
+                <img src={srcUrl} alt={t("ig.alt.original")} className="block w-full" />
                 <div
                   className="pointer-events-none absolute inset-0"
                   style={{
@@ -145,7 +147,7 @@ export default function ImageGridTool() {
                     imgRef.current = null
                   }}
                 >
-                  换一张
+                  {t("ig.replace")}
                 </Button>
               </div>
             </div>
@@ -154,7 +156,7 @@ export default function ImageGridTool() {
           {tiles.length > 0 && (
             <div className="mt-4 space-y-2 border-t pt-4">
               <p className="text-xs text-muted-foreground">
-                切好的 {tiles.length} 张（点单张可单独下载）
+                {t("ig.tilesCount", { n: tiles.length })}
               </p>
               <div
                 className="grid gap-1.5"
@@ -176,11 +178,11 @@ export default function ImageGridTool() {
           )}
         </ToolSection>
 
-        <ToolSection title="切分设置">
+        <ToolSection title={t("ig.section.settings")}>
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">行数</Label>
+                <Label className="text-xs text-muted-foreground">{t("ig.rows")}</Label>
                 <Input
                   type="number"
                   min={1}
@@ -190,7 +192,7 @@ export default function ImageGridTool() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">列数</Label>
+                <Label className="text-xs text-muted-foreground">{t("ig.cols")}</Label>
                 <Input
                   type="number"
                   min={1}
@@ -205,8 +207,8 @@ export default function ImageGridTool() {
               {[
                 { label: "3 × 3", r: 3, c: 3 },
                 { label: "2 × 2", r: 2, c: 2 },
-                { label: "1 × 3 长条", r: 1, c: 3 },
-                { label: "3 × 1 长条", r: 3, c: 1 },
+                { label: t("ig.preset.1x3"), r: 1, c: 3 },
+                { label: t("ig.preset.3x1"), r: 3, c: 1 },
                 { label: "2 × 3", r: 2, c: 3 },
               ].map((p) => (
                 <button
@@ -229,7 +231,7 @@ export default function ImageGridTool() {
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">格子间隔 {gap}px（仅预览提示）</Label>
+              <Label className="text-xs text-muted-foreground">{t("ig.gap", { n: gap })}</Label>
               <input
                 type="range"
                 min={0}
@@ -241,26 +243,26 @@ export default function ImageGridTool() {
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">输出格式</Label>
+              <Label className="text-xs text-muted-foreground">{t("ig.outFormat")}</Label>
               <Select value={format} onValueChange={(v) => setFormat(v as "png" | "jpeg")}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="png">PNG · 无损</SelectItem>
-                  <SelectItem value="jpeg">JPG · 体积小</SelectItem>
+                  <SelectItem value="png">{t("ig.fmt.png")}</SelectItem>
+                  <SelectItem value="jpeg">{t("ig.fmt.jpeg")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             <p className="text-xs text-muted-foreground">
-              原图会按整行整列切分，除不尽的边缘像素会被舍弃，所以先把图片裁成合适的比例效果最好。
+              {t("ig.note")}
             </p>
 
             {error && <p className="text-xs text-destructive">{error}</p>}
 
             <Button className="w-full" disabled={!srcUrl || busy} onClick={() => void generate()}>
-              {busy ? "切分中…" : "开始切分"}
+              {busy ? t("ig.slicing") : t("ig.start")}
             </Button>
             <Button
               variant="outline"
@@ -269,7 +271,7 @@ export default function ImageGridTool() {
               onClick={() => void downloadZip()}
             >
               <Package className="h-4 w-4" />
-              打包下载 ZIP（{tiles.length} 张）
+              {t("ig.zipAll", { n: tiles.length })}
             </Button>
             {tiles.length === 1 && (
               <Button
@@ -278,7 +280,7 @@ export default function ImageGridTool() {
                 onClick={() => downloadBlob(tiles[0].blob, tiles[0].name)}
               >
                 <Download className="h-4 w-4" />
-                下载单张
+                {t("ig.downloadOne")}
               </Button>
             )}
           </div>

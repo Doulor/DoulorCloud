@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { useT } from "@/i18n"
 import {
   baseName,
   canvasToBlob,
@@ -21,15 +22,15 @@ type Anchor =
   | "bl" | "bc" | "br"
 
 const ANCHORS: { id: Anchor; label: string }[] = [
-  { id: "tl", label: "左上" },
-  { id: "tc", label: "上中" },
-  { id: "tr", label: "右上" },
-  { id: "ml", label: "左中" },
-  { id: "mc", label: "居中" },
-  { id: "mr", label: "右中" },
-  { id: "bl", label: "左下" },
-  { id: "bc", label: "下中" },
-  { id: "br", label: "右下" },
+  { id: "tl", label: "wm.pos.tl" },
+  { id: "tc", label: "wm.pos.tc" },
+  { id: "tr", label: "wm.pos.tr" },
+  { id: "ml", label: "wm.pos.ml" },
+  { id: "mc", label: "wm.pos.mc" },
+  { id: "mr", label: "wm.pos.mr" },
+  { id: "bl", label: "wm.pos.bl" },
+  { id: "bc", label: "wm.pos.bc" },
+  { id: "br", label: "wm.pos.br" },
 ]
 
 interface PaintOptions {
@@ -101,10 +102,11 @@ function paint(ctx: CanvasRenderingContext2D, W: number, H: number, o: PaintOpti
 }
 
 export default function ImageWatermarkTool() {
+  const { t } = useT()
   const [file, setFile] = React.useState<File | null>(null)
   const [markName, setMarkName] = React.useState("")
   const [kind, setKind] = React.useState<"text" | "image">("text")
-  const [text, setText] = React.useState("© 你的名字")
+  const [text, setText] = React.useState(t("wm.defaultText"))
   const [fontPct, setFontPct] = React.useState(6)
   const [color, setColor] = React.useState("#ffffff")
   const [opacity, setOpacity] = React.useState(0.55)
@@ -128,7 +130,7 @@ export default function ImageWatermarkTool() {
       setFile(f)
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "图片打开失败")
+      setError(e instanceof Error ? e.message : t("wm.err.open"))
     }
   }
 
@@ -141,7 +143,7 @@ export default function ImageWatermarkTool() {
       setKind("image")
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "水印图片打开失败")
+      setError(e instanceof Error ? e.message : t("wm.err.openMark"))
     }
   }
 
@@ -190,7 +192,7 @@ export default function ImageWatermarkTool() {
       const blob = await canvasToBlob(canvas, "image/png")
       downloadBlob(blob, `${baseName(file?.name ?? "image")}-watermark.png`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "导出失败")
+      setError(e instanceof Error ? e.message : t("wm.err.export"))
     } finally {
       setBusy(false)
     }
@@ -198,11 +200,11 @@ export default function ImageWatermarkTool() {
 
   return (
     <ToolShell
-      title="加水印"
-      description="给图片盖上文字或图片水印，适合发原创作品、防盗图。"
+      title={t("toolbox.imageWatermark.name")}
+      description={t("wm.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_340px]">
-        <ToolSection title="图片">
+        <ToolSection title={t("wm.section.image")}>
           {!file ? (
             <FileDrop accept="image/*" onFiles={(f) => void handleMain(f)} />
           ) : (
@@ -217,43 +219,43 @@ export default function ImageWatermarkTool() {
                     imgRef.current = null
                   }}
                 >
-                  换一张
+                  {t("wm.replace")}
                 </Button>
               </div>
               <div className="flex justify-center overflow-hidden rounded-lg border bg-muted/30 p-2">
                 <canvas ref={previewRef} className="h-auto max-h-[420px] w-auto max-w-full" />
               </div>
               <p className="text-xs text-muted-foreground">
-                预览已按比例缩小，导出的仍是原始尺寸
+                {t("wm.previewHint")}
               </p>
             </div>
           )}
         </ToolSection>
 
-        <ToolSection title="水印设置">
+        <ToolSection title={t("wm.section.settings")}>
           <div className="space-y-4">
             <Tabs value={kind} onValueChange={(v) => setKind(v as "text" | "image")}>
               <TabsList className="w-full">
                 <TabsTrigger value="text" className="flex-1">
-                  文字水印
+                  {t("wm.type.text")}
                 </TabsTrigger>
                 <TabsTrigger value="image" className="flex-1">
-                  图片水印
+                  {t("wm.type.image")}
                 </TabsTrigger>
               </TabsList>
               <TabsContent value="text" className="mt-3">
                 <Input
                   value={text}
                   onChange={(e) => setText(e.target.value)}
-                  placeholder="水印文字"
+                  placeholder={t("wm.textPlaceholder")}
                 />
               </TabsContent>
               <TabsContent value="image" className="mt-3 space-y-2">
                 <FileDrop
                   accept="image/*"
                   onFiles={(f) => void handleMark(f)}
-                  label={markName || "选择水印图片"}
-                  hint="建议用透明底的 PNG"
+                  label={markName || t("wm.pickMark")}
+                  hint={t("wm.pickMarkHint")}
                   className="py-5"
                 />
               </TabsContent>
@@ -262,7 +264,7 @@ export default function ImageWatermarkTool() {
             {kind === "text" && (
               <>
                 <div className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">颜色</Label>
+                  <Label className="text-xs text-muted-foreground">{t("wm.color")}</Label>
                   <Input
                     type="color"
                     value={color}
@@ -271,7 +273,7 @@ export default function ImageWatermarkTool() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">字号 {fontPct}%</Label>
+                  <Label className="text-xs text-muted-foreground">{t("wm.fontSize", { n: fontPct })}</Label>
                   <input
                     type="range"
                     min={2}
@@ -286,7 +288,7 @@ export default function ImageWatermarkTool() {
 
             {kind === "image" && (
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">水印宽度 {markPct}%</Label>
+                <Label className="text-xs text-muted-foreground">{t("wm.markWidth", { n: markPct })}</Label>
                 <input
                   type="range"
                   min={5}
@@ -300,7 +302,7 @@ export default function ImageWatermarkTool() {
 
             <div className="space-y-1.5">
               <Label className="text-xs text-muted-foreground">
-                透明度 {Math.round(opacity * 100)}%
+                {t("wm.opacity", { n: Math.round(opacity * 100) })}
               </Label>
               <input
                 type="range"
@@ -313,7 +315,7 @@ export default function ImageWatermarkTool() {
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">旋转 {rotation}°</Label>
+              <Label className="text-xs text-muted-foreground">{t("wm.rotation", { n: rotation })}</Label>
               <input
                 type="range"
                 min={-90}
@@ -325,7 +327,7 @@ export default function ImageWatermarkTool() {
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">位置</Label>
+              <Label className="text-xs text-muted-foreground">{t("wm.position")}</Label>
               <div className="grid w-fit grid-cols-3 gap-1">
                 {ANCHORS.map((a) => (
                   <button
@@ -354,12 +356,12 @@ export default function ImageWatermarkTool() {
                 onChange={(e) => setTile(e.target.checked)}
                 className="h-4 w-4 accent-primary"
               />
-              平铺整张图（防裁剪盗用）
+              {t("wm.tile")}
             </label>
 
             {tile && (
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">平铺间距 {gapPct}%</Label>
+                <Label className="text-xs text-muted-foreground">{t("wm.tileGap", { n: gapPct })}</Label>
                 <input
                   type="range"
                   min={8}
@@ -375,7 +377,7 @@ export default function ImageWatermarkTool() {
 
             <Button className="w-full" disabled={!file || busy} onClick={() => void download()}>
               <Download className="h-4 w-4" />
-              {busy ? "导出中…" : "下载带水印的图片"}
+              {busy ? t("wm.exporting") : t("wm.download")}
             </Button>
           </div>
         </ToolSection>
