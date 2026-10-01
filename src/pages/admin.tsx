@@ -2708,7 +2708,7 @@ export default function AdminPage() {
   return (
     <div>
       <PageHeader
-        title="管理"
+        title={t("adm.213")}
         description={`已注册用户 ${users.length} 个 · 邀请码 ${invites.length} 个`}
       />
 
@@ -2726,29 +2726,29 @@ export default function AdminPage() {
             </Link>
 
             <nav className="flex flex-col gap-0.5 lg:overflow-y-auto lg:pr-1">
-              <NavItem active={activeTab === "users"} icon={Users} label="用户" onClick={() => handleTabChange("users")} />
-              <NavGroup label="账号与邀请">
-                <NavItem active={activeTab === "invites"} icon={KeyRound} label="邀请码" onClick={() => handleTabChange("invites")} />
-                <NavItem active={activeTab === "inviteQuotas"} icon={Ticket} label="用户邀请码" onClick={() => handleTabChange("inviteQuotas")} />
-                <NavItem active={activeTab === "reserved"} icon={ShieldBan} label="保留名" onClick={() => handleTabChange("reserved")} />
-                <NavItem active={activeTab === "titles"} icon={Medal} label="自定义称号" onClick={() => handleTabChange("titles")} />
+              <NavItem active={activeTab === "users"} icon={Users} label={t("adm.214")} onClick={() => handleTabChange("users")} />
+              <NavGroup label={t("adm.215")}>
+                <NavItem active={activeTab === "invites"} icon={KeyRound} label={t("adm.216")} onClick={() => handleTabChange("invites")} />
+                <NavItem active={activeTab === "inviteQuotas"} icon={Ticket} label={t("adm.217")} onClick={() => handleTabChange("inviteQuotas")} />
+                <NavItem active={activeTab === "reserved"} icon={ShieldBan} label={t("adm.218")} onClick={() => handleTabChange("reserved")} />
+                <NavItem active={activeTab === "titles"} icon={Medal} label={t("adm.219")} onClick={() => handleTabChange("titles")} />
               </NavGroup>
-              <NavGroup label="资源服务">
-                <NavItem active={activeTab === "newapi"} icon={Sparkles} label="中转站" onClick={() => handleTabChange("newapi")} />
+              <NavGroup label={t("adm.220")}>
+                <NavItem active={activeTab === "newapi"} icon={Sparkles} label={t("adm.221")} onClick={() => handleTabChange("newapi")} />
                 {/* 三条免审核捐献通道（wb2api / cli2api / 商汤）合并在一个选项卡里 */}
-                <NavItem active={activeTab === "wb2api"} icon={Unplug} label="捐献通道" onClick={() => handleTabChange("wb2api")} />
-                <NavItem active={activeTab === "r2"} icon={Database} label="R2 存储" onClick={() => handleTabChange("r2")} />
-                <NavItem active={activeTab === "frp"} icon={Network} label="内网穿透" onClick={() => handleTabChange("frp")} />
-                <NavItem active={activeTab === "proxy"} icon={Zap} label="代理节点" onClick={() => handleTabChange("proxy")} />
+                <NavItem active={activeTab === "wb2api"} icon={Unplug} label={t("adm.222")} onClick={() => handleTabChange("wb2api")} />
+                <NavItem active={activeTab === "r2"} icon={Database} label={t("adm.223")} onClick={() => handleTabChange("r2")} />
+                <NavItem active={activeTab === "frp"} icon={Network} label={t("adm.224")} onClick={() => handleTabChange("frp")} />
+                <NavItem active={activeTab === "proxy"} icon={Zap} label={t("adm.225")} onClick={() => handleTabChange("proxy")} />
               </NavGroup>
-              <NavGroup label="内容与运营">
-                <NavItem active={activeTab === "announcements"} icon={Megaphone} label="公告" onClick={() => handleTabChange("announcements")} />
-                <NavItem active={activeTab === "funLinks"} icon={Compass} label="网页分享" onClick={() => handleTabChange("funLinks")} />
+              <NavGroup label={t("adm.226")}>
+                <NavItem active={activeTab === "announcements"} icon={Megaphone} label={t("adm.227")} onClick={() => handleTabChange("announcements")} />
+                <NavItem active={activeTab === "funLinks"} icon={Compass} label={t("adm.228")} onClick={() => handleTabChange("funLinks")} />
                 {/* 角标 = 活动奖励里「自动发放失败、要人工发」的条数（见各活动的「领取名单」） */}
                 <NavItem
                   active={activeTab === "events"}
                   icon={PartyPopper}
-                  label="活动"
+                  label={t("adm.229")}
                   count={attention?.eventClaims}
                   onClick={() => handleTabChange("events")}
                 />
@@ -2756,33 +2756,33 @@ export default function AdminPage() {
                 <NavItem
                   active={activeTab === "points"}
                   icon={Coins}
-                  label="积分"
+                  label={t("adm.230")}
                   count={(attention?.pointProducts ?? 0) + (attention?.pointOrders ?? 0)}
                   onClick={() => handleTabChange("points")}
                 />
-                <NavItem active={activeTab === "community"} icon={MessagesSquare} label="社区" onClick={() => handleTabChange("community")} />
+                <NavItem active={activeTab === "community"} icon={MessagesSquare} label={t("adm.231")} onClick={() => handleTabChange("community")} />
                 <NavItem
                   active={activeTab === "donations"}
                   icon={Heart}
-                  label="捐献"
+                  label={t("adm.232")}
                   count={attention?.donations}
                   onClick={() => handleTabChange("donations")}
                 />
                 <NavItem
                   active={activeTab === "feedback"}
                   icon={MessageSquare}
-                  label="反馈"
+                  label={t("adm.233")}
                   count={attention?.feedback}
                   onClick={() => handleTabChange("feedback")}
                 />
               </NavGroup>
-              <NavGroup label="系统">
-                <NavItem active={activeTab === "oauth"} icon={KeyRound} label="OAuth 应用" onClick={() => handleTabChange("oauth")} />
-                <NavItem active={activeTab === "analytics"} icon={BarChart3} label="网站统计" onClick={() => handleTabChange("analytics")} />
-                <NavItem active={activeTab === "cfQuota"} icon={Gauge} label="CF 额度" onClick={() => handleTabChange("cfQuota")} />
-                <NavItem active={activeTab === "audit"} icon={ScrollText} label="管理审计" onClick={() => handleTabChange("audit")} />
-                <NavItem active={activeTab === "mail"} icon={Mail} label="邮件" onClick={() => handleTabChange("mail")} />
-                <NavItem active={activeTab === "settings"} icon={SlidersHorizontal} label="设置" onClick={() => handleTabChange("settings")} />
+              <NavGroup label={t("adm.234")}>
+                <NavItem active={activeTab === "oauth"} icon={KeyRound} label={t("adm.235")} onClick={() => handleTabChange("oauth")} />
+                <NavItem active={activeTab === "analytics"} icon={BarChart3} label={t("adm.236")} onClick={() => handleTabChange("analytics")} />
+                <NavItem active={activeTab === "cfQuota"} icon={Gauge} label={t("adm.237")} onClick={() => handleTabChange("cfQuota")} />
+                <NavItem active={activeTab === "audit"} icon={ScrollText} label={t("adm.238")} onClick={() => handleTabChange("audit")} />
+                <NavItem active={activeTab === "mail"} icon={Mail} label={t("adm.239")} onClick={() => handleTabChange("mail")} />
+                <NavItem active={activeTab === "settings"} icon={SlidersHorizontal} label={t("adm.240")} onClick={() => handleTabChange("settings")} />
               </NavGroup>
             </nav>
           </aside>
@@ -2794,7 +2794,7 @@ export default function AdminPage() {
             <div className="relative max-w-sm">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="搜索用户名 / 邮箱 / 域名"
+                placeholder={t("adm.241")}
                 className="pl-8"
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
@@ -2805,7 +2805,7 @@ export default function AdminPage() {
       {loading ? (
         <LoadingBlock />
       ) : filtered.length === 0 ? (
-        <EmptyState title="没有匹配的用户" description="换个关键词试试。" />
+        <EmptyState title={t("adm.242")} description={t("adm.243")} />
       ) : (
         <div className="rounded-lg border bg-card">
           <Table wrapperClassName="overflow-x-auto lg:overflow-clip">
@@ -2916,7 +2916,7 @@ export default function AdminPage() {
                               size="icon"
                               className="h-6 w-6 text-muted-foreground"
                               asChild
-                              title="打开公开名片页"
+                              title={t("adm.244")}
                             >
                               <a href={url} target="_blank" rel="noopener noreferrer">
                                 <ExternalLink className="h-3.5 w-3.5" />
@@ -2940,7 +2940,7 @@ export default function AdminPage() {
                         size="icon"
                         className="h-8 w-8 text-muted-foreground"
                         asChild
-                        title="查看该用户的个人空间"
+                        title={t("adm.245")}
                       >
                         <Link to={`/space/${encodeURIComponent(u.username)}`}>
                           <ExternalLink className="h-3.5 w-3.5" />
@@ -2952,7 +2952,7 @@ export default function AdminPage() {
                         className="h-8 gap-1 px-2 text-xs"
                         onClick={() => void openDetail(u.username)}
                         disabled={busy}
-                        title="编辑该用户"
+                        title={t("adm.246")}
                       >
                         <Pencil className="h-3.5 w-3.5" />
                         编辑
@@ -2977,7 +2977,7 @@ export default function AdminPage() {
                         className="h-8 w-8 text-muted-foreground hover:text-destructive"
                         onClick={() => void handleDelete(u)}
                         disabled={busy || u.username === user?.username}
-                        title="删除"
+                        title={t("adm.247")}
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -3025,11 +3025,11 @@ export default function AdminPage() {
           {inviteLoading ? (
             <LoadingBlock />
           ) : invites.length === 0 ? (
-            <EmptyState title="还没有邀请码" description="创建一个邀请码用于注册。" />
+            <EmptyState title={t("adm.248")} description={t("adm.249")} />
           ) : filterInvites(invites, inviteFilter).length === 0 ? (
             <EmptyState
               title={`没有${INVITE_FILTERS.find((f) => f.key === inviteFilter)?.label ?? ""}的邀请码`}
-              description="换个分类看看。"
+              description={t("adm.250")}
             />
           ) : (
             <div className="rounded-lg border bg-card">
@@ -3063,7 +3063,7 @@ export default function AdminPage() {
                             type="button"
                             className="flex flex-wrap gap-1 text-left"
                             onClick={() => openInvitePerms(inv)}
-                            title="点击编辑权限"
+                            title={t("adm.251")}
                           >
                             {FEATURES.filter((f) => inv.permissions[f.key]).length ===
                             FEATURES.length ? (
@@ -3099,7 +3099,7 @@ export default function AdminPage() {
                               size="icon"
                               className="h-8 w-8 text-muted-foreground"
                               onClick={() => openInvitePerms(inv)}
-                              title="编辑权限"
+                              title={t("adm.252")}
                             >
                               <Pencil className="h-4 w-4" />
                             </Button>
@@ -3108,7 +3108,7 @@ export default function AdminPage() {
                               size="icon"
                               className="h-8 w-8 text-muted-foreground hover:text-destructive"
                               onClick={() => void handleDeleteInvite(inv)}
-                              title="删除"
+                              title={t("adm.253")}
                             >
                               <Trash2 className="h-4 w-4" />
                             </Button>
@@ -3182,13 +3182,13 @@ export default function AdminPage() {
             <div className="space-y-4">
               {frpApps.length === 0 ? (
                 <EmptyState
-                  title="还没有申请"
-                  description="用户在内网穿透页面提交申请后会出现在这里。"
+                  title={t("adm.254")}
+                  description={t("adm.255")}
                 />
               ) : filterFrpApps(frpApps, frpFilter).length === 0 ? (
                 <EmptyState
                   title={`没有${FRP_FILTERS.find((f) => f.key === frpFilter)?.label ?? ""}的申请`}
-                  description="换个分类看看。"
+                  description={t("adm.256")}
                 />
               ) : (
                 <div className="space-y-3">
@@ -3465,8 +3465,8 @@ export default function AdminPage() {
             <LoadingBlock />
           ) : proxySubs.length === 0 ? (
             <EmptyState
-              title="还没有订阅源"
-              description="添加一个代理订阅链接（vless / vmess / trojan / ss / ssr / anytls / hysteria2 / tuic）。"
+              title={t("adm.257")}
+              description={t("adm.258")}
             />
           ) : (
             <div className="rounded-lg border bg-card">
@@ -3566,7 +3566,7 @@ export default function AdminPage() {
           <div className="relative mb-3 max-w-sm">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="搜索用户名 / 邮箱 / 域名"
+              placeholder={t("adm.259")}
               className="pl-8"
               value={quotaFilter}
               onChange={(e) => setQuotaFilter(e.target.value)}
@@ -3576,9 +3576,9 @@ export default function AdminPage() {
           {inviteQuotaLoading ? (
             <LoadingBlock />
           ) : (inviteQuotas?.users.length ?? 0) === 0 ? (
-            <EmptyState title="还没有数据" description="用户注册后会出现在这里。" />
+            <EmptyState title={t("adm.260")} description={t("adm.261")} />
           ) : quotaUsers.length === 0 ? (
-            <EmptyState title="没有匹配的用户" description="换个关键词试试。" />
+            <EmptyState title={t("adm.262")} description={t("adm.263")} />
           ) : (
             <div className="rounded-lg border bg-card">
               <Table>
@@ -3690,7 +3690,7 @@ export default function AdminPage() {
                 <Label htmlFor="rnote" className="text-xs">备注（可选）</Label>
                 <Input
                   id="rnote"
-                  placeholder="用途说明"
+                  placeholder={t("adm.264")}
                   className="w-48"
                   value={reservedNote}
                   onChange={(e) => setReservedNote(e.target.value)}
@@ -3707,7 +3707,7 @@ export default function AdminPage() {
           {reservedLoading ? (
             <LoadingBlock />
           ) : reserved.length === 0 ? (
-            <EmptyState title="没有保留域名" description="添加后用户将无法创建同名一级子域名。" />
+            <EmptyState title={t("adm.265")} description={t("adm.266")} />
           ) : (
             <div className="rounded-lg border bg-card">
               <Table>
@@ -3735,7 +3735,7 @@ export default function AdminPage() {
                           size="icon"
                           className="h-8 w-8 text-muted-foreground hover:text-destructive"
                           onClick={() => void handleRemoveReserved(r.name)}
-                          title="取消保留"
+                          title={t("adm.267")}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
@@ -3764,7 +3764,7 @@ export default function AdminPage() {
                 <Label htmlFor="rnick" className="text-xs">保留词</Label>
                 <Input
                   id="rnick"
-                  placeholder="小助手"
+                  placeholder={t("adm.268")}
                   className="w-40"
                   value={nickReservedInput}
                   onChange={(e) => setNickReservedInput(e.target.value)}
@@ -3869,13 +3869,13 @@ export default function AdminPage() {
             <LoadingBlock />
           ) : donations.length === 0 ? (
             <EmptyState
-              title="还没有捐献申请"
-              description="用户在「捐献」页面提交后会出现在这里。"
+              title={t("adm.269")}
+              description={t("adm.270")}
             />
           ) : filterDonationsByTypeAndStatus(donations, donationTypeFilter, donationFilter).length === 0 ? (
             <EmptyState
-              title="没有符合条件的申请"
-              description="换个分类看看。"
+              title={t("adm.271")}
+              description={t("adm.272")}
             />
           ) : (
             <div className="space-y-3">
@@ -4046,8 +4046,8 @@ export default function AdminPage() {
             {wb2apiBindings.length === 0 ? (
               <EmptyState
                 icon={Unplug}
-                title="还没有反代账号贡献"
-                description="用户在「捐献」页登录 WorkBuddy 账号后会出现在这里。"
+                title={t("adm.273")}
+                description={t("adm.274")}
               />
             ) : (
               <div className="divide-y rounded-md border">
@@ -4162,8 +4162,8 @@ export default function AdminPage() {
           ) : announcements.length === 0 ? (
             <EmptyState
               icon={Megaphone}
-              title="还没有公告"
-              description="发布公告后，用户会在概览页「网站动态」看到。"
+              title={t("adm.275")}
+              description={t("adm.276")}
             />
           ) : (
             <div className="space-y-3">
@@ -4226,7 +4226,7 @@ export default function AdminPage() {
                           size="icon"
                           className="h-7 w-7"
                           onClick={() => openAnnouncementDialog(a)}
-                          aria-label="编辑"
+                          aria-label={t("adm.277")}
                         >
                           <Pencil className="h-3.5 w-3.5" />
                         </Button>
@@ -4235,7 +4235,7 @@ export default function AdminPage() {
                           size="icon"
                           className="h-7 w-7 text-muted-foreground hover:text-destructive"
                           onClick={() => void handleDeleteAnnouncement(a.id)}
-                          aria-label="删除"
+                          aria-label={t("adm.278")}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
@@ -4271,8 +4271,8 @@ export default function AdminPage() {
           ) : events.length === 0 ? (
             <EmptyState
               icon={PartyPopper}
-              title="还没有活动"
-              description="发布活动后，用户会在消息中心「活动推广」看到并参与。"
+              title={t("adm.279")}
+              description={t("adm.280")}
             />
           ) : (
             <div className="space-y-3">
@@ -4334,7 +4334,7 @@ export default function AdminPage() {
                           size="icon"
                           className="h-7 w-7"
                           onClick={() => openEventDialog(ev)}
-                          aria-label="编辑"
+                          aria-label={t("adm.281")}
                         >
                           <Pencil className="h-3.5 w-3.5" />
                         </Button>
@@ -4343,7 +4343,7 @@ export default function AdminPage() {
                           size="icon"
                           className="h-7 w-7 text-muted-foreground hover:text-destructive"
                           onClick={() => void handleDeleteEvent(ev)}
-                          aria-label="删除"
+                          aria-label={t("adm.282")}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
@@ -4377,8 +4377,8 @@ export default function AdminPage() {
           ) : !r2Data || (r2Data.buckets.length === 0 && !r2Data.legacyBucket) ? (
             <EmptyState
               icon={Database}
-              title="还没有配置 R2 桶"
-              description="添加桶后，新开通网盘的用户会被自动分配。"
+              title={t("adm.283")}
+              description={t("adm.284")}
             />
           ) : (
             <div className="space-y-4">
@@ -4439,7 +4439,7 @@ export default function AdminPage() {
                                 size="icon"
                                 className="h-8 w-8"
                                 onClick={() => openR2BucketDialog(b)}
-                                aria-label="编辑"
+                                aria-label={t("adm.285")}
                               >
                                 <Pencil className="h-3.5 w-3.5" />
                               </Button>
@@ -4448,7 +4448,7 @@ export default function AdminPage() {
                                 size="icon"
                                 className="h-8 w-8 text-muted-foreground hover:text-destructive"
                                 onClick={() => void handleDeleteR2Bucket(b.id, b.name)}
-                                aria-label="删除"
+                                aria-label={t("adm.286")}
                               >
                                 <Trash2 className="h-3.5 w-3.5" />
                               </Button>
@@ -4714,7 +4714,7 @@ export default function AdminPage() {
             <div className="relative max-w-xs flex-1">
               <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
-                placeholder="按用户名筛选"
+                placeholder={t("adm.287")}
                 value={communityUserFilter}
                 onChange={(e) => setCommunityUserFilter(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") void loadCommunity() }}
@@ -4739,8 +4739,8 @@ export default function AdminPage() {
           ) : communityPosts.length === 0 ? (
             <EmptyState
               icon={MessagesSquare}
-              title="没有帖子"
-              description="当前筛选条件下没有社区帖子。"
+              title={t("adm.288")}
+              description={t("adm.289")}
             />
           ) : (
             <div className="rounded-md border">
@@ -4878,7 +4878,7 @@ export default function AdminPage() {
                           id="newapiNewToken"
                           type="password"
                           autoComplete="off"
-                          placeholder="在 NewAPI「个人设置 → 安全设置 → 系统访问令牌」复制"
+                          placeholder={t("adm.290")}
                           value={newapiNewToken}
                           onChange={(e) => setNewapiNewToken(e.target.value)}
                         />
@@ -5034,15 +5034,15 @@ export default function AdminPage() {
                     还没有推荐分档。点右上角「添加梯队」开始配置。
                   </p>
                 ) : (
-                  recommendedTiers.map((t, i) => (
+                  recommendedTiers.map((tier, i) => (
                     <div key={i} className="space-y-3 rounded-lg border p-3.5">
                       <div className="flex items-center gap-2">
                         <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] font-semibold text-muted-foreground">
                           {i + 1}
                         </span>
                         <Input
-                          value={t.tier}
-                          placeholder="梯队名，如：第一梯队"
+                          value={tier.tier}
+                          placeholder={t("adm.291")}
                           maxLength={20}
                           className="h-8 flex-1"
                           onChange={(e) =>
@@ -5062,15 +5062,15 @@ export default function AdminPage() {
                               list.filter((_, idx) => idx !== i)
                             )
                           }
-                          title="删除该梯队"
+                          title={t("adm.292")}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
 
                       <Input
-                        value={t.desc}
-                        placeholder="一句话说明（可选），如：综合最强，日常首选"
+                        value={tier.desc}
+                        placeholder={t("adm.293")}
                         maxLength={120}
                         className="h-8 text-sm"
                         onChange={(e) =>
@@ -5084,12 +5084,12 @@ export default function AdminPage() {
 
                       <div className="space-y-2">
                         <div className="flex flex-wrap gap-1.5">
-                          {t.models.length === 0 ? (
+                          {tier.models.length === 0 ? (
                             <span className="text-xs text-muted-foreground">
                               还没有模型
                             </span>
                           ) : (
-                            t.models.map((m) => (
+                            tier.models.map((m) => (
                               <Badge
                                 key={m}
                                 variant="outline"
@@ -5135,11 +5135,11 @@ export default function AdminPage() {
                               }
                             >
                               <SelectTrigger className="h-8 flex-1 text-xs">
-                                <SelectValue placeholder="从中转站模型里选择…" />
+                                <SelectValue placeholder={t("adm.294")} />
                               </SelectTrigger>
                               <SelectContent>
                                 {modelOptions
-                                  .filter((m) => !t.models.includes(m))
+                                  .filter((m) => !tier.models.includes(m))
                                   .map((m) => (
                                     <SelectItem key={m} value={m} className="font-mono text-xs">
                                       {m}
@@ -5150,7 +5150,7 @@ export default function AdminPage() {
                           </div>
                         ) : (
                           <Input
-                            placeholder="手动输入模型名后按回车添加"
+                            placeholder={t("adm.295")}
                             className="h-8 font-mono text-xs"
                             onKeyDown={(e) => {
                               if (e.key !== "Enter") return
@@ -5358,7 +5358,7 @@ export default function AdminPage() {
                         <Input
                           id="wb2apiKey"
                           type="password"
-                          placeholder="粘贴反代网关面板的 api_key"
+                          placeholder={t("adm.296")}
                           value={wb2apiNewKey}
                           onChange={(e) => setWb2apiNewKey(e.target.value)}
                         />
@@ -5443,8 +5443,8 @@ export default function AdminPage() {
                 {wb2apiBindings.length === 0 ? (
                   <EmptyState
                     icon={Unplug}
-                    title="还没有捐献绑定"
-                    description="用户在「捐献」页登录 WorkBuddy 账号后会出现在这里。"
+                    title={t("adm.297")}
+                    description={t("adm.298")}
                   />
                 ) : (
                   <div className="divide-y rounded-md border">
@@ -5631,7 +5631,7 @@ export default function AdminPage() {
                         <Input
                           id="cli2apiKey"
                           type="password"
-                          placeholder="粘贴 cli2api 的 console key"
+                          placeholder={t("adm.299")}
                           value={cli2apiNewKey}
                           onChange={(e) => setCli2apiNewKey(e.target.value)}
                         />
@@ -5703,8 +5703,8 @@ export default function AdminPage() {
                 {cli2apiBindings.length === 0 ? (
                   <EmptyState
                     icon={Unplug}
-                    title="还没有捐献绑定"
-                    description="用户在「捐献」页登录 CLI2API 账号后会出现在这里。"
+                    title={t("adm.300")}
+                    description={t("adm.301")}
                   />
                 ) : (
                   <div className="divide-y rounded-md border">
@@ -5799,7 +5799,7 @@ export default function AdminPage() {
                   <Input
                     id="sensenovaChannelId"
                     inputMode="numeric"
-                    placeholder="例如 17（留空 = 未配置，捐献转人工）"
+                    placeholder={t("adm.302")}
                     value={sensenovaChannelId}
                     onChange={(e) => setSensenovaChannelId(e.target.value)}
                   />
@@ -6545,7 +6545,7 @@ export default function AdminPage() {
                     }
                   >
                     <SelectTrigger id="frpNotify">
-                      <SelectValue placeholder="选择接收申请的邮箱" />
+                      <SelectValue placeholder={t("adm.303")} />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">不接收通知</SelectItem>
@@ -6738,7 +6738,7 @@ export default function AdminPage() {
                             void handleAddBrevoKey()
                           }
                         }}
-                        placeholder="粘贴新的 Key（可一次粘多把，逗号或换行分隔）"
+                        placeholder={t("adm.304")}
                         className="font-mono text-xs"
                       />
                       <Button
@@ -7097,7 +7097,7 @@ export default function AdminPage() {
                               variant="ghost"
                               size="icon"
                               className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                              title="删除（未使用的会退还额度）"
+                              title={t("adm.305")}
                               onClick={async () => {
                                 try {
                                   await adminApi.deleteInvite(inv.id)
@@ -7207,7 +7207,7 @@ export default function AdminPage() {
               <Label htmlFor="annTitle">标题</Label>
               <Input
                 id="annTitle"
-                placeholder="如：新增内网穿透节点"
+                placeholder={t("adm.306")}
                 value={annDraft.title}
                 onChange={(e) => setAnnDraft((d) => ({ ...d, title: e.target.value }))}
               />
@@ -7216,7 +7216,7 @@ export default function AdminPage() {
               <Label htmlFor="annBody">正文</Label>
               <Textarea
                 id="annBody"
-                placeholder="支持换行"
+                placeholder={t("adm.307")}
                 rows={4}
                 value={annDraft.body}
                 onChange={(e) => setAnnDraft((d) => ({ ...d, body: e.target.value }))}
@@ -7352,7 +7352,7 @@ export default function AdminPage() {
               <Label htmlFor="evTitle">标题</Label>
               <Input
                 id="evTitle"
-                placeholder="如：限时开通个人名片得中转站钱包余额"
+                placeholder={t("adm.308")}
                 value={eventDraft.title}
                 onChange={(e) => setEventDraft((d) => ({ ...d, title: e.target.value }))}
               />
@@ -7362,7 +7362,7 @@ export default function AdminPage() {
               <Textarea
                 id="evBody"
                 rows={6}
-                placeholder="说明活动规则、参与方式等"
+                placeholder={t("adm.309")}
                 value={eventDraft.body}
                 onChange={(e) => setEventDraft((d) => ({ ...d, body: e.target.value }))}
               />
@@ -7391,7 +7391,7 @@ export default function AdminPage() {
                 <Label htmlFor="evRewardLabel">奖励文案（展示用）</Label>
                 <Input
                   id="evRewardLabel"
-                  placeholder="如：中转站钱包余额 +5"
+                  placeholder={t("adm.310")}
                   value={eventDraft.rewardLabel}
                   onChange={(e) => setEventDraft((d) => ({ ...d, rewardLabel: e.target.value }))}
                 />
@@ -7574,7 +7574,7 @@ export default function AdminPage() {
                 id="evMaxClaims"
                 type="number"
                 min={1}
-                placeholder="如：100"
+                placeholder={t("adm.311")}
                 value={eventDraft.maxClaims}
                 onChange={(e) => setEventDraft((d) => ({ ...d, maxClaims: e.target.value }))}
               />
@@ -7631,7 +7631,7 @@ export default function AdminPage() {
               {eventDraft.conditionType === "code" && (
                 <div className="space-y-1.5 pt-1">
                   <Input
-                    placeholder="设置认证码（如 QQ 群口令）"
+                    placeholder={t("adm.312")}
                     maxLength={64}
                     value={eventDraft.conditionCode}
                     onChange={(e) =>
@@ -7647,7 +7647,7 @@ export default function AdminPage() {
               {eventDraft.conditionType === "github_star" && (
                 <div className="space-y-1.5 pt-1">
                   <Input
-                    placeholder="owner/repo，例如 Doulor/DoulorCloud"
+                    placeholder={t("adm.313")}
                     maxLength={120}
                     value={eventDraft.conditionRepo}
                     onChange={(e) =>
@@ -7849,7 +7849,7 @@ export default function AdminPage() {
                   <>
                     <Select value={r2Pick} onValueChange={handlePickBucket}>
                       <SelectTrigger>
-                        <SelectValue placeholder="选择一个桶" />
+                        <SelectValue placeholder={t("adm.314")} />
                       </SelectTrigger>
                       <SelectContent>
                         {r2Discovered.accounts.flatMap((a) =>
@@ -7914,7 +7914,7 @@ export default function AdminPage() {
                 <Label htmlFor="r2name">显示名</Label>
                 <Input
                   id="r2name"
-                  placeholder="2 号桶 network2"
+                  placeholder={t("adm.315")}
                   value={r2Draft.name}
                   onChange={(e) => setR2Draft((d) => ({ ...d, name: e.target.value }))}
                 />
@@ -8068,7 +8068,7 @@ export default function AdminPage() {
                       <Input
                         className="max-w-xs"
                         value={nickDraft}
-                        placeholder="未设置昵称"
+                        placeholder={t("adm.316")}
                         disabled={busy || detail.user.username === user?.username}
                         onChange={(e) => setNickDraft(e.target.value)}
                       />
@@ -8177,7 +8177,7 @@ export default function AdminPage() {
                               type="number"
                               min={1}
                               className="h-8 w-28"
-                              aria-label="网盘配额（MB）"
+                              aria-label={t("adm.317")}
                               value={storageQuotaMbDraft}
                               onChange={(e) => setStorageQuotaMbDraft(e.target.value)}
                             />
@@ -8512,7 +8512,7 @@ export default function AdminPage() {
                         max={100}
                         className="w-24"
                         value={quotaDraft ?? ""}
-                        placeholder="默认"
+                        placeholder={t("adm.318")}
                         disabled={busy || detail.user.username === user?.username}
                         onChange={(e) => setQuotaDraft(e.target.value)}
                       />
@@ -8608,7 +8608,7 @@ export default function AdminPage() {
                 <Input
                   value={nodeForm.name}
                   onChange={(e) => setNodeForm((f) => ({ ...f, name: e.target.value }))}
-                  placeholder="北京"
+                  placeholder={t("adm.319")}
                 />
               </div>
               <div className="space-y-2">
@@ -8616,7 +8616,7 @@ export default function AdminPage() {
                 <Input
                   value={nodeForm.region}
                   onChange={(e) => setNodeForm((f) => ({ ...f, region: e.target.value }))}
-                  placeholder="北京地区"
+                  placeholder={t("adm.320")}
                 />
               </div>
             </div>
@@ -8749,7 +8749,7 @@ export default function AdminPage() {
                   onChange={(e) =>
                     setNodeForm((f) => ({ ...f, statusNote: e.target.value }))
                   }
-                  placeholder="例如：机房维护至 22:00"
+                  placeholder={t("adm.321")}
                 />
               </div>
             </div>
@@ -8785,7 +8785,7 @@ export default function AdminPage() {
                   onChange={(e) =>
                     setProxyForm((f) => ({ ...f, name: e.target.value }))
                   }
-                  placeholder="香港中继"
+                  placeholder={t("adm.322")}
                 />
               </div>
               <div className="space-y-2">
@@ -8795,7 +8795,7 @@ export default function AdminPage() {
                   onChange={(e) =>
                     setProxyForm((f) => ({ ...f, region: e.target.value }))
                   }
-                  placeholder="香港"
+                  placeholder={t("adm.323")}
                 />
               </div>
             </div>
@@ -8822,7 +8822,7 @@ export default function AdminPage() {
                   onChange={(e) =>
                     setProxyForm((f) => ({ ...f, protocol: e.target.value }))
                   }
-                  placeholder="留空自动识别"
+                  placeholder={t("adm.324")}
                 />
                 <p className="text-xs text-muted-foreground">
                   留空则保存时自动从订阅内容识别
@@ -8868,7 +8868,7 @@ export default function AdminPage() {
                 onChange={(e) =>
                   setProxyForm((f) => ({ ...f, statusNote: e.target.value }))
                 }
-                placeholder="例如：机房维护至 22:00"
+                placeholder={t("adm.325")}
               />
             </div>
             <div className="space-y-2">
