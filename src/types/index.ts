@@ -561,6 +561,13 @@ export interface NewApiStatus {
   availableGroups: string[]
   /** 分组 → 该分组可用模型 */
   groupModels: Record<string, string[]>
+  /**
+   * 捐献渠道所在的分组名（默认 donation）。
+   * 捐献模型只能被「选了这个分组」的 Key 调用，前端据此提示用户。
+   */
+  donationGroup: string
+  /** 建 Key 时可自选的分组（顺序：站点分组在前，即默认值） */
+  keyGroups: string[]
   /** 账号当前所属分组 */
   accountGroup: string | null
   /** 中转站健康状态（在线/离线 + 延迟 + 版本） */
@@ -617,7 +624,8 @@ export interface NewApiKey {
   name: string
   maskedKey: string
   createdAt: string
-  group?: string
+  /** 该 Key 所属分组；读不到时为 null（前端只显示「未知」） */
+  group?: string | null
 }
 
 /** 开通前探测：决定展示「绑定已有账号」还是「创建新账号」 */
@@ -2036,7 +2044,14 @@ export interface EventItem {
 
 export type EventStatus = "draft" | "scheduled" | "active" | "ended" | "archived"
 export type EventRewardType = "none" | "newapi_quota" | "invite_quota" | "points"
-export type EventConditionType = "always" | "has_profile" | "has_feature" | "code" | "lottery"
+export type EventConditionType =
+  | "always"
+  | "has_profile"
+  | "has_feature"
+  | "code"
+  | "lottery"
+  /** 点 GitHub star：用户填自己的 GitHub 用户名，服务端去仓库的 stargazers 名单里核验 */
+  | "github_star"
 
 /** 活动发布/更新请求体 */
 export interface EventPayload {

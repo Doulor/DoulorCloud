@@ -17,6 +17,7 @@ import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
+import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Separator } from "@/components/ui/separator"
 import { Card, CardContent } from "@/components/ui/card"
@@ -87,6 +88,11 @@ export function FeedbackPanel() {
   const [replyTarget, setReplyTarget] = React.useState<AdminFeedbackItem | null>(null)
   const [replyText, setReplyText] = React.useState("")
   const [replyStatus, setReplyStatus] = React.useState("resolved")
+  /**
+   * 顺带发给作者的积分奖励（空串 = 不发）。
+   * 同一张反馈只会发一次（服务端按反馈 id 幂等），重复保存不会重复发。
+   */
+  const [replyPoints, setReplyPoints] = React.useState("")
   const [replyBusy, setReplyBusy] = React.useState(false)
   const replyImages = usePickedImages()
 
@@ -120,6 +126,7 @@ export function FeedbackPanel() {
     // 回填已有回复，方便在原文上追加/修改，而不是从零重写
     setReplyText(f.adminReply ?? "")
     setReplyStatus(f.adminReply ? f.status : "resolved")
+    setReplyPoints("")
     replyImages.reset()
   }
 
@@ -142,14 +149,34 @@ export function FeedbackPanel() {
           failed++
         }
       }
-      await feedbackApi.reply({ id: replyTarget.id, reply: text, status: replyStatus, images: keys })
+      const points = Math.floor(Number(replyPoints))
+      const res = await feedbackApi.reply({
+        id: replyTarget.id,
+        reply: text,
+        status: replyStatus,
+        images: keys,
+        rewardPoints: Number.isFinite(points) && points > 0 ? points : undefined,
+      })
+      const reward = res.reward
+      const rewardNote = reward
+        ? reward.duplicated
+          ? `这张反馈之前已发过 ${reward.amount} 积分奖励，未重复发放。`
+          : `已同时赠送 ${reward.amount} 积分（作者余额 ${reward.balance}）。`
+        : ""
       if (failed > 0) {
-        toast.warning(`回复已发送，但有 ${failed} 张图片上传失败`)
+        toast.warning(`回复已发送，但有 ${failed} 张图片上传失败`, {
+          description: rewardNote || undefined,
+        })
+      } else if (reward?.duplicated) {
+        toast.warning("回复已发送", { description: rewardNote })
       } else {
-        toast.success("回复已发送", { description: "用户会收到站内通知和邮件提醒。" })
+        toast.success("回复已发送", {
+          description: rewardNote || "用户会收到站内通知和邮件提醒。",
+        })
       }
       setReplyTarget(null)
       setReplyText("")
+      setReplyPoints("")
       replyImages.reset()
       await load(filter)
       notifyAttentionChanged() // 待处理反馈角标当场更新，不用等 60 秒轮询
@@ -430,6 +457,27 @@ export function FeedbackPanel() {
                 </Select>
                 <p className="text-xs text-muted-foreground">
                   默认「已处理」。如果只是追问细节、还需要用户回复，选「处理中」。
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="fbReplyPoints">赠送积分（可选）</Label>
+                <Input
+                  id="fbReplyPoints"
+                  type="number"
+                  min={1}
+                  max={10000}
+                  placeholder="留空 = 不赠送"
+                  value={replyPoints}
+                  onChange={(e) => setReplyPoints(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  随手答谢愿意提反馈的用户（比如报了个真 bug）。
+                  这是平台白送的积分，<span className="font-medium">不会</span>触发邀请返佣。
+                  <span className="font-medium">
+                    同一张反馈只会发一次
+                  </span>
+                  —— 之后再回复这张单子不会重复赠送（想追加请到「积分 → 用户」里手工发）。
                 </p>
               </div>
             </div>

@@ -12,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { useT } from "@/i18n"
 import {
   baseName,
   canvasToBlob,
@@ -24,16 +25,17 @@ import {
 type OutFormat = "webp" | "jpeg" | "png"
 
 const PRESETS = [
-  { id: "origin", label: "保持原尺寸（只重编码）", long: 0 },
-  { id: "1920", label: "长边 1920px（电脑壁纸/大图）", long: 1920 },
-  { id: "1600", label: "长边 1600px（通用推荐）", long: 1600 },
-  { id: "1280", label: "长边 1280px（网页配图）", long: 1280 },
-  { id: "1080", label: "长边 1080px（手机屏）", long: 1080 },
-  { id: "800", label: "长边 800px（文章插图）", long: 800 },
-  { id: "400", label: "长边 400px（头像/缩略图）", long: 400 },
+  { id: "origin", label: "ic.size.origin", long: 0 },
+  { id: "1920", label: "ic.size.1920", long: 1920 },
+  { id: "1600", label: "ic.size.1600", long: 1600 },
+  { id: "1280", label: "ic.size.1280", long: 1280 },
+  { id: "1080", label: "ic.size.1080", long: 1080 },
+  { id: "800", label: "ic.size.800", long: 800 },
+  { id: "400", label: "ic.size.400", long: 400 },
 ]
 
 export default function ImageCompressTool() {
+  const { t } = useT()
   const [file, setFile] = React.useState<File | null>(null)
   const [preset, setPreset] = React.useState("1600")
   const [format, setFormat] = React.useState<OutFormat>("webp")
@@ -52,7 +54,7 @@ export default function ImageCompressTool() {
       setOut(null)
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "图片打开失败")
+      setError(e instanceof Error ? e.message : t("ic.err.open"))
     }
   }
 
@@ -95,7 +97,7 @@ export default function ImageCompressTool() {
           })
           setError(null)
         } catch (e) {
-          if (!cancelled) setError(e instanceof Error ? e.message : "压缩失败")
+          if (!cancelled) setError(e instanceof Error ? e.message : t("ic.err.compress"))
         } finally {
           if (!cancelled) setBusy(false)
         }
@@ -113,11 +115,11 @@ export default function ImageCompressTool() {
 
   return (
     <ToolShell
-      title="图片压缩"
-      description="把图片的长边缩小、质量降一点，体积通常能小一大截，肉眼几乎看不出差别。"
+      title={t("toolbox.imageCompress.name")}
+      description={t("ic.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_340px]">
-        <ToolSection title="原图">
+        <ToolSection title={t("ic.section.original")}>
           {!file ? (
             <FileDrop accept="image/*" onFiles={(f) => void handleFiles(f)} />
           ) : (
@@ -133,28 +135,28 @@ export default function ImageCompressTool() {
                     setOut(null)
                   }}
                 >
-                  换一张
+                  {t("ic.replace")}
                 </Button>
               </div>
               <div className="flex items-center justify-center rounded-lg border bg-muted/30 p-3">
                 {out ? (
-                  <img src={out.url} alt="压缩结果" className="max-h-[360px] w-auto rounded" />
+                  <img src={out.url} alt={t("ic.alt.compressed")} className="max-h-[360px] w-auto rounded" />
                 ) : (
-                  <div className="py-10 text-sm text-muted-foreground">处理中…</div>
+                  <div className="py-10 text-sm text-muted-foreground">{t("ic.processing")}</div>
                 )}
               </div>
               {file && out && (
                 <div className="grid grid-cols-3 gap-3 text-center">
                   <div className="rounded-lg border p-3">
-                    <p className="text-xs text-muted-foreground">原始</p>
+                    <p className="text-xs text-muted-foreground">{t("ic.stat.original")}</p>
                     <p className="mt-1 text-sm font-medium">{formatBytes(file.size)}</p>
                   </div>
                   <div className="rounded-lg border p-3">
-                    <p className="text-xs text-muted-foreground">压缩后</p>
+                    <p className="text-xs text-muted-foreground">{t("ic.stat.compressed")}</p>
                     <p className="mt-1 text-sm font-medium">{formatBytes(out.blob.size)}</p>
                   </div>
                   <div className="rounded-lg border p-3">
-                    <p className="text-xs text-muted-foreground">节省</p>
+                    <p className="text-xs text-muted-foreground">{t("ic.stat.saved")}</p>
                     <p className="mt-1 text-sm font-medium">
                       {saved > 0 ? `${Math.round((saved / file.size) * 100)}%` : "—"}
                     </p>
@@ -165,10 +167,10 @@ export default function ImageCompressTool() {
           )}
         </ToolSection>
 
-        <ToolSection title="压缩设置">
+        <ToolSection title={t("ic.section.settings")}>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">尺寸</Label>
+              <Label className="text-xs text-muted-foreground">{t("ic.size")}</Label>
               <Select value={preset} onValueChange={setPreset}>
                 <SelectTrigger>
                   <SelectValue />
@@ -184,22 +186,22 @@ export default function ImageCompressTool() {
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">输出格式</Label>
+              <Label className="text-xs text-muted-foreground">{t("ic.format")}</Label>
               <Select value={format} onValueChange={(v) => setFormat(v as OutFormat)}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="webp">WebP · 最省体积</SelectItem>
-                  <SelectItem value="jpeg">JPG · 兼容性最好</SelectItem>
-                  <SelectItem value="png">PNG · 无损但最大</SelectItem>
+                  <SelectItem value="webp">{t("ic.fmt.webp")}</SelectItem>
+                  <SelectItem value="jpeg">{t("ic.fmt.jpeg")}</SelectItem>
+                  <SelectItem value="png">{t("ic.fmt.png")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             {format !== "png" && (
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">质量 {quality}%</Label>
+                <Label className="text-xs text-muted-foreground">{t("ic.quality", { n: quality })}</Label>
                 <input
                   type="range"
                   min={20}
@@ -209,14 +211,14 @@ export default function ImageCompressTool() {
                   className="w-full accent-primary"
                 />
                 <p className="text-xs text-muted-foreground">
-                  一般 75–85 就够用；要发朋友圈、公众号可以压到 60。
+                  {t("ic.qualityHint")}
                 </p>
               </div>
             )}
 
             {out && (
               <p className="text-xs text-muted-foreground">
-                输出尺寸 {out.w} × {out.h}
+                {t("ic.outSize", { w: out.w, h: out.h })}
               </p>
             )}
             {error && <p className="text-xs text-destructive">{error}</p>}
@@ -227,7 +229,7 @@ export default function ImageCompressTool() {
               onClick={() => out && downloadBlob(out.blob, out.name)}
             >
               <Download className="h-4 w-4" />
-              {busy ? "处理中…" : "下载压缩后的图片"}
+              {busy ? t("ic.processing") : t("ic.download")}
             </Button>
           </div>
         </ToolSection>

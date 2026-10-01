@@ -45,6 +45,8 @@ export default function ActivityPage() {
   const [notFound, setNotFound] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
   const [code, setCode] = React.useState("")
+  /** 「点了 GitHub star」活动里用户自己填的 GitHub 用户名 */
+  const [github, setGithub] = React.useState("")
   const [copied, setCopied] = React.useState(false)
 
   const load = React.useCallback(async () => {
@@ -72,7 +74,7 @@ export default function ActivityPage() {
     }
     setBusy(true)
     try {
-      const res = await eventApi.claim(ev.id, code.trim())
+      const res = await eventApi.claim(ev.id, code.trim(), github.trim())
       toast.success(res.detail)
       notifyMessagesChanged()
       await load()
@@ -125,6 +127,8 @@ export default function ActivityPage() {
   const isLottery = ev.conditionType === "lottery"
   const lotteryClosed = isLottery && !!ev.lottery?.drawn
   const needsCode = ev.conditionType === "code" && !claimed
+  /** 「点 GitHub star」活动：领取前必须让用户填 GitHub 用户名，服务端据此核验 */
+  const needsGithub = ev.conditionType === "github_star" && !claimed
   const blockedReason = claimed ? "" : ev.claimBlockedReason ?? ""
 
   const timeText = (() => {
@@ -228,6 +232,15 @@ export default function ActivityPage() {
                     onChange={(e) => setCode(e.target.value)}
                   />
                 )}
+                {needsGithub && (
+                  <Input
+                    className="h-9 w-48"
+                    placeholder={t("msg.enterGithub")}
+                    maxLength={64}
+                    value={github}
+                    onChange={(e) => setGithub(e.target.value)}
+                  />
+                )}
                 <Button
                   size="sm"
                   onClick={() => void handleClaim()}
@@ -235,6 +248,7 @@ export default function ActivityPage() {
                     busy ||
                     ev.claimState !== "open" ||
                     (needsCode && !code.trim()) ||
+                    (needsGithub && !github.trim()) ||
                     !!blockedReason ||
                     lotteryClosed
                   }
@@ -261,6 +275,9 @@ export default function ActivityPage() {
               <AlertCircle className="h-3.5 w-3.5" />
               {blockedReason}
             </p>
+          )}
+          {needsGithub && (
+            <p className="text-xs text-muted-foreground">{t("msg.github.hint")}</p>
           )}
           {isLottery && !claimed && (
             <p className="text-xs text-muted-foreground">

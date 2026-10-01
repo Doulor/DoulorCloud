@@ -258,10 +258,21 @@ interface EventDraft {
   rewardType: EventRewardType
   /** 奖励数量：newapi_quota 用 amount（元），invite_quota 用 count，points 用 amount（积分数） */
   rewardAmount: string
+  /**
+   * 积分奖励是否走「区间随机」（仅 rewardType = points 时有意义）。
+   * 勾上后改用 rewardMin / rewardMax 两个输入框，发放时在闭区间内取一个整数。
+   */
+  pointsRandom: boolean
+  /** 区间下限（积分数） */
+  rewardMin: string
+  /** 区间上限（积分数） */
+  rewardMax: string
   conditionType: EventConditionType
   conditionFeature: string
   /** 认证码（conditionType = code 时用）：用户凭它领取，通常公布在 QQ 群等站外 */
   conditionCode: string
+  /** 要核验 star 的 GitHub 仓库（conditionType = github_star 时用），形如 owner/repo */
+  conditionRepo: string
   /** 抽奖（conditionType = lottery 时用）：中奖人数 */
   lotteryWinners: string
   /** 抽奖：奖池总积分（中奖者共享） */
@@ -285,9 +296,13 @@ function emptyEventDraft(): EventDraft {
     rewardLabel: "",
     rewardType: "none",
     rewardAmount: "",
+    pointsRandom: false,
+    rewardMin: "",
+    rewardMax: "",
     conditionType: "always",
     conditionFeature: "ai",
     conditionCode: "",
+    conditionRepo: "Doulor/DoulorCloud",
     lotteryWinners: "10",
     lotteryPool: "1000",
     lotteryMode: "even",
@@ -323,7 +338,16 @@ function eventDraftToPayload(d: EventDraft): EventPayload {
       : d.rewardType === "invite_quota"
         ? { count: Number.isFinite(amount) && amount > 0 ? Math.floor(amount) : 2 }
         : d.rewardType === "points"
-          ? { amount: Number.isFinite(amount) && amount > 0 ? Math.floor(amount) : 10 }
+          ? d.pointsRandom
+            ? // 区间随机：下限至少 1，上限不小于下限（后端还会再校验一遍）
+              {
+                min: Math.max(1, Math.floor(Number(d.rewardMin)) || 1),
+                max: Math.max(
+                  Math.max(1, Math.floor(Number(d.rewardMin)) || 1),
+                  Math.floor(Number(d.rewardMax)) || 1
+                ),
+              }
+            : { amount: Number.isFinite(amount) && amount > 0 ? Math.floor(amount) : 10 }
           : null
   const conditionParams = isLottery
     ? {
@@ -335,7 +359,9 @@ function eventDraftToPayload(d: EventDraft): EventPayload {
       ? { feature: d.conditionFeature }
       : d.conditionType === "code"
         ? { code: d.conditionCode.trim() }
-        : null
+        : d.conditionType === "github_star"
+          ? { repo: d.conditionRepo.trim() }
+          : null
 
   const maxClaims = d.maxClaims.trim() === "" ? null : Math.floor(Number(d.maxClaims))
   return {
@@ -381,8 +407,10 @@ const CONDITION_TYPE_OPTIONS: { value: EventConditionType; label: string }[] = [
   // 只卡「已发布」等于点一下开通就能领奖，所以还要有昵称（见 event-rewards.ts）
   { value: "has_profile", label: "个人名片已对外展示（已发布 + 已填昵称）" },
   { value: "has_feature", label: "已开通指定功能模块" },
-  // 抽奖：参与只是「报名」，开奖时从报名者里随机抽人发积分（奖励类型固定为积分）
+  // 抽奖：参与只是「报名」，开奖时从报名者里随机抽取中奖者发积分（奖励类型固定为积分）
   { value: "lottery", label: "抽奖（报名后随机抽取中奖者发积分）" },
+  // 点 star：用户填自己的 GitHub 用户名，服务端去该仓库的 stargazers 名单里核验
+  { value: "github_star", label: "点了指定 GitHub 仓库的 star" },
 ]
 
 const EVENT_STATUS_BADGE: Record<EventStatus, "default" | "secondary" | "success" | "outline"> = {
@@ -1942,9 +1970,15 @@ export default function AdminPage() {
             rewardLabel: ev.rewardLabel ?? "",
             rewardType: ev.rewardType,
             rewardAmount: String(ev.rewardParams?.amount ?? ev.rewardParams?.count ?? ""),
+            // 「区间随机」的判据就是存了 min/max（老配置只有 amount）
+            pointsRandom:
+              ev.rewardParams?.min !== undefined || ev.rewardParams?.max !== undefined,
+            rewardMin: String(ev.rewardParams?.min ?? ""),
+            rewardMax: String(ev.rewardParams?.max ?? ""),
             conditionType: ev.conditionType,
             conditionFeature: String(ev.conditionParams?.feature ?? "ai"),
             conditionCode: String(ev.conditionParams?.code ?? ""),
+            conditionRepo: String(ev.conditionParams?.repo ?? "Doulor/DoulorCloud"),
             lotteryWinners: String(ev.conditionParams?.winners ?? "10"),
             lotteryPool: String(ev.conditionParams?.pool ?? "1000"),
             lotteryMode: ev.conditionParams?.mode === "random" ? "random" : "even",
@@ -7428,29 +7462,80 @@ export default function AdminPage() {
                   eventDraft.rewardType === "invite_quota" ||
                   eventDraft.rewardType === "points") && (
                   <div className="space-y-2 pt-1">
-                    <Label htmlFor="evAmount">
-                      {eventDraft.rewardType === "newapi_quota"
-                        ? "钱包余额（元）"
-                        : eventDraft.rewardType === "points"
-                          ? "积分数量"
-                          : "邀请码额度个数"}
-                    </Label>
-                    <Input
-                      id="evAmount"
-                      type="number"
-                      min={1}
-                      placeholder={
-                        eventDraft.rewardType === "newapi_quota"
-                          ? "1"
-                          : eventDraft.rewardType === "points"
-                            ? "10"
-                            : "2"
-                      }
-                      value={eventDraft.rewardAmount}
-                      onChange={(e) =>
-                        setEventDraft((d) => ({ ...d, rewardAmount: e.target.value }))
-                      }
-                    />
+                    {/* 积分奖励支持「区间随机」：打开后改用上下限两个输入框 */}
+                    {eventDraft.rewardType === "points" && (
+                      <div className="flex items-center justify-between rounded-md border px-3 py-2">
+                        <div className="space-y-0.5">
+                          <p className="text-sm font-medium">区间内随机发放</p>
+                          <p className="text-xs text-muted-foreground">
+                            打开后在「下限 ~ 上限」之间随机取一个整数（每个人拿到的数不同，类似抽奖）
+                          </p>
+                        </div>
+                        <Switch
+                          checked={eventDraft.pointsRandom}
+                          onCheckedChange={(v) =>
+                            setEventDraft((d) => ({ ...d, pointsRandom: v }))
+                          }
+                        />
+                      </div>
+                    )}
+
+                    {eventDraft.rewardType === "points" && eventDraft.pointsRandom ? (
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label htmlFor="evRewardMin">积分下限</Label>
+                          <Input
+                            id="evRewardMin"
+                            type="number"
+                            min={1}
+                            placeholder="5"
+                            value={eventDraft.rewardMin}
+                            onChange={(e) =>
+                              setEventDraft((d) => ({ ...d, rewardMin: e.target.value }))
+                            }
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="evRewardMax">积分上限</Label>
+                          <Input
+                            id="evRewardMax"
+                            type="number"
+                            min={1}
+                            placeholder="20"
+                            value={eventDraft.rewardMax}
+                            onChange={(e) =>
+                              setEventDraft((d) => ({ ...d, rewardMax: e.target.value }))
+                            }
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <Label htmlFor="evAmount">
+                          {eventDraft.rewardType === "newapi_quota"
+                            ? "钱包余额（元）"
+                            : eventDraft.rewardType === "points"
+                              ? "积分数量"
+                              : "邀请码额度个数"}
+                        </Label>
+                        <Input
+                          id="evAmount"
+                          type="number"
+                          min={1}
+                          placeholder={
+                            eventDraft.rewardType === "newapi_quota"
+                              ? "1"
+                              : eventDraft.rewardType === "points"
+                                ? "10"
+                                : "2"
+                          }
+                          value={eventDraft.rewardAmount}
+                          onChange={(e) =>
+                            setEventDraft((d) => ({ ...d, rewardAmount: e.target.value }))
+                          }
+                        />
+                      </>
+                    )}
                     {eventDraft.rewardType === "newapi_quota" && (
                       <p className="text-xs text-muted-foreground">
                         按「元」填写，发放时会自动换算成中转站额度（1 元 ={" "}
@@ -7464,6 +7549,13 @@ export default function AdminPage() {
                         「积分 → 商城」商品表第一行的内置商品里配置，这里不写死。
                         与钱包余额不同，积分不要求用户已绑定中转站账号 —— 先攒着，之后由用户
                         自己在「积分与商城」页兑换成中转站余额或购买商城商品。
+                        {eventDraft.pointsRandom && (
+                          <>
+                            <br />
+                            区间随机的金额按「活动 + 用户」固定：同一个人重试也拿到同一个数，
+                            不会出现「刷新一下金额变了」。实际发到的数额会记在「领取名单」里。
+                          </>
+                        )}
                       </p>
                     )}
                   </div>
@@ -7547,6 +7639,30 @@ export default function AdminPage() {
                   <p className="text-xs text-muted-foreground">
                     用户必须在活动卡片输入这个码才能领取（不区分大小写）。把码公布在
                     QQ 群公告等站外位置，即可验证「真的进过群」。码本身不会展示给用户。
+                  </p>
+                </div>
+              )}
+              {eventDraft.conditionType === "github_star" && (
+                <div className="space-y-1.5 pt-1">
+                  <Input
+                    placeholder="owner/repo，例如 Doulor/DoulorCloud"
+                    maxLength={120}
+                    value={eventDraft.conditionRepo}
+                    onChange={(e) =>
+                      setEventDraft((d) => ({ ...d, conditionRepo: e.target.value }))
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    用户要填自己的 GitHub 用户名，服务端去这个仓库的 stargazers 名单里核验。
+                    <span className="font-medium">必须是公开仓库</span>
+                    —— 私有仓库读不到名单，会变成「所有人都核验失败」。
+                    名单缓存 5 分钟，所以刚点的 star 最多 5 分钟后才认。
+                    <br />
+                    <span className="font-medium text-destructive">
+                      还需要给 Worker 配一个 GitHub Token
+                    </span>
+                    （环境变量/密钥 <code className="font-mono">GITHUB_TOKEN</code>）：
+                    GitHub 现在要鉴权才肯返回 star 名单，没配的话用户会看到「无法核验」。
                   </p>
                 </div>
               )}

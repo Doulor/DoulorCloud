@@ -28,6 +28,7 @@ import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
 import { Label } from "@/components/ui/label"
+import { KeyGroupCell, KeyGroupNote, KeyGroupPicker } from "@/components/ai-key-group"
 import {
   Card,
   CardContent,
@@ -465,6 +466,15 @@ export default function AiPage() {
   // 新建 Key
   const [keyOpen, setKeyOpen] = React.useState(false)
   const [keyName, setKeyName] = React.useState("")
+  /**
+   * 新建 Key 选的分组。空串 = 用服务端给的默认（站点分组）。
+   * 捐献模型在独立分组里，只有选了那个分组的 Key 才调得到 —— 见 status.keyGroups。
+   */
+  const [keyGroup, setKeyGroup] = React.useState("")
+  /** 建 Key 可选的分组（服务端下发，别在前端写死分组名） */
+  const keyGroups = status?.keyGroups ?? []
+  /** 捐献模型所在的分组名 */
+  const donationGroup = status?.donationGroup ?? "donation"
   /** 全部模型清单默认折叠：推荐分档已给出选择建议，完整清单是查漏用途 */
   const [modelsOpen, setModelsOpen] = React.useState(false)
 
@@ -697,7 +707,7 @@ export default function AiPage() {
   const handleCreateKey = async () => {
     setBusy(true)
     try {
-      const res = await newapiApi.createKey(keyName)
+      const res = await newapiApi.createKey(keyName, keyGroup || undefined)
       setCreatedKey(res.key.fullKey)
       setKeyName("")
       // 静默刷新列表，不能让整页 loading 卸载掉展示完整 Key 的弹窗
@@ -1085,6 +1095,7 @@ export default function AiPage() {
                   <TableRow>
                     <TableHead>{t("ai.key.col.name")}</TableHead>
                     <TableHead>Key</TableHead>
+                    <TableHead>分组</TableHead>
                     <TableHead>{t("ai.key.col.created")}</TableHead>
                     <TableHead className="w-24" />
                   </TableRow>
@@ -1095,6 +1106,10 @@ export default function AiPage() {
                       <TableCell className="text-sm">{k.name}</TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">
                         {k.maskedKey}
+                      </TableCell>
+                      <TableCell>
+                        {/* 分组决定这个 Key 能调哪些模型（捐献模型在独立分组里） */}
+                        <KeyGroupCell group={k.group} donationGroup={donationGroup} />
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">
                         {fmtTime(k.createdAt)}
@@ -1237,7 +1252,9 @@ export default function AiPage() {
                 status.availableGroups.map((g) => {
                   const list = status.groupModels[g] ?? []
                   if (list.length === 0) return null
-                  const label = g === "donation" ? t("ai.group.donation") : g === "default" ? t("ai.group.default") : g
+                  // ⚠️ 分组名来自服务端（可在管理面板改），别在前端写死 "donation"
+                  const isDonation = g === donationGroup
+                  const label = isDonation ? t("ai.group.donation") : g === "default" ? t("ai.group.default") : g
                   return (
                     <div key={g} className="space-y-2">
                       <div className="flex items-center gap-2">
@@ -1250,6 +1267,9 @@ export default function AiPage() {
                             {t("ai.currentAccount")}
                           </Badge>
                         )}
+                        {/* 捐献分组必须点明「要用另一个分组的 Key」——
+                            否则用户会拿 default 的 Key 去调，直接 403 报无权访问 */}
+                        {isDonation && <KeyGroupNote donationGroup={donationGroup} />}
                       </div>
                       <div className="flex flex-wrap gap-2">
                         {list.map((m) => (
@@ -1350,9 +1370,12 @@ export default function AiPage() {
                 onChange={(e) => setKeyName(e.target.value)}
               />
             </div>
-            <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-              {t("ai.key.groupNote")}
-            </div>
+            <KeyGroupPicker
+              keyGroups={keyGroups}
+              donationGroup={donationGroup}
+              value={keyGroup}
+              onChange={setKeyGroup}
+            />
             </>
           )}
 

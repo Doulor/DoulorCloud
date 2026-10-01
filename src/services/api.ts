@@ -1711,10 +1711,19 @@ export const eventApi = {
   /** 单个活动（公开）：活动分享链接用；draft / scheduled 会 404 */
   get: (id: string) => request<{ event: EventItem }>(`/events/${encodeURIComponent(id)}`),
   /** 认证码活动必须带 code；其余活动 code 可省略 */
-  claim: (id: string, code?: string) =>
+  /**
+   * 领取活动奖励。
+   *
+   * `code` 用于「凭认证码」的活动，`github` 用于「点了 GitHub star」的活动 ——
+   * 两者都只是**线索**，服务端一律重新核验，前端传什么都不信。
+   */
+  claim: (id: string, code?: string, github?: string) =>
     request<{ status: string; detail: string }>(
       `/events/${encodeURIComponent(id)}/claim`,
-      { method: "POST", body: JSON.stringify({ code: code ?? "" }) }
+      {
+        method: "POST",
+        body: JSON.stringify({ code: code ?? "", github: github ?? "" }),
+      }
     ),
 }
 
@@ -2018,8 +2027,25 @@ export const feedbackApi = {
       `/admin/feedback${status ? `?status=${encodeURIComponent(status)}` : ""}`
     ),
 
-  reply: (payload: { id: string; reply: string; status?: string; images?: string[] }) =>
-    request<{ feedback: AdminFeedbackItem }>("/admin/feedback/reply", {
+  /**
+   * 回复一条反馈。
+   *
+   * `rewardPoints` > 0 时**顺手给作者发一笔积分奖励**（2026-10-01 加）：
+   * 同一张反馈只会发一次（服务端按反馈 id 幂等），重复保存不会重复发，
+   * 返回体里的 `reward.duplicated` 用于区分这一点。
+   */
+  reply: (payload: {
+    id: string
+    reply: string
+    status?: string
+    images?: string[]
+    /** 附带的积分奖励；不填 / 0 = 不发 */
+    rewardPoints?: number
+  }) =>
+    request<{
+      feedback: AdminFeedbackItem
+      reward: { amount: number; balance: number; duplicated: boolean } | null
+    }>("/admin/feedback/reply", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
