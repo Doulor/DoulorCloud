@@ -2037,6 +2037,63 @@ export const zh = {
   "rp.pageDesc": "为你的账号设置一个新的登录密码。",
 
   "dmsg.bellAria": "私信（{n} 条未读）",
+
+  // —— 工具：Markdown 预览 ——
+  "md.desc": "左边写、右边看，支持表格、任务列表、代码块。写完可以导出成 HTML 或 .md 文件。",
+  "md.section.source": "Markdown 源码",
+  "md.section.preview": "预览",
+  "md.placeholder": "在这里输入 Markdown…",
+  "md.downloadMd": "下载 .md",
+  "md.exportHtml": "导出 HTML",
+  "md.htmlTitle": "文档",
+  "md.fileName": "文档-{ts}.{ext}",
+  "md.sample": "# 标题\n\n这是一段**正文**，支持 *斜体*、~~删除线~~ 和 `行内代码`。\n\n## 列表\n\n- 第一项\n- 第二项\n  - 嵌套一项\n\n## 表格\n\n| 项目 | 说明 |\n| --- | --- |\n| 语法 | GitHub 风格 |\n| 导出 | 可存成 HTML |\n\n> 引用一段话。\n\n```js\nconsole.log(\"代码块也支持高亮结构\")\n```\n",
+
+  // —— 管理面板 · 访问统计 ——
+  "an.today": "今天",
+  "an.yesterday": "昨天",
+  "an.pv": "浏览量（PV）",
+  "an.uv": "独立访客（UV）",
+  "an.trend": "访问趋势",
+  "an.trendDesc": "按天的 PV（柱）/ UV（线不画，看数值）",
+  "an.pages": "页面热度",
+  "an.pagesDesc": "访问最多的路径",
+  "an.referrers": "来源分析",
+  "an.referrersDesc": "访客从哪来",
+  "an.direct": "直接访问",
+  "an.tab.traffic": "访问统计",
+  "an.tab.users": "用户数据",
+  "an.days7": "近 7 天",
+  "an.days30": "近 30 天",
+  "an.days90": "近 90 天",
+  "an.err.load": "加载统计失败",
+
+  // —— 管理面板 · 审计日志 ——
+  "au.role.root": "站长",
+  "au.role.admin": "管理员",
+  "au.onlyAdmins": "仅管理员操作",
+  "au.allRecords": "全部审计记录",
+  "au.allActions": "全部操作类型",
+  "au.onlyMgmt": "仅管理操作",
+  "au.empty": "没有符合条件的审计记录",
+  "au.emptyDesc": "换个筛选条件，或切到「全部审计记录」看看。",
+  "au.timeline": "操作时间线",
+  "au.pageInfo": "第 {page} / {total} 页 · 共 {n} 条",
+  "au.rollback.title": "关于「操作回退」",
+  "au.rollback.p1":
+    "这页目前**只做展示**。回退的前提是能从记录里恢复出当时的状态，而审计日志只存了「动作 + 一句描述」，没有变更前后的结构化快照 —— 删掉的子域名、被覆盖的设置旧值，都无法从这条记录还原。",
+  "au.rollback.p2":
+    "能做的路子：让各个写入操作把「改前 / 改后」一起记进日志（需要逐个接口改造），之后才能对**设置类、封禁类**这类纯站内状态做单个/批量回退。删除类和涉及外部系统（Cloudflare、NewAPI、邮件）的操作本质上不可逆，永远不会支持。",
+  "au.err.load": "加载审计记录失败",
+
+  // —— 表情分组名 ——
+  "emoji.cat.smile": "表情",
+  "emoji.cat.gesture": "手势",
+  "emoji.cat.mood": "心情",
+  "emoji.cat.animal": "动物",
+  "emoji.cat.food": "美食",
+  "emoji.cat.activity": "活动",
+  "emoji.cat.other": "其他",
 } as const
 
 export type MessageKey = keyof typeof zh

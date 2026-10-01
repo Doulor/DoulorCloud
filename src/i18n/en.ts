@@ -2122,4 +2122,63 @@ export const en: Record<MessageKey, string> = {
 
   "dmsg.bellAria": "Direct messages ({n} unread)",
 
+  // —— Tool: Markdown preview ——
+  "md.desc":
+    "Write on the left, see it rendered on the right — tables, task lists and code blocks included. Export as HTML or .md when done.",
+  "md.section.source": "Markdown source",
+  "md.section.preview": "Preview",
+  "md.placeholder": "Type Markdown here…",
+  "md.downloadMd": "Download .md",
+  "md.exportHtml": "Export HTML",
+  "md.htmlTitle": "Document",
+  "md.fileName": "document-{ts}.{ext}",
+  "md.sample":
+    "# Heading\n\nThis is **body text** with *italics*, ~~strikethrough~~ and `inline code`.\n\n## List\n\n- First item\n- Second item\n  - Nested item\n\n## Table\n\n| Item | Description |\n| --- | --- |\n| Syntax | GitHub flavoured |\n| Export | HTML supported |\n\n> A blockquote.\n\n```js\nconsole.log(\"Code blocks are highlighted too\")\n```\n",
+
+  // —— Admin · traffic analytics ——
+  "an.today": "Today",
+  "an.yesterday": "Yesterday",
+  "an.pv": "Page views (PV)",
+  "an.uv": "Unique visitors (UV)",
+  "an.trend": "Traffic trend",
+  "an.trendDesc": "Daily PV (bars); UV shown as numbers",
+  "an.pages": "Top pages",
+  "an.pagesDesc": "Most visited paths",
+  "an.referrers": "Referrers",
+  "an.referrersDesc": "Where visitors come from",
+  "an.direct": "Direct",
+  "an.tab.traffic": "Traffic",
+  "an.tab.users": "Users",
+  "an.days7": "Last 7 days",
+  "an.days30": "Last 30 days",
+  "an.days90": "Last 90 days",
+  "an.err.load": "Couldn't load analytics",
+
+  // —— Admin · audit log ——
+  "au.role.root": "Owner",
+  "au.role.admin": "Admin",
+  "au.onlyAdmins": "Admin actions only",
+  "au.allRecords": "All audit records",
+  "au.allActions": "All action types",
+  "au.onlyMgmt": "Management actions only",
+  "au.empty": "No matching audit records",
+  "au.emptyDesc": "Change the filters, or switch to \\u201cAll audit records\\u201d.",
+  "au.timeline": "Action timeline",
+  "au.pageInfo": "Page {page} / {total} · {n} records",
+  "au.rollback.title": "About \\u201caction rollback\\u201d",
+  "au.rollback.p1":
+    "This page is display-only for now. Rolling back requires reconstructing the previous state from the record, but the audit log only stores an action plus a one-line description — no structured before/after snapshot. Deleted subdomains and overwritten setting values simply can't be restored from it.",
+  "au.rollback.p2":
+    "The viable path: have each write operation log its before/after values (requires touching every handler), after which pure in-site state like settings and bans could be rolled back individually or in bulk. Deletions and anything touching external systems (Cloudflare, NewAPI, email) are irreversible by nature and will never be supported.",
+  "au.err.load": "Couldn't load audit records",
+
+  // —— Emoji group names ——
+  "emoji.cat.smile": "Smileys",
+  "emoji.cat.gesture": "Gestures",
+  "emoji.cat.mood": "Mood",
+  "emoji.cat.animal": "Animals",
+  "emoji.cat.food": "Food",
+  "emoji.cat.activity": "Activity",
+  "emoji.cat.other": "Other",
+
 }

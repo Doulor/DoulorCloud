@@ -21,19 +21,21 @@ import { LoadingBlock } from "@/components/loading-block"
 import { analyticsApi, errMsg } from "@/services/api"
 import { UserAnalyticsPanel } from "./admin-analytics-users"
 import type { AnalyticsOverview } from "@/types"
+import { useT, tStatic } from "@/i18n"
 
 /** 相对时间（今天/昨天/N 天前） */
 function dayLabel(date: string): string {
   const d = new Date(date + "T00:00:00")
   const today = new Date()
   const diff = Math.round((today.getTime() - d.getTime()) / 86400000)
-  if (diff === 0) return "今天"
-  if (diff === 1) return "昨天"
+  if (diff === 0) return tStatic("an.today")
+  if (diff === 1) return tStatic("an.yesterday")
   return `${date.slice(5)}`
 }
 
 /** 访问统计（访客侧） */
 function TrafficPanel({ days }: { days: string }) {
+  const { t } = useT()
   const [data, setData] = React.useState<AnalyticsOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
 
@@ -42,7 +44,7 @@ function TrafficPanel({ days }: { days: string }) {
     try {
       setData(await analyticsApi.overview(Number(days)))
     } catch (err) {
-      toast.error(errMsg(err, "加载统计失败"))
+      toast.error(errMsg(err, t("an.err.load")))
     } finally {
       setLoading(false)
     }
@@ -66,7 +68,7 @@ function TrafficPanel({ days }: { days: string }) {
           <div className="flex items-center gap-3">
             <Eye className="h-5 w-5 text-muted-foreground" />
             <div>
-              <p className="text-xs text-muted-foreground">浏览量（PV）</p>
+              <p className="text-xs text-muted-foreground">{t("an.pv")}</p>
               <p className="text-2xl font-semibold tabular-nums">{data.summary.pv}</p>
             </div>
           </div>
@@ -75,7 +77,7 @@ function TrafficPanel({ days }: { days: string }) {
           <div className="flex items-center gap-3">
             <Users className="h-5 w-5 text-muted-foreground" />
             <div>
-              <p className="text-xs text-muted-foreground">独立访客（UV）</p>
+              <p className="text-xs text-muted-foreground">{t("an.uv")}</p>
               <p className="text-2xl font-semibold tabular-nums">{data.summary.uv}</p>
             </div>
           </div>
@@ -87,13 +89,13 @@ function TrafficPanel({ days }: { days: string }) {
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <BarChart3 className="h-4 w-4 text-muted-foreground" />
-            访问趋势
+            {t("an.trend")}
           </CardTitle>
-          <CardDescription>按天的 PV（柱）/ UV（线不画，看数值）</CardDescription>
+          <CardDescription>{t("an.trendDesc")}</CardDescription>
         </CardHeader>
         <CardContent>
           {data.byDay.length === 0 ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">暂无数据</p>
+            <p className="py-6 text-center text-sm text-muted-foreground">{t("common.empty")}</p>
           ) : (
             <div className="space-y-1.5">
               {data.byDay.map((d) => (
@@ -122,12 +124,12 @@ function TrafficPanel({ days }: { days: string }) {
         {/* 页面热度 */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">页面热度</CardTitle>
-            <CardDescription>访问最多的路径</CardDescription>
+            <CardTitle className="text-base">{t("an.pages")}</CardTitle>
+            <CardDescription>{t("an.pagesDesc")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
             {data.byPath.length === 0 ? (
-              <p className="py-4 text-center text-sm text-muted-foreground">暂无数据</p>
+              <p className="py-4 text-center text-sm text-muted-foreground">{t("common.empty")}</p>
             ) : (
               data.byPath.map((p) => (
                 <div key={p.path} className="flex items-center gap-2 text-xs">
@@ -152,17 +154,17 @@ function TrafficPanel({ days }: { days: string }) {
         {/* 来源分析 */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">来源分析</CardTitle>
-            <CardDescription>访客从哪来</CardDescription>
+            <CardTitle className="text-base">{t("an.referrers")}</CardTitle>
+            <CardDescription>{t("an.referrersDesc")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
             {data.byReferrer.length === 0 ? (
-              <p className="py-4 text-center text-sm text-muted-foreground">暂无数据</p>
+              <p className="py-4 text-center text-sm text-muted-foreground">{t("common.empty")}</p>
             ) : (
               data.byReferrer.map((r) => (
                 <div key={r.referrer} className="flex items-center gap-2 text-xs">
                   <span className="w-40 shrink-0 truncate" title={r.referrer}>
-                    {r.referrer === "direct" ? "直接访问" : r.referrer}
+                    {r.referrer === "direct" ? t("an.direct") : r.referrer}
                   </span>
                   <div className="h-3 flex-1 overflow-hidden rounded bg-muted">
                     <div
@@ -184,12 +186,13 @@ function TrafficPanel({ days }: { days: string }) {
 }
 
 export function AnalyticsPanel() {
+  const { t } = useT()
   const [tab, setTab] = React.useState<"traffic" | "users">("traffic")
   const [days, setDays] = React.useState("7")
 
   const tabs: { key: "traffic" | "users"; label: string }[] = [
-    { key: "traffic", label: "访问统计" },
-    { key: "users", label: "用户数据" },
+    { key: "traffic", label: t("an.tab.traffic") },
+    { key: "users", label: t("an.tab.users") },
   ]
 
   return (
@@ -218,9 +221,9 @@ export function AnalyticsPanel() {
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="7">近 7 天</SelectItem>
-            <SelectItem value="30">近 30 天</SelectItem>
-            <SelectItem value="90">近 90 天</SelectItem>
+            <SelectItem value="7">{t("an.days7")}</SelectItem>
+            <SelectItem value="30">{t("an.days30")}</SelectItem>
+            <SelectItem value="90">{t("an.days90")}</SelectItem>
           </SelectContent>
         </Select>
       </div>

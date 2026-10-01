@@ -51,9 +51,11 @@ import { compressImage } from "@/lib/image-compress"
 import { fmtTime, relTime } from "@/lib/format"
 import { EMOJI_GROUPS } from "@/lib/emojis"
 import type { Post, CommentNode, CommunityStats, Notification } from "@/types"
+import { useT } from "@/i18n"
 
 /** 表情选择面板：点击把 emoji 插到光标处 */
 function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
+  const { t } = useT()
   const [open, setOpen] = React.useState(false)
   const [group, setGroup] = React.useState(0)
   const ref = React.useRef<HTMLDivElement>(null)
@@ -98,7 +100,7 @@ function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
                     : "text-muted-foreground hover:bg-accent")
                 }
               >
-                {g.name}
+                {t(g.name)}
               </button>
             ))}
           </div>

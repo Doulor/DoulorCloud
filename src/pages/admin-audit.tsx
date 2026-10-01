@@ -30,15 +30,17 @@ import { EmptyState } from "@/components/empty-state"
 import { auditApi, HttpError } from "@/services/api"
 import { fmtDateTime } from "@/lib/format"
 import type { AdminAuditData } from "@/types"
+import { useT, tStatic } from "@/i18n"
 
 /** 操作者徽章：管理员 / 站长 */
 function actorRoleBadge(role: string) {
-  if (role === "root") return "站长"
-  if (role === "admin") return "管理员"
+  if (role === "root") return tStatic("au.role.root")
+  if (role === "admin") return tStatic("au.role.admin")
   return ""
 }
 
 export function AuditPanel() {
+  const { t } = useT()
   const [data, setData] = React.useState<AdminAuditData | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [scope, setScope] = React.useState<"admins" | "all">("admins")
@@ -61,7 +63,7 @@ export function AuditPanel() {
         })
       )
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载审计记录失败")
+      toast.error(err instanceof HttpError ? err.message : t("au.err.load"))
     } finally {
       setLoading(false)
     }
@@ -89,8 +91,8 @@ export function AuditPanel() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="admins">仅管理员操作</SelectItem>
-              <SelectItem value="all">全部审计记录</SelectItem>
+              <SelectItem value="admins">{t("au.onlyAdmins")}</SelectItem>
+              <SelectItem value="all">{t("au.allRecords")}</SelectItem>
             </SelectContent>
           </Select>
           {/* 操作类型筛选 */}
@@ -102,11 +104,11 @@ export function AuditPanel() {
             }}
           >
             <SelectTrigger className="w-56">
-              <SelectValue placeholder="全部操作类型" />
+              <SelectValue placeholder={t("au.allActions")} />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">全部操作类型</SelectItem>
-              <SelectItem value="__mgmt__">仅管理操作</SelectItem>
+              <SelectItem value="all">{t("au.allActions")}</SelectItem>
+              <SelectItem value="__mgmt__">{t("au.onlyMgmt")}</SelectItem>
               {(data?.actions ?? []).map((a) => (
                 <SelectItem key={a.action} value={a.action}>
                   {a.action}（{a.c}）
@@ -121,7 +123,7 @@ export function AuditPanel() {
           ) : (
             <RefreshCw className="h-3.5 w-3.5" />
           )}
-          刷新
+          {t("common.refresh")}
         </Button>
       </div>
 
@@ -130,15 +132,15 @@ export function AuditPanel() {
       ) : !data || data.items.length === 0 ? (
         <EmptyState
           icon={ScrollText}
-          title="没有符合条件的审计记录"
-          description="换个筛选条件，或切到「全部审计记录」看看。"
+          title={t("au.empty")}
+          description={t("au.emptyDesc")}
         />
       ) : (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <History className="h-4 w-4 text-muted-foreground" />
-              操作时间线
+              {t("au.timeline")}
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-0">
@@ -198,10 +200,10 @@ export function AuditPanel() {
             onClick={() => setPage((p) => Math.max(1, p - 1))}
           >
             <ChevronLeft className="h-3.5 w-3.5" />
-            上一页
+            {t("common.prev")}
           </Button>
           <span className="tabular-nums">
-            第 {data.page} / {totalPages} 页 · 共 {data.total} 条
+            {t("au.pageInfo", { page: data.page, total: totalPages, n: data.total })}
           </span>
           <Button
             variant="outline"
@@ -209,7 +211,7 @@ export function AuditPanel() {
             disabled={page >= totalPages || loading}
             onClick={() => setPage((p) => p + 1)}
           >
-            下一页
+            {t("common.next")}
             <ChevronRight className="h-3.5 w-3.5" />
           </Button>
         </div>
@@ -218,18 +220,14 @@ export function AuditPanel() {
       {/* 为什么没有回退按钮（诚实说明边界） */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm">关于「操作回退」</CardTitle>
+          <CardTitle className="text-sm">{t("au.rollback.title")}</CardTitle>
         </CardHeader>
         <CardContent className="text-xs text-muted-foreground">
           <p>
-            这页目前**只做展示**。回退的前提是能从记录里恢复出当时的状态，而审计日志只存了
-            「动作 + 一句描述」，没有变更前后的结构化快照——删掉的子域名、被覆盖的设置旧值，
-            都无法从这条记录还原。
+            {t("au.rollback.p1")}
           </p>
           <p className="mt-1.5">
-            能做的路子：让各个写入操作把「改前 / 改后」一起记进日志（需要逐个接口改造），
-            之后才能对**设置类、封禁类**这类纯站内状态做单个/批量回退。
-            删除类和涉及外部系统（Cloudflare、NewAPI、邮件）的操作本质上不可逆，永远不会支持。
+            {t("au.rollback.p2")}
           </p>
         </CardContent>
       </Card>
