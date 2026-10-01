@@ -2873,4 +2873,8 @@ export const en: Record<MessageKey, string> = {
   "af.err.replyEmpty": "The reply cannot be empty",
   "af.err.update": "Update failed",
 
+  "quota.unit.times": "times",
+  "quota.unit.rows": "rows",
+  "quota.unit.items": "items",
+
 }

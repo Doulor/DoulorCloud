@@ -27,6 +27,7 @@ import { LoadingBlock } from "@/components/loading-block"
 import { adminApi, errMsg } from "@/services/api"
 import { fmtDateTime, formatBytes, formatBytesShort } from "@/lib/format"
 import type { CfQuotaHighlight, CfQuotaItem, CfQuotaOverview, CfPlanSource } from "@/types"
+import { useT } from "@/i18n"
 
 /** 千分位整数 */
 function fmtNum(n: number): string {
@@ -35,7 +36,7 @@ function fmtNum(n: number): string {
 
 /** 按单位渲染用量：字节走 formatBytes，其余走千分位 */
 function fmtUsed(value: number, unit: CfQuotaItem["unit"]): string {
-  return unit === "字节" ? formatBytes(value) : fmtNum(value)
+  return unit === "bytes" ? formatBytes(value) : fmtNum(value)
 }
 
 /** 美元金额（小额保留 4 位，避免 $0.0004 被显示成 $0.00） */
@@ -81,7 +82,7 @@ function MiniBars({ item }: { item: CfQuotaItem }) {
               key={h.date}
               className={`flex-1 rounded-sm ${cls.bar} opacity-60`}
               style={{ height: `${Math.max(4, pct)}%` }}
-              title={`${h.date}：${item.unit === "字节" ? formatBytes(h.value) : fmtNum(h.value)}`}
+              title={`${h.date}：${item.unit === "bytes" ? formatBytes(h.value) : fmtNum(h.value)}`}
             />
           )
         })}
@@ -142,7 +143,7 @@ function Ring({ item }: { item: CfQuotaHighlight }) {
         {item.label}
       </div>
       <div className="text-center text-[10px] text-muted-foreground">
-        {fmtUsed(item.used, item.unit)} / {item.unit === "字节" ? formatBytesShort(item.limit) : fmtNum(item.limit)}
+        {fmtUsed(item.used, item.unit)} / {item.unit === "bytes" ? formatBytesShort(item.limit) : fmtNum(item.limit)}
       </div>
     </div>
   )
@@ -150,6 +151,7 @@ function Ring({ item }: { item: CfQuotaHighlight }) {
 
 /** 单项额度卡片 */
 function QuotaRow({ item, paid }: { item: CfQuotaItem; paid: boolean }) {
+  const { t } = useT()
   // 读不到：明确写原因，不装成 0
   if (item.used == null) {
     return (
@@ -174,7 +176,7 @@ function QuotaRow({ item, paid }: { item: CfQuotaItem; paid: boolean }) {
   const limitText =
     item.limit == null
       ? null
-      : item.unit === "字节"
+      : item.unit === "bytes"
         ? formatBytesShort(item.limit)
         : fmtNum(item.limit)
 
@@ -185,7 +187,7 @@ function QuotaRow({ item, paid }: { item: CfQuotaItem; paid: boolean }) {
         <span className="font-mono text-xs">
           <span className={cls ? cls.text : ""}>{usedText}</span>
           {limitText && <span className="text-muted-foreground"> / {limitText}</span>}
-          {item.unit !== "字节" && <span className="text-muted-foreground"> {item.unit}</span>}
+          {item.unit !== "bytes" && <span className="text-muted-foreground"> {t(item.unit)}</span>}
           {percent != null && (
             <span className={`ml-2 ${cls?.text ?? ""}`}>
               {percent >= 1000 ? ">999%" : `${percent.toFixed(2)}%`}

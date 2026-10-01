@@ -2757,6 +2757,10 @@ export const zh = {
   "af.ok.statusUpdated": "状态已更新",
   "af.err.replyEmpty": "回复内容不能为空",
   "af.err.update": "更新失败",
+
+  "quota.unit.times": "次",
+  "quota.unit.rows": "行",
+  "quota.unit.items": "个",
 } as const
 
 export type MessageKey = keyof typeof zh

@@ -1261,14 +1261,19 @@ export type CfPlanSource = "manual" | "subscription" | "usage" | "default"
  * 单项额度。
  * `used`/`limit` 为 null 表示读不到 —— 此时 `error` 一定有值。
  */
+export type CfQuotaUnit = "times" | "rows" | "items" | "bytes"
+
 export interface CfQuotaItem {
   key: string
   label: string
   used: number | null
   /** 免费版=每日硬上限；付费版=套餐内含的量 */
   limit: number | null
-  /** 展示单位；`字节` 由前端用 formatBytes 渲染 */
-  unit: "次" | "行" | "个" | "字节"
+  /**
+   * 展示单位（**i18n key**）。`quota.unit.bytes` 由前端用 formatBytes 渲染，
+   * 其余用 `t(unit)` 取词。
+   */
+  unit: CfQuotaUnit
   /** 重置周期说明（每天 00:00 UTC / 每月 / 不重置） */
   period: string
   /** used/limit 是哪个周期的量 */
