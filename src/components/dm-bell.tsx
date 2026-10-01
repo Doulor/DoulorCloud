@@ -5,6 +5,7 @@ import { MessagesSquare } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAuth } from "@/hooks/use-auth"
 import { dmApi } from "@/services/api"
+import { useT } from "@/i18n"
 
 /** 未读数轮询间隔：与消息铃铛一致（60 秒） */
 const POLL_MS = 60_000
@@ -22,6 +23,7 @@ const POLL_MS = 60_000
  * 切回页面时立刻纠正；不引入跨组件事件总线，少一处耦合。
  */
 export function DmBell() {
+  const { t } = useT()
   const { user } = useAuth()
   const navigate = useNavigate()
   const [count, setCount] = React.useState(0)
@@ -65,8 +67,8 @@ export function DmBell() {
       size="icon"
       className="relative"
       onClick={() => navigate("/dashboard/dm")}
-      aria-label={count > 0 ? `私信（${count} 条未读）` : "私信"}
-      title="私信"
+      aria-label={count > 0 ? t("dmsg.bellAria", { n: count }) : t("dmsg.title")}
+      title={t("dmsg.title")}
     >
       <MessagesSquare className="h-4 w-4" />
       {count > 0 && (

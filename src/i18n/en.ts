@@ -2035,4 +2035,91 @@ export const en: Record<MessageKey, string> = {
   "bq.unreadable": "Unreadable",
   "bq.err.load": "Couldn't load Brevo quota",
 
+  // —— Reset / forgot password ——
+  "rp.title": "Set a new password",
+  "rp.restart": "Restart the reset",
+  "rp.confirmPlaceholder": "Type it again",
+  "rp.submit": "Reset password",
+  "rp.ok": "Password reset — sign in with the new one",
+  "rp.err.invalidLink": "The reset link is invalid — start over",
+  "rp.err.failed": "Reset failed — start over",
+  "fp.title": "Forgot password",
+  "fp.desc": "Enter your registered email and we'll send a password reset message.",
+  "fp.backToLogin": "Back to sign in",
+  "fp.remember": "Remembered it?",
+  "fp.ok": "Reset email sent",
+  "fp.checkEmail": "Check {email} for the message and click the reset link (it may land in spam).",
+  "fp.expiry": "The link is valid for 15 minutes — finish the reset soon.",
+  "fp.emailLabel": "Registered email",
+  "fp.submit": "Send reset email",
+
+  // —— Tool: text diff ——
+  "td.desc": "Find line-by-line differences between two texts — for edits, config checks and contract comparisons.",
+  "td.section.old": "Original (old)",
+  "td.section.new": "Updated (new)",
+  "td.section.result": "Diff result",
+  "td.placeholderOld": "Paste the old version…",
+  "td.placeholderNew": "Paste the new version…",
+  "td.ignoreCase": "Ignore case",
+  "td.ignoreSpaces": "Ignore extra whitespace",
+  "td.addedPrefix": "",
+  "td.addedSuffix": " lines added ·",
+  "td.removedPrefix": "",
+  "td.removedSuffix": " lines removed",
+  "td.empty": "Paste the two texts into the boxes above to compare them",
+  "td.legend": "Green = added in the new version, red = removed from the old one",
+
+  // —— Tool: color picker ——
+  "cp.desc":
+    "Click anywhere on an image to pick that pixel's color, or extract the dominant palette automatically.",
+  "cp.section.image": "Image (click to pick a color)",
+  "cp.section.color": "Color",
+  "cp.replace": "Choose another",
+  "cp.hint": "Move the mouse over the image to preview a color; click to lock it in",
+  "cp.palette": "Dominant palette (click to copy)",
+  "cp.paletteHint": "Extracted automatically once an image is loaded",
+  "cp.err.canvas": "Couldn't read the canvas",
+  "cp.err.open": "Couldn't open the image",
+
+  // —— Tool: interesting websites ——
+  "fl.desc": "A few sites worth a look — click and you're off. This site neither participates in nor endorses them.",
+  "fl.searchPlaceholder": "Search name, description or URL…",
+  "fl.empty.search": "No matching sites",
+  "fl.empty.category": "Nothing in this category yet — try another",
+  "fl.empty.none": "The admin hasn't added anything yet — check back later",
+  "fl.err.load": "Couldn't load",
+
+  // —— Shop icon picker ——
+  "si.label": "Icon (optional)",
+  "si.change": "Change icon",
+  "si.pickFrom": "Choose from {n} icons",
+  "si.note1": "Without an icon, the product card shows a default one.",
+  "si.note2": "The icon fills a large band at the top of the card; a cover image takes precedence.",
+  "si.clear": "Clear",
+  "si.searchPlaceholder": "Search icon names (English, e.g. gift / card)",
+  "si.noMatch": "No matching icons.",
+
+  // —— Direct messages ——
+  "dmsg.desc":
+    "Chat one-on-one with someone on the site — marketplace trades and personal spaces both lead here.",
+  "dmsg.peerPlaceholder": "Enter a username to start a conversation",
+  "dmsg.startChat": "Start conversation",
+  "dmsg.list": "List",
+  "dmsg.pickTitle": "Pick a conversation",
+  "dmsg.pickDesc":
+    "Choose a conversation on the left, or type a username above to start a new one.",
+  "dmsg.noMessages": "No messages yet — say something",
+  "dmsg.minePrefix": "You: ",
+  "dmsg.read": " · read",
+  "dmsg.inputPlaceholder": "Type a message, Enter to send",
+  "dmsg.err.open": "Couldn't open this conversation",
+  "dmsg.err.self": "You can't message yourself",
+  "dmsg.err.send": "Sending failed",
+
+  "dmsg.title": "Direct messages",
+  "dmsg.empty": "No conversations yet",
+  "rp.pageDesc": "Choose a new sign-in password for your account.",
+
+  "dmsg.bellAria": "Direct messages ({n} unread)",
+
 }

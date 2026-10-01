@@ -7,8 +7,10 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { authApi, HttpError } from "@/services/api"
+import { useT } from "@/i18n"
 
 export default function ForgotPasswordPage() {
+  const { t } = useT()
   const [email, setEmail] = React.useState("")
   const [sent, setSent] = React.useState(false)
   const [loading, setLoading] = React.useState(false)
@@ -20,9 +22,9 @@ export default function ForgotPasswordPage() {
     try {
       const res = await authApi.forgotPassword(email.trim())
       setSent(true)
-      toast.success(res.message ?? "重置邮件已发送")
+      toast.success(res.message ?? t("fp.ok"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "发送失败，请稍后重试")
+      toast.error(err instanceof HttpError ? err.message : t("lay.sendFailed"))
     } finally {
       setLoading(false)
     }
@@ -30,24 +32,24 @@ export default function ForgotPasswordPage() {
 
   return (
     <AuthShell
-      title="找回密码"
-      description="输入你的注册邮箱，我们会发送一封重置密码邮件。"
+      title={t("fp.title")}
+      description={t("fp.desc")}
       footer={
         <>
-          想起密码了？<AuthFooterLink to="/login" label="返回登录" />
+          {t("fp.remember")}<AuthFooterLink to="/login" label={t("fp.backToLogin")} />
         </>
       }
     >
       {sent ? (
         <div className="space-y-3 rounded-md border bg-muted/40 p-4 text-sm text-muted-foreground">
-          <p className="font-medium text-foreground">重置邮件已发送</p>
-          <p>请到 {email} 查收邮件并点击其中的重置链接（可能进垃圾箱）。</p>
-          <p className="text-xs">链接 15 分钟内有效，请尽快完成重置。</p>
+          <p className="font-medium text-foreground">{t("fp.ok")}</p>
+          <p>{t("fp.checkEmail", { email })}</p>
+          <p className="text-xs">{t("fp.expiry")}</p>
         </div>
       ) : (
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="email">注册邮箱</Label>
+            <Label htmlFor="email">{t("fp.emailLabel")}</Label>
             <Input
               id="email"
               type="email"
@@ -60,7 +62,7 @@ export default function ForgotPasswordPage() {
           </div>
           <Button type="submit" className="w-full" disabled={loading}>
             {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-            发送重置邮件
+            {t("fp.submit")}
           </Button>
         </form>
       )}

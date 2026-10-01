@@ -1953,6 +1953,90 @@ export const zh = {
   "bq.loading": "正在读取 Brevo 额度…",
   "bq.unreadable": "读不到",
   "bq.err.load": "加载 Brevo 额度失败",
+
+  // —— 重置密码 / 找回密码 ——
+  "rp.title": "设置新密码",
+  "rp.restart": "重新发起找回",
+  "rp.confirmPlaceholder": "再次输入",
+  "rp.submit": "重置密码",
+  "rp.ok": "密码已重置，请使用新密码登录",
+  "rp.err.invalidLink": "重置链接无效，请重新发起找回",
+  "rp.err.failed": "重置失败，请重新发起找回",
+  "fp.title": "找回密码",
+  "fp.desc": "输入你的注册邮箱，我们会发送一封重置密码邮件。",
+  "fp.backToLogin": "返回登录",
+  "fp.remember": "想起密码了？",
+  "fp.ok": "重置邮件已发送",
+  "fp.checkEmail": "请到 {email} 查收邮件并点击其中的重置链接（可能进垃圾箱）。",
+  "fp.expiry": "链接 15 分钟内有效，请尽快完成重置。",
+  "fp.emailLabel": "注册邮箱",
+  "fp.submit": "发送重置邮件",
+
+  // —— 工具：文本对比 ——
+  "td.desc": "逐行找出两段文字的差异，改稿、核对配置、比对合同都用得上。",
+  "td.section.old": "原文（旧）",
+  "td.section.new": "新版（新）",
+  "td.section.result": "对比结果",
+  "td.placeholderOld": "粘贴旧版本内容…",
+  "td.placeholderNew": "粘贴新版本内容…",
+  "td.ignoreCase": "忽略大小写",
+  "td.ignoreSpaces": "忽略多余空格",
+  "td.addedPrefix": "新增 ",
+  "td.addedSuffix": " 行 ·",
+  "td.removedPrefix": "删除 ",
+  "td.removedSuffix": " 行",
+  "td.empty": "在上下两个框里分别粘贴要对比的内容",
+  "td.legend": "绿色 = 新版新增，红色 = 旧版删除",
+
+  // —— 工具：取色与配色 ——
+  "cp.desc": "从图片上点一下就能取到那个像素的颜色，也可以自动提取整张图的主色调。",
+  "cp.section.image": "图片（点一下取色）",
+  "cp.section.color": "颜色",
+  "cp.replace": "换一张",
+  "cp.hint": "把鼠标移到图上可以看到颜色，点一下锁定",
+  "cp.palette": "图片主色调（点击复制）",
+  "cp.paletteHint": "载入图片后自动提取",
+  "cp.err.canvas": "无法读取画布",
+  "cp.err.open": "图片打开失败",
+
+  // —— 工具：有趣的网页分享 ——
+  "fl.desc": "一些值得一逛的网站，点开即走，本站不参与也不背书。",
+  "fl.searchPlaceholder": "搜索名称、说明或网址…",
+  "fl.empty.search": "没有匹配的网站",
+  "fl.empty.category": "这一栏还没有内容，翻翻其它栏",
+  "fl.empty.none": "站长还没放内容进来，等等看",
+  "fl.err.load": "加载失败",
+
+  // —— 商品图标选择器 ——
+  "si.label": "图标（可选）",
+  "si.change": "更换图标",
+  "si.pickFrom": "从 {n} 个图标里选",
+  "si.note1": "没选图标时，商品卡片上显示一个默认图标。",
+  "si.note2": "图标会占卡片顶部一大块；填了封面图则以图片为准。",
+  "si.clear": "清除",
+  "si.searchPlaceholder": "搜索图标名（英文，如 gift / card）",
+  "si.noMatch": "没有匹配的图标。",
+
+  // —— 私信 ——
+  "dmsg.desc": "和站内的某个人单独聊 —— 商城交易、个人空间都能从这里联系对方。",
+  "dmsg.peerPlaceholder": "输入用户名发起私信",
+  "dmsg.startChat": "开始对话",
+  "dmsg.list": "列表",
+  "dmsg.pickTitle": "选择一个会话",
+  "dmsg.pickDesc": "从左边挑一个会话，或者在上面的输入框里填用户名发起新的对话。",
+  "dmsg.noMessages": "还没有消息，说点什么吧",
+  "dmsg.minePrefix": "我：",
+  "dmsg.read": " · 已读",
+  "dmsg.inputPlaceholder": "输入消息，回车发送",
+  "dmsg.err.open": "打不开这个会话",
+  "dmsg.err.self": "不能给自己发私信",
+  "dmsg.err.send": "发送失败",
+
+  "dmsg.title": "私信",
+  "dmsg.empty": "还没有任何会话",
+  "rp.pageDesc": "为你的账号设置一个新的登录密码。",
+
+  "dmsg.bellAria": "私信（{n} 条未读）",
 } as const
 
 export type MessageKey = keyof typeof zh

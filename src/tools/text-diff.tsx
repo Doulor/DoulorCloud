@@ -4,6 +4,7 @@ import { ToolShell, ToolSection } from "@/components/toolbox/tool-shell"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
+import { useT } from "@/i18n"
 
 type Kind = "same" | "add" | "del"
 
@@ -60,6 +61,7 @@ function diffLines(a: string[], b: string[]): Row[] {
 }
 
 export default function TextDiffTool() {
+  const { t } = useT()
   const [left, setLeft] = React.useState("")
   const [right, setRight] = React.useState("")
   const [ignoreCase, setIgnoreCase] = React.useState(false)
@@ -88,27 +90,27 @@ export default function TextDiffTool() {
 
   return (
     <ToolShell
-      title="文本对比"
-      description="逐行找出两段文字的差异，改稿、核对配置、比对合同都用得上。"
+      title={t("toolbox.textDiff.name")}
+      description={t("td.desc")}
       wide
     >
       <div className="grid gap-4 lg:grid-cols-2">
-        <ToolSection title="原文（旧）">
+        <ToolSection title={t("td.section.old")}>
           <Textarea
             value={left}
             onChange={(e) => setLeft(e.target.value)}
             rows={14}
             className="min-h-[260px] font-mono text-[13px]"
-            placeholder="粘贴旧版本内容…"
+            placeholder={t("td.placeholderOld")}
           />
         </ToolSection>
-        <ToolSection title="新版（新）">
+        <ToolSection title={t("td.section.new")}>
           <Textarea
             value={right}
             onChange={(e) => setRight(e.target.value)}
             rows={14}
             className="min-h-[260px] font-mono text-[13px]"
-            placeholder="粘贴新版本内容…"
+            placeholder={t("td.placeholderNew")}
           />
         </ToolSection>
       </div>
@@ -121,7 +123,7 @@ export default function TextDiffTool() {
             onChange={(e) => setIgnoreCase(e.target.checked)}
             className="h-4 w-4 accent-primary"
           />
-          忽略大小写
+          {t("td.ignoreCase")}
         </label>
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -130,18 +132,22 @@ export default function TextDiffTool() {
             onChange={(e) => setIgnoreSpace(e.target.checked)}
             className="h-4 w-4 accent-primary"
           />
-          忽略多余空格
+          {t("td.ignoreSpaces")}
         </label>
         <span className="text-sm text-muted-foreground">
-          新增 <span className="font-medium text-emerald-600 dark:text-emerald-400">{added}</span> 行 ·
-          删除 <span className="font-medium text-red-600 dark:text-red-400">{removed}</span> 行
+          {t("td.addedPrefix")}
+          <span className="font-medium text-emerald-600 dark:text-emerald-400">{added}</span>
+          {t("td.addedSuffix")}
+          {t("td.removedPrefix")}
+          <span className="font-medium text-red-600 dark:text-red-400">{removed}</span>
+          {t("td.removedSuffix")}
         </span>
       </div>
 
-      <ToolSection title="对比结果">
+      <ToolSection title={t("td.section.result")}>
         {!hasInput ? (
           <p className="py-10 text-center text-sm text-muted-foreground">
-            在上下两个框里分别粘贴要对比的内容
+            {t("td.empty")}
           </p>
         ) : (
           <div className="max-h-[520px] overflow-auto rounded-lg border">
@@ -175,7 +181,7 @@ export default function TextDiffTool() {
 
       <div className="flex justify-end">
         <Label className="text-xs text-muted-foreground">
-          绿色 = 新版新增，红色 = 旧版删除
+          {t("td.legend")}
         </Label>
       </div>
     </ToolShell>

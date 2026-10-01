@@ -31,11 +31,13 @@ import { setVisibleInterval } from "@/lib/visible-interval"
 import { dmApi, errMsg, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 import type { DmConversation, DmMessage } from "@/types"
+import { useT } from "@/i18n"
 
 /** 轮询间隔：会话列表与当前会话都用它 */
 const POLL_MS = 5000
 
 export default function DmPage() {
+  const { t } = useT()
   const { username: routePeer } = useParams<{ username?: string }>()
   const navigate = useNavigate()
   const { user } = useAuth()
@@ -80,7 +82,7 @@ export default function DmPage() {
       setMessages(res.messages)
       cursorRef.current = res.nextCursor
     } catch (err) {
-      toast.error(errMsg(err, "打不开这个会话"))
+      toast.error(errMsg(err, t("dmsg.err.open")))
     } finally {
       setMsgLoading(false)
     }
@@ -158,7 +160,7 @@ export default function DmPage() {
     const target = name.trim()
     if (!target) return
     if (user && target.toLowerCase() === user.username.toLowerCase()) {
-      toast.error("不能给自己发私信")
+      toast.error(t("dmsg.err.self"))
       return
     }
     navigate(`/dashboard/dm/${encodeURIComponent(target)}`)
@@ -176,7 +178,7 @@ export default function DmPage() {
       void loadConversations()
     } catch (err) {
       if (err instanceof HttpError) toast.error(err.message)
-      else toast.error("发送失败")
+      else toast.error(t("dmsg.err.send"))
     } finally {
       setSending(false)
     }
@@ -184,7 +186,7 @@ export default function DmPage() {
 
   return (
     <div>
-      <PageHeader title="私信" description="和站内的某个人单独聊 —— 商城交易、个人空间都能从这里联系对方。" />
+      <PageHeader title={t("dmsg.title")} description={t("dmsg.desc")} />
 
       <div className="grid gap-4 lg:grid-cols-[20rem_1fr]">
         {/* 左：会话列表 + 找人 */}
@@ -198,12 +200,12 @@ export default function DmPage() {
             }}
           >
             <Input
-              placeholder="输入用户名发起私信"
+              placeholder={t("dmsg.peerPlaceholder")}
               value={peerInput}
               maxLength={64}
               onChange={(e) => setPeerInput(e.target.value)}
             />
-            <Button type="submit" size="icon" variant="outline" title="开始对话">
+            <Button type="submit" size="icon" variant="outline" title={t("dmsg.startChat")}>
               <MessageSquarePlus className="h-4 w-4" />
             </Button>
           </form>
@@ -215,7 +217,7 @@ export default function DmPage() {
               </div>
             ) : conversations.length === 0 ? (
               <p className="p-6 text-center text-sm text-muted-foreground">
-                还没有任何会话
+                {t("dmsg.empty")}
               </p>
             ) : (
               <div className="divide-y">
@@ -245,7 +247,7 @@ export default function DmPage() {
                           </span>
                         </div>
                         <p className="truncate text-xs text-muted-foreground">
-                          {c.last.mine && "我："}
+                          {c.last.mine && t("dmsg.minePrefix")}
                           {c.last.body}
                         </p>
                       </div>
@@ -267,8 +269,8 @@ export default function DmPage() {
           {!peerName ? (
             <div className="flex flex-1 items-center justify-center p-8">
               <EmptyState
-                title="选择一个会话"
-                description="从左边挑一个会话，或者在上面的输入框里填用户名发起新的对话。"
+                title={t("dmsg.pickTitle")}
+                description={t("dmsg.pickDesc")}
               />
             </div>
           ) : (
@@ -279,7 +281,7 @@ export default function DmPage() {
                   className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground lg:hidden"
                 >
                   <ArrowLeft className="h-3.5 w-3.5" />
-                  列表
+                  {t("dmsg.list")}
                 </Link>
                 <UserAvatar
                   username={peerName}
@@ -292,7 +294,7 @@ export default function DmPage() {
                   to={`/space/${encodeURIComponent(peerName)}`}
                   className="ml-auto text-xs text-muted-foreground hover:text-foreground"
                 >
-                  查看空间
+                  {t("lay.viewSpace")}
                 </Link>
               </div>
 
@@ -303,7 +305,7 @@ export default function DmPage() {
                   </div>
                 ) : messages.length === 0 ? (
                   <p className="py-8 text-center text-sm text-muted-foreground">
-                    还没有消息，说点什么吧
+                    {t("dmsg.noMessages")}
                   </p>
                 ) : (
                   messages.map((m) => {
@@ -332,7 +334,7 @@ export default function DmPage() {
                           </div>
                           <div className="mt-1 text-[11px] text-muted-foreground">
                             {relTime(m.createdAt)}
-                            {mine && m.readAt ? " · 已读" : ""}
+                            {mine && m.readAt ? t("dmsg.read") : ""}
                           </div>
                         </div>
                       </div>
@@ -349,7 +351,7 @@ export default function DmPage() {
                 }}
               >
                 <Input
-                  placeholder="输入消息，回车发送"
+                  placeholder={t("dmsg.inputPlaceholder")}
                   value={text}
                   maxLength={2000}
                   onChange={(e) => setText(e.target.value)}
