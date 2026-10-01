@@ -312,7 +312,7 @@ export default function SpacePage() {
               }
             >
               <MessageSquare className="h-4 w-4" />
-              发私信
+              {t("dmsg.title")}
             </Button>
           )}
         </CardContent>

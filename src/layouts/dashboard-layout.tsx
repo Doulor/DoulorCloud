@@ -485,7 +485,7 @@ export function DashboardLayout({
                   <button
                     type="button"
                     className="-m-1.5 shrink-0 rounded-full p-1.5 transition-opacity hover:opacity-80 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    aria-label="账户菜单"
+                    aria-label={t("lay.accountMenu")}
                   >
                     <UserAvatar
                       username={user.username}

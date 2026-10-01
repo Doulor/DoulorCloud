@@ -1095,7 +1095,7 @@ export default function AiPage() {
                   <TableRow>
                     <TableHead>{t("ai.key.col.name")}</TableHead>
                     <TableHead>Key</TableHead>
-                    <TableHead>分组</TableHead>
+                    <TableHead>{t("ai.key.col.group")}</TableHead>
                     <TableHead>{t("ai.key.col.created")}</TableHead>
                     <TableHead className="w-24" />
                   </TableRow>

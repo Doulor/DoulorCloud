@@ -2,6 +2,7 @@ import * as React from "react"
 import { Upload } from "lucide-react"
 
 import { cn } from "@/lib/utils"
+import { useT } from "@/i18n"
 
 interface FileDropProps {
   accept?: string
@@ -18,11 +19,12 @@ export function FileDrop({
   accept,
   multiple,
   onFiles,
-  label = "点击选择文件，或拖拽到这里",
+  label,
   hint,
   disabled,
   className,
 }: FileDropProps) {
+  const { t } = useT()
   const [over, setOver] = React.useState(false)
   const inputRef = React.useRef<HTMLInputElement>(null)
 
@@ -62,7 +64,7 @@ export function FileDrop({
       )}
     >
       <Upload className="h-6 w-6 text-muted-foreground" />
-      <p className="text-sm font-medium">{label}</p>
+      <p className="text-sm font-medium">{label ?? t("fd.defaultLabel")}</p>
       {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
       <input
         ref={inputRef}
