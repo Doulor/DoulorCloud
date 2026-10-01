@@ -24,6 +24,7 @@ import { Badge } from "@/components/ui/badge"
 import { adminApi, errMsg } from "@/services/api"
 import { fmtDateTime } from "@/lib/format"
 import type { BrevoKeyQuota, BrevoQuotaOverview } from "@/types"
+import { useT } from "@/i18n"
 
 /** 千分位整数 */
 function fmtNum(n: number): string {
@@ -39,16 +40,17 @@ function remainingClass(remainingPercent: number): { bar: string; text: string }
 
 /** 单把 Key 的一行 */
 function KeyRow({ key_, limit }: { key_: BrevoKeyQuota; limit: number }) {
+  const { t } = useT()
   // 读不到：明确写原因，不装成 0
   if (!key_.ok || key_.credits == null) {
     return (
       <div className="rounded-md border border-dashed p-3">
         <div className="flex items-center justify-between gap-2">
           <span className="text-sm font-medium">
-            第 {key_.index} 把{key_.email ? ` · ${key_.email}` : ""}
+            {t("bq.keyNth", { n: key_.index })}{key_.email ? ` · ${key_.email}` : ""}
           </span>
           <Badge variant="outline" className="text-xs">
-            读不到
+            {t("bq.unreadable")}
           </Badge>
         </div>
         {key_.error && <p className="mt-1 text-xs text-destructive">{key_.error}</p>}
@@ -64,12 +66,12 @@ function KeyRow({ key_, limit }: { key_: BrevoKeyQuota; limit: number }) {
     <div className="rounded-md border p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
         <span className="text-sm font-medium">
-          第 {key_.index} 把{key_.email ? ` · ${key_.email}` : ""}
+          {t("bq.keyNth", { n: key_.index })}{key_.email ? ` · ${key_.email}` : ""}
           {key_.plan && <span className="ml-1 text-[11px] text-muted-foreground">（{key_.plan}）</span>}
         </span>
         <span className="font-mono text-xs">
-          <span className={cls.text}>剩 {fmtNum(key_.credits)}</span>
-          <span className="text-muted-foreground"> / {fmtNum(limit)} 封</span>
+          <span className={cls.text}>{t("bq.left", { n: fmtNum(key_.credits) })}</span>
+          <span className="text-muted-foreground">{t("bq.ofQuota", { n: fmtNum(limit) })}</span>
           <span className={`ml-2 ${cls.text}`}>{remainingPercent.toFixed(0)}%</span>
         </span>
       </div>
@@ -82,13 +84,14 @@ function KeyRow({ key_, limit }: { key_: BrevoKeyQuota; limit: number }) {
       </div>
 
       <p className="mt-1 text-[11px] text-muted-foreground">
-        今日已用 {fmtNum(used)} 封{key_.creditsType ? `（额度类型 ${key_.creditsType}）` : ""}
+        {t("bq.usedToday", { n: fmtNum(used) })}{key_.creditsType ? t("bq.creditsType", { type: key_.creditsType }) : ""}
       </p>
     </div>
   )
 }
 
 export function BrevoQuotaPanel() {
+  const { t } = useT()
   const [data, setData] = React.useState<BrevoQuotaOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [refreshing, setRefreshing] = React.useState(false)
@@ -99,7 +102,7 @@ export function BrevoQuotaPanel() {
       setData(await adminApi.brevoQuota())
     } catch (err) {
       // 首次加载失败不弹 toast 打扰编辑（可能只是没配 Key），刷新失败才提示
-      if (fresh) toast.error(errMsg(err, "加载 Brevo 额度失败"))
+      if (fresh) toast.error(errMsg(err, t("bq.err.load")))
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -111,7 +114,7 @@ export function BrevoQuotaPanel() {
   }, [load])
 
   // 未配置任何 Key 就整块不显示（邮件板块已另有 Key 输入框）
-  if (loading) return <div className="text-xs text-muted-foreground">正在读取 Brevo 额度…</div>
+  if (loading) return <div className="text-xs text-muted-foreground">{t("bq.loading")}</div>
   if (!data || data.totalCount === 0) return null
 
   const capacity = data.totalCount * data.freeDailyLimit
@@ -122,24 +125,28 @@ export function BrevoQuotaPanel() {
     <div className="space-y-3 rounded-md border bg-muted/30 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <p className="text-sm font-medium">Brevo 剩余额度</p>
+          <p className="text-sm font-medium">{t("bq.title")}</p>
           <p className="mt-0.5 text-[11px] text-muted-foreground">
-            {data.okCount}/{data.totalCount} 把可读 · 每账号每天 {fmtNum(data.freeDailyLimit)} 封，按天重置 ·
-            读取于 {fmtDateTime(data.generatedAt)}
+            {t("bq.summary", {
+              ok: data.okCount,
+              total: data.totalCount,
+              limit: fmtNum(data.freeDailyLimit),
+              at: fmtDateTime(data.generatedAt),
+            })}
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={() => void load(true)} disabled={refreshing}>
           <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
-          刷新
+          {t("common.refresh")}
         </Button>
       </div>
 
       <div>
         <div className="flex items-baseline justify-between text-xs">
-          <span className="font-medium">今日合计剩余</span>
+          <span className="font-medium">{t("bq.totalLeft")}</span>
           <span className="font-mono">
             <span className={cls.text}>{fmtNum(data.totalRemaining)}</span>
-            <span className="text-muted-foreground"> / {fmtNum(capacity)} 封</span>
+            <span className="text-muted-foreground">{t("bq.ofQuota", { n: fmtNum(capacity) })}</span>
           </span>
         </div>
         <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-muted">

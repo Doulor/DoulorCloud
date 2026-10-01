@@ -13,6 +13,7 @@
  */
 import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
+import { useT, tStatic } from "@/i18n"
 import {
   Select,
   SelectContent,
@@ -23,8 +24,8 @@ import {
 
 /** 建 Key 时可选的某一个分组在 UI 上的名字 */
 function groupLabel(g: string, donationGroup: string, first: string): string {
-  if (g === donationGroup) return `${g}（捐献模型）`
-  if (g === first) return `${g}（默认）`
+  if (g === donationGroup) return tStatic("kg.groupDonation", { group: g })
+  if (g === first) return tStatic("kg.groupDefault", { group: g })
   return g
 }
 
@@ -47,12 +48,13 @@ export function KeyGroupPicker({
   value: string
   onChange: (v: string) => void
 }) {
+  const { t } = useT()
   const first = keyGroups[0] ?? ""
   const current = value || first
   return (
     <>
       <div className="space-y-2">
-        <Label>分组</Label>
+        <Label>{t("ai.key.group")}</Label>
         <Select value={current} onValueChange={onChange}>
           <SelectTrigger>
             <SelectValue />
@@ -69,19 +71,19 @@ export function KeyGroupPicker({
       <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
         {current === donationGroup ? (
           <>
-            <span className="font-medium text-foreground">{donationGroup}</span> 分组可以调用
-            <span className="font-medium text-foreground">捐献模型</span>（模型名以{" "}
-            <code className="font-mono">donation-</code> 开头，见「全部可用模型」）。
-            这类模型来自其他用户的捐献，稳定性不如站点自有模型，适合单独用一个 Key 试。
-            额度同样来自你的订阅。
+            {t("kg.donationNote.a", { group: donationGroup })}
+            <span className="font-medium text-foreground">{t("kg.donationModel")}</span>
+            {t("kg.donationNote.b")}
+            <code className="font-mono">donation-</code>
+            {t("kg.donationNote.c")}
           </>
         ) : (
           <>
-            额度来自你的免费订阅每日发放。想用
-            <span className="font-medium text-foreground">捐献模型</span>（其他用户捐献的渠道），
-            需要另外建一个
-            <span className="font-medium text-foreground">{donationGroup}</span>{" "}
-            分组的 Key —— 两类模型走不同分组，一个 Key 不能同时调用。
+            {t("kg.freeNote.a")}
+            <span className="font-medium text-foreground">{t("kg.donationModel")}</span>
+            {t("kg.freeNote.b")}
+            <span className="font-medium text-foreground">{donationGroup}</span>
+            {t("kg.freeNote.c")}
           </>
         )}
       </div>
@@ -97,16 +99,18 @@ export function KeyGroupCell({
   group: string | null | undefined
   donationGroup: string
 }) {
+  const { t } = useT()
   if (!group) return <span className="text-xs text-muted-foreground">—</span>
-  if (group === donationGroup) return <Badge variant="secondary">捐献模型</Badge>
+  if (group === donationGroup) return <Badge variant="secondary">{t("kg.donationModel")}</Badge>
   return <Badge variant="outline">{group}</Badge>
 }
 
 /** 「全部可用模型」里捐献分组标题旁的那句提示 */
 export function KeyGroupNote({ donationGroup }: { donationGroup: string }) {
+  const { t } = useT()
   return (
     <span className="text-xs text-muted-foreground">
-      来自用户捐献，需另建一个「{donationGroup}」分组的 Key 才能调用
+      {t("kg.footerNote", { group: donationGroup })}
     </span>
   )
 }

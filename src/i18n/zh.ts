@@ -1857,6 +1857,102 @@ export const zh = {
   "ed.copyBase64": "只复制 Base64 部分",
   "ed.err.badBase64": "不是合法的 Base64 内容",
   "ed.err.decode": "解码失败，请检查内容是否被截断",
+
+  // —— 登录页（环境自检）——
+  "lg.cookieFail":
+    "登录成功，但浏览器没有保存登录状态。请检查：① 是否禁用了本站的 Cookie / 站点数据；② 是否处于无痕或隐私模式；③ 是否通过 https 访问。",
+  "lg.verifyHint": "登录成功，建议前往「设置」验证真实邮箱",
+  "lg.ok": "登录成功",
+  "lg.diag.ok": "环境检测正常",
+  "lg.diag.bad": "⚠️ 环境检测发现问题",
+  "lg.collapse": "收起",
+  "lg.expand": "展开",
+  "lg.diag.https": "HTTPS 访问",
+  "lg.diag.httpsHint": "请用 https:// 打开本站",
+  "lg.diag.cookie": "允许写入 Cookie",
+  "lg.diag.cookieHint": "浏览器阻止了本站 Cookie / 站点数据",
+  "lg.diag.storage": "本地存储可用",
+  "lg.diag.storageHint": "可能处于无痕或隐私模式",
+  "lg.diag.domain": "当前域名：",
+  "lg.diag.tip":
+    "若「允许写入 Cookie」为否：请在本站设置里允许 Cookie／站点数据，或关闭无痕模式。iOS 还需检查「设置 → Safari → 阻止所有 Cookie」与「隐私 → 网站数据」。",
+  "lg.diag.rowOk": "正常",
+  "lg.diag.rowBad": "异常{hint}",
+
+  // —— 聊天室 ——
+  "chat.title": "公共聊天室",
+  "chat.back": "返回上一页",
+  "chat.backShort": "返回",
+  "chat.onlineCount": "{n} 人在线",
+  "chat.closed": "聊天室已关闭",
+  "chat.closedDesc":
+    "管理员暂时关闭了聊天室（通常是站点资源紧张时用来省流量的应急措施），恢复后无需任何操作，这里会自动恢复。",
+  "chat.loadFailed": "消息加载失败，请检查网络后重试。",
+  "chat.empty": "还没有消息，来说第一句吧。",
+  "chat.placeholder": "说点什么…（Enter 发送）",
+  "chat.loginToSpeak": "登录后可发言",
+  "chat.err.send": "发送失败",
+
+  // —— OAuth 授权确认 ——
+  "oc.scope.openid.title": "确认你的身份",
+  "oc.scope.openid.desc": "用于判断你是本站的哪个账号。",
+  "oc.scope.profile.title": "读取你的公开资料",
+  "oc.scope.profile.desc": "用户名、昵称、头像。",
+  "oc.scope.email.title": "读取你的邮箱地址",
+  "oc.scope.email.desc": "你在本站注册时填写的真实邮箱。",
+  "oc.scope.unknown": "（未知权限，请谨慎授权）",
+  "oc.title": "授权登录",
+  "oc.wantsAccess": "想要使用你的 Doulor Cloud 账号",
+  "oc.willBeAble": "它将能够：",
+  "oc.note": "它不会拿到你的密码。你随时可以在面板里撤销这个授权。",
+  "oc.deny": "拒绝",
+  "oc.allow": "允许",
+  "oc.failed": "无法完成授权",
+  "oc.back": "返回",
+  "oc.err.params": "授权请求缺少必要参数（client_id / redirect_uri）",
+  "oc.err.load": "无法加载授权信息",
+  "oc.err.op": "操作失败",
+
+  // —— 工具：倒计时与纪念日 ——
+  "cd.desc": "记录重要的日子，看还有多少天，或者已经过去了多久。数据只保存在这台设备上。",
+  "cd.section.add": "添加一个日子",
+  "cd.section.list": "我的日子（{n}）",
+  "cd.namePlaceholder": "名称，如：结婚纪念日",
+  "cd.mode.countdown": "倒数到那天",
+  "cd.mode.since": "从那天起",
+  "cd.empty": "还没有记录，上面添加一个试试",
+  "cd.daysPastMarked": "天前（已过）",
+  "cd.daysAhead": "天后",
+  "cd.daysPast": "天前",
+  "cd.past": "已过 ",
+  "cd.left": "还剩 ",
+  "cd.hms": "{h} 时 {m} 分 {s} 秒",
+
+  // —— Key 分组选择器 ——
+  "kg.groupDonation": "{group}（捐献模型）",
+  "kg.groupDefault": "{group}（默认）",
+  "kg.donationModel": "捐献模型",
+  "kg.donationNote.a": "用 ",
+  "kg.donationNote.b": "（模型名以 ",
+  "kg.donationNote.c":
+    " 开头，见「全部可用模型」）。这类模型来自其他用户的捐献，稳定性不如站点自有模型，适合单独用一个 Key 试。额度同样来自你的订阅。",
+  "kg.freeNote.a": "额度来自你的免费订阅每日发放。想用 ",
+  "kg.freeNote.b": "（其他用户捐献的渠道），需要另外建一个",
+  "kg.freeNote.c": "分组的 Key —— 两类模型走不同分组，一个 Key 不能同时调用。",
+  "kg.footerNote": "来自用户捐献，需另建一个「{group}」分组的 Key 才能调用",
+
+  // —— 管理面板 · Brevo 额度 ——
+  "bq.title": "Brevo 剩余额度",
+  "bq.summary": "{ok}/{total} 把可读 · 每账号每天 {limit} 封，按天重置 · 读取于 {at}",
+  "bq.keyNth": "第 {n} 把",
+  "bq.left": "剩 {n}",
+  "bq.ofQuota": " / {n} 封",
+  "bq.usedToday": "今日已用 {n} 封",
+  "bq.creditsType": "（额度类型 {type}）",
+  "bq.totalLeft": "今日合计剩余",
+  "bq.loading": "正在读取 Brevo 额度…",
+  "bq.unreadable": "读不到",
+  "bq.err.load": "加载 Brevo 额度失败",
 } as const
 
 export type MessageKey = keyof typeof zh

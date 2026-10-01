@@ -1937,4 +1937,102 @@ export const en: Record<MessageKey, string> = {
   "ed.err.badBase64": "Not valid Base64 content",
   "ed.err.decode": "Decoding failed — check whether the content was truncated",
 
+  // —— Login page (environment diagnostics) ——
+  "lg.cookieFail":
+    "Signed in, but the browser didn't store the session. Please check: (1) whether cookies / site data are blocked for this site; (2) whether you're in private/incognito mode; (3) whether you're visiting over https.",
+  "lg.verifyHint": "Signed in — consider verifying your real email under Settings",
+  "lg.ok": "Signed in",
+  "lg.diag.ok": "Environment check passed",
+  "lg.diag.bad": "⚠️ Environment check found problems",
+  "lg.collapse": "Collapse",
+  "lg.expand": "Expand",
+  "lg.diag.https": "HTTPS access",
+  "lg.diag.httpsHint": "Open this site over https://",
+  "lg.diag.cookie": "Cookies allowed",
+  "lg.diag.cookieHint": "The browser is blocking cookies / site data for this site",
+  "lg.diag.storage": "Local storage available",
+  "lg.diag.storageHint": "You may be in private/incognito mode",
+  "lg.diag.domain": "Current domain: ",
+  "lg.diag.tip":
+    "If \\u201cCookies allowed\\u201d is No: allow cookies / site data for this site in your browser settings, or leave private mode. On iOS also check Settings → Safari → Block All Cookies and Privacy → Website Data.",
+  "lg.diag.rowOk": "OK",
+  "lg.diag.rowBad": "Problem{hint}",
+
+  // —— Chat room ——
+  "chat.title": "Public chat room",
+  "chat.back": "Back",
+  "chat.backShort": "Back",
+  "chat.onlineCount": "{n} online",
+  "chat.closed": "Chat is turned off",
+  "chat.closedDesc":
+    "The admin temporarily turned the chat room off (usually a traffic-saving measure when resources are tight). Nothing to do — it comes back automatically.",
+  "chat.loadFailed": "Couldn't load messages — check your network and retry.",
+  "chat.empty": "No messages yet — say the first one.",
+  "chat.placeholder": "Say something… (Enter to send)",
+  "chat.loginToSpeak": "Sign in to chat",
+  "chat.err.send": "Sending failed",
+
+  // —— OAuth consent ——
+  "oc.scope.openid.title": "Confirm your identity",
+  "oc.scope.openid.desc": "Used to tell which account on this site is you.",
+  "oc.scope.profile.title": "Read your public profile",
+  "oc.scope.profile.desc": "Username, nickname, avatar.",
+  "oc.scope.email.title": "Read your email address",
+  "oc.scope.email.desc": "The real email you registered with on this site.",
+  "oc.scope.unknown": "(unknown permission — grant with caution)",
+  "oc.title": "Authorize sign-in",
+  "oc.wantsAccess": "wants to use your Doulor Cloud account",
+  "oc.willBeAble": "It will be able to:",
+  "oc.note": "It never receives your password. You can revoke this authorization anytime from the dashboard.",
+  "oc.deny": "Deny",
+  "oc.allow": "Allow",
+  "oc.failed": "Authorization could not be completed",
+  "oc.back": "Back",
+  "oc.err.params": "The authorization request is missing required parameters (client_id / redirect_uri)",
+  "oc.err.load": "Couldn't load the authorization request",
+  "oc.err.op": "Operation failed",
+
+  // —— Tool: countdown & anniversaries ——
+  "cd.desc":
+    "Track important dates — see how many days are left, or how long it's been. Data stays on this device only.",
+  "cd.section.add": "Add a date",
+  "cd.section.list": "My dates ({n})",
+  "cd.namePlaceholder": "Name, e.g. Wedding anniversary",
+  "cd.mode.countdown": "Count down to it",
+  "cd.mode.since": "Count up from it",
+  "cd.empty": "Nothing yet — add one above",
+  "cd.daysPastMarked": "days ago (passed)",
+  "cd.daysAhead": "days to go",
+  "cd.daysPast": "days ago",
+  "cd.past": "Passed ",
+  "cd.left": "Left ",
+  "cd.hms": "{h}h {m}m {s}s",
+
+  // —— API key group picker ——
+  "kg.groupDonation": "{group} (donation models)",
+  "kg.groupDefault": "{group} (default)",
+  "kg.donationModel": "donation models",
+  "kg.donationNote.a": "Keys in the ",
+  "kg.donationNote.b": " group can call ",
+  "kg.donationNote.c":
+    " (model names start with the prefix shown below — see \\u201cAll available models\\u201d). These come from other users' donations and are less stable than first-party models, so use a dedicated key to try them. Quota comes from your subscription the same way.",
+  "kg.freeNote.a": "Quota comes from your free plan's daily grant. To use ",
+  "kg.freeNote.b": " (channels donated by other users), create a separate key in the",
+  "kg.freeNote.c":
+    " group — the two kinds of models live in different groups, and one key can't call both.",
+  "kg.footerNote": "Donated by a user — needs a separate key in the \\u201c{group}\\u201d group",
+
+  // —— Admin · Brevo quota ——
+  "bq.title": "Brevo remaining quota",
+  "bq.summary": "{ok}/{total} keys readable · {limit} emails/day per account, daily reset · read at {at}",
+  "bq.keyNth": "Key #{n}",
+  "bq.left": "{n} left",
+  "bq.ofQuota": " / {n} emails",
+  "bq.usedToday": "{n} used today",
+  "bq.creditsType": " (credit type {type})",
+  "bq.totalLeft": "Total left today",
+  "bq.loading": "Reading Brevo quota…",
+  "bq.unreadable": "Unreadable",
+  "bq.err.load": "Couldn't load Brevo quota",
+
 }
