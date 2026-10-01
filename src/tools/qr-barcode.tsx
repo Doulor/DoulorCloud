@@ -17,17 +17,19 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { canvasToBlob, downloadBlob } from "@/lib/toolbox/utils"
+import { useT } from "@/i18n"
 
 export default function QrBarcodeTool() {
+  const { t } = useT()
   return (
     <ToolShell
-      title="二维码与条形码"
-      description="把网址、文字、WiFi 密码、联系人做成二维码，或把编号做成条形码，直接下载图片。"
+      title={t("toolbox.qrBarcode.name")}
+      description={t("qr.desc")}
     >
       <Tabs defaultValue="qr">
         <TabsList>
-          <TabsTrigger value="qr">二维码</TabsTrigger>
-          <TabsTrigger value="barcode">条形码</TabsTrigger>
+          <TabsTrigger value="qr">{t("qr.tab.qr")}</TabsTrigger>
+          <TabsTrigger value="barcode">{t("qr.tab.barcode")}</TabsTrigger>
         </TabsList>
         <TabsContent value="qr" className="mt-4">
           <QrPanel />
@@ -43,6 +45,7 @@ export default function QrBarcodeTool() {
 type QrKind = "text" | "wifi" | "vcard"
 
 function QrPanel() {
+  const { t } = useT()
   const [kind, setKind] = React.useState<QrKind>("text")
   const [text, setText] = React.useState("https://cloud.doulor.cn")
   const [ssid, setSsid] = React.useState("")
@@ -106,7 +109,7 @@ function QrPanel() {
       .catch((e: unknown) => {
         if (cancelled) return
         setDataUrl(null)
-        setError(e instanceof Error ? e.message : "生成失败")
+        setError(e instanceof Error ? e.message : t("qr.err.generate"))
       })
     return () => {
       cancelled = true
@@ -122,24 +125,24 @@ function QrPanel() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-      <ToolSection title="内容">
+      <ToolSection title={t("qr.section.content")}>
         <div className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">类型</Label>
+              <Label className="text-xs text-muted-foreground">{t("qr.type")}</Label>
               <Select value={kind} onValueChange={(v) => setKind(v as QrKind)}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="text">网址 / 文字</SelectItem>
-                  <SelectItem value="wifi">WiFi 密码</SelectItem>
-                  <SelectItem value="vcard">联系人名片</SelectItem>
+                  <SelectItem value="text">{t("qr.type.text")}</SelectItem>
+                  <SelectItem value="wifi">{t("qr.type.wifi")}</SelectItem>
+                  <SelectItem value="vcard">{t("qr.type.vcard")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">尺寸</Label>
+              <Label className="text-xs text-muted-foreground">{t("qr.size")}</Label>
               <Select value={String(size)} onValueChange={(v) => setSize(Number(v))}>
                 <SelectTrigger>
                   <SelectValue />
@@ -160,26 +163,26 @@ function QrPanel() {
               value={text}
               onChange={(e) => setText(e.target.value)}
               rows={5}
-              placeholder="输入网址或任意文字"
+              placeholder={t("qr.textPlaceholder")}
             />
           )}
 
           {kind === "wifi" && (
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">WiFi 名称（SSID）</Label>
+                <Label className="text-xs text-muted-foreground">{t("qr.ssid")}</Label>
                 <Input value={ssid} onChange={(e) => setSsid(e.target.value)} placeholder="MyWiFi" />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">密码</Label>
+                <Label className="text-xs text-muted-foreground">{t("qr.password")}</Label>
                 <Input
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="留空表示无密码"
+                  placeholder={t("qr.passwordPlaceholder")}
                 />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">加密方式</Label>
+                <Label className="text-xs text-muted-foreground">{t("qr.encryption")}</Label>
                 <Select value={encryption} onValueChange={setEncryption}>
                   <SelectTrigger>
                     <SelectValue />
@@ -187,7 +190,7 @@ function QrPanel() {
                   <SelectContent>
                     <SelectItem value="WPA">WPA / WPA2 / WPA3</SelectItem>
                     <SelectItem value="WEP">WEP</SelectItem>
-                    <SelectItem value="nopass">无密码</SelectItem>
+                    <SelectItem value="nopass">{t("qr.enc.nopass")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -197,15 +200,15 @@ function QrPanel() {
           {kind === "vcard" && (
             <div className="grid gap-3 sm:grid-cols-3">
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">姓名</Label>
+                <Label className="text-xs text-muted-foreground">{t("qr.vcard.name")}</Label>
                 <Input value={vName} onChange={(e) => setVName(e.target.value)} />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">电话</Label>
+                <Label className="text-xs text-muted-foreground">{t("qr.vcard.phone")}</Label>
                 <Input value={vPhone} onChange={(e) => setVPhone(e.target.value)} />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">单位</Label>
+                <Label className="text-xs text-muted-foreground">{t("qr.vcard.org")}</Label>
                 <Input value={vOrg} onChange={(e) => setVOrg(e.target.value)} />
               </div>
             </div>
@@ -213,7 +216,7 @@ function QrPanel() {
 
           <div className="grid gap-3 sm:grid-cols-3">
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">纠错级别（越高越耐脏）</Label>
+              <Label className="text-xs text-muted-foreground">{t("qr.ecLevel")}</Label>
               <Select value={level} onValueChange={(v) => setLevel(v as "L" | "M" | "Q" | "H")}>
                 <SelectTrigger>
                   <SelectValue />
@@ -227,28 +230,28 @@ function QrPanel() {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">前景色</Label>
+              <Label className="text-xs text-muted-foreground">{t("qr.fg")}</Label>
               <Input type="color" value={dark} onChange={(e) => setDark(e.target.value)} className="h-9 p-1" />
             </div>
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">背景色</Label>
+              <Label className="text-xs text-muted-foreground">{t("qr.bg")}</Label>
               <Input type="color" value={light} onChange={(e) => setLight(e.target.value)} className="h-9 p-1" />
             </div>
           </div>
 
           <p className="text-xs text-muted-foreground">
-            小提示：扫不出来多半是颜色对比不够，前景色尽量深、背景色尽量浅。
+            {t("qr.colorHint")}
           </p>
         </div>
       </ToolSection>
 
-      <ToolSection title="预览">
+      <ToolSection title={t("qr.section.preview")}>
         <div className="flex flex-col items-center gap-3">
           <div className="flex w-full items-center justify-center rounded-lg border bg-white p-3">
             {dataUrl ? (
               <img
                 src={dataUrl}
-                alt="二维码"
+                alt={t("qr.alt.qr")}
                 className="block aspect-square w-full max-w-[240px]"
               />
             ) : (
@@ -259,7 +262,7 @@ function QrPanel() {
           {error && <p className="text-xs text-destructive">{error}</p>}
           <Button onClick={() => void download()} disabled={!payload.trim() || !!error} className="w-full">
             <Download className="h-4 w-4" />
-            下载 PNG
+            {t("qr.downloadPng")}
           </Button>
         </div>
       </ToolSection>
@@ -268,18 +271,19 @@ function QrPanel() {
 }
 
 const BARCODE_FORMATS = [
-  { id: "CODE128", label: "CODE128（通用，字母数字）", sample: "ABC-12345" },
-  { id: "CODE39", label: "CODE39（字母数字，工业常用）", sample: "ABC123" },
-  { id: "EAN13", label: "EAN-13（13 位商品码）", sample: "6901234567892" },
-  { id: "EAN8", label: "EAN-8（8 位商品码）", sample: "12345670" },
-  { id: "UPC", label: "UPC-A（12 位，北美商品码）", sample: "123456789012" },
-  { id: "ITF14", label: "ITF-14（14 位物流箱码）", sample: "10012345000017" },
-  { id: "MSI", label: "MSI（仓库货架）", sample: "1234567" },
-  { id: "pharmacode", label: "Pharmacode（药品）", sample: "1234" },
-  { id: "codabar", label: "Codabar（快递单）", sample: "A123456789B" },
+  { id: "CODE128", label: "qr.fmt.code128", sample: "ABC-12345" },
+  { id: "CODE39", label: "qr.fmt.code39", sample: "ABC123" },
+  { id: "EAN13", label: "qr.fmt.ean13", sample: "6901234567892" },
+  { id: "EAN8", label: "qr.fmt.ean8", sample: "12345670" },
+  { id: "UPC", label: "qr.fmt.upca", sample: "123456789012" },
+  { id: "ITF14", label: "qr.fmt.itf14", sample: "10012345000017" },
+  { id: "MSI", label: "qr.fmt.msi", sample: "1234567" },
+  { id: "pharmacode", label: "qr.fmt.pharmacode", sample: "1234" },
+  { id: "codabar", label: "qr.fmt.codabar", sample: "A123456789B" },
 ]
 
 function BarcodePanel() {
+  const { t } = useT()
   const [format, setFormat] = React.useState("CODE128")
   const [value, setValue] = React.useState("ABC-12345")
   const [barWidth, setBarWidth] = React.useState(2)
@@ -310,7 +314,7 @@ function BarcodePanel() {
       })
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "生成失败，请检查内容格式")
+      setError(e instanceof Error ? e.message : t("qr.err.generateFormat"))
       const ctx = canvas.getContext("2d")
       if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height)
     }
@@ -327,10 +331,10 @@ function BarcodePanel() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-      <ToolSection title="内容">
+      <ToolSection title={t("qr.section.content")}>
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">编码格式</Label>
+            <Label className="text-xs text-muted-foreground">{t("qr.barcode.format")}</Label>
             <Select
               value={format}
               onValueChange={(v) => {
@@ -353,20 +357,20 @@ function BarcodePanel() {
           </div>
 
           <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">内容</Label>
+            <Label className="text-xs text-muted-foreground">{t("qr.barcode.content")}</Label>
             <Input
               value={value}
               onChange={(e) => setValue(e.target.value)}
               placeholder={current?.sample}
             />
             {current && (
-              <p className="text-xs text-muted-foreground">示例：{current.sample}</p>
+              <p className="text-xs text-muted-foreground">{t("qr.barcode.sample", { sample: current.sample })}</p>
             )}
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">条宽（{barWidth}px）</Label>
+              <Label className="text-xs text-muted-foreground">{t("qr.barcode.barWidth", { n: barWidth })}</Label>
               <input
                 type="range"
                 min={1}
@@ -377,7 +381,7 @@ function BarcodePanel() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">高度（{height}px）</Label>
+              <Label className="text-xs text-muted-foreground">{t("qr.barcode.height", { n: height })}</Label>
               <input
                 type="range"
                 min={40}
@@ -397,12 +401,12 @@ function BarcodePanel() {
               onChange={(e) => setShowText(e.target.checked)}
               className="h-4 w-4 accent-primary"
             />
-            在下方显示文字
+            {t("qr.barcode.showText")}
           </label>
         </div>
       </ToolSection>
 
-      <ToolSection title="预览">
+      <ToolSection title={t("qr.section.preview")}>
         <div className="flex flex-col items-center gap-3">
           <div className="flex w-full items-center justify-center overflow-hidden rounded-lg border bg-white p-3">
             <canvas ref={canvasRef} className="h-auto max-w-full" />
@@ -410,7 +414,7 @@ function BarcodePanel() {
           {error && <p className="text-xs text-destructive">{error}</p>}
           <Button onClick={() => void download()} disabled={!value.trim() || !!error} className="w-full">
             <Download className="h-4 w-4" />
-            下载 PNG
+            {t("qr.downloadPng")}
           </Button>
         </div>
       </ToolSection>

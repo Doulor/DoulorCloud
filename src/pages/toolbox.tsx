@@ -5,7 +5,14 @@ import { Search, Wrench } from "lucide-react"
 import { PageHeader } from "@/components/page-header"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { CATEGORIES, TOOLS, type ToolCategory } from "@/lib/toolbox/registry"
+import {
+  CATEGORIES,
+  TOOLS,
+  toolDesc,
+  toolName,
+  type ToolCategory,
+} from "@/lib/toolbox/registry"
+import { useT } from "@/i18n"
 import { cn } from "@/lib/utils"
 
 /**
@@ -15,6 +22,7 @@ import { cn } from "@/lib/utils"
  * 每个工具的代码是独立的懒加载分包，不点进去就不会下载。
  */
 export default function ToolboxPage() {
+  const { t } = useT()
   const [tab, setTab] = React.useState<ToolCategory | "all">("all")
   const [keyword, setKeyword] = React.useState("")
 
@@ -26,18 +34,20 @@ export default function ToolboxPage() {
 
   const list = React.useMemo(() => {
     const kw = keyword.trim().toLowerCase()
-    return TOOLS.filter((t) => {
-      if (tab !== "all" && t.category !== tab) return false
+    return TOOLS.filter((tool) => {
+      if (tab !== "all" && tool.category !== tab) return false
       if (!kw) return true
-      return `${t.name} ${t.desc} ${t.id}`.toLowerCase().includes(kw)
+      return `${toolName(t, tool)} ${toolDesc(t, tool)} ${tool.id}`
+        .toLowerCase()
+        .includes(kw)
     })
-  }, [tab, keyword])
+  }, [tab, keyword, t])
 
   return (
     <div className="space-y-6">
       <PageHeader
-        title="工具箱"
-        description="常用的小工具集合，全部在你的浏览器里运行，文件不会上传"
+        title={t("toolbox.title")}
+        description={t("toolbox.desc")}
       />
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -45,7 +55,7 @@ export default function ToolboxPage() {
           <TabsList className="h-auto flex-wrap justify-start">
             {CATEGORIES.map((c) => (
               <TabsTrigger key={c.id} value={c.id} className="gap-1.5">
-                {c.label}
+                {t(c.label)}
                 <span className="text-[11px] text-muted-foreground">{counts[c.id] ?? 0}</span>
               </TabsTrigger>
             ))}
@@ -57,7 +67,7 @@ export default function ToolboxPage() {
           <Input
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
-            placeholder="搜索工具…"
+            placeholder={t("toolbox.searchPlaceholder")}
             className="pl-9"
           />
         </div>
@@ -66,7 +76,7 @@ export default function ToolboxPage() {
       {list.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed py-16 text-center">
           <Wrench className="h-6 w-6 text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">没有找到匹配的工具</p>
+          <p className="text-sm text-muted-foreground">{t("toolbox.noMatch")}</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -80,6 +90,7 @@ export default function ToolboxPage() {
 }
 
 function ToolCard({ tool }: { tool: (typeof TOOLS)[number] }) {
+  const { t } = useT()
   const to = tool.href ?? `/dashboard/toolbox/${tool.id}`
   return (
     <Link
@@ -95,8 +106,8 @@ function ToolCard({ tool }: { tool: (typeof TOOLS)[number] }) {
         <tool.icon className="h-5 w-5" />
       </span>
       <div className="space-y-1">
-        <p className="text-sm font-medium leading-tight">{tool.name}</p>
-        <p className="text-xs leading-relaxed text-muted-foreground">{tool.desc}</p>
+        <p className="text-sm font-medium leading-tight">{toolName(t, tool)}</p>
+        <p className="text-xs leading-relaxed text-muted-foreground">{toolDesc(t, tool)}</p>
       </div>
     </Link>
   )
