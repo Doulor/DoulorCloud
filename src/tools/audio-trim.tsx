@@ -5,6 +5,7 @@ import { FileDrop } from "@/components/toolbox/file-drop"
 import { ToolShell, ToolSection } from "@/components/toolbox/tool-shell"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
+import { useT } from "@/i18n"
 import {
   baseName,
   downloadBlob,
@@ -14,6 +15,7 @@ import {
 } from "@/lib/toolbox/utils"
 
 export default function AudioTrimTool() {
+  const { t } = useT()
   const [fileName, setFileName] = React.useState("")
   const [audio, setAudio] = React.useState<AudioBuffer | null>(null)
   const [start, setStart] = React.useState(0)
@@ -43,7 +45,7 @@ export default function AudioTrimTool() {
       setStart(0)
       setEnd(1)
     } catch {
-      setError("无法解析这个音频文件，请确认它是浏览器支持的格式（mp3 / m4a / wav / ogg 等）。")
+      setError(t("at2.err.parse"))
       setAudio(null)
     } finally {
       setBusy(false)
@@ -116,10 +118,10 @@ export default function AudioTrimTool() {
         channels.push(audio.getChannelData(c).slice(s, s + len))
       }
       const blob = encodeWav(channels, audio.sampleRate)
-      downloadBlob(blob, `${baseName(fileName || "audio")}-剪辑.wav`)
+      downloadBlob(blob, t("at2.fileName", { name: baseName(fileName || t("at2.fallbackName")) }))
       setError(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "导出失败")
+      setError(err instanceof Error ? err.message : t("at2.err.export"))
     } finally {
       setBusy(false)
     }
@@ -162,11 +164,11 @@ export default function AudioTrimTool() {
 
   return (
     <ToolShell
-      title="音频剪辑"
-      description="在波形上拖出要保留的一段，试听满意后导出。适合截手机铃声、剪一段语音。"
+      title={t("toolbox.audioTrim.name")}
+      description={t("at2.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <ToolSection title="音频">
+        <ToolSection title={t("at2.section.audio")}>
           {!audio ? (
             <FileDrop accept="audio/*,video/*" onFiles={(f) => void handleFiles(f)} />
           ) : (
@@ -182,7 +184,7 @@ export default function AudioTrimTool() {
                     setAudio(null)
                   }}
                 >
-                  换一个
+                  {t("at2.replace")}
                 </Button>
               </div>
 
@@ -202,20 +204,23 @@ export default function AudioTrimTool() {
               </div>
 
               <p className="text-xs text-muted-foreground">
-                选中 {formatDuration(start * audio.duration)} → {formatDuration(end * audio.duration)}
-                {"  "}（时长 {formatDuration(selLen)}）
+                {t("at2.selection", {
+                  from: formatDuration(start * audio.duration),
+                  to: formatDuration(end * audio.duration),
+                  len: formatDuration(selLen),
+                })}
               </p>
             </div>
           )}
         </ToolSection>
 
-        <ToolSection title="操作">
+        <ToolSection title={t("at2.section.ops")}>
           <div className="space-y-4">
             {audio && (
               <>
                 <div className="space-y-1.5">
                   <Label className="text-xs text-muted-foreground">
-                    起点 {formatDuration(start * audio.duration)}
+                    {t("at2.start", { t: formatDuration(start * audio.duration) })}
                   </Label>
                   <input
                     type="range"
@@ -228,7 +233,7 @@ export default function AudioTrimTool() {
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs text-muted-foreground">
-                    终点 {formatDuration(end * audio.duration)}
+                    {t("at2.end", { t: formatDuration(end * audio.duration) })}
                   </Label>
                   <input
                     type="range"
@@ -242,24 +247,24 @@ export default function AudioTrimTool() {
 
                 <div className="grid grid-cols-2 gap-2">
                   <Button variant="outline" size="sm" onClick={() => { setStart(0); setEnd(1) }}>
-                    全选
+                    {t("at2.selectAll")}
                   </Button>
                   <Button variant="outline" size="sm" onClick={preview}>
                     {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-                    {playing ? "停止" : "试听"}
+                    {playing ? t("at2.stop") : t("at2.preview")}
                   </Button>
                 </div>
               </>
             )}
 
             <p className="text-xs text-muted-foreground">
-              导出的是未压缩 WAV，音质无损但体积较大。
+              {t("at2.wavNote")}
             </p>
             {error && <p className="text-xs text-destructive">{error}</p>}
 
             <Button className="w-full" disabled={!audio || busy} onClick={exportWav}>
               <Download className="h-4 w-4" />
-              {busy ? "导出中…" : "导出选中的片段"}
+              {busy ? t("at2.exporting") : t("at2.export")}
             </Button>
           </div>
         </ToolSection>

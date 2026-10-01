@@ -1788,4 +1788,67 @@ export const en: Record<MessageKey, string> = {
   "ach.loadFailedDesc": "Network or service error — try again later.",
   "ach.err.load": "Couldn't load achievements",
 
+  // —— Tool: extract audio ——
+  "ae.desc":
+    "Pull the audio track out of a video and export it as a standard WAV file. Also handy for converting audio formats to WAV.",
+  "ae.section.source": "Source file",
+  "ae.section.export": "Export",
+  "ae.pickHint": "mp4 / mov / webm / mp3 / m4a / wav and more all work",
+  "ae.replace": "Choose another",
+  "ae.duration": "Duration",
+  "ae.channels": "Channels",
+  "ae.mono": "Mono",
+  "ae.stereo": "Stereo",
+  "ae.sampleRate": "Sample rate",
+  "ae.preview": "Preview",
+  "ae.wavNote":
+    "WAV is uncompressed: lossless but large (about 10 MB per minute). To shrink it, use the audio trimmer or convert to mp3 with an external tool.",
+  "ae.processing": "Processing…",
+  "ae.export": "Export WAV",
+  "ae.saveLocal": "Save to device",
+  "ae.err.parse":
+    "Couldn't read the audio track. This fails when the file has no sound or the format isn't supported by the browser (some wmv, flac).",
+  "ae.err.export": "Export failed",
+
+  // —— Tool: audio trimmer ——
+  "at2.desc":
+    "Drag a segment on the waveform, preview it, then export. Great for ringtones or cutting a voice clip.",
+  "at2.section.audio": "Audio",
+  "at2.section.ops": "Actions",
+  "at2.replace": "Choose another",
+  "at2.selection": "Selected {from} → {to} ({len})",
+  "at2.start": "Start {t}",
+  "at2.end": "End {t}",
+  "at2.selectAll": "Select all",
+  "at2.stop": "Stop",
+  "at2.preview": "Preview",
+  "at2.wavNote": "The export is uncompressed WAV — lossless but large.",
+  "at2.exporting": "Exporting…",
+  "at2.export": "Export selected clip",
+  "at2.fileName": "{name}-clip.wav",
+  "at2.fallbackName": "audio",
+  "at2.err.parse":
+    "Couldn't read this audio file — make sure it's a browser-supported format (mp3 / m4a / wav / ogg…).",
+  "at2.err.export": "Export failed",
+
+  // —— Tool: crop / rotate / flip ——
+  "icr.desc": "Drag on the image to mark the area to keep — you can also straighten the image first.",
+  "icr.section.image": "Image",
+  "icr.section.adjust": "Adjust",
+  "icr.alt": "To crop",
+  "icr.sizeLine": "Original {w} × {h} · selection {ow} × {oh} (drag again to reselect)",
+  "icr.rotateFlip": "Rotate & flip",
+  "icr.rotateLeft": "Rotate left 90°",
+  "icr.rotateRight": "Rotate right 90°",
+  "icr.flipH": "Flip horizontal",
+  "icr.flipV": "Flip vertical",
+  "icr.fineAngle": "Fine angle {n}°",
+  "icr.applyAngle": "Apply this angle",
+  "icr.selectAll": "Select all",
+  "icr.reset": "Reset",
+  "icr.processing": "Processing…",
+  "icr.download": "Crop & download",
+  "icr.err.open": "Couldn't open the image",
+  "icr.err.crop": "Cropping failed",
+
 }
