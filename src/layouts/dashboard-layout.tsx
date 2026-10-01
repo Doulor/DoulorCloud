@@ -27,6 +27,7 @@ import { ThemeToggle } from "@/components/theme-toggle"
 import { LangToggle } from "@/components/lang-toggle"
 import { useT } from "@/i18n"
 import { MessageBell } from "@/components/message-bell"
+import { DmBell } from "@/components/dm-bell"
 import { PointsBadge } from "@/components/points-badge"
 import { ScrollToTop } from "@/components/scroll-to-top"
 import { PageEnter } from "@/components/page-enter"
@@ -133,16 +134,16 @@ export function DashboardLayout({
     try {
       const res = await settingsApi.verifyEmail()
       if (res.verified) {
-        toast.success("邮箱已验证")
+        toast.success(t("lay.emailVerified"))
         if (setUser && user) setUser({ ...user, emailVerified: true })
         setVerifyOpen(false)
       } else {
         setCodeSent(true)
         setVerifyCode("")
-        toast.success("验证码已发送，请查收（可能进垃圾箱）")
+        toast.success(t("lay.codeSent"))
       }
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "发送失败，请稍后重试")
+      toast.error(err instanceof HttpError ? err.message : t("lay.sendFailed"))
     } finally {
       setVerifyBusy(false)
     }
@@ -151,21 +152,21 @@ export function DashboardLayout({
   /** 回填验证码完成验证 */
   const handleConfirmVerify = async () => {
     if (!/^\d{6}$/.test(verifyCode)) {
-      toast.error("请输入 6 位数字验证码")
+      toast.error(t("em.err.enter6"))
       return
     }
     setVerifyBusy(true)
     try {
       const res = await settingsApi.verifyEmail("confirm", verifyCode)
       if (res.verified) {
-        toast.success("邮箱验证成功")
+        toast.success(t("lay.verifyOk"))
         if (setUser && user) setUser({ ...user, emailVerified: true })
         setVerifyOpen(false)
         setCodeSent(false)
         setVerifyCode("")
       }
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "验证失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.verify"))
     } finally {
       setVerifyBusy(false)
     }
@@ -393,7 +394,7 @@ export function DashboardLayout({
             <button
               type="button"
               onClick={() => navigate(`/space/${encodeURIComponent(user.username)}`)}
-              title="查看个人空间"
+              title={t("lay.viewSpace")}
               className="shrink-0 rounded-full transition-opacity hover:opacity-80 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <UserAvatar
@@ -414,7 +415,7 @@ export function DashboardLayout({
                   variant="ghost"
                   size="icon"
                   className="h-8 w-8"
-                  aria-label="账户菜单"
+                  aria-label={t("lay.accountMenu")}
                 >
                   <Settings className="h-4 w-4" />
                 </Button>
@@ -430,15 +431,15 @@ export function DashboardLayout({
               <LogIn className="h-4 w-4" />
             </span>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium">未登录</p>
-              <p className="truncate text-xs text-muted-foreground">登录后可发帖互动</p>
+              <p className="truncate text-sm font-medium">{t("lay.notLoggedIn")}</p>
+              <p className="truncate text-xs text-muted-foreground">{t("lay.loginHint")}</p>
             </div>
             <Button
               size="sm"
               className="h-8 shrink-0"
               onClick={() => navigate("/login", { state: { from: location.pathname } })}
             >
-              登录
+              {t("nav.login")}
             </Button>
           </div>
         )}
@@ -463,12 +464,13 @@ export function DashboardLayout({
             size="icon"
             className="lg:hidden"
             onClick={() => setOpen((v) => !v)}
-            aria-label="菜单"
+            aria-label={t("lay.menu")}
           >
             {open ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
           </Button>
           <div className="ml-auto flex items-center gap-2">
             {user && <PointsBadge />}
+            {user && <DmBell />}
             {user && <MessageBell />}
             <LangToggle />
             <ThemeToggle />
@@ -504,7 +506,7 @@ export function DashboardLayout({
                 className="lg:hidden"
                 onClick={() => navigate("/login", { state: { from: location.pathname } })}
               >
-                登录
+                {t("nav.login")}
               </Button>
             )}
           </div>
@@ -527,12 +529,13 @@ export function DashboardLayout({
             <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 lg:px-8">
               <Mail className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
               <p className="min-w-0 flex-1 text-sm text-amber-800 dark:text-amber-200">
-                邮箱 <span className="font-mono">{user.email}</span> 尚未验证 ——
-                验证后才能正常接收本站通知、使用邮件转发等功能。验证码会发送到你的邮箱。
+                {t("lay.verifyBanner.a")}
+                <span className="font-mono">{user.email}</span>
+                {t("lay.verifyBanner.b")}
               </p>
               <div className="flex shrink-0 items-center gap-2">
                 <Button size="sm" onClick={openVerify}>
-                  立即验证
+                  {t("lay.verifyNow")}
                 </Button>
               </div>
             </div>
@@ -543,20 +546,22 @@ export function DashboardLayout({
         <Dialog open={verifyOpen} onOpenChange={setVerifyOpen}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>验证邮箱</DialogTitle>
+              <DialogTitle>{t("lay.verifyTitle")}</DialogTitle>
               <DialogDescription>
-                验证码会发送到 <span className="font-mono">{user?.email}</span>，10 分钟内有效。
+                {t("lay.verifyDesc.a")}
+                <span className="font-mono">{user?.email}</span>
+                {t("lay.verifyDesc.b")}
               </DialogDescription>
             </DialogHeader>
             {codeSent ? (
               <div className="space-y-3">
                 <div className="space-y-2">
-                  <Label htmlFor="verifyCode">6 位验证码</Label>
+                  <Label htmlFor="verifyCode">{t("em.codePlaceholder")}</Label>
                   <Input
                     id="verifyCode"
                     inputMode="numeric"
                     maxLength={6}
-                    placeholder="请输入验证码"
+                    placeholder={t("lay.codePlaceholder")}
                     value={verifyCode}
                     onChange={(e) => setVerifyCode(e.target.value.replace(/\D/g, ""))}
                     className="font-mono text-sm tracking-widest"
@@ -568,17 +573,17 @@ export function DashboardLayout({
                     onClick={() => void handleResendVerify()}
                     disabled={verifyBusy}
                   >
-                    重新发送
+                    {t("settings.email.resend")}
                   </Button>
                   <Button onClick={() => void handleConfirmVerify()} disabled={verifyBusy}>
-                    {verifyBusy ? "验证中…" : "确认验证"}
+                    {verifyBusy ? t("lay.verifying") : t("settings.email.confirmVerify")}
                   </Button>
                 </DialogFooter>
               </div>
             ) : (
               <DialogFooter>
                 <Button onClick={() => void handleResendVerify()} disabled={verifyBusy}>
-                  {verifyBusy ? "发送中…" : "发送验证码"}
+                  {verifyBusy ? t("lay.sending") : t("settings.btn.sendCode")}
                 </Button>
               </DialogFooter>
             )}
