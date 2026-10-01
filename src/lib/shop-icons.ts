@@ -148,7 +148,7 @@ export interface ShopIconGroup {
 
 export const SHOP_ICON_GROUPS: ShopIconGroup[] = [
   {
-    label: "充值 / 额度",
+    label: "si.cat.topup",
     icons: [
       { name: "coins", Icon: Coins },
       { name: "wallet", Icon: Wallet },
@@ -167,7 +167,7 @@ export const SHOP_ICON_GROUPS: ShopIconGroup[] = [
     ],
   },
   {
-    label: "会员 / 权益",
+    label: "si.cat.member",
     icons: [
       { name: "crown", Icon: Crown },
       { name: "star", Icon: Star },
@@ -187,7 +187,7 @@ export const SHOP_ICON_GROUPS: ShopIconGroup[] = [
     ],
   },
   {
-    label: "AI / 技术",
+    label: "si.cat.ai",
     icons: [
       { name: "cpu", Icon: Cpu },
       { name: "bot", Icon: Bot },
@@ -211,7 +211,7 @@ export const SHOP_ICON_GROUPS: ShopIconGroup[] = [
     ],
   },
   {
-    label: "存储 / 网络",
+    label: "si.cat.storage",
     icons: [
       { name: "hard-drive", Icon: HardDrive },
       { name: "folder-open", Icon: FolderOpen },
@@ -229,7 +229,7 @@ export const SHOP_ICON_GROUPS: ShopIconGroup[] = [
     ],
   },
   {
-    label: "实物 / 周边",
+    label: "si.cat.physical",
     icons: [
       { name: "package", Icon: Package },
       { name: "gift", Icon: Gift },
@@ -253,7 +253,7 @@ export const SHOP_ICON_GROUPS: ShopIconGroup[] = [
     ],
   },
   {
-    label: "服务 / 支持",
+    label: "si.cat.service",
     icons: [
       { name: "wrench", Icon: Wrench },
       { name: "settings", Icon: Settings },
@@ -273,7 +273,7 @@ export const SHOP_ICON_GROUPS: ShopIconGroup[] = [
     ],
   },
   {
-    label: "娱乐 / 生活",
+    label: "si.cat.life",
     icons: [
       { name: "heart", Icon: Heart },
       { name: "thumbs-up", Icon: ThumbsUp },

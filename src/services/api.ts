@@ -111,6 +111,7 @@ import {
   type DmConversation,
 } from "@/types"
 import type { FunLinkCategory } from "@/lib/fun-links"
+import { tStatic } from "@/i18n"
 
 /**
  * 统一 API 请求层。
@@ -150,7 +151,7 @@ export class HttpError extends Error {
  */
 export function errMsg(err: unknown, fallback: string): string {
   if (err instanceof HttpError && err.message) return err.message
-  if (err instanceof TypeError) return "网络连接失败，请检查网络后重试"
+  if (err instanceof TypeError) return tStatic("api.networkError")
   return fallback
 }
 
@@ -177,7 +178,7 @@ async function request<T>(
 
   if (!res.ok) {
     const message =
-      (data as ApiError | null)?.error ?? `请求失败 (${res.status})`
+      (data as ApiError | null)?.error ?? tStatic("api.requestFailed", { status: res.status })
     const code = (data as ApiError | null)?.code
 
     // 仅在「会话本身失效」时清空用户态。
@@ -197,7 +198,7 @@ async function request<T>(
   // 此时 data 是 null，若直接返回会让调用方在 `res.posts` 上抛 TypeError，
   // 用户看到的是白屏而不是可理解的错误。这里统一转成 HttpError。
   if (data === null) {
-    throw new HttpError(res.status, "服务响应异常，请检查网络或稍后重试", "INVALID_RESPONSE")
+    throw new HttpError(res.status, tStatic("api.invalidResponse"), "INVALID_RESPONSE")
   }
 
   return data as T
@@ -1064,7 +1065,7 @@ export const profileApi = {
     if (!res.ok) {
       throw new HttpError(
         res.status,
-        (data as ApiError | null)?.error ?? `上传失败 (${res.status})`,
+        (data as ApiError | null)?.error ?? tStatic("api.uploadFailed", { status: res.status }),
         (data as ApiError | null)?.code
       )
     }

@@ -101,7 +101,7 @@ export function ShopIconPicker({
             ) : (
               groups.map((g) => (
                 <div key={g.label}>
-                  <p className="mb-1.5 text-[10px] font-medium text-muted-foreground">{g.label}</p>
+                  <p className="mb-1.5 text-[10px] font-medium text-muted-foreground">{t(g.label)}</p>
                   <div className="grid grid-cols-8 gap-1">
                     {g.icons.map(({ name, Icon }) => (
                       <button

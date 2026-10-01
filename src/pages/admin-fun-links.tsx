@@ -34,6 +34,7 @@ import {
 } from "@/lib/fun-links"
 import { adminFunLinksApi, funLinkIconUrl, type FunLink } from "@/services/api"
 import { errMsg } from "@/services/api"
+import { useT } from "@/i18n"
 
 /**
  * 管理面板 → 网页分享。
@@ -42,6 +43,7 @@ import { errMsg } from "@/services/api"
  * 列表很短，一次全量拉取，前端不做分页。
  */
 export function FunLinksAdminPanel() {
+  const { t } = useT()
   const [links, setLinks] = React.useState<FunLink[] | null>(null)
   const [loading, setLoading] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
@@ -375,7 +377,7 @@ export function FunLinksAdminPanel() {
                   <SelectContent>
                     {FUN_LINK_CATEGORIES.map((c) => (
                       <SelectItem key={c.id} value={c.id}>
-                        {c.label}
+                        {t(c.label)}
                       </SelectItem>
                     ))}
                   </SelectContent>

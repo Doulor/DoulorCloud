@@ -1,3 +1,4 @@
+import { tStatic } from "@/i18n"
 /**
  * 全站共用的时间 / 体积格式化。
  *
@@ -52,13 +53,13 @@ export function relTime(iso: string | null | undefined, fallback = "—"): strin
   const t = new Date(iso).getTime()
   if (Number.isNaN(t)) return fallback
   const m = Math.floor((Date.now() - t) / 60000)
-  if (m < 1) return "刚刚"
-  if (m < 60) return `${m} 分钟前`
+  if (m < 1) return tStatic("fmt.justNow")
+  if (m < 60) return tStatic("fmt.minutesAgo", { n: m })
   const h = Math.floor(m / 60)
-  if (h < 24) return `${h} 小时前`
+  if (h < 24) return tStatic("fmt.hoursAgo", { n: h })
   const d = Math.floor(h / 24)
-  if (d === 1) return "昨天"
-  if (d < 7) return `${d} 天前`
+  if (d === 1) return tStatic("fmt.yesterday")
+  if (d < 7) return tStatic("fmt.daysAgo", { n: d })
   return fmtTime(iso, fallback)
 }
 

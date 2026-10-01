@@ -746,10 +746,10 @@ export interface Permissions {
 }
 
 export const FEATURE_LABELS: Record<FeatureKey, string> = {
-  r2: "直链网盘",
-  ai: "AI 中转站",
-  frp: "内网穿透",
-  proxy: "代理节点",
+  r2: "feat.r2",
+  ai: "feat.ai",
+  frp: "feat.frp",
+  proxy: "feat.proxy",
 }
 
 // ---- 管理员全局设置 ----
