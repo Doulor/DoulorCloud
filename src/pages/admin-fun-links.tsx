@@ -68,7 +68,7 @@ export function FunLinksAdminPanel() {
       const res = await adminFunLinksApi.list()
       setLinks(res.links)
     } catch (err) {
-      toast.error(errMsg(err, "加载失败"))
+      toast.error(errMsg(err, t("fl.err.load")))
     } finally {
       setLoading(false)
     }
@@ -109,7 +109,7 @@ export function FunLinksAdminPanel() {
   const handleProbe = async () => {
     const url = draft.url.trim()
     if (!url) {
-      toast.error("先把链接填上")
+      toast.error(t("afl.err.urlFirst"))
       return
     }
     setProbing(true)
@@ -124,14 +124,14 @@ export function FunLinksAdminPanel() {
         description: d.description.trim() ? d.description : res.description,
       }))
       if (res.title) {
-        toast.success(`识别成功：「${res.title}」`)
+        toast.success(t("afl.ok.recognized", { title: res.title }))
       } else if (res.iconUrl) {
-        toast.success("没读到标题，图标已补上")
+        toast.success(t("afl.ok.iconOnly"))
       } else {
-        toast.warning("这个网页没写标题也没找到图标，手动填吧")
+        toast.warning(t("afl.warn.nothing"))
       }
     } catch (err) {
-      toast.error(errMsg(err, "识别失败"))
+      toast.error(errMsg(err, t("afl.err.recognize")))
     } finally {
       setProbing(false)
     }
@@ -139,7 +139,7 @@ export function FunLinksAdminPanel() {
 
   const handleSave = async () => {
     if (!draft.title.trim() || !draft.url.trim()) {
-      toast.error("名称和链接都要填")
+      toast.error(t("afl.err.nameUrl"))
       return
     }
     setBusy(true)
@@ -155,15 +155,15 @@ export function FunLinksAdminPanel() {
       }
       if (editId) {
         await adminFunLinksApi.update(editId, payload)
-        toast.success("已更新")
+        toast.success(t("cm.ok.updated"))
       } else {
         await adminFunLinksApi.create(payload)
-        toast.success("已添加")
+        toast.success(t("afl.ok.added"))
       }
       setOpen(false)
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "保存失败"))
+      toast.error(errMsg(err, t("em.err.save")))
     } finally {
       setBusy(false)
     }
@@ -174,18 +174,18 @@ export function FunLinksAdminPanel() {
       await adminFunLinksApi.update(link.id, { enabled: !link.enabled })
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "操作失败"))
+      toast.error(errMsg(err, t("em.err.op")))
     }
   }
 
   const handleDelete = async (link: FunLink) => {
-    if (!confirm(`删除「${link.title}」？`)) return
+    if (!confirm(t("afl.confirmDelete", { title: link.title }))) return
     try {
       await adminFunLinksApi.remove(link.id)
-      toast.success("已删除")
+      toast.success(t("at.ok.deleted"))
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "删除失败"))
+      toast.error(errMsg(err, t("em.err.delete")))
     }
   }
 
@@ -197,15 +197,14 @@ export function FunLinksAdminPanel() {
         <CardHeader>
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="space-y-1">
-              <CardTitle className="text-base">有趣的网页分享</CardTitle>
+              <CardTitle className="text-base">{t("toolbox.funLinks.name")}</CardTitle>
               <CardDescription>
-                工具箱里「有趣的网页分享」模块的内容。共 {links?.length ?? 0} 条，
-                其中上架 {enabledCount} 条；下架的只有你在这里看得到。
+                {t("afl.desc", { total: links?.length ?? 0, enabled: enabledCount })}
               </CardDescription>
             </div>
             <Button size="sm" onClick={() => openDialog()}>
               <Plus className="h-4 w-4" />
-              添加网站
+              {t("afl.add")}
             </Button>
           </div>
         </CardHeader>
@@ -215,8 +214,8 @@ export function FunLinksAdminPanel() {
           ) : (links?.length ?? 0) === 0 ? (
             <EmptyState
               icon={Sparkles}
-              title="还没有内容"
-              description="点右上角「添加网站」放第一条进去。"
+              title={t("afl.empty")}
+              description={t("afl.emptyDesc")}
             />
           ) : (
             <div className="divide-y rounded-md border">
@@ -234,7 +233,7 @@ export function FunLinksAdminPanel() {
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="truncate text-sm font-medium">{l.title}</span>
                       <Badge variant="outline">{funLinkCategoryLabel(l.category)}</Badge>
-                      {!l.enabled && <Badge variant="secondary">已下架</Badge>}
+                      {!l.enabled && <Badge variant="secondary">{t("afl.unlisted")}</Badge>}
                     </div>
                     <a
                       href={l.url}
@@ -258,13 +257,13 @@ export function FunLinksAdminPanel() {
                       className="h-8"
                       onClick={() => void handleToggle(l)}
                     >
-                      {l.enabled ? "下架" : "上架"}
+                      {l.enabled ? t("afl.unlist") : t("afl.list")}
                     </Button>
                     <Button
                       variant="ghost"
                       size="icon"
                       className="h-8 w-8"
-                      aria-label="编辑"
+                      aria-label={t("common.edit")}
                       onClick={() => openDialog(l)}
                     >
                       <Pencil className="h-3.5 w-3.5" />
@@ -273,7 +272,7 @@ export function FunLinksAdminPanel() {
                       variant="ghost"
                       size="icon"
                       className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                      aria-label="删除"
+                      aria-label={t("common.delete")}
                       onClick={() => void handleDelete(l)}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
@@ -289,24 +288,24 @@ export function FunLinksAdminPanel() {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{editId ? "编辑网站" : "添加网站"}</DialogTitle>
+            <DialogTitle>{editId ? t("afl.edit") : t("afl.add")}</DialogTitle>
             <DialogDescription>
-              链接必须是 http / https；排序数字小的排前面，分类决定它在工具箱里归到哪一栏。
+              {t("afl.dlg.note")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="flTitle">名称</Label>
+              <Label htmlFor="flTitle">{t("afl.dlg.title")}</Label>
               <Input
                 id="flTitle"
-                placeholder="比如：这个网站会告诉你一天有多长"
+                placeholder={t("afl.dlg.titlePh")}
                 value={draft.title}
                 onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))}
               />
             </div>
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
-                <Label htmlFor="flUrl">链接</Label>
+                <Label htmlFor="flUrl">{t("afl.dlg.url")}</Label>
                 <Button
                   type="button"
                   variant="outline"
@@ -320,7 +319,7 @@ export function FunLinksAdminPanel() {
                   ) : (
                     <Wand2 className="h-3.5 w-3.5" />
                   )}
-                  {probing ? "识别中…" : "自动识别"}
+                  {probing ? t("afl.dlg.probing") : t("afl.dlg.autoDetect")}
                 </Button>
               </div>
               <Input
@@ -331,11 +330,11 @@ export function FunLinksAdminPanel() {
                 onChange={(e) => setDraft((d) => ({ ...d, url: e.target.value }))}
               />
               <p className="text-xs text-muted-foreground">
-                填好链接后点「自动识别」，会去把这个网页的标题、说明和图标抓回来。
+                {t("afl.dlg.detectHint")}
               </p>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="flIcon">图标</Label>
+              <Label htmlFor="flIcon">{t("afl.dlg.icon")}</Label>
               <div className="flex items-center gap-2">
                 <FunLinkIcon
                   src={draft.iconUrl.trim() || null}
@@ -346,25 +345,25 @@ export function FunLinksAdminPanel() {
                 <Input
                   id="flIcon"
                   className="font-mono text-xs"
-                  placeholder="留空就用首字母头像"
+                  placeholder={t("afl.dlg.iconPh")}
                   value={draft.iconUrl}
                   onChange={(e) => setDraft((d) => ({ ...d, iconUrl: e.target.value }))}
                 />
               </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="flDesc">一句话说明</Label>
+              <Label htmlFor="flDesc">{t("afl.dlg.desc")}</Label>
               <Textarea
                 id="flDesc"
                 rows={2}
-                placeholder="它有意思在哪？"
+                placeholder={t("afl.dlg.descPh")}
                 value={draft.description}
                 onChange={(e) => setDraft((d) => ({ ...d, description: e.target.value }))}
               />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">
-                <Label htmlFor="flCategory">分类</Label>
+                <Label htmlFor="flCategory">{t("afl.dlg.category")}</Label>
                 <Select
                   value={draft.category}
                   onValueChange={(v) =>
@@ -384,7 +383,7 @@ export function FunLinksAdminPanel() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="flSort">排序</Label>
+                <Label htmlFor="flSort">{t("afl.dlg.sort")}</Label>
                 <Input
                   id="flSort"
                   type="number"
@@ -394,7 +393,7 @@ export function FunLinksAdminPanel() {
               </div>
             </div>
             <div className="flex items-center justify-between rounded-md border px-3 py-2">
-              <span className="text-sm font-medium">上架</span>
+              <span className="text-sm font-medium">{t("afl.list")}</span>
               <Switch
                 checked={draft.enabled}
                 onCheckedChange={(v) => setDraft((d) => ({ ...d, enabled: v }))}
@@ -403,11 +402,11 @@ export function FunLinksAdminPanel() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void handleSave()} disabled={busy}>
               {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-              {editId ? "保存" : "添加"}
+              {editId ? t("common.save") : t("common.add")}
             </Button>
           </DialogFooter>
         </DialogContent>
