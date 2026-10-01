@@ -453,6 +453,35 @@ export const zh = {
   "dash.err.profile": "个人名片加载失败",
   "dash.err.announcements": "公告加载失败",
   "dash.err.me": "账号信息加载失败",
+
+  // —— 设置页（续）——
+  "settings.toast.codeSentDesc": "请查收 {email}（可能进垃圾箱）",
+  "settings.profileSection": "个人资料",
+  "settings.avatar.remove": "删除头像",
+  "settings.avatar.hint": "支持 JPG/PNG/WebP/GIF，上限 2 MB",
+  "settings.email.verifyTitle": "真实邮箱验证",
+  "settings.email.verified": "已验证",
+  "settings.email.verifyDesc": "验证后可将该邮箱设为邮件转发目标。",
+  "settings.email.unverifiedHint": "尚未验证：验证码会发送到 {email}",
+  "settings.email.codeNote": "验证码 10 分钟内有效，请勿泄露给他人。",
+  "settings.email.confirmVerify": "确认验证",
+  "settings.email.resend": "重新发送",
+  "settings.email.forwardNote":
+    "邮箱转发说明：将 doulor.cn 邮箱转发到真实邮箱时，需先验证该邮箱，防止邮件被转发到错误地址。",
+  "settings.notify.desc2": "选择你愿意接收的邮件通知类型。",
+  "settings.notify.announcementsDesc": "网站动态、维护通知等统一公告的邮件推送",
+  "settings.notify.personalDesc": "捐献审核结果、反馈回复、社区互动等与你有关的邮件",
+  "settings.security": "安全",
+  "settings.pw.changeNote": "修改后其他设备上的登录会失效",
+  "settings.pw.dialogDesc": "需要验证当前密码；修改成功后其他设备需重新登录。",
+  "settings.delete.section": "注销账号",
+  "settings.delete.sectionDesc": "注销后你的账号、域名邮箱、网盘文件及所有相关数据将被删除，且无法恢复。",
+  "settings.delete.body1": "此操作",
+  "settings.delete.body2":
+    "。将删除你的账号、域名邮箱、网盘文件、社区内容等全部数据，并回收相关外部资源。请确认你已备份所有需要保留的数据。系统会保留一条最小化的注销留痕（用户名、邮箱、注销时间）用于审计追溯。",
+  "settings.delete.codeHint": "验证码会发送到你的注册邮箱（{email}），10 分钟内有效。需同时通过密码与验证码校验。",
+  "settings.delete.confirmBtn": "确认注销",
+  "settings.notify.prefTitle": "通知偏好",
 } as const
 
 export type MessageKey = keyof typeof zh

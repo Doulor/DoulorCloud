@@ -466,4 +466,36 @@ export const en: Record<MessageKey, string> = {
   "dash.err.announcements": "Couldn't load announcements",
   "dash.err.me": "Couldn't load account info",
 
+  // —— Settings page (cont.) ——
+  "settings.toast.codeSentDesc": "Check {email} (may land in spam)",
+  "settings.profileSection": "Profile",
+  "settings.avatar.remove": "Remove avatar",
+  "settings.avatar.hint": "JPG/PNG/WebP/GIF, up to 2 MB",
+  "settings.email.verifyTitle": "Real email verification",
+  "settings.email.verified": "Verified",
+  "settings.email.verifyDesc": "Once verified, this email can be used as a forwarding target.",
+  "settings.email.unverifiedHint": "Not verified yet — the code will be sent to {email}",
+  "settings.email.codeNote": "The code is valid for 10 minutes — don't share it with anyone.",
+  "settings.email.confirmVerify": "Confirm code",
+  "settings.email.resend": "Resend",
+  "settings.email.forwardNote":
+    "About forwarding: before a doulor.cn mailbox can forward to your real email, that email must be verified — this prevents mail from being forwarded to the wrong address.",
+  "settings.notify.desc2": "Choose which email notifications you'd like to receive.",
+  "settings.notify.announcementsDesc": "Site updates, maintenance notices and other announcements",
+  "settings.notify.personalDesc":
+    "Donation reviews, feedback replies, community interactions — anything addressed to you",
+  "settings.security": "Security",
+  "settings.pw.changeNote": "Changing it signs out your other devices",
+  "settings.pw.dialogDesc": "Your current password is required; other devices will need to sign in again.",
+  "settings.delete.section": "Delete account",
+  "settings.delete.sectionDesc":
+    "Deleting removes your account, mailboxes, cloud drive files and all related data — this cannot be undone.",
+  "settings.delete.body1": "This action is ",
+  "settings.delete.body2":
+    ". It deletes your account, domain mailboxes, cloud drive files, community content and all related data, and releases associated external resources. Make sure you've backed up anything you want to keep. A minimal deletion record (username, email, deletion time) is kept for audit purposes.",
+  "settings.delete.codeHint":
+    "The code will be sent to your registered email ({email}) and is valid for 10 minutes. Both the password and the code are required.",
+  "settings.delete.confirmBtn": "Delete account",
+  "settings.notify.prefTitle": "Notification preferences",
+
 }
