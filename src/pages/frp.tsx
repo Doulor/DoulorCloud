@@ -55,34 +55,36 @@ import {
 import { frpApi, HttpError } from "@/services/api"
 import { fmtTime } from "@/lib/format"
 import type { FrpApplication, FrpNode, FrpOverview, FrpTunnel } from "@/types"
+import { useT, tStatic } from "@/i18n"
 
 const STATUS_BADGE: Record<
   FrpApplication["status"],
   { label: string; variant: "success" | "secondary" | "destructive" }
 > = {
-  pending: { label: "待审核", variant: "secondary" },
-  approved: { label: "已通过", variant: "success" },
-  rejected: { label: "未通过", variant: "destructive" },
+  pending: { label: "frp.st.pending", variant: "secondary" },
+  approved: { label: "frp.st.approved", variant: "success" },
+  rejected: { label: "frp.st.rejected", variant: "destructive" },
 }
 
 const NODE_STATUS: Record<
   FrpNode["status"],
   { label: string; variant: "success" | "secondary" | "destructive" | "outline" }
 > = {
-  online: { label: "运行中", variant: "success" },
-  offline: { label: "不可用", variant: "destructive" },
-  maintenance: { label: "维护中", variant: "secondary" },
-  unknown: { label: "状态未知", variant: "outline" },
+  online: { label: "frp.ns.online", variant: "success" },
+  offline: { label: "frp.ns.offline", variant: "destructive" },
+  maintenance: { label: "frp.ns.maintenance", variant: "secondary" },
+  unknown: { label: "frp.ns.unknown", variant: "outline" },
 }
 
 function NodeStatusBadge({ node }: { node: FrpNode }) {
+  const { t } = useT()
   const cfg = NODE_STATUS[node.status] ?? NODE_STATUS.unknown
   return (
     <Badge variant={cfg.variant} className="text-xs">
       {node.status === "online" && (
         <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-current" />
       )}
-      {cfg.label}
+      {t(cfg.label)}
     </Badge>
   )
 }
@@ -103,16 +105,16 @@ function buildConfig(
 ): string {
   const proxiesBlock =
     app.tunnels.length === 0
-      ? "# 你还没有添加隧道，请在网页上添加后重新生成"
+      ? tStatic("frp.cfg.noTunnels")
       : app.tunnels
-          .map((t) =>
+          .map((tn) =>
             [
               "[[proxies]]",
-              `name = "${t.name}"`,
-              `type = "${t.type}"`,
-              `localIP = "${t.localIP}"`,
-              `localPort = ${t.localPort}`,
-              `remotePort = ${t.remotePort}`,
+              `name = "${tn.name}"`,
+              `type = "${tn.type}"`,
+              `localIP = "${tn.localIP}"`,
+              `localPort = ${tn.localPort}`,
+              `remotePort = ${tn.remotePort}`,
               "",
             ].join("\n")
           )
@@ -155,10 +157,11 @@ function buildConfig(
     ? body.split("{proxies}").join(proxiesBlock)
     : `${body}\n\n${proxiesBlock}`
 
-  return `${body.replace(/\n{3,}/g, "\n\n").trimEnd()}\n\n# 由 Doulor Cloud 生成 · ${new Date().toLocaleString("zh-CN")}\n`
+  return `${body.replace(/\n{3,}/g, "\\n\\n").trimEnd()}\n\n${tStatic("frp.cfg.generatedBy", { at: new Date().toLocaleString(tStatic("frp.cfg.locale")) })}`
 }
 
 export default function FrpPage() {
+  const { t } = useT()
   const [data, setData] = React.useState<FrpOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
@@ -199,7 +202,7 @@ export default function FrpPage() {
         setLocked(true)
         return
       }
-      toast.error(err instanceof HttpError ? err.message : "加载失败")
+      toast.error(err instanceof HttpError ? err.message : t("at.err.load"))
     } finally {
       if (!silent) setLoading(false)
     }
@@ -220,28 +223,28 @@ export default function FrpPage() {
   const addPort = () => {
     const node = nodeById(form.nodeId)
     if (!node) {
-      toast.error("请先选择节点")
+      toast.error(t("frp.err.pickNode"))
       return
     }
     const p = Math.trunc(Number(portInput))
     if (!Number.isFinite(p)) {
-      toast.error("请输入端口号")
+      toast.error(t("frp.err.enterPort"))
       return
     }
     if (p < node.portMin || p > node.portMax) {
-      toast.error(`端口需在 ${node.portMin}-${node.portMax} 之间`)
+      toast.error(t("frp.err.portRange", { min: node.portMin, max: node.portMax }))
       return
     }
     if (takenSet.has(p)) {
-      toast.error(`端口 ${p} 已被占用，请换一个`)
+      toast.error(t("frp.err.portTaken", { port: p }))
       return
     }
     if (selectedPorts.includes(p)) {
-      toast.error("该端口已添加")
+      toast.error(t("frp.err.portAdded"))
       return
     }
     if (selectedPorts.length >= node.maxPorts) {
-      toast.error(`最多选择 ${node.maxPorts} 个端口`)
+      toast.error(t("frp.err.portLimit", { n: node.maxPorts }))
       return
     }
     setSelectedPorts((prev) => [...prev, p].sort((a, b) => a - b))
@@ -268,10 +271,10 @@ export default function FrpPage() {
     setBusy(true)
     try {
       await frpApi.enable()
-      toast.success("已启用内网穿透")
+      toast.success(t("frp.ok.enabled"))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "启用失败")
+      toast.error(err instanceof HttpError ? err.message : t("frp.err.enable"))
     } finally {
       setBusy(false)
     }
@@ -281,10 +284,10 @@ export default function FrpPage() {
     setBusy(true)
     try {
       await frpApi.disable()
-      toast.success("已关闭内网穿透（已通过的端口占用仍保留）")
+      toast.success(t("frp.ok.disabled"))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.op"))
     } finally {
       setBusy(false)
     }
@@ -302,14 +305,14 @@ export default function FrpPage() {
         notifyEmail: form.notifyEmail,
         remark: form.remark,
       })
-      toast.success("申请已提交，等待管理员审核（结果会发到通知邮箱）")
+      toast.success(t("frp.ok.submitted"))
       setApplyOpen(false)
       setSelectedPorts([])
       setTunnels([])
       setForm((f) => ({ ...f, frpPassword: "", remark: "" }))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "提交失败")
+      toast.error(err instanceof HttpError ? err.message : t("frp.err.submit"))
     } finally {
       setBusy(false)
     }
@@ -318,10 +321,10 @@ export default function FrpPage() {
   const handleCancel = async (app: FrpApplication) => {
     try {
       await frpApi.cancel(app.id)
-      toast.success("已撤回申请")
+      toast.success(t("frp.ok.withdrawn"))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "撤回失败")
+      toast.error(err instanceof HttpError ? err.message : t("frp.err.withdraw"))
     }
   }
 
@@ -329,12 +332,12 @@ export default function FrpPage() {
   const openConfig = (app: FrpApplication) => {
     const node = nodeById(app.nodeId)
     if (!node) {
-      toast.error("节点信息缺失")
+      toast.error(t("frp.err.nodeMissing"))
       return
     }
     setConfigApp(app)
     if (!app.configAuthToken) {
-      toast.error("缺少节点密钥，请联系管理员")
+      toast.error(t("frp.err.noToken"))
       return
     }
     // metadatas.token 就是申请时填写的密码
@@ -346,9 +349,9 @@ export default function FrpPage() {
   const copyConfig = async () => {
     try {
       await navigator.clipboard.writeText(configText)
-      toast.success("config.toml 内容已复制")
+      toast.success(t("frp.ok.copied"))
     } catch {
-      toast.error("复制失败，请手动选择复制")
+      toast.error(t("ai.err.copy"))
     }
   }
 
@@ -360,15 +363,15 @@ export default function FrpPage() {
     a.download = "config.toml"
     a.click()
     URL.revokeObjectURL(url)
-    toast.success("config.toml 已下载")
+    toast.success(t("frp.ok.downloaded"))
   }
 
   if (locked) {
     return (
       <FeatureLockedNotice
         feature="frp"
-        featureLabel="内网穿透"
-        description="你的账号未被授予「内网穿透」权限。站长资源有限，该服务暂未全量开放。"
+        featureLabel={t("feat.frp")}
+        description={t("locked.desc", { feature: t("feat.frp") })}
       />
     )
   }
@@ -376,7 +379,7 @@ export default function FrpPage() {
   if (loading) {
     return (
       <div>
-        <PageHeader title="内网穿透" description="frp 内网穿透" />
+        <PageHeader title={t("frp.title")} description={t("frp.subtitle")} />
         <LoadingBlock />
       </div>
     )
@@ -385,10 +388,10 @@ export default function FrpPage() {
   if (!data?.featureEnabled) {
     return (
       <div>
-        <PageHeader title="内网穿透" description="frp 内网穿透" />
+        <PageHeader title={t("frp.title")} description={t("frp.subtitle")} />
         <EmptyState
-          title="功能已关闭"
-          description="管理员暂时关闭了内网穿透功能。"
+          title={t("ai.disabled")}
+          description={t("frp.disabledDesc")}
         />
       </div>
     )
@@ -398,29 +401,29 @@ export default function FrpPage() {
   if (!data.activated) {
     return (
       <div>
-        <PageHeader title="内网穿透" description="frp 内网穿透" />
+        <PageHeader title={t("frp.title")} description={t("frp.subtitle")} />
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Network className="h-4 w-4 text-muted-foreground" />
-              启用内网穿透
+              {t("frp.intro.title")}
             </CardTitle>
             <CardDescription>
-              启用后可以选择节点、申请账号与端口，并生成 config.toml。
+              {t("frp.intro.desc")}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <ul className="space-y-1.5 text-sm text-muted-foreground">
-              <li>· 第一步：下载 frp 核心包并解压</li>
-              <li>· 第二步：选择节点，提交账号 / 端口 / 隧道申请</li>
-              <li>· 第三步：管理员审核通过后，生成 config.toml 替换到核心目录</li>
+              <li>{t("frp.intro.s1")}</li>
+              <li>{t("frp.intro.s2")}</li>
+              <li>{t("frp.intro.s3")}</li>
             </ul>
             <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-              申请需要人工审核，结果会发送到你选择的邮箱（本站邮箱或已验证的真实邮箱）。
+              {t("frp.intro.note")}
             </div>
             <Button onClick={() => void handleEnable()} disabled={busy}>
               {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-              启用内网穿透
+              {t("frp.intro.cta")}
             </Button>
           </CardContent>
         </Card>
@@ -433,11 +436,11 @@ export default function FrpPage() {
   return (
     <div>
       <PageHeader
-        title="内网穿透"
-        description="把本机服务通过 frp 暴露到公网"
+        title={t("frp.title")}
+        description={t("frp.tagline")}
         actions={
           <Button variant="outline" size="sm" onClick={() => void handleDisable()} disabled={busy}>
-            关闭功能
+            {t("common.disable")}
           </Button>
         }
       />
@@ -448,17 +451,17 @@ export default function FrpPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Download className="h-4 w-4 text-muted-foreground" />
-              第一步：下载 frp 核心
+              {t("frp.step1.title")}
             </CardTitle>
             <CardDescription>
-              下载后解压，再用下方生成的 config.toml 替换压缩包内的同名文件。
+              {t("frp.step1.desc")}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <Button asChild>
               <a href={data.coreUrl} target="_blank" rel="noreferrer">
                 <Download className="h-4 w-4" />
-                下载 frp 核心包
+                {t("frp.step1.download")}
               </a>
             </Button>
           </CardContent>
@@ -469,15 +472,15 @@ export default function FrpPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Server className="h-4 w-4 text-muted-foreground" />
-              可用节点
+              {t("frp.nodes.title")}
             </CardTitle>
             <CardDescription>
-              选择节点后提交申请，管理员人工审核通过后即可使用。
+              {t("frp.nodes.desc")}
             </CardDescription>
           </CardHeader>
           <CardContent>
             {data.nodes.length === 0 ? (
-              <EmptyState title="暂无可用节点" description="请联系管理员添加节点。" />
+              <EmptyState title={t("frp.nodes.empty")} description={t("frp.nodes.emptyDesc")} />
             ) : (
               <div className="space-y-3">
                 {data.nodes.map((n) => {
@@ -498,15 +501,20 @@ export default function FrpPage() {
                           <NodeStatusBadge node={n} />
                         </p>
                         <p className="font-mono text-xs text-muted-foreground">
-                          {n.serverAddr}:{n.serverPort} · 端口 {n.portMin}-
-                          {n.portMax} · 最多 {n.maxPorts} 个
+                          {t("frp.nodes.line", {
+                            addr: n.serverAddr,
+                            port: n.serverPort,
+                            min: n.portMin,
+                            max: n.portMax,
+                            n: n.maxPorts,
+                          })}
                         </p>
                         {n.note && (
                           <p className="text-xs text-muted-foreground">{n.note}</p>
                         )}
                         {n.status === "offline" && (
                           <p className="text-xs text-destructive">
-                            该节点当前不可用，请选择其它节点
+                            {t("frp.nodes.unavailable")}
                           </p>
                         )}
                         {n.statusNote && (
@@ -518,7 +526,7 @@ export default function FrpPage() {
                       <div className="flex items-center gap-2">
                         {used > 0 && (
                           <Badge variant="secondary" className="text-xs">
-                            已占用 {used} 个端口
+                            {t("frp.nodes.used", { n: used })}
                           </Badge>
                         )}
                         <Button
@@ -531,7 +539,7 @@ export default function FrpPage() {
                             setApplyOpen(true)
                           }}
                         >
-                          {n.status === "maintenance" ? "维护中" : "申请账号"}
+                          {n.status === "maintenance" ? t("frp.ns.maintenance") : t("frp.nodes.apply")}
                         </Button>
                       </div>
                     </div>
@@ -546,24 +554,24 @@ export default function FrpPage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">
-              我的申请（{data.applications.length}）
+              {t("frp.apps.title", { n: data.applications.length })}
             </CardTitle>
           </CardHeader>
           <CardContent>
             {data.applications.length === 0 ? (
               <EmptyState
-                title="还没有申请"
-                description="选择上方节点提交申请。"
+                title={t("frp.apps.empty")}
+                description={t("frp.apps.emptyDesc")}
               />
             ) : (
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>节点</TableHead>
-                    <TableHead>账号</TableHead>
-                    <TableHead>端口</TableHead>
-                    <TableHead>状态</TableHead>
-                    <TableHead>提交时间</TableHead>
+                    <TableHead>{t("frp.apps.col.node")}</TableHead>
+                    <TableHead>{t("frp.apps.col.account")}</TableHead>
+                    <TableHead>{t("frp.apps.col.ports")}</TableHead>
+                    <TableHead>{t("frp.apps.col.status")}</TableHead>
+                    <TableHead>{t("frp.apps.col.submitted")}</TableHead>
                     <TableHead className="w-40" />
                   </TableRow>
                 </TableHeader>
@@ -582,7 +590,7 @@ export default function FrpPage() {
                           {a.ports.join(", ") || "—"}
                         </TableCell>
                         <TableCell>
-                          <Badge variant={badge.variant}>{badge.label}</Badge>
+                          <Badge variant={badge.variant}>{t(badge.label)}</Badge>
                           {a.reviewNote && (
                             <p className="mt-1 text-xs text-muted-foreground">
                               {a.reviewNote}
@@ -601,7 +609,7 @@ export default function FrpPage() {
                                 onClick={() => openConfig(a)}
                               >
                                 <FileCode2 className="h-3.5 w-3.5" />
-                                生成配置
+                                {t("frp.apps.genConfig")}
                               </Button>
                             )}
                             {a.status === "pending" && (
@@ -612,7 +620,7 @@ export default function FrpPage() {
                                 onClick={() => void handleCancel(a)}
                               >
                                 <X className="h-3.5 w-3.5" />
-                                撤回
+                                {t("frp.apps.withdraw")}
                               </Button>
                             )}
                           </div>
@@ -628,7 +636,7 @@ export default function FrpPage() {
 
         {approved.length === 0 && data.applications.length > 0 && (
           <p className="text-xs text-muted-foreground">
-            申请通过后这里会出现「生成配置」按钮。
+            {t("frp.apps.genHint")}
           </p>
         )}
       </div>
@@ -667,9 +675,9 @@ export default function FrpPage() {
       >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>生成 config.toml</DialogTitle>
+            <DialogTitle>{t("frp.dlg.configTitle")}</DialogTitle>
             <DialogDescription>
-              复制或下载后，替换 frp 核心压缩包里的 config.toml，然后启动 frpc。
+              {t("frp.dlg.configDesc")}
             </DialogDescription>
           </DialogHeader>
           <pre className="max-h-96 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
@@ -678,11 +686,11 @@ export default function FrpPage() {
           <DialogFooter>
             <Button variant="outline" onClick={() => void copyConfig()}>
               <Copy className="h-4 w-4" />
-              复制内容
+              {t("frp.dlg.copy")}
             </Button>
             <Button onClick={downloadConfig}>
               <Download className="h-4 w-4" />
-              下载 config.toml
+              {t("frp.dlg.download")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -732,6 +740,7 @@ function ApplyDialog({
   busy,
   onConfirm,
 }: ApplyDialogProps) {
+  const { t } = useT()
   // 这个节点要不要填「每用户账号 + 密码」——与后端 needsUserAccount() 同一个判断：
   //   token_user / custom → 需要
   //   token（只用全局 auth.token）/ none（无鉴权）→ **不需要**
@@ -743,9 +752,9 @@ function ApplyDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[88vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>申请内网穿透账号 · {node?.name ?? ""}</DialogTitle>
+          <DialogTitle>{t("frp.dlg.applyTitle", { name: node?.name ?? "" })}</DialogTitle>
           <DialogDescription>
-            提交后由管理员人工审核，结果会发送到你选择的邮箱。
+            {t("frp.dlg.applyDesc")}
           </DialogDescription>
         </DialogHeader>
 
@@ -756,48 +765,52 @@ function ApplyDialog({
           {needAccount ? (
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="frpUser">账号名</Label>
+                <Label htmlFor="frpUser">{t("frp.dlg.user")}</Label>
                 <Input
                   id="frpUser"
-                  placeholder="字母/数字/_-"
+                  placeholder={t("frp.dlg.userPh")}
                   value={form.frpUser}
                   onChange={(e) => setForm((f) => ({ ...f, frpUser: e.target.value }))}
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="frpPw">密码</Label>
+                <Label htmlFor="frpPw">{t("settings.pw.new")}</Label>
                 <Input
                   id="frpPw"
                   type="text"
-                  placeholder="6-64 位"
+                  placeholder={t("frp.dlg.pwPh")}
                   value={form.frpPassword}
                   onChange={(e) =>
                     setForm((f) => ({ ...f, frpPassword: e.target.value }))
                   }
                 />
                 <p className="text-xs text-muted-foreground">
-                  该密码会作为 config.toml 里的 <code>metadatas.token</code>，
-                  也是管理员在 frps-panel 为你建号时使用的 token，请牢记。
-                  只允许字母、数字和半角符号 <code>_!@#$%^&amp;*().-</code>，不要用空格或中文符号。
+                  {t("frp.dlg.pwNote1a")}
+                  <code>metadatas.token</code>
+                  {t("frp.dlg.pwNote1b")}
+                  {t("frp.dlg.pwNote2")}
                 </p>
               </div>
             </div>
           ) : (
             <div className="rounded-md border border-dashed px-4 py-3 text-xs text-muted-foreground">
-              这个节点
-              <span className="text-foreground">不需要账号和密码</span>
+              {t("frp.dlg.thisNode")}
+              <span className="text-foreground">{t("frp.dlg.noAccountNeeded")}</span>
               {node?.authMode === "none"
-                ? "（它没有开启任何鉴权）"
-                : "（它只用服务端全局 auth.token 鉴权）"}
-              —— 直接选端口提交即可，生成的配置里也不会出现{" "}
-              <code>user</code> / <code>metadatas.token</code> 这两行。
+                ? t("frp.dlg.noAuth")
+                : t("frp.dlg.globalTokenOnly")}
+              {t("frp.dlg.noAccountNoteA")}{" "}
+              <code>user</code>
+              {t("frp.dlg.noAccountNoteB")}
+              <code>metadatas.token</code>
+              {t("frp.dlg.noAccountNoteC")}
             </div>
           )}
 
           {/* 端口 */}
           <div className="space-y-2">
             <Label>
-              选择端口（最多 {node?.maxPorts ?? 5} 个）
+              {t("frp.dlg.ports", { n: node?.maxPorts ?? 5 })}
             </Label>
             <div className="flex gap-2">
               <Input
@@ -813,7 +826,7 @@ function ApplyDialog({
               />
               <Button variant="outline" onClick={onAddPort} type="button">
                 <Plus className="h-4 w-4" />
-                添加
+                {t("common.add")}
               </Button>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -831,12 +844,12 @@ function ApplyDialog({
                 </Badge>
               ))}
               {selectedPorts.length === 0 && (
-                <span className="text-xs text-muted-foreground">尚未选择端口</span>
+                <span className="text-xs text-muted-foreground">{t("frp.dlg.noPorts")}</span>
               )}
             </div>
             {takenSet.size > 0 && (
               <p className="text-xs text-muted-foreground">
-                该节点已占用：{[...takenSet].sort((a, b) => a - b).slice(0, 20).join(", ")}
+                {t("frp.dlg.taken", { list: [...takenSet].sort((a, b) => a - b).slice(0, 20).join(", ") })}
                 {takenSet.size > 20 ? " …" : ""}
               </p>
             )}
@@ -847,27 +860,27 @@ function ApplyDialog({
           {/* 隧道 */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <Label>隧道（{tunnels.length}）</Label>
+              <Label>{t("frp.dlg.tunnels", { n: tunnels.length })}</Label>
               <Button variant="outline" size="sm" onClick={onAddTunnel} type="button">
                 <Plus className="h-3.5 w-3.5" />
-                添加隧道
+                {t("frp.dlg.addTunnel")}
               </Button>
             </div>
             {tunnels.length === 0 && (
               <p className="text-xs text-muted-foreground">
-                可先提交申请，通过后再补隧道；也可以现在就配置好。
+                {t("frp.dlg.tunnelHint")}
               </p>
             )}
-            {tunnels.map((t, i) => (
+            {tunnels.map((tn, i) => (
               <div key={i} className="space-y-2 rounded-md border p-3">
                 <div className="flex items-center gap-2">
                   <Input
-                    placeholder="隧道名称"
-                    value={t.name}
+                    placeholder={t("frp.dlg.tunnelName")}
+                    value={tn.name}
                     onChange={(e) => patchTunnel(i, { name: e.target.value })}
                   />
                   <Select
-                    value={t.type}
+                    value={tn.type}
                     onValueChange={(v) => patchTunnel(i, { type: v as "tcp" | "udp" })}
                   >
                     <SelectTrigger className="w-24">
@@ -890,22 +903,22 @@ function ApplyDialog({
                 </div>
                 <div className="grid grid-cols-3 gap-2">
                   <Input
-                    placeholder="本地 IP"
-                    value={t.localIP}
+                    placeholder={t("frp.dlg.localIp")}
+                    value={tn.localIP}
                     onChange={(e) => patchTunnel(i, { localIP: e.target.value })}
                   />
                   <Input
                     type="number"
-                    placeholder="本地端口"
-                    value={t.localPort}
+                    placeholder={t("frp.dlg.localPort")}
+                    value={tn.localPort}
                     onChange={(e) =>
                       patchTunnel(i, { localPort: Number(e.target.value) })
                     }
                   />
                   <Input
                     type="number"
-                    placeholder="公网端口"
-                    value={t.remotePort}
+                    placeholder={t("frp.dlg.remotePort")}
+                    value={tn.remotePort}
                     onChange={(e) =>
                       patchTunnel(i, { remotePort: Number(e.target.value) })
                     }
@@ -919,38 +932,38 @@ function ApplyDialog({
 
           {/* 通知邮箱 */}
           <div className="space-y-2">
-            <Label htmlFor="notify">结果通知邮箱</Label>
+            <Label htmlFor="notify">{t("frp.dlg.notify")}</Label>
             <Select
               value={form.notifyEmail}
               onValueChange={(v) => setForm((f) => ({ ...f, notifyEmail: v }))}
             >
               <SelectTrigger id="notify">
-                <SelectValue placeholder="选择邮箱" />
+                <SelectValue placeholder={t("frp.dlg.notifyPh")} />
               </SelectTrigger>
               <SelectContent>
                 {notifyOptions.map((o) => (
                   <SelectItem key={o.email} value={o.email}>
                     {o.email}
-                    {o.kind === "real" ? "（真实邮箱）" : ""}
+                    {o.kind === "real" ? t("frp.dlg.realMailbox") : ""}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
             {notifyOptions.length === 0 && (
               <p className="text-xs text-destructive">
-                没有可用邮箱：请先创建本站邮箱，或在「设置」中验证真实邮箱。
+                {t("frp.dlg.noMailbox")}
               </p>
             )}
             <p className="text-xs text-muted-foreground">
-              只能使用本站邮箱，或已验证的真实邮箱。
+              {t("frp.dlg.mailboxHint")}
             </p>
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="remark">备注（可选）</Label>
+            <Label htmlFor="remark">{t("frp.dlg.remark")}</Label>
             <Input
               id="remark"
-              placeholder="用途说明，便于管理员审核"
+              placeholder={t("frp.dlg.remarkPh")}
               value={form.remark}
               onChange={(e) => setForm((f) => ({ ...f, remark: e.target.value }))}
             />
@@ -959,15 +972,14 @@ function ApplyDialog({
           <div className="flex gap-2 rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
-              审核通过后，请到「我的申请」点「生成配置」拿到 config.toml。
-              frp 会把你的本地服务暴露到公网，请自行确保服务安全。
+              {t("frp.dlg.footer")}
             </div>
           </div>
         </div>
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            取消
+            {t("common.cancel")}
           </Button>
           <Button
             onClick={onConfirm}
@@ -980,7 +992,7 @@ function ApplyDialog({
             }
           >
             {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-            提交申请
+            {t("frp.dlg.submit")}
           </Button>
         </DialogFooter>
       </DialogContent>
