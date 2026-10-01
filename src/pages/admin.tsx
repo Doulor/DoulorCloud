@@ -33,6 +33,7 @@ import {
   AlertCircle,
   BarChart3,
   Gauge,
+  Globe,
   ArrowLeft,
   ExternalLink,
   Mail,
@@ -55,6 +56,8 @@ import { AuditPanel } from "./admin-audit"
 import { PointsAdminPanel } from "./admin-points"
 import { FunLinksAdminPanel } from "./admin-fun-links"
 import { TitlesAdminPanel } from "./admin-titles"
+// DNS 解析管理（全站记录 / 合规扫描 / 与 Cloudflare 对账）同理外置
+import { DnsAdminPanel } from "./admin-dns"
 
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
@@ -2722,7 +2725,7 @@ export default function AdminPage() {
               className="mb-3 inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
               <ArrowLeft className="h-4 w-4" />
-              返回控制台
+              {t("adm.326")}
             </Link>
 
             <nav className="flex flex-col gap-0.5 lg:overflow-y-auto lg:pr-1">
@@ -2740,6 +2743,16 @@ export default function AdminPage() {
                 <NavItem active={activeTab === "r2"} icon={Database} label={t("adm.223")} onClick={() => handleTabChange("r2")} />
                 <NavItem active={activeTab === "frp"} icon={Network} label={t("adm.224")} onClick={() => handleTabChange("frp")} />
                 <NavItem active={activeTab === "proxy"} icon={Zap} label={t("adm.225")} onClick={() => handleTabChange("proxy")} />
+
+                {/* 角标 = DNS 合规扫描里待处理的问题条数（原先解析功能完全没有审核）。
+                    标签用 dns.* 前缀，避开并发进行的 adm.* 编号 */}
+                <NavItem
+                  active={activeTab === "dns"}
+                  icon={Globe}
+                  label={t("dns.nav")}
+                  count={attention?.dnsFindings}
+                  onClick={() => handleTabChange("dns")}
+                />
               </NavGroup>
               <NavGroup label={t("adm.226")}>
                 <NavItem active={activeTab === "announcements"} icon={Megaphone} label={t("adm.227")} onClick={() => handleTabChange("announcements")} />
@@ -2812,15 +2825,15 @@ export default function AdminPage() {
             <TableHeader>
               <TableRow>
                 <TableHead className="sticky top-[56px] z-10 w-16 border-b bg-card">UID</TableHead>
-                <TableHead className="sticky top-[56px] z-10 border-b bg-card">用户</TableHead>
-                <TableHead className="sticky top-[56px] z-10 border-b bg-card">邀请码</TableHead>
-                <TableHead className="sticky top-[56px] z-10 border-b bg-card">创建时间</TableHead>
-                <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">网盘</TableHead>
-                <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">AI 中转站</TableHead>
-                <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">内网穿透</TableHead>
-                <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">代理节点</TableHead>
-                <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">个人名片</TableHead>
-                <TableHead className="sticky top-[56px] z-10 border-b bg-card">状态</TableHead>
+                <TableHead className="sticky top-[56px] z-10 border-b bg-card">{t("adm.327")}</TableHead>
+                <TableHead className="sticky top-[56px] z-10 border-b bg-card">{t("adm.328")}</TableHead>
+                <TableHead className="sticky top-[56px] z-10 border-b bg-card">{t("adm.329")}</TableHead>
+                <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">{t("adm.330")}</TableHead>
+                <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">{t("adm.331")}</TableHead>
+                <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">{t("adm.332")}</TableHead>
+                <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">{t("adm.333")}</TableHead>
+                <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">{t("adm.334")}</TableHead>
+                <TableHead className="sticky top-[56px] z-10 border-b bg-card">{t("adm.335")}</TableHead>
                 <TableHead className="sticky top-[56px] z-10 w-24 border-b bg-card" />
               </TableRow>
             </TableHeader>
@@ -2836,9 +2849,9 @@ export default function AdminPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono text-sm line-through">{u.username}</span>
                         <span className="text-xs">{u.email}</span>
-                        <Badge variant="outline">已注销用户</Badge>
+                        <Badge variant="outline">{t("adm.336")}</Badge>
                         {u.deletedReason === "admin" && (
-                          <Badge variant="destructive">管理员删除</Badge>
+                          <Badge variant="destructive">{t("adm.337")}</Badge>
                         )}
                         <span className="text-xs">
                           注销于 {u.deletedAt ? fmtTime(u.deletedAt) : t("adm.148")}
@@ -2955,7 +2968,7 @@ export default function AdminPage() {
                         title={t("adm.246")}
                       >
                         <Pencil className="h-3.5 w-3.5" />
-                        编辑
+                        {t("adm.338")}
                       </Button>
                       <Button
                         variant="ghost"
@@ -2995,11 +3008,11 @@ export default function AdminPage() {
         <TabsContent value="invites">
           <div className="mb-4 flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
-              邀请码用于注册；每个码有使用次数上限。
+              {t("adm.339")}
             </p>
             <Button size="sm" onClick={() => setInviteOpen(true)}>
               <Plus className="h-4 w-4" />
-              添加邀请码
+              {t("adm.340")}
             </Button>
           </div>
 
@@ -3036,11 +3049,11 @@ export default function AdminPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>邀请码</TableHead>
-                    <TableHead>已用 / 上限</TableHead>
-                    <TableHead>权限</TableHead>
-                    <TableHead>创建时间</TableHead>
-                    <TableHead>状态</TableHead>
+                    <TableHead>{t("adm.341")}</TableHead>
+                    <TableHead>{t("adm.342")}</TableHead>
+                    <TableHead>{t("adm.343")}</TableHead>
+                    <TableHead>{t("adm.344")}</TableHead>
+                    <TableHead>{t("adm.345")}</TableHead>
                     <TableHead className="w-20" />
                   </TableRow>
                 </TableHeader>
@@ -3067,10 +3080,10 @@ export default function AdminPage() {
                           >
                             {FEATURES.filter((f) => inv.permissions[f.key]).length ===
                             FEATURES.length ? (
-                              <Badge variant="secondary">全部</Badge>
+                              <Badge variant="secondary">{t("adm.346")}</Badge>
                             ) : FEATURES.filter((f) => inv.permissions[f.key]).length ===
                               0 ? (
-                              <Badge variant="destructive">无</Badge>
+                              <Badge variant="destructive">{t("adm.347")}</Badge>
                             ) : (
                               FEATURES.filter((f) => inv.permissions[f.key]).map((f) => (
                                 <Badge key={f.key} variant="outline">
@@ -3085,11 +3098,11 @@ export default function AdminPage() {
                         </TableCell>
                         <TableCell>
                           {exhausted ? (
-                            <Badge variant="destructive">已用完</Badge>
+                            <Badge variant="destructive">{t("adm.348")}</Badge>
                           ) : expired ? (
-                            <Badge variant="destructive">已过期</Badge>
+                            <Badge variant="destructive">{t("adm.349")}</Badge>
                           ) : (
-                            <Badge variant="success">可用</Badge>
+                            <Badge variant="success">{t("adm.350")}</Badge>
                           )}
                         </TableCell>
                         <TableCell>
@@ -3128,7 +3141,7 @@ export default function AdminPage() {
             <div className="flex items-center gap-2">
               <Button variant="outline" size="sm" onClick={() => void loadFrp()}>
                 <RefreshCw className="h-3.5 w-3.5" />
-                刷新
+                {t("adm.351")}
               </Button>
             </div>
             <Button
@@ -3153,7 +3166,7 @@ export default function AdminPage() {
               }}
             >
               <Plus className="h-4 w-4" />
-              添加节点
+              {t("adm.352")}
             </Button>
           </div>
 
@@ -3262,7 +3275,7 @@ export default function AdminPage() {
                               disabled={frpBusy}
                             >
                               <CheckCircle2 className="h-3.5 w-3.5" />
-                              通过
+                              {t("adm.353")}
                             </Button>
                             <Button
                               variant="outline"
@@ -3271,7 +3284,7 @@ export default function AdminPage() {
                               disabled={frpBusy}
                             >
                               <XCircle className="h-3.5 w-3.5" />
-                              拒绝
+                              {t("adm.354")}
                             </Button>
                           </div>
                         )}
@@ -3285,7 +3298,7 @@ export default function AdminPage() {
                               disabled={frpBusy}
                             >
                               <RotateCcw className="h-3.5 w-3.5" />
-                              撤销审核
+                              {t("adm.355")}
                             </Button>
                           </div>
                         )}
@@ -3305,10 +3318,10 @@ export default function AdminPage() {
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead>名称</TableHead>
+                        <TableHead>{t("adm.356")}</TableHead>
                         <TableHead>serverAddr</TableHead>
-                        <TableHead>端口范围</TableHead>
-                        <TableHead>已占用</TableHead>
+                        <TableHead>{t("adm.357")}</TableHead>
+                        <TableHead>{t("adm.358")}</TableHead>
                         <TableHead className="w-28" />
                       </TableRow>
                     </TableHeader>
@@ -3354,7 +3367,7 @@ export default function AdminPage() {
                                   setNodeOpen(true)
                                 }}
                               >
-                                编辑
+                                {t("adm.359")}
                               </Button>
                               <Button
                                 variant="ghost"
@@ -3405,9 +3418,9 @@ export default function AdminPage() {
                 {frpReviewTarget?.action === "approve" &&
                   (frpReviewTarget.app.needAccount ? (
                     <p className="text-xs text-muted-foreground">
-                      提示：在 frps-panel 建号时，请把用户申请里填的
+                      {t("adm.360")}
                       <strong>密码</strong>（<code className="font-mono">{frpReviewTarget.app.frpPassword}</code>）
-                      原样作为该用户的 token（即 config.toml 里的 metadatas.token）。
+                      {t("adm.361")}
                     </p>
                   ) : (
                     <p className="text-xs text-muted-foreground">
@@ -3418,7 +3431,7 @@ export default function AdminPage() {
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setFrpReviewTarget(null)} disabled={frpBusy}>
-                  取消
+                  {t("adm.362")}
                 </Button>
                 <Button
                   variant={frpReviewTarget?.action === "reject" ? "destructive" : "default"}
@@ -3436,7 +3449,7 @@ export default function AdminPage() {
         <TabsContent value="proxy">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <p className="text-sm text-muted-foreground">
-              维护代理订阅源：用户启用「代理节点」后即可看到所有已启用的订阅源。
+              {t("adm.363")}
             </p>
             <Button
               size="sm"
@@ -3457,7 +3470,7 @@ export default function AdminPage() {
               }}
             >
               <Plus className="h-4 w-4" />
-              添加订阅源
+              {t("adm.364")}
             </Button>
           </div>
 
@@ -3473,11 +3486,11 @@ export default function AdminPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>名称</TableHead>
-                    <TableHead>订阅链接</TableHead>
-                    <TableHead>协议</TableHead>
-                    <TableHead>状态</TableHead>
-                    <TableHead>启用</TableHead>
+                    <TableHead>{t("adm.365")}</TableHead>
+                    <TableHead>{t("adm.366")}</TableHead>
+                    <TableHead>{t("adm.367")}</TableHead>
+                    <TableHead>{t("adm.368")}</TableHead>
+                    <TableHead>{t("adm.369")}</TableHead>
                     <TableHead className="w-28" />
                   </TableRow>
                 </TableHeader>
@@ -3498,20 +3511,20 @@ export default function AdminPage() {
                       <TableCell className="text-xs">{s.protocol}</TableCell>
                       <TableCell>
                         {s.status === "online" ? (
-                          <Badge variant="success">运行中</Badge>
+                          <Badge variant="success">{t("adm.370")}</Badge>
                         ) : s.status === "offline" ? (
-                          <Badge variant="destructive">不可用</Badge>
+                          <Badge variant="destructive">{t("adm.371")}</Badge>
                         ) : s.status === "maintenance" ? (
-                          <Badge variant="secondary">维护中</Badge>
+                          <Badge variant="secondary">{t("adm.372")}</Badge>
                         ) : (
-                          <Badge variant="outline">未知</Badge>
+                          <Badge variant="outline">{t("adm.373")}</Badge>
                         )}
                       </TableCell>
                       <TableCell>
                         {s.enabled ? (
-                          <Badge variant="success">公开</Badge>
+                          <Badge variant="success">{t("adm.374")}</Badge>
                         ) : (
-                          <Badge variant="secondary">停用</Badge>
+                          <Badge variant="secondary">{t("adm.375")}</Badge>
                         )}
                       </TableCell>
                       <TableCell>
@@ -3535,7 +3548,7 @@ export default function AdminPage() {
                               setProxyOpen(true)
                             }}
                           >
-                            编辑
+                            {t("adm.376")}
                           </Button>
                           <Button
                             variant="ghost"
@@ -3558,8 +3571,8 @@ export default function AdminPage() {
         <TabsContent value="inviteQuotas">
           <p className="mb-4 text-sm text-muted-foreground">
             每个用户默认可创建 {inviteQuotas?.baseQuota ?? 3} 个邀请码；
-            每笔捐献获批再 +2 个额度，并获得 1 个对应模块的权限额度。
-            点「详情」可查看该用户创建的邀请码并调整额度。
+            {t("adm.377")}
+            {t("adm.378")}
           </p>
 
           {/* 顶部搜索：与用户列表同款，按用户名 / 邮箱 / 域名过滤 */}
@@ -3585,10 +3598,10 @@ export default function AdminPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-16">UID</TableHead>
-                    <TableHead>用户</TableHead>
-                    <TableHead>邀请码额度</TableHead>
-                    <TableHead>模块权限额度（剩余）</TableHead>
-                    <TableHead>已创建</TableHead>
+                    <TableHead>{t("adm.379")}</TableHead>
+                    <TableHead>{t("adm.380")}</TableHead>
+                    <TableHead>{t("adm.381")}</TableHead>
+                    <TableHead>{t("adm.382")}</TableHead>
                     <TableHead className="w-20" />
                   </TableRow>
                 </TableHeader>
@@ -3625,7 +3638,7 @@ export default function AdminPage() {
                               <span key={f}>
                                 {inviteQuotas!.featureLabels[f]}{" "}
                                 {isBasic ? (
-                                  <Badge variant="outline">基础</Badge>
+                                  <Badge variant="outline">{t("adm.383")}</Badge>
                                 ) : (
                                   <span
                                     className={
@@ -3651,7 +3664,7 @@ export default function AdminPage() {
                           disabled={quotaDetailBusy}
                           onClick={() => void openQuotaDetail(u.username)}
                         >
-                          详情
+                          {t("adm.384")}
                         </Button>
                       </TableCell>
                     </TableRow>
@@ -3665,19 +3678,19 @@ export default function AdminPage() {
         <TabsContent value="reserved">
           {/* 保留域名 */}
           <div className="mb-2 flex items-center gap-2">
-            <h3 className="text-sm font-medium">保留域名</h3>
+            <h3 className="text-sm font-medium">{t("adm.385")}</h3>
             <span className="text-xs text-muted-foreground">
-              命中后用户无法创建同名一级子域名
+              {t("adm.386")}
             </span>
           </div>
           <div className="mb-4 space-y-3">
             <p className="text-sm text-muted-foreground">
-              名单中的名称不允许用户创建为一级子域名（即使位数合规）。
-              邮箱前缀与用户名不受此名单影响。
+              {t("adm.387")}
+              {t("adm.388")}
             </p>
             <div className="flex flex-wrap items-end gap-2">
               <div className="space-y-1">
-                <Label htmlFor="rname" className="text-xs">名称</Label>
+                <Label htmlFor="rname" className="text-xs">{t("adm.389")}</Label>
                 <Input
                   id="rname"
                   placeholder="brand"
@@ -3687,7 +3700,7 @@ export default function AdminPage() {
                 />
               </div>
               <div className="space-y-1">
-                <Label htmlFor="rnote" className="text-xs">备注（可选）</Label>
+                <Label htmlFor="rnote" className="text-xs">{t("adm.390")}</Label>
                 <Input
                   id="rnote"
                   placeholder={t("adm.264")}
@@ -3699,7 +3712,7 @@ export default function AdminPage() {
               <Button onClick={() => void handleAddReserved()} disabled={reservedBusy || !reservedName.trim()}>
                 {reservedBusy && <Loader2 className="h-4 w-4 animate-spin" />}
                 <Plus className="h-4 w-4" />
-                添加
+                {t("adm.391")}
               </Button>
             </div>
           </div>
@@ -3713,9 +3726,9 @@ export default function AdminPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>名称</TableHead>
-                    <TableHead>完整域名</TableHead>
-                    <TableHead>备注</TableHead>
+                    <TableHead>{t("adm.392")}</TableHead>
+                    <TableHead>{t("adm.393")}</TableHead>
+                    <TableHead>{t("adm.394")}</TableHead>
                     <TableHead className="w-12" />
                   </TableRow>
                 </TableHeader>
@@ -3749,19 +3762,19 @@ export default function AdminPage() {
 
           {/* 昵称保留词 */}
           <div className="mt-8 mb-2 flex items-center gap-2">
-            <h3 className="text-sm font-medium">昵称保留词</h3>
+            <h3 className="text-sm font-medium">{t("adm.395")}</h3>
             <span className="text-xs text-muted-foreground">
-              命中后普通用户无法用该昵称（管理员自身不受限）
+              {t("adm.396")}
             </span>
           </div>
           <div className="space-y-3">
             <p className="text-xs text-muted-foreground">
-              用户设置昵称时，命中此列表的昵称会被拒绝。基础保留词（管理员、站长、admin 等）
-              硬编码无法删除。管理员自己设昵称时跳过此名单，但仍禁止含「doulor」。
+              {t("adm.397")}
+              {t("adm.398")}
             </p>
             <div className="flex flex-wrap items-end gap-2">
               <div className="space-y-1">
-                <Label htmlFor="rnick" className="text-xs">保留词</Label>
+                <Label htmlFor="rnick" className="text-xs">{t("adm.399")}</Label>
                 <Input
                   id="rnick"
                   placeholder={t("adm.268")}
@@ -3782,7 +3795,7 @@ export default function AdminPage() {
               >
                 {nickReservedBusy && <Loader2 className="h-4 w-4 animate-spin" />}
                 <Plus className="h-4 w-4" />
-                添加
+                {t("adm.400")}
               </Button>
             </div>
             {nickReserved.length > 0 ? (
@@ -3805,7 +3818,7 @@ export default function AdminPage() {
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-muted-foreground">还没有附加保留词。</p>
+              <p className="text-xs text-muted-foreground">{t("adm.401")}</p>
             )}
           </div>
         </TabsContent>
@@ -3813,11 +3826,11 @@ export default function AdminPage() {
         <TabsContent value="donations">
           <div className="mb-4 flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
-              用户贡献资源以解锁功能。通过后会自动为其开通对应权限，并邮件通知申请人。
+              {t("adm.402")}
             </p>
             <Button variant="outline" size="sm" onClick={() => void loadDonations()}>
               <RefreshCw className="h-4 w-4" />
-              刷新
+              {t("adm.403")}
             </Button>
           </div>
 
@@ -3944,7 +3957,7 @@ export default function AdminPage() {
                           disabled={donationBusy}
                         >
                           <CheckCircle2 className="h-3.5 w-3.5" />
-                          通过并解锁
+                          {t("adm.404")}
                         </Button>
                         <Button
                           variant="outline"
@@ -3953,15 +3966,15 @@ export default function AdminPage() {
                           disabled={donationBusy}
                         >
                           <XCircle className="h-3.5 w-3.5" />
-                          拒绝
+                          {t("adm.405")}
                         </Button>
                       </div>
                     )}
                     {(d.status === "rejected" || d.status === "revoked") && (
                       <div className="flex shrink-0 items-center gap-2">
                         {/* AI 渠道可以「先用原始信息重试接入」；代理/内网穿透没有
-                            可重试的自动动作，直接人工放行即可。
-                            对 revoked（资源失效被系统撤销）同样给这两个按钮：
+                            {t("adm.406")}
+                            {t("adm.407")}
                             这是管理员的人工兜底 —— 复核接入会重新校验并并入。 */}
                         {(d.type === "ai" || d.type === "sensenova") && (
                           <Button
@@ -3971,7 +3984,7 @@ export default function AdminPage() {
                             disabled={donationBusy}
                           >
                             <PlugZap className="h-3.5 w-3.5" />
-                            复核：重试接入
+                            {t("adm.408")}
                           </Button>
                         )}
                         <Button
@@ -3980,14 +3993,14 @@ export default function AdminPage() {
                           disabled={donationBusy}
                         >
                           <CheckCircle2 className="h-3.5 w-3.5" />
-                          复核通过
+                          {t("adm.409")}
                         </Button>
                       </div>
                     )}
                     {d.status === "approved" && (
                       <div className="flex shrink-0 items-center gap-2">
                         {/* 渠道已接入 → 才有「补全/重试」的对象。补全用于救
-                            「失败模型没落库」的历史单（重新拉上游做差集），
+                            {t("adm.410")}
                             重试用于补回当时因限流/超时而没通过的模型。 */}
                         {d.type === "ai" && d.channelId != null && (
                           <>
@@ -3998,7 +4011,7 @@ export default function AdminPage() {
                               disabled={donationBusy}
                             >
                               <PlugZap className="h-3.5 w-3.5" />
-                              补全模型
+                              {t("adm.411")}
                             </Button>
                             <Button
                               variant="outline"
@@ -4007,7 +4020,7 @@ export default function AdminPage() {
                               disabled={donationBusy}
                             >
                               <RefreshCw className="h-3.5 w-3.5" />
-                              重试失败模型
+                              {t("adm.412")}
                             </Button>
                           </>
                         )}
@@ -4019,7 +4032,7 @@ export default function AdminPage() {
                           disabled={donationBusy}
                         >
                           <RotateCcw className="h-3.5 w-3.5" />
-                          撤销并重新审核
+                          {t("adm.413")}
                         </Button>
                       </div>
                     )}
@@ -4033,14 +4046,14 @@ export default function AdminPage() {
           <div className="mt-6 border-t pt-6">
             <div className="mb-3 flex items-center justify-between">
               <div>
-                <h3 className="text-sm font-medium">反代账号贡献</h3>
+                <h3 className="text-sm font-medium">{t("adm.414")}</h3>
                 <p className="text-xs text-muted-foreground">
-                  用户登录 WorkBuddy 账号即自动生效，无需审核。这里用于观察与摘除。
+                  {t("adm.415")}
                 </p>
               </div>
               <Button variant="outline" size="sm" onClick={() => void loadWb2api()}>
                 <RefreshCw className="h-4 w-4" />
-                刷新
+                {t("adm.416")}
               </Button>
             </div>
             {wb2apiBindings.length === 0 ? (
@@ -4079,7 +4092,7 @@ export default function AdminPage() {
                         }}
                       >
                         <Trash2 className="h-4 w-4" />
-                        摘除
+                        {t("adm.417")}
                       </Button>
                     )}
                   </div>
@@ -4123,12 +4136,12 @@ export default function AdminPage() {
                   onChange={(e) => setReviewNote(e.target.value)}
                 />
                 <p className="text-xs text-muted-foreground">
-                  会随结果邮件一并通知申请人。
+                  {t("adm.418")}
                 </p>
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setReviewTarget(null)} disabled={donationBusy}>
-                  取消
+                  {t("adm.419")}
                 </Button>
                 <Button
                   variant={reviewTarget?.action === "reject" ? "destructive" : "default"}
@@ -4150,11 +4163,11 @@ export default function AdminPage() {
         <TabsContent value="announcements">
           <div className="mb-4 flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
-              发布网站动态，用户在概览页可见（pinned 优先，最多展示 5 条）
+              {t("adm.420")}
             </p>
             <Button size="sm" onClick={() => openAnnouncementDialog()}>
               <Plus className="h-4 w-4" />
-              发布公告
+              {t("adm.421")}
             </Button>
           </div>
           {announcementLoading ? (
@@ -4256,14 +4269,18 @@ export default function AdminPage() {
           <TitlesAdminPanel />
         </TabsContent>
 
+        <TabsContent value="dns">
+          <DnsAdminPanel />
+        </TabsContent>
+
         <TabsContent value="events">
           <div className="mb-4 flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
-              活动发布后会推送到用户消息中心「活动推广」，用户点「立即参与」时由服务端校验条件并自动发放奖励。
+              {t("adm.422")}
             </p>
             <Button size="sm" onClick={() => openEventDialog()}>
               <Plus className="h-4 w-4" />
-              发布活动
+              {t("adm.423")}
             </Button>
           </div>
           {eventLoading ? (
@@ -4318,7 +4335,7 @@ export default function AdminPage() {
                             disabled={eventBusy}
                             onClick={() => void handleDrawEvent(ev)}
                           >
-                            开奖
+                            {t("adm.424")}
                           </Button>
                         )}
                         <Button
@@ -4327,7 +4344,7 @@ export default function AdminPage() {
                           className="h-7"
                           onClick={() => void openClaimsDialog(ev)}
                         >
-                          领取名单
+                          {t("adm.425")}
                         </Button>
                         <Button
                           variant="ghost"
@@ -4363,12 +4380,12 @@ export default function AdminPage() {
         <TabsContent value="r2">
           <div className="mb-4 flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
-              多桶横向扩容：免费额度每账户 10 GB。用户开通网盘时自动分配到人数最少的桶，
-              每桶人数上限与每人配额可随时调整。
+              {t("adm.426")}
+              {t("adm.427")}
             </p>
             <Button size="sm" onClick={() => openR2BucketDialog()}>
               <Plus className="h-4 w-4" />
-              添加桶
+              {t("adm.428")}
             </Button>
           </div>
 
@@ -4384,7 +4401,7 @@ export default function AdminPage() {
             <div className="space-y-4">
               {/* 免费额度图例 */}
               <div className="flex flex-wrap items-center gap-4 rounded-lg border bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">Cloudflare 免费额度（每月）</span>
+                <span className="font-medium text-foreground">{t("adm.429")}</span>
                 <span>存储 {formatBytes(r2Data.freeTier.storageBytes)}</span>
                 <span>A 类操作 {r2Data.freeTier.classAOps.toLocaleString()}</span>
                 <span>B 类操作 {r2Data.freeTier.classBOps.toLocaleString()}</span>
@@ -4407,7 +4424,7 @@ export default function AdminPage() {
                               <Database className="h-4 w-4 text-muted-foreground" />
                               {b.name}
                               {b.kind === "platform" && (
-                                <Badge variant="secondary">平台数据</Badge>
+                                <Badge variant="secondary">{t("adm.430")}</Badge>
                               )}
                               {!b.enabled && <Badge variant="secondary">已停用</Badge>}
                               {b.id === "" && <Badge variant="outline">默认桶</Badge>}
@@ -4425,14 +4442,14 @@ export default function AdminPage() {
                                 size="sm"
                                 onClick={() => void handleTestR2Bucket(b.id, false)}
                               >
-                                连通测试
+                                {t("adm.431")}
                               </Button>
                               <Button
                                 variant="outline"
                                 size="sm"
                                 onClick={() => void handleTestR2Bucket(b.id, true)}
                               >
-                                读写测试
+                                {t("adm.432")}
                               </Button>
                               <Button
                                 variant="ghost"
@@ -4466,7 +4483,7 @@ export default function AdminPage() {
                                 }
                               >
                                 <Plus className="h-3.5 w-3.5" />
-                                纳入管理
+                                {t("adm.433")}
                               </Button>
                               {r2Data.assignableBuckets.length > 0 && (
                                 <Button
@@ -4488,7 +4505,7 @@ export default function AdminPage() {
                         {/* 存储用量：占免费额度百分比 */}
                         <div className="space-y-1.5">
                           <div className="flex items-center justify-between text-sm">
-                            <span className="text-muted-foreground">存储占用（免费额度）</span>
+                            <span className="text-muted-foreground">{t("adm.434")}</span>
                             <span className="font-medium">
                               {formatBytes(s.usedBytes)}
                               <span className="ml-1 text-xs text-muted-foreground">
@@ -4515,7 +4532,7 @@ export default function AdminPage() {
                         {b.kind !== "platform" && b.maxUsers > 0 && (
                           <div className="space-y-1.5">
                             <div className="flex items-center justify-between text-sm">
-                              <span className="text-muted-foreground">容量分配</span>
+                              <span className="text-muted-foreground">{t("adm.435")}</span>
                               <span className="font-medium">
                                 {formatBytes(s.usedBytes)}
                                 <span className="ml-1 text-xs text-muted-foreground">
@@ -4536,34 +4553,34 @@ export default function AdminPage() {
                         {b.kind === "platform" ? (
                           <div className="grid grid-cols-2 gap-3">
                             <div className="rounded-md border px-3 py-2">
-                              <p className="text-xs text-muted-foreground">用途</p>
-                              <p className="text-sm font-semibold">名片 + 分享箱</p>
+                              <p className="text-xs text-muted-foreground">{t("adm.436")}</p>
+                              <p className="text-sm font-semibold">{t("adm.437")}</p>
                             </div>
                             <div className="rounded-md border px-3 py-2">
-                              <p className="text-xs text-muted-foreground">文件数</p>
+                              <p className="text-xs text-muted-foreground">{t("adm.438")}</p>
                               <p className="text-sm font-semibold">{s.fileCount}</p>
                             </div>
                           </div>
                         ) : (
                           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                             <div className="rounded-md border px-3 py-2">
-                              <p className="text-xs text-muted-foreground">已分配用户</p>
+                              <p className="text-xs text-muted-foreground">{t("adm.439")}</p>
                               <p className="text-sm font-semibold">
                                 {s.users} / {b.maxUsers || "—"}
                               </p>
                             </div>
                             <div className="rounded-md border px-3 py-2">
-                              <p className="text-xs text-muted-foreground">文件数</p>
+                              <p className="text-xs text-muted-foreground">{t("adm.440")}</p>
                               <p className="text-sm font-semibold">{s.fileCount}</p>
                             </div>
                             <div className="rounded-md border px-3 py-2">
-                              <p className="text-xs text-muted-foreground">每人配额</p>
+                              <p className="text-xs text-muted-foreground">{t("adm.441")}</p>
                               <p className="text-sm font-semibold">
                                 {formatBytes(b.quotaPerUser)}
                               </p>
                             </div>
                             <div className="rounded-md border px-3 py-2">
-                              <p className="text-xs text-muted-foreground">人数占用</p>
+                              <p className="text-xs text-muted-foreground">{t("adm.442")}</p>
                               <p className="text-sm font-semibold">{userPct.toFixed(0)}%</p>
                             </div>
                           </div>
@@ -4573,7 +4590,7 @@ export default function AdminPage() {
                         {b.id !== "" && (
                           <div className="space-y-2 rounded-md border p-3">
                             <div className="flex items-center justify-between">
-                              <span className="text-xs font-medium">本月操作数</span>
+                              <span className="text-xs font-medium">{t("adm.443")}</span>
                               {!ops?.configured && (
                                 <span className="text-xs text-muted-foreground">
                                   {ops?.reason ?? "未接入 Analytics"}
@@ -4589,7 +4606,7 @@ export default function AdminPage() {
                               <>
                                 <div className="space-y-1">
                                   <div className="flex items-center justify-between text-xs">
-                                    <span className="text-muted-foreground">A 类操作</span>
+                                    <span className="text-muted-foreground">{t("adm.444")}</span>
                                     <span>
                                       {(ops.classA ?? 0).toLocaleString()} /{" "}
                                       {ops.freeTier.classAOps.toLocaleString()}（
@@ -4609,7 +4626,7 @@ export default function AdminPage() {
                                 </div>
                                 <div className="space-y-1">
                                   <div className="flex items-center justify-between text-xs">
-                                    <span className="text-muted-foreground">B 类操作</span>
+                                    <span className="text-muted-foreground">{t("adm.445")}</span>
                                     <span>
                                       {(ops.classB ?? 0).toLocaleString()} /{" "}
                                       {ops.freeTier.classBOps.toLocaleString()}（
@@ -4636,7 +4653,7 @@ export default function AdminPage() {
                         {b.users.length > 0 && (
                           <div className="space-y-1">
                             <p className="text-xs font-medium text-muted-foreground">
-                              已分配用户（点击「改派」可迁移到其他桶，仅改归属不搬文件）
+                              {t("adm.446")}
                             </p>
                             <div className="divide-y rounded-md border">
                               {b.users.map((u) => (
@@ -4648,7 +4665,7 @@ export default function AdminPage() {
                                     <span className="font-mono">{u.username}</span>
                                     {!u.enabled && (
                                       <Badge variant="secondary" className="text-xs">
-                                        已停用
+                                        {t("adm.447")}
                                       </Badge>
                                     )}
                                   </div>
@@ -4690,7 +4707,7 @@ export default function AdminPage() {
                                             )
                                           }
                                         >
-                                          改派
+                                          {t("adm.448")}
                                         </Button>
                                       </>
                                     )}
@@ -4726,11 +4743,11 @@ export default function AdminPage() {
                 checked={communityShowDeleted}
                 onCheckedChange={(v) => { setCommunityShowDeleted(v); }}
               />
-              显示已删帖
+              {t("adm.449")}
             </label>
             <Button variant="outline" size="sm" onClick={() => void loadCommunity()}>
               <RefreshCw className="h-4 w-4" />
-              刷新
+              {t("adm.450")}
             </Button>
           </div>
 
@@ -4747,12 +4764,12 @@ export default function AdminPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-32">作者</TableHead>
-                    <TableHead>内容</TableHead>
-                    <TableHead className="w-28">时间</TableHead>
-                    <TableHead className="w-28">互动</TableHead>
-                    <TableHead className="w-20">状态</TableHead>
-                    <TableHead className="w-24">操作</TableHead>
+                    <TableHead className="w-32">{t("adm.451")}</TableHead>
+                    <TableHead>{t("adm.452")}</TableHead>
+                    <TableHead className="w-28">{t("adm.453")}</TableHead>
+                    <TableHead className="w-28">{t("adm.454")}</TableHead>
+                    <TableHead className="w-20">{t("adm.455")}</TableHead>
+                    <TableHead className="w-24">{t("adm.456")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -4773,9 +4790,9 @@ export default function AdminPage() {
                       </TableCell>
                       <TableCell>
                         {p.deleted_at ? (
-                          <Badge variant="destructive">已删</Badge>
+                          <Badge variant="destructive">{t("adm.457")}</Badge>
                         ) : (
-                          <Badge variant="secondary">正常</Badge>
+                          <Badge variant="secondary">{t("adm.458")}</Badge>
                         )}
                       </TableCell>
                       <TableCell>
@@ -4786,7 +4803,7 @@ export default function AdminPage() {
                             onClick={() => void handleRestoreCommunityPost(p.id)}
                           >
                             <RotateCcw className="h-4 w-4" />
-                            恢复
+                            {t("adm.459")}
                           </Button>
                         ) : (
                           <Button
@@ -4795,7 +4812,7 @@ export default function AdminPage() {
                             onClick={() => void handleDeleteCommunityPost(p.id)}
                           >
                             <Trash2 className="h-4 w-4" />
-                            删除
+                            {t("adm.460")}
                           </Button>
                         )}
                       </TableCell>
@@ -4813,11 +4830,11 @@ export default function AdminPage() {
                 这里允许直接在网页上验证并替换，不必重跑 wrangler secret put。 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">管理员凭据（系统访问令牌）</CardTitle>
+                <CardTitle className="text-base">{t("adm.461")}</CardTitle>
                 <CardDescription>
-                  NewAPI 后台每次「生成 / 重新生成」系统访问令牌都会覆盖旧值，旧令牌随即失效，
-                  本站的管理员级调用（建号、查账号、设额度、健康检查）会全部报令牌无效。
-                  在此粘贴新令牌即可恢复，无需重新部署。
+                  {t("adm.462")}
+                  {t("adm.463")}
+                  {t("adm.464")}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -4827,18 +4844,18 @@ export default function AdminPage() {
                   <>
                     <div className="space-y-1 rounded-md border p-3 text-sm">
                       <div className="flex items-center gap-2">
-                        <span className="text-muted-foreground">当前来源</span>
+                        <span className="text-muted-foreground">{t("adm.465")}</span>
                         {newapiCred?.source === "db" ? (
-                          <Badge variant="secondary">管理面板设置（优先）</Badge>
+                          <Badge variant="secondary">{t("adm.466")}</Badge>
                         ) : newapiCred?.source === "env" ? (
-                          <Badge variant="outline">Worker 环境变量</Badge>
+                          <Badge variant="outline">{t("adm.467")}</Badge>
                         ) : (
-                          <Badge variant="destructive">未配置</Badge>
+                          <Badge variant="destructive">{t("adm.468")}</Badge>
                         )}
                         {newapiCred?.configured ? (
-                          <Badge variant="secondary">已启用</Badge>
+                          <Badge variant="secondary">{t("adm.469")}</Badge>
                         ) : (
-                          <Badge variant="destructive">不可用</Badge>
+                          <Badge variant="destructive">{t("adm.470")}</Badge>
                         )}
                       </div>
                       <p className="text-muted-foreground">
@@ -4856,11 +4873,11 @@ export default function AdminPage() {
                       {/* 真实探测一次管理接口：NewAPI 的令牌会被后台轮换，
                           不主动测就只能等用户建 Key 时才发现已经失效 */}
                       <p className="flex items-center gap-1.5">
-                        <span className="text-muted-foreground">连通性</span>
+                        <span className="text-muted-foreground">{t("adm.471")}</span>
                         {newapiCred?.health?.ok ? (
                           <span className="flex items-center gap-1 text-emerald-600">
                             <CheckCircle2 className="h-3.5 w-3.5" />
-                            令牌有效
+                            {t("adm.472")}
                           </span>
                         ) : (
                           <span className="flex items-center gap-1 text-destructive">
@@ -4873,7 +4890,7 @@ export default function AdminPage() {
 
                     <div className="grid gap-4 sm:grid-cols-2">
                       <div className="space-y-2 sm:col-span-2">
-                        <Label htmlFor="newapiNewToken">新的访问令牌</Label>
+                        <Label htmlFor="newapiNewToken">{t("adm.473")}</Label>
                         <Input
                           id="newapiNewToken"
                           type="password"
@@ -4883,12 +4900,12 @@ export default function AdminPage() {
                           onChange={(e) => setNewapiNewToken(e.target.value)}
                         />
                         <p className="text-xs text-muted-foreground">
-                          提交前会先真实调用一次中转站管理接口验证；验证不通过不会覆盖现有凭据。
-                          令牌加密存储，明文不回传。
+                          {t("adm.474")}
+                          {t("adm.475")}
                         </p>
                       </div>
                       <div className="space-y-2">
-                        <Label htmlFor="newapiAdminUserId">令牌所属用户 id</Label>
+                        <Label htmlFor="newapiAdminUserId">{t("adm.476")}</Label>
                         <Input
                           id="newapiAdminUserId"
                           inputMode="numeric"
@@ -4896,7 +4913,7 @@ export default function AdminPage() {
                           onChange={(e) => setNewapiUserId(e.target.value)}
                         />
                         <p className="text-xs text-muted-foreground">
-                          root 账户通常为 1；该值会作为 New-Api-User 头下发。
+                          {t("adm.477")}
                         </p>
                       </div>
                     </div>
@@ -4907,7 +4924,7 @@ export default function AdminPage() {
                         disabled={newapiCredBusy || !newapiNewToken.trim()}
                       >
                         {newapiCredBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                        验证并更新令牌
+                        {t("adm.478")}
                       </Button>
                     </div>
                   </>
@@ -4918,7 +4935,7 @@ export default function AdminPage() {
             {/* 开通策略：与原「设置」标签里的 AI 中转站卡片同一份状态 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">AI 中转站</CardTitle>
+                <CardTitle className="text-base">{t("adm.479")}</CardTitle>
                 <CardDescription>
                   仅影响新开通的账号。当前{" "}
                   {settingsStats?.newapiAccounts ?? 0} 个账号、
@@ -4941,7 +4958,7 @@ export default function AdminPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="newapiGroup">默认分组</Label>
+                    <Label htmlFor="newapiGroup">{t("adm.480")}</Label>
                     <Input
                       id="newapiGroup"
                       value={newapiGroup}
@@ -4950,7 +4967,7 @@ export default function AdminPage() {
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="newapiVisibleGroups">用户可见的模型分组</Label>
+                  <Label htmlFor="newapiVisibleGroups">{t("adm.481")}</Label>
                   <Input
                     id="newapiVisibleGroups"
                     value={newapiVisibleGroups}
@@ -4958,17 +4975,17 @@ export default function AdminPage() {
                     placeholder="default"
                   />
                   <p className="text-xs text-muted-foreground">
-                    逗号分隔的分组名，决定用户在 AI 页「全部可用模型」里能看到哪些分组。
-                    捐献（donation）分组会自动追加，无需填写。留空则只显示捐献分组。
+                    {t("adm.482")}
+                    {t("adm.483")}
                     例如：<span className="font-mono">default</span> 或{" "}
                     <span className="font-mono">default,付费</span>。
                   </p>
                 </div>
                 <div className="flex items-center justify-between rounded-md border p-3">
                   <div className="space-y-0.5">
-                    <p className="text-sm font-medium">新账号不限额度</p>
+                    <p className="text-sm font-medium">{t("adm.484")}</p>
                     <p className="text-xs text-muted-foreground">
-                      开启后忽略上面的试用额度
+                      {t("adm.485")}
                     </p>
                   </div>
                   <Switch
@@ -4978,9 +4995,9 @@ export default function AdminPage() {
                 </div>
                 <div className="flex items-center justify-between rounded-md border p-3">
                   <div className="space-y-0.5">
-                    <p className="text-sm font-medium">启用 AI 中转站</p>
+                    <p className="text-sm font-medium">{t("adm.486")}</p>
                     <p className="text-xs text-muted-foreground">
-                      关闭后用户无法开通或创建 Key
+                      {t("adm.487")}
                     </p>
                   </div>
                   <Switch
@@ -4994,7 +5011,7 @@ export default function AdminPage() {
                     disabled={settingsBusy}
                   >
                     {settingsBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                    保存设置
+                    {t("adm.488")}
                   </Button>
                 </div>
               </CardContent>
@@ -5005,11 +5022,11 @@ export default function AdminPage() {
               <CardHeader>
                 <div className="flex items-start justify-between gap-4">
                   <div className="space-y-1">
-                    <CardTitle className="text-base">推荐模型</CardTitle>
+                    <CardTitle className="text-base">{t("adm.489")}</CardTitle>
                     <CardDescription>
-                      用户在「AI 中转站」页看到的推荐分档。数组顺序即梯队顺序
-                      （第一梯队在最上），梯队之间会显示向下的箭头。留空则不显示该区块。
-                      本标签页的设置共用一份提交，任一处保存都会一并写入。
+                      {t("adm.490")}
+                      {t("adm.491")}
+                      {t("adm.492")}
                     </CardDescription>
                   </div>
                   <Button
@@ -5024,14 +5041,14 @@ export default function AdminPage() {
                     disabled={recommendedTiers.length >= 8}
                   >
                     <Plus className="h-3.5 w-3.5" />
-                    添加梯队
+                    {t("adm.493")}
                   </Button>
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
                 {recommendedTiers.length === 0 ? (
                   <p className="rounded-md border border-dashed py-6 text-center text-sm text-muted-foreground">
-                    还没有推荐分档。点右上角「添加梯队」开始配置。
+                    {t("adm.494")}
                   </p>
                 ) : (
                   recommendedTiers.map((tier, i) => (
@@ -5086,7 +5103,7 @@ export default function AdminPage() {
                         <div className="flex flex-wrap gap-1.5">
                           {tier.models.length === 0 ? (
                             <span className="text-xs text-muted-foreground">
-                              还没有模型
+                              {t("adm.495")}
                             </span>
                           ) : (
                             tier.models.map((m) => (
@@ -5173,7 +5190,7 @@ export default function AdminPage() {
                   ))
                 )}
                 {/* 推荐模型走的是同一个 handleSaveSettings（整个 newapi 标签页共用一份
-                    payload），但只靠上面「AI 中转站」卡片里那个按钮太不显眼，这里再给一个
+                    {t("adm.496")}
                     就近入口。 */}
                 <div className="flex justify-end">
                   <Button
@@ -5181,7 +5198,7 @@ export default function AdminPage() {
                     disabled={settingsBusy}
                   >
                     {settingsBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                    保存推荐模型
+                    {t("adm.497")}
                   </Button>
                 </div>
               </CardContent>
@@ -5195,38 +5212,38 @@ export default function AdminPage() {
                 每条通道自带「通道开关」（管功能）与「显示入口」（只管捐献页给不给看）。 */}
             <p className="text-sm text-muted-foreground">
               这一页集中管理三条<b className="font-medium">免审核</b>捐献通道：
-              登录即解锁的反代账号（WorkBuddy / CLI2API），以及提交即校验的商汤 Key。
-              每条通道都有两个开关 ——「开启捐献通道」管功能（关掉会拒绝新提交），
-              「显示入口」只管捐献页给不给看。
+              {t("adm.498")}
+              {t("adm.499")}
+              {t("adm.500")}
             </p>
 
             {/* ① 反代账号（wb2api）：通道开关与限额，走全局设置接口 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">反代账号（WorkBuddy）通道设置</CardTitle>
+                <CardTitle className="text-base">{t("adm.501")}</CardTitle>
                 <CardDescription>
-                  用户登录自己的 WorkBuddy 账号进网关共享池，换「AI 中转站」权限。
-                  「通道开关」管功能（关掉后接口也拒绝新的绑定），「显示入口」只管捐献页给不给看；
-                  两者都会隐藏卡片，但已绑定的账号始终留在网关池中。
-                  三条通道的设置共用页面底部那一个保存按钮。
+                  {t("adm.502")}
+                  {t("adm.503")}
+                  {t("adm.504")}
+                  {t("adm.505")}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
-                    <p className="text-sm font-medium">开启捐献通道</p>
+                    <p className="text-sm font-medium">{t("adm.506")}</p>
                     <p className="text-xs text-muted-foreground">
-                      允许用户登录 WorkBuddy 账号换取 AI 中转站权限
+                      {t("adm.507")}
                     </p>
                   </div>
                   <Switch checked={wb2apiEnabled} onCheckedChange={setWb2apiEnabled} />
                 </div>
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
-                    <p className="text-sm font-medium">在捐献页显示捐献入口</p>
+                    <p className="text-sm font-medium">{t("adm.508")}</p>
                     <p className="text-xs text-muted-foreground">
                       关掉后，<span className="font-medium">还没有绑定过</span>的用户看不到
-                      「反代账号」卡；通道本身照常工作，已绑定的用户仍能进来管理 / 撤销绑定
+                      {t("adm.509")}
                     </p>
                   </div>
                   <Switch
@@ -5236,7 +5253,7 @@ export default function AdminPage() {
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-2">
-                    <Label htmlFor="wb2apiLimit">每人可绑定上限</Label>
+                    <Label htmlFor="wb2apiLimit">{t("adm.510")}</Label>
                     <Input
                       id="wb2apiLimit"
                       type="number"
@@ -5245,11 +5262,11 @@ export default function AdminPage() {
                       onChange={(e) => setWb2apiMaxBindings(e.target.value)}
                     />
                     <p className="text-xs text-muted-foreground">
-                      绑定即自动解锁 AI 权限且免审核，故需要上限防止刷额度
+                      {t("adm.511")}
                     </p>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="wb2apiBaseUrl">网关地址</Label>
+                    <Label htmlFor="wb2apiBaseUrl">{t("adm.512")}</Label>
                     <Input
                       id="wb2apiBaseUrl"
                       placeholder="https://wb2api.doulor.cn"
@@ -5257,11 +5274,11 @@ export default function AdminPage() {
                       onChange={(e) => setWb2apiBaseUrl(e.target.value)}
                     />
                     <p className="text-xs text-muted-foreground">
-                      留空则用内置默认值
+                      {t("adm.513")}
                     </p>
                   </div>
                   <div className="space-y-2">
-                    <Label>对接域</Label>
+                    <Label>{t("adm.514")}</Label>
                     <Select
                       value={wb2apiRealm}
                       onValueChange={(v) => setWb2apiRealm(v as "cn" | "global")}
@@ -5270,12 +5287,12 @@ export default function AdminPage() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="cn">国内版（cn）</SelectItem>
-                        <SelectItem value="global">国际版（global）</SelectItem>
+                        <SelectItem value="cn">{t("adm.515")}</SelectItem>
+                        <SelectItem value="global">{t("adm.516")}</SelectItem>
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
-                      用户捐献时的默认对接域 —— 捐献者可以在捐献页自己改选国内版 / 国际版。
+                      {t("adm.517")}
                     </p>
                   </div>
                 </div>
@@ -5285,11 +5302,11 @@ export default function AdminPage() {
             {/* 网关访问密钥：反代网关面板的 api_key 可能被随时改，允许在网页上验证并替换 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">网关访问密钥</CardTitle>
+                <CardTitle className="text-base">{t("adm.518")}</CardTitle>
                 <CardDescription>
                   捐献页让用户登录自己的 WorkBuddy {realmLabel(wb2apiRealm)}账号来解锁 AI 权限，
-                  本站需要持有反代网关面板的访问密钥（Bearer）才能代为发起登录与轮询。
-                  密钥会先做一次真实探测，通过后才加密入库。
+                  {t("adm.519")}
+                  {t("adm.520")}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -5324,7 +5341,7 @@ export default function AdminPage() {
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2 text-sm">
-                      <span className="text-muted-foreground">网关地址：</span>
+                      <span className="text-muted-foreground">{t("adm.521")}</span>
                       <span className="font-mono text-xs">
                         {wb2apiConfig?.baseUrl || "（未配置）"}
                       </span>
@@ -5353,7 +5370,7 @@ export default function AdminPage() {
                     )}
 
                     <div className="space-y-2">
-                      <Label htmlFor="wb2apiKey">更新访问密钥</Label>
+                      <Label htmlFor="wb2apiKey">{t("adm.522")}</Label>
                       <div className="flex gap-2">
                         <Input
                           id="wb2apiKey"
@@ -5367,7 +5384,7 @@ export default function AdminPage() {
                           disabled={wb2apiBusy || !wb2apiNewKey.trim()}
                         >
                           {wb2apiBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                          保存
+                          {t("adm.523")}
                         </Button>
                       </div>
                     </div>
@@ -5379,15 +5396,15 @@ export default function AdminPage() {
             {/* 账号池概览：直接读网关的池状态，确认捐献的账号是否真的进池 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">网关账号池</CardTitle>
+                <CardTitle className="text-base">{t("adm.524")}</CardTitle>
                 <CardDescription>
-                  账号池健康度来自网关自身，用于确认捐献的账号已正常入池。
+                  {t("adm.525")}
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 {!wb2apiPool ? (
                   <p className="text-sm text-muted-foreground">
-                    暂无数据（密钥未配置或网关不可达）
+                    {t("adm.526")}
                   </p>
                 ) : (
                   <>
@@ -5433,10 +5450,10 @@ export default function AdminPage() {
                   捐献绑定（{wb2apiBindings.length}）
                 </CardTitle>
                 <CardDescription>
-                  摘除绑定时会尝试从网关账号池移除该账号。
-                  「AI 权限」一列表示该绑定当时是否新授予了权限 ——
-                  若该用户还有其它捐献依据（其他绑定 / 已通过的 AI 渠道捐献），
-                  默认会保留其权限，可在弹窗中勾选强制收回。
+                  {t("adm.527")}
+                  {t("adm.528")}
+                  {t("adm.529")}
+                  {t("adm.530")}
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -5476,7 +5493,7 @@ export default function AdminPage() {
                             }}
                           >
                             <Trash2 className="h-4 w-4" />
-                            摘除
+                            {t("adm.531")}
                           </Button>
                         )}
                       </div>
@@ -5486,35 +5503,35 @@ export default function AdminPage() {
               </CardContent>
             </Card>
             {/* ============ 第二条通道：CLI2API ============
-                ⚠️ 三条免审核捐献通道（反代账号 wb2api / CLI2API / 商汤 Key）**故意放在
+                {t("adm.532")}
                 同一个选项卡**里，所以这里不再是 <TabsContent>，只是同一页里的一段。
                 别再拆成兄弟 tab（2026-10-01 合并，站长要求）。 */}
             {/* 通道开关 / 上限 / provider / region：走全局设置接口 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">CLI2API 通道设置</CardTitle>
+                <CardTitle className="text-base">{t("adm.533")}</CardTitle>
                 <CardDescription>
-                  用户登录自己的 Qoder / WorkBuddy / Trae 账号到 cli2api 共享池，换取 AI 中转站权限。
-                  与「反代账号」是并行的两条通道。「通道开关」管功能，「显示入口」只管捐献页给不给看。
-                  这些设置与「设置」标签共用同一个保存接口。
+                  {t("adm.534")}
+                  {t("adm.535")}
+                  {t("adm.536")}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
-                    <p className="text-sm font-medium">开启捐献通道</p>
+                    <p className="text-sm font-medium">{t("adm.537")}</p>
                     <p className="text-xs text-muted-foreground">
-                      关闭后捐献页不再显示 CLI2API 卡，且接口拒绝新的绑定
+                      {t("adm.538")}
                     </p>
                   </div>
                   <Switch checked={cli2apiEnabled} onCheckedChange={setCli2apiEnabled} />
                 </div>
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
-                    <p className="text-sm font-medium">在捐献页显示捐献入口</p>
+                    <p className="text-sm font-medium">{t("adm.539")}</p>
                     <p className="text-xs text-muted-foreground">
                       关掉后，<span className="font-medium">还没有绑定过</span>的用户看不到
-                      CLI2API 卡；通道本身照常工作，已绑定的用户仍能进来管理 / 撤销绑定
+                      {t("adm.540")}
                     </p>
                   </div>
                   <Switch
@@ -5524,7 +5541,7 @@ export default function AdminPage() {
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-2">
-                    <Label htmlFor="cli2apiLimit">每人可绑定上限</Label>
+                    <Label htmlFor="cli2apiLimit">{t("adm.541")}</Label>
                     <Input
                       id="cli2apiLimit"
                       type="number"
@@ -5534,17 +5551,17 @@ export default function AdminPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="cli2apiBaseUrl">网关地址</Label>
+                    <Label htmlFor="cli2apiBaseUrl">{t("adm.542")}</Label>
                     <Input
                       id="cli2apiBaseUrl"
                       placeholder="https://cli2api.doulor.cn"
                       value={cli2apiBaseUrl}
                       onChange={(e) => setCli2apiBaseUrl(e.target.value)}
                     />
-                    <p className="text-xs text-muted-foreground">留空则用内置默认值</p>
+                    <p className="text-xs text-muted-foreground">{t("adm.543")}</p>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="cli2apiProvider">上游服务商</Label>
+                    <Label htmlFor="cli2apiProvider">{t("adm.544")}</Label>
                     <Select
                       value={cli2apiProvider}
                       onValueChange={(v) => setCli2apiProvider(v)}
@@ -5560,11 +5577,11 @@ export default function AdminPage() {
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
-                      用户贡献的是哪个上游的账号，默认 Qoder
+                      {t("adm.545")}
                     </p>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="cli2apiRegion">上游区域</Label>
+                    <Label htmlFor="cli2apiRegion">{t("adm.546")}</Label>
                     <Select
                       value={cli2apiRegion}
                       onValueChange={(v) => setCli2apiRegion(v)}
@@ -5573,12 +5590,12 @@ export default function AdminPage() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="cn">国内版（cn）</SelectItem>
-                        <SelectItem value="global">国际版（global）</SelectItem>
+                        <SelectItem value="cn">{t("adm.547")}</SelectItem>
+                        <SelectItem value="global">{t("adm.548")}</SelectItem>
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
-                      决定对接哪个区域，默认国内版。Qoder/WorkBuddy 支持两者，Trae 仅国内版。
+                      {t("adm.549")}
                     </p>
                   </div>
                 </div>
@@ -5588,11 +5605,11 @@ export default function AdminPage() {
             {/* console key：会先探测再加密入库 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">控制台密钥（console key）</CardTitle>
+                <CardTitle className="text-base">{t("adm.550")}</CardTitle>
                 <CardDescription>
-                  <span className="text-destructive">⚠️ 这不是给客户端用的 API key，而是该实例的管理员密钥。</span>
-                  本站用它在用户绑定账号时调用 cli2api 的 /api/* 接口；泄露等于整个账号池被拿走。
-                  密钥会先做一次真实探测，通过后才加密入库。
+                  <span className="text-destructive">{t("adm.551")}</span>
+                  {t("adm.552")}
+                  {t("adm.553")}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -5626,7 +5643,7 @@ export default function AdminPage() {
                       )}
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="cli2apiKey">更新 console key</Label>
+                      <Label htmlFor="cli2apiKey">{t("adm.554")}</Label>
                       <div className="flex gap-2">
                         <Input
                           id="cli2apiKey"
@@ -5640,7 +5657,7 @@ export default function AdminPage() {
                           disabled={cli2apiBusy || !cli2apiNewKey.trim()}
                         >
                           {cli2apiBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                          保存
+                          {t("adm.555")}
                         </Button>
                       </div>
                     </div>
@@ -5652,20 +5669,20 @@ export default function AdminPage() {
             {/* 账号池概览 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">上游账号池</CardTitle>
+                <CardTitle className="text-base">{t("adm.556")}</CardTitle>
                 <CardDescription>
-                  直接读 cli2api 的账号列表，确认捐献的账号已正常入池。
+                  {t("adm.557")}
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 {!cli2apiPool ? (
                   <p className="text-sm text-muted-foreground">
-                    暂无数据（console key 未配置或网关不可达）
+                    {t("adm.558")}
                   </p>
                 ) : !cli2apiPool.available ? (
                   <p className="text-sm text-destructive">{cli2apiPool.reason}</p>
                 ) : cli2apiPool.accounts.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">账号池为空</p>
+                  <p className="text-sm text-muted-foreground">{t("adm.559")}</p>
                 ) : (
                   <div className="divide-y rounded-md border">
                     {cli2apiPool.accounts.map((a) => (
@@ -5695,8 +5712,8 @@ export default function AdminPage() {
                   捐献绑定（{cli2apiBindings.length}）
                 </CardTitle>
                 <CardDescription>
-                  摘除绑定时会尝试从 cli2api 删除该账号。
-                  若该用户还有其它捐献依据，默认保留其 AI 权限。
+                  {t("adm.560")}
+                  {t("adm.561")}
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -5732,7 +5749,7 @@ export default function AdminPage() {
                             }}
                           >
                             <Trash2 className="h-4 w-4" />
-                            摘除
+                            {t("adm.562")}
                           </Button>
                         )}
                       </div>
@@ -5743,24 +5760,24 @@ export default function AdminPage() {
             </Card>
 
             {/* ============ 第三条通道：商汤 Key ============
-                原先挂在「设置」标签页里，2026-10-01 随三条通道合并一起挪到这里
+                {t("adm.563")}
                 （上游地址与「并入哪个渠道」都做成可配置）。 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">商汤 Key 捐献</CardTitle>
+                <CardTitle className="text-base">{t("adm.564")}</CardTitle>
                 <CardDescription>
-                  用户提交自己的商汤 API Key，系统会真调一次上游接口验证。
-                  验证通过即把 Key 追加进下面指定的那个渠道，并解锁「AI 中转站」权限（免审核）。
-                  不会新建渠道，也不改动渠道的模型列表（模型请在中转站手工维护）。
-                  商汤的 Key 只能在其控制台手动创建，没有程序化获取接口。
+                  {t("adm.565")}
+                  {t("adm.566")}
+                  {t("adm.567")}
+                  {t("adm.568")}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
-                    <p className="text-sm font-medium">开启捐献通道</p>
+                    <p className="text-sm font-medium">{t("adm.569")}</p>
                     <p className="text-xs text-muted-foreground">
-                      关闭后不再接受新的商汤 Key 提交（已接入的渠道仍留在中转站）
+                      {t("adm.570")}
                     </p>
                   </div>
                   <Switch
@@ -5770,10 +5787,10 @@ export default function AdminPage() {
                 </div>
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
-                    <p className="text-sm font-medium">在捐献页显示捐献入口</p>
+                    <p className="text-sm font-medium">{t("adm.571")}</p>
                     <p className="text-xs text-muted-foreground">
-                      关掉后捐献页不再显示「贡献商汤 Key」卡；提交接口照常可用
-                      （与「开启捐献通道」的区别：那个还会拒绝新提交）
+                      {t("adm.572")}
+                      {t("adm.573")}
                     </p>
                   </div>
                   <Switch
@@ -5782,7 +5799,7 @@ export default function AdminPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="sensenovaBaseUrl">上游地址</Label>
+                  <Label htmlFor="sensenovaBaseUrl">{t("adm.574")}</Label>
                   <Input
                     id="sensenovaBaseUrl"
                     placeholder="https://token.sensenova.cn"
@@ -5790,12 +5807,12 @@ export default function AdminPage() {
                     onChange={(e) => setSensenovaBaseUrl(e.target.value)}
                   />
                   <p className="text-xs text-muted-foreground">
-                    填到域名即可（末尾的 /v1 会被自动去掉）。留空则用内置默认值。
-                    用户提交的 Key 只能通过这个地址鉴权，所以改这里就能整体切换服务商。
+                    {t("adm.575")}
+                    {t("adm.576")}
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="sensenovaChannelId">并入的渠道 ID</Label>
+                  <Label htmlFor="sensenovaChannelId">{t("adm.577")}</Label>
                   <Input
                     id="sensenovaChannelId"
                     inputMode="numeric"
@@ -5804,9 +5821,9 @@ export default function AdminPage() {
                     onChange={(e) => setSensenovaChannelId(e.target.value)}
                   />
                   <p className="text-xs text-muted-foreground">
-                    填中转站里那个商汤渠道的 ID（渠道列表第一列）。
-                    该渠道必须已开启「多密钥模式」—— 否则会拒绝自动加 Key（在普通渠道上
-                    追加 Key 会把原有 Key 覆盖掉）。留空则捐献一律转人工，不自动加 Key。
+                    {t("adm.578")}
+                    {t("adm.579")}
+                    {t("adm.580")}
                   </p>
                 </div>
               </CardContent>
@@ -5817,11 +5834,11 @@ export default function AdminPage() {
             <Card>
               <CardContent className="flex flex-wrap items-center justify-between gap-3 pt-6">
                 <p className="text-xs text-muted-foreground">
-                  上面三条通道的所有设置共用这一个保存按钮（一次提交全部）。
+                  {t("adm.581")}
                 </p>
                 <Button onClick={() => void handleSaveSettings()} disabled={settingsBusy}>
                   {settingsBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                  保存捐献通道设置
+                  {t("adm.582")}
                 </Button>
               </CardContent>
             </Card>
@@ -5851,15 +5868,15 @@ export default function AdminPage() {
             <div className="space-y-6">
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">子域名配额</CardTitle>
+                  <CardTitle className="text-base">{t("adm.583")}</CardTitle>
                   <CardDescription>
-                    每个用户默认可创建的一级子域名数量（不含注册时分配的主域名）。
-                    可在成员详情里为单个用户单独调整。
+                    {t("adm.584")}
+                    {t("adm.585")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="space-y-2">
-                    <Label htmlFor="subQuota">默认数量</Label>
+                    <Label htmlFor="subQuota">{t("adm.586")}</Label>
                     <Input
                       id="subQuota"
                       type="number"
@@ -5870,7 +5887,7 @@ export default function AdminPage() {
                       onChange={(e) => setSubQuota(e.target.value)}
                     />
                     <p className="text-xs text-muted-foreground">
-                      一级子域名形如 xxx.doulor.cn（至少 3 位）；其下还可各建 5 个二级域名。
+                      {t("adm.587")}
                     </p>
                   </div>
                 </CardContent>
@@ -5878,10 +5895,10 @@ export default function AdminPage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">网盘配额</CardTitle>
+                  <CardTitle className="text-base">{t("adm.588")}</CardTitle>
                   <CardDescription>
-                    默认配额只对「之后新开通」的网盘生效；已开通用户的配额是开通时的快照，
-                    要用下面的「同步存量用户配额」刷一遍（或去成员详情单独改）。
+                    {t("adm.589")}
+                    {t("adm.590")}
                     当前 {settingsStats?.storageAccounts ?? 0} 个网盘，
                     占用 {formatBytes(settingsStats?.storageUsedBytes ?? 0)}。
                   </CardDescription>
@@ -5889,7 +5906,7 @@ export default function AdminPage() {
                 <CardContent className="space-y-4">
                   <div className="grid gap-4 sm:grid-cols-2">
                     <div className="space-y-2">
-                      <Label htmlFor="storageQuota">默认存储配额（MB）</Label>
+                      <Label htmlFor="storageQuota">{t("adm.591")}</Label>
                       <Input
                         id="storageQuota"
                         type="number"
@@ -5899,7 +5916,7 @@ export default function AdminPage() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="maxFile">单文件上限（MB）</Label>
+                      <Label htmlFor="maxFile">{t("adm.592")}</Label>
                       <Input
                         id="maxFile"
                         type="number"
@@ -5911,9 +5928,9 @@ export default function AdminPage() {
                   </div>
                   <div className="flex items-center justify-between rounded-md border p-3">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">启用网盘功能</p>
+                      <p className="text-sm font-medium">{t("adm.593")}</p>
                       <p className="text-xs text-muted-foreground">
-                        关闭后用户无法开通或上传（已有直链仍可访问）
+                        {t("adm.594")}
                       </p>
                     </div>
                     <Switch
@@ -5925,17 +5942,17 @@ export default function AdminPage() {
                   {/* 每桶人数上限：用户开通网盘时按「占用比例最低」分配，桶满即不再分配 */}
                   <div className="space-y-3 rounded-md border p-3">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">每桶人数上限</p>
+                      <p className="text-sm font-medium">{t("adm.595")}</p>
                       <p className="text-xs text-muted-foreground">
-                        新用户开通网盘时自动分配到「占用比例最低」的桶，桶满后不再分配。
-                        每人的实际配额取所属桶的「每人配额」，没有可用桶时才回落到上面的默认配额。
+                        {t("adm.596")}
+                        {t("adm.597")}
                       </p>
                     </div>
                     {r2Loading && !r2Data ? (
-                      <p className="text-xs text-muted-foreground">正在读取桶列表…</p>
+                      <p className="text-xs text-muted-foreground">{t("adm.598")}</p>
                     ) : (r2Data?.buckets.filter((b) => b.kind !== "platform") ?? []).length === 0 ? (
                       <p className="text-xs text-muted-foreground">
-                        还没有用户网盘桶 —— 去「直链网盘」标签添加。
+                        {t("adm.599")}
                       </p>
                     ) : (
                       <div className="space-y-2">
@@ -5979,7 +5996,7 @@ export default function AdminPage() {
                                   {bucketMaxBusy === b.id && (
                                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                   )}
-                                  保存
+                                  {t("adm.600")}
                                 </Button>
                               </div>
                             )
@@ -6000,7 +6017,7 @@ export default function AdminPage() {
                       ) : (
                         <RefreshCw className="h-3.5 w-3.5" />
                       )}
-                      同步存量用户配额
+                      {t("adm.601")}
                     </Button>
                     <Button
                       variant="outline"
@@ -6010,11 +6027,11 @@ export default function AdminPage() {
                     >
                       {settingsBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                       <RefreshCw className="h-3.5 w-3.5" />
-                      重算所有用户用量
+                      {t("adm.602")}
                     </Button>
                     <span className="text-xs text-muted-foreground">
-                      配额是开通时写死的：改桶的「每人配额」只影响之后新开通的人，
-                      存量用户要点左边这个按钮刷一遍。
+                      {t("adm.603")}
+                      {t("adm.604")}
                     </span>
                   </div>
                 </CardContent>
@@ -6022,14 +6039,14 @@ export default function AdminPage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">内网穿透</CardTitle>
+                  <CardTitle className="text-base">{t("adm.605")}</CardTitle>
                   <CardDescription>
-                    核心包下载地址与功能开关。
+                    {t("adm.606")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="space-y-2">
-                    <Label htmlFor="frpCoreUrl">frp 核心包下载地址</Label>
+                    <Label htmlFor="frpCoreUrl">{t("adm.607")}</Label>
                     <Input
                       id="frpCoreUrl"
                       value={frpCoreUrl}
@@ -6039,9 +6056,9 @@ export default function AdminPage() {
                   </div>
                   <div className="flex items-center justify-between rounded-md border p-3">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">启用内网穿透</p>
+                      <p className="text-sm font-medium">{t("adm.608")}</p>
                       <p className="text-xs text-muted-foreground">
-                        关闭后用户无法启用或提交申请
+                        {t("adm.609")}
                       </p>
                     </div>
                     <Switch
@@ -6055,15 +6072,15 @@ export default function AdminPage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">临时分享箱</CardTitle>
+                  <CardTitle className="text-base">{t("adm.610")}</CardTitle>
                   <CardDescription>
-                    无需注册即可查看/下载，上传权限可单独控制；文件到点自动失效。
+                    {t("adm.611")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="grid gap-4 sm:grid-cols-3">
                     <div className="space-y-2">
-                      <Label htmlFor="tempboxMinutes">默认保存时长（分钟）</Label>
+                      <Label htmlFor="tempboxMinutes">{t("adm.612")}</Label>
                       <Input
                         id="tempboxMinutes"
                         type="number"
@@ -6073,7 +6090,7 @@ export default function AdminPage() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="tempboxMaxFile">单次上传上限（MB）</Label>
+                      <Label htmlFor="tempboxMaxFile">{t("adm.613")}</Label>
                       <Input
                         id="tempboxMaxFile"
                         type="number"
@@ -6083,7 +6100,7 @@ export default function AdminPage() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="tempboxMaxFiles">每接收码文件数上限</Label>
+                      <Label htmlFor="tempboxMaxFiles">{t("adm.614")}</Label>
                       <Input
                         id="tempboxMaxFiles"
                         type="number"
@@ -6095,9 +6112,9 @@ export default function AdminPage() {
                   </div>
                   <div className="flex items-center justify-between rounded-md border p-3">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">上传需登录</p>
+                      <p className="text-sm font-medium">{t("adm.615")}</p>
                       <p className="text-xs text-muted-foreground">
-                        关闭后访客无需登录也可上传（查看/下载始终无需登录）
+                        {t("adm.616")}
                       </p>
                     </div>
                     <Switch
@@ -6107,9 +6124,9 @@ export default function AdminPage() {
                   </div>
                   <div className="flex items-center justify-between rounded-md border p-3">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">启用临时分享箱</p>
+                      <p className="text-sm font-medium">{t("adm.617")}</p>
                       <p className="text-xs text-muted-foreground">
-                        关闭后页面提示不可用，已生成的内容照常失效
+                        {t("adm.618")}
                       </p>
                     </div>
                     <Switch
@@ -6122,15 +6139,15 @@ export default function AdminPage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">社区广场</CardTitle>
+                  <CardTitle className="text-base">{t("adm.619")}</CardTitle>
                   <CardDescription>
-                    用户发帖、评论、点赞的公共社区；关闭后页面提示不可用。
+                    {t("adm.620")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="grid gap-4 sm:grid-cols-2">
                     <div className="space-y-2">
-                      <Label htmlFor="communityPostMaxImages">每帖图片上限</Label>
+                      <Label htmlFor="communityPostMaxImages">{t("adm.621")}</Label>
                       <Input
                         id="communityPostMaxImages"
                         type="number"
@@ -6141,7 +6158,7 @@ export default function AdminPage() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="communityImageMaxKb">单图大小上限（KB）</Label>
+                      <Label htmlFor="communityImageMaxKb">{t("adm.622")}</Label>
                       <Input
                         id="communityImageMaxKb"
                         type="number"
@@ -6153,9 +6170,9 @@ export default function AdminPage() {
                   </div>
                   <div className="flex items-center justify-between rounded-md border p-3">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">允许访客访问帖子广场</p>
+                      <p className="text-sm font-medium">{t("adm.623")}</p>
                       <p className="text-xs text-muted-foreground">
-                        关闭后未登录用户访问社区会被引导去登录页
+                        {t("adm.624")}
                       </p>
                     </div>
                     <Switch
@@ -6165,9 +6182,9 @@ export default function AdminPage() {
                   </div>
                   <div className="flex items-center justify-between rounded-md border p-3">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">启用社区广场</p>
+                      <p className="text-sm font-medium">{t("adm.625")}</p>
                       <p className="text-xs text-muted-foreground">
-                        关闭后用户无法访问社区页面
+                        {t("adm.626")}
                       </p>
                     </div>
                     <Switch
@@ -6176,16 +6193,16 @@ export default function AdminPage() {
                     />
                   </div>
                   {/*
-                    聊天室总开关。放这里而不是聊天栏目：它是「应急断流」的开关 ——
-                    聊天页的心跳/轮询是 D1 写与 Worker 请求的最大头，
-                    额度告急时在这里一键掐掉最有效（2026-09-30 D1 写被打满时就是这么用的）。
+                    {t("adm.627")}
+                    {t("adm.628")}
+                    {t("adm.629")}
                   */}
                   <div className="flex items-center justify-between rounded-md border p-3">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">启用聊天室</p>
+                      <p className="text-sm font-medium">{t("adm.630")}</p>
                       <p className="text-xs text-muted-foreground">
-                        关闭后用户进聊天页会看到「聊天室已关闭」并停止轮询。
-                        聊天是请求与写库的大头，额度告急时先关这里
+                        {t("adm.631")}
+                        {t("adm.632")}
                       </p>
                     </div>
                     <Switch checked={chatEnabled} onCheckedChange={setChatEnabled} />
@@ -6195,16 +6212,16 @@ export default function AdminPage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">限时开放注册</CardTitle>
+                  <CardTitle className="text-base">{t("adm.633")}</CardTitle>
                   <CardDescription>
-                    打开后注册不再需要邀请码，任何人都能直接创建账户（用于活动 / 推广期临时放开）。
-                    可设截止时间，到点自动关闭。默认关。
+                    {t("adm.634")}
+                    {t("adm.635")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="flex items-center justify-between rounded-md border p-3">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">开放注册（无需邀请码）</p>
+                      <p className="text-sm font-medium">{t("adm.636")}</p>
                       <p className="text-xs text-muted-foreground">
                         {openRegistration
                           ? t("adm.176")
@@ -6226,23 +6243,23 @@ export default function AdminPage() {
                       disabled={!openRegistration}
                     />
                     <p className="text-xs text-muted-foreground">
-                      到点后即使总开关还开着也会自动失效，无需手动关闭。
+                      {t("adm.637")}
                     </p>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    开放注册的账号拿到的是「默认邀请码」的那套权限（即上方「邀请码模块权限」里
-                    勾为基础权限的模块），与邀请码注册一致；邀请奖励不适用于无码注册。
+                    {t("adm.638")}
+                    {t("adm.639")}
                   </p>
                 </CardContent>
               </Card>
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">邀请码模块权限</CardTitle>
+                  <CardTitle className="text-base">{t("adm.640")}</CardTitle>
                   <CardDescription>
-                    每个模块可设为「基础权限」或「受限模式」。
-                    基础权限：创建邀请码时人人可勾选，不消耗模块额度。
-                    受限模式：需消耗模块额度（捐献获批或手动发放）。
+                    {t("adm.641")}
+                    {t("adm.642")}
+                    {t("adm.643")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
@@ -6270,17 +6287,17 @@ export default function AdminPage() {
                     </div>
                   ))}
                   <p className="text-xs text-muted-foreground">
-                    基础权限的模块不消耗额度；受限模块靠捐献或手动发放获取转授额度。
+                    {t("adm.644")}
                   </p>
                 </CardContent>
               </Card>
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">免权限访问</CardTitle>
+                  <CardTitle className="text-base">{t("adm.645")}</CardTitle>
                   <CardDescription>
-                    打开某个模块，则该模块不再检查用户权限 —— 没有该权限的人也能正常访问、开通与使用，
-                    相当于把该模块对所有人开放。默认全关（按权限卡）。
+                    {t("adm.646")}
+                    {t("adm.647")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
@@ -6308,18 +6325,18 @@ export default function AdminPage() {
                     </div>
                   ))}
                   <p className="text-xs text-muted-foreground">
-                    只旁路「访问时的权限校验」：不会改动任何用户的权限数据，关掉开关即恢复按权限卡。
-                    也不影响各模块自己的「启用」总开关，与上方邀请码权限设置互不相关。
+                    {t("adm.648")}
+                    {t("adm.649")}
                   </p>
                 </CardContent>
               </Card>
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">捐献自动审核</CardTitle>
+                  <CardTitle className="text-base">{t("adm.650")}</CardTitle>
                   <CardDescription>
-                    打开某个模块后，用户提交该模块的捐献会**当场自动审核**（能用的自动通过并解锁，
-                    全部无效则自动拒绝并写明原因），不再进管理员的待审核队列。关闭则回到人工审核。
+                    {t("adm.651")}
+                    {t("adm.652")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
@@ -6349,34 +6366,34 @@ export default function AdminPage() {
                     </div>
                   ))}
                   <p className="text-xs text-muted-foreground">
-                    AI 与代理能「真的调一次」验证可用性，判定可靠；内网穿透的 config.yml
-                    虽指向公网 frps，但 frpc↔frps 是私有 TCP 协议、不是 HTTP，
-                    本站后端出站只能发 HTTP/HTTPS、连不了 TCP 端口，验证不了连通性，
-                    只能做语法/字段静态校验。默认建议保持关闭。
-                    自动拒绝的单据仍可在「捐献」页里人工复核通过。
+                    {t("adm.653")}
+                    {t("adm.654")}
+                    {t("adm.655")}
+                    {t("adm.656")}
+                    {t("adm.657")}
                   </p>
                 </CardContent>
               </Card>
 
               {/* ⚠️ 商汤 Key 捐献的配置卡片已挪到「捐献通道」选项卡（三条通道合并），
-                  别在这里再加回来 —— 否则同一批设置项会在两个 tab 里各有一份输入框，
+                  {t("adm.658")}
                   改哪边会互相覆盖。 */}
 
               {/* ---- 2026-09-26 补齐的设置卡片 ---- */}
               <Card>
                 <CardHeader>
-                  <CardTitle>邀请与奖励</CardTitle>
+                  <CardTitle>{t("adm.659")}</CardTitle>
                   <CardDescription>
-                    好友用你的邀请码注册、并且真的贡献了资源（绑定反代账号 / 捐献 AI 渠道）后，
-                    作为邀请人获得的额外订阅额度。同一被邀请人只发一次。
+                    {t("adm.660")}
+                    {t("adm.661")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="flex items-center justify-between rounded-md border p-3">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">启用邀请奖励</p>
+                      <p className="text-sm font-medium">{t("adm.662")}</p>
                       <p className="text-xs text-muted-foreground">
-                        关闭后，被邀请人贡献资源不再给邀请人发放奖励订阅
+                        {t("adm.663")}
                       </p>
                     </div>
                     <Switch
@@ -6385,7 +6402,7 @@ export default function AdminPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="inviteRewardPlanId">反代绑定奖励套餐 ID</Label>
+                    <Label htmlFor="inviteRewardPlanId">{t("adm.664")}</Label>
                     <Input
                       id="inviteRewardPlanId"
                       inputMode="numeric"
@@ -6397,7 +6414,7 @@ export default function AdminPage() {
                     </p>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="inviteRewardAiPlanId">AI 渠道捐献奖励套餐 ID</Label>
+                    <Label htmlFor="inviteRewardAiPlanId">{t("adm.665")}</Label>
                     <Input
                       id="inviteRewardAiPlanId"
                       inputMode="numeric"
@@ -6411,9 +6428,9 @@ export default function AdminPage() {
                   <div className="space-y-2 rounded-md border p-3">
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <p className="text-sm font-medium">启用成就奖励</p>
+                        <p className="text-sm font-medium">{t("adm.666")}</p>
                         <p className="text-xs text-muted-foreground">
-                          用户成就点每满 N 点，自动发放一份「成就奖励」AI 订阅
+                          {t("adm.667")}
                         </p>
                       </div>
                       <Switch
@@ -6423,7 +6440,7 @@ export default function AdminPage() {
                     </div>
                     <div className="grid grid-cols-2 gap-3 pt-1">
                       <div className="space-y-2">
-                        <Label htmlFor="achievementRewardPlanId">成就奖励套餐 ID</Label>
+                        <Label htmlFor="achievementRewardPlanId">{t("adm.668")}</Label>
                         <Input
                           id="achievementRewardPlanId"
                           inputMode="numeric"
@@ -6432,7 +6449,7 @@ export default function AdminPage() {
                         />
                       </div>
                       <div className="space-y-2">
-                        <Label htmlFor="achievementRewardPoints">每满多少点发一份</Label>
+                        <Label htmlFor="achievementRewardPoints">{t("adm.669")}</Label>
                         <Input
                           id="achievementRewardPoints"
                           inputMode="numeric"
@@ -6442,11 +6459,11 @@ export default function AdminPage() {
                       </div>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      默认 10 点一份。发放对象需已开通 AI 中转站（订阅挂在 NewAPI 侧账号上）。
+                      {t("adm.670")}
                     </p>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="inviteQuotaBase">每人默认邀请码额度</Label>
+                    <Label htmlFor="inviteQuotaBase">{t("adm.671")}</Label>
                     <Input
                       id="inviteQuotaBase"
                       inputMode="numeric"
@@ -6454,7 +6471,7 @@ export default function AdminPage() {
                       onChange={(e) => setInviteQuotaBase(e.target.value)}
                     />
                     <p className="text-xs text-muted-foreground">
-                      新用户默认能建多少个邀请码（默认 3）。单个用户可在成员详情里单独覆盖。
+                      {t("adm.672")}
                     </p>
                   </div>
                 </CardContent>
@@ -6465,12 +6482,12 @@ export default function AdminPage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle>AI 计费</CardTitle>
-                  <CardDescription>免费订阅与额度换算基准。</CardDescription>
+                  <CardTitle>{t("adm.673")}</CardTitle>
+                  <CardDescription>{t("adm.674")}</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="space-y-2">
-                    <Label htmlFor="newapiFreePlanId">免费订阅套餐 ID</Label>
+                    <Label htmlFor="newapiFreePlanId">{t("adm.675")}</Label>
                     <Input
                       id="newapiFreePlanId"
                       inputMode="numeric"
@@ -6490,7 +6507,7 @@ export default function AdminPage() {
                       onChange={(e) => setQuotaPerUnitInput(e.target.value)}
                     />
                     <p className="text-xs text-muted-foreground">
-                      默认 500000。它同时是后台「额度 ↔ 金额」的换算基准 ——
+                      {t("adm.676")}
                       <strong>改动会让所有已配置额度的显示基准一起变化</strong>，一般不需要改。
                     </p>
                   </div>
@@ -6499,15 +6516,15 @@ export default function AdminPage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle>其它总开关与通知</CardTitle>
-                  <CardDescription>代理功能开关。</CardDescription>
+                  <CardTitle>{t("adm.677")}</CardTitle>
+                  <CardDescription>{t("adm.678")}</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="flex items-center justify-between rounded-md border p-3">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">启用代理节点功能</p>
+                      <p className="text-sm font-medium">{t("adm.679")}</p>
                       <p className="text-xs text-muted-foreground">
-                        关闭后用户无法启用代理，也看不到订阅源与节点
+                        {t("adm.680")}
                       </p>
                     </div>
                     <Switch checked={proxyEnabled} onCheckedChange={setProxyEnabled} />
@@ -6518,7 +6535,7 @@ export default function AdminPage() {
               <div className="flex justify-end">
                 <Button onClick={() => void handleSaveSettings()} disabled={settingsBusy}>
                   {settingsBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                  保存设置
+                  {t("adm.681")}
                 </Button>
               </div>
             </div>
@@ -6530,14 +6547,14 @@ export default function AdminPage() {
             {/* 管理员通知邮箱 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">通知邮箱</CardTitle>
+                <CardTitle className="text-base">{t("adm.682")}</CardTitle>
                 <CardDescription>
-                  各类「提交申请」时通知管理员的邮箱。留空则不发送通知。
+                  {t("adm.683")}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="frpNotify">内网穿透申请通知邮箱</Label>
+                  <Label htmlFor="frpNotify">{t("adm.684")}</Label>
                   <Select
                     value={frpNotifyEmail || "__none__"}
                     onValueChange={(v) =>
@@ -6548,7 +6565,7 @@ export default function AdminPage() {
                       <SelectValue placeholder={t("adm.303")} />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="__none__">不接收通知</SelectItem>
+                      <SelectItem value="__none__">{t("adm.685")}</SelectItem>
                       {notifyEmailOptions.map((e) => (
                         <SelectItem key={e} value={e}>
                           {e}
@@ -6557,12 +6574,12 @@ export default function AdminPage() {
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">
-                    用户提交内网穿透申请时会发信到这里。候选项来自「已在 Cloudflare
-                    验证的邮箱」与「管理员的真实邮箱」。
+                    {t("adm.686")}
+                    {t("adm.687")}
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="feedbackNotify">新反馈通知邮箱</Label>
+                  <Label htmlFor="feedbackNotify">{t("adm.688")}</Label>
                   <Textarea
                     id="feedbackNotify"
                     rows={3}
@@ -6571,7 +6588,7 @@ export default function AdminPage() {
                     onChange={(e) => setFeedbackNotifyEmail(e.target.value)}
                   />
                   <p className="text-xs text-muted-foreground">
-                    用户提交反馈时发信到这里。一行一个邮箱。
+                    {t("adm.689")}
                     {notifyEmailOptions.length > 0 && (
                       <> 本站在册邮箱：{notifyEmailOptions.join("、")}</>
                     )}
@@ -6583,14 +6600,14 @@ export default function AdminPage() {
             {/* 邮件发送通道 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">邮件发送通道</CardTitle>
+                <CardTitle className="text-base">{t("adm.690")}</CardTitle>
                 <CardDescription>
-                  系统通知邮件的发送方式。命中 CF 白名单的邮箱直接走 CF，其余按顺序回退。
+                  {t("adm.691")}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="mailOrder">发送顺序</Label>
+                  <Label htmlFor="mailOrder">{t("adm.692")}</Label>
                   <Input
                     id="mailOrder"
                     value={mailTransportOrder}
@@ -6598,12 +6615,12 @@ export default function AdminPage() {
                     className="font-mono text-xs"
                   />
                   <p className="text-xs text-muted-foreground">
-                    逗号分隔：posta、brevo、cf。前面的优先，失败自动回退下一个。
-                    默认 posta → brevo → cf（cf 兜底）。
+                    {t("adm.693")}
+                    {t("adm.694")}
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <Label>公告群发首选通道</Label>
+                  <Label>{t("adm.695")}</Label>
                   <Select
                     value={announcementMailTransport}
                     onValueChange={setAnnouncementMailTransport}
@@ -6612,21 +6629,21 @@ export default function AdminPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="posta">Posta（自建网关）</SelectItem>
-                      <SelectItem value="brevo">Brevo（第三方）</SelectItem>
+                      <SelectItem value="posta">{t("adm.696")}</SelectItem>
+                      <SelectItem value="brevo">{t("adm.697")}</SelectItem>
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">
-                    发布公告并勾选「推送到用户邮箱」时优先走这个通道。默认 Posta。
-                    首选通道失败时仍会按上面的「发送顺序」自动回退，不会因一个下拉框而发不出去。
+                    {t("adm.698")}
+                    {t("adm.699")}
                   </p>
                   <p className="text-xs text-muted-foreground">
                     ⚠️ 群发量 = 全部活跃用户数，一次可能吃掉第三方免费额度的一大截
-                    （Brevo 免费版 300 封/天）。日常单封通知建议走 Posta。
+                    {t("adm.700")}
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="mailCfTargets">CF 直达邮箱白名单</Label>
+                  <Label htmlFor="mailCfTargets">{t("adm.701")}</Label>
                   <Textarea
                     id="mailCfTargets"
                     rows={3}
@@ -6636,17 +6653,17 @@ export default function AdminPage() {
                     className="font-mono text-xs"
                   />
                   <p className="text-xs text-muted-foreground">
-                    这些邮箱的邮件直接走 Cloudflare（送达率高、免费），不走上面的顺序。
-                    一行一个邮箱。
+                    {t("adm.702")}
+                    {t("adm.703")}
                   </p>
                 </div>
 
                 <Separator />
 
                 <div className="space-y-3 rounded-md border p-3">
-                  <p className="text-sm font-medium">Posta（自建网关）</p>
+                  <p className="text-sm font-medium">{t("adm.704")}</p>
                   <div className="space-y-2">
-                    <Label htmlFor="postaUrl">网关地址（基础地址，不带路径）</Label>
+                    <Label htmlFor="postaUrl">{t("adm.705")}</Label>
                     <Input
                       id="postaUrl"
                       value={postaUrl}
@@ -6668,7 +6685,7 @@ export default function AdminPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="postaFrom">发件人</Label>
+                    <Label htmlFor="postaFrom">{t("adm.706")}</Label>
                     <Input
                       id="postaFrom"
                       value={postaFrom}
@@ -6677,15 +6694,15 @@ export default function AdminPage() {
                       className="font-mono text-xs"
                     />
                     <p className="text-xs text-muted-foreground">
-                      必须与 Posta 后台所配 SMTP 的登录账号一致（QQ SMTP 强制要求，
-                      否则报 501 Mail from address must be same as authorization user）。
-                      换用支持自有域名的 SMTP 后可改成 no-reply@doulor.cn。
+                      {t("adm.707")}
+                      {t("adm.708")}
+                      {t("adm.709")}
                     </p>
                   </div>
                 </div>
 
                 <div className="space-y-3 rounded-md border p-3">
-                  <p className="text-sm font-medium">Brevo（第三方）</p>
+                  <p className="text-sm font-medium">{t("adm.710")}</p>
                   <div className="space-y-2">
                     <Label>
                       API Key
@@ -6714,14 +6731,14 @@ export default function AdminPage() {
                               disabled={brevoBusy}
                               onClick={() => void handleRemoveBrevoKey(i + 1)}
                             >
-                              删除
+                              {t("adm.711")}
                             </Button>
                           </li>
                         ))}
                       </ul>
                     ) : (
                       <p className="rounded-md border border-dashed px-2.5 py-1.5 text-xs text-muted-foreground">
-                        还没有配置 Key
+                        {t("adm.712")}
                       </p>
                     )}
 
@@ -6749,21 +6766,21 @@ export default function AdminPage() {
                         disabled={brevoBusy || !brevoAddInput.trim()}
                         onClick={() => void handleAddBrevoKey()}
                       >
-                        添加
+                        {t("adm.713")}
                       </Button>
                     </div>
 
                     <p className="text-xs text-muted-foreground">
-                      多把 Key 额度叠加：Brevo 免费版按账号限 300 封/天，多注册几个账号即可把日额度累加。
-                      发送时轮询各把，某把额度用尽会自动换下一把。
+                      {t("adm.714")}
+                      {t("adm.715")}
                       <span className="font-medium">
-                        添加 / 删除会立即生效，不需要点下面的「保存设置」。
+                        {t("adm.716")}
                       </span>
                     </p>
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2">
                     <div className="space-y-2">
-                      <Label htmlFor="brevoSenderEmail">发件人邮箱</Label>
+                      <Label htmlFor="brevoSenderEmail">{t("adm.717")}</Label>
                       <Input
                         id="brevoSenderEmail"
                         value={brevoSenderEmail}
@@ -6772,7 +6789,7 @@ export default function AdminPage() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="brevoSenderName">发件人名称</Label>
+                      <Label htmlFor="brevoSenderName">{t("adm.718")}</Label>
                       <Input
                         id="brevoSenderName"
                         value={brevoSenderName}
@@ -6781,7 +6798,7 @@ export default function AdminPage() {
                     </div>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    发件人邮箱需在 Brevo 后台完成验证后才能发信。
+                    {t("adm.719")}
                   </p>
                   <BrevoQuotaPanel />
                 </div>
@@ -6791,7 +6808,7 @@ export default function AdminPage() {
             <div className="flex justify-end">
               <Button onClick={() => void handleSaveSettings()} disabled={settingsBusy}>
                 {settingsBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                保存设置
+                {t("adm.720")}
               </Button>
             </div>
           </div>
@@ -6809,11 +6826,11 @@ export default function AdminPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>摘除捐献绑定</DialogTitle>
+            <DialogTitle>{t("adm.721")}</DialogTitle>
             <DialogDescription>
               将从网关账号池移除 {wb2apiRemoving?.nickname || wb2apiRemoving?.uid}
               （捐献者 {wb2apiRemoving?.username}）。
-              网关侧移除失败时本地仍会标记为已移除，并提示失败原因。
+              {t("adm.722")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -6825,17 +6842,17 @@ export default function AdminPage() {
                 onChange={(e) => setWb2apiRevokeAi(e.target.checked)}
               />
               <span className="text-sm">
-                同时收回该用户的「AI 中转站」权限
+                {t("adm.723")}
                 <span className="mt-0.5 block text-xs text-muted-foreground">
-                  默认按「还有其它捐献依据就保留」自动判定。
-                  若该用户的权限来自邀请码（本站无法溯源），需要在此手动勾选才会收回。
+                  {t("adm.724")}
+                  {t("adm.725")}
                 </span>
               </span>
             </label>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setWb2apiRemoving(null)}>
-              取消
+              {t("adm.726")}
             </Button>
             <Button
               variant="destructive"
@@ -6843,7 +6860,7 @@ export default function AdminPage() {
               disabled={wb2apiBusy}
             >
               {wb2apiBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-              确认摘除
+              {t("adm.727")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -6858,11 +6875,11 @@ export default function AdminPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>摘除 CLI2API 捐献绑定</DialogTitle>
+            <DialogTitle>{t("adm.728")}</DialogTitle>
             <DialogDescription>
               将从 cli2api 删除账号 {cli2apiRemoving?.accountId}
               （捐献者 {cli2apiRemoving?.username}）。
-              上游删除失败时本地仍会标记为已移除，并提示失败原因。
+              {t("adm.729")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -6874,17 +6891,17 @@ export default function AdminPage() {
                 onChange={(e) => setCli2apiRevokeAi(e.target.checked)}
               />
               <span className="text-sm">
-                同时收回该用户的「AI 中转站」权限
+                {t("adm.730")}
                 <span className="mt-0.5 block text-xs text-muted-foreground">
-                  默认按「还有其它捐献依据就保留」自动判定。
-                  若该用户的权限来自邀请码（本站无法溯源），需要在此手动勾选才会收回。
+                  {t("adm.731")}
+                  {t("adm.732")}
                 </span>
               </span>
             </label>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCli2apiRemoving(null)}>
-              取消
+              {t("adm.733")}
             </Button>
             <Button
               variant="destructive"
@@ -6892,7 +6909,7 @@ export default function AdminPage() {
               disabled={cli2apiBusy}
             >
               {cli2apiBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-              确认摘除
+              {t("adm.734")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -6910,10 +6927,10 @@ export default function AdminPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>编辑邀请码权限</DialogTitle>
+            <DialogTitle>{t("adm.735")}</DialogTitle>
             <DialogDescription>
               {permInvite?.code} · 只影响之后用该码注册的新账号；
-              已注册用户的权限请在其详情里单独修改。
+              {t("adm.736")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -6943,11 +6960,11 @@ export default function AdminPage() {
                 setPermDraft(null)
               }}
             >
-              取消
+              {t("adm.737")}
             </Button>
             <Button onClick={() => void handleSaveInvitePerms()} disabled={permBusy}>
               {permBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-              保存
+              {t("adm.738")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -6968,13 +6985,13 @@ export default function AdminPage() {
                   {quotaDetail.username} 的邀请码额度
                 </DialogTitle>
                 <DialogDescription>
-                  可手动调整额度用于补偿或纠错；输入框失去焦点即保存。
+                  {t("adm.739")}
                 </DialogDescription>
               </DialogHeader>
 
               <div className="space-y-4">
                 <div className="rounded-md border p-3">
-                  <p className="text-sm font-medium">邀请码额度</p>
+                  <p className="text-sm font-medium">{t("adm.740")}</p>
                   <p className="mt-1 text-xs text-muted-foreground">
                     剩余 {quotaDetail.quota.inviteRemaining} / 共{" "}
                     {quotaDetail.quota.inviteTotal}（基础{" "}
@@ -6983,7 +7000,7 @@ export default function AdminPage() {
                     {quotaDetail.quota.inviteUsed}
                   </p>
                   <div className="mt-2 flex items-center gap-2">
-                    <Label className="text-xs">捐献额度</Label>
+                    <Label className="text-xs">{t("adm.741")}</Label>
                     <Input
                       type="number"
                       min={0}
@@ -7000,9 +7017,9 @@ export default function AdminPage() {
                 </div>
 
                 <div className="rounded-md border p-3">
-                  <p className="text-sm font-medium">模块权限额度</p>
+                  <p className="text-sm font-medium">{t("adm.742")}</p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    决定该用户能给邀请码授予多少模块权限
+                    {t("adm.743")}
                   </p>
                   <div className="mt-2 space-y-2">
                     {quotaDetail.quotaFeatures.map((f) => {
@@ -7015,7 +7032,7 @@ export default function AdminPage() {
                           </Label>
                           {isBasic ? (
                             <span className="text-xs text-muted-foreground">
-                              基础权限（不消耗额度）
+                              {t("adm.744")}
                             </span>
                           ) : (
                             <>
@@ -7059,7 +7076,7 @@ export default function AdminPage() {
                   </h3>
                   {quotaDetail.invites.length === 0 ? (
                     <p className="rounded-md border px-3 py-4 text-sm text-muted-foreground">
-                      无
+                      {t("adm.745")}
                     </p>
                   ) : (
                     <div className="divide-y rounded-md border">
@@ -7074,7 +7091,7 @@ export default function AdminPage() {
                             className="flex flex-wrap items-center gap-2 px-3 py-2 text-xs"
                           >
                             <span className="font-mono">{inv.code}</span>
-                            <Badge variant="outline">域名 · 邮箱 · 名片</Badge>
+                            <Badge variant="outline">{t("adm.746")}</Badge>
                             {extra.map((f) => (
                               <Badge
                                 key={f}
@@ -7131,14 +7148,14 @@ export default function AdminPage() {
       <Dialog open={inviteOpen} onOpenChange={setInviteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>添加邀请码</DialogTitle>
+            <DialogTitle>{t("adm.747")}</DialogTitle>
             <DialogDescription>
-              分享给他人用于注册。
+              {t("adm.748")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="inviteCode">邀请码</Label>
+              <Label htmlFor="inviteCode">{t("adm.749")}</Label>
               <Input
                 id="inviteCode"
                 placeholder="FRIENDS-02"
@@ -7147,7 +7164,7 @@ export default function AdminPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="inviteMax">可使用次数</Label>
+              <Label htmlFor="inviteMax">{t("adm.750")}</Label>
               <Input
                 id="inviteMax"
                 type="number"
@@ -7158,7 +7175,7 @@ export default function AdminPage() {
               />
             </div>
             <div className="space-y-3">
-              <Label>该码注册的账号可用功能</Label>
+              <Label>{t("adm.751")}</Label>
               {FEATURES.map((f) => (
                 <div
                   key={f.key}
@@ -7177,17 +7194,17 @@ export default function AdminPage() {
                 </div>
               ))}
               <p className="text-xs text-muted-foreground">
-                未勾选的功能，用该码注册的账号将无法使用（管理员可事后在成员详情里调整）。
+                {t("adm.752")}
               </p>
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setInviteOpen(false)}>
-              取消
+              {t("adm.753")}
             </Button>
             <Button onClick={() => void handleCreateInvite()} disabled={inviteBusy}>
               {inviteBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-              创建
+              {t("adm.754")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -7199,12 +7216,12 @@ export default function AdminPage() {
           <DialogHeader>
             <DialogTitle>{annDraft.id ? "编辑公告" : "发布公告"}</DialogTitle>
             <DialogDescription>
-              用户在概览页「网站动态」可见，pinned 优先展示。
+              {t("adm.755")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="annTitle">标题</Label>
+              <Label htmlFor="annTitle">{t("adm.756")}</Label>
               <Input
                 id="annTitle"
                 placeholder={t("adm.306")}
@@ -7213,7 +7230,7 @@ export default function AdminPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="annBody">正文</Label>
+              <Label htmlFor="annBody">{t("adm.757")}</Label>
               <Textarea
                 id="annBody"
                 placeholder={t("adm.307")}
@@ -7224,7 +7241,7 @@ export default function AdminPage() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">
-                <Label>分类</Label>
+                <Label>{t("adm.758")}</Label>
                 <Select
                   value={annDraft.category}
                   onValueChange={(v) => setAnnDraft((d) => ({ ...d, category: v }))}
@@ -7233,20 +7250,20 @@ export default function AdminPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="general">公告</SelectItem>
-                    <SelectItem value="frp">内网穿透</SelectItem>
-                    <SelectItem value="ai">AI 中转站</SelectItem>
-                    <SelectItem value="proxy">代理节点</SelectItem>
-                    <SelectItem value="storage">网盘</SelectItem>
-                    <SelectItem value="profile">名片</SelectItem>
+                    <SelectItem value="general">{t("adm.759")}</SelectItem>
+                    <SelectItem value="frp">{t("adm.760")}</SelectItem>
+                    <SelectItem value="ai">{t("adm.761")}</SelectItem>
+                    <SelectItem value="proxy">{t("adm.762")}</SelectItem>
+                    <SelectItem value="storage">{t("adm.763")}</SelectItem>
+                    <SelectItem value="profile">{t("adm.764")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
               <div className="flex items-end">
                 <div className="flex w-full items-center justify-between rounded-md border p-3">
                   <div className="space-y-0.5">
-                    <p className="text-sm font-medium">置顶</p>
-                    <p className="text-xs text-muted-foreground">优先展示在概览</p>
+                    <p className="text-sm font-medium">{t("adm.765")}</p>
+                    <p className="text-xs text-muted-foreground">{t("adm.766")}</p>
                   </div>
                   <Switch
                     checked={annDraft.pinned}
@@ -7257,7 +7274,7 @@ export default function AdminPage() {
             </div>
 
             <div className="space-y-2">
-              <Label>发布方式</Label>
+              <Label>{t("adm.767")}</Label>
               <Select
                 value={annDraft.status}
                 onValueChange={(v) => setAnnDraft((d) => ({ ...d, status: v as AnnouncementStatus }))}
@@ -7266,14 +7283,14 @@ export default function AdminPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="published">立即发布</SelectItem>
-                  <SelectItem value="scheduled">定时发布</SelectItem>
-                  <SelectItem value="draft">存为草稿（用户不可见）</SelectItem>
+                  <SelectItem value="published">{t("adm.768")}</SelectItem>
+                  <SelectItem value="scheduled">{t("adm.769")}</SelectItem>
+                  <SelectItem value="draft">{t("adm.770")}</SelectItem>
                 </SelectContent>
               </Select>
               {annDraft.status === "scheduled" && (
                 <div className="space-y-2 pt-1">
-                  <Label htmlFor="annPublishAt">发布时间</Label>
+                  <Label htmlFor="annPublishAt">{t("adm.771")}</Label>
                   <Input
                     id="annPublishAt"
                     type="datetime-local"
@@ -7281,14 +7298,14 @@ export default function AdminPage() {
                     onChange={(e) => setAnnDraft((d) => ({ ...d, publishAt: e.target.value }))}
                   />
                   <p className="text-xs text-muted-foreground">
-                    到点后自动发布并推送；如需群发邮件，到点时会按「推送到用户邮箱」的设置发送。
+                    {t("adm.772")}
                   </p>
                 </div>
               )}
             </div>
 
             <div className="space-y-2">
-              <Label>弹窗提醒</Label>
+              <Label>{t("adm.773")}</Label>
               <Select
                 value={annDraft.popupMode}
                 onValueChange={(v) => setAnnDraft((d) => ({ ...d, popupMode: v as "none" | "once" | "every" }))}
@@ -7297,21 +7314,21 @@ export default function AdminPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">不弹窗（仅概览显示）</SelectItem>
-                  <SelectItem value="once">仅弹窗一次</SelectItem>
-                  <SelectItem value="every">每次进入都弹（可「不再显示」）</SelectItem>
+                  <SelectItem value="none">{t("adm.774")}</SelectItem>
+                  <SelectItem value="once">{t("adm.775")}</SelectItem>
+                  <SelectItem value="every">{t("adm.776")}</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                弹窗提醒登录用户。用户关闭后，「仅一次」不再出现；「每次都弹」时用户可自行选择「不再显示」。
+                {t("adm.777")}
               </p>
             </div>
 
             <div className="flex items-center justify-between rounded-md border p-3">
               <div className="space-y-0.5">
-                <p className="text-sm font-medium">推送到用户邮箱</p>
+                <p className="text-sm font-medium">{t("adm.778")}</p>
                 <p className="text-xs text-muted-foreground">
-                  勾选后，发布/保存时会把这则公告发到所有已验证用户的邮箱。
+                  {t("adm.779")}
                 </p>
               </div>
               <Switch
@@ -7322,7 +7339,7 @@ export default function AdminPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAnnouncementOpen(false)}>
-              取消
+              {t("adm.780")}
             </Button>
             <Button onClick={() => void handleSaveAnnouncement()} disabled={announcementBusy}>
               {announcementBusy && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -7344,12 +7361,12 @@ export default function AdminPage() {
           <DialogHeader>
             <DialogTitle>{eventDraft.id ? "编辑活动" : "发布活动"}</DialogTitle>
             <DialogDescription>
-              状态设为「已上线」时立即推送到用户消息中心；设为「定时发布」则到点自动上线。用户点「立即参与」即触发服务端校验与自动发放。
+              {t("adm.781")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="evTitle">标题</Label>
+              <Label htmlFor="evTitle">{t("adm.782")}</Label>
               <Input
                 id="evTitle"
                 placeholder={t("adm.308")}
@@ -7358,7 +7375,7 @@ export default function AdminPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="evBody">正文（支持 Markdown）</Label>
+              <Label htmlFor="evBody">{t("adm.783")}</Label>
               <Textarea
                 id="evBody"
                 rows={6}
@@ -7370,7 +7387,7 @@ export default function AdminPage() {
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">
-                <Label>状态</Label>
+                <Label>{t("adm.784")}</Label>
                 <Select
                   value={eventDraft.status}
                   onValueChange={(v) => setEventDraft((d) => ({ ...d, status: v as EventStatus }))}
@@ -7388,7 +7405,7 @@ export default function AdminPage() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="evRewardLabel">奖励文案（展示用）</Label>
+                <Label htmlFor="evRewardLabel">{t("adm.785")}</Label>
                 <Input
                   id="evRewardLabel"
                   placeholder={t("adm.310")}
@@ -7421,7 +7438,7 @@ export default function AdminPage() {
 
             {eventDraft.status === "scheduled" && (
               <div className="space-y-2">
-                <Label htmlFor="evPublishAt">定时上线时间</Label>
+                <Label htmlFor="evPublishAt">{t("adm.786")}</Label>
                 <Input
                   id="evPublishAt"
                   type="datetime-local"
@@ -7429,13 +7446,13 @@ export default function AdminPage() {
                   onChange={(e) => setEventDraft((d) => ({ ...d, publishAt: e.target.value }))}
                 />
                 <p className="text-xs text-muted-foreground">
-                  到点后自动上线并推送到用户消息中心。请填未来时间。
+                  {t("adm.787")}
                 </p>
               </div>
             )}
 
             <div className="space-y-2">
-              <Label>奖励类型</Label>
+              <Label>{t("adm.788")}</Label>
               <Select
                 value={eventDraft.rewardType}
                 disabled={eventDraft.conditionType === "lottery"}
@@ -7456,7 +7473,7 @@ export default function AdminPage() {
               </Select>
               {eventDraft.conditionType === "lottery" && (
                 <p className="text-xs text-muted-foreground">
-                  抽奖活动的奖励固定是积分（奖池在中奖人数那组配置里填），所以这里锁住不能改。
+                  {t("adm.789")}
                 </p>
               )}
               {eventDraft.conditionType !== "lottery" &&
@@ -7468,9 +7485,9 @@ export default function AdminPage() {
                     {eventDraft.rewardType === "points" && (
                       <div className="flex items-center justify-between rounded-md border px-3 py-2">
                         <div className="space-y-0.5">
-                          <p className="text-sm font-medium">区间内随机发放</p>
+                          <p className="text-sm font-medium">{t("adm.790")}</p>
                           <p className="text-xs text-muted-foreground">
-                            打开后在「下限 ~ 上限」之间随机取一个整数（每个人拿到的数不同，类似抽奖）
+                            {t("adm.791")}
                           </p>
                         </div>
                         <Switch
@@ -7485,7 +7502,7 @@ export default function AdminPage() {
                     {eventDraft.rewardType === "points" && eventDraft.pointsRandom ? (
                       <div className="grid gap-3 sm:grid-cols-2">
                         <div className="space-y-2">
-                          <Label htmlFor="evRewardMin">积分下限</Label>
+                          <Label htmlFor="evRewardMin">{t("adm.792")}</Label>
                           <Input
                             id="evRewardMin"
                             type="number"
@@ -7498,7 +7515,7 @@ export default function AdminPage() {
                           />
                         </div>
                         <div className="space-y-2">
-                          <Label htmlFor="evRewardMax">积分上限</Label>
+                          <Label htmlFor="evRewardMax">{t("adm.793")}</Label>
                           <Input
                             id="evRewardMax"
                             type="number"
@@ -7542,20 +7559,20 @@ export default function AdminPage() {
                       <p className="text-xs text-muted-foreground">
                         按「元」填写，发放时会自动换算成中转站额度（1 元 ={" "}
                         {quotaPerUnit.toLocaleString()} 额度）加到对方的余额里。
-                        用户未绑定中转站账号时无法自动发放，会落到「待人工发放」，可在领取名单里手动处理。
+                        {t("adm.794")}
                       </p>
                     )}
                     {eventDraft.rewardType === "points" && (
                       <p className="text-xs text-muted-foreground">
                         发放到用户的「积分」余额。兑换比例（每 1 积分 = 多少元）在
-                        「积分 → 商城」商品表第一行的内置商品里配置，这里不写死。
-                        与钱包余额不同，积分不要求用户已绑定中转站账号 —— 先攒着，之后由用户
-                        自己在「积分与商城」页兑换成中转站余额或购买商城商品。
+                        {t("adm.795")}
+                        {t("adm.796")}
+                        {t("adm.797")}
                         {eventDraft.pointsRandom && (
                           <>
                             <br />
-                            区间随机的金额按「活动 + 用户」固定：同一个人重试也拿到同一个数，
-                            不会出现「刷新一下金额变了」。实际发到的数额会记在「领取名单」里。
+                            {t("adm.798")}
+                            {t("adm.799")}
                           </>
                         )}
                       </p>
@@ -7586,7 +7603,7 @@ export default function AdminPage() {
             </div>
 
             <div className="space-y-2">
-              <Label>参与类型</Label>
+              <Label>{t("adm.800")}</Label>
               <Select
                 value={eventDraft.conditionType}
                 onValueChange={(v) =>
@@ -7639,8 +7656,8 @@ export default function AdminPage() {
                     }
                   />
                   <p className="text-xs text-muted-foreground">
-                    用户必须在活动卡片输入这个码才能领取（不区分大小写）。把码公布在
-                    QQ 群公告等站外位置，即可验证「真的进过群」。码本身不会展示给用户。
+                    {t("adm.801")}
+                    {t("adm.802")}
                   </p>
                 </div>
               )}
@@ -7655,17 +7672,17 @@ export default function AdminPage() {
                     }
                   />
                   <p className="text-xs text-muted-foreground">
-                    用户要填自己的 GitHub 用户名，服务端去这个仓库的 stargazers 名单里核验。
-                    <span className="font-medium">必须是公开仓库</span>
-                    —— 私有仓库读不到名单，会变成「所有人都核验失败」。
-                    点完 star 马上就能领（核验结果按需缓存；「没查到」只缓存 1 分钟，
-                    避免用户点完立刻来领却拿到旧结果）。
+                    {t("adm.803")}
+                    <span className="font-medium">{t("adm.804")}</span>
+                    {t("adm.805")}
+                    {t("adm.806")}
+                    {t("adm.807")}
                     <br />
                     <span className="font-medium text-destructive">
-                      还需要给 Worker 配一个 GitHub Token
+                      {t("adm.808")}
                     </span>
                     （环境变量/密钥 <code className="font-mono">GITHUB_TOKEN</code>）：
-                    GitHub 现在要鉴权才肯返回 star 名单，没配的话用户会看到「无法核验」。
+                    {t("adm.809")}
                   </p>
                 </div>
               )}
@@ -7673,7 +7690,7 @@ export default function AdminPage() {
                 <div className="space-y-3 pt-1">
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-2">
-                      <Label htmlFor="evLotteryWinners">中奖人数</Label>
+                      <Label htmlFor="evLotteryWinners">{t("adm.810")}</Label>
                       <Input
                         id="evLotteryWinners"
                         type="number"
@@ -7686,7 +7703,7 @@ export default function AdminPage() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="evLotteryPool">奖池积分（总数）</Label>
+                      <Label htmlFor="evLotteryPool">{t("adm.811")}</Label>
                       <Input
                         id="evLotteryPool"
                         type="number"
@@ -7699,7 +7716,7 @@ export default function AdminPage() {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <Label>分配方式</Label>
+                    <Label>{t("adm.812")}</Label>
                     <Select
                       value={eventDraft.lotteryMode}
                       onValueChange={(v) =>
@@ -7710,22 +7727,22 @@ export default function AdminPage() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="even">平均分（每人一样多）</SelectItem>
-                        <SelectItem value="random">随机分（有多有少，总数不变）</SelectItem>
+                        <SelectItem value="even">{t("adm.813")}</SelectItem>
+                        <SelectItem value="random">{t("adm.814")}</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    用户点「参与抽奖」只是报名，当时不发奖。之后两种开奖方式：
-                    你在活动列表点「开奖」立即抽；或到上面填的「结束时间」自动开
-                    （没填结束时间就只会等你手动开）。开奖时从报名者里随机抽，
-                    奖池按分配方式切给中奖者 —— 平均分是每人一样，随机分是各人多少不同但总数不变。
-                    报名人数不足中奖人数时，报名的都中奖。
+                    {t("adm.815")}
+                    {t("adm.816")}
+                    {t("adm.817")}
+                    {t("adm.818")}
+                    {t("adm.819")}
                   </p>
                   {Number(eventDraft.lotteryPool) > 0 &&
                     Number(eventDraft.lotteryPool) < Number(eventDraft.lotteryWinners) && (
                       <p className="text-xs text-destructive">
-                        奖池不能少于中奖人数（每人至少要分到 1 积分）。
+                        {t("adm.820")}
                       </p>
                     )}
                 </div>
@@ -7734,7 +7751,7 @@ export default function AdminPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEventOpen(false)}>
-              取消
+              {t("adm.821")}
             </Button>
             <Button onClick={() => void handleSaveEvent()} disabled={eventBusy}>
               {eventBusy && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -7756,20 +7773,20 @@ export default function AdminPage() {
           <DialogHeader>
             <DialogTitle>领取名单 · {claimsEvent?.title}</DialogTitle>
             <DialogDescription>
-              自动发放失败的记录可在这里手动标记为「已发放」。
+              {t("adm.822")}
             </DialogDescription>
           </DialogHeader>
           {claimsLoading ? (
             <LoadingBlock />
           ) : claims.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">还没有人参与。</p>
+            <p className="py-8 text-center text-sm text-muted-foreground">{t("adm.823")}</p>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>用户</TableHead>
-                  <TableHead>领取时间</TableHead>
-                  <TableHead>状态</TableHead>
+                  <TableHead>{t("adm.824")}</TableHead>
+                  <TableHead>{t("adm.825")}</TableHead>
+                  <TableHead>{t("adm.826")}</TableHead>
                   <TableHead className="w-24" />
                 </TableRow>
               </TableHeader>
@@ -7815,7 +7832,7 @@ export default function AdminPage() {
                           className="h-7"
                           onClick={() => void handleGrantClaim(c)}
                         >
-                          标记已发放
+                          {t("adm.827")}
                         </Button>
                       )}
                     </TableCell>
@@ -7842,9 +7859,9 @@ export default function AdminPage() {
             {/* 新建时：从已发现的桶里选（大幅简化填写） */}
             {!r2EditId && (
               <div className="space-y-2">
-                <Label>选择桶</Label>
+                <Label>{t("adm.828")}</Label>
                 {r2DiscoverLoading ? (
-                  <p className="text-xs text-muted-foreground">正在读取账户与桶…</p>
+                  <p className="text-xs text-muted-foreground">{t("adm.829")}</p>
                 ) : r2Discovered?.available ? (
                   <>
                     <Select value={r2Pick} onValueChange={handlePickBucket}>
@@ -7867,7 +7884,7 @@ export default function AdminPage() {
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
-                      列表来自全局 token 可访问的所有账户。也可以跳过此项，在下面手动填写。
+                      {t("adm.830")}
                     </p>
                   </>
                 ) : (
@@ -7880,7 +7897,7 @@ export default function AdminPage() {
 
             {/* 桶类型：决定用途 */}
             <div className="space-y-2">
-              <Label>桶类型</Label>
+              <Label>{t("adm.831")}</Label>
               <Select
                 value={r2Draft.kind}
                 onValueChange={(v) => setR2Draft((d) => ({ ...d, kind: v }))}
@@ -7889,8 +7906,8 @@ export default function AdminPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="user">用户网盘桶（存用户文件，参与分配）</SelectItem>
-                  <SelectItem value="platform">平台数据桶（存名片/分享箱，全局唯一）</SelectItem>
+                  <SelectItem value="user">{t("adm.832")}</SelectItem>
+                  <SelectItem value="platform">{t("adm.833")}</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
@@ -7901,7 +7918,7 @@ export default function AdminPage() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">
-                <Label htmlFor="r2id">标识 id</Label>
+                <Label htmlFor="r2id">{t("adm.834")}</Label>
                 <Input
                   id="r2id"
                   placeholder="b2"
@@ -7911,7 +7928,7 @@ export default function AdminPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="r2name">显示名</Label>
+                <Label htmlFor="r2name">{t("adm.835")}</Label>
                 <Input
                   id="r2name"
                   placeholder={t("adm.315")}
@@ -7922,7 +7939,7 @@ export default function AdminPage() {
             </div>
             <details className="rounded-md border" open={Boolean(r2EditId) || !r2Discovered?.available}>
               <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground">
-                高级选项（端点 / 桶名 / 账户 ID / 凭据）— 选桶后已自动填好，一般无需改动
+                {t("adm.836")}
               </summary>
               <div className="space-y-4 border-t px-3 pb-3 pt-3">
                 <div className="space-y-2">
@@ -7937,7 +7954,7 @@ export default function AdminPage() {
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-2">
-                    <Label htmlFor="r2bucket">桶名</Label>
+                    <Label htmlFor="r2bucket">{t("adm.837")}</Label>
                     <Input
                       id="r2bucket"
                       placeholder="network2"
@@ -7947,7 +7964,7 @@ export default function AdminPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="r2account">账户 ID</Label>
+                    <Label htmlFor="r2account">{t("adm.838")}</Label>
                     <Input
                       id="r2account"
                       placeholder="d20b3b86…"
@@ -7982,7 +7999,7 @@ export default function AdminPage() {
             </details>
             <div className="grid grid-cols-3 gap-3">
               <div className="space-y-2">
-                <Label htmlFor="r2max">人数上限</Label>
+                <Label htmlFor="r2max">{t("adm.839")}</Label>
                 <Input
                   id="r2max"
                   type="number"
@@ -7992,7 +8009,7 @@ export default function AdminPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="r2quota">每人配额（MB）</Label>
+                <Label htmlFor="r2quota">{t("adm.840")}</Label>
                 <Input
                   id="r2quota"
                   type="number"
@@ -8002,7 +8019,7 @@ export default function AdminPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="r2sort">排序</Label>
+                <Label htmlFor="r2sort">{t("adm.841")}</Label>
                 <Input
                   id="r2sort"
                   type="number"
@@ -8013,12 +8030,12 @@ export default function AdminPage() {
             </div>
             <p className="text-xs text-muted-foreground">
               每人配额按 MB 填（1024 MB = 1 GiB）。容量上限 = 人数上限 × 每人配额。
-              ⚠️ 改这里只影响「之后新开通」的用户；存量用户要去「设置 → 网盘配额」点「同步存量用户配额」。
+              {t("adm.842")}
             </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setR2BucketOpen(false)}>
-              取消
+              {t("adm.843")}
             </Button>
             <Button onClick={() => void handleSaveR2Bucket()} disabled={r2Busy}>
               {r2Busy && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -8048,7 +8065,7 @@ export default function AdminPage() {
                     <Badge variant="success">active</Badge>
                   )}
                   {detail.user.role === "root" ? (
-                    <Badge variant="secondary">站长</Badge>
+                    <Badge variant="secondary">{t("adm.844")}</Badge>
                   ) : detail.user.role === "admin" ? (
                     <Badge variant="secondary">admin</Badge>
                   ) : null}
@@ -8062,7 +8079,7 @@ export default function AdminPage() {
               <div className="min-w-0 space-y-4">
                 {/* ---- 账号：昵称 / 邮箱验证 / 通知 / 角色 ---- */}
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">账号</h3>
+                  <h3 className="mb-2 text-sm font-medium">{t("adm.845")}</h3>
                   <div className="space-y-2">
                     <div className="flex items-center gap-3 rounded-md border p-3">
                       <Input
@@ -8082,13 +8099,13 @@ export default function AdminPage() {
                         disabled={busy || detail.user.username === user?.username}
                         onClick={() => void handleSaveNickname()}
                       >
-                        保存
+                        {t("adm.846")}
                       </Button>
                     </div>
 
                     <div className="flex items-center justify-between rounded-md border p-3">
                       <div className="space-y-0.5">
-                        <p className="text-sm font-medium">邮箱已验证</p>
+                        <p className="text-sm font-medium">{t("adm.847")}</p>
                         <p className="text-xs text-muted-foreground">
                           {detail.user.email} · 验证后才能接收转发与通知
                         </p>
@@ -8104,9 +8121,9 @@ export default function AdminPage() {
 
                     <div className="flex items-center justify-between rounded-md border p-3">
                       <div className="space-y-0.5">
-                        <p className="text-sm font-medium">接收通知邮件</p>
+                        <p className="text-sm font-medium">{t("adm.848")}</p>
                         <p className="text-xs text-muted-foreground">
-                          审批结果、系统公告等平台邮件的开关
+                          {t("adm.849")}
                         </p>
                       </div>
                       <Switch
@@ -8150,18 +8167,18 @@ export default function AdminPage() {
 
                 {/* ---- 各模块用量与开通状态 ---- */}
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">模块开通与用量</h3>
+                  <h3 className="mb-2 text-sm font-medium">{t("adm.850")}</h3>
                   <div className="rounded-md border">
                     {/* 网盘 */}
                     <div className="border-b px-3 py-2 text-xs last:border-b-0">
                       <div className="flex items-center justify-between">
-                        <span className="font-medium">直链网盘</span>
+                        <span className="font-medium">{t("adm.851")}</span>
                         {detail.storage ? (
                           <Badge variant={detail.storage.enabled ? "success" : "secondary"}>
                             {detail.storage.enabled ? "已开通" : "已停用"}
                           </Badge>
                         ) : (
-                          <Badge variant="outline">未开通</Badge>
+                          <Badge variant="outline">{t("adm.852")}</Badge>
                         )}
                       </div>
                       {detail.storage && (
@@ -8199,7 +8216,7 @@ export default function AdminPage() {
                               {storageQuotaBusy && (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                               )}
-                              保存配额
+                              {t("adm.853")}
                             </Button>
                             {detail.storage.usedBytes > 0 && (
                               <span className="text-muted-foreground">
@@ -8214,11 +8231,11 @@ export default function AdminPage() {
                     {/* AI 中转站 */}
                     <div className="border-b px-3 py-2 text-xs last:border-b-0">
                       <div className="flex items-center justify-between">
-                        <span className="font-medium">AI 中转站</span>
+                        <span className="font-medium">{t("adm.854")}</span>
                         {detail.newapi ? (
-                          <Badge variant="success">已开通</Badge>
+                          <Badge variant="success">{t("adm.855")}</Badge>
                         ) : (
-                          <Badge variant="outline">未开通</Badge>
+                          <Badge variant="outline">{t("adm.856")}</Badge>
                         )}
                       </div>
                       {detail.newapi && (
@@ -8244,10 +8261,10 @@ export default function AdminPage() {
                             {newapiSyncBusy && (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" />
                             )}
-                            对齐中转站状态
+                            {t("adm.857")}
                           </Button>
                           <span className="text-muted-foreground">
-                            中转站账号被禁用（如商汤 Key 失效被收回权限）后，若权限已恢复，点这里立即解禁
+                            {t("adm.858")}
                           </span>
                         </div>
                       )}
@@ -8256,20 +8273,20 @@ export default function AdminPage() {
                     {/* 内网穿透 */}
                     <div className="border-b px-3 py-2 text-xs last:border-b-0">
                       <div className="flex items-center justify-between">
-                        <span className="font-medium">内网穿透</span>
+                        <span className="font-medium">{t("adm.859")}</span>
                         {detail.frp ? (
                           <Badge variant={detail.frp.enabled ? "success" : "secondary"}>
                             {detail.frp.enabled ? "已启用" : "已关闭"}
                           </Badge>
                         ) : (
-                          <Badge variant="outline">未启用</Badge>
+                          <Badge variant="outline">{t("adm.860")}</Badge>
                         )}
                       </div>
                       {(detail.frpPorts.length > 0 || detail.frpApplications.length > 0) && (
                         <div className="mt-1 space-y-1 text-muted-foreground">
                           {detail.frpPorts.length > 0 && (
                             <p>
-                              占用端口：
+                              {t("adm.861")}
                               {detail.frpPorts
                                 .map((p) => `${p.nodeName ?? "节点"} ${p.remotePort}`)
                                 .join("、")}
@@ -8290,13 +8307,13 @@ export default function AdminPage() {
                     {/* 代理节点 */}
                     <div className="px-3 py-2 text-xs">
                       <div className="flex items-center justify-between">
-                        <span className="font-medium">代理节点</span>
+                        <span className="font-medium">{t("adm.862")}</span>
                         {detail.proxy ? (
                           <Badge variant={detail.proxy.enabled ? "success" : "secondary"}>
                             {detail.proxy.enabled ? "已启用" : "已关闭"}
                           </Badge>
                         ) : (
-                          <Badge variant="outline">未启用</Badge>
+                          <Badge variant="outline">{t("adm.863")}</Badge>
                         )}
                       </div>
                       {detail.proxy?.consentedAt && (
@@ -8311,7 +8328,7 @@ export default function AdminPage() {
 
                 {/* ---- 个人名片 ---- */}
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">个人名片</h3>
+                  <h3 className="mb-2 text-sm font-medium">{t("adm.864")}</h3>
                   <div className="rounded-md border p-3 text-xs">
                     {detail.profile ? (
                       <div className="space-y-1">
@@ -8334,7 +8351,7 @@ export default function AdminPage() {
                                 rel="noopener noreferrer"
                                 className="ml-auto inline-flex items-center gap-1 text-primary hover:underline"
                               >
-                                打开
+                                {t("adm.865")}
                                 <ExternalLink className="h-3 w-3" />
                               </a>
                             ) : null
@@ -8347,14 +8364,14 @@ export default function AdminPage() {
                         </p>
                       </div>
                     ) : (
-                      <p className="text-muted-foreground">未开通名片</p>
+                      <p className="text-muted-foreground">{t("adm.866")}</p>
                     )}
                   </div>
                 </section>
 
                 {/* ---- 邀请码 / 模块额度 ---- */}
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">邀请码与模块额度</h3>
+                  <h3 className="mb-2 text-sm font-medium">{t("adm.867")}</h3>
                   <div className="rounded-md border p-3 text-xs">
                     <p className="text-muted-foreground">
                       邀请码：共 {detail.quota.inviteTotal} 个（基础{" "}
@@ -8381,7 +8398,7 @@ export default function AdminPage() {
                   </h3>
                   <div className="rounded-md border">
                     {detail.activity.length === 0 ? (
-                      <p className="px-3 py-4 text-sm text-muted-foreground">无</p>
+                      <p className="px-3 py-4 text-sm text-muted-foreground">{t("adm.868")}</p>
                     ) : (
                       detail.activity.map((a) => (
                         <div
@@ -8416,7 +8433,7 @@ export default function AdminPage() {
                   <h3 className="mb-2 text-sm font-medium">DNS 记录（{detail.dns.length}）</h3>
                   <div className="rounded-md border">
                     {detail.dns.length === 0 ? (
-                      <p className="px-3 py-4 text-sm text-muted-foreground">无</p>
+                      <p className="px-3 py-4 text-sm text-muted-foreground">{t("adm.869")}</p>
                     ) : (
                       detail.dns.slice(0, 30).map((r) => (
                         <div
@@ -8443,7 +8460,7 @@ export default function AdminPage() {
                       >
                         {mb.address}
                         {mb.primary && (
-                          <span className="ml-1 text-muted-foreground">主</span>
+                          <span className="ml-1 text-muted-foreground">{t("adm.870")}</span>
                         )}
                       </span>
                     ))}
@@ -8456,7 +8473,7 @@ export default function AdminPage() {
                   </h3>
                   <div className="rounded-md border">
                     {detail.messages.length === 0 ? (
-                      <p className="px-3 py-4 text-sm text-muted-foreground">无</p>
+                      <p className="px-3 py-4 text-sm text-muted-foreground">{t("adm.871")}</p>
                     ) : (
                       detail.messages.slice(0, 20).map((m) => (
                         <button
@@ -8479,7 +8496,7 @@ export default function AdminPage() {
                 </section>
 
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">功能权限</h3>
+                  <h3 className="mb-2 text-sm font-medium">{t("adm.872")}</h3>
                   <div className="space-y-2">
                     {FEATURES.map((f) => (
                       <div
@@ -8503,7 +8520,7 @@ export default function AdminPage() {
                 </section>
 
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">子域名配额</h3>
+                  <h3 className="mb-2 text-sm font-medium">{t("adm.873")}</h3>
                   <div className="rounded-md border p-3">
                     <div className="flex items-center gap-3">
                       <Input
@@ -8526,11 +8543,11 @@ export default function AdminPage() {
                         disabled={busy || detail.user.username === user?.username}
                         onClick={() => void handleSaveQuota()}
                       >
-                        保存
+                        {t("adm.874")}
                       </Button>
                     </div>
                     <p className="mt-2 text-xs text-muted-foreground">
-                      当前有效配额：
+                      {t("adm.875")}
                       {detail.user.maxSubdomains ?? globalQuota} 个
                       {detail.user.maxSubdomains === null && "（全局默认）"}
                     </p>
@@ -8552,12 +8569,12 @@ export default function AdminPage() {
                     {detail.user.status === "active" ? (
                       <>
                         <Ban className="h-3.5 w-3.5" />
-                        封禁
+                        {t("adm.876")}
                       </>
                     ) : (
                       <>
                         <UserCheck className="h-3.5 w-3.5" />
-                        解封
+                        {t("adm.877")}
                       </>
                     )}
                   </Button>
@@ -8598,13 +8615,13 @@ export default function AdminPage() {
           <DialogHeader>
             <DialogTitle>{nodeForm.id ? "编辑节点" : "添加节点"}</DialogTitle>
             <DialogDescription>
-              serverAddr / serverPort / auth.token 会写进用户生成的 config.toml。
+              {t("adm.878")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label>名称</Label>
+                <Label>{t("adm.879")}</Label>
                 <Input
                   value={nodeForm.name}
                   onChange={(e) => setNodeForm((f) => ({ ...f, name: e.target.value }))}
@@ -8612,7 +8629,7 @@ export default function AdminPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label>地区说明</Label>
+                <Label>{t("adm.880")}</Label>
                 <Input
                   value={nodeForm.region}
                   onChange={(e) => setNodeForm((f) => ({ ...f, region: e.target.value }))}
@@ -8645,7 +8662,7 @@ export default function AdminPage() {
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label>鉴权方式</Label>
+                <Label>{t("adm.881")}</Label>
                 <Select
                   value={nodeForm.authMode}
                   onValueChange={(v) => setNodeForm((f) => ({ ...f, authMode: v }))}
@@ -8654,10 +8671,10 @@ export default function AdminPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="none">无鉴权（最基础）</SelectItem>
-                    <SelectItem value="token">全局 auth.token</SelectItem>
-                    <SelectItem value="token_user">全局 token + 每用户账号</SelectItem>
-                    <SelectItem value="custom">其它 / 自定义插件</SelectItem>
+                    <SelectItem value="none">{t("adm.882")}</SelectItem>
+                    <SelectItem value="token">{t("adm.883")}</SelectItem>
+                    <SelectItem value="token_user">{t("adm.884")}</SelectItem>
+                    <SelectItem value="custom">{t("adm.885")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -8674,17 +8691,17 @@ export default function AdminPage() {
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label>auth.token 说明</Label>
+                <Label>{t("adm.886")}</Label>
                 <p className="text-xs text-muted-foreground">
-                  auth.token 是 frps 服务端的共享密钥，所有用户相同。
+                  {t("adm.887")}
                   每个用户自己的 <code>metadatas.token</code> 由用户在申请时自设，
-                  无需在此配置。
+                  {t("adm.888")}
                 </p>
               </div>
             </div>
             <div className="grid gap-4 sm:grid-cols-3">
               <div className="space-y-2">
-                <Label>端口下限</Label>
+                <Label>{t("adm.889")}</Label>
                 <Input
                   type="number"
                   value={nodeForm.portMin}
@@ -8694,7 +8711,7 @@ export default function AdminPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label>端口上限</Label>
+                <Label>{t("adm.890")}</Label>
                 <Input
                   type="number"
                   value={nodeForm.portMax}
@@ -8704,7 +8721,7 @@ export default function AdminPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label>每账号最多端口</Label>
+                <Label>{t("adm.891")}</Label>
                 <Input
                   type="number"
                   value={nodeForm.maxPorts}
@@ -8715,7 +8732,7 @@ export default function AdminPage() {
               </div>
             </div>
             <div className="space-y-2">
-              <Label>备注</Label>
+              <Label>{t("adm.892")}</Label>
               <Input
                 value={nodeForm.note}
                 onChange={(e) => setNodeForm((f) => ({ ...f, note: e.target.value }))}
@@ -8723,7 +8740,7 @@ export default function AdminPage() {
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label>节点状态</Label>
+                <Label>{t("adm.893")}</Label>
                 <Select
                   value={nodeForm.status}
                   onValueChange={(v) => setNodeForm((f) => ({ ...f, status: v }))}
@@ -8732,18 +8749,18 @@ export default function AdminPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="online">运行中</SelectItem>
-                    <SelectItem value="offline">不可用</SelectItem>
-                    <SelectItem value="maintenance">维护中</SelectItem>
-                    <SelectItem value="unknown">状态未知</SelectItem>
+                    <SelectItem value="online">{t("adm.894")}</SelectItem>
+                    <SelectItem value="offline">{t("adm.895")}</SelectItem>
+                    <SelectItem value="maintenance">{t("adm.896")}</SelectItem>
+                    <SelectItem value="unknown">{t("adm.897")}</SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  用户在节点列表会看到该状态；不可用/维护中时无法提交申请。
+                  {t("adm.898")}
                 </p>
               </div>
               <div className="space-y-2">
-                <Label>状态说明（可选）</Label>
+                <Label>{t("adm.899")}</Label>
                 <Input
                   value={nodeForm.statusNote}
                   onChange={(e) =>
@@ -8756,11 +8773,11 @@ export default function AdminPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setNodeOpen(false)}>
-              取消
+              {t("adm.900")}
             </Button>
             <Button onClick={() => void handleSaveNode()} disabled={frpBusy}>
               {frpBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-              保存
+              {t("adm.901")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -8772,14 +8789,14 @@ export default function AdminPage() {
           <DialogHeader>
             <DialogTitle>{proxyForm.id ? "编辑订阅源" : "添加订阅源"}</DialogTitle>
             <DialogDescription>
-              订阅链接会被 Worker 抓取并解析成节点；剩余流量 / 到期日取决于订阅源
-              是否在响应里附带信息（解析不到时用户端显示「未知」）。
+              {t("adm.902")}
+              {t("adm.903")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label>名称</Label>
+                <Label>{t("adm.904")}</Label>
                 <Input
                   value={proxyForm.name}
                   onChange={(e) =>
@@ -8789,7 +8806,7 @@ export default function AdminPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label>地区说明</Label>
+                <Label>{t("adm.905")}</Label>
                 <Input
                   value={proxyForm.region}
                   onChange={(e) =>
@@ -8800,7 +8817,7 @@ export default function AdminPage() {
               </div>
             </div>
             <div className="space-y-2">
-              <Label>订阅链接</Label>
+              <Label>{t("adm.906")}</Label>
               <Input
                 value={proxyForm.url}
                 onChange={(e) =>
@@ -8810,13 +8827,13 @@ export default function AdminPage() {
                 className="font-mono text-xs"
               />
               <p className="text-xs text-muted-foreground">
-                需要鉴权的订阅可在 Worker secret 里配置 PROXY_API_TOKEN，
+                {t("adm.907")}
                 抓取时会自动带上 Authorization: Bearer。
               </p>
             </div>
             <div className="grid gap-4 sm:grid-cols-3">
               <div className="space-y-1.5">
-                <Label>协议</Label>
+                <Label>{t("adm.908")}</Label>
                 <Input
                   value={proxyForm.protocol}
                   onChange={(e) =>
@@ -8825,11 +8842,11 @@ export default function AdminPage() {
                   placeholder={t("adm.324")}
                 />
                 <p className="text-xs text-muted-foreground">
-                  留空则保存时自动从订阅内容识别
+                  {t("adm.909")}
                 </p>
               </div>
               <div className="space-y-2">
-                <Label>排序</Label>
+                <Label>{t("adm.910")}</Label>
                 <Input
                   type="number"
                   value={proxyForm.sortOrder}
@@ -8839,7 +8856,7 @@ export default function AdminPage() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>节点状态</Label>
+                <Label>{t("adm.911")}</Label>
                 <Select
                   value={proxyForm.status}
                   onValueChange={(v) =>
@@ -8850,19 +8867,19 @@ export default function AdminPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="online">运行中</SelectItem>
-                    <SelectItem value="offline">不可用</SelectItem>
-                    <SelectItem value="maintenance">维护中</SelectItem>
-                    <SelectItem value="unknown">未知</SelectItem>
+                    <SelectItem value="online">{t("adm.912")}</SelectItem>
+                    <SelectItem value="offline">{t("adm.913")}</SelectItem>
+                    <SelectItem value="maintenance">{t("adm.914")}</SelectItem>
+                    <SelectItem value="unknown">{t("adm.915")}</SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  留空则保存时按订阅 URL 能否访问自动判定
+                  {t("adm.916")}
                 </p>
               </div>
             </div>
             <div className="space-y-2">
-              <Label>状态说明（可选）</Label>
+              <Label>{t("adm.917")}</Label>
               <Input
                 value={proxyForm.statusNote}
                 onChange={(e) =>
@@ -8872,7 +8889,7 @@ export default function AdminPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label>备注（可选）</Label>
+              <Label>{t("adm.918")}</Label>
               <Input
                 value={proxyForm.note}
                 onChange={(e) =>
@@ -8882,9 +8899,9 @@ export default function AdminPage() {
             </div>
             <div className="flex items-center justify-between rounded-md border p-3">
               <div className="space-y-0.5">
-                <p className="text-sm font-medium">对该订阅源启用</p>
+                <p className="text-sm font-medium">{t("adm.919")}</p>
                 <p className="text-xs text-muted-foreground">
-                  停用后用户看不到这个订阅源（不影响其它订阅源）
+                  {t("adm.920")}
                 </p>
               </div>
               <Switch
@@ -8895,11 +8912,11 @@ export default function AdminPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setProxyOpen(false)}>
-              取消
+              {t("adm.921")}
             </Button>
             <Button onClick={() => void handleSaveProxy()} disabled={proxyBusy}>
               {proxyBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-              保存
+              {t("adm.922")}
             </Button>
           </DialogFooter>
         </DialogContent>
