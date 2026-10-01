@@ -118,6 +118,7 @@ import {
   attentionApi,
   HttpError,
 } from "@/services/api"
+import { useT, tStatic } from "@/i18n"
 import { useAuth } from "@/hooks/use-auth"
 /**
  * 可授权的功能（与后端 permissions.ts 的 FEATURES 保持一致）。
@@ -125,10 +126,10 @@ import { useAuth } from "@/hooks/use-auth"
  * 因此创建/编辑邀请码与成员详情里都不再出现名片开关。
  */
 const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
-  { key: "r2", label: "直链网盘", desc: "R2 存储与直链分享" },
-  { key: "ai", label: "AI 中转站", desc: "NewAPI 账号与 API Key" },
-  { key: "frp", label: "内网穿透", desc: "frp 隧道申请" },
-  { key: "proxy", label: "代理节点", desc: "代理订阅与节点" },
+  { key: "r2", label: "feat.r2", desc: "adm.feat.r2Desc" },
+  { key: "ai", label: "feat.ai", desc: "adm.feat.aiDesc" },
+  { key: "frp", label: "feat.frp", desc: "adm.feat.frpDesc" },
+  { key: "proxy", label: "feat.proxy", desc: "adm.feat.proxyDesc" },
 ]
 
 import type {
@@ -216,9 +217,9 @@ function fmtTime(iso: string) {
 
 /** realm（cn/global）→ 中文标签 */
 function realmLabel(realm: string | null | undefined): string {
-  if (realm === "global") return "国际版"
-  if (realm === "cn") return "国内版"
-  return "未知"
+  if (realm === "global") return tStatic("don.realm.global")
+  if (realm === "cn") return tStatic("don.realm.cn")
+  return tStatic("common.unknown")
 }
 
 /** 用户列表里的布尔列：开通打勾，未开通画叉（居中对齐，无多余留白） */
@@ -226,7 +227,7 @@ function BoolMark({ on, title }: { on: boolean; title?: string }) {
   return (
     <span
       className="inline-flex items-center justify-center"
-      title={title ?? (on ? "已开通" : "未开通")}
+      title={title ?? (on ? tStatic("adm.on") : tStatic("adm.off"))}
     >
       {on ? (
         <CheckCircle2 className="h-4 w-4 text-emerald-600" />
@@ -384,33 +385,33 @@ function eventDraftToPayload(d: EventDraft): EventPayload {
 }
 
 const EVENT_STATUS_OPTIONS: { value: EventStatus; label: string }[] = [
-  { value: "draft", label: "草稿（不推送）" },
-  { value: "scheduled", label: "定时发布（到点自动上线）" },
-  { value: "active", label: "已上线（推送给所有用户）" },
-  { value: "ended", label: "已结束" },
-  { value: "archived", label: "已归档" },
+  { value: "draft", label: "adm.evStatus.draft" },
+  { value: "scheduled", label: "adm.evStatus.scheduled" },
+  { value: "active", label: "adm.evStatus.active" },
+  { value: "ended", label: "adm.evStatus.ended" },
+  { value: "archived", label: "adm.evStatus.archived" },
 ]
 
 const REWARD_TYPE_OPTIONS: { value: EventRewardType; label: string }[] = [
-  { value: "none", label: "不自动发放（仅登记，人工发放）" },
-  { value: "newapi_quota", label: "AI 中转站钱包余额" },
-  { value: "invite_quota", label: "邀请码创建额度" },
+  { value: "none", label: "adm.reward.none" },
+  { value: "newapi_quota", label: "adm.reward.quota" },
+  { value: "invite_quota", label: "adm.reward.inviteQuota" },
   // 积分：记在用户积分余额上，任何用户都能领（不必先绑中转站），
   // 之后由用户自己在「积分与商城」页兑换成中转站余额
-  { value: "points", label: "积分" },
+  { value: "points", label: "adm.reward.points" },
 ]
 
 const CONDITION_TYPE_OPTIONS: { value: EventConditionType; label: string }[] = [
-  { value: "always", label: "无门槛（所有登录用户）" },
-  { value: "code", label: "凭认证码（如 QQ 群口令）" },
+  { value: "always", label: "adm.cond.always" },
+  { value: "code", label: "adm.cond.code" },
   // 判据是「已发布 **且** 填了昵称」——开通名片默认就是已发布状态，
   // 只卡「已发布」等于点一下开通就能领奖，所以还要有昵称（见 event-rewards.ts）
-  { value: "has_profile", label: "个人名片已对外展示（已发布 + 已填昵称）" },
-  { value: "has_feature", label: "已开通指定功能模块" },
+  { value: "has_profile", label: "adm.cond.profile" },
+  { value: "has_feature", label: "adm.cond.feature" },
   // 抽奖：参与只是「报名」，开奖时从报名者里随机抽取中奖者发积分（奖励类型固定为积分）
-  { value: "lottery", label: "抽奖（报名后随机抽取中奖者发积分）" },
+  { value: "lottery", label: "adm.cond.lottery" },
   // 点 star：用户填自己的 GitHub 用户名，服务端去该仓库的 stargazers 名单里核验
-  { value: "github_star", label: "点了指定 GitHub 仓库的 star" },
+  { value: "github_star", label: "adm.cond.githubStar" },
 ]
 
 const EVENT_STATUS_BADGE: Record<EventStatus, "default" | "secondary" | "success" | "outline"> = {
@@ -422,14 +423,15 @@ const EVENT_STATUS_BADGE: Record<EventStatus, "default" | "secondary" | "success
 }
 
 const EVENT_STATUS_TEXT: Record<EventStatus, string> = {
-  draft: "草稿",
-  scheduled: "定时发布",
-  active: "已上线",
-  ended: "已结束",
-  archived: "已归档",
+  draft: "adm.evStatus.draft",
+  scheduled: "adm.evStatus.scheduledShort",
+  active: "adm.evStatus.activeShort",
+  ended: "adm.evStatus.endedShort",
+  archived: "adm.evStatus.archivedShort",
 }
 
 export default function AdminPage() {
+  const { t } = useT()
   const { user } = useAuth()
   const [users, setUsers] = React.useState<AdminUser[]>([])
   const [filter, setFilter] = React.useState("")
@@ -752,7 +754,7 @@ export default function AdminPage() {
       const res = await adminApi.listUsers()
       setUsers(res.users)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载用户失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.1"))
     } finally {
       setLoading(false)
     }
@@ -768,7 +770,7 @@ export default function AdminPage() {
       const res = await adminApi.listInvites()
       setInvites(res.invites)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载邀请码失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.2"))
     } finally {
       setInviteLoading(false)
     }
@@ -782,13 +784,13 @@ export default function AdminPage() {
         maxUses: Number(inviteMax) || 1,
         permissions: invitePerms,
       })
-      toast.success("邀请码已创建")
+      toast.success(t("adm.3"))
       setInviteCode("")
       setInviteMax("1")
       setInviteOpen(false)
       void loadInvites()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "创建失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.4"))
     } finally {
       setInviteBusy(false)
     }
@@ -797,10 +799,10 @@ export default function AdminPage() {
   const handleDeleteInvite = async (invite: AdminInvite) => {
     try {
       await adminApi.deleteInvite(invite.id)
-      toast.success("邀请码已删除")
+      toast.success(t("adm.5"))
       void loadInvites()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.6"))
     }
   }
 
@@ -857,7 +859,7 @@ export default function AdminPage() {
       const res = await donationApi.listAll()
       setDonations(res.donations)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载捐献申请失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.7"))
     } finally {
       setDonationLoading(false)
     }
@@ -884,14 +886,14 @@ export default function AdminPage() {
       toast.success(
         reviewTarget.action === "approve"
           ? `已通过，${reviewTarget.donation.username} 的对应功能已解锁`
-          : "已拒绝，结果已邮件通知申请人"
+          : t("adm.8")
       )
       setReviewTarget(null)
       setReviewNote("")
       await loadDonations()
       notifyAttentionChanged() // 捐献角标当场减一，不用等 60 秒轮询
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.9"))
     } finally {
       setDonationBusy(false)
     }
@@ -903,11 +905,11 @@ export default function AdminPage() {
     // 渠道本身必须保留（里面还有别处来的 Key）—— 所以文案要和 AI 区分开。
     const extra =
       d.type === "ai"
-        ? "，并把它接入中转站的渠道删掉"
+        ? t("adm.10")
         : d.type === "sensenova"
-          ? "，并从商汤渠道里移除这把 Key（渠道本身保留）"
+          ? t("adm.11")
           : d.type === "proxy"
-            ? "，并把它导入节点池的订阅源移出去"
+            ? t("adm.12")
             : ""
     if (!confirm(`撤销「${d.username}」的捐献审核？\n\n撤销后回到待审核；若该捐献授予过权限，会自动收回${extra}。`)) return
     setDonationBusy(true)
@@ -917,13 +919,13 @@ export default function AdminPage() {
       // 商汤通道返回的是一句话说明（已移除 / 没找到那把 Key，请手工处理），
       // 不能笼统地说「渠道已删除」—— 那个渠道是共享的，根本没删。
       if (res.releaseMessage) parts.push(res.releaseMessage.replace(/^（|）$/g, ""))
-      else if (res.releasedChannel) parts.push("中转站渠道已删除")
+      else if (res.releasedChannel) parts.push(t("adm.13"))
       if (res.releasedSubscriptions) parts.push(`已移出 ${res.releasedSubscriptions} 个订阅源`)
       toast.success(parts.join("，"))
       await loadDonations()
       notifyAttentionChanged() // 撤销后回到待审核，捐献角标当场 +1
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.14"))
     } finally {
       setDonationBusy(false)
     }
@@ -940,13 +942,13 @@ export default function AdminPage() {
     try {
       const res = await donationApi.provision(d.id)
       if (res.ok) {
-        toast.success(res.detail ? `渠道已接入：${res.detail}` : "渠道已接入中转站")
+        toast.success(res.detail ? `渠道已接入：${res.detail}` : t("adm.15"))
       } else {
-        toast.error(res.detail || res.message || "接入失败")
+        toast.error(res.detail || res.message || t("adm.16"))
       }
       await loadDonations()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "接入失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.17"))
     } finally {
       setDonationBusy(false)
     }
@@ -961,7 +963,7 @@ export default function AdminPage() {
       else toast.error(res.message)
       await loadDonations()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "补全失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.18"))
     } finally {
       setDonationBusy(false)
     }
@@ -973,10 +975,10 @@ export default function AdminPage() {
     try {
       const res = await donationApi.retryModels(d.id)
       if (res.ok) toast.success(res.message)
-      else toast.error(res.detail || res.message || "重试失败")
+      else toast.error(res.detail || res.message || t("adm.19"))
       await loadDonations()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "重试失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.20"))
     } finally {
       setDonationBusy(false)
     }
@@ -992,7 +994,7 @@ export default function AdminPage() {
       setFrpApps(apps.applications)
       setFrpNodes(nodes.nodes)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.21"))
     } finally {
       setFrpLoading(false)
     }
@@ -1021,7 +1023,7 @@ export default function AdminPage() {
       setFrpReviewNote("")
       await loadFrp()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.22"))
     } finally {
       setFrpBusy(false)
     }
@@ -1032,10 +1034,10 @@ export default function AdminPage() {
     setFrpBusy(true)
     try {
       await adminApi.revokeFrp(app.id)
-      toast.success("已撤销，申请回到待审核")
+      toast.success(t("adm.23"))
       await loadFrp()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "撤销失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.24"))
     } finally {
       setFrpBusy(false)
     }
@@ -1059,11 +1061,11 @@ export default function AdminPage() {
         statusNote: nodeForm.statusNote,
         authMode: nodeForm.authMode as "none" | "token" | "token_user" | "custom",
       })
-      toast.success("节点已保存")
+      toast.success(t("adm.25"))
       setNodeOpen(false)
       await loadFrp()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.26"))
     } finally {
       setFrpBusy(false)
     }
@@ -1072,10 +1074,10 @@ export default function AdminPage() {
   const handleDeleteNode = async (id: string) => {
     try {
       await adminApi.deleteFrpNode(id)
-      toast.success("节点已删除")
+      toast.success(t("adm.27"))
       await loadFrp()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.28"))
     }
   }
 
@@ -1104,7 +1106,7 @@ export default function AdminPage() {
       const res = await adminApi.listProxySubscriptions()
       setProxySubs(res.subscriptions)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载订阅源失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.29"))
     } finally {
       setProxyLoading(false)
     }
@@ -1126,11 +1128,11 @@ export default function AdminPage() {
         sortOrder: Number(proxyForm.sortOrder),
         note: proxyForm.note,
       })
-      toast.success("订阅源已保存")
+      toast.success(t("adm.30"))
       setProxyOpen(false)
       await loadProxy()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.31"))
     } finally {
       setProxyBusy(false)
     }
@@ -1139,10 +1141,10 @@ export default function AdminPage() {
   const handleDeleteProxy = async (id: string) => {
     try {
       await adminApi.deleteProxySubscription(id)
-      toast.success("订阅源已删除")
+      toast.success(t("adm.32"))
       await loadProxy()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.33"))
     }
   }
 
@@ -1154,7 +1156,7 @@ export default function AdminPage() {
       const res = await adminApi.listCommunityPosts({ includeDeleted: communityShowDeleted, user: communityUserFilter || undefined })
       setCommunityPosts(res.posts)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.34"))
     } finally {
       setCommunityLoading(false)
     }
@@ -1163,20 +1165,20 @@ export default function AdminPage() {
   const handleDeleteCommunityPost = async (id: string) => {
     try {
       await adminApi.deleteCommunityPost(id)
-      toast.success("帖子已删除")
+      toast.success(t("adm.35"))
       await loadCommunity()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.36"))
     }
   }
 
   const handleRestoreCommunityPost = async (id: string) => {
     try {
       await adminApi.restoreCommunityPost(id)
-      toast.success("帖子已恢复")
+      toast.success(t("adm.37"))
       await loadCommunity()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "恢复失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.38"))
     }
   }
 
@@ -1310,7 +1312,7 @@ export default function AdminPage() {
       setPostaKey("")
       setBrevoAddInput("")
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载设置失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.39"))
     } finally {
       setSettingsLoading(false)
     }
@@ -1423,10 +1425,10 @@ export default function AdminPage() {
         brevo_sender_email: brevoSenderEmail.trim(),
         brevo_sender_name: brevoSenderName.trim(),
       })
-      toast.success("设置已保存")
+      toast.success(t("adm.40"))
       await loadSettings()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.41"))
     } finally {
       setSettingsBusy(false)
     }
@@ -1447,7 +1449,7 @@ export default function AdminPage() {
       setBrevoKeys(res.mailSecrets?.brevoKeys ?? [])
       return true
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存 Brevo Key 失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.42"))
       return false
     } finally {
       setBrevoBusy(false)
@@ -1460,7 +1462,7 @@ export default function AdminPage() {
       .map((s) => s.trim())
       .filter(Boolean)
     if (added.length === 0) {
-      toast.error("请先填入要添加的 Key")
+      toast.error(t("adm.43"))
       return
     }
     const keep = brevoKeys.map((_, i) => i + 1)
@@ -1472,7 +1474,7 @@ export default function AdminPage() {
 
   const handleRemoveBrevoKey = async (index1Based: number) => {
     const keep = brevoKeys.map((_, i) => i + 1).filter((n) => n !== index1Based)
-    if (await saveBrevoKeys(keep, [])) toast.success("已删除该 Key")
+    if (await saveBrevoKeys(keep, [])) toast.success(t("adm.44"))
   }
 
   const handleSaveQuota = async () => {
@@ -1485,10 +1487,10 @@ export default function AdminPage() {
         maxSubdomains: raw === "" ? null : Number(raw),
       })
       setDetail(res)
-      toast.success("配额已更新")
+      toast.success(t("adm.45"))
       void load()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.46"))
     } finally {
       setBusy(false)
     }
@@ -1503,7 +1505,7 @@ export default function AdminPage() {
       setNewapiCred(res)
       setNewapiUserId(res.adminUserId || "1")
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "读取中转站凭据失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.47"))
     } finally {
       setNewapiCredLoading(false)
     }
@@ -1524,7 +1526,7 @@ export default function AdminPage() {
       const cfg = await wb2apiApi.getConfig()
       setWb2apiConfig(cfg)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "读取反代网关配置失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.48"))
     } finally {
       setWb2apiLoading(false)
     }
@@ -1535,14 +1537,14 @@ export default function AdminPage() {
       const b = await wb2apiApi.listBindings()
       setWb2apiBindings(b.bindings)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "读取绑定列表失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.49"))
       setWb2apiBindings([])
     }
     try {
       const p = await wb2apiApi.getPool()
       setWb2apiPool(p.pool)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "读取网关池失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.50"))
       setWb2apiPool(null)
     }
   }, [])
@@ -1550,17 +1552,17 @@ export default function AdminPage() {
   const handleSaveWb2apiKey = async () => {
     const key = wb2apiNewKey.trim()
     if (!key) {
-      toast.error("请粘贴反代网关面板的访问密钥")
+      toast.error(t("adm.51"))
       return
     }
     setWb2apiBusy(true)
     try {
       const res = await wb2apiApi.saveConfig(key)
       setWb2apiNewKey("") // 明文用完即弃，不留内存
-      toast.success(res.message || "密钥已更新并生效")
+      toast.success(res.message || t("adm.52"))
       void loadWb2api()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "密钥验证失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.53"))
     } finally {
       setWb2apiBusy(false)
     }
@@ -1574,8 +1576,8 @@ export default function AdminPage() {
       const res = await wb2apiApi.removeBinding(b.id, wb2apiRevokeAi)
       toast.success(
         res.aiRevoked
-          ? "已移除绑定，并收回了该用户的 AI 权限"
-          : "已移除绑定（保留其 AI 权限）"
+          ? t("adm.54")
+          : t("adm.55")
       )
       if (res.upstreamWarning) {
         toast.warning(`网关侧移除失败：${res.upstreamWarning}`)
@@ -1583,7 +1585,7 @@ export default function AdminPage() {
       setWb2apiRemoving(null)
       void loadWb2api()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "移除失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.56"))
     } finally {
       setWb2apiBusy(false)
     }
@@ -1597,7 +1599,7 @@ export default function AdminPage() {
       const cfg = await cli2apiApi.getConfig()
       setCli2apiConfig(cfg)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "读取 CLI2API 配置失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.57"))
     } finally {
       setCli2apiLoading(false)
     }
@@ -1605,14 +1607,14 @@ export default function AdminPage() {
       const b = await cli2apiApi.listBindings()
       setCli2apiBindings(b.bindings)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "读取 CLI2API 绑定列表失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.58"))
       setCli2apiBindings([])
     }
     try {
       const p = await cli2apiApi.getPool()
       setCli2apiPool(p)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "读取 CLI2API 账号池失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.59"))
       setCli2apiPool(null)
     }
   }, [])
@@ -1620,17 +1622,17 @@ export default function AdminPage() {
   const handleSaveCli2apiKey = async () => {
     const key = cli2apiNewKey.trim()
     if (!key) {
-      toast.error("请粘贴 CLI2API 的 console key")
+      toast.error(t("adm.60"))
       return
     }
     setCli2apiBusy(true)
     try {
       await cli2apiApi.saveConfig(key)
       setCli2apiNewKey("")
-      toast.success("console key 已更新并生效")
+      toast.success(t("adm.61"))
       void loadCli2api()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "console key 验证失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.62"))
     } finally {
       setCli2apiBusy(false)
     }
@@ -1644,8 +1646,8 @@ export default function AdminPage() {
       const res = await cli2apiApi.removeBinding(b.id, cli2apiRevokeAi)
       toast.success(
         res.aiRevoked
-          ? "已移除绑定，并收回了该用户的 AI 权限"
-          : "已移除绑定（保留其 AI 权限）"
+          ? t("adm.63")
+          : t("adm.64")
       )
       if (res.upstreamWarning) {
         toast.warning(`上游删除失败：${res.upstreamWarning}`)
@@ -1653,7 +1655,7 @@ export default function AdminPage() {
       setCli2apiRemoving(null)
       void loadCli2api()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "移除失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.65"))
     } finally {
       setCli2apiBusy(false)
     }
@@ -1662,7 +1664,7 @@ export default function AdminPage() {
   const handleUpdateNewApiToken = async () => {
     const token = newapiNewToken.trim()
     if (!token) {
-      toast.error("请粘贴 NewAPI 的新访问令牌")
+      toast.error(t("adm.66"))
       return
     }
     setNewapiCredBusy(true)
@@ -1681,10 +1683,10 @@ export default function AdminPage() {
           : prev
       )
       setNewapiNewToken("") // 明文用完即弃，不留内存
-      toast.success(res.message || "令牌已更新并生效")
+      toast.success(res.message || t("adm.67"))
       void loadNewApiConfig()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "令牌验证失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.68"))
     } finally {
       setNewapiCredBusy(false)
     }
@@ -1700,12 +1702,12 @@ export default function AdminPage() {
     setPermBusy(true)
     try {
       await adminApi.updateInvite(permInvite.id, { permissions: permDraft })
-      toast.success("权限已更新（只影响之后注册的新账号）")
+      toast.success(t("adm.69"))
       setPermInvite(null)
       setPermDraft(null)
       void loadInvites()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.70"))
     } finally {
       setPermBusy(false)
     }
@@ -1716,7 +1718,7 @@ export default function AdminPage() {
     try {
       setInviteQuotas(await adminApi.listInviteQuotas())
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载额度失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.71"))
     } finally {
       setInviteQuotaLoading(false)
     }
@@ -1727,7 +1729,7 @@ export default function AdminPage() {
     try {
       setQuotaDetail(await adminApi.getUserInviteQuota(username))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载详情失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.72"))
     } finally {
       setQuotaDetailBusy(false)
     }
@@ -1744,10 +1746,10 @@ export default function AdminPage() {
     try {
       const res = await adminApi.updateUserInviteQuota(username, payload)
       setQuotaDetail(res)
-      toast.success("额度已更新")
+      toast.success(t("adm.73"))
       void loadInviteQuotas()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "更新失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.74"))
     } finally {
       setQuotaDetailBusy(false)
     }
@@ -1768,7 +1770,7 @@ export default function AdminPage() {
           .filter(Boolean)
       )
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载保留名失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.75"))
     } finally {
       setReservedLoading(false)
     }
@@ -1785,9 +1787,9 @@ export default function AdminPage() {
       setReserved(res.reserved)
       setReservedName("")
       setReservedNote("")
-      toast.success("已加入保留列表")
+      toast.success(t("adm.76"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "添加失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.77"))
     } finally {
       setReservedBusy(false)
     }
@@ -1799,7 +1801,7 @@ export default function AdminPage() {
       setReserved(res.reserved)
       toast.success(`已取消保留 ${name}`)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "移除失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.78"))
     }
   }
 
@@ -1809,9 +1811,9 @@ export default function AdminPage() {
     try {
       await adminApi.updateSettings({ reserved_nicknames: next.join(",") })
       setNickReserved(next)
-      toast.success("保留词已更新")
+      toast.success(t("adm.79"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.80"))
     } finally {
       setNickReservedBusy(false)
     }
@@ -1820,7 +1822,7 @@ export default function AdminPage() {
     const w = nickReservedInput.trim()
     if (!w) return
     if (nickReserved.some((x) => x.toLowerCase() === w.toLowerCase())) {
-      toast.error("该保留词已存在")
+      toast.error(t("adm.81"))
       return
     }
     await saveNickReserved([...nickReserved, w])
@@ -1837,7 +1839,7 @@ export default function AdminPage() {
       const res = await announcementApi.listAll()
       setAnnouncements(res.announcements)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载公告失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.82"))
     } finally {
       setAnnouncementLoading(false)
     }
@@ -1875,7 +1877,7 @@ export default function AdminPage() {
   const handleSaveAnnouncement = async () => {
     if (!annDraft.title.trim() || !annDraft.body.trim()) return
     if (annDraft.status === "scheduled" && !annDraft.publishAt) {
-      toast.error("定时发布需要选择发布时间")
+      toast.error(t("adm.83"))
       return
     }
     setAnnouncementBusy(true)
@@ -1899,16 +1901,16 @@ export default function AdminPage() {
       if (res.queued) {
         toast.success(`已排入邮件队列（${res.queued} 个收件人），后台正在分批发送`)
       } else if (annDraft.status === "draft") {
-        toast.success("已存为草稿")
+        toast.success(t("adm.84"))
       } else if (annDraft.status === "scheduled") {
         toast.success(`已设置定时发布（${new Date(fromLocalInput(annDraft.publishAt)!).toLocaleString("zh-CN")}）`)
       } else {
-        toast.success(annDraft.id ? "已更新" : "已发布")
+        toast.success(annDraft.id ? t("adm.85") : t("adm.86"))
       }
       setAnnouncementOpen(false)
       void loadAnnouncements()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.87"))
     } finally {
       setAnnouncementBusy(false)
     }
@@ -1918,9 +1920,9 @@ export default function AdminPage() {
     try {
       await announcementApi.remove(id)
       void loadAnnouncements()
-      toast.success("已删除")
+      toast.success(t("adm.88"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.89"))
     }
   }
 
@@ -1934,13 +1936,13 @@ export default function AdminPage() {
     try {
       const res = await announcementApi.resendFailed(a.id)
       if (res.requeued === 0) {
-        toast.info("没有需要重发的失败邮件")
+        toast.info(t("adm.90"))
       } else {
         toast.success(`已重新排入队列（${res.requeued} 封），后台正在发送`)
       }
       void loadAnnouncements()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "重发失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.91"))
     }
   }
 
@@ -1951,7 +1953,7 @@ export default function AdminPage() {
       const res = await adminEventApi.list()
       setEvents(res.events)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载活动失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.92"))
     } finally {
       setEventLoading(false)
     }
@@ -1992,15 +1994,15 @@ export default function AdminPage() {
 
   const handleSaveEvent = async () => {
     if (!eventDraft.title.trim() || !eventDraft.body.trim()) {
-      toast.error("标题和正文不能为空")
+      toast.error(t("adm.93"))
       return
     }
     if (eventDraft.status === "scheduled" && !eventDraft.publishAt) {
-      toast.error("定时发布需要选择上线时间")
+      toast.error(t("adm.94"))
       return
     }
     if (eventDraft.maxClaims.trim() !== "" && !(Number(eventDraft.maxClaims) >= 1)) {
-      toast.error("限量总份数需为不小于 1 的整数（留空 = 不限量）")
+      toast.error(t("adm.95"))
       return
     }
     setEventBusy(true)
@@ -2011,15 +2013,15 @@ export default function AdminPage() {
         : await adminEventApi.create(payload)
       toast.success(
         eventDraft.id
-          ? "已更新"
+          ? t("adm.96")
           : res.inserted > 0
             ? `已发布，推送给 ${res.inserted} 个用户`
-            : "已保存为草稿"
+            : t("adm.97")
       )
       setEventOpen(false)
       void loadEvents()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.98"))
     } finally {
       setEventBusy(false)
     }
@@ -2030,9 +2032,9 @@ export default function AdminPage() {
     try {
       await adminEventApi.remove(ev.id)
       void loadEvents()
-      toast.success("已删除")
+      toast.success(t("adm.99"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.100"))
     }
   }
 
@@ -2059,7 +2061,7 @@ export default function AdminPage() {
       )
       void loadEvents()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "开奖失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.101"))
     } finally {
       setEventBusy(false)
     }
@@ -2073,7 +2075,7 @@ export default function AdminPage() {
       const res = await adminEventApi.claims(ev.id)
       setClaims(res.claims)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载领取名单失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.102"))
       setClaims([])
     } finally {
       setClaimsLoading(false)
@@ -2084,12 +2086,12 @@ export default function AdminPage() {
     if (!claimsEvent) return
     try {
       await adminEventApi.grant(claimsEvent.id, claim.id)
-      toast.success("已标记为已发放")
+      toast.success(t("adm.103"))
       const res = await adminEventApi.claims(claimsEvent.id)
       setClaims(res.claims)
       notifyAttentionChanged() // 活动角标当场减一，不用等 60 秒轮询
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.104"))
     }
   }
 
@@ -2114,7 +2116,7 @@ export default function AdminPage() {
       )
       setR2Ops(ops)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载 R2 桶失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.105"))
     } finally {
       setR2Loading(false)
     }
@@ -2202,8 +2204,8 @@ export default function AdminPage() {
     if (!r2Draft.name.trim() || !r2Draft.endpoint.trim() || !r2Draft.bucketName.trim()) {
       toast.error(
         r2Pick || r2EditId
-          ? "名称不能为空"
-          : "请先从上方选择一个桶（或展开「高级选项」手动填写端点与桶名）"
+          ? t("adm.106")
+          : t("adm.107")
       )
       return
     }
@@ -2228,10 +2230,10 @@ export default function AdminPage() {
           ...(r2Draft.secretAccessKey ? { secretAccessKey: r2Draft.secretAccessKey } : {}),
           ...(r2Draft.analyticsToken ? { analyticsToken: r2Draft.analyticsToken } : {}),
         })
-        toast.success("已更新")
+        toast.success(t("adm.108"))
       } else {
         if (!r2Draft.id.trim()) {
-          toast.error("新建时必须填 id")
+          toast.error(t("adm.109"))
           setR2Busy(false)
           return
         }
@@ -2243,12 +2245,12 @@ export default function AdminPage() {
           secretAccessKey: r2Draft.secretAccessKey,
           ...(r2Draft.analyticsToken ? { analyticsToken: r2Draft.analyticsToken } : {}),
         })
-        toast.success("已创建")
+        toast.success(t("adm.110"))
       }
       setR2BucketOpen(false)
       void loadR2()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.111"))
     } finally {
       setR2Busy(false)
     }
@@ -2259,19 +2261,19 @@ export default function AdminPage() {
     try {
       await r2AdminApi.remove(id)
       void loadR2()
-      toast.success("已删除")
+      toast.success(t("adm.112"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.113"))
     }
   }
 
   const handleTestR2Bucket = async (id: string, write: boolean) => {
     try {
       const res = write ? await r2AdminApi.writeTest(id) : await r2AdminApi.test(id)
-      if (res.ok) toast.success(res.message ?? "连通正常")
-      else toast.error(res.error ?? "测试失败")
+      if (res.ok) toast.success(res.message ?? t("adm.114"))
+      else toast.error(res.error ?? t("adm.115"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "测试失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.116"))
     }
   }
 
@@ -2285,7 +2287,7 @@ export default function AdminPage() {
     const raw = bucketMaxDraft[bucketId]
     const n = Math.trunc(Number(raw))
     if (!Number.isFinite(n) || n < 1) {
-      toast.error("人数上限至少为 1")
+      toast.error(t("adm.117"))
       return
     }
     setBucketMaxBusy(bucketId)
@@ -2298,9 +2300,9 @@ export default function AdminPage() {
         return next
       })
       await loadR2()
-      toast.success("已更新人数上限")
+      toast.success(t("adm.118"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "更新失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.119"))
     } finally {
       setBucketMaxBusy(null)
     }
@@ -2310,9 +2312,9 @@ export default function AdminPage() {
     try {
       await r2AdminApi.assign(username, bucketId)
       void loadR2()
-      toast.success(`已把 ${username} 改派到 ${bucketId || "默认桶"}`)
+      toast.success(`已把 ${username} 改派到 ${bucketId || t("adm.120")}`)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "改派失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.121"))
     }
   }
 
@@ -2338,12 +2340,12 @@ export default function AdminPage() {
             void loadR2()
             toast.success(`已强制迁入 ${res.moved} 个用户`)
           } catch (e2) {
-            toast.error(e2 instanceof HttpError ? e2.message : "迁移失败")
+            toast.error(e2 instanceof HttpError ? e2.message : t("adm.122"))
           }
         }
         return
       }
-      toast.error(err instanceof HttpError ? err.message : "迁移失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.123"))
     }
   }
 
@@ -2356,7 +2358,7 @@ export default function AdminPage() {
       )
       await loadSettings()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "重算失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.124"))
     } finally {
       setSettingsBusy(false)
     }
@@ -2391,7 +2393,7 @@ export default function AdminPage() {
       )
       setDetailUser(username)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载详情失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.125"))
     } finally {
       setBusy(false)
     }
@@ -2406,10 +2408,10 @@ export default function AdminPage() {
         nickname: nickDraft.trim() === "" ? null : nickDraft.trim(),
       })
       setDetail(res)
-      toast.success(nickDraft.trim() === "" ? "昵称已清空" : "昵称已更新")
+      toast.success(nickDraft.trim() === "" ? t("adm.126") : t("adm.127"))
       void load()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.128"))
     } finally {
       setBusy(false)
     }
@@ -2425,7 +2427,7 @@ export default function AdminPage() {
     if (!detail?.storage) return
     const mb = Number(storageQuotaMbDraft)
     if (!Number.isFinite(mb) || mb <= 0) {
-      toast.error("配额必须是不小于 0 的数字（MB）")
+      toast.error(t("adm.129"))
       return
     }
     const bytes = Math.round(mb * 1024 * 1024)
@@ -2445,9 +2447,9 @@ export default function AdminPage() {
       await adminApi.updateStorageQuota(detail.user.username, bytes)
       const res = await adminApi.getUser(detail.user.username)
       setDetail(res)
-      toast.success("网盘配额已更新")
+      toast.success(t("adm.130"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.131"))
     } finally {
       setStorageQuotaBusy(false)
     }
@@ -2461,7 +2463,7 @@ export default function AdminPage() {
   const handleSyncStorageQuota = async () => {
     const buckets = (r2Data?.buckets ?? []).filter((b) => b.kind !== "platform")
     if (buckets.length === 0) {
-      toast.error("还没有用户网盘桶 —— 先去「直链网盘」标签添加")
+      toast.error(t("adm.132"))
       return
     }
     // 预览要跟后端口径一致：管理员被跳过，不能列进「会被改成多少」里误导站长
@@ -2511,7 +2513,7 @@ export default function AdminPage() {
       )
       await loadR2()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "同步失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.133"))
     } finally {
       setSyncQuotaBusy(false)
     }
@@ -2528,9 +2530,9 @@ export default function AdminPage() {
       const res = await adminApi.updateUser(detail.user.username, { [field]: value })
       setDetail(res)
       const label = field === "emailVerified" ? "邮箱验证" : "通知邮件"
-      toast.success(`${label}已${value ? "开启" : "关闭"}`)
+      toast.success(`${label}已${value ? t("adm.134") : t("adm.135")}`)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.136"))
     } finally {
       setBusy(false)
     }
@@ -2543,10 +2545,10 @@ export default function AdminPage() {
     try {
       const res = await adminApi.updateUser(detail.user.username, { role: nextRole })
       setDetail(res)
-      toast.success(nextRole === "admin" ? "已设为管理员" : "已降为普通用户")
+      toast.success(nextRole === "admin" ? t("adm.137") : t("adm.138"))
       void load()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.139"))
     } finally {
       setBusy(false)
     }
@@ -2559,10 +2561,10 @@ export default function AdminPage() {
         status: currentStatus === "suspended" ? "active" : "suspended",
       })
       setDetail(res)
-      toast.success(res.user.status === "suspended" ? "已封禁" : "已解封")
+      toast.success(res.user.status === "suspended" ? t("adm.140") : t("adm.141"))
       void load()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.142"))
     } finally {
       setBusy(false)
     }
@@ -2591,7 +2593,7 @@ export default function AdminPage() {
       )
       if (res.errors.length) console.warn("中转站对齐出错：", res.errors)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.143"))
     } finally {
       setNewapiSyncBusy(false)
     }
@@ -2612,7 +2614,7 @@ export default function AdminPage() {
       )
       void load()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.144"))
     } finally {
       setBusy(false)
     }
@@ -2625,12 +2627,12 @@ export default function AdminPage() {
     setBusy(true)
     try {
       await adminApi.deleteUser(u.username)
-      toast.success("用户已删除")
+      toast.success(t("adm.145"))
       setDetail(null)
       setDetailUser("")
       void load()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.146"))
     } finally {
       setBusy(false)
     }
@@ -2642,7 +2644,7 @@ export default function AdminPage() {
       const res = await adminApi.getUserMessage(detailUser, messageId)
       setOpenedMessage(res.message)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载邮件失败")
+      toast.error(err instanceof HttpError ? err.message : t("adm.147"))
     }
   }
 
@@ -2839,7 +2841,7 @@ export default function AdminPage() {
                           <Badge variant="destructive">管理员删除</Badge>
                         )}
                         <span className="text-xs">
-                          注销于 {u.deletedAt ? fmtTime(u.deletedAt) : "未知"}
+                          注销于 {u.deletedAt ? fmtTime(u.deletedAt) : t("adm.148")}
                         </span>
                       </div>
                     </TableCell>
@@ -2878,7 +2880,7 @@ export default function AdminPage() {
                             <p className="text-muted-foreground">
                               {u.inviteCreatedAt
                                 ? fmtTime(u.inviteCreatedAt)
-                                : "时间未知"}
+                                : t("adm.149")}
                             </p>
                           </TooltipContent>
                         </Tooltip>
@@ -3210,10 +3212,10 @@ export default function AdminPage() {
                               className="ml-2"
                             >
                               {a.status === "pending"
-                                ? "待审核"
+                                ? t("adm.150")
                                 : a.status === "approved"
-                                  ? "已通过"
-                                  : "已拒绝"}
+                                  ? t("adm.151")
+                                  : t("adm.152")}
                             </Badge>
                           </p>
                           <p className="text-xs text-muted-foreground">
@@ -3394,8 +3396,8 @@ export default function AdminPage() {
                   rows={3}
                   placeholder={
                     frpReviewTarget?.action === "reject"
-                      ? "例如：端口冲突请重选 / 请确认用途后重新提交"
-                      : "例如：已在 frps-panel 建号"
+                      ? t("adm.153")
+                      : t("adm.154")
                   }
                   value={frpReviewNote}
                   onChange={(e) => setFrpReviewNote(e.target.value)}
@@ -3897,26 +3899,26 @@ export default function AdminPage() {
                           className="ml-2"
                         >
                           {d.status === "pending"
-                            ? "待审核"
+                            ? t("adm.155")
                             : d.status === "approved"
                               ? d.autoReviewed
-                                ? "自动通过"
-                                : "已通过"
+                                ? t("adm.156")
+                                : t("adm.157")
                               : d.status === "revoked"
-                                ? "已失效·已收回"
+                                ? t("adm.158")
                                 : d.autoReviewed
-                                  ? "自动拒绝"
-                                  : "已拒绝"}
+                                  ? t("adm.159")
+                                  : t("adm.160")}
                         </Badge>
                       </p>
                       <DonationDetail type={d.type} payload={d.payload} />
                       {(d.type === "ai" || d.type === "sensenova") && (
                         <p className="text-xs text-muted-foreground">
                           {d.status === "revoked"
-                            ? "已从渠道移除（资源失效）"
+                            ? t("adm.161")
                             : d.channelId !== null && d.channelId !== undefined
                               ? `中转站渠道 #${d.channelId} 已接入`
-                              : "尚未接入中转站渠道"}
+                              : t("adm.162")}
                           {d.autoReviewed && " · 本次为系统自动审核"}
                         </p>
                       )}
@@ -4096,8 +4098,8 @@ export default function AdminPage() {
                 <DialogDescription>
                   用户「{reviewTarget?.donation.username}」的捐献
                   {reviewTarget?.action === "approve"
-                    ? "将通过并解锁对应功能。"
-                    : "将被拒绝。"}
+                    ? t("adm.163")
+                    : t("adm.164")}
                   {reviewTarget?.action === "approve" &&
                     reviewTarget.donation.type === "ai" &&
                     (reviewTarget.donation.channelId === null ||
@@ -4114,8 +4116,8 @@ export default function AdminPage() {
                   rows={3}
                   placeholder={
                     reviewTarget?.action === "reject"
-                      ? "例如：渠道已失效 / 订阅链接无法使用，请更换后重新提交"
-                      : "例如：渠道已验证可用，已为你开通"
+                      ? t("adm.165")
+                      : t("adm.166")
                   }
                   value={reviewNote}
                   onChange={(e) => setReviewNote(e.target.value)}
@@ -4303,8 +4305,8 @@ export default function AdminPage() {
                         <p className="flex items-center gap-1 text-xs text-muted-foreground">
                           <Clock className="h-3 w-3" />
                           {ev.startsAt || ev.endsAt
-                            ? `${ev.startsAt ? new Date(ev.startsAt).toLocaleString("zh-CN") : "不限"} 至 ${ev.endsAt ? new Date(ev.endsAt).toLocaleString("zh-CN") : "不限"}`
-                            : "长期有效"}
+                            ? `${ev.startsAt ? new Date(ev.startsAt).toLocaleString("zh-CN") : t("adm.167")} 至 ${ev.endsAt ? new Date(ev.endsAt).toLocaleString("zh-CN") : t("adm.168")}`
+                            : t("adm.169")}
                         </p>
                       </div>
                       <div className="flex shrink-0 items-center gap-1">
@@ -5306,10 +5308,10 @@ export default function AdminPage() {
                         }
                       >
                         {wb2apiConfig?.source === "db"
-                          ? "已在线配置"
+                          ? t("adm.170")
                           : wb2apiConfig?.source === "env"
-                            ? "来自环境变量"
-                            : "未配置"}
+                            ? t("adm.171")
+                            : t("adm.172")}
                       </Badge>
                       <span className="font-mono text-xs text-muted-foreground">
                         {wb2apiConfig?.maskedApiKey ?? "（无）"}
@@ -5609,10 +5611,10 @@ export default function AdminPage() {
                         }
                       >
                         {cli2apiConfig?.source === "db"
-                          ? "已在线配置"
+                          ? t("adm.173")
                           : cli2apiConfig?.source === "env"
-                            ? "来自环境变量"
-                            : "未配置"}
+                            ? t("adm.174")
+                            : t("adm.175")}
                       </Badge>
                       <span className="font-mono text-xs text-muted-foreground">
                         {cli2apiConfig?.maskedKey ?? "（无）"}
@@ -6205,8 +6207,8 @@ export default function AdminPage() {
                       <p className="text-sm font-medium">开放注册（无需邀请码）</p>
                       <p className="text-xs text-muted-foreground">
                         {openRegistration
-                          ? "已开放：注册页不再要求邀请码，并展示「限时开放」横幅"
-                          : "已关闭：注册必须提供邀请码"}
+                          ? t("adm.176")
+                          : t("adm.177")}
                       </p>
                     </div>
                     <Switch
@@ -6255,8 +6257,8 @@ export default function AdminPage() {
                         </p>
                         <p className="text-xs text-muted-foreground">
                           {inviteBasic[f]
-                            ? "基础权限：创建邀请码时人人可勾选，不消耗模块额度"
-                            : "受限模式：勾选需消耗模块额度（捐献获批或管理员发放）"}
+                            ? t("adm.178")
+                            : t("adm.179")}
                         </p>
                       </div>
                       <Switch
@@ -6293,8 +6295,8 @@ export default function AdminPage() {
                         </p>
                         <p className="text-xs text-muted-foreground">
                           {openFeatures[f]
-                            ? "已开放：任何人都能访问与启用，不检查该模块权限"
-                            : "按权限卡：需拥有该模块权限才能访问（管理员不受限）"}
+                            ? t("adm.180")
+                            : t("adm.181")}
                         </p>
                       </div>
                       <Switch
@@ -6332,10 +6334,10 @@ export default function AdminPage() {
                         </p>
                         <p className="text-xs text-muted-foreground">
                           {f === "ai"
-                            ? "自动探测上游 + 逐个测模型，只留可用的；全不可用则自动拒绝"
+                            ? t("adm.182")
                             : f === "proxy"
-                              ? "逐个真实拉取订阅链接，能解析出节点的才导入；全无效则自动拒绝"
-                              : "仅校验 config.yml 的语法与必填字段（frpc↔frps 是私有 TCP 协议，Worker 只能发 HTTP，验证不了连通性）"}
+                              ? t("adm.183")
+                              : t("adm.184")}
                         </p>
                       </div>
                       <Switch
@@ -7099,14 +7101,14 @@ export default function AdminPage() {
                               onClick={async () => {
                                 try {
                                   await adminApi.deleteInvite(inv.id)
-                                  toast.success("已删除")
+                                  toast.success(t("adm.185"))
                                   void openQuotaDetail(quotaDetail.username)
                                   void loadInviteQuotas()
                                 } catch (err) {
                                   toast.error(
                                     err instanceof HttpError
                                       ? err.message
-                                      : "删除失败"
+                                      : t("adm.186")
                                   )
                                 }
                               }}
@@ -7325,12 +7327,12 @@ export default function AdminPage() {
             <Button onClick={() => void handleSaveAnnouncement()} disabled={announcementBusy}>
               {announcementBusy && <Loader2 className="h-4 w-4 animate-spin" />}
               {annDraft.status === "draft"
-                ? "保存草稿"
+                ? t("adm.187")
                 : annDraft.status === "scheduled"
-                  ? "设置定时"
+                  ? t("adm.188")
                   : annDraft.id
-                    ? "保存"
-                    : "发布"}
+                    ? t("adm.189")
+                    : t("adm.190")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -7513,10 +7515,10 @@ export default function AdminPage() {
                       <>
                         <Label htmlFor="evAmount">
                           {eventDraft.rewardType === "newapi_quota"
-                            ? "钱包余额（元）"
+                            ? t("adm.191")
                             : eventDraft.rewardType === "points"
-                              ? "积分数量"
-                              : "邀请码额度个数"}
+                              ? t("adm.192")
+                              : t("adm.193")}
                         </Label>
                         <Input
                           id="evAmount"
@@ -7565,8 +7567,8 @@ export default function AdminPage() {
             <div className="space-y-2">
               <Label htmlFor="evMaxClaims">
                 {eventDraft.conditionType === "lottery"
-                  ? "参与人数上限（留空 = 不限）"
-                  : "限量总份数（留空 = 不限量）"}
+                  ? t("adm.194")
+                  : t("adm.195")}
               </Label>
               <Input
                 id="evMaxClaims"
@@ -7578,8 +7580,8 @@ export default function AdminPage() {
               />
               <p className="text-xs text-muted-foreground">
                 {eventDraft.conditionType === "lottery"
-                  ? "最多接受多少人报名，报满后其他人看到「参与人数已满」。留空则不限制。"
-                  : "先到先得：活动总共只发这么多份，领满即止，其余用户会看到「名额已满」。留空则不限制。"}
+                  ? t("adm.196")
+                  : t("adm.197")}
               </p>
             </div>
 
@@ -7737,12 +7739,12 @@ export default function AdminPage() {
             <Button onClick={() => void handleSaveEvent()} disabled={eventBusy}>
               {eventBusy && <Loader2 className="h-4 w-4 animate-spin" />}
               {eventDraft.status === "draft"
-                ? "保存草稿"
+                ? t("adm.198")
                 : eventDraft.status === "scheduled"
-                  ? "设置定时"
+                  ? t("adm.199")
                   : eventDraft.id
-                    ? "保存"
-                    : "发布"}
+                    ? t("adm.200")
+                    : t("adm.201")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -7791,14 +7793,14 @@ export default function AdminPage() {
                         }
                       >
                         {c.rewardStatus === "granted"
-                          ? "已发放"
+                          ? t("adm.202")
                           : c.rewardStatus === "failed"
-                            ? "发放失败"
+                            ? t("adm.203")
                             : c.rewardStatus === "manual"
-                              ? "待人工发放"
+                              ? t("adm.204")
                               : c.rewardStatus === "lost"
-                                ? "未中奖"
-                                : "处理中"}
+                                ? t("adm.205")
+                                : t("adm.206")}
                       </Badge>
                       {c.rewardDetail && (
                         <p className="mt-0.5 text-xs text-muted-foreground">{c.rewardDetail}</p>
@@ -7832,8 +7834,8 @@ export default function AdminPage() {
             <DialogTitle>{r2EditId ? "编辑 R2 桶" : "添加 R2 桶"}</DialogTitle>
             <DialogDescription>
               {r2EditId
-                ? "凭据与端点一般无需改动，通常只调人数上限与每人配额。"
-                : "直接选一个桶即可 —— 端点、账户 ID 会自动填好，凭据用全局 token 无需填写。"}
+                ? t("adm.207")
+                : t("adm.208")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -7893,8 +7895,8 @@ export default function AdminPage() {
               </Select>
               <p className="text-xs text-muted-foreground">
                 {r2Draft.kind === "platform"
-                  ? "平台数据桶只应有一个：存 profiles/（名片头像/背景/音乐）与 temporary/（分享箱）。不参与用户分配、不占用户配额。"
-                  : "用户网盘桶：存 <用户名>/ 前缀的文件，新用户开通时自动分配到人数最少的桶。"}
+                  ? t("adm.209")
+                  : t("adm.210")}
               </p>
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -8123,8 +8125,8 @@ export default function AdminPage() {
                         </p>
                         <p className="text-xs text-muted-foreground">
                           {detail.user.role === "root"
-                            ? "站长拥有全部权限，不可被其它角色修改"
-                            : "设为管理员后可使用整个管理面板"}
+                            ? t("adm.211")
+                            : t("adm.212")}
                         </p>
                       </div>
                       <Switch
