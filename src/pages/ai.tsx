@@ -59,6 +59,7 @@ import {
 } from "@/components/ui/tooltip"
 import { newapiApi, HttpError } from "@/services/api"
 import { fmtTime } from "@/lib/format"
+import { useT, tStatic } from "@/i18n"
 import type {
   NewApiHealth,
   NewApiKey,
@@ -70,6 +71,7 @@ import type {
 
 /** 中转站在线/离线徽章，含延迟与版本 */
 function HealthBadge({ health }: { health?: NewApiHealth }) {
+  const { t } = useT()
   if (!health) return null
   return (
     <div className="flex items-center gap-2">
@@ -79,7 +81,7 @@ function HealthBadge({ health }: { health?: NewApiHealth }) {
             health.online ? "bg-emerald-500" : "bg-destructive"
           }`}
         />
-        {health.online ? "在线" : "离线"}
+        {health.online ? t("ai.online") : t("ai.offline")}
       </Badge>
       {health.online && (
         <span className="text-xs text-muted-foreground">
@@ -102,9 +104,10 @@ function RecommendedModels({
   tiers: RecommendedTier[]
   onCopy: (model: string) => void
 }) {
+  const { t } = useT()
   return (
     <div className="space-y-1">
-      {tiers.map((t, i) => {
+      {tiers.map((tier, i) => {
         // 颜色随梯队递减：第一梯队最醒目，越往后越淡
         const tone =
           i === 0
@@ -113,7 +116,7 @@ function RecommendedModels({
               ? "border-border bg-muted/40"
               : "border-border bg-muted/20"
         return (
-          <React.Fragment key={`${t.tier}-${i}`}>
+          <React.Fragment key={`${tier.tier}-${i}`}>
             <div className={`rounded-lg border p-3.5 ${tone}`}>
               <div className="flex flex-wrap items-center gap-2">
                 <span
@@ -125,22 +128,22 @@ function RecommendedModels({
                 >
                   {i + 1}
                 </span>
-                <span className="text-sm font-semibold">{t.tier}</span>
+                <span className="text-sm font-semibold">{tier.tier}</span>
                 <Badge variant="secondary" className="text-xs">
-                  {t.models.length} 个
+                  {t("ai.modelCount", { n: tier.models.length })}
                 </Badge>
               </div>
-              {t.desc && (
-                <p className="mt-1.5 pl-7 text-xs text-muted-foreground">{t.desc}</p>
+              {tier.desc && (
+                <p className="mt-1.5 pl-7 text-xs text-muted-foreground">{tier.desc}</p>
               )}
               <div className="mt-2.5 flex flex-wrap gap-1.5 pl-7">
-                {t.models.map((m) => (
+                {tier.models.map((m) => (
                   <Badge
                     key={m}
                     variant="outline"
                     className="cursor-pointer bg-background font-mono text-xs"
                     onClick={() => onCopy(m)}
-                    title="点击复制模型名"
+                    title={t("ai.clickCopyModel")}
                   >
                     {m}
                   </Badge>
@@ -168,11 +171,17 @@ function formatResetTime(ts: number): string {
   const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(
     d.getMinutes()
   ).padStart(2, "0")}`
-  if (isToday) return `今天 ${hhmm}`
+  if (isToday) return tStatic("ai.time.today", { time: hhmm })
   const tomorrow = new Date(now)
   tomorrow.setDate(now.getDate() + 1)
-  if (d.toDateString() === tomorrow.toDateString()) return `明天 ${hhmm}`
-  return `${d.getMonth() + 1}月${d.getDate()}日 ${hhmm}`
+  if (d.toDateString() === tomorrow.toDateString()) {
+    return tStatic("ai.time.tomorrow", { time: hhmm })
+  }
+  return tStatic("ai.time.date", {
+    month: d.getMonth() + 1,
+    day: d.getDate(),
+    time: hhmm,
+  })
 }
 
 /** NewAPI quota 单位 → 站点金额（换算率由服务端下发，见 status.quotaPerUnit） */
@@ -186,7 +195,11 @@ function formatExpiry(ts: number): string {
   if (!ts) return "—"
   const d = new Date(ts * 1000)
   if (Number.isNaN(d.getTime())) return "—"
-  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`
+  return tStatic("ai.time.fullDate", {
+    year: d.getFullYear(),
+    month: d.getMonth() + 1,
+    day: d.getDate(),
+  })
 }
 
 /**
@@ -236,6 +249,7 @@ function RewardSubscriptionsCard({
   )
   // 有效期取最晚的一张：表示「这份额度最迟什么时候失效」
   const expiry = groups.reduce((max, g) => Math.max(max, g.endTime), 0)
+  const { t } = useT()
   const [infoOpen, setInfoOpen] = React.useState(false)
 
   return (
@@ -243,39 +257,35 @@ function RewardSubscriptionsCard({
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           <Wallet className="h-4 w-4 text-muted-foreground" />
-          其他订阅
+          {t("ai.rewards.title")}
           <button
             type="button"
             onClick={() => setInfoOpen(true)}
             className="rounded-full text-muted-foreground transition-colors hover:text-foreground"
-            title="其他订阅是什么？"
+            title={t("ai.rewards.why")}
           >
             <Info className="h-4 w-4" />
           </button>
         </CardTitle>
-        <CardDescription>
-          通过邀请好友、完成成就等获得的额外额度，与免费订阅叠加使用 ——
-          消费时逐张接力，互不浪费。
-        </CardDescription>
+        <CardDescription>{t("ai.rewards.desc")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {groups.length === 0 ? (
           <div className="space-y-3">
             <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-              还没有额外订阅额度。邀请好友捐献 AI 渠道、绑定 WorkBuddy 账号，
-              或完成成就积累成就点，都能获得额外额度。
+              {t("ai.rewards.empty")}
             </div>
             <div className="flex flex-wrap gap-2">
               <Button variant="outline" size="sm" asChild>
                 <Link to="/dashboard/donations?tab=invite">
                   <Gift className="h-4 w-4" />
-                  去邀请好友
+                  {t("ai.rewards.invite")}
                 </Link>
               </Button>
               <Button variant="outline" size="sm" asChild>
                 <Link to="/dashboard/achievements">
                   <Trophy className="h-4 w-4" />
-                  去完成成就
+                  {t("ai.rewards.achievements")}
                 </Link>
               </Button>
             </div>
@@ -284,7 +294,7 @@ function RewardSubscriptionsCard({
           <>
             <div>
               <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">今日剩余额度</span>
+                <span className="text-muted-foreground">{t("ai.todayLeft")}</span>
                 <span className="font-medium">
                   {fmtAmount(remaining, symbol, perUnit)}
                   {" / "}
@@ -317,12 +327,12 @@ function RewardSubscriptionsCard({
                         <TooltipContent>
                           <p className="font-medium">{g.title}</p>
                           <p>
-                            额度 {fmtAmount(g.amountTotal, symbol, perUnit)} · 剩余{" "}
+                            {t("ai.quotaLine", { total: fmtAmount(g.amountTotal, symbol, perUnit) })}{" "}
                             {fmtAmount(planRemaining, symbol, perUnit)}
                           </p>
-                          {g.count > 1 && <p>共 {g.count} 张订阅</p>}
-                          <p>下次重置 {formatResetTime(g.nextResetTime)}</p>
-                          <p>有效期至 {formatExpiry(g.endTime)}</p>
+                          {g.count > 1 && <p>{t("ai.subCount", { n: g.count })}</p>}
+                          <p>{t("ai.nextResetAt", { time: formatResetTime(g.nextResetTime) })}</p>
+                          <p>{t("ai.validUntil", { date: formatExpiry(g.endTime) })}</p>
                         </TooltipContent>
                       </Tooltip>
                     )
@@ -342,11 +352,11 @@ function RewardSubscriptionsCard({
                       }`}
                     />
                     {g.title}
-                    <span className="text-muted-foreground/70">剩</span>
+                    <span className="text-muted-foreground/70">{t("ai.left")}</span>
                     <span className="tabular-nums">
                       {fmtAmount(Math.max(0, g.amountTotal - g.amountUsed), symbol, perUnit)}
                     </span>
-                    {g.count > 1 && <span>· {g.count} 张</span>}
+                    {g.count > 1 && <span>{t("ai.cardsSuffix", { n: g.count })}</span>}
                   </span>
                 ))}
               </div>
@@ -355,7 +365,7 @@ function RewardSubscriptionsCard({
             {groups.length <= 1 ||
             groups.every((g) => g.nextResetTime === groups[0].nextResetTime) ? (
               <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">下次重置</span>
+                <span className="text-muted-foreground">{t("ai.nextReset")}</span>
                 <span className="font-medium tabular-nums">
                   {formatResetTime(nextReset)}
                 </span>
@@ -363,7 +373,7 @@ function RewardSubscriptionsCard({
             ) : (
               groups.map((g) => (
                 <div key={g.planId} className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">{g.title} 重置</span>
+                  <span className="text-muted-foreground">{t("ai.resetOf", { title: g.title })}</span>
                   <span className="font-medium tabular-nums">
                     {formatResetTime(g.nextResetTime)}
                   </span>
@@ -371,7 +381,7 @@ function RewardSubscriptionsCard({
               ))
             )}
             <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">有效期至</span>
+              <span className="text-muted-foreground">{t("ai.validUntilLabel")}</span>
               <span className="font-medium tabular-nums">{formatExpiry(expiry)}</span>
             </div>
             <Separator />
@@ -379,13 +389,13 @@ function RewardSubscriptionsCard({
               <Button variant="outline" size="sm" asChild>
                 <Link to="/dashboard/donations?tab=invite">
                   <Gift className="h-4 w-4" />
-                  去邀请好友
+                  {t("ai.rewards.invite")}
                 </Link>
               </Button>
               <Button variant="outline" size="sm" asChild>
                 <Link to="/dashboard/achievements">
                   <Trophy className="h-4 w-4" />
-                  去完成成就
+                  {t("ai.rewards.achievements")}
                 </Link>
               </Button>
             </div>
@@ -397,32 +407,31 @@ function RewardSubscriptionsCard({
       <Dialog open={infoOpen} onOpenChange={setInfoOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>其他订阅是什么？</DialogTitle>
+            <DialogTitle>{t("ai.rewards.why")}</DialogTitle>
             <DialogDescription>
-              除免费订阅外，你还能通过以下方式获得额外额度，与免费订阅叠加使用。
+              {t("ai.dialog.rewards.intro")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 text-sm">
             <div className="space-y-1.5">
-              <p className="font-medium text-foreground">邀请好友</p>
+              <p className="font-medium text-foreground">{t("ai.dialog.invite.title")}</p>
               <p className="text-muted-foreground">
-                好友用你的邀请码注册，并解锁 AI 中转站后，你获得对应奖励：
+                {t("ai.dialog.invite.desc")}
               </p>
               <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
-                <li>绑定 WorkBuddy 反代账号 → 「wb邀请套餐」每天 ¥500</li>
-                <li>捐献 AI 渠道 / 商汤 Key 并通过审核 → 「邀请套餐」每天 ¥200</li>
+                <li>{t("ai.dialog.invite.wb")}</li>
+                <li>{t("ai.dialog.invite.channel")}</li>
               </ul>
-              <p className="text-xs text-muted-foreground">每个好友只计一次奖励。</p>
+              <p className="text-xs text-muted-foreground">{t("ai.dialog.invite.once")}</p>
             </div>
             <div className="space-y-1.5">
-              <p className="font-medium text-foreground">成就奖励</p>
+              <p className="font-medium text-foreground">{t("ai.dialog.ach.title")}</p>
               <p className="text-muted-foreground">
-                每积累 10 点成就点，自动获得一份「成就奖励」订阅。
+                {t("ai.dialog.ach.desc")}
               </p>
             </div>
             <p className="text-xs text-muted-foreground">
-              以上额度的重置周期可能不同（邀请通常每天重置、成就可能每周重置），
-              以卡片上各套餐标注的重置时间为准。
+              {t("ai.dialog.resetNote")}
             </p>
           </div>
         </DialogContent>
@@ -432,6 +441,7 @@ function RewardSubscriptionsCard({
 }
 
 export default function AiPage() {
+  const { t } = useT()
   const navigate = useNavigate()
   const [status, setStatus] = React.useState<NewApiStatus | null>(null)
   const [keys, setKeys] = React.useState<NewApiKey[]>([])
@@ -490,7 +500,7 @@ export default function AiPage() {
         setLocked(true)
         return
       }
-      toast.error(err instanceof HttpError ? err.message : "加载失败")
+      toast.error(err instanceof HttpError ? err.message : t("ai.err.load"))
     } finally {
       if (!silent) setLoading(false)
     }
@@ -510,19 +520,19 @@ export default function AiPage() {
     const tick = () => {
       const diff = next * 1000 - Date.now()
       if (diff <= 0) {
-        setResetCountdown("即将重置")
+        setResetCountdown(t("ai.reset.soon"))
         return
       }
       const totalSec = Math.floor(diff / 1000)
       const h = Math.floor(totalSec / 3600)
       const m = Math.floor((totalSec % 3600) / 60)
       const s = totalSec % 60
-      setResetCountdown(`${h} 小时 ${m} 分 ${s} 秒`)
+      setResetCountdown(t("ai.reset.countdown", { h, m, s }))
     }
     tick()
-    const t = setInterval(tick, 1000)
-    return () => clearInterval(t)
-  }, [status?.subscription?.nextResetTime])
+    const timer = setInterval(tick, 1000)
+    return () => clearInterval(timer)
+  }, [status?.subscription?.nextResetTime, t])
 
   // 自动认领（account 存在但 bound=false）的用户：进入页面即强制弹出密码绑定，
   // 不允许直接使用界面。只触发一次，避免每次 status 变化都重复弹。
@@ -534,18 +544,18 @@ export default function AiPage() {
     void openBind()
   }, [status])
 
-  const copyText = async (text: string, label = "已复制") => {
+  const copyText = async (text: string, label = t("common.copied")) => {
     try {
       await navigator.clipboard.writeText(text)
       toast.success(label)
     } catch {
-      toast.error("复制失败，请手动选择复制")
+      toast.error(t("ai.err.copy"))
     }
   }
 
   /** 用户 access token 失效（被 NewAPI 吊销/过期）→ 直接弹出输密码框重新绑定 */
   const handleTokenExpired = () => {
-    toast.error("你的中转站登录已失效，请重新输入密码绑定")
+    toast.error(t("ai.err.tokenExpired"))
     // 用户已经 OIDC 绑定过（只是 token 失效），直接构造「已绑定」状态弹输密码框，
     // 不依赖 preflight 探测（探测若失败会把弹窗关掉，导致「没输入密码的地方」）。
     setPreflight({
@@ -577,7 +587,7 @@ export default function AiPage() {
         startOAuthPopup()
       }
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "无法连接中转站")
+      toast.error(err instanceof HttpError ? err.message : t("ai.err.unreachable"))
       setBindOpen(false)
     } finally {
       setPreflightLoading(false)
@@ -617,7 +627,7 @@ export default function AiPage() {
           /* ignore */
         }
         setAwaitingOAuth(false)
-        toast.info("已关闭授权窗口。可点「重新打开」再次授权。")
+        toast.info(t("ai.info.windowClosed"))
         return
       }
 
@@ -648,19 +658,19 @@ export default function AiPage() {
   const handleBind = async () => {
     // 复用 cloud 密码，只输入一次
     if (password.length < 8) {
-      toast.error("请输入你的 Doulor Cloud 登录密码")
+      toast.error(t("ai.err.enterPassword"))
       return
     }
     setBusy(true)
     try {
       await newapiApi.bind(password)
-      toast.success("AI 中转站已开通")
+      toast.success(t("ai.ok.activated"))
       setBindOpen(false)
       setPassword("")
       // 静默刷新：非静默会整页 loading，把弹窗和错误提示一起卸载掉
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "开通失败")
+      toast.error(err instanceof HttpError ? err.message : t("ai.err.activate"))
     } finally {
       setBusy(false)
     }
@@ -672,13 +682,13 @@ export default function AiPage() {
     try {
       await newapiApi.sync()
       await load(true)
-      toast.success("已同步额度")
+      toast.success(t("ai.ok.synced"))
     } catch (err) {
       if (err instanceof HttpError && err.code === "USER_TOKEN_EXPIRED") {
         handleTokenExpired()
         return
       }
-      toast.error(err instanceof HttpError ? err.message : "同步失败")
+      toast.error(err instanceof HttpError ? err.message : t("ai.err.sync"))
     } finally {
       setSyncing(false)
     }
@@ -698,10 +708,10 @@ export default function AiPage() {
         return
       }
       if (err instanceof HttpError && err.code === "SUBSCRIPTION_REQUIRED") {
-        toast.error("请先领取免费订阅，再创建 API Key")
+        toast.error(t("ai.err.claimFirst"))
         return
       }
-      toast.error(err instanceof HttpError ? err.message : "创建失败")
+      toast.error(err instanceof HttpError ? err.message : t("ai.err.create"))
     } finally {
       setBusy(false)
     }
@@ -713,12 +723,12 @@ export default function AiPage() {
     try {
       const res = await newapiApi.redeem(redeemCode.trim())
       toast.success(
-        `兑换成功：+${res.currencySymbol}${res.addedDisplay}`
+        t("ai.ok.redeemed", { symbol: res.currencySymbol, amount: res.addedDisplay })
       )
       setRedeemCode("")
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "兑换失败")
+      toast.error(err instanceof HttpError ? err.message : t("ai.err.redeem"))
     } finally {
       setRedeemBusy(false)
     }
@@ -728,10 +738,10 @@ export default function AiPage() {
     setSubscribing(true)
     try {
       const res = await newapiApi.subscribe()
-      toast.success(res.message || "已领取免费订阅")
+      toast.success(res.message || t("ai.ok.freeClaimed"))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "领取失败")
+      toast.error(err instanceof HttpError ? err.message : t("ai.err.claim"))
     } finally {
       setSubscribing(false)
     }
@@ -739,7 +749,7 @@ export default function AiPage() {
 
   const handleAiPassword = async () => {
     if (aiPw.next !== aiPw.confirm) {
-      toast.error("两次输入的新密码不一致")
+      toast.error(t("ai.err.passwordMismatch"))
       return
     }
     setAiPwBusy(true)
@@ -748,11 +758,11 @@ export default function AiPage() {
         currentPassword: aiPw.current,
         newPassword: aiPw.next,
       })
-      toast.success("中转站密码已修改")
+      toast.success(t("ai.ok.passwordChanged"))
       setAiPwOpen(false)
       setAiPw({ current: "", next: "", confirm: "" })
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "修改失败")
+      toast.error(err instanceof HttpError ? err.message : t("ai.err.update"))
     } finally {
       setAiPwBusy(false)
     }
@@ -763,10 +773,10 @@ export default function AiPage() {
     setDeletingKeyId(key.id)
     try {
       await newapiApi.removeKey(key.id)
-      toast.success("Key 已删除")
+      toast.success(t("ai.ok.keyDeleted"))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("ai.err.delete"))
     } finally {
       setDeletingKeyId(null)
     }
@@ -779,10 +789,10 @@ export default function AiPage() {
       const res = await newapiApi.syncKeys()
       setKeys(res.keys)
       toast.success(
-        res.added > 0 ? `已同步 ${res.added} 个 Key` : "没有新的 Key"
+        res.added > 0 ? t("ai.ok.keysSynced", { n: res.added }) : t("ai.ok.noNewKeys")
       )
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "同步失败")
+      toast.error(err instanceof HttpError ? err.message : t("ai.err.sync"))
     } finally {
       setSyncing(false)
     }
@@ -792,8 +802,8 @@ export default function AiPage() {
     return (
       <FeatureLockedNotice
         feature="ai"
-        featureLabel="AI 中转站"
-        description="你的账号未被授予「AI 中转站」权限。站长资源有限，该服务暂未全量开放。"
+        featureLabel={t("ai.title")}
+        description={t("locked.desc", { feature: t("ai.title") })}
       />
     )
   }
@@ -801,7 +811,7 @@ export default function AiPage() {
   if (loading) {
     return (
       <div>
-        <PageHeader title="AI 中转站" description="NewAPI 集成" />
+        <PageHeader title={t("ai.title")} description={t("ai.subtitle")} />
         <LoadingBlock />
       </div>
     )
@@ -810,10 +820,10 @@ export default function AiPage() {
   if (!status?.configured) {
     return (
       <div>
-        <PageHeader title="AI 中转站" description="NewAPI 集成" />
+        <PageHeader title={t("ai.title")} description={t("ai.subtitle")} />
         <EmptyState
-          title="AI 中转站尚未配置"
-          description="管理员还未配置 NewAPI 凭据，请稍后再试。"
+          title={t("ai.notConfigured")}
+          description={t("ai.notConfiguredDesc")}
         />
       </div>
     )
@@ -822,10 +832,10 @@ export default function AiPage() {
   if (!status.featureEnabled) {
     return (
       <div>
-        <PageHeader title="AI 中转站" description="NewAPI 集成" />
+        <PageHeader title={t("ai.title")} description={t("ai.subtitle")} />
         <EmptyState
-          title="功能已关闭"
-          description="管理员暂时关闭了 AI 中转站功能。"
+          title={t("ai.disabled")}
+          description={t("ai.disabledDesc")}
         />
       </div>
     )
@@ -837,20 +847,20 @@ export default function AiPage() {
     return (
       <div>
         <PageHeader
-          title="AI 中转站"
-          description="统一的大模型 API 入口"
+          title={t("ai.title")}
+          description={t("ai.tagline")}
           actions={<HealthBadge health={status.health} />}
         />
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Sparkles className="h-4 w-4 text-muted-foreground" />
-              {status.account ? "完成密码绑定" : "开通 AI 中转站"}
+              {status.account ? t("ai.bind.title") : t("ai.activate.title")}
             </CardTitle>
             <CardDescription>
               {status.account
-                ? "你的中转站账号已就绪，输入 Doulor Cloud 密码完成绑定后即可使用。"
-                : "用你的 Doulor Cloud 账号登录中转站，附赠试用额度 " +
+                ? t("ai.bind.ready")
+                : t("ai.activate.desc") + " " +
                   status.currencySymbol +
                   status.trialQuotaUsd +
                   "。"}
@@ -859,14 +869,14 @@ export default function AiPage() {
           <CardContent className="space-y-4">
             {!status.account && (
               <ul className="space-y-1.5 text-sm text-muted-foreground">
-                <li>· 用 Doulor Cloud 账号登录中转站，无需单独注册</li>
-                <li>· 开通时复用你的 Doulor Cloud 登录密码</li>
-                <li>· 开通后可查看可用模型并自助创建 API Key</li>
+                <li>{t("ai.activate.b1")}</li>
+                <li>{t("ai.activate.b2")}</li>
+                <li>{t("ai.activate.b3")}</li>
               </ul>
             )}
             <Button onClick={() => void openBind()}>
               <Sparkles className="h-4 w-4" />
-              {status.account ? "立即绑定" : "立即开通"}
+              {status.account ? t("ai.bind.now") : t("ai.activate.now")}
             </Button>
           </CardContent>
         </Card>
@@ -907,8 +917,8 @@ export default function AiPage() {
   return (
     <div>
       <PageHeader
-        title="AI 中转站"
-        description={`账号 ${account.username} · ${account.email}`}
+        title={t("ai.title")}
+        description={t("ai.accountLine", { username: account.username, email: account.email })}
         actions={<HealthBadge health={status.health} />}
       />
 
@@ -918,10 +928,10 @@ export default function AiPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Sparkles className="h-4 w-4 text-primary" />
-              免费订阅
+              {t("ai.free.title")}
             </CardTitle>
             <CardDescription>
-              必须先领取免费订阅，才能创建 API Key 并调用模型。
+              {t("ai.free.mustClaim")}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -929,7 +939,7 @@ export default function AiPage() {
               <div className="space-y-3">
                 <div>
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">今日剩余额度</span>
+                    <span className="text-muted-foreground">{t("ai.todayLeft")}</span>
                     <span className="font-medium">
                       {fmtAmount(
                         status.subscription.amountTotal -
@@ -964,31 +974,29 @@ export default function AiPage() {
                   </div>
                 </div>
                 <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">下次重置</span>
+                  <span className="text-muted-foreground">{t("ai.nextReset")}</span>
                   <span className="font-medium tabular-nums">
                     {resetCountdown !== null ? resetCountdown : formatResetTime(status.subscription.nextResetTime)}
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">有效期至</span>
+                  <span className="text-muted-foreground">{t("ai.validUntilLabel")}</span>
                   <span className="font-medium tabular-nums">
                     {formatExpiry(status.subscription.endTime)}
                   </span>
                 </div>
                 <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-                  订阅规则：免费订阅每天自动发放额度（默认 ¥1000，按次计费、每次 ¥1），
-                  当天额度用完则需等次日重置。额度长期有效，持续到订阅到期。
+                  {t("ai.free.rulesClaimed")}
                 </div>
               </div>
             ) : (
               <>
                 <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-                  订阅规则：领取免费订阅后，每天自动发放额度（默认 ¥1000），
-                  按次计费、每次调用扣 ¥1。未领取订阅将无法创建 Key 和调用模型。
+                  {t("ai.free.rulesUnclaimed")}
                 </div>
                 <Button onClick={() => void handleSubscribe()} disabled={subscribing}>
                   {subscribing && <Loader2 className="h-4 w-4 animate-spin" />}
-                  领取免费订阅
+                  {t("ai.free.claim")}
                 </Button>
               </>
             )}
@@ -1007,10 +1015,10 @@ export default function AiPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <KeyRound className="h-4 w-4 text-muted-foreground" />
-              接入信息
+              {t("ai.access.title")}
             </CardTitle>
             <CardDescription>
-              在任意 OpenAI 兼容客户端中填入 Base URL 与 API Key 即可使用。
+              {t("ai.access.desc")}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -1026,9 +1034,9 @@ export default function AiPage() {
                   variant="outline"
                   size="icon"
                   onClick={() =>
-                    void copyText("https://api.doulor.cn/v1", "Base URL 已复制")
+                    void copyText("https://api.doulor.cn/v1", t("ai.access.copied"))
                   }
-                  title="复制"
+                  title={t("common.copy")}
                 >
                   <Copy className="h-4 w-4" />
                 </Button>
@@ -1042,7 +1050,7 @@ export default function AiPage() {
               <div>
                 <Label>API Key</Label>
                 <p className="text-xs text-muted-foreground">
-                  用于调用 OpenAI 兼容接口，完整 Key 只在创建时显示一次。
+                  {t("ai.key.hint")}
                 </p>
               </div>
               <div className="flex gap-2">
@@ -1057,27 +1065,27 @@ export default function AiPage() {
                   ) : (
                     <RefreshCw className="h-3.5 w-3.5" />
                   )}
-                  同步
+                  {t("ai.sync")}
                 </Button>
                 <Button size="sm" onClick={() => setKeyOpen(true)}>
                   <Plus className="h-3.5 w-3.5" />
-                  新建 Key
+                  {t("ai.key.new")}
                 </Button>
               </div>
             </div>
 
             {keys.length === 0 ? (
               <EmptyState
-                title="还没有 API Key"
-                description="创建一个 Key 即可开始调用模型。"
+                title={t("ai.key.empty")}
+                description={t("ai.key.emptyDesc")}
               />
             ) : (
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>名称</TableHead>
+                    <TableHead>{t("ai.key.col.name")}</TableHead>
                     <TableHead>Key</TableHead>
-                    <TableHead>创建时间</TableHead>
+                    <TableHead>{t("ai.key.col.created")}</TableHead>
                     <TableHead className="w-24" />
                   </TableRow>
                 </TableHeader>
@@ -1098,7 +1106,7 @@ export default function AiPage() {
                           className="h-8 w-8 text-muted-foreground hover:text-destructive"
                           onClick={() => void handleDeleteKey(k)}
                           disabled={deletingKeyId !== null}
-                          title="删除"
+                          title={t("common.delete")}
                         >
                           {deletingKeyId === k.id ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
@@ -1119,7 +1127,7 @@ export default function AiPage() {
               <Button variant="outline" size="sm" asChild>
                 <a href="https://api.doulor.cn" target="_blank" rel="noreferrer">
                   <ExternalLink className="h-3.5 w-3.5" />
-                  前往中转站本站
+                  {t("ai.goSite")}
                 </a>
               </Button>
               <Button
@@ -1128,11 +1136,11 @@ export default function AiPage() {
                 onClick={() => setAiPwOpen(true)}
               >
                 <KeyRound className="h-3.5 w-3.5" />
-                修改中转站密码
+                {t("ai.pw.title")}
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              充值、渠道、日志等复杂操作请前往中转站本站完成。
+              {t("ai.goSite.desc")}
             </p>
           </CardContent>
         </Card>
@@ -1143,16 +1151,16 @@ export default function AiPage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
                 <Sparkles className="h-4 w-4 text-muted-foreground" />
-                推荐模型
+                {t("ai.rec.title")}
               </CardTitle>
               <CardDescription>
-                按综合能力与稳定性分档，从上到下依次递减。点击模型名可复制。
+                {t("ai.rec.desc")}
               </CardDescription>
             </CardHeader>
             <CardContent>
               <RecommendedModels
                 tiers={status.recommended}
-                onCopy={(m) => void copyText(m, `已复制模型名 ${m}`)}
+                onCopy={(m) => void copyText(m, t("ai.modelCopied", { model: m }))}
               />
             </CardContent>
           </Card>
@@ -1165,12 +1173,12 @@ export default function AiPage() {
               <div>
                 <CardTitle className="flex items-center gap-2 text-base">
                   <Wallet className="h-4 w-4 text-muted-foreground" />
-                  钱包余额
+                  {t("ai.wallet.title")}
                 </CardTitle>
                 <CardDescription>
-                  剩余 {status.currencySymbol}
-                  {account.quotaUsd.toFixed(4)} · 已用 {status.currencySymbol}
-                  {account.usedUsd.toFixed(4)} · 请求 {account.requestCount} 次
+                  {t("ai.wallet.left", { symbol: status.currencySymbol })}
+                  {account.quotaUsd.toFixed(4)}{t("ai.wallet.used", { symbol: status.currencySymbol })}
+                  {account.usedUsd.toFixed(4)}{t("ai.wallet.requests", { n: account.requestCount })}
                 </CardDescription>
               </div>
               <Button
@@ -1184,15 +1192,15 @@ export default function AiPage() {
                 ) : (
                   <RefreshCw className="h-3.5 w-3.5" />
                 )}
-                同步
+                {t("ai.sync")}
               </Button>
             </div>
           </CardHeader>
           {account.syncedAt && (
             <CardContent>
               <p className="text-xs text-muted-foreground">
-                最后同步：{fmtTime(account.syncedAt)}
-                {account.group ? ` · 分组 ${account.group}` : ""}
+                {t("ai.lastSync", { time: fmtTime(account.syncedAt) })}
+                {account.group ? t("ai.groupSuffix", { group: account.group }) : ""}
               </p>
             </CardContent>
           )}
@@ -1208,10 +1216,10 @@ export default function AiPage() {
               <div>
                 <CardTitle className="flex items-center gap-2 text-base">
                   <Bot className="h-4 w-4 text-muted-foreground" />
-                  全部可用模型（{status.models.length}）
+                  {t("ai.models.title", { n: status.models.length })}
                 </CardTitle>
                 <CardDescription>
-                  按分组分类显示，点击模型名可复制。不同分组的计费与可用渠道不同。
+                  {t("ai.models.desc")}
                 </CardDescription>
               </div>
               <ChevronDown
@@ -1224,22 +1232,22 @@ export default function AiPage() {
           {modelsOpen && (
             <CardContent className="space-y-4">
               {status.models.length === 0 ? (
-                <p className="text-sm text-muted-foreground">暂无可用模型</p>
+                <p className="text-sm text-muted-foreground">{t("ai.models.empty")}</p>
               ) : (
                 status.availableGroups.map((g) => {
                   const list = status.groupModels[g] ?? []
                   if (list.length === 0) return null
-                  const label = g === "donation" ? "捐献" : g === "default" ? "默认" : g
+                  const label = g === "donation" ? t("ai.group.donation") : g === "default" ? t("ai.group.default") : g
                   return (
                     <div key={g} className="space-y-2">
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">{label} 分组</span>
+                        <span className="text-sm font-medium">{t("ai.groupLabel", { group: label })}</span>
                         <Badge variant="secondary" className="text-xs">
-                          {list.length} 个模型
+                          {t("ai.modelCount", { n: list.length })}
                         </Badge>
                         {status.accountGroup === g && (
                           <Badge variant="success" className="text-xs">
-                            当前账号
+                            {t("ai.currentAccount")}
                           </Badge>
                         )}
                       </div>
@@ -1249,7 +1257,7 @@ export default function AiPage() {
                             key={`${g}-${m}`}
                             variant="outline"
                             className="cursor-pointer font-mono text-xs"
-                            onClick={() => void copyText(m, `已复制模型名 ${m}`)}
+                            onClick={() => void copyText(m, t("ai.modelCopied", { model: m }))}
                           >
                             {m}
                           </Badge>
@@ -1268,16 +1276,16 @@ export default function AiPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Gift className="h-4 w-4 text-muted-foreground" />
-              兑换码充值
+              {t("ai.redeem.title")}
             </CardTitle>
             <CardDescription>
-              输入兑换码（邀请码）为你的中转站额度充值。
+              {t("ai.redeem.desc")}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="flex gap-2">
               <Input
-                placeholder="输入兑换码"
+                placeholder={t("ai.redeem.placeholder")}
                 value={redeemCode}
                 onChange={(e) => setRedeemCode(e.target.value)}
                 onKeyDown={(e) => {
@@ -1289,7 +1297,7 @@ export default function AiPage() {
                 disabled={redeemBusy || !redeemCode.trim()}
               >
                 {redeemBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                兑换
+                {t("ai.redeem.btn")}
               </Button>
             </div>
           </CardContent>
@@ -1307,11 +1315,11 @@ export default function AiPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>新建 API Key</DialogTitle>
+            <DialogTitle>{t("ai.key.dialogTitle")}</DialogTitle>
             <DialogDescription>
               {createdKey
-                ? "请立即复制保存，关闭后无法再次查看完整 Key。"
-                : "给这个 Key 起个名字，便于日后分辨用途。"}
+                ? t("ai.key.saveHint")
+                : t("ai.key.nameHint")}
             </DialogDescription>
           </DialogHeader>
 
@@ -1322,44 +1330,43 @@ export default function AiPage() {
                 <Button
                   variant="outline"
                   size="icon"
-                  onClick={() => void copyText(createdKey, "API Key 已复制")}
+                  onClick={() => void copyText(createdKey, t("ai.key.copied"))}
                 >
                   <Copy className="h-4 w-4" />
                 </Button>
               </div>
               <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
-                完整 Key 仅此一次显示，服务端不保存，请务必现在复制。
+                {t("ai.key.onceOnly")}
               </div>
             </div>
           ) : (
             <>
             <div className="space-y-2">
-              <Label htmlFor="keyName">名称</Label>
+              <Label htmlFor="keyName">{t("ai.key.name")}</Label>
               <Input
                 id="keyName"
-                placeholder="例如 chatbox、my-script"
+                placeholder={t("ai.key.namePlaceholder")}
                 value={keyName}
                 onChange={(e) => setKeyName(e.target.value)}
               />
             </div>
             <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-              该 Key 固定属于 <span className="font-medium text-foreground">default（免费）</span> 分组，
-              额度来自你的免费订阅每日发放。付费分组需联系管理员单独开通。
+              {t("ai.key.groupNote")}
             </div>
             </>
           )}
 
           <DialogFooter>
             {createdKey ? (
-              <Button onClick={() => setKeyOpen(false)}>完成</Button>
+              <Button onClick={() => setKeyOpen(false)}>{t("common.done")}</Button>
             ) : (
               <>
                 <Button variant="outline" onClick={() => setKeyOpen(false)}>
-                  取消
+                  {t("common.cancel")}
                 </Button>
                 <Button onClick={() => void handleCreateKey()} disabled={busy}>
                   {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-                  创建
+                  {t("common.create")}
                 </Button>
               </>
             )}
@@ -1377,14 +1384,14 @@ export default function AiPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>修改中转站密码</DialogTitle>
+            <DialogTitle>{t("ai.pw.title")}</DialogTitle>
             <DialogDescription>
-              需要当前密码验证；修改后不影响已创建的 API Key。
+              {t("ai.pw.desc")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="aiPwCurrent">当前密码</Label>
+              <Label htmlFor="aiPwCurrent">{t("settings.pw.current")}</Label>
               <Input
                 id="aiPwCurrent"
                 type="password"
@@ -1396,7 +1403,7 @@ export default function AiPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="aiPwNext">新密码</Label>
+              <Label htmlFor="aiPwNext">{t("settings.pw.new")}</Label>
               <Input
                 id="aiPwNext"
                 type="password"
@@ -1404,10 +1411,10 @@ export default function AiPage() {
                 value={aiPw.next}
                 onChange={(e) => setAiPw((f) => ({ ...f, next: e.target.value }))}
               />
-              <p className="text-xs text-muted-foreground">至少 8 位</p>
+              <p className="text-xs text-muted-foreground">{t("settings.pw.atLeast8")}</p>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="aiPwConfirm">确认新密码</Label>
+              <Label htmlFor="aiPwConfirm">{t("settings.pw.confirm")}</Label>
               <Input
                 id="aiPwConfirm"
                 type="password"
@@ -1421,7 +1428,7 @@ export default function AiPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAiPwOpen(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button
               onClick={() => void handleAiPassword()}
@@ -1433,7 +1440,7 @@ export default function AiPage() {
               }
             >
               {aiPwBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-              确认修改
+              {t("common.saveChanges")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1453,7 +1460,7 @@ interface BindDialogProps {
   busy: boolean
   onReopenOAuth: () => void
   onConfirm: () => void
-  /** 点「取消」：关闭弹窗并跳回概览 */
+  /** 点「{t("common.cancel")}」：关闭弹窗并跳回概览 */
   onCancel: () => void
 }
 
@@ -1470,6 +1477,7 @@ function BindDialog({
   onConfirm,
   onCancel,
 }: BindDialogProps) {
+  const { t } = useT()
   // 探测尚未返回时不渲染表单，避免用户先填了再被告知流程不同
   const ready = !preflightLoading && preflight !== null
   const oidcBound = Boolean(preflight?.oidcBound)
@@ -1478,74 +1486,71 @@ function BindDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>开通 AI 中转站</DialogTitle>
+          <DialogTitle>{t("ai.activate.title")}</DialogTitle>
           <DialogDescription>
             {!ready
-              ? "正在检查中转站账号…"
+              ? t("ai.activate.checkingAccount")
               : awaitingOAuth
-                ? "请在打开的窗口里用 Doulor Cloud 登录，完成后这里会自动继续。"
+                ? t("ai.activate.step2")
                 : oidcBound
-                  ? "中转站账号已就绪，输入你的 Doulor Cloud 密码即可完成开通。"
-                  : "需要先到中转站用 Doulor Cloud 登录创建账号。"}
+                  ? t("ai.activate.step3")
+                  : t("ai.activate.needAccount")}
           </DialogDescription>
         </DialogHeader>
 
         {!ready ? (
           <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
-            正在检查…
+            {t("ai.activate.checking")}
           </div>
         ) : awaitingOAuth ? (
           <div className="space-y-4">
             <div className="flex items-center gap-3 rounded-md border bg-muted/40 p-4 text-sm text-muted-foreground">
               <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" />
-              <div>
-                正在等待授权完成… 在弹出窗口里点「用 Doulor Cloud 登录」并允许后，
-                本页会自动继续，无需手动操作。
-              </div>
+              <div>{t("ai.activate.waiting")}</div>
             </div>
             <Button variant="outline" size="sm" className="w-full" onClick={onReopenOAuth}>
               <ExternalLink className="h-3.5 w-3.5" />
-              没看到窗口？重新打开
+              {t("ai.activate.reopen")}
             </Button>
           </div>
         ) : oidcBound ? (
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="aiPassword">你的 Doulor Cloud 登录密码</Label>
+              <Label htmlFor="aiPassword">{t("ai.activate.passwordLabel")}</Label>
               <Input
                 id="aiPassword"
                 type="password"
                 autoComplete="current-password"
-                placeholder="输入你登录 Doulor Cloud 时用的那个密码（不是新设密码）"
+                placeholder={t("ai.activate.passwordPlaceholder")}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
               />
             </div>
             <div className="rounded-md border border-primary/30 bg-primary/5 p-3 text-xs">
               <p className="font-medium">
-                这里填的是你<b>已经在用的 Doulor Cloud 密码</b>，不是让你新设一个。
+                {t("ai.activate.passwordNote.a")}
+                <b>{t("ai.activate.passwordNote.bold")}</b>
+                {t("ai.activate.passwordNote.b")}
               </p>
-              <p className="mt-1 text-muted-foreground">
-                系统会验证它，然后同步为你中转站账号的密码，之后两边共用同一个密码。
-              </p>
+              <p className="mt-1 text-muted-foreground">{t("ai.activate.passwordNote.c")}</p>
             </div>
           </div>
         ) : (
           <div className="space-y-4">
             <div className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-              中转站里还没有用 Doulor Cloud 登录创建的账号。
+              {t("ai.activate.noAccountYet")}
             </div>
             <Button variant="outline" className="w-full" onClick={onReopenOAuth}>
               <ExternalLink className="h-4 w-4" />
-              前往中转站登录
+              {t("ai.activate.goLogin")}
             </Button>
           </div>
         )}
 
         <DialogFooter>
           <Button variant="outline" onClick={onCancel}>
-            取消
+            {t("common.cancel")}
           </Button>
           {oidcBound && !awaitingOAuth && (
             <Button
@@ -1553,7 +1558,7 @@ function BindDialog({
               disabled={busy || password.length < 8}
             >
               {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-              {busy ? "处理中…" : "开通"}
+              {busy ? t("ai.activate.processing") : t("ai.activate.submit")}
             </Button>
           )}
         </DialogFooter>
