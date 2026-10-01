@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Link, useParams } from "react-router-dom"
+import { Link, useNavigate, useParams } from "react-router-dom"
 import {
   ArrowLeft,
   ExternalLink,
@@ -179,6 +179,7 @@ function StatItem({ label, value }: { label: string; value: number | string }) {
 }
 
 export default function SpacePage() {
+  const navigate = useNavigate()
   const { t } = useT()
   const { username = "" } = useParams()
   const [data, setData] = React.useState<SpaceData | null>(null)
@@ -290,7 +291,7 @@ export default function SpacePage() {
               <p className="text-sm italic text-muted-foreground">「{space.motto}」</p>
             )}
           </div>
-          {space.isOwner && (
+          {space.isOwner ? (
             <Button
               variant="outline"
               size="sm"
@@ -299,6 +300,19 @@ export default function SpacePage() {
             >
               <Settings2 className="h-4 w-4" />
               {t("space.settingsBtn")}
+            </Button>
+          ) : (
+            /* 别人的空间：直接开私信（2026-10-01）。放在名片右上角，
+               是「看到这个人 → 想联系他」最自然的位置。 */
+            <Button
+              size="sm"
+              className="shrink-0"
+              onClick={() =>
+                navigate(`/dashboard/dm/${encodeURIComponent(user.username)}`)
+              }
+            >
+              <MessageSquare className="h-4 w-4" />
+              发私信
             </Button>
           )}
         </CardContent>

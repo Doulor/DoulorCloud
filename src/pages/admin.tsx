@@ -7656,7 +7656,8 @@ export default function AdminPage() {
                     用户要填自己的 GitHub 用户名，服务端去这个仓库的 stargazers 名单里核验。
                     <span className="font-medium">必须是公开仓库</span>
                     —— 私有仓库读不到名单，会变成「所有人都核验失败」。
-                    名单缓存 5 分钟，所以刚点的 star 最多 5 分钟后才认。
+                    点完 star 马上就能领（核验结果按需缓存；「没查到」只缓存 1 分钟，
+                    避免用户点完立刻来领却拿到旧结果）。
                     <br />
                     <span className="font-medium text-destructive">
                       还需要给 Worker 配一个 GitHub Token

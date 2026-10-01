@@ -1,15 +1,24 @@
+<div align="center">
+
+<img src="public/favicon.png" width="88" alt="Doulor Cloud" />
+
 # Doulor Cloud
 
-> 一站式云端资源分发平台 —— 二级域名、域名邮箱、直链网盘、个人名片（Bento 空间）与 AI API 中转站。
-> 线上实例：[cloud.doulor.cn](https://cloud.doulor.cn)
+**一站式云端资源分发平台** —— 二级域名、域名邮箱、直链网盘、个人名片（Bento 空间）与 AI API 中转站
 
-**纯静态前端 + Serverless 后端**：前端是构建产物直出的 SPA，后端全部跑在 Cloudflare Workers 上，
-数据库用 D1（SQLite）、对象存储用 R2，不依赖任何常驻服务器。
+[cloud.doulor.cn](https://cloud.doulor.cn)
+·
+[<img src="https://cdn.simpleicons.org/github/8b949e" width="15" height="15" alt="GitHub" style="vertical-align:-2px" />](https://github.com/Doulor/DoulorCloud) Doulor/DoulorCloud
+
+纯静态前端 + Serverless 后端：前端是构建产物直出的 SPA，后端全部跑在 Cloudflare Workers 上，数据库用 D1（SQLite）、对象存储用 R2，不依赖任何常驻服务器。
+
+</div>
 
 ---
 
 ## 目录
 
+- [界面预览](#界面预览)
 - [功能概览](#功能概览)
 - [架构](#架构)
 - [技术栈](#技术栈)
@@ -19,7 +28,22 @@
 - [安全模型](#安全模型)
 - [本地开发](#本地开发)
 - [发展历程](#发展历程)
+- [Star History](#star-history)
 - [许可](#许可)
+
+---
+
+## 界面预览
+
+| 控制台 | AI 中转站 |
+| :---: | :---: |
+| ![控制台](assets/screenshot-dashboard.png) | ![AI 中转站](assets/screenshot-ai.png) |
+
+| 积分与商城 | 私信 |
+| :---: | :---: |
+| ![积分与商城](assets/screenshot-points.png) | ![私信](assets/screenshot-dm.png) |
+
+> 截图来自线上实例（[cloud.doulor.cn](https://cloud.doulor.cn)），界面为深色主题，全站中英双语可切换。
 
 ---
 
@@ -277,6 +301,14 @@ npm test                         # Vitest（在 miniflare 里跑真实 Worker + 
 
 > 期间项目一直由多个 AI 并行开发，因此形成了「静态护栏 + 真浏览器走查 + 临时会话读线上库验证」这套
 > 工程实践 —— 见上文「质量护栏」。
+
+---
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Doulor/DoulorCloud&type=Date)](https://star-history.com/#Doulor/DoulorCloud&Date)
+
+> 点一个 star 就是对这个项目最好的支持，也会让更多需要的人看到它。
 
 ---
 

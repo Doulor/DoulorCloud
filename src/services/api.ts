@@ -106,6 +106,9 @@ import {
   type DonationRewardItem,
   type InvitePointsConfig,
   type AttentionCounts,
+  type DmPeer,
+  type DmMessage,
+  type DmConversation,
 } from "@/types"
 import type { FunLinkCategory } from "@/lib/fun-links"
 
@@ -1370,6 +1373,21 @@ export const achievementApi = {
 // ---- 积分（余额 / 流水 / 兑换中转站余额）----
 
 export const pointsApi = {
+  /**
+   * 上传商品封面图（2026-10-01 加）。
+   *
+   * 返回的 `url` 是**同源相对路径**（`/shop-img/<userId>/<file>`），
+   * 直接填进 imageUrl 字段即可 —— 商城所有人都能看到这张图。
+   */
+  uploadProductImage: (file: File) => {
+    const headers = new Headers()
+    headers.set("Content-Type", file.type)
+    return request<{ key: string; url: string }>("/points/product/image", {
+      method: "POST",
+      body: file,
+      headers,
+    })
+  },
   /** 余额 + 兑换配置 + 商城商品 + 我的订单 + 最近流水（一次拿齐整页数据） */
   overview: () => request<PointsOverview>("/points"),
   /** 用积分兑换中转站余额（每 1 积分值多少元由后台配置） */
@@ -1674,6 +1692,45 @@ export const attentionApi = {
 }
 
 // ---- 通知 / 消息箱 ----
+
+/**
+ * 一对一私信（2026-10-01）。
+ *
+ * 轮询与聊天室一个路子：拉取**不会**自动标已读，前端在「用户真的看到」时
+ * 单独调 `seen()`（否则轮询一次就把未读清零了）。
+ */
+export const dmApi = {
+  /** 会话列表（每个对端一条，带未读数） */
+  conversations: () =>
+    request<{ conversations: DmConversation[]; unreadTotal: number }>(
+      "/dm/conversations"
+    ),
+
+  /** 只取未读总数（做角标用，别为它拉整个列表） */
+  unread: () => request<{ unread: number }>("/dm/unread"),
+
+  /** 某个会话的消息；传 after 则增量拉取 */
+  list: (peer: string, after?: string) => {
+    const qs = new URLSearchParams({ peer })
+    if (after) qs.set("after", after)
+    return request<{ peer: DmPeer; messages: DmMessage[]; nextCursor: string | null }>(
+      `/dm?${qs.toString()}`
+    )
+  },
+
+  send: (to: string, body: string) =>
+    request<{ message: DmMessage }>("/dm", {
+      method: "POST",
+      body: JSON.stringify({ to, body }),
+    }),
+
+  /** 把「与某个对端的会话里我收到的消息」标为已读（幂等） */
+  seen: (peer: string) =>
+    request<{ ok: boolean; marked: number }>("/dm/seen", {
+      method: "POST",
+      body: JSON.stringify({ peer }),
+    }),
+}
 
 export const notificationApi = {
   /** 消息列表；category 可选（system/site/social/event），不传 = 全部 */

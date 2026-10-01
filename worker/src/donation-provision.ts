@@ -46,6 +46,25 @@ export const DONATION_CHANNEL_PREFIX = "捐献"
  * 这正好当作「文件夹」用来收纳所有捐献渠道，管理员一眼能和自建渠道分开。
  */
 export const DONATION_CHANNEL_TAG = "捐献"
+/**
+ * 捐献渠道所属的 NewAPI 分组名（设置项 `newapi_donation_group` 被清空时的兜底）。
+ *
+ * 与 `DONATION_CHANNEL_TAG` 的区别（两者同名但不是一回事，别混）：
+ *   - tag 只是渠道列表里的「文件夹」，纯展示，不影响谁能调用；
+ *   - **group 决定路由** —— 令牌的分组必须匹配渠道的分组才调得到。
+ */
+export const DONATION_CHANNEL_GROUP = "donation"
+
+/**
+ * 从设置值解析捐献分组名。
+ *
+ * 空串/未配置一律兜底成 `DONATION_CHANNEL_GROUP` —— 分组名是**路由键**，
+ * 解析出空串会让渠道落在「没有分组」上，谁都调不到，比落回默认更糟。
+ * 三处调用（建渠道 / 复核自愈 / 用户分组拼接）共用它，避免口径漂移。
+ */
+export function resolveDonationGroup(raw: string | null | undefined): string {
+  return (raw ?? "").trim() || DONATION_CHANNEL_GROUP
+}
 
 /** 探测 + 建渠道的总超时预算（毫秒）。单次 fetch 用更短的超时。 */
 const PROBE_TIMEOUT_MS = 12000
@@ -439,7 +458,11 @@ export async function provisionDonationChannel(
   }
 
   const settings = await getSettings(env)
-  const group = opts.group || settings.newapi_group || "default"
+  // ⚠️ 2026-10-01 起捐献渠道走**独立分组**（`newapi_donation_group`，默认 donation），
+  // 不再混进站点的 `newapi_group`。站长口径：default 分组只放非捐献渠道，
+  // 想用捐献模型的用户要单独建一个选了捐献分组的 Key。
+  // 旧行为（`settings.newapi_group`）已废弃，别改回去。
+  const group = opts.group || resolveDonationGroup(settings.newapi_donation_group)
   const exposed = models.map((m) =>
     m.startsWith(DONATION_MODEL_PREFIX) ? m : DONATION_MODEL_PREFIX + m
   )

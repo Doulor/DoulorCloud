@@ -2534,3 +2534,31 @@ export interface AttentionCounts {
     eventClaims: number
   } | null
 }
+
+// ---- 一对一私信（2026-10-01）----
+
+/** 私信里的对端（另一个用户） */
+export interface DmPeer {
+  id: string
+  username: string
+  nickname: string | null
+  hasAvatar: boolean
+}
+
+export interface DmMessage {
+  id: string
+  fromUserId: string
+  toUserId: string
+  body: string
+  createdAt: string
+  /** 收件人读这条的时间；null = 未读 */
+  readAt: string | null
+}
+
+export interface DmConversation {
+  peer: DmPeer
+  /** 最近一条消息（列表预览用） */
+  last: { body: string; createdAt: string; /** 是不是我发的 */ mine: boolean }
+  /** 我在这条会话里还没读的数量 */
+  unread: number
+}

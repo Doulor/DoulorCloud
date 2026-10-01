@@ -13,6 +13,7 @@ import { parsePermissions, hasFeature, FEATURES, type Feature } from "./permissi
 import { adminSetQuota, getCurrencyInfo } from "./newapi-client"
 import { getSetting } from "./settings"
 import { applyPoints } from "./points"
+import { checkStarred, isRepoSlug } from "./github"
 import type { Env } from "./env"
 
 // ---- 奖励 ----
@@ -40,6 +41,105 @@ export type RewardHandler = (ctx: RewardContext) => Promise<RewardResult>
 function readAmount(params: Record<string, unknown>, key: string, fallback: number): number {
   const n = Number(params[key])
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback
+}
+
+/**
+ * FNV-1a 32 位哈希。
+ *
+ * 用途只有一个：把「活动 id + 用户 id」摊到积分区间上（见 pickPointsAmount）。
+ * 挑 FNV-1a 是因为它几行就能写完、无依赖、同样的输入永远同样的输出。
+ */
+function hash32(input: string): number {
+  let h = 0x811c9dc5
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h >>> 0
+}
+
+/**
+ * 校验「积分奖励」配置（创建 / 更新活动时调用）。返回 null = 合法，否则是拒绝原因。
+ *
+ * 为什么要在**写入时**拦：发放端（下面的 points handler）遇到非法配置只会把
+ * 那一条领取记成 `failed`，用户看到「领取失败」却完全不知道为什么 ——
+ * 配置错误属于管理员笔误，应该在他点保存的那一刻就报出来。
+ *
+ * 兼容旧配置：只有出现 `min`/`max` 才按区间校验；`{amount: N}` 与
+ * 抽奖用的 `null`（params 为空、走奖池分配）都直接放行。
+ */
+export function validatePointsReward(params: unknown): string | null {
+  const p = (params ?? {}) as Record<string, unknown>
+  if (p.min === undefined && p.max === undefined) return null
+  const min = Number(p.min)
+  const max = Number(p.max)
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return "随机区间的上下限都要填数字"
+  }
+  if (Math.floor(min) < 1) return "随机区间下限至少为 1 积分"
+  if (Math.floor(max) < Math.floor(min)) return "随机区间上限不能小于下限"
+  if (Math.floor(max) > 1_000_000) return "随机区间上限过大（最多 100 万积分）"
+  return null
+}
+
+/**
+ * 校验 `github_star` 条件的配置。返回 null = 合法，否则是拒绝原因。
+ *
+ * ⚠️ 一定要求 `owner/repo` 形态：只填个仓库名（或在面板里粘了完整 URL）
+ * 会让核验请求打到不存在的地址，表现成「所有人都核验失败」。
+ */
+export function validateGithubStarCondition(params: unknown): string | null {
+  const p = (params ?? {}) as Record<string, unknown>
+  const repo = typeof p.repo === "string" ? p.repo.trim() : ""
+  if (!repo) return "请填写要核验的 GitHub 仓库（形如 owner/repo）"
+  if (!isRepoSlug(repo)) {
+    return `GitHub 仓库不合法：${repo}（要形如 owner/repo，不要整段 URL）`
+  }
+  return null
+}
+
+/** 解析后的积分奖励数额 */
+export interface PickedPointsAmount {
+  /** 本次实际发放的积分数 */
+  amount: number
+  /** 配置的区间（固定值时 min === max） */
+  min: number
+  max: number
+  /** 是否为区间随机 */
+  random: boolean
+}
+
+/**
+ * 解析「积分奖励数额」——支持**固定值**与**区间随机**两种写法。
+ *
+ * `reward_params`：
+ *   { "amount": 10 }         → 固定 10 积分
+ *   { "min": 5, "max": 20 }  → 5~20 之间取一个整数（闭区间）
+ *
+ * ⚠️ **随机是确定性的**（用 seed 做哈希取模），不是每次调用现抽。理由：
+ * `claimEvent` 在发放失败时会复用旧 claim 重试（见 handlers/events.ts），
+ * 如果金额在发放那一刻才现抽，同一次领取重试后金额可能变 —— 用户视角就是
+ * 「刚才显示 7 积分，刷一下变 12 了」。确定性抽取让重试拿到同一个数，
+ * 并且不需要额外落库保存抽到的值（实际数额会写进 event_claims.reward_detail）。
+ * seed 用 `eventId:userId`：同一活动里每个人不同、同一个人在不同活动里也不同。
+ *
+ * 返回 null = 配置无法解析出正整数（调用方按「发放失败」处理，让管理员看到）。
+ */
+export function pickPointsAmount(
+  params: Record<string, unknown>,
+  seed: string
+): PickedPointsAmount | null {
+  const rawMin = Number(params.min)
+  const rawMax = Number(params.max)
+  if (Number.isFinite(rawMin) && Number.isFinite(rawMax)) {
+    const lo = Math.max(1, Math.floor(rawMin))
+    const hi = Math.max(lo, Math.floor(rawMax))
+    if (hi === lo) return { amount: lo, min: lo, max: hi, random: false }
+    return { amount: lo + (hash32(seed) % (hi - lo + 1)), min: lo, max: hi, random: true }
+  }
+  const fixed = readAmount(params, "amount", 0)
+  if (fixed <= 0) return null
+  return { amount: fixed, min: fixed, max: fixed, random: false }
 }
 
 export const REWARD_HANDLERS: Record<RewardType, RewardHandler> = {
@@ -118,13 +218,18 @@ export const REWARD_HANDLERS: Record<RewardType, RewardHandler> = {
    * 「活动奖励类型被改成积分、旧 claim 触发重试」这类边界情况不会重复发放。
    */
   points: async ({ env, userId, params, eventId }) => {
-    const amount = readAmount(params, "amount", 0)
-    if (amount <= 0) return { status: "failed", detail: "活动配置的积分数无效。" }
+    // 支持固定值 / 区间随机（见 pickPointsAmount）。区间时按 `eventId:userId`
+    // 确定性抽取 ⇒ 发放失败重试也是同一个数，不会「金额变来变去」。
+    const picked = pickPointsAmount(params, `${eventId}:${userId}`)
+    if (!picked) return { status: "failed", detail: "活动配置的积分数无效。" }
+    const { amount, min, max, random } = picked
     const res = await applyPoints(env, {
       userId,
       delta: amount,
       reason: "event",
-      detail: `活动奖励：${amount} 积分`,
+      detail: random
+        ? `活动奖励：${amount} 积分（区间 ${min}~${max} 随机）`
+        : `活动奖励：${amount} 积分`,
       dedupKey: `event:${eventId}`,
     })
     if (!res.applied) {
@@ -188,13 +293,27 @@ export const CONDITION_TYPES = [
   "has_feature",
   "code",
   "lottery",
+  "github_star",
 ] as const
 export type ConditionType = (typeof CONDITION_TYPES)[number]
+
+/**
+ * 领取时前端带过来的输入（服务端一律**不信**这些值，只当线索去核验）。
+ * 目前只有认证码与 GitHub 用户名两种活动用得到。
+ */
+export interface ClaimInput {
+  /** condition_type = code 时的认证码 */
+  code?: string
+  /** condition_type = github_star 时的 GitHub 用户名 */
+  github?: string
+}
 
 export type ConditionHandler = (
   env: Env,
   userId: string,
-  params: Record<string, unknown>
+  params: Record<string, unknown>,
+  /** 领取请求里带的输入；老条件用不到，忽略即可 */
+  input: ClaimInput
 ) => Promise<boolean>
 
 export const CONDITION_HANDLERS: Record<ConditionType, ConditionHandler> = {
@@ -256,7 +375,29 @@ export const CONDITION_HANDLERS: Record<ConditionType, ConditionHandler> = {
    * 所以这里恒通过 —— 是否还能报名由 claimState（未结束）与 max_claims（参与上限）管，
    * 与「条件」无关。配置见 parseLotteryConfig。
    */
+  /**
+   * 抽奖：报名阶段的「条件」是恒真 —— 能不能中奖由开奖时按奖池分配决定，
+   * 报名本身不该有门槛（见 handlers/events.ts 的 drawEvent）。
+   */
   lottery: async () => true,
+
+  /**
+   * 「有没有给我的 GitHub 仓库点过 star」。
+   *
+   * `condition_params`：`{ repo: "owner/name" }`
+   * 领取时 `input.github` 是用户自己填的 GitHub 用户名。
+   *
+   * ⚠️ 核验不了（仓库私有 / 限额打光 / 网络异常）时**返回 false**，
+   * 但真正的用户提示由 `handlers/events.ts` 在调本函数**之前**的预检给出 ——
+   * 那边能拿到 `error` 文案，能告诉用户「稍后再试」而不是「你没点 star」。
+   */
+  github_star: async (env, _userId, params, input) => {
+    const repo = String(params.repo ?? "").trim()
+    const who = String(input.github ?? "").trim()
+    if (!repo || !who) return false
+    const res = await checkStarred(env, repo, who)
+    return res.ok
+  },
 }
 
 // ---- 抽奖 ----

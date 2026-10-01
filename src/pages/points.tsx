@@ -16,6 +16,7 @@ import {
   Sparkles,
   Store,
   Trash2,
+  Upload,
   Wallet,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -39,7 +40,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { pointsApi, errMsg } from "@/services/api"
+import { pointsApi, errMsg, HttpError } from "@/services/api"
 import { notifyPointsChanged } from "@/components/points-badge"
 import { fmtDateTime } from "@/lib/format"
 import { shopIcon } from "@/lib/shop-icons"
@@ -397,6 +398,32 @@ export default function PointsPage() {
   const [editingId, setEditingId] = React.useState<string | null>(null)
   const [form, setForm] = React.useState<UploadForm>(emptyUpload())
   const [formBusy, setFormBusy] = React.useState(false)
+
+  // 封面图直传（2026-10-01）：传完把返回的同源 URL 填进 imageUrl，卖家不用再找图床
+  const [coverUploading, setCoverUploading] = React.useState(false)
+  const coverInputRef = React.useRef<HTMLInputElement | null>(null)
+  const handleCoverPick = async (file: File | undefined) => {
+    if (!file) return
+    if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type)) {
+      toast.error("封面只支持 JPG / PNG / WebP / GIF")
+      return
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("封面图不能超过 5 MB")
+      return
+    }
+    setCoverUploading(true)
+    try {
+      const res = await pointsApi.uploadProductImage(file)
+      setForm((f) => ({ ...f, imageUrl: res.url }))
+      toast.success("封面上传成功")
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "封面上传失败")
+    } finally {
+      setCoverUploading(false)
+      if (coverInputRef.current) coverInputRef.current.value = ""
+    }
+  }
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -863,6 +890,18 @@ export default function PointsPage() {
                           <p className="truncate text-xs text-muted-foreground">
                             {fmtDateTime(o.createdAt)}
                             {isUserOrder ? ` · 卖家 ${o.sellerName ?? "?"}` : ""}
+                            {/* 交易双方能互相联系（2026-10-01）：交付方式、催确认收货都靠它 */}
+                            {isUserOrder && o.sellerName && (
+                              <>
+                                {" · "}
+                                <Link
+                                  to={`/dashboard/dm/${encodeURIComponent(o.sellerName)}`}
+                                  className="underline underline-offset-2 hover:text-foreground"
+                                >
+                                  发私信
+                                </Link>
+                              </>
+                            )}
                             {o.note ? ` · ${o.note}` : ""}
                           </p>
                           {rental && (
@@ -936,6 +975,13 @@ export default function PointsPage() {
                             </p>
                             <p className="truncate text-xs text-muted-foreground">
                               买家 {o.username} · {fmtDateTime(o.createdAt)}
+                              {" · "}
+                              <Link
+                                to={`/dashboard/dm/${encodeURIComponent(o.username)}`}
+                                className="underline underline-offset-2 hover:text-foreground"
+                              >
+                                发私信
+                              </Link>
                               {o.note ? ` · ${o.note}` : ""}
                             </p>
                             {rentalOrderText(o) && (
@@ -1356,16 +1402,41 @@ export default function PointsPage() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="upImage">封面图地址（可选，http(s) 链接）</Label>
+              <div className="flex items-center justify-between gap-2">
+                <Label htmlFor="upImage">封面图（可选）</Label>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={coverUploading}
+                  onClick={() => coverInputRef.current?.click()}
+                >
+                  {coverUploading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Upload className="h-3.5 w-3.5" />
+                  )}
+                  本地上传
+                </Button>
+                {/* 隐藏的文件选择：传完立即把返回的 URL 填进下面的输入框 */}
+                <input
+                  ref={coverInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/gif"
+                  className="hidden"
+                  onChange={(e) => void handleCoverPick(e.target.files?.[0])}
+                />
+              </div>
               <Input
                 id="upImage"
-                placeholder="https://..."
+                placeholder="https://... 或点「本地上传」"
                 value={form.imageUrl}
                 onChange={(e) => setForm((f) => ({ ...f, imageUrl: e.target.value }))}
               />
               {form.imageUrl.trim() && (
                 <p className="text-xs text-muted-foreground">
                   填了封面图就以图片为准，下面的图标不会显示（不用特意清空）。
+                  本地上传的图存本站网盘，直接粘外链也可以。
                 </p>
               )}
             </div>

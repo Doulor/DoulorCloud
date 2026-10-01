@@ -34,6 +34,7 @@ const AchievementsPage = React.lazy(() => import("@/pages/achievements"))
 const PointsPage = React.lazy(() => import("@/pages/points"))
 const AdminPage = React.lazy(() => import("@/pages/admin"))
 const MessagesPage = React.lazy(() => import("@/pages/messages"))
+const DmPage = React.lazy(() => import("@/pages/dm"))
 const CommunityPage = React.lazy(() => import("@/pages/community"))
 const ToolboxPage = React.lazy(() => import("@/pages/toolbox"))
 const ToolboxDetailPage = React.lazy(() => import("@/pages/toolbox-detail"))
@@ -192,6 +193,9 @@ function AppRoutes() {
         <Route path="points" element={<PointsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="messages" element={<MessagesPage />} />
+        {/* 一对一私信：带用户名就是打开某个会话，不带就是纯列表 */}
+        <Route path="dm" element={<DmPage />} />
+        <Route path="dm/:username" element={<DmPage />} />
         {/* 消息中心每个分类都有自己的 URL（深链）：/dashboard/messages/<system|site|social|event> */}
         <Route path="messages/:category" element={<MessagesPage />} />
         <Route path="donations" element={<DonationPage />} />
