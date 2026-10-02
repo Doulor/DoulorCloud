@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
+import { useT } from "@/i18n"
 
 const STORAGE_KEY = "doulor.toolbox.countdown"
 
@@ -58,6 +59,7 @@ function daysBetween(a: Date, b: Date): number {
 }
 
 export default function CountdownTool() {
+  const { t } = useT()
   const [items, setItems] = React.useState<Item[]>([])
   const [name, setName] = React.useState("")
   const [date, setDate] = React.useState("")
@@ -100,15 +102,15 @@ export default function CountdownTool() {
 
   return (
     <ToolShell
-      title="倒计时与纪念日"
-      description="记录重要的日子，看还有多少天，或者已经过去了多久。数据只保存在这台设备上。"
+      title={t("toolbox.countdown.name")}
+      description={t("cd.desc")}
     >
-      <ToolSection title="添加一个日子">
+      <ToolSection title={t("cd.section.add")}>
         <div className="grid gap-3 sm:grid-cols-[1fr_170px_130px_auto]">
           <Input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="名称，如：结婚纪念日"
+            placeholder={t("cd.namePlaceholder")}
             onKeyDown={(e) => e.key === "Enter" && handleAdd()}
           />
           <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
@@ -117,21 +119,21 @@ export default function CountdownTool() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="countdown">倒数到那天</SelectItem>
-              <SelectItem value="since">从那天起</SelectItem>
+              <SelectItem value="countdown">{t("cd.mode.countdown")}</SelectItem>
+              <SelectItem value="since">{t("cd.mode.since")}</SelectItem>
             </SelectContent>
           </Select>
           <Button onClick={handleAdd} disabled={!name.trim() || !parseLocalDate(date)}>
             <Plus className="h-4 w-4" />
-            添加
+            {t("common.add")}
           </Button>
         </div>
       </ToolSection>
 
-      <ToolSection title={`我的日子（${items.length}）`}>
+      <ToolSection title={t("cd.section.list", { n: items.length })}>
         {items.length === 0 ? (
           <p className="py-8 text-center text-sm text-muted-foreground">
-            还没有记录，上面添加一个试试
+            {t("cd.empty")}
           </p>
         ) : (
           <ul className="grid gap-3 sm:grid-cols-2">
@@ -159,7 +161,7 @@ export default function CountdownTool() {
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
-                      aria-label="删除"
+                      aria-label={t("common.delete")}
                       onClick={() => update(items.filter((x) => x.id !== it.id))}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
@@ -177,14 +179,14 @@ export default function CountdownTool() {
                     <span className="text-xs text-muted-foreground">
                       {it.mode === "countdown"
                         ? past
-                          ? "天前（已过）"
-                          : "天后"
-                        : "天前"}
+                          ? t("cd.daysPastMarked")
+                          : t("cd.daysAhead")
+                        : t("cd.daysPast")}
                     </span>
                   </div>
                   <p className="mt-1 font-mono text-xs text-muted-foreground">
-                    {past ? "已过 " : "还剩 "}
-                    {h} 时 {m} 分 {s} 秒
+                    {past ? t("cd.past") : t("cd.left")}
+                    {t("cd.hms", { h, m, s })}
                   </p>
                 </li>
               )

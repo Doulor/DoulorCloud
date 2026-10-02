@@ -1,4 +1,5 @@
 import * as React from "react"
+import { useT } from "@/i18n"
 import { useNavigate, useParams } from "react-router-dom"
 import {
   Bell,
@@ -37,39 +38,44 @@ import type {
   Notification,
 } from "@/types"
 
+/**
+ * 分类元数据。文案存 **i18n key**（不是译好的字符串）——
+ * 模块级常量在加载时就把语言冻结了，key 留到渲染/取词时再解析。
+ */
 const CATEGORY_META: Record<
   MessageCategory,
-  { label: string; icon: typeof Bell; empty: string; emptyDesc: string }
+  { labelKey: string; icon: typeof Bell; emptyKey: string; emptyDescKey: string }
 > = {
   system: {
-    label: "系统消息",
+    labelKey: "msg.cat.system",
     icon: Info,
-    empty: "没有系统消息",
-    emptyDesc: "账号状态、捐献审核结果等会出现在这里。",
+    emptyKey: "msg.empty.system",
+    emptyDescKey: "msg.empty.systemDesc",
   },
   site: {
-    label: "网站动态",
+    labelKey: "msg.cat.site",
     icon: Megaphone,
-    empty: "还没有网站动态",
-    emptyDesc: "管理员发布的公告会出现在这里。",
+    emptyKey: "msg.empty.site",
+    emptyDescKey: "msg.empty.siteDesc",
   },
   social: {
-    label: "社交消息",
+    labelKey: "msg.cat.social",
     icon: MessagesSquare,
-    empty: "没有社交消息",
-    emptyDesc: "社区里的回复与点赞会出现在这里。",
+    emptyKey: "msg.empty.social",
+    emptyDescKey: "msg.empty.socialDesc",
   },
   event: {
-    label: "活动推广",
+    labelKey: "msg.cat.event",
     icon: PartyPopper,
-    empty: "暂时没有活动",
-    emptyDesc: "管理员发布新活动时会推送到这里。",
+    emptyKey: "msg.empty.event",
+    emptyDescKey: "msg.empty.eventDesc",
   },
 }
 
 const TABS: MessageCategory[] = ["system", "site", "social", "event"]
 
 export default function MessagesPage() {
+  const { t } = useT()
   const { user } = useAuth()
   const navigate = useNavigate()
   const { category } = useParams<{ category?: string }>()
@@ -100,10 +106,11 @@ export default function MessagesPage() {
       const res = await notificationApi.list({ category: c })
       setMessages((prev) => ({ ...prev, [c]: res.notifications }))
     } catch (err) {
-      toast.error(errMsg(err, "消息加载失败"))
+      toast.error(errMsg(err, t("msg.err.load")))
       setMessages((prev) => ({ ...prev, [c]: [] }))
     }
-  }, [])
+    // t 来自 context，语言切换会重建；这里只在 t 变化时重建即可
+  }, [t])
 
   const loadCounts = React.useCallback(async () => {
     try {
@@ -117,10 +124,10 @@ export default function MessagesPage() {
     try {
       setEvents((await eventApi.list()).events)
     } catch (err) {
-      toast.error(errMsg(err, "活动加载失败"))
+      toast.error(errMsg(err, t("msg.err.loadEvents")))
       setEvents([])
     }
-  }, [])
+  }, [t])
 
   // 首屏：未读数 + 活动（消息列表由下面的 tab effect 按当前 URL 加载，
   // 这样「深链直达某个分类」和「正常进页面」走的是同一条路径）
@@ -244,7 +251,7 @@ export default function MessagesPage() {
     // 帖子已删则无处可跳，给个提示而不是静默无反应。
     if (!n.link && n.postId) {
       if (n.postDeleted) {
-        toast.error("该帖子已被删除")
+        toast.error(t("msg.postDeleted"))
         return
       }
       navigate(`/dashboard/community/${n.postId}`)
@@ -269,9 +276,9 @@ export default function MessagesPage() {
       )
       setByCategory((prev) => ({ ...prev, [c]: 0 }))
       notifyMessagesChanged()
-      toast.success(`已将「${CATEGORY_META[c].label}」全部标记为已读`)
+      toast.success(t("msg.markAllReadDone", { category: t(CATEGORY_META[c].labelKey) }))
     } catch (err) {
-      toast.error(errMsg(err, "操作失败"))
+      toast.error(errMsg(err, t("common.error")))
     }
   }
 
@@ -282,7 +289,7 @@ export default function MessagesPage() {
     setClaiming(ev.id)
     try {
       const res = await eventApi.claim(ev.id, codeDrafts[ev.id] ?? "")
-      toast.success(res.detail || "领取成功")
+      toast.success(res.detail || t("msg.claimOk"))
       setCodeDrafts((d) => {
         const next = { ...d }
         delete next[ev.id]
@@ -290,7 +297,7 @@ export default function MessagesPage() {
       })
       await loadEvents()
     } catch (err) {
-      toast.error(errMsg(err, "领取失败"))
+      toast.error(errMsg(err, t("msg.claimFailed")))
       // 条件不满足 / 已结束时刷新一下，让按钮状态与服务端一致
       await loadEvents()
     } finally {
@@ -303,8 +310,8 @@ export default function MessagesPage() {
   return (
     <div>
       <PageHeader
-        title="消息中心"
-        description="系统消息、网站动态、社区互动与活动推广都汇总在这里。"
+        title={t("msg.title")}
+        description={t("msg.desc")}
       />
 
       <Tabs value={tab} onValueChange={handleTabChange}>
@@ -317,7 +324,7 @@ export default function MessagesPage() {
               return (
                 <TabsTrigger key={c} value={c} className="gap-1.5">
                   <Icon className="h-3.5 w-3.5" />
-                  {meta.label}
+                  {t(meta.labelKey)}
                   {n > 0 && (
                     <Badge variant="destructive" className="h-4 px-1 text-[10px] tabular-nums">
                       {n > 99 ? "99+" : n}
@@ -334,7 +341,7 @@ export default function MessagesPage() {
             disabled={byCategory[tab] === 0}
           >
             <CheckCheck className="h-4 w-4" />
-            本页全部已读
+            {t("msg.markAllRead")}
           </Button>
         </div>
 
@@ -357,8 +364,8 @@ export default function MessagesPage() {
             ) : (messages[c] ?? []).length === 0 ? (
               <EmptyState
                 icon={CATEGORY_META[c].icon}
-                title={CATEGORY_META[c].empty}
-                description={CATEGORY_META[c].emptyDesc}
+                title={t(CATEGORY_META[c].emptyKey)}
+                description={t(CATEGORY_META[c].emptyDescKey)}
               />
             ) : (
               <div className="space-y-2">
@@ -397,6 +404,7 @@ function OrderMessageActions({
   /** 操作成功后回调（带上消息 id，父级把这条的按钮摘掉并置已读） */
   onChanged: (messageId: string) => void
 }) {
+  const { t } = useT()
   const [busy, setBusy] = React.useState(false)
   const p = (n.payload ?? {}) as { kind?: string; orderId?: string; action?: string | null }
   const isDeliver = p.action === "deliver"
@@ -412,11 +420,11 @@ function OrderMessageActions({
     try {
       if (isDeliver) await pointsApi.sellerDeliver(orderId)
       else await pointsApi.confirmReceipt(orderId)
-      toast.success(isDeliver ? "已标记交付，等买家确认收货" : "已确认收货，积分已转给卖家")
+      toast.success(isDeliver ? t("msg.order.delivered") : t("msg.order.confirmed"))
       notifyPointsChanged()
       onChanged(n.id)
     } catch (err) {
-      toast.error(errMsg(err, isDeliver ? "交付失败" : "确认收货失败"))
+      toast.error(errMsg(err, isDeliver ? t("msg.order.deliverFailed") : t("msg.order.confirmFailed")))
     } finally {
       setBusy(false)
     }
@@ -431,7 +439,7 @@ function OrderMessageActions({
       ) : (
         <Check className="mr-1.5 h-3.5 w-3.5" />
       )}
-      {isDeliver ? "标记已交付" : "确认收货"}
+      {isDeliver ? t("msg.order.markDelivered") : t("msg.order.confirmReceipt")}
     </Button>
   )
 }
@@ -446,6 +454,7 @@ function MessageRow({
   onOpen: () => void
   onOrderChanged: (messageId: string) => void
 }) {
+  const { t } = useT()
   const isSiteOrSystem = n.category === "site" || n.category === "system"
   const actor = n.actorNickname || n.actorUsername
 
@@ -467,12 +476,12 @@ function MessageRow({
             {!isSiteOrSystem && (
               <p className="text-sm font-medium">
                 {n.type === "post_like"
-                  ? `${actor ?? "有人"} 赞了你的帖子`
-                  : `${actor ?? "有人"} 回复了你的帖子`}
+                  ? t("msg.liked", { actor: actor ?? t("msg.someone") })
+                  : t("msg.replied", { actor: actor ?? t("msg.someone") })}
               </p>
             )}
             <span className="text-xs text-muted-foreground">
-              {new Date(n.createdAt).toLocaleString("zh-CN")}
+              {new Date(n.createdAt).toLocaleString(t("msg.dateLocale"))}
             </span>
           </div>
 
@@ -490,9 +499,9 @@ function MessageRow({
           {!isSiteOrSystem && (
             <div className="space-y-0.5 text-xs text-muted-foreground">
               {n.postDeleted ? (
-                <p className="italic">帖子已删除</p>
+                <p className="italic">{t("msg.postDeletedShort")}</p>
               ) : (
-                n.postPreview && <p className="truncate">「{n.postPreview}」</p>
+                n.postPreview && <p className="truncate">{t("msg.postPreview", { text: n.postPreview })}</p>
               )}
               {n.commentPreview && <p className="truncate">{n.commentPreview}</p>}
             </div>
@@ -519,14 +528,15 @@ function EventList({
   codeDrafts: Record<string, string>
   onCodeChange: (id: string, v: string) => void
   onClaim: (ev: EventItem) => void
-}) {
+}) {  const { t } = useT()
+
   if (loading && events.length === 0) return <LoadingBlock />
   if (events.length === 0) {
     return (
       <EmptyState
         icon={PartyPopper}
-        title="暂时没有活动"
-        description="管理员发布新活动时会推送到这里。"
+        title={t("msg.empty.event")}
+        description={t("msg.empty.eventDesc")}
       />
     )
   }
@@ -561,6 +571,7 @@ function EventCard({
   onCodeChange: (v: string) => void
   onClaim: () => void
 }) {
+  const { t } = useT()
   const claim = ev.myClaim
   const claimed = !!claim && claim.rewardStatus !== "failed"
   /** 认证码活动：领取前必须输入管理员公布的口令（如 QQ 群群公告里的码） */
@@ -572,13 +583,21 @@ function EventCard({
   /** 未满足奖励前置条件（如未开通中转站）：按钮置灰并说明原因，避免点了才失败 */
   const blockedReason = claimed ? "" : ev.claimBlockedReason ?? ""
 
+  const locale = t("msg.dateLocale")
   const timeText = (() => {
     if (ev.startsAt && ev.endsAt) {
-      return `${new Date(ev.startsAt).toLocaleString("zh-CN")} 至 ${new Date(ev.endsAt).toLocaleString("zh-CN")}`
+      return t("msg.time.range", {
+        from: new Date(ev.startsAt).toLocaleString(locale),
+        to: new Date(ev.endsAt).toLocaleString(locale),
+      })
     }
-    if (ev.endsAt) return `截止 ${new Date(ev.endsAt).toLocaleString("zh-CN")}`
-    if (ev.startsAt) return `从 ${new Date(ev.startsAt).toLocaleString("zh-CN")} 开始`
-    return "长期有效"
+    if (ev.endsAt) {
+      return t("msg.time.until", { at: new Date(ev.endsAt).toLocaleString(locale) })
+    }
+    if (ev.startsAt) {
+      return t("msg.time.from", { at: new Date(ev.startsAt).toLocaleString(locale) })
+    }
+    return t("msg.time.always")
   })()
 
   /** 复制这场活动的分享链接（/activity/<id>，未登录也能打开看到内容） */
@@ -586,9 +605,9 @@ function EventCard({
     const url = `${window.location.origin}/activity/${ev.id}`
     try {
       await navigator.clipboard.writeText(url)
-      toast.success("活动链接已复制，发给别人即可参与")
+      toast.success(t("msg.shareCopied"))
     } catch {
-      toast.message("复制失败，请手动复制", { description: url })
+      toast.message(t("msg.shareCopyFailed"), { description: url })
     }
   }
 
@@ -598,8 +617,8 @@ function EventCard({
         <div className="flex flex-wrap items-center gap-2">
           <Gift className="h-4 w-4 text-primary" />
           <p className="text-base font-semibold">{ev.title}</p>
-          {ev.claimState === "ended" && <Badge variant="secondary">已结束</Badge>}
-          {ev.claimState === "not_started" && <Badge variant="outline">未开始</Badge>}
+          {ev.claimState === "ended" && <Badge variant="secondary">{t("msg.ended")}</Badge>}
+          {ev.claimState === "not_started" && <Badge variant="outline">{t("msg.notStarted")}</Badge>}
         </div>
 
         <div className="text-muted-foreground">
@@ -621,26 +640,29 @@ function EventCard({
                   <Users className="h-3.5 w-3.5" />
                   {isLottery
                     ? left > 0
-                      ? `限 ${ev.maxClaims} 人参与，还剩 ${left} 个名额`
-                      : "参与人数已满"
+                      ? t("msg.slots.lottery", { max: ev.maxClaims, left })
+                      : t("msg.slots.lotteryFull")
                     : left > 0
-                      ? `限量 ${ev.maxClaims} 份，剩余 ${left} 份`
-                      : "名额已满"}
+                      ? t("msg.slots.quota", { max: ev.maxClaims, left })
+                      : t("msg.slots.quotaFull")}
                 </span>
               )
             })()}
           {ev.lottery && (
             <span className="inline-flex items-center gap-1">
               <Gift className="h-3.5 w-3.5" />
-              {ev.lottery.drawn ? "已开奖 · " : ""}
-              抽 {ev.lottery.winners} 人，奖池 {ev.lottery.pool} 积分（
-              {ev.lottery.mode === "even" ? "平均分" : "随机分"}）
+              {ev.lottery.drawn ? t("msg.lottery.drawnPrefix") : ""}
+              {t("msg.lottery.summary", {
+                winners: ev.lottery.winners,
+                pool: ev.lottery.pool,
+                mode: ev.lottery.mode === "even" ? t("msg.mode.even") : t("msg.mode.random"),
+              })}
             </span>
           )}
           {ev.rewardLabel && (
             <span className="inline-flex items-center gap-1 font-medium text-foreground">
               <Gift className="h-3.5 w-3.5" />
-              奖励：{ev.rewardLabel}
+              {t("msg.rewardLabel", { label: ev.rewardLabel })}
             </span>
           )}
         </div>
@@ -648,14 +670,14 @@ function EventCard({
         <div className="flex flex-wrap items-center gap-2">
           {claimed ? (
             <Badge variant={claim?.rewardStatus === "granted" ? "success" : "secondary"}>
-              {claim?.rewardDetail ?? "已领取"}
+              {claim?.rewardDetail ?? t("msg.claimed")}
             </Badge>
           ) : (
             <>
               {needsCode && (
                 <Input
                   className="h-9 w-44"
-                  placeholder="输入认证码"
+                  placeholder={t("msg.enterCode")}
                   maxLength={64}
                   value={code}
                   onChange={(e) => onCodeChange(e.target.value)}
@@ -679,18 +701,18 @@ function EventCard({
               >
                 {busy && <Loader2 className="h-4 w-4 animate-spin" />}
                 {ev.claimState === "not_started"
-                  ? "未开始"
+                  ? t("msg.btn.notStarted")
                   : ev.claimState === "ended"
-                    ? "已结束"
+                    ? t("msg.btn.ended")
                     : blockedReason
-                      ? "暂不可领取"
+                      ? t("msg.btn.blocked")
                       : claim?.rewardStatus === "failed"
-                        ? "重新尝试领取"
+                        ? t("msg.btn.retry")
                         : lotteryClosed
-                          ? "已开奖"
+                          ? t("msg.btn.drawn")
                           : isLottery
-                            ? "参与抽奖"
-                            : "立即参与"}
+                            ? t("msg.btn.joinLottery")
+                            : t("msg.btn.join")}
               </Button>
             </>
           )}
@@ -702,18 +724,17 @@ function EventCard({
           )}
           <Button variant="outline" size="sm" onClick={() => void shareLink()}>
             <Share2 className="h-4 w-4" />
-            分享
+            {t("msg.share")}
           </Button>
         </div>
         {needsCode && (
-          <p className="text-xs text-muted-foreground">
-            该活动需要认证码才能参与，认证码通常在活动说明或指定群内公布。
-          </p>
+          <p className="text-xs text-muted-foreground">{t("msg.codeHint")}</p>
         )}
         {isLottery && !claimed && (
           <p className="text-xs text-muted-foreground">
-            抽奖活动：点「参与抽奖」只是报名，当时不发奖。活动结束后由系统从报名者里随机抽取中奖者，
-            按「{ev.lottery?.mode === "even" ? "平均分" : "随机分"}」发放奖池积分。
+            {t("msg.lottery.hint", {
+              mode: ev.lottery?.mode === "even" ? t("msg.mode.even") : t("msg.mode.random"),
+            })}
           </p>
         )}
         {blockedReason && (

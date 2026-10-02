@@ -1010,6 +1010,32 @@ export async function addChannel(
 }
 
 /**
+ * 只改渠道的**所属分组**（`PUT /api/channel/`）。
+ *
+ * 为什么只需要传 `id + group`：同 `updateChannelModels` —— NewAPI 的
+ * `UpdateChannel` 走 GORM `Updates(结构体)`，只会写非零字段，没传的
+ * name / key / base_url / models 全部原样保留。这正好绕开「读渠道拿不到明文 key」
+ * 的死结（列表接口一律 `Omit("key")`），所以**改分组完全不需要 key**。
+ *
+ * ⚠️ 绝不能带 `status`（`UpdateChannel` 见到就报参数错误），启停要走
+ * `/api/channel/:id/status`。
+ *
+ * 用途：把 2026-10-01 之前建在 `default` 分组里的捐献渠道，纠正到捐献分组
+ * （见 handlers/donations.ts 复用渠道时的自愈）。
+ */
+export async function updateChannelGroup(
+  env: Env,
+  channelId: number,
+  group: string
+): Promise<void> {
+  const res = await newApiFetch(env, "/api/channel/", {
+    method: "PUT",
+    body: JSON.stringify({ id: channelId, group }),
+  })
+  await unwrap(res, "更新渠道分组")
+}
+
+/**
  * 只改渠道的模型列表与重定向表（`PUT /api/channel/`）。
  *
  * ⚠️ 只传这两个字段是**刻意**的：NewAPI 的 `UpdateChannel` 最终走

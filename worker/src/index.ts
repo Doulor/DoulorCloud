@@ -32,6 +32,7 @@ import * as spaceHandlers from "./handlers/space"
 import * as analyticsHandlers from "./handlers/analytics"
 import * as auditHandlers from "./handlers/audit"
 import * as chatHandlers from "./handlers/chat"
+import * as dmHandlers from "./handlers/dm"
 import * as oauthHandlers from "./handlers/oauth"
 import * as feedbackHandlers from "./handlers/feedback"
 import * as eventHandlers from "./handlers/events"
@@ -1571,6 +1572,38 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       chatHandlers.markChatSeen(env, request),
   },
 
+  // ---- 一对一私信（2026-10-01）----
+  {
+    kind: "exact",
+    path: "/dm/conversations",
+    method: "GET",
+    handle: () => dmHandlers.listConversations(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/dm/unread",
+    method: "GET",
+    handle: () => dmHandlers.dmUnreadCount(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/dm/seen",
+    method: "POST",
+    handle: () => dmHandlers.markDmSeen(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/dm",
+    method: "GET",
+    handle: () => dmHandlers.listDm(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/dm",
+    method: "POST",
+    handle: () => dmHandlers.sendDm(env, request),
+  },
+
   {
     kind: "exact",
     path: "/community/posts",
@@ -1848,6 +1881,13 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   },
 
   // ---- 用户商城（用户自己上架 / 交付 / 确认收货）----
+  {
+    // 商品封面上传：返回可直接填进 imageUrl 的同源 URL（2026-10-01）
+    kind: "exact",
+    path: "/points/product/image",
+    method: "POST",
+    handle: () => pointHandlers.uploadProductImage(env, request),
+  },
   {
     kind: "exact",
     path: "/points/products",
@@ -2632,6 +2672,16 @@ export default {
           env,
           decodeURIComponent(communityImgMatch[1]),
           decodeURIComponent(communityImgMatch[2])
+        )
+      }
+
+      // 商城商品封面：/shop-img/<userId>/<filename>（公开，走平台桶；2026-10-01）
+      const shopImgMatch = url.pathname.match(/^\/shop-img\/([^/]+)\/([^/]+)$/)
+      if (shopImgMatch) {
+        return pointHandlers.serveShopImage(
+          env,
+          decodeURIComponent(shopImgMatch[1]),
+          decodeURIComponent(shopImgMatch[2])
         )
       }
 

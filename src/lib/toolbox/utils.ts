@@ -1,3 +1,4 @@
+import { tStatic } from "@/i18n"
 /**
  * 工具箱通用工具函数。
  *
@@ -51,7 +52,7 @@ export function loadImageFromUrl(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image()
     img.onload = () => resolve(img)
-    img.onerror = () => reject(new Error("图片解码失败，可能格式不受支持"))
+    img.onerror = () => reject(new Error(tStatic("tu.err.decode")))
     img.src = url
   })
 }
@@ -61,7 +62,7 @@ export function createCanvas(width: number, height: number) {
   canvas.width = Math.max(1, Math.round(width))
   canvas.height = Math.max(1, Math.round(height))
   const ctx = canvas.getContext("2d")
-  if (!ctx) throw new Error("当前浏览器无法创建画布")
+  if (!ctx) throw new Error(tStatic("tu.err.canvas"))
   return { canvas, ctx }
 }
 
@@ -72,7 +73,7 @@ export function canvasToBlob(
 ): Promise<Blob> {
   return new Promise((resolve, reject) => {
     canvas.toBlob(
-      (b) => (b ? resolve(b) : reject(new Error("导出图片失败，可能是画布过大"))),
+      (b) => (b ? resolve(b) : reject(new Error(tStatic("tu.err.export")))),
       type,
       quality
     )
@@ -92,7 +93,7 @@ export function readAsText(file: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const r = new FileReader()
     r.onload = () => resolve(String(r.result ?? ""))
-    r.onerror = () => reject(new Error("读取文件失败"))
+    r.onerror = () => reject(new Error(tStatic("tu.err.read")))
     r.readAsText(file)
   })
 }
@@ -101,7 +102,7 @@ export function readAsArrayBuffer(file: Blob): Promise<ArrayBuffer> {
   return new Promise((resolve, reject) => {
     const r = new FileReader()
     r.onload = () => resolve(r.result as ArrayBuffer)
-    r.onerror = () => reject(new Error("读取文件失败"))
+    r.onerror = () => reject(new Error(tStatic("tu.err.read")))
     r.readAsArrayBuffer(file)
   })
 }
@@ -110,7 +111,7 @@ export function readAsDataURL(file: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const r = new FileReader()
     r.onload = () => resolve(String(r.result ?? ""))
-    r.onerror = () => reject(new Error("读取文件失败"))
+    r.onerror = () => reject(new Error(tStatic("tu.err.read")))
     r.readAsDataURL(file)
   })
 }

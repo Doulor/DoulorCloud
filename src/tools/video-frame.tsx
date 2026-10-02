@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { canvasToBlob, createCanvas, downloadBlob, formatDuration } from "@/lib/toolbox/utils"
 import { blobToBytes, createZip, type ZipEntry } from "@/lib/toolbox/zip"
+import { useT } from "@/i18n"
 
 function seekTo(video: HTMLVideoElement, t: number): Promise<void> {
   return new Promise((resolve) => {
@@ -21,6 +22,7 @@ function seekTo(video: HTMLVideoElement, t: number): Promise<void> {
 }
 
 export default function VideoFrameTool() {
+  const { t } = useT()
   const [file, setFile] = React.useState<File | null>(null)
   const [url, setUrl] = React.useState<string | null>(null)
   const [duration, setDuration] = React.useState(0)
@@ -51,10 +53,10 @@ export default function VideoFrameTool() {
     setError(null)
   }
 
-  const grab = async (t: number) => {
+  const grab = async (at: number) => {
     const video = videoRef.current
-    if (!video) throw new Error("视频还没准备好")
-    await seekTo(video, t)
+    if (!video) throw new Error(t("vf.err.notReady"))
+    await seekTo(video, at)
     const { canvas, ctx } = createCanvas(video.videoWidth, video.videoHeight)
     if (format === "jpeg") {
       ctx.fillStyle = "#ffffff"
@@ -76,7 +78,7 @@ export default function VideoFrameTool() {
       downloadBlob(blob, name)
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "截帧失败")
+      setError(e instanceof Error ? e.message : t("vf.err.capture"))
     } finally {
       setBusy(false)
     }
@@ -108,7 +110,7 @@ export default function VideoFrameTool() {
       setShots(out)
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "批量截帧失败")
+      setError(e instanceof Error ? e.message : t("vf.err.batch"))
     } finally {
       setBusy(false)
     }
@@ -120,7 +122,7 @@ export default function VideoFrameTool() {
     try {
       const entries: ZipEntry[] = []
       for (const s of shots) entries.push({ name: s.name, data: await blobToBytes(s.blob) })
-      downloadBlob(createZip(entries), `视频截帧-${Date.now()}.zip`)
+      downloadBlob(createZip(entries), t("vf.fileName", { ts: Date.now() }))
     } finally {
       setBusy(false)
     }
@@ -128,11 +130,11 @@ export default function VideoFrameTool() {
 
   return (
     <ToolShell
-      title="视频截帧"
-      description="把视频里某一秒的画面存成图片。想批量导出成图片序列（比如做逐帧素材）也可以。"
+      title={t("toolbox.videoFrame.name")}
+      description={t("vf.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <ToolSection title="视频">
+        <ToolSection title={t("vf.section.video")}>
           {!url ? (
             <FileDrop
               accept="video/*"
@@ -158,16 +160,16 @@ export default function VideoFrameTool() {
               <div className="flex items-center justify-between gap-3 text-sm">
                 <span className="truncate font-medium">{file?.name}</span>
                 <span className="shrink-0 text-xs text-muted-foreground">
-                  时长 {formatDuration(duration)}
+                  {t("vf.duration", { d: formatDuration(duration) })}
                 </span>
                 <Button variant="ghost" size="sm" onClick={() => { setUrl(null); setFile(null) }}>
-                  换一个
+                  {t("vf.replace")}
                 </Button>
               </div>
 
               <div className="space-y-2">
                 <Label className="text-xs text-muted-foreground">
-                  当前时间点 {time.toFixed(1)}s / {duration.toFixed(1)}s
+                  {t("vf.currentTime", { t: time.toFixed(1), d: duration.toFixed(1) })}
                 </Label>
                 <input
                   type="range"
@@ -188,10 +190,10 @@ export default function VideoFrameTool() {
           )}
         </ToolSection>
 
-        <ToolSection title="导出设置">
+        <ToolSection title={t("vf.section.output")}>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">图片格式</Label>
+              <Label className="text-xs text-muted-foreground">{t("vf.format")}</Label>
               <div className="flex gap-2">
                 {(["png", "jpeg"] as const).map((f) => (
                   <Button
@@ -200,7 +202,7 @@ export default function VideoFrameTool() {
                     size="sm"
                     onClick={() => setFormat(f)}
                   >
-                    {f === "png" ? "PNG 无损" : "JPG 小体积"}
+                    {f === "png" ? t("vf.fmt.png") : t("vf.fmt.jpg")}
                   </Button>
                 ))}
               </div>
@@ -208,11 +210,11 @@ export default function VideoFrameTool() {
 
             <Button className="w-full" disabled={!url || busy} onClick={() => void captureOne()}>
               <Camera className="h-4 w-4" />
-              截取当前画面并下载
+              {t("vf.captureOne")}
             </Button>
 
             <div className="space-y-1.5 border-t pt-4">
-              <Label className="text-xs text-muted-foreground">批量截帧：每几秒一张</Label>
+              <Label className="text-xs text-muted-foreground">{t("vf.batchEvery")}</Label>
               <Input
                 type="number"
                 min={0.5}
@@ -221,7 +223,7 @@ export default function VideoFrameTool() {
                 onChange={(e) => setIntervalSec(Math.max(0.5, Number(e.target.value) || 0.5))}
               />
               <p className="text-xs text-muted-foreground">
-                预计约 {duration > 0 ? Math.floor(duration / Math.max(0.5, interval)) + 1 : 0} 张
+                {t("vf.estimated", { n: duration > 0 ? Math.floor(duration / Math.max(0.5, interval)) + 1 : 0 })}
               </p>
             </div>
 
@@ -231,7 +233,7 @@ export default function VideoFrameTool() {
               disabled={!url || busy || duration <= 0}
               onClick={() => void captureAll()}
             >
-              {busy && progress > 0 ? `截取中 ${progress}%` : "批量截帧"}
+              {busy && progress > 0 ? t("vf.capturing", { n: progress }) : t("vf.batch")}
             </Button>
 
             <Button
@@ -240,7 +242,7 @@ export default function VideoFrameTool() {
               onClick={() => void downloadZip()}
             >
               <Package className="h-4 w-4" />
-              打包下载 ZIP（{shots.length} 张）
+              {t("vf.zipAll", { n: shots.length })}
             </Button>
 
             {error && <p className="text-xs text-destructive">{error}</p>}
@@ -249,7 +251,7 @@ export default function VideoFrameTool() {
       </div>
 
       {shots.length > 0 && (
-        <ToolSection title={`已截取 ${shots.length} 张（点单张可单独下载）`}>
+        <ToolSection title={t("vf.shotsTitle", { n: shots.length })}>
           <div className="grid gap-3 sm:grid-cols-4 lg:grid-cols-6">
             {shots.map((s) => (
               <button

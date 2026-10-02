@@ -24,9 +24,10 @@ dist-ssr
 *.log
 
 # 开发与运维工具（真机验收脚本、探针、部署脚本；仅本地保留）
-# 例外：包脚本 check:i18n 依赖的校验器随源码发布
+# 例外：包脚本 check:i18n / check:vendors 依赖的校验器随源码发布
 scripts/*
 !scripts/check-i18n.mjs
+!scripts/check-model-vendors.mjs
 docs/
 HANDOFF.md
 

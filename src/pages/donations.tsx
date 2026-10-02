@@ -69,6 +69,7 @@ import {
   HttpError,
 } from "@/services/api"
 import { fmtTime } from "@/lib/format"
+import { useT, tStatic } from "@/i18n"
 import type {
   AiProbeResult,
   DonationOverview,
@@ -91,10 +92,10 @@ import type {
 const TYPE_META: Record<string, { label: string; desc: string }> = {
   // 卡片标题用「AI 模型」而不是「AI 中转站」：这里捐的是模型（渠道是载体），
   // 叫「中转站」会把「站点」和「模型资源」混起来，用户容易不知道该填什么。
-  ai: { label: "AI 模型", desc: "贡献一个模型渠道，让其他用户也能用" },
-  frp: { label: "内网穿透", desc: "提供完整可用的 config.yml" },
-  proxy: { label: "代理节点", desc: "贡献你的代理订阅链接" },
-  sensenova: { label: "商汤 Key", desc: "贡献一个商汤日日新 API Key" },
+  ai: { label: "don.type.ai", desc: "don.type.aiDesc" },
+  frp: { label: "don.type.frp", desc: "don.type.frpDesc" },
+  proxy: { label: "don.type.proxy", desc: "don.type.proxyDesc" },
+  sensenova: { label: "don.type.sensenova", desc: "don.type.sensenovaDesc" },
 }
 
 /**
@@ -113,12 +114,13 @@ const LISTED_TYPES = ["ai", "frp", "proxy"]
  * `value` 是探测时用的格式名，`channelType` 是建渠道时给 NewAPI 的类型。
  */
 const AI_FORMATS: { value: string; label: string; channelType: number }[] = [
-  { value: "auto", label: "自动识别（推荐）", channelType: 1 },
-  { value: "openai", label: "OpenAI 兼容（/v1/chat/completions）", channelType: 1 },
-  { value: "anthropic", label: "Anthropic 原生（/v1/messages）", channelType: 14 },
+  { value: "auto", label: "don.fmt.auto", channelType: 1 },
+  { value: "openai", label: "don.fmt.openai", channelType: 1 },
+  { value: "anthropic", label: "don.fmt.anthropic", channelType: 14 },
 ]
 
 export default function DonationPage() {
+  const { t } = useT()
   const [searchParams] = useSearchParams()
   const [data, setData] = React.useState<DonationOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
@@ -145,7 +147,7 @@ export default function DonationPage() {
     } catch (err) {
       // ⚠️ 2026-09-26：失败必须落成错误态。原先只 toast，`data` 保持 null ⇒
       // 页面显示成「还没有捐献记录」，用户以为本来就没人捐过。
-      toast.error(err instanceof HttpError ? err.message : "加载失败")
+      toast.error(err instanceof HttpError ? err.message : t("at.err.load"))
       setFailed(true)
     } finally {
       setLoading(false)
@@ -239,7 +241,7 @@ export default function DonationPage() {
         code: inviteCode.trim() || undefined,
         features: inviteFeatures,
       })
-      toast.success("邀请码已创建")
+      toast.success(t("don.ok.inviteCreated"))
       setInviteOpen(false)
       setInviteCode("")
       setInviteFeatures([])
@@ -250,7 +252,7 @@ export default function DonationPage() {
         await copyLink(res.invite.code)
       }
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "创建失败")
+      toast.error(err instanceof HttpError ? err.message : t("dm.err.create"))
     } finally {
       setInviteBusy(false)
     }
@@ -259,10 +261,10 @@ export default function DonationPage() {
   const handleDeleteInvite = async (inv: MyInvite) => {
     try {
       const res = await myInviteApi.remove(inv.id)
-      toast.success(res.refunded ? "已删除，额度已退还" : "已删除（该码已被使用，额度不退还）")
+      toast.success(res.refunded ? t("don.ok.deletedRefunded") : t("don.ok.deletedNoRefund"))
       await loadInvites()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.delete"))
     }
   }
 
@@ -272,7 +274,7 @@ export default function DonationPage() {
       setCopiedCode(code)
       setTimeout(() => setCopiedCode(null), 1500)
     } catch {
-      toast.error("复制失败，请手动复制")
+      toast.error(t("ai.err.copy"))
     }
   }
 
@@ -288,9 +290,9 @@ export default function DonationPage() {
       await navigator.clipboard.writeText(inviteLinkOf(code))
       setCopiedLink(code)
       setTimeout(() => setCopiedLink(null), 1500)
-      toast.success("邀请链接已复制，发给好友即可")
+      toast.success(t("don.ok.linkCopied"))
     } catch {
-      toast.error("复制失败，请手动复制")
+      toast.error(t("ai.err.copy"))
     }
   }
 
@@ -300,9 +302,9 @@ export default function DonationPage() {
   const copyRegisterLink = async () => {
     try {
       await navigator.clipboard.writeText(`${window.location.origin}/register`)
-      toast.success("当前限时开放注册，已复制注册页链接（无需邀请码）")
+      toast.success(t("don.ok.openRegCopied"))
     } catch {
-      toast.error("复制失败，请手动复制")
+      toast.error(t("ai.err.copy"))
     }
   }
 
@@ -321,7 +323,7 @@ export default function DonationPage() {
       return
     }
     if ((invites?.quota.inviteRemaining ?? 0) < 1) {
-      toast.error("邀请码额度已用完，捐献资源可增加额度")
+      toast.error(t("don.err.quotaExhausted"))
       return
     }
     setLinkAfterCreate(true)
@@ -354,11 +356,11 @@ export default function DonationPage() {
       return (
         <EmptyState
           icon={WifiOff}
-          title="捐献记录加载失败"
-          description="网络或服务异常，请稍后重试。"
+          title={t("cm.postFailed")}
+          description={t("cm.loadFailedDesc")}
           action={
             <Button variant="outline" size="sm" onClick={() => void load()}>
-              <RotateCw className="h-4 w-4" /> 重试
+              <RotateCw className="h-4 w-4" /> {t("common.retry")}
             </Button>
           }
         />
@@ -368,8 +370,8 @@ export default function DonationPage() {
       return (
         <EmptyState
           icon={Heart}
-          title="还没有捐献记录"
-          description="贡献资源后，记录会显示在这里。"
+          title={t("don.records.empty")}
+          description={t("don.records.emptyDesc")}
         />
       )
     }
@@ -394,33 +396,33 @@ export default function DonationPage() {
                 }
               >
                 {d.status === "approved"
-                  ? "已通过"
+                  ? t("frp.st.approved")
                   : d.status === "pending"
-                    ? "待审核"
+                    ? t("frp.st.pending")
                     : d.status === "revoked"
-                      ? "已失效"
-                      : "未通过"}
+                      ? t("don.status.expired")
+                      : t("frp.st.rejected")}
               </Badge>
             </CardHeader>
             <CardContent className="space-y-2">
               {d.autoReviewed && (
                 <Badge variant="outline">
                   {d.status === "approved"
-                    ? "系统自动校验通过"
+                    ? t("don.review.autoPassed")
                     : d.status === "revoked"
-                      ? "系统巡检发现已失效"
-                      : "系统自动校验未通过"}
+                      ? t("don.review.autoRevoked")
+                      : t("don.review.autoFailed")}
                 </Badge>
               )}
               {d.status === "approved" && d.channelId !== null && d.channelId !== undefined && (
                 <p className="text-xs text-muted-foreground">
-                  已接入中转站渠道 #{d.channelId}
+                  {t("don.records.channel", { id: d.channelId })}
                 </p>
               )}
-              {d.remark && <p className="text-sm text-muted-foreground">备注：{d.remark}</p>}
+              {d.remark && <p className="text-sm text-muted-foreground">{t("don.records.remark", { text: d.remark })}</p>}
               {d.reviewNote && (
                 <p className="whitespace-pre-wrap text-sm text-muted-foreground">
-                  审核回复：{d.reviewNote}
+                  {t("don.records.reviewNote", { text: d.reviewNote })}
                 </p>
               )}
               {d.status === "pending" && (
@@ -433,17 +435,17 @@ export default function DonationPage() {
                     setBusy(true)
                     try {
                       await donationApi.cancel(d.id)
-                      toast.success("已撤销")
+                      toast.success(t("don.ok.revoked"))
                       void load()
                     } catch (err) {
-                      toast.error(err instanceof HttpError ? err.message : "撤销失败")
+                      toast.error(err instanceof HttpError ? err.message : t("don.err.revoke"))
                     } finally {
                       setBusy(false)
                     }
                   }}
                 >
                   <Trash2 className="h-4 w-4" />
-                  撤销申请
+                  {t("don.records.revoke")}
                 </Button>
               )}
             </CardContent>
@@ -460,20 +462,19 @@ export default function DonationPage() {
         <CardTitle className="flex items-center gap-2 text-base">
           {TYPE_META[type]?.label}
           {perms?.[type as keyof Permissions] ? (
-            <Badge variant="success">已解锁</Badge>
+            <Badge variant="success">{t("don.unlocked")}</Badge>
           ) : (
-            <Badge variant="secondary">未解锁</Badge>
+            <Badge variant="secondary">{t("don.locked")}</Badge>
           )}
         </CardTitle>
         <CardDescription>
-          {TYPE_META[type]?.desc}。提交后系统会自动校验，
-          通过即解锁对应功能权限；未能自动校验的会转人工复核。
+          {t(TYPE_META[type]?.desc ?? "")}{t("don.card.note")}
         </CardDescription>
       </CardHeader>
       <CardContent>
         <Button size="sm" onClick={() => setDialogType(type)}>
           <Plus className="h-4 w-4" />
-          贡献{TYPE_META[type]?.label ?? ""}
+          {t("don.card.contribute", { label: t(TYPE_META[type]?.label ?? "") })}
         </Button>
       </CardContent>
     </Card>
@@ -481,7 +482,7 @@ export default function DonationPage() {
 
   return (
     <div>
-      <PageHeader title="捐献与邀请" description="贡献资源解锁功能，邀请好友获得奖励" />
+      <PageHeader title={t("don.title")} description={t("don.subtitle")} />
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <div className="flex flex-col gap-6 lg:flex-row">
@@ -492,38 +493,38 @@ export default function DonationPage() {
               className="mb-3 inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
               <ArrowLeft className="h-4 w-4" />
-              返回控制台
+              {t("space.backToConsole")}
             </Link>
             <nav className="flex flex-col gap-0.5">
               <NavItem
                 active={activeTab === "overview"}
                 icon={LayoutDashboard}
-                label="概览"
+                label={t("don.nav.overview")}
                 onClick={() => setActiveTab("overview")}
               />
               <NavItem
                 active={activeTab === "invite"}
                 icon={Ticket}
-                label="邀请"
+                label={t("don.nav.invite")}
                 onClick={() => setActiveTab("invite")}
               />
-              <NavGroup label="捐献资源">
+              <NavGroup label={t("don.nav.group")}>
                 <NavItem
                   active={activeTab === "ai"}
                   icon={Sparkles}
-                  label="AI 模型"
+                  label={t("don.type.ai")}
                   onClick={() => setActiveTab("ai")}
                 />
                 <NavItem
                   active={activeTab === "frp"}
                   icon={Network}
-                  label="内网穿透"
+                  label={t("don.type.frp")}
                   onClick={() => setActiveTab("frp")}
                 />
                 <NavItem
                   active={activeTab === "proxy"}
                   icon={Zap}
-                  label="代理节点"
+                  label={t("don.type.proxy")}
                   onClick={() => setActiveTab("proxy")}
                 />
               </NavGroup>
@@ -536,22 +537,20 @@ export default function DonationPage() {
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2 text-base">
                     <Heart className="h-4 w-4 text-muted-foreground" />
-                    资源有限，按需开放
+                    {t("don.intro.title")}
                   </CardTitle>
                   <CardDescription>
-                    站长资源有限，部分功能不会全量开放。如果你愿意贡献以下资源，
-                    管理员审核通过后将为你解锁对应功能权限。
+                    {t("don.intro.desc")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                    你的
-                    <span className="text-foreground">首次捐献成功</span>
-                    会额外赠送一张「自选权限」兑换码 —— 可以自己拿来开通任意一个还没开的模块，
-                    也可以送给别人。
+                    {t("don.first.a")}
+                    <span className="text-foreground">{t("don.first.bold")}</span>
+                    {t("don.first.b")}
                   </div>
                   {allTypes.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">加载中…</p>
+                    <p className="text-sm text-muted-foreground">{t("common.loading")}</p>
                   ) : (
                     allTypes.map(([type, label]) => {
                       const unlocked = perms?.[type as keyof Permissions] ?? false
@@ -564,9 +563,9 @@ export default function DonationPage() {
                           <p className="flex items-center gap-2 text-sm font-medium">
                             {label}
                             {unlocked ? (
-                              <Badge variant="success">已解锁</Badge>
+                              <Badge variant="success">{t("don.unlocked")}</Badge>
                             ) : (
-                              <Badge variant="secondary">未解锁</Badge>
+                              <Badge variant="secondary">{t("don.locked")}</Badge>
                             )}
                           </p>
                           <p className="text-xs text-muted-foreground">
@@ -581,7 +580,7 @@ export default function DonationPage() {
                           onClick={() => setActiveTab(type)}
                         >
                           <Plus className="h-4 w-4" />
-                          贡献
+                          {t("don.card.contributeShort")}
                         </Button>
                       </div>
                       )
@@ -598,13 +597,13 @@ export default function DonationPage() {
               <Card>
                 <CardContent className="flex items-center justify-between py-4">
                   <div className="space-y-1">
-                    <p className="text-sm font-medium">邀请好友</p>
+                    <p className="text-sm font-medium">{t("don.invite.title")}</p>
                     <p className="text-xs text-muted-foreground">
-                      创建邀请码、查看邀请奖励，请前往「邀请」分区。
+                      {t("don.invite.desc")}
                     </p>
                   </div>
                   <Button size="sm" variant="outline" onClick={() => setActiveTab("invite")}>
-                    前往邀请
+                    {t("don.invite.go")}
                     <ArrowRight className="h-4 w-4" />
                   </Button>
                 </CardContent>
@@ -618,13 +617,11 @@ export default function DonationPage() {
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2 text-base">
                     <Ticket className="h-4 w-4 text-muted-foreground" />
-                    邀请好友，获得奖励
+                    {t("don.rewards.title")}
                   </CardTitle>
                   <CardDescription>
-                    好友用你的邀请码注册，并通过贡献 workbuddy 账户解锁 AI 中转站权限后，
-                    你将获得一张「wb邀请套餐」订阅（每天额外 ¥500 额度）。
-                    好友通过贡献 其他AI渠道 解锁 AI 中转站权限后，
-                    你将获得一张「邀请套餐」订阅（每天额外 ¥200 额度）。
+                    {t("don.rewards.wb")}
+                    {t("don.rewards.channel")}
                   </CardDescription>
                 </CardHeader>
               </Card>
@@ -636,12 +633,12 @@ export default function DonationPage() {
                     <div className="space-y-1">
                       <CardTitle className="flex items-center gap-2 text-base">
                         <Ticket className="h-4 w-4 text-muted-foreground" />
-                        我的邀请码
+                        {t("don.invites.title")}
                       </CardTitle>
                       <CardDescription>
-                        每人默认 {invites?.quota.inviteBase ?? 3} 个额度；
-                        每笔捐献获批再 +2 个额度，并获得 1 个对应模块的权限额度。
-                        点「邀请链接」可一键拿到一条注册链接，好友打开后邀请码会自动填好。
+                        {t("don.invites.descA", { n: invites?.quota.inviteBase ?? 3 })}
+                        {t("don.invites.descB")}
+                        {t("don.invites.descC")}
                       </CardDescription>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
@@ -659,10 +656,10 @@ export default function DonationPage() {
                             ) ?? false
                           )
                         }
-                        title="复制一条可直接发给好友的注册链接"
+                        title={t("don.invites.linkHint")}
                       >
                         <Link2 className="h-4 w-4" />
-                        邀请链接
+                        {t("don.invites.link")}
                       </Button>
                       <Button
                         size="sm"
@@ -670,7 +667,7 @@ export default function DonationPage() {
                         disabled={(invites?.quota.inviteRemaining ?? 0) < 1}
                       >
                         <Plus className="h-4 w-4" />
-                        创建
+                        {t("common.create")}
                       </Button>
                     </div>
                   </div>
@@ -678,9 +675,9 @@ export default function DonationPage() {
                 <CardContent className="space-y-4">
                   {invitesFailed && (
                     <div className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
-                      <span>邀请额度加载失败，下方数字与列表可能不准确。</span>
+                      <span>{t("don.invites.loadFailed")}</span>
                       <Button variant="outline" size="sm" onClick={() => void loadInvites()}>
-                        重试
+                        {t("common.retry")}
                       </Button>
                     </div>
                   )}
@@ -692,22 +689,22 @@ export default function DonationPage() {
                         <div className="flex items-start gap-2.5 rounded-md border border-primary/30 bg-primary/5 p-3">
                           <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
                           <p className="text-xs text-muted-foreground">
-                            当前处于
+                            {t("don.openReg.a")}
                             <span className="font-medium text-foreground">
-                              「限时开放注册」
+                              {t("don.openReg.bold")}
                             </span>
-                            ：不含权限的邀请码
+                            {t("don.openReg.b")}
                             <span className="font-medium text-foreground">
-                              不消耗次数
+                              {t("don.openReg.c")}
                             </span>
-                            ，可以无限次分享给不同的人；带权限的邀请码仍是一次性的。
-                            这段时间好友直接打开注册页也能注册。
+                            {t("don.openReg.d")}
+                            {t("don.openReg.e")}
                           </p>
                         </div>
                       )}
                       <div className="grid gap-3 sm:grid-cols-2">
                         <div className="rounded-md border px-4 py-3">
-                          <p className="text-xs text-muted-foreground">邀请码额度</p>
+                          <p className="text-xs text-muted-foreground">{t("don.quota.invite")}</p>
                           <p className="mt-1 text-lg font-semibold">
                             {invites.quota.inviteRemaining}
                             <span className="ml-1 text-sm font-normal text-muted-foreground">
@@ -715,11 +712,11 @@ export default function DonationPage() {
                             </span>
                           </p>
                           <p className="text-xs text-muted-foreground">
-                            基础 {invites.quota.inviteBase} + 捐献 {invites.quota.inviteBonus}
+                            {t("don.quota.inviteLine", { base: invites.quota.inviteBase, bonus: invites.quota.inviteBonus })}
                           </p>
                         </div>
                         <div className="rounded-md border px-4 py-3">
-                          <p className="text-xs text-muted-foreground">模块权限额度（可转授）</p>
+                          <p className="text-xs text-muted-foreground">{t("don.quota.module")}</p>
                           <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
                             {invites.quotaFeatures.map((f) => {
                               const isBasic = invites.basicFeatures?.includes(f) ?? false
@@ -732,7 +729,7 @@ export default function DonationPage() {
                                   {invites.featureLabels[f]}
                                   {isBasic ? (
                                     <Badge variant="outline" className="ml-1.5 align-middle">
-                                      基础
+                                      {t("don.quota.base")}
                                     </Badge>
                                   ) : (
                                     <span
@@ -751,14 +748,14 @@ export default function DonationPage() {
                             })}
                           </div>
                           <p className="mt-1 text-xs text-muted-foreground">
-                            基础权限模块人人可授，不消耗额度；受限模块勾选时会消耗对应额度
+                            {t("don.quota.hint")}
                           </p>
                         </div>
                       </div>
 
                       {invites.invites.length === 0 ? (
                         <p className="py-2 text-sm text-muted-foreground">
-                          还没有创建过邀请码。
+                          {t("don.invites.empty")}
                         </p>
                       ) : (
                         <div className="divide-y rounded-md border">
@@ -781,7 +778,7 @@ export default function DonationPage() {
                                   size="icon"
                                   className="h-7 w-7 text-muted-foreground"
                                   onClick={() => void copyCode(inv.code)}
-                                  title="复制邀请码"
+                                  title={t("don.invites.copyCode")}
                                 >
                                   {copiedCode === inv.code ? (
                                     <Check className="h-3.5 w-3.5" />
@@ -796,17 +793,17 @@ export default function DonationPage() {
                                     size="sm"
                                     className="h-7 gap-1.5 px-2 text-xs"
                                     onClick={() => void copyLink(inv.code)}
-                                    title="复制邀请链接（好友打开自动填码）"
+                                    title={t("don.invites.copyLink")}
                                   >
                                     {copiedLink === inv.code ? (
                                       <Check className="h-3.5 w-3.5" />
                                     ) : (
                                       <Link2 className="h-3.5 w-3.5" />
                                     )}
-                                    邀请链接
+                                    {t("don.invites.link")}
                                   </Button>
                                 )}
-                                <Badge variant="outline">域名 · 邮箱 · 名片</Badge>
+                                <Badge variant="outline">{t("don.invites.baseBadge")}</Badge>
                                 {extra.map((f) => (
                                   <Badge
                                     key={f}
@@ -823,17 +820,17 @@ export default function DonationPage() {
                                   variant={used ? 'destructive' : 'success'}
                                   title={
                                     used
-                                      ? '这个邀请码已经被用掉了，发给别人也注册不了'
+                                      ? t("don.invites.state.used")
                                       : unlimited
-                                        ? '开放注册期间不限次数：发给几个人都不会消耗'
-                                        : '还可用：分享给好友注册'
+                                        ? t("don.invites.state.openUnlimited")
+                                        : t("don.invites.state.usable")
                                   }
                                 >
                                   {used
-                                    ? '已使用 · 链接失效'
+                                    ? t("don.invites.state.usedShort")
                                     : unlimited
-                                      ? '未使用 · 开放期不限次'
-                                      : '未使用'}
+                                      ? t("don.invites.state.unusedOpen")
+                                      : t("don.invites.state.unused")}
                                 </Badge>
                                 <span className="ml-auto text-xs text-muted-foreground">
                                   {fmtTime(inv.createdAt)}
@@ -845,7 +842,7 @@ export default function DonationPage() {
                                   onClick={() => void handleDeleteInvite(inv)}
                                   // 退款只看「有没有被用过」——不限次码的 usedCount 也可能 > 0
                                   title={
-                                    inv.usedCount > 0 ? '删除（额度不退还）' : '删除并退还额度'
+                                    inv.usedCount > 0 ? t("don.invites.deleteNoRefund") : t("don.invites.deleteRefund")
                                   }
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
@@ -865,16 +862,16 @@ export default function DonationPage() {
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2 text-base">
                     <Gift className="h-4 w-4 text-muted-foreground" />
-                    邀请奖励记录
+                    {t("don.rew.title")}
                   </CardTitle>
                   <CardDescription>
-                    好友解锁 AI 权限后，这里会记录你获得的邀请订阅奖励。
+                    {t("don.rew.desc")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
                   {!invites?.rewards || invites.rewards.length === 0 ? (
                     <p className="py-2 text-sm text-muted-foreground">
-                      还没有好友完成有效邀请。
+                      {t("don.rew.empty")}
                     </p>
                   ) : (
                     <div className="divide-y rounded-md border">
@@ -883,8 +880,8 @@ export default function DonationPage() {
                           key={i}
                           className="flex flex-wrap items-center gap-2 px-4 py-2.5"
                         >
-                          <Badge variant="success">+¥200/天</Badge>
-                          <span className="text-sm">邀请了好友</span>
+                          <Badge variant="success">{t("don.rew.daily200")}</Badge>
+                          <span className="text-sm">{t("don.rew.invited")}</span>
                           <span className="font-medium">{r.invitee}</span>
                           <span className="ml-auto text-xs text-muted-foreground">
                             {fmtTime(r.grantedAt)}
@@ -949,15 +946,14 @@ export default function DonationPage() {
       <Dialog open={inviteOpen} onOpenChange={setInviteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>创建邀请码</DialogTitle>
+            <DialogTitle>{t("don.create.title")}</DialogTitle>
             <DialogDescription>
-              基础权限含域名、邮箱、个人名片，以及标记为「基础」的模块（不消耗额度）。
-              勾选受限模块会消耗对应额度。
+              {t("don.create.desc")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="invCode">邀请码（留空自动生成）</Label>
+              <Label htmlFor="invCode">{t("don.create.code")}</Label>
               <Input
                 id="invCode"
                 placeholder="DC-XXXX-XXXX"
@@ -967,7 +963,7 @@ export default function DonationPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label>附加模块权限</Label>
+              <Label>{t("don.create.perms")}</Label>
               {invites?.quotaFeatures.map((f) => {
                 const isBasic = invites.basicFeatures?.includes(f) ?? false
                 const remain =
@@ -1002,10 +998,10 @@ export default function DonationPage() {
                       {invites.featureLabels[f]}
                     </span>
                     {isBasic ? (
-                      <Badge variant="outline">基础权限</Badge>
+                      <Badge variant="outline">{t("don.create.base")}</Badge>
                     ) : (
                       <span className="text-xs text-muted-foreground">
-                        剩余 {remain}
+                        {t("don.create.remain", { n: remain })}
                       </span>
                     )}
                   </label>
@@ -1013,23 +1009,23 @@ export default function DonationPage() {
               })}
             </div>
             <p className="text-xs text-muted-foreground">
-              本次将消耗 1 个邀请码额度
+              {t("don.create.costA")}
               {inviteFeatures.length > 0 &&
-                `，以及 ${
+                `{t("don.create.costB")}${
                   inviteFeatures.filter(
                     (f) => !(invites?.basicFeatures?.includes(f) ?? false)
                   ).length
-                } 个受限模块额度`}
-              。当前剩余 {invites?.quota.inviteRemaining ?? 0} 个邀请码额度。
+                } {t("don.create.costC")}`}
+              {t("don.create.costD", { n: invites?.quota.inviteRemaining ?? 0 })}
             </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setInviteOpen(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void handleCreateInvite()} disabled={inviteBusy}>
               {inviteBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-              创建
+              {t("common.create")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1053,6 +1049,7 @@ function DonationForm({
   onClose: () => void
   onSubmitted: () => void
 }) {
+  const { t } = useT()
   const meta = TYPE_META[type]
   const [busy, setBusy] = React.useState(false)
   const [remark, setRemark] = React.useState("")
@@ -1101,7 +1098,7 @@ function DonationForm({
 
   const handleProbe = async () => {
     if (!baseUrl.trim() || !apiKey.trim()) {
-      toast.error("请先填写 Base URL 和 API Key")
+      toast.error(t("don.err.baseUrlKey"))
       return
     }
     setProbing(true)
@@ -1119,14 +1116,14 @@ function DonationForm({
         setSelected([])
         setManual(false)
         toast.success(
-          `识别为「${res.channelTypeName}」，共 ${res.models.length} 个模型`
+          t("don.ok.detected", { name: res.channelTypeName, n: res.models.length })
         )
       } else {
         setManual(true)
         toast.error(res.message)
       }
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "探测失败")
+      toast.error(err instanceof HttpError ? err.message : t("don.err.probe"))
     } finally {
       setProbing(false)
     }
@@ -1136,7 +1133,7 @@ function DonationForm({
     setSelected((prev) => {
       if (prev.includes(m)) return prev.filter((x) => x !== m)
       if (prev.length >= maxModels) {
-        toast.info(`一次最多选 ${maxModels} 个模型（每个都要真实调用一次验证可用性）`)
+        toast.info(t("don.info.maxModels", { n: maxModels }))
         return prev
       }
       return [...prev, m]
@@ -1148,7 +1145,7 @@ function DonationForm({
     const all = probe?.models ?? []
     if (all.length > maxModels) {
       setSelected(all.slice(0, maxModels))
-      toast.info(`共 ${all.length} 个模型，一次最多捐 ${maxModels} 个，已为你选上前 ${maxModels} 个`)
+      toast.info(t("don.info.autoSelected", { all: all.length, max: maxModels }))
     } else {
       setSelected(all)
     }
@@ -1160,7 +1157,7 @@ function DonationForm({
       let payload: unknown
       if (type === "ai") {
         if (!baseUrl.trim() || !apiKey.trim()) {
-          toast.error("请填写 Base URL 和 API Key")
+          toast.error(t("don.err.baseUrlKey"))
           setBusy(false)
           return
         }
@@ -1171,12 +1168,12 @@ function DonationForm({
               .filter(Boolean)
           : selected
         if (models.length === 0) {
-          toast.error(manual ? "请填写至少一个模型名" : "请至少选择一个要捐献的模型")
+          toast.error(manual ? t("don.err.manualModel") : t("don.err.pickModel"))
           setBusy(false)
           return
         }
         if (models.length > maxModels) {
-          toast.error(`一次最多捐献 ${maxModels} 个模型（当前 ${models.length} 个）`)
+          toast.error(t("don.err.tooManyModels", { max: maxModels, cur: models.length }))
           setBusy(false)
           return
         }
@@ -1190,7 +1187,7 @@ function DonationForm({
       } else if (type === "frp") {
         // 服务端信息：必填字段在服务端还会校验一次，这里先做轻量提示
         if (!frpForm.serverAddr.trim() || !frpForm.configSample.trim()) {
-          toast.error("请填写服务端地址，并粘贴一份能连上它的 frpc.toml 示例")
+          toast.error(t("don.err.frpRequired"))
           setBusy(false)
           return
         }
@@ -1210,12 +1207,12 @@ function DonationForm({
       } else {
         const urls = subUrls.split("\n").map((s) => s.trim()).filter(Boolean)
         if (urls.length === 0) {
-          toast.error("请填写至少一个订阅链接")
+          toast.error(t("don.err.subRequired"))
           setBusy(false)
           return
         }
         if (urls.length > maxSubUrls) {
-          toast.error(`一次最多提交 ${maxSubUrls} 个订阅链接（当前 ${urls.length} 个）`)
+          toast.error(t("don.err.tooManySubs", { max: maxSubUrls, cur: urls.length }))
           setBusy(false)
           return
         }
@@ -1232,16 +1229,16 @@ function DonationForm({
       if (res.status === "approved") {
         const okMsg =
           type === "ai"
-            ? "校验通过，渠道已接入中转站，AI 权限已解锁"
+            ? t("don.submit.okAi")
             : type === "proxy"
-              ? "校验通过，订阅已接入节点池，代理节点权限已解锁"
-              : "已自动通过审核，对应功能权限已解锁"
+              ? t("don.submit.okProxy")
+              : t("don.submit.okGeneric")
         toast.success(okMsg, {
           description:
             [
               res.reviewNote,
               res.voucherCode
-                ? `首次捐献奖励：自选权限兑换码 ${res.voucherCode}，可在下方「兑换码」里使用。`
+                ? t("don.submit.firstReward", { code: res.voucherCode })
                 : "",
             ]
               .filter(Boolean)
@@ -1249,19 +1246,19 @@ function DonationForm({
           duration: 12000,
         })
       } else if (res.status === "rejected") {
-        toast.error("未通过自动校验", {
+        toast.error(t("don.submit.autoFailed"), {
           // 后端会把「哪个模型为什么没通过」写在这里，原样给用户看
-          description: res.reviewNote ?? "已转人工复核，管理员会跟进",
+          description: res.reviewNote ?? t("don.submit.toManual"),
           duration: 10000,
         })
       } else {
-        toast.success("捐献申请已提交，请等待管理员审核", {
+        toast.success(t("don.submit.pending"), {
           description: res.reviewNote ?? undefined,
         })
       }
       onSubmitted()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "提交失败")
+      toast.error(err instanceof HttpError ? err.message : t("frp.err.submit"))
     } finally {
       setBusy(false)
     }
@@ -1277,7 +1274,7 @@ function DonationForm({
     <Dialog open onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>捐献 · {meta?.label}</DialogTitle>
+          <DialogTitle>{t("don.dlg.title", { label: t(meta?.label ?? "") })}</DialogTitle>
           <DialogDescription>{meta?.desc}</DialogDescription>
         </DialogHeader>
 
@@ -1285,11 +1282,11 @@ function DonationForm({
           {type === "ai" && (
             <>
               <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                提交后系统会把渠道接入中转站，并
-                <span className="text-foreground">逐个模型真实调用一次</span>
-                验证可用性：只保留可用的（最多 {maxModels} 个），
-                <span className="text-foreground">通过即当场解锁 AI 权限</span>
-                ；全部不可用则拒绝并写明原因。逐个测试需要几秒到几十秒，请耐心等待。
+                {t("don.dlg.ai.a")}
+                <span className="text-foreground">{t("don.dlg.ai.bold1")}</span>
+                {t("don.dlg.ai.b", { max: maxModels })}
+                <span className="text-foreground">{t("don.dlg.ai.bold2")}</span>
+                {t("don.dlg.ai.c")}
               </div>
               <div className="space-y-2">
                 <Label>Base URL</Label>
@@ -1302,7 +1299,7 @@ function DonationForm({
                   }}
                 />
                 <p className="text-xs text-muted-foreground">
-                  填到域名即可，末尾的 <code>/v1</code> 会自动去掉。
+                  {t("don.dlg.ai.urlHint")}
                 </p>
               </div>
               <div className="space-y-2">
@@ -1319,7 +1316,7 @@ function DonationForm({
               </div>
 
               <div className="space-y-2">
-                <Label>接口格式</Label>
+                <Label>{t("don.dlg.ai.format")}</Label>
                 <Select
                   value={format}
                   onValueChange={(v) => {
@@ -1344,8 +1341,7 @@ function DonationForm({
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  读不到模型列表时先换一种格式再检测 —— 有的上游只实现了 Anthropic 原生接口，
-                  用 OpenAI 格式去调必然失败。
+                  {t("don.dlg.ai.formatHint")}
                 </p>
               </div>
 
@@ -1361,11 +1357,11 @@ function DonationForm({
                   ) : (
                     <Download className="h-4 w-4" />
                   )}
-                  自动检测并获取模型
+                  {t("don.dlg.ai.detect")}
                 </Button>
                 {probe?.ok && (
                   <Badge variant="secondary">
-                    {probe.channelTypeName} · {probe.models.length} 个模型
+                    {t("don.probe.result", { name: probe.channelTypeName, n: probe.models.length })}
                   </Badge>
                 )}
               </div>
@@ -1374,9 +1370,9 @@ function DonationForm({
                 <div className="space-y-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <Label>
-                      选择要捐献的模型
+                      {t("don.dlg.ai.pickModels")}
                       <span className="ml-1 font-normal text-muted-foreground">
-                        （已选 {selected.length} / {maxModels}）
+                        {t("don.dlg.ai.selected", { n: selected.length, max: maxModels })}
                       </span>
                     </Label>
                     <div className="flex items-center gap-2">
@@ -1386,7 +1382,7 @@ function DonationForm({
                         variant="ghost"
                         onClick={selectAll}
                       >
-                        全选
+                        {t("don.dlg.ai.selectAll")}
                       </Button>
                       <Button
                         type="button"
@@ -1394,7 +1390,7 @@ function DonationForm({
                         variant="ghost"
                         onClick={() => setSelected([])}
                       >
-                        清空
+                        {t("don.dlg.ai.clear")}
                       </Button>
                       <Button
                         type="button"
@@ -1402,19 +1398,19 @@ function DonationForm({
                         variant="ghost"
                         onClick={() => setManual(true)}
                       >
-                        手动填写
+                        {t("don.dlg.ai.manual")}
                       </Button>
                     </div>
                   </div>
                   <Input
-                    placeholder="筛选模型名…"
+                    placeholder={t("don.dlg.ai.filterPh")}
                     value={filter}
                     onChange={(e) => setFilter(e.target.value)}
                   />
                   <div className="max-h-56 overflow-y-auto rounded-md border p-2">
                     {visibleModels.length === 0 ? (
                       <p className="py-3 text-center text-xs text-muted-foreground">
-                        没有匹配的模型
+                        {t("don.dlg.ai.noMatch")}
                       </p>
                     ) : (
                       <div className="flex flex-wrap gap-1.5">
@@ -1440,9 +1436,9 @@ function DonationForm({
                     )}
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    捐献的模型在中转站里会显示为{" "}
-                    <code>donation-模型名</code>，方便与其他来源区分。
-                    提交时会逐个真实调用一次，<span className="text-foreground">测试不通过的模型不会被上传</span>。
+                    {t("don.dlg.ai.prefixA")}{" "}
+                    <code>donation-{"{model}"}</code>{t("don.dlg.ai.prefixB")}
+                    {t("don.dlg.ai.testNoteA")}<span className="text-foreground">{t("don.dlg.ai.testNoteB")}</span>{t("don.dlg.ai.testNoteC")}
                   </p>
                 </div>
               )}
@@ -1450,7 +1446,7 @@ function DonationForm({
               {manual && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <Label>模型名（每行一个，或逗号分隔）</Label>
+                    <Label>{t("don.dlg.ai.modelNames")}</Label>
                     {probe?.ok && (
                       <Button
                         type="button"
@@ -1458,7 +1454,7 @@ function DonationForm({
                         variant="ghost"
                         onClick={() => setManual(false)}
                       >
-                        回到列表选择
+                        {t("don.dlg.ai.backToList")}
                       </Button>
                     )}
                   </div>
@@ -1470,8 +1466,7 @@ function DonationForm({
                     onChange={(e) => setManualModels(e.target.value)}
                   />
                   <p className="text-xs text-muted-foreground">
-                    无法自动读取上游模型列表时才需要手填。提交后仍会尝试接入并做真实测试，
-                    测试通过就自动解锁；失败则转给管理员人工复核。
+                    {t("don.dlg.ai.manualHint")}
                   </p>
                 </div>
               )}
@@ -1480,26 +1475,25 @@ function DonationForm({
           {type === "frp" && (
             <>
               <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                捐献的是一台 <span className="text-foreground">frps 服务端</span>：
-                审核通过后，它会成为本站的节点，所有用户都能申请端口与隧道。
-                本站验证不了服务器能否连通，所以提交后
-                <span className="text-foreground">一律转人工复核</span>，
-                管理员确认后才正式上线。
+                {t("don.frp.a")}<span className="text-foreground">{t("don.frp.bold")}</span>{t("don.frp.b")}
+                {t("don.frp.c")}
+                <span className="text-foreground">{t("don.frp.bold2")}</span>，
+                {t("don.frp.d")}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label>节点名称</Label>
+                  <Label>{t("don.frp.name")}</Label>
                   <Input
-                    placeholder="如：阿里云-香港"
+                    placeholder={t("don.frp.namePh")}
                     value={frpForm.nodeName}
                     onChange={(e) => setFrp("nodeName", e.target.value)}
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>地区（可选）</Label>
+                  <Label>{t("don.frp.region")}</Label>
                   <Input
-                    placeholder="如：香港"
+                    placeholder={t("don.frp.regionPh")}
                     value={frpForm.region}
                     onChange={(e) => setFrp("region", e.target.value)}
                   />
@@ -1508,15 +1502,15 @@ function DonationForm({
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label>服务端地址（serverAddr）</Label>
+                  <Label>{t("don.frp.addr")}</Label>
                   <Input
-                    placeholder="如 firef.cc.cd"
+                    placeholder={t("don.frp.addrPh")}
                     value={frpForm.serverAddr}
                     onChange={(e) => setFrp("serverAddr", e.target.value)}
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>服务端端口（serverPort）</Label>
+                  <Label>{t("don.frp.port")}</Label>
                   <Input
                     placeholder="7000"
                     value={frpForm.serverPort}
@@ -1527,7 +1521,7 @@ function DonationForm({
 
               <div className="grid grid-cols-3 gap-3">
                 <div className="space-y-1.5">
-                  <Label>可用端口范围（起）</Label>
+                  <Label>{t("don.frp.rangeFrom")}</Label>
                   <Input
                     placeholder="20000"
                     value={frpForm.portMin}
@@ -1535,7 +1529,7 @@ function DonationForm({
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>可用端口范围（止）</Label>
+                  <Label>{t("don.frp.rangeTo")}</Label>
                   <Input
                     placeholder="50000"
                     value={frpForm.portMax}
@@ -1543,7 +1537,7 @@ function DonationForm({
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>每用户端口上限</Label>
+                  <Label>{t("don.frp.maxPorts")}</Label>
                   <Input
                     placeholder="5"
                     value={frpForm.maxPorts}
@@ -1553,7 +1547,7 @@ function DonationForm({
               </div>
 
               <div className="space-y-1.5">
-                <Label>服务端鉴权方式</Label>
+                <Label>{t("don.frp.authMode")}</Label>
                 <Select
                   value={frpForm.authMode}
                   onValueChange={(v) => setFrp("authMode", v)}
@@ -1562,21 +1556,21 @@ function DonationForm({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="none">无鉴权（最基础的 frps）</SelectItem>
-                    <SelectItem value="token">全局 auth.token</SelectItem>
+                    <SelectItem value="none">{t("don.frp.auth.none")}</SelectItem>
+                    <SelectItem value="token">{t("don.frp.auth.token")}</SelectItem>
                     <SelectItem value="token_user">
-                      全局 token + 每用户账号（带鉴权插件）
+                      {t("don.frp.auth.tokenUser")}
                     </SelectItem>
-                    <SelectItem value="custom">其它 / 自定义插件</SelectItem>
+                    <SelectItem value="custom">{t("don.frp.auth.custom")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
 
               {(frpForm.authMode === "token" || frpForm.authMode === "token_user") && (
                 <div className="space-y-1.5">
-                  <Label>服务端全局 token（auth.token）</Label>
+                  <Label>{t("don.frp.authToken")}</Label>
                   <Input
-                    placeholder="frps 服务端配置里的 auth.token"
+                    placeholder={t("don.frp.authTokenPh")}
                     value={frpForm.authToken}
                     onChange={(e) => setFrp("authToken", e.target.value)}
                   />
@@ -1584,7 +1578,7 @@ function DonationForm({
               )}
 
               <div className="space-y-1.5">
-                <Label>一份能连上这台服务器的 frpc.toml 示例</Label>
+                <Label>{t("don.frp.sample")}</Label>
                 <Textarea
                   rows={10}
                   className="font-mono text-xs"
@@ -1595,16 +1589,16 @@ function DonationForm({
                   onChange={(e) => setFrp("configSample", e.target.value)}
                 />
                 <p className="text-xs text-muted-foreground">
-                  把它自己的账号、token 换成任何占位都行——系统会自动识别并参数化。
-                  你在这里填的账号口令<b>只用于管理员复核</b>，不会出现在生成给其他用户的配置里。
-                  如果你用了第三方鉴权插件，把插件需要的字段也写进示例即可，我们会原样保留。
+                  {t("don.frp.sampleHintA")}
+                  <b>{t("don.frp.sampleHintB")}</b>
+                  {t("don.frp.sampleHintC")}
                 </p>
               </div>
 
               <div className="space-y-1.5">
-                <Label>备注（可选）</Label>
+                <Label>{t("don.remark")}</Label>
                 <Input
-                  placeholder="带宽、到期时间等说明"
+                  placeholder={t("don.frp.remarkPh")}
                   value={frpForm.note}
                   onChange={(e) => setFrp("note", e.target.value)}
                 />
@@ -1614,14 +1608,14 @@ function DonationForm({
           {type === "proxy" && (
             <>
               <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                提交后系统会
-                <span className="text-foreground">逐个真实拉取订阅链接</span>
-                ，能解析出节点的才算有效：
-                <span className="text-foreground">有可用的就自动通过并接入节点池</span>
-                ，全部无效则拒绝并写明原因。一次最多 {maxSubUrls} 个链接。
+                {t("don.proxy.a")}
+                <span className="text-foreground">{t("don.proxy.bold1")}</span>
+                {t("don.proxy.b")}
+                <span className="text-foreground">{t("don.proxy.bold2")}</span>
+                {t("don.proxy.c", { max: maxSubUrls })}
               </div>
               <div className="space-y-2">
-                <Label>订阅链接（每行一个）</Label>
+                <Label>{t("don.proxy.urls")}</Label>
                 <Textarea
                   rows={5}
                   placeholder="https://example.com/sub/abc"
@@ -1630,35 +1624,32 @@ function DonationForm({
                   className="font-mono text-xs"
                 />
                 <p className="text-xs text-muted-foreground">
-                  只支持 http/https 的订阅地址（不是单个节点链接）；
-                  识别的协议有 vless / vmess / trojan / ss / ssr / anytls / hysteria2 / tuic。
-                  节点能不能连上我们测不了（Cloudflare 出网无法对节点端口探测），
-                  但「链接是否有效、拿到的是不是节点列表」会自动校验。
+                  {t("don.proxy.hint")}
                 </p>
               </div>
             </>
           )}
           <div className="space-y-2">
-            <Label>备注（可选）</Label>
-            <Input placeholder="渠道来源、稳定性说明等" value={remark} onChange={(e) => setRemark(e.target.value)} />
+            <Label>{t("don.remark")}</Label>
+            <Input placeholder={t("don.proxy.remarkPh")} value={remark} onChange={(e) => setRemark(e.target.value)} />
           </div>
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={busy}>取消</Button>
+          <Button variant="outline" onClick={onClose} disabled={busy}>{t("common.cancel")}</Button>
           <Button onClick={() => void handleSubmit()} disabled={busy}>
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             {busy
               ? type === "ai"
-                ? "正在逐个测试模型…"
+                ? t("don.submit.testingModels")
                 : type === "proxy"
-                  ? "正在逐个校验订阅…"
-                  : "提交中…"
+                  ? t("don.submit.testingSubs")
+                  : t("don.submit.busy")
               : type === "ai"
-                ? "提交并接入中转站"
+                ? t("don.submit.ai")
                 : type === "proxy"
-                  ? "提交并校验订阅"
-                  : "提交申请"}
+                  ? t("don.submit.proxy")
+                  : t("don.submit.generic")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1676,6 +1667,7 @@ function DonationForm({
  * 所以卡片里不再区分「邀请码」「兑换券」，统一叫「码」。
  */
 function RedeemCard({ onChanged }: { onChanged: () => void }) {
+  const { t } = useT()
   const [data, setData] = React.useState<VoucherOverview | null>(null)
   /** 兑换码区加载失败（原先完全静默，界面上会一片空白） */
   const [failed, setFailed] = React.useState(false)
@@ -1720,13 +1712,13 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
   const doRedeem = async (raw: string, feature?: string) => {
     const c = raw.trim()
     if (!c) {
-      toast.error("请填写兑换码")
+      toast.error(t("don.voucher.err.empty"))
       return
     }
     setBusy(true)
     try {
       const res = await voucherApi.redeem({ code: c, feature })
-      toast.success(`已开通：${res.granted.map(labelOf).join("、")}`)
+      toast.success(t("don.voucher.ok.granted", { list: res.granted.map(labelOf).join(", ") }))
       setCode("")
       setManualFeature("")
       setNeedPick(null)
@@ -1739,9 +1731,9 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
         // 拥有者没选就转送出来的自选券 —— 把选择权交给收码的人
         setNeedPick(c)
         setPick("")
-        toast.info("这张码是「自选权限」，请选一个要开通的模块")
+        toast.info(t("don.voucher.info.selfSelect"))
       } else {
-        toast.error(err instanceof HttpError ? err.message : "兑换失败")
+        toast.error(err instanceof HttpError ? err.message : t("ai.err.redeem"))
       }
     } finally {
       setBusy(false)
@@ -1754,7 +1746,7 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
       setCopied(text)
       setTimeout(() => setCopied(null), 1500)
     } catch {
-      toast.error("复制失败，请手动复制")
+      toast.error(t("ai.err.copy"))
     }
   }
 
@@ -1764,26 +1756,28 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
   return (
     <Card className="mb-6">
       <CardHeader>
-        <CardTitle className="text-base">兑换码</CardTitle>
+        <CardTitle className="text-base">{t("don.voucher.title")}</CardTitle>
         <CardDescription>
-          邀请码和兑换码是同一个东西：<span className="text-foreground">可以发给别人</span>
-          （新用户注册，或让对方补权限），
-          <span className="text-foreground">也可以给自己用</span>
-          —— 把自己没有的模块开通。首次捐献成功会赠送一张「自选权限」的码。
+          {t("don.voucher.descA")}
+          <span className="text-foreground">{t("don.voucher.descBold1")}</span>
+          {t("don.voucher.descB")}
+          <span className="text-foreground">{t("don.voucher.descBold2")}</span>
+          {t("don.voucher.descC")}
+          {t("don.voucher.descC")}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {failed && (
           <div className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
-            <span>兑换码加载失败，下面可能不完整。</span>
+            <span>{t("don.voucher.loadFailed")}</span>
             <Button variant="outline" size="sm" onClick={() => void load()}>
-              重试
+              {t("common.retry")}
             </Button>
           </div>
         )}
         {codes.length > 0 && (
           <div className="space-y-2">
-            <p className="text-xs text-muted-foreground">我持有的码</p>
+            <p className="text-xs text-muted-foreground">{t("don.voucher.mine")}</p>
             {codes.map((c) => {
               // 自选码只有在「还有没开的模块」时才能自用；否则它是给别人准备的
               const selfSelectable = c.selfSelect && available.length > 0
@@ -1800,7 +1794,7 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
                     size="icon"
                     className="h-7 w-7 text-muted-foreground"
                     onClick={() => void copy(c.code)}
-                    title="复制这个码"
+                    title={t("don.voucher.copy")}
                   >
                     {copied === c.code ? (
                       <Check className="h-3.5 w-3.5" />
@@ -1810,7 +1804,7 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
                   </Button>
                   {c.selfSelect ? (
                     <>
-                      <Badge variant="secondary">自选权限</Badge>
+                      <Badge variant="secondary">{t("don.voucher.selfSelect")}</Badge>
                       {/*
                         ⚠️ 下拉**始终渲染**，哪怕一个可选的模块都没有。
                         2026-09-30 之前是 `available.length === 0` 就整块换掉、只留一句
@@ -1829,7 +1823,7 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
                         <SelectTrigger className="h-8 w-44">
                           <SelectValue
                             placeholder={
-                              selfSelectable ? "选择要开通的模块" : "已开通全部模块"
+                              selfSelectable ? t("don.voucher.pickModule") : t("don.voucher.allOwned")
                             }
                           />
                         </SelectTrigger>
@@ -1837,14 +1831,14 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
                           {(data?.features ?? []).map((f) => (
                             <SelectItem key={f.key} value={f.key} disabled={f.owned}>
                               {f.label}
-                              {f.owned ? "（已开通）" : ""}
+                              {f.owned ? t("don.voucher.owned") : ""}
                             </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
                       {!selfSelectable && (
                         <span className="text-xs text-amber-600 dark:text-amber-400">
-                          你已开通全部模块，这张码自己用不上，可以转送给别人
+                          {t("don.voucher.allOwnedNote")}
                         </span>
                       )}
                     </>
@@ -1855,10 +1849,10 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
                       </Badge>
                     ))
                   ) : (
-                    <Badge variant="outline">仅用于注册</Badge>
+                    <Badge variant="outline">{t("don.voucher.registerOnly")}</Badge>
                   )}
                   {c.transferable && (
-                    <span className="text-xs text-muted-foreground">可发给别人</span>
+                    <span className="text-xs text-muted-foreground">{t("don.voucher.shareable")}</span>
                   )}
                   {canSelfUse && (
                     <Button
@@ -1869,7 +1863,7 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
                         void doRedeem(c.code, c.selfSelect ? choice[c.id] : undefined)
                       }
                     >
-                      给自己开通
+                      {t("don.voucher.useForSelf")}
                     </Button>
                   )}
                 </div>
@@ -1879,11 +1873,11 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
         )}
 
         <div className="space-y-2">
-          <Label>用别人的码</Label>
+          <Label>{t("don.voucher.useOther")}</Label>
           <div className="flex flex-wrap gap-2">
             <Input
               className="min-w-0 flex-1 font-mono"
-              placeholder="VX-XXXX-XXXX，或别人给你的邀请码"
+              placeholder={t("don.voucher.codePh")}
               value={code}
               onChange={(e) => setCode(e.target.value)}
             />
@@ -1895,13 +1889,13 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
             */}
             <Select value={manualFeature} onValueChange={setManualFeature}>
               <SelectTrigger className="h-9 w-44 shrink-0">
-                <SelectValue placeholder="自选券：选模块" />
+                <SelectValue placeholder={t("don.voucher.selfSelectPh")} />
               </SelectTrigger>
               <SelectContent>
                 {(data?.features ?? []).map((f) => (
                   <SelectItem key={f.key} value={f.key} disabled={f.owned}>
                     {f.label}
-                    {f.owned ? "（已开通）" : ""}
+                    {f.owned ? t("don.voucher.owned") : ""}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -1912,12 +1906,11 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
               disabled={busy || !code.trim()}
             >
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              兑换
+              {t("ai.redeem.btn")}
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            只会补上你还没有的权限，已有的会跳过并提示。
-            别人转送给你的「自选权限券」，要在这里先选一个模块再兑换。
+            {t("don.voucher.hint")}
           </p>
         </div>
 
@@ -1925,7 +1918,7 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
           <div className="space-y-2 rounded-md border border-primary/30 bg-primary/5 p-3">
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs font-medium">
-                码 <span className="font-mono">{needPick}</span> 是「自选权限」，需要你挑一个模块
+                {t("don.voucher.needPickA")}<span className="font-mono">{needPick}</span>{t("don.voucher.needPickB")}
               </p>
               <Button
                 variant="ghost"
@@ -1933,13 +1926,13 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
                 onClick={() => setNeedPick(null)}
                 disabled={busy}
               >
-                取消
+                {t("common.cancel")}
               </Button>
             </div>
             <div className="flex gap-2">
               <Select value={pick} onValueChange={setPick}>
                 <SelectTrigger className="flex-1">
-                  <SelectValue placeholder="选择要开通的模块" />
+                  <SelectValue placeholder={t("don.voucher.pickModulePh")} />
                 </SelectTrigger>
                 <SelectContent>
                   {available.map((f) => (
@@ -1951,12 +1944,12 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
               </Select>
               <Button onClick={() => void doRedeem(needPick, pick)} disabled={busy || !pick}>
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                确认开通
+                {t("don.voucher.confirm")}
               </Button>
             </div>
             {available.length === 0 && (
               <p className="text-xs text-amber-600 dark:text-amber-400">
-                你已开通全部模块，这张自选码在你这里用不上，可以转给别人。
+                {t("don.voucher.allOwnedNote2")}
               </p>
             )}
           </div>
@@ -1986,6 +1979,7 @@ function SenseNovaDonationCard({
   aiUnlocked: boolean
   onDone: () => void
 }) {
+  const { t } = useT()
   const [apiKey, setApiKey] = React.useState("")
   const [acknowledged, setAcknowledged] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
@@ -1998,7 +1992,7 @@ function SenseNovaDonationCard({
 
   const submit = async () => {
     if (!apiKey.trim()) {
-      toast.error("请填写商汤 API Key")
+      toast.error(t("don.sn.err.empty"))
       return
     }
     setBusy(true)
@@ -2012,14 +2006,14 @@ function SenseNovaDonationCard({
       // 之前这里无条件弹「校验通过」，Key 明明是错的也报成功（用户实测反馈），
       // 所以必须按 status 分三种情况给文案。
       if (res.status === "approved") {
-        toast.success("商汤 Key 校验通过，已解锁「AI 中转站」权限", {
+        toast.success(t("don.sn.ok.verified"), {
           description: res.reviewNote ?? undefined,
           duration: 10000,
         })
         setApiKey("")
         setAcknowledged(false)
       } else if (res.status === "rejected") {
-        toast.error("商汤 Key 未通过校验，权限未解锁", {
+        toast.error(t("don.sn.err.failed"), {
           // 后端把「为什么没通过」写在这里（Key 无效 / 目标渠道不是多密钥渠道…），
           // 原样给用户看，别用一句「提交失败」盖掉
           description: res.reviewNote ?? undefined,
@@ -2027,7 +2021,7 @@ function SenseNovaDonationCard({
         })
         // 不清空输入框：用户多半是粘错了，让他直接在原值上改
       } else {
-        toast.success("已提交，等待管理员复核", {
+        toast.success(t("don.sn.ok.pending"), {
           description: res.reviewNote ?? undefined,
           duration: 10000,
         })
@@ -2036,7 +2030,7 @@ function SenseNovaDonationCard({
       }
       onDone()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "提交失败")
+      toast.error(err instanceof HttpError ? err.message : t("frp.err.submit"))
     } finally {
       setBusy(false)
     }
@@ -2047,47 +2041,45 @@ function SenseNovaDonationCard({
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           <KeyRound className="h-4 w-4 text-muted-foreground" />
-          商汤 Key
+          {t("don.type.sensenova")}
           {aiUnlocked ? (
-            <Badge variant="success">已解锁 AI 中转站</Badge>
+            <Badge variant="success">{t("don.sn.badge")}</Badge>
           ) : (
-            <Badge variant="secondary">未解锁</Badge>
+            <Badge variant="secondary">{t("don.locked")}</Badge>
           )}
         </CardTitle>
         <CardDescription>
-          提交你的商汤日日新 API Key，系统会真实调一次商汤接口验证有效性。
-          校验通过即解锁「AI 中转站」权限 —— 无需等待管理员审核。
+          {t("don.sn.desc")}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="rounded-md border border-dashed px-4 py-3 text-xs text-muted-foreground">
-          商汤的 Key 只能在控制台手动创建，且
-          <span className="text-foreground">只在创建时完整显示一次</span>
-          —— 请先创建并复制好再回来提交。
+          {t("don.sn.noteA")}
+          <span className="text-foreground">{t("don.sn.noteBold")}</span>
+          {t("don.sn.noteB")}
           <a
             href={block.consoleUrl}
             target="_blank"
             rel="noreferrer noopener"
             className="ml-1 inline-flex items-center gap-0.5 text-foreground underline underline-offset-2"
           >
-            去商汤控制台创建
+            {t("don.sn.goConsole")}
             <ExternalLink className="h-3 w-3" />
           </a>
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="sensenovaKey">商汤 API Key</Label>
+          <Label htmlFor="sensenovaKey">{t("don.sn.keyLabel")}</Label>
           <Input
             id="sensenovaKey"
             type="password"
             autoComplete="off"
-            placeholder="粘贴你的商汤 API Key"
+            placeholder={t("don.sn.keyPh")}
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
           />
           <p className="text-xs text-muted-foreground">
-            该 Key 会被加入本站的商汤上游渠道（与其它 Key 轮询使用），供全站用户调用，
-            会消耗你的账户额度。
+            {t("don.sn.shareNote")}
           </p>
         </div>
 
@@ -2099,8 +2091,7 @@ function SenseNovaDonationCard({
             onChange={(e) => setAcknowledged(e.target.checked)}
           />
           <span>
-            我已阅读并同意上述说明，理解该 Key 会被本站用于全站用户的模型调用、
-            消耗我账户的额度，并自行承担可能的账号风险。
+            {t("don.sn.consent")}
           </span>
         </label>
 
@@ -2112,7 +2103,7 @@ function SenseNovaDonationCard({
           >
             {busy && <Loader2 className="h-4 w-4 animate-spin" />}
             <Plus className="h-4 w-4" />
-            校验并捐献
+            {t("don.sn.submit")}
           </Button>
         </div>
       </CardContent>
@@ -2136,6 +2127,7 @@ function Wb2ApiDonationCard({
   aiUnlocked: boolean
   onDone: () => void
 }) {
+  const { t } = useT()
   const [acknowledged, setAcknowledged] = React.useState(false)
   const [dialogOpen, setDialogOpen] = React.useState(false)
   /**
@@ -2155,23 +2147,22 @@ function Wb2ApiDonationCard({
   const full = block.remaining < 1
   const realm: "cn" | "global" =
     realmChoice ?? (block.realm === "global" ? "global" : "cn")
-  const realmLabel = realm === "global" ? "国际版" : "国内版"
+  const realmLabel = realm === "global" ? tStatic("don.realm.global") : tStatic("don.realm.cn")
 
   return (
     <Card className="mb-6">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           <Unplug className="h-4 w-4 text-muted-foreground" />
-          反代账号
+          {t("don.proxyAccount.title")}
           {aiUnlocked ? (
-            <Badge variant="success">已解锁 AI 中转站</Badge>
+            <Badge variant="success">{t("don.sn.badge")}</Badge>
           ) : (
-            <Badge variant="secondary">未解锁</Badge>
+            <Badge variant="secondary">{t("don.locked")}</Badge>
           )}
         </CardTitle>
         <CardDescription>
-          登录你自己的 WorkBuddy {realmLabel}账号，把账号贡献到共享池，
-          即可解锁「AI 中转站」权限 —— 无需等待管理员审核，登录成功立即生效。
+          {t("don.wb.desc", { realm: realmLabel })}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -2179,12 +2170,8 @@ function Wb2ApiDonationCard({
           <p className="flex items-start gap-2 text-sm">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
             <span>
-              <span className="font-medium">请务必知悉：</span>
-              你的账号将<span className="font-medium">加入共享账号池，被本站其他用户使用</span>，
-              并且会被站点的<span className="font-medium">自动化任务</span>
-              （签到、活跃上报、旅行、奖励任务等）操作。
-              这可能<span className="font-medium">违反 WorkBuddy 服务条款，并导致你的账号被封禁</span>。
-              请仅在你自愿接受该后果时继续。
+              <span className="font-medium">{t("don.risk.title")}</span>
+              {t("don.risk.a")}<span className="font-medium">{t("don.risk.bold1")}</span>{t("don.risk.b")}<span className="font-medium">{t("don.risk.bold2")}</span>{t("don.risk.c")}<span className="font-medium">{t("don.risk.bold3")}</span>{t("don.risk.d")}
             </span>
           </p>
         </div>
@@ -2197,7 +2184,7 @@ function Wb2ApiDonationCard({
                   {b.nickname || b.uid}
                 </span>
                 <Badge variant={b.status === "active" ? "success" : "secondary"}>
-                  {b.status === "active" ? "使用中" : "已移除"}
+                  {b.status === "active" ? t("don.binding.active") : t("don.binding.removed")}
                 </Badge>
                 <span className="ml-auto text-xs text-muted-foreground">
                   {fmtTime(b.createdAt)}
@@ -2209,7 +2196,7 @@ function Wb2ApiDonationCard({
 
         {/* 版本选择：捐献者自己挑对接哪个域。选错会授权失败，所以给一句明确提示 */}
         <div className="space-y-2">
-          <Label className="text-xs text-muted-foreground">你的账号是哪个版本</Label>
+          <Label className="text-xs text-muted-foreground">{t("don.wb.realmLabel")}</Label>
           <div className="flex gap-2">
             {(["cn", "global"] as const).map((r) => (
               <Button
@@ -2219,20 +2206,19 @@ function Wb2ApiDonationCard({
                 variant={realm === r ? "default" : "outline"}
                 onClick={() => setRealmChoice(r)}
               >
-                {r === "cn" ? "国内版" : "国际版"}
+                {r === "cn" ? t("don.realm.cn") : t("don.realm.global")}
               </Button>
             ))}
           </div>
           <p className="text-xs text-muted-foreground">
-            用中国大陆的账号请选「国内版」，海外 / 国际站账号请选「国际版」——
-            选错了登录会失败，改选另一边重试即可。
+            {t("don.wb.realmHint")}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs text-muted-foreground">
-            已绑定 {block.used} / {block.limit} 个账号
-            {full && "（已达上限，可联系管理员移除后重试）"}
+            {t("don.binding.count", { used: block.used, limit: block.limit })}
+            {full && t("don.binding.full")}
           </p>
           <Button
             size="sm"
@@ -2240,7 +2226,7 @@ function Wb2ApiDonationCard({
             onClick={() => setDialogOpen(true)}
           >
             <Plus className="h-4 w-4" />
-            登录并捐献
+            {t("don.binding.login")}
           </Button>
         </div>
 
@@ -2252,8 +2238,7 @@ function Wb2ApiDonationCard({
             onChange={(e) => setAcknowledged(e.target.checked)}
           />
           <span>
-            我已阅读并同意上述说明，理解账号会进入共享池供他人使用、
-            会被自动化任务操作，并自行承担可能的封号风险。
+            {t("don.binding.consent")}
           </span>
         </label>
       </CardContent>
@@ -2284,6 +2269,7 @@ function Wb2ApiLoginDialog({
   /** 捐献者选的版本，直接透给服务端决定对接哪个域 */
   realm: "cn" | "global"
 }) {
+  const { t } = useT()
   const [url, setUrl] = React.useState<string | null>(null)
   const [sessionId, setSessionId] = React.useState<string | null>(null)
   const [phase, setPhase] = React.useState<"starting" | "waiting" | "done" | "failed">(
@@ -2306,7 +2292,7 @@ function Wb2ApiLoginDialog({
       } catch (err) {
         if (cancelled) return
         setPhase("failed")
-        setMessage(err instanceof HttpError ? err.message : "发起登录失败")
+        setMessage(err instanceof HttpError ? err.message : t("don.binding.err.start"))
       }
     })()
     return () => {
@@ -2333,26 +2319,26 @@ function Wb2ApiLoginDialog({
           setPhase("done")
           const r = res.result
           setMessage(
-            `已绑定 ${r?.nickname || r?.uid || ""}` +
+            t("don.binding.done", { name: r?.nickname || r?.uid || "" }) +
               (r?.alreadyBound
-                ? "（该账号此前已绑定过）"
+                ? t("don.binding.already")
                 : r?.aiGranted
-                  ? "，已为你解锁 AI 中转站权限"
-                  : "，你的 AI 中转站权限此前已解锁")
+                  ? t("don.binding.granted")
+                  : t("don.binding.grantedBefore"))
           )
           return
         }
         if (res.status === "failed") {
           stopped = true
           setPhase("failed")
-          setMessage(res.message || "登录失败")
+          setMessage(res.message || t("don.binding.err.login"))
           return
         }
       } catch (err) {
         if (stopped) return
         stopped = true
         setPhase("failed")
-        setMessage(err instanceof HttpError ? err.message : "轮询失败")
+        setMessage(err instanceof HttpError ? err.message : t("don.binding.err.poll"))
         return
       }
       if (!stopped) {
@@ -2374,7 +2360,7 @@ function Wb2ApiLoginDialog({
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
-      toast.error("复制失败，请手动复制")
+      toast.error(t("ai.err.copy"))
     }
   }
 
@@ -2382,9 +2368,9 @@ function Wb2ApiLoginDialog({
     <Dialog open onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>登录 WorkBuddy {realm === "global" ? "国际版" : "国内版"}账号</DialogTitle>
+          <DialogTitle>{t("don.wb.dlgTitle", { realm: realm === "global" ? t("don.realm.global") : t("don.realm.cn") })}</DialogTitle>
           <DialogDescription>
-            在打开的页面登录你的账号，本站会自动检测登录结果并完成绑定。
+            {t("don.binding.dlgDesc")}
           </DialogDescription>
         </DialogHeader>
 
@@ -2392,14 +2378,14 @@ function Wb2ApiLoginDialog({
           {phase === "starting" && (
             <p className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
-              正在生成授权链接…
+              {t("don.binding.generating")}
             </p>
           )}
 
           {url && (
             <>
               <div className="space-y-2">
-                <Label>授权链接</Label>
+                <Label>{t("don.binding.authLink")}</Label>
                 <div className="flex gap-2">
                   <Input readOnly value={url} className="font-mono text-xs" />
                   <Button variant="outline" size="icon" onClick={() => void copyUrl()}>
@@ -2409,7 +2395,7 @@ function Wb2ApiLoginDialog({
                     variant="outline"
                     size="icon"
                     onClick={() => window.open(url, "_blank", "noopener")}
-                    aria-label="打开链接"
+                    aria-label={t("don.binding.openLink")}
                   >
                     <ExternalLink className="h-4 w-4" />
                   </Button>
@@ -2419,7 +2405,7 @@ function Wb2ApiLoginDialog({
               {phase === "waiting" && (
                 <p className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  等待你在浏览器中完成登录…（链接 15 分钟内有效）
+                  {t("don.binding.waiting")}
                 </p>
               )}
             </>
@@ -2442,10 +2428,10 @@ function Wb2ApiLoginDialog({
 
         <DialogFooter>
           {phase === "done" ? (
-            <Button onClick={onDone}>完成</Button>
+            <Button onClick={onDone}>{t("common.done")}</Button>
           ) : (
             <Button variant="outline" onClick={onClose}>
-              {phase === "failed" ? "关闭" : "取消"}
+              {phase === "failed" ? t("common.close") : t("common.cancel")}
             </Button>
           )}
         </DialogFooter>
@@ -2464,6 +2450,7 @@ function Cli2ApiDonationCard({
   aiUnlocked: boolean
   onDone: () => void
 }) {
+  const { t } = useT()
   const [acknowledged, setAcknowledged] = React.useState(false)
   const [dialogOpen, setDialogOpen] = React.useState(false)
 
@@ -2487,16 +2474,15 @@ function Cli2ApiDonationCard({
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           <Unplug className="h-4 w-4 text-muted-foreground" />
-          反代账号（{providerLabel}）
+          {t("don.provider.title", { provider: providerLabel })}
           {aiUnlocked ? (
-            <Badge variant="success">已解锁 AI 中转站</Badge>
+            <Badge variant="success">{t("don.sn.badge")}</Badge>
           ) : (
-            <Badge variant="secondary">未解锁</Badge>
+            <Badge variant="secondary">{t("don.locked")}</Badge>
           )}
         </CardTitle>
         <CardDescription>
-          登录你自己的 {providerLabel} {block.region === "global" ? "国际版" : "国内版"}账号，
-          把账号贡献到共享池，即可解锁「AI 中转站」权限 —— 无需等待管理员审核。
+          {t("don.cli.desc", { provider: providerLabel, realm: block.region === "global" ? t("don.realm.global") : t("don.realm.cn") })}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -2504,11 +2490,10 @@ function Cli2ApiDonationCard({
           <p className="flex items-start gap-2 text-sm">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
             <span>
-              <span className="font-medium">请务必知悉：</span>
-              你的账号将<span className="font-medium">加入共享账号池，被本站其他用户使用</span>，
-              并且会被站点的<span className="font-medium">自动化任务</span>（签到、活跃上报等）操作。
-              这可能<span className="font-medium">违反 {providerLabel} 服务条款，并导致你的账号被封禁</span>。
-              请仅在你自愿接受该后果时继续。
+              <span className="font-medium">{t("don.risk.title")}</span>
+              {t("don.risk.a")}<span className="font-medium">{t("don.risk.bold1")}</span>{t("don.risk.b")}
+              {t("don.risk.bold2pre")}<span className="font-medium">{t("don.risk.bold2")}</span>{t("don.risk.bold2post")}
+              {t("don.risk.c")}<span className="font-medium">{t("don.risk.bold3cli", { provider: providerLabel })}</span>{t("don.risk.d")}
             </span>
           </p>
         </div>
@@ -2521,7 +2506,7 @@ function Cli2ApiDonationCard({
                   {b.nickname || b.accountId}
                 </span>
                 <Badge variant={b.status === "active" ? "success" : "secondary"}>
-                  {b.status === "active" ? "使用中" : "已移除"}
+                  {b.status === "active" ? t("don.binding.active") : t("don.binding.removed")}
                 </Badge>
                 <span className="ml-auto text-xs text-muted-foreground">
                   {fmtTime(b.createdAt)}
@@ -2533,8 +2518,8 @@ function Cli2ApiDonationCard({
 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs text-muted-foreground">
-            已绑定 {block.used} / {block.limit} 个账号
-            {full && "（已达上限，可联系管理员移除后重试）"}
+            {t("don.binding.count", { used: block.used, limit: block.limit })}
+            {full && t("don.binding.full")}
           </p>
           <Button
             size="sm"
@@ -2542,7 +2527,7 @@ function Cli2ApiDonationCard({
             onClick={() => setDialogOpen(true)}
           >
             <Plus className="h-4 w-4" />
-            登录并捐献
+            {t("don.binding.login")}
           </Button>
         </div>
 
@@ -2554,8 +2539,7 @@ function Cli2ApiDonationCard({
             onChange={(e) => setAcknowledged(e.target.checked)}
           />
           <span>
-            我已阅读并同意上述说明，理解账号会进入共享池供他人使用、
-            会被自动化任务操作，并自行承担可能的封号风险。
+            {t("don.binding.consent")}
           </span>
         </label>
       </CardContent>
@@ -2588,6 +2572,7 @@ function Cli2ApiLoginDialog({
   providerLabel: string
   region: string
 }) {
+  const { t } = useT()
   const [url, setUrl] = React.useState<string | null>(null)
   const [sessionId, setSessionId] = React.useState<string | null>(null)
   const [phase, setPhase] = React.useState<"starting" | "waiting" | "done" | "failed">(
@@ -2609,7 +2594,7 @@ function Cli2ApiLoginDialog({
       } catch (err) {
         if (cancelled) return
         setPhase("failed")
-        setMessage(err instanceof HttpError ? err.message : "发起登录失败")
+        setMessage(err instanceof HttpError ? err.message : t("don.binding.err.start"))
       }
     })()
     return () => {
@@ -2632,19 +2617,19 @@ function Cli2ApiLoginDialog({
           setPhase("done")
           const r = res.result
           setMessage(
-            `已绑定 ${providerLabel} 账号` +
+            t("don.binding.doneProvider", { provider: providerLabel }) +
               (r?.alreadyBound
-                ? "（该账号此前已绑定过）"
+                ? t("don.binding.already")
                 : r?.aiGranted
-                  ? "，已为你解锁 AI 中转站权限"
-                  : "，你的 AI 中转站权限此前已解锁")
+                  ? t("don.binding.granted")
+                  : t("don.binding.grantedBefore"))
           )
           return
         }
         if (res.status === "failed") {
           stopped = true
           setPhase("failed")
-          setMessage(res.message || "登录失败")
+          setMessage(res.message || t("don.binding.err.login"))
           return
         }
         // pending：更新提示语
@@ -2653,7 +2638,7 @@ function Cli2ApiLoginDialog({
         if (stopped) return
         stopped = true
         setPhase("failed")
-        setMessage(err instanceof HttpError ? err.message : "轮询失败")
+        setMessage(err instanceof HttpError ? err.message : t("don.binding.err.poll"))
         return
       }
       if (!stopped) {
@@ -2675,7 +2660,7 @@ function Cli2ApiLoginDialog({
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
-      toast.error("复制失败，请手动复制")
+      toast.error(t("ai.err.copy"))
     }
   }
 
@@ -2684,10 +2669,10 @@ function Cli2ApiLoginDialog({
       <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle>
-            登录 {providerLabel} {region === "global" ? "国际版" : "国内版"}账号
+            {t("don.cli.dlgTitle", { provider: providerLabel, realm: region === "global" ? t("don.realm.global") : t("don.realm.cn") })}
           </DialogTitle>
           <DialogDescription>
-            在打开的页面登录你的账号，本站会自动检测登录结果并完成绑定。
+            {t("don.binding.dlgDesc")}
           </DialogDescription>
         </DialogHeader>
 
@@ -2695,14 +2680,14 @@ function Cli2ApiLoginDialog({
           {phase === "starting" && (
             <p className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
-              正在创建上游账号…
+              {t("don.cli.creating")}
             </p>
           )}
 
           {url && (
             <>
               <div className="space-y-2">
-                <Label>授权链接</Label>
+                <Label>{t("don.binding.authLink")}</Label>
                 <div className="flex gap-2">
                   <Input readOnly value={url} className="font-mono text-xs" />
                   <Button variant="outline" size="icon" onClick={() => void copyUrl()}>
@@ -2712,7 +2697,7 @@ function Cli2ApiLoginDialog({
                     variant="outline"
                     size="icon"
                     onClick={() => window.open(url, "_blank", "noopener")}
-                    aria-label="打开链接"
+                    aria-label={t("don.binding.openLink")}
                   >
                     <ExternalLink className="h-4 w-4" />
                   </Button>
@@ -2722,7 +2707,7 @@ function Cli2ApiLoginDialog({
               {phase === "waiting" && (
                 <p className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  {message || "等待你在浏览器中完成登录…（链接 15 分钟内有效）"}
+                  {message || t("don.binding.waiting")}
                 </p>
               )}
             </>
@@ -2731,7 +2716,7 @@ function Cli2ApiLoginDialog({
           {!url && phase === "waiting" && (
             <p className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
-              {message || "正在启动上游账号并生成授权链接…"}
+              {message || t("don.cli.starting")}
             </p>
           )}
 
@@ -2752,10 +2737,10 @@ function Cli2ApiLoginDialog({
 
         <DialogFooter>
           {phase === "done" ? (
-            <Button onClick={onDone}>完成</Button>
+            <Button onClick={onDone}>{t("common.done")}</Button>
           ) : (
             <Button variant="outline" onClick={onClose}>
-              {phase === "failed" ? "关闭" : "取消"}
+              {phase === "failed" ? t("common.close") : t("common.cancel")}
             </Button>
           )}
         </DialogFooter>

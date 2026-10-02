@@ -47,6 +47,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { profileApi, HttpError } from "@/services/api"
 import { compressImage } from "@/lib/image-compress"
 import { cn } from "@/lib/utils"
+import { useT } from "@/i18n"
 import type {
   ContactType,
   ProfileContact,
@@ -63,62 +64,62 @@ const CONTACT_META: Record<
   ContactType,
   { label: string; placeholder: string; hint?: string }
 > = {
-  email: { label: "邮箱", placeholder: "you@example.com", hint: "填邮箱地址即可" },
+  email: { label: "pf.c.email", placeholder: "you@example.com", hint: "pf.c.emailHint" },
   qq: {
-    label: "QQ",
-    placeholder: "点击链接加我为QQ好友：https://qm.qq.com/q/xxx",
-    hint: "一定要直接粘贴 QQ 里「分享」的整段内容，会自动识别出链接,必须是从QQ分享时得到的链接而不是QQ号!!! QQ 号可以填进「显示文字」栏，别人不用点也能看到号直接搜",
+    label: "pf.c.qq",
+    placeholder: "pf.c.qqPh",
+    hint: "pf.c.qqHint",
   },
   wechat: {
-    label: "微信",
-    placeholder: "微信号，或二维码图片链接",
-    hint: "微信无跳转链接；填图片链接可展示二维码",
+    label: "pf.c.wechat",
+    placeholder: "pf.c.wechatPh",
+    hint: "pf.c.wechatHint",
   },
   bilibili: {
     label: "Bilibili",
     placeholder: "1307574205",
-    hint: "填数字 UID 即可，带 UID: 前缀或整条空间链接也能识别",
+    hint: "pf.c.biliHint",
   },
   discord: {
     label: "Discord",
-    placeholder: "邀请码，或完整邀请链接",
-    hint: "个人主页无固定链接，建议用服务器邀请链接",
+    placeholder: "pf.c.discordPh",
+    hint: "pf.c.discordHint",
   },
   telegram: {
     label: "Telegram",
     placeholder: "username",
-    hint: "填用户名即可，@ 与整条 t.me 链接都能识别",
+    hint: "pf.c.tgHint",
   },
   youtube: {
     label: "YouTube",
-    placeholder: "@channel 或频道链接",
-    hint: "填 @handle 或整条 youtube.com 频道链接",
+    placeholder: "pf.c.ytPh",
+    hint: "pf.c.ytHint",
   },
   github: {
     label: "GitHub",
     placeholder: "username",
-    hint: "填用户名即可，@ 与整条主页链接都能识别",
+    hint: "pf.c.ghHint",
   },
   x: {
     label: "X / Twitter",
     placeholder: "@username",
-    hint: "填用户名即可，@ 与整条主页链接都能识别",
+    hint: "pf.c.xHint",
   },
-  custom: { label: "自定义链接", placeholder: "https://…", hint: "需是完整链接" },
+  custom: { label: "pf.c.custom", placeholder: "https://…", hint: "pf.c.customHint" },
 }
 
 const THEME_LABEL: Record<string, string> = {
-  void: "虚空",
-  neon: "霓虹",
-  glass: "玻璃",
-  aurora: "极光",
-  cyber: "赛博",
-  blossom: "绽放",
-  paper: "纸刊",
-  ink: "水墨",
-  terminal: "终端",
-  solar: "暖阳",
-  royal: "紫金",
+  void: "pf.theme.void",
+  neon: "pf.theme.neon",
+  glass: "pf.theme.glass",
+  aurora: "pf.theme.aurora",
+  cyber: "pf.theme.cyber",
+  blossom: "pf.theme.blossom",
+  paper: "pf.theme.paper",
+  ink: "pf.theme.ink",
+  terminal: "pf.theme.terminal",
+  solar: "pf.theme.solar",
+  royal: "pf.theme.royal",
 }
 
 /**
@@ -291,6 +292,7 @@ function LayoutWireframe({ id }: { id: string }) {
 
 /** 一行可复制的地址：显示 + 复制 + 新窗口打开 */
 function AddressRow({ url }: { url: string }) {
+  const { t } = useT()
   const [done, setDone] = React.useState(false)
   const copy = async () => {
     try {
@@ -298,16 +300,16 @@ function AddressRow({ url }: { url: string }) {
       setDone(true)
       setTimeout(() => setDone(false), 1500)
     } catch {
-      toast.error("复制失败，请手动复制")
+      toast.error(t("pf.err.copy"))
     }
   }
   return (
     <div className="flex items-center gap-2">
       <Input readOnly value={url} className="font-mono text-xs" />
-      <Button variant="outline" size="icon" onClick={() => void copy()} aria-label="复制">
+      <Button variant="outline" size="icon" onClick={() => void copy()} aria-label={t("common.copy")}>
         {done ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
       </Button>
-      <Button variant="outline" size="icon" asChild aria-label="打开">
+      <Button variant="outline" size="icon" asChild aria-label={t("pf.open")}>
         <a href={url} target="_blank" rel="noopener noreferrer">
           <ExternalLink className="h-4 w-4" />
         </a>
@@ -384,6 +386,7 @@ function normalizeModules(stored: ProfileModule[] | undefined): ProfileModule[] 
 }
 
 export default function ProfilePage() {
+  const { t } = useT()
   const [data, setData] = React.useState<ProfileOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [saving, setSaving] = React.useState(false)
@@ -468,7 +471,7 @@ export default function ProfilePage() {
       setModules(normalizeModules(p.modules))
       setPublished(p.published)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载名片失败")
+      toast.error(err instanceof HttpError ? err.message : t("pf.err.load"))
     } finally {
       setLoading(false)
     }
@@ -521,9 +524,9 @@ export default function ProfilePage() {
     try {
       await profileApi.enable()
       await load()
-      toast.success("名片已开通，已经对外显示了（可在「对外展示」里关闭）")
+      toast.success(t("pf.ok.created"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "开通失败")
+      toast.error(err instanceof HttpError ? err.message : t("pf.err.create"))
     } finally {
       setEnabling(false)
     }
@@ -534,9 +537,9 @@ export default function ProfilePage() {
     try {
       const res = await profileApi.update({ ...form, contacts, modules })
       setData((d) => (d ? { ...d, profile: res.profile } : d))
-      toast.success("已保存")
+      toast.success(t("pf.ok.saved"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.save"))
     } finally {
       setSaving(false)
     }
@@ -546,9 +549,9 @@ export default function ProfilePage() {
     try {
       await profileApi.publish(next)
       setPublished(next)
-      toast.success(next ? "名片已启用，任何人可访问" : "名片已停用")
+      toast.success(next ? t("pf.ok.enabled") : t("pf.ok.disabled"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.op"))
     }
   }
 
@@ -569,9 +572,9 @@ export default function ProfilePage() {
       }
       await profileApi.uploadAsset(kind, file)
       await load()
-      toast.success("上传成功")
+      toast.success(t("pf.ok.uploaded"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "上传失败")
+      toast.error(err instanceof HttpError ? err.message : t("pf.err.upload"))
     } finally {
       setUploading(null)
     }
@@ -581,9 +584,9 @@ export default function ProfilePage() {
     try {
       await profileApi.deleteAsset(kind)
       await load()
-      toast.success("已移除")
+      toast.success(t("pf.ok.removed"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "移除失败")
+      toast.error(err instanceof HttpError ? err.message : t("pf.err.remove"))
     }
   }
 
@@ -608,11 +611,11 @@ export default function ProfilePage() {
       setMusicResults(res.tracks)
       // 「没搜到」和「服务挂了」要给不同提示：前者换关键词，后者改用上传/外链
       if (res.tracks.length === 0) {
-        toast.info("没搜到这首歌，换个关键词，或改用下面的上传 / 外链")
+        toast.info(t("pf.music.notFound"))
       }
     } catch (err) {
       setMusicResults([])
-      toast.error(err instanceof HttpError ? err.message : "搜索失败")
+      toast.error(err instanceof HttpError ? err.message : t("pf.err.search"))
     } finally {
       setMusicSearching(false)
     }
@@ -622,14 +625,14 @@ export default function ProfilePage() {
    * 选中一首歌。只填表单，**不删**用户原有的上传文件和外链 ——
    * 服务端按「搜索歌曲 > 上传 > 外链」取用，清掉 `musicSource` 就能回到原来那首。
    */
-  const pickMusicTrack = async (t: ProfileMusicTrack) => {
+  const pickMusicTrack = async (track: ProfileMusicTrack) => {
     setForm((f) => ({
       ...f,
-      musicSource: t.source,
+      musicSource: track.source,
       // 标题带上歌手：名片上「歌名 - 歌手」比光有歌名清楚得多
-      musicTitle: t.artist ? `${t.title} - ${t.artist}` : t.title,
+      musicTitle: track.artist ? `${track.title} - ${track.artist}` : track.title,
       // 搜索结果的封面是长期有效的地址，可以直接存
-      musicCoverUrl: t.cover ?? "",
+      musicCoverUrl: track.cover ?? "",
     }))
     setMusicResults([])
     setMusicQuery("")
@@ -637,22 +640,22 @@ export default function ProfilePage() {
     // 歌词单独取：歌词库与音频源是两套曲库，要靠「歌名+歌手」去对。
     // 取不到就留空（用户可手填），绝不因为它失败而取消选歌。
     try {
-      const res = await profileApi.fetchLyrics(t.title, t.artist)
+      const res = await profileApi.fetchLyrics(track.title, track.artist)
       if (res.lyrics) {
         setForm((f) => ({ ...f, musicLyrics: res.lyrics as string }))
-        toast.success("已选择，歌词也一并取到了")
+        toast.success(t("pf.music.pickedWithLyrics"))
       } else {
-        toast.success("已选择（没找到歌词，可手动填写）")
+        toast.success(t("pf.music.pickedNoLyrics"))
       }
     } catch {
-      toast.success("已选择（歌词没取到，可手动填写）")
+      toast.success(t("pf.music.pickedNoLyrics"))
     }
   }
 
   /** 清除搜索选择：播放源回到用户自己上传/粘贴的音频（不会被删除） */
   const clearMusicSource = () => {
     setForm((f) => ({ ...f, musicSource: "" }))
-    toast.success("已改回自定义音频")
+    toast.success(t("pf.music.backToCustom"))
   }
 
   const addContact = () => {
@@ -694,7 +697,7 @@ export default function ProfilePage() {
   if (loading) {
     return (
       <div>
-        <PageHeader title="个人名片" description="对外展示的个人主页" />
+        <PageHeader title={t("pf.title")} description={t("pf.subtitle")} />
         <LoadingBlock />
       </div>
     )
@@ -704,30 +707,28 @@ export default function ProfilePage() {
   if (!data?.enabled || !data.profile) {
     return (
       <div>
-        <PageHeader title="个人名片" description="对外展示的个人主页" />
+        <PageHeader title={t("pf.title")} description={t("pf.subtitle")} />
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Contact className="h-4 w-4 text-muted-foreground" />
-              开通个人名片
+              {t("pf.intro.title")}
             </CardTitle>
             <CardDescription>
-              开通后你会得到一个对外展示的个人主页——11 种皮肤、6 种骨架、
-              可自由组装的模块（标签 / 名言 / 大事记 / 图片墙 / 音乐 …），
-              还能绑定自己的子域名。
+              {t("pf.intro.desc")}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <ul className="space-y-1.5 text-sm text-muted-foreground">
-              <li>· 默认地址：{window.location.origin}/profile/&lt;你的用户名&gt;</li>
-              <li>· 支持 QQ、Bilibili、Telegram、GitHub、邮箱等，填写原始值即可自动生成链接</li>
-              <li>· 模块可开关、可排序，皮肤 × 骨架 × 字体 × 动效自由混搭</li>
-              <li>· 开通后立即对外展示，任何拿到链接的人都能访问</li>
-              <li>· 还没想好内容？可以在「对外展示」里先关掉，等填好了再打开</li>
+              <li>{t("pf.intro.b1", { origin: window.location.origin })}</li>
+              <li>{t("pf.intro.b2")}</li>
+              <li>{t("pf.intro.b3")}</li>
+              <li>{t("pf.intro.b4")}</li>
+              <li>{t("pf.intro.b5")}</li>
             </ul>
             <Button onClick={() => void handleEnable()} disabled={enabling}>
               {enabling && <Loader2 className="h-4 w-4 animate-spin" />}
-              开通名片
+              {t("pf.intro.cta")}
             </Button>
           </CardContent>
         </Card>
@@ -747,16 +748,16 @@ export default function ProfilePage() {
   return (
     <div>
       <PageHeader
-        title="个人名片"
-        description="皮肤 × 骨架 × 模块自由组装，右侧实时预览。"
+        title={t("pf.title")}
+        description={t("pf.editorDesc")}
         actions={
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="icon" onClick={() => void load()} aria-label="刷新">
+            <Button variant="outline" size="icon" onClick={() => void load()} aria-label={t("common.refresh")}>
               <RefreshCw className="h-4 w-4" />
             </Button>
             <Button onClick={() => void handleSave()} disabled={saving}>
               {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-              保存
+              {t("common.save")}
             </Button>
           </div>
         }
@@ -767,36 +768,36 @@ export default function ProfilePage() {
         <div className="min-w-0">
           <Tabs defaultValue="basic">
             <TabsList className="mb-4 flex h-auto flex-wrap justify-start">
-              <TabsTrigger value="basic">资料</TabsTrigger>
-              <TabsTrigger value="appearance">外观</TabsTrigger>
-              <TabsTrigger value="modules">模块</TabsTrigger>
-              <TabsTrigger value="contacts">联系方式</TabsTrigger>
-              <TabsTrigger value="music">音乐</TabsTrigger>
-              <TabsTrigger value="publish">发布</TabsTrigger>
+              <TabsTrigger value="basic">{t("pf.tab.basic")}</TabsTrigger>
+              <TabsTrigger value="appearance">{t("pf.tab.appearance")}</TabsTrigger>
+              <TabsTrigger value="modules">{t("pf.tab.modules")}</TabsTrigger>
+              <TabsTrigger value="contacts">{t("pf.tab.contacts")}</TabsTrigger>
+              <TabsTrigger value="music">{t("pf.tab.music")}</TabsTrigger>
+              <TabsTrigger value="publish">{t("pf.tab.publish")}</TabsTrigger>
             </TabsList>
 
             {/* ============ 资料 ============ */}
             <TabsContent value="basic" className="space-y-6">
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">基本资料</CardTitle>
-                  <CardDescription>昵称与签名，名片最显眼的两行字</CardDescription>
+                  <CardTitle className="text-base">{t("pf.basic.title")}</CardTitle>
+                  <CardDescription>{t("pf.basic.desc")}</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="space-y-2">
-                    <Label htmlFor="displayName">昵称</Label>
+                    <Label htmlFor="displayName">{t("settings.label.nickname")}</Label>
                     <Input
                       id="displayName"
-                      placeholder="你的名字"
+                      placeholder={t("pf.basic.namePh")}
                       value={form.displayName}
                       onChange={(e) => setForm((f) => ({ ...f, displayName: e.target.value }))}
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="bio">个性签名</Label>
+                    <Label htmlFor="bio">{t("pf.basic.bio")}</Label>
                     <Textarea
                       id="bio"
-                      placeholder="一句话介绍自己（支持换行）"
+                      placeholder={t("pf.basic.bioPh")}
                       value={form.bio}
                       onChange={(e) => setForm((f) => ({ ...f, bio: e.target.value }))}
                       rows={3}
@@ -808,8 +809,8 @@ export default function ProfilePage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">当前状态</CardTitle>
-                  <CardDescription>昵称下方的小状态签（在「模块」页可开关）</CardDescription>
+                  <CardTitle className="text-base">{t("pf.status.title")}</CardTitle>
+                  <CardDescription>{t("pf.status.desc")}</CardDescription>
                 </CardHeader>
                 <CardContent>
                   <StatusEditor
@@ -824,40 +825,40 @@ export default function ProfilePage() {
             <TabsContent value="appearance" className="space-y-6">
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">皮肤</CardTitle>
-                  <CardDescription>11 套完整视觉语言，右侧预览实时生效</CardDescription>
+                  <CardTitle className="text-base">{t("pf.theme.title")}</CardTitle>
+                  <CardDescription>{t("pf.theme.desc")}</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="grid grid-cols-3 gap-2.5 sm:grid-cols-4">
-                    {(data?.themes ?? []).map((t) => (
+                    {(data?.themes ?? []).map((theme) => (
                       <button
-                        key={t}
+                        key={theme}
                         type="button"
-                        onClick={() => setForm((f) => ({ ...f, theme: t }))}
+                        onClick={() => setForm((f) => ({ ...f, theme }))}
                         className={cn(
                           "relative rounded-lg border-2 p-1.5 transition-all",
-                          form.theme === t
+                          form.theme === theme
                             ? "border-primary ring-2 ring-primary/20"
                             : "border-border hover:border-primary/50"
                         )}
                       >
-                        <ThemeThumbnail theme={t} accent={form.accent} />
+                        <ThemeThumbnail theme={theme} accent={form.accent} />
                         <span className="mt-1 block text-center text-xs font-medium">
-                          {THEME_LABEL[t] ?? t}
+                          {THEME_LABEL[theme] ? t(THEME_LABEL[theme]) : theme}
                         </span>
                       </button>
                     ))}
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="accent">主题色（可选，留空用皮肤默认色）</Label>
+                    <Label htmlFor="accent">{t("pf.theme.accent")}</Label>
                     <div className="flex items-center gap-2">
                       <input
                         type="color"
                         value={/^#[0-9a-f]{6}$/i.test(form.accent) ? form.accent : "#6366f1"}
                         onChange={(e) => setForm((f) => ({ ...f, accent: e.target.value }))}
                         className="h-9 w-12 cursor-pointer rounded-md border bg-transparent p-1"
-                        aria-label="选择主题色"
+                        aria-label={t("pf.theme.accentAria")}
                       />
                       <Input
                         id="accent"
@@ -872,7 +873,7 @@ export default function ProfilePage() {
                           size="sm"
                           onClick={() => setForm((f) => ({ ...f, accent: "" }))}
                         >
-                          清除
+                          {t("si.clear")}
                         </Button>
                       )}
                     </div>
@@ -882,8 +883,8 @@ export default function ProfilePage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">骨架</CardTitle>
-                  <CardDescription>页面的结构方式，与皮肤自由混搭</CardDescription>
+                  <CardTitle className="text-base">{t("pf.layout.title")}</CardTitle>
+                  <CardDescription>{t("pf.layout.desc")}</CardDescription>
                 </CardHeader>
                 <CardContent>
                   <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -910,9 +911,9 @@ export default function ProfilePage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">自动缩放</CardTitle>
+                  <CardTitle className="text-base">{t("pf.scale.title")}</CardTitle>
                   <CardDescription>
-                    模块开得多时内容会超出屏幕。开启后按屏幕高度自动缩小，一屏放下
+                    {t("pf.scale.desc")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -938,7 +939,7 @@ export default function ProfilePage() {
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <Label htmlFor="scaleManual">
-                        {form.scaleMode === "auto" ? "起始比例" : "显示比例"}
+                        {form.scaleMode === "auto" ? t("pf.scale.start") : t("pf.scale.display")}
                       </Label>
                       <span className="font-mono text-sm text-muted-foreground">
                         {form.scaleManual}%
@@ -958,15 +959,15 @@ export default function ProfilePage() {
                     />
                     <p className="text-xs text-muted-foreground">
                       {form.scaleMode === "auto"
-                        ? "自动缩放只在这个比例基础上继续缩小，不会放大 —— 内容不长时观感与不缩放一致。"
-                        : "固定按这个比例显示，内容超出屏幕时需要滚动查看。"}
+                        ? t("pf.scale.autoHint")
+                        : t("pf.scale.fixedHint")}
                     </p>
                   </div>
 
                   {form.scaleMode === "auto" && (
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <Label htmlFor="scaleMin">最小比例</Label>
+                        <Label htmlFor="scaleMin">{t("pf.scale.min")}</Label>
                         <span className="font-mono text-sm text-muted-foreground">
                           {form.scaleMin}%
                         </span>
@@ -984,7 +985,7 @@ export default function ProfilePage() {
                         className="h-2 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary"
                       />
                       <p className="text-xs text-muted-foreground">
-                        内容再多也不会小于这个比例，避免文字小到看不清。设成 100% 等于关闭自动缩放。
+                        {t("pf.scale.minHint")}
                       </p>
                     </div>
                   )}
@@ -993,12 +994,12 @@ export default function ProfilePage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">字体</CardTitle>
-                  <CardDescription>英文标题字与中文正文字体，相互独立</CardDescription>
+                  <CardTitle className="text-base">{t("pf.font.title")}</CardTitle>
+                  <CardDescription>{t("pf.font.desc")}</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="space-y-2">
-                    <Label>英文标题字</Label>
+                    <Label>{t("pf.font.heading")}</Label>
                     <div className="grid grid-cols-3 gap-2">
                       {(data?.fontOptions ?? []).map((opt) => {
                         const family =
@@ -1023,7 +1024,7 @@ export default function ProfilePage() {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <Label>中文正文字体</Label>
+                    <Label>{t("pf.font.body")}</Label>
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                       {(data?.cjkFontOptions ?? []).map((opt) => {
                         const family =
@@ -1059,20 +1060,20 @@ export default function ProfilePage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">头像与背景</CardTitle>
+                  <CardTitle className="text-base">{t("pf.media.title")}</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="grid gap-4 sm:grid-cols-2">
                     {/* 头像 */}
                     <div className="space-y-2">
-                      <Label>头像</Label>
+                      <Label>{t("pf.media.avatar")}</Label>
                       <div className="flex items-center gap-3">
                         {profile?.avatarKey || form.avatarUrl ? (
                           <img
                             src={
                               profile?.avatarKey ? `/api/profile/asset?kind=avatar` : form.avatarUrl
                             }
-                            alt="头像"
+                            alt={t("pf.media.avatar")}
                             className="h-14 w-14 rounded-full border object-cover"
                           />
                         ) : (
@@ -1087,7 +1088,7 @@ export default function ProfilePage() {
                             ) : (
                               <Upload className="h-3.5 w-3.5" />
                             )}
-                            上传
+                            {t("pf.upload")}
                             <input
                               type="file"
                               accept="image/jpeg,image/png,image/webp,image/gif"
@@ -1101,27 +1102,27 @@ export default function ProfilePage() {
                               className="text-left text-xs text-muted-foreground hover:text-destructive"
                               onClick={() => void handleRemoveAsset("avatar")}
                             >
-                              移除已上传
+                              {t("pf.removeUploaded")}
                             </button>
                           )}
                         </div>
                       </div>
                       <Input
-                        placeholder="或粘贴图片链接"
+                        placeholder={t("pf.media.pasteLink")}
                         value={form.avatarUrl}
                         onChange={(e) => setForm((f) => ({ ...f, avatarUrl: e.target.value }))}
                         className="text-xs"
                       />
                       {limits && (
                         <p className="text-xs text-muted-foreground">
-                          上传上限 {formatBytes(limits.avatar)}
+                          {t("pf.media.avatarLimit", { size: formatBytes(limits.avatar) })}
                         </p>
                       )}
                     </div>
 
                     {/* 背景图 */}
                     <div className="space-y-2">
-                      <Label>背景图片</Label>
+                      <Label>{t("pf.media.background")}</Label>
                       <div className="flex items-center gap-3">
                         {profile?.backgroundKey || form.backgroundUrl ? (
                           <img
@@ -1130,7 +1131,7 @@ export default function ProfilePage() {
                                 ? `/api/profile/asset?kind=background`
                                 : form.backgroundUrl
                             }
-                            alt="背景"
+                            alt={t("pf.media.background")}
                             className="h-14 w-24 rounded-md border object-cover"
                           />
                         ) : (
@@ -1145,7 +1146,7 @@ export default function ProfilePage() {
                             ) : (
                               <Upload className="h-3.5 w-3.5" />
                             )}
-                            上传
+                            {t("pf.upload")}
                             <input
                               type="file"
                               accept="image/jpeg,image/png,image/webp,image/gif"
@@ -1159,20 +1160,20 @@ export default function ProfilePage() {
                               className="text-left text-xs text-muted-foreground hover:text-destructive"
                               onClick={() => void handleRemoveAsset("background")}
                             >
-                              移除已上传
+                              {t("pf.removeUploaded")}
                             </button>
                           )}
                         </div>
                       </div>
                       <Input
-                        placeholder="或粘贴图片链接"
+                        placeholder={t("pf.media.pasteLink")}
                         value={form.backgroundUrl}
                         onChange={(e) => setForm((f) => ({ ...f, backgroundUrl: e.target.value }))}
                         className="text-xs"
                       />
                       {limits && (
                         <p className="text-xs text-muted-foreground">
-                          上传上限 {formatBytes(limits.background)}
+                          {t("pf.media.bgLimit", { size: formatBytes(limits.background) })}
                         </p>
                       )}
                     </div>
@@ -1182,9 +1183,9 @@ export default function ProfilePage() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">动效与开屏</CardTitle>
+                  <CardTitle className="text-base">{t("pf.fx.title")}</CardTitle>
                   <CardDescription>
-                    动效可多选（粒子 / 代码雨 / 樱花 / 落雪共用画布，互斥）
+                    {t("pf.fx.desc")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -1225,7 +1226,7 @@ export default function ProfilePage() {
                   <Separator />
 
                   <div className="space-y-2">
-                    <Label>开屏动画</Label>
+                    <Label>{t("pf.fx.splash")}</Label>
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                       {(data?.introOptions ?? []).map((opt) => (
                         <button
@@ -1252,9 +1253,7 @@ export default function ProfilePage() {
             {/* ============ 模块 ============ */}
             <TabsContent value="modules" className="space-y-3">
               <p className="text-sm text-muted-foreground">
-                名片由模块组装而成：开关决定显示与否，中间几个模块可用箭头调整顺序、
-                用右侧下拉选择宽度。宽度只在**电脑端**生效（≥641px），两个「半宽」模块会自动并排。
-                启用但还没填内容的模块不会出现在名片上。
+                {t("pf.modules.desc")}
               </p>
               {modules.map((m, idx) => {
                 const meta = data?.moduleOptions.find((o) => o.id === m.id)
@@ -1272,7 +1271,7 @@ export default function ProfilePage() {
                                 className="text-muted-foreground hover:text-foreground disabled:opacity-30"
                                 onClick={() => moveModule(idx, -1)}
                                 disabled={idx === 2}
-                                aria-label="上移"
+                                aria-label={t("ip.moveUp")}
                               >
                                 <ChevronUp className="h-4 w-4" />
                               </button>
@@ -1281,7 +1280,7 @@ export default function ProfilePage() {
                                 className="text-muted-foreground hover:text-foreground disabled:opacity-30"
                                 onClick={() => moveModule(idx, 1)}
                                 disabled={idx === modules.length - 2}
-                                aria-label="下移"
+                                aria-label={t("ip.moveDown")}
                               >
                                 <ChevronDown className="h-4 w-4" />
                               </button>
@@ -1303,7 +1302,7 @@ export default function ProfilePage() {
                               })
                             }
                           >
-                            <SelectTrigger className="w-[92px]" aria-label="模块宽度">
+                            <SelectTrigger className="w-[92px]" aria-label={t("pf.modules.width")}>
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
@@ -1340,21 +1339,21 @@ export default function ProfilePage() {
                 <CardHeader>
                   <div className="flex items-start justify-between">
                     <div className="space-y-1">
-                      <CardTitle className="text-base">联系方式</CardTitle>
+                      <CardTitle className="text-base">{t("pf.contacts.title")}</CardTitle>
                       <CardDescription>
-                        只填原始值即可（QQ 号、UID、用户名），链接由系统自动生成
+                        {t("pf.contacts.desc")}
                       </CardDescription>
                     </div>
                     <Button size="sm" variant="outline" onClick={addContact}>
                       <Plus className="h-4 w-4" />
-                      添加
+                      {t("common.add")}
                     </Button>
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   {contacts.length === 0 ? (
                     <p className="py-4 text-center text-sm text-muted-foreground">
-                      还没有联系方式，点右上角「添加」。
+                      {t("pf.contacts.empty")}
                     </p>
                   ) : (
                     contacts.map((c, i) => (
@@ -1368,21 +1367,21 @@ export default function ProfilePage() {
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              {(data?.contactTypes ?? []).map((t) => (
-                                <SelectItem key={t} value={t}>
-                                  {CONTACT_META[t]?.label ?? t}
+                              {(data?.contactTypes ?? []).map((ct) => (
+                                <SelectItem key={ct} value={ct}>
+                                  {CONTACT_META[ct]?.label ? t(CONTACT_META[ct].label) : ct}
                                 </SelectItem>
                               ))}
                             </SelectContent>
                           </Select>
                           <Input
-                            placeholder={CONTACT_META[c.type]?.placeholder}
+                            placeholder={CONTACT_META[c.type]?.placeholder ? t(CONTACT_META[c.type].placeholder!) : undefined}
                             value={c.value}
                             onChange={(e) => updateContact(i, { value: e.target.value })}
                             className="flex-1"
                           />
                           <Input
-                            placeholder={c.type === "qq" ? "显示文字（填 QQ 号）" : "显示文字（可选）"}
+                            placeholder={c.type === "qq" ? t("pf.contacts.labelPhQq") : t("pf.contacts.labelPh")}
                             value={c.label ?? ""}
                             onChange={(e) => updateContact(i, { label: e.target.value })}
                             className="w-36"
@@ -1396,13 +1395,13 @@ export default function ProfilePage() {
                             size="icon"
                             className="h-8 w-8 text-muted-foreground hover:text-destructive"
                             onClick={() => setContacts((list) => list.filter((_, idx) => idx !== i))}
-                            aria-label="删除"
+                            aria-label={t("common.delete")}
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
                         </div>
                         {CONTACT_META[c.type]?.hint && (
-                          <p className="text-xs text-muted-foreground">{CONTACT_META[c.type].hint}</p>
+                          <p className="text-xs text-muted-foreground">{t(CONTACT_META[c.type].hint!)}</p>
                         )}
                       </div>
                     ))
@@ -1417,20 +1416,20 @@ export default function ProfilePage() {
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2 text-base">
                     <Music className="h-4 w-4 text-muted-foreground" />
-                    背景音乐
+                    {t("pf.music.title")}
                   </CardTitle>
                   <CardDescription>
-                    搜索歌名自动取回音频、封面与歌词；也可以自己上传音频文件或粘贴直链
+                    {t("pf.music.desc")}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   {/* ---- 搜索歌曲 ---- */}
                   <div className="space-y-2">
-                    <Label htmlFor="musicQuery">搜索歌曲</Label>
+                    <Label htmlFor="musicQuery">{t("pf.music.search")}</Label>
                     <div className="flex gap-2">
                       <Input
                         id="musicQuery"
-                        placeholder="输入歌名，例如：起风了"
+                        placeholder={t("pf.music.searchPh")}
                         value={musicQuery}
                         onChange={(e) => setMusicQuery(e.target.value)}
                         onKeyDown={(e) => {
@@ -1451,26 +1450,26 @@ export default function ProfilePage() {
                         ) : (
                           <Search className="h-4 w-4" />
                         )}
-                        搜索
+                        {t("pf.music.searchBtn")}
                       </Button>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      选中的歌曲由服务端在播放时实时取地址，所以换源不会让老名片失效。
+                      {t("pf.music.note")}
                     </p>
                   </div>
 
                   {musicResults.length > 0 && (
                     <ul className="divide-y overflow-hidden rounded-md border">
-                      {musicResults.map((t) => (
-                        <li key={t.source}>
+                      {musicResults.map((track) => (
+                        <li key={track.source}>
                           <button
                             type="button"
                             className="flex w-full items-center gap-3 p-2 text-left hover:bg-accent"
-                            onClick={() => void pickMusicTrack(t)}
+                            onClick={() => void pickMusicTrack(track)}
                           >
-                            {t.cover ? (
+                            {track.cover ? (
                               <img
-                                src={t.cover}
+                                src={track.cover}
                                 alt=""
                                 className="h-10 w-10 shrink-0 rounded border object-cover"
                               />
@@ -1478,10 +1477,10 @@ export default function ProfilePage() {
                               <div className="h-10 w-10 shrink-0 rounded border bg-muted" />
                             )}
                             <span className="min-w-0 flex-1">
-                              <span className="block truncate text-sm">{t.title}</span>
+                              <span className="block truncate text-sm">{track.title}</span>
                               <span className="block truncate text-xs text-muted-foreground">
-                                {t.artist}
-                                {t.album ? ` · ${t.album}` : ""}
+                                {track.artist}
+                                {track.album ? ` · ${track.album}` : ""}
                               </span>
                             </span>
                           </button>
@@ -1493,7 +1492,7 @@ export default function ProfilePage() {
                   {form.musicSource ? (
                     <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2">
                       <span className="min-w-0 flex-1 truncate text-xs">
-                        当前使用搜索到的歌曲
+                        {t("pf.music.usingSearch")}
                         {form.musicTitle ? `：${form.musicTitle}` : ""}
                       </span>
                       <Button
@@ -1503,20 +1502,20 @@ export default function ProfilePage() {
                         className="shrink-0"
                         onClick={clearMusicSource}
                       >
-                        改回自定义音频
+                        {t("pf.music.backCustom")}
                       </Button>
                     </div>
                   ) : null}
 
                   <div className="flex items-center gap-3 border-t pt-4">
-                    <span className="text-sm font-medium">或自定义音频</span>
+                    <span className="text-sm font-medium">{t("pf.music.custom")}</span>
                     <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-2 text-sm hover:bg-accent">
                       {uploading === "music" ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
                       ) : (
                         <Upload className="h-4 w-4" />
                       )}
-                      上传音乐
+                      {t("pf.music.upload")}
                       <input
                         type="file"
                         accept="audio/mpeg,audio/mp4,audio/ogg,audio/wav"
@@ -1530,18 +1529,18 @@ export default function ProfilePage() {
                         className="text-xs text-muted-foreground hover:text-destructive"
                         onClick={() => void handleRemoveAsset("music")}
                       >
-                        移除已上传
+                        {t("pf.removeUploaded")}
                       </button>
                     )}
                     {limits && (
                       <span className="text-xs text-muted-foreground">
-                        上限 {formatBytes(limits.music)}
+                        {t("pf.music.limit", { size: formatBytes(limits.music) })}
                       </span>
                     )}
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="musicUrl">或粘贴音频链接</Label>
+                    <Label htmlFor="musicUrl">{t("pf.music.urlLabel")}</Label>
                     <Input
                       id="musicUrl"
                       placeholder="https://…/song.mp3"
@@ -1552,10 +1551,10 @@ export default function ProfilePage() {
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="musicTitle">音乐标题（可选）</Label>
+                    <Label htmlFor="musicTitle">{t("pf.music.titleLabel")}</Label>
                     <Input
                       id="musicTitle"
-                      placeholder="曲名"
+                      placeholder={t("pf.music.titlePh")}
                       value={form.musicTitle}
                       onChange={(e) => setForm((f) => ({ ...f, musicTitle: e.target.value }))}
                     />
@@ -1563,7 +1562,7 @@ export default function ProfilePage() {
 
                   {/* 专辑封面 */}
                   <div className="space-y-2">
-                    <Label>专辑封面（可选）</Label>
+                    <Label>{t("pf.music.cover")}</Label>
                     <div className="flex items-center gap-3">
                       {profile?.musicCoverKey || form.musicCoverUrl ? (
                         <img
@@ -1572,7 +1571,7 @@ export default function ProfilePage() {
                               ? `/api/profile/asset?kind=music-cover`
                               : form.musicCoverUrl
                           }
-                          alt="封面"
+                          alt={t("pf.music.cover")}
                           className="h-14 w-14 rounded-md border object-cover"
                         />
                       ) : (
@@ -1587,7 +1586,7 @@ export default function ProfilePage() {
                           ) : (
                             <Upload className="h-3.5 w-3.5" />
                           )}
-                          上传封面
+                          {t("pf.music.uploadCover")}
                           <input
                             type="file"
                             accept="image/jpeg,image/png,image/webp,image/gif"
@@ -1601,13 +1600,13 @@ export default function ProfilePage() {
                             className="text-left text-xs text-muted-foreground hover:text-destructive"
                             onClick={() => void handleRemoveAsset("music-cover")}
                           >
-                            移除已上传
+                            {t("pf.removeUploaded")}
                           </button>
                         )}
                       </div>
                     </div>
                     <Input
-                      placeholder="或粘贴封面图片链接"
+                      placeholder={t("pf.music.coverPh")}
                       value={form.musicCoverUrl}
                       onChange={(e) => setForm((f) => ({ ...f, musicCoverUrl: e.target.value }))}
                       className="text-xs"
@@ -1617,14 +1616,14 @@ export default function ProfilePage() {
                   {/* 歌词：搜索选中时会自动填好，也可以手写或整个删掉 */}
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
-                      <Label htmlFor="musicLyrics">歌词（可选）</Label>
+                      <Label htmlFor="musicLyrics">{t("pf.music.lyrics")}</Label>
                       {form.musicLyrics ? (
                         <button
                           type="button"
                           className="text-xs text-muted-foreground hover:text-destructive"
                           onClick={() => setForm((f) => ({ ...f, musicLyrics: "" }))}
                         >
-                          清空歌词
+                          {t("pf.music.clearLyrics")}
                         </button>
                       ) : null}
                     </div>
@@ -1632,21 +1631,20 @@ export default function ProfilePage() {
                       id="musicLyrics"
                       rows={6}
                       className="font-mono text-xs"
-                      placeholder={"[00:12.34] 第一句歌词\n[00:16.00] 第二句歌词"}
+                      placeholder={t("pf.music.lyricsPh")}
                       value={form.musicLyrics}
                       onChange={(e) => setForm((f) => ({ ...f, musicLyrics: e.target.value }))}
                     />
                     <p className="text-xs text-muted-foreground">
-                      带 <code>[mm:ss.xx]</code> 时间标记的歌词会在名片页随播放滚动高亮；
-                      不带时间标记则静态显示。搜索选中时会自动填。
+                      {t("pf.music.lyricsHint")}
                     </p>
                   </div>
 
                   <div className="flex items-center justify-between rounded-md border px-4 py-3">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">自动播放</p>
+                      <p className="text-sm font-medium">{t("pf.music.autoplay")}</p>
                       <p className="text-xs text-muted-foreground">
-                        多数浏览器会拦截自动播放，通常需访问者手动点击
+                        {t("pf.music.autoplayHint")}
                       </p>
                     </div>
                     <Switch
@@ -1666,17 +1664,17 @@ export default function ProfilePage() {
                     <div className="space-y-1">
                       <CardTitle className="flex items-center gap-2 text-base">
                         <UserRound className="h-4 w-4 text-muted-foreground" />
-                        对外展示
+                        {t("pf.publish.title")}
                       </CardTitle>
                       <CardDescription>
                         {published
-                          ? "已启用，任何拿到链接的人都能访问。"
-                          : "未启用时，访问者只会看到「名片不存在」。"}
+                          ? t("pf.publish.on")
+                          : t("pf.publish.off")}
                       </CardDescription>
                     </div>
                     <div className="flex items-center gap-3">
                       <Badge variant={published ? "success" : "secondary"}>
-                        {published ? "已启用" : "未启用"}
+                        {published ? t("pf.publish.enabled") : t("pf.publish.disabled")}
                       </Badge>
                       <Switch
                         checked={published}
@@ -1687,12 +1685,12 @@ export default function ProfilePage() {
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="space-y-2">
-                    <Label>默认地址</Label>
+                    <Label>{t("pf.publish.defaultUrl")}</Label>
                     <AddressRow url={defaultUrl} />
                   </div>
 
                   <div className="space-y-2">
-                    <Label>自定义域名</Label>
+                    <Label>{t("pf.publish.customDomain")}</Label>
                     {profile?.fqdn ? (
                       <>
                         <AddressRow url={customUrl!} />
@@ -1703,18 +1701,18 @@ export default function ProfilePage() {
                             try {
                               await profileApi.unbindDomain()
                               await load()
-                              toast.success("已解绑")
+                              toast.success(t("pf.ok.unbound"))
                             } catch (err) {
-                              toast.error(err instanceof HttpError ? err.message : "解绑失败")
+                              toast.error(err instanceof HttpError ? err.message : t("pf.err.unbind"))
                             }
                           }}
                         >
-                          解绑该域名
+                          {t("pf.publish.unbind")}
                         </button>
                       </>
                     ) : (data?.availableSubdomains.length ?? 0) === 0 ? (
                       <p className="text-xs text-muted-foreground">
-                        没有可用的子域名。请先到「域名」创建，或确认它没有被网盘直链占用。
+                        {t("pf.publish.noSubdomain")}
                       </p>
                     ) : (
                       <div className="flex flex-wrap gap-2">
@@ -1729,10 +1727,10 @@ export default function ProfilePage() {
                                 const res = await profileApi.bindDomain(sub.id)
                                 await load()
                                 toast.success(
-                                  res.dnsCreated ? "已绑定，DNS 生效约需 1-2 分钟" : "已绑定"
+                                  res.dnsCreated ? t("pf.publish.boundDns") : t("pf.publish.bound")
                                 )
                               } catch (err) {
-                                toast.error(err instanceof HttpError ? err.message : "绑定失败")
+                                toast.error(err instanceof HttpError ? err.message : t("pf.err.bind"))
                               }
                             }}
                           >
@@ -1746,11 +1744,10 @@ export default function ProfilePage() {
                   {boundToRootDomain && (
                     <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2">
                       <p className="text-xs font-medium text-destructive">
-                        当前绑定的是根域名 {profile?.fqdn}
+                        {t("pf.publish.rootBound", { fqdn: profile?.fqdn ?? "" })}
                       </p>
                       <p className="mt-0.5 text-xs text-muted-foreground">
-                        根域名是平台入口，绑给名片会导致整站无法访问。请解绑后改用子域名
-                        （如 card.doulor.cn）。
+                        {t("pf.publish.rootWarn")}
                       </p>
                     </div>
                   )}
@@ -1766,7 +1763,7 @@ export default function ProfilePage() {
             <div className="mb-2 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <Eye className="h-4 w-4 text-muted-foreground" />
-                实时预览
+                {t("pf.preview.title")}
                 {previewLoading && (
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                 )}
@@ -1779,7 +1776,7 @@ export default function ProfilePage() {
                     className="h-7 px-2 text-xs"
                     onClick={() => setPreviewMode("portrait")}
                   >
-                    竖版
+                    {t("pf.preview.portrait")}
                   </Button>
                   <Button
                     variant={previewMode === "landscape" ? "secondary" : "ghost"}
@@ -1787,13 +1784,13 @@ export default function ProfilePage() {
                     className="h-7 px-2 text-xs"
                     onClick={() => setPreviewMode("landscape")}
                   >
-                    横版
+                    {t("pf.preview.landscape")}
                   </Button>
                 </div>
                 {published && (
                   <Button variant="ghost" size="sm" asChild>
                     <a href={defaultUrl} target="_blank" rel="noopener noreferrer">
-                      打开公开页
+                      {t("pf.preview.open")}
                       <ExternalLink className="h-3.5 w-3.5" />
                     </a>
                   </Button>
@@ -1807,7 +1804,7 @@ export default function ProfilePage() {
               {previewHtml ? (
                 previewMode === "portrait" ? (
                   <iframe
-                    title="名片实时预览"
+                    title={t("pf.preview.cardTitle")}
                     sandbox="allow-scripts allow-popups"
                     srcDoc={previewHtml}
                     className="h-full w-full border-0"
@@ -1816,7 +1813,7 @@ export default function ProfilePage() {
                   /* 横版：iframe 内部按 1280px 布局（触发桌面断点），再整体缩进容器里。
                      外层 overflow-hidden 负责裁掉缩放后溢出的部分。 */
                   <iframe
-                    title="名片实时预览（横版）"
+                    title={t("pf.preview.cardTitleLandscape")}
                     sandbox="allow-scripts allow-popups"
                     srcDoc={previewHtml}
                     style={{
@@ -1836,9 +1833,9 @@ export default function ProfilePage() {
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
               {previewMode === "portrait"
-                ? "竖版预览（手机宽度）。名片在电脑上会用更宽的布局，切到「横版」可查看。"
-                : `横版预览：按 ${LANDSCAPE_WIDTH}px 宽的电脑屏幕渲染后等比缩小，字偏小，看的是整体布局。`}
-              {" "}预览由服务端按线上同样的方式渲染，未保存的改动也会实时反映，不计访客数。
+                ? t("pf.preview.hintPortrait")
+                : t("pf.preview.hintLandscape", { w: LANDSCAPE_WIDTH })}
+              {" "}{t("pf.preview.note")}
             </p>
           </div>
         </div>
@@ -1856,6 +1853,7 @@ function StatusEditor({
   module: ProfileModule | undefined
   onChange: (patch: Partial<ProfileModule>) => void
 }) {
+  const { t } = useT()
   if (!module) return null
   return (
     <div className="flex items-center gap-2">
@@ -1867,7 +1865,7 @@ function StatusEditor({
         maxLength={8}
       />
       <Input
-        placeholder="在做什么？（如：在听歌 / 闭关写代码）"
+        placeholder={t("pf.status.ph")}
         value={module.text ?? ""}
         onChange={(e) => onChange({ text: e.target.value })}
         className="flex-1"
@@ -1884,6 +1882,7 @@ function TagsEditor({
   module: ProfileModule
   onChange: (patch: Partial<ProfileModule>) => void
 }) {
+  const { t } = useT()
   const [draft, setDraft] = React.useState("")
   const tags = (module.items ?? []).filter((x): x is string => typeof x === "string")
   const add = () => {
@@ -1896,7 +1895,7 @@ function TagsEditor({
     <div className="space-y-2">
       <div className="flex items-center gap-2">
         <Input
-          placeholder="输入标签后回车添加（最多 12 个）"
+          placeholder={t("pf.tags.ph")}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -1908,22 +1907,22 @@ function TagsEditor({
           className="flex-1"
         />
         <Button size="sm" variant="outline" onClick={add}>
-          添加
+          {t("common.add")}
         </Button>
       </div>
       {tags.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
-          {tags.map((t, i) => (
+          {tags.map((tag, i) => (
             <span
               key={i}
               className="inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs"
             >
-              {t}
+              {tag}
               <button
                 type="button"
                 className="text-muted-foreground hover:text-destructive"
                 onClick={() => onChange({ items: tags.filter((_, idx) => idx !== i) })}
-                aria-label="移除标签"
+                aria-label={t("pf.tags.remove")}
               >
                 <X className="h-3 w-3" />
               </button>
@@ -1942,6 +1941,7 @@ function TimelineEditor({
   module: ProfileModule
   onChange: (patch: Partial<ProfileModule>) => void
 }) {
+  const { t } = useT()
   const items = (module.items ?? []).filter(
     (x): x is ProfileTimelineItem => typeof x === "object" && x !== null && "title" in x
   )
@@ -1953,7 +1953,7 @@ function TimelineEditor({
       {items.map((it, i) => (
         <div key={i} className="flex items-start gap-2 rounded-md border p-2.5">
           <Input
-            placeholder="时间"
+            placeholder={t("pf.timeline.time")}
             value={it.date}
             onChange={(e) => setItem(i, { date: e.target.value })}
             className="w-24 shrink-0 text-xs"
@@ -1961,13 +1961,13 @@ function TimelineEditor({
           />
           <div className="flex-1 space-y-1.5">
             <Input
-              placeholder="标题（如：开始学摄影）"
+              placeholder={t("pf.timeline.titlePh")}
               value={it.title}
               onChange={(e) => setItem(i, { title: e.target.value })}
               maxLength={30}
             />
             <Input
-              placeholder="补充说明（可选）"
+              placeholder={t("pf.timeline.descPh")}
               value={it.desc}
               onChange={(e) => setItem(i, { desc: e.target.value })}
               className="text-xs"
@@ -1979,7 +1979,7 @@ function TimelineEditor({
             size="icon"
             className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
             onClick={() => onChange({ items: items.filter((_, idx) => idx !== i) })}
-            aria-label="删除"
+            aria-label={t("common.delete")}
           >
             <Trash2 className="h-4 w-4" />
           </Button>
@@ -1992,7 +1992,7 @@ function TimelineEditor({
           onClick={() => onChange({ items: [...items, { date: "", title: "", desc: "" }] })}
         >
           <Plus className="h-4 w-4" />
-          添加一条
+          {t("pf.timeline.add")}
         </Button>
       )}
     </div>
@@ -2020,6 +2020,7 @@ function GalleryEditor({
   module: ProfileModule
   onChange: (patch: Partial<ProfileModule>) => void
 }) {
+  const { t } = useT()
   const items = (module.items ?? []).filter(
     (x): x is ProfileGalleryItem => typeof x === "object" && x !== null && "url" in x
   )
@@ -2045,10 +2046,10 @@ function GalleryEditor({
       }
       if (added.length) {
         onChange({ items: [...items, ...added] })
-        toast.success(`已上传 ${added.length} 张图片`)
+        toast.success(t("pf.ok.uploadedN", { n: added.length }))
       }
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "上传失败")
+      toast.error(err instanceof HttpError ? err.message : t("pf.err.upload"))
       // 部分成功也要落盘，避免已上传的图丢失
       if (added.length) onChange({ items: [...items, ...added] })
     } finally {
@@ -2060,7 +2061,7 @@ function GalleryEditor({
   return (
     <div className="space-y-2">
       <p className="text-xs text-muted-foreground">
-        可直接从本机上传（自动压缩），也可粘贴 https 图片链接。最多 9 张，展示为三列网格。
+        {t("pf.gallery.desc")}
       </p>
       <input
         ref={fileRef}
@@ -2083,14 +2084,14 @@ function GalleryEditor({
             />
           )}
           <Input
-            placeholder="https://…/photo.jpg 或本机上传"
+            placeholder={t("pf.gallery.urlPh")}
             value={it.url}
             onChange={(e) => setItem(i, { url: e.target.value })}
             className="flex-1 font-mono text-xs"
             maxLength={1000}
           />
           <Input
-            placeholder="说明（可选）"
+            placeholder={t("pf.gallery.captionPh")}
             value={it.caption}
             onChange={(e) => setItem(i, { caption: e.target.value })}
             className="w-28"
@@ -2101,7 +2102,7 @@ function GalleryEditor({
             size="icon"
             className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
             onClick={() => onChange({ items: items.filter((_, idx) => idx !== i) })}
-            aria-label="删除"
+            aria-label={t("common.delete")}
           >
             <Trash2 className="h-4 w-4" />
           </Button>
@@ -2116,7 +2117,7 @@ function GalleryEditor({
             onClick={() => fileRef.current?.click()}
           >
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-            {busy ? "上传中…" : "上传图片"}
+            {busy ? t("pf.uploading") : t("pf.gallery.upload")}
           </Button>
           <Button
             size="sm"
@@ -2124,7 +2125,7 @@ function GalleryEditor({
             onClick={() => onChange({ items: [...items, { url: "", caption: "" }] })}
           >
             <Plus className="h-4 w-4" />
-            粘贴链接
+            {t("pf.gallery.pasteLink")}
           </Button>
         </div>
       )}
@@ -2139,6 +2140,7 @@ function ModuleConfigEditor({
   module: ProfileModule
   onChange: (patch: Partial<ProfileModule>) => void
 }) {
+  const { t } = useT()
   switch (module.id) {
     case "status":
       return <StatusEditor module={module} onChange={onChange} />
@@ -2148,7 +2150,7 @@ function ModuleConfigEditor({
       return (
         <div className="space-y-2">
           <Textarea
-            placeholder="一句喜欢的话（可换行，最多 5 行）"
+            placeholder={t("pf.quote.quotePh")}
             value={module.text ?? ""}
             onChange={(e) => onChange({ text: e.target.value })}
             rows={4}
@@ -2156,7 +2158,7 @@ function ModuleConfigEditor({
             maxLength={200}
           />
           <Input
-            placeholder="出处 / 作者（可选）"
+            placeholder={t("pf.quote.authorPh")}
             value={module.author ?? ""}
             onChange={(e) => onChange({ author: e.target.value })}
             maxLength={20}

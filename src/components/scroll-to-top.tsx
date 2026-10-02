@@ -1,6 +1,7 @@
 import * as React from "react"
 import { ArrowUp } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { useT } from "@/i18n"
 
 /**
  * 回到顶部按钮：固定右下角。
@@ -12,6 +13,7 @@ import { cn } from "@/lib/utils"
  * 阈值用「已滚动距离 / (文档高度 - 视口高度)」算进度。
  */
 export function ScrollToTop() {
+  const { t } = useT()
   const [progress, setProgress] = React.useState(0)
   const [visible, setVisible] = React.useState(false)
 
@@ -47,7 +49,7 @@ export function ScrollToTop() {
   return (
     <button
       type="button"
-      aria-label="回到顶部"
+      aria-label={t("stt.aria")}
       onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
       className={cn(
         "fixed bottom-6 right-6 z-40 flex h-11 w-11 items-center justify-center rounded-full border border-border bg-card/80 shadow-lg backdrop-blur transition-all hover:bg-accent",

@@ -6,6 +6,7 @@ import { ToolShell, ToolSection } from "@/components/toolbox/tool-shell"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { baseName, canvasToBlob, createCanvas, downloadBlob, loadImageFile } from "@/lib/toolbox/utils"
+import { useT } from "@/i18n"
 
 interface Selection {
   x: number
@@ -17,6 +18,7 @@ interface Selection {
 const FULL: Selection = { x: 0, y: 0, w: 1, h: 1 }
 
 export default function ImageCropTool() {
+  const { t } = useT()
   const [fileName, setFileName] = React.useState<string>("")
   const [srcUrl, setSrcUrl] = React.useState<string | null>(null)
   const [sel, setSel] = React.useState<Selection>(FULL)
@@ -59,7 +61,7 @@ export default function ImageCropTool() {
       setError(null)
       publish()
     } catch (e) {
-      setError(e instanceof Error ? e.message : "图片打开失败")
+      setError(e instanceof Error ? e.message : t("icr.err.open"))
     }
   }
 
@@ -150,7 +152,7 @@ export default function ImageCropTool() {
       const blob = await canvasToBlob(canvas, "image/png")
       downloadBlob(blob, `${baseName(fileName || "image")}-cropped.png`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "裁剪失败")
+      setError(e instanceof Error ? e.message : t("icr.err.crop"))
     } finally {
       setBusy(false)
     }
@@ -161,11 +163,11 @@ export default function ImageCropTool() {
 
   return (
     <ToolShell
-      title="裁剪旋转翻转"
-      description="在图上按住拖动框出要保留的区域，也可以先把图片摆正再裁。"
+      title={t("toolbox.imageCrop.name")}
+      description={t("icr.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <ToolSection title="图片">
+        <ToolSection title={t("icr.section.image")}>
           {!srcUrl ? (
             <FileDrop accept="image/*" onFiles={(f) => void handleFiles(f)} />
           ) : (
@@ -178,7 +180,7 @@ export default function ImageCropTool() {
                 onPointerCancel={onPointerUp}
                 className="relative w-full touch-none select-none overflow-hidden rounded-lg border bg-muted/30"
               >
-                <img src={srcUrl} alt="待裁剪" className="block w-full" draggable={false} />
+                <img src={srcUrl} alt={t("icr.alt")} className="block w-full" draggable={false} />
                 <div
                   className="absolute border-2 border-primary"
                   style={{
@@ -191,38 +193,38 @@ export default function ImageCropTool() {
                 />
               </div>
               <p className="text-xs text-muted-foreground">
-                原图 {size.w} × {size.h} · 选区 {outW} × {outH}（按住拖动可重新框选）
+                {t("icr.sizeLine", { w: size.w, h: size.h, ow: outW, oh: outH })}
               </p>
             </div>
           )}
         </ToolSection>
 
-        <ToolSection title="调整">
+        <ToolSection title={t("icr.section.adjust")}>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label className="text-xs text-muted-foreground">旋转与翻转</Label>
+              <Label className="text-xs text-muted-foreground">{t("icr.rotateFlip")}</Label>
               <div className="grid grid-cols-2 gap-2">
                 <Button variant="outline" size="sm" disabled={!srcUrl} onClick={() => rotateBy(-90)}>
                   <RotateCcw className="h-4 w-4" />
-                  左转 90°
+                  {t("icr.rotateLeft")}
                 </Button>
                 <Button variant="outline" size="sm" disabled={!srcUrl} onClick={() => rotateBy(90)}>
                   <RotateCw className="h-4 w-4" />
-                  右转 90°
+                  {t("icr.rotateRight")}
                 </Button>
                 <Button variant="outline" size="sm" disabled={!srcUrl} onClick={() => flip("h")}>
                   <FlipHorizontal className="h-4 w-4" />
-                  水平翻转
+                  {t("icr.flipH")}
                 </Button>
                 <Button variant="outline" size="sm" disabled={!srcUrl} onClick={() => flip("v")}>
                   <FlipVertical className="h-4 w-4" />
-                  垂直翻转
+                  {t("icr.flipV")}
                 </Button>
               </div>
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">微调角度 {angle}°</Label>
+              <Label className="text-xs text-muted-foreground">{t("icr.fineAngle", { n: angle })}</Label>
               <input
                 type="range"
                 min={-45}
@@ -242,13 +244,13 @@ export default function ImageCropTool() {
                   setAngle(0)
                 }}
               >
-                应用这个角度
+                {t("icr.applyAngle")}
               </Button>
             </div>
 
             <div className="grid grid-cols-2 gap-2">
               <Button variant="outline" size="sm" disabled={!srcUrl} onClick={() => setSel(FULL)}>
-                全选
+                {t("icr.selectAll")}
               </Button>
               <Button
                 variant="outline"
@@ -261,7 +263,7 @@ export default function ImageCropTool() {
                   publish()
                 }}
               >
-                重置
+                {t("icr.reset")}
               </Button>
             </div>
 
@@ -269,7 +271,7 @@ export default function ImageCropTool() {
 
             <Button className="w-full" disabled={!srcUrl || busy} onClick={() => void crop()}>
               <Download className="h-4 w-4" />
-              {busy ? "处理中…" : "裁剪并下载"}
+              {busy ? t("icr.processing") : t("icr.download")}
             </Button>
           </div>
         </ToolSection>

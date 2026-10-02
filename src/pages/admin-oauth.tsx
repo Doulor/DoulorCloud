@@ -51,11 +51,12 @@ import {
   type OAuthClient,
 } from "@/services/api"
 import { fmtTime } from "@/lib/format"
+import { useT, tStatic } from "@/i18n"
 
 const SCOPE_OPTIONS = [
-  { value: "openid", label: "openid", hint: "标识用户身份（必选）" },
-  { value: "profile", label: "profile", hint: "用户名 / 昵称 / 头像" },
-  { value: "email", label: "email", hint: "邮箱地址" },
+  { value: "openid", label: "openid", hint: "ao.scope.openidHint" },
+  { value: "profile", label: "profile", hint: "ao.scope.profileHint" },
+  { value: "email", label: "email", hint: "ao.scope.emailHint" },
 ]
 
 /** 供对方站点填写的端点地址。用当前 origin 拼，换域名也不会写错。 */
@@ -71,14 +72,15 @@ function endpoints(origin: string) {
 async function copy(value: string, what: string) {
   try {
     await navigator.clipboard.writeText(value)
-    toast.success(`${what}已复制`)
+    toast.success(tStatic("ao.ok.copied", { what }))
   } catch {
-    toast.error("复制失败，请手动复制")
+    toast.error(tStatic("ao.err.copy"))
   }
 }
 
 /** 一条端点地址 + 复制按钮 */
 function EndpointRow({ label, value }: { label: string; value: string }) {
+  const { t } = useT()
   return (
     <div className="flex items-center gap-2">
       <span className="w-44 shrink-0 text-xs text-muted-foreground">{label}</span>
@@ -90,8 +92,8 @@ function EndpointRow({ label, value }: { label: string; value: string }) {
         size="icon"
         className="h-7 w-7 shrink-0"
         onClick={() => void copy(value, label)}
-        title={`复制 ${label}`}
-        aria-label={`复制 ${label}`}
+        title={t("ao.copyTitle", { label })}
+        aria-label={t("ao.copyTitle", { label })}
       >
         <Copy className="h-3.5 w-3.5" aria-hidden="true" />
       </Button>
@@ -100,6 +102,7 @@ function EndpointRow({ label, value }: { label: string; value: string }) {
 }
 
 export function OAuthAdminPanel() {
+  const { t } = useT()
   const [clients, setClients] = React.useState<OAuthClient[]>([])
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
@@ -127,7 +130,7 @@ export function OAuthAdminPanel() {
       const res = await oauthAdminApi.list()
       setClients(res.clients)
     } catch (err) {
-      toast.error(errMsg(err, "加载 OAuth 应用失败"))
+      toast.error(errMsg(err, t("ao.err.load")))
     } finally {
       setLoading(false)
     }
@@ -149,15 +152,15 @@ export function OAuthAdminPanel() {
       .map((s) => s.trim())
       .filter(Boolean)
     if (!name.trim()) {
-      toast.error("请填写应用名")
+      toast.error(t("ao.err.nameRequired"))
       return
     }
     if (redirectUris.length === 0) {
-      toast.error("请至少填一个回调地址")
+      toast.error(t("ao.err.uriRequired"))
       return
     }
     if (!scopes.includes("openid")) {
-      toast.error("必须包含 openid")
+      toast.error(t("ao.err.openidRequired"))
       return
     }
 
@@ -177,7 +180,7 @@ export function OAuthAdminPanel() {
       })
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "创建失败"))
+      toast.error(errMsg(err, t("dm.err.create")))
     } finally {
       setBusy(false)
     }
@@ -186,7 +189,7 @@ export function OAuthAdminPanel() {
   const doResetSecret = async (client: OAuthClient) => {
     if (
       !window.confirm(
-        `重置「${client.name}」的密钥？\n\n旧密钥会立即失效，使用它的站点在你更新配置前将无法登录。`
+        t("ao.confirmReset", { name: client.name })
       )
     ) {
       return
@@ -199,17 +202,17 @@ export function OAuthAdminPanel() {
         clientSecret: res.clientSecret,
       })
     } catch (err) {
-      toast.error(errMsg(err, "重置失败"))
+      toast.error(errMsg(err, t("ao.err.reset")))
     }
   }
 
   const toggleDisabled = async (client: OAuthClient) => {
     try {
       await oauthAdminApi.update(client.id, { disabled: !client.disabled })
-      toast.success(client.disabled ? "已启用" : "已停用")
+      toast.success(client.disabled ? t("common.enabled") : t("common.disabled"))
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "操作失败"))
+      toast.error(errMsg(err, t("em.err.op")))
     }
   }
 
@@ -218,11 +221,11 @@ export function OAuthAdminPanel() {
     setBusy(true)
     try {
       await oauthAdminApi.remove(toDelete.id)
-      toast.success("已删除")
+      toast.success(t("at.ok.deleted"))
       setToDelete(null)
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "删除失败"))
+      toast.error(errMsg(err, t("em.err.delete")))
     } finally {
       setBusy(false)
     }
@@ -233,10 +236,9 @@ export function OAuthAdminPanel() {
       {/* 端点地址：用户要填进对方站点，放最前面最方便 */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">接入信息</CardTitle>
+          <CardTitle className="text-base">{t("ao.info.title")}</CardTitle>
           <CardDescription>
-            把这些地址填进对方站点（如 NewAPI 的「自定义 OAuth 提供商」）。
-            若对方的「自动发现」报错，就手动填下面三条 Endpoint。
+            {t("ao.info.desc")}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
@@ -244,8 +246,9 @@ export function OAuthAdminPanel() {
             <EndpointRow key={e.label} label={e.label} value={e.value} />
           ))}
           <p className="pt-1 text-xs text-muted-foreground">
-            对方的回调地址（redirect_uri）需填 <code className="font-mono">对方域名/oauth/oidc</code>
-            （以 NewAPI 为例），并原样登记到下面应用的「回调地址」里。
+            {t("ao.info.callbackNoteA")}
+            <code className="font-mono">{t("ao.info.peerDomain")}/oauth/oidc</code>
+            {t("ao.info.callbackNoteB")}
           </p>
         </CardContent>
       </Card>
@@ -253,12 +256,12 @@ export function OAuthAdminPanel() {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <div>
-            <CardTitle className="text-base">应用（{clients.length}）</CardTitle>
-            <CardDescription>每个接入的站点是一个应用</CardDescription>
+            <CardTitle className="text-base">{t("ao.apps.title", { n: clients.length })}</CardTitle>
+            <CardDescription>{t("ao.apps.desc")}</CardDescription>
           </div>
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="mr-1.5 h-4 w-4" aria-hidden="true" />
-            添加应用
+            {t("ao.apps.add")}
           </Button>
         </CardHeader>
         <CardContent>
@@ -267,8 +270,8 @@ export function OAuthAdminPanel() {
           ) : clients.length === 0 ? (
             <EmptyState
               icon={KeyRound}
-              title="还没有应用"
-              description="添加一个应用，就能让对应站点用 Doulor Cloud 登录。"
+              title={t("ao.apps.empty")}
+              description={t("ao.apps.emptyDesc")}
             />
           ) : (
             <div className="space-y-3">
@@ -276,7 +279,7 @@ export function OAuthAdminPanel() {
                 <div key={c.id} className="rounded-lg border p-4">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium">{c.name}</span>
-                    {c.disabled && <Badge variant="secondary">已停用</Badge>}
+                    {c.disabled && <Badge variant="secondary">{t("common.disabled")}</Badge>}
                     <span className="ml-auto text-xs text-muted-foreground">
                       {fmtTime(c.createdAt)}
                     </span>
@@ -291,13 +294,13 @@ export function OAuthAdminPanel() {
                         size="icon"
                         className="h-6 w-6 shrink-0"
                         onClick={() => void copy(c.clientId, "Client ID")}
-                        aria-label="复制 Client ID"
+                        aria-label={t("ao.copyClientId")}
                       >
                         <Copy className="h-3 w-3" aria-hidden="true" />
                       </Button>
                     </div>
                     <div className="flex gap-2">
-                      <span className="w-24 shrink-0 text-muted-foreground">回调地址</span>
+                      <span className="w-24 shrink-0 text-muted-foreground">{t("ao.field.redirect")}</span>
                       <div className="min-w-0 flex-1 space-y-0.5">
                         {c.redirectUris.map((u) => (
                           <div key={u} className="truncate font-mono">
@@ -307,7 +310,7 @@ export function OAuthAdminPanel() {
                       </div>
                     </div>
                     <div className="flex gap-2">
-                      <span className="w-24 shrink-0 text-muted-foreground">权限</span>
+                      <span className="w-24 shrink-0 text-muted-foreground">{t("ao.field.scopes")}</span>
                       <span className="font-mono">{c.scopes}</span>
                     </div>
                   </div>
@@ -319,14 +322,14 @@ export function OAuthAdminPanel() {
                       onClick={() => void doResetSecret(c)}
                     >
                       <RefreshCw className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-                      重置密钥
+                      {t("ao.reset")}
                     </Button>
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() => void toggleDisabled(c)}
                     >
-                      {c.disabled ? "启用" : "停用"}
+                      {c.disabled ? t("common.enable") : t("common.disable")}
                     </Button>
                     <Button
                       variant="ghost"
@@ -335,7 +338,7 @@ export function OAuthAdminPanel() {
                       onClick={() => setToDelete(c)}
                     >
                       <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-                      删除
+                      {t("common.delete")}
                     </Button>
                   </div>
                 </div>
@@ -349,26 +352,26 @@ export function OAuthAdminPanel() {
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>添加 OAuth 应用</DialogTitle>
+            <DialogTitle>{t("ao.dlg.title")}</DialogTitle>
             <DialogDescription>
-              回调地址必须与对方站点配置的完全一致，否则对方会拒绝接收授权结果。
+              {t("ao.dlg.desc")}
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="oauth-name">应用名</Label>
+              <Label htmlFor="oauth-name">{t("ao.dlg.name")}</Label>
               <Input
                 id="oauth-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="如：NewAPI"
+                placeholder={t("ao.dlg.namePh")}
               />
-              <p className="text-xs text-muted-foreground">用户在同意页上看到的就是这个名字。</p>
+              <p className="text-xs text-muted-foreground">{t("ao.dlg.nameHint")}</p>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="oauth-uris">回调地址（每行一个）</Label>
+              <Label htmlFor="oauth-uris">{t("ao.dlg.uris")}</Label>
               <Textarea
                 id="oauth-uris"
                 value={urisText}
@@ -378,12 +381,12 @@ export function OAuthAdminPanel() {
                 className="font-mono text-xs"
               />
               <p className="text-xs text-muted-foreground">
-                必须 https。本机调试可填 http://127.0.0.1/… （需在对方站点也保持一致）。
+                {t("ao.dlg.urisHint")}
               </p>
             </div>
 
             <div className="space-y-2">
-              <Label>权限</Label>
+              <Label>{t("ao.field.scopes")}</Label>
               {SCOPE_OPTIONS.map((s) => (
                 <label key={s.value} className="flex items-center gap-2 text-sm">
                   <input
@@ -408,10 +411,10 @@ export function OAuthAdminPanel() {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={busy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void submitCreate()} disabled={busy}>
-              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "创建"}
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : t("common.create")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -423,20 +426,20 @@ export function OAuthAdminPanel() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Check className="h-4 w-4 text-primary" aria-hidden="true" />
-              密钥已生成
+              {t("ao.secret.title")}
             </DialogTitle>
             <DialogDescription>
               <span className="font-medium text-destructive">
-                这段密钥只显示这一次
+                {t("ao.secret.once")}
               </span>
-              ，关掉后就查不到了（库里只存哈希）。请立刻复制到对方站点。
+              {t("ao.secret.desc")}
             </DialogDescription>
           </DialogHeader>
 
           {secretDialog && (
             <div className="space-y-3">
               <div className="flex items-center gap-2 text-sm">
-                <span className="shrink-0 text-muted-foreground">应用</span>
+                <span className="shrink-0 text-muted-foreground">{t("ao.secret.app")}</span>
                 <span className="font-medium">{secretDialog.clientName}</span>
               </div>
 
@@ -454,7 +457,7 @@ export function OAuthAdminPanel() {
                     onClick={() => void copy(secretDialog.clientId, "Client ID")}
                   >
                     <Copy className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-                    复制
+                    {t("common.copy")}
                   </Button>
                 </div>
               </div>
@@ -472,7 +475,7 @@ export function OAuthAdminPanel() {
                     onClick={() => void copy(secretDialog.clientSecret, "Client Secret")}
                   >
                     <Copy className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-                    复制
+                    {t("common.copy")}
                   </Button>
                 </div>
               </div>
@@ -482,13 +485,13 @@ export function OAuthAdminPanel() {
                   className="mr-1 inline h-3.5 w-3.5 text-destructive"
                   aria-hidden="true"
                 />
-                没有存下来？关掉后只能用「重置密钥」重新生成一个（旧的会立即失效）。
+                {t("ao.secret.lost")}
               </div>
             </div>
           )}
 
           <DialogFooter>
-            <Button onClick={() => setSecretDialog(null)}>关闭</Button>
+            <Button onClick={() => setSecretDialog(null)}>{t("common.close")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -497,18 +500,17 @@ export function OAuthAdminPanel() {
       <Dialog open={toDelete !== null} onOpenChange={(o) => !o && setToDelete(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>删除应用</DialogTitle>
+            <DialogTitle>{t("ao.del.title")}</DialogTitle>
             <DialogDescription>
-              删除「{toDelete?.name}」后，它的全部访问令牌与授权记录会立即作废，
-              使用它的站点将无法再用 Doulor Cloud 登录。
+              {t("ao.del.desc", { name: toDelete?.name ?? "" })}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setToDelete(null)} disabled={busy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button variant="destructive" onClick={() => void doDelete()} disabled={busy}>
-              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "确认删除"}
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : t("ao.del.confirm")}
             </Button>
           </DialogFooter>
         </DialogContent>

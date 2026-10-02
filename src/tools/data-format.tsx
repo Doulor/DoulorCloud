@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { copyText, downloadBlob } from "@/lib/toolbox/utils"
+import { useT, tStatic } from "@/i18n"
 
 type Fmt = "json" | "yaml" | "xml"
 
@@ -49,7 +50,7 @@ function elementToValue(el: Element): unknown {
 function xmlToValue(text: string): unknown {
   const doc = new DOMParser().parseFromString(text, "application/xml")
   if (doc.querySelector("parsererror")) {
-    throw new Error("XML 解析失败，请检查标签是否闭合、属性有没有加引号")
+    throw new Error(tStatic("df.err.xmlParse"))
   }
   return { [doc.documentElement.tagName]: elementToValue(doc.documentElement) }
 }
@@ -100,7 +101,7 @@ function valueToXmlDoc(value: unknown): string {
 /** 把一段 XML 重新缩进，用于「格式化」 */
 function prettyXml(text: string): string {
   const doc = new DOMParser().parseFromString(text, "application/xml")
-  if (doc.querySelector("parsererror")) throw new Error("XML 解析失败，无法格式化")
+  if (doc.querySelector("parsererror")) throw new Error(tStatic("df.err.xmlFormat"))
   const raw = new XMLSerializer().serializeToString(doc)
   return raw.replace(/>\s*</g, ">\n<")
 }
@@ -118,6 +119,7 @@ function serialize(value: unknown, fmt: Fmt, compact: boolean): string {
 }
 
 export default function DataFormatTool() {
+  const { t } = useT()
   const [from, setFrom] = React.useState<Fmt>("json")
   const [to, setTo] = React.useState<Fmt>("yaml")
   const [input, setInput] = React.useState('{\n  "name": "doulor",\n  "tags": ["cloud", "mail"],\n  "nested": { "a": 1, "b": true }\n}')
@@ -139,7 +141,7 @@ export default function DataFormatTool() {
         setError(null)
       } catch (e) {
         setOutput("")
-        setError(e instanceof Error ? e.message : "转换失败")
+        setError(e instanceof Error ? e.message : t("df.err.convert"))
       }
     },
     []
@@ -158,12 +160,12 @@ export default function DataFormatTool() {
   return (
     <ToolShell
       title="JSON / XML / YAML"
-      description="三种结构化数据互转，也能单纯用来格式化或压缩。数据不离开你的浏览器。"
+      description={t("df.desc")}
       wide
     >
       <div className="flex flex-wrap items-end gap-3">
         <div className="w-40 space-y-1.5">
-          <Label className="text-xs text-muted-foreground">输入格式</Label>
+          <Label className="text-xs text-muted-foreground">{t("df.inputFormat")}</Label>
           <Select
             value={from}
             onValueChange={(v) => {
@@ -186,7 +188,7 @@ export default function DataFormatTool() {
         <ArrowRight className="mb-2.5 h-4 w-4 text-muted-foreground" />
 
         <div className="w-40 space-y-1.5">
-          <Label className="text-xs text-muted-foreground">输出格式</Label>
+          <Label className="text-xs text-muted-foreground">{t("df.outputFormat")}</Label>
           <Select value={to} onValueChange={(v) => setTo(v as Fmt)}>
             <SelectTrigger>
               <SelectValue />
@@ -207,7 +209,7 @@ export default function DataFormatTool() {
               onChange={(e) => setCompact(e.target.checked)}
               className="h-4 w-4 accent-primary"
             />
-            压缩成一行
+            {t("df.minify")}
           </label>
         )}
 
@@ -220,11 +222,11 @@ export default function DataFormatTool() {
                 setOutput(prettyXml(input))
                 setError(null)
               } catch (e) {
-                setError(e instanceof Error ? e.message : "格式化失败")
+                setError(e instanceof Error ? e.message : t("df.err.format"))
               }
             }}
           >
-            直接格式化原文
+            {t("df.formatAsIs")}
           </Button>
           <Button
             variant="outline"
@@ -233,29 +235,29 @@ export default function DataFormatTool() {
             onClick={() => downloadBlob(new Blob([output], { type: "text/plain;charset=utf-8" }), `data.${EXT[to]}`)}
           >
             <Download className="h-4 w-4" />
-            下载
+            {t("common.download")}
           </Button>
         </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <ToolSection title="输入">
+        <ToolSection title={t("df.section.input")}>
           <Textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             rows={20}
             spellCheck={false}
             className="min-h-[420px] font-mono text-[13px]"
-            placeholder="粘贴 JSON / YAML / XML…"
+            placeholder={t("df.inputPlaceholder")}
           />
         </ToolSection>
 
         <ToolSection
-          title="输出"
+          title={t("df.section.output")}
           actions={
             <Button variant="ghost" size="sm" disabled={!output} onClick={() => void copy()}>
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-              {copied ? "已复制" : "复制"}
+              {copied ? t("common.copied") : t("common.copy")}
             </Button>
           }
         >
@@ -270,15 +272,14 @@ export default function DataFormatTool() {
               rows={20}
               spellCheck={false}
               className="min-h-[420px] font-mono text-[13px]"
-              placeholder="转换结果会出现在这里"
+              placeholder={t("df.outputPlaceholder")}
             />
           )}
         </ToolSection>
       </div>
 
       <p className="text-xs text-muted-foreground">
-        提示：XML 转成 JSON 时，属性名会带上 <code className="font-mono">@</code> 前缀，
-        纯文本节点放在 <code className="font-mono">#text</code> 里；再转回 XML 时会自动还原。
+        {t("df.xmlNote")}
       </p>
     </ToolShell>
   )

@@ -106,8 +106,12 @@ import {
   type DonationRewardItem,
   type InvitePointsConfig,
   type AttentionCounts,
+  type DmPeer,
+  type DmMessage,
+  type DmConversation,
 } from "@/types"
 import type { FunLinkCategory } from "@/lib/fun-links"
+import { tStatic } from "@/i18n"
 
 /**
  * 统一 API 请求层。
@@ -147,7 +151,7 @@ export class HttpError extends Error {
  */
 export function errMsg(err: unknown, fallback: string): string {
   if (err instanceof HttpError && err.message) return err.message
-  if (err instanceof TypeError) return "网络连接失败，请检查网络后重试"
+  if (err instanceof TypeError) return tStatic("api.networkError")
   return fallback
 }
 
@@ -174,7 +178,7 @@ async function request<T>(
 
   if (!res.ok) {
     const message =
-      (data as ApiError | null)?.error ?? `请求失败 (${res.status})`
+      (data as ApiError | null)?.error ?? tStatic("api.requestFailed", { status: res.status })
     const code = (data as ApiError | null)?.code
 
     // 仅在「会话本身失效」时清空用户态。
@@ -194,7 +198,7 @@ async function request<T>(
   // 此时 data 是 null，若直接返回会让调用方在 `res.posts` 上抛 TypeError，
   // 用户看到的是白屏而不是可理解的错误。这里统一转成 HttpError。
   if (data === null) {
-    throw new HttpError(res.status, "服务响应异常，请检查网络或稍后重试", "INVALID_RESPONSE")
+    throw new HttpError(res.status, tStatic("api.invalidResponse"), "INVALID_RESPONSE")
   }
 
   return data as T
@@ -1061,7 +1065,7 @@ export const profileApi = {
     if (!res.ok) {
       throw new HttpError(
         res.status,
-        (data as ApiError | null)?.error ?? `上传失败 (${res.status})`,
+        (data as ApiError | null)?.error ?? tStatic("api.uploadFailed", { status: res.status }),
         (data as ApiError | null)?.code
       )
     }
@@ -1370,6 +1374,21 @@ export const achievementApi = {
 // ---- 积分（余额 / 流水 / 兑换中转站余额）----
 
 export const pointsApi = {
+  /**
+   * 上传商品封面图（2026-10-01 加）。
+   *
+   * 返回的 `url` 是**同源相对路径**（`/shop-img/<userId>/<file>`），
+   * 直接填进 imageUrl 字段即可 —— 商城所有人都能看到这张图。
+   */
+  uploadProductImage: (file: File) => {
+    const headers = new Headers()
+    headers.set("Content-Type", file.type)
+    return request<{ key: string; url: string }>("/points/product/image", {
+      method: "POST",
+      body: file,
+      headers,
+    })
+  },
   /** 余额 + 兑换配置 + 商城商品 + 我的订单 + 最近流水（一次拿齐整页数据） */
   overview: () => request<PointsOverview>("/points"),
   /** 用积分兑换中转站余额（每 1 积分值多少元由后台配置） */
@@ -1675,6 +1694,45 @@ export const attentionApi = {
 
 // ---- 通知 / 消息箱 ----
 
+/**
+ * 一对一私信（2026-10-01）。
+ *
+ * 轮询与聊天室一个路子：拉取**不会**自动标已读，前端在「用户真的看到」时
+ * 单独调 `seen()`（否则轮询一次就把未读清零了）。
+ */
+export const dmApi = {
+  /** 会话列表（每个对端一条，带未读数） */
+  conversations: () =>
+    request<{ conversations: DmConversation[]; unreadTotal: number }>(
+      "/dm/conversations"
+    ),
+
+  /** 只取未读总数（做角标用，别为它拉整个列表） */
+  unread: () => request<{ unread: number }>("/dm/unread"),
+
+  /** 某个会话的消息；传 after 则增量拉取 */
+  list: (peer: string, after?: string) => {
+    const qs = new URLSearchParams({ peer })
+    if (after) qs.set("after", after)
+    return request<{ peer: DmPeer; messages: DmMessage[]; nextCursor: string | null }>(
+      `/dm?${qs.toString()}`
+    )
+  },
+
+  send: (to: string, body: string) =>
+    request<{ message: DmMessage }>("/dm", {
+      method: "POST",
+      body: JSON.stringify({ to, body }),
+    }),
+
+  /** 把「与某个对端的会话里我收到的消息」标为已读（幂等） */
+  seen: (peer: string) =>
+    request<{ ok: boolean; marked: number }>("/dm/seen", {
+      method: "POST",
+      body: JSON.stringify({ peer }),
+    }),
+}
+
 export const notificationApi = {
   /** 消息列表；category 可选（system/site/social/event），不传 = 全部 */
   list: (params?: { category?: MessageCategory; limit?: number }) => {
@@ -1711,10 +1769,19 @@ export const eventApi = {
   /** 单个活动（公开）：活动分享链接用；draft / scheduled 会 404 */
   get: (id: string) => request<{ event: EventItem }>(`/events/${encodeURIComponent(id)}`),
   /** 认证码活动必须带 code；其余活动 code 可省略 */
-  claim: (id: string, code?: string) =>
+  /**
+   * 领取活动奖励。
+   *
+   * `code` 用于「凭认证码」的活动，`github` 用于「点了 GitHub star」的活动 ——
+   * 两者都只是**线索**，服务端一律重新核验，前端传什么都不信。
+   */
+  claim: (id: string, code?: string, github?: string) =>
     request<{ status: string; detail: string }>(
       `/events/${encodeURIComponent(id)}/claim`,
-      { method: "POST", body: JSON.stringify({ code: code ?? "" }) }
+      {
+        method: "POST",
+        body: JSON.stringify({ code: code ?? "", github: github ?? "" }),
+      }
     ),
 }
 
@@ -2018,8 +2085,25 @@ export const feedbackApi = {
       `/admin/feedback${status ? `?status=${encodeURIComponent(status)}` : ""}`
     ),
 
-  reply: (payload: { id: string; reply: string; status?: string; images?: string[] }) =>
-    request<{ feedback: AdminFeedbackItem }>("/admin/feedback/reply", {
+  /**
+   * 回复一条反馈。
+   *
+   * `rewardPoints` > 0 时**顺手给作者发一笔积分奖励**（2026-10-01 加）：
+   * 同一张反馈只会发一次（服务端按反馈 id 幂等），重复保存不会重复发，
+   * 返回体里的 `reward.duplicated` 用于区分这一点。
+   */
+  reply: (payload: {
+    id: string
+    reply: string
+    status?: string
+    images?: string[]
+    /** 附带的积分奖励；不填 / 0 = 不发 */
+    rewardPoints?: number
+  }) =>
+    request<{
+      feedback: AdminFeedbackItem
+      reward: { amount: number; balance: number; duplicated: boolean } | null
+    }>("/admin/feedback/reply", {
       method: "POST",
       body: JSON.stringify(payload),
     }),

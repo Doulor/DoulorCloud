@@ -561,6 +561,13 @@ export interface NewApiStatus {
   availableGroups: string[]
   /** 分组 → 该分组可用模型 */
   groupModels: Record<string, string[]>
+  /**
+   * 捐献渠道所在的分组名（默认 donation）。
+   * 捐献模型只能被「选了这个分组」的 Key 调用，前端据此提示用户。
+   */
+  donationGroup: string
+  /** 建 Key 时可自选的分组（顺序：站点分组在前，即默认值） */
+  keyGroups: string[]
   /** 账号当前所属分组 */
   accountGroup: string | null
   /** 中转站健康状态（在线/离线 + 延迟 + 版本） */
@@ -617,7 +624,8 @@ export interface NewApiKey {
   name: string
   maskedKey: string
   createdAt: string
-  group?: string
+  /** 该 Key 所属分组；读不到时为 null（前端只显示「未知」） */
+  group?: string | null
 }
 
 /** 开通前探测：决定展示「绑定已有账号」还是「创建新账号」 */
@@ -738,10 +746,10 @@ export interface Permissions {
 }
 
 export const FEATURE_LABELS: Record<FeatureKey, string> = {
-  r2: "直链网盘",
-  ai: "AI 中转站",
-  frp: "内网穿透",
-  proxy: "代理节点",
+  r2: "feat.r2",
+  ai: "feat.ai",
+  frp: "feat.frp",
+  proxy: "feat.proxy",
 }
 
 // ---- 管理员全局设置 ----
@@ -1253,14 +1261,19 @@ export type CfPlanSource = "manual" | "subscription" | "usage" | "default"
  * 单项额度。
  * `used`/`limit` 为 null 表示读不到 —— 此时 `error` 一定有值。
  */
+export type CfQuotaUnit = "times" | "rows" | "items" | "bytes"
+
 export interface CfQuotaItem {
   key: string
   label: string
   used: number | null
   /** 免费版=每日硬上限；付费版=套餐内含的量 */
   limit: number | null
-  /** 展示单位；`字节` 由前端用 formatBytes 渲染 */
-  unit: "次" | "行" | "个" | "字节"
+  /**
+   * 展示单位（**i18n key**）。`quota.unit.bytes` 由前端用 formatBytes 渲染，
+   * 其余用 `t(unit)` 取词。
+   */
+  unit: CfQuotaUnit
   /** 重置周期说明（每天 00:00 UTC / 每月 / 不重置） */
   period: string
   /** used/limit 是哪个周期的量 */
@@ -2036,7 +2049,14 @@ export interface EventItem {
 
 export type EventStatus = "draft" | "scheduled" | "active" | "ended" | "archived"
 export type EventRewardType = "none" | "newapi_quota" | "invite_quota" | "points"
-export type EventConditionType = "always" | "has_profile" | "has_feature" | "code" | "lottery"
+export type EventConditionType =
+  | "always"
+  | "has_profile"
+  | "has_feature"
+  | "code"
+  | "lottery"
+  /** 点 GitHub star：用户填自己的 GitHub 用户名，服务端去仓库的 stargazers 名单里核验 */
+  | "github_star"
 
 /** 活动发布/更新请求体 */
 export interface EventPayload {
@@ -2518,4 +2538,32 @@ export interface AttentionCounts {
     /** 活动奖励里「自动发放失败、要人工发」的条数 */
     eventClaims: number
   } | null
+}
+
+// ---- 一对一私信（2026-10-01）----
+
+/** 私信里的对端（另一个用户） */
+export interface DmPeer {
+  id: string
+  username: string
+  nickname: string | null
+  hasAvatar: boolean
+}
+
+export interface DmMessage {
+  id: string
+  fromUserId: string
+  toUserId: string
+  body: string
+  createdAt: string
+  /** 收件人读这条的时间；null = 未读 */
+  readAt: string | null
+}
+
+export interface DmConversation {
+  peer: DmPeer
+  /** 最近一条消息（列表预览用） */
+  last: { body: string; createdAt: string; /** 是不是我发的 */ mine: boolean }
+  /** 我在这条会话里还没读的数量 */
+  unread: number
 }

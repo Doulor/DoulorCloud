@@ -286,7 +286,7 @@ export interface QuotaItem {
   /** 上限（免费版=每日硬上限；付费版=套餐内含量）；无上限为 null */
   limit: number | null
   /** 展示单位：次 / 行 / 个 / 字节 */
-  unit: "次" | "行" | "个" | "字节"
+  unit: "times" | "rows" | "items" | "bytes"
   /** 重置周期说明 */
   period: string
   /**
@@ -876,7 +876,7 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
       return {
         key: o.key,
         label: o.label,
-        unit: o.unit ?? "次",
+        unit: o.unit ?? "times",
         used: o.today,
         limit: o.limitFreePerDay,
         scope: "day",
@@ -893,7 +893,7 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
     return {
       key: o.key,
       label: o.label,
-      unit: o.unit ?? "次",
+      unit: o.unit ?? "times",
       used: o.mtd,
       limit: o.limitPaidPerMonth,
       scope: "month",
@@ -932,7 +932,7 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
     return {
       key: o.key,
       label: o.label,
-      unit: o.unit ?? "个",
+      unit: o.unit ?? "items",
       used: o.used,
       limit,
       scope: "none",
@@ -988,7 +988,7 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
         flowItem({
           key: "d1.rowsRead",
           label: paid ? "本月行读" : "今日行读",
-          unit: "行",
+          unit: "rows",
           today: errors.d1 ? null : valueOnDate(data.d1, "rowsRead", today),
           mtd: errors.d1 ? null : sumSeriesSince(d1ReadSeries, monthStart),
           limitFreePerDay: FREE_LIMITS.d1RowsReadPerDay,
@@ -1002,7 +1002,7 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
         flowItem({
           key: "d1.rowsWritten",
           label: paid ? "本月行写" : "今日行写",
-          unit: "行",
+          unit: "rows",
           today: errors.d1 ? null : valueOnDate(data.d1, "rowsWritten", today),
           mtd: errors.d1 ? null : sumSeriesSince(d1WriteSeries, monthStart),
           limitFreePerDay: FREE_LIMITS.d1RowsWrittenPerDay,
@@ -1016,7 +1016,7 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
         stockItem({
           key: "d1.storage",
           label: "存储",
-          unit: "字节",
+          unit: "bytes",
           used: counts.d1Bytes,
           limitFree: FREE_LIMITS.d1StorageBytes,
           limitPaid: PAID_LIMITS.d1StorageBytes,
@@ -1041,7 +1041,7 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
         stockItem({
           key: "r2.storage",
           label: "存储",
-          unit: "字节",
+          unit: "bytes",
           used: r2Bytes,
           limitFree: FREE_LIMITS.r2StorageBytes,
           limitPaid: FREE_LIMITS.r2StorageBytes,
@@ -1166,7 +1166,7 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
         stockItem({
           key: "kv.storage",
           label: "存储",
-          unit: "字节",
+          unit: "bytes",
           used: kvBytes,
           limitFree: FREE_LIMITS.kvStorageBytes,
           limitPaid: PAID_LIMITS.kvStorageBytes,
@@ -1197,7 +1197,7 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
           return {
             key: "ai.neurons",
             label: "今日 Neurons",
-            unit: "次" as const,
+            unit: "times" as const,
             used: usedToday,
             limit: FREE_LIMITS.aiNeuronsPerDay,
             scope: "day" as const,

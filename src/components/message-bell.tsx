@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { useAuth } from "@/hooks/use-auth"
 import { notificationApi } from "@/services/api"
 import { onMessagesChanged } from "@/lib/message-events"
+import { useT } from "@/i18n"
 
 /** 未读数轮询间隔：与侧边栏「新帖」角标一致 */
 const POLL_MS = 60_000
@@ -22,6 +23,7 @@ const POLL_MS = 60_000
  *   3. 标签页重新可见时（轮询在后台被跳过，切回来要立刻纠正）
  */
 export function MessageBell() {
+  const { t } = useT()
   const { user } = useAuth()
   const navigate = useNavigate()
   const [count, setCount] = React.useState(0)
@@ -67,8 +69,8 @@ export function MessageBell() {
       size="icon"
       className="relative"
       onClick={() => navigate("/dashboard/messages")}
-      aria-label={count > 0 ? `消息（${count} 条未读）` : "消息"}
-      title="消息"
+      aria-label={count > 0 ? t("mb.aria", { n: count }) : t("mb.title")}
+      title={t("mb.title")}
     >
       <Bell className="h-4 w-4" />
       {count > 0 && (

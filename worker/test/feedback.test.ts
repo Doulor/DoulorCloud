@@ -7,6 +7,7 @@
 //   3. 回复后 user_read 归零、标记已读只影响自己的记录。
 import { describe, it, expect } from "vitest"
 import { env } from "cloudflare:workers"
+import { getPointsBalance } from "../src/points"
 import { makeUser, authRequest, fetchSelf } from "./helpers"
 
 /** 提交一条反馈，返回 id */
@@ -396,5 +397,175 @@ describe("管理端删除反馈", () => {
       .bind(keep)
       .first<{ id: string }>()
     expect(kept?.id).toBe(keep)
+  })
+})
+
+// ---- 2026-10-01：回复反馈时可顺带赠送积分 ----
+//
+// 关键约束：**同一张反馈只发一次**（服务端按反馈 id 做幂等键），
+// 否则管理员重复点「发送回复」就会重复发分（积分能换真钱，这是资金问题）。
+describe("反馈回复附带积分奖励", () => {
+  it("带 rewardPoints 回复 → 作者到账，返回体带上发放结果", async () => {
+    const u = await makeUser()
+    const admin = await makeUser({ role: "admin" })
+    const id = await submit(u, { category: "bug", title: "登录页白屏", body: "……" })
+
+    const res = await fetchSelf(
+      authRequest(admin, "/api/admin/feedback/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, reply: "已修复，感谢反馈！", rewardPoints: 30 }),
+      })
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json<{
+      reward: { amount: number; balance: number; duplicated: boolean } | null
+    }>()
+    expect(body.reward?.amount).toBe(30)
+    expect(body.reward?.duplicated).toBe(false)
+    expect(await getPointsBalance(env, u.id)).toBe(30)
+  })
+
+  it("不传 rewardPoints → 一分不发（老行为不变）", async () => {
+    const u = await makeUser()
+    const admin = await makeUser({ role: "admin" })
+    const id = await submit(u, { category: "other", title: "随便说说", body: "……" })
+
+    const res = await fetchSelf(
+      authRequest(admin, "/api/admin/feedback/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, reply: "收到" }),
+      })
+    )
+    expect(res.status).toBe(200)
+    expect((await res.json<{ reward: unknown }>()).reward).toBeNull()
+    expect(await getPointsBalance(env, u.id)).toBe(0)
+  })
+
+  it("⚠️ 同一张反馈重复回复 → 不重复发分", async () => {
+    const u = await makeUser()
+    const admin = await makeUser({ role: "admin" })
+    const id = await submit(u, { category: "bug", title: "重复发分检查", body: "……" })
+
+    const send = () =>
+      fetchSelf(
+        authRequest(admin, "/api/admin/feedback/reply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, reply: "已处理", rewardPoints: 50 }),
+        })
+      )
+
+    const first = await send()
+    expect((await first.json<{ reward: { duplicated: boolean } }>()).reward.duplicated).toBe(false)
+    expect(await getPointsBalance(env, u.id)).toBe(50)
+
+    // 再回一次同一张单子（甚至改大金额）—— 都不该再发
+    const second = await send()
+    const secondBody = await second.json<{ reward: { duplicated: boolean } }>()
+    expect(secondBody.reward.duplicated).toBe(true)
+    expect(await getPointsBalance(env, u.id)).toBe(50)
+  })
+
+  it("超过单次上限 → 400，且回复不发出去", async () => {
+    const u = await makeUser()
+    const admin = await makeUser({ role: "admin" })
+    const id = await submit(u, { category: "bug", title: "上限检查", body: "……" })
+
+    const res = await fetchSelf(
+      authRequest(admin, "/api/admin/feedback/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, reply: "太多了", rewardPoints: 100000 }),
+      })
+    )
+    expect(res.status).toBe(400)
+    expect(await getPointsBalance(env, u.id)).toBe(0)
+  })
+})
+
+// ---- 2026-10-01：回复反馈时可顺带赠送积分 ----
+//
+// 关键约束：**同一张反馈只发一次**（服务端按反馈 id 做幂等键），
+// 否则管理员重复点「发送回复」就会重复发分（积分能换真钱，这是资金问题）。
+describe("反馈回复附带积分奖励", () => {
+  it("带 rewardPoints 回复 → 作者到账，返回体带上发放结果", async () => {
+    const u = await makeUser()
+    const admin = await makeUser({ role: "admin" })
+    const id = await submit(u, { category: "bug", title: "登录页白屏", body: "……" })
+
+    const res = await fetchSelf(
+      authRequest(admin, "/api/admin/feedback/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, reply: "已修复，感谢反馈！", rewardPoints: 30 }),
+      })
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json<{
+      reward: { amount: number; balance: number; duplicated: boolean } | null
+    }>()
+    expect(body.reward?.amount).toBe(30)
+    expect(body.reward?.duplicated).toBe(false)
+    expect(await getPointsBalance(env, u.id)).toBe(30)
+  })
+
+  it("不传 rewardPoints → 一分不发（老行为不变）", async () => {
+    const u = await makeUser()
+    const admin = await makeUser({ role: "admin" })
+    const id = await submit(u, { category: "other", title: "随便说说", body: "……" })
+
+    const res = await fetchSelf(
+      authRequest(admin, "/api/admin/feedback/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, reply: "收到" }),
+      })
+    )
+    expect(res.status).toBe(200)
+    expect((await res.json<{ reward: unknown }>()).reward).toBeNull()
+    expect(await getPointsBalance(env, u.id)).toBe(0)
+  })
+
+  it("⚠️ 同一张反馈重复回复 → 不重复发分", async () => {
+    const u = await makeUser()
+    const admin = await makeUser({ role: "admin" })
+    const id = await submit(u, { category: "bug", title: "重复发分检查", body: "……" })
+
+    const send = () =>
+      fetchSelf(
+        authRequest(admin, "/api/admin/feedback/reply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, reply: "已处理", rewardPoints: 50 }),
+        })
+      )
+
+    const first = await send()
+    expect((await first.json<{ reward: { duplicated: boolean } }>()).reward.duplicated).toBe(false)
+    expect(await getPointsBalance(env, u.id)).toBe(50)
+
+    // 再回一次同一张单子（甚至改大金额）—— 都不该再发
+    const second = await send()
+    const secondBody = await second.json<{ reward: { duplicated: boolean } }>()
+    expect(secondBody.reward.duplicated).toBe(true)
+    expect(await getPointsBalance(env, u.id)).toBe(50)
+  })
+
+  it("超过单次上限 → 400，且回复不发出去", async () => {
+    const u = await makeUser()
+    const admin = await makeUser({ role: "admin" })
+    const id = await submit(u, { category: "bug", title: "上限检查", body: "……" })
+
+    const res = await fetchSelf(
+      authRequest(admin, "/api/admin/feedback/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, reply: "太多了", rewardPoints: 100000 }),
+      })
+    )
+    expect(res.status).toBe(400)
+    expect(await getPointsBalance(env, u.id)).toBe(0)
   })
 })

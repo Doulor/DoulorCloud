@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 import { SHOP_ICON_COUNT, SHOP_ICON_GROUPS, shopIcon } from "@/lib/shop-icons"
+import { useT } from "@/i18n"
 
 /**
  * 积分商城的商品图标选择器（可折叠）。
@@ -28,6 +29,7 @@ export function ShopIconPicker({
   onChange: (slug: string) => void
   disabled?: boolean
 }) {
+  const { t } = useT()
   const [open, setOpen] = React.useState(false)
   const [query, setQuery] = React.useState("")
 
@@ -45,7 +47,7 @@ export function ShopIconPicker({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <Label>图标（可选）</Label>
+        <Label>{t("si.label")}</Label>
         <Button
           type="button"
           variant="ghost"
@@ -54,7 +56,7 @@ export function ShopIconPicker({
           onClick={() => setOpen((o) => !o)}
         >
           <Palette className="mr-1 h-3.5 w-3.5" />
-          {open ? "收起" : value ? "更换图标" : `从 ${SHOP_ICON_COUNT} 个图标里选`}
+          {open ? t("lg.collapse") : value ? t("si.change") : t("si.pickFrom", { n: SHOP_ICON_COUNT })}
         </Button>
       </div>
 
@@ -66,9 +68,9 @@ export function ShopIconPicker({
           {value ? (
             <p className="truncate font-mono">{value}</p>
           ) : (
-            <p>没选图标时，商品卡片上显示一个默认图标。</p>
+            <p>{t("si.note1")}</p>
           )}
-          <p className="mt-0.5">图标会占卡片顶部一大块；填了封面图则以图片为准。</p>
+          <p className="mt-0.5">{t("si.note2")}</p>
         </div>
         {value && (
           <Button
@@ -78,7 +80,7 @@ export function ShopIconPicker({
             disabled={disabled}
             onClick={() => onChange("")}
           >
-            清除
+            {t("si.clear")}
           </Button>
         )}
       </div>
@@ -88,18 +90,18 @@ export function ShopIconPicker({
           <div className="border-b p-2">
             <Input
               className="h-8 text-xs"
-              placeholder="搜索图标名（英文，如 gift / card）"
+              placeholder={t("si.searchPlaceholder")}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
           </div>
           <div className="max-h-60 space-y-3 overflow-y-auto p-2">
             {groups.length === 0 ? (
-              <p className="py-6 text-center text-xs text-muted-foreground">没有匹配的图标。</p>
+              <p className="py-6 text-center text-xs text-muted-foreground">{t("si.noMatch")}</p>
             ) : (
               groups.map((g) => (
                 <div key={g.label}>
-                  <p className="mb-1.5 text-[10px] font-medium text-muted-foreground">{g.label}</p>
+                  <p className="mb-1.5 text-[10px] font-medium text-muted-foreground">{t(g.label)}</p>
                   <div className="grid grid-cols-8 gap-1">
                     {g.icons.map(({ name, Icon }) => (
                       <button

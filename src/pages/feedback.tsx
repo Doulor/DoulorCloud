@@ -38,6 +38,7 @@ import {
   ImageGallery,
 } from "@/components/feedback-image"
 import type { FeedbackItem, FeedbackOverview } from "@/types"
+import { useT } from "@/i18n"
 
 /**
  * 反馈页。
@@ -77,6 +78,7 @@ const MAX_TITLE = 80
 const MAX_BODY = 2000
 
 export default function FeedbackPage() {
+  const { t } = useT()
   const [data, setData] = React.useState<FeedbackOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
 
@@ -104,7 +106,7 @@ export default function FeedbackPage() {
       // 自动展开最新一条（列表按时间倒序，第一条即最新）
       setExpanded(res.feedback[0]?.id ?? null)
     } catch (err) {
-      toast.error(errMsg(err, "加载反馈失败"))
+      toast.error(errMsg(err, t("fb.err.load")))
     } finally {
       setLoading(false)
     }
@@ -118,14 +120,14 @@ export default function FeedbackPage() {
   const statusLabels = data?.statusLabels ?? {}
 
   const submit = async () => {
-    const t = title.trim()
+    const ttl = title.trim()
     const b = body.trim()
-    if (!t) {
-      toast.error("请填写标题")
+    if (!ttl) {
+      toast.error(t("fb.err.titleRequired"))
       return
     }
     if (!b) {
-      toast.error("请填写详细内容")
+      toast.error(t("fb.err.bodyRequired"))
       return
     }
     setBusy(true)
@@ -141,12 +143,12 @@ export default function FeedbackPage() {
           failed++
         }
       }
-      await feedbackApi.create({ category, title: t, body: b, images: keys })
+      await feedbackApi.create({ category, title: ttl, body: b, images: keys })
       if (failed > 0) {
-        toast.warning(`反馈已提交，但有 ${failed} 张图片上传失败`)
+        toast.warning(t("fb.ok.submittedWithImages", { n: failed }))
       } else {
-        toast.success("反馈已提交", {
-          description: "管理员回复后，会在这里显示，同时收到站内通知。",
+        toast.success(t("fb.ok.submitted"), {
+          description: t("fb.ok.submittedDesc"),
         })
       }
       setTitle("")
@@ -154,7 +156,7 @@ export default function FeedbackPage() {
       formImages.reset()
       await load()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "提交失败")
+      toast.error(err instanceof HttpError ? err.message : t("fb.err.submit"))
     } finally {
       setBusy(false)
     }
@@ -166,18 +168,18 @@ export default function FeedbackPage() {
   const handleReply = async (id: string, text: string, images: string[]) => {
     try {
       await feedbackApi.replyMy({ id, reply: text, images })
-      toast.success("回复已发送")
+      toast.success(t("fb.ok.replied"))
       await load()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "回复失败")
+      toast.error(err instanceof HttpError ? err.message : t("fb.err.reply"))
     }
   }
 
   return (
     <div>
       <PageHeader
-        title="反馈"
-        description="提交问题、建议或捐献相关咨询，管理员会在这里回复你"
+        title={t("fb.title")}
+        description={t("fb.desc")}
       />
 
       <Link
@@ -185,7 +187,7 @@ export default function FeedbackPage() {
         className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
       >
         <ArrowLeft className="h-4 w-4" />
-        返回控制台
+        {t("space.backToConsole")}
       </Link>
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -194,16 +196,13 @@ export default function FeedbackPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Sparkles className="h-4 w-4 text-muted-foreground" />
-              提交反馈
+              {t("fb.submitTitle")}
             </CardTitle>
-            <CardDescription>
-              请尽量把「你做了什么、期望什么、实际发生了什么」写清楚，
-              这样管理员才能定位问题，也能更快给你回复。
-            </CardDescription>
+            <CardDescription>{t("fb.submitDesc")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <Label>分类</Label>
+              <Label>{t("fb.category")}</Label>
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {categories.map((c) => {
                   const Icon = CATEGORY_ICONS[c.key] ?? MessageSquare
@@ -233,23 +232,23 @@ export default function FeedbackPage() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="fbTitle">标题</Label>
+              <Label htmlFor="fbTitle">{t("fb.field.title")}</Label>
               <Input
                 id="fbTitle"
                 maxLength={MAX_TITLE}
-                placeholder="一句话概括"
+                placeholder={t("fb.titlePlaceholder")}
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="fbBody">详细内容</Label>
+              <Label htmlFor="fbBody">{t("fb.field.body")}</Label>
               <Textarea
                 id="fbBody"
                 rows={8}
                 maxLength={MAX_BODY}
-                placeholder={"复现步骤 / 期望结果 / 实际情况，越具体越好"}
+                placeholder={t("fb.bodyPlaceholder")}
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
               />
@@ -273,7 +272,7 @@ export default function FeedbackPage() {
                 ) : (
                   <Send className="h-4 w-4" />
                 )}
-                提交
+                {t("common.submit")}
               </Button>
             </div>
           </CardContent>
@@ -282,9 +281,9 @@ export default function FeedbackPage() {
         {/* ---- 右：我的反馈 ---- */}
         <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-medium">我提交的反馈</h2>
+            <h2 className="text-sm font-medium">{t("fb.mine")}</h2>
             {items.length > 0 && (
-              <span className="text-xs text-muted-foreground">共 {items.length} 条</span>
+              <span className="text-xs text-muted-foreground">{t("fb.count", { n: items.length })}</span>
             )}
           </div>
 
@@ -293,8 +292,8 @@ export default function FeedbackPage() {
           ) : items.length === 0 ? (
             <EmptyState
               icon={MessageSquare}
-              title="还没有提交过反馈"
-              description="左边填好标题和内容，点「提交」即可。"
+              title={t("fb.empty")}
+              description={t("fb.emptyDesc")}
             />
           ) : (
             items.map((f) => (
@@ -333,6 +332,7 @@ function FeedbackCard({
   onToggle: () => void
   onReply: (id: string, text: string, images: string[]) => Promise<void>
 }) {
+  const { t } = useT()
   const Icon = CATEGORY_ICONS[item.category] ?? MessageSquare
   const hasReply = Boolean(item.adminReply)
   // 未读回复：用一条左侧色条 + 徽章提示，不做整卡高亮（列表里会太吵）
@@ -343,9 +343,9 @@ function FeedbackCard({
   const replyImages = usePickedImages()
 
   const submitReply = async () => {
-    const t = replyText.trim()
-    if (!t && replyImages.images.length === 0) {
-      toast.error("请输入回复内容")
+    const text = replyText.trim()
+    if (!text && replyImages.images.length === 0) {
+      toast.error(t("fb.err.replyRequired"))
       return
     }
     setReplying(true)
@@ -360,12 +360,12 @@ function FeedbackCard({
           failed++
         }
       }
-      await onReply(item.id, t, keys)
-      if (failed > 0) toast.warning(`已发送，但有 ${failed} 张图片上传失败`)
+      await onReply(item.id, text, keys)
+      if (failed > 0) toast.warning(t("fb.ok.repliedWithImages", { n: failed }))
       setReplyText("")
       replyImages.reset()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "回复失败")
+      toast.error(err instanceof HttpError ? err.message : t("fb.err.reply"))
     } finally {
       setReplying(false)
     }
@@ -388,11 +388,11 @@ function FeedbackCard({
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm font-medium">{item.title}</span>
               <Badge variant={statusVariant(item.status)}>{statusLabel}</Badge>
-              {unread && <Badge variant="default">新回复</Badge>}
+              {unread && <Badge variant="default">{t("fb.newReply")}</Badge>}
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
               {categoryLabel} · {fmtTime(item.createdAt)}
-              {item.repliedAt && ` · 回复于 ${fmtTime(item.repliedAt)}`}
+              {item.repliedAt && t("fb.repliedAt", { time: fmtTime(item.repliedAt) })}
             </p>
             {!expanded && (
               <p className="mt-1 line-clamp-2 text-xs text-muted-foreground/80">
@@ -412,7 +412,7 @@ function FeedbackCard({
           <div className="mt-3 space-y-3 border-t pt-3">
             {/* 我的原始反馈 */}
             <div>
-              <p className="mb-1 text-xs font-medium text-muted-foreground">我</p>
+              <p className="mb-1 text-xs font-medium text-muted-foreground">{t("fb.me")}</p>
               <p className="whitespace-pre-wrap text-sm">{item.body}</p>
               <ImageGallery images={item.images} />
             </div>
@@ -436,7 +436,7 @@ function FeedbackCard({
                   {m.isAdmin ? (
                     <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
                   ) : null}
-                  {m.isAdmin ? "管理员" : "我"}
+                  {m.isAdmin ? t("fb.admin") : t("fb.me")}
                 </p>
                 <p className="whitespace-pre-wrap text-sm">{m.body}</p>
                 <ImageGallery images={m.images} />
@@ -448,7 +448,7 @@ function FeedbackCard({
               <div className="rounded-md border border-primary/30 bg-accent/40 p-3">
                 <p className="mb-1 flex items-center gap-1.5 text-xs font-medium text-foreground">
                   <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-                  管理员回复
+                  {t("fb.adminReply")}
                 </p>
                 <p className="whitespace-pre-wrap text-sm">{item.adminReply}</p>
               </div>
@@ -456,7 +456,7 @@ function FeedbackCard({
             {item.messages.length === 0 && !hasReply && (
               <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <AlertCircle className="h-3.5 w-3.5" />
-                还没有回复，管理员看到后会尽快处理。
+                {t("fb.noReplyYet")}
               </p>
             )}
 
@@ -464,7 +464,7 @@ function FeedbackCard({
             <div className="space-y-2">
               <Textarea
                 rows={2}
-                placeholder="继续补充说明…"
+                placeholder={t("fb.replyPlaceholder")}
                 value={replyText}
                 onChange={(e) => setReplyText(e.target.value)}
               />
@@ -483,7 +483,7 @@ function FeedbackCard({
                 >
                   {replying && <Loader2 className="h-4 w-4 animate-spin" />}
                   <Send className="h-3.5 w-3.5" />
-                  发送
+                  {t("fb.send")}
                 </Button>
               </div>
             </div>

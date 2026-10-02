@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { FUN_LINK_CATEGORIES, type FunLinkCategory } from "@/lib/fun-links"
 import { funLinkIconUrl, funLinksApi, type FunLink } from "@/services/api"
+import { useT } from "@/i18n"
 
 /**
  * 有趣的网页分享。
@@ -27,6 +28,7 @@ function hostOf(url: string): string {
 }
 
 export default function FunLinksTool() {
+  const { t } = useT()
   const [links, setLinks] = React.useState<FunLink[] | null>(null)
   const [error, setError] = React.useState("")
   const [keyword, setKeyword] = React.useState("")
@@ -39,7 +41,7 @@ export default function FunLinksTool() {
       const res = await funLinksApi.list()
       setLinks(res.links)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "加载失败")
+      setError(err instanceof Error ? err.message : t("fl.err.load"))
     }
   }, [])
 
@@ -66,8 +68,8 @@ export default function FunLinksTool() {
 
   return (
     <ToolShell
-      title="有趣的网页分享"
-      description="一些值得一逛的网站，点开即走，本站不参与也不背书。"
+      title={t("toolbox.funLinks.name")}
+      description={t("fl.desc")}
       local={false}
     >
       <ToolSection>
@@ -78,7 +80,7 @@ export default function FunLinksTool() {
           >
             <TabsList className="h-auto flex-wrap justify-start">
               <TabsTrigger value="all" className="gap-1.5">
-                全部
+                {t("common.all")}
                 {links !== null && (
                   <span className="text-[11px] text-muted-foreground">{counts.all ?? 0}</span>
                 )}
@@ -101,7 +103,7 @@ export default function FunLinksTool() {
             <Input
               value={keyword}
               onChange={(e) => setKeyword(e.target.value)}
-              placeholder="搜索名称、说明或网址…"
+              placeholder={t("fl.searchPlaceholder")}
               className="pl-9"
             />
           </div>
@@ -111,23 +113,23 @@ export default function FunLinksTool() {
           <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-12 text-center">
             <p className="text-sm text-muted-foreground">{error}</p>
             <Button variant="outline" size="sm" onClick={() => void load()}>
-              重试
+              {t("common.retry")}
             </Button>
           </div>
         ) : links === null ? (
           <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
-            正在加载…
+            {t("common.loading")}
           </div>
         ) : list.length === 0 ? (
           <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed py-12 text-center">
             <Sparkles className="h-5 w-5 text-muted-foreground" />
             <p className="text-sm text-muted-foreground">
               {keyword.trim()
-                ? "没有匹配的网站"
+                ? t("fl.empty.search")
                 : category !== "all"
-                  ? "这一栏还没有内容，翻翻其它栏"
-                  : "站长还没放内容进来，等等看"}
+                  ? t("fl.empty.category")
+                  : t("fl.empty.none")}
             </p>
           </div>
         ) : (

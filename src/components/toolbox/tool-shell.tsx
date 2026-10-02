@@ -3,6 +3,7 @@ import { Link } from "react-router-dom"
 import { ArrowLeft, ShieldCheck } from "lucide-react"
 
 import { cn } from "@/lib/utils"
+import { useT } from "@/i18n"
 
 /**
  * 工具详情页的统一外壳：返回入口 + 标题 + 说明 + 隐私提示。
@@ -25,6 +26,7 @@ export function ToolShell({
   /** 宽版布局：拼图 / 长图这类需要横向铺开的工具用 */
   wide?: boolean
 }) {
+  const { t } = useT()
   return (
     <div className={cn("space-y-6", wide ? "w-full" : "")}>
       <div className="space-y-3">
@@ -33,7 +35,7 @@ export function ToolShell({
           className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
         >
           <ArrowLeft className="h-4 w-4" />
-          返回工具箱
+          {t("toolbox.backToToolbox")}
         </Link>
         <div className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
@@ -42,7 +44,7 @@ export function ToolShell({
         {local && (
           <p className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2.5 py-1 text-xs text-muted-foreground">
             <ShieldCheck className="h-3.5 w-3.5" />
-            本工具在你的浏览器本地运行，文件不会上传到服务器
+            {t("ts2.localNote")}
           </p>
         )}
       </div>

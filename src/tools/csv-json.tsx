@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { copyText, downloadBlob } from "@/lib/toolbox/utils"
+import { useT } from "@/i18n"
 
 /** 标准 CSV 解析：处理引号包裹、字段内换行、双引号转义 */
 function parseCsv(text: string, delimiter: string): string[][] {
@@ -70,16 +71,17 @@ function toCsvCell(value: unknown): string {
 }
 
 export default function CsvJsonTool() {
+  const { t } = useT()
   return (
     <ToolShell
-      title="表格转 JSON"
-      description="CSV / Excel 转成 JSON 给程序用，或者把 JSON 数组导出成 CSV 用表格打开。"
+      title={t("toolbox.csvJson.name")}
+      description={t("cj.desc")}
       wide
     >
       <Tabs defaultValue="to-json">
         <TabsList>
-          <TabsTrigger value="to-json">表格 → JSON</TabsTrigger>
-          <TabsTrigger value="to-csv">JSON → 表格</TabsTrigger>
+          <TabsTrigger value="to-json">{t("cj.tab.toJson")}</TabsTrigger>
+          <TabsTrigger value="to-csv">{t("cj.tab.toCsv")}</TabsTrigger>
         </TabsList>
         <TabsContent value="to-json" className="mt-4">
           <TableToJson />
@@ -93,6 +95,7 @@ export default function CsvJsonTool() {
 }
 
 function TableToJson() {
+  const { t } = useT()
   const [source, setSource] = React.useState("")
   const [rows, setRows] = React.useState<string[][]>([])
   const [header, setHeader] = React.useState(true)
@@ -105,9 +108,9 @@ function TableToJson() {
       const d = detectDelimiter(text)
       const parsed = parseCsv(text, d)
       setRows(parsed)
-      setError(parsed.length === 0 ? "没有解析到数据" : null)
+      setError(parsed.length === 0 ? t("cj.err.noRows") : null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "解析失败")
+      setError(e instanceof Error ? e.message : t("cj.err.parse"))
       setRows([])
     }
   }
@@ -117,14 +120,14 @@ function TableToJson() {
       const buf = await file.arrayBuffer()
       const wb = XLSX.read(buf, { type: "array" })
       const first = wb.SheetNames[0]
-      if (!first) throw new Error("工作簿里没有工作表")
+      if (!first) throw new Error(t("cj.err.noSheet"))
       const sheet = wb.Sheets[first]
       const data = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, raw: false, defval: "" })
       setRows(data.filter((r) => r.some((c) => String(c ?? "").trim() !== "")))
-      setSource(`（来自 ${file.name} · 工作表 ${first}）`)
+      setSource(t("cj.sourceWithSheet", { name: file.name, sheet: first }))
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Excel 读取失败")
+      setError(e instanceof Error ? e.message : t("cj.err.excel"))
       setRows([])
     }
   }
@@ -136,7 +139,7 @@ function TableToJson() {
     const body = rows.slice(1).map((r) => {
       const obj: Record<string, string> = {}
       keys.forEach((k, i) => {
-        obj[k || `列${i + 1}`] = r[i] ?? ""
+        obj[k || t("cj.colFallback", { n: i + 1 })] = r[i] ?? ""
       })
       return obj
     })
@@ -151,7 +154,7 @@ function TableToJson() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
-      <ToolSection title="数据源">
+      <ToolSection title={t("cj.section.source")}>
         <div className="space-y-3">
           <FileDrop
             accept=".csv,.tsv,.txt,.xlsx,.xls"
@@ -159,15 +162,15 @@ function TableToJson() {
               const f = files[0]
               if (!f) return
               if (/\.(xlsx|xls)$/i.test(f.name)) void loadExcel(f)
-              else void f.text().then((t) => { setSource(`（来自 ${f.name}）`); loadText(t) })
+              else void f.text().then((text) => { setSource(t("cj.source", { name: f.name })); loadText(text) })
             }}
-            label="选择 CSV / TSV / Excel 文件"
-            hint="也可以直接在下面粘贴 CSV 文本"
+            label={t("cj.pickFile")}
+            hint={t("cj.pickHint")}
             className="py-5"
           />
 
           <Textarea
-            value={source.startsWith("（来自") ? "" : source}
+            value={source.startsWith(t("cj.sourcePrefix")) ? "" : source}
             onChange={(e) => {
               setSource(e.target.value)
               loadText(e.target.value)
@@ -175,9 +178,9 @@ function TableToJson() {
             rows={10}
             spellCheck={false}
             className="min-h-[220px] font-mono text-[12.5px]"
-            placeholder={"name,age,city\n张三,28,杭州\n李四,35,成都"}
+            placeholder={t("cj.csvPlaceholder")}
           />
-          {source.startsWith("（来自") && (
+          {source.startsWith(t("cj.sourcePrefix")) && (
             <p className="text-xs text-muted-foreground">{source}</p>
           )}
 
@@ -189,7 +192,7 @@ function TableToJson() {
                 onChange={(e) => setHeader(e.target.checked)}
                 className="h-4 w-4 accent-primary"
               />
-              第一行是表头
+              {t("cj.firstRowHeader")}
             </label>
             <label className="flex items-center gap-2 text-sm">
               <input
@@ -198,7 +201,7 @@ function TableToJson() {
                 onChange={(e) => setCompact(e.target.checked)}
                 className="h-4 w-4 accent-primary"
               />
-              压缩成一行
+              {t("cj.minify")}
             </label>
           </div>
           {error && <p className="text-xs text-destructive">{error}</p>}
@@ -206,12 +209,12 @@ function TableToJson() {
       </ToolSection>
 
       <ToolSection
-        title={`JSON 结果${rows.length > 0 ? `（${header ? rows.length - 1 : rows.length} 条）` : ""}`}
+        title={t("cj.resultTitle", { n: rows.length })}
         actions={
           <div className="flex gap-2">
             <Button variant="ghost" size="sm" disabled={!json} onClick={() => void copy()}>
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-              {copied ? "已复制" : "复制"}
+              {copied ? t("common.copied") : t("common.copy")}
             </Button>
             <Button
               variant="outline"
@@ -220,7 +223,7 @@ function TableToJson() {
               onClick={() => downloadBlob(new Blob([json], { type: "application/json" }), "data.json")}
             >
               <Download className="h-4 w-4" />
-              下载
+              {t("cj.download")}
             </Button>
           </div>
         }
@@ -231,7 +234,7 @@ function TableToJson() {
           rows={22}
           spellCheck={false}
           className="min-h-[420px] font-mono text-[12.5px]"
-          placeholder="转换结果会出现在这里"
+          placeholder={t("cj.resultPlaceholder")}
         />
       </ToolSection>
     </div>
@@ -239,7 +242,8 @@ function TableToJson() {
 }
 
 function JsonToTable() {
-  const [text, setText] = React.useState('[\n  { "name": "张三", "age": 28 },\n  { "name": "李四", "age": 35 }\n]')
+  const { t } = useT()
+  const [text, setText] = React.useState(t("cj.jsonSample"))
   const [error, setError] = React.useState<string | null>(null)
 
   const csv = React.useMemo(() => {
@@ -250,9 +254,9 @@ function JsonToTable() {
     try {
       const parsed = JSON.parse(text)
       const list: unknown[] = Array.isArray(parsed) ? parsed : [parsed]
-      if (list.length === 0) throw new Error("数组是空的")
+      if (list.length === 0) throw new Error(t("cj.err.emptyArray"))
       if (typeof list[0] !== "object" || list[0] === null) {
-        throw new Error("需要是对象数组，例如 [{ \"a\": 1 }]")
+        throw new Error(t("cj.err.objectArray"))
       }
       const keys: string[] = []
       for (const item of list) {
@@ -271,7 +275,7 @@ function JsonToTable() {
       // 加 BOM，Excel 打开中文才不乱码
       return "\ufeff" + lines.join("\r\n")
     } catch (e) {
-      setError(e instanceof Error ? e.message : "JSON 解析失败")
+      setError(e instanceof Error ? e.message : t("cj.err.json"))
       return ""
     }
   }, [text])
@@ -280,20 +284,20 @@ function JsonToTable() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
-      <ToolSection title="JSON 输入">
+      <ToolSection title={t("cj.section.jsonInput")}>
         <Textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
           rows={20}
           spellCheck={false}
           className="min-h-[420px] font-mono text-[12.5px]"
-          placeholder='[{ "name": "张三", "age": 28 }]'
+          placeholder={t("cj.jsonPlaceholder")}
         />
         {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
       </ToolSection>
 
       <ToolSection
-        title="CSV 结果"
+        title={t("cj.csvResult")}
         actions={
           <div className="flex gap-2">
             <Button
@@ -307,7 +311,7 @@ function JsonToTable() {
               }}
             >
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-              {copied ? "已复制" : "复制"}
+              {copied ? t("common.copied") : t("common.copy")}
             </Button>
             <Button
               variant="outline"
@@ -318,7 +322,7 @@ function JsonToTable() {
               }
             >
               <Download className="h-4 w-4" />
-              下载 CSV
+              {t("cj.downloadCsv")}
             </Button>
           </div>
         }
@@ -329,10 +333,10 @@ function JsonToTable() {
           rows={20}
           spellCheck={false}
           className="min-h-[420px] font-mono text-[12.5px]"
-          placeholder="CSV 会出现在这里"
+          placeholder={t("cj.csvPlaceholderOut")}
         />
         <Label className="mt-2 block text-xs text-muted-foreground">
-          已带 UTF-8 BOM，用 Excel 直接打开中文不会乱码
+          {t("cj.bomNote")}
         </Label>
       </ToolSection>
     </div>

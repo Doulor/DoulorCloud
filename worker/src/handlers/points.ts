@@ -28,10 +28,18 @@
  * 余额与流水的读写全部委托给 points.ts，商品与订单委托给 points-shop.ts
  * （那两处是唯一的写入口），本文件只负责鉴权、参数校验与响应组装。
  */
-import { ApiError, json, assertContentLengthWithin } from "../http"
+import { ApiError, json, assertContentLengthWithin, readBodyCapped } from "../http"
 import { requireUser } from "../auth"
 import { requireAdmin } from "./admin"
 import { guardRateLimit } from "../ratelimit"
+import { uuid } from "../crypto"
+import {
+  isStorageConfigured,
+  putObject,
+  getObject,
+  getPlatformBucketId,
+} from "../r2"
+import { hardenUserContentResponse } from "../content-type"
 import { likeContains } from "../sql-like"
 import { audit, updateSettings } from "../settings"
 import type { SettingKey } from "../settings"
@@ -140,10 +148,104 @@ export async function redeem(env: Env, request: Request): Promise<Response> {
 }
 
 /**
+ * 转账的两条硬限制（2026-10-01 站长要求）。
+ *
+ * 为什么要有：积分能换真钱（`redeemPoints()` 走的是上游真金白银），
+ * 所以「互转」天然是小号刷分/洗积分的通道。这里加时间门槛 + 日限额，
+ * 成本远低于做一套风控模型，也足够挡住绝大多数脚本。
+ */
+/** 账号注册满这么多天才允许转账 */
+const TRANSFER_MIN_ACCOUNT_AGE_DAYS = 7
+/** 每人每天最多**转出**多少积分（收款不限） */
+const TRANSFER_DAILY_LIMIT = 100
+
+/** 商品封面图：允许的类型（Content-Type → 扩展名） */
+const SHOP_IMAGE_TYPES: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+}
+/** 商品封面图大小上限：封面会被压成小卡片，5MB 足够 */
+const MAX_SHOP_IMAGE_BYTES = 5 * 1024 * 1024
+
+/**
+ * POST /api/points/product/image —— 上传商品封面图（2026-10-01 加）。
+ *
+ * 以前封面只能填图片链接，卖家得先把图传到别的图床再粘 URL —— 门槛高还不可控。
+ * 现在直接传文件：存进平台桶 `shop/<userId>/<uuid>.<ext>`，返回**可直接用的 URL**，
+ * 商品表不用改（`imageUrl` 本来就是字符串）。
+ *
+ * 读取走公开路由 `GET /shop-img/<userId>/<filename>`（见 serveShopImage）——
+ * 封面要给所有逛商城的人看，不能像反馈图那样只限本人。
+ */
+export async function uploadProductImage(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  // 封面不常换，但按钮可能被连点；与反馈图上传同量级
+  await guardRateLimit(env, `shop-image:${user.id}`, 20, 60, "上传过于频繁，请稍后再试")
+  if (!(await isStorageConfigured(env))) {
+    throw new ApiError(503, "存储未配置", "R2_NOT_CONFIGURED")
+  }
+
+  const ct = (request.headers.get("Content-Type") ?? "").split(";")[0].trim()
+  const ext = SHOP_IMAGE_TYPES[ct]
+  if (!ext) throw new ApiError(400, "仅支持 JPG/PNG/WebP/GIF", "INVALID_TYPE")
+
+  const buf = await readBodyCapped(request, MAX_SHOP_IMAGE_BYTES, "封面图需在 5 MB 以内", 400, "TOO_LARGE")
+  if (buf.byteLength === 0) throw new ApiError(400, "封面图需在 5 MB 以内", "TOO_LARGE")
+
+  const bucketId = await getPlatformBucketId(env)
+  const filename = `${uuid()}.${ext}`
+  const key = `shop/${user.id}/${filename}`
+  await putObject(env, key, buf, ct, bucketId)
+
+  return json(
+    {
+      key,
+      /** 前端直接把它塞进 imageUrl 字段即可（相对路径，跟站点同源） */
+      url: `/shop-img/${user.id}/${filename}`,
+    },
+    201
+  )
+}
+
+/**
+ * GET /shop-img/<userId>/<filename> —— 商品封面图公开读取（走 Host 分发层，非 /api）。
+ *
+ * 与社区帖子图片（`/c/<postId>/<file>`，serveCommunityImage）同一套做法：
+ * 任何人可读 + 文件名只允许 `<uuid>.<ext>`（防路径穿越）+ 类型收口 + nosniff。
+ */
+export async function serveShopImage(
+  env: Env,
+  userId: string,
+  filename: string
+): Promise<Response> {
+  if (!/^[A-Za-z0-9-]{8,64}\.(jpg|jpeg|png|webp|gif)$/i.test(filename)) {
+    return new Response("Not Found", { status: 404 })
+  }
+  if (!/^[A-Za-z0-9-]{8,64}$/.test(userId)) {
+    return new Response("Not Found", { status: 404 })
+  }
+  if (!(await isStorageConfigured(env))) return new Response("Not Found", { status: 404 })
+  const bucketId = await getPlatformBucketId(env)
+  try {
+    const res = await getObject(env, `shop/${userId}/${filename}`, undefined, bucketId)
+    return hardenUserContentResponse(res, filename)
+  } catch {
+    return new Response("Not Found", { status: 404 })
+  }
+}
+
+/**
  * POST /api/points/transfer —— 用户间转账。
  *
  * **只需要转出方确认**（不需要收款方同意），凭用户名转给对方。
  * 限流 10 次/分钟：转账是资金操作，脚本刷起来会反复打 D1。
+ *
+ * 三条限制（后两条 2026-10-01 加）：
+ *   1. 账号注册满 7 天；
+ *   2. 每天转出总量 ≤ 100 积分（按 **UTC 日界**，与捐献每日计数同口径）；
+ *   3. 限流 10 次/分钟。
  */
 export async function transfer(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
@@ -159,6 +261,42 @@ export async function transfer(env: Env, request: Request): Promise<Response> {
   if (!username) throw new ApiError(400, "请填写收款人的用户名", "INVALID_INPUT")
   if (!Number.isFinite(amount) || amount < 1) {
     throw new ApiError(400, "转账数量必须是不小于 1 的整数", "INVALID_INPUT")
+  }
+
+  // 限制①：注册满 7 天。放在最前面 —— 新号的任何转账都直接拒，
+  // 免得脚本先转到一半才发现（也省掉后面几次 D1 查询）。
+  const ageMs = Date.now() - Date.parse(user.created_at)
+  const minAgeMs = TRANSFER_MIN_ACCOUNT_AGE_DAYS * 86_400_000
+  if (!Number.isFinite(ageMs) || ageMs < minAgeMs) {
+    const leftDays = Number.isFinite(ageMs)
+      ? Math.max(1, Math.ceil((minAgeMs - ageMs) / 86_400_000))
+      : TRANSFER_MIN_ACCOUNT_AGE_DAYS
+    throw new ApiError(
+      403,
+      `账号注册满 ${TRANSFER_MIN_ACCOUNT_AGE_DAYS} 天后才能转账，你的账号还需 ${leftDays} 天`,
+      "TRANSFER_ACCOUNT_TOO_NEW"
+    )
+  }
+
+  // 限制②：每天转出总量 ≤ 100 积分。
+  // 先查已转出多少再放行（而不是先扣后退）—— 免得白扣一次余额再回滚。
+  // 口径与捐献每日计数一致：**UTC 日界**。
+  const dayStart = new Date().toISOString().slice(0, 10) + "T00:00:00.000Z"
+  const usedRow = await env.DB.prepare(
+    `SELECT COALESCE(SUM(-delta), 0) AS used
+       FROM point_transactions
+      WHERE user_id = ? AND reason = 'transfer_out' AND delta < 0 AND created_at >= ?`
+  )
+    .bind(user.id, dayStart)
+    .first<{ used: number }>()
+  const usedToday = Math.max(0, Math.floor(Number(usedRow?.used ?? 0)))
+  if (usedToday + amount > TRANSFER_DAILY_LIMIT) {
+    const left = Math.max(0, TRANSFER_DAILY_LIMIT - usedToday)
+    throw new ApiError(
+      403,
+      `每天最多转出 ${TRANSFER_DAILY_LIMIT} 积分，你今天已转出 ${usedToday}，本次最多还能转 ${left}`,
+      "TRANSFER_DAILY_LIMIT_REACHED"
+    )
   }
 
   const target = await env.DB.prepare(

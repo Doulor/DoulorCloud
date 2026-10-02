@@ -32,6 +32,7 @@ import { LoadingBlock } from "@/components/loading-block"
 import { analyticsApi, errMsg } from "@/services/api"
 import { formatBytes } from "@/lib/format"
 import type { UserAnalytics } from "@/types"
+import { useT } from "@/i18n"
 
 /** 模块 → 环形图颜色 */
 const FEATURE_COLORS: Record<string, string> = {
@@ -44,15 +45,15 @@ const FEATURE_COLORS: Record<string, string> = {
 
 /** 角色 / 状态 → 中文标签（系统级固定枚举，前端映射即可） */
 const ROLE_LABELS: Record<string, string> = {
-  user: "普通用户",
-  admin: "管理员",
-  root: "站长",
+  user: "au2.role.user",
+  admin: "au.role.admin",
+  root: "au.role.root",
 }
 const STATUS_LABELS: Record<string, string> = {
-  active: "正常",
-  banned: "已封禁",
-  suspended: "已停用",
-  pending: "待激活",
+  active: "au2.status.active",
+  banned: "au2.status.banned",
+  suspended: "au2.status.suspended",
+  pending: "au2.status.pending",
 }
 
 /** 饼图配色：主色橙 + 中性灰阶 */
@@ -93,6 +94,7 @@ function RingStat({
   label: string
   color: string
 }) {
+  const { t } = useT()
   return (
     <div className="flex flex-col items-center gap-1.5 rounded-lg border p-3">
       <div className="relative">
@@ -102,7 +104,7 @@ function RingStat({
         </span>
       </div>
       <span className="text-xs font-medium">{label}</span>
-      <span className="text-[11px] tabular-nums text-muted-foreground">{count} 人</span>
+      <span className="text-[11px] tabular-nums text-muted-foreground">{t("au2.people", { n: count })}</span>
     </div>
   )
 }
@@ -117,6 +119,7 @@ function PieLegend({
   colors: string[]
   labelOf: (key: string) => string
 }) {
+  const { t } = useT()
   const total = items.reduce((a, b) => a + b.percent, 0)
   let acc = 0
   const stops = items
@@ -128,7 +131,7 @@ function PieLegend({
     .join(", ")
 
   if (items.length === 0) {
-    return <p className="py-4 text-center text-sm text-muted-foreground">暂无数据</p>
+    return <p className="py-4 text-center text-sm text-muted-foreground">{t("common.empty")}</p>
   }
 
   return (
@@ -165,9 +168,10 @@ function BarList({
   labelOf: (key: string) => string
   color: string
 }) {
+  const { t } = useT()
   const max = Math.max(1, ...items.map((i) => i.count))
   if (items.length === 0) {
-    return <p className="py-4 text-center text-sm text-muted-foreground">暂无数据</p>
+    return <p className="py-4 text-center text-sm text-muted-foreground">{t("common.empty")}</p>
   }
   return (
     <div className="space-y-2">
@@ -193,10 +197,11 @@ function BarList({
 
 /** 柱状趋势图（新增用户） */
 function ColumnChart({ data }: { data: { date: string; count: number }[] }) {
+  const { t } = useT()
   if (data.length === 0) {
     return (
       <p className="py-6 text-center text-sm text-muted-foreground">
-        这段时间没有新用户注册
+        {t("au2.noNewUsers")}
       </p>
     )
   }
@@ -243,6 +248,7 @@ function Metric({
 }
 
 export function UserAnalyticsPanel({ days }: { days: string }) {
+  const { t } = useT()
   const [data, setData] = React.useState<UserAnalytics | null>(null)
   const [loading, setLoading] = React.useState(true)
 
@@ -251,7 +257,7 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
     try {
       setData(await analyticsApi.users(Number(days)))
     } catch (err) {
-      toast.error(errMsg(err, "加载用户数据失败"))
+      toast.error(errMsg(err, t("au2.err.load")))
     } finally {
       setLoading(false)
     }
@@ -278,19 +284,19 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
     <div className="space-y-6">
       {/* 概览指标 */}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Metric icon={Users} label="注册用户" value={data.total} hint={`含 ${data.byRole.length} 种角色`} />
-        <Metric icon={UserPlus} label={`近 ${days} 天新增`} value={newTotal} />
+        <Metric icon={Users} label={t("au2.metric.total")} value={data.total} hint={t("au2.metric.totalHint", { n: data.byRole.length })} />
+        <Metric icon={UserPlus} label={t("au2.metric.new", { n: days })} value={newTotal} />
         <Metric
           icon={ShieldCheck}
-          label="邮箱已验证"
+          label={t("au2.metric.verified")}
           value={`${data.verifiedPercent}%`}
-          hint={`${data.verified} / ${data.total} 人`}
+          hint={t("au2.metric.verifiedHint", { a: data.verified, b: data.total })}
         />
         <Metric
           icon={Gift}
-          label="捐过资源的用户"
+          label={t("au2.metric.donors")}
           value={`${don.donorsPercent}%`}
-          hint={`${don.donors} 人 · 共 ${don.total} 笔`}
+          hint={t("au2.metric.donorsHint", { n: don.donors, total: don.total })}
         />
       </div>
 
@@ -299,10 +305,10 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <HeartPulse className="h-4 w-4 text-muted-foreground" />
-            用户存活率
+            {t("au2.alive.title")}
           </CardTitle>
           <CardDescription>
-            口径：**最近一周内登录过网站算存活**，分母是全部 {data.total} 名注册用户
+            {t("au2.alive.desc", { n: data.total })}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
@@ -310,19 +316,19 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
             <RingStat
               percent={rt.alive7dPercent}
               count={rt.alive7d}
-              label="7 天内登录过"
+              label={t("au2.alive.d7")}
               color="#22c55e"
             />
             <RingStat
               percent={rt.alive1dPercent}
               count={rt.alive1d}
-              label="24 小时内"
+              label={t("au2.alive.d1")}
               color="#f97316"
             />
             <RingStat
               percent={rt.alive30dPercent}
               count={rt.alive30d}
-              label="30 天内"
+              label={t("au2.alive.d30")}
               color="#78716c"
             />
           </div>
@@ -330,7 +336,7 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
           {/* 最后登录时间分布 */}
           <div>
             <p className="mb-2 text-xs font-medium text-muted-foreground">
-              最后登录时间分布
+              {t("au2.lastLogin.title")}
             </p>
             <div className="space-y-1.5">
               {rt.buckets.map((b) => (
@@ -343,7 +349,7 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
                     />
                   </div>
                   <span className="w-24 shrink-0 text-right tabular-nums text-muted-foreground">
-                    {b.count} 人（{b.percent}%）
+                    {t("au2.lastLogin.bucket", { n: b.count, pct: b.percent })}
                   </span>
                 </div>
               ))}
@@ -352,14 +358,12 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t pt-3 text-xs text-muted-foreground">
             <span>
-              近 30 天新注册{" "}
-              <span className="font-medium text-foreground">{rt.newUsers.registered}</span> 人，
-              其中{" "}
-              <span className="font-medium text-foreground">{rt.newUsers.loggedIn}</span> 人登录过
+              {t("au2.newUsers.a", { n: rt.newUsers.registered })}
+              {t("au2.newUsers.b", { n: rt.newUsers.loggedIn })}
               （{rt.newUsers.percent}%）
             </span>
             <span>
-              从未登录过：<span className="font-medium text-foreground">{rt.neverLoggedIn}</span> 人
+              {t("au2.neverLoggedIn", { n: rt.neverLoggedIn })}
             </span>
           </div>
 
@@ -375,11 +379,10 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <Activity className="h-4 w-4 text-muted-foreground" />
-            功能开通率
+            {t("au2.features.title")}
           </CardTitle>
           <CardDescription>
-            以全部 {data.total} 名注册用户为分母，统计**实际开通**各模块的人数
-            （有开通记录，不等于「有权限」）
+            {t("au2.features.desc", { n: data.total })}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -401,8 +404,8 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
         {/* 用户构成 */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">用户构成</CardTitle>
-            <CardDescription>按角色划分</CardDescription>
+            <CardTitle className="text-base">{t("au2.roles.title")}</CardTitle>
+            <CardDescription>{t("au2.roles.desc")}</CardDescription>
           </CardHeader>
           <CardContent>
             <PieLegend
@@ -416,8 +419,8 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
         {/* 账号状态 */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">账号状态</CardTitle>
-            <CardDescription>正常 / 封禁等</CardDescription>
+            <CardTitle className="text-base">{t("au2.statuses.title")}</CardTitle>
+            <CardDescription>{t("au2.statuses.desc")}</CardDescription>
           </CardHeader>
           <CardContent>
             <PieLegend
@@ -434,9 +437,9 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <TrendingUp className="h-4 w-4 text-muted-foreground" />
-            新增用户趋势
+            {t("au2.trend.title")}
           </CardTitle>
-          <CardDescription>近 {days} 天，每天新注册的人数（悬停看日期）</CardDescription>
+          <CardDescription>{t("au2.trend.desc", { n: days })}</CardDescription>
         </CardHeader>
         <CardContent>
           <ColumnChart data={data.newByDay} />
@@ -449,10 +452,10 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Gift className="h-4 w-4 text-muted-foreground" />
-              捐献类型分布
+              {t("au2.donTypes.title")}
             </CardTitle>
             <CardDescription>
-              共 {don.total} 笔，其中 {don.autoReviewed} 笔由系统自动审核
+              {t("au2.donTypes.desc", { n: don.total, auto: don.autoReviewed })}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -463,8 +466,8 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
         {/* 捐献状态 */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">捐献审核状态</CardTitle>
-            <CardDescription>各状态下的笔数</CardDescription>
+            <CardTitle className="text-base">{t("au2.donStatus.title")}</CardTitle>
+            <CardDescription>{t("au2.donStatus.desc")}</CardDescription>
           </CardHeader>
           <CardContent>
             <BarList items={don.byStatus} labelOf={(k) => k} color="#f59e0b" />
@@ -478,40 +481,40 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Database className="h-4 w-4 text-muted-foreground" />
-              资源占用
+              {t("au2.res.title")}
             </CardTitle>
-            <CardDescription>全站累计，不是人均</CardDescription>
+            <CardDescription>{t("au2.res.desc")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
               <div className="flex items-center gap-1.5">
                 <Mail className="h-3.5 w-3.5 text-muted-foreground" />
-                邮箱 <span className="ml-auto tabular-nums">{res.mailboxes}</span>
+                {t("em.title")} <span className="ml-auto tabular-nums">{res.mailboxes}</span>
               </div>
               <div className="flex items-center gap-1.5">
                 <Mail className="h-3.5 w-3.5 text-muted-foreground" />
-                临时邮箱 <span className="ml-auto tabular-nums">{res.tempMailboxes}</span>
+                {t("em.temp.title")} <span className="ml-auto tabular-nums">{res.tempMailboxes}</span>
               </div>
               <div className="flex items-center gap-1.5">
                 <Server className="h-3.5 w-3.5 text-muted-foreground" />
-                子域名 <span className="ml-auto tabular-nums">{res.subdomains}</span>
+                {t("dm.subdomains")} <span className="ml-auto tabular-nums">{res.subdomains}</span>
               </div>
               <div className="flex items-center gap-1.5">
                 <Server className="h-3.5 w-3.5 text-muted-foreground" />
-                DNS 记录 <span className="ml-auto tabular-nums">{res.dnsRecords}</span>
+                {t("dm.recordCount", { n: res.dnsRecords })}
               </div>
               <div className="flex items-center gap-1.5">
                 <MessageSquare className="h-3.5 w-3.5 text-muted-foreground" />
-                帖子 <span className="ml-auto tabular-nums">{res.posts}</span>
+                {t("cm.stats.total")} <span className="ml-auto tabular-nums">{res.posts}</span>
               </div>
               <div className="flex items-center gap-1.5">
                 <MessageSquare className="h-3.5 w-3.5 text-muted-foreground" />
-                评论 <span className="ml-auto tabular-nums">{res.comments}</span>
+                {t("space.stat.comments")} <span className="ml-auto tabular-nums">{res.comments}</span>
               </div>
             </div>
             <div>
               <div className="mb-1 flex justify-between text-xs text-muted-foreground">
-                <span>网盘用量</span>
+                <span>{t("au2.res.storage")}</span>
                 <span className="tabular-nums">
                   {formatBytes(res.storageUsedBytes)} / {formatBytes(res.storageQuotaBytes)}（
                   {storagePercent}%）
@@ -524,7 +527,7 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
                 />
               </div>
               <p className="mt-1.5 text-[11px] text-muted-foreground">
-                人均普通邮箱 {res.avgMailboxes} 个
+                {t("au2.res.avgMailboxes", { n: res.avgMailboxes })}
               </p>
             </div>
           </CardContent>
@@ -535,42 +538,41 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <MessageSquare className="h-4 w-4 text-muted-foreground" />
-              社区活跃度
+              {t("au2.community.title")}
             </CardTitle>
-            <CardDescription>去重到「人」，看有多少用户真的参与过</CardDescription>
+            <CardDescription>{t("au2.community.desc")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="flex items-center gap-4">
               <RingStat
                 percent={com.authorsPercent}
                 count={com.authors}
-                label="发过帖"
+                label={t("au2.community.posted")}
                 color="#f97316"
               />
               <RingStat
                 percent={com.commentersPercent}
                 count={com.commenters}
-                label="评论过"
+                label={t("au2.community.commented")}
                 color="#64748b"
               />
             </div>
             <div className="grid grid-cols-3 gap-2 text-center text-xs">
               <div className="rounded-md border p-2">
                 <p className="text-base font-semibold tabular-nums">{res.posts}</p>
-                <p className="text-muted-foreground">帖子</p>
+                <p className="text-muted-foreground">{t("space.stat.posts")}</p>
               </div>
               <div className="rounded-md border p-2">
                 <p className="text-base font-semibold tabular-nums">{res.comments}</p>
-                <p className="text-muted-foreground">评论</p>
+                <p className="text-muted-foreground">{t("space.stat.comments")}</p>
               </div>
               <div className="rounded-md border p-2">
                 <p className="text-base font-semibold tabular-nums">{res.likes}</p>
-                <p className="text-muted-foreground">点赞</p>
+                <p className="text-muted-foreground">{t("space.stat.likes")}</p>
               </div>
             </div>
             <p className="text-[11px] text-muted-foreground">
-              资料完整度：{data.nickname} 人设了昵称、{data.avatar} 人传了头像；
-              {data.invitedPercent}% 的用户（{data.invited} 人）由邀请码注册。
+              {t("au2.profile.title", { nick: data.nickname, avatar: data.avatar, pct: data.invitedPercent, invited: data.invited })}
             </p>
           </CardContent>
         </Card>

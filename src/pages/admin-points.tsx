@@ -5,6 +5,7 @@ import {
   Coins,
   Gift,
   Loader2,
+  Upload,
   Pencil,
   Plus,
   RefreshCw,
@@ -45,11 +46,12 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { ShopIconPicker } from "@/components/shop-icon-picker"
-import { adminPointsApi, errMsg } from "@/services/api"
+import { adminPointsApi, errMsg, pointsApi, HttpError } from "@/services/api"
 import { fmtDateTime, fmtUid } from "@/lib/format"
 import { notifyAttentionChanged } from "@/lib/attention-events"
 import { shopIcon } from "@/lib/shop-icons"
 import { FEATURE_LABELS } from "@/types"
+import { useT } from "@/i18n"
 import type {
   AdminPointsOverview,
   AdminPointsUser,
@@ -360,6 +362,7 @@ function ProductThumb({ product }: { product: PointProduct }) {
 }
 
 function ShopTab() {
+  const { t } = useT()
   const [data, setData] = React.useState<AdminShopData | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [orderStatus, setOrderStatus] = React.useState("pending")
@@ -407,6 +410,32 @@ function ShopTab() {
   const [editingId, setEditingId] = React.useState<string | null>(null)
   const [form, setForm] = React.useState<FormState>(emptyForm())
   const [formBusy, setFormBusy] = React.useState(false)
+
+  // 封面图直传（2026-10-01）：与用户端共用同一个接口，传完把 URL 填进 imageUrl
+  const [coverUploading, setCoverUploading] = React.useState(false)
+  const coverInputRef = React.useRef<HTMLInputElement | null>(null)
+  const handleCoverPick = async (file: File | undefined) => {
+    if (!file) return
+    if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type)) {
+      toast.error("封面只支持 JPG / PNG / WebP / GIF")
+      return
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("封面图不能超过 5 MB")
+      return
+    }
+    setCoverUploading(true)
+    try {
+      const res = await pointsApi.uploadProductImage(file)
+      setForm((f) => ({ ...f, imageUrl: res.url }))
+      toast.success("封面上传成功")
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : "封面上传失败")
+    } finally {
+      setCoverUploading(false)
+      if (coverInputRef.current) coverInputRef.current.value = ""
+    }
+  }
 
   const load = React.useCallback(
     async (opts?: { keepConfig?: boolean }) => {
@@ -794,7 +823,7 @@ function ShopTab() {
             <LoadingBlock />
           ) : (
             <div className="overflow-x-auto rounded-lg border">
-              <table className="w-full text-sm">
+              <table className="table-actions-sticky w-full text-sm">
                 <thead className="bg-muted/50 text-xs text-muted-foreground">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">商品</th>
@@ -996,7 +1025,7 @@ function ShopTab() {
             />
           ) : (
             <div className="overflow-x-auto rounded-lg border">
-              <table className="w-full text-sm">
+              <table className="table-actions-sticky w-full text-sm">
                 <thead className="bg-muted/50 text-xs text-muted-foreground">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">商品</th>
@@ -1123,7 +1152,7 @@ function ShopTab() {
             <EmptyState icon={Coins} title="没有订单" description="这个筛选下还没有订单。" />
           ) : (
             <div className="overflow-x-auto rounded-lg border">
-              <table className="w-full text-sm">
+              <table className="table-actions-sticky w-full text-sm">
                 <thead className="bg-muted/50 text-xs text-muted-foreground">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">用户</th>
@@ -1672,16 +1701,41 @@ function ShopTab() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="pdImage">封面图地址（可选，http(s) 链接）</Label>
+              <div className="flex items-center justify-between gap-2">
+                <Label htmlFor="pdImage">封面图（可选）</Label>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={coverUploading}
+                  onClick={() => coverInputRef.current?.click()}
+                >
+                  {coverUploading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Upload className="h-3.5 w-3.5" />
+                  )}
+                  本地上传
+                </Button>
+                {/* 与用户端同一个上传接口；传完把返回的同源 URL 填进输入框 */}
+                <input
+                  ref={coverInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/gif"
+                  className="hidden"
+                  onChange={(e) => void handleCoverPick(e.target.files?.[0])}
+                />
+              </div>
               <Input
                 id="pdImage"
-                placeholder="https://..."
+                placeholder="https://... 或点「本地上传」"
                 value={form.imageUrl}
                 onChange={(e) => setForm((f) => ({ ...f, imageUrl: e.target.value }))}
               />
               {form.imageUrl.trim() && (
                 <p className="text-xs text-muted-foreground">
                   填了封面图就以图片为准，下面的图标不会显示（不用特意清空）。
+                  本地上传的图存本站网盘，直接粘外链也可以。
                 </p>
               )}
             </div>
@@ -1846,7 +1900,7 @@ function ShopTab() {
                   <SelectContent>
                     {FEATURE_KEYS.map((k) => (
                       <SelectItem key={k} value={k}>
-                        {FEATURE_LABELS[k]}
+                        {t(FEATURE_LABELS[k])}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -2062,7 +2116,7 @@ function MembersTab() {
         />
       ) : (
         <div className="overflow-x-auto rounded-lg border">
-          <table className="w-full text-sm">
+          <table className="table-actions-sticky w-full text-sm">
             <thead className="bg-muted/50 text-xs text-muted-foreground">
               <tr>
                 <th className="w-16 px-3 py-2 text-left font-medium">UID</th>

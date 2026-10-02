@@ -17,6 +17,7 @@ import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
+import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Separator } from "@/components/ui/separator"
 import { Card, CardContent } from "@/components/ui/card"
@@ -44,6 +45,7 @@ import {
   ImageGallery,
 } from "@/components/feedback-image"
 import type { AdminFeedbackItem, AdminFeedbackOverview } from "@/types"
+import { useT, tStatic } from "@/i18n"
 
 /**
  * 管理面板「反馈」标签。
@@ -79,6 +81,7 @@ function statusVariant(status: string): "success" | "secondary" | "destructive" 
 const FILTERS = ["", "pending", "processing", "resolved", "closed"] as const
 
 export function FeedbackPanel() {
+  const { t } = useT()
   const [data, setData] = React.useState<AdminFeedbackOverview | null>(null)
   const [loading, setLoading] = React.useState(false)
   const [filter, setFilter] = React.useState<string>("")
@@ -87,6 +90,11 @@ export function FeedbackPanel() {
   const [replyTarget, setReplyTarget] = React.useState<AdminFeedbackItem | null>(null)
   const [replyText, setReplyText] = React.useState("")
   const [replyStatus, setReplyStatus] = React.useState("resolved")
+  /**
+   * 顺带发给作者的积分奖励（空串 = 不发）。
+   * 同一张反馈只会发一次（服务端按反馈 id 幂等），重复保存不会重复发。
+   */
+  const [replyPoints, setReplyPoints] = React.useState("")
   const [replyBusy, setReplyBusy] = React.useState(false)
   const replyImages = usePickedImages()
 
@@ -99,7 +107,7 @@ export function FeedbackPanel() {
     try {
       setData(await feedbackApi.listAll(status || undefined))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载反馈失败")
+      toast.error(err instanceof HttpError ? err.message : t("fb.err.load"))
     } finally {
       setLoading(false)
     }
@@ -120,6 +128,7 @@ export function FeedbackPanel() {
     // 回填已有回复，方便在原文上追加/修改，而不是从零重写
     setReplyText(f.adminReply ?? "")
     setReplyStatus(f.adminReply ? f.status : "resolved")
+    setReplyPoints("")
     replyImages.reset()
   }
 
@@ -127,7 +136,7 @@ export function FeedbackPanel() {
     if (!replyTarget) return
     const text = replyText.trim()
     if (!text) {
-      toast.error("回复内容不能为空")
+      toast.error(t("af.err.replyEmpty"))
       return
     }
     setReplyBusy(true)
@@ -142,19 +151,39 @@ export function FeedbackPanel() {
           failed++
         }
       }
-      await feedbackApi.reply({ id: replyTarget.id, reply: text, status: replyStatus, images: keys })
+      const points = Math.floor(Number(replyPoints))
+      const res = await feedbackApi.reply({
+        id: replyTarget.id,
+        reply: text,
+        status: replyStatus,
+        images: keys,
+        rewardPoints: Number.isFinite(points) && points > 0 ? points : undefined,
+      })
+      const reward = res.reward
+      const rewardNote = reward
+        ? reward.duplicated
+          ? t("af.reward.already", { n: reward.amount })
+          : t("af.reward.granted", { n: reward.amount, balance: reward.balance })
+        : ""
       if (failed > 0) {
-        toast.warning(`回复已发送，但有 ${failed} 张图片上传失败`)
+        toast.warning(t("af.ok.repliedWithImages", { n: failed }), {
+          description: rewardNote || undefined,
+        })
+      } else if (reward?.duplicated) {
+        toast.warning(t("af.ok.replied"), { description: rewardNote })
       } else {
-        toast.success("回复已发送", { description: "用户会收到站内通知和邮件提醒。" })
+        toast.success(t("af.ok.replied"), {
+          description: rewardNote || t("af.ok.repliedDesc"),
+        })
       }
       setReplyTarget(null)
       setReplyText("")
+      setReplyPoints("")
       replyImages.reset()
       await load(filter)
       notifyAttentionChanged() // 待处理反馈角标当场更新，不用等 60 秒轮询
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "回复失败")
+      toast.error(err instanceof HttpError ? err.message : t("fb.err.reply"))
     } finally {
       setReplyBusy(false)
     }
@@ -164,11 +193,11 @@ export function FeedbackPanel() {
   const changeStatus = async (f: AdminFeedbackItem, status: string) => {
     try {
       await feedbackApi.setStatus({ id: f.id, status })
-      toast.success("状态已更新")
+      toast.success(t("af.ok.statusUpdated"))
       await load(filter)
       notifyAttentionChanged()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "更新失败")
+      toast.error(err instanceof HttpError ? err.message : t("af.err.update"))
     }
   }
 
@@ -178,15 +207,15 @@ export function FeedbackPanel() {
     setDeleteBusy(true)
     try {
       const { deletedImages } = await feedbackApi.remove(deleteTarget.id)
-      toast.success("已删除", {
+      toast.success(t("at.ok.deleted"), {
         description:
-          deletedImages > 0 ? `同时清理了 ${deletedImages} 张图片。` : undefined,
+          deletedImages > 0 ? t("af.deletedImages", { n: deletedImages }) : undefined,
       })
       setDeleteTarget(null)
       await load(filter)
       notifyAttentionChanged()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.delete"))
     } finally {
       setDeleteBusy(false)
     }
@@ -199,7 +228,7 @@ export function FeedbackPanel() {
   const total = Object.values(counts).reduce((a, b) => a + b, 0)
 
   const labelOf = (key: string) => {
-    if (!key) return "全部"
+    if (!key) return tStatic("common.all")
     return statusLabels[key] ?? key
   }
 
@@ -207,7 +236,7 @@ export function FeedbackPanel() {
     <div>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
-          用户在「反馈」页提交的工单，回复后会收到站内通知和邮件。
+          {t("af.desc")}
         </p>
         <Button
           variant="outline"
@@ -220,7 +249,7 @@ export function FeedbackPanel() {
           ) : (
             <RefreshCw className="h-3.5 w-3.5" />
           )}
-          刷新
+          {t("common.refresh")}
         </Button>
       </div>
 
@@ -248,8 +277,8 @@ export function FeedbackPanel() {
       ) : items.length === 0 ? (
         <EmptyState
           icon={MessageSquare}
-          title={filter ? `没有${labelOf(filter)}的反馈` : "还没有反馈"}
-          description="用户提交反馈后会显示在这里。"
+          title={filter ? t("af.emptyFiltered", { label: labelOf(filter) }) : t("af.empty")}
+          description={t("af.emptyDesc")}
         />
       ) : (
         <div className="space-y-3">
@@ -295,7 +324,7 @@ export function FeedbackPanel() {
                             ) : (
                               <MessageSquare className="h-3.5 w-3.5 text-muted-foreground" />
                             )}
-                            {m.isAdmin ? "管理员" : f.nickname || f.username}
+                            {m.isAdmin ? t("fb.admin") : f.nickname || f.username}
                             <span className="font-normal text-muted-foreground">
                               · {fmtDateTime(m.createdAt)}
                             </span>
@@ -311,7 +340,7 @@ export function FeedbackPanel() {
                           <div className="rounded-md border border-primary/30 bg-accent/40 p-3">
                             <p className="mb-1 flex items-center gap-1.5 text-xs font-medium">
                               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-                              已回复
+                              {t("af.replied")}
                               {f.repliedAt && (
                                 <span className="font-normal text-muted-foreground">
                                   · {fmtDateTime(f.repliedAt)}
@@ -319,7 +348,7 @@ export function FeedbackPanel() {
                               )}
                               {!f.replyRead && (
                                 <Badge variant="outline" className="ml-1">
-                                  用户未读
+                                  {t("af.userUnread")}
                                 </Badge>
                               )}
                             </p>
@@ -331,7 +360,7 @@ export function FeedbackPanel() {
                       <div className="flex flex-wrap items-center gap-2 pt-1">
                         <Button size="sm" onClick={() => openReply(f)}>
                           <Send className="h-3.5 w-3.5" />
-                          {f.adminReply ? "修改回复" : "回复"}
+                          {f.adminReply ? t("af.editReply") : t("af.reply")}
                         </Button>
                         {/* 状态快捷切换：与回复分开，用于「先挂起」/「关闭」这类不产生正文的动作 */}
                         <Select
@@ -357,7 +386,7 @@ export function FeedbackPanel() {
                           onClick={() => setDeleteTarget(f)}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
-                          删除
+                          {t("common.delete")}
                         </Button>
                       </div>
                     </div>
@@ -378,7 +407,7 @@ export function FeedbackPanel() {
       >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>回复反馈</DialogTitle>
+            <DialogTitle>{t("af.dlg.title")}</DialogTitle>
             <DialogDescription>
               {replyTarget
                 ? `${replyTarget.nickname || replyTarget.username} · ${replyTarget.title}`
@@ -396,12 +425,12 @@ export function FeedbackPanel() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="fbReply">回复内容</Label>
+                <Label htmlFor="fbReply">{t("af.dlg.reply")}</Label>
                 <Textarea
                   id="fbReply"
                   rows={6}
                   maxLength={2000}
-                  placeholder="说明处理结果，或需要用户补充的信息…"
+                  placeholder={t("af.dlg.replyPh")}
                   value={replyText}
                   onChange={(e) => setReplyText(e.target.value)}
                 />
@@ -415,7 +444,7 @@ export function FeedbackPanel() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="fbReplyStatus">回复后状态</Label>
+                <Label htmlFor="fbReplyStatus">{t("af.dlg.status")}</Label>
                 <Select value={replyStatus} onValueChange={setReplyStatus}>
                   <SelectTrigger id="fbReplyStatus" className="w-48">
                     <SelectValue />
@@ -429,7 +458,28 @@ export function FeedbackPanel() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  默认「已处理」。如果只是追问细节、还需要用户回复，选「处理中」。
+                  {t("af.dlg.statusHint")}
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="fbReplyPoints">{t("af.dlg.points")}</Label>
+                <Input
+                  id="fbReplyPoints"
+                  type="number"
+                  min={1}
+                  max={10000}
+                  placeholder={t("af.dlg.pointsPh")}
+                  value={replyPoints}
+                  onChange={(e) => setReplyPoints(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t("af.dlg.pointsHint1")}
+                  {t("af.dlg.pointsHint2")}
+                  <span className="font-medium">
+                    {t("af.dlg.pointsOnce")}
+                  </span>
+                  {t("af.dlg.pointsOnceDesc")}
                 </p>
               </div>
             </div>
@@ -437,7 +487,7 @@ export function FeedbackPanel() {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setReplyTarget(null)} disabled={replyBusy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void submitReply()} disabled={replyBusy}>
               {replyBusy ? (
@@ -445,7 +495,7 @@ export function FeedbackPanel() {
               ) : (
                 <Send className="h-4 w-4" />
               )}
-              发送回复
+              {t("af.dlg.send")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -460,7 +510,7 @@ export function FeedbackPanel() {
       >
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>删除这条反馈？</DialogTitle>
+            <DialogTitle>{t("af.del.title")}</DialogTitle>
             <DialogDescription>
               {deleteTarget
                 ? `${deleteTarget.nickname || deleteTarget.username} · ${deleteTarget.title}`
@@ -468,7 +518,7 @@ export function FeedbackPanel() {
             </DialogDescription>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            删除后该反馈及其全部对话记录、上传的图片都会被永久移除，无法恢复；用户侧也会立即看不到。
+            {t("af.del.desc")}
           </p>
           <DialogFooter>
             <Button
@@ -476,7 +526,7 @@ export function FeedbackPanel() {
               onClick={() => setDeleteTarget(null)}
               disabled={deleteBusy}
             >
-              取消
+              {t("common.cancel")}
             </Button>
             <Button
               variant="destructive"
@@ -488,7 +538,7 @@ export function FeedbackPanel() {
               ) : (
                 <Trash2 className="h-4 w-4" />
               )}
-              删除
+              {t("common.delete")}
             </Button>
           </DialogFooter>
         </DialogContent>

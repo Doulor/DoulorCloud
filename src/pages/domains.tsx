@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/table"
 import { Switch } from "@/components/ui/switch"
 import { dnsApi, domainApi, HttpError } from "@/services/api"
+import { useT } from "@/i18n"
 import { useAuth } from "@/hooks/use-auth"
 import type { DnsRecord, DnsRecordType, Subdomain } from "@/types"
 
@@ -49,6 +50,7 @@ function StatusBadge({ status }: { status: DnsRecord["status"] }) {
 }
 
 export default function DomainsPage() {
+  const { t } = useT()
   const { user } = useAuth()
   // 新模型：子域名是 doulor.cn 的直系（xxx.doulor.cn，含主域名 '@' = username.doulor.cn）
   const rootDomain = "doulor.cn"
@@ -100,7 +102,7 @@ export default function DomainsPage() {
         res.subdomains[0]
       setSelected(target ?? null)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载域名失败")
+      toast.error(err instanceof HttpError ? err.message : t("dm.err.load"))
     } finally {
       setLoading(false)
     }
@@ -112,7 +114,7 @@ export default function DomainsPage() {
       const res = await dnsApi.list(subdomainId)
       setRecords(res.records)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载 DNS 记录失败")
+      toast.error(err instanceof HttpError ? err.message : t("dm.err.loadRecords"))
       setRecords([])
     } finally {
       setLoading(false)
@@ -134,13 +136,13 @@ export default function DomainsPage() {
         name: subName,
         parentId: parentFor?.id,
       })
-      toast.success(`已创建 ${res.subdomain.fqdn}`)
+      toast.success(t("dm.ok.created", { fqdn: res.subdomain.fqdn }))
       setSubName("")
       setParentFor(null)
       setOpenSub(false)
       await loadSubdomains(res.subdomain.id)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "创建失败")
+      toast.error(err instanceof HttpError ? err.message : t("dm.err.createFailed"))
     } finally {
       setSaving(false)
     }
@@ -151,10 +153,10 @@ export default function DomainsPage() {
     setDeletingId(sub.id)
     try {
       await domainApi.remove(sub.id)
-      toast.success("子域名已删除")
+      toast.success(t("dm.ok.subDeleted"))
       await loadSubdomains()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("dm.err.deleteFailed"))
     } finally {
       setDeletingId(null)
     }
@@ -180,11 +182,11 @@ export default function DomainsPage() {
     // SRV 不填「内容」（由 service/proto/权重/端口/目标推导），校验分开走
     if (form.type === "SRV") {
       if (!form.srvService.trim() || !form.srvPort.trim() || !form.srvTarget.trim()) {
-        toast.error("请填写服务名、端口和目标主机")
+        toast.error(t("dm.err.srvRequired"))
         return
       }
     } else if (!form.content || (!form.name && selected.name !== "@")) {
-      toast.error("请填写记录名称和内容")
+      toast.error(t("dm.err.recordRequired"))
       return
     }
     setSaving(true)
@@ -207,13 +209,13 @@ export default function DomainsPage() {
             }
           : {}),
       })
-      toast.success("DNS 记录已创建")
+      toast.success(t("dm.ok.recordCreated"))
       setOpenDns(false)
       resetForm()
       bumpRecordCount(selected.id, 1)
       void loadRecords(selected.id)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "创建失败")
+      toast.error(err instanceof HttpError ? err.message : t("dm.err.createFailed"))
     } finally {
       setSaving(false)
     }
@@ -240,12 +242,12 @@ export default function DomainsPage() {
     setDeletingId(record.id)
     try {
       await dnsApi.remove(record.id)
-      toast.success("DNS 记录已删除")
+      toast.success(t("dm.ok.recordDeleted"))
       // 优先按记录自己的归属改数字；老数据 subdomainId 可能为空，退回当前选中项
       bumpRecordCount(record.subdomainId ?? selected?.id ?? "", -1)
       void loadRecords(selected?.id)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("dm.err.deleteFailed"))
     } finally {
       setDeletingId(null)
     }
@@ -261,7 +263,7 @@ export default function DomainsPage() {
   return (
     <div>
       <PageHeader
-        title="域名"
+        title={t("dm.title")}
         description={ownDomain}
       />
 
@@ -269,11 +271,11 @@ export default function DomainsPage() {
       <div className="mb-6 rounded-lg border bg-card">
         <div className="flex items-center justify-between border-b px-4 py-3">
           <div className="text-sm font-medium">
-            我的域名
+            {t("dm.myDomains")}
             <span className="ml-2 text-xs font-normal text-muted-foreground">
               {quota >= 999999
-                ? `${rootSubs.length} 个一级域名（管理员不限）`
-                : `${rootSubs.length} / ${quota} 个一级域名（含主域名）`}
+                ? t("dm.quota.admin", { n: rootSubs.length })
+                : t("dm.quota.user", { n: rootSubs.length, quota })}
             </span>
           </div>
           <Button
@@ -286,14 +288,14 @@ export default function DomainsPage() {
             disabled={!canAddRoot}
           >
             <Plus className="h-4 w-4" />
-            添加
+            {t("common.add")}
           </Button>
         </div>
         <div className="space-y-3 p-3">
           {loading && subdomains.length === 0 ? (
             <LoadingBlock />
           ) : subdomains.length === 0 ? (
-            <p className="px-2 py-6 text-sm text-muted-foreground">还没有域名</p>
+            <p className="px-2 py-6 text-sm text-muted-foreground">{t("dm.empty")}</p>
           ) : (
             rootSubs.map((sub) => {
               const children = childrenOf(sub.id)
@@ -323,7 +325,7 @@ export default function DomainsPage() {
                       {sub.fqdn}
                     </button>
                     {sub.name === "@" ? (
-                      <Badge variant="outline">主域名</Badge>
+                      <Badge variant="outline">{t("dm.primary")}</Badge>
                     ) : (
                       <button
                         type="button"
@@ -332,7 +334,7 @@ export default function DomainsPage() {
                           e.stopPropagation()
                           void handleDeleteSubdomain(sub)
                         }}
-                        title="删除该域名"
+                        title={t("dm.deleteTitle")}
                       >
                         {deletingId === sub.id ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -344,7 +346,7 @@ export default function DomainsPage() {
                     {/* 该域名下挂了几条解析。只算**直接挂的**，不含子子域名的 ——
                         列表里父子各占一行，各算各的才对得上点进去看到的那份列表 */}
                     <span className="shrink-0 text-xs text-muted-foreground">
-                      {sub.recordCount ?? 0} 条解析
+                      {t("dm.recordCount", { n: sub.recordCount ?? 0 })}
                     </span>
                     {/* 在一级之下加子子域名 */}
                     <button
@@ -359,12 +361,12 @@ export default function DomainsPage() {
                       disabled={!canAddChild}
                       title={
                         canAddChild
-                          ? `在 ${sub.name} 下添加子域名`
-                          : `每个域名下最多 ${childQuota} 个`
+                          ? t("dm.addChildUnder", { name: sub.name })
+                          : t("dm.childQuota", { n: childQuota })
                       }
                     >
                       <Plus className="h-3 w-3" />
-                      子域名
+                      {t("dm.subdomains")}
                     </button>
                   </div>
 
@@ -389,7 +391,7 @@ export default function DomainsPage() {
                         {child.fqdn}
                       </button>
                       <span className="shrink-0 text-xs text-muted-foreground">
-                        {child.recordCount ?? 0} 条解析
+                        {t("dm.recordCount", { n: child.recordCount ?? 0 })}
                       </span>
                       <button
                         type="button"
@@ -398,7 +400,7 @@ export default function DomainsPage() {
                           e.stopPropagation()
                           void handleDeleteSubdomain(child)
                         }}
-                        title="删除该域名"
+                        title={t("dm.deleteTitle")}
                       >
                         {deletingId === child.id ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -418,17 +420,17 @@ export default function DomainsPage() {
       {/* DNS 记录 */}
       {!selected ? (
         <EmptyState
-          title="选择或创建一个域名"
-          description="创建子域名后即可在其下添加 DNS 记录。"
+          title={t("dm.selectTitle")}
+          description={t("dm.selectDesc")}
         />
       ) : (
         <>
           <div className="mb-4 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Globe className="h-4 w-4 text-muted-foreground" />
-              <h2 className="text-sm font-medium">DNS 记录 · {selected.fqdn}</h2>
+              <h2 className="text-sm font-medium">{t("dm.recordsOf", { fqdn: selected.fqdn })}</h2>
               <span className="text-xs text-muted-foreground">
-                {records.length} 条
+                {t("dm.recordCount", { n: records.length })}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -436,21 +438,21 @@ export default function DomainsPage() {
                 variant="outline"
                 size="icon"
                 onClick={() => void loadRecords(selected.id)}
-                aria-label="刷新"
+                aria-label={t("common.refresh")}
               >
                 <RefreshCw className="h-4 w-4" />
               </Button>
               <Button size="sm" onClick={() => setOpenDns(true)}>
                 <Plus className="h-4 w-4" />
-                添加记录
+                {t("dm.addRecord")}
               </Button>
             </div>
           </div>
 
           {records.length === 0 ? (
             <EmptyState
-              title="还没有 DNS 记录"
-              description="为这个域名添加一条记录，指向你的服务器或服务。"
+              title={t("dm.noRecords")}
+              description={t("dm.noRecordsDesc")}
             />
           ) : (
             <div className="rounded-lg border bg-card">
@@ -482,7 +484,7 @@ export default function DomainsPage() {
                         {r.ttl === 1 ? "Auto" : r.ttl}
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">
-                        {r.proxied ? "已代理" : "仅 DNS"}
+                        {r.proxied ? t("dm.proxied") : t("dm.dnsOnly")}
                       </TableCell>
                       <TableCell>
                         <StatusBadge status={r.status} />
@@ -522,16 +524,16 @@ export default function DomainsPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {parentFor ? `在 ${parentFor.fqdn} 下添加` : "添加子域名"}
+              {parentFor ? t("dm.addChildUnderFull", { fqdn: parentFor.fqdn }) : t("dm.addSubdomain")}
             </DialogTitle>
             <DialogDescription>
               {parentFor
-                ? `新域名会形如 xxx.${parentFor.fqdn}`
-                : `新域名会直接创建在 ${rootDomain} 之下。`}
+                ? t("dm.hint.child", { fqdn: parentFor.fqdn })
+                : t("dm.hint.root", { domain: rootDomain })}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <Label htmlFor="subName">名称</Label>
+            <Label htmlFor="subName">{t("dm.name")}</Label>
             <div className="flex items-center gap-1">
               <Input
                 id="subName"
@@ -547,23 +549,22 @@ export default function DomainsPage() {
             {/* 一级子域名有最短位数限制；二级是用户自己的细分空间，不限 */}
             {!parentFor && (
               <p className="text-xs text-muted-foreground">
-                一级子域名至少 {minNameLen} 个字符（如 xxx.{rootDomain}），
-                且不能使用平台保留的名称。
+                {t("dm.nameHint.root", { min: minNameLen, domain: rootDomain })}
               </p>
             )}
             {parentFor && (
               <p className="text-xs text-muted-foreground">
-                这是 {parentFor.fqdn} 之下的二级域名，无位数限制。
+                {t("dm.nameHint.child", { fqdn: parentFor.fqdn })}
               </p>
             )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpenSub(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void handleCreateSubdomain()} disabled={saving}>
               {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-              创建
+              {t("common.create")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -573,16 +574,16 @@ export default function DomainsPage() {
       <Dialog open={openDns} onOpenChange={setOpenDns}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>添加 DNS 记录</DialogTitle>
+            <DialogTitle>{t("dm.addRecord")}</DialogTitle>
             <DialogDescription>
-              添加到 {base} 的记录。
+              {t("dm.addRecordDesc", { base })}
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4">
             {form.type !== "SRV" ? (
               <div className="space-y-2">
-                <Label htmlFor="name">名称</Label>
+                <Label htmlFor="name">{t("dm.recordName")}</Label>
                 <div className="flex items-center gap-1">
                   <Input
                     id="name"
@@ -596,7 +597,7 @@ export default function DomainsPage() {
                   </span>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  实际记录：
+                  {t("dm.actualRecord")}
                   <span className="font-mono">
                     {(form.name || "@")}.{base}
                   </span>
@@ -604,7 +605,7 @@ export default function DomainsPage() {
               </div>
             ) : (
               <div className="space-y-2">
-                <Label htmlFor="srvService">服务</Label>
+                <Label htmlFor="srvService">{t("dm.srv.service")}</Label>
                 <div className="grid grid-cols-2 gap-2">
                   <Input
                     id="srvService"
@@ -632,7 +633,7 @@ export default function DomainsPage() {
                 <div className="flex items-center gap-1 pt-1">
                   <Input
                     id="name"
-                    placeholder="（可留空）"
+                    placeholder={t("dm.optional")}
                     value={form.name}
                     onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
                     className="flex-1"
@@ -642,9 +643,9 @@ export default function DomainsPage() {
                   </span>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  实际记录：
+                  {t("dm.actualRecord")}
                   <span className="font-mono">
-                    _{form.srvService.replace(/^_+/, "") || "service"}._
+                    _{form.srvService.replace(/^_+/, "") || t("dm.srv.serviceFallback")}._
                     {form.srvProto}
                     {form.name ? `.${form.name}` : ""}.{base}
                   </span>
@@ -654,7 +655,7 @@ export default function DomainsPage() {
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label>类型</Label>
+                <Label>{t("dm.type")}</Label>
                 <Select
                   value={form.type}
                   onValueChange={(v) =>
@@ -683,10 +684,10 @@ export default function DomainsPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="1">自动</SelectItem>
-                    <SelectItem value="60">60 秒</SelectItem>
-                    <SelectItem value="300">5 分钟</SelectItem>
-                    <SelectItem value="3600">1 小时</SelectItem>
+                    <SelectItem value="1">{t("dm.ttl.auto")}</SelectItem>
+                    <SelectItem value="60">{t("dm.ttl.60")}</SelectItem>
+                    <SelectItem value="300">{t("dm.ttl.300")}</SelectItem>
+                    <SelectItem value="3600">{t("dm.ttl.3600")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -694,7 +695,7 @@ export default function DomainsPage() {
 
             {form.type !== "SRV" ? (
               <div className="space-y-2">
-                <Label htmlFor="content">内容</Label>
+                <Label htmlFor="content">{t("dm.content")}</Label>
                 <Input
                   id="content"
                   placeholder={
@@ -712,7 +713,7 @@ export default function DomainsPage() {
               <>
                 <div className="grid gap-4 sm:grid-cols-3">
                   <div className="space-y-2">
-                    <Label htmlFor="srvPriority">优先级</Label>
+                    <Label htmlFor="srvPriority">{t("dm.srv.priority")}</Label>
                     <Input
                       id="srvPriority"
                       type="number"
@@ -722,7 +723,7 @@ export default function DomainsPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="srvWeight">权重</Label>
+                    <Label htmlFor="srvWeight">{t("dm.srv.weight")}</Label>
                     <Input
                       id="srvWeight"
                       type="number"
@@ -732,7 +733,7 @@ export default function DomainsPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="srvPort">端口</Label>
+                    <Label htmlFor="srvPort">{t("dm.srv.port")}</Label>
                     <Input
                       id="srvPort"
                       type="number"
@@ -743,7 +744,7 @@ export default function DomainsPage() {
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="srvTarget">目标主机</Label>
+                  <Label htmlFor="srvTarget">{t("dm.srv.target")}</Label>
                   <Input
                     id="srvTarget"
                     placeholder="server.example.com"
@@ -751,7 +752,7 @@ export default function DomainsPage() {
                     onChange={(e) => setForm((f) => ({ ...f, srvTarget: e.target.value }))}
                   />
                   <p className="text-xs text-muted-foreground">
-                    提供服务的主机名。优先级数值小的先被使用；同优先级内按权重分配流量。
+                    {t("dm.srv.hint")}
                   </p>
                 </div>
               </>
@@ -759,7 +760,7 @@ export default function DomainsPage() {
 
             {form.type === "MX" && (
               <div className="space-y-2">
-                <Label htmlFor="priority">优先级</Label>
+                <Label htmlFor="priority">{t("dm.srv.priority")}</Label>
                 <Input
                   id="priority"
                   type="number"
@@ -773,9 +774,9 @@ export default function DomainsPage() {
             {(form.type === "A" || form.type === "AAAA" || form.type === "CNAME") && (
               <div className="flex items-center justify-between rounded-md border px-4 py-3">
                 <div className="space-y-0.5">
-                  <p className="text-sm font-medium">启用代理</p>
+                  <p className="text-sm font-medium">{t("dm.proxiedToggle")}</p>
                   <p className="text-xs text-muted-foreground">
-                    通过 Cloudflare 网络代理流量
+                    {t("dm.proxiedToggleHint")}
                   </p>
                 </div>
                 <Switch
@@ -788,11 +789,11 @@ export default function DomainsPage() {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpenDns(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void handleCreateDns()} disabled={saving}>
               {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-              创建记录
+              {t("dm.createRecord")}
             </Button>
           </DialogFooter>
         </DialogContent>

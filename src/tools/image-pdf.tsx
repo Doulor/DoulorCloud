@@ -23,20 +23,22 @@ import {
   loadImageFile,
 } from "@/lib/toolbox/utils"
 import { blobToBytes, createZip, type ZipEntry } from "@/lib/toolbox/zip"
+import { useT } from "@/i18n"
 
 // pdf.js 需要一个独立的 worker 文件；交给 Vite 打包成同源资源，避免依赖外部 CDN
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 
 export default function ImagePdfTool() {
+  const { t } = useT()
   return (
     <ToolShell
-      title="图片 ⇄ PDF"
-      description="多张图片合成一个 PDF（报销、材料提交常用），或者把 PDF 每页导出成图片。"
+      title={t("toolbox.imagePdf.name")}
+      description={t("ip.desc")}
     >
       <Tabs defaultValue="to-pdf">
         <TabsList>
-          <TabsTrigger value="to-pdf">图片转 PDF</TabsTrigger>
-          <TabsTrigger value="to-image">PDF 转图片</TabsTrigger>
+          <TabsTrigger value="to-pdf">{t("ip.tab.toPdf")}</TabsTrigger>
+          <TabsTrigger value="to-image">{t("ip.tab.toImage")}</TabsTrigger>
         </TabsList>
         <TabsContent value="to-pdf" className="mt-4">
           <ImagesToPdf />
@@ -65,6 +67,7 @@ const PAGE_PRESETS = {
 }
 
 function ImagesToPdf() {
+  const { t } = useT()
   const [items, setItems] = React.useState<Pic[]>([])
   const [pageSize, setPageSize] = React.useState<keyof typeof PAGE_PRESETS>("auto")
   const [margin, setMargin] = React.useState(18)
@@ -86,7 +89,7 @@ function ImagesToPdf() {
       setItems((prev) => [...prev, ...loaded])
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "图片打开失败")
+      setError(e instanceof Error ? e.message : t("ip.err.openImage"))
     }
   }
 
@@ -149,10 +152,10 @@ function ImagesToPdf() {
 
       const bytes = await pdf.save()
       const blob = new Blob([new Uint8Array(bytes)], { type: "application/pdf" })
-      downloadBlob(blob, `合并-${Date.now()}.pdf`)
+      downloadBlob(blob, t("ip.file.merged", { ts: Date.now() }))
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "生成 PDF 失败")
+      setError(e instanceof Error ? e.message : t("ip.err.makePdf"))
     } finally {
       setBusy(false)
     }
@@ -160,13 +163,13 @@ function ImagesToPdf() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-      <ToolSection title={`图片列表（${items.length}）`}>
+      <ToolSection title={t("ip.listTitle", { n: items.length })}>
         <FileDrop
           accept="image/*"
           multiple
           onFiles={(f) => void add(f)}
-          label="点击选择图片，可一次选多张"
-          hint="一张图片对应 PDF 的一页，顺序可在下面调整"
+          label={t("ip.pickLabel")}
+          hint={t("ip.pickHint")}
           className="py-6"
         />
         {items.length > 0 && (
@@ -183,13 +186,13 @@ function ImagesToPdf() {
                     {it.img.naturalWidth} × {it.img.naturalHeight}
                   </p>
                 </div>
-                <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="上移" disabled={i === 0} onClick={() => move(i, -1)}>
+                <Button variant="ghost" size="icon" className="h-7 w-7" aria-label={t("ip.moveUp")} disabled={i === 0} onClick={() => move(i, -1)}>
                   <ArrowUp className="h-3.5 w-3.5" />
                 </Button>
-                <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="下移" disabled={i === items.length - 1} onClick={() => move(i, 1)}>
+                <Button variant="ghost" size="icon" className="h-7 w-7" aria-label={t("ip.moveDown")} disabled={i === items.length - 1} onClick={() => move(i, 1)}>
                   <ArrowDown className="h-3.5 w-3.5" />
                 </Button>
-                <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-destructive" aria-label="移除" onClick={() => remove(it.id)}>
+                <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-destructive" aria-label={t("common.delete")} onClick={() => remove(it.id)}>
                   <X className="h-3.5 w-3.5" />
                 </Button>
               </li>
@@ -198,26 +201,26 @@ function ImagesToPdf() {
         )}
       </ToolSection>
 
-      <ToolSection title="PDF 设置">
+      <ToolSection title={t("ip.pdfSettings")}>
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">纸张</Label>
+            <Label className="text-xs text-muted-foreground">{t("ip.paper")}</Label>
             <Select value={pageSize} onValueChange={(v) => setPageSize(v as keyof typeof PAGE_PRESETS)}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="auto">跟随图片尺寸</SelectItem>
-                <SelectItem value="a4">A4 纵向</SelectItem>
-                <SelectItem value="a4l">A4 横向</SelectItem>
-                <SelectItem value="a5">A5 纵向</SelectItem>
+                <SelectItem value="auto">{t("ip.paper.auto")}</SelectItem>
+                <SelectItem value="a4">{t("ip.paper.a4")}</SelectItem>
+                <SelectItem value="a4l">{t("ip.paper.a4l")}</SelectItem>
+                <SelectItem value="a5">{t("ip.paper.a5")}</SelectItem>
                 <SelectItem value="letter">Letter</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">页边距 {margin}pt</Label>
+            <Label className="text-xs text-muted-foreground">{t("ip.margin", { n: margin })}</Label>
             <input
               type="range"
               min={0}
@@ -229,13 +232,13 @@ function ImagesToPdf() {
           </div>
 
           <p className="text-xs text-muted-foreground">
-            图片会等比缩放并居中放在页面上，不会被拉伸变形。
+            {t("ip.fitHint")}
           </p>
           {error && <p className="text-xs text-destructive">{error}</p>}
 
           <Button className="w-full" disabled={items.length === 0 || busy} onClick={() => void build()}>
             <Download className="h-4 w-4" />
-            {busy ? "生成中…" : "生成并下载 PDF"}
+            {busy ? t("ip.generating") : t("ip.generate")}
           </Button>
         </div>
       </ToolSection>
@@ -244,6 +247,7 @@ function ImagesToPdf() {
 }
 
 function PdfToImages() {
+  const { t } = useT()
   const [file, setFile] = React.useState<File | null>(null)
   const [dpi, setDpi] = React.useState(150)
   const [format, setFormat] = React.useState<"png" | "jpeg">("png")
@@ -285,14 +289,14 @@ function PdfToImages() {
         )
         out.push({
           url: URL.createObjectURL(blob),
-          name: `${stem}_第${i}页.${format === "png" ? "png" : "jpg"}`,
+          name: `${stem}_${t("ip.pageNo", { n: i })}.${format === "png" ? "png" : "jpg"}`,
           blob,
         })
       }
       setPages(out)
       await (doc as unknown as { destroy: () => Promise<void> }).destroy()
     } catch (e) {
-      setError(e instanceof Error ? e.message : "PDF 解析失败，可能是加密或损坏的文件")
+      setError(e instanceof Error ? e.message : t("ip.err.parse"))
     } finally {
       setBusy(false)
     }
@@ -304,7 +308,7 @@ function PdfToImages() {
     try {
       const entries: ZipEntry[] = []
       for (const p of pages) entries.push({ name: p.name, data: await blobToBytes(p.blob) })
-      downloadBlob(createZip(entries), `PDF转图片-${Date.now()}.zip`)
+      downloadBlob(createZip(entries), t("ip.file.zipName", { ts: Date.now() }))
     } finally {
       setBusy(false)
     }
@@ -312,7 +316,7 @@ function PdfToImages() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-      <ToolSection title="PDF 文件">
+      <ToolSection title={t("ip.pdfFile")}>
         {!file ? (
           <FileDrop
             accept="application/pdf,.pdf"
@@ -335,7 +339,7 @@ function PdfToImages() {
                   clear()
                 }}
               >
-                换一个
+                {t("ip.replace")}
               </Button>
             </div>
             {pages.length > 0 && (
@@ -344,7 +348,7 @@ function PdfToImages() {
                   <button
                     key={p.name}
                     type="button"
-                    title={`点击下载 ${p.name}`}
+                    title={t("ip.clickDownload", { name: p.name })}
                     onClick={() => downloadBlob(p.blob, p.name)}
                     className="overflow-hidden rounded-lg border transition-opacity hover:opacity-80"
                   >
@@ -360,38 +364,38 @@ function PdfToImages() {
         )}
       </ToolSection>
 
-      <ToolSection title="导出设置">
+      <ToolSection title={t("ip.exportSettings")}>
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">清晰度</Label>
+            <Label className="text-xs text-muted-foreground">{t("ip.dpi")}</Label>
             <Select value={String(dpi)} onValueChange={(v) => setDpi(Number(v))}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="72">72 DPI · 屏幕预览</SelectItem>
-                <SelectItem value="150">150 DPI · 常规推荐</SelectItem>
-                <SelectItem value="200">200 DPI · 清晰</SelectItem>
-                <SelectItem value="300">300 DPI · 打印级（文件较大）</SelectItem>
+                <SelectItem value="72">{t("ip.dpi.72")}</SelectItem>
+                <SelectItem value="150">{t("ip.dpi.150")}</SelectItem>
+                <SelectItem value="200">{t("ip.dpi.200")}</SelectItem>
+                <SelectItem value="300">{t("ip.dpi.300")}</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">输出格式</Label>
+            <Label className="text-xs text-muted-foreground">{t("ip.outFormat")}</Label>
             <Select value={format} onValueChange={(v) => setFormat(v as "png" | "jpeg")}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="png">PNG · 无损，适合文字文档</SelectItem>
-                <SelectItem value="jpeg">JPG · 体积小，适合图片多的文档</SelectItem>
+                <SelectItem value="png">{t("ip.fmt.png")}</SelectItem>
+                <SelectItem value="jpeg">{t("ip.fmt.jpeg")}</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           <p className="text-xs text-muted-foreground">
-            改完设置需要重新点「开始转换」才会生效。
+            {t("ip.reconvertHint")}
           </p>
           {error && <p className="text-xs text-destructive">{error}</p>}
 
@@ -401,7 +405,7 @@ function PdfToImages() {
             disabled={!file || busy}
             onClick={() => file && void run(file)}
           >
-            {busy ? "转换中…" : "开始转换"}
+            {busy ? t("ip.converting") : t("ip.convert")}
           </Button>
           <Button
             className="w-full"
@@ -409,7 +413,7 @@ function PdfToImages() {
             onClick={() => void downloadZip()}
           >
             <Package className="h-4 w-4" />
-            打包下载 ZIP（{pages.length} 页）
+            {t("ip.zipAll", { n: pages.length })}
           </Button>
           {pages.length === 1 && (
             <Button
@@ -418,7 +422,7 @@ function PdfToImages() {
               onClick={() => downloadBlob(pages[0].blob, pages[0].name)}
             >
               <Download className="h-4 w-4" />
-              下载单张
+              {t("ip.downloadOne")}
             </Button>
           )}
         </div>

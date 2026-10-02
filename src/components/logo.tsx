@@ -1,5 +1,6 @@
 import { Cloud } from "lucide-react"
 import { Link } from "react-router-dom"
+import { useT } from "@/i18n"
 
 /**
  * 站点 Logo。`tagline` 为 true 时在名称下方追加一行小字副标题
@@ -12,6 +13,7 @@ export function Logo({
   className?: string
   tagline?: boolean
 }) {
+  const { t } = useT()
   return (
     <Link
       to="/"
@@ -24,7 +26,7 @@ export function Logo({
         <span className="flex min-w-0 flex-col leading-tight">
           <span>Doulor Cloud</span>
           <span className="truncate pl-[2em] text-[10px] font-normal text-muted-foreground">
-            一个不断向共产主义靠拢的社区
+            {t("logo.tagline")}
           </span>
         </span>
       ) : (

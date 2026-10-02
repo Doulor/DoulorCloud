@@ -4,6 +4,7 @@ import { Loader2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { getTool } from "@/lib/toolbox/registry"
+import { useT } from "@/i18n"
 
 /**
  * 工具详情页。每个工具是一个独立的分包，只有点到它才会下载 ——
@@ -40,6 +41,7 @@ const LOADERS: Record<string, React.LazyExoticComponent<React.ComponentType>> = 
 }
 
 export default function ToolboxDetailPage() {
+  const { t } = useT()
   const { toolId } = useParams<{ toolId: string }>()
   const meta = toolId ? getTool(toolId) : undefined
   const Component = toolId ? LOADERS[toolId] : undefined
@@ -47,9 +49,9 @@ export default function ToolboxDetailPage() {
   if (!meta || !Component || meta.href) {
     return (
       <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 text-center">
-        <p className="text-sm text-muted-foreground">没有找到这个工具</p>
+        <p className="text-sm text-muted-foreground">{t("toolbox.notFound")}</p>
         <Button asChild variant="outline" size="sm">
-          <Link to="/dashboard/toolbox">返回工具箱</Link>
+          <Link to="/dashboard/toolbox">{t("toolbox.backToToolbox")}</Link>
         </Button>
       </div>
     )

@@ -14,13 +14,14 @@ import {
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { copyText } from "@/lib/toolbox/utils"
+import { useT } from "@/i18n"
 
 type Mode = "escape" | "unescape" | "inspect"
 
 const MODES: { id: Mode; label: string }[] = [
-  { id: "escape", label: "文本 → \\uXXXX 转义" },
-  { id: "unescape", label: "\\uXXXX 转义 → 文本" },
-  { id: "inspect", label: "查看每个字符的码点" },
+  { id: "escape", label: "ucv.mode.escape" },
+  { id: "unescape", label: "ucv.mode.unescape" },
+  { id: "inspect", label: "ucv.mode.inspect" },
 ]
 
 /** 16 进制补足 4 位并套上 \u 前缀 */
@@ -128,6 +129,7 @@ function toRows(text: string): CharRow[] {
 }
 
 export default function UnicodeConvertTool() {
+  const { t } = useT()
   const [mode, setMode] = React.useState<Mode>("escape")
   const [input, setInput] = React.useState("")
   const [output, setOutput] = React.useState("")
@@ -158,7 +160,7 @@ export default function UnicodeConvertTool() {
       setError(null)
     } catch {
       setOutput("")
-      setError("转换失败，请检查输入内容")
+      setError(t("ucv.err.convert"))
     }
   }, [input, mode, onlyNonAscii, upper])
 
@@ -186,7 +188,7 @@ export default function UnicodeConvertTool() {
   /** 把码点表导成制表符分隔的文本，可直接粘进表格软件 */
   const tableText = React.useMemo(
     () =>
-      ["字符\t码点\t十进制\tUTF-8\tHTML 实体"]
+      [t("ucv.tsvHeader")]
         .concat(
           shownRows.map(
             (r) => `${r.ch}\tU+${r.cp.toString(16).toUpperCase().padStart(4, "0")}\t${r.cp}\t${utf8Hex(r.ch)}\t&#x${r.cp.toString(16).toUpperCase()};`
@@ -198,12 +200,12 @@ export default function UnicodeConvertTool() {
 
   return (
     <ToolShell
-      title="Unicode 转换"
-      description="文本与 \uXXXX 转义序列互转，并查看每个字符的码点、UTF-8 字节和 HTML 实体。写代码、调接口、查乱码都用得上。"
+      title={t("toolbox.unicode.name")}
+      description={t("ucv.desc")}
       wide
     >
       <div className="grid gap-4 lg:grid-cols-2">
-        <ToolSection title="输入">
+        <ToolSection title={t("ucv.section.input")}>
           <div className="space-y-3">
             <div className="flex items-center gap-2">
               <Select value={mode} onValueChange={(v) => setMode(v as Mode)}>
@@ -221,7 +223,7 @@ export default function UnicodeConvertTool() {
               <Button
                 variant="outline"
                 size="icon"
-                title="把结果放回输入框，反向再转一次"
+                title={t("ucv.swapHint")}
                 disabled={!output || mode === "inspect"}
                 onClick={() => {
                   setInput(output)
@@ -242,13 +244,13 @@ export default function UnicodeConvertTool() {
                     className="cursor-pointer select-none"
                     onClick={() => setOnlyNonAscii((v) => !v)}
                   >
-                    只转非 ASCII（中文、emoji 才转，英文数字保持原样）
+                    {t("ucv.onlyNonAscii")}
                   </span>
                 </span>
                 <span className="flex items-center gap-2 text-xs text-muted-foreground">
                   <Switch checked={upper} onCheckedChange={setUpper} />
                   <span className="cursor-pointer select-none" onClick={() => setUpper((v) => !v)}>
-                    十六进制用大写
+                    {t("ucv.upperHex")}
                   </span>
                 </span>
               </div>
@@ -262,20 +264,20 @@ export default function UnicodeConvertTool() {
               className="min-h-[260px] font-mono text-[13px]"
               placeholder={
                 mode === "unescape"
-                  ? "粘贴含 \\u4E2D\\u6587 这类转义序列的内容…"
-                  : "粘贴要转换的中文、emoji 或任意文本…"
+                  ? t("ucv.placeholder.escaped")
+                  : t("ucv.placeholder.raw")
               }
             />
           </div>
         </ToolSection>
 
         <ToolSection
-          title="结果"
+          title={t("ucv.result")}
           actions={
             mode !== "inspect" ? (
               <Button variant="ghost" size="sm" disabled={!output} onClick={() => void copy(output)}>
                 {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                {copied ? "已复制" : "复制"}
+                {copied ? t("common.copied") : t("common.copy")}
               </Button>
             ) : undefined
           }
@@ -291,23 +293,21 @@ export default function UnicodeConvertTool() {
               rows={12}
               spellCheck={false}
               className="min-h-[260px] font-mono text-[13px]"
-              placeholder="结果显示在这里"
+              placeholder={t("ucv.resultPlaceholder")}
             />
           )}
           {mode === "unescape" && (
             <p className="text-xs text-muted-foreground">
-              兼容 <code className="font-mono">\uXXXX</code>、
-              <code className="font-mono">\u{"{1F600}"}</code>、
-              <code className="font-mono">%uXXXX</code> 以及{" "}
-              <code className="font-mono">{"&#x4E2D;"}</code> 这几种写法。
-              若原文里本来就有反斜杠，会被一并还原 —— 这正是这个工具的作用，别拿它处理不想被转义的串。
+              {t("ucv.compat.a")}
+              <code className="font-mono">{"&#x4E2D;"}</code>
+              {t("ucv.compat.b")}
             </p>
           )}
         </ToolSection>
       </div>
 
       <ToolSection
-        title={`逐字符码点${rows.length ? `（共 ${rows.length} 个字符${rows.length >= 500 ? "，仅显示前 500" : ""}）` : ""}`}
+        title={t("ucv.charsTitle", { n: rows.length })}
         actions={
           <div className="flex items-center gap-2">
             <div className="relative">
@@ -315,7 +315,7 @@ export default function UnicodeConvertTool() {
               <Input
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
-                placeholder="按字符 / 4E2D / U+4E2D"
+                placeholder={t("ucv.filterPlaceholder")}
                 className="h-8 w-52 pl-7 text-xs"
               />
             </div>
@@ -326,28 +326,28 @@ export default function UnicodeConvertTool() {
               onClick={() => void copy(tableText)}
             >
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-              复制表格
+              {t("ucv.copyTable")}
             </Button>
           </div>
         }
       >
         {rows.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">
-            在上面输入内容，这里会逐个字符列出码点
+            {t("ucv.emptyHint")}
           </p>
         ) : shownRows.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">没有匹配的字符</p>
+          <p className="py-6 text-center text-sm text-muted-foreground">{t("ucv.noMatch")}</p>
         ) : (
           <div className="max-h-[420px] overflow-auto rounded-md border">
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-muted/60 text-xs text-muted-foreground backdrop-blur">
                 <tr>
-                  <th className="px-3 py-2 text-left font-medium">字符</th>
-                  <th className="px-3 py-2 text-left font-medium">码点</th>
-                  <th className="px-3 py-2 text-left font-medium">十进制</th>
-                  <th className="px-3 py-2 text-left font-medium">转义</th>
+                  <th className="px-3 py-2 text-left font-medium">{t("ucv.col.char")}</th>
+                  <th className="px-3 py-2 text-left font-medium">{t("ucv.col.codePoint")}</th>
+                  <th className="px-3 py-2 text-left font-medium">{t("ucv.col.decimal")}</th>
+                  <th className="px-3 py-2 text-left font-medium">{t("ucv.col.escape")}</th>
                   <th className="px-3 py-2 text-left font-medium">UTF-8</th>
-                  <th className="px-3 py-2 text-left font-medium">HTML 实体</th>
+                  <th className="px-3 py-2 text-left font-medium">{t("ucv.col.htmlEntity")}</th>
                 </tr>
               </thead>
               <tbody>

@@ -18,6 +18,7 @@ import { uuid } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
 import { getSetting, audit as recordAudit } from "../settings"
 import { sendMail, renderMail } from "../mailer"
+import { applyPoints } from "../points"
 import { isStorageConfigured, putObject, getObject, deleteObject, getPlatformBucketId } from "../r2"
 import { hardenUserContentResponse } from "../content-type"
 import type { Env } from "../env"
@@ -55,6 +56,8 @@ const MAX_TITLE = 80
 const MAX_BODY = 2000
 /** 管理员回复上限 */
 const MAX_REPLY = 2000
+/** 单次反馈回复最多附带多少积分奖励（防手滑多打一个 0） */
+const MAX_FEEDBACK_REWARD = 10_000
 /** 请求体上限：正文 2000 字按 UTF-8 最多 3 字节/字，留一倍余量 */
 const MAX_JSON_BODY_BYTES = 32 * 1024
 /** 一次最多返回多少条（前端不做分页：单用户反馈量本就很小） */
@@ -564,6 +567,39 @@ export async function replyFeedback(env: Env, request: Request): Promise<Respons
     .bind(uuid(), id, admin.id, reply, imageKeys.length ? JSON.stringify(imageKeys) : null, now)
     .run()
 
+  // 可选：回复时**顺手给作者发一笔积分奖励**（2026-10-01 站长要求）。
+  //
+  // 走 `applyPoints()` 这个唯一入口，reason 用 `admin`：
+  //   - `admin` **不在** COMMISSIONABLE_REASONS 白名单里 ⇒ 不会触发邀请返佣
+  //     （平台白送的积分再往外分钱没有道理）；
+  //   - dedupKey 钉在**反馈 id** 上 ⇒ 同一张单子重复回复只会发一次。
+  //     这是刻意的：避免手滑发两遍。想追加奖励得走「积分 → 用户」那边手工发。
+  const rewardAmount = Math.floor(Number(body.rewardPoints))
+  let reward: { amount: number; balance: number; duplicated: boolean } | null = null
+  if (Number.isFinite(rewardAmount) && rewardAmount > 0) {
+    if (rewardAmount > MAX_FEEDBACK_REWARD) {
+      throw new ApiError(
+        400,
+        `单次反馈奖励最多 ${MAX_FEEDBACK_REWARD} 积分`,
+        "INVALID_INPUT"
+      )
+    }
+    const applied = await applyPoints(env, {
+      userId: existing.user_id,
+      delta: rewardAmount,
+      reason: "admin",
+      detail: `反馈奖励：${existing.title}`.slice(0, 200),
+      dedupKey: `feedback-reward:${id}`,
+      createdBy: admin.id,
+    })
+    reward = {
+      amount: rewardAmount,
+      balance: applied.balance,
+      // 幂等命中 = 之前已经给这张单子发过奖励了（管理员重复点保存）
+      duplicated: !applied.applied && applied.reason === "duplicated",
+    }
+  }
+
   // 落一条站内通知：作者不一定在反馈页，通知能保证他看到
   try {
     await env.DB.prepare(
@@ -587,6 +623,10 @@ export async function replyFeedback(env: Env, request: Request): Promise<Respons
       const { text, html } = renderMail("你的反馈有新回复", [
         `你在 Doulor Cloud 提交的反馈「${existing.title}」收到了管理员的回复：`,
         reply,
+        // 只有真的发出去（不是幂等命中）才提奖励，否则会重复告诉用户
+        ...(reward && !reward.duplicated
+          ? [`另外，感谢你的反馈，已赠送 ${reward.amount} 积分（当前余额 ${reward.balance}）。`]
+          : []),
         "可到控制台「反馈」页查看并继续回复。",
       ])
       await sendMail(env, {
@@ -605,7 +645,7 @@ export async function replyFeedback(env: Env, request: Request): Promise<Respons
   )
     .bind(id)
     .first<FeedbackRow>()
-  return json({ feedback: toAdmin(row as FeedbackRow) })
+  return json({ feedback: toAdmin(row as FeedbackRow), reward })
 }
 
 /**
