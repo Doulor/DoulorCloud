@@ -241,9 +241,20 @@ async function requireMailbox(
  * `xxx@doulor.cn` 都会回到本 Worker，转发到它们就是自己给自己转发 —— 成环。
  */
 async function validateForwarding(env: Env, forwardingTo: string[]): Promise<string[]> {
+  // 去重必须在 slice(0, 3) 之前：重复目标不该白白占掉 3 个名额。
+  // 大小写不敏感 —— 与 verifiedSet / forwarding_verifications 的比对口径一致
+  // （那些地方统一 toLowerCase），a@x.com 与 A@x.com 实为同一信箱，不 Dedupe
+  // 会把同一封邮件转发多遍。
+  const seen = new Set<string>()
   const targets = forwardingTo
     .map((s) => s.trim())
     .filter(Boolean)
+    .filter((s) => {
+      const key = s.toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
     .slice(0, 3)
 
   if (
@@ -400,9 +411,12 @@ export async function updateMailbox(env: Env, request: Request, id: string): Pro
 
   const updated = await requireMailbox(env, user, id)
   const afterSet = await loadVerifiedTargets(env, user.id)
+  // ⚠️ 必须把 afterSet 传进去：漏传的话 forwardingVerified 会全为 null，
+  // 前端用本响应覆盖列表后，刚验证好的「已转发」会被打回「转发待验证」
+  // （转发实际正常，纯属状态显示回退 —— 2026-10-02 用户实测复现）。
   return json({
     mailbox: await toPublicMailbox(
-      env, user, updated, undefined, undefined, await primaryMailboxAddress(env, user)
+      env, user, updated, afterSet, undefined, await primaryMailboxAddress(env, user)
     ),
     forwardingStatus: targets.map((t) => ({
       email: t,
