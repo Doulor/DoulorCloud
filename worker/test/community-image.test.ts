@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest"
 import { env } from "cloudflare:workers"
 import { makeUser, authRequest, fetchSelf } from "./helpers"
+import { hasValidImageSignature } from "../src/handlers/community"
 
 describe("POST /api/community/posts/:id/images", () => {
   it("returns 503 when R2 not configured", async () => {
@@ -14,5 +15,11 @@ describe("POST /api/community/posts/:id/images", () => {
       headers: { "Content-Type": "image/png" },
     }))
     expect(res.status).toBe(503)
+  })
+
+  it("校验真实图片魔数，不接受伪装内容", () => {
+    expect(hasValidImageSignature(new Uint8Array([0xff, 0xd8, 0xff, 0x00]).buffer, "image/jpeg")).toBe(true)
+    expect(hasValidImageSignature(new Uint8Array([0x89, 0x50, 0x4e, 0x47]).buffer, "image/png")).toBe(false)
+    expect(hasValidImageSignature(new TextEncoder().encode("<html>").buffer, "image/png")).toBe(false)
   })
 })

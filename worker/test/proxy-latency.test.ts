@@ -23,6 +23,7 @@ import {
   type SocketLike,
   type TcpConnector,
 } from "../src/proxy-latency"
+import { assertPublicTcpHost } from "../src/url-guard"
 
 /** 造一个可控的假 socket：opened 按需成功/失败/永久挂起，并记录 close 是否被调用 */
 function fakeSocket(opts: {
@@ -300,5 +301,25 @@ describe("POST /proxy/latency", () => {
 
     const { status } = await call(user, { id: subId })
     expect(status).toBe(502)
+  })
+})
+
+describe("TCP 地址守卫", () => {
+  it("拒绝本机或内网目标，且不调用 connector", async () => {
+    let connected = 0
+    const result = await measureTcpHandshake("127.0.0.1", 443, {
+      connector: () => {
+        connected++
+        return fakeSocket({}).socket
+      },
+    })
+    expect(result).toEqual({ ok: false, latencyMs: null, reason: "节点地址为本机或内网地址" })
+    expect(connected).toBe(0)
+  })
+
+  it("TCP 地址守卫规范化公网主机并拒绝混入端口", () => {
+    expect(assertPublicTcpHost("example.com")).toBe("example.com")
+    expect(() => assertPublicTcpHost("10.0.0.1")).toThrow(/本机或内网/)
+    expect(() => assertPublicTcpHost("example.com:443")).toThrow(/无效/)
   })
 })

@@ -20,6 +20,7 @@
  *      ⇒ 并发取 4（给订阅抓取那次 fetch 留位），并逐批关闭 socket。
  */
 import { connect } from "cloudflare:sockets"
+import { assertPublicTcpHost } from "./url-guard"
 import { mapLimit } from "./async-utils"
 
 /**
@@ -101,11 +102,18 @@ export async function measureTcpHandshake(
     return { ok: false, latencyMs: null, reason: "节点缺少地址或端口" }
   }
 
+  let publicHost: string
+  try {
+    publicHost = assertPublicTcpHost(hostname)
+  } catch {
+    return { ok: false, latencyMs: null, reason: "节点地址为本机或内网地址" }
+  }
+
   const started = Date.now()
   let socket: SocketLike | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
   try {
-    socket = connector({ hostname, port })
+    socket = connector({ hostname: publicHost, port })
     await Promise.race([
       socket.opened,
       new Promise((_, reject) => {

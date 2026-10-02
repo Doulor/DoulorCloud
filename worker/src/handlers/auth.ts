@@ -394,6 +394,10 @@ export async function register(env: Env, request: Request): Promise<Response> {
         .run()
         .catch(() => {})
     }
+    const message = err instanceof Error ? err.message : String(err)
+    if (/unique constraint|sqlite_constraint_unique|already exists/i.test(message)) {
+      throw new ApiError(409, "用户名或邮箱已被占用", "CONFLICT")
+    }
     throw err
   }
 

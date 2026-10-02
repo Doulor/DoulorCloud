@@ -370,3 +370,18 @@ describe("PUT /api/admin/settings —— 开放注册设置校验", () => {
     expect(row?.value).toBe("1")
   })
 })
+describe("并发重复注册冲突", () => {
+  it("同一用户名并发请求不会返回 500", async () => {
+    await setSetting("open_registration", "1")
+    const u = randUser("dup")
+    const results = await Promise.all(
+      [1, 2].map((i) => fetchSelf(registerReq(u, `${u}${i}@example.com`, "", `10.50.0.${i}`)))
+    )
+    const statuses = results.map((r) => r.status)
+    expect(statuses.filter((status) => status === 201)).toHaveLength(1)
+    expect(statuses).toContain(409)
+    const conflict = results.find((r) => r.status === 409)
+    expect(conflict).toBeTruthy()
+    expect((await conflict!.json<{ code: string }>()).code).toBe("CONFLICT")
+  })
+})
