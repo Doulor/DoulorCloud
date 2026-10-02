@@ -2346,6 +2346,8 @@ export interface PointOrder {
   renewedFrom: string | null
   /** 到期处理（收回权益）的时间；null = 还没处理过 */
   expireHandledAt: string | null
+  /** 有限库存占用标记；取消或租期到期后由数据库触发器清零 */
+  stockReserved: boolean
   /** 本单实际授予的模块权限名（仅 delivery='feature' 时非空） */
   grantedFeature: string | null
 }

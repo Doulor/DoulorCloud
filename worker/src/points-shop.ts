@@ -1117,12 +1117,10 @@ async function deliverAuto(
 }
 
 /**
-
-/**
  * 下单购买。
  *
- * 顺序见文件头注释。注意**库存是先占后退**：条件 UPDATE 的 `stock > 0` 是并发下
- * 唯一的防超卖手段，所以必须放在最前面，失败路径再补回去。
+ * 顺序见文件头注释。有限库存由数据库触发器在订单写入时原子占用，失败时随订单
+ * INSERT 一起回滚；后续交付失败则通过取消订单触发器释放占用。
  *
  * 用户商品走担保：只扣分、不结算给卖家（见文件头注释第 2 条）。
  */
@@ -1258,6 +1256,8 @@ export async function buyProduct(
       product.delivery === "feature" ? (product.deliveryParams?.feature ?? null) : null, now
     ).run()
   } catch (err) {
+    const outOfStock =
+      err instanceof Error && err.message.toLowerCase().includes("point product is out of stock")
     // 订单写入失败也必须原路补偿；补偿失败记日志，供管理员对账处理。
     if (pointsDeducted) {
       try {
@@ -1273,6 +1273,7 @@ export async function buyProduct(
         throw new ApiError(500, "购买失败，补偿正在人工处理", "PURCHASE_COMPENSATION_PENDING")
       }
     }
+    if (outOfStock) throw new ApiError(400, "该商品已售罄", "OUT_OF_STOCK")
     throw err
   }
 
@@ -1649,18 +1650,21 @@ export async function adminCancelOrder(
     throw new ApiError(500, "退款失败，请稍后重试", "REFUND_FAILED")
   }
 
-  // 库存还回货架（有限量的商品才需要；商品已删则静默跳过）
-  //
-  // ⚠️ 租用商品**到期时已经归还过一次**（见 expireRentalOrders）。
-  //    若这单已经过到期处理（expire_handled_at 非空），这里就不能再还一次 ——
-  //    否则库存会凭空变多（租出去 1 份、收回来 2 份）。
-  if (!order.expireHandledAt) {
-  }
+  // 状态转为 cancelled 时由数据库触发器原子释放库存占用；重复取消不会重复归还。
 
   const note = `订单已取消，${order.price} 积分已退回${reason ? `：${reason}` : ""}`.slice(0, 300)
-  await env.DB.prepare("UPDATE point_orders SET status = 'cancelled', note = ? WHERE id = ?")
-    .bind(note, orderId)
-    .run()
+  try {
+    await env.DB.prepare("UPDATE point_orders SET status = 'cancelled', note = ? WHERE id = ?")
+      .bind(note, orderId)
+      .run()
+  } catch (statusErr) {
+    console.error("商城订单退款后状态更新失败:", orderId, statusErr)
+    throw new ApiError(
+      500,
+      "退款已完成，但订单状态更新失败，请联系管理员处理",
+      "PURCHASE_COMPENSATION_PENDING"
+    )
+  }
 
   await audit(
     env,
@@ -1764,9 +1768,9 @@ export interface RentalExpiryResult {
  *
  * 做三件事：
  *   1. 收回模块权限（delivery='feature'）—— 见 revokeRentalFeature 的「别的来源」判断；
- *   2. 归还库存 —— 租用商品的 stock 是「**同时**最多能租出几份」，到期要还回去，
- *      否则租出去几次就永久少几份；
- *   3. 打上 `expire_handled_at` —— **幂等标记**，重复跑不会重复收回 / 重复还库存。
+ *   2. 将 `expire_handled_at` 从 NULL 置为时间；数据库触发器会原子释放租用商品的
+ *      有限库存占用，且该转换是幂等的；
+ *   3. 记录本次实际释放的库存占用份数，供维护结果汇总。
  *
  * 不做的事（都是刻意的）：
  *   · 不改 `status` —— delivered / settled 是「交付 / 结算」的历史事实，不该被抹掉。
@@ -1811,11 +1815,12 @@ export async function expireRentalOrders(
 
   for (const order of orders) {
     try {
+      const reservedBeforeExpiry = order.stockReserved
       const verdict = await revokeRentalFeature(env, order, now)
       if (verdict === "revoked") res.permissionsRevoked++
       else if (verdict === "kept") res.keptWithOtherSource++
 
-      // 归还库存（不限量 / 商品已删时 restoreStock 返回 0，静默跳过）
+      // 写入到期标记会触发数据库释放库存；先记住占用状态用于汇总统计。
 
       await env.DB.prepare("UPDATE point_orders SET expire_handled_at = ? WHERE id = ?")
         .bind(now, order.id)
