@@ -1215,10 +1215,11 @@ export const en: Record<MessageKey, string> = {
   "ai.groupSuffix": " · group {group}",
   "ai.models.title": "All available models ({n})",
   "ai.models.desc":
-    "Grouped by category — click a model name to copy it. Different groups have different pricing and channels.",
+    "Grouped by category; groups with many models are split by vendor. Click a model name to copy it. Different groups have different pricing and channels.",
   "ai.models.empty": "No models available",
   "ai.group.donation": "Donation",
   "ai.group.default": "Default",
+  "ai.group.other": "Other",
   "ai.groupLabel": "{group} group",
   "ai.currentAccount": "Current account",
   "ai.redeem.title": "Redeem a code",
