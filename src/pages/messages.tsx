@@ -421,6 +421,17 @@ function OrderMessageActions({
   const isConfirm = p.action === "confirm"
   if (p.kind !== "order" || !p.orderId) return null
   const peer = p.peer?.trim() || null
+  /**
+   * ⚠️ 操作按钮必须只在**真的有动作**时才渲染。
+   *
+   * 「已买下」「积分到账」「订单已取消」这些订单消息的 action 是 null，但同样带着
+   * kind:"order" —— 只看 kind 判断，它们就会长出一个点了必然报错的「确认收货」按钮。
+   * 「去私聊」是与动作无关的入口，所以单独判断，不受这里影响。
+   * （PR #8 合并后的回归修复，2026-10-02）
+   */
+  const hasAction = isDeliver || isConfirm
+  // 既没动作、也没有对端可私聊 → 这条订单消息根本不需要按钮区
+  if (!hasAction && !peer) return null
 
   const orderId = p.orderId
   const run = async (e: React.MouseEvent) => {
@@ -443,16 +454,18 @@ function OrderMessageActions({
 
   return (
     <div className="mt-2 flex flex-wrap items-center gap-2">
-      <Button size="sm" disabled={busy} onClick={(e) => void run(e)}>
-        {busy ? (
-          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-        ) : isDeliver ? (
-          <Package className="mr-1.5 h-3.5 w-3.5" />
-        ) : (
-          <Check className="mr-1.5 h-3.5 w-3.5" />
-        )}
-        {isDeliver ? t("msg.order.markDelivered") : t("msg.order.confirmReceipt")}
-      </Button>
+      {hasAction && (
+        <Button size="sm" disabled={busy} onClick={(e) => void run(e)}>
+          {busy ? (
+            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+          ) : isDeliver ? (
+            <Package className="mr-1.5 h-3.5 w-3.5" />
+          ) : (
+            <Check className="mr-1.5 h-3.5 w-3.5" />
+          )}
+          {isDeliver ? t("msg.order.markDelivered") : t("msg.order.confirmReceipt")}
+        </Button>
+      )}
       {peer && (
         <Button
           size="sm"
