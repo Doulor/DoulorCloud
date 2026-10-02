@@ -715,6 +715,7 @@ describe("积分商城：下单", () => {
     expect((await buy(a, p.id)).status).toBe(200)
     const soldOut = await buy(b, p.id)
     expect(soldOut.status).toBe(400)
+    expect((await soldOut.json()).code).toBe("OUT_OF_STOCK")
     expect(await getPointsBalance(env, b.id)).toBe(100)
   })
 
