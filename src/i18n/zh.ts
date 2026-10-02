@@ -567,6 +567,7 @@ export const zh = {
   "msg.order.confirmFailed": "确认收货失败",
   "msg.order.markDelivered": "标记已交付",
   "msg.order.confirmReceipt": "确认收货",
+  "msg.order.goToDm": "去私聊 {peer}",
   "msg.time.range": "{from} 至 {to}",
   "msg.time.until": "截止 {at}",
   "msg.time.from": "从 {at} 开始",

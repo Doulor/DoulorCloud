@@ -586,6 +586,7 @@ export const en: Record<MessageKey, string> = {
   "msg.order.confirmFailed": "Confirmation failed",
   "msg.order.markDelivered": "Mark as delivered",
   "msg.order.confirmReceipt": "Confirm receipt",
+  "msg.order.goToDm": "Message {peer}",
   "msg.time.range": "{from} \\u2013 {to}",
   "msg.time.until": "Until {at}",
   "msg.time.from": "From {at}",

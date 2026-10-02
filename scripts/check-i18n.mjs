@@ -12,8 +12,12 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { join, relative } from "node:path"
+import { fileURLToPath } from "node:url"
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")
+// new URL(..).pathname 会把路径里的中文/空格 percent-encode（%E6%94%B9…），
+// 后续 readdirSync 直接 ENOENT —— 要 decode 回真实路径；fileURLToPath 顺带
+// 处理 Windows 盘符的 /E:/ 前缀。
+const ROOT = fileURLToPath(new URL("..", import.meta.url))
 const SRC = join(ROOT, "src")
 const CJK = /[\u4e00-\u9fff]/
 const SHOW_LIST = process.argv.includes("--list")

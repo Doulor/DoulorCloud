@@ -8,6 +8,7 @@ import {
   Loader2,
   Megaphone,
   MessagesSquare,
+  MessageSquare,
   Package,
   PartyPopper,
   Gift,
@@ -389,10 +390,13 @@ export default function MessagesPage() {
 /**
  * 订单消息的「快捷操作」。
  *
- * 后端在订单流转时写 `payload = { kind:"order", orderId, action }`（见
+ * 后端在订单流转时写 `payload = { kind:"order", orderId, action, peer }`（见
  * worker/src/points-shop.ts 的 notifyOrder）。这里据此把操作直接放到消息里 ——
  * 卖家收到「有人买下了」就能当场点「标记已交付」，买家收到「卖家已交付」就能
  * 当场点「确认收货」，不用再去积分页翻订单。
+ *
+ * `peer` 是订单对端的用户名快照（买家/卖家）：有值就再给一个「去私聊」按钮，
+ * 直达 /dashboard/dm/<peer> —— 商量交付、对齐发货细节不用再手动搜用户名。
  *
  * 约定变更要两边一起改：`action` 只认 "deliver" / "confirm"。
  */
@@ -405,11 +409,18 @@ function OrderMessageActions({
   onChanged: (messageId: string) => void
 }) {
   const { t } = useT()
+  const navigate = useNavigate()
   const [busy, setBusy] = React.useState(false)
-  const p = (n.payload ?? {}) as { kind?: string; orderId?: string; action?: string | null }
+  const p = (n.payload ?? {}) as {
+    kind?: string
+    orderId?: string
+    action?: string | null
+    peer?: string | null
+  }
   const isDeliver = p.action === "deliver"
   const isConfirm = p.action === "confirm"
-  if (p.kind !== "order" || !p.orderId || (!isDeliver && !isConfirm)) return null
+  if (p.kind !== "order" || !p.orderId) return null
+  const peer = p.peer?.trim() || null
 
   const orderId = p.orderId
   const run = async (e: React.MouseEvent) => {
@@ -431,16 +442,32 @@ function OrderMessageActions({
   }
 
   return (
-    <Button size="sm" className="mt-2" disabled={busy} onClick={(e) => void run(e)}>
-      {busy ? (
-        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-      ) : isDeliver ? (
-        <Package className="mr-1.5 h-3.5 w-3.5" />
-      ) : (
-        <Check className="mr-1.5 h-3.5 w-3.5" />
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <Button size="sm" disabled={busy} onClick={(e) => void run(e)}>
+        {busy ? (
+          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+        ) : isDeliver ? (
+          <Package className="mr-1.5 h-3.5 w-3.5" />
+        ) : (
+          <Check className="mr-1.5 h-3.5 w-3.5" />
+        )}
+        {isDeliver ? t("msg.order.markDelivered") : t("msg.order.confirmReceipt")}
+      </Button>
+      {peer && (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={(e) => {
+            // 与上面的操作按钮同理：去私聊是导航，不该触发卡片的「打开消息」
+            e.stopPropagation()
+            navigate(`/dashboard/dm/${encodeURIComponent(peer)}`)
+          }}
+        >
+          <MessageSquare className="mr-1.5 h-3.5 w-3.5" />
+          {t("msg.order.goToDm", { peer })}
+        </Button>
       )}
-      {isDeliver ? t("msg.order.markDelivered") : t("msg.order.confirmReceipt")}
-    </Button>
+    </div>
   )
 }
 
