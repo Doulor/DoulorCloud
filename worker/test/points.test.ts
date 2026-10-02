@@ -1370,12 +1370,14 @@ describe("用户商城：担保交易", () => {
       kind: "order",
       orderId: order.id,
       action: "deliver",
+      peer: buyer.username,
     })
 
-    // 买家也有一条「已买下」，但**不带**动作（他要等卖家先交付）
+    // 买家也有一条「已买下」，但不带动作（他要等卖家先交付），对端是卖家
     const placed = (await messagesOf(buyer.id)).find((m) => m.type === "order_placed")
     expect(placed).toBeTruthy()
     expect(JSON.parse(placed!.payload ?? "{}").action).toBeNull()
+    expect(JSON.parse(placed!.payload ?? "{}").peer).toBe(seller.username)
 
     // 2) 卖家交付 → 买家收到带 confirm 动作的消息
     const deliver = await fetchSelf(
@@ -1385,6 +1387,7 @@ describe("用户商城：担保交易", () => {
     const shipped = (await messagesOf(buyer.id)).find((m) => m.type === "order_shipped")
     expect(shipped).toBeTruthy()
     expect(JSON.parse(shipped!.payload ?? "{}").action).toBe("confirm")
+    expect(JSON.parse(shipped!.payload ?? "{}").peer).toBe(seller.username)
 
     // 3) 买家确认收货 → 卖家收到「积分到账」
     const confirm = await fetchSelf(
@@ -1394,6 +1397,7 @@ describe("用户商城：担保交易", () => {
     const settled = (await messagesOf(seller.id)).find((m) => m.type === "order_settled")
     expect(settled).toBeTruthy()
     expect(settled!.title).toContain("到账")
+    expect(JSON.parse(settled!.payload ?? "{}").peer).toBe(buyer.username)
   })
 
   it("商品审核结果会通知卖家（通过 / 驳回各一条）", async () => {

@@ -861,9 +861,13 @@ export async function reviewProduct(
  * 并且**直接在消息里执行操作**）。
  *
  * 统一走 `system` 分类（消息中心「系统消息」），并带 payload：
- *   `{ kind: "order", orderId, action: "deliver" | "confirm" | null }`
+ *   `{ kind: "order", orderId, action: "deliver" | "confirm" | null, peer: string | null }`
  * 前端据此在消息里渲染「发货 / 确认收货」按钮 —— 这是「快捷执行操作」的约定，
  * 改动时两边要一起改（见 `src/pages/messages.tsx` 的 `OrderMessageActions`）。
+ *
+ * `peer` 是「这笔订单里对方」的用户名快照（给卖家发 → 买家；给买家发 → 卖家）。
+ * 前端用它渲染「去私聊」按钮直达 /dashboard/dm/<peer> —— 私信按用户名寻址，
+ * 用户名又是下单时的快照字段，不用额外查库；官方商品订单没有对端，为 null。
  *
  * dedupKey = `order-<事件>:<订单号>`：同一个事件重复触发只留一条，
  * 但「下单 / 发货 / 结算」是不同事件，各自留一条，用户能看到完整时间线。
@@ -879,6 +883,8 @@ async function notifyOrder(
     orderId: string
     /** 有值时前端会在消息里给一个操作按钮 */
     action?: "deliver" | "confirm"
+    /** 订单对端的用户名快照（买家或卖家），前端「去私聊」按钮用 */
+    peer?: string | null
   }
 ): Promise<void> {
   if (!userId) return
@@ -892,6 +898,7 @@ async function notifyOrder(
       kind: "order",
       orderId: opts.orderId,
       action: opts.action ?? null,
+      peer: opts.peer ?? null,
     },
     dedupKey: `order-${opts.event}:${opts.orderId}`,
   })
@@ -1325,12 +1332,14 @@ export async function buyProduct(
         body: `买家 **${user.username}** 花 ${product.price} 积分买下。请尽快交付；买家确认收货后积分才会转到你的账上。`,
         orderId,
         action: "deliver",
+        peer: user.username,
       })
       await notifyOrder(env, user.id, {
         event: "placed",
         title: `已买下「${product.name}」`,
         body: `积分已由平台保管，等卖家交付后记得回来确认收货 —— 确认后积分才转给卖家。`,
         orderId,
+        peer: product.ownerName,
       })
     } else {
       await notifyOrder(env, user.id, {
@@ -1514,6 +1523,7 @@ export async function sellerDeliverOrder(
     body: `请查收后点「确认收货」；确认后积分才会转给卖家 ${order.sellerName ?? ""}。`,
     orderId,
     action: "confirm",
+    peer: order.sellerName,
   })
 
   const updated = await getOrder(env, orderId)
@@ -1591,6 +1601,7 @@ async function settleEscrow(
     title: `积分到账：卖出「${order.productName}」`,
     body: `${order.price} 积分已入账（${actorLabel}，买家 ${order.username}）。`,
     orderId: order.id,
+    peer: order.username,
   })
 
   const updated = await getOrder(env, order.id)
@@ -1711,12 +1722,14 @@ export async function adminCancelOrder(
     title: `订单已取消：「${order.productName}」`,
     body: `${order.price} 积分已退回你的账户。${cancelReason}`,
     orderId,
+    peer: order.sellerName,
   })
   await notifyOrder(env, order.sellerId, {
     event: "cancelled",
     title: `订单被取消：「${order.productName}」`,
     body: `买家 ${order.username} 的这单已取消，积分已退回买家。${cancelReason}`,
     orderId,
+    peer: order.username,
   })
 
   const updated = await getOrder(env, orderId)
