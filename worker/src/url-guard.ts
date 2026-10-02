@@ -23,7 +23,7 @@ const PRIVATE_HOST_RE =
  * 也访问不到内网地址。这一层是为了挡住明显的探测请求、并给出清晰报错。
  */
 export function isPrivateOrLocalHost(host: string): boolean {
-  const h = (host ?? "").trim().toLowerCase().replace(/^\[|\]$/g, "")
+  const h = (host ?? "").trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "")
   if (!h) return true
   if (PRIVATE_HOST_RE.test(h)) return true
   // 172.16 – 172.31
@@ -69,4 +69,36 @@ export function assertPublicHttpUrl(
     throw new Error(`${label}不能是本机或内网地址`)
   }
   return { url, href: url.href, host: url.hostname }
+}
+
+/**
+ * 校验 TCP 连接目标；与 HTTP URL 守卫共用同一套字面量内网规则。
+ * IPv6 节点可能带方括号，先剥掉方括号再交给主机校验。
+ */
+export function assertPublicTcpHost(raw: string, label = "节点地址"): string {
+  const input = (raw ?? "").trim()
+  if (!input) throw new Error(`${label}不能是本机或内网地址`)
+  // URL 解析会规范化非标准 IPv4 写法，避免字面检查被绕过。
+  const authority = input.includes(":") && !input.startsWith("[") ? `[${input}]` : input
+  let parsed: URL
+  try {
+    parsed = new URL(`http://${authority}`)
+  } catch {
+    throw new Error(`${label}无效`)
+  }
+  if (
+    parsed.username ||
+    parsed.password ||
+    parsed.port ||
+    parsed.pathname !== "/" ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw new Error(`${label}无效`)
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, "")
+  if (!host || isPrivateOrLocalHost(host)) {
+    throw new Error(`${label}不能是本机或内网地址`)
+  }
+  return host
 }

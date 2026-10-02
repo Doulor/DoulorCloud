@@ -760,3 +760,35 @@ describe("首捐奖励券", () => {
     expect(second.body.voucherCode).toBeNull()
   })
 })
+
+describe("上游探测重定向", () => {
+  it("手动跟随重定向，并在跨主机时不转发 API key", async () => {
+    const redirectUrl = "https://redirect.example.com"
+    stubFetch((url, init) => {
+      if (url.startsWith(`${UPSTREAM}/v1/models`)) {
+        return new Response(null, { status: 302, headers: { Location: `${redirectUrl}/v1/models` } })
+      }
+      if (url.startsWith(redirectUrl)) {
+        const headers = new Headers(init?.headers)
+        expect(headers.has("authorization")).toBe(false)
+        expect(headers.has("x-api-key")).toBe(false)
+        return upstreamModels(["redirected-model"])
+      }
+      return undefined
+    })
+    const res = await probeUpstream(UPSTREAM, "sk-test", "openai")
+    expect(res.ok).toBe(true)
+    expect(res.models).toEqual(["redirected-model"])
+  })
+
+  it("重定向到内网地址时拒绝请求", async () => {
+    stubFetch((url) =>
+      url.startsWith(`${UPSTREAM}/v1/models`)
+        ? new Response(null, { status: 302, headers: { Location: "http://127.0.0.1:8080/models" } })
+        : undefined
+    )
+    const res = await probeUpstream(UPSTREAM, "sk-test", "openai")
+    expect(res.ok).toBe(false)
+    expect(calls.some((call) => call.url.includes("127.0.0.1"))).toBe(false)
+  })
+})

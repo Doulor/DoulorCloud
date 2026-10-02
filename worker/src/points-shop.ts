@@ -1068,8 +1068,10 @@ async function deliverAuto(
       if (newapiUserId === null) throw new Error("未绑定中转站账号")
       const perUnit = Number(await getSetting(env, "newapi_quota_per_unit")) || 500_000
       const rawQuota = Math.round((product.quotaYuan ?? 0) * perUnit)
-      await adminSetQuota(env, newapiUserId, rawQuota, "add")
+      // 展示货币配置失败不能把已经充值成功的权益误判为交付失败；
+      // 先取出非副作用信息，再执行不可逆的上游充值。
       const { symbol } = await getCurrencyInfo(env)
+      await adminSetQuota(env, newapiUserId, rawQuota, "add")
       return `已自动充值 ${symbol}${product.quotaYuan}`
     }
 
@@ -1234,63 +1236,69 @@ export async function buyProduct(
 
   const orderId = uuid()
 
-  // 1. 占库存（有限量时才需要；条件 UPDATE 保证并发下不会超卖）
-  if (product.stock !== null) {
-    const res = await env.DB.prepare(
-      "UPDATE point_products SET stock = stock - 1, updated_at = ? " +
-        "WHERE id = ? AND enabled = 1 AND stock > 0"
-    )
-      .bind(now, product.id)
-      .run()
-    if ((res.meta?.changes ?? 0) === 0) {
-      throw new ApiError(400, "该商品已售罄", "OUT_OF_STOCK")
+  let stockReserved = false
+  let pointsDeducted = false
+  try {
+    // 1. 占库存（有限量时才需要；条件 UPDATE 保证并发下不会超卖）
+    if (product.stock !== null) {
+      const res = await env.DB.prepare(
+        "UPDATE point_products SET stock = stock - 1, updated_at = ? " +
+          "WHERE id = ? AND enabled = 1 AND stock > 0"
+      ).bind(now, product.id).run()
+      if ((res.meta?.changes ?? 0) === 0) {
+        throw new ApiError(400, "该商品已售罄", "OUT_OF_STOCK")
+      }
+      stockReserved = true
     }
-  }
 
-  // 2. 扣积分（dedup_key 用订单号，重放同一请求不会扣两次）
-  const deducted = await applyPoints(env, {
-    userId: user.id,
-    delta: -product.price,
-    reason: "shop",
-    detail: `购买「${product.name}」`,
-    dedupKey: `shop:${orderId}`,
-  })
-  if (!deducted.applied) {
-    await restoreStock(env, product.id)
-    throw new ApiError(400, "积分不足，无法购买", "INSUFFICIENT_POINTS")
-  }
+    // 2. 扣积分（dedup_key 用订单号，重放同一请求不会扣两次）
+    const deducted = await applyPoints(env, {
+      userId: user.id,
+      delta: -product.price,
+      reason: "shop",
+      detail: `购买「${product.name}」`,
+      dedupKey: `shop:${orderId}`,
+    })
+    if (!deducted.applied) {
+      throw new ApiError(400, "积分不足，无法购买", "INSUFFICIENT_POINTS")
+    }
+    pointsDeducted = true
 
-  // 3. 落订单（pending；自动交付成功后再改成 delivered）
-  //
-  // `expires_at` 先留 NULL —— 租期从**交付生效**那一刻起算（见 applyRentalExpiry），
-  // 不是从下单起算，否则卖家拖几天发货会白吃买家的租期。
-  // `granted_feature` 记录「这单发的是哪个权限」，到期收回时靠它，不依赖商品行还在不在。
-  await env.DB.prepare(
-    `INSERT INTO point_orders
-       (id, user_id, username, product_id, product_name, price, delivery,
-        quota_yuan, status, note, seller_id, seller_name,
-        billing_mode, rental_days, renewed_from, granted_feature, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`
-  )
-    .bind(
-      orderId,
-      user.id,
-      user.username,
-      product.id,
-      product.name,
-      product.price,
-      product.delivery,
-      product.quotaYuan,
-      isUserProduct ? "等待卖家交付" : null,
-      product.ownerId,
-      product.ownerName,
-      product.billingMode,
-      isRental ? product.rentalDays : null,
-      activeRental?.id ?? null,
-      product.delivery === "feature" ? (product.deliveryParams?.feature ?? null) : null,
-      now
-    )
-    .run()
+    // 3. 落订单（pending；自动交付成功后再改成 delivered）。
+    await env.DB.prepare(
+      `INSERT INTO point_orders
+         (id, user_id, username, product_id, product_name, price, delivery,
+          quota_yuan, status, note, seller_id, seller_name,
+          billing_mode, rental_days, renewed_from, granted_feature, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      orderId, user.id, user.username, product.id, product.name, product.price,
+      product.delivery, product.quotaYuan, isUserProduct ? "等待卖家交付" : null,
+      product.ownerId, product.ownerName, product.billingMode,
+      isRental ? product.rentalDays : null, activeRental?.id ?? null,
+      product.delivery === "feature" ? (product.deliveryParams?.feature ?? null) : null, now
+    ).run()
+  } catch (err) {
+    // 订单写入失败也必须原路补偿；补偿失败记日志，供管理员对账处理。
+    if (pointsDeducted) {
+      try {
+        await applyPoints(env, {
+          userId: user.id,
+          delta: product.price,
+          reason: "shop",
+          detail: `购买「${product.name}」失败退回`,
+          dedupKey: `shop-refund:${orderId}`,
+        })
+      } catch (refundErr) {
+        console.error("商城订单补偿退款失败:", orderId, refundErr)
+      }
+    }
+    if (stockReserved) {
+      try { await restoreStock(env, product.id) }
+      catch (stockErr) { console.error("商城库存补偿失败:", orderId, stockErr) }
+    }
+    throw err
+  }
 
   // 4. 交付
   if (isUserProduct || product.delivery === "manual") {
@@ -1333,8 +1341,11 @@ export async function buyProduct(
       })
     }
   } else {
+    let deliveryApplied = false
     try {
       const summary = await deliverAuto(env, product, user.id, newapiUserId)
+      // deliverAuto 成功后权益已经生效；此后的记账/通知失败不能再退款。
+      deliveryApplied = true
       const deliveredAt = new Date().toISOString()
       await env.DB.prepare(
         "UPDATE point_orders SET status = 'delivered', delivered_at = ?, note = ? WHERE id = ?"
@@ -1369,24 +1380,29 @@ export async function buyProduct(
         orderId,
       })
     } catch (err) {
-      // 退回积分 + 还原库存 + 订单置 cancelled（用户不丢积分，商品也还回货架）
-      await applyPoints(env, {
-        userId: user.id,
-        delta: product.price,
-        reason: "shop",
-        detail: `购买「${product.name}」失败退回`,
-        dedupKey: `shop-refund:${orderId}`,
-      })
-      await restoreStock(env, product.id)
       const msg = err instanceof Error ? err.message.slice(0, 120) : ""
+      if (deliveryApplied) {
+        console.error("自动交付成功但订单后处理失败:", orderId, err)
+        throw new ApiError(500, "商品已发放，订单记录正在同步，请稍后查看", "DELIVERY_RECORDED_PENDING")
+      }
+      // deliverAuto 失败且权益尚未生效，才可以退款并还原库存。
+      try {
+        await applyPoints(env, {
+          userId: user.id,
+          delta: product.price,
+          reason: "shop",
+          detail: `购买「${product.name}」失败退回`,
+          dedupKey: `shop-refund:${orderId}`,
+        })
+        await restoreStock(env, product.id)
+      } catch (compensationErr) {
+        console.error("自动交付失败后的商城补偿失败:", orderId, compensationErr)
+        throw new ApiError(500, "购买失败，补偿正在人工处理", "PURCHASE_COMPENSATION_PENDING")
+      }
       await env.DB.prepare("UPDATE point_orders SET status = 'cancelled', note = ? WHERE id = ?")
         .bind(`自动发放失败，积分已退回${msg ? `：${msg}` : ""}`.slice(0, 300), orderId)
         .run()
-      throw new ApiError(
-        502,
-        `购买失败，积分已退回：${msg || "上游暂时不可用，请稍后重试"}`,
-        "PURCHASE_FAILED"
-      )
+      throw new ApiError(502, `购买失败，积分已退回：${msg || "上游暂时不可用，请稍后重试"}`, "PURCHASE_FAILED")
     }
   }
 

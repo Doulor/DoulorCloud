@@ -109,10 +109,9 @@ export async function getPointsBalance(env: Env, userId: string): Promise<number
  *
  * 顺序（每一步都在注释里说明为什么）：
  *   1. 确保余额行存在（新用户首次得积分时建行，UPSERT DO NOTHING 不覆盖已有余额）
- *   2. 条件 UPDATE 改余额：扣减时带 `AND balance >= ?`，余额不足则影响 0 行
- *   3. 读回余额做快照
- *   4. INSERT OR IGNORE 记流水；若因 dedup_key 撞唯一索引而没插进去，
- *      说明是并发重复请求 —— 把第 2 步加的余额反向改回去，保证不重复发放
+ *   2. 在同一个 D1 batch 中先按余额条件插入流水，再条件更新余额
+ *      流水受 dedup_key 唯一索引保护；重复请求不会先改余额再补偿
+ *   3. 读回余额快照；余额不足时流水不会插入，避免扣成负数
  */
 export async function applyPoints(
   env: Env,
@@ -124,7 +123,6 @@ export async function applyPoints(
   }
   const now = new Date().toISOString()
 
-  // 1. 确保余额行存在（不覆盖已有值）
   await env.DB.prepare(
     "INSERT INTO user_points (user_id, balance, updated_at) VALUES (?, 0, ?) " +
       "ON CONFLICT(user_id) DO NOTHING"
@@ -132,63 +130,51 @@ export async function applyPoints(
     .bind(userId, now)
     .run()
 
-  // 2. 原子改余额：扣减时要求余额足够，不足则 changes=0
-  const upd =
-    delta < 0
-      ? await env.DB.prepare(
-          "UPDATE user_points SET balance = balance + ?, updated_at = ? " +
-            "WHERE user_id = ? AND balance >= ?"
-        )
-          .bind(delta, now, userId, -delta)
-          .run()
-      : await env.DB.prepare(
-          "UPDATE user_points SET balance = balance + ?, updated_at = ? WHERE user_id = ?"
-        )
-          .bind(delta, now, userId)
-          .run()
-
-  if ((upd.meta?.changes ?? 0) === 0) {
-    return { applied: false, balance: await getPointsBalance(env, userId), reason: "insufficient" }
-  }
-
-  // 3. 余额快照
-  const balance = await getPointsBalance(env, userId)
-
-  // 4. 记流水（dedup_key 非空时唯一索引即并发锁）
-  // id 先取出来，下面发邀请返佣时要拿它当幂等键
   const txId = uuid()
-  const ins = await env.DB.prepare(
-    `INSERT OR IGNORE INTO point_transactions
-       (id, user_id, delta, balance, reason, detail, dedup_key, created_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  )
-    .bind(
-      txId,
-      userId,
-      delta,
-      balance,
-      reason,
-      detail ? detail.slice(0, 300) : null,
-      dedupKey ?? null,
-      createdBy ?? null,
-      now
-    )
-    .run()
+  const [ins, upd] = await env.DB.batch([
+    // 只有余额足够时才插入负数流水；重复 dedup_key 的新 txId 不会出现。
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO point_transactions
+         (id, user_id, delta, balance, reason, detail, dedup_key, created_by, created_at)
+       SELECT ?, ?, ?, (SELECT balance + ? FROM user_points WHERE user_id = ?), ?, ?, ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1 FROM user_points
+           WHERE user_id = ? AND (? >= 0 OR balance >= ?)
+        )`
+    ).bind(
+      txId, userId, delta, delta, userId, reason, detail ? detail.slice(0, 300) : null,
+      dedupKey ?? null, createdBy ?? null, now, userId, delta, -delta
+    ),
+    env.DB.prepare(
+      `UPDATE user_points
+          SET balance = balance + ?, updated_at = ?
+        WHERE user_id = ?
+          AND (? >= 0 OR balance >= ?)
+          AND EXISTS (
+            SELECT 1 FROM point_transactions
+             WHERE id = ? AND user_id = ?
+          )`
+    ).bind(delta, now, userId, delta, -delta, txId, userId),
+  ])
 
-  if ((ins.meta?.changes ?? 0) === 0) {
-    // 幂等命中（并发重复）：把上一步加的余额反向抹掉
-    await env.DB.prepare(
-      "UPDATE user_points SET balance = balance - ?, updated_at = ? WHERE user_id = ?"
-    )
-      .bind(delta, now, userId)
-      .run()
-    return { applied: false, balance: await getPointsBalance(env, userId), reason: "duplicated" }
+  const inserted = ins.meta?.changes ?? 0
+  const updated = upd.meta?.changes ?? 0
+  const balance = await getPointsBalance(env, userId)
+  if (inserted === 0) {
+    const existing = dedupKey
+      ? await env.DB.prepare(
+          "SELECT 1 FROM point_transactions WHERE user_id = ? AND dedup_key = ? LIMIT 1"
+        ).bind(userId, dedupKey).first()
+      : null
+    return { applied: false, balance, reason: existing ? "duplicated" : "insufficient" }
   }
+  if (updated === 0) {
+    await env.DB.prepare("DELETE FROM point_transactions WHERE id = ? AND user_id = ?")
+      .bind(txId, userId).run()
+    return { applied: false, balance, reason: "insufficient" }
+  }
+  const appliedBalance = await getPointsBalance(env, userId)
 
-  // 5. 邀请返佣：被邀请人赚到分时，按比例给他的邀请人也发一份。
-  //    挂在这里（而不是各发放点各写一次）是因为本函数是**唯一**的积分写入口 ——
-  //    以后新增发放点自动获得返佣，不会漏；漏了也只是少发，不影响主流程。
-  //    幂等键用刚生成的流水 id，同一笔源流水永远只返一次。
   if (delta > 0 && COMMISSIONABLE_REASONS.has(reason)) {
     await grantInviteCommission(env, {
       sourceUserId: userId,
@@ -197,7 +183,7 @@ export async function applyPoints(
     })
   }
 
-  return { applied: true, balance }
+  return { applied: true, balance: appliedBalance }
 }
 
 /** 读某个用户的流水（倒序） */

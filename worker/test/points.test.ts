@@ -139,6 +139,13 @@ describe("积分核心：余额与流水", () => {
     const res = await applyPoints(env, { userId: u.id, delta: -30, reason: "redeem" })
     expect(res.applied).toBe(true)
     expect(res.balance).toBe(70)
+    const transactions = await env.DB.prepare(
+      "SELECT delta, balance FROM point_transactions WHERE user_id = ? ORDER BY delta DESC"
+    ).bind(u.id).all<{ delta: number; balance: number }>()
+    expect(transactions.results?.map(({ delta, balance }) => [delta, balance])).toEqual([
+      [100, 100],
+      [-30, 70],
+    ])
   })
 
   it("余额不足时不扣成负数，且不写流水", async () => {
@@ -171,6 +178,18 @@ describe("积分核心：余额与流水", () => {
     expect(second.applied).toBe(false)
     expect(second.reason).toBe("duplicated")
     // 关键：余额没有被重复加
+    expect(await getPointsBalance(env, u.id)).toBe(20)
+    expect(await txCount(u.id)).toBe(1)
+  })
+
+  it("并发重复发放不会通过回滚窗口制造额外余额", async () => {
+    const u = await makeUser()
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        applyPoints(env, { userId: u.id, delta: 20, reason: "event", dedupKey: "event:race" })
+      )
+    )
+    expect(results.filter((r) => r.applied)).toHaveLength(1)
     expect(await getPointsBalance(env, u.id)).toBe(20)
     expect(await txCount(u.id)).toBe(1)
   })

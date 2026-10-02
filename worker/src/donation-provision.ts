@@ -195,11 +195,7 @@ export async function probeUpstream(
     let lastError = ""
     for (const url of [`${baseUrl}/v1/models`, `${baseUrl}/models`]) {
       try {
-        const res = await fetch(url, {
-          method: "GET",
-          headers: candidate.headers,
-          signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-        })
+        const res = await fetchProbeResponse(url, candidate.headers)
         if (!res.ok) {
           lastError = `HTTP ${res.status}`
           continue
@@ -1037,5 +1033,46 @@ export async function refetchDonationModels(
             stillMissing.length > 0 ? `；${stillMissing.length} 个仍不可用（已排入重试）` : ""
           }`
         : `上游有 ${missing.length} 个模型不在渠道里，但逐个测试都没通过（已排入重试）`,
+  }
+}
+
+/** Redirects are handled manually so each destination is checked before a request. */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+const MAX_PROBE_REDIRECTS = 4
+
+async function fetchProbeResponse(
+  rawUrl: string,
+  headers: Record<string, string>
+): Promise<Response> {
+  let current = assertPublicHttpUrl(rawUrl, "上游 API 地址").url
+  const initialOrigin = current.origin
+
+  for (let redirects = 0; ; redirects++) {
+    const destination = assertPublicHttpUrl(current.href, "上游 API 地址").url
+    const requestHeaders = new Headers(headers)
+    if (destination.origin !== initialOrigin) {
+      requestHeaders.delete("Authorization")
+      requestHeaders.delete("x-api-key")
+    }
+
+    const response = await fetch(destination.href, {
+      method: "GET",
+      headers: requestHeaders,
+      redirect: "manual",
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    })
+    if (!REDIRECT_STATUSES.has(response.status)) return response
+    if (redirects >= MAX_PROBE_REDIRECTS) {
+      throw new Error("上游重定向次数过多")
+    }
+
+    const location = response.headers.get("Location")
+    if (!location) throw new Error("上游重定向缺少目标地址")
+    try {
+      current = new URL(location, destination)
+    } catch {
+      throw new Error("上游重定向地址无效")
+    }
+    assertPublicHttpUrl(current.href, "上游 API 地址")
   }
 }

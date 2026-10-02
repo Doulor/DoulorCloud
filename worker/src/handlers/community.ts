@@ -897,6 +897,9 @@ export async function uploadPostImage(env: Env, request: Request, id: string): P
   if (buf.byteLength === 0) {
     throw new ApiError(400, `图片需在 ${Math.round(maxBytes / 1024)} KB 以内`, "TOO_LARGE")
   }
+  if (!hasValidImageSignature(buf, ct)) {
+    throw new ApiError(400, "图片内容与声明的类型不匹配", "INVALID_IMAGE")
+  }
   const bucketId = await getPlatformBucketId(env)
   const filename = `${uuid()}.${ext}`
   const key = `community/${id}/${filename}`
@@ -1070,6 +1073,8 @@ export async function serveCommunityImage(
   }
   if (!(await isStorageConfigured(env))) return new Response("Not Found", { status: 404 })
   const bucketId = await getPlatformBucketId(env)
+  const post = await env.DB.prepare("SELECT deleted_at FROM posts WHERE id=?").bind(postId).first<{ deleted_at: string | null }>()
+  if (!post || post.deleted_at) return new Response("Not Found", { status: 404 })
   const key = `community/${postId}/${filename}`
   try {
     const res = await getObject(env, key, undefined, bucketId)
@@ -1077,5 +1082,23 @@ export async function serveCommunityImage(
     return hardenUserContentResponse(res, filename)
   } catch {
     return new Response("Not Found", { status: 404 })
+  }
+}
+
+/** Check the binary signature instead of trusting a client-controlled Content-Type. */
+export function hasValidImageSignature(buf: ArrayBuffer, contentType: string): boolean {
+  const bytes = new Uint8Array(buf)
+  const startsWith = (signature: number[]) => signature.every((value, index) => bytes[index] === value)
+  switch (contentType.toLowerCase()) {
+    case "image/jpeg":
+      return startsWith([0xff, 0xd8, 0xff])
+    case "image/png":
+      return startsWith([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    case "image/gif":
+      return startsWith([0x47, 0x49, 0x46, 0x38]) && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61
+    case "image/webp":
+      return startsWith([0x52, 0x49, 0x46, 0x46]) && bytes.length >= 12 && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+    default:
+      return false
   }
 }
