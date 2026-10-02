@@ -178,7 +178,7 @@ export default function ImageCompressTool() {
                 <SelectContent>
                   {PRESETS.map((p) => (
                     <SelectItem key={p.id} value={p.id}>
-                      {p.label}
+                      {t(p.label)}
                     </SelectItem>
                   ))}
                 </SelectContent>

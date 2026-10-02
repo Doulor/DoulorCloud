@@ -349,7 +349,7 @@ function BarcodePanel() {
               <SelectContent>
                 {BARCODE_FORMATS.map((f) => (
                   <SelectItem key={f.id} value={f.id}>
-                    {f.label}
+                    {t(f.label)}
                   </SelectItem>
                 ))}
               </SelectContent>

@@ -66,7 +66,10 @@ export interface R2BucketRow {
   secret_key_enc: string
   analytics_token_enc: string | null
   max_users: number
+  /** 每人最大上传限额（软上限，不保留空间） */
   quota_per_user: number
+  /** 桶的真实容量（共享池上限，默认 10 GB 免费额度） */
+  capacity_bytes: number
   enabled: number
   sort_order: number
   /** 'user' = 用户网盘桶（参与多人分配）；'platform' = 平台数据（名片/分享箱） */
@@ -299,44 +302,38 @@ export async function getBucketCredentials(
 }
 
 /**
- * 自动均衡分配：选一个「已分配人数最少且未达上限」的桶。
+ * 自动均衡分配：选一个「剩余容量最多」的桶（共享池模型）。
  *
- * - 只在启用中的桶里选
- * - 按 (人数 / 上限) 比例升序，优先填相对空闲的桶
- * - 全部满则返回 null，由调用方报错提示管理员加桶
+ * - 只在启用中的用户网盘桶里选（平台数据桶不参与）
+ * - 按（容量 - 已用）剩余空间降序，优先填最空的桶
+ * - 桶满（剩余 ≤ 0）则跳过 ⇒ 第一个满了自然落到第二个
  */
 export async function pickBucketForNewUser(
   env: Env
 ): Promise<{ id: string; quotaPerUser: number } | null> {
-  // 只考虑用户网盘桶（kind='user'），平台数据桶不参与分配
   const buckets = await env.DB.prepare(
     "SELECT * FROM r2_buckets WHERE enabled = 1 AND kind = 'user' ORDER BY sort_order ASC, created_at ASC"
   ).all<R2BucketRow>()
   const list = buckets.results ?? []
   if (list.length === 0) return null
 
-  // 一次查清各桶已分配人数，避免 N 次往返
-  const counts = await env.DB.prepare(
-    `SELECT bucket_id, COUNT(*) AS c FROM storage_accounts
+  // 一次查清各桶已用字节数，避免 N 次往返
+  const usedRes = await env.DB.prepare(
+    `SELECT bucket_id, COALESCE(SUM(used_bytes), 0) AS bytes FROM storage_accounts
       WHERE bucket_id IS NOT NULL GROUP BY bucket_id`
-  ).all<{ bucket_id: string; c: number }>()
-  const used = new Map((counts.results ?? []).map((r) => [r.bucket_id, r.c]))
+  ).all<{ bucket_id: string; bytes: number }>()
+  const usedMap = new Map((usedRes.results ?? []).map((r) => [r.bucket_id, r.bytes]))
 
   let best: R2BucketRow | null = null
-  let bestRatio = Infinity
-  let bestCount = Infinity
+  let bestFree = -1
   for (const b of list) {
-    const n = used.get(b.id) ?? 0
-    if (n >= b.max_users) continue
-    const ratio = b.max_users > 0 ? n / b.max_users : Infinity
-    // 比例相同时取绝对人数少的（避免大桶被优先塞满）
-    if (ratio < bestRatio || (ratio === bestRatio && n < bestCount)) {
+    const free = (b.capacity_bytes ?? 0) - (usedMap.get(b.id) ?? 0)
+    if (free <= 0) continue // 满桶跳过
+    if (free > bestFree) {
       best = b
-      bestRatio = ratio
-      bestCount = n
+      bestFree = free
     }
   }
-
   return best ? { id: best.id, quotaPerUser: best.quota_per_user } : null
 }
 

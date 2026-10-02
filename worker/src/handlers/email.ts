@@ -6,6 +6,15 @@ import { cfDeleteEmailRule } from "../cloudflare"
 import { sendReply, sendMail, renderMail, isMailerConfigured } from "../mailer"
 import { guardRateLimit } from "../ratelimit"
 import { audit } from "../settings"
+import {
+  pickRootDomain,
+  isOwnDomain,
+  listEnabledRootDomains,
+  canUseRootDomain,
+  getDefaultRootDomain,
+  primaryAddressFor,
+} from "../root-domains"
+import { userPermissions } from "../permissions"
 import { encodeCursor, decodeCursor } from "../community-logic"
 import type { Env } from "../env"
 
@@ -127,12 +136,25 @@ async function mailboxStatsBatch(
   return map
 }
 
+/**
+ * 该用户的「主邮箱」地址。
+ *
+ * 实现搬到 root-domains.ts 的 `primaryAddressFor`（newapi 也要用同一口径，
+ * 放两处必然漂移）。写死 `env.ROOT_DOMAIN` 会让「主邮箱不可删」的保护
+ * 永远判 false —— 主邮箱就能被用户删掉，而它是转发目标与重要来信的落点。
+ */
+async function primaryMailboxAddress(env: Env, user: UserRow): Promise<string> {
+  return primaryAddressFor(env, user.id, user.username)
+}
+
 async function toPublicMailbox(
   env: Env,
   user: UserRow,
   row: MailboxRow,
   verifiedSet?: Set<string>,
-  precomputedStats?: { total: number; unread: number }
+  precomputedStats?: { total: number; unread: number },
+  /** 主邮箱地址（调用方算一次传进来，避免每个邮箱一次额外查询） */
+  primaryAddress?: string
 ) {
   // 列表场景传入批量算好的统计，避免每个邮箱一次查询；单条场景仍按需查询
   const stats = precomputedStats ?? (await mailboxStats(env, row.id))
@@ -140,7 +162,7 @@ async function toPublicMailbox(
   return {
     id: row.id,
     address: row.address,
-    primary: row.address === `${user.username}@${env.ROOT_DOMAIN}`.toLowerCase(),
+    primary: row.address === (primaryAddress ?? `${user.username}@${env.ROOT_DOMAIN}`).toLowerCase(),
     /** true = 临时邮箱：前端据此分组展示，并隐藏「转发设置」入口 */
     isTemp: row.is_temp === 1,
     forwardingTo,
@@ -212,7 +234,13 @@ async function requireMailbox(
   return mailbox
 }
 
-function validateForwarding(forwardingTo: string[], rootDomain: string): string[] {
+/**
+ * 校验转发目标。
+ *
+ * ⚠️ 禁止转发到**本站任一域名**（不只 env.ROOT_DOMAIN）：`xxx@tyu.me` 与
+ * `xxx@doulor.cn` 都会回到本 Worker，转发到它们就是自己给自己转发 —— 成环。
+ */
+async function validateForwarding(env: Env, forwardingTo: string[]): Promise<string[]> {
   const targets = forwardingTo
     .map((s) => s.trim())
     .filter(Boolean)
@@ -220,13 +248,15 @@ function validateForwarding(forwardingTo: string[], rootDomain: string): string[
 
   if (
     targets.some(
-      (f) =>
-        f.length > 254 ||
-        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f) ||
-        f.toLowerCase().endsWith(`@${rootDomain.toLowerCase()}`)
+      (f) => f.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f)
     )
   ) {
     throw new ApiError(400, "转发邮箱格式无效", "INVALID_FORWARD")
+  }
+  for (const f of targets) {
+    if (await isOwnDomain(env, f)) {
+      throw new ApiError(400, "不能转发到本站域名邮箱", "INVALID_FORWARD")
+    }
   }
   return targets
 }
@@ -241,14 +271,22 @@ export async function listMailboxes(env: Env, request: Request): Promise<Respons
     .all<MailboxRow>()
 
   // 统计与验证状态各自只需一次查询，并行发出
-  const [verifiedSet, statsMap] = await Promise.all([
+  const [verifiedSet, statsMap, primaryAddress] = await Promise.all([
     loadVerifiedTargets(env, user.id),
     mailboxStatsBatch(env, user.id),
+    primaryMailboxAddress(env, user),
   ])
   const mailboxes = []
   for (const row of rows.results ?? []) {
     mailboxes.push(
-      await toPublicMailbox(env, user, row, verifiedSet, statsMap.get(row.id) ?? { total: 0, unread: 0 })
+      await toPublicMailbox(
+        env,
+        user,
+        row,
+        verifiedSet,
+        statsMap.get(row.id) ?? { total: 0, unread: 0 },
+        primaryAddress
+      )
     )
   }
   // 邮箱数量上限（管理员/站长不限，999999 作为哨兵值，前端显示「不限」）
@@ -257,13 +295,21 @@ export async function listMailboxes(env: Env, request: Request): Promise<Respons
   const tempUsed = (rows.results ?? []).filter((r) => r.is_temp === 1).length
   const tempLimit =
     user.role === "admin" || user.role === "root" ? ADMIN_UNLIMITED_MAILBOXES : MAX_TEMP_MAILBOXES_PER_USER
-  return json({ mailboxes, limit, tempLimit, tempUsed })
+
+  // 可选根域：只下发**当前用户有权限用的**，前端据此渲染域名选择器。
+  // 没权限的域不下发 —— 先显示再拒绝只会让人以为坏了。
+  const perms = userPermissions(user)
+  const rootDomains = (await listEnabledRootDomains(env))
+    .filter((r) => canUseRootDomain(perms, r))
+    .map((r) => ({ name: r.name, label: r.label ?? r.name, isDefault: r.is_default === 1 }))
+
+  return json({ mailboxes, limit, tempLimit, tempUsed, rootDomains })
 }
 
-// POST /api/mailbox —— 添加邮箱地址（{ localPart }），最多 3 个
+// POST /api/mailbox —— 添加邮箱地址（{ localPart, domain? }），最多 3 个
 export async function createMailbox(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  const body = (await request.json()) as { localPart?: string }
+  const body = (await request.json()) as { localPart?: string; domain?: string }
 
   const localPart = (body.localPart ?? "").trim().toLowerCase()
   if (!/^[a-z0-9._-]{1,40}$/.test(localPart)) {
@@ -273,6 +319,10 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
   if (isReservedName(localPart)) {
     throw new ApiError(400, "该邮箱前缀为系统保留名称", "RESERVED_NAME")
   }
+
+  // 建在哪个根域：省略 = 默认域（tyu.me）；显式指定要过权限闸
+  // （doulor.cn 挂 `doulor` 权限）。pickRootDomain 会校验「域名已登记 + 已启用 + 有权限」。
+  const root = await pickRootDomain(env, body.domain, userPermissions(user))
 
   // ⚠️ 必须带 is_temp = 0：临时邮箱有自己的额度，不能挤占这 3 个名额
   const count = await env.DB.prepare(
@@ -285,7 +335,7 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
     throw new ApiError(400, `每个用户最多 ${MAX_MAILBOXES_PER_USER} 个邮箱`, "LIMIT_REACHED")
   }
 
-  const address = `${localPart}@${env.ROOT_DOMAIN}`
+  const address = `${localPart}@${root.name}`
   const exists = await env.DB.prepare(
     "SELECT id FROM mailboxes WHERE address = ? COLLATE NOCASE LIMIT 1"
   )
@@ -317,7 +367,10 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
     .bind(id)
     .first<MailboxRow>()
 
-  return json({ mailbox: await toPublicMailbox(env, user, row!) }, 201)
+  return json(
+    { mailbox: await toPublicMailbox(env, user, row!, undefined, undefined, await primaryMailboxAddress(env, user)) },
+    201
+  )
 }
 
 // PUT /api/mailbox/:id —— 更新转发目标（空 = 不转发）
@@ -326,7 +379,7 @@ export async function updateMailbox(env: Env, request: Request, id: string): Pro
   const mailbox = await requireMailbox(env, user, id)
   const body = (await request.json()) as { forwardingTo?: string[] | null }
 
-  const targets = validateForwarding(body.forwardingTo ?? [], env.ROOT_DOMAIN)
+  const targets = await validateForwarding(env, body.forwardingTo ?? [])
 
   // 只有「已验证的转发目标」才能绑定（发验证码到目标邮箱、回填验证）。
   if (targets.length > 0) {
@@ -348,7 +401,9 @@ export async function updateMailbox(env: Env, request: Request, id: string): Pro
   const updated = await requireMailbox(env, user, id)
   const afterSet = await loadVerifiedTargets(env, user.id)
   return json({
-    mailbox: await toPublicMailbox(env, user, updated),
+    mailbox: await toPublicMailbox(
+      env, user, updated, undefined, undefined, await primaryMailboxAddress(env, user)
+    ),
     forwardingStatus: targets.map((t) => ({
       email: t,
       verified: afterSet.has(t.toLowerCase()),
@@ -383,7 +438,7 @@ export async function verifyForwardTarget(env: Env, request: Request): Promise<R
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new ApiError(400, "邮箱格式不正确", "INVALID_EMAIL")
   }
-  if (email.endsWith(`@${env.ROOT_DOMAIN.toLowerCase()}`)) {
+  if (await isOwnDomain(env, email)) {
     throw new ApiError(400, "不能转发到本站域名邮箱", "INVALID_EMAIL")
   }
 
@@ -473,8 +528,9 @@ export async function deleteMailbox(env: Env, request: Request, id: string): Pro
   const user = await requireUser(env, request)
   const mailbox = await requireMailbox(env, user, id)
 
-  const primary = `${user.username}@${env.ROOT_DOMAIN}`.toLowerCase()
-  if (mailbox.address === primary) {
+  // 主邮箱不可删：判据是「注册时分配的那个域」，不是写死的 env.ROOT_DOMAIN
+  const primary = await primaryMailboxAddress(env, user)
+  if (mailbox.address.toLowerCase() === primary) {
     throw new ApiError(400, "主邮箱不可删除", "PRIMARY_MAILBOX")
   }
 
@@ -536,7 +592,10 @@ export async function createTempMailbox(env: Env, request: Request): Promise<Res
   }
 
   const created = await insertTempMailbox(env, user.id)
-  return json({ mailbox: await toPublicMailbox(env, user, created) }, 201)
+  return json(
+    { mailbox: await toPublicMailbox(env, user, created, undefined, undefined, await primaryMailboxAddress(env, user)) },
+    201
+  )
 }
 
 /**
@@ -573,7 +632,10 @@ export async function refreshTempMailbox(
   await purgeMailbox(env, mailbox)
 
   const created = await insertTempMailbox(env, user.id)
-  return json({ mailbox: await toPublicMailbox(env, user, created) }, 201)
+  return json(
+    { mailbox: await toPublicMailbox(env, user, created, undefined, undefined, await primaryMailboxAddress(env, user)) },
+    201
+  )
 }
 
 /**
@@ -584,7 +646,8 @@ export async function refreshTempMailbox(
  * （例如没建 CF 规则，表现为收不到信）。
  */
 async function insertTempMailbox(env: Env, userId: string): Promise<MailboxRow> {
-  const root = env.ROOT_DOMAIN.toLowerCase()
+  // 临时邮箱也建在**默认根域**（与注册分配一致），不写死 env.ROOT_DOMAIN
+  const root = (await getDefaultRootDomain(env)).name
 
   // 随机前缀可能撞上：① 系统保留名（admin / postmaster 之类）
   // ② 已存在的地址（含其他用户的主邮箱和临时邮箱）。
@@ -886,7 +949,8 @@ export async function replyMessage(
       "NO_REPLY_TARGET"
     )
   }
-  if (to.endsWith(`@${env.ROOT_DOMAIN.toLowerCase()}`)) {
+  // 判「本站域名」要覆盖全部已登记根域（tyu.me + doulor.cn），只判主域会漏掉新域。
+  if (await isOwnDomain(env, to)) {
     throw new ApiError(
       400,
       "不能回复本站域名邮箱（防止转发成环）",

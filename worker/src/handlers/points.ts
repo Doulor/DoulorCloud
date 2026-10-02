@@ -11,6 +11,10 @@
  *   DELETE /api/points/products/:id         —— 删自己的商品
  *   POST   /api/points/orders/:id/deliver   —— 卖家标记订单已交付
  *   POST   /api/points/orders/:id/confirm   —— 买家确认收货（结算积分给卖家）
+ *   POST   /api/points/orders/:id/after-sale          —— 买家申请退款（售后）
+ *   DELETE /api/points/orders/:id/after-sale          —— 买家撤销售后申请
+ *   POST   /api/points/orders/:id/after-sale/escalate —— 买家申请平台（管理员）介入
+ *   POST   /api/points/orders/:id/after-sale/decide   —— 卖家处理退款申请（同意 / 拒绝）
  * 管理端：
  *   GET  /api/admin/points                    —— 用户积分总览（可搜索）
  *   POST /api/admin/points/adjust             —— 发放 / 扣减积分
@@ -59,22 +63,28 @@ import {
 import { backfillDonationRewards, topUpDonationRewards } from "../donation-backfill"
 import {
   adminCancelOrder,
+  adminResolveAfterSale,
   adminSettleOrder,
   buyProduct,
+  cancelAfterSale,
   confirmOrder,
   createProduct,
   createUserProduct,
   deleteProduct,
   deleteUserProduct,
   deliverOrder,
+  escalateAfterSale,
+  listAfterSaleOrders,
   listOrders,
   listProducts,
+  requestAfterSale,
   reviewProduct,
   sellerDeliverOrder,
+  sellerResolveAfterSale,
   updateProduct,
   updateUserProduct,
 } from "../points-shop"
-import type { OrderStatus } from "../points-shop"
+import type { AfterSaleStatus, OrderStatus } from "../points-shop"
 import type { Env } from "../env"
 
 const MAX_JSON_BODY_BYTES = 16 * 1024
@@ -202,8 +212,12 @@ export async function uploadProductImage(env: Env, request: Request): Promise<Re
   return json(
     {
       key,
-      /** 前端直接把它塞进 imageUrl 字段即可（相对路径，跟站点同源） */
-      url: `/shop-img/${user.id}/${filename}`,
+      /**
+       * 前端直接把它塞进 imageUrl 字段即可（相对路径，跟站点同源）。
+       * ⚠️ 必须**挂在 /api 前缀下**：只有 /api/* 等既有前缀会被 Cloudflare 路由进
+       * API Worker；自造前缀（/shop-img/*）的请求到不了 Worker，会拿到 SPA 的 HTML。
+       */
+      url: `/api/shop-img/${user.id}/${filename}`,
     },
     201
   )
@@ -401,6 +415,98 @@ export async function sellerDeliver(env: Env, request: Request, id: string): Pro
 export async function confirmReceipt(env: Env, request: Request, id: string): Promise<Response> {
   const user = await requireUser(env, request)
   const order = await confirmOrder(env, user.id, id)
+  return json({ order })
+}
+
+// ---- 售后（退款）----
+
+/** POST /api/points/orders/:id/after-sale —— 买家申请退款（售后） */
+export async function requestAfterSaleHandler(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  // 限流：申请会写库 + 给卖家发消息，脚本化调用能刷爆卖家的消息列表
+  await guardRateLimit(env, `shop:after-sale:user:${user.id}`, 10, 3600, "退款申请过于频繁，请稍后再试")
+  assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  const body = (await request.json().catch(() => ({}))) as { reason?: string }
+  const order = await requestAfterSale(env, user.id, id, body.reason ?? "")
+  return json({ order })
+}
+
+/** DELETE /api/points/orders/:id/after-sale —— 买家撤销售后申请 */
+export async function cancelAfterSaleHandler(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const order = await cancelAfterSale(env, user.id, id)
+  return json({ order })
+}
+
+/** POST /api/points/orders/:id/after-sale/escalate —— 买家申请平台介入 */
+export async function escalateAfterSaleHandler(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const order = await escalateAfterSale(env, user.id, id)
+  return json({ order })
+}
+
+/** POST /api/points/orders/:id/after-sale/decide —— 卖家处理退款申请（同意 / 拒绝） */
+export async function sellerResolveAfterSaleHandler(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  const body = (await request.json().catch(() => ({}))) as {
+    approve?: boolean
+    note?: string
+  }
+  const order = await sellerResolveAfterSale(env, user.id, id, body.approve === true, body.note)
+  return json({ order })
+}
+
+/** GET /api/admin/points/after-sales —— 售后列表（默认只看待平台判定的） */
+export async function listAfterSales(env: Env, request: Request): Promise<Response> {
+  await requireAdmin(env, request)
+  const url = new URL(request.url)
+  const raw = (url.searchParams.get("status") ?? "").trim()
+  const ALLOWED: readonly AfterSaleStatus[] = [
+    "requested",
+    "rejected",
+    "platform",
+    "closed",
+    "refunded",
+  ]
+  // 不传 → 只看「待平台处理」；传 all → 看全部有售后记录的
+  const status: AfterSaleStatus | undefined =
+    raw === "all" ? undefined : (ALLOWED as readonly string[]).includes(raw)
+      ? (raw as AfterSaleStatus)
+      : "platform"
+  const orders = await listAfterSaleOrders(env, { status, limit: 200 })
+  return json({ orders, status: raw || "platform" })
+}
+
+/** POST /api/admin/points/orders/:id/after-sale —— 管理员（客服）判定退款申请 */
+export async function adminResolveAfterSaleHandler(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+  assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  const body = (await request.json().catch(() => ({}))) as {
+    approve?: boolean
+    note?: string
+  }
+  const order = await adminResolveAfterSale(env, admin.id, id, body.approve === true, body.note)
   return json({ order })
 }
 

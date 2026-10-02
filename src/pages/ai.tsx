@@ -28,7 +28,7 @@ import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
 import { Label } from "@/components/ui/label"
-import { KeyGroupCell, KeyGroupNote, KeyGroupPicker } from "@/components/ai-key-group"
+import { KeyGroupCell, KeyGroupNote, KeyGroupPicker, ModelVendorSections } from "@/components/ai-key-group"
 import {
   Card,
   CardContent,
@@ -1271,18 +1271,12 @@ export default function AiPage() {
                             否则用户会拿 default 的 Key 去调，直接 403 报无权访问 */}
                         {isDonation && <KeyGroupNote donationGroup={donationGroup} />}
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        {list.map((m) => (
-                          <Badge
-                            key={`${g}-${m}`}
-                            variant="outline"
-                            className="cursor-pointer font-mono text-xs"
-                            onClick={() => void copyText(m, t("ai.modelCopied", { model: m }))}
-                          >
-                            {m}
-                          </Badge>
-                        ))}
-                      </div>
+                      {/* 模型多的分组（捐献）会在内部再按厂商分小节；
+                          十几个模型的分组保持平铺 —— 分厂反而是画蛇添足 */}
+                      <ModelVendorSections
+                        models={list}
+                        onCopy={(m) => void copyText(m, t("ai.modelCopied", { model: m }))}
+                      />
                     </div>
                   )
                 })

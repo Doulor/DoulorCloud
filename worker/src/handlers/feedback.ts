@@ -324,6 +324,91 @@ export async function createFeedback(env: Env, request: Request): Promise<Respon
   return json({ feedback: toMine(row as FeedbackRow) }, 201)
 }
 
+/** PATCH /api/feedback/:id —— 编辑自己还没被处理的反馈（只有 pending 可编辑） */
+export async function editMyFeedback(env: Env, request: Request, id: string): Promise<Response> {
+  const user = await requireUser(env, request)
+  const row = await env.DB.prepare("SELECT * FROM feedback WHERE id = ? AND user_id = ?")
+    .bind(id, user.id)
+    .first<FeedbackRow>()
+  if (!row) throw new ApiError(404, "反馈不存在", "NOT_FOUND")
+  if (row.status !== "pending") {
+    throw new ApiError(400, "该反馈已被处理，无法再编辑", "NOT_EDITABLE")
+  }
+
+  const body = await readJson(request)
+  const title = String(body.title ?? "").trim().slice(0, MAX_TITLE)
+  const text = String(body.body ?? "").trim().slice(0, MAX_BODY)
+  if (!title || !text) throw new ApiError(400, "标题和内容不能为空", "INVALID_INPUT")
+  // 图片：显式传了 images 数组才替换；不传则保留原图（编辑文字不丢图）
+  const imageKeys = Array.isArray(body.images)
+    ? normalizeImageKeys(body.images, user.id)
+    : parseImageKeys(row.images)
+
+  const now = new Date().toISOString()
+  await env.DB.prepare(
+    "UPDATE feedback SET category = ?, title = ?, body = ?, images = ?, updated_at = ? " +
+      "WHERE id = ? AND user_id = ?"
+  )
+    .bind(
+      parseCategory(body.category),
+      title,
+      text,
+      imageKeys.length ? JSON.stringify(imageKeys) : null,
+      now,
+      id,
+      user.id
+    )
+    .run()
+
+  const fresh = await env.DB.prepare("SELECT * FROM feedback WHERE id = ?")
+    .bind(id)
+    .first<FeedbackRow>()
+  return json({ feedback: toMine(fresh as FeedbackRow) })
+}
+
+/** DELETE /api/feedback/:id —— 撤销（删除）自己还没被处理的反馈 */
+export async function withdrawMyFeedback(env: Env, request: Request, id: string): Promise<Response> {
+  const user = await requireUser(env, request)
+  const existing = await env.DB.prepare(
+    "SELECT id, status, images FROM feedback WHERE id = ? AND user_id = ?"
+  )
+    .bind(id, user.id)
+    .first<{ id: string; status: string; images: string | null }>()
+  if (!existing) throw new ApiError(404, "反馈不存在", "NOT_FOUND")
+  if (existing.status !== "pending") {
+    throw new ApiError(400, "该反馈已被处理，无法撤销", "NOT_EDITABLE")
+  }
+
+  // 收集首帖 + 各条对话消息引用的图片 key，去重后统一删（与 admin deleteFeedback 一致）
+  const keys = new Set<string>(parseImageKeys(existing.images))
+  const msgRows = await env.DB.prepare(
+    "SELECT images FROM feedback_messages WHERE feedback_id = ?"
+  )
+    .bind(id)
+    .all<{ images: string | null }>()
+  for (const r of msgRows.results ?? []) {
+    for (const k of parseImageKeys(r.images)) keys.add(k)
+  }
+
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM feedback_messages WHERE feedback_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM feedback WHERE id = ? AND user_id = ?").bind(id, user.id),
+  ])
+
+  if (keys.size > 0 && (await isStorageConfigured(env))) {
+    const bucketId = await getPlatformBucketId(env)
+    for (const key of keys) {
+      try {
+        await deleteObject(env, key, bucketId)
+      } catch (err) {
+        console.error("删除反馈图片失败:", key, err)
+      }
+    }
+  }
+
+  return json({ ok: true })
+}
+
 /**
  * POST /api/feedback/upload-image —— 上传一张反馈图片。
  *

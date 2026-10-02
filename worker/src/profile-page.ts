@@ -1283,15 +1283,25 @@ function faviconJs(url: string): string {
  *   无法确定该缩多少。故把「模式 + 两个比例」注入页面，由 JS 现场量高度。
  *
  * 算法（一次算完，不做迭代）：
- *   1. 读 .wrap 的 offsetHeight 作为「自然高度」——实测它**不受 zoom 影响**
- *      （zoom 只影响 getBoundingClientRect），所以可以边缩放边量，不会自激。
+ *   1. 先把 --pz 归一到 1，再读 .wrap 的 offsetHeight 作为「自然高度」。
  *   2. 可用高度 = 视口高 - 上下内边距；比例 = 可用 / 自然高。
  *   3. 夹到 [scaleMin, scaleManual]：auto 模式**只缩不放**，
  *      内容不长时算出来 ≥ scaleManual，取 scaleManual 即观感与不缩放一致。
  *
+ * ⚠️ 第 1 步的「先归一到 1」是**必须**的，不是保险（2026-10-01 站长反馈
+ * 「名片切紫金主题时预览疯狂抽动」的根因就在这里）。
+ *
+ * 原先的写法是「在当前缩放值下直接量 offsetHeight」，理由是「zoom 不影响
+ * offsetHeight」——对固定高度的块成立，但**对文字不成立**：zoom 会改变元素的
+ * 实际盒宽，进而改变换行数，offsetHeight 随之变化。于是「量高度 → 算比例 →
+ * 写回 --pz → 高度又变 → 再量」构成反馈回路。实测在内容刚好放不下时会进入
+ * 稳定的两点振荡：--pz 在 0.998 与 1 之间永久来回跳，肉眼就是整个预览持续抽动。
+ * 归一到 1 再量，得到的是与当前缩放无关的定值，一次算完必然收敛。
+ *
  * 触发时机：load / resize / 字体加载完成后（字体换了行高会变）。
  * 用 ResizeObserver 监听 .wrap 自身的自然高度变化（如图片加载完），
- * 但只在「高度真的变了」时重算，避免 zoom 引起的回调形成死循环。
+ * 只在「高度真的变了」时重算。测量过程归零后立刻复位，净尺寸变化为 0，
+ * 所以观察者回调不会再次触发自己。
  */
 function autoscaleJs(mode: string, minPct: number, manualPct: number): string {
   const cfg = JSON.stringify({
@@ -1303,9 +1313,21 @@ function autoscaleJs(mode: string, minPct: number, manualPct: number): string {
     var cfg=${cfg};
     var wrap=document.querySelector('.wrap');
     if(!wrap)return;
-    var lastNatural=0;
+    var lastNatural=-1;
+
+    /* 量「自然高度」。必须先归一到 1，否则量到的值会随当前缩放变化，
+       与 apply() 构成反馈回路（见函数注释里的振荡说明）。归零后立刻复位
+       原值，净尺寸变化为 0，因此不会触发下面的 ResizeObserver 再回调。 */
+    function naturalHeight(){
+      var prev=wrap.style.getPropertyValue('--pz');
+      wrap.style.setProperty('--pz','1');
+      var h=wrap.offsetHeight;
+      if(prev)wrap.style.setProperty('--pz',prev);else wrap.style.removeProperty('--pz');
+      return h;
+    }
+
     function apply(){
-      var natural=wrap.offsetHeight;      /* 不受 zoom 影响 */
+      var natural=naturalHeight();
       if(!natural)return;
       lastNatural=natural;
       if(cfg.mode!=='auto'){wrap.style.setProperty('--pz',cfg.manual);return;}
@@ -1322,10 +1344,12 @@ function autoscaleJs(mode: string, minPct: number, manualPct: number): string {
     /* 字体/图片加载完高度会变，重算一次（这两个事件都只触发有限次） */
     addEventListener('load',apply);
     if(document.fonts&&document.fonts.ready)document.fonts.ready.then(apply);
-    /* 只监听自然高度变化；zoom 不改变 offsetHeight，故不会自激 */
+    /* 只监听自然高度变化（图片加载完、字体换行数变化）。容差 1px 挡掉
+       子像素噪声，避免反复重算。 */
     if(window.ResizeObserver){
       new ResizeObserver(function(){
-        if(wrap.offsetHeight!==lastNatural)apply();
+        var h=naturalHeight();
+        if(Math.abs(h-lastNatural)>1)apply();
       }).observe(wrap);
     }
   })();`

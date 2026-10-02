@@ -6,6 +6,7 @@ import { guardRateLimit } from "../ratelimit"
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
 import { hardenUserContentResponse } from "../content-type"
 import { attachCustomDomain, detachCustomDomain } from "../custom-domain"
+import { isRootDomainItself } from "../root-domains"
 import { renderProfileHtml } from "../profile-page"
 import { isValidSource, resolveAudioUrl, searchMusic, fetchLyrics } from "../music-api"
 import type { Env } from "../env"
@@ -906,7 +907,7 @@ export async function previewProfile(env: Env, request: Request): Promise<Respon
       body.scaleManual === undefined
         ? clampScale(row.scale_manual, SCALE_MANUAL_RANGE, 100)
         : clampScale(body.scaleManual as number, SCALE_MANUAL_RANGE, 100),
-    avatar: asset("avatar", row.avatar_key, body.avatarUrl, row.avatar_url),
+    avatar: user.avatar_key ? `/u/${user.username}/avatar` : null,
     background: asset("background", row.background_key, body.backgroundUrl, row.background_url),
     music: previewMusic,
     musicCover: asset("music-cover", row.music_cover_key, body.musicCoverUrl, row.music_cover_url),
@@ -1378,13 +1379,13 @@ export async function bindProfileDomain(
     .first<{ id: string; fqdn: string; name: string }>()
   if (!sub) throw new ApiError(404, "子域名不存在", "NOT_FOUND")
 
-  // 禁止绑定根域：doulor.cn 是整站入口（静态站点自定义域 + 多条邮件/API 路由），
-  // 绑给名片会让整个站点无法访问。绑定根域的请求会被 CF 路由层面拦不住，
-  // 必须在这里拒绝。
-  if (sub.fqdn.toLowerCase() === env.ROOT_DOMAIN.toLowerCase()) {
+  // 禁止绑定根域：doulor.cn / tyu.me 都是平台入口（静态站点自定义域 +
+  // 多条邮件/API 路由），绑给名片会让整个站点无法访问。CF 路由层拦不住，
+  // 必须在这里拒绝。判据是「任一已登记的根域」，不只是 env.ROOT_DOMAIN。
+  if (await isRootDomainItself(env, sub.fqdn)) {
     throw new ApiError(
       400,
-      "根域名是平台入口，不能绑定给名片。请使用子域名（如 card.doulor.cn）",
+      `根域名是平台入口，不能绑定给名片。请使用子域名（如 card.${sub.fqdn}）`,
       "ROOT_DOMAIN_FORBIDDEN"
     )
   }
@@ -1498,12 +1499,12 @@ export async function loadPublicProfile(
   const value = key.fqdn ?? key.slug ?? ""
 
   const row = await env.DB.prepare(
-    `SELECT p.*, u.username, u.status AS user_status, u.created_at AS user_created_at, u.uid AS user_uid
+    `SELECT p.*, u.username, u.avatar_key AS user_avatar_key, u.status AS user_status, u.created_at AS user_created_at, u.uid AS user_uid
        FROM profiles p JOIN users u ON u.id = p.user_id
       WHERE ${where} LIMIT 1`
   )
     .bind(value)
-    .first<ProfileRow & { username: string; user_status: string; user_created_at: string; user_uid: number | null }>()
+    .first<ProfileRow & { username: string; user_avatar_key: string | null; user_status: string; user_created_at: string; user_uid: number | null }>()
 
   if (!row) return null
   if (row.published !== 1 || row.user_status !== "active") return null
@@ -1548,7 +1549,9 @@ export async function loadPublicProfile(
     scaleMode: normalizeScaleMode(row.scale_mode),
     scaleMin: clampScale(row.scale_min, SCALE_MIN_RANGE, 50),
     scaleManual: clampScale(row.scale_manual, SCALE_MANUAL_RANGE, 100),
-    avatar: assetUrl("avatar", row.avatar_key, row.avatar_url),
+    // 头像已统一为「账户头像」一个来源：有就 /u/<用户名>/avatar，没有就 null（前端首字符兜底）。
+    // 不再回退名片头像/外链 —— 2026-10-02 站长拍板「两个头像完完全全同一个东西」。
+    avatar: row.user_avatar_key ? `/u/${row.username}/avatar` : null,
     background: assetUrl("background", row.background_key, row.background_url),
     music,
     musicCover: assetUrl("music-cover", row.music_cover_key, row.music_cover_url),

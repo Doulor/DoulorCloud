@@ -10,6 +10,11 @@ import {
   type SpaceData,
   type SpaceCardData,
   type MySpaceSettings,
+  type RootDomainOption,
+  type LeaderboardBoard,
+  type LeaderboardResponse,
+  type CommunityMetric,
+  type LeaderboardRange,
   type DnsRecord,
   type DnsRecordType,
   type Donation,
@@ -93,6 +98,9 @@ import {
   type EventItem,
   type EventClaim,
   type EventPayload,
+  type AccountAppeal,
+  type AppealPendingReply,
+  type RiskAccount,
   type PointsOverview,
   type PointsRedeemResult,
   type PointsConfig,
@@ -106,12 +114,20 @@ import {
   type DonationRewardItem,
   type InvitePointsConfig,
   type AttentionCounts,
+  type DmRequest,
+  type MyTitle,
   type DmPeer,
   type DmMessage,
   type DmConversation,
+  type AdminDnsListResponse,
+  type AdminDnsRecord,
+  type AdminDnsFindingsResponse,
+  type AdminDnsAuditSummary,
+  type AdminDnsCfDiff,
+  type Sticker,
 } from "@/types"
 import type { FunLinkCategory } from "@/lib/fun-links"
-import { tStatic } from "@/i18n"
+import { tStatic, translateApiMessage } from "@/i18n"
 
 /**
  * 统一 API 请求层。
@@ -130,15 +146,41 @@ export function notifySessionExpired() {
   window.dispatchEvent(new Event("auth:expired"))
 }
 
+/**
+ * 通知全局：当前账号**未验证邮箱**，这次功能请求被服务端拦下了
+ * （规则见 `worker/src/auth.ts` 的 EMAIL_VERIFY_REQUIRED_PREFIXES）。
+ *
+ * 为什么需要：未验证用户在功能页点按钮会收到 403「请先验证邮箱后再使用该功能」，
+ * 但零散的 toast 只告诉他"不行"，不告诉他"去哪验证"。dashboard 外壳监听本事件后
+ * 会直接把「验证邮箱」对话框弹出来，点一次就能收到验证码。
+ */
+function notifyEmailUnverified() {
+  window.dispatchEvent(new Event("auth:email-unverified"))
+}
+
 export class HttpError extends Error {
   status: number
   code?: string
+  /**
+   * 原始响应体（2026-10-02 加）。
+   *
+   * 有些错误除了 `error` / `code` 还会**带回用户需要的信息** ——
+   * 典型是登录时账号被封禁：响应里带着封禁原因和上次申诉的处理结果，
+   * 登录页要把它展示出来（用户此刻拿不到会话，没有别的渠道能看到）。
+   */
+  detail?: Record<string, unknown>
 
-  constructor(status: number, message: string, code?: string) {
+  constructor(
+    status: number,
+    message: string,
+    code?: string,
+    detail?: Record<string, unknown> | null
+  ) {
     super(message)
     this.name = "HttpError"
     this.status = status
     this.code = code
+    this.detail = detail ?? undefined
   }
 }
 
@@ -177,8 +219,14 @@ async function request<T>(
   const data = await res.json().catch(() => null)
 
   if (!res.ok) {
-    const message =
-      (data as ApiError | null)?.error ?? tStatic("api.requestFailed", { status: res.status })
+    // 后端 message 一律是中文（worker 侧既是给用户看的、也是运维/日志原文），
+    // 所以在这里就地翻一次：翻不到会原样返回，不影响任何错误处理逻辑。
+    // 放在**构造 HttpError 的地方**而不是每个调用点 —— 全站 `err.message` 的用法
+    // 有一百多处（`err instanceof HttpError ? err.message : t("…")`），逐个改必漏。
+    const raw = (data as ApiError | null)?.error
+    const message = raw
+      ? translateApiMessage(raw)
+      : tStatic("api.requestFailed", { status: res.status })
     const code = (data as ApiError | null)?.code
 
     // 仅在「会话本身失效」时清空用户态。
@@ -191,7 +239,16 @@ async function request<T>(
       notifySessionExpired()
     }
 
-    throw new HttpError(res.status, message, code)
+    // 邮箱未验证：功能接口被服务端拦下（见 worker/src/auth.ts 的
+    // EMAIL_VERIFY_REQUIRED_PREFIXES），广播一次让外壳弹出验证对话框。
+    // 仍然照常抛错，调用方原有的错误处理不受影响。
+    if (res.status === 403 && code === "EMAIL_NOT_VERIFIED") {
+      notifyEmailUnverified()
+    }
+
+    // 完整响应体一并带进异常：有些错误除了文案还要**把用户需要的信息**传出去
+    // （如登录时账号被封禁 → 封禁原因与申诉处理结果，见 login.tsx 的展示）
+    throw new HttpError(res.status, message, code, data as Record<string, unknown> | null)
   }
 
   // 200 但响应体不是 JSON（例如静态站点把 /api 请求兜底成了 index.html）。
@@ -220,10 +277,39 @@ export const authApi = {
 
   /** 注册页公开信息：当前是否开放注册（无需邀请码）、截止时间。无需登录 */
   registerStatus: () =>
-    request<{ openRegistration: boolean; until: string | null }>("/register-status"),
+    request<{
+      openRegistration: boolean
+      until: string | null
+      /**
+       * 当前「发给用户的根域」（root_domains 的默认行，如 tyu.me）。
+       * 注册页要用它显示「你会拿到 username.<域>」—— 那是管理员可改的，
+       * 写死 doulor.cn 会在换域后给新用户展示错误地址。
+       */
+      defaultRootDomain: string
+    }>("/register-status"),
 
+  /**
+   * 登录第一步（口令）。
+   *
+   * 返回有两种形态：
+   * · 普通结果 —— `{ user, pendingReply, mustSetupTwoFactor }`，登录已完成；
+   * · **需要二次验证** —— `{ needTwoFactor: true, challengeId, methods, maskedEmail }`，
+   *   此时**还没有登录态**，必须再调 `twoFactorApi.verifyLogin` 才算登录成功。
+   *
+   * 用 `needTwoFactor` 做判别字段，前端据此切换界面。
+   */
   login: (payload: { identifier: string; password: string }) =>
-    request<{ user: MeResponse["user"] }>("/login", {
+    request<{
+      user?: MeResponse["user"]
+      pendingReply?: unknown
+      /** 该账号被要求开 2FA 但还没配 —— 登录照样成功，前端引导去设置页 */
+      mustSetupTwoFactor?: boolean
+      /** 需要二次验证；此时 user 为空、也没有 cookie */
+      needTwoFactor?: boolean
+      challengeId?: string
+      methods?: string[]
+      maskedEmail?: string
+    }>("/login", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
@@ -252,6 +338,49 @@ export const authApi = {
       method: "POST",
       body: JSON.stringify({ token, password }),
     }),
+}
+
+/**
+ * 排行榜。
+ *
+ * `metric` 只对 `board=community` 有意义（后端忽略其余榜的该参数）。
+ */
+export const leaderboardApi = {
+  get: (board: LeaderboardBoard, metric?: CommunityMetric, range?: LeaderboardRange) => {
+    const qs = new URLSearchParams({ board })
+    if (metric) qs.set("metric", metric)
+    if (range && range !== "all") qs.set("range", range)
+    return request<LeaderboardResponse>(`/leaderboard?${qs.toString()}`)
+  },
+}
+
+/**
+ * 当前「发给用户的根域」（如 tyu.me），带模块级缓存。
+ *
+ * 为什么单独开一个函数而不是让各页面各自 request：`用户名.<根域>` / `用户名@<根域>`
+ * 在注册页、概览、设置里都要显示，挨个 fetch 会白打几次网络；更关键的是
+ * **这个域名是管理员可改的** —— 2026-10-02 从 doulor.cn 整体迁到 tyu.me 时，
+ * 凡是对它硬编码的地方都开始显示错地址。
+ *
+ * 失败时抛出，调用方自行回落（通常显示空串，别闪一个错域名）。
+ */
+let defaultRootDomainCache: string | null = null
+let defaultRootDomainInflight: Promise<string> | null = null
+
+export async function getDefaultRootDomain(): Promise<string> {
+  if (defaultRootDomainCache) return defaultRootDomainCache
+  if (!defaultRootDomainInflight) {
+    defaultRootDomainInflight = authApi
+      .registerStatus()
+      .then((res) => {
+        defaultRootDomainCache = res.defaultRootDomain
+        return res.defaultRootDomain
+      })
+      .finally(() => {
+        defaultRootDomainInflight = null
+      })
+  }
+  return defaultRootDomainInflight
 }
 
 // ---- DNS ----
@@ -318,10 +447,12 @@ export const domainApi = {
       limit: number
       childLimit: number
       minRootNameLength: number
+      /** 可选的根域（后端按权限筛过；没权限的不会出现在这里） */
+      rootDomains: RootDomainOption[]
     }>("/subdomains"),
 
   /** parentId 省略 → 建一级子域名；指定 → 在该子域名下建子子域名 */
-  create: (payload: { name: string; parentId?: string }) =>
+  create: (payload: { name: string; parentId?: string; rootDomain?: string }) =>
     request<{ subdomain: Subdomain }>("/subdomains", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -351,6 +482,11 @@ export const adminApi = {
       nickname?: string | null
       emailVerified?: boolean
       notifyEnabled?: boolean
+      /**
+       * 封禁原因：status 改成 suspended 时写入，**用户下次登录会在登录页看到**。
+       * 解封（status=active）时后端会自动清空，不用传。
+       */
+      suspendReason?: string | null
     }
   ) =>
     request<AdminUserDetail>(`/admin/users/${encodeURIComponent(username)}`, {
@@ -501,6 +637,29 @@ export const adminApi = {
       body: JSON.stringify({ id }),
     }),
 
+  /** 编辑一条「待审核」的申请（账号名/密码/端口/通知邮箱/备注） */
+  updateFrpApplication: (payload: {
+    id: string
+    frpUser?: string
+    frpPassword?: string
+    ports?: number[]
+    notifyEmail?: string
+    remark?: string
+  }) =>
+    request<{ ok: boolean; frpUser: string; ports: number[] }>(
+      `/admin/frp/applications/${encodeURIComponent(payload.id)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          frpUser: payload.frpUser,
+          frpPassword: payload.frpPassword,
+          ports: payload.ports,
+          notifyEmail: payload.notifyEmail,
+          remark: payload.remark,
+        }),
+      }
+    ),
+
   listFrpNodes: () => request<{ nodes: AdminFrpNode[] }>("/admin/frp/nodes"),
 
   upsertFrpNode: (payload: Record<string, unknown>) =>
@@ -514,6 +673,26 @@ export const adminApi = {
 
   releaseFrpPorts: (payload: { username: string; nodeId: string }) =>
     request<{ released: number }>("/admin/frp/ports/release", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 某节点已占用的端口（带来源：manual = 站长手工标记） */
+  listFrpPorts: (nodeId: string) =>
+    request<{ ports: { port: number; owner: string | null; manual: boolean }[] }>(
+      `/admin/frp/ports?nodeId=${encodeURIComponent(nodeId)}`
+    ),
+
+  /** 手动把一批端口标记为已占用 */
+  occupyFrpPorts: (payload: { nodeId: string; ports: number[] }) =>
+    request<{ ok: boolean; count: number }>("/admin/frp/ports/occupy", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 解除一批端口的占用 */
+  freeFrpPorts: (payload: { nodeId: string; ports: number[] }) =>
+    request<{ ok: boolean; freed: number }>("/admin/frp/ports/free", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
@@ -837,7 +1016,8 @@ export const frpApi = {
 // ---- 代理节点 ----
 
 export const proxyApi = {
-  overview: () => request<ProxyOverview>("/proxy"),
+  overview: (offset = 0, limit = 10) =>
+    request<ProxyOverview>(`/proxy?offset=${offset}&limit=${limit}`),
 
   /** 启用（须携带同意标记 + 协议版本） */
   enable: (consentVersion: number) =>
@@ -891,9 +1071,11 @@ export const emailApi = {
       /** 临时邮箱的独立额度（与 limit 互不占用） */
       tempLimit: number
       tempUsed: number
+      /** 可选的根域（后端按权限筛过） */
+      rootDomains: RootDomainOption[]
     }>("/mailbox"),
 
-  create: (payload: { localPart: string }) =>
+  create: (payload: { localPart: string; domain?: string }) =>
     request<{ mailbox: Mailbox }>("/mailbox", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -1063,9 +1245,10 @@ export const profileApi = {
     })
     const data = await res.json().catch(() => null)
     if (!res.ok) {
+      const raw = (data as ApiError | null)?.error
       throw new HttpError(
         res.status,
-        (data as ApiError | null)?.error ?? tStatic("api.uploadFailed", { status: res.status }),
+        raw ? translateApiMessage(raw) : tStatic("api.uploadFailed", { status: res.status }),
         (data as ApiError | null)?.code
       )
     }
@@ -1441,6 +1624,33 @@ export const pointsApi = {
       `/points/orders/${encodeURIComponent(orderId)}/confirm`,
       { method: "POST" }
     ),
+
+  // ---- 售后（退款）----
+
+  /** 买家：申请退款。`delivered`（还没收到货）随时可申请；`settled` 是确认收货后 7 天内 */
+  requestAfterSale: (orderId: string, reason: string) =>
+    request<{ order: PointOrder }>(
+      `/points/orders/${encodeURIComponent(orderId)}/after-sale`,
+      { method: "POST", body: JSON.stringify({ reason }) }
+    ),
+  /** 买家：撤销自己的退款申请（已申请平台介入后不能撤） */
+  cancelAfterSale: (orderId: string) =>
+    request<{ order: PointOrder }>(
+      `/points/orders/${encodeURIComponent(orderId)}/after-sale`,
+      { method: "DELETE" }
+    ),
+  /** 买家：卖家一直不处理或已拒绝 → 申请平台（管理员）介入 */
+  escalateAfterSale: (orderId: string) =>
+    request<{ order: PointOrder }>(
+      `/points/orders/${encodeURIComponent(orderId)}/after-sale/escalate`,
+      { method: "POST" }
+    ),
+  /** 卖家：处理买家的退款申请（同意即退款；拒绝要写明理由） */
+  sellerResolveAfterSale: (orderId: string, approve: boolean, note?: string) =>
+    request<{ order: PointOrder }>(
+      `/points/orders/${encodeURIComponent(orderId)}/after-sale/decide`,
+      { method: "POST", body: JSON.stringify({ approve, note }) }
+    ),
 }
 
 // ---- 个人空间（公开主页）----
@@ -1601,7 +1811,25 @@ export const r2AdminApi = {
 
 // ---- 社区广场 ----
 
+/** 自定义称号：查看我持有的全部称号、切换对外展示哪一个（2026-10-01） */
+export const titleApi = {
+  mine: () => request<{ titles: MyTitle[] }>("/titles/mine"),
+  /** titleId = null 表示一个都不展示 */
+  setDisplay: (titleId: string | null) =>
+    request<{ ok: boolean; titleId: string | null }>("/titles/display", {
+      method: "POST",
+      body: JSON.stringify({ titleId }),
+    }),
+}
+
 export const communityApi = {
+  /** 管理员 / 站长置顶或取消置顶帖子（2026-10-01） */
+  setPinned: (id: string, pinned: boolean) =>
+    request<{ ok: boolean; pinned: boolean }>(
+      `/community/posts/${encodeURIComponent(id)}/pin`,
+      { method: "POST", body: JSON.stringify({ pinned }) }
+    ),
+
   getConfig: () => request<{ guestAccess: boolean; enabled: boolean }>("/community/config"),
   listPosts: (cursor?: string) =>
     request<{ posts: Post[]; nextCursor: string | null }>(
@@ -1628,7 +1856,7 @@ export const communityApi = {
   toggleLike: (id: string) =>
     request<{ liked: boolean; likeCount: number }>(`/community/posts/${encodeURIComponent(id)}/like`, { method: "POST" }),
   share: (id: string) =>
-    request<{ shareCount: number }>(`/community/posts/${encodeURIComponent(id)}/share`, { method: "POST" }),
+    request<{ shareCount: number; alreadyShared: boolean }>(`/community/posts/${encodeURIComponent(id)}/share`, { method: "POST" }),
   comment: (id: string, body: string, parentId?: string, replyToUserId?: string) =>
     request<{ comment: { id: string } }>(`/community/posts/${encodeURIComponent(id)}/comments`, {
       method: "POST", body: JSON.stringify({ body, parentId, replyToUserId }),
@@ -1710,13 +1938,35 @@ export const dmApi = {
   /** 只取未读总数（做角标用，别为它拉整个列表） */
   unread: () => request<{ unread: number }>("/dm/unread"),
 
-  /** 某个会话的消息；传 after 则增量拉取 */
-  list: (peer: string, after?: string) => {
+  /** 我收到的待处理聊天申请（陌生人发来的第一条消息 + 同意/拒绝） */
+  requests: () => request<{ requests: DmRequest[] }>("/dm/requests"),
+
+  /** 处理聊天申请：同意后双方才能自由发消息 */
+  respondRequest: (peer: string, action: "accept" | "decline") =>
+    request<{ ok: boolean; status: string }>("/dm/requests", {
+      method: "POST",
+      body: JSON.stringify({ peer, action }),
+    }),
+
+  /**
+   * 某个会话的消息。
+   * · 不传游标：拉最近一批（进会话时用）
+   * · `after`：增量拉**更新**的（轮询用）
+   * · `before`：往前翻页，拉**更早**的（往上滑看历史用）
+   * 返回的 `nextCursor` 喂给 `after`，`prevCursor` 喂给 `before`。
+   */
+  list: (peer: string, opts?: { after?: string; before?: string; limit?: number }) => {
     const qs = new URLSearchParams({ peer })
-    if (after) qs.set("after", after)
-    return request<{ peer: DmPeer; messages: DmMessage[]; nextCursor: string | null }>(
-      `/dm?${qs.toString()}`
-    )
+    if (opts?.after) qs.set("after", opts.after)
+    if (opts?.before) qs.set("before", opts.before)
+    if (opts?.limit) qs.set("limit", String(opts.limit))
+    return request<{
+      peer: DmPeer
+      messages: DmMessage[]
+      nextCursor: string | null
+      prevCursor: string | null
+      hasMore: boolean
+    }>(`/dm?${qs.toString()}`)
   },
 
   send: (to: string, body: string) =>
@@ -1814,6 +2064,85 @@ export const adminEventApi = {
     ),
 }
 
+/**
+ * 封禁申诉（**公开接口**）：被封禁的账号登录会被 403、拿不到会话，
+ * 所以提交申诉不依赖登录态 —— 用「用户名 + 说明」提交。
+ */
+// ---- 用户表情包 ----
+
+export const stickerApi = {
+  /**
+   * 我的表情包。
+   *
+   * 缓存：服务端返回 `Cache-Control: private, no-cache` + ETag，**浏览器**会自己
+   * 带 If-None-Match 做协商、命中 304 时直接用本地副本 —— 这一层对 fetch 是透明的，
+   * 不需要我们写代码。前端另有一层 localStorage（见 sticker-panel.tsx）负责「打开就显示」。
+   */
+  list: () => request<{ stickers: Sticker[]; version: string; limit: number }>("/stickers"),
+
+  /** 上传：raw body + Content-Type（不套 multipart，少一层解析） */
+  upload: (blob: Blob, contentType: string) =>
+    request<{ sticker: Sticker }>("/stickers", {
+      method: "POST",
+      headers: { "Content-Type": contentType },
+      body: blob,
+    }),
+
+  remove: (id: string) =>
+    request<void>(`/stickers/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  /** 把别人发的表情包存进自己的表情包（幂等：已存过会返回已有的，alreadySaved=true） */
+  save: (id: string) =>
+    request<{ sticker: Sticker; alreadySaved: boolean }>("/stickers/save", {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    }),
+}
+
+export const appealApi = {
+  /** identifier：用户名**或**邮箱都行（后端两种都会查） */
+  submit: (payload: { identifier: string; contact?: string; content: string }) =>
+    request<{ ok: boolean; id: string }>("/appeal", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  /**
+   * 取「有管理员回复、但用户还没确认看过」的申诉（需登录）。
+   * 返回 null 表示没有待确认的回复 —— 前端据此决定要不要弹强制确认框。
+   * 这也是**补发**通道：老用户解封后一直没看到回复，这次打开页面就会命中。
+   */
+  pendingReply: () =>
+    request<{ reply: AppealPendingReply | null }>("/appeal/pending-reply"),
+  /**
+   * 确认已读管理员回复（需登录）。
+   *
+   * ⚠️ 只有 `choice: "understood"`（勾了「我已完全明白并承诺不再违规」）才会真正落库；
+   *    勾另一项只是留痕、回复仍算未读 —— 站长要求「必须勾第一个才能关掉弹窗」。
+   *    返回的 `read` 表示这次调用是否真的标记了已读。
+   */
+  acknowledge: (payload: { appealId?: string; choice?: string }) =>
+    request<{ ok: boolean; nothing?: boolean; read?: boolean }>("/appeal/acknowledge", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+}
+
+/** 管理端「监管」栏目：申诉 + 风险账户 */
+export const adminModerationApi = {
+  appeals: () => request<{ appeals: AccountAppeal[] }>("/admin/appeals"),
+  reviewAppeal: (id: string, action: "accept" | "reject", note?: string) =>
+    request<{ ok: boolean; status: string; unblocked: boolean }>(
+      `/admin/appeals/${encodeURIComponent(id)}/review`,
+      { method: "POST", body: JSON.stringify({ action, note }) }
+    ),
+  riskAccounts: () => request<{ accounts: RiskAccount[] }>("/admin/risk-accounts"),
+  updateRiskStatus: (userId: string, status: RiskAccount["status"]) =>
+    request<{ ok: boolean }>(`/admin/risk-accounts/${encodeURIComponent(userId)}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status }),
+    }),
+}
+
 /** 管理端积分接口 */
 export const adminPointsApi = {
   /** 积分总览：用户列表（含 0 分用户）+ 全站汇总；query 可按用户名/昵称搜索 */
@@ -1904,6 +2233,24 @@ export const adminPointsApi = {
       method: "POST",
       body: JSON.stringify({ reason }),
     }),
+  /**
+   * 售后列表。不传 status = 只看「待平台处理」的；
+   * 传 `all` = 看全部有售后记录的订单（含已退款 / 已驳回）。
+   */
+  afterSales: (status?: string) =>
+    request<{ orders: PointOrder[]; status: string }>(
+      `/admin/points/after-sales${status ? `?status=${encodeURIComponent(status)}` : ""}`
+    ),
+  /**
+   * 客服判定退款申请。
+   * approve=true 同意退款（已结算的会先从卖家收益里收回，收不回会报错并提示先调整卖家积分）；
+   * false 驳回，售后终结。
+   */
+  resolveAfterSale: (id: string, approve: boolean, note?: string) =>
+    request<{ order: PointOrder }>(
+      `/admin/points/orders/${encodeURIComponent(id)}/after-sale`,
+      { method: "POST", body: JSON.stringify({ approve, note }) }
+    ),
 }
 
 // ---- OAuth 授权服务器（Doulor Cloud 作为身份提供方）----
@@ -2046,8 +2393,100 @@ export const auditApi = {
   },
 }
 
-export const feedbackApi = {
-  /** 我提交过的反馈 + 分类/状态标签（标签文案由服务端下发，前端不硬编码） */
+/**
+ * 聊天图片上传 —— 私聊 / 聊天室 / 广场帖子与评论共用。
+ *
+ * 返回的 `url` 直接塞进 markdown 的 `![]()` 就能显示，
+ * 所以拖拽/粘贴进来后只需往输入框里插一段文本，不用改消息结构。
+ */
+export const chatUploadApi = {
+  upload: (file: File) => {
+    const headers = new Headers()
+    headers.set("Content-Type", file.type)
+    return request<{ key: string; url: string }>("/chat/upload-image", {
+      method: "POST",
+      body: file,
+      headers,
+    })
+  },
+}
+
+/**
+ * 二次认证（2FA）。
+ *
+ * 分两组：
+ * · `verifyLogin` / `sendLoginEmail` —— 登录第二步，此时**还没有登录态**；
+ * · 其余 —— 登录后在设置页自助管理。
+ */
+export const twoFactorApi = {
+  /** 登录第二步：提交验证码，成功后才真正建立登录态 */
+  verifyLogin: (payload: { challengeId: string; method: string; code: string }) =>
+    request<{ user: MeResponse["user"]; mustSetupTwoFactor?: boolean }>("/login/2fa", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 给当前挑战的账号重发一封邮箱验证码 */
+  sendLoginEmail: (challengeId: string) =>
+    request<{ ok: boolean }>("/login/2fa/send-email", {
+      method: "POST",
+      body: JSON.stringify({ challengeId }),
+    }),
+
+  /** 我的 2FA 现状（含「是否被强制」与收件地址脱敏） */
+  status: () =>
+    request<{
+      enabled: boolean
+      methods: string[]
+      totpConfirmed: boolean
+      emailEnabled: boolean
+      recoveryLeft: number
+      enforced: boolean
+      maskedEmail: string
+    }>("/settings/2fa"),
+
+  /** 开始配置 TOTP：拿到密钥与 otpauth 链接（前端画二维码） */
+  startTotp: () =>
+    request<{ secret: string; otpauthUrl: string }>("/settings/2fa/totp/start", {
+      method: "POST",
+    }),
+
+  /** 用认证器上的一次动态码确认，成功则返回恢复码（仅此一次明文） */
+  confirmTotp: (code: string) =>
+    request<{ ok: boolean; recoveryCodes: string[] }>("/settings/2fa/totp/confirm", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }),
+
+  /** 开关邮箱验证方式 */
+  setEmail: (enabled: boolean) =>
+    request<{ ok: boolean; emailEnabled: boolean }>("/settings/2fa/email", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+
+  /** 重新生成恢复码（旧的全部作废） */
+  regenerateRecovery: () =>
+    request<{ recoveryCodes: string[] }>("/settings/2fa/recovery/regenerate", {
+      method: "POST",
+    }),
+
+  /** 关闭全部 2FA（需先验一个当前有效的码；被强制的角色不允许） */
+  disable: (code: string) =>
+    request<{ ok: boolean }>("/settings/2fa/disable", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }),
+
+  /** 站长兜底：清掉某人的 2FA（丢了手机时用） */
+  adminReset: (userId: string) =>
+    request<{ ok: boolean }>("/admin/2fa/reset", {
+      method: "POST",
+      body: JSON.stringify({ userId }),
+    }),
+}
+
+export const feedbackApi = {  /** 我提交过的反馈 + 分类/状态标签（标签文案由服务端下发，前端不硬编码） */
   list: () => request<FeedbackOverview>("/feedback"),
 
   create: (payload: { category: string; title: string; body: string; images?: string[] }) =>
@@ -2078,6 +2517,17 @@ export const feedbackApi = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+
+  /** 编辑还没被处理的反馈（pending 才可改） */
+  edit: (id: string, payload: { category: string; title: string; body: string; images?: string[] }) =>
+    request<{ feedback: FeedbackItem }>(`/feedback/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 撤销（删除）还没被处理的反馈 */
+  withdraw: (id: string) =>
+    request<{ ok: boolean }>(`/feedback/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   // 管理端
   listAll: (status?: string) =>
@@ -2245,7 +2695,7 @@ export const adminTitlesApi = {
     request<{ ok: boolean }>(`/admin/titles/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
-  /** 授予（覆盖式：用户已有的其它自定义称号会被顶掉——一人一称号） */
+  /** 授予（一人可持多个称号；重复授予同一个是幂等的，不会重复添加） */
   grant: (id: string, username: string) =>
     request<{ ok: boolean }>(`/admin/titles/${encodeURIComponent(id)}/grant`, {
       method: "POST",
@@ -2273,4 +2723,97 @@ export interface AppNotifyToken {
 export const appNotifyApi = {
   get: () => request<AppNotifyToken>("/app/notify-token"),
   rotate: () => request<AppNotifyToken>("/app/notify-token/rotate", { method: "POST" }),
+}
+
+// ---- 管理面板 · DNS 解析管理（2026-10-01）----
+//
+// 独立成对象而不是塞进 adminApi：adminApi 已经很长，且这个模块有自己的
+// 「列表 / 扫描 / 处置 / 对账」四段语义。
+
+export const adminDnsApi = {
+  /**
+   * 全站 DNS 记录列表。
+   *
+   * `severity` 支持 high / medium / low / any（只看有问题的）/ none（只看干净的）。
+   * 注意严重度是服务端**算**出来的（规则引擎），不是在 SQL 里筛的，所以要传给它。
+   */
+  list: (params: {
+    q?: string
+    type?: string
+    severity?: string
+    proxied?: string
+    status?: string
+    username?: string
+    includeIgnored?: boolean
+    page?: number
+    pageSize?: number
+  } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.q) sp.set("q", params.q)
+    if (params.type) sp.set("type", params.type)
+    if (params.severity) sp.set("severity", params.severity)
+    if (params.proxied) sp.set("proxied", params.proxied)
+    if (params.status) sp.set("status", params.status)
+    if (params.username) sp.set("username", params.username)
+    if (params.includeIgnored) sp.set("includeIgnored", "1")
+    if (params.page) sp.set("page", String(params.page))
+    if (params.pageSize) sp.set("pageSize", String(params.pageSize))
+    const qs = sp.toString()
+    return request<AdminDnsListResponse>(`/admin/dns${qs ? "?" + qs : ""}`)
+  },
+
+  /** 编辑一条记录（站长视角：可改类型、内容、TTL、代理开关） */
+  update: (
+    id: string,
+    payload: {
+      name?: string
+      type?: string
+      content?: string
+      ttl?: number
+      proxied?: boolean
+      priority?: number
+    }
+  ) =>
+    request<{ record: AdminDnsRecord; cfError: string | null }>(
+      `/admin/dns/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(payload) }
+    ),
+
+  /** 删除一条记录（Cloudflare 侧一并删） */
+  remove: (id: string) =>
+    request<{ ok: boolean; cfError: string | null }>(`/admin/dns/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  /** 立刻扫描；deep=true 时额外做真实解析探测（会打 DNS-over-HTTPS） */
+  audit: (deep = false) =>
+    request<{ summary: AdminDnsAuditSummary }>(`/admin/dns/audit${deep ? "?deep=1" : ""}`, {
+      method: "POST",
+    }),
+
+  findings: (params: { status?: string; severity?: string; q?: string; page?: number } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.status) sp.set("status", params.status)
+    if (params.severity) sp.set("severity", params.severity)
+    if (params.q) sp.set("q", params.q)
+    if (params.page) sp.set("page", String(params.page))
+    const qs = sp.toString()
+    return request<AdminDnsFindingsResponse>(`/admin/dns/findings${qs ? "?" + qs : ""}`)
+  },
+
+  /** 处置一条发现项（忽略必须写备注；恢复则清空） */
+  reviewFinding: (id: string, status: "ignored" | "open", note?: string) =>
+    request<{ ok: boolean }>(`/admin/dns/findings/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ status, note }),
+    }),
+
+  /** 本地台账 vs Cloudflare 实际记录对账 */
+  cfDiff: () => request<AdminDnsCfDiff>("/admin/dns/cf-diff"),
+
+  /** 删除 Cloudflare 上一条无主记录（该 cfId 不在本地表里） */
+  removeOrphan: (cfId: string) =>
+    request<{ ok: boolean }>(`/admin/dns/cf-orphan/${encodeURIComponent(cfId)}`, {
+      method: "DELETE",
+    }),
 }

@@ -12,7 +12,8 @@ import {
 
 interface AuthShellProps {
   title: string
-  description: React.ReactNode
+  /** 可选：不传就只显示标题（注册页已不再展示副标题） */
+  description?: React.ReactNode
   footer: React.ReactNode
   children: React.ReactNode
 }
@@ -26,7 +27,7 @@ export function AuthShell({ title, description, footer, children }: AuthShellPro
       <Card className="w-full">
         <CardHeader className="space-y-2">
           <CardTitle className="text-xl">{title}</CardTitle>
-          <CardDescription>{description}</CardDescription>
+          {description ? <CardDescription>{description}</CardDescription> : null}
         </CardHeader>
         <CardContent>{children}</CardContent>
       </Card>

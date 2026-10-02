@@ -1,8 +1,8 @@
 import { ApiError, json, SAFE_JSON_HEADERS, readBodyCapped, assertContentLengthWithin } from "../http"
-import { requireUser, type UserRow } from "../auth"
+import { requireUser, isPrivileged, type UserRow } from "../auth"
 import { decodeCursor, encodeCursor, groupComments, canPostAgain, type RawComment } from "../community-logic"
 import { uuid } from "../crypto"
-import { getSettingNumber, getSettingBool } from "../settings"
+import { getSettingNumber, getSettingBool, audit } from "../settings"
 import { sendMail, renderMail } from "../mailer"
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
 import { hardenUserContentResponse } from "../content-type"
@@ -21,6 +21,8 @@ interface PostRow {
   like_count: number
   comment_count: number
   share_count: number
+  /** 1 = 管理员置顶（2026-10-01） */
+  pinned: number | null
   deleted_at: string | null
   created_at: string
   updated_at: string | null
@@ -72,6 +74,7 @@ function toPostDto(r: PostRow, viewerLiked: boolean, isMine: boolean) {
     shareCount: r.share_count,
     liked: viewerLiked,
     isMine,
+    pinned: Boolean(r.pinned),
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     editCount: r.edit_count ?? 0,
@@ -154,10 +157,12 @@ export async function listPosts(env: Env, request: Request): Promise<Response> {
             ct.name AS title_name, ct.color_from AS title_color_from, ct.color_to AS title_color_to,
             (SELECT COUNT(*) FROM post_edits e WHERE e.post_id = p.id) AS edit_count
        FROM posts p JOIN users u ON u.id = p.user_id
-       LEFT JOIN user_titles ut ON ut.user_id = u.id
+       LEFT JOIN user_titles ut ON ut.user_id = u.id AND ut.is_display = 1
        LEFT JOIN custom_titles ct ON ct.id = ut.title_id
       WHERE ${where}
-      ORDER BY p.created_at DESC, p.id DESC
+      -- 置顶的排最前（2026-10-01）；置顶内部仍按时间倒序。
+      -- 游标分页仍按 created_at：置顶只是「整体提到前面」，不影响翻页连续性。
+      ORDER BY p.pinned DESC, p.created_at DESC, p.id DESC
       LIMIT ?`
   ).bind(...binds, limit).all<PostRow>()
 
@@ -190,7 +195,7 @@ export async function getPost(env: Env, request: Request, id: string): Promise<R
             ct.name AS title_name, ct.color_from AS title_color_from, ct.color_to AS title_color_to,
             (SELECT COUNT(*) FROM post_edits e WHERE e.post_id = p.id) AS edit_count
        FROM posts p JOIN users u ON u.id = p.user_id
-       LEFT JOIN user_titles ut ON ut.user_id = u.id
+       LEFT JOIN user_titles ut ON ut.user_id = u.id AND ut.is_display = 1
        LEFT JOIN custom_titles ct ON ct.id = ut.title_id
       WHERE p.id = ?`
   ).bind(id).first<PostRow>()
@@ -315,7 +320,7 @@ export async function listComments(env: Env, request: Request, id: string): Prom
        FROM post_comments c
        JOIN users u ON u.id = c.user_id
        LEFT JOIN users ru ON ru.id = c.reply_to_user_id
-       LEFT JOIN user_titles ut ON ut.user_id = u.id
+       LEFT JOIN user_titles ut ON ut.user_id = u.id AND ut.is_display = 1
        LEFT JOIN custom_titles ct ON ct.id = ut.title_id
       WHERE c.post_id = ? AND c.deleted_at IS NULL
       ORDER BY c.created_at ASC`
@@ -537,6 +542,12 @@ async function likeCount(env: Env, id: string): Promise<number> {
  * ⚠️ 2026-09-25 审计（P2-7）：原实现**没有任何限流**，每次调用都是一次
  * D1 写 + 一次读，一个脚本就能把转发数刷到任意大（运营数据失真），
  * 并白耗行读额度。这里补用户级限流，顺带把「帖子不存在」从静默 0 改成 404。
+ *
+ * ⚠️ 2026-10-01 用户反馈「社区的分享量可以无限刷」：限流只管住了速度，
+ * 同一个人仍然能反复抬高同一条帖子的数字。转发数的语义是**有多少人转过**，
+ * 所以再叠一层 (帖子, 用户) 去重：同一个用户对同一条帖子只计一次。
+ * 重复点不再报错（按钮同时承担「复制链接」的职责），只在响应里告诉前端
+ * `alreadyShared`，让前端换个提示语、并且不要把数字往上加。
  */
 export async function sharePost(env: Env, request: Request, id: string): Promise<Response> {
   const user = await requireCommunityUser(env, request)
@@ -548,10 +559,45 @@ export async function sharePost(env: Env, request: Request, id: string): Promise
     "操作过于频繁"
   )
 
-  await env.DB.prepare("UPDATE posts SET share_count = share_count + 1 WHERE id=? AND deleted_at IS NULL").bind(id).run()
-  const r = await env.DB.prepare("SELECT share_count FROM posts WHERE id=? AND deleted_at IS NULL").bind(id).first<{share_count:number}>()
-  if (!r) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
-  return json({ shareCount: r.share_count ?? 0 })
+  // 先确认帖子存在，避免给不存在的 id 落下一条 post_shares 记录
+  const exists = await env.DB.prepare("SELECT id FROM posts WHERE id=? AND deleted_at IS NULL")
+    .bind(id)
+    .first<{ id: string }>()
+  if (!exists) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
+
+  /**
+   * 去重 + 计数。
+   *
+   * `INSERT OR IGNORE` 命中主键冲突时 changes 为 0，据此判断「这次是不是第一回」，
+   * 只有第一回才动 share_count。D1 串行执行，并发点击不会双双算成第一回。
+   *
+   * 表不存在时（代码先于迁移上线）退化成原来的「每次都 +1」：转发数失真总比
+   * 整个接口 500 好。迁移到位后这层兜底自然失效。
+   */
+  let first = true
+  try {
+    const ins = await env.DB.prepare(
+      "INSERT OR IGNORE INTO post_shares (post_id, user_id, created_at) VALUES (?, ?, ?)"
+    )
+      .bind(id, user.id, new Date().toISOString())
+      .run()
+    first = (ins.meta?.changes ?? 0) > 0
+  } catch (err) {
+    console.error("post_shares 去重失败，退化为不去重:", err)
+  }
+
+  if (first) {
+    await env.DB.prepare(
+      "UPDATE posts SET share_count = share_count + 1 WHERE id=? AND deleted_at IS NULL"
+    )
+      .bind(id)
+      .run()
+  }
+
+  const r = await env.DB.prepare("SELECT share_count FROM posts WHERE id=? AND deleted_at IS NULL")
+    .bind(id)
+    .first<{ share_count: number }>()
+  return json({ shareCount: r?.share_count ?? 0, alreadyShared: !first })
 }
 
 /** POST /api/community/posts/:id/comments */
@@ -606,6 +652,52 @@ export async function createComment(env: Env, request: Request, id: string): Pro
 }
 
 /** DELETE /api/community/posts/:id —— 作者或管理员软删 */
+/**
+ * 管理员 / 站长：置顶或取消置顶一条帖子（2026-10-01 加）。
+ *
+ * 为什么单独一个接口而不是塞进编辑：置顶是**管理动作**，跟作者编辑正文是两回事
+ * （作者能改自己的帖子，但不该能让自己的帖子钉在广场最前面）。
+ * 因此权限只认 admin/root，且写一条审计 —— 谁在什么时候把哪条帖子钉上去了要可查。
+ */
+export async function setPostPinned(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireCommunityUser(env, request)
+  if (!isPrivileged(user.role)) throw new ApiError(403, "只有管理员能置顶", "FORBIDDEN")
+
+  // 请求体只能读一次：readBodyCapped 已经把 body 消费掉了，再调 request.json() 必然抛错。
+  // 所以读出来自己解析（与 dm.ts 的 readJson 同一套路）。
+  const buf = await readBodyCapped(request, 4096, "请求内容过大", 413, "PAYLOAD_TOO_LARGE")
+  let body: { pinned?: unknown } = {}
+  try {
+    body = JSON.parse(new TextDecoder().decode(buf)) as { pinned?: unknown }
+  } catch {
+    throw new ApiError(400, "请求内容不是合法 JSON", "INVALID_JSON")
+  }
+  const pinned = body.pinned === true || body.pinned === 1
+
+  const row = await env.DB.prepare(
+    "SELECT id, body FROM posts WHERE id = ? AND deleted_at IS NULL"
+  )
+    .bind(id)
+    .first<{ id: string; body: string }>()
+  if (!row) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
+
+  await env.DB.prepare("UPDATE posts SET pinned = ?, updated_at = ? WHERE id = ?")
+    .bind(pinned ? 1 : 0, new Date().toISOString(), id)
+    .run()
+
+  await audit(
+    env,
+    user.id,
+    pinned ? "community.pin" : "community.unpin",
+    `${pinned ? "置顶" : "取消置顶"}帖子「${(row.body || "").slice(0, 30)}」`
+  )
+  return json({ ok: true, pinned })
+}
+
 export async function deletePost(env: Env, request: Request, id: string): Promise<Response> {
   const user = await requireCommunityUser(env, request)
   const row = await env.DB.prepare("SELECT user_id FROM posts WHERE id=?").bind(id).first<{ user_id: string }>()
@@ -897,6 +989,9 @@ export async function uploadPostImage(env: Env, request: Request, id: string): P
   if (buf.byteLength === 0) {
     throw new ApiError(400, `图片需在 ${Math.round(maxBytes / 1024)} KB 以内`, "TOO_LARGE")
   }
+  if (!hasValidImageSignature(buf, ct)) {
+    throw new ApiError(400, "图片内容与声明的类型不匹配", "INVALID_IMAGE")
+  }
   const bucketId = await getPlatformBucketId(env)
   const filename = `${uuid()}.${ext}`
   const key = `community/${id}/${filename}`
@@ -1070,6 +1165,8 @@ export async function serveCommunityImage(
   }
   if (!(await isStorageConfigured(env))) return new Response("Not Found", { status: 404 })
   const bucketId = await getPlatformBucketId(env)
+  const post = await env.DB.prepare("SELECT deleted_at FROM posts WHERE id=?").bind(postId).first<{ deleted_at: string | null }>()
+  if (!post || post.deleted_at) return new Response("Not Found", { status: 404 })
   const key = `community/${postId}/${filename}`
   try {
     const res = await getObject(env, key, undefined, bucketId)
@@ -1077,5 +1174,23 @@ export async function serveCommunityImage(
     return hardenUserContentResponse(res, filename)
   } catch {
     return new Response("Not Found", { status: 404 })
+  }
+}
+
+/** Check the binary signature instead of trusting a client-controlled Content-Type. */
+export function hasValidImageSignature(buf: ArrayBuffer, contentType: string): boolean {
+  const bytes = new Uint8Array(buf)
+  const startsWith = (signature: number[]) => signature.every((value, index) => bytes[index] === value)
+  switch (contentType.toLowerCase()) {
+    case "image/jpeg":
+      return startsWith([0xff, 0xd8, 0xff])
+    case "image/png":
+      return startsWith([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    case "image/gif":
+      return startsWith([0x47, 0x49, 0x46, 0x38]) && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61
+    case "image/webp":
+      return startsWith([0x52, 0x49, 0x46, 0x46]) && bytes.length >= 12 && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+    default:
+      return false
   }
 }

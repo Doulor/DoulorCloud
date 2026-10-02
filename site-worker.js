@@ -94,7 +94,32 @@ export default {
       )
     }
 
+    // 带内容哈希的静态资源（/assets/*、/fonts/*、favicon）
+    const isStaticAsset =
+      url.pathname.startsWith("/assets/") ||
+      url.pathname.startsWith("/fonts/") ||
+      url.pathname === "/favicon.png"
+
     const res = await env.ASSETS.fetch(request)
+
+    // ⚠️ 静态资源「不存在」时必须返回 404，**绝不能走 SPA 兜底**。
+    //
+    // 本站 assets 配的是 `not_found_handling: single-page-application`，于是
+    // 请求一个不存在的 `/assets/xxx-HASH.js` 会拿到 **index.html（200 + text/html）**。
+    // 后果（2026-10-02 线上事故）：
+    //   · 用户浏览器里还开着旧版本页面（记的是旧 chunk 名），点进懒加载路由去请求
+    //     已被新构建替换掉的旧 chunk → 拿到一段 HTML 被当 JS 解析 → 报
+    //     `Cannot read properties of undefined (reading 'default')`，
+    //     **而不是**前端 chunk 自愈（src/lib/chunk-error.ts）能识别的
+    //     `Failed to fetch dynamically imported module` ⇒ 不触发自动刷新，用户卡死；
+    //   · 下面还会给它打 `immutable` 长缓存，让它顽固不化。
+    //   · Service Worker 也会把这个 200 缓存下来（它只按 res.ok 判断）。
+    // 所以：静态资源路径只要拿回来的是 HTML（= 走了 SPA 兜底），一律改成 404，
+    // 让前端的「404 → 自动刷新换新版本」自愈链路恢复正常。
+    if (isStaticAsset && (res.headers.get("Content-Type") || "").includes("text/html")) {
+      return new Response("Not Found", { status: 404, headers: SECURITY_HEADERS })
+    }
+
     const copy = withSecurityHeaders(res)
 
     // 字体走 CORS 严格模式：自定义域名（如 card.doulor.cn）访问名片时，
@@ -112,10 +137,6 @@ export default {
     //     去请求已被新构建替换掉（hash 变化）的旧 JS → 404。
     //   - 带 hash 的静态资源（/assets/*.js|css|woff2|png、字体、favicon）
     //     → 长期缓存，文件名带内容 hash，内容变了名字就变，永不冲突。
-    const isStaticAsset =
-      url.pathname.startsWith("/assets/") ||
-      url.pathname.startsWith("/fonts/") ||
-      url.pathname === "/favicon.png"
     if (!isStaticAsset) {
       copy.headers.set("Cache-Control", "no-cache, no-store, must-revalidate")
       copy.headers.set("Pragma", "no-cache")

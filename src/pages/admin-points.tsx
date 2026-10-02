@@ -47,14 +47,16 @@ import {
 } from "@/components/ui/select"
 import { ShopIconPicker } from "@/components/shop-icon-picker"
 import { adminPointsApi, errMsg, pointsApi, HttpError } from "@/services/api"
+import { PRODUCT_CATEGORY_LABELS, type ProductCategory } from "@/types"
 import { fmtDateTime, fmtUid } from "@/lib/format"
 import { notifyAttentionChanged } from "@/lib/attention-events"
 import { shopIcon } from "@/lib/shop-icons"
 import { FEATURE_LABELS } from "@/types"
-import { useT } from "@/i18n"
+import { useT, tStatic } from "@/i18n"
 import type {
   AdminPointsOverview,
   AdminPointsUser,
+  AfterSaleStatus,
   AdminShopData,
   DonationRewardItem,
   FeatureKey,
@@ -70,27 +72,26 @@ import type {
 
 /** 交付方式 → 短标签（按钮上显示） */
 const DELIVERY_LABELS: Record<PointDelivery, string> = {
-  manual: "人工发放",
-  quota: "自动充值",
-  feature: "授予权限",
-  subscription: "开通订阅",
-  invite_quota: "邀请码额度",
+  manual: "pt.delivery.manual",
+  quota: "ap.dlv.quota",
+  feature: "ap.dlv.feature",
+  subscription: "ap.dlv.subscription",
+  invite_quota: "ap.dlv.inviteQuota",
 }
 
 /** 交付方式 → 一句话说明（选中后显示在按钮下方） */
 const DELIVERY_HINTS: Record<PointDelivery, string> = {
-  manual: "下单后只生成一张「待发放」订单，你在订单列表里点「标记发放」才真正发出去。",
-  quota: "下单后自动把金额加到用户的 AI 中转站余额。用户没开通中转站时无法购买。",
-  feature: "下单后自动给用户开通选中的模块权限。用户已经有了这个权限时会直接拒绝下单，不会白扣积分。",
-  subscription:
-    "下单后自动给用户开通 NewAPI 的订阅套餐（按月重置额度那种）。套餐 ID 由你填，在 NewAPI 后台的套餐列表里能看到。",
-  invite_quota: "下单后自动增加用户的「邀请码创建额度」，也就是他能建多少个邀请码。",
+  manual: "ap.hint.manual",
+  quota: "ap.hint.quota",
+  feature: "ap.hint.feature",
+  subscription: "ap.hint.subscription",
+  invite_quota: "ap.hint.inviteQuota",
 }
 
 /** 交付方式 → 商品表 / 订单表里的展示文案 */
 function deliveryText(delivery: string, quotaYuan?: number | null): string {
-  if (delivery === "quota") return `自动充 ¥${fmtMoney(quotaYuan ?? 0)}`
-  return DELIVERY_LABELS[delivery as PointDelivery] ?? "人工发放"
+  if (delivery === "quota") return tStatic("ap.dlv.quotaShort", { v: fmtMoney(quotaYuan ?? 0) })
+  return tStatic(DELIVERY_LABELS[delivery as PointDelivery] ?? "pt.delivery.manual")
 }
 
 /** 全部模块（下拉框选项顺序） */
@@ -98,24 +99,24 @@ const FEATURE_KEYS: FeatureKey[] = ["ai", "r2", "frp", "proxy"]
 
 /** 流水来源 → 标签 */
 const REASON_LABEL: Record<string, string> = {
-  event: "活动奖励",
-  admin: "管理员调整",
-  redeem: "兑换余额",
-  shop: "商城购买",
-  shop_sell: "商城售出",
-  donation: "捐献奖励",
-  invite: "邀请奖励",
-  invite_commission: "邀请返佣",
-  transfer_out: "转账转出",
-  transfer_in: "转账收到",
+  event: "pt.reason.event",
+  admin: "pt.reason.admin",
+  redeem: "pt.reason.redeem",
+  shop: "pt.reason.shop",
+  shop_sell: "pt.reason.shopSell",
+  donation: "pt.reason.donation",
+  invite: "pt.reason.invite",
+  invite_commission: "pt.reason.inviteCommission",
+  transfer_out: "pt.reason.transferOut",
+  transfer_in: "pt.reason.transferIn",
 }
 
 /** 订单状态 → 标签（用户商品订单的 pending/delivered 含义不同，用 orderStatusText 区分） */
 const ORDER_STATUS: Record<string, { label: string; variant: "default" | "outline" | "secondary" | "success" }> = {
-  pending: { label: "待发放", variant: "default" },
-  delivered: { label: "已发放", variant: "outline" },
-  settled: { label: "已结算", variant: "success" },
-  cancelled: { label: "已取消", variant: "secondary" },
+  pending: { label: "pt.status.pending", variant: "default" },
+  delivered: { label: "pt.status.delivered", variant: "outline" },
+  settled: { label: "pt.status.settled", variant: "success" },
+  cancelled: { label: "pt.status.cancelled", variant: "secondary" },
 }
 
 /**
@@ -127,10 +128,22 @@ const ORDER_STATUS: Record<string, { label: string; variant: "default" | "outlin
  */
 function orderStatusText(status: string, isUserOrder: boolean): string {
   if (isUserOrder) {
-    if (status === "pending") return "待卖家交付"
-    if (status === "delivered") return "待买家确认"
+    if (status === "pending") return "pt.status.awaitSeller"
+    if (status === "delivered") return "ap.status.awaitBuyer"
   }
   return ORDER_STATUS[status]?.label ?? status
+}
+
+/** 售后状态 → 展示标签（与用户端 points.tsx 的定义保持一致） */
+const AFTER_SALE_STATUS: Record<
+  AfterSaleStatus,
+  { label: string; variant: "default" | "outline" | "secondary" | "destructive" | "success" }
+> = {
+  requested: { label: "pt.afterSale.st.requested", variant: "default" },
+  rejected: { label: "pt.afterSale.st.rejected", variant: "destructive" },
+  platform: { label: "pt.afterSale.st.platform", variant: "default" },
+  closed: { label: "pt.afterSale.st.closed", variant: "secondary" },
+  refunded: { label: "pt.afterSale.st.refunded", variant: "success" },
 }
 
 /** 用户商品的审核状态 → 标签 */
@@ -138,9 +151,9 @@ const REVIEW_STATUS: Record<
   string,
   { label: string; variant: "default" | "outline" | "secondary" | "destructive" | "success" }
 > = {
-  pending: { label: "待审核", variant: "default" },
-  approved: { label: "已通过", variant: "success" },
-  rejected: { label: "已拒绝", variant: "destructive" },
+  pending: { label: "pt.review.pending", variant: "default" },
+  approved: { label: "ap.review.approved", variant: "success" },
+  rejected: { label: "ap.review.rejected", variant: "destructive" },
 }
 
 /** 金额展示：整数不带小数，非整数保留两位 */
@@ -164,7 +177,7 @@ const RENTAL_DELIVERIES: readonly PointDelivery[] = ["manual", "feature", "subsc
 
 /** 租期展示：如「租用 30 天」 */
 function rentalTerm(days: number | null | undefined): string {
-  return days && days > 0 ? `租用 ${days} 天` : "租用"
+  return days && days > 0 ? tStatic("pt.rental.term", { n: days }) : tStatic("pt.rental.rental")
 }
 
 /** 租用订单是否已到期 */
@@ -181,12 +194,15 @@ function isRentalExpired(o: PointOrder): boolean {
  */
 function rentalOrderText(o: PointOrder): string | null {
   if (o.billingMode !== "rental") return null
-  if (!o.expiresAt) return `${rentalTerm(o.rentalDays)}（未起算）`
+  if (!o.expiresAt) return tStatic("ap.rental.notStarted", { term: rentalTerm(o.rentalDays) })
   const time = fmtDateTime(o.expiresAt)
   if (isRentalExpired(o)) {
-    return `已到期（${time}）${o.expireHandledAt ? " · 已收回" : " · 待处理"}`
+    return tStatic("ap.rental.expired", {
+      time,
+      note: o.expireHandledAt ? tStatic("ap.rental.reclaimed") : tStatic("ap.rental.pendingHandle"),
+    })
   }
-  return `至 ${time}`
+  return tStatic("ap.rental.until", { time })
 }
 
 /** 租期快捷值（天） */
@@ -205,27 +221,25 @@ const RENTAL_DAY_PRESETS = [7, 30, 90, 365] as const
  * 「活动发积分」在「活动」标签里配，不在这里 —— 两处都能发会让权限与审计变乱。
  */
 export function PointsAdminPanel() {
+  const { t } = useT()
   const [tab, setTab] = React.useState("shop")
 
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="text-lg font-semibold">积分</h2>
-        <p className="text-sm text-muted-foreground">
-          积分是站点发放的余额。用户在「积分与商城」页的商城里可以按比例兑换成 AI 中转站余额，
-          也可以花积分换你上架的商品。
-        </p>
+        <h2 className="text-lg font-semibold">{t("ap.title")}</h2>
+        <p className="text-sm text-muted-foreground">{t("ap.desc")}</p>
       </div>
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="shop" className="gap-1.5">
             <ShoppingBag className="h-3.5 w-3.5" />
-            商城
+            {t("ap.tab.shop")}
           </TabsTrigger>
           <TabsTrigger value="members" className="gap-1.5">
             <Users className="h-3.5 w-3.5" />
-            成员
+            {t("ap.tab.members")}
           </TabsTrigger>
         </TabsList>
         <TabsContent value="shop">
@@ -247,6 +261,8 @@ interface FormState {
   imageUrl: string
   /** 内置图标 slug；空串 = 没选 */
   icon: string
+  /** 分类：it / other（2026-10-01 加） */
+  category: ProductCategory
   price: string
   stock: string
   perUserLimit: string
@@ -273,6 +289,7 @@ function emptyForm(): FormState {
     description: "",
     imageUrl: "",
     icon: "",
+    category: "other",
     price: "",
     stock: "",
     perUserLimit: "",
@@ -294,6 +311,7 @@ function formOf(p: PointProduct): FormState {
     description: p.description,
     imageUrl: p.imageUrl ?? "",
     icon: p.icon ?? "",
+    category: p.category ?? "other",
     price: String(p.price),
     stock: p.stock === null ? "" : String(p.stock),
     perUserLimit: p.perUserLimit === null ? "" : String(p.perUserLimit),
@@ -327,6 +345,7 @@ function payloadOf(f: FormState): PointProductPayload {
     name: f.name.trim(),
     description: f.description.trim(),
     imageUrl: f.imageUrl.trim() || null,
+    category: f.category,
     icon: f.icon.trim() || null,
     price: Math.trunc(Number(f.price) || 0),
     stock: f.stock.trim() === "" ? null : Math.trunc(Number(f.stock) || 0),
@@ -414,23 +433,51 @@ function ShopTab() {
   // 封面图直传（2026-10-01）：与用户端共用同一个接口，传完把 URL 填进 imageUrl
   const [coverUploading, setCoverUploading] = React.useState(false)
   const coverInputRef = React.useRef<HTMLInputElement | null>(null)
+
+  // ---- 售后（客服介入）----
+  // 买家申请退款后：有卖家的先在卖家那一步（requested），卖家拒绝或被申请介入后到这里。
+  // 官方商品订单没有卖家，一申请就直接进 platform。
+  const [afterSales, setAfterSales] = React.useState<PointOrder[]>([])
+  const [afterSaleLoading, setAfterSaleLoading] = React.useState(true)
+  /** "platform"（待处理，默认）| "all"（全部有售后记录的）| 具体状态值 */
+  const [afterSaleFilter, setAfterSaleFilter] = React.useState("platform")
+  const [resolveTarget, setResolveTarget] = React.useState<{
+    order: PointOrder
+    approve: boolean
+  } | null>(null)
+  const [resolveNote, setResolveNote] = React.useState("")
+  const [resolveBusy, setResolveBusy] = React.useState(false)
+
+  const loadAfterSales = React.useCallback(async (status: string) => {
+    setAfterSaleLoading(true)
+    try {
+      const res = await adminPointsApi.afterSales(status)
+      setAfterSales(res.orders)
+    } catch (err) {
+      // 售后列表拉不到不该让整页白屏：报一条 toast、按空处理
+      toast.error(errMsg(err, t("ap.err.loadAfterSales")))
+      setAfterSales([])
+    } finally {
+      setAfterSaleLoading(false)
+    }
+  }, [])
   const handleCoverPick = async (file: File | undefined) => {
     if (!file) return
     if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type)) {
-      toast.error("封面只支持 JPG / PNG / WebP / GIF")
+      toast.error(t("pt.err.coverFormat"))
       return
     }
     if (file.size > 5 * 1024 * 1024) {
-      toast.error("封面图不能超过 5 MB")
+      toast.error(t("pt.err.coverSize"))
       return
     }
     setCoverUploading(true)
     try {
       const res = await pointsApi.uploadProductImage(file)
       setForm((f) => ({ ...f, imageUrl: res.url }))
-      toast.success("封面上传成功")
+      toast.success(t("pt.toast.coverUploaded"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "封面上传失败")
+      toast.error(err instanceof HttpError ? err.message : t("pt.err.coverUpload"))
     } finally {
       setCoverUploading(false)
       if (coverInputRef.current) coverInputRef.current.value = ""
@@ -456,7 +503,7 @@ function ShopTab() {
           if (res.inviteConfig) setInviteForm(res.inviteConfig)
         }
       } catch (err) {
-        toast.error(errMsg(err, "加载商城数据失败"))
+        toast.error(errMsg(err, t("ap.err.loadShop")))
       } finally {
         setLoading(false)
       }
@@ -468,15 +515,46 @@ function ShopTab() {
     void load()
   }, [load])
 
+  // 售后列表单独加载：它有自己的筛选，不该被订单筛选带着一起重查
+  React.useEffect(() => {
+    void loadAfterSales(afterSaleFilter)
+  }, [afterSaleFilter, loadAfterSales])
+
+  /**
+   * 提交客服判定。
+   * 同意退款时后端会：已结算的先从卖家收益里扣回 → 退买家 → 还库存 → 收权限。
+   * 卖家积分不够会报错并提示先在「成员」里调整 —— 这里照原样把报错给管理员看。
+   */
+  const submitResolve = async () => {
+    const tgt = resolveTarget
+    if (!tgt) return
+    setResolveBusy(true)
+    try {
+      await adminPointsApi.resolveAfterSale(
+        tgt.order.id,
+        tgt.approve,
+        resolveNote.trim() || undefined
+      )
+      toast.success(t(tgt.approve ? "ap.toast.afterSaleApproved" : "ap.toast.afterSaleRejected"))
+      setResolveTarget(null)
+      setResolveNote("")
+      await Promise.all([loadAfterSales(afterSaleFilter), load({ keepConfig: true })])
+    } catch (err) {
+      toast.error(errMsg(err, t("ap.err.afterSale")))
+    } finally {
+      setResolveBusy(false)
+    }
+  }
+
   const saveConfig = async () => {
     const ratio = Number(cfgRatio)
     if (!Number.isFinite(ratio) || ratio <= 0) {
-      toast.error("兑换比例必须大于 0（例如 1 表示 1 积分 = 1 元，10 表示 1 积分 = 10 元）")
+      toast.error(t("ap.err.ratePositive"))
       return
     }
     const daily = Math.trunc(Number(cfgDaily))
     if (!Number.isFinite(daily) || daily < 0) {
-      toast.error("每日上限不能是负数（0 = 不限）")
+      toast.error(t("ap.err.dailyLimitNegative"))
       return
     }
     setCfgBusy(true)
@@ -486,11 +564,11 @@ function ShopTab() {
         yuanPerPoint: ratio,
         dailyLimit: daily,
       })
-      toast.success(`已保存：1 积分 = ¥${fmtMoney(res.config.yuanPerPoint)}`)
+      toast.success(t("ap.toast.rateSaved", { v: fmtMoney(res.config.yuanPerPoint) }))
       setRedeemOpen(false)
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "保存失败"))
+      toast.error(errMsg(err, t("ap.err.save")))
     } finally {
       setCfgBusy(false)
     }
@@ -507,18 +585,18 @@ function ShopTab() {
     for (const item of donationList) {
       const n = Math.trunc(Number(donationDraft[item.key]))
       if (!Number.isFinite(n) || n < 0 || n > 100_000) {
-        toast.error(`「${item.label}」的积分数需在 0 ~ 100000 之间（0 = 该类型不发）`)
+        toast.error(t("ap.err.donationPointsRange", { label: item.label }))
         return
       }
       payload[item.key] = n
     }
     if (Object.keys(payload).length === 0) {
-      toast.error("没有可保存的档位")
+      toast.error(t("ap.err.noTiers"))
       return
     }
     const daily = Math.trunc(Number(donationDaily))
     if (!Number.isFinite(daily) || daily < 0 || daily > 1000) {
-      toast.error("每日发放次数上限需在 0 ~ 1000 之间（0 = 不限）")
+      toast.error(t("ap.err.dailyTimesRange"))
       return
     }
     setDonationBusy(true)
@@ -530,10 +608,10 @@ function ShopTab() {
       setDonationList(res.donationRewards ?? [])
       setDonationDraft(draftOf(res.donationRewards ?? []))
       setDonationDaily(String(res.donationDailyLimit ?? daily))
-      toast.success("已保存捐献奖励")
+      toast.success(t("ap.toast.donationSaved"))
       setDonationOpen(false)
     } catch (err) {
-      toast.error(errMsg(err, "保存失败"))
+      toast.error(errMsg(err, t("ap.err.save")))
     } finally {
       setDonationBusy(false)
     }
@@ -543,17 +621,17 @@ function ShopTab() {
   const saveInviteRewards = async () => {
     const perFriend = Math.trunc(Number(inviteForm.perFriend))
     if (!Number.isFinite(perFriend) || perFriend < 0 || perFriend > 100_000) {
-      toast.error("每邀请 1 人的积分需在 0 ~ 100000 之间（0 = 不发）")
+      toast.error(t("ap.err.invitePointsRange"))
       return
     }
     const pct = Number(inviteForm.commissionPercent)
     if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
-      toast.error("返佣比例需在 0 ~ 100 之间（0 = 关闭）")
+      toast.error(t("ap.err.commissionRange"))
       return
     }
     const daily = Math.trunc(Number(inviteForm.dailyLimit))
     if (!Number.isFinite(daily) || daily < 0 || daily > 1_000_000) {
-      toast.error("每日上限需在 0 ~ 1000000 之间（0 = 不限）")
+      toast.error(t("ap.err.inviteDailyRange"))
       return
     }
     setInviteBusy(true)
@@ -562,10 +640,10 @@ function ShopTab() {
         invitePoints: { ...inviteForm, perFriend, commissionPercent: pct, dailyLimit: daily },
       })
       if (res.inviteConfig) setInviteForm(res.inviteConfig)
-      toast.success("已保存邀请奖励配置")
+      toast.success(t("ap.toast.inviteSaved"))
       setInviteOpen(false)
     } catch (err) {
-      toast.error(errMsg(err, "保存失败"))
+      toast.error(errMsg(err, t("ap.err.save")))
     } finally {
       setInviteBusy(false)
     }
@@ -586,10 +664,10 @@ function ShopTab() {
         yuanPerPoint: cfg.yuanPerPoint,
         dailyLimit: cfg.dailyLimit,
       })
-      toast.success(cfg.enabled ? "已下架「兑换中转站余额」" : "已上架「兑换中转站余额」")
+      toast.success(cfg.enabled ? t("ap.toast.redeemUnlisted") : t("ap.toast.redeemListed"))
       await load({ keepConfig: true })
     } catch (err) {
-      toast.error(errMsg(err, "操作失败"))
+      toast.error(errMsg(err, t("pt.err.op")))
     }
   }
 
@@ -608,32 +686,32 @@ function ShopTab() {
   const submitForm = async () => {
     const payload = payloadOf(form)
     if (!payload.name) {
-      toast.error("请填写商品名称")
+      toast.error(t("pt.err.nameRequired"))
       return
     }
     if (payload.price < 1) {
-      toast.error("售价必须是大于 0 的整数积分")
+      toast.error(t("pt.err.priceInvalid"))
       return
     }
     if (payload.delivery === "quota" && !(Number(payload.quotaYuan) > 0)) {
-      toast.error("自动充值的商品必须填写每件充入金额（元）")
+      toast.error(t("ap.err.quotaYuanRequired"))
       return
     }
     if (payload.delivery === "subscription" && !(Number(payload.deliveryParams?.planId) > 0)) {
-      toast.error("开通订阅的商品必须填写中转站套餐 ID")
+      toast.error(t("ap.err.planIdRequired"))
       return
     }
     if (payload.delivery === "invite_quota" && !(Number(payload.deliveryParams?.count) > 0)) {
-      toast.error("邀请码额度商品必须填写发放数量")
+      toast.error(t("ap.err.inviteCountRequired"))
       return
     }
     if (payload.billingMode === "rental") {
       if (!(Number(payload.rentalDays) > 0)) {
-        toast.error("租用商品必须填写租期天数（大于 0 的整数）")
+        toast.error(t("ap.err.rentalDaysRequired"))
         return
       }
       if (!RENTAL_DELIVERIES.includes(payload.delivery)) {
-        toast.error("「自动充值」和「邀请码额度」是一次性发放的，不能设为租用")
+        toast.error(t("ap.err.rentalNotSupported"))
         return
       }
     }
@@ -641,15 +719,15 @@ function ShopTab() {
     try {
       if (editingId) {
         await adminPointsApi.updateProduct(editingId, payload)
-        toast.success("商品已更新")
+        toast.success(t("ap.toast.productUpdated"))
       } else {
         await adminPointsApi.createProduct(payload)
-        toast.success("商品已创建")
+        toast.success(t("ap.toast.productCreated"))
       }
       setDialogOpen(false)
       await load({ keepConfig: true })
     } catch (err) {
-      toast.error(errMsg(err, "保存商品失败"))
+      toast.error(errMsg(err, t("ap.err.saveProduct")))
     } finally {
       setFormBusy(false)
     }
@@ -658,21 +736,21 @@ function ShopTab() {
   const toggleEnabled = async (p: PointProduct) => {
     try {
       await adminPointsApi.updateProduct(p.id, { ...payloadOf(formOf(p)), enabled: !p.enabled })
-      toast.success(p.enabled ? "已下架" : "已上架")
+      toast.success(p.enabled ? t("ap.delisted") : t("ap.listed"))
       await load({ keepConfig: true })
     } catch (err) {
-      toast.error(errMsg(err, "操作失败"))
+      toast.error(errMsg(err, t("pt.err.op")))
     }
   }
 
   const removeProduct = async (p: PointProduct) => {
-    if (!confirm(`确定删除商品「${p.name}」？\n\n已产生的订单会保留，不受影响。`)) return
+    if (!confirm(t("ap.confirm.deleteProduct", { name: p.name }))) return
     try {
       await adminPointsApi.deleteProduct(p.id)
-      toast.success("已删除")
+      toast.success(t("pt.toast.deleted"))
       await load({ keepConfig: true })
     } catch (err) {
-      toast.error(errMsg(err, "删除失败"))
+      toast.error(errMsg(err, t("pt.err.delete")))
     }
   }
 
@@ -681,12 +759,12 @@ function ShopTab() {
     setDeliverBusy(true)
     try {
       await adminPointsApi.deliverOrder(deliverTarget.id, deliverNote.trim() || undefined)
-      toast.success("已标记发放")
+      toast.success(t("ap.toast.markedDelivered"))
       setDeliverTarget(null)
       await load({ keepConfig: true })
-      notifyAttentionChanged() // 待处理订单角标当场减一
+      notifyAttentionChanged() // 订单已不参与角标（2026-10-03），保留调用以备恢复
     } catch (err) {
-      toast.error(errMsg(err, "操作失败"))
+      toast.error(errMsg(err, t("pt.err.op")))
     } finally {
       setDeliverBusy(false)
     }
@@ -709,60 +787,73 @@ function ShopTab() {
         reviewApprove,
         reviewNote.trim() || undefined
       )
-      toast.success(reviewApprove ? "已通过，商品已上架" : "已拒绝")
+      toast.success(reviewApprove ? t("ap.toast.reviewApproved") : t("ap.review.rejected"))
       setReviewTarget(null)
       await load({ keepConfig: true })
       notifyAttentionChanged() // 待审核商品角标当场减一
     } catch (err) {
-      toast.error(errMsg(err, "审核失败"))
+      toast.error(errMsg(err, t("ap.err.review")))
     } finally {
       setReviewBusy(false)
     }
   }
 
   const removeUserProduct = async (p: PointProduct) => {
-    if (!confirm(`确定删除用户商品「${p.name}」（${p.ownerName ?? "?"} 上架）？\n\n已产生的订单会保留。`)) return
+    if (
+      !confirm(
+        t("ap.confirm.deleteUserProduct", { name: p.name, seller: p.ownerName ?? "?" })
+      )
+    )
+      return
     try {
       await adminPointsApi.deleteProduct(p.id)
-      toast.success("已删除")
+      toast.success(t("pt.toast.deleted"))
       await load({ keepConfig: true })
       notifyAttentionChanged() // 若删的是待审核商品，角标当场减一
     } catch (err) {
-      toast.error(errMsg(err, "删除失败"))
+      toast.error(errMsg(err, t("pt.err.delete")))
     }
   }
 
   // ---- 用户商品订单：结算 / 退款 ----
 
   const settleOrder = async (o: PointOrder) => {
-    if (!confirm(`把 ${o.price} 积分结算给卖家「${o.sellerName ?? "?"}」？\n\n结算后积分归卖家，撤销要走退款流程。`)) return
+    if (
+      !confirm(
+        t("ap.confirm.settle", { price: o.price, seller: o.sellerName ?? "?" })
+      )
+    )
+      return
     try {
       await adminPointsApi.settleOrder(o.id)
-      toast.success("已结算给卖家")
+      toast.success(t("ap.toast.settled"))
       await load({ keepConfig: true })
       notifyAttentionChanged()
     } catch (err) {
-      toast.error(errMsg(err, "结算失败"))
+      toast.error(errMsg(err, t("ap.err.settle")))
     }
   }
 
   const cancelOrder = async (o: PointOrder) => {
     const extra =
-      o.status === "settled"
-        ? `\n\n⚠️ 这单已经结算给卖家了，会先从卖家账上收回 ${o.price} 积分；卖家积分不够会失败。`
-        : ""
+      o.status === "settled" ? t("ap.cancelExtraSettled", { n: o.price }) : ""
     const reason = prompt(
-      `取消订单「${o.productName}」并把 ${o.price} 积分退回买家 ${o.username}？${extra}\n\n可以填一句原因（会显示在订单备注里）：`,
+      t("ap.cancelOrderMessage", {
+        name: o.productName,
+        price: o.price,
+        user: o.username,
+        extra,
+      }),
       ""
     )
     if (reason === null) return
     try {
       await adminPointsApi.cancelOrder(o.id, reason.trim() || undefined)
-      toast.success("已取消并退款")
+      toast.success(t("ap.toast.cancelled"))
       await load({ keepConfig: true })
       notifyAttentionChanged()
     } catch (err) {
-      toast.error(errMsg(err, "取消失败"))
+      toast.error(errMsg(err, t("ap.err.cancel")))
     }
   }
 
@@ -777,13 +868,8 @@ function ShopTab() {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <div className="space-y-1">
-            <CardTitle className="text-base">商品（官方）</CardTitle>
-            <CardDescription>
-              用户花积分购买。「兑换中转站余额」是内置的第一行，兑换比例就在它的「编辑」里改。
-              交付方式「自动充值」需要用户已开通中转站；「人工发放」会生成待发放订单。
-              商品可以设成租用（付一次用 N 天，到期自动收回权限；续费会顺延剩余天数）。
-              用户自己上架的商品在下面单独一块，走审核流程，不能在这里直接编辑。
-            </CardDescription>
+            <CardTitle className="text-base">{t("ap.officialProducts")}</CardTitle>
+            <CardDescription>{t("ap.officialProductsDesc")}</CardDescription>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Button
@@ -797,7 +883,7 @@ function ShopTab() {
               disabled={loading}
             >
               <Gift className="mr-1.5 h-3.5 w-3.5" />
-              捐献奖励
+              {t("ap.donationRewards")}
             </Button>
             <Button
               variant="outline"
@@ -806,15 +892,15 @@ function ShopTab() {
               disabled={loading}
             >
               <Users className="mr-1.5 h-3.5 w-3.5" />
-              邀请奖励
+              {t("ap.inviteRewards")}
             </Button>
             <Button variant="outline" size="sm" onClick={() => void load({ keepConfig: true })} disabled={loading}>
               <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-              刷新
+              {t("common.refresh")}
             </Button>
             <Button size="sm" onClick={openCreate}>
               <Plus className="mr-1 h-3.5 w-3.5" />
-              新建商品
+              {t("ap.newProduct")}
             </Button>
           </div>
         </CardHeader>
@@ -826,14 +912,14 @@ function ShopTab() {
               <table className="table-actions-sticky w-full text-sm">
                 <thead className="bg-muted/50 text-xs text-muted-foreground">
                   <tr>
-                    <th className="px-3 py-2 text-left font-medium">商品</th>
-                    <th className="px-3 py-2 text-left font-medium">售价</th>
-                    <th className="px-3 py-2 text-left font-medium">库存</th>
-                    <th className="px-3 py-2 text-left font-medium">限购</th>
-                    <th className="px-3 py-2 text-left font-medium">计费</th>
-                    <th className="px-3 py-2 text-left font-medium">交付</th>
-                    <th className="px-3 py-2 text-left font-medium">状态</th>
-                    <th className="px-3 py-2 text-right font-medium">操作</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.product")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("pt.priceLabel")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.stock")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.limit")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.billing")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.delivery")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.status")}</th>
+                    <th className="px-3 py-2 text-right font-medium">{t("ap.th.actions")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -850,39 +936,39 @@ function ShopTab() {
                         </span>
                         <div className="min-w-0">
                           <p className="flex items-center gap-1.5 font-medium">
-                            兑换中转站余额
+                            {t("pt.redeemBalance")}
                             <Badge variant="outline" className="text-[10px]">
-                              内置
+                              {t("ap.builtin")}
                             </Badge>
                           </p>
                           <p className="max-w-xs text-xs text-muted-foreground">
-                            用户自己填积分数，按比例换成中转站余额
+                            {t("ap.redeemRowDesc")}
                           </p>
                         </div>
                       </div>
                     </td>
                     <td className="px-3 py-2">
                       <p className="tabular-nums">
-                        1 积分 = ¥{fmtMoney(data?.config.yuanPerPoint ?? 1)}
+                        {t("ap.rateLine", { v: fmtMoney(data?.config.yuanPerPoint ?? 1) })}
                       </p>
-                      <p className="text-xs text-muted-foreground">金额自选</p>
+                      <p className="text-xs text-muted-foreground">{t("ap.amountFree")}</p>
                     </td>
-                    <td className="px-3 py-2 text-muted-foreground">不限</td>
+                    <td className="px-3 py-2 text-muted-foreground">{t("pt.form.unlimited")}</td>
                     <td className="px-3 py-2 tabular-nums text-muted-foreground">
                       {(data?.config.dailyLimit ?? 0) > 0
-                        ? `${data?.config.dailyLimit} 次/人/天`
-                        : "不限"}
+                        ? t("ap.timesPerDay", { n: data?.config.dailyLimit ?? 0 })
+                        : t("pt.form.unlimited")}
                     </td>
-                    <td className="px-3 py-2 text-xs text-muted-foreground">买断</td>
-                    <td className="px-3 py-2 text-xs text-muted-foreground">自动充值</td>
+                    <td className="px-3 py-2 text-xs text-muted-foreground">{t("ap.oneTime")}</td>
+                    <td className="px-3 py-2 text-xs text-muted-foreground">{t("ap.dlv.quota")}</td>
                     <td className="px-3 py-2">
                       {data?.config.enabled ? (
                         <Badge variant="success" className="text-[10px]">
-                          已上架
+                          {t("ap.listed")}
                         </Badge>
                       ) : (
                         <Badge variant="outline" className="text-[10px]">
-                          已下架
+                          {t("ap.delisted")}
                         </Badge>
                       )}
                     </td>
@@ -899,10 +985,10 @@ function ShopTab() {
                           }}
                         >
                           <Pencil className="mr-1 h-3.5 w-3.5" />
-                          编辑
+                          {t("common.edit")}
                         </Button>
                         <Button variant="ghost" size="sm" onClick={() => void toggleRedeemEnabled()}>
-                          {data?.config.enabled ? "下架" : "上架"}
+                          {data?.config.enabled ? t("ap.unlist") : t("ap.list")}
                         </Button>
                       </div>
                     </td>
@@ -911,7 +997,7 @@ function ShopTab() {
                   {products.length === 0 && (
                     <tr className="border-t">
                       <td colSpan={8} className="px-3 py-8 text-center text-sm text-muted-foreground">
-                        还没有上架商品，点右上角「新建商品」加一件吧。
+                        {t("ap.noOfficialProducts")}
                       </td>
                     </tr>
                   )}
@@ -931,12 +1017,14 @@ function ShopTab() {
                           </div>
                         </div>
                       </td>
-                      <td className="px-3 py-2 tabular-nums">{p.price} 积分</td>
+                      <td className="px-3 py-2 tabular-nums">{t("pt.pointsUnit", { n: p.price })}</td>
                       <td className="px-3 py-2 tabular-nums text-muted-foreground">
-                        {p.stock === null ? "不限" : p.stock}
+                        {p.stock === null ? t("pt.form.unlimited") : p.stock}
                       </td>
                       <td className="px-3 py-2 tabular-nums text-muted-foreground">
-                        {p.perUserLimit === null ? "不限" : `${p.perUserLimit} 件/人`}
+                        {p.perUserLimit === null
+                          ? t("pt.form.unlimited")
+                          : t("ap.perUserUnit", { n: p.perUserLimit })}
                       </td>
                       <td className="px-3 py-2">
                         {p.billingMode === "rental" ? (
@@ -945,7 +1033,7 @@ function ShopTab() {
                             {rentalTerm(p.rentalDays)}
                           </Badge>
                         ) : (
-                          <span className="text-xs text-muted-foreground">买断</span>
+                          <span className="text-xs text-muted-foreground">{t("ap.oneTime")}</span>
                         )}
                       </td>
                       <td className="px-3 py-2 text-xs text-muted-foreground">
@@ -954,11 +1042,11 @@ function ShopTab() {
                       <td className="px-3 py-2">
                         {p.enabled ? (
                           <Badge variant="success" className="text-[10px]">
-                            已上架
+                            {t("ap.listed")}
                           </Badge>
                         ) : (
                           <Badge variant="outline" className="text-[10px]">
-                            已下架
+                            {t("ap.delisted")}
                           </Badge>
                         )}
                       </td>
@@ -966,10 +1054,10 @@ function ShopTab() {
                         <div className="flex justify-end gap-2">
                           <Button variant="outline" size="sm" onClick={() => openEdit(p)}>
                             <Pencil className="mr-1 h-3.5 w-3.5" />
-                            编辑
+                            {t("common.edit")}
                           </Button>
                           <Button variant="ghost" size="sm" onClick={() => void toggleEnabled(p)}>
-                            {p.enabled ? "下架" : "上架"}
+                            {p.enabled ? t("ap.unlist") : t("ap.list")}
                           </Button>
                           <Button
                             variant="ghost"
@@ -996,22 +1084,18 @@ function ShopTab() {
           <div className="space-y-1">
             <CardTitle className="flex items-center gap-2 text-base">
               <Store className="h-4 w-4" />
-              用户上架的商品
+              {t("ap.userProducts")}
               {pendingReviews > 0 && (
                 <Badge variant="default" className="text-[10px]">
-                  {pendingReviews} 件待审核
+                  {t("ap.pendingReviewBadge", { n: pendingReviews })}
                 </Badge>
               )}
             </CardTitle>
-            <CardDescription>
-              用户自己挂的东西，只能人工交付；<span className="text-foreground">审核通过后</span>
-              才会出现在用户端的「用户们的商城」里。别人买下的积分先由平台保管，
-              卖家发货、买家确认收货后才结算给卖家。
-            </CardDescription>
+            <CardDescription>{t("ap.userProductsDesc")}</CardDescription>
           </div>
           <Button variant="outline" size="sm" onClick={() => void load({ keepConfig: true })} disabled={loading}>
             <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-            刷新
+            {t("common.refresh")}
           </Button>
         </CardHeader>
         <CardContent>
@@ -1020,102 +1104,97 @@ function ShopTab() {
           ) : userProducts.length === 0 ? (
             <EmptyState
               icon={Store}
-              title="还没有用户上架商品"
-              description="用户在「积分与商城 → 用户们的商城」里点「上传商品」就能提交，之后会出现在这里等你审核。"
+              title={t("ap.userProductsEmpty")}
+              description={t("ap.userProductsEmptyDesc")}
             />
           ) : (
-            <div className="overflow-x-auto rounded-lg border">
-              <table className="table-actions-sticky w-full text-sm">
-                <thead className="bg-muted/50 text-xs text-muted-foreground">
-                  <tr>
-                    <th className="px-3 py-2 text-left font-medium">商品</th>
-                    <th className="px-3 py-2 text-left font-medium">卖家</th>
-                    <th className="px-3 py-2 text-left font-medium">售价</th>
-                    <th className="px-3 py-2 text-left font-medium">库存</th>
-                    <th className="px-3 py-2 text-left font-medium">审核</th>
-                    <th className="px-3 py-2 text-right font-medium">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {userProducts.map((p) => {
-                    const rv = REVIEW_STATUS[p.reviewStatus] ?? REVIEW_STATUS.pending
-                    return (
-                      <tr key={p.id} className="border-t">
-                        <td className="px-3 py-2">
-                          <div className="flex items-center gap-2.5">
-                            <ProductThumb product={p} />
-                            <div className="min-w-0">
-                              <p className="font-medium">
-                                {p.name}
-                                {!p.enabled && (
-                                  <span className="ml-1.5 text-xs text-muted-foreground">
-                                    （已下架）
-                                  </span>
-                                )}
-                              </p>
-                              {p.description && (
-                                <p className="max-w-xs truncate text-xs text-muted-foreground">
-                                  {p.description}
-                                </p>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-3 py-2 text-muted-foreground">{p.ownerName ?? "—"}</td>
-                        <td className="px-3 py-2 tabular-nums">
-                          {p.price} 积分
-                          {p.billingMode === "rental" && (
-                            <Badge variant="secondary" className="ml-1.5 text-[10px]">
-                              {rentalTerm(p.rentalDays)}
+            <div className="grid gap-3 lg:grid-cols-2">
+              {/* 卡片而不是表格（2026-10-01 站长反馈：表格列多，横向滚动后
+                  商品信息和「通过 / 拒绝」没法同时看到，信息也展示不全）。
+                  两列自适应、窄屏单列，永不横向滚动。 */}
+              {userProducts.map((p) => {
+                const rv = REVIEW_STATUS[p.reviewStatus] ?? REVIEW_STATUS.pending
+                return (
+                  <div key={p.id} className="flex flex-col gap-3 rounded-lg border p-3">
+                    <div className="flex items-start gap-3">
+                      <ProductThumb product={p} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="truncate font-medium">{p.name}</span>
+                          <Badge variant={rv.variant} className="text-[10px]">
+                            {t(rv.label)}
+                          </Badge>
+                          {!p.enabled && (
+                            <Badge variant="outline" className="text-[10px]">
+                              {t("ap.delisted")}
                             </Badge>
                           )}
-                        </td>
-                        <td className="px-3 py-2 tabular-nums text-muted-foreground">
-                          {p.stock === null ? "不限" : p.stock}
-                        </td>
-                        <td className="px-3 py-2">
-                          <Badge variant={rv.variant} className="text-[10px]">
-                            {rv.label}
-                          </Badge>
-                          {p.reviewNote && (
-                            <p className="mt-0.5 max-w-[14rem] truncate text-[10px] text-muted-foreground">
-                              {p.reviewNote}
-                            </p>
-                          )}
-                        </td>
-                        <td className="px-3 py-2">
-                          <div className="flex justify-end gap-1.5">
-                            {p.reviewStatus !== "approved" && (
-                              <Button size="sm" onClick={() => openReview(p, true)}>
-                                <Check className="mr-1 h-3.5 w-3.5" />
-                                通过
-                              </Button>
-                            )}
-                            {p.reviewStatus !== "rejected" && (
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => openReview(p, false)}
-                              >
-                                <X className="mr-1 h-3.5 w-3.5" />
-                                拒绝
-                              </Button>
-                            )}
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="text-destructive hover:text-destructive"
-                              onClick={() => void removeUserProduct(p)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+                        </div>
+                        {p.description && (
+                          <p className="mt-1 line-clamp-2 break-all text-xs text-muted-foreground">
+                            {p.description}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                      <span>
+                        {t("pt.sellerLabel")}{" "}
+                        <span className="text-foreground">{p.ownerName ?? "—"}</span>
+                      </span>
+                      <span>
+                        {t(PRODUCT_CATEGORY_LABELS[p.category] ?? PRODUCT_CATEGORY_LABELS.other)}
+                      </span>
+                      <span className="tabular-nums">{t("pt.pointsUnit", { n: p.price })}</span>
+                      <span className="tabular-nums">
+                        {t("ap.th.stock")} {p.stock === null ? t("pt.form.unlimited") : p.stock}
+                      </span>
+                      {p.billingMode === "rental" && <span>{rentalTerm(p.rentalDays)}</span>}
+                    </div>
+
+                    {p.reviewNote && (
+                      <p className="line-clamp-2 break-all rounded-md bg-muted/50 px-2 py-1 text-[11px] text-muted-foreground">
+                        {p.reviewNote}
+                      </p>
+                    )}
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      {/* 编辑：上架后也要能改分类/价格等（2026-10-03 站长反馈
+                          「不能对已上架的商品进行分类」—— 原来这里只有通过/拒绝/删除） */}
+                      <Button variant="outline" size="sm" onClick={() => openEdit(p)}>
+                        <Pencil className="mr-1 h-3.5 w-3.5" />
+                        {t("common.edit")}
+                      </Button>
+                      {p.reviewStatus !== "approved" && (
+                        <Button size="sm" onClick={() => openReview(p, true)}>
+                          <Check className="mr-1 h-3.5 w-3.5" />
+                          {t("ap.approve")}
+                        </Button>
+                      )}
+                      {p.reviewStatus !== "rejected" && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => openReview(p, false)}
+                        >
+                          <X className="mr-1 h-3.5 w-3.5" />
+                          {t("ap.reject")}
+                        </Button>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="ml-auto text-destructive hover:text-destructive"
+                        onClick={() => void removeUserProduct(p)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        {t("common.delete")}
+                      </Button>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           )}
         </CardContent>
@@ -1125,23 +1204,19 @@ function ShopTab() {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <div className="space-y-1">
-            <CardTitle className="text-base">订单</CardTitle>
-            <CardDescription>
-              积分在下单时已经扣掉。官方商品：「待发放」需要你处理完再点标记；
-              用户商品走担保 —— 卖家交付、买家确认后才把积分结算给卖家，你这里可以强制结算或取消退款。
-              租用订单会显示租期与到期时间，到期由系统自动收回权益并归还库存。
-            </CardDescription>
+            <CardTitle className="text-base">{t("ap.orders")}</CardTitle>
+            <CardDescription>{t("ap.ordersDesc")}</CardDescription>
           </div>
           <Select value={orderStatus} onValueChange={setOrderStatus}>
             <SelectTrigger className="h-8 w-32 text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="pending">待处理</SelectItem>
-              <SelectItem value="delivered">已交付</SelectItem>
-              <SelectItem value="settled">已结算</SelectItem>
-              <SelectItem value="cancelled">已取消</SelectItem>
-              <SelectItem value="all">全部</SelectItem>
+              <SelectItem value="pending">{t("ap.filter.pending")}</SelectItem>
+              <SelectItem value="delivered">{t("ap.filter.delivered")}</SelectItem>
+              <SelectItem value="settled">{t("pt.status.settled")}</SelectItem>
+              <SelectItem value="cancelled">{t("pt.status.cancelled")}</SelectItem>
+              <SelectItem value="all">{t("common.all")}</SelectItem>
             </SelectContent>
           </Select>
         </CardHeader>
@@ -1149,19 +1224,19 @@ function ShopTab() {
           {loading && !data ? (
             <LoadingBlock />
           ) : orders.length === 0 ? (
-            <EmptyState icon={Coins} title="没有订单" description="这个筛选下还没有订单。" />
+            <EmptyState icon={Coins} title={t("ap.ordersEmpty")} description={t("ap.ordersEmptyDesc")} />
           ) : (
             <div className="overflow-x-auto rounded-lg border">
               <table className="table-actions-sticky w-full text-sm">
                 <thead className="bg-muted/50 text-xs text-muted-foreground">
                   <tr>
-                    <th className="px-3 py-2 text-left font-medium">用户</th>
-                    <th className="px-3 py-2 text-left font-medium">商品</th>
-                    <th className="px-3 py-2 text-left font-medium">积分</th>
-                    <th className="px-3 py-2 text-left font-medium">租期</th>
-                    <th className="px-3 py-2 text-left font-medium">状态</th>
-                    <th className="px-3 py-2 text-left font-medium">时间</th>
-                    <th className="px-3 py-2 text-right font-medium">操作</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.user")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.product")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.title")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.rentalTerm")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.status")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.time")}</th>
+                    <th className="px-3 py-2 text-right font-medium">{t("ap.th.actions")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1176,10 +1251,11 @@ function ShopTab() {
                           <p>{o.productName}</p>
                           <p className="text-xs text-muted-foreground">
                             {isUserOrder
-                              ? `用户商品 · 卖家 ${o.sellerName ?? "?"}`
-                              : o.delivery === "quota"
-                                ? "自动充值"
-                                : (DELIVERY_LABELS[o.delivery as PointDelivery] ?? "人工发放")}
+                              ? t("ap.userOrderSeller", { seller: o.sellerName ?? "?" })
+                              : t(
+                                  DELIVERY_LABELS[o.delivery as PointDelivery] ??
+                                    "pt.delivery.manual"
+                                )}
                           </p>
                         </td>
                         <td className="px-3 py-2 tabular-nums">{o.price}</td>
@@ -1198,7 +1274,7 @@ function ShopTab() {
                         </td>
                         <td className="px-3 py-2">
                           <Badge variant={st.variant} className="text-[10px]">
-                            {orderStatusText(o.status, isUserOrder)}
+                            {t(orderStatusText(o.status, isUserOrder))}
                           </Badge>
                           {o.note && (
                             <p className="mt-0.5 max-w-[16rem] truncate text-[10px] text-muted-foreground">
@@ -1215,7 +1291,7 @@ function ShopTab() {
                               <>
                                 {o.status === "delivered" && (
                                   <Button size="sm" onClick={() => void settleOrder(o)}>
-                                    结算给卖家
+                                    {t("ap.settle")}
                                   </Button>
                                 )}
                                 {!closed && (
@@ -1225,13 +1301,13 @@ function ShopTab() {
                                     className="text-destructive hover:text-destructive"
                                     onClick={() => void cancelOrder(o)}
                                   >
-                                    取消退款
+                                    {t("ap.cancelRefund")}
                                   </Button>
                                 )}
                                 {closed && (
                                   <span className="text-xs text-muted-foreground">
                                     {o.settledAt
-                                      ? `结算于 ${fmtDateTime(o.settledAt)}`
+                                      ? t("ap.settledAt", { time: fmtDateTime(o.settledAt) })
                                       : "—"}
                                   </span>
                                 )}
@@ -1244,7 +1320,7 @@ function ShopTab() {
                                   setDeliverTarget(o)
                                 }}
                               >
-                                标记已发放
+                                {t("ap.markDelivered")}
                               </Button>
                             ) : (
                               <span className="text-xs text-muted-foreground">
@@ -1263,6 +1339,176 @@ function ShopTab() {
         </CardContent>
       </Card>
 
+      {/* 售后处理（客服介入） */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <div className="space-y-1">
+            <CardTitle className="text-base">{t("ap.afterSales")}</CardTitle>
+            <CardDescription>{t("ap.afterSalesDesc")}</CardDescription>
+          </div>
+          <Select value={afterSaleFilter} onValueChange={setAfterSaleFilter}>
+            <SelectTrigger className="h-8 w-32 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="platform">{t("ap.afterSaleFilter.pending")}</SelectItem>
+              <SelectItem value="all">{t("common.all")}</SelectItem>
+            </SelectContent>
+          </Select>
+        </CardHeader>
+        <CardContent>
+          {afterSaleLoading ? (
+            <LoadingBlock />
+          ) : afterSales.length === 0 ? (
+            <EmptyState
+              icon={Coins}
+              title={t("ap.afterSalesEmpty")}
+              description={t("ap.afterSalesEmptyDesc")}
+            />
+          ) : (
+            <div className="overflow-x-auto rounded-lg border">
+              <table className="table-actions-sticky w-full text-sm">
+                <thead className="bg-muted/50 text-xs text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.user")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.product")}</th>
+                    <th className="px-3 py-2 text-left font-medium">
+                      {t("ap.th.afterSaleReason")}
+                    </th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.status")}</th>
+                    <th className="px-3 py-2 text-left font-medium">{t("ap.th.time")}</th>
+                    <th className="px-3 py-2 text-right font-medium">{t("ap.th.actions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {afterSales.map((o) => {
+                    const s = o.afterSaleStatus
+                    const st = s ? AFTER_SALE_STATUS[s] : null
+                    // 卖家还没处理的也允许客服直接判（卖家长期不理时不必逼买家先点一次「申请介入」）
+                    const actionable = s === "platform" || s === "requested" || s === "rejected"
+                    return (
+                      <tr key={o.id} className="border-t">
+                        <td className="px-3 py-2">
+                          <p className="font-medium">{o.username}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {o.sellerId
+                              ? t("ap.userOrderSeller", { seller: o.sellerName ?? "?" })
+                              : t(
+                                  DELIVERY_LABELS[o.delivery as PointDelivery] ??
+                                    "pt.delivery.manual"
+                                )}
+                          </p>
+                        </td>
+                        <td className="px-3 py-2">
+                          <p>{o.productName}</p>
+                          <p className="text-xs tabular-nums text-muted-foreground">
+                            {t("pt.pointsUnit", { n: o.price })}
+                          </p>
+                        </td>
+                        <td className="px-3 py-2">
+                          <p className="max-w-[18rem] text-xs">{o.afterSaleReason ?? "—"}</p>
+                          {o.afterSaleNote && (
+                            <p className="mt-0.5 max-w-[18rem] text-[10px] text-muted-foreground">
+                              {o.afterSaleNote}
+                            </p>
+                          )}
+                        </td>
+                        <td className="px-3 py-2">
+                          <Badge variant={st?.variant ?? "outline"} className="text-[10px]">
+                            {st ? t(st.label) : "—"}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-2 text-xs text-muted-foreground">
+                          {o.afterSaleRequestedAt ? fmtDateTime(o.afterSaleRequestedAt) : "—"}
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="flex justify-end gap-1.5">
+                            {actionable ? (
+                              <>
+                                <Button
+                                  size="sm"
+                                  onClick={() => setResolveTarget({ order: o, approve: true })}
+                                >
+                                  {t("ap.afterSale.approve")}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="text-destructive hover:text-destructive"
+                                  onClick={() => setResolveTarget({ order: o, approve: false })}
+                                >
+                                  {t("ap.afterSale.reject")}
+                                </Button>
+                              </>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">
+                                {o.afterSaleResolvedAt ? fmtDateTime(o.afterSaleResolvedAt) : "—"}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 售后判定弹窗 */}
+      <Dialog
+        open={!!resolveTarget}
+        onOpenChange={(o) => {
+          if (!o && !resolveBusy) setResolveTarget(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {t(resolveTarget?.approve ? "ap.afterSale.approveTitle" : "ap.afterSale.rejectTitle")}
+            </DialogTitle>
+            <DialogDescription>
+              {resolveTarget?.approve
+                ? t("ap.afterSale.approveDesc", {
+                    price: resolveTarget.order.price,
+                    buyer: resolveTarget.order.username,
+                  })
+                : t("ap.afterSale.rejectDesc")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="resolveNote">{t("ap.afterSale.noteLabel")}</Label>
+            <Textarea
+              id="resolveNote"
+              rows={3}
+              maxLength={300}
+              placeholder={t(
+                resolveTarget?.approve
+                  ? "ap.afterSale.approveNotePlaceholder"
+                  : "ap.afterSale.rejectNotePlaceholder"
+              )}
+              value={resolveNote}
+              onChange={(e) => setResolveNote(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setResolveTarget(null)}
+              disabled={resolveBusy}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button onClick={() => void submitResolve()} disabled={resolveBusy}>
+              {resolveBusy && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+              {t("common.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* 标记发放 */}
       <Dialog
         open={!!deliverTarget}
@@ -1272,31 +1518,39 @@ function ShopTab() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>标记已发放 · {deliverTarget?.productName}</DialogTitle>
+            <DialogTitle>
+              {t("ap.markDeliveredTitle", { name: deliverTarget?.productName ?? "" })}
+            </DialogTitle>
             <DialogDescription>
-              {deliverTarget?.username} 用 {deliverTarget?.price} 积分购买。
-              积分已经扣过了，这里只是把订单标成已处理。
+              {t("ap.deliverDesc1", {
+                user: deliverTarget?.username ?? "",
+                price: deliverTarget?.price ?? 0,
+              })}
+              {t("ap.deliverDesc2")}
               {deliverTarget?.billingMode === "rental" && (
-                <> 这是租用订单：租期从你点「确认发放」这一刻起算（{deliverTarget.rentalDays ?? "?"} 天）。</>
+                <>
+                  {" "}
+                  {t("ap.deliverRentalNote", { n: deliverTarget.rentalDays ?? "?" })}
+                </>
               )}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <Label htmlFor="deliverNote">备注（可选，用户可见）</Label>
+            <Label htmlFor="deliverNote">{t("ap.noteOptionalUserVisible")}</Label>
             <Input
               id="deliverNote"
-              placeholder="如：已发到你的注册邮箱"
+              placeholder={t("ap.deliverNotePlaceholder")}
               value={deliverNote}
               onChange={(e) => setDeliverNote(e.target.value)}
             />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeliverTarget(null)} disabled={deliverBusy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void submitDeliver()} disabled={deliverBusy}>
               {deliverBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              确认发放
+              {t("ap.confirmDeliver")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1312,31 +1566,31 @@ function ShopTab() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {reviewApprove ? "通过审核" : "拒绝"} · {reviewTarget?.name}
+              {reviewApprove ? t("ap.reviewApproveTitle") : t("ap.reject")} · {reviewTarget?.name}
             </DialogTitle>
             <DialogDescription>
-              {reviewTarget?.ownerName ?? "该用户"} 上架，售价 {reviewTarget?.price} 积分
+              {t("ap.reviewMeta", {
+                seller: reviewTarget?.ownerName ?? t("ap.reviewThisUser"),
+                price: reviewTarget?.price ?? 0,
+              })}
               {reviewTarget?.billingMode === "rental"
-                ? `，租期 ${reviewTarget.rentalDays ?? "?"} 天`
+                ? t("ap.reviewRentalAppend", { n: reviewTarget.rentalDays ?? "?" })
                 : ""}
-              。
-              {reviewApprove
-                ? "通过后商品会立刻出现在用户端的「用户们的商城」里。"
-                : "拒绝后用户能看到你填的理由，可以改完重新提交。"}
-              {reviewTarget?.billingMode === "rental" &&
-                " 这是租用商品：交付后按上面的天数计租，到期后由买卖双方自行协商归还。"}
+              {t("ap.period")}
+              {reviewApprove ? t("ap.reviewApproveHint") : t("ap.reviewRejectHint")}
+              {reviewTarget?.billingMode === "rental" && t("ap.reviewRentalHint")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
             <Label htmlFor="reviewNote">
-              {reviewApprove ? "备注（可选，用户可见）" : "拒绝理由（建议填，用户可见）"}
+              {reviewApprove ? t("ap.noteOptionalUserVisible") : t("ap.rejectReasonLabel")}
             </Label>
             <Textarea
               id="reviewNote"
               rows={3}
               maxLength={200}
               placeholder={
-                reviewApprove ? "如：已核对，可以上架" : "如：商品描述与实际不符 / 属于站内不允许交易的类型"
+                reviewApprove ? t("ap.notePlaceholder") : t("ap.rejectReasonPlaceholder")
               }
               value={reviewNote}
               onChange={(e) => setReviewNote(e.target.value)}
@@ -1344,7 +1598,7 @@ function ShopTab() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setReviewTarget(null)} disabled={reviewBusy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button
               variant={reviewApprove ? "default" : "destructive"}
@@ -1352,7 +1606,7 @@ function ShopTab() {
               disabled={reviewBusy}
             >
               {reviewBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              {reviewApprove ? "确认通过" : "确认拒绝"}
+              {reviewApprove ? t("ap.confirmReviewApprove") : t("ap.confirmReviewReject")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1366,15 +1620,15 @@ function ShopTab() {
       <Dialog open={donationOpen} onOpenChange={(o) => !donationBusy && setDonationOpen(o)}>
         <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>捐献奖励积分</DialogTitle>
+            <DialogTitle>{t("ap.donationTitle")}</DialogTitle>
             <DialogDescription>
-              捐献审核通过（或反代账号绑定成功）后自动发放给捐献者。填 0 = 该类型不发。
+              {t("ap.donationDesc")}
             </DialogDescription>
           </DialogHeader>
 
           {donationList.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
-              没有取到档位清单，请刷新后重试。
+              {t("ap.donationNoTiers")}
             </p>
           ) : (
             <div className="space-y-3">
@@ -1393,7 +1647,7 @@ function ShopTab() {
                         setDonationDraft((d) => ({ ...d, [item.key]: e.target.value }))
                       }
                     />
-                    <span className="text-xs text-muted-foreground">积分</span>
+                    <span className="text-xs text-muted-foreground">{t("ap.title")}</span>
                   </div>
                 </div>
               ))}
@@ -1404,10 +1658,10 @@ function ShopTab() {
             <div className="flex items-center justify-between gap-3 border-t pt-3">
               <div className="min-w-0 flex-1">
                 <Label htmlFor="dp-daily" className="font-normal">
-                  每人每日发放上限
+                  {t("ap.donationDailyLabel")}
                 </Label>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  同一个人一天最多领几次捐献分，填 0 = 不限
+                  {t("ap.donationDailyHint")}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
@@ -1418,37 +1672,33 @@ function ShopTab() {
                   value={donationDaily}
                   onChange={(e) => setDonationDaily(e.target.value)}
                 />
-                <span className="text-xs text-muted-foreground">次/天</span>
+                <span className="text-xs text-muted-foreground">{t("ap.timesPerDayUnit")}</span>
               </div>
             </div>
           )}
 
           <div className="space-y-1.5 rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
             <p>
-              <span className="font-medium text-foreground">发放次数：</span>
-              每通过一笔新捐献就发一次 —— 这是用户可重复赚积分的通道。
-              AI 渠道 / 商汤 Key / 内网穿透 / 代理节点按捐献单据计（同一笔单据被重复审核
-              不会重复发，但用户再捐一份新资源会再发一次）；
-              反代账号按每次新绑定计，上限由「最多绑定几个账号」天然限制。
+              <span className="font-medium text-foreground">{t("ap.issueTimesLabel")}</span>
+              {t("ap.donationIssueNote")}
             </p>
             <p>
-              <span className="font-medium text-foreground">每日上限：</span>
-              这是防刷分的硬顶 —— 同一个人一天领满这么多笔后，再捐也不发分
-              （捐献照样通过、权限照给，只是不发分，次日恢复）。填 0 就是不限。
+              <span className="font-medium text-foreground">{t("ap.dailyCapLabel")}</span>
+              {t("ap.donationDailyCapNote")}
             </p>
             <p>
-              <span className="font-medium text-foreground">这个值直接影响发放量：</span>
-              用户能按兑换比例把积分换成 AI 中转站余额，调高之前先想清楚。
+              <span className="font-medium text-foreground">{t("ap.valueImpactLabel")}</span>
+              {t("ap.valueImpactNote")}
             </p>
           </div>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setDonationOpen(false)} disabled={donationBusy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void saveDonationRewards()} disabled={donationBusy}>
               {donationBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              保存
+              {t("common.save")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1462,19 +1712,19 @@ function ShopTab() {
       <Dialog open={inviteOpen} onOpenChange={(o) => !inviteBusy && setInviteOpen(o)}>
         <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>邀请奖励</DialogTitle>
+            <DialogTitle>{t("ap.inviteRewards")}</DialogTitle>
             <DialogDescription>
-              发给「邀请人」的两笔积分：好友注册时的固定奖励，以及好友之后赚分时的返佣。
+              {t("ap.inviteDesc")}
             </DialogDescription>
           </DialogHeader>
 
           <div className="flex items-center justify-between gap-3 rounded-md border p-3">
             <div className="min-w-0 space-y-0.5">
-              <p className="text-sm font-medium">开启邀请奖励</p>
+              <p className="text-sm font-medium">{t("ap.inviteEnable")}</p>
               <p className="text-xs text-muted-foreground">
                 {inviteForm.enabled
-                  ? "已开启：每次有效邀请都会真实增发积分"
-                  : "已关闭：邀请不发放任何积分"}
+                  ? t("ap.inviteOn")
+                  : t("ap.inviteOff")}
               </p>
             </div>
             <Switch
@@ -1487,10 +1737,10 @@ function ShopTab() {
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <Label htmlFor="ip-per" className="font-normal">
-                  每邀请 1 个好友
+                  {t("ap.perInvite")}
                 </Label>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  每个被邀请人只发一次，填 0 = 不发
+                  {t("ap.perInviteHint")}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
@@ -1503,17 +1753,17 @@ function ShopTab() {
                     setInviteForm((f) => ({ ...f, perFriend: Number(e.target.value) || 0 }))
                   }
                 />
-                <span className="text-xs text-muted-foreground">积分</span>
+                <span className="text-xs text-muted-foreground">{t("ap.title")}</span>
               </div>
             </div>
 
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <Label htmlFor="ip-pct" className="font-normal">
-                  好友赚分的返佣比例
+                  {t("ap.commissionLabel")}
                 </Label>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  好友每赚一笔积分（捐献 / 活动），你抽成百分之几，填 0 = 关闭
+                  {t("ap.commissionHint")}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
@@ -1536,10 +1786,10 @@ function ShopTab() {
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <Label htmlFor="ip-daily" className="font-normal">
-                  每人每日上限
+                  {t("ap.inviteDailyLabel")}
                 </Label>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  一个人一天最多通过邀请拿多少分（奖励 + 返佣合计），填 0 = 不限
+                  {t("ap.inviteDailyHint")}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
@@ -1552,16 +1802,15 @@ function ShopTab() {
                     setInviteForm((f) => ({ ...f, dailyLimit: Number(e.target.value) || 0 }))
                   }
                 />
-                <span className="text-xs text-muted-foreground">积分/天</span>
+                <span className="text-xs text-muted-foreground">{t("ap.pointsPerDay")}</span>
               </div>
             </div>
 
             <div className="flex items-start justify-between gap-3 border-t pt-3">
               <div className="min-w-0 flex-1">
-                <Label className="font-normal">只算「真正消耗了次数」的邀请</Label>
+                <Label className="font-normal">{t("ap.consumedOnlyLabel")}</Label>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  关掉之后，限时开放注册期间的普通邀请码也会发奖励 —— 那种码可以无限复用，
-                  等于随便注册小号白拿钱，强烈建议保持开启。
+                  {t("ap.consumedOnlyNote")}
                 </p>
               </div>
               <Switch
@@ -1574,31 +1823,30 @@ function ShopTab() {
 
           <div className="space-y-1.5 rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
             <p>
-              <span className="font-medium text-foreground">换算成钱：</span>
-              当前 1 积分 = ¥{fmtMoney(data?.config.yuanPerPoint ?? 1)}，
-              所以每邀请 1 人 = ¥
-              {fmtMoney((inviteForm.perFriend || 0) * (data?.config.yuanPerPoint ?? 1))}。
-              这笔钱是通过「兑换中转站余额」真实发出去的（AI 上游成本），
-              改数字前先算一下预期邀请量。
+              <span className="font-medium text-foreground">{t("ap.toMoneyLabel")}</span>
+              {t("ap.toMoneyCurrent", { v: fmtMoney(data?.config.yuanPerPoint ?? 1) })}
+              {t("ap.toMoneyPerInvite")}
+              {fmtMoney((inviteForm.perFriend || 0) * (data?.config.yuanPerPoint ?? 1))}
+              {t("ap.period")}
+              {t("ap.toMoneyNote")}
             </p>
             <p>
-              <span className="font-medium text-foreground">返佣只算一级：</span>
-              只认直接邀请人，且不返佣「邀请奖励」本身（否则 A→B→C 会层层抽成，
-              积分总额指数膨胀）。管理员手动发的分、用户商城的卖家收益也不参与返佣。
+              <span className="font-medium text-foreground">{t("ap.oneLevelLabel")}</span>
+              {t("ap.oneLevelNote")}
             </p>
             <p>
-              <span className="font-medium text-foreground">防小号：</span>
-              注册只要一个邮箱。不设每日上限 + 关掉上面那道闸，就存在「自己注册小号刷分」的路径。
+              <span className="font-medium text-foreground">{t("ap.antiAltLabel")}</span>
+              {t("ap.antiAltNote")}
             </p>
           </div>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setInviteOpen(false)} disabled={inviteBusy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void saveInviteRewards()} disabled={inviteBusy}>
               {inviteBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              保存
+              {t("common.save")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1612,25 +1860,25 @@ function ShopTab() {
       <Dialog open={redeemOpen} onOpenChange={(o) => !cfgBusy && setRedeemOpen(o)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>编辑 · 兑换中转站余额</DialogTitle>
+            <DialogTitle>{t("ap.editRedeemTitle")}</DialogTitle>
             <DialogDescription>
-              这是商城里的内置商品：用户自己填积分数，按下面的比例换成 AI 中转站余额。
+              {t("ap.editRedeemDesc")}
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4">
             <div className="flex items-center justify-between rounded-md border p-3">
               <div className="space-y-0.5">
-                <p className="text-sm font-medium">上架（开放兑换）</p>
+                <p className="text-sm font-medium">{t("ap.redeemEnabledLabel")}</p>
                 <p className="text-xs text-muted-foreground">
-                  关掉后用户仍能看到余额与明细，但不能兑换 —— 已发放的积分不会消失。
+                  {t("ap.redeemEnabledHint")}
                 </p>
               </div>
               <Switch checked={cfgEnabled} onCheckedChange={setCfgEnabled} />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="pointsYuanPerPoint">兑换比例（每 1 积分 = ? 元）</Label>
+              <Label htmlFor="pointsYuanPerPoint">{t("ap.rateLabel")}</Label>
               <Input
                 id="pointsYuanPerPoint"
                 inputMode="decimal"
@@ -1638,12 +1886,12 @@ function ShopTab() {
                 onChange={(e) => setCfgRatio(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                填 1 就是「1 积分 = 1 元」，填 10 就是「1 积分 = 10 元」，可以填小数（如 0.5）。
+                {t("ap.rateHint")}
               </p>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="pointsDailyLimit">每人每日兑换次数上限</Label>
+              <Label htmlFor="pointsDailyLimit">{t("ap.redeemDailyLabel")}</Label>
               <Input
                 id="pointsDailyLimit"
                 inputMode="numeric"
@@ -1651,18 +1899,18 @@ function ShopTab() {
                 onChange={(e) => setCfgDaily(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                默认 5，填 0 = 不限。兑换会真实调用中转站加额度，建议保留上限防刷。
+                {t("ap.redeemDailyHint")}
               </p>
             </div>
           </div>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setRedeemOpen(false)} disabled={cfgBusy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void saveConfig()} disabled={cfgBusy}>
               {cfgBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              保存
+              {t("common.save")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1672,29 +1920,29 @@ function ShopTab() {
       <Dialog open={dialogOpen} onOpenChange={(o) => !formBusy && setDialogOpen(o)}>
         <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{editingId ? "编辑商品" : "新建商品"}</DialogTitle>
-            <DialogDescription>售价按积分填；留空的库存 / 限购表示不限。</DialogDescription>
+            <DialogTitle>{editingId ? t("ap.editProduct") : t("ap.newProduct")}</DialogTitle>
+            <DialogDescription>{t("ap.formDesc")}</DialogDescription>
           </DialogHeader>
 
           <div className="space-y-3">
             <div className="space-y-2">
-              <Label htmlFor="pdName">名称</Label>
+              <Label htmlFor="pdName">{t("pt.form.name")}</Label>
               <Input
                 id="pdName"
                 maxLength={40}
-                placeholder="如：10 元中转站充值"
+                placeholder={t("ap.namePlaceholder")}
                 value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="pdDesc">说明（可选）</Label>
+              <Label htmlFor="pdDesc">{t("pt.form.desc")}</Label>
               <Textarea
                 id="pdDesc"
                 rows={3}
                 maxLength={500}
-                placeholder="给用户看的补充说明，如发放时间、注意事项"
+                placeholder={t("ap.descPlaceholder")}
                 value={form.description}
                 onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
               />
@@ -1702,7 +1950,7 @@ function ShopTab() {
 
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
-                <Label htmlFor="pdImage">封面图（可选）</Label>
+                <Label htmlFor="pdImage">{t("pt.form.cover")}</Label>
                 <Button
                   type="button"
                   variant="outline"
@@ -1715,7 +1963,7 @@ function ShopTab() {
                   ) : (
                     <Upload className="h-3.5 w-3.5" />
                   )}
-                  本地上传
+                  {t("pt.form.localUpload")}
                 </Button>
                 {/* 与用户端同一个上传接口；传完把返回的同源 URL 填进输入框 */}
                 <input
@@ -1728,16 +1976,32 @@ function ShopTab() {
               </div>
               <Input
                 id="pdImage"
-                placeholder="https://... 或点「本地上传」"
+                placeholder={t("pt.form.coverPlaceholder")}
                 value={form.imageUrl}
                 onChange={(e) => setForm((f) => ({ ...f, imageUrl: e.target.value }))}
               />
               {form.imageUrl.trim() && (
-                <p className="text-xs text-muted-foreground">
-                  填了封面图就以图片为准，下面的图标不会显示（不用特意清空）。
-                  本地上传的图存本站网盘，直接粘外链也可以。
-                </p>
+                <p className="text-xs text-muted-foreground">{t("pt.form.coverHint")}</p>
               )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="pdCategory">{t("pt.form.category")}</Label>
+              <Select
+                value={form.category}
+                onValueChange={(v) => setForm((f) => ({ ...f, category: v as ProductCategory }))}
+              >
+                <SelectTrigger id="pdCategory" className="w-40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(Object.keys(PRODUCT_CATEGORY_LABELS) as ProductCategory[]).map((c) => (
+                    <SelectItem key={c} value={c}>
+                      {t(PRODUCT_CATEGORY_LABELS[c])}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             <ShopIconPicker
@@ -1748,7 +2012,7 @@ function ShopTab() {
 
             <div className="grid gap-3 sm:grid-cols-3">
               <div className="space-y-2">
-                <Label htmlFor="pdPrice">售价（积分）</Label>
+                <Label htmlFor="pdPrice">{t("pt.form.price")}</Label>
                 <Input
                   id="pdPrice"
                   inputMode="numeric"
@@ -1758,21 +2022,21 @@ function ShopTab() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="pdStock">库存（留空 = 不限）</Label>
+                <Label htmlFor="pdStock">{t("pt.form.stock")}</Label>
                 <Input
                   id="pdStock"
                   inputMode="numeric"
-                  placeholder="不限"
+                  placeholder={t("pt.form.unlimited")}
                   value={form.stock}
                   onChange={(e) => setForm((f) => ({ ...f, stock: e.target.value }))}
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="pdLimit">每人限购（留空 = 不限）</Label>
+                <Label htmlFor="pdLimit">{t("ap.perUserLimitLabel")}</Label>
                 <Input
                   id="pdLimit"
                   inputMode="numeric"
-                  placeholder="不限"
+                  placeholder={t("pt.form.unlimited")}
                   value={form.perUserLimit}
                   onChange={(e) => setForm((f) => ({ ...f, perUserLimit: e.target.value }))}
                 />
@@ -1783,11 +2047,8 @@ function ShopTab() {
             <div className="space-y-3 rounded-md border p-3">
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
-                  <p className="text-sm font-medium">租用模式</p>
-                  <p className="text-xs text-muted-foreground">
-                    开启后用户付一次积分用一段时间，到期自动失效（续费会顺延剩余天数）；
-                    关闭则是买断，永久拥有。
-                  </p>
+                  <p className="text-sm font-medium">{t("pt.form.rentalMode")}</p>
+                  <p className="text-xs text-muted-foreground">{t("ap.rentalModeHint")}</p>
                 </div>
                 <Switch
                   checked={form.billingMode === "rental"}
@@ -1811,11 +2072,11 @@ function ShopTab() {
 
               {form.billingMode === "rental" && (
                 <div className="space-y-2">
-                  <Label htmlFor="pdDays">租期（天）</Label>
+                  <Label htmlFor="pdDays">{t("pt.form.rentalDays")}</Label>
                   <Input
                     id="pdDays"
                     inputMode="numeric"
-                    placeholder="如 30"
+                    placeholder={t("pt.form.rentalDaysPlaceholder")}
                     value={form.rentalDays}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, rentalDays: e.target.value.replace(/\D/g, "") }))
@@ -1830,20 +2091,17 @@ function ShopTab() {
                         variant={form.rentalDays === String(d) ? "default" : "outline"}
                         onClick={() => setForm((f) => ({ ...f, rentalDays: String(d) }))}
                       >
-                        {d} 天
+                        {t("pt.days", { n: d })}
                       </Button>
                     ))}
                   </div>
-                  <p className="text-xs text-muted-foreground">
-                    租期从「交付生效」那一刻起算（自动交付 = 下单成功；人工发放 = 你点标记发放），
-                    不是从下单起算 —— 免得中间等待时间白吃用户的租期。
-                  </p>
+                  <p className="text-xs text-muted-foreground">{t("ap.rentalDaysHint")}</p>
                 </div>
               )}
             </div>
 
             <div className="space-y-2">
-              <Label>交付方式</Label>
+              <Label>{t("ap.deliveryLabel")}</Label>
               <div className="flex flex-wrap gap-2">
                 {(Object.keys(DELIVERY_LABELS) as PointDelivery[]).map((d) => {
                   const blockedByRental =
@@ -1855,41 +2113,41 @@ function ShopTab() {
                       variant={form.delivery === d ? "default" : "outline"}
                       size="sm"
                       disabled={blockedByRental}
-                      title={blockedByRental ? "一次性发放，不能设为租用" : undefined}
+                      title={blockedByRental ? t("ap.rentalBlockedTip") : undefined}
                       onClick={() => setForm((f) => ({ ...f, delivery: d }))}
                     >
-                      {DELIVERY_LABELS[d]}
+                      {t(DELIVERY_LABELS[d])}
                     </Button>
                   )
                 })}
               </div>
-              <p className="text-xs text-muted-foreground">{DELIVERY_HINTS[form.delivery]}</p>
+              <p className="text-xs text-muted-foreground">{t(DELIVERY_HINTS[form.delivery])}</p>
               {form.billingMode === "rental" && (
                 <p className="text-xs text-muted-foreground">
-                  「自动充值」和「邀请码额度」发出去就收不回来，租用模式下不可选。
+                  {t("ap.rentalBlockedNote")}
                 </p>
               )}
             </div>
 
             {form.delivery === "quota" && (
               <div className="space-y-2">
-                <Label htmlFor="pdQuota">每件充入金额（元）</Label>
+                <Label htmlFor="pdQuota">{t("ap.quotaYuanLabel")}</Label>
                 <Input
                   id="pdQuota"
                   inputMode="decimal"
-                  placeholder="如 10"
+                  placeholder={t("ap.quotaYuanPlaceholder")}
                   value={form.quotaYuan}
                   onChange={(e) => setForm((f) => ({ ...f, quotaYuan: e.target.value }))}
                 />
                 <p className="text-xs text-muted-foreground">
-                  下单时会自动加到用户的 AI 中转站余额；用户没开通中转站时无法购买。
+                  {t("ap.quotaHint")}
                 </p>
               </div>
             )}
 
             {form.delivery === "feature" && (
               <div className="space-y-2">
-                <Label htmlFor="pdFeature">授予哪个模块</Label>
+                <Label htmlFor="pdFeature">{t("ap.featureLabel")}</Label>
                 <Select
                   value={form.feature}
                   onValueChange={(v) => setForm((f) => ({ ...f, feature: v as FeatureKey }))}
@@ -1906,47 +2164,44 @@ function ShopTab() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  下单后自动给用户开通该模块。用户已经有了这个权限时会直接拒绝下单，不会白扣积分。
+                  {t("ap.featureHint")}
                 </p>
               </div>
             )}
 
             {form.delivery === "subscription" && (
               <div className="space-y-2">
-                <Label htmlFor="pdPlan">中转站套餐 ID</Label>
+                <Label htmlFor="pdPlan">{t("ap.planIdLabel")}</Label>
                 <Input
                   id="pdPlan"
                   inputMode="numeric"
-                  placeholder="如 2"
+                  placeholder={t("ap.numPlaceholder")}
                   value={form.planId}
                   onChange={(e) => setForm((f) => ({ ...f, planId: e.target.value }))}
                 />
-                <p className="text-xs text-muted-foreground">
-                  填 NewAPI 后台「订阅套餐」列表里的那个数字 ID。这里不写死任何套餐，
-                  你建几个就能填几个。
-                </p>
+                <p className="text-xs text-muted-foreground">{t("ap.planIdHint")}</p>
               </div>
             )}
 
             {form.delivery === "invite_quota" && (
               <div className="space-y-2">
-                <Label htmlFor="pdInvite">发放额度（个）</Label>
+                <Label htmlFor="pdInvite">{t("ap.inviteCountLabel")}</Label>
                 <Input
                   id="pdInvite"
                   inputMode="numeric"
-                  placeholder="如 2"
+                  placeholder={t("ap.numPlaceholder")}
                   value={form.inviteCount}
                   onChange={(e) => setForm((f) => ({ ...f, inviteCount: e.target.value }))}
                 />
                 <p className="text-xs text-muted-foreground">
-                  下单后加到用户的「邀请码创建额度」上，也就是他能建多少个邀请码。
+                  {t("ap.inviteCountHint")}
                 </p>
               </div>
             )}
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="pdSort">排序（越大越靠前）</Label>
+                <Label htmlFor="pdSort">{t("ap.sortLabel")}</Label>
                 <Input
                   id="pdSort"
                   inputMode="numeric"
@@ -1955,7 +2210,7 @@ function ShopTab() {
                 />
               </div>
               <div className="flex items-center justify-between rounded-md border p-3">
-                <p className="text-sm font-medium">上架</p>
+                <p className="text-sm font-medium">{t("ap.list")}</p>
                 <Switch
                   checked={form.enabled}
                   onCheckedChange={(v) => setForm((f) => ({ ...f, enabled: v }))}
@@ -1966,11 +2221,11 @@ function ShopTab() {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={formBusy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void submitForm()} disabled={formBusy}>
               {formBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              保存
+              {t("common.save")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1982,6 +2237,7 @@ function ShopTab() {
 // ---------------------------------------------------------------- 成员
 
 function MembersTab() {
+  const { t } = useT()
   const [data, setData] = React.useState<AdminPointsOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [query, setQuery] = React.useState("")
@@ -2002,7 +2258,7 @@ function MembersTab() {
     try {
       setData(await adminPointsApi.list(q?.trim() || undefined))
     } catch (err) {
-      toast.error(errMsg(err, "加载积分数据失败"))
+      toast.error(errMsg(err, t("ap.err.loadMembers")))
     } finally {
       setLoading(false)
     }
@@ -2022,7 +2278,7 @@ function MembersTab() {
     if (!adjustTarget) return
     const value = Math.trunc(Number(delta))
     if (!Number.isFinite(value) || value === 0) {
-      toast.error("请填写非零整数（正数发放、负数扣减）")
+      toast.error(t("ap.err.nonZeroInt"))
       return
     }
     setBusy(true)
@@ -2033,12 +2289,17 @@ function MembersTab() {
         detail: detail.trim() || undefined,
       })
       toast.success(
-        `已${value > 0 ? "发放" : "扣减"} ${Math.abs(value)} 积分，${adjustTarget.username} 当前余额 ${res.balance}`
+        t("ap.toast.adjusted", {
+          verb: value > 0 ? t("ap.verb.issue") : t("ap.verb.deduct"),
+          n: Math.abs(value),
+          user: adjustTarget.username,
+          balance: res.balance,
+        })
       )
       setAdjustTarget(null)
       await load(query)
     } catch (err) {
-      toast.error(errMsg(err, "操作失败"))
+      toast.error(errMsg(err, t("pt.err.op")))
     } finally {
       setBusy(false)
     }
@@ -2052,7 +2313,7 @@ function MembersTab() {
       const res = await adminPointsApi.history(u.username)
       setHistory(res.transactions)
     } catch (err) {
-      toast.error(errMsg(err, "加载流水失败"))
+      toast.error(errMsg(err, t("ap.err.loadTx")))
       setHistory([])
     } finally {
       setHistoryLoading(false)
@@ -2064,11 +2325,11 @@ function MembersTab() {
       {/* 汇总 */}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {[
-          { label: "累计发放", value: data?.stats.issued ?? 0 },
-          { label: "累计消耗（兑换 + 商城）", value: data?.stats.redeemed ?? 0 },
-          { label: "用户商城成交额", value: data?.stats.traded ?? 0 },
-          { label: "用户在手总量", value: data?.stats.holding ?? 0 },
-          { label: "持有积分人数", value: data?.stats.holders ?? 0 },
+          { label: t("ap.stat.issued"), value: data?.stats.issued ?? 0 },
+          { label: t("ap.stat.redeemed"), value: data?.stats.redeemed ?? 0 },
+          { label: t("ap.stat.traded"), value: data?.stats.traded ?? 0 },
+          { label: t("ap.stat.holding"), value: data?.stats.holding ?? 0 },
+          { label: t("ap.stat.holders"), value: data?.stats.holders ?? 0 },
         ].map((s) => (
           <Card key={s.label}>
             <CardContent className="p-4">
@@ -2093,7 +2354,7 @@ function MembersTab() {
         >
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="搜索用户名 / 昵称 / 邮箱后回车"
+            placeholder={t("ap.searchPlaceholder")}
             className="pl-8"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -2101,7 +2362,7 @@ function MembersTab() {
         </form>
         <Button variant="outline" size="sm" onClick={() => void load(query)} disabled={loading}>
           <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-          刷新
+          {t("common.refresh")}
         </Button>
       </div>
 
@@ -2111,8 +2372,8 @@ function MembersTab() {
       ) : !data || data.users.length === 0 ? (
         <EmptyState
           icon={Coins}
-          title="没有匹配的用户"
-          description={query ? "换个关键词再试，或清空搜索看全部。" : "还没有用户数据。"}
+          title={t("ap.noUserMatch")}
+          description={query ? t("ap.noUserMatchDesc") : t("ap.noUserData")}
         />
       ) : (
         <div className="overflow-x-auto rounded-lg border">
@@ -2120,12 +2381,12 @@ function MembersTab() {
             <thead className="bg-muted/50 text-xs text-muted-foreground">
               <tr>
                 <th className="w-16 px-3 py-2 text-left font-medium">UID</th>
-                <th className="px-3 py-2 text-left font-medium">用户</th>
-                <th className="px-3 py-2 text-left font-medium">邮箱</th>
-                <th className="px-3 py-2 text-left font-medium">注册时间</th>
-                <th className="px-3 py-2 text-left font-medium">积分余额</th>
-                <th className="px-3 py-2 text-left font-medium">最近变动</th>
-                <th className="px-3 py-2 text-right font-medium">操作</th>
+                <th className="px-3 py-2 text-left font-medium">{t("ap.th.user")}</th>
+                <th className="px-3 py-2 text-left font-medium">{t("ap.th.email")}</th>
+                <th className="px-3 py-2 text-left font-medium">{t("ap.th.joinedAt")}</th>
+                <th className="px-3 py-2 text-left font-medium">{t("ap.th.balance")}</th>
+                <th className="px-3 py-2 text-left font-medium">{t("ap.th.lastChange")}</th>
+                <th className="px-3 py-2 text-right font-medium">{t("ap.th.actions")}</th>
               </tr>
             </thead>
             <tbody>
@@ -2140,7 +2401,7 @@ function MembersTab() {
                       {u.nickname && <span className="text-muted-foreground">{u.nickname}</span>}
                       {u.status !== "active" && (
                         <Badge variant="outline" className="text-[10px]">
-                          已停用
+                          {t("common.disabled")}
                         </Badge>
                       )}
                     </div>
@@ -2157,10 +2418,10 @@ function MembersTab() {
                     <div className="flex justify-end gap-2">
                       <Button variant="outline" size="sm" onClick={() => openAdjust(u)}>
                         <SlidersHorizontal className="mr-1 h-3.5 w-3.5" />
-                        调整
+                        {t("ap.adjust")}
                       </Button>
                       <Button variant="ghost" size="sm" onClick={() => void openHistory(u)}>
-                        流水
+                        {t("ap.tx")}
                       </Button>
                     </div>
                   </td>
@@ -2175,28 +2436,30 @@ function MembersTab() {
       <Dialog open={!!adjustTarget} onOpenChange={(o) => !o && setAdjustTarget(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>调整积分 · {adjustTarget?.username}</DialogTitle>
+            <DialogTitle>
+              {t("ap.adjustTitle", { user: adjustTarget?.username ?? "" })}
+            </DialogTitle>
             <DialogDescription>
-              当前余额 <span className="font-medium text-foreground">{adjustTarget?.balance ?? 0}</span>{" "}
-              积分。正数发放、负数扣减；扣减不能超过余额。
+              {t("ap.adjustBalancePrefix")} <span className="font-medium text-foreground">{adjustTarget?.balance ?? 0}</span>{" "}
+              {t("ap.adjustDesc")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <div className="space-y-2">
-              <Label htmlFor="adjDelta">变动值</Label>
+              <Label htmlFor="adjDelta">{t("ap.deltaLabel")}</Label>
               <Input
                 id="adjDelta"
                 type="number"
-                placeholder="如 100 表示发放 100，-50 表示扣减 50"
+                placeholder={t("ap.deltaPlaceholder")}
                 value={delta}
                 onChange={(e) => setDelta(e.target.value)}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="adjDetail">备注（可选，用户可见）</Label>
+              <Label htmlFor="adjDetail">{t("ap.noteOptionalUserVisible")}</Label>
               <Input
                 id="adjDetail"
-                placeholder="如：活动补发 / 问题补偿"
+                placeholder={t("ap.adjustNotePlaceholder")}
                 value={detail}
                 onChange={(e) => setDetail(e.target.value)}
               />
@@ -2214,11 +2477,11 @@ function MembersTab() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAdjustTarget(null)} disabled={busy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void submitAdjust()} disabled={busy}>
               {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              确认
+              {t("common.confirm")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2228,26 +2491,32 @@ function MembersTab() {
       <Dialog open={!!historyTarget} onOpenChange={(o) => !o && setHistoryTarget(null)}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>积分流水 · {historyTarget?.username}</DialogTitle>
-            <DialogDescription>最近 100 条记录</DialogDescription>
+            <DialogTitle>
+              {t("ap.txTitle", { user: historyTarget?.username ?? "" })}
+            </DialogTitle>
+            <DialogDescription>{t("ap.txDesc")}</DialogDescription>
           </DialogHeader>
           {historyLoading ? (
             <LoadingBlock />
           ) : !history || history.length === 0 ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">暂无流水记录。</p>
+            <p className="py-6 text-center text-sm text-muted-foreground">{t("ap.txEmpty")}</p>
           ) : (
             <ul className="max-h-[60vh] divide-y overflow-y-auto">
-              {history.map((t) => (
-                <li key={t.id} className="flex items-center justify-between gap-3 py-2">
+              {history.map((tx) => (
+                <li key={tx.id} className="flex items-center justify-between gap-3 py-2">
                   <div className="min-w-0">
-                    <p className="truncate text-sm">{t.detail || REASON_LABEL[t.reason] || t.reason}</p>
-                    <p className="text-xs text-muted-foreground">{fmtDateTime(t.createdAt)}</p>
+                    <p className="truncate text-sm">
+                      {tx.detail || t(REASON_LABEL[tx.reason] ?? tx.reason)}
+                    </p>
+                    <p className="text-xs text-muted-foreground">{fmtDateTime(tx.createdAt)}</p>
                   </div>
                   <div className="shrink-0 text-right">
                     <p className="text-sm font-medium tabular-nums">
-                      {t.delta > 0 ? `+${t.delta}` : t.delta}
+                      {tx.delta > 0 ? `+${tx.delta}` : tx.delta}
                     </p>
-                    <p className="text-[10px] text-muted-foreground">余额 {t.balance}</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {t("pt.balanceSuffix", { n: tx.balance })}
+                    </p>
                   </div>
                 </li>
               ))}

@@ -16,11 +16,17 @@
  * 预览数据来自后端（服务端抓取，避免浏览器 CORS），并有模块级缓存去重。
  */
 import * as React from "react"
+import { createPortal } from "react-dom"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkBreaks from "remark-breaks"
+import { Check, Loader2, Plus } from "lucide-react"
+import { toast } from "sonner"
 import { FunLinkIcon } from "@/components/fun-link-icon"
-import { communityApi } from "@/services/api"
+import { communityApi, stickerApi, errMsg } from "@/services/api"
+import { GitHubMark, isGitHubUrl } from "@/components/github-mark"
+import { useAuth } from "@/hooks/use-auth"
+import { useT } from "@/i18n"
 import type { LinkPreview } from "@/types"
 
 /** 链接预览的模块级缓存：同一链接在同一页面只请求一次 */
@@ -34,6 +40,11 @@ function LinkCard({ href }: { href: string }) {
   /** og:image 加载失败时回退到站点图标（别留一块空白把文字挤到左边） */
   const [imageFailed, setImageFailed] = React.useState(false)
   const imageUrl = preview?.image ?? ""
+  /**
+   * GitHub 链接**不走 og:image**：那张 1200×600 的社交大图缩到 80×80 后
+   * 只剩一团噪点，完全看不清（站长原话）。直接用章鱼猫徽标，干净又一眼可辨。
+   */
+  const useGitHubMark = isGitHubUrl(href)
 
   React.useEffect(() => {
     setImageFailed(false)
@@ -98,7 +109,11 @@ function LinkCard({ href }: { href: string }) {
       rel="noopener noreferrer nofollow"
       className="glass-card mt-2 flex gap-3 overflow-hidden rounded-lg border transition-colors hover:bg-accent/40"
     >
-      {preview.image && !imageFailed ? (
+      {useGitHubMark ? (
+        <div className="flex h-20 w-20 shrink-0 items-center justify-center bg-foreground/[0.04]">
+          <GitHubMark className="h-9 w-9 text-foreground/70" />
+        </div>
+      ) : preview.image && !imageFailed ? (
         <img
           src={preview.image}
           alt=""
@@ -173,6 +188,151 @@ function renderCode(props: React.ComponentPropsWithoutRef<"code"> & { node?: unk
   return <code {...rest}>{children}</code>
 }
 
+/**
+ * 图片渲染。
+ *
+ * 分两种，因为它们的意图完全不同：
+ *   · **站内表情包**（`/api/stickers/<id>/image`）是「内联小图」—— 跟着文字走，
+ *     限制在 96px 见方、与文字基线对齐。不限制的话，一张 512×512 的表情包
+ *     会把整段话撑成一大块，聊天体感全毁。
+ *   · **外链图片**按常规处理：限宽不溢出、限高不喧宾夺主，圆角加边。
+ * 两者都开 lazy loading：一屏十几张表情包时，只有进视口的才真正去取。
+ */
+/** 站内表情包：点一下放大看原图；右键（桌面）/ 长按（移动）弹出「存到我的表情包」 */
+function StickerImage({ src, alt }: { src: string; alt: string }) {
+  const { user } = useAuth()
+  const { t } = useT()
+  const [menuOpen, setMenuOpen] = React.useState(false)
+  const [zoom, setZoom] = React.useState(false)
+  const [saved, setSaved] = React.useState(false)
+  const [saving, setSaving] = React.useState(false)
+  const longPressTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const longPressed = React.useRef(false)
+  const id = src.match(/\/api\/stickers\/([0-9a-f-]{36})\/image/)?.[1]
+
+  const openMenu = () => {
+    if (user && id && !saved) setMenuOpen(true)
+  }
+  const clearLongPress = () => {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current)
+    longPressTimer.current = null
+  }
+
+  // 点别处 / 滚动时收起菜单
+  React.useEffect(() => {
+    if (!menuOpen) return
+    const close = () => setMenuOpen(false)
+    document.addEventListener("click", close)
+    document.addEventListener("scroll", close, true)
+    return () => {
+      document.removeEventListener("click", close)
+      document.removeEventListener("scroll", close, true)
+    }
+  }, [menuOpen])
+
+  const save = async () => {
+    if (!id || saving || saved) return
+    setSaving(true)
+    try {
+      await stickerApi.save(id)
+      setSaved(true)
+      setMenuOpen(false)
+      toast.success(t("stk.ok.saved"))
+    } catch (err) {
+      toast.error(errMsg(err, t("stk.err.save")))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const onClick = () => {
+    // 长按触发的 touchend 之后的 click 不要放大，只放大普通点击/轻点
+    if (longPressed.current) {
+      longPressed.current = false
+      return
+    }
+    setZoom(true)
+  }
+
+  return (
+    <>
+      <span
+        className="relative inline-block select-none"
+        onClick={onClick}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          openMenu()
+        }}
+        onTouchStart={() => {
+          longPressTimer.current = setTimeout(() => {
+            longPressed.current = true
+            openMenu()
+          }, 500)
+        }}
+        onTouchEnd={clearLongPress}
+        onTouchMove={clearLongPress}
+        onTouchCancel={clearLongPress}
+      >
+        <img
+          src={src}
+          alt={alt}
+          loading="lazy"
+          decoding="async"
+          className="sticker-img inline-block align-text-bottom"
+        />
+        {user && id && !saved && menuOpen && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              void save()
+            }}
+            disabled={saving}
+            className="absolute -top-7 right-0 z-20 flex items-center gap-1 whitespace-nowrap rounded-md border bg-popover px-2 py-0.5 text-xs font-medium shadow-md hover:bg-accent disabled:opacity-60"
+          >
+            {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
+            {t("stk.save")}
+          </button>
+        )}
+        {user && saved && (
+          <span
+            className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-primary-foreground"
+            title={t("stk.saved")}
+          >
+            <Check className="h-2.5 w-2.5" />
+          </span>
+        )}
+      </span>
+      {zoom &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center bg-black/80 p-6"
+            onClick={() => setZoom(false)}
+          >
+            <img src={src} alt={alt} className="max-h-full max-w-full rounded-lg shadow-2xl" />
+          </div>,
+          document.body
+        )}
+    </>
+  )
+}
+
+function renderImage({ src, alt }: React.ComponentProps<"img">) {
+  const url = typeof src === "string" ? src : ""
+  if (url.startsWith("/api/stickers/")) {
+    return <StickerImage src={url} alt={alt ?? ""} />
+  }
+  return (
+    <img
+      src={url}
+      alt={alt ?? ""}
+      loading="lazy"
+      decoding="async"
+      className="my-2 max-h-80 max-w-full rounded-md border"
+    />
+  )
+}
+
 export function Markdown({ children }: { children: string }) {
   return (
     <div className="markdown-body break-words text-sm leading-relaxed">
@@ -181,7 +341,7 @@ export function Markdown({ children }: { children: string }) {
         components={{
           a: renderLink,
           code: renderCode,
-          // 链接里的图片等默认处理，不做额外定制
+          img: renderImage,
         }}
       >
         {children}

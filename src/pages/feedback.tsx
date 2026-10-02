@@ -32,13 +32,17 @@ import {
 } from "@/components/ui/card"
 import { feedbackApi, HttpError, errMsg } from "@/services/api"
 import { fmtTime } from "@/lib/format"
+import { EmojiPicker } from "@/components/emoji-picker"
+import { useEmojiInsert } from "@/hooks/use-emoji-insert"
+import { useImageDrop } from "@/hooks/use-image-drop"
+import { cn } from "@/lib/utils"
 import {
   usePickedImages,
   ImagePickerField,
   ImageGallery,
 } from "@/components/feedback-image"
 import type { FeedbackItem, FeedbackOverview } from "@/types"
-import { useT } from "@/i18n"
+import { useT, translateApiMessage } from "@/i18n"
 
 /**
  * 反馈页。
@@ -91,6 +95,18 @@ export default function FeedbackPage() {
   const [expanded, setExpanded] = React.useState<string | null>(null)
   /** 提交表单的待上传图片 */
   const formImages = usePickedImages()
+
+  /**
+   * 拖入图片 → 交给 `formImages`（它自带压缩与上传）。
+   * `noPaste`：这个 Textarea 自己已经处理粘贴了，两边都接会重复上传。
+   */
+  const { dragging, dropProps } = useImageDrop({
+    onFiles: (files) => void formImages.pick(files),
+    noPaste: true,
+  })
+  /** 正文输入框：表情要插到光标处 */
+  const bodyRef = React.useRef<HTMLTextAreaElement | null>(null)
+  const insertEmoji = useEmojiInsert(bodyRef, body, setBody)
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -175,6 +191,28 @@ export default function FeedbackPage() {
     }
   }
 
+  /** 编辑还没被处理的反馈 */
+  const handleEdit = async (id: string, payload: { category: string; title: string; body: string }) => {
+    try {
+      await feedbackApi.edit(id, payload)
+      toast.success(t("fb.ok.edited"))
+      await load()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("fb.err.edit"))
+    }
+  }
+
+  /** 撤销（删除）还没被处理的反馈 */
+  const handleWithdraw = async (id: string) => {
+    try {
+      await feedbackApi.withdraw(id)
+      toast.success(t("fb.ok.withdrawn"))
+      await load()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("fb.err.withdraw"))
+    }
+  }
+
   return (
     <div>
       <PageHeader
@@ -224,7 +262,7 @@ export default function FeedbackPage() {
                           "h-4 w-4 " + (active ? CATEGORY_TONE[c.key] ?? "" : "")
                         }
                       />
-                      {c.label}
+                      {translateApiMessage(c.label)}
                     </button>
                   )
                 })}
@@ -242,19 +280,34 @@ export default function FeedbackPage() {
               />
             </div>
 
-            <div className="space-y-2">
+            <div
+              {...dropProps}
+              className={cn("relative space-y-2", dragging && "rounded-md ring-2 ring-primary")}
+            >
               <Label htmlFor="fbBody">{t("fb.field.body")}</Label>
               <Textarea
                 id="fbBody"
+                ref={bodyRef}
                 rows={8}
                 maxLength={MAX_BODY}
                 placeholder={t("fb.bodyPlaceholder")}
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
+                onPaste={(e) => {
+                  // 直接粘贴截图/图片：有图就把图收进待上传列表，不往正文塞字节
+                  const files = e.clipboardData?.files
+                  if (files && files.length > 0) {
+                    e.preventDefault()
+                    void formImages.pick(files)
+                  }
+                }}
               />
-              <p className="text-right text-xs text-muted-foreground">
-                {body.length} / {MAX_BODY}
-              </p>
+              <div className="flex items-center gap-1">
+                <EmojiPicker onPick={insertEmoji} />
+                <span className="ml-auto text-xs text-muted-foreground">
+                  {body.length} / {MAX_BODY}
+                </span>
+              </div>
             </div>
 
             <ImagePickerField
@@ -300,13 +353,16 @@ export default function FeedbackPage() {
               <FeedbackCard
                 key={f.id}
                 item={f}
-                statusLabel={statusLabels[f.status] ?? f.status}
+                statusLabel={translateApiMessage(statusLabels[f.status] ?? f.status)}
                 categoryLabel={
-                  categories.find((c) => c.key === f.category)?.label ?? f.category
+                  translateApiMessage(categories.find((c) => c.key === f.category)?.label ?? f.category)
                 }
+                categories={categories}
                 expanded={expanded === f.id}
                 onToggle={() => setExpanded((prev) => (prev === f.id ? null : f.id))}
                 onReply={handleReply}
+                onEdit={handleEdit}
+                onWithdraw={handleWithdraw}
               />
             ))
           )}
@@ -321,16 +377,22 @@ function FeedbackCard({
   item,
   statusLabel,
   categoryLabel,
+  categories,
   expanded,
   onToggle,
   onReply,
+  onEdit,
+  onWithdraw,
 }: {
   item: FeedbackItem
   statusLabel: string
   categoryLabel: string
+  categories: { key: string; label: string }[]
   expanded: boolean
   onToggle: () => void
   onReply: (id: string, text: string, images: string[]) => Promise<void>
+  onEdit: (id: string, payload: { category: string; title: string; body: string }) => Promise<void>
+  onWithdraw: (id: string) => Promise<void>
 }) {
   const { t } = useT()
   const Icon = CATEGORY_ICONS[item.category] ?? MessageSquare
@@ -341,6 +403,52 @@ function FeedbackCard({
   const [replyText, setReplyText] = React.useState("")
   const [replying, setReplying] = React.useState(false)
   const replyImages = usePickedImages()
+
+  /** 拖入图片 → 交给回复的图片列表（noPaste：下面那个 Textarea 自己处理粘贴） */
+  const { dragging: replyDragging, dropProps: replyDropProps } = useImageDrop({
+    onFiles: (files) => void replyImages.pick(files),
+    noPaste: true,
+  })
+
+  // 编辑（仅 pending 可编辑）
+  const editable = item.status === "pending"
+  const [editing, setEditing] = React.useState(false)
+  const [editTitle, setEditTitle] = React.useState("")
+  const [editBody, setEditBody] = React.useState("")
+  const [editCategory, setEditCategory] = React.useState("")
+  const [savingEdit, setSavingEdit] = React.useState(false)
+  const [withdrawing, setWithdrawing] = React.useState(false)
+
+  const startEdit = () => {
+    setEditTitle(item.title)
+    setEditBody(item.body)
+    setEditCategory(item.category)
+    setEditing(true)
+  }
+  const saveEdit = async () => {
+    const ttl = editTitle.trim()
+    const b = editBody.trim()
+    if (!ttl || !b) {
+      toast.error(t("fb.err.titleRequired"))
+      return
+    }
+    setSavingEdit(true)
+    try {
+      await onEdit(item.id, { category: editCategory, title: ttl, body: b })
+      setEditing(false)
+    } finally {
+      setSavingEdit(false)
+    }
+  }
+  const doWithdraw = async () => {
+    if (!window.confirm(t("fb.withdrawConfirm"))) return
+    setWithdrawing(true)
+    try {
+      await onWithdraw(item.id)
+    } finally {
+      setWithdrawing(false)
+    }
+  }
 
   const submitReply = async () => {
     const text = replyText.trim()
@@ -412,9 +520,74 @@ function FeedbackCard({
           <div className="mt-3 space-y-3 border-t pt-3">
             {/* 我的原始反馈 */}
             <div>
-              <p className="mb-1 text-xs font-medium text-muted-foreground">{t("fb.me")}</p>
-              <p className="whitespace-pre-wrap text-sm">{item.body}</p>
-              <ImageGallery images={item.images} />
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <p className="text-xs font-medium text-muted-foreground">{t("fb.me")}</p>
+                {editable && !editing && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+                      onClick={startEdit}
+                    >
+                      {t("fb.edit")}
+                    </button>
+                    <button
+                      type="button"
+                      className="text-xs text-muted-foreground transition-colors hover:text-destructive disabled:opacity-60"
+                      onClick={() => void doWithdraw()}
+                      disabled={withdrawing}
+                    >
+                      {t("fb.withdraw")}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {editing ? (
+                <div className="space-y-2">
+                  <select
+                    value={editCategory}
+                    onChange={(e) => setEditCategory(e.target.value)}
+                    className="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+                  >
+                    {categories.map((c) => (
+                      <option key={c.key} value={c.key}>
+                        {translateApiMessage(c.label)}
+                      </option>
+                    ))}
+                  </select>
+                  <Input
+                    value={editTitle}
+                    maxLength={MAX_TITLE}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                  />
+                  <Textarea
+                    rows={5}
+                    maxLength={MAX_BODY}
+                    value={editBody}
+                    onChange={(e) => setEditBody(e.target.value)}
+                  />
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setEditing(false)}
+                      disabled={savingEdit}
+                    >
+                      {t("common.cancel")}
+                    </Button>
+                    <Button size="sm" onClick={() => void saveEdit()} disabled={savingEdit}>
+                      {savingEdit && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+                      {t("common.save")}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <p className="whitespace-pre-wrap break-words text-sm">{item.body}</p>
+                  <ImageGallery images={item.images} />
+                </>
+              )}
             </div>
 
             {/* 对话消息（用户追加 + 管理员回复） */}
@@ -438,7 +611,7 @@ function FeedbackCard({
                   ) : null}
                   {m.isAdmin ? t("fb.admin") : t("fb.me")}
                 </p>
-                <p className="whitespace-pre-wrap text-sm">{m.body}</p>
+                <p className="whitespace-pre-wrap break-words text-sm">{m.body}</p>
                 <ImageGallery images={m.images} />
               </div>
             ))}
@@ -450,7 +623,7 @@ function FeedbackCard({
                   <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
                   {t("fb.adminReply")}
                 </p>
-                <p className="whitespace-pre-wrap text-sm">{item.adminReply}</p>
+                <p className="whitespace-pre-wrap break-words text-sm">{item.adminReply}</p>
               </div>
             )}
             {item.messages.length === 0 && !hasReply && (
@@ -461,7 +634,13 @@ function FeedbackCard({
             )}
 
             {/* 追加回复 */}
-            <div className="space-y-2">
+            <div
+              {...replyDropProps}
+              className={cn(
+                "relative space-y-2",
+                replyDragging && "rounded-md ring-2 ring-primary"
+              )}
+            >
               <Textarea
                 rows={2}
                 placeholder={t("fb.replyPlaceholder")}

@@ -19,8 +19,9 @@ import { cfEnsureDestination, cfListDestinations, cfDeleteDestination } from "..
 import { purgeUserExternalResources } from "../user-cleanup"
 import { sendMail, renderMail } from "../mailer"
 import { isReservedName } from "../reserved-names"
-import { audit } from "../settings"
+import { audit, getSetting } from "../settings"
 import { guardRateLimit } from "../ratelimit"
+import { userRootDomainName, isOwnDomain } from "../root-domains"
 import type { Env } from "../env"
 
 /**
@@ -65,7 +66,8 @@ function isValidEmail(email: string): boolean {
 }
 
 function isValidUsername(username: string): boolean {
-  return /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(username)
+  // 3-32 位（2026-10-02 站长定，与注册同口径）：见 handlers/auth.ts 的说明
+  return /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(username)
 }
 
 /**
@@ -285,7 +287,11 @@ export async function changeUsername(env: Env, request: Request): Promise<Respon
   const next = (body.username ?? "").trim().toLowerCase()
 
   if (!isValidUsername(next)) {
-    throw new ApiError(400, "用户名只能包含小写字母、数字和连字符", "INVALID_USERNAME")
+    throw new ApiError(
+      400,
+      "用户名需要 3-32 位，只能包含小写字母、数字和连字符",
+      "INVALID_USERNAME"
+    )
   }
   if (isReservedName(next)) {
     throw new ApiError(400, "该用户名为系统保留名称", "RESERVED_NAME")
@@ -298,8 +304,11 @@ export async function changeUsername(env: Env, request: Request): Promise<Respon
   // （含限流，见 verifyCurrentPassword —— 2026-09-25 审计 H9）
   await verifyCurrentPassword(env, user.id, body.password, user.password_hash)
 
-  // 目标名字必须未被任何命名空间占用（与注册同口径）
-  const requestedFqdn = `${next}.${env.ROOT_DOMAIN.toLowerCase()}`
+  // 目标名字必须未被任何命名空间占用（与注册同口径）。
+  // ⚠️ 判的是**用户自己所在的根域**，不是 env.ROOT_DOMAIN：新用户在 tyu.me 上，
+  //    拿主域去判重会判错对象（漏真冲突、拦无关名字）。
+  const myRoot = await userRootDomainName(env, user.id, user.username)
+  const requestedFqdn = `${next}.${myRoot}`
   const conflicts = await env.DB.batch([
     env.DB.prepare(
       "SELECT id FROM users WHERE username = ? COLLATE NOCASE LIMIT 1"
@@ -312,7 +321,7 @@ export async function changeUsername(env: Env, request: Request): Promise<Respon
     ).bind(requestedFqdn),
     env.DB.prepare(
       "SELECT id FROM mailboxes WHERE address = ? COLLATE NOCASE LIMIT 1"
-    ).bind(`${next}@${env.ROOT_DOMAIN.toLowerCase()}`),
+    ).bind(`${next}@${myRoot}`),
   ])
   if (conflicts.some((r) => (r.results ?? []).length > 0)) {
     throw new ApiError(409, "该用户名已被占用", "CONFLICT")
@@ -373,7 +382,8 @@ export async function changeRealEmail(env: Env, request: Request): Promise<Respo
   if (!isValidEmail(next)) {
     throw new ApiError(400, "邮箱格式不正确", "INVALID_EMAIL")
   }
-  if (next.endsWith(`@${env.ROOT_DOMAIN.toLowerCase()}`)) {
+  // 覆盖全部已登记根域（tyu.me + doulor.cn），只判主域会漏掉新域
+  if (await isOwnDomain(env, next)) {
     throw new ApiError(400, "不能使用本站域名邮箱", "INVALID_EMAIL")
   }
 
@@ -595,4 +605,20 @@ export async function deleteOwnAccount(env: Env, request: Request): Promise<Resp
   const res = new Response(null, { status: 204 })
   res.headers.set("Set-Cookie", clearedSessionCookie())
   return res
+}
+/**
+ * GET /api/downloads —— 落地页「下载」区的渠道链接（公开，无需登录）。
+ *
+ * 网页端 PWA 走 beforeinstallprompt 安装、不走链接，所以这里只下发安卓/Windows 两个
+ * 可配链接；留空（未配置）则该渠道为 null，前端不显示对应按钮。
+ */
+export async function publicDownloads(env: Env, _request: Request): Promise<Response> {
+  const [android, windows] = await Promise.all([
+    getSetting(env, "download_android_url"),
+    getSetting(env, "download_windows_url"),
+  ])
+  return json({
+    android: android.trim() || null,
+    windows: windows.trim() || null,
+  })
 }

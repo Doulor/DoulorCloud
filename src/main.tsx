@@ -7,6 +7,7 @@ import { I18nProvider } from "@/i18n"
 import { AuthProvider } from "@/hooks/use-auth"
 import { ErrorBoundary } from "@/components/error-boundary"
 import { Toaster } from "@/components/ui/sonner"
+import { TooltipProvider } from "@/components/ui/tooltip"
 import { reloadOnceForChunkError } from "@/lib/chunk-error"
 import "@/index.css"
 
@@ -35,7 +36,17 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <I18nProvider>
         <BrowserRouter>
           <AuthProvider>
-            <App />
+            {/*
+              TooltipProvider 必须挂在根上。
+              背景（2026-10-01 站长反馈「DNS 管理界面用不了，报 Tooltip must be
+              used within TooltipProvider」）：admin-dns.tsx 直接用了 <Tooltip>，
+              却没人给它套 Provider，Radix 会**抛异常**⇒ ErrorBoundary 接住后整页不可用。
+              放在这里之后，任何页面（含懒加载的 admin 子页）用 Tooltip 都不必各自包一层。
+              delayDuration 取 200ms：比 Radix 默认的 700ms 跟手，又不至于划过就弹。
+            */}
+            <TooltipProvider delayDuration={200}>
+              <App />
+            </TooltipProvider>
             <Toaster />
           </AuthProvider>
         </BrowserRouter>

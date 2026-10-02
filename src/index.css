@@ -410,6 +410,15 @@
   opacity: 0.8;
 }
 
+/* 自己发的气泡（主色底 + 主色前景）里的链接。
+ * 上面的 `.markdown-body a` 写死了 `color: var(--primary)` —— 那是给**浅底**设计的，
+ * 落在主色底上就是「同色隐形」（浅色主题 primary 近黑、深色主题近白，两边都中招）。
+ * 聊天室与私信里，自己那条消息一旦带链接就看不见，这里统一跟随气泡前景色。
+ * 由气泡自己带 `.bubble-mine` 标记，不在 Markdown 组件里判断（那样会波及社区发帖）。 */
+.bubble-mine .markdown-body a {
+  color: inherit;
+}
+
 /* 表格 */
 .markdown-body table {
   margin: 0.8em 0;
@@ -441,6 +450,20 @@
 .markdown-body img {
   max-width: 100%;
   border-radius: 0.5rem;
+}
+
+/* 站内表情包：跟文字走的内联小图，等比缩放。
+ * ⚠️ 必须用「.markdown-body img.sticker-img」这个更高优先级的选择器 ——
+ * 上面的 `.markdown-body img { max-width:100% }` 会把表情包的 `max-w-24` 顶掉。
+ * 规则：**高度封顶 96px、宽度封顶到容器宽**（不是 96px）——这样
+ * 方图（300×300）仍是 96px 小图，而 555×61 这种长条图会按容器宽铺开、
+ * 保持可读，而不是被压成 96×11 的一条线（2026-10-02 yangshu 的长图反馈）。 */
+.markdown-body img.sticker-img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 96px;
+  cursor: zoom-in;
 }
 
 /* 任务列表 */
@@ -497,25 +520,63 @@
 }
 
 
+/* ==========================================================================
+   全站统一滚动条（亮/暗色自适应，跟主题的 muted 灰走）
+   - 竖向/横向都用同一套，圆角细条
+   - 之前各弹窗、聊天、列表用的是浏览器默认滚动条：亮色下纯白、暗色下突兀，
+     与黑白灰极简风格完全不搭。这里统一收口到全局。
+   - Firefox 走 scrollbar-width/scrollbar-color，WebKit 走 ::-webkit-scrollbar。
+   ========================================================================== */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted-foreground) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--muted-foreground);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--foreground);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 落地页锚点跳转：sticky 顶栏（h-14 = 56px）会盖住 section 顶部，
+   给带 id 的 section 留出偏移（配合 landing-layout 的 hash 滚动）。 */
+section[id] {
+  scroll-margin-top: 4.5rem;
+}
+
 /* 公告弹窗：明显的滚动条 */
 .announcement-scroll {
   scrollbar-width: thin;
-  scrollbar-color: hsl(var(--muted-foreground)) transparent;
+  scrollbar-color: var(--muted-foreground) transparent;
 }
 .announcement-scroll::-webkit-scrollbar {
   width: 10px;
 }
 .announcement-scroll::-webkit-scrollbar-track {
-  background: hsl(var(--muted));
+  background: var(--muted);
   border-radius: 8px;
 }
 .announcement-scroll::-webkit-scrollbar-thumb {
-  background: hsl(var(--muted-foreground));
+  background: var(--muted-foreground);
   border-radius: 8px;
-  border: 2px solid hsl(var(--muted));
+  border: 2px solid var(--muted);
 }
 .announcement-scroll::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--foreground));
+  background: var(--foreground);
 }
 
 /* ==========================================================================
@@ -679,3 +740,25 @@ html.dark .glass-card {
   box-shadow: 0 1px 2px oklch(0 0 0 / 8%), inset 0 1px 0 oklch(1 0 0 / 7%);
 }
 
+
+/*
+ * 管理端宽表：最后一列（操作按钮）固定在右侧。
+ *
+ * 为什么需要：这些表格列多、总宽超过容器，`overflow-x-auto` 横向滚动后
+ * 「通过 / 拒绝 / 删除」按钮跟着滚出屏幕，管理员得滚到最右再滚回来才能操作
+ * （2026-10-01 站长反馈）。sticky 让按钮永远贴在可视区右缘。
+ *
+ * 背景必须**不透明**：sticky 列浮在滚动内容之上，透明会透出下层文字。
+ * 表头那格用 muted（与 thead 同色系但不透明），正文格用 background（与行底色一致）。
+ */
+.table-actions-sticky > thead > tr > th:last-child,
+.table-actions-sticky > tbody > tr > td:last-child {
+  position: sticky;
+  right: 0;
+  background: var(--background);
+  box-shadow: -8px 0 8px -8px rgb(0 0 0 / 0.3);
+}
+
+.table-actions-sticky > thead > tr > th:last-child {
+  background: var(--muted);
+}

@@ -11,6 +11,10 @@ export interface UserRow {
   namespace: string
   role: string
   status: string
+  /** 封禁原因（仅 status='suspended' 时有值）；用户下次登录时会在登录页看到 */
+  suspend_reason?: string | null
+  /** 封禁时间（同上，仅封禁期间有值；解封时清空） */
+  suspend_at?: string | null
   /** 真实邮箱是否已验证（验证后才能作转发目标） */
   email_verified?: number
   /** 是否接收「个人相关」通知邮件（捐献/反馈/社区回复等） */
@@ -51,6 +55,80 @@ const SESSION_COOKIE = "doulor_session"
  */
 export function isPrivileged(role: string | null | undefined): boolean {
   return role === "admin" || role === "root"
+}
+
+/* --------------------------------------------------------------------------
+ * 「未验证邮箱」功能门槛（2026-10-02 站长要求）
+ *
+ * 站长口径：「没验证虽然可以进页面，但类似于开通中转站之类的都干不了；
+ *          最多可以搞一下注销账户、更改密码、用户名之类的个人信息。」
+ *
+ * 因此这里的语义是 **只拦写操作**：
+ *   · GET / HEAD / OPTIONS 一律放行 —— 未验证用户照样能进所有页面、看自己的数据，
+ *     不会出现「一片 403、页面空转」的观感；
+ *   · 只有要开通 / 创建 / 提交 / 删除时才要求先验证邮箱。
+ *
+ * ⚠️ 这里**只列业务功能模块**。账户与状态类接口（/settings、/me、/password、
+ * /logout、/attention、/notifications、/app、/feedback、/community/seen…）刻意
+ * **不列** —— 未验证用户仍能改密码、改用户名、改昵称头像、看消息、提反馈、
+ * 以及注销账号（站长明确要求保留这些出口）。
+ *
+ * ⚠️ 判定方向必须保守：**宁可漏锁（某个功能还能用），也绝不误锁**。
+ * 漏锁只是少拦一个入口，事后加一行即可；误锁会把用户关进「什么都改不了」的
+ * 死角，只能靠发版救回来。
+ *
+ * ⚠️ 前缀匹配用的是「去掉 /api 前缀」的路径（与 index.ts 的 routePath 同一口径），
+ * 且要求 `=== prefix` 或 `startsWith(prefix + "/")` —— 否则 `/dev` 会误伤 `/device`。
+ * ----------------------------------------------------------------------- */
+const EMAIL_VERIFY_REQUIRED_PREFIXES: readonly string[] = [
+  "/dev", //             AI 中转站：开通 / 建 Key / 兑换 / 订阅
+  "/wb2api", //          WorkBuddy 号池通道
+  "/cli2api", //         CLI2API 通道
+  "/storage", //         直链网盘
+  "/subdomains", //      子域名
+  "/dns", //             DNS 记录
+  "/mailbox", //         邮箱与转发
+  "/frp", //             内网穿透
+  "/proxy", //           代理节点
+  "/donations", //       资源捐献
+  "/points", //          积分与商城
+  "/vouchers", //        兑换券
+  "/my-invites", //      我的邀请码
+  "/chat", //            聊天室
+  "/dm", //              一对一私信
+  "/events", //          活动参与
+  "/fun-links", //       工具箱外链
+  "/tempbox", //         临时分享箱（创建）
+  "/community/posts", // 社区发帖 / 评论 / 点赞（只读 GET 不受影响）
+  "/profile/domain", //  名片绑定的自定义域名
+  "/profile/asset", //   名片资源上传（占 R2）
+]
+
+/** 只读方法一律放行 —— 「可以进页面」就是靠这条兜住的 */
+const READ_ONLY_METHODS = new Set(["GET", "HEAD", "OPTIONS"])
+
+/**
+ * 从请求里取「去掉 /api 前缀」的接口路径，口径与 index.ts::route 的 routePath 一致。
+ * 解析失败时返回空串（不命中任何前缀 ⇒ 放行，仍然走保守方向）。
+ */
+function apiRoutePath(request: Request): string {
+  let path: string
+  try {
+    path = new URL(request.url).pathname
+  } catch {
+    return ""
+  }
+  path = path.replace(/\/+$/, "") || "/"
+  return path.startsWith("/api") ? path.slice(4) : path
+}
+
+/** 该请求是否命中「未验证邮箱」门槛（非只读 + 前缀命中功能模块） */
+function needsVerifiedEmail(request: Request): boolean {
+  if (READ_ONLY_METHODS.has(request.method.toUpperCase())) return false
+  const routePath = apiRoutePath(request)
+  return EMAIL_VERIFY_REQUIRED_PREFIXES.some(
+    (p) => routePath === p || routePath.startsWith(`${p}/`)
+  )
 }
 
 export function toPublicUser(row: UserRow) {
@@ -136,6 +214,23 @@ export async function requireUser(
 
   // 把仅用于判定过期的辅助列摘掉，保持返回形状与原来一致
   const { _session_expires_at: _expires, ...user } = valid
+
+  // 「未验证邮箱」功能门槛（规则见上方 EMAIL_VERIFY_REQUIRED_PREFIXES 注释）。
+  //
+  // 放在**这里**而不是 dispatch 层，有两个理由：
+  //   1. 零成本 —— 用户行本来就已经查出来了，不额外多一次 D1 往返；
+  //   2. 一处覆盖 —— requireFeatureUser 也走本函数，因此 122 个调用点全部自动生效。
+  // 管理员/站长必须豁免：否则站长只要没验证邮箱，连管理后台都进不去。
+  if (user.email_verified !== 1 && !isPrivileged(user.role)) {
+    if (needsVerifiedEmail(request)) {
+      throw new ApiError(
+        403,
+        "请先验证邮箱后再使用该功能（设置 → 真实邮箱验证）",
+        "EMAIL_NOT_VERIFIED"
+      )
+    }
+  }
+
   return user as UserRow
 }
 
@@ -275,4 +370,58 @@ export async function requireFeatureUser(
     requireFeature(perms, feature)
   }
   return user
+}
+
+/** 管理员对申诉的回复，以及用户是否已确认看过（供强制弹窗使用） */
+export interface PendingAppealReply {
+  id: string
+  status: string
+  reviewNote: string
+  createdAt: string
+  reviewedAt: string | null
+}
+
+/**
+ * 读「最近一条有管理员回复、但用户还没确认看过」的申诉（2026-10-02 补发机制）。
+ *
+ * 场景：管理员处理完申诉（accept 解封 / reject 驳回）并写了回复后，
+ * 用户下一次登录（或打开页面）就应该被**强制弹窗**看到这段回复；
+ * 直到他勾选确认（`/api/appeal/acknowledge`）把 `note_read_at` 写上，这里才不再返回。
+ *
+ * 这也是**补发**通道：老用户早就解封、当时没看到回复，只要 `note_read_at` 仍为空，
+ * 下次登录/开页面就会命中。
+ *
+ * ⚠️ `note_read_at` 是迁移 0101 才加的列：线上万一漏执行迁移，这里必须吞异常返回 null，
+ *   绝不能把登录本身打成 500（登录一挂，全站都进不去）。
+ */
+export async function loadPendingReply(
+  env: Env,
+  userId: string
+): Promise<PendingAppealReply | null> {
+  try {
+    const row = await env.DB.prepare(
+      "SELECT id, status, review_note, created_at, reviewed_at FROM account_appeals " +
+        "WHERE user_id = ? AND review_note IS NOT NULL AND review_note != '' " +
+        "AND note_read_at IS NULL " +
+        "ORDER BY COALESCE(reviewed_at, created_at) DESC LIMIT 1"
+    )
+      .bind(userId)
+      .first<{
+        id: string
+        status: string
+        review_note: string
+        created_at: string
+        reviewed_at: string | null
+      }>()
+    if (!row) return null
+    return {
+      id: row.id,
+      status: row.status,
+      reviewNote: row.review_note,
+      createdAt: row.created_at,
+      reviewedAt: row.reviewed_at,
+    }
+  } catch {
+    return null
+  }
 }

@@ -266,7 +266,7 @@ export default function IdPhotoTool() {
                 <SelectContent>
                   {PRESETS.map((p) => (
                     <SelectItem key={p.id} value={p.id}>
-                      {p.label}
+                      {t(p.label)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -294,7 +294,7 @@ export default function IdPhotoTool() {
                         style={{ background: b.hex }}
                       />
                     )}
-                    {b.label}
+                    {t(b.label)}
                   </button>
                 ))}
               </div>

@@ -35,6 +35,7 @@ import { purgeExpiredPreviews } from "./link-preview"
 import { autoPriceNewModels } from "./newapi-client"
 import { cli2DeleteAccount } from "./cli2api-client"
 import { expireRentalOrders } from "./points-shop"
+import { scanDns } from "./dns-audit"
 
 /** 过期会话保留期（天）：留一点用于排查"刚掉线"的投诉 */
 const SESSION_RETENTION_DAYS = 7
@@ -152,6 +153,12 @@ export interface MaintenanceReport {
   }
   /** 网盘记账与实际记录数不一致的用户（只报告，不自动修） */
   storageMismatches: { prefix: string; fileCount: number; actual: number; usedBytes: number }[]
+  /**
+   * DNS 解析合规扫描结果（2026-10-01）。
+   * 只做静态规则（私网地址、第三方托管、域名转发、无效内容…）；
+   * 「真实解析探测」是站长在面板上手动触发的，不进 cron（避免外部依赖）。
+   */
+  dnsAudit: { scanned: number; found: number; high: number; medium: number; low: number } | null
   tableRows: Record<string, number>
   warnings: string[]
   errors: string[]
@@ -714,6 +721,32 @@ export async function runMaintenance(
     }
   }
 
+  // 9c) DNS 解析合规扫描（2026-10-01）
+  //
+  // 站内 DNS 解析功能此前没有任何审核（见 dns-audit.ts 的模块注释）。
+  // 这里每小时跑一次**静态规则**扫描：只读 dns_records 一行 SELECT + 内存规则，
+  // 不产生外部请求，成本可忽略（这也是不在 cron 里做真实解析探测的原因）。
+  // 结果落 dns_audit_findings，站长在「管理 → DNS」里处置。
+  let dnsAudit: { scanned: number; found: number; high: number; medium: number; low: number } | null = null
+  if (!dryRun) {
+    try {
+      const summary = await scanDns(env, { mode: "hourly" })
+      dnsAudit = {
+        scanned: summary.scanned,
+        found: summary.found,
+        high: summary.high,
+        medium: summary.medium,
+        low: summary.low,
+      }
+      if (summary.high > 0) {
+        warnings.push(`DNS 合规扫描发现 ${summary.high} 项高风险解析记录，请到「管理 → DNS」处理。`)
+      }
+    } catch (err) {
+      // 表未迁移 / D1 抖动：只记日志，不影响其它运维项
+      console.error("DNS 合规扫描失败（表可能未迁移）:", err)
+    }
+  }
+
   // 10) 清理失败也算告警（否则"静默失败"永远没人知道）
   if (errors.length > 0) {
     warnings.push(`本次运维有 ${errors.length} 项失败：${errors.slice(0, 3).join("；")}`)
@@ -737,6 +770,7 @@ export async function runMaintenance(
     rentalExpiry,
     announcementMails,
     storageMismatches,
+    dnsAudit,
     tableRows,
     warnings,
     errors,

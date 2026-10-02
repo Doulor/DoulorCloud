@@ -20,6 +20,7 @@ import {
   GripVertical,
   Pencil,
   RotateCcw,
+  ChevronDown,
 } from "lucide-react"
 import { toast } from "sonner"
 import {
@@ -40,6 +41,7 @@ import {
 import { CSS } from "@dnd-kit/utilities"
 
 import { PageHeader } from "@/components/page-header"
+import { InstallAppButton } from "@/components/install-app-button"
 import { DataFade } from "@/components/data-fade"
 import {
   Card,
@@ -61,9 +63,18 @@ import {
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import { formatBytesShort } from "@/lib/format"
-import { authApi, newapiApi, profileApi, announcementApi, errMsg, HttpError } from "@/services/api"
+import {
+  authApi,
+  newapiApi,
+  profileApi,
+  announcementApi,
+  getDefaultRootDomain,
+  errMsg,
+  HttpError,
+} from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 import { useT, tStatic } from "@/i18n"
+import { UserAvatar } from "@/components/user-avatar"
 import type {
   Announcement,
   MeResponse,
@@ -117,7 +128,17 @@ function AiCard() {
 
   const acc = status?.account
   const symbol = status?.currencySymbol ?? "¥"
-  const remaining = acc ? (acc.quotaUsd ?? 0) - (acc.usedUsd ?? 0) : 0
+  const perUnit = status?.quotaPerUnit ?? 500_000
+  // 剩余额度按**订阅**口径算，两个坑都在这里：
+  //   1. 账户级的 `account.quota` **不含订阅额度** —— 免费订阅和邀请/成就奖励订阅
+  //      都在 `status.subscriptions` 里，只看 account 会漏掉一大截（用户会以为额度不对）。
+  //   2. 而且 `account.quota` **本身就是剩余值**（消费时直接扣减，用超了还会变负），
+  //      原来又减了一次累计消耗 `usedQuota` ⇒ 用超的用户直接显示成负数。
+  // 没有订阅数据时才回落到账户剩余（同样**不再减** used）。
+  const subs = status?.subscriptions ?? []
+  const remaining = subs.length
+    ? subs.reduce((sum, g) => sum + Math.max(0, g.amountTotal - g.amountUsed), 0) / perUnit
+    : Math.max(0, acc?.quotaUsd ?? 0)
 
   return (
     <Card>
@@ -243,6 +264,7 @@ function AiCard() {
 /** 名片预览卡：头像 + 昵称 + 签名 + 查看按钮 */
 function ProfileCard({ compact = false }: { compact?: boolean }) {
   const { t } = useT()
+  const { user } = useAuth()
   const [data, setData] = React.useState<ProfileOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
 
@@ -297,11 +319,22 @@ function ProfileCard({ compact = false }: { compact?: boolean }) {
           </div>
         ) : (
           <div className="flex items-center gap-3">
-            <img
-              src={p.avatarKey ? `/api/profile/asset?kind=avatar` : p.avatarUrl ?? ""}
-              alt={p.displayName ?? ""}
-              className="h-12 w-12 rounded-full border object-cover"
-            />
+            {p.avatarKey || p.avatarUrl ? (
+              <img
+                src={p.avatarKey ? `/api/profile/asset?kind=avatar` : p.avatarUrl ?? ""}
+                alt={p.displayName ?? ""}
+                className="h-12 w-12 shrink-0 rounded-full border object-cover"
+              />
+            ) : (
+              // 名片头像没传时回退账号头像（概览卡语境是「我的账号」不是「公开名片页」），
+              // 否则会渲染出 src="" 的破图（2026-10-02 issue #3）
+              <UserAvatar
+                username={user?.username ?? ""}
+                nickname={user?.nickname}
+                hasAvatar={user?.hasAvatar}
+                className="h-12 w-12 shrink-0"
+              />
+            )}
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">
                 {p.displayName ?? t("dash.profile.noNickname")}
@@ -578,6 +611,14 @@ function AnnouncementsCard() {
   const { t } = useT()
   const [items, setItems] = React.useState<Announcement[]>([])
   const [loading, setLoading] = React.useState(true)
+  /**
+   * 展开中的公告 id。
+   *
+   * 公告正文原来固定 `line-clamp-2` 截断、整条又没有任何点击行为 —— 长公告
+   * 只能看到前两行，用户反馈「点了没反应、看不到完整公告」（2026-10-02）。
+   * 现在点整条即可展开/收起（键盘 Enter/Space 同样可用）。
+   */
+  const [expandedId, setExpandedId] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     let cancelled = false
@@ -624,21 +665,49 @@ function AnnouncementsCard() {
           </p>
         ) : (
           <div className="space-y-3">
-            {items.map((a) => (
-              <div key={a.id} className="space-y-1">
-                <div className="flex items-center gap-2">
-                  {a.pinned && <Badge variant="success">{t("dash.news.pinned")}</Badge>}
-                  <Badge variant="secondary">{categoryLabel[a.category] ?? a.category}</Badge>
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    {new Date(a.createdAt).toLocaleDateString("zh-CN")}
+            {items.map((a) => {
+              const expanded = expandedId === a.id
+              const toggle = () => setExpandedId(expanded ? null : a.id)
+              return (
+                <div
+                  key={a.id}
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={expanded}
+                  onClick={toggle}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault()
+                      toggle()
+                    }
+                  }}
+                  className="-m-2 cursor-pointer space-y-1 rounded-md p-2 transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <div className="flex items-center gap-2">
+                    {a.pinned && <Badge variant="success">{t("dash.news.pinned")}</Badge>}
+                    <Badge variant="secondary">{categoryLabel[a.category] ?? a.category}</Badge>
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      {new Date(a.createdAt).toLocaleDateString("zh-CN")}
+                    </span>
+                  </div>
+                  <p className="text-sm font-medium">{a.title}</p>
+                  <p
+                    className={cn(
+                      "whitespace-pre-wrap text-xs text-muted-foreground",
+                      !expanded && "line-clamp-2"
+                    )}
+                  >
+                    {a.body}
+                  </p>
+                  <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                    <ChevronDown
+                      className={cn("h-3 w-3 transition-transform", expanded && "rotate-180")}
+                    />
+                    {expanded ? t("dash.news.collapse") : t("dash.news.expand")}
                   </span>
                 </div>
-                <p className="text-sm font-medium">{a.title}</p>
-                <p className="whitespace-pre-wrap text-xs text-muted-foreground line-clamp-2">
-                  {a.body}
-                </p>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}</DataFade>
       </CardContent>
@@ -1001,6 +1070,26 @@ function reorderLayout(
 export default function DashboardPage() {
   const { t } = useT()
   const { user } = useAuth()
+
+  /**
+   * 「发给用户的根域」（如 tyu.me）。由后端下发，**不写死** ——
+   * 它是管理员可改的（root_domains 的默认行），换域后写死的地方会显示错地址
+   * （2026-10-02 从 doulor.cn 整体迁到 tyu.me 时就踩到了）。拉不到就留空。
+   */
+  const [rootDomain, setRootDomain] = React.useState("")
+  React.useEffect(() => {
+    let alive = true
+    getDefaultRootDomain()
+      .then((d) => {
+        if (alive) setRootDomain(d)
+      })
+      .catch(() => {
+        /* 拉不到就不显示域名，别闪一个错的 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
   const [data, setData] = React.useState<MeResponse | null>(null)
   const [loading, setLoading] = React.useState(true)
 
@@ -1089,9 +1178,11 @@ export default function DashboardPage() {
       <AnnouncementPopup />
       <PageHeader
         title={t("dash.welcome", { name: user?.username ?? "" })}
-        description={`${user?.namespace}.doulor.cn`}
+        // 根域由后端下发（不写死 doulor.cn）：换域后这里要跟着变
+        description={rootDomain ? `${user?.namespace}.${rootDomain}` : undefined}
         actions={
           <div className="flex items-center gap-2">
+            <InstallAppButton />
             {editing && (
               <Button
                 variant="outline"

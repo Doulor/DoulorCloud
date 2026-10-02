@@ -3,6 +3,7 @@ import { uuid } from "../crypto"
 import { requireUser } from "../auth"
 import { guardRateLimit } from "../ratelimit"
 import { requireOwnedDomain, assertFqdnOwned } from "../ownership"
+import { zoneIdForFqdn } from "../root-domains"
 import {
   cfCreateDnsRecord,
   cfUpdateDnsRecord,
@@ -125,6 +126,12 @@ function toPublicRecord(row: DnsRow) {
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    /**
+     * 平台自动创建、只读（由 listDns 派生注入，见 loadManagedDns）。
+     * 用户自建的一律 false —— 这里显式给出字段，好让派生项能推进同一个数组。
+     */
+    managed: false,
+    managedBy: null as null | "profile" | "storage",
   }
 }
 
@@ -134,6 +141,53 @@ async function loadUserDomain(env: Env, userId: string) {
     .first<{ id: string; name: string; zone_id: string | null }>()
 }
 
+/**
+ * 平台自己建的解析：个人名片 / 网盘直链绑定自定义域名时，`attachCustomDomain`
+ * （见 custom-domain.ts）会为那个 fqdn 建一条 `AAAA 100::` 占位记录 —— 但它只存在
+ * 于 Cloudflare，不落 `dns_records`。于是用户在「DNS 记录」页里既看不到自己名片的
+ * 域名，也看不懂那个域名为什么解析得通（2026-10-01 反馈：「个人名片界面绑定域名
+ * 不会在前面的 dns 记录那里显现」）。
+ *
+ * 这里把它**派生**出来展示，而不是绑定时补写一行，理由：
+ *   1. 补写会让同一事实存在两处（dns_records 与 profiles / storage_prefixes），
+ *      两边必须互相同步：用户在 DNS 页删掉那一行，就会得到「解析没了、名片却还
+ *      显示已绑定」的死结 —— 正是同一条反馈里「删了很久还是在跳转」的成因。
+ *   2. 派生是只读的，天然不可能不一致；而且**存量绑定立刻可见**，不必回填。
+ */
+interface ManagedDnsRow {
+  fqdn: string
+  subdomain_id: string | null
+  ts: string | null
+  kind: string
+}
+
+async function loadManagedDns(env: Env, userId: string): Promise<ManagedDnsRow[]> {
+  try {
+    const res = await env.DB.prepare(
+      `SELECT fqdn, subdomain_id, updated_at AS ts, 'profile' AS kind FROM profiles
+         WHERE user_id = ? AND fqdn IS NOT NULL AND fqdn != ''
+       UNION ALL
+       SELECT fqdn, subdomain_id, created_at AS ts, 'storage' AS kind FROM storage_prefixes
+         WHERE user_id = ? AND fqdn IS NOT NULL AND fqdn != ''`
+    )
+      .bind(userId, userId)
+      .all<ManagedDnsRow>()
+    return res.results ?? []
+  } catch (err) {
+    // 派生展示失败不该让整个 DNS 列表打不开
+    console.error("读取平台托管解析失败:", err)
+    return []
+  }
+}
+
+/** 取 fqdn 相对根域名的前缀（`blog.abc.doulor.cn` + `doulor.cn` → `blog.abc`） */
+function relativeName(fqdn: string, rootDomain: string): string {
+  const lower = fqdn.toLowerCase()
+  const root = rootDomain.toLowerCase()
+  if (root && lower.endsWith(`.${root}`)) return fqdn.slice(0, fqdn.length - root.length - 1)
+  return fqdn.split(".")[0]
+}
+
 // GET /api/dns?subdomainId=xxx —— DNS 记录列表
 export async function listDns(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
@@ -141,6 +195,7 @@ export async function listDns(env: Env, request: Request): Promise<Response> {
   const subdomainId = url.searchParams.get("subdomainId")
 
   let rows
+  let rootDomain = ""
   if (subdomainId) {
     // 校验该子域名属于当前用户
     const sub = await env.DB.prepare(
@@ -158,6 +213,7 @@ export async function listDns(env: Env, request: Request): Promise<Response> {
   } else {
     const domain = await loadUserDomain(env, user.id)
     if (!domain) return json({ records: [] })
+    rootDomain = domain.name
     rows = await env.DB.prepare(
       "SELECT * FROM dns_records WHERE domain_id = ? ORDER BY created_at ASC"
     )
@@ -165,7 +221,40 @@ export async function listDns(env: Env, request: Request): Promise<Response> {
       .all<DnsRow>()
   }
 
-  return json({ records: (rows.results ?? []).map(toPublicRecord) })
+  const records = (rows.results ?? []).map(toPublicRecord)
+
+  // 追加平台托管的解析（只读）。已有同 fqdn 的真实记录时不重复展示 ——
+  // 那属于历史数据，用户当初手工建过，列表里以他自己那条为准。
+  if (!rootDomain) {
+    const d = await loadUserDomain(env, user.id)
+    rootDomain = d?.name ?? ""
+  }
+  const seen = new Set(records.map((r) => r.fqdn.toLowerCase()))
+  for (const m of await loadManagedDns(env, user.id)) {
+    const key = m.fqdn.toLowerCase()
+    if (seen.has(key)) continue
+    if (subdomainId && m.subdomain_id !== subdomainId) continue
+    seen.add(key)
+    records.push({
+      id: `managed:${m.kind}:${key}`,
+      subdomainId: m.subdomain_id,
+      name: relativeName(m.fqdn, rootDomain),
+      fqdn: m.fqdn,
+      type: "AAAA",
+      content: "100::",
+      ttl: 1,
+      proxied: true,
+      priority: undefined,
+      srv: undefined,
+      status: "active",
+      createdAt: m.ts ?? "",
+      updatedAt: m.ts ?? "",
+      managed: true,
+      managedBy: m.kind === "storage" ? "storage" : "profile",
+    })
+  }
+
+  return json({ records })
 }
 
 /** 请求体里 SRV 相关字段的形状（create / update 共用） */
@@ -297,7 +386,7 @@ export async function createDns(env: Env, request: Request): Promise<Response> {
 
   let cfId: string | null = null
   try {
-    const result = await cfCreateDnsRecord(env, domain.zone_id ?? env.ZONE_ID, {
+    const result = await cfCreateDnsRecord(env, await zoneIdForFqdn(env, fqdn), {
       type,
       name: fqdn,
       // SRV 走 data 对象（CF 的 SRV 示例里只有 data，没有 content），其余类型反之
@@ -462,7 +551,7 @@ export async function updateDns(env: Env, request: Request, id: string): Promise
   await assertFqdnOwned(env, user.id, fqdn)
 
   if (existing.cf_id) {
-    await cfUpdateDnsRecord(env, domain!.zone_id ?? env.ZONE_ID, existing.cf_id, {
+    await cfUpdateDnsRecord(env, await zoneIdForFqdn(env, fqdn), existing.cf_id, {
       type,
       name: fqdn,
       ...(srvData ? { data: srvData } : { content }),
@@ -517,10 +606,24 @@ export async function deleteDns(env: Env, request: Request, id: string): Promise
   await requireOwnedDomain(env, user.id, existing.domain_id)
 
   if (existing.cf_id) {
-    const domain = await env.DB.prepare("SELECT zone_id FROM domains WHERE id = ?")
-      .bind(existing.domain_id)
-      .first<{ zone_id: string | null }>()
-    await cfDeleteDnsRecord(env, domain!.zone_id ?? env.ZONE_ID, existing.cf_id)
+    // ⚠️ 必须用**记录自己的 fqdn** 判 zone，不能用「用户主域的名字」：
+    // 两者在「主域与记录不同根域」时不一致，拿主域判会把记录写到别的 zone 里 ——
+    // 表现为记录建了、CF 上却解析不出来，之后删除还会 404。
+    // 2026-10-02 迁移窗口期真的踩到了：19 条 `1.luna.tyu.me` 被写进 doulor.cn 的 zone。
+    try {
+      await cfDeleteDnsRecord(env, await zoneIdForFqdn(env, existing.fqdn), existing.cf_id)
+    } catch (err) {
+      // CF 上已经不存在这条记录（`81044 Record does not exist`）⇒ **视为删除成功**，
+      // 继续把 DB 行清掉。
+      //
+      // 为什么必须容错：上面那批历史脏数据就是「DB 里有行、CF 上根本没有」——
+      // 用户点删除会一直报 `Cloudflare API 调用失败: 404 ...`，记录删不掉、
+      // 永远卡在列表里（2026-10-02 用户 ventus 反馈的就是这个）。
+      // 删除本身是幂等的：目标已不在，目的就算达成了。
+      // 真正的失败（网络 / 权限 / 限流）仍然照常抛出。
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!/81044|Record does not exist|\b404\b/i.test(msg)) throw err
+    }
   }
 
   await env.DB.prepare("DELETE FROM dns_records WHERE id = ?").bind(id).run()

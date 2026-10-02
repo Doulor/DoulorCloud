@@ -2,7 +2,7 @@ import * as React from "react"
 import { AlertTriangle, RotateCw } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { isChunkLoadError, reloadOnceForChunkError } from "@/lib/chunk-error"
+import { isChunkLoadError, reloadOnceForChunkError, hardResetAndReload } from "@/lib/chunk-error"
 import { tStatic } from "@/i18n"
 
 interface State {
@@ -54,7 +54,7 @@ export class ErrorBoundary extends React.Component<
             {error.message || String(error)}
           </pre>
           <div className="mt-4 flex justify-center gap-2">
-            <Button size="sm" onClick={() => window.location.reload()}>
+            <Button size="sm" onClick={() => void hardResetAndReload()}>
               <RotateCw className="h-4 w-4" /> {tStatic("error.reload")}
             </Button>
             <Button

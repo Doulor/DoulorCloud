@@ -3,6 +3,7 @@ import { Link } from "react-router-dom"
 import {
   CalendarClock,
   Check,
+  ChevronDown,
   Coins,
   Loader2,
   Package,
@@ -22,6 +23,7 @@ import {
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
+import { AnchoredPanel } from "@/components/anchored-panel"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { ShopIconPicker } from "@/components/shop-icon-picker"
@@ -29,6 +31,13 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -41,11 +50,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { pointsApi, errMsg, HttpError } from "@/services/api"
+import { PRODUCT_CATEGORY_LABELS, type ProductCategory } from "@/types"
 import { notifyPointsChanged } from "@/components/points-badge"
 import { fmtDateTime } from "@/lib/format"
 import { shopIcon } from "@/lib/shop-icons"
 import { FEATURE_LABELS } from "@/types"
+import { useT, tStatic } from "@/i18n"
 import type {
+  AfterSaleStatus,
   PointBillingMode,
   PointOrder,
   PointProduct,
@@ -55,24 +67,24 @@ import type {
 
 /** 流水来源 → 展示标签 */
 const REASON_LABEL: Record<string, string> = {
-  event: "活动奖励",
-  admin: "管理员调整",
-  redeem: "兑换余额",
-  shop: "商城购买",
-  shop_sell: "商城售出",
-  donation: "捐献奖励",
-  invite: "邀请奖励",
-  invite_commission: "邀请返佣",
-  transfer_out: "转账转出",
-  transfer_in: "转账收到",
+  event: "pt.reason.event",
+  admin: "pt.reason.admin",
+  redeem: "pt.reason.redeem",
+  shop: "pt.reason.shop",
+  shop_sell: "pt.reason.shopSell",
+  donation: "pt.reason.donation",
+  invite: "pt.reason.invite",
+  invite_commission: "pt.reason.inviteCommission",
+  transfer_out: "pt.reason.transferOut",
+  transfer_in: "pt.reason.transferIn",
 }
 
 /** 订单状态 → 展示标签（用户商品订单的 pending/delivered 含义不同，用 orderStatusText 区分） */
 const ORDER_STATUS: Record<string, { label: string; variant: "default" | "outline" | "secondary" }> = {
-  pending: { label: "待发放", variant: "default" },
-  delivered: { label: "已发放", variant: "outline" },
-  settled: { label: "已结算", variant: "outline" },
-  cancelled: { label: "已取消", variant: "secondary" },
+  pending: { label: "pt.status.pending", variant: "default" },
+  delivered: { label: "pt.status.delivered", variant: "outline" },
+  settled: { label: "pt.status.settled", variant: "outline" },
+  cancelled: { label: "pt.status.cancelled", variant: "secondary" },
 }
 
 /**
@@ -80,14 +92,53 @@ const ORDER_STATUS: Record<string, { label: string; variant: "default" | "outlin
  *
  * 用户商品走**担保**：pending = 等卖家交付（积分在平台手里）、
  * delivered = 卖家已交付、等你确认收货。跟官方商品的「待发放 / 已发放」不是一回事。
+ *
+ * ⚠️ 返回的是 **i18n key**，调用方要再套一层 t()（这样语言切换能立刻生效）。
  */
 function orderStatusText(status: string, isUserOrder: boolean): string {
   if (isUserOrder) {
-    if (status === "pending") return "待卖家交付"
-    if (status === "delivered") return "待确认收货"
-    if (status === "settled") return "已完成"
+    if (status === "pending") return "pt.status.awaitSeller"
+    if (status === "delivered") return "pt.status.awaitReceipt"
+    if (status === "settled") return "pt.status.done"
   }
   return ORDER_STATUS[status]?.label ?? status
+}
+
+/** 售后状态 → 展示标签（只在订单确实走过售后时才显示） */
+const AFTER_SALE_STATUS: Record<
+  AfterSaleStatus,
+  { label: string; variant: "default" | "outline" | "secondary" | "destructive" | "success" }
+> = {
+  requested: { label: "pt.afterSale.st.requested", variant: "default" },
+  rejected: { label: "pt.afterSale.st.rejected", variant: "destructive" },
+  platform: { label: "pt.afterSale.st.platform", variant: "default" },
+  closed: { label: "pt.afterSale.st.closed", variant: "secondary" },
+  refunded: { label: "pt.afterSale.st.refunded", variant: "success" },
+}
+
+/**
+ * 买家能不能对这笔订单申请退款。
+ *
+ * 与后端 `requestAfterSale` 的口径保持一致：
+ *   · 订单必须是 delivered（卖家已交付、我还没确认）或 settled（已确认收货）；
+ *   · 没有进行中的售后（requested / platform）—— 已退款更不行；
+ *   · 卖家拒绝 / 平台驳回之后允许重新申请。
+ * 「确认收货后 7 天」的期限由后端判定（前端不重复实现，避免两边算出不同结果）。
+ */
+function canRequestAfterSale(o: PointOrder): boolean {
+  if (o.status !== "delivered" && o.status !== "settled") return false
+  const s = o.afterSaleStatus
+  return s === null || s === "rejected" || s === "closed"
+}
+
+/** 买家能不能申请平台介入（卖家一直不处理 / 已拒绝） */
+function canEscalateAfterSale(o: PointOrder): boolean {
+  return o.afterSaleStatus === "requested" || o.afterSaleStatus === "rejected"
+}
+
+/** 买家能不能自己撤销（已经申请平台介入后要等客服判定，不能自撤） */
+function canWithdrawAfterSale(o: PointOrder): boolean {
+  return o.afterSaleStatus === "requested"
 }
 
 /** 自己上架商品的审核状态 → 标签 */
@@ -95,9 +146,9 @@ const MY_REVIEW: Record<
   string,
   { label: string; variant: "default" | "outline" | "secondary" | "destructive" | "success" }
 > = {
-  pending: { label: "待审核", variant: "default" },
-  approved: { label: "已上架", variant: "success" },
-  rejected: { label: "未通过", variant: "destructive" },
+  pending: { label: "pt.review.pending", variant: "default" },
+  approved: { label: "pt.review.approved", variant: "success" },
+  rejected: { label: "pt.review.rejected", variant: "destructive" },
 }
 
 /**
@@ -108,15 +159,15 @@ const MY_REVIEW: Record<
 function deliveryLabel(delivery: string): string {
   switch (delivery) {
     case "quota":
-      return "自动到账 · 中转站余额"
+      return tStatic("pt.delivery.quota")
     case "feature":
-      return "自动开通 · 功能权限"
+      return tStatic("pt.delivery.feature")
     case "subscription":
-      return "自动开通 · 中转站订阅"
+      return tStatic("pt.delivery.subscription")
     case "invite_quota":
-      return "自动到账 · 邀请码额度"
+      return tStatic("pt.delivery.inviteQuota")
     default:
-      return "人工发放"
+      return tStatic("pt.delivery.manual")
   }
 }
 
@@ -129,25 +180,25 @@ function needsNewapiBinding(delivery: string): boolean {
 function buyHint(delivery: string, isUserProduct: boolean): string {
   if (isUserProduct) {
     // 用户商品是担保交易：钱先放平台，卖家交付 + 买家确认后才转给卖家
-    return "下单后积分先由平台保管，卖家发货、你确认收货后才转给卖家。"
+    return tStatic("pt.buyHint.userProduct")
   }
   switch (delivery) {
     case "quota":
-      return "下单后会自动充进你的 AI 中转站余额。"
+      return tStatic("pt.buyHint.quota")
     case "feature":
-      return "下单后会自动给你开通对应功能权限，立即生效。"
+      return tStatic("pt.buyHint.feature")
     case "subscription":
-      return "下单后会自动给你的中转站账号开通订阅套餐。"
+      return tStatic("pt.buyHint.subscription")
     case "invite_quota":
-      return "下单后会自动增加你的邀请码创建额度。"
+      return tStatic("pt.buyHint.inviteQuota")
     default:
-      return "下单后由管理员人工发放，可在「我的订单」里看进度。"
+      return tStatic("pt.buyHint.manual")
   }
 }
 
 /** 租期展示：如「租用 30 天」 */
 function rentalTerm(days: number | null | undefined): string {
-  return days && days > 0 ? `租用 ${days} 天` : "租用"
+  return days && days > 0 ? tStatic("pt.rental.term", { n: days }) : tStatic("pt.rental.rental")
 }
 
 /** 租用订单是否已到期（只有租用订单才有 expiresAt） */
@@ -168,18 +219,20 @@ function isRentalExpired(o: PointOrder): boolean {
 function rentalOrderText(o: PointOrder): string | null {
   if (o.billingMode !== "rental") return null
   if (o.status === "cancelled") return null
-  if (!o.expiresAt) return `${rentalTerm(o.rentalDays)}（交付后起算）`
+  if (!o.expiresAt) return tStatic("pt.rental.afterDelivery", { term: rentalTerm(o.rentalDays) })
   const time = fmtDateTime(o.expiresAt)
-  return isRentalExpired(o) ? `已到期（${time}）` : `有效期至 ${time}`
+  return isRentalExpired(o)
+    ? tStatic("pt.rental.expired", { time })
+    : tStatic("pt.rental.validUntil", { time })
 }
 
 /** 购买弹窗里对「租用」的一句解释（官方自动发放 vs 用户商品，收尾方式不同） */
 function rentalBuyHint(days: number | null, isUserProduct: boolean): string {
-  const term = days && days > 0 ? `${days} 天` : "一个租期"
+  const term = days && days > 0 ? tStatic("pt.days", { n: days }) : tStatic("pt.rental.oneTerm")
   if (isUserProduct) {
-    return `这是租用商品：交付后 ${term} 内有效，到期请与卖家协商归还；想继续用，再买一次即可（剩余天数会顺延）。`
+    return tStatic("pt.rental.buyHintUser", { term })
   }
-  return `这是租用商品：交付后 ${term} 内有效，到期后权益会自动收回。想继续用，到期前再买一次即可续期（剩余天数会往后顺延）。`
+  return tStatic("pt.rental.buyHintOfficial", { term })
 }
 
 /** 金额展示：整数不带小数，非整数保留两位 */
@@ -220,6 +273,13 @@ function ProductCover({
   )
 }
 
+/** 商城分类筛选项（「全部」+ 各分类） */
+const SHOP_CAT_FILTERS: { key: ProductCategory | "all"; label: string }[] = [
+  { key: "all", label: "pt.cat.all" },
+  { key: "it", label: PRODUCT_CATEGORY_LABELS.it },
+  { key: "other", label: PRODUCT_CATEGORY_LABELS.other },
+]
+
 /** 商品卡片（官方 / 用户商品共用；卖家名非空时显示「由 xxx 上架」） */
 function ProductCard({
   product,
@@ -232,16 +292,31 @@ function ProductCard({
   sellerName?: string | null
   onBuy: (p: PointProduct) => void
 }) {
+  const { t } = useT()
   const soldOut = product.stock !== null && product.stock <= 0
   const tooExpensive = product.price > balance
   const isRental = product.billingMode === "rental"
   return (
-    <Card className="flex flex-col">
+    <Card className="flex min-w-0 flex-col">
       <ProductCover imageUrl={product.imageUrl} icon={product.icon} name={product.name} />
       <CardHeader className="pb-2">
         <div className="flex items-start justify-between gap-2">
           <CardDescription className="min-w-0 truncate">
-            {sellerName ? `由 ${sellerName} 上架` : deliveryLabel(product.delivery)}
+            {sellerName ? (
+              <>
+                {t("pt.bySeller", { name: sellerName })}
+                {/* 快速联系卖家（2026-10-01）：问细节、催发货都从这进，
+                    跟订单记录里的「发私信」是同一个会话 */}
+                <Link
+                  to={`/dashboard/dm/${encodeURIComponent(sellerName)}`}
+                  className="ml-1 whitespace-nowrap text-primary underline underline-offset-2 hover:text-primary/80"
+                >
+                  {t("pt.dm")}
+                </Link>
+              </>
+            ) : (
+              deliveryLabel(product.delivery)
+            )}
           </CardDescription>
           <div className="flex shrink-0 items-center gap-1">
             {isRental && (
@@ -254,20 +329,31 @@ function ProductCard({
               <Badge variant="outline" className="text-[10px]">
                 {soldOut
                   ? isRental
-                    ? "已租完"
-                    : "已售罄"
+                    ? t("pt.rentedOut")
+                    : t("pt.soldOut")
                   : isRental
-                    ? `剩 ${product.stock} 份`
-                    : `剩 ${product.stock} 件`}
+                    ? t("pt.leftCopies", { n: product.stock })
+                    : t("pt.leftPieces", { n: product.stock })}
               </Badge>
             )}
           </div>
         </div>
-        <CardTitle className="text-base">{product.name}</CardTitle>
+        <CardTitle className="flex items-center gap-1.5 text-base">
+          <span className="min-w-0 truncate">{product.name}</span>
+          <Badge variant="outline" className="shrink-0 text-[10px] font-normal">
+            {t(PRODUCT_CATEGORY_LABELS[product.category] ?? PRODUCT_CATEGORY_LABELS.other)}
+          </Badge>
+        </CardTitle>
       </CardHeader>
       <CardContent className="flex flex-1 flex-col justify-between gap-3">
         {product.description ? (
-          <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+          // ⚠️ 必须 line-clamp + break-all：商品描述里常有一整段不带空格的链接，
+          // 没有断行机会会一路把卡片撑爆（2026-10-01 用户反馈「描述过长超出卡片」）。
+          // 完整内容在「购买」弹窗里还有一次展示，这里截断不丢信息。
+          <p
+            className="line-clamp-3 break-all whitespace-pre-wrap text-sm text-muted-foreground"
+            title={product.description}
+          >
             {product.description}
           </p>
         ) : (
@@ -277,12 +363,12 @@ function ProductCard({
           <div className="flex items-baseline gap-1.5">
             <span className="text-lg font-semibold tabular-nums">{product.price}</span>
             <span className="text-xs text-muted-foreground">
-              积分
-              {isRental ? ` / ${product.rentalDays} 天` : ""}
+              {t("pt.unit")}
+              {isRental ? ` / ${t("pt.days", { n: product.rentalDays ?? 0 })}` : ""}
               {product.delivery === "quota" && product.quotaYuan
-                ? ` · 充 ¥${fmtMoney(product.quotaYuan)}`
+                ? ` · ${t("pt.quotaFill", { v: fmtMoney(product.quotaYuan) })}`
                 : ""}
-              {product.perUserLimit ? ` · 每人限 ${product.perUserLimit} 件` : ""}
+              {product.perUserLimit ? ` · ${t("pt.perUserLimit", { n: product.perUserLimit })}` : ""}
             </span>
           </div>
           <Button
@@ -293,13 +379,13 @@ function ProductCard({
           >
             {soldOut
               ? isRental
-                ? "已租完"
-                : "已售罄"
+                ? t("pt.rentedOut")
+                : t("pt.soldOut")
               : tooExpensive
-                ? "积分不足"
+                ? t("pt.insufficientShort")
                 : isRental
-                  ? "租用"
-                  : "购买"}
+                  ? t("pt.rental.rental")
+                  : t("pt.buy")}
           </Button>
         </div>
       </CardContent>
@@ -313,6 +399,7 @@ interface UploadForm {
   description: string
   imageUrl: string
   icon: string
+  category: ProductCategory
   price: string
   stock: string
   /** 计费方式：买断 / 租用 */
@@ -328,6 +415,7 @@ function emptyUpload(): UploadForm {
     description: "",
     imageUrl: "",
     icon: "",
+    category: "other",
     price: "",
     stock: "",
     billingMode: "one_time",
@@ -342,6 +430,7 @@ function uploadOf(p: PointProduct): UploadForm {
     description: p.description,
     imageUrl: p.imageUrl ?? "",
     icon: p.icon ?? "",
+    category: p.category ?? "other",
     price: String(p.price),
     stock: p.stock === null ? "" : String(p.stock),
     billingMode: p.billingMode,
@@ -356,6 +445,7 @@ function uploadPayload(f: UploadForm): UserProductPayload {
     name: f.name.trim(),
     description: f.description.trim(),
     imageUrl: f.imageUrl.trim() || null,
+    category: f.category,
     icon: f.icon.trim() || null,
     price: Math.trunc(Number(f.price) || 0),
     stock: f.stock.trim() === "" ? null : Math.trunc(Number(f.stock) || 0),
@@ -369,6 +459,7 @@ function uploadPayload(f: UploadForm): UserProductPayload {
 const RENTAL_DAY_PRESETS = [7, 30, 90, 365] as const
 
 export default function PointsPage() {
+  const { t } = useT()
   const [data, setData] = React.useState<PointsOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
 
@@ -402,23 +493,29 @@ export default function PointsPage() {
   // 封面图直传（2026-10-01）：传完把返回的同源 URL 填进 imageUrl，卖家不用再找图床
   const [coverUploading, setCoverUploading] = React.useState(false)
   const coverInputRef = React.useRef<HTMLInputElement | null>(null)
+
+  // 售后（退款）：买家「申请退款」与卖家「拒绝并说明理由」共用一个对话框，用 mode 区分
+  const [afterSaleTarget, setAfterSaleTarget] = React.useState<PointOrder | null>(null)
+  const [afterSaleMode, setAfterSaleMode] = React.useState<"request" | "reject">("request")
+  const [afterSaleText, setAfterSaleText] = React.useState("")
+  const [afterSaleBusy, setAfterSaleBusy] = React.useState(false)
   const handleCoverPick = async (file: File | undefined) => {
     if (!file) return
     if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type)) {
-      toast.error("封面只支持 JPG / PNG / WebP / GIF")
+      toast.error(t("pt.err.coverFormat"))
       return
     }
     if (file.size > 5 * 1024 * 1024) {
-      toast.error("封面图不能超过 5 MB")
+      toast.error(t("pt.err.coverSize"))
       return
     }
     setCoverUploading(true)
     try {
       const res = await pointsApi.uploadProductImage(file)
       setForm((f) => ({ ...f, imageUrl: res.url }))
-      toast.success("封面上传成功")
+      toast.success(t("pt.toast.coverUploaded"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "封面上传失败")
+      toast.error(err instanceof HttpError ? err.message : t("pt.err.coverUpload"))
     } finally {
       setCoverUploading(false)
       if (coverInputRef.current) coverInputRef.current.value = ""
@@ -430,7 +527,7 @@ export default function PointsPage() {
     try {
       setData(await pointsApi.overview())
     } catch (err) {
-      toast.error(errMsg(err, "加载积分失败"))
+      toast.error(errMsg(err, t("pt.err.load")))
     } finally {
       setLoading(false)
     }
@@ -460,7 +557,7 @@ export default function PointsPage() {
       notifyPointsChanged()
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "兑换失败"))
+      toast.error(errMsg(err, t("pt.err.redeem")))
     } finally {
       setRedeemBusy(false)
     }
@@ -479,14 +576,14 @@ export default function PointsPage() {
     setTransferBusy(true)
     try {
       const res = await pointsApi.transfer(transferTo.trim(), transferValue)
-      toast.success(`已转给 @${res.to} ${transferValue} 积分`)
+      toast.success(t("pt.toast.transferred", { to: res.to, n: transferValue }))
       setTransferTo("")
       setTransferAmount("")
       setTransferOpen(false)
       notifyPointsChanged()
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "转账失败"))
+      toast.error(errMsg(err, t("pt.err.transfer")))
     } finally {
       setTransferBusy(false)
     }
@@ -502,20 +599,27 @@ export default function PointsPage() {
     setBuyBusy(true)
     try {
       const res = await pointsApi.buy(buyTarget.id)
-      const term = res.order.billingMode === "rental" ? `（${rentalTerm(res.order.rentalDays)}）` : ""
+      const term =
+        res.order.billingMode === "rental"
+          ? t("pt.rental.termParen", { term: rentalTerm(res.order.rentalDays) })
+          : ""
       toast.success(
         res.order.status === "delivered"
           ? // 自动交付的订单，note 里就是「发了什么」（如「已自动充值 ¥10」）
-            `已购买「${res.order.productName}」${term}，${res.order.note ?? "已自动发放"}。`
+            t("pt.toast.boughtAuto", {
+              name: res.order.productName,
+              term,
+              note: res.order.note ?? t("pt.autoDelivered"),
+            })
           : res.order.sellerId
-            ? `已买下「${res.order.productName}」${term}，等卖家发货后记得来确认收货。`
-            : `已购买「${res.order.productName}」${term}，等待管理员发放。`
+            ? t("pt.toast.boughtUser", { name: res.order.productName, term })
+            : t("pt.toast.boughtManual", { name: res.order.productName, term })
       )
       setBuyTarget(null)
       notifyPointsChanged()
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "购买失败"))
+      toast.error(errMsg(err, t("pt.err.buy")))
     } finally {
       setBuyBusy(false)
     }
@@ -525,21 +629,105 @@ export default function PointsPage() {
   const confirmReceipt = async (o: PointOrder) => {
     const rentalNote =
       o.billingMode === "rental"
-        ? `\n\n租期从确认收货这一刻起算（${o.rentalDays ?? "?"} 天）。`
+        ? "\n\n" + t("pt.rental.noteFromReceipt", { n: o.rentalDays ?? "?" })
         : ""
     if (
       !confirm(
-        `确认收到「${o.productName}」了？\n\n确认后 ${o.price} 积分会转给卖家，不能再撤回。${rentalNote}`
+        t("pt.confirm.receipt", { name: o.productName, price: o.price, note: rentalNote })
       )
     )
       return
     try {
       await pointsApi.confirmReceipt(o.id)
-      toast.success("已确认收货，积分已转给卖家")
+      toast.success(t("pt.toast.receiptConfirmed"))
       notifyPointsChanged()
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "确认失败"))
+      toast.error(errMsg(err, t("pt.err.confirmReceipt")))
+    }
+  }
+
+  // ---- 售后（退款）----
+
+  /** 买家：打开「申请退款」对话框 */
+  const openAfterSale = (o: PointOrder) => {
+    setAfterSaleMode("request")
+    setAfterSaleText("")
+    setAfterSaleTarget(o)
+  }
+
+  /** 卖家：打开「拒绝退款」对话框（要写明理由，买家才服气） */
+  const openAfterSaleReject = (o: PointOrder) => {
+    setAfterSaleMode("reject")
+    setAfterSaleText("")
+    setAfterSaleTarget(o)
+  }
+
+  /** 提交对话框 —— 买家申请 / 卖家拒绝共用 */
+  const submitAfterSale = async () => {
+    const o = afterSaleTarget
+    if (!o) return
+    const text = afterSaleText.trim()
+    if (afterSaleMode === "request" && text.length < 4) {
+      toast.error(t("pt.afterSale.reasonTooShort"))
+      return
+    }
+    if (afterSaleMode === "reject" && !text) {
+      toast.error(t("pt.afterSale.rejectNeedReason"))
+      return
+    }
+    setAfterSaleBusy(true)
+    try {
+      if (afterSaleMode === "request") {
+        await pointsApi.requestAfterSale(o.id, text)
+        toast.success(t("pt.toast.afterSaleRequested"))
+      } else {
+        await pointsApi.sellerResolveAfterSale(o.id, false, text)
+        toast.success(t("pt.toast.afterSaleRejected"))
+      }
+      setAfterSaleTarget(null)
+      await load()
+    } catch (err) {
+      toast.error(errMsg(err, t("pt.err.afterSale")))
+    } finally {
+      setAfterSaleBusy(false)
+    }
+  }
+
+  /** 卖家：同意退款（积分原路退回买家；卖家本就没拿到过这笔托管积分） */
+  const approveAfterSale = async (o: PointOrder) => {
+    if (!confirm(t("pt.afterSale.confirmApprove", { name: o.productName, price: o.price }))) return
+    try {
+      await pointsApi.sellerResolveAfterSale(o.id, true)
+      toast.success(t("pt.toast.afterSaleApproved"))
+      notifyPointsChanged()
+      await load()
+    } catch (err) {
+      toast.error(errMsg(err, t("pt.err.afterSale")))
+    }
+  }
+
+  /** 买家：撤销自己的退款申请 */
+  const withdrawAfterSale = async (o: PointOrder) => {
+    if (!confirm(t("pt.afterSale.confirmWithdraw"))) return
+    try {
+      await pointsApi.cancelAfterSale(o.id)
+      toast.success(t("pt.toast.afterSaleWithdrawn"))
+      await load()
+    } catch (err) {
+      toast.error(errMsg(err, t("pt.err.afterSale")))
+    }
+  }
+
+  /** 买家：卖家不处理或已拒绝 → 申请平台（管理员）介入 */
+  const escalateAfterSale = async (o: PointOrder) => {
+    if (!confirm(t("pt.afterSale.confirmEscalate"))) return
+    try {
+      await pointsApi.escalateAfterSale(o.id)
+      toast.success(t("pt.toast.afterSaleEscalated"))
+      await load()
+    } catch (err) {
+      toast.error(errMsg(err, t("pt.err.afterSale")))
     }
   }
 
@@ -560,60 +748,64 @@ export default function PointsPage() {
   const submitUpload = async () => {
     const payload = uploadPayload(form)
     if (!payload.name) {
-      toast.error("请填写商品名称")
+      toast.error(t("pt.err.nameRequired"))
       return
     }
     if (payload.price < 1) {
-      toast.error("售价必须是大于 0 的整数积分")
+      toast.error(t("pt.err.priceInvalid"))
       return
     }
     if (payload.billingMode === "rental" && (!payload.rentalDays || payload.rentalDays < 1)) {
-      toast.error("租用模式请填写租期天数（大于 0 的整数）")
+      toast.error(t("pt.err.rentalDaysRequired"))
       return
     }
     setFormBusy(true)
     try {
       if (editingId) {
         await pointsApi.updateMyProduct(editingId, payload)
-        toast.success("已保存，改动需要管理员重新审核")
+        toast.success(t("pt.toast.savedReview"))
       } else {
         await pointsApi.uploadProduct(payload)
-        toast.success("已提交，等管理员审核通过后就会出现在「用户们的商城」里")
+        toast.success(t("pt.toast.submitted"))
       }
       setUploadOpen(false)
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "提交失败"))
+      toast.error(errMsg(err, t("pt.err.submit")))
     } finally {
       setFormBusy(false)
     }
   }
 
   const removeMine = async (p: PointProduct) => {
-    if (!confirm(`确定删除「${p.name}」？删掉后不能再恢复。`)) return
+    if (!confirm(t("pt.confirm.deleteMine", { name: p.name }))) return
     try {
       await pointsApi.deleteMyProduct(p.id)
-      toast.success("已删除")
+      toast.success(t("pt.toast.deleted"))
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "删除失败"))
+      toast.error(errMsg(err, t("pt.err.delete")))
     }
   }
 
   const sellerDeliver = async (o: PointOrder) => {
-    if (!confirm(`把订单「${o.productName}」标记为已交付？\n\n买家确认收货后积分才会到你的账上。`)) return
+    if (!confirm(t("pt.confirm.deliver", { name: o.productName }))) return
     try {
       await pointsApi.sellerDeliver(o.id)
-      toast.success("已标记交付，等买家确认收货")
+      toast.success(t("pt.toast.delivered"))
       await load()
     } catch (err) {
-      toast.error(errMsg(err, "操作失败"))
+      toast.error(errMsg(err, t("pt.err.op")))
     }
   }
 
   const orders: PointOrder[] = data?.orders ?? []
   const myProducts: PointProduct[] = data?.myProducts ?? []
   const userProducts: PointProduct[] = data?.userProducts ?? []
+  /** 用户商城的分类筛选：all / it / other */
+  const [shopCat, setShopCat] = React.useState<ProductCategory | "all">("all")
+  const shownUserProducts =
+    shopCat === "all" ? userProducts : userProducts.filter((p) => p.category === shopCat)
   const sellerOrders: PointOrder[] = data?.sellerOrders ?? []
   /** 需要我处理的：别人买了我的东西但还没交付 */
   const todoSellerOrders = sellerOrders.filter((o) => o.status === "pending").length
@@ -621,6 +813,15 @@ export default function PointsPage() {
   const todoConfirm = orders.filter((o) => o.sellerId !== null && o.status === "delivered").length
   /** 一共几件事等着我动手（发货 + 收货），用于卡片角标 */
   const todoCount = todoSellerOrders + todoConfirm
+
+  /** 「我的交易」二级菜单：顶部按钮 → 下拉分类 → 点分类弹窗看明细（2026-10-03 站长要求） */
+  const [tradesMenuOpen, setTradesMenuOpen] = React.useState(false)
+  const tradesBtnRef = React.useRef<HTMLDivElement | null>(null)
+  const [tradesView, setTradesView] = React.useState<null | "todo" | "bought" | "sold">(null)
+  const openTradesView = (v: "todo" | "bought" | "sold") => {
+    setTradesMenuOpen(false)
+    setTradesView(v)
+  }
 
   /**
    * 续费：找到订单对应的商品，重新走一遍购买流程。
@@ -637,15 +838,297 @@ export default function PointsPage() {
     )
   }
 
+  /**
+   * 「我的交易」三个分区的渲染。原先这三块是页面底部一张大卡片，
+   * 2026-10-03 站长要求收进顶部「我的交易」按钮的二级菜单里（点分类再弹窗看）。
+   * 抽成渲染函数是为了弹窗里复用同一套 UI（含卖家发货 / 买家收货 / 售后等操作）。
+   */
+  const renderTodoList = () => (
+    <div className="space-y-2 rounded-lg border border-primary/40 bg-primary/5 p-3">
+      <ul className="space-y-2">
+        {sellerOrders
+          .filter((o) => o.status === "pending")
+          .map((o) => (
+            <li key={o.id} className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm">
+                  {t("pt.todo.ship", { name: o.productName })}
+                </p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {t("pt.todo.shipMeta", { user: o.username, n: o.price })}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                className="shrink-0"
+                onClick={() => void sellerDeliver(o)}
+              >
+                {t("pt.markDelivered")}
+              </Button>
+            </li>
+          ))}
+        {orders
+          .filter((o) => o.sellerId !== null && o.status === "delivered")
+          .map((o) => (
+            <li key={o.id} className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm">
+                  {t("pt.todo.receive", { name: o.productName })}
+                </p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {t("pt.todo.receiveMeta", {
+                    seller: o.sellerName ?? "?",
+                    price: o.price,
+                  })}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                className="shrink-0"
+                onClick={() => void confirmReceipt(o)}
+              >
+                {t("pt.confirmReceipt")}
+              </Button>
+            </li>
+          ))}
+      </ul>
+    </div>
+  )
+
+  const renderBoughtList = () =>
+    orders.length === 0 ? (
+      <p className="rounded-md border border-dashed py-6 text-center text-sm text-muted-foreground">
+        {t("pt.boughtEmpty")}
+      </p>
+    ) : (
+      <ul className="divide-y">
+        {orders.map((o) => {
+          const isUserOrder = o.sellerId !== null
+          const st = ORDER_STATUS[o.status] ?? ORDER_STATUS.pending
+          const rental = rentalOrderText(o)
+          const expired = isRentalExpired(o)
+          const renew = renewTarget(o)
+          return (
+            <li key={o.id} className="flex items-center justify-between gap-3 py-2.5">
+              <div className="min-w-0">
+                <p className="truncate text-sm">
+                  {o.productName}
+                  {o.billingMode === "rental" && (
+                    <Badge variant="secondary" className="ml-1.5 text-[10px]">
+                      {rentalTerm(o.rentalDays)}
+                    </Badge>
+                  )}
+                </p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {fmtDateTime(o.createdAt)}
+                  {isUserOrder ? ` · ${t("pt.sellerLabel")} ${o.sellerName ?? "?"}` : ""}
+                  {/* 交易双方能互相联系（2026-10-01）：交付方式、催确认收货都靠它 */}
+                  {isUserOrder && o.sellerName && (
+                    <>
+                      {" · "}
+                      <Link
+                        to={`/dashboard/dm/${encodeURIComponent(o.sellerName)}`}
+                        className="underline underline-offset-2 hover:text-foreground"
+                      >
+                        {t("pt.sendDm")}
+                      </Link>
+                    </>
+                  )}
+                  {o.note ? ` · ${o.note}` : ""}
+                </p>
+                {(o.afterSaleReason || o.afterSaleNote) && (
+                  <p className="truncate text-xs text-muted-foreground">
+                    {o.afterSaleReason
+                      ? `${t("pt.afterSale.reasonLabel")}${o.afterSaleReason}`
+                      : ""}
+                    {o.afterSaleReason && o.afterSaleNote ? " · " : ""}
+                    {o.afterSaleNote
+                      ? `${t("pt.afterSale.noteLabel")}${o.afterSaleNote}`
+                      : ""}
+                  </p>
+                )}
+                {rental && (
+                  <p
+                    className={
+                      expired
+                        ? "text-xs font-medium text-destructive"
+                        : "text-xs text-muted-foreground"
+                    }
+                  >
+                    {rental}
+                  </p>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-3 text-right">
+                <div>
+                  <p className="text-sm font-medium tabular-nums text-muted-foreground">
+                    -{o.price}
+                  </p>
+                  <div className="mt-0.5 flex flex-col items-end gap-1">
+                    <Badge variant={st.variant} className="text-[10px]">
+                      {t(orderStatusText(o.status, isUserOrder))}
+                    </Badge>
+                    {o.afterSaleStatus && (
+                      <Badge
+                        variant={AFTER_SALE_STATUS[o.afterSaleStatus].variant}
+                        className="text-[10px]"
+                      >
+                        {t(AFTER_SALE_STATUS[o.afterSaleStatus].label)}
+                      </Badge>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-col items-end gap-1">
+                  {isUserOrder && o.status === "delivered" && (
+                    <Button size="sm" onClick={() => void confirmReceipt(o)}>
+                      <Check className="mr-1 h-3.5 w-3.5" />
+                      {t("pt.confirmReceipt")}
+                    </Button>
+                  )}
+                  {canRequestAfterSale(o) && (
+                    <Button size="sm" variant="outline" onClick={() => openAfterSale(o)}>
+                      {t("pt.afterSale.request")}
+                    </Button>
+                  )}
+                  {canEscalateAfterSale(o) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void escalateAfterSale(o)}
+                    >
+                      {t("pt.afterSale.escalate")}
+                    </Button>
+                  )}
+                  {canWithdrawAfterSale(o) && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void withdrawAfterSale(o)}
+                    >
+                      {t("pt.afterSale.withdraw")}
+                    </Button>
+                  )}
+                </div>
+                {renew && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setBuyTarget(renew)}
+                    title={expired ? t("pt.renewExpiredTip") : t("pt.renewTip")}
+                  >
+                    <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                    {t("pt.renew")}
+                  </Button>
+                )}
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+    )
+
+  const renderSoldList = () =>
+    sellerOrders.length === 0 ? (
+      <p className="rounded-md border border-dashed py-6 text-center text-sm text-muted-foreground">
+        {t("pt.soldEmpty")}
+      </p>
+    ) : (
+      <ul className="divide-y rounded-md border">
+        {sellerOrders.map((o) => (
+          <li key={o.id} className="flex items-center justify-between gap-3 p-3">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">
+                {o.productName}
+                {o.billingMode === "rental" && (
+                  <Badge variant="secondary" className="ml-1.5 text-[10px]">
+                    {rentalTerm(o.rentalDays)}
+                  </Badge>
+                )}
+              </p>
+              <p className="truncate text-xs text-muted-foreground">
+                {t("pt.soldMeta", { user: o.username, time: fmtDateTime(o.createdAt) })}
+                {" · "}
+                <Link
+                  to={`/dashboard/dm/${encodeURIComponent(o.username)}`}
+                  className="underline underline-offset-2 hover:text-foreground"
+                >
+                  {t("pt.sendDm")}
+                </Link>
+                {o.note ? ` · ${o.note}` : ""}
+              </p>
+              {o.afterSaleReason && (
+                <p className="truncate text-xs text-amber-600 dark:text-amber-400">
+                  {t("pt.afterSale.buyerReason")}
+                  {o.afterSaleReason}
+                </p>
+              )}
+              {o.afterSaleNote && o.afterSaleStatus !== "requested" && (
+                <p className="truncate text-xs text-muted-foreground">
+                  {t("pt.afterSale.noteLabel")}
+                  {o.afterSaleNote}
+                </p>
+              )}
+              {rentalOrderText(o) && (
+                <p className="text-xs text-muted-foreground">{rentalOrderText(o)}</p>
+              )}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="text-sm font-medium tabular-nums">+{o.price}</span>
+              <div className="flex flex-col items-end gap-1">
+                {o.status === "pending" ? (
+                  <Button size="sm" onClick={() => void sellerDeliver(o)}>
+                    {t("pt.markDelivered")}
+                  </Button>
+                ) : (
+                  <Badge
+                    variant={(ORDER_STATUS[o.status] ?? ORDER_STATUS.pending).variant}
+                    className="text-[10px]"
+                  >
+                    {t(orderStatusText(o.status, true))}
+                  </Badge>
+                )}
+                {o.afterSaleStatus && (
+                  <Badge
+                    variant={AFTER_SALE_STATUS[o.afterSaleStatus].variant}
+                    className="text-[10px]"
+                  >
+                    {t(AFTER_SALE_STATUS[o.afterSaleStatus].label)}
+                  </Badge>
+                )}
+                {o.afterSaleStatus === "requested" && (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void approveAfterSale(o)}
+                    >
+                      {t("pt.afterSale.approve")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => openAfterSaleReject(o)}
+                    >
+                      {t("pt.afterSale.reject")}
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
+          </li>
+        ))}
+      </ul>
+    )
+
   return (
     <div>
       <PageHeader
-        title="积分与商城"
-        description="积分是站点发放的余额，可在下方商城兑换中转站余额或换取商品。"
+        title={t("pt.title")}
+        description={t("pt.desc")}
         actions={
           <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
             <RotateCw className="mr-1.5 h-3.5 w-3.5" />
-            刷新
+            {t("common.refresh")}
           </Button>
         }
       />
@@ -654,9 +1137,9 @@ export default function PointsPage() {
         <LoadingBlock />
       ) : !data ? (
         <EmptyState
-          title="加载失败"
-          description="积分数据暂时取不到，请稍后重试。"
-          action={<Button onClick={() => void load()}>重试</Button>}
+          title={t("pt.loadFailed")}
+          description={t("pt.loadFailedDesc")}
+          action={<Button onClick={() => void load()}>{t("common.retry")}</Button>}
         />
       ) : (
         <div className="space-y-6">
@@ -664,7 +1147,7 @@ export default function PointsPage() {
           <Card>
             <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3 space-y-0">
               <div className="space-y-1">
-                <CardDescription>我的积分</CardDescription>
+                <CardDescription>{t("pt.myPoints")}</CardDescription>
                 <CardTitle className="flex items-baseline gap-2 text-4xl">
                   <Coins className="h-7 w-7 text-primary" />
                   {balance}
@@ -681,17 +1164,77 @@ export default function PointsPage() {
                   disabled={balance < 1}
                 >
                   <Send className="mr-1.5 h-3.5 w-3.5" />
-                  转账
+                  {t("pt.transfer")}
                 </Button>
+
+                {/* 我的交易：二级菜单。按钮本身带「待处理」角标，点开选分类再看明细
+                    （2026-10-03 站长要求：原来它是页面底部一整张卡片，太靠下） */}
+                <div ref={tradesBtnRef} className="relative">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setTradesMenuOpen((v) => !v)}
+                  >
+                    <Package className="mr-1.5 h-3.5 w-3.5" />
+                    {t("pt.myTrades")}
+                    {todoCount > 0 && (
+                      <Badge
+                        variant="default"
+                        className="ml-1.5 h-4 min-w-4 justify-center px-1 text-[10px] leading-none"
+                      >
+                        {todoCount}
+                      </Badge>
+                    )}
+                    <ChevronDown className="ml-1 h-3 w-3 opacity-60" />
+                  </Button>
+                  <AnchoredPanel
+                    anchorRef={tradesBtnRef}
+                    open={tradesMenuOpen}
+                    onClose={() => setTradesMenuOpen(false)}
+                    width={208}
+                    height={172}
+                  >
+                    <div className="space-y-0.5 p-1">
+                      <button
+                        type="button"
+                        className="flex w-full items-center justify-between rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent"
+                        onClick={() => openTradesView("todo")}
+                      >
+                        <span>{t("pt.todoTitle")}</span>
+                        {todoCount > 0 && (
+                          <Badge variant="default" className="text-[10px]">
+                            {todoCount}
+                          </Badge>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        className="block w-full rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent"
+                        onClick={() => openTradesView("bought")}
+                      >
+                        {t("pt.boughtTitle", { n: orders.length })}
+                      </button>
+                      <button
+                        type="button"
+                        className="block w-full rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent"
+                        onClick={() => openTradesView("sold")}
+                      >
+                        {t("pt.soldTitle", { n: sellerOrders.length })}
+                      </button>
+                    </div>
+                  </AnchoredPanel>
+                </div>
+
                 <Button variant="outline" size="sm" onClick={() => setDetailOpen(true)}>
                   <ReceiptText className="mr-1.5 h-3.5 w-3.5" />
-                  积分明细
+                  {t("pt.detail")}
                 </Button>
               </div>
             </CardHeader>
             <CardContent className="text-xs text-muted-foreground">
-              当前兑换比例：1 积分 = ¥{fmtMoney(yuanPerPoint)}
-              {data.config.dailyLimit > 0 && ` · 兑换每日最多 ${data.config.dailyLimit} 次`}
+              {t("pt.rate", { v: fmtMoney(yuanPerPoint) })}
+              {data.config.dailyLimit > 0 &&
+                ` · ${t("pt.rateDailyLimit", { n: data.config.dailyLimit })}`}
             </CardContent>
           </Card>
 
@@ -699,7 +1242,7 @@ export default function PointsPage() {
           <div>
             <div className="mb-3 flex items-center gap-2">
               <ShoppingBag className="h-4 w-4 text-primary" />
-              <h2 className="text-base font-semibold">积分商城</h2>
+              <h2 className="text-base font-semibold">{t("pt.officialShop")}</h2>
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -711,24 +1254,24 @@ export default function PointsPage() {
                 </div>
                 <CardHeader className="pb-2">
                   <div className="flex items-start justify-between gap-2">
-                    <CardDescription>兑换</CardDescription>
+                    <CardDescription>{t("pt.redeem")}</CardDescription>
                     <Badge variant="outline" className="text-[10px]">
-                      按比例
+                      {t("pt.byRate")}
                     </Badge>
                   </div>
-                  <CardTitle className="text-base">兑换中转站余额</CardTitle>
+                  <CardTitle className="text-base">{t("pt.redeemBalance")}</CardTitle>
                 </CardHeader>
                 <CardContent className="flex flex-1 flex-col justify-between gap-3">
                   <p className="text-sm text-muted-foreground">
-                    1 积分 = ¥{fmtMoney(yuanPerPoint)}，金额自己填，直接充进 AI 中转站余额。
+                    {t("pt.redeemCardDesc", { v: fmtMoney(yuanPerPoint) })}
                   </p>
                   {!data.config.enabled ? (
                     <Button disabled variant="outline" className="w-full">
-                      兑换暂未开放
+                      {t("pt.redeemClosed")}
                     </Button>
                   ) : !data.bound ? (
                     <Button variant="outline" className="w-full" asChild>
-                      <Link to="/dashboard/ai">先去开通中转站</Link>
+                      <Link to="/dashboard/ai">{t("pt.goBindGateway")}</Link>
                     </Button>
                   ) : (
                     <Button
@@ -738,7 +1281,7 @@ export default function PointsPage() {
                         setRedeemOpen(true)
                       }}
                     >
-                      立即兑换
+                      {t("pt.redeemNow")}
                     </Button>
                   )}
                 </CardContent>
@@ -754,34 +1297,47 @@ export default function PointsPage() {
           <div>
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <Store className="h-4 w-4 text-primary" />
-              <h2 className="text-base font-semibold">用户们的商城</h2>
+              <h2 className="text-base font-semibold">{t("pt.userShop")}</h2>
               <div className="ml-auto flex flex-wrap gap-2">
                 <Button variant="outline" size="sm" onClick={() => setMineOpen(true)}>
                   <Package className="mr-1.5 h-3.5 w-3.5" />
-                  我的商品
+                  {t("pt.myProducts")}
                   {myProducts.length > 0 && ` (${myProducts.length})`}
                 </Button>
                 <Button size="sm" onClick={openUpload}>
                   <Plus className="mr-1 h-3.5 w-3.5" />
-                  上传商品
+                  {t("pt.uploadProduct")}
                 </Button>
               </div>
             </div>
 
             <p className="mb-3 text-xs text-muted-foreground">
-              这些是其他用户上架的东西。你花积分买下，积分先由平台保管，
-              卖家发货、你确认收货后才真正转给卖家 —— 你也可以上传自己的东西卖积分。
+              {t("pt.userShopDesc")}
             </p>
+
+            {/* 分类筛选（2026-10-03 站长要求：「其他」的商品默认排在后面） */}
+            <div className="mb-3 flex flex-wrap gap-2">
+              {SHOP_CAT_FILTERS.map((f) => (
+                <Button
+                  key={f.key}
+                  size="sm"
+                  variant={shopCat === f.key ? "default" : "outline"}
+                  onClick={() => setShopCat(f.key)}
+                >
+                  {t(f.label)}
+                </Button>
+              ))}
+            </div>
 
             {userProducts.length === 0 ? (
               <EmptyState
                 icon={Store}
-                title="还没有人上架商品"
-                description="点右上角「上传商品」把你的东西挂上来，别人用积分兑换，积分就归你。"
+                title={t("pt.userShopEmpty")}
+                description={t("pt.userShopEmptyDesc")}
               />
             ) : (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {userProducts.map((p) => (
+                {shownUserProducts.map((p) => (
                   <ProductCard
                     key={p.id}
                     product={p}
@@ -794,259 +1350,143 @@ export default function PointsPage() {
             )}
           </div>
 
-          {/* 我的交易：买的和卖的都在这里处理。
-              站长 2026-09-29 反馈「卖家在哪发货、买家在哪收货找不到」——
-              原来「我收到的订单」藏在「我的商品」弹窗最底下，得点开再往下滚才看得到。 */}
-          {(orders.length > 0 || sellerOrders.length > 0) && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Package className="h-4 w-4" />
-                  我的交易
-                  {todoCount > 0 && (
-                    <Badge variant="default" className="text-[10px]">
-                      {todoCount} 笔待处理
-                    </Badge>
-                  )}
-                </CardTitle>
-                <CardDescription>
-                  最近 50 笔。「待发货」= 等卖家交付；「待收货」= 卖家交付了，你点确认后积分才转给卖家。
-                  消息中心收到的那条通知里也能直接操作。
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-5">
-                {/* 待你处理：把要动手的事顶到最上面，进来就能点 */}
-                {todoCount > 0 && (
-                  <div className="space-y-2 rounded-lg border border-primary/40 bg-primary/5 p-3">
-                    <p className="text-sm font-medium">待你处理</p>
-                    <ul className="space-y-2">
-                      {sellerOrders
-                        .filter((o) => o.status === "pending")
-                        .map((o) => (
-                          <li key={o.id} className="flex items-center justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="truncate text-sm">发货 · {o.productName}</p>
-                              <p className="truncate text-xs text-muted-foreground">
-                                买家 {o.username} · 到账 +{o.price} 积分
-                              </p>
-                            </div>
-                            <Button
-                              size="sm"
-                              className="shrink-0"
-                              onClick={() => void sellerDeliver(o)}
-                            >
-                              标记已交付
-                            </Button>
-                          </li>
-                        ))}
-                      {orders
-                        .filter((o) => o.sellerId !== null && o.status === "delivered")
-                        .map((o) => (
-                          <li key={o.id} className="flex items-center justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="truncate text-sm">收货 · {o.productName}</p>
-                              <p className="truncate text-xs text-muted-foreground">
-                                卖家 {o.sellerName ?? "?"} · 已付 {o.price} 积分
-                              </p>
-                            </div>
-                            <Button
-                              size="sm"
-                              className="shrink-0"
-                              onClick={() => void confirmReceipt(o)}
-                            >
-                              确认收货
-                            </Button>
-                          </li>
-                        ))}
-                    </ul>
-                  </div>
-                )}
-
-                <div className="space-y-2">
-                  <p className="text-sm font-medium">我买到的（{orders.length}）</p>
-                  {orders.length === 0 ? (
-                    <p className="rounded-md border border-dashed py-6 text-center text-sm text-muted-foreground">
-                      还没买过东西。
-                    </p>
-                  ) : (
-                    <ul className="divide-y">
-                  {orders.map((o) => {
-                    const isUserOrder = o.sellerId !== null
-                    const st = ORDER_STATUS[o.status] ?? ORDER_STATUS.pending
-                    const rental = rentalOrderText(o)
-                    const expired = isRentalExpired(o)
-                    const renew = renewTarget(o)
-                    return (
-                      <li key={o.id} className="flex items-center justify-between gap-3 py-2.5">
-                        <div className="min-w-0">
-                          <p className="truncate text-sm">
-                            {o.productName}
-                            {o.billingMode === "rental" && (
-                              <Badge variant="secondary" className="ml-1.5 text-[10px]">
-                                {rentalTerm(o.rentalDays)}
-                              </Badge>
-                            )}
-                          </p>
-                          <p className="truncate text-xs text-muted-foreground">
-                            {fmtDateTime(o.createdAt)}
-                            {isUserOrder ? ` · 卖家 ${o.sellerName ?? "?"}` : ""}
-                            {/* 交易双方能互相联系（2026-10-01）：交付方式、催确认收货都靠它 */}
-                            {isUserOrder && o.sellerName && (
-                              <>
-                                {" · "}
-                                <Link
-                                  to={`/dashboard/dm/${encodeURIComponent(o.sellerName)}`}
-                                  className="underline underline-offset-2 hover:text-foreground"
-                                >
-                                  发私信
-                                </Link>
-                              </>
-                            )}
-                            {o.note ? ` · ${o.note}` : ""}
-                          </p>
-                          {rental && (
-                            <p
-                              className={
-                                expired
-                                  ? "text-xs font-medium text-destructive"
-                                  : "text-xs text-muted-foreground"
-                              }
-                            >
-                              {rental}
-                            </p>
-                          )}
-                        </div>
-                        <div className="flex shrink-0 items-center gap-3 text-right">
-                          <div>
-                            <p className="text-sm font-medium tabular-nums text-muted-foreground">
-                              -{o.price}
-                            </p>
-                            <Badge variant={st.variant} className="mt-0.5 text-[10px]">
-                              {orderStatusText(o.status, isUserOrder)}
-                            </Badge>
-                          </div>
-                          {isUserOrder && o.status === "delivered" && (
-                            <Button size="sm" onClick={() => void confirmReceipt(o)}>
-                              <Check className="mr-1 h-3.5 w-3.5" />
-                              确认收货
-                            </Button>
-                          )}
-                          {renew && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => setBuyTarget(renew)}
-                              title={
-                                expired
-                                  ? "已到期，再买一次重新开始计租"
-                                  : "再买一次，租期从当前到期时间往后顺延"
-                              }
-                            >
-                              <RefreshCw className="mr-1 h-3.5 w-3.5" />
-                              续费
-                            </Button>
-                          )}
-                        </div>
-                      </li>
-                    )
-                  })}
-                    </ul>
-                  )}
-                </div>
-
-                <div className="space-y-2">
-                  <p className="text-sm font-medium">我卖出的（{sellerOrders.length}）</p>
-                  {sellerOrders.length === 0 ? (
-                    <p className="rounded-md border border-dashed py-6 text-center text-sm text-muted-foreground">
-                      还没有人买你的东西。上传商品被别人买下后，订单会出现在这里。
-                    </p>
-                  ) : (
-                    <ul className="divide-y rounded-md border">
-                      {sellerOrders.map((o) => (
-                        <li key={o.id} className="flex items-center justify-between gap-3 p-3">
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-medium">
-                              {o.productName}
-                              {o.billingMode === "rental" && (
-                                <Badge variant="secondary" className="ml-1.5 text-[10px]">
-                                  {rentalTerm(o.rentalDays)}
-                                </Badge>
-                              )}
-                            </p>
-                            <p className="truncate text-xs text-muted-foreground">
-                              买家 {o.username} · {fmtDateTime(o.createdAt)}
-                              {" · "}
-                              <Link
-                                to={`/dashboard/dm/${encodeURIComponent(o.username)}`}
-                                className="underline underline-offset-2 hover:text-foreground"
-                              >
-                                发私信
-                              </Link>
-                              {o.note ? ` · ${o.note}` : ""}
-                            </p>
-                            {rentalOrderText(o) && (
-                              <p className="text-xs text-muted-foreground">{rentalOrderText(o)}</p>
-                            )}
-                          </div>
-                          <div className="flex shrink-0 items-center gap-2">
-                            <span className="text-sm font-medium tabular-nums">+{o.price}</span>
-                            {o.status === "pending" ? (
-                              <Button size="sm" onClick={() => void sellerDeliver(o)}>
-                                标记已交付
-                              </Button>
-                            ) : (
-                              <Badge
-                                variant={(ORDER_STATUS[o.status] ?? ORDER_STATUS.pending).variant}
-                                className="text-[10px]"
-                              >
-                                {orderStatusText(o.status, true)}
-                              </Badge>
-                            )}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          )}
+          {/* 我的交易：二级菜单点开后的弹窗。
+              原先这里是页面底部一整张卡片（待处理 + 我买到的 + 我卖出的），
+              2026-10-03 站长要求收进顶部「我的交易」按钮的二级菜单里。 */}
+          <Dialog
+            open={tradesView !== null}
+            onOpenChange={(o) => {
+              if (!o) setTradesView(null)
+            }}
+          >
+            <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle>
+                  {tradesView === "todo"
+                    ? t("pt.todoTitle")
+                    : tradesView === "bought"
+                      ? t("pt.boughtTitle", { n: orders.length })
+                      : t("pt.soldTitle", { n: sellerOrders.length })}
+                </DialogTitle>
+                <DialogDescription>{t("pt.tradesDesc")}</DialogDescription>
+              </DialogHeader>
+              {tradesView === "todo" ? (
+                todoCount > 0 ? (
+                  renderTodoList()
+                ) : (
+                  <p className="py-6 text-center text-sm text-muted-foreground">
+                    {t("pt.todoNone")}
+                  </p>
+                )
+              ) : tradesView === "bought" ? (
+                renderBoughtList()
+              ) : (
+                renderSoldList()
+              )}
+            </DialogContent>
+          </Dialog>
         </div>
       )}
+
+      {/* 售后（退款）：买家「申请退款」与卖家「拒绝并说明理由」共用一个对话框 */}
+      <Dialog
+        open={afterSaleTarget !== null}
+        onOpenChange={(v) => {
+          if (!v) setAfterSaleTarget(null)
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {t(afterSaleMode === "request" ? "pt.afterSale.request" : "pt.afterSale.reject")}
+            </DialogTitle>
+            <DialogDescription>
+              {t(
+                afterSaleMode === "request"
+                  ? "pt.afterSale.requestDesc"
+                  : "pt.afterSale.rejectDesc"
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="afterSaleText">
+              {t(
+                afterSaleMode === "request"
+                  ? "pt.afterSale.reasonLabel"
+                  : "pt.afterSale.rejectNote"
+              )}
+            </Label>
+            <Textarea
+              id="afterSaleText"
+              value={afterSaleText}
+              onChange={(e) => setAfterSaleText(e.target.value)}
+              maxLength={300}
+              rows={3}
+              placeholder={t(
+                afterSaleMode === "request"
+                  ? "pt.afterSale.reasonPlaceholder"
+                  : "pt.afterSale.rejectPlaceholder"
+              )}
+            />
+            {afterSaleTarget && (
+              <p className="text-xs text-muted-foreground">
+                {afterSaleTarget.productName} ·{" "}
+                {t("pt.pointsUnit", { n: afterSaleTarget.price })}
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setAfterSaleTarget(null)}
+              disabled={afterSaleBusy}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button onClick={() => void submitAfterSale()} disabled={afterSaleBusy}>
+              {afterSaleBusy && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+              {t("pt.afterSale.submit")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 积分明细 */}
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>积分明细</DialogTitle>
-            <DialogDescription>最近 50 条记录</DialogDescription>
+            <DialogTitle>{t("pt.detail")}</DialogTitle>
+            <DialogDescription>{t("pt.detailDesc")}</DialogDescription>
           </DialogHeader>
           {!data || data.transactions.length === 0 ? (
             <EmptyState
               icon={Sparkles}
-              title="还没有积分记录"
-              description="参与站内活动、或由管理员发放后，这里会显示每一笔积分的来去。"
+              title={t("pt.detailEmpty")}
+              description={t("pt.detailEmptyDesc")}
             />
           ) : (
             <ul className="max-h-[60vh] divide-y overflow-y-auto">
-              {data.transactions.map((t) => (
-                <li key={t.id} className="flex items-center justify-between gap-3 py-2.5">
+              {data.transactions.map((tx) => (
+                <li key={tx.id} className="flex items-center justify-between gap-3 py-2.5">
                   <div className="min-w-0">
-                    <p className="truncate text-sm">{t.detail || REASON_LABEL[t.reason] || t.reason}</p>
-                    <p className="text-xs text-muted-foreground">{fmtDateTime(t.createdAt)}</p>
+                    <p className="truncate text-sm">
+                      {tx.detail || t(REASON_LABEL[tx.reason] ?? tx.reason)}
+                    </p>
+                    <p className="text-xs text-muted-foreground">{fmtDateTime(tx.createdAt)}</p>
                   </div>
                   <div className="shrink-0 text-right">
                     <p
                       className={
-                        t.delta > 0
+                        tx.delta > 0
                           ? "text-sm font-medium text-emerald-600 dark:text-emerald-400"
                           : "text-sm font-medium text-muted-foreground"
                       }
                     >
-                      {t.delta > 0 ? `+${t.delta}` : t.delta}
+                      {tx.delta > 0 ? `+${tx.delta}` : tx.delta}
                     </p>
                     <p className="text-[10px] text-muted-foreground">
-                      {REASON_LABEL[t.reason] ?? t.reason} · 余额 {t.balance}
+                      {t(REASON_LABEL[tx.reason] ?? tx.reason)} ·{" "}
+                      {t("pt.balanceSuffix", { n: tx.balance })}
                     </p>
                   </div>
                 </li>
@@ -1060,31 +1500,32 @@ export default function PointsPage() {
       <Dialog open={redeemOpen} onOpenChange={(o) => !redeemBusy && setRedeemOpen(o)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>兑换中转站余额</DialogTitle>
-            <DialogDescription>
-              1 积分 = ¥{fmtMoney(yuanPerPoint)}，兑换后金额直接充进你的 AI 中转站余额。
-            </DialogDescription>
+            <DialogTitle>{t("pt.redeemBalance")}</DialogTitle>
+            <DialogDescription>{t("pt.redeemDialogDesc", { v: fmtMoney(yuanPerPoint) })}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <div className="space-y-2">
-              <Label htmlFor="redeem-points">使用积分</Label>
+              <Label htmlFor="redeem-points">{t("pt.usePoints")}</Label>
               <Input
                 id="redeem-points"
                 inputMode="numeric"
-                placeholder="请输入积分数"
+                placeholder={t("pt.pointsPlaceholder")}
                 value={amount}
                 onChange={(e) => setAmount(e.target.value.replace(/\D/g, ""))}
               />
               <p className="text-xs text-muted-foreground">
                 {points > 0 ? (
                   <>
-                    将兑换 <span className="font-medium text-foreground">¥{fmtMoney(yuan)}</span>
+                    {t("pt.willRedeem")}{" "}
+                    <span className="font-medium text-foreground">¥{fmtMoney(yuan)}</span>
                     {points > balance && (
-                      <span className="text-destructive">（超过你的积分余额 {balance}）</span>
+                      <span className="text-destructive">
+                        {t("pt.overBalance", { n: balance })}
+                      </span>
                     )}
                   </>
                 ) : (
-                  `输入积分数后自动计算金额（当前余额 ${balance} 积分）`
+                  t("pt.amountHint", { n: balance })
                 )}
               </p>
             </div>
@@ -1095,17 +1536,17 @@ export default function PointsPage() {
                 onClick={() => setAmount(String(balance))}
                 disabled={balance < 1}
               >
-                全部兑换
+                {t("pt.redeemAll")}
               </Button>
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRedeemOpen(false)} disabled={redeemBusy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void handleRedeem()} disabled={!canRedeem}>
               {redeemBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              确认兑换
+              {t("pt.confirmRedeem")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1115,41 +1556,43 @@ export default function PointsPage() {
       <Dialog open={transferOpen} onOpenChange={(o) => !transferBusy && setTransferOpen(o)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>转账给别人</DialogTitle>
-            <DialogDescription>
-              填对方的用户名即可，不需要对方确认，转出后立刻到账。请确认用户名没写错 ——
-              转账一经发起无法撤回，只能请对方再转回来。
-            </DialogDescription>
+            <DialogTitle>{t("pt.transferTitle")}</DialogTitle>
+            <DialogDescription>{t("pt.transferDesc")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <div className="space-y-2">
-              <Label htmlFor="transfer-to">收款人用户名</Label>
+              <Label htmlFor="transfer-to">{t("pt.transferTo")}</Label>
               <Input
                 id="transfer-to"
-                placeholder="对方的用户名（不是昵称）"
+                placeholder={t("pt.transferToPlaceholder")}
                 value={transferTo}
                 onChange={(e) => setTransferTo(e.target.value)}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="transfer-amount">转账积分数</Label>
+              <Label htmlFor="transfer-amount">{t("pt.transferAmount")}</Label>
               <Input
                 id="transfer-amount"
                 inputMode="numeric"
-                placeholder="请输入积分数"
+                placeholder={t("pt.pointsPlaceholder")}
                 value={transferAmount}
                 onChange={(e) => setTransferAmount(e.target.value.replace(/\D/g, ""))}
               />
               <p className="text-xs text-muted-foreground">
                 {transferValue > 0 ? (
                   <>
-                    相当于 <span className="font-medium text-foreground">¥{fmtMoney(transferValue * yuanPerPoint)}</span>
+                    {t("pt.equals")}{" "}
+                    <span className="font-medium text-foreground">
+                      ¥{fmtMoney(transferValue * yuanPerPoint)}
+                    </span>
                     {transferValue > balance && (
-                      <span className="text-destructive">（超过你的积分余额 {balance}）</span>
+                      <span className="text-destructive">
+                        {t("pt.overBalance", { n: balance })}
+                      </span>
                     )}
                   </>
                 ) : (
-                  `当前余额 ${balance} 积分`
+                  t("pt.balanceSuffix", { n: balance })
                 )}
               </p>
             </div>
@@ -1160,7 +1603,7 @@ export default function PointsPage() {
                 onClick={() => setTransferAmount(String(balance))}
                 disabled={balance < 1}
               >
-                全部转出
+                {t("pt.transferAll")}
               </Button>
             </div>
           </div>
@@ -1170,11 +1613,11 @@ export default function PointsPage() {
               onClick={() => setTransferOpen(false)}
               disabled={transferBusy}
             >
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void handleTransfer()} disabled={!canTransfer}>
               {transferBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              确认转账
+              {t("pt.confirmTransfer")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1185,7 +1628,7 @@ export default function PointsPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {buyTarget?.billingMode === "rental" ? "租用" : "购买"} · {buyTarget?.name}
+              {buyTarget?.billingMode === "rental" ? tStatic("pt.rental.rental") : t("pt.buy")} · {buyTarget?.name}
             </DialogTitle>
             <DialogDescription>
               {buyHint(buyTarget?.delivery ?? "manual", buyIsUserProduct)}
@@ -1197,40 +1640,42 @@ export default function PointsPage() {
           <div className="space-y-2 text-sm">
             {buyIsUserProduct && (
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">卖家</span>
+                <span className="text-muted-foreground">{t("pt.sellerLabel")}</span>
                 <span className="font-medium">{buyTarget?.ownerName ?? "—"}</span>
               </div>
             )}
             <div className="flex items-center justify-between">
-              <span className="text-muted-foreground">售价</span>
+              <span className="text-muted-foreground">{t("pt.priceLabel")}</span>
               <span className="font-medium tabular-nums">
-                {buyTarget?.price ?? 0} 积分
-                {buyTarget?.billingMode === "rental" ? ` / ${buyTarget.rentalDays} 天` : ""}
+                {t("pt.pointsUnit", { n: buyTarget?.price ?? 0 })}
+                {buyTarget?.billingMode === "rental"
+                  ? ` / ${t("pt.days", { n: buyTarget.rentalDays ?? 0 })}`
+                  : ""}
               </span>
             </div>
             {buyTarget?.billingMode === "rental" && (
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">计费方式</span>
-                <span className="font-medium">租用 · 到期自动失效</span>
+                <span className="text-muted-foreground">{t("pt.billingLabel")}</span>
+                <span className="font-medium">{t("pt.billingRental")}</span>
               </div>
             )}
             {buyTarget?.delivery === "quota" && buyTarget.quotaYuan ? (
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">到账金额</span>
+                <span className="text-muted-foreground">{t("pt.quotaAmount")}</span>
                 <span className="font-medium tabular-nums">¥{fmtMoney(buyTarget.quotaYuan)}</span>
               </div>
             ) : null}
             {buyTarget?.delivery === "feature" && buyTarget.deliveryParams?.feature ? (
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">开通功能</span>
+                <span className="text-muted-foreground">{t("pt.featureLabel")}</span>
                 <span className="font-medium">
-                  {FEATURE_LABELS[buyTarget.deliveryParams.feature]}
+                  {t(FEATURE_LABELS[buyTarget.deliveryParams.feature])}
                 </span>
               </div>
             ) : null}
             {buyTarget?.delivery === "subscription" && buyTarget.deliveryParams?.planId ? (
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">订阅套餐</span>
+                <span className="text-muted-foreground">{t("pt.planLabel")}</span>
                 <span className="font-medium tabular-nums">
                   #{buyTarget.deliveryParams.planId}
                 </span>
@@ -1238,39 +1683,39 @@ export default function PointsPage() {
             ) : null}
             {buyTarget?.delivery === "invite_quota" && buyTarget.deliveryParams?.count ? (
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">邀请码额度</span>
+                <span className="text-muted-foreground">{t("pt.inviteQuotaLabel")}</span>
                 <span className="font-medium tabular-nums">
-                  +{buyTarget.deliveryParams.count} 个
+                  {t("pt.countUnit", { n: buyTarget.deliveryParams.count })}
                 </span>
               </div>
             ) : null}
             <div className="flex items-center justify-between">
-              <span className="text-muted-foreground">购买后余额</span>
+              <span className="text-muted-foreground">{t("pt.balanceAfter")}</span>
               <span className="font-medium tabular-nums">
-                {balance - (buyTarget?.price ?? 0)} 积分
+                {t("pt.pointsUnit", { n: balance - (buyTarget?.price ?? 0) })}
               </span>
             </div>
             {buyTargetNeedsBind && (
               <p className="text-xs text-destructive">
                 {buyTarget?.delivery === "subscription"
-                  ? "该商品会自动开通中转站订阅，你还没有开通中转站。"
-                  : "该商品会自动充进 AI 中转站余额，你还没有开通中转站。"}
+                  ? t("pt.needBind.subscription")
+                  : t("pt.needBind.quota")}
                 <Link to="/dashboard/ai" className="ml-1 underline-offset-4 hover:underline">
-                  去开通
+                  {t("pt.goOpen")}
                 </Link>
               </p>
             )}
             {!buyTargetAffordable && (
-              <p className="text-xs text-destructive">积分不足，无法购买。</p>
+              <p className="text-xs text-destructive">{t("pt.insufficient")}</p>
             )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBuyTarget(null)} disabled={buyBusy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void handleBuy()} disabled={!canBuy}>
               {buyBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              确认购买
+              {t("pt.confirmBuy")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1280,17 +1725,14 @@ export default function PointsPage() {
       <Dialog open={mineOpen} onOpenChange={setMineOpen}>
         <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>我的商品</DialogTitle>
-            <DialogDescription>
-              审核通过后才会出现在「用户们的商城」里；改动过内容会重新进入待审核。
-              别人买下后的订单不在这里，去页面上的「我的交易」处理。
-            </DialogDescription>
+            <DialogTitle>{t("pt.myProducts")}</DialogTitle>
+            <DialogDescription>{t("pt.myProductsDesc")}</DialogDescription>
           </DialogHeader>
 
           <div className="space-y-6">
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <p className="text-sm font-medium">我上架的（{myProducts.length}）</p>
+                <p className="text-sm font-medium">{t("pt.listedTitle", { n: myProducts.length })}</p>
                 <Button
                   size="sm"
                   onClick={() => {
@@ -1299,13 +1741,13 @@ export default function PointsPage() {
                   }}
                 >
                   <Plus className="mr-1 h-3.5 w-3.5" />
-                  上传新商品
+                  {t("pt.uploadNew")}
                 </Button>
               </div>
 
               {myProducts.length === 0 ? (
                 <p className="rounded-md border border-dashed py-6 text-center text-sm text-muted-foreground">
-                  你还没有上架过商品。
+                  {t("pt.listedEmpty")}
                 </p>
               ) : (
                 <ul className="divide-y rounded-md border">
@@ -1327,21 +1769,26 @@ export default function PointsPage() {
                           <div className="min-w-0">
                             <p className="truncate text-sm font-medium">{p.name}</p>
                             <p className="text-xs text-muted-foreground">
-                              {p.price} 积分
-                              {p.billingMode === "rental" ? ` / ${p.rentalDays} 天` : ""} ·{" "}
-                              {p.stock === null ? "不限量" : `剩 ${p.stock} 件`}
-                              {!p.enabled ? " · 已下架" : ""}
+                              {t("pt.pointsUnit", { n: p.price })}
+                              {p.billingMode === "rental"
+                                ? ` / ${t("pt.days", { n: p.rentalDays ?? 0 })}`
+                                : ""}{" "}
+                              ·{" "}
+                              {p.stock === null
+                                ? t("pt.unlimited")
+                                : t("pt.leftPieces", { n: p.stock })}
+                              {!p.enabled ? t("pt.delisted") : ""}
                             </p>
                             {p.reviewStatus === "rejected" && p.reviewNote && (
                               <p className="mt-0.5 text-xs text-destructive">
-                                未通过：{p.reviewNote}
+                                {t("pt.rejectedNote", { note: p.reviewNote })}
                               </p>
                             )}
                           </div>
                         </div>
                         <div className="flex shrink-0 items-center gap-2">
                           <Badge variant={rv.variant} className="text-[10px]">
-                            {rv.label}
+                            {t(rv.label)}
                           </Badge>
                           <Button variant="outline" size="sm" onClick={() => openEditMine(p)}>
                             <Pencil className="h-3.5 w-3.5" />
@@ -1369,33 +1816,29 @@ export default function PointsPage() {
       <Dialog open={uploadOpen} onOpenChange={(o) => !formBusy && setUploadOpen(o)}>
         <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{editingId ? "编辑我的商品" : "上传我的商品"}</DialogTitle>
-            <DialogDescription>
-              提交后要等管理员审核通过才会被别人看到。别人买下后积分先由平台保管，
-              你发货、他确认收货后积分才到你的账上。也可以设为租用：买家付一次积分用一段时间，
-              到期失效（用户商品的到期归还由你和买家自行协商）。
-            </DialogDescription>
+            <DialogTitle>{editingId ? t("pt.editMine") : t("pt.uploadMine")}</DialogTitle>
+            <DialogDescription>{t("pt.uploadDesc")}</DialogDescription>
           </DialogHeader>
 
           <div className="space-y-3">
             <div className="space-y-2">
-              <Label htmlFor="upName">名称</Label>
+              <Label htmlFor="upName">{t("pt.form.name")}</Label>
               <Input
                 id="upName"
                 maxLength={40}
-                placeholder="如：英国vps一台"
+                placeholder={t("pt.form.namePlaceholder")}
                 value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="upDesc">说明（可选）</Label>
+              <Label htmlFor="upDesc">{t("pt.form.desc")}</Label>
               <Textarea
                 id="upDesc"
                 rows={3}
                 maxLength={500}
-                placeholder="写清楚是什么、怎么交付（如「加 QQ 发激活码」「站内私信联系」）"
+                placeholder={t("pt.form.descPlaceholder")}
                 value={form.description}
                 onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
               />
@@ -1403,7 +1846,7 @@ export default function PointsPage() {
 
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
-                <Label htmlFor="upImage">封面图（可选）</Label>
+                <Label htmlFor="upImage">{t("pt.form.cover")}</Label>
                 <Button
                   type="button"
                   variant="outline"
@@ -1416,7 +1859,7 @@ export default function PointsPage() {
                   ) : (
                     <Upload className="h-3.5 w-3.5" />
                   )}
-                  本地上传
+                  {t("pt.form.localUpload")}
                 </Button>
                 {/* 隐藏的文件选择：传完立即把返回的 URL 填进下面的输入框 */}
                 <input
@@ -1429,16 +1872,37 @@ export default function PointsPage() {
               </div>
               <Input
                 id="upImage"
-                placeholder="https://... 或点「本地上传」"
+                placeholder={t("pt.form.coverPlaceholder")}
                 value={form.imageUrl}
                 onChange={(e) => setForm((f) => ({ ...f, imageUrl: e.target.value }))}
               />
               {form.imageUrl.trim() && (
                 <p className="text-xs text-muted-foreground">
-                  填了封面图就以图片为准，下面的图标不会显示（不用特意清空）。
-                  本地上传的图存本站网盘，直接粘外链也可以。
+                  {t("pt.form.coverHint")}
                 </p>
               )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="upCategory">{t("pt.form.category")}</Label>
+              <Select
+                value={form.category}
+                onValueChange={(v) => setForm((f) => ({ ...f, category: v as ProductCategory }))}
+              >
+                <SelectTrigger id="upCategory" className="w-40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(Object.keys(PRODUCT_CATEGORY_LABELS) as ProductCategory[]).map((c) => (
+                      <SelectItem key={c} value={c}>
+                        {t(PRODUCT_CATEGORY_LABELS[c])}
+                      </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {t("pt.form.categoryHint")}
+              </p>
             </div>
 
             <ShopIconPicker
@@ -1449,27 +1913,23 @@ export default function PointsPage() {
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="upPrice">售价（积分）</Label>
+                <Label htmlFor="upPrice">{t("pt.form.price")}</Label>
                 <Input
                   id="upPrice"
                   inputMode="numeric"
-                  placeholder="如 200"
+                  placeholder={t("pt.form.pricePlaceholder")}
                   value={form.price}
                   onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))}
                 />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="upStock">
-                  库存（留空 = 不限
-                  {form.billingMode === "rental"
-                    ? "；租用商品指「同时最多能租出几份」，到期归还"
-                    : ""}
-                  ）
+                  {form.billingMode === "rental" ? t("pt.form.stockRental") : t("pt.form.stock")}
                 </Label>
                 <Input
                   id="upStock"
                   inputMode="numeric"
-                  placeholder="不限"
+                  placeholder={t("pt.form.unlimited")}
                   value={form.stock}
                   onChange={(e) => setForm((f) => ({ ...f, stock: e.target.value }))}
                 />
@@ -1480,9 +1940,9 @@ export default function PointsPage() {
             <div className="space-y-3 rounded-md border p-3">
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
-                  <p className="text-sm font-medium">租用模式</p>
+                  <p className="text-sm font-medium">{t("pt.form.rentalMode")}</p>
                   <p className="text-xs text-muted-foreground">
-                    开启后买家付一次积分用一段时间，到期失效；关闭则是买断（永久拥有）。
+                    {t("pt.form.rentalModeHint")}
                   </p>
                 </div>
                 <Switch
@@ -1500,11 +1960,11 @@ export default function PointsPage() {
 
               {form.billingMode === "rental" && (
                 <div className="space-y-2">
-                  <Label htmlFor="upDays">租期（天）</Label>
+                  <Label htmlFor="upDays">{t("pt.form.rentalDays")}</Label>
                   <Input
                     id="upDays"
                     inputMode="numeric"
-                    placeholder="如 30"
+                    placeholder={t("pt.form.rentalDaysPlaceholder")}
                     value={form.rentalDays}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, rentalDays: e.target.value.replace(/\D/g, "") }))
@@ -1519,7 +1979,7 @@ export default function PointsPage() {
                         variant={form.rentalDays === String(d) ? "default" : "outline"}
                         onClick={() => setForm((f) => ({ ...f, rentalDays: String(d) }))}
                       >
-                        {d} 天
+                        {t("pt.days", { n: d })}
                       </Button>
                     ))}
                   </div>
@@ -1529,9 +1989,9 @@ export default function PointsPage() {
 
             <div className="flex items-center justify-between rounded-md border p-3">
               <div className="space-y-0.5">
-                <p className="text-sm font-medium">上架</p>
+                <p className="text-sm font-medium">{t("pt.form.enabled")}</p>
                 <p className="text-xs text-muted-foreground">
-                  关掉相当于暂时下架，别人看不到，但商品还在。
+                  {t("pt.form.enabledHint")}
                 </p>
               </div>
               <Switch
@@ -1543,11 +2003,11 @@ export default function PointsPage() {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setUploadOpen(false)} disabled={formBusy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void submitUpload()} disabled={formBusy}>
               {formBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              {editingId ? "保存" : "提交审核"}
+              {editingId ? t("common.save") : t("pt.submitReview")}
             </Button>
           </DialogFooter>
         </DialogContent>

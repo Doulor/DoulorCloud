@@ -19,6 +19,7 @@
  * 仅用于代用户创建 API Key；用户可在 NewAPI 后台随时吊销。
  */
 import { ApiError, json } from "../http"
+import { primaryAddressFor } from "../root-domains"
 import { encryptSecret, decryptSecret, uuid, verifyPassword } from "../crypto"
 import { requireFeatureUser } from "../auth"
 import {
@@ -132,7 +133,8 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     configured,
     featureEnabled: settings.newapi_enabled === "1",
     // 仅 @doulor.cn 邮箱可开通 —— 这是本功能的核心限制
-    eligibleEmail: `${user.username}@${env.ROOT_DOMAIN}`,
+    // 用户自己的主邮箱（tyu.me / doulor.cn 都可能），不要写死主域
+    eligibleEmail: await primaryAddressFor(env, user.id, user.username),
     currencySymbol: currency.symbol,
     currencyCode: currency.code,
     /** quota ↔ 金额的换算率（前端把订阅额度换算成金额展示） */
@@ -640,7 +642,7 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
   const accessToken = loginResult.accessToken
 
   const now = new Date().toISOString()
-  const email = `${username}@${env.ROOT_DOMAIN}`.toLowerCase()
+  const email = (await primaryAddressFor(env, user.id, username)).toLowerCase()
 
   await env.DB.prepare(
     `INSERT INTO newapi_accounts
@@ -1251,4 +1253,105 @@ export async function adminSyncPermissions(
 
   const result = await syncPermissionState(env, username ? { username } : {})
   return json({ ...result, username: username || null })
+}
+
+/**
+ * 批量刷新所有「已绑定 token」的中转站账号的最新调用次数 / 额度 / 配额。
+ *
+ * 为什么需要：排行榜用的是 `newapi_accounts.request_count`（本地缓存），
+ * 它只在**用户打开中转站页**时才刷新 —— 不打开就一直是旧的。于是排行榜
+ * 「数据不对」（2026-10-02 实测：kuromi 本地 806、上游实际 10272）。
+ * 这个函数由定时任务定时调用，按 `synced_at` 从旧到新每轮刷一批，
+ * 把榜单数字拉回接近真实。
+ *
+ * 约束（都踩过 / 都想清楚了）：
+ *   - **只刷有 token 的**：`enc_token` 为 NO_TOKEN（自动认领）的账号无法主动同步。
+ *   - **别触发上游限流**：所有调用都从同一个 CF 出口 IP 发出，量要控制 ——
+ *     每轮最多 BATCH 条，条与条之间留 DELAY 毫秒。
+ *   - **单账号失败不中断整批**：token 失效且无密码可重登的账号跳过，
+ *     不能让一个坏账号挡住后面所有账号。
+ */
+export async function syncAllNewapiAccounts(
+  env: Env
+): Promise<{ synced: number; failed: number; skipped: number; failedNames: string[] }> {
+  const BATCH = 60
+  const DELAY_MS = 100
+
+  // 不再要求账号有「用户自己的 token」—— 用**管理员 token** 调
+  // `/api/user/search` 能读任意账号的用量（kuromi 这种管理员账号、token 失效的
+  // 账号都覆盖得到）。之前用用户 token 路径，一半账号因 token/密码过期而失败，
+  // 排行榜数字就一直错。
+  const accounts = await env.DB.prepare(
+    `SELECT user_id, username, quota, used_quota, request_count
+       FROM newapi_accounts
+      ORDER BY (synced_at IS NULL) ASC, synced_at ASC
+      LIMIT ${BATCH}`
+  ).all<{
+    user_id: string
+    username: string
+    quota: number
+    used_quota: number
+    request_count: number
+  }>()
+
+  let synced = 0
+  let failed = 0
+  let skipped = 0
+  const failedNames: string[] = []
+
+  for (const account of accounts.results ?? []) {
+    try {
+      const u = await findUserByUsername(env, account.username)
+      if (!u) {
+        // 上游已删除/不存在：不再重试，直接跳过并把 synced_at 顶到「现在」
+        skipped++
+        await env.DB.prepare(
+          "UPDATE newapi_accounts SET synced_at = ? WHERE user_id = ?"
+        )
+          .bind(new Date().toISOString(), account.user_id)
+          .run()
+      } else {
+        await env.DB.prepare(
+          `UPDATE newapi_accounts
+              SET quota = ?, used_quota = ?, request_count = ?, synced_at = ?
+            WHERE user_id = ?`
+        )
+          .bind(
+            u.quota ?? account.quota,
+            u.used_quota ?? account.used_quota,
+            u.request_count ?? account.request_count,
+            new Date().toISOString(),
+            account.user_id
+          )
+          .run()
+        synced++
+      }
+    } catch (err) {
+      failed++
+      failedNames.push(account.username)
+      console.warn("批量同步中转站账号失败:", account.username, err instanceof Error ? err.message : err)
+      // 失败也把 synced_at 顶到「现在」，避免失败账号永远卡在队首挡住后面的
+      await env.DB.prepare(
+        "UPDATE newapi_accounts SET synced_at = ? WHERE user_id = ?"
+      )
+        .bind(new Date().toISOString(), account.user_id)
+        .run()
+    }
+    if (DELAY_MS > 0) await new Promise((r) => setTimeout(r, DELAY_MS))
+  }
+
+  return { synced, failed, skipped, failedNames: failedNames.slice(0, 10) }
+}
+
+/**
+ * POST /api/admin/newapi/sync-all —— 手动触发一次中转站批量同步。
+ * 给站长一个「立即刷新」的入口：排行榜数字过期时不用等下一轮定时任务。
+ */
+export async function adminSyncAllNewapiAccounts(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  await requireAdmin(env, request)
+  const r = await syncAllNewapiAccounts(env)
+  return json({ ok: true, ...r })
 }

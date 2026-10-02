@@ -125,7 +125,7 @@ const ACHIEVEMENTS: AchievementDef[] = [
     desc: "创建子域名",
     icon: "globe",
     group: "resource",
-    how: "在「域名」页面添加子域名（注册时分配的主域名不计入）。",
+    how: "注册时分配的主域名就算一个；在「域名」页面添加更多子域名可以继续升级。",
     tiers: [1, 3, 5],
     tierNames: ["初出茅庐", "渐入佳境", "疆域辽阔"],
     tierReqs: ["创建 1 个子域名", "创建 3 个子域名", "创建 5 个子域名"],
@@ -232,7 +232,7 @@ const ACHIEVEMENTS: AchievementDef[] = [
     desc: "用图片或音乐装点名片",
     icon: "palette",
     group: "usage",
-    how: "给名片设置头像、背景图或背景音乐（任意一项即可）。",
+    how: "给名片设置背景图或背景音乐（任意一项即可）。",
   },
   {
     id: "tempbox",
@@ -452,8 +452,50 @@ async function recordUnlocks(
   }
 }
 
-export interface AchievementProgress {
-  id: string
+/**
+ * 把「历史已解锁的最高等级」合并进实时计算结果 —— **等级只升不降**。
+ *
+ * 为什么需要：成就原本的语义是「当前等级以实时计算为准」，于是加了 DNS 记录
+ * 达成成就、后来把记录删了，成就就退回未完成。用户观感是「我的成就会被拿走」，
+ * 而成就本该是「做过就算数」的纪念（2026-10-02 站长要求 + 用户 ventus 反馈）。
+ *
+ * 成就页与排行榜都调这个函数，保证两处口径一致 —— 否则同一用户在两个页面
+ * 看到的成就点数会不一样，那比不做还糟。
+ *
+ * ⚠️ 只改 `level` / `maxed` / `nextTier`，**不动 `value`**：
+ * `value` 表达的是「当前有多少」（资源删了就真的少了），
+ * 与「曾经达成过什么」是两件事，别一起改了。
+ */
+export function mergeHistoricalLevels(
+  achievements: AchievementProgress[],
+  history: Map<string, number>
+): void {
+  for (const a of achievements) {
+    const highest = history.get(a.id) ?? 0
+    if (a.single) {
+      if (highest >= 1 && a.level < 1) a.level = 1
+      continue
+    }
+    if (highest > a.level) {
+      const maxLevel = a.tiers?.length ?? 0
+      a.level = Math.min(highest, maxLevel)
+      a.maxed = a.level >= maxLevel
+      a.nextTier = a.maxed ? null : (a.tiers?.[a.level] ?? null)
+    }
+  }
+}
+
+/**
+ * 算某人的成就点数（含历史等级合并）。
+ * 排行榜与成就页共用，保证同一用户在两个页面看到同一个数。
+ */
+export function achievementPointsOf(counts: UserCounts, history: Map<string, number>): number {
+  const res = computeAchievements(counts)
+  mergeHistoricalLevels(res.achievements, history)
+  return res.achievements.reduce((sum, a) => sum + a.level, 0)
+}
+
+export interface AchievementProgress {  id: string
   name: string
   desc: string
   icon: string
@@ -565,68 +607,111 @@ function emptyCounts(): UserCounts {
  * —— SQLite 不允许在 SELECT 列表的嵌套标量子查询中引用 CTE 名
  * （实测确认，两种 CTE 写法都失败）。放 FROM 里就是普通的关联子查询，能解析。
  */
-export async function loadUserCounts(env: Env, userId: string): Promise<UserCounts> {
-  const row = await env.DB.prepare(
-    `SELECT
-       (SELECT COUNT(*) FROM subdomains WHERE user_id = me.uid AND name != '@') AS subdomain,
-       (SELECT COUNT(*) FROM mailboxes WHERE user_id = me.uid) AS mailbox,
+/**
+ * 那 26 个计数子查询的列清单（**只此一份**）。
+ *
+ * 抽成函数是为了让「算某一个用户」与「算全站每个用户」共用同一份定义：
+ * 排行榜要按**成就点**排序，而成就是这 26 个计数推出来的 ——
+ * 定义写两份迟早漂移，然后排行榜与成就页的数字对不上，没人说得清哪个对。
+ *
+ * @param owner 指向「被统计的用户 id」那一列的表达式：
+ *              单用户传 `me.uid`，全站传 `u.id`。
+ */
+function countColumns(owner: string): string {
+  return `
+       -- 主域名（name='@'，注册时分配）也计入（2026-10-01 用户反馈：
+      -- 原先排除它导致「创建 1 个子域名」这一档永远差一个，除非用户自己再建子域名）
+      (SELECT COUNT(*) FROM subdomains WHERE user_id = {OWNER}) AS subdomain,
+       (SELECT COUNT(*) FROM mailboxes WHERE user_id = {OWNER}) AS mailbox,
        (SELECT COUNT(*) FROM dns_records dr JOIN subdomains s ON dr.subdomain_id = s.id
-         WHERE s.user_id = me.uid) AS dns,
-       (SELECT COUNT(*) FROM storage_objects WHERE user_id = me.uid) AS storage_files,
-       (SELECT COALESCE(SUM(size), 0) FROM storage_objects WHERE user_id = me.uid) AS storage_bytes,
-       (SELECT COUNT(*) FROM newapi_keys WHERE user_id = me.uid) AS ai_keys,
+         WHERE s.user_id = {OWNER}) AS dns,
+       (SELECT COUNT(*) FROM storage_objects WHERE user_id = {OWNER}) AS storage_files,
+       (SELECT COALESCE(SUM(size), 0) FROM storage_objects WHERE user_id = {OWNER}) AS storage_bytes,
+       (SELECT COUNT(*) FROM newapi_keys WHERE user_id = {OWNER}) AS ai_keys,
        (SELECT COUNT(*) FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id
-         WHERE mb.user_id = me.uid) AS mails,
-       (SELECT COUNT(*) FROM users WHERE id = me.uid
+         WHERE mb.user_id = {OWNER}) AS mails,
+       (SELECT COUNT(*) FROM users WHERE id = {OWNER}
           AND nickname IS NOT NULL AND nickname != '' AND avatar_key IS NOT NULL) AS identity,
        -- 「已发布」这一项**不能只看 published**：2026-09-28 起开通名片就默认
        -- published=1，光看它会让「公之于众」变成和「数字名片」重复的白送成就
        -- （成就点会换成 NewAPI 订阅，是真金白银）。所以要求同时填了昵称。
-       (SELECT COUNT(*) FROM profiles WHERE user_id = me.uid AND published = 1
+       (SELECT COUNT(*) FROM profiles WHERE user_id = {OWNER} AND published = 1
           AND display_name IS NOT NULL AND TRIM(display_name) <> '') AS published,
-       (SELECT COUNT(*) FROM profiles WHERE user_id = me.uid AND (
+       (SELECT COUNT(*) FROM profiles WHERE user_id = {OWNER} AND (
           (background_key IS NOT NULL AND background_key != '')
           OR (background_url IS NOT NULL AND background_url != '')
           OR (music_key IS NOT NULL AND music_key != '')
           OR (music_url IS NOT NULL AND music_url != '')
-          OR (avatar_key IS NOT NULL AND avatar_key != '')
-          OR (avatar_url IS NOT NULL AND avatar_url != '')
        )) AS decorated,
        (SELECT COUNT(*) FROM (
-          SELECT 1 FROM profiles WHERE user_id = me.uid AND fqdn IS NOT NULL
+          SELECT 1 FROM profiles WHERE user_id = {OWNER} AND fqdn IS NOT NULL
           UNION ALL
-          SELECT 1 FROM storage_prefixes WHERE user_id = me.uid
+          SELECT 1 FROM storage_prefixes WHERE user_id = {OWNER}
        )) AS domain_bind,
-       (SELECT COALESCE(view_count, 0) FROM profiles WHERE user_id = me.uid) AS profile_view,
-       (SELECT COALESCE(visit_count, 0) FROM user_stats WHERE user_id = me.uid) AS visit,
-       (SELECT COUNT(*) FROM posts WHERE user_id = me.uid AND deleted_at IS NULL) AS posts,
-       (SELECT COUNT(*) FROM post_comments WHERE user_id = me.uid AND deleted_at IS NULL) AS comments,
-       (SELECT COUNT(*) FROM post_likes WHERE user_id = me.uid) AS likes_given,
+       (SELECT COALESCE(view_count, 0) FROM profiles WHERE user_id = {OWNER}) AS profile_view,
+       (SELECT COALESCE(visit_count, 0) FROM user_stats WHERE user_id = {OWNER}) AS visit,
+       (SELECT COUNT(*) FROM posts WHERE user_id = {OWNER} AND deleted_at IS NULL) AS posts,
+       (SELECT COUNT(*) FROM post_comments WHERE user_id = {OWNER} AND deleted_at IS NULL) AS comments,
+       (SELECT COUNT(*) FROM post_likes WHERE user_id = {OWNER}) AS likes_given,
        (SELECT COALESCE((SELECT SUM(like_count) FROM posts
-                          WHERE user_id = me.uid AND deleted_at IS NULL), 0)
+                          WHERE user_id = {OWNER} AND deleted_at IS NULL), 0)
              + COALESCE((SELECT SUM(like_count) FROM post_comments
-                          WHERE user_id = me.uid AND deleted_at IS NULL), 0)) AS likes_received,
-       (SELECT COUNT(*) FROM chat_messages WHERE user_id = me.uid) AS chat,
-       (SELECT COUNT(*) FROM tempbox_batches WHERE creator_user_id = me.uid) AS tempbox,
+                          WHERE user_id = {OWNER} AND deleted_at IS NULL), 0)) AS likes_received,
+       (SELECT COUNT(*) FROM chat_messages WHERE user_id = {OWNER}) AS chat,
+       (SELECT COUNT(*) FROM tempbox_batches WHERE creator_user_id = {OWNER}) AS tempbox,
        (SELECT COUNT(*) FROM users u JOIN invite_codes c ON u.invite_code_id = c.id
-         WHERE c.created_by = me.uid) AS invited,
-       (SELECT COUNT(*) FROM donations WHERE user_id = me.uid AND status = 'approved') AS donations,
+         WHERE c.created_by = {OWNER}) AS invited,
+       (SELECT COUNT(*) FROM donations WHERE user_id = {OWNER} AND status = 'approved') AS donations,
        (SELECT COUNT(DISTINCT type) FROM donations
-         WHERE user_id = me.uid AND status = 'approved') AS donation_kinds,
-       (SELECT COUNT(*) FROM frp_accounts WHERE user_id = me.uid) AS frp,
-       (SELECT COUNT(*) FROM proxy_activation WHERE user_id = me.uid) AS proxy,
-       (SELECT COUNT(*) FROM storage_accounts WHERE user_id = me.uid) AS storage_acc,
-       (SELECT COUNT(*) FROM newapi_accounts WHERE user_id = me.uid) AS ai_acc,
-       (SELECT COUNT(*) FROM profiles WHERE user_id = me.uid) AS profile_row,
+         WHERE user_id = {OWNER} AND status = 'approved') AS donation_kinds,
+       (SELECT COUNT(*) FROM frp_accounts WHERE user_id = {OWNER}) AS frp,
+       (SELECT COUNT(*) FROM proxy_activation WHERE user_id = {OWNER}) AS proxy,
+       (SELECT COUNT(*) FROM storage_accounts WHERE user_id = {OWNER}) AS storage_acc,
+       (SELECT COUNT(*) FROM newapi_accounts WHERE user_id = {OWNER}) AS ai_acc,
+       (SELECT COUNT(*) FROM profiles WHERE user_id = {OWNER}) AS profile_row,
        (SELECT COUNT(*) FROM users WHERE created_at <
-         (SELECT created_at FROM users WHERE id = me.uid)) AS veteran_rank,
-       (SELECT created_at FROM users WHERE id = me.uid) AS created_at
+         (SELECT created_at FROM users WHERE id = {OWNER})) AS veteran_rank,
+       (SELECT created_at FROM users WHERE id = {OWNER}) AS created_at
+     `.replaceAll("{OWNER}", owner)
+}
+
+export async function loadUserCounts(env: Env, userId: string): Promise<UserCounts> {
+  const row = await env.DB.prepare(
+    `SELECT ${countColumns("me.uid")}
      FROM (SELECT ? AS uid) me`
   )
     .bind(userId)
     .first<UserCounts>()
 
   return row ?? emptyCounts()
+}
+
+/** 全站计数行（比 UserCounts 多出身份字段，排行榜直接用） */
+export interface AllUserCounts extends UserCounts {
+  uid: string
+  username: string
+  nickname: string | null
+  avatar_key: string | null
+}
+
+/**
+ * 全站每个**活跃**用户的原始计数，供排行榜按成就点排序。
+ *
+ * 实测成本（2026-10-02，1151 个用户）：远程 D1 上约 **9ms**，`rows_read` 约 5100 ——
+ * 因为 26 个子查询基本都走索引、每次只读 0~1 行。所以可以实时算，不必落快照表。
+ *
+ * ⚠️ 这里引用的表必须**线上真实存在**（`feedback` 就曾缺席过），
+ * 新增依赖前先 `SELECT name FROM sqlite_master` 确认一次，否则整页 500。
+ */
+export async function loadAllUserCounts(env: Env): Promise<AllUserCounts[]> {
+  const res = await env.DB.prepare(
+    `SELECT u.id AS uid, u.username AS username, u.nickname AS nickname,
+            u.avatar_key AS avatar_key,
+            ${countColumns("u.id")}
+       FROM users u
+      WHERE u.status = 'active'`
+  ).all<AllUserCounts>()
+  return res.results ?? []
 }
 
 /**
@@ -749,10 +834,6 @@ export async function getAchievements(env: Env, request: Request): Promise<Respo
   // 记录新解锁（首次达成某等级时写库），并读回所有历史解锁时间
   await recordUnlocks(env, user.id, snapshot.achievements)
 
-  // 成就奖励：每满 N 点发放一份 AI 订阅（防重复见 achievement_rewards 表）。
-  // 大多数用户不跨档位、会立即返回；只有刚满档的用户才会真正调 NewAPI 发订阅。
-  await grantAchievementRewards(env, user.id, user.username, snapshot.summary.points)
-
   const unlockRows = await env.DB.prepare(
     "SELECT achievement_id, level, unlocked_at FROM user_achievements WHERE user_id = ?"
   )
@@ -778,6 +859,28 @@ export async function getAchievements(env: Env, request: Request): Promise<Respo
       a.unlockedAt = times.length ? times[times.length - 1] : null
     }
   }
+
+  // 等级只升不降（历史最高等级覆盖实时计算值）。与排行榜共用同一个函数，
+  // 避免同一用户在两个页面看到不同的成就点数。
+  const history = new Map<string, number>()
+  for (const [id, levels] of unlockMap) {
+    history.set(id, Math.max(...levels.keys()))
+  }
+  mergeHistoricalLevels(snapshot.achievements, history)
+
+  // 合并历史等级后 summary 会变，必须重算 —— 否则徽章数/成就点数与列表对不上。
+  // ⚠️ 必须放在 grantAchievementRewards 之前：那个函数按点数发订阅，用旧值会少发。
+  snapshot.summary = {
+    unlocked: snapshot.achievements.filter((a) => a.level > 0).length,
+    total: snapshot.achievements.length,
+    points: snapshot.achievements.reduce((sum, a) => sum + a.level, 0),
+    maxPoints: snapshot.summary.maxPoints,
+  }
+  snapshot.title = titleFor(snapshot.summary.points)
+
+  // 成就奖励：每满 N 点发放一份 AI 订阅（防重复见 achievement_rewards 表）。
+  // 大多数用户不跨档位、会立即返回；只有刚满档的用户才会真正调 NewAPI 发订阅。
+  await grantAchievementRewards(env, user.id, user.username, snapshot.summary.points)
 
   return json({
     achievements: snapshot.achievements,

@@ -284,13 +284,24 @@ export default function MessagesPage() {
 
   /** 每个活动的认证码输入：{ eventId: code }，认证码活动才需要 */
   const [codeDrafts, setCodeDrafts] = React.useState<Record<string, string>>({})
+  /** 每个活动的 GitHub 用户名输入：{ eventId: github }，「点 Star」活动才需要 */
+  const [githubDrafts, setGithubDrafts] = React.useState<Record<string, string>>({})
 
   const claim = async (ev: EventItem) => {
     setClaiming(ev.id)
     try {
-      const res = await eventApi.claim(ev.id, codeDrafts[ev.id] ?? "")
+      const res = await eventApi.claim(
+        ev.id,
+        codeDrafts[ev.id] ?? "",
+        githubDrafts[ev.id] ?? ""
+      )
       toast.success(res.detail || t("msg.claimOk"))
       setCodeDrafts((d) => {
+        const next = { ...d }
+        delete next[ev.id]
+        return next
+      })
+      setGithubDrafts((d) => {
         const next = { ...d }
         delete next[ev.id]
         return next
@@ -355,6 +366,10 @@ export default function MessagesPage() {
                 codeDrafts={codeDrafts}
                 onCodeChange={(id, v) =>
                   setCodeDrafts((d) => ({ ...d, [id]: v }))
+                }
+                githubDrafts={githubDrafts}
+                onGithubChange={(id, v) =>
+                  setGithubDrafts((d) => ({ ...d, [id]: v }))
                 }
                 onClaim={(ev) => void claim(ev)}
               />
@@ -477,7 +492,10 @@ function MessageRow({
               <p className="text-sm font-medium">
                 {n.type === "post_like"
                   ? t("msg.liked", { actor: actor ?? t("msg.someone") })
-                  : t("msg.replied", { actor: actor ?? t("msg.someone") })}
+                  : n.type === "feedback_reply"
+                    ? // 反馈回复关联的是反馈单，不是帖子 —— 说成「帖子」用户会找不到东西
+                      `${actor ?? t("msg.someone")} ${t("cm.notif.feedbackReply")}`
+                    : t("msg.replied", { actor: actor ?? t("msg.someone") })}
               </p>
             )}
             <span className="text-xs text-muted-foreground">
@@ -519,6 +537,8 @@ function EventList({
   claiming,
   codeDrafts,
   onCodeChange,
+  githubDrafts,
+  onGithubChange,
   onClaim,
 }: {
   events: EventItem[]
@@ -527,6 +547,9 @@ function EventList({
   /** 认证码草稿：{ eventId: 已输入的码 } */
   codeDrafts: Record<string, string>
   onCodeChange: (id: string, v: string) => void
+  /** GitHub 用户名草稿：{ eventId: 已输入的用户名 } */
+  githubDrafts: Record<string, string>
+  onGithubChange: (id: string, v: string) => void
   onClaim: (ev: EventItem) => void
 }) {  const { t } = useT()
 
@@ -550,6 +573,8 @@ function EventList({
           busy={claiming === ev.id}
           code={codeDrafts[ev.id] ?? ""}
           onCodeChange={(v) => onCodeChange(ev.id, v)}
+          github={githubDrafts[ev.id] ?? ""}
+          onGithubChange={(v) => onGithubChange(ev.id, v)}
           onClaim={() => onClaim(ev)}
         />
       ))}
@@ -562,6 +587,8 @@ function EventCard({
   busy,
   code,
   onCodeChange,
+  github,
+  onGithubChange,
   onClaim,
 }: {
   ev: EventItem
@@ -569,6 +596,9 @@ function EventCard({
   /** 当前输入的认证码（仅认证码活动用） */
   code: string
   onCodeChange: (v: string) => void
+  /** 当前输入的 GitHub 用户名（仅「点 Star」活动用） */
+  github: string
+  onGithubChange: (v: string) => void
   onClaim: () => void
 }) {
   const { t } = useT()
@@ -576,6 +606,9 @@ function EventCard({
   const claimed = !!claim && claim.rewardStatus !== "failed"
   /** 认证码活动：领取前必须输入管理员公布的口令（如 QQ 群群公告里的码） */
   const needsCode = ev.conditionType === "code" && !claimed
+  /** 「点 GitHub star」活动：领取前必须填 GitHub 用户名，服务端据此核验。
+   *  ⚠️ 这里之前漏了（只在专属页 /activity/:id 有），消息中心的卡片因此看不到输入框。 */
+  const needsGithub = ev.conditionType === "github_star" && !claimed
   /** 抽奖活动：参与只是报名，开奖后由服务端随机抽人发积分 */
   const isLottery = ev.conditionType === "lottery"
   /** 抽奖已开奖：不能再报名（报了也拿不到奖），按钮置灰 */
@@ -688,6 +721,20 @@ function EventCard({
                   }}
                 />
               )}
+              {needsGithub && (
+                <Input
+                  className="h-9 w-44"
+                  placeholder={t("msg.enterGithub")}
+                  maxLength={64}
+                  value={github}
+                  onChange={(e) => onGithubChange(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && github.trim() && ev.claimState === "open" && !busy) {
+                      onClaim()
+                    }
+                  }}
+                />
+              )}
               <Button
                 size="sm"
                 onClick={onClaim}
@@ -695,6 +742,7 @@ function EventCard({
                   busy ||
                   ev.claimState !== "open" ||
                   (needsCode && !code.trim()) ||
+                  (needsGithub && !github.trim()) ||
                   !!blockedReason ||
                   lotteryClosed
                 }
@@ -729,6 +777,9 @@ function EventCard({
         </div>
         {needsCode && (
           <p className="text-xs text-muted-foreground">{t("msg.codeHint")}</p>
+        )}
+        {needsGithub && (
+          <p className="text-xs text-muted-foreground">{t("msg.github.hint")}</p>
         )}
         {isLottery && !claimed && (
           <p className="text-xs text-muted-foreground">

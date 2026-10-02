@@ -2,9 +2,19 @@ import * as React from "react"
 
 import { zh } from "./zh"
 import { en } from "./en"
+import { API_MESSAGES_EN, API_MESSAGE_PATTERNS, API_LABELS_EN } from "./api-messages"
 
 export type Lang = "zh" | "en"
 export type Dict = Record<string, string>
+
+/**
+ * 取词时允许传入的变量类型。
+ *
+ * 放宽到 boolean / null / undefined 是**故意的**：这些词条多半是从模板字符串
+ * 批量搬过来的（`已选 ${n} 个` 之类），原来的 `String(x)` 行为必须保持一致
+ * —— 表达式是 `string | undefined` 时，旧代码渲染的就是 "undefined"。
+ */
+export type TVars = Record<string, string | number | boolean | null | undefined>
 
 const DICTS: Record<Lang, Dict> = { zh, en }
 
@@ -40,7 +50,7 @@ interface I18nValue {
   lang: Lang
   setLang: (l: Lang) => void
   /** 取词。缺失时回落到中文；再没有就原样返回 key（方便一眼看出漏翻） */
-  t: (key: string, vars?: Record<string, string | number>) => string
+  t: (key: string, vars?: TVars) => string
 }
 
 const I18nContext = React.createContext<I18nValue | null>(null)
@@ -55,12 +65,42 @@ const I18nContext = React.createContext<I18nValue | null>(null)
 let currentLang: Lang = "zh"
 
 /** 取词（非 hook 版本）：给 class 组件与组件外代码用；组件里请优先 useT() */
-export function tStatic(key: string, vars?: Record<string, string | number>): string {
+export function tStatic(key: string, vars?: TVars): string {
   const raw = DICTS[currentLang][key] ?? DICTS.zh[key] ?? key
   if (!vars) return raw
   return raw.replace(/\{(\w+)\}/g, (m, name) =>
-    vars[name] !== undefined ? String(vars[name]) : m
+    name in vars ? String(vars[name]) : m
   )
+}
+
+/**
+ * 后端错误消息的英文化。
+ *
+ * 背景：`worker/src` 里的 `ApiError(status, message)` 一律是中文（那是运维/日志
+ * 也认的原文），前端拿到 `err.message` 直接显示，于是英文界面上会蹦出中文
+ * ——注册时那句「密码至少需要 8 位」就是这么来的。
+ *
+ * 做法：**按消息原文**查一份独立词表（`api-messages.ts`），不按错误码 ——
+ * `NOT_FOUND` 这类码一条对十几句，按码翻会把「商品不存在」说成「未找到」。
+ * 中文界面下直接原样返回；查不到也原样返回（宁可显示中文，不要空白）。
+ */
+let apiPatterns: { re: RegExp; en: string }[] | null = null
+
+export function translateApiMessage(message: string): string {
+  if (!message || currentLang === "zh") return message
+  const exact = API_MESSAGES_EN[message]
+  if (exact) return exact
+  const label = API_LABELS_EN[message]
+  if (label) return label
+  if (!apiPatterns) {
+    apiPatterns = API_MESSAGE_PATTERNS.map((p) => ({ re: new RegExp(p.src), en: p.en }))
+  }
+  for (const p of apiPatterns) {
+    const m = message.match(p.re)
+    if (!m) continue
+    return p.en.replace(/\{v(\d+)\}/g, (_, i) => m[Number(i) + 1] ?? "")
+  }
+  return message
 }
 
 export function I18nProvider({ children }: { children: React.ReactNode }) {
@@ -84,11 +124,11 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   }, [lang])
 
   const t = React.useCallback(
-    (key: string, vars?: Record<string, string | number>) => {
+    (key: string, vars?: TVars) => {
       const raw = DICTS[lang][key] ?? DICTS.zh[key] ?? key
       if (!vars) return raw
       return raw.replace(/\{(\w+)\}/g, (m, name) =>
-        vars[name] !== undefined ? String(vars[name]) : m
+        name in vars ? String(vars[name]) : m
       )
     },
     [lang]

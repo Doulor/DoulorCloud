@@ -61,6 +61,13 @@ export interface DnsRecord {
   status: "active" | "pending" | "error"
   createdAt: string
   updatedAt: string
+  /**
+   * 平台自动创建的解析（个人名片 / 网盘直链绑定的域名）。
+   * 这类记录是后端派生出来的只读项：它并不存在于 dns_records 表里，
+   * 删掉它只会让域名解析不到本站、而绑定关系还在，所以这里不给编辑/删除。
+   */
+  managed?: boolean
+  managedBy?: "profile" | "storage" | null
 }
 
 export interface Mailbox {
@@ -162,6 +169,7 @@ export interface AnalyticsOverview {
   byDay: { date: string; pv: number; uv: number }[]
   byPath: { path: string; pv: number; uv: number }[]
   byReferrer: { referrer: string; pv: number }[]
+  byDevice: { ua: string; pv: number; uv: number }[]
 }
 
 /**
@@ -238,6 +246,8 @@ export interface UserAnalytics {
     /** 数据可信度说明（后端下发，前端原样展示） */
     caveat: string
   }
+  /** 「更多数据」：跨模块补充指标，按分组展示（标签由服务端下发） */
+  more: { group: string; items: { label: string; value: number; hint?: string }[] }[]
 }
 
 /** 聊天室消息 */
@@ -736,13 +746,21 @@ export interface AdminFrpNode extends FrpNode {
  * 受权限控制的模块（与后端 permissions.ts 的 FEATURES 一致）。
  * ⚠️ 不含「个人名片」：名片不消耗资源，已从权限体系移出、全量开放。
  */
-export type FeatureKey = "r2" | "ai" | "frp" | "proxy"
+export type FeatureKey = "r2" | "ai" | "frp" | "proxy" | "doulor"
 
 export interface Permissions {
   r2: boolean
   ai: boolean
   frp: boolean
   proxy: boolean
+  /**
+   * doulor.cn 专属域（子域名 + 邮箱）。
+   *
+   * ⚠️ 与其它四项**不同**：默认值是 false（`permissions.ts` 的 DEFAULT_ALLOWED
+   * 不含它）。doulor.cn 是站点主域，用户邮箱/解析挂上去会把滥用风险记到主域声誉上，
+   * 而主域还要负责给全站发验证码与找回密码。所以只由管理员显式授予。
+   */
+  doulor: boolean
 }
 
 export const FEATURE_LABELS: Record<FeatureKey, string> = {
@@ -750,6 +768,63 @@ export const FEATURE_LABELS: Record<FeatureKey, string> = {
   ai: "feat.ai",
   frp: "feat.frp",
   proxy: "feat.proxy",
+  doulor: "feat.doulor",
+}
+
+/**
+ * 可选的「根域」——用户建子域名/邮箱时能选哪个域名。
+ *
+ * 后端按当前用户的权限**筛过一遍**才下发：没权限的域根本不会出现在这里，
+ * 前端不必自己判断权限（否则两边口径迟早漂移）。
+ */
+export interface RootDomainOption {
+  name: string
+  label: string
+  isDefault: boolean
+}
+
+// ---- 排行榜 ----
+
+/** 四个榜 */
+export type LeaderboardBoard =
+  | "newapi"
+  | "community"
+  | "feedback"
+  | "achievement"
+  /** 当前积分余额（只有「全部」口径） */
+  | "points_balance"
+  /** 累计获得的积分（可按今日/本周/本月/全部切） */
+  | "points_earned"
+
+/** 社区榜的三个子项（只有 board=community 时有意义） */
+export type CommunityMetric = "posts" | "likes" | "comments"
+
+/** 榜上一行 */
+export interface LeaderboardEntry {
+  /** 名次（同分并列，下一名跳号：1,2,2,4） */
+  rank: number
+  username: string
+  nickname: string | null
+  hasAvatar: boolean
+  score: number
+  /** 是不是当前登录用户（前端高亮那一行） */
+  isMe: boolean
+}
+
+/** 时间范围：历史累计 / 今日 / 本周 / 本月 */
+export type LeaderboardRange = "all" | "today" | "week" | "month"
+
+export interface LeaderboardResponse {
+  board: LeaderboardBoard
+  metric: CommunityMetric | null
+  /** 实际生效的时间范围（请求了不支持的会回落到 all） */
+  range: LeaderboardRange
+  /** 这个榜支持哪些范围（newapi/成就点只有累计），前端据此禁用不支持的按钮 */
+  ranges: LeaderboardRange[]
+  items: LeaderboardEntry[]
+  /** 我的成绩与名次；0 分时为 null（前端显示「暂未上榜」） */
+  me: { score: number; rank: number } | null
+  topN: number
 }
 
 // ---- 管理员全局设置 ----
@@ -1240,6 +1315,8 @@ export interface ProxyOverview {
   /** 用户已同意的协议版本（enable 时写入） */
   consentedVersion: number
   subscriptions: ProxySubscription[]
+  /** 是否还有更多订阅源（懒加载分页，前端点「查看更多」接着拉） */
+  hasMore: boolean
 }
 
 /** 管理端订阅源（含停用开关与最近错误） */
@@ -1868,7 +1945,7 @@ export interface R2BucketUser {
 export interface R2BucketStats {
   users: number
   usedBytes: number
-  /** 容量上限 = 人数上限 × 每人配额 */
+  /** 容量上限 = 桶的真实容量（共享池） */
   capacityBytes: number
   fileCount: number
   /** 该桶占免费额度（10 GB）的百分比 */
@@ -1882,7 +1959,10 @@ export interface R2Bucket {
   endpoint: string
   bucketName: string
   maxUsers: number
+  /** 每人最大上传限额（软上限，字节） */
   quotaPerUser: number
+  /** 桶的真实容量（共享池，字节） */
+  capacityBytes: number
   enabled: boolean
   sortOrder: number
   /** 'user' = 用户网盘桶；'platform' = 平台数据桶（名片/分享箱） */
@@ -1953,6 +2033,8 @@ export interface Post {
   shareCount: number
   liked: boolean
   isMine: boolean
+  /** 管理员置顶（2026-10-01）；置顶的排在广场最前 */
+  pinned: boolean
   createdAt: string
   /** 最近编辑时间（未编辑过为 null） */
   updatedAt: string | null
@@ -2016,6 +2098,11 @@ export interface EventItem {
   rewardParams: Record<string, unknown> | null
   conditionType: EventConditionType
   conditionParams: Record<string, unknown> | null
+  /**
+   * 参与条件的规则说明（如「需要先把个人名片做完：填好昵称并保存」）。
+   * 与 claimBlockedReason 不同：那个是「你现在还差什么」，这个是「这类活动要什么」。
+   */
+  conditionHint?: string | null
   /** 抽奖：开奖时间（ISO）；null = 尚未开奖 */
   drawnAt: string | null
   /**
@@ -2057,6 +2144,50 @@ export type EventConditionType =
   | "lottery"
   /** 点 GitHub star：用户填自己的 GitHub 用户名，服务端去仓库的 stargazers 名单里核验 */
   | "github_star"
+
+// ---- 账号监管（封禁申诉 + 风险账户）----
+
+/** 封禁申诉（管理端列表用） */
+export interface AccountAppeal {
+  id: string
+  userId: string | null
+  username: string
+  contact: string | null
+  content: string
+  status: "pending" | "accepted" | "rejected"
+  reviewNote: string | null
+  reviewedBy: string | null
+  ip: string | null
+  createdAt: string
+  reviewedAt: string | null
+  /** 该账号当前在 cloud 侧的状态（suspended = 仍在封禁中） */
+  userStatus: string | null
+}
+
+/** 管理员对申诉的回复（**用户端**用：登录后强制弹窗展示，直到用户确认已读） */
+export interface AppealPendingReply {
+  id: string
+  status: "pending" | "accepted" | "rejected"
+  reviewNote: string
+  createdAt: string
+  reviewedAt: string | null
+}
+
+/** 风险账户（定时扫描中转站日志写入） */
+export interface RiskAccount {
+  userId: string
+  username: string
+  riskLevel: "low" | "medium" | "high"
+  score: number
+  /** JSON 字符串（字符串数组），前端解析后逐条展示 */
+  reasons: string | null
+  peakPerMin: number
+  requests7d: number
+  firstSeenAt: string
+  lastSeenAt: string
+  status: "open" | "watching" | "banned" | "cleared"
+  userStatus: string | null
+}
 
 /** 活动发布/更新请求体 */
 export interface EventPayload {
@@ -2261,11 +2392,22 @@ export type PointReviewStatus = "pending" | "approved" | "rejected"
 export type PointBillingMode = "one_time" | "rental"
 
 /** 商城里的一个商品（官方 / 用户上架共用同一个结构） */
+/** 用户商品分类（2026-10-01：先分 IT / 其他） */
+export type ProductCategory = "it" | "other"
+
+/** 分类的展示名（i18n key）；新增分类时只改这里 + 两份词典 */
+export const PRODUCT_CATEGORY_LABELS: Record<ProductCategory, string> = {
+  it: "pt.cat.it",
+  other: "pt.cat.other",
+}
+
 export interface PointProduct {
   id: string
   name: string
   description: string
   imageUrl: string | null
+  /** 分类：it / other（2026-10-01 加，暂只有这两类） */
+  category: ProductCategory
   /**
    * 内置图标名（lucide slug，如 'gift'）。与 imageUrl 互补：**imageUrl 优先**，
    * 没填图片才用图标；两个都没有时卡片上回退成默认图标。
@@ -2309,6 +2451,14 @@ export interface PointProduct {
  */
 export type PointOrderStatus = "pending" | "delivered" | "settled" | "cancelled"
 
+/**
+ * 售后（退款）状态 —— 与订单状态**正交**。
+ *
+ * 订单状态说「交易走到哪」，售后状态说「退款诉求走到哪」。
+ * 退款成立时订单同时变成 `cancelled`（积分原路退回）。
+ */
+export type AfterSaleStatus = "requested" | "rejected" | "platform" | "closed" | "refunded"
+
 /** 一笔商城订单 */
 export interface PointOrder {
   id: string
@@ -2348,6 +2498,16 @@ export interface PointOrder {
   expireHandledAt: string | null
   /** 本单实际授予的模块权限名（仅 delivery='feature' 时非空） */
   grantedFeature: string | null
+  /** 售后状态；null = 没有进行中的售后 */
+  afterSaleStatus: AfterSaleStatus | null
+  /** 买家申请退款时填写的理由 */
+  afterSaleReason: string | null
+  /** 售后处理意见：卖家的拒绝理由 / 平台的判定说明 */
+  afterSaleNote: string | null
+  /** 买家申请退款（最近一次）的时间 */
+  afterSaleRequestedAt: string | null
+  /** 售后终结（退款 / 驳回）的时间 */
+  afterSaleResolvedAt: string | null
 }
 
 /** GET /api/points 响应 */
@@ -2471,6 +2631,7 @@ export interface PointProductPayload {
   description: string
   imageUrl: string | null
   icon: string | null
+  category: ProductCategory
   price: number
   stock: number | null
   perUserLimit: number | null
@@ -2496,6 +2657,7 @@ export interface UserProductPayload {
   description: string
   imageUrl: string | null
   icon: string | null
+  category: ProductCategory
   price: number
   stock: number | null
   /** 计费方式：买断 / 租用（用户商品也能租 —— 交付方式固定人工，属于可收回的类别） */
@@ -2533,10 +2695,12 @@ export interface AttentionCounts {
     donations: number
     /** 用户上传的商品待审核（官方商品建时即 approved，不计入） */
     pointProducts: number
-    /** 待处理订单（官方=待发放；用户商品=待交付） */
-    pointOrders: number
     /** 活动奖励里「自动发放失败、要人工发」的条数 */
     eventClaims: number
+    /** 内网穿透申请待审核（用户提交后等管理员批） */
+    frpApplications: number
+    /** 待处理的封禁申诉（2026-10-02） */
+    appeals: number
   } | null
 }
 
@@ -2560,10 +2724,192 @@ export interface DmMessage {
   readAt: string | null
 }
 
+/** 我收到的一条待处理「聊天申请」（2026-10-01） */
+/** 我持有的一个称号（个人空间里可切换对外展示哪一个；2026-10-01） */
+export interface MyTitle {
+  id: string
+  name: string
+  colorFrom: string
+  colorTo: string
+  isDisplay: boolean
+  grantedAt: string
+}
+
+export interface DmRequest {
+  peer: DmPeer
+  /** 对方发来的申请消息（陌生人的第一条，也是同意前唯一能发的一条） */
+  body: string
+  createdAt: string
+}
+
 export interface DmConversation {
   peer: DmPeer
   /** 最近一条消息（列表预览用） */
   last: { body: string; createdAt: string; /** 是不是我发的 */ mine: boolean }
   /** 我在这条会话里还没读的数量 */
   unread: number
+}
+
+// ---- 管理面板 · DNS 解析管理（2026-10-01）----
+//
+// 为什么单独一套类型，而不复用 Domains 页的 DnsRecord：
+// 用户侧看到的是「我自己的记录」，管理侧还要带**归属用户**与**风险判断**，
+// 后者是服务端按规则引擎算出来的（assessRecord），不属于用户侧的语义。
+
+/** 风险等级：high = 明确滥用形态，medium = 可疑，low = 信息性提示 */
+export type DnsSeverity = "high" | "medium" | "low"
+
+/** 命中的一条规则 */
+export interface AdminDnsFinding {
+  /** 规则 id（private-ip / forward-domain / third-party-hosting…） */
+  rule: string
+  severity: DnsSeverity
+  /** 为什么这条有问题（中文说明） */
+  detail: string
+  /** 站长已将其标记为忽略 */
+  ignored: boolean
+}
+
+export interface AdminDnsRecord {
+  id: string
+  fqdn: string
+  name: string
+  type: string
+  content: string
+  ttl: number
+  proxied: boolean
+  priority: number | null
+  srv: { weight: number; port: number; target: string } | null
+  status: string
+  /** 本地是否关联了 Cloudflare 记录（false = 实际不生效） */
+  hasCf: boolean
+  subdomainId: string | null
+  createdAt: string
+  updatedAt: string
+  /** 归属用户（LEFT JOIN users） */
+  username: string | null
+  uid: number | null
+  /** 归属用户账号状态：banned = 已封禁但解析记录还在 */
+  userStatus: string | null
+  /** 归属域名（xxx.doulor.cn） */
+  domain: string | null
+  risks: AdminDnsFinding[]
+  /** 未忽略风险里的最高等级；null = 干净 */
+  topSeverity: DnsSeverity | null
+}
+
+/** 上一次合规扫描的快照 */
+export interface AdminDnsAuditRun {
+  ranAt: string
+  mode: string
+  scanned: number
+  found: number
+  high: number
+  medium: number
+  low: number
+  note: string | null
+}
+
+export interface AdminDnsListResponse {
+  records: AdminDnsRecord[]
+  total: number
+  page: number
+  pageSize: number
+  /** 记录数超过服务端单次评估上限，统计与筛选只覆盖已评估的部分 */
+  truncated: boolean
+  stats: {
+    high: number
+    medium: number
+    low: number
+    clean: number
+    scanned: number
+    openFindings: number
+  }
+  lastRun: AdminDnsAuditRun | null
+}
+
+/** 落库的扫描发现项（可处置：忽略 / 恢复） */
+export interface AdminDnsFindingRow {
+  id: string
+  recordId: string | null
+  fqdn: string
+  type: string
+  content: string
+  username: string | null
+  rule: string
+  severity: DnsSeverity
+  detail: string
+  status: "open" | "ignored" | "resolved"
+  firstSeenAt: string
+  lastSeenAt: string
+  reviewedBy: string | null
+  reviewedAt: string | null
+  note: string | null
+}
+
+export interface AdminDnsFindingsResponse {
+  findings: AdminDnsFindingRow[]
+  total: number
+  page: number
+  pageSize: number
+  /** 审计表是否已建（false = 迁移 0092 还没执行） */
+  tableReady: boolean
+  counts?: { open: number; ignored: number; resolved: number }
+  lastRun: AdminDnsAuditRun | null
+  message?: string
+}
+
+export interface AdminDnsAuditSummary {
+  ranAt: string
+  mode: string
+  scanned: number
+  found: number
+  high: number
+  medium: number
+  low: number
+  /** 本次新出现的问题数 */
+  fresh: number
+  note?: string
+}
+
+/** 本地台账 vs Cloudflare 实际记录的对账结果 */
+export interface AdminDnsCfDiff {
+  cfTotal: number
+  dbTotal: number
+  /** 被识别为平台自建（Worker 路由 / 邮件鉴权 / 根域）并排除的条数 */
+  platformManaged: number
+  checkedAt: string
+  note: string
+  onlyInCf: {
+    id: string
+    name: string
+    type: string
+    content: string
+    proxied: boolean
+    hint: string | null
+  }[]
+  onlyInDb: {
+    id: string
+    fqdn: string
+    type: string
+    content: string
+    status: string
+    username: string | null
+    cfId: string | null
+    reason: string
+  }[]
+}
+
+/**
+ * 用户自定义表情包（社区 / 私信编辑器里快捷发送）。
+ *
+ * `url` 形如 `/s/<id>`：id 是 uuid ⇒ 内容与 URL 一一对应、永不变，
+ * 所以取图那边可以放心用一年 immutable 缓存。
+ */
+export interface Sticker {
+  id: string
+  url: string
+  contentType: string
+  bytes: number
+  createdAt: string
 }

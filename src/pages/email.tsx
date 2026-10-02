@@ -12,6 +12,13 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
   Card,
   CardContent,
   CardHeader,
@@ -29,7 +36,7 @@ import { cn } from "@/lib/utils"
 import { fmtMailTime } from "@/lib/format"
 import { emailApi, HttpError } from "@/services/api"
 import { useT } from "@/i18n"
-import type { Mailbox, MailMessage } from "@/types"
+import type { Mailbox, MailMessage, RootDomainOption } from "@/types"
 
 /** 邮箱数量上限的兜底值（真实值由后端 GET /api/mailbox 的 limit 返回，
  *  管理员为 999999 哨兵值 → 界面显示「不限」） */
@@ -80,6 +87,13 @@ export default function EmailPage() {
   const pendingMailbox = searchParams.get("mailbox")
   const pendingMessage = searchParams.get("message")
 
+  /**
+   * 可选根域（按权限由后端筛过：没解锁 `doulor` 权限就没有 doulor.cn）。
+   * 只有多于一个时才渲染选择器 —— 多数用户只有一个域，多一个下拉框只是噪音。
+   */
+  const [rootOptions, setRootOptions] = React.useState<RootDomainOption[]>([])
+  /** 新建邮箱要用的域名（默认取默认域） */
+  const [mailDomain, setMailDomain] = React.useState("")
   const [mailboxes, setMailboxes] = React.useState<Mailbox[]>([])
   const [mailboxLimit, setMailboxLimit] = React.useState(FALLBACK_MAILBOX_LIMIT)
   // 临时邮箱额度：与 mailboxLimit 独立，互不占用
@@ -137,6 +151,13 @@ export default function EmailPage() {
       setMailboxes(res.mailboxes)
       if (typeof res.limit === "number") setMailboxLimit(res.limit)
       if (typeof res.tempLimit === "number") setTempLimit(res.tempLimit)
+      const roots = res.rootDomains ?? []
+      const fallback = (roots.find((r) => r.isDefault) ?? roots[0])?.name ?? ""
+      setRootOptions(roots)
+      // 只在「没选过 / 原选中项已不可用」时重置，别把用户的选择冲掉
+      setMailDomain((prev) =>
+        roots.some((r) => r.name === prev) ? prev : fallback
+      )
       // 优先级：显式指定 > query 参数 ?mailbox= > 主邮箱 > 第一个
       const target =
         res.mailboxes.find((m) => m.id === selectId) ??
@@ -249,7 +270,12 @@ export default function EmailPage() {
 
   React.useEffect(() => {
     void loadMailboxes()
-  }, [loadMailboxes])
+    // 只在挂载时跑一次。?mailbox= 只用于「初始选中」；自动打开邮件会清掉 query，
+    // 若这里依赖 loadMailboxes（其内部依赖 pendingMailbox），清 query 会触发本
+    // effect 重跑，把已选中的子邮箱冲回主邮箱/第一个（2026-10-02 反馈「首页最近
+    // 邮件点子邮箱 → 先跳对再刷回默认邮箱」）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   React.useEffect(() => {
     if (selected) void loadMessages(selected.id)
@@ -423,7 +449,7 @@ export default function EmailPage() {
   const handleAddMailbox = async () => {
     setBusy(true)
     try {
-      await emailApi.create({ localPart })
+      await emailApi.create({ localPart, domain: mailDomain || undefined })
       toast.success(t("em.ok.mailboxAdded"))
       setLocalPart("")
       setAddOpen(false)
@@ -892,6 +918,24 @@ export default function EmailPage() {
               {t("em.dialog.addDesc")}
             </DialogDescription>
           </DialogHeader>
+          {/* 邮箱建在哪个域名下：只有多个可选域时才需要选（列表由后端按权限下发） */}
+          {rootOptions.length > 1 && (
+            <div className="space-y-2">
+              <Label htmlFor="mailDomain">{t("em.dialog.domain")}</Label>
+              <Select value={mailDomain} onValueChange={setMailDomain}>
+                <SelectTrigger id="mailDomain">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {rootOptions.map((r) => (
+                    <SelectItem key={r.name} value={r.name}>
+                      {r.label || r.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div className="space-y-2">
             <Label htmlFor="localPart">{t("em.dialog.localPart")}</Label>
             <div className="flex items-center gap-1">
@@ -903,7 +947,7 @@ export default function EmailPage() {
                 className="flex-1"
               />
               <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                @doulor.cn
+                {mailDomain ? `@${mailDomain}` : "@"}
               </span>
             </div>
           </div>

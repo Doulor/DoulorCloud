@@ -15,6 +15,7 @@ import {
   Network,
   Zap,
   Trophy,
+  Medal,
   Coins,
   MessagesSquare,
   MessageSquare,
@@ -53,7 +54,16 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { useAuth } from "@/hooks/use-auth"
-import { authApi, attentionApi, chatApi, communityApi, settingsApi, HttpError } from "@/services/api"
+import { AttentionContext } from "@/lib/attention-context"
+import {
+  authApi,
+  attentionApi,
+  chatApi,
+  communityApi,
+  settingsApi,
+  getDefaultRootDomain,
+  HttpError,
+} from "@/services/api"
 import type { AttentionCounts } from "@/types"
 import { cn } from "@/lib/utils"
 import { onAttentionChanged } from "@/lib/attention-events"
@@ -89,6 +99,14 @@ const adminNav = { to: "/dashboard/admin", labelKey: "nav.admin", icon: ShieldCh
 // 「成就」不再占侧边栏位置，收进右下角账户菜单（排在「个人空间」上方）。
 // 侧边栏底部队列只留更常用的入口，成就属于「偶尔看一眼」的荣誉页。
 const achievementNav = { to: "/dashboard/achievements", labelKey: "nav.achievements", icon: Trophy, end: false }
+/**
+ * 排行榜。
+ *
+ * 放在账户菜单（左下角齿轮 / 移动端头像）里而不是侧边栏主队列：
+ * 侧边栏只留「日常要用」的入口，排行榜属于「偶尔看一眼」的荣誉页 ——
+ * 与「成就」同一性质，所以跟它并排。
+ */
+const leaderboardNav = { to: "/dashboard/leaderboard", labelKey: "nav.leaderboard", icon: Medal, end: false }
 // 积分与成就原本并列（都是「成长/奖励」体系），成就移入账户菜单后这里只剩积分。
 // 文案用「积分与商城」：该页同时承载「积分余额」与「积分商城」两块，光写「积分」看不出有商城。
 const pointsNav = { to: "/dashboard/points", labelKey: "nav.points", icon: Coins, end: false }
@@ -113,6 +131,21 @@ export function DashboardLayout({
   children?: React.ReactNode
 }) {
   const { user, setUser } = useAuth()
+  /** 「发给用户的根域」（如 tyu.me），由后端下发，不写死 —— 管理员可改 */
+  const [rootDomain, setRootDomain] = React.useState("")
+  React.useEffect(() => {
+    let alive = true
+    getDefaultRootDomain()
+      .then((d) => {
+        if (alive) setRootDomain(d)
+      })
+      .catch(() => {
+        /* 拉不到就不显示域名 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
   const location = useLocation()
   const navigate = useNavigate()
   const { t } = useT()
@@ -178,6 +211,23 @@ export function DashboardLayout({
     setVerifyCode("")
     setVerifyOpen(true)
   }
+
+  /**
+   * 功能接口因「邮箱未验证」被服务端拦下时，直接把验证对话框弹出来。
+   *
+   * 背景（2026-10-02）：未验证账号可以照常浏览页面，但所有写操作（开通中转站、
+   * 建子域名、发帖、发言…）都会被 403 拦掉。只靠 toast 提示，用户得自己摸到
+   * 这里找入口；这里做一次全局兜底，点到哪被拦就在哪弹窗。
+   */
+  React.useEffect(() => {
+    const onGated = () => {
+      setCodeSent(false)
+      setVerifyCode("")
+      setVerifyOpen(true)
+    }
+    window.addEventListener("auth:email-unverified", onGated)
+    return () => window.removeEventListener("auth:email-unverified", onGated)
+  }, [])
 
   /**
    * 角标数据：一次请求拿齐社区 / 聊天室 / 反馈 / 管理四项。
@@ -350,6 +400,10 @@ export function DashboardLayout({
         <Trophy className="h-4 w-4" />
         {t("nav.achievements")}
       </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => navigate(leaderboardNav.to)}>
+        <Medal className="h-4 w-4" />
+        {t("nav.leaderboard")}
+      </DropdownMenuItem>
       <DropdownMenuItem
         onClick={() => navigate(`/space/${encodeURIComponent(user?.username ?? "")}`)}
       >
@@ -406,7 +460,10 @@ export function DashboardLayout({
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">{user.username}</p>
               <p className="truncate text-xs text-muted-foreground">
-                {user.namespace}.doulor.cn
+                {/* 根域由后端下发（root_domains 的默认行，管理员可改），
+                    2026-10-02 起是 tyu.me —— 写死 doulor.cn 会在换域后显示错地址 */}
+                {user.namespace}
+                {rootDomain ? `.${rootDomain}` : ""}
               </p>
             </div>
             <DropdownMenu>
@@ -551,6 +608,8 @@ export function DashboardLayout({
                 {t("lay.verifyDesc.a")}
                 <span className="font-mono">{user?.email}</span>
                 {t("lay.verifyDesc.b")}
+                {" "}
+                {t("lay.verifyWhy")}
               </DialogDescription>
             </DialogHeader>
             {codeSent ? (
@@ -591,8 +650,14 @@ export function DashboardLayout({
         </Dialog>
 
         <main className="mx-auto w-full max-w-6xl px-4 py-8 lg:px-8">
-          {/* 页面内容渐入：只包内容区，侧边栏与顶栏在外面 ⇒ 点导航时外壳不会跟着闪 */}
-          <PageEnter>{children ?? <Outlet />}</PageEnter>
+          {/* 页面内容渐入：只包内容区，侧边栏与顶栏在外面 ⇒ 点导航时外壳不会跟着闪。
+              同时把角标数据下发给页面（社区页的聊天室入口卡要用同一个未读数，
+              见 @/lib/attention-context）。 */}
+          <PageEnter>
+            <AttentionContext.Provider value={attention}>
+              {children ?? <Outlet />}
+            </AttentionContext.Provider>
+          </PageEnter>
         </main>
         <ScrollToTop />
       </div>

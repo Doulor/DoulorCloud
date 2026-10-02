@@ -33,7 +33,8 @@ export function usePickedImages() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const pick = async (files: FileList | null) => {
+  // 同时接受 FileList（来自 <input type=file> / 粘贴）与 File[]（来自拖拽 hook）
+  const pick = async (files: FileList | File[] | null) => {
     if (!files || files.length === 0) return
     const room = MAX_FEEDBACK_IMAGES - images.length
     if (room <= 0) {

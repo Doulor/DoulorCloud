@@ -128,11 +128,16 @@ async function isActivated(env: Env, userId: string): Promise<boolean> {
   return row?.enabled === 1
 }
 
-/** 该用户可见的订阅源：全部已启用的（enabled=1），不做按用户授权 */
-async function visibleSubscriptions(env: Env): Promise<ProxySubscriptionRow[]> {
+/** 该用户可见的订阅源：全部已启用的（enabled=1），不做按用户授权。支持分页（懒加载）。 */
+async function visibleSubscriptions(
+  env: Env,
+  opts?: { limit?: number; offset?: number }
+): Promise<ProxySubscriptionRow[]> {
+  const limit = Math.min(Math.max(opts?.limit ?? 200, 1), 200)
+  const offset = Math.max(opts?.offset ?? 0, 0)
   const rows = await env.DB.prepare(
-    "SELECT * FROM proxy_subscriptions WHERE enabled = 1 ORDER BY sort_order ASC, created_at ASC"
-  ).all<ProxySubscriptionRow>()
+    "SELECT * FROM proxy_subscriptions WHERE enabled = 1 ORDER BY sort_order ASC, created_at ASC LIMIT ? OFFSET ?"
+  ).bind(limit, offset).all<ProxySubscriptionRow>()
   return rows.results ?? []
 }
 
@@ -1370,10 +1375,19 @@ export async function getProxyOverview(env: Env, request: Request): Promise<Resp
   const settings = await getSettings(env)
   const activated = await isActivated(env, user.id)
 
-  const rows = activated ? await visibleSubscriptions(env) : []
+  // 懒加载分页（2026-10-03 站长：一次抓取+解析 180 个订阅链接要近 10 秒，
+  // 全量返回会让用户进页面干等）。默认 10 条一页，前端「查看更多」传 offset 接着拉。
+  const q = new URL(request.url).searchParams
+  const limit = Math.min(Math.max(Number(q.get("limit") ?? 10) || 10, 1), 50)
+  const offset = Math.max(Number(q.get("offset") ?? 0) || 0, 0)
+
+  // 多取一条判断还有没有下一页
+  const rows = activated ? await visibleSubscriptions(env, { limit: limit + 1, offset }) : []
+  const hasMore = rows.length > limit
+  const page = rows.slice(0, limit)
 
   const subscriptions = await Promise.all(
-    rows.map(async (row) => {
+    page.map(async (row) => {
       const base = toPublicSubscription(row)
       try {
         const { nodes, usage } = await syncSubscription(env, row)
@@ -1407,6 +1421,8 @@ export async function getProxyOverview(env: Env, request: Request): Promise<Resp
     /** 已同意的协议版本（enable 时写入） */
     consentedVersion,
     subscriptions,
+    /** 是否还有更多订阅源（懒加载分页） */
+    hasMore,
   })
 }
 

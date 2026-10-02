@@ -145,8 +145,8 @@ export default function OAuthConsentPage() {
                   <li key={s} className="flex gap-2.5 text-sm">
                     <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
                     <span>
-                      <span className="font-medium">{title}</span>
-                      <span className="block text-xs text-muted-foreground">{desc}</span>
+                      <span className="font-medium">{t(title)}</span>
+                      <span className="block text-xs text-muted-foreground">{t(desc)}</span>
                     </span>
                   </li>
                 )

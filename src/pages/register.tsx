@@ -50,6 +50,8 @@ export default function RegisterPage() {
   const [regStatus, setRegStatus] = React.useState<{
     openRegistration: boolean
     until: string | null
+    /** 当前发给用户的根域（管理员可改；由后端下发，不写死） */
+    defaultRootDomain: string
   } | null>(null)
 
   React.useEffect(() => {
@@ -69,6 +71,10 @@ export default function RegisterPage() {
 
   const openRegistration = regStatus?.openRegistration ?? false
   const openUntil = regStatus?.until ?? null
+  // 域名还没拉到时留空，避免闪出一个错的（写成 "username." 看着像坏了）
+  const rootSuffix = regStatus?.defaultRootDomain
+    ? `.${regStatus.defaultRootDomain}`
+    : ""
 
   const set = (key: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm((f) => ({ ...f, [key]: e.target.value }))
@@ -120,15 +126,6 @@ export default function RegisterPage() {
   return (
     <AuthShell
       title={t("reg.title")}
-      description={
-        <>
-          {t("reg.desc.prefix")}
-          <span className="font-mono text-foreground">username.doulor.cn</span>
-          {t("reg.desc.mid")}
-          <span className="font-mono text-foreground">username@doulor.cn</span>
-          {t("reg.desc.suffix")}
-        </>
-      }
       footer={
         <>
           {t("reg.haveAccount")}
@@ -152,25 +149,6 @@ export default function RegisterPage() {
             </div>
           </div>
         )}
-        {/*
-          ⚠️ 注册前就说清「注册后能拿到什么、什么需要贡献解锁」。
-          原先这段说明缺失，新用户注册完进控制台才发现四个模块都是锁的，
-          容易直接流失 —— 如实告知比让人抱着「全能」预期进来更好。
-          权限模型以 worker/src/permissions.ts 的 FEATURES 为准。
-        */}
-        <div className="flex items-start gap-2.5 rounded-md border bg-muted/40 p-3">
-          <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-          <div className="space-y-1 text-xs text-muted-foreground">
-            <p>
-              <span className="font-medium text-foreground">{t("reg.ready.title")}</span>
-              {t("reg.ready.desc")}
-            </p>
-            <p>
-              <span className="font-medium text-foreground">{t("reg.contrib.title")}</span>
-              {t("reg.contrib.desc")}
-            </p>
-          </div>
-        </div>
         <div className="space-y-2">
           <Label htmlFor="username">{t("settings.label.username")}</Label>
           <Input
@@ -180,11 +158,14 @@ export default function RegisterPage() {
             value={form.username}
             onChange={set("username")}
             required
+            minLength={3}
+            maxLength={32}
           />
           <p className="text-xs text-muted-foreground">
             {t("reg.usernameHint.prefix")}{" "}
             <span className="font-mono">
-              {form.username || "username"}.doulor.cn
+              {form.username || "username"}
+              {rootSuffix}
             </span>
           </p>
         </div>

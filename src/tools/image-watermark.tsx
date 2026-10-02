@@ -335,7 +335,7 @@ export default function ImageWatermarkTool() {
                     type="button"
                     disabled={tile}
                     onClick={() => setAnchor(a.id)}
-                    title={a.label}
+                    title={t(a.label)}
                     className={
                       "h-7 w-9 rounded border text-[11px] transition-colors disabled:opacity-40 " +
                       (anchor === a.id
@@ -343,7 +343,7 @@ export default function ImageWatermarkTool() {
                         : "border-border text-muted-foreground hover:border-primary/50")
                     }
                   >
-                    {a.label}
+                    {t(a.label)}
                   </button>
                 ))}
               </div>

@@ -8,6 +8,7 @@ import { useAuth } from "@/hooks/use-auth"
 import { communityApi } from "@/services/api"
 import { AnalyticsTracker } from "@/components/analytics-tracker"
 import { CursorGlow } from "@/components/cursor-effect"
+import { AppealAckGate } from "@/components/appeal-ack-dialog"
 
 // 首屏必需的页面（访客第一眼就要看到）保持同步导入
 import LandingPage from "@/pages/landing"
@@ -31,6 +32,7 @@ const SettingsPage = React.lazy(() => import("@/pages/settings"))
 const DonationPage = React.lazy(() => import("@/pages/donations"))
 const FeedbackPage = React.lazy(() => import("@/pages/feedback"))
 const AchievementsPage = React.lazy(() => import("@/pages/achievements"))
+const LeaderboardPage = React.lazy(() => import("@/pages/leaderboard"))
 const PointsPage = React.lazy(() => import("@/pages/points"))
 const AdminPage = React.lazy(() => import("@/pages/admin"))
 const MessagesPage = React.lazy(() => import("@/pages/messages"))
@@ -40,6 +42,7 @@ const ToolboxPage = React.lazy(() => import("@/pages/toolbox"))
 const ToolboxDetailPage = React.lazy(() => import("@/pages/toolbox-detail"))
 const SpacePage = React.lazy(() => import("@/pages/space"))
 const ActivityPage = React.lazy(() => import("@/pages/activity"))
+const AppealPage = React.lazy(() => import("@/pages/appeal"))
 const ChatPage = React.lazy(() => import("@/pages/chat"))
 const TermsPage = React.lazy(() => import("@/pages/terms"))
 const PrivacyPage = React.lazy(() => import("@/pages/privacy"))
@@ -136,6 +139,8 @@ export default function App() {
     <React.Suspense fallback={<PageLoader />}>
       <AnalyticsTracker />
       <CursorGlow />
+      {/* 申诉回复强制确认：全站挂一次，登录后只要有未读回复就弹不可关闭的窗 */}
+      <AppealAckGate />
       <AppRoutes />
     </React.Suspense>
   )
@@ -166,6 +171,8 @@ function AppRoutes() {
         <Route path="community/:id" element={<CommunityRedirect />} />
         <Route path="terms" element={<TermsPage />} />
         <Route path="privacy" element={<PrivacyPage />} />
+        {/* 封禁申诉：必须是公开路由（被封禁用户没有会话） */}
+        <Route path="appeal" element={<AppealPage />} />
         <Route path="forgot-password" element={<ForgotPasswordPage />} />
         <Route path="reset-password" element={<ResetPasswordPage />} />
       </Route>
@@ -190,6 +197,7 @@ function AppRoutes() {
         <Route path="toolbox/:toolId" element={<ToolboxDetailPage />} />
         <Route path="chat" element={<ChatPage />} />
         <Route path="achievements" element={<AchievementsPage />} />
+        <Route path="leaderboard" element={<LeaderboardPage />} />
         <Route path="points" element={<PointsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="messages" element={<MessagesPage />} />

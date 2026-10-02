@@ -117,7 +117,15 @@ export async function serveAvatar(env: Env, username: string): Promise<Response>
     // 一旦有对象以 text/html 或 image/svg+xml 落进 avatar_key，
     // 就会在应用主源上被当文档渲染。上传侧虽有扩展名白名单，
     // 但公开读取接口不应该依赖写入侧的校验（纵深防御）。
-    return hardenUserContentResponse(res, user.avatar_key.split("/").pop() || "avatar")
+    // 2026-10-02（issue #3）：头像是公开只读端点、按 username 寻址的同一份字节流，
+    // 却吃 hardenUserContentResponse 的 no-store 兜底 —— 侧边栏每次重挂载都回源重拉
+    // 546 KB。这里显式给个短缓存（60s），harden 只在缺失时才补 no-store，不会被覆盖。
+    const headers = new Headers(res.headers)
+    headers.set("Cache-Control", "public, max-age=60")
+    return hardenUserContentResponse(
+      new Response(res.body, { status: res.status, headers }),
+      user.avatar_key.split("/").pop() || "avatar"
+    )
   } catch {
     return new Response("Not Found", { status: 404 })
   }

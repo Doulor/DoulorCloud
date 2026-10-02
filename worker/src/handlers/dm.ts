@@ -62,12 +62,14 @@ interface PeerRow {
   nickname: string | null
   avatar_key: string | null
   status: string
+  /** 收件人是管理员/站长时免申请（给管理团队发消息不该被拦） */
+  role: string
 }
 
 /** 按用户名找对端（大小写不敏感，与站点其它地方口径一致） */
 async function loadPeerByName(env: Env, username: string): Promise<PeerRow | null> {
   return env.DB.prepare(
-    `SELECT id, username, nickname, avatar_key, status
+    `SELECT id, username, nickname, avatar_key, status, role
        FROM users WHERE username = ? COLLATE NOCASE`
   )
     .bind(username)
@@ -83,7 +85,7 @@ async function loadPeersByIds(env: Env, ids: string[]): Promise<Map<string, Peer
     const chunk = ids.slice(i, i + 20)
     const placeholders = chunk.map(() => "?").join(",")
     const rows = await env.DB.prepare(
-      `SELECT id, username, nickname, avatar_key, status
+      `SELECT id, username, nickname, avatar_key, status, role
          FROM users WHERE id IN (${placeholders})`
     )
       .bind(...chunk)
@@ -91,6 +93,85 @@ async function loadPeersByIds(env: Env, ids: string[]): Promise<Map<string, Peer
     for (const r of rows.results ?? []) map.set(r.id, r)
   }
   return map
+}
+
+/**
+ * 能不能给对方发消息（2026-10-01 站长要求：陌生人私信要先申请、对方同意后才能发）。
+ *
+ * 免申请（不落 dm_contacts 表）：
+ *   ① 收件人是管理员 / 站长 —— 给管理团队发消息不该被拦；
+ *   ② 双方有订单关系 —— 买家卖家本来就该能直接联系（站长确认：免）。
+ *
+ * 其余情况按 dm_contacts 关系判断：
+ *   · 任一方向 accepted → 自由发；
+ *   · **对方给我发过申请**（owner=我, peer=对方, status=request）→ 允许（我在回他的申请）；
+ *   · 我发过申请还没处理（owner=对方, peer=我, status=request）→ 拦住，提示等对方同意；
+ *   · 被拒绝（declined）→ 拦住，提示对方已拒绝；
+ *   · 完全没有关系 → **允许这一条**，它本身就是「聊天申请」，发完落一条 request 记录。
+ */
+type SendGate =
+  | { ok: true; /** 发完要不要落一条申请记录 */ needRequestRow: boolean }
+  | { ok: false; code: string; message: string }
+
+async function checkSendGate(
+  env: Env,
+  me: { id: string },
+  peer: PeerRow
+): Promise<SendGate> {
+  if (peer.role === "admin" || peer.role === "root") return { ok: true, needRequestRow: false }
+
+  const order = await env.DB.prepare(
+    `SELECT 1 AS x FROM point_orders
+      WHERE (user_id = ? AND seller_id = ?) OR (user_id = ? AND seller_id = ?)
+      LIMIT 1`
+  )
+    .bind(me.id, peer.id, peer.id, me.id)
+    .first<{ x: number }>()
+  if (order) return { ok: true, needRequestRow: false }
+
+  // ③ 已经互相聊过 = 事实上的同意。
+  //    ⚠️ 必须有这条：私信是在加「聊天申请」**之前**上线的，线上已有一批老会话
+  //    没有关系记录；不加这条的话，老用户第二天再回复一句就会被要求「先申请」，
+  //    等于把已经建立的对话掐断（2026-10-01 上线时线上已有 28 条真实消息）。
+  const prior = await env.DB.prepare(
+    `SELECT 1 AS x FROM direct_messages
+      WHERE (from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?)
+      LIMIT 1`
+  )
+    .bind(me.id, peer.id, peer.id, me.id)
+    .first<{ x: number }>()
+  if (prior) return { ok: true, needRequestRow: false }
+
+  const rows = await env.DB.prepare(
+    `SELECT owner_id, peer_id, status FROM dm_contacts
+      WHERE (owner_id = ? AND peer_id = ?) OR (owner_id = ? AND peer_id = ?)`
+  )
+    .bind(peer.id, me.id, me.id, peer.id)
+    .all<{ owner_id: string; peer_id: string; status: string }>()
+  const rel = rows.results ?? []
+
+  if (rel.some((r) => r.status === "accepted")) return { ok: true, needRequestRow: false }
+  // 对方申请过我 → 我这是在回复，放行
+  if (rel.some((r) => r.owner_id === me.id && r.status === "request")) {
+    return { ok: true, needRequestRow: false }
+  }
+  const mine = rel.find((r) => r.owner_id === peer.id && r.peer_id === me.id)
+  if (mine?.status === "declined") {
+    return {
+      ok: false,
+      code: "DM_DECLINED",
+      message: "对方已拒绝你的聊天申请，无法再给他发消息。",
+    }
+  }
+  if (mine?.status === "request") {
+    return {
+      ok: false,
+      code: "DM_PENDING",
+      message: "你的聊天申请还在等对方同意。对方同意后就能继续聊。",
+    }
+  }
+  // 从没接触过 → 这一条作为申请发出
+  return { ok: true, needRequestRow: true }
 }
 
 /** 统一的消息下发形状 */
@@ -106,7 +187,11 @@ function toMessage(r: Record<string, unknown>) {
 }
 
 /**
- * GET /api/dm?peer=<用户名>&after=<游标>
+ * GET /api/dm?peer=<用户名>&after=<游标>&before=<游标>
+ *
+ * `after` 拉**更新**的消息（轮询用）；`before` 拉**更早**的消息（往上翻历史用）。
+ * 两者互斥，同时传以 `before` 为准。返回里 `nextCursor` 供 `after` 用、
+ * `prevCursor` 供 `before` 用，`hasMore` 表示可能还有更早的。
  *
  * 注意：**拉取不会自动标记已读**。已读由前端在「用户真的看到」时单独调
  * `/api/dm/seen`（与消息中心「点开才标已读」的语义一致）——
@@ -122,17 +207,46 @@ export async function listDm(env: Env, request: Request): Promise<Response> {
   if (!peer) throw new ApiError(404, "找不到这个用户", "NOT_FOUND")
 
   const after = url.searchParams.get("after") ?? ""
+  /**
+   * 往前翻页游标：拉**比它更早**的消息（用户往上滑看历史）。
+   *
+   * 与 `after`（拉更新的、供轮询用）方向相反，两者互斥：
+   * 同时传时以 `before` 为准 —— 它只会在「往上滑」时出现，
+   * 那一刻用户要看的是历史，不是新消息。
+   */
+  const before = url.searchParams.get("before") ?? ""
   const limit = Math.min(
     Math.max(Number(url.searchParams.get("limit") ?? 50) || 50, 1),
     MAX_MESSAGES
   )
   const cursor = after ? decodeCursor(after) : null
+  const beforeCursor = before ? decodeCursor(before) : null
 
   // 会话条件：两个方向都算（我发给他的 + 他发给我的）
   const pair =
     "(from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?)"
   let rows
-  if (cursor) {
+  if (beforeCursor) {
+    // 往前：取游标之前最近的 limit 条。先倒序取（才能拿到「最近的」），
+    // 再在外层转回正序 —— 返回给前端的始终是时间升序，前端不用管方向。
+    rows = await env.DB.prepare(
+      `SELECT * FROM (SELECT * FROM direct_messages
+          WHERE (${pair}) AND (created_at < ? OR (created_at = ? AND id < ?))
+          ORDER BY created_at DESC, id DESC LIMIT ?)
+        ORDER BY created_at ASC, id ASC`
+    )
+      .bind(
+        me.id,
+        peer.id,
+        peer.id,
+        me.id,
+        beforeCursor.createdAt,
+        beforeCursor.createdAt,
+        beforeCursor.id,
+        limit
+      )
+      .all()
+  } else if (cursor) {
     rows = await env.DB.prepare(
       `SELECT * FROM direct_messages
         WHERE (${pair}) AND (created_at > ? OR (created_at = ? AND id > ?))
@@ -152,6 +266,7 @@ export async function listDm(env: Env, request: Request): Promise<Response> {
 
   const messages = (rows.results ?? []).map(toMessage)
   const last = messages[messages.length - 1]
+  const first = messages[0]
   return json({
     peer: {
       id: peer.id,
@@ -161,6 +276,14 @@ export async function listDm(env: Env, request: Request): Promise<Response> {
     },
     messages,
     nextCursor: last ? encodeCursor(String(last.createdAt), String(last.id)) : after || null,
+    /** 往前翻页游标：传给 `before` 就能取到更早的一批（没有更早的了则为 null） */
+    prevCursor: first ? encodeCursor(String(first.createdAt), String(first.id)) : null,
+    /**
+     * 是否可能还有更早的消息。
+     * 取满了 limit 条就认为「可能还有」—— 少一次精确 COUNT 查询，
+     * 前端据此决定还要不要继续监听滚动加载。
+     */
+    hasMore: messages.length >= limit,
   })
 }
 
@@ -186,6 +309,10 @@ export async function sendDm(env: Env, request: Request): Promise<Response> {
     throw new ApiError(400, "该账号当前状态无法接收私信", "INVALID_INPUT")
   }
 
+  // 陌生人的第一条消息 = 聊天申请；对方同意前只能发这一条
+  const gate = await checkSendGate(env, me, peer)
+  if (!gate.ok) throw new ApiError(403, gate.message, gate.code)
+
   const id = uuid()
   const now = new Date().toISOString()
   await env.DB.prepare(
@@ -194,6 +321,16 @@ export async function sendDm(env: Env, request: Request): Promise<Response> {
   )
     .bind(id, me.id, peer.id, text, now)
     .run()
+
+  if (gate.needRequestRow) {
+    // 落一条待处理申请（重复发不覆盖已同意/已拒绝的状态 —— 用 OR IGNORE）
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO dm_contacts (owner_id, peer_id, status, created_at, updated_at)
+       VALUES (?, ?, 'request', ?, ?)`
+    )
+      .bind(peer.id, me.id, now, now)
+      .run()
+  }
 
   return json(
     {
@@ -309,6 +446,83 @@ export async function listConversations(env: Env, request: Request): Promise<Res
       .filter(Boolean),
     unreadTotal,
   })
+}
+
+/**
+ * GET /api/dm/requests —— 我收到的**待处理聊天申请**。
+ *
+ * 带上对方发来的第一条（也是唯一一条）消息，好让用户知道「是谁、想干嘛」再决定。
+ */
+export async function listDmRequests(env: Env, request: Request): Promise<Response> {
+  const me = await requireUser(env, request)
+  const rows = await env.DB.prepare(
+    `SELECT c.peer_id, c.created_at,
+            u.username, u.nickname, u.avatar_key
+       FROM dm_contacts c JOIN users u ON u.id = c.peer_id
+      WHERE c.owner_id = ? AND c.status = 'request'
+      ORDER BY c.created_at DESC
+      LIMIT 50`
+  )
+    .bind(me.id)
+    .all<{
+      peer_id: string
+      created_at: string
+      username: string
+      nickname: string | null
+      avatar_key: string | null
+    }>()
+
+  const requests = []
+  for (const r of rows.results ?? []) {
+    // 对方发给我的最新一条（申请时只有一条；之后若对方再发，会被门槛拦住）
+    const msg = await env.DB.prepare(
+      `SELECT body, created_at FROM direct_messages
+        WHERE from_user_id = ? AND to_user_id = ?
+        ORDER BY created_at DESC, id DESC LIMIT 1`
+    )
+      .bind(r.peer_id, me.id)
+      .first<{ body: string; created_at: string }>()
+    requests.push({
+      peer: {
+        id: r.peer_id,
+        username: r.username,
+        nickname: r.nickname ?? null,
+        hasAvatar: Boolean(r.avatar_key),
+      },
+      body: msg?.body ?? "",
+      createdAt: msg?.created_at ?? r.created_at,
+    })
+  }
+  return json({ requests })
+}
+
+/**
+ * POST /api/dm/requests —— 处理申请：`{ peer: "<用户名>", action: "accept" | "decline" }`
+ *
+ * 只有**收到申请的一方**能处理；同意后双方即可自由发消息（发送门槛里看 accepted）。
+ */
+export async function respondDmRequest(env: Env, request: Request): Promise<Response> {
+  const me = await requireUser(env, request)
+  const body = await readJson(request)
+  const peerName = typeof body.peer === "string" ? body.peer.trim() : ""
+  const action = body.action === "accept" ? "accept" : body.action === "decline" ? "decline" : ""
+  if (!peerName) throw new ApiError(400, "缺少对端用户名", "INVALID_INPUT")
+  if (!action) throw new ApiError(400, "action 只能是 accept 或 decline", "INVALID_INPUT")
+
+  const peer = await loadPeerByName(env, peerName)
+  if (!peer) throw new ApiError(404, "找不到这个用户", "NOT_FOUND")
+
+  const now = new Date().toISOString()
+  const res = await env.DB.prepare(
+    `UPDATE dm_contacts SET status = ?, updated_at = ?
+      WHERE owner_id = ? AND peer_id = ? AND status = 'request'`
+  )
+    .bind(action === "accept" ? "accepted" : "declined", now, me.id, peer.id)
+    .run()
+  if ((res.meta?.changes ?? 0) === 0) {
+    throw new ApiError(404, "没有待处理的聊天申请", "NOT_FOUND")
+  }
+  return json({ ok: true, status: action === "accept" ? "accepted" : "declined" })
 }
 
 /** GET /api/dm/unread —— 只取未读总数（侧边栏角标用，别为它拉整个列表） */

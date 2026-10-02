@@ -56,6 +56,7 @@ function toPublicBucket(row: R2BucketRow, envHasAnalytics: boolean) {
     bucketName: row.bucket_name,
     maxUsers: row.max_users,
     quotaPerUser: row.quota_per_user,
+    capacityBytes: row.capacity_bytes,
     enabled: row.enabled === 1,
     sortOrder: row.sort_order,
     kind: row.kind,
@@ -68,6 +69,40 @@ function toPublicBucket(row: R2BucketRow, envHasAnalytics: boolean) {
 /** 取 S3 凭据（供连通性测试用，不返回前端） */
 async function credentialsOf(env: Env, id: string) {
   return getBucketCredentials(env, id)
+}
+
+/**
+ * 平台数据桶的真实用量（文件数 + 字节数）。
+ *
+ * ⚠️ 名片头像/背景/音乐、分享箱文件都存这个桶，但它们**不走 `storage_accounts`**
+ * （那张表只记网盘）。所以不能像用户网盘桶那样用 SUM(file_count) 统计 —— 那会让
+ * 平台桶永远显示「0 B / 0 文件」，看着像数据丢了（其实没丢）。
+ * 这里真的把桶列一遍、数对象数并累加 size。平台桶通常只有几百个对象，一两次分页就够。
+ */
+async function platformBucketUsage(
+  env: Env,
+  bucketId: string
+): Promise<{ files: number; bytes: number } | null> {
+  try {
+    let files = 0
+    let bytes = 0
+    let cursor: string | null = null
+    for (let i = 0; i < 50; i++) {
+      const page = await listObjects(env, "", {
+        limit: 1000,
+        cursor: cursor ?? undefined,
+        bucketId,
+      })
+      files += page.objects.length
+      for (const o of page.objects) bytes += o.size ?? 0
+      if (!page.truncated || !page.cursor) break
+      cursor = page.cursor
+    }
+    return { files, bytes }
+  } catch {
+    // 凭据错 / 桶不可达时留空，别让整页 500
+    return null
+  }
 }
 
 /**
@@ -101,6 +136,14 @@ export async function listR2Buckets(env: Env, request: Request): Promise<Respons
   }>()
   const aggMap = new Map((agg.results ?? []).map((r) => [r.bucket_id ?? "", r]))
 
+  // 平台桶的真实用量（不走 storage_accounts，见 platformBucketUsage）
+  const platformUsage = new Map<string, { files: number; bytes: number }>()
+  for (const b of buckets) {
+    if (b.kind !== "platform") continue
+    const pu = await platformBucketUsage(env, b.id)
+    if (pu) platformUsage.set(b.id, pu)
+  }
+
   // 每个桶的用户明细（一次查全，前端按桶分组）
   // role 一起带上：前端「同步存量用户配额」要预告「谁会被改」，而管理员是被跳过的
   const users = await env.DB.prepare(
@@ -131,16 +174,22 @@ export async function listR2Buckets(env: Env, request: Request): Promise<Respons
 
   const items = buckets.map((b) => {
     const a = aggMap.get(b.id)
-    const capacity = b.max_users * b.quota_per_user
-    const used = a?.used ?? 0
+    // 共享池：桶容量 = 桶的真实容量，不是 max_users × quota_per_user
+    // （后者是旧「每人保留配额」模型，会让开通不用的空间显得「被浪费」）
+    const capacity = b.capacity_bytes ?? b.max_users * b.quota_per_user
+    // 平台桶用「真的列一遍 R2」的用量；用户网盘桶用 storage_accounts 聚合
+    const isPlatform = b.kind === "platform"
+    const pu = platformUsage.get(b.id)
+    const used = isPlatform ? (pu?.bytes ?? 0) : (a?.used ?? 0)
+    const files = isPlatform ? (pu?.files ?? 0) : (a?.files ?? 0)
     return {
       ...toPublicBucket(b, Boolean(env.R2_API_TOKEN)),
       stats: {
         users: a?.users ?? 0,
         usedBytes: used,
-        /** 容量上限 = 人数上限 × 每人配额 */
+        /** 容量上限 = 人数上限 × 每人配额（平台桶按免费额度 10GB 显示） */
         capacityBytes: capacity,
-        fileCount: a?.files ?? 0,
+        fileCount: files,
         /** 该桶占免费额度的百分比 */
         storagePercent: FREE_TIER.storageBytes
           ? Math.min((used / FREE_TIER.storageBytes) * 100, 100)
@@ -334,6 +383,8 @@ export async function createR2Bucket(env: Env, request: Request): Promise<Respon
   const maxUsers = Math.max(1, Math.trunc(Number(body.maxUsers ?? 8)) || 8)
   const quotaPerUser =
     Math.max(0, Math.trunc(Number(body.quotaPerUser ?? 1073741824))) || 1073741824
+  const capacityBytes =
+    Math.max(0, Math.trunc(Number(body.capacityBytes ?? 10737418240))) || 10737418240
   const sortOrder = Math.trunc(Number(body.sortOrder ?? 0)) || 0
   const kind = body.kind === "platform" ? "platform" : "user"
   const now = new Date().toISOString()
@@ -356,8 +407,8 @@ export async function createR2Bucket(env: Env, request: Request): Promise<Respon
     `INSERT INTO r2_buckets
        (id, name, account_id, endpoint, bucket_name,
         access_key_id_enc, secret_key_enc, analytics_token_enc,
-        max_users, quota_per_user, enabled, sort_order, kind, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`
+        max_users, quota_per_user, capacity_bytes, enabled, sort_order, kind, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`
   )
     .bind(
       id,
@@ -371,6 +422,7 @@ export async function createR2Bucket(env: Env, request: Request): Promise<Respon
       analyticsToken ? await encryptSecret(analyticsToken, env.SESSION_SECRET) : null,
       maxUsers,
       quotaPerUser,
+      capacityBytes,
       sortOrder,
       kind,
       now,
@@ -426,6 +478,10 @@ export async function updateR2Bucket(
     body.quotaPerUser === undefined
       ? row.quota_per_user
       : Math.max(0, Math.trunc(Number(body.quotaPerUser))) || row.quota_per_user
+  const capacityBytes =
+    body.capacityBytes === undefined
+      ? row.capacity_bytes
+      : Math.max(0, Math.trunc(Number(body.capacityBytes))) || row.capacity_bytes
   const sortOrder =
     body.sortOrder === undefined ? row.sort_order : Math.trunc(Number(body.sortOrder)) || 0
   const enabled = body.enabled === undefined ? row.enabled : body.enabled ? 1 : 0
@@ -449,7 +505,7 @@ export async function updateR2Bucket(
     `UPDATE r2_buckets SET
        name = ?, account_id = ?, endpoint = ?, bucket_name = ?,
        access_key_id_enc = ?, secret_key_enc = ?, analytics_token_enc = ?,
-       max_users = ?, quota_per_user = ?, enabled = ?, sort_order = ?, updated_at = ?
+       max_users = ?, quota_per_user = ?, capacity_bytes = ?, enabled = ?, sort_order = ?, updated_at = ?
      WHERE id = ?`
   )
     .bind(
@@ -462,6 +518,7 @@ export async function updateR2Bucket(
       analyticsEnc,
       maxUsers,
       quotaPerUser,
+      capacityBytes,
       enabled,
       sortOrder,
       new Date().toISOString(),

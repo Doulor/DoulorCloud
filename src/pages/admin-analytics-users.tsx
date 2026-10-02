@@ -274,6 +274,7 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
   const don = data.donations
   const com = data.community
   const rt = data.retention
+  const more = data.more ?? []
   const storagePercent =
     res.storageQuotaBytes > 0
       ? Math.round((res.storageUsedBytes / res.storageQuotaBytes) * 1000) / 10
@@ -411,7 +412,7 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
             <PieLegend
               items={data.byRole}
               colors={PIE_COLORS}
-              labelOf={(k) => ROLE_LABELS[k] ?? k}
+              labelOf={(k) => t(ROLE_LABELS[k] ?? k)}
             />
           </CardContent>
         </Card>
@@ -426,7 +427,7 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
             <PieLegend
               items={data.byStatus}
               colors={PIE_COLORS}
-              labelOf={(k) => STATUS_LABELS[k] ?? k}
+              labelOf={(k) => t(STATUS_LABELS[k] ?? k)}
             />
           </CardContent>
         </Card>
@@ -574,6 +575,41 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
             <p className="text-[11px] text-muted-foreground">
               {t("au2.profile.title", { nick: data.nickname, avatar: data.avatar, pct: data.invitedPercent, invited: data.invited })}
             </p>
+          </CardContent>
+        </Card>
+
+        {/* 更多数据：跨模块补充指标（标签由服务端下发） */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Database className="h-4 w-4 text-muted-foreground" />
+              {t("au2.more.title")}
+            </CardTitle>
+            <CardDescription>{t("au2.more.desc")}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {more.map((g) => (
+              <div key={g.group}>
+                <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground/70">
+                  {g.group}
+                </p>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+                  {g.items.map((it) => (
+                    <div key={it.label} className="rounded-md border p-2">
+                      <p className="text-base font-semibold tabular-nums">
+                        {it.value.toLocaleString()}
+                      </p>
+                      <p
+                        className="truncate text-xs text-muted-foreground"
+                        title={it.hint ?? it.label}
+                      >
+                        {it.label}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
           </CardContent>
         </Card>
       </div>

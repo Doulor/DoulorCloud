@@ -85,6 +85,39 @@ export type BillingMode = "one_time" | "rental"
  */
 export type OrderStatus = "pending" | "delivered" | "settled" | "cancelled"
 
+/**
+ * 售后（退款）状态 —— 与 `OrderStatus` **正交**。
+ *
+ * 订单状态表达「这笔交易走到哪一步」，售后状态表达「退款诉求走到哪一步」。
+ * 退款成立时订单变成 `cancelled`（积分原路退回买家，与管理员取消同一语义），
+ * 这里同时记 `'refunded'` 用来区分「是退款退掉的」还是「卖家没发货被取消的」。
+ *
+ * 为什么不做成 `OrderStatus` 的新枚举值（2026-10-02 决策）：
+ *   现有所有按 status 过滤的查询（到期收回权益、归还库存、限购计数…）都建立在那 4 个值上，
+ *   加值就要逐处复核；而这套售后本来就是「叠加在订单之上的一条支线」，
+ *   单独一列既不动老逻辑，又能表达「谁在什么时候申请、卖家怎么说、平台怎么判」。
+ *
+ * · `requested` —— 买家已申请，等卖家处理（**官方商品订单不会停在这里**，没有卖家）
+ * · `rejected`  —— 卖家拒绝，买家可申请平台介入
+ * · `platform`  —— 待平台（管理员）判定；官方商品订单一申请就直接到这里
+ * · `closed`    —— 平台判定「不予退款」，售后终结（买家可再次申请，见 requestAfterSale）
+ * · `refunded`  —— 已退款（订单同时已是 cancelled）
+ */
+export type AfterSaleStatus =
+  | "requested"
+  | "rejected"
+  | "platform"
+  | "closed"
+  | "refunded"
+
+/**
+ * 确认收货后还能申请售后的天数（买断交易「验收期」的通行做法）。
+ *
+ * 刻意不导出：期限判定只在 `requestAfterSale` 里做一次，
+ * 前端不重复实现（两边各算一遍迟早会算出不同结果）。
+ */
+const AFTER_SALE_WINDOW_DAYS = 7
+
 /** 用户商品的审核状态；官方商品恒为 'approved' */
 export type ReviewStatus = "pending" | "approved" | "rejected"
 
@@ -110,6 +143,8 @@ export interface PointProduct {
   name: string
   description: string
   imageUrl: string | null
+  /** 分类：it / other（见 PRODUCT_CATEGORIES） */
+  category: ProductCategory
   /**
    * 内置图标名（lucide slug，如 'gift' / 'credit-card'）；null = 没选。
    *
@@ -195,6 +230,16 @@ export interface PointOrder {
    * 到期收回时靠它判断「收哪个权限」，不依赖商品行是否还在。
    */
   grantedFeature: string | null
+  /** 售后状态；null = 没有进行中的售后（也从不出售后的订单是 null） */
+  afterSaleStatus: AfterSaleStatus | null
+  /** 买家申请售后时填写的理由 */
+  afterSaleReason: string | null
+  /** 售后处理意见：卖家拒绝的理由 / 平台判定说明 */
+  afterSaleNote: string | null
+  /** 买家申请售后（最近一次）的时间 */
+  afterSaleRequestedAt: string | null
+  /** 售后终结（退款 / 驳回）的时间 */
+  afterSaleResolvedAt: string | null
 }
 
 /** 新建 / 编辑商品时前端提交的字段（已经过 sanitize） */
@@ -203,6 +248,7 @@ export interface ProductInput {
   description: string
   imageUrl: string | null
   icon: string | null
+  category: ProductCategory
   price: number
   stock: number | null
   perUserLimit: number | null
@@ -275,6 +321,17 @@ function isReviewStatus(v: unknown): v is ReviewStatus {
   return v === "pending" || v === "approved" || v === "rejected"
 }
 
+/** 认不出的售后状态一律当「没有售后」，不做猜测（与 isBillingMode 等同一口径） */
+function isAfterSaleStatus(v: unknown): v is AfterSaleStatus {
+  return (
+    v === "requested" ||
+    v === "rejected" ||
+    v === "platform" ||
+    v === "closed" ||
+    v === "refunded"
+  )
+}
+
 /**
  * 解析库里存的 delivery_params。
  *
@@ -319,6 +376,8 @@ function rowToProduct(r: Record<string, unknown>): PointProduct {
     description: String(r.description ?? ""),
     imageUrl: r.image_url == null ? null : String(r.image_url),
     icon: r.icon == null || r.icon === "" ? null : String(r.icon),
+    // 列有 DEFAULT 'other'，这里再兜一层（老行 / 异常值）
+    category: isProductCategory(r.category) ? r.category : "other",
     price: Number(r.price ?? 0),
     stock: r.stock == null ? null : Number(r.stock),
     perUserLimit: r.per_user_limit == null ? null : Number(r.per_user_limit),
@@ -368,6 +427,13 @@ function rowToOrder(r: Record<string, unknown>): PointOrder {
     renewedFrom: r.renewed_from == null ? null : String(r.renewed_from),
     expireHandledAt: r.expire_handled_at == null ? null : String(r.expire_handled_at),
     grantedFeature: r.granted_feature == null ? null : String(r.granted_feature),
+    afterSaleStatus: isAfterSaleStatus(r.after_sale_status) ? r.after_sale_status : null,
+    afterSaleReason: r.after_sale_reason == null ? null : String(r.after_sale_reason),
+    afterSaleNote: r.after_sale_note == null ? null : String(r.after_sale_note),
+    afterSaleRequestedAt:
+      r.after_sale_requested_at == null ? null : String(r.after_sale_requested_at),
+    afterSaleResolvedAt:
+      r.after_sale_resolved_at == null ? null : String(r.after_sale_resolved_at),
   }
 }
 
@@ -405,11 +471,20 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
   let imageUrl: string | null = null
   if (typeof b.imageUrl === "string" && b.imageUrl.trim()) {
     const url = b.imageUrl.trim().slice(0, 500)
-    if (!/^https?:\/\//i.test(url)) {
-      throw new ApiError(400, "封面图地址必须是 http(s) 链接", "INVALID_INPUT")
+    // 允许两种形式（2026-10-01「本地上传」上线后补的口子，当时漏改这里：
+    // 上传接口返回**相对路径**，被这里拒掉，用户保存商品时报「必须是 http(s) 链接」）：
+    //   ① http(s) 绝对链接 —— 外链图床，一直以来的用法；
+    //   ② /api/shop-img/<userId>/<file> —— 本地上传接口返回的站内路径。
+    // 只放行这个前缀而不是任意相对路径：img src 塞站内路径虽多半无害，
+    // 但收口到「只可能是我们发的封面地址」最稳，也防误填前端路由。
+    if (!/^https?:\/\//i.test(url) && !url.startsWith("/api/shop-img/")) {
+      throw new ApiError(400, "封面图地址必须是 http(s) 链接，或使用「本地上传」", "INVALID_INPUT")
     }
     imageUrl = url
   }
+
+  // 分类：白名单收口，非法值回落 other
+  const category: ProductCategory = isProductCategory(b.category) ? b.category : "other"
 
   // 图标名只允许 lucide 那种 slug（小写字母 / 数字 / 单连字符分段）。
   // 不做「白名单」是刻意的：前端有回退，加图标时不必两边同时改；
@@ -510,6 +585,7 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
     description,
     imageUrl,
     icon,
+    category,
     price,
     stock,
     perUserLimit,
@@ -561,7 +637,11 @@ export async function listProducts(
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : ""
   const limit = Math.min(Math.max(1, opts.limit ?? 200), 500)
   const rows = await env.DB.prepare(
-    `SELECT * FROM point_products ${where} ORDER BY sort DESC, created_at DESC LIMIT ?`
+    // 排序规则（2026-10-03 站长要求）：**「其他」分类的商品一律排在别的分类下面**，
+    // 同组内再按管理员设的 sort 降序、上架时间降序。
+    // `(category = 'other')` 在 SQLite 里求值为 0/1，升序即「非 other 在前」。
+    `SELECT * FROM point_products ${where}
+      ORDER BY (category = 'other') ASC, sort DESC, created_at DESC LIMIT ?`
   )
     .bind(...binds, limit)
     .all<Record<string, unknown>>()
@@ -576,13 +656,25 @@ export async function getProduct(env: Env, id: string): Promise<PointProduct | n
   return row ? rowToProduct(row) : null
 }
 
+/** 商品分类（2026-10-01 站长要求）：先分两类，以后加只改这里 + 前端选项 */
+export const PRODUCT_CATEGORIES = ["it", "other"] as const
+export type ProductCategory = (typeof PRODUCT_CATEGORIES)[number]
+
+/** 白名单校验：非白名单值一律回落 other（老前端不带这字段，不能报错） */
+export function isProductCategory(v: unknown): v is ProductCategory {
+  return typeof v === "string" && (PRODUCT_CATEGORIES as readonly string[]).includes(v)
+}
+
 const PRODUCT_COLUMNS =
   "(id, name, description, image_url, icon, price, stock, per_user_limit, " +
   " delivery, quota_yuan, delivery_params, billing_mode, rental_days, enabled, sort, " +
-  " owner_id, owner_name, review_status, review_note, reviewed_at, created_at, updated_at)"
+  // ⚠️ 新增列一律追加到**末尾**：列顺序一变，INSERT 占位符就要整体重排，
+  //    极易漏一处而变成「字段整体错位」的脏数据。这里只改个数。
+  " owner_id, owner_name, review_status, review_note, reviewed_at, created_at, updated_at, " +
+  "category)"
 
 /** PRODUCT_COLUMNS 的列数 —— INSERT 的占位符个数必须与它一致 */
-const PRODUCT_COLUMN_COUNT = 22
+const PRODUCT_COLUMN_COUNT = 23
 
 function productBindings(id: string, input: ProductInput, now: string): unknown[] {
   return [
@@ -608,6 +700,7 @@ function productBindings(id: string, input: ProductInput, now: string): unknown[
     input.reviewStatus === "approved" ? now : null,
     now,
     now,
+    input.category,
   ]
 }
 
@@ -625,26 +718,29 @@ export async function createProduct(env: Env, raw: unknown): Promise<PointProduc
 }
 
 /**
- * 编辑**官方**商品（整条覆盖，与前端弹窗「保存」语义一致）。
+ * 编辑商品（管理员；官方 / 用户两类都能改，整条覆盖，与前端弹窗「保存」语义一致）。
  *
- * ⚠️ 用户商品不允许走这里 —— 用 updateUserProduct()。否则管理员（或任何
- *    能调到这个接口的路径）会把用户商品整条改掉、还会顺手把审核状态刷成「已通过」。
+ * 用户商品也放行（2026-10-03 站长：上架后要能改分类/价格等），但：
+ *   · 按 `asUser` 口径收口（manual 交付、无 per_user_limit / quota_yuan / sort），
+ *     与用户自己编辑保持一致，避免把官方商品字段口径写进用户商品；
+ *   · **不动 review_status** —— 管理员只是纠正分类/价格这类小事，
+ *     不把已上架的商品打回「待审核」。
+ *
+ * 用户**自己**编辑仍走 `updateUserProduct()`（改完回待审核，防「先过审再改内容」绕过审核）。
  */
 export async function updateProduct(env: Env, id: string, raw: unknown): Promise<PointProduct> {
   const existing = await getProduct(env, id)
   if (!existing) throw new ApiError(404, "商品不存在", "NOT_FOUND")
-  if (existing.ownerId) {
-    throw new ApiError(400, "这是用户上架的商品，请用审核操作处理", "NOT_OFFICIAL_PRODUCT")
-  }
 
-  const input = sanitizeProductInput(raw)
+  const isUserProduct = existing.ownerId != null
+  const input = sanitizeProductInput(raw, isUserProduct ? { asUser: true } : undefined)
   const now = new Date().toISOString()
   await env.DB.prepare(
     `UPDATE point_products SET
        name = ?, description = ?, image_url = ?, icon = ?, price = ?, stock = ?,
        per_user_limit = ?, delivery = ?, quota_yuan = ?, delivery_params = ?,
        billing_mode = ?, rental_days = ?,
-       enabled = ?, sort = ?, updated_at = ?
+       enabled = ?, sort = ?, category = ?, updated_at = ?
      WHERE id = ?`
   )
     .bind(
@@ -662,6 +758,7 @@ export async function updateProduct(env: Env, id: string, raw: unknown): Promise
       input.rentalDays,
       input.enabled ? 1 : 0,
       input.sort,
+      input.category,
       now,
       id
     )
@@ -742,7 +839,7 @@ export async function updateUserProduct(
        name = ?, description = ?, image_url = ?, icon = ?, price = ?, stock = ?,
        per_user_limit = NULL, delivery = 'manual', quota_yuan = NULL,
        delivery_params = NULL, billing_mode = ?, rental_days = ?,
-       enabled = ?, sort = 0,
+       enabled = ?, sort = 0, category = ?,
        review_status = 'pending', review_note = NULL, reviewed_at = NULL,
        updated_at = ?
      WHERE id = ? AND owner_id = ?`
@@ -757,6 +854,7 @@ export async function updateUserProduct(
       input.billingMode,
       input.rentalDays,
       input.enabled ? 1 : 0,
+      input.category,
       now,
       id,
       ownerId
@@ -868,6 +966,46 @@ export async function reviewProduct(
  * dedupKey = `order-<事件>:<订单号>`：同一个事件重复触发只留一条，
  * 但「下单 / 发货 / 结算」是不同事件，各自留一条，用户能看到完整时间线。
  */
+/**
+ * 订单流转（交付 / 结算 / 取消）后，把消息里挂着的**快捷操作按钮**摘掉。
+ *
+ * 为什么必须动服务端（2026-10-01 修）：消息的 payload 写进去就不会变，
+ * 买家一旦从**积分页**确认收货（而不是从消息里点），消息里的「确认收货」
+ * 按钮就永远留着 —— 下次拉列表它还在，点了才报「这单已经结算过了」。
+ * 消息页那边的本地摘除（messages.tsx 的 handleOrderActionDone）只管得住
+ * 「当场点」这一条路径，管不住刷新和跨页面操作。
+ *
+ * 实现注意：
+ *   - `json_valid` 必须带上 —— payload 列有 NULL 和老数据，`json_*` 遇到
+ *     非法 JSON 会直接抛错（D1 方言坑，见 MEMORY）；
+ *   - `json_remove` 只删 `$.action` 这一个键，其余字段（orderId 等）原样保留；
+ *   - 按 `action IN (...)` 定向摘：交付时只摘「发货」按钮（买家那条新的
+ *     「确认收货」消息刚创建，不能误伤），结算 / 取消时全摘。
+ */
+async function clearOrderActionButtons(
+  env: Env,
+  orderId: string,
+  actions: readonly string[]
+): Promise<void> {
+  if (actions.length === 0) return
+  const placeholders = actions.map(() => "?").join(",")
+  try {
+    await env.DB.prepare(
+      `UPDATE notifications
+          SET payload = json_remove(payload, '$.action')
+        WHERE json_valid(payload)
+          AND json_extract(payload, '$.kind') = 'order'
+          AND json_extract(payload, '$.orderId') = ?
+          AND json_extract(payload, '$.action') IN (${placeholders})`
+    )
+      .bind(orderId, ...actions)
+      .run()
+  } catch (err) {
+    // 摘按钮属于「锦上添花」，失败不能让结算 / 交付本身报错
+    console.error("清理订单消息按钮失败:", orderId, err)
+  }
+}
+
 async function notifyOrder(
   env: Env,
   userId: string | null | undefined,
@@ -879,6 +1017,14 @@ async function notifyOrder(
     orderId: string
     /** 有值时前端会在消息里给一个操作按钮 */
     action?: "deliver" | "confirm"
+    /**
+     * 幂等键后缀。
+     *
+     * 默认键是 `order-<事件>:<订单号>` —— 同一订单的同类事件只会有一条。
+     * 但售后的申请 / 拒绝 / 驳回**可能在一单上发生多次**（买家被拒后可重新申请），
+     * 那种场景要把时间戳传进来，否则第 2 次开始的通知会被静默去重吃掉。
+     */
+    dedupSuffix?: string
   }
 ): Promise<void> {
   if (!userId) return
@@ -893,7 +1039,7 @@ async function notifyOrder(
       orderId: opts.orderId,
       action: opts.action ?? null,
     },
-    dedupKey: `order-${opts.event}:${opts.orderId}`,
+    dedupKey: `order-${opts.event}:${opts.orderId}${opts.dedupSuffix ?? ""}`,
   })
 }
 
@@ -1068,8 +1214,10 @@ async function deliverAuto(
       if (newapiUserId === null) throw new Error("未绑定中转站账号")
       const perUnit = Number(await getSetting(env, "newapi_quota_per_unit")) || 500_000
       const rawQuota = Math.round((product.quotaYuan ?? 0) * perUnit)
-      await adminSetQuota(env, newapiUserId, rawQuota, "add")
+      // 展示货币配置失败不能把已经充值成功的权益误判为交付失败；
+      // 先取出非副作用信息，再执行不可逆的上游充值。
       const { symbol } = await getCurrencyInfo(env)
+      await adminSetQuota(env, newapiUserId, rawQuota, "add")
       return `已自动充值 ${symbol}${product.quotaYuan}`
     }
 
@@ -1234,63 +1382,69 @@ export async function buyProduct(
 
   const orderId = uuid()
 
-  // 1. 占库存（有限量时才需要；条件 UPDATE 保证并发下不会超卖）
-  if (product.stock !== null) {
-    const res = await env.DB.prepare(
-      "UPDATE point_products SET stock = stock - 1, updated_at = ? " +
-        "WHERE id = ? AND enabled = 1 AND stock > 0"
-    )
-      .bind(now, product.id)
-      .run()
-    if ((res.meta?.changes ?? 0) === 0) {
-      throw new ApiError(400, "该商品已售罄", "OUT_OF_STOCK")
+  let stockReserved = false
+  let pointsDeducted = false
+  try {
+    // 1. 占库存（有限量时才需要；条件 UPDATE 保证并发下不会超卖）
+    if (product.stock !== null) {
+      const res = await env.DB.prepare(
+        "UPDATE point_products SET stock = stock - 1, updated_at = ? " +
+          "WHERE id = ? AND enabled = 1 AND stock > 0"
+      ).bind(now, product.id).run()
+      if ((res.meta?.changes ?? 0) === 0) {
+        throw new ApiError(400, "该商品已售罄", "OUT_OF_STOCK")
+      }
+      stockReserved = true
     }
-  }
 
-  // 2. 扣积分（dedup_key 用订单号，重放同一请求不会扣两次）
-  const deducted = await applyPoints(env, {
-    userId: user.id,
-    delta: -product.price,
-    reason: "shop",
-    detail: `购买「${product.name}」`,
-    dedupKey: `shop:${orderId}`,
-  })
-  if (!deducted.applied) {
-    await restoreStock(env, product.id)
-    throw new ApiError(400, "积分不足，无法购买", "INSUFFICIENT_POINTS")
-  }
+    // 2. 扣积分（dedup_key 用订单号，重放同一请求不会扣两次）
+    const deducted = await applyPoints(env, {
+      userId: user.id,
+      delta: -product.price,
+      reason: "shop",
+      detail: `购买「${product.name}」`,
+      dedupKey: `shop:${orderId}`,
+    })
+    if (!deducted.applied) {
+      throw new ApiError(400, "积分不足，无法购买", "INSUFFICIENT_POINTS")
+    }
+    pointsDeducted = true
 
-  // 3. 落订单（pending；自动交付成功后再改成 delivered）
-  //
-  // `expires_at` 先留 NULL —— 租期从**交付生效**那一刻起算（见 applyRentalExpiry），
-  // 不是从下单起算，否则卖家拖几天发货会白吃买家的租期。
-  // `granted_feature` 记录「这单发的是哪个权限」，到期收回时靠它，不依赖商品行还在不在。
-  await env.DB.prepare(
-    `INSERT INTO point_orders
-       (id, user_id, username, product_id, product_name, price, delivery,
-        quota_yuan, status, note, seller_id, seller_name,
-        billing_mode, rental_days, renewed_from, granted_feature, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`
-  )
-    .bind(
-      orderId,
-      user.id,
-      user.username,
-      product.id,
-      product.name,
-      product.price,
-      product.delivery,
-      product.quotaYuan,
-      isUserProduct ? "等待卖家交付" : null,
-      product.ownerId,
-      product.ownerName,
-      product.billingMode,
-      isRental ? product.rentalDays : null,
-      activeRental?.id ?? null,
-      product.delivery === "feature" ? (product.deliveryParams?.feature ?? null) : null,
-      now
-    )
-    .run()
+    // 3. 落订单（pending；自动交付成功后再改成 delivered）。
+    await env.DB.prepare(
+      `INSERT INTO point_orders
+         (id, user_id, username, product_id, product_name, price, delivery,
+          quota_yuan, status, note, seller_id, seller_name,
+          billing_mode, rental_days, renewed_from, granted_feature, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      orderId, user.id, user.username, product.id, product.name, product.price,
+      product.delivery, product.quotaYuan, isUserProduct ? "等待卖家交付" : null,
+      product.ownerId, product.ownerName, product.billingMode,
+      isRental ? product.rentalDays : null, activeRental?.id ?? null,
+      product.delivery === "feature" ? (product.deliveryParams?.feature ?? null) : null, now
+    ).run()
+  } catch (err) {
+    // 订单写入失败也必须原路补偿；补偿失败记日志，供管理员对账处理。
+    if (pointsDeducted) {
+      try {
+        await applyPoints(env, {
+          userId: user.id,
+          delta: product.price,
+          reason: "shop",
+          detail: `购买「${product.name}」失败退回`,
+          dedupKey: `shop-refund:${orderId}`,
+        })
+      } catch (refundErr) {
+        console.error("商城订单补偿退款失败:", orderId, refundErr)
+      }
+    }
+    if (stockReserved) {
+      try { await restoreStock(env, product.id) }
+      catch (stockErr) { console.error("商城库存补偿失败:", orderId, stockErr) }
+    }
+    throw err
+  }
 
   // 4. 交付
   if (isUserProduct || product.delivery === "manual") {
@@ -1333,8 +1487,11 @@ export async function buyProduct(
       })
     }
   } else {
+    let deliveryApplied = false
     try {
       const summary = await deliverAuto(env, product, user.id, newapiUserId)
+      // deliverAuto 成功后权益已经生效；此后的记账/通知失败不能再退款。
+      deliveryApplied = true
       const deliveredAt = new Date().toISOString()
       await env.DB.prepare(
         "UPDATE point_orders SET status = 'delivered', delivered_at = ?, note = ? WHERE id = ?"
@@ -1369,24 +1526,29 @@ export async function buyProduct(
         orderId,
       })
     } catch (err) {
-      // 退回积分 + 还原库存 + 订单置 cancelled（用户不丢积分，商品也还回货架）
-      await applyPoints(env, {
-        userId: user.id,
-        delta: product.price,
-        reason: "shop",
-        detail: `购买「${product.name}」失败退回`,
-        dedupKey: `shop-refund:${orderId}`,
-      })
-      await restoreStock(env, product.id)
       const msg = err instanceof Error ? err.message.slice(0, 120) : ""
+      if (deliveryApplied) {
+        console.error("自动交付成功但订单后处理失败:", orderId, err)
+        throw new ApiError(500, "商品已发放，订单记录正在同步，请稍后查看", "DELIVERY_RECORDED_PENDING")
+      }
+      // deliverAuto 失败且权益尚未生效，才可以退款并还原库存。
+      try {
+        await applyPoints(env, {
+          userId: user.id,
+          delta: product.price,
+          reason: "shop",
+          detail: `购买「${product.name}」失败退回`,
+          dedupKey: `shop-refund:${orderId}`,
+        })
+        await restoreStock(env, product.id)
+      } catch (compensationErr) {
+        console.error("自动交付失败后的商城补偿失败:", orderId, compensationErr)
+        throw new ApiError(500, "购买失败，补偿正在人工处理", "PURCHASE_COMPENSATION_PENDING")
+      }
       await env.DB.prepare("UPDATE point_orders SET status = 'cancelled', note = ? WHERE id = ?")
         .bind(`自动发放失败，积分已退回${msg ? `：${msg}` : ""}`.slice(0, 300), orderId)
         .run()
-      throw new ApiError(
-        502,
-        `购买失败，积分已退回：${msg || "上游暂时不可用，请稍后重试"}`,
-        "PURCHASE_FAILED"
-      )
+      throw new ApiError(502, `购买失败，积分已退回：${msg || "上游暂时不可用，请稍后重试"}`, "PURCHASE_FAILED")
     }
   }
 
@@ -1490,6 +1652,10 @@ export async function sellerDeliverOrder(
     `${order.sellerName ?? "卖家"} 标记订单「${order.productName}」已交付（买家 ${order.username}）`
   )
 
+  // 已交付 → 卖家消息里的「标记已交付」按钮没用了，摘掉
+  //（只摘 deliver；马上要发的「确认收货」不受影响）
+  await clearOrderActionButtons(env, orderId, ["deliver"])
+
   // 通知买家来确认收货（带快捷按钮）—— 不确认积分就一直挂在托管里，
   // 卖家拿不到钱，所以这一步的提醒对双方都重要。
   await notifyOrder(env, order.userId, {
@@ -1568,6 +1734,12 @@ async function settleEscrow(
     `${actorLabel}：订单「${order.productName}」结算 ${order.price} 积分给卖家 ${order.sellerName ?? "?"}`
   )
 
+  // 结算完成 → 这个订单**所有**快捷按钮都该消失了：
+  // 买家的「确认收货」（不管他是从消息里点的还是从积分页点的），
+  // 以及卖家残留的「标记已交付」。不摘的话按钮永远留在消息里，
+  // 点了只会得到「这单已经结算过了」（2026-10-01 用户反馈）。
+  await clearOrderActionButtons(env, order.id, ["confirm", "deliver"])
+
   // 通知卖家：钱到账了。`actorLabel` 区分是买家确认的还是管理员强制结算的，
   // 免得卖家以为「买家一直没确认，钱怎么自己来了」。
   await notifyOrder(env, order.sellerId, {
@@ -1607,46 +1779,73 @@ export async function adminSettleOrder(
   return settleEscrow(env, order, adminId, "管理员结算")
 }
 
-/**
- * 管理员：取消订单并退款。
- *
- * 三种情况：
- *   · pending / delivered（钱还在托管）—— 直接原路退回买家，卖家没拿到过，无需倒扣
- *   · settled（钱已给卖家）—— 先从卖家账上收回，再退买家；卖家余额不够就报错，
- *     让管理员先去「成员」里调整，而不是把卖家的余额扣成负数
- *   · cancelled —— 已退过，报错
- */
-export async function adminCancelOrder(
-  env: Env,
-  adminId: string,
-  orderId: string,
-  reason?: string
-): Promise<PointOrder> {
-  const order = await getOrder(env, orderId)
-  if (!order) throw new ApiError(404, "订单不存在", "NOT_FOUND")
-  if (order.status === "cancelled") throw new ApiError(409, "该订单已取消", "ORDER_CANCELLED")
+// ---------------------------------------------------------------- 售后（退款）
 
-  // 已结算的：先把钱从卖家手里收回，收不回来就别往下走
+/** 售后理由 / 处理意见的长度上限（够说清楚，又不至于把列表撑爆） */
+const MAX_AFTER_SALE_REASON = 300
+/** 售后理由最短长度：拦掉「1」「退」这种什么都没说的申请 */
+const MIN_AFTER_SALE_REASON = 4
+
+/**
+ * 执行退款并终结订单 —— **管理员取消**与**售后退款**共用这一段。
+ *
+ * 步骤与顺序都有理由，别调换：
+ *   1. **已结算的**先把积分从卖家手里收回。收不回来就整单失败 ——
+ *      绝不把卖家余额扣成负数（与既有口径一致：让管理员先去「成员」里调整，
+ *      而不是让平台默默垫一笔、账目变成负的）。
+ *   2. 退买家（幂等：`shop-refund:<订单号>`，重复调用不会退两次）。
+ *   3. 归还库存 —— 已过期处理过的订单不能再还，否则库存凭空变多。
+ *   4. 收回租用权限 —— **必须当场收**：订单变成 cancelled 之后 cron 就再也扫不到它，
+ *      不在这里收等于「退了钱还留着权限」。
+ *   5. 写订单状态与备注、通知买卖双方、清掉消息里的快捷按钮。
+ */
+async function refundOrderCore(
+  env: Env,
+  order: PointOrder,
+  opts: {
+    actorId: string
+    /** 审计动作名：'points.shop.cancel' | 'points.shop.after_sale_refund' */
+    auditAction: string
+    /** 退款原因，会拼进订单备注 */
+    reason?: string
+    /** 传 'refunded' 表示这是售后流程收的尾（多写售后字段） */
+    afterSaleStatus?: "refunded"
+    /** 售后处理说明（卖家同意 / 平台判定） */
+    afterSaleNote?: string
+    /**
+     * 通知事件名，决定买家消息里显示「订单已取消」还是「已退款」。
+     *
+     * 默认 `'refunded'`（售后场景）；管理员「取消订单」传 `'cancelled'`
+     * 以保持这条老路径的文案与 `order_cancelled` 消息类型不变。
+     */
+    notifyEvent?: "cancelled" | "refunded"
+  }
+): Promise<PointOrder> {
+  if (order.status === "cancelled") {
+    throw new ApiError(409, "该订单已取消（积分已退回）", "ORDER_CANCELLED")
+  }
+
+  // 1. 已结算的：先把钱从卖家手里收回
   if (order.status === "settled" && order.sellerId) {
     const back = await applyPoints(env, {
       userId: order.sellerId,
       delta: -order.price,
       reason: "admin",
-      detail: `订单「${order.productName}」被撤销，收回卖家收益`,
+      detail: `订单「${order.productName}」退款，收回卖家收益`,
       dedupKey: `shop-settle-revoke:${order.id}`,
-      createdBy: adminId,
+      createdBy: opts.actorId,
     })
     if (!back.applied && back.reason !== "duplicated") {
       throw new ApiError(
         400,
         `卖家 ${order.sellerName ?? "?"} 当前只有 ${back.balance} 积分，不够收回 ${order.price}。` +
-          `请先在「成员」里调整卖家积分，再取消这单。`,
+          `请先在「成员」里调整卖家积分，再处理这笔退款。`,
         "INSUFFICIENT_POINTS"
       )
     }
   }
 
-  // 退买家（幂等：dedup_key 保证重复取消不会退两次）
+  // 2. 退买家
   const refunded = await applyPoints(env, {
     userId: order.userId,
     delta: order.price,
@@ -1658,54 +1857,425 @@ export async function adminCancelOrder(
     throw new ApiError(500, "退款失败，请稍后重试", "REFUND_FAILED")
   }
 
-  // 库存还回货架（有限量的商品才需要；商品已删则静默跳过）
-  //
-  // ⚠️ 租用商品**到期时已经归还过一次**（见 expireRentalOrders）。
-  //    若这单已经过到期处理（expire_handled_at 非空），这里就不能再还一次 ——
-  //    否则库存会凭空变多（租出去 1 份、收回来 2 份）。
+  // 3. 库存还回货架（限量的商品才需要；商品已删则静默跳过）
   if (!order.expireHandledAt) {
     await restoreStock(env, order.productId)
   }
 
-  const note = `订单已取消，${order.price} 积分已退回${reason ? `：${reason}` : ""}`.slice(0, 300)
-  await env.DB.prepare("UPDATE point_orders SET status = 'cancelled', note = ? WHERE id = ?")
-    .bind(note, orderId)
+  // 4. 写订单：状态、备注，以及（售后流程时）售后收尾字段
+  const now = new Date().toISOString()
+  // 「取消」与「退款」走同一套动作，但文案要区别开：前者是卖家没交付被平台取消，
+  // 后者是买家申请、卖家/平台判定同意 —— 用户看到的词不一样，心里预期也不一样。
+  const ev = opts.notifyEvent ?? "refunded"
+  const notePrefix = ev === "cancelled" ? "订单已取消" : "订单已退款"
+  const note = `${notePrefix}，${order.price} 积分已退回${
+    opts.reason ? `：${opts.reason}` : ""
+  }`.slice(0, MAX_AFTER_SALE_REASON)
+  if (opts.afterSaleStatus === "refunded") {
+    await env.DB.prepare(
+      "UPDATE point_orders SET status = 'cancelled', note = ?, after_sale_status = 'refunded', " +
+        "after_sale_note = ?, after_sale_resolved_at = ? WHERE id = ?"
+    )
+      .bind(note, opts.afterSaleNote?.slice(0, MAX_AFTER_SALE_REASON) ?? null, now, order.id)
+      .run()
+  } else {
+    await env.DB.prepare("UPDATE point_orders SET status = 'cancelled', note = ? WHERE id = ?")
+      .bind(note, order.id)
+      .run()
+  }
+
+  // 5. 当场收回租用权限（理由见函数头注释）
+  if (order.grantedFeature && !order.expireHandledAt) {
+    await revokeRentalFeature(env, order, now)
+  }
+
+  await audit(
+    env,
+    opts.actorId,
+    opts.auditAction,
+    `订单「${order.productName}」退款 ${order.price} 积分（买家 ${order.username}）` +
+      `${opts.reason ? ` · ${opts.reason}` : ""}`
+  )
+
+  await clearOrderActionButtons(env, order.id, ["confirm", "deliver"])
+  await notifyOrder(env, order.userId, {
+    event: ev,
+    title: `${ev === "cancelled" ? "订单已取消" : "已退款"}：「${order.productName}」`,
+    body: `${order.price} 积分已退回你的账户。${opts.reason ? `原因：${opts.reason}` : ""}`,
+    orderId: order.id,
+  })
+  if (order.sellerId) {
+    await notifyOrder(env, order.sellerId, {
+      event: ev,
+      title: `${ev === "cancelled" ? "订单被取消" : "订单已退款"}：「${order.productName}」`,
+      body:
+        ev === "cancelled"
+          ? `买家 ${order.username} 的这单已取消，积分已退回买家。${
+              opts.reason ? `原因：${opts.reason}` : ""
+            }`
+          : `买家 ${order.username} 的这单已退款，${order.price} 积分已从你的收益中收回。${
+              opts.reason ? `原因：${opts.reason}` : ""
+            }`,
+      orderId: order.id,
+    })
+  }
+
+  const updated = await getOrder(env, order.id)
+  if (!updated) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  return updated
+}
+
+/** 售后申请是否「还占着」这单（进行中，不允许重复申请） */
+function afterSaleInProgress(s: AfterSaleStatus | null): boolean {
+  return s === "requested" || s === "platform" || s === "refunded"
+}
+
+/**
+ * 买家：申请售后（要退款）。
+ *
+ * 允许的时机：
+ *   · `delivered` —— 卖家说交付了但我没收到，随时可以申请（交易还没完）；
+ *   · `settled`   —— 已确认收货，**7 天内**可以申请（见 AFTER_SALE_WINDOW_DAYS）。
+ *     主流电商都是「确认收货后 N 天可售后」，超过就走人工。
+ *
+ * 官方商品订单（没有卖家）直接进 `platform` 由管理员处理 —— 它本来就不存在
+ * 「卖家同意/拒绝」这一环，多一步只是让买家白等。
+ *
+ * 卖家已拒绝（`rejected`）或被平台驳回（`closed`）之后**允许重新申请**：
+ * 买家可能补充了新证据，拦着只会把人逼去私聊站长。
+ */
+export async function requestAfterSale(
+  env: Env,
+  buyerId: string,
+  orderId: string,
+  reason: string
+): Promise<PointOrder> {
+  const order = await getOrder(env, orderId)
+  if (!order) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  if (order.userId !== buyerId) {
+    throw new ApiError(403, "这不是你的订单", "FORBIDDEN")
+  }
+  if (order.status === "cancelled") {
+    throw new ApiError(409, "该订单已取消，积分已退回，无需申请售后", "ORDER_CANCELLED")
+  }
+  if (order.status === "pending") {
+    throw new ApiError(
+      409,
+      order.sellerId ? "卖家还没有交付，请先等卖家发货" : "订单尚未发放，请先联系管理员",
+      "NOT_DELIVERED"
+    )
+  }
+  if (afterSaleInProgress(order.afterSaleStatus)) {
+    throw new ApiError(409, "这笔订单已有售后在处理中", "AFTER_SALE_EXISTS")
+  }
+
+  // 已结算的：确认收货后有期限
+  if (order.status === "settled" && order.settledAt) {
+    const elapsedDays =
+      (Date.now() - new Date(order.settledAt).getTime()) / (24 * 60 * 60 * 1000)
+    if (elapsedDays > AFTER_SALE_WINDOW_DAYS) {
+      throw new ApiError(
+        400,
+        `已超过确认收货后 ${AFTER_SALE_WINDOW_DAYS} 天的售后申请期限，如有特殊情况请联系管理员`,
+        "AFTER_SALE_EXPIRED"
+      )
+    }
+  }
+
+  const text = String(reason ?? "").trim().slice(0, MAX_AFTER_SALE_REASON)
+  if (text.length < MIN_AFTER_SALE_REASON) {
+    throw new ApiError(400, `请填写退款原因（至少 ${MIN_AFTER_SALE_REASON} 个字）`, "INVALID_INPUT")
+  }
+
+  const now = new Date().toISOString()
+  // 官方商品订单没有卖家，直接进平台待判
+  const next: AfterSaleStatus = order.sellerId ? "requested" : "platform"
+  await env.DB.prepare(
+    "UPDATE point_orders SET after_sale_status = ?, after_sale_reason = ?, " +
+      "after_sale_requested_at = ?, after_sale_note = NULL, after_sale_resolved_at = NULL " +
+      "WHERE id = ?"
+  )
+    .bind(next, text, now, order.id)
+    .run()
+
+  await audit(
+    env,
+    buyerId,
+    "points.shop.after_sale.request",
+    `${order.username} 对订单「${order.productName}」申请售后（${order.price} 积分）：${text}`
+  )
+
+  // 去重后缀用申请时间：同一单可能被反复申请，只用订单号会把后续通知全吃掉
+  const dedupSuffix = `:${now}`
+  if (order.sellerId) {
+    await notifyOrder(env, order.sellerId, {
+      event: "after_sale_requested",
+      title: `买家申请退款：「${order.productName}」`,
+      body: `${order.username} 申请退款，理由：${text}。请到积分页处理（同意退款 / 拒绝）。`,
+      orderId: order.id,
+      dedupSuffix,
+    })
+  } else {
+    await notifyOrder(env, order.userId, {
+      event: "after_sale_requested",
+      title: `退款申请已提交：「${order.productName}」`,
+      body: `平台会尽快处理你的退款申请（理由：${text}）。`,
+      orderId: order.id,
+      dedupSuffix,
+    })
+  }
+
+  const updated = await getOrder(env, order.id)
+  if (!updated) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  return updated
+}
+
+/** 买家：撤销售后申请（还没终结时才能撤） */
+export async function cancelAfterSale(
+  env: Env,
+  buyerId: string,
+  orderId: string
+): Promise<PointOrder> {
+  const order = await getOrder(env, orderId)
+  if (!order) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  if (order.userId !== buyerId) throw new ApiError(403, "这不是你的订单", "FORBIDDEN")
+  if (!order.afterSaleStatus || order.afterSaleStatus === "refunded") {
+    throw new ApiError(409, "当前没有可以撤销的售后申请", "NO_AFTER_SALE")
+  }
+  if (order.afterSaleStatus === "platform") {
+    throw new ApiError(
+      409,
+      "已申请平台介入，不能自己撤销，请等待管理员处理",
+      "AFTER_SALE_ESCALATED"
+    )
+  }
+
+  await env.DB.prepare(
+    "UPDATE point_orders SET after_sale_status = NULL, after_sale_resolved_at = ? WHERE id = ?"
+  )
+    .bind(new Date().toISOString(), order.id)
+    .run()
+
+  await audit(
+    env,
+    buyerId,
+    "points.shop.after_sale.cancel",
+    `${order.username} 撤销了订单「${order.productName}」的售后申请`
+  )
+
+  const updated = await getOrder(env, order.id)
+  if (!updated) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  return updated
+}
+
+/** 买家：卖家一直不处理 / 已拒绝 → 申请平台（管理员）介入 */
+export async function escalateAfterSale(
+  env: Env,
+  buyerId: string,
+  orderId: string
+): Promise<PointOrder> {
+  const order = await getOrder(env, orderId)
+  if (!order) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  if (order.userId !== buyerId) throw new ApiError(403, "这不是你的订单", "FORBIDDEN")
+  if (order.afterSaleStatus !== "requested" && order.afterSaleStatus !== "rejected") {
+    throw new ApiError(409, "当前状态不能申请平台介入", "NO_AFTER_SALE")
+  }
+
+  await env.DB.prepare("UPDATE point_orders SET after_sale_status = 'platform' WHERE id = ?")
+    .bind(order.id)
+    .run()
+
+  await audit(
+    env,
+    buyerId,
+    "points.shop.after_sale.escalate",
+    `${order.username} 申请平台介入订单「${order.productName}」的退款`
+  )
+
+  const updated = await getOrder(env, order.id)
+  if (!updated) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  return updated
+}
+
+/**
+ * 卖家：处理买家的退款申请。
+ *
+ * 同意 → 直接走 refundOrderCore 退款（钱从托管退给买家，卖家本来就没拿到）；
+ * 拒绝 → 记下理由，买家可以申请平台介入。
+ */
+export async function sellerResolveAfterSale(
+  env: Env,
+  sellerId: string,
+  orderId: string,
+  approve: boolean,
+  note?: string
+): Promise<PointOrder> {
+  const order = await getOrder(env, orderId)
+  if (!order) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  if (order.sellerId !== sellerId) throw new ApiError(403, "这不是你的订单", "FORBIDDEN")
+  if (order.afterSaleStatus !== "requested") {
+    throw new ApiError(409, "当前没有待你处理的退款申请", "NO_AFTER_SALE")
+  }
+
+  const text = String(note ?? "").trim().slice(0, MAX_AFTER_SALE_REASON)
+
+  if (approve) {
+    return refundOrderCore(env, order, {
+      actorId: sellerId,
+      auditAction: "points.shop.after_sale_refund",
+      reason: `卖家同意退款（买家理由：${order.afterSaleReason ?? "未填写"}）`,
+      afterSaleStatus: "refunded",
+      afterSaleNote: text || "卖家同意退款",
+    })
+  }
+
+  await env.DB.prepare(
+    "UPDATE point_orders SET after_sale_status = 'rejected', after_sale_note = ? WHERE id = ?"
+  )
+    .bind(text || "卖家拒绝退款", order.id)
+    .run()
+
+  await audit(
+    env,
+    sellerId,
+    "points.shop.after_sale.reject",
+    `卖家 ${order.sellerName ?? ""} 拒绝订单「${order.productName}」的退款：${text || "未说明"}`
+  )
+
+  await notifyOrder(env, order.userId, {
+    event: "after_sale_rejected",
+    title: `退款申请被拒绝：「${order.productName}」`,
+    body: `${order.sellerName ?? "卖家"}拒绝了退款${text ? `：${text}` : ""}。如仍有异议，可申请平台介入。`,
+    orderId: order.id,
+    dedupSuffix: `:${new Date().toISOString()}`,
+  })
+
+  const updated = await getOrder(env, order.id)
+  if (!updated) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  return updated
+}
+
+/**
+ * 管理员（客服）：判定售后。
+ *
+ * 同意 → 退款（已结算的会先从卖家收益里收回，收不回就报错并提示先调整卖家积分）；
+ * 驳回 → `closed`，售后终结（买家仍可再次申请，见 requestAfterSale）。
+ *
+ * `platform` / `requested` / `rejected` 都允许管理员直接判定 —— 卖家长期不处理时
+ * 不必逼买家先点一次「申请介入」。
+ */
+export async function adminResolveAfterSale(
+  env: Env,
+  adminId: string,
+  orderId: string,
+  approve: boolean,
+  note?: string
+): Promise<PointOrder> {
+  const order = await getOrder(env, orderId)
+  if (!order) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  const s = order.afterSaleStatus
+  if (s !== "platform" && s !== "requested" && s !== "rejected") {
+    throw new ApiError(409, "这笔订单当前没有待判定的售后", "NO_AFTER_SALE")
+  }
+
+  const text = String(note ?? "").trim().slice(0, MAX_AFTER_SALE_REASON)
+  const buyerReason = order.afterSaleReason ?? "未填写"
+
+  if (approve) {
+    return refundOrderCore(env, order, {
+      actorId: adminId,
+      auditAction: "points.shop.after_sale_refund",
+      reason: `平台判定退款（买家理由：${buyerReason}）`,
+      afterSaleStatus: "refunded",
+      afterSaleNote: text || "平台判定同意退款",
+    })
+  }
+
+  const now = new Date().toISOString()
+  await env.DB.prepare(
+    "UPDATE point_orders SET after_sale_status = 'closed', after_sale_note = ?, " +
+      "after_sale_resolved_at = ? WHERE id = ?"
+  )
+    .bind(text || "平台判定不予退款", now, order.id)
     .run()
 
   await audit(
     env,
     adminId,
-    "points.shop.cancel",
-    `取消订单「${order.productName}」（买家 ${order.username}，${order.price} 积分已退回）` +
-      `${reason ? ` · ${reason}` : ""}`
+    "points.shop.after_sale.reject",
+    `平台驳回订单「${order.productName}」的退款申请（买家 ${order.username}）：${text || "未说明"}`
   )
 
-  // ⚠️ 租用 + feature 类订单被取消时，必须**当场收回权限**：
-  //    退款已经退了，若只等 cron 处理，这单 status 变成 cancelled 后就再也不会被扫到
-  //    （cron 只扫 delivered / settled），用户等于白拿权限还拿回积分。
-  if (order.grantedFeature && !order.expireHandledAt) {
-    await revokeRentalFeature(env, order, new Date().toISOString())
-  }
-
-  // 通知买卖双方 —— 这是「钱动了」的事件，双方都该知道（尤其卖家：
-  // 他可能已经发货，突然被取消会一头雾水）。
-  const cancelReason = reason ? `原因：${reason}` : ""
   await notifyOrder(env, order.userId, {
-    event: "cancelled",
-    title: `订单已取消：「${order.productName}」`,
-    body: `${order.price} 积分已退回你的账户。${cancelReason}`,
-    orderId,
-  })
-  await notifyOrder(env, order.sellerId, {
-    event: "cancelled",
-    title: `订单被取消：「${order.productName}」`,
-    body: `买家 ${order.username} 的这单已取消，积分已退回买家。${cancelReason}`,
-    orderId,
+    event: "after_sale_closed",
+    title: `退款申请未通过：「${order.productName}」`,
+    body: `平台判定不予退款${text ? `：${text}` : ""}。`,
+    orderId: order.id,
+    dedupSuffix: `:${now}`,
   })
 
-  const updated = await getOrder(env, orderId)
+  const updated = await getOrder(env, order.id)
   if (!updated) throw new ApiError(404, "订单不存在", "NOT_FOUND")
   return updated
+}
+
+/**
+ * 售后列表（管理端用）。
+ *
+ * `status` 省略 = 所有有过售后记录的订单（含已终结的），按申请时间倒序。
+ * 管理面板的「待处理」用 `status: "platform"`。
+ */
+export async function listAfterSaleOrders(
+  env: Env,
+  opts: { status?: AfterSaleStatus; limit?: number } = {}
+): Promise<PointOrder[]> {
+  const limit = Math.min(Math.max(1, opts.limit ?? 100), 500)
+  const rows = opts.status
+    ? await env.DB.prepare(
+        "SELECT * FROM point_orders WHERE after_sale_status = ? " +
+          "ORDER BY after_sale_requested_at DESC, id DESC LIMIT ?"
+      )
+        .bind(opts.status, limit)
+        .all<Record<string, unknown>>()
+    : await env.DB.prepare(
+        "SELECT * FROM point_orders WHERE after_sale_status IS NOT NULL " +
+          "ORDER BY after_sale_requested_at DESC, id DESC LIMIT ?"
+      )
+        .bind(limit)
+        .all<Record<string, unknown>>()
+  return (rows.results ?? []).map(rowToOrder)
+}
+
+/**
+ * 管理员：取消订单并退款。
+ *
+ * 三种情况：
+ *   · pending / delivered（钱还在托管）—— 直接原路退回买家，卖家没拿到过，无需倒扣
+ *   · settled（钱已给卖家）—— 先从卖家账上收回，再退买家；卖家余额不够就报错，
+ *     让管理员先去「成员」里调整，而不是把卖家的余额扣成负数
+ *   · cancelled —— 已退过，报错
+ *
+ * ⚠️ 具体步骤全部在 `refundOrderCore` 里 —— 它与**售后退款**共用同一套动作
+ *    （收回卖家收益 → 退买家 → 还库存 → 收权限 → 通知）。两处各写一遍必然漏改，
+ *    所以这里只保留「谁触发的」和「算取消还是算退款」这两个差异点。
+ */
+export async function adminCancelOrder(
+  env: Env,
+  adminId: string,
+  orderId: string,
+  reason?: string
+): Promise<PointOrder> {
+  const order = await getOrder(env, orderId)
+  if (!order) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  if (order.status === "cancelled") throw new ApiError(409, "该订单已取消", "ORDER_CANCELLED")
+
+  return refundOrderCore(env, order, {
+    actorId: adminId,
+    auditAction: "points.shop.cancel",
+    reason,
+    // 保持这条路的老文案与消息类型（order_cancelled）不变
+    notifyEvent: "cancelled",
+  })
 }
 
 // ---------------------------------------------------------------- 到期处理

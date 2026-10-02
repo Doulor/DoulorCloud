@@ -163,10 +163,11 @@ function copyText(text: string, label = tStatic("common.copied")) {
 
 /** 订阅源的节点总数（含抓取失败时显示错误） */
 function SubStatusBadge({ sub }: { sub: ProxySubscription }) {
+  const { t } = useT()
   const cfg = NODE_STATUS_BADGE[sub.status] ?? NODE_STATUS_BADGE.unknown
   return (
     <Badge variant={cfg.variant} className="text-xs">
-      {cfg.label}
+      {t(cfg.label)}
     </Badge>
   )
 }
@@ -208,6 +209,9 @@ function NodeDetails({ node }: { node: ProxyNode }) {
   )
 }
 
+/** 订阅列表先显示多少个，其余点「查看更多」再展开（2026-10-03 站长：订阅组太多一次全列太长） */
+const PROXY_SUB_BATCH = 10
+
 export default function ProxyPage() {
   const { t } = useT()
   const [data, setData] = React.useState<ProxyOverview | null>(null)
@@ -224,6 +228,10 @@ export default function ProxyPage() {
   const [expandedSubs, setExpandedSubs] = React.useState<Record<string, boolean>>({})
   /** 展开的节点配置（默认收起，点击节点行展开） */
   const [expandedNodes, setExpandedNodes] = React.useState<Record<string, boolean>>({})
+  /** 已加载的订阅列表（懒加载，分批累计） */
+  const [subs, setSubs] = React.useState<ProxySubscription[]>([])
+  const [hasMore, setHasMore] = React.useState(false)
+  const [loadingMore, setLoadingMore] = React.useState(false)
   /** 逐节点测速结果：`<订阅id>-<节点下标>` → 结果 */
   const [nodeLatency, setNodeLatency] = React.useState<Record<string, ProxyNodeLatency>>({})
   /** 正在测速的订阅源 id */
@@ -258,8 +266,10 @@ export default function ProxyPage() {
   const load = React.useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
-      const res = await proxyApi.overview()
+      const res = await proxyApi.overview(0, PROXY_SUB_BATCH)
       setData(res)
+      setSubs(res.subscriptions)
+      setHasMore(res.hasMore)
       // 协议更新过时，要求重新同意
       if (res.activated && res.consentedVersion < res.consentVersion) {
         setConsent(false)
@@ -279,6 +289,21 @@ export default function ProxyPage() {
   React.useEffect(() => {
     void load()
   }, [load])
+
+  /** 点「查看更多」：接着拉下一批订阅，追加到列表尾部 */
+  const loadMore = async () => {
+    if (loadingMore || !hasMore) return
+    setLoadingMore(true)
+    try {
+      const res = await proxyApi.overview(subs.length, PROXY_SUB_BATCH)
+      setSubs((prev) => [...prev, ...res.subscriptions])
+      setHasMore(res.hasMore)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("at.err.load"))
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   const handleEnable = async () => {
     if (!consent) {
@@ -490,7 +515,6 @@ export default function ProxyPage() {
     )
   }
 
-  const subs = data.subscriptions
 
   return (
     <div>
@@ -733,6 +757,17 @@ export default function ProxyPage() {
               </Card>
             )
           })}
+          {hasMore && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={() => void loadMore()}
+              disabled={loadingMore}
+            >
+              {loadingMore ? t("px.loading") : t("px.showMore")}
+            </Button>
+          )}
         </div>
       )}
 
@@ -763,8 +798,8 @@ function AgreementDialog({
         <div className="space-y-4">
           {PROXY_AGREEMENT.map((s) => (
             <div key={s.title}>
-              <p className="text-sm font-medium">{s.title}</p>
-              <p className="mt-1 text-sm text-muted-foreground">{s.body}</p>
+              <p className="text-sm font-medium">{t(s.title)}</p>
+              <p className="mt-1 text-sm text-muted-foreground">{t(s.body)}</p>
             </div>
           ))}
         </div>

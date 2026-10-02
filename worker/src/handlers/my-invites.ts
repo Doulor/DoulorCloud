@@ -13,7 +13,7 @@
 import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
 import { requireUser } from "../auth"
-import { parsePermissions, type Permissions } from "../permissions"
+import { parsePermissions, permissionsFromFeatures, type Permissions } from "../permissions"
 import {
   QUOTA_FEATURES,
   QUOTA_FEATURE_LABELS,
@@ -39,12 +39,9 @@ interface InviteRow {
 
 /** 基础权限：个人名片 + 管理员设为「基础权限」的模块 */
 function basePermissions(basic: Set<QuotaFeature>): Permissions {
-  return {
-    r2: basic.has("r2"),
-    ai: basic.has("ai"),
-    frp: basic.has("frp"),
-    proxy: basic.has("proxy"),
-  }
+  // 走 permissionsFromFeatures 而不是手写字面量：新增模块（如 doulor）时
+  // 这里会自动补成 false，不会因为「漏写一个键」而编译不过或悄悄变成允许。
+  return permissionsFromFeatures(basic)
 }
 
 /** 生成一个随机邀请码，形如 DC-XXXX-XXXX（去掉易混字符） */

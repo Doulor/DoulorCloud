@@ -6,6 +6,7 @@ import {
   Check,
   Clock,
   Gift,
+  Info,
   Loader2,
   PartyPopper,
   Share2,
@@ -130,6 +131,8 @@ export default function ActivityPage() {
   /** 「点 GitHub star」活动：领取前必须让用户填 GitHub 用户名，服务端据此核验 */
   const needsGithub = ev.conditionType === "github_star" && !claimed
   const blockedReason = claimed ? "" : ev.claimBlockedReason ?? ""
+  /** 参与条件的规则说明（静态规则，与用户当前状态无关） */
+  const conditionHint = claimed ? "" : ev.conditionHint ?? ""
 
   const timeText = (() => {
     const locale = t("msg.dateLocale")
@@ -274,6 +277,15 @@ export default function ActivityPage() {
             <p className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
               <AlertCircle className="h-3.5 w-3.5" />
               {blockedReason}
+            </p>
+          )}
+          {/* 参与条件的规则说明：**领取前**就告诉用户这类活动要什么。
+              以前只在点了之后才回一句「你还不满足参与条件」，用户不知道差哪一步
+              （2026-10-02 有人因为「开通了名片但没填昵称」卡住并来提反馈）。 */}
+          {!claimed && !blockedReason && conditionHint && (
+            <p className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <Info className="h-3.5 w-3.5" />
+              {conditionHint}
             </p>
           )}
           {needsGithub && (

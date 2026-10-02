@@ -1,11 +1,24 @@
 export class ApiError extends Error {
   status: number
   code?: string
+  /**
+   * 附加到响应体上的额外字段（2026-10-02 加）。
+   *
+   * 用途：有些错误**不只是报错**，还要顺带把用户需要的信息带回去 ——
+   * 典型是登录时账号被封禁：响应里要一并给出封禁原因与申诉处理结果，
+   * 否则用户除了「你被封了」之外什么都不知道（而他此刻拿不到会话，
+   * 没有别的渠道能看到这些信息）。
+   *
+   * 合并方式见 index.ts 的错误处理：`{ error, code, ...extra }`。
+   * ⚠️ 别把 `error` / `code` 塞进来覆盖掉 —— 那两个是错误处理的统一契约。
+   */
+  extra?: Record<string, unknown>
 
-  constructor(status: number, message: string, code?: string) {
+  constructor(status: number, message: string, code?: string, extra?: Record<string, unknown>) {
     super(message)
     this.status = status
     this.code = code
+    this.extra = extra
   }
 }
 

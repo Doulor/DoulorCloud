@@ -23,6 +23,21 @@ async function resolveApiToken(env: Env): Promise<string> {
   throw new ApiError(500, "未配置 Cloudflare API Token", "CF_NOT_CONFIGURED")
 }
 
+/**
+ * 导出给**其它**需要直接打 CF API 的模块用（自定义域名绑定等）。
+ *
+ * 2026-10-01 起全站只认这一份令牌：以前「绑定自定义域名」单独读 `CF_WORKERS_TOKEN`，
+ * 那个令牌一旦失效，绑定功能整个挂掉（报 Cloudflare 的 Authentication error），
+ * 而同期 DNS 记录、邮件路由都还正常 —— 因为它们读的是 CLOUDFLARE_API_TOKEN_SECRET。
+ * 同一个 CF 账号维护两套凭证，出问题必然对不上号。
+ */
+export { resolveApiToken }
+
+/** 有没有可用的 CF Token（给「功能是否可用」的布尔判断用，不抛错） */
+export function hasCfApiToken(env: Env): boolean {
+  return Boolean(env.CLOUDFLARE_API_TOKEN_SECRET || env.CLOUDFLARE_API_TOKEN)
+}
+
 export async function callCloudflare(
   env: Env,
   path: string,

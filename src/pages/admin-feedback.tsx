@@ -45,7 +45,7 @@ import {
   ImageGallery,
 } from "@/components/feedback-image"
 import type { AdminFeedbackItem, AdminFeedbackOverview } from "@/types"
-import { useT, tStatic } from "@/i18n"
+import { useT, tStatic, translateApiMessage } from "@/i18n"
 
 /**
  * 管理面板「反馈」标签。
@@ -229,7 +229,7 @@ export function FeedbackPanel() {
 
   const labelOf = (key: string) => {
     if (!key) return tStatic("common.all")
-    return statusLabels[key] ?? key
+    return translateApiMessage(statusLabels[key] ?? key)
   }
 
   return (
@@ -285,7 +285,7 @@ export function FeedbackPanel() {
           {items.map((f) => {
             const Icon = CATEGORY_ICONS[f.category] ?? MessageSquare
             const categoryLabel =
-              categories.find((c) => c.key === f.category)?.label ?? f.category
+              translateApiMessage(categories.find((c) => c.key === f.category)?.label ?? f.category)
             return (
               <Card key={f.id}>
                 <CardContent className="p-4">
@@ -295,7 +295,7 @@ export function FeedbackPanel() {
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-sm font-medium">{f.title}</span>
                         <Badge variant={statusVariant(f.status)}>
-                          {statusLabels[f.status] ?? f.status}
+                          {translateApiMessage(statusLabels[f.status] ?? f.status)}
                         </Badge>
                         <Badge variant="outline">{categoryLabel}</Badge>
                         <span className="text-xs text-muted-foreground">
@@ -303,7 +303,7 @@ export function FeedbackPanel() {
                         </span>
                       </div>
 
-                      <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+                      <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
                         {f.body}
                       </p>
                       <ImageGallery images={f.images} />
@@ -329,7 +329,7 @@ export function FeedbackPanel() {
                               · {fmtDateTime(m.createdAt)}
                             </span>
                           </p>
-                          <p className="whitespace-pre-wrap text-sm">{m.body}</p>
+                          <p className="whitespace-pre-wrap break-words text-sm">{m.body}</p>
                           <ImageGallery images={m.images} />
                         </div>
                       ))}
@@ -352,7 +352,7 @@ export function FeedbackPanel() {
                                 </Badge>
                               )}
                             </p>
-                            <p className="whitespace-pre-wrap text-sm">{f.adminReply}</p>
+                            <p className="whitespace-pre-wrap break-words text-sm">{f.adminReply}</p>
                           </div>
                         </>
                       )}
@@ -373,7 +373,7 @@ export function FeedbackPanel() {
                           <SelectContent>
                             {FILTERS.filter(Boolean).map((s) => (
                               <SelectItem key={s} value={s}>
-                                {statusLabels[s] ?? s}
+                                {translateApiMessage(statusLabels[s] ?? s)}
                               </SelectItem>
                             ))}
                           </SelectContent>
@@ -419,7 +419,7 @@ export function FeedbackPanel() {
             <div className="space-y-4">
               {/* 原正文放出来，回复时不用来回切页面看上下文 */}
               <div className="max-h-40 overflow-y-auto rounded-md border bg-muted/30 p-3">
-                <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+                <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
                   {replyTarget.body}
                 </p>
               </div>
@@ -452,7 +452,7 @@ export function FeedbackPanel() {
                   <SelectContent>
                     {FILTERS.filter(Boolean).map((s) => (
                       <SelectItem key={s} value={s}>
-                        {statusLabels[s] ?? s}
+                        {translateApiMessage(statusLabels[s] ?? s)}
                       </SelectItem>
                     ))}
                   </SelectContent>

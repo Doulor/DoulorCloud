@@ -28,6 +28,7 @@ import { sendMail, renderMail, parseBrevoKeys } from "../mailer"
 import { fetchWithTimeout } from "../async-utils"
 import { cfListDestinations } from "../cloudflare"
 import { normalizePermissions, parsePermissions, FEATURES } from "../permissions"
+import { normalizeEmailDomains } from "../email-domains"
 import {
   validateNicknameFormat,
   isReservedNickname,
@@ -514,6 +515,14 @@ export async function updateUser(env: Env, request: Request, username: string): 
     emailVerified?: boolean
     /** 是否接收平台通知邮件 */
     notifyEnabled?: boolean
+    /**
+     * 封禁原因（2026-10-02 加）。
+     *
+     * 只在 status 变成 `suspended` 时有意义：会写进 `users.suspend_reason`，
+     * **用户下次登录时会看到**。所以请写「为什么」而不是「违规」这种等于没说的词 ——
+     * 用户看不懂原因就会反复来申诉，反而增加你的工作量。
+     */
+    suspendReason?: string | null
   }
 
   const user = await targetUser(env, username)
@@ -589,6 +598,29 @@ export async function updateUser(env: Env, request: Request, username: string): 
       user.id
     )
     .run()
+
+  /**
+   * 封禁原因 / 封禁时间（2026-10-02）。
+   *
+   * · 封禁 → 记下原因（用户在登录页会看到，所以宁可写清楚）；
+   * · 解封 → **清空**，否则会出现「已解封但登录页还挂着上次封禁理由」的怪状态。
+   *
+   * ⚠️ 只在本次**确实改了 status** 时才动这两列 —— 否则管理员改个昵称
+   *    就会把封禁原因默默冲掉（或把解封后的残留又写回去）。
+   */
+  if (statusChanged === "suspended") {
+    const reason = String(body.suspendReason ?? "").trim().slice(0, 300)
+    const now = new Date().toISOString()
+    await env.DB.prepare("UPDATE users SET suspend_reason = ?, suspend_at = ? WHERE id = ?")
+      .bind(reason || null, now, user.id)
+      .run()
+  } else if (statusChanged === "active") {
+    await env.DB.prepare(
+      "UPDATE users SET suspend_reason = NULL, suspend_at = NULL WHERE id = ?"
+    )
+      .bind(user.id)
+      .run()
+  }
 
   // 封禁/解封联动 NewAPI 账户（2026-09-25 新增）。
   //
@@ -1303,6 +1335,16 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
         )
       }
       values[key] = String(n)
+      continue
+    }
+
+    // register_email_domains：注册邮箱白名单；空串 = 不限制（合法值）。
+    // ⚠️ 必须单独处理：通用兜底会把字符串截断到 100 字符，而默认列表有 ~250 字符，
+    // 会被砍掉后半段（gmail / outlook / hotmail 等），导致「注册不让用 gmail」。
+    // 归一化（分隔符收宽 / 去空白 / 小写 / 去重 / 不截断）统一放在 email-domains.ts，
+    // 与注册侧读取用的是**同一份实现** —— 两边分家就会出现「存进去的一个都匹配不上」。
+    if (key === "register_email_domains") {
+      values[key] = normalizeEmailDomains(String(raw))
       continue
     }
 

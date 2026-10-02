@@ -18,7 +18,7 @@ import { ApiError } from "./http"
 import { getSetting } from "./settings"
 import type { Env } from "./env"
 
-export const FEATURES = ["r2", "ai", "frp", "proxy"] as const
+export const FEATURES = ["r2", "ai", "frp", "proxy", "doulor"] as const
 export type Feature = (typeof FEATURES)[number]
 
 export const FEATURE_LABELS: Record<Feature, string> = {
@@ -26,13 +26,33 @@ export const FEATURE_LABELS: Record<Feature, string> = {
   ai: "AI 中转站",
   frp: "内网穿透",
   proxy: "代理节点",
+  doulor: "doulor.cn 专属域名与邮箱",
 }
 
 export type Permissions = Record<Feature, boolean>
 
-/** 全开（老数据 / 未指定时的默认值） */
+/**
+ * 「缺键即允许」的模块 —— 老数据 / 权限 JSON 里没写这个键时的回落值。
+ *
+ * ⚠️ 这**不是** FEATURES 的副本，两者必须分开维护。
+ * 原因：`parsePermissions` 对 JSON 里**没有出现的键**是按 `allPermissions()`
+ * 兜底的（历史兼容：权限系统上线前的老用户不能突然失去功能）。所以任何
+ * 「新增时必须默认关闭」的权限**绝不能**进这个列表 —— 进了就等于给所有
+ * 存量用户、以及所有显式 JSON 里缺这个键的新账号**白送**。
+ *
+ * `doulor`（doulor.cn 专属域）正是这种：
+ *   doulor.cn 是站点主域，用户的邮箱与子域名挂上去会把滥用风险引到主域声誉上，
+ *   而主域同时承担「给用户发验证码 / 找回密码」的发件人角色。
+ *   站长明确要求先「只定义、不放开」⇒ 它的默认值必须是 false，
+ *   只能由管理员在成员详情里显式勾选。
+ */
+export const DEFAULT_ALLOWED: readonly Feature[] = ["r2", "ai", "frp", "proxy"]
+
+/** 默认权限（“全开”指 DEFAULT_ALLOWED 里的那些；doulor 不在其中） */
 export function allPermissions(): Permissions {
-  return { r2: true, ai: true, frp: true, proxy: true }
+  const out = {} as Permissions
+  for (const f of FEATURES) out[f] = DEFAULT_ALLOWED.includes(f)
+  return out
 }
 
 /** 解析权限 JSON；NULL / 非法值按「全开」处理 */
@@ -72,7 +92,7 @@ export function normalizePermissions(input: unknown): Permissions {
  * 语义明确、与 NULL 划清界限。
  */
 export function permissionsFromFeatures(enabled: ReadonlySet<string>): Permissions {
-  const out = { r2: false, ai: false, frp: false, proxy: false }
+  const out = {} as Permissions
   for (const f of FEATURES) out[f] = enabled.has(f)
   return out
 }
@@ -116,9 +136,21 @@ export function isBasicOnlyInvitePermissions(
   const obj = parsed as Record<string, unknown>
   for (const f of FEATURES) {
     const v = obj[f]
-    // 缺键 / 非布尔 ⇒ parsePermissions 会把它当「允许」，不可复用
-    if (typeof v !== "boolean") return false
-    if (v === true && !basic.has(f)) return false
+    if (typeof v === "boolean") {
+      if (v === true && !basic.has(f)) return false
+      continue
+    }
+    // 缺键 / 非布尔：parsePermissions 会回落到 allPermissions()[f]，所以要看那个回落值 ——
+    //   · 回落成 **true**（`DEFAULT_ALLOWED` 里的 r2/ai/frp/proxy）⇒ 复用等于白送该模块，
+    //     保守判「带权限」（照旧消费次数）。这条不能松，松了就是无限发放。
+    //   · 回落成 **false**（`doulor` 这类默认拒绝的）⇒ 缺键并不构成额外权限，
+    //     继续往下看。
+    //
+    // 为什么必须区分（2026-10-01 加 doulor 时踩到）：那时 FEATURES 多了一个键，
+    // 而**所有存量邀请码**的 JSON 都没有它 ⇒ 旧码全被判成「带权限」，
+    // 在开放注册期被白白烧掉。语义上旧码确实没授予 doulor（那时它还不存在），
+    // 所以正确做法是按回落值判，而不是一律保守。
+    if (DEFAULT_ALLOWED.includes(f)) return false
   }
   return true
 }

@@ -168,11 +168,21 @@ export async function overview(env: Env, request: Request): Promise<Response> {
     .bind(since)
     .all<{ referrer: string; pv: number }>()
 
+  // 按设备类别（ua 已在入库时归类为 desktop / mobile / tablet）
+  const byDevice = await env.DB.prepare(
+    `SELECT ua, COUNT(*) AS pv, COUNT(DISTINCT visitor_id) AS uv
+       FROM analytics_events WHERE created_at >= ?
+      GROUP BY ua ORDER BY pv DESC`
+  )
+    .bind(since)
+    .all<{ ua: string; pv: number; uv: number }>()
+
   return json({
     summary: { pv: summary?.pv ?? 0, uv: summary?.uv ?? 0 },
     byDay: byDay.results ?? [],
     byPath: byPath.results ?? [],
     byReferrer: byReferrer.results ?? [],
+    byDevice: byDevice.results ?? [],
   })
 }
 
@@ -248,6 +258,7 @@ export async function userOverview(env: Env, request: Request): Promise<Response
     newByDayRes,
     retentionRes,
     newUserRes,
+    extraRes,
   ] = await env.DB.batch([
     env.DB.prepare("SELECT COUNT(*) AS c FROM users"),
     env.DB.prepare("SELECT role, COUNT(*) AS c FROM users GROUP BY role"),
@@ -340,6 +351,50 @@ export async function userOverview(env: Env, request: Request): Promise<Response
               SUM(CASE WHEN last_login_at IS NOT NULL THEN 1 ELSE 0 END) AS loggedIn
          FROM users WHERE created_at >= ?`
     ).bind(since30d),
+    // 「更多数据」：跨模块的补充指标（中转站/积分/成就/反馈/社区/邮件/邀请/其他）。
+    // 一次性子查询拉全，标签在响应里服务端下发（与 FEATURE_LABELS 同约定）。
+    env.DB.prepare(
+      `SELECT
+         -- 中转站
+         (SELECT COALESCE(SUM(request_count), 0) FROM newapi_accounts) AS aiCalls,
+         (SELECT COALESCE(SUM(used_quota), 0) FROM newapi_accounts) AS aiQuota,
+         (SELECT COUNT(*) FROM newapi_keys) AS aiKeys,
+         -- 积分商城
+         (SELECT COALESCE(SUM(balance), 0) FROM user_points) AS pointsBalance,
+         (SELECT COUNT(*) FROM point_products WHERE enabled = 1) AS products,
+         (SELECT COUNT(*) FROM point_orders) AS orders,
+         (SELECT COUNT(*) FROM point_orders WHERE delivered_at IS NOT NULL) AS ordersDelivered,
+         -- 成就
+         (SELECT COUNT(*) FROM user_achievements) AS achievements,
+         (SELECT COUNT(DISTINCT user_id) FROM user_achievements) AS achievers,
+         -- 反馈
+         (SELECT COUNT(*) FROM feedback) AS feedback,
+         (SELECT COUNT(*) FROM feedback WHERE admin_reply IS NOT NULL AND admin_reply <> '') AS feedbackReplied,
+         (SELECT COUNT(*) FROM feedback WHERE status = 'pending') AS feedbackPending,
+         -- 社区与互动
+         (SELECT COALESCE(SUM(like_count), 0) FROM posts WHERE deleted_at IS NULL) AS postLikes,
+         (SELECT COALESCE(SUM(like_count), 0) FROM post_comments WHERE deleted_at IS NULL) AS commentLikes,
+         (SELECT COUNT(*) FROM post_shares) AS shares,
+         (SELECT COUNT(*) FROM chat_messages) AS chatMessages,
+         (SELECT COUNT(DISTINCT user_id) FROM chat_messages) AS chatters,
+         (SELECT COUNT(*) FROM direct_messages) AS dms,
+         (SELECT COUNT(*) FROM notifications) AS notifications,
+         -- 邮件
+         (SELECT COUNT(*) FROM messages) AS mails,
+         -- 邀请
+         (SELECT COUNT(*) FROM invite_codes) AS inviteCodes,
+         -- 其他
+         (SELECT COUNT(*) FROM custom_titles) AS customTitles,
+         (SELECT COUNT(*) FROM user_titles) AS grantedTitles,
+         (SELECT COUNT(*) FROM events) AS events,
+         (SELECT COUNT(*) FROM event_claims) AS eventClaims,
+         (SELECT COUNT(*) FROM fun_links) AS funLinks,
+         (SELECT COUNT(*) FROM oauth_clients) AS oauthClients,
+         (SELECT COUNT(*) FROM oauth_grants) AS oauthGrants,
+         (SELECT COUNT(*) FROM tempbox_batches) AS tempboxes,
+         (SELECT COUNT(*) FROM wb2api_bindings) AS wb2apiBindings,
+         (SELECT COUNT(*) FROM cli2api_bindings) AS cli2apiBindings`
+    ),
   ])
 
   const total = (totalRes as { results?: { c: number }[] }).results?.[0]?.c ?? 0
@@ -394,6 +449,86 @@ export async function userOverview(env: Env, request: Request): Promise<Response
   }).results?.[0]
   const nu = (newUserRes as { results?: { registered: number; loggedIn: number }[] })
     .results?.[0]
+
+  // ---- 「更多数据」：跨模块补充指标 ----
+  const ex = (extraRes as { results?: Record<string, number>[] }).results?.[0] ?? {}
+  const n = (v: unknown) => Number(v ?? 0)
+  const avg = (v: unknown) => (total > 0 ? Math.round((n(v) / total) * 100) / 100 : 0)
+  /** 每组 = 一个分组标题 + 一串 {label, value, hint?} 卡片 */
+  const more: {
+    group: string
+    items: { label: string; value: number; hint?: string }[]
+  }[] = [
+    {
+      group: "中转站",
+      items: [
+        { label: "总调用次数", value: n(ex.aiCalls) },
+        { label: "人均调用次数", value: avg(ex.aiCalls) },
+        { label: "已消耗额度 (quota)", value: n(ex.aiQuota) },
+        { label: "API Key 数", value: n(ex.aiKeys) },
+      ],
+    },
+    {
+      group: "积分商城",
+      items: [
+        { label: "积分余额总量", value: n(ex.pointsBalance) },
+        { label: "人均积分", value: avg(ex.pointsBalance) },
+        { label: "启用中的商品", value: n(ex.products) },
+        { label: "订单总数", value: n(ex.orders) },
+        { label: "已交付订单", value: n(ex.ordersDelivered) },
+      ],
+    },
+    {
+      group: "成就",
+      items: [
+        { label: "解锁总数", value: n(ex.achievements) },
+        { label: "解锁过成就的人数", value: n(ex.achievers) },
+        { label: "人均成就点", value: avg(ex.achievements) },
+      ],
+    },
+    {
+      group: "反馈",
+      items: [
+        { label: "反馈总数", value: n(ex.feedback) },
+        { label: "已回复", value: n(ex.feedbackReplied) },
+        { label: "待处理", value: n(ex.feedbackPending) },
+      ],
+    },
+    {
+      group: "社区与互动",
+      items: [
+        { label: "帖子获赞总数", value: n(ex.postLikes) + n(ex.commentLikes) },
+        { label: "分享数", value: n(ex.shares) },
+        { label: "聊天消息数", value: n(ex.chatMessages) },
+        { label: "聊天参与人数", value: n(ex.chatters) },
+        { label: "私信数", value: n(ex.dms) },
+        { label: "通知数", value: n(ex.notifications) },
+      ],
+    },
+    {
+      group: "邮件",
+      items: [{ label: "收信总数", value: n(ex.mails) }],
+    },
+    {
+      group: "邀请",
+      items: [{ label: "邀请码总数", value: n(ex.inviteCodes) }],
+    },
+    {
+      group: "其他",
+      items: [
+        { label: "自定义称号", value: n(ex.customTitles) },
+        { label: "已发放称号", value: n(ex.grantedTitles) },
+        { label: "活动数", value: n(ex.events) },
+        { label: "活动参与数", value: n(ex.eventClaims) },
+        { label: "工具箱链接数", value: n(ex.funLinks) },
+        { label: "OAuth 客户端", value: n(ex.oauthClients) },
+        { label: "OAuth 授权数", value: n(ex.oauthGrants) },
+        { label: "临时分享箱", value: n(ex.tempboxes) },
+        { label: "wb2api 绑定", value: n(ex.wb2apiBindings) },
+        { label: "cli2api 绑定", value: n(ex.cli2apiBindings) },
+      ],
+    },
+  ]
 
   // 模块开通率：顺序固定（按开通数从高到低更好读），标签服务端下发
   const featureRows = [
@@ -461,6 +596,8 @@ export async function userOverview(env: Env, request: Request): Promise<Response
       commenters: c?.commenters ?? 0,
       commentersPercent: pct(c?.commenters ?? 0),
     },
+    /** 「更多数据」：跨模块补充指标（标签服务端下发） */
+    more,
     retention: {
       /** 「最近一周内登录过」= 存活，这是用户定义的口径 */
       alive7d: rt?.alive7d ?? 0,

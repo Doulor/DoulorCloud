@@ -1,3 +1,4 @@
+import * as React from "react"
 import { Link, Outlet, useLocation } from "react-router-dom"
 import { ArrowRight } from "lucide-react"
 
@@ -16,6 +17,29 @@ export function LandingLayout() {
   const location = useLocation()
   const { t } = useT()
 
+  /**
+   * 顶栏的「功能 / 更新 / 下载 / 常见问题」都是 `/#xxx` 锚点，而 react-router
+   * **不会**自动滚动到对应元素（历史上没做这件事 ⇒ 点了没反应，2026-10-02 站长反馈）。
+   * 这里监听 hash 变化手动滚；刚挂载时目标可能还没渲染出来，所以带重试。
+   * 顶栏是 sticky，靠 section 的 scroll-margin-top 留出偏移（见 index.css）。
+   */
+  React.useEffect(() => {
+    const hash = location.hash.replace(/^#/, "")
+    if (!hash) return
+    let attempts = 0
+    let timer = 0
+    const tick = () => {
+      const el = document.getElementById(hash)
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" })
+      } else if (attempts++ < 20) {
+        timer = window.setTimeout(tick, 50)
+      }
+    }
+    tick()
+    return () => window.clearTimeout(timer)
+  }, [location.hash])
+
   return (
     <div className="flex min-h-screen flex-col">
       {/* 这层刻意不铺 bg-background：底色由 body 提供，云纹背景画在 body 上，
@@ -32,10 +56,28 @@ export function LandingLayout() {
               {t("landing.features")}
             </Link>
             <Link
-              to="/#how"
+              to="/#updates"
               className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
             >
-              {t("landing.how")}
+              {t("landing.updates")}
+            </Link>
+            <Link
+              to="/#download"
+              className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
+            >
+              {t("landing.download")}
+            </Link>
+            <Link
+              to="/#faq"
+              className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
+            >
+              {t("landing.faq")}
+            </Link>
+            <Link
+              to="/#contact"
+              className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
+            >
+              {t("landing.contact")}
             </Link>
           </nav>
           <div className="ml-auto flex items-center gap-2">

@@ -15,6 +15,7 @@ import {
   type Feature,
 } from "../permissions"
 import { sendMail, renderMail } from "../mailer"
+import { isOwnDomain } from "../root-domains"
 import { wb2apiDonationBlock } from "./wb2api"
 import { cli2apiDonationBlock } from "./cli2api"
 import {
@@ -1636,7 +1637,8 @@ export async function createDonation(env: Env, request: Request): Promise<Respon
 
   // 通知邮箱：优先用已验证的真实邮箱
   const notifyEmail = user.email
-  if (!notifyEmail || notifyEmail.endsWith(`@${env.ROOT_DOMAIN.toLowerCase()}`)) {
+  // 「本站域名邮箱」= 任一已登记根域（tyu.me / doulor.cn），不能只判主域
+  if (!notifyEmail || (await isOwnDomain(env, notifyEmail))) {
     throw new ApiError(400, "请先在「设置」中验证真实邮箱", "NO_NOTIFY_EMAIL")
   }
 

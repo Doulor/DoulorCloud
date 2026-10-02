@@ -270,14 +270,14 @@ function PlanPicker({
             className="h-7 px-2.5 text-xs"
             disabled={saving !== null}
             onClick={() => void save(o.value)}
-            title={o.hint}
+            title={t(o.hint)}
           >
             {saving === o.value ? (
               <RefreshCw className="h-3 w-3 animate-spin" />
             ) : active ? (
               <Check className="h-3 w-3" />
             ) : null}
-            {o.label}
+            {t(o.label)}
           </Button>
         )
       })}

@@ -44,10 +44,11 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { profileApi, HttpError } from "@/services/api"
+import { profileApi, identityApi, HttpError } from "@/services/api"
 import { compressImage } from "@/lib/image-compress"
 import { cn } from "@/lib/utils"
 import { useT } from "@/i18n"
+import { useAuth } from "@/hooks/use-auth"
 import type {
   ContactType,
   ProfileContact,
@@ -387,6 +388,7 @@ function normalizeModules(stored: ProfileModule[] | undefined): ProfileModule[] 
 
 export default function ProfilePage() {
   const { t } = useT()
+  const { user, setUser } = useAuth()
   const [data, setData] = React.useState<ProfileOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [saving, setSaving] = React.useState(false)
@@ -562,15 +564,21 @@ export default function ProfilePage() {
     if (!file) return
     setUploading(kind)
     try {
-      // 上传音乐前先摘掉「搜索歌曲」。
-      // 服务端取用顺序是「搜索歌曲 > 上传文件 > 外链」，库里若还留着来源，
-      // 用户会看到「上传成功了，但放出来还是那首歌」这种说不通的故障。
-      // 只发这一个字段：后端把 undefined 当「保持不变」，所以不会覆盖
-      // 表单里其它还没保存的改动。
-      if (kind === "music" && form.musicSource) {
-        await profileApi.update({ musicSource: "" })
+      if (kind === "avatar") {
+        // 头像已统一为账户头像：走 identity 头像接口，与设置页同一份
+        await identityApi.uploadAvatar(file)
+        if (user) setUser({ ...user, hasAvatar: true })
+      } else {
+        // 上传音乐前先摘掉「搜索歌曲」。
+        // 服务端取用顺序是「搜索歌曲 > 上传文件 > 外链」，库里若还留着来源，
+        // 用户会看到「上传成功了，但放出来还是那首歌」这种说不通的故障。
+        // 只发这一个字段：后端把 undefined 当「保持不变」，所以不会覆盖
+        // 表单里其它还没保存的改动。
+        if (kind === "music" && form.musicSource) {
+          await profileApi.update({ musicSource: "" })
+        }
+        await profileApi.uploadAsset(kind, file)
       }
-      await profileApi.uploadAsset(kind, file)
       await load()
       toast.success(t("pf.ok.uploaded"))
     } catch (err) {
@@ -582,7 +590,12 @@ export default function ProfilePage() {
 
   const handleRemoveAsset = async (kind: "avatar" | "background" | "music" | "music-cover") => {
     try {
-      await profileApi.deleteAsset(kind)
+      if (kind === "avatar") {
+        await identityApi.deleteAvatar()
+        if (user) setUser({ ...user, hasAvatar: false })
+      } else {
+        await profileApi.deleteAsset(kind)
+      }
       await load()
       toast.success(t("pf.ok.removed"))
     } catch (err) {
@@ -1068,11 +1081,9 @@ export default function ProfilePage() {
                     <div className="space-y-2">
                       <Label>{t("pf.media.avatar")}</Label>
                       <div className="flex items-center gap-3">
-                        {profile?.avatarKey || form.avatarUrl ? (
+                        {user?.hasAvatar ? (
                           <img
-                            src={
-                              profile?.avatarKey ? `/api/profile/asset?kind=avatar` : form.avatarUrl
-                            }
+                            src={`/u/${encodeURIComponent(user.username)}/avatar`}
                             alt={t("pf.media.avatar")}
                             className="h-14 w-14 rounded-full border object-cover"
                           />
@@ -1096,7 +1107,7 @@ export default function ProfilePage() {
                               onChange={(e) => void handleUpload("avatar", e.target.files?.[0])}
                             />
                           </label>
-                          {profile?.avatarKey && (
+                          {user?.hasAvatar && (
                             <button
                               type="button"
                               className="text-left text-xs text-muted-foreground hover:text-destructive"
@@ -1107,12 +1118,9 @@ export default function ProfilePage() {
                           )}
                         </div>
                       </div>
-                      <Input
-                        placeholder={t("pf.media.pasteLink")}
-                        value={form.avatarUrl}
-                        onChange={(e) => setForm((f) => ({ ...f, avatarUrl: e.target.value }))}
-                        className="text-xs"
-                      />
+                      <p className="text-xs text-muted-foreground">
+                        {t("pf.media.avatarIsAccount")}
+                      </p>
                       {limits && (
                         <p className="text-xs text-muted-foreground">
                           {t("pf.media.avatarLimit", { size: formatBytes(limits.avatar) })}

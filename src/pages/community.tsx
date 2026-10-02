@@ -1,28 +1,6 @@
 import * as React from "react"
 import { Link, useParams, useNavigate } from "react-router-dom"
-import {
-  Heart,
-  MessageCircle,
-  Share2,
-  Send,
-  Trash2,
-  Loader2,
-  ArrowLeft,
-  PenSquare,
-  Flame,
-  TrendingUp,
-  Users,
-  X,
-  Smile,
-  ImagePlus,
-  Image as ImageIcon,
-  ImageOff,
-  WifiOff,
-  RotateCw,
-  AlertCircle,
-  FileQuestion,
-  MessagesSquare,
-} from "lucide-react"
+import { AlertCircle, ArrowLeft, FileQuestion, Flame, Heart, Image as ImageIcon, ImageOff, ImagePlus, Loader2, MessageCircle, MessagesSquare, PenSquare, Pin, RotateCw, Send, Share2, Trash2, TrendingUp, Users, WifiOff, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -34,6 +12,8 @@ import { UserCardPopover } from "@/components/user-card"
 import { RoleBadge } from "@/components/role-badge"
 import { CustomTitleBadge } from "@/components/custom-title-badge"
 import { Markdown } from "@/components/markdown"
+import { EmojiPicker } from "@/components/emoji-picker"
+import { StickerPanel } from "@/components/sticker-panel"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
@@ -46,81 +26,14 @@ import {
 } from "@/components/ui/dialog"
 import { useAuth } from "@/hooks/use-auth"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
+import { useImageDrop } from "@/hooks/use-image-drop"
+import { cn } from "@/lib/utils"
+import { useAttentionCounts } from "@/lib/attention-context"
 import { communityApi, notificationApi, HttpError, errMsg } from "@/services/api"
 import { compressImage } from "@/lib/image-compress"
 import { fmtTime, relTime } from "@/lib/format"
-import { EMOJI_GROUPS } from "@/lib/emojis"
 import type { Post, CommentNode, CommunityStats, Notification } from "@/types"
 import { useT } from "@/i18n"
-
-/** 表情选择面板：点击把 emoji 插到光标处 */
-function EmojiPicker({ onPick }: { onPick: (emoji: string) => void }) {
-  const { t } = useT()
-  const [open, setOpen] = React.useState(false)
-  const [group, setGroup] = React.useState(0)
-  const ref = React.useRef<HTMLDivElement>(null)
-
-  // 点外部关闭
-  React.useEffect(() => {
-    if (!open) return
-    const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener("mousedown", onDoc)
-    return () => document.removeEventListener("mousedown", onDoc)
-  }, [open])
-
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className={
-          "rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground " +
-          (open ? "bg-accent text-foreground" : "")
-        }
-        title={t("cm.emoji")}
-        aria-label={t("cm.emojiInsert")}
-        aria-expanded={open}
-      >
-        <Smile className="h-4 w-4" aria-hidden="true" />
-      </button>
-      {open && (
-        <div className="absolute bottom-full left-0 z-30 mb-2 w-72 rounded-xl border bg-popover p-2 shadow-lg">
-          <div className="mb-1.5 flex flex-wrap gap-0.5 border-b pb-1.5">
-            {EMOJI_GROUPS.map((g, i) => (
-              <button
-                key={g.name}
-                type="button"
-                onClick={() => setGroup(i)}
-                className={
-                  "rounded-md px-2 py-1 text-xs transition-colors " +
-                  (i === group
-                    ? "bg-primary/10 font-medium text-primary"
-                    : "text-muted-foreground hover:bg-accent")
-                }
-              >
-                {t(g.name)}
-              </button>
-            ))}
-          </div>
-          <div className="grid max-h-44 grid-cols-8 gap-0.5 overflow-y-auto">
-            {EMOJI_GROUPS[group].emojis.map((e) => (
-              <button
-                key={e}
-                type="button"
-                onClick={() => onPick(e)}
-                className="rounded-md p-1 text-lg leading-none transition-colors hover:bg-accent"
-              >
-                {e}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
 
 /** 单张图片：加载前显示占位骨架（扫光），加载完成后淡入，失败显示提示 */
 function LazyImage({
@@ -298,6 +211,7 @@ function PostActions({
   onLike,
   onShare,
   onDelete,
+  onPin,
   detail,
   basePath,
 }: {
@@ -305,6 +219,8 @@ function PostActions({
   onLike: () => void
   onShare: () => void
   onDelete?: () => void
+  /** 管理员 / 站长才有：置顶或取消置顶（2026-10-01） */
+  onPin?: () => void
   detail?: boolean
   basePath: string
 }) {
@@ -356,6 +272,30 @@ function PostActions({
         <Share2 className="h-4 w-4" aria-hidden="true" />
         <span className="tabular-nums">{post.shareCount}</span>
       </button>
+      {post.pinned && (
+        /* 置顶标记：放在操作行最前面，一眼能看出这条为什么排在最上面 */
+        <span className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium text-primary">
+          <Pin className="h-3.5 w-3.5" aria-hidden="true" />
+          {t("cm.pinned")}
+        </span>
+      )}
+      {onPin && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            onPin()
+          }}
+          className={
+            "flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors hover:bg-accent" +
+            (post.pinned ? " text-primary" : "") +
+            (onDelete ? "" : " ml-auto")
+          }
+          aria-label={post.pinned ? t("cm.unpinPost") : t("cm.pinPost")}
+          title={post.pinned ? t("cm.unpinPost") : t("cm.pinPost")}
+        >
+          <Pin className="h-4 w-4" aria-hidden="true" />
+        </button>
+      )}
       {onDelete && (
         <button
           onClick={(e) => {
@@ -378,12 +318,17 @@ function PostCard({
   onLike,
   onShare,
   onDelete,
+  onPin,
+  canPin,
   basePath,
 }: {
   post: Post
   onLike: (p: Post) => void
   onShare: (p: Post) => void
   onDelete: (p: Post) => void
+  /** 管理员 / 站长：置顶能力（传 undefined 就不渲染按钮） */
+  onPin?: (p: Post) => void
+  canPin?: boolean
   basePath: string
 }) {
   const navigate = useNavigate()
@@ -406,6 +351,7 @@ function PostCard({
           onLike={() => onLike(post)}
           onShare={() => onShare(post)}
           onDelete={post.isMine ? () => onDelete(post) : undefined}
+          onPin={canPin && onPin ? () => onPin(post) : undefined}
           basePath={basePath}
         />
       </div>
@@ -455,6 +401,9 @@ function CommentItem({
 
   const insertEmoji = useEmojiInsert(taRef, text, setText)
 
+  /** 拖入 / 粘贴图片：上传后把 `![](url)` 插到光标处 */
+  const { dragging, dropProps } = useImageDrop({ onImage: insertEmoji })
+
   // 深层嵌套时停止左侧缩进，避免在手机上越缩越窄成一条缝
   const indent = depth < 6
 
@@ -501,7 +450,10 @@ function CommentItem({
         </button>
       )}
       {replying && (
-        <div className="mt-2">
+        <div
+          {...dropProps}
+          className={cn("relative mt-2", dragging && "rounded-md ring-2 ring-primary")}
+        >
           <Textarea
             ref={taRef}
             value={text}
@@ -512,6 +464,7 @@ function CommentItem({
           />
           <div className="mt-1.5 flex items-center gap-1">
             <EmojiPicker onPick={insertEmoji} />
+            <StickerPanel onPick={insertEmoji} />
             <Button
               size="sm"
               className="ml-auto"
@@ -685,16 +638,28 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
     }
   }
 
-  /** 转发：乐观 +1，复制链接 */
+  /**
+   * 转发：始终复制链接；转发数按 (帖子, 用户) 去重，同一个人只计一次。
+   *
+   * 计数以服务端返回值为准（不做乐观 +1）—— 去重后前端无法预判这次算不算数，
+   * 乐观加一只会在「已经转过」时留下一个永远对不上的数字。
+   */
   const handleShare = async () => {
     if (!post) return
-    setPost((p) => (p ? { ...p, shareCount: p.shareCount + 1 } : p))
     try {
       await navigator.clipboard.writeText(`${window.location.origin}/community/${post.id}`)
-      await communityApi.share(post.id)
-      toast.success(t("cm.ok.linkCopied"))
     } catch {
       toast.error(t("cm.err.copy"))
+      return
+    }
+    toast.success(t("cm.ok.linkCopied"))
+    // 未登录 / 请求失败都不影响「链接已复制」这个事实，静默处理即可
+    try {
+      const r = await communityApi.share(post.id)
+      setPost((p) => (p ? { ...p, shareCount: r.shareCount } : p))
+      if (r.alreadyShared) toast.info(t("cm.info.alreadyShared"))
+    } catch {
+      /* 计数失败不打扰用户 */
     }
   }
 
@@ -778,6 +743,9 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
 
   const insertEmoji = useEmojiInsert(taRef, text, setText)
 
+  /** 拖入 / 粘贴图片：上传后把 `![](url)` 插到光标处 */
+  const { dragging, dropProps } = useImageDrop({ onImage: insertEmoji })
+
   if (loading) return <PostDetailSkeleton />
 
   if (failed && !post) {
@@ -830,7 +798,10 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
         </div>
         <div className="min-w-0 p-4">
           {editing ? (
-            <div className="space-y-2">
+            <div
+              {...dropProps}
+              className={cn("relative space-y-2", dragging && "rounded-md ring-2 ring-primary")}
+            >
               <Textarea
                 value={editText}
                 onChange={(e) => setEditText(e.target.value)}
@@ -912,7 +883,13 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
       </div>
 
       {user ? (
-        <div className="rounded-lg border bg-card p-3">
+        <div
+          {...dropProps}
+          className={cn(
+            "relative rounded-lg border bg-card p-3",
+            dragging && "ring-2 ring-primary"
+          )}
+        >
           <Textarea
             ref={taRef}
             value={text}
@@ -923,6 +900,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
           />
           <div className="mt-2 flex items-center gap-1">
             <EmojiPicker onPick={insertEmoji} />
+            <StickerPanel onPick={insertEmoji} />
             <Button
               size="sm"
               className="ml-auto"
@@ -1051,6 +1029,9 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
 
   const insertEmoji = useEmojiInsert(taRef, draft, setDraft)
 
+  /** 拖入 / 粘贴图片：上传后把 `![](url)` 插到光标处 */
+  const { dragging, dropProps } = useImageDrop({ onImage: insertEmoji })
+
   const submit = async () => {
     if (!draft.trim() && images.length === 0) return
     setBusy(true)
@@ -1099,7 +1080,13 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
   }
 
   return (
-    <div className="mb-5 rounded-xl border bg-card p-4">
+    <div
+      {...dropProps}
+      className={cn(
+        "relative mb-5 rounded-xl border bg-card p-4",
+        dragging && "ring-2 ring-primary"
+      )}
+    >
       <div className="mb-2.5 flex items-center gap-2">
         <UserAvatar username={user.username} nickname={user.nickname} hasAvatar={user.hasAvatar} />
         <span className="text-sm font-medium">{user.nickname ?? user.username}</span>
@@ -1174,6 +1161,7 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
           {images.length > 0 && <span className="tabular-nums">{images.length}/{MAX_IMAGES}</span>}
         </button>
         <EmojiPicker onPick={insertEmoji} />
+        <StickerPanel onPick={insertEmoji} />
         <span
           className={
             "ml-auto text-xs tabular-nums " +
@@ -1203,22 +1191,49 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
   )
 }
 
+/** 聊天室入口卡：桌面端在右侧栏，移动端单独提到帖子列表上方（右侧栏 lg 以下被隐藏，否则进不去聊天室） */
+function ChatEntryCard({ className = "" }: { className?: string }) {
+  const { t } = useT()
+  /**
+   * 聊天室未读数。
+   *
+   * 取的是共享角标里的 `chat`，与侧边栏「社区广场」里并入的那个数是**同一个**
+   * （广场是聊天室在侧边栏的唯一入口，所以那个角标里混了 chat）。这里挂在卡片上，
+   * 是因为站在社区页时人只会盯着内容区，不会注意到侧边栏 —— 卡片才是他要去的地方。
+   * 未登录 / 不在控制台内时为 null，此时不显示角标。
+   */
+  const unread = useAttentionCounts()?.chat ?? 0
+  return (
+    <Link
+      to="/dashboard/chat"
+      className={
+        "flex items-center gap-3 rounded-xl border bg-gradient-to-br from-primary/10 to-primary/5 p-4 transition-colors hover:bg-primary/10 " +
+        className
+      }
+    >
+      <MessagesSquare className="h-5 w-5 shrink-0 text-primary" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium">{t("cm.chatEntry")}</p>
+        <p className="text-xs text-muted-foreground">{t("cm.chatEntryDesc")}</p>
+      </div>
+      {/* 这是「有新消息可看」而不是「等你动手处理」，故用主题色浅底（与侧边栏
+          非管理类角标同一档语义），不用管理面板那种实心深色 */}
+      {unread > 0 && (
+        <span className="ml-auto inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[11px] font-medium leading-none tabular-nums text-primary-foreground">
+          {unread > 99 ? "99+" : unread}
+        </span>
+      )}
+    </Link>
+  )
+}
+
 /** 右侧动态栏：今日新帖、活跃用户、总数 */
 function SidePanel({ stats }: { stats: CommunityStats | null }) {
   const { t } = useT()
   return (
-    <aside className="hidden w-72 shrink-0 space-y-4 lg:block">
-      {/* 聊天室入口 */}
-      <Link
-        to="/dashboard/chat"
-        className="flex items-center gap-3 rounded-xl border bg-gradient-to-br from-primary/10 to-primary/5 p-4 transition-colors hover:bg-primary/10"
-      >
-        <MessagesSquare className="h-5 w-5 text-primary" />
-        <div>
-          <p className="text-sm font-medium">{t("cm.chatEntry")}</p>
-          <p className="text-xs text-muted-foreground">{t("cm.chatEntryDesc")}</p>
-        </div>
-      </Link>
+    <aside className="w-full space-y-4 lg:w-72 lg:shrink-0">
+      {/* 聊天室入口（移动端另有一份在帖子列表上方，这里只在桌面显示，避免重复） */}
+      <ChatEntryCard className="hidden lg:flex" />
 
       <div className="rounded-xl border bg-card p-4">
         <h3 className="mb-3 flex items-center gap-1.5 text-sm font-medium">
@@ -1436,17 +1451,48 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
     }
   }
 
-  /** 转发：乐观 +1 + 复制链接（不重拉列表） */
+  /**
+   * 转发：始终复制链接；转发数按 (帖子, 用户) 去重，同一个人只计一次。
+   * 计数以服务端返回值为准，理由同详情页那份（见上面的同名注释）。
+   */
   const handleShare = async (p: Post) => {
     if (!requireLogin()) return
-    setPosts((prev) => prev.map((x) => (x.id === p.id ? { ...x, shareCount: x.shareCount + 1 } : x)))
     try {
       await navigator.clipboard.writeText(`${window.location.origin}/community/${p.id}`)
-      await communityApi.share(p.id)
-      toast.success(t("cm.ok.linkCopied"))
     } catch {
-      setPosts((prev) => prev.map((x) => (x.id === p.id ? p : x)))
       toast.error(t("cm.err.copy"))
+      return
+    }
+    toast.success(t("cm.ok.linkCopied"))
+    try {
+      const r = await communityApi.share(p.id)
+      setPosts((prev) =>
+        prev.map((x) => (x.id === p.id ? { ...x, shareCount: r.shareCount } : x))
+      )
+      if (r.alreadyShared) toast.info(t("cm.info.alreadyShared"))
+    } catch {
+      /* 计数失败不打扰用户 */
+    }
+  }
+
+  /** 管理员 / 站长置顶切换（乐观更新；失败回滚） */
+  const handlePin = async (p: Post) => {
+    const next = !p.pinned
+    const before = posts
+    setPosts((prev) =>
+      prev
+        .map((x) => (x.id === p.id ? { ...x, pinned: next } : x))
+        // 置顶的排最前：本地也按同一规则重排，别等刷新才跳位
+        .sort((a, b) =>
+          a.pinned === b.pinned ? 0 : a.pinned ? -1 : 1
+        )
+    )
+    try {
+      await communityApi.setPinned(p.id, next)
+      toast.success(next ? t("cm.pinPost") : t("cm.unpinPost"))
+    } catch (err) {
+      setPosts(before)
+      toast.error(errMsg(err, t("em.err.delete")))
     }
   }
 
@@ -1493,8 +1539,12 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
         </div>
       )}
 
-      <div className="flex gap-6">
+      <div className="flex flex-col gap-6 lg:flex-row">
         <div className="min-w-0 flex-1">
+          {/* 移动端：聊天室入口提到最上面（桌面版入口在右侧栏里，这里 lg 起隐藏） */}
+          <div className="mb-4 lg:hidden">
+            <ChatEntryCard />
+          </div>
           <PostComposer
             basePath={basePath}
             onPosted={() => {
@@ -1530,6 +1580,8 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
                   onLike={handleLike}
                   onShare={handleShare}
                   onDelete={handleDelete}
+                  onPin={handlePin}
+                  canPin={user?.role === "admin" || user?.role === "root"}
                   basePath={basePath}
                 />
               ))}
@@ -1541,7 +1593,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
                   onClick={() => void load(cursor)}
                 >
                   {loadingMore ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                  {t("em.loadOlder")}
+                  {t("cm.loadOlder")}
                 </Button>
               )}
             </div>

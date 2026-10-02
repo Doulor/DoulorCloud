@@ -892,6 +892,44 @@ const CHANNEL_MAX_PAGES = 50
  * 于是 `sensenova.ts` 的「渠道不存在」分支被误触发，所有商汤 Key 捐献
  * 全部转人工复核、且状态停在 `pending`（详见 `getChannel` 的注释）。
  */
+/**
+ * 拉取消费日志（管理端 `/api/log/`），用于风险账户扫描。
+ *
+ * ⚠️ 分页参数是 **`p`**（不是 `page`），且 `page_size` 服务端硬封顶 100
+ * （与渠道列表同一个坑，见 listChannels 的注释）。
+ * 时间戳是**秒**，`type=2` = 消费日志。
+ *
+ * 返回 `{ items, total }`：total 用于判断「还有没有下一页」，
+ * 上游只给数组（老版本）时用本页条数兜底。
+ */
+export interface NewApiLogItem {
+  id?: number
+  user_id?: number
+  created_at?: number
+  username?: string
+  model_name?: string
+  quota?: number
+  is_stream?: boolean
+}
+
+export async function listLogs(
+  env: Env,
+  opts: { startTimestamp: number; endTimestamp: number; page: number; pageSize?: number }
+): Promise<{ items: NewApiLogItem[]; total: number }> {
+  const pageSize = Math.min(opts.pageSize ?? 100, 100)
+  const qs =
+    `p=${opts.page}&page_size=${pageSize}&type=2` +
+    `&start_timestamp=${opts.startTimestamp}&end_timestamp=${opts.endTimestamp}`
+  const res = await newApiFetch(env, `/api/log/?${qs}`, { method: "GET" })
+  const data = await unwrap<NewApiLogItem[] | { items?: NewApiLogItem[]; total?: number }>(
+    res,
+    "读取调用日志"
+  )
+  const items = Array.isArray(data) ? data : (data.items ?? [])
+  const total = Array.isArray(data) ? items.length : (data.total ?? items.length)
+  return { items, total }
+}
+
 export async function listChannels(env: Env): Promise<NewApiChannel[]> {
   const all: NewApiChannel[] = []
   const seen = new Set<number>()

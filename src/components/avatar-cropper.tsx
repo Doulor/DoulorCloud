@@ -9,7 +9,6 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
-import { Input } from "@/components/ui/input"
 import { useT } from "@/i18n"
 
 /**
@@ -216,7 +215,11 @@ export function AvatarCropper({
 
           <div className="flex w-full items-center gap-3">
             <Label className="shrink-0 text-xs text-muted-foreground">{t("crop.range")}</Label>
-            <Input
+            {/* ⚠️ 滑块**不能**用 Input 组件：它给文本框设计的 px-3 内边距会把原生
+                range 的轨道两端各挤进去一段，滑块永远到不了进度条两边
+                （2026-10-01 用户反馈「拉不满」，纯渲染问题、功能本身没坏）。
+                项目里其它滑块（profile.tsx / audio-trim）都用原生 input + accent 色。 */}
+            <input
               type="range"
               min={40}
               max={state ? Math.min(state.displayW, state.displayH) : 100}
@@ -232,7 +235,7 @@ export function AvatarCropper({
                   })
                 )
               }
-              className="flex-1"
+              className="w-full flex-1 cursor-pointer accent-primary"
             />
           </div>
         </div>

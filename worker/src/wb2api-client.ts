@@ -137,18 +137,48 @@ interface Wb2Envelope {
   error?: string
 }
 
-/** 上游返回「state 未知或已过期」（网关 poll 成功一次后 state 即被删除） */
-export class Wb2StateGoneError extends Error {
-  constructor(message: string) {
-    super(message)
+/**
+ * 上游返回「state 未知或已过期」（网关 poll 成功一次后 state 即被删除）。
+ *
+ * ⚠️ 继承 `ApiError` 的理由见下面 `Wb2UnauthorizedError` 的注释 —— 这两个类
+ * 原先都是裸 `Error`，冒泡到 `index.ts` 的兜底就会被统一回成
+ * **500「服务器内部错误」**，把真实原因彻底藏住。
+ */
+export class Wb2StateGoneError extends ApiError {
+  /**
+   * 网关的原始响应体（截断到 200 字）。
+   *
+   * **只允许写日志，绝不下发前端** —— 与 `wb2Fetch` 的口径一致：上游 body 可能
+   * 带请求细节。所以它单独放一个字段，**不能**塞进 `message`，
+   * 因为 `message` 会被 `index.ts` 原样回给用户。
+   */
+  readonly upstreamDetail: string
+
+  constructor(upstreamDetail = "") {
+    super(410, "授权会话已在网关侧失效，请重新发起授权", "WB2API_STATE_GONE")
     this.name = "Wb2StateGoneError"
+    this.upstreamDetail = upstreamDetail.slice(0, 200)
   }
 }
 
-/** 上游返回 401：api_key 错误或已被轮换 */
-export class Wb2UnauthorizedError extends Error {
-  constructor(message: string) {
-    super(message)
+/**
+ * 上游返回 401/403：本站配置的 api_key 错误，或已被轮换。
+ *
+ * ⚠️ **必须继承 `ApiError`，不能再退回裸 `Error`**（2026-10-01 站长反馈
+ * 「捐献 workbuddy 反代节点显示内部错误」的成因）：
+ * 那次网关侧 `config.json` 的 api_key 是 `hu182241764`，而本站库里存的是
+ * `Hu182241764.`（首字母大小写 + 句尾多一点），网关回 401。
+ * 但 `loginStart` 里**没有**捕获这个类，裸 Error 冒泡到 `index.ts` 的兜底，
+ * 被回成 500「服务器内部错误」⇒ 一个「改密钥就能解决」的问题，
+ * 被呈现成「代码坏了」，排查绕了一大圈。
+ *
+ * 现在它自带 502 + 可操作文案，前端直接原样显示。
+ */
+export class Wb2UnauthorizedError extends ApiError {
+  constructor(
+    message = "反代网关拒绝了本站的访问密钥，请联系管理员检查「捐献通道」里配置的网关密钥"
+  ) {
+    super(502, message, "WB2API_UNAUTHORIZED")
     this.name = "Wb2UnauthorizedError"
   }
 }
@@ -216,12 +246,14 @@ async function wb2Fetch<T>(
   const text = new TextDecoder("utf-8").decode(buf)
 
   if (res.status === 401 || res.status === 403) {
-    throw new Wb2UnauthorizedError("反代网关拒绝了本站的访问密钥")
+    // 不传参 ⇒ 用类里的默认文案（带「去哪儿检查」的可操作提示）
+    throw new Wb2UnauthorizedError()
   }
   if (res.status === 404) {
     // 网关对未知 state 回 404「unknown or expired state」；
     // 对不存在的账号路径也回 404 —— 两者由调用方按上下文区分。
-    throw new Wb2StateGoneError(text.slice(0, 200) || "not found")
+    // 原始 body 进 upstreamDetail（只写日志），不下发前端。
+    throw new Wb2StateGoneError(text)
   }
   if (!res.ok) {
     throw new ApiError(

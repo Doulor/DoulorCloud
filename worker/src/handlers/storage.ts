@@ -33,7 +33,10 @@ import {
   cfCreateDnsRecord,
   cfDeleteDnsRecord,
   cfListDnsRecords,
+  hasCfApiToken,
+  resolveApiToken,
 } from "../cloudflare"
+import { zoneIdForFqdn } from "../root-domains"
 import { guardRateLimit } from "../ratelimit"
 import { contentDispositionFor } from "../content-type"
 import { isPlaceholderDnsRecord } from "../custom-domain"
@@ -99,13 +102,62 @@ function toPublicAccount(row: StorageAccountRow, directLinkBase: string) {
   }
 }
 
+/**
+ * 桶级容量守卫：网盘是「共享池」，桶内所有用户的总用量不得超过桶的真实容量。
+ * 桶满则拒绝上传 —— 这就是「桶没满才能继续传」的边界；与 per-user 限额（软上限）
+ * 是两层独立约束。桶被删 / 无 bucket_id（老账号）时不额外拦，回落 per-user 判断。
+ */
+async function assertBucketHasRoom(
+  env: Env,
+  bucketId: string | null | undefined,
+  delta: number
+): Promise<void> {
+  if (!bucketId || delta <= 0) return
+  const bucket = await env.DB.prepare(
+    "SELECT capacity_bytes FROM r2_buckets WHERE id = ?"
+  )
+    .bind(bucketId)
+    .first<{ capacity_bytes: number }>()
+  if (!bucket) return
+  const total = await env.DB.prepare(
+    "SELECT COALESCE(SUM(used_bytes), 0) AS t FROM storage_accounts WHERE bucket_id = ?"
+  )
+    .bind(bucketId)
+    .first<{ t: number }>()
+  if ((total?.t ?? 0) + delta > bucket.capacity_bytes) {
+    throw new ApiError(400, "存储桶已满，上传已取消", "BUCKET_FULL")
+  }
+}
+
 async function loadAccount(
   env: Env,
   userId: string
 ): Promise<StorageAccountRow | null> {
-  return env.DB.prepare("SELECT * FROM storage_accounts WHERE user_id = ?")
+  const row = await env.DB.prepare("SELECT * FROM storage_accounts WHERE user_id = ?")
     .bind(userId)
     .first<StorageAccountRow>()
+  if (!row) return null
+
+  // 自愈：历史遗留的「没分到桶」账号（bucket_id = NULL）。
+  //
+  // 背景（2026-10-03 站长反馈 deity 用不了网盘）：旧的分配逻辑按「每桶人数上限」分桶，
+  // 桶满时开通的账号拿到 bucket_id = NULL。此后它的一切存储操作都会回落到 env 默认桶
+  // （见 r2.ts::resolveBucket → envConfig），而本站从没配那套 env 变量 ⇒ 用户看到
+  // 「网盘存储未配置（缺少 R2 S3 凭据）」。**其实一个字节都没存**（used_bytes = 0），
+  // 纯属被卡死。全站 49 个网盘账号里有 15 个是这种。
+  // 现在分配逻辑已改成「共享池按剩余容量选桶」，这里顺手把没桶的补上，杜绝再卡。
+  if (!row.bucket_id) {
+    const picked = await pickBucketForNewUser(env)
+    if (picked) {
+      await env.DB.prepare(
+        "UPDATE storage_accounts SET bucket_id = ?, updated_at = ? WHERE user_id = ?"
+      )
+        .bind(picked.id, new Date().toISOString(), userId)
+        .run()
+      row.bucket_id = picked.id
+    }
+  }
+  return row
 }
 
 /** 校验用户对某个 R2 key 的所有权（key 必须落在其 prefix 目录内） */
@@ -218,7 +270,8 @@ export async function getStorage(env: Env, request: Request): Promise<Response> 
     configured,
     featureEnabled: settings.storage_enabled === "1",
     // 自定义域名需要 Doulor 账户的 Worker Routes 权限
-    customDomainSupported: Boolean(env.CF_WORKERS_TOKEN),
+    // 不再单独看 CF_WORKERS_TOKEN：绑定用的是与 DNS 共用的那个令牌
+    customDomainSupported: hasCfApiToken(env),
     account: account ? toPublicAccount(account, `${url.origin}/dl`) : null,
     defaultQuotaBytes: Number(settings.storage_quota_bytes),
     maxFileBytes: Number(settings.storage_max_file_bytes),
@@ -500,6 +553,8 @@ export async function createUploadUrl(
       "QUOTA_EXCEEDED"
     )
   }
+  // 桶级共享池容量守卫
+  await assertBucketHasRoom(env, account.bucket_id, delta)
 
   const uploadUrl = (await supportsPresign(env, account.bucket_id))
     ? // content-length 参与签名（见 r2.ts 的 presign）：否则客户端可以声明
@@ -566,6 +621,7 @@ export async function proxyUpload(env: Env, request: Request): Promise<Response>
   if (account.used_bytes + delta > account.quota_bytes) {
     throw new ApiError(400, "存储空间不足，上传已取消", "QUOTA_EXCEEDED")
   }
+  await assertBucketHasRoom(env, account.bucket_id, delta)
 
   await putObject(env, key, buf, contentType, account.bucket_id)
   return json({ ok: true, key, size: buf.byteLength })
@@ -601,10 +657,24 @@ export async function commitUpload(env: Env, request: Request): Promise<Response
 
   const delta = head.size - (prev?.size ?? 0)
 
-  if (account.used_bytes + delta > account.quota_bytes) {
-    // 超额：删掉刚上传的文件，保持账实一致
+  // 个人限额 + 桶级共享池容量：任一超限都回滚刚上传的文件，保持账实一致
+  const overQuota = account.used_bytes + delta > account.quota_bytes
+  let bucketFull = false
+  if (!overQuota && account.bucket_id) {
+    try {
+      await assertBucketHasRoom(env, account.bucket_id, delta)
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "BUCKET_FULL") bucketFull = true
+      else throw err
+    }
+  }
+  if (overQuota || bucketFull) {
     await deleteObject(env, key, account.bucket_id)
-    throw new ApiError(400, "存储空间不足，上传已取消", "QUOTA_EXCEEDED")
+    throw new ApiError(
+      400,
+      overQuota ? "存储空间不足，上传已取消" : "存储桶已满，上传已取消",
+      overQuota ? "QUOTA_EXCEEDED" : "BUCKET_FULL"
+    )
   }
 
   const res = await env.DB.batch([
@@ -756,10 +826,12 @@ export async function bindStorageDomain(
     // （与下面绑定分支 cfCreateDnsRecord 的参数一一对应）。
     // 用户自行添加的记录一律保留 —— 它们本来就指向别处，不存在「悬空」问题。
     try {
-      const records = await cfListDnsRecords(env, env.ZONE_ID, existing.fqdn)
+      // zone 按 fqdn 解析：用户子域名可能建在 tyu.me 上
+      const zoneId = await zoneIdForFqdn(env, existing.fqdn)
+      const records = await cfListDnsRecords(env, zoneId, existing.fqdn)
       for (const record of records) {
         if (!isPlaceholderDnsRecord(record)) continue
-        await cfDeleteDnsRecord(env, env.ZONE_ID, record.id)
+        await cfDeleteDnsRecord(env, zoneId, record.id)
       }
     } catch (err) {
       console.error("移除直链域名 DNS 记录失败:", err)
@@ -784,7 +856,7 @@ export async function bindStorageDomain(
     throw new ApiError(400, "主域名不能作为直链前缀", "INVALID_SUBDOMAIN")
   }
 
-  if (!env.CF_WORKERS_TOKEN) {
+  if (!hasCfApiToken(env)) {
     throw new ApiError(
       503,
       "自定义直链域名未启用（管理员需配置 CF_WORKERS_TOKEN）",
@@ -838,11 +910,14 @@ export async function bindStorageDomain(
   //    该域名根本不会被解析到 Cloudflare，浏览器会直接连接失败。
   //    用 AAAA 100:: 占位并开启代理（与平台上其它 Worker 路由域名一致）。
   //    若该域名已有解析（例如管理员手工建过），则跳过，不覆盖既有配置。
-  const existingCf = await cfListDnsRecords(env, env.ZONE_ID, sub.fqdn)
+  // ⚠️ zone 按 fqdn 解析，不能写死 env.ZONE_ID：写死会把记录建到 doulor.cn 上，
+  //    而该子域名其实在 tyu.me 下 —— 解析不出来，且是静默错误。
+  const zoneId = await zoneIdForFqdn(env, sub.fqdn)
+  const existingCf = await cfListDnsRecords(env, zoneId, sub.fqdn)
   const ensuredDns = existingCf.length > 0
   if (!ensuredDns) {
     try {
-      await cfCreateDnsRecord(env, env.ZONE_ID, {
+      await cfCreateDnsRecord(env, zoneId, {
         type: "AAAA",
         name: sub.fqdn,
         content: "100::",
@@ -867,9 +942,9 @@ export async function bindStorageDomain(
     // 路由创建失败则回滚刚建的 DNS 记录，避免留下解析不到内容的空域名
     if (!ensuredDns) {
       try {
-        const created = await cfListDnsRecords(env, env.ZONE_ID, sub.fqdn)
+        const created = await cfListDnsRecords(env, zoneId, sub.fqdn)
         for (const record of created) {
-          await cfDeleteDnsRecord(env, env.ZONE_ID, record.id)
+          await cfDeleteDnsRecord(env, zoneId, record.id)
         }
       } catch (cleanupErr) {
         console.error("回滚 DNS 记录失败:", sub.fqdn, cleanupErr)
@@ -919,23 +994,26 @@ async function cfWorkersApi(
   path: string,
   init: RequestInit = {}
 ): Promise<Response> {
-  if (!env.CF_WORKERS_TOKEN) {
-    throw new ApiError(503, "未配置 CF_WORKERS_TOKEN", "CUSTOM_DOMAIN_UNAVAILABLE")
+  // 与 DNS 记录 / 邮件路由共用同一个令牌（2026-10-01 起全站一份，见 custom-domain.ts）
+  if (!hasCfApiToken(env)) {
+    throw new ApiError(503, "未配置 Cloudflare API Token", "CUSTOM_DOMAIN_UNAVAILABLE")
   }
+  const token = await resolveApiToken(env)
   return fetch(`https://api.cloudflare.com/client/v4${path}`, {
     ...init,
     headers: {
-      Authorization: `Bearer ${env.CF_WORKERS_TOKEN}`,
+      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
       ...(init.headers ?? {}),
     },
   })
 }
 
-async function listWorkerRoutes(env: Env): Promise<
-  { id: string; pattern: string; script?: string }[]
-> {
-  const res = await cfWorkersApi(env, `/zones/${env.ZONE_ID}/workers/routes`)
+async function listWorkerRoutes(
+  env: Env,
+  zoneId: string
+): Promise<{ id: string; pattern: string; script?: string }[]> {
+  const res = await cfWorkersApi(env, `/zones/${zoneId}/workers/routes`)
   const data = (await res.json()) as {
     result?: { id: string; pattern: string; script?: string }[]
   }
@@ -948,13 +1026,14 @@ async function createWorkerRoute(
 ): Promise<string | null> {
   const script = env.WORKER_NAME ?? "doulor-mail-api"
   const pattern = `${fqdn}/*`
+  const zoneId = await zoneIdForFqdn(env, fqdn)
 
-  const existing = (await listWorkerRoutes(env)).find(
+  const existing = (await listWorkerRoutes(env, zoneId)).find(
     (r) => r.pattern.toLowerCase() === pattern.toLowerCase()
   )
   if (existing) return existing.id
 
-  const res = await cfWorkersApi(env, `/zones/${env.ZONE_ID}/workers/routes`, {
+  const res = await cfWorkersApi(env, `/zones/${zoneId}/workers/routes`, {
     method: "POST",
     body: JSON.stringify({ pattern, script }),
   })
@@ -975,11 +1054,18 @@ async function createWorkerRoute(
 
 async function removeWorkerRoute(env: Env, fqdn: string): Promise<void> {
   const pattern = `${fqdn}/*`
-  const existing = (await listWorkerRoutes(env)).find(
+  let zoneId: string
+  try {
+    zoneId = await zoneIdForFqdn(env, fqdn)
+  } catch (err) {
+    console.error("解绑时无法解析 zone:", fqdn, err)
+    return
+  }
+  const existing = (await listWorkerRoutes(env, zoneId)).find(
     (r) => r.pattern.toLowerCase() === pattern.toLowerCase()
   )
   if (!existing) return
-  await cfWorkersApi(env, `/zones/${env.ZONE_ID}/workers/routes/${existing.id}`, {
+  await cfWorkersApi(env, `/zones/${zoneId}/workers/routes/${existing.id}`, {
     method: "DELETE",
   })
 }

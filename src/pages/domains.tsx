@@ -1,5 +1,5 @@
 import * as React from "react"
-import { CornerDownRight, Globe, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react"
+import { CornerDownRight, Globe, Loader2, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -36,7 +36,7 @@ import { Switch } from "@/components/ui/switch"
 import { dnsApi, domainApi, HttpError } from "@/services/api"
 import { useT } from "@/i18n"
 import { useAuth } from "@/hooks/use-auth"
-import type { DnsRecord, DnsRecordType, Subdomain } from "@/types"
+import type { DnsRecord, DnsRecordType, RootDomainOption, Subdomain } from "@/types"
 
 const RECORD_TYPES: DnsRecordType[] = ["A", "AAAA", "CNAME", "TXT", "MX", "SRV"]
 
@@ -52,8 +52,19 @@ function StatusBadge({ status }: { status: DnsRecord["status"] }) {
 export default function DomainsPage() {
   const { t } = useT()
   const { user } = useAuth()
-  // 新模型：子域名是 doulor.cn 的直系（xxx.doulor.cn，含主域名 '@' = username.doulor.cn）
-  const rootDomain = "doulor.cn"
+  /**
+   * 展示用的根域（xxx.<根域>，含主域名 '@' = username.<根域>）。
+   * **由后端下发**（列表接口的 rootDomains，已按当前用户权限筛过），不再写死：
+   * 2026-10-02 用户域从 doulor.cn 整体迁到 tyu.me 后，写死会让整页显示错域名。
+   */
+  const [rootDomain, setRootDomain] = React.useState("")
+  /**
+   * 可选的根域（后端按权限筛过：没解锁 `doulor` 权限就拿不到 doulor.cn）。
+   * 只有多于一个时才渲染选择器 —— 绝大多数用户只有一个域，多一个下拉框只是噪音。
+   */
+  const [rootOptions, setRootOptions] = React.useState<RootDomainOption[]>([])
+  /** 本次创建要用的根域（一级子域名才可选；二级由父级决定） */
+  const [createRoot, setCreateRoot] = React.useState("")
   const ownDomain = `${user?.namespace}.${rootDomain}`
 
   const [subdomains, setSubdomains] = React.useState<Subdomain[]>([])
@@ -66,6 +77,14 @@ export default function DomainsPage() {
   const [minNameLen, setMinNameLen] = React.useState(3)
   const [saving, setSaving] = React.useState(false)
   const [deletingId, setDeletingId] = React.useState<string | null>(null)
+  /**
+   * 正在编辑的记录 id（null = 新建）。
+   *
+   * 新建与编辑共用同一个弹窗：非 null 时提交走 `dnsApi.update`。
+   * 编辑时**不允许改记录名与类型** —— 改类型等于换一条记录，
+   * 容易把 SRV 的 service/proto 弄丢，也让「改了什么」变得难以追溯。
+   */
+  const [editingId, setEditingId] = React.useState<string | null>(null)
 
   const [openSub, setOpenSub] = React.useState(false)
   const [openDns, setOpenDns] = React.useState(false)
@@ -96,6 +115,14 @@ export default function DomainsPage() {
       setQuota(res.limit)
       setChildQuota(res.childLimit)
       if (res.minRootNameLength) setMinNameLen(res.minRootNameLength)
+      const roots = res.rootDomains ?? []
+      const fallback = (roots.find((r) => r.isDefault) ?? roots[0])?.name ?? ""
+      setRootDomain(fallback)
+      setRootOptions(roots)
+      // 只在「用户没选过 / 原选中项已不可用」时重置，避免把用户的选择冲掉
+      setCreateRoot((prev) =>
+        roots.some((r) => r.name === prev) ? prev : fallback
+      )
       const target =
         res.subdomains.find((s) => s.id === keepId) ??
         res.subdomains.find((s) => s.name === "@") ??
@@ -135,6 +162,8 @@ export default function DomainsPage() {
       const res = await domainApi.create({
         name: subName,
         parentId: parentFor?.id,
+        // 二级由父级的域名决定，不传；一级才带用户选的那个
+        ...(parentFor ? {} : { rootDomain: createRoot || rootDomain }),
       })
       toast.success(t("dm.ok.created", { fqdn: res.subdomain.fqdn }))
       setSubName("")
@@ -177,7 +206,34 @@ export default function DomainsPage() {
       srvTarget: "",
     })
 
-  const handleCreateDns = async () => {
+  /**
+   * 打开「编辑」弹窗：把记录现有值填进表单。
+   *
+   * SRV 的记录名形如 `_sip._tcp.blog`，前两段是 service/proto（表单里是独立字段），
+   * 剩下的才是「前缀」—— 拆错会把记录名改到别的名字上。
+   */
+  const openEditDns = (r: DnsRecord) => {
+    const isSrv = r.type === "SRV"
+    const labels = isSrv ? r.name.split(".") : []
+    setForm({
+      name: isSrv ? labels.slice(2).join(".") : r.name === "@" ? "" : r.name,
+      type: r.type,
+      content: isSrv ? "" : r.content,
+      ttl: String(r.ttl),
+      proxied: r.proxied,
+      priority: r.priority != null ? String(r.priority) : "",
+      srvService: isSrv ? (labels[0] ?? "").replace(/^_/, "") : "",
+      srvProto: isSrv ? (labels[1] ?? "tcp").replace(/^_/, "") : "tcp",
+      srvWeight: String(r.srv?.weight ?? 0),
+      srvPort: r.srv?.port != null ? String(r.srv.port) : "",
+      srvTarget: r.srv?.target ?? "",
+    })
+    setEditingId(r.id)
+    setOpenDns(true)
+  }
+
+  /** 提交：editingId 为空走新建，否则走更新 */
+  const handleSubmitDns = async () => {
     if (!selected) return
     // SRV 不填「内容」（由 service/proto/权重/端口/目标推导），校验分开走
     if (form.type === "SRV") {
@@ -191,8 +247,7 @@ export default function DomainsPage() {
     }
     setSaving(true)
     try {
-      await dnsApi.create({
-        subdomainId: selected.id,
+      const payload = {
         name: selected.name === "@" ? (form.name || "@") : form.name || "@",
         type: form.type,
         content: form.content,
@@ -208,17 +263,33 @@ export default function DomainsPage() {
               srvTarget: form.srvTarget.trim(),
             }
           : {}),
-      })
-      toast.success(t("dm.ok.recordCreated"))
-      setOpenDns(false)
-      resetForm()
-      bumpRecordCount(selected.id, 1)
+      }
+      if (editingId) {
+        await dnsApi.update(editingId, payload)
+        toast.success(t("dm.ok.recordUpdated"))
+      } else {
+        await dnsApi.create({ subdomainId: selected.id, ...payload })
+        toast.success(t("dm.ok.recordCreated"))
+        bumpRecordCount(selected.id, 1)
+      }
+      closeDnsDialog()
       void loadRecords(selected.id)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("dm.err.createFailed"))
+      toast.error(
+        err instanceof HttpError
+          ? err.message
+          : t(editingId ? "dm.err.updateFailed" : "dm.err.createFailed")
+      )
     } finally {
       setSaving(false)
     }
+  }
+
+  /** 关弹窗：表单与编辑态一起复位，避免下次打开还带着上一条记录 */
+  const closeDnsDialog = () => {
+    setOpenDns(false)
+    setEditingId(null)
+    resetForm()
   }
 
   /**
@@ -442,7 +513,15 @@ export default function DomainsPage() {
               >
                 <RefreshCw className="h-4 w-4" />
               </Button>
-              <Button size="sm" onClick={() => setOpenDns(true)}>
+              <Button
+                size="sm"
+                onClick={() => {
+                  // 明确走「新建」：清掉可能残留的编辑态，否则会误改成编辑上一条
+                  setEditingId(null)
+                  resetForm()
+                  setOpenDns(true)
+                }}
+              >
                 <Plus className="h-4 w-4" />
                 {t("dm.addRecord")}
               </Button>
@@ -472,7 +551,23 @@ export default function DomainsPage() {
                   {records.map((r) => (
                     <TableRow key={r.id}>
                       <TableCell className="font-mono text-sm">
-                        {r.name}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span>{r.name}</span>
+                          {r.managed && (
+                            <Badge
+                              variant="secondary"
+                              className="font-sans text-[10px] font-normal"
+                            >
+                              {t("dm.managed.badge", {
+                                module: t(
+                                  r.managedBy === "storage"
+                                    ? "dm.managed.storage"
+                                    : "dm.managed.profile"
+                                ),
+                              })}
+                            </Badge>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell>
                         <Badge variant="outline">{r.type}</Badge>
@@ -490,24 +585,52 @@ export default function DomainsPage() {
                         <StatusBadge status={r.status} />
                       </TableCell>
                       <TableCell>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                          onClick={() => void handleDeleteDns(r)}
-                          disabled={deletingId === r.id}
-                        >
-                          {deletingId === r.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Trash2 className="h-4 w-4" />
-                          )}
-                        </Button>
+                        {/* 平台自动创建的解析不给删除入口：删了域名就解析不到本站，
+                            而名片/网盘那边仍显示已绑定，用户无从自查 */}
+                        {r.managed ? (
+                          <span
+                            className="text-xs text-muted-foreground"
+                            title={t("dm.managed.hint")}
+                          >
+                            —
+                          </span>
+                        ) : (
+                          <div className="flex items-center justify-end gap-0.5">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                              onClick={() => openEditDns(r)}
+                              aria-label={t("dm.editRecord")}
+                              title={t("dm.editRecord")}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                              onClick={() => void handleDeleteDns(r)}
+                              disabled={deletingId === r.id}
+                            >
+                              {deletingId === r.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-4 w-4" />
+                              )}
+                            </Button>
+                          </div>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
+              {records.some((r) => r.managed) && (
+                <p className="border-t px-4 py-3 text-xs text-muted-foreground">
+                  {t("dm.managed.hint")}
+                </p>
+              )}
             </div>
           )}
         </>
@@ -529,9 +652,28 @@ export default function DomainsPage() {
             <DialogDescription>
               {parentFor
                 ? t("dm.hint.child", { fqdn: parentFor.fqdn })
-                : t("dm.hint.root", { domain: rootDomain })}
+                : t("dm.hint.root", { domain: createRoot || rootDomain })}
             </DialogDescription>
           </DialogHeader>
+          {/* 建在哪个根域下：只有「一级子域名 + 用户有多个可选域」时才需要选。
+              可选域由后端按权限下发，这里的列表里出现 doulor.cn 就说明后端认了他有权限。 */}
+          {!parentFor && rootOptions.length > 1 && (
+            <div className="space-y-2">
+              <Label htmlFor="rootDomain">{t("dm.domain")}</Label>
+              <Select value={createRoot} onValueChange={setCreateRoot}>
+                <SelectTrigger id="rootDomain">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {rootOptions.map((r) => (
+                    <SelectItem key={r.name} value={r.name}>
+                      {r.label || r.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div className="space-y-2">
             <Label htmlFor="subName">{t("dm.name")}</Label>
             <div className="flex items-center gap-1">
@@ -543,13 +685,16 @@ export default function DomainsPage() {
                 className="flex-1"
               />
               <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                .{parentFor ? parentFor.fqdn : rootDomain}
+                .{parentFor ? parentFor.fqdn : createRoot || rootDomain}
               </span>
             </div>
             {/* 一级子域名有最短位数限制；二级是用户自己的细分空间，不限 */}
             {!parentFor && (
               <p className="text-xs text-muted-foreground">
-                {t("dm.nameHint.root", { min: minNameLen, domain: rootDomain })}
+                {t("dm.nameHint.root", {
+                  min: minNameLen,
+                  domain: createRoot || rootDomain,
+                })}
               </p>
             )}
             {parentFor && (
@@ -571,12 +716,20 @@ export default function DomainsPage() {
       </Dialog>
 
       {/* 添加 DNS 记录 */}
-      <Dialog open={openDns} onOpenChange={setOpenDns}>
+      <Dialog
+        open={openDns}
+        onOpenChange={(o) => {
+          // 关弹窗一律走 closeDnsDialog：顺带清掉编辑态，否则下次点「添加」
+          // 会带着上一条记录进入编辑模式
+          if (o) setOpenDns(true)
+          else closeDnsDialog()
+        }}
+      >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t("dm.addRecord")}</DialogTitle>
+            <DialogTitle>{t(editingId ? "dm.editRecord" : "dm.addRecord")}</DialogTitle>
             <DialogDescription>
-              {t("dm.addRecordDesc", { base })}
+              {editingId ? t("dm.editRecordDesc", { base }) : t("dm.addRecordDesc", { base })}
             </DialogDescription>
           </DialogHeader>
 
@@ -788,12 +941,12 @@ export default function DomainsPage() {
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpenDns(false)}>
+            <Button variant="outline" onClick={closeDnsDialog}>
               {t("common.cancel")}
             </Button>
-            <Button onClick={() => void handleCreateDns()} disabled={saving}>
+            <Button onClick={() => void handleSubmitDns()} disabled={saving}>
               {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-              {t("dm.createRecord")}
+              {t(editingId ? "dm.saveEdit" : "dm.createRecord")}
             </Button>
           </DialogFooter>
         </DialogContent>

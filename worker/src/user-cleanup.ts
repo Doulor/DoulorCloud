@@ -288,6 +288,13 @@ export async function purgeUserExternalResources(
   } catch (err) {
     report.errors.push(`自定义称号：${errText(err)}`)
   }
+  // 社区转发去重凭据（post_shares 无 FK）。帖子本身是软删、行会保留，
+  // 但这张表只用来判「这个人转过没有」，用户都没了就没有存在意义。
+  try {
+    await env.DB.prepare("DELETE FROM post_shares WHERE user_id = ?").bind(userId).run()
+  } catch (err) {
+    report.errors.push(`社区转发记录：${errText(err)}`)
+  }
   // `invite_rewards` 刻意**保留**：它是「某被邀请人只发过一次奖励」的去重凭据，
   // 删掉会让同一个被邀请人重新注册后被再次计入奖励。悬空引用不影响任何查询。
 

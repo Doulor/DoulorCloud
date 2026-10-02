@@ -2,10 +2,13 @@ import { ApiError, json } from "./http"
 import { getSessionTokens, clearedSessionCookie } from "./auth"
 import type { Env } from "./env"
 import * as authHandlers from "./handlers/auth"
+import * as stickerHandlers from "./handlers/stickers"
 import * as dnsHandlers from "./handlers/dns"
 import * as emailHandlers from "./handlers/email"
 import * as subdomainHandlers from "./handlers/subdomains"
 import * as adminHandlers from "./handlers/admin"
+import * as adminDnsHandlers from "./handlers/admin-dns"
+import * as adminRootDomainHandlers from "./handlers/admin-root-domains"
 import * as storageHandlers from "./handlers/storage"
 import * as newapiHandlers from "./handlers/newapi"
 import * as settingsHandlers from "./handlers/settings"
@@ -26,6 +29,7 @@ import * as funLinkProbeHandlers from "./handlers/fun-link-probe"
 import * as titleHandlers from "./handlers/titles"
 import * as r2AdminHandlers from "./handlers/r2-admin"
 import * as achievementHandlers from "./handlers/achievements"
+import * as leaderboardHandlers from "./handlers/leaderboard"
 import * as communityHandlers from "./handlers/community"
 import * as appNotifyHandlers from "./handlers/app-notify"
 import * as spaceHandlers from "./handlers/space"
@@ -35,13 +39,18 @@ import * as chatHandlers from "./handlers/chat"
 import * as dmHandlers from "./handlers/dm"
 import * as oauthHandlers from "./handlers/oauth"
 import * as feedbackHandlers from "./handlers/feedback"
+import * as chatUploadHandlers from "./handlers/chat-upload"
+import * as twoFactorHandlers from "./handlers/two-factor"
+import * as login2faHandlers from "./handlers/login-2fa"
 import * as eventHandlers from "./handlers/events"
+import * as moderationHandlers from "./handlers/moderation"
 import * as pointHandlers from "./handlers/points"
 import * as attentionHandlers from "./handlers/attention"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
 import { runMaintenance } from "./maintenance"
 import { processScheduledPublishes } from "./scheduled-publish"
+import { scanRiskAccounts } from "./risk-scan"
 
 /**
  * 「到点发布」专用的 cron 表达式（每分钟）。必须与 wrangler.toml 的 [triggers] crons 一致 ——
@@ -105,6 +114,22 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       authHandlers.login(env, request),
   },
 
+  // ---- 登录第二步：二次验证（2FA）----
+  // 口令通过后若该账号要求 2FA，/login 会返回 challengeId 而不下发 session，
+  // 前端拿着它来这两个接口完成验证。
+  {
+    kind: "exact",
+    path: "/login/2fa",
+    method: "POST",
+    handle: () => login2faHandlers.verifyLoginTwoFactor(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/login/2fa/send-email",
+    method: "POST",
+    handle: () => login2faHandlers.sendLoginTwoFactorEmail(env, request),
+  },
+
   {
     kind: "exact",
     path: "/logout",
@@ -155,10 +180,63 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
 
   {
     kind: "exact",
+    path: "/downloads",
+    method: "GET",
+    handle: () =>
+      settingsHandlers.publicDownloads(env, request),
+  },
+
+  {
+    kind: "exact",
     path: "/settings/email/verify",
     method: "POST",
     handle: () =>
       settingsHandlers.verifyRealEmail(env, request),
+  },
+
+  // ---- 二次认证（2FA）自助管理 ----
+  {
+    kind: "exact",
+    path: "/settings/2fa",
+    method: "GET",
+    handle: () => twoFactorHandlers.getTwoFactorSettings(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/settings/2fa/totp/start",
+    method: "POST",
+    handle: () => twoFactorHandlers.startTotpSetup(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/settings/2fa/totp/confirm",
+    method: "POST",
+    handle: () => twoFactorHandlers.confirmTotpSetup(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/settings/2fa/email",
+    method: "POST",
+    handle: () => twoFactorHandlers.setEmailTwoFactor(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/settings/2fa/recovery/regenerate",
+    method: "POST",
+    handle: () => twoFactorHandlers.regenerateRecoveryCodes(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/settings/2fa/disable",
+    method: "POST",
+    handle: () => twoFactorHandlers.disableTwoFactor(env, request),
+  },
+  // 站长的最后一道保险：给丢了手机的人拆掉这道锁
+  {
+    kind: "exact",
+    path: "/admin/2fa/reset",
+    method: "POST",
+    handle: () => twoFactorHandlers.adminResetTwoFactor(env, request),
   },
 
   {
@@ -287,6 +365,54 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "GET",
     handle: () =>
       adminHandlers.listUsers(env, request),
+  },
+
+  // ---- 账号监管：封禁申诉 + 风险账户 ----
+  // 申诉提交是**公开**接口：被封禁用户登录会被 403，拿不到会话
+  {
+    kind: "exact",
+    path: "/appeal",
+    method: "POST",
+    handle: () => moderationHandlers.submitAppeal(env, request),
+  },
+  // 用户端：申诉回复的已读确认（需登录态）
+  {
+    kind: "exact",
+    path: "/appeal/pending-reply",
+    method: "GET",
+    handle: () => moderationHandlers.getPendingAppealReply(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/appeal/acknowledge",
+    method: "POST",
+    handle: () => moderationHandlers.acknowledgeAppealNote(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/appeals",
+    method: "GET",
+    handle: () => moderationHandlers.listAppeals(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/appeals\/([^/]+)\/review$/),
+    methods: ["POST"],
+    handle: (appealMatch: RegExpMatchArray) =>
+      moderationHandlers.reviewAppeal(env, request, decodeURIComponent(appealMatch[1])),
+  },
+  {
+    kind: "exact",
+    path: "/admin/risk-accounts",
+    method: "GET",
+    handle: () => moderationHandlers.listRiskAccounts(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/risk-accounts\/([^/]+)\/status$/),
+    methods: ["POST"],
+    handle: (riskMatch: RegExpMatchArray) =>
+      moderationHandlers.updateRiskStatus(env, request, decodeURIComponent(riskMatch[1])),
   },
 
   {
@@ -579,6 +705,113 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       adminHandlers.listReserved(env, request),
   },
 
+  // ---- DNS 解析管理（管理面板 → DNS）----
+  // ⚠️ 声明顺序有意义（dispatch 按数组顺序命中）：
+  //    固定路径必须排在 `/admin/dns/:id` 正则之前，否则 findings / audit / cf-diff
+  //    会被当成记录 id 吃掉。
+  {
+    kind: "exact",
+    path: "/admin/dns",
+    method: "GET",
+    handle: () => adminDnsHandlers.listAdminDns(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/dns/findings",
+    method: "GET",
+    handle: () => adminDnsHandlers.listDnsFindings(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/dns/audit",
+    method: "POST",
+    handle: () => adminDnsHandlers.runDnsAudit(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/dns/cf-diff",
+    method: "GET",
+    handle: () => adminDnsHandlers.compareCfDns(env, request),
+  },
+
+  // 「台账与 Cloudflare 对不上」的修复口：fqdn 换了归属域（如整体换到 tyu.me）后，
+  // 老 cf_id 指向的是**另一个 zone** 的记录 —— 这里按当前 fqdn 重建并回填。
+  {
+    kind: "exact",
+    path: "/admin/dns/recreate",
+    method: "POST",
+    handle: () => adminDnsHandlers.recreateDnsRecord(env, request),
+  },
+
+  // 绑定在子域名上的服务（名片/网盘直链）换域后，Worker Route 是 zone 级资源、
+  // 不会自己搬家 —— 这里在新 domain 下重挂一套并拆掉旧的。
+  {
+    kind: "exact",
+    path: "/admin/domains/rebind",
+    method: "POST",
+    handle: () => adminDnsHandlers.rebindCustomDomain(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/dns\/findings\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (findingMatch: RegExpMatchArray) =>
+      adminDnsHandlers.reviewDnsFinding(env, request, decodeURIComponent(findingMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/dns\/cf-orphan\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (orphanMatch: RegExpMatchArray) =>
+      adminDnsHandlers.deleteOrphanCfRecord(env, request, decodeURIComponent(orphanMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/dns\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (adminDnsMatch: RegExpMatchArray) =>
+      adminDnsHandlers.updateAdminDns(env, request, decodeURIComponent(adminDnsMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/dns\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (adminDnsMatch: RegExpMatchArray) =>
+      adminDnsHandlers.deleteAdminDns(env, request, decodeURIComponent(adminDnsMatch[1])),
+  },
+
+  // ---- 用户可分配根域（管理面板 → DNS 解析 → 根域管理）----
+  // 用途：把「发给用户的域名」从 env.ROOT_DOMAIN 拆出来（默认 tyu.me），
+  // 并提供 Cloudflare 侧的开通动作（解析 zone id / 开 Email Routing / 设 catch-all）。
+  // ⚠️ 顺序：固定路径必须排在 `/admin/root-domains/:name` 之前。
+  {
+    kind: "exact",
+    path: "/admin/root-domains",
+    method: "GET",
+    handle: () => adminRootDomainHandlers.listAdminRootDomains(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/root-domains",
+    method: "POST",
+    handle: () => adminRootDomainHandlers.upsertAdminRootDomain(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/root-domains/action",
+    method: "POST",
+    handle: () => adminRootDomainHandlers.rootDomainAction(env, request),
+  },
+
   {
     kind: "exact",
     path: "/admin/reserved-subdomains",
@@ -613,6 +846,15 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "GET",
     handle: () =>
       adminHandlers.testNewApi(env, request),
+  },
+
+  // 手动触发一次中转站批量同步（排行榜数字过期时的「立即刷新」入口）
+  {
+    kind: "exact",
+    path: "/admin/newapi/sync-all",
+    method: "POST",
+    handle: () =>
+      newapiHandlers.adminSyncAllNewapiAccounts(env, request),
   },
 
   {
@@ -715,6 +957,15 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "GET",
     handle: () =>
       achievementHandlers.getAchievements(env, request),
+  },
+
+  // 排行榜：?board=newapi|community|feedback|achievement（community 再带 ?metric=posts|likes|comments）
+  {
+    kind: "exact",
+    path: "/leaderboard",
+    method: "GET",
+    handle: () =>
+      leaderboardHandlers.getLeaderboard(env, request),
   },
 
   // ---- 个人空间（公开主页）----
@@ -1304,6 +1555,28 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       ),
   },
 
+  // ---- 聊天图片（私聊 / 聊天室 / 广场帖子与评论共用）----
+  // 与反馈图片分开：反馈图是私有工单附件（只有本人+管理员能看），
+  // 聊天图要能被会话双方看到，鉴权口径不同。详见 handlers/chat-upload.ts 头部说明。
+  {
+    kind: "exact",
+    path: "/chat/upload-image",
+    method: "POST",
+    handle: () => chatUploadHandlers.uploadChatImage(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/chat\/image\/([^/]+)\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (m: RegExpMatchArray) =>
+      chatUploadHandlers.serveChatImage(
+        env,
+        request,
+        decodeURIComponent(m[1]),
+        decodeURIComponent(m[2])
+      ),
+  },
+
   {
     kind: "exact",
     path: "/feedback/reply",
@@ -1326,6 +1599,22 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       feedbackHandlers.createFeedback(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/feedback\/([0-9a-f-]{36})$/),
+    methods: ["PATCH"],
+    handle: (m: RegExpMatchArray) =>
+      feedbackHandlers.editMyFeedback(env, request, m[1]),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/feedback\/([0-9a-f-]{36})$/),
+    methods: ["DELETE"],
+    handle: (m: RegExpMatchArray) =>
+      feedbackHandlers.withdrawMyFeedback(env, request, m[1]),
   },
 
   // ---- 权限兑换码（首捐奖励券 / 用邀请码补权限）----
@@ -1586,6 +1875,20 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: () => dmHandlers.dmUnreadCount(env, request),
   },
   {
+    // 我收到的待处理聊天申请（2026-10-01）
+    kind: "exact",
+    path: "/dm/requests",
+    method: "GET",
+    handle: () => dmHandlers.listDmRequests(env, request),
+  },
+  {
+    // 同意 / 拒绝聊天申请
+    kind: "exact",
+    path: "/dm/requests",
+    method: "POST",
+    handle: () => dmHandlers.respondDmRequest(env, request),
+  },
+  {
     kind: "exact",
     path: "/dm/seen",
     method: "POST",
@@ -1602,6 +1905,44 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/dm",
     method: "POST",
     handle: () => dmHandlers.sendDm(env, request),
+  },
+
+  // ---- 用户表情包（社区/私信编辑器里快捷发送）----
+  {
+    kind: "exact",
+    path: "/stickers",
+    method: "GET",
+    handle: () => stickerHandlers.listStickers(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/stickers",
+    method: "POST",
+    handle: () => stickerHandlers.uploadSticker(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/stickers/save",
+    method: "POST",
+    handle: () => stickerHandlers.saveSticker(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/stickers\/([0-9a-f-]{36})\/image$/),
+    methods: ["GET"],
+    handle: (stickerImgMatch: RegExpMatchArray) =>
+      stickerHandlers.serveSticker(env, request, stickerImgMatch[1]),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/stickers\/([0-9a-f-]{36})$/),
+    methods: ["DELETE"],
+    handle: (stickerMatch: RegExpMatchArray) =>
+      stickerHandlers.deleteSticker(env, request, stickerMatch[1]),
   },
 
   {
@@ -1692,6 +2033,28 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       communityHandlers.createComment(env, request, decodeURIComponent(communityCommentsMatch[1])),
   },
 
+  {
+    kind: "regex",
+    // 管理员 / 站长置顶帖子（2026-10-01）
+    match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)\/pin$/),
+    methods: ["POST"],
+    handle: (postPinMatch: RegExpMatchArray) =>
+      communityHandlers.setPostPinned(env, request, decodeURIComponent(postPinMatch[1])),
+  },
+  {
+    // 我持有的全部称号（个人空间里自己选展示哪一个；2026-10-01）
+    kind: "exact",
+    path: "/titles/mine",
+    method: "GET",
+    handle: () => titleHandlers.listMyTitles(env, request),
+  },
+  {
+    // 设置对外展示的称号；titleId = null 表示一个都不展示
+    kind: "exact",
+    path: "/titles/display",
+    method: "POST",
+    handle: () => titleHandlers.setDisplayedTitle(env, request),
+  },
   {
     kind: "regex",
     match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)\/images$/),
@@ -1889,6 +2252,20 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: () => pointHandlers.uploadProductImage(env, request),
   },
   {
+    // 封面图公开读取。⚠️ 必须**挂在 /api 前缀下**：cloud.doulor.cn 只有 /api/*、
+    // /c/*、/u/* 等 zone 路由会进 API Worker，自造新前缀（如 /shop-img/*）的请求
+    // 根本到不了这里，会落到 SPA 的 index.html（2026-10-01 实测踩过）。
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/shop-img\/([^/]+)\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (shopImgMatch: RegExpMatchArray) =>
+      pointHandlers.serveShopImage(
+        env,
+        decodeURIComponent(shopImgMatch[1]),
+        decodeURIComponent(shopImgMatch[2])
+      ),
+  },
+  {
     kind: "exact",
     path: "/points/products",
     method: "POST",
@@ -1918,6 +2295,43 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     methods: ["POST"],
     handle: (myOrderConfirmMatch: RegExpMatchArray) =>
       pointHandlers.confirmReceipt(env, request, decodeURIComponent(myOrderConfirmMatch[1])),
+  },
+  // 售后（退款）：买家申请 / 撤销
+  {
+    kind: "branch",
+    match: (routePath: string) => routePath.match(/^\/points\/orders\/([^/]+)\/after-sale$/),
+    handle: (afterSaleMatch: RegExpMatchArray, method: string) => {
+      const id = decodeURIComponent(afterSaleMatch[1])
+      if (method === "POST") return pointHandlers.requestAfterSaleHandler(env, request, id)
+      if (method === "DELETE") return pointHandlers.cancelAfterSaleHandler(env, request, id)
+      return null
+    },
+  },
+  // 售后：买家申请平台（管理员）介入
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/points\/orders\/([^/]+)\/after-sale\/escalate$/),
+    methods: ["POST"],
+    handle: (afterSaleEscalateMatch: RegExpMatchArray) =>
+      pointHandlers.escalateAfterSaleHandler(
+        env,
+        request,
+        decodeURIComponent(afterSaleEscalateMatch[1])
+      ),
+  },
+  // 售后：卖家处理（同意退款 / 拒绝）
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/points\/orders\/([^/]+)\/after-sale\/decide$/),
+    methods: ["POST"],
+    handle: (afterSaleDecideMatch: RegExpMatchArray) =>
+      pointHandlers.sellerResolveAfterSaleHandler(
+        env,
+        request,
+        decodeURIComponent(afterSaleDecideMatch[1])
+      ),
   },
 
   {
@@ -1987,6 +2401,25 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     methods: ["POST"],
     handle: (shopCancelMatch: RegExpMatchArray) =>
       pointHandlers.cancelShopOrder(env, request, decodeURIComponent(shopCancelMatch[1])),
+  },
+  // 售后（客服介入）：列表 + 判定
+  {
+    kind: "exact",
+    path: "/admin/points/after-sales",
+    method: "GET",
+    handle: () => pointHandlers.listAfterSales(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/points\/orders\/([^/]+)\/after-sale$/),
+    methods: ["POST"],
+    handle: (adminAfterSaleMatch: RegExpMatchArray) =>
+      pointHandlers.adminResolveAfterSaleHandler(
+        env,
+        request,
+        decodeURIComponent(adminAfterSaleMatch[1])
+      ),
   },
 
   {
@@ -2213,6 +2646,20 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       frpHandlers.reviewFrpApplication(env, request),
   },
 
+  // 编辑一条待审核的申请（账号名/密码/端口/通知邮箱/备注）
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/frp\/applications\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (adminFrpAppMatch: RegExpMatchArray) =>
+      frpHandlers.updateFrpApplication(
+        env,
+        request,
+        decodeURIComponent(adminFrpAppMatch[1])
+      ),
+  },
+
   {
     kind: "exact",
     path: "/admin/frp/review-revoke",
@@ -2243,6 +2690,31 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       frpHandlers.releaseFrpPorts(env, request),
+  },
+
+  // 某节点已占用的端口（带来源）
+  {
+    kind: "exact",
+    path: "/admin/frp/ports",
+    method: "GET",
+    handle: () =>
+      frpHandlers.listFrpPorts(env, request),
+  },
+
+  // 手动标记 / 解除 一批端口的占用
+  {
+    kind: "exact",
+    path: "/admin/frp/ports/occupy",
+    method: "POST",
+    handle: () =>
+      frpHandlers.occupyFrpPorts(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/frp/ports/free",
+    method: "POST",
+    handle: () =>
+      frpHandlers.freeFrpPorts(env, request),
   },
 
   {
@@ -2675,15 +3147,7 @@ export default {
         )
       }
 
-      // 商城商品封面：/shop-img/<userId>/<filename>（公开，走平台桶；2026-10-01）
-      const shopImgMatch = url.pathname.match(/^\/shop-img\/([^/]+)\/([^/]+)$/)
-      if (shopImgMatch) {
-        return pointHandlers.serveShopImage(
-          env,
-          decodeURIComponent(shopImgMatch[1]),
-          decodeURIComponent(shopImgMatch[2])
-        )
-      }
+
 
       // 图片墙资源：/p/<用户名>/gallery/<id>（公开，无需鉴权）；必须排在下面
       // 的两段式 assetMatch 之前，否则 /gallery/<id> 不匹配、会被漏掉。
@@ -2757,7 +3221,11 @@ export default {
       return await route(env, request, ctx)
     } catch (err) {
       if (err instanceof ApiError) {
-        const res = json({ error: err.message, code: err.code }, err.status)
+        // extra：报错之外还要带回信息时用（如登录时账号被封禁 → 一并给出原因与申诉结果）
+        const res = json(
+          { error: err.message, code: err.code, ...(err.extra ?? {}) },
+          err.status
+        )
         // 仅在「会话本身失效」时清除 cookie。
         // 注意不能用 status===401 一刀切：登录密码错误、修改密码时当前密码错误
         // 也是 401（INVALID_CREDENTIALS），清 cookie 会把正常用户踢下线。
@@ -2819,6 +3287,16 @@ export default {
           if (r.errors > 0) console.warn("到点发布有失败项:", JSON.stringify(r))
         })
       )
+      // 风险账户扫描：每 10 分钟一次（窗口也是 10 分钟，首尾正好相接）。
+      // 搭在每分钟的 tick 上而不是新增一条 cron —— 它本身很轻（几条 SELECT +
+      // 一两次 NewAPI 请求），不值得为它多开一条触发器。
+      if (new Date(controller.scheduledTime).getUTCMinutes() % 10 === 0) {
+        ctx.waitUntil(
+          scanRiskAccounts(env).then((r) => {
+            if (r.flagged > 0) console.warn("风险扫描命中:", JSON.stringify(r))
+          })
+        )
+      }
       return
     }
 
@@ -2828,6 +3306,14 @@ export default {
         if (report.warnings.length > 0) {
           console.warn("运维自检告警:", report.warnings.join(" | "))
         }
+      })
+    )
+    // 批量刷新中转站调用次数/额度：排行榜读的是 newapi_accounts.request_count
+    // 的本地缓存，只在用户打开中转站页时刷新 —— 不打开就一直是旧的（排行榜
+    // 于是「数据不对」）。这里每小时刷一批（从最旧开始，限量防上游限流）。
+    ctx.waitUntil(
+      newapiHandlers.syncAllNewapiAccounts(env).then((r) => {
+        if (r.failed > 0) console.warn("中转站批量同步有失败项:", JSON.stringify(r))
       })
     )
   },

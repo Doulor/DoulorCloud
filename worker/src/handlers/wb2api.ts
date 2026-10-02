@@ -32,7 +32,6 @@ import {
   resolveWb2ApiConfig,
   saveWb2ApiKey,
   Wb2StateGoneError,
-  Wb2UnauthorizedError,
   wb2Overview,
   wb2Poll,
   wb2RemoveAccount,
@@ -334,13 +333,9 @@ export async function loginPoll(env: Env, request: Request): Promise<Response> {
       await failSession(env, sess.id, msg)
       return json({ status: "failed", message: msg })
     }
-    if (err instanceof Wb2UnauthorizedError) {
-      throw new ApiError(
-        503,
-        "反代网关拒绝了本站的访问密钥，请联系管理员",
-        "WB2API_UNAUTHORIZED"
-      )
-    }
+    // 网关拒绝密钥（Wb2UnauthorizedError）不再单独包装：它本身就是
+    // `ApiError(502, "…请联系管理员检查「捐献通道」里配置的网关密钥", "WB2API_UNAUTHORIZED")`，
+    // 落到下面的 `throw err` 即可 —— 多包一层只会把可操作文案换短。
     // 超时（本站主动放弃等待）：网关那一次 poll 可能仍在跑，也可能已经完成
     // 落盘 + 热加载 —— 它的 handler 不因客户端断开而停止。所以这里必须给出
     // 可操作的文案：让用户重新发起一次登录即可完成绑定（重新登录同一账号会命中
@@ -801,9 +796,8 @@ export async function adminGetPool(
   try {
     return json({ pool: await wb2Overview(env) })
   } catch (err) {
-    if (err instanceof Wb2UnauthorizedError) {
-      throw new ApiError(502, "反代网关拒绝了本站的访问密钥", "WB2API_UNAUTHORIZED")
-    }
+    // 网关拒绝密钥 = `Wb2UnauthorizedError`，本身就是带可读文案的 ApiError(502)，
+    // 直接放行给全局兜底即可（原先在这里再包一层，文案反而更短）。
     throw err
   }
 }

@@ -1,5 +1,6 @@
 import { ApiError, json } from "../http"
 import { requireAdmin } from "./admin"
+import { requireUser } from "../auth"
 import { uuid } from "../crypto"
 import { audit as recordAudit } from "../settings"
 import type { Env } from "../env"
@@ -62,7 +63,8 @@ export async function getTitleForUser(env: Env, userId: string) {
   const row = await env.DB.prepare(
     `SELECT ct.name AS title_name, ct.color_from AS title_color_from, ct.color_to AS title_color_to
        FROM user_titles ut JOIN custom_titles ct ON ct.id = ut.title_id
-      WHERE ut.user_id = ?`
+      WHERE ut.user_id = ? AND ut.is_display = 1
+      LIMIT 1`
   )
     .bind(userId)
     .first<{ title_name: string; title_color_from: string; title_color_to: string }>()
@@ -221,6 +223,96 @@ export async function deleteTitle(env: Env, request: Request, id: string): Promi
  * POST /api/admin/titles/:id/grant { username } —— 授予。
  * 覆盖式：用户已有其它自定义称号会被顶掉（一人一称号是表结构保证的硬约束）。
  */
+/**
+ * 若该用户当前没有任何「展示中」的称号，就把最早获得的一个设为展示。
+ * 收回称号 / 用户手动取消展示后调用，避免出现「有称号却什么都不显示」的空窗。
+ */
+async function promoteIfNothingDisplayed(env: Env, userId: string): Promise<void> {
+  const shown = await env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM user_titles WHERE user_id = ? AND is_display = 1"
+  )
+    .bind(userId)
+    .first<{ c: number }>()
+  if ((shown?.c ?? 0) > 0) return
+  await env.DB.prepare(
+    `UPDATE user_titles SET is_display = 1
+      WHERE user_id = ?
+        AND title_id = (SELECT title_id FROM user_titles WHERE user_id = ?
+                         ORDER BY granted_at ASC LIMIT 1)`
+  )
+    .bind(userId, userId)
+    .run()
+}
+
+/**
+ * GET /api/titles/mine —— 我持有的**全部**称号（2026-10-01 加）。
+ *
+ * 个人空间里要列出来让用户自己挑「对外展示哪一个」，所以这里必须返回全部，
+ * 并标出哪个正在展示。
+ */
+export async function listMyTitles(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const rows = await env.DB.prepare(
+    `SELECT ct.id, ct.name, ct.color_from, ct.color_to, ut.is_display, ut.granted_at
+       FROM user_titles ut JOIN custom_titles ct ON ct.id = ut.title_id
+      WHERE ut.user_id = ?
+      ORDER BY ut.is_display DESC, ut.granted_at ASC`
+  )
+    .bind(user.id)
+    .all<{
+      id: string
+      name: string
+      color_from: string
+      color_to: string
+      is_display: number
+      granted_at: string
+    }>()
+  return json({
+    titles: (rows.results ?? []).map((r) => ({
+      id: String(r.id),
+      name: String(r.name),
+      colorFrom: String(r.color_from),
+      colorTo: String(r.color_to),
+      isDisplay: Boolean(r.is_display),
+      grantedAt: String(r.granted_at),
+    })),
+  })
+}
+
+/**
+ * POST /api/titles/display —— 把某个称号设为对外展示；`{ titleId: null }` = 一个都不展示。
+ *
+ * 只能设置**自己持有**的称号：先清掉自己的 is_display，再把目标标上。
+ * 两步都是 `WHERE user_id = 我`，拿别人的 titleId 也只会把自己的清空，不会越权。
+ */
+export async function setDisplayedTitle(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
+  const titleId = typeof body.titleId === "string" && body.titleId ? body.titleId : null
+
+  if (titleId) {
+    const owned = await env.DB.prepare(
+      "SELECT 1 AS x FROM user_titles WHERE user_id = ? AND title_id = ?"
+    )
+      .bind(user.id, titleId)
+      .first()
+    if (!owned) throw new ApiError(403, "你没有这个称号", "FORBIDDEN")
+  }
+
+  // 先全部清掉（保证「展示中」唯一；部分唯一索引也兜底）
+  await env.DB.prepare("UPDATE user_titles SET is_display = 0 WHERE user_id = ?")
+    .bind(user.id)
+    .run()
+  if (titleId) {
+    await env.DB.prepare(
+      "UPDATE user_titles SET is_display = 1 WHERE user_id = ? AND title_id = ?"
+    )
+      .bind(user.id, titleId)
+      .run()
+  }
+  return json({ ok: true, titleId })
+}
+
 export async function grantTitle(env: Env, request: Request, id: string): Promise<Response> {
   const admin = await requireAdmin(env, request)
 
@@ -234,12 +326,22 @@ export async function grantTitle(env: Env, request: Request, id: string): Promis
   if (!username) throw new ApiError(400, "用户名不能为空", "INVALID_INPUT")
   const target = await loadTargetUser(env, username)
 
+  // 一人可持多个称号（2026-10-01 改）。若他当前没有任何「展示中」的称号，
+  // 就把新授的这个设为展示 —— 否则用户会「拿到了称号却什么都没显示」，莫名其妙。
+  const shown = await env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM user_titles WHERE user_id = ? AND is_display = 1"
+  )
+    .bind(target.id)
+    .first<{ c: number }>()
+  const isDisplay = (shown?.c ?? 0) === 0
+
   await env.DB.prepare(
-    `INSERT INTO user_titles (user_id, title_id, granted_by, granted_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(user_id) DO UPDATE SET title_id = excluded.title_id,
+    `INSERT INTO user_titles (user_id, title_id, is_display, granted_by, granted_at)
+     VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, title_id) DO UPDATE SET
          granted_by = excluded.granted_by, granted_at = excluded.granted_at`
   )
-    .bind(target.id, id, admin.id, new Date().toISOString())
+    .bind(target.id, id, isDisplay ? 1 : 0, admin.id, new Date().toISOString())
     .run()
 
   await recordAudit(
@@ -276,6 +378,10 @@ export async function revokeTitle(env: Env, request: Request, id: string): Promi
   if (!res.meta.changes) {
     throw new ApiError(404, `${target.username} 没有持有这个称号`, "NOT_FOUND")
   }
+
+  // 收回的若是「展示中」的那个，自动把剩下最早获得的一个顶上去
+  //（否则用户会变成「有称号但一个都不显示」）
+  await promoteIfNothingDisplayed(env, target.id)
 
   await recordAudit(
     env,

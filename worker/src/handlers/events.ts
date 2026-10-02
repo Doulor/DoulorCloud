@@ -21,6 +21,7 @@ import {
   REWARD_HANDLERS,
   REWARD_PRECONDITIONS,
   CONDITION_HANDLERS,
+  CONDITION_HINTS,
   isRewardType,
   isConditionType,
   parseLotteryConfig,
@@ -109,6 +110,14 @@ function toEvent(row: EventRow, now: number, isAdmin = false) {
     rewardParams: parseJson(row.reward_params),
     conditionType: row.condition_type,
     conditionParams,
+    /**
+     * 参与条件的**规则说明**（如「需要先把个人名片做完：填好昵称并保存」）。
+     *
+     * 与 `claimBlockedReason` 的区别：那个说的是「你**现在**还差什么」（奖励前置条件，
+     * 与用户状态有关），这个是「这类活动**要什么**」（静态规则，任何人都一样）。
+     * 两者一起给，用户领取前就能知道该做什么，而不是点了才被拒。
+     */
+    conditionHint: CONDITION_HINTS[row.condition_type as ConditionType] || null,
     /** 抽奖：开奖时间；null = 尚未开奖 */
     drawnAt: row.drawn_at ?? null,
     /**
@@ -269,6 +278,103 @@ export async function getEvent(env: Env, request: Request, id: string): Promise<
  *   3. 写领取记录（唯一索引即锁）
  *   4. 自动发放奖励，回写发放结果
  */
+/**
+ * GitHub star 活动：把用户名**规范化**（去 @、转小写）。
+ * GitHub 用户名本身大小写不敏感，不归一化的话 Deity6 / deity6 能绕过唯一键。
+ */
+function normalizeGithubName(raw: string): string {
+  return raw.trim().replace(/^@/, "").toLowerCase()
+}
+
+/** 预检结果：`ok` = 可用；`taken` = 名字被别的账号用了；`bound-other` = 本人已绑定过另一个名字 */
+type GithubNameCheck = "ok" | "taken" | "bound-other"
+
+/**
+ * 领取前的**快速预检**（2026-10-01 修漏洞加）。
+ *
+ * 漏洞背景：原先只核验「填的 GitHub 用户名真的 star 过仓库」，没限制一个名字
+ * 只能被领一次 —— star 名单是公开的，谁都能抄别人的名字，用多个站内账号反复领
+ * （用户 deity6 实测刷成功后报告了这个洞）。
+ *
+ * 预检发生在 event_claims 占位**之前**：名字已被占用时直接 403，
+ * 不会白白消耗一次性领取机会 / 名额。真正的并发安全靠 lockGithubNameForEvent
+ * 的唯一键，这里只是 UX 快路径 + 提示更友好。
+ */
+async function checkGithubNameForEvent(
+  env: Env,
+  eventId: string,
+  githubInput: string,
+  userId: string
+): Promise<GithubNameCheck> {
+  const who = normalizeGithubName(githubInput)
+  const rows = await env.DB.prepare(
+    `SELECT github_username, user_id FROM event_github_claims
+      WHERE event_id = ? AND (github_username = ? OR user_id = ?)`
+  )
+    .bind(eventId, who, userId)
+    .all<{ github_username: string; user_id: string }>()
+  for (const r of rows.results ?? []) {
+    if (r.github_username === who && r.user_id !== userId) return "taken"
+    if (r.user_id === userId && r.github_username !== who) return "bound-other"
+  }
+  return "ok"
+}
+
+/**
+ * 给「GitHub 用户名 × 活动」上锁（authoritative，防并发的关键）。
+ *
+ * 返回 `ok` 以外的值时**必须拒绝发放**：
+ *   - `taken`：这个名字已被另一个账号占用；
+ *   - `bound-other`：本人已在别的名字上绑过（换名字重试，不给换）。
+ *
+ * 幂等：同一用户用**同一个**名字重试（上次发放失败）会命中自己的行 → 返回 ok。
+ * WHERE NOT EXISTS 只允许每人占一个名字 —— 否则已领过的人可以恶意把
+ * 别人的名字全都占满（名字锁死，真主人反而领不了）。
+ */
+async function lockGithubNameForEvent(
+  env: Env,
+  eventId: string,
+  githubInput: string,
+  userId: string
+): Promise<GithubNameCheck> {
+  const who = normalizeGithubName(githubInput)
+  const res = await env.DB.prepare(
+    `INSERT OR IGNORE INTO event_github_claims (event_id, github_username, user_id, claimed_at)
+     SELECT ?, ?, ?, ?
+      WHERE NOT EXISTS (SELECT 1 FROM event_github_claims WHERE event_id = ? AND user_id = ?)`
+  )
+    .bind(eventId, who, userId, new Date().toISOString(), eventId, userId)
+    .run()
+  if ((res.meta?.changes ?? 0) > 0) return "ok"
+  // 没插进去：名字被别人占，或自己已绑过别的名字 —— 查清楚是哪种
+  const holder = await env.DB.prepare(
+    "SELECT user_id FROM event_github_claims WHERE event_id = ? AND github_username = ?"
+  )
+    .bind(eventId, who)
+    .first<{ user_id: string }>()
+  if (holder?.user_id === userId) return "ok" // 自己的名字重试（上次发放失败）
+  return holder ? "taken" : "bound-other"
+}
+
+/** 把占用检查的结果翻译成对用户可操作的报错 */
+function githubNameError(check: GithubNameCheck): ApiError | null {
+  if (check === "taken") {
+    return new ApiError(
+      403,
+      "这个 GitHub 用户名已被另一个账号用于领取本活动 —— 一个 GitHub 账号只能领一次。",
+      "GITHUB_ALREADY_CLAIMED"
+    )
+  }
+  if (check === "bound-other") {
+    return new ApiError(
+      403,
+      "你在本活动已用过另一个 GitHub 用户名，不能更换。如认为有误请联系管理员。",
+      "GITHUB_NAME_BOUND"
+    )
+  }
+  return null
+}
+
 export async function claimEvent(
   env: Env,
   request: Request,
@@ -330,12 +436,25 @@ export async function claimEvent(
         "GITHUB_NOT_STARRED"
       )
     }
+    // 修漏洞（2026-10-01）：star 名单是公开的，谁都可能冒用别人的 GitHub 用户名。
+    // 预检放在占位之前 —— 名字已被占用时不会白白消耗一次性领取机会。
+    const err = githubNameError(await checkGithubNameForEvent(env, id, githubInput, user.id))
+    if (err) throw err
   }
   const ok = await conditionHandler(env, user.id, conditionParams, {
     code: codeInput,
     github: githubInput,
   })
-  if (!ok) throw new ApiError(403, "你还不满足参与条件", "CONDITION_FAILED")
+  if (!ok) {
+    // 带上「具体差什么」：笼统的「你还不满足参与条件」会让人反复试、
+    // 最后跑来提反馈问（见 CONDITION_HINTS 的注释）
+    const hint = CONDITION_HINTS[conditionType]
+    throw new ApiError(
+      403,
+      hint ? `还不满足参与条件：${hint}` : "你还不满足参与条件",
+      "CONDITION_FAILED"
+    )
+  }
 
   // 奖励前置条件（如中转站额度要求「已开通中转站」）：不满足直接拒绝，
   // 且**在占位之前**拦下 —— 否则一次性领取机会会被白白消耗掉。
@@ -385,6 +504,11 @@ export async function claimEvent(
         409
       )
     }
+    // GitHub star 活动：发放前给用户名上锁（防并发窗口里的冒用；见 helper 注释）
+    if ((row.condition_type as ConditionType) === "github_star" && githubInput) {
+      const err = githubNameError(await lockGithubNameForEvent(env, id, githubInput, user.id))
+      if (err) throw err
+    }
     return grantAndRecord(env, existing.id, row, user.id, user.username)
   }
 
@@ -394,6 +518,18 @@ export async function claimEvent(
     .bind(id, user.id)
     .first<{ id: string }>()
   if (!claimRow) throw new ApiError(500, "领取记录创建失败", "INTERNAL")
+
+  // GitHub star 活动：发放前给用户名上锁。占用失败时**回滚刚占的领取名额**，
+  // 不然用户为了一个被冒用的名字白丢一次机会（活动可能是限量的）。
+  if ((row.condition_type as ConditionType) === "github_star" && githubInput) {
+    const err = githubNameError(await lockGithubNameForEvent(env, id, githubInput, user.id))
+    if (err) {
+      await env.DB.prepare("DELETE FROM event_claims WHERE id = ? AND reward_status = 'pending'")
+        .bind(claimRow.id)
+        .run()
+      throw err
+    }
+  }
 
   // 抽奖活动：这一步只是**报名**，不发奖 —— 开奖时由 drawEvent 从报名者里随机抽人。
   // 所以不调 grantAndRecord（那是「参与即发放」路径）。

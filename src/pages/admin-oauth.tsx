@@ -403,7 +403,7 @@ export function OAuthAdminPanel() {
                     }
                   />
                   <code className="font-mono text-xs">{s.label}</code>
-                  <span className="text-muted-foreground">{s.hint}</span>
+                  <span className="text-muted-foreground">{t(s.hint)}</span>
                 </label>
               ))}
             </div>

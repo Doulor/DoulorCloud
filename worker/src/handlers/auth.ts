@@ -9,9 +9,13 @@ import { getSettings } from "../settings"
 import {
   isBasicOnlyInvitePermissions,
   permissionsFromFeatures,
+  parsePermissions,
 } from "../permissions"
 import { getBasicFeatures } from "../quotas"
+import { parseEmailDomains } from "../email-domains"
+import { getDefaultRootDomain, resolveZoneId, isOwnDomain } from "../root-domains"
 import { grantInvitePoints } from "../points"
+import { evaluateTwoFactorGate, createLoginChallenge, maskEmail } from "./two-factor"
 import {
   createSession,
   destroySession,
@@ -20,6 +24,7 @@ import {
   clearedSessionCookie,
   getSessionTokens,
   toPublicUser,
+  loadPendingReply,
   type UserRow,
 } from "../auth"
 import type { Env } from "../env"
@@ -60,7 +65,11 @@ async function bumpVisit(env: Env, userId: string): Promise<void> {
 }
 
 function isValidUsername(username: string): boolean {
-  return /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(username)
+  // 3-32 位（2026-10-02 站长定）：与「一级子域名至少 3 位」对齐 ——
+  // 注册会自动创建 <用户名>.<根域> 与 <用户名>@<根域>，而那条路径不经过
+  // createSubdomain 的位数校验；用户名若允许 1 位，就出现了「自己建不了 i.tyu.me、
+  // 注册个叫 i 的号却能拿到」的规则漏洞。
+  return /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(username)
 }
 
 /**
@@ -127,7 +136,16 @@ export async function registerStatus(env: Env): Promise<Response> {
   // 下）在跨境链路上要 ~0.5-1s，现在合并成 1 次 getSettings（读全表一次）。
   const s = await getSettings(env)
   const until = (s.open_registration_until ?? "").trim()
-  return json({ openRegistration: isOpenRegistrationIn(s), until: until || null })
+  // 一并下发「发给用户的根域」：注册页要显示「你会拿到 username.<域> / username@<域>」，
+  // 而那个域是管理员可改的（root_domains 的默认行）—— 前端写死会在换域后误导新用户
+  // （2026-10-02 从 doulor.cn 整体迁到 tyu.me 时就踩到了）。注册页本来就是公开接口，
+  // 多带一个域名不增加任何隐私面。
+  const root = await getDefaultRootDomain(env)
+  return json({
+    openRegistration: isOpenRegistrationIn(s),
+    until: until || null,
+    defaultRootDomain: root.name,
+  })
 }
 
 export async function register(env: Env, request: Request): Promise<Response> {
@@ -153,7 +171,11 @@ export async function register(env: Env, request: Request): Promise<Response> {
   )
 
   if (!isValidUsername(username)) {
-    throw new ApiError(400, "用户名只能包含小写字母、数字和连字符", "INVALID_USERNAME")
+    throw new ApiError(
+      400,
+      "用户名需要 3-32 位，只能包含小写字母、数字和连字符",
+      "INVALID_USERNAME"
+    )
   }
   if (isReservedName(username)) {
     throw new ApiError(400, "该用户名为系统保留名称", "RESERVED_NAME")
@@ -163,6 +185,53 @@ export async function register(env: Env, request: Request): Promise<Response> {
   }
   if (password.length < 8) {
     throw new ApiError(400, "密码至少需要 8 位", "WEAK_PASSWORD")
+  }
+
+  // ---- 注册准入的两道闸（2026-10-02 加，为挡批量小号）----
+  const regSettings = await getSettings(env)
+
+  // 1) 邮箱域名白名单：只放主流邮箱，留空 = 不限制。
+  //    背景：排查发现一批小号用临时邮箱服务注册（smailr.com / mailto.plus /
+  //    virgilian.com / *.kdns.fr 等），这类域名能无限免费开新邮箱。
+  //    解析走 email-domains.ts（与后台的写入侧同一份实现）：那里的分隔符很宽，
+  //    因为管理员可能在多行输入框里「一行一个域名」—— 只按逗号切会把整段当成
+  //    一个条目，结果是白名单里的域名**全都**匹配不上、谁都注册不了。
+  const allowedDomains = parseEmailDomains(regSettings.register_email_domains)
+  if (allowedDomains.length > 0) {
+    const domain = email.slice(email.lastIndexOf("@") + 1).toLowerCase()
+    if (!allowedDomains.includes(domain)) {
+      throw new ApiError(
+        400,
+        `请使用主流邮箱注册（如 ${allowedDomains.slice(0, 6).join(" / ")} 等），暂不支持该邮箱域名`,
+        "EMAIL_DOMAIN_NOT_ALLOWED"
+      )
+    }
+  }
+
+  // 2) 同 IP 累计注册数上限。原限流是「每小时 60 次请求」，挡不住「一个 IP 注册 9 个号」
+  //    ——9 次请求远在 60 次以内。这里是按 24 小时的**累计计数**（不是速率）。
+  //
+  //    ⚠️ 只统计「账号**仍然存在**」的注册（EXISTS users）。否则被删掉的账号会一直占着
+  //    这个 IP 的额度到 24h 满 —— 实测站长自己就踩了：他的 IP 上 3 条注册记录对应的
+  //    账号全被删了（0 个存活），却因为记录还在而被挡在门外。
+  //    另外「注册失败」本来就不写审计（冲突检查在写审计之前就抛错），所以这里天然只数成功。
+  const ipDailyLimit = Number(regSettings.register_ip_daily_limit ?? "0") || 0
+  if (ipDailyLimit > 0) {
+    const since = new Date(Date.now() - 86_400_000).toISOString()
+    const recent = await env.DB.prepare(
+      `SELECT COUNT(*) AS c FROM audit_logs a
+        WHERE a.action = 'register' AND a.ip = ? AND a.created_at >= ?
+          AND EXISTS (SELECT 1 FROM users u WHERE u.id = a.user_id)`
+    )
+      .bind(clientIp(request), since)
+      .first<{ c: number }>()
+    if ((recent?.c ?? 0) >= ipDailyLimit) {
+      throw new ApiError(
+        429,
+        `同一网络 24 小时内最多注册 ${ipDailyLimit} 个账号，请稍后再试`,
+        "REGISTER_IP_LIMIT"
+      )
+    }
   }
 
   // 是否处于「限时开放注册」窗口（管理面板可开，见 settings.isOpenRegistration）。
@@ -235,8 +304,14 @@ export async function register(env: Env, request: Request): Promise<Response> {
   // 这些名字。必须把这三种情况一并查出，否则：
   //   - 名字被抢先后本人注册会在 batch 阶段失败，而邀请码已被消费（白烧一个码）；
   //   - subdomains.fqdn 被占用时该名字将永久无法注册。
-  const requestedFqdn = `${username}.${env.ROOT_DOMAIN.toLowerCase()}`
-  const mailboxAddress = `${username}@${env.ROOT_DOMAIN.toLowerCase()}`
+  // ⚠️ 发给用户的域名取自 `root_domains` 表的**默认行**（当前 tyu.me），
+  // **不是** `env.ROOT_DOMAIN` —— 后者是站点自身域名（cloud.doulor.cn、
+  // 密码重置链接都从它拼），把它当作用户域会让所有用户把滥用风险记在主域声誉上，
+  // 而主域还担着「发验证码/找回密码」的发件人角色。详见 src/root-domains.ts。
+  const root = await getDefaultRootDomain(env)
+  const rootZoneId = (await resolveZoneId(env, root.name)) ?? env.ZONE_ID
+  const requestedFqdn = `${username}.${root.name}`
+  const mailboxAddress = `${username}@${root.name}`
 
   const conflicts = await env.DB.batch([
     env.DB.prepare(
@@ -267,9 +342,15 @@ export async function register(env: Env, request: Request): Promise<Response> {
     throw new ApiError(409, "用户名或邮箱已被占用", "CONFLICT")
   }
 
-  // 注册邮箱不得是本站域名，防止转发成环
-  if (email.endsWith(`@${env.ROOT_DOMAIN.toLowerCase()}`)) {
-    throw new ApiError(400, "真实邮箱不能是 doulor.cn 邮箱", "INVALID_EMAIL")
+  // 注册邮箱不得是本站域名，防止转发成环。
+  // 判据是「属于任一已登记根域」而不是只判 env.ROOT_DOMAIN —— 否则
+  // `xxx@tyu.me` 会被当成外部地址放进来，转发时就形成回环。
+  if (await isOwnDomain(env, email)) {
+    throw new ApiError(
+      400,
+      `真实邮箱不能是本站域名邮箱（如 @${root.name}）`,
+      "INVALID_EMAIL"
+    )
   }
 
   const passwordHash = await hashPassword(password)
@@ -338,8 +419,16 @@ export async function register(env: Env, request: Request): Promise<Response> {
   //   · 开放注册 → 与「默认邀请码」一致的那套权限（r2 等基础模块）。
   //     ⚠️ 必须写**显式** JSON，绝不能写 NULL —— parsePermissions 把 NULL 当
   //     「全部允许」，开放注册的每个新号会白拿 AI/frp/proxy，免费额度被薅。
+  //
+  // 邀请码那一路再走一遍 parsePermissions 归一化（2026-10-01 加 doulor 权限时补）：
+  //   ① 码里存的 JSON 是**建码当时**的键集合，老码没有 `doulor` 这个键。
+  //      直接原样落库 ⇒ 用户行的权限 JSON 键不全，以后再加权限还会重复踩。
+  //   ② 更麻烦的是 `invite.permissions === null`（建码时没限制）会**原样写 NULL**，
+  //      而 NULL = 全开 —— 归一化后写成显式 JSON，语义不变但把那个坑填掉了。
+  //   归一化后 doulor 恒为 false（它不在 DEFAULT_ALLOWED 里），这正是我们要的：
+  //   旧码不该因为「当年没这个键」而在今天白送主域权限。
   const invitePermissions = invite
-    ? invite.permissions ?? null
+    ? JSON.stringify(parsePermissions(invite.permissions))
     : JSON.stringify(permissionsFromFeatures(await getBasicFeatures(env)))
 
   try {
@@ -356,7 +445,7 @@ export async function register(env: Env, request: Request): Promise<Response> {
       ).bind(id, username, email, passwordHash, username, invitePermissions, invite?.id ?? null, now, now),
       env.DB.prepare(
         "INSERT INTO domains (id, user_id, name, zone_id, status, created_at) VALUES (?, ?, ?, ?, 'active', ?)"
-      ).bind(uuid(), id, requestedFqdn, env.ZONE_ID, now),
+      ).bind(uuid(), id, requestedFqdn, rootZoneId, now),
       env.DB.prepare(
         "INSERT INTO subdomains (id, user_id, name, fqdn, status, created_at) VALUES (?, ?, '@', ?, 'active', ?)"
       ).bind(uuid(), id, requestedFqdn, now),
@@ -393,6 +482,10 @@ export async function register(env: Env, request: Request): Promise<Response> {
         .bind(invite.id)
         .run()
         .catch(() => {})
+    }
+    const message = err instanceof Error ? err.message : String(err)
+    if (/unique constraint|sqlite_constraint_unique|already exists/i.test(message)) {
+      throw new ApiError(409, "用户名或邮箱已被占用", "CONFLICT")
     }
     throw err
   }
@@ -433,6 +526,13 @@ export async function register(env: Env, request: Request): Promise<Response> {
   return res
 }
 
+/**
+ * 读「最近一条有回复、但用户还没确认看过」的申诉（2026-10-02 补发机制）。
+ *
+ * 实现已挪到 `../auth`（`loadPendingReply`）—— `handlers/moderation.ts` 的
+ * `acknowledge` 接口也要用同一份查询，放在共享的 auth 模块里避免两处各写一遍。
+ */
+
 export async function login(env: Env, request: Request): Promise<Response> {
   const body = (await request.json()) as {
     identifier?: string
@@ -472,7 +572,49 @@ export async function login(env: Env, request: Request): Promise<Response> {
     throw new ApiError(401, "用户名或密码错误", "INVALID_CREDENTIALS")
   }
   if (user.status !== "active") {
-    throw new ApiError(403, "账户已被停用", "SUSPENDED")
+    // 账号被停用：**把「为什么」和最近一次申诉的结果一起返回**（2026-10-02 站长要求）。
+    //
+    // 此刻用户的处境是：登不进来、拿不到任何会话，登录页是他唯一能看到说明的地方。
+    // 只回一句「账户已被停用」，他只能靠猜 —— 于是反复申诉，或者换个小号来问。
+    //
+    // 安全性：密码已经在上面校验通过 ⇒ 这些内容只会给到**账号本人**。
+    //
+    // account_appeals 是 0096 才建的表：万一线上漏执行了迁移，这里必须降级（吞异常），
+    // 绝不能把「你被封了」这条主信息也一起打成 500。
+    let appeal: Record<string, unknown> | null = null
+    try {
+      const row = await env.DB.prepare(
+        "SELECT id, status, review_note, created_at, reviewed_at, note_read_at FROM account_appeals " +
+          "WHERE user_id = ? ORDER BY created_at DESC LIMIT 1"
+      )
+        .bind(user.id)
+        .first<{
+          id: string
+          status: string
+          review_note: string | null
+          created_at: string
+          reviewed_at: string | null
+          note_read_at: string | null
+        }>()
+      if (row) {
+        appeal = {
+          id: row.id,
+          status: row.status,
+          reviewNote: row.review_note,
+          createdAt: row.created_at,
+          reviewedAt: row.reviewed_at,
+          noteRead: row.note_read_at != null,
+        }
+      }
+    } catch {
+      /* 表不存在 / 查询失败都不影响「账号被封禁」这个主结论 */
+    }
+
+    throw new ApiError(403, "账户已被停用", "SUSPENDED", {
+      suspendReason: user.suspend_reason ?? null,
+      suspendAt: user.suspend_at ?? null,
+      appeal,
+    })
   }
 
   // 口令哈希透明升级：旧格式（单次 SHA-256）或迭代次数偏低的哈希，
@@ -517,6 +659,42 @@ export async function login(env: Env, request: Request): Promise<Response> {
     }
   }
 
+  // 二次验证（2FA）闸门 —— 必须在建 session **之前**。
+  //
+  // 这里是「管理员账号一旦口令泄露就等于易主」的唯一堵点，所以判断顺序很关键：
+  // 只有口令**已经校验通过**、且账号**未被封禁**之后，才轮到它。
+  const gate = await evaluateTwoFactorGate(env, user)
+  if (gate.needChallenge) {
+    const challenge = await createLoginChallenge(env, user, gate.methods, request)
+    // ⚠️ 此时**绝不能**下发 session cookie —— 否则 2FA 就是个摆设
+    return json({
+      needTwoFactor: true,
+      challengeId: challenge.id,
+      methods: gate.methods,
+      // 脱敏后的收件地址，让用户知道码发到哪了（不泄露完整邮箱）
+      maskedEmail: maskEmail(user.email),
+      expiresAt: challenge.expiresAt,
+    })
+  }
+
+  return completeLogin(env, user, { mustSetupTwoFactor: gate.mustSetup })
+}
+
+/**
+ * 完成登录：记最后登录时间 + 建 session + 下发 cookie。
+ *
+ * 抽出来是因为有**两条路径**会走到这里：口令直接通过（未启用 2FA 的用户），
+ * 以及二次验证通过之后。两处各写一份的话，将来改 cookie 属性、加审计字段
+ * 必然漏掉一边 —— 而「登录态怎么建立」是最不该分家的逻辑。
+ *
+ * `extra` 里的 `mustSetupTwoFactor`：该账号被要求开 2FA 但还没配。
+ * **登录照样放行**（不能把人锁在门外），由前端强制跳去设置页。
+ */
+export async function completeLogin(
+  env: Env,
+  user: UserRow,
+  extra: { mustSetupTwoFactor?: boolean } = {}
+): Promise<Response> {
   // 记下最后登录时间（存活率统计用）。
   //
   // 为什么非要单独存一列：sessions 会被定时运维每小时清理（删 7 天前已过期的），
@@ -531,10 +709,19 @@ export async function login(env: Env, request: Request): Promise<Response> {
   }
 
   const token = await createSession(env, user.id)
-  const res = new Response(JSON.stringify({ user: toPublicUser(user) }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  })
+  // 补发未读的申诉回复：用户已解封但还没确认看过回复时，登录后由前端强制弹窗展示
+  const pendingReply = await loadPendingReply(env, user.id)
+  const res = new Response(
+    JSON.stringify({
+      user: toPublicUser(user),
+      pendingReply,
+      mustSetupTwoFactor: Boolean(extra.mustSetupTwoFactor),
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }
+  )
   res.headers.set("Set-Cookie", sessionCookie(token))
   return res
 }

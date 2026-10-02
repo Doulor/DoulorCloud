@@ -14,8 +14,10 @@ import {
   cfCreateDnsRecord,
   cfDeleteDnsRecord,
   cfListDnsRecords,
+  resolveApiToken,
 } from "./cloudflare"
 import { fetchWithTimeout } from "./async-utils"
+import { zoneIdForFqdn } from "./root-domains"
 import type { Env } from "./env"
 
 /** 绑定自定义域名的 CF API 超时（2026-09-25 审计 H15） */
@@ -26,10 +28,16 @@ async function cfWorkersApi(
   path: string,
   init: RequestInit = {}
 ): Promise<Response> {
-  if (!env.CF_WORKERS_TOKEN) {
+  // 与 DNS 记录 / 邮件路由**共用同一个令牌**（见 cloudflare.ts 的 resolveApiToken）。
+  // 该令牌含 workers_routes + dns 权限，绑定自定义域名够用；
+  // 单独维护一个 CF_WORKERS_TOKEN 的结果就是「一个失效、功能半瘫」（2026-10-01 踩到）。
+  let token: string
+  try {
+    token = await resolveApiToken(env)
+  } catch {
     throw new ApiError(
       503,
-      "未配置 Cloudflare Workers 权限，无法绑定自定义域名",
+      "未配置 Cloudflare API Token，无法绑定自定义域名",
       "CF_NOT_CONFIGURED"
     )
   }
@@ -38,7 +46,7 @@ async function cfWorkersApi(
     {
       ...init,
       headers: {
-        Authorization: `Bearer ${env.CF_WORKERS_TOKEN}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         ...(init.headers ?? {}),
       },
@@ -48,9 +56,10 @@ async function cfWorkersApi(
 }
 
 async function listWorkerRoutes(
-  env: Env
+  env: Env,
+  zoneId: string
 ): Promise<{ id: string; pattern: string; script?: string }[]> {
-  const res = await cfWorkersApi(env, `/zones/${env.ZONE_ID}/workers/routes`)
+  const res = await cfWorkersApi(env, `/zones/${zoneId}/workers/routes`)
   const data = (await res.json()) as {
     result?: { id: string; pattern: string; script?: string }[]
   }
@@ -65,13 +74,18 @@ export async function attachCustomDomain(
   env: Env,
   fqdn: string
 ): Promise<{ dnsCreated: boolean }> {
+  // ⚠️ zone 必须按 fqdn 解析，不能写死 env.ZONE_ID：
+  //    用户的子域名建在哪个根域下（tyu.me / doulor.cn）就要写到哪个 zone，
+  //    写死会把记录建到 doulor.cn 上 —— 域名解析不出来，且是静默错误。
+  const zoneId = await zoneIdForFqdn(env, fqdn)
+
   // 1. DNS：AAAA 100:: + 橙云代理（与平台上其它 Worker 路由域名一致）
   //    已有解析则跳过，不覆盖用户既有配置
-  const existing = await cfListDnsRecords(env, env.ZONE_ID, fqdn)
+  const existing = await cfListDnsRecords(env, zoneId, fqdn)
   const dnsCreated = existing.length === 0
   if (dnsCreated) {
     try {
-      await cfCreateDnsRecord(env, env.ZONE_ID, {
+      await cfCreateDnsRecord(env, zoneId, {
         type: "AAAA",
         name: fqdn,
         content: "100::",
@@ -87,12 +101,12 @@ export async function attachCustomDomain(
   // 2. Worker Route
   const script = env.WORKER_NAME ?? "doulor-mail-api"
   const pattern = `${fqdn}/*`
-  const found = (await listWorkerRoutes(env)).find(
+  const found = (await listWorkerRoutes(env, zoneId)).find(
     (r) => r.pattern.toLowerCase() === pattern.toLowerCase()
   )
   if (found) return { dnsCreated }
 
-  const res = await cfWorkersApi(env, `/zones/${env.ZONE_ID}/workers/routes`, {
+  const res = await cfWorkersApi(env, `/zones/${zoneId}/workers/routes`, {
     method: "POST",
     body: JSON.stringify({ pattern, script }),
   })
@@ -105,8 +119,8 @@ export async function attachCustomDomain(
     // 回滚刚建的 DNS，避免留下解析不到内容的空域名
     if (dnsCreated) {
       try {
-        const created = await cfListDnsRecords(env, env.ZONE_ID, fqdn)
-        for (const r of created) await cfDeleteDnsRecord(env, env.ZONE_ID, r.id)
+        const created = await cfListDnsRecords(env, zoneId, fqdn)
+        for (const r of created) await cfDeleteDnsRecord(env, zoneId, r.id)
       } catch (cleanupErr) {
         console.error("回滚 DNS 记录失败:", fqdn, cleanupErr)
       }
@@ -142,14 +156,23 @@ export function isPlaceholderDnsRecord(record: {
 /** 解绑自定义域名：移除 Route 与绑定期间自动创建的 DNS 记录 */
 export async function detachCustomDomain(env: Env, fqdn: string): Promise<void> {
   const pattern = `${fqdn}/*`
+  // zone 按 fqdn 解析（用户域名可能在 tyu.me 上，写死主 zone 会删错地方）
+  let zoneId: string
   try {
-    const found = (await listWorkerRoutes(env)).find(
+    zoneId = await zoneIdForFqdn(env, fqdn)
+  } catch (err) {
+    // 解析不出 zone ⇒ 这个域名本来就没挂在我们这，没有要清理的东西
+    console.error("解绑时无法解析 zone:", fqdn, err)
+    return
+  }
+  try {
+    const found = (await listWorkerRoutes(env, zoneId)).find(
       (r) => r.pattern.toLowerCase() === pattern.toLowerCase()
     )
     if (found) {
       await cfWorkersApi(
         env,
-        `/zones/${env.ZONE_ID}/workers/routes/${found.id}`,
+        `/zones/${zoneId}/workers/routes/${found.id}`,
         { method: "DELETE" }
       )
     }
@@ -160,10 +183,10 @@ export async function detachCustomDomain(env: Env, fqdn: string): Promise<void> 
   // 清掉**占位** DNS，否则该域名会一直解析到本站，且冲突检测会认为仍被占用。
   // 只删我们自己建的 AAAA 100::，用户自建的记录（含 MX/TXT）保留 —— 见 M14b。
   try {
-    const records = await cfListDnsRecords(env, env.ZONE_ID, fqdn)
+    const records = await cfListDnsRecords(env, zoneId, fqdn)
     for (const r of records) {
       if (!isPlaceholderDnsRecord(r)) continue
-      await cfDeleteDnsRecord(env, env.ZONE_ID, r.id)
+      await cfDeleteDnsRecord(env, zoneId, r.id)
     }
   } catch (err) {
     console.error("移除自定义域名 DNS 记录失败:", fqdn, err)

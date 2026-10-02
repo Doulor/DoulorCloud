@@ -59,6 +59,7 @@ function TrafficPanel({ days }: { days: string }) {
   const maxPathPv = Math.max(1, ...data.byPath.map((p) => p.pv))
   const maxDayPv = Math.max(1, ...data.byDay.map((d) => d.pv))
   const maxRefPv = Math.max(1, ...data.byReferrer.map((r) => r.pv))
+  const maxDevicePv = Math.max(1, ...(data.byDevice ?? []).map((d) => d.pv))
 
   return (
     <div className="space-y-6">
@@ -174,6 +175,34 @@ function TrafficPanel({ days }: { days: string }) {
                   </div>
                   <span className="w-12 shrink-0 text-right tabular-nums text-muted-foreground">
                     {r.pv}
+                  </span>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+
+        {/* 设备分布 */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t("an.device")}</CardTitle>
+            <CardDescription>{t("an.deviceDesc")}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {(data.byDevice ?? []).length === 0 ? (
+              <p className="py-4 text-center text-sm text-muted-foreground">{t("common.empty")}</p>
+            ) : (
+              data.byDevice.map((d) => (
+                <div key={d.ua} className="flex items-center gap-2 text-xs">
+                  <span className="w-24 shrink-0">{t(`an.dev.${d.ua}`)}</span>
+                  <div className="h-3 flex-1 overflow-hidden rounded bg-muted">
+                    <div
+                      className="h-full rounded bg-primary/60"
+                      style={{ width: `${(d.pv / maxDevicePv) * 100}%` }}
+                    />
+                  </div>
+                  <span className="w-24 shrink-0 text-right tabular-nums text-muted-foreground">
+                    {d.pv} PV · {d.uv} UV
                   </span>
                 </div>
               ))

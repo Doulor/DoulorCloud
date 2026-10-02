@@ -314,4 +314,7 @@ npm test                         # Vitest（在 miniflare 里跑真实 Worker + 
 
 ## 许可
 
-暂未指定开源许可证。在补充 LICENSE 之前，默认保留所有权利（All rights reserved）。
+[MIT](LICENSE) © Doulor
+
+可以自由使用、修改、分发，包括商用；保留版权声明即可。
+第三方资源遵循各自许可（如自托管的 Outfit 字体为 SIL OFL、图标为 lucide 的 ISC）。

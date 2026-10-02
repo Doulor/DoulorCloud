@@ -6,6 +6,8 @@ import { guardRateLimit } from "../ratelimit"
 import { cfListDnsRecords, cfDeleteDnsRecord } from "../cloudflare"
 import { detachCustomDomain } from "../custom-domain"
 import { getSettingNumber } from "../settings"
+import { pickRootDomain, zoneIdForFqdn, listEnabledRootDomains, canUseRootDomain } from "../root-domains"
+import { userPermissions } from "../permissions"
 import type { Env } from "../env"
 
 /**
@@ -91,6 +93,18 @@ export async function listSubdomains(env: Env, request: Request): Promise<Respon
       : (perUser?.max_subdomains ??
          (await getSettingNumber(env, "subdomain_quota_default")))
 
+  // 可选根域：只给**当前用户有权限用的**那些，前端据此渲染「建在哪个域名下」。
+  // 没权限的域（如未解锁 doulor 权限时的 doulor.cn）直接不下发 ——
+  // 让前端先显示再拒绝，只会让人以为坏了。
+  const perms = userPermissions(user)
+  const roots = (await listEnabledRootDomains(env))
+    .filter((r) => canUseRootDomain(perms, r))
+    .map((r) => ({
+      name: r.name,
+      label: r.label ?? r.name,
+      isDefault: r.is_default === 1,
+    }))
+
   return json({
     subdomains: (rows.results ?? []).map((r) =>
       toPublicSubdomain(r, countBySub.get(r.id) ?? 0)
@@ -98,6 +112,7 @@ export async function listSubdomains(env: Env, request: Request): Promise<Respon
     limit,
     childLimit: MAX_CHILDREN,
     minRootNameLength: MIN_ROOT_NAME_LENGTH,
+    rootDomains: roots,
   })
 }
 
@@ -111,7 +126,12 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
   const user = await requireUser(env, request)
   // ⚠️ 2026-09-26 审计：创建会调 cfListDnsRecords 查 CF，原先零限流。
   await guardRateLimit(env, `subdomain:create:user:${user.id}`, 10, 60, "创建子域名过于频繁，请稍后再试")
-  const body = (await request.json()) as { name?: string; parentId?: string }
+  const body = (await request.json()) as {
+    name?: string
+    parentId?: string
+    /** 一级子域名建在哪个根域下（省略 = 默认域）；二级由父级决定，忽略此项 */
+    rootDomain?: string
+  }
 
   const name = (body.name ?? "").trim().toLowerCase().replace(/\.$/, "")
   if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name)) {
@@ -196,7 +216,10 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
       )
     }
 
-    fqdn = `${name}.${env.ROOT_DOMAIN.toLowerCase()}`
+    // 选根域：省略 = 默认域（tyu.me）；显式指定则要过权限闸
+    // （doulor.cn 挂 `doulor` 权限，没解锁的人拿不到）。
+    const root = await pickRootDomain(env, body.rootDomain, userPermissions(user))
+    fqdn = `${name}.${root.name}`
   }
 
   const exists = await env.DB.prepare(
@@ -208,9 +231,10 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
     throw new ApiError(409, "该子域名已被占用", "CONFLICT")
   }
 
-  // 平台外冲突：doulor.cn zone 上已有该名称的记录（如你的其它项目），不得发放
+  // 平台外冲突：该 zone 上已有同名记录（如你的其它项目），不得发放
   try {
-    const records = await cfListDnsRecords(env, env.ZONE_ID, fqdn)
+    const zoneId = await zoneIdForFqdn(env, fqdn)
+    const records = await cfListDnsRecords(env, zoneId, fqdn)
     if (records.length > 0) {
       throw new ApiError(409, "该子域名已被使用，无法分配", "CONFLICT")
     }

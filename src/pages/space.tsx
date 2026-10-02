@@ -38,14 +38,21 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Switch } from "@/components/ui/switch"
 import { achievementIcon } from "@/lib/achievement-icons"
 import { fmtTime, fmtUid, relTime } from "@/lib/format"
 import { cn } from "@/lib/utils"
-import { HttpError, spaceApi } from "@/services/api"
+import { HttpError, spaceApi, titleApi, errMsg } from "@/services/api"
 import { useT } from "@/i18n"
-import type { MySpaceSettings, SpaceData } from "@/types"
+import type { MySpaceSettings, SpaceData, MyTitle } from "@/types"
 
 /**
  * 个人空间（公开主页）。
@@ -97,6 +104,33 @@ function SettingsDialog({
     }
   }
 
+  /** 我持有的称号（可切换展示哪一个，2026-10-01） */
+  const [myTitles, setMyTitles] = React.useState<MyTitle[]>([])
+  const [titleBusy, setTitleBusy] = React.useState(false)
+
+  React.useEffect(() => {
+    titleApi
+      .mine()
+      .then((r) => setMyTitles(r.titles))
+      .catch(() => {
+        /* 静默：拿不到就只是不显示这一块 */
+      })
+  }, [])
+
+  const switchTitle = async (id: string) => {
+    const next = id === "__none__" ? null : id
+    setTitleBusy(true)
+    try {
+      await titleApi.setDisplay(next)
+      setMyTitles((prev) => prev.map((x) => ({ ...x, isDisplay: x.id === next })))
+      toast.success(t("space.settings.titleLabel"))
+    } catch (err) {
+      toast.error(errMsg(err, t("em.err.save")))
+    } finally {
+      setTitleBusy(false)
+    }
+  }
+
   const rows: { key: keyof MySpaceSettings; label: string; desc: string }[] = [
     { key: "showAchievements", label: t("space.opt.achievements"), desc: t("space.opt.achievementsDesc") },
     { key: "showStats", label: t("space.opt.stats"), desc: t("space.opt.statsDesc") },
@@ -138,6 +172,30 @@ function SettingsDialog({
                 onChange={(e) => setDraft({ ...draft, motto: e.target.value })}
               />
             </div>
+            {myTitles.length > 0 && (
+              /* 多称号时由用户自己决定展示哪一个（2026-10-01） */
+              <div className="space-y-2">
+                <Label htmlFor="spaceTitle">{t("space.settings.titleLabel")}</Label>
+                <Select
+                  value={myTitles.find((x) => x.isDisplay)?.id ?? "__none__"}
+                  disabled={titleBusy}
+                  onValueChange={(v) => void switchTitle(v)}
+                >
+                  <SelectTrigger id="spaceTitle">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">{t("space.settings.titleNone")}</SelectItem>
+                    {myTitles.map((x) => (
+                      <SelectItem key={x.id} value={x.id}>
+                        {x.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t("space.settings.titleHint")}</p>
+              </div>
+            )}
             <Separator />
             {rows.map((r) => (
               <div key={r.key} className="flex items-center justify-between gap-4">

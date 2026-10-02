@@ -11,7 +11,9 @@ import * as React from "react"
  * @param setValue 文本更新函数
  */
 export function useEmojiInsert(
-  ref: React.RefObject<HTMLTextAreaElement | null>,
+  // 社区用多行 textarea、私信用单行 input —— 两者的 selectionStart/setSelectionRange
+  // 行为一致，所以共用这一个 hook（2026-10-02 扩宽类型以支持私信）
+  ref: React.RefObject<HTMLTextAreaElement | HTMLInputElement | null>,
   value: string,
   setValue: React.Dispatch<React.SetStateAction<string>>
 ) {

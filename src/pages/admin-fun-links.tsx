@@ -232,7 +232,7 @@ export function FunLinksAdminPanel() {
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="truncate text-sm font-medium">{l.title}</span>
-                      <Badge variant="outline">{funLinkCategoryLabel(l.category)}</Badge>
+                      <Badge variant="outline">{t(funLinkCategoryLabel(l.category))}</Badge>
                       {!l.enabled && <Badge variant="secondary">{t("afl.unlisted")}</Badge>}
                     </div>
                     <a

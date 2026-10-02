@@ -69,7 +69,7 @@ import {
   HttpError,
 } from "@/services/api"
 import { fmtTime } from "@/lib/format"
-import { useT, tStatic } from "@/i18n"
+import { useT, tStatic, translateApiMessage } from "@/i18n"
 import type {
   AiProbeResult,
   DonationOverview,
@@ -382,7 +382,7 @@ export default function DonationPage() {
             <CardHeader className="flex flex-row items-start justify-between">
               <div className="space-y-1">
                 <CardTitle className="text-base">
-                  {TYPE_META[d.type]?.label ?? d.type}
+                  {t(TYPE_META[d.type]?.label ?? d.type)}
                 </CardTitle>
                 <CardDescription>{fmtTime(d.createdAt)}</CardDescription>
               </div>
@@ -460,7 +460,7 @@ export default function DonationPage() {
     <Card className="mb-6">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
-          {TYPE_META[type]?.label}
+          {t(TYPE_META[type]?.label ?? "")}
           {perms?.[type as keyof Permissions] ? (
             <Badge variant="success">{t("don.unlocked")}</Badge>
           ) : (
@@ -561,7 +561,7 @@ export default function DonationPage() {
                       >
                         <div className="space-y-0.5">
                           <p className="flex items-center gap-2 text-sm font-medium">
-                            {label}
+                            {translateApiMessage(label)}
                             {unlocked ? (
                               <Badge variant="success">{t("don.unlocked")}</Badge>
                             ) : (
@@ -569,7 +569,7 @@ export default function DonationPage() {
                             )}
                           </p>
                           <p className="text-xs text-muted-foreground">
-                            {TYPE_META[type]?.desc}
+                            {t(TYPE_META[type]?.desc ?? "")}
                           </p>
                         </div>
                         {/* 跳到对应分区，而不是直接弹表单 —— 那里有完整的说明与
@@ -1275,7 +1275,7 @@ function DonationForm({
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{t("don.dlg.title", { label: t(meta?.label ?? "") })}</DialogTitle>
-          <DialogDescription>{meta?.desc}</DialogDescription>
+          <DialogDescription>{t(meta?.desc ?? "")}</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
@@ -1335,7 +1335,7 @@ function DonationForm({
                   <SelectContent>
                     {AI_FORMATS.map((f) => (
                       <SelectItem key={f.value} value={f.value}>
-                        {f.label}
+                        {t(f.label)}
                       </SelectItem>
                     ))}
                   </SelectContent>

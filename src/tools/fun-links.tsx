@@ -87,7 +87,7 @@ export default function FunLinksTool() {
               </TabsTrigger>
               {FUN_LINK_CATEGORIES.map((c) => (
                 <TabsTrigger key={c.id} value={c.id} className="gap-1.5">
-                  {c.label}
+                  {t(c.label)}
                   {links !== null && (
                     <span className="text-[11px] text-muted-foreground">
                       {counts[c.id] ?? 0}

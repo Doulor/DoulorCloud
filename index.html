@@ -6,6 +6,8 @@
     <meta name="description" content="Doulor Cloud — 一站式云端平台，域名与服务开箱即用。" />
     <link rel="icon" type="image/png" href="/favicon.png?v=2" />
     <link rel="apple-touch-icon" href="/favicon.png?v=2" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#0a0a0a" />
     <title>Doulor Cloud</title>
 
     <!--
@@ -180,11 +182,66 @@
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
     <script>
+      // PWA：等页面加载完再注册 Service Worker，不抢首屏时间。
+      // 注册失败（旧浏览器/隐私模式）不影响站点本身。
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", function () {
+          navigator.serviceWorker.register("/sw.js").catch(function () {})
+        })
+      }
+    </script>
+    <script>
       // 动画播完（1.32s）就从 DOM 里摘掉：虽然那时已经全透明，但留着会挡住鼠标点击。
       setTimeout(function () {
         var el = document.getElementById("boot-splash");
         if (el) el.remove();
       }, 1500);
+    </script>
+    <script>
+      /**
+       * 「一行 JS 都没跑起来」时的自救。
+       *
+       * 场景：部署后 chunk 哈希变了，而用户浏览器里还留着**旧 HTML**（它记着旧的
+       * `assets/index-<old>.js`）。那个文件服务器上已经没有了 → 404 →
+       * **入口脚本本身加载失败，任何业务 JS 都不会执行**。
+       * 于是 src/lib/chunk-error.ts 那套全局兜底（它自己也是 JS）根本没机会生效，
+       * 页面就停在启动画面上 —— 用户看到的就是「只有背景」（2026-10-02 站长反馈）。
+       *
+       * 这段内联脚本在 HTML 里就地生效，不依赖任何外部资源：
+       *   ① 模块脚本加载失败 → 立刻刷新一次；
+       *   ② 兜底：5 秒后应用仍未挂载（root 还是空的）→ 也刷新一次。
+       * 两种情况都用 sessionStorage 防循环（10 秒内只刷一次），
+       * 免得真的断网时无限刷新。
+       */
+      (function () {
+        var KEY = "boot-reload-at";
+        function reloadOnce() {
+          try {
+            var last = Number(sessionStorage.getItem(KEY) || 0);
+            if (Date.now() - last < 10000) return; // 刚刷过 → 放弃，交给用户手动刷新
+            sessionStorage.setItem(KEY, String(Date.now()));
+          } catch (e) {
+            // 隐私模式等场景 sessionStorage 不可用：仍然刷一次
+          }
+          location.reload();
+        }
+        // ① 模块脚本 404 会以 error 事件冒泡到 window，必须用 capture 才收得到
+        window.addEventListener(
+          "error",
+          function (e) {
+            var t = e.target;
+            if (t && t.tagName === "SCRIPT") reloadOnce();
+          },
+          true
+        );
+        // ② 兜底：React 没挂载成功（root 为空）也刷一次。
+        //    5 秒是折中：splash 1.5 秒就淡出了，正常网络下此时早已挂载完；
+        //    再长用户就盯着空白屏发呆，再短会误伤慢网络。
+        setTimeout(function () {
+          var root = document.getElementById("root");
+          if (root && root.childElementCount === 0) reloadOnce();
+        }, 5000);
+      })();
     </script>
   </body>
 </html>

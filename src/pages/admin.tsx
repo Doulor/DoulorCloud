@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Search,
   ShieldBan,
+  ShieldAlert,
   Medal,
   SlidersHorizontal,
   Network,
@@ -56,6 +57,7 @@ import { AuditPanel } from "./admin-audit"
 import { PointsAdminPanel } from "./admin-points"
 import { FunLinksAdminPanel } from "./admin-fun-links"
 import { TitlesAdminPanel } from "./admin-titles"
+import { ModerationAdminPanel } from "./admin-moderation"
 // DNS 解析管理（全站记录 / 合规扫描 / 与 Cloudflare 对账）同理外置
 import { DnsAdminPanel } from "./admin-dns"
 
@@ -112,6 +114,7 @@ import {
 } from "@/components/ui/table"
 import {
   adminApi,
+  twoFactorApi,
   announcementApi,
   adminEventApi,
   donationApi,
@@ -133,6 +136,9 @@ const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
   { key: "ai", label: "feat.ai", desc: "adm.feat.aiDesc" },
   { key: "frp", label: "feat.frp", desc: "adm.feat.frpDesc" },
   { key: "proxy", label: "feat.proxy", desc: "adm.feat.proxyDesc" },
+  // doulor.cn 专属域：**默认关闭**，只能在这里显式打开（后端 allPermissions()
+  // 不含它，见 worker/src/permissions.ts 的 DEFAULT_ALLOWED）。
+  { key: "doulor", label: "feat.doulor", desc: "adm.feat.doulorDesc" },
 ]
 
 import type {
@@ -230,7 +236,7 @@ function BoolMark({ on, title }: { on: boolean; title?: string }) {
   return (
     <span
       className="inline-flex items-center justify-center"
-      title={title ?? (on ? tStatic("adm.on") : tStatic("adm.off"))}
+      title={title ?? (on ? tStatic("common.on") : tStatic("common.off"))}
     >
       {on ? (
         <CheckCircle2 className="h-4 w-4 text-emerald-600" />
@@ -433,6 +439,14 @@ const EVENT_STATUS_TEXT: Record<EventStatus, string> = {
   archived: "adm.evStatus.archivedShort",
 }
 
+/** 管理面板全部子 tab（用于 URL hash 校验：/dashboard/admin#users 直达） */
+const ADMIN_TAB_KEYS = new Set([
+  "users", "invites", "inviteQuotas", "reserved", "titles", "points",
+  "donations", "feedback", "announcements", "events", "community", "moderation",
+  "dns", "newapi", "r2", "frp", "proxy", "mail", "analytics", "cfQuota", "audit",
+  "oauth", "settings", "funLinks", "wb2api",
+])
+
 export default function AdminPage() {
   const { t } = useT()
   const { user } = useAuth()
@@ -440,8 +454,13 @@ export default function AdminPage() {
   const [filter, setFilter] = React.useState("")
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
-  // 管理面板当前激活的 tab（受控，供「更多」下拉切换）
-  const [activeTab, setActiveTab] = React.useState("users")
+  // 管理面板当前激活的 tab（受控，供「更多」下拉切换）。
+  // 初始值从 URL hash 读：/dashboard/admin#users 直接打开「用户」栏，
+  // 刷新/分享链接都保持停留在那个子 tab。
+  const [activeTab, setActiveTab] = React.useState<string>(() => {
+    const h = (typeof window !== "undefined" ? window.location.hash : "").replace(/^#\/?/, "")
+    return h && ADMIN_TAB_KEYS.has(h) ? h : "users"
+  })
   // 各栏目「待处理」角标（反馈 / 捐献 / 积分 / 活动），与侧边栏「管理」总角标同源
   const [attention, setAttention] = React.useState<AttentionCounts["admin"]>(null)
 
@@ -465,6 +484,9 @@ export default function AdminPage() {
     ai: true,
     frp: true,
     proxy: true,
+    // doulor.cn 专属域默认**不开**：建码时要显式勾选才会授予
+    // （与后端 allPermissions() 的口径一致，见 worker/src/permissions.ts）
+    doulor: false,
   })
 
   // 子域名配额编辑
@@ -568,14 +590,13 @@ export default function AdminPage() {
     maxUsers: "8",
     /** 单位 MB（界面按 MB 填，提交时 ×1024×1024 换算成字节） */
     quotaPerUser: "1024",
+    /** 单位 GB（提交时 ×1024³ 换算成字节） */
+    capacityBytes: "10",
     sortOrder: "0",
     kind: "user",
   })
   /** 用户改派：{ 用户名: 目标桶 id } 的临时选择 */
   const [assignTarget, setAssignTarget] = React.useState<Record<string, string>>({})
-  /** 设置页「每桶人数上限」的草稿值（桶 id → 输入框内容）；有草稿才算「未保存」 */
-  const [bucketMaxDraft, setBucketMaxDraft] = React.useState<Record<string, string>>({})
-  const [bucketMaxBusy, setBucketMaxBusy] = React.useState<string | null>(null)
   /** 自动发现的账户与桶（用全局 token 拉取） */
   const [r2Discovered, setR2Discovered] = React.useState<{
     available: boolean
@@ -693,6 +714,9 @@ export default function AdminPage() {
   const [frpEnabled, setFrpEnabled] = React.useState(true)
   const [frpCoreUrl, setFrpCoreUrl] = React.useState("")
   const [frpNotifyEmail, setFrpNotifyEmail] = React.useState("")
+  // 落地页「下载」区的安卓 / Windows 链接
+  const [downloadAndroidUrl, setDownloadAndroidUrl] = React.useState("")
+  const [downloadWindowsUrl, setDownloadWindowsUrl] = React.useState("")
   const [notifyEmailOptions, setNotifyEmailOptions] = React.useState<string[]>([])
   // 出站邮件通道
   const [mailTransportOrder, setMailTransportOrder] = React.useState("posta,brevo,cf")
@@ -731,6 +755,11 @@ export default function AdminPage() {
   // 限时开放注册：打开后注册无需邀请码；可设截止时间（datetime-local 本地值）
   const [openRegistration, setOpenRegistration] = React.useState(false)
   const [openRegistrationUntil, setOpenRegistrationUntil] = React.useState("")
+  // 注册准入（2026-10-02）：邮箱域名白名单 + 同 IP 累计注册上限
+  const [registerEmailDomains, setRegisterEmailDomains] = React.useState("")
+  const [registerIpDailyLimit, setRegisterIpDailyLimit] = React.useState("3")
+  /** 风险账户判定阈值（单账号每分钟请求数） */
+  const [riskPeakThreshold, setRiskPeakThreshold] = React.useState("20")
   // 自动审核：打开后该模块的捐献提交即自动审核（r2 没有捐献，不在列表里）
   const [autoReview, setAutoReview] = React.useState<Record<string, boolean>>({
     ai: true,
@@ -823,7 +852,23 @@ export default function AdminPage() {
     action: "approve" | "reject"
   } | null>(null)
   const [frpReviewNote, setFrpReviewNote] = React.useState("")
+  /** 编辑待审核申请的弹窗（账号名/密码/端口/通知邮箱/备注） */
+  const [frpEditTarget, setFrpEditTarget] = React.useState<AdminFrpApplication | null>(null)
+  const [frpEditDraft, setFrpEditDraft] = React.useState({
+    frpUser: "",
+    frpPassword: "",
+    /** 文本框：逗号/空格分隔，可写 a-b 范围 */
+    ports: "",
+    notifyEmail: "",
+    remark: "",
+  })
   const [nodeOpen, setNodeOpen] = React.useState(false)
+  /** 节点编辑弹窗里的「占用端口」列表 + 新增草稿 */
+  const [nodePorts, setNodePorts] = React.useState<
+    { port: number; owner: string | null; manual: boolean }[]
+  >([])
+  const [nodePortsLoading, setNodePortsLoading] = React.useState(false)
+  const [nodePortAdd, setNodePortAdd] = React.useState("")
   const [nodeForm, setNodeForm] = React.useState({
     id: "",
     name: "",
@@ -888,7 +933,7 @@ export default function AdminPage() {
       )
       toast.success(
         reviewTarget.action === "approve"
-          ? `已通过，${reviewTarget.donation.username} 的对应功能已解锁`
+          ? t("adm.923", { v0: reviewTarget.donation.username })
           : t("adm.8")
       )
       setReviewTarget(null)
@@ -914,16 +959,16 @@ export default function AdminPage() {
           : d.type === "proxy"
             ? t("adm.12")
             : ""
-    if (!confirm(`撤销「${d.username}」的捐献审核？\n\n撤销后回到待审核；若该捐献授予过权限，会自动收回${extra}。`)) return
+    if (!confirm(t("adm.924", { v0: d.username, v1: extra }))) return
     setDonationBusy(true)
     try {
       const res = await donationApi.revoke(d.id)
-      const parts = [res.revokedPermission ? "已撤销并收回权限" : "已撤销（该捐献未授予新权限）"]
+      const parts = [res.revokedPermission ? t("adm.925") : t("adm.926")]
       // 商汤通道返回的是一句话说明（已移除 / 没找到那把 Key，请手工处理），
       // 不能笼统地说「渠道已删除」—— 那个渠道是共享的，根本没删。
       if (res.releaseMessage) parts.push(res.releaseMessage.replace(/^（|）$/g, ""))
       else if (res.releasedChannel) parts.push(t("adm.13"))
-      if (res.releasedSubscriptions) parts.push(`已移出 ${res.releasedSubscriptions} 个订阅源`)
+      if (res.releasedSubscriptions) parts.push(t("adm.927", { v0: res.releasedSubscriptions }))
       toast.success(parts.join("，"))
       await loadDonations()
       notifyAttentionChanged() // 撤销后回到待审核，捐献角标当场 +1
@@ -945,7 +990,7 @@ export default function AdminPage() {
     try {
       const res = await donationApi.provision(d.id)
       if (res.ok) {
-        toast.success(res.detail ? `渠道已接入：${res.detail}` : t("adm.15"))
+        toast.success(res.detail ? t("adm.928", { v0: res.detail }) : t("adm.15"))
       } else {
         toast.error(res.detail || res.message || t("adm.16"))
       }
@@ -1019,12 +1064,13 @@ export default function AdminPage() {
       })
       toast.success(
         frpReviewTarget.action === "approve"
-          ? `已通过，结果已邮件通知 ${frpReviewTarget.app.notifyEmail}`
-          : `已拒绝，结果已邮件通知 ${frpReviewTarget.app.notifyEmail}`
+          ? t("adm.929", { v0: frpReviewTarget.app.notifyEmail })
+          : t("adm.930", { v0: frpReviewTarget.app.notifyEmail })
       )
       setFrpReviewTarget(null)
       setFrpReviewNote("")
       await loadFrp()
+      notifyAttentionChanged() // 待审核 frp 申请角标当场减一，不用等 60 秒轮询
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.22"))
     } finally {
@@ -1032,15 +1078,150 @@ export default function AdminPage() {
     }
   }
 
+  /** 打开编辑弹窗，把当前申请的值填进草稿 */
+  const openFrpEdit = (app: AdminFrpApplication) => {
+    setFrpEditDraft({
+      frpUser: app.frpUser,
+      frpPassword: app.frpPassword,
+      ports: app.ports.join(", "),
+      notifyEmail: app.notifyEmail,
+      remark: app.remark ?? "",
+    })
+    setFrpEditTarget(app)
+  }
+
+  /** 把「23457-23460, 39000」这类文本解析成端口数组 */
+  const parsePortsText = (raw: string): number[] => {
+    const out: number[] = []
+    for (const part of raw.split(/[\s,，]+/).map((x) => x.trim()).filter(Boolean)) {
+      const m = /^(\d+)\s*-\s*(\d+)$/.exec(part)
+      if (m) {
+        const a = Number(m[1])
+        const b = Number(m[2])
+        for (let p = Math.min(a, b); p <= Math.max(a, b); p++) out.push(p)
+      } else {
+        const n = Number(part)
+        if (Number.isFinite(n)) out.push(Math.trunc(n))
+      }
+    }
+    return [...new Set(out)].sort((a, b) => a - b)
+  }
+
+  const handleSaveFrpEdit = async () => {
+    if (!frpEditTarget) return
+    const ports = parsePortsText(frpEditDraft.ports)
+    if (ports.length === 0) {
+      toast.error(t("adm.1239"))
+      return
+    }
+    setFrpBusy(true)
+    try {
+      await adminApi.updateFrpApplication({
+        id: frpEditTarget.id,
+        frpUser: frpEditDraft.frpUser.trim(),
+        ...(frpEditTarget.needAccount ? { frpPassword: frpEditDraft.frpPassword } : {}),
+        ports,
+        notifyEmail: frpEditDraft.notifyEmail.trim(),
+        remark: frpEditDraft.remark,
+      })
+      toast.success(t("adm.1238"))
+      setFrpEditTarget(null)
+      await loadFrp()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.1240"))
+    } finally {
+      setFrpBusy(false)
+    }
+  }
+
   const handleRevokeFrp = async (app: AdminFrpApplication) => {
-    if (!confirm(`撤销「${app.siteUsername}」的申请审核？\n\n撤销后回到待审核；已占用的端口会被释放。`)) return
+    if (!confirm(t("adm.931", { v0: app.siteUsername }))) return
     setFrpBusy(true)
     try {
       await adminApi.revokeFrp(app.id)
       toast.success(t("adm.23"))
       await loadFrp()
+      notifyAttentionChanged() // 撤销后回到待审核，角标当场 +1
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.24"))
+    } finally {
+      setFrpBusy(false)
+    }
+  }
+
+  // 打开节点编辑弹窗时，拉一次该节点已占用的端口
+  React.useEffect(() => {
+    if (!nodeOpen || !nodeForm.id) {
+      setNodePorts([])
+      return
+    }
+    let cancelled = false
+    setNodePortsLoading(true)
+    adminApi
+      .listFrpPorts(nodeForm.id)
+      .then((r) => !cancelled && setNodePorts(r.ports))
+      .catch(() => !cancelled && setNodePorts([]))
+      .finally(() => !cancelled && setNodePortsLoading(false))
+    return () => {
+      cancelled = true
+    }
+  }, [nodeOpen, nodeForm.id])
+
+  const reloadNodePorts = async () => {
+    if (!nodeForm.id) return
+    const r = await adminApi.listFrpPorts(nodeForm.id)
+    setNodePorts(r.ports)
+  }
+
+  const handleAddNodePorts = async () => {
+    if (!nodeForm.id) return
+    const ports = parsePortsText(nodePortAdd)
+    if (ports.length === 0) {
+      toast.error(t("adm.1239"))
+      return
+    }
+    setFrpBusy(true)
+    try {
+      await adminApi.occupyFrpPorts({ nodeId: nodeForm.id, ports })
+      toast.success(t("adm.1249"))
+      setNodePortAdd("")
+      await reloadNodePorts()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.1251"))
+    } finally {
+      setFrpBusy(false)
+    }
+  }
+
+  /** 把端口列表折叠成连续区间：[20008,20009,21000] → [{from:20008,to:20009},{from:21000,to:21000}] */
+  const groupPortRuns = (ports: number[]): { from: number; to: number }[] => {
+    const sorted = [...ports].sort((a, b) => a - b)
+    const out: { from: number; to: number }[] = []
+    for (const p of sorted) {
+      const last = out[out.length - 1]
+      if (last && p === last.to + 1) last.to = p
+      else out.push({ from: p, to: p })
+    }
+    return out
+  }
+
+  /** 解除一段连续端口（展开成列表后交给 handleFreeNodePorts，分段避免一次太多） */
+  const handleFreeNodePortRun = async (from: number, to: number) => {
+    if (!nodeForm.id) return
+    const ports: number[] = []
+    for (let p = from; p <= to; p++) ports.push(p)
+    await handleFreeNodePorts(ports)
+  }
+
+  const handleFreeNodePorts = async (ports: number[]) => {
+    if (!nodeForm.id || ports.length === 0) return
+    setFrpBusy(true)
+    try {
+      await adminApi.freeFrpPorts({ nodeId: nodeForm.id, ports })
+      toast.success(t("adm.1250"))
+      await reloadNodePorts()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.1251"))
     } finally {
       setFrpBusy(false)
     }
@@ -1245,6 +1426,8 @@ export default function AdminPage() {
       setFrpEnabled(isSettingOn(s.frp_enabled, true))
       setFrpCoreUrl(s.frp_core_url ?? "")
       setFrpNotifyEmail(s.frp_admin_notify_email ?? "")
+      setDownloadAndroidUrl(s.download_android_url ?? "")
+      setDownloadWindowsUrl(s.download_windows_url ?? "")
       setNotifyEmailOptions(res.notifyEmailOptions ?? [])
       setTempboxEnabled(isSettingOn(s.tempbox_enabled, true))
       setTempboxMinutes(s.tempbox_default_minutes ?? "30")
@@ -1280,6 +1463,9 @@ export default function AdminPage() {
       // 限时开放注册：总开关 + 截止时间（后端存 ISO，转成本地 datetime-local 显示）
       setOpenRegistration(isSettingOn(s.open_registration, false))
       setOpenRegistrationUntil(toLocalInput(s.open_registration_until || null))
+      setRegisterEmailDomains(s.register_email_domains ?? "")
+      setRegisterIpDailyLimit(s.register_ip_daily_limit ?? "3")
+      setRiskPeakThreshold(s.risk_peak_per_minute_threshold ?? "20")
       // 自动审核：后端存空串表示「全部转人工」
       const autoRaw = (s.auto_review_features ?? "").split(",").map((x) => x.trim()).filter(Boolean)
       setAutoReview({
@@ -1353,6 +1539,8 @@ export default function AdminPage() {
         frp_enabled: frpEnabled,
         frp_core_url: frpCoreUrl,
         frp_admin_notify_email: frpNotifyEmail,
+        download_android_url: downloadAndroidUrl.trim(),
+        download_windows_url: downloadWindowsUrl.trim(),
         tempbox_enabled: tempboxEnabled,
         tempbox_default_minutes: Math.round(Number(tempboxMinutes) || 30),
         tempbox_max_file_bytes: Math.round(Number(tempboxMaxFileMb) * 1024 * 1024),
@@ -1376,6 +1564,9 @@ export default function AdminPage() {
         // 限时开放注册：总开关 + 截止时间（本地时间转 ISO；留空 = 不自动关闭）
         open_registration: openRegistration,
         open_registration_until: fromLocalInput(openRegistrationUntil) ?? "",
+        register_email_domains: registerEmailDomains,
+        register_ip_daily_limit: registerIpDailyLimit,
+        risk_peak_per_minute_threshold: riskPeakThreshold,
         // 自动审核的模块，逗号分隔；全关时发空串 = 全部转人工
         auto_review_features: Object.entries(autoReview)
           .filter(([, on]) => on)
@@ -1471,7 +1662,7 @@ export default function AdminPage() {
     const keep = brevoKeys.map((_, i) => i + 1)
     if (await saveBrevoKeys(keep, added)) {
       setBrevoAddInput("")
-      toast.success(`已添加 ${added.length} 把 Brevo Key`)
+      toast.success(t("adm.932", { v0: added.length }))
     }
   }
 
@@ -1583,7 +1774,7 @@ export default function AdminPage() {
           : t("adm.55")
       )
       if (res.upstreamWarning) {
-        toast.warning(`网关侧移除失败：${res.upstreamWarning}`)
+        toast.warning(t("adm.933", { v0: res.upstreamWarning }))
       }
       setWb2apiRemoving(null)
       void loadWb2api()
@@ -1653,7 +1844,7 @@ export default function AdminPage() {
           : t("adm.64")
       )
       if (res.upstreamWarning) {
-        toast.warning(`上游删除失败：${res.upstreamWarning}`)
+        toast.warning(t("adm.934", { v0: res.upstreamWarning }))
       }
       setCli2apiRemoving(null)
       void loadCli2api()
@@ -1802,7 +1993,7 @@ export default function AdminPage() {
     try {
       const res = await adminApi.removeReserved(name)
       setReserved(res.reserved)
-      toast.success(`已取消保留 ${name}`)
+      toast.success(t("adm.935", { v0: name }))
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.78"))
     }
@@ -1902,11 +2093,11 @@ export default function AdminPage() {
       // 邮件已入队、后台分批发送：这里只说「已排入队列」，真实进度看列表里的
       // 「推送中 x/y」标记（loadAnnouncements 会刷新）
       if (res.queued) {
-        toast.success(`已排入邮件队列（${res.queued} 个收件人），后台正在分批发送`)
+        toast.success(t("adm.936", { v0: res.queued }))
       } else if (annDraft.status === "draft") {
         toast.success(t("adm.84"))
       } else if (annDraft.status === "scheduled") {
-        toast.success(`已设置定时发布（${new Date(fromLocalInput(annDraft.publishAt)!).toLocaleString("zh-CN")}）`)
+        toast.success(t("adm.937", { v0: new Date(fromLocalInput(annDraft.publishAt)!).toLocaleString("zh-CN") }))
       } else {
         toast.success(annDraft.id ? t("adm.85") : t("adm.86"))
       }
@@ -1941,7 +2132,7 @@ export default function AdminPage() {
       if (res.requeued === 0) {
         toast.info(t("adm.90"))
       } else {
-        toast.success(`已重新排入队列（${res.requeued} 封），后台正在发送`)
+        toast.success(t("adm.938", { v0: res.requeued }))
       }
       void loadAnnouncements()
     } catch (err) {
@@ -2018,7 +2209,7 @@ export default function AdminPage() {
         eventDraft.id
           ? t("adm.96")
           : res.inserted > 0
-            ? `已发布，推送给 ${res.inserted} 个用户`
+            ? t("adm.939", { v0: res.inserted })
             : t("adm.97")
       )
       setEventOpen(false)
@@ -2031,7 +2222,7 @@ export default function AdminPage() {
   }
 
   const handleDeleteEvent = async (ev: EventItem) => {
-    if (!confirm(`确定删除活动「${ev.title}」？领取记录会一并删除。`)) return
+    if (!confirm(t("adm.940", { v0: ev.title }))) return
     try {
       await adminEventApi.remove(ev.id)
       void loadEvents()
@@ -2047,10 +2238,10 @@ export default function AdminPage() {
     if (!l) return
     if (
       !confirm(
-        `现在给「${ev.title}」开奖？\n\n当前 ${ev.claimCount ?? 0} 人报名，` +
-          `将随机抽 ${Math.min(l.winners, ev.claimCount ?? 0)} 人，` +
-          `共发放 ${l.pool} 积分（${l.mode === "even" ? "平均分" : "随机分"}）。\n` +
-          `开奖后不可撤销，也不能再有人报名。`
+        t("adm.941", { v0: ev.title, v1: ev.claimCount ?? 0 }) +
+          t("adm.942", { v0: Math.min(l.winners, ev.claimCount ?? 0) }) +
+          t("adm.943", { v0: l.pool, v1: l.mode === "even" ? t("adm.944") : t("adm.945") }) +
+          t("adm.946")
       )
     ) {
       return
@@ -2059,8 +2250,8 @@ export default function AdminPage() {
     try {
       const res = await adminEventApi.draw(ev.id)
       toast.success(
-        `开奖完成：${res.participants} 人报名，抽中 ${res.winners} 人，共发放 ${res.distributed} 积分` +
-          (res.failed > 0 ? `（${res.failed} 份发放失败，可在领取名单手动补）` : "")
+        t("adm.947", { v0: res.participants, v1: res.winners, v2: res.distributed }) +
+          (res.failed > 0 ? t("adm.948", { v0: res.failed }) : "")
       )
       void loadEvents()
     } catch (err) {
@@ -2143,6 +2334,8 @@ export default function AdminPage() {
         maxUsers: String(bucket.maxUsers),
         // 草稿单位 MB（库里存的是字节）
         quotaPerUser: String(Math.round((bucket.quotaPerUser / 1024 / 1024) * 100) / 100),
+        // 桶容量草稿单位 GB
+        capacityBytes: String(Math.round((bucket.capacityBytes / 1024 / 1024 / 1024) * 100) / 100),
         sortOrder: String(bucket.sortOrder),
         kind: bucket.kind ?? "user",
       })
@@ -2159,6 +2352,7 @@ export default function AdminPage() {
         analyticsToken: "",
         maxUsers: "8",
         quotaPerUser: "1024",
+        capacityBytes: "10",
         sortOrder: "0",
         kind: "user",
       })
@@ -2178,7 +2372,7 @@ export default function AdminPage() {
     } catch (err) {
       setR2Discovered({
         available: false,
-        reason: err instanceof HttpError ? err.message : "自动发现失败",
+        reason: err instanceof HttpError ? err.message : t("adm.949"),
         accounts: [],
       })
     } finally {
@@ -2222,6 +2416,8 @@ export default function AdminPage() {
         maxUsers: Number(r2Draft.maxUsers) || 8,
         // 草稿是 MB，后端要字节
         quotaPerUser: Math.round((Number(r2Draft.quotaPerUser) || 1024) * 1024 * 1024),
+        // 草稿是 GB，后端要字节
+        capacityBytes: Math.round((Number(r2Draft.capacityBytes) || 10) * 1024 * 1024 * 1024),
         sortOrder: Number(r2Draft.sortOrder) || 0,
       }
       if (r2EditId) {
@@ -2260,7 +2456,7 @@ export default function AdminPage() {
   }
 
   const handleDeleteR2Bucket = async (id: string, name: string) => {
-    if (!confirm(`确定删除桶「${name}」？仍有用户分配时会被拒绝。`)) return
+    if (!confirm(t("adm.950", { v0: name }))) return
     try {
       await r2AdminApi.remove(id)
       void loadR2()
@@ -2280,42 +2476,11 @@ export default function AdminPage() {
     }
   }
 
-  /**
-   * 设置页直接改某个桶的「人数上限」。
-   *
-   * 只发 maxUsers 一个字段：后端是「undefined 就保留原值」的局部更新，
-   * 这样不必把端点/凭据等敏感字段回传（回传空串反而会被当成「要清空」）。
-   */
-  const handleSaveBucketMaxUsers = async (bucketId: string) => {
-    const raw = bucketMaxDraft[bucketId]
-    const n = Math.trunc(Number(raw))
-    if (!Number.isFinite(n) || n < 1) {
-      toast.error(t("adm.117"))
-      return
-    }
-    setBucketMaxBusy(bucketId)
-    try {
-      await r2AdminApi.update(bucketId, { maxUsers: n })
-      // 清掉这一行的草稿，让它回到「已保存」状态
-      setBucketMaxDraft((d) => {
-        const next = { ...d }
-        delete next[bucketId]
-        return next
-      })
-      await loadR2()
-      toast.success(t("adm.118"))
-    } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("adm.119"))
-    } finally {
-      setBucketMaxBusy(null)
-    }
-  }
-
   const handleAssignBucket = async (username: string, bucketId: string) => {
     try {
       await r2AdminApi.assign(username, bucketId)
       void loadR2()
-      toast.success(`已把 ${username} 改派到 ${bucketId || t("adm.120")}`)
+      toast.success(t("adm.951", { v0: username, v1: bucketId || t("adm.120") }))
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.121"))
     }
@@ -2325,23 +2490,23 @@ export default function AdminPage() {
   const handleAssignAll = async (bucketId: string, bucketName: string) => {
     if (
       !confirm(
-        `把全部「未分配桶」的用户迁入「${bucketName}」？\n\n` +
-          `只改数据库归属，不搬文件。若该桶与默认桶指向同一物理桶则完全安全。`
+        t("adm.952", { v0: bucketName }) +
+          t("adm.953")
       )
     )
       return
     try {
       const res = await r2AdminApi.assignAll(bucketId)
       void loadR2()
-      toast.success(`已迁入 ${res.moved} 个用户`)
+      toast.success(t("adm.954", { v0: res.moved }))
     } catch (err) {
       if (err instanceof HttpError && err.code === "BUCKET_FULL") {
         // 超上限：明确告知后可强制
-        if (confirm(`${err.message}\n\n仍要强制迁移吗？`)) {
+        if (confirm(t("adm.955", { v0: err.message }))) {
           try {
             const res = await r2AdminApi.assignAll(bucketId, true)
             void loadR2()
-            toast.success(`已强制迁入 ${res.moved} 个用户`)
+            toast.success(t("adm.956", { v0: res.moved }))
           } catch (e2) {
             toast.error(e2 instanceof HttpError ? e2.message : t("adm.122"))
           }
@@ -2357,7 +2522,7 @@ export default function AdminPage() {
     try {
       const res = await adminApi.recalculateStorage()
       toast.success(
-        `已重算 ${res.accounts} 个账户，合计 ${formatBytes(res.totalBytes)}`
+        t("adm.957", { v0: res.accounts, v1: formatBytes(res.totalBytes) })
       )
       await loadSettings()
     } catch (err) {
@@ -2438,8 +2603,8 @@ export default function AdminPage() {
     if (bytes < detail.storage.usedBytes) {
       if (
         !confirm(
-          `该用户已用 ${formatBytes(detail.storage.usedBytes)}，改成 ${formatBytes(bytes)} 后会超额。\n` +
-            `已有文件不会被删，但该用户将无法再上传。确定继续？`
+          t("adm.958", { v0: formatBytes(detail.storage.usedBytes), v1: formatBytes(bytes) }) +
+            t("adm.959")
         )
       ) {
         return
@@ -2493,26 +2658,26 @@ export default function AdminPage() {
       }
       if (u.quotaBytes !== defaultBytes) {
         preview.push(
-          `${u.username}：${formatBytes(u.quotaBytes)} → ${formatBytes(defaultBytes)}（默认桶）`
+          t("adm.960", { v0: u.username, v1: formatBytes(u.quotaBytes), v2: formatBytes(defaultBytes) })
         )
       }
     }
     const shown = preview.slice(0, 12)
-    const more = preview.length > shown.length ? `\n…另外 ${preview.length - shown.length} 人` : ""
+    const more = preview.length > shown.length ? t("adm.961", { v0: preview.length - shown.length }) : ""
     const ok = confirm(
-      `把存量用户的网盘配额改成「所属桶的每人配额」？\n\n` +
-        `各桶配额：${buckets.map((b) => `${b.name} ${formatBytes(b.quotaPerUser)}`).join("、")}\n\n` +
-        (preview.length ? shown.join("\n") + more : "（所有普通用户已经一致，无需改动）") +
-        `\n\n管理员 ${adminCount} 个会被跳过（需要的话在成员详情里单独改）；已有文件不会被删。`
+      t("adm.962") +
+        t("adm.963", { v0: buckets.map((b) => `${b.name} ${formatBytes(b.quotaPerUser)}`).join("、") }) +
+        (preview.length ? shown.join("\n") + more : t("adm.964")) +
+        t("adm.965", { v0: adminCount })
     )
     if (!ok) return
     setSyncQuotaBusy(true)
     try {
       const res = await adminApi.syncStorageQuota()
       toast.success(
-        `已更新 ${res.updated} 个用户` +
-          (res.skippedAdmins ? `，跳过 ${res.skippedAdmins} 个管理员` : "") +
-          (res.overQuota ? `，其中 ${res.overQuota} 人已超额` : "")
+        t("adm.966", { v0: res.updated }) +
+          (res.skippedAdmins ? t("adm.967", { v0: res.skippedAdmins }) : "") +
+          (res.overQuota ? t("adm.968", { v0: res.overQuota }) : "")
       )
       await loadR2()
     } catch (err) {
@@ -2532,8 +2697,8 @@ export default function AdminPage() {
     try {
       const res = await adminApi.updateUser(detail.user.username, { [field]: value })
       setDetail(res)
-      const label = field === "emailVerified" ? "邮箱验证" : "通知邮件"
-      toast.success(`${label}已${value ? t("adm.134") : t("adm.135")}`)
+      const label = field === "emailVerified" ? t("adm.969") : t("adm.970")
+      toast.success(t("adm.971", { v0: label, v1: value ? t("adm.134") : t("adm.135") }))
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.136"))
     } finally {
@@ -2557,11 +2722,54 @@ export default function AdminPage() {
     }
   }
 
+  /**
+   * 重置某个用户的二次认证 —— **最后一道保险**。
+   *
+   * 场景：管理员手机丢了 / 认证器删了，密码还记得但被 2FA 挡在门外。
+   * 这是唯一能把他救回来的手段，所以只能由 root 做 ——
+   * admin 之间互相拆锁等于这道锁可以被内部人绕过。
+   *
+   * 刻意做成「先确认再执行」：清掉之后对方会退化成「只有密码」的状态，
+   * 万一他是被钓鱼骗着点的，损失会很大。
+   */
+  const handleResetTwoFactor = async () => {
+    if (!detail) return
+    const name = detail.user.username
+    if (!window.confirm(t("adm.1255", { v0: name }))) return
+    setBusy(true)
+    try {
+      await twoFactorApi.adminReset(detail.user.id)
+      toast.success(t("adm.1256", { v0: name }))
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.1257"))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const handleToggleStatusByName = async (username: string, currentStatus: string) => {
+    /**
+     * 封禁前先问原因（2026-10-02 站长要求）。
+     *
+     * 这句话会直接显示在用户的登录页上 —— 这是他被封之后唯一能看到说明的地方，
+     * 空着或写「违规」等于让他瞎猜，然后反复申诉来找你要说法。
+     * 解封不需要原因（后端会自动把旧原因清掉）。
+     */
+    let suspendReason: string | undefined
+    if (currentStatus !== "suspended") {
+      const input = prompt(t("adm.suspendReasonPrompt", { username }))
+      if (input === null) return // 用户点了取消
+      suspendReason = input.trim()
+      if (!suspendReason) {
+        toast.error(t("adm.suspendReasonRequired"))
+        return
+      }
+    }
     setBusy(true)
     try {
       const res = await adminApi.updateUser(username, {
         status: currentStatus === "suspended" ? "active" : "suspended",
+        ...(suspendReason ? { suspendReason } : {}),
       })
       setDetail(res)
       toast.success(res.user.status === "suspended" ? t("adm.140") : t("adm.141"))
@@ -2591,10 +2799,10 @@ export default function AdminPage() {
         username: detail.user.username,
       })
       toast.success(
-        `已对齐中转站状态：启用 ${res.enabled} 个、禁用 ${res.disabled} 个` +
-          (res.errors.length ? `，${res.errors.length} 个出错` : "")
+        t("adm.972", { v0: res.enabled, v1: res.disabled }) +
+          (res.errors.length ? t("adm.973", { v0: res.errors.length }) : "")
       )
-      if (res.errors.length) console.warn("中转站对齐出错：", res.errors)
+      if (res.errors.length) console.warn(t("adm.974"), res.errors)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.143"))
     } finally {
@@ -2613,7 +2821,7 @@ export default function AdminPage() {
       })
       setDetail(res)
       toast.success(
-        `${FEATURE_LABELS[key]}已${value ? "开启" : "关闭"}`
+        t("adm.975", { v0: t(FEATURE_LABELS[key]), v1: value ? t("adm.976") : t("adm.977") })
       )
       void load()
     } catch (err) {
@@ -2682,6 +2890,12 @@ export default function AdminPage() {
   /** 切换管理面板 tab：切到对应标签时懒加载该标签的数据 */
   const handleTabChange = (v: string) => {
     setActiveTab(v)
+    // 同步 URL hash：让子 tab 可直达、可分享（用 replaceState 不刷历史记录）
+    try {
+      window.history.replaceState(null, "", "#" + v)
+    } catch {
+      /* 某些环境禁用 history API，忽略即可 */
+    }
     if (v === "invites") void loadInvites()
     if (v === "settings") {
       void loadSettings()
@@ -2708,11 +2922,23 @@ export default function AdminPage() {
     }
   }
 
+  /**
+   * 深链接直达（如 /dashboard/admin#r2）时，初始 tab 由 hash 决定，
+   * 但 `handleTabChange` 只在用户**点击**时才跑 ⇒ 该 tab 的懒加载不会触发，
+   * 页面会停在「空状态 / 还没有配置」。
+   * 这里在挂载时补跑一次，触发初始 tab 的数据加载。
+   */
+  React.useEffect(() => {
+    handleTabChange(activeTab)
+    // 只在挂载时跑一次；依赖故意留空
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   return (
     <div>
       <PageHeader
         title={t("adm.213")}
-        description={`已注册用户 ${users.length} 个 · 邀请码 ${invites.length} 个`}
+        description={t("adm.978", { v0: users.length, v1: invites.length })}
       />
 
       <Tabs value={activeTab} onValueChange={handleTabChange}>
@@ -2735,22 +2961,39 @@ export default function AdminPage() {
                 <NavItem active={activeTab === "inviteQuotas"} icon={Ticket} label={t("adm.217")} onClick={() => handleTabChange("inviteQuotas")} />
                 <NavItem active={activeTab === "reserved"} icon={ShieldBan} label={t("adm.218")} onClick={() => handleTabChange("reserved")} />
                 <NavItem active={activeTab === "titles"} icon={Medal} label={t("adm.219")} onClick={() => handleTabChange("titles")} />
+                {/* 监管：风险账户（自动扫描）+ 封禁申诉；后续风控规则都归这里。
+                    角标只数**封禁申诉** —— 风险账户是自动观察名单，没人处理也不该
+                    一直挂着角标（站长要求），否则这个数永远不归零。 */}
+                <NavItem
+                  active={activeTab === "moderation"}
+                  icon={ShieldAlert}
+                  label={t("adm.moderation")}
+                  count={attention?.appeals}
+                  onClick={() => handleTabChange("moderation")}
+                />
               </NavGroup>
               <NavGroup label={t("adm.220")}>
                 <NavItem active={activeTab === "newapi"} icon={Sparkles} label={t("adm.221")} onClick={() => handleTabChange("newapi")} />
                 {/* 三条免审核捐献通道（wb2api / cli2api / 商汤）合并在一个选项卡里 */}
                 <NavItem active={activeTab === "wb2api"} icon={Unplug} label={t("adm.222")} onClick={() => handleTabChange("wb2api")} />
                 <NavItem active={activeTab === "r2"} icon={Database} label={t("adm.223")} onClick={() => handleTabChange("r2")} />
-                <NavItem active={activeTab === "frp"} icon={Network} label={t("adm.224")} onClick={() => handleTabChange("frp")} />
+                {/* 角标 = 待审核的内网穿透申请数（用户提交后等管理员批） */}
+                <NavItem
+                  active={activeTab === "frp"}
+                  icon={Network}
+                  label={t("adm.224")}
+                  count={attention?.frpApplications}
+                  onClick={() => handleTabChange("frp")}
+                />
                 <NavItem active={activeTab === "proxy"} icon={Zap} label={t("adm.225")} onClick={() => handleTabChange("proxy")} />
 
-                {/* 角标 = DNS 合规扫描里待处理的问题条数（原先解析功能完全没有审核）。
+                {/* 此处刻意**不挂角标**：DNS 合规扫描的发现是「看一眼」的体检报告，
+                    不是等你逐条处理的队列（站长要求 2026-10-02 移除）。
                     标签用 dns.* 前缀，避开并发进行的 adm.* 编号 */}
                 <NavItem
                   active={activeTab === "dns"}
                   icon={Globe}
                   label={t("dns.nav")}
-                  count={attention?.dnsFindings}
                   onClick={() => handleTabChange("dns")}
                 />
               </NavGroup>
@@ -2765,12 +3008,13 @@ export default function AdminPage() {
                   count={attention?.eventClaims}
                   onClick={() => handleTabChange("events")}
                 />
-                {/* 「积分」角标 = 待审核商品 + 待处理订单，两项之和与侧边栏总角标口径一致 */}
+                {/* 「积分」角标 = 待审核商品（不含待处理订单 —— 2026-10-03 站长要求，
+                    订单多是等卖家交付/买家确认的正常流程态，不该挂角标虚高） */}
                 <NavItem
                   active={activeTab === "points"}
                   icon={Coins}
                   label={t("adm.230")}
-                  count={(attention?.pointProducts ?? 0) + (attention?.pointOrders ?? 0)}
+                  count={attention?.pointProducts ?? 0}
                   onClick={() => handleTabChange("points")}
                 />
                 <NavItem active={activeTab === "community"} icon={MessagesSquare} label={t("adm.231")} onClick={() => handleTabChange("community")} />
@@ -2853,9 +3097,7 @@ export default function AdminPage() {
                         {u.deletedReason === "admin" && (
                           <Badge variant="destructive">{t("adm.337")}</Badge>
                         )}
-                        <span className="text-xs">
-                          注销于 {u.deletedAt ? fmtTime(u.deletedAt) : t("adm.148")}
-                        </span>
+                        <span className="text-xs">{t("adm.979", { v0: u.deletedAt ? fmtTime(u.deletedAt) : t("adm.148") })}</span>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -2864,14 +3106,23 @@ export default function AdminPage() {
                   <TableCell className="font-mono text-xs text-muted-foreground">
                     {u.uid != null ? fmtUid(u.uid) : "—"}
                   </TableCell>
+                  {/* 用户名/邮箱列：**固定宽度**。
+                      原先用 max-w-[260px] 无效 —— 表格单元格的 max-width 不可靠，
+                      个别超长邮箱仍会把整列撑开、吃掉右侧操作列的空间（站长 2026-10-03 反馈）。
+                      改成固定宽的内层块，truncate 才真的生效：大部分人邮箱能完整显示，
+                      个别超长的截断，hover 看全文。 */}
                   <TableCell>
                     <button
                       type="button"
-                      className="text-left hover:underline"
+                      className="block w-[170px] text-left hover:underline"
                       onClick={() => void openDetail(u.username)}
                     >
-                      <p className="font-mono text-sm">{u.username}</p>
-                      <p className="text-xs text-muted-foreground">{u.email}</p>
+                      <p className="truncate font-mono text-sm" title={u.username}>
+                        {u.username}
+                      </p>
+                      <p className="truncate text-xs text-muted-foreground" title={u.email}>
+                        {u.email}
+                      </p>
                     </button>
                   </TableCell>
                   <TableCell className="font-mono text-xs">
@@ -2887,9 +3138,7 @@ export default function AdminPage() {
                             </button>
                           </TooltipTrigger>
                           <TooltipContent>
-                            <p>
-                              创建者：{u.inviteCreatedBy ?? "未知"}
-                            </p>
+                            <p>{t("adm.980", { v0: u.inviteCreatedBy ?? t("adm.981") })}</p>
                             <p className="text-muted-foreground">
                               {u.inviteCreatedAt
                                 ? fmtTime(u.inviteCreatedAt)
@@ -2976,7 +3225,7 @@ export default function AdminPage() {
                         className="h-8 w-8 text-muted-foreground"
                         onClick={() => void handleToggleStatus(u)}
                         disabled={busy || u.username === user?.username}
-                        title={u.status === "active" ? "封禁" : "解封"}
+                        title={u.status === "active" ? t("adm.982") : t("adm.983")}
                       >
                         {u.status === "active" ? (
                           <Ban className="h-4 w-4" />
@@ -3028,7 +3277,7 @@ export default function AdminPage() {
                   variant={active ? "default" : "outline"}
                   onClick={() => setInviteFilter(f.key)}
                 >
-                  {f.label}
+                  {t(f.label)}
                   <span className="ml-1.5 tabular-nums opacity-70">{n}</span>
                 </Button>
               )
@@ -3041,7 +3290,7 @@ export default function AdminPage() {
             <EmptyState title={t("adm.248")} description={t("adm.249")} />
           ) : filterInvites(invites, inviteFilter).length === 0 ? (
             <EmptyState
-              title={`没有${INVITE_FILTERS.find((f) => f.key === inviteFilter)?.label ?? ""}的邀请码`}
+              title={t("adm.984", { v0: t(INVITE_FILTERS.find((f) => f.key === inviteFilter)?.label ?? "") })}
               description={t("adm.250")}
             />
           ) : (
@@ -3087,7 +3336,7 @@ export default function AdminPage() {
                             ) : (
                               FEATURES.filter((f) => inv.permissions[f.key]).map((f) => (
                                 <Badge key={f.key} variant="outline">
-                                  {f.label}
+                                  {t(f.label)}
                                 </Badge>
                               ))
                             )}
@@ -3182,7 +3431,7 @@ export default function AdminPage() {
                   variant={active ? "default" : "outline"}
                   onClick={() => setFrpFilter(f.key)}
                 >
-                  {f.label}
+                  {t(f.label)}
                   <span className="ml-1.5 tabular-nums opacity-70">{n}</span>
                 </Button>
               )
@@ -3200,7 +3449,7 @@ export default function AdminPage() {
                 />
               ) : filterFrpApps(frpApps, frpFilter).length === 0 ? (
                 <EmptyState
-                  title={`没有${FRP_FILTERS.find((f) => f.key === frpFilter)?.label ?? ""}的申请`}
+                  title={t("adm.985", { v0: t(FRP_FILTERS.find((f) => f.key === frpFilter)?.label ?? "") })}
                   description={t("adm.256")}
                 />
               ) : (
@@ -3231,21 +3480,15 @@ export default function AdminPage() {
                                   : t("adm.152")}
                             </Badge>
                           </p>
-                          <p className="text-xs text-muted-foreground">
-                            节点 {a.nodeName} · 端口 {a.ports.join(", ")}
-                            {/* 免账号的节点没有密码可看，别展示成空白让人以为漏了 */}
+                          <p className="text-xs text-muted-foreground">{t("adm.986", { v0: a.nodeName, v1: a.ports.join(", ") })}{/* 免账号的节点没有密码可看，别展示成空白让人以为漏了 */}
                             {a.needAccount ? (
-                              <>
-                                {" "}
-                                · 密码 <code className="font-mono">{a.frpPassword}</code>
+                              <>{t("adm.987", { v0: " " })}<code className="font-mono">{a.frpPassword}</code>
                               </>
                             ) : (
-                              " · 免账号（该节点只用服务端全局 token）"
+                              t("adm.988")
                             )}
                           </p>
-                          <p className="text-xs text-muted-foreground">
-                            通知邮箱 {a.notifyEmail} · {fmtTime(a.createdAt)}
-                          </p>
+                          <p className="text-xs text-muted-foreground">{t("adm.989", { v0: a.notifyEmail, v1: fmtTime(a.createdAt) })}</p>
                           {a.tunnels.length > 0 && (
                             <p className="font-mono text-xs text-muted-foreground">
                               {a.tunnels
@@ -3257,18 +3500,23 @@ export default function AdminPage() {
                             </p>
                           )}
                           {a.remark && (
-                            <p className="text-xs text-muted-foreground">
-                              备注：{a.remark}
-                            </p>
+                            <p className="text-xs text-muted-foreground">{t("adm.990", { v0: a.remark })}</p>
                           )}
                           {a.reviewNote && (
-                            <p className="text-xs text-muted-foreground">
-                              审批意见：{a.reviewNote}
-                            </p>
+                            <p className="text-xs text-muted-foreground">{t("adm.991", { v0: a.reviewNote })}</p>
                           )}
                         </div>
                         {a.status === "pending" && (
                           <div className="flex items-center gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => openFrpEdit(a)}
+                              disabled={frpBusy}
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                              {t("adm.1231")}
+                            </Button>
                             <Button
                               size="sm"
                               onClick={() => openReview(a, "approve")}
@@ -3311,9 +3559,7 @@ export default function AdminPage() {
               <Separator />
 
               <div>
-                <h3 className="mb-2 text-sm font-medium">
-                  节点（{frpNodes.length}）
-                </h3>
+                <h3 className="mb-2 text-sm font-medium">{t("adm.992", { v0: frpNodes.length })}</h3>
                 <div className="rounded-lg border bg-card">
                   <Table>
                     <TableHeader>
@@ -3339,9 +3585,7 @@ export default function AdminPage() {
                           <TableCell className="font-mono text-xs">
                             {n.serverAddr}:{n.serverPort}
                           </TableCell>
-                          <TableCell className="text-xs">
-                            {n.portMin}-{n.portMax}（最多 {n.maxPorts}）
-                          </TableCell>
+                          <TableCell className="text-xs">{t("adm.993", { v0: n.portMin, v1: n.portMax, v2: n.maxPorts })}</TableCell>
                           <TableCell className="text-xs">{n.usedPorts}</TableCell>
                           <TableCell>
                             <div className="flex items-center gap-1">
@@ -3393,16 +3637,13 @@ export default function AdminPage() {
             <DialogContent>
               <DialogHeader>
                 <DialogTitle>
-                  {frpReviewTarget?.action === "approve" ? "通过申请" : "拒绝申请"}
+                  {frpReviewTarget?.action === "approve" ? t("adm.994") : t("adm.995")}
                 </DialogTitle>
-                <DialogDescription>
-                  用户「{frpReviewTarget?.app.siteUsername}」在 {frpReviewTarget?.app.nodeName} 上的申请
-                  {frpReviewTarget?.action === "approve" ? "，通过后会占用所选端口并邮件通知。" : "。"}
-                </DialogDescription>
+                <DialogDescription>{t("adm.996", { v0: frpReviewTarget?.app.siteUsername, v1: frpReviewTarget?.app.nodeName, v2: frpReviewTarget?.action === "approve" ? t("adm.997") : "。" })}</DialogDescription>
               </DialogHeader>
               <div className="space-y-2">
                 <Label htmlFor="frpReviewNote">
-                  {frpReviewTarget?.action === "approve" ? "审批意见（可选）" : "拒绝理由（可选，建议填写）"}
+                  {frpReviewTarget?.action === "approve" ? t("adm.998") : t("adm.999")}
                 </Label>
                 <Textarea
                   id="frpReviewNote"
@@ -3419,14 +3660,12 @@ export default function AdminPage() {
                   (frpReviewTarget.app.needAccount ? (
                     <p className="text-xs text-muted-foreground">
                       {t("adm.360")}
-                      <strong>密码</strong>（<code className="font-mono">{frpReviewTarget.app.frpPassword}</code>）
+                      <strong>{t("adm.1000")}</strong>（<code className="font-mono">{frpReviewTarget.app.frpPassword}</code>）
                       {t("adm.361")}
                     </p>
                   ) : (
-                    <p className="text-xs text-muted-foreground">
-                      这个节点只用服务端全局 <code className="font-mono">auth.token</code>，
-                      <strong>不需要去 frps-panel 建号</strong>，直接批准即可。
-                    </p>
+                    <p className="text-xs text-muted-foreground">{t("adm.1001")}<code className="font-mono">auth.token</code>，
+                      <strong>{t("adm.1002")}</strong>{t("adm.1003")}</p>
                   ))}
               </div>
               <DialogFooter>
@@ -3438,8 +3677,79 @@ export default function AdminPage() {
                   onClick={() => void confirmFrpReview()}
                   disabled={frpBusy}
                 >
+                  {frpBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}{t("adm.1004", { v0: frpReviewTarget?.action === "approve" ? t("adm.1005") : t("adm.1006") })}</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          {/* frp 编辑申请弹窗：改账号名/密码/端口/通知邮箱/备注（只对待审核生效） */}
+          <Dialog open={frpEditTarget !== null} onOpenChange={(o) => !o && setFrpEditTarget(null)}>
+            <DialogContent className="max-h-[85vh] overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle>{t("adm.1231")}</DialogTitle>
+                <DialogDescription>
+                  {t("adm.1232", { v0: frpEditTarget?.siteUsername ?? "", v1: frpEditTarget?.nodeName ?? "" })}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label htmlFor="frpEditUser">{t("adm.1233")}</Label>
+                  <Input
+                    id="frpEditUser"
+                    className="font-mono"
+                    disabled={!frpEditTarget?.needAccount}
+                    value={frpEditDraft.frpUser}
+                    onChange={(e) => setFrpEditDraft((d) => ({ ...d, frpUser: e.target.value }))}
+                  />
+                  <p className="text-xs text-muted-foreground">{t("adm.1241")}</p>
+                </div>
+                {frpEditTarget?.needAccount && (
+                  <div className="space-y-2">
+                    <Label htmlFor="frpEditPw">{t("settings.pw.new")}</Label>
+                    <Input
+                      id="frpEditPw"
+                      className="font-mono"
+                      value={frpEditDraft.frpPassword}
+                      onChange={(e) => setFrpEditDraft((d) => ({ ...d, frpPassword: e.target.value }))}
+                    />
+                  </div>
+                )}
+                <div className="space-y-2">
+                  <Label htmlFor="frpEditPorts">{t("adm.1234")}</Label>
+                  <Input
+                    id="frpEditPorts"
+                    className="font-mono"
+                    placeholder="23457-23460, 39000"
+                    value={frpEditDraft.ports}
+                    onChange={(e) => setFrpEditDraft((d) => ({ ...d, ports: e.target.value }))}
+                  />
+                  <p className="text-xs text-muted-foreground">{t("adm.1242", { v0: frpEditTarget?.nodeName ?? "" })}</p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="frpEditMail">{t("adm.1235")}</Label>
+                  <Input
+                    id="frpEditMail"
+                    value={frpEditDraft.notifyEmail}
+                    onChange={(e) => setFrpEditDraft((d) => ({ ...d, notifyEmail: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="frpEditRemark">{t("adm.1236")}</Label>
+                  <Textarea
+                    id="frpEditRemark"
+                    rows={2}
+                    value={frpEditDraft.remark}
+                    onChange={(e) => setFrpEditDraft((d) => ({ ...d, remark: e.target.value }))}
+                  />
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setFrpEditTarget(null)} disabled={frpBusy}>
+                  {t("adm.362")}
+                </Button>
+                <Button onClick={() => void handleSaveFrpEdit()} disabled={frpBusy}>
                   {frpBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                  确认{frpReviewTarget?.action === "approve" ? "通过" : "拒绝"}
+                  {t("adm.1237")}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -3569,11 +3879,7 @@ export default function AdminPage() {
         </TabsContent>
 
         <TabsContent value="inviteQuotas">
-          <p className="mb-4 text-sm text-muted-foreground">
-            每个用户默认可创建 {inviteQuotas?.baseQuota ?? 3} 个邀请码；
-            {t("adm.377")}
-            {t("adm.378")}
-          </p>
+          <p className="mb-4 text-sm text-muted-foreground">{t("adm.1007", { v0: inviteQuotas?.baseQuota ?? 3, v1: t("adm.377"), v2: t("adm.378") })}</p>
 
           {/* 顶部搜索：与用户列表同款，按用户名 / 邮箱 / 域名过滤 */}
           <div className="relative mb-3 max-w-sm">
@@ -3621,9 +3927,7 @@ export default function AdminPage() {
                           {" / "}
                           {u.inviteTotal}
                         </span>
-                        <span className="ml-2 text-xs text-muted-foreground">
-                          （基础 {u.inviteBase} + 捐献 {u.inviteBonus}）
-                        </span>
+                        <span className="ml-2 text-xs text-muted-foreground">{t("adm.1008", { v0: u.inviteBase, v1: u.inviteBonus })}</span>
                       </TableCell>
                       <TableCell className="text-xs">
                         <div className="flex flex-wrap gap-x-3 gap-y-1">
@@ -3737,7 +4041,8 @@ export default function AdminPage() {
                     <TableRow key={r.name}>
                       <TableCell className="font-mono text-sm">{r.name}</TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">
-                        {r.name}.doulor.cn
+                        
+                        {r.name}.*
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">
                         {r.note ?? "—"}
@@ -3810,7 +4115,7 @@ export default function AdminPage() {
                     <button
                       onClick={() => handleRemoveNickReserved(w)}
                       className="rounded-sm p-0.5 hover:bg-background hover:text-foreground"
-                      aria-label={`移除 ${w}`}
+                      aria-label={t("adm.1009", { v0: w })}
                     >
                       <X className="h-3 w-3" />
                     </button>
@@ -3849,7 +4154,7 @@ export default function AdminPage() {
                   variant={active ? "default" : "outline"}
                   onClick={() => setDonationTypeFilter(f.key)}
                 >
-                  {f.label}
+                  {t(f.label)}
                   <span className="ml-1.5 tabular-nums opacity-70">{n}</span>
                 </Button>
               )
@@ -3871,7 +4176,7 @@ export default function AdminPage() {
                   variant={active ? "default" : "outline"}
                   onClick={() => setDonationFilter(f.key)}
                 >
-                  {f.label}
+                  {t(f.label)}
                   <span className="ml-1.5 tabular-nums opacity-70">{n}</span>
                 </Button>
               )
@@ -3899,7 +4204,7 @@ export default function AdminPage() {
                       <p className="text-sm font-medium">
                         {d.username}
                         <Badge variant="outline" className="ml-2">
-                          {DONATION_LABEL[d.type] ?? d.type}
+                          {t(DONATION_LABEL[d.type] ?? d.type)}
                         </Badge>
                         <Badge
                           variant={
@@ -3930,23 +4235,17 @@ export default function AdminPage() {
                           {d.status === "revoked"
                             ? t("adm.161")
                             : d.channelId !== null && d.channelId !== undefined
-                              ? `中转站渠道 #${d.channelId} 已接入`
+                              ? t("adm.1010", { v0: d.channelId })
                               : t("adm.162")}
-                          {d.autoReviewed && " · 本次为系统自动审核"}
+                          {d.autoReviewed && t("adm.1011")}
                         </p>
                       )}
-                      <p className="text-xs text-muted-foreground">
-                        通知邮箱 {d.notifyEmail} · {fmtTime(d.createdAt)}
-                      </p>
+                      <p className="text-xs text-muted-foreground">{t("adm.1012", { v0: d.notifyEmail, v1: fmtTime(d.createdAt) })}</p>
                       {d.remark && (
-                        <p className="text-xs text-muted-foreground">
-                          备注：{d.remark}
-                        </p>
+                        <p className="text-xs text-muted-foreground">{t("adm.1013", { v0: d.remark })}</p>
                       )}
                       {d.reviewNote && (
-                        <p className="whitespace-pre-wrap text-xs text-muted-foreground">
-                          审批回复：{d.reviewNote}
-                        </p>
+                        <p className="whitespace-pre-wrap text-xs text-muted-foreground">{t("adm.1014", { v0: d.reviewNote })}</p>
                       )}
                     </div>
                     {d.status === "pending" && (
@@ -4073,10 +4372,10 @@ export default function AdminPage() {
                     <span className="text-sm">{b.nickname || b.uid}</span>
                     <Badge variant="outline">{realmLabel(b.realm)}</Badge>
                     <Badge variant={b.status === "active" ? "success" : "secondary"}>
-                      {b.status === "active" ? "使用中" : "已移除"}
+                      {b.status === "active" ? t("adm.1015") : t("adm.1016")}
                     </Badge>
                     <Badge variant={b.grantedAi ? "outline" : "secondary"}>
-                      {b.grantedAi ? "AI 权限由本次授予" : "未授予（此前已有）"}
+                      {b.grantedAi ? t("adm.1017") : t("adm.1018")}
                     </Badge>
                     <span className="ml-auto text-xs text-muted-foreground">
                       {fmtTime(b.createdAt)}
@@ -4106,23 +4405,19 @@ export default function AdminPage() {
             <DialogContent>
               <DialogHeader>
                 <DialogTitle>
-                  {reviewTarget?.action === "approve" ? "通过捐献" : "拒绝捐献"}
+                  {reviewTarget?.action === "approve" ? t("adm.1019") : t("adm.1020")}
                 </DialogTitle>
-                <DialogDescription>
-                  用户「{reviewTarget?.donation.username}」的捐献
-                  {reviewTarget?.action === "approve"
+                <DialogDescription>{t("adm.1021", { v0: reviewTarget?.donation.username, v1: reviewTarget?.action === "approve"
                     ? t("adm.163")
-                    : t("adm.164")}
-                  {reviewTarget?.action === "approve" &&
+                    : t("adm.164"), v2: reviewTarget?.action === "approve" &&
                     reviewTarget.donation.type === "ai" &&
                     (reviewTarget.donation.channelId === null ||
                       reviewTarget.donation.channelId === undefined) &&
-                    "该 AI 捐献尚未接入中转站，通过时会自动尝试创建渠道并测试。"}
-                </DialogDescription>
+                    t("adm.1022") })}</DialogDescription>
               </DialogHeader>
               <div className="space-y-2">
                 <Label htmlFor="reviewNote">
-                  {reviewTarget?.action === "approve" ? "审批回复（可选）" : "拒绝理由（可选，建议填写）"}
+                  {reviewTarget?.action === "approve" ? t("adm.1023") : t("adm.1024")}
                 </Label>
                 <Textarea
                   id="reviewNote"
@@ -4148,9 +4443,7 @@ export default function AdminPage() {
                   onClick={() => void confirmReview()}
                   disabled={donationBusy}
                 >
-                  {donationBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                  确认{reviewTarget?.action === "approve" ? "通过" : "拒绝"}
-                </Button>
+                  {donationBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}{t("adm.1025", { v0: reviewTarget?.action === "approve" ? t("adm.1026") : t("adm.1027") })}</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
@@ -4186,30 +4479,23 @@ export default function AdminPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1 space-y-1">
                         <div className="flex items-center gap-2">
-                          {a.status === "draft" && <Badge variant="secondary">草稿</Badge>}
+                          {a.status === "draft" && <Badge variant="secondary">{t("adm.1028")}</Badge>}
                           {a.status === "scheduled" && (
                             <Badge variant="default" className="gap-1">
-                              <Clock className="h-3 w-3" />
-                              定时 {a.publishAt ? new Date(a.publishAt).toLocaleString("zh-CN") : ""}
-                            </Badge>
+                              <Clock className="h-3 w-3" />{t("adm.1029", { v0: a.publishAt ? new Date(a.publishAt).toLocaleString("zh-CN") : "" })}</Badge>
                           )}
-                          {a.pinned && <Badge variant="success">置顶</Badge>}
+                          {a.pinned && <Badge variant="success">{t("adm.1030")}</Badge>}
                           <Badge variant="secondary">{a.category}</Badge>
                           {/* 邮件群发进度：推送中显示 x/y，完成后显示结果与失败数 */}
                           {a.mailStatus === "sending" && (
                             <Badge variant="default" className="tabular-nums">
-                              <Loader2 className="h-3 w-3 animate-spin" />
-                              推送中 {a.mailSent}/{a.mailTotal}
-                            </Badge>
+                              <Loader2 className="h-3 w-3 animate-spin" />{t("adm.1031", { v0: a.mailSent, v1: a.mailTotal })}</Badge>
                           )}
                           {a.mailStatus === "done" && (
                             <Badge
                               variant={a.mailFailed > 0 ? "destructive" : "outline"}
                               className="tabular-nums"
-                            >
-                              已推送 {a.mailSent}/{a.mailTotal}
-                              {a.mailFailed > 0 ? ` · 失败 ${a.mailFailed}` : ""}
-                            </Badge>
+                            >{t("adm.1032", { v0: a.mailSent, v1: a.mailTotal, v2: a.mailFailed > 0 ? t("adm.1033", { v0: a.mailFailed }) : "" })}</Badge>
                           )}
                           <span className="text-xs text-muted-foreground">
                             {new Date(a.createdAt).toLocaleString("zh-CN")}
@@ -4230,9 +4516,7 @@ export default function AdminPage() {
                             className="h-7 gap-1 px-2 text-xs"
                             onClick={() => void handleResendAnnouncementMails(a)}
                           >
-                            <RefreshCw className="h-3 w-3" />
-                            重发失败 {a.mailFailed}
-                          </Button>
+                            <RefreshCw className="h-3 w-3" />{t("adm.1034", { v0: a.mailFailed })}</Button>
                         )}
                         <Button
                           variant="ghost"
@@ -4269,6 +4553,10 @@ export default function AdminPage() {
           <TitlesAdminPanel />
         </TabsContent>
 
+        <TabsContent value="moderation">
+          <ModerationAdminPanel />
+        </TabsContent>
+
         <TabsContent value="dns">
           <DnsAdminPanel />
         </TabsContent>
@@ -4300,20 +4588,13 @@ export default function AdminPage() {
                       <div className="min-w-0 flex-1 space-y-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <Badge variant={EVENT_STATUS_BADGE[ev.status]}>
-                            {EVENT_STATUS_TEXT[ev.status]}
+                            {t(EVENT_STATUS_TEXT[ev.status])}
                           </Badge>
                           {ev.rewardLabel && <Badge variant="secondary">{ev.rewardLabel}</Badge>}
                           {ev.lottery && (
-                            <Badge variant={ev.lottery.drawn ? "secondary" : "default"}>
-                              {ev.lottery.drawn ? "已开奖" : "待开奖"} · 抽 {ev.lottery.winners} 人 /
-                              {ev.lottery.pool} 积分（
-                              {ev.lottery.mode === "even" ? "平均分" : "随机分"}）
-                            </Badge>
+                            <Badge variant={ev.lottery.drawn ? "secondary" : "default"}>{t("adm.1035", { v0: ev.lottery.drawn ? t("adm.1036") : t("adm.1037"), v1: ev.lottery.winners, v2: ev.lottery.pool, v3: ev.lottery.mode === "even" ? t("adm.1038") : t("adm.1039") })}</Badge>
                           )}
-                          <span className="text-xs text-muted-foreground">
-                            {ev.claimCount ?? 0}
-                            {ev.maxClaims != null ? `/${ev.maxClaims}` : ""} 人参与
-                          </span>
+                          <span className="text-xs text-muted-foreground">{t("adm.1040", { v0: ev.claimCount ?? 0, v1: ev.maxClaims != null ? `/${ev.maxClaims}` : "" })}</span>
                         </div>
                         <p className="text-sm font-medium">{ev.title}</p>
                         <p className="whitespace-pre-wrap text-xs text-muted-foreground">
@@ -4322,7 +4603,7 @@ export default function AdminPage() {
                         <p className="flex items-center gap-1 text-xs text-muted-foreground">
                           <Clock className="h-3 w-3" />
                           {ev.startsAt || ev.endsAt
-                            ? `${ev.startsAt ? new Date(ev.startsAt).toLocaleString("zh-CN") : t("adm.167")} 至 ${ev.endsAt ? new Date(ev.endsAt).toLocaleString("zh-CN") : t("adm.168")}`
+                            ? t("adm.1041", { v0: ev.startsAt ? new Date(ev.startsAt).toLocaleString("zh-CN") : t("adm.167"), v1: ev.endsAt ? new Date(ev.endsAt).toLocaleString("zh-CN") : t("adm.168") })
                             : t("adm.169")}
                         </p>
                       </div>
@@ -4402,16 +4683,15 @@ export default function AdminPage() {
               {/* 免费额度图例 */}
               <div className="flex flex-wrap items-center gap-4 rounded-lg border bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
                 <span className="font-medium text-foreground">{t("adm.429")}</span>
-                <span>存储 {formatBytes(r2Data.freeTier.storageBytes)}</span>
-                <span>A 类操作 {r2Data.freeTier.classAOps.toLocaleString()}</span>
-                <span>B 类操作 {r2Data.freeTier.classBOps.toLocaleString()}</span>
+                <span>{t("adm.1042")}{formatBytes(r2Data.freeTier.storageBytes)}</span>
+                <span>{t("adm.1043")}{r2Data.freeTier.classAOps.toLocaleString()}</span>
+                <span>{t("adm.1044")}{r2Data.freeTier.classBOps.toLocaleString()}</span>
               </div>
 
               {/* 各桶卡片 */}
               {[...r2Data.buckets, ...(r2Data.legacyBucket ? [r2Data.legacyBucket] : [])].map(
                 (b) => {
                   const s = b.stats
-                  const userPct = b.maxUsers ? Math.min((s.users / b.maxUsers) * 100, 100) : 0
                   const capacityPct =
                     s.capacityBytes > 0 ? Math.min((s.usedBytes / s.capacityBytes) * 100, 100) : 0
                   const ops = b.id ? r2Ops[b.id] : undefined
@@ -4426,13 +4706,13 @@ export default function AdminPage() {
                               {b.kind === "platform" && (
                                 <Badge variant="secondary">{t("adm.430")}</Badge>
                               )}
-                              {!b.enabled && <Badge variant="secondary">已停用</Badge>}
-                              {b.id === "" && <Badge variant="outline">默认桶</Badge>}
+                              {!b.enabled && <Badge variant="secondary">{t("adm.1045")}</Badge>}
+                              {b.id === "" && <Badge variant="outline">{t("adm.1046")}</Badge>}
                             </CardTitle>
                             <CardDescription className="font-mono text-xs">
                               {b.bucketName}
                               {b.accountId ? ` · ${b.accountId.slice(0, 8)}…` : ""}
-                              {b.id === "" && " · 来自环境变量，未纳入数据库管理"}
+                              {b.id === "" && t("adm.1047")}
                             </CardDescription>
                           </div>
                           {b.id !== "" ? (
@@ -4493,9 +4773,7 @@ export default function AdminPage() {
                                     const first = r2Data.assignableBuckets[0]
                                     void handleAssignAll(first.id, first.name)
                                   }}
-                                >
-                                  用户迁入 {r2Data.assignableBuckets[0].name}
-                                </Button>
+                                >{t("adm.1048", { v0: r2Data.assignableBuckets[0].name })}</Button>
                               )}
                             </div>
                           )}
@@ -4562,13 +4840,7 @@ export default function AdminPage() {
                             </div>
                           </div>
                         ) : (
-                          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                            <div className="rounded-md border px-3 py-2">
-                              <p className="text-xs text-muted-foreground">{t("adm.439")}</p>
-                              <p className="text-sm font-semibold">
-                                {s.users} / {b.maxUsers || "—"}
-                              </p>
-                            </div>
+                          <div className="grid grid-cols-2 gap-3">
                             <div className="rounded-md border px-3 py-2">
                               <p className="text-xs text-muted-foreground">{t("adm.440")}</p>
                               <p className="text-sm font-semibold">{s.fileCount}</p>
@@ -4578,10 +4850,6 @@ export default function AdminPage() {
                               <p className="text-sm font-semibold">
                                 {formatBytes(b.quotaPerUser)}
                               </p>
-                            </div>
-                            <div className="rounded-md border px-3 py-2">
-                              <p className="text-xs text-muted-foreground">{t("adm.442")}</p>
-                              <p className="text-sm font-semibold">{userPct.toFixed(0)}%</p>
                             </div>
                           </div>
                         )}
@@ -4593,7 +4861,7 @@ export default function AdminPage() {
                               <span className="text-xs font-medium">{t("adm.443")}</span>
                               {!ops?.configured && (
                                 <span className="text-xs text-muted-foreground">
-                                  {ops?.reason ?? "未接入 Analytics"}
+                                  {ops?.reason ?? t("adm.1049")}
                                 </span>
                               )}
                               {ops?.error && (
@@ -4649,14 +4917,14 @@ export default function AdminPage() {
                           </div>
                         )}
 
-                        {/* 用户列表 + 改派 */}
-                        {b.users.length > 0 && (
+                        {/* 用户列表 + 改派：只列「真的存了东西」的人（共享池，0 用量不显示） */}
+                        {b.users.filter((u) => u.usedBytes > 0).length > 0 && (
                           <div className="space-y-1">
                             <p className="text-xs font-medium text-muted-foreground">
                               {t("adm.446")}
                             </p>
                             <div className="divide-y rounded-md border">
-                              {b.users.map((u) => (
+                              {b.users.filter((u) => u.usedBytes > 0).map((u) => (
                                 <div
                                   key={u.userId}
                                   className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm"
@@ -4670,10 +4938,7 @@ export default function AdminPage() {
                                     )}
                                   </div>
                                   <div className="flex items-center gap-3">
-                                    <span className="text-xs text-muted-foreground">
-                                      {formatBytes(u.usedBytes)} / {formatBytes(u.quotaBytes)} ·{" "}
-                                      {u.fileCount} 文件
-                                    </span>
+                                    <span className="text-xs text-muted-foreground">{t("adm.1050", { v0: formatBytes(u.usedBytes), v1: formatBytes(u.quotaBytes), v2: " ", v3: u.fileCount })}</span>
                                     {b.id !== "" && (
                                       <>
                                         <Select
@@ -4785,9 +5050,7 @@ export default function AdminPage() {
                       <TableCell className="text-xs text-muted-foreground">
                         {fmtTime(p.created_at)}
                       </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {p.like_count} 赞 · {p.comment_count} 评 · {p.share_count} 转
-                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{t("adm.1051", { v0: p.like_count, v1: p.comment_count, v2: p.share_count })}</TableCell>
                       <TableCell>
                         {p.deleted_at ? (
                           <Badge variant="destructive">{t("adm.457")}</Badge>
@@ -4858,18 +5121,11 @@ export default function AdminPage() {
                           <Badge variant="destructive">{t("adm.470")}</Badge>
                         )}
                       </div>
-                      <p className="text-muted-foreground">
-                        站点地址：{newapiCred?.baseUrl || "（未配置 NEWAPI_BASE_URL）"}
-                      </p>
-                      <p className="font-mono text-xs">
-                        当前令牌：{newapiCred?.maskedToken ?? "（未设置）"}
-                      </p>
-                      <p className="text-muted-foreground">
-                        令牌所属用户 id：{newapiCred?.adminUserId ?? "1"}
-                        {newapiCred?.updatedAt
-                          ? ` · 更新于 ${new Date(newapiCred.updatedAt).toLocaleString("zh-CN")}`
-                          : ""}
-                      </p>
+                      <p className="text-muted-foreground">{t("adm.1052", { v0: newapiCred?.baseUrl || t("adm.1053") })}</p>
+                      <p className="font-mono text-xs">{t("adm.1054", { v0: newapiCred?.maskedToken ?? t("adm.1055") })}</p>
+                      <p className="text-muted-foreground">{t("adm.1056", { v0: newapiCred?.adminUserId ?? "1", v1: newapiCred?.updatedAt
+                          ? t("adm.1057", { v0: new Date(newapiCred.updatedAt).toLocaleString("zh-CN") })
+                          : "" })}</p>
                       {/* 真实探测一次管理接口：NewAPI 的令牌会被后台轮换，
                           不主动测就只能等用户建 Key 时才发现已经失效 */}
                       <p className="flex items-center gap-1.5">
@@ -4882,7 +5138,7 @@ export default function AdminPage() {
                         ) : (
                           <span className="flex items-center gap-1 text-destructive">
                             <XCircle className="h-3.5 w-3.5" />
-                            {newapiCred?.health?.message || "未知"}
+                            {newapiCred?.health?.message || t("adm.1058")}
                           </span>
                         )}
                       </p>
@@ -4936,18 +5192,12 @@ export default function AdminPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">{t("adm.479")}</CardTitle>
-                <CardDescription>
-                  仅影响新开通的账号。当前{" "}
-                  {settingsStats?.newapiAccounts ?? 0} 个账号、
-                  {settingsStats?.newapiKeys ?? 0} 个 Key。
-                </CardDescription>
+                <CardDescription>{t("adm.1059", { v0: " ", v1: settingsStats?.newapiAccounts ?? 0, v2: settingsStats?.newapiKeys ?? 0 })}</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
-                    <Label htmlFor="trialQuota">
-                      新账号试用额度（{currencySymbol}）
-                    </Label>
+                    <Label htmlFor="trialQuota">{t("adm.1060", { v0: currencySymbol })}</Label>
                     <Input
                       id="trialQuota"
                       type="number"
@@ -4974,11 +5224,7 @@ export default function AdminPage() {
                     onChange={(e) => setNewapiVisibleGroups(e.target.value)}
                     placeholder="default"
                   />
-                  <p className="text-xs text-muted-foreground">
-                    {t("adm.482")}
-                    {t("adm.483")}
-                    例如：<span className="font-mono">default</span> 或{" "}
-                    <span className="font-mono">default,付费</span>。
+                  <p className="text-xs text-muted-foreground">{t("adm.1061", { v0: t("adm.482"), v1: t("adm.483") })}<span className="font-mono">default</span>{t("adm.1062", { v0: " " })}<span className="font-mono">{t("adm.1063")}</span>。
                   </p>
                 </div>
                 <div className="flex items-center justify-between rounded-md border p-3">
@@ -5033,9 +5279,9 @@ export default function AdminPage() {
                     variant="outline"
                     size="sm"
                     onClick={() =>
-                      setRecommendedTiers((t) => [
-                        ...t,
-                        { tier: `第${t.length + 1}梯队`, desc: "", models: [] },
+                      setRecommendedTiers((prev) => [
+                        ...prev,
+                        { tier: t("adm.1064", { v0: prev.length + 1 }), desc: "", models: [] },
                       ])
                     }
                     disabled={recommendedTiers.length >= 8}
@@ -5128,7 +5374,7 @@ export default function AdminPage() {
                                       )
                                     )
                                   }
-                                  aria-label={`移除 ${m}`}
+                                  aria-label={t("adm.1065", { v0: m })}
                                 >
                                   <X className="h-3 w-3" />
                                 </button>
@@ -5210,12 +5456,7 @@ export default function AdminPage() {
           <div className="space-y-6">
             {/* 三条免审核捐献通道都在这一页：① 反代账号（wb2api）② CLI2API ③ 商汤 Key。
                 每条通道自带「通道开关」（管功能）与「显示入口」（只管捐献页给不给看）。 */}
-            <p className="text-sm text-muted-foreground">
-              这一页集中管理三条<b className="font-medium">免审核</b>捐献通道：
-              {t("adm.498")}
-              {t("adm.499")}
-              {t("adm.500")}
-            </p>
+            <p className="text-sm text-muted-foreground">{t("adm.1066")}<b className="font-medium">{t("adm.1067")}</b>{t("adm.1068", { v0: t("adm.498"), v1: t("adm.499"), v2: t("adm.500") })}</p>
 
             {/* ① 反代账号（wb2api）：通道开关与限额，走全局设置接口 */}
             <Card>
@@ -5241,10 +5482,7 @@ export default function AdminPage() {
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
                     <p className="text-sm font-medium">{t("adm.508")}</p>
-                    <p className="text-xs text-muted-foreground">
-                      关掉后，<span className="font-medium">还没有绑定过</span>的用户看不到
-                      {t("adm.509")}
-                    </p>
+                    <p className="text-xs text-muted-foreground">{t("adm.1069")}<span className="font-medium">{t("adm.1070")}</span>{t("adm.1071", { v0: t("adm.509") })}</p>
                   </div>
                   <Switch
                     checked={wb2apiDonationVisible}
@@ -5303,11 +5541,7 @@ export default function AdminPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">{t("adm.518")}</CardTitle>
-                <CardDescription>
-                  捐献页让用户登录自己的 WorkBuddy {realmLabel(wb2apiRealm)}账号来解锁 AI 权限，
-                  {t("adm.519")}
-                  {t("adm.520")}
-                </CardDescription>
+                <CardDescription>{t("adm.1072", { v0: realmLabel(wb2apiRealm), v1: t("adm.519"), v2: t("adm.520") })}</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 {wb2apiLoading ? (
@@ -5331,24 +5565,19 @@ export default function AdminPage() {
                             : t("adm.172")}
                       </Badge>
                       <span className="font-mono text-xs text-muted-foreground">
-                        {wb2apiConfig?.maskedApiKey ?? "（无）"}
+                        {wb2apiConfig?.maskedApiKey ?? t("adm.1073")}
                       </span>
                       {wb2apiConfig?.updatedAt && (
-                        <span className="text-xs text-muted-foreground">
-                          更新于 {fmtTime(wb2apiConfig.updatedAt)}
-                        </span>
+                        <span className="text-xs text-muted-foreground">{t("adm.1074", { v0: fmtTime(wb2apiConfig.updatedAt) })}</span>
                       )}
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2 text-sm">
                       <span className="text-muted-foreground">{t("adm.521")}</span>
                       <span className="font-mono text-xs">
-                        {wb2apiConfig?.baseUrl || "（未配置）"}
+                        {wb2apiConfig?.baseUrl || t("adm.1075")}
                       </span>
-                      <span className="text-muted-foreground">
-                        · 通道{wb2apiConfig?.enabled ? "已开启" : "已关闭"} ·
-                        每人上限 {wb2apiConfig?.limit ?? "-"}
-                      </span>
+                      <span className="text-muted-foreground">{t("adm.1076", { v0: wb2apiConfig?.enabled ? t("adm.1077") : t("adm.1078"), v1: wb2apiConfig?.limit ?? "-" })}</span>
                     </div>
 
                     {wb2apiConfig?.health && (
@@ -5409,17 +5638,13 @@ export default function AdminPage() {
                 ) : (
                   <>
                     <div className="mb-4 flex flex-wrap gap-4 text-sm">
-                      <span>
-                        总数 <span className="font-semibold">{wb2apiPool.total}</span>
+                      <span>{t("adm.1079")}<span className="font-semibold">{wb2apiPool.total}</span>
                       </span>
-                      <span className="text-emerald-600 dark:text-emerald-400">
-                        可用 <span className="font-semibold">{wb2apiPool.healthy}</span>
+                      <span className="text-emerald-600 dark:text-emerald-400">{t("adm.1080")}<span className="font-semibold">{wb2apiPool.healthy}</span>
                       </span>
-                      <span className="text-amber-600 dark:text-amber-400">
-                        冷却 <span className="font-semibold">{wb2apiPool.cooling}</span>
+                      <span className="text-amber-600 dark:text-amber-400">{t("adm.1081")}<span className="font-semibold">{wb2apiPool.cooling}</span>
                       </span>
-                      <span className="text-muted-foreground">
-                        禁用 <span className="font-semibold">{wb2apiPool.disabled}</span>
+                      <span className="text-muted-foreground">{t("adm.1082")}<span className="font-semibold">{wb2apiPool.disabled}</span>
                       </span>
                     </div>
                     {wb2apiPool.accounts.length > 0 && (
@@ -5432,7 +5657,7 @@ export default function AdminPage() {
                             <span>{a.nickname || a.uid}</span>
                             {a.realm && <Badge variant="outline">{realmLabel(a.realm)}</Badge>}
                             <span className="ml-auto font-mono text-xs text-muted-foreground">
-                              {typeof a.credits === "number" ? `积分 ${a.credits}` : ""}
+                              {typeof a.credits === "number" ? t("adm.1083", { v0: a.credits }) : ""}
                             </span>
                           </div>
                         ))}
@@ -5446,9 +5671,7 @@ export default function AdminPage() {
             {/* 绑定列表：谁捐了哪个账号，可摘除 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">
-                  捐献绑定（{wb2apiBindings.length}）
-                </CardTitle>
+                <CardTitle className="text-base">{t("adm.1084", { v0: wb2apiBindings.length })}</CardTitle>
                 <CardDescription>
                   {t("adm.527")}
                   {t("adm.528")}
@@ -5473,10 +5696,10 @@ export default function AdminPage() {
                         <span className="text-sm font-medium">{b.username}</span>
                         <span className="text-sm">{b.nickname || b.uid}</span>
                         <Badge variant={b.status === "active" ? "success" : "secondary"}>
-                          {b.status === "active" ? "使用中" : "已移除"}
+                          {b.status === "active" ? t("adm.1085") : t("adm.1086")}
                         </Badge>
                         <Badge variant={b.grantedAi ? "outline" : "secondary"}>
-                          {b.grantedAi ? "AI 权限由本次授予" : "未授予（此前已有）"}
+                          {b.grantedAi ? t("adm.1087") : t("adm.1088")}
                         </Badge>
                         <span className="ml-auto text-xs text-muted-foreground">
                           {fmtTime(b.createdAt)}
@@ -5529,10 +5752,7 @@ export default function AdminPage() {
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
                     <p className="text-sm font-medium">{t("adm.539")}</p>
-                    <p className="text-xs text-muted-foreground">
-                      关掉后，<span className="font-medium">还没有绑定过</span>的用户看不到
-                      {t("adm.540")}
-                    </p>
+                    <p className="text-xs text-muted-foreground">{t("adm.1089")}<span className="font-medium">{t("adm.1090")}</span>{t("adm.1091", { v0: t("adm.540") })}</p>
                   </div>
                   <Switch
                     checked={cli2apiDonationVisible}
@@ -5634,12 +5854,10 @@ export default function AdminPage() {
                             : t("adm.175")}
                       </Badge>
                       <span className="font-mono text-xs text-muted-foreground">
-                        {cli2apiConfig?.maskedKey ?? "（无）"}
+                        {cli2apiConfig?.maskedKey ?? t("adm.1092")}
                       </span>
                       {cli2apiConfig?.updatedAt && (
-                        <span className="text-xs text-muted-foreground">
-                          更新于 {fmtTime(cli2apiConfig.updatedAt)}
-                        </span>
+                        <span className="text-xs text-muted-foreground">{t("adm.1093", { v0: fmtTime(cli2apiConfig.updatedAt) })}</span>
                       )}
                     </div>
                     <div className="space-y-2">
@@ -5692,9 +5910,9 @@ export default function AdminPage() {
                           {a.provider}/{a.region}
                         </Badge>
                         <Badge variant={a.enabled ? "success" : "secondary"}>
-                          {a.enabled ? "启用" : "停用"}
+                          {a.enabled ? t("adm.1094") : t("adm.1095")}
                         </Badge>
-                        {a.ready && <Badge variant="success">就绪</Badge>}
+                        {a.ready && <Badge variant="success">{t("adm.1096")}</Badge>}
                         <span className="ml-auto font-mono text-xs text-muted-foreground">
                           {a.id}
                         </span>
@@ -5708,9 +5926,7 @@ export default function AdminPage() {
             {/* 绑定列表 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">
-                  捐献绑定（{cli2apiBindings.length}）
-                </CardTitle>
+                <CardTitle className="text-base">{t("adm.1097", { v0: cli2apiBindings.length })}</CardTitle>
                 <CardDescription>
                   {t("adm.560")}
                   {t("adm.561")}
@@ -5733,7 +5949,7 @@ export default function AdminPage() {
                           {b.provider}/{b.region}
                         </Badge>
                         <Badge variant={b.status === "active" ? "success" : "secondary"}>
-                          {b.status === "active" ? "使用中" : "已移除"}
+                          {b.status === "active" ? t("adm.1098") : t("adm.1099")}
                         </Badge>
                         <span className="ml-auto text-xs text-muted-foreground">
                           {fmtTime(b.createdAt)}
@@ -5896,12 +6112,7 @@ export default function AdminPage() {
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">{t("adm.588")}</CardTitle>
-                  <CardDescription>
-                    {t("adm.589")}
-                    {t("adm.590")}
-                    当前 {settingsStats?.storageAccounts ?? 0} 个网盘，
-                    占用 {formatBytes(settingsStats?.storageUsedBytes ?? 0)}。
-                  </CardDescription>
+                  <CardDescription>{t("adm.1100", { v0: t("adm.589"), v1: t("adm.590"), v2: settingsStats?.storageAccounts ?? 0, v3: formatBytes(settingsStats?.storageUsedBytes ?? 0) })}</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="grid gap-4 sm:grid-cols-2">
@@ -5937,72 +6148,6 @@ export default function AdminPage() {
                       checked={storageEnabled}
                       onCheckedChange={setStorageEnabled}
                     />
-                  </div>
-
-                  {/* 每桶人数上限：用户开通网盘时按「占用比例最低」分配，桶满即不再分配 */}
-                  <div className="space-y-3 rounded-md border p-3">
-                    <div className="space-y-0.5">
-                      <p className="text-sm font-medium">{t("adm.595")}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {t("adm.596")}
-                        {t("adm.597")}
-                      </p>
-                    </div>
-                    {r2Loading && !r2Data ? (
-                      <p className="text-xs text-muted-foreground">{t("adm.598")}</p>
-                    ) : (r2Data?.buckets.filter((b) => b.kind !== "platform") ?? []).length === 0 ? (
-                      <p className="text-xs text-muted-foreground">
-                        {t("adm.599")}
-                      </p>
-                    ) : (
-                      <div className="space-y-2">
-                        {(r2Data?.buckets ?? [])
-                          .filter((b) => b.kind !== "platform")
-                          .map((b) => {
-                            const value = bucketMaxDraft[b.id] ?? String(b.maxUsers)
-                            const dirty = value !== String(b.maxUsers)
-                            const full = b.maxUsers > 0 && b.stats.users >= b.maxUsers
-                            return (
-                              <div
-                                key={b.id}
-                                className="flex flex-wrap items-center gap-3 rounded-md border bg-muted/30 px-3 py-2"
-                              >
-                                <div className="min-w-0 flex-1">
-                                  <p className="flex items-center gap-2 truncate text-sm font-medium">
-                                    {b.name}
-                                    {full && <Badge variant="secondary">已满</Badge>}
-                                    {!b.enabled && <Badge variant="secondary">已停用</Badge>}
-                                  </p>
-                                  <p className="text-xs text-muted-foreground">
-                                    已分配 {b.stats.users} 人 · 每人 {formatBytes(b.quotaPerUser)}
-                                  </p>
-                                </div>
-                                <Input
-                                  type="number"
-                                  min={1}
-                                  className="w-24"
-                                  aria-label={`${b.name} 人数上限`}
-                                  value={value}
-                                  onChange={(e) =>
-                                    setBucketMaxDraft((d) => ({ ...d, [b.id]: e.target.value }))
-                                  }
-                                />
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  disabled={!dirty || bucketMaxBusy === b.id}
-                                  onClick={() => void handleSaveBucketMaxUsers(b.id)}
-                                >
-                                  {bucketMaxBusy === b.id && (
-                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                  )}
-                                  {t("adm.600")}
-                                </Button>
-                              </div>
-                            )
-                          })}
-                      </div>
-                    )}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
@@ -6065,6 +6210,37 @@ export default function AdminPage() {
                       checked={frpEnabled}
                       onCheckedChange={setFrpEnabled}
                     />
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{t("adm.downloadTitle")}</CardTitle>
+                  <CardDescription>{t("adm.downloadDesc")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="downloadAndroidUrl">{t("adm.downloadAndroid")}</Label>
+                      <Input
+                        id="downloadAndroidUrl"
+                        placeholder="https://…"
+                        value={downloadAndroidUrl}
+                        onChange={(e) => setDownloadAndroidUrl(e.target.value)}
+                        className="font-mono text-xs"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="downloadWindowsUrl">{t("adm.downloadWindows")}</Label>
+                      <Input
+                        id="downloadWindowsUrl"
+                        placeholder="https://…"
+                        value={downloadWindowsUrl}
+                        onChange={(e) => setDownloadWindowsUrl(e.target.value)}
+                        className="font-mono text-xs"
+                      />
+                    </div>
                   </div>
                 </CardContent>
               </Card>
@@ -6234,7 +6410,7 @@ export default function AdminPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="openRegUntil">截止时间（留空 = 不自动关闭）</Label>
+                    <Label htmlFor="openRegUntil">{t("adm.1105")}</Label>
                     <Input
                       id="openRegUntil"
                       type="datetime-local"
@@ -6250,6 +6426,50 @@ export default function AdminPage() {
                     {t("adm.638")}
                     {t("adm.639")}
                   </p>
+
+                  <div className="space-y-2 border-t pt-4">
+                    <Label htmlFor="regEmailDomains">{t("adm.regEmailDomains")}</Label>
+                    <Textarea
+                      id="regEmailDomains"
+                      rows={3}
+                      className="font-mono text-xs"
+                      value={registerEmailDomains}
+                      onChange={(e) => setRegisterEmailDomains(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t("adm.regEmailDomainsHint")}
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="regIpLimit">{t("adm.regIpDailyLimit")}</Label>
+                    <Input
+                      id="regIpLimit"
+                      type="number"
+                      min={0}
+                      className="w-32"
+                      value={registerIpDailyLimit}
+                      onChange={(e) => setRegisterIpDailyLimit(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t("adm.regIpDailyLimitHint")}
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="riskThreshold">{t("adm.riskThreshold")}</Label>
+                    <Input
+                      id="riskThreshold"
+                      type="number"
+                      min={1}
+                      className="w-32"
+                      value={riskPeakThreshold}
+                      onChange={(e) => setRiskPeakThreshold(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t("adm.riskThresholdHint")}
+                    </p>
+                  </div>
                 </CardContent>
               </Card>
 
@@ -6270,7 +6490,7 @@ export default function AdminPage() {
                     >
                       <div className="space-y-0.5">
                         <p className="text-sm font-medium">
-                          {FEATURE_LABELS[f as FeatureKey] ?? f}
+                          {t(FEATURE_LABELS[f as FeatureKey] ?? f)}
                         </p>
                         <p className="text-xs text-muted-foreground">
                           {inviteBasic[f]
@@ -6308,7 +6528,7 @@ export default function AdminPage() {
                     >
                       <div className="space-y-0.5">
                         <p className="text-sm font-medium">
-                          {FEATURE_LABELS[f as FeatureKey] ?? f}
+                          {t(FEATURE_LABELS[f as FeatureKey] ?? f)}
                         </p>
                         <p className="text-xs text-muted-foreground">
                           {openFeatures[f]
@@ -6347,7 +6567,7 @@ export default function AdminPage() {
                     >
                       <div className="space-y-0.5">
                         <p className="text-sm font-medium">
-                          {FEATURE_LABELS[f as FeatureKey] ?? f}
+                          {t(FEATURE_LABELS[f as FeatureKey] ?? f)}
                         </p>
                         <p className="text-xs text-muted-foreground">
                           {f === "ai"
@@ -6409,9 +6629,7 @@ export default function AdminPage() {
                       value={inviteRewardPlanId}
                       onChange={(e) => setInviteRewardPlanId(e.target.value)}
                     />
-                    <p className="text-xs text-muted-foreground">
-                      被邀请人绑定 WorkBuddy 反代账号后，给邀请人开的套餐（默认 2 = ¥500/天）
-                    </p>
+                    <p className="text-xs text-muted-foreground">{t("adm.1106")}</p>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="inviteRewardAiPlanId">{t("adm.665")}</Label>
@@ -6421,9 +6639,7 @@ export default function AdminPage() {
                       value={inviteRewardAiPlanId}
                       onChange={(e) => setInviteRewardAiPlanId(e.target.value)}
                     />
-                    <p className="text-xs text-muted-foreground">
-                      被邀请人捐献的 AI 渠道审核通过后，给邀请人开的套餐（默认 3 = ¥200/天）
-                    </p>
+                    <p className="text-xs text-muted-foreground">{t("adm.1107")}</p>
                   </div>
                   <div className="space-y-2 rounded-md border p-3">
                     <div className="flex items-center justify-between">
@@ -6494,12 +6710,10 @@ export default function AdminPage() {
                       value={newapiFreePlanId}
                       onChange={(e) => setNewapiFreePlanId(e.target.value)}
                     />
-                    <p className="text-xs text-muted-foreground">
-                      用户点「领取免费订阅」时开的套餐（默认 1）。填 0 = 关闭自动开订阅。
-                    </p>
+                    <p className="text-xs text-muted-foreground">{t("adm.1108")}</p>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="quotaPerUnitInput">额度换算率（1 单位金额 = 多少 quota）</Label>
+                    <Label htmlFor="quotaPerUnitInput">{t("adm.1109")}</Label>
                     <Input
                       id="quotaPerUnitInput"
                       inputMode="numeric"
@@ -6508,8 +6722,7 @@ export default function AdminPage() {
                     />
                     <p className="text-xs text-muted-foreground">
                       {t("adm.676")}
-                      <strong>改动会让所有已配置额度的显示基准一起变化</strong>，一般不需要改。
-                    </p>
+                      <strong>{t("adm.1110")}</strong>{t("adm.1111")}</p>
                   </div>
                 </CardContent>
               </Card>
@@ -6583,14 +6796,14 @@ export default function AdminPage() {
                   <Textarea
                     id="feedbackNotify"
                     rows={3}
-                    placeholder={"留空则不通知\n一行一个邮箱"}
+                    placeholder={t("adm.1112")}
                     value={feedbackNotifyEmail}
                     onChange={(e) => setFeedbackNotifyEmail(e.target.value)}
                   />
                   <p className="text-xs text-muted-foreground">
                     {t("adm.689")}
                     {notifyEmailOptions.length > 0 && (
-                      <> 本站在册邮箱：{notifyEmailOptions.join("、")}</>
+                      <>{t("adm.1113")}{notifyEmailOptions.join("、")}</>
                     )}
                   </p>
                 </div>
@@ -6637,10 +6850,7 @@ export default function AdminPage() {
                     {t("adm.698")}
                     {t("adm.699")}
                   </p>
-                  <p className="text-xs text-muted-foreground">
-                    ⚠️ 群发量 = 全部活跃用户数，一次可能吃掉第三方免费额度的一大截
-                    {t("adm.700")}
-                  </p>
+                  <p className="text-xs text-muted-foreground">{t("adm.1114", { v0: t("adm.700") })}</p>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="mailCfTargets">{t("adm.701")}</Label>
@@ -6674,14 +6884,14 @@ export default function AdminPage() {
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="postaKey">
-                      API Key{postaConfigured && "（已配置）"}
+                      API Key{postaConfigured && t("adm.1115")}
                     </Label>
                     <Input
                       id="postaKey"
                       type="password"
                       value={postaKey}
                       onChange={(e) => setPostaKey(e.target.value)}
-                      placeholder={postaConfigured ? "已配置，留空则保持不变" : "未配置"}
+                      placeholder={postaConfigured ? t("adm.1116") : t("adm.1117")}
                     />
                   </div>
                   <div className="space-y-2">
@@ -6706,7 +6916,7 @@ export default function AdminPage() {
                   <div className="space-y-2">
                     <Label>
                       API Key
-                      {brevoKeys.length > 0 && `（已配置 ${brevoKeys.length} 把）`}
+                      {brevoKeys.length > 0 && t("adm.1118", { v0: brevoKeys.length })}
                     </Label>
 
                     {/* 已配置的 Key 列表：只显示中间打码的串，明文永不回前端 */}
@@ -6718,9 +6928,7 @@ export default function AdminPage() {
                             className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5"
                           >
                             <span className="flex items-center gap-2 overflow-hidden">
-                              <span className="shrink-0 text-[11px] text-muted-foreground">
-                                第 {i + 1} 把
-                              </span>
+                              <span className="shrink-0 text-[11px] text-muted-foreground">{t("adm.1119", { v0: i + 1 })}</span>
                               <span className="truncate font-mono text-xs">{k}</span>
                             </span>
                             <Button
@@ -6827,11 +7035,7 @@ export default function AdminPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t("adm.721")}</DialogTitle>
-            <DialogDescription>
-              将从网关账号池移除 {wb2apiRemoving?.nickname || wb2apiRemoving?.uid}
-              （捐献者 {wb2apiRemoving?.username}）。
-              {t("adm.722")}
-            </DialogDescription>
+            <DialogDescription>{t("adm.1120", { v0: wb2apiRemoving?.nickname || wb2apiRemoving?.uid, v1: wb2apiRemoving?.username, v2: t("adm.722") })}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <label className="flex cursor-pointer items-start gap-3 rounded-md border px-4 py-3">
@@ -6876,11 +7080,7 @@ export default function AdminPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t("adm.728")}</DialogTitle>
-            <DialogDescription>
-              将从 cli2api 删除账号 {cli2apiRemoving?.accountId}
-              （捐献者 {cli2apiRemoving?.username}）。
-              {t("adm.729")}
-            </DialogDescription>
+            <DialogDescription>{t("adm.1121", { v0: cli2apiRemoving?.accountId, v1: cli2apiRemoving?.username, v2: t("adm.729") })}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <label className="flex cursor-pointer items-start gap-3 rounded-md border px-4 py-3">
@@ -6928,10 +7128,7 @@ export default function AdminPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t("adm.735")}</DialogTitle>
-            <DialogDescription>
-              {permInvite?.code} · 只影响之后用该码注册的新账号；
-              {t("adm.736")}
-            </DialogDescription>
+            <DialogDescription>{t("adm.1122", { v0: permInvite?.code, v1: t("adm.736") })}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             {FEATURES.map((f) => (
@@ -6940,8 +7137,8 @@ export default function AdminPage() {
                 className="flex items-center justify-between rounded-md border px-4 py-3"
               >
                 <div className="space-y-0.5">
-                  <p className="text-sm font-medium">{f.label}</p>
-                  <p className="text-xs text-muted-foreground">{f.desc}</p>
+                  <p className="text-sm font-medium">{t(f.label)}</p>
+                  <p className="text-xs text-muted-foreground">{t(f.desc)}</p>
                 </div>
                 <Switch
                   checked={permDraft?.[f.key] ?? false}
@@ -6981,9 +7178,7 @@ export default function AdminPage() {
           {quotaDetail && (
             <>
               <DialogHeader>
-                <DialogTitle className="font-mono">
-                  {quotaDetail.username} 的邀请码额度
-                </DialogTitle>
+                <DialogTitle className="font-mono">{t("adm.1123", { v0: quotaDetail.username })}</DialogTitle>
                 <DialogDescription>
                   {t("adm.739")}
                 </DialogDescription>
@@ -6992,13 +7187,7 @@ export default function AdminPage() {
               <div className="space-y-4">
                 <div className="rounded-md border p-3">
                   <p className="text-sm font-medium">{t("adm.740")}</p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    剩余 {quotaDetail.quota.inviteRemaining} / 共{" "}
-                    {quotaDetail.quota.inviteTotal}（基础{" "}
-                    {quotaDetail.quota.inviteBase} + 捐献{" "}
-                    {quotaDetail.quota.inviteBonus}），已用{" "}
-                    {quotaDetail.quota.inviteUsed}
-                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">{t("adm.1124", { v0: quotaDetail.quota.inviteRemaining, v1: " ", v2: quotaDetail.quota.inviteTotal, v3: " ", v4: quotaDetail.quota.inviteBase, v5: " ", v6: quotaDetail.quota.inviteBonus, v7: " ", v8: quotaDetail.quota.inviteUsed })}</p>
                   <div className="mt-2 flex items-center gap-2">
                     <Label className="text-xs">{t("adm.741")}</Label>
                     <Input
@@ -7054,14 +7243,9 @@ export default function AdminPage() {
                                   })
                                 }
                               />
-                              <span className="text-xs text-muted-foreground">
-                                已用{" "}
-                                {
-                                  quotaDetail.quota.featureUsed[
+                              <span className="text-xs text-muted-foreground">{t("adm.1125", { v0: " ", v1: quotaDetail.quota.featureUsed[
                                     f as keyof typeof quotaDetail.quota.featureUsed
-                                  ]
-                                }
-                              </span>
+                                  ] })}</span>
                             </>
                           )}
                         </div>
@@ -7071,9 +7255,7 @@ export default function AdminPage() {
                 </div>
 
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">
-                    该用户创建的邀请码（{quotaDetail.invites.length}）
-                  </h3>
+                  <h3 className="mb-2 text-sm font-medium">{t("adm.1126", { v0: quotaDetail.invites.length })}</h3>
                   {quotaDetail.invites.length === 0 ? (
                     <p className="rounded-md border px-3 py-4 text-sm text-muted-foreground">
                       {t("adm.745")}
@@ -7105,7 +7287,7 @@ export default function AdminPage() {
                               </Badge>
                             ))}
                             <Badge variant={used ? "destructive" : "success"}>
-                              {used ? "已使用" : "未使用"}
+                              {used ? t("adm.1127") : t("adm.1128")}
                             </Badge>
                             <span className="ml-auto text-muted-foreground">
                               {fmtTime(inv.createdAt)}
@@ -7182,8 +7364,8 @@ export default function AdminPage() {
                   className="flex items-center justify-between rounded-md border p-3"
                 >
                   <div className="space-y-0.5">
-                    <p className="text-sm font-medium">{f.label}</p>
-                    <p className="text-xs text-muted-foreground">{f.desc}</p>
+                    <p className="text-sm font-medium">{t(f.label)}</p>
+                    <p className="text-xs text-muted-foreground">{t(f.desc)}</p>
                   </div>
                   <Switch
                     checked={invitePerms[f.key]}
@@ -7214,7 +7396,7 @@ export default function AdminPage() {
       <Dialog open={announcementOpen} onOpenChange={setAnnouncementOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{annDraft.id ? "编辑公告" : "发布公告"}</DialogTitle>
+            <DialogTitle>{annDraft.id ? t("adm.1129") : t("adm.1130")}</DialogTitle>
             <DialogDescription>
               {t("adm.755")}
             </DialogDescription>
@@ -7359,7 +7541,7 @@ export default function AdminPage() {
       <Dialog open={eventOpen} onOpenChange={setEventOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{eventDraft.id ? "编辑活动" : "发布活动"}</DialogTitle>
+            <DialogTitle>{eventDraft.id ? t("adm.1131") : t("adm.1132")}</DialogTitle>
             <DialogDescription>
               {t("adm.781")}
             </DialogDescription>
@@ -7398,7 +7580,7 @@ export default function AdminPage() {
                   <SelectContent>
                     {EVENT_STATUS_OPTIONS.map((o) => (
                       <SelectItem key={o.value} value={o.value}>
-                        {o.label}
+                        {t(o.label)}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -7417,7 +7599,7 @@ export default function AdminPage() {
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">
-                <Label htmlFor="evStart">开始时间（留空 = 立即）</Label>
+                <Label htmlFor="evStart">{t("adm.1133")}</Label>
                 <Input
                   id="evStart"
                   type="datetime-local"
@@ -7426,7 +7608,7 @@ export default function AdminPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="evEnd">结束时间（留空 = 不过期）</Label>
+                <Label htmlFor="evEnd">{t("adm.1134")}</Label>
                 <Input
                   id="evEnd"
                   type="datetime-local"
@@ -7466,7 +7648,7 @@ export default function AdminPage() {
                 <SelectContent>
                   {REWARD_TYPE_OPTIONS.map((o) => (
                     <SelectItem key={o.value} value={o.value}>
-                      {o.label}
+                      {t(o.label)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -7556,19 +7738,10 @@ export default function AdminPage() {
                       </>
                     )}
                     {eventDraft.rewardType === "newapi_quota" && (
-                      <p className="text-xs text-muted-foreground">
-                        按「元」填写，发放时会自动换算成中转站额度（1 元 ={" "}
-                        {quotaPerUnit.toLocaleString()} 额度）加到对方的余额里。
-                        {t("adm.794")}
-                      </p>
+                      <p className="text-xs text-muted-foreground">{t("adm.1135", { v0: " ", v1: quotaPerUnit.toLocaleString(), v2: t("adm.794") })}</p>
                     )}
                     {eventDraft.rewardType === "points" && (
-                      <p className="text-xs text-muted-foreground">
-                        发放到用户的「积分」余额。兑换比例（每 1 积分 = 多少元）在
-                        {t("adm.795")}
-                        {t("adm.796")}
-                        {t("adm.797")}
-                        {eventDraft.pointsRandom && (
+                      <p className="text-xs text-muted-foreground">{t("adm.1136", { v0: t("adm.795"), v1: t("adm.796"), v2: t("adm.797") })}{eventDraft.pointsRandom && (
                           <>
                             <br />
                             {t("adm.798")}
@@ -7621,7 +7794,7 @@ export default function AdminPage() {
                 <SelectContent>
                   {CONDITION_TYPE_OPTIONS.map((o) => (
                     <SelectItem key={o.value} value={o.value}>
-                      {o.label}
+                      {t(o.label)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -7638,7 +7811,7 @@ export default function AdminPage() {
                     <SelectContent>
                       {FEATURES.map((f) => (
                         <SelectItem key={f.key} value={f.key}>
-                          {f.label}
+                          {t(f.label)}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -7680,8 +7853,7 @@ export default function AdminPage() {
                     <br />
                     <span className="font-medium text-destructive">
                       {t("adm.808")}
-                    </span>
-                    （环境变量/密钥 <code className="font-mono">GITHUB_TOKEN</code>）：
+                    </span>{t("adm.1137")}<code className="font-mono">GITHUB_TOKEN</code>）：
                     {t("adm.809")}
                   </p>
                 </div>
@@ -7771,7 +7943,7 @@ export default function AdminPage() {
       <Dialog open={claimsOpen} onOpenChange={setClaimsOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>领取名单 · {claimsEvent?.title}</DialogTitle>
+            <DialogTitle>{t("adm.1138")}{claimsEvent?.title}</DialogTitle>
             <DialogDescription>
               {t("adm.822")}
             </DialogDescription>
@@ -7848,7 +8020,7 @@ export default function AdminPage() {
       <Dialog open={r2BucketOpen} onOpenChange={setR2BucketOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{r2EditId ? "编辑 R2 桶" : "添加 R2 桶"}</DialogTitle>
+            <DialogTitle>{r2EditId ? t("adm.1139") : t("adm.1140")}</DialogTitle>
             <DialogDescription>
               {r2EditId
                 ? t("adm.207")
@@ -7877,7 +8049,7 @@ export default function AdminPage() {
                               disabled={b.imported}
                             >
                               {a.name} / {b.name}
-                              {b.imported ? "（已导入）" : ""}
+                              {b.imported ? t("adm.1141") : ""}
                             </SelectItem>
                           ))
                         )}
@@ -7889,7 +8061,7 @@ export default function AdminPage() {
                   </>
                 ) : (
                   <p className="text-xs text-muted-foreground">
-                    {r2Discovered?.reason ?? "无法自动发现，请在下面手动填写"}
+                    {r2Discovered?.reason ?? t("adm.1142")}
                   </p>
                 )}
               </div>
@@ -7978,7 +8150,7 @@ export default function AdminPage() {
                   <Label htmlFor="r2ak">Access Key ID</Label>
                   <Input
                     id="r2ak"
-                    placeholder={r2EditId ? "留空则不修改" : "留空 = 用全局 R2_API_TOKEN"}
+                    placeholder={r2EditId ? t("adm.1143") : t("adm.1144")}
                     className="font-mono text-xs"
                     value={r2Draft.accessKeyId}
                     onChange={(e) => setR2Draft((d) => ({ ...d, accessKeyId: e.target.value }))}
@@ -7989,7 +8161,7 @@ export default function AdminPage() {
                   <Input
                     id="r2sk"
                     type="password"
-                    placeholder={r2EditId ? "留空则不修改" : "留空 = 用全局 R2_API_TOKEN"}
+                    placeholder={r2EditId ? t("adm.1145") : t("adm.1146")}
                     className="font-mono text-xs"
                     value={r2Draft.secretAccessKey}
                     onChange={(e) => setR2Draft((d) => ({ ...d, secretAccessKey: e.target.value }))}
@@ -7997,17 +8169,7 @@ export default function AdminPage() {
                 </div>
               </div>
             </details>
-            <div className="grid grid-cols-3 gap-3">
-              <div className="space-y-2">
-                <Label htmlFor="r2max">{t("adm.839")}</Label>
-                <Input
-                  id="r2max"
-                  type="number"
-                  min={1}
-                  value={r2Draft.maxUsers}
-                  onChange={(e) => setR2Draft((d) => ({ ...d, maxUsers: e.target.value }))}
-                />
-              </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div className="space-y-2">
                 <Label htmlFor="r2quota">{t("adm.840")}</Label>
                 <Input
@@ -8016,6 +8178,16 @@ export default function AdminPage() {
                   min={1}
                   value={r2Draft.quotaPerUser}
                   onChange={(e) => setR2Draft((d) => ({ ...d, quotaPerUser: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="r2capacity">{t("adm.1230")}</Label>
+                <Input
+                  id="r2capacity"
+                  type="number"
+                  min={1}
+                  value={r2Draft.capacityBytes}
+                  onChange={(e) => setR2Draft((d) => ({ ...d, capacityBytes: e.target.value }))}
                 />
               </div>
               <div className="space-y-2">
@@ -8028,10 +8200,7 @@ export default function AdminPage() {
                 />
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">
-              每人配额按 MB 填（1024 MB = 1 GiB）。容量上限 = 人数上限 × 每人配额。
-              {t("adm.842")}
-            </p>
+            <p className="text-xs text-muted-foreground">{t("adm.1147", { v0: t("adm.842") })}</p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setR2BucketOpen(false)}>
@@ -8039,7 +8208,7 @@ export default function AdminPage() {
             </Button>
             <Button onClick={() => void handleSaveR2Bucket()} disabled={r2Busy}>
               {r2Busy && <Loader2 className="h-4 w-4 animate-spin" />}
-              {r2EditId ? "保存" : "创建"}
+              {r2EditId ? t("adm.1148") : t("adm.1149")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -8070,10 +8239,7 @@ export default function AdminPage() {
                     <Badge variant="secondary">admin</Badge>
                   ) : null}
                 </DialogTitle>
-                <DialogDescription>
-                  {detail.user.nickname ? `${detail.user.nickname} · ` : ""}
-                  {detail.user.email} · 注册于 {fmtTime(detail.user.createdAt)}
-                </DialogDescription>
+                <DialogDescription>{t("adm.1150", { v0: detail.user.nickname ? `${detail.user.nickname} · ` : "", v1: detail.user.email, v2: fmtTime(detail.user.createdAt) })}</DialogDescription>
               </DialogHeader>
 
               <div className="min-w-0 space-y-4">
@@ -8089,9 +8255,7 @@ export default function AdminPage() {
                         disabled={busy || detail.user.username === user?.username}
                         onChange={(e) => setNickDraft(e.target.value)}
                       />
-                      <span className="text-xs text-muted-foreground">
-                        展示昵称（2-16 位中文/英文/数字/下划线，留空 = 清空）
-                      </span>
+                      <span className="text-xs text-muted-foreground">{t("adm.1151")}</span>
                       <Button
                         size="sm"
                         variant="outline"
@@ -8106,9 +8270,7 @@ export default function AdminPage() {
                     <div className="flex items-center justify-between rounded-md border p-3">
                       <div className="space-y-0.5">
                         <p className="text-sm font-medium">{t("adm.847")}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {detail.user.email} · 验证后才能接收转发与通知
-                        </p>
+                        <p className="text-xs text-muted-foreground">{t("adm.1152", { v0: detail.user.email })}</p>
                       </div>
                       <Switch
                         checked={detail.user.emailVerified}
@@ -8138,7 +8300,7 @@ export default function AdminPage() {
                     <div className="flex items-center justify-between rounded-md border p-3">
                       <div className="space-y-0.5">
                         <p className="text-sm font-medium">
-                          {detail.user.role === "root" ? "站长" : "管理员"}
+                          {detail.user.role === "root" ? t("adm.1153") : t("adm.1154")}
                         </p>
                         <p className="text-xs text-muted-foreground">
                           {detail.user.role === "root"
@@ -8163,6 +8325,27 @@ export default function AdminPage() {
                       />
                     </div>
                   </div>
+
+                  {/* 重置二次认证：只有站长能做，是「管理员被 2FA 挡在门外」时的唯一出路 */}
+                  {user?.role === "root" && (
+                    <div className="mt-2 flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 dark:border-amber-800 dark:bg-amber-950/40">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium">{t("adm.1254")}</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {t("adm.1258")}
+                        </div>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="shrink-0"
+                        disabled={busy}
+                        onClick={() => void handleResetTwoFactor()}
+                      >
+                        {t("adm.1259")}
+                      </Button>
+                    </div>
+                  )}
                 </section>
 
                 {/* ---- 各模块用量与开通状态 ---- */}
@@ -8175,7 +8358,7 @@ export default function AdminPage() {
                         <span className="font-medium">{t("adm.851")}</span>
                         {detail.storage ? (
                           <Badge variant={detail.storage.enabled ? "success" : "secondary"}>
-                            {detail.storage.enabled ? "已开通" : "已停用"}
+                            {detail.storage.enabled ? t("adm.1155") : t("adm.1156")}
                           </Badge>
                         ) : (
                           <Badge variant="outline">{t("adm.852")}</Badge>
@@ -8183,11 +8366,7 @@ export default function AdminPage() {
                       </div>
                       {detail.storage && (
                         <>
-                          <p className="mt-1 text-muted-foreground">
-                            {detail.storage.prefix}/ · {formatBytes(detail.storage.usedBytes)} /{" "}
-                            {formatBytes(detail.storage.quotaBytes)} · {detail.storage.fileCount} 个文件
-                            {detail.storage.bucketName && ` · 桶 ${detail.storage.bucketName}`}
-                          </p>
+                          <p className="mt-1 text-muted-foreground">{t("adm.1157", { v0: detail.storage.prefix, v1: formatBytes(detail.storage.usedBytes), v2: " ", v3: formatBytes(detail.storage.quotaBytes), v4: detail.storage.fileCount, v5: detail.storage.bucketName && t("adm.1158", { v0: detail.storage.bucketName }) })}</p>
                           {/* 单独改这个人的配额：配额是开通时写死的快照，改桶不会回填老用户 */}
                           <div className="mt-2 flex flex-wrap items-center gap-2">
                             <Input
@@ -8219,9 +8398,7 @@ export default function AdminPage() {
                               {t("adm.853")}
                             </Button>
                             {detail.storage.usedBytes > 0 && (
-                              <span className="text-muted-foreground">
-                                已用 {formatBytes(detail.storage.usedBytes)}
-                              </span>
+                              <span className="text-muted-foreground">{t("adm.1159", { v0: formatBytes(detail.storage.usedBytes) })}</span>
                             )}
                           </div>
                         </>
@@ -8239,15 +8416,7 @@ export default function AdminPage() {
                         )}
                       </div>
                       {detail.newapi && (
-                        <p className="mt-1 text-muted-foreground">
-                          #{detail.newapi.newapiUserId} · 余额{" "}
-                          {currencySymbol}
-                          {(detail.newapi.quota / quotaPerUnit).toFixed(2)} · 已用{" "}
-                          {currencySymbol}
-                          {(detail.newapi.usedQuota / quotaPerUnit).toFixed(2)} ·{" "}
-                          {detail.newapi.requestCount} 次请求
-                          {detail.newapi.syncedAt && ` · 同步于 ${fmtTime(detail.newapi.syncedAt)}`}
-                        </p>
+                        <p className="mt-1 text-muted-foreground">{t("adm.1160", { v0: detail.newapi.newapiUserId, v1: " ", v2: currencySymbol, v3: (detail.newapi.quota / quotaPerUnit).toFixed(2), v4: " ", v5: currencySymbol, v6: (detail.newapi.usedQuota / quotaPerUnit).toFixed(2), v7: " ", v8: detail.newapi.requestCount, v9: detail.newapi.syncedAt && t("adm.1161", { v0: fmtTime(detail.newapi.syncedAt) }) })}</p>
                       )}
                       {detail.newapi && (
                         <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -8276,7 +8445,7 @@ export default function AdminPage() {
                         <span className="font-medium">{t("adm.859")}</span>
                         {detail.frp ? (
                           <Badge variant={detail.frp.enabled ? "success" : "secondary"}>
-                            {detail.frp.enabled ? "已启用" : "已关闭"}
+                            {detail.frp.enabled ? t("adm.1162") : t("adm.1163")}
                           </Badge>
                         ) : (
                           <Badge variant="outline">{t("adm.860")}</Badge>
@@ -8288,17 +8457,12 @@ export default function AdminPage() {
                             <p>
                               {t("adm.861")}
                               {detail.frpPorts
-                                .map((p) => `${p.nodeName ?? "节点"} ${p.remotePort}`)
+                                .map((p) => `${p.nodeName ?? t("adm.1164")} ${p.remotePort}`)
                                 .join("、")}
                             </p>
                           )}
                           {detail.frpApplications.slice(0, 5).map((a) => (
-                            <p key={a.id}>
-                              申请 {a.ports.join("/")} · {a.status}
-                              {a.reviewNote && ` · ${a.reviewNote}`}
-                              {" · "}
-                              {fmtTime(a.createdAt)}
-                            </p>
+                            <p key={a.id}>{t("adm.1165", { v0: a.ports.join("/"), v1: a.status, v2: a.reviewNote && ` · ${a.reviewNote}`, v3: " · ", v4: fmtTime(a.createdAt) })}</p>
                           ))}
                         </div>
                       )}
@@ -8310,17 +8474,14 @@ export default function AdminPage() {
                         <span className="font-medium">{t("adm.862")}</span>
                         {detail.proxy ? (
                           <Badge variant={detail.proxy.enabled ? "success" : "secondary"}>
-                            {detail.proxy.enabled ? "已启用" : "已关闭"}
+                            {detail.proxy.enabled ? t("adm.1166") : t("adm.1167")}
                           </Badge>
                         ) : (
                           <Badge variant="outline">{t("adm.863")}</Badge>
                         )}
                       </div>
                       {detail.proxy?.consentedAt && (
-                        <p className="mt-1 text-muted-foreground">
-                          已同意使用协议 v{detail.proxy.consentVersion} ·{" "}
-                          {fmtTime(detail.proxy.consentedAt)}
-                        </p>
+                        <p className="mt-1 text-muted-foreground">{t("adm.1168", { v0: detail.proxy.consentVersion, v1: " ", v2: fmtTime(detail.proxy.consentedAt) })}</p>
                       )}
                     </div>
                   </div>
@@ -8334,10 +8495,10 @@ export default function AdminPage() {
                       <div className="space-y-1">
                         <div className="flex items-center gap-2">
                           <Badge variant={detail.profile.published ? "success" : "secondary"}>
-                            {detail.profile.published ? "已启用" : "未启用"}
+                            {detail.profile.published ? t("adm.1169") : t("adm.1170")}
                           </Badge>
                           <span className="text-muted-foreground">
-                            {detail.profile.displayName ?? "未设置展示名"}
+                            {detail.profile.displayName ?? t("adm.1171")}
                           </span>
                           {(() => {
                             const url = profilePublicUrl(
@@ -8357,11 +8518,7 @@ export default function AdminPage() {
                             ) : null
                           })()}
                         </div>
-                        <p className="text-muted-foreground">
-                          {detail.profile.fqdn ?? `/profile/${detail.profile.slug}`} ·
-                          访问 {detail.profile.viewCount} 次 · 更新于{" "}
-                          {fmtTime(detail.profile.updatedAt)}
-                        </p>
+                        <p className="text-muted-foreground">{t("adm.1172", { v0: detail.profile.fqdn ?? `/profile/${detail.profile.slug}`, v1: detail.profile.viewCount, v2: " ", v3: fmtTime(detail.profile.updatedAt) })}</p>
                       </div>
                     ) : (
                       <p className="text-muted-foreground">{t("adm.866")}</p>
@@ -8373,11 +8530,7 @@ export default function AdminPage() {
                 <section>
                   <h3 className="mb-2 text-sm font-medium">{t("adm.867")}</h3>
                   <div className="rounded-md border p-3 text-xs">
-                    <p className="text-muted-foreground">
-                      邀请码：共 {detail.quota.inviteTotal} 个（基础{" "}
-                      {detail.quota.inviteBase} + 捐献 {detail.quota.inviteBonus}）· 已用{" "}
-                      {detail.quota.inviteUsed} · 剩余 {detail.quota.inviteRemaining}
-                    </p>
+                    <p className="text-muted-foreground">{t("adm.1173", { v0: detail.quota.inviteTotal, v1: " ", v2: detail.quota.inviteBase, v3: detail.quota.inviteBonus, v4: " ", v5: detail.quota.inviteUsed, v6: detail.quota.inviteRemaining })}</p>
                     <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
                       {Object.keys(detail.quota.featureQuota).map((f) => (
                         <div key={f} className="flex items-center justify-between">
@@ -8393,9 +8546,7 @@ export default function AdminPage() {
 
                 {/* ---- 最近活动 ---- */}
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">
-                    最近活动（{detail.activity.length}）
-                  </h3>
+                  <h3 className="mb-2 text-sm font-medium">{t("adm.1174", { v0: detail.activity.length })}</h3>
                   <div className="rounded-md border">
                     {detail.activity.length === 0 ? (
                       <p className="px-3 py-4 text-sm text-muted-foreground">{t("adm.868")}</p>
@@ -8416,7 +8567,7 @@ export default function AdminPage() {
                 </section>
 
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">子域名（{detail.subdomains.length}）</h3>
+                  <h3 className="mb-2 text-sm font-medium">{t("adm.1175", { v0: detail.subdomains.length })}</h3>
                   <div className="flex flex-wrap gap-2">
                     {detail.subdomains.map((s) => (
                       <span
@@ -8430,7 +8581,7 @@ export default function AdminPage() {
                 </section>
 
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">DNS 记录（{detail.dns.length}）</h3>
+                  <h3 className="mb-2 text-sm font-medium">{t("adm.1176", { v0: detail.dns.length })}</h3>
                   <div className="rounded-md border">
                     {detail.dns.length === 0 ? (
                       <p className="px-3 py-4 text-sm text-muted-foreground">{t("adm.869")}</p>
@@ -8451,7 +8602,7 @@ export default function AdminPage() {
                 </section>
 
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">邮箱（{detail.mailboxes.length}）</h3>
+                  <h3 className="mb-2 text-sm font-medium">{t("adm.1177", { v0: detail.mailboxes.length })}</h3>
                   <div className="flex flex-wrap gap-2">
                     {detail.mailboxes.map((mb) => (
                       <span
@@ -8468,9 +8619,7 @@ export default function AdminPage() {
                 </section>
 
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">
-                    邮件（{detail.messages.length}）
-                  </h3>
+                  <h3 className="mb-2 text-sm font-medium">{t("adm.1178", { v0: detail.messages.length })}</h3>
                   <div className="rounded-md border">
                     {detail.messages.length === 0 ? (
                       <p className="px-3 py-4 text-sm text-muted-foreground">{t("adm.871")}</p>
@@ -8484,7 +8633,7 @@ export default function AdminPage() {
                         >
                           <span className="truncate font-medium">
                             {m.read ? "" : "● "}
-                            {m.subject || "无主题"}
+                            {m.subject || t("adm.1179")}
                           </span>
                           <span className="ml-2 shrink-0 text-muted-foreground">
                             {m.from}
@@ -8504,8 +8653,8 @@ export default function AdminPage() {
                         className="flex items-center justify-between rounded-md border p-3"
                       >
                         <div className="space-y-0.5">
-                          <p className="text-sm font-medium">{f.label}</p>
-                          <p className="text-xs text-muted-foreground">{f.desc}</p>
+                          <p className="text-sm font-medium">{t(f.label)}</p>
+                          <p className="text-xs text-muted-foreground">{t(f.desc)}</p>
                         </div>
                         <Switch
                           checked={detail.user.permissions[f.key]}
@@ -8533,9 +8682,7 @@ export default function AdminPage() {
                         disabled={busy || detail.user.username === user?.username}
                         onChange={(e) => setQuotaDraft(e.target.value)}
                       />
-                      <span className="text-xs text-muted-foreground">
-                        个一级子域名（留空 = 用全局默认）
-                      </span>
+                      <span className="text-xs text-muted-foreground">{t("adm.1180")}</span>
                       <Button
                         size="sm"
                         variant="outline"
@@ -8546,11 +8693,7 @@ export default function AdminPage() {
                         {t("adm.874")}
                       </Button>
                     </div>
-                    <p className="mt-2 text-xs text-muted-foreground">
-                      {t("adm.875")}
-                      {detail.user.maxSubdomains ?? globalQuota} 个
-                      {detail.user.maxSubdomains === null && "（全局默认）"}
-                    </p>
+                    <p className="mt-2 text-xs text-muted-foreground">{t("adm.1181", { v0: t("adm.875"), v1: detail.user.maxSubdomains ?? globalQuota, v2: detail.user.maxSubdomains === null && t("adm.1182") })}</p>
                   </div>
                 </section>
 
@@ -8596,13 +8739,13 @@ export default function AdminPage() {
           {openedMessage && (
             <>
               <DialogHeader>
-                <DialogTitle>{openedMessage.subject || "无主题"}</DialogTitle>
+                <DialogTitle>{openedMessage.subject || t("adm.1183")}</DialogTitle>
                 <DialogDescription>
                   {openedMessage.from} · {fmtTime(openedMessage.receivedAt)}
                 </DialogDescription>
               </DialogHeader>
               <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed">
-                {openedMessage.body || "（无正文内容）"}
+                {openedMessage.body || t("adm.1184")}
               </pre>
             </>
           )}
@@ -8613,7 +8756,7 @@ export default function AdminPage() {
       <Dialog open={nodeOpen} onOpenChange={setNodeOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{nodeForm.id ? "编辑节点" : "添加节点"}</DialogTitle>
+            <DialogTitle>{nodeForm.id ? t("adm.1185") : t("adm.1186")}</DialogTitle>
             <DialogDescription>
               {t("adm.878")}
             </DialogDescription>
@@ -8692,11 +8835,7 @@ export default function AdminPage() {
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label>{t("adm.886")}</Label>
-                <p className="text-xs text-muted-foreground">
-                  {t("adm.887")}
-                  每个用户自己的 <code>metadatas.token</code> 由用户在申请时自设，
-                  {t("adm.888")}
-                </p>
+                <p className="text-xs text-muted-foreground">{t("adm.1187", { v0: t("adm.887") })}<code>metadatas.token</code>{t("adm.1188", { v0: t("adm.888") })}</p>
               </div>
             </div>
             <div className="grid gap-4 sm:grid-cols-3">
@@ -8771,6 +8910,67 @@ export default function AdminPage() {
               </div>
             </div>
           </div>
+            {nodeForm.id && (
+              <div className="mt-4 space-y-2 rounded-md border p-3">
+                <div className="flex items-center justify-between">
+                  <Label>{t("adm.1243")}</Label>
+                  <span className="text-xs text-muted-foreground">
+                    {nodePortsLoading ? t("adm.1245") : t("adm.1244", { v0: nodePorts.length })}
+                  </span>
+                </div>
+                {nodePorts.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">{t("adm.1246")}</p>
+                ) : (
+                  <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto">
+                    {groupPortRuns(nodePorts.map((p) => p.port)).map((r) => {
+                      // 相邻端口折叠成「30000-30060」显示；来源看这一段里是否含手工标记
+                      const inRun = nodePorts.filter((p) => p.port >= r.from && p.port <= r.to)
+                      const owners = [
+                        ...new Set(inRun.map((p) => (p.manual ? t("adm.1252") : (p.owner ?? "?")))),
+                      ]
+                      return (
+                        <span
+                          key={r.from}
+                          className="inline-flex items-center gap-1 rounded border bg-muted/40 px-2 py-0.5 font-mono text-xs"
+                          title={owners.join("、")}
+                        >
+                          {r.from === r.to ? r.from : `${r.from}-${r.to}`}
+                          <span className="text-[10px] text-muted-foreground">
+                            {r.from === r.to ? "" : t("adm.1253", { v0: r.to - r.from + 1 })}
+                          </span>
+                          <button
+                            type="button"
+                            className="text-muted-foreground hover:text-destructive"
+                            disabled={frpBusy}
+                            onClick={() => void handleFreeNodePortRun(r.from, r.to)}
+                            aria-label={t("adm.1250")}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      )
+                    })}
+                  </div>
+                )}
+                <div className="flex items-center gap-2">
+                  <Input
+                    className="font-mono"
+                    placeholder="28888-28890, 22222"
+                    value={nodePortAdd}
+                    onChange={(e) => setNodePortAdd(e.target.value)}
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void handleAddNodePorts()}
+                    disabled={frpBusy}
+                  >
+                    {t("adm.1247")}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">{t("adm.1248")}</p>
+              </div>
+            )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setNodeOpen(false)}>
               {t("adm.900")}
@@ -8787,7 +8987,7 @@ export default function AdminPage() {
       <Dialog open={proxyOpen} onOpenChange={setProxyOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{proxyForm.id ? "编辑订阅源" : "添加订阅源"}</DialogTitle>
+            <DialogTitle>{proxyForm.id ? t("adm.1189") : t("adm.1190")}</DialogTitle>
             <DialogDescription>
               {t("adm.902")}
               {t("adm.903")}
@@ -8826,10 +9026,7 @@ export default function AdminPage() {
                 placeholder="https://example.com/api/v1/client/subscribe?token=..."
                 className="font-mono text-xs"
               />
-              <p className="text-xs text-muted-foreground">
-                {t("adm.907")}
-                抓取时会自动带上 Authorization: Bearer。
-              </p>
+              <p className="text-xs text-muted-foreground">{t("adm.1191", { v0: t("adm.907") })}</p>
             </div>
             <div className="grid gap-4 sm:grid-cols-3">
               <div className="space-y-1.5">
@@ -8926,22 +9123,22 @@ export default function AdminPage() {
 }
 
 const DONATION_LABEL: Record<string, string> = {
-  ai: "AI 渠道",
-  frp: "内网穿透",
-  proxy: "代理订阅",
-  sensenova: "商汤 Key",
+  ai: "adm.1192",
+  frp: "adm.1193",
+  proxy: "adm.1194",
+  sensenova: "adm.1195",
 }
 
 /** 捐献的分类维度：未处理 / 人工通过 / 人工拒绝 / 自动通过 / 自动拒绝 */
 type DonationBucket = "pending" | "approved" | "rejected" | "autoApproved" | "autoRejected"
 
 const DONATION_FILTERS: { key: string; label: string }[] = [
-  { key: "", label: "全部" },
-  { key: "pending", label: "未处理" },
-  { key: "approved", label: "已通过" },
-  { key: "rejected", label: "已拒绝" },
-  { key: "autoApproved", label: "自动通过" },
-  { key: "autoRejected", label: "自动拒绝" },
+  { key: "", label: "adm.1196" },
+  { key: "pending", label: "adm.1197" },
+  { key: "approved", label: "adm.1198" },
+  { key: "rejected", label: "adm.1199" },
+  { key: "autoApproved", label: "adm.1200" },
+  { key: "autoRejected", label: "adm.1201" },
 ]
 
 /**
@@ -8958,11 +9155,11 @@ function donationBucket(d: Donation): DonationBucket {
 
 /** 捐献类别筛选（上层）：全部 / AI / 内网穿透 / 代理 / 商汤 */
 const DONATION_TYPE_FILTERS: { key: string; label: string }[] = [
-  { key: "", label: "全部" },
+  { key: "", label: "adm.1202" },
   { key: "ai", label: "AI" },
-  { key: "frp", label: "内网穿透" },
-  { key: "proxy", label: "代理" },
-  { key: "sensenova", label: "商汤" },
+  { key: "frp", label: "adm.1203" },
+  { key: "proxy", label: "adm.1204" },
+  { key: "sensenova", label: "adm.1205" },
 ]
 
 /** 先按类别筛，再按状态分类筛 */
@@ -8985,10 +9182,10 @@ function inviteBucket(inv: AdminInvite): "unused" | "partial" | "used" {
 }
 
 const INVITE_FILTERS: { key: string; label: string }[] = [
-  { key: "", label: "全部" },
-  { key: "unused", label: "未使用" },
-  { key: "partial", label: "部分使用" },
-  { key: "used", label: "已使用" },
+  { key: "", label: "adm.1206" },
+  { key: "unused", label: "adm.1207" },
+  { key: "partial", label: "adm.1208" },
+  { key: "used", label: "adm.1209" },
 ]
 
 function filterInvites(list: AdminInvite[], filter: string): AdminInvite[] {
@@ -8998,10 +9195,10 @@ function filterInvites(list: AdminInvite[], filter: string): AdminInvite[] {
 
 /** frp 申请分类：待审核 / 已通过 / 已拒绝 */
 const FRP_FILTERS: { key: string; label: string }[] = [
-  { key: "", label: "全部" },
-  { key: "pending", label: "待审核" },
-  { key: "approved", label: "已通过" },
-  { key: "rejected", label: "已拒绝" },
+  { key: "", label: "adm.1210" },
+  { key: "pending", label: "adm.1211" },
+  { key: "approved", label: "adm.1212" },
+  { key: "rejected", label: "adm.1213" },
 ]
 
 function filterFrpApps(list: AdminFrpApplication[], filter: string): AdminFrpApplication[] {
@@ -9011,6 +9208,7 @@ function filterFrpApps(list: AdminFrpApplication[], filter: string): AdminFrpApp
 
 /** 按类型渲染捐献详情（payload 结构随类型不同） */
 function DonationDetail({ type, payload }: { type: string; payload: unknown }) {
+  const { t } = useT()
   const p = (payload ?? {}) as Record<string, unknown>
   const rows: [string, string][] = []
 
@@ -9018,32 +9216,32 @@ function DonationDetail({ type, payload }: { type: string; payload: unknown }) {
     if (p.baseUrl) rows.push(["Base URL", String(p.baseUrl)])
     if (p.apiKey) rows.push(["API Key", String(p.apiKey)])
     const models = Array.isArray(p.models) ? p.models.join("、") : p.models
-    if (models) rows.push(["可用模型", String(models)])
+    if (models) rows.push([t("adm.1214"), String(models)])
   } else if (type === "sensenova") {
     // 只展示 Key：上游地址是管理面板的全局配置（不在 payload 里），
     // 模型列表是建渠道时从上游拉来的、也没存进 payload。
     if (p.apiKey) rows.push(["API Key", String(p.apiKey)])
   } else if (type === "frp") {
     // 捐献的是服务端信息（迁移 0054 改版后）；旧数据是 configYml（客户端配置）
-    if (p.serverAddr) rows.push(["服务端地址", `${String(p.serverAddr)}:${String(p.serverPort ?? "")}`])
-    if (p.nodeName) rows.push(["节点名称", String(p.nodeName)])
-    if (p.region) rows.push(["地区", String(p.region)])
+    if (p.serverAddr) rows.push([t("adm.1215"), `${String(p.serverAddr)}:${String(p.serverPort ?? "")}`])
+    if (p.nodeName) rows.push([t("adm.1216"), String(p.nodeName)])
+    if (p.region) rows.push([t("adm.1217"), String(p.region)])
     if (p.portMin != null || p.portMax != null) {
-      rows.push(["端口范围", `${String(p.portMin ?? "")}-${String(p.portMax ?? "")}`])
+      rows.push([t("adm.1218"), `${String(p.portMin ?? "")}-${String(p.portMax ?? "")}`])
     }
-    if (p.maxPorts != null) rows.push(["每用户端口上限", String(p.maxPorts)])
+    if (p.maxPorts != null) rows.push([t("adm.1219"), String(p.maxPorts)])
     const authModeLabel: Record<string, string> = {
-      none: "无鉴权",
-      token: "全局 auth.token",
-      token_user: "全局 token + 每用户账号",
-      custom: "自定义插件",
+      none: t("adm.1220"),
+      token: t("adm.1221"),
+      token_user: t("adm.1222"),
+      custom: t("adm.1223"),
     }
-    if (p.authMode) rows.push(["鉴权方式", authModeLabel[String(p.authMode)] ?? String(p.authMode)])
-    if (p.note) rows.push(["备注", String(p.note)])
+    if (p.authMode) rows.push([t("adm.1224"), t(authModeLabel[String(p.authMode)] ?? String(p.authMode))])
+    if (p.note) rows.push([t("adm.1225"), String(p.note)])
   } else if (type === "proxy") {
     const subs = Array.isArray(p.subUrls) ? p.subUrls : []
-    if (subs.length) rows.push(["订阅链接", subs.join("、")])
-    if (p.nodeCount) rows.push(["节点数", String(p.nodeCount)])
+    if (subs.length) rows.push([t("adm.1226"), subs.join("、")])
+    if (p.nodeCount) rows.push([t("adm.1227"), String(p.nodeCount)])
   }
 
   const configYml = typeof p.configYml === "string" ? p.configYml : ""
@@ -9060,7 +9258,7 @@ function DonationDetail({ type, payload }: { type: string; payload: unknown }) {
       {configText && (
         <details className="text-xs">
           <summary className="cursor-pointer text-muted-foreground">
-            {configYml ? "查看 config.yml" : "查看 frpc.toml 示例"}
+            {configYml ? t("adm.1228") : t("adm.1229")}
           </summary>
           <pre className="mt-1 max-h-56 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px] leading-relaxed">
             {configText}

@@ -97,7 +97,7 @@ export default function EncodeDecodeTool() {
                 <SelectContent>
                   {MODES.map((m) => (
                     <SelectItem key={m.id} value={m.id}>
-                      {m.label}
+                      {t(m.label)}
                     </SelectItem>
                   ))}
                 </SelectContent>

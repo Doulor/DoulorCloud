@@ -39,7 +39,9 @@ const DialogContent = React.forwardRef<
       className={cn(
         // 居中用内联 style 的 transform（最直接、不被 Tailwind translate 属性或任何
         // 动画覆盖）。宽度用 100vw 明确相对视口，避免 fixed 元素 100% 在移动端的坑。
-        "fixed left-1/2 top-1/2 z-50 grid w-[calc(100vw-2rem)] max-w-lg gap-4 border bg-background p-6 shadow-lg sm:rounded-lg",
+        // max-h-[85vh] + overflow-y-auto：高弹窗（多输入框/长表单）在手机竖屏下
+        // 上下越界、按钮点不到 —— 基类统一加滚动保护（2026-10-02 issue #6）。
+        "fixed left-1/2 top-1/2 z-50 grid max-h-[85vh] w-[calc(100vw-2rem)] max-w-lg gap-4 overflow-y-auto border bg-background p-6 shadow-lg sm:rounded-lg",
         className
       )}
       style={{ transform: "translate(-50%, -50%)" }}

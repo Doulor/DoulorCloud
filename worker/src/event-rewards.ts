@@ -298,6 +298,25 @@ export const CONDITION_TYPES = [
 export type ConditionType = (typeof CONDITION_TYPES)[number]
 
 /**
+ * 条件不满足时告诉用户**具体差什么**（前端直接展示这段文案）。
+ *
+ * 为什么需要它：原来一律报「你还不满足参与条件」，用户完全不知道缺哪一步 ——
+ * 最典型的就是「开通了名片却领不了」（其实还要求发布 + 填昵称），
+ * 只能跑来提反馈问（2026-10-02 用户 baijiu 就是这么卡住的）。
+ *
+ * ⚠️ 改这里的文案时**别把门槛说松**：这几句是给用户看的「怎么才算达标」，
+ * 与上面的判据必须一致，否则又变成「照着提示做还是过不了」。
+ */
+export const CONDITION_HINTS: Record<ConditionType, string> = {
+  always: "",
+  has_profile: "需要先把个人名片做完：打开名片页填好昵称并保存（只点「开通名片」不算）",
+  has_feature: "需要先开通对应的功能模块",
+  code: "需要填写正确的活动口令",
+  lottery: "",
+  github_star: "需要给仓库点 Star（刚点完最多 5 分钟后才会识别到）",
+}
+
+/**
  * 领取时前端带过来的输入（服务端一律**不信**这些值，只当线索去核验）。
  * 目前只有认证码与 GitHub 用户名两种活动用得到。
  */

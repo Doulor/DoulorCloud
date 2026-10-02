@@ -121,6 +121,38 @@ export const SETTING_DEFAULTS = {
    */
   open_registration_until: "",
   /**
+   * 允许注册的邮箱域名白名单（逗号分隔）。**留空 = 不限制**。
+   *
+   * 为什么要有：2026-10-02 排查发现一批小号用临时邮箱服务注册
+   * （smailr.com / mailto.plus / virgilian.com / 2925.com / *.kdns.fr 等），
+   * 这类域名可以无限次免费开新邮箱，是批量注册小号最省事的入口。
+   * 只放主流邮箱（qq / gmail / outlook / 163 …），能挡掉绝大部分一次性的。
+   *
+   * ⚠️ 匹配的是 `@` 之后的完整域名（小写），不做子域通配 ——
+   * 例如写了 `qq.com` 不会放过 `mail.qq.com`。要放子域就把子域也写进去。
+   */
+  register_email_domains:
+    "qq.com,foxmail.com,163.com,126.com,yeah.net,sina.com,sina.cn,sohu.com,21cn.com," +
+    "139.com,189.cn,tom.com,aliyun.com,263.net,gmail.com,outlook.com,hotmail.com,live.com," +
+    "msn.com,yahoo.com,icloud.com,me.com,mac.com,aol.com,proton.me,protonmail.com," +
+    "zoho.com,yandex.com,gmx.com,fastmail.com,tutanota.com,tutamail.com",
+  /**
+   * 同一个 IP 在 24 小时内最多能注册几个账号。**0 = 不限**。
+   *
+   * 为什么要有：原有限流是「每小时 60 次请求」，挡不住「一个 IP 注册 9 个号」——
+   * 9 次请求远在 60 次以内。这是**累计计数**，不是速率限制。
+   * 默认 3：正常家庭/宿舍共用出口 IP 也就几个人，超过就该人工看一眼。
+   */
+  register_ip_daily_limit: "3",
+  /**
+   * 风险账户判定阈值：单账号「同一分钟内的请求数」超过它，就写进 risk_accounts
+   * （管理面板「监管」栏目可见）。
+   *
+   * 默认 20 —— 正常聊天一分钟不可能发 20 次以上请求，超了基本是脚本 / 批量任务 /
+   * 把 Key 分给了别人。由 `risk-scan.ts` 每 10 分钟从 NewAPI 日志里扫一次。
+   */
+  risk_peak_per_minute_threshold: "20",
+  /**
    * 哪些模块的捐献走「自动审核」（逗号分隔的模块名列表）。
    *
    *   - ai：自动探测上游 + 逐个测模型，只留可用的；全不可用则自动拒绝。
@@ -191,6 +223,10 @@ export const SETTING_DEFAULTS = {
   community_guest_access: "1",
   /** 压缩后单张图片上限（字节，默认 1 MiB） */
   community_image_max_bytes: "1048576",
+  /** 单个表情包大小上限（字节，默认 512 KiB）—— 表情包都是小图，不必给到 1 MiB */
+  sticker_max_bytes: "524288",
+  /** 每人最多保存多少个表情包（防止有人把它当网盘用） */
+  sticker_max_count: "60",
   /**
    * WorkBuddy 反代网关捐献通道总开关。
    *
@@ -492,6 +528,12 @@ export const SETTING_DEFAULTS = {
    *      「其实会被硬拦」的日上限藏掉），并在面板上提示管理员手动指定。
    */
   cf_plan: "auto",
+  /**
+   * 落地页「下载」区的渠道链接（管理员在设置里配；留空则该渠道不显示按钮）。
+   * 网页端 PWA 走 beforeinstallprompt 安装，不用这两个链接。
+   */
+  download_android_url: "",
+  download_windows_url: "",
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS

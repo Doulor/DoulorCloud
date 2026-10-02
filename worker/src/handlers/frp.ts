@@ -425,11 +425,17 @@ export async function applyFrp(env: Env, request: Request): Promise<Response> {
 
   // frp 账号名：留空就用本站用户名（前端在免账号的节点上会隐藏这两个输入框，
   // 传过来的是空串 —— 所以这里用 `||` 而不是 `??`，空串也要回落默认值）
-  const frpUser = (body.frpUser || user.username).trim()
-  if (!/^[A-Za-z0-9_-]{2,32}$/.test(frpUser)) {
+  //
+  // ⚠️ 与 frps-panel 的建号规则对齐（2026-10-02）：账号名**只能字母/数字/下划线**，
+  // **不接受短横** —— 面板那边建不了含 `-` 的账号，带短横的申请审批时会卡住
+  //（线上实例：用户申请了 `corvinyu-frp`，管理员改不了名只能人工改库）。
+  // 因此：用户显式填的带短横就明确报错；留空回落用户名时把非法字符清洗成下划线。
+  const rawFrpUser = (body.frpUser ?? "").trim()
+  const frpUser = rawFrpUser || user.username.replace(/[^A-Za-z0-9_]/g, "_")
+  if (!/^[A-Za-z0-9_]{2,32}$/.test(frpUser)) {
     throw new ApiError(
       400,
-      "账号名只能包含字母、数字、下划线和连字符（2-32 位）",
+      "账号名只能包含字母、数字、下划线（2-32 位，不能含短横）",
       "INVALID_FRP_USER"
     )
   }
@@ -635,6 +641,126 @@ export async function listFrpApplications(
 }
 
 /**
+ * PUT /api/admin/frp/applications/:id —— 管理员编辑一条「待审核」的申请。
+ *
+ * 为什么要：用户提交的账号名/端口可能不合 frps-panel 的规则（账号名带短横建不了号），
+ * 或与已占用的端口冲突。以前只能人工改库（2026-10-03 站长反馈），现在管理面板直接改。
+ *
+ * 只允许改 **pending** 的申请：已批准的要动端口必须同步 `frp_ports`（另行处理，
+ * 避免这里漏改导致账实不一致）。
+ * 校验与会话内申请（applyFrp）保持一致，保证改完的申请仍然「批得下去」。
+ */
+export async function updateFrpApplication(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const admin = await requireAdminUser(env, request)
+
+  const app = await env.DB.prepare(
+    `SELECT a.*, u.username AS site_username, n.name AS node_name,
+            n.auth_mode AS node_auth_mode
+       FROM frp_applications a
+       JOIN users u ON a.user_id = u.id
+       JOIN frp_nodes n ON a.node_id = n.id
+      WHERE a.id = ?`
+  )
+    .bind(id)
+    .first<FrpApplicationRow & { site_username: string; node_name: string; node_auth_mode: string }>()
+  if (!app) throw new ApiError(404, "申请不存在", "NOT_FOUND")
+  if (app.status !== "pending") {
+    throw new ApiError(
+      409,
+      "只能编辑「待审核」的申请；已处理的请先撤销回待审核再改",
+      "NOT_PENDING"
+    )
+  }
+
+  const body = (await request.json()) as {
+    frpUser?: string
+    frpPassword?: string
+    ports?: unknown
+    notifyEmail?: string
+    remark?: string
+  }
+
+  const needAccount = needsUserAccount(app.node_auth_mode)
+
+  // 账号名：与 frps-panel 建号规则对齐（只字母/数字/下划线，不给短横）
+  let frpUser = app.frp_user
+  if (body.frpUser !== undefined) {
+    frpUser = String(body.frpUser).trim().replace(/[^A-Za-z0-9_]/g, "_")
+    if (!/^[A-Za-z0-9_]{2,32}$/.test(frpUser)) {
+      throw new ApiError(
+        400,
+        "账号名只能包含字母、数字、下划线（2-32 位，不能含短横）",
+        "INVALID_FRP_USER"
+      )
+    }
+  }
+
+  // 密码：只有需要「每用户账号」的节点才有意义
+  let frpPassword = app.frp_password
+  if (!needAccount) {
+    frpPassword = ""
+  } else if (body.frpPassword !== undefined) {
+    frpPassword = String(body.frpPassword)
+    if (frpPassword.length < 6 || frpPassword.length > 64) {
+      throw new ApiError(400, "密码长度需在 6-64 位之间", "WEAK_PASSWORD")
+    }
+    if (!/^[A-Za-z0-9_!@#$%^&*().-]+$/.test(frpPassword)) {
+      throw new ApiError(
+        400,
+        "密码不能包含空格或中文等字符，允许字母、数字和这些符号：_!@#$%^&*().-",
+        "INVALID_FRP_PASSWORD"
+      )
+    }
+  }
+
+  // 端口：复用申请时的校验（范围 + 与已占用端口冲突检测）
+  let ports = parseJsonArray<number>(app.ports, [])
+  if (body.ports !== undefined) {
+    const node = await env.DB.prepare("SELECT * FROM frp_nodes WHERE id = ?")
+      .bind(app.node_id)
+      .first<FrpNodeRow>()
+    if (!node) throw new ApiError(404, "节点不存在", "NOT_FOUND")
+    ports = await validatePorts(env, node, body.ports)
+  }
+
+  // 通知邮箱：复用申请时的校验（须为本人本站邮箱或已验证的真实邮箱）
+  let notifyEmail = app.notify_email
+  if (body.notifyEmail !== undefined) {
+    const applicant = await env.DB.prepare("SELECT * FROM users WHERE id = ?")
+      .bind(app.user_id)
+      .first<UserRow>()
+    if (!applicant) throw new ApiError(404, "申请人不存在", "NOT_FOUND")
+    notifyEmail = await validateNotifyEmail(env, applicant, String(body.notifyEmail))
+  }
+
+  let remark = app.remark
+  if (body.remark !== undefined) {
+    remark = String(body.remark).trim().slice(0, 500) || null
+  }
+
+  await env.DB.prepare(
+    `UPDATE frp_applications
+        SET frp_user = ?, frp_password = ?, ports = ?, notify_email = ?, remark = ?
+      WHERE id = ?`
+  )
+    .bind(frpUser, frpPassword, JSON.stringify(ports), notifyEmail, remark, id)
+    .run()
+
+  await audit(
+    env,
+    admin.id,
+    "frp.edit",
+    `编辑 ${app.site_username} 的申请（${app.node_name}）：账号 ${frpUser}，端口 ${ports.join(",")}`
+  )
+
+  return json({ ok: true, frpUser, ports })
+}
+
+/**
  * POST /api/admin/frp/review —— 批准或拒绝。
  *
  * 批准时记录端口占用（防止后续申请重复选到同一端口）。
@@ -672,10 +798,16 @@ export async function reviewFrpApplication(
 
   if (approve) {
     // 再次校验端口是否已被占用（申请提交后可能被别的申请用掉）
+    //
+    // ⚠️ 排除「站长手工标记的占用」（application_id = 'manual'）：那些代表**站点上线前
+    // 就存在的 frps-panel 账号**，而本条申请往往就是同一个账号（例：xpzhan / corvinyu_frp）。
+    // 若把它们也算「被占用」，批准会永远失败（2026-10-03 站长要求把面板账号端口全部登记
+    // 成已占用，正是这个场景）。真正来自其他用户/申请的占用仍然照拦。
     const placeholders = ports.map(() => "?").join(",")
     const taken = await env.DB.prepare(
       `SELECT remote_port FROM frp_ports
-        WHERE node_id = ? AND remote_port IN (${placeholders})`
+        WHERE node_id = ? AND remote_port IN (${placeholders})
+          AND (application_id IS NULL OR application_id <> '${MANUAL_PORT_MARK}')`
     )
       .bind(app.node_id, ...ports)
       .all<{ remote_port: number }>()
@@ -692,6 +824,18 @@ export async function reviewFrpApplication(
     // 用户会把这个密码在 frps-panel 里作为自己的 token，并写进 config.toml；
     // 两者必须是同一个值，否则连不上。
     await env.DB.batch([
+      // ⚠️ 先把这个节点上这些端口的「手工标记」删掉，再写入属于本条申请的占用。
+      //
+      // 背景（2026-10-03 站长批准 corvinyu 报 500）：站点上线前就存在的 frps-panel 账号
+      // 会被站长手工登记成占用（application_id = 'manual'）。当申请人的端口正好是这些
+      // 手工标记时，上面的占用检测已放行（见其注释），但下面的 INSERT 会撞
+      // UNIQUE(node_id, remote_port) ⇒ 整个 batch 失败 ⇒ 500。
+      // 语义上这批端口本来就属于这个申请人，所以「过户」给他：先删手工标记再写。
+      env.DB.prepare(
+        `DELETE FROM frp_ports
+          WHERE node_id = ? AND application_id = '${MANUAL_PORT_MARK}'
+            AND remote_port IN (${placeholders})`
+      ).bind(app.node_id, ...ports),
       ...ports.map((p) =>
         env.DB.prepare(
           `INSERT INTO frp_ports (id, node_id, user_id, application_id, remote_port, created_at)
@@ -995,4 +1139,114 @@ export async function releaseFrpPorts(
     .run()
 
   return json({ released: res.meta.changes ?? 0 })
+}
+
+/**
+ * 手动标记的占用端口，用这个哨兵当 `application_id`（区分于真实申请单）。
+ * 来源是「站点上线前就存在、由站长在 frps-panel 里手工建的账号」——
+ * 它们在站里没有申请单，但端口必须算已占用，否则新用户会选到同一个端口。
+ */
+const MANUAL_PORT_MARK = "manual"
+
+/** GET /api/admin/frp/ports?nodeId=xxx —— 某节点已占用的端口（带来源，供管理面板展示） */
+export async function listFrpPorts(env: Env, request: Request): Promise<Response> {
+  await requireAdminUser(env, request)
+  const nodeId = new URL(request.url).searchParams.get("nodeId") ?? ""
+  if (!nodeId) throw new ApiError(400, "缺少 nodeId", "INVALID_INPUT")
+
+  const rows = await env.DB.prepare(
+    `SELECT p.remote_port, p.application_id, u.username AS owner
+       FROM frp_ports p
+       LEFT JOIN users u ON u.id = p.user_id
+      WHERE p.node_id = ?
+      ORDER BY p.remote_port`
+  )
+    .bind(nodeId)
+    .all<{ remote_port: number; application_id: string | null; owner: string | null }>()
+
+  return json({
+    ports: (rows.results ?? []).map((r) => ({
+      port: r.remote_port,
+      owner: r.owner,
+      /** true = 站长手工标记的（无申请单）；false = 来自站内申请/用户 */
+      manual: r.application_id === MANUAL_PORT_MARK,
+    })),
+  })
+}
+
+/** POST /api/admin/frp/ports/occupy —— 手动把一批端口标记为已占用（幂等） */
+export async function occupyFrpPorts(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdminUser(env, request)
+  const body = (await request.json()) as { nodeId?: string; ports?: unknown }
+  const nodeId = body.nodeId ?? ""
+  if (!nodeId) throw new ApiError(400, "缺少 nodeId", "INVALID_INPUT")
+
+  const node = await env.DB.prepare("SELECT id FROM frp_nodes WHERE id = ?")
+    .bind(nodeId)
+    .first()
+  if (!node) throw new ApiError(404, "节点不存在", "NOT_FOUND")
+
+  const ports = [
+    ...new Set(
+      (Array.isArray(body.ports) ? body.ports : [])
+        .map((p) => Math.trunc(Number(p)))
+        .filter((p) => Number.isFinite(p) && p >= 1 && p <= 65535)
+    ),
+  ].sort((a, b) => a - b)
+  if (ports.length === 0) throw new ApiError(400, "请至少填一个端口", "INVALID_PORTS")
+  if (ports.length > 2000) {
+    throw new ApiError(400, "一次最多标记 2000 个端口", "TOO_MANY_PORTS")
+  }
+
+  const now = new Date().toISOString()
+  // INSERT OR IGNORE + 确定的 id：重复标记同一端口是幂等的（UNIQUE(node_id, remote_port) 兜底）
+  await env.DB.batch(
+    ports.map((p) =>
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO frp_ports
+           (id, node_id, user_id, application_id, remote_port, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).bind(`manual-${nodeId}-${p}`, nodeId, admin.id, MANUAL_PORT_MARK, p, now)
+    )
+  )
+
+  await audit(
+    env,
+    admin.id,
+    "frp.ports.occupy",
+    `节点 ${nodeId} 手动标记占用端口：${ports.join(",")}`
+  )
+  return json({ ok: true, count: ports.length })
+}
+
+/** POST /api/admin/frp/ports/free —— 解除一批端口的占用（含用户申请的端口，慎用） */
+export async function freeFrpPorts(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdminUser(env, request)
+  const body = (await request.json()) as { nodeId?: string; ports?: unknown }
+  const nodeId = body.nodeId ?? ""
+  const ports = [
+    ...new Set(
+      (Array.isArray(body.ports) ? body.ports : [])
+        .map((p) => Math.trunc(Number(p)))
+        .filter((p) => Number.isFinite(p) && p >= 1 && p <= 65535)
+    ),
+  ]
+  if (!nodeId || ports.length === 0) {
+    throw new ApiError(400, "缺少参数", "INVALID_INPUT")
+  }
+
+  const placeholders = ports.map(() => "?").join(",")
+  const res = await env.DB.prepare(
+    `DELETE FROM frp_ports WHERE node_id = ? AND remote_port IN (${placeholders})`
+  )
+    .bind(nodeId, ...ports)
+    .run()
+
+  await audit(
+    env,
+    admin.id,
+    "frp.ports.free",
+    `节点 ${nodeId} 解除端口占用：${ports.join(",")}`
+  )
+  return json({ ok: true, freed: res.meta.changes ?? 0 })
 }

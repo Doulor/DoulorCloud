@@ -12,6 +12,7 @@
  */
 import PostalMime from "postal-mime"
 import { sendMail, renderMail } from "./mailer"
+import { isOwnDomain } from "./root-domains"
 import type { Env } from "./env"
 
 const MAX_RAW_BYTES = 2 * 1024 * 1024
@@ -156,11 +157,13 @@ export async function incomingEmail(
   message: ForwardableEmailMessage,
   env: Env
 ): Promise<void> {
-  const rootDomain = env.ROOT_DOMAIN.toLowerCase()
   const recipient = (message.to ?? "").toLowerCase()
   const envelopeFrom = message.from ?? "unknown"
 
-  if (!recipient.endsWith(`@${rootDomain}`)) {
+  // 收件域必须是**本站任一已登记的根域**（root_domains 表），不能只认 env.ROOT_DOMAIN ——
+  // 用户的邮箱默认建在 tyu.me 上，只判 doulor.cn 会把新用户的所有来信全部拒收。
+  // 未登记的域名本来也不会被 CF 的 catch-all 送到这里，这一层是纵深防御。
+  if (!(await isOwnDomain(env, recipient))) {
     message.setReject("收件人不是本站域名的邮箱")
     return
   }
