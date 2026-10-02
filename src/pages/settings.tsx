@@ -225,7 +225,7 @@ export default function SettingsPage() {
     setDelCodeBusy(true)
     try {
       const res = await settingsApi.requestDeleteCode()
-      toast.success(t("settings.toast.codeSent"), { description: `请查收 ${res.email}（可能进垃圾箱）` })
+      toast.success(t("settings.toast.codeSent"), { description: t("settings.toast.codeSentDesc", { email: res.email }) })
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("settings.toast.sendFailed"))
     } finally {
@@ -309,7 +309,7 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <User className="h-4 w-4 text-muted-foreground" />
-              个人资料
+              {t("settings.profileSection")}
             </CardTitle>
             <CardDescription>{t("settings.profileSectionDesc")}</CardDescription>
           </CardHeader>
@@ -361,12 +361,12 @@ export default function SettingsPage() {
                         }
                       }}
                     >
-                      删除头像
+                      {t("settings.avatar.remove")}
                     </Button>
                   )}
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  支持 JPG/PNG/WebP/GIF，上限 2 MB
+                  {t("settings.avatar.hint")}
                 </p>
               </div>
             </div>
@@ -408,7 +408,7 @@ export default function SettingsPage() {
                   }
                 }}
               >
-                保存
+                {t("common.save")}
               </Button>
             </div>
 
@@ -425,7 +425,7 @@ export default function SettingsPage() {
                     size="sm"
                     onClick={() => setNameOpen(true)}
                   >
-                    修改
+                    {t("common.edit")}
                   </Button>
                 </div>
               </div>
@@ -438,7 +438,7 @@ export default function SettingsPage() {
                     size="sm"
                     onClick={() => setEmailOpen(true)}
                   >
-                    修改
+                    {t("common.edit")}
                   </Button>
                 </div>
               </div>
@@ -463,18 +463,18 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Mail className="h-4 w-4 text-muted-foreground" />
-              真实邮箱验证
+              {t("settings.email.verifyTitle")}
               {verified ? (
                 <Badge variant="success">
                   <BadgeCheck className="mr-1 h-3 w-3" />
-                  已验证
+                  {t("settings.email.verified")}
                 </Badge>
               ) : (
                 <Badge variant="destructive">{t("settings.email.unverified")}</Badge>
               )}
             </CardTitle>
             <CardDescription>
-              验证后可将该邮箱设为邮件转发目标。
+              {t("settings.email.verifyDesc")}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -482,7 +482,7 @@ export default function SettingsPage() {
               <div className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
                 <span>{t("settings.email.loadFailedHint")}</span>
                 <Button variant="outline" size="sm" onClick={() => void loadEmailSettings()}>
-                  重试
+                  {t("common.retry")}
                 </Button>
               </div>
             )}
@@ -491,10 +491,10 @@ export default function SettingsPage() {
                 <p className="text-sm font-medium">
                   {verified
                     ? t("settings.email.verifiedHint")
-                    : `尚未验证：验证码会发送到 ${emailSettings?.email ?? t("settings.email.yours")}`}
+                    : t("settings.email.unverifiedHint", { email: emailSettings?.email ?? t("settings.email.yours") })}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  验证码 10 分钟内有效，请勿泄露给他人。
+                  {t("settings.email.codeNote")}
                 </p>
               </div>
               {!verified && !codeSent && (
@@ -504,7 +504,7 @@ export default function SettingsPage() {
                   disabled={verifyBusy}
                 >
                   {verifyBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                  发送验证码
+                  {t("settings.btn.sendCode")}
                 </Button>
               )}
               {verified && (
@@ -514,7 +514,7 @@ export default function SettingsPage() {
                   onClick={() => void loadEmailSettings()}
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
-                  刷新
+                  {t("common.refresh")}
                 </Button>
               )}
             </div>
@@ -535,7 +535,7 @@ export default function SettingsPage() {
                   disabled={verifyBusy}
                 >
                   {verifyBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                  确认验证
+                  {t("settings.email.confirmVerify")}
                 </Button>
                 <Button
                   variant="ghost"
@@ -543,14 +543,13 @@ export default function SettingsPage() {
                   onClick={() => void handleStartVerify()}
                   disabled={verifyBusy}
                 >
-                  重新发送
+                  {t("settings.email.resend")}
                 </Button>
               </div>
             )}
 
             <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-              邮箱转发说明：将 doulor.cn 邮箱转发到真实邮箱时，需先验证该邮箱，
-              防止邮件被转发到错误地址。
+              {t("settings.email.forwardNote")}
             </div>
           </CardContent>
         </Card>
@@ -560,10 +559,10 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Bell className="h-4 w-4 text-muted-foreground" />
-              通知偏好
+              {t("settings.notify.prefTitle")}
             </CardTitle>
             <CardDescription>
-              选择你愿意接收的邮件通知类型。
+              {t("settings.notify.desc2")}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -571,7 +570,7 @@ export default function SettingsPage() {
               <div className="space-y-0.5">
                 <p className="text-sm font-medium">{t("settings.notify.announcements")}</p>
                 <p className="text-xs text-muted-foreground">
-                  网站动态、维护通知等统一公告的邮件推送
+                  {t("settings.notify.announcementsDesc")}
                 </p>
               </div>
               <Switch
@@ -583,7 +582,7 @@ export default function SettingsPage() {
               <div className="space-y-0.5">
                 <p className="text-sm font-medium">{t("settings.notify.personal")}</p>
                 <p className="text-xs text-muted-foreground">
-                  捐献审核结果、反馈回复、社区互动等与你有关的邮件
+                  {t("settings.notify.personalDesc")}
                 </p>
               </div>
               <Switch
@@ -598,7 +597,7 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <KeyRound className="h-4 w-4 text-muted-foreground" />
-              安全
+              {t("settings.security")}
             </CardTitle>
             <CardDescription>{t("settings.securitySectionDesc")}</CardDescription>
           </CardHeader>
@@ -607,7 +606,7 @@ export default function SettingsPage() {
               <div className="space-y-0.5">
                 <p className="text-sm font-medium">{t("settings.btn.changePassword")}</p>
                 <p className="text-xs text-muted-foreground">
-                  修改后其他设备上的登录会失效
+                  {t("settings.pw.changeNote")}
                 </p>
               </div>
               <Button size="sm" onClick={() => setPwOpen(true)}>
@@ -624,15 +623,15 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <AlertTriangle className="h-4 w-4 text-destructive" />
-              注销账号
+              {t("settings.delete.section")}
             </CardTitle>
             <CardDescription>
-              注销后你的账号、域名邮箱、网盘文件及所有相关数据将被删除，且无法恢复。
+              {t("settings.delete.sectionDesc")}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <Button variant="destructive" size="sm" onClick={() => setDelOpen(true)}>
-              注销账号
+              {t("settings.delete.section")}
             </Button>
             <div className="flex items-center gap-3 text-xs text-muted-foreground">
               <a href="/terms" className="underline underline-offset-2 hover:text-foreground">{t("legal.terms")}</a>
@@ -657,10 +656,9 @@ export default function SettingsPage() {
           <DialogHeader>
             <DialogTitle>{t("settings.delete.confirmTitle")}</DialogTitle>
             <DialogDescription>
-              此操作<strong className="text-destructive">{t("settings.delete.irreversible")}</strong>。将删除你的账号、
-              域名邮箱、网盘文件、社区内容等全部数据，并回收相关外部资源。
-              请确认你已备份所有需要保留的数据。系统会保留一条最小化的注销留痕
-              （用户名、邮箱、注销时间）用于审计追溯。
+              {t("settings.delete.body1")}
+              <strong className="text-destructive">{t("settings.delete.irreversible")}</strong>
+              {t("settings.delete.body2")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
@@ -697,16 +695,16 @@ export default function SettingsPage() {
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              验证码会发送到你的注册邮箱（{user?.email}），10 分钟内有效。需同时通过密码与验证码校验。
+              {t("settings.delete.codeHint", { email: user?.email ?? "" })}
             </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDelOpen(false)} disabled={delBusy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button variant="destructive" onClick={() => void handleDeleteAccount()} disabled={delBusy}>
               {delBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-              确认注销
+              {t("settings.delete.confirmBtn")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -723,7 +721,7 @@ export default function SettingsPage() {
           <DialogHeader>
             <DialogTitle>{t("settings.btn.changePassword")}</DialogTitle>
             <DialogDescription>
-              需要验证当前密码；修改成功后其他设备需重新登录。
+              {t("settings.pw.dialogDesc")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -762,14 +760,14 @@ export default function SettingsPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={closeDialog}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button
               onClick={() => void handleChangePassword()}
               disabled={saving || !form.current || !form.next}
             >
               {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-              确认修改
+              {t("common.saveChanges")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -832,14 +830,14 @@ export default function SettingsPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setNameOpen(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button
               onClick={() => void handleChangeUsername()}
               disabled={saving || !nameForm.username || !nameForm.password}
             >
               {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-              确认修改
+              {t("common.saveChanges")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -894,7 +892,7 @@ export default function SettingsPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEmailOpen(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button
               onClick={() => void handleChangeEmail()}

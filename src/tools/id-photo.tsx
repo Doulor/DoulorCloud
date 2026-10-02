@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { baseName, canvasToBlob, createCanvas, downloadBlob, loadImageFile } from "@/lib/toolbox/utils"
+import { useT } from "@/i18n"
 
 interface Preset {
   id: string
@@ -23,22 +24,22 @@ interface Preset {
 
 /** 300 DPI 下的像素尺寸，按 mm 换算：px = mm / 25.4 × 300 */
 const PRESETS: Preset[] = [
-  { id: "1cun", label: "一寸 25×35mm（295×413）", w: 295, h: 413 },
-  { id: "x1cun", label: "小一寸 22×32mm（260×378）", w: 260, h: 378 },
-  { id: "d1cun", label: "大一寸 33×48mm（390×567）", w: 390, h: 567 },
-  { id: "2cun", label: "二寸 35×49mm（413×579）", w: 413, h: 579 },
-  { id: "x2cun", label: "小二寸 35×45mm（413×531）", w: 413, h: 531 },
-  { id: "passport", label: "护照 33×48mm（390×567）", w: 390, h: 567 },
-  { id: "visa-us", label: "美国签证 51×51mm（602×602）", w: 602, h: 602 },
-  { id: "idcard", label: "证件照头像 26×32mm（307×378）", w: 307, h: 378 },
+  { id: "1cun", label: "ipho.preset.1cun", w: 295, h: 413 },
+  { id: "x1cun", label: "ipho.preset.x1cun", w: 260, h: 378 },
+  { id: "d1cun", label: "ipho.preset.d1cun", w: 390, h: 567 },
+  { id: "2cun", label: "ipho.preset.2cun", w: 413, h: 579 },
+  { id: "x2cun", label: "ipho.preset.x2cun", w: 413, h: 531 },
+  { id: "passport", label: "ipho.preset.passport", w: 390, h: 567 },
+  { id: "visa-us", label: "ipho.preset.visaUs", w: 602, h: 602 },
+  { id: "idcard", label: "ipho.preset.idcard", w: 307, h: 378 },
 ]
 
 const BG_COLORS = [
-  { id: "none", label: "不换背景", hex: "" },
-  { id: "white", label: "白色（通用）", hex: "#ffffff" },
-  { id: "blue", label: "蓝色（常用证件）", hex: "#2e6bd6" },
-  { id: "red", label: "红色（部分证件）", hex: "#d0342c" },
-  { id: "gray", label: "浅灰（商务）", hex: "#e8e8e8" },
+  { id: "none", label: "ipho.bg.none", hex: "" },
+  { id: "white", label: "ipho.bg.white", hex: "#ffffff" },
+  { id: "blue", label: "ipho.bg.blue", hex: "#2e6bd6" },
+  { id: "red", label: "ipho.bg.red", hex: "#d0342c" },
+  { id: "gray", label: "ipho.bg.gray", hex: "#e8e8e8" },
 ]
 
 /** 从四角采样，估算原背景色 */
@@ -124,6 +125,7 @@ function hexToRgb(hex: string): [number, number, number] {
 }
 
 export default function IdPhotoTool() {
+  const { t } = useT()
   const [fileName, setFileName] = React.useState("")
   const [presetId, setPresetId] = React.useState("1cun")
   const [bgId, setBgId] = React.useState("white")
@@ -149,7 +151,7 @@ export default function IdPhotoTool() {
       setFileName(f.name)
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "图片打开失败")
+      setError(e instanceof Error ? e.message : t("ipho.err.open"))
     }
   }
 
@@ -204,7 +206,7 @@ export default function IdPhotoTool() {
         `${baseName(fileName || "photo")}-${preset.w}x${preset.h}.${format === "png" ? "png" : "jpg"}`
       )
     } catch (e) {
-      setError(e instanceof Error ? e.message : "导出失败")
+      setError(e instanceof Error ? e.message : t("ipho.err.export"))
     } finally {
       setBusy(false)
     }
@@ -212,23 +214,23 @@ export default function IdPhotoTool() {
 
   return (
     <ToolShell
-      title="证件照处理"
-      description="裁成常见证件尺寸，并把纯色背景换成白、蓝、红。适合影楼拍好但底色不对，或自己用手机拍的证件照。"
+      title={t("toolbox.idPhoto.name")}
+      description={t("ipho.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_340px]">
-        <ToolSection title="预览">
+        <ToolSection title={t("ipho.section.preview")}>
           {!preview ? (
             <FileDrop
               accept="image/*"
               onFiles={(f) => void handleFiles(f)}
-              hint="建议用背景干净、光线均匀的半身照，换底色效果最好"
+              hint={t("ipho.pickHint")}
             />
           ) : (
             <div className="space-y-3">
               <div className="flex justify-center">
                 <img
                   src={preview}
-                  alt="证件照预览"
+                  alt={t("ipho.alt.preview")}
                   className="h-auto rounded border shadow-sm"
                   style={{ width: Math.min(320, preset.w * 1.1) }}
                 />
@@ -236,7 +238,7 @@ export default function IdPhotoTool() {
               <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
                 <span className="truncate font-medium">{fileName}</span>
                 <span className="text-xs text-muted-foreground">
-                  {preset.w} × {preset.h} 像素
+                  {t("ipho.pixels", { w: preset.w, h: preset.h })}
                 </span>
                 <Button
                   variant="ghost"
@@ -246,17 +248,17 @@ export default function IdPhotoTool() {
                     imgRef.current = null
                   }}
                 >
-                  换一张
+                  {t("ipho.replace")}
                 </Button>
               </div>
             </div>
           )}
         </ToolSection>
 
-        <ToolSection title="参数">
+        <ToolSection title={t("ipho.section.params")}>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">证件尺寸</Label>
+              <Label className="text-xs text-muted-foreground">{t("ipho.size")}</Label>
               <Select value={presetId} onValueChange={setPresetId}>
                 <SelectTrigger>
                   <SelectValue />
@@ -272,7 +274,7 @@ export default function IdPhotoTool() {
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">背景颜色</Label>
+              <Label className="text-xs text-muted-foreground">{t("ipho.bgColor")}</Label>
               <div className="flex flex-wrap gap-2">
                 {BG_COLORS.map((b) => (
                   <button
@@ -301,7 +303,7 @@ export default function IdPhotoTool() {
             {bg.hex && (
               <div className="space-y-1.5">
                 <Label className="text-xs text-muted-foreground">
-                  背景识别容差 {tolerance}
+                  {t("ipho.tolerance", { n: tolerance })}
                 </Label>
                 <input
                   type="range"
@@ -312,13 +314,13 @@ export default function IdPhotoTool() {
                   className="w-full accent-primary"
                 />
                 <p className="text-xs text-muted-foreground">
-                  背景没换干净就调大一点；如果头发、衣服边缘被误伤就调小一点。
+                  {t("ipho.toleranceHint")}
                 </p>
               </div>
             )}
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">放大 {zoom}%</Label>
+              <Label className="text-xs text-muted-foreground">{t("ipho.zoom", { n: zoom })}</Label>
               <input
                 type="range"
                 min={100}
@@ -330,7 +332,7 @@ export default function IdPhotoTool() {
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">上下位置 {offsetY}</Label>
+              <Label className="text-xs text-muted-foreground">{t("ipho.offsetY", { n: offsetY })}</Label>
               <input
                 type="range"
                 min={-100}
@@ -340,19 +342,19 @@ export default function IdPhotoTool() {
                 className="w-full accent-primary"
               />
               <p className="text-xs text-muted-foreground">
-                往负方向调是往上移，通常人物头部需要留出一点空白。
+                {t("ipho.offsetHint")}
               </p>
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">输出格式</Label>
+              <Label className="text-xs text-muted-foreground">{t("ipho.outFormat")}</Label>
               <Select value={format} onValueChange={(v) => setFormat(v as "png" | "jpeg")}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="jpeg">JPG · 上传报名系统常用</SelectItem>
-                  <SelectItem value="png">PNG · 无损</SelectItem>
+                  <SelectItem value="jpeg">{t("ipho.fmt.jpeg")}</SelectItem>
+                  <SelectItem value="png">{t("ipho.fmt.png")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -361,7 +363,7 @@ export default function IdPhotoTool() {
 
             <Button className="w-full" disabled={!preview || busy} onClick={() => void download()}>
               <Download className="h-4 w-4" />
-              {busy ? "导出中…" : "下载证件照"}
+              {busy ? t("ipho.exporting") : t("ipho.download")}
             </Button>
           </div>
         </ToolSection>

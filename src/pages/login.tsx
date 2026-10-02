@@ -11,8 +11,10 @@ import { TermsDialog } from "@/components/terms-dialog"
 import { authApi, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 import { safeNextPath } from "@/lib/safe-next"
+import { useT } from "@/i18n"
 
 export default function LoginPage() {
+  const { t } = useT()
   const { setUser } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
@@ -47,16 +49,16 @@ export default function LoginPage() {
       } catch {
         setUser(null)
         setError(
-          "登录成功，但浏览器没有保存登录状态。请检查：① 是否禁用了本站的 Cookie / 站点数据；② 是否处于无痕或隐私模式；③ 是否通过 https 访问。"
+          t("lg.cookieFail")
         )
         return
       }
 
       const incomplete = res.user.emailVerified === false
       if (incomplete) {
-        toast.warning("登录成功，建议前往「设置」验证真实邮箱")
+        toast.warning(t("lg.verifyHint"))
       } else {
-        toast.success("登录成功")
+        toast.success(t("lg.ok"))
       }
 
       // ⚠️ 2026-09-25 审计（F5）：`next` 指向 **API 路由**时必须整页跳转。
@@ -151,6 +153,7 @@ export default function LoginPage() {
  * 默认折叠，点击展开。
  */
 function Diagnostics() {
+  const { t } = useT()
   const [open, setOpen] = React.useState(false)
   const [cookieOk, setCookieOk] = React.useState<boolean | null>(null)
 
@@ -188,29 +191,27 @@ function Diagnostics() {
         onClick={() => setOpen((v) => !v)}
         className="w-full text-left text-xs text-muted-foreground hover:text-foreground"
       >
-        {allGood ? "环境检测正常" : "⚠️ 环境检测发现问题"} · 点击{open ? "收起" : "展开"}
+        {allGood ? t("lg.diag.ok") : t("lg.diag.bad")} · {open ? t("lg.collapse") : t("lg.expand")}
       </button>
       {open && (
         <dl className="mt-3 space-y-1.5 text-xs">
-          <DiagRow label="HTTPS 访问" ok={isHttps} hint={isHttps ? "" : "请用 https:// 打开本站"} />
+          <DiagRow label={t("lg.diag.https")} ok={isHttps} hint={isHttps ? "" : t("lg.diag.httpsHint")} />
           <DiagRow
-            label="允许写入 Cookie"
+            label={t("lg.diag.cookie")}
             ok={cookieOk === true}
-            hint={cookieOk === true ? "" : "浏览器阻止了本站 Cookie / 站点数据"}
+            hint={cookieOk === true ? "" : t("lg.diag.cookieHint")}
           />
           <DiagRow
-            label="本地存储可用"
+            label={t("lg.diag.storage")}
             ok={hasStorage}
-            hint={hasStorage ? "" : "可能处于无痕或隐私模式"}
+            hint={hasStorage ? "" : t("lg.diag.storageHint")}
           />
           <div className="pt-1 text-muted-foreground">
-            当前域名：<span className="font-mono">{window.location.host}</span>
+            {t("lg.diag.domain")}<span className="font-mono">{window.location.host}</span>
           </div>
           {!allGood && (
             <p className="pt-2 text-muted-foreground">
-              若「允许写入 Cookie」为否：请在本站设置里允许 Cookie／站点数据，
-              或关闭无痕模式。iOS 还需检查「设置 → Safari → 阻止所有 Cookie」
-              与「隐私 → 网站数据」。
+              {t("lg.diag.tip")}
             </p>
           )}
         </dl>
@@ -228,11 +229,12 @@ function DiagRow({
   ok: boolean
   hint: string
 }) {
+  const { t } = useT()
   return (
     <div className="flex items-start justify-between gap-3">
       <dt className="text-muted-foreground">{label}</dt>
       <dd className={ok ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}>
-        {ok ? "正常" : `异常${hint ? `（${hint}）` : ""}`}
+        {ok ? t("lg.diag.rowOk") : t("lg.diag.rowBad", { hint: hint ? ` (${hint})` : "" })}
       </dd>
     </div>
   )

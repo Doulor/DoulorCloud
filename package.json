@@ -11,7 +11,8 @@
     "deploy:api": "cd worker && npm run deploy",
     "check:handlers": "cd worker && npm run check:handlers",
     "check:guards": "cd worker && npm run check:guards",
-    "check:i18n": "node scripts/check-i18n.mjs"
+    "check:i18n": "node scripts/check-i18n.mjs",
+    "check:vendors": "node scripts/check-model-vendors.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

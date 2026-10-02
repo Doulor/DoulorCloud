@@ -74,8 +74,8 @@ export const TOOLS: ToolMeta[] = [
   // ── 分享 ──────────────────────────────────────────────────────────────
   {
     id: "tempbox",
-    name: "临时分享箱",
-    desc: "上传文件生成取件码，对方凭码下载",
+    name: "toolbox.tempbox.name",
+    desc: "toolbox.tempbox.desc",
     icon: Package,
     category: "share",
     tone: TONES.blue,
@@ -83,8 +83,8 @@ export const TOOLS: ToolMeta[] = [
   },
   {
     id: "fun-links",
-    name: "有趣的网页分享",
-    desc: "站长精选的一批有意思的网站，点开即走",
+    name: "toolbox.funLinks.name",
+    desc: "toolbox.funLinks.desc",
     icon: Sparkles,
     category: "share",
     tone: TONES.rose,
@@ -93,32 +93,32 @@ export const TOOLS: ToolMeta[] = [
   // ── 日常 ──────────────────────────────────────────────────────────────
   {
     id: "unit-convert",
-    name: "单位换算",
-    desc: "长度、重量、面积、体积、温度、速度、数据大小互转",
+    name: "toolbox.unitConvert.name",
+    desc: "toolbox.unitConvert.desc",
     icon: Ruler,
     category: "daily",
     tone: TONES.green,
   },
   {
     id: "countdown",
-    name: "倒计时与纪念日",
-    desc: "算还有多少天，或已经过去了多少天；数据存在本机",
+    name: "toolbox.countdown.name",
+    desc: "toolbox.countdown.desc",
     icon: CalendarClock,
     category: "daily",
     tone: TONES.amber,
   },
   {
     id: "random-picker",
-    name: "随机抽签",
-    desc: "抽签转盘、掷骰子、抛硬币、名单随机分组",
+    name: "toolbox.randomPicker.name",
+    desc: "toolbox.randomPicker.desc",
     icon: Dices,
     category: "daily",
     tone: TONES.violet,
   },
   {
     id: "qr-barcode",
-    name: "二维码与条形码",
-    desc: "把网址、文字、WiFi 密码生成二维码或条形码图片",
+    name: "toolbox.qrBarcode.name",
+    desc: "toolbox.qrBarcode.desc",
     icon: QrCode,
     category: "daily",
     tone: TONES.slate,
@@ -127,80 +127,80 @@ export const TOOLS: ToolMeta[] = [
   // ── 图片 ──────────────────────────────────────────────────────────────
   {
     id: "image-convert",
-    name: "图片格式互转",
-    desc: "PNG / JPG / WebP / ICO 互相转换，ICO 可打包多尺寸",
+    name: "toolbox.imageConvert.name",
+    desc: "toolbox.imageConvert.desc",
     icon: RefreshCw,
     category: "image",
     tone: TONES.blue,
   },
   {
     id: "image-compress",
-    name: "图片压缩",
-    desc: "按长边和质量压缩，体积能小一大截",
+    name: "toolbox.imageCompress.name",
+    desc: "toolbox.imageCompress.desc",
     icon: Minimize2,
     category: "image",
     tone: TONES.green,
   },
   {
     id: "image-crop",
-    name: "裁剪旋转翻转",
-    desc: "自由裁剪、任意角度旋转、水平垂直翻转",
+    name: "toolbox.imageCrop.name",
+    desc: "toolbox.imageCrop.desc",
     icon: Crop,
     category: "image",
     tone: TONES.cyan,
   },
   {
     id: "image-watermark",
-    name: "加水印",
-    desc: "文字或图片水印，可调位置、大小、透明度、平铺",
+    name: "toolbox.imageWatermark.name",
+    desc: "toolbox.imageWatermark.desc",
     icon: Droplets,
     category: "image",
     tone: TONES.amber,
   },
   {
     id: "image-grid",
-    name: "九宫格切图",
-    desc: "把一张图切成九宫格，发朋友圈不用愁",
+    name: "toolbox.imageGrid.name",
+    desc: "toolbox.imageGrid.desc",
     icon: LayoutGrid,
     category: "image",
     tone: TONES.violet,
   },
   {
     id: "image-stitch",
-    name: "长图拼接",
-    desc: "多张截图纵向或横向拼成一张长图",
+    name: "toolbox.imageStitch.name",
+    desc: "toolbox.imageStitch.desc",
     icon: Combine,
     category: "image",
     tone: TONES.orange,
   },
   {
     id: "image-pdf",
-    name: "图片 ⇄ PDF",
-    desc: "多张图片合成一个 PDF，或把 PDF 每页导出成图片",
+    name: "toolbox.imagePdf.name",
+    desc: "toolbox.imagePdf.desc",
     icon: FileImage,
     category: "image",
     tone: TONES.rose,
   },
   {
     id: "image-mosaic",
-    name: "打码与马赛克",
-    desc: "框选区域打马赛克或模糊，证件、聊天记录都能用",
+    name: "toolbox.imageMosaic.name",
+    desc: "toolbox.imageMosaic.desc",
     icon: ScanEye,
     category: "image",
     tone: TONES.slate,
   },
   {
     id: "id-photo",
-    name: "证件照处理",
-    desc: "裁成常见证件尺寸，一键把纯色背景换成白/蓝/红",
+    name: "toolbox.idPhoto.name",
+    desc: "toolbox.idPhoto.desc",
     icon: Contact,
     category: "image",
     tone: TONES.blue,
   },
   {
     id: "color-picker",
-    name: "取色与配色",
-    desc: "从图片里吸取颜色，生成色板并复制色值",
+    name: "toolbox.colorPicker.name",
+    desc: "toolbox.colorPicker.desc",
     icon: Pipette,
     category: "image",
     tone: TONES.cyan,
@@ -209,40 +209,40 @@ export const TOOLS: ToolMeta[] = [
   // ── 音视频 ────────────────────────────────────────────────────────────
   {
     id: "video-gif",
-    name: "视频转 GIF",
-    desc: "选一段时长导出成 GIF，可调帧率、宽度、速度",
+    name: "toolbox.videoGif.name",
+    desc: "toolbox.videoGif.desc",
     icon: Film,
     category: "media",
     tone: TONES.violet,
   },
   {
     id: "video-convert",
-    name: "视频压缩与转格式",
-    desc: "降低分辨率/码率把视频压小，输出 WebM",
+    name: "toolbox.videoConvert.name",
+    desc: "toolbox.videoConvert.desc",
     icon: Video,
     category: "media",
     tone: TONES.orange,
   },
   {
     id: "video-frame",
-    name: "视频截帧",
-    desc: "把视频某一秒画面存成图片，可批量截多张",
+    name: "toolbox.videoFrame.name",
+    desc: "toolbox.videoFrame.desc",
     icon: Camera,
     category: "media",
     tone: TONES.cyan,
   },
   {
     id: "audio-extract",
-    name: "提取音频",
-    desc: "从视频里取出声音，导出成 WAV",
+    name: "toolbox.audioExtract.name",
+    desc: "toolbox.audioExtract.desc",
     icon: Music,
     category: "media",
     tone: TONES.green,
   },
   {
     id: "audio-trim",
-    name: "音频剪辑",
-    desc: "可视化截取一段音频，试听满意再导出",
+    name: "toolbox.audioTrim.name",
+    desc: "toolbox.audioTrim.desc",
     icon: Scissors,
     category: "media",
     tone: TONES.rose,
@@ -251,56 +251,56 @@ export const TOOLS: ToolMeta[] = [
   // ── 文档与文本 ────────────────────────────────────────────────────────
   {
     id: "markdown-preview",
-    name: "Markdown 预览",
-    desc: "左边写右边看，支持表格、代码块，可导出 HTML",
+    name: "toolbox.markdown.name",
+    desc: "toolbox.markdown.desc",
     icon: FileText,
     category: "doc",
     tone: TONES.slate,
   },
   {
     id: "text-diff",
-    name: "文本对比",
-    desc: "逐行找出两段文字的差异，改稿校对很省事",
+    name: "toolbox.textDiff.name",
+    desc: "toolbox.textDiff.desc",
     icon: GitCompare,
     category: "doc",
     tone: TONES.amber,
   },
   {
     id: "data-format",
-    name: "JSON / XML / YAML",
-    desc: "格式化、压缩、互转三种结构化数据",
+    name: "toolbox.dataFormat.name",
+    desc: "toolbox.dataFormat.desc",
     icon: Braces,
     category: "doc",
     tone: TONES.blue,
   },
   {
     id: "encode-decode",
-    name: "Base64 / URL 编解码",
-    desc: "文本与 Base64、URL 编码互转，含图片转 Base64",
+    name: "toolbox.encodeDecode.name",
+    desc: "toolbox.encodeDecode.desc",
     icon: Binary,
     category: "doc",
     tone: TONES.violet,
   },
   {
     id: "csv-json",
-    name: "表格转 JSON",
-    desc: "CSV / Excel 转成 JSON，或 JSON 转回 CSV",
+    name: "toolbox.csvJson.name",
+    desc: "toolbox.csvJson.desc",
     icon: Table2,
     category: "doc",
     tone: TONES.green,
   },
   {
     id: "timestamp",
-    name: "时间戳转换",
-    desc: "Unix 时间戳与日期时间互转，支持秒和毫秒",
+    name: "toolbox.timestamp.name",
+    desc: "toolbox.timestamp.desc",
     icon: Clock,
     category: "doc",
     tone: TONES.cyan,
   },
   {
     id: "unicode-convert",
-    name: "Unicode 转换",
-    desc: "文本与 \\uXXXX 转义互转，查看每个字符的码点与 UTF-8 字节",
+    name: "toolbox.unicode.name",
+    desc: "toolbox.unicode.desc",
     icon: Languages,
     category: "doc",
     tone: TONES.rose,
@@ -308,12 +308,12 @@ export const TOOLS: ToolMeta[] = [
 ]
 
 export const CATEGORIES: { id: ToolCategory | "all"; label: string }[] = [
-  { id: "all", label: "全部" },
-  { id: "daily", label: "日常" },
-  { id: "image", label: "图片" },
-  { id: "media", label: "音视频" },
-  { id: "doc", label: "文档文本" },
-  { id: "share", label: "分享" },
+  { id: "all", label: "toolbox.cat.all" },
+  { id: "daily", label: "toolbox.cat.daily" },
+  { id: "image", label: "toolbox.cat.image" },
+  { id: "media", label: "toolbox.cat.media" },
+  { id: "doc", label: "toolbox.cat.doc" },
+  { id: "share", label: "toolbox.cat.share" },
 ]
 
 export function getTool(id: string): ToolMeta | undefined {
@@ -322,4 +322,22 @@ export function getTool(id: string): ToolMeta | undefined {
 
 export function toolsOf(category: ToolCategory | "all"): ToolMeta[] {
   return category === "all" ? TOOLS : TOOLS.filter((t) => t.category === category)
+}
+
+/**
+ * 取工具名称 / 说明 / 分类名。
+ *
+ * 注册表存的是 **i18n key**（见 ToolMeta.name 的注释）：注册表是模块级常量，
+ * 直接放译好的字符串会在模块加载时把语言冻结成初始值，切语言后不跟着变。
+ */
+export function toolName(t: (k: string) => string, tool: ToolMeta): string {
+  return t(tool.name)
+}
+
+export function toolDesc(t: (k: string) => string, tool: ToolMeta): string {
+  return t(tool.desc)
+}
+
+export function categoryLabel(t: (k: string) => string, id: ToolCategory | "all"): string {
+  return t(`toolbox.cat.${id}`)
 }

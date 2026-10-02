@@ -19,8 +19,10 @@ import { chatApi, errMsg, HttpError } from "@/services/api"
 import { relTime } from "@/lib/format"
 import { setVisibleInterval } from "@/lib/visible-interval"
 import type { ChatMessage, ChatPresenceUser } from "@/types"
+import { useT } from "@/i18n"
 
 export default function ChatPage() {
+  const { t } = useT()
   const { user } = useAuth()
   const navigate = useNavigate()
 
@@ -124,7 +126,7 @@ export default function ChatPage() {
       lastIdRef.current = res.message.id
       setDraft("")
     } catch (err) {
-      toast.error(errMsg(err, "发送失败"))
+      toast.error(errMsg(err, t("chat.err.send")))
     } finally {
       setSending(false)
     }
@@ -154,17 +156,17 @@ export default function ChatPage() {
             size="sm"
             className="-ml-2 shrink-0 gap-1 px-2 text-muted-foreground"
             onClick={goBack}
-            title="返回上一页"
-            aria-label="返回上一页"
+            title={t("chat.back")}
+            aria-label={t("chat.back")}
           >
             <ArrowLeft className="h-4 w-4" />
-            返回
+            {t("chat.backShort")}
           </Button>
           <div>
-            <h1 className="text-lg font-semibold">公共聊天室</h1>
+            <h1 className="text-lg font-semibold">{t("chat.title")}</h1>
             <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Users className="h-3.5 w-3.5" />
-              {online.length} 人在线
+              {t("chat.onlineCount", { n: online.length })}
             </p>
           </div>
         </div>
@@ -186,10 +188,9 @@ export default function ChatPage() {
       <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto py-4">
         {chatOff ? (
           <div className="flex flex-col items-center gap-1.5 py-10 text-center">
-            <p className="text-sm font-medium">聊天室已关闭</p>
+            <p className="text-sm font-medium">{t("chat.closed")}</p>
             <p className="max-w-xs text-xs text-muted-foreground">
-              管理员暂时关闭了聊天室（通常是站点资源紧张时用来省流量的应急措施），
-              恢复后无需任何操作，这里会自动恢复。
+              {t("chat.closedDesc")}
             </p>
           </div>
         ) : loading ? (
@@ -198,7 +199,7 @@ export default function ChatPage() {
           </div>
         ) : failed && messages.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-8 text-sm text-muted-foreground">
-            <p>消息加载失败，请检查网络后重试。</p>
+            <p>{t("chat.loadFailed")}</p>
             <Button
               variant="outline"
               size="sm"
@@ -208,12 +209,12 @@ export default function ChatPage() {
                 void poll(true)
               }}
             >
-              重试
+              {t("common.retry")}
             </Button>
           </div>
         ) : messages.length === 0 ? (
           <p className="py-8 text-center text-sm text-muted-foreground">
-            还没有消息，来说第一句吧。
+            {t("chat.empty")}
           </p>
         ) : (
           <div className="space-y-3">
@@ -254,13 +255,15 @@ export default function ChatPage() {
               void send()
             }
           }}
-          placeholder={chatOff ? "聊天室已关闭" : user ? "说点什么…（Enter 发送）" : "登录后可发言"}
+          placeholder={
+              chatOff ? t("chat.closed") : user ? t("chat.placeholder") : t("chat.loginToSpeak")
+            }
           className="flex-1"
           disabled={chatOff}
         />
         <Button onClick={() => void send()} disabled={chatOff || sending || !draft.trim()}>
           {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-          发送
+          {t("fb.send")}
         </Button>
       </div>
     </div>

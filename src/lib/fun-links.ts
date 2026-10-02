@@ -6,9 +6,9 @@
  * 两边是独立的 TS 工程，共享不了常量，只能各自维护一份。
  */
 export const FUN_LINK_CATEGORIES = [
-  { id: "aesthetic", label: "唯美" },
-  { id: "tool", label: "工具" },
-  { id: "ent", label: "娱乐" },
+  { id: "aesthetic", label: "fun.cat.aesthetic" },
+  { id: "tool", label: "fun.cat.tool" },
+  { id: "ent", label: "fun.cat.ent" },
 ] as const
 
 export type FunLinkCategory = (typeof FUN_LINK_CATEGORIES)[number]["id"]

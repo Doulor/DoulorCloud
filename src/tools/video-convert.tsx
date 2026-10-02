@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { createCanvas, downloadBlob, formatBytes, formatDuration } from "@/lib/toolbox/utils"
+import { useT } from "@/i18n"
 
 const MIME_CANDIDATES = [
   "video/webm;codecs=vp9,opus",
@@ -29,6 +30,7 @@ function pickMime(): string | null {
 }
 
 export default function VideoConvertTool() {
+  const { t } = useT()
   const [file, setFile] = React.useState<File | null>(null)
   const [url, setUrl] = React.useState<string | null>(null)
   const [duration, setDuration] = React.useState(0)
@@ -141,11 +143,11 @@ export default function VideoConvertTool() {
 
       await finished
       const blob = new Blob(chunks, { type: "video/webm" })
-      if (blob.size === 0) throw new Error("没有录到内容，请重试")
+      if (blob.size === 0) throw new Error(t("vc.err.empty"))
       setResult({ url: URL.createObjectURL(blob), blob })
       setProgress(100)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "转换失败")
+      setError(e instanceof Error ? e.message : t("vc.err.convert"))
     } finally {
       setBusy(false)
       recorderRef.current = null
@@ -154,16 +156,16 @@ export default function VideoConvertTool() {
 
   return (
     <ToolShell
-      title="视频压缩与转格式"
-      description="把视频降分辨率、降码率重新录一遍，体积通常能小很多。输出 WebM 格式。"
+      title={t("toolbox.videoConvert.name")}
+      description={t("vc.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <ToolSection title="视频">
+        <ToolSection title={t("vc.section.video")}>
           {!url ? (
             <FileDrop
               accept="video/*"
               onFiles={handleFiles}
-              hint="转换过程是实时播放的，视频多长就要等多久"
+              hint={t("vc.pickHint")}
             />
           ) : (
             <div className="space-y-3">
@@ -179,9 +181,9 @@ export default function VideoConvertTool() {
               <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
                 <span className="truncate font-medium">{file?.name}</span>
                 <span className="text-xs text-muted-foreground">
-                  时长 {formatDuration(duration)}
+                  {t("vc.duration", { d: formatDuration(duration) })}
                   {videoRef.current?.videoWidth
-                    ? ` · 原始 ${videoRef.current.videoWidth}×${videoRef.current.videoHeight}`
+                    ? t("vc.originalSize", { w: videoRef.current.videoWidth, h: videoRef.current.videoHeight })
                     : ""}
                 </span>
                 <Button
@@ -194,7 +196,7 @@ export default function VideoConvertTool() {
                     setResult(null)
                   }}
                 >
-                  换一个
+                  {t("vc.replace")}
                 </Button>
               </div>
 
@@ -204,7 +206,7 @@ export default function VideoConvertTool() {
                     <div className="h-full bg-primary transition-all" style={{ width: `${progress}%` }} />
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    正在转换 {progress}% —— 请保持这个页面在前台
+                    {t("vc.converting", { n: progress })}
                   </p>
                 </div>
               )}
@@ -212,7 +214,7 @@ export default function VideoConvertTool() {
               {result && (
                 <div className="space-y-2 rounded-lg border p-3">
                   <p className="text-xs text-muted-foreground">
-                    转换完成，{formatBytes(result.blob.size)}
+                    {t("vc.done", { size: formatBytes(result.blob.size) })}
                   </p>
                   <video src={result.url} controls className="w-full rounded" />
                 </div>
@@ -221,32 +223,32 @@ export default function VideoConvertTool() {
           )}
         </ToolSection>
 
-        <ToolSection title="输出设置">
+        <ToolSection title={t("vc.section.output")}>
           <div className="space-y-4">
             {!supported && (
               <p className="text-xs text-destructive">
-                当前浏览器不支持视频录制（MediaRecorder），建议换 Chrome 或 Edge 使用本工具。
+                {t("vc.unsupported")}
               </p>
             )}
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">输出分辨率（宽度）</Label>
+              <Label className="text-xs text-muted-foreground">{t("vc.resolution")}</Label>
               <Select value={String(width)} onValueChange={(v) => setWidth(Number(v))}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="480">480px · 体积最小</SelectItem>
-                  <SelectItem value="720">720p · 推荐</SelectItem>
-                  <SelectItem value="1080">1080p · 较清晰</SelectItem>
-                  <SelectItem value="1440">1440px · 基本不压</SelectItem>
+                  <SelectItem value="480">{t("vc.res.480")}</SelectItem>
+                  <SelectItem value="720">{t("vc.res.720")}</SelectItem>
+                  <SelectItem value="1080">{t("vc.res.1080")}</SelectItem>
+                  <SelectItem value="1440">{t("vc.res.1440")}</SelectItem>
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground">不会超过原视频的宽度</p>
+              <p className="text-xs text-muted-foreground">{t("vc.resHint")}</p>
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">码率 {bitrate} kbps</Label>
+              <Label className="text-xs text-muted-foreground">{t("vc.bitrate", { n: bitrate })}</Label>
               <input
                 type="range"
                 min={200}
@@ -257,12 +259,12 @@ export default function VideoConvertTool() {
                 className="w-full accent-primary"
               />
               <p className="text-xs text-muted-foreground">
-                720p 建议 1000–1500；480p 用 500–800 就够
+                {t("vc.bitrateHint")}
               </p>
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">帧率</Label>
+              <Label className="text-xs text-muted-foreground">{t("vc.fps")}</Label>
               <Select value={String(fps)} onValueChange={(v) => setFps(Number(v))}>
                 <SelectTrigger>
                   <SelectValue />
@@ -270,7 +272,7 @@ export default function VideoConvertTool() {
                 <SelectContent>
                   {[15, 20, 24, 30].map((f) => (
                     <SelectItem key={f} value={String(f)}>
-                      {f} 帧/秒
+                      {t("vc.fpsUnit", { n: f })}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -278,7 +280,7 @@ export default function VideoConvertTool() {
             </div>
 
             <p className="text-xs text-muted-foreground">
-              预计体积约 {duration > 0 ? formatBytes((bitrate * 1000 * duration) / 8) : "—"}（实际以输出为准）
+              {t("vc.estimated", { size: duration > 0 ? formatBytes((bitrate * 1000 * duration) / 8) : "—" })}
             </p>
 
             {error && <p className="text-xs text-destructive">{error}</p>}
@@ -289,12 +291,12 @@ export default function VideoConvertTool() {
               onClick={() => void convert()}
             >
               <Video className="h-4 w-4" />
-              {busy ? "转换中…" : "开始转换"}
+              {busy ? t("vc.convertingShort") : t("vc.start")}
             </Button>
 
             {busy && (
               <Button variant="outline" className="w-full" onClick={stopAll}>
-                中止
+                {t("vc.abort")}
               </Button>
             )}
 
@@ -302,10 +304,10 @@ export default function VideoConvertTool() {
               className="w-full"
               variant="outline"
               disabled={!result}
-              onClick={() => result && downloadBlob(result.blob, `压缩-${Date.now()}.webm`)}
+              onClick={() => result && downloadBlob(result.blob, t("vc.fileName", { ts: Date.now() }))}
             >
               <Download className="h-4 w-4" />
-              下载 WebM
+              {t("vc.download")}
             </Button>
           </div>
         </ToolSection>

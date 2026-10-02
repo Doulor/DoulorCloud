@@ -29,10 +29,11 @@ import { formatBytes } from "@/lib/format"
 import { achievementIcon } from "@/lib/achievement-icons"
 import { useAuth } from "@/hooks/use-auth"
 import type { AchievementProgress, AchievementsResponse } from "@/types"
+import { useT, tStatic } from "@/i18n"
 
 /** 格式化解锁时间 */
 function fmtUnlock(iso: string | null): string {
-  if (!iso) return "未解锁"
+  if (!iso) return tStatic("ach.locked")
   return new Date(iso).toLocaleString("zh-CN", {
     year: "numeric",
     month: "2-digit",
@@ -55,6 +56,7 @@ function AchievementCard({
   a: AchievementProgress
   onClick: () => void
 }) {
+  const { t } = useT()
   const Icon = achievementIcon(a.icon)
   const unlocked = a.level > 0
   const tierName = a.tierNames?.[Math.max(0, a.level - 1)] ?? null
@@ -123,14 +125,14 @@ function AchievementCard({
                   </p>
                 </>
               ) : (
-                <p className="text-[10px] text-primary">已满级</p>
+                <p className="text-[10px] text-primary">{t("ach.maxed")}</p>
               )}
             </div>
           )}
 
           {a.single && (
             <Badge variant={unlocked ? "success" : "secondary"} className="text-[10px]">
-              {unlocked ? "已解锁" : "未解锁"}
+              {unlocked ? t("ach.unlocked") : t("ach.locked")}
             </Badge>
           )}
         </CardContent>
@@ -147,6 +149,7 @@ function AchievementDetailDialog({
   a: AchievementProgress | null
   onClose: () => void
 }) {
+  const { t } = useT()
   if (!a) return null
   const Icon = achievementIcon(a.icon)
   const unlocked = a.level > 0
@@ -176,7 +179,7 @@ function AchievementDetailDialog({
         <div className="space-y-4">
           {/* 获取途径 */}
           <div className="space-y-1.5">
-            <p className="text-xs font-medium text-muted-foreground">获取途径</p>
+            <p className="text-xs font-medium text-muted-foreground">{t("ach.howTo")}</p>
             <p className="text-sm">{a.how}</p>
           </div>
 
@@ -185,21 +188,21 @@ function AchievementDetailDialog({
           {/* 单级成就 */}
           {a.single ? (
             <div className="space-y-1.5">
-              <p className="text-xs font-medium text-muted-foreground">状态</p>
+              <p className="text-xs font-medium text-muted-foreground">{t("ach.status")}</p>
               <p className="text-sm">
                 {unlocked ? (
                   <>
-                    已解锁 · <span className="text-muted-foreground">{fmtUnlock(a.unlockedAt)}</span>
+                    {t("ach.unlockedAt")} · <span className="text-muted-foreground">{fmtUnlock(a.unlockedAt)}</span>
                   </>
                 ) : (
-                  <span className="text-muted-foreground">尚未解锁</span>
+                  <span className="text-muted-foreground">{t("ach.notYet")}</span>
                 )}
               </p>
             </div>
           ) : (
             /* 分级成就：各等级详情 */
             <div className="space-y-2">
-              <p className="text-xs font-medium text-muted-foreground">等级进度</p>
+              <p className="text-xs font-medium text-muted-foreground">{t("ach.tierProgress")}</p>
               <div className="space-y-2">
                 {(a.tiers ?? []).map((tier, i) => {
                   const lv = i + 1
@@ -218,13 +221,13 @@ function AchievementDetailDialog({
                           Lv.{lv} {a.tierNames?.[i] ?? ""}
                         </p>
                         <p className="text-xs text-muted-foreground">
-                          {a.tierReqs?.[i] ?? `达成 ${fmtValue(a, tier)}`}
+                          {a.tierReqs?.[i] ?? t("ach.reach", { value: fmtValue(a, tier) })}
                         </p>
                       </div>
                       <div className="shrink-0 text-right">
                         {reached ? (
                           <Badge variant="success" className="text-[10px]">
-                            已解锁
+                            {t("ach.unlocked")}
                           </Badge>
                         ) : (
                           <span className="text-xs text-muted-foreground">
@@ -250,6 +253,7 @@ function AchievementDetailDialog({
 }
 
 export default function AchievementsPage() {
+  const { t } = useT()
   const { user } = useAuth()
   const username = user?.username ?? ""
   const [data, setData] = React.useState<AchievementsResponse | null>(null)
@@ -266,7 +270,7 @@ export default function AchievementsPage() {
     } catch (err) {
       // ⚠️ 2026-09-26：失败不再伪装成「零成就」——原先只 toast，`data` 保持 null
       // 就一路渲染成空成就墙，用户以为是自己没解锁任何成就。
-      toast.error(err instanceof HttpError ? err.message : "加载成就失败")
+      toast.error(err instanceof HttpError ? err.message : t("ach.err.load"))
       setFailed(true)
     } finally {
       setLoading(false)
@@ -280,7 +284,7 @@ export default function AchievementsPage() {
   if (loading) {
     return (
       <div>
-        <PageHeader title="成就" description="记录你在 Doulor Cloud 的足迹" />
+        <PageHeader title={t("ach.title")} description={t("ach.desc")} />
         <LoadingBlock />
       </div>
     )
@@ -289,14 +293,14 @@ export default function AchievementsPage() {
   if (failed) {
     return (
       <div>
-        <PageHeader title="成就" description="记录你在 Doulor Cloud 的足迹" />
+        <PageHeader title={t("ach.title")} description={t("ach.desc")} />
         <EmptyState
           icon={WifiOff}
-          title="成就加载失败"
-          description="网络或服务异常，请稍后重试。"
+          title={t("ach.loadFailed")}
+          description={t("ach.loadFailedDesc")}
           action={
             <Button variant="outline" size="sm" onClick={() => void load()}>
-              <RotateCw className="h-4 w-4" /> 重试
+              <RotateCw className="h-4 w-4" /> {t("common.retry")}
             </Button>
           }
         />
@@ -307,7 +311,12 @@ export default function AchievementsPage() {
   const achievements = data?.achievements ?? []
   const groups = data?.groups ?? []
   const summary = data?.summary ?? { unlocked: 0, total: 0, points: 0, maxPoints: 0 }
-  const title = data?.title ?? { name: "初来乍到", min: 0, next: null, nextName: null }
+  const title = data?.title ?? {
+      name: t("ach.defaultTitle"),
+      min: 0,
+      next: null,
+      nextName: null,
+    }
   const pct = summary.total > 0 ? (summary.unlocked / summary.total) * 100 : 0
 
   // 每个分组的进度（组内已解锁 / 组内总数）
@@ -327,8 +336,8 @@ export default function AchievementsPage() {
   return (
     <div>
       <PageHeader
-        title="成就"
-        description="记录你在 Doulor Cloud 的足迹"
+        title={t("ach.title")}
+        description={t("ach.desc")}
         actions={
           <div className="flex items-center gap-2">
             {/* 成就要别人看得到才有意思 —— 直接给个入口去自己的空间（徽章墙在那儿） */}
@@ -336,11 +345,11 @@ export default function AchievementsPage() {
               <Button variant="outline" size="sm" asChild>
                 <Link to={`/space/${encodeURIComponent(username)}`}>
                   <UserRound className="h-4 w-4" />
-                  我的空间
+                  {t("ach.mySpace")}
                 </Link>
               </Button>
             )}
-            <Button variant="outline" size="icon" onClick={() => void load()} aria-label="刷新">
+            <Button variant="outline" size="icon" onClick={() => void load()} aria-label={t("common.refresh")}>
               <RefreshCw className="h-4 w-4" />
             </Button>
           </div>
@@ -354,10 +363,11 @@ export default function AchievementsPage() {
             <div className="space-y-1">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Trophy className="h-4 w-4 text-muted-foreground" />
-                成就进度
+                {t("ach.progress")}
               </CardTitle>
               <CardDescription>
-                已解锁 {summary.unlocked} / {summary.total} 个成就 · 成就点{" "}
+                {t("ach.progressLine", { unlocked: summary.unlocked, total: summary.total })}{" "}
+
                 {summary.points} / {summary.maxPoints}
               </CardDescription>
             </div>
@@ -370,16 +380,16 @@ export default function AchievementsPage() {
           {/* 称号 */}
           <div className="flex flex-wrap items-center gap-3 rounded-md border px-4 py-3">
             <Badge variant="secondary" className="shrink-0">
-              当前称号
+              {t("ach.currentTitle")}
             </Badge>
             <span className="text-lg font-semibold tracking-tight">{title.name}</span>
             {title.next !== null && (
               <span className="text-xs text-muted-foreground">
-                再积 {title.next - summary.points} 点到「{title.nextName}」
+                {t("ach.nextTitle", { n: title.next - summary.points, name: title.nextName ?? "" })}
               </span>
             )}
             {title.next === null && (
-              <span className="text-xs text-muted-foreground">已达最高称号</span>
+              <span className="text-xs text-muted-foreground">{t("ach.maxTitle")}</span>
             )}
           </div>
 
@@ -416,7 +426,7 @@ export default function AchievementsPage() {
 
           {data?.registeredAt && (
             <p className="text-xs text-muted-foreground">
-              加入于 {new Date(data.registeredAt).toLocaleDateString("zh-CN")}
+              {t("ach.joinedAt", { date: new Date(data.registeredAt).toLocaleDateString(t("msg.dateLocale")) })}
             </p>
           )}
         </CardContent>
@@ -424,7 +434,7 @@ export default function AchievementsPage() {
 
       {/* 勋章墙（按分组） */}
       {achievements.length === 0 ? (
-        <p className="py-12 text-center text-sm text-muted-foreground">暂无成就</p>
+        <p className="py-12 text-center text-sm text-muted-foreground">{t("ach.empty")}</p>
       ) : (
         <div className="space-y-8">
           {groupStats
@@ -448,7 +458,7 @@ export default function AchievementsPage() {
 
           {orphans.length > 0 && (
             <section className="space-y-3">
-              <h2 className="text-sm font-semibold">其他</h2>
+              <h2 className="text-sm font-semibold">{t("ach.other")}</h2>
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
                 {orphans.map((a) => (
                   <AchievementCard key={a.id} a={a} onClick={() => setSelected(a)} />

@@ -14,14 +14,15 @@ import {
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { copyText, formatBytes, readAsDataURL } from "@/lib/toolbox/utils"
+import { useT } from "@/i18n"
 
 type Mode = "b64e" | "b64d" | "urle" | "urld"
 
 const MODES: { id: Mode; label: string }[] = [
-  { id: "b64e", label: "文本 → Base64" },
-  { id: "b64d", label: "Base64 → 文本" },
-  { id: "urle", label: "文本 → URL 编码" },
-  { id: "urld", label: "URL 编码 → 文本" },
+  { id: "b64e", label: "ed.mode.b64e" },
+  { id: "b64d", label: "ed.mode.b64d" },
+  { id: "urle", label: "ed.mode.urle" },
+  { id: "urld", label: "ed.mode.urld" },
 ]
 
 /** btoa 只认 latin1，先转成 UTF-8 字节再编码，中文才不会乱码 */
@@ -41,6 +42,7 @@ function b64decode(text: string): string {
 }
 
 export default function EncodeDecodeTool() {
+  const { t } = useT()
   const [mode, setMode] = React.useState<Mode>("b64e")
   const [input, setInput] = React.useState("")
   const [output, setOutput] = React.useState("")
@@ -64,7 +66,7 @@ export default function EncodeDecodeTool() {
       setError(null)
     } catch {
       setOutput("")
-      setError(m === "b64d" ? "不是合法的 Base64 内容" : "解码失败，请检查内容是否被截断")
+      setError(m === "b64d" ? t("ed.err.badBase64") : t("ed.err.decode"))
     }
   }
 
@@ -78,16 +80,14 @@ export default function EncodeDecodeTool() {
     window.setTimeout(() => setCopied(false), 1200)
   }
 
-  const current = MODES.find((m) => m.id === mode)!
-
   return (
     <ToolShell
-      title="Base64 / URL 编解码"
-      description="文本与 Base64、URL 编码互转，也能把图片转成 Base64 字符串嵌到网页或配置里。"
+      title={t("toolbox.encodeDecode.name")}
+      description={t("ed.desc")}
       wide
     >
       <div className="grid gap-4 lg:grid-cols-2">
-        <ToolSection title="输入">
+        <ToolSection title={t("ed.section.input")}>
           <div className="space-y-3">
             <div className="flex items-center gap-2">
               <Select value={mode} onValueChange={(v) => setMode(v as Mode)}>
@@ -105,7 +105,7 @@ export default function EncodeDecodeTool() {
               <Button
                 variant="outline"
                 size="icon"
-                title="交换结果与输入"
+                title={t("ed.swap")}
                 disabled={!output}
                 onClick={() => {
                   const flipped: Mode =
@@ -123,17 +123,17 @@ export default function EncodeDecodeTool() {
               rows={14}
               spellCheck={false}
               className="min-h-[300px] font-mono text-[13px]"
-              placeholder={`在此粘贴要${current.label.includes("→") ? "处理" : "转换"}的内容…`}
+              placeholder={t("ed.placeholder")}
             />
           </div>
         </ToolSection>
 
         <ToolSection
-          title="结果"
+          title={t("ed.section.result")}
           actions={
             <Button variant="ghost" size="sm" disabled={!output} onClick={() => void copy(output)}>
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-              {copied ? "已复制" : "复制"}
+              {copied ? t("common.copied") : t("common.copy")}
             </Button>
           }
         >
@@ -148,13 +148,13 @@ export default function EncodeDecodeTool() {
               rows={14}
               spellCheck={false}
               className="min-h-[300px] font-mono text-[13px]"
-              placeholder="结果显示在这里"
+              placeholder={t("ed.resultPlaceholder")}
             />
           )}
         </ToolSection>
       </div>
 
-      <ToolSection title="图片转 Base64（可直接贴进 HTML 或 CSS）">
+      <ToolSection title={t("ed.section.image")}>
         {!imgData ? (
           <FileDrop
             accept="image/*"
@@ -169,7 +169,7 @@ export default function EncodeDecodeTool() {
                 dataUrl,
               })
             }}
-            hint="小图标（几十 KB 以内）适合内联，大图会让 HTML 变得很臃肿"
+            hint={t("ed.imageHint")}
           />
         ) : (
           <div className="space-y-3">
@@ -178,7 +178,7 @@ export default function EncodeDecodeTool() {
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm">{imgData.name}</p>
                 <p className="text-xs text-muted-foreground">
-                  原图 {formatBytes(imgData.size)} · Base64 后约 {formatBytes(imgData.dataUrl.length)}
+                  {t("ed.imageSize", { orig: formatBytes(imgData.size), b64: formatBytes(imgData.dataUrl.length) })}
                 </p>
               </div>
               <Button
@@ -189,13 +189,13 @@ export default function EncodeDecodeTool() {
                   setImgData(null)
                 }}
               >
-                换一张
+                {t("ed.replace")}
               </Button>
             </div>
 
             <div className="space-y-2">
               <Label className="text-xs text-muted-foreground">
-                Data URL（点复制按钮拿走，或手动全选）
+                {t("ed.dataUrlLabel")}
               </Label>
               <Textarea
                 value={imgData.dataUrl}
@@ -207,14 +207,14 @@ export default function EncodeDecodeTool() {
               <div className="flex gap-2">
                 <Button size="sm" onClick={() => void copy(imgData.dataUrl)}>
                   {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                  复制完整 Data URL
+                  {t("ed.copyDataUrl")}
                 </Button>
                 <Button
                   size="sm"
                   variant="outline"
                   onClick={() => void copy(imgData.dataUrl.split(",")[1] ?? "")}
                 >
-                  只复制 Base64 部分
+                  {t("ed.copyBase64")}
                 </Button>
               </div>
             </div>

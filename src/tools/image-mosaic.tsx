@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { baseName, canvasToBlob, createCanvas, downloadBlob, loadImageFile } from "@/lib/toolbox/utils"
+import { useT } from "@/i18n"
 
 interface Op {
   x: number
@@ -61,6 +62,7 @@ function applyBlur(ctx: CanvasRenderingContext2D, op: Op, W: number, H: number) 
 }
 
 export default function ImageMosaicTool() {
+  const { t } = useT()
   const [fileName, setFileName] = React.useState("")
   const [srcUrl, setSrcUrl] = React.useState<string | null>(null)
   const [ops, setOps] = React.useState<Op[]>([])
@@ -88,7 +90,7 @@ export default function ImageMosaicTool() {
       setError(null)
       setVersion((v) => v + 1)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "图片打开失败")
+      setError(e instanceof Error ? e.message : t("im.err.open"))
     }
   }
 
@@ -178,7 +180,7 @@ export default function ImageMosaicTool() {
       const blob = await canvasToBlob(canvas, "image/png")
       downloadBlob(blob, `${baseName(fileName || "image")}-mosaic.png`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "导出失败")
+      setError(e instanceof Error ? e.message : t("im.err.export"))
     } finally {
       setBusy(false)
     }
@@ -195,11 +197,11 @@ export default function ImageMosaicTool() {
 
   return (
     <ToolShell
-      title="打码与马赛克"
-      description="在图上框出要遮住的地方，打马赛克或模糊，可连续处理多处，随时撤销。"
+      title={t("toolbox.imageMosaic.name")}
+      description={t("im.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <ToolSection title="图片（按住拖动框选要遮挡的区域）">
+        <ToolSection title={t("im.section.image")}>
           {!srcUrl ? (
             <FileDrop accept="image/*" onFiles={(f) => void handleFiles(f)} />
           ) : (
@@ -212,7 +214,7 @@ export default function ImageMosaicTool() {
                 onPointerCancel={onUp}
                 className="relative w-full touch-none select-none overflow-hidden rounded-lg border bg-muted/30"
               >
-                <img src={srcUrl} alt="编辑中" className="block w-full" draggable={false} />
+                <img src={srcUrl} alt={t("im.alt.editing")} className="block w-full" draggable={false} />
                 {norm && (
                   <div
                     className="absolute border-2 border-primary"
@@ -238,31 +240,31 @@ export default function ImageMosaicTool() {
                     setSel(null)
                   }}
                 >
-                  换一张
+                  {t("im.replace")}
                 </Button>
               </div>
             </div>
           )}
         </ToolSection>
 
-        <ToolSection title="遮挡设置">
+        <ToolSection title={t("im.section.settings")}>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">方式</Label>
+              <Label className="text-xs text-muted-foreground">{t("im.mode")}</Label>
               <Select value={mode} onValueChange={(v) => setMode(v as "mosaic" | "blur")}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="mosaic">马赛克（格子）</SelectItem>
-                  <SelectItem value="blur">模糊（高斯）</SelectItem>
+                  <SelectItem value="mosaic">{t("im.mode.mosaic")}</SelectItem>
+                  <SelectItem value="blur">{t("im.mode.blur")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             <div className="space-y-1.5">
               <Label className="text-xs text-muted-foreground">
-                {mode === "mosaic" ? `格子大小 ${strength}px` : `模糊半径 ${strength}px`}
+                {mode === "mosaic" ? t("im.strength.mosaic", { n: strength }) : t("im.strength.blur", { n: strength })}
               </Label>
               <input
                 type="range"
@@ -273,17 +275,17 @@ export default function ImageMosaicTool() {
                 className="w-full accent-primary"
               />
               <p className="text-xs text-muted-foreground">
-                号码、姓名这类敏感信息建议把格子调到 20 以上，太细仍有被还原的风险。
+                {t("im.strengthHint")}
               </p>
             </div>
 
             <div className="rounded-lg border p-3 text-xs text-muted-foreground">
-              已处理 <span className="font-medium text-foreground">{ops.length}</span> 处
-              {sel ? " · 已有选区，点下面的按钮生效" : " · 在图上按住拖动来框选"}
+              {t("im.processed", { n: ops.length })}
+              {sel ? t("im.hasSelection") : t("im.noSelection")}
             </div>
 
             <Button className="w-full" disabled={!sel} onClick={apply}>
-              应用遮挡
+              {t("im.apply")}
             </Button>
             <Button
               variant="outline"
@@ -292,14 +294,14 @@ export default function ImageMosaicTool() {
               onClick={() => setOps((prev) => prev.slice(0, -1))}
             >
               <Undo2 className="h-4 w-4" />
-              撤销上一步
+              {t("im.undo")}
             </Button>
 
             {error && <p className="text-xs text-destructive">{error}</p>}
 
             <Button className="w-full" disabled={!srcUrl || busy} onClick={() => void download()}>
               <Download className="h-4 w-4" />
-              {busy ? "导出中…" : "下载处理后的图片"}
+              {busy ? t("im.exporting") : t("im.download")}
             </Button>
           </div>
         </ToolSection>

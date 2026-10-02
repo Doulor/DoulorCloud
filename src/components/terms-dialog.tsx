@@ -6,6 +6,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog"
 import { TermsContent } from "@/components/legal-content"
+import { useT } from "@/i18n"
 
 /**
  * 《服务条款》弹窗。
@@ -21,13 +22,14 @@ interface TermsDialogProps {
 }
 
 export function TermsDialog({ open, onOpenChange }: TermsDialogProps) {
+  const { t } = useT()
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Doulor Cloud 服务条款</DialogTitle>
+          <DialogTitle>{t("legal.termsTitle")}</DialogTitle>
           <DialogDescription>
-            更新日期：2026 年 9 月 27 日 · 生效日期：2026 年 9 月 27 日
+            {t("legal.updatedAt")}
           </DialogDescription>
         </DialogHeader>
         <div className="max-h-[70vh] overflow-y-auto pr-4">

@@ -43,6 +43,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { tempboxApi, HttpError } from "@/services/api"
+import { useT, tStatic } from "@/i18n"
 import { formatBytes } from "@/lib/format"
 import { useAuth } from "@/hooks/use-auth"
 import type { TempboxBatch, TempboxConfig } from "@/types"
@@ -79,10 +80,10 @@ function putWithProgress(
     }
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) resolve()
-      else reject(new Error(`R2 返回 HTTP ${xhr.status}`))
+      else reject(new Error(tStatic("tb.err.r2Http", { status: xhr.status })))
     }
-    xhr.onerror = () => reject(new Error("网络错误或跨域被拒（R2 CORS）"))
-    xhr.ontimeout = () => reject(new Error("上传超时"))
+    xhr.onerror = () => reject(new Error(tStatic("tb.err.network")))
+    xhr.ontimeout = () => reject(new Error(tStatic("tb.err.timeout")))
     xhr.timeout = 30 * 60 * 1000
     xhr.send(file)
   })
@@ -90,6 +91,7 @@ function putWithProgress(
 
 /** 传输列表：逐项显示进度与状态，上传者可据此观察是否传完 */
 function TransferList({ items }: { items: TransferItem[] }) {
+  const { t } = useT()
   if (items.length === 0) return null
   return (
     <div className="space-y-2">
@@ -101,13 +103,13 @@ function TransferList({ items }: { items: TransferItem[] }) {
               <span className="truncate">{it.name}</span>
               <span className="shrink-0 text-muted-foreground">
                 {it.status === "failed" ? (
-                  <span className="text-destructive">{it.error ?? "失败"}</span>
+                  <span className="text-destructive">{it.error ?? t("tb.transfer.failed")}</span>
                 ) : it.status === "done" ? (
-                  <span className="text-emerald-600">完成</span>
+                  <span className="text-emerald-600">{t("tb.transfer.done")}</span>
                 ) : it.status === "uploading" ? (
                   `${pct}% · ${formatBytes(it.sent)} / ${formatBytes(it.size)}`
                 ) : (
-                  "等待中"
+                  t("tb.transfer.pending")
                 )}
               </span>
             </div>
@@ -131,6 +133,7 @@ function TransferList({ items }: { items: TransferItem[] }) {
 }
 
 export default function TempboxPage() {
+  const { t } = useT()
   const { user } = useAuth()
   const [searchParams] = useSearchParams()
   const [config, setConfig] = React.useState<TempboxConfig | null>(null)
@@ -156,7 +159,7 @@ export default function TempboxPage() {
     try {
       setConfig(await tempboxApi.config())
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载配置失败")
+      toast.error(err instanceof HttpError ? err.message : t("tb.err.loadConfig"))
     } finally {
       setLoading(false)
     }
@@ -176,7 +179,7 @@ export default function TempboxPage() {
       // 现用 6 位数字；历史上出现过 4 位数字与 8 位字母数字，服务端按字符串匹配，
       // 所以这里放宽到 4–12 位字母数字，让所有旧码都还能解锁。
       if (!/^[A-Z0-9]{4,12}$/.test(code)) {
-        toast.error("请输入接收码")
+        toast.error(t("tb.err.enterCode"))
         return
       }
       setBusy(true)
@@ -185,7 +188,7 @@ export default function TempboxPage() {
         setPreviewText(null)
       } catch (err) {
         setBatch(null)
-        toast.error(err instanceof HttpError ? err.message : "解锁失败")
+        toast.error(err instanceof HttpError ? err.message : t("tb.err.unlock"))
       } finally {
         setBusy(false)
       }
@@ -216,7 +219,10 @@ export default function TempboxPage() {
     const list = files.filter((f) => {
       if (f.size > config.maxFileBytes) {
         toast.error(
-          `${f.name} 超过 ${Math.round(config.maxFileBytes / 1024 / 1024)} MB 上限，已跳过`
+          t("tb.err.tooLarge", {
+            name: f.name,
+            mb: Math.round(config.maxFileBytes / 1024 / 1024),
+          })
         )
         return false
       }
@@ -264,14 +270,19 @@ export default function TempboxPage() {
           failed++
           patch(i, {
             status: "failed",
-            error: err instanceof HttpError ? err.message : err instanceof Error ? err.message : "失败",
+            error:
+              err instanceof HttpError
+                ? err.message
+                : err instanceof Error
+                  ? err.message
+                  : t("tb.transfer.failed"),
           })
         }
       }
 
       const ok = list.length - failed
-      if (ok > 0) toast.success(`已上传 ${ok} 个文件`)
-      if (failed > 0) toast.error(`${failed} 个文件上传失败，可在传输列表中查看原因`)
+      if (ok > 0) toast.success(t("tb.ok.uploaded", { n: ok }))
+      if (failed > 0) toast.error(t("tb.err.uploadFailedN", { n: failed }))
 
       // 上传后刷新左侧列表，方便上传者核对传输内容
       setBatch(await tempboxApi.get(code))
@@ -280,8 +291,8 @@ export default function TempboxPage() {
         err instanceof HttpError
           ? err.message
           : err instanceof Error
-            ? `上传失败：${err.message}`
-            : "上传失败"
+            ? t("tb.err.uploadFailedMsg", { msg: err.message })
+            : t("tb.err.uploadFailed")
       )
     } finally {
       setUploading(false)
@@ -298,7 +309,7 @@ export default function TempboxPage() {
   /** 纯文本互传：直接生成接收码（文字存 D1，不走 R2） */
   const shareText = async () => {
     if (!textDraft.trim()) {
-      toast.error("先输入要分享的文字")
+      toast.error(t("tb.err.emptyText"))
       return
     }
     setTextBusy(true)
@@ -309,9 +320,9 @@ export default function TempboxPage() {
       setBatch(b)
       // 文字分享后同样自动填入左侧接收码并展示
       setCodeInput(created.code)
-      toast.success("文字已生成接收码")
+      toast.success(t("tb.ok.textShared"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "分享失败")
+      toast.error(err instanceof HttpError ? err.message : t("tb.err.share"))
     } finally {
       setTextBusy(false)
     }
@@ -321,9 +332,9 @@ export default function TempboxPage() {
     if (!createdCode) return
     try {
       await navigator.clipboard.writeText(createdCode)
-      toast.success("接收码已复制")
+      toast.success(t("tb.ok.codeCopied"))
     } catch {
-      toast.error("复制失败，请手动复制")
+      toast.error(t("tb.err.copy"))
     }
   }
 
@@ -342,9 +353,9 @@ export default function TempboxPage() {
     if (!shareUrl) return
     try {
       await navigator.clipboard.writeText(shareUrl)
-      toast.success("分享链接已复制")
+      toast.success(t("tb.ok.linkCopied"))
     } catch {
-      toast.error("复制失败，请手动复制")
+      toast.error(t("tb.err.copy"))
     }
   }
 
@@ -354,7 +365,7 @@ export default function TempboxPage() {
   if (loading) {
     return (
       <div>
-        <PageHeader title="临时分享箱" description="即传即取，过期自动消失" />
+        <PageHeader title={t("tb.title")} description={t("tb.tagline")} />
         <div className="flex justify-center py-16">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
@@ -365,10 +376,10 @@ export default function TempboxPage() {
   if (!config?.enabled) {
     return (
       <div>
-        <PageHeader title="临时分享箱" description="即传即取，过期自动消失" />
+        <PageHeader title={t("tb.title")} description={t("tb.tagline")} />
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            临时分享箱功能已关闭。
+            {t("tb.closed")}
           </CardContent>
         </Card>
       </div>
@@ -378,8 +389,8 @@ export default function TempboxPage() {
   return (
     <div>
       <PageHeader
-        title="临时分享箱"
-        description="生成 6 位接收码分享文件或文字；把分享链接发给对方，点开即看；到点自动清除。"
+        title={t("tb.title")}
+        description={t("tb.desc")}
       />
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -388,14 +399,14 @@ export default function TempboxPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Lock className="h-4 w-4 text-muted-foreground" />
-              输入接收码解锁
+              {t("tb.unlockTitle")}
             </CardTitle>
-            <CardDescription>访客无需登录即可查看与下载。</CardDescription>
+            <CardDescription>{t("tb.unlockDesc")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex gap-2">
               <Input
-                placeholder="输入接收码"
+                placeholder={t("tb.codePlaceholder")}
                 maxLength={12}
                 className="w-48 font-mono text-lg tracking-widest uppercase"
                 value={codeInput}
@@ -406,7 +417,7 @@ export default function TempboxPage() {
               />
               <Button onClick={() => void handleUnlock()} disabled={busy}>
                 {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-                解锁
+                {t("tb.unlock")}
               </Button>
             </div>
 
@@ -414,7 +425,7 @@ export default function TempboxPage() {
               <div className="space-y-3 rounded-md border p-4">
                 <p className="flex items-center gap-2 text-sm">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  正在上传，接收码 <span className="font-mono font-semibold">{createdCode}</span>
+                  {t("tb.uploadingCode")} <span className="font-mono font-semibold">{createdCode}</span>
                 </p>
                 <TransferList items={transfers} />
               </div>
@@ -427,13 +438,13 @@ export default function TempboxPage() {
                     {batch.code}
                   </Badge>
                   <Badge variant="outline">
-                    剩余 {batch.remainingMinutes} 分钟
+                    {t("tb.remaining", { n: batch.remainingMinutes })}
                   </Badge>
                   {batch.isText ? (
-                    <Badge variant="success">纯文本</Badge>
+                    <Badge variant="success">{t("tb.textBadge")}</Badge>
                   ) : (
                     <Badge variant="outline">
-                      {batch.fileCount} 个文件 · {formatBytes(batch.totalBytes)}
+                      {t("tb.fileSummary", { n: batch.fileCount, size: formatBytes(batch.totalBytes) })}
                     </Badge>
                   )}
                 </div>
@@ -449,16 +460,16 @@ export default function TempboxPage() {
                       onClick={() =>
                         navigator.clipboard
                           .writeText(batch.textContent ?? "")
-                          .then(() => toast.success("文字已复制"))
-                          .catch(() => toast.error("复制失败"))
+                          .then(() => toast.success(t("tb.ok.textCopied")))
+                          .catch(() => toast.error(t("tb.err.copy")))
                       }
                     >
                       <Copy className="h-3.5 w-3.5" />
-                      复制文字
+                      {t("tb.copyText")}
                     </Button>
                   </div>
                 ) : batch.files.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">该接收码还没有文件。</p>
+                  <p className="text-sm text-muted-foreground">{t("tb.noFiles")}</p>
                 ) : (
                   <div className="space-y-2">
                     {batch.files.map((f) => (
@@ -483,12 +494,12 @@ export default function TempboxPage() {
                               variant="ghost"
                               size="sm"
                               onClick={() => setPreviewText(f.name)}
-                              title="预览"
+                              title={t("tb.preview")}
                             >
                               <Box className="h-4 w-4" />
                             </Button>
                           )}
-                          <Button variant="ghost" size="sm" asChild title="下载">
+                          <Button variant="ghost" size="sm" asChild title={t("tb.download")}>
                             <a
                               href={fileDownloadUrl(batch.code, f.name)}
                               download
@@ -511,58 +522,58 @@ export default function TempboxPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Upload className="h-4 w-4 text-muted-foreground" />
-              分享临时内容
+              {t("tb.shareTitle")}
             </CardTitle>
             <CardDescription>
               {config.uploadRequiresLogin
-                ? "需登录后上传；文字 / 图片 / 文件均可。"
-                : "无需登录即可分享，访客可用接收码查看。"}
+                ? t("tb.shareHint.authed")
+                : t("tb.shareHint.guest")}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid grid-cols-3 gap-3 text-center text-xs text-muted-foreground">
               <div className="rounded-md border p-3">
                 <p className="text-base font-semibold text-foreground">
-                  {config.defaultMinutes} 分钟
+                  {t("tb.minutes", { n: config.defaultMinutes })}
                 </p>
-                默认保存
+                {t("tb.defaultRetention")}
               </div>
               <div className="rounded-md border p-3">
                 <p className="text-base font-semibold text-foreground">
                   {Math.round(config.maxFileBytes / 1024 / 1024)} MB
                 </p>
-                文件上限
+                {t("tb.maxFileSize")}
               </div>
               <div className="rounded-md border p-3">
                 <p className="text-base font-semibold text-foreground">
                   {config.maxFiles}
                 </p>
-                最多文件数
+                {t("tb.maxFiles")}
               </div>
             </div>
 
             {!user && config.uploadRequiresLogin ? (
               <div className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-                分享需要登录。访客只能查看与下载。
+                {t("tb.loginToShare")}
               </div>
             ) : createdCode ? (
               <div className="space-y-3">
                 <div className="rounded-md border p-4 text-center">
-                  <p className="text-sm text-muted-foreground">你的接收码</p>
+                  <p className="text-sm text-muted-foreground">{t("tb.yourCode")}</p>
                   <p className="mt-1 font-mono text-5xl font-bold tracking-widest">
                     {createdCode}
                   </p>
                   <p className="mt-2 text-xs text-muted-foreground">
-                    把分享链接发给对方，点开就会自动填入并解锁，不用手输。
+                    {t("tb.shareLinkHint")}
                   </p>
                   <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
                     <Button variant="outline" size="sm" onClick={() => void copyShareLink()}>
                       <Link2 className="h-3.5 w-3.5" />
-                      复制分享链接
+                      {t("tb.copyLink")}
                     </Button>
                     <Button variant="ghost" size="sm" onClick={() => void copyCode()}>
                       <Copy className="h-3.5 w-3.5" />
-                      只复制码
+                      {t("tb.copyCodeOnly")}
                     </Button>
                   </div>
                   <p className="mt-2 break-all px-1 font-mono text-[11px] text-muted-foreground/70">
@@ -571,7 +582,7 @@ export default function TempboxPage() {
                 </div>
                 {batch?.isText ? (
                   <p className="text-xs text-muted-foreground">
-                    文字已分享。每个接收码只承载一种内容，想再发一条请重新开始。
+                    {t("tb.textSharedNote")}
                   </p>
                 ) : (
                   <label className="flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed p-6 text-sm text-muted-foreground hover:bg-accent/40">
@@ -580,7 +591,7 @@ export default function TempboxPage() {
                     ) : (
                       <Upload className="h-4 w-4" />
                     )}
-                    再传一个文件到该接收码
+                    {t("tb.uploadAnother")}
                     <input
                       type="file"
                       multiple
@@ -600,7 +611,7 @@ export default function TempboxPage() {
                   className="w-full text-muted-foreground"
                   onClick={resetUpload}
                 >
-                  重新开始（丢弃当前接收码）
+                  {t("tb.restart")}
                 </Button>
               </div>
             ) : (
@@ -608,25 +619,25 @@ export default function TempboxPage() {
                 <TabsList className="grid w-full grid-cols-2">
                   <TabsTrigger value="text">
                     <MessageSquareText className="mr-1.5 h-3.5 w-3.5" />
-                    文字
+                    {t("tb.tab.text")}
                   </TabsTrigger>
                   <TabsTrigger value="file">
                     <Upload className="mr-1.5 h-3.5 w-3.5" />
-                    文件 / 图片
+                    {t("tb.tab.files")}
                   </TabsTrigger>
                 </TabsList>
                 <TabsContent value="text" className="space-y-2">
-                  <Label htmlFor="tempboxText">粘贴文字（存数据库，不占存储空间）</Label>
+                  <Label htmlFor="tempboxText">{t("tb.textLabel")}</Label>
                   <Textarea
                     id="tempboxText"
                     rows={6}
-                    placeholder="直接把文字粘贴到这里，生成接收码给对方……"
+                    placeholder={t("tb.textPlaceholder")}
                     value={textDraft}
                     onChange={(e) => setTextDraft(e.target.value)}
                   />
                   <Button onClick={() => void shareText()} disabled={textBusy || !textDraft.trim()}>
                     {textBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                    生成接收码
+                    {t("tb.createCode")}
                   </Button>
                 </TabsContent>
                 <TabsContent value="file">
@@ -637,7 +648,7 @@ export default function TempboxPage() {
                       <Upload className="h-5 w-5" />
                     )}
                     <span>
-                      {uploading ? "上传中…" : "点击选择文件 / 图片，可多选"}
+                      {uploading ? t("tb.uploading") : t("tb.chooseFiles")}
                     </span>
                     <input
                       type="file"
@@ -658,14 +669,15 @@ export default function TempboxPage() {
             {transfers.length > 0 && (
               <div className="space-y-3 rounded-md border p-3">
                 <p className="text-xs font-medium text-muted-foreground">
-                  传输列表{uploading ? "（上传中）" : ""}
+                  {t("tb.transfers")}
+                  {uploading ? t("tb.transfersBusy") : ""}
                 </p>
                 <TransferList items={transfers} />
               </div>
             )}
 
             <p className="text-xs text-muted-foreground">
-              文字直接存于数据库；文件存于 R2 的 temporary 目录。到期后自动清除。
+              {t("tb.storageNote")}
             </p>
           </CardContent>
         </Card>
@@ -684,7 +696,7 @@ export default function TempboxPage() {
               <DialogHeader>
                 <DialogTitle>{previewText}</DialogTitle>
                 <DialogDescription>
-                  文字内容预览（较大文本可能只显示开头）。
+                  {t("tb.previewNote")}
                 </DialogDescription>
               </DialogHeader>
               <TextPreview url={fileDownloadUrl(batch.code, previewText)} />
@@ -692,10 +704,10 @@ export default function TempboxPage() {
                 <Button variant="outline" asChild>
                   <a href={fileDownloadUrl(batch.code, previewText)} download>
                     <Download className="h-4 w-4" />
-                    下载原文件
+                    {t("tb.downloadOriginal")}
                   </a>
                 </Button>
-                <Button onClick={() => setPreviewText(null)}>关闭</Button>
+                <Button onClick={() => setPreviewText(null)}>{t("common.close")}</Button>
               </DialogFooter>
             </>
           )}
@@ -707,6 +719,7 @@ export default function TempboxPage() {
 
 /** 拉取文本内容并展示（限制前 20KB） */
 function TextPreview({ url }: { url: string }) {
+  const { t } = useT()
   const [text, setText] = React.useState<string>("")
   React.useEffect(() => {
     let cancelled = false
@@ -716,7 +729,7 @@ function TextPreview({ url }: { url: string }) {
         if (!cancelled) setText(t.slice(0, 20000))
       })
       .catch(() => {
-        if (!cancelled) setText("（预览失败）")
+        if (!cancelled) setText(t("tb.previewFailed"))
       })
     return () => {
       cancelled = true
@@ -724,7 +737,7 @@ function TextPreview({ url }: { url: string }) {
   }, [url])
   return (
     <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed">
-      {text || "加载中…"}
+      {text || t("common.loading")}
     </pre>
   )
 }

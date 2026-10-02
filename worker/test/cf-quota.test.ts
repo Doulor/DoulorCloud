@@ -358,8 +358,12 @@ describe("套餐判定与口径", () => {
     expect(w.scope).toBe("month")
     expect(w.limitKind).toBe("included")
     expect(w.limit).toBe(PAID_LIMITS.workersRequestsPerMonth)
-    // 本月至今 = 昨天 1000 + 今天 4000（打桩数据）
-    expect(w.used).toBe(5000)
+    // 本月至今 = 本月内的打桩数据之和（昨天 1000 + 今天 4000）。
+    // ⚠️ 不能写死 5000：**每月 1 号**跑时「昨天」落在上个月，月口径只该算今天的 4000
+    // —— 这正是月口径与日口径的区别，写死会让用例每月 1 号必红。
+    const monthStart = `${utcDay().slice(0, 7)}-01`
+    const yesterdayStr = new Date(Date.now() - 86400_000).toISOString().slice(0, 10)
+    expect(w.used).toBe(yesterdayStr >= monthStart ? 5000 : 4000)
 
     // 免费版的日上限在付费版下**不该**再出现
     expect(w.limit).not.toBe(FREE_LIMITS.workersRequestsPerDay)

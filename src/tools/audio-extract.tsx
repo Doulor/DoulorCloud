@@ -5,8 +5,10 @@ import { FileDrop } from "@/components/toolbox/file-drop"
 import { ToolShell, ToolSection } from "@/components/toolbox/tool-shell"
 import { Button } from "@/components/ui/button"
 import { baseName, downloadBlob, encodeWav, formatDuration, readAsArrayBuffer } from "@/lib/toolbox/utils"
+import { useT } from "@/i18n"
 
 export default function AudioExtractTool() {
+  const { t } = useT()
   const [fileName, setFileName] = React.useState("")
   const [audio, setAudio] = React.useState<AudioBuffer | null>(null)
   const [busy, setBusy] = React.useState(false)
@@ -32,7 +34,7 @@ export default function AudioExtractTool() {
       setAudio(decoded)
       setFileName(f.name)
     } catch {
-      setError("无法解析这个文件的音轨。如果它本身没有声音，或格式浏览器不支持（如部分 wmv、flac），就会失败。")
+      setError(t("ae.err.parse"))
       setAudio(null)
     } finally {
       setBusy(false)
@@ -52,7 +54,7 @@ export default function AudioExtractTool() {
       })
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "导出失败")
+      setError(e instanceof Error ? e.message : t("ae.err.export"))
     } finally {
       setBusy(false)
     }
@@ -60,45 +62,45 @@ export default function AudioExtractTool() {
 
   return (
     <ToolShell
-      title="提取音频"
-      description="从视频里把声音单独取出来，导出成通用的 WAV 文件。也可以用来给音频格式转成 WAV。"
+      title={t("toolbox.audioExtract.name")}
+      description={t("ae.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <ToolSection title="来源文件">
+        <ToolSection title={t("ae.section.source")}>
           {!audio ? (
             <FileDrop
               accept="video/*,audio/*"
               onFiles={(f) => void handleFiles(f)}
-              hint="mp4 / mov / webm / mp3 / m4a / wav 等都可以试试"
+              hint={t("ae.pickHint")}
             />
           ) : (
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-3 text-sm">
                 <span className="truncate font-medium">{fileName}</span>
                 <Button variant="ghost" size="sm" onClick={() => setAudio(null)}>
-                  换一个
+                  {t("ae.replace")}
                 </Button>
               </div>
               <div className="grid grid-cols-3 gap-3 text-center">
                 <div className="rounded-lg border p-3">
-                  <p className="text-xs text-muted-foreground">时长</p>
+                  <p className="text-xs text-muted-foreground">{t("ae.duration")}</p>
                   <p className="mt-1 text-sm font-medium">{formatDuration(audio.duration)}</p>
                 </div>
                 <div className="rounded-lg border p-3">
-                  <p className="text-xs text-muted-foreground">声道</p>
+                  <p className="text-xs text-muted-foreground">{t("ae.channels")}</p>
                   <p className="mt-1 text-sm font-medium">
-                    {audio.numberOfChannels === 1 ? "单声道" : "立体声"}
+                    {audio.numberOfChannels === 1 ? t("ae.mono") : t("ae.stereo")}
                   </p>
                 </div>
                 <div className="rounded-lg border p-3">
-                  <p className="text-xs text-muted-foreground">采样率</p>
+                  <p className="text-xs text-muted-foreground">{t("ae.sampleRate")}</p>
                   <p className="mt-1 text-sm font-medium">{audio.sampleRate} Hz</p>
                 </div>
               </div>
 
               {result && (
                 <div className="space-y-2 rounded-lg border p-3">
-                  <p className="text-xs text-muted-foreground">试听</p>
+                  <p className="text-xs text-muted-foreground">{t("ae.preview")}</p>
                   <audio controls src={result.url} className="w-full" />
                 </div>
               )}
@@ -106,15 +108,15 @@ export default function AudioExtractTool() {
           )}
         </ToolSection>
 
-        <ToolSection title="导出">
+        <ToolSection title={t("ae.section.export")}>
           <div className="space-y-4">
             <p className="text-xs text-muted-foreground">
-              WAV 是未压缩格式，音质无损但体积较大（每分钟约 10 MB）。要压小体积可以用「音频剪辑」或外部工具再转成 mp3。
+              {t("ae.wavNote")}
             </p>
             {error && <p className="text-xs text-destructive">{error}</p>}
             <Button className="w-full" disabled={!audio || busy} onClick={exportWav}>
               <Download className="h-4 w-4" />
-              {busy ? "处理中…" : "导出 WAV"}
+              {busy ? t("ae.processing") : t("ae.export")}
             </Button>
             <Button
               variant="outline"
@@ -123,7 +125,7 @@ export default function AudioExtractTool() {
               onClick={() => result && downloadBlob(result.blob, `${baseName(fileName || "audio")}.wav`)}
             >
               <Download className="h-4 w-4" />
-              保存到本地
+              {t("ae.saveLocal")}
             </Button>
           </div>
         </ToolSection>

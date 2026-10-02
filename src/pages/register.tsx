@@ -10,8 +10,10 @@ import { Label } from "@/components/ui/label"
 import { TermsDialog } from "@/components/terms-dialog"
 import { authApi, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
+import { useT } from "@/i18n"
 
 export default function RegisterPage() {
+  const { t } = useT()
   const { setUser } = useAuth()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -77,7 +79,7 @@ export default function RegisterPage() {
     setInviteError(false)
 
     if (form.password !== form.confirm) {
-      setError("两次输入的密码不一致")
+      setError(t("reg.err.passwordMismatch"))
       return
     }
 
@@ -90,14 +92,14 @@ export default function RegisterPage() {
         inviteCode: form.inviteCode,
       })
       setUser(res.user)
-      toast.success(`欢迎，${res.user.username}！你的命名空间已创建`)
+      toast.success(t("reg.ok.welcome", { username: res.user.username }))
       if (res.user.emailVerified === false) {
-        toast.info("可前往「设置」验证真实邮箱，验证后才能使用邮件转发")
+        toast.info(t("reg.info.verifyEmail"))
       }
       navigate("/dashboard", { replace: true })
     } catch (err) {
       const e = err instanceof HttpError ? err : null
-      setError(e?.message ?? "注册失败，请稍后重试")
+      setError(e?.message ?? t("reg.err.failed"))
       // 邀请码相关的失败要单独标出来：用户多半是点好友的邀请链接进来的，
       // 这时候「换一个码」比「检查用户名」更可能是他要做的事。
       const inviteCodeErr = [
@@ -117,18 +119,20 @@ export default function RegisterPage() {
 
   return (
     <AuthShell
-      title="创建账户"
+      title={t("reg.title")}
       description={
         <>
-          注册后将获得{" "}
-          <span className="font-mono text-foreground">username.doulor.cn</span>{" "}
-          子域名和 <span className="font-mono text-foreground">username@doulor.cn</span>{" "}
-          邮箱。
+          {t("reg.desc.prefix")}
+          <span className="font-mono text-foreground">username.doulor.cn</span>
+          {t("reg.desc.mid")}
+          <span className="font-mono text-foreground">username@doulor.cn</span>
+          {t("reg.desc.suffix")}
         </>
       }
       footer={
         <>
-          已有账户？<AuthFooterLink to="/login" label="登录" />
+          {t("reg.haveAccount")}
+          <AuthFooterLink to="/login" label={t("nav.login")} />
         </>
       }
     >
@@ -138,11 +142,11 @@ export default function RegisterPage() {
           <div className="flex items-start gap-2.5 rounded-md border border-primary/30 bg-primary/5 p-3">
             <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
             <div className="space-y-1 text-xs">
-              <p className="font-medium text-foreground">限时开放注册中</p>
+              <p className="font-medium text-foreground">{t("reg.open.title")}</p>
               <p className="text-muted-foreground">
-                当前无需邀请码，填写下方信息即可创建账户。
+                {t("reg.open.desc")}
                 {openUntil
-                  ? ` 活动截止 ${new Date(openUntil).toLocaleString()}。`
+                  ? t("reg.open.until", { at: new Date(openUntil).toLocaleString() })
                   : ""}
               </p>
             </div>
@@ -158,17 +162,17 @@ export default function RegisterPage() {
           <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="space-y-1 text-xs text-muted-foreground">
             <p>
-              <span className="font-medium text-foreground">注册即用：</span>
-              子域名、域名邮箱、网页收件箱、DNS 管理、临时分享箱、个人名片。
+              <span className="font-medium text-foreground">{t("reg.ready.title")}</span>
+              {t("reg.ready.desc")}
             </p>
             <p>
-              <span className="font-medium text-foreground">贡献解锁：</span>
-              AI 中转站、直链网盘、内网穿透、代理节点 —— 提交一份资源经审核通过后自动开放。
+              <span className="font-medium text-foreground">{t("reg.contrib.title")}</span>
+              {t("reg.contrib.desc")}
             </p>
           </div>
         </div>
         <div className="space-y-2">
-          <Label htmlFor="username">用户名</Label>
+          <Label htmlFor="username">{t("settings.label.username")}</Label>
           <Input
             id="username"
             autoComplete="username"
@@ -178,14 +182,14 @@ export default function RegisterPage() {
             required
           />
           <p className="text-xs text-muted-foreground">
-            将生成{" "}
+            {t("reg.usernameHint.prefix")}{" "}
             <span className="font-mono">
               {form.username || "username"}.doulor.cn
             </span>
           </p>
         </div>
         <div className="space-y-2">
-          <Label htmlFor="email">真实邮箱</Label>
+          <Label htmlFor="email">{t("settings.label.realEmail")}</Label>
           <Input
             id="email"
             type="email"
@@ -196,12 +200,12 @@ export default function RegisterPage() {
             required
           />
           <p className="text-xs text-muted-foreground">
-            域名邮箱收到的邮件将转发到此邮箱，之后需在「设置」页验证。
+            {t("reg.emailHint")}
           </p>
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
-            <Label htmlFor="password">密码</Label>
+            <Label htmlFor="password">{t("settings.pw.new")}</Label>
             <Input
               id="password"
               type="password"
@@ -212,7 +216,7 @@ export default function RegisterPage() {
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="confirm">确认密码</Label>
+            <Label htmlFor="confirm">{t("settings.pw.confirm")}</Label>
             <Input
               id="confirm"
               type="password"
@@ -225,13 +229,14 @@ export default function RegisterPage() {
         </div>
         <div className="space-y-2">
           <Label htmlFor="inviteCode">
-            邀请码{openRegistration ? "(选填)" : "(必填)"}
+            {t("reg.invite")}
+              {openRegistration ? t("reg.invite.optional") : t("reg.invite.required")}
           </Label>
           <Input
             id="inviteCode"
             ref={inviteInputRef}
             placeholder={
-              openRegistration ? "当前无需邀请码，可留空" : "输入邀请码"
+              openRegistration ? t("reg.invite.optionalHint") : t("reg.invite.placeholder")
             }
             value={form.inviteCode}
             onChange={set("inviteCode")}
@@ -242,7 +247,7 @@ export default function RegisterPage() {
           {/* 只在「还是链接带来的那个码」时提示，用户手动改过就不再啰嗦 */}
           {prefilledCode !== "" && form.inviteCode === prefilledCode && !inviteError && (
             <p className="text-xs text-muted-foreground">
-              已自动填入邀请链接中的邀请码，确认无误后直接注册即可。
+              {t("reg.invite.autoFilled")}
             </p>
           )}
           {inviteError && (
@@ -251,8 +256,7 @@ export default function RegisterPage() {
               <div className="space-y-1">
                 <p className="font-medium">{error}</p>
                 <p className="text-destructive/90">
-                  每个邀请码只能使用一次。如果你是点朋友分享的邀请链接进来的，说明这条链接已经被人用过了，
-                  请让朋友到「捐献与邀请 → 邀请」重新生成一条给你。
+                  {t("reg.invite.usedHint")}
                 </p>
               </div>
             </div>
@@ -262,16 +266,16 @@ export default function RegisterPage() {
         {error && !inviteError && <p className="text-sm text-destructive">{error}</p>}
         <Button type="submit" className="w-full" disabled={loading}>
           {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-          创建账户
+          {t("reg.submit")}
         </Button>
         <p className="text-center text-xs text-muted-foreground">
-          点击「创建账户」即表示你已阅读并同意{" "}
+          {t("reg.agree.prefix")}{" "}
           <button
             type="button"
             className="text-foreground underline underline-offset-2 hover:text-primary"
             onClick={() => setTermsOpen(true)}
           >
-            《服务条款》
+            {t("reg.agree.terms")}
           </button>
         </p>
       </form>

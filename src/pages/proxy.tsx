@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/dialog"
 import { proxyApi, HttpError } from "@/services/api"
 import { fmtTime } from "@/lib/format"
+import { useT, tStatic } from "@/i18n"
 import type {
   ProxyNode,
   ProxyNodeLatency,
@@ -69,20 +70,21 @@ const LATENCY_BATCH = 16
  * 可能只是本站出网到该节点不通，标红会让人误以为节点坏了。
  */
 function LatencyBadge({ latency, testable }: { latency?: ProxyNodeLatency; testable: boolean }) {
+  const { t } = useT()
   if (!testable) {
     return (
-      <span className="text-xs text-muted-foreground" title="该协议走 QUIC/UDP，服务端无法测速">
-        不支持测速
+      <span className="text-xs text-muted-foreground" title={t("px.lat.quicHint")}>
+        {t("px.lat.unsupported")}
       </span>
     )
   }
   if (!latency) {
-    return <span className="text-xs text-muted-foreground">未测速</span>
+    return <span className="text-xs text-muted-foreground">{t("px.lat.untested")}</span>
   }
   if (!latency.ok) {
     return (
       <span className="text-xs text-muted-foreground" title={latency.reason}>
-        测不到
+        {t("px.lat.unreachable")}
       </span>
     )
   }
@@ -91,7 +93,7 @@ function LatencyBadge({ latency, testable }: { latency?: ProxyNodeLatency; testa
   const cls =
     ms < 150 ? "text-emerald-600" : ms < 400 ? "text-amber-600" : "text-orange-600"
   return (
-    <span className={`font-mono text-xs ${cls}`} title="服务端 TCP 握手耗时">
+    <span className={`font-mono text-xs ${cls}`} title={t("px.lat.hint")}>
       {ms} ms
     </span>
   )
@@ -105,24 +107,24 @@ const PROXY_CONSENT_VERSION = 1
 
 const PROXY_AGREEMENT = [
   {
-    title: "一、服务性质",
-    body: "本模块仅为你提供代理节点订阅链接的浏览与复制服务。节点本身由管理员维护，本站不保证节点随时可用、速度或稳定性。",
+    title: "px.ag.1.title",
+    body: "px.ag.1.body",
   },
   {
-    title: "二、流量与到期信息",
-    body: "剩余流量、到期日等信息直接取自订阅源返回的内容，解析不到时显示「未知」。",
+    title: "px.ag.2.title",
+    body: "px.ag.2.body",
   },
   {
-    title: "三、使用限制",
-    body: "订阅链接仅限本人使用，不得转赠、转卖或公开传播。你须对使用节点产生的全部行为负责，遵守所在地法律与平台规则。",
+    title: "px.ag.3.title",
+    body: "px.ag.3.body",
   },
   {
-    title: "四、隐私说明",
-    body: "启用本功能不会向本站上传你的任何代理流量。访问订阅源时，本站会在服务器端代为抓取并解析，订阅源可能记录访问信息。",
+    title: "px.ag.4.title",
+    body: "px.ag.4.body",
   },
   {
-    title: "五、免责声明",
-    body: "因使用代理节点产生的任何直接或间接损失，本站不承担责任。管理员有权在任何时候停用个别节点或整个功能。",
+    title: "px.ag.5.title",
+    body: "px.ag.5.body",
   },
 ]
 
@@ -130,10 +132,10 @@ const NODE_STATUS_BADGE: Record<
   string,
   { label: string; variant: "success" | "secondary" | "destructive" | "outline" }
 > = {
-  online: { label: "运行中", variant: "success" },
-  offline: { label: "不可用", variant: "destructive" },
-  maintenance: { label: "维护中", variant: "secondary" },
-  unknown: { label: "状态未知", variant: "outline" },
+  online: { label: "frp.ns.online", variant: "success" },
+  offline: { label: "frp.ns.offline", variant: "destructive" },
+  maintenance: { label: "frp.ns.maintenance", variant: "secondary" },
+  unknown: { label: "frp.ns.unknown", variant: "outline" },
 }
 
 const PROTOCOL_BADGE_VARIANT: Record<
@@ -152,11 +154,11 @@ const PROTOCOL_BADGE_VARIANT: Record<
   unknown: "outline",
 }
 
-function copyText(text: string, label = "已复制") {
+function copyText(text: string, label = tStatic("common.copied")) {
   return navigator.clipboard
     .writeText(text)
     .then(() => toast.success(label))
-    .catch(() => toast.error("复制失败，请手动选择复制"))
+    .catch(() => toast.error(tStatic("ai.err.copy")))
 }
 
 /** 订阅源的节点总数（含抓取失败时显示错误） */
@@ -171,17 +173,18 @@ function SubStatusBadge({ sub }: { sub: ProxySubscription }) {
 
 /** 节点配置字段的可读展示 */
 function NodeDetails({ node }: { node: ProxyNode }) {
+  const { t } = useT()
   const fields: [string, string | null][] = [
-    ["协议", node.protocol],
-    ["服务器", node.server || null],
-    ["端口", node.port ? String(node.port) : null],
-    ["地区", node.region],
+    [t("px.field.protocol"), node.protocol],
+    [t("px.field.server"), node.server || null],
+    [t("px.field.port"), node.port ? String(node.port) : null],
+    [t("px.field.region"), node.region],
     ["UUID", node.details.uuid || null],
-    ["密码", node.details.password || null],
-    ["方法", node.details.method || null],
+    [t("px.field.password"), node.details.password || null],
+    [t("px.field.method"), node.details.method || null],
     ["SNI", node.details.sni || null],
-    ["流控", node.details.flow || null],
-    ["传输", node.details.network || null],
+    [t("px.field.flow"), node.details.flow || null],
+    [t("px.field.network"), node.details.network || null],
     ["TLS", node.details.tls || node.details.security || null],
     ["OBFS", node.details.obfs || node.details.headerType || null],
   ]
@@ -189,7 +192,7 @@ function NodeDetails({ node }: { node: ProxyNode }) {
   if (present.length === 0) {
     return (
       <p className="text-xs text-muted-foreground">
-        该节点未能完整解析，可复制原始链接手动导入客户端。
+        {t("px.nodePartial")}
       </p>
     )
   }
@@ -206,6 +209,7 @@ function NodeDetails({ node }: { node: ProxyNode }) {
 }
 
 export default function ProxyPage() {
+  const { t } = useT()
   const [data, setData] = React.useState<ProxyOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
@@ -243,9 +247,9 @@ export default function ProxyPage() {
     setRevealingId(id)
     try {
       const res = await proxyApi.revealSubscription(id)
-      await copyText(res.url, `订阅链接已复制，今天还可获取 ${res.remaining} 次`)
+      await copyText(res.url, t("px.ok.subCopied", { n: res.remaining }))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "获取订阅链接失败")
+      toast.error(err instanceof HttpError ? err.message : t("px.err.subLink"))
     } finally {
       setRevealingId(null)
     }
@@ -259,14 +263,14 @@ export default function ProxyPage() {
       // 协议更新过时，要求重新同意
       if (res.activated && res.consentedVersion < res.consentVersion) {
         setConsent(false)
-        toast.error("使用协议已更新，请重新阅读并同意")
+        toast.error(t("px.err.consentUpdated"))
       }
     } catch (err) {
       if (err instanceof HttpError && err.code === "FEATURE_NOT_PERMITTED") {
         setLocked(true)
         return
       }
-      toast.error(err instanceof HttpError ? err.message : "加载失败")
+      toast.error(err instanceof HttpError ? err.message : t("at.err.load"))
     } finally {
       if (!silent) setLoading(false)
     }
@@ -278,16 +282,16 @@ export default function ProxyPage() {
 
   const handleEnable = async () => {
     if (!consent) {
-      toast.error("请先阅读并勾选同意使用协议")
+      toast.error(t("st.err.needConsent"))
       return
     }
     setBusy(true)
     try {
       await proxyApi.enable(PROXY_CONSENT_VERSION)
-      toast.success("已启用代理节点")
+      toast.success(t("px.ok.enabled"))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "启用失败")
+      toast.error(err instanceof HttpError ? err.message : t("frp.err.enable"))
     } finally {
       setBusy(false)
     }
@@ -297,10 +301,10 @@ export default function ProxyPage() {
     setBusy(true)
     try {
       await proxyApi.disable()
-      toast.success("已关闭代理节点")
+      toast.success(t("px.ok.disabled"))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.op"))
     } finally {
       setBusy(false)
     }
@@ -313,11 +317,11 @@ export default function ProxyPage() {
       setCheckResult((prev) => ({ ...prev, [sub.id]: res }))
       toast.success(
         res.ok && res.latencyMs != null
-          ? `${sub.name} 响应 ${res.latencyMs} ms`
-          : res.message ?? "订阅地址不可达"
+          ? t("px.probe.responded", { name: sub.name, ms: res.latencyMs })
+          : (res.message ?? t("px.probe.unreachable"))
       )
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "检测失败")
+      toast.error(err instanceof HttpError ? err.message : t("px.err.probe"))
     } finally {
       setCheckingId(null)
     }
@@ -365,15 +369,15 @@ export default function ProxyPage() {
       }
 
       if (testable === 0) {
-        toast.message("该订阅里的节点都不支持服务端测速（QUIC/UDP 协议）")
+        toast.message(t("px.speed.noneTestable"))
       } else {
         toast.success(
-          `测速完成：${ok}/${testable} 个节点可连` +
-            (fastest != null ? `，最快 ${fastest} ms` : "")
+          t("px.speed.done", { ok, total: testable }) +
+          (fastest != null ? t("px.speed.fastest", { ms: fastest }) : "")
         )
       }
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "测速失败")
+      toast.error(err instanceof HttpError ? err.message : t("px.err.speed"))
     } finally {
       setLatencySubId(null)
       setLatencyProgress("")
@@ -384,8 +388,8 @@ export default function ProxyPage() {
     return (
       <FeatureLockedNotice
         feature="proxy"
-        featureLabel="代理节点"
-        description="你的账号未被授予「代理节点」权限。站长资源有限，该服务暂未全量开放。"
+        featureLabel={t("feat.proxy")}
+        description={t("locked.desc", { feature: t("feat.proxy") })}
       />
     )
   }
@@ -393,7 +397,7 @@ export default function ProxyPage() {
   if (loading) {
     return (
       <div>
-        <PageHeader title="代理节点" description="订阅与节点" />
+        <PageHeader title={t("px.title")} description={t("px.subtitle")} />
         <LoadingBlock />
       </div>
     )
@@ -402,10 +406,10 @@ export default function ProxyPage() {
   if (!data?.featureEnabled) {
     return (
       <div>
-        <PageHeader title="代理节点" description="订阅与节点" />
+        <PageHeader title={t("px.title")} description={t("px.subtitle")} />
         <EmptyState
-          title="功能已关闭"
-          description="管理员暂时关闭了代理节点功能。"
+          title={t("ai.disabled")}
+          description={t("px.disabledDesc")}
         />
       </div>
     )
@@ -419,15 +423,15 @@ export default function ProxyPage() {
   if (!data.activated || needReconsent) {
     return (
       <div>
-        <PageHeader title="代理节点" description="订阅链接与节点浏览" />
+        <PageHeader title={t("px.title")} description={t("px.subtitle2")} />
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Zap className="h-4 w-4 text-muted-foreground" />
-              启用代理节点
+              {t("px.intro.title")}
             </CardTitle>
             <CardDescription>
-              启用后你会看到全部可用的代理订阅与节点。首次启用需阅读并同意使用协议。
+              {t("px.intro.desc")}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -435,15 +439,14 @@ export default function ProxyPage() {
               <div className="flex gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <div>
-                  使用协议已更新到版本 {data.consentVersion}，
-                  请重新阅读并勾选同意后继续使用。
+                  {t("px.intro.updated", { v: data.consentVersion })}
                 </div>
               </div>
             )}
             <ul className="space-y-1.5 text-sm text-muted-foreground">
-              <li>· 查看每个订阅源的协议、地区与当前状态</li>
-              <li>· 复制订阅链接，或在页面上直接查看节点配置（地址 / 端口 / UUID / SNI）</li>
-              <li>· 订阅源附带流量 / 到期信息时自动展示，否则显示「未知」</li>
+              <li>{t("px.intro.b1")}</li>
+              <li>{t("px.intro.b2")}</li>
+              <li>{t("px.intro.b3")}</li>
             </ul>
 
             <div className="rounded-md border bg-muted/40 p-3">
@@ -451,14 +454,14 @@ export default function ProxyPage() {
                 <div className="flex items-start gap-2">
                   <ScrollText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                   <div>
-                    <p className="text-sm font-medium">使用协议（版本 {PROXY_CONSENT_VERSION}）</p>
+                    <p className="text-sm font-medium">{t("px.consent.version", { v: PROXY_CONSENT_VERSION })}</p>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      启用即表示你已阅读并同意以下条款。
+                      {t("px.consent.desc")}
                     </p>
                   </div>
                 </div>
                 <Button variant="outline" size="sm" onClick={() => setAgreementOpen(true)}>
-                  查看全文
+                  {t("st.consent.viewFull")}
                 </Button>
               </div>
             </div>
@@ -471,13 +474,13 @@ export default function ProxyPage() {
                 className="mt-0.5 h-4 w-4"
               />
               <span className="text-sm text-muted-foreground">
-                我已阅读并同意《代理节点使用协议》（版本 {PROXY_CONSENT_VERSION}）
+                {t("px.consent.check", { v: PROXY_CONSENT_VERSION })}
               </span>
             </label>
 
             <Button onClick={() => void handleEnable()} disabled={busy || !consent}>
               {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-              同意并启用
+              {t("px.consent.agree")}
             </Button>
           </CardContent>
         </Card>
@@ -492,15 +495,15 @@ export default function ProxyPage() {
   return (
     <div>
       <PageHeader
-        title="代理节点"
-        description="订阅链接与节点配置"
+        title={t("px.title")}
+        description={t("px.tagline")}
         actions={
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="icon" onClick={() => void load()} aria-label="刷新">
+            <Button variant="outline" size="icon" onClick={() => void load()} aria-label={t("common.refresh")}>
               <RefreshCw className="h-4 w-4" />
             </Button>
             <Button variant="outline" size="sm" onClick={() => void handleDisable()} disabled={busy}>
-              关闭功能
+              {t("common.disable")}
             </Button>
           </div>
         }
@@ -508,8 +511,8 @@ export default function ProxyPage() {
 
       {subs.length === 0 ? (
         <EmptyState
-          title="暂无可用订阅源"
-          description="管理员还没有添加代理订阅源，请稍后再来。"
+          title={t("px.empty")}
+          description={t("px.emptyDesc")}
         />
       ) : (
         <div className="space-y-6">
@@ -546,8 +549,8 @@ export default function ProxyPage() {
                         <SubStatusBadge sub={sub} />
                       </div>
                       <CardDescription className="text-xs">
-                        共 {sub.nodes.length} 个节点
-                        {sub.lastSyncedAt ? ` · 最近同步 ${fmtTime(sub.lastSyncedAt)}` : ""}
+                        {t("px.sub.nodes", { n: sub.nodes.length })}
+                        {sub.lastSyncedAt ? t("px.sub.syncedAt", { time: fmtTime(sub.lastSyncedAt) }) : ""}
                         {sub.statusNote ? ` · ${sub.statusNote}` : ""}
                       </CardDescription>
                     </div>
@@ -559,7 +562,7 @@ export default function ProxyPage() {
                         >
                           {result.ok && result.latencyMs != null
                             ? `${result.latencyMs} ms`
-                            : result.message ?? "不可达"}
+                            : result.message ?? t("px.probe.shortUnreachable")}
                         </Badge>
                       )}
                       <Button
@@ -570,14 +573,14 @@ export default function ProxyPage() {
                           void handleLatencyTest(sub)
                         }}
                         disabled={latencySubId === sub.id || sub.nodes.length === 0}
-                        title="对订阅里的每个节点做 TCP 握手测速"
+                        title={t("px.speed.hint")}
                       >
                         {latencySubId === sub.id ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         ) : (
                           <Gauge className="h-3.5 w-3.5" />
                         )}
-                        节点测速
+                        {t("px.speed.btn")}
                         {latencySubId === sub.id && latencyProgress
                           ? ` ${latencyProgress}`
                           : ""}
@@ -590,14 +593,14 @@ export default function ProxyPage() {
                           void handleCheck(sub)
                         }}
                         disabled={checkingId === sub.id}
-                        title="只测订阅地址本身能不能拉到（不测节点）"
+                        title={t("px.probe.hint")}
                       >
                         {checkingId === sub.id ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         ) : (
                           <Zap className="h-3.5 w-3.5" />
                         )}
-                        订阅探活
+                        {t("px.probe.btn")}
                       </Button>
                       <Button
                         variant="outline"
@@ -607,14 +610,14 @@ export default function ProxyPage() {
                           e.stopPropagation()
                           void handleCopySubscription(sub.id)
                         }}
-                        title="获取订阅源的原始链接（每个账号每天最多 3 次）"
+                        title={t("px.sub.getHint")}
                       >
                         {revealingId === sub.id ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         ) : (
                           <Copy className="h-3.5 w-3.5" />
                         )}
-                        复制订阅
+                        {t("px.sub.copy")}
                       </Button>
                     </div>
                   </div>
@@ -626,8 +629,7 @@ export default function ProxyPage() {
                     <div className="flex gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
                       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                       <div>
-                        订阅地址抓取失败：{sub.fetchError}。请检查订阅链接是否有效，
-                        或稍后点「订阅探活」重试。
+                        {t("px.sub.fetchFailed", { err: sub.fetchError })}
                       </div>
                     </div>
                   ) : null}
@@ -637,17 +639,17 @@ export default function ProxyPage() {
                     <div className="flex flex-wrap gap-2">
                       {sub.usage.total && (
                         <Badge variant="secondary" className="text-xs">
-                          总流量 {sub.usage.total}
+                          {t("px.usage.total", { v: sub.usage.total })}
                         </Badge>
                       )}
                       {sub.usage.used && (
                         <Badge variant="secondary" className="text-xs">
-                          已用 {sub.usage.used}
+                          {t("px.usage.used", { v: sub.usage.used })}
                         </Badge>
                       )}
                       {sub.usage.expire && (
                         <Badge variant="secondary" className="text-xs">
-                          到期 {sub.usage.expire}
+                          {t("px.usage.expire", { v: sub.usage.expire })}
                         </Badge>
                       )}
                     </div>
@@ -656,7 +658,7 @@ export default function ProxyPage() {
                   {/* 节点列表 */}
                   {sub.nodes.length === 0 ? (
                     <p className="py-6 text-center text-sm text-muted-foreground">
-                      该订阅源未解析出节点。
+                      {t("px.sub.noNodes")}
                     </p>
                   ) : (
                     <div className="space-y-2">
@@ -681,7 +683,7 @@ export default function ProxyPage() {
                                   }`}
                                 />
                                 <span className="truncate text-sm font-medium">
-                                  {node.name || `节点 ${i + 1}`}
+                                  {node.name || t("px.nodeN", { n: i + 1 })}
                                 </span>
                                 <Badge
                                   variant={PROTOCOL_BADGE_VARIANT[node.protocol] ?? "outline"}
@@ -705,11 +707,11 @@ export default function ProxyPage() {
                                 className="text-muted-foreground"
                                 onClick={(e) => {
                                   e.stopPropagation()
-                                  void copyText(node.raw, "节点链接已复制")
+                                  void copyText(node.raw, t("px.ok.nodeCopied"))
                                 }}
                               >
                                 <Copy className="h-3.5 w-3.5" />
-                                复制链接
+                                {t("px.nodeCopy")}
                               </Button>
                             </div>
                             {nodeExpanded && (
@@ -735,10 +737,7 @@ export default function ProxyPage() {
       )}
 
       <p className="mt-6 text-xs text-muted-foreground">
-        节点的「XX ms」是**本站服务器**到该节点地址的 TCP 握手耗时（用于分辨死节点与慢节点），
-        不是你在本机用客户端实测的速度，也没有经过节点转发，因此只作参考 —— 以你本地客户端的
-        「延迟测试」为准。QUIC/UDP 协议的节点（hysteria2 / tuic）服务端无法测速。
-        「测不到」只代表本站连不上，不代表节点不可用。剩余流量与到期日以订阅源返回为准。
+        {t("px.note")}
       </p>
 
       <AgreementDialog open={agreementOpen} onOpenChange={setAgreementOpen} />
@@ -753,12 +752,13 @@ function AgreementDialog({
   open: boolean
   onOpenChange: (o: boolean) => void
 }) {
+  const { t } = useT()
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[80vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>代理节点使用协议（版本 {PROXY_CONSENT_VERSION}）</DialogTitle>
-          <DialogDescription>启用本功能即视为同意以下条款。</DialogDescription>
+          <DialogTitle>{t("px.consent.dialogTitle", { v: PROXY_CONSENT_VERSION })}</DialogTitle>
+          <DialogDescription>{t("px.consent.dialogDesc")}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           {PROXY_AGREEMENT.map((s) => (
@@ -769,7 +769,7 @@ function AgreementDialog({
           ))}
         </div>
         <DialogFooter>
-          <Button onClick={() => onOpenChange(false)}>知道了</Button>
+          <Button onClick={() => onOpenChange(false)}>{t("dash.dialog.gotIt")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

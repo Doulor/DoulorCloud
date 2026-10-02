@@ -10,6 +10,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { spaceApi } from "@/services/api"
 import { fmtUid } from "@/lib/format"
 import type { SpaceCardData } from "@/types"
+import { useT } from "@/i18n"
 
 /**
  * 点击头像弹出的「用户小卡片」。
@@ -34,6 +35,7 @@ export function UserCardPopover({
   className?: string
   children: React.ReactNode
 }) {
+  const { t } = useT()
   const [open, setOpen] = React.useState(false)
   const [data, setData] = React.useState<SpaceCardData | null>(null)
   const [failed, setFailed] = React.useState(false)
@@ -103,19 +105,19 @@ export function UserCardPopover({
           {!data && !failed && (
             <p className="flex items-center gap-1.5">
               <Loader2 className="h-3 w-3 animate-spin" />
-              读取资料…
+              {t("uc2.loading")}
             </p>
           )}
-          {failed && <p>资料暂时读取失败</p>}
+          {failed && <p>{t("uc2.failed")}</p>}
           {data && (
             <>
               {data.motto && <p className="italic">「{data.motto}」</p>}
               <p className="flex items-center gap-1.5">
                 <Trophy className="h-3 w-3" />
-                称号「{data.title}」· 成就 {data.unlocked} / {data.total}
+                {t("uc2.titleLine", { title: data.title, unlocked: data.unlocked, total: data.total })}
               </p>
               <p>
-                加入 {data.days} 天 · 发过 {data.posts} 条帖子
+                {t("uc2.stats", { days: data.days, posts: data.posts })}
               </p>
             </>
           )}
@@ -124,7 +126,7 @@ export function UserCardPopover({
         <div className="border-t p-1.5">
           <Button asChild variant="ghost" size="sm" className="w-full justify-center">
             <Link to={`/space/${encodeURIComponent(username)}`}>
-              查看个人空间
+              {t("lay.viewSpace")}
               <ArrowUpRight className="h-3.5 w-3.5" />
             </Link>
           </Button>

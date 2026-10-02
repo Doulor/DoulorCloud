@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { copyText, loadImageFile } from "@/lib/toolbox/utils"
 import { cn } from "@/lib/utils"
+import { useT } from "@/i18n"
 
 interface Rgb {
   r: number
@@ -76,6 +77,7 @@ function extractPalette(data: Uint8ClampedArray, count: number): Rgb[] {
 }
 
 export default function ColorPickerTool() {
+  const { t } = useT()
   const [fileName, setFileName] = React.useState("")
   const [ready, setReady] = React.useState(false)
   const [picked, setPicked] = React.useState<Rgb | null>(null)
@@ -99,7 +101,7 @@ export default function ColorPickerTool() {
       canvas.width = Math.round(img.naturalWidth * scale)
       canvas.height = Math.round(img.naturalHeight * scale)
       const ctx = canvas.getContext("2d", { willReadFrequently: true })
-      if (!ctx) throw new Error("无法读取画布")
+      if (!ctx) throw new Error(t("cp.err.canvas"))
       ctx.clearRect(0, 0, canvas.width, canvas.height)
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
       const data = ctx.getImageData(0, 0, canvas.width, canvas.height)
@@ -110,7 +112,7 @@ export default function ColorPickerTool() {
       setReady(true)
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "图片打开失败")
+      setError(e instanceof Error ? e.message : t("cp.err.open"))
     }
   }
 
@@ -136,11 +138,11 @@ export default function ColorPickerTool() {
 
   return (
     <ToolShell
-      title="取色与配色"
-      description="从图片上点一下就能取到那个像素的颜色，也可以自动提取整张图的主色调。"
+      title={t("toolbox.colorPicker.name")}
+      description={t("cp.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <ToolSection title="图片（点一下取色）">
+        <ToolSection title={t("cp.section.image")}>
           {/* 画布必须一直挂载着：handleFiles 里要拿它读像素。若画布跟着 ready 一起
               条件渲染，第一次选图时 canvasRef.current 还是 null，会直接 return，
               表现就是「点了没反应」。所以只把整块藏起来，不用卸载。 */}
@@ -170,13 +172,13 @@ export default function ColorPickerTool() {
                   dataRef.current = null
                 }}
               >
-                换一张
+                {t("cp.replace")}
               </Button>
             </div>
           </div>
         </ToolSection>
 
-        <ToolSection title="颜色">
+        <ToolSection title={t("cp.section.color")}>
           <div className="space-y-4">
             <div className="rounded-lg border p-3">
               <div
@@ -208,15 +210,15 @@ export default function ColorPickerTool() {
                 </div>
               ) : (
                 <p className="mt-3 text-xs text-muted-foreground">
-                  把鼠标移到图上可以看到颜色，点一下锁定
+                  {t("cp.hint")}
                 </p>
               )}
             </div>
 
             <div className="space-y-2">
-              <Label className="text-xs text-muted-foreground">图片主色调（点击复制）</Label>
+              <Label className="text-xs text-muted-foreground">{t("cp.palette")}</Label>
               {palette.length === 0 ? (
-                <p className="text-xs text-muted-foreground">载入图片后自动提取</p>
+                <p className="text-xs text-muted-foreground">{t("cp.paletteHint")}</p>
               ) : (
                 <div className="grid grid-cols-4 gap-2">
                   {palette.map((c) => {

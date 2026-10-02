@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { createCanvas, downloadBlob, formatBytes, formatDuration } from "@/lib/toolbox/utils"
+import { useT } from "@/i18n"
 
 function seekTo(video: HTMLVideoElement, t: number): Promise<void> {
   return new Promise((resolve) => {
@@ -27,6 +28,7 @@ function seekTo(video: HTMLVideoElement, t: number): Promise<void> {
 }
 
 export default function VideoGifTool() {
+  const { t } = useT()
   const [file, setFile] = React.useState<File | null>(null)
   const [url, setUrl] = React.useState<string | null>(null)
   const [duration, setDuration] = React.useState(0)
@@ -121,7 +123,7 @@ export default function VideoGifTool() {
         return { url: URL.createObjectURL(blob), blob }
       })
     } catch (e) {
-      setError(e instanceof Error ? e.message : "生成 GIF 失败")
+      setError(e instanceof Error ? e.message : t("vg.err.generate"))
     } finally {
       setBusy(false)
     }
@@ -131,13 +133,13 @@ export default function VideoGifTool() {
 
   return (
     <ToolShell
-      title="视频转 GIF"
-      description="选一段视频导出成 GIF 动图，可调时长、帧率、宽度。全部在本机完成，不会上传视频。"
+      title={t("toolbox.videoGif.name")}
+      description={t("vg.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <ToolSection title="视频">
+        <ToolSection title={t("vg.section.video")}>
           {!url ? (
-            <FileDrop accept="video/*" onFiles={handleFiles} hint="建议先用 5 秒以内的片段，GIF 体积增长很快" />
+            <FileDrop accept="video/*" onFiles={handleFiles} hint={t("vg.pickHint")} />
           ) : (
             <div className="space-y-3">
               <div className="overflow-hidden rounded-lg border bg-black">
@@ -153,7 +155,7 @@ export default function VideoGifTool() {
               <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
                 <span className="truncate font-medium">{file?.name}</span>
                 <span className="text-xs text-muted-foreground">
-                  时长 {formatDuration(duration)}
+                  {t("vc.duration", { d: formatDuration(duration) })}
                 </span>
                 <Button
                   variant="ghost"
@@ -164,14 +166,14 @@ export default function VideoGifTool() {
                     setResult(null)
                   }}
                 >
-                  换一个
+                  {t("vg.replace")}
                 </Button>
               </div>
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label className="text-xs text-muted-foreground">
-                    起点 {start.toFixed(1)}s
+                    {t("vg.start", { n: start.toFixed(1) })}
                   </Label>
                   <input
                     type="range"
@@ -190,7 +192,7 @@ export default function VideoGifTool() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">终点 {end.toFixed(1)}s</Label>
+                  <Label className="text-xs text-muted-foreground">{t("vg.end", { n: end.toFixed(1) })}</Label>
                   <input
                     type="range"
                     min={0}
@@ -212,10 +214,10 @@ export default function VideoGifTool() {
           )}
         </ToolSection>
 
-        <ToolSection title="GIF 设置">
+        <ToolSection title={t("vg.section.settings")}>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">帧率</Label>
+              <Label className="text-xs text-muted-foreground">{t("vg.fps")}</Label>
               <Select value={String(fps)} onValueChange={(v) => setFps(Number(v))}>
                 <SelectTrigger>
                   <SelectValue />
@@ -223,7 +225,7 @@ export default function VideoGifTool() {
                 <SelectContent>
                   {[6, 8, 10, 12, 15, 20].map((f) => (
                     <SelectItem key={f} value={String(f)}>
-                      {f} 帧/秒
+                      {t("vc.fpsUnit", { n: f })}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -231,16 +233,16 @@ export default function VideoGifTool() {
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">宽度</Label>
+              <Label className="text-xs text-muted-foreground">{t("vg.width")}</Label>
               <Select value={String(width)} onValueChange={(v) => setWidth(Number(v))}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="240">240px · 微信表情</SelectItem>
-                  <SelectItem value="320">320px · 通用推荐</SelectItem>
-                  <SelectItem value="480">480px · 清晰</SelectItem>
-                  <SelectItem value="640">640px · 大图（体积大）</SelectItem>
+                  <SelectItem value="240">{t("vg.w.240")}</SelectItem>
+                  <SelectItem value="320">{t("vg.w.320")}</SelectItem>
+                  <SelectItem value="480">{t("vg.w.480")}</SelectItem>
+                  <SelectItem value="640">{t("vg.w.640")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -252,11 +254,11 @@ export default function VideoGifTool() {
                 onChange={(e) => setLoop(e.target.checked)}
                 className="h-4 w-4 accent-primary"
               />
-              循环播放
+              {t("vg.loop")}
             </label>
 
             <p className="text-xs text-muted-foreground">
-              将生成 {frameCount} 帧。帧数和宽度都直接影响体积，GIF 一般控制在 3 MB 以内比较合适。
+              {t("vg.frameNote", { n: frameCount })}
             </p>
 
             {busy && (
@@ -267,7 +269,7 @@ export default function VideoGifTool() {
                     style={{ width: `${progress}%` }}
                   />
                 </div>
-                <p className="text-xs text-muted-foreground">正在生成 {progress}%</p>
+                <p className="text-xs text-muted-foreground">{t("vg.generating", { n: progress })}</p>
               </div>
             )}
 
@@ -275,27 +277,27 @@ export default function VideoGifTool() {
 
             <Button className="w-full" disabled={!url || busy || duration <= 0} onClick={() => void generate()}>
               <Film className="h-4 w-4" />
-              {busy ? "生成中…" : "生成 GIF"}
+              {busy ? t("vg.generatingShort") : t("vg.generate")}
             </Button>
 
             <Button
               className="w-full"
               variant="outline"
               disabled={!result}
-              onClick={() => result && downloadBlob(result.blob, `动图-${Date.now()}.gif`)}
+              onClick={() => result && downloadBlob(result.blob, t("vg.fileName", { ts: Date.now() }))}
             >
               <Download className="h-4 w-4" />
-              下载 GIF
+              {t("vg.download")}
             </Button>
           </div>
         </ToolSection>
       </div>
 
       {result && (
-        <ToolSection title="效果预览">
+        <ToolSection title={t("vg.section.preview")}>
           <div className="flex flex-col items-center gap-3">
-            <img src={result.url} alt="GIF 预览" className="max-h-[420px] rounded-lg border" />
-            <p className="text-xs text-muted-foreground">文件大小 {formatBytes(result.blob.size)}</p>
+            <img src={result.url} alt={t("vg.alt.preview")} className="max-h-[420px] rounded-lg border" />
+            <p className="text-xs text-muted-foreground">{t("vg.fileSize", { size: formatBytes(result.blob.size) })}</p>
           </div>
         </ToolSection>
       )}

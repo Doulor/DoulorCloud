@@ -1,3 +1,4 @@
+import { useT } from "@/i18n"
 /**
  * 角色徽章：管理员金色、站长（root）红色，均带两种流光——
  *   1. 文字上的扫光（role-sheen / role-sheen-strong，内层 ::after）；
@@ -8,6 +9,7 @@
  * 头像悬浮卡片共用这一份，避免三处各写一遍、样式漂移。
  */
 export function RoleBadge({ role }: { role: "admin" | "root" }) {
+  const { t } = useT()
   const root = role === "root"
   return (
     <span
@@ -24,7 +26,7 @@ export function RoleBadge({ role }: { role: "admin" | "root" }) {
             : "role-sheen bg-gradient-to-r from-amber-400 to-yellow-500 text-amber-950")
         }
       >
-        {root ? "站长" : "管理员"}
+        {root ? t("au.role.root") : t("au.role.admin")}
       </span>
     </span>
   )

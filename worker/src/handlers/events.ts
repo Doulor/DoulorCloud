@@ -15,6 +15,7 @@ import { requireAdmin } from "./admin"
 import { uuid } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
 import { audit } from "../settings"
+import { checkStarred } from "../github"
 import { broadcastMessage } from "../user-messages"
 import {
   REWARD_HANDLERS,
@@ -24,6 +25,8 @@ import {
   isConditionType,
   parseLotteryConfig,
   splitPool,
+  validatePointsReward,
+  validateGithubStarCondition,
   type RewardType,
   type ConditionType,
 } from "../event-rewards"
@@ -278,8 +281,12 @@ export async function claimEvent(
 
   // 领取请求可携带认证码（POST body，可空）
   assertContentLengthWithin(request, 2 * 1024, "请求内容过大")
-  const body = (await request.json().catch(() => ({}))) as { code?: unknown }
+  const body = (await request.json().catch(() => ({}))) as {
+    code?: unknown
+    github?: unknown
+  }
   const codeInput = typeof body.code === "string" ? body.code.trim().slice(0, 64) : ""
+  const githubInput = typeof body.github === "string" ? body.github.trim().slice(0, 64) : ""
 
   const row = await loadOne(env, id)
   const now = Date.now()
@@ -308,7 +315,26 @@ export async function claimEvent(
   const conditionType = row.condition_type as ConditionType
   const conditionHandler = CONDITION_HANDLERS[conditionType]
   if (!conditionHandler) throw new ApiError(500, "活动参与条件配置异常", "BAD_CONDITION")
-  const ok = await conditionHandler(env, user.id, parseJson(row.condition_params) ?? {})
+  const conditionParams = (parseJson(row.condition_params) ?? {}) as Record<string, unknown>
+  // GitHub star 条件单独核验一次，为的是把「查不了」和「确实没点」分开回报：
+  // 笼统的「你还不满足参与条件」会让用户以为自己没点 star，去反复点、反复试。
+  if (conditionType === "github_star") {
+    const repo = String(conditionParams.repo ?? "").trim()
+    if (!githubInput) throw new ApiError(400, "请先填写你的 GitHub 用户名", "GITHUB_REQUIRED")
+    const check = await checkStarred(env, repo, githubInput)
+    if (check.error) throw new ApiError(503, check.error, "GITHUB_CHECK_FAILED")
+    if (!check.ok) {
+      throw new ApiError(
+        403,
+        `没查到 ${githubInput} 给 ${repo} 点过 star。请核对用户名拼写；刚点的 star 最多 5 分钟后才会被识别到。`,
+        "GITHUB_NOT_STARRED"
+      )
+    }
+  }
+  const ok = await conditionHandler(env, user.id, conditionParams, {
+    code: codeInput,
+    github: githubInput,
+  })
   if (!ok) throw new ApiError(403, "你还不满足参与条件", "CONDITION_FAILED")
 
   // 奖励前置条件（如中转站额度要求「已开通中转站」）：不满足直接拒绝，
@@ -749,6 +775,18 @@ export async function createEvent(env: Env, request: Request): Promise<Response>
       throw new ApiError(400, "抽奖活动的奖励类型必须是「积分」", "INVALID_INPUT")
     }
   }
+  // 积分奖励的数额配置（固定值 / 区间随机）必须**写入时**就校验：
+  // 非法配置若留到发放端才暴露，用户只会看到一条「领取失败」且查不出原因。
+  if (rewardType === "points") {
+    const bad = validatePointsReward(body.rewardParams)
+    if (bad) throw new ApiError(400, bad, "INVALID_INPUT")
+  }
+  // GitHub star 条件的仓库地址必须当场填对：填错了是「全体用户都核验失败」，
+  // 而失败提示看起来像用户的错，极难排查。
+  if (conditionType === "github_star") {
+    const bad = validateGithubStarCondition(body.conditionParams)
+    if (bad) throw new ApiError(400, bad, "INVALID_INPUT")
+  }
 
   const startsAt = normalizeTime(body.startsAt, "开始时间")
   const endsAt = normalizeTime(body.endsAt, "结束时间")
@@ -862,6 +900,22 @@ export async function updateEvent(
     if (rewardType !== "points") {
       throw new ApiError(400, "抽奖活动的奖励类型必须是「积分」", "INVALID_INPUT")
     }
+  }
+  // 积分奖励的数额配置同样要校验：body 没带 rewardParams 时沿用库里那份
+  // （旧配置当初已校验过，这里重校验一遍也无害）。
+  if (rewardType === "points") {
+    const resolved =
+      body.rewardParams !== undefined ? body.rewardParams : parseJson(existing.reward_params)
+    const bad = validatePointsReward(resolved)
+    if (bad) throw new ApiError(400, bad, "INVALID_INPUT")
+  }
+  if (conditionType === "github_star") {
+    const resolved =
+      body.conditionParams !== undefined
+        ? body.conditionParams
+        : parseJson(existing.condition_params)
+    const bad = validateGithubStarCondition(resolved)
+    if (bad) throw new ApiError(400, bad, "INVALID_INPUT")
   }
 
   const startsAt =

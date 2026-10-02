@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Link, useParams } from "react-router-dom"
+import { Link, useNavigate, useParams } from "react-router-dom"
 import {
   ArrowLeft,
   ExternalLink,
@@ -44,6 +44,7 @@ import { achievementIcon } from "@/lib/achievement-icons"
 import { fmtTime, fmtUid, relTime } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { HttpError, spaceApi } from "@/services/api"
+import { useT } from "@/i18n"
 import type { MySpaceSettings, SpaceData } from "@/types"
 
 /**
@@ -64,6 +65,7 @@ function SettingsDialog({
   onClose: () => void
   onSaved: () => void
 }) {
+  const { t } = useT()
   const [draft, setDraft] = React.useState<MySpaceSettings | null>(null)
   const [busy, setBusy] = React.useState(false)
 
@@ -75,7 +77,7 @@ function SettingsDialog({
         const res = await spaceApi.getMine()
         setDraft(res.settings)
       } catch (err) {
-        toast.error(err instanceof HttpError ? err.message : "读取展示设置失败")
+        toast.error(err instanceof HttpError ? err.message : t("space.err.loadSettings"))
       }
     })()
   }, [open])
@@ -85,29 +87,29 @@ function SettingsDialog({
     setBusy(true)
     try {
       await spaceApi.saveMine(draft)
-      toast.success("展示设置已保存")
+      toast.success(t("space.settingsSaved"))
       onSaved()
       onClose()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("space.err.save"))
     } finally {
       setBusy(false)
     }
   }
 
   const rows: { key: keyof MySpaceSettings; label: string; desc: string }[] = [
-    { key: "showAchievements", label: "成就与称号", desc: "展示已解锁的徽章、称号与成就点" },
-    { key: "showStats", label: "统计数据", desc: "域名/邮箱/帖子/获赞/邀请/捐献等数字" },
-    { key: "showPosts", label: "历史帖子", desc: "最近 10 条社区帖子（社区关闭或访客无权限时自动隐藏）" },
+    { key: "showAchievements", label: t("space.opt.achievements"), desc: t("space.opt.achievementsDesc") },
+    { key: "showStats", label: t("space.opt.stats"), desc: t("space.opt.statsDesc") },
+    { key: "showPosts", label: t("space.opt.posts"), desc: t("space.opt.postsDesc") },
     {
       key: "showContributions",
-      label: "历史贡献",
-      desc: "捐献记录的类型与次数 —— 缺少对应模块权限的访客只能看到打码条目",
+      label: t("space.opt.contributions"),
+      desc: t("space.opt.contributionsDesc"),
     },
     {
       key: "showProfileLink",
-      label: "显示名片入口",
-      desc: "在空间顶部显示「查看名片」按钮，跳转到你的个人名片（自定义域名优先）",
+      label: t("space.opt.profileLink"),
+      desc: t("space.opt.profileLinkDesc"),
     },
   ]
 
@@ -115,23 +117,23 @@ function SettingsDialog({
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>空间展示设置</DialogTitle>
-          <DialogDescription>决定别人打开你的个人空间时能看到什么</DialogDescription>
+          <DialogTitle>{t("space.settings.title")}</DialogTitle>
+          <DialogDescription>{t("space.settings.desc")}</DialogDescription>
         </DialogHeader>
 
         {!draft ? (
           <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
-            加载中…
+            {t("common.loading")}
           </div>
         ) : (
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="spaceMotto">一句话签名（可留空）</Label>
+              <Label htmlFor="spaceMotto">{t("space.settings.motto")}</Label>
               <Input
                 id="spaceMotto"
                 maxLength={40}
-                placeholder="例如：折腾不停的人"
+                placeholder={t("space.settings.mottoPlaceholder")}
                 value={draft.motto}
                 onChange={(e) => setDraft({ ...draft, motto: e.target.value })}
               />
@@ -154,11 +156,11 @@ function SettingsDialog({
 
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={busy}>
-            取消
+            {t("common.cancel")}
           </Button>
           <Button onClick={() => void save()} disabled={busy || !draft}>
             {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-            保存
+            {t("common.save")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -177,6 +179,8 @@ function StatItem({ label, value }: { label: string; value: number | string }) {
 }
 
 export default function SpacePage() {
+  const navigate = useNavigate()
+  const { t } = useT()
   const { username = "" } = useParams()
   const [data, setData] = React.useState<SpaceData | null>(null)
   const [loading, setLoading] = React.useState(true)
@@ -193,7 +197,7 @@ export default function SpacePage() {
       if (err instanceof HttpError && err.status === 404) {
         setNotFound(true)
       } else {
-        toast.error(err instanceof HttpError ? err.message : "加载个人空间失败")
+        toast.error(err instanceof HttpError ? err.message : t("space.err.load"))
       }
     } finally {
       setLoading(false)
@@ -216,11 +220,11 @@ export default function SpacePage() {
     return (
       <div className="mx-auto max-w-3xl space-y-4 px-4 py-16 text-center">
         <UserRound className="mx-auto h-10 w-10 text-muted-foreground" />
-        <p className="text-sm text-muted-foreground">没找到这个用户</p>
+        <p className="text-sm text-muted-foreground">{t("space.notFound")}</p>
         <Button asChild variant="outline" size="sm">
           <Link to="/dashboard">
             <ArrowLeft className="h-4 w-4" />
-            回到控制台
+            {t("space.backToConsole")}
           </Link>
         </Button>
       </div>
@@ -236,15 +240,15 @@ export default function SpacePage() {
       <div className="flex items-center justify-between">
         <Link to="/dashboard" className="text-sm text-muted-foreground hover:text-foreground">
           <ArrowLeft className="mr-1 inline h-3.5 w-3.5" />
-          控制台
+          {t("space.console")}
         </Link>
         <div className="flex items-center gap-3">
-          <span className="text-xs text-muted-foreground">Doulor Cloud · 个人空间</span>
+          <span className="text-xs text-muted-foreground">{t("space.brandLine")}</span>
           {data.profileUrl && space.showProfileLink && (
             <Button variant="outline" size="sm" asChild>
               <a href={data.profileUrl} target="_blank" rel="noopener noreferrer">
                 <ExternalLink className="h-3.5 w-3.5" />
-                查看名片
+                {t("space.viewCard")}
               </a>
             </Button>
           )}
@@ -269,7 +273,7 @@ export default function SpacePage() {
               {user.customTitle && <CustomTitleBadge title={user.customTitle} />}
               {space.isOwner && (
                 <Badge variant="secondary" className="text-[10px]">
-                  这是你的空间
+                  {t("space.isOwner")}
                 </Badge>
               )}
             </div>
@@ -277,14 +281,17 @@ export default function SpacePage() {
               {fmtUid(user.uid) && (
                 <span className="mr-1.5 font-medium text-foreground/70">{fmtUid(user.uid)}</span>
               )}
-              @{user.username} · 加入 {user.days} 天（
-              {new Date(user.joinedAt).toLocaleDateString("zh-CN")}）
+              {t("space.joined", {
+                username: user.username,
+                days: user.days,
+                date: new Date(user.joinedAt).toLocaleDateString(t("space.dateLocale")),
+              })}
             </p>
             {space.motto && (
               <p className="text-sm italic text-muted-foreground">「{space.motto}」</p>
             )}
           </div>
-          {space.isOwner && (
+          {space.isOwner ? (
             <Button
               variant="outline"
               size="sm"
@@ -292,7 +299,20 @@ export default function SpacePage() {
               onClick={() => setSettingsOpen(true)}
             >
               <Settings2 className="h-4 w-4" />
-              展示设置
+              {t("space.settingsBtn")}
+            </Button>
+          ) : (
+            /* 别人的空间：直接开私信（2026-10-01）。放在名片右上角，
+               是「看到这个人 → 想联系他」最自然的位置。 */
+            <Button
+              size="sm"
+              className="shrink-0"
+              onClick={() =>
+                navigate(`/dashboard/dm/${encodeURIComponent(user.username)}`)
+              }
+            >
+              <MessageSquare className="h-4 w-4" />
+              {t("dmsg.title")}
             </Button>
           )}
         </CardContent>
@@ -306,12 +326,16 @@ export default function SpacePage() {
               <div className="space-y-1">
                 <CardTitle className="flex items-center gap-2 text-base">
                   <Trophy className="h-4 w-4 text-muted-foreground" />
-                  成就
+                  {t("space.achievements")}
                 </CardTitle>
                 <CardDescription>
-                  称号「{achievements.title.name}」· 成就点 {achievements.points} /{" "}
-                  {achievements.maxPoints} · 已解锁 {achievements.unlocked} /{" "}
-                  {achievements.total}
+                  {t("space.achievementsSummary", {
+                    title: achievements.title.name,
+                    points: achievements.points,
+                    maxPoints: achievements.maxPoints,
+                    unlocked: achievements.unlocked,
+                    total: achievements.total,
+                  })}
                 </CardDescription>
               </div>
               <span className="shrink-0 text-2xl font-semibold tracking-tight">
@@ -321,7 +345,7 @@ export default function SpacePage() {
           </CardHeader>
           <CardContent className="space-y-3">
             {achievements.badges.length === 0 ? (
-              <p className="text-sm text-muted-foreground">还没有解锁任何成就</p>
+              <p className="text-sm text-muted-foreground">{t("space.noAchievements")}</p>
             ) : (
               <div className="flex flex-wrap gap-2">
                 {achievements.badges.map((b) => {
@@ -360,19 +384,19 @@ export default function SpacePage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Sparkles className="h-4 w-4 text-muted-foreground" />
-              数据
+              {t("space.stats")}
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              <StatItem label="加入天数" value={stats.days} />
-              <StatItem label="子域名" value={stats.subdomains} />
-              <StatItem label="邮箱" value={stats.mailboxes} />
-              <StatItem label="帖子" value={stats.posts} />
-              <StatItem label="评论" value={stats.comments} />
-              <StatItem label="获赞" value={stats.likesReceived} />
-              <StatItem label="邀请" value={stats.invited} />
-              <StatItem label="捐献" value={stats.donations} />
+              <StatItem label={t("space.stat.days")} value={stats.days} />
+              <StatItem label={t("space.stat.subdomains")} value={stats.subdomains} />
+              <StatItem label={t("space.stat.mailboxes")} value={stats.mailboxes} />
+              <StatItem label={t("space.stat.posts")} value={stats.posts} />
+              <StatItem label={t("space.stat.comments")} value={stats.comments} />
+              <StatItem label={t("space.stat.likes")} value={stats.likesReceived} />
+              <StatItem label={t("space.stat.invited")} value={stats.invited} />
+              <StatItem label={t("space.stat.donations")} value={stats.donations} />
             </div>
           </CardContent>
         </Card>
@@ -384,7 +408,7 @@ export default function SpacePage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <MessageSquare className="h-4 w-4 text-muted-foreground" />
-              历史帖子
+              {t("space.posts")}
             </CardTitle>
             {posts.hiddenReason && (
               <CardDescription>{posts.hiddenReason}</CardDescription>
@@ -416,7 +440,7 @@ export default function SpacePage() {
           )}
           {!posts.hiddenReason && posts.items.length === 0 && (
             <CardContent>
-              <p className="text-sm text-muted-foreground">还没有发过帖子</p>
+              <p className="text-sm text-muted-foreground">{t("space.noPosts")}</p>
             </CardContent>
           )}
         </Card>
@@ -428,11 +452,9 @@ export default function SpacePage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Gift className="h-4 w-4 text-muted-foreground" />
-              历史贡献
+              {t("space.contributions")}
             </CardTitle>
-            <CardDescription>
-              TA 为本站贡献过的资源（贡献详情受权限限制，不展示凭据）
-            </CardDescription>
+            <CardDescription>{t("space.contributionsDesc")}</CardDescription>
           </CardHeader>
           {contributions.items.length > 0 ? (
             <CardContent className="space-y-2">
@@ -456,7 +478,7 @@ export default function SpacePage() {
                       </span>
                       <span className="ml-2 inline-flex items-center gap-1 text-xs text-muted-foreground">
                         <Lock className="h-3 w-3" />
-                        需要「{c.needLabel ?? "对应模块"}」权限
+                        {t("space.needPermission", { module: c.needLabel ?? t("space.someModule") })}
                       </span>
                     </span>
                   ) : (
@@ -473,7 +495,7 @@ export default function SpacePage() {
             </CardContent>
           ) : (
             <CardContent>
-              <p className="text-sm text-muted-foreground">还没有通过审核的捐献</p>
+              <p className="text-sm text-muted-foreground">{t("space.noContributions")}</p>
             </CardContent>
           )}
         </Card>
@@ -482,7 +504,7 @@ export default function SpacePage() {
       {!achievements && !stats && !posts && !contributions && (
         <Card>
           <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            这个用户关闭了空间展示
+            {t("space.disabled")}
           </CardContent>
         </Card>
       )}

@@ -45,6 +45,7 @@ import {
   changePassword as changePasswordRemote,
 } from "../newapi-client"
 import { audit, getSetting, getSettings, parseRecommendedModels } from "../settings"
+import { resolveDonationGroup } from "../donation-provision"
 import { hasFeature, parsePermissions, parseOpenFeatures } from "../permissions"
 import { guardRateLimit } from "../ratelimit"
 import { requireAdmin } from "./admin"
@@ -200,11 +201,15 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
 
   // 「捐献」分组：模型名以 donation 开头的，统一归到这里，
   // 不再出现在 default / 付费分组里（管理员用来标记「捐献解锁的模型」）。
+  //
+  // ⚠️ 2026-10-01：这里**不能**再要求 `models.includes(p.model)`。
+  // 捐献渠道已移到独立分组（`newapi_donation_group`），而 `models` 是用
+  // 用户那个 `default` 分组的令牌拉的 ⇒ 捐献模型根本不在里面，加了这层过滤
+  // 会让整个「捐献」分组凭空消失。改成只看 pricing（管理员凭据拉的、不过滤分组）
+  // 里的模型名前缀 —— 这正是「用户还没建捐献 Key，也看得到自己能得到什么」的语义。
   const isDonationModel = (name: string) => /^donation/i.test(name)
   const donationModels = new Set(
-    pricing
-      .filter((p) => models.includes(p.model) && isDonationModel(p.model))
-      .map((p) => p.model)
+    pricing.filter((p) => isDonationModel(p.model)).map((p) => p.model)
   )
 
   const groupModels: Record<string, string[]> = {}
@@ -292,6 +297,14 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     availableGroups,
     /** 分组 → 该分组可用模型；仅包含用户可用的模型 */
     groupModels,
+    /**
+     * 捐献渠道所在的分组名（默认 `donation`）。
+     * 前端要拿它提示用户「捐献模型得单独建一个选这个分组的 Key」——
+     * 分组名可在管理面板改，所以不能在前端写死。
+     */
+    donationGroup: resolveDonationGroup(settings.newapi_donation_group),
+    /** 建 Key 时可自选的分组（顺序：站点分组在前，即默认值） */
+    keyGroups: userSelectableGroups(settings),
     /** 用户当前账号所属分组 */
     accountGroup: account.group_name,
     /** 管理员维护的推荐模型分档（数组顺序即梯队顺序） */
@@ -604,14 +617,19 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
   // 表现为「绑定成功但建 Key 报 not logged in」。先转组、再 login，token 才能拿到
   // group 已定型之后的版本。
   // 失败不阻断开通主流程，只记审计（group 默认值在多数场景本来就一致）。
+  // 分组列表 = 站点分组 + 捐献分组（NewAPI 的 user.group 是逗号分隔的多选，
+  // 第一个是默认分组）。**必须把捐献分组带上**，否则用户在面板/建 Key 时
+  // 根本选不到它 —— 连带我们自己在 createKey 里传 `group: donation` 也可能被拒。
+  // 顺序有意把站点分组放第一：不显式选分组时走的还是它（付费倍率口径不变）。
+  const userGroups = userSelectableGroups(settings2)
   try {
-    await adminSetUserGroup(env, remote.id, username, settings2.newapi_group)
+    await adminSetUserGroup(env, remote.id, username, userGroups.join(","))
   } catch (err) {
     await audit(
       env,
       user.id,
       "newapi.group_sync_failed",
-      `开通时转组到 ${settings2.newapi_group} 失败：${
+      `开通时转组到 ${userGroups.join(",")} 失败：${
         err instanceof Error ? err.message : String(err)
       }`
     )
@@ -697,6 +715,23 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
   )
 }
 
+/**
+ * 用户可以**自选**的分组（建 Key 时可选、开通账号时写进 user.group）。
+ *
+ * 只有两个：站点分组 + 捐献分组。刻意不放开更多 —— 付费/管理员分组由管理员
+ * 单独开通，让用户自选等于绕过计费。三处（开通转组 / 建 Key 校验 / 概览下发）
+ * 共用它，避免口径漂移。
+ */
+function userSelectableGroups(settings: {
+  newapi_group?: string
+  newapi_donation_group?: string
+}): string[] {
+  return [
+    (settings.newapi_group || "").trim() || "default",
+    resolveDonationGroup(settings.newapi_donation_group),
+  ].filter((g, i, arr) => g && arr.indexOf(g) === i)
+}
+
 // ---- API Key ----
 
 /** GET /api/dev/keys —— 已创建的 Key（掩码） */
@@ -711,12 +746,28 @@ export async function listKeys(env: Env, request: Request): Promise<Response> {
     .bind(user.id)
     .all()
 
+  // 顺带把每个 Key 的**所属分组**带出去 —— 用户要靠它分辨「这个 Key 能不能调捐献模型」。
+  //
+  // 分组**刻意不落库**：它是 NewAPI 侧的属性，管理员可能在面板里改过，实时读才准；
+  // 读不到就留 null（列表照样能用，只是不显示分组）。
+  const groupByTokenId = new Map<number, string>()
+  try {
+    const tokens = await runWithUserToken(env, account, (token, userId) =>
+      listTokens(env, token, userId)
+    )
+    for (const t of tokens) groupByTokenId.set(t.id, t.group)
+  } catch (err) {
+    console.error("读取 Key 分组失败（不影响列表）:", err)
+  }
+
   return json({
     keys: (rows.results ?? []).map((r: Record<string, unknown>) => ({
       id: r.id,
       tokenId: r.token_id,
       name: r.name,
       maskedKey: r.key_prefix,
+      /** 该 Key 所属分组；读不到为 null */
+      group: groupByTokenId.get(Number(r.token_id)) ?? null,
       createdAt: r.created_at,
     })),
   })
@@ -737,9 +788,23 @@ export async function createKey(env: Env, request: Request): Promise<Response> {
   const body = (await request.json()) as { name?: string; group?: string }
   const name = (body.name ?? "").trim().slice(0, 50) || `doulor-${user.username}`
 
-  // 分组固定为 default（免费分组），不允许用户自选付费/其他分组。
-  // 用户侧的免费额度来自订阅，付费分组由管理员单独开通。
-  const group = "default"
+  // 可选分组 = 站点分组 + 捐献分组（2026-10-01 起放开）。
+  //
+  // 为什么只放开这两个：捐献模型被分到了独立分组（`newapi_donation_group`），
+  // 用站点分组的旧 Key 调不到它们，所以用户必须能建一个「选了捐献分组」的 Key。
+  // 而**付费/管理员分组仍然不能自选** —— 那等于绕过计费，只能由管理员单独开通。
+  const settings = await getSettings(env)
+  const allowedGroups = userSelectableGroups(settings)
+
+  const requested = (body.group ?? "").trim()
+  if (requested && !allowedGroups.includes(requested)) {
+    throw new ApiError(
+      400,
+      `不支持的分组「${requested}」，只能选：${allowedGroups.join(" / ")}`,
+      "INVALID_GROUP"
+    )
+  }
+  const group = requested || allowedGroups[0]
 
   let created
   try {

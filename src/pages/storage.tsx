@@ -43,6 +43,7 @@ import {
 import { storageApi, HttpError } from "@/services/api"
 import { formatBytes, fmtTime } from "@/lib/format"
 import type { StorageObject, StorageOverview } from "@/types"
+import { useT } from "@/i18n"
 /**
  * 网盘「使用协议」。版本须与后端 STORAGE_CONSENT_VERSION 一致。
  * 用户点「开通网盘」前必须勾选同意，服务端校验通过才会写入启用状态。
@@ -52,28 +53,28 @@ const STORAGE_CONSENT_VERSION = 1
 
 const STORAGE_AGREEMENT = [
   {
-    title: "一、服务性质",
-    body: "本模块仅为你提供文件存储与公开直链分享服务。本站不保证存储永久可用、不被删除或数据不丢失，请自行保留重要文件的备份。",
+    title: "st.ag.1.title",
+    body: "st.ag.1.body",
   },
   {
-    title: "二、禁止存放的内容",
-    body: "严禁上传、存储或分享下列内容：① 儿童色情及任何涉及未成年人的色情内容；② 色情、低俗内容（R18）；③ 恐怖主义、极端暴力、血腥内容；④ 盗版软件、影视、音乐、电子书及其他侵犯他人著作权的资源；⑤ 赌博、诈骗、传销等违法信息；⑥ 恶意软件、木马、病毒、钓鱼页面；⑦ 侵犯他人隐私或含有他人敏感个人信息的内容；⑧ 其他违反中华人民共和国法律法规及你所在地法律的内容。",
+    title: "st.ag.2.title",
+    body: "st.ag.2.body",
   },
   {
-    title: "三、违规处理",
-    body: "一经发现或经举报核实存在上述内容，本站将立即删除相关文件、停用你的网盘功能，并视情节严重程度对你作出警告、限制功能直至【永久封禁账号】的处理，且不予恢复。构成违法犯罪的，本站将配合有权机关提供必要信息。",
+    title: "st.ag.3.title",
+    body: "st.ag.3.body",
   },
   {
-    title: "四、你的责任",
-    body: "你须对通过本服务上传、存储、分享的全部内容及由此产生的全部后果独立承担法律责任。因你上传的内容导致本站被第三方索赔、行政处罚或产生其他损失的，你有义务予以赔偿。",
+    title: "st.ag.4.title",
+    body: "st.ag.4.body",
   },
   {
-    title: "五、直链公开性",
-    body: "直链是公开的，任何拿到链接的人都能访问。请勿存放隐私文件、证件照、密钥等敏感信息。你应为自己的分享行为负责。",
+    title: "st.ag.5.title",
+    body: "st.ag.5.body",
   },
   {
-    title: "六、免责与配合",
-    body: "本站有权在收到有效投诉或依法配合调查时，无需事先通知即删除相关文件并停用账号。管理员有权调整配额、限速或在任何时候关闭整个功能。",
+    title: "st.ag.6.title",
+    body: "st.ag.6.body",
   },
 ]
 
@@ -92,6 +93,7 @@ interface Uploading {
 }
 
 export default function StoragePage() {
+  const { t } = useT()
   const [overview, setOverview] = React.useState<StorageOverview | null>(null)
   const [objects, setObjects] = React.useState<StorageObject[]>([])
   const [loading, setLoading] = React.useState(true)
@@ -131,7 +133,7 @@ export default function StoragePage() {
         setLocked(true)
         return
       }
-      toast.error(err instanceof HttpError ? err.message : "加载网盘信息失败")
+      toast.error(err instanceof HttpError ? err.message : t("st.err.load"))
     } finally {
       if (!silent) setLoading(false)
     }
@@ -152,7 +154,7 @@ export default function StoragePage() {
         prev ? { ...prev, usedBytes: res.usedBytes, quotaBytes: res.quotaBytes } : prev
       )
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载更多失败")
+      toast.error(err instanceof HttpError ? err.message : t("st.err.loadMore"))
     } finally {
       setLoadingMore(false)
     }
@@ -164,16 +166,16 @@ export default function StoragePage() {
 
   const handleEnable = async () => {
     if (!consent) {
-      toast.error("请先阅读并勾选同意使用协议")
+      toast.error(t("st.err.needConsent"))
       return
     }
     setBusy(true)
     try {
       await storageApi.enable(STORAGE_CONSENT_VERSION)
-      toast.success("网盘已开通")
+      toast.success(t("st.ok.created"))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "开通失败")
+      toast.error(err instanceof HttpError ? err.message : t("st.err.create"))
     } finally {
       setBusy(false)
     }
@@ -185,15 +187,15 @@ export default function StoragePage() {
     try {
       if (overview.account.enabled) {
         await storageApi.disable()
-        toast.success("已关闭直链（文件保留）")
+        toast.success(t("st.ok.linkDisabled"))
       } else {
         // 重新启用同样要带协议版本：若协议已升级，服务端会要求重新同意
         await storageApi.enable(STORAGE_CONSENT_VERSION)
-        toast.success("已重新启用")
+        toast.success(t("st.ok.linkEnabled"))
       }
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.op"))
     } finally {
       setBusy(false)
     }
@@ -219,10 +221,10 @@ export default function StoragePage() {
     setBusy(true)
     try {
       await storageApi.setDefaultPrefix(prefixId)
-      toast.success(prefixId ? "已设为默认分享前缀" : "已恢复默认直链前缀")
+      toast.success(prefixId ? t("st.ok.defaultPrefixSet") : t("st.ok.defaultPrefixReset"))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "设置失败")
+      toast.error(err instanceof HttpError ? err.message : t("st.err.setting"))
     } finally {
       setBusy(false)
     }
@@ -231,9 +233,9 @@ export default function StoragePage() {
   const copyText = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text)
-      toast.success("已复制直链")
+      toast.success(t("st.ok.linkCopied"))
     } catch {
-      toast.error("复制失败，请手动选择复制")
+      toast.error(t("ai.err.copy"))
     }
   }
 
@@ -273,25 +275,25 @@ export default function StoragePage() {
               storageApi
                 .commit({ key, contentType: file.type })
                 .then(() => {
-                  toast.success(`${file.name} 上传成功`)
+                  toast.success(t("st.ok.fileUploaded", { name: file.name }))
                   done()
                   resolve()
                 })
                 .catch((err) => {
                   toast.error(
-                    err instanceof HttpError ? err.message : `${file.name} 登记失败`
+                    err instanceof HttpError ? err.message : t("st.err.regFailed", { name: file.name })
                   )
                   done()
                   resolve()
                 })
             } else {
-              toast.error(`${file.name} 上传失败 (${xhr.status})`)
+              toast.error(t("st.err.uploadFailed", { name: file.name, status: xhr.status }))
               done()
               resolve()
             }
           }
           xhr.onerror = () => {
-            toast.error(`${file.name} 上传中断`)
+            toast.error(t("st.err.uploadAborted", { name: file.name }))
             done()
             resolve()
           }
@@ -299,7 +301,7 @@ export default function StoragePage() {
         })
         .catch((err) => {
           toast.error(
-            err instanceof HttpError ? err.message : `${file.name} 无法上传`
+            err instanceof HttpError ? err.message : t("st.err.cannotUpload", { name: file.name })
           )
           done()
           resolve()
@@ -316,7 +318,7 @@ export default function StoragePage() {
       const list = Array.from(files)
 
       for (const f of list.filter((f) => f.size > max)) {
-        toast.error(`${f.name} 超过单文件上限 ${formatBytes(max)}`)
+        toast.error(t("st.err.tooLarge", { name: f.name, size: formatBytes(max) }))
       }
 
       for (const file of list.filter((f) => f.size <= max)) {
@@ -331,10 +333,10 @@ export default function StoragePage() {
   const handleDelete = async (obj: StorageObject) => {
     try {
       await storageApi.remove(obj.key)
-      toast.success(`已删除 ${obj.filename}`)
+      toast.success(t("st.ok.deleted", { name: obj.filename }))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.delete"))
     }
   }
 
@@ -345,14 +347,14 @@ export default function StoragePage() {
       const res = await storageApi.bindDomain(selectedSub)
       toast.success(
         res.prefix.dnsCreated
-          ? "直链域名已绑定，DNS 与证书生效通常需要 1-2 分钟"
-          : "直链域名已绑定"
+          ? t("st.ok.domainBoundDns")
+          : t("st.ok.domainBound")
       )
       setDomainOpen(false)
       setSelectedSub("")
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "绑定失败")
+      toast.error(err instanceof HttpError ? err.message : t("pf.err.bind"))
     } finally {
       setBusy(false)
     }
@@ -361,10 +363,10 @@ export default function StoragePage() {
   const handleUnbind = async (id: string) => {
     try {
       await storageApi.unbindDomain(id)
-      toast.success("已解绑")
+      toast.success(t("pf.ok.unbound"))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "解绑失败")
+      toast.error(err instanceof HttpError ? err.message : t("pf.err.unbind"))
     }
   }
 
@@ -372,8 +374,8 @@ export default function StoragePage() {
     return (
       <FeatureLockedNotice
         feature="r2"
-        featureLabel="直链网盘"
-        description="你的账号未被授予「直链网盘」权限。站长资源有限，该服务暂未全量开放。"
+        featureLabel={t("feat.r2")}
+        description={t("locked.desc", { feature: t("feat.r2") })}
       />
     )
   }
@@ -381,7 +383,7 @@ export default function StoragePage() {
   if (loading) {
     return (
       <div>
-        <PageHeader title="网盘" description="R2 直链网盘" />
+        <PageHeader title={t("st.title")} description={t("st.subtitle")} />
         <LoadingBlock />
       </div>
     )
@@ -390,10 +392,10 @@ export default function StoragePage() {
   if (!overview?.configured) {
     return (
       <div>
-        <PageHeader title="网盘" description="R2 直链网盘" />
+        <PageHeader title={t("st.title")} description={t("st.subtitle")} />
         <EmptyState
-          title="网盘尚未配置"
-          description="管理员还未配置 R2 存储凭据，请稍后再试。"
+          title={t("st.notConfigured")}
+          description={t("st.notConfiguredDesc")}
         />
       </div>
     )
@@ -402,23 +404,22 @@ export default function StoragePage() {
   if (!overview.account) {
     return (
       <div>
-        <PageHeader title="网盘" description="R2 直链网盘" />
+        <PageHeader title={t("st.title")} description={t("st.subtitle")} />
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <HardDrive className="h-4 w-4 text-muted-foreground" />
-              开通直链网盘
+              {t("st.intro.title")}
             </CardTitle>
             <CardDescription>
-              开通后会在 R2 中创建以你的用户名命名的目录，配额{" "}
-              {formatBytes(overview.defaultQuotaBytes)}，文件可通过直链公开访问。
+              {t("st.intro.desc", { size: formatBytes(overview.defaultQuotaBytes) })}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <ul className="space-y-1.5 text-sm text-muted-foreground">
-              <li>· 默认直链：{window.location.origin}/dl/&lt;你的用户名&gt;/&lt;文件名&gt;</li>
-              <li>· 可绑定自己的二级域名作为前缀（如 blog.doulor.cn/a.png）</li>
-              <li>· 直链是公开的，拿到链接的人都能访问，请勿存放隐私文件</li>
+              <li>{t("st.intro.b1", { origin: window.location.origin })}</li>
+              <li>{t("st.intro.b2")}</li>
+              <li>{t("st.intro.b3")}</li>
             </ul>
 
             <div className="rounded-md border bg-muted/40 p-3">
@@ -427,10 +428,10 @@ export default function StoragePage() {
                   <ScrollText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                   <div>
                     <p className="text-sm font-medium">
-                      使用协议（版本 {STORAGE_CONSENT_VERSION}）
+                      {t("st.consent.version", { v: STORAGE_CONSENT_VERSION })}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      开通即表示你已阅读并同意以下条款，包括禁止存放违规内容。
+                      {t("st.consent.desc")}
                     </p>
                   </div>
                 </div>
@@ -439,7 +440,7 @@ export default function StoragePage() {
                   size="sm"
                   onClick={() => setAgreementOpen(true)}
                 >
-                  查看全文
+                  {t("st.consent.viewFull")}
                 </Button>
               </div>
             </div>
@@ -452,14 +453,13 @@ export default function StoragePage() {
                 className="mt-0.5 h-4 w-4"
               />
               <span className="text-sm text-muted-foreground">
-                我已阅读并同意《网盘使用协议》（版本 {STORAGE_CONSENT_VERSION}），
-                承诺不存放 R18、恐怖暴力、盗版等违规内容
+                {t("st.consent.check", { v: STORAGE_CONSENT_VERSION })}
               </span>
             </label>
 
             <Button onClick={() => void handleEnable()} disabled={busy || !consent}>
               {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-              同意并开通
+              {t("st.consent.agreeCreate")}
             </Button>
           </CardContent>
         </Card>
@@ -477,16 +477,15 @@ export default function StoragePage() {
   if (needReconsent) {
     return (
       <div>
-        <PageHeader title="网盘" description="R2 直链网盘" />
+        <PageHeader title={t("st.title")} description={t("st.subtitle")} />
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <ScrollText className="h-4 w-4 text-muted-foreground" />
-              网盘使用协议已更新
+              {t("st.updated.title")}
             </CardTitle>
             <CardDescription>
-              协议已更新到版本 {overview.consentVersion}，请重新阅读并勾选同意后继续使用。
-              你已有的文件不会受影响。
+              {t("st.updated.desc", { v: overview.consentVersion })}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -496,10 +495,10 @@ export default function StoragePage() {
                   <ScrollText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                   <div>
                     <p className="text-sm font-medium">
-                      使用协议（版本 {overview.consentVersion}）
+                      {t("st.consent.version", { v: overview.consentVersion })}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      同意即表示你已阅读并接受全部条款。
+                      {t("st.consent.desc2")}
                     </p>
                   </div>
                 </div>
@@ -508,7 +507,7 @@ export default function StoragePage() {
                   size="sm"
                   onClick={() => setAgreementOpen(true)}
                 >
-                  查看全文
+                  {t("st.consent.viewFull")}
                 </Button>
               </div>
             </div>
@@ -521,13 +520,13 @@ export default function StoragePage() {
                 className="mt-0.5 h-4 w-4"
               />
               <span className="text-sm text-muted-foreground">
-                我已阅读并同意《网盘使用协议》（版本 {overview.consentVersion}）
+                {t("st.consent.checkShort", { v: overview.consentVersion })}
               </span>
             </label>
 
             <Button onClick={() => void handleEnable()} disabled={busy || !consent}>
               {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-              同意并继续
+              {t("st.consent.agreeContinue")}
             </Button>
           </CardContent>
         </Card>
@@ -546,8 +545,8 @@ export default function StoragePage() {
   return (
     <div>
       <PageHeader
-        title="网盘"
-        description={`目录 ${account.prefix}/ · ${account.fileCount} 个文件`}
+        title={t("st.title")}
+        description={t("st.accountLine", { prefix: account.prefix, n: account.fileCount })}
         actions={
           <Button
             variant="outline"
@@ -555,7 +554,7 @@ export default function StoragePage() {
             onClick={() => setAgreementOpen(true)}
           >
             <ScrollText className="h-4 w-4" />
-            使用协议
+            {t("st.consent.link")}
           </Button>
         }
       />
@@ -568,11 +567,11 @@ export default function StoragePage() {
               <div>
                 <CardTitle className="flex items-center gap-2 text-base">
                   <HardDrive className="h-4 w-4 text-muted-foreground" />
-                  存储用量
+                  {t("st.usage")}
                 </CardTitle>
                 <CardDescription>
                   {formatBytes(account.usedBytes)} / {formatBytes(account.quotaBytes)}
-                  {!account.enabled && " · 直链已关闭（文件保留）"}
+                  {!account.enabled && t("st.linkDisabled")}
                 </CardDescription>
               </div>
               <div className="flex items-center gap-2">
@@ -583,7 +582,7 @@ export default function StoragePage() {
                   disabled={busy}
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
-                  刷新
+                  {t("common.refresh")}
                 </Button>
                 <Button
                   variant="outline"
@@ -592,7 +591,7 @@ export default function StoragePage() {
                   disabled={busy}
                 >
                   <Power className="h-3.5 w-3.5" />
-                  {account.enabled ? "关闭直链" : "启用直链"}
+                  {account.enabled ? t("st.disableLink") : t("st.enableLink")}
                 </Button>
               </div>
             </div>
@@ -605,7 +604,7 @@ export default function StoragePage() {
               />
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
-              已使用 {usedPercent.toFixed(1)}% · 单文件上限{" "}
+              {t("st.usedLine", { pct: usedPercent.toFixed(1) })}{" "}
               {formatBytes(overview.maxFileBytes)}
             </p>
           </CardContent>
@@ -616,10 +615,10 @@ export default function StoragePage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Globe className="h-4 w-4 text-muted-foreground" />
-              直链地址
+              {t("st.links.title")}
             </CardTitle>
             <CardDescription>
-              默认前缀开箱即用；也可以绑定自己的二级域名作为前缀。
+              {t("st.links.desc")}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -636,15 +635,15 @@ export default function StoragePage() {
                 onClick={() =>
                   void copyText(`${overview.shareBase ?? account.directLinkBase}/`)
                 }
-                title="复制"
+                title={t("common.copy")}
               >
                 <Copy className="h-4 w-4" />
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
               {overview.defaultPrefix
-                ? `默认分享前缀：${overview.defaultPrefix.fqdn}`
-                : "默认分享前缀：站点直链路径（可在下方绑定域名后设为默认）"}
+                ? t("st.links.defaultFqdn", { fqdn: overview.defaultPrefix.fqdn })
+                : t("st.links.defaultPath")}
             </p>
 
             {overview.prefixes.length > 0 && (
@@ -660,7 +659,7 @@ export default function StoragePage() {
                       />
                       {isDefault ? (
                         <Badge variant="success" className="shrink-0">
-                          默认
+                          {t("st.links.isDefault")}
                         </Badge>
                       ) : (
                         <Button
@@ -669,16 +668,16 @@ export default function StoragePage() {
                           className="shrink-0"
                           onClick={() => void handleSetDefaultPrefix(p.id)}
                           disabled={busy}
-                          title="设为复制直链时使用的默认前缀"
+                          title={t("st.links.setDefaultHint")}
                         >
-                          设为默认
+                          {t("st.links.setDefault")}
                         </Button>
                       )}
                       <Button
                         variant="outline"
                         size="icon"
                         onClick={() => void copyText(`https://${p.fqdn}/`)}
-                        title="复制"
+                        title={t("common.copy")}
                       >
                         <Copy className="h-4 w-4" />
                       </Button>
@@ -687,7 +686,7 @@ export default function StoragePage() {
                         size="icon"
                         className="text-muted-foreground hover:text-destructive"
                         onClick={() => void handleUnbind(p.id)}
-                        title="解绑"
+                        title={t("st.links.unbind")}
                       >
                         <X className="h-4 w-4" />
                       </Button>
@@ -702,7 +701,7 @@ export default function StoragePage() {
                     onClick={() => void handleSetDefaultPrefix(null)}
                     disabled={busy}
                   >
-                    恢复为站点默认直链
+                    {t("st.links.resetDefault")}
                   </Button>
                 )}
               </div>
@@ -716,11 +715,11 @@ export default function StoragePage() {
                 disabled={overview.availableSubdomains.length === 0}
               >
                 <Globe className="h-3.5 w-3.5" />
-                绑定二级域名
+                {t("st.bind.title")}
               </Button>
             ) : (
               <p className="text-xs text-muted-foreground">
-                自定义直链域名未启用（管理员需配置 CF_WORKERS_TOKEN）。
+                {t("st.bind.disabled")}
               </p>
             )}
           </CardContent>
@@ -731,9 +730,9 @@ export default function StoragePage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Cloud className="h-4 w-4 text-muted-foreground" />
-              文件
+              {t("st.files.title")}
             </CardTitle>
-            <CardDescription>拖拽到下方区域，或点击选择文件。</CardDescription>
+            <CardDescription>{t("st.files.desc")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div
@@ -758,10 +757,10 @@ export default function StoragePage() {
             >
               <Upload className="h-6 w-6 text-muted-foreground" />
               <p className="text-sm font-medium">
-                {uploadActive ? "正在上传…" : "拖拽文件到此处上传"}
+                {uploadActive ? t("st.files.uploading") : t("st.files.dropHint")}
               </p>
               <p className="text-xs text-muted-foreground">
-                单文件不超过 {formatBytes(overview.maxFileBytes)}
+                {t("st.files.maxSize", { size: formatBytes(overview.maxFileBytes) })}
               </p>
               <input
                 ref={fileInputRef}
@@ -800,22 +799,22 @@ export default function StoragePage() {
         {/* 文件列表 */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">文件列表（{objects.length}）</CardTitle>
+            <CardTitle className="text-base">{t("st.list.title", { n: objects.length })}</CardTitle>
           </CardHeader>
           <CardContent>
             {objects.length === 0 ? (
               <EmptyState
-                title="还没有文件"
-                description="上传第一个文件后，这里会显示直链。"
+                title={t("st.list.empty")}
+                description={t("st.list.emptyDesc")}
               />
             ) : (
               <>
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>文件名</TableHead>
-                      <TableHead>大小</TableHead>
-                      <TableHead>上传时间</TableHead>
+                      <TableHead>{t("st.list.col.name")}</TableHead>
+                      <TableHead>{t("st.list.col.size")}</TableHead>
+                      <TableHead>{t("st.list.col.uploaded")}</TableHead>
                       <TableHead className="w-32" />
                     </TableRow>
                   </TableHeader>
@@ -840,7 +839,7 @@ export default function StoragePage() {
                                 size="icon"
                                 className="h-8 w-8 text-muted-foreground"
                                 onClick={() => void copyText(link)}
-                                title="复制直链"
+                                title={t("st.list.copyLink")}
                               >
                                 <Copy className="h-4 w-4" />
                               </Button>
@@ -849,7 +848,7 @@ export default function StoragePage() {
                                 size="icon"
                                 className="h-8 w-8 text-muted-foreground"
                                 asChild
-                                title="打开直链"
+                                title={t("st.list.openLink")}
                               >
                                 <a href={link} target="_blank" rel="noreferrer">
                                   <ExternalLink className="h-4 w-4" />
@@ -860,7 +859,7 @@ export default function StoragePage() {
                                 size="icon"
                                 className="h-8 w-8 text-muted-foreground hover:text-destructive"
                                 onClick={() => void handleDelete(o)}
-                                title="删除"
+                                title={t("common.delete")}
                               >
                                 <Trash2 className="h-4 w-4" />
                               </Button>
@@ -882,10 +881,10 @@ export default function StoragePage() {
                       {loadingMore ? (
                         <>
                           <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                          加载中…
+                          {t("common.loading")}
                         </>
                       ) : (
-                        "加载更多"
+                        t("em.loadOlder")
                       )}
                     </Button>
                   </div>
@@ -900,16 +899,16 @@ export default function StoragePage() {
       <Dialog open={domainOpen} onOpenChange={setDomainOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>绑定自定义直链域名</DialogTitle>
+            <DialogTitle>{t("st.bind.dialogTitle")}</DialogTitle>
             <DialogDescription>
-              该子域名的根路径将直接指向你的网盘目录，可用作图床。
+              {t("st.bind.desc")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <Label htmlFor="domainSelect">子域名</Label>
+            <Label htmlFor="domainSelect">{t("st.bind.subdomain")}</Label>
             <Select value={selectedSub} onValueChange={setSelectedSub}>
               <SelectTrigger id="domainSelect">
-                <SelectValue placeholder="选择子域名" />
+                <SelectValue placeholder={t("st.bind.selectPh")} />
               </SelectTrigger>
               <SelectContent>
                 {overview.availableSubdomains.map((s) => (
@@ -920,20 +919,19 @@ export default function StoragePage() {
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              绑定后访问 https://&lt;子域名&gt;/文件名 即可直接读取网盘中的文件。
-              该子域名上不能已有 DNS 记录。
+              {t("st.bind.note")}
             </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDomainOpen(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button
               onClick={() => void handleBindDomain()}
               disabled={busy || !selectedSub}
             >
               {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-              绑定
+              {t("st.bind.submit")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -952,21 +950,22 @@ function AgreementDialog({
   open: boolean
   onOpenChange: (v: boolean) => void
 }) {
+  const { t } = useT()
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[80vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>网盘使用协议（版本 {STORAGE_CONSENT_VERSION}）</DialogTitle>
+          <DialogTitle>{t("st.consent.dialogTitle", { v: STORAGE_CONSENT_VERSION })}</DialogTitle>
           <DialogDescription>
-            开通网盘前请完整阅读。勾选同意即表示你接受全部条款。
+            {t("st.consent.dialogDesc")}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           {STORAGE_AGREEMENT.map((sec) => (
             <section key={sec.title}>
-              <h3 className="mb-1 text-sm font-medium">{sec.title}</h3>
+              <h3 className="mb-1 text-sm font-medium">{t(sec.title)}</h3>
               <p className="text-sm leading-relaxed text-muted-foreground">
-                {sec.body}
+                {t(sec.body)}
               </p>
             </section>
           ))}

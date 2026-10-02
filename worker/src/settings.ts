@@ -18,8 +18,23 @@ export const SETTING_DEFAULTS = {
   newapi_enabled: "1",
   /** 新开通 AI 账号的试用额度（NewAPI quota 单位，500000 = $1） */
   newapi_trial_quota: "500000",
-  /** 新账号所属分组 */
+  /** 新账号所属分组（也是站点自动创建的 Key 所属分组） */
   newapi_group: "default",
+  /**
+   * **捐献模型**（AI 渠道捐献）所属的 NewAPI 分组，默认 `donation`。
+   *
+   * 为什么要单独一个分组：捐献来的渠道来源杂、稳定性参差，跟站点自有的
+   * `default` 渠道混在一个分组里，既看不清谁是谁，也没法单独控制谁能用。
+   * 分出去之后：
+   *   - 捐献渠道只进这个分组 ⇒ 用 `default` 分组的旧 Key **调不到捐献模型**；
+   *   - 用户要调捐献模型，得**另建一个 Key 并选这个分组**（站点建 Key 的对话框已放开选择）；
+   *   - 为此开通账号时会把本分组一并加进用户的 groups（否则用户在面板里选不到它）。
+   *
+   * ⚠️ 前端「全部可用模型」里的「捐献」分组**不是**按本设置项归类的，
+   * 而是按模型名前缀 `donation-`（见 `donation-provision.ts` 的 `DONATION_MODEL_PREFIX`）。
+   * 改这里不影响那个展示口径。
+   */
+  newapi_donation_group: "donation",
   /** 是否给予不限额度（1/0），开启后忽略试用额度 */
   newapi_unlimited_quota: "0",
   /** 免费订阅套餐 id（绑定后自动/手动开通；0 = 不自动开通） */

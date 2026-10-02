@@ -14,16 +14,17 @@ import { Loader2, ShieldCheck, AlertTriangle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { oauthApi, HttpError, errMsg, type OAuthAuthorizeParams } from "@/services/api"
+import { useT } from "@/i18n"
 
 /** scope → 给普通人看的中文说明。未知 scope 也不会隐藏，照样列出来。 */
 const SCOPE_LABELS: Record<string, { title: string; desc: string }> = {
-  openid: { title: "确认你的身份", desc: "用于判断你是本站的哪个账号。" },
-  profile: { title: "读取你的公开资料", desc: "用户名、昵称、头像。" },
-  email: { title: "读取你的邮箱地址", desc: "你在本站注册时填写的真实邮箱。" },
+  openid: { title: "oc.scope.openid.title", desc: "oc.scope.openid.desc" },
+  profile: { title: "oc.scope.profile.title", desc: "oc.scope.profile.desc" },
+  email: { title: "oc.scope.email.title", desc: "oc.scope.email.desc" },
 }
 
 function scopeLabel(s: string) {
-  return SCOPE_LABELS[s] ?? { title: s, desc: "（未知权限，请谨慎授权）" }
+  return SCOPE_LABELS[s] ?? { title: s, desc: "oc.scope.unknown" }
 }
 
 /** 从 URL 查询串里取出 authorize 端点的原始参数（原样透传给后端校验） */
@@ -43,6 +44,7 @@ function readParams(sp: URLSearchParams): OAuthAuthorizeParams | null {
 }
 
 export default function OAuthConsentPage() {
+  const { t } = useT()
   const [searchParams] = useSearchParams()
   const params = React.useMemo(() => readParams(searchParams), [searchParams])
 
@@ -57,7 +59,7 @@ export default function OAuthConsentPage() {
   const started = React.useRef(false)
   React.useEffect(() => {
     if (!params) {
-      setError("授权请求缺少必要参数（client_id / redirect_uri）")
+      setError(t("oc.err.params"))
       return
     }
     if (started.current) return
@@ -72,7 +74,7 @@ export default function OAuthConsentPage() {
           window.location.replace(`/login?next=${back}`)
           return
         }
-        setError(errMsg(err, "无法加载授权信息"))
+        setError(errMsg(err, t("oc.err.load")))
       })
   }, [params])
 
@@ -85,7 +87,7 @@ export default function OAuthConsentPage() {
       // 否则用户按「后退」会回到一个已经没有意义的授权页面。
       window.location.replace(redirectTo)
     } catch (err) {
-      setError(errMsg(err, "操作失败"))
+      setError(errMsg(err, t("oc.err.op")))
       setBusy(false)
     }
   }
@@ -97,13 +99,13 @@ export default function OAuthConsentPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <AlertTriangle className="h-4 w-4 text-destructive" />
-              无法完成授权
+              {t("oc.failed")}
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <p className="text-sm text-muted-foreground">{error}</p>
             <Button variant="outline" className="w-full" onClick={() => window.history.back()}>
-              返回
+              {t("oc.back")}
             </Button>
           </CardContent>
         </Card>
@@ -125,17 +127,17 @@ export default function OAuthConsentPage() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <ShieldCheck className="h-4 w-4 text-primary" />
-            授权登录
+            {t("oc.title")}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-5">
           <div className="rounded-md border bg-muted/40 p-3 text-sm">
             <span className="font-medium">{ctx.clientName}</span>
-            <span className="text-muted-foreground"> 想要使用你的 Doulor Cloud 账号</span>
+            <span className="text-muted-foreground"> {t("oc.wantsAccess")}</span>
           </div>
 
           <div>
-            <p className="mb-2 text-sm font-medium">它将能够：</p>
+            <p className="mb-2 text-sm font-medium">{t("oc.willBeAble")}</p>
             <ul className="space-y-2">
               {ctx.scopes.map((s) => {
                 const { title, desc } = scopeLabel(s)
@@ -153,7 +155,7 @@ export default function OAuthConsentPage() {
           </div>
 
           <p className="text-xs text-muted-foreground">
-            它不会拿到你的密码。你随时可以在面板里撤销这个授权。
+            {t("oc.note")}
           </p>
 
           <div className="flex gap-2">
@@ -163,14 +165,14 @@ export default function OAuthConsentPage() {
               disabled={busy}
               onClick={() => void submit(false)}
             >
-              拒绝
+              {t("oc.deny")}
             </Button>
             <Button
               className="flex-1"
               disabled={busy}
               onClick={() => void submit(true)}
             >
-              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "允许"}
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : t("oc.allow")}
             </Button>
           </div>
         </CardContent>

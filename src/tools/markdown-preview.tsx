@@ -6,33 +6,13 @@ import { ToolShell, ToolSection } from "@/components/toolbox/tool-shell"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { downloadBlob } from "@/lib/toolbox/utils"
+import { useT, tStatic } from "@/i18n"
 
-const SAMPLE = `# 标题
-
-这是一段**正文**，支持 *斜体*、~~删除线~~ 和 \`行内代码\`。
-
-## 列表
-
-- 第一项
-- 第二项
-  - 嵌套一项
-
-## 表格
-
-| 项目 | 说明 |
-| --- | --- |
-| 语法 | GitHub 风格 |
-| 导出 | 可存成 HTML |
-
-> 引用一段话。
-
-\`\`\`js
-console.log("代码块也支持高亮结构")
-\`\`\`
-`
+const SAMPLE = () => tStatic("md.sample")
 
 export default function MarkdownPreviewTool() {
-  const [text, setText] = React.useState(SAMPLE)
+  const { t } = useT()
+  const [text, setText] = React.useState(SAMPLE())
   const [busy, setBusy] = React.useState(false)
   const previewRef = React.useRef<HTMLDivElement>(null)
 
@@ -46,7 +26,7 @@ export default function MarkdownPreviewTool() {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>文档</title>
+<title>{tStatic("md.htmlTitle")}</title>
 <style>
   body { max-width: 760px; margin: 40px auto; padding: 0 20px; line-height: 1.75;
          font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: #24292f; }
@@ -64,7 +44,7 @@ export default function MarkdownPreviewTool() {
 ${node.innerHTML}
 </body>
 </html>`
-      downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), `文档-${Date.now()}.html`)
+      downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), t("md.fileName", { ts: Date.now(), ext: "html" }))
     } finally {
       setBusy(false)
     }
@@ -72,23 +52,23 @@ ${node.innerHTML}
 
   return (
     <ToolShell
-      title="Markdown 预览"
-      description="左边写、右边看，支持表格、任务列表、代码块。写完可以导出成 HTML 或 .md 文件。"
+      title={t("toolbox.markdown.name")}
+      description={t("md.desc")}
       wide
     >
       <div className="grid gap-4 lg:grid-cols-2">
-        <ToolSection title="Markdown 源码">
+        <ToolSection title={t("md.section.source")}>
           <Textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={22}
             className="min-h-[420px] font-mono text-[13px] leading-relaxed"
-            placeholder="在这里输入 Markdown…"
+            placeholder={t("md.placeholder")}
           />
         </ToolSection>
 
         <ToolSection
-          title="预览"
+          title={t("md.section.preview")}
           actions={
             <div className="flex gap-2">
               <Button
@@ -97,15 +77,15 @@ ${node.innerHTML}
                 onClick={() =>
                   downloadBlob(
                     new Blob([text], { type: "text/markdown;charset=utf-8" }),
-                    `文档-${Date.now()}.md`
+                    t("md.fileName", { ts: Date.now(), ext: "md" })
                   )
                 }
               >
-                下载 .md
+                {t("md.downloadMd")}
               </Button>
               <Button size="sm" onClick={() => void exportHtml()} disabled={busy}>
                 <Download className="h-4 w-4" />
-                导出 HTML
+                {t("md.exportHtml")}
               </Button>
             </div>
           }

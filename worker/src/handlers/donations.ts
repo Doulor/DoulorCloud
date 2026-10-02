@@ -32,11 +32,17 @@ import {
   provisionDonationChannel,
   refetchDonationModels,
   releaseDonationChannel,
+  resolveDonationGroup,
   retryDonationModels,
   validateUpstreamUrl,
   type UpstreamFormat,
 } from "../donation-provision"
-import { isNewApiConfigured, testChannel, adminSetUserStatus } from "../newapi-client"
+import {
+  isNewApiConfigured,
+  testChannel,
+  adminSetUserStatus,
+  updateChannelGroup,
+} from "../newapi-client"
 import { ensureNewApiAccountEnabled } from "../newapi-access"
 import {
   SENSENOVA_CONSOLE_URL,
@@ -2015,6 +2021,21 @@ export async function provisionDonation(
   // 已经接进来过就不必再跑一遍接入（AI 会多建一个「捐献NN」渠道；商汤那句
   // 「追加」虽然天然幂等，但重跑没有意义）—— 这里退化成「复测一次」。
   if (app.newapi_channel_id !== null && app.newapi_channel_id !== undefined) {
+    // 顺手把分组纠正到捐献分组：2026-10-01 之前建的捐献渠道留在 `default` 组里，
+    // 这里自愈一笔是一笔（改分组不需要明文 key，见 updateChannelGroup）。
+    // 失败不阻断复测 —— 分组不对只是「default 的 Key 也能调捐献模型」，不该因此拦住复核。
+    if (app.type === "ai") {
+      try {
+        const settings = await getSettings(env)
+        await updateChannelGroup(
+          env,
+          app.newapi_channel_id,
+          resolveDonationGroup(settings.newapi_donation_group)
+        )
+      } catch (err) {
+        console.error("复核时同步捐献渠道分组失败（不影响复测）:", app.newapi_channel_id, err)
+      }
+    }
     const existing = await testExistingChannel(env, app.newapi_channel_id)
     return json({
       ok: existing.ok,

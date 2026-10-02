@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { copyText } from "@/lib/toolbox/utils"
+import { useT } from "@/i18n"
 
 interface Unit {
   id: string
@@ -26,92 +27,92 @@ const lin = (f: number) => ({ toBase: (v: number) => v * f, fromBase: (v: number
 const GROUPS: { id: string; label: string; units: Unit[] }[] = [
   {
     id: "length",
-    label: "长度",
+    label: "uc.cat.length",
     units: [
-      { id: "mm", label: "毫米 mm", ...lin(0.001) },
-      { id: "cm", label: "厘米 cm", ...lin(0.01) },
-      { id: "m", label: "米 m", ...lin(1) },
-      { id: "km", label: "千米 km", ...lin(1000) },
-      { id: "chi", label: "市尺", ...lin(1 / 3) },
-      { id: "li", label: "市里", ...lin(500) },
-      { id: "in", label: "英寸 in", ...lin(0.0254) },
-      { id: "ft", label: "英尺 ft", ...lin(0.3048) },
-      { id: "yd", label: "码 yd", ...lin(0.9144) },
-      { id: "mi", label: "英里 mi", ...lin(1609.344) },
-      { id: "nmi", label: "海里 nmi", ...lin(1852) },
+      { id: "mm", label: "uc.unit.mm", ...lin(0.001) },
+      { id: "cm", label: "uc.unit.cm", ...lin(0.01) },
+      { id: "m", label: "uc.unit.m", ...lin(1) },
+      { id: "km", label: "uc.unit.km", ...lin(1000) },
+      { id: "chi", label: "uc.unit.chi", ...lin(1 / 3) },
+      { id: "li", label: "uc.unit.li", ...lin(500) },
+      { id: "in", label: "uc.unit.in", ...lin(0.0254) },
+      { id: "ft", label: "uc.unit.ft", ...lin(0.3048) },
+      { id: "yd", label: "uc.unit.yd", ...lin(0.9144) },
+      { id: "mi", label: "uc.unit.mi", ...lin(1609.344) },
+      { id: "nmi", label: "uc.unit.nmi", ...lin(1852) },
     ],
   },
   {
     id: "weight",
-    label: "重量",
+    label: "uc.cat.weight",
     units: [
-      { id: "mg", label: "毫克 mg", ...lin(0.000001) },
-      { id: "g", label: "克 g", ...lin(0.001) },
-      { id: "kg", label: "千克 kg", ...lin(1) },
-      { id: "t", label: "吨 t", ...lin(1000) },
-      { id: "liang", label: "两", ...lin(0.05) },
-      { id: "jin", label: "斤", ...lin(0.5) },
-      { id: "dan", label: "担", ...lin(50) },
-      { id: "oz", label: "盎司 oz", ...lin(0.028349523125) },
-      { id: "lb", label: "磅 lb", ...lin(0.45359237) },
+      { id: "mg", label: "uc.unit.mg", ...lin(0.000001) },
+      { id: "g", label: "uc.unit.g", ...lin(0.001) },
+      { id: "kg", label: "uc.unit.kg", ...lin(1) },
+      { id: "t", label: "uc.unit.t", ...lin(1000) },
+      { id: "liang", label: "uc.unit.liang", ...lin(0.05) },
+      { id: "jin", label: "uc.unit.jin", ...lin(0.5) },
+      { id: "dan", label: "uc.unit.dan", ...lin(50) },
+      { id: "oz", label: "uc.unit.oz", ...lin(0.028349523125) },
+      { id: "lb", label: "uc.unit.lb", ...lin(0.45359237) },
     ],
   },
   {
     id: "area",
-    label: "面积",
+    label: "uc.cat.area",
     units: [
-      { id: "cm2", label: "平方厘米", ...lin(0.0001) },
-      { id: "m2", label: "平方米", ...lin(1) },
-      { id: "km2", label: "平方千米", ...lin(1000000) },
-      { id: "mu", label: "亩", ...lin(2000 / 3) },
-      { id: "ha", label: "公顷", ...lin(10000) },
-      { id: "ft2", label: "平方英尺", ...lin(0.09290304) },
-      { id: "acre", label: "英亩", ...lin(4046.8564224) },
-      { id: "mi2", label: "平方英里", ...lin(2589988.110336) },
+      { id: "cm2", label: "uc.unit.cm2", ...lin(0.0001) },
+      { id: "m2", label: "uc.unit.m2", ...lin(1) },
+      { id: "km2", label: "uc.unit.km2", ...lin(1000000) },
+      { id: "mu", label: "uc.unit.mu", ...lin(2000 / 3) },
+      { id: "ha", label: "uc.unit.ha", ...lin(10000) },
+      { id: "ft2", label: "uc.unit.ft2", ...lin(0.09290304) },
+      { id: "acre", label: "uc.unit.acre", ...lin(4046.8564224) },
+      { id: "mi2", label: "uc.unit.mi2", ...lin(2589988.110336) },
     ],
   },
   {
     id: "volume",
-    label: "体积",
+    label: "uc.cat.volume",
     units: [
-      { id: "ml", label: "毫升 mL", ...lin(0.001) },
-      { id: "l", label: "升 L", ...lin(1) },
-      { id: "m3", label: "立方米", ...lin(1000) },
-      { id: "galus", label: "加仑（美）", ...lin(3.785411784) },
-      { id: "galuk", label: "加仑（英）", ...lin(4.54609) },
-      { id: "ft3", label: "立方英尺", ...lin(28.316846592) },
+      { id: "ml", label: "uc.unit.ml", ...lin(0.001) },
+      { id: "l", label: "uc.unit.l", ...lin(1) },
+      { id: "m3", label: "uc.unit.m3", ...lin(1000) },
+      { id: "galus", label: "uc.unit.galus", ...lin(3.785411784) },
+      { id: "galuk", label: "uc.unit.galuk", ...lin(4.54609) },
+      { id: "ft3", label: "uc.unit.ft3", ...lin(28.316846592) },
     ],
   },
   {
     id: "speed",
-    label: "速度",
+    label: "uc.cat.speed",
     units: [
-      { id: "ms", label: "米/秒", ...lin(1) },
-      { id: "kmh", label: "千米/时", ...lin(1 / 3.6) },
-      { id: "mph", label: "英里/时", ...lin(0.44704) },
-      { id: "knot", label: "节", ...lin(0.5144444444) },
-      { id: "fts", label: "英尺/秒", ...lin(0.3048) },
+      { id: "ms", label: "uc.unit.ms", ...lin(1) },
+      { id: "kmh", label: "uc.unit.kmh", ...lin(1 / 3.6) },
+      { id: "mph", label: "uc.unit.mph", ...lin(0.44704) },
+      { id: "knot", label: "uc.unit.knot", ...lin(0.5144444444) },
+      { id: "fts", label: "uc.unit.fts", ...lin(0.3048) },
     ],
   },
   {
     id: "data",
-    label: "数据大小",
+    label: "uc.cat.data",
     units: [
-      { id: "b", label: "字节 B", ...lin(1) },
-      { id: "kb", label: "KB", ...lin(1024) },
-      { id: "mb", label: "MB", ...lin(1024 ** 2) },
-      { id: "gb", label: "GB", ...lin(1024 ** 3) },
-      { id: "tb", label: "TB", ...lin(1024 ** 4) },
-      { id: "pb", label: "PB", ...lin(1024 ** 5) },
+      { id: "b", label: "uc.unit.b", ...lin(1) },
+      { id: "kb", label: "uc.unit.kb", ...lin(1024) },
+      { id: "mb", label: "uc.unit.mb", ...lin(1024 ** 2) },
+      { id: "gb", label: "uc.unit.gb", ...lin(1024 ** 3) },
+      { id: "tb", label: "uc.unit.tb", ...lin(1024 ** 4) },
+      { id: "pb", label: "uc.unit.pb", ...lin(1024 ** 5) },
     ],
   },
   {
     id: "temp",
-    label: "温度",
+    label: "uc.cat.temperature",
     units: [
-      { id: "c", label: "摄氏度 °C", toBase: (v) => v, fromBase: (v) => v },
-      { id: "f", label: "华氏度 °F", toBase: (v) => ((v - 32) * 5) / 9, fromBase: (v) => (v * 9) / 5 + 32 },
-      { id: "k", label: "开尔文 K", toBase: (v) => v - 273.15, fromBase: (v) => v + 273.15 },
+      { id: "c", label: "uc.unit.c", toBase: (v) => v, fromBase: (v) => v },
+      { id: "f", label: "uc.unit.f", toBase: (v) => ((v - 32) * 5) / 9, fromBase: (v) => (v * 9) / 5 + 32 },
+      { id: "k", label: "uc.unit.k", toBase: (v) => v - 273.15, fromBase: (v) => v + 273.15 },
     ],
   },
 ]
@@ -126,6 +127,7 @@ function fmt(n: number): string {
 }
 
 export default function UnitConvertTool() {
+  const { t } = useT()
   const [groupId, setGroupId] = React.useState("length")
   const [fromId, setFromId] = React.useState("m")
   const [raw, setRaw] = React.useState("1")
@@ -153,14 +155,11 @@ export default function UnitConvertTool() {
   }
 
   return (
-    <ToolShell
-      title="单位换算"
-      description="输入一个数值，下面立刻列出它在同一类别里所有单位下的结果，点一下即可复制。"
-    >
+    <ToolShell title={t("toolbox.unitConvert.name")} description={t("uc.desc")}>
       <ToolSection>
         <div className="grid gap-3 sm:grid-cols-[160px_1fr_200px]">
           <div className="space-y-1.5">
-            <label className="text-xs text-muted-foreground">类别</label>
+            <label className="text-xs text-muted-foreground">{t("uc.category")}</label>
             <Select value={groupId} onValueChange={handleGroup}>
               <SelectTrigger>
                 <SelectValue />
@@ -168,23 +167,23 @@ export default function UnitConvertTool() {
               <SelectContent>
                 {GROUPS.map((g) => (
                   <SelectItem key={g.id} value={g.id}>
-                    {g.label}
+                    {t(g.label)}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-1.5">
-            <label className="text-xs text-muted-foreground">数值</label>
+            <label className="text-xs text-muted-foreground">{t("uc.value")}</label>
             <Input
               inputMode="decimal"
               value={raw}
               onChange={(e) => setRaw(e.target.value)}
-              placeholder="输入数值"
+              placeholder={t("uc.valuePlaceholder")}
             />
           </div>
           <div className="space-y-1.5">
-            <label className="text-xs text-muted-foreground">单位</label>
+            <label className="text-xs text-muted-foreground">{t("uc.unit")}</label>
             <Select value={fromId} onValueChange={setFromId}>
               <SelectTrigger>
                 <SelectValue />
@@ -192,7 +191,7 @@ export default function UnitConvertTool() {
               <SelectContent>
                 {group.units.map((u) => (
                   <SelectItem key={u.id} value={u.id}>
-                    {u.label}
+                    {t(u.label)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -201,9 +200,9 @@ export default function UnitConvertTool() {
         </div>
       </ToolSection>
 
-      <ToolSection title="换算结果">
+      <ToolSection title={t("uc.results")}>
         {!valid ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">请输入一个数值</p>
+          <p className="py-6 text-center text-sm text-muted-foreground">{t("uc.enterValue")}</p>
         ) : (
           <ul className="divide-y">
             {group.units
@@ -212,14 +211,14 @@ export default function UnitConvertTool() {
                 const text = fmt(u.fromBase(base))
                 return (
                   <li key={u.id} className="flex items-center justify-between gap-3 py-2.5">
-                    <span className="text-sm text-muted-foreground">{u.label}</span>
+                    <span className="text-sm text-muted-foreground">{t(u.label)}</span>
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-sm tabular-nums">{text}</span>
                       <Button
                         variant="ghost"
                         size="icon"
                         className="h-7 w-7"
-                        aria-label="复制"
+                        aria-label={t("common.copy")}
                         onClick={() => void handleCopy(u.id, text)}
                       >
                         {copied === u.id ? (

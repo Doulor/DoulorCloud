@@ -28,6 +28,7 @@ import {
 import { cn } from "@/lib/utils"
 import { fmtMailTime } from "@/lib/format"
 import { emailApi, HttpError } from "@/services/api"
+import { useT } from "@/i18n"
 import type { Mailbox, MailMessage } from "@/types"
 
 /** 邮箱数量上限的兜底值（真实值由后端 GET /api/mailbox 的 limit 返回，
@@ -74,6 +75,7 @@ function mergeIncomingMessages(prev: MailMessage[], incoming: MailMessage[]): Ma
 type View = "list" | "message"
 
 export default function EmailPage() {
+  const { t } = useT()
   const [searchParams, setSearchParams] = useSearchParams()
   const pendingMailbox = searchParams.get("mailbox")
   const pendingMessage = searchParams.get("message")
@@ -144,7 +146,7 @@ export default function EmailPage() {
         null
       setSelected(target)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载邮箱失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.loadMailboxes"))
     } finally {
       setLoadingMailboxes(false)
     }
@@ -159,7 +161,7 @@ export default function EmailPage() {
       setMessages(res.messages)
       setNextCursor(res.nextCursor)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载邮件失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.loadMessages"))
       setMessages([])
       setNextCursor(null)
     } finally {
@@ -184,7 +186,7 @@ export default function EmailPage() {
       })
       setNextCursor(res.nextCursor)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载更早的邮件失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.loadOlder"))
     } finally {
       setLoadingMore(false)
     }
@@ -333,7 +335,7 @@ export default function EmailPage() {
       const res = await emailApi.getMessage(mailboxId, message.id)
       setOpened(res.message)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "加载邮件正文失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.loadBody"))
     } finally {
       setLoadingBody(false)
     }
@@ -348,7 +350,7 @@ export default function EmailPage() {
       } catch (err) {
         // ⚠️ 2026-09-26：乐观更新回写失败要提示 —— 否则用户以为已经读了，
         // 刷新后又变回未读。与同文件「标记未读」的失败处理保持一致。
-        toast.error(err instanceof HttpError ? err.message : "标记已读失败")
+        toast.error(err instanceof HttpError ? err.message : t("em.err.markRead"))
       }
     }
   }
@@ -363,9 +365,9 @@ export default function EmailPage() {
     setView("list")
     try {
       await emailApi.markRead(selected.id, opened.id, false)
-      toast.success("已标记为未读")
+      toast.success(t("em.ok.markedUnread"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.op"))
     }
   }
 
@@ -379,9 +381,9 @@ export default function EmailPage() {
       lastLocalUnreadChange.current = Date.now()
       setMailboxes((prev) => prev.map((m) => ({ ...m, unread: 0 })))
       setMessages((prev) => prev.map((m) => ({ ...m, read: true })))
-      toast.success(`已标记 ${res.updated} 封邮件为已读`)
+      toast.success(t("em.ok.markedRead", { n: res.updated }))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "操作失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.op"))
     } finally {
       setBusy(false)
     }
@@ -394,9 +396,9 @@ export default function EmailPage() {
    * 的失败原因翻成人话（如"请先完成 Email Sending Onboard"），吞掉就会误导用户。
    */
   const handleReply = async (text: string) => {
-    if (!selected || !opened) throw new Error("邮件未打开，请重新进入该邮件")
+    if (!selected || !opened) throw new Error(t("em.err.notOpen"))
     const res = await emailApi.reply(selected.id, opened.id, text)
-    toast.success(`已发送给 ${res.to}`)
+    toast.success(t("em.ok.sentTo", { to: res.to }))
   }
 
   const handleDeleteMessage = async (messageId: string) => {
@@ -410,9 +412,9 @@ export default function EmailPage() {
         setView("list")
       }
       void loadMailboxes()
-      toast.success("邮件已删除")
+      toast.success(t("em.ok.deleted"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.delete"))
     } finally {
       setDeletingId(null)
     }
@@ -422,12 +424,12 @@ export default function EmailPage() {
     setBusy(true)
     try {
       await emailApi.create({ localPart })
-      toast.success("邮箱已添加")
+      toast.success(t("em.ok.mailboxAdded"))
       setLocalPart("")
       setAddOpen(false)
       await loadMailboxes()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "创建失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.create"))
     } finally {
       setBusy(false)
     }
@@ -438,10 +440,10 @@ export default function EmailPage() {
     setBusy(true)
     try {
       await emailApi.remove(mailbox.id)
-      toast.success("邮箱已删除")
+      toast.success(t("em.ok.mailboxDeleted"))
       await loadMailboxes()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "删除失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.delete"))
     } finally {
       setBusy(false)
     }
@@ -470,13 +472,13 @@ export default function EmailPage() {
       const unverified = (res.forwardingStatus ?? []).filter((s) => !s.verified)
       if (unverified.length > 0) {
         toast.warning(
-          `已保存。请到 ${unverified.map((u) => u.email).join("、")} 查收验证邮件并点击确认，验证后才会开始转发。`
+          t("em.ok.savedUnverified", { emails: unverified.map((u) => u.email).join(", ") })
         )
       } else {
-        toast.success(`已保存 ${forwardBox.address} 的转发设置`)
+        toast.success(t("em.ok.forwardSaved", { address: forwardBox.address }))
       }
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "保存失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.save"))
     } finally {
       setSavingForward(false)
     }
@@ -489,9 +491,9 @@ export default function EmailPage() {
     setForwardVerifyBusy(true)
     try {
       const res = await emailApi.verifyForwardTarget(email)
-      toast.success(res.message ?? "验证码已发送到该邮箱，请查收")
+      toast.success(res.message ?? t("em.ok.codeSent"))
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "发送失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.send"))
       setVerifyingEmail(null)
     } finally {
       setForwardVerifyBusy(false)
@@ -501,19 +503,19 @@ export default function EmailPage() {
   /** 回填转发目标验证码 */
   const handleConfirmForwardCode = async (email: string) => {
     if (!/^\d{6}$/.test(forwardCode)) {
-      toast.error("请输入 6 位数字验证码")
+      toast.error(t("em.err.enter6"))
       return
     }
     setForwardVerifyBusy(true)
     try {
       await emailApi.verifyForwardTarget(email, "confirm", forwardCode)
-      toast.success("该邮箱已验证，可绑定为转发目标")
+      toast.success(t("em.ok.emailVerified"))
       setVerifyingEmail(null)
       setForwardCode("")
       // 重新拉取邮箱列表，刷新转发目标的验证状态（保留当前选中）
       if (forwardBox) await loadMailboxes(forwardBox.id)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "验证失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.verify"))
     } finally {
       setForwardVerifyBusy(false)
     }
@@ -524,10 +526,10 @@ export default function EmailPage() {
     setTempBusy(true)
     try {
       const res = await emailApi.createTemp()
-      toast.success(`已生成 ${res.mailbox.address}`)
+      toast.success(t("em.ok.tempCreated", { address: res.mailbox.address }))
       await loadMailboxes(res.mailbox.id)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "生成失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.generate"))
     } finally {
       setTempBusy(false)
     }
@@ -541,10 +543,10 @@ export default function EmailPage() {
     setTempBusy(true)
     try {
       const res = await emailApi.refreshTemp(mailbox.id)
-      toast.success(`已换成 ${res.mailbox.address}`)
+      toast.success(t("em.ok.tempRotated", { address: res.mailbox.address }))
       await loadMailboxes(res.mailbox.id)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : "刷新失败")
+      toast.error(err instanceof HttpError ? err.message : t("em.err.refresh"))
     } finally {
       setTempBusy(false)
     }
@@ -553,10 +555,10 @@ export default function EmailPage() {
   const handleCopyAddress = async (address: string) => {
     try {
       await navigator.clipboard.writeText(address)
-      toast.success("地址已复制")
+      toast.success(t("em.ok.addressCopied"))
     } catch {
       // clipboard 在非 HTTPS / 无权限时会抛错，此时只能让用户手动选中
-      toast.error("复制失败，请手动选中地址")
+      toast.error(t("em.err.copy"))
     }
   }
 
@@ -572,11 +574,11 @@ export default function EmailPage() {
   return (
     <div>
       <PageHeader
-        title="邮箱"
+        title={t("em.title")}
         description={
           unlimited
-            ? `${normalMailboxes.length} 个地址（管理员不限）`
-            : `${normalMailboxes.length} / ${mailboxLimit} 个地址`
+            ? t("em.quota.admin", { n: normalMailboxes.length })
+            : t("em.quota.user", { n: normalMailboxes.length, limit: mailboxLimit })
         }
         actions={
           <div className="flex items-center gap-2">
@@ -588,13 +590,13 @@ export default function EmailPage() {
                 disabled={busy}
               >
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCheck className="h-4 w-4" />}
-                全部已读
+                {t("em.markAllRead")}
                 <Badge variant="secondary" className="ml-1">{totalUnread}</Badge>
               </Button>
             )}
             <Button onClick={() => setAddOpen(true)} disabled={!canAdd}>
               <Plus className="h-4 w-4" />
-              添加邮箱
+              {t("em.addMailbox")}
             </Button>
           </div>
         }
@@ -608,8 +610,8 @@ export default function EmailPage() {
           ) : normalMailboxes.length === 0 ? (
             <EmptyState
               icon={Mail}
-              title="还没有邮箱"
-              description="添加地址后即可收信。"
+              title={t("em.empty")}
+              description={t("em.emptyDesc")}
             />
           ) : (
             normalMailboxes.map((mb) => (
@@ -626,27 +628,27 @@ export default function EmailPage() {
                   onClick={() => setSelected(mb)}
                   title={
                     mb.forwardingTo.length > 0
-                      ? `转发至 ${mb.forwardingTo.join(", ")}`
+                      ? t("em.forwardingTo", { to: mb.forwardingTo.join(", ") })
                       : undefined
                   }
                 >
                   <div className="truncate">
                     <p className="truncate font-mono text-sm">{mb.address}</p>
                     <p className="truncate text-xs text-muted-foreground">
-                      {mb.unread > 0 ? `${mb.unread} 封未读` : `${mb.total} 封邮件`}
+                      {mb.unread > 0 ? t("em.unreadCount", { n: mb.unread }) : t("em.totalCount", { n: mb.total })}
                     </p>
                     <p className="mt-0.5 flex items-center gap-1 text-xs">
                       {mb.forwardingTo.length === 0 ? (
-                        <span className="text-muted-foreground/70">未转发</span>
+                        <span className="text-muted-foreground/70">{t("em.forward.off")}</span>
                       ) : mb.lastForwardError ? (
-                        <span className="font-medium text-destructive">转发失败</span>
+                        <span className="font-medium text-destructive">{t("em.forward.failed")}</span>
                       ) : mb.forwardingVerified?.every((v) => v === true) ? (
                         <span className="font-medium text-emerald-600 dark:text-emerald-400">
-                          已转发
+                          {t("em.forward.on")}
                         </span>
                       ) : (
                         <span className="font-medium text-amber-600 dark:text-amber-400">
-                          转发待验证
+                          {t("em.forward.pending")}
                         </span>
                       )}
                       {mb.forwardingTo.length > 0 && (
@@ -663,7 +665,7 @@ export default function EmailPage() {
                       type="button"
                       className="hidden rounded p-1 text-muted-foreground hover:text-destructive group-hover:block"
                       onClick={() => void handleDeleteMailbox(mb)}
-                      aria-label={`删除 ${mb.address}`}
+                      aria-label={t("em.deleteAria", { address: mb.address })}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
@@ -672,7 +674,7 @@ export default function EmailPage() {
                     type="button"
                     className="rounded p-1 text-muted-foreground hover:text-foreground"
                     onClick={() => openForwardDialog(mb)}
-                    aria-label={`设置 ${mb.address}`}
+                    aria-label={t("em.setupAria", { address: mb.address })}
                   >
                     <Settings className="h-3.5 w-3.5" />
                   </button>
@@ -686,9 +688,9 @@ export default function EmailPage() {
             <div className="mt-2 flex flex-col gap-2 border-t pt-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="text-xs font-medium">临时邮箱</p>
+                  <p className="text-xs font-medium">{t("em.temp.title")}</p>
                   <p className="text-[11px] text-muted-foreground">
-                    {unlimited ? "管理员不限" : `${tempMailboxes.length} / ${tempLimit}`}
+                    {unlimited ? t("em.temp.unlimited") : `${tempMailboxes.length} / ${tempLimit}`}
                   </p>
                 </div>
                 <Button
@@ -697,20 +699,20 @@ export default function EmailPage() {
                   className="h-7 shrink-0 px-2 text-xs"
                   onClick={() => void handleCreateTemp()}
                   disabled={tempBusy || !canAddTemp}
-                  title={canAddTemp ? undefined : `最多同时存在 ${tempLimit} 个`}
+                  title={canAddTemp ? undefined : t("em.temp.limitHint", { n: tempLimit })}
                 >
                   {tempBusy ? (
                     <Loader2 className="h-3 w-3 animate-spin" />
                   ) : (
                     <Plus className="h-3 w-3" />
                   )}
-                  生成
+                  {t("em.temp.generate")}
                 </Button>
               </div>
 
               {tempMailboxes.length === 0 ? (
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
-                  注册不想留真实地址的网站时用。生成后点「换一个」立刻得到新地址，旧地址随即作废。
+                  {t("em.temp.desc")}
                 </p>
               ) : (
                 tempMailboxes.map((mb) => (
@@ -730,7 +732,7 @@ export default function EmailPage() {
                     >
                       <p className="truncate font-mono text-sm">{mb.address}</p>
                       <p className="truncate text-xs text-muted-foreground">
-                        {mb.unread > 0 ? `${mb.unread} 封未读` : `${mb.total} 封邮件`}
+                        {mb.unread > 0 ? t("em.unreadCount", { n: mb.unread }) : t("em.totalCount", { n: mb.total })}
                       </p>
                     </button>
                     <div className="mt-1.5 flex items-center gap-1">
@@ -741,7 +743,7 @@ export default function EmailPage() {
                         onClick={() => void handleCopyAddress(mb.address)}
                       >
                         <Copy className="h-3 w-3" />
-                        复制
+                        {t("common.copy")}
                       </Button>
                       <Button
                         variant="ghost"
@@ -749,17 +751,17 @@ export default function EmailPage() {
                         className="h-6 px-2 text-xs"
                         onClick={() => void handleRefreshTemp(mb)}
                         disabled={tempBusy}
-                        title="换一个新地址，旧地址立即作废"
+                        title={t("em.temp.rotateHint")}
                       >
                         <RefreshCw className="h-3 w-3" />
-                        换一个
+                        {t("em.temp.rotate")}
                       </Button>
                       <button
                         type="button"
                         className="ml-auto rounded p-1 text-muted-foreground hover:text-destructive"
                         onClick={() => void handleDeleteMailbox(mb)}
                         disabled={tempBusy}
-                        aria-label={`删除 ${mb.address}`}
+                        aria-label={t("em.deleteAria", { address: mb.address })}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -776,8 +778,8 @@ export default function EmailPage() {
           {!selected ? (
             <EmptyState
               icon={Inbox}
-              title="选择一个邮箱"
-              description="在左侧选择邮箱查看邮件。"
+              title={t("em.pickMailbox")}
+              description={t("em.pickMailboxDesc")}
             />
           ) : view === "message" && opened ? (
             <MailMessageView
@@ -808,8 +810,8 @@ export default function EmailPage() {
                     void silentRefresh(selected.id)
                     void syncMailboxUnread()
                   }}
-                  aria-label="刷新"
-                  title={`每 ${INBOX_POLL_MS / 1000} 秒自动刷新，也可点这里立即刷新`}
+                  aria-label={t("common.refresh")}
+                  title={t("em.autoRefreshHint", { n: INBOX_POLL_MS / 1000 })}
                 >
                   <RotateCcw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
                 </Button>
@@ -820,8 +822,8 @@ export default function EmailPage() {
                 ) : messages.length === 0 ? (
                   <EmptyState
                     icon={Inbox}
-                    title="收件箱是空的"
-                    description={`发往 ${selected.address} 的邮件会出现在这里。`}
+                    title={t("em.inboxEmpty")}
+                    description={t("em.inboxEmptyDesc", { address: selected.address })}
                   />
                 ) : (
                   <>
@@ -843,7 +845,7 @@ export default function EmailPage() {
                               !m.read ? "font-semibold" : "text-muted-foreground"
                             )}
                           >
-                            {m.from || "未知发件人"}
+                            {m.from || t("em.unknownSender")}
                           </span>
                           {!m.read && (
                             <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-foreground" />
@@ -869,7 +871,7 @@ export default function EmailPage() {
                           disabled={loadingMore}
                           onClick={() => void loadMoreMessages()}
                         >
-                          {loadingMore ? "加载中…" : "加载更早的邮件"}
+                          {loadingMore ? t("common.loading") : t("em.loadOlder")}
                         </Button>
                       </div>
                     )}
@@ -885,13 +887,13 @@ export default function EmailPage() {
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>添加邮箱</DialogTitle>
+            <DialogTitle>{t("em.addMailbox")}</DialogTitle>
             <DialogDescription>
-              例如 hello、contact，用于接收站内邮件。
+              {t("em.dialog.addDesc")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <Label htmlFor="localPart">邮箱前缀</Label>
+            <Label htmlFor="localPart">{t("em.dialog.localPart")}</Label>
             <div className="flex items-center gap-1">
               <Input
                 id="localPart"
@@ -907,11 +909,11 @@ export default function EmailPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAddOpen(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void handleAddMailbox()} disabled={busy}>
               {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-              添加
+              {t("common.add")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -926,13 +928,13 @@ export default function EmailPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>转发设置</DialogTitle>
+            <DialogTitle>{t("em.forward.title")}</DialogTitle>
             <DialogDescription>
-              {forwardBox?.address} 收到的邮件会转发到以下地址，留空则不转发。
+              {t("em.forward.desc", { address: forwardBox?.address ?? "" })}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <Label htmlFor="forwardInput">转发目标</Label>
+            <Label htmlFor="forwardInput">{t("em.forward.target")}</Label>
             <Input
               id="forwardInput"
               placeholder="you@example.com"
@@ -940,7 +942,7 @@ export default function EmailPage() {
               onChange={(e) => setForwardInput(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
-              多个地址用逗号分隔，最多 3 个。新邮箱需先发验证码验证。
+              {t("em.forward.hint")}
             </p>
 
             {/* 验证目标邮箱：输入任意邮箱 → 发验证码 → 回填 */}
@@ -951,7 +953,7 @@ export default function EmailPage() {
                 onClick={() => {
                   const first = forwardInput.split(",")[0]?.trim()
                   if (!first) {
-                    toast.error("请先在转发目标里输入要验证的邮箱")
+                    toast.error(t("em.err.enterTarget"))
                     return
                   }
                   void handleSendForwardCode(first)
@@ -959,17 +961,18 @@ export default function EmailPage() {
                 disabled={forwardVerifyBusy}
               >
                 {forwardVerifyBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                发送验证码
+                {t("settings.btn.sendCode")}
               </Button>
             ) : (
               <div className="space-y-2 rounded-md border p-3">
                 <p className="text-xs text-muted-foreground">
-                  验证码已发送到 <span className="font-mono">{verifyingEmail}</span>
-                  ，请查收（可能进垃圾箱）。
+                  {t("em.codeSentTo.a")}
+                  <span className="font-mono">{verifyingEmail}</span>
+                  {t("em.codeSentTo.b")}
                 </p>
                 <div className="flex items-center gap-2">
                   <Input
-                    placeholder="6 位验证码"
+                    placeholder={t("em.codePlaceholder")}
                     inputMode="numeric"
                     maxLength={6}
                     value={forwardCode}
@@ -984,7 +987,7 @@ export default function EmailPage() {
                     disabled={forwardVerifyBusy}
                   >
                     {forwardVerifyBusy && <Loader2 className="h-4 w-4 animate-spin" />}
-                    确认验证
+                    {t("settings.email.confirmVerify")}
                   </Button>
                 </div>
               </div>
@@ -1002,15 +1005,15 @@ export default function EmailPage() {
                       <span className="truncate font-mono">{email}</span>
                       {state === true ? (
                         <span className="shrink-0 text-emerald-600 dark:text-emerald-400">
-                          已验证
+                          {t("settings.email.verified")}
                         </span>
                       ) : state === false ? (
                         <span className="shrink-0 text-amber-600 dark:text-amber-400">
-                          待验证
+                          {t("em.forward.pendingShort")}
                         </span>
                       ) : (
                         <span className="shrink-0 text-muted-foreground">
-                          状态未知
+                          {t("em.forward.unknown")}
                         </span>
                       )}
                     </div>
@@ -1021,7 +1024,7 @@ export default function EmailPage() {
             {forwardBox?.lastForwardError && (
               <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2">
                 <p className="text-xs font-medium text-destructive">
-                  最近一次转发失败
+                  {t("em.forward.lastFailed")}
                 </p>
                 <p className="mt-0.5 break-words text-xs text-muted-foreground">
                   {forwardBox.lastForwardError}
@@ -1029,7 +1032,7 @@ export default function EmailPage() {
               </div>
             )}
             <p className="text-xs text-muted-foreground">
-              转发目标需要先验证：对要绑定的邮箱发送验证码并回填，验证通过后才会开始转发。
+              {t("em.forward.verifyNote")}
             </p>
 
             {/* 转发进垃圾箱的说明：这是用户最常反馈的问题 */}
@@ -1037,27 +1040,24 @@ export default function EmailPage() {
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <div className="space-y-1">
                 <p className="font-medium text-foreground">
-                  收不到转发邮件？请先检查垃圾邮件文件夹
+                  {t("em.forward.tip.title")}
                 </p>
                 <p>
-                  转发属于「二次投递」，对方邮箱（尤其 QQ / 163 / Gmail）
-                  容易判为垃圾邮件。请到垃圾箱找一下，并把发件人标记为
-                  「非垃圾邮件」或加入白名单，之后就会正常进入收件箱。
+                  {t("em.forward.tip.body")}
                 </p>
                 <p>
-                  若长期收不到，建议改用支持自动转发的邮箱（如 Gmail），
-                  或在此处改填其他邮箱。
+                  {t("em.forward.tip.fallback")}
                 </p>
               </div>
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setForwardBox(null)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button onClick={() => void handleSaveForwarding()} disabled={savingForward}>
               {savingForward && <Loader2 className="h-4 w-4 animate-spin" />}
-              保存
+              {t("common.save")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1085,6 +1085,7 @@ function MailMessageView({
   onDelete: () => void
   onReply: (text: string) => Promise<void>
 }) {
+  const { t } = useT()
   const [replyOpen, setReplyOpen] = React.useState(false)
   const [replyText, setReplyText] = React.useState("")
   const [sending, setSending] = React.useState(false)
@@ -1128,10 +1129,10 @@ function MailMessageView({
     if (!replyToAddress) return ""
     const subject = /^re\s*:/i.test(message.subject ?? "")
       ? message.subject
-      : `Re: ${message.subject || "(无主题)"}`
+      : t("em.replySubject", { subject: message.subject || t("em.noSubject") })
     const quoted = (message.body ?? "").slice(0, 1200)
     const body = quoted
-      ? `\n\n---------- 原邮件 ----------\n来自：${message.from}\n\n${quoted}`
+      ? t("em.quoteBlock", { from: message.from ?? "", quoted })
       : ""
     return `mailto:${replyToAddress}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
   }, [replyToAddress, message.subject, message.body, message.from])
@@ -1148,7 +1149,7 @@ function MailMessageView({
       setReplyOpen(false)
     } catch (err) {
       // 保留正文，让用户可以改完重试（例如先去 Onboard 再回来点一次）
-      setError(err instanceof HttpError ? err.message : "发送失败，请稍后重试")
+      setError(err instanceof HttpError ? err.message : t("em.err.sendRetry"))
     } finally {
       setSending(false)
     }
@@ -1160,15 +1161,18 @@ function MailMessageView({
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 space-y-1">
             <CardTitle className="text-base leading-snug">
-              {message.subject || "无主题"}
+              {message.subject || t("em.noSubject")}
             </CardTitle>
             <p className="text-xs text-muted-foreground">
-              来自 {message.from || "未知发件人"} · 发往 {mailbox.address} ·{" "}
+              {t("em.metaLine", {
+                from: message.from || t("em.unknownSender"),
+                to: mailbox.address,
+              })}{" "}
               {new Date(message.receivedAt).toLocaleString("zh-CN")}
             </p>
           </div>
           <Button variant="ghost" size="sm" onClick={onBack}>
-            返回列表
+            {t("em.backToList")}
           </Button>
         </div>
       </CardHeader>
@@ -1179,11 +1183,11 @@ function MailMessageView({
           onClick={() => setReplyOpen((v) => !v)}
         >
           <Reply className="h-3.5 w-3.5" />
-          回信
+          {t("em.reply")}
         </Button>
         <Button variant="outline" size="sm" onClick={onMarkUnread}>
           <Mail className="h-3.5 w-3.5" />
-          标为未读
+          {t("em.markUnread")}
         </Button>
         <Button
           variant="outline"
@@ -1197,18 +1201,18 @@ function MailMessageView({
           ) : (
             <Trash2 className="h-3.5 w-3.5" />
           )}
-          删除
+          {t("common.delete")}
         </Button>
       </div>
       <CardContent className="space-y-4">
         {loadingBody ? (
           <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
-            正在加载正文…
+            {t("em.loadingBody")}
           </div>
         ) : (
           <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed">
-            {message.body || "（无正文内容）"}
+            {message.body || t("em.noBody")}
           </pre>
         )}
 
@@ -1217,25 +1221,31 @@ function MailMessageView({
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
               <div className="flex items-center gap-2">
                 <Reply className="h-3.5 w-3.5" />
-                以 <span className="font-medium text-foreground">{mailbox.address}</span> 发送
-                {message.from ? <> 给 <span className="font-medium text-foreground">{message.from}</span></> : null}
+                {t("em.sendAs.a")}
+                <span className="font-medium text-foreground">{mailbox.address}</span>
+                {t("em.sendAs.b")}
+                {message.from ? (
+                  <>
+                    {t("em.sendAs.to")}
+                    <span className="font-medium text-foreground">{message.from}</span>
+                  </>
+                ) : null}
               </div>
               {mailtoHref && (
                 <Button asChild variant="outline" size="sm">
-                  <a href={mailtoHref}>改用我的邮箱回复</a>
+                  <a href={mailtoHref}>{t("em.useOwnMail")}</a>
                 </Button>
               )}
             </div>
             <p className="text-xs leading-relaxed text-muted-foreground">
-              下面的「发送」需要 Cloudflare 完成 Email Sending 域名 Onboard（付费功能）才能发给任意外部邮箱；
-              未开通时只能发往账户内已验证的收件地址。发不出去就点上面的
-              <span className="font-medium text-foreground">「改用我的邮箱回复」</span>
-              —— 免费、立刻可用（会在你本机邮箱里打开，收件人与原文已填好）。
+              {t("em.sendNote.a")}
+              <span className="font-medium text-foreground">{t("em.useOwnMail")}</span>
+              {t("em.sendNote.b")}
             </p>
             <Textarea
               value={replyText}
               onChange={(e) => setReplyText(e.target.value)}
-              placeholder="输入回信内容（纯文本）…"
+              placeholder={t("em.replyPlaceholder")}
               rows={6}
               maxLength={20000}
               disabled={sending}
@@ -1261,7 +1271,7 @@ function MailMessageView({
                   }}
                   disabled={sending}
                 >
-                  收起
+                  {t("em.collapse")}
                 </Button>
                 <Button size="sm" onClick={() => void handleSend()} disabled={sending || !replyText.trim()}>
                   {sending ? (
@@ -1269,7 +1279,7 @@ function MailMessageView({
                   ) : (
                     <Send className="h-3.5 w-3.5" />
                   )}
-                  发送
+                  {t("fb.send")}
                 </Button>
               </div>
             </div>

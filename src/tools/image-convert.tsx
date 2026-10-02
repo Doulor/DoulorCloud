@@ -13,6 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { useT } from "@/i18n"
 import {
   baseName,
   canvasToBlob,
@@ -28,6 +29,7 @@ type OutFormat = "png" | "jpeg" | "webp" | "ico"
 const ICO_SIZE_OPTIONS = [16, 32, 48, 64, 128, 256]
 
 export default function ImageConvertTool() {
+  const { t } = useT()
   const [file, setFile] = React.useState<File | null>(null)
   const [format, setFormat] = React.useState<OutFormat>("png")
   const [quality, setQuality] = React.useState(0.9)
@@ -47,7 +49,7 @@ export default function ImageConvertTool() {
       setOut(null)
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "图片打开失败")
+      setError(e instanceof Error ? e.message : t("icv.err.open"))
     }
   }
 
@@ -68,7 +70,7 @@ export default function ImageConvertTool() {
 
         if (format === "ico") {
           const sizes = [...new Set(icoSizes)].sort((a, b) => a - b)
-          if (sizes.length === 0) throw new Error("请至少勾选一个图标尺寸")
+          if (sizes.length === 0) throw new Error(t("icv.err.pickSize"))
           const canvases = sizes.map((size) => {
             const { canvas, ctx } = createCanvas(size, size)
             ctx.imageSmoothingEnabled = true
@@ -100,7 +102,7 @@ export default function ImageConvertTool() {
         setOut({ blob, name, url })
         setError(null)
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : "转换失败")
+        if (!cancelled) setError(e instanceof Error ? e.message : t("icv.err.convert"))
       } finally {
         if (!cancelled) setBusy(false)
       }
@@ -114,45 +116,45 @@ export default function ImageConvertTool() {
 
   return (
     <ToolShell
-      title="图片格式互转"
-      description="PNG、JPG、WebP、ICO 互相转换。做网站图标时可以直接生成一个包含多种尺寸的 .ico。"
+      title={t("toolbox.imageConvert.name")}
+      description={t("icv.desc")}
     >
       <div className="grid gap-4 lg:grid-cols-[1fr_340px]">
-        <ToolSection title="原图">
+        <ToolSection title={t("icv.section.original")}>
           {!file ? (
             <FileDrop
               accept="image/*"
               onFiles={(f) => void handleFiles(f)}
-              hint="支持 PNG / JPG / WebP / GIF / BMP 等浏览器能打开的格式"
+              hint={t("icv.pickHint")}
             />
           ) : (
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-3 text-sm">
                 <span className="truncate font-medium">{file.name}</span>
                 <Button variant="ghost" size="sm" onClick={() => { setFile(null); imgRef.current = null; setOut(null) }}>
-                  换一张
+                  {t("icv.replace")}
                 </Button>
               </div>
               <div className="flex items-center justify-center rounded-lg border bg-muted/30 p-3">
                 {out ? (
-                  <img src={out.url} alt="转换结果" className="max-h-[320px] w-auto rounded" />
+                  <img src={out.url} alt={t("icv.alt.result")} className="max-h-[320px] w-auto rounded" />
                 ) : (
-                  <div className="py-10 text-sm text-muted-foreground">处理中…</div>
+                  <div className="py-10 text-sm text-muted-foreground">{t("icv.processing")}</div>
                 )}
               </div>
               <p className="text-xs text-muted-foreground">
-                原图 {imgRef.current?.naturalWidth} × {imgRef.current?.naturalHeight} ·{" "}
+                {t("icv.originalSize", { w: imgRef.current?.naturalWidth ?? 0, h: imgRef.current?.naturalHeight ?? 0 })}{" "}
                 {formatBytes(file.size)}
                 {out && (
                   <>
                     {" → "}
-                    输出 {formatBytes(out.blob.size)}
+                    {t("icv.outSize", { size: formatBytes(out.blob.size) })}
                     {file.size > 0 && (
                       <span className="ml-1">
                         （
                         {out.blob.size < file.size
-                          ? `小了 ${Math.round((1 - out.blob.size / file.size) * 100)}%`
-                          : `大了 ${Math.round((out.blob.size / file.size - 1) * 100)}%`}
+                          ? t("icv.smaller", { n: Math.round((1 - out.blob.size / file.size) * 100) })
+                          : t("icv.larger", { n: Math.round((out.blob.size / file.size - 1) * 100) })}
                         ）
                       </span>
                     )}
@@ -163,19 +165,19 @@ export default function ImageConvertTool() {
           )}
         </ToolSection>
 
-        <ToolSection title="输出设置">
+        <ToolSection title={t("icv.section.output")}>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">目标格式</Label>
+              <Label className="text-xs text-muted-foreground">{t("icv.target")}</Label>
               <Select value={format} onValueChange={(v) => setFormat(v as OutFormat)}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="png">PNG · 支持透明，体积较大</SelectItem>
-                  <SelectItem value="jpeg">JPG · 照片首选，不支持透明</SelectItem>
-                  <SelectItem value="webp">WebP · 体积最小，现代浏览器通用</SelectItem>
-                  <SelectItem value="ico">ICO · 网站图标</SelectItem>
+                  <SelectItem value="png">{t("icv.fmt.png")}</SelectItem>
+                  <SelectItem value="jpeg">{t("icv.fmt.jpeg")}</SelectItem>
+                  <SelectItem value="webp">{t("icv.fmt.webp")}</SelectItem>
+                  <SelectItem value="ico">{t("icv.fmt.ico")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -183,7 +185,7 @@ export default function ImageConvertTool() {
             {(format === "jpeg" || format === "webp") && (
               <div className="space-y-1.5">
                 <Label className="text-xs text-muted-foreground">
-                  质量 {Math.round(quality * 100)}%
+                  {t("icv.quality", { n: Math.round(quality * 100) })}
                 </Label>
                 <input
                   type="range"
@@ -199,7 +201,7 @@ export default function ImageConvertTool() {
             {format === "jpeg" && (
               <div className="space-y-1.5">
                 <Label className="text-xs text-muted-foreground">
-                  透明区域填充色（JPG 不支持透明）
+                  {t("icv.bgFill")}
                 </Label>
                 <Input
                   type="color"
@@ -213,7 +215,7 @@ export default function ImageConvertTool() {
             {format === "ico" && (
               <div className="space-y-2">
                 <Label className="text-xs text-muted-foreground">
-                  打包尺寸（可多选，图片会等比居中）
+                  {t("icv.icoSizes")}
                 </Label>
                 <div className="flex flex-wrap gap-2">
                   {ICO_SIZE_OPTIONS.map((s) => {
@@ -248,7 +250,7 @@ export default function ImageConvertTool() {
               onClick={() => out && downloadBlob(out.blob, out.name)}
             >
               <Download className="h-4 w-4" />
-              {busy ? "处理中…" : "下载"}
+              {busy ? t("icv.processing") : t("common.download")}
             </Button>
           </div>
         </ToolSection>
