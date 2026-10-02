@@ -190,6 +190,8 @@ export interface PointOrder {
   renewedFrom: string | null
   /** 到期处理（收回权益）的时间；NULL = 还没处理过 */
   expireHandledAt: string | null
+  /** 有限库存占用标记；取消或租期到期后由数据库触发器清零 */
+  stockReserved: boolean
   /**
    * 本单**实际授予**的模块权限名（仅 delivery='feature' 时非空）。
    * 到期收回时靠它判断「收哪个权限」，不依赖商品行是否还在。
@@ -367,6 +369,7 @@ function rowToOrder(r: Record<string, unknown>): PointOrder {
     expiresAt: r.expires_at == null ? null : String(r.expires_at),
     renewedFrom: r.renewed_from == null ? null : String(r.renewed_from),
     expireHandledAt: r.expire_handled_at == null ? null : String(r.expire_handled_at),
+    stockReserved: Number(r.stock_reserved ?? 0) === 1,
     grantedFeature: r.granted_feature == null ? null : String(r.granted_feature),
   }
 }
@@ -1114,19 +1117,6 @@ async function deliverAuto(
 }
 
 /**
- * 把商品库存还回去（有限量的商品才需要）。商品已被删时静默跳过。
- *
- * @returns 实际改动的行数（0 = 商品已删 / 不限量，没还成）
- */
-async function restoreStock(env: Env, productId: string | null): Promise<number> {
-  if (!productId) return 0
-  const res = await env.DB.prepare(
-    "UPDATE point_products SET stock = stock + 1, updated_at = ? WHERE id = ? AND stock IS NOT NULL"
-  )
-    .bind(new Date().toISOString(), productId)
-    .run()
-  return res.meta?.changes ?? 0
-}
 
 /**
  * 下单购买。
@@ -1236,20 +1226,9 @@ export async function buyProduct(
 
   const orderId = uuid()
 
-  let stockReserved = false
   let pointsDeducted = false
   try {
     // 1. 占库存（有限量时才需要；条件 UPDATE 保证并发下不会超卖）
-    if (product.stock !== null) {
-      const res = await env.DB.prepare(
-        "UPDATE point_products SET stock = stock - 1, updated_at = ? " +
-          "WHERE id = ? AND enabled = 1 AND stock > 0"
-      ).bind(now, product.id).run()
-      if ((res.meta?.changes ?? 0) === 0) {
-        throw new ApiError(400, "该商品已售罄", "OUT_OF_STOCK")
-      }
-      stockReserved = true
-    }
 
     // 2. 扣积分（dedup_key 用订单号，重放同一请求不会扣两次）
     const deducted = await applyPoints(env, {
@@ -1291,11 +1270,8 @@ export async function buyProduct(
         })
       } catch (refundErr) {
         console.error("商城订单补偿退款失败:", orderId, refundErr)
+        throw new ApiError(500, "购买失败，补偿正在人工处理", "PURCHASE_COMPENSATION_PENDING")
       }
-    }
-    if (stockReserved) {
-      try { await restoreStock(env, product.id) }
-      catch (stockErr) { console.error("商城库存补偿失败:", orderId, stockErr) }
     }
     throw err
   }
@@ -1394,7 +1370,6 @@ export async function buyProduct(
           detail: `购买「${product.name}」失败退回`,
           dedupKey: `shop-refund:${orderId}`,
         })
-        await restoreStock(env, product.id)
       } catch (compensationErr) {
         console.error("自动交付失败后的商城补偿失败:", orderId, compensationErr)
         throw new ApiError(500, "购买失败，补偿正在人工处理", "PURCHASE_COMPENSATION_PENDING")
@@ -1680,7 +1655,6 @@ export async function adminCancelOrder(
   //    若这单已经过到期处理（expire_handled_at 非空），这里就不能再还一次 ——
   //    否则库存会凭空变多（租出去 1 份、收回来 2 份）。
   if (!order.expireHandledAt) {
-    await restoreStock(env, order.productId)
   }
 
   const note = `订单已取消，${order.price} 积分已退回${reason ? `：${reason}` : ""}`.slice(0, 300)
@@ -1842,12 +1816,12 @@ export async function expireRentalOrders(
       else if (verdict === "kept") res.keptWithOtherSource++
 
       // 归还库存（不限量 / 商品已删时 restoreStock 返回 0，静默跳过）
-      if ((await restoreStock(env, order.productId)) > 0) res.stockReturned++
 
       await env.DB.prepare("UPDATE point_orders SET expire_handled_at = ? WHERE id = ?")
         .bind(now, order.id)
         .run()
       res.handled++
+      if (reservedBeforeExpiry) res.stockReturned++
 
       // 用户商品（manual 交付）平台无法强制回收，留给管理员跟进
       if (order.sellerId) {
