@@ -99,6 +99,9 @@ import {
   type EventClaim,
   type EventPayload,
   type AccountAppeal,
+  type ModerationLists,
+  type ModerationConditionMetric,
+  type ModerationConditionOp,
   type AppealPendingReply,
   type RiskAccount,
   type PointsOverview,
@@ -588,6 +591,22 @@ export const adminApi = {
       body: JSON.stringify(payload),
     }),
 
+  /** 公开 API 配置（功能开关 + 层级限额 + 计入成就开关） */
+  getApiConfig: () =>
+    request<{
+      features: { feature: string; enabled: boolean; tierLimits: number[]; ipLimit: number }[]
+      countAchievements: boolean
+    }>("/admin/api-config"),
+
+  saveApiConfig: (payload: {
+    countAchievements: boolean
+    features: { feature: string; enabled: boolean; tierLimits: number[]; ipLimit: number }[]
+  }) =>
+    request<{ ok: boolean }>("/admin/api-config", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   recalculateStorage: () =>
     request<{ accounts: number; totalBytes: number }>("/admin/storage/recalculate", {
       method: "POST",
@@ -876,6 +895,13 @@ export const storageApi = {
       method: "DELETE",
     }),
 
+  /** 批量删除（一次最多 200 个） */
+  removeMany: (keys: string[]) =>
+    request<{ deleted: number }>("/storage/objects/delete", {
+      method: "POST",
+      body: JSON.stringify({ keys }),
+    }),
+
   bindDomain: (subdomainId: string) =>
     request<{ prefix: StoragePrefixCreated }>("/storage/domain", {
       method: "POST",
@@ -982,6 +1008,13 @@ export const tempboxApi = {
 
   remove: (code: string) =>
     request<void>(`/tempbox/${encodeURIComponent(code)}`, { method: "DELETE" }),
+
+  /** 删除批次里的单个文件（创建者本人或管理员） */
+  removeFile: (code: string, filename: string) =>
+    request<{ fileCount: number; totalBytes: number }>(
+      `/tempbox/${encodeURIComponent(code)}/${encodeURIComponent(filename)}`,
+      { method: "DELETE" }
+    ),
 }
 
 // ---- frp 内网穿透 ----
@@ -1556,6 +1589,73 @@ export const achievementApi = {
 
 // ---- 积分（余额 / 流水 / 兑换中转站余额）----
 
+/**
+ * 每日签到。
+ *
+ * `status` 只读（未签到时的当前状态），`do` 执行签到（幂等，重复调用会拿到「已签」错误）。
+ */
+/**
+ * 公开 API：用户用 API Key 调用站点功能。
+ *
+ * Key 管理走 session（设置页），调用走 Bearer（/v1/*）。
+ */
+export const publicApi = {
+  /** 当前 Key 状态（明文永不回传） */
+  getKeyStatus: () =>
+    request<{
+      hasKey: boolean
+      prefix: string | null
+      createdAt: string | null
+      lastUsedAt: string | null
+    }>("/api-key"),
+
+  /** 生成新 Key（已有则覆盖，旧 Key 立即作废）。明文只返回这一次 */
+  generateKey: () =>
+    request<{ apiKey: string; prefix: string }>("/api-key", { method: "POST" }),
+
+  /** 删除 Key（禁用 API 调用） */
+  deleteKey: () => request<{ ok: boolean }>("/api-key", { method: "DELETE" }),
+
+  /** 用户视角的 API 文档（自己的层级/额度 + 各功能开放与否） */
+  getDoc: () =>
+    request<{
+      achievementPoints: number
+      tier: number
+      features: {
+        feature: string
+        enabled: boolean
+        tier: number
+        accountLimit: number
+        ipLimit: number
+      }[]
+    }>("/api-doc"),
+}
+
+export const checkinApi = {
+  status: () =>
+    request<{
+      enabled: boolean
+      checkedIn: boolean
+      streak: number
+      todayPoints: number
+      todayBase: number
+      todayBonus: number
+      milestones: { days: number; points: number }[]
+      next: { days: number; points: number; daysLeft: number } | null
+    }>("/checkin"),
+
+  do: () =>
+    request<{
+      ok: boolean
+      streak: number
+      base: number
+      bonus: number
+      total: number
+      milestoneHit: { days: number; points: number } | null
+      next: { days: number; points: number; daysLeft: number } | null
+    }>("/checkin", { method: "POST" }),
+}
+
 export const pointsApi = {
   /**
    * 上传商品封面图（2026-10-01 加）。
@@ -1691,6 +1791,13 @@ export const myInviteApi = {
       `/my-invites/${encodeURIComponent(id)}`,
       { method: "DELETE" }
     ),
+
+  /** 补填邀请码（注册时忘记填，7 天内可补） */
+  claim: (code: string) =>
+    request<{ ok: boolean; grantedPoints: number }>("/my-invites/claim", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }),
 }
 
 // ---- 身份资料（昵称 / 头像）----
@@ -1842,9 +1949,9 @@ export const communityApi = {
   getPost: (id: string) => request<{ post: Post }>(`/community/posts/${encodeURIComponent(id)}`),
   getComments: (id: string) =>
     request<{ comments: CommentNode[] }>(`/community/posts/${encodeURIComponent(id)}/comments`),
-  createPost: (body: string, images: string[] = []) =>
+  createPost: (body: string, images: string[] = [], category: string = "chat") =>
     request<{ post: { id: string } }>("/community/posts", {
-      method: "POST", body: JSON.stringify({ body, images }),
+      method: "POST", body: JSON.stringify({ body, images, category }),
     }),
   uploadImage: (postId: string, file: File) => {
     const headers = new Headers()
@@ -1855,6 +1962,8 @@ export const communityApi = {
   },
   toggleLike: (id: string) =>
     request<{ liked: boolean; likeCount: number }>(`/community/posts/${encodeURIComponent(id)}/like`, { method: "POST" }),
+  toggleCommentLike: (id: string) =>
+    request<{ liked: boolean; likeCount: number }>(`/community/comments/${encodeURIComponent(id)}/like`, { method: "POST" }),
   share: (id: string) =>
     request<{ shareCount: number; alreadyShared: boolean }>(`/community/posts/${encodeURIComponent(id)}/share`, { method: "POST" }),
   comment: (id: string, body: string, parentId?: string, replyToUserId?: string) =>
@@ -1896,10 +2005,15 @@ export const chatApi = {
     request<{ messages: ChatMessage[] }>(
       `/chat/messages${after ? `?after=${encodeURIComponent(after)}` : ""}`
     ),
-  send: (body: string) =>
+  send: (body: string, replyTo?: string | null) =>
     request<{ message: ChatMessage }>("/chat/messages", {
       method: "POST",
-      body: JSON.stringify({ body }),
+      body: JSON.stringify(replyTo ? { body, replyTo } : { body }),
+    }),
+  /** 撤回自己的消息（管理员不限） */
+  recall: (id: string) =>
+    request<{ ok: boolean }>(`/chat/messages/${encodeURIComponent(id)}/recall`, {
+      method: "POST",
     }),
   heartbeat: () => request<{ ok: boolean }>("/chat/heartbeat", { method: "POST" }),
   presence: () => request<{ online: ChatPresenceUser[] }>("/chat/presence"),
@@ -2141,6 +2255,36 @@ export const adminModerationApi = {
       method: "POST",
       body: JSON.stringify({ status }),
     }),
+
+  // ---- 白名单 / 自动条件 / 黑名单（2026-10-03） ----
+
+  /** 一次拿齐白名单（按来源分组）+ 黑名单；GET 时后端会顺带按条件同步一次 */
+  lists: () => request<ModerationLists>("/admin/moderation/lists"),
+  /** 白名单手动增删 */
+  whitelistUpdate: (action: "add" | "remove", username: string) =>
+    request<{ ok: boolean }>("/admin/moderation/whitelist", {
+      method: "POST",
+      body: JSON.stringify({ action, username }),
+    }),
+  /** 白名单自动条件：新建 / 启停 / 删除 */
+  conditionUpdate: (payload: {
+    action: "create" | "toggle" | "delete"
+    id?: string
+    metric?: ModerationConditionMetric
+    op?: ModerationConditionOp
+    value?: number
+    enabled?: boolean
+  }) =>
+    request<{ ok: boolean }>("/admin/moderation/conditions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  /** 黑名单增删（IP） */
+  blacklistUpdate: (action: "add" | "remove", ip: string, reason?: string) =>
+    request<{ ok: boolean }>("/admin/moderation/blacklist", {
+      method: "POST",
+      body: JSON.stringify({ action, ip, reason }),
+    }),
 }
 
 /** 管理端积分接口 */
@@ -2221,6 +2365,23 @@ export const adminPointsApi = {
     request<{ product: PointProduct }>(
       `/admin/points/products/${encodeURIComponent(id)}/review`,
       { method: "POST", body: JSON.stringify({ approve, note }) }
+    ),
+  /** 卡密池概览（delivery='code'） */
+  getProductCodes: (id: string) =>
+    request<{ total: number; used: number; available: number }>(
+      `/admin/points/products/${encodeURIComponent(id)}/codes`
+    ),
+  /** 追加卡密（一行一条，自动去重） */
+  addProductCodes: (id: string, codes: string[]) =>
+    request<{ added: number; available: number }>(
+      `/admin/points/products/${encodeURIComponent(id)}/codes`,
+      { method: "POST", body: JSON.stringify({ codes }) }
+    ),
+  /** 清空未使用的卡密 */
+  clearProductCodes: (id: string) =>
+    request<{ removed: number }>(
+      `/admin/points/products/${encodeURIComponent(id)}/codes`,
+      { method: "DELETE" }
     ),
   /** 强制结算用户商品订单（卖家已交付但买家一直不确认时用） */
   settleOrder: (id: string) =>

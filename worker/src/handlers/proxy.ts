@@ -78,6 +78,8 @@ interface ProxySubscriptionRow {
   status_note: string | null
   enabled: number
   sort_order: number
+  /** 审核来源：auto=自动审核导入 / manual=人工放行或手工添加（决定过时能否自动标记不可用） */
+  review_source: string
   note: string | null
   last_synced_at: string | null
   last_error: string | null
@@ -98,6 +100,8 @@ export interface ProxyNodeInfo {
   raw: string
   /** 解析出的配置字段（uuid / password / security / sni / flow / obfs…） */
   details: Record<string, string>
+  /** 相同节点检测：本节点在**另一个**订阅源里也出现了（值是那个订阅源的名称） */
+  duplicateOf?: string
 }
 
 function toPublicSubscription(row: ProxySubscriptionRow) {
@@ -136,7 +140,8 @@ async function visibleSubscriptions(
   const limit = Math.min(Math.max(opts?.limit ?? 200, 1), 200)
   const offset = Math.max(opts?.offset ?? 0, 0)
   const rows = await env.DB.prepare(
-    "SELECT * FROM proxy_subscriptions WHERE enabled = 1 ORDER BY sort_order ASC, created_at ASC LIMIT ? OFFSET ?"
+    // offline（过时）的订阅源排最后，其余按 sort_order + 创建时间（2026-10-03 站长要求）
+    "SELECT * FROM proxy_subscriptions WHERE enabled = 1 ORDER BY (status = 'offline') ASC, sort_order ASC, created_at ASC LIMIT ? OFFSET ?"
   ).bind(limit, offset).all<ProxySubscriptionRow>()
   return rows.results ?? []
 }
@@ -1183,6 +1188,11 @@ export function usableNodes(nodes: ProxyNodeInfo[]): ProxyNodeInfo[] {
   return nodes.filter((n) => n.protocol && n.protocol !== "unknown" && n.server)
 }
 
+/** 节点指纹：`协议:服务器:端口` —— 跨订阅源识别「同一个节点」的唯一键（导入查重 + 相同节点检测都用它） */
+export function nodeFingerprint(n: { protocol: string; server: string; port: number | null }): string {
+  return `${n.protocol}:${n.server}:${n.port ?? 0}`
+}
+
 /**
  * 从解析出的节点推断协议与地区 —— 纯计算，不联网。
  * 协议：按出现频次取最常见的；地区：订阅 URL 里的地区参数优先，
@@ -1258,6 +1268,102 @@ export async function detectSubscriptionProfile(
   return { protocol, region, ok }
 }
 
+/**
+ * 订阅源「过时 / 失效」检测（2026-10-03 站长要求，由每小时运维任务调用）。
+ *
+ * 逐个抓取订阅源（并发 + 抖动重试）：
+ *   · 连续抓取失败（过时 / 失效）：
+ *     - 自动审核（review_source='auto'）→ 自动标记 offline（列表自动排到最后）；
+ *     - 人工审核（review_source='manual'）→ 标记 unknown，**不自动判死**（管理员亲手放过，
+ *       可能只是临时故障，等人工确认）。
+ *   · 抓取成功：
+ *     - 自动审核且之前是「自动标记的 offline」→ 恢复 online（自动恢复）。
+ *
+ * 抖动重试：一次抓取失败就判死太狠（订阅站偶发 5xx/超时很常见），连续两次都失败才算过时。
+ */
+export async function syncProxySubscriptionStatuses(
+  env: Env,
+  dryRun = false
+): Promise<{ checked: number; offline: number; unknown: number; recovered: number }> {
+  const rows = await env.DB.prepare(
+    "SELECT id, url, status, review_source FROM proxy_subscriptions WHERE enabled = 1"
+  ).all<{ id: string; url: string; status: string; review_source: string }>()
+
+  let checked = 0
+  let offline = 0
+  let unknown = 0
+  let recovered = 0
+
+  await mapLimit(rows.results ?? [], 8, async (row) => {
+    checked++
+    let ok = false
+    let fingerprints: string[] = []
+    for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+      try {
+        const { text } = await fetchSubscriptionText(env, row.url, true)
+        const nodes = usableNodes(parseSubscription(text))
+        if (nodes.length > 0) {
+          ok = true
+          fingerprints = nodes.map(nodeFingerprint)
+        }
+      } catch {
+        ok = false
+      }
+    }
+    const now = new Date().toISOString()
+
+    if (!ok) {
+      if (row.review_source === "auto") {
+        // 自动审核：自动标记不可用，列表自动排到最后
+        if (row.status !== "offline") offline++
+        if (!dryRun && row.status !== "offline") {
+          await env.DB.prepare(
+            "UPDATE proxy_subscriptions SET status = 'offline', status_note = '自动检测：订阅源不可用', updated_at = ? WHERE id = ?"
+          )
+            .bind(now, row.id)
+            .run()
+        }
+      } else {
+        // 人工审核：只标「未知」，等管理员确认，不自动判死
+        if (row.status !== "unknown") unknown++
+        if (!dryRun && row.status !== "unknown") {
+          await env.DB.prepare(
+            "UPDATE proxy_subscriptions SET status = 'unknown', status_note = '检测不可用（人工审核，需人工确认）', updated_at = ? WHERE id = ?"
+          )
+            .bind(now, row.id)
+            .run()
+        }
+      }
+    } else {
+      // 回填节点指纹（供「导入时拒绝相同节点」查重；节点可能变化，先清旧再写新）
+      if (!dryRun && fingerprints.length > 0) {
+        await env.DB.prepare(
+          "DELETE FROM proxy_node_fingerprints WHERE subscription_id = ?"
+        )
+          .bind(row.id)
+          .run()
+        const stmt = env.DB.prepare(
+          "INSERT OR IGNORE INTO proxy_node_fingerprints (fingerprint, subscription_id, created_at) VALUES (?, ?, ?)"
+        )
+        await env.DB.batch(fingerprints.map((fp) => stmt.bind(fp, row.id, now)))
+      }
+      // 自动审核的订阅源恢复了 → 自动恢复 online
+      if (row.status === "offline" && row.review_source === "auto") {
+        recovered++
+        if (!dryRun) {
+          await env.DB.prepare(
+            "UPDATE proxy_subscriptions SET status = 'online', status_note = NULL, updated_at = ? WHERE id = ?"
+          )
+            .bind(now, row.id)
+            .run()
+        }
+      }
+    }
+  })
+
+  return { checked, offline, unknown, recovered }
+}
+
 // ---- 代理节点捐献的自动审核 ----
 
 /** 单次捐献最多校验多少个订阅链接（每个都要真拉一次，太多会把提交拖到超时） */
@@ -1282,6 +1388,8 @@ export interface SubscriptionCheck {
    * 必须据此转人工，绝不能自动拒绝：误拒一份好订阅，用户只会觉得站点坏了。
    */
   uncertain: boolean
+  /** ok=true 时，解析出的有效节点指纹（protocol:server:port），供「导入时拒绝相同节点」查重 */
+  nodeFingerprints: string[]
 }
 
 /**
@@ -1310,6 +1418,7 @@ export async function verifySubscriptionUrls(
       region: null,
       error,
       uncertain,
+      nodeFingerprints: [],
     })
 
     try {
@@ -1362,7 +1471,16 @@ export async function verifySubscriptionUrls(
     }
 
     const { protocol, region } = profileFromNodes(nodes, url)
-    return { url, ok: true, nodeCount: nodes.length, protocol, region, error: "", uncertain: false }
+    return {
+      url,
+      ok: true,
+      nodeCount: nodes.length,
+      protocol,
+      region,
+      error: "",
+      uncertain: false,
+      nodeFingerprints: nodes.map(nodeFingerprint),
+    }
   })
 }
 
@@ -1402,6 +1520,26 @@ export async function getProxyOverview(env: Env, request: Request): Promise<Resp
       }
     })
   )
+
+  // 相同节点检测（2026-10-03 站长要求）：跨订阅源按「协议+服务器+端口」指纹找重复节点。
+  // 重复的节点标 duplicateOf = 首次出现的订阅源名，前端可提示「与 xxx 重复」。
+  // ⚠️ 只对「有效节点」做（有协议 + 有服务器地址）—— parseSubscription 对 HTML 也会产出
+  // 一堆 protocol=unknown、server="" 的假条目，把它们算进去会把 HTML 误判成重复节点。
+  {
+    const seen = new Map<string, string>()
+    for (const sub of subscriptions) {
+      for (const node of sub.nodes) {
+        if (!node.protocol || node.protocol === "unknown" || !node.server) continue
+        const fp = `${node.protocol}:${node.server}:${node.port ?? 0}`
+        const first = seen.get(fp)
+        if (first && first !== sub.name) {
+          node.duplicateOf = first
+        } else if (!first) {
+          seen.set(fp, sub.name)
+        }
+      }
+    }
+  }
 
   let consentedVersion = 0
   if (activated) {
@@ -1787,8 +1925,8 @@ export async function upsertProxySubscription(
   await env.DB.prepare(
     `INSERT INTO proxy_subscriptions
        (id, name, region, url, protocol, status, status_note,
-        enabled, sort_order, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        enabled, sort_order, note, review_source, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?)`
   )
     .bind(
       id, values.name, values.region, values.url, values.protocol, values.status,
@@ -1818,5 +1956,7 @@ export async function deleteProxySubscription(
     .first()
   if (!existing) throw new ApiError(404, "订阅源不存在", "NOT_FOUND")
   await env.DB.prepare("DELETE FROM proxy_subscriptions WHERE id = ?").bind(id).run()
+  // 对称清理节点指纹，避免「已删订阅源」的指纹仍挡着后续导入
+  await env.DB.prepare("DELETE FROM proxy_node_fingerprints WHERE subscription_id = ?").bind(id).run()
   return new Response(null, { status: 204 })
 }

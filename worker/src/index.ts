@@ -10,6 +10,7 @@ import * as adminHandlers from "./handlers/admin"
 import * as adminDnsHandlers from "./handlers/admin-dns"
 import * as adminRootDomainHandlers from "./handlers/admin-root-domains"
 import * as storageHandlers from "./handlers/storage"
+import { rootDomainFor } from "./root-domains"
 import * as newapiHandlers from "./handlers/newapi"
 import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
@@ -42,8 +43,12 @@ import * as feedbackHandlers from "./handlers/feedback"
 import * as chatUploadHandlers from "./handlers/chat-upload"
 import * as twoFactorHandlers from "./handlers/two-factor"
 import * as login2faHandlers from "./handlers/login-2fa"
+import * as checkinHandlers from "./handlers/checkin"
+import * as publicApiHandlers from "./handlers/public-api"
+import * as adminApiHandlers from "./handlers/admin-api"
 import * as eventHandlers from "./handlers/events"
 import * as moderationHandlers from "./handlers/moderation"
+import * as moderationListHandlers from "./handlers/moderation-lists"
 import * as pointHandlers from "./handlers/points"
 import * as attentionHandlers from "./handlers/attention"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
@@ -415,6 +420,32 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       moderationHandlers.updateRiskStatus(env, request, decodeURIComponent(riskMatch[1])),
   },
 
+  // 监管：白名单 / 自动条件 / 黑名单（2026-10-03）
+  {
+    kind: "exact",
+    path: "/admin/moderation/lists",
+    method: "GET",
+    handle: () => moderationListHandlers.listModerationLists(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/moderation/whitelist",
+    method: "POST",
+    handle: () => moderationListHandlers.updateWhitelist(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/moderation/conditions",
+    method: "POST",
+    handle: () => moderationListHandlers.updateConditions(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/moderation/blacklist",
+    method: "POST",
+    handle: () => moderationListHandlers.updateBlacklist(env, request),
+  },
+
   {
     kind: "regex",
     match: (routePath: string) => routePath.match(/^\/admin\/users\/([^/]+)$/),
@@ -504,6 +535,15 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       myInviteHandlers.createMyInvite(env, request),
+  },
+
+  // 补填邀请码（用户反馈 3ed5d0b0）—— 必须排在 /my-invites/:id 之前
+  {
+    kind: "exact",
+    path: "/my-invites/claim",
+    method: "POST",
+    handle: () =>
+      myInviteHandlers.claimMyInvite(env, request),
   },
 
   {
@@ -1831,6 +1871,13 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       chatHandlers.sendMessage(env, request),
   },
   {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/chat\/messages\/([^/]+)\/recall$/),
+    methods: ["POST"],
+    handle: (chatRecallMatch: RegExpMatchArray) =>
+      chatHandlers.recallMessage(env, request, decodeURIComponent(chatRecallMatch[1])),
+  },
+  {
     kind: "exact",
     path: "/chat/heartbeat",
     method: "POST",
@@ -1991,6 +2038,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     methods: ["POST"],
     handle: (communityLikeMatch: RegExpMatchArray) =>
       communityHandlers.toggleLike(env, request, decodeURIComponent(communityLikeMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/comments\/([^/]+)\/like$/),
+    methods: ["POST"],
+    handle: (communityCommentLikeMatch: RegExpMatchArray) =>
+      communityHandlers.toggleCommentLike(env, request, decodeURIComponent(communityCommentLikeMatch[1])),
   },
 
   {
@@ -2208,6 +2263,141 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () => pointHandlers.redeem(env, request),
   },
+
+  // ---- 每日签到 ----
+  {
+    kind: "exact",
+    path: "/checkin",
+    method: "GET",
+    handle: () => checkinHandlers.getCheckinStatus(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/checkin",
+    method: "POST",
+    handle: () => checkinHandlers.doCheckin(env, request),
+  },
+
+  // ---- 公开 API（API Key 认证 + 限额）----
+  // DNS：列表 / 创建 / 编辑 / 删除
+  {
+    kind: "exact",
+    path: "/v1/dns",
+    method: "GET",
+    handle: () => publicApiHandlers.apiListDns(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/v1/dns",
+    method: "POST",
+    handle: () => publicApiHandlers.apiCreateDns(env, request),
+  },
+  {
+    kind: "regex",
+    match: (p: string) => p.match(/^\/v1\/dns\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (m: RegExpMatchArray) => publicApiHandlers.apiUpdateDns(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (p: string) => p.match(/^\/v1\/dns\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (m: RegExpMatchArray) => publicApiHandlers.apiDeleteDns(env, request, decodeURIComponent(m[1])),
+  },
+  // 邮箱：列表 / 创建 / 邮件列表 / 邮件内容 / 回复
+  {
+    kind: "exact",
+    path: "/v1/mailbox",
+    method: "GET",
+    handle: () => publicApiHandlers.apiListMailbox(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/v1/mailbox",
+    method: "POST",
+    handle: () => publicApiHandlers.apiCreateMailbox(env, request),
+  },
+  {
+    kind: "regex",
+    match: (p: string) => p.match(/^\/v1\/mailbox\/([^/]+)\/messages$/),
+    methods: ["GET"],
+    handle: (m: RegExpMatchArray) => publicApiHandlers.apiListMessages(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (p: string) => p.match(/^\/v1\/mailbox\/([^/]+)\/messages\/([^/]+)\/reply$/),
+    methods: ["POST"],
+    handle: (m: RegExpMatchArray) => publicApiHandlers.apiReplyMessage(env, request, decodeURIComponent(m[1]), decodeURIComponent(m[2])),
+  },
+  {
+    kind: "regex",
+    match: (p: string) => p.match(/^\/v1\/mailbox\/([^/]+)\/messages\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (m: RegExpMatchArray) => publicApiHandlers.apiGetMessage(env, request, decodeURIComponent(m[1]), decodeURIComponent(m[2])),
+  },
+  // 临时邮箱：创建 / 刷新 / 读取收件内容
+  {
+    kind: "exact",
+    path: "/v1/temp-mailbox",
+    method: "POST",
+    handle: () => publicApiHandlers.apiCreateTempMailbox(env, request),
+  },
+  {
+    kind: "regex",
+    match: (p: string) => p.match(/^\/v1\/temp-mailbox\/([^/]+)\/refresh$/),
+    methods: ["POST"],
+    handle: (m: RegExpMatchArray) => publicApiHandlers.apiRefreshTempMailbox(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (p: string) => p.match(/^\/v1\/temp-mailbox\/([^/]+)\/messages$/),
+    methods: ["GET"],
+    handle: (m: RegExpMatchArray) => publicApiHandlers.apiListTempMessages(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (p: string) => p.match(/^\/v1\/temp-mailbox\/([^/]+)\/messages\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (m: RegExpMatchArray) => publicApiHandlers.apiGetTempMessage(env, request, decodeURIComponent(m[1]), decodeURIComponent(m[2])),
+  },
+  // Key 管理 + 文档（走 session，供设置页用）
+  {
+    kind: "exact",
+    path: "/api-key",
+    method: "GET",
+    handle: () => publicApiHandlers.getApiKeyStatus(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/api-key",
+    method: "POST",
+    handle: () => publicApiHandlers.generateApiKey(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/api-key",
+    method: "DELETE",
+    handle: () => publicApiHandlers.deleteApiKey(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/api-doc",
+    method: "GET",
+    handle: () => publicApiHandlers.getApiDoc(env, request),
+  },
+  // 管理面板「API」板块配置
+  {
+    kind: "exact",
+    path: "/admin/api-config",
+    method: "GET",
+    handle: () => adminApiHandlers.getApiConfig(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/api-config",
+    method: "POST",
+    handle: () => adminApiHandlers.saveApiConfig(env, request),
+  },
   // 用户间转账（只需转出方确认，凭用户名转给对方）
   {
     kind: "exact",
@@ -2381,6 +2571,18 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: (shopReviewMatch: RegExpMatchArray) =>
       pointHandlers.reviewShopProduct(env, request, decodeURIComponent(shopReviewMatch[1])),
   },
+  // 卡密池（delivery='code'）：读概览 / 追加 / 清空未使用
+  {
+    kind: "branch",
+    match: (routePath: string) => routePath.match(/^\/admin\/points\/products\/([^/]+)\/codes$/),
+    handle: (shopCodesMatch: RegExpMatchArray, method: string) => {
+      const id = decodeURIComponent(shopCodesMatch[1])
+      if (method === "GET") return pointHandlers.getShopProductCodes(env, request, id)
+      if (method === "POST") return pointHandlers.addShopProductCodes(env, request, id)
+      if (method === "DELETE") return pointHandlers.clearShopProductCodes(env, request, id)
+      return null
+    },
+  },
   {
     kind: "regex",
     match: (routePath: string) => routePath.match(/^\/admin\/points\/orders\/([^/]+)\/deliver$/),
@@ -2484,6 +2686,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "DELETE",
     handle: () =>
       storageHandlers.deleteStorageObject(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/objects/delete",
+    method: "POST",
+    handle: () =>
+      storageHandlers.deleteStorageObjects(env, request),
   },
 
   {
@@ -2889,6 +3099,19 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
 
   {
     kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/tempbox\/([^/]+)\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (tempboxFileDelMatch: RegExpMatchArray) =>
+      tempboxHandlers.deleteTempboxFile(
+      env,
+      request,
+      decodeURIComponent(tempboxFileDelMatch[1]),
+      decodeURIComponent(tempboxFileDelMatch[2])
+      ),
+  },
+
+  {
+    kind: "regex",
     match: (routePath: string) => routePath.match(/^\/dev\/key\/([^/]+)$/),
     methods: ["DELETE"],
     handle: (devKeyMatch: RegExpMatchArray) =>
@@ -3074,10 +3297,15 @@ async function hostedDirectLink(
 ): Promise<Response | null> {
   const url = new URL(request.url)
   const host = url.hostname.toLowerCase()
-  const rootDomain = (env.ROOT_DOMAIN ?? "").toLowerCase()
 
-  // 只接管 doulor.cn 的子域名，避免影响自定义域等其它入口
-  if (!rootDomain || !host.endsWith(`.${rootDomain}`)) return null
+  // 只接管**本站根域名**的子域名（doulor.cn + root_domains 表里的 tyu.me 等），
+  // 避免影响自定义域等其它入口。
+  //
+  // ⚠️ 不能只看 env.ROOT_DOMAIN（那是站点自己的域名 doulor.cn）：发给用户的域名由
+  // root_domains 表决定（默认 tyu.me），网盘自定义直链绑在 tyu.me 子域名上时，
+  // 若只看 doulor.cn 会直接 return null → 落回静态资源 → NOT_FOUND
+  // （2026-10-03 反馈「example.tyu.me/xxx.jpg 返回接口不存在」）。
+  if (!(await rootDomainFor(env, host))) return null
   if (!(await storageHandlers.isHostedDirectLinkHost(env, host))) return null
 
   return storageHandlers.serveHostedDirectLink(env, request, host)

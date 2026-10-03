@@ -110,6 +110,8 @@ export default function StoragePage() {
   // 分页：后端每次最多返回 200 个对象并带一个 cursor，接上它才能看到第 201 个之后的文件
   const [cursor, setCursor] = React.useState<string | null>(null)
   const [loadingMore, setLoadingMore] = React.useState(false)
+  /** 多选：批量删除用（存 key） */
+  const [selected, setSelected] = React.useState<Set<string>>(new Set())
 
   /** 拉取概览与文件列表；silent 用于上传/删除后刷新，避免整页 loading 闪烁 */
   // 无权限（403 FEATURE_NOT_PERMITTED）：整页显示提示 + 捐献入口
@@ -334,6 +336,52 @@ export default function StoragePage() {
     try {
       await storageApi.remove(obj.key)
       toast.success(t("st.ok.deleted", { name: obj.filename }))
+      setSelected((prev) => {
+        if (!prev.has(obj.key)) return prev
+        const next = new Set(prev)
+        next.delete(obj.key)
+        return next
+      })
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("em.err.delete"))
+    }
+  }
+
+  // ---- 批量删除 ----
+
+  const toggleSelect = (key: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const allSelected = objects.length > 0 && objects.every((o) => selected.has(o.key))
+
+  const toggleSelectAll = () => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (objects.length > 0 && objects.every((o) => prev.has(o.key))) {
+        for (const o of objects) next.delete(o.key)
+      } else {
+        for (const o of objects) next.add(o.key)
+      }
+      return next
+    })
+  }
+
+  const handleDeleteSelected = async () => {
+    // 只用当前列表里仍然存在的 key，避免删掉已经消失的项
+    const keys = [...selected].filter((k) => objects.some((o) => o.key === k))
+    if (keys.length === 0) return
+    if (!confirm(t("st.confirmDeleteMany", { n: keys.length }))) return
+    try {
+      await storageApi.removeMany(keys)
+      toast.success(t("st.ok.deletedMany", { n: keys.length }))
+      setSelected(new Set())
       await load(true)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("em.err.delete"))
@@ -798,8 +846,19 @@ export default function StoragePage() {
 
         {/* 文件列表 */}
         <Card>
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
             <CardTitle className="text-base">{t("st.list.title", { n: objects.length })}</CardTitle>
+            {selected.size > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-destructive hover:text-destructive"
+                onClick={() => void handleDeleteSelected()}
+              >
+                <Trash2 className="h-4 w-4" />
+                {t("st.list.deleteSelected", { n: selected.size })}
+              </Button>
+            )}
           </CardHeader>
           <CardContent>
             {objects.length === 0 ? (
@@ -812,6 +871,15 @@ export default function StoragePage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead className="w-10">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 cursor-pointer accent-primary align-middle"
+                          checked={allSelected}
+                          onChange={toggleSelectAll}
+                          aria-label={t("st.list.selectAll")}
+                        />
+                      </TableHead>
                       <TableHead>{t("st.list.col.name")}</TableHead>
                       <TableHead>{t("st.list.col.size")}</TableHead>
                       <TableHead>{t("st.list.col.uploaded")}</TableHead>
@@ -823,6 +891,15 @@ export default function StoragePage() {
                       const link = directLinkFor(o.filename)
                       return (
                         <TableRow key={o.key}>
+                          <TableCell className="w-10">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 cursor-pointer accent-primary align-middle"
+                              checked={selected.has(o.key)}
+                              onChange={() => toggleSelect(o.key)}
+                              aria-label={t("st.list.selectOne", { name: o.filename })}
+                            />
+                          </TableCell>
                           <TableCell className="max-w-xs truncate font-mono text-xs">
                             {o.filename}
                           </TableCell>

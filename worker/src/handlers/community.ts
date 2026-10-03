@@ -13,6 +13,49 @@ import type { Env } from "../env"
 
 const DEFAULT_LIMIT = 20
 
+/** 帖子分类（用户反馈 2026-10-03）：闲聊 / 求助 / 资源共享，默认闲聊 */
+export const POST_CATEGORIES = ["chat", "help", "resource"] as const
+export type PostCategory = (typeof POST_CATEGORIES)[number]
+
+function isPostCategory(v: unknown): v is PostCategory {
+  return typeof v === "string" && (POST_CATEGORIES as readonly string[]).includes(v)
+}
+
+/**
+ * 「高赞评论」阈值（用户反馈 2026-10-03）：赞数排在整个社区前约 20% 的评论算高赞。
+ *
+ * 阈值 = 全社区所有「赞数 > 0」的评论按赞数降序后，第 20% 位那条的赞数；
+ * 赞数 >= 阈值且 > 0 即视为高赞。带 60 秒内存缓存（Worker isolate 内复用），
+ * 避免每条评论、每个帖子都重算一遍全局统计。
+ */
+let hotThresholdCache: { t: number; value: number } | null = null
+async function hotCommentThreshold(env: Env): Promise<number> {
+  const now = Date.now()
+  if (hotThresholdCache && now - hotThresholdCache.t < 60_000) {
+    return hotThresholdCache.value
+  }
+  const total = await env.DB.prepare(
+    "SELECT COUNT(*) c FROM post_comments WHERE like_count > 0 AND deleted_at IS NULL"
+  )
+    .first<{ c: number }>()
+  const count = Number(total?.c ?? 0)
+  let threshold = 0
+  if (count > 0) {
+    // 前 20%：跳过赞数最少的后 80%（近似，边界有并列时取整即可）
+    const offset = Math.max(0, Math.floor(count * 0.2))
+    const row = await env.DB.prepare(
+      `SELECT like_count FROM post_comments
+        WHERE like_count > 0 AND deleted_at IS NULL
+        ORDER BY like_count DESC LIMIT 1 OFFSET ?`
+    )
+      .bind(offset)
+      .first<{ like_count: number }>()
+    threshold = Number(row?.like_count ?? 0)
+  }
+  hotThresholdCache = { t: now, value: threshold }
+  return threshold
+}
+
 interface PostRow {
   id: string
   user_id: string
@@ -27,6 +70,8 @@ interface PostRow {
   created_at: string
   updated_at: string | null
   edit_count: number
+  /** 帖子分类：chat（闲聊）/ help（求助）/ resource（资源共享），默认 chat */
+  category: string
   username: string
   nickname: string | null
   avatar_key: string | null
@@ -75,6 +120,7 @@ function toPostDto(r: PostRow, viewerLiked: boolean, isMine: boolean) {
     liked: viewerLiked,
     isMine,
     pinned: Boolean(r.pinned),
+    category: isPostCategory(r.category) ? r.category : "chat",
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     editCount: r.edit_count ?? 0,
@@ -181,7 +227,52 @@ export async function listPosts(env: Env, request: Request): Promise<Response> {
       ).bind(viewer.id, ...ids).all<{ target_id: string }>()).results?.map((x) => x.target_id) ?? [])
     : new Set<string>()
 
-  const out = posts.map((r) => toPostDto(r, likedSet.has(r.id), viewer?.id === r.user_id))
+  // 高赞评论预览（用户反馈 2026-10-03）：每个帖子下方展示最多 2 条「全社区前 20%」的评论
+  const hotThreshold = await hotCommentThreshold(env)
+  const topByPost = new Map<
+    string,
+    { id: string; body: string; likeCount: number; username: string; nickname: string | null; hasAvatar: boolean }[]
+  >()
+  if (ids.length > 0 && hotThreshold > 0) {
+    const placeholders = ids.map(() => "?").join(", ")
+    const commentRows = await env.DB.prepare(
+      `SELECT c.post_id, c.id, c.body, c.like_count, u.username, u.nickname, u.avatar_key
+         FROM post_comments c JOIN users u ON u.id = c.user_id
+        WHERE c.post_id IN (${placeholders}) AND c.deleted_at IS NULL AND c.like_count >= ?
+        ORDER BY c.like_count DESC, c.created_at ASC`
+    )
+      .bind(...ids, hotThreshold)
+      .all<{
+        post_id: string
+        id: string
+        body: string
+        like_count: number
+        username: string
+        nickname: string | null
+        avatar_key: string | null
+      }>()
+    for (const c of commentRows.results ?? []) {
+      const arr = topByPost.get(c.post_id) ?? []
+      if (arr.length < 2) {
+        arr.push({
+          id: c.id,
+          // 预览里不渲染 Markdown，纯表情包评论会显示成一串 `![](...)`，
+          // 这里把图片语法摘掉换成占位符，纯文本正常截断。
+          body: String(c.body ?? "").replace(/!\[[^\]]*\]\([^)\s]+\)/g, "〔图片〕").slice(0, 120),
+          likeCount: Number(c.like_count) || 0,
+          username: c.username,
+          nickname: c.nickname ?? null,
+          hasAvatar: Boolean(c.avatar_key),
+        })
+      }
+      topByPost.set(c.post_id, arr)
+    }
+  }
+
+  const out = posts.map((r) => ({
+    ...toPostDto(r, likedSet.has(r.id), viewer?.id === r.user_id),
+    topComments: topByPost.get(r.id) ?? [],
+  }))
   const last = posts[posts.length - 1]
   const nextCursor = posts.length === limit && last ? encodeCursor(last.created_at, last.id) : null
   return json({ posts: out, nextCursor })
@@ -312,7 +403,7 @@ async function previewInternalPost(
 
 /** GET /api/community/posts/:id/comments */
 export async function listComments(env: Env, request: Request, id: string): Promise<Response> {
-  await readViewer(env, request)
+  const viewer = await readViewer(env, request)
   const rows = await env.DB.prepare(
     `SELECT c.*, u.username, u.nickname, u.avatar_key, u.role AS author_role,
             ct.name AS title_name, ct.color_from AS title_color_from, ct.color_to AS title_color_to,
@@ -343,7 +434,34 @@ export async function listComments(env: Env, request: Request, id: string): Prom
     replyTo: (c.reply_to_username as string | null) ?? null,
     likeCount: c.like_count as number,
   }))
-  return json({ comments: groupComments(comments as unknown as RawComment[]) })
+
+  // 补齐「我点过赞没有」（评论点赞 2026-10-03）。一次 IN 查询，注意 D1 参数上限 100，
+  // 取前 90 条评论即可（单帖评论数受限于展示，不会到 90 条以上还需要精确高亮）。
+  const likedSet = new Set<string>()
+  if (viewer && comments.length > 0) {
+    const ids = comments.slice(0, 90).map((c) => c.id)
+    const placeholders = ids.map(() => "?").join(",")
+    const res = await env.DB.prepare(
+      `SELECT target_id FROM post_likes WHERE user_id=? AND target_type='comment' AND target_id IN (${placeholders})`
+    )
+      .bind(viewer.id, ...ids)
+      .all<{ target_id: string }>()
+    for (const r of res.results ?? []) likedSet.add(r.target_id)
+  }
+
+  // 高赞标记：全社区前 20%（赞数 >= 阈值且 > 0），用于「高赞评论优先显示 + 广场预览」
+  const hotThreshold = await hotCommentThreshold(env)
+
+  return json({
+    comments: groupComments(
+      comments.map((c) => ({
+        ...c,
+        liked: likedSet.has(c.id),
+        likeCount: Number(c.likeCount) || 0,
+        hot: (Number(c.likeCount) || 0) > 0 && (Number(c.likeCount) || 0) >= hotThreshold,
+      })) as unknown as RawComment[]
+    ),
+  })
 }
 
 const POST_COOLDOWN_SEC = 60
@@ -387,10 +505,17 @@ const MAX_JSON_BODY_BYTES = 64 * 1024
 export async function createPost(env: Env, request: Request): Promise<Response> {
   const user = await requireCommunityUser(env, request)
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
-  const body = (await request.json().catch(() => ({}))) as { body?: string; images?: string[] }
+  const body = (await request.json().catch(() => ({}))) as {
+    body?: string
+    images?: string[]
+    category?: unknown
+  }
   const text = (body.body ?? "").trim()
   if (!text) throw new ApiError(400, "内容不能为空", "INVALID_INPUT")
   if (text.length > 5000) throw new ApiError(400, "内容过长（上限 5000 字）", "TOO_LARGE")
+
+  // 分类：只认三种，非法值回落到「闲聊」（前端下拉框已限，这里兜底不报错）
+  const category: PostCategory = isPostCategory(body.category) ? body.category : "chat"
 
   const last = await env.DB.prepare("SELECT created_at FROM posts WHERE user_id=? ORDER BY created_at DESC LIMIT 1")
     .bind(user.id).first<{ created_at: string }>()
@@ -422,8 +547,8 @@ export async function createPost(env: Env, request: Request): Promise<Response> 
   const id = uuid()
   const now = new Date().toISOString()
   await env.DB.prepare(
-    "INSERT INTO posts (id, user_id, channel, body, images, created_at) VALUES (?, ?, 'general', ?, NULL, ?)"
-  ).bind(id, user.id, text, now).run()
+    "INSERT INTO posts (id, user_id, channel, body, images, category, created_at) VALUES (?, ?, 'general', ?, NULL, ?, ?)"
+  ).bind(id, user.id, text, category, now).run()
   return json({ post: { id } }, 201)
 }
 
@@ -533,6 +658,71 @@ export async function toggleLike(env: Env, request: Request, id: string): Promis
 
 async function likeCount(env: Env, id: string): Promise<number> {
   const r = await env.DB.prepare("SELECT like_count FROM posts WHERE id=?").bind(id).first<{ like_count: number }>()
+  return r?.like_count ?? 0
+}
+
+/**
+ * POST /api/community/comments/:id/like —— 评论点赞（幂等切换）。
+ *
+ * 用户反馈（2026-10-03）：成就里写着「给别人的帖子或评论点赞」，但评论根本没有点赞入口。
+ * 表结构其实早就支持（post_likes.target_type='comment' + post_comments.like_count），
+ * 只是没写代码。这里照帖子点赞实现，统计侧（成就 likes_given/likes_received、
+ * analytics、leaderboard）都按 post_likes / like_count 全量统计，会自动包含。
+ */
+export async function toggleCommentLike(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireCommunityUser(env, request)
+
+  const comment = await env.DB.prepare(
+    "SELECT user_id, post_id FROM post_comments WHERE id=? AND deleted_at IS NULL"
+  )
+    .bind(id)
+    .first<{ user_id: string; post_id: string }>()
+  if (!comment) throw new ApiError(404, "评论不存在", "NOT_FOUND")
+
+  const existing = await env.DB.prepare(
+    "SELECT 1 FROM post_likes WHERE user_id=? AND target_type='comment' AND target_id=?"
+  )
+    .bind(user.id, id)
+    .first()
+  if (existing) {
+    await env.DB.batch([
+      env.DB.prepare(
+        "DELETE FROM post_likes WHERE user_id=? AND target_type='comment' AND target_id=?"
+      ).bind(user.id, id),
+      env.DB.prepare("UPDATE post_comments SET like_count = MAX(0, like_count - 1) WHERE id=?").bind(id),
+    ])
+    return json({ liked: false, likeCount: await commentLikeCount(env, id) })
+  }
+
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO post_likes (user_id, target_type, target_id, created_at) VALUES (?, 'comment', ?, ?)"
+    ).bind(user.id, id, new Date().toISOString()),
+    env.DB.prepare("UPDATE post_comments SET like_count = like_count + 1 WHERE id=?").bind(id),
+  ])
+
+  if (comment.user_id !== user.id) {
+    await pushMessage(env, comment.user_id, {
+      category: "social",
+      type: "comment_like",
+      actorId: user.id,
+      postId: comment.post_id,
+      commentId: id,
+      dedupKey: `clike:${id}:${user.id}`,
+    })
+  }
+
+  return json({ liked: true, likeCount: await commentLikeCount(env, id) })
+}
+
+async function commentLikeCount(env: Env, id: string): Promise<number> {
+  const r = await env.DB.prepare("SELECT like_count FROM post_comments WHERE id=?")
+    .bind(id)
+    .first<{ like_count: number }>()
   return r?.like_count ?? 0
 }
 
@@ -902,7 +1092,10 @@ export async function latestNotification(env: Env, request: Request): Promise<Re
   if (!title) {
     const who = actor || (en ? "Someone" : "有人")
     if (row.type === "post_like") title = en ? `${who} liked your post` : `${who} 赞了你的帖子`
-    else if (row.type === "post_comment" || row.type === "comment_reply")
+    else if (row.type === "comment_like") title = en ? `${who} liked your comment` : `${who} 赞了你的评论`
+    else if (row.type === "comment_reply")
+      title = en ? `${who} replied to your comment` : `${who} 回复了你的评论`
+    else if (row.type === "post_comment")
       title = en ? `${who} replied to your post` : `${who} 回复了你的帖子`
     else title = en ? "New message" : "新消息"
   }
@@ -1030,6 +1223,11 @@ export async function uploadPostImage(env: Env, request: Request, id: string): P
  *      否则不同 query 串会各占一份缓存。
  */
 const STATS_CACHE_TTL_SECONDS = 60
+// 说明（2026-10-03 站长反馈）：这个值**不是**「每 N 秒主动请求一次」，而是
+// 「同一份统计结果在边缘缓存里存 N 秒」—— 只在有人真正打开/刷新社区页时才产生
+// 一次 worker 调用，没人看就零请求，不消耗额度。之前从 60 降到 15 是为了让
+// 「发帖后侧栏数字立即更新」更快，但其实发帖后的即时更新已由前端本地 +1 承担
+// （见 community.tsx 的 bumpStats），这里回退到 60 秒即可，缓存更省读额度。
 
 /**
  * GET /api/community/new-posts-count —— 「我看过之后新增」的帖子数。

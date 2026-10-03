@@ -316,8 +316,11 @@ export default function AchievementsPage() {
       min: 0,
       next: null,
       nextName: null,
+      ladder: [],
     }
-  const pct = summary.total > 0 ? (summary.unlocked / summary.total) * 100 : 0
+  // 总览进度按**成就点**算（而不是成就个数）：分级成就练到 Lv.3 值 3 点，
+  // 只看个数会把「浅尝辄止」和「全部练满」算成一样的进度。
+  const pct = summary.maxPoints > 0 ? (summary.points / summary.maxPoints) * 100 : 0
 
   // 每个分组的进度（组内已解锁 / 组内总数）
   const groupStats = groups.map((g) => {
@@ -399,6 +402,56 @@ export default function AchievementsPage() {
               style={{ width: `${pct}%` }}
             />
           </div>
+
+          {/* 称号阶梯：像 VIP 等级一样线性展示所有档位，前后都能看到 */}
+          {title.ladder.length > 1 && (
+            <div className="overflow-x-auto pb-1">
+              <div className="flex w-full min-w-[560px] items-start">
+                {title.ladder.map((rung, i) => {
+                  const reached = summary.points >= rung.min
+                  const isLast = i === title.ladder.length - 1
+                  return (
+                    <div key={`${rung.min}-${rung.name}`} className="flex flex-1 items-start">
+                      <div className="flex w-16 shrink-0 flex-col items-center gap-1">
+                        <div
+                          className={`flex h-7 w-7 items-center justify-center rounded-full border-2 text-[11px] font-semibold transition-colors ${
+                            rung.current
+                              ? "border-primary bg-primary text-primary-foreground"
+                              : reached
+                                ? "border-primary bg-primary/15 text-primary"
+                                : "border-muted-foreground/30 text-muted-foreground"
+                          }`}
+                        >
+                          {i + 1}
+                        </div>
+                        <span
+                          className={`text-[11px] leading-tight ${
+                            rung.current
+                              ? "font-semibold text-foreground"
+                              : reached
+                                ? "text-foreground"
+                                : "text-muted-foreground"
+                          }`}
+                        >
+                          {rung.name}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">{rung.min}</span>
+                      </div>
+                      {!isLast && (
+                        <div
+                          className={`mt-3.5 h-0.5 flex-1 ${
+                            summary.points >= title.ladder[i + 1].min
+                              ? "bg-primary"
+                              : "bg-muted-foreground/25"
+                          }`}
+                        />
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
 
           {/* 分组进度 */}
           {groupStats.length > 1 && (

@@ -410,7 +410,10 @@ async function completeBinding(
   const now = new Date().toISOString()
 
   // 本次是否真的把 ai 从无变有：决定移除时该不该收回，以及是否发邀请奖励。
-  const aiGranted = !parsePermissions(user.permissions).ai
+  // 先看「捐献授权开关」：关掉时绑定照常进池，只是不再授予 ai 权限。
+  const aiGranted =
+    (await getSettingBool(env, "donation_grant_cli2api")) &&
+    !parsePermissions(user.permissions).ai
 
   const result = {
     id,

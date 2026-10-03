@@ -9,6 +9,7 @@ import {
   Link2,
   Loader2,
   Lock,
+  Trash2,
   Upload,
   MessageSquareText,
 } from "lucide-react"
@@ -197,6 +198,20 @@ export default function TempboxPage() {
   )
 
   const handleUnlock = () => void unlock()
+
+  /** 删除批次里的单个文件（用户反馈：传了多个文件后没法删掉其中一个） */
+  const handleDeleteFile = async (filename: string) => {
+    if (!batch) return
+    if (!confirm(t("tb.confirmDeleteFile", { name: filename }))) return
+    try {
+      await tempboxApi.removeFile(batch.code, filename)
+      setBatch(await tempboxApi.get(batch.code))
+      if (previewText === filename) setPreviewText(null)
+      toast.success(t("tb.ok.fileDeleted"))
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("tb.err.deleteFile"))
+    }
+  }
 
   /**
    * 分享链接进入：`/t?code=123456` 自动填入并解锁。
@@ -507,6 +522,15 @@ export default function TempboxPage() {
                               <Download className="h-4 w-4" />
                             </a>
                           </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void handleDeleteFile(f.name)}
+                            title={t("tb.deleteFile")}
+                            className="text-destructive hover:text-destructive"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
                         </div>
                       </div>
                     ))}
@@ -531,7 +555,7 @@ export default function TempboxPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-3 gap-3 text-center text-xs text-muted-foreground">
+            <div className="grid grid-cols-2 gap-3 text-center text-xs text-muted-foreground sm:grid-cols-4">
               <div className="rounded-md border p-3">
                 <p className="text-base font-semibold text-foreground">
                   {t("tb.minutes", { n: config.defaultMinutes })}
@@ -549,6 +573,12 @@ export default function TempboxPage() {
                   {config.maxFiles}
                 </p>
                 {t("tb.maxFiles")}
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-base font-semibold text-foreground">
+                  {config.maxLiveBatches}
+                </p>
+                {t("tb.maxLiveBatches")}
               </div>
             </div>
 

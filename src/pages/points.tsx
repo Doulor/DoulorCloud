@@ -21,6 +21,7 @@ import {
   Trash2,
   Upload,
   Wallet,
+  CalendarCheck,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -29,6 +30,7 @@ import { AnchoredPanel } from "@/components/anchored-panel"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { ShopIconPicker } from "@/components/shop-icon-picker"
+import { CheckinDialog } from "@/components/checkin-dialog"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -288,18 +290,24 @@ function ProductCard({
   balance,
   sellerName,
   onBuy,
+  onDetail,
 }: {
   product: PointProduct
   balance: number
   sellerName?: string | null
   onBuy: (p: PointProduct) => void
+  /** 点击查看完整商品详情（用户反馈 4b720eeb：标题/描述过长看不全） */
+  onDetail?: (p: PointProduct) => void
 }) {
   const { t } = useT()
   const soldOut = product.stock !== null && product.stock <= 0
   const tooExpensive = product.price > balance
   const isRental = product.billingMode === "rental"
   return (
-    <Card className="flex min-w-0 flex-col">
+    <Card
+      className="flex min-w-0 cursor-pointer flex-col"
+      onClick={() => onDetail?.(product)}
+    >
       <ProductCover imageUrl={product.imageUrl} icon={product.icon} name={product.name} />
       <CardHeader className="pb-2">
         <div className="flex items-start justify-between gap-2">
@@ -311,6 +319,7 @@ function ProductCard({
                     跟订单记录里的「发私信」是同一个会话 */}
                 <Link
                   to={`/dashboard/dm/${encodeURIComponent(sellerName)}`}
+                  onClick={(e) => e.stopPropagation()}
                   className="ml-1 whitespace-nowrap text-primary underline underline-offset-2 hover:text-primary/80"
                 >
                   {t("pt.dm")}
@@ -351,11 +360,8 @@ function ProductCard({
         {product.description ? (
           // ⚠️ 必须 line-clamp + break-all：商品描述里常有一整段不带空格的链接，
           // 没有断行机会会一路把卡片撑爆（2026-10-01 用户反馈「描述过长超出卡片」）。
-          // 完整内容在「购买」弹窗里还有一次展示，这里截断不丢信息。
-          <p
-            className="line-clamp-3 break-all whitespace-pre-wrap text-sm text-muted-foreground"
-            title={product.description}
-          >
+          // 点卡片任意位置（含图标/封面）都会打开完整详情弹窗，这里无需单独按钮。
+          <p className="line-clamp-3 break-all whitespace-pre-wrap text-sm text-muted-foreground">
             {product.description}
           </p>
         ) : (
@@ -377,7 +383,10 @@ function ProductCard({
             className="w-full"
             variant={tooExpensive ? "outline" : "default"}
             disabled={soldOut}
-            onClick={() => onBuy(product)}
+            onClick={(e) => {
+              e.stopPropagation()
+              onBuy(product)
+            }}
           >
             {soldOut
               ? isRental
@@ -477,6 +486,7 @@ export default function PointsPage() {
   const [detailOpen, setDetailOpen] = React.useState(false)
 
   // 转账弹窗（用户间转账：只需自己确认，凭对方用户名转过去）
+  const [checkinOpen, setCheckinOpen] = React.useState(false)
   const [transferOpen, setTransferOpen] = React.useState(false)
   const [transferTo, setTransferTo] = React.useState("")
   const [transferAmount, setTransferAmount] = React.useState("")
@@ -484,6 +494,8 @@ export default function PointsPage() {
 
   // 购买弹窗
   const [buyTarget, setBuyTarget] = React.useState<PointProduct | null>(null)
+  /** 商品详情弹窗（用户反馈 4b720eeb：标题/描述过长在卡片里看不全） */
+  const [detailTarget, setDetailTarget] = React.useState<PointProduct | null>(null)
   const [buyBusy, setBuyBusy] = React.useState(false)
 
   // 我的商品 / 收到的订单
@@ -1179,7 +1191,22 @@ export default function PointsPage() {
                   </span>
                 </CardTitle>
               </div>
-              <div className="flex items-center gap-2">
+              {/**
+               * 按钮区父容器：flex-wrap 让按钮在窄屏自动换行（全局规则，见 MEMORY.md）。
+               * 每个按钮都是 whitespace-nowrap 的 flex 项，按钮再多也不撑破卡片 ——
+               * 最多换行，不会把最后一个按钮顶出屏幕外（390px 手机 / WebToApp WebView 实测）。
+               */}
+              <div className="flex flex-wrap items-center gap-2">
+                {/* 每日签到：放在转账左边，作为积分获取的常驻入口 */}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setCheckinOpen(true)}
+                >
+                  <CalendarCheck className="mr-1.5 h-3.5 w-3.5" />
+                  {t("pt.checkin")}
+                </Button>
+
                 <Button
                   variant="outline"
                   size="sm"
@@ -1311,7 +1338,7 @@ export default function PointsPage() {
               </Card>
 
               {data.products.map((p) => (
-                <ProductCard key={p.id} product={p} balance={balance} onBuy={setBuyTarget} />
+                <ProductCard key={p.id} product={p} balance={balance} onBuy={setBuyTarget} onDetail={setDetailTarget} />
               ))}
             </div>
           </div>
@@ -1367,6 +1394,7 @@ export default function PointsPage() {
                     balance={balance}
                     sellerName={p.ownerName}
                     onBuy={setBuyTarget}
+                    onDetail={setDetailTarget}
                   />
                 ))}
               </div>
@@ -1603,6 +1631,9 @@ export default function PointsPage() {
       </Dialog>
 
       {/* 转账弹窗：只需转出方确认，不需要对方同意 */}
+      {/* 每日签到 */}
+      <CheckinDialog open={checkinOpen} onOpenChange={setCheckinOpen} onDone={() => void load()} />
+
       <Dialog open={transferOpen} onOpenChange={(o) => !transferBusy && setTransferOpen(o)}>
         <DialogContent>
           <DialogHeader>
@@ -1766,6 +1797,54 @@ export default function PointsPage() {
             <Button onClick={() => void handleBuy()} disabled={!canBuy}>
               {buyBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
               {t("pt.confirmBuy")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 商品详情：完整标题 + 描述（卡片里被截断，这里看全文） */}
+      <Dialog open={!!detailTarget} onOpenChange={(o) => !o && setDetailTarget(null)}>
+        <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="break-all">{detailTarget?.name}</DialogTitle>
+            <DialogDescription>{t("pt.detailTitle")}</DialogDescription>
+          </DialogHeader>
+          {detailTarget && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+                <span className="text-lg font-semibold tabular-nums">{detailTarget.price}</span>
+                <span className="text-xs text-muted-foreground">
+                  {t("pt.unit")}
+                  {detailTarget.billingMode === "rental"
+                    ? ` / ${t("pt.days", { n: detailTarget.rentalDays ?? 0 })}`
+                    : ""}
+                  {detailTarget.perUserLimit
+                    ? ` · ${t("pt.perUserLimit", { n: detailTarget.perUserLimit })}`
+                    : ""}
+                </span>
+              </div>
+              {detailTarget.description ? (
+                <p className="whitespace-pre-wrap break-all text-sm text-muted-foreground">
+                  {detailTarget.description}
+                </p>
+              ) : (
+                <p className="text-sm text-muted-foreground">{t("pt.detailNoDesc")}</p>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDetailTarget(null)}>
+              {t("common.close")}
+            </Button>
+            <Button
+              onClick={() => {
+                if (detailTarget) {
+                  setBuyTarget(detailTarget)
+                  setDetailTarget(null)
+                }
+              }}
+            >
+              {t("pt.buy")}
             </Button>
           </DialogFooter>
         </DialogContent>

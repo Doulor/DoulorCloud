@@ -5,8 +5,10 @@ import {
   Bell,
   Check,
   CheckCheck,
+  Heart,
   Loader2,
   Megaphone,
+  MessageCircle,
   MessagesSquare,
   MessageSquare,
   Package,
@@ -255,7 +257,8 @@ export default function MessagesPage() {
         toast.error(t("msg.postDeleted"))
         return
       }
-      navigate(`/dashboard/community/${n.postId}`)
+      // 带上 from：详情页的返回按钮据此回到消息列表（用户反馈 d89b9a86）
+      navigate(`/dashboard/community/${n.postId}`, { state: { from: "/dashboard/messages" } })
       return
     }
     if (n.link) navigate(n.link)
@@ -328,7 +331,7 @@ export default function MessagesPage() {
 
       <Tabs value={tab} onValueChange={handleTabChange}>
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <TabsList>
+          <TabsList className="h-auto max-w-full flex-wrap">
             {TABS.map((c) => {
               const meta = CATEGORY_META[c]
               const Icon = meta.icon
@@ -499,6 +502,19 @@ function OrderMessageActions({
   )
 }
 
+/**
+ * 左侧类型图标：一眼能分出「点赞」还是「评论」（站长 2026-10-03 要求）。
+ * 点赞 = 爱心；评论/回复 = 气泡；反馈 = 方气泡；网站动态 = 喇叭；系统 = 铃铛。
+ */
+function notifIcon(n: Notification) {
+  if (n.category === "social") {
+    if (n.type === "post_like" || n.type === "comment_like") return Heart
+    if (n.type === "feedback_reply") return MessageSquare
+    return MessageCircle
+  }
+  return n.category === "site" ? Megaphone : Bell
+}
+
 /** 单条消息 */
 function MessageRow({
   n,
@@ -512,6 +528,8 @@ function MessageRow({
   const { t } = useT()
   const isSiteOrSystem = n.category === "site" || n.category === "system"
   const actor = n.actorNickname || n.actorUsername
+  const who = actor ?? t("msg.someone")
+  const TypeIcon = notifIcon(n)
 
   return (
     <Card
@@ -520,9 +538,19 @@ function MessageRow({
     >
       <CardContent className="flex items-start gap-3 p-4">
         <span
-          className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${n.read ? "bg-transparent" : "bg-primary"}`}
-          aria-hidden
-        />
+          className={`relative mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
+            n.read ? "bg-muted text-muted-foreground" : "bg-primary/10 text-primary"
+          }`}
+        >
+          <TypeIcon className="h-4 w-4" aria-hidden />
+          {/* 未读：图标右上角一个小点（原来是一个独立的纯色圆点，现在并到图标上） */}
+          {!n.read && (
+            <span
+              className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-primary"
+              aria-hidden
+            />
+          )}
+        </span>
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             {isSiteOrSystem && n.title && (
@@ -530,12 +558,17 @@ function MessageRow({
             )}
             {!isSiteOrSystem && (
               <p className="text-sm font-medium">
+                {/* ⚠️ 口径必须和后端 latestNotification 一致（浏览器通知拿的是那份） */}
                 {n.type === "post_like"
-                  ? t("msg.liked", { actor: actor ?? t("msg.someone") })
-                  : n.type === "feedback_reply"
-                    ? // 反馈回复关联的是反馈单，不是帖子 —— 说成「帖子」用户会找不到东西
-                      `${actor ?? t("msg.someone")} ${t("cm.notif.feedbackReply")}`
-                    : t("msg.replied", { actor: actor ?? t("msg.someone") })}
+                  ? t("msg.liked", { actor: who })
+                  : n.type === "comment_like"
+                    ? t("msg.likedComment", { actor: who })
+                    : n.type === "comment_reply"
+                      ? t("msg.repliedComment", { actor: who })
+                      : n.type === "feedback_reply"
+                        ? // 反馈回复关联的是反馈单，不是帖子 —— 说成「帖子」用户会找不到东西
+                          `${who} ${t("cm.notif.feedbackReply")}`
+                        : t("msg.replied", { actor: who })}
               </p>
             )}
             <span className="text-xs text-muted-foreground">

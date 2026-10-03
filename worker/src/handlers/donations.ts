@@ -61,7 +61,7 @@ import {
 import { guardRateLimit } from "../ratelimit"
 import { donationRewardLabel, grantDonationReward, isDonationRewardKind } from "../points"
 import { grantFirstDonationVoucher } from "../vouchers"
-import { getSettings, getSettingBool, getSettingNumber } from "../settings"
+import { getSettings, getSettingBool, getSettingNumber, type SettingKey } from "../settings"
 import { pushMessage } from "../user-messages"
 import { grantInviteReward } from "../invite-rewards"
 import {
@@ -185,6 +185,27 @@ const DONATION_TYPES: Record<string, Feature> = {
 }
 
 /**
+ * 捐献类型 → 「是否授予权限」的设置键。
+ *
+ * 反代账号（wb2api / cli2api）不在这里 —— 那是独立通道、走各自的绑定表，
+ * 开关在其 handler 里单独读（`donation_grant_wb2api` / `donation_grant_cli2api`）。
+ * 未列出的类型默认授予（保守，宁可多授不漏）。
+ */
+const DONATION_GRANT_SETTING: Record<string, SettingKey> = {
+  ai: "donation_grant_ai",
+  sensenova: "donation_grant_sensenova",
+  frp: "donation_grant_frp",
+  proxy: "donation_grant_proxy",
+}
+
+/** 某捐献类型通过后是否授予对应权限（默认 true，保持历史行为） */
+async function donationGrantsPermission(env: Env, type: string): Promise<boolean> {
+  const key = DONATION_GRANT_SETTING[type]
+  if (!key) return true
+  return getSettingBool(env, key)
+}
+
+/**
  * 捐献类型的**展示名**，与 `FEATURE_LABELS` 解耦。
  *
  * 为什么不能直接用 FEATURE_LABELS：`ai` 与 `sensenova` 的 feature 都是 `ai`，
@@ -212,6 +233,41 @@ export const DONATION_TYPE_LABELS: Record<string, string> = {
  * 幂等：同一个 URL 已在节点池里（无论来自谁）就跳过，避免重复条目。
  * `donationId` 用于记录来源，撤销这笔捐献时据此精确收回。
  */
+/** 查这批节点指纹里有多少个已经存在于节点池（「导入时拒绝相同节点」用） */
+async function countDuplicateFingerprints(
+  env: Env,
+  fingerprints: string[]
+): Promise<number> {
+  if (fingerprints.length === 0) return 0
+  let dup = 0
+  const BATCH = 100
+  for (let i = 0; i < fingerprints.length; i += BATCH) {
+    const batch = fingerprints.slice(i, i + BATCH)
+    const placeholders = batch.map(() => "?").join(",")
+    const r = await env.DB.prepare(
+      `SELECT COUNT(*) AS c FROM proxy_node_fingerprints WHERE fingerprint IN (${placeholders})`
+    )
+      .bind(...batch)
+      .first<{ c: number }>()
+    dup += r?.c ?? 0
+  }
+  return dup
+}
+
+/** 写入某订阅源的节点指纹（INSERT OR IGNORE：一个指纹只能归属一个订阅源） */
+async function writeNodeFingerprints(
+  env: Env,
+  subscriptionId: string,
+  fingerprints: string[]
+): Promise<void> {
+  if (fingerprints.length === 0) return
+  const now = new Date().toISOString()
+  const stmt = env.DB.prepare(
+    "INSERT OR IGNORE INTO proxy_node_fingerprints (fingerprint, subscription_id, created_at) VALUES (?, ?, ?)"
+  )
+  await env.DB.batch(fingerprints.map((fp) => stmt.bind(fp, subscriptionId, now)))
+}
+
 async function importProxySubscriptions(
   env: Env,
   payloadStr: string,
@@ -246,6 +302,17 @@ async function importProxySubscriptions(
       .first()
     if (exists) continue
 
+    const check = byUrl.get(url)
+    const fingerprints = check?.nodeFingerprints ?? []
+
+    // 节点查重（2026-10-03 站长要求：导入时拒绝相同节点）。
+    // 只在自动审核路径（有 checks）做；手工放行是管理员明确批准的，不强拦。
+    // 全部节点都已在池里 = 同一份资源换个 URL，直接拒绝导入。
+    if (opts.checks && fingerprints.length > 0) {
+      const dup = await countDuplicateFingerprints(env, fingerprints)
+      if (dup >= fingerprints.length) continue
+    }
+
     let host = url
     try {
       host = new URL(url).hostname
@@ -254,9 +321,9 @@ async function importProxySubscriptions(
     }
 
     // 手工放行路径没有识别结果，就地补一次（失败不阻断，协议地区留空由管理员补）
-    let protocol = byUrl.get(url)?.protocol ?? null
-    let region = byUrl.get(url)?.region ?? null
-    let status = byUrl.get(url)?.ok ? "online" : "unknown"
+    let protocol = check?.protocol ?? null
+    let region = check?.region ?? null
+    let status = check?.ok ? "online" : "unknown"
     if (!opts.checks) {
       try {
         const profile = await detectSubscriptionProfile(env, { id: "", url })
@@ -268,14 +335,15 @@ async function importProxySubscriptions(
       }
     }
 
+    const newId = uuid()
     await env.DB.prepare(
       `INSERT INTO proxy_subscriptions
          (id, name, region, url, protocol, status, enabled, sort_order, note,
-          source_donation_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?)`
+          source_donation_id, review_source, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?)`
     )
       .bind(
-        uuid(),
+        newId,
         host,
         region,
         url,
@@ -283,10 +351,16 @@ async function importProxySubscriptions(
         status,
         "由捐献导入",
         opts.donationId ?? null,
+        // 审核来源：带 checks（自动审核路径）= auto，否则（管理员手工放行）= manual
+        opts.checks ? "auto" : "manual",
         new Date().toISOString(),
         new Date().toISOString()
       )
       .run()
+
+    // 写节点指纹（后续导入据此查重拒绝）
+    await writeNodeFingerprints(env, newId, fingerprints)
+
     imported += 1
   }
   return imported
@@ -461,12 +535,16 @@ async function applyDonationApproval(
   const grantRewards = opts.grantRewards !== false
   const now = new Date().toISOString()
 
+  // 是否授予权限：先看「这条捐献通道是否还开着授权」，再看「用户是否本来就有」。
+  // 关掉授权开关时，捐献照常受理（资源照收、额度与积分照发），只是不写权限。
+  const grantPerm = await donationGrantsPermission(env, app.type)
+
   // 记录「这次是否真正授予了权限」：置 true 之前若为 false，才算新增。
   // ⚠️ 这个判断仍基于 app.permissions 的快照（并发下可能有微小误差）；
   // 但下面写回 permissions 走的是原子 json_set，不会再整列覆盖别人的变更。
-  const granted = parsePermissions(app.permissions)[feature] !== true
+  const granted = grantPerm && parsePermissions(app.permissions)[feature] !== true
 
-  await env.DB.batch([
+  const approvalStatements = [
     env.DB.prepare(
       `UPDATE donations
           SET status = 'approved', review_note = ?, reviewed_by = ?, reviewed_at = ?,
@@ -482,10 +560,18 @@ async function applyDonationApproval(
       opts.channelId ?? null,
       app.id
     ),
-    env.DB.prepare(
-      `UPDATE users SET permissions = ${featurePermissionSql(feature, true)}, updated_at = ? WHERE id = ?`
-    ).bind(now, app.user_id),
-  ])
+  ]
+
+  // 授权开关关掉时不写权限（granted 为 false 时同样不写 —— 本来就有的不重复写）。
+  if (granted) {
+    approvalStatements.push(
+      env.DB.prepare(
+        `UPDATE users SET permissions = ${featurePermissionSql(feature, true)}, updated_at = ? WHERE id = ?`
+      ).bind(now, app.user_id)
+    )
+  }
+
+  await env.DB.batch(approvalStatements)
 
   // 授予 **ai** 权限时，把被商汤巡检禁用的中转站账号重新启用。
   //
@@ -1323,6 +1409,19 @@ export async function listDonations(env: Env, request: Request): Promise<Respons
       // 纯展示开关（与 sensenova_enabled 的「通道总开关」区分）：见 settings.ts 注释
       visible: await getSettingBool(env, "sensenova_donation_visible"),
       consoleUrl: SENSENOVA_CONSOLE_URL,
+    },
+    /**
+     * 各捐献/绑定通道是否「授予权限」（对应 donation_grant_* 开关）。
+     * 前端据此把「通过即解锁权限」的文案换成「仅收录资源、不授予权限」，
+     * 避免站长关掉授权后捐献页还在误导用户。
+     */
+    grantPermissions: {
+      ai: settings.donation_grant_ai !== "0",
+      sensenova: settings.donation_grant_sensenova !== "0",
+      frp: settings.donation_grant_frp !== "0",
+      proxy: settings.donation_grant_proxy !== "0",
+      wb2api: settings.donation_grant_wb2api !== "0",
+      cli2api: settings.donation_grant_cli2api !== "0",
     },
   })
 }
@@ -2274,12 +2373,27 @@ export async function revokeDonation(env: Env, request: Request, id: string): Pr
   // 只删 source_donation_id 指向本单的行，不碰管理员手工添加的。
   let releasedSubs = 0
   if (app.type === "proxy") {
+    // 先取出要删的订阅源 id，删掉后对称清理它们的节点指纹
+    const ids = await env.DB.prepare(
+      "SELECT id FROM proxy_subscriptions WHERE source_donation_id = ?"
+    )
+      .bind(app.id)
+      .all<{ id: string }>()
+    const idList = (ids.results ?? []).map((r) => r.id)
     const del = await env.DB.prepare(
       "DELETE FROM proxy_subscriptions WHERE source_donation_id = ?"
     )
       .bind(app.id)
       .run()
     releasedSubs = del.meta?.changes ?? 0
+    if (idList.length > 0) {
+      const placeholders = idList.map(() => "?").join(",")
+      await env.DB.prepare(
+        `DELETE FROM proxy_node_fingerprints WHERE subscription_id IN (${placeholders})`
+      )
+        .bind(...idList)
+        .run()
+    }
   }
 
   // 内网穿透捐献：撤销时把捐献的服务端节点**停用**（不删，删了会级联

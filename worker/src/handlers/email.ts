@@ -2,6 +2,7 @@ import { ApiError, json } from "../http"
 import { uuid, hashToken } from "../crypto"
 import { isReservedName } from "../reserved-names"
 import { requireUser, type UserRow } from "../auth"
+import { isApiRequest } from "../api-source"
 import { cfDeleteEmailRule } from "../cloudflare"
 import { sendReply, sendMail, renderMail, isMailerConfigured } from "../mailer"
 import { guardRateLimit } from "../ratelimit"
@@ -358,9 +359,9 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
   // 由代码查 mailboxes 表决定去处 —— 逐地址建规则是历史包袱，还占「每域 200 条」硬配额。
   // 所以新邮箱的 rule_id 一律为 NULL；删除路径仍会摘掉历史遗留的规则（见 purgeMailbox）。
   await env.DB.prepare(
-    "INSERT INTO mailboxes (id, user_id, address, forwarding_to, created_at) VALUES (?, ?, ?, ?, ?)"
+    "INSERT INTO mailboxes (id, user_id, address, forwarding_to, source, created_at) VALUES (?, ?, ?, ?, ?, ?)"
   )
-    .bind(id, user.id, address, defaultForwarding, now)
+    .bind(id, user.id, address, defaultForwarding, isApiRequest(request) ? "api" : "web", now)
     .run()
 
   const row = await env.DB.prepare("SELECT * FROM mailboxes WHERE id = ?")
@@ -591,7 +592,7 @@ export async function createTempMailbox(env: Env, request: Request): Promise<Res
     )
   }
 
-  const created = await insertTempMailbox(env, user.id)
+  const created = await insertTempMailbox(env, user.id, isApiRequest(request) ? "api" : "web")
   return json(
     { mailbox: await toPublicMailbox(env, user, created, undefined, undefined, await primaryMailboxAddress(env, user)) },
     201
@@ -631,7 +632,7 @@ export async function refreshTempMailbox(
   // 不会出现「两个邮箱抢同一个地址」或额度被凭空占掉的情况。
   await purgeMailbox(env, mailbox)
 
-  const created = await insertTempMailbox(env, user.id)
+  const created = await insertTempMailbox(env, user.id, isApiRequest(request) ? "api" : "web")
   return json(
     { mailbox: await toPublicMailbox(env, user, created, undefined, undefined, await primaryMailboxAddress(env, user)) },
     201
@@ -645,7 +646,11 @@ export async function refreshTempMailbox(
  * 否则刷新出来的邮箱可能出现「少了某个字段」这类只在刷新路径上复现的问题
  * （例如没建 CF 规则，表现为收不到信）。
  */
-async function insertTempMailbox(env: Env, userId: string): Promise<MailboxRow> {
+async function insertTempMailbox(
+  env: Env,
+  userId: string,
+  source: "web" | "api" = "web"
+): Promise<MailboxRow> {
   // 临时邮箱也建在**默认根域**（与注册分配一致），不写死 env.ROOT_DOMAIN
   const root = (await getDefaultRootDomain(env)).name
 
@@ -677,9 +682,9 @@ async function insertTempMailbox(env: Env, userId: string): Promise<MailboxRow> 
   // 与普通邮箱一致：不再逐条建 Cloudflare 规则（catch-all 已由本 Worker 接管）。
   // forwarding_to 恒为 NULL：临时邮箱不提供转发配置，避免被当成转发跳板。
   await env.DB.prepare(
-    "INSERT INTO mailboxes (id, user_id, address, forwarding_to, created_at, is_temp) VALUES (?, ?, ?, NULL, ?, 1)"
+    "INSERT INTO mailboxes (id, user_id, address, forwarding_to, source, created_at, is_temp) VALUES (?, ?, ?, NULL, ?, ?, 1)"
   )
-    .bind(id, userId, address, now)
+    .bind(id, userId, address, source, now)
     .run()
 
   const row = await env.DB.prepare("SELECT * FROM mailboxes WHERE id = ?")

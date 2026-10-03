@@ -168,6 +168,32 @@ export const SETTING_DEFAULTS = {
    */
   auto_review_features: "ai,proxy",
   /**
+   * ── 捐献是否授予对应权限（1/0，默认全开）────────────────────────────
+   *
+   * 每项控制一条「捐献/绑定通道」在**通过后是否自动授予对应功能权限**。
+   * 关掉某条后：捐献/绑定**照常受理**（资源照收、额度与积分照发），
+   * 只是不再把该权限写进 users.permissions —— 权限与「收资源」解耦。
+   *
+   * 与其它开关的区别（别混）：
+   *   · `*_enabled` 是「通道/功能总开关」—— 关掉后连提交/绑定都会被拒；
+   *   · 本组只卡「**是否给权限**」这一环，通道本身仍工作；
+   *   · `auto_review_features` 管「要不要人工审核」，与给不给权限无关。
+   *
+   * 关掉后**不会回收**已授予的权限，只影响之后的捐献。
+   */
+  /** 自定义 AI 渠道捐献 → ai 权限 */
+  donation_grant_ai: "1",
+  /** 商汤 Key 捐献 → ai 权限 */
+  donation_grant_sensenova: "1",
+  /** 内网穿透捐献 → frp 权限 */
+  donation_grant_frp: "1",
+  /** 代理节点捐献 → proxy 权限 */
+  donation_grant_proxy: "1",
+  /** WorkBuddy 反代账号绑定 → ai 权限 */
+  donation_grant_wb2api: "1",
+  /** CLI2API 账号绑定 → ai 权限 */
+  donation_grant_cli2api: "1",
+  /**
    * 昵称附加保留词（逗号分隔，大小写不敏感）。
    * 与「保留域名」同在管理面板「保留名」标签管理。
    * 基础保留词（管理员/站长/admin 等）硬编码在 identity.ts，无法删除。
@@ -223,8 +249,8 @@ export const SETTING_DEFAULTS = {
   community_guest_access: "1",
   /** 压缩后单张图片上限（字节，默认 1 MiB） */
   community_image_max_bytes: "1048576",
-  /** 单个表情包大小上限（字节，默认 512 KiB）—— 表情包都是小图，不必给到 1 MiB */
-  sticker_max_bytes: "524288",
+  /** 单个表情包大小上限（字节，默认 1 MiB）—— 2026-10-03 站长要求从 512 KiB 提到 1 MiB（动图常超 512KB） */
+  sticker_max_bytes: "1048576",
   /** 每人最多保存多少个表情包（防止有人把它当网盘用） */
   sticker_max_count: "60",
   /**
@@ -407,6 +433,36 @@ export const SETTING_DEFAULTS = {
    * 注意：它**只管兑换**，商城里其它商品各自有上架开关（point_products.enabled）。
    */
   points_enabled: "1",
+  /**
+   * ── 每日签到 ──
+   *
+   * 基础奖励是**闭区间随机**（min === max 时就是固定值），
+   * 连续签到命中里程碑再额外加一笔。所有数值都由站长在管理面板填。
+   */
+  checkin_enabled: "1",
+  /** 基础奖励下限（含） */
+  checkin_points_min: "1",
+  /** 基础奖励上限（含）。与下限相等即「固定奖励」 */
+  checkin_points_max: "5",
+  /**
+   * 连续签到里程碑，格式 `天数:奖励`，**一行一个**（也认逗号/分号/顿号分隔）。
+   * 例：
+   *   7:50
+   *   30:300
+   *   100:1000
+   *
+   * ⚠️ 分隔符要收宽：后台是个多行输入框，「一行一个」是站长最自然的写法。
+   * 只按逗号切会把整段当成**一个**条目，配置看着有、实际不生效。
+   * 解析逻辑统一走 `worker/src/checkin-config.ts`（写入侧与读取侧共用一份）。
+   */
+  checkin_milestones: "7:50\n30:300\n100:1000",
+  /**
+   * 公开 API 调用产生的业务数据（DNS / 邮箱 / 临时邮箱）是否计入成就计数。
+   *
+   * 默认 **0 = 不计入**：API 是程序化调用，容易脚本刷成就点（成就点能换真金白银的
+   * 订阅），所以默认不让 API 调用刷成就。站长可在管理面板「API」板块打开。
+   */
+  api_count_achievements: "0",
   /**
    * 兑换比例：**每 1 积分值多少元**（默认 1，支持小数，如 0.5 / 10）。
    * 兑换 X 积分 ⇒ X * points_yuan_per_point 元。填 10 就是「1 积分 = 10 元」。

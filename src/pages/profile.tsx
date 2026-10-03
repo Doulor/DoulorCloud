@@ -1526,7 +1526,7 @@ export default function ProfilePage() {
                       {t("pf.music.upload")}
                       <input
                         type="file"
-                        accept="audio/mpeg,audio/mp4,audio/ogg,audio/wav"
+                        accept="audio/mpeg,audio/mp4,audio/x-m4a,audio/m4a,audio/ogg,audio/wav"
                         className="hidden"
                         onChange={(e) => void handleUpload("music", e.target.files?.[0])}
                       />

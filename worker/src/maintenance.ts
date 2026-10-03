@@ -36,6 +36,7 @@ import { autoPriceNewModels } from "./newapi-client"
 import { cli2DeleteAccount } from "./cli2api-client"
 import { expireRentalOrders } from "./points-shop"
 import { scanDns } from "./dns-audit"
+import { syncProxySubscriptionStatuses } from "./handlers/proxy"
 
 /** 过期会话保留期（天）：留一点用于排查"刚掉线"的投诉 */
 const SESSION_RETENTION_DAYS = 7
@@ -160,6 +161,7 @@ export interface MaintenanceReport {
    */
   dnsAudit: { scanned: number; found: number; high: number; medium: number; low: number } | null
   tableRows: Record<string, number>
+  proxySync: { checked: number; offline: number; unknown: number; recovered: number } | null
   warnings: string[]
   errors: string[]
 }
@@ -747,6 +749,25 @@ export async function runMaintenance(
     }
   }
 
+  // 9d) 订阅源过时检测（2026-10-03 站长要求）
+  //
+  // 逐个抓取订阅源：自动审核的失效 → 自动标 offline（列表自动排到最后）；人工审核的
+  // 失效 → 只标 unknown 等管理员确认。抓取是外部请求（贵），挂每小时这条。
+  let proxySync: { checked: number; offline: number; unknown: number; recovered: number } | null = null
+  if (!dryRun) {
+    try {
+      proxySync = await syncProxySubscriptionStatuses(env)
+      if (proxySync.offline > 0) {
+        warnings.push(`订阅源过时检测：${proxySync.offline} 个自动审核的订阅源已自动标记不可用。`)
+      }
+      if (proxySync.unknown > 0) {
+        warnings.push(`订阅源过时检测：${proxySync.unknown} 个人工审核的订阅源检测不可用，已标为未知待人工确认。`)
+      }
+    } catch (err) {
+      console.error("订阅源过时检测失败（表可能未迁移）:", err)
+    }
+  }
+
   // 10) 清理失败也算告警（否则"静默失败"永远没人知道）
   if (errors.length > 0) {
     warnings.push(`本次运维有 ${errors.length} 项失败：${errors.slice(0, 3).join("；")}`)
@@ -772,6 +793,7 @@ export async function runMaintenance(
     storageMismatches,
     dnsAudit,
     tableRows,
+    proxySync,
     warnings,
     errors,
   }

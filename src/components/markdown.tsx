@@ -26,7 +26,7 @@ import { FunLinkIcon } from "@/components/fun-link-icon"
 import { communityApi, stickerApi, errMsg } from "@/services/api"
 import { GitHubMark, isGitHubUrl } from "@/components/github-mark"
 import { useAuth } from "@/hooks/use-auth"
-import { useT } from "@/i18n"
+import { useT, tStatic } from "@/i18n"
 import type { LinkPreview } from "@/types"
 
 /** 链接预览的模块级缓存：同一链接在同一页面只请求一次 */
@@ -76,6 +76,7 @@ function LinkCard({ href }: { href: string }) {
         href={href}
         target="_blank"
         rel="noopener noreferrer nofollow"
+        onClick={(e) => guardExternalClick(e, href)}
         className="break-all text-primary underline underline-offset-2 hover:text-primary/80"
       >
         {href}
@@ -90,6 +91,7 @@ function LinkCard({ href }: { href: string }) {
         href={href}
         target="_blank"
         rel="noopener noreferrer nofollow"
+        onClick={(e) => guardExternalClick(e, href)}
         className="break-all text-primary underline underline-offset-2 hover:text-primary/80"
       >
         {href}
@@ -107,6 +109,7 @@ function LinkCard({ href }: { href: string }) {
       href={href}
       target="_blank"
       rel="noopener noreferrer nofollow"
+      onClick={(e) => guardExternalClick(e, href)}
       className="glass-card mt-2 flex gap-3 overflow-hidden rounded-lg border transition-colors hover:bg-accent/40"
     >
       {useGitHubMark ? (
@@ -157,6 +160,26 @@ function isBareLink(href: string, children: React.ReactNode): boolean {
   return text === href || text === href.replace(/^https?:\/\//, "")
 }
 
+/**
+ * 外链二次确认（用户反馈 5f489c9a）：正文里的链接点击后先弹一次确认，
+ * 避免误点直接跳走；确认后在**新标签页**打开，当前页不丢。
+ * 站内/相对链接（无 http(s) 前缀或同源）不拦。
+ */
+function guardExternalClick(e: React.MouseEvent, href: string): void {
+  if (!/^https?:\/\//i.test(href)) return
+  let external = false
+  try {
+    external = new URL(href).host !== window.location.host
+  } catch {
+    external = false
+  }
+  if (!external) return
+  e.preventDefault()
+  if (window.confirm(tStatic("link.leaveConfirm", { host: hostOf(href) }))) {
+    window.open(href, "_blank", "noopener,noreferrer")
+  }
+}
+
 /** 链接渲染：裸链接走卡片，行内链接保持普通样式 */
 function renderLink(props: React.ComponentPropsWithoutRef<"a">) {
   const { href, children, ...rest } = props
@@ -173,6 +196,7 @@ function renderLink(props: React.ComponentPropsWithoutRef<"a">) {
       href={href}
       target="_blank"
       rel="noopener noreferrer nofollow"
+      onClick={(e) => guardExternalClick(e, href)}
       className="break-all text-primary underline underline-offset-2 hover:text-primary/80"
       {...rest}
     >
@@ -319,7 +343,8 @@ function StickerImage({ src, alt }: { src: string; alt: string }) {
 
 function renderImage({ src, alt }: React.ComponentProps<"img">) {
   const url = typeof src === "string" ? src : ""
-  if (url.startsWith("/api/stickers/")) {
+  // 兼容相对与绝对两种写法（极少数历史数据的 body 里带上了完整 host）
+  if (/\/api\/stickers\/[0-9a-f-]{36}\/image/.test(url)) {
     return <StickerImage src={url} alt={alt ?? ""} />
   }
   return (

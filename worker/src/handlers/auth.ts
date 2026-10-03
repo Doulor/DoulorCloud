@@ -13,6 +13,7 @@ import {
 } from "../permissions"
 import { getBasicFeatures } from "../quotas"
 import { parseEmailDomains } from "../email-domains"
+import { isIpBlacklisted } from "./moderation-lists"
 import { getDefaultRootDomain, resolveZoneId, isOwnDomain } from "../root-domains"
 import { grantInvitePoints } from "../points"
 import { evaluateTwoFactorGate, createLoginChallenge, maskEmail } from "./two-factor"
@@ -215,6 +216,12 @@ export async function register(env: Env, request: Request): Promise<Response> {
   //    这个 IP 的额度到 24h 满 —— 实测站长自己就踩了：他的 IP 上 3 条注册记录对应的
   //    账号全被删了（0 个存活），却因为记录还在而被挡在门外。
   //    另外「注册失败」本来就不写审计（冲突检查在写审计之前就抛错），所以这里天然只数成功。
+  // 1.5) 黑名单 IP：直接拒绝注册。
+  //      见「监管 → 黑名单」：账号被封禁时它的注册 IP 会自动进来（站长 2026-10-03）。
+  if (await isIpBlacklisted(env, clientIp(request))) {
+    throw new ApiError(403, "该网络已被限制注册", "IP_BLACKLISTED")
+  }
+
   const ipDailyLimit = Number(regSettings.register_ip_daily_limit ?? "0") || 0
   if (ipDailyLimit > 0) {
     const since = new Date(Date.now() - 86_400_000).toISOString()

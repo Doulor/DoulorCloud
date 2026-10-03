@@ -63,6 +63,8 @@ export type ProductDelivery =
   | "feature"
   | "subscription"
   | "invite_quota"
+  /** 卡密/Key：下单时从商品卡密池原子取出一条交付（2026-10-03） */
+  | "code"
 
 /**
  * 计费方式。
@@ -157,6 +159,8 @@ export interface PointProduct {
   price: number
   /** 剩余库存；null = 不限量 */
   stock: number | null
+  /** 每日限量（自然日）；null = 不限（用户反馈 6e002b5e：限量商品希望每天补一点） */
+  dailyLimit: number | null
   /** 每人限购件数；null = 不限 */
   perUserLimit: number | null
   delivery: ProductDelivery
@@ -251,6 +255,8 @@ export interface ProductInput {
   category: ProductCategory
   price: number
   stock: number | null
+  /** 每日限量（自然日）；null = 不限 */
+  dailyLimit: number | null
   perUserLimit: number | null
   delivery: ProductDelivery
   quotaYuan: number | null
@@ -266,6 +272,8 @@ export interface ProductInput {
 
 const MAX_PRICE = 100_000_000
 const MAX_STOCK = 1_000_000
+/** 每日限量上限 */
+const MAX_DAILY_LIMIT = 1_000_000
 /** 单件自动充值金额上限（元）：防手滑把 100 写成 100000000 */
 const MAX_QUOTA_YUAN = 100_000
 const MAX_PER_USER_LIMIT = 10_000
@@ -293,6 +301,7 @@ const DELIVERIES: readonly ProductDelivery[] = [
   "feature",
   "subscription",
   "invite_quota",
+  "code",
 ]
 
 /**
@@ -380,6 +389,7 @@ function rowToProduct(r: Record<string, unknown>): PointProduct {
     category: isProductCategory(r.category) ? r.category : "other",
     price: Number(r.price ?? 0),
     stock: r.stock == null ? null : Number(r.stock),
+    dailyLimit: r.daily_limit == null ? null : Number(r.daily_limit),
     perUserLimit: r.per_user_limit == null ? null : Number(r.per_user_limit),
     delivery,
     quotaYuan: r.quota_yuan == null ? null : Number(r.quota_yuan),
@@ -502,6 +512,9 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
   if (price === null) throw new ApiError(400, "请填写售价（积分）", "INVALID_INPUT")
 
   const stock = nullableInt(b.stock, "库存", 0, MAX_STOCK)
+  // 每日限量：0 与 null 都当「不限」，统一存 null；用户商品一律不限
+  const dailyRaw = asUser ? null : nullableInt(b.dailyLimit, "每日限量", 0, MAX_DAILY_LIMIT)
+  const dailyLimit = dailyRaw && dailyRaw > 0 ? dailyRaw : null
   // 限购：0 与 null 都当「不限」，统一存 null；用户商品一律不限
   const limitRaw = asUser ? null : nullableInt(b.perUserLimit, "每人限购", 0, MAX_PER_USER_LIMIT)
   const perUserLimit = limitRaw && limitRaw > 0 ? limitRaw : null
@@ -588,6 +601,7 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
     category,
     price,
     stock,
+    dailyLimit,
     perUserLimit,
     delivery,
     quotaYuan,
@@ -671,10 +685,10 @@ const PRODUCT_COLUMNS =
   // ⚠️ 新增列一律追加到**末尾**：列顺序一变，INSERT 占位符就要整体重排，
   //    极易漏一处而变成「字段整体错位」的脏数据。这里只改个数。
   " owner_id, owner_name, review_status, review_note, reviewed_at, created_at, updated_at, " +
-  "category)"
+  "category, daily_limit)"
 
 /** PRODUCT_COLUMNS 的列数 —— INSERT 的占位符个数必须与它一致 */
-const PRODUCT_COLUMN_COUNT = 23
+const PRODUCT_COLUMN_COUNT = 24
 
 function productBindings(id: string, input: ProductInput, now: string): unknown[] {
   return [
@@ -701,6 +715,7 @@ function productBindings(id: string, input: ProductInput, now: string): unknown[
     now,
     now,
     input.category,
+    input.dailyLimit,
   ]
 }
 
@@ -740,7 +755,7 @@ export async function updateProduct(env: Env, id: string, raw: unknown): Promise
        name = ?, description = ?, image_url = ?, icon = ?, price = ?, stock = ?,
        per_user_limit = ?, delivery = ?, quota_yuan = ?, delivery_params = ?,
        billing_mode = ?, rental_days = ?,
-       enabled = ?, sort = ?, category = ?, updated_at = ?
+       enabled = ?, sort = ?, category = ?, daily_limit = ?, updated_at = ?
      WHERE id = ?`
   )
     .bind(
@@ -759,6 +774,7 @@ export async function updateProduct(env: Env, id: string, raw: unknown): Promise
       input.enabled ? 1 : 0,
       input.sort,
       input.category,
+      input.dailyLimit,
       now,
       id
     )
@@ -774,6 +790,75 @@ export async function deleteProduct(env: Env, id: string): Promise<void> {
   if ((res.meta?.changes ?? 0) === 0) {
     throw new ApiError(404, "商品不存在", "NOT_FOUND")
   }
+}
+
+// ---------------------------------------------------------------- 卡密池（delivery='code'）
+
+/** 卡密池概览 */
+export async function getProductCodes(
+  env: Env,
+  productId: string
+): Promise<{ total: number; used: number; available: number }> {
+  const r = await env.DB.prepare(
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN used_at IS NULL THEN 1 ELSE 0 END) AS available
+       FROM point_product_codes WHERE product_id = ?`
+  )
+    .bind(productId)
+    .first<{ total: number; available: number }>()
+  const total = Number(r?.total ?? 0)
+  const available = Number(r?.available ?? 0)
+  return { total, used: total - available, available }
+}
+
+/** 追加卡密（同一商品下自动去重）。返回新增条数与当前可用数。 */
+export async function addProductCodes(
+  env: Env,
+  productId: string,
+  codes: string[]
+): Promise<{ added: number; available: number }> {
+  const product = await getProduct(env, productId)
+  if (!product) throw new ApiError(404, "商品不存在", "NOT_FOUND")
+
+  const clean = [...new Set(codes.map((c) => c.trim()).filter((c) => c.length > 0))]
+  if (clean.length > 2000) {
+    throw new ApiError(400, "一次最多导入 2000 条卡密", "INVALID_INPUT")
+  }
+  let inserted = 0
+  if (clean.length > 0) {
+    const existing = await env.DB.prepare(
+      "SELECT code FROM point_product_codes WHERE product_id = ?"
+    )
+      .bind(productId)
+      .all<{ code: string }>()
+    const have = new Set((existing.results ?? []).map((r) => r.code))
+    const fresh = clean.filter((c) => !have.has(c))
+    const now = new Date().toISOString()
+    // D1 单次 batch 语句数有限，分批发
+    for (let i = 0; i < fresh.length; i += 100) {
+      const chunk = fresh.slice(i, i + 100)
+      await env.DB.batch(
+        chunk.map((c) =>
+          env.DB.prepare(
+            "INSERT INTO point_product_codes (id, product_id, code, used_by, used_at, created_at) VALUES (?, ?, ?, NULL, NULL, ?)"
+          ).bind(uuid(), productId, c, now)
+        )
+      )
+      inserted += chunk.length
+    }
+  }
+  const info = await getProductCodes(env, productId)
+  return { added: inserted, available: info.available }
+}
+
+/** 清空「未使用」的卡密，返回删除条数 */
+export async function clearUnusedProductCodes(env: Env, productId: string): Promise<number> {
+  const res = await env.DB.prepare(
+    "DELETE FROM point_product_codes WHERE product_id = ? AND used_at IS NULL"
+  )
+    .bind(productId)
+    .run()
+  return res.meta?.changes ?? 0
 }
 
 // ---------------------------------------------------------------- 用户商品
@@ -1261,6 +1346,27 @@ async function deliverAuto(
       return `已自动增加 ${count} 个邀请码创建额度`
     }
 
+    case "code": {
+      // 卡密交付（用户反馈 a977d1cf）：原子取出一条未使用的卡密并标记占用。
+      // 用 UPDATE ... WHERE id = (SELECT ... LIMIT 1) RETURNING code —— 单语句完成
+      // 「选一条 + 标记」，并发下不会两条订单拿到同一个码。
+      const now = new Date().toISOString()
+      const claimed = await env.DB.prepare(
+        `UPDATE point_product_codes
+            SET used_by = ?, used_at = ?
+          WHERE id = (
+            SELECT id FROM point_product_codes
+             WHERE product_id = ? AND used_by IS NULL
+             ORDER BY created_at ASC LIMIT 1
+          )
+        RETURNING code`
+      )
+        .bind(userId, now, product.id)
+        .first<{ code: string }>()
+      if (!claimed) throw new Error("卡密已售罄，请联系管理员补货")
+      return claimed.code
+    }
+
     default:
       throw new Error("未知的交付方式")
   }
@@ -1281,6 +1387,16 @@ async function restoreStock(env: Env, productId: string | null): Promise<number>
   return res.meta?.changes ?? 0
 }
 
+/** 归还一个「当日名额」（每日限量买的退单/失败补偿用） */
+async function releaseDailySlot(env: Env, productId: string | null): Promise<void> {
+  if (!productId) return
+  const day = new Date().toISOString().slice(0, 10)
+  await env.DB.prepare(
+    "UPDATE point_product_daily_sales SET sold = MAX(0, sold - 1) WHERE product_id = ? AND date = ?"
+  )
+    .bind(productId, day)
+    .run()
+}
 /**
  * 下单购买。
  *
@@ -1391,6 +1507,8 @@ export async function buyProduct(
 
   let stockReserved = false
   let pointsDeducted = false
+  /** 是否已占用一个「当日名额」（用于失败时归还） */
+  let dailyReserved = false
   try {
     // 1. 占库存（有限量时才需要；条件 UPDATE 保证并发下不会超卖）
     if (product.stock !== null) {
@@ -1402,6 +1520,26 @@ export async function buyProduct(
         throw new ApiError(400, "该商品已售罄", "OUT_OF_STOCK")
       }
       stockReserved = true
+    }
+
+    // 1b. 每日限量（用户反馈 6e002b5e：「限量商品每天补一点」）：
+    //     按自然日累计、隔天自动恢复，靠日期键实现，不需要定时任务。
+    if (product.dailyLimit !== null) {
+      const day = new Date().toISOString().slice(0, 10)
+      const row = await env.DB.prepare(
+        `INSERT INTO point_product_daily_sales (product_id, date, sold) VALUES (?, ?, 1)
+         ON CONFLICT(product_id, date) DO UPDATE SET sold = sold + 1
+         RETURNING sold`
+      )
+        .bind(product.id, day)
+        .first<{ sold: number }>()
+      if ((row?.sold ?? 0) > product.dailyLimit) {
+        await env.DB.prepare(
+          "UPDATE point_product_daily_sales SET sold = MAX(0, sold - 1) WHERE product_id = ? AND date = ?"
+        ).bind(product.id, day).run()
+        throw new ApiError(400, "该商品今日名额已抢完，明天再来", "OUT_OF_STOCK")
+      }
+      dailyReserved = true
     }
 
     // 2. 扣积分（dedup_key 用订单号，重放同一请求不会扣两次）
@@ -1449,6 +1587,10 @@ export async function buyProduct(
     if (stockReserved) {
       try { await restoreStock(env, product.id) }
       catch (stockErr) { console.error("商城库存补偿失败:", orderId, stockErr) }
+    }
+    if (dailyReserved) {
+      try { await releaseDailySlot(env, product.id) }
+      catch (dailyErr) { console.error("商城每日限量补偿失败:", orderId, dailyErr) }
     }
     throw err
   }
@@ -1550,6 +1692,7 @@ export async function buyProduct(
           dedupKey: `shop-refund:${orderId}`,
         })
         await restoreStock(env, product.id)
+        if (dailyReserved) await releaseDailySlot(env, product.id)
       } catch (compensationErr) {
         console.error("自动交付失败后的商城补偿失败:", orderId, compensationErr)
         throw new ApiError(500, "购买失败，补偿正在人工处理", "PURCHASE_COMPENSATION_PENDING")

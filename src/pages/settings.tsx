@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/card"
 import { MessageNotifyCard } from "@/components/message-notify-card"
 import { TwoFactorCard } from "@/components/two-factor-card"
+import { ApiSettingsCard } from "@/components/api-settings-card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -327,11 +328,39 @@ export default function SettingsPage() {
 
   const verified = emailSettings?.verified ?? user?.emailVerified ?? false
 
+  /** 设置页分类：用 chips 切换，样式与管理面板的分类筛选一致 */
+  const [group, setGroup] = React.useState("all")
+  const SETTING_GROUPS = [
+    { key: "all", label: t("settings.group.all") },
+    { key: "account", label: t("settings.group.account") },
+    { key: "security", label: t("settings.group.security") },
+    { key: "notify", label: t("settings.group.notify") },
+    { key: "api", label: t("settings.group.api") },
+    { key: "danger", label: t("settings.group.danger") },
+  ]
+  /** 某分组是否可见（"all" 显示全部） */
+  const show = (g: string) => group === "all" || group === g
+
   return (
     <div>
       <PageHeader title={t("settings.title")} description={t("settings.desc")} />
 
+      {/* 分类筛选 */}
+      <div className="mb-4 flex flex-wrap gap-2">
+        {SETTING_GROUPS.map((g) => (
+          <Button
+            key={g.key}
+            size="sm"
+            variant={group === g.key ? "default" : "outline"}
+            onClick={() => setGroup(g.key)}
+          >
+            {g.label}
+          </Button>
+        ))}
+      </div>
+
       <div className="space-y-6">
+        {show("account") && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -487,11 +516,15 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+        )}
 
         {/* 二次认证（管理员/站长强制，普通用户可选） */}
+        {show("security") && (
         <TwoFactorCard />
+        )}
 
         {/* 真实邮箱验证 */}
+        {show("account") && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -586,8 +619,10 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+        )}
 
         {/* 通知偏好 */}
+        {show("notify") && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -625,7 +660,10 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+        )}
 
+        {/* 安全：改密码等 */}
+        {show("security") && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -648,10 +686,14 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+        )}
 
         {/* 手机 App 通知：给打包成 App 的移动端提供拉取地址与令牌 */}
+        {show("notify") && (
         <MessageNotifyCard />
+        )}
 
+        {show("danger") && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -672,6 +714,12 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+        )}
+
+        {/* 公开 API：Key 管理 + 层级额度 + 接口文档 */}
+        {show("api") && (
+        <ApiSettingsCard />
+        )}
       </div>
 
       {/* 注销账号确认 */}

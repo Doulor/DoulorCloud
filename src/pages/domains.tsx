@@ -1,5 +1,5 @@
 import * as React from "react"
-import { CornerDownRight, Globe, Loader2, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react"
+import { ChevronDown, CornerDownRight, Globe, Loader2, Pencil, Plus, RefreshCw, ScrollText, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -635,6 +635,39 @@ export default function DomainsPage() {
           )}
         </>
       )}
+
+      {/* 域名服务声明 / 免责条款（用户反馈 43441cdb + 9dcdbaab） */}
+      <div className="mt-6 rounded-lg border bg-card">
+        <details className="group">
+          <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium">
+            <span className="flex items-center gap-2">
+              <ScrollText className="h-4 w-4 text-muted-foreground" />
+              {t("dn.terms.title")}
+            </span>
+            <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="space-y-3 border-t px-4 py-3 text-xs leading-relaxed text-muted-foreground">
+            <p>{t("dn.terms.intro")}</p>
+            <div>
+              <p className="font-medium text-foreground">{t("dn.terms.forbiddenTitle")}</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                <li>{t("dn.terms.forbidden.1")}</li>
+                <li>{t("dn.terms.forbidden.2")}</li>
+                <li>{t("dn.terms.forbidden.3")}</li>
+                <li>{t("dn.terms.forbidden.4")}</li>
+                <li>{t("dn.terms.forbidden.5")}</li>
+                <li>{t("dn.terms.forbidden.6")}</li>
+                <li>{t("dn.terms.forbidden.7")}</li>
+              </ul>
+            </div>
+            <div>
+              <p className="font-medium text-foreground">{t("dn.terms.enforceTitle")}</p>
+              <p className="mt-1">{t("dn.terms.enforce")}</p>
+            </div>
+            <p className="text-destructive/90">{t("dn.terms.recycle")}</p>
+          </div>
+        </details>
+      </div>
 
       {/* 添加子域名 */}
       <Dialog

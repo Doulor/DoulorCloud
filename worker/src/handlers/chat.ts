@@ -43,6 +43,12 @@ const ONLINE_WINDOW_SECONDS = 120
 /** 消息最大长度 */
 const MAX_BODY = 2000
 
+/** 撤回时限：非管理员只能撤回 N 秒内自己发的消息 */
+const RECALL_WINDOW_SECONDS = 600
+
+/** 引用摘要的最大长度 */
+const QUOTE_SNIPPET = 200
+
 /** 拉取的历史消息上限 */
 const MAX_MESSAGES = 100
 
@@ -98,7 +104,8 @@ export async function listMessages(env: Env, request: Request): Promise<Response
   let rows
   if (cursor) {
     rows = await env.DB.prepare(
-      `SELECT m.id, m.user_id, m.body, m.created_at, u.username, u.nickname, u.avatar_key
+      `SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
+              u.username, u.nickname, u.avatar_key
          FROM chat_messages m JOIN users u ON u.id = m.user_id
         WHERE m.created_at > ? OR (m.created_at = ? AND m.id > ?)
         ORDER BY m.created_at ASC, m.id ASC LIMIT ?`
@@ -107,7 +114,8 @@ export async function listMessages(env: Env, request: Request): Promise<Response
       .all()
   } else {
     rows = await env.DB.prepare(
-      `SELECT m.id, m.user_id, m.body, m.created_at, u.username, u.nickname, u.avatar_key
+      `SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
+              u.username, u.nickname, u.avatar_key
          FROM (SELECT * FROM chat_messages ORDER BY created_at DESC, id DESC LIMIT ?) m
          JOIN users u ON u.id = m.user_id
         ORDER BY m.created_at ASC, m.id ASC`
@@ -117,6 +125,7 @@ export async function listMessages(env: Env, request: Request): Promise<Response
   }
 
   const messages = (rows.results ?? []).map(toMessage)
+  await attachQuotes(env, messages)
   const last = messages[messages.length - 1]
   return json({
     messages,
@@ -126,15 +135,76 @@ export async function listMessages(env: Env, request: Request): Promise<Response
   })
 }
 
-function toMessage(r: Record<string, unknown>) {
+/** 引用摘要（前端右键「引用」时展示被引消息的作者 + 截断正文） */
+interface QuoteRef {
+  id: string
+  username: string
+  nickname: string | null
+  recalled: boolean
+  body: string
+}
+
+interface ChatMessageOut {
+  id: string
+  userId: string
+  username: string
+  nickname: string | null
+  hasAvatar: boolean
+  body: string
+  recalled: boolean
+  replyTo: string | null
+  quote: QuoteRef | null
+  createdAt: string
+}
+
+function toMessage(r: Record<string, unknown>): ChatMessageOut {
+  const recalled = Boolean(r.recalled_at)
   return {
-    id: r.id,
-    userId: r.user_id,
-    username: r.username,
-    nickname: r.nickname ?? null,
+    id: String(r.id),
+    userId: String(r.user_id),
+    username: String(r.username),
+    nickname: (r.nickname as string | null) ?? null,
     hasAvatar: Boolean(r.avatar_key),
-    body: r.body,
-    createdAt: r.created_at,
+    // 撤回后正文不下发，避免「撤回」变成只盖一层遮罩、内容其实还在
+    body: recalled ? "" : String(r.body ?? ""),
+    recalled,
+    replyTo: recalled ? null : ((r.reply_to as string | null) ?? null),
+    quote: null,
+    createdAt: String(r.created_at),
+  }
+}
+
+/** 批量补全被引用消息的摘要（一次查询，避免 N+1） */
+async function attachQuotes(env: Env, messages: ChatMessageOut[]): Promise<void> {
+  const ids = [...new Set(messages.map((m) => m.replyTo).filter((x): x is string => !!x))]
+  if (ids.length === 0) return
+  const placeholders = ids.map(() => "?").join(",")
+  const res = await env.DB.prepare(
+    `SELECT m.id, m.body, m.recalled_at, u.username, u.nickname
+       FROM chat_messages m JOIN users u ON u.id = m.user_id
+      WHERE m.id IN (${placeholders})`
+  )
+    .bind(...ids)
+    .all<{
+      id: string
+      body: string
+      recalled_at: string | null
+      username: string
+      nickname: string | null
+    }>()
+  const map = new Map((res.results ?? []).map((r) => [r.id, r]))
+  for (const m of messages) {
+    if (!m.replyTo) continue
+    const q = map.get(m.replyTo)
+    if (!q) continue
+    const recalled = Boolean(q.recalled_at)
+    m.quote = {
+      id: q.id,
+      username: q.username,
+      nickname: q.nickname ?? null,
+      recalled,
+      body: recalled ? "" : String(q.body ?? "").slice(0, QUOTE_SNIPPET),
+    }
   }
 }
 
@@ -149,17 +219,46 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
     "发言过于频繁"
   )
 
-  const body = (await request.json().catch(() => ({}))) as { body?: string }
+  const body = (await request.json().catch(() => ({}))) as { body?: string; replyTo?: string }
   const text = (body.body ?? "").trim()
   if (!text) throw new ApiError(400, "内容不能为空", "INVALID_INPUT")
   if (text.length > MAX_BODY) throw new ApiError(400, "内容过长", "TOO_LARGE")
 
+  // 引用：只接受「确实存在且未被撤回」的消息 id，否则按普通消息发（不报错，
+  // 因为被引消息可能刚好在我们校验前被撤回，不该因此挡住用户发言）
+  let replyTo: string | null = null
+  let quote: QuoteRef | null = null
+  if (body.replyTo) {
+    const target = await env.DB.prepare(
+      `SELECT m.id, m.body, m.recalled_at, u.username, u.nickname
+         FROM chat_messages m JOIN users u ON u.id = m.user_id WHERE m.id = ?`
+    )
+      .bind(body.replyTo)
+      .first<{
+        id: string
+        body: string
+        recalled_at: string | null
+        username: string
+        nickname: string | null
+      }>()
+    if (target && !target.recalled_at) {
+      replyTo = target.id
+      quote = {
+        id: target.id,
+        username: target.username,
+        nickname: target.nickname ?? null,
+        recalled: false,
+        body: String(target.body ?? "").slice(0, QUOTE_SNIPPET),
+      }
+    }
+  }
+
   const id = uuid()
   const now = new Date().toISOString()
   await env.DB.prepare(
-    "INSERT INTO chat_messages (id, user_id, body, created_at) VALUES (?, ?, ?, ?)"
+    "INSERT INTO chat_messages (id, user_id, body, created_at, reply_to) VALUES (?, ?, ?, ?, ?)"
   )
-    .bind(id, user.id, text, now)
+    .bind(id, user.id, text, now, replyTo)
     .run()
 
   // 发消息也算一次活跃（更新心跳），让在线列表及时反映
@@ -178,9 +277,50 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
       nickname: user.nickname ?? null,
       hasAvatar: Boolean(user.avatar_key),
       body: text,
+      recalled: false,
+      replyTo,
+      quote,
       createdAt: now,
     },
   }, 201)
+}
+
+/**
+ * POST /api/chat/messages/:id/recall —— 撤回消息。
+ * 作者本人 10 分钟内可撤回；管理员/站长不限。撤回后正文清空（不是只加遮罩）。
+ */
+export async function recallMessage(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireChatUser(env, request)
+  const row = await env.DB.prepare(
+    "SELECT id, user_id, created_at, recalled_at FROM chat_messages WHERE id = ?"
+  )
+    .bind(id)
+    .first<{ id: string; user_id: string; created_at: string; recalled_at: string | null }>()
+  if (!row) throw new ApiError(404, "消息不存在", "NOT_FOUND")
+  if (row.recalled_at) return json({ ok: true })
+
+  const privileged = user.role === "admin" || user.role === "root"
+  if (row.user_id !== user.id && !privileged) {
+    throw new ApiError(403, "只能撤回自己的消息", "FORBIDDEN")
+  }
+  if (!privileged) {
+    const age = Date.now() - new Date(row.created_at).getTime()
+    if (age > RECALL_WINDOW_SECONDS * 1000) {
+      throw new ApiError(400, "超过撤回时限（10 分钟）", "RECALL_EXPIRED")
+    }
+  }
+
+  await env.DB.prepare(
+    "UPDATE chat_messages SET recalled_at = ?, body = '' WHERE id = ? AND recalled_at IS NULL"
+  )
+    .bind(new Date().toISOString(), id)
+    .run()
+
+  return json({ ok: true })
 }
 
 /** POST /api/chat/heartbeat —— 心跳（前端每 30 秒一次） */

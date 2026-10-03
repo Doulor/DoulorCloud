@@ -459,7 +459,14 @@ export async function serveFeedbackImage(
 ): Promise<Response> {
   const user = await requireUser(env, request)
   if (user.id !== userId && !isPrivileged(user.role)) {
-    throw new ApiError(403, "无权查看该图片", "FORBIDDEN")
+    // 非上传者、非管理员：再查「这个图片是否出现在当前用户的某条工单里」。
+    //
+    // 为什么：管理员回复时上传的图，key 前缀是**管理员的 id**（uploadFeedbackImage 用
+    // 登录者 id 拼前缀），于是工单提交者读它时 user.id ≠ userId，会被上面的条件误拒
+    // （2026-10-03 反馈 bug #6「管理员回复里的图别人看不见」）。
+    // 工单里的图片本就该「提交者 + 管理员」双方可见，这里按 filename 反查补上提交者。
+    const visible = await isFeedbackImageVisibleTo(env, user.id, filename)
+    if (!visible) throw new ApiError(403, "无权查看该图片", "FORBIDDEN")
   }
   // 文件名只允许 <uuid>.<ext>，防路径穿越
   if (!/^[A-Za-z0-9-]+\.(jpg|jpeg|png|webp|gif)$/i.test(filename)) {
@@ -475,6 +482,34 @@ export async function serveFeedbackImage(
   } catch {
     return new Response("Not Found", { status: 404 })
   }
+}
+
+/**
+ * 判断某张反馈图片（按 filename）是否出现在「该用户的某条工单」的首帖或对话消息里。
+ * 供 serveFeedbackImage 在「非上传者、非管理员」时放行工单提交者用。
+ *
+ * filename 是 `<uuid>.<ext>`（约 40 字符），LIKE 模式最长 ~42 字符，不超 D1 的 50 上限。
+ */
+async function isFeedbackImageVisibleTo(
+  env: Env,
+  userId: string,
+  filename: string
+): Promise<boolean> {
+  const pat = `%${filename}%`
+  const inPost = await env.DB.prepare(
+    "SELECT id FROM feedback WHERE user_id = ? AND images LIKE ? LIMIT 1"
+  )
+    .bind(userId, pat)
+    .first()
+  if (inPost) return true
+  const inMsg = await env.DB.prepare(
+    `SELECT m.id FROM feedback_messages m
+       JOIN feedback f ON f.id = m.feedback_id
+      WHERE f.user_id = ? AND m.images LIKE ? LIMIT 1`
+  )
+    .bind(userId, pat)
+    .first()
+  return !!inMsg
 }
 
 /**

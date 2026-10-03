@@ -251,6 +251,14 @@ export interface UserAnalytics {
 }
 
 /** 聊天室消息 */
+export interface ChatQuoteRef {
+  id: string
+  username: string
+  nickname: string | null
+  recalled: boolean
+  body: string
+}
+
 export interface ChatMessage {
   id: string
   userId: string
@@ -258,6 +266,12 @@ export interface ChatMessage {
   nickname: string | null
   hasAvatar: boolean
   body: string
+  /** 是否已撤回（撤回后 body 为空） */
+  recalled?: boolean
+  /** 引用的消息 id（null = 非引用） */
+  replyTo?: string | null
+  /** 被引用消息的摘要（列表接口会补全） */
+  quote?: ChatQuoteRef | null
   createdAt: string
 }
 
@@ -313,6 +327,8 @@ export interface AdminUser {
   profileSlug: string | null
   /** 名片绑定的自定义域名（优先于 slug 地址） */
   profileFqdn: string | null
+  /** 注册时使用的 IP（来自 audit_logs 的 register 记录；查不到时为 null） */
+  registerIp: string | null
   permissions: Permissions
   /** 注册时使用的邀请码（老用户或码已删除时为 null） */
   inviteCode: string | null
@@ -1090,6 +1106,8 @@ export interface AchievementTitle {
   /** 下一档所需点数；已是最高档为 null */
   next: number | null
   nextName: string | null
+  /** 完整称号阶梯（所有档位，供前端做「VIP 等级」式线性展示） */
+  ladder: { name: string; min: number; current: boolean }[]
 }
 
 export interface AchievementsResponse {
@@ -1249,6 +1267,8 @@ export interface ProxyNode {
   raw: string
   /** 解析出的配置字段（uuid / password / security / sni / flow…） */
   details: Record<string, string>
+  /** 相同节点检测：本节点在另一个订阅源里也出现了（值是那个订阅源的名称） */
+  duplicateOf?: string
 }
 
 export interface ProxySubscription {
@@ -1452,6 +1472,8 @@ export interface TempboxConfig {
   defaultMinutes: number
   maxFileBytes: number
   maxFiles: number
+  /** 同时存活的分享箱数量上限（后端常量，非每箱文件数） */
+  maxLiveBatches: number
   uploadRequiresLogin: boolean
 }
 
@@ -1604,6 +1626,11 @@ export interface DonationOverview {
   cli2api: Cli2ApiDonationBlock
   /** 商汤 Key 捐献通道（免审核，Key 校验通过即解锁 ai） */
   sensenova: SenseNovaDonationBlock
+  /**
+   * 各捐献/绑定通道是否「授予权限」（对应 donation_grant_* 开关）。
+   * false = 该通道仅收录资源、不再授予权限，前端据此改文案。
+   */
+  grantPermissions?: Record<string, boolean>
 }
 
 // ---- 商汤 Key 捐献 ----
@@ -2023,6 +2050,19 @@ export interface CommunityAuthor {
   customTitle: CustomTitle | null
 }
 
+/** 帖子分类（2026-10-03）：闲聊 / 求助 / 资源共享 */
+export type PostCategory = "chat" | "help" | "resource"
+
+/** 广场列表里展示的高赞评论预览 */
+export interface PostTopComment {
+  id: string
+  body: string
+  likeCount: number
+  username: string
+  nickname: string | null
+  hasAvatar: boolean
+}
+
 export interface Post {
   id: string
   author: CommunityAuthor
@@ -2035,6 +2075,10 @@ export interface Post {
   isMine: boolean
   /** 管理员置顶（2026-10-01）；置顶的排在广场最前 */
   pinned: boolean
+  /** 帖子分类：chat（闲聊）/ help（求助）/ resource（资源共享） */
+  category?: PostCategory
+  /** 广场列表里展示的高赞评论预览（最多 2 条，全社区前 20%） */
+  topComments?: PostTopComment[]
   createdAt: string
   /** 最近编辑时间（未编辑过为 null） */
   updatedAt: string | null
@@ -2049,6 +2093,10 @@ export interface CommentNode {
   author: CommunityAuthor
   replyTo: string | null
   likeCount: number
+  /** 是否为「全社区前 20%」的高赞评论（用户反馈 2026-10-03） */
+  hot?: boolean
+  /** 当前登录用户是否点过赞（未登录恒 false） */
+  liked?: boolean
   replies: CommentNode[]
 }
 
@@ -2187,6 +2235,47 @@ export interface RiskAccount {
   lastSeenAt: string
   status: "open" | "watching" | "banned" | "cleared"
   userStatus: string | null
+}
+
+// ---- 监管：白名单 / 自动条件 / 黑名单（2026-10-03） ----
+
+export type ModerationConditionOp = "gt" | "gte" | "lt" | "lte"
+export type ModerationConditionMetric = "achievement_points"
+
+/** 白名单里的用户（展示成「昵称 @用户名」，与「自定义称号」面板一致） */
+export interface ModerationWhitelistUser {
+  username: string
+  nickname: string | null
+}
+
+/** 白名单自动条件（如「成就点 > 20」）及其命中的用户 */
+export interface ModerationWhitelistCondition {
+  id: string
+  metric: ModerationConditionMetric
+  op: ModerationConditionOp
+  value: number
+  enabled: boolean
+  users: ModerationWhitelistUser[]
+}
+
+export interface ModerationLists {
+  whitelist: {
+    /** 手动添加的用户 */
+    manual: ModerationWhitelistUser[]
+    /** 自动条件分组（含已停用的，停用时 users 为空） */
+    groups: ModerationWhitelistCondition[]
+  }
+  blacklist: {
+    manual: ModerationBlacklistEntry[]
+    /** 封禁联动自动加入的 IP */
+    auto: ModerationBlacklistEntry[]
+  }
+}
+
+export interface ModerationBlacklistEntry {
+  ip: string
+  reason: string | null
+  createdAt: string
 }
 
 /** 活动发布/更新请求体 */
@@ -2365,7 +2454,7 @@ export interface PointsConfig {
  *   · subscription —— 自动开通一个 NewAPI 订阅套餐（deliveryParams.planId）
  *   · invite_quota —— 自动增加邀请码创建额度（deliveryParams.count）
  */
-export type PointDelivery = "manual" | "quota" | "feature" | "subscription" | "invite_quota"
+export type PointDelivery = "manual" | "quota" | "feature" | "subscription" | "invite_quota" | "code"
 
 /** 交付参数：每种方式只用到其中一个字段（quota 走 quotaYuan，不用这里） */
 export interface PointDeliveryParams {
@@ -2417,6 +2506,8 @@ export interface PointProduct {
   price: number
   /** 剩余库存；null = 不限量 */
   stock: number | null
+  /** 每日限量（自然日）；null = 不限 */
+  dailyLimit: number | null
   /** 每人限购件数；null = 不限 */
   perUserLimit: number | null
   delivery: PointDelivery
@@ -2634,6 +2725,8 @@ export interface PointProductPayload {
   category: ProductCategory
   price: number
   stock: number | null
+  /** 每日限量（自然日）；null = 不限 */
+  dailyLimit: number | null
   perUserLimit: number | null
   delivery: PointDelivery
   quotaYuan: number | null

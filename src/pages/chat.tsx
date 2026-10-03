@@ -8,7 +8,7 @@
 import * as React from "react"
 import { createPortal } from "react-dom"
 import { useNavigate } from "react-router-dom"
-import { ArrowLeft, Send, Loader2, Users, AtSign } from "lucide-react"
+import { ArrowLeft, Send, Loader2, Users, AtSign, Copy, Quote, Undo2, CornerDownLeft, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -19,6 +19,7 @@ import { AnchoredPanel } from "@/components/anchored-panel"
 import { EmojiPicker } from "@/components/emoji-picker"
 import { StickerPanel } from "@/components/sticker-panel"
 import { Markdown } from "@/components/markdown"
+import { DraftImagePreview } from "@/components/draft-image-preview"
 import { useAuth } from "@/hooks/use-auth"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
 import { useImageDrop } from "@/hooks/use-image-drop"
@@ -78,7 +79,7 @@ function mentionAtCaret(value: string, caret: number): { start: number; query: s
   return null
 }
 
-export default function ChatPage() {
+export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
   const { t } = useT()
   const { user } = useAuth()
   const navigate = useNavigate()
@@ -109,12 +110,35 @@ export default function ChatPage() {
     user: ChatPresenceUser
   } | null>(null)
 
+  /** 右键消息弹出的菜单：撤回 / 复制 / 引用 */
+  const [msgMenu, setMsgMenu] = React.useState<{
+    x: number
+    y: number
+    msg: ChatMessage
+  } | null>(null)
+  /** 正在引用的消息（发送前展示在输入框上方） */
+  const [quoteTarget, setQuoteTarget] = React.useState<ChatMessage | null>(null)
+  /**
+   * Enter 行为偏好：true = Enter 发送、Shift+Enter 换行（默认，符合聊天习惯）；
+   * false = Enter 换行、Ctrl/Cmd+Enter 发送（想用 Enter 排版 markdown 列表时切这个）。
+   * 存 localStorage（纯前端偏好，不上服务端）。
+   */
+  const [enterToSend, setEnterToSend] = React.useState(() => {
+    try {
+      return localStorage.getItem("chat:enterToSend") !== "0"
+    } catch {
+      return true
+    }
+  })
+
   const listRef = React.useRef<HTMLDivElement>(null)
   const lastIdRef = React.useRef<string | null>(null)
   /** 发言输入框：表情/表情包要插到光标处 */
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null)
   /** 右键菜单自身，用于「点菜单外关闭」判断 */
   const ctxRef = React.useRef<HTMLDivElement | null>(null)
+  /** 右键消息菜单自身 */
+  const msgMenuRef = React.useRef<HTMLDivElement | null>(null)
 
   // 表情与表情包都插到光标处（与社区、私信共用同一个 hook）
   const insertEmoji = useEmojiInsert(inputRef, draft, setDraft)
@@ -265,6 +289,27 @@ export default function ChatPage() {
     }
   }, [ctxMenu])
 
+  // 右键消息菜单：同样「点别处 / 滚动 / Esc」收起
+  React.useEffect(() => {
+    if (!msgMenu) return
+    const onDown = (e: MouseEvent) => {
+      if (msgMenuRef.current && msgMenuRef.current.contains(e.target as Node)) return
+      setMsgMenu(null)
+    }
+    const close = () => setMsgMenu(null)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMsgMenu(null)
+    }
+    document.addEventListener("mousedown", onDown)
+    document.addEventListener("scroll", close, true)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("mousedown", onDown)
+      document.removeEventListener("scroll", close, true)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [msgMenu])
+
   /**
    * 点页面别处就收起候选面板。
    *
@@ -368,6 +413,28 @@ export default function ChatPage() {
     if (el) el.scrollTop = el.scrollHeight
   }, [messages.length, mentionOpen])
 
+  /**
+   * 进入聊天室时定位到最新消息（用户反馈：进来不在最新处）。
+   *
+   * 首屏加载完成后、以及稍等图片/表情包异步加载出来再各滚一次 —— 否则
+   * `scrollHeight` 还没把图片高度算进去，会停在最新消息上方一截。
+   * 用 setTimeout 而不是 requestAnimationFrame（后台标签页里 rAF 会被暂停）。
+   */
+  const scrollToBottom = React.useCallback(() => {
+    const el = listRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [])
+  React.useEffect(() => {
+    if (loading || messages.length === 0) return
+    scrollToBottom()
+    const t1 = window.setTimeout(scrollToBottom, 120)
+    const t2 = window.setTimeout(scrollToBottom, 350)
+    return () => {
+      window.clearTimeout(t1)
+      window.clearTimeout(t2)
+    }
+  }, [loading, messages.length, scrollToBottom])
+
   const send = async () => {
     const text = draft.trim()
     if (!text) return
@@ -377,15 +444,55 @@ export default function ChatPage() {
     }
     setSending(true)
     try {
-      const res = await chatApi.send(text)
+      const res = await chatApi.send(text, quoteTarget?.id ?? null)
       setMessages((prev) => [...prev, res.message])
       lastIdRef.current = res.message.id
       setDraft("")
+      setQuoteTarget(null)
+      setMentionOpen(false)
     } catch (err) {
       toast.error(errMsg(err, t("chat.err.send")))
     } finally {
       setSending(false)
     }
+  }
+
+  /** 撤回自己的消息（右键菜单） */
+  const recallMessage = async (m: ChatMessage) => {
+    try {
+      await chatApi.recall(m.id)
+      setMessages((prev) =>
+        prev.map((x) =>
+          x.id === m.id ? { ...x, recalled: true, body: "", replyTo: null, quote: null } : x
+        )
+      )
+      toast.success(t("chat.recalledToast"))
+    } catch (err) {
+      toast.error(errMsg(err, t("chat.err.recall")))
+    }
+  }
+
+  /** 复制消息正文（右键菜单） */
+  const copyMessage = async (m: ChatMessage) => {
+    try {
+      await navigator.clipboard.writeText(m.body)
+      toast.success(t("chat.copied"))
+    } catch {
+      toast.error(t("chat.err.copy"))
+    }
+  }
+
+  /** 切换 Enter 行为并存进 localStorage */
+  const toggleEnterToSend = () => {
+    setEnterToSend((prev) => {
+      const next = !prev
+      try {
+        localStorage.setItem("chat:enterToSend", next ? "1" : "0")
+      } catch {
+        /* 隐私模式下写不了就算了 */
+      }
+      return next
+    })
   }
 
   /**
@@ -403,21 +510,29 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-8rem)] max-w-3xl flex-col supports-[height:100dvh]:h-[calc(100dvh-8rem)]">
+    <div
+      className={
+        embedded
+          ? "flex h-full min-h-0 flex-col"
+          : "mx-auto flex h-[calc(100vh-8rem)] max-w-3xl flex-col supports-[height:100dvh]:h-[calc(100dvh-8rem)]"
+      }
+    >
       {/* 顶部：返回 + 标题 + 在线头像堆叠 */}
       <div className="flex items-center justify-between border-b pb-3">
         <div className="flex items-center gap-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="-ml-2 shrink-0 gap-1 px-2 text-muted-foreground"
-            onClick={goBack}
-            title={t("chat.back")}
-            aria-label={t("chat.back")}
-          >
-            <ArrowLeft className="h-4 w-4" />
-            {t("chat.backShort")}
-          </Button>
+          {!embedded && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="-ml-2 shrink-0 gap-1 px-2 text-muted-foreground"
+              onClick={goBack}
+              title={t("chat.back")}
+              aria-label={t("chat.back")}
+            >
+              <ArrowLeft className="h-4 w-4" />
+              {t("chat.backShort")}
+            </Button>
+          )}
           <div>
             <h1 className="text-lg font-semibold">{t("chat.title")}</h1>
             <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -525,16 +640,44 @@ export default function ChatPage() {
                       </div>
                     )}
                     <div
+                      onContextMenu={(e) => {
+                        e.preventDefault()
+                        setMsgMenu({ x: e.clientX, y: e.clientY, msg: m })
+                      }}
                       className={cn(
                         "inline-block max-w-full break-words rounded-lg px-3 py-2 text-sm",
                         mine ? "bubble-mine bg-primary text-primary-foreground" : "bg-muted",
                         mentioned && "ring-2 ring-primary/60"
                       )}
                     >
-                      {/* 用 Markdown 渲染：表情包插进来的是 `![](/api/stickers/<id>/image)`，
-                          纯文本会把它原样显示成一行字（2026-10-02 反馈）。
-                          ⚠️ 外层用 div 不用 p —— Markdown 自己会产出 p 标签，嵌在 p 里是非法 HTML。 */}
-                      <Markdown>{m.body}</Markdown>
+                      {/* 引用块：显示被引消息的作者 + 摘要（被引消息已撤回则显示「已撤回」） */}
+                      {m.quote && !m.recalled && (
+                        <div
+                          className={cn(
+                            "mb-1.5 rounded border-l-2 px-2 py-1 text-xs",
+                            mine
+                              ? "border-primary-foreground/40 bg-primary-foreground/10"
+                              : "border-primary/40 bg-background/60"
+                          )}
+                        >
+                          <span className="font-medium">
+                            {m.quote.nickname || m.quote.username}
+                          </span>
+                          <span className={cn("ml-1", mine ? "text-primary-foreground/80" : "text-muted-foreground")}>
+                            {m.quote.recalled ? t("chat.recalled") : m.quote.body}
+                          </span>
+                        </div>
+                      )}
+                      {m.recalled ? (
+                        <span className={cn("italic", mine ? "text-primary-foreground/70" : "text-muted-foreground")}>
+                          {t("chat.recalled")}
+                        </span>
+                      ) : (
+                        /* 用 Markdown 渲染：表情包插进来的是 `![](/api/stickers/<id>/image)`，
+                            纯文本会把它原样显示成一行字（2026-10-02 反馈）。
+                            ⚠️ 外层用 div 不用 p —— Markdown 自己会产出 p 标签，嵌在 p 里是非法 HTML。 */
+                        <Markdown>{m.body}</Markdown>
+                      )}
                     </div>
                     {(mine || mentioned) && (
                       <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -558,7 +701,7 @@ export default function ChatPage() {
       <div
         {...dropProps}
         className={cn(
-          "relative flex items-center gap-2 border-t pt-3 transition-colors",
+          "relative flex flex-col gap-2 border-t pt-3 transition-colors",
           dragging && "bg-primary/5 ring-2 ring-inset ring-primary"
         )}
       >
@@ -573,6 +716,30 @@ export default function ChatPage() {
             {t("img.uploading")}
           </div>
         )}
+        {/* 引用预览：发送前展示「正在引用谁」，可取消 */}
+        {quoteTarget && (          <div className="flex items-start gap-2 rounded-md border-l-2 border-primary bg-muted/50 px-2 py-1.5 text-xs">
+            <Quote className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1">
+              <span className="font-medium">
+                {quoteTarget.nickname || quoteTarget.username}
+              </span>
+              <span className="ml-1 break-all text-muted-foreground">
+                {quoteTarget.body.slice(0, 120)}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setQuoteTarget(null)}
+              className="shrink-0 text-muted-foreground hover:text-foreground"
+              title={t("common.cancel")}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+        {/* 表情包/图片实时预览：发送前就把 `![](url)` 渲染成真实缩略图 */}
+        <DraftImagePreview text={draft} />
+        <div className="flex items-center gap-2">
         {/* 表情与表情包（与社区/私信同一套组件）。未登录时禁用 —— 反正发不出去 */}
         <EmojiPicker onPick={insertEmoji} />
         <StickerPanel onPick={insertEmoji} />
@@ -611,7 +778,18 @@ export default function ChatPage() {
                 return
               }
             }
-            if (e.key === "Enter" && !e.shiftKey) {
+            // 中文输入法「选词回车」也会触发 keydown —— 不判断的话就会选字即发送
+            if (e.nativeEvent.isComposing) return
+            if (e.key !== "Enter") return
+            const mod = e.ctrlKey || e.metaKey
+            if (enterToSend) {
+              // Enter 发送、Shift+Enter 换行
+              if (!e.shiftKey && !mod) {
+                e.preventDefault()
+                void send()
+              }
+            } else if (mod) {
+              // 反向偏好：Enter 换行、Ctrl/Cmd+Enter 发送
               e.preventDefault()
               void send()
             }
@@ -627,6 +805,19 @@ export default function ChatPage() {
           {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
           {t("fb.send")}
         </Button>
+        </div>
+        {/* 发送键偏好：默认 Enter 发送；想用 Enter 排版（如 markdown 列表）就切到 Ctrl+Enter 发送 */}
+        <div className="flex items-center justify-end">
+          <button
+            type="button"
+            onClick={toggleEnterToSend}
+            className="flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+            title={t("chat.enterHintTip")}
+          >
+            <CornerDownLeft className="h-3 w-3" />
+            {enterToSend ? t("chat.enterHintSend") : t("chat.enterHintNewline")}
+          </button>
+        </div>
 
         {/* 艾特候选：贴着输入框弹（Portal 到 body，不会被任何容器裁掉）。
             点击用 onMouseDown + preventDefault —— 别把输入框的焦点抢走，
@@ -705,6 +896,67 @@ export default function ChatPage() {
                 {t("chat.mentionCtx")} @{ctxMenu.user.username}
               </span>
             </button>
+          </div>,
+          document.body
+        )}
+
+      {/* 右键消息的菜单：引用 / 复制 / 撤回（撤回只在是自己的未撤回消息时出现） */}
+      {msgMenu &&
+        createPortal(
+          <div
+            ref={msgMenuRef}
+            className="fixed z-50 w-40 rounded-lg border bg-popover p-1 shadow-lg"
+            style={{
+              top: Math.max(8, Math.min(msgMenu.y, window.innerHeight - 132)),
+              left: Math.max(8, Math.min(msgMenu.x, window.innerWidth - 168)),
+            }}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            {!msgMenu.msg.recalled && (
+              <>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    setQuoteTarget(msgMenu.msg)
+                    setMsgMenu(null)
+                    inputRef.current?.focus()
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+                >
+                  <Quote className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  {t("chat.ctx.quote")}
+                </button>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    const m = msgMenu.msg
+                    setMsgMenu(null)
+                    void copyMessage(m)
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+                >
+                  <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  {t("chat.ctx.copy")}
+                </button>
+              </>
+            )}
+            {Boolean(user) && msgMenu.msg.userId === user!.id && !msgMenu.msg.recalled && (
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  const m = msgMenu.msg
+                  setMsgMenu(null)
+                  void recallMessage(m)
+                }}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-destructive transition-colors hover:bg-accent"
+              >
+                <Undo2 className="h-4 w-4 shrink-0" />
+                {t("chat.ctx.recall")}
+              </button>
+            )}
           </div>,
           document.body
         )}

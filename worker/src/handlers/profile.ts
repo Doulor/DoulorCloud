@@ -35,6 +35,9 @@ const IMAGE_TYPES: Record<string, string> = {
 const AUDIO_TYPES: Record<string, string> = {
   "audio/mpeg": "mp3",
   "audio/mp4": "m4a",
+  // m4a 在不同系统/浏览器上报的 MIME 可能不是标准的 audio/mp4（2026-10-03 反馈 bug #3）
+  "audio/x-m4a": "m4a",
+  "audio/m4a": "m4a",
   "audio/ogg": "ogg",
   "audio/wav": "wav",
   "audio/x-wav": "wav",

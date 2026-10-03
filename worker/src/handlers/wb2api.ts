@@ -500,7 +500,10 @@ async function completeBinding(
   // 记录「本次绑定是否真的把 ai 从无变有」——移除时据此判断该不该收回。
   // ⚠️ 判断基于会话用户的快照（并发下可能偏保守）；写回走原子 json_set，
   // 不会覆盖并发写入的其他模块权限。
-  const aiGranted = !parsePermissions(user.permissions).ai
+  // 先看「捐献授权开关」：关掉时绑定照常进池，只是不再授予 ai 权限。
+  const aiGranted =
+    (await getSettingBool(env, "donation_grant_wb2api")) &&
+    !parsePermissions(user.permissions).ai
 
   const id = uuid()
   const now = new Date().toISOString()

@@ -1,6 +1,7 @@
 import { json } from "../http"
 import { requireUser } from "../auth"
 import { grantAchievementRewards } from "../achievement-rewards"
+import { getSettingBool } from "../settings"
 import type { Env } from "../env"
 
 /**
@@ -373,6 +374,96 @@ const ACHIEVEMENTS: AchievementDef[] = [
     tierNames: ["满月", "周年"],
     tierReqs: ["注册满 30 天", "注册满 365 天"],
   },
+
+  // ---- 真实行为（2026-10-03 新增）--------------------------------------
+  // 这批成就有两个特点：① 全部来自「有真实成本/门槛」的行为（收发邮件、
+  // 签到、攒积分、消费、反馈、分享、开启 2FA），不是「发条消息」那种零成本
+  // 动作，刷不动；② 都依赖线上已存在的表，不新增迁移。
+  {
+    id: "two_factor",
+    name: "安全卫士",
+    desc: "开启二次验证",
+    icon: "shield-check",
+    group: "usage",
+    how: "在「设置 → 安全」开启邮箱验证码或 TOTP 二次验证，登录多一层保护。",
+  },
+  {
+    id: "mail_count",
+    name: "邮路繁忙",
+    desc: "累计收到的邮件",
+    icon: "mail-check",
+    group: "resource",
+    how: "别人向你的站内邮箱发信都会累计（验证码、通知、往来邮件都算）。",
+    tiers: [10, 100, 500],
+    tierNames: ["十封往来", "百封不断", "千封大户"],
+    tierReqs: ["收到 10 封邮件", "收到 100 封邮件", "收到 500 封邮件"],
+  },
+  {
+    id: "checkin",
+    name: "风雨无阻",
+    desc: "每日签到",
+    icon: "calendar-check",
+    group: "usage",
+    how: "在「积分」页每日签到一次，连续签到还有里程碑奖励。",
+    tiers: [7, 30, 100],
+    tierNames: ["坚持一周", "满月打卡", "百日如一日"],
+    tierReqs: ["签到 7 天", "签到 30 天", "签到 100 天"],
+  },
+  {
+    id: "points_balance",
+    name: "积分大亨",
+    desc: "积分余额",
+    icon: "coins",
+    group: "resource",
+    how: "捐献、签到、活动、邀请都能攒积分，攒到一定数量即可解锁（按曾达到的最高余额算）。",
+    tiers: [100, 500, 1000],
+    tierNames: ["小有积分", "百元身家", "富可敌国"],
+    tierReqs: ["余额达 100 分", "余额达 500 分", "余额达 1000 分"],
+  },
+  {
+    id: "feedback",
+    name: "直言不讳",
+    desc: "提交反馈",
+    icon: "megaphone",
+    group: "contribute",
+    how: "在「反馈」页提交问题或建议，帮平台变得更好。",
+    tiers: [1, 5, 10],
+    tierNames: ["首条反馈", "热心用户", "编外产品经理"],
+    tierReqs: ["提交 1 条反馈", "提交 5 条反馈", "提交 10 条反馈"],
+  },
+  {
+    id: "shop_orders",
+    name: "消费达人",
+    desc: "在积分商城购买",
+    icon: "shopping-bag",
+    group: "usage",
+    how: "在「积分商城」用积分兑换商品或中转站余额（成功交付才计数）。",
+    tiers: [1, 5, 20],
+    tierNames: ["首单成交", "小有剁手", "消费达人"],
+    tierReqs: ["购买 1 次", "购买 5 次", "购买 20 次"],
+  },
+  {
+    id: "post_shares",
+    name: "传播达人",
+    desc: "分享帖子",
+    icon: "share-2",
+    group: "social",
+    how: "把社区里值得看的帖子分享出去，让好内容被更多人看到。",
+    tiers: [1, 20, 100],
+    tierNames: ["首次分享", "乐于分享", "传播达人"],
+    tierReqs: ["分享 1 次", "分享 20 次", "分享 100 次"],
+  },
+  {
+    id: "stickers",
+    name: "表情包收藏家",
+    desc: "保存表情包",
+    icon: "smile",
+    group: "usage",
+    how: "在聊天或社区里把喜欢的表情包存到自己的收藏。",
+    tiers: [1, 10, 100],
+    tierNames: ["收藏起步", "表情丰富", "收藏大家"],
+    tierReqs: ["保存 1 个表情包", "保存 10 个表情包", "保存 100 个表情包"],
+  },
 ]
 
 /**
@@ -381,23 +472,36 @@ const ACHIEVEMENTS: AchievementDef[] = [
  * 为什么用「点」而不是「成就个数」：分级成就练到 Lv.3 却和只解锁 Lv.1 一样，
  * 会让人觉得刷等级没意义。点数把深度也计进去了。
  *
- * 上限参考：29 个成就 + 分级额外等级 ≈ 60 点，所以最高档取 36，
- * 让「传奇」是可达但有门槛的目标。
+ * 上限参考：37 个成就 + 分级额外等级 ≈ 82 点。档位在 2026-10-03 提过一次
+ * （成就从 60 点扩到 82 点后，原「传奇 = 36」显得太低），梯度逐渐拉大，
+ * 越往上越难：0/5/12/22/36/52/70/80。
  */
 const TITLES: { min: number; name: string }[] = [
   { min: 0, name: "初来乍到" },
-  { min: 3, name: "新星" },
-  { min: 8, name: "常客" },
-  { min: 15, name: "老友" },
-  { min: 25, name: "名人" },
-  { min: 36, name: "传奇" },
+  { min: 5, name: "新星" },
+  { min: 12, name: "常客" },
+  { min: 22, name: "老友" },
+  { min: 36, name: "名人" },
+  { min: 52, name: "传奇" },
+  { min: 70, name: "至尊" },
+  { min: 80, name: "萌新" },
 ]
+
+/** 称号阶梯里的一个档位（供前端做「VIP 等级」式的线性展示） */
+export interface TitleRung {
+  name: string
+  min: number
+  /** 是否当前所处档位 */
+  current: boolean
+}
 
 export function titleFor(points: number): {
   name: string
   min: number
   next: number | null
   nextName: string | null
+  /** 完整称号阶梯（所有档位，前端线性展示用） */
+  ladder: TitleRung[]
 } {
   let idx = 0
   for (let i = 0; i < TITLES.length; i++) {
@@ -410,6 +514,11 @@ export function titleFor(points: number): {
     min: cur.min,
     next: nxt ? nxt.min : null,
     nextName: nxt ? nxt.name : null,
+    ladder: TITLES.map((t, i) => ({
+      name: t.name,
+      min: t.min,
+      current: i === idx,
+    })),
   }
 }
 
@@ -555,6 +664,20 @@ export interface UserCounts {
   ai_acc: number
   profile_row: number
   veteran_rank: number
+  /** 是否开启二次验证（0/1） */
+  two_factor: number
+  /** 累计签到天数 */
+  checkin_count: number
+  /** 积分余额 */
+  points_balance: number
+  /** 累计提交的反馈数 */
+  feedback_count: number
+  /** 积分商城成功交付的订单数 */
+  shop_orders: number
+  /** 累计分享帖子的次数 */
+  shares_given: number
+  /** 已保存的表情包数 */
+  stickers: number
   /** 注册时间（「坚守者」按天数算，个人空间也要显示加入时间） */
   created_at: string | null
 }
@@ -590,6 +713,13 @@ function emptyCounts(): UserCounts {
     ai_acc: 0,
     profile_row: 0,
     veteran_rank: 999,
+    two_factor: 0,
+    checkin_count: 0,
+    points_balance: 0,
+    feedback_count: 0,
+    shop_orders: 0,
+    shares_given: 0,
+    stickers: 0,
     created_at: null,
   }
 }
@@ -617,14 +747,18 @@ function emptyCounts(): UserCounts {
  * @param owner 指向「被统计的用户 id」那一列的表达式：
  *              单用户传 `me.uid`，全站传 `u.id`。
  */
-function countColumns(owner: string): string {
+function countColumns(owner: string, excludeApi: boolean): string {
+  // 「API 计入成就」开关关闭时，排除通过公开 API 创建的记录（source='api'），
+  // 防止脚本刷成就点。只影响 DNS 与邮箱这两个能被 API 创建的资源。
+  const mailboxSrc = excludeApi ? " AND source != 'api'" : ""
+  const dnsSrc = excludeApi ? " AND dr.source != 'api'" : ""
   return `
        -- 主域名（name='@'，注册时分配）也计入（2026-10-01 用户反馈：
       -- 原先排除它导致「创建 1 个子域名」这一档永远差一个，除非用户自己再建子域名）
       (SELECT COUNT(*) FROM subdomains WHERE user_id = {OWNER}) AS subdomain,
-       (SELECT COUNT(*) FROM mailboxes WHERE user_id = {OWNER}) AS mailbox,
+       (SELECT COUNT(*) FROM mailboxes WHERE user_id = {OWNER}${mailboxSrc}) AS mailbox,
        (SELECT COUNT(*) FROM dns_records dr JOIN subdomains s ON dr.subdomain_id = s.id
-         WHERE s.user_id = {OWNER}) AS dns,
+         WHERE s.user_id = {OWNER}${dnsSrc}) AS dns,
        (SELECT COUNT(*) FROM storage_objects WHERE user_id = {OWNER}) AS storage_files,
        (SELECT COALESCE(SUM(size), 0) FROM storage_objects WHERE user_id = {OWNER}) AS storage_bytes,
        (SELECT COUNT(*) FROM newapi_keys WHERE user_id = {OWNER}) AS ai_keys,
@@ -658,7 +792,7 @@ function countColumns(owner: string): string {
              + COALESCE((SELECT SUM(like_count) FROM post_comments
                           WHERE user_id = {OWNER} AND deleted_at IS NULL), 0)) AS likes_received,
        (SELECT COUNT(*) FROM chat_messages WHERE user_id = {OWNER}) AS chat,
-       (SELECT COUNT(*) FROM tempbox_batches WHERE creator_user_id = {OWNER}) AS tempbox,
+       (SELECT COALESCE(tempbox_created, 0) FROM user_stats WHERE user_id = {OWNER}) AS tempbox,
        (SELECT COUNT(*) FROM users u JOIN invite_codes c ON u.invite_code_id = c.id
          WHERE c.created_by = {OWNER}) AS invited,
        (SELECT COUNT(*) FROM donations WHERE user_id = {OWNER} AND status = 'approved') AS donations,
@@ -671,13 +805,24 @@ function countColumns(owner: string): string {
        (SELECT COUNT(*) FROM profiles WHERE user_id = {OWNER}) AS profile_row,
        (SELECT COUNT(*) FROM users WHERE created_at <
          (SELECT created_at FROM users WHERE id = {OWNER})) AS veteran_rank,
+       -- ---- 2026-10-03 新增：真实行为类计数 ----
+       (SELECT COUNT(*) FROM user_2fa WHERE user_id = {OWNER}
+          AND (totp_confirmed = 1 OR email_enabled = 1)) AS two_factor,
+       (SELECT COUNT(*) FROM daily_checkins WHERE user_id = {OWNER}) AS checkin_count,
+       (SELECT COALESCE(balance, 0) FROM user_points WHERE user_id = {OWNER}) AS points_balance,
+       (SELECT COUNT(*) FROM feedback WHERE user_id = {OWNER}) AS feedback_count,
+       (SELECT COUNT(*) FROM point_orders WHERE user_id = {OWNER}
+          AND status IN ('delivered', 'settled')) AS shop_orders,
+       (SELECT COUNT(*) FROM post_shares WHERE user_id = {OWNER}) AS shares_given,
+       (SELECT COUNT(*) FROM user_stickers WHERE user_id = {OWNER}) AS stickers,
        (SELECT created_at FROM users WHERE id = {OWNER}) AS created_at
      `.replaceAll("{OWNER}", owner)
 }
 
 export async function loadUserCounts(env: Env, userId: string): Promise<UserCounts> {
+  const excludeApi = !(await getSettingBool(env, "api_count_achievements"))
   const row = await env.DB.prepare(
-    `SELECT ${countColumns("me.uid")}
+    `SELECT ${countColumns("me.uid", excludeApi)}
      FROM (SELECT ? AS uid) me`
   )
     .bind(userId)
@@ -704,10 +849,11 @@ export interface AllUserCounts extends UserCounts {
  * 新增依赖前先 `SELECT name FROM sqlite_master` 确认一次，否则整页 500。
  */
 export async function loadAllUserCounts(env: Env): Promise<AllUserCounts[]> {
+  const excludeApi = !(await getSettingBool(env, "api_count_achievements"))
   const res = await env.DB.prepare(
     `SELECT u.id AS uid, u.username AS username, u.nickname AS nickname,
             u.avatar_key AS avatar_key,
-            ${countColumns("u.id")}
+            ${countColumns("u.id", excludeApi)}
        FROM users u
       WHERE u.status = 'active'`
   ).all<AllUserCounts>()
@@ -760,6 +906,15 @@ export function computeAchievements(counts: UserCounts): {
     proxy_enable: (c?.proxy ?? 0) > 0 ? 1 : 0,
     veteran: (c?.veteran_rank ?? 999) < VETERAN_TOP_N ? 1 : 0,
     loyal: daysSinceRegister,
+    // ---- 2026-10-03 新增：真实行为类 ----
+    two_factor: c?.two_factor ?? 0,
+    mail_count: c?.mails ?? 0,
+    checkin: c?.checkin_count ?? 0,
+    points_balance: c?.points_balance ?? 0,
+    feedback: c?.feedback_count ?? 0,
+    shop_orders: c?.shop_orders ?? 0,
+    post_shares: c?.shares_given ?? 0,
+    stickers: c?.stickers ?? 0,
   }
 
   const result: AchievementProgress[] = ACHIEVEMENTS.map((def) => {

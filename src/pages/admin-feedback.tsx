@@ -44,6 +44,9 @@ import {
   ImagePickerField,
   ImageGallery,
 } from "@/components/feedback-image"
+import { EmojiPicker } from "@/components/emoji-picker"
+import { useEmojiInsert } from "@/hooks/use-emoji-insert"
+import { useImageDrop } from "@/hooks/use-image-drop"
 import type { AdminFeedbackItem, AdminFeedbackOverview } from "@/types"
 import { useT, tStatic, translateApiMessage } from "@/i18n"
 
@@ -97,6 +100,13 @@ export function FeedbackPanel() {
   const [replyPoints, setReplyPoints] = React.useState("")
   const [replyBusy, setReplyBusy] = React.useState(false)
   const replyImages = usePickedImages()
+  // 回复框：表情插到光标处；拖入/粘贴图片交给 replyImages（自带压缩+上传，用 onFiles + noPaste）
+  const replyTaRef = React.useRef<HTMLTextAreaElement>(null)
+  const insertReplyEmoji = useEmojiInsert(replyTaRef, replyText, setReplyText)
+  const { dragging: replyDragging, dropProps: replyDropProps } = useImageDrop({
+    onFiles: (files) => void replyImages.pick(files),
+    noPaste: true,
+  })
 
   // 删除确认弹窗
   const [deleteTarget, setDeleteTarget] = React.useState<AdminFeedbackItem | null>(null)
@@ -424,16 +434,31 @@ export function FeedbackPanel() {
                 </p>
               </div>
 
-              <div className="space-y-2">
+              <div
+                {...replyDropProps}
+                className={`space-y-2${replyDragging ? " rounded-md ring-2 ring-primary" : ""}`}
+              >
                 <Label htmlFor="fbReply">{t("af.dlg.reply")}</Label>
                 <Textarea
                   id="fbReply"
+                  ref={replyTaRef}
                   rows={6}
                   maxLength={2000}
                   placeholder={t("af.dlg.replyPh")}
                   value={replyText}
                   onChange={(e) => setReplyText(e.target.value)}
+                  onPaste={(e) => {
+                    // 直接粘贴截图/图片：把图收进待上传列表，不往正文塞字节
+                    const files = e.clipboardData?.files
+                    if (files && files.length > 0) {
+                      e.preventDefault()
+                      void replyImages.pick(files)
+                    }
+                  }}
                 />
+                <div className="flex items-center gap-1">
+                  <EmojiPicker onPick={insertReplyEmoji} />
+                </div>
                 <ImagePickerField
                   images={replyImages.images}
                   compressing={replyImages.compressing}

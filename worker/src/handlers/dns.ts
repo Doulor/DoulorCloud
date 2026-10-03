@@ -2,6 +2,7 @@ import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
 import { requireUser } from "../auth"
 import { guardRateLimit } from "../ratelimit"
+import { isApiRequest } from "../api-source"
 import { requireOwnedDomain, assertFqdnOwned } from "../ownership"
 import { zoneIdForFqdn } from "../root-domains"
 import {
@@ -418,8 +419,8 @@ export async function createDns(env: Env, request: Request): Promise<Response> {
     env.DB.prepare(
       `INSERT INTO dns_records
         (id, domain_id, subdomain_id, cf_id, name, fqdn, type, content, ttl, proxied, priority,
-         srv_weight, srv_port, srv_target, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         srv_weight, srv_port, srv_target, status, source, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       id,
       domain.id,
@@ -436,6 +437,7 @@ export async function createDns(env: Env, request: Request): Promise<Response> {
       srv ? srv.port : null,
       srv ? srv.target : null,
       cfId ? "active" : "error",
+      isApiRequest(request) ? "api" : "web",
       now,
       now
     ),

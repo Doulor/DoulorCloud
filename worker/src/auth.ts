@@ -92,6 +92,7 @@ const EMAIL_VERIFY_REQUIRED_PREFIXES: readonly string[] = [
   "/proxy", //           代理节点
   "/donations", //       资源捐献
   "/points", //          积分与商城
+  "/checkin", //         每日签到（发积分，属于写操作，同样过门槛）
   "/vouchers", //        兑换券
   "/my-invites", //      我的邀请码
   "/chat", //            聊天室

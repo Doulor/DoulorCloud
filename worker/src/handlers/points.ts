@@ -62,11 +62,13 @@ import {
 } from "../points"
 import { backfillDonationRewards, topUpDonationRewards } from "../donation-backfill"
 import {
+  addProductCodes,
   adminCancelOrder,
   adminResolveAfterSale,
   adminSettleOrder,
   buyProduct,
   cancelAfterSale,
+  clearUnusedProductCodes,
   confirmOrder,
   createProduct,
   createUserProduct,
@@ -74,6 +76,7 @@ import {
   deleteUserProduct,
   deliverOrder,
   escalateAfterSale,
+  getProductCodes,
   listAfterSaleOrders,
   listOrders,
   listProducts,
@@ -918,8 +921,48 @@ export async function deleteShopProduct(
   return json({ ok: true })
 }
 
-/** POST /api/admin/points/products/:id/review —— 审核用户商品 */
-export async function reviewShopProduct(
+// ---- 卡密池（delivery='code'，用户反馈 a977d1cf）----
+
+/** GET /api/admin/points/products/:id/codes */
+export async function getShopProductCodes(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  await requireAdmin(env, request)
+  return json(await getProductCodes(env, id))
+}
+
+/** POST /api/admin/points/products/:id/codes —— body { codes: string[] } */
+export async function addShopProductCodes(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+  assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  const body = (await request.json().catch(() => ({}))) as { codes?: unknown }
+  const codes = Array.isArray(body.codes)
+    ? body.codes.filter((c): c is string => typeof c === "string")
+    : []
+  const result = await addProductCodes(env, id, codes)
+  await audit(env, admin.id, "points.shop.product", `商品 ${id} 导入卡密 ${result.added} 条`)
+  return json(result)
+}
+
+/** DELETE /api/admin/points/products/:id/codes —— 清空未使用的卡密 */
+export async function clearShopProductCodes(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+  const removed = await clearUnusedProductCodes(env, id)
+  await audit(env, admin.id, "points.shop.product", `商品 ${id} 清空未使用卡密 ${removed} 条`)
+  return json({ removed })
+}
+
+/** POST /api/admin/points/products/:id/review —— 审核用户商品 */export async function reviewShopProduct(
   env: Env,
   request: Request,
   id: string

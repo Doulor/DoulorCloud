@@ -81,7 +81,16 @@ export function AnchoredPanel({
 
   React.useEffect(() => {
     if (!open) return
-    const close = () => onClose()
+    const close = (e: Event) => {
+      // 面板内部自己的滚动**不**关闭 —— 否则表情/表情包列表根本滚不动。
+      //
+      // scroll 事件不冒泡，但这里用 capture 监听 window 能抓到；
+      // 抓到时的 `e.target` 就是**实际滚动的那个元素**。只要它在面板里，
+      // 就是列表在滚，不该当成「页面滚走了」而收面板。
+      const t = e.target
+      if (t instanceof Element && t.closest("[data-anchored-panel]")) return
+      onClose()
+    }
     // capture 阶段监听：卡片内部的滚动容器也能捕获到
     window.addEventListener("scroll", close, true)
     window.addEventListener("resize", close)

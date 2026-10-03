@@ -7,10 +7,12 @@
  *   - 静态资源（带哈希的 JS/CSS/字体/图标）：**缓存优先**（URL 带哈希，内容不可变）。
  *   - /api/*：**永远走网络**，不缓存（接口有鉴权与实时性）。
  */
-// ⚠️ 改这里 = 激活时清掉上一版缓存。2026-10-02 升 v2：此前 assets 会把「不存在的
-//    /assets/*.js」兜底成 200 + text/html，SW 按 res.ok 把这个坏响应也缓存了；
-//    服务端已修（site-worker.js 对这类路径返回 404），这里升版本把历史坏缓存清掉。
-const CACHE = "doulor-shell-v2"
+// ⚠️ 改这里 = 激活时清掉上一版缓存。2026-10-03 升 v3：此前站长反馈「关了捐献授权
+//   开关、捐献页文案却还是旧的」，根因是 cache-first 的静态资源把旧 chunk 缓存住了，
+//   普通刷新拿不到新版（chunk 哈希变了但旧缓存仍在）。升版本强制清一次，让所有人
+//   下次加载拿到最新版本。历史：2026-10-02 升 v2 修「不存在的 /assets/*.js 被兜底成
+//   200 + text/html、SW 把坏响应也缓存」的问题（见 site-worker.js）。
+const CACHE = "doulor-shell-v3"
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

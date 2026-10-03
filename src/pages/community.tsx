@@ -1,6 +1,6 @@
 import * as React from "react"
-import { Link, useParams, useNavigate } from "react-router-dom"
-import { AlertCircle, ArrowLeft, FileQuestion, Flame, Heart, Image as ImageIcon, ImageOff, ImagePlus, Loader2, MessageCircle, MessagesSquare, PenSquare, Pin, RotateCw, Send, Share2, Trash2, TrendingUp, Users, WifiOff, X } from "lucide-react"
+import { Link, useParams, useNavigate, useLocation } from "react-router-dom"
+import { AlertCircle, ArrowLeft, Eye, FileQuestion, Flame, Heart, Image as ImageIcon, ImageOff, ImagePlus, Loader2, MessageCircle, MessagesSquare, PenSquare, Pin, RotateCw, Send, Share2, Trash2, TrendingUp, Users, WifiOff, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -12,6 +12,7 @@ import { UserCardPopover } from "@/components/user-card"
 import { RoleBadge } from "@/components/role-badge"
 import { CustomTitleBadge } from "@/components/custom-title-badge"
 import { Markdown } from "@/components/markdown"
+import { DraftImagePreview } from "@/components/draft-image-preview"
 import { EmojiPicker } from "@/components/emoji-picker"
 import { StickerPanel } from "@/components/sticker-panel"
 import { Button } from "@/components/ui/button"
@@ -32,8 +33,32 @@ import { useAttentionCounts } from "@/lib/attention-context"
 import { communityApi, notificationApi, HttpError, errMsg } from "@/services/api"
 import { compressImage } from "@/lib/image-compress"
 import { fmtTime, relTime } from "@/lib/format"
-import type { Post, CommentNode, CommunityStats, Notification } from "@/types"
+import type { Post, CommentNode, CommunityStats, Notification, PostCategory } from "@/types"
 import { useT } from "@/i18n"
+
+/** 帖子分类（2026-10-03）：闲聊 / 求助 / 资源共享 */
+const POST_CATEGORIES = ["chat", "help", "resource"] as const
+const POST_CATEGORY_LABELS: Record<PostCategory, string> = {
+  chat: "cm.cat.chat",
+  help: "cm.cat.help",
+  resource: "cm.cat.resource",
+}
+
+/**
+ * 社区列表的滚动位置记忆（用户反馈 d89b9a86）： * 从广场点进帖子后，返回时帖子「跑到下面去了」—— 点开帖子前存下 window.scrollY，
+ * 回到列表时再滚回去。用 sessionStorage（每标签页独立，关掉即失效，符合直觉）。
+ */
+function communityScrollKey(basePath: string): string {
+  return `community:scroll:${basePath}`
+}
+
+function saveCommunityScroll(basePath: string): void {
+  try {
+    sessionStorage.setItem(communityScrollKey(basePath), String(window.scrollY))
+  } catch {
+    /* 隐私模式写不了就算了 */
+  }
+}
 
 /** 单张图片：加载前显示占位骨架（扫光），加载完成后淡入，失败显示提示 */
 function LazyImage({
@@ -253,7 +278,10 @@ function PostActions({
       {!detail && (
         <Link
           to={`${basePath}/${post.id}`}
-          onClick={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation()
+            saveCommunityScroll(basePath)
+          }}
           className="flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors hover:bg-accent hover:text-foreground"
           aria-label={t("cm.viewComments")}
         >
@@ -332,20 +360,65 @@ function PostCard({
   basePath: string
 }) {
   const navigate = useNavigate()
+  const { t } = useT()
   return (
     <article
-      onClick={() => navigate(`${basePath}/${post.id}`)}
+      onClick={() => {
+        saveCommunityScroll(basePath)
+        navigate(`${basePath}/${post.id}`)
+      }}
       className="group relative cursor-pointer overflow-hidden rounded-xl border bg-card p-4 transition-all hover:border-border/80 hover:shadow-sm"
     >
       <span className="absolute inset-y-0 left-0 w-1 rounded-l-xl bg-gradient-to-b from-primary/40 to-primary/10" />
       <div className="min-w-0 pl-2">
         <AuthorLine post={post} />
+        {/* 分类标签：闲聊 / 求助 / 资源共享 */}
+        <div className="mt-1.5">
+          <Badge
+            variant="outline"
+            className="text-[10px] font-normal text-muted-foreground"
+          >
+            {t(
+              POST_CATEGORY_LABELS[(post.category as PostCategory) ?? "chat"] ??
+                POST_CATEGORY_LABELS.chat
+            )}
+          </Badge>
+        </div>
         {post.body && (
           <div className="mt-2.5">
             <Markdown>{post.body}</Markdown>
           </div>
         )}
         <PostImages images={post.images} />
+        {/* 高赞评论预览：不进详情就能看到最值得看的评论 */}
+        {post.topComments && post.topComments.length > 0 && (
+          <div className="mt-2.5 space-y-1.5 rounded-md bg-muted/40 p-2">
+            {post.topComments.map((c) => (
+              <div key={c.id} className="flex items-start gap-2">
+                <UserAvatar
+                  username={c.username}
+                  nickname={c.nickname}
+                  hasAvatar={c.hasAvatar}
+                  className="h-5 w-5 shrink-0"
+                />
+                <div className="min-w-0 flex-1">
+                  <span className="text-xs font-medium">
+                    {c.nickname || c.username}
+                  </span>
+                  <span className="ml-1.5 line-clamp-1 break-all text-xs text-muted-foreground">
+                    {c.body}
+                  </span>
+                </div>
+                {c.likeCount > 0 && (
+                  <span className="flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground">
+                    <Heart className="h-3 w-3 fill-current text-primary" />
+                    <span className="tabular-nums">{c.likeCount}</span>
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         <PostActions
           post={post}
           onLike={() => onLike(post)}
@@ -404,11 +477,45 @@ function CommentItem({
   /** 拖入 / 粘贴图片：上传后把 `![](url)` 插到光标处 */
   const { dragging, dropProps } = useImageDrop({ onImage: insertEmoji })
 
+  // 评论点赞（2026-10-03）：初始值取自后端，操作时乐观更新
+  const [liked, setLiked] = React.useState(Boolean(node.liked))
+  const [likeCount, setLikeCount] = React.useState(node.likeCount)
+  const [liking, setLiking] = React.useState(false)
+
+  const toggleLike = async () => {
+    if (!user) {
+      navigate("/login", { state: { from: `${basePath}/${postId}` } })
+      return
+    }
+    if (liking) return
+    setLiking(true)
+    const prev = { liked, likeCount }
+    setLiked(!liked)
+    setLikeCount((c) => Math.max(0, c + (liked ? -1 : 1)))
+    try {
+      const res = await communityApi.toggleCommentLike(node.id)
+      setLiked(res.liked)
+      setLikeCount(res.likeCount)
+    } catch (err) {
+      setLiked(prev.liked)
+      setLikeCount(prev.likeCount)
+      toast.error(errMsg(err, t("cm.err.like")))
+    } finally {
+      setLiking(false)
+    }
+  }
+
   // 深层嵌套时停止左侧缩进，避免在手机上越缩越窄成一条缝
   const indent = depth < 6
 
+  // 回复过多时自动折叠（用户反馈 2026-10-03：同一条回复下太多条会刷屏）
+  const COLLAPSE_AT = 3
+  const [showAllReplies, setShowAllReplies] = React.useState(false)
+  const collapsed = node.replies.length > COLLAPSE_AT
+  const visibleReplies = collapsed && !showAllReplies ? node.replies.slice(0, COLLAPSE_AT) : node.replies
+
   return (
-    <div className="overflow-hidden rounded-lg border bg-card p-3">
+    <div className={cn("overflow-hidden rounded-lg border bg-card p-3", depth > 0 && "border-l-2 border-l-primary/30")}>
       <div className="flex min-w-0 items-center gap-2">
         <UserCardPopover
           username={node.author.username}
@@ -429,6 +536,12 @@ function CommentItem({
         </UserCardPopover>
         {node.author.isAdmin && <RoleBadge role={node.author.isRoot ? "root" : "admin"} />}
         {node.author.customTitle && <CustomTitleBadge title={node.author.customTitle} />}
+        {node.hot && (
+          <Badge variant="secondary" className="shrink-0 text-[10px]">
+            <Flame className="mr-0.5 h-3 w-3 text-orange-500" />
+            {t("cm.hot")}
+          </Badge>
+        )}
         <span className="ml-auto shrink-0 text-xs text-muted-foreground" title={fmtTime(node.createdAt)}>
           {relTime(node.createdAt)}
         </span>
@@ -441,14 +554,28 @@ function CommentItem({
         )}
         <Markdown>{node.body}</Markdown>
       </div>
-      {user && (
+      <div className="mt-1.5 flex items-center gap-3">
         <button
-          onClick={() => setReplying((v) => !v)}
-          className="mt-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+          onClick={() => void toggleLike()}
+          className={cn(
+            "flex items-center gap-1 text-xs transition-colors",
+            liked ? "text-primary" : "text-muted-foreground hover:text-foreground"
+          )}
+          title={t("cm.like")}
         >
-          {replying ? t("cm.cancelReply") : t("cm.reply")}
+          <Heart className={cn("h-3.5 w-3.5", liked && "fill-current")} />
+          {likeCount > 0 && <span className="tabular-nums">{likeCount}</span>}
+          <span>{t("cm.like")}</span>
         </button>
-      )}
+        {user && (
+          <button
+            onClick={() => setReplying((v) => !v)}
+            className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+          >
+            {replying ? t("cm.cancelReply") : t("cm.reply")}
+          </button>
+        )}
+      </div>
       {replying && (
         <div
           {...dropProps}
@@ -478,8 +605,8 @@ function CommentItem({
         </div>
       )}
       {node.replies.length > 0 && (
-        <div className={"mt-3 space-y-2 " + (indent ? "border-l-2 border-border pl-3" : "")}>
-          {node.replies.map((r) => (
+        <div className={cn("mt-3 space-y-2", indent && "border-l-2 border-border pl-3")}>
+          {visibleReplies.map((r) => (
             <CommentItem
               key={r.id}
               node={r}
@@ -489,6 +616,17 @@ function CommentItem({
               depth={depth + 1}
             />
           ))}
+          {collapsed && (
+            <button
+              type="button"
+              onClick={() => setShowAllReplies((v) => !v)}
+              className="pl-3 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            >
+              {showAllReplies
+                ? t("cm.collapseReplies")
+                : t("cm.expandReplies", { n: node.replies.length - COLLAPSE_AT })}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -570,9 +708,28 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
   const { user } = useAuth()
   const basePath = inDashboard ? "/dashboard/community" : "/community"
   const navigate = useNavigate()
+  const location = useLocation()
+  /** 来源页（如 /dashboard/messages）：有值时返回按钮回来源页，而不是广场 */
+  const from = (location.state as { from?: string } | null)?.from ?? null
   const [text, setText] = React.useState("")
   const [busy, setBusy] = React.useState(false)
   const taRef = React.useRef<HTMLTextAreaElement>(null)
+
+  // 进详情页滚到顶部（从列表点进来时，窗口还停在列表的滚动位置）
+  React.useEffect(() => {
+    window.scrollTo(0, 0)
+  }, [id])
+
+  /** 返回：优先回来源页（消息通知等），否则回退历史，再兜底回广场 */
+  const goBack = () => {
+    if (from) {
+      navigate(from)
+      return
+    }
+    const idx = (window.history.state as { idx?: number } | null)?.idx ?? 0
+    if (idx > 0) navigate(-1)
+    else navigate(basePath)
+  }
 
   // 编辑
   const [editing, setEditing] = React.useState(false)
@@ -784,13 +941,21 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
 
   return (
     <div className="mx-auto w-full max-w-3xl space-y-4 animate-in fade-in-0 duration-300">
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={() => navigate(basePath)}
-      >
-        <ArrowLeft className="h-4 w-4" /> {t("cm.backToSquare")}
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={goBack}
+          className="-ml-2"
+        >
+          <ArrowLeft className="h-4 w-4" /> {from ? t("cm.backToPrev") : t("cm.backToSquare")}
+        </Button>
+        {from && (
+          <Button variant="ghost" size="sm" onClick={() => navigate(basePath)}>
+            {t("cm.goToSquare")}
+          </Button>
+        )}
+      </div>
 
       <article className="overflow-hidden rounded-xl border bg-card">
         <div className="border-b bg-muted/30 px-4 py-3">
@@ -958,6 +1123,10 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
   /** 待上传图片：{ file, preview } */
   const [images, setImages] = React.useState<{ file: File; preview: string }[]>([])
   const [compressing, setCompressing] = React.useState(false)
+  /** Markdown 实时预览开关（用户反馈：编辑时看不到排版效果） */
+  const [preview, setPreview] = React.useState(false)
+  /** 帖子分类：闲聊（默认）/ 求助 / 资源共享（用户反馈 2026-10-03） */
+  const [category, setCategory] = React.useState<PostCategory>("chat")
   const fileRef = React.useRef<HTMLInputElement>(null)
   const taRef = React.useRef<HTMLTextAreaElement>(null)
 
@@ -991,6 +1160,7 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
     for (const img of images) URL.revokeObjectURL(img.preview)
     setImages([])
     setDraft("")
+    setCategory("chat")
     setOpen(false)
   }
 
@@ -1037,7 +1207,7 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
     setBusy(true)
     try {
       // 1) 先建帖拿到 id（图片 key 需要 postId）
-      const { post } = await communityApi.createPost(draft.trim())
+      const { post } = await communityApi.createPost(draft.trim(), [], category)
       // 2) 逐张上传；单张失败不阻塞其余，最后统一提示
       let failed = 0
       for (const img of images) {
@@ -1099,21 +1269,34 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
         </button>
       </div>
 
-      <Textarea
-        ref={taRef}
-        autoFocus
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        placeholder={t("cm.postPh")}
-        rows={4}
-        className="resize-none border-0 px-0 text-sm focus-visible:ring-0"
-        onKeyDown={(e) => {
-          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-            e.preventDefault()
-            void submit()
-          }
-        }}
-      />
+      {preview ? (
+        <div className="min-h-[6rem] rounded-md border border-dashed p-2.5 text-sm">
+          {draft.trim() ? (
+            <Markdown>{draft}</Markdown>
+          ) : (
+            <p className="text-muted-foreground">{t("cm.previewEmpty")}</p>
+          )}
+        </div>
+      ) : (
+        <Textarea
+          ref={taRef}
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder={t("cm.postPh")}
+          rows={4}
+          className="resize-none border-0 px-0 text-sm focus-visible:ring-0"
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+              e.preventDefault()
+              void submit()
+            }
+          }}
+        />
+      )}
+
+      {/* 表情包/图片实时预览：正文里贴的表情包发送前就渲染成缩略图 */}
+      {!preview && <DraftImagePreview text={draft} className="mt-2" />}
 
       {/* 图片预览 */}
       {images.length > 0 && (
@@ -1149,6 +1332,24 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
       />
 
       <div className="mt-2 flex items-center gap-1 border-t pt-2.5">
+        {/* 分类选择：闲聊 / 求助 / 资源共享（默认闲聊） */}
+        <div className="mr-1 flex items-center gap-0.5 rounded-md border p-0.5">
+          {(POST_CATEGORIES as readonly PostCategory[]).map((c) => (
+            <button
+              key={c}
+              type="button"
+              onClick={() => setCategory(c)}
+              className={cn(
+                "rounded px-2 py-1 text-xs transition-colors",
+                category === c
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {t(POST_CATEGORY_LABELS[c])}
+            </button>
+          ))}
+        </div>
         <button
           type="button"
           onClick={() => fileRef.current?.click()}
@@ -1162,6 +1363,18 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
         </button>
         <EmojiPicker onPick={insertEmoji} />
         <StickerPanel onPick={insertEmoji} />
+        <button
+          type="button"
+          onClick={() => setPreview((v) => !v)}
+          className={cn(
+            "flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-accent hover:text-foreground",
+            preview ? "text-primary" : "text-muted-foreground"
+          )}
+          title={t("cm.previewToggle")}
+        >
+          <Eye className="h-4 w-4" />
+          {preview ? t("cm.previewOn") : t("cm.previewOff")}
+        </button>
         <span
           className={
             "ml-auto text-xs tabular-nums " +
@@ -1354,10 +1567,44 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
     }
   }, [])
 
+  /** 本地即时 +1/-1（发帖/删帖后）：不等服务端缓存，侧栏数字立刻跟上 */
+  const bumpStats = React.useCallback((delta: number) => {
+    setStats((s) =>
+      s
+        ? {
+            ...s,
+            todayCount: Math.max(0, s.todayCount + delta),
+            totalCount: Math.max(0, s.totalCount + delta),
+          }
+        : s
+    )
+  }, [])
+
   React.useEffect(() => {
     if (!id) void load()
     void loadStats()
   }, [load, loadStats, id])
+
+  // 列表渲染完成后恢复上次的滚动位置（只在列表视图 /community，不是在详情）
+  React.useEffect(() => {
+    if (id || loading) return
+    let saved: string | null = null
+    try {
+      saved = sessionStorage.getItem(communityScrollKey(basePath))
+    } catch {
+      return
+    }
+    if (!saved) return
+    try {
+      sessionStorage.removeItem(communityScrollKey(basePath))
+    } catch {
+      /* ignore */
+    }
+    const y = Number(saved) || 0
+    if (y <= 0) return
+    // 等布局稳定再滚；用定时器而不是 requestAnimationFrame（后台标签页 rAF 会暂停）
+    window.setTimeout(() => window.scrollTo(0, y), 80)
+  }, [id, loading, basePath])
 
   React.useEffect(() => {
     if (!user) {
@@ -1503,6 +1750,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
     try {
       await communityApi.deletePost(p.id)
       toast.success(t("at.ok.deleted"))
+      bumpStats(-1)
       void loadStats()
     } catch (err) {
       setPosts(before)
@@ -1549,6 +1797,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
             basePath={basePath}
             onPosted={() => {
               void load()
+              bumpStats(1)
               void loadStats()
             }}
           />

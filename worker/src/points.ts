@@ -63,6 +63,14 @@ export type PointReason =
    */
   | "transfer_out"
   | "transfer_in"
+  /**
+   * 每日签到奖励（基础 + 连续里程碑）。
+   *
+   * **平台增发** —— 与 `donation` / `invite` 同性质，统计「累计发放」时不能排除。
+   * ⚠️ 同样**绝不能**进 `COMMISSIONABLE_REASONS`：签到是人人每天都能拿的，
+   * 给它返佣等于让邀请人躺着抽成，积分会随活跃度指数膨胀。
+   */
+  | "checkin"
 
 /** 单笔流水（下发给前端） */
 export interface PointTransaction {

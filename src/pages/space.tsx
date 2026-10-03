@@ -294,12 +294,20 @@ export default function SpacePage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-5 px-4 py-8">
-      {/* 顶部：回控制台出口 + 查看名片入口（有已发布名片且开关打开时） */}
+      {/* 顶部：返回上一页 + 查看名片入口（有已发布名片且开关打开时） */}
       <div className="flex items-center justify-between">
-        <Link to="/dashboard" className="text-sm text-muted-foreground hover:text-foreground">
+        <button
+          type="button"
+          onClick={() => {
+            const idx = (window.history.state as { idx?: number } | null)?.idx ?? 0
+            if (idx > 0) navigate(-1)
+            else navigate("/dashboard")
+          }}
+          className="text-sm text-muted-foreground hover:text-foreground"
+        >
           <ArrowLeft className="mr-1 inline h-3.5 w-3.5" />
-          {t("space.console")}
-        </Link>
+          {t("space.back")}
+        </button>
         <div className="flex items-center gap-3">
           <span className="text-xs text-muted-foreground">{t("space.brandLine")}</span>
           {data.profileUrl && space.showProfileLink && (

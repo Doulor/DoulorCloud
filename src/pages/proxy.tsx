@@ -720,6 +720,11 @@ export default function ProxyPage() {
                                     {node.region}
                                   </Badge>
                                 )}
+                                {node.duplicateOf && (
+                                  <Badge variant="secondary" className="text-xs">
+                                    {t("px.duplicateOf", { name: node.duplicateOf })}
+                                  </Badge>
+                                )}
                                 <LatencyBadge
                                   latency={nodeLatency[nodeKey]}
                                   testable={canTestLatency(node.protocol)}

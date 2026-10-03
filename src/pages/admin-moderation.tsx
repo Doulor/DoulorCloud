@@ -3,10 +3,14 @@ import {
   AlertTriangle,
   CheckCircle2,
   Loader2,
+  Plus,
   RefreshCw,
   ShieldAlert,
+  ShieldBan,
   ShieldCheck,
+  Trash2,
   UserX,
+  X,
   XCircle,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -18,6 +22,15 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
+import { Input } from "@/components/ui/input"
+import { Switch } from "@/components/ui/switch"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Label } from "@/components/ui/label"
 import {
   Dialog,
@@ -29,7 +42,12 @@ import {
 } from "@/components/ui/dialog"
 import { adminApi, adminModerationApi, errMsg } from "@/services/api"
 import { useT } from "@/i18n"
-import type { AccountAppeal, RiskAccount } from "@/types"
+import type {
+  AccountAppeal,
+  RiskAccount,
+  ModerationLists,
+  ModerationConditionOp,
+} from "@/types"
 
 const fmt = (iso: string | null | undefined) =>
   iso ? new Date(iso).toLocaleString("zh-CN") : "—"
@@ -79,6 +97,70 @@ export function ModerationAdminPanel() {
   const [risks, setRisks] = React.useState<RiskAccount[]>([])
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState<string | null>(null)
+
+  // ---- 白名单 / 自动条件 / 黑名单（2026-10-03 站长要求） ----
+  const [lists, setLists] = React.useState<ModerationLists | null>(null)
+  const [listBusy, setListBusy] = React.useState(false)
+  const [wlInput, setWlInput] = React.useState("")
+  const [blInput, setBlInput] = React.useState("")
+  const [blReason, setBlReason] = React.useState("")
+  const [condOp, setCondOp] = React.useState<ModerationConditionOp>("gt")
+  const [condValue, setCondValue] = React.useState("20")
+
+  const loadLists = React.useCallback(async () => {
+    try {
+      setLists(await adminModerationApi.lists())
+    } catch (err) {
+      toast.error(errMsg(err, t("mod.err.load")))
+    }
+  }, [t])
+
+  React.useEffect(() => {
+    void loadLists()
+  }, [loadLists])
+
+  /** 列表操作统一包一层：开关 loading、失败提示、成功后重拉（后端会按条件重新同步一次） */
+  const runList = async (fn: () => Promise<unknown>) => {
+    setListBusy(true)
+    try {
+      await fn()
+      await loadLists()
+    } catch (err) {
+      toast.error(errMsg(err, t("mod.err.load")))
+    } finally {
+      setListBusy(false)
+    }
+  }
+
+  const addWhitelist = () =>
+    runList(async () => {
+      await adminModerationApi.whitelistUpdate("add", wlInput.trim())
+      setWlInput("")
+      toast.success(t("mod.wl.added"))
+    })
+  const removeWhitelist = (username: string) =>
+    runList(() => adminModerationApi.whitelistUpdate("remove", username))
+  const addCondition = () =>
+    runList(() =>
+      adminModerationApi.conditionUpdate({
+        action: "create",
+        metric: "achievement_points",
+        op: condOp,
+        value: Math.trunc(Number(condValue) || 0),
+      })
+    )
+  const toggleCondition = (id: string, enabled: boolean) =>
+    runList(() => adminModerationApi.conditionUpdate({ action: "toggle", id, enabled }))
+  const deleteCondition = (id: string) =>
+    runList(() => adminModerationApi.conditionUpdate({ action: "delete", id }))
+  const addBlacklist = () =>
+    runList(async () => {
+      await adminModerationApi.blacklistUpdate("add", blInput.trim(), blReason.trim())
+      setBlInput("")
+      setBlReason("")
+    })
+  const removeBlacklist = (ip: string) =>
+    runList(() => adminModerationApi.blacklistUpdate("remove", ip))
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -182,6 +264,13 @@ export function ModerationAdminPanel() {
 
   const pendingAppeals = appeals.filter((a) => a.status === "pending").length
   const openRisks = risks.filter((r) => r.status === "open").length
+  const whitelistTotal = lists
+    ? lists.whitelist.manual.length +
+      lists.whitelist.groups.reduce((n, g) => n + g.users.length, 0)
+    : 0
+  const blacklistTotal = lists
+    ? lists.blacklist.manual.length + lists.blacklist.auto.length
+    : 0
 
   return (
     <div className="space-y-4">
@@ -210,6 +299,24 @@ export function ModerationAdminPanel() {
             {pendingAppeals > 0 && (
               <Badge variant="destructive" className="h-4 px-1 text-[10px] tabular-nums">
                 {pendingAppeals}
+              </Badge>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="whitelist" className="gap-1.5">
+            <ShieldCheck className="h-3.5 w-3.5" />
+            {t("mod.tab.whitelist")}
+            {whitelistTotal > 0 && (
+              <Badge variant="secondary" className="h-4 px-1 text-[10px] tabular-nums">
+                {whitelistTotal}
+              </Badge>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="blacklist" className="gap-1.5">
+            <ShieldBan className="h-3.5 w-3.5" />
+            {t("mod.tab.blacklist")}
+            {blacklistTotal > 0 && (
+              <Badge variant="secondary" className="h-4 px-1 text-[10px] tabular-nums">
+                {blacklistTotal}
               </Badge>
             )}
           </TabsTrigger>
@@ -372,6 +479,204 @@ export function ModerationAdminPanel() {
                   </CardContent>
                 </Card>
               ))}
+            </div>
+          )}
+        </TabsContent>
+        {/* ---- 白名单（2026-10-03） ---- */}
+        <TabsContent value="whitelist" className="mt-4 space-y-4">
+          <p className="text-xs text-muted-foreground">{t("mod.wl.desc")}</p>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              placeholder={t("mod.wl.placeholder")}
+              value={wlInput}
+              onChange={(e) => setWlInput(e.target.value)}
+              className="max-w-xs"
+            />
+            <Button
+              size="sm"
+              onClick={() => void addWhitelist()}
+              disabled={listBusy || !wlInput.trim()}
+            >
+              <Plus className="mr-1 h-3.5 w-3.5" />
+              {t("mod.wl.add")}
+            </Button>
+          </div>
+
+          {!lists ? (
+            <LoadingBlock />
+          ) : (
+            <div className="space-y-3">
+              <div className="rounded-lg border bg-card p-4">
+                <p className="mb-2 text-sm font-medium">{t("mod.wl.manualTitle")}</p>
+                {lists.whitelist.manual.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">{t("mod.wl.empty")}</p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {lists.whitelist.manual.map((u) => (
+                      <span
+                        key={u.username}
+                        className="inline-flex items-center gap-1 rounded-md border bg-background px-2 py-1 text-xs"
+                      >
+                        {u.nickname ?? u.username}
+                        <span className="text-muted-foreground">@{u.username}</span>
+                        <button
+                          type="button"
+                          className="text-muted-foreground hover:text-foreground"
+                          onClick={() => void removeWhitelist(u.username)}
+                          aria-label={t("common.delete")}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {lists.whitelist.groups.map((g) => (
+                <div key={g.id} className="rounded-lg border bg-card p-4">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-sm font-medium">
+                      {t("mod.wl.groupTitle", { op: t(`mod.op.${g.op}`), n: g.value })}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        checked={g.enabled}
+                        onCheckedChange={(v) => void toggleCondition(g.id, v)}
+                      />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => void deleteCondition(g.id)}
+                        aria-label={t("common.delete")}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                  {!g.enabled ? (
+                    <p className="text-xs text-muted-foreground">{t("mod.wl.condOff")}</p>
+                  ) : g.users.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">{t("mod.wl.empty")}</p>
+                  ) : (
+                    <div className="flex flex-wrap gap-1.5">
+                      {g.users.map((u) => (
+                        <span
+                          key={u.username}
+                          className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-xs"
+                        >
+                          {u.nickname ?? u.username}
+                          <span className="text-muted-foreground">@{u.username}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              <div className="rounded-lg border border-dashed p-4">
+                <p className="mb-2 text-sm font-medium">{t("mod.wl.newCond")}</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm text-muted-foreground">
+                    {t("mod.wl.metric.achievement")}
+                  </span>
+                  <Select
+                    value={condOp}
+                    onValueChange={(v) => setCondOp(v as ModerationConditionOp)}
+                  >
+                    <SelectTrigger className="h-8 w-24 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="gt">{t("mod.op.gt")}</SelectItem>
+                      <SelectItem value="gte">{t("mod.op.gte")}</SelectItem>
+                      <SelectItem value="lt">{t("mod.op.lt")}</SelectItem>
+                      <SelectItem value="lte">{t("mod.op.lte")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Input
+                    type="number"
+                    min={0}
+                    className="h-8 w-20"
+                    value={condValue}
+                    onChange={(e) => setCondValue(e.target.value)}
+                  />
+                  <Button size="sm" onClick={() => void addCondition()} disabled={listBusy}>
+                    <Plus className="mr-1 h-3.5 w-3.5" />
+                    {t("mod.wl.addCond")}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+        </TabsContent>
+
+        {/* ---- 黑名单（2026-10-03） ---- */}
+        <TabsContent value="blacklist" className="mt-4 space-y-4">
+          <p className="text-xs text-muted-foreground">{t("mod.bl.desc")}</p>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              placeholder={t("mod.bl.placeholder")}
+              value={blInput}
+              onChange={(e) => setBlInput(e.target.value)}
+              className="max-w-xs"
+            />
+            <Input
+              placeholder={t("mod.bl.reasonPlaceholder")}
+              value={blReason}
+              onChange={(e) => setBlReason(e.target.value)}
+              className="max-w-xs"
+            />
+            <Button
+              size="sm"
+              onClick={() => void addBlacklist()}
+              disabled={listBusy || !blInput.trim()}
+            >
+              <Plus className="mr-1 h-3.5 w-3.5" />
+              {t("mod.bl.add")}
+            </Button>
+          </div>
+
+          {!lists ? (
+            <LoadingBlock />
+          ) : (
+            <div className="space-y-3">
+              {(["manual", "auto"] as const).map((src) => {
+                const items = lists.blacklist[src]
+                return (
+                  <div key={src} className="rounded-lg border bg-card p-4">
+                    <p className="mb-2 text-sm font-medium">
+                      {src === "manual" ? t("mod.bl.manualTitle") : t("mod.bl.autoTitle")}
+                    </p>
+                    {items.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">{t("mod.bl.empty")}</p>
+                    ) : (
+                      <ul className="space-y-1.5">
+                        {items.map((e) => (
+                          <li key={e.ip} className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="truncate font-mono text-xs">{e.ip}</p>
+                              {e.reason && (
+                                <p className="truncate text-xs text-muted-foreground">{e.reason}</p>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              className="shrink-0 text-muted-foreground hover:text-foreground"
+                              onClick={() => void removeBlacklist(e.ip)}
+                              aria-label={t("common.delete")}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           )}
         </TabsContent>

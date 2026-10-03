@@ -24,7 +24,11 @@ import {
   quotaFeaturesFromStored,
   type QuotaFeature,
 } from "../quotas"
+import { grantInvitePoints } from "../points"
 import type { Env } from "../env"
+
+/** 注册后允许补填邀请码的天数（见 claimMyInvite） */
+const CLAIM_WINDOW_DAYS = 7
 
 interface InviteRow {
   id: string
@@ -104,6 +108,90 @@ export async function listMyInvites(env: Env, request: Request): Promise<Respons
     quotaFeatures: QUOTA_FEATURES,
     basicFeatures: [...(await getBasicFeatures(env))],
   })
+}
+
+/**
+ * POST /api/my-invites/claim —— 补填邀请码（用户反馈 3ed5d0b0）。
+ *
+ * 场景：注册时忘了填 / 后来才意识到邀请码有价值，希望补上、并让邀请人拿到奖励。
+ * 防刷限制：
+ *   · 只能用一次，且账号必须**还没绑过邀请码**；
+ *   · 注册后 N 天内才允许补填（越久越难分辨「忘了」与「搬分」）；
+ *   · 码必须有效（未过期、未用尽），补填会**真实消费**一次；
+ *   · 奖励走 `grantInvitePoints`（幂等键 `invite:<被邀请人id>`，重复调用不会重复发分）；
+ *   · 不能填自己的码。
+ */
+export async function claimMyInvite(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const body = (await request.json().catch(() => ({}))) as { code?: unknown }
+  const code = typeof body.code === "string" ? body.code.trim() : ""
+  if (!code) throw new ApiError(400, "请输入邀请码", "INVALID_INPUT")
+
+  const me = await env.DB.prepare(
+    "SELECT invite_code_id, created_at FROM users WHERE id = ?"
+  )
+    .bind(user.id)
+    .first<{ invite_code_id: string | null; created_at: string }>()
+  if (!me) throw new ApiError(404, "用户不存在", "NOT_FOUND")
+  if (me.invite_code_id) throw new ApiError(400, "你已经填过邀请码了", "ALREADY_CLAIMED")
+
+  const ageMs = Date.now() - new Date(me.created_at).getTime()
+  if (ageMs > CLAIM_WINDOW_DAYS * 86_400_000) {
+    throw new ApiError(
+      400,
+      `注册超过 ${CLAIM_WINDOW_DAYS} 天后不能再补填邀请码`,
+      "CLAIM_WINDOW_PASSED"
+    )
+  }
+
+  const found = await env.DB.prepare(
+    `SELECT id, max_uses, used_count, expires_at, created_by
+       FROM invite_codes WHERE code = ? COLLATE NOCASE LIMIT 1`
+  )
+    .bind(code)
+    .first<{
+      id: string
+      max_uses: number
+      used_count: number
+      expires_at: string | null
+      created_by: string | null
+    }>()
+  if (!found) throw new ApiError(400, "邀请码无效，请检查是否输入正确", "INVALID_INVITE")
+  if (found.created_by === user.id) {
+    throw new ApiError(400, "不能填写自己创建的邀请码", "SELF_INVITE")
+  }
+  if (found.expires_at && found.expires_at <= new Date().toISOString()) {
+    throw new ApiError(400, "该邀请码已过期，请向邀请你的人索取新的邀请链接", "INVITE_EXPIRED")
+  }
+
+  // 原子消费一次（与注册同一套口径：查得到但扣不到 = 被别人抢先）
+  const consumed = await env.DB.prepare(
+    "UPDATE invite_codes SET used_count = used_count + 1 WHERE id = ? AND used_count < max_uses"
+  )
+    .bind(found.id)
+    .run()
+  if ((consumed.meta?.changes ?? 0) === 0) {
+    throw new ApiError(
+      400,
+      "该邀请码已被使用，请向邀请你的人索取新的邀请链接",
+      "INVITE_USED"
+    )
+  }
+
+  await env.DB.prepare(
+    "UPDATE users SET invite_code_id = ?, updated_at = ? WHERE id = ? AND invite_code_id IS NULL"
+  )
+    .bind(found.id, new Date().toISOString(), user.id)
+    .run()
+
+  // 给邀请人发奖励（幂等、永不抛错）
+  const granted = await grantInvitePoints(env, {
+    inviteeId: user.id,
+    inviteeUsername: user.username,
+    codeConsumed: true,
+  })
+
+  return json({ ok: true, grantedPoints: granted })
 }
 
 /**

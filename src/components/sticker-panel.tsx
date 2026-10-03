@@ -18,6 +18,7 @@ import * as React from "react"
 import { ImagePlus, Loader2, Smile, Sticker as StickerIcon, X } from "lucide-react"
 import { toast } from "sonner"
 import { stickerApi, errMsg } from "@/services/api"
+import { compressToLimit } from "@/lib/image-compress"
 import { AnchoredPanel, isInsideAnchoredPanel } from "@/components/anchored-panel"
 import { useT } from "@/i18n"
 import type { Sticker } from "@/types"
@@ -25,8 +26,8 @@ import type { Sticker } from "@/types"
 /** localStorage 键。带版本号，日后结构变了直接换 key，不做迁移 */
 const CACHE_KEY = "doulor:stickers:v1"
 
-/** 单张表情包大小上限（与后端 sticker_max_bytes 默认值一致，超了不必白传一趟） */
-const MAX_BYTES = 512 * 1024
+/** 单张表情包大小上限（与后端 sticker_max_bytes 默认值一致，超了前端会先自动压缩） */
+const MAX_BYTES = 1024 * 1024
 
 interface CacheShape {
   stickers: Sticker[]
@@ -97,13 +98,22 @@ export function StickerPanel({ onPick }: { onPick: (markdown: string) => void })
       toast.error(t("stk.err.type"))
       return
     }
+    // 超过上限先自动压缩：静态图转 WebP，动图（GIF）解帧重编码，保留动画；
+    // 压不下去（或浏览器不支持）才报「超过 X KB」。
+    let toUpload = file
     if (file.size > MAX_BYTES) {
-      toast.error(t("stk.err.size", { kb: Math.round(MAX_BYTES / 1024) }))
-      return
+      setUploading(true)
+      const compressed = await compressToLimit(file, MAX_BYTES)
+      setUploading(false)
+      if (!compressed) {
+        toast.error(t("stk.err.size", { kb: Math.round(MAX_BYTES / 1024) }))
+        return
+      }
+      toUpload = compressed
     }
     setUploading(true)
     try {
-      const { sticker } = await stickerApi.upload(file, file.type)
+      const { sticker } = await stickerApi.upload(toUpload, toUpload.type)
       setStickers((prev) => {
         const next = [...prev, sticker]
         writeCache(next)

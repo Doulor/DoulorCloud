@@ -71,6 +71,13 @@ export const STORAGE_CONSENT_VERSION = 1
 /** 管理员配额「不限」哨兵值（1 PiB，实际用不完）。前端见到应显示「不限」 */
 const ADMIN_UNLIMITED_QUOTA = 1024 ** 5
 
+/**
+ * Cloudflare 边缘对「请求体」的大小上限（Free/Pro 套餐 100MB）。
+ * token 模式的桶走 Worker 中转上传，超过这个值会在进入 Worker 前被 413，
+ * 因此这里留 5MB 余量、以 95MB 作为中转模式的实际可用上限。
+ */
+const CF_PROXY_BODY_LIMIT = 95 * 1024 * 1024
+
 interface StorageAccountRow {
   user_id: string
   prefix: string
@@ -563,6 +570,21 @@ export async function createUploadUrl(
     : // token 模式不支持预签名：改走 Worker 转发上传（见 proxyUpload）
       `/api/storage/proxy-upload?key=${encodeURIComponent(key)}`
 
+  // ⚠️ 用户反馈 4f86f202：132MB 上传报 413。根因不是代码限制，而是**Cloudflare
+  // 边缘的请求体上限**（Free/Pro 套餐 100MB）：token 模式的桶走 Worker 中转，
+  // 请求体要经过 CF 边缘，超过 100MB 在进入 Worker **之前**就被 413 掉，
+  // 我们连返回自定义错误的机会都没有（表现为浏览器里一个光秃秃的 413）。
+  // 因此在签发中转上传地址时就**提前拦下**，给出可执行的说明。
+  if (uploadUrl.startsWith("/api/storage/proxy-upload") && size > CF_PROXY_BODY_LIMIT) {
+    throw new ApiError(
+      400,
+      `当前存储为「中转模式」，单文件最大约 ${Math.round(CF_PROXY_BODY_LIMIT / 1024 / 1024)} MB` +
+        `（Cloudflare 边缘对经过服务器的请求体有 100 MB 上限）。` +
+        `如需上传更大的文件，请让管理员把存储桶改为 S3 直传模式（配置 AK/SK），浏览器可直传 R2、不受此限制。`,
+      "PROXY_UPLOAD_TOO_LARGE"
+    )
+  }
+
   return json({
     uploadUrl,
     key,
@@ -764,6 +786,60 @@ export async function deleteStorageObject(
   ])
 
   return new Response(null, { status: 204 })
+}
+
+/** POST /api/storage/objects/delete —— 批量删除文件（body { keys: string[] }） */
+export async function deleteStorageObjects(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "r2")
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+
+  const body = (await request.json().catch(() => ({}))) as { keys?: unknown }
+  const keys = Array.isArray(body.keys)
+    ? body.keys.filter((k): k is string => typeof k === "string" && k.length > 0)
+    : []
+  if (keys.length === 0) throw new ApiError(400, "请选择要删除的文件", "BAD_REQUEST")
+  if (keys.length > 200) throw new ApiError(400, "一次最多删除 200 个文件", "BAD_REQUEST")
+
+  // 先校验全部 key 属于该账号（越权直接拒绝，避免「删一半」）
+  for (const key of keys) assertKeyOwned(account, key)
+
+  const placeholders = keys.map(() => "?").join(",")
+  const rows = await env.DB.prepare(
+    `SELECT r2_key, size FROM storage_objects WHERE user_id = ? AND r2_key IN (${placeholders})`
+  )
+    .bind(user.id, ...keys)
+    .all<{ r2_key: string; size: number }>()
+  const found = rows.results ?? []
+  const removedBytes = found.reduce((s, r) => s + (r.size ?? 0), 0)
+
+  // 逐个删 R2 对象：单个失败不阻断其余（与单删一致的容错口径）
+  for (const key of keys) {
+    try {
+      await deleteObject(env, key, account.bucket_id)
+    } catch {
+      /* 忽略单个失败，下面按 DB 记录清理并重算用量 */
+    }
+  }
+
+  const now = new Date().toISOString()
+  await env.DB.batch([
+    env.DB.prepare(
+      `DELETE FROM storage_objects WHERE user_id = ? AND r2_key IN (${placeholders})`
+    ).bind(user.id, ...keys),
+    env.DB.prepare(
+      `UPDATE storage_accounts
+          SET used_bytes = MAX(0, used_bytes - ?),
+              file_count = (SELECT COUNT(*) FROM storage_objects WHERE user_id = ?),
+              updated_at = ?
+        WHERE user_id = ?`
+    ).bind(removedBytes, user.id, now, user.id),
+  ])
+
+  return json({ deleted: keys.length })
 }
 
 /** GET /api/storage/download?key=xxx —— 鉴权下载（供后台预览） */

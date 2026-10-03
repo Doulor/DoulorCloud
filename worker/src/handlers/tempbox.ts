@@ -277,6 +277,9 @@ export async function getTempboxConfig(env: Env, _request: Request): Promise<Res
     defaultMinutes: Number(settings.tempbox_default_minutes),
     maxFileBytes: Number(settings.tempbox_max_file_bytes),
     maxFiles: Number(settings.tempbox_max_files),
+    // 「同时存活的分享箱数量上限」是常量，之前没下发给前端，导致用户把
+    // 「最多文件数(每箱)」误解成「最多 20 个分享箱」。这里一并下发，前端分开展示。
+    maxLiveBatches: TEMPBOX_MAX_LIVE_BATCHES,
     uploadRequiresLogin: settings.tempbox_upload_requires_login === "1",
   })
 }
@@ -332,6 +335,15 @@ export async function createTempbox(env: Env, request: Request): Promise<Respons
   )
     .bind(uuid(), code, user?.id ?? null, expireAt.toISOString(), now.toISOString(), text || null)
     .run()
+
+  // 累计创建数 +1（成就「分享即达」按累计算；批次过期会被清理，不能依赖 tempbox_batches 行数）
+  if (user) {
+    await env.DB.prepare(
+      "UPDATE user_stats SET tempbox_created = tempbox_created + 1 WHERE user_id = ?"
+    )
+      .bind(user.id)
+      .run()
+  }
 
   return json({ code, expireAt: expireAt.toISOString(), minutes, isText: Boolean(text) }, 201)
 }
@@ -700,4 +712,51 @@ export async function deleteTempbox(
     .run()
 
   return new Response(null, { status: 204 })
+}
+
+/** DELETE /api/tempbox/:code/:filename —— 删除批次内的单个文件（创建者本人或管理员） */
+export async function deleteTempboxFile(
+  env: Env,
+  request: Request,
+  code: string,
+  filename: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const batch = await loadBatch(env, code)
+  if (!batch) throw new ApiError(404, TEMPBOX_NOT_FOUND, "NOT_FOUND")
+
+  if (
+    user.role !== "admin" &&
+    user.role !== "root" &&
+    (!batch.creator_user_id || batch.creator_user_id !== user.id)
+  ) {
+    throw new ApiError(403, "只能删除自己创建的临时分享", "FORBIDDEN")
+  }
+
+  if (!(await isStorageConfigured(env))) {
+    throw new ApiError(503, "存储未配置", "R2_NOT_CONFIGURED")
+  }
+  // 防目录穿越：与下载侧同一套收口
+  if (filename.includes("/") || filename.includes("\\") || filename.includes("..")) {
+    throw new ApiError(403, "非法的文件名", "FORBIDDEN")
+  }
+
+  const platformBucket = await getPlatformBucketId(env)
+  await deleteObject(env, `${R2_PREFIX}/${code}/${filename}`, platformBucket)
+
+  // 与 commit 一致：以 R2 实际内容为准重算 file_count / total_bytes，保持账实一致
+  const page = await listObjects(env, `${R2_PREFIX}/${code}/`, {
+    limit: 1000,
+    bucketId: platformBucket,
+  })
+  const objects = page.objects.filter((o) => !o.key.endsWith("/"))
+  const fileCount = objects.length
+  const totalBytes = objects.reduce((s, o) => s + o.size, 0)
+  await env.DB.prepare(
+    "UPDATE tempbox_batches SET file_count = ?, total_bytes = ? WHERE code = ?"
+  )
+    .bind(fileCount, totalBytes, code)
+    .run()
+
+  return json({ fileCount, totalBytes })
 }

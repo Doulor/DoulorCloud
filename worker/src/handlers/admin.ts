@@ -1,6 +1,7 @@
 import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
 import { requireUser } from "../auth"
+import { isUsernameWhitelisted, addIpToBlacklist } from "./moderation-lists"
 import type { Env } from "../env"
 import {
   SETTING_DEFAULTS,
@@ -29,6 +30,7 @@ import { fetchWithTimeout } from "../async-utils"
 import { cfListDestinations } from "../cloudflare"
 import { normalizePermissions, parsePermissions, FEATURES } from "../permissions"
 import { normalizeEmailDomains } from "../email-domains"
+import { normalizeCheckinMilestones } from "../checkin-config"
 import {
   validateNicknameFormat,
   isReservedNickname,
@@ -119,136 +121,150 @@ async function targetUser(env: Env, username: string): Promise<AdminUserRow> {
  * 拉取），不在这里实时打 NewAPI 接口 —— 管理面板打开详情不应产生外部请求。
  */
 async function userDetail(env: Env, user: AdminUserRow) {
-  const subdomains = await env.DB.prepare(
-    "SELECT id, name, fqdn, status, created_at FROM subdomains WHERE user_id = ? ORDER BY created_at ASC"
-  )
-    .bind(user.id)
-    .all()
-
-  const dns = await env.DB.prepare(
-    "SELECT id, subdomain_id, name, fqdn, type, content, ttl, proxied, status, created_at FROM dns_records WHERE domain_id IN (SELECT id FROM domains WHERE user_id = ?) ORDER BY created_at ASC LIMIT 200"
-  )
-    .bind(user.id)
-    .all()
-
-  const mailboxes = await env.DB.prepare(
-    "SELECT id, address, forwarding_to, created_at FROM mailboxes WHERE user_id = ? ORDER BY created_at ASC"
-  )
-    .bind(user.id)
-    .all()
-
-  const mails = await env.DB.prepare(
-    "SELECT m.id, m.mailbox_id, m.from_address, m.subject, m.read, m.received_at FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id WHERE mb.user_id = ? ORDER BY m.received_at DESC LIMIT 200"
-  )
-    .bind(user.id)
-    .all()
-
-  const sessions = await env.DB.prepare(
-    "SELECT id, expires_at, created_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 20"
-  )
-    .bind(user.id)
-    .all()
-
-  // ---- 各模块明细 ----
-  const storage = await env.DB.prepare(
-    `SELECT sa.prefix, sa.quota_bytes, sa.used_bytes, sa.file_count, sa.enabled,
-            sa.bucket_id, sa.created_at, b.name AS bucket_name
-       FROM storage_accounts sa
-       LEFT JOIN r2_buckets b ON b.id = sa.bucket_id
-      WHERE sa.user_id = ?`
-  )
-    .bind(user.id)
-    .first<{
-      prefix: string
-      quota_bytes: number
-      used_bytes: number
-      file_count: number
-      enabled: number
-      bucket_id: string | null
-      bucket_name: string | null
-      created_at: string
-    }>()
-
-  const newapi = await env.DB.prepare(
-    `SELECT newapi_user_id, username, email, group_name, quota, used_quota,
-            request_count, synced_at, created_at
-       FROM newapi_accounts WHERE user_id = ?`
-  )
-    .bind(user.id)
-    .first<{
-      newapi_user_id: number
-      username: string
-      email: string
-      group_name: string | null
-      quota: number
-      used_quota: number
-      request_count: number
-      synced_at: string | null
-      created_at: string
-    }>()
-
-  const frp = await env.DB.prepare(
-    "SELECT enabled, created_at, updated_at FROM frp_accounts WHERE user_id = ?"
-  )
-    .bind(user.id)
-    .first<{ enabled: number; created_at: string; updated_at: string }>()
-
-  const frpApplications = await env.DB.prepare(
-    `SELECT id, status, frp_user, ports, notify_email, remark, review_note,
-            reviewed_at, created_at
-       FROM frp_applications WHERE user_id = ? ORDER BY created_at DESC LIMIT 20`
-  )
-    .bind(user.id)
-    .all<{
-      id: string
-      status: string
-      frp_user: string
-      ports: string
-      notify_email: string
-      remark: string | null
-      review_note: string | null
-      reviewed_at: string | null
-      created_at: string
-    }>()
-
-  const frpPorts = await env.DB.prepare(
-    `SELECT p.remote_port, p.created_at, n.name AS node_name
-       FROM frp_ports p
-       LEFT JOIN frp_nodes n ON n.id = p.node_id
-      WHERE p.user_id = ? ORDER BY p.remote_port ASC`
-  )
-    .bind(user.id)
-    .all<{ remote_port: number; created_at: string; node_name: string | null }>()
-
-  const proxy = await env.DB.prepare(
-    "SELECT enabled, consent_version, consented_at, created_at, updated_at FROM proxy_activation WHERE user_id = ?"
-  )
-    .bind(user.id)
-    .first<{
-      enabled: number
-      consent_version: number
-      consented_at: string | null
-      created_at: string
-      updated_at: string
-    }>()
-
-  const profile = await env.DB.prepare(
-    `SELECT slug, published, fqdn, view_count, display_name, created_at, updated_at
-       FROM profiles WHERE user_id = ?`
-  )
-    .bind(user.id)
-    .first<{
-      slug: string
-      published: number
-      fqdn: string | null
-      view_count: number
-      display_name: string | null
-      created_at: string
-      updated_at: string
-    }>()
+  // 一次性**并行**拉取各模块明细（2026-10-03 反馈「打开用户详情卡顿」）。
+  //
+  // 之前这里是 13 个串行 await，每个 D1 往返 ~150ms，串起来 2 秒+；
+  // 并行后总耗时 ≈ 最慢那一个查询。D1 支持同请求内并发读，这里没有写后读依赖。
+  const [
+    subdomains,
+    dns,
+    mailboxes,
+    mails,
+    sessions,
+    storage,
+    newapi,
+    frp,
+    frpApplications,
+    frpPorts,
+    proxy,
+    profile,
+    activity,
+    inviteBase,
+  ] = await Promise.all([
+    env.DB.prepare(
+      "SELECT id, name, fqdn, status, created_at FROM subdomains WHERE user_id = ? ORDER BY created_at ASC"
+    )
+      .bind(user.id)
+      .all(),
+    env.DB.prepare(
+      "SELECT id, subdomain_id, name, fqdn, type, content, ttl, proxied, status, created_at FROM dns_records WHERE domain_id IN (SELECT id FROM domains WHERE user_id = ?) ORDER BY created_at ASC LIMIT 200"
+    )
+      .bind(user.id)
+      .all(),
+    env.DB.prepare(
+      "SELECT id, address, forwarding_to, created_at FROM mailboxes WHERE user_id = ? ORDER BY created_at ASC"
+    )
+      .bind(user.id)
+      .all(),
+    env.DB.prepare(
+      "SELECT m.id, m.mailbox_id, m.from_address, m.subject, m.read, m.received_at FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id WHERE mb.user_id = ? ORDER BY m.received_at DESC LIMIT 200"
+    )
+      .bind(user.id)
+      .all(),
+    env.DB.prepare(
+      "SELECT id, expires_at, created_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 20"
+    )
+      .bind(user.id)
+      .all(),
+    env.DB.prepare(
+      `SELECT sa.prefix, sa.quota_bytes, sa.used_bytes, sa.file_count, sa.enabled,
+              sa.bucket_id, sa.created_at, b.name AS bucket_name
+         FROM storage_accounts sa
+         LEFT JOIN r2_buckets b ON b.id = sa.bucket_id
+        WHERE sa.user_id = ?`
+    )
+      .bind(user.id)
+      .first<{
+        prefix: string
+        quota_bytes: number
+        used_bytes: number
+        file_count: number
+        enabled: number
+        bucket_id: string | null
+        bucket_name: string | null
+        created_at: string
+      }>(),
+    env.DB.prepare(
+      `SELECT newapi_user_id, username, email, group_name, quota, used_quota,
+              request_count, synced_at, created_at
+         FROM newapi_accounts WHERE user_id = ?`
+    )
+      .bind(user.id)
+      .first<{
+        newapi_user_id: number
+        username: string
+        email: string
+        group_name: string | null
+        quota: number
+        used_quota: number
+        request_count: number
+        synced_at: string | null
+        created_at: string
+      }>(),
+    env.DB.prepare(
+      "SELECT enabled, created_at, updated_at FROM frp_accounts WHERE user_id = ?"
+    )
+      .bind(user.id)
+      .first<{ enabled: number; created_at: string; updated_at: string }>(),
+    env.DB.prepare(
+      `SELECT id, status, frp_user, ports, notify_email, remark, review_note,
+              reviewed_at, created_at
+         FROM frp_applications WHERE user_id = ? ORDER BY created_at DESC LIMIT 20`
+    )
+      .bind(user.id)
+      .all<{
+        id: string
+        status: string
+        frp_user: string
+        ports: string
+        notify_email: string
+        remark: string | null
+        review_note: string | null
+        reviewed_at: string | null
+        created_at: string
+      }>(),
+    env.DB.prepare(
+      `SELECT p.remote_port, p.created_at, n.name AS node_name
+         FROM frp_ports p
+         LEFT JOIN frp_nodes n ON n.id = p.node_id
+        WHERE p.user_id = ? ORDER BY p.remote_port ASC`
+    )
+      .bind(user.id)
+      .all<{ remote_port: number; created_at: string; node_name: string | null }>(),
+    env.DB.prepare(
+      "SELECT enabled, consent_version, consented_at, created_at, updated_at FROM proxy_activation WHERE user_id = ?"
+    )
+      .bind(user.id)
+      .first<{
+        enabled: number
+        consent_version: number
+        consented_at: string | null
+        created_at: string
+        updated_at: string
+      }>(),
+    env.DB.prepare(
+      `SELECT slug, published, fqdn, view_count, display_name, created_at, updated_at
+         FROM profiles WHERE user_id = ?`
+    )
+      .bind(user.id)
+      .first<{
+        slug: string
+        published: number
+        fqdn: string | null
+        view_count: number
+        display_name: string | null
+        created_at: string
+        updated_at: string
+      }>(),
+    env.DB.prepare(
+      "SELECT id, action, detail, created_at FROM audit_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 20"
+    )
+      .bind(user.id)
+      .all<{ id: string; action: string; detail: string | null; created_at: string }>(),
+    getSettingNumber(env, "invite_quota_base"),
+  ])
 
   // ---- 额度 ----
-  const inviteBase = await getSettingNumber(env, "invite_quota_base")
   const inviteBonus = Math.max(0, user.invite_quota_bonus ?? 0)
   const inviteUsed = Math.max(0, user.invite_quota_used ?? 0)
   const featureQuota = parseCounts(user.feature_quota)
@@ -257,13 +273,6 @@ async function userDetail(env: Env, user: AdminUserRow) {
   for (const f of QUOTA_FEATURES) {
     featureRemaining[f] = Math.max(0, featureQuota[f] - featureUsed[f])
   }
-
-  // ---- 最近活动 ----
-  const activity = await env.DB.prepare(
-    "SELECT id, action, detail, created_at FROM audit_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 20"
-  )
-    .bind(user.id)
-    .all<{ id: string; action: string; detail: string | null; created_at: string }>()
 
   return {
     user: {
@@ -407,7 +416,11 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
             EXISTS(SELECT 1 FROM proxy_activation pa WHERE pa.user_id = u.id AND pa.enabled = 1) AS proxy_on,
             p.published AS profile_published,
             p.slug AS profile_slug,
-            p.fqdn AS profile_fqdn
+            p.fqdn AS profile_fqdn,
+            -- 注册时用的 IP：没存在 users 表上，只在 audit_logs 的 register 记录里（取最早一条）
+            (SELECT a.ip FROM audit_logs a
+              WHERE a.user_id = u.id AND a.action = 'register'
+              ORDER BY a.created_at ASC LIMIT 1) AS register_ip
        FROM users u
        LEFT JOIN invite_codes ic ON ic.id = u.invite_code_id
        LEFT JOIN users creator ON creator.id = ic.created_by
@@ -440,6 +453,8 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
     profileEnabled: Number(r.profile_published) === 1,
     profileSlug: (r.profile_slug as string | null) ?? null,
     profileFqdn: (r.profile_fqdn as string | null) ?? null,
+    /** 注册时使用的 IP（来自 audit_logs 的 register 记录；查不到为 null） */
+    registerIp: (r.register_ip as string | null) ?? null,
     deleted: false,
     deletedAt: null as string | null,
     deletedReason: null as string | null,
@@ -485,6 +500,7 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
     profileEnabled: false,
     profileSlug: null as string | null,
     profileFqdn: null as string | null,
+    registerIp: null as string | null,
     deleted: true,
     deletedAt: t.deleted_at,
     deletedReason: t.reason,
@@ -571,6 +587,18 @@ export async function updateUser(env: Env, request: Request, username: string): 
       ? (body.status as "active" | "suspended")
       : null
 
+  /**
+   * 白名单用户不会被封禁（站长 2026-10-03 要求）。
+   * 在**真正写库之前**拦住，否则会先封再回滚，NewAPI 那边也会被连带 disable。
+   */
+  if (statusChanged === "suspended" && (await isUsernameWhitelisted(env, user.username))) {
+    throw new ApiError(
+      400,
+      `「${user.username}」在白名单里，不会被封禁。如需封禁请先从白名单移除。`,
+      "USER_WHITELISTED"
+    )
+  }
+
   // 子域名配额：undefined 保持原值；null 清除覆盖（回落到全局默认）
   let quotaUpdate = false
   let quotaValue: number | null = null
@@ -614,12 +642,54 @@ export async function updateUser(env: Env, request: Request, username: string): 
     await env.DB.prepare("UPDATE users SET suspend_reason = ?, suspend_at = ? WHERE id = ?")
       .bind(reason || null, now, user.id)
       .run()
+
+    /**
+     * 封禁联动黑名单（站长 2026-10-03）：
+     * 把这个账号的**注册 IP** 自动加进黑名单 —— 同一 IP 批量注册的小号被封后，新注册直接挡。
+     * 取的是「注册时的 IP」（audit_logs 的 register 行），不是最后一次登录 IP。
+     */
+    const reg = await env.DB.prepare(
+      "SELECT ip FROM audit_logs WHERE user_id = ? AND action = 'register' ORDER BY created_at ASC LIMIT 1"
+    )
+      .bind(user.id)
+      .first<{ ip: string | null }>()
+    if (reg?.ip) {
+      await addIpToBlacklist(env, reg.ip, `账号 ${user.username} 被封禁`, "auto")
+    }
   } else if (statusChanged === "active") {
     await env.DB.prepare(
       "UPDATE users SET suspend_reason = NULL, suspend_at = NULL WHERE id = ?"
     )
       .bind(user.id)
       .run()
+
+    /**
+     * 解封时**对称地**把「封禁联动」加进来的 IP 撤掉 —— 否则误封一次，
+     * 那个 IP 就永久被拉黑、连新账号都注册不了，且没人会想到去黑名单里清。
+     * 但若该 IP 上还有**别的仍被封禁**的账号，则保留（那个号的封禁理由还在）。
+     */
+    const regIp = await env.DB.prepare(
+      "SELECT ip FROM audit_logs WHERE user_id = ? AND action = 'register' ORDER BY created_at ASC LIMIT 1"
+    )
+      .bind(user.id)
+      .first<{ ip: string | null }>()
+    if (regIp?.ip) {
+      const stillBanned = await env.DB.prepare(
+        `SELECT 1 AS x FROM users u
+           JOIN audit_logs a ON a.user_id = u.id AND a.action = 'register'
+          WHERE a.ip = ? AND u.status = 'suspended' AND u.id <> ?
+          LIMIT 1`
+      )
+        .bind(regIp.ip, user.id)
+        .first<{ x: number }>()
+      if (!stillBanned) {
+        await env.DB.prepare(
+          "DELETE FROM moderation_blacklist WHERE ip = ? AND source = 'auto'"
+        )
+          .bind(regIp.ip)
+          .run()
+      }
+    }
   }
 
   // 封禁/解封联动 NewAPI 账户（2026-09-25 新增）。
@@ -1345,6 +1415,13 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
     // 与注册侧读取用的是**同一份实现** —— 两边分家就会出现「存进去的一个都匹配不上」。
     if (key === "register_email_domains") {
       values[key] = normalizeEmailDomains(String(raw))
+      continue
+    }
+
+    // checkin_milestones：连续签到里程碑。归一化（分隔符收宽/去重/按天数升序/不截断）
+    // 统一放在 checkin-config.ts，与签到读取侧用**同一份实现**。
+    if (key === "checkin_milestones") {
+      values[key] = normalizeCheckinMilestones(String(raw))
       continue
     }
 

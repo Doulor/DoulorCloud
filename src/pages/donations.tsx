@@ -169,6 +169,9 @@ export default function DonationPage() {
   const [inviteCode, setInviteCode] = React.useState("")
   const [inviteFeatures, setInviteFeatures] = React.useState<string[]>([])
   const [inviteBusy, setInviteBusy] = React.useState(false)
+  /** 补填邀请码（用户反馈 3ed5d0b0） */
+  const [claimCode, setClaimCode] = React.useState("")
+  const [claimBusy, setClaimBusy] = React.useState(false)
   const [copiedCode, setCopiedCode] = React.useState<string | null>(null)
   /** 复制的是「邀请链接」时高亮的码（与只复制码分开，两个按钮互不抢高亮） */
   const [copiedLink, setCopiedLink] = React.useState<string | null>(null)
@@ -268,6 +271,27 @@ export default function DonationPage() {
     }
   }
 
+  /** 补填邀请码：成功则给邀请人发奖励，并刷新邀请数据 */
+  const handleClaimInvite = async () => {
+    const code = claimCode.trim()
+    if (!code) return
+    setClaimBusy(true)
+    try {
+      const res = await myInviteApi.claim(code)
+      toast.success(
+        res.grantedPoints > 0
+          ? t("don.claim.okRewarded", { n: res.grantedPoints })
+          : t("don.claim.ok")
+      )
+      setClaimCode("")
+      await loadInvites()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("don.claim.failed"))
+    } finally {
+      setClaimBusy(false)
+    }
+  }
+
   const copyCode = async (code: string) => {
     try {
       await navigator.clipboard.writeText(code)
@@ -331,6 +355,8 @@ export default function DonationPage() {
   }
 
   const perms = data?.permissions
+  /** 各捐献/绑定通道是否授予权限（关掉后前端文案要改成「不授予」） */
+  const grantPermissions = data?.grantPermissions
   // 可捐献的类型（已解锁的用户也能主动贡献），只是未解锁的会标注出来，
   // 方便知道贡献哪个能解锁什么。sensenova 不在这个列表里 —— 它有自己的卡片。
   const allTypes = data
@@ -468,7 +494,16 @@ export default function DonationPage() {
           )}
         </CardTitle>
         <CardDescription>
-          {t(TYPE_META[type]?.desc ?? "")}{t("don.card.note")}
+          {t(TYPE_META[type]?.desc ?? "")}
+          {/* 站长关掉这条通道的授权后，别再说「通过即解锁」误导用户 */}
+          {grantPermissions?.[type] !== false
+            ? t("don.card.note")
+            : t("don.card.noteNoGrant")}
+          {grantPermissions?.[type] === false && (
+            <span className="mt-1 block font-semibold text-destructive">
+              {t("don.grantOff")}
+            </span>
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -624,6 +659,33 @@ export default function DonationPage() {
                     {t("don.rewards.channel")}
                   </CardDescription>
                 </CardHeader>
+              </Card>
+
+              {/* 补填邀请码（用户反馈 3ed5d0b0）：注册时忘了填，7 天内可补 */}
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <Ticket className="h-4 w-4 text-muted-foreground" />
+                    {t("don.claim.title")}
+                  </CardTitle>
+                  <CardDescription>{t("don.claim.desc")}</CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-wrap items-center gap-2">
+                  <Input
+                    value={claimCode}
+                    onChange={(e) => setClaimCode(e.target.value)}
+                    placeholder={t("don.claim.placeholder")}
+                    className="max-w-xs"
+                  />
+                  <Button
+                    size="sm"
+                    onClick={() => void handleClaimInvite()}
+                    disabled={claimBusy || !claimCode.trim()}
+                  >
+                    {claimBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                    {t("don.claim.submit")}
+                  </Button>
+                </CardContent>
               </Card>
 
               {/* 我的邀请码：额度 + 创建 + 列表 */}
@@ -900,16 +962,19 @@ export default function DonationPage() {
               <Wb2ApiDonationCard
                 block={data?.wb2api}
                 aiUnlocked={perms?.ai ?? false}
+                grantsPermission={grantPermissions?.wb2api !== false}
                 onDone={() => void load()}
               />
               <Cli2ApiDonationCard
                 block={data?.cli2api}
                 aiUnlocked={perms?.ai ?? false}
+                grantsPermission={grantPermissions?.cli2api !== false}
                 onDone={() => void load()}
               />
               <SenseNovaDonationCard
                 block={data?.sensenova}
                 aiUnlocked={perms?.ai ?? false}
+                grantsPermission={grantPermissions?.sensenova !== false}
                 onDone={() => void load()}
               />
               {renderResourceIntro("ai")}
@@ -934,6 +999,7 @@ export default function DonationPage() {
           type={dialogType}
           maxModels={data?.maxAiModels ?? 30}
           maxSubUrls={data?.maxSubUrls ?? 8}
+          grantsPermission={grantPermissions?.[dialogType] !== false}
           onClose={() => setDialogType(null)}
           onSubmitted={() => {
             setDialogType(null)
@@ -1038,6 +1104,7 @@ function DonationForm({
   type,
   maxModels,
   maxSubUrls,
+  grantsPermission = true,
   onClose,
   onSubmitted,
 }: {
@@ -1046,6 +1113,8 @@ function DonationForm({
   maxModels: number
   /** 代理类型一次最多能提交多少个订阅链接（每个都要真拉一次） */
   maxSubUrls: number
+  /** 这条通道当前是否授予权限（关掉后成功文案不提「已解锁」） */
+  grantsPermission?: boolean
   onClose: () => void
   onSubmitted: () => void
 }) {
@@ -1227,12 +1296,17 @@ function DonationForm({
 
       // AI 与代理都是自动化流程，提交后当场就有结论
       if (res.status === "approved") {
-        const okMsg =
-          type === "ai"
+        const okMsg = grantsPermission
+          ? type === "ai"
             ? t("don.submit.okAi")
             : type === "proxy"
               ? t("don.submit.okProxy")
               : t("don.submit.okGeneric")
+          : type === "ai"
+            ? t("don.submit.okAiNoGrant")
+            : type === "proxy"
+              ? t("don.submit.okProxyNoGrant")
+              : t("don.submit.okGenericNoGrant")
         toast.success(okMsg, {
           description:
             [
@@ -1973,10 +2047,13 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
 function SenseNovaDonationCard({
   block,
   aiUnlocked,
+  grantsPermission = true,
   onDone,
 }: {
   block: SenseNovaDonationBlock | undefined
   aiUnlocked: boolean
+  /** 商汤通道当前是否授予权限（关掉后文案改成「仅收录」） */
+  grantsPermission?: boolean
   onDone: () => void
 }) {
   const { t } = useT()
@@ -2006,7 +2083,7 @@ function SenseNovaDonationCard({
       // 之前这里无条件弹「校验通过」，Key 明明是错的也报成功（用户实测反馈），
       // 所以必须按 status 分三种情况给文案。
       if (res.status === "approved") {
-        toast.success(t("don.sn.ok.verified"), {
+        toast.success(grantsPermission ? t("don.sn.ok.verified") : t("don.sn.ok.verifiedNoGrant"), {
           description: res.reviewNote ?? undefined,
           duration: 10000,
         })
@@ -2049,7 +2126,12 @@ function SenseNovaDonationCard({
           )}
         </CardTitle>
         <CardDescription>
-          {t("don.sn.desc")}
+          {grantsPermission ? t("don.sn.desc") : t("don.sn.descNoGrant")}
+          {!grantsPermission && (
+            <span className="mt-1 block font-semibold text-destructive">
+              {t("don.grantOffAi")}
+            </span>
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -2121,10 +2203,13 @@ function SenseNovaDonationCard({
 function Wb2ApiDonationCard({
   block,
   aiUnlocked,
+  grantsPermission = true,
   onDone,
 }: {
   block: Wb2ApiDonationBlock | undefined
   aiUnlocked: boolean
+  /** wb2api 通道当前是否授予权限（关掉后文案改成「仅收录」） */
+  grantsPermission?: boolean
   onDone: () => void
 }) {
   const { t } = useT()
@@ -2162,7 +2247,14 @@ function Wb2ApiDonationCard({
           )}
         </CardTitle>
         <CardDescription>
-          {t("don.wb.desc", { realm: realmLabel })}
+          {grantsPermission
+            ? t("don.wb.desc", { realm: realmLabel })
+            : t("don.wb.descNoGrant", { realm: realmLabel })}
+          {!grantsPermission && (
+            <span className="mt-1 block font-semibold text-destructive">
+              {t("don.grantOffAi")}
+            </span>
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -2246,6 +2338,7 @@ function Wb2ApiDonationCard({
       {dialogOpen && (
         <Wb2ApiLoginDialog
           realm={realm}
+          grantsPermission={grantsPermission}
           onClose={() => setDialogOpen(false)}
           onDone={() => {
             setDialogOpen(false)
@@ -2263,11 +2356,14 @@ function Wb2ApiLoginDialog({
   onClose,
   onDone,
   realm,
+  grantsPermission = true,
 }: {
   onClose: () => void
   onDone: () => void
   /** 捐献者选的版本，直接透给服务端决定对接哪个域 */
   realm: "cn" | "global"
+  /** 当前通道是否授予权限（关掉后绑定成功文案改成「仅收录」） */
+  grantsPermission?: boolean
 }) {
   const { t } = useT()
   const [url, setUrl] = React.useState<string | null>(null)
@@ -2322,9 +2418,11 @@ function Wb2ApiLoginDialog({
             t("don.binding.done", { name: r?.nickname || r?.uid || "" }) +
               (r?.alreadyBound
                 ? t("don.binding.already")
-                : r?.aiGranted
-                  ? t("don.binding.granted")
-                  : t("don.binding.grantedBefore"))
+                : grantsPermission
+                  ? r?.aiGranted
+                    ? t("don.binding.granted")
+                    : t("don.binding.grantedBefore")
+                  : t("don.binding.noGrant"))
           )
           return
         }
@@ -2444,10 +2542,13 @@ function Wb2ApiLoginDialog({
 function Cli2ApiDonationCard({
   block,
   aiUnlocked,
+  grantsPermission = true,
   onDone,
 }: {
   block: Cli2ApiDonationBlock | undefined
   aiUnlocked: boolean
+  /** cli2api 通道当前是否授予权限（关掉后文案改成「仅收录」） */
+  grantsPermission?: boolean
   onDone: () => void
 }) {
   const { t } = useT()
@@ -2482,7 +2583,14 @@ function Cli2ApiDonationCard({
           )}
         </CardTitle>
         <CardDescription>
-          {t("don.cli.desc", { provider: providerLabel, realm: block.region === "global" ? t("don.realm.global") : t("don.realm.cn") })}
+          {grantsPermission
+            ? t("don.cli.desc", { provider: providerLabel, realm: block.region === "global" ? t("don.realm.global") : t("don.realm.cn") })
+            : t("don.cli.descNoGrant", { provider: providerLabel, realm: block.region === "global" ? t("don.realm.global") : t("don.realm.cn") })}
+          {!grantsPermission && (
+            <span className="mt-1 block font-semibold text-destructive">
+              {t("don.grantOffAi")}
+            </span>
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -2548,6 +2656,7 @@ function Cli2ApiDonationCard({
         <Cli2ApiLoginDialog
           providerLabel={providerLabel}
           region={block.region}
+          grantsPermission={grantsPermission}
           onClose={() => setDialogOpen(false)}
           onDone={() => {
             setDialogOpen(false)
@@ -2566,11 +2675,14 @@ function Cli2ApiLoginDialog({
   onDone,
   providerLabel,
   region,
+  grantsPermission = true,
 }: {
   onClose: () => void
   onDone: () => void
   providerLabel: string
   region: string
+  /** 当前通道是否授予权限（关掉后绑定成功文案改成「仅收录」） */
+  grantsPermission?: boolean
 }) {
   const { t } = useT()
   const [url, setUrl] = React.useState<string | null>(null)
@@ -2620,9 +2732,11 @@ function Cli2ApiLoginDialog({
             t("don.binding.doneProvider", { provider: providerLabel }) +
               (r?.alreadyBound
                 ? t("don.binding.already")
-                : r?.aiGranted
-                  ? t("don.binding.granted")
-                  : t("don.binding.grantedBefore"))
+                : grantsPermission
+                  ? r?.aiGranted
+                    ? t("don.binding.granted")
+                    : t("don.binding.grantedBefore")
+                  : t("don.binding.noGrant"))
           )
           return
         }

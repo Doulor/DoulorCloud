@@ -13,7 +13,7 @@
  */
 import * as React from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
-import { ArrowLeft, Loader2, MessageSquarePlus, Send } from "lucide-react"
+import { ArrowLeft, Loader2, MessageSquarePlus, Send, Users } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -32,6 +32,7 @@ import { dmApi, errMsg, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
 import { useImageDrop } from "@/hooks/use-image-drop"
+import ChatPage from "@/pages/chat"
 import type { DmConversation, DmMessage, DmPeer, DmRequest } from "@/types"
 import { useT } from "@/i18n"
 
@@ -53,6 +54,8 @@ export default function DmPage() {
 
   const [messages, setMessages] = React.useState<DmMessage[]>([])
   const [peerName, setPeerName] = React.useState<string | null>(null)
+  /** 右侧是否显示「公共聊天室」（用户反馈 2026-10-03：私信列表固定聊天室入口 + 右侧直接聊） */
+  const [showChat, setShowChat] = React.useState(false)
   /**
    * 对端信息（含昵称 / hasAvatar）。消息表里只有 userId，头像与昵称得从
    * `list` 返回的 peer 上取 —— 之前这里硬编码了 hasAvatar=false/nickname=null，
@@ -372,6 +375,29 @@ export default function DmPage() {
       <div className="grid gap-4 lg:grid-cols-[20rem_1fr]">
         {/* 左：会话列表 + 找人 */}
         <aside className="space-y-3">
+          {/* 公共聊天室固定入口（用户反馈 2026-10-03）：始终钉在列表最上面 */}
+          <button
+            type="button"
+            onClick={() => {
+              setShowChat(true)
+              navigate("/dashboard/dm")
+            }}
+            className={cn(
+              "flex w-full items-center gap-3 rounded-lg border bg-card px-3 py-2.5 text-left transition-colors hover:bg-accent",
+              showChat && "border-primary bg-accent"
+            )}
+          >
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+              <Users className="h-4 w-4" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <span className="block text-sm font-medium">{t("dmsg.publicChat")}</span>
+              <span className="block truncate text-xs text-muted-foreground">
+                {t("dmsg.publicChatHint")}
+              </span>
+            </div>
+          </button>
+
           {requests.length > 0 && (
             /* 聊天申请（2026-10-01）：陌生人发来第一条消息后要先经过这里，
                同意之前他发不出第二条（服务端在 sendDm 里拦） */
@@ -450,6 +476,7 @@ export default function DmPage() {
                     <Link
                       key={c.peer.id}
                       to={`/dashboard/dm/${encodeURIComponent(c.peer.username)}`}
+                      onClick={() => setShowChat(false)}
                       className={cn(
                         "flex items-center gap-3 px-3 py-2.5 transition-colors hover:bg-accent",
                         active && "bg-accent"
@@ -499,7 +526,11 @@ export default function DmPage() {
           2026-10-02 排查「进入会话停在最上面」的真正断点就在这里。
         */}
         <section className="flex max-h-[calc(100vh-10rem)] min-h-[28rem] flex-col overflow-hidden rounded-lg border">
-          {!peerName ? (
+          {showChat ? (
+            <div className="flex-1 overflow-hidden p-4">
+              <ChatPage embedded />
+            </div>
+          ) : !peerName ? (
             <div className="flex flex-1 items-center justify-center p-8">
               <EmptyState
                 title={t("dmsg.pickTitle")}

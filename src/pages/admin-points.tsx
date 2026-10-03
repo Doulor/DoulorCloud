@@ -77,6 +77,7 @@ const DELIVERY_LABELS: Record<PointDelivery, string> = {
   feature: "ap.dlv.feature",
   subscription: "ap.dlv.subscription",
   invite_quota: "ap.dlv.inviteQuota",
+  code: "ap.dlv.code",
 }
 
 /** 交付方式 → 一句话说明（选中后显示在按钮下方） */
@@ -86,6 +87,7 @@ const DELIVERY_HINTS: Record<PointDelivery, string> = {
   feature: "ap.hint.feature",
   subscription: "ap.hint.subscription",
   invite_quota: "ap.hint.inviteQuota",
+  code: "ap.hint.code",
 }
 
 /** 交付方式 → 商品表 / 订单表里的展示文案 */
@@ -265,6 +267,8 @@ interface FormState {
   category: ProductCategory
   price: string
   stock: string
+  /** 每日限量（自然日）；空 = 不限 */
+  dailyLimit: string
   perUserLimit: string
   delivery: PointDelivery
   /** delivery='quota' 时每件充入多少元 */
@@ -292,6 +296,7 @@ function emptyForm(): FormState {
     category: "other",
     price: "",
     stock: "",
+    dailyLimit: "",
     perUserLimit: "",
     delivery: "manual",
     quotaYuan: "",
@@ -314,6 +319,7 @@ function formOf(p: PointProduct): FormState {
     category: p.category ?? "other",
     price: String(p.price),
     stock: p.stock === null ? "" : String(p.stock),
+    dailyLimit: p.dailyLimit === null || p.dailyLimit === undefined ? "" : String(p.dailyLimit),
     perUserLimit: p.perUserLimit === null ? "" : String(p.perUserLimit),
     delivery: p.delivery,
     quotaYuan: p.quotaYuan === null ? "" : String(p.quotaYuan),
@@ -349,6 +355,7 @@ function payloadOf(f: FormState): PointProductPayload {
     icon: f.icon.trim() || null,
     price: Math.trunc(Number(f.price) || 0),
     stock: f.stock.trim() === "" ? null : Math.trunc(Number(f.stock) || 0),
+    dailyLimit: f.dailyLimit.trim() === "" ? null : Math.trunc(Number(f.dailyLimit) || 0),
     perUserLimit: f.perUserLimit.trim() === "" ? null : Math.trunc(Number(f.perUserLimit) || 0),
     delivery: f.delivery,
     quotaYuan: f.delivery === "quota" ? Number(f.quotaYuan) || 0 : null,
@@ -358,6 +365,92 @@ function payloadOf(f: FormState): PointProductPayload {
     enabled: f.enabled,
     sort: Math.trunc(Number(f.sort) || 0),
   }
+}
+
+/** 卡密池管理（delivery='code'，用户反馈 a977d1cf）：只在编辑已存在的商品时出现 */
+function CodeManager({ productId }: { productId: string }) {
+  const { t } = useT()
+  const [info, setInfo] = React.useState<{
+    total: number
+    used: number
+    available: number
+  } | null>(null)
+  const [text, setText] = React.useState("")
+  const [busy, setBusy] = React.useState(false)
+
+  const load = React.useCallback(async () => {
+    try {
+      setInfo(await adminPointsApi.getProductCodes(productId))
+    } catch (err) {
+      toast.error(errMsg(err, t("ap.codes.loadFailed")))
+    }
+  }, [productId, t])
+
+  React.useEffect(() => {
+    void load()
+  }, [load])
+
+  const add = async () => {
+    const codes = text
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (codes.length === 0) return
+    setBusy(true)
+    try {
+      const r = await adminPointsApi.addProductCodes(productId, codes)
+      toast.success(t("ap.codes.added", { n: r.added, avail: r.available }))
+      setText("")
+      await load()
+    } catch (err) {
+      toast.error(errMsg(err, t("ap.codes.addFailed")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const clear = async () => {
+    if (!confirm(t("ap.codes.confirmClear"))) return
+    setBusy(true)
+    try {
+      const r = await adminPointsApi.clearProductCodes(productId)
+      toast.success(t("ap.codes.cleared", { n: r.removed }))
+      await load()
+    } catch (err) {
+      toast.error(errMsg(err, t("ap.codes.clearFailed")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border p-3">
+      <div className="flex items-center justify-between">
+        <Label>{t("ap.codes.title")}</Label>
+        {info && (
+          <span className="text-xs text-muted-foreground">
+            {t("ap.codes.stats", { avail: info.available, used: info.used, total: info.total })}
+          </span>
+        )}
+      </div>
+      <Textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={4}
+        placeholder={t("ap.codes.placeholder")}
+      />
+      <div className="flex items-center gap-2">
+        <Button size="sm" onClick={() => void add()} disabled={busy || !text.trim()}>
+          {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+          {t("ap.codes.add")}
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => void clear()} disabled={busy}>
+          {t("ap.codes.clear")}
+        </Button>
+      </div>
+      <p className="text-[11px] text-muted-foreground">{t("ap.codes.hint")}</p>
+    </div>
+  )
 }
 
 /** 商品列表里的小缩略图：有封面图用图，否则用图标（和用户端卡片的优先级一致） */
@@ -2041,6 +2134,17 @@ function ShopTab() {
                   onChange={(e) => setForm((f) => ({ ...f, perUserLimit: e.target.value }))}
                 />
               </div>
+              <div className="space-y-2">
+                <Label htmlFor="pdDaily">{t("ap.dailyLimitLabel")}</Label>
+                <Input
+                  id="pdDaily"
+                  inputMode="numeric"
+                  placeholder={t("pt.form.unlimited")}
+                  value={form.dailyLimit}
+                  onChange={(e) => setForm((f) => ({ ...f, dailyLimit: e.target.value }))}
+                />
+                <p className="text-[11px] text-muted-foreground">{t("ap.dailyLimitHint")}</p>
+              </div>
             </div>
 
             {/* 计费方式：买断 / 租用。放在交付方式之前，因为租用会限制可选的交付方式 */}
@@ -2142,6 +2246,18 @@ function ShopTab() {
                 <p className="text-xs text-muted-foreground">
                   {t("ap.quotaHint")}
                 </p>
+              </div>
+            )}
+
+            {form.delivery === "code" && (
+              <div className="space-y-2">
+                {editingId ? (
+                  <CodeManager productId={editingId} />
+                ) : (
+                  <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                    {t("ap.codes.saveFirst")}
+                  </p>
+                )}
               </div>
             )}
 

@@ -42,6 +42,9 @@ import {
   Clock,
   ScrollText,
   Coins,
+  Eye,
+  EyeOff,
+  Webhook,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -64,6 +67,7 @@ import { DnsAdminPanel } from "./admin-dns"
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { NavItem, NavGroup } from "@/components/sub-nav"
+import { AdminApiTab } from "@/components/admin-api-tab"
 import { Textarea } from "@/components/ui/textarea"
 import {
   Tooltip,
@@ -139,6 +143,16 @@ const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
   // doulor.cn 专属域：**默认关闭**，只能在这里显式打开（后端 allPermissions()
   // 不含它，见 worker/src/permissions.ts 的 DEFAULT_ALLOWED）。
   { key: "doulor", label: "feat.doulor", desc: "adm.feat.doulorDesc" },
+]
+
+/** 「捐献是否授予对应权限」的开关项（与后端 settings.ts 的 donation_grant_* 一一对应） */
+const DONATION_GRANT_ITEMS: { key: string; label: string; desc: string }[] = [
+  { key: "ai", label: "adm.1271", desc: "adm.1272" },
+  { key: "sensenova", label: "adm.1273", desc: "adm.1274" },
+  { key: "frp", label: "adm.1275", desc: "adm.1276" },
+  { key: "proxy", label: "adm.1277", desc: "adm.1278" },
+  { key: "wb2api", label: "adm.1279", desc: "adm.1280" },
+  { key: "cli2api", label: "adm.1281", desc: "adm.1282" },
 ]
 
 import type {
@@ -444,7 +458,7 @@ const ADMIN_TAB_KEYS = new Set([
   "users", "invites", "inviteQuotas", "reserved", "titles", "points",
   "donations", "feedback", "announcements", "events", "community", "moderation",
   "dns", "newapi", "r2", "frp", "proxy", "mail", "analytics", "cfQuota", "audit",
-  "oauth", "settings", "funLinks", "wb2api",
+  "oauth", "settings", "funLinks", "wb2api", "api",
 ])
 
 export default function AdminPage() {
@@ -452,6 +466,8 @@ export default function AdminPage() {
   const { user } = useAuth()
   const [users, setUsers] = React.useState<AdminUser[]>([])
   const [filter, setFilter] = React.useState("")
+  /** 「注册 IP」列默认隐藏（站长 2026-10-03 要求）：列较多时默认不占地方，需要时用搜索框右边的开关打开 */
+  const [showRegisterIp, setShowRegisterIp] = React.useState(false)
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
   // 管理面板当前激活的 tab（受控，供「更多」下拉切换）。
@@ -469,6 +485,14 @@ export default function AdminPage() {
   const [openedMessage, setOpenedMessage] = React.useState<MailMessage | null>(null)
   /** 成员详情里「对齐中转站状态」按钮的忙碌态 */
   const [newapiSyncBusy, setNewapiSyncBusy] = React.useState(false)
+
+  /** 封禁原因输入框（正式对话框，替代浏览器原生 prompt，支持多行备注） */
+  const [suspendTarget, setSuspendTarget] = React.useState<{
+    username: string
+    status: string
+  } | null>(null)
+  const [suspendReasonText, setSuspendReasonText] = React.useState("")
+  const [suspendBusy, setSuspendBusy] = React.useState(false)
 
   // 邀请码
   const [invites, setInvites] = React.useState<AdminInvite[]>([])
@@ -617,6 +641,12 @@ export default function AdminPage() {
   const [settingsLoading, setSettingsLoading] = React.useState(false)
   const [settingsBusy, setSettingsBusy] = React.useState(false)
   const [quotaMb, setQuotaMb] = React.useState("1024")
+
+  // 每日签到配置（基础区间 + 连续里程碑，全部站长手填）
+  const [checkinEnabled, setCheckinEnabled] = React.useState(true)
+  const [checkinMin, setCheckinMin] = React.useState("1")
+  const [checkinMax, setCheckinMax] = React.useState("5")
+  const [checkinMilestones, setCheckinMilestones] = React.useState("7:50\n30:300\n100:1000")
   const [maxFileMb, setMaxFileMb] = React.useState("100")
   const [storageEnabled, setStorageEnabled] = React.useState(true)
   const [trialQuotaUsd, setTrialQuotaUsd] = React.useState("1")
@@ -765,6 +795,15 @@ export default function AdminPage() {
     ai: true,
     frp: false,
     proxy: true,
+  })
+  // 捐献是否授予对应权限（6 条通道各自独立，默认全开；见 settings.ts 注释）
+  const [donationGrants, setDonationGrants] = React.useState<Record<string, boolean>>({
+    ai: true,
+    sensenova: true,
+    frp: true,
+    proxy: true,
+    wb2api: true,
+    cli2api: true,
   })
 
   // ---- 社区管理 ----
@@ -1375,6 +1414,11 @@ export default function AdminPage() {
       setSettingsStats(res.stats)
       if (res.currency?.symbol) setCurrencySymbol(res.currency.symbol)
       const s = res.settings
+      // 每日签到配置
+      setCheckinEnabled(isSettingOn(s.checkin_enabled, true))
+      setCheckinMin(String(Number(s.checkin_points_min ?? 1) || 1))
+      setCheckinMax(String(Number(s.checkin_points_max ?? 5) || 5))
+      setCheckinMilestones(s.checkin_milestones ?? "7:50\n30:300\n100:1000")
       const quotaBytes = Number(s.storage_quota_bytes ?? 1073741824)
       // 字节 → MB（界面统一按 MB 填，避免 512 MB 这种非整 GB 的值没法表达）
       setQuotaMb(String(Math.round((quotaBytes / 1024 / 1024) * 100) / 100))
@@ -1473,6 +1517,15 @@ export default function AdminPage() {
         frp: autoRaw.includes("frp"),
         proxy: autoRaw.includes("proxy"),
       })
+      // 捐献是否授予对应权限（6 条通道各自独立，默认全开）
+      setDonationGrants({
+        ai: isSettingOn(s.donation_grant_ai, true),
+        sensenova: isSettingOn(s.donation_grant_sensenova, true),
+        frp: isSettingOn(s.donation_grant_frp, true),
+        proxy: isSettingOn(s.donation_grant_proxy, true),
+        wb2api: isSettingOn(s.donation_grant_wb2api, true),
+        cli2api: isSettingOn(s.donation_grant_cli2api, true),
+      })
       // ---- 2026-09-26 补齐的设置项 ----
       setNewapiFreePlanId(s.newapi_free_plan_id ?? "1")
       setQuotaPerUnitInput(s.newapi_quota_per_unit ?? "500000")
@@ -1517,6 +1570,10 @@ export default function AdminPage() {
     setSettingsBusy(true)
     try {
       await adminApi.updateSettings({
+        checkin_enabled: checkinEnabled,
+        checkin_points_min: checkinMin,
+        checkin_points_max: checkinMax,
+        checkin_milestones: checkinMilestones,
         storage_quota_bytes: Math.round(Number(quotaMb) * 1024 * 1024),
         storage_max_file_bytes: Math.round(Number(maxFileMb) * 1024 * 1024),
         storage_enabled: storageEnabled,
@@ -1572,6 +1629,13 @@ export default function AdminPage() {
           .filter(([, on]) => on)
           .map(([k]) => k)
           .join(","),
+        // 捐献是否授予对应权限（6 条通道各自独立）
+        donation_grant_ai: donationGrants.ai,
+        donation_grant_sensenova: donationGrants.sensenova,
+        donation_grant_frp: donationGrants.frp,
+        donation_grant_proxy: donationGrants.proxy,
+        donation_grant_wb2api: donationGrants.wb2api,
+        donation_grant_cli2api: donationGrants.cli2api,
         // 反代账号捐献通道
         wb2api_enabled: wb2apiEnabled,
         wb2api_donation_visible: wb2apiDonationVisible,
@@ -2748,23 +2812,20 @@ export default function AdminPage() {
   }
 
   const handleToggleStatusByName = async (username: string, currentStatus: string) => {
-    /**
-     * 封禁前先问原因（2026-10-02 站长要求）。
-     *
-     * 这句话会直接显示在用户的登录页上 —— 这是他被封之后唯一能看到说明的地方，
-     * 空着或写「违规」等于让他瞎猜，然后反复申诉来找你要说法。
-     * 解封不需要原因（后端会自动把旧原因清掉）。
-     */
-    let suspendReason: string | undefined
+    // 封禁：弹正式对话框写原因（多行备注）；解封不需要原因（后端会自动清掉旧原因）。
     if (currentStatus !== "suspended") {
-      const input = prompt(t("adm.suspendReasonPrompt", { username }))
-      if (input === null) return // 用户点了取消
-      suspendReason = input.trim()
-      if (!suspendReason) {
-        toast.error(t("adm.suspendReasonRequired"))
-        return
-      }
+      setSuspendTarget({ username, status: currentStatus })
+      setSuspendReasonText("")
+      return
     }
+    await doToggleStatus(username, "suspended")
+  }
+
+  const doToggleStatus = async (
+    username: string,
+    currentStatus: string,
+    suspendReason?: string
+  ) => {
     setBusy(true)
     try {
       const res = await adminApi.updateUser(username, {
@@ -3040,6 +3101,7 @@ export default function AdminPage() {
                 <NavItem active={activeTab === "audit"} icon={ScrollText} label={t("adm.238")} onClick={() => handleTabChange("audit")} />
                 <NavItem active={activeTab === "mail"} icon={Mail} label={t("adm.239")} onClick={() => handleTabChange("mail")} />
                 <NavItem active={activeTab === "settings"} icon={SlidersHorizontal} label={t("adm.240")} onClick={() => handleTabChange("settings")} />
+                <NavItem active={activeTab === "api"} icon={Webhook} label={t("adm.api.tab")} onClick={() => handleTabChange("api")} />
               </NavGroup>
             </nav>
           </aside>
@@ -3047,8 +3109,8 @@ export default function AdminPage() {
           {/* 右侧内容区 */}
           <div className="min-w-0 flex-1">
         <TabsContent value="users">
-          <div className="sticky top-4 z-20 -mx-1 mb-3 bg-background px-1 pb-1">
-            <div className="relative max-w-sm">
+          <div className="sticky top-4 z-20 -mx-1 mb-3 flex items-center gap-2 bg-background px-1 pb-1">
+            <div className="relative w-full max-w-sm">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
                 placeholder={t("adm.241")}
@@ -3057,6 +3119,21 @@ export default function AdminPage() {
                 onChange={(e) => setFilter(e.target.value)}
               />
             </div>
+            {/* 「注册 IP」列的显示开关（默认隐藏，需要时再打开） */}
+            <Button
+              variant={showRegisterIp ? "default" : "outline"}
+              size="sm"
+              className="shrink-0"
+              onClick={() => setShowRegisterIp((v) => !v)}
+              title={t("adm.registerIp")}
+            >
+              {showRegisterIp ? (
+                <EyeOff className="mr-1.5 h-3.5 w-3.5" />
+              ) : (
+                <Eye className="mr-1.5 h-3.5 w-3.5" />
+              )}
+              {t("adm.registerIp")}
+            </Button>
           </div>
 
       {loading ? (
@@ -3072,6 +3149,11 @@ export default function AdminPage() {
                 <TableHead className="sticky top-[56px] z-10 border-b bg-card">{t("adm.327")}</TableHead>
                 <TableHead className="sticky top-[56px] z-10 border-b bg-card">{t("adm.328")}</TableHead>
                 <TableHead className="sticky top-[56px] z-10 border-b bg-card">{t("adm.329")}</TableHead>
+                {showRegisterIp && (
+                  <TableHead className="sticky top-[56px] z-10 border-b bg-card">
+                    {t("adm.registerIp")}
+                  </TableHead>
+                )}
                 <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">{t("adm.330")}</TableHead>
                 <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">{t("adm.331")}</TableHead>
                 <TableHead className="sticky top-[56px] z-10 border-b bg-card text-center">{t("adm.332")}</TableHead>
@@ -3154,6 +3236,21 @@ export default function AdminPage() {
                   <TableCell className="text-xs text-muted-foreground">
                     {fmtTime(u.createdAt)}
                   </TableCell>
+                  {/* 注册 IP：默认隐藏（见 showRegisterIp 开关）。固定宽度 + 截断，避免长 IPv6 撑宽整列 */}
+                  {showRegisterIp && (
+                    <TableCell className="text-xs text-muted-foreground">
+                      {u.registerIp ? (
+                        <span
+                          className="block w-[110px] truncate font-mono"
+                          title={u.registerIp}
+                        >
+                          {u.registerIp}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </TableCell>
+                  )}
                   <TableCell className="text-center">
                     <BoolMark on={u.storageEnabled} />
                   </TableCell>
@@ -6109,6 +6206,60 @@ export default function AdminPage() {
                 </CardContent>
               </Card>
 
+              {/* 每日签到配置 */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{t("adm.1260")}</CardTitle>
+                  <CardDescription>{t("adm.1261")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="flex items-center justify-between rounded-md border p-3">
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium">{t("adm.1262")}</p>
+                      <p className="text-xs text-muted-foreground">{t("adm.1263")}</p>
+                    </div>
+                    <Switch checked={checkinEnabled} onCheckedChange={setCheckinEnabled} />
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="checkinMin">{t("adm.1264")}</Label>
+                      <Input
+                        id="checkinMin"
+                        type="number"
+                        min={0}
+                        value={checkinMin}
+                        onChange={(e) => setCheckinMin(e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="checkinMax">{t("adm.1265")}</Label>
+                      <Input
+                        id="checkinMax"
+                        type="number"
+                        min={0}
+                        value={checkinMax}
+                        onChange={(e) => setCheckinMax(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{t("adm.1266")}</p>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="checkinMilestones">{t("adm.1267")}</Label>
+                    <Textarea
+                      id="checkinMilestones"
+                      rows={5}
+                      className="font-mono text-sm"
+                      value={checkinMilestones}
+                      onChange={(e) => setCheckinMilestones(e.target.value)}
+                      placeholder={"7:50\n30:300\n100:1000"}
+                    />
+                    <p className="text-xs text-muted-foreground">{t("adm.1268")}</p>
+                  </div>
+                </CardContent>
+              </Card>
+
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">{t("adm.588")}</CardTitle>
@@ -6595,6 +6746,35 @@ export default function AdminPage() {
                 </CardContent>
               </Card>
 
+              {/* 捐献是否授予权限：与「自动审核」并列的捐献侧开关，
+                  只管「通过后给不给权限」，不影响资源入库 / 额度 / 积分 */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{t("adm.1269")}</CardTitle>
+                  <CardDescription>{t("adm.1270")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {DONATION_GRANT_ITEMS.map((item) => (
+                    <div
+                      key={item.key}
+                      className="flex items-center justify-between rounded-md border p-3"
+                    >
+                      <div className="space-y-0.5">
+                        <p className="text-sm font-medium">{t(item.label)}</p>
+                        <p className="text-xs text-muted-foreground">{t(item.desc)}</p>
+                      </div>
+                      <Switch
+                        checked={donationGrants[item.key] ?? false}
+                        onCheckedChange={(v) =>
+                          setDonationGrants((prev) => ({ ...prev, [item.key]: v }))
+                        }
+                      />
+                    </div>
+                  ))}
+                  <p className="text-xs text-muted-foreground">{t("adm.1283")}</p>
+                </CardContent>
+              </Card>
+
               {/* ⚠️ 商汤 Key 捐献的配置卡片已挪到「捐献通道」选项卡（三条通道合并），
                   {t("adm.658")}
                   改哪边会互相覆盖。 */}
@@ -7020,6 +7200,10 @@ export default function AdminPage() {
               </Button>
             </div>
           </div>
+        </TabsContent>
+
+        <TabsContent value="api">
+          <AdminApiTab />
         </TabsContent>
           </div>
         </div>
@@ -8725,6 +8909,61 @@ export default function AdminPage() {
               </div>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* 封禁原因（多行备注，替代原生 prompt） */}
+      <Dialog
+        open={suspendTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !suspendBusy) setSuspendTarget(null)
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {t("adm.suspendReasonTitle", { username: suspendTarget?.username ?? "" })}
+            </DialogTitle>
+            <DialogDescription>{t("adm.suspendReasonDesc")}</DialogDescription>
+          </DialogHeader>
+          <Textarea
+            rows={4}
+            maxLength={300}
+            autoFocus
+            value={suspendReasonText}
+            onChange={(e) => setSuspendReasonText(e.target.value)}
+            placeholder={t("adm.suspendReasonPh")}
+          />
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={suspendBusy}
+              onClick={() => setSuspendTarget(null)}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              size="sm"
+              disabled={suspendBusy}
+              onClick={() => {
+                const reason = suspendReasonText.trim()
+                if (!reason) {
+                  toast.error(t("adm.suspendReasonRequired"))
+                  return
+                }
+                if (!suspendTarget) return
+                void (async () => {
+                  setSuspendBusy(true)
+                  await doToggleStatus(suspendTarget.username, suspendTarget.status, reason)
+                  setSuspendBusy(false)
+                  setSuspendTarget(null)
+                })()
+              }}
+            >
+              {t("adm.876")}
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
 
