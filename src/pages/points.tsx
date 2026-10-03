@@ -700,7 +700,15 @@ export default function PointsPage() {
                   </span>
                 </CardTitle>
               </div>
-              <div className="flex items-center gap-2">
+              {/**
+               * 按钮区父容器：flex-wrap 让按钮在窄屏自动换行。
+               * 每个按钮都是 whitespace-nowrap 的 flex 项，按钮再多也不撑破卡片 ——
+               * 最多换行，不会把最后一个按钮顶出屏幕外。
+               * 背景：390px 视口下（手机 / WebToApp WebView），按钮行最小宽度约 332px、
+               * 卡片内可用约 300px，单个 flex 项默认 min-width:auto 无法收缩，
+               * 「积分明细」被推出屏幕右缘 30px+，页面出现横向滚动。
+               */}
+              <div className="flex flex-wrap items-center gap-2">
                 {/* 我的交易：买的 / 卖的都在这个弹窗里处理；待处理的笔数直接标在按钮上 */}
                 <Button variant="outline" size="sm" onClick={() => setTradeOpen(true)}>
                   <Handshake className="mr-1.5 h-3.5 w-3.5" />
