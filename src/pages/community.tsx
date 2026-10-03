@@ -432,18 +432,39 @@ function PostCard({
   )
 }
 
+/**
+ * 评论行（推特式平铺版式，2026-10-03）。
+ *
+ * 背景：原来每条回复是一张**嵌套卡片**，回复别人的评论会缩进一层 + 变成更窄的卡片，
+ * 盖楼几层后内容被挤成一条缝，手机上完全没法看。
+ *
+ * 现在照推特的通行做法改：
+ *   · **一律平铺**：所有层级都是同一列、全宽的整行，头像固定在左侧 40px 列，
+ *     正文占满剩余宽度 —— 深度再大也不会变窄；
+ *   · **不再有嵌套卡片**：整列共用一张卡片的边框，行与行之间用一条细分割线；
+ *   · **头像间竖线**：自己头像下方到行底画一条竖线（下面还有回复时），
+ *     子回复在自己头像上方补一段，两段接起来就是推特那条「盖楼连线」；
+ *   · 「回复盖楼」不再靠缩进表达，而是在正文上方写一行「回复 @某某」。
+ */
 function CommentItem({
   node,
   postId,
   basePath,
   onReplied,
-  depth = 0,
+  lineUp = false,
+  lineDown = false,
+  parentAuthor = null,
 }: {
   node: CommentNode
   postId: string
   basePath: string
   onReplied: () => void
-  depth?: number
+  /** 上方是否需要补一小段竖线（自己是别人的回复） */
+  lineUp?: boolean
+  /** 头像下方是否需要画竖线（自己还有下级回复） */
+  lineDown?: boolean
+  /** 被回复者的用户名（盖楼时显示「回复 @xxx」） */
+  parentAuthor?: string | null
 }) {
   const { t } = useT()
   const { user } = useAuth()
@@ -505,132 +526,164 @@ function CommentItem({
     }
   }
 
-  // 深层嵌套时停止左侧缩进，避免在手机上越缩越窄成一条缝
-  const indent = depth < 6
-
-  // 回复过多时自动折叠（用户反馈 2026-10-03：同一条回复下太多条会刷屏）
-  const COLLAPSE_AT = 3
-  const [showAllReplies, setShowAllReplies] = React.useState(false)
-  const collapsed = node.replies.length > COLLAPSE_AT
-  const visibleReplies = collapsed && !showAllReplies ? node.replies.slice(0, COLLAPSE_AT) : node.replies
-
   return (
-    <div className={cn("overflow-hidden rounded-lg border bg-card p-3", depth > 0 && "border-l-2 border-l-primary/30")}>
-      <div className="flex min-w-0 items-center gap-2">
+    <div className="relative flex gap-3 px-3 py-3">
+      {/* 盖楼竖线：与上下相邻行接续，构成推特那种连续连线 */}
+      {lineUp && (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute left-8 top-0 h-3 w-px bg-border"
+        />
+      )}
+      {lineDown && (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute bottom-0 left-8 top-[3.25rem] w-px bg-border"
+        />
+      )}
+
+      {/* 头像列：固定宽度，所有层级都对齐在同一列 ⇒ 永远不会越缩越窄 */}
+      <div className="shrink-0">
         <UserCardPopover
           username={node.author.username}
           nickname={node.author.nickname}
           hasAvatar={node.author.hasAvatar}
-          className="flex min-w-0 items-center gap-2 text-left"
+          className="block text-left"
         >
           <UserAvatar
             username={node.author.username}
             nickname={node.author.nickname}
             hasAvatar={node.author.hasAvatar}
-            className="h-7 w-7"
+            className="h-10 w-10"
           />
-          <span className="truncate text-sm font-medium">
+        </UserCardPopover>
+      </div>
+
+      <div className="min-w-0 flex-1">
+        {/* 头部：昵称 @用户名 · 时间（推特的排法，时间放名字后面而不是右对齐） */}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+          <span className="min-w-0 truncate text-sm font-semibold">
             {node.author.nickname ?? node.author.username}
           </span>
-          <span className="truncate text-xs text-muted-foreground">@{node.author.username}</span>
-        </UserCardPopover>
-        {node.author.isAdmin && <RoleBadge role={node.author.isRoot ? "root" : "admin"} />}
-        {node.author.customTitle && <CustomTitleBadge title={node.author.customTitle} />}
-        {node.hot && (
-          <Badge variant="secondary" className="shrink-0 text-[10px]">
-            <Flame className="mr-0.5 h-3 w-3 text-orange-500" />
-            {t("cm.hot")}
-          </Badge>
-        )}
-        <span className="ml-auto shrink-0 text-xs text-muted-foreground" title={fmtTime(node.createdAt)}>
-          {relTime(node.createdAt)}
-        </span>
-      </div>
-      <div className="mt-1.5">
-        {node.replyTo && (
-          <span className="mb-0.5 block text-xs text-muted-foreground">
-            {t("cm.replyTo")} <span className="text-primary">@{node.replyTo}</span>
+          <span className="min-w-0 truncate text-xs text-muted-foreground">
+            @{node.author.username}
           </span>
-        )}
-        <Markdown>{node.body}</Markdown>
-      </div>
-      <div className="mt-1.5 flex items-center gap-3">
-        <button
-          onClick={() => void toggleLike()}
-          className={cn(
-            "flex items-center gap-1 text-xs transition-colors",
-            liked ? "text-primary" : "text-muted-foreground hover:text-foreground"
+          {node.author.isAdmin && <RoleBadge role={node.author.isRoot ? "root" : "admin"} />}
+          {node.author.customTitle && <CustomTitleBadge title={node.author.customTitle} />}
+          {node.hot && (
+            <Badge variant="secondary" className="shrink-0 text-[10px]">
+              <Flame className="mr-0.5 h-3 w-3 text-orange-500" />
+              {t("cm.hot")}
+            </Badge>
           )}
-          title={t("cm.like")}
-        >
-          <Heart className={cn("h-3.5 w-3.5", liked && "fill-current")} />
-          {likeCount > 0 && <span className="tabular-nums">{likeCount}</span>}
-          <span>{t("cm.like")}</span>
-        </button>
-        {user && (
-          <button
-            onClick={() => setReplying((v) => !v)}
-            className="text-xs text-muted-foreground transition-colors hover:text-foreground"
-          >
-            {replying ? t("cm.cancelReply") : t("cm.reply")}
-          </button>
-        )}
-      </div>
-      {replying && (
-        <div
-          {...dropProps}
-          className={cn("relative mt-2", dragging && "rounded-md ring-2 ring-primary")}
-        >
-          <Textarea
-            ref={taRef}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            rows={2}
-            placeholder={t("cm.replyPh", { name: node.author.nickname ?? node.author.username })}
-            className="text-sm"
-          />
-          <div className="mt-1.5 flex items-center gap-1">
-            <EmojiPicker onPick={insertEmoji} />
-            <StickerPanel onPick={insertEmoji} />
-            <Button
-              size="sm"
-              className="ml-auto"
-              onClick={submit}
-              disabled={busy || !text.trim()}
-            >
-              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              {t("cm.reply")}
-            </Button>
-          </div>
+          <span className="shrink-0 text-xs text-muted-foreground" title={fmtTime(node.createdAt)}>
+            · {relTime(node.createdAt)}
+          </span>
         </div>
-      )}
-      {node.replies.length > 0 && (
-        <div className={cn("mt-3 space-y-2", indent && "border-l-2 border-border pl-3")}>
-          {visibleReplies.map((r) => (
-            <CommentItem
-              key={r.id}
-              node={r}
-              postId={postId}
-              basePath={basePath}
-              onReplied={onReplied}
-              depth={depth + 1}
-            />
-          ))}
-          {collapsed && (
+
+        {/* 盖楼标注：不再用缩进，改成「回复 @某某」一行 */}
+        {(parentAuthor || node.replyTo) && (
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            {t("cm.replyTo")}{" "}
+            <span className="text-primary">@{parentAuthor ?? node.replyTo}</span>
+          </p>
+        )}
+
+        <div className="mt-1">
+          <Markdown>{node.body}</Markdown>
+        </div>
+
+        <div className="mt-1.5 flex items-center gap-3">
+          <button
+            onClick={() => void toggleLike()}
+            className={cn(
+              "flex items-center gap-1 text-xs transition-colors",
+              liked ? "text-primary" : "text-muted-foreground hover:text-foreground"
+            )}
+            title={t("cm.like")}
+          >
+            <Heart className={cn("h-3.5 w-3.5", liked && "fill-current")} />
+            {likeCount > 0 && <span className="tabular-nums">{likeCount}</span>}
+            <span>{t("cm.like")}</span>
+          </button>
+          {user && (
             <button
-              type="button"
-              onClick={() => setShowAllReplies((v) => !v)}
-              className="pl-3 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              onClick={() => setReplying((v) => !v)}
+              className="text-xs text-muted-foreground transition-colors hover:text-foreground"
             >
-              {showAllReplies
-                ? t("cm.collapseReplies")
-                : t("cm.expandReplies", { n: node.replies.length - COLLAPSE_AT })}
+              {replying ? t("cm.cancelReply") : t("cm.reply")}
             </button>
           )}
         </div>
-      )}
+
+        {replying && (
+          <div
+            {...dropProps}
+            className={cn("relative mt-2", dragging && "rounded-md ring-2 ring-primary")}
+          >
+            <Textarea
+              ref={taRef}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              rows={2}
+              placeholder={t("cm.replyPh", { name: node.author.nickname ?? node.author.username })}
+              className="text-sm"
+            />
+            <div className="mt-1.5 flex items-center gap-1">
+              <EmojiPicker onPick={insertEmoji} />
+              <StickerPanel onPick={insertEmoji} />
+              <Button
+                size="sm"
+                className="ml-auto"
+                onClick={submit}
+                disabled={busy || !text.trim()}
+              >
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                {t("cm.reply")}
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
+}
+
+/** 平铺后的一行：要么是一条评论，要么是「展开 N 条回复」的入口 */
+type FlatRow =
+  | { kind: "comment"; node: CommentNode; parentAuthor: string | null; lineUp: boolean; lineDown: boolean }
+  | { kind: "more"; node: CommentNode; hidden: number }
+
+/** 折叠阈值：同级回复超过这个数就先收起 */
+const REPLY_COLLAPSE_AT = 3
+
+/**
+ * 把评论树「拍平」成一行行（推特的列表就是平的）。
+ *
+ * 深度优先：父评论 → 它的前 N 条回复 → 再递归。父级是否画竖线的依据是
+ * 「拍平后紧跟在它下面的那几行里，有没有它的后代」。
+ */
+function flattenComments(
+  nodes: CommentNode[],
+  expanded: Set<string>,
+  out: FlatRow[],
+  parent: CommentNode | null
+): void {
+  for (const node of nodes) {
+    const collapsed = !expanded.has(node.id) && node.replies.length > REPLY_COLLAPSE_AT
+    const shown = collapsed ? node.replies.slice(0, REPLY_COLLAPSE_AT) : node.replies
+    out.push({
+      kind: "comment",
+      node,
+      parentAuthor: parent?.author.username ?? null,
+      lineUp: parent !== null,
+      lineDown: shown.length > 0,
+    })
+    flattenComments(shown, expanded, out, node)
+    if (collapsed && node.replies.length > shown.length) {
+      out.push({ kind: "more", node, hidden: node.replies.length - shown.length })
+    }
+  }
 }
 
 function CommentTree({
@@ -644,11 +697,51 @@ function CommentTree({
   basePath: string
   onReplied: () => void
 }) {
+  const { t } = useT()
+  const [expanded, setExpanded] = React.useState<Set<string>>(() => new Set())
+  const rows = React.useMemo(
+    () => {
+      const out: FlatRow[] = []
+      flattenComments(comments, expanded, out, null)
+      return out
+    },
+    [comments, expanded]
+  )
+
   return (
-    <div className="space-y-3">
-      {comments.map((c) => (
-        <CommentItem key={c.id} node={c} postId={postId} basePath={basePath} onReplied={onReplied} />
-      ))}
+    <div className="divide-y overflow-hidden rounded-lg border bg-card">
+      {rows.map((row) =>
+        row.kind === "comment" ? (
+          <CommentItem
+            key={row.node.id}
+            node={row.node}
+            postId={postId}
+            basePath={basePath}
+            onReplied={onReplied}
+            parentAuthor={row.parentAuthor}
+            lineUp={row.lineUp}
+            lineDown={row.lineDown}
+          />
+        ) : (
+          <div key={`more-${row.node.id}`} className="flex gap-3 px-3 py-2">
+            {/* 空头像列占位，让「展开」链接与正文左对齐 */}
+            <div className="w-10 shrink-0" />
+            <button
+              type="button"
+              onClick={() =>
+                setExpanded((prev) => {
+                  const next = new Set(prev)
+                  next.add(row.node.id)
+                  return next
+                })
+              }
+              className="text-xs font-medium text-primary hover:underline"
+            >
+              {t("cm.expandReplies", { n: row.hidden })}
+            </button>
+          </div>
+        )
+      )}
     </div>
   )
 }
