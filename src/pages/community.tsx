@@ -454,6 +454,7 @@ function CommentItem({
   lineUp = false,
   lineDown = false,
   parentAuthor = null,
+  topBorder = true,
 }: {
   node: CommentNode
   postId: string
@@ -465,6 +466,8 @@ function CommentItem({
   lineDown?: boolean
   /** 被回复者的用户名（盖楼时显示「回复 @xxx」） */
   parentAuthor?: string | null
+  /** 是否显示顶部分割线（盖楼续行时不显示，让竖线连通） */
+  topBorder?: boolean
 }) {
   const { t } = useT()
   const { user } = useAuth()
@@ -527,18 +530,18 @@ function CommentItem({
   }
 
   return (
-    <div className="relative flex gap-3 px-3 py-3">
+    <div className={cn("relative flex gap-3 px-3 py-3", topBorder && "border-t")}>
       {/* 盖楼竖线：与上下相邻行接续，构成推特那种连续连线 */}
       {lineUp && (
         <span
           aria-hidden="true"
-          className="pointer-events-none absolute left-8 top-0 h-3 w-px bg-border"
+          className="pointer-events-none absolute left-8 top-0 h-3 w-0.5 -translate-x-1/2 bg-border"
         />
       )}
       {lineDown && (
         <span
           aria-hidden="true"
-          className="pointer-events-none absolute bottom-0 left-8 top-[3.25rem] w-px bg-border"
+          className="pointer-events-none absolute bottom-0 left-8 top-[3.25rem] w-0.5 -translate-x-1/2 bg-border"
         />
       )}
 
@@ -669,7 +672,9 @@ function flattenComments(
   out: FlatRow[],
   parent: CommentNode | null
 ): void {
-  for (const node of nodes) {
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i]
+    const hasNextSibling = i < nodes.length - 1
     const collapsed = !expanded.has(node.id) && node.replies.length > REPLY_COLLAPSE_AT
     const shown = collapsed ? node.replies.slice(0, REPLY_COLLAPSE_AT) : node.replies
     out.push({
@@ -677,7 +682,9 @@ function flattenComments(
       node,
       parentAuthor: parent?.author.username ?? null,
       lineUp: parent !== null,
-      lineDown: shown.length > 0,
+      // 有下级回复，或后面还有兄弟 ⇒ 头像下方要一直画到行底，
+      // 这样父→子、子→兄弟之间的竖线能连成一条连续不断的线（推特的盖楼线）。
+      lineDown: shown.length > 0 || hasNextSibling,
     })
     flattenComments(shown, expanded, out, node)
     if (collapsed && node.replies.length > shown.length) {
@@ -709,8 +716,8 @@ function CommentTree({
   )
 
   return (
-    <div className="divide-y overflow-hidden rounded-lg border bg-card">
-      {rows.map((row) =>
+    <div className="overflow-hidden rounded-lg border bg-card">
+      {rows.map((row, i) =>
         row.kind === "comment" ? (
           <CommentItem
             key={row.node.id}
@@ -721,6 +728,7 @@ function CommentTree({
             parentAuthor={row.parentAuthor}
             lineUp={row.lineUp}
             lineDown={row.lineDown}
+            topBorder={i > 0 && !row.lineUp}
           />
         ) : (
           <div key={`more-${row.node.id}`} className="flex gap-3 px-3 py-2">
