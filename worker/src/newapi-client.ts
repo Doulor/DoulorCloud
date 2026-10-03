@@ -1285,6 +1285,24 @@ export async function deleteChannel(env: Env, channelId: number): Promise<void> 
   await unwrap(res, "删除渠道")
 }
 
+/**
+ * 切换渠道启停状态（`POST /api/channel/:id/status`）。
+ * 状态取值见 `CHANNEL_STATUS_ENABLED`(1) / `CHANNEL_STATUS_MANUALLY_DISABLED`(2)。
+ * 用于「失效渠道批量禁用」—— 把测不通的渠道标记为手动禁用，避免它们继续抢占
+ * 正常渠道的流量（NewAPI 轮询到坏渠道时会拖慢整体响应）。
+ */
+export async function setChannelStatus(
+  env: Env,
+  channelId: number,
+  status: number
+): Promise<void> {
+  const res = await newApiFetch(env, `/api/channel/${Math.trunc(channelId)}/status`, {
+    method: "POST",
+    body: JSON.stringify({ status }),
+  })
+  await unwrap(res, `更新渠道 #${channelId} 状态`)
+}
+
 // ---- 管理员凭据（管理面板可在线更新）----
 
 /** 清除进程内凭据缓存；写入新凭据后必须调用，否则后续调用仍用旧值 */

@@ -9,6 +9,7 @@ import * as subdomainHandlers from "./handlers/subdomains"
 import * as adminHandlers from "./handlers/admin"
 import * as adminDnsHandlers from "./handlers/admin-dns"
 import * as adminRootDomainHandlers from "./handlers/admin-root-domains"
+import * as adminChannelHandlers from "./handlers/admin-channels"
 import * as storageHandlers from "./handlers/storage"
 import { rootDomainFor } from "./root-domains"
 import * as newapiHandlers from "./handlers/newapi"
@@ -743,6 +744,20 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "GET",
     handle: () =>
       adminHandlers.listReserved(env, request),
+  },
+
+  // ---- AI 中转站渠道巡检（管理面板 → 中转站）----
+  {
+    kind: "exact",
+    path: "/admin/channels",
+    method: "GET",
+    handle: () => adminChannelHandlers.listChannelReport(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/channels/sweep",
+    method: "POST",
+    handle: () => adminChannelHandlers.sweepChannels(env, request),
   },
 
   // ---- DNS 解析管理（管理面板 → DNS）----
