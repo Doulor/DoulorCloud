@@ -50,13 +50,6 @@ dist-new/
 # CI 工作流引用内部文档且依赖线上环境，暂不随开源仓库发布
 .github/
 
-# 单元测试 / 本地脚本 / README 截图：本地保留，不进源码仓库
-worker/test/
-worker/scripts/test-cf-token.mjs
-worker/scripts/render-profile-demos.ts
-worker/scripts/smoke-modules.ts
-assets/
-
 # 临时排查文件（本地遗留，不进仓库）
 .tmp-*
 .frp*.json

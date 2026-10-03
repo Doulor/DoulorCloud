@@ -35,7 +35,15 @@
 
 ## 界面预览
 
-界面截图不随源码仓库分发，可访问线上实例 [cloud.doulor.cn](https://cloud.doulor.cn) 查看（深色主题、全站中英双语可切换）。
+| 控制台 | AI 中转站 |
+| :---: | :---: |
+| ![控制台](assets/screenshot-dashboard.png) | ![AI 中转站](assets/screenshot-ai.png) |
+
+| 积分与商城 | 私信 |
+| :---: | :---: |
+| ![积分与商城](assets/screenshot-points.png) | ![私信](assets/screenshot-dm.png) |
+
+> 截图来自线上实例（[cloud.doulor.cn](https://cloud.doulor.cn)），界面为深色主题，全站中英双语可切换。
 
 ---
 
