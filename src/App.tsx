@@ -9,6 +9,7 @@ import { communityApi } from "@/services/api"
 import { AnalyticsTracker } from "@/components/analytics-tracker"
 import { CursorGlow } from "@/components/cursor-effect"
 import { AppealAckGate } from "@/components/appeal-ack-dialog"
+import { NoticeAckGate } from "@/components/notice-ack-dialog"
 
 // 首屏必需的页面（访客第一眼就要看到）保持同步导入
 import LandingPage from "@/pages/landing"
@@ -141,6 +142,8 @@ export default function App() {
       <CursorGlow />
       {/* 申诉回复强制确认：全站挂一次，登录后只要有未读回复就弹不可关闭的窗 */}
       <AppealAckGate />
+      {/* 管理端通知强制已读：同样全站挂一次 */}
+      <NoticeAckGate />
       <AppRoutes />
     </React.Suspense>
   )

@@ -103,6 +103,8 @@ import {
   type ModerationConditionMetric,
   type ModerationConditionOp,
   type AppealPendingReply,
+  type PendingNotice,
+  type AdminNotice,
   type RiskAccount,
   type PointsOverview,
   type PointsRedeemResult,
@@ -2238,6 +2240,31 @@ export const appealApi = {
     request<{ ok: boolean; nothing?: boolean; read?: boolean }>("/appeal/acknowledge", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+}
+
+/** 用户侧：管理端通知（强制已读弹窗） */
+export const noticeApi = {
+  pending: () => request<{ notices: PendingNotice[] }>("/notice/pending"),
+  ack: (id: string) =>
+    request<{ ok: boolean }>("/notice/ack", {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    }),
+}
+
+/** 管理端：通知 */
+export const adminNoticeApi = {
+  list: () => request<{ notices: AdminNotice[] }>("/admin/notices"),
+  send: (payload: { usernames: string[]; title: string; body: string; restrictFeatures?: string[] }) =>
+    request<{ sent: string[]; missing: string[]; restricted: number }>("/admin/notices", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  revoke: (id: string) =>
+    request<{ ok: boolean }>("/admin/notices/revoke", {
+      method: "POST",
+      body: JSON.stringify({ id }),
     }),
 }
 

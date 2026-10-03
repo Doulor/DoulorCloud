@@ -1687,6 +1687,8 @@ export interface Wb2ApiDonationBlock {
    * 只是初始选中项 —— 捐献者可以在捐献页自己改选（2026-09-30 起）。
    */
   realm: string
+  /** 当前允许用户自选的版本（国内版/国际版开关决定）；前端据此隐藏被关的版本 */
+  availableRealms: string[]
   bindings: Wb2ApiBinding[]
   /** 该通道解锁的功能模块 */
   feature: string
@@ -2221,6 +2223,28 @@ export interface AppealPendingReply {
   reviewedAt: string | null
 }
 
+/** 管理端通知：用户侧待确认的一条 */
+export interface PendingNotice {
+  id: string
+  title: string
+  body: string
+  createdAt: string
+}
+
+/** 管理端通知（列表条目） */
+export interface AdminNotice {
+  id: string
+  username: string
+  title: string
+  body: string
+  restrictFeatures: string[]
+  newapiDisabled: boolean
+  creator: string | null
+  createdAt: string
+  readAt: string | null
+  revokedAt: string | null
+}
+
 /** 风险账户（定时扫描中转站日志写入） */
 export interface RiskAccount {
   userId: string
@@ -2240,7 +2264,7 @@ export interface RiskAccount {
 // ---- 监管：白名单 / 自动条件 / 黑名单（2026-10-03） ----
 
 export type ModerationConditionOp = "gt" | "gte" | "lt" | "lte"
-export type ModerationConditionMetric = "achievement_points"
+export type ModerationConditionMetric = "achievement_points" | "custom_title"
 
 /** 白名单里的用户（展示成「昵称 @用户名」，与「自定义称号」面板一致） */
 export interface ModerationWhitelistUser {

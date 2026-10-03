@@ -10,6 +10,7 @@ import * as adminHandlers from "./handlers/admin"
 import * as adminDnsHandlers from "./handlers/admin-dns"
 import * as adminRootDomainHandlers from "./handlers/admin-root-domains"
 import * as adminChannelHandlers from "./handlers/admin-channels"
+import * as noticeHandlers from "./handlers/notices"
 import * as storageHandlers from "./handlers/storage"
 import { rootDomainFor } from "./root-domains"
 import * as newapiHandlers from "./handlers/newapi"
@@ -396,6 +397,36 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   },
   {
     kind: "exact",
+    path: "/notice/pending",
+    method: "GET",
+    handle: () => noticeHandlers.pendingNotices(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/notice/ack",
+    method: "POST",
+    handle: () => noticeHandlers.ackNotice(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/notices",
+    method: "GET",
+    handle: () => noticeHandlers.listNotices(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/notices",
+    method: "POST",
+    handle: () => noticeHandlers.sendNotice(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/notices/revoke",
+    method: "POST",
+    handle: () => noticeHandlers.revokeNotice(env, request),
+  },
+  {
+    kind: "exact",
     path: "/admin/appeals",
     method: "GET",
     handle: () => moderationHandlers.listAppeals(env, request),
@@ -758,6 +789,12 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/admin/channels/sweep",
     method: "POST",
     handle: () => adminChannelHandlers.sweepChannels(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/channels/enable",
+    method: "POST",
+    handle: () => adminChannelHandlers.enableChannels(env, request),
   },
 
   // ---- DNS 解析管理（管理面板 → DNS）----
