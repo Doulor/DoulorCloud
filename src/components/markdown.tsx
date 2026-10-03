@@ -216,9 +216,10 @@ function renderCode(props: React.ComponentPropsWithoutRef<"code"> & { node?: unk
  * 图片渲染。
  *
  * 分两种，因为它们的意图完全不同：
- *   · **站内表情包**（`/api/stickers/<id>/image`）是「内联小图」—— 跟着文字走，
- *     限制在 96px 见方、与文字基线对齐。不限制的话，一张 512×512 的表情包
- *     会把整段话撑成一大块，聊天体感全毁。
+ *   · **站内表情包**（`/api/stickers/<id>/image`）是**独占一行的块级小图**——
+ *     不管前面有没有文字，都自动换行到新的一行再显示（2026-10-03 站长要求：
+ *     贴一行文字 + 表情包时，表情包单独一行，视觉更对齐）。限制在 96px 见方。
+ *     不限制的话，一张 512×512 的表情包会把整段话撑成一大块，聊天体感全毁。
  *   · **外链图片**按常规处理：限宽不溢出、限高不喧宾夺主，圆角加边。
  * 两者都开 lazy loading：一屏十几张表情包时，只有进视口的才真正去取。
  */
@@ -281,7 +282,7 @@ function StickerImage({ src, alt }: { src: string; alt: string }) {
   return (
     <>
       <span
-        className="relative inline-block select-none"
+        className="relative my-1 block select-none"
         onClick={onClick}
         onContextMenu={(e) => {
           e.preventDefault()

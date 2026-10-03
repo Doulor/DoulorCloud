@@ -452,7 +452,7 @@
   border-radius: 0.5rem;
 }
 
-/* 站内表情包：跟文字走的内联小图，等比缩放。
+/* 站内表情包：独占一行的块级小图，等比缩放。
  * ⚠️ 必须用「.markdown-body img.sticker-img」这个更高优先级的选择器 ——
  * 上面的 `.markdown-body img { max-width:100% }` 会把表情包的 `max-w-24` 顶掉。
  * 规则：**高度封顶 96px、宽度封顶到容器宽**（不是 96px）——这样

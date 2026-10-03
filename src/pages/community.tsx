@@ -682,9 +682,12 @@ function flattenComments(
       node,
       parentAuthor: parent?.author.username ?? null,
       lineUp: parent !== null,
-      // 有下级回复，或后面还有兄弟 ⇒ 头像下方要一直画到行底，
-      // 这样父→子、子→兄弟之间的竖线能连成一条连续不断的线（推特的盖楼线）。
-      lineDown: shown.length > 0 || hasNextSibling,
+      // 头像下方画线，仅当：
+      //   · 有可见的下级回复（线连到子回复）；或
+      //   · 自己是**回复**且后面还有兄弟（线穿过去连下一个兄弟）。
+      // ⚠️ 根评论之间互不相连 —— 只有「回复」才用 hasNextSibling 续线，
+      // 否则一条没人回复的根评论（后面还有别的根评论）会误画一条线连到下一个帖子。
+      lineDown: shown.length > 0 || (parent !== null && hasNextSibling),
     })
     flattenComments(shown, expanded, out, node)
     if (collapsed && node.replies.length > shown.length) {
