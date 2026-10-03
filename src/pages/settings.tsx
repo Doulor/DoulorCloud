@@ -102,6 +102,7 @@ export default function SettingsPage() {
   const [emailForm, setEmailForm] = React.useState({
     email: "",
     password: "",
+    code: "",
     step: "request" as "request" | "confirm",
   })
 
@@ -308,14 +309,15 @@ export default function SettingsPage() {
         email: emailForm.email,
         password: emailForm.password,
         action: emailForm.step,
+        code: emailForm.step === "confirm" ? emailForm.code : undefined,
       })
       if (emailForm.step === "request") {
         toast.success(res.message ?? t("settings.toast.verifyMailSent"))
-        setEmailForm((f) => ({ ...f, step: "confirm" }))
+        setEmailForm((f) => ({ ...f, step: "confirm", code: "" }))
       } else {
         toast.success(t("settings.toast.emailUpdated"))
         setEmailOpen(false)
-        setEmailForm({ email: "", password: "", step: "request" })
+        setEmailForm({ email: "", password: "", code: "", step: "request" })
         await loadEmailSettings()
         if (res.user) setUser(res.user)
       }
@@ -946,7 +948,7 @@ export default function SettingsPage() {
         onOpenChange={(open) => {
           if (!open) {
             setEmailOpen(false)
-            setEmailForm({ email: "", password: "", step: "request" })
+            setEmailForm({ email: "", password: "", code: "", step: "request" })
             setError(null)
           }
         }}
@@ -985,6 +987,25 @@ export default function SettingsPage() {
                 }
               />
             </div>
+            {emailForm.step === "confirm" && (
+              <div className="space-y-2">
+                <Label htmlFor="emailChangeCode">{t("settings.email.codeLabel")}</Label>
+                <Input
+                  id="emailChangeCode"
+                  inputMode="numeric"
+                  maxLength={6}
+                  placeholder={t("settings.email.codeLabel")}
+                  className="font-mono tracking-widest"
+                  value={emailForm.code}
+                  onChange={(e) =>
+                    setEmailForm((f) => ({ ...f, code: e.target.value.replace(/\D/g, "") }))
+                  }
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t("settings.email.changeCodeHint")}
+                </p>
+              </div>
+            )}
             {error && <p className="text-sm text-destructive">{error}</p>}
           </div>
           <DialogFooter>
@@ -993,7 +1014,12 @@ export default function SettingsPage() {
             </Button>
             <Button
               onClick={() => void handleChangeEmail()}
-              disabled={saving || !emailForm.email || !emailForm.password}
+              disabled={
+                saving ||
+                !emailForm.email ||
+                !emailForm.password ||
+                (emailForm.step === "confirm" && !/^\d{6}$/.test(emailForm.code))
+              }
             >
               {saving && <Loader2 className="h-4 w-4 animate-spin" />}
               {emailForm.step === "request" ? t("settings.btn.sendVerifyMail") : t("settings.btn.confirmedSubmit")}

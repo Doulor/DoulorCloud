@@ -803,11 +803,13 @@ export const settingsApi = {
       }
     ),
 
-  /** 修改真实邮箱：先 request 触发验证邮件，再 confirm 落库 */
+  /** 修改真实邮箱：先 request 发送新邮箱验证码，再 confirm 带验证码落库 */
   changeEmail: (payload: {
     email: string
     password: string
     action: "request" | "confirm"
+    /** confirm 步骤必填：发往新邮箱的 6 位验证码 */
+    code?: string
   }) =>
     request<{ user: User; email?: string; verified?: boolean; message?: string }>(
       "/settings/email",
