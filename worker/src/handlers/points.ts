@@ -108,12 +108,13 @@ export async function getPoints(env: Env, request: Request): Promise<Response> {
     listPointTransactions(env, user.id, 50),
     // 官方商品：只要上架的
     listProducts(env, { onlyEnabled: true, scope: "official" }),
-    // 用户商品：上架 + 审核通过（待审核 / 被拒的不给别人看）
+    // 用户商品：上架 + 审核通过（待审核 / 被拒的不给别人看）。
+    // 上限 200 是「用户们的商城」一页 9 个的翻页基数：前端不做服务端分页，一次拿全量。
     listProducts(env, {
       onlyEnabled: true,
       scope: "user",
       reviewStatus: "approved",
-      limit: 100,
+      limit: 200,
     }),
     // 我上架的：含待审核 / 已拒绝 / 已下架，自己要看得到进度
     listProducts(env, { ownerId: user.id, limit: 50 }),

@@ -4,6 +4,8 @@ import {
   CalendarClock,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Coins,
   Loader2,
   Package,
@@ -458,6 +460,9 @@ function uploadPayload(f: UploadForm): UserProductPayload {
 /** 租期快捷值（天）—— 覆盖「周 / 月 / 季 / 年」四个常见档位 */
 const RENTAL_DAY_PRESETS = [7, 30, 90, 365] as const
 
+/** 「用户们的商城」每页商品数（3 列 × 3 行） */
+const SHOP_PAGE_SIZE = 9
+
 export default function PointsPage() {
   const { t } = useT()
   const [data, setData] = React.useState<PointsOverview | null>(null)
@@ -483,6 +488,10 @@ export default function PointsPage() {
 
   // 我的商品 / 收到的订单
   const [mineOpen, setMineOpen] = React.useState(false)
+
+  // 「用户们的商城」分页：服务端一次给全量（上限 200 个），在本地按 9 个一页切片
+  const [shopPage, setShopPage] = React.useState(1)
+  const shopTopRef = React.useRef<HTMLDivElement | null>(null)
 
   // 上架 / 编辑自己的商品
   const [uploadOpen, setUploadOpen] = React.useState(false)
@@ -807,6 +816,20 @@ export default function PointsPage() {
   const shownUserProducts =
     shopCat === "all" ? userProducts : userProducts.filter((p) => p.category === shopCat)
   const sellerOrders: PointOrder[] = data?.sellerOrders ?? []
+
+  /** 用户商城的页码：商品变少导致页码越界（如删到只剩 1 页）时自动收回到最后一页 */
+  const shopPageCount = Math.max(1, Math.ceil(shownUserProducts.length / SHOP_PAGE_SIZE))
+  const shopPageSafe = Math.min(shopPage, shopPageCount)
+  const pagedUserProducts = shownUserProducts.slice(
+    (shopPageSafe - 1) * SHOP_PAGE_SIZE,
+    shopPageSafe * SHOP_PAGE_SIZE
+  )
+
+  /** 翻页后把商城标题滚回视野 —— 否则新一页全在视口上方，看着像没反应 */
+  const gotoShopPage = (p: number) => {
+    setShopPage(p)
+    shopTopRef.current?.scrollIntoView({ block: "start", behavior: "smooth" })
+  }
   /** 需要我处理的：别人买了我的东西但还没交付 */
   const todoSellerOrders = sellerOrders.filter((o) => o.status === "pending").length
   /** 需要我确认收货的 */
@@ -1295,7 +1318,7 @@ export default function PointsPage() {
 
           {/* 用户们的商城 */}
           <div>
-            <div className="mb-3 flex flex-wrap items-center gap-2">
+            <div ref={shopTopRef} className="mb-3 flex flex-wrap items-center gap-2 scroll-mt-20">
               <Store className="h-4 w-4 text-primary" />
               <h2 className="text-base font-semibold">{t("pt.userShop")}</h2>
               <div className="ml-auto flex flex-wrap gap-2">
@@ -1337,7 +1360,7 @@ export default function PointsPage() {
               />
             ) : (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {shownUserProducts.map((p) => (
+                {pagedUserProducts.map((p) => (
                   <ProductCard
                     key={p.id}
                     product={p}
@@ -1346,6 +1369,33 @@ export default function PointsPage() {
                     onBuy={setBuyTarget}
                   />
                 ))}
+              </div>
+            )}
+
+            {/* 分页：每页 9 个（3 列 × 3 行），只有一页时不显示 */}
+            {shopPageCount > 1 && (
+              <div className="mt-4 flex items-center justify-center gap-3 text-xs text-muted-foreground">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={shopPageSafe <= 1}
+                  onClick={() => gotoShopPage(shopPageSafe - 1)}
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                  上一页
+                </Button>
+                <span className="tabular-nums">
+                  第 {shopPageSafe} / {shopPageCount} 页 · 共 {userProducts.length} 个商品
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={shopPageSafe >= shopPageCount}
+                  onClick={() => gotoShopPage(shopPageSafe + 1)}
+                >
+                  下一页
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </Button>
               </div>
             )}
           </div>

@@ -17,7 +17,10 @@ import { ChevronRight } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
 import {
-  groupModelsByVendor,
+  groupModelsBySection,
+  MODALITY_AUDIO,
+  MODALITY_IMAGE,
+  MODALITY_VIDEO,
   OTHER_VENDOR,
   VENDOR_SPLIT_THRESHOLD,
 } from "@/lib/model-vendor"
@@ -138,6 +141,14 @@ function ModelBadge({ model, onCopy }: { model: string; onCopy: (model: string) 
   )
 }
 
+/** 模态小节与兜底小节的标题走 i18n；厂商小节直接显示官方品牌名 */
+const SPECIAL_LABELS: Record<string, string> = {
+  [MODALITY_AUDIO]: "ai.group.audio",
+  [MODALITY_IMAGE]: "ai.group.image",
+  [MODALITY_VIDEO]: "ai.group.video",
+  [OTHER_VENDOR]: "ai.group.other",
+}
+
 /**
  * 「全部可用模型」里的模型清单。
  *
@@ -170,12 +181,12 @@ export function ModelVendorSections({
 
   return (
     <div className="space-y-2">
-      {groupModelsByVendor(models).map(({ vendor, models: list }) => (
-        <details key={vendor} className="group/vendor rounded-md border bg-muted/20">
+      {groupModelsBySection(models).map(({ section, models: list }) => (
+        <details key={section} className="group/section rounded-md border bg-muted/20">
           <summary className="flex cursor-pointer select-none list-none items-center gap-2 px-2.5 py-2 [&::-webkit-details-marker]:hidden">
-            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open/vendor:rotate-90" />
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open/section:rotate-90" />
             <span className="text-xs font-medium">
-              {vendor === OTHER_VENDOR ? t("ai.group.other") : vendor}
+              {SPECIAL_LABELS[section] ? t(SPECIAL_LABELS[section]) : section}
             </span>
             <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
               {t("ai.modelCount", { n: list.length })}
