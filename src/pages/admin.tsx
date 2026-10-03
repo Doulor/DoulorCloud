@@ -61,6 +61,7 @@ import { PointsAdminPanel } from "./admin-points"
 import { FunLinksAdminPanel } from "./admin-fun-links"
 import { TitlesAdminPanel } from "./admin-titles"
 import { ModerationAdminPanel } from "./admin-moderation"
+import { AdminNoticesPanel } from "./admin-notices"
 // DNS 解析管理（全站记录 / 合规扫描 / 与 Cloudflare 对账）同理外置
 import { DnsAdminPanel } from "./admin-dns"
 
@@ -456,7 +457,7 @@ const EVENT_STATUS_TEXT: Record<EventStatus, string> = {
 /** 管理面板全部子 tab（用于 URL hash 校验：/dashboard/admin#users 直达） */
 const ADMIN_TAB_KEYS = new Set([
   "users", "invites", "inviteQuotas", "reserved", "titles", "points",
-  "donations", "feedback", "announcements", "events", "community", "moderation",
+  "donations", "feedback", "announcements", "events", "community", "moderation", "notices",
   "dns", "newapi", "r2", "frp", "proxy", "mail", "analytics", "cfQuota", "audit",
   "oauth", "settings", "funLinks", "wb2api", "api",
 ])
@@ -3032,6 +3033,13 @@ export default function AdminPage() {
                   count={attention?.appeals}
                   onClick={() => handleTabChange("moderation")}
                 />
+                {/* 通知：站长给单个/多个用户发强制已读通知，可选确认前禁用权限 */}
+                <NavItem
+                  active={activeTab === "notices"}
+                  icon={Megaphone}
+                  label={t("adm.notices")}
+                  onClick={() => handleTabChange("notices")}
+                />
               </NavGroup>
               <NavGroup label={t("adm.220")}>
                 <NavItem active={activeTab === "newapi"} icon={Sparkles} label={t("adm.221")} onClick={() => handleTabChange("newapi")} />
@@ -4652,6 +4660,10 @@ export default function AdminPage() {
 
         <TabsContent value="moderation">
           <ModerationAdminPanel />
+        </TabsContent>
+
+        <TabsContent value="notices">
+          <AdminNoticesPanel />
         </TabsContent>
 
         <TabsContent value="dns">

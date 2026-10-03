@@ -140,3 +140,54 @@ export async function sweepChannels(env: Env, request: Request): Promise<Respons
 
   return json({ tested: targets.length, dead: dead.length, disabled, results })
 }
+
+/**
+ * POST /admin/channels/enable —— 重新启用渠道（撤销「失效禁用」用）。
+ * body: { ids?: number[] } —— 缺省 = 把所有「非启用」状态的渠道全部改回启用。
+ *
+ * 2026-10-03 站长反馈：还没筛选完就禁用太早，要求先全部解禁、等他自己筛。
+ * 这里只把 status 改回 1（启用），不做测试、不删数据，完全可逆。
+ */
+export async function enableChannels(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdmin(env, request)
+  const body = await readJson(request)
+  const ids = Array.isArray(body.ids)
+    ? (body.ids as unknown[]).map(Number).filter((n) => Number.isFinite(n) && n > 0)
+    : null
+
+  const all = await listChannels(env)
+  const targets = ids
+    ? all.filter((c) => ids.includes(c.id))
+    : all.filter((c) => c.status !== CHANNEL_STATUS_ENABLED)
+
+  if (targets.length === 0) {
+    return json({ reenabled: 0, total: 0, failures: [] })
+  }
+
+  // 有界并发：纯启停，每条很快，15 并发足够
+  const concurrency = 15
+  let cursor = 0
+  let reenabled = 0
+  const failures: { id: number; err: string }[] = []
+  const run = async (): Promise<void> => {
+    while (cursor < targets.length) {
+      const c = targets[cursor++]
+      try {
+        await setChannelStatus(env, c.id, CHANNEL_STATUS_ENABLED)
+        reenabled++
+      } catch (err) {
+        failures.push({ id: c.id, err: err instanceof Error ? err.message : String(err) })
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, run))
+
+  await recordAudit(
+    env,
+    admin.id,
+    "admin.channels.enable",
+    `重新启用渠道 ${reenabled}/${targets.length} 个`
+  )
+
+  return json({ reenabled, total: targets.length, failures })
+}
