@@ -21,7 +21,7 @@
 import { ApiError, json } from "../http"
 import { primaryAddressFor } from "../root-domains"
 import { encryptSecret, decryptSecret, uuid, verifyPassword } from "../crypto"
-import { requireFeatureUser } from "../auth"
+import { requireFeatureUser, isPrivileged } from "../auth"
 import {
   adminGrantSubscription,
   adminSetQuota,
@@ -49,7 +49,7 @@ import { audit, getSetting, getSettings, parseRecommendedModels } from "../setti
 import { resolveDonationGroup } from "../donation-provision"
 import { hasFeature, parsePermissions, parseOpenFeatures } from "../permissions"
 import { guardRateLimit } from "../ratelimit"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import type { Env } from "../env"
 
 function requireEncryptionSecret(env: Env): string {
@@ -384,7 +384,23 @@ async function loginWithStoredPassword(
     )
   }
 
-  const fresh = await login(env, account.username, password)
+  const fresh = await (async () => {
+    try {
+      return await login(env, account.username, password)
+    } catch (err) {
+      // ⚠️ 2026-10-04 用户 ventus 反馈：同步额度时报「NewAPI 登录失败: Conflict」，
+      // 因为 NewAPI 对「账号状态异常 / 凭据不再匹配」返回 409，它落进了 client 的
+      // 通用分支（NEWAPI_ERROR），于是用户只看到一句看不懂的 502，也不知道要重新绑定。
+      // 这里统一兜底：**存库密码已经登不进去了** ⇒ 一律转成 USER_TOKEN_EXPIRED，
+      // 前端据此弹出「重新输入密码绑定」。限流（429）不在此列，它有自己的可读提示。
+      if (err instanceof ApiError && err.code === "NEWAPI_RATE_LIMITED") throw err
+      throw new ApiError(
+        401,
+        "你的中转站登录已失效，请重新输入密码绑定",
+        "USER_TOKEN_EXPIRED"
+      )
+    }
+  })()
   await env.DB.prepare(
     "UPDATE newapi_accounts SET enc_token = ?, synced_at = ? WHERE user_id = ?"
   )
@@ -1118,7 +1134,7 @@ function shouldHaveAiAccess(
   permissionsRaw: string | null | undefined,
   openFeatures: Set<string>
 ): boolean {
-  if (role === "admin" || role === "root") return true
+  if (isPrivileged(role)) return true
   const perms = parsePermissions(permissionsRaw)
   if (hasFeature(perms, "ai")) return true
   return openFeatures.has("ai")
@@ -1239,7 +1255,7 @@ export async function adminSyncPermissions(
   env: Env,
   request: Request
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "newapi.subscriptions")
 
   // 可选：只对齐**一个**用户（`?username=` 或 body `{username}`）。
   // 不带就是全量 —— 线上 170+ 个账号会撞 subrequest 上限，除非确实需要，
@@ -1351,7 +1367,7 @@ export async function adminSyncAllNewapiAccounts(
   env: Env,
   request: Request
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "newapi.subscriptions")
   const r = await syncAllNewapiAccounts(env)
   return json({ ok: true, ...r })
 }

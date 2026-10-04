@@ -2,7 +2,6 @@ import { ApiError, json } from "../http"
 import { hashPassword, verifyPassword, needsPasswordRehash, uuid, hashToken, generateToken } from "../crypto"
 import { clientIp, normalizeKeyPart, guardRateLimit } from "../ratelimit"
 import { isReservedName } from "../reserved-names"
-import { cfListDestinations } from "../cloudflare"
 import { revokeAllUserTokens } from "../oauth-provider"
 import { sendMail, renderMail } from "../mailer"
 import { getSettings } from "../settings"
@@ -17,17 +16,7 @@ import { isIpBlacklisted } from "./moderation-lists"
 import { getDefaultRootDomain, resolveZoneId, isOwnDomain } from "../root-domains"
 import { grantInvitePoints } from "../points"
 import { evaluateTwoFactorGate, createLoginChallenge, maskEmail } from "./two-factor"
-import {
-  createSession,
-  destroySession,
-  requireUser,
-  sessionCookie,
-  clearedSessionCookie,
-  getSessionTokens,
-  toPublicUser,
-  loadPendingReply,
-  type UserRow,
-} from "../auth"
+import { createSession, destroySession, requireUser, sessionCookie, clearedSessionCookie, getSessionTokens, toPublicUser, loadPendingReply, type UserRow, isPrivileged } from "../auth"
 import type { Env } from "../env"
 
 /**
@@ -640,31 +629,9 @@ export async function login(env: Env, request: Request): Promise<Response> {
     }
   }
 
-  // 登录时自动同步邮箱验证状态。
-  //
-  // 用户注册时 Cloudflare 会向真实邮箱发确认链接；用户点过后，Cloudflare 侧的
-  // destination 就有了 verified 值，但本站的 users.email_verified 还停在 0 ——
-  // 除非用户主动到「设置」页点验证（大多数人不会去）。这里在登录时补一次
-  // 纯读检查，命中即置 1，让「点过确认链接」的用户在下一次登录时自动完成验证，
-  // 无需任何额外操作。失败静默，绝不影响登录。
-  if (user.email_verified !== 1) {
-    try {
-      const dests = await cfListDestinations(env)
-      const found = dests.find(
-        (d) => d.email.toLowerCase() === user.email.toLowerCase()
-      )
-      if (found && found.verified !== null) {
-        await env.DB.prepare(
-          "UPDATE users SET email_verified = 1, updated_at = ? WHERE id = ?"
-        )
-          .bind(new Date().toISOString(), user.id)
-          .run()
-        user.email_verified = 1
-      }
-    } catch (err) {
-      console.error("登录同步邮箱验证状态失败:", user.username, err)
-    }
-  }
+  // `email_verified` 只能由用户专属的验证码流程置为 true。
+  // Cloudflare Email Routing destination 是账户级对象，其 verified 状态不能证明
+  // 当前账号掌握对应邮箱，因此登录时不再据此修改用户验证状态。
 
   // 二次验证（2FA）闸门 —— 必须在建 session **之前**。
   //
@@ -887,8 +854,8 @@ export async function me(
       createdAt: f.created_at,
     })),
     // 管理员/站长不受配额限制（999999 作为「不限」哨兵值，前端据此显示）
-    subdomainLimit: user.role === "admin" || user.role === "root" ? 999999 : 5,
-    mailboxLimit: user.role === "admin" || user.role === "root" ? 999999 : 3,
+    subdomainLimit: isPrivileged(user.role) ? 999999 : 5,
+    mailboxLimit: isPrivileged(user.role) ? 999999 : 3,
     recentMessages: recentMessages.map((m) => ({
       id: m.id,
       from: m.from_address,

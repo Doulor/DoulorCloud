@@ -1,5 +1,5 @@
 import { ApiError, json, readBodyCapped } from "../http"
-import { requireUser } from "../auth"
+import { requireUser, isPrivileged } from "../auth"
 import {
   validateNicknameFormat,
   isReservedNickname,
@@ -31,7 +31,7 @@ export async function updateNickname(env: Env, request: Request): Promise<Respon
     throw new ApiError(400, "昵称为 2-16 位中文/英文/数字/下划线", "INVALID_NICKNAME")
   }
 
-  const isAdmin = user.role === "admin" || user.role === "root"
+  const isAdmin = isPrivileged(user.role)
   // 保留词：管理员/站长自己设时跳过（防自我限制），但仍禁含 doulor
   const extra = parseReservedNicknames(await getSetting(env, "reserved_nicknames"))
   if (isReservedNickname(nick, extra, isAdmin)) {

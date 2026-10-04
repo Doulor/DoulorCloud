@@ -11,7 +11,7 @@
  */
 import { ApiError, json, assertContentLengthWithin } from "../http"
 import { requireUser } from "../auth"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
 import { audit } from "../settings"
@@ -296,6 +296,10 @@ type GithubNameCheck = "ok" | "taken" | "bound-other"
  * 只能被领一次 —— star 名单是公开的，谁都能抄别人的名字，用多个站内账号反复领
  * （用户 deity6 实测刷成功后报告了这个洞）。
  *
+ * ⚠️ 占用口径是「**按活动**唯一」：同一个 GitHub 用户名在**同一个活动**里只能被
+ *    一个账号用；**不同活动各自独立计算**（新活动重新算，不继承旧活动的占用）。
+ *    所以这里按名字查时**必须限定 event_id**。
+ *
  * 预检发生在 event_claims 占位**之前**：名字已被占用时直接 403，
  * 不会白白消耗一次性领取机会 / 名额。真正的并发安全靠 lockGithubNameForEvent
  * 的唯一键，这里只是 UX 快路径 + 提示更友好。
@@ -307,16 +311,20 @@ async function checkGithubNameForEvent(
   userId: string
 ): Promise<GithubNameCheck> {
   const who = normalizeGithubName(githubInput)
-  const rows = await env.DB.prepare(
-    `SELECT github_username, user_id FROM event_github_claims
-      WHERE event_id = ? AND (github_username = ? OR user_id = ?)`
+  // 只在本活动内查这个名字：被别的账号用过 → taken（别的活动用过不影响本活动）
+  const byName = await env.DB.prepare(
+    "SELECT user_id FROM event_github_claims WHERE event_id = ? AND github_username = ?"
   )
-    .bind(eventId, who, userId)
-    .all<{ github_username: string; user_id: string }>()
-  for (const r of rows.results ?? []) {
-    if (r.github_username === who && r.user_id !== userId) return "taken"
-    if (r.user_id === userId && r.github_username !== who) return "bound-other"
-  }
+    .bind(eventId, who)
+    .first<{ user_id: string }>()
+  if (byName && byName.user_id !== userId) return "taken"
+  // 同一用户在本活动里已绑过**别的**名字 → 不许中途换名字
+  const mine = await env.DB.prepare(
+    "SELECT github_username FROM event_github_claims WHERE user_id = ? AND event_id = ?"
+  )
+    .bind(userId, eventId)
+    .first<{ github_username: string }>()
+  if (mine && mine.github_username !== who) return "bound-other"
   return "ok"
 }
 
@@ -324,12 +332,15 @@ async function checkGithubNameForEvent(
  * 给「GitHub 用户名 × 活动」上锁（authoritative，防并发的关键）。
  *
  * 返回 `ok` 以外的值时**必须拒绝发放**：
- *   - `taken`：这个名字已被另一个账号占用；
- *   - `bound-other`：本人已在别的名字上绑过（换名字重试，不给换）。
+ *   - `taken`：这个名字已被另一个账号占用（**本活动内**）；
+ *   - `bound-other`：本人已在本活动里绑过别的名字（换名字重试，不给换）。
+ *
+ * 唯一性由 `event_github_claims` 的主键 `(event_id, github_username)` 保证：
+ * 同一活动内一个名字只能写一行；不同活动的主键不同，互不干扰（新活动重新算）。
+ * `WHERE NOT EXISTS (... event_id = ? AND user_id = ?)` 另加一层「同一活动里
+ * 每人只占一个名字」，防止已领过的人把别人的名字全占满。
  *
  * 幂等：同一用户用**同一个**名字重试（上次发放失败）会命中自己的行 → 返回 ok。
- * WHERE NOT EXISTS 只允许每人占一个名字 —— 否则已领过的人可以恶意把
- * 别人的名字全都占满（名字锁死，真主人反而领不了）。
  */
 async function lockGithubNameForEvent(
   env: Env,
@@ -346,7 +357,7 @@ async function lockGithubNameForEvent(
     .bind(eventId, who, userId, new Date().toISOString(), eventId, userId)
     .run()
   if ((res.meta?.changes ?? 0) > 0) return "ok"
-  // 没插进去：名字被别人占，或自己已绑过别的名字 —— 查清楚是哪种
+  // 没插进去：名字被别人占，或自己已绑过别的名字 —— 查清楚是哪种（限定本活动）
   const holder = await env.DB.prepare(
     "SELECT user_id FROM event_github_claims WHERE event_id = ? AND github_username = ?"
   )
@@ -496,12 +507,18 @@ export async function claimEvent(
       )
     }
     if (existing.reward_status !== "failed") {
-      return json(
-        {
-          status: existing.reward_status,
-          detail: existing.reward_detail ?? "你已经参与过这个活动了。",
-        },
-        409
+      // 重复领取：统一按**错误**返回（HTTP 409 + 标准错误体 {error, code}）。
+      //
+      // ⚠️ 2026-10-04 审计修复（#3）：原先是 `json({ status: existing.reward_status,
+      //    detail }, 409)` —— 状态码是「冲突/失败」，body 里却带着 `status: "granted"`
+      //    （已领取的旧状态），自相矛盾。而前端 `request()` 对任何非 2xx 一律抛
+      //    HttpError，只认 body 的 `error` 字段；原 body 没有 `error`，于是前端只能
+      //    显示笼统的「请求失败(409)」，真正的 detail（如「已获得 50 积分」）被丢掉。
+      //    改用 ApiError 后：body 是 `{error, code}`，前端能显示真实原因。
+      throw new ApiError(
+        409,
+        existing.reward_detail ?? "你已经参与过这个活动了。",
+        "ALREADY_CLAIMED"
       )
     }
     // GitHub star 活动：发放前给用户名上锁（防并发窗口里的冒用；见 helper 注释）
@@ -770,7 +787,7 @@ export async function adminDrawEvent(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "events.grant")
   const outcome = await drawEvent(env, id, admin.id)
   return json({ ok: true, ...outcome })
 }
@@ -778,7 +795,7 @@ export async function adminDrawEvent(
 // ---- 管理端 ----
 
 export async function listAllEvents(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "events.manage")
   const now = Date.now()
   const rows = await env.DB.prepare(
     "SELECT * FROM events ORDER BY created_at DESC LIMIT 200"
@@ -868,7 +885,7 @@ function serializeJson(v: unknown): string | null {
 }
 
 export async function createEvent(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "events.manage")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = (await request.json()) as EventPayloadInput
 
@@ -981,7 +998,7 @@ export async function updateEvent(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "events.manage")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const existing = await loadOne(env, id)
   const body = (await request.json()) as EventPayloadInput
@@ -1109,7 +1126,7 @@ export async function updateEvent(
 }
 
 export async function deleteEvent(env: Env, request: Request, id: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "events.manage")
   const existing = await loadOne(env, id)
   await env.DB.prepare("DELETE FROM events WHERE id = ?").bind(id).run()
   await audit(env, admin.id, "event.delete", `删除活动「${existing.title}」`)
@@ -1122,7 +1139,7 @@ export async function listEventClaims(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "events.manage")
   await loadOne(env, id)
   const rows = await env.DB.prepare(
     `SELECT c.id, c.user_id, c.reward_type, c.reward_status, c.reward_detail,
@@ -1157,7 +1174,7 @@ export async function grantEventClaim(
   id: string,
   claimId: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "events.grant")
   await loadOne(env, id)
   const body = (await request.json().catch(() => ({}))) as { detail?: string }
   const detail = (body.detail ?? "").trim().slice(0, 300)

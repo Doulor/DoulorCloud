@@ -77,6 +77,41 @@ async function enableTotp2fa(userId: string): Promise<string> {
 }
 
 describe("登录闸门", () => {
+  it("登录不会把 Cloudflare 账户级 destination 验证冒充成用户本人验证", async () => {
+    const u = await seedUser({ emailVerified: false })
+    const originalFetch = globalThis.fetch
+    const cloudflareCalls: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (url.includes("api.cloudflare.com")) {
+        cloudflareCalls.push(url)
+        return new Response(
+          JSON.stringify({
+            success: true,
+            result: [{ id: "legacy-destination", email: `${u.username}@doulor.cn`, verified: "2026-01-01T00:00:00Z" }],
+            result_info: { total_pages: 1 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      }
+      return originalFetch(input as RequestInfo, init)
+    }) as typeof globalThis.fetch
+
+    try {
+      const res = await login(env, loginRequest(u.username))
+      expect(res.status).toBe(200)
+      const body = await readJson(res)
+      expect((body.user as { emailVerified: boolean }).emailVerified).toBe(false)
+      const stored = await env.DB.prepare("SELECT email_verified FROM users WHERE id = ?")
+        .bind(u.id)
+        .first<{ email_verified: number }>()
+      expect(stored?.email_verified).toBe(0)
+      expect(cloudflareCalls).toEqual([])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it("没配 2FA 的普通用户：行为与改动前一致，直接拿到 session", async () => {
     const u = await seedUser()
     const res = await login(env, loginRequest(u.username))

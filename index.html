@@ -209,16 +209,27 @@
        *
        * 这段内联脚本在 HTML 里就地生效，不依赖任何外部资源：
        *   ① 模块脚本加载失败 → 立刻刷新一次；
-       *   ② 兜底：5 秒后应用仍未挂载（root 还是空的）→ 也刷新一次。
-       * 两种情况都用 sessionStorage 防循环（10 秒内只刷一次），
-       * 免得真的断网时无限刷新。
+       *   ② 兜底：12 秒后应用仍未挂载（root 还是空的）→ 也刷新一次。
+       *
+       * 防循环（2026-10-05 修「手机端隔几秒就重播开屏动画」）用**双重保险**：
+       *   · 一个会话最多自动刷新 2 次；
+       *   · 两次之间至少间隔 15 秒。
+       * 为什么不能只靠 10 秒时间窗：弱网手机上下载 1.6 MB 主 JS 常超 10 秒，
+       * 时间窗会失效；5 秒兜底在弱网下也必然误伤「只是慢、不是失败」的加载。
+       * 改成「最多 2 次」后，无论多差的环境，自动刷新顶多发生 2 次就停。
        */
       (function () {
         var KEY = "boot-reload-at";
+        var COUNT_KEY = "boot-reload-count";
+        var MAX_RELOADS = 2;
+        var MIN_INTERVAL = 15000;
         function reloadOnce() {
           try {
+            var count = Number(sessionStorage.getItem(COUNT_KEY) || 0);
+            if (count >= MAX_RELOADS) return; // 刷满次数，放弃，交给用户手动刷新
             var last = Number(sessionStorage.getItem(KEY) || 0);
-            if (Date.now() - last < 10000) return; // 刚刷过 → 放弃，交给用户手动刷新
+            if (Date.now() - last < MIN_INTERVAL) return; // 刚刷过
+            sessionStorage.setItem(COUNT_KEY, String(count + 1));
             sessionStorage.setItem(KEY, String(Date.now()));
           } catch (e) {
             // 隐私模式等场景 sessionStorage 不可用：仍然刷一次
@@ -235,12 +246,12 @@
           true
         );
         // ② 兜底：React 没挂载成功（root 为空）也刷一次。
-        //    5 秒是折中：splash 1.5 秒就淡出了，正常网络下此时早已挂载完；
-        //    再长用户就盯着空白屏发呆，再短会误伤慢网络。
+        //    12 秒（原 5 秒太激进）：弱网手机下载主 JS 常超 5 秒，5 秒必误伤；
+        //    12 秒足够绝大多数正常网络挂载完，又不会让用户干等太久。
         setTimeout(function () {
           var root = document.getElementById("root");
           if (root && root.childElementCount === 0) reloadOnce();
-        }, 5000);
+        }, 12000);
       })();
     </script>
   </body>

@@ -12,8 +12,9 @@
  * 调 `/dm/seen`。否则切走再回来，未读会被轮询悄悄清零。
  */
 import * as React from "react"
+import { createPortal } from "react-dom"
 import { Link, useNavigate, useParams } from "react-router-dom"
-import { ArrowLeft, Loader2, MessageSquarePlus, Send, Users } from "lucide-react"
+import { ArrowLeft, Loader2, MessageSquarePlus, Send, Users, Copy, Plus } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -28,7 +29,7 @@ import { UserAvatar } from "@/components/user-avatar"
 import { cn } from "@/lib/utils"
 import { relTime } from "@/lib/format"
 import { setVisibleInterval } from "@/lib/visible-interval"
-import { dmApi, errMsg, HttpError } from "@/services/api"
+import { dmApi, stickerApi, errMsg, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
 import { useImageDrop } from "@/hooks/use-image-drop"
@@ -65,6 +66,58 @@ export default function DmPage() {
   const [msgLoading, setMsgLoading] = React.useState(false)
   const [text, setText] = React.useState("")
   const [sending, setSending] = React.useState(false)
+
+  /** 右键消息弹出的菜单：复制 /（落在表情包上时）存表情包 */
+  const [msgMenu, setMsgMenu] = React.useState<{
+    x: number
+    y: number
+    msg: DmMessage
+    /** 右键落在站内表情包上时的 sticker id；否则为 null */
+    stickerId: string | null
+  } | null>(null)
+  /** 右键消息菜单自身（点菜单外关闭用） */
+  const msgMenuRef = React.useRef<HTMLDivElement | null>(null)
+
+  // 右键消息菜单：点别处 / 滚动 / Esc 收起（与聊天室同款）
+  React.useEffect(() => {
+    if (!msgMenu) return
+    const onDown = (e: MouseEvent) => {
+      if (msgMenuRef.current && msgMenuRef.current.contains(e.target as Node)) return
+      setMsgMenu(null)
+    }
+    const close = () => setMsgMenu(null)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMsgMenu(null)
+    }
+    document.addEventListener("mousedown", onDown)
+    document.addEventListener("scroll", close, true)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("mousedown", onDown)
+      document.removeEventListener("scroll", close, true)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [msgMenu])
+
+  /** 复制私信正文（右键菜单） */
+  const copyMessage = async (m: DmMessage) => {
+    try {
+      await navigator.clipboard.writeText(m.body)
+      toast.success(t("chat.copied"))
+    } catch {
+      toast.error(t("chat.err.copy"))
+    }
+  }
+
+  /** 把私信里的表情包存到自己的表情包（右键菜单） */
+  const saveSticker = async (id: string) => {
+    try {
+      const res = await stickerApi.save(id)
+      toast.success(res.alreadySaved ? t("stk.saved") : t("stk.ok.saved"))
+    } catch (err) {
+      toast.error(errMsg(err, t("stk.err.save")))
+    }
+  }
 
   /** 增量轮询游标 */
   const cursorRef = React.useRef<string | null>(null)
@@ -606,6 +659,17 @@ export default function DmPage() {
                         />
                         <div className={cn("max-w-[75%]", mine && "text-right")}>
                           <div
+                            onContextMenu={(e) => {
+                              e.preventDefault()
+                              // 右键落在站内表情包上时，把 sticker id 带进菜单（供「存到我的表情包」）
+                              const el = (e.target as HTMLElement).closest?.(
+                                "img.sticker-img"
+                              ) as HTMLImageElement | null
+                              const stickerId = el
+                                ? el.src.match(/\/api\/stickers\/([0-9a-f-]{36})\/image/)?.[1] ?? null
+                                : null
+                              setMsgMenu({ x: e.clientX, y: e.clientY, msg: m, stickerId })
+                            }}
                             className={cn(
                               "inline-block max-w-full break-words rounded-lg px-3 py-2 text-sm",
                               // `bubble-mine` 只是给 CSS 挂钩子：主色底上的链接要跟随前景色，
@@ -616,7 +680,7 @@ export default function DmPage() {
                             {/* 用 Markdown 渲染：表情包插进来的是 `![](/api/stickers/<id>/image)`，
                                 纯文本渲染会把它原样显示成一行字（2026-10-02 反馈）。
                                 换行由 remarkBreaks 负责，所以这里不再加 whitespace-pre-wrap。 */}
-                            <Markdown>{m.body}</Markdown>
+                            <Markdown stickerSaveButton={false}>{m.body}</Markdown>
                           </div>
                           <div className="mt-1 text-[11px] text-muted-foreground">
                             {relTime(m.createdAt)}
@@ -677,6 +741,50 @@ export default function DmPage() {
           )}
         </section>
       </div>
+
+      {/* 右键消息的菜单：复制 /（落在表情包上时）存表情包 */}
+      {msgMenu &&
+        createPortal(
+          <div
+            ref={msgMenuRef}
+            className="fixed z-50 w-40 rounded-lg border bg-popover p-1 shadow-lg"
+            style={{
+              top: Math.max(8, Math.min(msgMenu.y, window.innerHeight - 132)),
+              left: Math.max(8, Math.min(msgMenu.x, window.innerWidth - 168)),
+            }}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                const m = msgMenu.msg
+                setMsgMenu(null)
+                void copyMessage(m)
+              }}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+            >
+              <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
+              {t("chat.ctx.copy")}
+            </button>
+            {Boolean(user) && msgMenu.stickerId && (
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  const id = msgMenu.stickerId!
+                  setMsgMenu(null)
+                  void saveSticker(id)
+                }}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+              >
+                <Plus className="h-4 w-4 shrink-0 text-muted-foreground" />
+                {t("stk.save")}
+              </button>
+            )}
+          </div>,
+          document.body
+        )}
     </div>
   )
 }

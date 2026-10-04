@@ -33,6 +33,8 @@ import {
 import { feedbackApi, HttpError, errMsg } from "@/services/api"
 import { fmtTime } from "@/lib/format"
 import { EmojiPicker } from "@/components/emoji-picker"
+import { StickerPanel } from "@/components/sticker-panel"
+import { Markdown } from "@/components/markdown"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
 import { useImageDrop } from "@/hooks/use-image-drop"
 import { cn } from "@/lib/utils"
@@ -304,6 +306,7 @@ export default function FeedbackPage() {
               />
               <div className="flex items-center gap-1">
                 <EmojiPicker onPick={insertEmoji} />
+                <StickerPanel onPick={insertEmoji} />
                 <span className="ml-auto text-xs text-muted-foreground">
                   {body.length} / {MAX_BODY}
                 </span>
@@ -584,7 +587,7 @@ function FeedbackCard({
                 </div>
               ) : (
                 <>
-                  <p className="whitespace-pre-wrap break-words text-sm">{item.body}</p>
+                  <Markdown>{item.body}</Markdown>
                   <ImageGallery images={item.images} />
                 </>
               )}
@@ -611,7 +614,7 @@ function FeedbackCard({
                   ) : null}
                   {m.isAdmin ? t("fb.admin") : t("fb.me")}
                 </p>
-                <p className="whitespace-pre-wrap break-words text-sm">{m.body}</p>
+                <Markdown>{m.body}</Markdown>
                 <ImageGallery images={m.images} />
               </div>
             ))}
@@ -623,7 +626,7 @@ function FeedbackCard({
                   <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
                   {t("fb.adminReply")}
                 </p>
-                <p className="whitespace-pre-wrap break-words text-sm">{item.adminReply}</p>
+                <Markdown>{item.adminReply ?? ""}</Markdown>
               </div>
             )}
             {item.messages.length === 0 && !hasReply && (

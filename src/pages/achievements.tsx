@@ -336,6 +336,23 @@ export default function AchievementsPage() {
   const knownGroups = new Set(groups.map((g) => g.id))
   const orphans = achievements.filter((a) => !knownGroups.has(a.group))
 
+  // 「即将达成」：未满级、已完成度 ≥ 60% 的成就，按完成度从高到低取前 6 个。
+  // 成就数量变多后，一眼看不出「哪个差一点就拿到了」，这一块专门解决它。
+  const almostDone = achievements
+    .filter((a) => a.nextTier !== null && a.tiers && a.tiers.length > 0)
+    .map((a) => {
+      const prevTier = a.level > 0 ? (a.tiers?.[a.level - 1] ?? 0) : 0
+      const span = (a.nextTier ?? 0) - prevTier
+      const ratio = span > 0 ? (a.value - prevTier) / span : 0
+      return { a, ratio }
+    })
+    .filter((x) => x.ratio >= 0.6)
+    .sort((x, y) => y.ratio - x.ratio)
+    .slice(0, 6)
+
+  const unlockedCount = summary.unlocked
+  const lockedCount = summary.total - unlockedCount
+
   return (
     <div>
       <PageHeader
@@ -481,6 +498,70 @@ export default function AchievementsPage() {
             <p className="text-xs text-muted-foreground">
               {t("ach.joinedAt", { date: new Date(data.registeredAt).toLocaleDateString(t("msg.dateLocale")) })}
             </p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 即将达成：完成度 ≥60% 的成就，给用户一个明确的下一步 */}
+      <Card className="mb-6">
+        <CardHeader>
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Trophy className="h-4 w-4 text-muted-foreground" />
+                {t("ach.almost")}
+              </CardTitle>
+              <CardDescription>{t("ach.almostDesc")}</CardDescription>
+            </div>
+            <div className="shrink-0 space-y-0.5 text-right text-xs text-muted-foreground">
+              <p>{t("ach.summaryUnlocked", { n: unlockedCount })}</p>
+              <p>{t("ach.summaryLocked", { n: lockedCount })}</p>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {almostDone.length === 0 ? (
+            <p className="py-2 text-center text-sm text-muted-foreground">
+              {t("ach.almostEmpty")}
+            </p>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {almostDone.map(({ a, ratio }) => {
+                const Icon = achievementIcon(a.icon)
+                const prevTier = a.level > 0 ? (a.tiers?.[a.level - 1] ?? 0) : 0
+                const remain = (a.nextTier ?? 0) - a.value
+                return (
+                  <button
+                    key={a.id}
+                    type="button"
+                    onClick={() => setSelected(a)}
+                    className="flex items-center gap-3 rounded-lg border p-3 text-left transition-colors hover:border-primary/60"
+                  >
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 border-primary/40 bg-primary/10 text-primary">
+                      <Icon className="h-4 w-4" />
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <p className="truncate text-sm font-medium">{a.name}</p>
+                        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                          {Math.round(ratio * 100)}%
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                        <div
+                          className="h-full rounded-full bg-primary transition-all"
+                          style={{ width: `${Math.min(100, ratio * 100)}%` }}
+                        />
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        {t("ach.remaining", { n: fmtValue(a, remain > 0 ? remain : 0) })}
+                        {prevTier > 0 ? ` · ${fmtValue(a, a.value)} / ${fmtValue(a, a.nextTier ?? 0)}` : ""}
+                      </p>
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
           )}
         </CardContent>
       </Card>

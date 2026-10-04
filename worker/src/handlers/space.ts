@@ -1,5 +1,5 @@
 import { ApiError, json } from "../http"
-import { requireUser, type UserRow } from "../auth"
+import { requireUser, type UserRow, isPrivileged } from "../auth"
 import { getSettingBool } from "../settings"
 import { FEATURE_LABELS, parsePermissions, type Feature } from "../permissions"
 import {
@@ -215,7 +215,7 @@ export async function getSpace(
   } | null = null
   if (settings.show_posts) {
     let hiddenReason: string | null = null
-    if (!(await getSettingBool(env, "community_enabled")) && viewer?.role !== "admin" && viewer?.role !== "root") {
+    if (!(await getSettingBool(env, "community_enabled")) && !isPrivileged(viewer?.role)) {
       hiddenReason = "社区广场暂时关闭"
     } else if (!viewer && !(await getSettingBool(env, "community_guest_access"))) {
       hiddenReason = "登录后可查看 TA 的帖子"
@@ -321,7 +321,7 @@ export async function getSpace(
       username: target.username,
       nickname: target.nickname,
       hasAvatar: Boolean(target.avatar_key),
-      isAdmin: target.role === "admin" || target.role === "root",
+      isAdmin: isPrivileged(target.role),
       isRoot: target.role === "root",
       /** 自定义称号（徽章式，管理面板授予；没有为 null） */
       customTitle: await getTitleForUser(env, target.id),
@@ -379,7 +379,7 @@ export async function getSpaceCard(
     username: target.username,
     nickname: target.nickname,
     hasAvatar: Boolean(target.avatar_key),
-    isAdmin: target.role === "admin" || target.role === "root",
+    isAdmin: isPrivileged(target.role),
     isRoot: target.role === "root",
     /** 自定义称号（徽章式，管理面板授予；没有为 null）。注意与下面的成就等级 title 不是一回事 */
     customTitle: await getTitleForUser(env, target.id),

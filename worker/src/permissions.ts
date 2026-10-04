@@ -263,3 +263,26 @@ export function featurePermittedGuard(feature: Feature): string {
 export function featureNotPermittedGuard(feature: Feature): string {
   return `COALESCE(json_extract(${PERMISSIONS_JSON_EXPR}, '$.${feature}'), 1) != 1`
 }
+
+/**
+ * 仅用于 `WHERE` 的守卫：该用户**不在监管白名单里**。
+ *
+ * 用途：所有「收回权限」的 UPDATE 都要带上它。
+ *
+ * 背景（2026-10-04）：白名单从「各功能自己记得查」升级为**数据库触发器**
+ * （见 migrations/0114）—— 一旦用户在白名单里，任何把权限从「允许」改成
+ * 「不允许」的写入都会被触发器 ABORT，**包括以后新写的代码路径**。
+ * 那保证了「白名单免疫一切处置」，但副作用是：没带这个守卫的回收语句
+ * 会直接抛 `SQLITE_CONSTRAINT_TRIGGER`，把一个正常的业务流程打成 500。
+ *
+ * 所以规约是：**收回权限时必须带本守卫**（带上了就是「静默跳过」：
+ * 不改权限、也不报错，与触发器的语义完全一致），触发器只作为兜底。
+ *
+ * ⚠️ 必须写 `users.username` 全限定：子查询里 `moderation_whitelist` 自己也有
+ *    `username` 列，不限定会解析到内层表的列上，守卫恒为 true（等于没写）。
+ * ⚠️ 表不存在（迁移未执行）时这里会报 `no such table`，所以 `moderation_whitelist`
+ *    必须比用到它的代码先建好（0111 已建）。
+ */
+export function notWhitelistedGuard(): string {
+  return "NOT EXISTS (SELECT 1 FROM moderation_whitelist w WHERE w.username = users.username COLLATE NOCASE)"
+}

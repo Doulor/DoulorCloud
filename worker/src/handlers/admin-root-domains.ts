@@ -13,7 +13,7 @@
  * 边界：全部 `requireAdmin`；写操作一律记审计。禁止删除默认域（否则注册无处可去）。
  */
 import { ApiError, json, readBodyCapped } from "../http"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { audit as recordAudit } from "../settings"
 import { callCloudflare } from "../cloudflare"
 import {
@@ -97,7 +97,7 @@ export async function listAdminRootDomains(
   env: Env,
   request: Request
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "reserved")
   const rows = await listRootDomains(env)
 
   const items = []
@@ -142,7 +142,7 @@ export async function upsertAdminRootDomain(
   env: Env,
   request: Request
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "reserved")
   const body = await readJson(request)
 
   const name = String(body.name ?? "").trim().toLowerCase()
@@ -215,7 +215,7 @@ export async function upsertAdminRootDomain(
  * 分开才能一眼看出卡在哪一步。
  */
 export async function rootDomainAction(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "reserved")
   const body = await readJson(request)
   const name = String(body.name ?? "").trim().toLowerCase()
   const action = String(body.action ?? "").trim()

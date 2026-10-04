@@ -19,7 +19,7 @@
 import { ApiError, json, SAFE_JSON_HEADERS } from "../http"
 import { requireUser } from "../auth"
 import { guardRateLimit, clientIp } from "../ratelimit"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import {
   createClient,
   deleteClient,
@@ -602,12 +602,12 @@ export async function revokeMyGrant(
 // ---- 管理端：应用管理 ----
 
 export async function adminListClients(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "oauth")
   return json({ clients: await listClients(env) })
 }
 
 export async function adminCreateClient(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "oauth")
   const body = (await request.json()) as {
     name?: string
     redirectUris?: string[]
@@ -634,7 +634,7 @@ export async function adminUpdateClient(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "oauth")
   const body = (await request.json()) as {
     name?: string
     redirectUris?: string[]
@@ -662,7 +662,7 @@ export async function adminResetClientSecret(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "oauth")
   const clientSecret = await resetClientSecret(env, decodeURIComponent(id))
   return json({ clientSecret })
 }
@@ -672,7 +672,7 @@ export async function adminDeleteClient(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "oauth")
   await deleteClient(env, decodeURIComponent(id))
   return json({ ok: true })
 }

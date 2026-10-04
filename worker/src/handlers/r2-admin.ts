@@ -15,7 +15,7 @@
  */
 import { ApiError, json } from "../http"
 import { encryptSecret, uuid } from "../crypto"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { audit as recordAudit } from "../settings"
 import {
   deletePrefix,
@@ -114,7 +114,7 @@ async function platformBucketUsage(
  *   - 未纳入多桶的老用户（bucket_id 为空）单独归入「默认桶」条目
  */
 export async function listR2Buckets(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "r2.buckets")
 
   const buckets = await listBuckets(env)
 
@@ -268,7 +268,7 @@ export async function listR2Buckets(env: Env, request: Request): Promise<Respons
  * 需要环境变量 R2_API_TOKEN（权限：Account → Workers R2 Storage → Read）。
  */
 export async function discoverBuckets(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "r2.buckets")
   const token = env.R2_API_TOKEN
   if (!token) {
     return json({
@@ -344,7 +344,7 @@ export async function discoverBuckets(env: Env, request: Request): Promise<Respo
  * body: { id, name, accountId?, endpoint, bucketName, accessKeyId, secretAccessKey, analyticsToken?, maxUsers?, quotaPerUser?, sortOrder? }
  */
 export async function createR2Bucket(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "r2.buckets")
   if (!env.SESSION_SECRET) {
     throw new ApiError(503, "未配置 SESSION_SECRET，无法加密凭据", "NOT_CONFIGURED")
   }
@@ -452,7 +452,7 @@ export async function updateR2Bucket(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "r2.buckets")
   if (!env.SESSION_SECRET) {
     throw new ApiError(503, "未配置 SESSION_SECRET，无法加密凭据", "NOT_CONFIGURED")
   }
@@ -548,7 +548,7 @@ export async function deleteR2Bucket(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "r2.buckets")
   const row = await env.DB.prepare("SELECT * FROM r2_buckets WHERE id = ?")
     .bind(id)
     .first<R2BucketRow>()
@@ -588,7 +588,7 @@ export async function testR2Bucket(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "r2.buckets")
   const { row } = await credentialsOf(env, id)
   try {
     const page = await listObjects(env, "", { limit: 1, bucketId: id })
@@ -612,7 +612,7 @@ export async function writeTestR2Bucket(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "r2.buckets")
   const { row } = await credentialsOf(env, id)
   const key = `_healthcheck/${uuid()}.txt`
   try {
@@ -636,7 +636,7 @@ export async function getR2Operations(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "r2.buckets")
   const { row, analyticsToken: perBucketToken } = await credentialsOf(env, id)
   // 优先用环境变量里的全局 token（全账户公用），桶级配置作为覆盖
   const analyticsToken = perBucketToken ?? env.R2_API_TOKEN ?? null
@@ -748,7 +748,7 @@ export async function getR2Operations(
  * env 默认桶，只要目标桶指向同一个物理桶（同 endpoint + 同桶名）就没有副作用。
  */
 export async function assignAllUnassigned(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "r2.buckets")
   const body = (await request.json()) as { bucketId?: string; force?: boolean }
   const bucketId = String(body.bucketId ?? "").trim()
   if (!bucketId) throw new ApiError(400, "缺少 bucketId", "INVALID_INPUT")
@@ -808,7 +808,7 @@ export async function assignAllUnassigned(env: Env, request: Request): Promise<R
  * 因此前端要提示管理员：仅对空账号或已手工搬完文件的用户使用。
  */
 export async function assignUserBucket(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "r2.buckets")
   const body = (await request.json()) as { username?: string; bucketId?: string }
   const username = String(body.username ?? "").trim()
   const bucketId = String(body.bucketId ?? "").trim()

@@ -1,7 +1,7 @@
 import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
 import { isReservedName, isReservedSubdomain } from "../reserved-names"
-import { requireUser } from "../auth"
+import { requireUser, isPrivileged } from "../auth"
 import { guardRateLimit } from "../ratelimit"
 import { cfListDnsRecords, cfDeleteDnsRecord } from "../cloudflare"
 import { detachCustomDomain } from "../custom-domain"
@@ -88,7 +88,7 @@ export async function listSubdomains(env: Env, request: Request): Promise<Respon
     .bind(user.id)
     .first<{ max_subdomains: number | null }>()
   const limit =
-    user.role === "admin" || user.role === "root"
+    isPrivileged(user.role)
       ? ADMIN_UNLIMITED
       : (perUser?.max_subdomains ??
          (await getSettingNumber(env, "subdomain_quota_default")))
@@ -162,7 +162,7 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
     )
       .bind(parent.id)
       .first<{ c: number }>()
-    if (user.role !== "admin" && user.role !== "root" && (siblings?.c ?? 0) >= MAX_CHILDREN) {
+    if (!isPrivileged(user.role) && (siblings?.c ?? 0) >= MAX_CHILDREN) {
       throw new ApiError(
         400,
         `${parent.fqdn} 之下最多可创建 ${MAX_CHILDREN} 个子域名`,
@@ -175,7 +175,7 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
   } else {
     // ---- 一级：xxx.doulor.cn（根域直系）----
     // 位数限制：x.doulor.cn / xx.doulor.cn 不允许，至少 3 位（管理员不受限）
-    if (user.role !== "admin" && user.role !== "root" && name.length < MIN_ROOT_NAME_LENGTH) {
+    if (!isPrivileged(user.role) && name.length < MIN_ROOT_NAME_LENGTH) {
       throw new ApiError(
         400,
         `一级子域名至少需要 ${MIN_ROOT_NAME_LENGTH} 个字符`,
@@ -198,7 +198,7 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
     const globalQuota = await getSettingNumber(env, "subdomain_quota_default")
     // 管理员/站长不受配额限制（用一个足够大的数字表示「无限制」，前端据此显示）
     const quota =
-      user.role === "admin" || user.role === "root"
+      isPrivileged(user.role)
         ? ADMIN_UNLIMITED
         : (perUser?.max_subdomains ?? globalQuota)
 
@@ -208,7 +208,7 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
     )
       .bind(user.id)
       .first<{ c: number }>()
-    if (user.role !== "admin" && user.role !== "root" && (used?.c ?? 0) >= quota) {
+    if (!isPrivileged(user.role) && (used?.c ?? 0) >= quota) {
       throw new ApiError(
         400,
         `最多可创建 ${quota} 个一级子域名（当前 ${used?.c ?? 0} 个）`,

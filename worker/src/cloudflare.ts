@@ -228,49 +228,20 @@ export async function cfListDestinations(env: Env): Promise<CfDestination[]> {
 }
 
 /**
- * 注册转发目标地址。若已存在则直接返回其状态。
- * 新地址 Cloudflare 会向该邮箱发送验证邮件，用户点击后 verified 才有值。
- */
-export async function cfEnsureDestination(
-  env: Env,
-  email: string
-): Promise<CfDestination> {
-  const existing = await cfListDestinations(env).catch(() => [] as CfDestination[])
-  const found = existing.find((d) => d.email.toLowerCase() === email.toLowerCase())
-  if (found) return found
-
-  const res = await callCloudflare(
-    env,
-    `/accounts/${await resolveAccountId(env)}/email/routing/addresses`,
-    {
-      method: "POST",
-      body: JSON.stringify({ email }),
-    }
-  )
-  const data = (await res.json()) as { result?: CfDestination; errors?: { message: string }[] }
-  if (!data.result) {
-    throw new ApiError(502, data.errors?.[0]?.message ?? "注册转发地址失败", "CF_ERROR")
-  }
-  return data.result
-}
-
-/**
  * 删除一个转发目标地址。
  *
  * 为什么需要它（2026-09-25 审计 M10）：
  *   Cloudflare 的 destination 是**账户级**的，`verified` 也只属于账户而不属于某个用户。
- *   而本站的 `users.email_verified` 直接采信这个全局 `verified` 标志
- *   （见 handlers/settings.ts 的 destinationStatus）。于是：
+ *   本站曾把这个全局 `verified` 直接当成用户级邮箱验证状态，于是：
  *     用户 A 验证过 a@x.com → A 改成 a2@x.com（**旧地址仍留在账户里且仍是 verified**）
- *     → 攻击者 B 用 a@x.com 注册 → 调一次 action:"status" → email_verified = 1，
- *     而 B **从未**能读取那个邮箱。
- *   `email_verified` 会经 OAuth /userinfo 以 `email_verified: true` 暴露给依赖方，
- *   也是 FRP 的准入条件，所以这是可用的身份伪造。
+ *     → 攻击者 B 用 a@x.com 注册 → 被判定 email_verified = 1，
+ *     而 B **从未**能读取那个邮箱（该标志会经 OAuth /userinfo 暴露、也是 FRP 准入条件）。
  *
- *   改邮箱时把旧 destination 从账户里删掉，就能消除「弃用但仍 verified」这一状态，
- *   使攻击者必须真的点开 Cloudflare 发往该邮箱的验证信（只有邮箱主人收得到）。
+ *   2026-10-04 起，所有邮箱验证/换绑都改为「用户专属验证码」，不再读 CF 状态，
+ *   这条洞的判定路径已彻底移除。这里保留删除旧 destination，是为了：
+ *   ① 释放「每账户 200 条」的硬配额；② 不留账户级残留，避免以后再有代码误用它。
  *
- * 失败不阻断：删不掉最多是保留原有风险，而阻断会让用户改不了邮箱。
+ * 失败不阻断：删不掉最多是保留一份残留，而阻断会让用户改不了邮箱。
  */
 export async function cfDeleteDestination(env: Env, email: string): Promise<boolean> {
   const list = await cfListDestinations(env)

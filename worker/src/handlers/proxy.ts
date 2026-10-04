@@ -22,10 +22,11 @@
  * 所有接口先过 requireFeatureUser(env, request, "proxy")。
  */
 import { ApiError, json } from "../http"
+import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { mapLimit } from "../async-utils"
 import { assertPublicHttpUrl } from "../url-guard"
-import { requireUser, requireFeatureUser, type UserRow } from "../auth"
+import { requireFeatureUser, type UserRow } from "../auth"
 import { audit, getSettings } from "../settings"
 import { guardRateLimit, hitRateLimit } from "../ratelimit"
 import {
@@ -1802,12 +1803,9 @@ export async function revealProxySubscriptionUrl(
 
 // ---- 管理端 ----
 
-async function requireAdminUser(env: Env, request: Request): Promise<UserRow> {
-  const user = await requireUser(env, request)
-  if (user.role !== "admin" && user.role !== "root") {
-    throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
-  }
-  return user
+async function requireAdminUser(env: Env, request: Request, permKey: string): Promise<UserRow> {
+  const admin = await requireAdminScope(env, request, permKey)
+  return admin as unknown as UserRow
 }
 
 function toAdminSubscription(row: ProxySubscriptionRow) {
@@ -1826,7 +1824,7 @@ export async function listProxySubscriptions(
   env: Env,
   request: Request
 ): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "proxy.subscriptions")
   const rows = await env.DB.prepare(
     "SELECT * FROM proxy_subscriptions ORDER BY sort_order ASC, created_at ASC"
   ).all<ProxySubscriptionRow>()
@@ -1841,7 +1839,7 @@ export async function upsertProxySubscription(
   env: Env,
   request: Request
 ): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "proxy.subscriptions")
   const body = (await request.json()) as {
     id?: string
     name?: string
@@ -1948,7 +1946,7 @@ export async function deleteProxySubscription(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "proxy.subscriptions")
   const existing = await env.DB.prepare(
     "SELECT id FROM proxy_subscriptions WHERE id = ?"
   )

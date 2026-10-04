@@ -4,6 +4,7 @@
  * 流程与 frp_applications 一致：申请 → 管理员审核（带邮件通知）→ 批准即解锁权限。
  */
 import { ApiError, json, assertContentLengthWithin } from "../http"
+import { requireAdmin, assertAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { requireUser, isPrivileged, type UserRow } from "../auth"
 import {
@@ -12,6 +13,7 @@ import {
   parseOpenFeatures,
   featurePermissionSql,
   featurePermittedGuard,
+  notWhitelistedGuard,
   type Feature,
 } from "../permissions"
 import { sendMail, renderMail } from "../mailer"
@@ -415,12 +417,10 @@ function toPublicDonation(
   }
 }
 
-async function requireAdminUser(env: Env, request: Request): Promise<UserRow> {
-  const user = await requireUser(env, request)
-  if (user.role !== "admin" && user.role !== "root") {
-    throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
-  }
-  return user
+async function requireAdminUser(env: Env, request: Request, permKey?: string): Promise<UserRow> {
+  const admin = await requireAdmin(env, request)
+  if (permKey) await assertAdminScope(env, admin, permKey)
+  return admin as unknown as UserRow
 }
 
 /** 带用户名的捐献行（管理端 / 审核路径都要用） */
@@ -1434,10 +1434,7 @@ export async function listAllDonations(
   env: Env,
   request: Request
 ): Promise<Response> {
-  const admin = await requireUser(env, request)
-  if (admin.role !== "admin" && admin.role !== "root") {
-    throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
-  }
+  await requireAdminUser(env, request, "donations.ai")
 
   const rows = await env.DB.prepare(
     `SELECT d.*, u.username FROM donations d
@@ -1901,6 +1898,13 @@ export async function reviewDonation(env: Env, request: Request): Promise<Respon
 
   if (!app) throw new ApiError(404, "申请不存在", "NOT_FOUND")
 
+  // 细粒度：审核不同类型要对应节点（站长 2026-10-04 要求分 ai / 代理 / 内网穿透）
+  const reviewPerm =
+    app.type === "proxy" ? "donations.proxy"
+    : app.type === "frp" ? "donations.frp"
+    : "donations.ai"
+  await assertAdminScope(env, admin, reviewPerm)
+
   const approve = body.action === "approve"
   // 被**系统自动拒绝**的单据允许复核放行（这正是「人工复核」的用途）；
   // 被**系统撤销**（资源失效）的同样允许 —— 管理员可能在核对了新情况后
@@ -2105,7 +2109,7 @@ export async function provisionDonation(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "donations.ai")
   const app = await env.DB.prepare(
     `SELECT d.*, u.username, u.permissions FROM donations d
        JOIN users u ON u.id = d.user_id
@@ -2180,7 +2184,7 @@ export async function retryDonationModelsNow(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "donations.ai")
   const app = await env.DB.prepare("SELECT id, type FROM donations WHERE id = ?")
     .bind(id)
     .first<{ id: string; type: string }>()
@@ -2218,7 +2222,7 @@ export async function refetchDonationModelsNow(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "donations.ai")
   const r = await refetchDonationModels(env, id)
   return json({
     ok: r.ok,
@@ -2307,7 +2311,7 @@ async function testExistingChannel(
  * （额度回退涉及多表、易算错，且多给不致命；如需严格回退另行处理）。
  */
 export async function revokeDonation(env: Env, request: Request, id: string): Promise<Response> {
-  const admin = await requireAdminUser(env, request)
+  const admin = await requireAdminUser(env, request, "donations.ai")
   const app = await env.DB.prepare(
     `SELECT d.*, u.username, u.permissions FROM donations d JOIN users u ON u.id = d.user_id WHERE d.id = ?`
   )
@@ -2333,7 +2337,8 @@ export async function revokeDonation(env: Env, request: Request, id: string): Pr
     // 原子写：只把该模块置 false，不整列覆盖（见 permissions.ts 的说明）
     batch.push(
       env.DB.prepare(
-        `UPDATE users SET permissions = ${featurePermissionSql(feature, false)}, updated_at = ? WHERE id = ?`
+        `UPDATE users SET permissions = ${featurePermissionSql(feature, false)}, updated_at = ?
+          WHERE id = ? AND ${notWhitelistedGuard()}`
       ).bind(now, app.user_id)
     )
   }
@@ -2604,6 +2609,18 @@ export async function auditSenseNovaKeys(
   const start = (Math.floor(Date.now() / 3_600_000) % windows) * SENSENOVA_AUDIT_BATCH
   const batch = opts.all ? all : all.slice(start, start + SENSENOVA_AUDIT_BATCH)
 
+  // 白名单用户：即使 Key 失效也不收回权限、不封禁中转站（2026-10-03 站长要求）。
+  // 循环外一次性查成全量 Set，避免每个捐献各查一次白名单表。
+  const whitelist = new Set<string>()
+  try {
+    const wlRows = await env.DB.prepare("SELECT username FROM moderation_whitelist").all<{
+      username: string
+    }>()
+    for (const r of wlRows.results ?? []) whitelist.add(r.username.toLowerCase())
+  } catch {
+    // 表未建好时按「无白名单」处理（与 isUsernameWhitelisted 同口径）
+  }
+
   for (const row of batch) {
     let apiKey = ""
     try {
@@ -2649,6 +2666,9 @@ export async function auditSenseNovaKeys(
     } else if (isPrivileged(row.role)) {
       out.keptWithOtherSource++
       keepReason = "管理员账号不受捐献权限约束"
+    } else if (whitelist.has(row.username.toLowerCase())) {
+      out.keptWithOtherSource++
+      keepReason = "白名单用户，不收回权限"
     } else if (aiIsOpen) {
       out.keptWithOtherSource++
       keepReason = "「AI 中转站」当前设为免权限开放，收回无意义"
@@ -2689,7 +2709,7 @@ export async function auditSenseNovaKeys(
       // 原子写 + 守卫：只有「原本确实开着」才算真收回，且不整列覆盖并发写入
       const res = await env.DB.prepare(
         `UPDATE users SET permissions = ${featurePermissionSql("ai", false)}, updated_at = ?
-          WHERE id = ? AND ${featurePermittedGuard("ai")}`
+          WHERE id = ? AND ${featurePermittedGuard("ai")} AND ${notWhitelistedGuard()}`
       )
         .bind(now, row.user_id)
         .run()
@@ -2779,7 +2799,7 @@ export async function adminAuditSenseNovaKeys(
   env: Env,
   request: Request
 ): Promise<Response> {
-  const admin = await requireAdminUser(env, request)
+  const admin = await requireAdminUser(env, request, "donations.ai")
   let apply = false
   try {
     const body = (await request.json()) as { apply?: unknown } | null

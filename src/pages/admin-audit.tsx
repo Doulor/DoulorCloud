@@ -32,9 +32,10 @@ import { fmtDateTime } from "@/lib/format"
 import type { AdminAuditData } from "@/types"
 import { useT, tStatic } from "@/i18n"
 
-/** 操作者徽章：管理员 / 站长 */
+/** 操作者徽章：管理员 / 超级管理员 / 站长 */
 function actorRoleBadge(role: string) {
   if (role === "root") return tStatic("au.role.root")
+  if (role === "superadmin") return tStatic("au.role.superadmin")
   if (role === "admin") return tStatic("au.role.admin")
   return ""
 }

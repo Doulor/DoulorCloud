@@ -47,6 +47,7 @@ import type {
   RiskAccount,
   ModerationLists,
   ModerationConditionOp,
+  ModerationConditionMetric,
 } from "@/types"
 
 const fmt = (iso: string | null | undefined) =>
@@ -104,6 +105,7 @@ export function ModerationAdminPanel() {
   const [wlInput, setWlInput] = React.useState("")
   const [blInput, setBlInput] = React.useState("")
   const [blReason, setBlReason] = React.useState("")
+  const [condMetric, setCondMetric] = React.useState<ModerationConditionMetric>("achievement_points")
   const [condOp, setCondOp] = React.useState<ModerationConditionOp>("gt")
   const [condValue, setCondValue] = React.useState("20")
 
@@ -144,7 +146,7 @@ export function ModerationAdminPanel() {
     runList(() =>
       adminModerationApi.conditionUpdate({
         action: "create",
-        metric: "achievement_points",
+        metric: condMetric,
         op: condOp,
         value: Math.trunc(Number(condValue) || 0),
       })
@@ -538,7 +540,9 @@ export function ModerationAdminPanel() {
                 <div key={g.id} className="rounded-lg border bg-card p-4">
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <p className="text-sm font-medium">
-                      {t("mod.wl.groupTitle", { op: t(`mod.op.${g.op}`), n: g.value })}
+                      {g.metric === "custom_title"
+                        ? t("mod.wl.groupTitleCustom")
+                        : t("mod.wl.groupTitle", { op: t(`mod.op.${g.op}`), n: g.value })}
                     </p>
                     <div className="flex items-center gap-2">
                       <Switch
@@ -578,30 +582,47 @@ export function ModerationAdminPanel() {
               <div className="rounded-lg border border-dashed p-4">
                 <p className="mb-2 text-sm font-medium">{t("mod.wl.newCond")}</p>
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-sm text-muted-foreground">
-                    {t("mod.wl.metric.achievement")}
-                  </span>
                   <Select
-                    value={condOp}
-                    onValueChange={(v) => setCondOp(v as ModerationConditionOp)}
+                    value={condMetric}
+                    onValueChange={(v) => setCondMetric(v as ModerationConditionMetric)}
                   >
-                    <SelectTrigger className="h-8 w-24 text-xs">
+                    <SelectTrigger className="h-8 w-36 text-xs">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="gt">{t("mod.op.gt")}</SelectItem>
-                      <SelectItem value="gte">{t("mod.op.gte")}</SelectItem>
-                      <SelectItem value="lt">{t("mod.op.lt")}</SelectItem>
-                      <SelectItem value="lte">{t("mod.op.lte")}</SelectItem>
+                      <SelectItem value="achievement_points">
+                        {t("mod.wl.metric.achievement")}
+                      </SelectItem>
+                      <SelectItem value="custom_title">
+                        {t("mod.wl.metric.customTitle")}
+                      </SelectItem>
                     </SelectContent>
                   </Select>
-                  <Input
-                    type="number"
-                    min={0}
-                    className="h-8 w-20"
-                    value={condValue}
-                    onChange={(e) => setCondValue(e.target.value)}
-                  />
+                  {condMetric === "achievement_points" && (
+                    <>
+                      <Select
+                        value={condOp}
+                        onValueChange={(v) => setCondOp(v as ModerationConditionOp)}
+                      >
+                        <SelectTrigger className="h-8 w-24 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="gt">{t("mod.op.gt")}</SelectItem>
+                          <SelectItem value="gte">{t("mod.op.gte")}</SelectItem>
+                          <SelectItem value="lt">{t("mod.op.lt")}</SelectItem>
+                          <SelectItem value="lte">{t("mod.op.lte")}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        type="number"
+                        min={0}
+                        className="h-8 w-20"
+                        value={condValue}
+                        onChange={(e) => setCondValue(e.target.value)}
+                      />
+                    </>
+                  )}
                   <Button size="sm" onClick={() => void addCondition()} disabled={listBusy}>
                     <Plus className="mr-1 h-3.5 w-3.5" />
                     {t("mod.wl.addCond")}

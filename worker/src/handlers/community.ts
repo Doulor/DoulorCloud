@@ -1,5 +1,5 @@
 import { ApiError, json, SAFE_JSON_HEADERS, readBodyCapped, assertContentLengthWithin } from "../http"
-import { requireUser, isPrivileged, type UserRow } from "../auth"
+import { requireUser, isPrivileged, type UserRow, isAnyAdmin } from "../auth"
 import { decodeCursor, encodeCursor, groupComments, canPostAgain, type RawComment } from "../community-logic"
 import { uuid } from "../crypto"
 import { getSettingNumber, getSettingBool, audit } from "../settings"
@@ -107,7 +107,7 @@ function toPostDto(r: PostRow, viewerLiked: boolean, isMine: boolean) {
     author: {
       username: r.username,
       nickname: r.nickname ?? null,
-      isAdmin: r.author_role === "admin" || r.author_role === "root",
+      isAdmin: isPrivileged(r.author_role),
       isRoot: r.author_role === "root",
       hasAvatar: Boolean(r.avatar_key),
       customTitle: titleOf(r),
@@ -147,7 +147,7 @@ async function assertCommunityEnabled(
   env: Env,
   viewer: { role?: string } | null
 ): Promise<void> {
-  if (viewer?.role === "admin" || viewer?.role === "root") return
+  if (isPrivileged(viewer?.role)) return
   if (!(await getSettingBool(env, "community_enabled"))) {
     throw new ApiError(403, "社区广场已关闭", "FEATURE_DISABLED")
   }
@@ -426,7 +426,7 @@ export async function listComments(env: Env, request: Request, id: string): Prom
     author: {
       username: c.username as string,
       nickname: (c.nickname as string | null) ?? null,
-      isAdmin: c.author_role === "admin" || c.author_role === "root",
+      isAdmin: isPrivileged(c.author_role as string | null | undefined),
       isRoot: c.author_role === "root",
       hasAvatar: Boolean(c.avatar_key),
       customTitle: titleOf(c as { title_name?: string | null }),
@@ -562,7 +562,7 @@ export async function updatePost(env: Env, request: Request, id: string): Promis
     "SELECT user_id, body FROM posts WHERE id=? AND deleted_at IS NULL"
   ).bind(id).first<{ user_id: string; body: string }>()
   if (!row) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
-  if (row.user_id !== user.id && user.role !== "admin" && user.role !== "root") {
+  if (row.user_id !== user.id && !isAnyAdmin(user.role)) {
     throw new ApiError(403, "无权编辑该帖子", "FORBIDDEN")
   }
 
@@ -599,7 +599,7 @@ export async function listPostEdits(env: Env, request: Request, id: string): Pro
   const row = await env.DB.prepare("SELECT user_id FROM posts WHERE id=?").bind(id)
     .first<{ user_id: string }>()
   if (!row) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
-  if (row.user_id !== user.id && user.role !== "admin" && user.role !== "root") {
+  if (row.user_id !== user.id && !isAnyAdmin(user.role)) {
     throw new ApiError(403, "无权查看编辑历史", "FORBIDDEN")
   }
   const edits = await env.DB.prepare(
@@ -892,7 +892,7 @@ export async function deletePost(env: Env, request: Request, id: string): Promis
   const user = await requireCommunityUser(env, request)
   const row = await env.DB.prepare("SELECT user_id FROM posts WHERE id=?").bind(id).first<{ user_id: string }>()
   if (!row) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
-  if (row.user_id !== user.id && user.role !== "admin" && user.role !== "root") throw new ApiError(403, "无权删除", "FORBIDDEN")
+  if (row.user_id !== user.id && !isAnyAdmin(user.role)) throw new ApiError(403, "无权删除", "FORBIDDEN")
   await env.DB.prepare("UPDATE posts SET deleted_at=? WHERE id=?").bind(new Date().toISOString(), id).run()
   return json({ ok: true })
 }

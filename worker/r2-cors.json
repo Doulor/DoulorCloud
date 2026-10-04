@@ -5,9 +5,7 @@
         "origins": [
           "https://cloud.doulor.cn",
           "https://mail.doulor.cn",
-          "https://doulor.cn",
-          "http://localhost:5173",
-          "http://127.0.0.1:5173"
+          "https://doulor.cn"
         ],
         "methods": ["GET", "PUT", "HEAD"],
         "headers": ["*"]

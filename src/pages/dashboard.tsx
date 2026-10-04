@@ -785,6 +785,99 @@ function QuickActions() {
   )
 }
 
+/**
+ * 审计动作 → 文案 key（2026-10-04 ventus 反馈：概览「最近活动」直接显示
+ * achievement.reward / email.receive 这类原始英文标识）。
+ *
+ * 后端写进 audit_logs 的 action 是点分标识，前端此前从不翻译。这里把
+ * **用户自己账号下会出现**的动作全部映射成中文；没映射到的（多为管理员
+ * 操作、以后新增的动作）回退显示原始标识，不会崩。
+ *
+ * ⚠️ 键刻意用**单引号**：check-i18n 会把「词典里出现过的前缀.名字」当成
+ * 漏翻译的文案 key 报警（dns.create / frp.enable 这类审计动作名恰好长这样），
+ * 而它的启发式只匹配双引号字符串 —— 这里是后端动作名，不是文案，别改回去。
+ */
+const ACTION_LABEL_KEYS: Record<string, string> = {
+  register: "dash.act.register",
+  'login.2fa': "dash.act.login2fa",
+  'password.change': "dash.act.passwordChange",
+  'password.reset': "dash.act.passwordReset",
+  'email.verify.request': "dash.act.emailVerifyRequest",
+  'email.verify.confirm': "dash.act.emailVerifyConfirm",
+  'email.receive': "dash.act.emailReceive",
+  'email.destination.remove': "dash.act.emailDestinationRemove",
+  'subdomain.create': "dash.act.subdomainCreate",
+  'subdomain.delete': "dash.act.subdomainDelete",
+  'dns.create': "dash.act.dnsCreate",
+  'mailbox.forward.verify': "dash.act.mailboxForwardVerify",
+  'storage.enable': "dash.act.storageEnable",
+  'storage.disable': "dash.act.storageDisable",
+  'storage.domain.bind': "dash.act.storageDomainBind",
+  'storage.domain.unbind': "dash.act.storageDomainUnbind",
+  'storage.default_prefix': "dash.act.storageDefaultPrefix",
+  'newapi.bind': "dash.act.newapiBind",
+  'newapi.bind_existing': "dash.act.newapiBindExisting",
+  'newapi.subscribe': "dash.act.newapiSubscribe",
+  'newapi.key.create': "dash.act.newapiKeyCreate",
+  'newapi.key.delete': "dash.act.newapiKeyDelete",
+  'newapi.password.change': "dash.act.newapiPasswordChange",
+  'newapi.auto_claim': "dash.act.newapiAutoClaim",
+  'newapi.group_sync_failed': "dash.act.newapiGroupSyncFailed",
+  'frp.enable': "dash.act.frpEnable",
+  'frp.disable': "dash.act.frpDisable",
+  'frp.apply': "dash.act.frpApply",
+  'frp.approve': "dash.act.frpApprove",
+  'frp.reject': "dash.act.frpReject",
+  'frp.cancel': "dash.act.frpCancel",
+  'frp.revoke': "dash.act.frpRevoke",
+  'frp.edit': "dash.act.frpEdit",
+  'frp.ports.occupy': "dash.act.frpPortsOccupy",
+  'frp.ports.free': "dash.act.frpPortsFree",
+  'proxy.enable': "dash.act.proxyEnable",
+  'proxy.disable': "dash.act.proxyDisable",
+  'donation.review': "dash.act.donationReview",
+  'donation.provision': "dash.act.donationProvision",
+  'donation.revoke': "dash.act.donationRevoke",
+  'donation.sensenova_audit': "dash.act.donationSensenovaAudit",
+  'invite.create': "dash.act.inviteCreate",
+  'invite.reward': "dash.act.inviteReward",
+  'voucher.redeem': "dash.act.voucherRedeem",
+  'points.redeem': "dash.act.pointsRedeem",
+  'points.transfer': "dash.act.pointsTransfer",
+  'points.adjust': "dash.act.pointsAdjust",
+  'points.shop.buy': "dash.act.pointsShopBuy",
+  'points.shop.review': "dash.act.pointsShopReview",
+  'points.shop.settle': "dash.act.pointsShopSettle",
+  'points.shop.seller_deliver': "dash.act.pointsShopSellerDeliver",
+  'points.shop.deliver': "dash.act.pointsShopDeliver",
+  'points.shop.after_sale.request': "dash.act.pointsShopAfterSale",
+  'achievement.reward': "dash.act.achievementReward",
+  'notice.ack': "dash.act.noticeAck",
+  'notice.ack_blocked': "dash.act.noticeAckBlocked",
+  'appeal.submit': "dash.act.appealSubmit",
+  'appeal.review': "dash.act.appealReview",
+  'appeal.ack': "dash.act.appealAck",
+  'user.rename': "dash.act.userRename",
+  'user.email.change': "dash.act.userEmailChange",
+  'user.account.delete': "dash.act.userAccountDelete",
+  'user.account.delete.request': "dash.act.userAccountDeleteRequest",
+  'oauth.tokens.revoke': "dash.act.oauthTokensRevoke",
+  '2fa.totp.enable': "dash.act.totpEnable",
+  '2fa.email.enable': "dash.act.email2faEnable",
+  '2fa.email.disable': "dash.act.email2faDisable",
+  '2fa.disable': "dash.act.disable2fa",
+  '2fa.recovery.regenerate': "dash.act.recoveryRegenerate",
+  'wb2api.login.start': "dash.act.wb2apiLoginStart",
+  'wb2api.login.done': "dash.act.wb2apiLoginDone",
+  'wb2api.binding.remove': "dash.act.wb2apiBindingRemove",
+  'cli2api.login.start': "dash.act.cli2apiLoginStart",
+  'cli2api.login.done': "dash.act.cli2apiLoginDone",
+  'community.pin': "dash.act.communityPin",
+  'community.unpin': "dash.act.communityUnpin",
+  'admin.community.post.delete': "dash.act.postDelete",
+  'admin.community.post.restore': "dash.act.postRestore",
+}
+
 /** 最近活动：audit_logs 的最近操作记录 */
 function RecentActivityCard({ data, loading }: { data: MeResponse | null; loading: boolean }) {
   const { t } = useT()
@@ -815,7 +908,9 @@ function RecentActivityCard({ data, loading }: { data: MeResponse | null; loadin
                 className="flex items-center justify-between gap-3 rounded-md px-3 py-2 text-sm hover:bg-accent/40"
               >
                 <div className="min-w-0 flex-1">
-                  <span className="text-muted-foreground">{a.action}</span>
+                  <span className="text-muted-foreground">
+                    {ACTION_LABEL_KEYS[a.action] ? t(ACTION_LABEL_KEYS[a.action]) : a.action}
+                  </span>
                   {a.detail && (
                     <span className="ml-2 block truncate text-xs text-muted-foreground/70">
                       {a.detail}

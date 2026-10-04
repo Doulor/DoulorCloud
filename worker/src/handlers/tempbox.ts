@@ -19,7 +19,7 @@
  */
 import { ApiError, json, readBodyCapped } from "../http"
 import { uuid } from "../crypto"
-import { requireUser, type UserRow } from "../auth"
+import { requireUser, type UserRow, isPrivileged, isAnyAdmin } from "../auth"
 import { guardRateLimit, clientIp } from "../ratelimit"
 import { getObject, headObject, isStorageConfigured, listObjects, presign, deleteObject, deletePrefix, getPlatformBucketId, putObject, supportsPresign } from "../r2"
 import { sanitizeFilename } from "./storage"
@@ -302,7 +302,7 @@ export async function createTempbox(env: Env, request: Request): Promise<Respons
   await guardTempboxUpload(env, request, user, "create")
 
   // 同时存活的批次数上限（见 TEMPBOX_MAX_LIVE_BATCHES 的说明）
-  if (user && user.role !== "admin" && user.role !== "root") {
+  if (user && !isAnyAdmin(user.role)) {
     const usage = await liveUsage(env, user.id)
     if (usage.batches >= TEMPBOX_MAX_LIVE_BATCHES) {
       throw new ApiError(
@@ -364,7 +364,7 @@ export async function createTempboxUploadUrl(
   await assertBatchAlive(env, code)
 
   // 管理员/站长不受分享箱配额限制
-  const isAdmin = uploader?.role === "admin" || uploader?.role === "root"
+  const isAdmin = isPrivileged(uploader?.role)
   const maxFileBytes = isAdmin
     ? ADMIN_UNLIMITED
     : await getSettingNumber(env, "tempbox_max_file_bytes")
@@ -420,7 +420,7 @@ export async function proxyTempboxUpload(
 
   // 管理员/站长不受大小限制
   const maxFileBytes =
-    uploader?.role === "admin" || uploader?.role === "root"
+    isPrivileged(uploader?.role)
       ? ADMIN_UNLIMITED
       : await getSettingNumber(env, "tempbox_max_file_bytes")
   const contentType = request.headers.get("Content-Type") ?? "application/octet-stream"
@@ -439,7 +439,7 @@ export async function proxyTempboxUpload(
   }
 
   // 落盘前先判存活总字节（token 模式下字节已在内存里，能提前拦掉）
-  if (uploader && uploader.role !== "admin" && uploader.role !== "root") {
+  if (uploader && !isAnyAdmin(uploader.role)) {
     const usage = await liveUsage(env, uploader.id)
     if (usage.bytes + buf.byteLength > TEMPBOX_MAX_LIVE_BYTES) {
       throw new ApiError(
@@ -474,7 +474,7 @@ export async function commitTempboxUpload(
   const head = await headObject(env, key, platformBucket)
   if (!head) throw new ApiError(404, "上传未完成或文件不存在", "NOT_FOUND")
 
-  const isAdmin = uploader?.role === "admin" || uploader?.role === "root"
+  const isAdmin = isPrivileged(uploader?.role)
   const maxFileBytes = isAdmin
     ? ADMIN_UNLIMITED
     : await getSettingNumber(env, "tempbox_max_file_bytes")
@@ -702,7 +702,7 @@ export async function deleteTempbox(
   const batch = await loadBatch(env, code)
   if (!batch) throw new ApiError(404, "接收码不存在或已失效", "NOT_FOUND")
 
-  if (user.role !== "admin" && user.role !== "root" && (!batch.creator_user_id || batch.creator_user_id !== user.id)) {
+  if (!isAnyAdmin(user.role) && (!batch.creator_user_id || batch.creator_user_id !== user.id)) {
     throw new ApiError(403, "只能删除自己创建的临时分享", "FORBIDDEN")
   }
 
@@ -726,8 +726,7 @@ export async function deleteTempboxFile(
   if (!batch) throw new ApiError(404, TEMPBOX_NOT_FOUND, "NOT_FOUND")
 
   if (
-    user.role !== "admin" &&
-    user.role !== "root" &&
+    !isAnyAdmin(user.role) &&
     (!batch.creator_user_id || batch.creator_user_id !== user.id)
   ) {
     throw new ApiError(403, "只能删除自己创建的临时分享", "FORBIDDEN")

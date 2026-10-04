@@ -59,19 +59,21 @@ beforeEach(async () => {
 describe("titleFor", () => {
   it("按成就点分档，边界含下界", () => {
     expect(titleFor(0).name).toBe("初来乍到")
-    expect(titleFor(2).name).toBe("初来乍到")
-    expect(titleFor(3).name).toBe("新星")
-    expect(titleFor(7).name).toBe("新星")
-    expect(titleFor(8).name).toBe("常客")
-    expect(titleFor(36).name).toBe("传奇")
-    expect(titleFor(999).name).toBe("传奇")
+    expect(titleFor(4).name).toBe("初来乍到")
+    expect(titleFor(5).name).toBe("新星")
+    expect(titleFor(11).name).toBe("新星")
+    expect(titleFor(12).name).toBe("常客")
+    expect(titleFor(36).name).toBe("名人")
+    expect(titleFor(999).name).toBe("萌新")
   })
 
   it("给出下一档目标（最高档为 null）", () => {
-    expect(titleFor(0).next).toBe(3)
+    expect(titleFor(0).next).toBe(5)
     expect(titleFor(0).nextName).toBe("新星")
-    expect(titleFor(36).next).toBeNull()
-    expect(titleFor(36).nextName).toBeNull()
+    // 最高档（萌新，122 点）没有下一档
+    expect(titleFor(122).next).toBeNull()
+    expect(titleFor(122).nextName).toBeNull()
+    expect(titleFor(999).next).toBeNull()
   })
 })
 
@@ -109,6 +111,77 @@ describe("computeAchievements", () => {
     )
     expect(snap.summary.points).toBeGreaterThan(0)
     expect(snap.summary.maxPoints).toBeGreaterThan(snap.summary.unlocked)
+  })
+
+  it("2026-10-04 新增的成就在列表里且可被计数驱动", async () => {
+    const u = await makeUser()
+    const now = new Date().toISOString()
+    // 「阅信有道」改读 user_stats.mail_read_count（累计已读，删邮件不清减）
+    await env.DB.prepare(
+      `INSERT INTO user_stats (user_id, visit_count, mail_read_count) VALUES (?, 0, 2)`
+    )
+      .bind(u.id)
+      .run()
+    // 一条带图帖子（验证 json_array_length 判断）
+    await env.DB.prepare(
+      `INSERT INTO posts (id, user_id, channel, body, images, created_at)
+       VALUES (?, ?, 'general', '带图', '["community/x/1.webp"]', ?)`
+    )
+      .bind(`p_img_${u.id}`, u.id, now)
+      .run()
+    // 一张名片，3 个已启用模块 + 1 个停用（验证 json_each 只数 enabled=1）
+    await env.DB.prepare(
+      `INSERT INTO profiles (user_id, slug, published, modules, created_at, updated_at)
+       VALUES (?, ?, 1, ?, ?, ?)`
+    )
+      .bind(
+        u.id,
+        `u${u.id.slice(0, 8)}`,
+        JSON.stringify([
+          { id: "identity", enabled: true },
+          { id: "links", enabled: true },
+          { id: "stats", enabled: true },
+          { id: "music", enabled: false },
+        ]),
+        now,
+        now
+      )
+      .run()
+    // 一条已读通知 + 一条未读（验证只数 read=1）
+    await env.DB.prepare(
+      `INSERT INTO notifications (id, user_id, type, read, created_at)
+       VALUES (?, ?, 'post_comment', ?, ?)`
+    )
+      .bind(`ntf_${u.id}`, u.id, 1, now)
+      .run()
+
+    const snap = computeAchievements(await loadUserCounts(env, u.id))
+    const byId = new Map(snap.achievements.map((a) => [a.id, a]))
+    // 新成就必须存在于列表（防止只在 SQL 里加列、忘了定义成就）
+    for (const id of [
+      "mail_read",
+      "dns_types",
+      "post_edits",
+      "post_images",
+      "comment_replies",
+      "notification_read",
+      "direct_messages",
+      "event_claims",
+      "oauth_grants",
+      "public_api",
+      "profile_modules",
+      "feature_count",
+      "points_earned",
+      "checkin_streak",
+    ]) {
+      expect(byId.has(id), `缺少成就 ${id}`).toBe(true)
+    }
+    expect(byId.get("mail_read")?.value).toBe(2) // 累计已读（读 user_stats.mail_read_count）
+    expect(byId.get("post_images")?.value).toBe(1)
+    expect(byId.get("notification_read")?.value).toBe(1) // 只算已读
+    expect(byId.get("profile_modules")?.value).toBe(3) // 只算 enabled=1
+    // 开通了名片一项 → feature_count 至少 1
+    expect(byId.get("feature_count")?.value).toBeGreaterThanOrEqual(1)
   })
 
   it("分级成就按阈值算等级，不越界", async () => {

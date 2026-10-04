@@ -193,17 +193,25 @@ export async function saveSticker(env: Env, request: Request): Promise<Response>
   if (!id) throw new ApiError(400, "缺少表情包 id", "INVALID_INPUT")
 
   const src = await env.DB.prepare(
-    "SELECT r2_key, content_type, bytes FROM user_stickers WHERE id = ?"
+    "SELECT r2_key, content_type, bytes, source_id FROM user_stickers WHERE id = ?"
   )
     .bind(id)
-    .first<{ r2_key: string; content_type: string; bytes: number }>()
+    .first<{ r2_key: string; content_type: string; bytes: number; source_id: string | null }>()
   if (!src) throw new ApiError(404, "表情包不存在", "NOT_FOUND")
 
-  // 幂等：自己已经存过这个来源（source_id 相同）就直接返回已有的，不重复写 R2
+  // 幂等：自己已经存过这个来源（source_id 相同）就直接返回已有的，不重复写 R2。
+  //
+  // ⚠️ 2026-10-04 用户 onevergiveupa 反馈：同一张表情包从**不同人**那里保存会
+  // 存出两份 —— 因为「别人存来的副本」是一个新行、新 id，source_id 只指向它的
+  // 直接来源，而那条来源自己又指向同一个原作者。所以去重要同时比对两级：
+  //   a) 我存过这张的直接来源（source_id = id）；
+  //   b) 我存过「这张的来源」—— 即我此前存过同一个原作者的那张（source_id = src.source_id）。
+  // 两级都命中不了才真正复制，链式转发（A 的图被 B 存、B 的又被 C 存）也随之收敛。
   const dup = await env.DB.prepare(
-    "SELECT id, content_type, bytes, created_at FROM user_stickers WHERE user_id = ? AND source_id = ? LIMIT 1"
+    `SELECT id, content_type, bytes, created_at FROM user_stickers
+      WHERE user_id = ? AND (source_id = ? ${src.source_id ? "OR source_id = ?" : ""}) LIMIT 1`
   )
-    .bind(user.id, id)
+    .bind(user.id, id, ...(src.source_id ? [src.source_id] : []))
     .first<StickerRow>()
   if (dup) {
     return json({ sticker: toDto(dup), alreadySaved: true })

@@ -10,7 +10,7 @@
  *   所以真正可回退的操作需要先让写入点记录结构化的变更前后值，那是另一个工程。
  */
 import { json } from "../http"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { likeStartsWith } from "../sql-like"
 import type { Env } from "../env"
 
@@ -32,7 +32,7 @@ const MGMT_ACTION_SQL =
  * action：按动作**前缀**筛选（如 `donation.` 匹配 donation.review / donation.provision）。
  */
 export async function listAudit(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "audit")
   const url = new URL(request.url)
   const scope = url.searchParams.get("scope") === "all" ? "all" : "admins"
   const mgmt = url.searchParams.get("mgmt") === "1"

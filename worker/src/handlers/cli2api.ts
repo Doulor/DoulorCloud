@@ -15,9 +15,15 @@
  * 管理端留人工覆盖开关。
  */
 import { ApiError, json } from "../http"
+import { requireAdminScope } from "./admin"
 import { generateToken, hashToken, uuid } from "../crypto"
 import { requireUser, type UserRow } from "../auth"
-import { parsePermissions, featurePermissionSql } from "../permissions"
+import {
+  parsePermissions,
+  featurePermissionSql,
+  featurePermittedGuard,
+  notWhitelistedGuard,
+} from "../permissions"
 import { audit, getSetting, getSettingBool, getSettingNumber } from "../settings"
 import { clientIp, guardRateLimit } from "../ratelimit"
 import { donationRewardLabel, grantDonationReward, isDonationRewardKind } from "../points"
@@ -69,12 +75,9 @@ interface SessionRow {
   expires_at: string
 }
 
-async function requireAdminUser(env: Env, request: Request): Promise<UserRow> {
-  const user = await requireUser(env, request)
-  if (user.role !== "admin" && user.role !== "root") {
-    throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
-  }
-  return user
+async function requireAdminUser(env: Env, request: Request, permKey: string): Promise<UserRow> {
+  const admin = await requireAdminScope(env, request, permKey)
+  return admin as unknown as UserRow
 }
 
 /** 读取通道开关、限额、以及要绑的上游与区域（都在管理面板可改） */
@@ -510,7 +513,7 @@ async function completeBinding(
 
 /** GET /api/admin/cli2api/config —— 通道配置（含掩码后的凭据信息） */
 export async function adminGetConfig(env: Env, request: Request): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "wb2api.config")
   const { enabled, limit, provider, region } = await channelConfig(env)
   const cred = await getCli2ApiCredentialInfo(env)
   const baseUrl = (await getSetting(env, "cli2api_base_url")).trim()
@@ -527,7 +530,7 @@ export async function adminGetConfig(env: Env, request: Request): Promise<Respon
 
 /** PUT /api/admin/cli2api/config —— 保存 console key（校验通过才落库） */
 export async function adminSaveConfig(env: Env, request: Request): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "wb2api.config")
   const body = (await request.json().catch(() => ({}))) as { consoleKey?: unknown }
   const key = String(body.consoleKey ?? "").trim()
   if (!key) throw new ApiError(400, "请填写 console key", "INVALID_INPUT")
@@ -539,7 +542,7 @@ export async function adminSaveConfig(env: Env, request: Request): Promise<Respo
 
 /** GET /api/admin/cli2api/bindings —— 全部绑定（含已移除） */
 export async function adminListBindings(env: Env, request: Request): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "wb2api.config")
   const rows = await env.DB.prepare(
     `SELECT b.*, u.username FROM cli2api_bindings b
        LEFT JOIN users u ON u.id = b.user_id
@@ -564,7 +567,7 @@ export async function adminRemoveBinding(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdminUser(env, request)
+  const admin = await requireAdminUser(env, request, "wb2api.config")
   const body = (await request.json().catch(() => ({}))) as { revokeAi?: unknown }
 
   const binding = await env.DB.prepare("SELECT * FROM cli2api_bindings WHERE id = ?")
@@ -596,7 +599,7 @@ export async function adminRemoveBinding(
   if (shouldRevoke) {
     const res = await env.DB.prepare(
       `UPDATE users SET permissions = ${featurePermissionSql("ai", false)}, updated_at = ?
-        WHERE id = ? AND COALESCE(json_extract(CASE WHEN json_valid(permissions) THEN permissions ELSE '{}' END, '$.ai'), 1) = 1`
+        WHERE id = ? AND ${featurePermittedGuard("ai")} AND ${notWhitelistedGuard()}`
     )
       .bind(now, binding.user_id)
       .run()
@@ -644,7 +647,7 @@ async function shouldRevokeAi(env: Env, binding: BindingRow): Promise<boolean> {
 
 /** GET /api/admin/cli2api/pool —— 上游池子概览（账号列表） */
 export async function adminGetPool(env: Env, request: Request): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "wb2api.config")
   if (!(await isCli2ApiConfigured(env))) {
     return json({ available: false, reason: "未配置 console key", accounts: [] })
   }

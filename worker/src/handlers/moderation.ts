@@ -9,7 +9,7 @@
  * 他拿不到任何会话。所以这里用「用户名 + 正文」提交，不依赖登录态。
  */
 import { ApiError, json, assertContentLengthWithin } from "../http"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { requireUser, loadPendingReply } from "../auth"
 import { clientIp, guardRateLimit } from "../ratelimit"
 import { audit } from "../settings"
@@ -93,7 +93,7 @@ export async function submitAppeal(env: Env, request: Request): Promise<Response
 
 /** GET /api/admin/appeals —— 申诉列表（待处理在前） */
 export async function listAppeals(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "moderation.appeals")
   const rows = await env.DB.prepare(
     `SELECT a.id, a.user_id, a.username, a.contact, a.content, a.status,
             a.review_note, a.reviewed_by, a.ip, a.created_at, a.reviewed_at,
@@ -148,7 +148,7 @@ export async function reviewAppeal(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "moderation.appeals")
   assertContentLengthWithin(request, MAX_BODY_BYTES, "内容过长")
   const body = (await request.json().catch(() => ({}))) as {
     action?: unknown
@@ -312,7 +312,7 @@ export async function acknowledgeAppealNote(env: Env, request: Request): Promise
 
 /** GET /api/admin/risk-accounts —— 风险账户列表 */
 export async function listRiskAccounts(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "moderation.suspend")
   const rows = await env.DB.prepare(
     `SELECT r.user_id, r.username, r.risk_level, r.score, r.reasons, r.peak_per_min,
             r.requests_7d, r.first_seen_at, r.last_seen_at, r.status,
@@ -359,7 +359,7 @@ export async function updateRiskStatus(
   request: Request,
   userId: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "moderation.suspend")
   assertContentLengthWithin(request, MAX_BODY_BYTES, "内容过长")
   const body = (await request.json().catch(() => ({}))) as { status?: unknown }
   const status = String(body.status ?? "")

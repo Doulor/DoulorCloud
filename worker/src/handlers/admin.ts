@@ -1,6 +1,12 @@
 import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
-import { requireUser } from "../auth"
+import { requireUser, isPrivileged, isAnyAdmin, isRoot } from "../auth"
+import {
+  parseAdminScope,
+  isKnownPermissionKey,
+  isRootOnlyPermission,
+  permissionLabel,
+} from "../admin-permissions"
 import { isUsernameWhitelisted, addIpToBlacklist } from "./moderation-lists"
 import type { Env } from "../env"
 import {
@@ -28,7 +34,7 @@ import {
 import { sendMail, renderMail, parseBrevoKeys } from "../mailer"
 import { fetchWithTimeout } from "../async-utils"
 import { cfListDestinations } from "../cloudflare"
-import { normalizePermissions, parsePermissions, FEATURES } from "../permissions"
+import { normalizePermissions, parsePermissions, FEATURES, type Permissions } from "../permissions"
 import { normalizeEmailDomains } from "../email-domains"
 import { normalizeCheckinMilestones } from "../checkin-config"
 import {
@@ -65,6 +71,10 @@ interface AdminUserRow {
   role: string
   status: string
   permissions: string | null
+  /** 引用的权限组 id（可空 = 未加入任何组） */
+  admin_role_id?: string | null
+  /** 自定义管理白名单（JSON 数组；非空 = 覆盖权限组，前端标记「自定义」） */
+  admin_scope?: string | null
   /** 用户级子域名配额覆盖；NULL = 用全局默认 */
   max_subdomains?: number | null
   /** 展示用昵称（社区/名片），NULL = 未设置 */
@@ -89,9 +99,95 @@ interface AdminUserRow {
 
 export async function requireAdmin(env: Env, request: Request): Promise<AdminUserRow> {
   const admin = (await requireUser(env, request)) as AdminUserRow
-  // root（站长）与 admin 都放行；root 拥有 admin 的全部权限
-  if (admin.role !== "admin" && admin.role !== "root") {
+  // root（站长）与 superadmin（超级管理员）都放行；admin（自定义白名单）也放行，
+  // 但能否做具体某件事由 requireAdminScope 按白名单逐项判断
+  if (!isAnyAdmin(admin.role)) {
     throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
+  }
+  return admin
+}
+
+/**
+ * 白名单解析所需的最小字段（UserRow / AdminUserRow 都满足）。
+ * 让 assertAdminScope / resolveAdminScope 能被各 handler 复用，
+ * 而不必处处持有完整的 AdminUserRow。
+ */
+export type AdminScopeSource = {
+  role: string
+  admin_role_id?: string | null
+  admin_scope?: string | null
+}
+
+/**
+ * 读取管理员的**最终白名单**（admin_scope 优先，否则回落到引用的权限组 scope）。
+ * root / superadmin 不走到这里（调用方先短路）。
+ */
+export async function resolveAdminScope(env: Env, admin: AdminScopeSource): Promise<Set<string>> {
+  const own = parseAdminScope(admin.admin_scope)
+  if (own.size > 0) return own // 单人自定义覆盖（即便仍挂在组里，也以覆盖为准）
+  if (admin.admin_role_id) {
+    const row = await env.DB.prepare("SELECT scope FROM admin_roles WHERE id = ?")
+      .bind(admin.admin_role_id)
+      .first<{ scope: string }>()
+    if (row) return parseAdminScope(row.scope)
+  }
+  return new Set()
+}
+
+/**
+ * 已拿到 admin 对象时，检查其白名单是否含 permKey（不再重复 requireUser）。
+ * 用于「一个接口里做多件危险事」的场景（如 updateUser 里封禁/改权限/切角色）。
+ */
+export async function assertAdminScope(
+  env: Env,
+  admin: AdminScopeSource,
+  permKey: string
+): Promise<void> {
+  if (!isKnownPermissionKey(permKey)) {
+    throw new ApiError(500, `未登记的权限节点 ${permKey}`, "BAD_PERMISSION")
+  }
+  // rootOnly 节点先于 superadmin 放行判断：这类节点只有 root 能过（superadmin 也不行）
+  if (isRootOnlyPermission(permKey)) {
+    if (!isRoot(admin.role)) {
+      throw new ApiError(403, `「${permissionLabel(permKey)}」仅站长可用`, "FORBIDDEN")
+    }
+    return
+  }
+  if (isPrivileged(admin.role)) return
+  const scope = await resolveAdminScope(env, admin)
+  if (!scope.has(permKey)) {
+    throw new ApiError(403, `你没有「${permissionLabel(permKey)}」权限`, "ADMIN_SCOPE_DENIED")
+  }
+}
+
+/**
+ * requireAdmin + 白名单权限节点检查。
+ *
+ * - root / superadmin：直接放行（全权）。
+ * - admin：查最终白名单，含 permKey 才放行，否则 403。
+ * - rootOnly 节点：只有 root 能过（superadmin 也不行）。
+ */
+export async function requireAdminScope(
+  env: Env,
+  request: Request,
+  permKey: string
+): Promise<AdminUserRow> {
+  const admin = await requireAdmin(env, request)
+
+  if (!isKnownPermissionKey(permKey)) {
+    throw new ApiError(500, `未登记的权限节点 ${permKey}`, "BAD_PERMISSION")
+  }
+  // rootOnly 节点先于 superadmin 放行判断：这类节点只有 root 能过（superadmin 也不行）
+  if (isRootOnlyPermission(permKey)) {
+    if (!isRoot(admin.role)) {
+      throw new ApiError(403, `「${permissionLabel(permKey)}」仅站长可用`, "FORBIDDEN")
+    }
+    return admin
+  }
+  if (isPrivileged(admin.role)) return admin
+  const scope = await resolveAdminScope(env, admin)
+  if (!scope.has(permKey)) {
+    throw new ApiError(403, `你没有「${permissionLabel(permKey)}」权限`, "ADMIN_SCOPE_DENIED")
   }
   return admin
 }
@@ -400,7 +496,7 @@ function parseJsonArray(raw: string | null): number[] {
 
 // GET /api/admin/users —— 用户列表
 export async function listUsers(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "users.view")
   const rows = await env.DB.prepare(
     // 列表只展示「各模块是否已开通」与「名片是否已启用」，不再回传子域名/DNS/
     // 邮箱/邮件的计数 —— 那些明细在用户详情里看。四个模块的判定与各 handler
@@ -511,14 +607,14 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
 
 // GET /api/admin/users/:username —— 用户详情（子域名/DNS/邮箱/邮件/会话）
 export async function getUser(env: Env, request: Request, username: string): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "users.view")
   const user = await targetUser(env, username)
   return json(await userDetail(env, user))
 }
 
 // PUT /api/admin/users/:username —— 更新用户状态（封禁/解封/设管理员/昵称等）
 export async function updateUser(env: Env, request: Request, username: string): Promise<Response> {
-  const operator = await requireAdmin(env, request)
+  const operator = await requireAdminScope(env, request, "users.view")
   const body = (await request.json()) as {
     status?: string
     role?: string
@@ -545,33 +641,30 @@ export async function updateUser(env: Env, request: Request, username: string): 
   if (body.status && !["active", "suspended"].includes(body.status)) {
     throw new ApiError(400, "无效的状态", "INVALID_INPUT")
   }
-  if (body.role && !["user", "admin", "root"].includes(body.role)) {
+  if (body.role && !["user", "admin", "superadmin", "root"].includes(body.role)) {
     throw new ApiError(400, "无效的角色", "INVALID_INPUT")
   }
 
   /**
-   * 角色/状态修改的权限边界（2026-09-25 引入 root 角色后收紧）：
-   *
-   * 1. **root（站长）凌驾于一切**：任何非 root 操作者（包括 admin）都不能修改
-   *    root 的任何字段、封禁/解封 root、也不能删 root。用「目标角色是 root」判断，
-   *    不再依赖硬编码用户名 doulor。
-   * 2. **只有 root 能改角色**：把别人设成 admin / 撤销 admin / 设成 root，
-   *    都是 root 的专属动作。普通 admin 无权变更任何人的 role（否则 admin
-   *    可以互提、甚至把自己提成 root）。
-   *
-   * 判断顺序很重要：先看「目标是 root 且操作者不是 root」直接拒绝（最强保护），
-   * 再看「body.role 变化且操作者不是 root」拒绝。
+   * 角色修改的权限边界（2026-10-04 权限系统重构）：
+   * 1. root（站长）凌驾一切：非 root 操作者不能改 root 的任何字段、封禁/解封/删 root。
+   * 2. 只有 root / superadmin 能变更角色；admin 无权改任何人的 role。
+   * 3. superadmin 只能设 user / admin；设 superadmin / root 是 root 专属。
    */
   if (user.role === "root" && operator.role !== "root") {
     throw new ApiError(403, "站长账户不可被修改", "FORBIDDEN")
   }
   const roleChanging = body.role !== undefined && body.role !== user.role
-  if (roleChanging && operator.role !== "root") {
-    throw new ApiError(403, "只有站长可以变更角色", "FORBIDDEN")
-  }
-  // root 不能把另一个 root 降级（理论上只有一个 root，双保险）
-  if (roleChanging && user.role === "root") {
-    throw new ApiError(403, "站长账户的角色不可变更", "FORBIDDEN")
+  if (roleChanging) {
+    if (!isPrivileged(operator.role)) {
+      throw new ApiError(403, "只有站长或超级管理员可以变更角色", "FORBIDDEN")
+    }
+    if (operator.role !== "root" && (body.role === "superadmin" || body.role === "root")) {
+      throw new ApiError(403, "只有站长可以授予超级管理员或站长角色", "FORBIDDEN")
+    }
+    if (user.role === "root") {
+      throw new ApiError(403, "站长账户的角色不可变更", "FORBIDDEN")
+    }
   }
 
   // 权限：只有显式传入时才更新（null 保持原值）
@@ -587,16 +680,46 @@ export async function updateUser(env: Env, request: Request, username: string): 
       ? (body.status as "active" | "suspended")
       : null
 
+  // 字段级权限（白名单逐项）：改封禁要 users.suspend、改功能权限要 users.permissions、
+  // 改配额要 users.quota。root/superadmin 直接放行。
+  if (statusChanged !== null) await assertAdminScope(env, operator, "users.suspend")
+  if (perms !== null) await assertAdminScope(env, operator, "users.permissions")
+  if (body.maxSubdomains !== undefined) await assertAdminScope(env, operator, "users.quota")
+
   /**
-   * 白名单用户不会被封禁（站长 2026-10-03 要求）。
-   * 在**真正写库之前**拦住，否则会先封再回滚，NewAPI 那边也会被连带 disable。
+   * 白名单用户不会被封禁（站长 2026-10-03 要求）；
+   * **也不会被收回权限**（2026-10-04 站长要求「白名单本身杜绝以后所有封禁项目」）。
+   *
+   * 两道防线：
+   *   1. 这里——在**真正写库之前**拦住，给出一条人能看懂的错误（否则管理员会
+   *      撞上触发器抛出的原始 SQL 报错）；
+   *   2. `migrations/0114` 的数据库触发器——**兜底**，任何绕过本函数的代码路径
+   *      （以后新写的功能）同样改不动白名单用户。
+   * 所以这里的判断不是「唯一的保护」，而是「体验更好的那一层」。
    */
-  if (statusChanged === "suspended" && (await isUsernameWhitelisted(env, user.username))) {
-    throw new ApiError(
-      400,
-      `「${user.username}」在白名单里，不会被封禁。如需封禁请先从白名单移除。`,
-      "USER_WHITELISTED"
-    )
+  const white = await isUsernameWhitelisted(env, user.username)
+  if (white) {
+    if (statusChanged === "suspended") {
+      throw new ApiError(
+        400,
+        `「${user.username}」在白名单里，不会被封禁。如需封禁请先从白名单移除。`,
+        "USER_WHITELISTED"
+      )
+    }
+    if (perms !== null) {
+      const before = parsePermissions(user.permissions)
+      const after = JSON.parse(perms) as Permissions
+      const revoked = FEATURES.filter((f) => before[f] && !after[f])
+      if (revoked.length > 0) {
+        throw new ApiError(
+          400,
+          `「${user.username}」在监管白名单里，权限不会被收回（本次涉及：${revoked.join(
+            "、"
+          )}）。如需收回请先把该用户移出白名单。`,
+          "USER_WHITELISTED"
+        )
+      }
+    }
   }
 
   // 子域名配额：undefined 保持原值；null 清除覆盖（回落到全局默认）
@@ -626,6 +749,43 @@ export async function updateUser(env: Env, request: Request, username: string): 
       user.id
     )
     .run()
+
+  /**
+   * 权限变更审计（2026-10-04 补）。
+   *
+   * 背景：这里原先**没有**任何 permissions 的审计 —— 站长在成员详情里手动
+   * 勾/取消一个模块，事后完全查不出「是谁、什么时候、把什么改成了什么」。
+   * 排查 `mahesh` 时踩到：该账号开放注册、无捐献无券无绑定，却拿到了四项
+   * 全开权限，只能靠「建过一条同名邀请码、权限串一模一样」反推，日志里
+   * 一个字都没有。权限是这个站最重要的资产之一，必须留痕。
+   *
+   * 只在**真的有差异**时记录：管理员改个昵称、或前端把同一份权限原样回传，
+   * 都不该污染审计流（否则这行日志会被淹没）。对比用归一化后的权限对象，
+   * 这样「原先是 NULL=全开、现在显式写成一样的内容」也不会误报为变更。
+   */
+  if (perms !== null) {
+    const before = parsePermissions(user.permissions)
+    const after = JSON.parse(perms) as Permissions
+    const changed = FEATURES.filter((f) => before[f] !== after[f])
+    if (changed.length > 0) {
+      const describe = (p: Permissions) =>
+        FEATURES.filter((f) => p[f]).join("/") || "（无）"
+      const detail = changed
+        .map((f) => `${f}:${before[f] ? "开" : "关"}→${after[f] ? "开" : "关"}`)
+        .join(", ")
+      await recordAudit(
+        env,
+        // ⚠️ 记在**被改的用户**名下（不是操作人）：用户详情页的「最近活动」
+        //    按 `user_id = 目标用户` 查（见本文件 getUser 的 activity 查询）。
+        //    排查 `mahesh` 时正是从那里入手的 —— 记在管理员名下就永远查不到
+        //    「这个人的权限是谁给的」。操作人写进 detail 里，两边信息都不丢。
+        user.id,
+        "admin.user.permissions",
+        `管理员 ${operator.username} 修改权限：${detail}（操作前 [${describe(before)}]，操作后 [${describe(after)}]）`,
+        request.headers.get("CF-Connecting-IP")
+      )
+    }
+  }
 
   /**
    * 封禁原因 / 封禁时间（2026-10-02）。
@@ -759,7 +919,7 @@ export async function updateUser(env: Env, request: Request, username: string): 
         throw new ApiError(400, "昵称为 2-16 位中文/英文/数字/下划线", "INVALID_NICKNAME")
       }
       const extra = parseReservedNicknames(await getSetting(env, "reserved_nicknames"))
-      if (isReservedNickname(nick, extra, user.role === "admin" || user.role === "root")) {
+      if (isReservedNickname(nick, extra, isPrivileged(user.role))) {
         throw new ApiError(400, "该昵称包含保留词，请换一个", "NICKNAME_RESERVED")
       }
       try {
@@ -797,7 +957,7 @@ export async function updateUser(env: Env, request: Request, username: string): 
 
 // DELETE /api/admin/users/:username —— 删除用户（级联 + 回收外部资源）
 export async function deleteUser(env: Env, request: Request, username: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "users.delete")
   const user = await targetUser(env, username)
   // root（站长）不可被删除（原来靠硬编码 doulor，现改成按 root 角色判断）
   if (user.role === "root") {
@@ -856,7 +1016,7 @@ export async function getUserMessage(
   username: string,
   messageId: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "users.view")
   const user = await targetUser(env, username)
 
   const row = await env.DB.prepare(
@@ -918,7 +1078,7 @@ function toPublicInvite(row: InviteRow) {
 
 // GET /api/admin/invites —— 邀请码列表
 export async function listInvites(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "invites")
   const rows = await env.DB.prepare(
     "SELECT * FROM invite_codes ORDER BY created_at DESC"
   ).all<InviteRow>()
@@ -928,7 +1088,7 @@ export async function listInvites(env: Env, request: Request): Promise<Response>
 
 // POST /api/admin/invites —— 创建邀请码
 export async function createInvite(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "invites")
   const body = (await request.json()) as {
     code?: string
     maxUses?: number
@@ -976,7 +1136,7 @@ export async function createInvite(env: Env, request: Request): Promise<Response
 
 // DELETE /api/admin/invites/:id —— 删除邀请码
 export async function deleteInvite(env: Env, request: Request, id: string): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "invites")
   const existing = await env.DB.prepare("SELECT id FROM invite_codes WHERE id = ?")
     .bind(id)
     .first()
@@ -996,7 +1156,7 @@ export async function deleteInvite(env: Env, request: Request, id: string): Prom
  *   - 「公告群发」：需要先 Onboard 发送域名（付费），否则只能发已验证地址
  */
 export async function testMail(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "mail")
   const body = (await request.json().catch(() => ({}))) as { to?: string }
   const to = (body.to ?? "").trim()
   if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
@@ -1025,7 +1185,7 @@ export async function testMail(env: Env, request: Request): Promise<Response> {
  * 调 /api/user/search（需 admin 权限），返回连通状态与具体错误，便于排查。
  */
 export async function testNewApi(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "newapi.channels")
   if (!(await isNewApiConfigured(env))) {
     return json({ ok: false, configured: false, error: "NewAPI 未配置（缺少 BASE_URL 或管理员令牌）" })
   }
@@ -1055,7 +1215,7 @@ export async function testNewApi(env: Env, request: Request): Promise<Response> 
  * 只回掩码，明文绝不下发。
  */
 export async function getNewApiAdminConfig(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "newapi.channels")
   const info = await getAdminCredentialInfo(env)
 
   // 顺带做一次真实的连通性探测（管理面板打开即知令牌是否还有效，
@@ -1080,7 +1240,7 @@ export async function getNewApiAdminConfig(env: Env, request: Request): Promise<
  * 下拉是辅助功能，拿不到时管理员仍可手动输入模型名。
  */
 export async function listNewApiModels(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "newapi.channels")
   const pricing = await listPricing(env)
   const models = [...new Set(pricing.map((p) => p.model))].sort((a, b) =>
     a.localeCompare(b)
@@ -1097,7 +1257,7 @@ export async function listNewApiModels(env: Env, request: Request): Promise<Resp
  * 那样会把原本可用的环境变量凭据也一起顶掉）。验证失败直接 400 且不落库。
  */
 export async function updateNewApiAdminConfig(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "newapi.channels")
   const body = (await request.json().catch(() => ({}))) as {
     token?: string
     adminUserId?: string
@@ -1154,7 +1314,7 @@ export async function updateNewApiAdminConfig(env: Env, request: Request): Promi
  * 供管理面板与前端判断「哪些邮件功能当前可用」。
  */
 export async function mailStatus(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "mail")
 
   let verified: { email: string; verifiedAt: string | null }[] = []
   let listError: string | null = null
@@ -1239,7 +1399,7 @@ function mailSecretsOf(settings: Record<SettingKey, string>): {
 
 // GET /api/admin/settings —— 读取全部可配置项
 export async function getSettingsHandler(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "settings")
   const settings = await getSettings(env)
 
   // 邮件通道的密钥「只写不读」：GET 不返回明文，前端用是否已配置来判断。
@@ -1302,7 +1462,7 @@ export async function getSettingsHandler(env: Env, request: Request): Promise<Re
 
 // PUT /api/admin/settings —— 更新设置（仅接受白名单内的 key）
 export async function updateSettingsHandler(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "settings")
   const body = (await request.json()) as Record<string, unknown>
 
   const values: Record<string, string> = {}
@@ -1361,6 +1521,24 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
           throw new ApiError(
             400,
             `基础权限模块只支持：${QUOTA_FEATURES.join("、")}`,
+            "INVALID_INPUT"
+          )
+        }
+      }
+      values[key] = parts.join(",")
+      continue
+    }
+
+    // first_donation_voucher_features：首捐奖励券可兑换的模块，空串 = 一个都不给。
+    // 必须和上面两项一样排在 `str === "" continue` 之前，否则「全关掉」永远清不掉。
+    // 取值范围是 FEATURES（含 doulor），与 vouchers.ts 的 redeemVoucher 校验一致。
+    if (key === "first_donation_voucher_features") {
+      const parts = String(raw).split(",").map((s) => s.trim()).filter(Boolean)
+      for (const p of parts) {
+        if (!(FEATURES as readonly string[]).includes(p)) {
+          throw new ApiError(
+            400,
+            `首捐奖励券可兑换模块只支持：${FEATURES.join("、")}`,
             "INVALID_INPUT"
           )
         }
@@ -1481,6 +1659,16 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
       continue
     }
 
+    // temp_mailbox_refresh_daily_limit：临时邮箱每天最多刷新次数，非负整数（0 = 不限）。
+    if (key === "temp_mailbox_refresh_daily_limit") {
+      const n = Number(str)
+      if (!Number.isFinite(n) || n < 0) {
+        throw new ApiError(400, "临时邮箱每天刷新上限需要非负整数", "INVALID_INPUT")
+      }
+      values[key] = String(Math.trunc(n))
+      continue
+    }
+
     // wb2api_max_bindings：每人可绑定的反代账号数，必须 ≥ 1
     // （不能走上面的通用数值分支：0 会让通道彻底不可用，且通用分支允许 0）
     if (key === "wb2api_max_bindings") {
@@ -1565,7 +1753,7 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
 
 // POST /api/admin/storage/recalculate —— 以 R2 实际内容重算所有用户用量
 export async function recalculateStorage(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "r2.quota")
   if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "网盘存储未配置", "R2_NOT_CONFIGURED")
   }
@@ -1603,7 +1791,7 @@ export async function recalculateStorage(env: Env, request: Request): Promise<Re
 
 // POST /api/admin/storage/purge/:username —— 清空某用户网盘文件
 export async function purgeStorage(env: Env, request: Request, username: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "r2.quota")
   const user = await targetUser(env, username)
 
   const deleted = await purgeUserStorage(env, user.id)
@@ -1631,7 +1819,7 @@ export async function updateStorageQuota(
   request: Request,
   username: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "r2.quota")
   const user = await targetUser(env, username)
 
   const body = (await request.json().catch(() => ({}))) as { quotaBytes?: unknown }
@@ -1676,7 +1864,7 @@ export async function updateStorageQuota(
  * 桶被删/停用或用户没有桶归属时，回落全局 `storage_quota_bytes`。
  */
 export async function syncStorageQuotas(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "r2.quota")
 
   const bucketRows = await env.DB.prepare(
     "SELECT id, quota_per_user FROM r2_buckets WHERE kind = 'user' AND enabled = 1"
@@ -1702,7 +1890,7 @@ export async function syncStorageQuotas(env: Env, request: Request): Promise<Res
   let failed = 0
 
   for (const r of rows.results ?? []) {
-    if (r.role === "admin" || r.role === "root") {
+    if (isPrivileged(r.role)) {
       skippedAdmins++
       continue
     }
@@ -1755,7 +1943,7 @@ export async function updateInvite(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "invites")
   const body = (await request.json()) as {
     permissions?: unknown
     maxUses?: number
@@ -1808,13 +1996,13 @@ export async function listReserved(
   env: Env,
   request: Request
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "reserved")
   return json({ reserved: await listReservedSubdomains(env.DB) })
 }
 
 // POST /api/admin/reserved-subdomains —— { name, note? }
 export async function addReserved(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "reserved")
   const body = (await request.json()) as { name?: string; note?: string }
 
   const name = (body.name ?? "").trim().toLowerCase().replace(/\.doulor\.cn$/i, "")
@@ -1854,7 +2042,7 @@ export async function removeReserved(
   request: Request,
   name: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "reserved")
   const target = decodeURIComponent(name).trim().toLowerCase()
 
   const exists = await env.DB.prepare(
@@ -1914,7 +2102,7 @@ export async function listInviteQuotas(
   env: Env,
   request: Request
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "inviteQuotas")
 
   const rows = await env.DB.prepare(
     `SELECT u.id, u.uid, u.username, u.email, u.namespace,
@@ -1984,7 +2172,7 @@ export async function getUserInviteQuota(
   request: Request,
   username: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "inviteQuotas")
   const user = await targetUser(env, username)
 
   const rows = await env.DB.prepare(
@@ -2031,7 +2219,7 @@ export async function updateUserInviteQuota(
   request: Request,
   username: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "inviteQuotas")
   const body = (await request.json().catch(() => ({}))) as {
     inviteBonus?: unknown
     inviteUsed?: unknown
@@ -2114,7 +2302,7 @@ export async function adminDeleteInviteWithRefund(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "invites")
 
   const row = await env.DB.prepare("SELECT * FROM invite_codes WHERE id = ?")
     .bind(id)
@@ -2159,7 +2347,7 @@ export async function adminDeleteInviteWithRefund(
 
 /** GET /api/admin/community/posts?user=&includeDeleted= */
 export async function adminListPosts(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "community.posts")
   const url = new URL(request.url)
   const includeDeleted = url.searchParams.get("includeDeleted") === "1"
   const user = url.searchParams.get("user")
@@ -2176,7 +2364,7 @@ export async function adminListPosts(env: Env, request: Request): Promise<Respon
 
 /** DELETE /api/admin/community/posts/:id —— 管理员软删 */
 export async function adminDeletePost(env: Env, request: Request, id: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "community.posts")
   await env.DB.prepare("UPDATE posts SET deleted_at=? WHERE id=?").bind(new Date().toISOString(), id).run()
   await recordAudit(env, admin.id, "admin.community.post.delete", `删帖 ${id}`, request.headers.get("CF-Connecting-IP"))
   return json({ ok: true })
@@ -2184,7 +2372,7 @@ export async function adminDeletePost(env: Env, request: Request, id: string): P
 
 /** POST /api/admin/community/posts/:id/restore */
 export async function adminRestorePost(env: Env, request: Request, id: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "community.posts")
   await env.DB.prepare("UPDATE posts SET deleted_at=NULL WHERE id=?").bind(id).run()
   await recordAudit(env, admin.id, "admin.community.post.restore", `恢复帖 ${id}`, request.headers.get("CF-Connecting-IP"))
   return json({ ok: true })
@@ -2297,7 +2485,7 @@ async function probeBrevoKey(key: string, index: number): Promise<BrevoKeyQuota>
 
 /** GET /api/admin/mail/brevo-quota —— 每把 Brevo Key 的当日剩余额度 */
 export async function getBrevoQuota(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "mail")
   const keys = parseBrevoKeys(await getSetting(env, "brevo_api_key"))
 
   const quota = await Promise.all(keys.map((k, i) => probeBrevoKey(k, i + 1)))

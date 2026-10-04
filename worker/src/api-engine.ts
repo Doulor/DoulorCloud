@@ -13,6 +13,7 @@
  */
 import { ApiError } from "./http"
 import { loadUserCounts, achievementPointsOf } from "./handlers/achievements"
+import { siteOffsetHours, siteDayString } from "./settings"
 import type { Env } from "./env"
 
 /** 成就点每多少点升一层 */
@@ -116,12 +117,6 @@ export function accountLimitFor(tier: number, tierLimits: number[]): number {
   return tierLimits[Math.min(tier, tierLimits.length - 1)] ?? 0
 }
 
-/** 站点时区的「今天」（YYYY-MM-DD），与签到同口径 */
-export function apiDateString(d: Date = new Date()): string {
-  const shifted = new Date(d.getTime() + 8 * 60 * 60 * 1000)
-  return shifted.toISOString().slice(0, 10)
-}
-
 export interface LimitCheck {
   tier: number
   accountLimit: number
@@ -148,7 +143,7 @@ export async function enforceApiLimit(
   }
 ): Promise<LimitCheck> {
   const { userId, ip, feature, config } = opts
-  const date = apiDateString()
+  const date = siteDayString(new Date(), await siteOffsetHours(env))
   const points = await getUserAchievementPoints(env, userId)
   const tier = tierFor(points)
   const accountLimit = accountLimitFor(tier, config.tierLimits)

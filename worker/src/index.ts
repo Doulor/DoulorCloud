@@ -10,6 +10,7 @@ import * as adminHandlers from "./handlers/admin"
 import * as adminDnsHandlers from "./handlers/admin-dns"
 import * as adminRootDomainHandlers from "./handlers/admin-root-domains"
 import * as adminChannelHandlers from "./handlers/admin-channels"
+import * as adminPermHandlers from "./handlers/admin-perms"
 import * as noticeHandlers from "./handlers/notices"
 import * as storageHandlers from "./handlers/storage"
 import { rootDomainFor } from "./root-domains"
@@ -222,6 +223,12 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   },
   {
     kind: "exact",
+    path: "/settings/2fa/totp/disable",
+    method: "POST",
+    handle: () => twoFactorHandlers.disableTotp(env, request),
+  },
+  {
+    kind: "exact",
     path: "/settings/2fa/email",
     method: "POST",
     handle: () => twoFactorHandlers.setEmailTwoFactor(env, request),
@@ -372,6 +379,61 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "GET",
     handle: () =>
       adminHandlers.listUsers(env, request),
+  },
+
+  // ---- 管理员权限系统：权限树 / 权限组 / 成员管理权限 ----
+  {
+    kind: "exact",
+    path: "/admin/permissions/tree",
+    method: "GET",
+    handle: () => adminPermHandlers.getPermissionTree(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/permission-groups",
+    method: "GET",
+    handle: () => adminPermHandlers.listPermissionGroups(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/permission-groups",
+    method: "POST",
+    handle: () => adminPermHandlers.createPermissionGroup(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/permission-groups\/([^/]+)\/members$/),
+    methods: ["POST"],
+    handle: (m: RegExpMatchArray) =>
+      adminPermHandlers.addGroupMembers(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/permission-groups\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (m: RegExpMatchArray) =>
+      adminPermHandlers.updatePermissionGroup(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/permission-groups\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (m: RegExpMatchArray) =>
+      adminPermHandlers.deletePermissionGroup(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/users\/([^/]+)\/admin-permissions$/),
+    methods: ["GET"],
+    handle: (m: RegExpMatchArray) =>
+      adminPermHandlers.getUserAdminPermissions(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/users\/([^/]+)\/admin-permissions$/),
+    methods: ["PUT"],
+    handle: (m: RegExpMatchArray) =>
+      adminPermHandlers.setUserAdminPermissions(env, request, decodeURIComponent(m[1])),
   },
 
   // ---- 账号监管：封禁申诉 + 风险账户 ----
@@ -1561,6 +1623,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
 
   {
     kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)\/messages\/batch-delete$/),
+    methods: ["POST"],
+    handle: (batchDeleteMatch: RegExpMatchArray) =>
+      emailHandlers.batchDeleteMessages(env, request, decodeURIComponent(batchDeleteMatch[1])),
+  },
+
+  {
+    kind: "regex",
     match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)\/reply$/),
     methods: ["POST"],
     handle: (messageReplyMatch: RegExpMatchArray) =>
@@ -2521,6 +2591,19 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       const id = decodeURIComponent(myProductMatch[1])
       if (method === "PUT") return pointHandlers.updateMyProduct(env, request, id)
       if (method === "DELETE") return pointHandlers.deleteMyProduct(env, request, id)
+      return null
+    },
+  },
+  // 卖家自己的卡密池（用户商品 delivery='code'）：读概览 / 追加 / 清空未使用。
+  // 所有权在 handler 里校验（只能动自己的商品）。
+  {
+    kind: "branch",
+    match: (routePath: string) => routePath.match(/^\/points\/products\/([^/]+)\/codes$/),
+    handle: (myCodesMatch: RegExpMatchArray, method: string) => {
+      const id = decodeURIComponent(myCodesMatch[1])
+      if (method === "GET") return pointHandlers.getMyProductCodes(env, request, id)
+      if (method === "POST") return pointHandlers.addMyProductCodes(env, request, id)
+      if (method === "DELETE") return pointHandlers.clearMyProductCodes(env, request, id)
       return null
     },
   },

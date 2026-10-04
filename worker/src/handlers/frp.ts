@@ -11,8 +11,9 @@
  * 本站负责：节点信息展示、端口分配与占用检测、申请单流转、config.toml 生成。
  */
 import { ApiError, json } from "../http"
+import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
-import { requireUser, requireFeatureUser, type UserRow } from "../auth"
+import { requireFeatureUser, type UserRow } from "../auth"
 import { sendMail, renderMail } from "../mailer"
 import { audit, getSetting, getSettings } from "../settings"
 import { isFrpAuthMode } from "../frp-config"
@@ -601,7 +602,7 @@ export async function listFrpApplications(
   env: Env,
   request: Request
 ): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "frp.approve")
   const url = new URL(request.url)
   const status = url.searchParams.get("status") ?? "pending"
 
@@ -655,7 +656,7 @@ export async function updateFrpApplication(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdminUser(env, request)
+  const admin = await requireAdminUser(env, request, "frp.approve")
 
   const app = await env.DB.prepare(
     `SELECT a.*, u.username AS site_username, n.name AS node_name,
@@ -770,7 +771,7 @@ export async function reviewFrpApplication(
   env: Env,
   request: Request
 ): Promise<Response> {
-  const admin = await requireAdminUser(env, request)
+  const admin = await requireAdminUser(env, request, "frp.approve")
   const body = (await request.json()) as {
     id?: string
     action?: "approve" | "reject"
@@ -882,7 +883,7 @@ export async function revokeFrpApplication(
   env: Env,
   request: Request
 ): Promise<Response> {
-  const admin = await requireAdminUser(env, request)
+  const admin = await requireAdminUser(env, request, "frp.approve")
   const body = (await request.json()) as { id?: string }
 
   const app = await env.DB.prepare(
@@ -976,19 +977,16 @@ async function notifyApplicant(
 }
 
 /** 管理员校验（与 handlers/admin.ts 同口径，root 也放行） */
-async function requireAdminUser(env: Env, request: Request): Promise<UserRow> {
-  const user = await requireUser(env, request)
-  if (user.role !== "admin" && user.role !== "root") {
-    throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
-  }
-  return user
+async function requireAdminUser(env: Env, request: Request, permKey: string): Promise<UserRow> {
+  const admin = await requireAdminScope(env, request, permKey)
+  return admin as unknown as UserRow
 }
 
 // ---- 节点管理（管理端） ----
 
 /** POST /api/admin/frp/nodes —— 新建/更新节点 */
 export async function upsertFrpNode(env: Env, request: Request): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "frp.nodes")
   const body = (await request.json()) as {
     id?: string
     name?: string
@@ -1081,7 +1079,7 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
 
 /** GET /api/admin/frp/nodes —— 节点列表（含 auth.token，仅管理员可见） */
 export async function listFrpNodes(env: Env, request: Request): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "frp.nodes")
   const rows = await env.DB.prepare(
     "SELECT * FROM frp_nodes ORDER BY sort_order ASC, created_at ASC"
   ).all<FrpNodeRow>()
@@ -1109,7 +1107,7 @@ export async function deleteFrpNode(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "frp.nodes")
   const existing = await env.DB.prepare("SELECT id FROM frp_nodes WHERE id = ?")
     .bind(id)
     .first()
@@ -1123,7 +1121,7 @@ export async function releaseFrpPorts(
   env: Env,
   request: Request
 ): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "frp.ports")
   const body = (await request.json()) as { username?: string; nodeId?: string }
   const target = await env.DB.prepare(
     "SELECT id FROM users WHERE username = ? COLLATE NOCASE"
@@ -1150,7 +1148,7 @@ const MANUAL_PORT_MARK = "manual"
 
 /** GET /api/admin/frp/ports?nodeId=xxx —— 某节点已占用的端口（带来源，供管理面板展示） */
 export async function listFrpPorts(env: Env, request: Request): Promise<Response> {
-  await requireAdminUser(env, request)
+  await requireAdminUser(env, request, "frp.ports")
   const nodeId = new URL(request.url).searchParams.get("nodeId") ?? ""
   if (!nodeId) throw new ApiError(400, "缺少 nodeId", "INVALID_INPUT")
 
@@ -1176,7 +1174,7 @@ export async function listFrpPorts(env: Env, request: Request): Promise<Response
 
 /** POST /api/admin/frp/ports/occupy —— 手动把一批端口标记为已占用（幂等） */
 export async function occupyFrpPorts(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdminUser(env, request)
+  const admin = await requireAdminUser(env, request, "frp.ports")
   const body = (await request.json()) as { nodeId?: string; ports?: unknown }
   const nodeId = body.nodeId ?? ""
   if (!nodeId) throw new ApiError(400, "缺少 nodeId", "INVALID_INPUT")
@@ -1221,7 +1219,7 @@ export async function occupyFrpPorts(env: Env, request: Request): Promise<Respon
 
 /** POST /api/admin/frp/ports/free —— 解除一批端口的占用（含用户申请的端口，慎用） */
 export async function freeFrpPorts(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdminUser(env, request)
+  const admin = await requireAdminUser(env, request, "frp.ports")
   const body = (await request.json()) as { nodeId?: string; ports?: unknown }
   const nodeId = body.nodeId ?? ""
   const ports = [

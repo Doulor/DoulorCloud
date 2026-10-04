@@ -10,7 +10,7 @@
  * 架构重）。轮询 + 心跳对本场景最务实。
  */
 import { ApiError, json } from "../http"
-import { requireUser } from "../auth"
+import { requireUser, isPrivileged, isAnyAdmin } from "../auth"
 import { uuid } from "../crypto"
 import { guardRateLimit, clientIp } from "../ratelimit"
 import { getSettingBool } from "../settings"
@@ -29,7 +29,7 @@ async function requireChatUser(
   request: Request
 ): Promise<ReturnType<typeof requireUser>> {
   const user = await requireUser(env, request)
-  if (user.role !== "admin" && user.role !== "root") {
+  if (!isAnyAdmin(user.role)) {
     if (!(await getSettingBool(env, "chat_enabled"))) {
       throw new ApiError(403, "聊天室已关闭", "CHAT_DISABLED")
     }
@@ -303,7 +303,7 @@ export async function recallMessage(
   if (!row) throw new ApiError(404, "消息不存在", "NOT_FOUND")
   if (row.recalled_at) return json({ ok: true })
 
-  const privileged = user.role === "admin" || user.role === "root"
+  const privileged = isPrivileged(user.role)
   if (row.user_id !== user.id && !privileged) {
     throw new ApiError(403, "只能撤回自己的消息", "FORBIDDEN")
   }

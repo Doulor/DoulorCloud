@@ -34,7 +34,7 @@
  *   - `aiInferenceAdaptiveGroups` → `sum.totalNeurons`（**没有** `totalRequests`！）
  */
 import { ApiError, json } from "../http"
-import { requireUser } from "../auth"
+import { requireUser, isAnyAdmin } from "../auth"
 import { callCloudflare } from "../cloudflare"
 import { fetchWithTimeout } from "../async-utils"
 import { getSetting } from "../settings"
@@ -1282,7 +1282,7 @@ let cache: { at: number; value: CfQuotaOverview } | null = null
  */
 export async function getCloudflareQuota(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  if (user.role !== "admin" && user.role !== "root") {
+  if (!isAnyAdmin(user.role)) {
     throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
   }
   const accountId = env.ACCOUNT_ID

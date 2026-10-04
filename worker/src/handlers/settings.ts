@@ -1,21 +1,14 @@
 /**
  * 账户设置：真实邮箱验证、通知开关、修改用户名 / 真实邮箱。
  *
- * 关于「真实邮箱验证」为什么这样做：
- *   Cloudflare Email Service 规定，在把发送域名 Onboard（付费/需面板操作）之前，
- *   Worker 只能发往账户内**已验证的 destination address**。
- *   而「注册为 destination address」正是 Cloudflare 免费提供的验证流程：
- *   `POST /accounts/<id>/email/routing/addresses` 会让 Cloudflare 给该邮箱
- *   发一封验证邮件，用户点链接后 `verified` 才有值。
- *
- *   于是「验证真实邮箱」= 调用 cfEnsureDestination + 轮询其 verified 状态。
- *   验证通过后该地址即成为已验证目标地址，我们就能免费给它发通知/验证码。
- *   不需要 SMTP，也不需要为 Email Sending 付费。
+ * 邮箱所有权验证必须绑定到当前用户提交的目标地址：Cloudflare Email Routing 的
+ * destination.verified 是账户级状态，不能证明某个用户能收取该地址的邮件。
+ * 账号邮箱验证与更换真实邮箱都使用发往目标地址的用户专属验证码。
  */
 import { ApiError, json } from "../http"
 import { requireUser, toPublicUser, clearedSessionCookie, type UserRow } from "../auth"
 import { uuid, hashToken } from "../crypto"
-import { cfEnsureDestination, cfListDestinations, cfDeleteDestination } from "../cloudflare"
+import { cfDeleteDestination } from "../cloudflare"
 import { purgeUserExternalResources } from "../user-cleanup"
 import { sendMail, renderMail } from "../mailer"
 import { isReservedName } from "../reserved-names"
@@ -70,36 +63,10 @@ function isValidUsername(username: string): boolean {
   return /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(username)
 }
 
-/**
- * 查询某个邮箱在 Cloudflare 侧的验证状态。
- *
- * ⚠️ 2026-09-25 审计（M10）—— 这里采信的是**账户级**的 `verified` 标志，
- * 它无法回答「是**谁**验证的」。残留风险与已做的缓解：
- *
- *   已缓解：`changeRealEmail` 现在会删掉旧 destination，所以
- *     「弃用但仍 verified」的地址不再累积 —— 攻击者必须真的点开
- *     Cloudflare 发往该邮箱的确认信（只有邮箱主人收得到）。
- *
- *   未根治：如果账户里**已经**存在一个别人验证过、但当前无人使用的地址
- *     （历史遗留数据），用该地址注册仍会被判定为已验证。
- *     彻底修复需要「我们自己的验证码」流程（把 6 位码发到该邮箱、由用户回填），
- *     这样验证就归属到具体用户而不是账户 —— 需要新增一张表/列，
- *     而 `worker/migrations/` 的编号当前与另一个 AI 的改动冲突，故记为待办。
- */
-async function destinationStatus(
-  env: Env,
-  email: string
-): Promise<{ exists: boolean; verified: boolean }> {
-  try {
-    const list = await cfListDestinations(env)
-    const found = list.find((d) => d.email.toLowerCase() === email.toLowerCase())
-    if (!found) return { exists: false, verified: false }
-    return { exists: true, verified: found.verified !== null }
-  } catch (err) {
-    console.error("查询转发地址状态失败:", err)
-    return { exists: false, verified: false }
-  }
-}
+/** 改邮箱验证码：10 分钟有效、最多 5 次尝试、60 秒内最多重发 3 次（与邮箱验证同款规则） */
+const EMAIL_CHANGE_CODE_TTL_MS = 10 * 60_000
+const EMAIL_CHANGE_CODE_ATTEMPTS = 5
+const EMAIL_CHANGE_RESEND_WAIT_MS = 60_000
 
 // ---- GET /api/settings/email —— 当前真实邮箱与验证状态 ----
 
@@ -368,7 +335,7 @@ export async function changeUsername(env: Env, request: Request): Promise<Respon
   })
 }
 
-// ---- PUT /api/settings/email —— 修改真实邮箱（需新邮箱已验证） ----
+// ---- PUT /api/settings/email —— 修改真实邮箱（需新邮箱完成用户专属验证码验证） ----
 
 export async function changeRealEmail(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
@@ -376,6 +343,7 @@ export async function changeRealEmail(env: Env, request: Request): Promise<Respo
     email?: string
     password?: string
     action?: "request" | "confirm"
+    code?: string
   }
   const next = (body.email ?? "").trim().toLowerCase()
 
@@ -397,48 +365,116 @@ export async function changeRealEmail(env: Env, request: Request): Promise<Respo
     .first()
   if (taken) throw new ApiError(409, "该邮箱已被其他账户使用", "CONFLICT")
 
-  // 第一步：向新邮箱发起验证（Cloudflare 发验证邮件）
+  // 第一步：把 6 位验证码发到**新邮箱**。
+  //
+  // ⚠️ 2026-10-04 审计修复：这里原先调用 cfEnsureDestination + destinationStatus，
+  // 采信 Cloudflare Email Routing 的 `verified`。那是**账户级**状态，只能说明
+  // 「本账户里这个地址验证过」，不能证明「当前这个用户在收这封邮件」——账户里
+  // 历史遗留（或别人验证过）的已验证地址会被当成「已验证」，把 email_verified
+  // 置 1，而该用户从未能读取那个邮箱。现在改成发往目标地址的用户专属验证码：
+  // 只有真正能读这个邮箱的人才能把码回填回来，验证归属到 user_id。
   if (body.action !== "confirm") {
+    // 每人 60 秒内最多 3 次：避免拿改邮箱接口当「向任意地址发信」的跳板
+    await guardRateLimit(
+      env,
+      `email-change-code:user:${user.id}`,
+      3,
+      EMAIL_CHANGE_RESEND_WAIT_MS / 1000,
+      "验证码发送过于频繁，请稍后再试"
+    )
+
+    const code = generateVerifyCode()
+    const now = new Date().toISOString()
+    const expiresAt = new Date(Date.now() + EMAIL_CHANGE_CODE_TTL_MS).toISOString()
+
+    await env.DB.prepare(
+      `INSERT INTO email_change_codes (user_id, email, code_hash, expires_at, attempts, created_at)
+       VALUES (?, ?, ?, ?, 0, ?)
+       ON CONFLICT(user_id) DO UPDATE SET email = excluded.email,
+         code_hash = excluded.code_hash, expires_at = excluded.expires_at,
+         attempts = 0, created_at = excluded.created_at`
+    )
+      .bind(user.id, next, await hashToken(code), expiresAt, now)
+      .run()
+
+    const { text, html } = renderMail("确认新的账号邮箱", [
+      `你的验证码是：${code}`,
+      `提交后，你的账号邮箱将改为 ${next}。`,
+      "验证码 10 分钟内有效，请勿泄露给他人。",
+      "如果这不是你本人的操作，请忽略本邮件。",
+    ])
     try {
-      await cfEnsureDestination(env, next)
+      await sendMail(env, {
+        to: next,
+        subject: "【Doulor Cloud】修改邮箱验证码",
+        text,
+        html,
+      })
     } catch (err) {
-      console.error("注册新邮箱失败:", next, err)
-      throw new ApiError(502, "无法发送验证邮件，请稍后重试", "CF_ERROR")
+      console.error("发送改邮箱验证码失败:", next, err)
+      throw new ApiError(502, "发送验证码失败，请稍后重试", "MAIL_SEND_FAILED")
     }
+
+    await audit(env, user.id, "user.email.change.request", `请求改邮箱为 ${next}`)
+
     return json({
       email: next,
       verified: false,
-      message: "验证邮件已发送到新邮箱，请点击确认后再提交",
+      message: "验证码已发送到新邮箱，请查收后在 10 分钟内提交",
     })
   }
 
-  // 第二步：确认新邮箱已验证，然后落库
-  const status = await destinationStatus(env, next)
-  if (!status.verified) {
-    throw new ApiError(
-      400,
-      "新邮箱尚未完成验证，请先在邮箱中点击 Cloudflare 的确认链接",
-      "NOT_VERIFIED"
+  // 第二步：校验发往新邮箱的验证码，通过后落库。
+  const code = String(body.code ?? "").trim()
+  if (!/^\d{6}$/.test(code)) {
+    throw new ApiError(400, "请输入 6 位数字验证码", "INVALID_CODE")
+  }
+
+  const row = await env.DB.prepare(
+    "SELECT email, code_hash, expires_at, attempts FROM email_change_codes WHERE user_id = ?"
+  )
+    .bind(user.id)
+    .first<{ email: string; code_hash: string; expires_at: string; attempts: number }>()
+
+  // 码必须是发给「这次要改成的那个地址」的：否则可以对 A 邮箱取码、拿 B 邮箱来换，
+  // 从而把一个自己无法收信的地址标成已验证。
+  if (!row || row.email.toLowerCase() !== next) {
+    throw new ApiError(400, "请先向该邮箱发送验证码", "CODE_NOT_REQUESTED")
+  }
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    throw new ApiError(400, "验证码已过期，请重新发送", "CODE_EXPIRED")
+  }
+  if (row.attempts >= EMAIL_CHANGE_CODE_ATTEMPTS) {
+    throw new ApiError(400, "尝试次数过多，请重新发送", "TOO_MANY_ATTEMPTS")
+  }
+  if ((await hashToken(code)) !== row.code_hash) {
+    await env.DB.prepare(
+      "UPDATE email_change_codes SET attempts = attempts + 1 WHERE user_id = ?"
     )
+      .bind(user.id)
+      .run()
+    throw new ApiError(400, "验证码错误", "INVALID_CODE")
   }
 
   const now = new Date().toISOString()
   const previousEmail = user.email
-  await env.DB.prepare(
-    "UPDATE users SET email = ?, email_verified = 1, updated_at = ? WHERE id = ?"
-  )
-    .bind(next, now, user.id)
-    .run()
+  await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE users SET email = ?, email_verified = 1, updated_at = ? WHERE id = ?"
+    ).bind(next, now, user.id),
+    env.DB.prepare("DELETE FROM email_change_codes WHERE user_id = ?").bind(user.id),
+  ])
 
-  // ⚠️ 2026-09-25 审计（M10）：旧地址必须从 Cloudflare 账户里删掉。
+  // 旧地址仍要从 Cloudflare 账户里删掉（2026-09-25 审计 M10，2026-10-04 复核）。
   //
-  // destination 是**账户级**的，`verified` 也只属于账户而不属于用户。旧实现
-  // 只改 `users.email`、不删旧 destination，于是「弃用但仍 verified」的地址会一直
-  // 留在账户里：任何人拿它注册，只要调一次 action:"status" 就会被判定
-  // `email_verified = 1` —— 而他从未能读取那个邮箱。
-  // 该标志会经 OAuth /userinfo 以 `email_verified: true` 暴露给依赖方，也是 FRP 准入条件。
+  // 历史背景：本站曾用 destination 的**账户级** `verified` 判定用户邮箱验证状态，
+  // 于是「弃用但仍 verified」的旧地址留在账户里，会被下一次拿它注册/换绑的人
+  // 白捡一个 `email_verified = 1`。这条判定路径现已全部改为用户专属验证码
+  // （见本文件 verifyRealEmail 与上面的第一步），不再读 CF 状态；
+  // 这里继续删除旧 destination，是为了：① 释放「每账户 200 条」的硬配额；
+  // ② 不留账户级残留，避免以后再有代码误用它。
   //
-  // 删除失败**不阻断**改邮箱（最多保留原有风险），但必须留下日志以便排查。
+  // 删除失败**不阻断**改邮箱（最多是一份残留），但必须留下日志以便排查。
   try {
     const removed = await cfDeleteDestination(env, previousEmail)
     if (removed) {

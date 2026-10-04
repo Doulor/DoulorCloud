@@ -303,8 +303,8 @@ export function DashboardLayout({
     }
   }
 
-  // root（站长）与 admin 都显示管理入口
-  const isAdmin = user?.role === "admin" || user?.role === "root"
+  // root / superadmin / admin 都显示管理入口（admin 权限由白名单逐项控制）
+  const isAdmin = user?.role === "admin" || user?.role === "superadmin" || user?.role === "root"
   // 底部队列（自上而下）：反馈 → 捐献 → 积分与商城 → 管理（仅管理员）→ 设置
   // 即「从下往上」为 设置 → 管理 → 积分与商城 → 捐献 → 反馈，设置紧贴账户信息。
   // 「成就」已移入右下角账户菜单（个人空间上方），不再占侧边栏位置。

@@ -92,6 +92,23 @@ export const SETTING_DEFAULTS = {
    */
   invite_basic_features: "r2",
   /**
+   * 首捐奖励券（`vouchers.source = 'first_donation'`）**可以兑换哪些模块**
+   * （逗号分隔的模块名列表，取值同 FEATURES）。
+   *
+   * 背景：用户第一次捐献获批时会自动拿到一张「自选券」（`vouchers.ts` 的
+   * `grantFirstDonationVoucher`），原本他可以拿它在四个模块里任挑一个。
+   * 这个设置让站长收口：只允许拿它换指定模块（例如只放网盘、不给中转站）。
+   *
+   * 语义（与 `invite_basic_features` 同一套，别把空串当「没配」）：
+   *   · 缺省（键不存在）→ **全部可兑换** —— 这就是「默认全都可以兑换」；
+   *   · 空串（站长把开关全关掉后保存）→ **一个都不给**，券形同废纸；
+   *   · 只认 FEATURES 里的名字，认不出的直接丢掉（写入侧已校验）。
+   *
+   * ⚠️ 只约束**首捐券**这一条路。邀请码本身带哪些权限由建码时勾选决定，
+   *   与这里无关（见 vouchers.redeemInvite）。
+   */
+  first_donation_voucher_features: "r2,ai,frp,proxy,doulor",
+  /**
    * 免权限访问的模块（逗号分隔的模块名列表）。
    *
    * 设置后该模块**不再要求用户权限**，没有权限的人也能访问/启用 ——
@@ -212,6 +229,12 @@ export const SETTING_DEFAULTS = {
   tempbox_max_files: "20",
   /** 临时分享箱上传是否必须登录（1=默认，访客只可查看/下载） */
   tempbox_upload_requires_login: "1",
+  /**
+   * 临时邮箱（收件邮箱，非上面的「分享箱」）每天最多刷新次数。
+   * 刷新 = 换一个新地址（旧地址作废）。0 = 不限制。
+   * 默认 20：够正常用，又把「刷一堆一次性地址去注册第三方账号」压住。
+   */
+  temp_mailbox_refresh_daily_limit: "20",
   /** frp 内网穿透总开关 */
   frp_enabled: "1",
   /** frp 核心包下载地址（可由后台替换） */
@@ -253,6 +276,15 @@ export const SETTING_DEFAULTS = {
   sticker_max_bytes: "1048576",
   /** 每人最多保存多少个表情包（防止有人把它当网盘用） */
   sticker_max_count: "60",
+  /** 站点时区偏移（小时）。默认 8 = 北京时间（UTC+8）：「每天」的日界（签到/限额/商城限量等）
+   *  在北京时间 0 点翻篇。后台可配，改它 = 改全站「今天什么时候翻篇」。 */
+  site_timezone_offset_hours: "8",
+  /**
+   * 超级管理员能否管理「权限组」（创建 / 修改 / 删除 / 套用成员）。
+   * 默认关（"0"）＝只有站长 root 能管权限组；开启后 superadmin 也能管。
+   * 2026-10-04 站长要求：默认关，权限管理界面提供开关。
+   */
+  superadmin_manage_permission_groups: "0",
   /**
    * WorkBuddy 反代网关捐献通道总开关。
    *
@@ -270,6 +302,14 @@ export const SETTING_DEFAULTS = {
    * （见 handlers/wb2api.ts 的 normalizeRealm）。管理员在这里设的是初始值。
    */
   wb2api_realm: "cn",
+  /**
+   * 反代账号「国内版 / 国际版」可用开关（2026-10-03 站长要求）。
+   *
+   * 捐献/邀请里用户本可自选国内版或国际版；关掉其中一项，那一项就在捐献页
+   * 隐藏、且接口拒绝绑定（见 wb2api.ts 的 availableRealms）。两个都关 = 通道实际不可用。
+   */
+  wb2api_realm_cn: "1",
+  wb2api_realm_global: "1",
   /**
    * 每个用户最多可绑定的 WorkBuddy 账号数。
    *
@@ -680,6 +720,31 @@ export async function getSettingNumber(
 export async function getSettingBool(env: Env, key: SettingKey): Promise<boolean> {
   const raw = await getSetting(env, key)
   return raw === "1" || raw.toLowerCase() === "true"
+}
+
+/**
+ * 站点时区偏移（小时）。默认 8 = 北京时间（UTC+8）。
+ * 后台可配 site_timezone_offset_hours —— 「每天」的日界（签到、限额、商城限量、
+ * 排行榜区间、分析聚合等）**全部**按它算，改它 = 改全站「今天什么时候翻篇」。
+ */
+export async function siteOffsetHours(env: Env): Promise<number> {
+  const n = await getSettingNumber(env, "site_timezone_offset_hours")
+  return Number.isFinite(n) ? n : 8
+}
+
+/**
+ * 把某个时刻换算到「站点时区」当天的日期串（YYYY-MM-DD）。
+ * 所有「每天」计数必须走它（offsetHours 用 siteOffsetHours 取），保证同一口径。
+ */
+export function siteDayString(d: Date, offsetHours: number): string {
+  return new Date(d.getTime() + offsetHours * 60 * 60 * 1000).toISOString().slice(0, 10)
+}
+
+/** 站点时区当天 0 点，转回 UTC 的 Date（给 `created_at >= ?` 这种比较用） */
+export function siteDayStartUtc(d: Date, offsetHours: number): Date {
+  const c = new Date(d.getTime() + offsetHours * 60 * 60 * 1000)
+  c.setHours(0, 0, 0, 0)
+  return new Date(c.getTime() - offsetHours * 60 * 60 * 1000)
 }
 
 /** 写入设置（仅接受已知 key，避免前端塞入任意键） */

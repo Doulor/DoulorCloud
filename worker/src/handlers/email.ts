@@ -1,12 +1,12 @@
 import { ApiError, json } from "../http"
 import { uuid, hashToken } from "../crypto"
 import { isReservedName } from "../reserved-names"
-import { requireUser, type UserRow } from "../auth"
+import { requireUser, type UserRow, isPrivileged } from "../auth"
 import { isApiRequest } from "../api-source"
 import { cfDeleteEmailRule } from "../cloudflare"
 import { sendReply, sendMail, renderMail, isMailerConfigured } from "../mailer"
 import { guardRateLimit } from "../ratelimit"
-import { audit } from "../settings"
+import { audit, getSettingNumber, siteOffsetHours, siteDayString } from "../settings"
 import {
   pickRootDomain,
   isOwnDomain,
@@ -302,11 +302,11 @@ export async function listMailboxes(env: Env, request: Request): Promise<Respons
     )
   }
   // 邮箱数量上限（管理员/站长不限，999999 作为哨兵值，前端显示「不限」）
-  const limit = user.role === "admin" || user.role === "root" ? ADMIN_UNLIMITED_MAILBOXES : MAX_MAILBOXES_PER_USER
+  const limit = isPrivileged(user.role) ? ADMIN_UNLIMITED_MAILBOXES : MAX_MAILBOXES_PER_USER
   // 临时邮箱额度独立计算。直接数上面已查出的行，不再多打一次 D1 查询。
   const tempUsed = (rows.results ?? []).filter((r) => r.is_temp === 1).length
   const tempLimit =
-    user.role === "admin" || user.role === "root" ? ADMIN_UNLIMITED_MAILBOXES : MAX_TEMP_MAILBOXES_PER_USER
+    isPrivileged(user.role) ? ADMIN_UNLIMITED_MAILBOXES : MAX_TEMP_MAILBOXES_PER_USER
 
   // 可选根域：只下发**当前用户有权限用的**，前端据此渲染域名选择器。
   // 没权限的域不下发 —— 先显示再拒绝只会让人以为坏了。
@@ -343,7 +343,7 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
     .bind(user.id)
     .first<{ c: number }>()
 
-  if (user.role !== "admin" && user.role !== "root" && (count?.c ?? 0) >= MAX_MAILBOXES_PER_USER) {
+  if (!isPrivileged(user.role) && (count?.c ?? 0) >= MAX_MAILBOXES_PER_USER) {
     throw new ApiError(400, `每个用户最多 ${MAX_MAILBOXES_PER_USER} 个邮箱`, "LIMIT_REACHED")
   }
 
@@ -598,7 +598,7 @@ export async function createTempMailbox(env: Env, request: Request): Promise<Res
     .bind(user.id)
     .first<{ c: number }>()
 
-  if (user.role !== "admin" && user.role !== "root" && (count?.c ?? 0) >= MAX_TEMP_MAILBOXES_PER_USER) {
+  if (!isPrivileged(user.role) && (count?.c ?? 0) >= MAX_TEMP_MAILBOXES_PER_USER) {
     throw new ApiError(
       400,
       `临时邮箱最多同时存在 ${MAX_TEMP_MAILBOXES_PER_USER} 个，请先删除或刷新已有的`,
@@ -611,6 +611,37 @@ export async function createTempMailbox(env: Env, request: Request): Promise<Res
     { mailbox: await toPublicMailbox(env, user, created, undefined, undefined, await primaryMailboxAddress(env, user)) },
     201
   )
+}
+
+/**
+ * 临时邮箱「每天最多刷新次数」闸门（后台可配，默认 20；0 = 不限）。
+ *
+ * 用 `INSERT ... ON CONFLICT DO UPDATE SET count = count + 1 RETURNING count`
+ * 原子累加（与 api-engine 的限额、ratelimit 同思路），拿到的是「本次计入之后的
+ * 计数」—— 超限的那次被拒，之后每次也都超，不会漏拦。
+ * 管理员 / 站长不限（与其它配额口径一致）。
+ */
+async function enforceTempMailboxRefreshLimit(env: Env, user: UserRow): Promise<void> {
+  if (isPrivileged(user.role)) return
+  const limit = await getSettingNumber(env, "temp_mailbox_refresh_daily_limit")
+  if (limit <= 0) return
+
+  const row = await env.DB.prepare(
+    `INSERT INTO temp_mailbox_refresh_daily (user_id, date, count)
+     VALUES (?, ?, 1)
+     ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1
+     RETURNING count`
+  )
+    .bind(user.id, siteDayString(new Date(), await siteOffsetHours(env)))
+    .first<{ count: number }>()
+
+  if ((row?.count ?? 1) > limit) {
+    throw new ApiError(
+      429,
+      `临时邮箱每天最多刷新 ${limit} 次，请明天再试`,
+      "TEMP_MAILBOX_DAILY_LIMIT"
+    )
+  }
 }
 
 /**
@@ -641,6 +672,10 @@ export async function refreshTempMailbox(
     3600,
     "临时邮箱操作过于频繁"
   )
+
+  // 每日刷新次数上限（后台可配，默认 20；0 = 不限）。放在 purge 之前：
+  // 超限那次绝不能动旧邮箱，否则用户「今天的刷新额度」被浪费掉、还得再点一次生成。
+  await enforceTempMailboxRefreshLimit(env, user)
 
   // 先删后建：若中间失败，用户只是少了一个临时邮箱（可再点一次生成），
   // 不会出现「两个邮箱抢同一个地址」或额度被凭空占掉的情况。
@@ -787,7 +822,13 @@ export async function getMessage(
   }
 
   if (row.read === 0) {
-    await env.DB.prepare("UPDATE messages SET read = 1 WHERE id = ?").bind(messageId).run()
+    // 未读 → 已读：除更新行状态外，累加「累计已读封数」成就计数（删邮件不清减）
+    await env.DB.batch([
+      env.DB.prepare("UPDATE messages SET read = 1 WHERE id = ?").bind(messageId),
+      env.DB.prepare(
+        "UPDATE user_stats SET mail_read_count = mail_read_count + 1 WHERE user_id = ?"
+      ).bind(user.id),
+    ])
     row.read = 1
   }
 
@@ -806,18 +847,28 @@ export async function markMessage(
   const body = (await request.json()) as { read?: boolean }
 
   const row = await env.DB.prepare(
-    "SELECT id FROM messages WHERE id = ? AND mailbox_id = ?"
+    "SELECT read FROM messages WHERE id = ? AND mailbox_id = ?"
   )
     .bind(messageId, mailbox.id)
-    .first()
+    .first<{ read: number }>()
 
   if (!row) {
     throw new ApiError(404, "邮件不存在", "NOT_FOUND")
   }
 
+  const target = body.read === false ? 0 : 1
   await env.DB.prepare("UPDATE messages SET read = ? WHERE id = ?")
-    .bind(body.read === false ? 0 : 1, messageId)
+    .bind(target, messageId)
     .run()
+
+  // 未读 → 已读 才算一次「累计已读」（成就计数），反复标记 / 标回未读不重复累加
+  if (row.read === 0 && target === 1) {
+    await env.DB.prepare(
+      "UPDATE user_stats SET mail_read_count = mail_read_count + 1 WHERE user_id = ?"
+    )
+      .bind(user.id)
+      .run()
+  }
 
   return new Response(null, { status: 204 })
 }
@@ -835,7 +886,16 @@ export async function markAllRead(env: Env, request: Request): Promise<Response>
   )
     .bind(user.id)
     .run()
-  return json({ updated: result.meta?.changes ?? 0 })
+  const changed = result.meta?.changes ?? 0
+  // 本次实际从未读变已读的封数，一并累加进「累计已读」
+  if (changed > 0) {
+    await env.DB.prepare(
+      "UPDATE user_stats SET mail_read_count = mail_read_count + ? WHERE user_id = ?"
+    )
+      .bind(changed, user.id)
+      .run()
+  }
+  return json({ updated: changed })
 }
 
 // DELETE /api/mailbox/:id/messages/:messageId —— 删除消息
@@ -860,6 +920,34 @@ export async function deleteMessage(
 
   await env.DB.prepare("DELETE FROM messages WHERE id = ?").bind(messageId).run()
   return new Response(null, { status: 204 })
+}
+
+// POST /mailbox/:id/messages/batch-delete —— 批量删除消息（2026-10-04 用户建议收件箱批量删除）
+export async function batchDeleteMessages(
+  env: Env,
+  request: Request,
+  mailboxId: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const mailbox = await requireMailbox(env, user, mailboxId)
+
+  const body = (await request.json().catch(() => ({}))) as { ids?: unknown }
+  const ids = Array.isArray(body.ids)
+    ? body.ids.filter((x): x is string => typeof x === "string").slice(0, 100)
+    : []
+  if (ids.length === 0) {
+    throw new ApiError(400, "没有要删除的邮件", "INVALID_INPUT")
+  }
+
+  // 只删属于当前 mailbox 的邮件（带 mailbox_id 守卫，防止越权删到别的邮箱）
+  const placeholders = ids.map(() => "?").join(",")
+  const result = await env.DB.prepare(
+    `DELETE FROM messages WHERE mailbox_id = ? AND id IN (${placeholders})`
+  )
+    .bind(mailbox.id, ...ids)
+    .run()
+
+  return json({ deleted: result.meta?.changes ?? 0 })
 }
 
 // ---- 网页端回信（出站邮件）----

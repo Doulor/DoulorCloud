@@ -3,6 +3,10 @@ import {
   type AdminSettings,
   type AdminUser,
   type AdminUserDetail,
+  type AdminPermGroup,
+  type AdminPermCategory,
+  type AdminPermissionGroup,
+  type AdminPermissionsState,
   type ApiError,
   type Announcement,
   type AnnouncementStatus,
@@ -18,6 +22,7 @@ import {
   type DnsRecord,
   type DnsRecordType,
   type Donation,
+  type DonationChannel,
   type DonationOverview,
   type DonationProvisionResult,
   type DonationSubmitResult,
@@ -472,6 +477,49 @@ export const domainApi = {
 export const adminApi = {
   listUsers: () => request<{ users: AdminUser[] }>("/admin/users"),
 
+  /** 管理员权限树（两级） */
+  getPermissionTree: () =>
+    request<{ groups: AdminPermGroup[]; categories: AdminPermCategory[] }>("/admin/permissions/tree"),
+
+  /** 权限组列表 */
+  listPermissionGroups: () =>
+    request<{ groups: AdminPermissionGroup[] }>("/admin/permission-groups"),
+
+  createPermissionGroup: (name: string, scope: string[]) =>
+    request<{ id: string; name: string; scope: string[] }>("/admin/permission-groups", {
+      method: "POST",
+      body: JSON.stringify({ name, scope }),
+    }),
+
+  updatePermissionGroup: (id: string, payload: { name?: string; scope?: string[] }) =>
+    request<{ ok: boolean }>(`/admin/permission-groups/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  deletePermissionGroup: (id: string) =>
+    request<{ ok: boolean }>(`/admin/permission-groups/${id}`, { method: "DELETE" }),
+
+  addGroupMembers: (id: string, userIds: string[]) =>
+    request<{ added: number }>(`/admin/permission-groups/${id}/members`, {
+      method: "POST",
+      body: JSON.stringify({ userIds }),
+    }),
+
+  getUserAdminPermissions: (username: string) =>
+    request<AdminPermissionsState>(
+      `/admin/users/${encodeURIComponent(username)}/admin-permissions`
+    ),
+
+  setUserAdminPermissions: (
+    username: string,
+    payload: { role?: string; adminRoleId?: string | null; adminScope?: string[] }
+  ) =>
+    request<{ ok: boolean }>(`/admin/users/${encodeURIComponent(username)}/admin-permissions`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
   getUser: (username: string) =>
     request<AdminUserDetail>(`/admin/users/${encodeURIComponent(username)}`),
 
@@ -803,11 +851,13 @@ export const settingsApi = {
       }
     ),
 
-  /** 修改真实邮箱：先 request 触发验证邮件，再 confirm 落库 */
+  /** 修改真实邮箱：先 request 发送新邮箱验证码，再 confirm 带验证码落库 */
   changeEmail: (payload: {
     email: string
     password: string
     action: "request" | "confirm"
+    /** confirm 步骤必填：发往新邮箱的 6 位验证码 */
+    code?: string
   }) =>
     request<{ user: User; email?: string; verified?: boolean; message?: string }>(
       "/settings/email",
@@ -1176,6 +1226,13 @@ export const emailApi = {
   deleteMessage: (mailboxId: string, messageId: string) =>
     request<void>(`/mailbox/${mailboxId}/messages/${messageId}`, {
       method: "DELETE",
+    }),
+
+  /** 批量删除邮件（收件箱多选删除） */
+  batchDeleteMessages: (mailboxId: string, ids: string[]) =>
+    request<{ deleted: number }>(`/mailbox/${mailboxId}/messages/batch-delete`, {
+      method: "POST",
+      body: JSON.stringify({ ids }),
     }),
 
   /**
@@ -1714,6 +1771,22 @@ export const pointsApi = {
     request<{ ok: boolean }>(`/points/products/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
+  /** 我的商品（卡密）的卡密池概览 */
+  getMyProductCodes: (id: string) =>
+    request<{ total: number; used: number; available: number }>(
+      `/points/products/${encodeURIComponent(id)}/codes`
+    ),
+  /** 给我的商品（卡密）追加卡密（自动去重） */
+  addMyProductCodes: (id: string, codes: string[]) =>
+    request<{ added: number; available: number }>(
+      `/points/products/${encodeURIComponent(id)}/codes`,
+      { method: "POST", body: JSON.stringify({ codes }) }
+    ),
+  /** 清空我的商品（卡密）未使用的卡密 */
+  clearMyProductCodes: (id: string) =>
+    request<{ removed: number }>(`/points/products/${encodeURIComponent(id)}/codes`, {
+      method: "DELETE",
+    }),
   /** 卖家：把订单标记为已交付（积分仍在托管，等买家确认收货） */
   sellerDeliver: (orderId: string) =>
     request<{ order: PointOrder }>(
@@ -2246,8 +2319,17 @@ export const appealApi = {
 /** 用户侧：管理端通知（强制已读弹窗） */
 export const noticeApi = {
   pending: () => request<{ notices: PendingNotice[] }>("/notice/pending"),
+  /**
+   * 确认收到。若该通知要求捐献而用户还没捐，后端返回 `ok:false` +
+   * 还缺哪些渠道（**不解锁、也不标记已读**，弹窗继续拦着）；
+   * 用户捐完再点同一个接口即通过。
+   */
   ack: (id: string) =>
-    request<{ ok: boolean }>("/notice/ack", {
+    request<{
+      ok: boolean
+      unlocked?: boolean
+      donationRequired?: { required: DonationChannel[]; missing: DonationChannel[] }
+    }>("/notice/ack", {
       method: "POST",
       body: JSON.stringify({ id }),
     }),
@@ -2256,8 +2338,24 @@ export const noticeApi = {
 /** 管理端：通知 */
 export const adminNoticeApi = {
   list: () => request<{ notices: AdminNotice[] }>("/admin/notices"),
-  send: (payload: { usernames: string[]; title: string; body: string; restrictFeatures?: string[] }) =>
-    request<{ sent: string[]; missing: string[]; restricted: number }>("/admin/notices", {
+  send: (payload: {
+    usernames: string[]
+    title: string
+    body: string
+    restrictFeatures?: string[]
+    /** 要求用户捐献的渠道（任选其一解锁）；非空时后端强制一并禁用 ai */
+    requireDonation?: DonationChannel[]
+  }) =>
+    request<{
+      sent: string[]
+      missing: string[]
+      restricted: number
+      /** 命中监管白名单、只发通知不改权限的用户 */
+      whitelisted: string[]
+      /** 已满足捐献门槛、整条跳过的用户（名单过时） */
+      alreadyDonated: string[]
+      requireDonation: DonationChannel[]
+    }>("/admin/notices", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
@@ -2644,6 +2742,12 @@ export const twoFactorApi = {
     request<{ ok: boolean; recoveryCodes: string[] }>("/settings/2fa/totp/confirm", {
       method: "POST",
       body: JSON.stringify({ code }),
+    }),
+
+  /** 单独关闭 TOTP（保留邮箱验证；被强制的角色不允许） */
+  disableTotp: () =>
+    request<{ ok: boolean }>("/settings/2fa/totp/disable", {
+      method: "POST",
     }),
 
   /** 开关邮箱验证方式 */

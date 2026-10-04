@@ -5,8 +5,8 @@ export interface User {
   username: string
   email: string
   namespace: string
-  /** root = 站长（唯一，拥有全部权限且不可被其它角色修改）；admin = 管理员；user = 普通用户 */
-  role: "user" | "admin" | "root"
+  /** root = 站长（唯一）；superadmin = 超级管理员（全权）；admin = 自定义白名单管理员；user = 普通用户 */
+  role: "user" | "admin" | "superadmin" | "root"
   /** 真实邮箱是否已验证（验证后才能作转发目标） */
   emailVerified: boolean
   /** 是否接收「个人相关」通知邮件（捐献/反馈/社区回复等） */
@@ -165,10 +165,23 @@ export interface LinkPreview {
 
 /** 网站统计概览（管理面板） */
 export interface AnalyticsOverview {
-  summary: { pv: number; uv: number }
+  summary: {
+    pv: number
+    uv: number
+    /** 统计窗口内有访问的自然日数量 */
+    activeDays: number
+    /** 平均每个匿名访客浏览的页面数 */
+    avgPagesPerVisitor: number
+    /** 只浏览过一次页面的访客数 */
+    singlePageVisitors: number
+    /** 浏览过两次及以上页面的访客数 */
+    returningVisitors: number
+  }
   byDay: { date: string; pv: number; uv: number }[]
+  /** 按中国标准时间小时聚合（0-23） */
+  byHour: { hour: number; pv: number; uv: number }[]
   byPath: { path: string; pv: number; uv: number }[]
-  byReferrer: { referrer: string; pv: number }[]
+  byReferrer: { referrer: string; pv: number; uv: number }[]
   byDevice: { ua: string; pv: number; uv: number }[]
 }
 
@@ -1585,12 +1598,15 @@ export interface MyCode {
 export interface VoucherOverview {
   codes: MyCode[]
   /**
-   * 全部可兑模块 + 当前是否已拥有。
-   * ⚠️ 是**全部四个**，不是「只列还没开的」—— 自选券的下拉要把已开通的也列出来
+   * 全部可兑模块 + 当前是否已拥有 + 当前是否允许用首捐券兑换。
+   * ⚠️ 是**全部**，不是「只列还没开的」—— 自选券的下拉要把已开通的也列出来
    * （标「已开通」并置灰），否则四模块全开的账号看到的是一个空下拉，
    * 观感上像「这张券没有选权限的地方」（2026-09-30 站长反馈）。
+   *
+   * `allowed` 来自管理面板设置「首捐奖励券可兑换的模块」（默认全部）。
+   * ⚠️ 只约束**首捐券**；别人给的邀请码带什么权限由码自己决定，别用它过滤。
    */
-  features: { key: string; label: string; owned: boolean }[]
+  features: { key: string; label: string; owned: boolean; allowed: boolean }[]
 }
 
 export interface RedeemResult {
@@ -2223,12 +2239,19 @@ export interface AppealPendingReply {
   reviewedAt: string | null
 }
 
+/** 可要求的捐献渠道（通知门槛）。语义是「任选其一」 */
+export type DonationChannel = "wb" | "frp" | "proxy"
+
 /** 管理端通知：用户侧待确认的一条 */
 export interface PendingNotice {
   id: string
   title: string
   body: string
   createdAt: string
+  /** 发布时勾选的要求渠道；空数组 = 无门槛 */
+  donationRequired: DonationChannel[]
+  /** 其中还没满足的渠道；非空 = 权限仍锁着，捐完才能解锁 */
+  donationMissing: DonationChannel[]
 }
 
 /** 管理端通知（列表条目） */
@@ -2238,6 +2261,8 @@ export interface AdminNotice {
   title: string
   body: string
   restrictFeatures: string[]
+  /** 要求捐献的渠道（任选其一即可解锁） */
+  requireDonation: DonationChannel[]
   newapiDisabled: boolean
   creator: string | null
   createdAt: string
@@ -2477,8 +2502,17 @@ export interface PointsConfig {
  *   · feature      —— 自动授予一个模块权限（deliveryParams.feature）
  *   · subscription —— 自动开通一个 NewAPI 订阅套餐（deliveryParams.planId）
  *   · invite_quota —— 自动增加邀请码创建额度（deliveryParams.count）
+ *   · code         —— 卡密/Key：从卡密池取一条**各不相同**的发给买家（一人一条）
+ *   · content      —— 统一内容：发一段**人人相同**的固定内容（deliveryParams.content）
  */
-export type PointDelivery = "manual" | "quota" | "feature" | "subscription" | "invite_quota" | "code"
+export type PointDelivery =
+  | "manual"
+  | "quota"
+  | "feature"
+  | "subscription"
+  | "invite_quota"
+  | "code"
+  | "content"
 
 /** 交付参数：每种方式只用到其中一个字段（quota 走 quotaYuan，不用这里） */
 export interface PointDeliveryParams {
@@ -2488,6 +2522,8 @@ export interface PointDeliveryParams {
   planId?: number
   /** delivery='invite_quota'：增加的邀请码创建额度 */
   count?: number
+  /** delivery='content'：人人相同的固定交付内容（网盘链接 / 说明 / 通用兑换码） */
+  content?: string
 }
 
 /** 用户商品的审核状态；官方商品恒为 'approved' */
@@ -2532,6 +2568,8 @@ export interface PointProduct {
   stock: number | null
   /** 每日限量（自然日）；null = 不限 */
   dailyLimit: number | null
+  /** 今日已售数（与后端每日限量计数同口径 UTC 日）；无每日限时恒 0 */
+  dailySold: number
   /** 每人限购件数；null = 不限 */
   perUserLimit: number | null
   delivery: PointDelivery
@@ -2587,6 +2625,13 @@ export interface PointOrder {
   quotaYuan: number | null
   status: PointOrderStatus
   note: string | null
+  /**
+   * 交付内容快照（仅 delivery='content' / 'code' 的订单非 null）。
+   *
+   * 与 `note` 分开：note 是列表里一行摘要（多处截断到 300 字），
+   * 而这是买家**买到的东西**本身（最长 2000 字、可能多行），要能反复查看。
+   */
+  deliveryContent: string | null
   /** 卖家 id（下单时快照）；**null = 官方商品订单** */
   sellerId: string | null
   sellerName: string | null
@@ -2777,7 +2822,14 @@ export interface UserProductPayload {
   category: ProductCategory
   price: number
   stock: number | null
-  /** 计费方式：买断 / 租用（用户商品也能租 —— 交付方式固定人工，属于可收回的类别） */
+  /**
+   * 交付方式（2026-10-04 放开自动发货）：用户商品允许 manual / code / content。
+   * 其余自动方式（权限 / 订阅 / 额度）是平台能力，后端会直接拒绝。
+   */
+  delivery: PointDelivery
+  /** delivery='content' 时人人相同的固定内容 */
+  deliveryParams: PointDeliveryParams | null
+  /** 计费方式：买断 / 租用（用户商品也能租 —— 但只有人工交付可租） */
   billingMode: PointBillingMode
   /** 租期天数；`billingMode='rental'` 时必填（1 ~ 3650），买断传 null */
   rentalDays: number | null
@@ -3029,4 +3081,44 @@ export interface Sticker {
   contentType: string
   bytes: number
   createdAt: string
+}
+
+/** 管理员权限树：分组 → 大类 → 子项（后端权威下发，前端不硬编码） */
+export interface AdminPermGroup {
+  key: string
+  label: string
+}
+
+export interface AdminPermLeaf {
+  key: string
+  label: string
+  rootOnly?: boolean
+}
+
+export interface AdminPermCategory {
+  key: string
+  label: string
+  group: string
+  children?: AdminPermLeaf[]
+}
+
+/** 权限组（一套权限 + 成员数） */
+export interface AdminPermissionGroup {
+  id: string
+  name: string
+  scope: string[]
+  memberCount: number
+  createdAt: string
+}
+
+/** 某成员的管理权限现状 */
+export interface AdminPermissionsState {
+  userId: string
+  username: string
+  role: string
+  adminRoleId: string | null
+  adminRoleName: string | null
+  adminScope: string[]
+  /** true = admin_scope 覆盖了权限组（前端标记「自定义」） */
+  custom: boolean
 }

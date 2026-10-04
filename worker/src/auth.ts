@@ -46,15 +46,27 @@ export interface DomainRow {
 const SESSION_COOKIE = "doulor_session"
 
 /**
- * 是否有管理员及以上的权限（root 或 admin）。
+ * 角色分级（2026-10-04 权限系统重构）：
+ *   root        站长，唯一，凌驾一切，不可被改/删。
+ *   superadmin  超级管理员，拥有全部管理权限 + 资源特权（= 旧「admin」）。
+ *   admin       自定义管理员，能进管理面板，但**只能做白名单里允许的事**。
+ *   user        普通用户。
  *
- * 2026-09-25 引入 root 角色（站长，唯一，凌驾于 admin）：root 拥有 admin 的全部
- * 权限，且不能被 admin 修改/删除。因此「放行管理员」的判定统一从
- * `role === "admin"` 改成 `isPrivileged(role)` —— 否则 root 会被意外挡在
- * 各种 admin 专属接口之外。
+ * 命名约定：
+ *   isPrivileged  → root / superadmin（全权；资源特权 + 管理接口直接放行）
+ *   isAnyAdmin    → root / superadmin / admin（能进管理面板；admin 还要过白名单）
  */
+export function isRoot(role: string | null | undefined): boolean {
+  return role === "root"
+}
+
 export function isPrivileged(role: string | null | undefined): boolean {
-  return role === "admin" || role === "root"
+  return role === "superadmin" || role === "root"
+}
+
+/** 任何「管理员」角色（含自定义白名单的 admin） */
+export function isAnyAdmin(role: string | null | undefined): boolean {
+  return role === "superadmin" || role === "root" || role === "admin"
 }
 
 /* --------------------------------------------------------------------------
