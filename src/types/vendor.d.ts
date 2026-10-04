@@ -59,7 +59,7 @@ declare module "jsmediatags" {
     track?: string
     genre?: string
     picture?: JsMediaTagsPicture
-    lyrics?: string
+    lyrics?: string | { language: string; descriptor: string; lyrics: string }
   }
 
   export interface JsMediaTagResult {
