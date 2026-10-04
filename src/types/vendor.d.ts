@@ -41,3 +41,40 @@ declare module "gifenc" {
     format?: string
   ): Uint8Array
 }
+
+declare module "jsmediatags" {
+  export interface JsMediaTagsPicture {
+    format: string
+    type: string
+    description: string
+    data: number[]
+  }
+
+  export interface JsMediaTags {
+    title?: string
+    artist?: string
+    album?: string
+    year?: string
+    comment?: string | { language: string; descriptor: string; text: string }
+    track?: string
+    genre?: string
+    picture?: JsMediaTagsPicture
+    lyrics?: string
+  }
+
+  export interface JsMediaTagResult {
+    type: string
+    version: string
+    tags: JsMediaTags
+  }
+
+  export interface JsMediaCallbacks {
+    onSuccess: (tag: JsMediaTagResult) => void
+    onError: (error: { type: string; info: string }) => void
+  }
+
+  const jsmediatags: {
+    read(file: Blob, callbacks: JsMediaCallbacks): void
+  }
+  export default jsmediatags
+}

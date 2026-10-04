@@ -31,6 +31,7 @@ const LOADERS: Record<string, React.LazyExoticComponent<React.ComponentType>> = 
   "video-frame": React.lazy(() => import("@/tools/video-frame")),
   "audio-extract": React.lazy(() => import("@/tools/audio-extract")),
   "audio-trim": React.lazy(() => import("@/tools/audio-trim")),
+  "audio-tags": React.lazy(() => import("@/tools/audio-tags")),
   "markdown-preview": React.lazy(() => import("@/tools/markdown-preview")),
   "text-diff": React.lazy(() => import("@/tools/text-diff")),
   "data-format": React.lazy(() => import("@/tools/data-format")),

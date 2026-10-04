@@ -27,6 +27,7 @@ import {
   Scissors,
   Sparkles,
   Table2,
+  Tags,
   Video,
 } from "lucide-react"
 
@@ -246,6 +247,14 @@ export const TOOLS: ToolMeta[] = [
     icon: Scissors,
     category: "media",
     tone: TONES.rose,
+  },
+  {
+    id: "audio-tags",
+    name: "toolbox.audioTags.name",
+    desc: "toolbox.audioTags.desc",
+    icon: Tags,
+    category: "media",
+    tone: TONES.amber,
   },
 
   // ── 文档与文本 ────────────────────────────────────────────────────────
