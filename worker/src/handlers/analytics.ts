@@ -9,9 +9,10 @@
  * 区分「是否同一访客」，无法反查具体是谁。
  */
 import { json, assertContentLengthWithin } from "../http"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { hitRateLimit, clientIp } from "../ratelimit"
+import { siteOffsetHours } from "../settings"
 import type { Env } from "../env"
 
 /**
@@ -123,32 +124,56 @@ export async function track(env: Env, request: Request): Promise<Response> {
 /**
  * GET /api/admin/analytics?days=7 —— 管理员查询统计。
  * 返回：
- *   - summary：总 PV、总 UV
- *   - byDay：按天的 [{date, pv, uv}]（趋势图）
+ *   - summary：总 PV、总 UV、平均每访客浏览页数、活跃天数与峰值
+ *   - byDay：按中国标准时间自然日的 [{date, pv, uv}]（趋势图）
+ *   - byHour：按中国标准时间小时的 [{hour, pv, uv}]（访问时段）
  *   - byPath：按路径 [{path, pv, uv}]（页面热度，Top N）
  *   - byReferrer：按来源 [{referrer, pv}]（来源分析）
  */
 export async function overview(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "analytics")
   const url = new URL(request.url)
   const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 7) || 7, 1), 90)
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+  // 站点时区偏移（后台可配，默认 +8 = 北京时间），按自然日/小时聚合用它
+  const off = await siteOffsetHours(env)
 
-  // 总 PV / UV
+  // 总 PV / UV / 回访质量。单页访客是只上报过一次页面浏览的访客，
+  // 没有把匿名 visitor_id 和真实账号关联起来，仍然保持隐私友好。
   const summary = await env.DB.prepare(
-    "SELECT COUNT(*) AS pv, COUNT(DISTINCT visitor_id) AS uv FROM analytics_events WHERE created_at >= ?"
+    `SELECT COUNT(*) AS pv,
+            COUNT(DISTINCT visitor_id) AS uv,
+            COUNT(DISTINCT substr(datetime(created_at, '+${off} hours'), 1, 10)) AS activeDays,
+            (SELECT COUNT(*) FROM (
+               SELECT visitor_id FROM analytics_events
+                WHERE created_at >= ?
+               GROUP BY visitor_id HAVING COUNT(*) = 1
+             )) AS singlePageVisitors
+       FROM analytics_events WHERE created_at >= ?`
   )
-    .bind(since)
-    .first<{ pv: number; uv: number }>()
+    .bind(since, since)
+    .first<{ pv: number; uv: number; activeDays: number; singlePageVisitors: number }>()
 
-  // 按天（SQLite 的 date 函数按 UTC，这里用本地日期字符串前 10 位）
+  // 按中国标准时间自然日聚合。created_at 存 ISO UTC，直接 substr 会把晚间
+  // 访问算到错误的一天，这里统一加 8 小时再分组。
   const byDay = await env.DB.prepare(
-    `SELECT substr(created_at, 1, 10) AS date, COUNT(*) AS pv, COUNT(DISTINCT visitor_id) AS uv
+    `SELECT substr(datetime(created_at, '+${off} hours'), 1, 10) AS date,
+            COUNT(*) AS pv, COUNT(DISTINCT visitor_id) AS uv
        FROM analytics_events WHERE created_at >= ?
       GROUP BY date ORDER BY date ASC`
   )
     .bind(since)
     .all<{ date: string; pv: number; uv: number }>()
+
+  // 按中国标准时间小时聚合，帮助判断用户最常访问的时段。
+  const byHour = await env.DB.prepare(
+    `SELECT CAST(strftime('%H', datetime(created_at, '+${off} hours')) AS INTEGER) AS hour,
+            COUNT(*) AS pv, COUNT(DISTINCT visitor_id) AS uv
+       FROM analytics_events WHERE created_at >= ?
+      GROUP BY hour ORDER BY hour ASC`
+  )
+    .bind(since)
+    .all<{ hour: number; pv: number; uv: number }>()
 
   // 按路径 Top 20
   const byPath = await env.DB.prepare(
@@ -159,14 +184,14 @@ export async function overview(env: Env, request: Request): Promise<Response> {
     .bind(since)
     .all<{ path: string; pv: number; uv: number }>()
 
-  // 按来源 Top 10
+  // 按来源 Top 10，同时返回 UV，避免只看 PV 误判来源质量。
   const byReferrer = await env.DB.prepare(
-    `SELECT referrer, COUNT(*) AS pv
+    `SELECT referrer, COUNT(*) AS pv, COUNT(DISTINCT visitor_id) AS uv
        FROM analytics_events WHERE created_at >= ?
       GROUP BY referrer ORDER BY pv DESC LIMIT 10`
   )
     .bind(since)
-    .all<{ referrer: string; pv: number }>()
+    .all<{ referrer: string; pv: number; uv: number }>()
 
   // 按设备类别（ua 已在入库时归类为 desktop / mobile / tablet）
   const byDevice = await env.DB.prepare(
@@ -177,9 +202,20 @@ export async function overview(env: Env, request: Request): Promise<Response> {
     .bind(since)
     .all<{ ua: string; pv: number; uv: number }>()
 
+  const pv = Number(summary?.pv ?? 0)
+  const uv = Number(summary?.uv ?? 0)
+  const singlePageVisitors = Number(summary?.singlePageVisitors ?? 0)
   return json({
-    summary: { pv: summary?.pv ?? 0, uv: summary?.uv ?? 0 },
+    summary: {
+      pv,
+      uv,
+      activeDays: Number(summary?.activeDays ?? 0),
+      avgPagesPerVisitor: uv > 0 ? Math.round((pv / uv) * 100) / 100 : 0,
+      singlePageVisitors,
+      returningVisitors: Math.max(0, uv - singlePageVisitors),
+    },
     byDay: byDay.results ?? [],
+    byHour: byHour.results ?? [],
     byPath: byPath.results ?? [],
     byReferrer: byReferrer.results ?? [],
     byDevice: byDevice.results ?? [],
@@ -231,7 +267,7 @@ const DONATION_STATUS_LABELS: Record<string, string> = {
  *   - 邮箱临时箱单列（`mailboxes.is_temp`），不混进「人均邮箱数」。
  */
 export async function userOverview(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "analytics")
   const url = new URL(request.url)
   const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 30) || 30, 1), 90)
   const now = Date.now()
@@ -353,17 +389,33 @@ export async function userOverview(env: Env, request: Request): Promise<Response
     ).bind(since30d),
     // 「更多数据」：跨模块的补充指标（中转站/积分/成就/反馈/社区/邮件/邀请/其他）。
     // 一次性子查询拉全，标签在响应里服务端下发（与 FEATURE_LABELS 同约定）。
+    //
+    // 2026-10-04 扩充：新增邮箱转发、网盘文件量与人数、AI 绑定账号数、
+    // 积分发放/消费/流水、签到人次、社区图片与评论量、通知未读与参与人数、
+    // 私信会话、活动进行中数量、风控与内容安全（风险账号/申诉/DNS 审计/审核名单）、
+    // 以及账号生命周期（注销用户、改名次数）等指标。全部来自已存在的表，
+    // 不新增迁移，也不引入新的查询次数（仍是一条聚合查询）。
     env.DB.prepare(
       `SELECT
          -- 中转站
          (SELECT COALESCE(SUM(request_count), 0) FROM newapi_accounts) AS aiCalls,
          (SELECT COALESCE(SUM(used_quota), 0) FROM newapi_accounts) AS aiQuota,
          (SELECT COUNT(*) FROM newapi_keys) AS aiKeys,
-         -- 积分商城
+         (SELECT COUNT(DISTINCT user_id) FROM newapi_keys) AS aiKeyUsers,
+         (SELECT COUNT(*) FROM wb2api_bindings WHERE status = 'active') AS wb2apiActive,
+         (SELECT COUNT(*) FROM cli2api_bindings WHERE status = 'active') AS cli2apiActive,
+         -- 积分与商城
          (SELECT COALESCE(SUM(balance), 0) FROM user_points) AS pointsBalance,
+         (SELECT COUNT(*) FROM user_points WHERE balance > 0) AS pointsHolders,
+         (SELECT COALESCE(SUM(delta), 0) FROM point_transactions WHERE delta > 0) AS pointsIssued,
+         (SELECT COALESCE(SUM(-delta), 0) FROM point_transactions WHERE delta < 0) AS pointsSpent,
+         (SELECT COUNT(*) FROM point_transactions) AS pointTxns,
          (SELECT COUNT(*) FROM point_products WHERE enabled = 1) AS products,
          (SELECT COUNT(*) FROM point_orders) AS orders,
          (SELECT COUNT(*) FROM point_orders WHERE delivered_at IS NOT NULL) AS ordersDelivered,
+         (SELECT COUNT(*) FROM point_orders WHERE status = 'pending') AS ordersPending,
+         (SELECT COUNT(*) FROM daily_checkins) AS checkins,
+         (SELECT COUNT(DISTINCT user_id) FROM daily_checkins) AS checkinUsers,
          -- 成就
          (SELECT COUNT(*) FROM user_achievements) AS achievements,
          (SELECT COUNT(DISTINCT user_id) FROM user_achievements) AS achievers,
@@ -371,29 +423,54 @@ export async function userOverview(env: Env, request: Request): Promise<Response
          (SELECT COUNT(*) FROM feedback) AS feedback,
          (SELECT COUNT(*) FROM feedback WHERE admin_reply IS NOT NULL AND admin_reply <> '') AS feedbackReplied,
          (SELECT COUNT(*) FROM feedback WHERE status = 'pending') AS feedbackPending,
+         (SELECT COUNT(*) FROM feedback WHERE category = 'bug') AS feedbackBug,
+         (SELECT COUNT(*) FROM feedback WHERE category = 'feature') AS feedbackFeature,
          -- 社区与互动
+         (SELECT COUNT(*) FROM posts WHERE deleted_at IS NULL) AS posts,
          (SELECT COALESCE(SUM(like_count), 0) FROM posts WHERE deleted_at IS NULL) AS postLikes,
          (SELECT COALESCE(SUM(like_count), 0) FROM post_comments WHERE deleted_at IS NULL) AS commentLikes,
          (SELECT COUNT(*) FROM post_shares) AS shares,
+         (SELECT COUNT(*) FROM post_edits) AS postEdits,
          (SELECT COUNT(*) FROM chat_messages) AS chatMessages,
          (SELECT COUNT(DISTINCT user_id) FROM chat_messages) AS chatters,
          (SELECT COUNT(*) FROM direct_messages) AS dms,
+         (SELECT COUNT(DISTINCT from_user_id) FROM direct_messages) AS dmSenders,
          (SELECT COUNT(*) FROM notifications) AS notifications,
+         (SELECT COUNT(*) FROM notifications WHERE read = 0) AS notificationsUnread,
          -- 邮件
          (SELECT COUNT(*) FROM messages) AS mails,
+         (SELECT COUNT(*) FROM messages WHERE read = 1) AS mailsRead,
+         (SELECT COUNT(*) FROM mailboxes WHERE is_temp = 0) AS mailboxCount,
+         -- 网盘
+         (SELECT COUNT(*) FROM storage_objects) AS storageFiles,
+         (SELECT COALESCE(SUM(size), 0) FROM storage_objects) AS storageBytes,
+         (SELECT COUNT(*) FROM storage_accounts WHERE enabled = 1) AS storageUsers,
          -- 邀请
          (SELECT COUNT(*) FROM invite_codes) AS inviteCodes,
+         (SELECT COUNT(*) FROM invite_codes WHERE used_count > 0) AS inviteCodesUsed,
+         (SELECT COUNT(DISTINCT created_by) FROM invite_codes WHERE created_by IS NOT NULL) AS inviteCreators,
+         -- 内容安全与风控
+         (SELECT COUNT(*) FROM risk_accounts) AS riskAccounts,
+         (SELECT COUNT(*) FROM account_appeals) AS appeals,
+         (SELECT COUNT(*) FROM dns_audit_findings WHERE status = 'open') AS dnsFindings,
+         (SELECT COUNT(*) FROM moderation_whitelist) AS modWhitelist,
+         (SELECT COUNT(*) FROM moderation_blacklist) AS modBlacklist,
+         (SELECT COUNT(*) FROM moderation_conditions WHERE enabled = 1) AS modConditions,
+         -- 账号生命周期
+         (SELECT COUNT(*) FROM deleted_users) AS deletedUsers,
+         (SELECT COUNT(*) FROM username_changes) AS usernameChanges,
+         (SELECT COUNT(*) FROM user_api_keys) AS apiKeys,
          -- 其他
          (SELECT COUNT(*) FROM custom_titles) AS customTitles,
          (SELECT COUNT(*) FROM user_titles) AS grantedTitles,
          (SELECT COUNT(*) FROM events) AS events,
+         (SELECT COUNT(*) FROM events WHERE status = 'active') AS eventsActive,
          (SELECT COUNT(*) FROM event_claims) AS eventClaims,
          (SELECT COUNT(*) FROM fun_links) AS funLinks,
          (SELECT COUNT(*) FROM oauth_clients) AS oauthClients,
          (SELECT COUNT(*) FROM oauth_grants) AS oauthGrants,
          (SELECT COUNT(*) FROM tempbox_batches) AS tempboxes,
-         (SELECT COUNT(*) FROM wb2api_bindings) AS wb2apiBindings,
-         (SELECT COUNT(*) FROM cli2api_bindings) AS cli2apiBindings`
+         (SELECT COUNT(*) FROM user_stickers) AS stickers`
     ),
   ])
 
@@ -466,6 +543,9 @@ export async function userOverview(env: Env, request: Request): Promise<Response
         { label: "人均调用次数", value: avg(ex.aiCalls) },
         { label: "已消耗额度 (quota)", value: n(ex.aiQuota) },
         { label: "API Key 数", value: n(ex.aiKeys) },
+        { label: "创建过 Key 的人数", value: n(ex.aiKeyUsers) },
+        { label: "wb2api 有效绑定", value: n(ex.wb2apiActive) },
+        { label: "cli2api 有效绑定", value: n(ex.cli2apiActive) },
       ],
     },
     {
@@ -492,6 +572,8 @@ export async function userOverview(env: Env, request: Request): Promise<Response
         { label: "反馈总数", value: n(ex.feedback) },
         { label: "已回复", value: n(ex.feedbackReplied) },
         { label: "待处理", value: n(ex.feedbackPending) },
+        { label: "Bug 类", value: n(ex.feedbackBug) },
+        { label: "功能建议类", value: n(ex.feedbackFeature) },
       ],
     },
     {
@@ -507,25 +589,82 @@ export async function userOverview(env: Env, request: Request): Promise<Response
     },
     {
       group: "邮件",
-      items: [{ label: "收信总数", value: n(ex.mails) }],
+      items: [
+        { label: "收信总数", value: n(ex.mails) },
+        { label: "已读邮件", value: n(ex.mailsRead) },
+        { label: "未读邮件", value: Math.max(0, n(ex.mails) - n(ex.mailsRead)) },
+        { label: "普通邮箱数", value: n(ex.mailboxCount) },
+        { label: "人均邮件", value: avg(ex.mails) },
+      ],
+    },
+    {
+      group: "网盘",
+      items: [
+        { label: "文件总数", value: n(ex.storageFiles) },
+        { label: "占用空间 (MB)", value: Math.round(n(ex.storageBytes) / 1048576) },
+        { label: "开通网盘人数", value: n(ex.storageUsers) },
+        { label: "人均文件数", value: avg(ex.storageFiles) },
+      ],
+    },
+    {
+      group: "积分明细",
+      items: [
+        { label: "累计发放", value: n(ex.pointsIssued) },
+        { label: "累计消费", value: n(ex.pointsSpent) },
+        { label: "持有积分的人数", value: n(ex.pointsHolders) },
+        { label: "积分流水条数", value: n(ex.pointTxns) },
+        { label: "签到总人次", value: n(ex.checkins) },
+        { label: "签到过的人数", value: n(ex.checkinUsers) },
+        { label: "待发放订单", value: n(ex.ordersPending) },
+      ],
     },
     {
       group: "邀请",
-      items: [{ label: "邀请码总数", value: n(ex.inviteCodes) }],
+      items: [
+        { label: "邀请码总数", value: n(ex.inviteCodes) },
+        { label: "已被使用的邀请码", value: n(ex.inviteCodesUsed) },
+        { label: "创建过邀请码的人数", value: n(ex.inviteCreators) },
+      ],
+    },
+    {
+      group: "内容安全与风控",
+      items: [
+        { label: "风险账号", value: n(ex.riskAccounts) },
+        { label: "封禁申诉", value: n(ex.appeals) },
+        { label: "待处理 DNS 审计", value: n(ex.dnsFindings) },
+        { label: "监管白名单", value: n(ex.modWhitelist) },
+        { label: "黑名单 IP", value: n(ex.modBlacklist) },
+        { label: "启用的自动条件", value: n(ex.modConditions) },
+      ],
+    },
+    {
+      group: "账号生命周期",
+      items: [
+        { label: "已注销用户", value: n(ex.deletedUsers) },
+        { label: "改名次数", value: n(ex.usernameChanges) },
+        { label: "公开 API Key", value: n(ex.apiKeys) },
+      ],
     },
     {
       group: "其他",
       items: [
+        { label: "帖子总数", value: n(ex.posts) },
+        { label: "帖子编辑次数", value: n(ex.postEdits) },
+        { label: "私信发送者", value: n(ex.dmSenders) },
+        { label: "未读通知", value: n(ex.notificationsUnread) },
+        { label: "表情包总数", value: n(ex.stickers) },
         { label: "自定义称号", value: n(ex.customTitles) },
         { label: "已发放称号", value: n(ex.grantedTitles) },
         { label: "活动数", value: n(ex.events) },
+        { label: "进行中活动", value: n(ex.eventsActive) },
         { label: "活动参与数", value: n(ex.eventClaims) },
         { label: "工具箱链接数", value: n(ex.funLinks) },
         { label: "OAuth 客户端", value: n(ex.oauthClients) },
         { label: "OAuth 授权数", value: n(ex.oauthGrants) },
         { label: "临时分享箱", value: n(ex.tempboxes) },
-        { label: "wb2api 绑定", value: n(ex.wb2apiBindings) },
-        { label: "cli2api 绑定", value: n(ex.cli2apiBindings) },
+        { label: "wb2api 绑定（有效）", value: n(ex.wb2apiActive) },
+        { label: "cli2api 绑定（有效）", value: n(ex.cli2apiActive) },
+        { label: "AI Key 用户数", value: n(ex.aiKeyUsers) },
       ],
     },
   ]

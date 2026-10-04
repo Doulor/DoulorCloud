@@ -115,13 +115,12 @@ export function TwoFactorCard() {
     }
   }
 
-  const regenerate = async () => {
+  const disableTotp = async () => {
     setBusy(true)
     try {
-      const res = await twoFactorApi.regenerateRecovery()
-      setRecoveryCodes(res.recoveryCodes)
+      await twoFactorApi.disableTotp()
       await load()
-      toast.success(t("s2fa.recoveryRegenerated"))
+      toast.success(t("s2fa.totpOff"))
     } catch (err) {
       toast.error(errMsg(err, t("s2fa.opFailed")))
     } finally {
@@ -129,14 +128,13 @@ export function TwoFactorCard() {
     }
   }
 
-  const disable = async () => {
-    const input = window.prompt(t("s2fa.disablePrompt"))
-    if (!input) return
+  const regenerate = async () => {
     setBusy(true)
     try {
-      await twoFactorApi.disable(input.trim())
+      const res = await twoFactorApi.regenerateRecovery()
+      setRecoveryCodes(res.recoveryCodes)
       await load()
-      toast.success(t("s2fa.disabled"))
+      toast.success(t("s2fa.recoveryRegenerated"))
     } catch (err) {
       toast.error(errMsg(err, t("s2fa.opFailed")))
     } finally {
@@ -270,9 +268,14 @@ export function TwoFactorCard() {
                   )}
                 </div>
                 {status.totpConfirmed ? (
-                  <Button size="sm" variant="outline" disabled={busy} onClick={() => void startTotp()}>
-                    {t("s2fa.reset")}
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="outline" disabled={busy} onClick={() => void disableTotp()}>
+                      {t("s2fa.disable")}
+                    </Button>
+                    <Button size="sm" variant="outline" disabled={busy} onClick={() => void startTotp()}>
+                      {t("s2fa.reset")}
+                    </Button>
+                  </div>
                 ) : (
                   <Button size="sm" disabled={busy} onClick={() => void startTotp()}>
                     {t("s2fa.enable")}
@@ -308,14 +311,10 @@ export function TwoFactorCard() {
               </div>
             )}
 
-            {status.enabled &&
-              (status.enforced ? (
-                <p className="text-xs text-muted-foreground">{t("s2fa.cannotDisable")}</p>
-              ) : (
-                <Button size="sm" variant="destructive" disabled={busy} onClick={() => void disable()}>
-                  {t("s2fa.disableAll")}
-                </Button>
-              ))}
+            {/* 2026-10-04 ventus 反馈：原「关闭全部二次认证」红色按钮毫无意义 ——
+                TOTP 和邮箱验证各有自己的开关，用户自由开关每一种即可；两个都关掉
+                二次认证自然完全关闭。红色按钮反而要求输入一个用户未必有的码，把人
+                引向死路。故整块移除。 */}
           </div>
         )}
       </CardContent>

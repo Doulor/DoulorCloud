@@ -7,7 +7,7 @@
  * 读写同一份数据，但权限不同（这里要 admin，那边要 API Key）。
  */
 import { json } from "../http"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { listApiFeatures } from "../api-engine"
 import { getSettingBool } from "../settings"
 import type { Env } from "../env"
@@ -17,7 +17,7 @@ const KNOWN_FEATURES = ["dns", "mailbox", "temp_mailbox"] as const
 
 /** GET /api/admin/api-config —— 读全部功能配置 + 计入成就开关 */
 export async function getApiConfig(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "api")
   const features = await listApiFeatures(env)
   return json({
     features,
@@ -34,7 +34,7 @@ export async function getApiConfig(env: Env, request: Request): Promise<Response
  * （防止前端被篡改后往表里塞脏功能）。
  */
 export async function saveApiConfig(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "api")
   const body = (await request.json().catch(() => ({}))) as {
     countAchievements?: boolean
     features?: {

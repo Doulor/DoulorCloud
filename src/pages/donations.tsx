@@ -1825,7 +1825,19 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
   }
 
   const codes = data?.codes ?? []
-  const available = (data?.features ?? []).filter((f) => !f.owned)
+  const allFeatures = data?.features ?? []
+  /** 还没开通的模块（不看「是否允许兑换」，只用于区分提示文案） */
+  const notOwned = allFeatures.filter((f) => !f.owned)
+  /**
+   * 自选券**实际可选**的模块：既没开通、又在「首捐券可兑换」范围内
+   * （范围由管理面板设置，后端 redeemVoucher 也会再校验一次）。
+   *
+   * ⚠️ 判定写成 `allowed !== false` 而不是 `allowed`：老版本后端不下发这个字段，
+   * 若按 `!allowed` 过滤，会把**所有**模块都当成「不可兑换」——
+   * 前端先上线、后端还没上线的那一小段时间里，所有自选券会突然全变灰。
+   * 缺失 = 不限制，与后端「设置项缺失 = 全部可兑换」的默认口径一致。
+   */
+  const available = allFeatures.filter((f) => !f.owned && f.allowed !== false)
 
   return (
     <Card className="mb-6">
@@ -1902,17 +1914,27 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
                           />
                         </SelectTrigger>
                         <SelectContent>
-                          {(data?.features ?? []).map((f) => (
-                            <SelectItem key={f.key} value={f.key} disabled={f.owned}>
+                          {allFeatures.map((f) => (
+                            <SelectItem
+                              key={f.key}
+                              value={f.key}
+                              disabled={f.owned || f.allowed === false}
+                            >
                               {f.label}
-                              {f.owned ? t("don.voucher.owned") : ""}
+                              {f.owned
+                                ? t("don.voucher.owned")
+                                : f.allowed === false
+                                  ? t("don.voucher.notRedeemable")
+                                  : ""}
                             </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
                       {!selfSelectable && (
                         <span className="text-xs text-amber-600 dark:text-amber-400">
-                          {t("don.voucher.allOwnedNote")}
+                          {notOwned.length === 0
+                            ? t("don.voucher.allOwnedNote")
+                            : t("don.voucher.noRedeemableNote")}
                         </span>
                       )}
                     </>
@@ -1966,10 +1988,18 @@ function RedeemCard({ onChanged }: { onChanged: () => void }) {
                 <SelectValue placeholder={t("don.voucher.selfSelectPh")} />
               </SelectTrigger>
               <SelectContent>
-                {(data?.features ?? []).map((f) => (
-                  <SelectItem key={f.key} value={f.key} disabled={f.owned}>
+                {allFeatures.map((f) => (
+                  <SelectItem
+                    key={f.key}
+                    value={f.key}
+                    disabled={f.owned || f.allowed === false}
+                  >
                     {f.label}
-                    {f.owned ? t("don.voucher.owned") : ""}
+                    {f.owned
+                      ? t("don.voucher.owned")
+                      : f.allowed === false
+                        ? t("don.voucher.notRedeemable")
+                        : ""}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -2229,9 +2259,15 @@ function Wb2ApiDonationCard({
   // 已经绑定过的人仍看得到卡片 —— 否则就没法在这里撤销自己的绑定了。
   if (!block.visible && block.bindings.length === 0) return null
 
+  // 国内版/国际版都关掉 = 通道实际不可用，整卡隐藏
+  const availableRealms = block.availableRealms ?? ["cn", "global"]
+  if (availableRealms.length === 0) return null
+
   const full = block.remaining < 1
+  const defaultRealm: "cn" | "global" = block.realm === "global" ? "global" : "cn"
   const realm: "cn" | "global" =
-    realmChoice ?? (block.realm === "global" ? "global" : "cn")
+    realmChoice ??
+    (availableRealms.includes(defaultRealm) ? defaultRealm : (availableRealms[0] as "cn" | "global"))
   const realmLabel = realm === "global" ? tStatic("don.realm.global") : tStatic("don.realm.cn")
 
   return (
@@ -2290,17 +2326,19 @@ function Wb2ApiDonationCard({
         <div className="space-y-2">
           <Label className="text-xs text-muted-foreground">{t("don.wb.realmLabel")}</Label>
           <div className="flex gap-2">
-            {(["cn", "global"] as const).map((r) => (
-              <Button
-                key={r}
-                type="button"
-                size="sm"
-                variant={realm === r ? "default" : "outline"}
-                onClick={() => setRealmChoice(r)}
-              >
-                {r === "cn" ? t("don.realm.cn") : t("don.realm.global")}
-              </Button>
-            ))}
+            {(["cn", "global"] as const)
+              .filter((r) => (block.availableRealms ?? ["cn", "global"]).includes(r))
+              .map((r) => (
+                <Button
+                  key={r}
+                  type="button"
+                  size="sm"
+                  variant={realm === r ? "default" : "outline"}
+                  onClick={() => setRealmChoice(r)}
+                >
+                  {r === "cn" ? t("don.realm.cn") : t("don.realm.global")}
+                </Button>
+              ))}
           </div>
           <p className="text-xs text-muted-foreground">
             {t("don.wb.realmHint")}

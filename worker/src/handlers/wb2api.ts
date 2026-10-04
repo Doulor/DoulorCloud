@@ -14,11 +14,12 @@
  */
 import { ApiError, json } from "../http"
 import { generateToken, hashToken, uuid } from "../crypto"
-import { requireUser, type UserRow } from "../auth"
+import { requireUser, type UserRow, isAnyAdmin } from "../auth"
 import {
   parsePermissions,
   featurePermissionSql,
   featurePermittedGuard,
+  notWhitelistedGuard,
   type Feature,
 } from "../permissions"
 import { audit, getSetting, getSettingBool, getSettingNumber } from "../settings"
@@ -61,6 +62,19 @@ function normalizeRealm(v: unknown): Realm | null {
   return (REALMS as readonly string[]).includes(s) ? (s as Realm) : null
 }
 
+/**
+ * 当前允许对接的上游域（2026-10-03 站长要求：国内版/国际版可用开关）。
+ *
+ * 捐献/邀请里用户本可自选国内版/国际版，但管理员可以关掉其中一项 ——
+ * 关掉的版本在捐献页隐藏、接口拒绝绑定。返回空数组 = 通道实际不可用。
+ */
+export async function availableRealms(env: Env): Promise<Realm[]> {
+  const out: Realm[] = []
+  if (await getSettingBool(env, "wb2api_realm_cn")) out.push("cn")
+  if (await getSettingBool(env, "wb2api_realm_global")) out.push("global")
+  return out
+}
+
 interface BindingRow {
   id: string
   user_id: string
@@ -92,7 +106,7 @@ interface SessionRow {
 
 async function requireAdminUser(env: Env, request: Request): Promise<UserRow> {
   const user = await requireUser(env, request)
-  if (user.role !== "admin" && user.role !== "root") {
+  if (!isAnyAdmin(user.role)) {
     throw new ApiError(403, "需要管理员权限", "FORBIDDEN")
   }
   return user
@@ -223,7 +237,25 @@ export async function loginStart(env: Env, request: Request): Promise<Response> 
   // 用户自选的上游域；没选或非法 → 用管理员设的默认（wb2Start 内部读 wb2api_realm）
   const chosenRealm = normalizeRealm(body.realm)
 
-  const started = await wb2Start(env, chosenRealm ?? undefined)
+  // 国内版/国际版开关校验（2026-10-03 站长要求）：关掉的版本不可选
+  const allowed = await availableRealms(env)
+  if (allowed.length === 0) {
+    throw new ApiError(503, "反代账号通道当前不可用", "WB2API_NO_REALM")
+  }
+  if (chosenRealm && !allowed.includes(chosenRealm)) {
+    throw new ApiError(403, "该版本已停用，请选择其他版本", "WB2API_REALM_DISABLED")
+  }
+  const defaultRealm: Realm =
+    (await getSetting(env, "wb2api_realm")).trim().toLowerCase() === "global" ? "global" : "cn"
+  // 最终用的域：用户选且开放 → 用它；否则用默认（若默认被关则落到第一个仍开放的）
+  const effectiveRealm: Realm =
+    chosenRealm && allowed.includes(chosenRealm)
+      ? chosenRealm
+      : allowed.includes(defaultRealm)
+        ? defaultRealm
+        : allowed[0]
+
+  const started = await wb2Start(env, effectiveRealm)
 
   // 拍一张「此刻网关池里有哪些账号」的快照，随会话落库。
   //
@@ -685,7 +717,7 @@ export async function adminRemoveBinding(
     // 这样既省掉一次 SELECT，也不会整列覆盖并发写入的其他模块权限。
     const res = await env.DB.prepare(
       `UPDATE users SET permissions = ${featurePermissionSql("ai", false)}, updated_at = ?
-        WHERE id = ? AND ${featurePermittedGuard("ai")}`
+        WHERE id = ? AND ${featurePermittedGuard("ai")} AND ${notWhitelistedGuard()}`
     )
       .bind(now, binding.user_id)
       .run()
@@ -828,6 +860,8 @@ export async function wb2apiDonationBlock(
   used: number
   remaining: number
   realm: string
+  /** 当前允许用户自选的版本（国内版/国际版开关决定）；前端据此隐藏被关的版本 */
+  availableRealms: Realm[]
   bindings: ReturnType<typeof toPublicBinding>[]
   /** 该通道解锁的功能（前端据此在卡片上标注） */
   feature: Feature
@@ -854,6 +888,7 @@ export async function wb2apiDonationBlock(
     used,
     remaining: Math.max(0, limit - used),
     realm,
+    availableRealms: await availableRealms(env),
     bindings: bindings.map(toPublicBinding),
     feature: "ai",
   }

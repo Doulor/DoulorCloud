@@ -1,6 +1,6 @@
 import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { audit as recordAudit } from "../settings"
 import type { Env } from "../env"
@@ -134,7 +134,7 @@ export async function listFunLinks(env: Env, request: Request): Promise<Response
 
 /** GET /api/admin/fun-links —— 管理员看全部（含已下架） */
 export async function adminListFunLinks(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "funLinks")
   const rows = await env.DB.prepare(
     "SELECT * FROM fun_links ORDER BY sort_order ASC, created_at ASC"
   ).all<FunLinkRow>()
@@ -143,7 +143,7 @@ export async function adminListFunLinks(env: Env, request: Request): Promise<Res
 
 /** POST /api/admin/fun-links —— 新增一条 */
 export async function createFunLink(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "funLinks")
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
 
   const count = await env.DB.prepare("SELECT COUNT(*) AS c FROM fun_links").first<{ c: number }>()
@@ -188,7 +188,7 @@ export async function updateFunLink(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "funLinks")
 
   const row = await env.DB.prepare("SELECT * FROM fun_links WHERE id = ?")
     .bind(id)
@@ -233,7 +233,7 @@ export async function deleteFunLink(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "funLinks")
 
   const row = await env.DB.prepare("SELECT * FROM fun_links WHERE id = ?")
     .bind(id)

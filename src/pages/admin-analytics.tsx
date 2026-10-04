@@ -13,7 +13,7 @@
  */
 import * as React from "react"
 import { toast } from "sonner"
-import { BarChart3, Eye, Users } from "lucide-react"
+import { BarChart3, CalendarDays, Clock, Eye, Repeat, Users } from "lucide-react"
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -60,29 +60,34 @@ function TrafficPanel({ days }: { days: string }) {
   const maxDayPv = Math.max(1, ...data.byDay.map((d) => d.pv))
   const maxRefPv = Math.max(1, ...data.byReferrer.map((r) => r.pv))
   const maxDevicePv = Math.max(1, ...(data.byDevice ?? []).map((d) => d.pv))
+  const maxHourPv = Math.max(1, ...(data.byHour ?? []).map((h) => h.pv))
+
+  const summaryCards = [
+    { icon: Eye, label: t("an.pv"), value: data.summary.pv },
+    { icon: Users, label: t("an.uv"), value: data.summary.uv },
+    { icon: CalendarDays, label: t("an.activeDays"), value: data.summary.activeDays ?? 0 },
+    { icon: BarChart3, label: t("an.avgPages"), value: data.summary.avgPagesPerVisitor ?? 0 },
+    { icon: Eye, label: t("an.singlePage"), value: data.summary.singlePageVisitors ?? 0 },
+    { icon: Repeat, label: t("an.returning"), value: data.summary.returningVisitors ?? 0 },
+  ]
 
   return (
     <div className="space-y-6">
       {/* 总览 */}
-      <div className="flex flex-wrap items-center gap-4">
-        <Card className="px-5 py-4">
-          <div className="flex items-center gap-3">
-            <Eye className="h-5 w-5 text-muted-foreground" />
-            <div>
-              <p className="text-xs text-muted-foreground">{t("an.pv")}</p>
-              <p className="text-2xl font-semibold tabular-nums">{data.summary.pv}</p>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        {summaryCards.map((card) => (
+          <Card key={card.label} className="px-5 py-4">
+            <div className="flex items-center gap-3">
+              <card.icon className="h-5 w-5 shrink-0 text-muted-foreground" />
+              <div className="min-w-0">
+                <p className="truncate text-xs text-muted-foreground" title={card.label}>
+                  {card.label}
+                </p>
+                <p className="text-2xl font-semibold tabular-nums">{card.value}</p>
+              </div>
             </div>
-          </div>
-        </Card>
-        <Card className="px-5 py-4">
-          <div className="flex items-center gap-3">
-            <Users className="h-5 w-5 text-muted-foreground" />
-            <div>
-              <p className="text-xs text-muted-foreground">{t("an.uv")}</p>
-              <p className="text-2xl font-semibold tabular-nums">{data.summary.uv}</p>
-            </div>
-          </div>
-        </Card>
+          </Card>
+        ))}
       </div>
 
       {/* 趋势图（纯 CSS 条形图） */}
@@ -116,6 +121,49 @@ function TrafficPanel({ days }: { days: string }) {
                   </span>
                 </div>
               ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 访问时段（按小时） */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Clock className="h-4 w-4 text-muted-foreground" />
+            {t("an.hour")}
+          </CardTitle>
+          <CardDescription>{t("an.hourDesc")}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {(data.byHour ?? []).length === 0 ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">{t("common.empty")}</p>
+          ) : (
+            <div className="flex h-32 items-end gap-0.5">
+              {Array.from({ length: 24 }, (_, h) => {
+                const row = (data.byHour ?? []).find((x) => x.hour === h)
+                const pv = row?.pv ?? 0
+                return (
+                  <div key={h} className="group relative flex flex-1 flex-col items-center">
+                    <div
+                      className="w-full rounded-t bg-primary/70 transition-[height] duration-500 group-hover:bg-primary"
+                      style={{ height: `${Math.max((pv / maxHourPv) * 100, pv > 0 ? 4 : 1)}%` }}
+                    />
+                    <div className="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded bg-foreground px-1.5 py-0.5 text-[10px] text-background group-hover:block">
+                      {t("an.hourLabel", { n: h })} · {pv} PV
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {(data.byHour ?? []).length > 0 && (
+            <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+              <span>0:00</span>
+              <span>6:00</span>
+              <span>12:00</span>
+              <span>18:00</span>
+              <span>23:00</span>
             </div>
           )}
         </CardContent>
@@ -173,8 +221,8 @@ function TrafficPanel({ days }: { days: string }) {
                       style={{ width: `${(r.pv / maxRefPv) * 100}%` }}
                     />
                   </div>
-                  <span className="w-12 shrink-0 text-right tabular-nums text-muted-foreground">
-                    {r.pv}
+                  <span className="w-20 shrink-0 text-right tabular-nums text-muted-foreground">
+                    {r.pv} PV · {r.uv ?? 0} UV
                   </span>
                 </div>
               ))

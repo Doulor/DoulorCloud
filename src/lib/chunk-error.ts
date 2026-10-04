@@ -14,9 +14,12 @@
  * 不能再刷，否则会无限刷新。
  */
 
-const RELOAD_FLAG = "chunk-reload-at"
-/** 这个窗口内已经刷过就不再刷，避免死循环 */
-const RELOAD_WINDOW_MS = 10_000
+const RELOAD_AT_KEY = "chunk-reload-at"
+const RELOAD_COUNT_KEY = "chunk-reload-count"
+/** 一个会话内**最多**自动硬重置几次。超过就彻底放弃，绝不无限刷。 */
+const MAX_AUTO_RELOADS = 2
+/** 两次自动硬重置之间的最小间隔。 */
+const MIN_RELOAD_INTERVAL_MS = 30_000
 
 /** 判断一个错误是不是「旧 chunk 加载失败」（而不是别的业务异常） */
 export function isChunkLoadError(err: unknown): boolean {
@@ -39,16 +42,32 @@ export function isChunkLoadError(err: unknown): boolean {
 
 /**
  * 若是 chunk 加载失败就自动刷新一次。
+ *
+ * 防循环用**双重保险**（2026-10-05 修「手机端隔几秒就重播开屏动画」）：
+ *   1. 次数上限：一个会话最多自动硬重置 `MAX_AUTO_RELOADS` 次；
+ *   2. 最小间隔：两次之间至少 `MIN_RELOAD_INTERVAL_MS`。
+ *
+ * 为什么不能只靠「10 秒时间窗」：
+ *   弱网手机上，硬重置会清空缓存 + 整页刷新，重新下载全部资源往往要
+ *   十几秒，于是「两次触发之间的间隔」天然 > 10 秒，时间窗形同虚设，
+ *   sessionStorage 在部分 webview 里又不可靠 —— 结果就是隔一会儿刷一次、
+ *   开屏动画反复重播、页面完全没法用。改成「最多 2 次」后，无论网络多差，
+ *   自动刷新顶多发生 2 次就停，剩下的交给用户手动刷新。
+ *
  * @returns 是否触发了刷新（true 表示调用方不用再展示错误页）
  */
 export function reloadOnceForChunkError(err: unknown): boolean {
   if (!isChunkLoadError(err)) return false
   try {
-    const last = Number(sessionStorage.getItem(RELOAD_FLAG) ?? 0)
-    if (Date.now() - last < RELOAD_WINDOW_MS) return false // 刚刷过 → 放弃，交给错误页
-    sessionStorage.setItem(RELOAD_FLAG, String(Date.now()))
+    const count = Number(sessionStorage.getItem(RELOAD_COUNT_KEY) ?? 0)
+    if (count >= MAX_AUTO_RELOADS) return false // 已经自动刷满次数，放弃
+    const last = Number(sessionStorage.getItem(RELOAD_AT_KEY) ?? 0)
+    if (Date.now() - last < MIN_RELOAD_INTERVAL_MS) return false // 刚刷过
+    sessionStorage.setItem(RELOAD_COUNT_KEY, String(count + 1))
+    sessionStorage.setItem(RELOAD_AT_KEY, String(Date.now()))
   } catch {
-    // sessionStorage 不可用（隐私模式等）时仍尝试刷新一次
+    // sessionStorage 不可用（隐私模式等）时仍尝试刷新一次；
+    // 此时次数上限失效，但隐私模式用户对「手动刷新一次」有预期，可接受。
   }
   void hardResetAndReload()
   return true

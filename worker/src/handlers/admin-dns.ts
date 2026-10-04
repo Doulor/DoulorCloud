@@ -17,7 +17,7 @@
  *    zone 上的记录，只有对账才看得见。
  */
 import { ApiError, json } from "../http"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { guardRateLimit } from "../ratelimit"
 import {
   callCloudflare,
@@ -204,7 +204,7 @@ async function loadIgnoredMap(env: Env): Promise<Map<string, Set<string>>> {
 
 /** GET /api/admin/dns —— 全站 DNS 记录列表（跨用户，带风险标记） */
 export async function listAdminDns(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "dns")
   const url = new URL(request.url)
   const q = (url.searchParams.get("q") ?? "").trim()
   const typeFilter = (url.searchParams.get("type") ?? "").trim().toUpperCase()
@@ -339,7 +339,7 @@ async function loadRow(env: Env, id: string): Promise<DnsRow> {
  * 而失败只写 status='error'，本地看起来「还在」，很容易被忽略。
  */
 export async function updateAdminDns(env: Env, request: Request, id: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "dns")
   const body = (await request.json()) as {
     name?: string
     type?: string
@@ -483,7 +483,7 @@ export async function updateAdminDns(env: Env, request: Request, id: string): Pr
 
 /** DELETE /api/admin/dns/:id —— 删除记录（Cloudflare 侧一并删） */
 export async function deleteAdminDns(env: Env, request: Request, id: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "dns")
   const existing = await loadRow(env, id)
 
   let cfError: string | null = null
@@ -520,7 +520,7 @@ export async function deleteAdminDns(env: Env, request: Request, id: string): Pr
  * 与「本地活着但 DNS 上不存在」的记录。探测有外部请求，所以单独限流。
  */
 export async function runDnsAudit(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "dns")
   const url = new URL(request.url)
   const deep = url.searchParams.get("deep") === "1"
   await guardRateLimit(env, `admin:dns:audit:${admin.id}`, deep ? 6 : 30, 300, "扫描过于频繁")
@@ -538,7 +538,7 @@ export async function runDnsAudit(env: Env, request: Request): Promise<Response>
 
 /** GET /api/admin/dns/findings —— 扫描发现项列表 */
 export async function listDnsFindings(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "dns")
   const url = new URL(request.url)
   const status = (url.searchParams.get("status") ?? "open").trim().toLowerCase()
   const severity = (url.searchParams.get("severity") ?? "").trim().toLowerCase()
@@ -638,7 +638,7 @@ export async function listDnsFindings(env: Env, request: Request): Promise<Respo
  * 不提供「删除」：留档本身就是这张表存在的理由。
  */
 export async function reviewDnsFinding(env: Env, request: Request, id: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "dns")
   const body = (await request.json()) as { status?: string; note?: string }
   const status = body.status === "open" ? "open" : body.status === "ignored" ? "ignored" : null
   if (!status) throw new ApiError(400, "status 只能是 ignored 或 open", "INVALID_INPUT")
@@ -737,7 +737,7 @@ function classifyPlatformRecord(rec: CfRecord, rootDomain: string): string | nul
  *   · `onlyInDb` —— 本地表有、CF 上没有：记录实际不生效（用户以为配好了）。
  */
 export async function compareCfDns(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "dns")
   await guardRateLimit(env, `admin:dns:cfdiff`, 20, 300, "对账过于频繁")
 
   const zoneId = env.ZONE_ID
@@ -831,7 +831,7 @@ export async function deleteOrphanCfRecord(
   request: Request,
   cfId: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "dns")
   const known = await env.DB.prepare("SELECT id, fqdn FROM dns_records WHERE cf_id = ?")
     .bind(cfId)
     .first<{ id: string; fqdn: string }>()
@@ -868,7 +868,7 @@ export async function deleteOrphanCfRecord(
  * body: `{ id, oldZoneId? }`
  */
 export async function recreateDnsRecord(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "dns")
   const body = (await request.json()) as { id?: string; oldZoneId?: string }
   const id = String(body.id ?? "").trim()
   if (!id) throw new ApiError(400, "缺少记录 id", "INVALID_INPUT")
@@ -963,7 +963,7 @@ export async function recreateDnsRecord(env: Env, request: Request): Promise<Res
  * body: `{ newFqdn, oldFqdn? }`
  */
 export async function rebindCustomDomain(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "dns")
   const body = (await request.json()) as { newFqdn?: string; oldFqdn?: string }
   const newFqdn = String(body.newFqdn ?? "").trim().toLowerCase()
   const oldFqdn = String(body.oldFqdn ?? "").trim().toLowerCase()

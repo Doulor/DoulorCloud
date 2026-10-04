@@ -11,7 +11,7 @@
  */
 import { ApiError, json, assertContentLengthWithin } from "../http"
 import { requireUser } from "../auth"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
 import { audit } from "../settings"
@@ -787,7 +787,7 @@ export async function adminDrawEvent(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "events.grant")
   const outcome = await drawEvent(env, id, admin.id)
   return json({ ok: true, ...outcome })
 }
@@ -795,7 +795,7 @@ export async function adminDrawEvent(
 // ---- 管理端 ----
 
 export async function listAllEvents(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "events.manage")
   const now = Date.now()
   const rows = await env.DB.prepare(
     "SELECT * FROM events ORDER BY created_at DESC LIMIT 200"
@@ -885,7 +885,7 @@ function serializeJson(v: unknown): string | null {
 }
 
 export async function createEvent(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "events.manage")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = (await request.json()) as EventPayloadInput
 
@@ -998,7 +998,7 @@ export async function updateEvent(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "events.manage")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const existing = await loadOne(env, id)
   const body = (await request.json()) as EventPayloadInput
@@ -1126,7 +1126,7 @@ export async function updateEvent(
 }
 
 export async function deleteEvent(env: Env, request: Request, id: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "events.manage")
   const existing = await loadOne(env, id)
   await env.DB.prepare("DELETE FROM events WHERE id = ?").bind(id).run()
   await audit(env, admin.id, "event.delete", `删除活动「${existing.title}」`)
@@ -1139,7 +1139,7 @@ export async function listEventClaims(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "events.manage")
   await loadOne(env, id)
   const rows = await env.DB.prepare(
     `SELECT c.id, c.user_id, c.reward_type, c.reward_status, c.reward_detail,
@@ -1174,7 +1174,7 @@ export async function grantEventClaim(
   id: string,
   claimId: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "events.grant")
   await loadOne(env, id)
   const body = (await request.json().catch(() => ({}))) as { detail?: string }
   const detail = (body.detail ?? "").trim().slice(0, 300)

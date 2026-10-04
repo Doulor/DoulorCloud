@@ -533,6 +533,34 @@ export async function disableTwoFactor(env: Env, request: Request): Promise<Resp
 }
 
 /**
+ * POST /api/settings/2fa/totp/disable —— 单独关闭 TOTP（保留邮箱验证）。
+ *
+ * 2026-10-04 ventus 反馈：原本没有「单独关 TOTP」的入口，用户只能走
+ * 「关闭全部」（还要求输入一个他没有的码）。改为与邮箱开关对称：关 TOTP
+ * 直接关、无需验证码（用户是登录态，风险与关邮箱一致），同时清掉该方式的
+ * 恢复码（否则恢复码还能当 2FA 用，等于没关干净）。邮箱验证不受影响。
+ */
+export async function disableTotp(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  if (isTwoFactorEnforced(user.role)) {
+    throw new ApiError(
+      403,
+      "管理员账号必须开启二次认证，无法自行关闭；如需重置请联系站长",
+      "FORBIDDEN"
+    )
+  }
+  const now = new Date().toISOString()
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE user_2fa SET totp_secret = NULL, totp_confirmed = 0, updated_at = ? WHERE user_id = ?`
+    ).bind(now, user.id),
+    env.DB.prepare(`DELETE FROM user_2fa_recovery WHERE user_id = ?`).bind(user.id),
+  ])
+  await recordAudit(env, user.id, "2fa.totp.disable", "关闭 TOTP 二次认证")
+  return json({ ok: true })
+}
+
+/**
  * POST /api/admin/users/:id/2fa/reset —— 清掉某人的 2FA。
  *
  * 这是**最后一道保险**：管理员手机丢了、认证器删了、密码还记得但进不去时，

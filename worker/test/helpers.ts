@@ -11,7 +11,7 @@ export interface TestUser {
 /** 注册一个用户并返回带 session cookie 的请求头 */
 export async function makeUser(opts: {
   username?: string
-  role?: "user" | "admin" | "root"
+  role?: "user" | "admin" | "superadmin" | "root"
   /**
    * 邮箱是否已验证，默认 **true**。
    *

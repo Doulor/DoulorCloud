@@ -150,7 +150,7 @@ export function StickerPanel({ onPick }: { onPick: (markdown: string) => void })
       <button
         ref={btnRef}
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen(true)}
         className={
           "rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground " +
           (open ? "bg-accent text-foreground" : "")

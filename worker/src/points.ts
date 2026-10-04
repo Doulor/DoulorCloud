@@ -18,7 +18,7 @@
 import { ApiError } from "./http"
 import { uuid } from "./crypto"
 import { adminSetQuota, getCurrencyInfo } from "./newapi-client"
-import { audit, getSetting, getSettingBool, getSettingNumber } from "./settings"
+import { audit, getSetting, getSettingBool, getSettingNumber, siteOffsetHours, siteDayStartUtc } from "./settings"
 import type { SettingKey } from "./settings"
 import type { Env } from "./env"
 
@@ -325,14 +325,13 @@ export async function getDonationDailyLimit(env: Env): Promise<number> {
 }
 
 /**
- * 今天（UTC 日界，与 countTodayRedeems 同口径）该用户已发的捐献奖励笔数。
+ * 今天（站点时区日界，与 countTodayRedeems 同口径）该用户已发的捐献奖励笔数。
  *
  * ⚠️ 口径是「**已发出的流水条数**」，所以历史补发的流水也会占当天额度 ——
  * 这是刻意的保守口径（宁可少发不可多发），且补发是一次性的、次日即无影响。
  */
 async function countTodayDonationGrants(env: Env, userId: string): Promise<number> {
-  const dayStart = new Date()
-  dayStart.setUTCHours(0, 0, 0, 0)
+  const dayStart = siteDayStartUtc(new Date(), await siteOffsetHours(env))
   const row = await env.DB.prepare(
     `SELECT COUNT(*) AS c FROM point_transactions
       WHERE user_id = ? AND reason = 'donation' AND delta > 0 AND created_at >= ?`
@@ -487,15 +486,14 @@ async function findInviter(env: Env, inviteeId: string): Promise<string | null> 
 }
 
 /**
- * 今天（UTC 日界，与 countTodayDonationGrants / countTodayRedeems 同口径）
+ * 今天（站点时区日界，与 countTodayDonationGrants / countTodayRedeems 同口径）
  * 该用户通过邀请拿到的积分合计。
  *
  * 口径 = `reason IN ('invite','invite_commission')` 且 `delta > 0` 的流水合计 ——
  * **奖励与返佣共用同一个额度**，所以两条发放路径都要先过 `inviteDailyAllowance()`。
  */
 async function countTodayInvitePoints(env: Env, userId: string): Promise<number> {
-  const dayStart = new Date()
-  dayStart.setUTCHours(0, 0, 0, 0)
+  const dayStart = siteDayStartUtc(new Date(), await siteOffsetHours(env))
   const row = await env.DB.prepare(
     `SELECT COALESCE(SUM(delta), 0) AS s FROM point_transactions
       WHERE user_id = ? AND reason IN ('invite','invite_commission')
@@ -685,10 +683,9 @@ export async function transferPoints(
   return { ok: true, balance: out.balance }
 }
 
-/** 今日（UTC 日界）该用户已兑换次数 */
+/** 今日（站点时区日界）该用户已兑换次数 */
 async function countTodayRedeems(env: Env, userId: string): Promise<number> {
-  const dayStart = new Date()
-  dayStart.setUTCHours(0, 0, 0, 0)
+  const dayStart = siteDayStartUtc(new Date(), await siteOffsetHours(env))
   const row = await env.DB.prepare(
     `SELECT COUNT(*) AS c FROM point_transactions
       WHERE user_id = ? AND reason = 'redeem' AND delta < 0 AND created_at >= ?`

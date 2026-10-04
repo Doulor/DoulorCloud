@@ -8,9 +8,10 @@ import { useT } from "@/i18n"
  * 不用 Badge 组件——需要分层可控，自定义 span 更稳。社区广场、个人空间、
  * 头像悬浮卡片共用这一份，避免三处各写一遍、样式漂移。
  */
-export function RoleBadge({ role }: { role: "admin" | "root" }) {
+export function RoleBadge({ role }: { role: "admin" | "superadmin" | "root" }) {
   const { t } = useT()
   const root = role === "root"
+  const superadmin = role === "superadmin"
   return (
     <span
       className={
@@ -26,7 +27,7 @@ export function RoleBadge({ role }: { role: "admin" | "root" }) {
             : "role-sheen bg-gradient-to-r from-amber-400 to-yellow-500 text-amber-950")
         }
       >
-        {root ? t("au.role.root") : t("au.role.admin")}
+        {root ? t("au.role.root") : superadmin ? t("au.role.superadmin") : t("au.role.admin")}
       </span>
     </span>
   )

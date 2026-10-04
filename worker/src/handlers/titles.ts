@@ -1,5 +1,5 @@
 import { ApiError, json } from "../http"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { requireUser } from "../auth"
 import { uuid } from "../crypto"
 import { audit as recordAudit } from "../settings"
@@ -86,7 +86,7 @@ async function loadTargetUser(env: Env, username: string) {
 
 /** GET /api/admin/titles —— 称号列表 + 每个称号的持有者（管理面板用） */
 export async function listTitles(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "titles")
 
   const [titles, grants] = await Promise.all([
     env.DB.prepare(
@@ -133,7 +133,7 @@ export async function listTitles(env: Env, request: Request): Promise<Response> 
 
 /** POST /api/admin/titles —— 创建称号 */
 export async function createTitle(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "titles")
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
 
   const count = await env.DB.prepare("SELECT COUNT(*) AS c FROM custom_titles").first<{ c: number }>()
@@ -165,7 +165,7 @@ export async function createTitle(env: Env, request: Request): Promise<Response>
 
 /** PUT /api/admin/titles/:id —— 修改（没传的字段保留原值） */
 export async function updateTitle(env: Env, request: Request, id: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "titles")
 
   const row = await env.DB.prepare("SELECT * FROM custom_titles WHERE id = ?")
     .bind(id)
@@ -196,7 +196,7 @@ export async function updateTitle(env: Env, request: Request, id: string): Promi
 
 /** DELETE /api/admin/titles/:id —— 删除（授予关系一并清掉，不依赖 FK） */
 export async function deleteTitle(env: Env, request: Request, id: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "titles")
 
   const row = await env.DB.prepare("SELECT * FROM custom_titles WHERE id = ?")
     .bind(id)
@@ -314,7 +314,7 @@ export async function setDisplayedTitle(env: Env, request: Request): Promise<Res
 }
 
 export async function grantTitle(env: Env, request: Request, id: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "titles")
 
   const title = await env.DB.prepare("SELECT * FROM custom_titles WHERE id = ?")
     .bind(id)
@@ -357,7 +357,7 @@ export async function grantTitle(env: Env, request: Request, id: string): Promis
 
 /** POST /api/admin/titles/:id/revoke { username } —— 收回 */
 export async function revokeTitle(env: Env, request: Request, id: string): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "titles")
 
   const title = await env.DB.prepare("SELECT * FROM custom_titles WHERE id = ?")
     .bind(id)

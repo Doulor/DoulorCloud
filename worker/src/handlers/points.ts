@@ -34,7 +34,7 @@
  */
 import { ApiError, json, assertContentLengthWithin, readBodyCapped } from "../http"
 import { requireUser } from "../auth"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { guardRateLimit } from "../ratelimit"
 import { uuid } from "../crypto"
 import {
@@ -109,17 +109,21 @@ export async function getPoints(env: Env, request: Request): Promise<Response> {
     getPointsBalance(env, user.id),
     getRedeemConfig(env),
     listPointTransactions(env, user.id, 50),
-    // 官方商品：只要上架的
-    listProducts(env, { onlyEnabled: true, scope: "official" }),
+    // 官方商品：只要上架的。⚠️ stripContent：content 是要卖的正文，
+    // 公开列表里绝不能带（不买也能看到 = 白送）。
+    listProducts(env, { onlyEnabled: true, scope: "official", stripContent: true }),
     // 用户商品：上架 + 审核通过（待审核 / 被拒的不给别人看）。
     // 上限 200 是「用户们的商城」一页 9 个的翻页基数：前端不做服务端分页，一次拿全量。
+    // stripContent 同上 —— 用户商家的固定内容也是要卖的东西。
     listProducts(env, {
       onlyEnabled: true,
       scope: "user",
       reviewStatus: "approved",
       limit: 200,
+      stripContent: true,
     }),
-    // 我上架的：含待审核 / 已拒绝 / 已下架，自己要看得到进度
+    // 我上架的：含待审核 / 已拒绝 / 已下架，自己要看得到进度。
+    // 不 strip —— 卖家编辑自己的商品需要回填正文。
     listProducts(env, { ownerId: user.id, limit: 50 }),
     listOrders(env, { userId: user.id, limit: 50 }),
     // 我收到的订单（我是卖家）
@@ -408,6 +412,70 @@ export async function deleteMyProduct(
   return json({ ok: true })
 }
 
+// ---- 卖家的卡密池（自己的商品 delivery='code'，2026-10-04 用户商品放开自动发货）----
+
+/** 卡密池三个动作共用的所有权校验：商品存在 + 是我的 + 是卡密商品 */
+async function requireMyCodeProduct(
+  env: Env,
+  userId: string,
+  productId: string
+): Promise<void> {
+  const row = await env.DB.prepare(
+    "SELECT owner_id, delivery FROM point_products WHERE id = ?"
+  )
+    .bind(productId)
+    .first<{ owner_id: string | null; delivery: string }>()
+  if (!row) throw new ApiError(404, "商品不存在", "NOT_FOUND")
+  if (row.owner_id !== userId) {
+    throw new ApiError(403, "这不是你的商品", "FORBIDDEN")
+  }
+  if (row.delivery !== "code") {
+    throw new ApiError(400, "只有「卡密/Key」交付的商品才有卡密池", "NOT_CODE_PRODUCT")
+  }
+}
+
+/** GET /api/points/products/:id/codes —— 我的商品卡密池概览 */
+export async function getMyProductCodes(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  await requireMyCodeProduct(env, user.id, id)
+  return json(await getProductCodes(env, id))
+}
+
+/** POST /api/points/products/:id/codes —— 给我的商品追加卡密 */
+export async function addMyProductCodes(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  await requireMyCodeProduct(env, user.id, id)
+  assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  const body = (await request.json().catch(() => ({}))) as { codes?: unknown }
+  const codes = Array.isArray(body.codes)
+    ? body.codes.filter((c): c is string => typeof c === "string")
+    : []
+  const result = await addProductCodes(env, id, codes)
+  await audit(env, user.id, "points.shop.upload", `${user.username} 给商品 ${id} 导入卡密 ${result.added} 条`)
+  return json(result)
+}
+
+/** DELETE /api/points/products/:id/codes —— 清空我的商品未使用的卡密 */
+export async function clearMyProductCodes(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  await requireMyCodeProduct(env, user.id, id)
+  const removed = await clearUnusedProductCodes(env, id)
+  await audit(env, user.id, "points.shop.upload", `${user.username} 清空商品 ${id} 未使用卡密 ${removed} 条`)
+  return json({ removed })
+}
+
 /** POST /api/points/orders/:id/deliver —— 卖家标记已交付 */
 export async function sellerDeliver(env: Env, request: Request, id: string): Promise<Response> {
   const user = await requireUser(env, request)
@@ -479,7 +547,7 @@ export async function sellerResolveAfterSaleHandler(
 
 /** GET /api/admin/points/after-sales —— 售后列表（默认只看待平台判定的） */
 export async function listAfterSales(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "points.aftersale")
   const url = new URL(request.url)
   const raw = (url.searchParams.get("status") ?? "").trim()
   const ALLOWED: readonly AfterSaleStatus[] = [
@@ -504,7 +572,7 @@ export async function adminResolveAfterSaleHandler(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.aftersale")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = (await request.json().catch(() => ({}))) as {
     approve?: boolean
@@ -518,7 +586,7 @@ export async function adminResolveAfterSaleHandler(
 
 /** GET /api/admin/points —— 用户积分总览（含未持有积分的用户，余额记 0） */
 export async function listPointsOverview(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "points.adjust")
   const url = new URL(request.url)
   // 上限 40 而不是 64：这个值最终会进 `LIKE '%...%'`，而 D1 的 LIKE 模式上限只有
   // 50 字符（见 sql-like.ts）。原来允许 64 ⇒ 搜长邮箱/长用户名会直接 500。
@@ -589,7 +657,7 @@ export async function listPointsOverview(env: Env, request: Request): Promise<Re
 
 /** POST /api/admin/points/adjust —— 发放 / 扣减积分 */
 export async function adjustPoints(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.adjust")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = (await request.json().catch(() => ({}))) as {
     username?: unknown
@@ -627,7 +695,7 @@ export async function userPointHistory(
   request: Request,
   username: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "points.adjust")
   const target = await env.DB.prepare("SELECT id, username FROM users WHERE username = ? COLLATE NOCASE")
     .bind(username)
     .first<{ id: string; username: string }>()
@@ -652,7 +720,7 @@ const ORDER_STATUSES: readonly OrderStatus[] = ["pending", "delivered", "settled
  * 「积分经济旋钮」，管理端在同一个标签页里改，没必要再开一个请求。
  */
 export async function getShopAdmin(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "points.official")
   const url = new URL(request.url)
   const statusRaw = (url.searchParams.get("status") ?? "").trim()
   const status = (ORDER_STATUSES as readonly string[]).includes(statusRaw)
@@ -697,7 +765,7 @@ export async function getShopAdmin(env: Env, request: Request): Promise<Response
 
 /** PUT /api/admin/points/config —— 保存兑换开关 / 比例 / 每日上限 / 捐献奖励积分 */
 export async function savePointsConfig(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.official")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = (await request.json().catch(() => ({}))) as {
     enabled?: unknown
@@ -832,7 +900,7 @@ export async function savePointsConfig(env: Env, request: Request): Promise<Resp
  * 幂等：复用正常发放的 dedupKey，已发过的不会再发，可重复运行。
  */
 export async function backfillDonations(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.adjust")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = (await request.json().catch(() => ({}))) as { dryRun?: unknown }
   const dryRun = body.dryRun !== false
@@ -860,7 +928,7 @@ export async function backfillDonations(env: Env, request: Request): Promise<Res
  * 幂等（同一笔同一倍数只补一次），可重复运行。
  */
 export async function topUpDonations(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.adjust")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = (await request.json().catch(() => ({}))) as {
     dryRun?: unknown
@@ -887,7 +955,7 @@ export async function topUpDonations(env: Env, request: Request): Promise<Respon
 
 /** POST /api/admin/points/products —— 新建官方商品 */
 export async function createShopProduct(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.official")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = await request.json().catch(() => ({}))
   const product = await createProduct(env, body)
@@ -901,7 +969,7 @@ export async function updateShopProduct(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.official")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = await request.json().catch(() => ({}))
   const product = await updateProduct(env, id, body)
@@ -915,7 +983,7 @@ export async function deleteShopProduct(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.official")
   await deleteProduct(env, id)
   await audit(env, admin.id, "points.shop.product", `删除商品 ${id}`)
   return json({ ok: true })
@@ -929,7 +997,7 @@ export async function getShopProductCodes(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "points.official")
   return json(await getProductCodes(env, id))
 }
 
@@ -939,7 +1007,7 @@ export async function addShopProductCodes(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.official")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = (await request.json().catch(() => ({}))) as { codes?: unknown }
   const codes = Array.isArray(body.codes)
@@ -956,7 +1024,7 @@ export async function clearShopProductCodes(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.official")
   const removed = await clearUnusedProductCodes(env, id)
   await audit(env, admin.id, "points.shop.product", `商品 ${id} 清空未使用卡密 ${removed} 条`)
   return json({ removed })
@@ -967,7 +1035,7 @@ export async function clearShopProductCodes(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.official")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = (await request.json().catch(() => ({}))) as {
     approve?: unknown
@@ -987,7 +1055,7 @@ export async function deliverShopOrder(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.official")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = (await request.json().catch(() => ({}))) as { note?: unknown }
   const note = typeof body.note === "string" ? body.note : undefined
@@ -1001,7 +1069,7 @@ export async function settleShopOrder(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.official")
   const order = await adminSettleOrder(env, admin.id, id)
   return json({ order })
 }
@@ -1012,7 +1080,7 @@ export async function cancelShopOrder(
   request: Request,
   id: string
 ): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "points.official")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
   const body = (await request.json().catch(() => ({}))) as { reason?: unknown }
   const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 200) : ""

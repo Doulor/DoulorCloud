@@ -78,6 +78,7 @@ const DELIVERY_LABELS: Record<PointDelivery, string> = {
   subscription: "ap.dlv.subscription",
   invite_quota: "ap.dlv.inviteQuota",
   code: "ap.dlv.code",
+  content: "ap.dlv.content",
 }
 
 /** 交付方式 → 一句话说明（选中后显示在按钮下方） */
@@ -88,6 +89,7 @@ const DELIVERY_HINTS: Record<PointDelivery, string> = {
   subscription: "ap.hint.subscription",
   invite_quota: "ap.hint.inviteQuota",
   code: "ap.hint.code",
+  content: "ap.hint.content",
 }
 
 /** 交付方式 → 商品表 / 订单表里的展示文案 */
@@ -279,6 +281,8 @@ interface FormState {
   planId: string
   /** delivery='invite_quota' 时增加的额度 */
   inviteCount: string
+  /** delivery='content' 时人人相同的固定发放内容（网盘链接 / 说明 / 通用兑换码） */
+  content: string
   /** 计费方式：买断 / 租用 */
   billingMode: PointBillingMode
   /** 租期天数（字符串，空 = 未填）；买断时忽略 */
@@ -303,6 +307,7 @@ function emptyForm(): FormState {
     feature: "ai",
     planId: "",
     inviteCount: "1",
+    content: "",
     billingMode: "one_time",
     rentalDays: "",
     enabled: true,
@@ -327,6 +332,7 @@ function formOf(p: PointProduct): FormState {
     planId: p.deliveryParams?.planId === undefined ? "" : String(p.deliveryParams.planId),
     inviteCount:
       p.deliveryParams?.count === undefined ? "1" : String(p.deliveryParams.count),
+    content: p.deliveryParams?.content ?? "",
     billingMode: p.billingMode,
     rentalDays: p.rentalDays === null ? "" : String(p.rentalDays),
     enabled: p.enabled,
@@ -344,6 +350,8 @@ function payloadOf(f: FormState): PointProductPayload {
     deliveryParams = { planId: Math.trunc(Number(f.planId) || 0) }
   } else if (f.delivery === "invite_quota") {
     deliveryParams = { count: Math.trunc(Number(f.inviteCount) || 0) }
+  } else if (f.delivery === "content") {
+    deliveryParams = { content: f.content }
   }
 
   const isRental = f.billingMode === "rental"
@@ -796,6 +804,10 @@ function ShopTab() {
     }
     if (payload.delivery === "invite_quota" && !(Number(payload.deliveryParams?.count) > 0)) {
       toast.error(t("ap.err.inviteCountRequired"))
+      return
+    }
+    if (payload.delivery === "content" && !payload.deliveryParams?.content?.trim()) {
+      toast.error(t("ap.err.contentRequired"))
       return
     }
     if (payload.billingMode === "rental") {
@@ -2311,6 +2323,22 @@ function ShopTab() {
                 />
                 <p className="text-xs text-muted-foreground">
                   {t("ap.inviteCountHint")}
+                </p>
+              </div>
+            )}
+
+            {form.delivery === "content" && (
+              <div className="space-y-2">
+                <Label htmlFor="pdContent">{t("ap.contentLabel")}</Label>
+                <Textarea
+                  id="pdContent"
+                  rows={6}
+                  placeholder={t("ap.contentPlaceholder")}
+                  value={form.content}
+                  onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t("ap.contentHint", { n: form.content.length })}
                 </p>
               </div>
             )}

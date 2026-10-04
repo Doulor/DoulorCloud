@@ -22,6 +22,7 @@ import {
   type Feature,
 } from "./permissions"
 import { ensureNewApiAccountEnabled } from "./newapi-access"
+import { getSetting } from "./settings"
 import type { Env } from "./env"
 
 /** 首捐奖励券的来源标记（也是「一辈子只发一张」的幂等键） */
@@ -101,6 +102,36 @@ export function requireFeature(raw: unknown): Feature {
 
 export function featureLabel(f: string): string {
   return FEATURE_LABELS[f as Feature] ?? f
+}
+
+/**
+ * 首捐奖励券**可兑换**的模块集合（设置项 `first_donation_voucher_features`）。
+ *
+ * 口径刻意与 `quotas.parseBasicFeatures` 保持一致，别在这里做「猜意图」的兜底：
+ *   · `null` / `undefined`（设置项真的缺失）→ **全部模块**
+ *     （这正是「默认全都可以兑换」；缺省时若回落成空集，
+ *      站长没配过这个键就会把所有人的首捐券变成废纸）；
+ *   · **空串**（站长在全关之后保存）→ **空集合**，即一个都不给；
+ *   · 其余按字面解析，认不出的名字直接丢掉（写入口已校验）。
+ */
+export function parseFirstDonationFeatures(
+  raw: string | null | undefined
+): Set<Feature> {
+  if (raw === null || raw === undefined) return new Set<Feature>(FEATURES)
+
+  const out = new Set<Feature>()
+  for (const seg of raw.split(",")) {
+    const f = seg.trim() as Feature
+    if ((FEATURES as readonly string[]).includes(f)) out.add(f)
+  }
+  return out
+}
+
+/** 读取首捐券当前允许兑换的模块（每次调用读库，站长改设置即时生效） */
+export async function getAllowedFirstDonationFeatures(
+  env: Env
+): Promise<Set<Feature>> {
+  return parseFirstDonationFeatures(await getSetting(env, "first_donation_voucher_features"))
 }
 
 /**
@@ -184,6 +215,24 @@ export async function redeemVoucher(
     )
   }
   const f = requireFeature(feature)
+
+  // 首捐奖励券：站长可以在管理面板里限定它能换哪几个模块
+  // （设置项 first_donation_voucher_features，默认全部）。
+  //
+  // ⚠️ 必须放在「扣券」之前 —— 校验不过就报错走人，券不能变成 used。
+  // 前端虽已按设置过滤候选列表，但请求可以伪造，真正的门在这里。
+  if (voucher.source === FIRST_DONATION_VOUCHER_SOURCE) {
+    const allowed = await getAllowedFirstDonationFeatures(env)
+    if (!allowed.has(f)) {
+      throw new ApiError(
+        400,
+        allowed.size === 0
+          ? "首捐奖励券当前不可兑换任何权限，请联系管理员"
+          : `首捐奖励券不能兑换「${featureLabel(f)}」，可兑换：${[...allowed].map(featureLabel).join("、")}`,
+        "FEATURE_NOT_ALLOWED"
+      )
+    }
+  }
 
   const perms = await loadPermissions(env, user.id)
   if (perms[f]) {

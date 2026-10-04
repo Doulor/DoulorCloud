@@ -819,9 +819,10 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
   const [busy, setBusy] = React.useState(false)
   const taRef = React.useRef<HTMLTextAreaElement>(null)
 
-  // 进详情页滚到顶部（从列表点进来时，窗口还停在列表的滚动位置）
+  // 进详情页滚到顶部（从列表点进来时，窗口还停在列表的滚动位置）。
+  // 只在「详情」时滚 —— 返回列表时不能滚，否则会把要恢复的位置清零。
   React.useEffect(() => {
-    window.scrollTo(0, 0)
+    if (id) window.scrollTo(0, 0)
   }, [id])
 
   /** 返回：优先回来源页（消息通知等），否则回退历史，再兜底回广场 */
@@ -1684,9 +1685,17 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
     )
   }, [])
 
+  // 列表是否已加载过第一页：从详情返回时**不重新拉列表**，保留缓存 posts，
+  // 否则返回只恢复滚动位置、内容却只剩第一页，滚不到原来的深度（用户反馈 d89b9a86）
+  const listLoadedOnceRef = React.useRef(false)
+
   React.useEffect(() => {
-    if (!id) void load()
+    // 详情页只刷新统计；列表页首次进入才拉帖子
     void loadStats()
+    if (id) return
+    if (listLoadedOnceRef.current) return // 从详情返回：保留缓存列表，配合滚动恢复
+    listLoadedOnceRef.current = true
+    void load()
   }, [load, loadStats, id])
 
   // 列表渲染完成后恢复上次的滚动位置（只在列表视图 /community，不是在详情）
@@ -1934,7 +1943,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
                   onShare={handleShare}
                   onDelete={handleDelete}
                   onPin={handlePin}
-                  canPin={user?.role === "admin" || user?.role === "root"}
+                  canPin={user?.role === "admin" || user?.role === "superadmin" || user?.role === "root"}
                   basePath={basePath}
                 />
               ))}

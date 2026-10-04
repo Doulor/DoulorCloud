@@ -257,8 +257,11 @@ export default function MessagesPage() {
         toast.error(t("msg.postDeleted"))
         return
       }
-      // 带上 from：详情页的返回按钮据此回到消息列表（用户反馈 d89b9a86）
-      navigate(`/dashboard/community/${n.postId}`, { state: { from: "/dashboard/messages" } })
+      // 带上 from（含当前分类）：详情页的返回按钮据此回到消息列表的**原分类**，
+      // 而不是回到默认的「系统」栏（用户反馈 d89b9a86 / yangshu）
+      navigate(`/dashboard/community/${n.postId}`, {
+        state: { from: `/dashboard/messages/${tab}` },
+      })
       return
     }
     if (n.link) navigate(n.link)

@@ -3,11 +3,18 @@
 // 这条链路的风险集中在「谁能用、能开什么、会不会重复」三件事上，
 // 所以用例围绕边界写：自己建的码不能自用、已拥有的模块不能重复开、
 // 一张券只能用一次、首捐券一辈子只有一张。
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest"
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest"
 import { env } from "cloudflare:workers"
-import { authRequest, fetchSelf, makeUser, setPermissions, type TestUser } from "./helpers"
+import {
+  authRequest,
+  fetchSelf,
+  makeUser,
+  setPermissions,
+  setSetting,
+  type TestUser,
+} from "./helpers"
 import { uuid } from "../src/crypto"
-import { grantFirstDonationVoucher } from "../src/vouchers"
+import { grantFirstDonationVoucher, parseFirstDonationFeatures } from "../src/vouchers"
 import { parsePermissions } from "../src/permissions"
 
 /**
@@ -290,6 +297,122 @@ describe("兑换自选券", () => {
     const { res } = await redeem(me, code)
     expect(res.status).toBe(200)
     expect((await permsOf(me.id)).frp).toBe(true)
+  })
+})
+
+describe("首捐券可兑换的模块（管理面板设置）", () => {
+  // 这个设置是全局的，用例之间必须还原，否则会串到别的 describe 上
+  afterEach(async () => {
+    await env.DB.prepare(
+      "DELETE FROM app_settings WHERE key = 'first_donation_voucher_features'"
+    ).run()
+  })
+
+  it("设置项缺失 = 全部可兑换（这就是「默认全都可以兑换」）", () => {
+    expect([...parseFirstDonationFeatures(null)].sort()).toEqual([
+      "ai",
+      "doulor",
+      "frp",
+      "proxy",
+      "r2",
+    ])
+    expect([...parseFirstDonationFeatures(undefined)].sort()).toEqual([
+      "ai",
+      "doulor",
+      "frp",
+      "proxy",
+      "r2",
+    ])
+  })
+
+  it("空串 = 一个都不给（不是「没配」）", () => {
+    expect([...parseFirstDonationFeatures("")]).toEqual([])
+    // 只写空白/逗号的脏值等价于空
+    expect([...parseFirstDonationFeatures(" , ")]).toEqual([])
+  })
+
+  it("认不出的名字直接丢掉；全是脏值 → 空集（宁可关掉也不放行）", () => {
+    expect([...parseFirstDonationFeatures(" r2 , bogus ,ai ")].sort()).toEqual(["ai", "r2"])
+    expect([...parseFirstDonationFeatures("nope")]).toEqual([])
+  })
+
+  it("范围外的模块被拒（400），且券不会被消耗", async () => {
+    const user = await makeUser()
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    const code = await seedVoucher({ owner: user.id, feature: null, source: "first_donation" })
+    await setSetting("first_donation_voucher_features", "frp")
+
+    const { res, body } = await redeem(user, code, "ai")
+    expect(res.status).toBe(400)
+    expect(body.code).toBe("FEATURE_NOT_ALLOWED")
+
+    // 关键：券仍然是 unused，权限也没有被改动 —— 校验必须发生在扣券之前
+    const row = await env.DB.prepare("SELECT status FROM vouchers WHERE code = ?")
+      .bind(code)
+      .first<{ status: string }>()
+    expect(row?.status).toBe("unused")
+    expect((await permsOf(user.id)).ai).toBe(false)
+  })
+
+  it("范围内的模块正常开通", async () => {
+    const user = await makeUser()
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    const code = await seedVoucher({ owner: user.id, feature: null, source: "first_donation" })
+    await setSetting("first_donation_voucher_features", "frp")
+
+    const { res, body } = await redeem(user, code, "frp")
+    expect(res.status).toBe(200)
+    expect(body.granted).toEqual(["frp"])
+    expect((await permsOf(user.id)).frp).toBe(true)
+  })
+
+  it("全部关掉 → 任何模块都换不了", async () => {
+    const user = await makeUser()
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    const code = await seedVoucher({ owner: user.id, feature: null, source: "first_donation" })
+    await setSetting("first_donation_voucher_features", "")
+
+    const { res, body } = await redeem(user, code, "frp")
+    expect(res.status).toBe(400)
+    expect(body.code).toBe("FEATURE_NOT_ALLOWED")
+  })
+
+  it("只约束首捐券：别的来源的自选券不受影响", async () => {
+    const user = await makeUser()
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    // seedVoucher 不传 source 时默认是 "admin"
+    const code = await seedVoucher({ owner: user.id, feature: null })
+    await setSetting("first_donation_voucher_features", "")
+
+    const { res, body } = await redeem(user, code, "ai")
+    expect(res.status).toBe(200)
+    expect(body.granted).toEqual(["ai"])
+  })
+
+  it("只约束首捐券：别人给的邀请码能带什么权限与它无关", async () => {
+    const owner = await makeUser()
+    const me = await makeUser()
+    await setPermissions(me.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    const code = await seedInvite({ createdBy: owner.id, permissions: { ai: true } })
+    await setSetting("first_donation_voucher_features", "")
+
+    const { res, body } = await redeem(me, code)
+    expect(res.status).toBe(200)
+    expect(body.granted).toEqual(["ai"])
+  })
+
+  it("GET /api/vouchers 会把 allowed 一起下发", async () => {
+    const user = await makeUser()
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    await setSetting("first_donation_voucher_features", "r2,frp")
+
+    const res = await fetchSelf(authRequest(user, "/vouchers"))
+    expect(res.status).toBe(200)
+    const body = await res.json<{ features: { key: string; allowed: boolean }[] }>()
+    expect(body.features.find((f) => f.key === "frp")?.allowed).toBe(true)
+    expect(body.features.find((f) => f.key === "r2")?.allowed).toBe(true)
+    expect(body.features.find((f) => f.key === "ai")?.allowed).toBe(false)
+    expect(body.features.find((f) => f.key === "proxy")?.allowed).toBe(false)
   })
 })
 

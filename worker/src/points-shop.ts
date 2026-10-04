@@ -9,6 +9,9 @@
  *        · `feature`      —— 自动授予一个模块权限（r2 / ai / frp / proxy）
  *        · `subscription` —— 自动开通一个 NewAPI 订阅套餐（planId 由管理员自己填，代码不写死）
  *        · `invite_quota` —— 自动增加「邀请码创建额度」
+ *        · `code`         —— 从商品卡密池取一条**各不相同**的卡密发给买家（一人一条，用完即止）
+ *        · `content`      —— 发一段**人人相同**的固定内容（网盘链接 / 说明 / 通用兑换码），
+ *                            下单即到账，不消耗库存、不需要卡密池
  *      除 `quota` 用专用列 `quota_yuan` 外，其余类型的参数存在 `delivery_params`（JSON）。
  *   2. **用户商品一律 `manual` 且走担保**（2026-09-28 站长要求「用户也能上传商品卖积分」）：
  *        · 只允许人工交付 —— 自动发权限 / 订阅 / 额度是平台能力，不能由用户创建
@@ -50,10 +53,11 @@ import {
   FEATURE_LABELS,
   featurePermissionSql,
   hasFeature,
+  notWhitelistedGuard,
   type Feature,
 } from "./permissions"
 import { grantFeatures, loadPermissions } from "./vouchers"
-import { audit, getSetting } from "./settings"
+import { audit, getSetting, siteOffsetHours, siteDayString } from "./settings"
 import { pushMessage } from "./user-messages"
 import type { Env } from "./env"
 
@@ -65,6 +69,13 @@ export type ProductDelivery =
   | "invite_quota"
   /** 卡密/Key：下单时从商品卡密池原子取出一条交付（2026-10-03） */
   | "code"
+  /**
+   * 统一内容：发一段**人人相同**的固定内容（网盘链接 / 说明 / 通用兑换码）。
+   *
+   * 与 `code`（卡密池，一人一条）相对：这里不消耗任何库存，所有买家拿到的是
+   * 管理员在商品里填的同一段文字，下单即到账。
+   */
+  | "content"
 
 /**
  * 计费方式。
@@ -138,6 +149,8 @@ export interface DeliveryParams {
   planId?: number
   /** delivery='invite_quota'：增加的邀请码创建额度 */
   count?: number
+  /** delivery='content'：人人相同的固定交付内容（网盘链接 / 说明 / 通用兑换码） */
+  content?: string
 }
 
 export interface PointProduct {
@@ -161,6 +174,8 @@ export interface PointProduct {
   stock: number | null
   /** 每日限量（自然日）；null = 不限（用户反馈 6e002b5e：限量商品希望每天补一点） */
   dailyLimit: number | null
+  /** 今日已售数；与 buyProduct 的每日计数同日期口径（站点时区日），无每日限时恒 0 */
+  dailySold: number
   /** 每人限购件数；null = 不限 */
   perUserLimit: number | null
   delivery: ProductDelivery
@@ -203,6 +218,14 @@ export interface PointOrder {
   quotaYuan: number | null
   status: OrderStatus
   note: string | null
+  /**
+   * 交付内容快照（仅 `delivery='content'` 的订单非 NULL）。
+   *
+   * 与 `note` 分开存：note 是列表里一行摘要（多处截断到 300 字），
+   * 而这是买家**买到的东西**本身（最长 2000 字、可能多行），要能反复查看。
+   * 存订单快照而不是回查商品 —— 商品事后被改/删都不影响历史订单。
+   */
+  deliveryContent: string | null
   /** 卖家 id（下单时快照）；**null = 官方商品订单** */
   sellerId: string | null
   sellerName: string | null
@@ -281,6 +304,15 @@ const MAX_PER_USER_LIMIT = 10_000
 const MAX_PLAN_ID = 1_000_000
 /** 单件可发放的邀请码创建额度上限 */
 const MAX_INVITE_QUOTA = 1_000
+/**
+ * 「统一内容」交付的内容长度上限（字符）。
+ *
+ * 与订单 note 的上限（300）分开取值：note 是给订单列表一行摘要看的，
+ * 而这里的内容是**要真的发给用户**的正文（可能是一整段网盘链接与说明），
+ * 太短会逼管理员反复裁剪。取 2000 —— 也刚好卡在推送私信的 8 KB 请求体之内
+ * （内容会进消息 body，8 KB 足够放下 2000 个中文字符及其它字段）。
+ */
+const MAX_DELIVERY_CONTENT_LEN = 2_000
 /** 图标名格式：lucide 风格的 slug（小写字母 / 数字，单连字符分段） */
 const ICON_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const MAX_ICON_LEN = 40
@@ -302,6 +334,7 @@ const DELIVERIES: readonly ProductDelivery[] = [
   "subscription",
   "invite_quota",
   "code",
+  "content",
 ]
 
 /**
@@ -311,6 +344,9 @@ const DELIVERIES: readonly ProductDelivery[] = [
  * 到期既没法收回、也没法判断用户用了多少，「租用」只剩个日期好看。
  * （订阅可以：订阅本身就是有期限的；feature 可以：权限能收回；
  *   manual 可以：官方人工商品与用户商品都靠人工履约，平台只记账。）
+ *
+ * 同样排除 `code` / `content`：卡密和固定内容都是**一次性发出去的文字**，
+ * 到期没有任何可收回的东西（用户早就抄走了），列进来只会让人误会「到期会失效」。
  */
 const RENTAL_DELIVERIES: readonly ProductDelivery[] = [
   "manual",
@@ -371,6 +407,9 @@ function parseDeliveryParams(
     if (delivery === "invite_quota" && Number.isInteger(Number(o.count)) && Number(o.count) > 0) {
       out.count = Number(o.count)
     }
+    if (delivery === "content" && typeof o.content === "string" && o.content.trim()) {
+      out.content = o.content.slice(0, MAX_DELIVERY_CONTENT_LEN)
+    }
     return Object.keys(out).length > 0 ? out : null
   } catch {
     return null
@@ -390,6 +429,8 @@ function rowToProduct(r: Record<string, unknown>): PointProduct {
     price: Number(r.price ?? 0),
     stock: r.stock == null ? null : Number(r.stock),
     dailyLimit: r.daily_limit == null ? null : Number(r.daily_limit),
+    /** 今日已售数（不限量商品恒 0）—— 与 buyProduct 的每日计数同日期口径 */
+    dailySold: Number(r.daily_sold ?? 0),
     perUserLimit: r.per_user_limit == null ? null : Number(r.per_user_limit),
     delivery,
     quotaYuan: r.quota_yuan == null ? null : Number(r.quota_yuan),
@@ -425,6 +466,7 @@ function rowToOrder(r: Record<string, unknown>): PointOrder {
     quotaYuan: r.quota_yuan == null ? null : Number(r.quota_yuan),
     status,
     note: r.note == null ? null : String(r.note),
+    deliveryContent: r.delivery_content == null ? null : String(r.delivery_content),
     sellerId: r.seller_id == null ? null : String(r.seller_id),
     sellerName: r.seller_name == null ? null : String(r.seller_name),
     createdAt: String(r.created_at ?? ""),
@@ -464,7 +506,9 @@ function nullableInt(raw: unknown, label: string, min: number, max: number): num
  * 校验并归一化商品输入。坏值一律报错，不做「猜用户意图」的兜底。
  *
  * `opts.asUser = true` 时按**用户商品**的规则收紧：
- *   · 交付方式强制 `manual`（自动发权限 / 订阅 / 额度是平台能力，不开放给用户）
+ *   · 交付方式只允许 manual / code / content（2026-10-04 放开自动发货：
+ *     卡密与固定内容交的是卖家自己的文字，不动平台资源；权限 / 订阅 / 额度
+ *     仍是平台能力，不开放给用户）
  *   · 每人限购强制 null（用户商品不需要这个维度）
  *   · 排序强制 0（用户商品不给自定义排序，免得有人靠 sort 把自己的商品顶到最前）
  *   · 库存仍可自填（用户商品通常是有限件数的二手物，不限量也允许）
@@ -519,11 +563,25 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
   const limitRaw = asUser ? null : nullableInt(b.perUserLimit, "每人限购", 0, MAX_PER_USER_LIMIT)
   const perUserLimit = limitRaw && limitRaw > 0 ? limitRaw : null
 
+  // 交付方式：
+  //   · 官方商品 —— 全部可选（管理员代表平台，能发任何东西）
+  //   · 用户商品 —— 只允许 manual / code / content（2026-10-04 站长放开）。
+  //     code（卡密池）与 content（固定内容）交的是**卖家自己的一段文字**，
+  //     不动用平台资源（权限 / 订阅 / 额度仍不开放），担保交易语义不变。
+  //     传其它自动方式直接 400，让前端明确知道不支持，而不是静默降级成 manual。
+  const USER_DELIVERIES: readonly ProductDelivery[] = ["manual", "code", "content"]
+  const rawDelivery = isDelivery(b.delivery) ? b.delivery : "manual"
   const delivery: ProductDelivery = asUser
-    ? "manual"
-    : isDelivery(b.delivery)
-      ? b.delivery
-      : "manual"
+    ? USER_DELIVERIES.includes(rawDelivery)
+      ? rawDelivery
+      : (() => {
+          throw new ApiError(
+            400,
+            "用户商品只支持「人工发放」「卡密/Key」「固定内容」三种交付方式",
+            "DELIVERY_NOT_ALLOWED_FOR_USER"
+          )
+        })()
+    : rawDelivery
 
   const params = (b.deliveryParams ?? {}) as Record<string, unknown>
 
@@ -566,6 +624,21 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
       )
     }
     deliveryParams = { count: n }
+  } else if (delivery === "content") {
+    // 统一内容：必须非空（空内容 = 用户花积分买到空气），并限制长度。
+    // 换行保留（网盘链接常带说明，可能多行），只做首尾裁剪。
+    const text = typeof params.content === "string" ? params.content.trim() : ""
+    if (!text) {
+      throw new ApiError(400, "请填写要自动发放的内容", "INVALID_INPUT")
+    }
+    if (text.length > MAX_DELIVERY_CONTENT_LEN) {
+      throw new ApiError(
+        400,
+        `自动发放的内容不能超过 ${MAX_DELIVERY_CONTENT_LEN} 个字符`,
+        "INVALID_INPUT"
+      )
+    }
+    deliveryParams = { content: text }
   }
 
   // 计费方式：买断 / 租用。租期是「天」，只在租用时有值。
@@ -580,11 +653,11 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
         "INVALID_INPUT"
       )
     }
-    // 额度类交付不能租用：发出去就收不回来（见 RENTAL_DELIVERIES 的说明）
+    // 一次性发放的交付不能租用：发出去就收不回来（见 RENTAL_DELIVERIES 的说明）
     if (!(RENTAL_DELIVERIES as readonly string[]).includes(delivery)) {
       throw new ApiError(
         400,
-        "「自动充余额」和「邀请码额度」是一次性发放的，不能设为租用。",
+        "「自动充余额」「邀请码额度」「卡密」「固定内容」都是一次性发放的，不能设为租用。",
         "RENTAL_NOT_SUPPORTED"
       )
     }
@@ -627,6 +700,15 @@ export interface ListProductsOptions {
   /** 只看某个审核状态 */
   reviewStatus?: ReviewStatus
   limit?: number
+  /**
+   * 去掉 `deliveryParams.content`（统一内容的**发货正文**）。
+   *
+   * ⚠️ 必须给「展示给非卖家」的列表用：content 是要卖的东西本身
+   * （网盘链接 / 兑换码），出现在公开商品列表里等于**不买也能看**。
+   * 只有两种列表可以带原文：商品**卖家自己的**（myProducts，编辑要用）
+   * 和**管理端**的。`feature` / `planId` / `count` 不是秘密，保留不动。
+   */
+  stripContent?: boolean
 }
 
 /** 商品列表 */
@@ -650,22 +732,41 @@ export async function listProducts(
 
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : ""
   const limit = Math.min(Math.max(1, opts.limit ?? 200), 500)
+  // 今日已售数：给前端算「今日剩几个」用。日期口径与 buyProduct 的
+  // 每日限量计数**完全一致**（站点时区日），否则会出现
+  // 「显示剩 1 个、实际已抢完」的错位。
+  const day = siteDayString(new Date(), await siteOffsetHours(env))
   const rows = await env.DB.prepare(
     // 排序规则（2026-10-03 站长要求）：**「其他」分类的商品一律排在别的分类下面**，
     // 同组内再按管理员设的 sort 降序、上架时间降序。
     // `(category = 'other')` 在 SQLite 里求值为 0/1，升序即「非 other 在前」。
-    `SELECT * FROM point_products ${where}
+    `SELECT point_products.*,
+            COALESCE((SELECT sold FROM point_product_daily_sales
+                       WHERE product_id = point_products.id AND date = ?), 0) AS daily_sold
+       FROM point_products ${where}
       ORDER BY (category = 'other') ASC, sort DESC, created_at DESC LIMIT ?`
   )
-    .bind(...binds, limit)
+    .bind(day, ...binds, limit)
     .all<Record<string, unknown>>()
-  return (rows.results ?? []).map(rowToProduct)
+  const items = (rows.results ?? []).map(rowToProduct)
+  if (!opts.stripContent) return items
+  return items.map((p) =>
+    p.deliveryParams?.content
+      ? { ...p, deliveryParams: { ...p.deliveryParams, content: undefined } }
+      : p
+  )
 }
 
 /** 读单个商品 */
 export async function getProduct(env: Env, id: string): Promise<PointProduct | null> {
-  const row = await env.DB.prepare("SELECT * FROM point_products WHERE id = ?")
-    .bind(id)
+  const day = siteDayString(new Date(), await siteOffsetHours(env))
+  const row = await env.DB.prepare(
+    `SELECT point_products.*,
+            COALESCE((SELECT sold FROM point_product_daily_sales
+                       WHERE product_id = point_products.id AND date = ?), 0) AS daily_sold
+       FROM point_products WHERE id = ?`
+  )
+    .bind(day, id)
     .first<Record<string, unknown>>()
   return row ? rowToProduct(row) : null
 }
@@ -729,7 +830,7 @@ export async function createProduct(env: Env, raw: unknown): Promise<PointProduc
   )
     .bind(...productBindings(id, input, now))
     .run()
-  return { id, ...input, reviewNote: null, reviewedAt: now, createdAt: now, updatedAt: now }
+  return { id, ...input, reviewNote: null, reviewedAt: now, createdAt: now, updatedAt: now, dailySold: 0 }
 }
 
 /**
@@ -896,7 +997,7 @@ export async function createUserProduct(
   )
     .bind(...productBindings(id, withOwner, now))
     .run()
-  return { id, ...withOwner, reviewNote: null, reviewedAt: null, createdAt: now, updatedAt: now }
+  return { id, ...withOwner, reviewNote: null, reviewedAt: null, createdAt: now, updatedAt: now, dailySold: 0 }
 }
 
 /**
@@ -1287,7 +1388,25 @@ async function applyRentalExpiry(
 }
 
 /**
- * 自动交付：按商品的 delivery 把东西真的发出去，返回一句「发了什么」的说明。
+ * 自动交付的返回值。
+ *
+ * `summary` 是一句**短摘要**，进订单备注（`note`，多处截断到 300 字）、审计日志
+ * 与「已发放」通知标题；`content` 是**真正发给买家的正文**（目前只有 `content`
+ * 交付方式有），会被完整存进 `point_orders.delivery_content` 并作为通知正文下发。
+ *
+ * 为什么把两者分开而不是只返回一句话：卡密（code）本身就短，塞进 summary 没问题；
+ * 但「统一内容」可能是一整段网盘链接 + 使用说明（最长 2000 字），
+ * 塞进 300 字的 note 会被截断 —— 用户就拿不到完整内容了。
+ */
+interface DeliveryResult {
+  /** 短摘要（进 note / 审计 / 通知标题） */
+  summary: string
+  /** 完整交付正文；无独立正文时省略 */
+  content?: string
+}
+
+/**
+ * 自动交付：按商品的 delivery 把东西真的发出去，返回「发了什么」的说明。
  *
  * 抛错 = 发放失败，调用方负责退积分 / 还原库存 / 把订单置 cancelled。
  * 只处理自动类交付（manual 不走这里；用户商品永远是 manual）。
@@ -1300,7 +1419,7 @@ async function deliverAuto(
   product: PointProduct,
   userId: string,
   newapiUserId: number | null
-): Promise<string> {
+): Promise<DeliveryResult> {
   switch (product.delivery) {
     case "quota": {
       if (newapiUserId === null) throw new Error("未绑定中转站账号")
@@ -1310,7 +1429,7 @@ async function deliverAuto(
       // 先取出非副作用信息，再执行不可逆的上游充值。
       const { symbol } = await getCurrencyInfo(env)
       await adminSetQuota(env, newapiUserId, rawQuota, "add")
-      return `已自动充值 ${symbol}${product.quotaYuan}`
+      return { summary: `已自动充值 ${symbol}${product.quotaYuan}` }
     }
 
     case "subscription": {
@@ -1321,7 +1440,7 @@ async function deliverAuto(
       //    所以这里不用额外判重 —— 重复买只会白花积分，不会报错到用户脸上。
       const res = await adminGrantSubscription(env, newapiUserId, planId)
       if (!res.ok) throw new Error(res.message || "中转站拒绝了这次开通")
-      return `已自动开通订阅套餐 #${planId}`
+      return { summary: `已自动开通订阅套餐 #${planId}` }
     }
 
     case "feature": {
@@ -1329,7 +1448,7 @@ async function deliverAuto(
       if (!f) throw new Error("商品未配置模块权限")
       // grantFeatures 内部是 `json_set` 单语句原子写，不会覆盖用户其它已开的模块
       await grantFeatures(env, userId, [f])
-      return `已自动授予「${FEATURE_LABELS[f]}」权限`
+      return { summary: `已自动授予「${FEATURE_LABELS[f]}」权限` }
     }
 
     case "invite_quota": {
@@ -1343,7 +1462,7 @@ async function deliverAuto(
       )
         .bind(count, new Date().toISOString(), userId)
         .run()
-      return `已自动增加 ${count} 个邀请码创建额度`
+      return { summary: `已自动增加 ${count} 个邀请码创建额度` }
     }
 
     case "code": {
@@ -1364,7 +1483,21 @@ async function deliverAuto(
         .bind(userId, now, product.id)
         .first<{ code: string }>()
       if (!claimed) throw new Error("卡密已售罄，请联系管理员补货")
-      return claimed.code
+      // 卡密本身就是用户要的东西：摘要与正文都给它（正文单独存一份，
+      // 这样「我的交易」里能原样复制，而不是从「已发货：xxx」里抠）
+      return { summary: `已发货：${claimed.code}`, content: claimed.code }
+    }
+
+    case "content": {
+      // 统一内容：所有人拿到的是管理员在商品里填的同一段文字。
+      // 没有上游调用、不消耗任何资源，所以这里不会失败 —— 唯一的失败可能在
+      // 下单前的前置校验（内容为空 → PRODUCT_MISCONFIGURED）。
+      const text = product.deliveryParams?.content?.trim()
+      if (!text) throw new Error("商品未配置自动发放的内容")
+      // 摘要只取首行并压到 60 字（进 note / 通知标题，别把多行内容糊进去）
+      const firstLine = text.split("\n")[0].trim()
+      const summary = `已自动发货：${firstLine.length > 60 ? firstLine.slice(0, 60) + "…" : firstLine}`
+      return { summary, content: text }
     }
 
     default:
@@ -1390,7 +1523,7 @@ async function restoreStock(env: Env, productId: string | null): Promise<number>
 /** 归还一个「当日名额」（每日限量买的退单/失败补偿用） */
 async function releaseDailySlot(env: Env, productId: string | null): Promise<void> {
   if (!productId) return
-  const day = new Date().toISOString().slice(0, 10)
+  const day = siteDayString(new Date(), await siteOffsetHours(env))
   await env.DB.prepare(
     "UPDATE point_product_daily_sales SET sold = MAX(0, sold - 1) WHERE product_id = ? AND date = ?"
   )
@@ -1464,6 +1597,26 @@ export async function buyProduct(
   if (product.delivery === "invite_quota" && !product.deliveryParams?.count) {
     throw new ApiError(500, "该商品配置有误，请联系管理员", "PRODUCT_MISCONFIGURED")
   }
+  // 卡密池空了要在扣分**之前**拦住（deliverAuto 也能拦，但那已经扣过分、
+  // 要走补偿退款一圈）。官方与用户卡密商品共用这一条。
+  if (product.delivery === "code") {
+    const pool = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM point_product_codes WHERE product_id = ? AND used_by IS NULL"
+    )
+      .bind(product.id)
+      .first<{ c: number }>()
+    if (Number(pool?.c ?? 0) === 0) {
+      throw new ApiError(
+        400,
+        "该商品的卡密已售罄，请联系卖家补货",
+        "OUT_OF_STOCK"
+      )
+    }
+  }
+  // 统一内容：内容为空就等于「什么都没发」，不能让用户白花积分
+  if (product.delivery === "content" && !product.deliveryParams?.content?.trim()) {
+    throw new ApiError(500, "该商品配置有误，请联系管理员", "PRODUCT_MISCONFIGURED")
+  }
 
   // 需要「挂在用户中转站账号上」的交付方式（充余额 / 开订阅）必须先绑定中转站。
   // 与兑换同一理由：没绑就发不出去，必须在扣分之前拦住。
@@ -1525,7 +1678,7 @@ export async function buyProduct(
     // 1b. 每日限量（用户反馈 6e002b5e：「限量商品每天补一点」）：
     //     按自然日累计、隔天自动恢复，靠日期键实现，不需要定时任务。
     if (product.dailyLimit !== null) {
-      const day = new Date().toISOString().slice(0, 10)
+      const day = siteDayString(new Date(), await siteOffsetHours(env))
       const row = await env.DB.prepare(
         `INSERT INTO point_product_daily_sales (product_id, date, sold) VALUES (?, ?, 1)
          ON CONFLICT(product_id, date) DO UPDATE SET sold = sold + 1
@@ -1596,8 +1749,8 @@ export async function buyProduct(
   }
 
   // 4. 交付
-  if (isUserProduct || product.delivery === "manual") {
-    // 用户商品 / 官方人工商品：都是「先挂 pending，等人工」。用户商品额外要
+  if (product.delivery === "manual") {
+    // 人工商品（官方或用户）：都是「先挂 pending，等人工」。用户商品额外要
     // 等买家确认收货才结算，那一步在 confirmOrder() 里。
     // 租期也等到「人工发放 / 买家确认」时才写（见 deliverOrder / settleEscrow）。
     await audit(
@@ -1640,14 +1793,17 @@ export async function buyProduct(
   } else {
     let deliveryApplied = false
     try {
-      const summary = await deliverAuto(env, product, user.id, newapiUserId)
+      const { summary, content } = await deliverAuto(env, product, user.id, newapiUserId)
       // deliverAuto 成功后权益已经生效；此后的记账/通知失败不能再退款。
       deliveryApplied = true
       const deliveredAt = new Date().toISOString()
+      // note = 一行摘要（多处截断到 300）；delivery_content = 完整交付正文
+      // （仅 content / code 这类有独立正文的方式非空，其余为 NULL）。
       await env.DB.prepare(
-        "UPDATE point_orders SET status = 'delivered', delivered_at = ?, note = ? WHERE id = ?"
+        "UPDATE point_orders SET status = 'delivered', delivered_at = ?, note = ?, " +
+          "delivery_content = ? WHERE id = ?"
       )
-        .bind(deliveredAt, summary.slice(0, 300), orderId)
+        .bind(deliveredAt, summary.slice(0, 300), content ?? null, orderId)
         .run()
       // 自动交付成功 = 交付生效，这里才写租期（续费会自动顺延）
       await applyRentalExpiry(
@@ -1667,15 +1823,35 @@ export async function buyProduct(
         "points.shop.buy",
         `${user.username} 用 ${product.price} 积分购买「${product.name}」` +
           (isRental ? `（租用 ${product.rentalDays} 天）` : "") +
-          `，${summary}`
+          (isUserProduct ? `（用户商品，卖家 ${product.ownerName ?? "?"}，` : "（") +
+          `自动交付：${summary}`
       )
-      // 自动交付是「下单即到账」，通知只是留个凭证，不需要用户再做什么
+      // 通知买家 + （用户商品）通知卖家。
+      //
+      // ⚠️ 有独立正文时（统一内容 / 卡密），通知正文要用**完整内容** ——
+      //    用户常常就是靠这条消息把链接复制走的；只用 summary 会把正文截掉。
+      //    消息表 body 无长度限制，但前端按 Markdown 渲染，所以这里保持原文。
+      //
+      // 用户商品走自动交付时**担保语义不变**：积分仍托管在平台，
+      // 买家确认收货（或售后超时判定）后才结算给卖家 —— 所以给买家的
+      // 通知要带「确认收货」按钮，卖家也要知道卖出了一单。
       await notifyOrder(env, user.id, {
         event: "delivered",
         title: `已发放「${product.name}」`,
-        body: summary || "已自动发放。",
+        body: content ? `${summary}\n\n${content}` : summary || "已自动发放。",
         orderId,
+        action: isUserProduct ? "confirm" : undefined,
+        peer: isUserProduct ? product.ownerName : undefined,
       })
+      if (isUserProduct) {
+        await notifyOrder(env, product.ownerId, {
+          event: "paid",
+          title: `有人买下了你的「${product.name}」`,
+          body: `买家 **${user.username}** 花 ${product.price} 积分买下，商品已**自动发货**，无需你操作。买家确认收货后积分即到账。`,
+          orderId,
+          peer: user.username,
+        })
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message.slice(0, 120) : ""
       if (deliveryApplied) {
@@ -2453,10 +2629,14 @@ export async function adminCancelOrder(
 async function revokeRentalFeature(
   env: Env,
   order: PointOrder,
-  now: string
+  now: string,
+  whitelisted: Set<string> = new Set()
 ): Promise<"revoked" | "kept" | "skipped"> {
   const f = order.grantedFeature
   if (!f || !(FEATURES as readonly string[]).includes(f)) return "skipped"
+
+  // 白名单用户：租用到期也不收回权限（2026-10-03 站长要求）
+  if (whitelisted.has(order.username.toLowerCase())) return "kept"
 
   const other = await env.DB.prepare(
     `SELECT COUNT(*) AS c FROM point_orders
@@ -2470,9 +2650,16 @@ async function revokeRentalFeature(
   if (Number(other?.c ?? 0) > 0) return "kept"
 
   // 原子写：只把该模块置 false，不整列覆盖（见 permissions.ts 的说明）
+  //
+  // ⚠️ 带白名单守卫：白名单用户不被收回任何权限（见 permissions.ts::notWhitelistedGuard）。
+  //    退款「撤销先前发放的权限」虽然在语义上不算处罚，但它同样是一条**降级写入**，
+  //    不带守卫就会被 0114 的触发器 ABORT、把整条退款流程打成 500。
+  //    代价是白名单用户退款后会保留该权限 —— 这是刻意的取舍：
+  //    白名单是站长手工维护的极短名单，宁可少收一个权限，也不要让流程报错。
+  //    真要收回，先把该用户移出白名单再操作。
   await env.DB.prepare(
     `UPDATE users SET permissions = ${featurePermissionSql(f as Feature, false)}, updated_at = ?
-      WHERE id = ?`
+      WHERE id = ? AND ${notWhitelistedGuard()}`
   )
     .bind(now, order.userId)
     .run()
@@ -2545,9 +2732,20 @@ export async function expireRentalOrders(
   // dryRun 只观察不写库（与 maintenance 的其它项一致）
   if (dryRun) return res
 
+  // 白名单用户：租用到期也不收回权限（2026-10-03 站长要求）。循环外一次性查成 Set。
+  const whitelisted = new Set<string>()
+  try {
+    const wlRows = await env.DB.prepare("SELECT username FROM moderation_whitelist").all<{
+      username: string
+    }>()
+    for (const r of wlRows.results ?? []) whitelisted.add(r.username.toLowerCase())
+  } catch {
+    // 表未建好时按「无白名单」处理
+  }
+
   for (const order of orders) {
     try {
-      const verdict = await revokeRentalFeature(env, order, now)
+      const verdict = await revokeRentalFeature(env, order, now, whitelisted)
       if (verdict === "revoked") res.permissionsRevoked++
       else if (verdict === "kept") res.keptWithOtherSource++
 

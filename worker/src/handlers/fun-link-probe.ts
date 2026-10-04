@@ -1,6 +1,6 @@
 import { ApiError, json } from "../http"
 import { isPrivileged, requireUser } from "../auth"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { assertPublicHttpUrl } from "../url-guard"
 import { extractIconUrl, extractMetaDescription, extractTitle, readTextCapped } from "../html-meta"
 import type { Env } from "../env"
@@ -47,7 +47,7 @@ function assertSafeUrl(raw: string, label: string): URL {
 
 /** POST /api/admin/fun-links/probe —— 管理员填完链接，抓标题 / 描述 / 图标 */
 export async function probeFunLink(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "funLinks")
 
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
   const raw = String(body.url ?? "").trim()

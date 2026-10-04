@@ -1,6 +1,6 @@
 import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { sendMail, renderMail, type MailTransport } from "../mailer"
 import { broadcastMessage } from "../user-messages"
@@ -452,7 +452,7 @@ export async function createAnnouncement(
   request: Request,
   ctx?: ExecutionContext
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "announcements")
   const body = (await request.json()) as {
     title?: string
     body?: string
@@ -520,7 +520,7 @@ export async function updateAnnouncement(
   id: string,
   ctx?: ExecutionContext
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "announcements")
   const existing = await loadOne(env, id)
   const body = (await request.json()) as {
     title?: string
@@ -608,7 +608,7 @@ export async function resendAnnouncementMails(
   id: string,
   ctx?: ExecutionContext
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "announcements")
   await loadOne(env, id)
 
   const body = (await request.json().catch(() => null)) as { emails?: unknown } | null
@@ -680,7 +680,7 @@ export async function deleteAnnouncement(
   request: Request,
   id: string
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "announcements")
   await loadOne(env, id)
   await env.DB.prepare("DELETE FROM announcements WHERE id = ?").bind(id).run()
   return json({ ok: true })
@@ -690,7 +690,7 @@ export async function listAllAnnouncements(
   env: Env,
   request: Request
 ): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "announcements")
   const rows = await env.DB.prepare(
     `SELECT * FROM announcements ORDER BY pinned DESC, created_at DESC LIMIT 100`
   ).all<AnnouncementRow>()

@@ -15,7 +15,7 @@
  * 边界：全部 requireAdmin；sweep 记审计。**禁用可逆**（status 1↔2），不做删除。
  */
 import { ApiError, json, readBodyCapped } from "../http"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { audit as recordAudit } from "../settings"
 import {
   listChannels,
@@ -43,7 +43,7 @@ function clamp(n: number, min: number, max: number): number {
 
 /** GET /admin/channels —— 全量渠道列表（只读） */
 export async function listChannelReport(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "newapi.channels")
   const channels = await listChannels(env)
   return json({
     total: channels.length,
@@ -68,7 +68,7 @@ export async function listChannelReport(env: Env, request: Request): Promise<Res
  * 返回每条的测试结果与是否被禁用。
  */
 export async function sweepChannels(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "newapi.channels")
   const body = await readJson(request)
   const ids = Array.isArray(body.ids)
     ? (body.ids as unknown[]).map(Number).filter((n) => Number.isFinite(n) && n > 0)
@@ -149,7 +149,7 @@ export async function sweepChannels(env: Env, request: Request): Promise<Respons
  * 这里只把 status 改回 1（启用），不做测试、不删数据，完全可逆。
  */
 export async function enableChannels(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "newapi.channels")
   const body = await readJson(request)
   const ids = Array.isArray(body.ids)
     ? (body.ids as unknown[]).map(Number).filter((n) => Number.isFinite(n) && n > 0)

@@ -1,6 +1,6 @@
 import * as React from "react"
 import { useSearchParams } from "react-router-dom"
-import { AlertTriangle, CheckCheck, Copy, Inbox, Loader2, Mail, Plus, RefreshCw, Reply, RotateCcw, Send, Settings, Trash2 } from "lucide-react"
+import { AlertTriangle, CheckCheck, CheckSquare, Copy, Inbox, ListChecks, Loader2, Mail, Pencil, Plus, RefreshCw, Reply, RotateCcw, Send, Settings, Square, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -130,6 +130,10 @@ export default function EmailPage() {
   const lastLocalUnreadChange = React.useRef(0)
   const [busy, setBusy] = React.useState(false)
   const [deletingId, setDeletingId] = React.useState<string | null>(null)
+  /** 批量删除：选中的邮件 id 集合 */
+  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+  /** 「编辑模式」：默认关，点工具栏「编辑」才显示勾选框 + 全选（2026-10-04 站长要求） */
+  const [selecting, setSelecting] = React.useState(false)
 
   // 添加邮箱
   const [addOpen, setAddOpen] = React.useState(false)
@@ -278,7 +282,11 @@ export default function EmailPage() {
   }, [])
 
   React.useEffect(() => {
-    if (selected) void loadMessages(selected.id)
+    if (selected) {
+      setSelectedIds(new Set()) // 切邮箱清空批量选择的勾选
+      setSelecting(false) // 切邮箱退出编辑模式
+      void loadMessages(selected.id)
+    }
   }, [selected?.id, loadMessages])
 
   // 带 ?message= 跳转过来：messages 加载后自动打开该邮件，然后清掉 query
@@ -443,6 +451,52 @@ export default function EmailPage() {
       toast.error(err instanceof HttpError ? err.message : t("em.err.delete"))
     } finally {
       setDeletingId(null)
+    }
+  }
+
+  /** 切换一封邮件的选中态（批量删除用） */
+  const toggleSelect = (messageId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(messageId)) next.delete(messageId)
+      else next.add(messageId)
+      return next
+    })
+  }
+
+  /** 当前列表是否已全选（用于「全选 / 取消全选」按钮切换） */
+  const allSelected = messages.length > 0 && messages.every((m) => selectedIds.has(m.id))
+
+  /** 全选 / 取消全选：只对当前已加载的邮件生效 */
+  const toggleSelectAll = () => {
+    setSelectedIds(allSelected ? new Set() : new Set(messages.map((m) => m.id)))
+  }
+
+  /** 退出编辑模式：清空勾选并隐藏勾选框 */
+  const exitSelecting = () => {
+    setSelecting(false)
+    setSelectedIds(new Set())
+  }
+
+  /** 批量删除选中的邮件 */
+  const handleBatchDelete = async () => {
+    if (!selected || selectedIds.size === 0) return
+    const ids = Array.from(selectedIds)
+    setBusy(true)
+    try {
+      await emailApi.batchDeleteMessages(selected.id, ids)
+      setMessages((prev) => prev.filter((m) => !selectedIds.has(m.id)))
+      if (opened && selectedIds.has(opened.id)) {
+        setOpened(null)
+        setView("list")
+      }
+      setSelectedIds(new Set())
+      void loadMailboxes()
+      toast.success(t("em.ok.batchDeleted", { n: ids.length }))
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("em.err.delete"))
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -828,19 +882,51 @@ export default function EmailPage() {
                   <Inbox className="h-4 w-4 text-muted-foreground" />
                   <span className="text-sm font-medium">{selected.address}</span>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7"
-                  onClick={() => {
-                    void silentRefresh(selected.id)
-                    void syncMailboxUnread()
-                  }}
-                  aria-label={t("common.refresh")}
-                  title={t("em.autoRefreshHint", { n: INBOX_POLL_MS / 1000 })}
-                >
-                  <RotateCcw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
-                </Button>
+                <div className="flex items-center gap-2">
+                  {selecting ? (
+                    <>
+                      <Button variant="outline" size="sm" onClick={toggleSelectAll}>
+                        <ListChecks className="mr-1 h-3.5 w-3.5" />
+                        {allSelected ? t("em.deselectAll") : t("em.selectAll")}
+                      </Button>
+                      <span className="text-xs text-muted-foreground">
+                        {t("em.selectedCount", { n: selectedIds.size })}
+                      </span>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        disabled={busy || selectedIds.size === 0}
+                        onClick={() => void handleBatchDelete()}
+                      >
+                        <Trash2 className="mr-1 h-3.5 w-3.5" />
+                        {t("em.batchDelete")}
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={exitSelecting}>
+                        {t("common.cancel")}
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button variant="outline" size="sm" onClick={() => setSelecting(true)}>
+                        <Pencil className="mr-1 h-3.5 w-3.5" />
+                        {t("em.edit")}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={() => {
+                          void silentRefresh(selected.id)
+                          void syncMailboxUnread()
+                        }}
+                        aria-label={t("common.refresh")}
+                        title={t("em.autoRefreshHint", { n: INBOX_POLL_MS / 1000 })}
+                      >
+                        <RotateCcw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
+                      </Button>
+                    </>
+                  )}
+                </div>
               </div>
               <div className="max-h-[560px] overflow-y-auto">
                 {loadingMessages ? (
@@ -863,6 +949,32 @@ export default function EmailPage() {
                         opened?.id === m.id && "bg-accent/60"
                       )}
                     >
+                      {/* 勾选框默认隐藏，点「编辑」进入编辑模式才显示 */}
+                      {selecting && (
+                        <span
+                          role="checkbox"
+                          aria-checked={selectedIds.has(m.id)}
+                          tabIndex={0}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            toggleSelect(m.id)
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault()
+                              e.stopPropagation()
+                              toggleSelect(m.id)
+                            }
+                          }}
+                          className="shrink-0 text-muted-foreground/60 hover:text-foreground"
+                        >
+                          {selectedIds.has(m.id) ? (
+                            <CheckSquare className="h-4 w-4 text-primary" />
+                          ) : (
+                            <Square className="h-4 w-4" />
+                          )}
+                        </span>
+                      )}
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           <span

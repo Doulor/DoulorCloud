@@ -29,6 +29,7 @@
 import { json, ApiError } from "../http"
 import { requireUser } from "../auth"
 import { achievementPointsOf, loadAllUserCounts } from "./achievements"
+import { siteOffsetHours } from "../settings"
 import type { Env } from "../env"
 
 /** 榜单长度。50 足够，再长没人翻；也避免把响应做大。 */
@@ -78,9 +79,9 @@ function supportedRanges(board: LeaderboardBoard): readonly LeaderboardRange[] {
  * 按 UTC 零点切，对国内用户错开 8 小时。做法：把当前时刻 +8h 当「中国墙钟」，
  * 在墙上取日/周/月的零点，再 -8h 还原成 UTC 时间戳。
  */
-function rangeStart(range: LeaderboardRange): string | null {
+function rangeStart(range: LeaderboardRange, offsetHours: number): string | null {
   if (range === "all") return null
-  const c = new Date(Date.now() + 8 * 3600_000)
+  const c = new Date(Date.now() + offsetHours * 3600_000)
   if (range === "today") {
     c.setHours(0, 0, 0, 0)
   } else if (range === "week") {
@@ -93,7 +94,7 @@ function rangeStart(range: LeaderboardRange): string | null {
     c.setDate(1)
     c.setHours(0, 0, 0, 0)
   }
-  return new Date(c.getTime() - 8 * 3600_000).toISOString()
+  return new Date(c.getTime() - offsetHours * 3600_000).toISOString()
 }
 
 /** 榜上的一行 */
@@ -118,9 +119,10 @@ interface ScoreSource {
 function scoreSource(
   board: LeaderboardBoard,
   metric: CommunityMetric,
-  range: LeaderboardRange
+  range: LeaderboardRange,
+  offsetHours: number
 ): ScoreSource {
-  const since = rangeStart(range)
+  const since = rangeStart(range, offsetHours)
 
   switch (board) {
     case "newapi":
@@ -331,7 +333,7 @@ export async function getLeaderboard(env: Env, request: Request): Promise<Respon
     const myIdx = scored.findIndex((r) => r.uid === user.id)
     if (myIdx >= 0) me = { score: scored[myIdx].score, rank: ranks[myIdx] }
   } else {
-    const r = await rankBySql(env, scoreSource(board, metric, range), user.id)
+    const r = await rankBySql(env, scoreSource(board, metric, range, await siteOffsetHours(env)), user.id)
     rows = r.rows
     me = r.me
   }

@@ -16,7 +16,7 @@
  * 见 chat.ts 里那段注释）。created_at 是 ISO 8601 定长字符串，字典序 == 时间序。
  */
 import { ApiError, json, readBodyCapped } from "../http"
-import { requireUser } from "../auth"
+import { requireUser, isPrivileged } from "../auth"
 import { uuid } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
 import type { Env } from "../env"
@@ -118,7 +118,7 @@ async function checkSendGate(
   me: { id: string },
   peer: PeerRow
 ): Promise<SendGate> {
-  if (peer.role === "admin" || peer.role === "root") return { ok: true, needRequestRow: false }
+  if (isPrivileged(peer.role)) return { ok: true, needRequestRow: false }
 
   const order = await env.DB.prepare(
     `SELECT 1 AS x FROM point_orders

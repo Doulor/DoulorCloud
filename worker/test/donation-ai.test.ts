@@ -10,7 +10,7 @@
 // 撤销时资源有没有真的收回。只测纯函数覆盖不到这些。
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest"
 import { env } from "cloudflare:workers"
-import { authRequest, fetchSelf, makeUser, setPermissions, type TestUser } from "./helpers"
+import { authRequest, fetchSelf, makeUser, setPermissions, setSetting, type TestUser } from "./helpers"
 import { normalizeBaseUrl, probeUpstream, validateUpstreamUrl } from "../src/donation-provision"
 import { parsePermissions } from "../src/permissions"
 
@@ -106,6 +106,7 @@ async function readDonation(id: string) {
       review_note: string | null
       newapi_channel_id: number | null
       auto_reviewed: number
+      granted_feature: number | null
     }>()
 }
 
@@ -357,6 +358,30 @@ describe("POST /donations —— AI 自动接入", () => {
     expect(JSON.parse(channel.model_mapping as string)).toEqual({ "donation-gpt-4o": "gpt-4o" })
     // 统一打上标签，NewAPI 的「标签模式」下就是一个自成一组的「文件夹」
     expect(channel.tag).toBe("捐献")
+  })
+
+  it("关闭 donation_grant_ai 后，捐献照常通过、但不再解锁 ai 权限", async () => {
+    await setSetting("donation_grant_ai", "0")
+    try {
+      const user = await makeDonor()
+      stubFetch((url) => (url.startsWith(UPSTREAM) ? upstreamModels(["gpt-4o"]) : undefined))
+      stubNewApiChannelFlow({ testOk: true })
+
+      const { res, body } = await submitAiDonation(user, `${UPSTREAM}/v1`)
+      expect(res.status).toBe(200)
+      // 捐献本身仍然通过（资源照收、渠道照建），只是权限不再授予
+      expect(body.status).toBe("approved")
+
+      const perms = await readPerms(user.id)
+      expect(perms.ai).toBe(false)
+
+      const row = await readDonation(body.id)
+      expect(row?.status).toBe("approved")
+      // granted_feature 记 0：没授予，撤销时也不会去收回
+      expect(row?.granted_feature).toBe(0)
+    } finally {
+      await setSetting("donation_grant_ai", "1")
+    }
   })
 
   it("全部模型都测不过 → **不自动拒绝**，转人工复核；半坏的渠道仍要删掉", async () => {

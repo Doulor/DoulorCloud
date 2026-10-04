@@ -13,7 +13,7 @@
  */
 import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
-import { getSetting, getSettingBool, getSettingNumber } from "../settings"
+import { getSetting, getSettingBool, getSettingNumber, siteOffsetHours, siteDayString } from "../settings"
 import { applyPoints } from "../points"
 import {
   parseCheckinMilestones,
@@ -22,15 +22,6 @@ import {
   nextMilestone,
 } from "../checkin-config"
 import type { Env } from "../env"
-
-/** 站点时区偏移（小时）。中国标准时间 UTC+8 */
-const SITE_UTC_OFFSET_HOURS = 8
-
-/** 站点时区的「今天」，YYYY-MM-DD。把 UTC 时间平移 +8 小时再取 UTC 日期部分 */
-function siteDateString(d: Date = new Date()): string {
-  const shifted = new Date(d.getTime() + SITE_UTC_OFFSET_HOURS * 60 * 60 * 1000)
-  return shifted.toISOString().slice(0, 10)
-}
 
 /** 某个日期字符串的前一天 */
 function prevDateString(dateStr: string): string {
@@ -77,7 +68,7 @@ export async function getCheckinStatus(env: Env, request: Request): Promise<Resp
   if (!enabled) return json({ enabled: false, checkedIn: false, streak: 0, milestones: [] })
 
   const user = await requireUser(env, request)
-  const today = siteDateString()
+  const today = siteDayString(new Date(), await siteOffsetHours(env))
 
   const todayRow = await env.DB.prepare(
     `SELECT points, base_points, bonus_points, streak FROM daily_checkins
@@ -122,7 +113,7 @@ export async function doCheckin(env: Env, request: Request): Promise<Response> {
   const enabled = await getSettingBool(env, "checkin_enabled")
   if (!enabled) throw new ApiError(403, "签到功能已关闭", "CHECKIN_DISABLED")
 
-  const today = siteDateString()
+  const today = siteDayString(new Date(), await siteOffsetHours(env))
 
   // 防重复：主键兜底，这里先查一次给个友好提示（避免用户看到 500）
   const existing = await env.DB.prepare(

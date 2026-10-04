@@ -16,17 +16,7 @@ import { isIpBlacklisted } from "./moderation-lists"
 import { getDefaultRootDomain, resolveZoneId, isOwnDomain } from "../root-domains"
 import { grantInvitePoints } from "../points"
 import { evaluateTwoFactorGate, createLoginChallenge, maskEmail } from "./two-factor"
-import {
-  createSession,
-  destroySession,
-  requireUser,
-  sessionCookie,
-  clearedSessionCookie,
-  getSessionTokens,
-  toPublicUser,
-  loadPendingReply,
-  type UserRow,
-} from "../auth"
+import { createSession, destroySession, requireUser, sessionCookie, clearedSessionCookie, getSessionTokens, toPublicUser, loadPendingReply, type UserRow, isPrivileged } from "../auth"
 import type { Env } from "../env"
 
 /**
@@ -864,8 +854,8 @@ export async function me(
       createdAt: f.created_at,
     })),
     // 管理员/站长不受配额限制（999999 作为「不限」哨兵值，前端据此显示）
-    subdomainLimit: user.role === "admin" || user.role === "root" ? 999999 : 5,
-    mailboxLimit: user.role === "admin" || user.role === "root" ? 999999 : 3,
+    subdomainLimit: isPrivileged(user.role) ? 999999 : 5,
+    mailboxLimit: isPrivileged(user.role) ? 999999 : 3,
     recentMessages: recentMessages.map((m) => ({
       id: m.id,
       from: m.from_address,

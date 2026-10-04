@@ -15,14 +15,14 @@
  *    —— 与排行榜、成就页同一口径，否则同一个人在三处显示的点数会不一样。
  */
 import { ApiError, json } from "../http"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { clientIp } from "../ratelimit"
 import { audit } from "../settings"
 import { achievementPointsOf, loadAllUserCounts } from "./achievements"
 import type { Env } from "../env"
 
-export type ConditionMetric = "achievement_points"
+export type ConditionMetric = "achievement_points" | "custom_title"
 export type ConditionOp = "gt" | "gte" | "lt" | "lte"
 
 const OPS: Record<ConditionOp, (a: number, b: number) => boolean> = {
@@ -52,31 +52,55 @@ async function evaluateConditions(
   const conds = await env.DB.prepare(
     "SELECT id, metric, op, value, enabled, created_at FROM moderation_conditions ORDER BY created_at ASC"
   ).all<ConditionRow>()
-  const enabled = (conds.results ?? []).filter((c) => Number(c.enabled) === 1 && OPS[c.op as ConditionOp])
+  const enabled = (conds.results ?? []).filter((c) => Number(c.enabled) === 1)
   const out = new Map<string, { username: string; points: number }[]>()
   for (const c of enabled) out.set(c.id, [])
   if (enabled.length === 0) return out
 
-  // 只有「成就点」一种指标，所以统一先算一遍全员成就点
-  const counts = await loadAllUserCounts(env)
-  const histRows = await env.DB.prepare(
-    "SELECT user_id, achievement_id, MAX(level) AS lv FROM user_achievements GROUP BY user_id, achievement_id"
-  ).all<{ user_id: string; achievement_id: string; lv: number }>()
-  const histByUser = new Map<string, Map<string, number>>()
-  for (const r of histRows.results ?? []) {
-    if (!histByUser.has(r.user_id)) histByUser.set(r.user_id, new Map())
-    histByUser.get(r.user_id)!.set(r.achievement_id, r.lv)
-  }
+  // 按指标分两类处理（当前两种指标、口径完全不同）
+  const apConds = enabled.filter(
+    (c) => c.metric === "achievement_points" && OPS[c.op as ConditionOp]
+  )
+  const titleConds = enabled.filter((c) => c.metric === "custom_title")
 
-  for (const c of counts) {
-    const points = achievementPointsOf(c, histByUser.get(c.uid) ?? new Map())
-    for (const cond of enabled) {
-      if (OPS[cond.op as ConditionOp](points, cond.value)) {
-        out.get(cond.id)!.push({ username: c.username, points })
-        break
+  // ---- 成就点条件：算一遍全员成就点（与排行榜 / 成就页同一口径）----
+  if (apConds.length > 0) {
+    const counts = await loadAllUserCounts(env)
+    const histRows = await env.DB.prepare(
+      "SELECT user_id, achievement_id, MAX(level) AS lv FROM user_achievements GROUP BY user_id, achievement_id"
+    ).all<{ user_id: string; achievement_id: string; lv: number }>()
+    const histByUser = new Map<string, Map<string, number>>()
+    for (const r of histRows.results ?? []) {
+      if (!histByUser.has(r.user_id)) histByUser.set(r.user_id, new Map())
+      histByUser.get(r.user_id)!.set(r.achievement_id, r.lv)
+    }
+
+    for (const c of counts) {
+      const points = achievementPointsOf(c, histByUser.get(c.uid) ?? new Map())
+      for (const cond of apConds) {
+        if (OPS[cond.op as ConditionOp](points, cond.value)) {
+          out.get(cond.id)!.push({ username: c.username, points })
+          break
+        }
       }
     }
   }
+
+  // ---- 有自定义称号条件：user_titles 有记录即命中 ----
+  if (titleConds.length > 0) {
+    const rows = await env.DB.prepare(
+      `SELECT DISTINCT u.username
+         FROM user_titles ut JOIN users u ON u.id = ut.user_id
+        WHERE u.status = 'active'
+        ORDER BY u.username`
+    ).all<{ username: string }>()
+    for (const cond of titleConds) {
+      for (const r of rows.results ?? []) {
+        out.get(cond.id)!.push({ username: r.username, points: 0 })
+      }
+    }
+  }
+
   return out
 }
 
@@ -195,7 +219,7 @@ export async function addIpToBlacklist(
 
 /** GET /api/admin/moderation/lists —— 白名单（按来源分组）+ 黑名单 */
 export async function listModerationLists(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "moderation.whitelist")
   await syncWhitelist(env)
 
   const [conds, wl, bl] = await Promise.all([
@@ -259,7 +283,7 @@ export async function listModerationLists(env: Env, request: Request): Promise<R
 
 /** POST /api/admin/moderation/whitelist —— { action: "add" | "remove", username } */
 export async function updateWhitelist(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "moderation.whitelist")
   const body = (await request.json()) as { action?: string; username?: string }
   const username = String(body.username ?? "").trim()
   if (!username) throw new ApiError(400, "请填写用户名", "INVALID_INPUT")
@@ -299,7 +323,7 @@ export async function updateWhitelist(env: Env, request: Request): Promise<Respo
 
 /** POST /api/admin/moderation/conditions —— { action: "create" | "toggle" | "delete", ... } */
 export async function updateConditions(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "moderation.whitelist")
   const body = (await request.json()) as {
     action?: string
     id?: string
@@ -311,6 +335,20 @@ export async function updateConditions(env: Env, request: Request): Promise<Resp
 
   if (body.action === "create") {
     const metric = String(body.metric ?? "achievement_points")
+
+    // 有自定义称号：布尔条件，不需要 op/value（存占位值）
+    if (metric === "custom_title") {
+      await env.DB.prepare(
+        "INSERT INTO moderation_conditions (id, metric, op, value, enabled, created_at) VALUES (?, 'custom_title', 'gte', 0, 1, ?)"
+      )
+        .bind(uuid(), new Date().toISOString())
+        .run()
+      await audit(env, admin.id, "moderation.condition.create", "新增白名单条件：有自定义称号", clientIp(request))
+      await syncWhitelist(env)
+      return json({ ok: true })
+    }
+
+    // 成就点：需要 op + value
     const op = String(body.op ?? "gt") as ConditionOp
     const value = Math.trunc(Number(body.value))
     if (metric !== "achievement_points") throw new ApiError(400, "暂不支持该条件类型", "INVALID_INPUT")
@@ -360,7 +398,7 @@ export async function updateConditions(env: Env, request: Request): Promise<Resp
 
 /** POST /api/admin/moderation/blacklist —— { action: "add" | "remove", ip, reason? } */
 export async function updateBlacklist(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "moderation.blacklist")
   const body = (await request.json()) as { action?: string; ip?: string; reason?: string }
   const ip = String(body.ip ?? "").trim()
   if (!ip) throw new ApiError(400, "请填写 IP", "INVALID_INPUT")

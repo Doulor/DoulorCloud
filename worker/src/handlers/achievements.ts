@@ -73,7 +73,6 @@ export const ACHIEVEMENT_GROUPS: { id: string; label: string; desc: string }[] =
 const VETERAN_TOP_N = 20
 
 const MB = 1024 * 1024
-const GB = 1024 * MB
 
 /** 成就定义表。新增成就只需在此追加（记得同时给前端 ICONS 加图标映射）。 */
 const ACHIEVEMENTS: AchievementDef[] = [
@@ -171,9 +170,12 @@ const ACHIEVEMENTS: AchievementDef[] = [
     icon: "database",
     group: "resource",
     how: "上传更大的文件即可推进（按当前占用总量算，删掉会回落）。",
-    tiers: [10 * MB, 200 * MB, GB],
-    tierNames: ["十兆起步", "两百兆", "一个 G"],
-    tierReqs: ["占用 10 MB", "占用 200 MB", "占用 1 GB"],
+    // 第三档 1000 MB 而非 1 GB（1024 MB）：用户反馈（38011049）网盘每人
+    // 配额是 1 GB，占用到 1023 MB 时最后 1 MB 传不上去，永远够不到精确
+    // 1024 MB 的门槛。降到 1000 MB 让满配额用户也能完成。
+    tiers: [10 * MB, 200 * MB, 1000 * MB],
+    tierNames: ["十兆起步", "两百兆", "千兆"],
+    tierReqs: ["占用 10 MB", "占用 200 MB", "占用 1000 MB"],
     valueFormat: "bytes",
   },
   {
@@ -401,13 +403,13 @@ const ACHIEVEMENTS: AchievementDef[] = [
   {
     id: "checkin",
     name: "风雨无阻",
-    desc: "每日签到",
+    desc: "累计签到天数",
     icon: "calendar-check",
     group: "usage",
-    how: "在「积分」页每日签到一次，连续签到还有里程碑奖励。",
+    how: "在「积分」页每日签到，按**累计**签到天数计算（中间断签不清零，签一天算一天）。",
     tiers: [7, 30, 100],
     tierNames: ["坚持一周", "满月打卡", "百日如一日"],
-    tierReqs: ["签到 7 天", "签到 30 天", "签到 100 天"],
+    tierReqs: ["累计签到 7 天", "累计签到 30 天", "累计签到 100 天"],
   },
   {
     id: "points_balance",
@@ -464,7 +466,167 @@ const ACHIEVEMENTS: AchievementDef[] = [
     tierNames: ["收藏起步", "表情丰富", "收藏大家"],
     tierReqs: ["保存 1 个表情包", "保存 10 个表情包", "保存 100 个表情包"],
   },
+
+  // ---- 2026-10-04 新增：深度使用与平台探索 ----------------------------
+  // 这批成就继续复用已经存在的业务表，不引入新迁移。计数均为用户实际
+  // 做过的事情：读信、参与活动、使用私信/OAuth/开放 API，以及把多个模块
+  // 真正组合起来使用。这样成就数量增加的同时，每一枚都有清晰的来源。
+  {
+    id: "mail_read",
+    name: "阅信有道",
+    desc: "阅读收到的邮件",
+    icon: "mail-check",
+    group: "usage",
+    how: "打开收件箱阅读邮件，按**累计已读**封数计算（读过的信即使删掉也不会少）。",
+    tiers: [1, 10, 50],
+    tierNames: ["拆开第一封", "往来渐多", "阅信达人"],
+    tierReqs: ["累计读过 1 封邮件", "累计读过 10 封邮件", "累计读过 50 封邮件"],
+  },
+  {
+    id: "dns_types",
+    name: "解析百宝箱",
+    desc: "使用不同类型的 DNS 记录",
+    icon: "network",
+    group: "resource",
+    how: "创建 A、CNAME、TXT、MX 等不同类型的 DNS 记录，按类型去重。",
+    tiers: [2, 4, 6],
+    tierNames: ["两种类型", "多种解析", "全能解析"],
+    tierReqs: ["使用 2 种 DNS 类型", "使用 4 种 DNS 类型", "使用 6 种 DNS 类型"],
+  },
+  {
+    id: "post_edits",
+    name: "精益求精",
+    desc: "编辑自己发布的帖子",
+    icon: "file-text",
+    group: "social",
+    how: "发布后继续编辑帖子，让内容越来越清楚。",
+    tiers: [1, 5, 20],
+    tierNames: ["首次打磨", "反复推敲", "内容匠人"],
+    tierReqs: ["编辑 1 次帖子", "编辑 5 次帖子", "编辑 20 次帖子"],
+  },
+  {
+    id: "post_images",
+    name: "图文并茂",
+    desc: "发布带图片的帖子",
+    icon: "palette",
+    group: "social",
+    how: "在社区帖子里加入图片，让内容更直观。",
+    tiers: [1, 3, 10],
+    tierNames: ["图文首发", "配图熟手", "视觉表达"],
+    tierReqs: ["发布 1 条带图片的帖子", "发布 3 条带图片的帖子", "发布 10 条带图片的帖子"],
+  },
+  {
+    id: "comment_replies",
+    name: "接话高手",
+    desc: "回复社区里的评论",
+    icon: "message-square",
+    group: "social",
+    how: "在评论下继续回复，让讨论形成来回交流。",
+    tiers: [1, 5, 20],
+    tierNames: ["接上话题", "讨论升温", "楼中楼常客"],
+    tierReqs: ["回复 1 条评论", "回复 5 条评论", "回复 20 条评论"],
+  },
+  {
+    id: "notification_read",
+    name: "消息不漏",
+    desc: "读完站内通知",
+    icon: "inbox",
+    group: "usage",
+    how: "在消息中心查看站内通知，按已读通知数量累计。",
+    tiers: [5, 25, 100],
+    tierNames: ["留意动态", "消息灵通", "信息管家"],
+    tierReqs: ["读过 5 条通知", "读过 25 条通知", "读过 100 条通知"],
+  },
+  {
+    id: "direct_messages",
+    name: "私信往来",
+    desc: "使用站内私信",
+    icon: "messages-square",
+    group: "social",
+    how: "通过站内私信与其他用户联系，按收发消息总数累计。",
+    tiers: [1, 10, 50],
+    tierNames: ["发出第一句", "有来有往", "私信常客"],
+    tierReqs: ["收发 1 条私信", "收发 10 条私信", "收发 50 条私信"],
+  },
+  {
+    id: "event_claims",
+    name: "活动参与者",
+    desc: "参加站内活动",
+    icon: "gift",
+    group: "contribute",
+    how: "在消息中心或活动页面领取站内活动奖励。",
+    tiers: [1, 3, 10],
+    tierNames: ["首次参加", "活动积极分子", "活动常客"],
+    tierReqs: ["参加 1 次活动", "参加 3 次活动", "参加 10 次活动"],
+  },
+  {
+    id: "oauth_grants",
+    name: "统一登录",
+    desc: "授权其他应用使用账号登录",
+    icon: "key-round",
+    group: "usage",
+    how: "在第三方应用的授权页同意使用 Doulor Cloud 登录。",
+    tiers: [1, 2, 5],
+    tierNames: ["首次授权", "多端通行", "身份中枢"],
+    tierReqs: ["授权 1 个应用", "授权 2 个应用", "授权 5 个应用"],
+  },
+  {
+    id: "public_api",
+    name: "开放接口",
+    desc: "开通公开 API",
+    icon: "route",
+    group: "start",
+    how: "在账号设置里生成公开 API Key，用代码调用站点功能。",
+  },
+  {
+    id: "profile_modules",
+    name: "名片设计师",
+    desc: "编排个人名片模块",
+    icon: "palette",
+    group: "resource",
+    how: "在个人名片编辑器里启用并编排多个内容模块。",
+    tiers: [2, 4, 6],
+    tierNames: ["开始布置", "布局讲究", "名片大师"],
+    tierReqs: ["配置 2 个名片模块", "配置 4 个名片模块", "配置 6 个名片模块"],
+  },
+  {
+    id: "feature_count",
+    name: "多面手",
+    desc: "开通多个平台模块",
+    icon: "layers",
+    group: "start",
+    how: "实际开通网盘、AI、名片、内网穿透、代理节点中的多个模块。",
+    tiers: [2, 3, 5],
+    tierNames: ["两项上手", "三线并行", "全能用户"],
+    tierReqs: ["开通 2 个功能模块", "开通 3 个功能模块", "开通全部 5 个功能模块"],
+  },
+  {
+    id: "points_earned",
+    name: "积分积累家",
+    desc: "累计获得积分",
+    icon: "coins",
+    group: "contribute",
+    how: "通过签到、活动、邀请或管理员奖励获得积分，按历史累计收入计算。",
+    tiers: [100, 500, 2000],
+    tierNames: ["积少成多", "积分有余", "积分富户"],
+    tierReqs: ["累计获得 100 分", "累计获得 500 分", "累计获得 2000 分"],
+  },
+  {
+    id: "checkin_streak",
+    name: "连续打卡",
+    desc: "连续签到不断签",
+    icon: "calendar-check",
+    group: "usage",
+    // 与「风雨无阻」的区别：那边按**累计签到天数**（断签不清零，签一天算一天），
+    // 这边按**最高连续天数**（断签重算，但已解锁等级不掉）。档位刻意更低，
+    // 让连续性更早出成绩（2026-10-04 用户 tasuyan 反馈两者重复，已拉开）。
+    how: "连续多天签到**不间断**，按历史最高连续天数计算（中间断签会重算，但已解锁的等级不会掉）。",
+    tiers: [3, 14, 60],
+    tierNames: ["三日不断", "半月坚持", "六十天如一日"],
+    tierReqs: ["连续签到 3 天", "连续签到 14 天", "连续签到 60 天"],
+  },
 ]
+
 
 /**
  * 称号：按**成就点**（每个已解锁等级记 1 点）分档。
@@ -472,9 +634,12 @@ const ACHIEVEMENTS: AchievementDef[] = [
  * 为什么用「点」而不是「成就个数」：分级成就练到 Lv.3 却和只解锁 Lv.1 一样，
  * 会让人觉得刷等级没意义。点数把深度也计进去了。
  *
- * 上限参考：37 个成就 + 分级额外等级 ≈ 82 点。档位在 2026-10-03 提过一次
- * （成就从 60 点扩到 82 点后，原「传奇 = 36」显得太低），梯度逐渐拉大，
- * 越往上越难：0/5/12/22/36/52/70/80。
+ * 上限参考：52 个成就 + 分级额外等级 ≈ 122 点。档位在 2026-10-03 与
+ * 2026-10-04 各提过一次（成就从 60 点扩到 82 点、再扩到 122 点后，
+ * 旧档位显得太低），梯度逐渐拉大，越往上越难：
+ * 0/5/12/22/36/52/70/92/122。
+ *
+ * ⚠️ 只**追加**档位、不改动已有档位的阈值，避免老用户的称号凭空降级。
  */
 const TITLES: { min: number; name: string }[] = [
   { min: 0, name: "初来乍到" },
@@ -484,7 +649,8 @@ const TITLES: { min: number; name: string }[] = [
   { min: 36, name: "名人" },
   { min: 52, name: "传奇" },
   { min: 70, name: "至尊" },
-  { min: 80, name: "萌新" },
+  { min: 92, name: "宗师" },
+  { min: 122, name: "萌新" },
 ]
 
 /** 称号阶梯里的一个档位（供前端做「VIP 等级」式的线性展示） */
@@ -678,6 +844,34 @@ export interface UserCounts {
   shares_given: number
   /** 已保存的表情包数 */
   stickers: number
+  /** 累计已读邮件封数（读过的信删掉也不清减） */
+  mail_read: number
+  /** 使用过的 DNS 记录类型数 */
+  dns_types: number
+  /** 编辑帖子次数 */
+  post_edits: number
+  /** 发布过的带图片帖子数 */
+  post_images: number
+  /** 回复评论次数（parent_id 非空） */
+  comment_replies: number
+  /** 已读站内通知数 */
+  notification_read: number
+  /** 收发私信总数 */
+  direct_messages: number
+  /** 参加活动次数 */
+  event_claims: number
+  /** 已授权的 OAuth 应用数 */
+  oauth_grants: number
+  /** 是否生成过公开 API Key */
+  public_api: number
+  /** 名片中已启用的模块数 */
+  profile_modules: number
+  /** 实际开通的平台功能数 */
+  feature_count: number
+  /** 历史累计获得的正积分 */
+  points_earned: number
+  /** 历史最高连续签到天数 */
+  checkin_streak: number
   /** 注册时间（「坚守者」按天数算，个人空间也要显示加入时间） */
   created_at: string | null
 }
@@ -720,6 +914,20 @@ function emptyCounts(): UserCounts {
     shop_orders: 0,
     shares_given: 0,
     stickers: 0,
+    mail_read: 0,
+    dns_types: 0,
+    post_edits: 0,
+    post_images: 0,
+    comment_replies: 0,
+    notification_read: 0,
+    direct_messages: 0,
+    event_claims: 0,
+    oauth_grants: 0,
+    public_api: 0,
+    profile_modules: 0,
+    feature_count: 0,
+    points_earned: 0,
+    checkin_streak: 0,
     created_at: null,
   }
 }
@@ -815,6 +1023,40 @@ function countColumns(owner: string, excludeApi: boolean): string {
           AND status IN ('delivered', 'settled')) AS shop_orders,
        (SELECT COUNT(*) FROM post_shares WHERE user_id = {OWNER}) AS shares_given,
        (SELECT COUNT(*) FROM user_stickers WHERE user_id = {OWNER}) AS stickers,
+       -- ---- 2026-10-04 新增：深度使用与平台探索 ----
+       (SELECT COALESCE(mail_read_count, 0) FROM user_stats WHERE user_id = {OWNER}) AS mail_read,
+       (SELECT COUNT(DISTINCT dr.type) FROM dns_records dr
+          JOIN subdomains s ON dr.subdomain_id = s.id
+         WHERE s.user_id = {OWNER}${dnsSrc}) AS dns_types,
+       (SELECT COUNT(*) FROM post_edits e JOIN posts p ON e.post_id = p.id
+         WHERE e.editor_id = {OWNER} AND p.deleted_at IS NULL) AS post_edits,
+       (SELECT COUNT(*) FROM posts
+         WHERE user_id = {OWNER} AND deleted_at IS NULL
+           AND json_array_length(CASE WHEN json_valid(images) THEN images ELSE '[]' END) > 0) AS post_images,
+       (SELECT COUNT(*) FROM post_comments
+         WHERE user_id = {OWNER} AND parent_id IS NOT NULL AND deleted_at IS NULL) AS comment_replies,
+       (SELECT COUNT(*) FROM notifications
+         WHERE user_id = {OWNER} AND read = 1) AS notification_read,
+       (SELECT COUNT(*) FROM direct_messages
+         WHERE from_user_id = {OWNER} OR to_user_id = {OWNER}) AS direct_messages,
+       (SELECT COUNT(*) FROM event_claims
+         WHERE user_id = {OWNER} AND reward_status != 'failed') AS event_claims,
+       (SELECT COUNT(*) FROM oauth_grants WHERE user_id = {OWNER}) AS oauth_grants,
+       (SELECT COUNT(*) FROM user_api_keys WHERE user_id = {OWNER}) AS public_api,
+       (SELECT COUNT(*) FROM profiles p, json_each(
+          CASE WHEN json_valid(p.modules) THEN p.modules ELSE '[]' END
+        ) WHERE p.user_id = {OWNER}
+          AND json_extract(json_each.value, '$.enabled') = 1) AS profile_modules,
+       (SELECT COUNT(*) FROM (
+          SELECT user_id FROM storage_accounts WHERE user_id = {OWNER} AND enabled = 1
+          UNION ALL SELECT user_id FROM newapi_accounts WHERE user_id = {OWNER}
+          UNION ALL SELECT user_id FROM profiles WHERE user_id = {OWNER}
+          UNION ALL SELECT user_id FROM frp_accounts WHERE user_id = {OWNER} AND enabled = 1
+          UNION ALL SELECT user_id FROM proxy_activation WHERE user_id = {OWNER} AND enabled = 1
+       )) AS feature_count,
+       (SELECT COALESCE(SUM(CASE WHEN delta > 0 THEN delta ELSE 0 END), 0)
+          FROM point_transactions WHERE user_id = {OWNER}) AS points_earned,
+       (SELECT COALESCE(MAX(streak), 0) FROM daily_checkins WHERE user_id = {OWNER}) AS checkin_streak,
        (SELECT created_at FROM users WHERE id = {OWNER}) AS created_at
      `.replaceAll("{OWNER}", owner)
 }
@@ -915,6 +1157,20 @@ export function computeAchievements(counts: UserCounts): {
     shop_orders: c?.shop_orders ?? 0,
     post_shares: c?.shares_given ?? 0,
     stickers: c?.stickers ?? 0,
+    mail_read: c?.mail_read ?? 0,
+    dns_types: c?.dns_types ?? 0,
+    post_edits: c?.post_edits ?? 0,
+    post_images: c?.post_images ?? 0,
+    comment_replies: c?.comment_replies ?? 0,
+    notification_read: c?.notification_read ?? 0,
+    direct_messages: c?.direct_messages ?? 0,
+    event_claims: c?.event_claims ?? 0,
+    oauth_grants: c?.oauth_grants ?? 0,
+    public_api: c?.public_api ?? 0,
+    profile_modules: c?.profile_modules ?? 0,
+    feature_count: c?.feature_count ?? 0,
+    points_earned: c?.points_earned ?? 0,
+    checkin_streak: c?.checkin_streak ?? 0,
   }
 
   const result: AchievementProgress[] = ACHIEVEMENTS.map((def) => {

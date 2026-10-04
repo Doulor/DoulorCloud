@@ -10,6 +10,7 @@ import { guardRateLimit } from "../ratelimit"
 import { FEATURES, FEATURE_LABELS } from "../permissions"
 import {
   featuresInInvite,
+  getAllowedFirstDonationFeatures,
   loadPermissions,
   redeemInvite,
   redeemVoucher,
@@ -34,7 +35,7 @@ interface InviteForRedeem {
 export async function listMyVouchers(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
 
-  const [voucherRows, inviteRows, perms] = await Promise.all([
+  const [voucherRows, inviteRows, perms, allowed] = await Promise.all([
     env.DB.prepare(
       "SELECT * FROM vouchers WHERE owner_user_id = ? AND status = 'unused' ORDER BY created_at DESC"
     )
@@ -55,6 +56,7 @@ export async function listMyVouchers(env: Env, request: Request): Promise<Respon
         created_at: string
       }>(),
     loadPermissions(env, user.id),
+    getAllowedFirstDonationFeatures(env),
   ])
 
   const codes = [
@@ -85,11 +87,19 @@ export async function listMyVouchers(env: Env, request: Request): Promise<Respon
 
   return json({
     codes,
-    /** 自选券的候选：带上是否已拥有，前端只列还没开的 */
+    /**
+     * 自选券的候选：带上是否已拥有，前端只列还没开的。
+     *
+     * `allowed` = 该模块当前是否在「首捐奖励券可兑换」范围内
+     * （设置项 first_donation_voucher_features，默认全部）。
+     * ⚠️ 它只约束**首捐券**这一条路；别人给的邀请码带什么权限由码自己决定，
+     *    与这一列无关，所以前端不能拿 `allowed` 去过滤邀请码那部分。
+     */
     features: FEATURES.map((f) => ({
       key: f,
       label: FEATURE_LABELS[f],
       owned: perms[f],
+      allowed: allowed.has(f),
     })),
   })
 }

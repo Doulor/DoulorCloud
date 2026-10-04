@@ -13,7 +13,7 @@
  */
 import { ApiError, json, readBodyCapped } from "../http"
 import { requireUser, isPrivileged } from "../auth"
-import { requireAdmin } from "./admin"
+import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
 import { getSetting, audit as recordAudit } from "../settings"
@@ -180,32 +180,41 @@ async function loadMessagesFor(
 ): Promise<Map<string, FeedbackMessageDto[]>> {
   const map = new Map<string, FeedbackMessageDto[]>()
   if (feedbackIds.length === 0) return map
-  const placeholders = feedbackIds.map(() => "?").join(",")
-  const rows = await env.DB.prepare(
-    `SELECT id, feedback_id, sender_id, is_admin, body, images, created_at
-       FROM feedback_messages WHERE feedback_id IN (${placeholders})
-      ORDER BY created_at ASC`
-  )
-    .bind(...feedbackIds)
-    .all<{
-      id: string
-      feedback_id: string
-      sender_id: string
-      is_admin: number
-      body: string
-      images: string | null
-      created_at: string
-    }>()
-  for (const r of rows.results ?? []) {
-    if (!map.has(r.feedback_id)) map.set(r.feedback_id, [])
-    map.get(r.feedback_id)!.push({
-      id: r.id,
-      senderId: r.sender_id,
-      isAdmin: r.is_admin === 1,
-      body: r.body,
-      images: imageKeysToUrls(parseImageKeys(r.images)),
-      createdAt: r.created_at,
-    })
+
+  // ⚠️ D1 单条语句**最多 100 个绑定参数**（官方 Limits）。反馈超过 100 条时，
+  //    一次 `IN (?,?,…)` 会超限直接 500 —— 管理端列表（LIMIT 200）比用户端（50）
+  //    更容易踩到。这里按 99 一片分片查（留余量）。同一 feedback_id 的所有消息
+  //    始终落在同一片里，所以片内 `ORDER BY created_at ASC` 就是最终顺序，无需再排。
+  const CHUNK = 99
+  for (let i = 0; i < feedbackIds.length; i += CHUNK) {
+    const slice = feedbackIds.slice(i, i + CHUNK)
+    const placeholders = slice.map(() => "?").join(",")
+    const rows = await env.DB.prepare(
+      `SELECT id, feedback_id, sender_id, is_admin, body, images, created_at
+         FROM feedback_messages WHERE feedback_id IN (${placeholders})
+        ORDER BY created_at ASC`
+    )
+      .bind(...slice)
+      .all<{
+        id: string
+        feedback_id: string
+        sender_id: string
+        is_admin: number
+        body: string
+        images: string | null
+        created_at: string
+      }>()
+    for (const r of rows.results ?? []) {
+      if (!map.has(r.feedback_id)) map.set(r.feedback_id, [])
+      map.get(r.feedback_id)!.push({
+        id: r.id,
+        senderId: r.sender_id,
+        isAdmin: r.is_admin === 1,
+        body: r.body,
+        images: imageKeysToUrls(parseImageKeys(r.images)),
+        createdAt: r.created_at,
+      })
+    }
   }
   return map
 }
@@ -607,7 +616,7 @@ export async function replyMyFeedback(env: Env, request: Request): Promise<Respo
  * 两个字段，不带邮箱等更多隐私信息（需要时点进用户详情看）。
  */
 export async function listAllFeedback(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "feedback")
   const url = new URL(request.url)
   const status = url.searchParams.get("status") ?? ""
 
@@ -652,7 +661,7 @@ export async function listAllFeedback(env: Env, request: Request): Promise<Respo
  * 管理员若只想留个话、把单子挂起，可以显式传 status=processing。
  */
 export async function replyFeedback(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "feedback")
   const body = await readJson(request)
   const id = String(body.id ?? "").trim()
   const reply = String(body.reply ?? "").trim().slice(0, MAX_REPLY)
@@ -775,7 +784,7 @@ export async function replyFeedback(env: Env, request: Request): Promise<Respons
  * 不产生给用户看的正文。若同时要回复，走 reply。
  */
 export async function setFeedbackStatus(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
+  await requireAdminScope(env, request, "feedback")
   const body = await readJson(request)
   const id = String(body.id ?? "").trim()
   const status = String(body.status ?? "").trim()
@@ -811,7 +820,7 @@ export async function setFeedbackStatus(env: Env, request: Request): Promise<Res
  * 反馈场景下为 NULL），无法精确回删，且它只是指向反馈页的入口，不会因删除而报错，故不处理。
  */
 export async function deleteFeedback(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdmin(env, request)
+  const admin = await requireAdminScope(env, request, "feedback")
   const body = await readJson(request)
   const id = String(body.id ?? "").trim()
   if (!id) throw new ApiError(400, "缺少反馈 id", "INVALID_INPUT")

@@ -14,6 +14,7 @@ import {
   Search,
   ShieldBan,
   ShieldAlert,
+  ShieldCheck,
   Medal,
   SlidersHorizontal,
   Network,
@@ -69,6 +70,7 @@ import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { NavItem, NavGroup } from "@/components/sub-nav"
 import { AdminApiTab } from "@/components/admin-api-tab"
+import { AdminPermissionsPanel } from "@/components/admin-permissions"
 import { Textarea } from "@/components/ui/textarea"
 import {
   Tooltip,
@@ -459,7 +461,7 @@ const ADMIN_TAB_KEYS = new Set([
   "users", "invites", "inviteQuotas", "reserved", "titles", "points",
   "donations", "feedback", "announcements", "events", "community", "moderation", "notices",
   "dns", "newapi", "r2", "frp", "proxy", "mail", "analytics", "cfQuota", "audit",
-  "oauth", "settings", "funLinks", "wb2api", "api",
+  "oauth", "settings", "funLinks", "wb2api", "api", "permissions",
 ])
 
 export default function AdminPage() {
@@ -715,6 +717,9 @@ export default function AdminPage() {
   const [wb2apiMaxBindings, setWb2apiMaxBindings] = React.useState("3")
   const [wb2apiBaseUrl, setWb2apiBaseUrl] = React.useState("")
   const [wb2apiRealm, setWb2apiRealm] = React.useState<"cn" | "global">("cn")
+  /** 国内版 / 国际版可用开关（关掉哪版，用户就不能在捐献/邀请里选哪版） */
+  const [wb2apiRealmCn, setWb2apiRealmCn] = React.useState(true)
+  const [wb2apiRealmGlobal, setWb2apiRealmGlobal] = React.useState(true)
 
   // ---- CLI2API 反代账号捐献（第二条通道）----
   const [cli2apiConfig, setCli2apiConfig] = React.useState<AdminCli2ApiConfig | null>(null)
@@ -783,6 +788,14 @@ export default function AdminPage() {
     frp: false,
     proxy: false,
   })
+  /**
+   * 首捐奖励券可兑换的模块（默认全部可兑换）。
+   * 用户第一次捐献成功后拿到的「自选权限」券只能换这里勾上的模块。
+   * 后端读取口径见 worker/src/vouchers.ts 的 parseFirstDonationFeatures。
+   */
+  const [firstDonationFeatures, setFirstDonationFeatures] = React.useState<
+    Record<string, boolean>
+  >(() => Object.fromEntries(FEATURES.map((f) => [f.key, true])))
   // 限时开放注册：打开后注册无需邀请码；可设截止时间（datetime-local 本地值）
   const [openRegistration, setOpenRegistration] = React.useState(false)
   const [openRegistrationUntil, setOpenRegistrationUntil] = React.useState("")
@@ -821,6 +834,8 @@ export default function AdminPage() {
   const [communityGuestAccess, setCommunityGuestAccess] = React.useState(true)
   const [communityPostMaxImages, setCommunityPostMaxImages] = React.useState("9")
   const [communityImageMaxKb, setCommunityImageMaxKb] = React.useState("1024")
+  /** 站点时区偏移（小时），默认 8 = 北京时间 0 点翻篇 */
+  const [siteTzOffsetHours, setSiteTzOffsetHours] = React.useState("8")
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -1449,6 +1464,8 @@ export default function AdminPage() {
       setWb2apiMaxBindings(s.wb2api_max_bindings ?? "3")
       setWb2apiBaseUrl(s.wb2api_base_url ?? "")
       setWb2apiRealm(s.wb2api_realm === "global" ? "global" : "cn")
+      setWb2apiRealmCn(isSettingOn(s.wb2api_realm_cn, true))
+      setWb2apiRealmGlobal(isSettingOn(s.wb2api_realm_global, true))
       // CLI2API 反代账号捐献通道
       setCli2apiEnabled(isSettingOn(s.cli2api_enabled, true))
       setCli2apiDonationVisible(isSettingOn(s.cli2api_donation_visible, true))
@@ -1492,6 +1509,7 @@ export default function AdminPage() {
       setCommunityImageMaxKb(
         String(Math.round(Number(s.community_image_max_bytes ?? 1048576) / 1024))
       )
+      setSiteTzOffsetHours(s.site_timezone_offset_hours ?? "8")
       const basicRaw = (s.invite_basic_features ?? "r2").split(",").map((x) => x.trim()).filter(Boolean)
       setInviteBasic({
         r2: basicRaw.includes("r2"),
@@ -1507,6 +1525,15 @@ export default function AdminPage() {
         frp: openRaw.includes("frp"),
         proxy: openRaw.includes("proxy"),
       })
+      // 首捐奖励券可兑换的模块：缺省/取不到时按「全部可兑换」显示
+      // （与后端 parseFirstDonationFeatures 的缺省口径一致）
+      const fdRaw = (s.first_donation_voucher_features ?? "r2,ai,frp,proxy,doulor")
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean)
+      setFirstDonationFeatures(
+        Object.fromEntries(FEATURES.map((f) => [f.key, fdRaw.includes(f.key)]))
+      )
       // 限时开放注册：总开关 + 截止时间（后端存 ISO，转成本地 datetime-local 显示）
       setOpenRegistration(isSettingOn(s.open_registration, false))
       setOpenRegistrationUntil(toLocalInput(s.open_registration_until || null))
@@ -1612,6 +1639,7 @@ export default function AdminPage() {
         community_guest_access: communityGuestAccess,
         community_post_max_images: Math.round(Number(communityPostMaxImages) || 9),
         community_image_max_bytes: Math.round(Number(communityImageMaxKb) * 1024),
+        site_timezone_offset_hours: String(Math.round(Number(siteTzOffsetHours) || 8)),
         // 邀请码模块权限：基础 vs 受限，逗号分隔
         invite_basic_features: Object.entries(inviteBasic)
           .filter(([, on]) => on)
@@ -1619,6 +1647,11 @@ export default function AdminPage() {
           .join(","),
         // 免权限访问的模块，逗号分隔；全关时发空串（后端允许空串 = 全部按权限卡）
         open_features: Object.entries(openFeatures)
+          .filter(([, on]) => on)
+          .map(([k]) => k)
+          .join(","),
+        // 首捐奖励券可兑换的模块，逗号分隔；全关时发空串（后端 = 一个都不给）
+        first_donation_voucher_features: Object.entries(firstDonationFeatures)
           .filter(([, on]) => on)
           .map(([k]) => k)
           .join(","),
@@ -1647,6 +1680,8 @@ export default function AdminPage() {
         wb2api_max_bindings: String(Math.max(1, Math.round(Number(wb2apiMaxBindings) || 3))),
         wb2api_base_url: wb2apiBaseUrl.trim(),
         wb2api_realm: wb2apiRealm,
+        wb2api_realm_cn: wb2apiRealmCn,
+        wb2api_realm_global: wb2apiRealmGlobal,
         // CLI2API 反代账号捐献通道
         cli2api_enabled: cli2apiEnabled,
         cli2api_donation_visible: cli2apiDonationVisible,
@@ -2704,7 +2739,7 @@ export default function AdminPage() {
       return
     }
     // 预览要跟后端口径一致：管理员被跳过，不能列进「会被改成多少」里误导站长
-    const isAdminRole = (r: string) => r === "admin" || r === "root"
+    const isAdminRole = (r: string) => r === "admin" || r === "superadmin" || r === "root"
     const preview: string[] = []
     let adminCount = 0
     for (const b of buckets) {
@@ -3114,6 +3149,10 @@ export default function AdminPage() {
                 <NavItem active={activeTab === "mail"} icon={Mail} label={t("adm.239")} onClick={() => handleTabChange("mail")} />
                 <NavItem active={activeTab === "settings"} icon={SlidersHorizontal} label={t("adm.240")} onClick={() => handleTabChange("settings")} />
                 <NavItem active={activeTab === "api"} icon={Webhook} label={t("adm.api.tab")} onClick={() => handleTabChange("api")} />
+                {/* 权限管理：只有 root / superadmin 能进（后端守卫一致） */}
+                {(user?.role === "root" || user?.role === "superadmin") && (
+                  <NavItem active={activeTab === "permissions"} icon={ShieldCheck} label={t("adm.perm.tab")} onClick={() => handleTabChange("permissions")} />
+                )}
               </NavGroup>
             </nav>
           </aside>
@@ -5647,6 +5686,20 @@ export default function AdminPage() {
                     </p>
                   </div>
                 </div>
+                <div className="flex items-center justify-between rounded-md border px-4 py-3">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">{t("adm.515")}</p>
+                    <p className="text-xs text-muted-foreground">{t("adm.wbRealmCnHint")}</p>
+                  </div>
+                  <Switch checked={wb2apiRealmCn} onCheckedChange={setWb2apiRealmCn} />
+                </div>
+                <div className="flex items-center justify-between rounded-md border px-4 py-3">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">{t("adm.516")}</p>
+                    <p className="text-xs text-muted-foreground">{t("adm.wbRealmGlobalHint")}</p>
+                  </div>
+                  <Switch checked={wb2apiRealmGlobal} onCheckedChange={setWb2apiRealmGlobal} />
+                </div>
               </CardContent>
             </Card>
 
@@ -6481,7 +6534,6 @@ export default function AdminPage() {
               </Card>
 
               <Card>
-              <Card>
                 <CardHeader>
                   <CardTitle className="text-base">{t("adm.tempMailbox")}</CardTitle>
                   <CardDescription>
@@ -6506,6 +6558,7 @@ export default function AdminPage() {
                 </CardContent>
               </Card>
 
+              <Card>
                 <CardHeader>
                   <CardTitle className="text-base">{t("adm.619")}</CardTitle>
                   <CardDescription>
@@ -6574,6 +6627,30 @@ export default function AdminPage() {
                       </p>
                     </div>
                     <Switch checked={chatEnabled} onCheckedChange={setChatEnabled} />
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{t("adm.tz.title")}</CardTitle>
+                  <CardDescription>{t("adm.tz.desc")}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="siteTzOffset">{t("adm.tz.label")}</Label>
+                      <Input
+                        id="siteTzOffset"
+                        type="number"
+                        min={-12}
+                        max={14}
+                        className="w-32"
+                        value={siteTzOffsetHours}
+                        onChange={(e) => setSiteTzOffsetHours(e.target.value)}
+                      />
+                    </div>
+                    <p className="max-w-md text-xs text-muted-foreground">{t("adm.tz.hint")}</p>
                   </div>
                 </CardContent>
               </Card>
@@ -6700,6 +6777,41 @@ export default function AdminPage() {
                   ))}
                   <p className="text-xs text-muted-foreground">
                     {t("adm.644")}
+                  </p>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{t("adm.firstDonation.title")}</CardTitle>
+                  <CardDescription>{t("adm.firstDonation.desc")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {Object.keys(firstDonationFeatures).map((f) => (
+                    <div
+                      key={f}
+                      className="flex items-center justify-between rounded-md border p-3"
+                    >
+                      <div className="space-y-0.5">
+                        <p className="text-sm font-medium">
+                          {t(FEATURE_LABELS[f as FeatureKey] ?? f)}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {firstDonationFeatures[f]
+                            ? t("adm.firstDonation.on")
+                            : t("adm.firstDonation.off")}
+                        </p>
+                      </div>
+                      <Switch
+                        checked={firstDonationFeatures[f] ?? false}
+                        onCheckedChange={(v) =>
+                          setFirstDonationFeatures((prev) => ({ ...prev, [f]: v }))
+                        }
+                      />
+                    </div>
+                  ))}
+                  <p className="text-xs text-muted-foreground">
+                    {t("adm.firstDonation.hint")}
                   </p>
                 </CardContent>
               </Card>
@@ -7245,6 +7357,10 @@ export default function AdminPage() {
 
         <TabsContent value="api">
           <AdminApiTab />
+        </TabsContent>
+
+        <TabsContent value="permissions">
+          <AdminPermissionsPanel isRoot={user?.role === "root"} />
         </TabsContent>
           </div>
         </div>
@@ -8460,8 +8576,10 @@ export default function AdminPage() {
                   )}
                   {detail.user.role === "root" ? (
                     <Badge variant="secondary">{t("adm.844")}</Badge>
+                  ) : detail.user.role === "superadmin" ? (
+                    <Badge variant="secondary">{t("adm.perm.roleSuperadmin")}</Badge>
                   ) : detail.user.role === "admin" ? (
-                    <Badge variant="secondary">admin</Badge>
+                    <Badge variant="secondary">{t("adm.perm.roleAdmin")}</Badge>
                   ) : null}
                 </DialogTitle>
                 <DialogDescription>{t("adm.1150", { v0: detail.user.nickname ? `${detail.user.nickname} · ` : "", v1: detail.user.email, v2: fmtTime(detail.user.createdAt) })}</DialogDescription>
@@ -8535,13 +8653,16 @@ export default function AdminPage() {
                       </div>
                       <Switch
                         checked={
-                          detail.user.role === "admin" || detail.user.role === "root"
+                          detail.user.role === "admin" ||
+                          detail.user.role === "superadmin" ||
+                          detail.user.role === "root"
                         }
-                        // root 不能被改（被查看者是 root 时锁定）；非 root 操作者也不能改角色
+                        // root / superadmin 不能被改（被查看者是 root/superadmin 时锁定）；非 root 操作者也不能改角色
                         disabled={
                           busy ||
                           detail.user.username === user?.username ||
                           detail.user.role === "root" ||
+                          detail.user.role === "superadmin" ||
                           user?.role !== "root"
                         }
                         onCheckedChange={(v) =>

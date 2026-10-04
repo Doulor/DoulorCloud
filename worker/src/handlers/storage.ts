@@ -14,7 +14,7 @@
  */
 import { ApiError, json, safeDecode, readBodyCapped } from "../http"
 import { uuid } from "../crypto"
-import { requireFeatureUser } from "../auth"
+import { requireFeatureUser, isPrivileged } from "../auth"
 import {
   deleteObject,
   getObject,
@@ -374,7 +374,7 @@ export async function enableStorage(env: Env, request: Request): Promise<Respons
     )
       .bind(
         // 管理员/站长配额不限（哨兵值）
-        user.role === "admin" || user.role === "root"
+        isPrivileged(user.role)
           ? ADMIN_UNLIMITED_QUOTA
           : await getSettingNumber(env, "storage_quota_bytes"),
         STORAGE_CONSENT_VERSION,
@@ -397,7 +397,7 @@ export async function enableStorage(env: Env, request: Request): Promise<Respons
   const bucketId = picked?.id ?? null
   // 管理员配额不限（哨兵值）；普通用户取桶配置的每人配额，回退全局默认
   const quota =
-    user.role === "admin" || user.role === "root"
+    isPrivileged(user.role)
       ? ADMIN_UNLIMITED_QUOTA
       : (picked?.quotaPerUser ?? defaultQuota)
 
@@ -536,7 +536,7 @@ export async function createUploadUrl(
   const size = Math.max(0, Math.trunc(Number(body.size ?? 0)))
   // 管理员不受单文件大小限制（仍受 Worker 请求体上限约束）
   const maxFile =
-    user.role === "admin" || user.role === "root"
+    isPrivileged(user.role)
       ? ADMIN_UNLIMITED_QUOTA
       : await getSettingNumber(env, "storage_max_file_bytes")
 
@@ -616,7 +616,7 @@ export async function proxyUpload(env: Env, request: Request): Promise<Response>
 
   // 管理员不受单文件大小限制（仍受 Worker 请求体上限约束）
   const maxFile =
-    user.role === "admin" || user.role === "root"
+    isPrivileged(user.role)
       ? ADMIN_UNLIMITED_QUOTA
       : await getSettingNumber(env, "storage_max_file_bytes")
 
