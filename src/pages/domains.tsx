@@ -33,6 +33,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
 import { dnsApi, domainApi, HttpError } from "@/services/api"
 import { useT } from "@/i18n"
 import { useAuth } from "@/hooks/use-auth"
@@ -77,6 +78,13 @@ export default function DomainsPage() {
   const [minNameLen, setMinNameLen] = React.useState(3)
   const [saving, setSaving] = React.useState(false)
   const [deletingId, setDeletingId] = React.useState<string | null>(null)
+  // ---- 批量操作（DNS 记录）----
+  /** 已勾选的记录 id（只在当前域名下有效，切域名/刷新后清空；平台托管的记录不可删，不进勾选） */
+  const [batchSelected, setBatchSelected] = React.useState<Set<string>>(new Set())
+  const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false)
+  const [batchAddOpen, setBatchAddOpen] = React.useState(false)
+  const [batchText, setBatchText] = React.useState("")
+  const [batchBusy, setBatchBusy] = React.useState(false)
   /**
    * 正在编辑的记录 id（null = 新建）。
    *
@@ -324,6 +332,139 @@ export default function DomainsPage() {
     }
   }
 
+  // ---------- 批量删除 ----------
+  // 切域名或刷新列表后清空勾选：勾选只在当前域名当前列表内有效
+  React.useEffect(() => {
+    setBatchSelected(new Set())
+  }, [selected?.id])
+
+  /** 可勾选的记录：平台托管（managed）的没有删除入口，不进批量 */
+  const deletableRecords = React.useMemo(() => records.filter((r) => !r.managed), [records])
+  const deletableIds = React.useMemo(() => deletableRecords.map((r) => r.id), [deletableRecords])
+  const allDeletableSelected =
+    deletableIds.length > 0 && deletableIds.every((id) => batchSelected.has(id))
+
+  const toggleBatchSelect = (id: string) => {
+    setBatchSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleBatchSelectAll = () => {
+    setBatchSelected((prev) => {
+      const next = new Set(prev)
+      if (allDeletableSelected) deletableIds.forEach((id) => next.delete(id))
+      else deletableIds.forEach((id) => next.add(id))
+      return next
+    })
+  }
+
+  const confirmBatchDelete = async () => {
+    if (batchSelected.size === 0) return
+    setBatchBusy(true)
+    let ok = 0
+    let fail = 0
+    try {
+      for (const id of batchSelected) {
+        try {
+          await dnsApi.remove(id)
+          ok++
+        } catch {
+          fail++
+        }
+      }
+      setBatchDeleteOpen(false)
+      setBatchSelected(new Set())
+      if (fail === 0) toast.success(t("dm.batch.deletedOk", { n: String(ok) }))
+      else toast.warning(t("dm.batch.deletedPart", { ok: String(ok), fail: String(fail) }))
+      if (selected) bumpRecordCount(selected.id, -ok)
+      void loadRecords(selected?.id)
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
+  // ---------- 批量添加 ----------
+  const BATCH_TYPES = ["A", "AAAA", "CNAME", "TXT", "MX"]
+
+  interface ParsedBatchLine {
+    name: string
+    type: string
+    content: string
+    priority?: number
+    error?: string
+  }
+
+  const parsedBatch: ParsedBatchLine[] = React.useMemo(() => {
+    return batchText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith("#"))
+      .map((line) => {
+        const parts = line.split(/\s+/)
+        if (parts.length < 3) {
+          return { name: line, type: "", content: "", error: t("dm.batch.lineError") }
+        }
+        const [name, rawType, ...rest] = parts
+        const type = rawType.toUpperCase()
+        if (!BATCH_TYPES.includes(type)) {
+          return { name, type, content: rest.join(" "), error: t("dm.batch.badType", { type }) }
+        }
+        if (type === "SRV") {
+          return { name, type, content: "", error: t("dm.batch.noSrv") }
+        }
+        // MX 允许第 4 段写优先级：`@ MX mail.example.com 20`
+        let content = rest.join(" ")
+        let priority: number | undefined
+        if (type === "MX" && rest.length >= 2) {
+          const maybePriority = Number(rest[rest.length - 1])
+          if (Number.isInteger(maybePriority) && maybePriority >= 0 && maybePriority <= 65535) {
+            priority = maybePriority
+            content = rest.slice(0, -1).join(" ")
+          }
+        }
+        return { name, type, content, priority }
+      })
+  }, [batchText, t])
+
+  const batchValid = parsedBatch.filter((l) => !l.error)
+
+  const submitBatchAdd = async () => {
+    if (!selected || batchValid.length === 0) return
+    setBatchBusy(true)
+    let ok = 0
+    let fail = 0
+    try {
+      for (const l of batchValid) {
+        try {
+          await dnsApi.create({
+            subdomainId: selected.id,
+            name: l.name,
+            type: l.type as DnsRecordType,
+            content: l.content,
+            ttl: 1,
+            proxied: false,
+            ...(l.type === "MX" ? { priority: l.priority ?? 10 } : {}),
+          })
+          ok++
+        } catch {
+          fail++
+        }
+      }
+      setBatchAddOpen(false)
+      setBatchText("")
+      if (fail === 0) toast.success(t("dm.batch.addedOk", { n: String(ok) }))
+      else toast.warning(t("dm.batch.addedPart", { ok: String(ok), fail: String(fail) }))
+      bumpRecordCount(selected.id, ok)
+      void loadRecords(selected.id)
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
   // 一级子域名（parentId 为空，含 '@' 主域名）
   const rootSubs = subdomains.filter((s) => !s.parentId)
   const childrenOf = (id: string) => subdomains.filter((s) => s.parentId === id)
@@ -515,6 +656,16 @@ export default function DomainsPage() {
               </Button>
               <Button
                 size="sm"
+                variant="outline"
+                onClick={() => {
+                  setBatchText("")
+                  setBatchAddOpen(true)
+                }}
+              >
+                {t("dm.batch.add")}
+              </Button>
+              <Button
+                size="sm"
                 onClick={() => {
                   // 明确走「新建」：清掉可能残留的编辑态，否则会误改成编辑上一条
                   setEditingId(null)
@@ -528,6 +679,27 @@ export default function DomainsPage() {
             </div>
           </div>
 
+          {/* 批量操作条：有勾选时出现 */}
+          {batchSelected.size > 0 && (
+            <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2">
+              <span className="text-sm text-muted-foreground">
+                {t("dm.batch.selected", { n: String(batchSelected.size) })}
+              </span>
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={batchBusy}
+                onClick={() => setBatchDeleteOpen(true)}
+              >
+                <Trash2 className="mr-1 h-4 w-4" />
+                {t("dm.batch.delete")}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setBatchSelected(new Set())}>
+                {t("dm.batch.clear")}
+              </Button>
+            </div>
+          )}
+
           {records.length === 0 ? (
             <EmptyState
               title={t("dm.noRecords")}
@@ -538,6 +710,15 @@ export default function DomainsPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
+                    <TableHead className="w-10">
+                      <input
+                        type="checkbox"
+                        aria-label={t("dm.batch.selectAll")}
+                        className="h-4 w-4 accent-primary"
+                        checked={allDeletableSelected}
+                        onChange={toggleBatchSelectAll}
+                      />
+                    </TableHead>
                     <TableHead>Name</TableHead>
                     <TableHead>Type</TableHead>
                     <TableHead>Content</TableHead>
@@ -550,6 +731,17 @@ export default function DomainsPage() {
                 <TableBody>
                   {records.map((r) => (
                     <TableRow key={r.id}>
+                      <TableCell>
+                        {!r.managed && (
+                          <input
+                            type="checkbox"
+                            aria-label={r.name}
+                            className="h-4 w-4 accent-primary"
+                            checked={batchSelected.has(r.id)}
+                            onChange={() => toggleBatchSelect(r.id)}
+                          />
+                        )}
+                      </TableCell>
                       <TableCell className="font-mono text-sm">
                         <div className="flex flex-wrap items-center gap-1.5">
                           <span>{r.name}</span>
@@ -668,6 +860,86 @@ export default function DomainsPage() {
           </div>
         </details>
       </div>
+
+      {/* 批量删除确认 */}
+      <Dialog open={batchDeleteOpen} onOpenChange={setBatchDeleteOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{t("dm.batch.deleteTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("dm.batch.deleteDesc", { n: String(batchSelected.size) })}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border bg-muted/40 p-2">
+            {records
+              .filter((r) => batchSelected.has(r.id))
+              .map((r) => (
+                <p key={r.id} className="font-mono text-xs">
+                  {r.name} · {r.type} {r.content}
+                </p>
+              ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBatchDeleteOpen(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button variant="destructive" disabled={batchBusy} onClick={() => void confirmBatchDelete()}>
+              {batchBusy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+              {t("dm.batch.deleteConfirm", { n: String(batchSelected.size) })}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 批量添加 */}
+      <Dialog open={batchAddOpen} onOpenChange={setBatchAddOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t("dm.batch.addTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("dm.batch.addDesc", { fqdn: selected?.fqdn ?? "" })}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="dm-batch-text">{t("dm.batch.addLabel")}</Label>
+            <Textarea
+              id="dm-batch-text"
+              rows={8}
+              className="font-mono text-xs"
+              placeholder={t("dm.batch.addPlaceholder")}
+              value={batchText}
+              onChange={(e) => setBatchText(e.target.value)}
+            />
+            <p className="text-[11px] text-muted-foreground">{t("dm.batch.addHint")}</p>
+          </div>
+          {parsedBatch.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-xs font-medium">
+                {t("dm.batch.preview", {
+                  ok: String(batchValid.length),
+                  fail: String(parsedBatch.length - batchValid.length),
+                })}
+              </p>
+              <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border bg-muted/40 p-2">
+                {parsedBatch.map((l, i) => (
+                  <p key={i} className={`font-mono text-xs ${l.error ? "text-destructive" : ""}`}>
+                    {l.error ? `✕ ${l.name} — ${l.error}` : `✓ ${l.name} ${l.type} ${l.content}`}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBatchAddOpen(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button disabled={batchBusy || batchValid.length === 0} onClick={() => void submitBatchAdd()}>
+              {batchBusy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+              {t("dm.batch.addConfirm", { n: String(batchValid.length) })}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 添加子域名 */}
       <Dialog
