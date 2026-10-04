@@ -212,6 +212,12 @@ export const SETTING_DEFAULTS = {
   tempbox_max_files: "20",
   /** 临时分享箱上传是否必须登录（1=默认，访客只可查看/下载） */
   tempbox_upload_requires_login: "1",
+  /**
+   * 临时邮箱（收件邮箱，非上面的「分享箱」）每天最多刷新次数。
+   * 刷新 = 换一个新地址（旧地址作废）。0 = 不限制。
+   * 默认 20：够正常用，又把「刷一堆一次性地址去注册第三方账号」压住。
+   */
+  temp_mailbox_refresh_daily_limit: "20",
   /** frp 内网穿透总开关 */
   frp_enabled: "1",
   /** frp 核心包下载地址（可由后台替换） */

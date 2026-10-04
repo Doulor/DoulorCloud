@@ -1482,6 +1482,16 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
     }
 
     // wb2api_max_bindings：每人可绑定的反代账号数，必须 ≥ 1
+    // temp_mailbox_refresh_daily_limit：临时邮箱每天最多刷新次数，非负整数（0 = 不限）。
+    if (key === "temp_mailbox_refresh_daily_limit") {
+      const n = Number(str)
+      if (!Number.isFinite(n) || n < 0) {
+        throw new ApiError(400, "临时邮箱每天刷新上限需要非负整数", "INVALID_INPUT")
+      }
+      values[key] = String(Math.trunc(n))
+      continue
+    }
+
     // （不能走上面的通用数值分支：0 会让通道彻底不可用，且通用分支允许 0）
     if (key === "wb2api_max_bindings") {
       const n = Number(str)

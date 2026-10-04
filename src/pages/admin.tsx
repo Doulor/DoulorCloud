@@ -789,6 +789,8 @@ export default function AdminPage() {
   // 注册准入（2026-10-02）：邮箱域名白名单 + 同 IP 累计注册上限
   const [registerEmailDomains, setRegisterEmailDomains] = React.useState("")
   const [registerIpDailyLimit, setRegisterIpDailyLimit] = React.useState("3")
+  /** 临时邮箱（收件邮箱）每天最多刷新次数（0 = 不限） */
+  const [tempMailboxRefreshLimit, setTempMailboxRefreshLimit] = React.useState("20")
   /** 风险账户判定阈值（单账号每分钟请求数） */
   const [riskPeakThreshold, setRiskPeakThreshold] = React.useState("20")
   // 自动审核：打开后该模块的捐献提交即自动审核（r2 没有捐献，不在列表里）
@@ -1510,6 +1512,7 @@ export default function AdminPage() {
       setOpenRegistrationUntil(toLocalInput(s.open_registration_until || null))
       setRegisterEmailDomains(s.register_email_domains ?? "")
       setRegisterIpDailyLimit(s.register_ip_daily_limit ?? "3")
+      setTempMailboxRefreshLimit(s.temp_mailbox_refresh_daily_limit ?? "20")
       setRiskPeakThreshold(s.risk_peak_per_minute_threshold ?? "20")
       // 自动审核：后端存空串表示「全部转人工」
       const autoRaw = (s.auto_review_features ?? "").split(",").map((x) => x.trim()).filter(Boolean)
@@ -1624,6 +1627,7 @@ export default function AdminPage() {
         open_registration_until: fromLocalInput(openRegistrationUntil) ?? "",
         register_email_domains: registerEmailDomains,
         register_ip_daily_limit: registerIpDailyLimit,
+        temp_mailbox_refresh_daily_limit: Math.round(Number(tempMailboxRefreshLimit) || 0),
         risk_peak_per_minute_threshold: riskPeakThreshold,
         // 自动审核的模块，逗号分隔；全关时发空串 = 全部转人工
         auto_review_features: Object.entries(autoReview)
@@ -6477,6 +6481,31 @@ export default function AdminPage() {
               </Card>
 
               <Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{t("adm.tempMailbox")}</CardTitle>
+                  <CardDescription>
+                    {t("adm.tempMailboxHint")}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="tempMailboxRefreshLimit">{t("adm.tempMailboxRefreshLimit")}</Label>
+                    <Input
+                      id="tempMailboxRefreshLimit"
+                      type="number"
+                      min={0}
+                      className="w-32"
+                      value={tempMailboxRefreshLimit}
+                      onChange={(e) => setTempMailboxRefreshLimit(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t("adm.tempMailboxRefreshLimitHint")}
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+
                 <CardHeader>
                   <CardTitle className="text-base">{t("adm.619")}</CardTitle>
                   <CardDescription>

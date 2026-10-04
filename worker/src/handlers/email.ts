@@ -6,7 +6,7 @@ import { isApiRequest } from "../api-source"
 import { cfDeleteEmailRule } from "../cloudflare"
 import { sendReply, sendMail, renderMail, isMailerConfigured } from "../mailer"
 import { guardRateLimit } from "../ratelimit"
-import { audit } from "../settings"
+import { audit, getSettingNumber } from "../settings"
 import {
   pickRootDomain,
   isOwnDomain,
@@ -613,6 +613,42 @@ export async function createTempMailbox(env: Env, request: Request): Promise<Res
   )
 }
 
+/** 站点时区（UTC+8）的「今天」YYYY-MM-DD，与签到 / API 限额的日期口径一致 */
+function siteDayString(d: Date = new Date()): string {
+  return new Date(d.getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+}
+
+/**
+ * 临时邮箱「每天最多刷新次数」闸门（后台可配，默认 20；0 = 不限）。
+ *
+ * 用 `INSERT ... ON CONFLICT DO UPDATE SET count = count + 1 RETURNING count`
+ * 原子累加（与 api-engine 的限额、ratelimit 同思路），拿到的是「本次计入之后的
+ * 计数」—— 超限的那次被拒，之后每次也都超，不会漏拦。
+ * 管理员 / 站长不限（与其它配额口径一致）。
+ */
+async function enforceTempMailboxRefreshLimit(env: Env, user: UserRow): Promise<void> {
+  if (user.role === "admin" || user.role === "root") return
+  const limit = await getSettingNumber(env, "temp_mailbox_refresh_daily_limit")
+  if (limit <= 0) return
+
+  const row = await env.DB.prepare(
+    `INSERT INTO temp_mailbox_refresh_daily (user_id, date, count)
+     VALUES (?, ?, 1)
+     ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1
+     RETURNING count`
+  )
+    .bind(user.id, siteDayString())
+    .first<{ count: number }>()
+
+  if ((row?.count ?? 1) > limit) {
+    throw new ApiError(
+      429,
+      `临时邮箱每天最多刷新 ${limit} 次，请明天再试`,
+      "TEMP_MAILBOX_DAILY_LIMIT"
+    )
+  }
+}
+
 /**
  * POST /api/mailbox/temp/:id/refresh —— 换一个地址（旧地址立即作废）
  *
@@ -641,6 +677,10 @@ export async function refreshTempMailbox(
     3600,
     "临时邮箱操作过于频繁"
   )
+
+  // 每日刷新次数上限（后台可配，默认 20；0 = 不限）。放在 purge 之前：
+  // 超限那次绝不能动旧邮箱，否则用户「今天的刷新额度」被浪费掉、还得再点一次生成。
+  await enforceTempMailboxRefreshLimit(env, user)
 
   // 先删后建：若中间失败，用户只是少了一个临时邮箱（可再点一次生成），
   // 不会出现「两个邮箱抢同一个地址」或额度被凭空占掉的情况。
