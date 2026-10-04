@@ -8,7 +8,7 @@
 import * as React from "react"
 import { createPortal } from "react-dom"
 import { useNavigate } from "react-router-dom"
-import { ArrowLeft, Send, Loader2, Users, AtSign, Copy, Quote, Undo2, CornerDownLeft, X } from "lucide-react"
+import { ArrowLeft, Send, Loader2, Users, AtSign, Copy, Quote, Undo2, CornerDownLeft, X, Plus } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -23,7 +23,7 @@ import { DraftImagePreview } from "@/components/draft-image-preview"
 import { useAuth } from "@/hooks/use-auth"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
 import { useImageDrop } from "@/hooks/use-image-drop"
-import { chatApi, errMsg, HttpError } from "@/services/api"
+import { chatApi, stickerApi, errMsg, HttpError } from "@/services/api"
 import { cn } from "@/lib/utils"
 import { relTime } from "@/lib/format"
 import { setVisibleInterval } from "@/lib/visible-interval"
@@ -110,11 +110,13 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
     user: ChatPresenceUser
   } | null>(null)
 
-  /** 右键消息弹出的菜单：撤回 / 复制 / 引用 */
+  /** 右键消息弹出的菜单：引用 / 复制 / 撤回 /（落在表情包上时）存表情包 */
   const [msgMenu, setMsgMenu] = React.useState<{
     x: number
     y: number
     msg: ChatMessage
+    /** 右键落在站内表情包上时的 sticker id；否则为 null */
+    stickerId: string | null
   } | null>(null)
   /** 正在引用的消息（发送前展示在输入框上方） */
   const [quoteTarget, setQuoteTarget] = React.useState<ChatMessage | null>(null)
@@ -482,6 +484,16 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
     }
   }
 
+  /** 把消息里的表情包存到自己的表情包（右键菜单） */
+  const saveSticker = async (id: string) => {
+    try {
+      const res = await stickerApi.save(id)
+      toast.success(res.alreadySaved ? t("stk.saved") : t("stk.ok.saved"))
+    } catch (err) {
+      toast.error(errMsg(err, t("stk.err.save")))
+    }
+  }
+
   /** 切换 Enter 行为并存进 localStorage */
   const toggleEnterToSend = () => {
     setEnterToSend((prev) => {
@@ -642,7 +654,14 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
                     <div
                       onContextMenu={(e) => {
                         e.preventDefault()
-                        setMsgMenu({ x: e.clientX, y: e.clientY, msg: m })
+                        // 右键落在站内表情包上时，把 sticker id 带进菜单（供「存到我的表情包」）
+                        const el = (e.target as HTMLElement).closest?.(
+                          "img.sticker-img"
+                        ) as HTMLImageElement | null
+                        const stickerId = el
+                          ? el.src.match(/\/api\/stickers\/([0-9a-f-]{36})\/image/)?.[1] ?? null
+                          : null
+                        setMsgMenu({ x: e.clientX, y: e.clientY, msg: m, stickerId })
                       }}
                       className={cn(
                         "inline-block max-w-full break-words rounded-lg px-3 py-2 text-sm",
@@ -676,7 +695,7 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
                         /* 用 Markdown 渲染：表情包插进来的是 `![](/api/stickers/<id>/image)`，
                             纯文本会把它原样显示成一行字（2026-10-02 反馈）。
                             ⚠️ 外层用 div 不用 p —— Markdown 自己会产出 p 标签，嵌在 p 里是非法 HTML。 */
-                        <Markdown>{m.body}</Markdown>
+                        <Markdown stickerSaveButton={false}>{m.body}</Markdown>
                       )}
                     </div>
                     {(mine || mentioned) && (
@@ -912,6 +931,21 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
             }}
             onContextMenu={(e) => e.preventDefault()}
           >
+            {Boolean(user) && msgMenu.stickerId && (
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  const id = msgMenu.stickerId!
+                  setMsgMenu(null)
+                  void saveSticker(id)
+                }}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+              >
+                <Plus className="h-4 w-4 shrink-0 text-muted-foreground" />
+                {t("stk.save")}
+              </button>
+            )}
             {!msgMenu.msg.recalled && (
               <>
                 <button

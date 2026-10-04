@@ -223,8 +223,25 @@ function renderCode(props: React.ComponentPropsWithoutRef<"code"> & { node?: unk
  *   · **外链图片**按常规处理：限宽不溢出、限高不喧宾夺主，圆角加边。
  * 两者都开 lazy loading：一屏十几张表情包时，只有进视口的才真正去取。
  */
-/** 站内表情包：点一下放大看原图；右键（桌面）/ 长按（移动）弹出「存到我的表情包」 */
-function StickerImage({ src, alt }: { src: string; alt: string }) {
+/**
+ * 站内表情包：点一下放大看原图。
+ *
+ * 「存到我的表情包」有两种形态：
+ *   · 默认（`showSaveButton` 不关）：右键/长按弹出本组件自己的保存按钮 ——
+ *     给社区帖子、私信等**没有消息右键菜单**的场景用；
+ *   · 聊天室（`showSaveButton=false`）：不弹自己的按钮，改由父级的消息右键菜单
+ *     统一承载「存到我的表情包」（见 chat.tsx 的 msgMenu），避免右键同时弹出
+ *     两个风格不一致的东西（2026-10-04 站长反馈）。
+ */
+function StickerImage({
+  src,
+  alt,
+  showSaveButton = true,
+}: {
+  src: string
+  alt: string
+  showSaveButton?: boolean
+}) {
   const { user } = useAuth()
   const { t } = useT()
   const [menuOpen, setMenuOpen] = React.useState(false)
@@ -236,7 +253,7 @@ function StickerImage({ src, alt }: { src: string; alt: string }) {
   const id = src.match(/\/api\/stickers\/([0-9a-f-]{36})\/image/)?.[1]
 
   const openMenu = () => {
-    if (user && id && !saved) setMenuOpen(true)
+    if (showSaveButton && user && id && !saved) setMenuOpen(true)
   }
   const clearLongPress = () => {
     if (longPressTimer.current) clearTimeout(longPressTimer.current)
@@ -284,19 +301,27 @@ function StickerImage({ src, alt }: { src: string; alt: string }) {
       <span
         className="relative my-1 block select-none"
         onClick={onClick}
-        onContextMenu={(e) => {
-          e.preventDefault()
-          openMenu()
-        }}
-        onTouchStart={() => {
-          longPressTimer.current = setTimeout(() => {
-            longPressed.current = true
-            openMenu()
-          }, 500)
-        }}
-        onTouchEnd={clearLongPress}
-        onTouchMove={clearLongPress}
-        onTouchCancel={clearLongPress}
+        onContextMenu={
+          showSaveButton
+            ? (e) => {
+                e.preventDefault()
+                openMenu()
+              }
+            : undefined
+        }
+        onTouchStart={
+          showSaveButton
+            ? () => {
+                longPressTimer.current = setTimeout(() => {
+                  longPressed.current = true
+                  openMenu()
+                }, 500)
+              }
+            : undefined
+        }
+        onTouchEnd={showSaveButton ? clearLongPress : undefined}
+        onTouchMove={showSaveButton ? clearLongPress : undefined}
+        onTouchCancel={showSaveButton ? clearLongPress : undefined}
       >
         <img
           src={src}
@@ -305,7 +330,7 @@ function StickerImage({ src, alt }: { src: string; alt: string }) {
           decoding="async"
           className="sticker-img inline-block align-text-bottom"
         />
-        {user && id && !saved && menuOpen && (
+        {showSaveButton && user && id && !saved && menuOpen && (
           <button
             type="button"
             onClick={(e) => {
@@ -342,11 +367,14 @@ function StickerImage({ src, alt }: { src: string; alt: string }) {
   )
 }
 
-function renderImage({ src, alt }: React.ComponentProps<"img">) {
+function renderImage(
+  { src, alt }: React.ComponentProps<"img">,
+  showSaveButton: boolean
+) {
   const url = typeof src === "string" ? src : ""
   // 兼容相对与绝对两种写法（极少数历史数据的 body 里带上了完整 host）
   if (/\/api\/stickers\/[0-9a-f-]{36}\/image/.test(url)) {
-    return <StickerImage src={url} alt={alt ?? ""} />
+    return <StickerImage src={url} alt={alt ?? ""} showSaveButton={showSaveButton} />
   }
   return (
     <img
@@ -359,7 +387,14 @@ function renderImage({ src, alt }: React.ComponentProps<"img">) {
   )
 }
 
-export function Markdown({ children }: { children: string }) {
+export function Markdown({
+  children,
+  stickerSaveButton = true,
+}: {
+  children: string
+  /** false = 表情包不显示自己的「保存」按钮（由父级右键菜单承载，如聊天室） */
+  stickerSaveButton?: boolean
+}) {
   return (
     <div className="markdown-body break-words text-sm leading-relaxed">
       <ReactMarkdown
@@ -367,7 +402,7 @@ export function Markdown({ children }: { children: string }) {
         components={{
           a: renderLink,
           code: renderCode,
-          img: renderImage,
+          img: (props) => renderImage(props, stickerSaveButton),
         }}
       >
         {children}
