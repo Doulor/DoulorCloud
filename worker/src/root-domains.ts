@@ -107,17 +107,26 @@ export async function listEnabledRootDomains(env: Env): Promise<RootDomainRow[]>
 /**
  * 新用户注册 / 新建时要用的默认根域。
  *
- * ⚠️ 默认域是**管理员设的**，不按调用者的权限筛：即使某管理员自己没解锁
- * `doulor` 权限，默认域也不该因此漂到别处。真正要挡的是「用户主动选一个
- * 自己没权限的域」，那由 `pickRootDomain` 负责。
+ * 默认域是「发给**所有人**」的域，所以它**必须是一个免权限的域**。若管理员
+ * 误把一个挂了 `requires_feature` 的域（例如 doulor.cn）设成默认，任何没解锁
+ * 对应权限的人都会在注册 / 临时邮箱 / 未指定域的别名里**白拿**一个该域地址 ——
+ * 这与「doulor.cn 需要 doulor 权限才能用」直接冲突（2026-10-04 越权注册复现）。
+ *
+ * 因此这里在选择默认域时**跳过带权限的域**：即使 doulor.cn 被标成 is_default，
+ * 也会回落到真正「人人可用」的域（如 tyu.me），而不是静默放行。主动选域仍走
+ * `pickRootDomain` 的权限闸。
  */
 export async function getDefaultRootDomain(env: Env): Promise<RootDomainRow> {
   const rows = await listRootDomains(env)
-  const def = rows.find((r) => r.is_default === 1 && r.enabled === 1)
+  const free = (r: RootDomainRow) => r.enabled === 1 && !r.requires_feature
+  const def = rows.find((r) => r.is_default === 1 && free(r))
   if (def) return def
-  // 没有任何默认行：取第一个启用的，保证永远有得用
-  const any = rows.find((r) => r.enabled === 1)
-  return any ?? fallbackRow(env)
+  // 没有任何免权限的默认行：取第一个免权限且启用的域
+  const any = rows.find(free)
+  if (any) return any
+  // 连一个免权限的启用域都没有：极端兜底。此时宁可用站点主域（历史行为，人人可用），
+  // 也不要挑一个带权限的域白送出去。
+  return fallbackRow(env)
 }
 
 export async function getRootDomainByName(
