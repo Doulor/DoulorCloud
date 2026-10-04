@@ -1367,6 +1367,7 @@ export const en: Record<MessageKey, string> = {
   "fb.repliedAt": " · replied {time}",
   "fb.me": "Me",
   "fb.admin": "Admin",
+  "fb.deletedUser": "Deleted user",
   "fb.adminReply": "Admin reply",
   "fb.noReplyYet": "No reply yet — the admin will get to it soon.",
   "fb.replyPlaceholder": "Add more details…",

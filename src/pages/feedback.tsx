@@ -31,11 +31,15 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { feedbackApi, HttpError, errMsg } from "@/services/api"
-import { fmtTime } from "@/lib/format"
+import { fmtTime, relTime } from "@/lib/format"
 import { EmojiPicker } from "@/components/emoji-picker"
 import { StickerPanel } from "@/components/sticker-panel"
 import { Markdown } from "@/components/markdown"
+import { UserAvatar } from "@/components/user-avatar"
+import { RoleBadge } from "@/components/role-badge"
+import { CustomTitleBadge } from "@/components/custom-title-badge"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
+import { useAuth } from "@/hooks/use-auth"
 import { useImageDrop } from "@/hooks/use-image-drop"
 import { cn } from "@/lib/utils"
 import {
@@ -398,6 +402,7 @@ function FeedbackCard({
   onWithdraw: (id: string) => Promise<void>
 }) {
   const { t } = useT()
+  const { user: me } = useAuth()
   const Icon = CATEGORY_ICONS[item.category] ?? MessageSquare
   const hasReply = Boolean(item.adminReply)
   // 未读回复：用一条左侧色条 + 徽章提示，不做整卡高亮（列表里会太吵）
@@ -594,30 +599,60 @@ function FeedbackCard({
             </div>
 
             {/* 对话消息（用户追加 + 管理员回复） */}
-            {item.messages.map((m) => (
-              <div
-                key={m.id}
-                className={
-                  m.isAdmin
-                    ? "rounded-md border border-primary/30 bg-accent/40 p-3"
-                    : ""
-                }
-              >
-                <p
+            {item.messages.map((m) => {
+              const s = m.sender
+              // 发送者已被删除：username 为空（后端 UNKNOWN_SENDER 兜底）
+              const gone = !s.username
+              const mine = Boolean(me) && s.username === me!.username
+              const name = gone
+                ? t("fb.deletedUser")
+                : mine
+                  ? t("fb.me")
+                  : s.nickname ?? s.username
+              return (
+                <div
+                  key={m.id}
                   className={
-                    "mb-1 flex items-center gap-1.5 text-xs font-medium " +
-                    (m.isAdmin ? "text-foreground" : "text-muted-foreground")
+                    m.isAdmin
+                      ? "rounded-md border border-primary/30 bg-accent/40 p-3"
+                      : ""
                   }
                 >
-                  {m.isAdmin ? (
-                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-                  ) : null}
-                  {m.isAdmin ? t("fb.admin") : t("fb.me")}
-                </p>
-                <Markdown>{m.body}</Markdown>
-                <ImageGallery images={m.images} />
-              </div>
-            ))}
+                  <div
+                    className={
+                      "mb-1.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-xs " +
+                      (m.isAdmin ? "text-foreground" : "text-muted-foreground")
+                    }
+                  >
+                    {gone ? (
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                        <AlertCircle className="h-3.5 w-3.5" />
+                      </span>
+                    ) : (
+                      <UserAvatar
+                        username={s.username}
+                        nickname={s.nickname}
+                        hasAvatar={s.hasAvatar}
+                        className="h-6 w-6"
+                      />
+                    )}
+                    <span className="truncate font-medium">{name}</span>
+                    {m.isAdmin && (
+                      <RoleBadge role={s.isRoot ? "root" : "admin"} />
+                    )}
+                    {s.customTitle && <CustomTitleBadge title={s.customTitle} />}
+                    {!gone && !mine && (
+                      <span className="truncate text-muted-foreground">@{s.username}</span>
+                    )}
+                    <span className="ml-auto shrink-0 text-[11px] text-muted-foreground" title={fmtTime(m.createdAt)}>
+                      {relTime(m.createdAt)}
+                    </span>
+                  </div>
+                  <Markdown>{m.body}</Markdown>
+                  <ImageGallery images={m.images} />
+                </div>
+              )
+            })}
 
             {/* 兼容：老数据没有 messages，只有 adminReply 字段 */}
             {item.messages.length === 0 && hasReply && (

@@ -38,6 +38,9 @@ import {
 } from "@/components/ui/select"
 import { feedbackApi, HttpError } from "@/services/api"
 import { fmtDateTime } from "@/lib/format"
+import { UserAvatar } from "@/components/user-avatar"
+import { RoleBadge } from "@/components/role-badge"
+import { CustomTitleBadge } from "@/components/custom-title-badge"
 import { notifyAttentionChanged } from "@/lib/attention-events"
 import {
   usePickedImages,
@@ -319,30 +322,52 @@ export function FeedbackPanel() {
                       <ImageGallery images={f.images} />
 
                       {/* 对话消息（用户追加 + 管理员回复） */}
-                      {f.messages.map((m) => (
-                        <div
-                          key={m.id}
-                          className={
-                            m.isAdmin
-                              ? "rounded-md border border-primary/30 bg-accent/40 p-3"
-                              : "rounded-md border bg-muted/30 p-3"
-                          }
-                        >
-                          <p className="mb-1 flex items-center gap-1.5 text-xs font-medium">
-                            {m.isAdmin ? (
-                              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-                            ) : (
-                              <MessageSquare className="h-3.5 w-3.5 text-muted-foreground" />
-                            )}
-                            {m.isAdmin ? t("fb.admin") : f.nickname || f.username}
-                            <span className="font-normal text-muted-foreground">
-                              · {fmtDateTime(m.createdAt)}
-                            </span>
-                          </p>
-                          <p className="whitespace-pre-wrap break-words text-sm">{m.body}</p>
-                          <ImageGallery images={m.images} />
-                        </div>
-                      ))}
+                      {f.messages.map((m) => {
+                        const s = m.sender
+                        const gone = !s.username
+                        return (
+                          <div
+                            key={m.id}
+                            className={
+                              m.isAdmin
+                                ? "rounded-md border border-primary/30 bg-accent/40 p-3"
+                                : "rounded-md border bg-muted/30 p-3"
+                            }
+                          >
+                            <div className="mb-1.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">
+                              {gone ? (
+                                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                                  <MessageSquare className="h-3.5 w-3.5" />
+                                </span>
+                              ) : (
+                                <UserAvatar
+                                  username={s.username}
+                                  nickname={s.nickname}
+                                  hasAvatar={s.hasAvatar}
+                                  className="h-6 w-6"
+                                />
+                              )}
+                              <span className="truncate font-medium">
+                                {gone ? t("fb.deletedUser") : s.nickname ?? s.username}
+                              </span>
+                              {s.isAdmin && (
+                                <RoleBadge role={s.isRoot ? "root" : "admin"} />
+                              )}
+                              {s.customTitle && <CustomTitleBadge title={s.customTitle} />}
+                              {!gone && (
+                                <span className="truncate text-muted-foreground">
+                                  @{s.username}
+                                </span>
+                              )}
+                              <span className="ml-auto shrink-0 font-normal text-muted-foreground">
+                                · {fmtDateTime(m.createdAt)}
+                              </span>
+                            </div>
+                            <p className="whitespace-pre-wrap break-words text-sm">{m.body}</p>
+                            <ImageGallery images={m.images} />
+                          </div>
+                        )
+                      })}
 
                       {f.adminReply && f.messages.length === 0 && (
                         <>

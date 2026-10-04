@@ -1332,6 +1332,7 @@ export const zh = {
   "fb.repliedAt": " · 回复于 {time}",
   "fb.me": "我",
   "fb.admin": "管理员",
+  "fb.deletedUser": "已注销用户",
   "fb.adminReply": "管理员回复",
   "fb.noReplyYet": "还没有回复，管理员看到后会尽快处理。",
   "fb.replyPlaceholder": "继续补充说明…",

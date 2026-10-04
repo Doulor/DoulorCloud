@@ -2399,6 +2399,12 @@ export interface FeedbackMessage {
   /** 附带的图片（访问 URL 数组） */
   images: string[]
   createdAt: string
+  /**
+   * 发送者资料（头像 / 昵称 / 用户名 / 角色徽章 / 自定义称号），
+   * 形状与社区广场的 CommunityAuthor 一致（2026-10-05：反馈要能看出是谁回复的）。
+   * username 为空串表示发送者已被删除（前端按「已注销用户」展示）。
+   */
+  sender: CommunityAuthor
 }
 
 /** 用户视角的一条反馈（不含作者 id 等内部字段） */

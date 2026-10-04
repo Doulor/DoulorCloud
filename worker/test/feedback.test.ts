@@ -7,6 +7,7 @@
 //   3. 回复后 user_read 归零、标记已读只影响自己的记录。
 import { describe, it, expect } from "vitest"
 import { env } from "cloudflare:workers"
+import { uuid } from "../src/crypto"
 import { getPointsBalance } from "../src/points"
 import { makeUser, authRequest, fetchSelf } from "./helpers"
 
@@ -567,5 +568,137 @@ describe("反馈回复附带积分奖励", () => {
     )
     expect(res.status).toBe(400)
     expect(await getPointsBalance(env, u.id)).toBe(0)
+  })
+})
+
+// ---- 2026-10-05：反馈回复要能看出「是谁回复的」 ----
+//
+// 站长要求：之后会多管理员，用户得知道具体是哪个管理员回复的反馈。
+// 每个对话消息都带 sender（头像 / 昵称 / 用户名 / 角色徽章 / 称号），
+// 形状与社区广场的 author 一致，前端可直接复用 UserAvatar / RoleBadge / CustomTitleBadge。
+describe("反馈消息带发送者资料", () => {
+  /**
+   * 造一个「能处理反馈」的管理员。
+   *
+   * ⚠️ 2026-10-05：管理端权限改成了白名单（并发开发中的「管理员权限组」），
+   * `role: "admin"` 不再自动拥有全部权限 —— 必须显式给 `admin_scope` 含 "feedback"
+   * 才能过 requireAdminScope。这里照新契约给上，避免测试依赖旧行为。
+   */
+  async function makeAdmin(nickname?: string) {
+    const a = await makeUser({ role: "admin" })
+    await env.DB.prepare("UPDATE users SET admin_scope = ?, nickname = ? WHERE id = ?")
+      .bind(JSON.stringify(["feedback"]), nickname ?? null, a.id)
+      .run()
+    return a
+  }
+
+  async function grantTitle(userId: string, name: string): Promise<void> {
+    const titleId = uuid()
+    const now = new Date().toISOString()
+    await env.DB.prepare(
+      "INSERT INTO custom_titles (id, name, color_from, color_to, created_at) VALUES (?, ?, ?, ?, ?)"
+    )
+      .bind(titleId, name, "#10b981", "#059669", now)
+      .run()
+    await env.DB.prepare(
+      "INSERT INTO user_titles (user_id, title_id, is_display, granted_at) VALUES (?, ?, 1, ?)"
+    )
+      .bind(userId, titleId, now)
+      .run()
+  }
+
+  it("管理员回复 → 用户侧消息带上该管理员的头像/昵称/用户名/角色/称号", async () => {
+    const u = await makeUser()
+    const admin = await makeAdmin("客服小助手")
+    await grantTitle(admin.id, "金牌客服")
+
+    const id = await submit(u, { category: "bug", title: "有回复人", body: "……" })
+    await fetchSelf(
+      authRequest(admin, "/api/admin/feedback/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, reply: "我来看看" }),
+      })
+    )
+
+    const res = await fetchSelf(authRequest(u, "/api/feedback"))
+    const data = await res.json<{
+      feedback: {
+        id: string
+        messages: {
+          isAdmin: boolean
+          body: string
+          sender: {
+            username: string
+            nickname: string | null
+            isAdmin: boolean
+            isRoot: boolean
+            hasAvatar: boolean
+            customTitle: { name: string; colorFrom: string; colorTo: string } | null
+          }
+        }[]
+      }[]
+    }>()
+    const item = data.feedback.find((f) => f.id === id)
+    const msg = item?.messages.find((m) => m.body === "我来看看")
+    expect(msg).toBeTruthy()
+    expect(msg?.isAdmin).toBe(true)
+    expect(msg?.sender.username).toBe(admin.username)
+    expect(msg?.sender.nickname).toBe("客服小助手")
+    expect(msg?.sender.isAdmin).toBe(true)
+    expect(msg?.sender.isRoot).toBe(false)
+    expect(msg?.sender.customTitle?.name).toBe("金牌客服")
+  })
+
+  it("用户自己的追加回复 → sender 是本人，且 isAdmin=false、无称号", async () => {
+    const u = await makeUser()
+    const id = await submit(u, { category: "bug", title: "我补充", body: "首帖" })
+    await fetchSelf(
+      authRequest(u, "/api/feedback/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, reply: "再补充一句" }),
+      })
+    )
+
+    const res = await fetchSelf(authRequest(u, "/api/feedback"))
+    const data = await res.json<{
+      feedback: {
+        id: string
+        messages: { body: string; isAdmin: boolean; sender: { username: string; isAdmin: boolean } }[]
+      }[]
+    }>()
+    const msg = data.feedback.find((f) => f.id === id)?.messages.find((m) => m.body === "再补充一句")
+    expect(msg?.sender.username).toBe(u.username)
+    expect(msg?.sender.isAdmin).toBe(false)
+    expect(msg?.isAdmin).toBe(false)
+  })
+
+  it("管理员多条回复分别带各自资料（多管理员场景）", async () => {
+    const u = await makeUser()
+    const a1 = await makeAdmin("甲管理员")
+    const a2 = await makeAdmin("乙管理员")
+
+    const id = await submit(u, { category: "bug", title: "多人回复", body: "……" })
+    for (const [admin, text] of [
+      [a1, "甲：我来处理"],
+      [a2, "乙：跟进一下"],
+    ] as const) {
+      await fetchSelf(
+        authRequest(admin, "/api/admin/feedback/reply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, reply: text }),
+        })
+      )
+    }
+
+    const res = await fetchSelf(authRequest(u, "/api/feedback"))
+    const data = await res.json<{
+      feedback: { id: string; messages: { body: string; sender: { nickname: string | null } }[] }[]
+    }>()
+    const msgs = data.feedback.find((f) => f.id === id)?.messages ?? []
+    expect(msgs.find((m) => m.body === "甲：我来处理")?.sender.nickname).toBe("甲管理员")
+    expect(msgs.find((m) => m.body === "乙：跟进一下")?.sender.nickname).toBe("乙管理员")
   })
 })

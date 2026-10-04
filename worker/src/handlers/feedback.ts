@@ -12,7 +12,7 @@
  *   3. 提交有频次上限（guardRateLimit），否则就是一条无限灌库的写接口。
  */
 import { ApiError, json, readBodyCapped } from "../http"
-import { requireUser, isPrivileged } from "../auth"
+import { requireUser, isPrivileged, isAnyAdmin } from "../auth"
 import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
@@ -171,9 +171,72 @@ interface FeedbackMessageDto {
   body: string
   images: string[]
   createdAt: string
+  /**
+   * 发送者资料（头像 / 昵称 / 用户名 / 角色徽章 / 自定义称号）。
+   * 2026-10-05 站长要求：反馈要能看出「是谁回复的」——之后会多管理员，
+   * 用户需要知道具体是哪个管理员回的。形状与社区广场的 author 一致，
+   * 前端可直接复用 UserAvatar / RoleBadge / CustomTitleBadge。
+   */
+  sender: CommunityAuthorDto
 }
 
-/** 批量加载一批反馈的对话消息（按时间正序，一次查询避免 N+1） */
+/** 与社区广场 `author` 同形的发送者资料 */
+interface CommunityAuthorDto {
+  username: string
+  nickname: string | null
+  isAdmin: boolean
+  isRoot: boolean
+  hasAvatar: boolean
+  customTitle: { name: string; colorFrom: string; colorTo: string } | null
+}
+
+/** 空发送者（用户已被删除、或查不到时兜底，前端按「已注销用户」展示） */
+const UNKNOWN_SENDER: CommunityAuthorDto = {
+  username: "",
+  nickname: null,
+  isAdmin: false,
+  isRoot: false,
+  hasAvatar: false,
+  customTitle: null,
+}
+
+/** 从查询行拼出发送者资料（形状与 community.ts 的 author 一致） */
+function senderOf(r: {
+  sender_username?: string | null
+  sender_nickname?: string | null
+  sender_avatar_key?: string | null
+  sender_role?: string | null
+  sender_title_name?: string | null
+  sender_title_from?: string | null
+  sender_title_to?: string | null
+}): CommunityAuthorDto {
+  return {
+    username: r.sender_username ?? "",
+    nickname: r.sender_nickname ?? null,
+    // ⚠️ 用 isAnyAdmin（含自定义白名单的 admin），不是 isPrivileged（只有 root/superadmin）——
+    // 白名单管理员也要能标出「管理员」徽章，否则多管理员场景下用户分不清是谁回的。
+    isAdmin: isAnyAdmin(r.sender_role),
+    isRoot: r.sender_role === "root",
+    hasAvatar: Boolean(r.sender_avatar_key),
+    customTitle: r.sender_title_name
+      ? {
+          name: r.sender_title_name,
+          colorFrom: r.sender_title_from ?? "#64748b",
+          colorTo: r.sender_title_to ?? "#64748b",
+        }
+      : null,
+  }
+}
+
+/**
+ * 批量加载一批反馈的对话消息（按时间正序，一次查询避免 N+1）。
+ *
+ * 联表 users / user_titles / custom_titles 取发送者资料：用户侧要显示「谁回复的」
+ * （头像 / 昵称 / 用户名 / 角色徽章 / 称号）。管理员多条回复时按 sender_id 取到各自资料。
+ * 展示用的 isAdmin **以角色实时推导**为准（不再读 is_admin 列）——
+ * 这样某个管理员被降权后，历史回复上的「管理员」徽章会随之消失，不会说谎。
+ * is_admin 列仍照旧写入（历史数据兼容，无副作用），只是不再参与展示判断。
+ */
 async function loadMessagesFor(
   env: Env,
   feedbackIds: string[]
@@ -190,29 +253,45 @@ async function loadMessagesFor(
     const slice = feedbackIds.slice(i, i + CHUNK)
     const placeholders = slice.map(() => "?").join(",")
     const rows = await env.DB.prepare(
-      `SELECT id, feedback_id, sender_id, is_admin, body, images, created_at
-         FROM feedback_messages WHERE feedback_id IN (${placeholders})
-        ORDER BY created_at ASC`
+      `SELECT m.id, m.feedback_id, m.sender_id, m.body, m.images, m.created_at,
+              u.username AS sender_username, u.nickname AS sender_nickname,
+              u.avatar_key AS sender_avatar_key, u.role AS sender_role,
+              ct.name AS sender_title_name, ct.color_from AS sender_title_from,
+              ct.color_to AS sender_title_to
+         FROM feedback_messages m
+         LEFT JOIN users u ON u.id = m.sender_id
+         LEFT JOIN user_titles ut ON ut.user_id = u.id AND ut.is_display = 1
+         LEFT JOIN custom_titles ct ON ct.id = ut.title_id
+        WHERE m.feedback_id IN (${placeholders})
+        ORDER BY m.created_at ASC`
     )
       .bind(...slice)
       .all<{
         id: string
         feedback_id: string
         sender_id: string
-        is_admin: number
         body: string
         images: string | null
         created_at: string
+        sender_username: string | null
+        sender_nickname: string | null
+        sender_avatar_key: string | null
+        sender_role: string | null
+        sender_title_name: string | null
+        sender_title_from: string | null
+        sender_title_to: string | null
       }>()
     for (const r of rows.results ?? []) {
       if (!map.has(r.feedback_id)) map.set(r.feedback_id, [])
+      const sender = senderOf(r)
       map.get(r.feedback_id)!.push({
         id: r.id,
         senderId: r.sender_id,
-        isAdmin: r.is_admin === 1,
+        isAdmin: sender.isAdmin,
         body: r.body,
         images: imageKeysToUrls(parseImageKeys(r.images)),
         createdAt: r.created_at,
+        sender: sender.username ? sender : UNKNOWN_SENDER,
       })
     }
   }
