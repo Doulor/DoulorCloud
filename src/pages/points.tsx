@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Coins,
+  Copy,
   Eye,
   Loader2,
   Package,
@@ -65,6 +66,7 @@ import { useT, tStatic } from "@/i18n"
 import type {
   AfterSaleStatus,
   PointBillingMode,
+  PointDelivery,
   PointOrder,
   PointProduct,
   PointsOverview,
@@ -172,6 +174,10 @@ function deliveryLabel(delivery: string): string {
       return tStatic("pt.delivery.subscription")
     case "invite_quota":
       return tStatic("pt.delivery.inviteQuota")
+    case "code":
+      return tStatic("pt.delivery.code")
+    case "content":
+      return tStatic("pt.delivery.content")
     default:
       return tStatic("pt.delivery.manual")
   }
@@ -197,6 +203,10 @@ function buyHint(delivery: string, isUserProduct: boolean): string {
       return tStatic("pt.buyHint.subscription")
     case "invite_quota":
       return tStatic("pt.buyHint.inviteQuota")
+    case "code":
+      return tStatic("pt.buyHint.code")
+    case "content":
+      return tStatic("pt.buyHint.content")
     default:
       return tStatic("pt.buyHint.manual")
   }
@@ -205,6 +215,48 @@ function buyHint(delivery: string, isUserProduct: boolean): string {
 /** 租期展示：如「租用 30 天」 */
 function rentalTerm(days: number | null | undefined): string {
   return days && days > 0 ? tStatic("pt.rental.term", { n: days }) : tStatic("pt.rental.rental")
+}
+
+/**
+ * 自动发货的正文块（统一内容 / 卡密）。
+ *
+ * 为什么单独一块而不是跟摘要挤在一行：这是买家**买到的东西**本身
+ * （网盘链接 + 提取码、卡密、使用说明），必须
+ *   · 能看清换行（`whitespace-pre-wrap`），不能像普通摘要那样截断；
+ *   · 能一键复制（用户下一个动作就是粘贴到网盘/客户端）；
+ *   · 用等宽字体，避免链接里的 `l/1/O/0` 看错。
+ */
+function DeliveryContentBlock({ content }: { content: string }) {
+  const { t } = useT()
+  const [copied, setCopied] = React.useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(content)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      toast.error(t("pt.copyFailed"))
+    }
+  }
+  return (
+    <div className="mt-1 w-full space-y-1 rounded-md border bg-muted/30 p-2 text-left">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-medium text-muted-foreground">
+          {t("pt.deliveryContent")}
+        </span>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 text-muted-foreground"
+          onClick={() => void copy()}
+          title={t("pt.copyContent")}
+        >
+          {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+        </Button>
+      </div>
+      <p className="whitespace-pre-wrap break-all font-mono text-xs">{content}</p>
+    </div>
+  )
 }
 
 /** 租用订单是否已到期（只有租用订单才有 expiresAt） */
@@ -302,7 +354,14 @@ function ProductCard({
   onDetail?: (p: PointProduct) => void
 }) {
   const { t } = useT()
-  const soldOut = product.stock !== null && product.stock <= 0
+  // 今日剩余：每日限量独立于总量库存 —— 总量不限（stock=null）也能有每日名额。
+  // dailySold 由后端按与下单计数相同的 UTC 日期口径带出，前端只做减法。
+  const dailyRemaining =
+    product.dailyLimit != null
+      ? Math.max(0, product.dailyLimit - (product.dailySold ?? 0))
+      : null
+  const dailySoldOut = dailyRemaining != null && dailyRemaining <= 0
+  const soldOut = (product.stock !== null && product.stock <= 0) || dailySoldOut
   const tooExpensive = product.price > balance
   const isRental = product.billingMode === "rental"
   return (
@@ -349,6 +408,21 @@ function ProductCard({
                     : t("pt.leftPieces", { n: product.stock })}
               </Badge>
             )}
+            {product.dailyLimit != null && (
+              <Badge
+                variant="outline"
+                className={
+                  dailySoldOut
+                    ? "text-[10px] font-medium text-destructive"
+                    : "text-[10px]"
+                }
+                title={t("pt.dailyLeftTitle")}
+              >
+                {dailySoldOut
+                  ? t("pt.dailySoldOut")
+                  : t("pt.dailyLeft", { n: dailyRemaining ?? 0 })}
+              </Badge>
+            )}
           </div>
         </div>
         <CardTitle className="flex items-center gap-1.5 text-base">
@@ -391,9 +465,12 @@ function ProductCard({
             }}
           >
             {soldOut
-              ? isRental
-                ? t("pt.rentedOut")
-                : t("pt.soldOut")
+              ? dailySoldOut
+                ? // 每日名额用完：总量可能还有（甚至不限量），提示明天再来更准确
+                  t("pt.dailySoldOutBtn")
+                : isRental
+                  ? t("pt.rentedOut")
+                  : t("pt.soldOut")
               : tooExpensive
                 ? t("pt.insufficientShort")
                 : isRental
@@ -415,12 +492,22 @@ interface UploadForm {
   category: ProductCategory
   price: string
   stock: string
+  /**
+   * 交付方式（2026-10-04 放开自动发货）：manual / code / content。
+   * 卡密池内容不放在表单里 —— 池子有独立的管理面板（保存后追加）。
+   */
+  delivery: PointDelivery
+  /** delivery='content' 的固定内容 */
+  content: string
   /** 计费方式：买断 / 租用 */
   billingMode: PointBillingMode
   /** 租期天数（字符串，空 = 未填）；买断时忽略 */
   rentalDays: string
   enabled: boolean
 }
+
+/** 用户商品可选的交付方式（人工 / 卡密 / 固定内容；其余是平台能力不开放） */
+const USER_DELIVERY_OPTIONS: readonly PointDelivery[] = ["manual", "code", "content"]
 
 function emptyUpload(): UploadForm {
   return {
@@ -431,6 +518,8 @@ function emptyUpload(): UploadForm {
     category: "other",
     price: "",
     stock: "",
+    delivery: "manual",
+    content: "",
     billingMode: "one_time",
     rentalDays: "",
     enabled: true,
@@ -446,6 +535,8 @@ function uploadOf(p: PointProduct): UploadForm {
     category: p.category ?? "other",
     price: String(p.price),
     stock: p.stock === null ? "" : String(p.stock),
+    delivery: USER_DELIVERY_OPTIONS.includes(p.delivery) ? p.delivery : "manual",
+    content: p.deliveryParams?.content ?? "",
     billingMode: p.billingMode,
     rentalDays: p.rentalDays === null ? "" : String(p.rentalDays),
     enabled: p.enabled,
@@ -462,6 +553,10 @@ function uploadPayload(f: UploadForm): UserProductPayload {
     icon: f.icon.trim() || null,
     price: Math.trunc(Number(f.price) || 0),
     stock: f.stock.trim() === "" ? null : Math.trunc(Number(f.stock) || 0),
+    delivery: f.delivery,
+    // 只有固定内容商品的 deliveryParams 有意义；其余方式传 null，
+    // 后端也只会读与 delivery 匹配的那个字段
+    deliveryParams: f.delivery === "content" ? { content: f.content } : null,
     billingMode: f.billingMode,
     rentalDays: isRental ? Math.trunc(Number(f.rentalDays) || 0) : null,
     enabled: f.enabled,
@@ -470,6 +565,110 @@ function uploadPayload(f: UploadForm): UserProductPayload {
 
 /** 租期快捷值（天）—— 覆盖「周 / 月 / 季 / 年」四个常见档位 */
 const RENTAL_DAY_PRESETS = [7, 30, 90, 365] as const
+
+/**
+ * 卖家自己的卡密池管理（用户商品 delivery='code'）。
+ *
+ * 结构与管理端 CodeManager 相同，但接口走用户侧（后端校验所有权）。
+ * 卡密本身不回显明文 —— 概览只有「可用 / 已用 / 共」三个数。
+ */
+function MyCodeManager({ productId }: { productId: string }) {
+  const { t } = useT()
+  const [info, setInfo] = React.useState<{
+    total: number
+    used: number
+    available: number
+  } | null>(null)
+  const [text, setText] = React.useState("")
+  const [busy, setBusy] = React.useState(false)
+
+  const load = React.useCallback(async () => {
+    try {
+      setInfo(await pointsApi.getMyProductCodes(productId))
+    } catch (err) {
+      toast.error(errMsg(err, t("pt.codes.loadFailed")))
+    }
+  }, [productId, t])
+
+  React.useEffect(() => {
+    void load()
+  }, [load])
+
+  const add = async () => {
+    const codes = text
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (codes.length === 0) return
+    setBusy(true)
+    try {
+      const r = await pointsApi.addMyProductCodes(productId, codes)
+      toast.success(t("pt.codes.added", { n: r.added, avail: r.available }))
+      setText("")
+      await load()
+    } catch (err) {
+      toast.error(errMsg(err, t("pt.codes.addFailed")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const clear = async () => {
+    if (!confirm(t("pt.codes.confirmClear"))) return
+    setBusy(true)
+    try {
+      const r = await pointsApi.clearMyProductCodes(productId)
+      toast.success(t("pt.codes.cleared", { n: r.removed }))
+      await load()
+    } catch (err) {
+      toast.error(errMsg(err, t("pt.codes.clearFailed")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border p-3">
+      <div className="flex items-center justify-between">
+        <Label>{t("pt.codes.title")}</Label>
+        {info && (
+          <span className="text-xs text-muted-foreground">
+            {t("pt.codes.stats", {
+              avail: info.available,
+              used: info.used,
+              total: info.total,
+            })}
+          </span>
+        )}
+      </div>
+      <Textarea
+        rows={4}
+        placeholder={t("pt.codes.placeholder")}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+      />
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" size="sm" disabled={busy} onClick={() => void add()}>
+          {t("pt.codes.add")}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy || !info?.available}
+          onClick={() => void clear()}
+        >
+          {t("pt.codes.clear")}
+        </Button>
+      </div>
+      {info && info.available === 0 && (
+        <p className="text-xs text-amber-600 dark:text-amber-400">
+          {t("pt.codes.empty")}
+        </p>
+      )}
+    </div>
+  )
+}
 
 /** 「用户们的商城」每页商品数（3 列 × 3 行） */
 const SHOP_PAGE_SIZE = 9
@@ -786,6 +985,7 @@ export default function PointsPage() {
       price: p.price,
       stock: p.stock,
       dailyLimit: null,
+      dailySold: 0,
       perUserLimit: null,
       // 用户商品交付方式固定为人工
       delivery: "manual",
@@ -817,6 +1017,11 @@ export default function PointsPage() {
     }
     if (payload.billingMode === "rental" && (!payload.rentalDays || payload.rentalDays < 1)) {
       toast.error(t("pt.err.rentalDaysRequired"))
+      return
+    }
+    // 固定内容商品：内容为空 = 买家花积分买到空气
+    if (payload.delivery === "content" && !payload.deliveryParams?.content?.trim()) {
+      toast.error(t("pt.err.contentRequired"))
       return
     }
     setFormBusy(true)
@@ -1031,6 +1236,14 @@ export default function PointsPage() {
                   >
                     {rental}
                   </p>
+                )}
+                {/*
+                  自动发货的正文（统一内容 / 卡密）：这是买家**买到的东西**，
+                  必须能反复查看、能直接复制，所以单列一块而不是塞进上面那行摘要。
+                  只在还没退款/取消的订单上显示 —— 已退款的把内容再摆出来没意义。
+                */}
+                {o.deliveryContent && o.status !== "cancelled" && (
+                  <DeliveryContentBlock content={o.deliveryContent} />
                 )}
               </div>
               <div className="flex shrink-0 items-center gap-3 text-right">
@@ -1860,6 +2073,15 @@ export default function PointsPage() {
                   {detailTarget.perUserLimit
                     ? ` · ${t("pt.perUserLimit", { n: detailTarget.perUserLimit })}`
                     : ""}
+                  {detailTarget.dailyLimit != null
+                    ? ` · ${
+                        detailTarget.dailyLimit - (detailTarget.dailySold ?? 0) > 0
+                          ? t("pt.dailyLeft", {
+                              n: Math.max(0, detailTarget.dailyLimit - (detailTarget.dailySold ?? 0)),
+                            })
+                          : t("pt.dailySoldOut")
+                      }`
+                    : ""}
                 </span>
               </div>
               {detailTarget.description ? (
@@ -2104,7 +2326,79 @@ export default function PointsPage() {
               </div>
             </div>
 
-            {/* 计费方式：买断 / 租用。租用对用户商品是可用的（交付方式固定人工，属于可收回的一类） */}
+            {/* 交付方式：人工 / 卡密 / 固定内容（2026-10-04 放开自动发货）。
+                其余自动方式（权限 / 订阅 / 额度）是平台能力，不开放给用户商品。 */}
+            <div className="space-y-2">
+              <Label>{t("pt.form.delivery")}</Label>
+              <div className="flex flex-wrap gap-2">
+                {USER_DELIVERY_OPTIONS.map((d) => (
+                  <Button
+                    key={d}
+                    type="button"
+                    size="sm"
+                    variant={form.delivery === d ? "default" : "outline"}
+                    onClick={() =>
+                      setForm((f) => ({
+                        ...f,
+                        delivery: d,
+                        // 卡密/固定内容是一次性发放，不能租用 —— 切过去时顺手关掉租用
+                        billingMode:
+                          d !== "manual" && f.billingMode === "rental" ? "one_time" : f.billingMode,
+                      }))
+                    }
+                  >
+                    {t(
+                      d === "manual"
+                        ? "pt.delivery.manual"
+                        : d === "code"
+                          ? "pt.delivery.code"
+                          : "pt.delivery.content"
+                    )}
+                  </Button>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {t(
+                  form.delivery === "manual"
+                    ? "pt.form.deliveryHint.manual"
+                    : form.delivery === "code"
+                      ? "pt.form.deliveryHint.code"
+                      : "pt.form.deliveryHint.content"
+                )}
+              </p>
+            </div>
+
+            {/* 固定内容：交付正文（人人相同，如网盘链接） */}
+            {form.delivery === "content" && (
+              <div className="space-y-2">
+                <Label htmlFor="upContent">{t("pt.form.contentLabel")}</Label>
+                <Textarea
+                  id="upContent"
+                  rows={6}
+                  placeholder={t("pt.form.contentPlaceholder")}
+                  value={form.content}
+                  onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t("pt.form.contentHint", { n: form.content.length })}
+                </p>
+              </div>
+            )}
+
+            {/* 卡密：保存后在这里维护卡密池（一行一条，每人一条互不相同） */}
+            {form.delivery === "code" && (
+              <div className="space-y-2">
+                {editingId ? (
+                  <MyCodeManager productId={editingId} />
+                ) : (
+                  <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                    {t("pt.form.codesSaveFirst")}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* 计费方式：买断 / 租用。只有人工交付的商品可租（卡密 / 固定内容是一次性发放，收不回来） */}
             <div className="space-y-3 rounded-md border p-3">
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
@@ -2115,6 +2409,7 @@ export default function PointsPage() {
                 </div>
                 <Switch
                   checked={form.billingMode === "rental"}
+                  disabled={form.delivery !== "manual"}
                   onCheckedChange={(v) =>
                     setForm((f) => ({
                       ...f,
