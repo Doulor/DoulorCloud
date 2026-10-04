@@ -11,6 +11,19 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { downloadBlob, formatBytes, readAsArrayBuffer } from "@/lib/toolbox/utils"
+import {
+  isFlacFile,
+  readFlacTags,
+  writeFlacTags,
+} from "@/lib/audio/flac-tags"
+import {
+  formatLrcTime,
+  lrcToText,
+  lrcToTtml,
+  parseLrc,
+  textToLrc,
+  ttmlToLrc,
+} from "@/lib/audio/lyrics"
 import { useT } from "@/i18n"
 
 interface TagForm {
@@ -22,6 +35,7 @@ interface TagForm {
   year: string
   track: string
   comment: string
+  lyrics: string
 }
 
 const EMPTY_FORM: TagForm = {
@@ -33,10 +47,15 @@ const EMPTY_FORM: TagForm = {
   year: "",
   track: "",
   comment: "",
+  lyrics: "",
 }
 
-function isMp3File(file: File): boolean {
-  return file.type === "audio/mpeg" || /\.mp3$/i.test(file.name)
+type AudioFormat = "mp3" | "flac" | "other"
+
+function detectFormat(file: File): AudioFormat {
+  if (file.type === "audio/mpeg" || /\.mp3$/i.test(file.name)) return "mp3"
+  if (isFlacFile(file)) return "flac"
+  return "other"
 }
 
 function readTags(file: File): Promise<JsMediaTags> {
@@ -54,16 +73,25 @@ function commentToString(comment: JsMediaTags["comment"]): string {
   return comment.text ?? ""
 }
 
+function lyricsToString(lyrics: JsMediaTags["lyrics"]): string {
+  if (!lyrics) return ""
+  if (typeof lyrics === "string") return lyrics
+  return lyrics.lyrics ?? ""
+}
+
 export default function AudioTagsTool() {
   const { t } = useT()
   const [file, setFile] = React.useState<File | null>(null)
-  const [writable, setWritable] = React.useState(false)
+  const [format, setFormat] = React.useState<AudioFormat>("other")
+  const writable = format === "mp3" || format === "flac"
   const [form, setForm] = React.useState<TagForm>(EMPTY_FORM)
   const [coverUrl, setCoverUrl] = React.useState<string | null>(null)
   const [coverBytes, setCoverBytes] = React.useState<ArrayBuffer | null>(null)
+  const [coverMime, setCoverMime] = React.useState("image/jpeg")
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [done, setDone] = React.useState(false)
+  const [previewLrc, setPreviewLrc] = React.useState(true)
   const coverInputRef = React.useRef<HTMLInputElement | null>(null)
 
   const clearCover = React.useCallback(() => {
@@ -79,7 +107,8 @@ export default function AudioTagsTool() {
     setForm(EMPTY_FORM)
     setError(null)
     setDone(false)
-    setWritable(false)
+    setFormat("other")
+    setCoverMime("image/jpeg")
     clearCover()
   }, [clearCover])
 
@@ -90,32 +119,66 @@ export default function AudioTagsTool() {
       setForm((f) => ({ ...f, [key]: e.target.value }))
     }
 
+  const applyForm = (tags: {
+    title?: string
+    artist?: string
+    album?: string
+    albumArtist?: string
+    genre?: string
+    year?: string
+    track?: string
+    comment?: string
+    lyrics?: string
+  }) => {
+    setForm({
+      title: tags.title ?? "",
+      artist: tags.artist ?? "",
+      album: tags.album ?? "",
+      albumArtist: tags.albumArtist ?? "",
+      genre: tags.genre ?? "",
+      year: tags.year ?? "",
+      track: tags.track ?? "",
+      comment: tags.comment ?? "",
+      lyrics: tags.lyrics ?? "",
+    })
+  }
+
+  const applyCover = (data: ArrayBuffer, mime: string) => {
+    clearCover()
+    setCoverBytes(data)
+    setCoverMime(mime || "image/jpeg")
+    setCoverUrl(URL.createObjectURL(new Blob([data], { type: mime || "image/jpeg" })))
+  }
+
   const handleFiles = async (files: File[]) => {
     const f = files[0]
     if (!f) return
     resetAll()
     setBusy(true)
     try {
-      const tags = await readTags(f)
+      const fmt = detectFormat(f)
       setFile(f)
-      setWritable(isMp3File(f))
-      setForm({
-        title: tags.title ?? "",
-        artist: tags.artist ?? "",
-        album: tags.album ?? "",
-        albumArtist: "",
-        genre: tags.genre ?? "",
-        year: tags.year ?? "",
-        track: tags.track ?? "",
-        comment: commentToString(tags.comment),
-      })
-      if (tags.picture?.data?.length) {
-        const bytes = new Uint8Array(tags.picture.data)
-        const blob = new Blob([bytes.buffer as ArrayBuffer], {
-          type: tags.picture.format || "image/jpeg",
+      setFormat(fmt)
+      if (fmt === "flac") {
+        const { tags, cover } = await readFlacTags(f)
+        applyForm(tags)
+        if (cover) applyCover(cover.data, cover.mime)
+      } else {
+        const tags = await readTags(f)
+        applyForm({
+          title: tags.title,
+          artist: tags.artist,
+          album: tags.album,
+          genre: tags.genre,
+          year: tags.year,
+          track: tags.track,
+          comment: commentToString(tags.comment),
+          lyrics: lyricsToString(tags.lyrics),
         })
-        setCoverBytes(bytes.buffer as ArrayBuffer)
-        setCoverUrl(URL.createObjectURL(blob))
+        if (tags.picture?.data?.length) {
+          const bytes = new Uint8Array(tags.picture.data)
+          applyCover(bytes.buffer as ArrayBuffer, tags.picture.format || "image/jpeg")
+        }
       }
     } catch {
       setError(t("at3.err.parse"))
@@ -132,6 +195,7 @@ export default function AudioTagsTool() {
       const buf = await readAsArrayBuffer(f)
       clearCover()
       setCoverBytes(buf)
+      setCoverMime(f.type || "image/jpeg")
       setCoverUrl(URL.createObjectURL(new Blob([buf], { type: f.type || "image/jpeg" })))
       setDone(false)
     } catch {
@@ -144,11 +208,32 @@ export default function AudioTagsTool() {
     setBusy(true)
     setError(null)
     try {
+      const v = (s: string) => s.trim()
+      if (format === "flac") {
+        const cover = coverBytes ? { mime: coverMime, data: coverBytes } : null
+        const out = await writeFlacTags(
+          file,
+          {
+            title: v(form.title),
+            artist: v(form.artist),
+            album: v(form.album),
+            albumArtist: v(form.albumArtist),
+            genre: v(form.genre),
+            year: v(form.year),
+            track: v(form.track),
+            comment: v(form.comment),
+            lyrics: v(form.lyrics),
+          },
+          cover,
+        )
+        downloadBlob(new Blob([out], { type: "audio/flac" }), file.name)
+        setDone(true)
+        return
+      }
       const buf = await readAsArrayBuffer(file)
       const writer = new ID3Writer(buf)
       // Strip the old tag first so edited fields don't duplicate.
       writer.removeTag()
-      const v = (s: string) => s.trim()
       if (v(form.title)) writer.setFrame("TIT2", v(form.title))
       if (v(form.artist)) writer.setFrame("TPE1", [v(form.artist)])
       if (v(form.albumArtist)) writer.setFrame("TPE2", v(form.albumArtist))
@@ -159,6 +244,8 @@ export default function AudioTagsTool() {
       if (Number.isFinite(yearNum)) writer.setFrame("TYER", yearNum)
       if (v(form.comment))
         writer.setFrame("COMM", { language: "eng", description: "", text: v(form.comment) })
+      if (v(form.lyrics))
+        writer.setFrame("USLT", { language: "eng", description: "", lyrics: v(form.lyrics) })
       if (coverBytes)
         writer.setFrame("APIC", { type: 3, data: coverBytes, description: "" })
       writer.addTag()
@@ -169,6 +256,13 @@ export default function AudioTagsTool() {
     } finally {
       setBusy(false)
     }
+  }
+
+  const lyricLines = React.useMemo(() => parseLrc(form.lyrics), [form.lyrics])
+
+  const convertLyrics = (fn: (s: string) => string) => {
+    setDone(false)
+    setForm((f) => ({ ...f, lyrics: fn(f.lyrics) }))
   }
 
   const fields: { key: keyof TagForm; label: string; placeholder?: string }[] = [
@@ -294,13 +388,102 @@ export default function AudioTagsTool() {
                 {busy ? t("at3.saving") : t("at3.save")}
               </Button>
               {!writable && (
-                <p className="mt-2 text-xs text-muted-foreground">{t("at3.onlyMp3")}</p>
+                <p className="mt-2 text-xs text-muted-foreground">{t("at3.writeLimit")}</p>
               )}
               {done && <p className="mt-2 text-xs text-muted-foreground">{t("at3.done")}</p>}
             </ToolSection>
           </div>
         )}
       </div>
+
+      {file && (
+        <ToolSection title={t("at3.section.lyrics")}>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="at-lyrics">{t("at3.lyricsEdit")}</Label>
+              <Textarea
+                id="at-lyrics"
+                value={form.lyrics}
+                onChange={setField("lyrics")}
+                disabled={!writable || busy}
+                rows={12}
+                className="font-mono text-xs leading-relaxed"
+              />
+              <div className="flex flex-wrap gap-2 pt-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!writable || busy}
+                  onClick={() => convertLyrics(lrcToText)}
+                >
+                  {t("at3.conv.lrc2text")}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!writable || busy}
+                  onClick={() => convertLyrics(textToLrc)}
+                >
+                  {t("at3.conv.text2lrc")}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!writable || busy}
+                  onClick={() => convertLyrics(lrcToTtml)}
+                >
+                  {t("at3.conv.lrc2ttml")}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!writable || busy}
+                  onClick={() => convertLyrics(ttmlToLrc)}
+                >
+                  {t("at3.conv.ttml2lrc")}
+                </Button>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <Label>{t("at3.lyricsPreview")}</Label>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setPreviewLrc((p) => !p)}
+                >
+                  {previewLrc ? t("at3.lyricsRaw") : t("at3.lyricsParsed")}
+                </Button>
+              </div>
+              <div className="max-h-80 overflow-y-auto rounded-lg border bg-muted/30 p-3">
+                {lyricLines.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">{t("at3.lyricsEmpty")}</p>
+                ) : previewLrc ? (
+                  <ol className="space-y-1.5">
+                    {lyricLines.map((l, i) => (
+                      <li key={i} className="flex items-start gap-2 text-sm">
+                        {l.time !== null && (
+                          <span className="mt-0.5 shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+                            {formatLrcTime(l.time).slice(1, -1)}
+                          </span>
+                        )}
+                        <span className="whitespace-pre-wrap break-words">
+                          {l.text || "　"}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+                    {form.lyrics}
+                  </pre>
+                )}
+              </div>
+            </div>
+          </div>
+        </ToolSection>
+      )}
+
       {busy && !file && (
         <p className="mt-2 text-sm text-muted-foreground">{t("at3.reading")}</p>
       )}
