@@ -1,13 +1,14 @@
 /**
- * GitHub star 活动：一个 GitHub 用户名**全站只能提交一次**（2026-10-04 站长要求）。
+ * GitHub star 活动：用户名**按活动**一次性（2026-10-04 站长口径）。
  *
- * 背景：star 名单是公开的，谁都能抄别人的名字。原先只按 (event_id, github_username)
- * 占用 —— 同一个名字可在**不同活动**里各冒领一次。现改为全局唯一
- * （migrations/0117 的 idx_event_github_username_global）。
+ * 背景：star 名单是公开的，谁都能抄别人的名字。占用口径是「**同一活动内**一个
+ * GitHub 用户名只能被一个账号用」；**不同活动各自独立**——新活动重新算，
+ * 不继承旧活动里已用过的名字。
  *
  * 本文件守住三条线：
- *   1. 同一名字被 B 用了之后，A 再用直接 403 GITHUB_ALREADY_CLAIMED；
- *   2. 同一个名字**换活动**也不能再领（全局唯一的核心）；
+ *   1. 同一活动内，名字被 B 用了之后 A 再用 → 403 GITHUB_ALREADY_CLAIMED；
+ *   2. **跨活动可以复用同名**（新活动单独算）—— 用 B 在活动1 用过的名字，
+ *      A 在活动2 仍能领；
  *   3. 重复领取返回统一错误体（HTTP 409 + code），而不是自相矛盾的 {status:"granted"}。
  */
 import { describe, it, expect, beforeEach } from "vitest"
@@ -56,14 +57,14 @@ function claimReq(user: Awaited<ReturnType<typeof makeUser>>, eventId: string, g
   })
 }
 
-describe("GitHub star：用户名全局一次性", () => {
+describe("GitHub star：用户名按活动一次性", () => {
   let restore: (() => void) | null = null
   beforeEach(() => {
     restore?.()
     restore = null
   })
 
-  it("同一名字：B 用过后 A 再用 → 403 GITHUB_ALREADY_CLAIMED", async () => {
+  it("同一活动内，同一名字 B 用过后 A 再用 → 403 GITHUB_ALREADY_CLAIMED", async () => {
     const repo = `Doulor/repo-${uuid().slice(0, 6)}`
     const eventId = await makeGithubEvent(repo)
     const a = await makeUser()
@@ -78,7 +79,7 @@ describe("GitHub star：用户名全局一次性", () => {
     expect((await second.json<{ code: string }>()).code).toBe("GITHUB_ALREADY_CLAIMED")
   })
 
-  it("同一名字**跨活动**也不能再领（全局唯一）", async () => {
+  it("跨活动可以复用同一个名字（新活动单独算）", async () => {
     const repo1 = `Doulor/r1-${uuid().slice(0, 6)}`
     const repo2 = `Doulor/r2-${uuid().slice(0, 6)}`
     const ev1 = await makeGithubEvent(repo1)
@@ -89,10 +90,9 @@ describe("GitHub star：用户名全局一次性", () => {
     restore = mockGithub(["crossname"])
     // B 在活动 1 用掉这个名字
     expect((await fetchSelf(claimReq(b, ev1, "crossname"))).status).toBe(200)
-    // A 想在活动 2 用同一个名字 → 被全局唯一拦下
+    // A 在**另一个活动**用同一个名字 → 允许（按活动独立）
     const res = await fetchSelf(claimReq(a, ev2, "crossname"))
-    expect(res.status).toBe(403)
-    expect((await res.json<{ code: string }>()).code).toBe("GITHUB_ALREADY_CLAIMED")
+    expect(res.status).toBe(200)
   })
 
   it("重复领取返回统一错误体（409 + code），不再自相矛盾", async () => {
