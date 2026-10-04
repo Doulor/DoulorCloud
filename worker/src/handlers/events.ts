@@ -290,11 +290,15 @@ function normalizeGithubName(raw: string): string {
 type GithubNameCheck = "ok" | "taken" | "bound-other"
 
 /**
- * 领取前的**快速预检**（2026-10-01 修漏洞加）。
+ * 领取前的**快速预检**（2026-10-01 修漏洞加；2026-10-04 升级为全局一次性）。
  *
  * 漏洞背景：原先只核验「填的 GitHub 用户名真的 star 过仓库」，没限制一个名字
  * 只能被领一次 —— star 名单是公开的，谁都能抄别人的名字，用多个站内账号反复领
  * （用户 deity6 实测刷成功后报告了这个洞）。
+ *
+ * ⚠️ 2026-10-04（站长要求）：占用口径从「**按活动**唯一」升级为「**全局唯一**」——
+ *    一个 GitHub 用户名在全站只能被提交一次，跨活动也不能再用
+ *    （见 migrations/0117 的全局唯一索引）。所以这里按名字查时**不再限定 event_id**。
  *
  * 预检发生在 event_claims 占位**之前**：名字已被占用时直接 403，
  * 不会白白消耗一次性领取机会 / 名额。真正的并发安全靠 lockGithubNameForEvent
@@ -307,29 +311,36 @@ async function checkGithubNameForEvent(
   userId: string
 ): Promise<GithubNameCheck> {
   const who = normalizeGithubName(githubInput)
-  const rows = await env.DB.prepare(
-    `SELECT github_username, user_id FROM event_github_claims
-      WHERE event_id = ? AND (github_username = ? OR user_id = ?)`
+  // 全局查这个名字：任何一个活动里被谁用过，都算「已占用」
+  const byName = await env.DB.prepare(
+    "SELECT user_id FROM event_github_claims WHERE github_username = ?"
   )
-    .bind(eventId, who, userId)
-    .all<{ github_username: string; user_id: string }>()
-  for (const r of rows.results ?? []) {
-    if (r.github_username === who && r.user_id !== userId) return "taken"
-    if (r.user_id === userId && r.github_username !== who) return "bound-other"
-  }
+    .bind(who)
+    .first<{ user_id: string }>()
+  if (byName && byName.user_id !== userId) return "taken"
+  // 同一用户在本活动里已绑过**别的**名字 → 不许中途换名字
+  const mine = await env.DB.prepare(
+    "SELECT github_username FROM event_github_claims WHERE user_id = ? AND event_id = ?"
+  )
+    .bind(userId, eventId)
+    .first<{ github_username: string }>()
+  if (mine && mine.github_username !== who) return "bound-other"
   return "ok"
 }
 
 /**
- * 给「GitHub 用户名 × 活动」上锁（authoritative，防并发的关键）。
+ * 给「GitHub 用户名」上锁（authoritative，防并发的关键）。
  *
  * 返回 `ok` 以外的值时**必须拒绝发放**：
- *   - `taken`：这个名字已被另一个账号占用；
- *   - `bound-other`：本人已在别的名字上绑过（换名字重试，不给换）。
+ *   - `taken`：这个名字已被另一个账号占用（全局，跨活动也算）；
+ *   - `bound-other`：本人已在本活动里绑过别的名字（换名字重试，不给换）。
+ *
+ * 全局唯一由 `idx_event_github_username_global`（migrations/0117）保证：
+ * 一旦某个 github_username 写过一行，任何活动、任何账号都无法再占用它。
+ * `WHERE NOT EXISTS (... event_id = ? AND user_id = ?)` 另加一层「同一活动里
+ * 每人只占一个名字」，防止已领过的人把别人的名字全占满。
  *
  * 幂等：同一用户用**同一个**名字重试（上次发放失败）会命中自己的行 → 返回 ok。
- * WHERE NOT EXISTS 只允许每人占一个名字 —— 否则已领过的人可以恶意把
- * 别人的名字全都占满（名字锁死，真主人反而领不了）。
  */
 async function lockGithubNameForEvent(
   env: Env,
@@ -346,11 +357,11 @@ async function lockGithubNameForEvent(
     .bind(eventId, who, userId, new Date().toISOString(), eventId, userId)
     .run()
   if ((res.meta?.changes ?? 0) > 0) return "ok"
-  // 没插进去：名字被别人占，或自己已绑过别的名字 —— 查清楚是哪种
+  // 没插进去：名字被别人占，或自己已绑过别的名字 —— 查清楚是哪种（按名字全局查）
   const holder = await env.DB.prepare(
-    "SELECT user_id FROM event_github_claims WHERE event_id = ? AND github_username = ?"
+    "SELECT user_id FROM event_github_claims WHERE github_username = ?"
   )
-    .bind(eventId, who)
+    .bind(who)
     .first<{ user_id: string }>()
   if (holder?.user_id === userId) return "ok" // 自己的名字重试（上次发放失败）
   return holder ? "taken" : "bound-other"
@@ -496,12 +507,18 @@ export async function claimEvent(
       )
     }
     if (existing.reward_status !== "failed") {
-      return json(
-        {
-          status: existing.reward_status,
-          detail: existing.reward_detail ?? "你已经参与过这个活动了。",
-        },
-        409
+      // 重复领取：统一按**错误**返回（HTTP 409 + 标准错误体 {error, code}）。
+      //
+      // ⚠️ 2026-10-04 审计修复（#3）：原先是 `json({ status: existing.reward_status,
+      //    detail }, 409)` —— 状态码是「冲突/失败」，body 里却带着 `status: "granted"`
+      //    （已领取的旧状态），自相矛盾。而前端 `request()` 对任何非 2xx 一律抛
+      //    HttpError，只认 body 的 `error` 字段；原 body 没有 `error`，于是前端只能
+      //    显示笼统的「请求失败(409)」，真正的 detail（如「已获得 50 积分」）被丢掉。
+      //    改用 ApiError 后：body 是 `{error, code}`，前端能显示真实原因。
+      throw new ApiError(
+        409,
+        existing.reward_detail ?? "你已经参与过这个活动了。",
+        "ALREADY_CLAIMED"
       )
     }
     // GitHub star 活动：发放前给用户名上锁（防并发窗口里的冒用；见 helper 注释）
