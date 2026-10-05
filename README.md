@@ -57,7 +57,7 @@
 | **直链网盘** | R2 对象存储（S3 兼容 API，跨账号），多桶架构 + 每用户配额，支持自定义直链域名与预签名直传 |
 | **个人名片 / 空间** | Bento 网格个人主页（`/space/<用户名>`、`/profile/<slug>`），音乐、歌词、图库、链接卡片、自定义配色与自动缩放 |
 | **社区** | 帖子 / 评论 / 图片（走 R2）、楼中楼回复、通知与邮件提醒 |
-| **聊天室** | 频道式实时聊天（轮询实现，不引常驻连接）、在线状态、未读角标 |
+| **聊天室** | 频道式实时聊天（轮询实现，不引常驻连接）、在线状态、未读角标；乐观发送（发送中/失败重试）、向上翻历史、日期分组、引用跳转、表情回应、10 分钟内可编辑、跨场景转发、正在输入指示 |
 | **AI 中转站** | 自建 NewAPI 网关的账号打通：开通、密码绑定、API Key 代建、额度同步、订阅套餐、渠道捐献自动化 |
 | **捐献体系** | 用户捐献上游 AI 渠道 / 反代账号（WorkBuddy、CLI2API 等）换取权限；自动审核 + 人工兜底 |
 | **积分与成就** | 注册 / 捐献 / 活动获得积分；成就点独立体系、成就徽章与自定义称号 |
@@ -228,7 +228,7 @@ site-worker.js           前端站点的 Worker 入口（HTTPS 跳转 + 安全�
 | 域名 | `domains` `dns_records` `subdomain_requests` |
 | 网盘 | `storage_accounts` `r2_buckets` `storage_prefixes` `storage_shares` |
 | 社区 | `posts` `comments` `feedback` |
-| 聊天 | `chat_messages` `chat_presence` |
+| 聊天 | `chat_messages` `chat_presence` `direct_messages` `dm_contacts` `dm_typing` `message_reactions` |
 | 名片 | `profiles` `profile_assets` |
 | 积分商城 | `user_points` `point_transactions` `point_products` `point_orders` |
 | 活动 | `events` `event_claims` |
