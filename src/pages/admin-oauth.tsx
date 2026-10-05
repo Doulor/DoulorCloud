@@ -21,6 +21,7 @@ import {
   Plus,
   RefreshCw,
   Trash2,
+  X,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -28,6 +29,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Textarea } from "@/components/ui/textarea"
+import { Switch } from "@/components/ui/switch"
 import { LoadingBlock } from "@/components/loading-block"
 import { EmptyState } from "@/components/empty-state"
 import {
@@ -107,6 +109,8 @@ export function OAuthAdminPanel() {
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
   const [origin] = React.useState(() => window.location.origin)
+  /** 用户自助创建当前是否「免审」（对应设置项 oauth_user_clients_open） */
+  const [autoApprove, setAutoApprove] = React.useState(false)
 
   // 新建
   const [createOpen, setCreateOpen] = React.useState(false)
@@ -129,6 +133,7 @@ export function OAuthAdminPanel() {
     try {
       const res = await oauthAdminApi.list()
       setClients(res.clients)
+      setAutoApprove(res.autoApprove)
     } catch (err) {
       toast.error(errMsg(err, t("ao.err.load")))
     } finally {
@@ -139,6 +144,38 @@ export function OAuthAdminPanel() {
   React.useEffect(() => {
     void load()
   }, [load])
+
+  /** 切换「用户自建应用免审」开关（关着 = 用户提交的要逐个审核） */
+  const toggleAutoApprove = async (v: boolean) => {
+    setBusy(true)
+    try {
+      await oauthAdminApi.setAutoApprove(v)
+      setAutoApprove(v)
+      toast.success(v ? t("ao.policy.onToast") : t("ao.policy.offToast"))
+    } catch (err) {
+      toast.error(errMsg(err, t("ao.err.op")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 审核用户提交的应用：通过 / 驳回 */
+  const doReview = async (client: OAuthClient, approve: boolean) => {    let note = ""
+    if (!approve) {
+      note = window.prompt(t("ao.review.rejectPrompt", { name: client.name })) ?? ""
+      if (note.trim() === "") return // 用户取消 / 没填原因
+    }
+    setBusy(true)
+    try {
+      await oauthAdminApi.review(client.id, { approve, note: note.trim() || undefined })
+      toast.success(approve ? t("ao.review.approved") : t("ao.review.rejected"))
+      await load()
+    } catch (err) {
+      toast.error(errMsg(err, t("ao.err.op")))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const resetForm = () => {
     setName("")
@@ -253,11 +290,37 @@ export function OAuthAdminPanel() {
         </CardContent>
       </Card>
 
+      {/* 用户自建应用的策略开关（2026-10-06） */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">{t("ao.policy.title")}</CardTitle>
+          <CardDescription>{t("ao.policy.desc")}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between gap-4 rounded-md border px-4 py-3">
+            <div className="space-y-0.5">
+              <p className="text-sm font-medium">{t("ao.policy.autoApprove")}</p>
+              <p className="text-xs text-muted-foreground">
+                {autoApprove ? t("ao.policy.onHint") : t("ao.policy.offHint")}
+              </p>
+            </div>
+            <Switch
+              checked={autoApprove}
+              disabled={busy}
+              onCheckedChange={(v) => void toggleAutoApprove(v)}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <div>
             <CardTitle className="text-base">{t("ao.apps.title", { n: clients.length })}</CardTitle>
             <CardDescription>{t("ao.apps.desc")}</CardDescription>
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              {autoApprove ? t("ao.apps.autoApprove") : t("ao.apps.manualReview")}
+            </p>
           </div>
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="mr-1.5 h-4 w-4" aria-hidden="true" />
@@ -279,11 +342,57 @@ export function OAuthAdminPanel() {
                 <div key={c.id} className="rounded-lg border p-4">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium">{c.name}</span>
+                    {c.reviewStatus === "pending" && (
+                      <Badge variant="outline" className="border-amber-500 text-amber-600">
+                        {t("ao.review.pending")}
+                      </Badge>
+                    )}
+                    {c.reviewStatus === "rejected" && (
+                      <Badge variant="outline" className="border-destructive text-destructive">
+                        {t("ao.review.rejectedBadge")}
+                      </Badge>
+                    )}
                     {c.disabled && <Badge variant="secondary">{t("common.disabled")}</Badge>}
+                    {/* 谁创建的：放开用户自建后，站长要顺着这个 + 回调域名去审查 */}
+                    {c.ownerName && (
+                      <span className="text-xs text-muted-foreground">
+                        {t("ao.owner", { name: c.ownerName })}
+                      </span>
+                    )}
                     <span className="ml-auto text-xs text-muted-foreground">
                       {fmtTime(c.createdAt)}
                     </span>
                   </div>
+
+                  {/* 待审核：给出「通过 / 驳回」这一条主操作 */}
+                  {c.reviewStatus === "pending" && (
+                    <div className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-2.5">
+                      <span className="text-xs text-muted-foreground">{t("ao.review.hint")}</span>
+                      <Button
+                        size="sm"
+                        className="ml-auto"
+                        disabled={busy}
+                        onClick={() => void doReview(c, true)}
+                      >
+                        <Check className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                        {t("ao.review.approve")}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() => void doReview(c, false)}
+                      >
+                        <X className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                        {t("ao.review.reject")}
+                      </Button>
+                    </div>
+                  )}
+                  {c.reviewStatus === "rejected" && c.reviewNote && (
+                    <p className="mt-2 text-xs text-destructive">
+                      {t("ao.review.note", { note: c.reviewNote })}
+                    </p>
+                  )}
 
                   <div className="mt-2 space-y-1 text-xs">
                     <div className="flex items-center gap-2">

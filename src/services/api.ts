@@ -2553,6 +2553,12 @@ export interface OAuthClient {
   scopes: string
   disabled: boolean
   ownerUserId: string | null
+  /** 审核状态：approved（可用）/ pending（待站长审核）/ rejected（已驳回） */
+  reviewStatus: string
+  /** 审核意见（驳回原因），通过时为 null */
+  reviewNote: string | null
+  /** 管理端列表才带：创建者用户名 */
+  ownerName?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -2562,6 +2568,8 @@ export interface OAuthAuthorizeContext {
   clientName: string
   clientId: string
   scopes: string[]
+  /** 回调地址的站点域名（用户据此判断这是哪个网站） */
+  redirectHosts: string[]
   alreadyGranted: boolean
 }
 
@@ -2609,10 +2617,65 @@ export const oauthApi = {
     request<{ ok: boolean }>(`/oauth/grants/${encodeURIComponent(clientId)}`, {
       method: "DELETE",
     }),
+
+  // ---- 「我创建的应用」（2026-10-06 放开用户自建）----
+
+  /** 我创建的应用列表 + 当前是否免审 + 每人上限 */
+  myClients: () =>
+    request<{ clients: OAuthClient[]; autoApprove: boolean; maxClients: number }>(
+      "/oauth/my-clients"
+    ),
+
+  /** 创建应用。clientSecret 明文只此一次，丢了只能删了重建 */
+  createMyClient: (payload: {
+    name: string
+    redirectUris: string[]
+    scopes?: string
+    allowHttp?: boolean
+  }) =>
+    request<{ client: OAuthClient; clientSecret: string; pending: boolean }>(
+      "/oauth/my-clients",
+      { method: "POST", body: JSON.stringify(payload) }
+    ),
+
+  /** 改名字 / 回调地址（会重新排队审核）。注意后端没有开放改 client_id */
+  updateMyClient: (
+    id: string,
+    payload: {
+      name?: string
+      redirectUris?: string[]
+      scopes?: string
+      allowHttp?: boolean
+    }
+  ) =>
+    request<{ client: OAuthClient | null }>(
+      `/oauth/my-clients/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(payload) }
+    ),
+
+  deleteMyClient: (id: string) =>
+    request<{ ok: boolean }>(`/oauth/my-clients/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
 }
 
 export const oauthAdminApi = {
-  list: () => request<{ clients: OAuthClient[] }>("/admin/oauth/clients"),
+  list: () =>
+    request<{ clients: OAuthClient[]; autoApprove: boolean }>("/admin/oauth/clients"),
+
+  /** 审核用户提交的应用：通过 / 驳回（可带驳回原因） */
+  review: (id: string, payload: { approve: boolean; note?: string }) =>
+    request<{ client: OAuthClient | null }>(
+      `/admin/oauth/clients/${encodeURIComponent(id)}/review`,
+      { method: "POST", body: JSON.stringify(payload) }
+    ),
+
+  /** 切换「用户自建应用免审」开关（关着 = 需站长审核） */
+  setAutoApprove: (autoApprove: boolean) =>
+    request<{ autoApprove: boolean }>("/admin/oauth/settings", {
+      method: "POST",
+      body: JSON.stringify({ autoApprove }),
+    }),
 
   /**
    * 创建应用。⚠️ 返回的 `clientSecret` 明文**只此一次**，

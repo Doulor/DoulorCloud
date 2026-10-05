@@ -22,6 +22,7 @@ import {
 import { MessageNotifyCard } from "@/components/message-notify-card"
 import { TwoFactorCard } from "@/components/two-factor-card"
 import { ApiSettingsCard } from "@/components/api-settings-card"
+import { OAuthAppsCard } from "@/components/oauth-apps-card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -721,6 +722,11 @@ export default function SettingsPage() {
         {/* 公开 API：Key 管理 + 层级额度 + 接口文档 */}
         {show("api") && (
         <ApiSettingsCard />
+        )}
+
+        {/* 我创建的 OAuth 应用：把「用 Doulor Cloud 登录」接到自己的站点 */}
+        {show("api") && (
+        <OAuthAppsCard />
         )}
       </div>
 

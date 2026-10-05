@@ -2400,6 +2400,9 @@ export const en: Record<MessageKey, string> = {
   "oc.scope.unknown": "(unknown permission — grant with caution)",
   "oc.title": "Authorize sign-in",
   "oc.wantsAccess": "wants to use your Doulor Cloud account",
+  "oc.requestFrom": "From site:",
+  "oc.verifyHost":
+    "Check that the domain above is really the site you're signing in to — the app name is entered by its owner and can't be trusted; only the domain can.",
   "oc.willBeAble": "It will be able to:",
   "oc.note": "It never receives your password. You can revoke this authorization anytime from the dashboard.",
   "oc.deny": "Deny",
@@ -3337,6 +3340,71 @@ export const en: Record<MessageKey, string> = {
   "ao.err.openidRequired": "openid is required",
   "ao.err.reset": "Reset failed",
   "ao.ok.copied": "{what} copied",
+
+  "ao.owner": "by {name}",
+  "ao.apps.autoApprove": "Currently: users can self-create — instant, no review",
+  "ao.apps.manualReview": "Currently: users can submit, but needs your approval before it works",
+  "ao.policy.title": "User-created apps",
+  "ao.policy.desc":
+    "Whether users may create their own OAuth apps (to offer “Sign in with Doulor Cloud” on their sites).",
+  "ao.policy.autoApprove": "Skip review (takes effect immediately)",
+  "ao.policy.onHint":
+    "On: user-created apps work right away. You can still disable or delete problematic ones below.",
+  "ao.policy.offHint":
+    "Off (default): user submissions stay “pending” until you approve them.",
+  "ao.policy.onToast": "Review skipped — user-created apps go live immediately",
+  "ao.policy.offToast": "Review required — user submissions will wait for your approval",
+  "ao.review.pending": "Pending",
+  "ao.review.rejectedBadge": "Rejected",
+  "ao.review.hint": "User-submitted app: check the redirect domain, visit their site if unsure",
+  "ao.review.approve": "Approve",
+  "ao.review.reject": "Reject",
+  "ao.review.rejectPrompt": "Reject “{name}”? Enter a reason (shown to the user)",
+  "ao.review.approved": "Approved",
+  "ao.review.rejected": "Rejected",
+  "ao.review.note": "Rejection reason: {note}",
+
+  "oapp.title": "My OAuth apps",
+  "oapp.desc": "Create OAuth apps to offer “Sign in with Doulor Cloud” on your own site.",
+  "oapp.autoApprove": "No review: goes live immediately",
+  "oapp.manualReview": "Takes effect after the admin approves it",
+  "oapp.quota": "{used}/{max} used",
+  "oapp.add": "Create app",
+  "oapp.empty": "You haven't created any app yet.",
+  "oapp.status.pending": "Pending review",
+  "oapp.status.rejected": "Not approved",
+  "oapp.status.approved": "Active",
+  "oapp.rejectNote": "Rejection reason: {note}",
+  "oapp.field.redirect": "Redirect URI",
+  "oapp.err.load": "Failed to load your apps",
+  "oapp.err.nameRequired": "Please enter an app name",
+  "oapp.err.uriRequired": "Please enter at least one redirect URI",
+  "oapp.err.save": "Save failed",
+  "oapp.err.delete": "Delete failed",
+  "oapp.err.copy": "Copy failed — please copy manually",
+  "oapp.ok.updated": "Saved (changes need re-approval)",
+  "oapp.ok.deleted": "Deleted",
+  "oapp.dlg.title": "Create OAuth app",
+  "oapp.dlg.editTitle": "Edit app",
+  "oapp.dlg.desc":
+    "Give it a name that describes its purpose, plus the redirect URI where your site receives the authorization.",
+  "oapp.dlg.editDesc": "Changing the name or redirect URI requires re-approval.",
+  "oapp.dlg.name": "App name",
+  "oapp.dlg.namePh": "e.g. My blog",
+  "oapp.dlg.uris": "Redirect URIs (one per line)",
+  "oapp.dlg.urisHint":
+    "Must use https; for local development http://127.0.0.1 or http://localhost is allowed.",
+  "oapp.dlg.warning":
+    "The name can't contain words like “official”, “support” or “verify” that could be mistaken for this site. Your domain is shown on the consent page so users can verify it.",
+  "oapp.secret.title": "App created",
+  "oapp.secret.desc": "Save these two now — the Client Secret is shown only once.",
+  "oapp.secret.pendingDesc":
+    "Submitted, waiting for the admin to approve. Save these two now — the Client Secret is shown only once.",
+  "oapp.secret.once":
+    "Once closed, the Client Secret can never be shown again (you'd have to delete and recreate the app).",
+  "oapp.delete.title": "Delete app",
+  "oapp.delete.desc":
+    "Delete “{name}”? Sites using it will immediately lose Doulor Cloud sign-in.",
 
   // —— Admin · Feedback ——
   "af.desc": "Tickets submitted from the Feedback page; replying notifies the user on-site and by email.",

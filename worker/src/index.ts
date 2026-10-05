@@ -3326,6 +3326,33 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       decodeURIComponent(oauthGrantMatch[1])
       ),
   },
+  // 用户自助：我创建的应用（2026-10-06 放开用户自建）
+  {
+    kind: "exact",
+    path: "/oauth/my-clients",
+    method: "GET",
+    handle: () => oauthHandlers.listMyClients(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/oauth/my-clients",
+    method: "POST",
+    handle: () => oauthHandlers.createMyClient(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/oauth\/my-clients\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (m: RegExpMatchArray) =>
+      oauthHandlers.updateMyClient(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/oauth\/my-clients\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (m: RegExpMatchArray) =>
+      oauthHandlers.deleteMyClient(env, request, decodeURIComponent(m[1])),
+  },
   // 管理端：OAuth 应用管理
   {
     kind: "exact",
@@ -3349,6 +3376,19 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       request,
       decodeURIComponent(oauthSecretMatch[1])
       ),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/oauth\/clients\/([^/]+)\/review$/),
+    methods: ["POST"],
+    handle: (m: RegExpMatchArray) =>
+      oauthHandlers.adminReviewClient(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "exact",
+    path: "/admin/oauth/settings",
+    method: "POST",
+    handle: () => oauthHandlers.adminSetUserClientPolicy(env, request),
   },
   {
     kind: "regex",

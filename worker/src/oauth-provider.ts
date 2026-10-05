@@ -39,6 +39,86 @@ export type Scope = (typeof SUPPORTED_SCOPES)[number]
 /** 未指定 scope 时的默认值 */
 export const DEFAULT_SCOPES = "openid profile email"
 
+// ---- 审核状态（2026-10-06，迁移 0123）----
+
+export const REVIEW_APPROVED = "approved"
+export const REVIEW_PENDING = "pending"
+export const REVIEW_REJECTED = "rejected"
+
+/** 只有 approved 的应用才能进入授权流程 */
+export function isClientUsable(client: { review_status?: string | null; disabled?: number }): boolean {
+  if (client.disabled === 1) return false
+  const status = client.review_status ?? REVIEW_APPROVED
+  return status === REVIEW_APPROVED
+}
+
+/**
+ * 应用名里禁止出现的词（防钓鱼仿冒）。
+ *
+ * 为什么必须有：同意页展示给用户的就是「应用名 + 权限」，用户判断「这是不是官方的」
+ * 基本只看名字。放任用户起名「Doulor Cloud 官方验证」「账号申诉客服」，等于把
+ * 钓鱼工具直接发到他手上。
+ *
+ * 匹配是**大小写不敏感的子串**匹配（中文没有大小写，英文一并规范化），
+ * 有意做得宽一点：宁可让用户换个名字，也不要漏掉明显仿冒的。
+ */
+const FORBIDDEN_NAME_PARTS = [
+  "doulor",
+  "官方",
+  "客服",
+  "管理",
+  "验证",
+  "申诉",
+  "解封",
+  "安全中心",
+  "系统",
+  "admin",
+  "official",
+  "support",
+  "verify",
+  "verification",
+  "security",
+  "service",
+  "helpdesk",
+]
+
+/** 应用名合法性：非空、长度合适、不含敏感词。不合法时抛 400 */
+export function assertClientNameAllowed(rawName: string): string {
+  const name = rawName.trim()
+  if (!name) throw new ApiError(400, "应用名不能为空", "INVALID_NAME")
+  if (name.length > 40) throw new ApiError(400, "应用名最长 40 个字", "INVALID_NAME")
+  const lower = name.toLowerCase()
+  for (const part of FORBIDDEN_NAME_PARTS) {
+    if (lower.includes(part.toLowerCase())) {
+      throw new ApiError(
+        400,
+        `应用名不能包含「${part}」——避免与官方/客服混淆。请换一个能体现你站点自身的名字`,
+        "NAME_NOT_ALLOWED"
+      )
+    }
+  }
+  return name
+}
+
+/**
+ * 取一组回调地址的**站点域名**（去重、保序），用于同意页与后台展示。
+ *
+ * 同意页要显示「哪个网站想访问你的账号」——域名是用户唯一能自己核对的东西
+ * （应用名是对方随便填的）。这里只取 host，不带路径，免得一串 query 挤爆界面。
+ */
+export function redirectHosts(redirectUris: string[]): string[] {
+  const out: string[] = []
+  for (const uri of redirectUris) {
+    try {
+      const host = new URL(uri).host
+      if (host && !out.includes(host)) out.push(host)
+    } catch {
+      // 坏 URL 已在录入时拦掉；这里静默跳过，别让展示层崩
+    }
+  }
+  return out
+}
+
 // ---- 行类型 ----
 
 export interface OAuthClientRow {
@@ -50,6 +130,16 @@ export interface OAuthClientRow {
   scopes: string
   owner_user_id: string | null
   disabled: number
+  /**
+   * 审核状态（2026-10-06 迁移 0123）：
+   *   'approved' —— 可正常授权（管理员建的客户端与既有客户端恒为此值）；
+   *   'pending'  —— 用户提交待站长审核，**授权页直接拒绝**；
+   *   'rejected' —— 已驳回，同样拒绝（用户可改内容后重新提交）。
+   */
+  review_status: string
+  review_note: string | null
+  reviewed_at: string | null
+  reviewed_by: string | null
   created_at: string
   updated_at: string
 }
@@ -77,6 +167,10 @@ export interface PublicClient {
   scopes: string
   disabled: boolean
   ownerUserId: string | null
+  /** 审核状态：approved | pending | rejected */
+  reviewStatus: string
+  /** 审核意见（驳回原因等），无则不返回 */
+  reviewNote: string | null
   createdAt: string
   updatedAt: string
 }
@@ -90,6 +184,9 @@ export function toPublicClient(row: OAuthClientRow): PublicClient {
     scopes: row.scopes,
     disabled: row.disabled === 1,
     ownerUserId: row.owner_user_id,
+    // 老数据 / 未迁移时兜底为 approved，避免把既有客户端判成待审核
+    reviewStatus: row.review_status ?? REVIEW_APPROVED,
+    reviewNote: row.review_note ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -184,10 +281,14 @@ export async function createClient(
     scopes?: string
     ownerUserId?: string | null
     allowHttp?: boolean
+    /**
+     * 审核状态。管理员在后台直接建 = approved（默认，与既有行为一致）；
+     * 用户自助创建时由调用方按设置项决定 approved / pending。
+     */
+    reviewStatus?: string
   }
 ): Promise<{ client: PublicClient; clientSecret: string }> {
-  const name = input.name.trim()
-  if (!name) throw new ApiError(400, "应用名不能为空", "INVALID_NAME")
+  const name = assertClientNameAllowed(input.name)
   if (input.redirectUris.length === 0) {
     throw new ApiError(400, "至少需要一个回调地址", "INVALID_REDIRECT_URI")
   }
@@ -198,6 +299,7 @@ export async function createClient(
   const scopes = normalizeScopes(input.scopes)
   assertScopesAllowed(scopes)
 
+  const reviewStatus = input.reviewStatus ?? REVIEW_APPROVED
   const clientId = newClientId()
   const clientSecret = newClientSecret()
   const id = uuid()
@@ -205,8 +307,9 @@ export async function createClient(
 
   await env.DB.prepare(
     `INSERT INTO oauth_clients
-       (id, client_id, client_secret_hash, name, redirect_uris, scopes, owner_user_id, disabled, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
+       (id, client_id, client_secret_hash, name, redirect_uris, scopes, owner_user_id, disabled,
+        review_status, reviewed_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`
   )
     .bind(
       id,
@@ -216,6 +319,9 @@ export async function createClient(
       JSON.stringify(input.redirectUris),
       scopes,
       input.ownerUserId ?? null,
+      reviewStatus,
+      // 免审直接建出来的相当于「已审核」，否则留空等站长处理
+      reviewStatus === REVIEW_APPROVED ? now : null,
       now,
       now
     )
@@ -230,6 +336,8 @@ export async function createClient(
       scopes,
       disabled: false,
       ownerUserId: input.ownerUserId ?? null,
+      reviewStatus,
+      reviewNote: null,
       createdAt: now,
       updatedAt: now,
     },
@@ -238,11 +346,43 @@ export async function createClient(
   }
 }
 
-export async function listClients(env: Env): Promise<PublicClient[]> {
+/**
+ * 某个用户自己创建的应用（「我的应用」列表用）。
+ *
+ * 注意：管理端列表**不走这里** —— 它要带创建者用户名，直接在 handler 里
+ * 用一条 JOIN 查询（`handlers/oauth.ts` 的 adminListClients），少一次往返。
+ */
+export async function listClientsByOwner(
+  env: Env,
+  ownerUserId: string
+): Promise<PublicClient[]> {
   const res = await env.DB.prepare(
-    "SELECT * FROM oauth_clients ORDER BY created_at DESC"
-  ).all<OAuthClientRow>()
+    "SELECT * FROM oauth_clients WHERE owner_user_id = ? ORDER BY created_at DESC"
+  )
+    .bind(ownerUserId)
+    .all<OAuthClientRow>()
   return (res.results ?? []).map(toPublicClient)
+}
+
+/** 某个用户已创建的应用数量（创建时的配额检查用） */
+export async function countClientsByOwner(env: Env, ownerUserId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM oauth_clients WHERE owner_user_id = ?"
+  )
+    .bind(ownerUserId)
+    .first<{ n: number }>()
+  return Number(row?.n ?? 0)
+}
+
+/** 按内部 id 取，且必须是**该用户自己的**应用（越权访问返回 null） */
+export async function getOwnedClient(
+  env: Env,
+  id: string,
+  ownerUserId: string
+): Promise<OAuthClientRow | null> {
+  return env.DB.prepare("SELECT * FROM oauth_clients WHERE id = ? AND owner_user_id = ? LIMIT 1")
+    .bind(id, ownerUserId)
+    .first<OAuthClientRow>()
 }
 
 export async function getClientByInternalId(
@@ -266,7 +406,19 @@ export async function loadClientByClientId(
 export async function updateClient(
   env: Env,
   id: string,
-  patch: { name?: string; redirectUris?: string[]; scopes?: string; disabled?: boolean; allowHttp?: boolean }
+  patch: {
+    name?: string
+    redirectUris?: string[]
+    scopes?: string
+    disabled?: boolean
+    allowHttp?: boolean
+    /** 审核结果（管理端审核 / 用户改动后重置为 pending） */
+    reviewStatus?: string
+    /** 审核意见（驳回原因），传 null 清空 */
+    reviewNote?: string | null
+    /** 审核人（用户名或 id，仅记录用） */
+    reviewedBy?: string | null
+  }
 ): Promise<void> {
   const row = await getClientByInternalId(env, id)
   if (!row) throw new ApiError(404, "应用不存在", "NOT_FOUND")
@@ -275,10 +427,8 @@ export async function updateClient(
   const binds: unknown[] = []
 
   if (patch.name !== undefined) {
-    const name = patch.name.trim()
-    if (!name) throw new ApiError(400, "应用名不能为空", "INVALID_NAME")
     sets.push("name = ?")
-    binds.push(name)
+    binds.push(assertClientNameAllowed(patch.name))
   }
   if (patch.redirectUris !== undefined) {
     if (patch.redirectUris.length === 0) {
@@ -300,6 +450,22 @@ export async function updateClient(
     sets.push("disabled = ?")
     binds.push(patch.disabled ? 1 : 0)
   }
+  if (patch.reviewStatus !== undefined) {
+    if (![REVIEW_APPROVED, REVIEW_PENDING, REVIEW_REJECTED].includes(patch.reviewStatus)) {
+      throw new ApiError(400, `未知的审核状态：${patch.reviewStatus}`, "INVALID_INPUT")
+    }
+    sets.push("review_status = ?")
+    binds.push(patch.reviewStatus)
+    // 通过时记审核时间；回到 pending 则清掉（表示又被重新排队）
+    sets.push("reviewed_at = ?")
+    binds.push(patch.reviewStatus === REVIEW_APPROVED ? new Date().toISOString() : null)
+    sets.push("reviewed_by = ?")
+    binds.push(patch.reviewStatus === REVIEW_APPROVED ? (patch.reviewedBy ?? null) : null)
+  }
+  if (patch.reviewNote !== undefined) {
+    sets.push("review_note = ?")
+    binds.push(patch.reviewNote)
+  }
 
   if (sets.length === 0) return
 
@@ -314,7 +480,12 @@ export async function updateClient(
   // 原先只把 `oauth_clients.disabled` 置 1，而 `verifyAccessToken` 根本不看这个标志 ——
   // 于是「管理员停用了一个应用」之后，它手上的 access_token 仍能继续调
   // `/userinfo` 直到自然过期（最长 1 小时）。停用应当是立即生效的。
-  if (patch.disabled === true) {
+  //
+  // 2026-10-06 扩展：**审核状态不再是 approved 时同样作废**。尤其「用户改了回调地址
+  // → 重新排队待审」这条路径：不切断旧令牌的话，改地址前骗到的授权会继续有效，
+  // 把地址改回去就白改了。
+  const notApproved = patch.reviewStatus !== undefined && patch.reviewStatus !== REVIEW_APPROVED
+  if (patch.disabled === true || notApproved) {
     await env.DB.prepare(
       "UPDATE oauth_tokens SET revoked = 1 WHERE client_id = ? AND revoked = 0"
     )

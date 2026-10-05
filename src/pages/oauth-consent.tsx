@@ -9,7 +9,7 @@
  */
 import * as React from "react"
 import { useSearchParams } from "react-router-dom"
-import { Loader2, ShieldCheck, AlertTriangle } from "lucide-react"
+import { Loader2, ShieldCheck, AlertTriangle, Globe } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -51,6 +51,7 @@ export default function OAuthConsentPage() {
   const [ctx, setCtx] = React.useState<{
     clientName: string
     scopes: string[]
+    redirectHosts: string[]
   } | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [busy, setBusy] = React.useState(false)
@@ -66,7 +67,13 @@ export default function OAuthConsentPage() {
     started.current = true
     oauthApi
       .context(params)
-      .then((c) => setCtx({ clientName: c.clientName, scopes: c.scopes }))
+      .then((c) =>
+        setCtx({
+          clientName: c.clientName,
+          scopes: c.scopes,
+          redirectHosts: c.redirectHosts ?? [],
+        })
+      )
       .catch((err) => {
         // 未登录：authorize 端点本应先跳登录页，这里兜底一次
         if (err instanceof HttpError && err.status === 401) {
@@ -131,9 +138,22 @@ export default function OAuthConsentPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-5">
-          <div className="rounded-md border bg-muted/40 p-3 text-sm">
-            <span className="font-medium">{ctx.clientName}</span>
-            <span className="text-muted-foreground"> {t("oc.wantsAccess")}</span>
+          <div className="rounded-md border bg-muted/40 p-3">
+            <div className="text-sm">
+              <span className="font-medium">{ctx.clientName}</span>
+              <span className="text-muted-foreground"> {t("oc.wantsAccess")}</span>
+            </div>
+            {/* 站点域名：应用名是对方随便填的，域名才是用户唯一能自己核对的东西 */}
+            {ctx.redirectHosts.length > 0 && (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t pt-2 text-xs">
+                <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                <span className="text-muted-foreground">{t("oc.requestFrom")}</span>
+                <span className="font-mono font-medium">
+                  {ctx.redirectHosts.join(" / ")}
+                </span>
+              </div>
+            )}
+            <p className="mt-2 text-xs text-muted-foreground">{t("oc.verifyHost")}</p>
           </div>
 
           <div>

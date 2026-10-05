@@ -20,16 +20,20 @@ import { ApiError, json, SAFE_JSON_HEADERS } from "../http"
 import { requireUser } from "../auth"
 import { guardRateLimit, clientIp } from "../ratelimit"
 import { requireAdminScope } from "./admin"
+import { getSettingBool, audit, updateSettings } from "../settings"
 import {
   createClient,
   deleteClient,
   discoveryDocument,
   getClientByInternalId,
   hasGrant,
+  isClientUsable,
   isRedirectUriAllowed,
   issueAccessToken,
   issueCode,
-  listClients,
+  listClientsByOwner,
+  countClientsByOwner,
+  getOwnedClient,
   loadClientByClientId,
   normalizeScopes,
   rememberGrant,
@@ -42,6 +46,10 @@ import {
   buildUserInfo,
   redeemCode,
   assertScopesAllowed,
+  redirectHosts,
+  REVIEW_APPROVED,
+  REVIEW_PENDING,
+  REVIEW_REJECTED,
   type OAuthClientRow,
 } from "../oauth-provider"
 import type { Env } from "../env"
@@ -212,6 +220,16 @@ export async function authorize(env: Env, request: Request): Promise<Response> {
   const client = await loadClientByClientId(env, clientId)
   if (!client) return htmlError("应用不存在，请检查 client_id")
   if (client.disabled === 1) return htmlError("该应用已被停用")
+  // ①.5 审核状态（2026-10-06）：用户自助创建的应用要站长先通过才可用。
+  //      放在这里（②之前）是刻意的：未通过审核的应用不该有机会把授权码/错误
+  //      发到它的回调地址上去。
+  if (!isClientUsable(client)) {
+    return htmlError(
+      client.review_status === REVIEW_REJECTED
+        ? "该应用的申请未通过站长审核"
+        : "该应用正在等待站长审核，通过后才能用于登录"
+    )
+  }
 
   // ② 回调地址必须精确匹配。**只有通过这一步之后才允许往回跳**，
   //    否则会把错误信息（乃至授权码）发到攻击者控制的地址。
@@ -352,6 +370,16 @@ async function parseAuthorizeRequest(
   const client = await loadClientByClientId(env, clientId)
   if (!client) throw new ApiError(404, "应用不存在", "NOT_FOUND")
   if (client.disabled === 1) throw new ApiError(403, "该应用已被停用", "FORBIDDEN")
+  // 审核未通过的应用不能走到同意页 / 发码（与 authorize 里的检查同一口径）
+  if (!isClientUsable(client)) {
+    throw new ApiError(
+      403,
+      client.review_status === REVIEW_REJECTED
+        ? "该应用的申请未通过站长审核"
+        : "该应用正在等待站长审核，通过后才能用于登录",
+      "CLIENT_NOT_APPROVED"
+    )
+  }
   if (!isRedirectUriAllowed(client, redirectUri)) {
     throw new ApiError(400, "回调地址未注册", "INVALID_REDIRECT_URI")
   }
@@ -383,6 +411,13 @@ export async function authorizeContext(
     clientName: client.name,
     clientId: client.client_id,
     scopes: scope.split(/\s+/).filter(Boolean),
+    /**
+     * 回调地址的**站点域名**（2026-10-06 新增）。
+     *
+     * 同意页必须把它显示出来：应用名是对方随便填的，域名才是用户唯一能自己
+     * 核对的东西 —— 这一条是「放开用户自建应用」后防钓鱼的主要抓手。
+     */
+    redirectHosts: redirectHosts(toPublicClient(client).redirectUris),
     alreadyGranted: granted,
   })
 }
@@ -603,7 +638,22 @@ export async function revokeMyGrant(
 
 export async function adminListClients(env: Env, request: Request): Promise<Response> {
   await requireAdminScope(env, request, "oauth")
-  return json({ clients: await listClients(env) })
+  // 带出创建者用户名：放开用户自建后，后台要能知道「这个应用是谁的」，
+  // 再顺着回调域名去对方网站实地看一眼（站长 2026-10-06 的明确需求）。
+  const rows = await env.DB.prepare(
+    `SELECT c.*, u.username AS owner_name
+       FROM oauth_clients c
+       LEFT JOIN users u ON u.id = c.owner_user_id
+      ORDER BY c.created_at DESC`
+  ).all<OAuthClientRow & { owner_name: string | null }>()
+  return json({
+    clients: (rows.results ?? []).map((r) => ({
+      ...toPublicClient(r),
+      ownerName: r.owner_name ?? null,
+    })),
+    /** 用户自建当前是否免审；前端据此决定显示「已生效」还是「待审核」 */
+    autoApprove: await getSettingBool(env, "oauth_user_clients_open"),
+  })
 }
 
 export async function adminCreateClient(env: Env, request: Request): Promise<Response> {
@@ -675,4 +725,208 @@ export async function adminDeleteClient(
   await requireAdminScope(env, request, "oauth")
   await deleteClient(env, decodeURIComponent(id))
   return json({ ok: true })
+}
+
+// ---- 用户自助：管理「我自己创建的应用」（2026-10-06）----
+//
+// 背景：OAuth 应用原先只能管理员在后台添加。放开给用户自建后，主要风险是
+// **钓鱼**（应用名随便填 + 同意页看不到对方是谁）。配套三道护栏：
+//   1. 同意页展示**回调域名**（见 authorizeContext）——用户唯一能自己核对的东西；
+//   2. 应用名**敏感词拦截**（见 oauth-provider 的 assertClientNameAllowed）；
+//   3. 站长**审核开关** `oauth_user_clients_open`：关着（默认）时用户提交的是
+//      「待审核」，通过前该应用无法用于授权。
+//
+// ⚠️ 改了**名字或回调地址**会重新回到待审核：否则先提交一个安全地址过审、
+//    再偷偷改成钓鱼地址，审核就白做了。
+
+/** 每人最多创建几个应用：防刷库，正常使用够用 */
+const OAUTH_MAX_CLIENTS_PER_USER = 5
+
+/** 请求体里的回调地址一律按字符串数组处理 */
+function parseUris(v: unknown): string[] {
+  return Array.isArray(v) ? v.map((s) => String(s).trim()).filter(Boolean) : []
+}
+
+export async function listMyClients(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  return json({
+    clients: await listClientsByOwner(env, user.id),
+    /** 当前是否免审：前端据此提示「提交即生效」还是「等待站长审核」 */
+    autoApprove: await getSettingBool(env, "oauth_user_clients_open"),
+    maxClients: OAUTH_MAX_CLIENTS_PER_USER,
+  })
+}
+
+export async function createMyClient(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  // 创建是有成本的动作（还要站长审），限流防脚本刷
+  await guardRateLimit(
+    env,
+    `oauth:create:${user.id}`,
+    10,
+    3600,
+    "创建应用过于频繁，请稍后再试"
+  )
+
+  if ((await countClientsByOwner(env, user.id)) >= OAUTH_MAX_CLIENTS_PER_USER) {
+    throw new ApiError(
+      400,
+      `每人最多创建 ${OAUTH_MAX_CLIENTS_PER_USER} 个应用，请先删掉不用的`,
+      "TOO_MANY_CLIENTS"
+    )
+  }
+
+  const body = (await request.json()) as {
+    name?: string
+    redirectUris?: unknown
+    scopes?: string
+    allowHttp?: boolean
+  }
+  const redirectUris = parseUris(body.redirectUris)
+  const autoApprove = await getSettingBool(env, "oauth_user_clients_open")
+
+  // 名字/回调/scope 的校验都在 createClient 里（含敏感词拦截），这里不重复
+  const result = await createClient(env, {
+    name: String(body.name ?? ""),
+    redirectUris,
+    scopes: body.scopes,
+    ownerUserId: user.id,
+    allowHttp: body.allowHttp === true,
+    reviewStatus: autoApprove ? REVIEW_APPROVED : REVIEW_PENDING,
+  })
+
+  await audit(
+    env,
+    user.id,
+    "oauth.client.create",
+    `创建 OAuth 应用「${result.client.name}」（回调 ${redirectHosts(redirectUris).join(", ") || "?"}）` +
+      (autoApprove ? "，免审直接生效" : "，等待站长审核"),
+    clientIp(request)
+  )
+
+  // clientSecret 明文只在这里返回一次，之后库里只有哈希
+  return json({ client: result.client, clientSecret: result.clientSecret, pending: !autoApprove }, 201)
+}
+
+export async function updateMyClient(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const owned = await getOwnedClient(env, decodeURIComponent(id), user.id)
+  if (!owned) throw new ApiError(404, "应用不存在", "NOT_FOUND")
+
+  const body = (await request.json()) as {
+    name?: string
+    redirectUris?: unknown
+    scopes?: string
+    allowHttp?: boolean
+  }
+
+  const patch: Parameters<typeof updateClient>[2] = {}
+  if (body.name !== undefined) patch.name = String(body.name)
+  if (body.redirectUris !== undefined) {
+    patch.redirectUris = parseUris(body.redirectUris)
+    patch.allowHttp = body.allowHttp === true
+  }
+  if (body.scopes !== undefined) patch.scopes = body.scopes
+
+  // 名字 / 回调地址变了 → 重新排队审核（见文件头注释），并清掉上次的驳回原因
+  const sensitive = body.name !== undefined || body.redirectUris !== undefined
+  if (sensitive) {
+    const autoApprove = await getSettingBool(env, "oauth_user_clients_open")
+    patch.reviewStatus = autoApprove ? REVIEW_APPROVED : REVIEW_PENDING
+    patch.reviewNote = null
+  }
+
+  await updateClient(env, owned.id, patch)
+
+  await audit(
+    env,
+    user.id,
+    "oauth.client.update",
+    `修改 OAuth 应用「${owned.name}」${sensitive ? "（名字或回调有变，已重新排队审核）" : ""}`,
+    clientIp(request)
+  )
+
+  const fresh = await getClientByInternalId(env, owned.id)
+  return json({ client: fresh ? toPublicClient(fresh) : null })
+}
+
+export async function deleteMyClient(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const owned = await getOwnedClient(env, decodeURIComponent(id), user.id)
+  // 不是自己的应用一律按「不存在」处理，不泄露别人的应用是否存在
+  if (!owned) throw new ApiError(404, "应用不存在", "NOT_FOUND")
+
+  await deleteClient(env, owned.id)
+  await audit(env, user.id, "oauth.client.delete", `删除 OAuth 应用「${owned.name}」`, clientIp(request))
+  return json({ ok: true })
+}
+
+// ---- 管理端：审核用户提交的应用 ----
+
+/**
+ * POST /api/admin/oauth/settings —— 用户自助创建应用的「免审」开关。
+ *
+ * 为什么单独一个接口、而不是走通用设置：
+ *   · 通用设置要 `settings` 权限，而 OAuth 面板的管理员可能只有 `oauth` 权限；
+ *     让他管得了应用却改不了这个开关（自己也管不着）很别扭。这里用 `oauth` 权限，
+ *     权限边界与「管理 OAuth 应用」保持一致。
+ *   · 但它终究是**站点级安全策略**：关着 = 用户建的应用要站长一个个过。
+ */
+export async function adminSetUserClientPolicy(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "oauth")
+  const body = (await request.json()) as { autoApprove?: boolean }
+  const autoApprove = body.autoApprove === true
+
+  await updateSettings(env, { oauth_user_clients_open: autoApprove ? "1" : "0" })
+  await audit(
+    env,
+    admin.id,
+    "oauth.settings",
+    `用户自助创建 OAuth 应用：${autoApprove ? "开启（免审，提交即生效）" : "关闭（需站长审核）"}`,
+    clientIp(request)
+  )
+  return json({ autoApprove })
+}
+
+export async function adminReviewClient(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "oauth")
+  const body = (await request.json()) as { approve?: boolean; note?: string }
+  const approve = body.approve === true
+  const note = typeof body.note === "string" ? body.note.trim().slice(0, 300) : ""
+
+  const row = await getClientByInternalId(env, decodeURIComponent(id))
+  if (!row) throw new ApiError(404, "应用不存在", "NOT_FOUND")
+
+  await updateClient(env, row.id, {
+    reviewStatus: approve ? REVIEW_APPROVED : REVIEW_REJECTED,
+    // 通过时清掉旧驳回原因；驳回时留一句给用户看
+    reviewNote: approve ? null : note || null,
+    reviewedBy: admin.username,
+  })
+
+  await audit(
+    env,
+    admin.id,
+    "oauth.client.review",
+    `${approve ? "通过" : "驳回"} OAuth 应用「${row.name}」${note ? `：${note}` : ""}`,
+    clientIp(request)
+  )
+
+  const fresh = await getClientByInternalId(env, row.id)
+  return json({ client: fresh ? toPublicClient(fresh) : null })
 }

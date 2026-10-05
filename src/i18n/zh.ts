@@ -2321,6 +2321,9 @@ export const zh = {
   "oc.scope.unknown": "（未知权限，请谨慎授权）",
   "oc.title": "授权登录",
   "oc.wantsAccess": "想要使用你的 Doulor Cloud 账号",
+  "oc.requestFrom": "来自网站：",
+  "oc.verifyHost":
+    "请先核对上面的域名是不是你要登录的网站 —— 应用名是对方自己填的，只有域名才可靠。",
   "oc.willBeAble": "它将能够：",
   "oc.note": "它不会拿到你的密码。你随时可以在面板里撤销这个授权。",
   "oc.deny": "拒绝",
@@ -3226,6 +3229,71 @@ export const zh = {
   "ao.err.openidRequired": "必须包含 openid",
   "ao.err.reset": "重置失败",
   "ao.ok.copied": "{what}已复制",
+
+  // —— OAuth 应用：用户自建与审核（2026-10-06）——
+  "ao.owner": "创建者 {name}",
+  "ao.apps.autoApprove": "当前：用户可自助创建，提交即生效（免审）",
+  "ao.apps.manualReview": "当前：用户可提交，但需你审核通过后才能用于登录",
+  "ao.policy.title": "用户自建应用",
+  "ao.policy.desc":
+    "是否允许用户自己创建 OAuth 应用（把「用 Doulor Cloud 登录」接到他们的站点）。",
+  "ao.policy.autoApprove": "免审核（提交即生效）",
+  "ao.policy.onHint":
+    "已开启：用户创建后立即可用。你仍可在下方停用 / 删除有问题的应用。",
+  "ao.policy.offHint":
+    "已关闭（默认）：用户提交后是「待审核」，你点通过后才能用于登录。",
+  "ao.policy.onToast": "已开启免审",
+  "ao.policy.offToast": "已关闭免审，用户提交后将等待你审核",
+  "ao.review.pending": "待审核",
+  "ao.review.rejectedBadge": "已驳回",
+  "ao.review.hint": "用户提交的应用：请先核对回调域名，必要时去对方网站看一眼",
+  "ao.review.approve": "通过",
+  "ao.review.reject": "驳回",
+  "ao.review.rejectPrompt": "驳回「{name}」？请填写原因（会展示给用户）",
+  "ao.review.approved": "已通过",
+  "ao.review.rejected": "已驳回",
+  "ao.review.note": "驳回原因：{note}",
+
+  // —— 设置页：我的 OAuth 应用 ——
+  "oapp.title": "我的 OAuth 应用",
+  "oapp.desc": "创建 OAuth 应用，把「用 Doulor Cloud 登录」接到你自己的网站。",
+  "oapp.autoApprove": "免审：提交即生效",
+  "oapp.manualReview": "需站长审核后生效",
+  "oapp.quota": "已用 {used}/{max}",
+  "oapp.add": "创建应用",
+  "oapp.empty": "还没有创建过应用。",
+  "oapp.status.pending": "待审核",
+  "oapp.status.rejected": "未通过",
+  "oapp.status.approved": "已生效",
+  "oapp.rejectNote": "驳回原因：{note}",
+  "oapp.field.redirect": "回调地址",
+  "oapp.err.load": "加载应用列表失败",
+  "oapp.err.nameRequired": "请填写应用名",
+  "oapp.err.uriRequired": "请至少填一个回调地址",
+  "oapp.err.save": "保存失败",
+  "oapp.err.delete": "删除失败",
+  "oapp.err.copy": "复制失败，请手动复制",
+  "oapp.ok.updated": "已保存（改动需重新审核）",
+  "oapp.ok.deleted": "已删除",
+  "oapp.dlg.title": "创建 OAuth 应用",
+  "oapp.dlg.editTitle": "编辑应用",
+  "oapp.dlg.desc": "填一个能说明用途的名字，以及你网站接收授权的回调地址。",
+  "oapp.dlg.editDesc": "改动名字或回调地址后需要重新审核。",
+  "oapp.dlg.name": "应用名",
+  "oapp.dlg.namePh": "例如：我的博客",
+  "oapp.dlg.uris": "回调地址（一行一个）",
+  "oapp.dlg.urisHint":
+    "必须用 https；本机调试可用 http://127.0.0.1 或 http://localhost。",
+  "oapp.dlg.warning":
+    "应用名不能包含「官方」「客服」「验证」等容易让人误以为是本站的词；你的网站域名会展示在用户的授权页上，供对方核对。",
+  "oapp.secret.title": "应用已创建",
+  "oapp.secret.desc": "请立刻保存下面两项 —— Client Secret 只显示这一次。",
+  "oapp.secret.pendingDesc":
+    "应用已提交，等待站长审核。请先保存下面两项 —— Client Secret 只显示这一次。",
+  "oapp.secret.once":
+    "关闭后就再也看不到 Client Secret 了（丢了只能删掉重新创建）。",
+  "oapp.delete.title": "删除应用",
+  "oapp.delete.desc": "确定删除「{name}」？使用它的网站将立即无法再用 Doulor Cloud 登录。",
 
   // —— 管理面板 · 反馈 ——
   "af.desc": "用户在「反馈」页提交的工单，回复后会收到站内通知和邮件。",
