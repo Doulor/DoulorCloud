@@ -4,6 +4,49 @@
  * 每个函数都标注了借鉴的 Telegram 出处（探查报告里的文件:行号），
  * 逻辑刻意保持无依赖、纯函数优先，方便两边页面复用与单测。
  */
+import type { ReactionGroup } from "@/types"
+
+/**
+ * 右键菜单顶部的常用表情（点一下 = 一次 toggle，再点取消）。
+ * 聊天室与私信共用同一排，挑的都是高频反应、一行放得下。
+ */
+export const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🎉", "🔥", "👀"]
+
+/**
+ * 本地计算一次「回应 toggle」后的新聚合列表。
+ * 乐观更新（点完立刻反馈）与服务端确认（拿 active 重算校准）都走它 ——
+ * 纯函数、以请求前的基线为输入，天然幂等，连点也不会算歪。
+ */
+export function applyReactionToggle<T extends { reactions?: ReactionGroup[] }>(
+  msg: T,
+  emoji: string,
+  active: boolean,
+  me: string
+): ReactionGroup[] {
+  const list = [...(msg.reactions ?? [])]
+  const idx = list.findIndex((r) => r.emoji === emoji)
+  if (active) {
+    if (idx >= 0) {
+      const g = { ...list[idx], count: list[idx].count + 1 }
+      if (me && !g.mine) {
+        g.mine = true
+        if (!g.names.includes(me)) g.names = [...g.names, me]
+      }
+      list[idx] = g
+    } else {
+      list.push({ emoji, count: 1, mine: !!me, names: me ? [me] : [] })
+    }
+  } else if (idx >= 0) {
+    const g = { ...list[idx], count: list[idx].count - 1 }
+    if (g.mine) {
+      g.mine = false
+      g.names = g.names.filter((n) => n !== me)
+    }
+    if (g.count <= 0) list.splice(idx, 1)
+    else list[idx] = g
+  }
+  return list
+}
 
 /** 本地时区的日期键 `YYYY-MM-DD`（分组用；与 Telegram MessageObject 的 dateKey 同思路，按本地天分桶） */
 export function dayKeyOf(iso: string | number | Date): string {

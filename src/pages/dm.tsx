@@ -18,7 +18,7 @@
 import * as React from "react"
 import { createPortal } from "react-dom"
 import { Link, useNavigate, useParams } from "react-router-dom"
-import { ArrowLeft, ArrowDown, Loader2, MessageSquarePlus, Send, Users, Copy, Plus, Quote, Undo2, AlertCircle, PenLine, X } from "lucide-react"
+import { ArrowLeft, ArrowDown, Loader2, MessageSquarePlus, Send, Users, Copy, Plus, Quote, Undo2, AlertCircle, PenLine, X, Forward } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -33,14 +33,16 @@ import { UserAvatar } from "@/components/user-avatar"
 import { cn } from "@/lib/utils"
 import { relTime } from "@/lib/format"
 import { setVisibleInterval } from "@/lib/visible-interval"
-import { dmApi, stickerApi, errMsg, HttpError } from "@/services/api"
+import { chatApi, dmApi, stickerApi, errMsg, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
 import { useImageDrop } from "@/hooks/use-image-drop"
 import {
+  applyReactionToggle,
   dayKeyOf,
   dayLabel,
   newClientId,
+  QUICK_REACTIONS,
   smoothScrollToBottom,
 } from "@/lib/chat-fluent"
 import ChatPage from "@/pages/chat"
@@ -104,6 +106,18 @@ export default function DmPage() {
   const [nearBottom, setNearBottom] = React.useState(true)
   /** 不在底部时累计的新消息数（回底按钮角标） */
   const [newCount, setNewCount] = React.useState(0)
+  /** 正在编辑的消息（输入区显示编辑条；提交走编辑接口不新发） */
+  const [editingMsg, setEditingMsg] = React.useState<DmMessage | null>(null)
+  /** 转发面板：要转发的消息 + 目标会话（打开时懒加载，null = 加载中） */
+  const [forwardMsg, setForwardMsg] = React.useState<DmMessage | null>(null)
+  const [forwardTargets, setForwardTargets] = React.useState<
+    { peer: { username: string; nickname: string | null; hasAvatar: boolean } }[] | null
+  >(null)
+  /**
+   * 上一次轮询的发出时刻 —— 增量请求带 `sinceEdit`（减 2 秒重叠防时钟边界），
+   * 让「编辑过 / 新被回应过」的旧消息也能回传（它们已越过 created_at 游标）。
+   */
+  const lastPollAtRef = React.useRef(Date.now())
 
   // 右键消息菜单：点别处 / 滚动 / Esc 收起（与聊天室同款）
   React.useEffect(() => {
@@ -125,6 +139,16 @@ export default function DmPage() {
       document.removeEventListener("keydown", onKey)
     }
   }, [msgMenu])
+
+  // 转发面板：Esc 关闭（遮罩点击关闭在 JSX 里）
+  React.useEffect(() => {
+    if (!forwardMsg) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setForwardMsg(null)
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [forwardMsg])
 
   /** 复制私信正文（右键菜单） */
   const copyMessage = async (m: DmMessage) => {
@@ -251,26 +275,54 @@ export default function DmPage() {
     }
   }, [])
 
-  /** 增量拉新消息（静默，不动 loading） */
+  /**
+   * 增量拉新消息（静默，不动 loading）。
+   *
+   * 带 `sinceEdit`：编辑过 / 新被回应过的旧消息已越过 created_at 游标，服务端
+   * 把它们一并回传；合并时对**已知 id 用服务端版本原位替换**（本地乐观中的
+   * sending/failed 不动）—— 对方编辑了文案、点了回应，我 5 秒内就能看到。
+   */
   const pollMessages = React.useCallback(async () => {
     const peer = peerRef.current
     if (!peer) return
     try {
-      const res = await dmApi.list(peer, { after: cursorRef.current ?? undefined })
+      // 请求发出时刻作为下一轮的 sinceEdit 起点（减 2 秒重叠防时钟边界）
+      const sinceEdit = new Date(lastPollAtRef.current - 2000).toISOString()
+      lastPollAtRef.current = Date.now()
+      const res = await dmApi.list(peer, {
+        after: cursorRef.current ?? undefined,
+        sinceEdit,
+      })
       if (peerRef.current !== peer) return // 期间切了会话，丢弃
       setPeerTyping(res.peerTyping)
       if (res.messages.length > 0) {
-        // 先在 ref 镜像上判重（理由见 knownIdsRef 注释），再送去重合并
+        // 先在 ref 镜像上数「全新的消息」（理由见 knownIdsRef 注释）；
+        // 已知 id 的替换不计数 —— 它们不是新消息，不该触发计数。
         const known = knownIdsRef.current
         const fresh = res.messages.filter((m) => !known.has(m.id))
-        if (fresh.length > 0) {
-          setMessages((prev) => {
-            const seen = new Set(prev.map((m) => m.id))
-            const extra = fresh.filter((m) => !seen.has(m.id))
-            return extra.length > 0 ? [...prev, ...extra] : prev
-          })
-          for (const m of fresh) known.add(m.id)
-        }
+        for (const m of fresh) known.add(m.id)
+        setMessages((prev) => {
+          const byId = new Map(res.messages.map((m) => [m.id, m]))
+          const next: DmMessage[] = []
+          for (const m of prev) {
+            if (m.status) {
+              // 本地「发送中/失败」的乐观气泡不被服务端版本覆盖
+              next.push(m)
+              continue
+            }
+            const freshVer = byId.get(m.id)
+            if (freshVer) {
+              next.push(freshVer)
+              byId.delete(m.id)
+            } else {
+              next.push(m)
+            }
+          }
+          for (const m of byId.values()) next.push(m)
+          return next.length === prev.length && next.every((m, i) => m === prev[i])
+            ? prev
+            : next
+        })
         cursorRef.current = res.nextCursor
         // 贴底才跟着滚（由下面的 messages effect 执行），不贴底就累计新消息计数 ——
         // 用户正翻历史时绝不打断（Telegram newUnreadMessageCount 同款）
@@ -502,7 +554,7 @@ export default function DmPage() {
               setMsgMenu({ x: e.clientX, y: e.clientY, msg: m, stickerId })
             }}
             className={cn(
-              "group/bubble relative inline-block max-w-full break-words rounded-lg px-3 py-2 text-sm text-left",
+              "inline-block max-w-full break-words rounded-lg px-3 py-2 text-sm text-left",
               // `bubble-mine` 只是给 CSS 挂钩子：主色底上的链接要跟随前景色，
               // 否则 `.markdown-body a { color: var(--primary) }` 会「同色隐形」。
               mine ? "bubble-mine bg-primary text-primary-foreground" : "bg-muted",
@@ -510,33 +562,20 @@ export default function DmPage() {
               m.status === "failed" && "ring-1 ring-destructive"
             )}
           >
-            {/* hover 快捷操作（桌面端免右键；触屏仍走右键菜单） */}
-            {!m.recalled && m.status !== "failed" && (
+            {/* 转发来源标注（纯展示） */}
+            {m.forwardFrom && !m.recalled && (
               <div
                 className={cn(
-                  "absolute -top-2.5 z-10 flex gap-0.5 opacity-0 transition-opacity",
-                  "group-hover/bubble:opacity-100 focus-within:opacity-100",
-                  mine ? "right-1" : "left-1"
+                  "mb-1 flex items-center gap-1 text-xs",
+                  mine ? "text-primary-foreground/70" : "text-muted-foreground"
                 )}
               >
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => setQuoteTarget(m)}
-                  title={t("chat.ctx.quote")}
-                  className="rounded-md border bg-popover p-1 text-muted-foreground shadow-sm transition-colors hover:bg-accent hover:text-foreground"
-                >
-                  <Quote className="h-3 w-3" />
-                </button>
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => void copyMessage(m)}
-                  title={t("chat.ctx.copy")}
-                  className="rounded-md border bg-popover p-1 text-muted-foreground shadow-sm transition-colors hover:bg-accent hover:text-foreground"
-                >
-                  <Copy className="h-3 w-3" />
-                </button>
+                <Forward className="h-3 w-3" />
+                <span className="truncate">
+                  {t("chat.forwardedFrom", {
+                    name: m.forwardFrom.nickname || m.forwardFrom.username,
+                  })}
+                </span>
               </div>
             )}
             {/* 引用块：点它跳回被引消息并高亮 */}
@@ -570,6 +609,28 @@ export default function DmPage() {
               <Markdown stickerSaveButton={false}>{m.body}</Markdown>
             )}
           </div>
+          {/* 表情回应胶囊：紧贴气泡下方，mine 高亮；点一下 toggle（本地即时反馈） */}
+          {!m.recalled && (m.reactions?.length ?? 0) > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {(m.reactions ?? []).map((r) => (
+                <button
+                  key={r.emoji}
+                  type="button"
+                  title={r.names.join(", ")}
+                  onClick={() => void toggleReaction(m, r.emoji)}
+                  className={cn(
+                    "flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs leading-none transition-colors",
+                    r.mine
+                      ? "border-primary bg-primary/15 text-primary"
+                      : "border-border bg-background/70 hover:bg-accent"
+                  )}
+                >
+                  <span>{r.emoji}</span>
+                  <span className="font-medium">{r.count}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <div className="mt-1 flex items-center justify-end gap-1.5 text-[11px] text-muted-foreground">
             {mine && m.status === "sending" && (
               <>
@@ -600,10 +661,16 @@ export default function DmPage() {
             {mine && !m.status && (
               <>
                 {relTime(m.createdAt)}
+                {m.editedAt ? ` · ${t("chat.edited")}` : ""}
                 {m.readAt ? t("dmsg.read") : ""}
               </>
             )}
-            {!mine && <span>{relTime(m.createdAt)}</span>}
+            {!mine && (
+              <span>
+                {relTime(m.createdAt)}
+                {m.editedAt ? ` · ${t("chat.edited")}` : ""}
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -658,6 +725,28 @@ export default function DmPage() {
     const peerNameStr = peerRef.current
     if (!peerNameStr || !body) return
     if (!user) return
+    // 编辑模式：提交 = 改原消息（不新发）。内容没变就直接退出编辑。
+    if (editingMsg) {
+      const target = editingMsg
+      if (body === target.body) {
+        cancelEdit()
+        return
+      }
+      setSending(true)
+      try {
+        const res = await dmApi.edit(target.id, body)
+        setMessages((prev) => prev.map((x) => (x.id === target.id ? res.message : x)))
+        setEditingMsg(null)
+        setText("")
+        clearDraft(peerNameStr)
+      } catch (err) {
+        if (err instanceof HttpError) toast.error(err.message)
+        else toast.error(t("chat.err.edit"))
+      } finally {
+        setSending(false)
+      }
+      return
+    }
     const clientId = newClientId()
     const tempId = `temp-${clientId}`
     const quoted = quoteTarget
@@ -742,6 +831,100 @@ export default function DmPage() {
     setText(m.body)
     if (peerRef.current) saveDraft(peerRef.current, m.body)
     inputRef.current?.focus()
+  }
+
+  /**
+   * 表情回应开关：右键菜单顶部那排表情、或点气泡下的胶囊。
+   * 服务端 toggle 返回 active，本地据此增减（不用等 5 秒轮询回传）。
+   */
+  const toggleReaction = async (m: DmMessage, emoji: string) => {
+    if (m.status || m.recalled) return
+    const expectActive = !(m.reactions ?? []).find((r) => r.emoji === emoji)?.mine
+    const before = m.reactions ?? []
+    setMessages((prev) =>
+      prev.map((x) =>
+        x.id === m.id
+          ? { ...x, reactions: applyReactionToggle(x, emoji, expectActive, user?.username ?? "") }
+          : x
+      )
+    )
+    try {
+      const res = await dmApi.react(m.id, emoji)
+      // 服务端确认：以请求前的基线 + active 重算（幂等校准，防并发双击算歪）
+      setMessages((prev) =>
+        prev.map((x) =>
+          x.id === m.id
+            ? {
+                ...x,
+                reactions: applyReactionToggle(
+                  { ...x, reactions: before },
+                  emoji,
+                  res.active,
+                  user?.username ?? ""
+                ),
+              }
+            : x
+        )
+      )
+    } catch (err) {
+      setMessages((prev) => prev.map((x) => (x.id === m.id ? { ...x, reactions: before } : x)))
+      toast.error(errMsg(err, t("chat.err.react")))
+    }
+  }
+
+  /** 右键「编辑」：正文放回输入框，提交时走编辑接口（不新发消息） */
+  const startEdit = (m: DmMessage) => {
+    if (!m.body || m.recalled || m.status) return
+    setEditingMsg(m)
+    setQuoteTarget(null)
+    setText(m.body)
+    const pos = m.body.length
+    window.setTimeout(() => {
+      const el = inputRef.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(pos, pos)
+    }, 0)
+  }
+
+  /** 取消编辑：输入框恢复空，草稿同步清掉 */
+  const cancelEdit = () => {
+    setEditingMsg(null)
+    setText("")
+    if (peerRef.current) clearDraft(peerRef.current)
+  }
+
+  /** 右键「转发」：打开目标选择（公共聊天室 + 其他会话），会话列表懒加载一次 */
+  const startForward = (m: DmMessage) => {
+    if (m.recalled || m.status || !m.body) return
+    setForwardMsg(m)
+    setForwardTargets(null)
+    void dmApi
+      .conversations()
+      .then((res) =>
+        setForwardTargets(
+          res.conversations.filter((c) => c.peer.username !== peerRef.current)
+        )
+      )
+      .catch(() => setForwardTargets([]))
+  }
+
+  /** 执行转发：正文由服务端取来源消息，这里只带来源 id（dm 消息 → "dm:<id>"） */
+  const doForward = async (target: { peer: { username: string } } | "chat") => {
+    const m = forwardMsg
+    if (!m) return
+    const source = `dm:${m.id}`
+    try {
+      if (target === "chat") {
+        await chatApi.send(m.body, { forwardFrom: source })
+      } else {
+        await dmApi.send(target.peer.username, m.body, { forwardFrom: source })
+      }
+      setForwardMsg(null)
+      toast.success(t("chat.forwardedToast"))
+    } catch (err) {
+      toast.error(errMsg(err, t("chat.err.forward")))
+    }
   }
 
   /** 撤回自己的消息（右键菜单；10 分钟外后端会拒绝并给出提示） */
@@ -1091,8 +1274,28 @@ export default function DmPage() {
                 )}
               </div>
 
+              {/* 编辑条：正在改一条旧消息（与引用条互斥 —— 进编辑会清掉引用） */}
+              {editingMsg && (
+                <div className="flex items-start gap-2 border-t bg-muted/50 px-3 py-1.5 text-xs">
+                  <PenLine className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <span className="font-medium">{t("chat.editing")}</span>
+                    <span className="ml-1 break-all text-muted-foreground">
+                      {editingMsg.body.slice(0, 120)}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={cancelEdit}
+                    className="shrink-0 text-muted-foreground hover:text-foreground"
+                    title={t("common.cancel")}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
               {/* 引用预览：发送前展示「正在引用谁」，可取消（Esc 也行） */}
-              {quoteTarget && (
+              {!editingMsg && quoteTarget && (
                 <div className="flex items-start gap-2 border-t bg-muted/50 px-3 py-1.5 text-xs">
                   <Quote className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <div className="min-w-0 flex-1">
@@ -1154,6 +1357,11 @@ export default function DmPage() {
                     if (e.target.value.trim()) notifyTyping()
                   }}
                   onKeyDown={(e) => {
+                    if (e.key === "Escape" && editingMsg) {
+                      e.preventDefault()
+                      cancelEdit()
+                      return
+                    }
                     if (e.key === "Escape" && quoteTarget) {
                       e.preventDefault()
                       setQuoteTarget(null)
@@ -1173,19 +1381,49 @@ export default function DmPage() {
         </section>
       </div>
 
-      {/* 右键消息的菜单：引用 / 复制 / 撤回 /（落在表情包上时）存表情包 */}
+      {/* 右键消息的菜单：顶部一排常用表情（点即回应），下面引用 / 编辑 / 复制 /
+          存表情包 / 转发 / 撤回 —— 与聊天室同一套平铺结构，不搞二级面板。 */}
       {msgMenu &&
         createPortal(
           <div
             ref={msgMenuRef}
-            className="fixed z-50 w-40 rounded-lg border bg-popover p-1 shadow-lg"
+            className="fixed z-50 w-52 rounded-lg border bg-popover p-1 shadow-lg"
             style={{
-              top: Math.max(8, Math.min(msgMenu.y, window.innerHeight - 176)),
-              left: Math.max(8, Math.min(msgMenu.x, window.innerWidth - 168)),
+              top: Math.max(8, Math.min(msgMenu.y, window.innerHeight - 300)),
+              left: Math.max(8, Math.min(msgMenu.x, window.innerWidth - 218)),
             }}
             onContextMenu={(e) => e.preventDefault()}
           >
-            {!msgMenu.msg.recalled && (
+            {/* 表情回应行：未撤回、非乐观气泡、已登录时才给 */}
+            {Boolean(user) && !msgMenu.msg.recalled && !msgMenu.msg.status && (
+              <div className="mb-1 flex flex-wrap gap-0.5 border-b px-1 pb-1.5 pt-1">
+                {QUICK_REACTIONS.map((e) => {
+                  const active = (msgMenu.msg.reactions ?? []).find(
+                    (r) => r.emoji === e
+                  )?.mine
+                  return (
+                    <button
+                      key={e}
+                      type="button"
+                      onMouseDown={(ev) => ev.preventDefault()}
+                      onClick={() => {
+                        const m = msgMenu.msg
+                        setMsgMenu(null)
+                        void toggleReaction(m, e)
+                      }}
+                      title={t("chat.ctx.react")}
+                      className={cn(
+                        "rounded-md px-1.5 py-1 text-lg leading-none transition-colors hover:bg-accent",
+                        active && "bg-primary/15 ring-1 ring-primary"
+                      )}
+                    >
+                      {e}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+            {!msgMenu.msg.recalled && !msgMenu.msg.status && (
               <button
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
@@ -1200,19 +1438,39 @@ export default function DmPage() {
                 {t("chat.ctx.quote")}
               </button>
             )}
-            <button
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                const m = msgMenu.msg
-                setMsgMenu(null)
-                void copyMessage(m)
-              }}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
-            >
-              <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
-              {t("chat.ctx.copy")}
-            </button>
+            {Boolean(user) &&
+              msgMenu.msg.fromUserId === user!.id &&
+              !msgMenu.msg.recalled &&
+              !msgMenu.msg.status && (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    const m = msgMenu.msg
+                    setMsgMenu(null)
+                    startEdit(m)
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+                >
+                  <PenLine className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  {t("chat.ctx.editMsg")}
+                </button>
+              )}
+            {!msgMenu.msg.recalled && (
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  const m = msgMenu.msg
+                  setMsgMenu(null)
+                  void copyMessage(m)
+                }}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+              >
+                <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
+                {t("chat.ctx.copy")}
+              </button>
+            )}
             {Boolean(user) && msgMenu.stickerId && (
               <button
                 type="button"
@@ -1228,22 +1486,117 @@ export default function DmPage() {
                 {t("stk.save")}
               </button>
             )}
-            {/* 撤回：只有自己的未撤回消息；10 分钟时限由后端裁决（超时弹错误） */}
-            {Boolean(user) && msgMenu.msg.fromUserId === user!.id && !msgMenu.msg.recalled && (
+            {Boolean(user) && !msgMenu.msg.recalled && !msgMenu.msg.status && (
               <button
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => {
                   const m = msgMenu.msg
                   setMsgMenu(null)
-                  void recallMessage(m)
+                  startForward(m)
                 }}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-destructive transition-colors hover:bg-accent"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
               >
-                <Undo2 className="h-4 w-4 shrink-0" />
-                {t("chat.ctx.recall")}
+                <Forward className="h-4 w-4 shrink-0 text-muted-foreground" />
+                {t("chat.ctx.forward")}
               </button>
             )}
+            {/* 撤回：只有自己的未撤回消息；10 分钟时限由后端裁决（超时弹错误） */}
+            {Boolean(user) &&
+              msgMenu.msg.fromUserId === user!.id &&
+              !msgMenu.msg.recalled &&
+              !msgMenu.msg.status && (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    const m = msgMenu.msg
+                    setMsgMenu(null)
+                    void recallMessage(m)
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-destructive transition-colors hover:bg-accent"
+                >
+                  <Undo2 className="h-4 w-4 shrink-0" />
+                  {t("chat.ctx.recall")}
+                </button>
+              )}
+          </div>,
+          document.body
+        )}
+
+      {/* 转发面板：目标 = 公共聊天室 + 其他会话（当前会话自己排除） */}
+      {forwardMsg &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={() => setForwardMsg(null)}
+          >
+            <div
+              className="w-80 max-h-[70vh] overflow-y-auto rounded-lg border bg-popover p-3 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+              onContextMenu={(e) => e.preventDefault()}
+            >
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-sm font-semibold">{t("chat.forwardTitle")}</p>
+                <button
+                  type="button"
+                  onClick={() => setForwardMsg(null)}
+                  className="text-muted-foreground hover:text-foreground"
+                  title={t("common.cancel")}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              {/* 待转发内容预览 */}
+              <p className="mb-2 line-clamp-2 rounded-md bg-muted px-2 py-1.5 text-xs text-muted-foreground">
+                {forwardMsg.body}
+              </p>
+              <div className="space-y-1">
+                {/* 公共聊天室目标 */}
+                <button
+                  type="button"
+                  onClick={() => void doForward("chat")}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+                >
+                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+                    <Users className="h-3.5 w-3.5" />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">{t("dmsg.publicChat")}</span>
+                </button>
+                {/* 私信会话目标 */}
+                {forwardTargets === null ? (
+                  <div className="flex justify-center py-3">
+                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                  </div>
+                ) : forwardTargets.length === 0 ? (
+                  <p className="py-3 text-center text-xs text-muted-foreground">
+                    {t("chat.forwardEmpty")}
+                  </p>
+                ) : (
+                  forwardTargets.map((c) => (
+                    <button
+                      key={c.peer.username}
+                      type="button"
+                      onClick={() => void doForward(c)}
+                      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+                    >
+                      <UserAvatar
+                        username={c.peer.username}
+                        nickname={c.peer.nickname}
+                        hasAvatar={c.peer.hasAvatar}
+                        className="h-6 w-6 shrink-0"
+                      />
+                      <span className="min-w-0 flex-1 truncate">
+                        {c.peer.nickname || c.peer.username}
+                      </span>
+                      <span className="shrink-0 text-[11px] text-muted-foreground">
+                        @{c.peer.username}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
           </div>,
           document.body
         )}

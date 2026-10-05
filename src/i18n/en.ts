@@ -2405,6 +2405,22 @@ export const en: Record<MessageKey, string> = {
   "chat.ctx.jump": "Jump to original message",
   /** Failed-send bubble action: pull the text back into the input box */
   "chat.ctx.edit": "Edit in input box",
+  /** Right-click menu: emoji reaction (expands a row of quick emojis) */
+  "chat.ctx.react": "React",
+  "chat.reactPick": "Pick a reaction",
+  /** Right-click menu: edit your own message (within 10 minutes) */
+  "chat.ctx.editMsg": "Edit",
+  "chat.editing": "Editing message",
+  "chat.edited": "edited",
+  /** Right-click menu: forward (opens target picker) */
+  "chat.ctx.forward": "Forward",
+  "chat.forwardTitle": "Forward to",
+  "chat.forwardedFrom": "Forwarded from {name}",
+  "chat.forwardedToast": "Forwarded",
+  "chat.forwardEmpty": "No conversations to forward to yet",
+  "chat.err.edit": "Failed to edit",
+  "chat.err.forward": "Failed to forward",
+  "chat.err.react": "Failed to react",
 
   // —— OAuth consent ——
   "oc.scope.openid.title": "Confirm your identity",

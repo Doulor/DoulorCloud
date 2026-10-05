@@ -2000,6 +2000,22 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       chatHandlers.recallMessage(env, request, decodeURIComponent(chatRecallMatch[1])),
   },
   {
+    // 表情回应开关（toggle）
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/chat\/messages\/([^/]+)\/reactions$/),
+    methods: ["POST"],
+    handle: (chatReactMatch: RegExpMatchArray) =>
+      chatHandlers.toggleReaction(env, request, decodeURIComponent(chatReactMatch[1])),
+  },
+  {
+    // 编辑自己的消息（10 分钟内）
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/chat\/messages\/([^/]+)\/edit$/),
+    methods: ["POST"],
+    handle: (chatEditMatch: RegExpMatchArray) =>
+      chatHandlers.editMessage(env, request, decodeURIComponent(chatEditMatch[1])),
+  },
+  {
     kind: "exact",
     path: "/chat/heartbeat",
     method: "POST",
@@ -2090,6 +2106,22 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     methods: ["POST"],
     handle: (dmRecallMatch: RegExpMatchArray) =>
       dmHandlers.recallDm(env, request, decodeURIComponent(dmRecallMatch[1])),
+  },
+  {
+    // 表情回应开关（toggle）
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/dm\/messages\/([^/]+)\/reactions$/),
+    methods: ["POST"],
+    handle: (dmReactMatch: RegExpMatchArray) =>
+      dmHandlers.toggleReactionDm(env, request, decodeURIComponent(dmReactMatch[1])),
+  },
+  {
+    // 编辑自己的私信（10 分钟内）
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/dm\/messages\/([^/]+)\/edit$/),
+    methods: ["POST"],
+    handle: (dmEditMatch: RegExpMatchArray) =>
+      dmHandlers.editDm(env, request, decodeURIComponent(dmEditMatch[1])),
   },
   {
     // 「我正在给对端打字」心跳（5 秒节流上报，listDm 顺带下发 peerTyping）

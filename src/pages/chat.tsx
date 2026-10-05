@@ -16,7 +16,7 @@
 import * as React from "react"
 import { createPortal } from "react-dom"
 import { useNavigate } from "react-router-dom"
-import { ArrowLeft, Send, Loader2, Users, AtSign, Copy, Quote, Undo2, CornerDownLeft, X, Plus, ArrowDown, AlertCircle, PenLine } from "lucide-react"
+import { ArrowLeft, Send, Loader2, Users, AtSign, Copy, Quote, Undo2, CornerDownLeft, X, Plus, ArrowDown, AlertCircle, PenLine, Forward } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -31,16 +31,18 @@ import { DraftImagePreview } from "@/components/draft-image-preview"
 import { useAuth } from "@/hooks/use-auth"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
 import { useImageDrop } from "@/hooks/use-image-drop"
-import { chatApi, stickerApi, errMsg, HttpError } from "@/services/api"
+import { chatApi, dmApi, stickerApi, errMsg, HttpError } from "@/services/api"
 import { cn } from "@/lib/utils"
 import { relTime } from "@/lib/format"
 import { setVisibleInterval } from "@/lib/visible-interval"
 import {
+  applyReactionToggle,
   dayKeyOf,
   dayLabel,
   isNearBottom,
   jumpToBottom,
   newClientId,
+  QUICK_REACTIONS,
   smoothScrollToBottom,
 } from "@/lib/chat-fluent"
 import type { ChatMessage, ChatPresenceUser } from "@/types"
@@ -126,7 +128,10 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
     user: ChatPresenceUser
   } | null>(null)
 
-  /** 右键消息弹出的菜单：引用 / 复制 / 撤回 /（落在表情包上时）存表情包 */
+  /**
+   * 右键消息弹出的菜单：顶部一排常用表情（点即回应），下面依次是
+   * 引用 / 编辑 / 复制 / 转发 / 撤回（各按权限与消息状态显隐）。
+   */
   const [msgMenu, setMsgMenu] = React.useState<{
     x: number
     y: number
@@ -136,6 +141,13 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
   } | null>(null)
   /** 正在引用的消息（发送前展示在输入框上方） */
   const [quoteTarget, setQuoteTarget] = React.useState<ChatMessage | null>(null)
+  /** 正在编辑的消息（输入区显示编辑条；提交走编辑接口而不是新发） */
+  const [editingMsg, setEditingMsg] = React.useState<ChatMessage | null>(null)
+  /** 转发面板：要转发的消息 + 目标会话（打开时懒加载，null = 加载中） */
+  const [forwardMsg, setForwardMsg] = React.useState<ChatMessage | null>(null)
+  const [forwardTargets, setForwardTargets] = React.useState<
+    { peer: { username: string; nickname: string | null; hasAvatar: boolean } }[] | null
+  >(null)
   /**
    * Enter 行为偏好：true = Enter 发送、Shift+Enter 换行（默认，符合聊天习惯）；
    * false = Enter 换行、Ctrl/Cmd+Enter 发送（想用 Enter 排版 markdown 列表时切这个）。
@@ -179,6 +191,11 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
   const [animOn, setAnimOn] = React.useState(false)
   /** 点引用块跳回原消息后的高亮目标（900ms 后清除） */
   const [flashId, setFlashId] = React.useState<string | null>(null)
+  /**
+   * 上一次轮询的发出时刻 —— 增量请求带 `sinceEdit`（减 2 秒重叠防时钟边界），
+   * 让「编辑过 / 新被回应过」的旧消息也能回传（它们已越过 created_at 游标）。
+   */
+  const lastPollAtRef = React.useRef(Date.now())
 
   const listRef = React.useRef<HTMLDivElement>(null)
   const lastIdRef = React.useRef<string | null>(null)
@@ -383,6 +400,16 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
     }
   }, [msgMenu])
 
+  // 转发面板：Esc 关闭（遮罩点击关闭在 JSX 里）
+  React.useEffect(() => {
+    if (!forwardMsg) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setForwardMsg(null)
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [forwardMsg])
+
   /**
    * 点页面别处就收起候选面板。
    *
@@ -465,24 +492,52 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
     }
   }, [stickToBottom])
 
-  /** 轮询增量：拉比游标新的消息。贴底才吸底，否则累计进「新消息」角标（Telegram 判据） */
+  /**
+   * 轮询增量：拉比游标新的消息。贴底才吸底，否则累计进「新消息」角标（Telegram 判据）。
+   *
+   * 带 `sinceEdit`：编辑过 / 新被回应过的旧消息已越过 created_at 游标，服务端
+   * 把它们一并回传；合并时对**已知 id 用服务端版本原位替换**（本地乐观中的
+   * sending/failed 不动）—— 这样别人编辑了文案、点了回应，我 5 秒内就能看到。
+   */
   const pollNew = React.useCallback(async () => {
     try {
-      const res = await chatApi.list({ after: lastIdRef.current ?? undefined })
+      // 请求发出时刻作为下一轮的 sinceEdit 起点（减 2 秒重叠防时钟边界）
+      const sinceEdit = new Date(lastPollAtRef.current - 2000).toISOString()
+      lastPollAtRef.current = Date.now()
+      const res = await chatApi.list({
+        after: lastIdRef.current ?? undefined,
+        sinceEdit,
+      })
       setTypingUsers(res.typing ?? [])
       if (res.messages.length === 0) return
-      // 先在 ref 镜像上判重（理由见 knownIdsRef 注释），再送去重合并
+      // 先在 ref 镜像上数出「全新的消息」（理由见 knownIdsRef 注释），
+      // 已知 id 的替换不计数 —— 它们不是新消息，不该触发吸底/角标。
       const known = knownIdsRef.current
       const fresh = res.messages.filter((m) => !known.has(m.id))
-      if (fresh.length > 0) {
-        setMessages((prev) => {
-          const seen = new Set(prev.map((m) => m.id))
-          const extra = fresh.filter((m) => !seen.has(m.id))
-          return extra.length > 0 ? [...prev, ...extra] : prev
-        })
-        // 同步更新镜像：同一渲染周期内连续两次轮询不会重复计数
-        for (const m of fresh) known.add(m.id)
-      }
+      for (const m of fresh) known.add(m.id)
+      setMessages((prev) => {
+        const byId = new Map(res.messages.map((m) => [m.id, m]))
+        const next: ChatMessage[] = []
+        for (const m of prev) {
+          if (m.status) {
+            // 本地「发送中/失败」的乐观气泡不被服务端版本覆盖
+            next.push(m)
+            continue
+          }
+          const freshVer = byId.get(m.id)
+          if (freshVer) {
+            next.push(freshVer)
+            byId.delete(m.id)
+          } else {
+            next.push(m)
+          }
+        }
+        // byId 里剩下的是全新消息（含上一轮之后刚到的），按序追加
+        for (const m of byId.values()) next.push(m)
+        return next.length === prev.length && next.every((m, i) => m === prev[i])
+          ? prev
+          : next
+      })
       // 推进游标只认服务端的 nextCursor；本轮全是重复（别人发的已合并过）就原地不动
       if (res.nextCursor) lastIdRef.current = res.nextCursor
       if (fresh.length === 0) return
@@ -696,6 +751,33 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
       navigate("/login", { state: { from: "/dashboard/chat" } })
       return
     }
+    // 编辑模式：提交 = 改原消息（不新发）。内容没变就直接退出编辑。
+    if (editingMsg) {
+      const target = editingMsg
+      if (text === target.body) {
+        cancelEdit()
+        return
+      }
+      setSending(true)
+      try {
+        const res = await chatApi.edit(target.id, text)
+        setMessages((prev) => prev.map((x) => (x.id === target.id ? res.message : x)))
+        setEditingMsg(null)
+        setDraft("")
+        if (draftKey) {
+          try {
+            localStorage.removeItem(draftKey)
+          } catch {
+            /* 忽略 */
+          }
+        }
+      } catch (err) {
+        toast.error(errMsg(err, t("chat.err.edit")))
+      } finally {
+        setSending(false)
+      }
+      return
+    }
     const clientId = newClientId()
     const tempId = `temp-${clientId}`
     const quoted = quoteTarget
@@ -793,6 +875,108 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
       }
     }
     inputRef.current?.focus()
+  }
+
+  /**
+   * 表情回应开关：右键「回应」选表情、或直接点气泡下的胶囊。
+   * 服务端 toggle 返回 active，本地据此增减（不用等 5 秒轮询回传）。
+   */
+  const toggleReaction = async (m: ChatMessage, emoji: string) => {
+    if (m.status || m.recalled) return
+    // 预判这次 toggle 的方向：我点过的表情 = 取消，没点过的 = 加上
+    const expectActive = !(m.reactions ?? []).find((r) => r.emoji === emoji)?.mine
+    const before = m.reactions ?? []
+    // 乐观本地增减，点完立刻有反馈
+    setMessages((prev) =>
+      prev.map((x) =>
+        x.id === m.id
+          ? { ...x, reactions: applyReactionToggle(x, emoji, expectActive, user?.username ?? "") }
+          : x
+      )
+    )
+    try {
+      const res = await chatApi.react(m.id, emoji)
+      // 服务端确认：以请求前的基线 + active 重算（幂等校准，防并发双击算歪）
+      setMessages((prev) =>
+        prev.map((x) =>
+          x.id === m.id
+            ? {
+                ...x,
+                reactions: applyReactionToggle(
+                  { ...x, reactions: before },
+                  emoji,
+                  res.active,
+                  user?.username ?? ""
+                ),
+              }
+            : x
+        )
+      )
+    } catch (err) {
+      // 失败：把乐观增减撤销回请求前的样子
+      setMessages((prev) => prev.map((x) => (x.id === m.id ? { ...x, reactions: before } : x)))
+      toast.error(errMsg(err, t("chat.err.react")))
+    }
+  }
+
+  /** 右键「编辑」：正文放回输入框，提交时走编辑接口（不新发消息） */
+  const startEdit = (m: ChatMessage) => {
+    if (!m.body || m.recalled || m.status) return
+    setEditingMsg(m)
+    setQuoteTarget(null)
+    setMentionOpen(false)
+    setDraft(m.body)
+    const pos = m.body.length
+    window.setTimeout(() => {
+      const el = inputRef.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(pos, pos)
+    }, 0)
+  }
+
+  /** 取消编辑（编辑条上的 X / Esc）：输入框恢复空 */
+  const cancelEdit = () => {
+    setEditingMsg(null)
+    setDraft("")
+    if (draftKey) {
+      try {
+        localStorage.removeItem(draftKey)
+      } catch {
+        /* 忽略 */
+      }
+    }
+  }
+
+  /** 右键「转发」：打开目标选择面板，目标会话懒加载一次 */
+  const startForward = (m: ChatMessage) => {
+    if (m.recalled || m.status || !m.body) return
+    setForwardMsg(m)
+    setForwardTargets(null)
+    void dmApi
+      .conversations()
+      .then((res) => setForwardTargets(res.conversations))
+      .catch(() => setForwardTargets([]))
+  }
+
+  /** 执行转发：正文由服务端取来源消息，这里只带来源 id */
+  const doForward = async (
+    target: { peer: { username: string } } | "chat"
+  ) => {
+    const m = forwardMsg
+    if (!m) return
+    const source = `chat:${m.id}`
+    try {
+      if (target === "chat") {
+        await chatApi.send(m.body, { forwardFrom: source })
+      } else {
+        await dmApi.send(target.peer.username, m.body, { forwardFrom: source })
+      }
+      setForwardMsg(null)
+      toast.success(t("chat.forwardedToast"))
+    } catch (err) {
+      toast.error(errMsg(err, t("chat.err.forward")))
+    }
   }
 
   /** 撤回自己的消息（右键菜单） */
@@ -929,6 +1113,7 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
               </span>
               <span className="text-[11px] text-muted-foreground/70">
                 {relTime(m.createdAt)}
+                {m.editedAt ? ` · ${t("chat.edited")}` : ""}
               </span>
             </div>
           )}
@@ -945,40 +1130,27 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
               setMsgMenu({ x: e.clientX, y: e.clientY, msg: m, stickerId })
             }}
             className={cn(
-              "group/bubble relative inline-block max-w-full break-words rounded-lg px-3 py-2 text-sm",
+              "inline-block max-w-full break-words rounded-lg px-3 py-2 text-sm",
               mine ? "bubble-mine bg-primary text-primary-foreground" : "bg-muted",
               mentioned && "ring-2 ring-primary/60",
               m.status === "sending" && "opacity-60",
               m.status === "failed" && "ring-1 ring-destructive"
             )}
           >
-            {/* hover 快捷操作（悬停在气泡上浮出；onMouseDown 防止抢走输入焦点） */}
-            {!m.recalled && m.status !== "failed" && (
+            {/* 转发来源标注（纯展示；来源在别的表里，不做跳转） */}
+            {m.forwardFrom && !m.recalled && (
               <div
                 className={cn(
-                  "absolute -top-2.5 z-10 flex gap-0.5 opacity-0 transition-opacity",
-                  "group-hover/bubble:opacity-100 focus-within:opacity-100",
-                  mine ? "right-1" : "left-1"
+                  "mb-1 flex items-center gap-1 text-xs",
+                  mine ? "text-primary-foreground/70" : "text-muted-foreground"
                 )}
               >
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => setQuoteTarget(m)}
-                  title={t("chat.ctx.quote")}
-                  className="rounded-md border bg-popover p-1 text-muted-foreground shadow-sm transition-colors hover:bg-accent hover:text-foreground"
-                >
-                  <Quote className="h-3 w-3" />
-                </button>
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => void copyMessage(m)}
-                  title={t("chat.ctx.copy")}
-                  className="rounded-md border bg-popover p-1 text-muted-foreground shadow-sm transition-colors hover:bg-accent hover:text-foreground"
-                >
-                  <Copy className="h-3 w-3" />
-                </button>
+                <Forward className="h-3 w-3" />
+                <span className="truncate">
+                  {t("chat.forwardedFrom", {
+                    name: m.forwardFrom.nickname || m.forwardFrom.username,
+                  })}
+                </span>
               </div>
             )}
             {/* 引用块：显示被引消息的作者 + 摘要（被引消息已撤回则显示「已撤回」）。
@@ -1013,6 +1185,28 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
               <Markdown stickerSaveButton={false}>{m.body}</Markdown>
             )}
           </div>
+          {/* 表情回应胶囊：紧贴气泡下方，mine 高亮；点一下 toggle（本地即时反馈） */}
+          {!m.recalled && (m.reactions?.length ?? 0) > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {(m.reactions ?? []).map((r) => (
+                <button
+                  key={r.emoji}
+                  type="button"
+                  title={r.names.join(", ")}
+                  onClick={() => void toggleReaction(m, r.emoji)}
+                  className={cn(
+                    "flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs leading-none transition-colors",
+                    r.mine
+                      ? "border-primary bg-primary/15 text-primary"
+                      : "border-border bg-background/70 hover:bg-accent"
+                  )}
+                >
+                  <span>{r.emoji}</span>
+                  <span className="font-medium">{r.count}</span>
+                </button>
+              ))}
+            </div>
+          )}
           {(mine || mentioned) && (
             <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
               {/* 发送中：转圈 + 时间（内容已在气泡里，气泡半透明） */}
@@ -1043,7 +1237,12 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
                   </button>
                 </>
               )}
-              {mine && !m.status && <span>{relTime(m.createdAt)}</span>}
+              {mine && !m.status && (
+                <span>
+                  {relTime(m.createdAt)}
+                  {m.editedAt ? ` · ${t("chat.edited")}` : ""}
+                </span>
+              )}
               {mentioned && (
                 <span className="rounded-full bg-primary/15 px-1.5 py-px font-medium text-primary">
                   {t("chat.mentionYou")}
@@ -1226,8 +1425,28 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
             {t("img.uploading")}
           </div>
         )}
+        {/* 编辑条：正在改一条旧消息（与引用条互斥 —— 进编辑会清掉引用） */}
+        {editingMsg && (
+          <div className="flex items-start gap-2 rounded-md border-l-2 border-primary bg-muted/50 px-2 py-1.5 text-xs">
+            <PenLine className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1">
+              <span className="font-medium">{t("chat.editing")}</span>
+              <span className="ml-1 break-all text-muted-foreground">
+                {editingMsg.body.slice(0, 120)}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={cancelEdit}
+              className="shrink-0 text-muted-foreground hover:text-foreground"
+              title={t("common.cancel")}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
         {/* 引用预览：发送前展示「正在引用谁」，可取消 */}
-        {quoteTarget && (          <div className="flex items-start gap-2 rounded-md border-l-2 border-primary bg-muted/50 px-2 py-1.5 text-xs">
+        {!editingMsg && quoteTarget && (          <div className="flex items-start gap-2 rounded-md border-l-2 border-primary bg-muted/50 px-2 py-1.5 text-xs">
             <Quote className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             <div className="min-w-0 flex-1">
               <span className="font-medium">
@@ -1288,7 +1507,12 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
                 return
               }
             }
-            // Esc 取消引用（面板没开时）——引用框一直挂着容易误发
+            // Esc 取消编辑 / 引用（面板没开时）—— 挂着容易误发
+            if (e.key === "Escape" && editingMsg) {
+              e.preventDefault()
+              cancelEdit()
+              return
+            }
             if (e.key === "Escape" && quoteTarget) {
               e.preventDefault()
               setQuoteTarget(null)
@@ -1416,18 +1640,96 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
           document.body
         )}
 
-      {/* 右键消息的菜单：引用 / 复制 / 撤回（撤回只在是自己的未撤回消息时出现） */}
+      {/* 右键消息的菜单：顶部一排常用表情（点即回应），下面引用 / 编辑 / 复制 /
+          存表情包 / 转发 / 撤回 —— 一个样子全摊开，不搞二级面板。 */}
       {msgMenu &&
         createPortal(
           <div
             ref={msgMenuRef}
-            className="fixed z-50 w-40 rounded-lg border bg-popover p-1 shadow-lg"
+            className="fixed z-50 w-52 rounded-lg border bg-popover p-1 shadow-lg"
             style={{
-              top: Math.max(8, Math.min(msgMenu.y, window.innerHeight - 132)),
-              left: Math.max(8, Math.min(msgMenu.x, window.innerWidth - 168)),
+              top: Math.max(8, Math.min(msgMenu.y, window.innerHeight - 300)),
+              left: Math.max(8, Math.min(msgMenu.x, window.innerWidth - 218)),
             }}
             onContextMenu={(e) => e.preventDefault()}
           >
+            {/* 表情回应行：消息未撤回、非乐观气泡、已登录时才给 */}
+            {Boolean(user) && !msgMenu.msg.recalled && !msgMenu.msg.status && (
+              <div className="mb-1 flex flex-wrap gap-0.5 border-b px-1 pb-1.5 pt-1">
+                {QUICK_REACTIONS.map((e) => {
+                  const active = (msgMenu.msg.reactions ?? []).find(
+                    (r) => r.emoji === e
+                  )?.mine
+                  return (
+                    <button
+                      key={e}
+                      type="button"
+                      onMouseDown={(ev) => ev.preventDefault()}
+                      onClick={() => {
+                        const m = msgMenu.msg
+                        setMsgMenu(null)
+                        void toggleReaction(m, e)
+                      }}
+                      title={t("chat.ctx.react")}
+                      className={cn(
+                        "rounded-md px-1.5 py-1 text-lg leading-none transition-colors hover:bg-accent",
+                        active && "bg-primary/15 ring-1 ring-primary"
+                      )}
+                    >
+                      {e}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+            {!msgMenu.msg.recalled && !msgMenu.msg.status && (
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setQuoteTarget(msgMenu.msg)
+                  setMsgMenu(null)
+                  inputRef.current?.focus()
+                }}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+              >
+                <Quote className="h-4 w-4 shrink-0 text-muted-foreground" />
+                {t("chat.ctx.quote")}
+              </button>
+            )}
+            {Boolean(user) &&
+              msgMenu.msg.userId === user!.id &&
+              !msgMenu.msg.recalled &&
+              !msgMenu.msg.status && (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    const m = msgMenu.msg
+                    setMsgMenu(null)
+                    startEdit(m)
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+                >
+                  <PenLine className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  {t("chat.ctx.editMsg")}
+                </button>
+              )}
+            {!msgMenu.msg.recalled && (
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  const m = msgMenu.msg
+                  setMsgMenu(null)
+                  void copyMessage(m)
+                }}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+              >
+                <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
+                {t("chat.ctx.copy")}
+              </button>
+            )}
             {Boolean(user) && msgMenu.stickerId && (
               <button
                 type="button"
@@ -1443,51 +1745,105 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
                 {t("stk.save")}
               </button>
             )}
-            {!msgMenu.msg.recalled && (
-              <>
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => {
-                    setQuoteTarget(msgMenu.msg)
-                    setMsgMenu(null)
-                    inputRef.current?.focus()
-                  }}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
-                >
-                  <Quote className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  {t("chat.ctx.quote")}
-                </button>
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => {
-                    const m = msgMenu.msg
-                    setMsgMenu(null)
-                    void copyMessage(m)
-                  }}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
-                >
-                  <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  {t("chat.ctx.copy")}
-                </button>
-              </>
-            )}
-            {Boolean(user) && msgMenu.msg.userId === user!.id && !msgMenu.msg.recalled && (
+            {Boolean(user) && !msgMenu.msg.recalled && !msgMenu.msg.status && (
               <button
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => {
                   const m = msgMenu.msg
                   setMsgMenu(null)
-                  void recallMessage(m)
+                  startForward(m)
                 }}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-destructive transition-colors hover:bg-accent"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
               >
-                <Undo2 className="h-4 w-4 shrink-0" />
-                {t("chat.ctx.recall")}
+                <Forward className="h-4 w-4 shrink-0 text-muted-foreground" />
+                {t("chat.ctx.forward")}
               </button>
             )}
+            {Boolean(user) &&
+              msgMenu.msg.userId === user!.id &&
+              !msgMenu.msg.recalled &&
+              !msgMenu.msg.status && (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    const m = msgMenu.msg
+                    setMsgMenu(null)
+                    void recallMessage(m)
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-destructive transition-colors hover:bg-accent"
+                >
+                  <Undo2 className="h-4 w-4 shrink-0" />
+                  {t("chat.ctx.recall")}
+                </button>
+              )}
+          </div>,
+          document.body
+        )}
+
+      {/* 转发面板：居中 Modal —— 目标是私信会话（聊天室自己转自己没意义，
+          所以这里只列会话；私信页那边会多一个「公共聊天室」目标）。 */}
+      {forwardMsg &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={() => setForwardMsg(null)}
+          >
+            <div
+              className="w-80 max-h-[70vh] overflow-y-auto rounded-lg border bg-popover p-3 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+              onContextMenu={(e) => e.preventDefault()}
+            >
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-sm font-semibold">{t("chat.forwardTitle")}</p>
+                <button
+                  type="button"
+                  onClick={() => setForwardMsg(null)}
+                  className="text-muted-foreground hover:text-foreground"
+                  title={t("common.cancel")}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              {/* 待转发内容预览 */}
+              <p className="mb-2 line-clamp-2 rounded-md bg-muted px-2 py-1.5 text-xs text-muted-foreground">
+                {forwardMsg.body}
+              </p>
+              {forwardTargets === null ? (
+                <div className="flex justify-center py-4">
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                </div>
+              ) : forwardTargets.length === 0 ? (
+                <p className="py-4 text-center text-xs text-muted-foreground">
+                  {t("chat.forwardEmpty")}
+                </p>
+              ) : (
+                <div className="space-y-1">
+                  {forwardTargets.map((c) => (
+                    <button
+                      key={c.peer.username}
+                      type="button"
+                      onClick={() => void doForward(c)}
+                      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent"
+                    >
+                      <UserAvatar
+                        username={c.peer.username}
+                        nickname={c.peer.nickname}
+                        hasAvatar={c.peer.hasAvatar}
+                        className="h-6 w-6 shrink-0"
+                      />
+                      <span className="min-w-0 flex-1 truncate">
+                        {c.peer.nickname || c.peer.username}
+                      </span>
+                      <span className="shrink-0 text-[11px] text-muted-foreground">
+                        @{c.peer.username}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>,
           document.body
         )}

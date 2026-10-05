@@ -46,6 +46,12 @@ const MAX_BODY = 2000
 /** 撤回时限：非管理员只能撤回 N 秒内自己发的消息 */
 const RECALL_WINDOW_SECONDS = 600
 
+/** 编辑时限：非管理员只能改 N 秒内自己发的消息（与撤回同窗，口径一致好记） */
+const EDIT_WINDOW_SECONDS = 600
+
+/** 一个回应表情最多几个码点（防把整段文本当表情存） */
+const MAX_REACTION_CODEPOINTS = 8
+
 /** 引用摘要的最大长度 */
 const QUOTE_SNIPPET = 200
 
@@ -102,7 +108,7 @@ function decodeCursor(raw: string): { createdAt: string; id: string } | null {
  * 不为 typing 单开请求（见 TYPING_WINDOW_SECONDS）。
  */
 export async function listMessages(env: Env, request: Request): Promise<Response> {
-  await requireChatUser(env, request)
+  const me = await requireChatUser(env, request)
   const url = new URL(request.url)
   const after = url.searchParams.get("after") ?? ""
   const before = url.searchParams.get("before") ?? ""
@@ -126,6 +132,7 @@ export async function listMessages(env: Env, request: Request): Promise<Response
   if (beforeCursor) {
     rows = await env.DB.prepare(
       `SELECT * FROM (SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
+               m.edited_at, m.forward_from,
                u.username, u.nickname, u.avatar_key
           FROM chat_messages m JOIN users u ON u.id = m.user_id
          WHERE (m.created_at < ? OR (m.created_at = ? AND m.id < ?))
@@ -135,18 +142,41 @@ export async function listMessages(env: Env, request: Request): Promise<Response
       .bind(beforeCursor.createdAt, beforeCursor.createdAt, beforeCursor.id, limit)
       .all()
   } else if (cursor) {
-    rows = await env.DB.prepare(
-      `SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
-              u.username, u.nickname, u.avatar_key
-         FROM chat_messages m JOIN users u ON u.id = m.user_id
-        WHERE m.created_at > ? OR (m.created_at = ? AND m.id > ?)
-        ORDER BY m.created_at ASC, m.id ASC LIMIT ?`
-    )
-      .bind(cursor.createdAt, cursor.createdAt, cursor.id, limit)
-      .all()
+    // sinceEdit（编辑 / 回应的回传窗口）：编辑过的旧消息、以及「新被回应」的
+    // 旧消息都已经越过 created_at 游标，光靠 after 永远拉不回来 —— 别人的页面
+    // 会一直显示旧文案/旧计数。前端每轮带上次轮询时刻（减一点重叠防时钟边界），
+    // 拿到后按 id **替换**本地已知消息（见 chat.tsx 的 pollNew 合并逻辑）。
+    const rawSince = url.searchParams.get("sinceEdit") ?? ""
+    const sinceEdit =
+      rawSince && !Number.isNaN(new Date(rawSince).getTime()) ? rawSince : null
+    rows = sinceEdit
+      ? await env.DB.prepare(
+          `SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
+                  m.edited_at, m.forward_from,
+                  u.username, u.nickname, u.avatar_key
+             FROM chat_messages m JOIN users u ON u.id = m.user_id
+            WHERE m.created_at > ? OR (m.created_at = ? AND m.id > ?)
+               OR m.edited_at > ?
+               OR m.id IN (SELECT message_id FROM message_reactions
+                            WHERE kind = 'chat' AND created_at > ?)
+            ORDER BY m.created_at ASC, m.id ASC LIMIT ?`
+        )
+          .bind(cursor.createdAt, cursor.createdAt, cursor.id, sinceEdit, sinceEdit, limit)
+          .all()
+      : await env.DB.prepare(
+          `SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
+                  m.edited_at, m.forward_from,
+                  u.username, u.nickname, u.avatar_key
+             FROM chat_messages m JOIN users u ON u.id = m.user_id
+            WHERE m.created_at > ? OR (m.created_at = ? AND m.id > ?)
+            ORDER BY m.created_at ASC, m.id ASC LIMIT ?`
+        )
+          .bind(cursor.createdAt, cursor.createdAt, cursor.id, limit)
+          .all()
   } else {
     rows = await env.DB.prepare(
       `SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
+              m.edited_at, m.forward_from,
               u.username, u.nickname, u.avatar_key
          FROM (SELECT * FROM chat_messages ORDER BY created_at DESC, id DESC LIMIT ?) m
          JOIN users u ON u.id = m.user_id
@@ -158,6 +188,8 @@ export async function listMessages(env: Env, request: Request): Promise<Response
 
   const messages = (rows.results ?? []).map(toMessage)
   await attachQuotes(env, messages)
+  await attachForwards(env, messages)
+  await attachReactions(env, messages, me.id)
   const last = messages[messages.length - 1]
   const first = messages[0]
 
@@ -231,6 +263,23 @@ interface QuoteRef {
   body: string
 }
 
+/** 一组表情回应（同一条消息上的同一个表情聚合） */
+export interface ReactionGroup {
+  emoji: string
+  count: number
+  /** 我有没有点过这个表情（前端高亮） */
+  mine: boolean
+  /** 参与者用户名（hover 胳囊的 tooltip 用，上限截断） */
+  names: string[]
+}
+
+/** 转发来源（「转发自 xxx」） */
+export interface ForwardRef {
+  userId: string
+  username: string
+  nickname: string | null
+}
+
 interface ChatMessageOut {
   id: string
   userId: string
@@ -242,6 +291,12 @@ interface ChatMessageOut {
   replyTo: string | null
   quote: QuoteRef | null
   createdAt: string
+  /** 最后一次编辑时间；null = 从未编辑 */
+  editedAt: string | null
+  /** 转发来源；null = 不是转发 */
+  forwardFrom: ForwardRef | null
+  /** 表情回应聚合（list 接口批量补全） */
+  reactions: ReactionGroup[]
 }
 
 function toMessage(r: Record<string, unknown>): ChatMessageOut {
@@ -258,6 +313,80 @@ function toMessage(r: Record<string, unknown>): ChatMessageOut {
     replyTo: recalled ? null : ((r.reply_to as string | null) ?? null),
     quote: null,
     createdAt: String(r.created_at),
+    editedAt: (r.edited_at as string | null) ?? null,
+    // 撤回的消息不暴露转发来源（与正文/引用同口径：撤回 = 什么都清掉）
+    forwardFrom: recalled || !r.forward_from ? null : { userId: String(r.forward_from), username: "", nickname: null },
+    reactions: [],
+  }
+}
+
+/**
+ * 批量补表情回应：一次 IN 查询捞回本页消息的全部回应，在 JS 里按 (消息, 表情) 分组。
+ * mine / names 都在这一趟里算完，前端拿到即可渲染，不再发第二个请求。
+ */
+async function attachReactions(
+  env: Env,
+  messages: ChatMessageOut[],
+  meId: string
+): Promise<void> {
+  const ids = [...new Set(messages.map((m) => m.id))]
+  if (ids.length === 0) return
+  const placeholders = ids.map(() => "?").join(",")
+  const res = await env.DB.prepare(
+    `SELECT r.message_id, r.emoji, r.user_id, u.username
+       FROM message_reactions r JOIN users u ON u.id = r.user_id
+      WHERE r.kind = 'chat' AND r.message_id IN (${placeholders})
+      ORDER BY r.created_at ASC`
+  )
+    .bind(...ids)
+    .all<{ message_id: string; emoji: string; user_id: string; username: string }>()
+  const byMsg = new Map<string, Map<string, { count: number; mine: boolean; names: string[] }>>()
+  for (const row of res.results ?? []) {
+    let emo = byMsg.get(row.message_id)
+    if (!emo) {
+      emo = new Map()
+      byMsg.set(row.message_id, emo)
+    }
+    let g = emo.get(row.emoji)
+    if (!g) {
+      g = { count: 0, mine: false, names: [] }
+      emo.set(row.emoji, g)
+    }
+    g.count++
+    if (row.user_id === meId) g.mine = true
+    if (g.names.length < 10) g.names.push(row.username)
+  }
+  for (const m of messages) {
+    const emo = byMsg.get(m.id)
+    if (!emo) continue
+    m.reactions = [...emo.entries()].map(([emoji, g]) => ({
+      emoji,
+      count: g.count,
+      mine: g.mine,
+      names: g.names,
+    }))
+  }
+}
+
+/** 批量补转发来源的用户名（forward_from 存的是 user_id，显示时现查） */
+async function attachForwards(env: Env, messages: ChatMessageOut[]): Promise<void> {
+  const ids = [
+    ...new Set(messages.map((m) => m.forwardFrom?.userId).filter((x): x is string => !!x)),
+  ]
+  if (ids.length === 0) return
+  const placeholders = ids.map(() => "?").join(",")
+  const res = await env.DB.prepare(
+    `SELECT id, username, nickname FROM users WHERE id IN (${placeholders})`
+  )
+    .bind(...ids)
+    .all<{ id: string; username: string; nickname: string | null }>()
+  const map = new Map((res.results ?? []).map((u) => [u.id, u]))
+  for (const m of messages) {
+    if (!m.forwardFrom) continue
+    const u = map.get(m.forwardFrom.userId)
+    m.forwardFrom = u
+      ? { userId: u.id, username: u.username, nickname: u.nickname ?? null }
+      : null // 来源用户已注销：退化成普通消息，不显示一个空的「转发自」
   }
 }
 
@@ -318,6 +447,8 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
     body?: string
     replyTo?: string
     clientId?: string
+    /** 转发来源消息 id（转发面板点选时带上） */
+    forwardFrom?: string
   }
   const text = (body.body ?? "").trim()
   if (!text) throw new ApiError(400, "内容不能为空", "INVALID_INPUT")
@@ -332,6 +463,66 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
   if (clientId) {
     const dup = await loadByClientId(env, user.id, clientId)
     if (dup) return json({ message: dup }, 201)
+  }
+
+  // 转发：参数格式 `"<kind>:<id>"`（kind ∈ chat|dm），允许跨场景转发
+  // （聊天室消息转进私信、私信消息转到聊天室都常见）。规则：
+  //   · 来源必须存在且未被撤回，否则降级为普通消息（与引用同策略，不挡发送）；
+  //   · 来源是私信时**必须是我参与的会话** —— 否则拿到一个 id 就能把
+  //     别人的私信内容公开发出去；
+  //   · 正文以**来源消息**为准、不信客户端传的 text，防转发时篡改内容。
+  let forwardFromUser: ForwardRef | null = null
+  let forwardBody: string | null = null
+  if (typeof body.forwardFrom === "string" && body.forwardFrom.includes(":")) {
+    const sep = body.forwardFrom.indexOf(":")
+    const kind = body.forwardFrom.slice(0, sep)
+    const srcId = body.forwardFrom.slice(sep + 1)
+    if (kind === "chat") {
+      const src = await env.DB.prepare(
+        `SELECT m.id, m.body, m.recalled_at, m.user_id, u.username, u.nickname
+           FROM chat_messages m JOIN users u ON u.id = m.user_id WHERE m.id = ?`
+      )
+        .bind(srcId)
+        .first<{
+          id: string
+          body: string
+          recalled_at: string | null
+          user_id: string
+          username: string
+          nickname: string | null
+        }>()
+      if (src && !src.recalled_at) {
+        forwardFromUser = {
+          userId: src.user_id,
+          username: src.username,
+          nickname: src.nickname ?? null,
+        }
+        forwardBody = String(src.body ?? "")
+      }
+    } else if (kind === "dm") {
+      const src = await env.DB.prepare(
+        `SELECT m.id, m.body, m.recalled_at, m.from_user_id, u.username, u.nickname
+           FROM direct_messages m JOIN users u ON u.id = m.from_user_id
+          WHERE m.id = ? AND (m.from_user_id = ? OR m.to_user_id = ?)`
+      )
+        .bind(srcId, user.id, user.id)
+        .first<{
+          id: string
+          body: string
+          recalled_at: string | null
+          from_user_id: string
+          username: string
+          nickname: string | null
+        }>()
+      if (src && !src.recalled_at) {
+        forwardFromUser = {
+          userId: src.from_user_id,
+          username: src.username,
+          nickname: src.nickname ?? null,
+        }
+        forwardBody = String(src.body ?? "")
+      }
+    }
   }
 
   // 引用：只接受「确实存在且未被撤回」的消息 id，否则按普通消息发（不报错，
@@ -365,11 +556,14 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
 
   const id = uuid()
   const now = new Date().toISOString()
+  // 转发时正文取来源消息（已确认存在且未撤回）
+  const finalText = forwardBody ?? text
   try {
     await env.DB.prepare(
-      "INSERT INTO chat_messages (id, user_id, body, created_at, reply_to, client_id) VALUES (?, ?, ?, ?, ?, ?)"
+      `INSERT INTO chat_messages (id, user_id, body, created_at, reply_to, client_id, forward_from)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
-      .bind(id, user.id, text, now, replyTo, clientId)
+      .bind(id, user.id, finalText, now, replyTo, clientId, forwardFromUser?.userId ?? null)
       .run()
   } catch (err) {
     // 幂等第 2 查：撞了 (user_id, client_id) 唯一索引 = 并发的重复提交，
@@ -396,16 +590,19 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
       username: user.username,
       nickname: user.nickname ?? null,
       hasAvatar: Boolean(user.avatar_key),
-      body: text,
+      body: finalText,
       recalled: false,
       replyTo,
       quote,
       createdAt: now,
+      editedAt: null,
+      forwardFrom: forwardFromUser,
+      reactions: [],
     },
   }, 201)
 }
 
-/** 按 (user_id, client_id) 取回已落库的消息（幂等命中时用，含引用摘要） */
+/** 按 (user_id, client_id) 取回已落库的消息（幂等命中时用，含引用/转发补全） */
 async function loadByClientId(
   env: Env,
   userId: string,
@@ -413,6 +610,7 @@ async function loadByClientId(
 ): Promise<ChatMessageOut | null> {
   const row = await env.DB.prepare(
     `SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
+            m.edited_at, m.forward_from,
             u.username, u.nickname, u.avatar_key
        FROM chat_messages m JOIN users u ON u.id = m.user_id
       WHERE m.user_id = ? AND m.client_id = ?`
@@ -422,6 +620,7 @@ async function loadByClientId(
   if (!row) return null
   const msg = toMessage(row)
   await attachQuotes(env, [msg])
+  await attachForwards(env, [msg])
   return msg
 }
 
@@ -466,6 +665,125 @@ export async function recallMessage(
     .run()
 
   return json({ ok: true })
+}
+
+/** emoji 合法性：1–8 个码点、无空白（防把整段话存成「表情」） */
+function validEmoji(raw: unknown): string {
+  const emoji = typeof raw === "string" ? raw.trim() : ""
+  const cps = [...emoji]
+  if (cps.length === 0 || cps.length > MAX_REACTION_CODEPOINTS) {
+    throw new ApiError(400, "表情无效", "INVALID_INPUT")
+  }
+  if (/\s/.test(emoji)) throw new ApiError(400, "表情无效", "INVALID_INPUT")
+  return emoji
+}
+
+/**
+ * POST /api/chat/messages/:id/reactions —— 表情回应开关（toggle）。
+ *
+ * 一条消息 × 我 × 一个表情只落一行（PK 四元组），所以「加上 / 取消」
+ * 就是 INSERT / DELETE 各一次，不存在先查后写的竞态重复。
+ * 撤回的消息不接受回应（正文都清了，回应没有意义）。
+ */
+export async function toggleReaction(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireChatUser(env, request)
+  const body = (await request.json().catch(() => ({}))) as { emoji?: unknown }
+  const emo = validEmoji(body.emoji)
+
+  const msg = await env.DB.prepare(
+    "SELECT id, recalled_at FROM chat_messages WHERE id = ?"
+  )
+    .bind(id)
+    .first<{ id: string; recalled_at: string | null }>()
+  if (!msg) throw new ApiError(404, "消息不存在", "NOT_FOUND")
+  if (msg.recalled_at) throw new ApiError(400, "消息已撤回", "INVALID_INPUT")
+
+  // 已存在 → 取消；不存在 → 加上。PK 冲突天然兜底并发双击。
+  const existing = await env.DB.prepare(
+    `SELECT 1 AS x FROM message_reactions
+      WHERE kind = 'chat' AND message_id = ? AND user_id = ? AND emoji = ?`
+  )
+    .bind(id, user.id, emo)
+    .first<{ x: number }>()
+
+  if (existing) {
+    await env.DB.prepare(
+      `DELETE FROM message_reactions
+        WHERE kind = 'chat' AND message_id = ? AND user_id = ? AND emoji = ?`
+    )
+      .bind(id, user.id, emo)
+      .run()
+    return json({ emoji: emo, active: false })
+  }
+  await env.DB.prepare(
+    `INSERT INTO message_reactions (kind, message_id, user_id, emoji, created_at)
+     VALUES ('chat', ?, ?, ?, ?)`
+  )
+    .bind(id, user.id, emo, new Date().toISOString())
+    .run()
+  return json({ emoji: emo, active: true })
+}
+
+/**
+ * POST /api/chat/messages/:id/edit —— 编辑自己的消息（Telegram 同款）。
+ *
+ * 只有作者能改（管理员也不能改别人的字 —— 撤回是处置权，编辑是表达权）；
+ * 10 分钟窗口与撤回一致；只改正文与 edited_at，created_at 不动
+ * （排序、游标全靠它，动了会让增量轮询错乱）。
+ */
+export async function editMessage(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireChatUser(env, request)
+  const body = (await request.json().catch(() => ({}))) as { body?: string }
+  const text = (body.body ?? "").trim()
+  if (!text) throw new ApiError(400, "内容不能为空", "INVALID_INPUT")
+  if (text.length > MAX_BODY) throw new ApiError(400, "内容过长", "TOO_LARGE")
+
+  const row = await env.DB.prepare(
+    "SELECT id, user_id, created_at, recalled_at FROM chat_messages WHERE id = ?"
+  )
+    .bind(id)
+    .first<{ id: string; user_id: string; created_at: string; recalled_at: string | null }>()
+  if (!row) throw new ApiError(404, "消息不存在", "NOT_FOUND")
+  if (row.recalled_at) throw new ApiError(400, "消息已撤回", "INVALID_INPUT")
+  if (row.user_id !== user.id) throw new ApiError(403, "只能编辑自己的消息", "FORBIDDEN")
+  if (!isPrivileged(user.role)) {
+    const age = Date.now() - new Date(row.created_at).getTime()
+    if (age > EDIT_WINDOW_SECONDS * 1000) {
+      throw new ApiError(400, "超过编辑时限（10 分钟）", "EDIT_EXPIRED")
+    }
+  }
+
+  const now = new Date().toISOString()
+  await env.DB.prepare(
+    "UPDATE chat_messages SET body = ?, edited_at = ? WHERE id = ? AND recalled_at IS NULL"
+  )
+      .bind(text, now, id)
+      .run()
+
+  // 返回补全后的消息，前端原位替换（引用/转发/回应一并带上）
+  const updated = await env.DB.prepare(
+    `SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
+            m.edited_at, m.forward_from,
+            u.username, u.nickname, u.avatar_key
+       FROM chat_messages m JOIN users u ON u.id = m.user_id
+      WHERE m.id = ?`
+  )
+    .bind(id)
+    .first<Record<string, unknown>>()
+  if (!updated) throw new ApiError(404, "消息不存在", "NOT_FOUND")
+  const msg = toMessage(updated)
+  await attachQuotes(env, [msg])
+  await attachForwards(env, [msg])
+  await attachReactions(env, [msg], user.id)
+  return json({ message: msg })
 }
 
 /** POST /api/chat/heartbeat —— 心跳（前端每 30 秒一次） */

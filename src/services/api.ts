@@ -2081,14 +2081,17 @@ export const chatApi = {
    * · 不传游标：拉最近一批（首屏用）
    * · `after`：增量拉**更新**的（5 秒轮询用）
    * · `before`：往前翻页，拉**更早**的（往上滑看历史，借鉴 Telegram offset_id 翻页）
+   * · `sinceEdit`：编辑/回应回传窗口 —— 已越过游标的「编辑过、新被回应过」的
+   *   旧消息也一并带回，前端按 id 替换本地已知消息（否则别人看不到你的编辑）。
    * 返回的 `nextCursor` 喂给 after、`prevCursor` 喂给 before；
    * `typing` 是窗口内正在输入的人（搭轮询的车下发，不单开请求）。
    */
-  list: (opts?: { after?: string; before?: string; limit?: number }) => {
+  list: (opts?: { after?: string; before?: string; limit?: number; sinceEdit?: string }) => {
     const qs = new URLSearchParams()
     if (opts?.after) qs.set("after", opts.after)
     if (opts?.before) qs.set("before", opts.before)
     if (opts?.limit) qs.set("limit", String(opts.limit))
+    if (opts?.sinceEdit) qs.set("sinceEdit", opts.sinceEdit)
     const suffix = qs.toString() ? `?${qs.toString()}` : ""
     return request<{
       messages: ChatMessage[]
@@ -2101,20 +2104,37 @@ export const chatApi = {
   /**
    * 发消息。`clientId` 是幂等键（借鉴 Telegram random_id）：乐观发送先本地出
    * 气泡，超时重试 / 双击提交时服务端只落一行，重复请求拿回同一条消息。
+   * `forwardFrom` = `"<kind>:<id>"`（chat|dm），转发时正文由服务端取来源消息。
    */
-  send: (body: string, opts?: { replyTo?: string | null; clientId?: string }) =>
+  send: (
+    body: string,
+    opts?: { replyTo?: string | null; clientId?: string; forwardFrom?: string }
+  ) =>
     request<{ message: ChatMessage }>("/chat/messages", {
       method: "POST",
       body: JSON.stringify({
         body,
         ...(opts?.replyTo ? { replyTo: opts.replyTo } : {}),
         ...(opts?.clientId ? { clientId: opts.clientId } : {}),
+        ...(opts?.forwardFrom ? { forwardFrom: opts.forwardFrom } : {}),
       }),
     }),
   /** 撤回自己的消息（管理员不限） */
   recall: (id: string) =>
     request<{ ok: boolean }>(`/chat/messages/${encodeURIComponent(id)}/recall`, {
       method: "POST",
+    }),
+  /** 表情回应开关（toggle）：点一下加上、再点取消 */
+  react: (id: string, emoji: string) =>
+    request<{ emoji: string; active: boolean }>(
+      `/chat/messages/${encodeURIComponent(id)}/reactions`,
+      { method: "POST", body: JSON.stringify({ emoji }) }
+    ),
+  /** 编辑自己的消息（10 分钟内），返回补全后的整条消息 */
+  edit: (id: string, body: string) =>
+    request<{ message: ChatMessage }>(`/chat/messages/${encodeURIComponent(id)}/edit`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
     }),
   /** 「我正在输入」心跳 —— 前端 5 秒节流一次，由消息轮询顺带带回别人的状态 */
   typing: () => request<{ ok: boolean }>("/chat/typing", { method: "POST" }),
@@ -2170,13 +2190,19 @@ export const dmApi = {
    * · 不传游标：拉最近一批（进会话时用）
    * · `after`：增量拉**更新**的（轮询用）
    * · `before`：往前翻页，拉**更早**的（往上滑看历史用）
+   * · `sinceEdit`：编辑/回应回传窗口 —— 已越过游标的「编辑过、新被回应过」
+   *   的旧消息也一并带回，前端按 id 替换本地已知消息。
    * 返回的 `nextCursor` 喂给 `after`，`prevCursor` 喂给 `before`。
    */
-  list: (peer: string, opts?: { after?: string; before?: string; limit?: number }) => {
+  list: (
+    peer: string,
+    opts?: { after?: string; before?: string; limit?: number; sinceEdit?: string }
+  ) => {
     const qs = new URLSearchParams({ peer })
     if (opts?.after) qs.set("after", opts.after)
     if (opts?.before) qs.set("before", opts.before)
     if (opts?.limit) qs.set("limit", String(opts.limit))
+    if (opts?.sinceEdit) qs.set("sinceEdit", opts.sinceEdit)
     return request<{
       peer: DmPeer
       messages: DmMessage[]
@@ -2190,9 +2216,14 @@ export const dmApi = {
 
   /**
    * 发私信。`clientId` 幂等键与聊天室同套（超时重发不产生重复消息）；
-   * `replyTo` = 被引用消息 id（同会话内有效，对方已撤回则自动降级为普通消息）。
+   * `replyTo` = 被引用消息 id（同会话内有效，对方已撤回则自动降级为普通消息）；
+   * `forwardFrom` = `"<kind>:<id>"`（chat|dm），转发正文由服务端取来源消息。
    */
-  send: (to: string, body: string, opts?: { replyTo?: string | null; clientId?: string }) =>
+  send: (
+    to: string,
+    body: string,
+    opts?: { replyTo?: string | null; clientId?: string; forwardFrom?: string }
+  ) =>
     request<{ message: DmMessage }>("/dm", {
       method: "POST",
       body: JSON.stringify({
@@ -2200,6 +2231,7 @@ export const dmApi = {
         body,
         ...(opts?.replyTo ? { replyTo: opts.replyTo } : {}),
         ...(opts?.clientId ? { clientId: opts.clientId } : {}),
+        ...(opts?.forwardFrom ? { forwardFrom: opts.forwardFrom } : {}),
       }),
     }),
 
@@ -2207,6 +2239,20 @@ export const dmApi = {
   recall: (id: string) =>
     request<{ ok: boolean }>(`/dm/messages/${encodeURIComponent(id)}/recall`, {
       method: "POST",
+    }),
+
+  /** 表情回应开关（toggle）：点一下加上、再点取消 */
+  react: (id: string, emoji: string) =>
+    request<{ emoji: string; active: boolean }>(
+      `/dm/messages/${encodeURIComponent(id)}/reactions`,
+      { method: "POST", body: JSON.stringify({ emoji }) }
+    ),
+
+  /** 编辑自己的私信（10 分钟内），返回补全后的整条消息 */
+  edit: (id: string, body: string) =>
+    request<{ message: DmMessage }>(`/dm/messages/${encodeURIComponent(id)}/edit`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
     }),
 
   /** 「我正在给对端打字」心跳 —— 5 秒节流，对端靠 list 轮询看到 */

@@ -31,8 +31,12 @@ const MAX_CONVERSATIONS = 50
 const MAX_JSON_BODY_BYTES = 8 * 1024
 /** 撤回时限：非管理员只能撤回 N 秒内自己发的消息（与聊天室一致） */
 const RECALL_WINDOW_SECONDS = 600
+/** 编辑时限：只能改 N 秒内自己发的消息（与撤回同窗，口径一致好记） */
+const EDIT_WINDOW_SECONDS = 600
 /** 引用摘要的最大长度（与聊天室一致） */
 const QUOTE_SNIPPET = 200
+/** 一个回应表情最多几个码点（防把整段文本当表情存） */
+const MAX_REACTION_CODEPOINTS = 8
 /**
  * 「正在输入」有效期。与聊天室同口径：前端 5 秒节流上报，10 秒 = 2 个窗口，
  * 由 listDm（消息轮询）顺带下发，不为它单开请求。
@@ -208,10 +212,109 @@ function toMessage(r: Record<string, unknown>) {
     /** 被引用消息的摘要（attachQuotes 批量补全） */
     quote: null as DmQuoteRef | null,
     recalled,
+    /** 最后一次编辑时间；null = 从未编辑 */
+    editedAt: (r.edited_at as string | null) ?? null,
+    /**
+     * 转发来源（attachForwards 把 user_id 现查成完整用户名；来源用户注销则置 null）。
+     * 撤回的消息连来源一起清（与正文/引用同口径）。
+     */
+    forwardFrom: recalled || !r.forward_from
+      ? null
+      : { userId: String(r.forward_from), username: "", nickname: null as string | null },
+    /** 表情回应聚合（attachReactions 批量补全） */
+    reactions: [] as DmReactionGroup[],
   }
 }
 
 type DmMessageOut = ReturnType<typeof toMessage>
+
+/** 一组表情回应（聚合后下发） */
+export interface DmReactionGroup {
+  emoji: string
+  count: number
+  /** 我点过没有（前端高亮） */
+  mine: boolean
+  /** 参与者用户名（tooltip，上限截断） */
+  names: string[]
+}
+
+/** 转发来源（「转发自 xxx」） */
+export interface DmForwardRef {
+  userId: string
+  username: string
+  nickname: string | null
+}
+
+/** 批量表情回应：一次 IN 查询 + JS 分组（与聊天室 attachReactions 同思路） */
+async function attachReactions(
+  env: Env,
+  messages: DmMessageOut[],
+  meId: string
+): Promise<void> {
+  const ids = [...new Set(messages.map((m) => String(m.id)))]
+  if (ids.length === 0) return
+  const placeholders = ids.map(() => "?").join(",")
+  const res = await env.DB.prepare(
+    `SELECT r.message_id, r.emoji, r.user_id, u.username
+       FROM message_reactions r JOIN users u ON u.id = r.user_id
+      WHERE r.kind = 'dm' AND r.message_id IN (${placeholders})
+      ORDER BY r.created_at ASC`
+  )
+    .bind(...ids)
+    .all<{ message_id: string; emoji: string; user_id: string; username: string }>()
+  const byMsg = new Map<string, Map<string, { count: number; mine: boolean; names: string[] }>>()
+  for (const row of res.results ?? []) {
+    let emo = byMsg.get(row.message_id)
+    if (!emo) {
+      emo = new Map()
+      byMsg.set(row.message_id, emo)
+    }
+    let g = emo.get(row.emoji)
+    if (!g) {
+      g = { count: 0, mine: false, names: [] }
+      emo.set(row.emoji, g)
+    }
+    g.count++
+    if (row.user_id === meId) g.mine = true
+    if (g.names.length < 10) g.names.push(row.username)
+  }
+  for (const m of messages) {
+    const emo = byMsg.get(String(m.id))
+    if (!emo) continue
+    m.reactions = [...emo.entries()].map(([emoji, g]) => ({
+      emoji,
+      count: g.count,
+      mine: g.mine,
+      names: g.names,
+    }))
+  }
+}
+
+/** 批量补转发来源的用户名（forward_from 存 user_id，显示时现查；注销则退化普通消息） */
+async function attachForwards(env: Env, messages: DmMessageOut[]): Promise<void> {
+  const ids = [
+    ...new Set(
+      messages
+        .map((m) => m.forwardFrom?.userId)
+        .filter((x): x is string => !!x)
+    ),
+  ]
+  if (ids.length === 0) return
+  const placeholders = ids.map(() => "?").join(",")
+  const res = await env.DB.prepare(
+    `SELECT id, username, nickname FROM users WHERE id IN (${placeholders})`
+  )
+    .bind(...ids)
+    .all<{ id: string; username: string; nickname: string | null }>()
+  const map = new Map((res.results ?? []).map((u) => [u.id, u]))
+  for (const m of messages) {
+    if (!m.forwardFrom?.userId) continue
+    const u = map.get(m.forwardFrom.userId)
+    m.forwardFrom = u
+      ? { userId: u.id, username: u.username, nickname: u.nickname ?? null }
+      : null
+  }
+}
 
 /** 批量补全被引用消息的摘要（一次查询，避免 N+1；与聊天室 attachQuotes 同思路） */
 async function attachQuotes(env: Env, messages: DmMessageOut[]): Promise<void> {
@@ -308,13 +411,41 @@ export async function listDm(env: Env, request: Request): Promise<Response> {
       )
       .all()
   } else if (cursor) {
-    rows = await env.DB.prepare(
-      `SELECT * FROM direct_messages
-        WHERE (${pair}) AND (created_at > ? OR (created_at = ? AND id > ?))
-        ORDER BY created_at ASC, id ASC LIMIT ?`
-    )
-      .bind(me.id, peer.id, peer.id, me.id, cursor.createdAt, cursor.createdAt, cursor.id, limit)
-      .all()
+    // sinceEdit（编辑 / 回应的回传窗口，理由见 chat.ts 同名参数）：
+    // 编辑过、以及新被回应过的旧消息已越过 created_at 游标，靠它捞回来，
+    // 前端按 id 替换本地已知消息。
+    const rawSince = url.searchParams.get("sinceEdit") ?? ""
+    const sinceEdit =
+      rawSince && !Number.isNaN(new Date(rawSince).getTime()) ? rawSince : null
+    rows = sinceEdit
+      ? await env.DB.prepare(
+          `SELECT * FROM direct_messages
+            WHERE (${pair}) AND (created_at > ? OR (created_at = ? AND id > ?)
+               OR edited_at > ?
+               OR id IN (SELECT message_id FROM message_reactions
+                          WHERE kind = 'dm' AND created_at > ?))
+            ORDER BY created_at ASC, id ASC LIMIT ?`
+        )
+          .bind(
+            me.id,
+            peer.id,
+            peer.id,
+            me.id,
+            cursor.createdAt,
+            cursor.createdAt,
+            cursor.id,
+            sinceEdit,
+            sinceEdit,
+            limit
+          )
+          .all()
+      : await env.DB.prepare(
+          `SELECT * FROM direct_messages
+            WHERE (${pair}) AND (created_at > ? OR (created_at = ? AND id > ?))
+            ORDER BY created_at ASC, id ASC LIMIT ?`
+        )
+          .bind(me.id, peer.id, peer.id, me.id, cursor.createdAt, cursor.createdAt, cursor.id, limit)
+          .all()
   } else {
     rows = await env.DB.prepare(
       `SELECT * FROM (SELECT * FROM direct_messages WHERE ${pair}
@@ -327,6 +458,8 @@ export async function listDm(env: Env, request: Request): Promise<Response> {
 
   const messages = (rows.results ?? []).map(toMessage)
   await attachQuotes(env, messages)
+  await attachForwards(env, messages)
+  await attachReactions(env, messages, me.id)
   const last = messages[messages.length - 1]
   const first = messages[0]
   return json({
@@ -403,6 +536,7 @@ async function loadDmByClientId(
   if (!row) return null
   const msg = toMessage(row)
   await attachQuotes(env, [msg])
+  await attachForwards(env, [msg])
   return msg
 }
 
@@ -479,18 +613,76 @@ export async function sendDm(env: Env, request: Request): Promise<Response> {
     }
   }
 
+  // 转发：参数 `"<kind>:<id>"`（chat|dm），与聊天室同一套规则 ——
+  // 来源必须存在且未撤回（否则降级普通消息）；私信来源必须是我参与的会话；
+  // 正文以来源消息为准，不信客户端传的 text。
+  let forwardFromUser: DmForwardRef | null = null
+  let forwardBody: string | null = null
+  const fwRaw = typeof body.forwardFrom === "string" ? body.forwardFrom : ""
+  if (fwRaw.includes(":")) {
+    const sep = fwRaw.indexOf(":")
+    const kind = fwRaw.slice(0, sep)
+    const srcId = fwRaw.slice(sep + 1)
+    if (kind === "chat") {
+      const src = await env.DB.prepare(
+        `SELECT m.id, m.body, m.recalled_at, m.user_id, u.username, u.nickname
+           FROM chat_messages m JOIN users u ON u.id = m.user_id WHERE m.id = ?`
+      )
+        .bind(srcId)
+        .first<{
+          body: string
+          recalled_at: string | null
+          user_id: string
+          username: string
+          nickname: string | null
+        }>()
+      if (src && !src.recalled_at) {
+        forwardFromUser = {
+          userId: src.user_id,
+          username: src.username,
+          nickname: src.nickname ?? null,
+        }
+        forwardBody = String(src.body ?? "")
+      }
+    } else if (kind === "dm") {
+      const src = await env.DB.prepare(
+        `SELECT m.id, m.body, m.recalled_at, m.from_user_id, u.username, u.nickname
+           FROM direct_messages m JOIN users u ON u.id = m.from_user_id
+          WHERE m.id = ? AND (m.from_user_id = ? OR m.to_user_id = ?)`
+      )
+        .bind(srcId, me.id, me.id)
+        .first<{
+          body: string
+          recalled_at: string | null
+          from_user_id: string
+          username: string
+          nickname: string | null
+        }>()
+      if (src && !src.recalled_at) {
+        forwardFromUser = {
+          userId: src.from_user_id,
+          username: src.username,
+          nickname: src.nickname ?? null,
+        }
+        forwardBody = String(src.body ?? "")
+      }
+    }
+  }
+
   // 陌生人的第一条消息 = 聊天申请；对方同意前只能发这一条
   const gate = await checkSendGate(env, me, peer)
   if (!gate.ok) throw new ApiError(403, gate.message, gate.code)
 
   const id = uuid()
   const now = new Date().toISOString()
+  // 转发时正文取来源消息（已确认存在且未撤回）
+  const finalText = forwardBody ?? text
   try {
     await env.DB.prepare(
-      `INSERT INTO direct_messages (id, from_user_id, to_user_id, body, created_at, read_at, reply_to, client_id)
-       VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`
+      `INSERT INTO direct_messages (id, from_user_id, to_user_id, body, created_at, read_at, reply_to, client_id, forward_from)
+       VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)`
     )
-      .bind(id, me.id, peer.id, text, now, replyTo, clientId)
+      .bind(id, me.id, peer.id, finalText, now, replyTo, clientId, forwardFromUser?.userId ?? null)
       .run()
   } catch (err) {
     // 幂等第 2 查：并发重复提交撞唯一索引，拿回先落库的那条
@@ -517,12 +709,15 @@ export async function sendDm(env: Env, request: Request): Promise<Response> {
         id,
         fromUserId: me.id,
         toUserId: peer.id,
-        body: text,
+        body: finalText,
         createdAt: now,
         readAt: null,
         replyTo,
         quote,
         recalled: false,
+        editedAt: null,
+        forwardFrom: forwardFromUser,
+        reactions: [],
       },
     },
     201
@@ -560,6 +755,133 @@ export async function recallDm(env: Env, request: Request, id: string): Promise<
     .bind(new Date().toISOString(), id)
     .run()
   return json({ ok: true })
+}
+
+/** emoji 合法性：1–8 个码点、无空白（与聊天室同口径） */
+function validEmoji(raw: unknown): string {
+  const emoji = typeof raw === "string" ? raw.trim() : ""
+  const cps = [...emoji]
+  if (cps.length === 0 || cps.length > MAX_REACTION_CODEPOINTS) {
+    throw new ApiError(400, "表情无效", "INVALID_INPUT")
+  }
+  if (/\s/.test(emoji)) throw new ApiError(400, "表情无效", "INVALID_INPUT")
+  return emoji
+}
+
+/** 消息是否属于「我与 peer 的会话」（回应/编辑的会话边界） */
+async function dmMessageInMyConversation(
+  env: Env,
+  id: string,
+  meId: string
+): Promise<{
+  id: string
+  from_user_id: string
+  created_at: string
+  recalled_at: string | null
+} | null> {
+  const row = await env.DB.prepare(
+    "SELECT id, from_user_id, created_at, recalled_at FROM direct_messages WHERE id = ?"
+  )
+    .bind(id)
+    .first<{
+      id: string
+      from_user_id: string
+      created_at: string
+      recalled_at: string | null
+    }>()
+  if (!row) return null
+  // 只有会话参与方能对这条消息操作 —— 拿到一个 id 不代表能碰别人的会话
+  const involved = await env.DB.prepare(
+    `SELECT 1 AS x FROM direct_messages
+      WHERE id = ? AND (from_user_id = ? OR to_user_id = ?)`
+  )
+    .bind(id, meId, meId)
+    .first<{ x: number }>()
+  return involved ? row : null
+}
+
+/**
+ * POST /api/dm/messages/:id/reactions —— 表情回应开关（toggle）。
+ * PK 四元组天然幂等：加上 = INSERT、取消 = DELETE，无竞态重复。
+ */
+export async function toggleReactionDm(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const me = await requireUser(env, request)
+  const body = (await readJson(request)) as { emoji?: unknown }
+  const emo = validEmoji(body.emoji)
+
+  const msg = await dmMessageInMyConversation(env, id, me.id)
+  if (!msg) throw new ApiError(404, "消息不存在", "NOT_FOUND")
+  if (msg.recalled_at) throw new ApiError(400, "消息已撤回", "INVALID_INPUT")
+
+  const existing = await env.DB.prepare(
+    `SELECT 1 AS x FROM message_reactions
+      WHERE kind = 'dm' AND message_id = ? AND user_id = ? AND emoji = ?`
+  )
+    .bind(id, me.id, emo)
+    .first<{ x: number }>()
+
+  if (existing) {
+    await env.DB.prepare(
+      `DELETE FROM message_reactions
+        WHERE kind = 'dm' AND message_id = ? AND user_id = ? AND emoji = ?`
+    )
+      .bind(id, me.id, emo)
+      .run()
+    return json({ emoji: emo, active: false })
+  }
+  await env.DB.prepare(
+    `INSERT INTO message_reactions (kind, message_id, user_id, emoji, created_at)
+     VALUES ('dm', ?, ?, ?, ?)`
+  )
+    .bind(id, me.id, emo, new Date().toISOString())
+    .run()
+  return json({ emoji: emo, active: true })
+}
+
+/**
+ * POST /api/dm/messages/:id/edit —— 编辑自己的私信。
+ * 只有作者能改（管理员也不能改别人的字）；10 分钟窗口与撤回一致；
+ * created_at 不动（排序与游标全靠它）。
+ */
+export async function editDm(env: Env, request: Request, id: string): Promise<Response> {
+  const me = await requireUser(env, request)
+  const body = (await readJson(request)) as { body?: string }
+  const text = typeof body.body === "string" ? body.body.trim() : ""
+  if (!text) throw new ApiError(400, "消息内容不能为空", "INVALID_INPUT")
+  if (text.length > MAX_BODY) {
+    throw new ApiError(400, `消息最长 ${MAX_BODY} 字`, "INVALID_INPUT")
+  }
+
+  const row = await dmMessageInMyConversation(env, id, me.id)
+  if (!row) throw new ApiError(404, "消息不存在", "NOT_FOUND")
+  if (row.recalled_at) throw new ApiError(400, "消息已撤回", "INVALID_INPUT")
+  if (row.from_user_id !== me.id) throw new ApiError(403, "只能编辑自己的消息", "FORBIDDEN")
+  if (!isPrivileged(me.role)) {
+    const age = Date.now() - new Date(row.created_at).getTime()
+    if (age > EDIT_WINDOW_SECONDS * 1000) {
+      throw new ApiError(400, "超过编辑时限（10 分钟）", "EDIT_EXPIRED")
+    }
+  }
+
+  await env.DB.prepare(
+    "UPDATE direct_messages SET body = ?, edited_at = ? WHERE id = ? AND recalled_at IS NULL"
+  )
+    .bind(text, new Date().toISOString(), id)
+    .run()
+
+  const updated = await env.DB.prepare("SELECT * FROM direct_messages WHERE id = ?")
+    .bind(id)
+    .first<Record<string, unknown>>()
+  if (!updated) throw new ApiError(404, "消息不存在", "NOT_FOUND")
+  const msg = toMessage(updated)
+  await attachQuotes(env, [msg])
+  await attachForwards(env, [msg])
+  await attachReactions(env, [msg], me.id)
+  return json({ message: msg })
 }
 
 /**

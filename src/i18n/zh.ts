@@ -2326,6 +2326,22 @@ export const zh = {
   "chat.ctx.jump": "跳转到原消息",
   /** 发送失败气泡的「取回编辑」：内容放回输入框 */
   "chat.ctx.edit": "取回编辑",
+  /** 右键菜单：表情回应（展开一排常用表情） */
+  "chat.ctx.react": "回应",
+  "chat.reactPick": "选个表情回应",
+  /** 右键菜单：编辑自己的消息（10 分钟内） */
+  "chat.ctx.editMsg": "编辑",
+  "chat.editing": "正在编辑消息",
+  "chat.edited": "已编辑",
+  /** 右键菜单：转发（弹目标选择） */
+  "chat.ctx.forward": "转发",
+  "chat.forwardTitle": "转发到",
+  "chat.forwardedFrom": "转发自 {name}",
+  "chat.forwardedToast": "已转发",
+  "chat.forwardEmpty": "还没有可转发的会话",
+  "chat.err.edit": "编辑失败",
+  "chat.err.forward": "转发失败",
+  "chat.err.react": "回应失败",
 
   // —— OAuth 授权确认 ——
   "oc.scope.openid.title": "确认你的身份",
