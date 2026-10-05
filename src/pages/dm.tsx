@@ -44,6 +44,7 @@ import {
   newClientId,
   QUICK_REACTIONS,
   smoothScrollToBottom,
+  summarizeBody,
 } from "@/lib/chat-fluent"
 import ChatPage from "@/pages/chat"
 import type { DmConversation, DmMessage, DmPeer, DmRequest } from "@/types"
@@ -544,6 +545,9 @@ export default function DmPage() {
           <div
             onContextMenu={(e) => {
               e.preventDefault()
+              // 已撤回 / 乐观发送中的消息没有任何可执行操作：菜单项会被逐个过滤掉，
+              // 只剩一个空白小白框（2026-10-05 站长反馈）。这里直接不弹。
+              if (m.recalled || m.status) return
               // 右键落在站内表情包上时，把 sticker id 带进菜单（供「存到我的表情包」）
               const el = (e.target as HTMLElement).closest?.(
                 "img.sticker-img"
@@ -594,7 +598,7 @@ export default function DmPage() {
                   {quote.nickname || quote.username}
                 </span>
                 <span className={cn("ml-1", mine ? "text-primary-foreground/80" : "text-muted-foreground")}>
-                  {quote.recalled ? t("chat.recalled") : quote.body}
+                  {quote.recalled ? t("chat.recalled") : summarizeBody(quote.body, t)}
                 </span>
               </div>
             )}
@@ -1051,7 +1055,7 @@ export default function DmPage() {
                       </span>
                     </div>
                     <p className="line-clamp-3 break-all rounded-md bg-background px-2 py-1 text-xs text-muted-foreground">
-                      {r.body || t("dmsg.req.noBody")}
+                      {summarizeBody(r.body, t) || t("dmsg.req.noBody")}
                     </p>
                     <div className="flex gap-2">
                       <Button size="sm" onClick={() => void handleRequest(r.peer.username, "accept")}>
@@ -1129,7 +1133,7 @@ export default function DmPage() {
                         </div>
                         <p className="truncate text-xs text-muted-foreground">
                           {c.last.mine && t("dmsg.minePrefix")}
-                          {c.last.body}
+                          {summarizeBody(c.last.body, t)}
                         </p>
                       </div>
                       {c.unread > 0 && (
@@ -1281,7 +1285,7 @@ export default function DmPage() {
                   <div className="min-w-0 flex-1">
                     <span className="font-medium">{t("chat.editing")}</span>
                     <span className="ml-1 break-all text-muted-foreground">
-                      {editingMsg.body.slice(0, 120)}
+                      {summarizeBody(editingMsg.body, t).slice(0, 120)}
                     </span>
                   </div>
                   <button
@@ -1303,7 +1307,7 @@ export default function DmPage() {
                       {authorOf(quoteTarget).nickname || authorOf(quoteTarget).username}
                     </span>
                     <span className="ml-1 break-all text-muted-foreground">
-                      {quoteTarget.recalled ? t("chat.recalled") : quoteTarget.body.slice(0, 120)}
+                      {quoteTarget.recalled ? t("chat.recalled") : summarizeBody(quoteTarget.body, t).slice(0, 120)}
                     </span>
                   </div>
                   <button
@@ -1549,7 +1553,7 @@ export default function DmPage() {
               </div>
               {/* 待转发内容预览 */}
               <p className="mb-2 line-clamp-2 rounded-md bg-muted px-2 py-1.5 text-xs text-muted-foreground">
-                {forwardMsg.body}
+                {summarizeBody(forwardMsg.body, t)}
               </p>
               <div className="space-y-1">
                 {/* 公共聊天室目标 */}

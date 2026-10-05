@@ -2377,6 +2377,8 @@ export const en: Record<MessageKey, string> = {
   "chat.ctx.copy": "Copy",
   "chat.ctx.recall": "Recall",
   "chat.recalled": "Message recalled",
+  "chat.tag.sticker": "Sticker",
+  "chat.tag.image": "Image",
   "chat.recalledToast": "Recalled",
   "chat.copied": "Copied",
   "chat.err.recall": "Failed to recall",

@@ -44,6 +44,7 @@ import {
   newClientId,
   QUICK_REACTIONS,
   smoothScrollToBottom,
+  summarizeBody,
 } from "@/lib/chat-fluent"
 import type { ChatMessage, ChatPresenceUser } from "@/types"
 import { useT } from "@/i18n"
@@ -1120,6 +1121,9 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
           <div
             onContextMenu={(e) => {
               e.preventDefault()
+              // 已撤回 / 乐观发送中的消息没有任何可执行操作：菜单项会被逐个过滤掉，
+              // 只剩一个空白小白框（2026-10-05 站长反馈）。这里直接不弹。
+              if (m.recalled || m.status) return
               // 右键落在站内表情包上时，把 sticker id 带进菜单（供「存到我的表情包」）
               const el = (e.target as HTMLElement).closest?.(
                 "img.sticker-img"
@@ -1170,7 +1174,7 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
                   {quote.nickname || quote.username}
                 </span>
                 <span className={cn("ml-1", mine ? "text-primary-foreground/80" : "text-muted-foreground")}>
-                  {quote.recalled ? t("chat.recalled") : quote.body}
+                  {quote.recalled ? t("chat.recalled") : summarizeBody(quote.body, t)}
                 </span>
               </div>
             )}
@@ -1432,7 +1436,7 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
             <div className="min-w-0 flex-1">
               <span className="font-medium">{t("chat.editing")}</span>
               <span className="ml-1 break-all text-muted-foreground">
-                {editingMsg.body.slice(0, 120)}
+                {summarizeBody(editingMsg.body, t).slice(0, 120)}
               </span>
             </div>
             <button
@@ -1453,7 +1457,7 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
                 {quoteTarget.nickname || quoteTarget.username}
               </span>
               <span className="ml-1 break-all text-muted-foreground">
-                {quoteTarget.body.slice(0, 120)}
+                {summarizeBody(quoteTarget.body, t).slice(0, 120)}
               </span>
             </div>
             <button
@@ -1808,7 +1812,7 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
               </div>
               {/* 待转发内容预览 */}
               <p className="mb-2 line-clamp-2 rounded-md bg-muted px-2 py-1.5 text-xs text-muted-foreground">
-                {forwardMsg.body}
+                {summarizeBody(forwardMsg.body, t)}
               </p>
               {forwardTargets === null ? (
                 <div className="flex justify-center py-4">

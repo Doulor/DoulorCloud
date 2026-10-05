@@ -142,3 +142,29 @@ export function newClientId(): string {
   }
   return `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`
 }
+
+/**
+ * 正文摘要：把 markdown 图片压成可读文案，仅供**纯文本**展示位使用
+ * （会话列表的最后一条预览、引用块摘要、编辑/引用工具条、转发预览）。
+ *
+ * 为什么必须有：表情包插进输入框的是 `![](/api/stickers/<id>/image)`。
+ * 消息气泡走 Markdown 组件渲染成图片没问题，但上面那些位置是纯文本 ——
+ * 直接塞原文就会显示成一整段 `![](/api/stickers/39a2ee18-…/image)` 的怪路径
+ * （2026-10-05 站长反馈）。这里统一压成 [表情包] / [图片]。
+ */
+export function summarizeBody(
+  body: string,
+  t: (key: string, params?: Record<string, string | number>) => string
+): string {
+  if (!body) return ""
+  // 正则写在函数内：带 g 标志的正则有 lastIndex 状态，模块级共享会在多次调用间串味
+  const imageMarkdown = /!\[[^\]]*\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g
+  return body
+    .replace(imageMarkdown, (_m, url: string) =>
+      url.includes("/api/stickers/")
+        ? `[${t("chat.tag.sticker")}]`
+        : `[${t("chat.tag.image")}]`
+    )
+    .replace(/\s+/g, " ")
+    .trim()
+}

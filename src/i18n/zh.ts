@@ -2298,6 +2298,8 @@ export const zh = {
   "chat.ctx.copy": "复制",
   "chat.ctx.recall": "撤回",
   "chat.recalled": "消息已撤回",
+  "chat.tag.sticker": "表情包",
+  "chat.tag.image": "图片",
   "chat.recalledToast": "已撤回",
   "chat.copied": "已复制",
   "chat.err.recall": "撤回失败",
