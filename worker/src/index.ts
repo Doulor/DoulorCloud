@@ -2029,6 +2029,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: () =>
       chatHandlers.markChatSeen(env, request),
   },
+  // 「正在输入」心跳（前端 5 秒节流上报，消息轮询顺带下发）
+  {
+    kind: "exact",
+    path: "/chat/typing",
+    method: "POST",
+    handle: () =>
+      chatHandlers.typing(env, request),
+  },
 
   // ---- 一对一私信（2026-10-01）----
   {
@@ -2074,6 +2082,21 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/dm",
     method: "POST",
     handle: () => dmHandlers.sendDm(env, request),
+  },
+  {
+    // 撤回私信（与 /chat/messages/:id/recall 同构）
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/dm\/messages\/([^/]+)\/recall$/),
+    methods: ["POST"],
+    handle: (dmRecallMatch: RegExpMatchArray) =>
+      dmHandlers.recallDm(env, request, decodeURIComponent(dmRecallMatch[1])),
+  },
+  {
+    // 「我正在给对端打字」心跳（5 秒节流上报，listDm 顺带下发 peerTyping）
+    kind: "exact",
+    path: "/dm/typing",
+    method: "POST",
+    handle: () => dmHandlers.typingDm(env, request),
   },
 
   // ---- 用户表情包（社区/私信编辑器里快捷发送）----
@@ -3480,7 +3503,11 @@ export default {
       // 强制 HTTPS：会话 cookie 带 Secure 标志，HTTP 下浏览器会拒绝保存，
       // 表现为「登录接口 200 却立刻被踢回登录页」，且清缓存/换域名都无效。
       // 静态站点侧由根目录的 site-worker.js 做同样的事。
-      if (url.protocol === "http:") {
+      //
+      // 例外：本机回环地址（本地 wrangler dev / miniflare 联调）没有 TLS，
+      // 跳过去就是 301 指向自身的死循环，所有本地请求全挂。线上不可能有
+      // 用户从 localhost 打进来，这个豁免不影响生产行为。
+      if (url.protocol === "http:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1" && url.hostname !== "[::1]") {
         url.protocol = "https:"
         return Response.redirect(url.toString(), 301)
       }

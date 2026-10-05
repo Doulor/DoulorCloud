@@ -419,6 +419,50 @@
   color: inherit;
 }
 
+/* —— 聊天室 / 私信流畅性样式（2026-10-05，借鉴 Telegram ChatListItemAnimator）—— */
+
+/* 新消息入场：淡入 + 轻微上移，220ms ease-out（Telegram 是 250ms 自定义贝塞尔）。
+ * 动画只在元素**挂载**时跑一次 —— React 的 key 是消息 id，已渲染的消息重渲染不重放；
+ * 首屏那一批由容器的 `.no-enter-anim` 整体关掉，否则一进聊天室几十条一起跳。 */
+@keyframes chat-msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.chat-msg-in {
+  animation: chat-msg-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.no-enter-anim .chat-msg-in {
+  animation: none;
+}
+
+/* 点引用块跳回原消息后的高亮：主色描边 0.9s 渐隐（只动 outline，不触发重排） */
+@keyframes chat-flash {
+  0% {
+    outline: 2px solid var(--primary);
+    outline-offset: 3px;
+  }
+  100% {
+    outline: 2px solid transparent;
+    outline-offset: 3px;
+  }
+}
+.chat-flash {
+  animation: chat-flash 0.9s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-msg-in,
+  .chat-flash {
+    animation: none;
+  }
+}
+
 /* 表格 */
 .markdown-body table {
   margin: 0.8em 0;

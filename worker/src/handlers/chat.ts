@@ -53,6 +53,13 @@ const QUOTE_SNIPPET = 200
 const MAX_MESSAGES = 100
 
 /**
+ * 「正在输入」有效期：超过这个窗口没续报就算没人打字。
+ * 前端按 Telegram 的做法 5 秒节流上报一次（见 ChatActivityEnterView 的
+ * lastTypingTimeSend），10 秒 = 2 个节流窗口，漏一拍还不至于闪断。
+ */
+const TYPING_WINDOW_SECONDS = 10
+
+/**
  * 游标编码：`<created_at>|<id>`（两者都按升序比较）。
  *
  * ⚠️ 2026-09-25 审计（H12）—— 这里原本直接把**消息 id** 当游标用：
@@ -83,11 +90,22 @@ function decodeCursor(raw: string): { createdAt: string; id: string } | null {
   return { createdAt, id }
 }
 
-/** GET /api/chat/messages?after=<游标或消息id>&limit= */
+/**
+ * GET /api/chat/messages?after=<游标>&before=<游标>&limit=
+ *
+ * `after` 拉**更新**的（5 秒轮询增量用，方向向后）；`before` 拉**更早**的
+ * （用户往上滑看历史用，方向向前，借鉴 Telegram load_type=1 的 offset_id 翻页）。
+ * 两者互斥，同时传以 `before` 为准 —— 与 dm.ts 的 listDm 同一套口径。
+ * 不带游标 = 拉最新 N 条（首屏）。
+ *
+ * 无 before 时顺带返回 `typing`（正在输入的人）：搭现有轮询的车下发，
+ * 不为 typing 单开请求（见 TYPING_WINDOW_SECONDS）。
+ */
 export async function listMessages(env: Env, request: Request): Promise<Response> {
   await requireChatUser(env, request)
   const url = new URL(request.url)
   const after = url.searchParams.get("after") ?? ""
+  const before = url.searchParams.get("before") ?? ""
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 50) || 50, 1), MAX_MESSAGES)
 
   // 游标优先按新格式解析；解析不出来再当成**消息 id**（旧前端就是这样传的）
@@ -99,10 +117,24 @@ export async function listMessages(env: Env, request: Request): Promise<Response
       .first<{ created_at: string }>()
     if (row) cursor = { createdAt: row.created_at, id: after }
   }
+  const beforeCursor = before ? decodeCursor(before) : null
 
+  // 带 before 则向前翻页（取游标之前最近的 limit 条：倒序取、外层转回正序 ——
+  // 返回给前端的始终是时间升序，前端不用管方向）；
   // 带 after 则增量拉取（只取比游标新的）；否则拉最新 N 条
   let rows
-  if (cursor) {
+  if (beforeCursor) {
+    rows = await env.DB.prepare(
+      `SELECT * FROM (SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
+               u.username, u.nickname, u.avatar_key
+          FROM chat_messages m JOIN users u ON u.id = m.user_id
+         WHERE (m.created_at < ? OR (m.created_at = ? AND m.id < ?))
+         ORDER BY m.created_at DESC, m.id DESC LIMIT ?) x
+        ORDER BY created_at ASC, id ASC`
+    )
+      .bind(beforeCursor.createdAt, beforeCursor.createdAt, beforeCursor.id, limit)
+      .all()
+  } else if (cursor) {
     rows = await env.DB.prepare(
       `SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
               u.username, u.nickname, u.avatar_key
@@ -127,12 +159,67 @@ export async function listMessages(env: Env, request: Request): Promise<Response
   const messages = (rows.results ?? []).map(toMessage)
   await attachQuotes(env, messages)
   const last = messages[messages.length - 1]
+  const first = messages[0]
+
+  // 正在输入的人：只在「不是往前翻历史」时查 —— 翻历史那一刻用户要的是旧消息，
+  // typing 又是随轮询每 5 秒都会刷新的短命状态，省一次查询。
+  const typing = beforeCursor ? [] : await listTypingUsers(env)
+
   return json({
     messages,
     // 新增字段：前端可以改用 nextCursor 作为下一次的 after（当前前端仍传消息 id，
     // 服务端已能正确解析，两者都支持）
     nextCursor: last ? encodeCursor(String(last.createdAt), String(last.id)) : after || null,
+    /** 往前翻页游标：传给 before 就能取到更早的一批（没有更早的了则为 null） */
+    prevCursor: first ? encodeCursor(String(first.createdAt), String(first.id)) : null,
+    /** 是否可能还有更早的消息（取满 limit 就认为可能有，省一次 COUNT） */
+    hasMore: messages.length >= limit,
+    /** 正在输入的人（TYPING_WINDOW_SECONDS 窗口内） */
+    typing,
   })
+}
+
+/** 窗口内正在输入的用户（上限 10 人，够「xx、xx 正在输入…」的展示） */
+async function listTypingUsers(
+  env: Env
+): Promise<{ userId: string; username: string; nickname: string | null; hasAvatar: boolean }[]> {
+  const now = Date.now()
+  const typingCutoff = new Date(now - TYPING_WINDOW_SECONDS * 1000).toISOString()
+  const onlineCutoff = new Date(now - ONLINE_WINDOW_SECONDS * 1000).toISOString()
+  const rows = await env.DB.prepare(
+    `SELECT u.id, u.username, u.nickname, u.avatar_key
+       FROM chat_presence p JOIN users u ON u.id = p.user_id
+      WHERE p.typing_at >= ? AND p.last_seen_at >= ?
+      ORDER BY p.typing_at DESC LIMIT 10`
+  )
+    .bind(typingCutoff, onlineCutoff)
+    .all()
+  return (rows.results ?? []).map((r) => ({
+    userId: String(r.id),
+    username: String(r.username),
+    nickname: (r.nickname as string | null) ?? null,
+    hasAvatar: Boolean(r.avatar_key),
+  }))
+}
+
+/**
+ * POST /api/chat/typing —— 「我正在输入」心跳。
+ *
+ * 前端 5 秒节流上报一次（输入即置位、期间不再重发），拉消息的轮询会把
+ * 窗口内的人顺带带回去；不在任何接口里返回历史 typing，过期即消失。
+ */
+export async function typing(env: Env, request: Request): Promise<Response> {
+  const user = await requireChatUser(env, request)
+  const now = new Date().toISOString()
+  // 顺手续 last_seen_at：打字的人当然是在线的
+  await env.DB.prepare(
+    `INSERT INTO chat_presence (user_id, last_seen_at, typing_at) VALUES (?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET typing_at = excluded.typing_at,
+                                        last_seen_at = excluded.last_seen_at`
+  )
+    .bind(user.id, now, now)
+    .run()
+  return json({ ok: true })
 }
 
 /** 引用摘要（前端右键「引用」时展示被引消息的作者 + 截断正文） */
@@ -208,7 +295,15 @@ async function attachQuotes(env: Env, messages: ChatMessageOut[]): Promise<void>
   }
 }
 
-/** POST /api/chat/messages —— 发消息 */
+/**
+ * POST /api/chat/messages —— 发消息。
+ *
+ * 幂等（借鉴 Telegram 的 random_id，SendMessagesHelper）：请求体可带
+ * `clientId`（前端生成的随机键）。乐观发送下「超时重发 / 双击」可能把同一条
+ * 提交两次，这里先按 (user_id, client_id) 查一次、插入撞唯一索引再查一次，
+ * 两次都命中就直接把**已存在的那条**返回 —— 库里永远只有一行，前端拿它去
+ * 替换本地的「发送中」气泡即可。不带 clientId 的旧调用方行为不变。
+ */
 export async function sendMessage(env: Env, request: Request): Promise<Response> {
   const user = await requireChatUser(env, request)
   await guardRateLimit(
@@ -219,10 +314,25 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
     "发言过于频繁"
   )
 
-  const body = (await request.json().catch(() => ({}))) as { body?: string; replyTo?: string }
+  const body = (await request.json().catch(() => ({}))) as {
+    body?: string
+    replyTo?: string
+    clientId?: string
+  }
   const text = (body.body ?? "").trim()
   if (!text) throw new ApiError(400, "内容不能为空", "INVALID_INPUT")
   if (text.length > MAX_BODY) throw new ApiError(400, "内容过长", "TOO_LARGE")
+  // 幂等键只认前端那种随机短串；超长的直接丢弃（等价于不带），不给库添乱
+  const clientId =
+    typeof body.clientId === "string" && body.clientId.length >= 8 && body.clientId.length <= 64
+      ? body.clientId
+      : null
+
+  // 幂等第 1 查：这条 (user, client) 已经写进去了？（上次的请求其实成功了）
+  if (clientId) {
+    const dup = await loadByClientId(env, user.id, clientId)
+    if (dup) return json({ message: dup }, 201)
+  }
 
   // 引用：只接受「确实存在且未被撤回」的消息 id，否则按普通消息发（不报错，
   // 因为被引消息可能刚好在我们校验前被撤回，不该因此挡住用户发言）
@@ -255,11 +365,21 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
 
   const id = uuid()
   const now = new Date().toISOString()
-  await env.DB.prepare(
-    "INSERT INTO chat_messages (id, user_id, body, created_at, reply_to) VALUES (?, ?, ?, ?, ?)"
-  )
-    .bind(id, user.id, text, now, replyTo)
-    .run()
+  try {
+    await env.DB.prepare(
+      "INSERT INTO chat_messages (id, user_id, body, created_at, reply_to, client_id) VALUES (?, ?, ?, ?, ?, ?)"
+    )
+      .bind(id, user.id, text, now, replyTo, clientId)
+      .run()
+  } catch (err) {
+    // 幂等第 2 查：撞了 (user_id, client_id) 唯一索引 = 并发的重复提交，
+    // 把先落库的那条查回来当成功。其它数据库错误照常抛。
+    if (clientId && isUniqueViolation(err)) {
+      const dup = await loadByClientId(env, user.id, clientId)
+      if (dup) return json({ message: dup }, 201)
+    }
+    throw err
+  }
 
   // 发消息也算一次活跃（更新心跳），让在线列表及时反映
   await env.DB.prepare(
@@ -283,6 +403,31 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
       createdAt: now,
     },
   }, 201)
+}
+
+/** 按 (user_id, client_id) 取回已落库的消息（幂等命中时用，含引用摘要） */
+async function loadByClientId(
+  env: Env,
+  userId: string,
+  clientId: string
+): Promise<ChatMessageOut | null> {
+  const row = await env.DB.prepare(
+    `SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
+            u.username, u.nickname, u.avatar_key
+       FROM chat_messages m JOIN users u ON u.id = m.user_id
+      WHERE m.user_id = ? AND m.client_id = ?`
+  )
+    .bind(userId, clientId)
+    .first<Record<string, unknown>>()
+  if (!row) return null
+  const msg = toMessage(row)
+  await attachQuotes(env, [msg])
+  return msg
+}
+
+/** D1 / SQLite 的唯一索引冲突是不是这个错误（错误文案带 UNIQUE constraint failed） */
+function isUniqueViolation(err: unknown): boolean {
+  return err instanceof Error && /UNIQUE constraint failed/i.test(err.message)
 }
 
 /**
