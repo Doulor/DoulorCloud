@@ -479,15 +479,24 @@ describe("POST /donations —— AI 自动接入", () => {
     expect(calls.some((c) => c.url.includes("/api/channel/"))).toBe(false)
   })
 
-  it("同一上游重复提交被拒（409）", async () => {
+  it("同一上游重复提交 → 覆盖（不再 409）", async () => {
     const user = await makeDonor()
     stubFetch((url) => (url.startsWith(UPSTREAM) ? upstreamModels(["gpt-4o"]) : undefined))
     stubNewApiChannelFlow({ testOk: true })
 
     const first = await submitAiDonation(user)
     expect(first.res.status).toBe(200)
+    // 第二次提交同一上游：不再被「已提交过」挡住，而是**覆盖**同一条单据
+    // （2026-10-05 站长要求：同一用户同一上游地址让它覆盖）
     const second = await submitAiDonation(user)
-    expect(second.res.status).toBe(409)
+    expect(second.res.status).toBe(200)
+    expect(second.body.id).toBe(first.body.id) // 同一条（覆盖），不是新建
+    const cnt = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM donations WHERE user_id = ? AND type = 'ai'"
+    )
+      .bind(user.id)
+      .first<{ c: number }>()
+    expect(cnt?.c).toBe(1)
   })
 
   // ---- 防重复校验的实现方式（2026-09-30 线上事故）----
@@ -512,9 +521,9 @@ describe("POST /donations —— AI 自动接入", () => {
     const { res } = await submitAiDonation(user, longUrl)
     expect(res.status).toBeLessThan(400)
 
-    // 同一个长地址再提一次仍然要能正常判重（说明长地址也能走到比对逻辑）
+    // 同一个长地址再提一次：仍能走到比对逻辑（覆盖，不再 500 —— 也不再有 409）
     const second = await submitAiDonation(user, longUrl)
-    expect(second.res.status).toBe(409)
+    expect(second.res.status).toBeLessThan(400)
   })
 
   it("上游地址里的 `_` 不再被当成 LIKE 通配符（旧写法会误判成重复）", async () => {

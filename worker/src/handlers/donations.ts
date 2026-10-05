@@ -155,7 +155,7 @@ function parseAiPayload(payloadStr: string): {
 async function hasDuplicateUpstream(
   env: Env,
   opts: { userId: string; type: string; jsonPath: string; value: string }
-): Promise<boolean> {
+): Promise<string | null> {
   const row = await env.DB.prepare(
     `SELECT id FROM donations
       WHERE user_id = ? AND type = ? AND status IN ('pending', 'approved')
@@ -166,8 +166,8 @@ async function hasDuplicateUpstream(
       LIMIT 1`
   )
     .bind(opts.userId, opts.type, opts.jsonPath, opts.value)
-    .first()
-  return Boolean(row)
+    .first<{ id: string }>()
+  return row?.id ?? null
 }
 
 /** 捐献类型 → 对应的功能权限 */
@@ -1004,6 +1004,9 @@ async function autoProvisionAiDonation(
     models: parsed.models,
     channelType: parsed.channelType,
     seq,
+    // 同一用户对同一上游「覆盖」重提时，单据上已挂着旧渠道 id —— 就地更新它的
+    // Key，而不是新建一个（避免重复渠道 / 该上游短暂失联）。普通首次提交为 null。
+    existingChannelId: app.newapi_channel_id ?? null,
   })
 
   if (!result.ok) {
@@ -1555,6 +1558,10 @@ export async function createDonation(env: Env, request: Request): Promise<Respon
   // AI 类型的提交，除了格式还要求「真的像一份资源」：
   // 必须选到模型、同一上游不能重复提交。
   // 这些校验放在入库之前，避免用无效 payload 去调中转站的建渠道接口。
+  //
+  // `overwriteId`：同一用户对**同一个上游**再次提交时（2026-10-05 站长要求
+  // 「让它覆盖」），命中的那条旧单据 id —— 走「更新它」而不是「新建一条」。
+  let overwriteId: string | null = null
   if (type === "ai") {
     // 接口格式只认白名单；传了不认识的直接拒，别静默回落（那会让用户以为生效了）
     const rawFormat = (body.payload as { channelType?: unknown }).channelType
@@ -1586,18 +1593,25 @@ export async function createDonation(env: Env, request: Request): Promise<Respon
         "TOO_MANY_MODELS"
       )
     }
-    // 同一上游重复提交没有意义（会建出重复渠道），只挡未被拒绝的那些。
+    // 同一上游重复提交：**覆盖**（2026-10-05 站长要求）。
+    //
+    // 背景：用户 mianke 反馈 —— 同一个上游地址（如 DeepSeek 官址）拿到了一把新
+    // Key 想更新，却被「这个上游地址你已经提交过了」挡住。站长口径：同一用户对
+    // 同一上游再提交，**让它覆盖**。
+    //
+    // 做法：命中旧单据就**更新那一条**（写入新 payload、重置为待审核、清掉上次的
+    // 审核痕迹），而不是新建。自动接入时会带着旧的 newapi_channel_id 就地替换
+    // 渠道里的 Key（见 autoProvisionAiDonation），既不产生重复渠道、也不会失联。
+    // 奖励幂等由 dedup_key=`donation:<id>` 兜底，重复审核不会重复发积分。
+    //
     // ⚠️ 走 hasDuplicateUpstream（json_extract 精确比对），别改回 payload LIKE —— 见该函数注释。
-    if (
-      await hasDuplicateUpstream(env, {
-        userId: user.id,
-        type: "ai",
-        jsonPath: "$.baseUrl",
-        value: parsed.baseUrl,
-      })
-    ) {
-      throw new ApiError(409, "这个上游地址你已经提交过了", "DUPLICATE_UPSTREAM")
-    }
+    const dupId = await hasDuplicateUpstream(env, {
+      userId: user.id,
+      type: "ai",
+      jsonPath: "$.baseUrl",
+      value: parsed.baseUrl,
+    })
+    if (dupId) overwriteId = dupId
   }
 
   // 代理捐献：只校验数量与协议格式；**地址是否可用交给自动校验**逐个判定，
@@ -1738,34 +1752,45 @@ export async function createDonation(env: Env, request: Request): Promise<Respon
     throw new ApiError(400, "请先在「设置」中验证真实邮箱", "NO_NOTIFY_EMAIL")
   }
 
-  // 同类型不能有 pending 申请
-  const pending = await env.DB.prepare(
-    "SELECT id FROM donations WHERE user_id = ? AND type = ? AND status = 'pending' LIMIT 1"
-  )
-    .bind(user.id, type)
-    .first()
-  if (pending) {
-    throw new ApiError(409, "你已有一个该类型的申请待审核", "PENDING_EXISTS")
+  // 同类型不能有 pending 申请。
+  // ⚠️ 「覆盖」时**跳过**这条闸：我们正是在更新那条命中单据（它本身可能就是
+  //    pending / approved），再拦一次就没有覆盖可言了。只有新建才需要它。
+  if (!overwriteId) {
+    const pending = await env.DB.prepare(
+      "SELECT id FROM donations WHERE user_id = ? AND type = ? AND status = 'pending' LIMIT 1"
+    )
+      .bind(user.id, type)
+      .first()
+    if (pending) {
+      throw new ApiError(409, "你已有一个该类型的申请待审核", "PENDING_EXISTS")
+    }
   }
 
-  const id = uuid()
+  // 覆盖 → 复用命中单据的 id（更新它）；否则新建一条。
+  const id = overwriteId ?? uuid()
   const now = new Date().toISOString()
   // frp 类型在上面被归一化回写过 body.payload，入库的是归一化后的值
   const finalPayloadStr = type === "frp" ? JSON.stringify(body.payload) : payloadStr
-  await env.DB.prepare(
-    `INSERT INTO donations (id, user_id, type, payload, notify_email, remark, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
-  )
-    .bind(
-      id,
-      user.id,
-      type,
-      finalPayloadStr,
-      notifyEmail,
-      (body.remark ?? "").trim().slice(0, 500) || null,
-      now
+  const remarkVal = (body.remark ?? "").trim().slice(0, 500) || null
+  if (overwriteId) {
+    // 覆盖：写入新 payload / 邮箱 / 备注，重置为待审核并清掉上次的审核痕迹
+    // （newapi_channel_id 刻意**保留** —— 自动接入据此就地替换渠道里的 Key）
+    await env.DB.prepare(
+      `UPDATE donations
+          SET payload = ?, notify_email = ?, remark = ?, status = 'pending',
+              review_note = NULL, reviewed_at = NULL, auto_reviewed = 0
+        WHERE id = ?`
     )
-    .run()
+      .bind(finalPayloadStr, notifyEmail, remarkVal, overwriteId)
+      .run()
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO donations (id, user_id, type, payload, notify_email, remark, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
+    )
+      .bind(id, user.id, type, finalPayloadStr, notifyEmail, remarkVal, now)
+      .run()
+  }
 
   // ---- AI 类型：入库后立刻走自动化（建渠道 → 测试 → 自动通过 / 自动拒绝）----
   //

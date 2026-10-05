@@ -1102,6 +1102,34 @@ export async function updateChannelModels(
 }
 
 /**
+ * **就地覆盖**渠道的密钥（连同 base_url / 模型）—— `PUT /api/channel/`。
+ *
+ * 与 updateChannelGroup / updateChannelModels 同一套「只传要改的非零字段」思路
+ * （见那两处注释：GORM `Updates(结构体)` 只写非零字段，没传的原样保留）。
+ *
+ * 用途（2026-10-05 站长要求）：同一用户对**同一个上游**提交了新的 Key 时，
+ * 直接替换旧渠道里的 Key，而不是删掉重建 —— 既避免「重复渠道」，也不会让该上游
+ * 短暂失联。`key` 是非零值，GORM 会写入；其余字段（name/group/tag）不动。
+ */
+export async function updateChannelKey(
+  env: Env,
+  channelId: number,
+  input: { key: string; baseUrl: string; models: string; modelMapping: string }
+): Promise<void> {
+  const res = await newApiFetch(env, "/api/channel/", {
+    method: "PUT",
+    body: JSON.stringify({
+      id: channelId,
+      key: input.key,
+      base_url: input.baseUrl,
+      models: input.models,
+      model_mapping: input.modelMapping,
+    }),
+  })
+  await unwrap(res, "更新渠道密钥")
+}
+
+/**
  * 往「多密钥渠道」里**追加**一把 Key（`PUT /api/channel/` + `key_mode: "append"`）。
  *
  * 为什么必须用 append 而不是自己拼：NewAPI 的 `UpdateChannel` 是「整体覆盖」语义，

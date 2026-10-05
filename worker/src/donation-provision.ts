@@ -29,6 +29,7 @@ import type { Env } from "./env"
 import {
   addChannel,
   deleteChannel,
+  updateChannelKey,
   getChannel,
   listChannels,
   testChannel,
@@ -435,6 +436,14 @@ export async function provisionDonationChannel(
     seq: number
     /** 渠道所属分组；缺省用全局 newapi_group */
     group?: string
+    /**
+     * 已存在的渠道 id（2026-10-05 加）。
+     *
+     * 传了它 ⇒ **就地覆盖**该渠道的 Key/base_url/模型（同一用户对同一上游提交了
+     * 新 Key 的场景），不再新建渠道；不传 ⇒ 维持原行为（新建渠道）。
+     * 见 createDonation 里「同一上游覆盖」那段。
+     */
+    existingChannelId?: number | null
   }
 ): Promise<ProvisionResult> {
   const { models, rejected } = sanitizeModels(opts.models)
@@ -464,76 +473,106 @@ export async function provisionDonationChannel(
   )
   const name = `${DONATION_CHANNEL_PREFIX}${String(opts.seq).padStart(2, "0")}`
 
-  // 建渠道前后的 id 差集 = 新渠道（比按名字找可靠：NewAPI 的 name 无唯一约束）
-  let beforeIds = new Set<number>()
-  try {
-    beforeIds = new Set((await listChannels(env)).map((c) => c.id))
-  } catch {
-    // 列表读不到不致命，退回「按名字找最大 id」
-  }
+  const modelMappingStr = JSON.stringify(
+    Object.fromEntries(models.map((m, i) => [exposed[i], m]))
+  )
 
-  // 先按全量建出来，方便拿它逐个测；测完再把不通的剔掉
-  try {
-    await addChannel(env, {
-      name,
-      type: opts.channelType,
-      key: opts.apiKey.trim(),
-      baseUrl: opts.baseUrl,
-      models: exposed.join(","),
-      modelMapping: JSON.stringify(
-        Object.fromEntries(models.map((m, i) => [exposed[i], m]))
-      ),
-      group,
-      tag: DONATION_CHANNEL_TAG,
-      testModel: models[0],
-    })
-  } catch (err) {
-    return {
-      ok: false,
-      channelId: null,
-      message: "在 NewAPI 创建渠道失败",
-      detail: err instanceof Error ? err.message : String(err),
-      passed: [],
-      failed: [],
-      uncertain: [],
-      // 这是**平台侧**故障（中转站挂/令牌失效/接口报错），绝不能算用户的资源不可用
-      definitive: false,
-    }
-  }
-
-  // 定位新建的渠道
   let channelId: number | null = null
-  try {
-    const after = await listChannels(env)
-    const created = after.filter((c) => !beforeIds.has(c.id))
-    channelId =
-      (created.length ? Math.max(...created.map((c) => c.id)) : null) ??
-      after
-        .filter((c) => c.name === name)
-        .reduce<number | null>((acc, c) => (acc === null || c.id > acc ? c.id : acc), null)
-  } catch (err) {
-    return {
-      ok: false,
-      channelId: null,
-      message: "渠道已创建，但读取渠道列表失败，无法验证",
-      detail: err instanceof Error ? err.message : String(err),
-      passed: [],
-      failed: [],
-      uncertain: [],
-      definitive: false,
-    }
-  }
 
-  if (channelId === null) {
-    return {
-      ok: false,
-      channelId: null,
-      message: "渠道已创建，但未能定位到它，无法验证",
-      detail: `渠道名：${name}`,
-      passed: [],
-      failed: [],
-      uncertain: [],
-      definitive: false,
+  if (opts.existingChannelId) {
+    // ---- 就地覆盖已有渠道（同一用户对同一上游换了新 Key）----
+    // 只改 key / base_url / 模型，渠道的 name / 分组 / tag 原样保留，也不新建渠道。
+    try {
+      await updateChannelKey(env, opts.existingChannelId, {
+        key: opts.apiKey.trim(),
+        baseUrl: opts.baseUrl,
+        models: exposed.join(","),
+        modelMapping: modelMappingStr,
+      })
+      channelId = opts.existingChannelId
+    } catch (err) {
+      // 平台侧故障（中转站挂/令牌失效）—— 不算用户的资源不可用，转人工
+      return {
+        ok: false,
+        channelId: opts.existingChannelId,
+        message: "更新已有渠道的密钥失败",
+        detail: err instanceof Error ? err.message : String(err),
+        passed: [],
+        failed: [],
+        uncertain: [],
+        definitive: false,
+      }
+    }
+  } else {
+    // ---- 新建渠道 ----
+    // 建渠道前后的 id 差集 = 新渠道（比按名字找可靠：NewAPI 的 name 无唯一约束）
+    let beforeIds = new Set<number>()
+    try {
+      beforeIds = new Set((await listChannels(env)).map((c) => c.id))
+    } catch {
+      // 列表读不到不致命，退回「按名字找最大 id」
+    }
+
+    // 先按全量建出来，方便拿它逐个测；测完再把不通的剔掉
+    try {
+      await addChannel(env, {
+        name,
+        type: opts.channelType,
+        key: opts.apiKey.trim(),
+        baseUrl: opts.baseUrl,
+        models: exposed.join(","),
+        modelMapping: modelMappingStr,
+        group,
+        tag: DONATION_CHANNEL_TAG,
+        testModel: models[0],
+      })
+    } catch (err) {
+      return {
+        ok: false,
+        channelId: null,
+        message: "在 NewAPI 创建渠道失败",
+        detail: err instanceof Error ? err.message : String(err),
+        passed: [],
+        failed: [],
+        uncertain: [],
+        // 这是**平台侧**故障（中转站挂/令牌失效/接口报错），绝不能算用户的资源不可用
+        definitive: false,
+      }
+    }
+
+    // 定位新建的渠道
+    try {
+      const after = await listChannels(env)
+      const created = after.filter((c) => !beforeIds.has(c.id))
+      channelId =
+        (created.length ? Math.max(...created.map((c) => c.id)) : null) ??
+        after
+          .filter((c) => c.name === name)
+          .reduce<number | null>((acc, c) => (acc === null || c.id > acc ? c.id : acc), null)
+    } catch (err) {
+      return {
+        ok: false,
+        channelId: null,
+        message: "渠道已创建，但读取渠道列表失败，无法验证",
+        detail: err instanceof Error ? err.message : String(err),
+        passed: [],
+        failed: [],
+        uncertain: [],
+        definitive: false,
+      }
+    }
+
+    if (channelId === null) {
+      return {
+        ok: false,
+        channelId: null,
+        message: "渠道已创建，但未能定位到它，无法验证",
+        detail: `渠道名：${name}`,
+        passed: [],
+        failed: [],
+        uncertain: [],
+        definitive: false,
+      }
     }
   }
 

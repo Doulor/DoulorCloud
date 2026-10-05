@@ -273,13 +273,22 @@ export async function resolveAudioUrl(source: string): Promise<string | null> {
     // 关键校验：必须是音频。
     // 上游失败时会返回 200 + 空 HTML（实测 QQ 音乐就是如此），
     // 只看状态码会把一个空页面当成音乐地址交给播放器，表现为「点了没反应」。
-    const contentType = res.headers.get("content-type") ?? ""
-    if (!/^audio\//i.test(contentType)) {
+    //
+    // ⚠️ 2026-10-05（用户 masters 反馈「名片音乐显示 0 秒」）：网易云 CDN 的**部分
+    //    边缘节点**会把 mp3 标成 `application/octet-stream;charset=UTF-8`（不是
+    //    audio/mpeg），只认 `audio/*` 会把这些**好用的**地址判死 → 静默 404 →
+    //    播放器时长读到 0。不同节点/不同歌时好时坏，所以表现为「间歇性」。
+    //    放行 octet-stream，但要求最终地址确实指向音频文件（挡住「200 + 错误页」）。
+    const contentType = (res.headers.get("content-type") ?? "").toLowerCase()
+    const isAudioType = /^audio\//i.test(contentType)
+    const isOctetStream = contentType.startsWith("application/octet-stream")
+    const finalUrl = res.url || url
+    const looksLikeAudioFile = /\.(mp3|m4a|flac|aac|ogg|opus|wav)([?#]|$)/i.test(finalUrl)
+    if (!isAudioType && !(isOctetStream && looksLikeAudioFile)) {
       void res.body?.cancel()
       return null
     }
 
-    const finalUrl = res.url || url
     // 不消费 body：这里只要地址，把连接还回去
     void res.body?.cancel()
 
