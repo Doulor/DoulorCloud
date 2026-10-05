@@ -5434,6 +5434,8 @@ export const en: Record<MessageKey, string> = {
   "pt.todo.receive": "Receive · {name}",
   "pt.toast.transferred": "Sent {n} points to @{to}",
   "pt.toast.boughtAuto": "Purchased “{name}”{term} — {note}.",
+  "pt.toast.boughtAutoDm":
+    "Purchased “{name}”{term} — the content was sent to you by DM; check “Messages” anytime.",
   "pt.toast.boughtUser": "Bought “{name}”{term} — remember to confirm receipt once the seller delivers.",
   "pt.toast.boughtManual": "Purchased “{name}”{term} — an admin will deliver it.",
   "pt.cat.all": "All",

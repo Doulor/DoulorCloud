@@ -287,6 +287,49 @@ export async function listDm(env: Env, request: Request): Promise<Response> {
   })
 }
 
+/**
+ * 业务侧**代发**一条私信（如商城自动发货把内容发给买家）。
+ *
+ * 与 `sendDm`（用户主动发）的区别：
+ *   · 不走发送限流 —— 这是系统代发，不是用户在刷消息；
+ *   · 不走「聊天申请」闸门 —— 闸门管的是「陌生人能不能主动骚扰你」，
+ *     而这条是**买家买完东西后应当收到的东西**，不该被折叠进「申请」里；
+ *   · 只往 `direct_messages` 插一条：会话列表是直接从这张表聚合的
+ *     （见 `listConversations`），所以买家**立刻**能在私信列表里看到并带未读角标。
+ *
+ * 买家想回复时能不能发出去，仍由 `sendDm` 里的 `checkSendGate` 决定：
+ *   · 卖家 → 双方有订单关系，免申请；
+ *   · 站长 / 管理员 → 收件人是管理团队，免申请。
+ * 所以这里不需要额外写 `dm_contacts`。
+ *
+ * @returns 消息 id；收件人不存在 / 已停用 / 内容为空时返回 null（不抛错）
+ */
+export async function sendSystemDm(
+  env: Env,
+  opts: { fromUserId: string; toUserId: string; body: string }
+): Promise<string | null> {
+  const text = opts.body.trim()
+  if (!text) return null
+  if (opts.fromUserId === opts.toUserId) return null
+
+  const peer = await env.DB.prepare(
+    "SELECT id, status FROM users WHERE id = ?"
+  )
+    .bind(opts.toUserId)
+    .first<{ id: string; status: string }>()
+  if (!peer) return null
+  if (peer.status !== "active") return null
+
+  const id = uuid()
+  await env.DB.prepare(
+    `INSERT INTO direct_messages (id, from_user_id, to_user_id, body, created_at, read_at)
+     VALUES (?, ?, ?, ?, ?, NULL)`
+  )
+    .bind(id, opts.fromUserId, opts.toUserId, text.slice(0, MAX_BODY), new Date().toISOString())
+    .run()
+  return id
+}
+
 /** POST /api/dm —— 发送 `{ to: "<用户名>", body: "..." }` */
 export async function sendDm(env: Env, request: Request): Promise<Response> {
   const me = await requireUser(env, request)

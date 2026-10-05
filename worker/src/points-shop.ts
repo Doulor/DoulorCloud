@@ -59,6 +59,7 @@ import {
 import { grantFeatures, loadPermissions } from "./vouchers"
 import { audit, getSetting, siteOffsetHours, siteDayString } from "./settings"
 import { pushMessage } from "./user-messages"
+import { sendSystemDm } from "./handlers/dm"
 import type { Env } from "./env"
 
 export type ProductDelivery =
@@ -1157,6 +1158,66 @@ export async function reviewProduct(
  * 但「下单 / 发货 / 结算」是不同事件，各自留一条，用户能看到完整时间线。
  */
 /**
+ * 自动发货的**完整内容**通过**私聊**发给买家（2026-10-06 站长要求）。
+ *
+ * 为什么改：此前完整内容只塞在「已发放」的站内通知正文里，而通知在界面上就是
+ * 右下角一闪而过的弹窗 —— 买家一眨眼就错过了，只能回头去「我的交易」里翻订单
+ * 才能拿到（站长反馈「一瞬间就没了」）。私信会留在会话里，随时能翻、能复制，
+ * 也不会被别的弹窗刷掉。
+ *
+ * 发送方（决定买家看到的是「谁发的」）：
+ *   · 用户商品 → **卖家**：货本来就是他发的，且双方有订单关系 ⇒ 免「聊天申请」；
+ *   · 官方商品 → **站长**：平台发货。买家若要回复，因收件人是管理团队同样免申请。
+ *
+ * ⚠️ 失败只记日志：内容同时也存在订单的 `delivery_content` 里（订单页仍可复制），
+ *    所以私聊没发出去**绝不能**影响订单本身。
+ */
+async function sendDeliveryContentDm(
+  env: Env,
+  opts: {
+    buyerId: string
+    /** 卖家 id；官方商品为 null */
+    sellerId: string | null
+    productName: string
+    /** 完整交付正文；为空则不发 */
+    content?: string
+  }
+): Promise<void> {
+  const text = (opts.content ?? "").trim()
+  if (!text) return
+
+  let fromId = opts.sellerId ?? null
+  if (!fromId) {
+    // 官方商品：由管理团队代发（站长优先，其次超管、管理员）。
+    // 兜底到管理员是为了「一定发得出去」—— 万一站点没建站长账号，内容
+    // 也不能就这么丢掉（订单里虽有，但买家不会主动去翻）。
+    const sender = await env.DB.prepare(
+      `SELECT id FROM users
+        WHERE role IN ('root', 'superadmin', 'admin') AND status = 'active'
+        ORDER BY CASE role WHEN 'root' THEN 0 WHEN 'superadmin' THEN 1 ELSE 2 END,
+                 created_at ASC
+        LIMIT 1`
+    ).first<{ id: string }>()
+    fromId = sender?.id ?? null
+  }
+  if (!fromId) {
+    console.error("自动发货内容未能私聊：找不到发送方（卖家与管理团队均缺失）", opts.productName)
+    return
+  }
+
+  // 私信单条上限 2000，与商品内容上限相同 —— 内容本来就顶到上限时，
+  // 宁可不要那句前缀，也不能把内容尾部截掉。
+  const prefix = `你买的「${opts.productName}」已自动发货：\n\n`
+  const body = prefix.length + text.length > 2000 ? text : prefix + text
+
+  try {
+    await sendSystemDm(env, { fromUserId: fromId, toUserId: opts.buyerId, body })
+  } catch (err) {
+    console.error("自动发货内容私聊失败:", opts.productName, err)
+  }
+}
+
+/**
  * 订单流转（交付 / 结算 / 取消）后，把消息里挂着的**快捷操作按钮**摘掉。
  *
  * 为什么必须动服务端（2026-10-01 修）：消息的 payload 写进去就不会变，
@@ -1826,19 +1887,26 @@ export async function buyProduct(
           (isUserProduct ? `（用户商品，卖家 ${product.ownerName ?? "?"}，` : "（") +
           `自动交付：${summary}`
       )
+      // 有独立正文（统一内容 / 卡密）→ 把**完整内容通过私聊**发给买家。
+      // 见 sendDeliveryContentDm 的说明：通知弹窗一闪而过，内容必须落到会话里。
+      await sendDeliveryContentDm(env, {
+        buyerId: user.id,
+        sellerId: product.ownerId,
+        productName: product.name,
+        content,
+      })
       // 通知买家 + （用户商品）通知卖家。
       //
-      // ⚠️ 有独立正文时（统一内容 / 卡密），通知正文要用**完整内容** ——
-      //    用户常常就是靠这条消息把链接复制走的；只用 summary 会把正文截掉。
-      //    消息表 body 无长度限制，但前端按 Markdown 渲染，所以这里保持原文。
-      //
-      // 用户商品走自动交付时**担保语义不变**：积分仍托管在平台，
-      // 买家确认收货（或售后超时判定）后才结算给卖家 —— 所以给买家的
-      // 通知要带「确认收货」按钮，卖家也要知道卖出了一单。
+      // ⚠️ 2026-10-06 改：有独立正文时**不再把完整内容塞进通知** —— 通知在界面上
+      //    就是右下角一闪而过的弹窗，买家一眨眼就错过（站长反馈）。内容改由
+      //    sendDeliveryContentDm 私聊发出（留在会话里可反复查看），这里只留一句
+      //    摘要 + 指路。用户商品的通知仍带「确认收货」按钮，那个不能省。
       await notifyOrder(env, user.id, {
         event: "delivered",
         title: `已发放「${product.name}」`,
-        body: content ? `${summary}\n\n${content}` : summary || "已自动发放。",
+        body: content
+          ? `${summary}\n\n完整内容已通过**私聊**发送给你，在「私信」里随时可看、可复制。`
+          : summary || "已自动发放。",
         orderId,
         action: isUserProduct ? "confirm" : undefined,
         peer: isUserProduct ? product.ownerName : undefined,

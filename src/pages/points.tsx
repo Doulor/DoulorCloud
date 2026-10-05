@@ -823,14 +823,18 @@ export default function PointsPage() {
         res.order.billingMode === "rental"
           ? t("pt.rental.termParen", { term: rentalTerm(res.order.rentalDays) })
           : ""
+      // 有独立交付正文（统一内容 / 卡密）时，完整内容已由后端私聊发给买家，
+      // 这里别再拿 note 硬塞 —— 弹窗一闪而过，买家根本来不及记（2026-10-06）。
       toast.success(
         res.order.status === "delivered"
-          ? // 自动交付的订单，note 里就是「发了什么」（如「已自动充值 ¥10」）
-            t("pt.toast.boughtAuto", {
-              name: res.order.productName,
-              term,
-              note: res.order.note ?? t("pt.autoDelivered"),
-            })
+          ? res.order.deliveryContent
+            ? t("pt.toast.boughtAutoDm", { name: res.order.productName, term })
+            : // 其余自动交付（充值 / 权限 / 订阅…）：note 就是「发了什么」的一句话
+              t("pt.toast.boughtAuto", {
+                name: res.order.productName,
+                term,
+                note: res.order.note ?? t("pt.autoDelivered"),
+              })
           : res.order.sellerId
             ? t("pt.toast.boughtUser", { name: res.order.productName, term })
             : t("pt.toast.boughtManual", { name: res.order.productName, term })

@@ -208,7 +208,7 @@ describe("统一内容自动发货", () => {
     expect(await getPointsBalance(env, buyer.id)).toBe(70)
   })
 
-  it("通知里带完整正文（用户靠消息复制链接）", async () => {
+  it("完整正文通过私聊发给买家（通知只留指路，不再糊正文）", async () => {
     const admin = await makeUser({ role: "admin" })
     const buyer = await makeUser()
     await givePoints(buyer, 100)

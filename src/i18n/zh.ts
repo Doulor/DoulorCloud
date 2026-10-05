@@ -5298,6 +5298,7 @@ export const zh = {
   "pt.todo.receive": "收货 · {name}",
   "pt.toast.transferred": "已转给 @{to} {n} 积分",
   "pt.toast.boughtAuto": "已购买「{name}」{term}，{note}。",
+  "pt.toast.boughtAutoDm": "已购买「{name}」{term}，发货内容已通过私聊发送给你，在「私信」里随时可看。",
   "pt.toast.boughtUser": "已买下「{name}」{term}，等卖家发货后记得来确认收货。",
   "pt.toast.boughtManual": "已购买「{name}」{term}，等待管理员发放。",
   "pt.cat.all": "全部",
