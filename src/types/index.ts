@@ -675,6 +675,11 @@ export interface NewApiPreflight {
   exists: boolean
   /** 该账号是否已用 Doulor Cloud 登录（OIDC）绑定（oidc_id === 本站用户 id） */
   oidcBound: boolean
+  /**
+   * 是否走的是「重新绑定 / 刷新凭据」而不是首次开通（2026-10-05）。
+   * 由前端在 access token 失效时自行置位，仅用于弹窗文案区分。
+   */
+  rebind?: boolean
 }
 
 // ---- frp 内网穿透 ----

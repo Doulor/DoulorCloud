@@ -1427,6 +1427,9 @@ export const zh = {
   "ai.bind.title": "完成密码绑定",
   "ai.bind.ready": "你的中转站账号已就绪，输入 Doulor Cloud 密码完成绑定后即可使用。",
   "ai.bind.now": "立即绑定",
+  "ai.rebind.title": "重新输入密码",
+  "ai.rebind.desc":
+    "你的中转站登录已失效（密码可能在中转站被改过）。输入 Doulor Cloud 密码重新绑定即可恢复，已建 Key 与额度都不受影响。",
   "ai.activate.title": "开通 AI 中转站",
   "ai.activate.desc": "用你的 Doulor Cloud 账号登录中转站，附赠试用额度",
   "ai.activate.b1": "· 用 Doulor Cloud 账号登录中转站，无需单独注册",
@@ -1524,6 +1527,7 @@ export const zh = {
   "ai.err.delete": "删除失败",
   "ai.info.windowClosed": "已关闭授权窗口。可点「重新打开」再次授权。",
   "ai.ok.activated": "AI 中转站已开通",
+  "ai.ok.rebound": "已重新绑定，中转站登录已恢复",
   "ai.ok.synced": "已同步额度",
   "ai.ok.redeemed": "兑换成功：+{symbol}{amount}",
   "ai.ok.freeClaimed": "已领取免费订阅",

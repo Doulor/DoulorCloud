@@ -573,11 +573,29 @@ export default function AiPage() {
       username: "",
       exists: true,
       oidcBound: true,
+      // 标记为「重新绑定」，弹窗文案改成「重新输入密码」，而非「开通」
+      rebind: true,
     })
     setAwaitingOAuth(false)
     setPreflightLoading(false)
     setPassword("")
     setBindOpen(true)
+  }
+
+  /**
+   * 统一的 NewAPI 操作报错处理：access token 失效 ⇒ 弹「重新输入密码」框；
+   * 其余走普通 toast。
+   *
+   * ⚠️ 别再在各自的 catch 里「先判 USER_TOKEN_EXPIRED 再各自 toast」了 ——
+   * 只要漏掉一处，用户就会看到「登录已失效，请重新输入密码绑定」却**找不到
+   * 输入密码的地方**（2026-10-05 用户反馈）。所有 key 管理操作都必须走这里。
+   */
+  const reportAiError = (err: unknown, fallbackKey: string) => {
+    if (err instanceof HttpError && err.code === "USER_TOKEN_EXPIRED") {
+      handleTokenExpired()
+      return
+    }
+    toast.error(err instanceof HttpError ? err.message : t(fallbackKey))
   }
 
   /**
@@ -673,8 +691,10 @@ export default function AiPage() {
     }
     setBusy(true)
     try {
-      await newapiApi.bind(password)
-      toast.success(t("ai.ok.activated"))
+      const res = await newapiApi.bind(password)
+      toast.success(
+        Boolean(res.account?.rebind) ? t("ai.ok.rebound") : t("ai.ok.activated")
+      )
       setBindOpen(false)
       setPassword("")
       // 静默刷新：非静默会整页 loading，把弹窗和错误提示一起卸载掉
@@ -694,11 +714,7 @@ export default function AiPage() {
       await load(true)
       toast.success(t("ai.ok.synced"))
     } catch (err) {
-      if (err instanceof HttpError && err.code === "USER_TOKEN_EXPIRED") {
-        handleTokenExpired()
-        return
-      }
-      toast.error(err instanceof HttpError ? err.message : t("ai.err.sync"))
+      reportAiError(err, "ai.err.sync")
     } finally {
       setSyncing(false)
     }
@@ -713,15 +729,11 @@ export default function AiPage() {
       // 静默刷新列表，不能让整页 loading 卸载掉展示完整 Key 的弹窗
       await load(true)
     } catch (err) {
-      if (err instanceof HttpError && err.code === "USER_TOKEN_EXPIRED") {
-        handleTokenExpired()
-        return
-      }
       if (err instanceof HttpError && err.code === "SUBSCRIPTION_REQUIRED") {
         toast.error(t("ai.err.claimFirst"))
         return
       }
-      toast.error(err instanceof HttpError ? err.message : t("ai.err.create"))
+      reportAiError(err, "ai.err.create")
     } finally {
       setBusy(false)
     }
@@ -738,7 +750,7 @@ export default function AiPage() {
       setRedeemCode("")
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("ai.err.redeem"))
+      reportAiError(err, "ai.err.redeem")
     } finally {
       setRedeemBusy(false)
     }
@@ -751,7 +763,7 @@ export default function AiPage() {
       toast.success(res.message || t("ai.ok.freeClaimed"))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("ai.err.claim"))
+      reportAiError(err, "ai.err.claim")
     } finally {
       setSubscribing(false)
     }
@@ -772,7 +784,7 @@ export default function AiPage() {
       setAiPwOpen(false)
       setAiPw({ current: "", next: "", confirm: "" })
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("ai.err.update"))
+      reportAiError(err, "ai.err.update")
     } finally {
       setAiPwBusy(false)
     }
@@ -786,7 +798,7 @@ export default function AiPage() {
       toast.success(t("ai.ok.keyDeleted"))
       await load(true)
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("ai.err.delete"))
+      reportAiError(err, "ai.err.delete")
     } finally {
       setDeletingKeyId(null)
     }
@@ -802,11 +814,53 @@ export default function AiPage() {
         res.added > 0 ? t("ai.ok.keysSynced", { n: res.added }) : t("ai.ok.noNewKeys")
       )
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("ai.err.sync"))
+      reportAiError(err, "ai.err.sync")
     } finally {
       setSyncing(false)
     }
   }
+
+  /**
+   * 关闭「重新输入密码绑定」弹窗时的收尾。
+   * 「未绑定」是有门槛的页面（用户还没完成绑定），关掉弹窗就离开本页回仪表盘
+   * （沿用原行为）；**已绑定**用户只是 access token 失效来补密码，关掉后留在
+   * 本页即可，不该被踢走。
+   */
+  const closeBindDialog = () => {
+    setBindOpen(false)
+    setPreflight(null)
+    setPassword("")
+    setAwaitingOAuth(false)
+    if (!status?.account?.bound) navigate("/dashboard")
+  }
+
+  /**
+   * 「重新输入密码绑定」弹窗。
+   *
+   * ⚠️ 2026-10-05 用户反馈「key 管理报登录失效，却没有输密码的弹窗」：
+   * 该弹窗此前只挂在「未开通 / 未绑定」那个提前 return 分支里，已绑定用户
+   * （正常使用中的绝大多数人）token 失效时 `handleTokenExpired()` 虽然把
+   * `bindOpen` 置了 true，但组件根本没渲染 ⇒ 只弹报错、没有输入框。
+   * 现在把它提出来，**未绑定与已绑定两条分支都渲染**。
+   */
+  const bindDialogEl = (
+    <BindDialog
+      open={bindOpen}
+      onOpenChange={(o) => {
+        setBindOpen(o)
+        if (!o) closeBindDialog()
+      }}
+      preflight={preflight}
+      preflightLoading={preflightLoading}
+      awaitingOAuth={awaitingOAuth}
+      password={password}
+      setPassword={setPassword}
+      busy={busy}
+      onReopenOAuth={() => startOAuthPopup()}
+      onConfirm={() => void handleBind()}
+      onCancel={closeBindDialog}
+    />
+  )
 
   if (locked) {
     return (
@@ -891,33 +945,7 @@ export default function AiPage() {
           </CardContent>
         </Card>
 
-        <BindDialog
-          open={bindOpen}
-          onOpenChange={(o) => {
-            setBindOpen(o)
-            if (!o) {
-              setPreflight(null)
-              setPassword("")
-              setAwaitingOAuth(false)
-              navigate("/dashboard")
-            }
-          }}
-          preflight={preflight}
-          preflightLoading={preflightLoading}
-          awaitingOAuth={awaitingOAuth}
-          password={password}
-          setPassword={setPassword}
-          busy={busy}
-          onReopenOAuth={() => startOAuthPopup()}
-          onConfirm={() => void handleBind()}
-          onCancel={() => {
-            setBindOpen(false)
-            setPreflight(null)
-            setPassword("")
-            setAwaitingOAuth(false)
-            navigate("/dashboard")
-          }}
-        />
+        {bindDialogEl}
       </div>
     )
   }
@@ -1462,6 +1490,9 @@ export default function AiPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* token 失效时「重新输入密码绑定」——已绑定用户也必须能弹出来 */}
+      {bindDialogEl}
     </div>
   )
 }
@@ -1498,19 +1529,21 @@ function BindDialog({
   // 探测尚未返回时不渲染表单，避免用户先填了再被告知流程不同
   const ready = !preflightLoading && preflight !== null
   const oidcBound = Boolean(preflight?.oidcBound)
+  /** 是「重新绑定（刷新密码）」而非首次开通 —— 文案要区分，别对老用户说「开通」 */
+  const rebind = Boolean(preflight?.rebind)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t("ai.activate.title")}</DialogTitle>
+          <DialogTitle>{rebind ? t("ai.rebind.title") : t("ai.activate.title")}</DialogTitle>
           <DialogDescription>
             {!ready
               ? t("ai.activate.checkingAccount")
               : awaitingOAuth
                 ? t("ai.activate.step2")
                 : oidcBound
-                  ? t("ai.activate.step3")
+                  ? t(rebind ? "ai.rebind.desc" : "ai.activate.step3")
                   : t("ai.activate.needAccount")}
           </DialogDescription>
         </DialogHeader>

@@ -560,11 +560,18 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
   }
 
   const existing = await loadAccount(env, user.id)
-  // 已真绑定（有真实 access token）→ 拒绝重复开通。
-  // 但「自动认领」的账号 enc_token 是哨兵值 NO_TOKEN，允许继续走补密码流程。
-  if (existing && existing.enc_token !== NO_TOKEN_SENTINEL) {
-    throw new ApiError(409, "你已经开通过 AI 中转站了", "ALREADY_BOUND")
-  }
+  // ⚠️ 2026-10-05：已真绑定（有真实 access token）**不再直接拒绝**，改为允许
+  //    「重新绑定 / 刷新凭据」。
+  //
+  //    背景：access token 失效、且用**存库密码**也重登不上时（用户在中转站改过
+  //    密码、账号被吊销等），后端会回 USER_TOKEN_EXPIRED 引导用户「重新输入密码
+  //    绑定」。若这里仍抛 409 ALREADY_BOUND，用户填完密码还是失败 —— 等于这条路
+  //    根本走不通（用户反馈：key 管理总报「登录已失效」却救不回来）。
+  //
+  //    重绑**只刷新密码 + access token**，绝不重置额度、不补发订阅（下面按
+  //    isRebind 分支跳过这些副作用）。「自动认领」账号（enc_token 是哨兵 NO_TOKEN）
+  //    走的是正常「补密码」流程，不属于重绑。
+  const isRebind = Boolean(existing && existing.enc_token !== NO_TOKEN_SENTINEL)
 
   const body = (await request.json()) as { password?: string }
   const password = body.password ?? ""
@@ -619,8 +626,8 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
   //    之后才能用它登录换 access token
   await adminSetUserPassword(env, remote.id, username, password)
 
-  // 2. 设试用额度
-  if (!unlimited) {
+  // 2. 设试用额度。**重绑不重置额度** —— 否则把用户余额抹成试用额度，是灾难性副作用。
+  if (!unlimited && !isRebind) {
     await adminSetQuota(
       env,
       remote.id,
@@ -659,46 +666,62 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
 
   const now = new Date().toISOString()
   const email = (await primaryAddressFor(env, user.id, username)).toLowerCase()
+  const encToken = await encryptSecret(accessToken, secret)
+  const encPassword = await encryptSecret(password, secret)
 
-  await env.DB.prepare(
-    `INSERT INTO newapi_accounts
-       (user_id, newapi_user_id, username, email, enc_token, enc_password, group_name, quota, used_quota, request_count, synced_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET
-       newapi_user_id = excluded.newapi_user_id,
-       username = excluded.username,
-       email = excluded.email,
-       enc_token = excluded.enc_token,
-       enc_password = excluded.enc_password,
-       group_name = excluded.group_name,
-       quota = excluded.quota,
-       synced_at = excluded.synced_at`
-  )
-    .bind(
-      user.id,
-      loginResult.userId,
-      username,
-      email,
-      await encryptSecret(accessToken, secret),
-      await encryptSecret(password, secret),
-      settings2.newapi_group,
-      unlimited ? 0 : Number(settings2.newapi_trial_quota),
-      now,
-      now
+  if (isRebind) {
+    // 重绑：**只刷新凭据**，绝不动 quota / used_quota / request_count / group_name。
+    await env.DB.prepare(
+      `UPDATE newapi_accounts
+          SET newapi_user_id = ?, username = ?, email = ?,
+              enc_token = ?, enc_password = ?, synced_at = ?
+        WHERE user_id = ?`
     )
-    .run()
+      .bind(loginResult.userId, username, email, encToken, encPassword, now, user.id)
+      .run()
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO newapi_accounts
+         (user_id, newapi_user_id, username, email, enc_token, enc_password, group_name, quota, used_quota, request_count, synced_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         newapi_user_id = excluded.newapi_user_id,
+         username = excluded.username,
+         email = excluded.email,
+         enc_token = excluded.enc_token,
+         enc_password = excluded.enc_password,
+         group_name = excluded.group_name,
+         quota = excluded.quota,
+         synced_at = excluded.synced_at`
+    )
+      .bind(
+        user.id,
+        loginResult.userId,
+        username,
+        email,
+        encToken,
+        encPassword,
+        settings2.newapi_group,
+        unlimited ? 0 : Number(settings2.newapi_trial_quota),
+        now,
+        now
+      )
+      .run()
+  }
 
   await audit(
     env,
     user.id,
     "newapi.bind",
-    `开通 AI 中转站账号 ${username} (id ${loginResult.userId})，通过 OIDC 绑定并复用 cloud 密码`
+    isRebind
+      ? `重新绑定 AI 中转站账号 ${username} (id ${loginResult.userId})，刷新密码与 access token`
+      : `开通 AI 中转站账号 ${username} (id ${loginResult.userId})，通过 OIDC 绑定并复用 cloud 密码`
   )
 
   // 开通后自动领免费订阅（plan_id 由设置项 newapi_free_plan_id 决定，0 = 不自动开）。
-  // 失败不阻断开通主流程（账号已建、已绑），只记审计 —— 用户仍可在页面手动领。
+  // **重绑不补发订阅**（避免把用户已有的订阅/每日额度重置）；失败不阻断主流程，只记审计。
   const freePlanId = Number(settings2.newapi_free_plan_id ?? "0")
-  if (Number.isFinite(freePlanId) && freePlanId > 0) {
+  if (!isRebind && Number.isFinite(freePlanId) && freePlanId > 0) {
     try {
       const sub = await adminGrantSubscription(env, loginResult.userId, freePlanId)
       await audit(
@@ -724,12 +747,20 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
         newapiUserId: loginResult.userId,
         username,
         email,
-        quota: unlimited ? 0 : Number(settings2.newapi_trial_quota),
-        group: settings2.newapi_group,
+        // 重绑沿用账号现有额度 / 分组，别回报成试用额度误导前端
+        quota: isRebind
+          ? (existing?.quota ?? 0)
+          : unlimited
+            ? 0
+            : Number(settings2.newapi_trial_quota),
+        group: isRebind
+          ? (existing?.group_name ?? settings2.newapi_group)
+          : settings2.newapi_group,
         unlimited,
+        rebind: isRebind,
       },
     },
-    201
+    isRebind ? 200 : 201
   )
 }
 

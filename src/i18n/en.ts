@@ -1468,6 +1468,9 @@ export const en: Record<MessageKey, string> = {
   "ai.bind.ready":
     "Your gateway account is ready — enter your Doulor Cloud password to finish binding and start using it.",
   "ai.bind.now": "Bind now",
+  "ai.rebind.title": "Re-enter your password",
+  "ai.rebind.desc":
+    "Your gateway sign-in has expired (the password may have been changed on the gateway). Enter your Doulor Cloud password to re-link — your keys and quota are untouched.",
   "ai.activate.title": "Activate the AI gateway",
   "ai.activate.desc": "Sign in to the gateway with your Doulor Cloud account — trial quota included",
   "ai.activate.b1": "· Sign in with your Doulor Cloud account; no separate registration",
@@ -1576,6 +1579,7 @@ export const en: Record<MessageKey, string> = {
   "ai.err.delete": "Deletion failed",
   "ai.info.windowClosed": "Authorization window closed. Click “Open again” to retry.",
   "ai.ok.activated": "AI gateway activated",
+  "ai.ok.rebound": "Re-linked — your gateway sign-in is restored",
   "ai.ok.synced": "Quota synced",
   "ai.ok.redeemed": "Redeemed: +{symbol}{amount}",
   "ai.ok.freeClaimed": "Free plan claimed",

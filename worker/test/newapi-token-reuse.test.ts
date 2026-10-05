@@ -266,3 +266,77 @@ describe("/api/dev/bind 的密码校验限流（补上的爆破面）", () => {
     expect(blocked.body.code).toBe("RATE_LIMITED")
   })
 })
+
+// ---------------------------------------------------------------------------
+// 2026-10-05 用户反馈回归：key 管理时总报「登录已失效，请重新输入密码绑定」，
+// 前端没有输密码的地方。修了前端弹窗后，还差一环 —— 已绑定账号必须能被「重绑」。
+//
+// 旧行为：bindAccount 对「已真绑定」的账号直接 409 ALREADY_BOUND，于是用户
+// 即使重新输密码也救不回来。现在改为允许重绑，并且**只刷新凭据**，
+// 绝不重置额度 / 补发订阅。
+// ---------------------------------------------------------------------------
+describe("/api/dev/bind —— 已绑定账号的重新绑定（刷新凭据）", () => {
+  it("用正确的 cloud 密码重绑 → 刷新 access token，且不重置额度", async () => {
+    const u = await makeAiUser()
+    await setSetting("newapi_enabled", "1")
+    // 试额度设成一个「容易被认出」的值：若重绑误重置额度，会被写成它
+    await setSetting("newapi_trial_quota", "999999")
+    await setSetting("newapi_free_plan_id", "0") // 关掉自动订阅，聚焦额度断言
+
+    const newapiUserId = 7001
+    await seedBoundAccount({
+      userId: u.id,
+      username: u.username,
+      cachedToken: "stale-token",
+      password: "old-password",
+      newapiUserId,
+    })
+    // 账号现有余额（非试用额度）—— 重绑后必须原封不动
+    await env.DB.prepare(
+      "UPDATE newapi_accounts SET quota = 12345, used_quota = 678 WHERE user_id = ?"
+    )
+      .bind(u.id)
+      .run()
+
+    stubNewApi((url) => {
+      if (url.includes("/api/user/search")) {
+        return jsonResponse({
+          success: true,
+          data: [{ id: newapiUserId, username: u.username, oidc_id: u.id }],
+        })
+      }
+      if (url.includes("/api/user/login")) {
+        return jsonResponse({
+          success: true,
+          data: { id: newapiUserId, access_token: "fresh-token" },
+        })
+      }
+      // /api/user（PUT 改密码 / 转组）等一律成功
+      return jsonResponse({ success: true, data: {} })
+    })
+
+    const res = await fetchSelf(
+      authRequest(u, "/api/dev/bind", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // makeUser 的 cloud 密码固定为 pass1234
+        body: JSON.stringify({ password: "pass1234" }),
+      })
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { account: { rebind?: boolean } }
+    expect(body.account.rebind).toBe(true)
+
+    const row = await env.DB.prepare(
+      "SELECT enc_token, quota, used_quota FROM newapi_accounts WHERE user_id = ?"
+    )
+      .bind(u.id)
+      .first<{ enc_token: string; quota: number; used_quota: number }>()
+    expect(row).not.toBeNull()
+    // token 已刷新成最新那把
+    expect(await decryptSecret(row!.enc_token, env.SESSION_SECRET!)).toBe("fresh-token")
+    // 额度 / 用量都没被动过（重绑只刷新凭据）
+    expect(row!.quota).toBe(12345)
+    expect(row!.used_quota).toBe(678)
+  })
+})
