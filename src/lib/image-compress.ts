@@ -1,6 +1,35 @@
 import { tStatic } from "@/i18n"
 import { GIFEncoder, applyPalette, quantize } from "gifenc"
 
+/**
+ * 由**实际**编码类型推出文件扩展名。
+ *
+ * ⚠️ 为什么不能硬编码 "webp"：`canvas.toBlob(cb, "image/webp", q)` 在**不支持
+ * WebP 编码**的浏览器（典型是部分移动端 Safari / iOS WebView）会**静默回退成
+ * PNG**，且 `blob.type` 会是 "image/png"。若我们仍把文件标成 image/webp，后端
+ * 的「真实图片魔数」校验（WebP 签名 vs 实际 PNG 字节）就会判不匹配 —— 2026-10-05
+ * 用户 masters 反馈「手机上传方形表情包报『声明不匹配』、但截图能传」正是这个。
+ * 所以一律以 `blob.type`（浏览器给出的真实类型）为准。
+ */
+function extForType(type: string): string {
+  switch (type) {
+    case "image/jpeg":
+      return "jpg"
+    case "image/png":
+      return "png"
+    case "image/gif":
+      return "gif"
+    default:
+      return "webp"
+  }
+}
+
+/** 把「压缩后的 blob」包成 File：类型与扩展名都用 blob 的**真实**类型 */
+function blobToFile(blob: Blob, originalName: string): File {
+  const type = blob.type || "image/webp"
+  return new File([blob], originalName.replace(/\.[^.]+$/, "." + extForType(type)), { type })
+}
+
 /** 将图片文件压缩到长边 1600px，输出 WebP（质量自适应） */
 export async function compressImage(
   file: File,
@@ -23,7 +52,7 @@ export async function compressImage(
   const blob = await new Promise<Blob>((resolve, reject) =>
     canvas.toBlob((b) => (b ? resolve(b) : reject(new Error(tStatic("icp.err.compress")))), "image/webp", quality)
   )
-  return new File([blob], file.name.replace(/\.[^.]+$/, ".webp"), { type: "image/webp" })
+  return blobToFile(blob, file.name)
 }
 
 /**
@@ -73,7 +102,8 @@ async function compressRaster(file: File, limit: number): Promise<File | null> {
     for (const q of RASTER_QUALITIES) {
       const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, "image/webp", q))
       if (blob && blob.size <= limit) {
-        return new File([blob], file.name.replace(/\.[^.]+$/, ".webp"), { type: "image/webp" })
+        // ⚠️ 用 blob 的真实类型（不支持 WebP 的浏览器会回退成 PNG），见 extForType 注释
+        return blobToFile(blob, file.name)
       }
     }
   }

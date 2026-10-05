@@ -933,21 +933,32 @@ export async function batchDeleteMessages(
 
   const body = (await request.json().catch(() => ({}))) as { ids?: unknown }
   const ids = Array.isArray(body.ids)
-    ? body.ids.filter((x): x is string => typeof x === "string").slice(0, 100)
+    ? body.ids.filter((x): x is string => typeof x === "string").slice(0, 1000)
     : []
   if (ids.length === 0) {
     throw new ApiError(400, "没有要删除的邮件", "INVALID_INPUT")
   }
 
-  // 只删属于当前 mailbox 的邮件（带 mailbox_id 守卫，防止越权删到别的邮箱）
-  const placeholders = ids.map(() => "?").join(",")
-  const result = await env.DB.prepare(
-    `DELETE FROM messages WHERE mailbox_id = ? AND id IN (${placeholders})`
-  )
-    .bind(mailbox.id, ...ids)
-    .run()
+  // 只删属于当前 mailbox 的邮件（带 mailbox_id 守卫，防止越权删到别的邮箱）。
+  //
+  // ⚠️ 必须**分批**：D1 单条语句最多 100 个绑定参数，而这里每个 id 占 1 个、
+  //    再加 mailbox_id 本身，所以一次最多放 99 个 id。2026-10-05 用户反馈
+  //    「批量删除 ≥100 条报内部错误」就是这个坑：原实现一次 IN (?,?,…) 塞进
+  //    最多 100 个 id ⇒ 101 个参数 ⇒ 直接 500。按 99 一批切，累加删除数。
+  const CHUNK = 99
+  let deleted = 0
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK)
+    const placeholders = slice.map(() => "?").join(",")
+    const result = await env.DB.prepare(
+      `DELETE FROM messages WHERE mailbox_id = ? AND id IN (${placeholders})`
+    )
+      .bind(mailbox.id, ...slice)
+      .run()
+    deleted += result.meta?.changes ?? 0
+  }
 
-  return json({ deleted: result.meta?.changes ?? 0 })
+  return json({ deleted })
 }
 
 // ---- 网页端回信（出站邮件）----

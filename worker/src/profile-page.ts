@@ -527,8 +527,11 @@ a{color:inherit;text-decoration:none}
 .lrc-line.on{opacity:1;font-weight:600;transform:translateY(0)}
 .lrc-line.pre{opacity:.42;transform:translateY(calc(1.75em + 2px))}
 /* 没有时间轴的纯文本歌词：整段静态展示（那段文字直接放在 .lrc-inner 里，没有 .lrc-line 子元素），
-   不参与「两行」同步，也不受上面的 opacity:0 影响 */
-.lyrics-plain .lrc-inner{height:auto;line-height:1.9;text-align:center;color:var(--text);opacity:.72;white-space:pre-wrap}
+   不参与「两行」同步，也不受上面的 opacity:0 影响。
+   ⚠️ 必须限高 + 可滚动：纯文本歌词动辄上千字（用户 sjkk16 反馈「歌词太长」时是 2189 字双语），
+   height:auto 会把整个歌词块撑到几千像素、名片被拉得又长又破。给个约 8 行的上限、超出滚动，
+   既保住版面又让用户能看全（2026-10-05）。 */
+.lyrics-plain .lrc-inner{height:auto;max-height:184px;overflow-y:auto;line-height:1.9;text-align:center;color:var(--text);opacity:.72;white-space:pre-wrap}
 /* 「歌词在下面还是右边」的规则在 .mod-music 那段（需要容器查询，且容器不能选中自己） */
 
 /* 页脚统计 */

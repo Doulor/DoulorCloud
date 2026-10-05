@@ -1019,8 +1019,14 @@ function countColumns(owner: string, excludeApi: boolean): string {
        (SELECT COUNT(*) FROM daily_checkins WHERE user_id = {OWNER}) AS checkin_count,
        (SELECT COALESCE(balance, 0) FROM user_points WHERE user_id = {OWNER}) AS points_balance,
        (SELECT COUNT(*) FROM feedback WHERE user_id = {OWNER}) AS feedback_count,
-       (SELECT COUNT(*) FROM point_orders WHERE user_id = {OWNER}
-          AND status IN ('delivered', 'settled')) AS shop_orders,
+       -- 「消费达人」：商城订单（成功交付）**加上**直接兑换中转站余额的次数。
+       -- 直接兑换（points.ts redeemPoints）只写一条 reason='redeem' 的流水、不生成
+       -- point_orders，原先没算进来 ⇒ 用户 zzy 反馈「兑换了余额但成就没计次」
+       -- （2026-10-05）。只数 delta<0 的成功兑换；失败退回是正数，天然不计。
+       ((SELECT COUNT(*) FROM point_orders WHERE user_id = {OWNER}
+           AND status IN ('delivered', 'settled'))
+        + (SELECT COUNT(*) FROM point_transactions WHERE user_id = {OWNER}
+             AND reason = 'redeem' AND delta < 0)) AS shop_orders,
        (SELECT COUNT(*) FROM post_shares WHERE user_id = {OWNER}) AS shares_given,
        (SELECT COUNT(*) FROM user_stickers WHERE user_id = {OWNER}) AS stickers,
        -- ---- 2026-10-04 新增：深度使用与平台探索 ----
