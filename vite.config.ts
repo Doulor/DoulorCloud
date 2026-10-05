@@ -31,10 +31,16 @@ export default defineConfig({
     ],
   },
   server: {
-    // 本地开发时将 /api 代理到 wrangler dev 启动的 Worker
+    // 本地开发时将 /api 代理到 wrangler dev 启动的 Worker。
+    //
+    // ⚠️ target 必须写 127.0.0.1，**不要**写 localhost：Windows 上 Node 会把
+    // localhost 先解析成 IPv6 的 ::1，而 wrangler dev 只监听 IPv4 的
+    // 127.0.0.1:8787 —— 于是代理时不时 ECONNREFUSED，浏览器侧表现为
+    // `TypeError: Failed to fetch`（同一秒里另一个请求却可能成功，极难排查）。
+    // 显式钉住 IPv4 回环后请求稳定。
     proxy: {
       "/api": {
-        target: "http://localhost:8787",
+        target: "http://127.0.0.1:8787",
         changeOrigin: true,
       },
     },

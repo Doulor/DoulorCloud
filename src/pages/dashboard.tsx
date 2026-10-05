@@ -999,17 +999,8 @@ function saveLayout(layout: CardLayout): void {
   }
 }
 
-/** 从布局中移除某卡片（用于拖拽时先摘出）；未命中的列保持原引用，
- *  让未变的那列在 memo 比较中直接跳过重渲染 */
-function withoutCard(layout: CardLayout, id: CardId): CardLayout {
-  const inLeft = layout.left.includes(id)
-  const inRight = layout.right.includes(id)
-  if (!inLeft && !inRight) return layout
-  return {
-    left: inLeft ? layout.left.filter((c) => c !== id) : layout.left,
-    right: inRight ? layout.right.filter((c) => c !== id) : layout.right,
-  }
-}
+// （原 withoutCard 已删除：拖拽预览不再摘除被拖卡片 —— 摘卡会让 dnd-kit 的
+//   active 节点卸载，排序与浮层全部失效，正是「拖拽不跟手」的根源之一。）
 
 /** 带排序能力的卡片包装：dnd-kit 的 useSortable 负责让位动画与拖拽状态 */
 const SortableCard = React.memo(function SortableCard({
@@ -1021,7 +1012,7 @@ const SortableCard = React.memo(function SortableCard({
   editing: boolean
   render: (id: CardId) => React.ReactNode
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+  const { attributes, listeners, setNodeRef, transform, isDragging } =
     useSortable({ id, disabled: !editing })
 
   return (
@@ -1029,7 +1020,12 @@ const SortableCard = React.memo(function SortableCard({
       ref={setNodeRef}
       style={{
         transform: CSS.Transform.toString(transform),
-        transition,
+        /**
+         * 让位动画用「回弹」弹簧曲线（overshoot 后收敛），替代 dnd-kit 默认的
+         * 平缓 ease —— 卡片被挤开时先冲过头一点再弹回，接近 iOS 的物理手感。
+         * 时长 260ms：短了看不出弹性，长了拖拽会感觉迟滞。
+         */
+        transition: "transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1)",
         // 被拖的卡片本身让 DragOverlay 接管，原位保留占位（透明）保持空间
         opacity: isDragging ? 0 : 1,
         zIndex: isDragging ? 0 : undefined,
@@ -1045,8 +1041,11 @@ const SortableCard = React.memo(function SortableCard({
       <div
         {...attributes}
         {...listeners}
+        // Jiggle 抖动挂在**内层**：外层 transform 归 dnd-kit 排序管，
+        // 动画属性撞车会把拖拽位移盖掉（详见 index.css 的 card-jiggle 注释）
         className={cn(
-          editing && !isDragging && "cursor-grab active:cursor-grabbing"
+          editing && !isDragging && "cursor-grab active:cursor-grabbing",
+          editing && !isDragging && "card-jiggle"
         )}
       >
         {render(id)}
@@ -1350,14 +1349,13 @@ export default function DashboardPage() {
   )
 
   /**
-   * 预览布局：拖拽中的卡片从原位摘出，其它卡按 layout 渲染。
-   * 注意：拖拽中的卡片位置随 onDragOver 在 layout 里实时更新，
-   * 这里只保证被拖卡不重复渲染在原有位置。
+   * 预览布局：**不能**把被拖的卡从渲染里摘出去（历史 bug：withoutCard 摘卡
+   * 导致 active 节点卸载，dnd-kit 的排序状态直接失效 —— 拖到哪儿别的卡都
+   * 不让位、浮层位置计算也失去宿主，就是「拖拽不跟手」的一半根源）。
+   * 正确姿势是 dnd-kit 官方模式：卡留在列表里，拖起时 isDragging → 透明占位
+   * 保持空间，视觉本体交给 DragOverlay；跨列顺序由 onDragOver 实时重排。
    */
-  const preview = React.useMemo<CardLayout>(() => {
-    if (!dragging) return layout
-    return withoutCard(layout, dragging)
-  }, [layout, dragging])
+  const preview = React.useMemo<CardLayout>(() => layout, [layout, dragging])
 
   /** 提交：把拖拽结果写入布局并落盘（松手时最终落位） */
   const commitDrop = React.useCallback(
@@ -1397,7 +1395,7 @@ export default function DashboardPage() {
   }, [])
 
   return (
-    <div className="space-y-6">
+    <div className={cn("space-y-6", editing && "dash-editing")}>
       <AnnouncementPopup announcements={announcements} />
       <PageHeader
         title={t("dash.welcome", { name: user?.username ?? "" })}
@@ -1458,9 +1456,23 @@ export default function DashboardPage() {
           <SortableColumn col="left" ids={preview.left} editing={editing} render={renderCard} />
           <SortableColumn col="right" ids={preview.right} editing={editing} render={renderCard} />
         </div>
-        <DragOverlay>
+        <DragOverlay
+          /**
+           * ⚠️ 这个 class 不能删：浮层的包裹层由 dnd-kit 渲染在 DndContext 内部，
+           * 正好命中 `.page-enter > * > *` 的入场动画选择器。CSS 动画的值优先级
+           * 高于内联 style，会把浮层靠 translate3d 的定位整段盖掉（拖拽不跟手）。
+           * index.css 用 `:not(.dnd-drag-overlay)` 把它排除在入场动画之外。
+           */
+          className="dnd-drag-overlay"
+          // 松手落位：短促带回弹的收束（常规 dropAnimation 是纯淡出，很"纸片"）
+          dropAnimation={{
+            duration: 260,
+            easing: "cubic-bezier(0.18, 1.35, 0.4, 1)",
+          }}
+        >
           {dragging ? (
-            <div className="cursor-grabbing rounded-xl shadow-xl ring-2 ring-primary/40">
+            // 拖起中：比原卡片略大 + 轻微倾斜 + 大阴影 —— 「拿在手里」的实感
+            <div className="scale-[1.03] rotate-[1.2deg] cursor-grabbing rounded-xl shadow-2xl ring-2 ring-primary/50 transition-transform">
               {renderCard(dragging)}
             </div>
           ) : null}

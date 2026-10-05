@@ -456,6 +456,28 @@
   animation: chat-flash 0.9s ease-out;
 }
 
+/* ---- 卡片编辑模式的 Jiggle 抖动（iOS 主屏「图标编辑模式」同款手感）----
+ * 只在概览页卡片编辑态（编辑模式 class 挂在页面根上）作用于卡片**内层**：
+ * 外层的 transform 归 dnd-kit 排序用，抖动绝不能碰它，否则拖拽位移会被
+ * 动画覆盖。nth-child 给每张卡错开相位，视觉上就是 iOS 那种各自轻微摇摆。 */
+@keyframes card-jiggle {
+  from {
+    transform: rotate(-0.7deg);
+  }
+  to {
+    transform: rotate(0.7deg);
+  }
+}
+.dash-editing .card-jiggle {
+  animation: card-jiggle 0.28s ease-in-out infinite alternate;
+}
+.dash-editing .card-jiggle:nth-child(2n) {
+  animation-delay: -0.09s;
+}
+.dash-editing .card-jiggle:nth-child(3n) {
+  animation-delay: -0.17s;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat-msg-in,
   .chat-flash {
@@ -638,11 +660,29 @@ section[id] {
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    /* ⚠️ 必须是 none，不能写 translateY(0)：fill:both 会在动画结束后**永久**
+     * 保留终值 transform，而 translateY(0) 的计算值是 matrix(1,0,0,1,0,0) ——
+     * 它 ≠ none，会让这个容器变成「transform 祖先」，内部所有 position:fixed
+     * 元素（典型如概览页拖拽的 DragOverlay）被锚定到容器坐标系而不是视口，
+     * 表现为拖拽浮层不跟手。transform:none 的终值填充后不构成 transform 祖先。 */
+    transform: none;
   }
 }
-.page-enter > * > * {
-  animation: page-enter 0.42s cubic-bezier(0.16, 1, 0.3, 1) both;
+/* ⚠️⚠️ 两条红线（2026-10-05 实测踩到，改这段前必看）：
+ *
+ * 1) **必须排除拖拽浮层**（.dnd-drag-overlay）。dnd-kit 的 DragOverlay 渲染在
+ *    DndContext 内部 —— 对概览页来说它恰好就是 `.page-enter > * > *` 的匹配对象。
+ *    于是拖起卡片时新建的浮层会立刻跑一遍 page-enter 动画，而 **CSS 动画的值
+ *    优先级高于内联 style**，这 0.42s 内浮层靠内联 translate3d 的定位被动画的
+ *    transform 完全盖住 ⇒ 手感是「鼠标拖到红圈了，卡片就是不过去」。
+ *
+ * 2) **fill 只能用 backwards，不能用 both**。both 会让终值 transform 永久生效
+ *    （即使终值写成 none），同样盖掉内联定位，且不是 0.42s，而是**永久**不动。
+ *    backwards 只在 delay 期间应用 from，动画一结束就放手。
+ *
+ * 合起来：浮层元素不参与入场动画，其余元素动画结束即交还样式控制权。 */
+.page-enter > * > *:not(.dnd-drag-overlay) {
+  animation: page-enter 0.42s cubic-bezier(0.16, 1, 0.3, 1) backwards;
 }
 .page-enter > * > *:nth-child(1) {
   animation-delay: 0s;
