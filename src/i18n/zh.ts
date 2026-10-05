@@ -929,7 +929,7 @@ export const zh = {
   "dm.addRecord": "添加记录",
   "dm.batch.add": "批量添加",
   "dm.batch.delete": "批量删除",
-  "dm.batch.clear": "取消选择",
+  "dm.batch.deselectAll": "取消全选",
   "dm.batch.selected": "已选 {n} 条",
   "dm.batch.selectAll": "全选",
   "dm.batch.deleteTitle": "批量删除解析记录？",

@@ -950,7 +950,7 @@ export const en: Record<MessageKey, string> = {
   "dm.addRecord": "Add record",
   "dm.batch.add": "Batch add",
   "dm.batch.delete": "Batch delete",
-  "dm.batch.clear": "Clear selection",
+  "dm.batch.deselectAll": "Deselect all",
   "dm.batch.selected": "{n} selected",
   "dm.batch.selectAll": "Select all",
   "dm.batch.deleteTitle": "Delete these DNS records?",

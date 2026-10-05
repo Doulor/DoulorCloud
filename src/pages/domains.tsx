@@ -1,5 +1,5 @@
 import * as React from "react"
-import { ChevronDown, CornerDownRight, Globe, Loader2, Pencil, Plus, RefreshCw, ScrollText, Trash2 } from "lucide-react"
+import { ChevronDown, CornerDownRight, Globe, ListChecks, Loader2, Pencil, Plus, RefreshCw, ScrollText, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -81,6 +81,8 @@ export default function DomainsPage() {
   // ---- 批量操作（DNS 记录）----
   /** 已勾选的记录 id（只在当前域名下有效，切域名/刷新后清空；平台托管的记录不可删，不进勾选） */
   const [batchSelected, setBatchSelected] = React.useState<Set<string>>(new Set())
+  /** 「编辑模式」：默认关，点工具栏「编辑」才显示勾选框（与邮箱页同一交互，2026-10-05 站长要求） */
+  const [batchSelecting, setBatchSelecting] = React.useState(false)
   const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false)
   const [batchAddOpen, setBatchAddOpen] = React.useState(false)
   const [batchText, setBatchText] = React.useState("")
@@ -333,9 +335,10 @@ export default function DomainsPage() {
   }
 
   // ---------- 批量删除 ----------
-  // 切域名或刷新列表后清空勾选：勾选只在当前域名当前列表内有效
+  // 切域名或刷新列表后清空勾选并退出编辑模式：勾选只在当前域名当前列表内有效
   React.useEffect(() => {
     setBatchSelected(new Set())
+    setBatchSelecting(false)
   }, [selected?.id])
 
   /** 可勾选的记录：平台托管（managed）的没有删除入口，不进批量 */
@@ -362,6 +365,12 @@ export default function DomainsPage() {
     })
   }
 
+  /** 退出编辑模式：清空勾选并隐藏勾选框（与邮箱页一致） */
+  const exitBatchSelecting = () => {
+    setBatchSelecting(false)
+    setBatchSelected(new Set())
+  }
+
   const confirmBatchDelete = async () => {
     if (batchSelected.size === 0) return
     setBatchBusy(true)
@@ -378,6 +387,7 @@ export default function DomainsPage() {
       }
       setBatchDeleteOpen(false)
       setBatchSelected(new Set())
+      setBatchSelecting(false)
       if (fail === 0) toast.success(t("dm.batch.deletedOk", { n: String(ok) }))
       else toast.warning(t("dm.batch.deletedPart", { ok: String(ok), fail: String(fail) }))
       if (selected) bumpRecordCount(selected.id, -ok)
@@ -646,59 +656,68 @@ export default function DomainsPage() {
               </span>
             </div>
             <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={() => void loadRecords(selected.id)}
-                aria-label={t("common.refresh")}
-              >
-                <RefreshCw className="h-4 w-4" />
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  setBatchText("")
-                  setBatchAddOpen(true)
-                }}
-              >
-                {t("dm.batch.add")}
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => {
-                  // 明确走「新建」：清掉可能残留的编辑态，否则会误改成编辑上一条
-                  setEditingId(null)
-                  resetForm()
-                  setOpenDns(true)
-                }}
-              >
-                <Plus className="h-4 w-4" />
-                {t("dm.addRecord")}
-              </Button>
+              {batchSelecting ? (
+                <>
+                  <Button variant="outline" size="sm" onClick={toggleBatchSelectAll}>
+                    <ListChecks className="mr-1 h-3.5 w-3.5" />
+                    {allDeletableSelected ? t("dm.batch.deselectAll") : t("dm.batch.selectAll")}
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    {t("dm.batch.selected", { n: String(batchSelected.size) })}
+                  </span>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    disabled={batchBusy || batchSelected.size === 0}
+                    onClick={() => setBatchDeleteOpen(true)}
+                  >
+                    <Trash2 className="mr-1 h-3.5 w-3.5" />
+                    {t("dm.batch.delete")}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={exitBatchSelecting}>
+                    {t("common.cancel")}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() => void loadRecords(selected.id)}
+                    aria-label={t("common.refresh")}
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setBatchText("")
+                      setBatchAddOpen(true)
+                    }}
+                  >
+                    {t("dm.batch.add")}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => setBatchSelecting(true)}>
+                    <Pencil className="mr-1 h-3.5 w-3.5" />
+                    {t("common.edit")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      // 明确走「新建」：清掉可能残留的编辑态，否则会误改成编辑上一条
+                      setEditingId(null)
+                      resetForm()
+                      setOpenDns(true)
+                    }}
+                  >
+                    <Plus className="h-4 w-4" />
+                    {t("dm.addRecord")}
+                  </Button>
+                </>
+              )}
             </div>
           </div>
-
-          {/* 批量操作条：有勾选时出现 */}
-          {batchSelected.size > 0 && (
-            <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2">
-              <span className="text-sm text-muted-foreground">
-                {t("dm.batch.selected", { n: String(batchSelected.size) })}
-              </span>
-              <Button
-                size="sm"
-                variant="destructive"
-                disabled={batchBusy}
-                onClick={() => setBatchDeleteOpen(true)}
-              >
-                <Trash2 className="mr-1 h-4 w-4" />
-                {t("dm.batch.delete")}
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setBatchSelected(new Set())}>
-                {t("dm.batch.clear")}
-              </Button>
-            </div>
-          )}
 
           {records.length === 0 ? (
             <EmptyState
@@ -710,15 +729,17 @@ export default function DomainsPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-10">
-                      <input
-                        type="checkbox"
-                        aria-label={t("dm.batch.selectAll")}
-                        className="h-4 w-4 accent-primary"
-                        checked={allDeletableSelected}
-                        onChange={toggleBatchSelectAll}
-                      />
-                    </TableHead>
+                    {batchSelecting && (
+                      <TableHead className="w-10">
+                        <input
+                          type="checkbox"
+                          aria-label={t("dm.batch.selectAll")}
+                          className="h-4 w-4 accent-primary"
+                          checked={allDeletableSelected}
+                          onChange={toggleBatchSelectAll}
+                        />
+                      </TableHead>
+                    )}
                     <TableHead>Name</TableHead>
                     <TableHead>Type</TableHead>
                     <TableHead>Content</TableHead>
@@ -731,17 +752,19 @@ export default function DomainsPage() {
                 <TableBody>
                   {records.map((r) => (
                     <TableRow key={r.id}>
-                      <TableCell>
-                        {!r.managed && (
-                          <input
-                            type="checkbox"
-                            aria-label={r.name}
-                            className="h-4 w-4 accent-primary"
-                            checked={batchSelected.has(r.id)}
-                            onChange={() => toggleBatchSelect(r.id)}
-                          />
-                        )}
-                      </TableCell>
+                      {batchSelecting && (
+                        <TableCell>
+                          {!r.managed && (
+                            <input
+                              type="checkbox"
+                              aria-label={r.name}
+                              className="h-4 w-4 accent-primary"
+                              checked={batchSelected.has(r.id)}
+                              onChange={() => toggleBatchSelect(r.id)}
+                            />
+                          )}
+                        </TableCell>
+                      )}
                       <TableCell className="font-mono text-sm">
                         <div className="flex flex-wrap items-center gap-1.5">
                           <span>{r.name}</span>
