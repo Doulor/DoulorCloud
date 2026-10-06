@@ -20,7 +20,7 @@
  */
 import * as React from "react"
 import { createPortal } from "react-dom"
-import { X } from "lucide-react"
+import { X, Maximize2 } from "lucide-react"
 
 /** 最小 1x（不缩小，避免缩成一粒看不见）；最大 6x 够看细节了 */
 const MIN_SCALE = 1
@@ -37,6 +37,7 @@ export function ImageLightbox({
   dialogLabel,
   closeLabel,
   zoomHint,
+  resizeLabel,
 }: {
   src: string
   alt: string
@@ -46,6 +47,8 @@ export function ImageLightbox({
   closeLabel: string
   /** 底部操作提示；不传则不显示提示条 */
   zoomHint?: string
+  /** 右下角「调整大小」手柄的无障碍名称 */
+  resizeLabel: string
 }) {
   const [scale, setScale] = React.useState(1)
   const [offset, setOffset] = React.useState({ x: 0, y: 0 })
@@ -57,6 +60,12 @@ export function ImageLightbox({
     startY: number
     baseX: number
     baseY: number
+  } | null>(null)
+  /** 右下角「调整大小」手柄的拖动起点 */
+  const resizeRef = React.useRef<{
+    startX: number
+    startY: number
+    baseScale: number
   } | null>(null)
   const movedRef = React.useRef(false)
   const overlayRef = React.useRef<HTMLDivElement>(null)
@@ -139,6 +148,36 @@ export function ImageLightbox({
     dragRef.current = null
   }
 
+  // ---- 右下角手柄：用鼠标拖着调整大小（用户 2026-10-06 追加要求）----
+
+  const onResizeDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    e.stopPropagation()
+    e.preventDefault()
+    resizeRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      baseScale: scaleRef.current,
+    }
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+
+  const onResizeMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const r = resizeRef.current
+    if (!r) return
+    // 往右下拖变大、往左上拖变小。取两个轴的均值：斜着拖和横竖拖的手感一致。
+    // 用 exp 而不是线性，是因为倍率本身是乘性变化的（1→2 和 4→8 幅度应该相同）。
+    const delta = (e.clientX - r.startX + (e.clientY - r.startY)) / 2
+    apply(clampScale(r.baseScale * Math.exp(delta / 220)), offsetRef.current)
+  }
+
+  const onResizeUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const el = e.currentTarget
+    if (resizeRef.current && el.hasPointerCapture?.(e.pointerId)) {
+      el.releasePointerCapture(e.pointerId)
+    }
+    resizeRef.current = null
+  }
+
   const zoomed = scale > MIN_SCALE + 0.001
 
   return createPortal(
@@ -152,6 +191,9 @@ export function ImageLightbox({
         (zoomed ? "cursor-grab" : "cursor-zoom-out")
       }
       onClick={(e) => {
+        // ⚠️ React 的 portal 事件按**组件树**冒泡，不是 DOM 树 —— 社区概览页的帖子卡片
+        //    整体可点（跳详情），不在这里截断的话，点灯箱里的任何地方都会连带跳转。
+        e.stopPropagation()
         // 只认「点在背景上」——点在图片上不关，拖动松手也不会误关
         if (e.target === e.currentTarget && !movedRef.current) onClose()
       }}
@@ -185,6 +227,32 @@ export function ImageLightbox({
         aria-label={closeLabel}
       >
         <X className="h-5 w-5" aria-hidden="true" />
+      </button>
+
+      {/* 右下角手柄：按住拖动即可调整大小；键盘用方向键（↑→ 放大，↓← 缩小） */}
+      <button
+        type="button"
+        aria-label={resizeLabel}
+        title={resizeLabel}
+        onPointerDown={onResizeDown}
+        onPointerMove={onResizeMove}
+        onPointerUp={onResizeUp}
+        onPointerCancel={onResizeUp}
+        onKeyDown={(e) => {
+          const step = 1.15
+          if (e.key === "ArrowUp" || e.key === "ArrowRight") {
+            e.preventDefault()
+            e.stopPropagation()
+            apply(clampScale(scaleRef.current * step), offsetRef.current)
+          } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
+            e.preventDefault()
+            e.stopPropagation()
+            apply(clampScale(scaleRef.current / step), offsetRef.current)
+          }
+        }}
+        className="absolute bottom-4 right-4 flex h-10 w-10 cursor-nwse-resize touch-none items-center justify-center rounded-full bg-white/15 text-white hover:bg-white/25"
+      >
+        <Maximize2 className="h-4 w-4" aria-hidden="true" />
       </button>
 
       {zoomHint && (

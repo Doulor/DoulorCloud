@@ -550,6 +550,7 @@ export const zh = {
   "feedback.closePreview": "关闭图片预览",
   // —— 通用图片灯箱（各处点开的图片预览都用它）——
   "lightbox.hint": "滚轮缩放 · 拖动平移 · 双击还原",
+  "lightbox.resize": "拖动调整大小",
 
   // —— 控制台首页 ——
   "dash.welcome": "欢迎回来，{name}",

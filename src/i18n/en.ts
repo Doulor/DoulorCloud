@@ -561,6 +561,7 @@ export const en: Record<MessageKey, string> = {
   "feedback.imageNAlt": "Image {n}",
   "feedback.closePreview": "Close image preview",
   "lightbox.hint": "Scroll to zoom · drag to pan · double-click to reset",
+  "lightbox.resize": "Drag to resize",
 
   // —— Dashboard home ——
   "dash.welcome": "Welcome back, {name}",

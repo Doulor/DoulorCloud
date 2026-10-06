@@ -287,7 +287,10 @@ function StickerImage({
     }
   }
 
-  const onClick = () => {
+  const onClick = (e: React.MouseEvent) => {
+    // 社区概览页整张卡片可点（跳详情），点表情包只该放大 ——
+    // 与 ZoomableImage 同一处理，否则点表情包会「放大 + 跳详情」双触发
+    e.stopPropagation()
     // 长按触发的 touchend 之后的 click 不要放大，只放大普通点击/轻点
     if (longPressed.current) {
       longPressed.current = false
@@ -361,6 +364,7 @@ function StickerImage({
           dialogLabel={t("feedback.preview")}
           closeLabel={t("feedback.closePreview")}
           zoomHint={t("lightbox.hint")}
+          resizeLabel={t("lightbox.resize")}
         />
       )}
     </>

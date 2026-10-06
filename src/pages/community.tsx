@@ -136,7 +136,12 @@ function PostImages({ images }: { images: string[] }) {
           <button
             key={src}
             type="button"
-            onClick={() => setPreview(i)}
+            onClick={(e) => {
+              // 概览页整张卡片可点（跳帖子详情），点图片应当**只开灯箱**。
+              // 不拦冒泡就会「开灯箱 + 跳详情」双触发（用户反馈 2026-10-06）。
+              e.stopPropagation()
+              setPreview(i)
+            }}
             aria-label={t("cm.viewImageOf", { n: i + 1, total: images.length })}
             className={
               "group overflow-hidden rounded-lg border " +
@@ -163,6 +168,7 @@ function PostImages({ images }: { images: string[] }) {
           dialogLabel={t("feedback.preview")}
           closeLabel={t("feedback.closePreview")}
           zoomHint={t("lightbox.hint")}
+          resizeLabel={t("lightbox.resize")}
         />
       )}
     </>

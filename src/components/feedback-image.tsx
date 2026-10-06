@@ -197,6 +197,7 @@ export function ImageGallery({ images }: { images: string[] }) {
           dialogLabel={t("feedback.preview")}
           closeLabel={t("feedback.closePreview")}
           zoomHint={t("lightbox.hint")}
+          resizeLabel={t("lightbox.resize")}
         />
       )}
     </>
