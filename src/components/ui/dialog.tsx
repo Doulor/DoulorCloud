@@ -41,7 +41,14 @@ const DialogContent = React.forwardRef<
         // 动画覆盖）。宽度用 100vw 明确相对视口，避免 fixed 元素 100% 在移动端的坑。
         // max-h-[85vh] + overflow-y-auto：高弹窗（多输入框/长表单）在手机竖屏下
         // 上下越界、按钮点不到 —— 基类统一加滚动保护（2026-10-02 issue #6）。
-        "fixed left-1/2 top-1/2 z-50 grid max-h-[85vh] w-[calc(100vw-2rem)] max-w-lg gap-4 overflow-y-auto border bg-background p-6 shadow-lg sm:rounded-lg",
+        //
+        // ⚠️ `grid-cols-1` 不能省（2026-10-06 站长反馈「我买到的」弹窗内容被撑大、
+        // 还出现左右滚动条）：`grid` 不写列定义时，列宽是 **auto = min-content**，
+        // 于是列表里任何 `truncate`（white-space: nowrap）的长文本 —— 比如订单摘要里
+        // 带长链接的备注 —— 都会把**整列**撑宽，连标题一起变形；
+        // 视觉上像"内容被放大了"并出现横向滚动。`grid-cols-1` 展开是
+        // `repeat(1, minmax(0, 1fr))`，列宽被钉在容器内，超长内容照常省略号截断。
+        "fixed left-1/2 top-1/2 z-50 grid grid-cols-1 max-h-[85vh] w-[calc(100vw-2rem)] max-w-lg gap-4 overflow-y-auto border bg-background p-6 shadow-lg sm:rounded-lg",
         className
       )}
       style={{ transform: "translate(-50%, -50%)" }}
