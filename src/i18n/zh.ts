@@ -2298,6 +2298,12 @@ export const zh = {
   "chat.ctx.copy": "复制",
   "chat.ctx.recall": "撤回",
   "chat.recalled": "消息已撤回",
+  "chat.tag.sticker": "表情包",
+  "chat.tag.image": "图片",
+  /** 发送前的缩略图预览条 */
+  "chat.preview.title": "发送预览",
+  "chat.preview.remove": "移除这张图",
+  "chat.preview.zoom": "点击放大",
   "chat.recalledToast": "已撤回",
   "chat.copied": "已复制",
   "chat.err.recall": "撤回失败",
@@ -2306,6 +2312,42 @@ export const zh = {
   "chat.enterHintSend": "Enter 发送",
   "chat.enterHintNewline": "Ctrl+Enter 发送",
   "chat.enterHintTip": "点击切换发送键：Enter 发送 / Enter 换行（Ctrl+Enter 发送）",
+  /** 往上翻历史（借鉴 Telegram 的 offset_id 分页，滑到顶自动加载） */
+  "chat.loadingEarlier": "加载更早的消息…",
+  "chat.scrollForEarlier": "上滑加载更早的消息",
+  "chat.noEarlier": "没有更早的消息了",
+  /** 回到底部悬浮钮（不在底部时才出现，可带新消息计数） */
+  "chat.jumpToBottom": "回到底部",
+  "chat.newMessages": "{n} 条新消息",
+  /** 正在输入（5 秒节流上报，随消息轮询下发） */
+  "chat.typingOne": "{name} 正在输入…",
+  "chat.typingMany": "{names} 等 {n} 人正在输入…",
+  /** 乐观发送失败的气泡状态（点击可重发） */
+  "chat.sendFailed": "发送失败，点击重试",
+  /** 日期分组分割线 */
+  "chat.day.today": "今天",
+  "chat.day.yesterday": "昨天",
+  "chat.day.date": "{y}年{m}月{d}日",
+  /** 点引用块跳回被引消息 */
+  "chat.ctx.jump": "跳转到原消息",
+  /** 发送失败气泡的「取回编辑」：内容放回输入框 */
+  "chat.ctx.edit": "取回编辑",
+  /** 右键菜单：表情回应（展开一排常用表情） */
+  "chat.ctx.react": "回应",
+  "chat.reactPick": "选个表情回应",
+  /** 右键菜单：编辑自己的消息（10 分钟内） */
+  "chat.ctx.editMsg": "编辑",
+  "chat.editing": "正在编辑消息",
+  "chat.edited": "已编辑",
+  /** 右键菜单：转发（弹目标选择） */
+  "chat.ctx.forward": "转发",
+  "chat.forwardTitle": "转发到",
+  "chat.forwardedFrom": "转发自 {name}",
+  "chat.forwardedToast": "已转发",
+  "chat.forwardEmpty": "还没有可转发的会话",
+  "chat.err.edit": "编辑失败",
+  "chat.err.forward": "转发失败",
+  "chat.err.react": "回应失败",
 
   // —— OAuth 授权确认 ——
   "oc.scope.openid.title": "确认你的身份",
@@ -2448,6 +2490,9 @@ export const zh = {
   "dmsg.err.open": "打不开这个会话",
   "dmsg.err.self": "不能给自己发私信",
   "dmsg.err.send": "发送失败",
+  /** 对端打字状态（listDm 轮询顺带下发 peerTyping） */
+  "dmsg.typing": "对方正在输入…",
+  "dmsg.err.recall": "撤回失败",
 
   "dmsg.title": "私信",
   "dmsg.publicChat": "公共聊天室",

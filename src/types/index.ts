@@ -272,6 +272,30 @@ export interface ChatQuoteRef {
   body: string
 }
 
+/** 一组表情回应（同一条消息上同一个表情的聚合） */
+export interface ReactionGroup {
+  emoji: string
+  count: number
+  /** 我点过没有（胶囊高亮） */
+  mine: boolean
+  /** 参与者用户名（hover tooltip） */
+  names: string[]
+}
+
+/** 转发来源（「转发自 xxx」） */
+export interface ForwardRef {
+  userId: string
+  username: string
+  nickname: string | null
+}
+
+/**
+ * 乐观发送状态（借鉴 Telegram 的 send_state：SENDING / SEND_ERROR）。
+ * 服务端下发的消息**没有**这个字段 —— 只有本地先插的「发送中 / 失败」气泡才带，
+ * 确认后被服务端的真消息原位替换（状态机见 chat.tsx 的 send()）。
+ */
+export type PendingSendStatus = "sending" | "failed"
+
 export interface ChatMessage {
   id: string
   userId: string
@@ -286,6 +310,16 @@ export interface ChatMessage {
   /** 被引用消息的摘要（列表接口会补全） */
   quote?: ChatQuoteRef | null
   createdAt: string
+  /** 最后一次编辑时间；null/缺省 = 从未编辑（显示「已编辑」用） */
+  editedAt?: string | null
+  /** 转发来源；null/缺省 = 不是转发 */
+  forwardFrom?: ForwardRef | null
+  /** 表情回应聚合 */
+  reactions?: ReactionGroup[]
+  /** 乐观字段：仅本地待发消息携带（undefined = 服务端已确认） */
+  status?: PendingSendStatus
+  /** 乐观字段：本地生成的幂等键，用于把服务端确认回填到这条气泡 */
+  clientId?: string
 }
 
 /** 聊天室在线用户 */
@@ -2897,6 +2931,22 @@ export interface DmMessage {
   createdAt: string
   /** 收件人读这条的时间；null = 未读 */
   readAt: string | null
+  /** 引用的消息 id（null = 非引用）；撤回的消息服务端会置空 */
+  replyTo?: string | null
+  /** 被引用消息的摘要（list 接口批量补全） */
+  quote?: ChatQuoteRef | null
+  /** 是否已撤回（撤回后 body 为空） */
+  recalled?: boolean
+  /** 最后一次编辑时间；null/缺省 = 从未编辑 */
+  editedAt?: string | null
+  /** 转发来源；null/缺省 = 不是转发 */
+  forwardFrom?: ForwardRef | null
+  /** 表情回应聚合 */
+  reactions?: ReactionGroup[]
+  /** 乐观字段：仅本地待发消息携带（undefined = 服务端已确认） */
+  status?: PendingSendStatus
+  /** 乐观字段：本地幂等键，服务端确认后据此原位替换 */
+  clientId?: string
 }
 
 /** 我收到的一条待处理「聊天申请」（2026-10-01） */

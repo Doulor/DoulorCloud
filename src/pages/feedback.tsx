@@ -40,6 +40,7 @@ import { RoleBadge } from "@/components/role-badge"
 import { CustomTitleBadge } from "@/components/custom-title-badge"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
 import { useAuth } from "@/hooks/use-auth"
+import { DraftImagePreview } from "@/components/draft-image-preview"
 import { useImageDrop } from "@/hooks/use-image-drop"
 import { cn } from "@/lib/utils"
 import {
@@ -308,6 +309,7 @@ export default function FeedbackPage() {
                   }
                 }}
               />
+              <DraftImagePreview text={body} className="mt-2" setText={setBody} />
               <div className="flex items-center gap-1">
                 <EmojiPicker onPick={insertEmoji} />
                 <StickerPanel onPick={insertEmoji} />

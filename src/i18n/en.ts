@@ -2377,6 +2377,12 @@ export const en: Record<MessageKey, string> = {
   "chat.ctx.copy": "Copy",
   "chat.ctx.recall": "Recall",
   "chat.recalled": "Message recalled",
+  "chat.tag.sticker": "Sticker",
+  "chat.tag.image": "Image",
+  /** Thumbnail preview strip shown before sending */
+  "chat.preview.title": "Send preview",
+  "chat.preview.remove": "Remove this image",
+  "chat.preview.zoom": "Click to enlarge",
   "chat.recalledToast": "Recalled",
   "chat.copied": "Copied",
   "chat.err.recall": "Failed to recall",
@@ -2385,6 +2391,42 @@ export const en: Record<MessageKey, string> = {
   "chat.enterHintSend": "Enter to send",
   "chat.enterHintNewline": "Ctrl+Enter to send",
   "chat.enterHintTip": "Click to toggle: Enter to send / Enter for newline (Ctrl+Enter sends)",
+  /** Load-earlier pagination (Telegram-style offset paging, auto-loads near the top) */
+  "chat.loadingEarlier": "Loading earlier messages…",
+  "chat.scrollForEarlier": "Scroll up to load earlier messages",
+  "chat.noEarlier": "No earlier messages",
+  /** Jump-to-bottom floating button (only when away from the bottom) */
+  "chat.jumpToBottom": "Jump to bottom",
+  "chat.newMessages": "{n} new messages",
+  /** Typing indicator (throttled to 5s, delivered with the message poll) */
+  "chat.typingOne": "{name} is typing…",
+  "chat.typingMany": "{names} and {n} more are typing…",
+  /** Optimistic send failed — tap to retry */
+  "chat.sendFailed": "Send failed — tap to retry",
+  /** Day separator labels */
+  "chat.day.today": "Today",
+  "chat.day.yesterday": "Yesterday",
+  "chat.day.date": "{m}/{d}/{y}",
+  /** Click a quote block to jump back to the quoted message */
+  "chat.ctx.jump": "Jump to original message",
+  /** Failed-send bubble action: pull the text back into the input box */
+  "chat.ctx.edit": "Edit in input box",
+  /** Right-click menu: emoji reaction (expands a row of quick emojis) */
+  "chat.ctx.react": "React",
+  "chat.reactPick": "Pick a reaction",
+  /** Right-click menu: edit your own message (within 10 minutes) */
+  "chat.ctx.editMsg": "Edit",
+  "chat.editing": "Editing message",
+  "chat.edited": "edited",
+  /** Right-click menu: forward (opens target picker) */
+  "chat.ctx.forward": "Forward",
+  "chat.forwardTitle": "Forward to",
+  "chat.forwardedFrom": "Forwarded from {name}",
+  "chat.forwardedToast": "Forwarded",
+  "chat.forwardEmpty": "No conversations to forward to yet",
+  "chat.err.edit": "Failed to edit",
+  "chat.err.forward": "Failed to forward",
+  "chat.err.react": "Failed to react",
 
   // —— OAuth consent ——
   "oc.scope.openid.title": "Confirm your identity",
@@ -2532,6 +2574,9 @@ export const en: Record<MessageKey, string> = {
   "dmsg.err.open": "Couldn't open this conversation",
   "dmsg.err.self": "You can't message yourself",
   "dmsg.err.send": "Sending failed",
+  /** Peer typing state (peerTyping piggybacked on the list poll) */
+  "dmsg.typing": "The other person is typing…",
+  "dmsg.err.recall": "Failed to recall",
 
   "dmsg.title": "Direct messages",
   "dmsg.publicChat": "Public chat",

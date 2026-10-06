@@ -13,15 +13,34 @@ import { defineConfig } from "vite"
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: {
-      "@": path.resolve(import.meta.dirname, "./src"),
-    },
+    // 用数组形式：需要精确匹配（正则）的条目必须写成 find/replacement ——
+    // 对象 key 是前缀匹配，会把子路径一起误替换掉。
+    alias: [
+      { find: "@", replacement: path.resolve(import.meta.dirname, "./src") },
+      // jsmediatags 3.9.7 的 main 是 build2/（含 Node / ReactNative 读取器），
+      // 它 require('react-native-fs') —— 浏览器项目没有这个包；而它的
+      // package.json「字符串形式的 browser 字段」指向 dist/jsmediatags.js，
+      // 这个文件在 npm 包里压根不存在（只有 bower 包带 dist）。
+      // Rolldown（Vite 8 内核）不认这套老配置，裸 `import jsmediatags`
+      // 干净依赖下必现 UNRESOLVED 构建失败。ReactNative 读取器在浏览器里
+      // 永远不会被执行（真正用的是 BlobFileReader），钉个空模块过打包即可。
+      {
+        find: /^react-native-fs$/,
+        replacement: path.resolve(import.meta.dirname, "./src/lib/empty-module.ts"),
+      },
+    ],
   },
   server: {
-    // 本地开发时将 /api 代理到 wrangler dev 启动的 Worker
+    // 本地开发时将 /api 代理到 wrangler dev 启动的 Worker。
+    //
+    // ⚠️ target 必须写 127.0.0.1，**不要**写 localhost：Windows 上 Node 会把
+    // localhost 先解析成 IPv6 的 ::1，而 wrangler dev 只监听 IPv4 的
+    // 127.0.0.1:8787 —— 于是代理时不时 ECONNREFUSED，浏览器侧表现为
+    // `TypeError: Failed to fetch`（同一秒里另一个请求却可能成功，极难排查）。
+    // 显式钉住 IPv4 回环后请求稳定。
     proxy: {
       "/api": {
-        target: "http://localhost:8787",
+        target: "http://127.0.0.1:8787",
         changeOrigin: true,
       },
     },
