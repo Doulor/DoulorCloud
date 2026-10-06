@@ -43,6 +43,7 @@ import {
   jumpToBottom,
   newClientId,
   QUICK_REACTIONS,
+  removeImageFromBody,
   smoothScrollToBottom,
   summarizeBody,
 } from "@/lib/chat-fluent"
@@ -1470,8 +1471,21 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
             </button>
           </div>
         )}
-        {/* 表情包/图片实时预览：发送前就把 `![](url)` 渲染成真实缩略图 */}
-        <DraftImagePreview text={draft} />
+        {/* 表情包/图片实时预览：发送前把 `![](url)` 渲染成真实缩略图（点图放大、× 移除） */}
+        <DraftImagePreview
+          text={draft}
+          onRemove={(url) => {
+            const next = removeImageFromBody(draft, url)
+            setDraft(next)
+            if (draftKey) {
+              try {
+                localStorage.setItem(draftKey, next)
+              } catch {
+                /* 隐私模式下 localStorage 可能不可用，忽略 */
+              }
+            }
+          }}
+        />
         <div className="flex items-center gap-2">
         {/* 表情与表情包（与社区/私信同一套组件）。未登录时禁用 —— 反正发不出去 */}
         <EmojiPicker onPick={insertEmoji} />

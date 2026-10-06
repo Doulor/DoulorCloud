@@ -33,6 +33,7 @@ import { UserAvatar } from "@/components/user-avatar"
 import { cn } from "@/lib/utils"
 import { relTime } from "@/lib/format"
 import { setVisibleInterval } from "@/lib/visible-interval"
+import { DraftImagePreview } from "@/components/draft-image-preview"
 import { chatApi, dmApi, stickerApi, errMsg, HttpError } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
@@ -43,6 +44,7 @@ import {
   dayLabel,
   newClientId,
   QUICK_REACTIONS,
+  removeImageFromBody,
   smoothScrollToBottom,
   summarizeBody,
 } from "@/lib/chat-fluent"
@@ -1321,6 +1323,16 @@ export default function DmPage() {
                 </div>
               )}
 
+              {/* 表情包/图片实时预览：发送前看到真实缩略图（点图放大、× 移除） */}
+              <DraftImagePreview
+                text={text}
+                className="mx-3 mt-2"
+                onRemove={(url) => {
+                  const next = removeImageFromBody(text, url)
+                  setText(next)
+                  if (peerRef.current) saveDraft(peerRef.current, next)
+                }}
+              />
               <form
                 {...dropProps}
                 className={cn(

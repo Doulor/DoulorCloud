@@ -2300,6 +2300,10 @@ export const zh = {
   "chat.recalled": "消息已撤回",
   "chat.tag.sticker": "表情包",
   "chat.tag.image": "图片",
+  /** 发送前的缩略图预览条 */
+  "chat.preview.title": "发送预览",
+  "chat.preview.remove": "移除这张图",
+  "chat.preview.zoom": "点击放大",
   "chat.recalledToast": "已撤回",
   "chat.copied": "已复制",
   "chat.err.recall": "撤回失败",

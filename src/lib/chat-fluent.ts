@@ -168,3 +168,16 @@ export function summarizeBody(
     .replace(/\s+/g, " ")
     .trim()
 }
+
+/**
+ * 从草稿正文里删掉某张图片的 markdown（发送预览条上点「移除」时用）。
+ *
+ * 用户在输入框里看到的是一长串 `![](/api/stickers/<id>/image)`，让他手动
+ * 圈选删除很难受；预览条上点一下 × 就整段去掉（同一个地址出现多次时全部去掉，
+ * 语义是「这张图我不要了」）。顺带收拢多余空格，避免留下两个空格。
+ */
+export function removeImageFromBody(body: string, url: string): string {
+  const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const re = new RegExp(`!\\[[^\\]]*\\]\\(\\s*${escaped}(?:\\s+"[^"]*")?\\s*\\)[ \\t]*`, "g")
+  return body.replace(re, "").replace(/[ \t]{2,}/g, " ").trim()
+}

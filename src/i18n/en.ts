@@ -2379,6 +2379,10 @@ export const en: Record<MessageKey, string> = {
   "chat.recalled": "Message recalled",
   "chat.tag.sticker": "Sticker",
   "chat.tag.image": "Image",
+  /** Thumbnail preview strip shown before sending */
+  "chat.preview.title": "Send preview",
+  "chat.preview.remove": "Remove this image",
+  "chat.preview.zoom": "Click to enlarge",
   "chat.recalledToast": "Recalled",
   "chat.copied": "Copied",
   "chat.err.recall": "Failed to recall",

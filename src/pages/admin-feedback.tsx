@@ -49,6 +49,7 @@ import {
 } from "@/components/feedback-image"
 import { EmojiPicker } from "@/components/emoji-picker"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
+import { DraftImagePreview } from "@/components/draft-image-preview"
 import { useImageDrop } from "@/hooks/use-image-drop"
 import type { AdminFeedbackItem, AdminFeedbackOverview } from "@/types"
 import { useT, tStatic, translateApiMessage } from "@/i18n"
@@ -481,6 +482,7 @@ export function FeedbackPanel() {
                     }
                   }}
                 />
+                <DraftImagePreview text={replyText} className="mt-2" setText={setReplyText} />
                 <div className="flex items-center gap-1">
                   <EmojiPicker onPick={insertReplyEmoji} />
                 </div>
