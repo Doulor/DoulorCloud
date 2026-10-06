@@ -352,14 +352,19 @@ function ProductCard({
   onDetail?: (p: PointProduct) => void
 }) {
   const { t } = useT()
-  // 今日剩余：每日限量独立于总量库存 —— 总量不限（stock=null）也能有每日名额。
-  // dailySold 由后端按与下单计数相同的 UTC 日期口径带出，前端只做减法。
+  // 「总量售罄」与「今日名额用完」是**两件事**，必须分开判断：
+  //   · 总量售罄（stock<=0）→ 库存没了，说明天再来是错的，每日名额也失去意义；
+  //   · 今日名额用完 → 总量可能还有（甚至不限量），明天确实能买。
+  // 2026-10-06 用户反馈：「天卡卖完后还显示『今日剩 3 个』」—— 天卡 stock 已经是 0，
+  // 但 dailySold 当天是 0（今天没人买过），每日名额从 3 起算，于是「已售罄」和
+  // 「今日剩 3 个」两个徽标并排出现，看着就像卖完了还能买。
+  const stockSoldOut = product.stock !== null && product.stock <= 0
   const dailyRemaining =
     product.dailyLimit != null
       ? Math.max(0, product.dailyLimit - (product.dailySold ?? 0))
       : null
   const dailySoldOut = dailyRemaining != null && dailyRemaining <= 0
-  const soldOut = (product.stock !== null && product.stock <= 0) || dailySoldOut
+  const soldOut = stockSoldOut || dailySoldOut
   const tooExpensive = product.price > balance
   const isRental = product.billingMode === "rental"
   return (
@@ -397,7 +402,7 @@ function ProductCard({
             )}
             {product.stock !== null && (
               <Badge variant="outline" className="text-[10px]">
-                {soldOut
+                {stockSoldOut
                   ? isRental
                     ? t("pt.rentedOut")
                     : t("pt.soldOut")
@@ -406,7 +411,8 @@ function ProductCard({
                     : t("pt.leftPieces", { n: product.stock })}
               </Badge>
             )}
-            {product.dailyLimit != null && (
+            {/* 总量已售罄时不显示每日名额：库存都没了，还说「今日剩 N 个」是误导 */}
+            {product.dailyLimit != null && !stockSoldOut && (
               <Badge
                 variant="outline"
                 className={
@@ -463,12 +469,13 @@ function ProductCard({
             }}
           >
             {soldOut
-              ? dailySoldOut
-                ? // 每日名额用完：总量可能还有（甚至不限量），提示明天再来更准确
-                  t("pt.dailySoldOutBtn")
-                : isRental
+              ? stockSoldOut
+                ? // 总量售罄：别提「明天再来」—— 明天也没货
+                  isRental
                   ? t("pt.rentedOut")
                   : t("pt.soldOut")
+                : // 今日名额用完：总量可能还有（甚至不限量），明天确实能买
+                  t("pt.dailySoldOutBtn")
               : tooExpensive
                 ? t("pt.insufficientShort")
                 : isRental
@@ -2037,15 +2044,22 @@ export default function PointsPage() {
                   {detailTarget.perUserLimit
                     ? ` · ${t("pt.perUserLimit", { n: detailTarget.perUserLimit })}`
                     : ""}
-                  {detailTarget.dailyLimit != null
+                  {/* 与卡片同一口径：总量售罄优先 —— 库存都没了还说「今日剩 N 个」是误导 */}
+                  {detailTarget.stock !== null && detailTarget.stock <= 0
                     ? ` · ${
-                        detailTarget.dailyLimit - (detailTarget.dailySold ?? 0) > 0
-                          ? t("pt.dailyLeft", {
-                              n: Math.max(0, detailTarget.dailyLimit - (detailTarget.dailySold ?? 0)),
-                            })
-                          : t("pt.dailySoldOut")
+                        detailTarget.billingMode === "rental"
+                          ? t("pt.rentedOut")
+                          : t("pt.soldOut")
                       }`
-                    : ""}
+                    : detailTarget.dailyLimit != null
+                      ? ` · ${
+                          detailTarget.dailyLimit - (detailTarget.dailySold ?? 0) > 0
+                            ? t("pt.dailyLeft", {
+                                n: Math.max(0, detailTarget.dailyLimit - (detailTarget.dailySold ?? 0)),
+                              })
+                            : t("pt.dailySoldOut")
+                        }`
+                      : ""}
                 </span>
               </div>
               {detailTarget.description ? (
