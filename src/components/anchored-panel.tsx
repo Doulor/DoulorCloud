@@ -15,10 +15,13 @@
  * ⚠️ 面板是 `fixed` 定位、不跟随锚点，所以**滚动或缩放时直接关闭** ——
  * 比跟着锚点跑更省事，也不会出现「面板飘在原地、按钮已经滚走了」的错位。
  *
- * ⚠️ z-index 必须**高于 Dialog**（`ui/dialog.tsx` 用的 z-50），所以这里是 z-[60]。
- * 原先也是 z-50，结果「弹窗里的表情面板能显示但点不动」：两者同层，
- * Radix Dialog 的内容包了一层（z-50、DOM 顺序靠后）把面板盖住，
- * 点击全落到那层上 —— 2026-10-06 站长反馈「反馈里选 emoji 选不了」即此因。
+ * ⚠️ **必须带 `pointer-events-auto`**（2026-10-06 站长反馈「反馈里选 emoji 选不了」的根因）：
+ * Radix 的 Dialog 在 modal 模式下会给 **`body` 设 `pointer-events: none`**，
+ * 只让弹窗内部恢复 auto。而本面板是 Portal 到 body 的**兄弟节点**，会继承这个 none ——
+ * 于是「面板能显示、但点哪都没反应」，且 `elementFromPoint` 根本命不中它。
+ * ⚠️ 光把 z-index 抬高**解决不了**（z 只在参与命中后才有意义），必须显式恢复交互。
+ *
+ * ⚠️ z-index 也要**高于 Dialog**（`ui/dialog.tsx` 是 z-50），所以这里是 z-[60]；
  * 强制确认类弹窗（notice-ack / appeal-ack）是 z-[100]，仍在其上，符合预期。
  */
 import * as React from "react"
@@ -114,7 +117,7 @@ export function AnchoredPanel({
       // 没有这个标记的话点面板自身会被当成「点了外部」而立刻关掉
       data-anchored-panel=""
       style={{ position: "fixed", top: pos.top, left: pos.left, width, height }}
-      className="z-[60] flex flex-col rounded-xl border bg-popover p-2 shadow-lg"
+      className="pointer-events-auto z-[60] flex flex-col rounded-xl border bg-popover p-2 shadow-lg"
     >
       {children}
     </div>,

@@ -187,7 +187,9 @@ export function ImageLightbox({
       aria-modal="true"
       aria-label={dialogLabel}
       className={
-        "fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/80 p-4 " +
+        // pointer-events-auto：Radix Dialog 的 modal 模式会给 body 设 pointer-events:none，
+        // 而本灯箱是 Portal 到 body 的兄弟节点，会继承它 ⇒ 出现在弹窗里时「点不开也关不掉」。
+        "pointer-events-auto fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/80 p-4 " +
         (zoomed ? "cursor-grab" : "cursor-zoom-out")
       }
       onClick={(e) => {
