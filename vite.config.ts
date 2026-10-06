@@ -40,8 +40,17 @@ export default defineConfig({
     // 显式钉住 IPv4 回环后请求稳定。
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8787",
+        target: "https://127.0.0.1:8787",
         changeOrigin: true,
+        // wrangler dev 本地强制 https（worker 代码 http→https 301，且只监听 TLS），
+        // 自签证书必须关校验，否则代理报 SELF_SIGNED_CERT_IN_CHAIN
+        secure: false,
+      },
+      // 社区帖子图片（/c/<postId>/<filename>）也由 worker 服务，本地同样要代理
+      "/c": {
+        target: "https://127.0.0.1:8787",
+        changeOrigin: true,
+        secure: false,
       },
     },
   },

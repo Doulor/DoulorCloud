@@ -1209,6 +1209,47 @@ export async function uploadPostImage(env: Env, request: Request, id: string): P
 }
 
 /**
+ * DELETE /api/community/posts/:id/images/:filename —— 删除一张帖子图片。
+ *
+ * 为什么需要它（用户反馈 2026-10-06）：编辑帖子时此前只能往上加图，没有任何
+ * 删除入口 —— 传错的图永远挂在帖子上。Discourse 的做法是「删正文引用即可，
+ * 孤儿文件后台清理」；但本项目的帖子图片独立于正文存 `posts.images`（R2 key
+ * 数组），光从正文删 markdown 引用不会移除它，所以必须给编辑器一个真正的删除
+ * 接口：前端从 images 数组移除 + 这里删 R2 对象。
+ *
+ * 权限与上传一致（仅作者本人；管理员不走这个入口——编辑他人帖子属管理行为，
+ * 保持与 updatePost 的「作者或管理员」口径不同是刻意的：删图是不可逆的存储
+ * 操作，收窄到作者本人更稳）。限流与上传同档（每次都打 R2，计费操作）。
+ */
+export async function deletePostImage(env: Env, request: Request, id: string, filename: string): Promise<Response> {
+  const user = await requireCommunityUser(env, request)
+  // filename 与读取接口（serveCommunityImage）同规则，防路径穿越
+  if (!/^[a-zA-Z0-9-]+\.(jpg|jpeg|png|webp|gif)$/i.test(filename)) {
+    throw new ApiError(404, "图片不存在", "NOT_FOUND")
+  }
+  await guardRateLimit(env, `post-image-del:${user.id}`, 40, 60, "操作过于频繁")
+  const post = await env.DB.prepare("SELECT user_id, images FROM posts WHERE id=? AND deleted_at IS NULL")
+    .bind(id).first<{ user_id: string; images: string | null }>()
+  if (!post) throw new ApiError(404, "帖子不存在", "NOT_FOUND")
+  if (post.user_id !== user.id) throw new ApiError(403, "无权", "FORBIDDEN")
+
+  const key = `community/${id}/${filename}`
+  let images: string[] = []
+  if (post.images) {
+    try { images = JSON.parse(post.images) as string[] } catch { images = [] }
+  }
+  if (!images.includes(key)) throw new ApiError(404, "图片不存在", "NOT_FOUND")
+
+  const bucketId = await getPlatformBucketId(env)
+  await deleteObject(env, key, bucketId)
+  const next = images.filter((k) => k !== key)
+  await env.DB.prepare("UPDATE posts SET images = ? WHERE id = ?")
+    .bind(next.length > 0 ? JSON.stringify(next) : null, id).run()
+
+  return json({ ok: true, remaining: next.length })
+}
+
+/**
  * GET /api/community/stats —— 社区动态概览（匿名可读）。
  * 右侧动态栏用：今日新帖数、本周活跃用户（发帖最多 top 5）、帖子总数。
  *

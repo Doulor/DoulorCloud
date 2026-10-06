@@ -2035,6 +2035,12 @@ export const communityApi = {
       method: "POST", body: file, headers,
     })
   },
+  /** 编辑帖子时删除一张帖子图片（后端同时删 R2 对象并从 posts.images 移除） */
+  deletePostImage: (postId: string, filename: string) =>
+    request<{ ok: boolean; remaining: number }>(
+      `/community/posts/${encodeURIComponent(postId)}/images/${encodeURIComponent(filename)}`,
+      { method: "DELETE" }
+    ),
   toggleLike: (id: string) =>
     request<{ liked: boolean; likeCount: number }>(`/community/posts/${encodeURIComponent(id)}/like`, { method: "POST" }),
   toggleCommentLike: (id: string) =>

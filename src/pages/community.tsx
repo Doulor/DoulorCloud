@@ -13,6 +13,7 @@ import { RoleBadge } from "@/components/role-badge"
 import { CustomTitleBadge } from "@/components/custom-title-badge"
 import { Markdown } from "@/components/markdown"
 import { DraftImagePreview } from "@/components/draft-image-preview"
+import { MdComposer } from "@/components/md-composer"
 import { EmojiPicker } from "@/components/emoji-picker"
 import { StickerPanel } from "@/components/sticker-panel"
 import { Button } from "@/components/ui/button"
@@ -841,6 +842,9 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
   const [editing, setEditing] = React.useState(false)
   const [editText, setEditText] = React.useState("")
   const [editBusy, setEditBusy] = React.useState(false)
+  // 编辑期间的帖子图片本地副本（删一张立即从网格消失，保存与否互不影响）
+  const [editImages, setEditImages] = React.useState<string[]>([])
+  const editTaRef = React.useRef<HTMLTextAreaElement>(null)
   // 编辑历史（时间列表）
   const [edits, setEdits] = React.useState<{ editedAt: string }[]>([])
   const [editsOpen, setEditsOpen] = React.useState(false)
@@ -941,6 +945,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
   const startEdit = () => {
     if (!post) return
     setEditText(post.body)
+    setEditImages(post.images)
     setEditing(true)
   }
 
@@ -958,10 +963,10 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
     setEditBusy(true)
     try {
       await communityApi.updatePost(post.id, editText.trim())
-      // 更新本地 post
+      // 更新本地 post（图片可能在编辑期间被删过，同步最新列表）
       setPost((p) =>
         p
-          ? { ...p, body: editText.trim(), updatedAt: new Date().toISOString(), editCount: p.editCount + 1 }
+          ? { ...p, body: editText.trim(), images: editImages, updatedAt: new Date().toISOString(), editCount: p.editCount + 1 }
           : p
       )
       setEditing(false)
@@ -1069,16 +1074,16 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
         </div>
         <div className="min-w-0 p-4">
           {editing ? (
-            <div
-              {...dropProps}
-              className={cn("relative space-y-2", dragging && "rounded-md ring-2 ring-primary")}
-            >
-              <Textarea
+            <div className="space-y-2">
+              <MdComposer
                 value={editText}
-                onChange={(e) => setEditText(e.target.value)}
-                rows={5}
-                className="text-sm"
+                onChange={setEditText}
+                textareaRef={editTaRef}
                 placeholder={t("cm.editPh")}
+                rows={5}
+                postId={post.id}
+                postImages={editImages}
+                onPostImagesChange={setEditImages}
               />
               <div className="flex items-center gap-2">
                 <Button size="sm" onClick={() => void submitEdit()} disabled={editBusy}>
@@ -1306,9 +1311,6 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
 
   const insertEmoji = useEmojiInsert(taRef, draft, setDraft)
 
-  /** 拖入 / 粘贴图片：上传后把 `![](url)` 插到光标处 */
-  const { dragging, dropProps } = useImageDrop({ onImage: insertEmoji })
-
   const submit = async () => {
     if (!draft.trim() && images.length === 0) return
     setBusy(true)
@@ -1358,10 +1360,8 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
 
   return (
     <div
-      {...dropProps}
       className={cn(
-        "relative mb-5 rounded-xl border bg-card p-4",
-        dragging && "ring-2 ring-primary"
+        "relative mb-5 rounded-xl border bg-card p-4"
       )}
     >
       <div className="mb-2.5 flex items-center gap-2">
@@ -1385,20 +1385,15 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
           )}
         </div>
       ) : (
-        <Textarea
-          ref={taRef}
-          autoFocus
+        <MdComposer
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={setDraft}
+          textareaRef={taRef}
           placeholder={t("cm.postPh")}
           rows={4}
-          className="resize-none border-0 px-0 text-sm focus-visible:ring-0"
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-              e.preventDefault()
-              void submit()
-            }
-          }}
+          autoFocus
+          className="border-0"
+          onCmdEnter={() => void submit()}
         />
       )}
 
