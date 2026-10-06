@@ -16,7 +16,6 @@
  * 预览数据来自后端（服务端抓取，避免浏览器 CORS），并有模块级缓存去重。
  */
 import * as React from "react"
-import { createPortal } from "react-dom"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkBreaks from "remark-breaks"
@@ -27,6 +26,7 @@ import { communityApi, stickerApi, errMsg } from "@/services/api"
 import { GitHubMark, isGitHubUrl } from "@/components/github-mark"
 import { useAuth } from "@/hooks/use-auth"
 import { useT, tStatic } from "@/i18n"
+import { ImageLightbox } from "@/components/image-lightbox"
 import type { LinkPreview } from "@/types"
 
 /** 链接预览的模块级缓存：同一链接在同一页面只请求一次 */
@@ -353,16 +353,16 @@ function StickerImage({
           </span>
         )}
       </span>
-      {zoom &&
-        createPortal(
-          <div
-            className="fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center bg-black/80 p-6"
-            onClick={() => setZoom(false)}
-          >
-            <img src={src} alt={alt} className="max-h-full max-w-full rounded-lg shadow-2xl" />
-          </div>,
-          document.body
-        )}
+      {zoom && (
+        <ImageLightbox
+          src={src}
+          alt={alt}
+          onClose={() => setZoom(false)}
+          dialogLabel={t("feedback.preview")}
+          closeLabel={t("feedback.closePreview")}
+          zoomHint={t("lightbox.hint")}
+        />
+      )}
     </>
   )
 }

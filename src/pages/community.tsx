@@ -30,8 +30,11 @@ import { useEmojiInsert } from "@/hooks/use-emoji-insert"
 import { useImageDrop } from "@/hooks/use-image-drop"
 import { cn } from "@/lib/utils"
 import { useAttentionCounts } from "@/lib/attention-context"
+import { onMessagesChanged, notifyMessagesChanged } from "@/lib/message-events"
+import { socialNotifIcon, socialNotifText } from "@/lib/notification-meta"
 import { communityApi, notificationApi, HttpError, errMsg } from "@/services/api"
 import { compressImage } from "@/lib/image-compress"
+import { ImageLightbox } from "@/components/image-lightbox"
 import { fmtTime, relTime } from "@/lib/format"
 import type { Post, CommentNode, CommunityStats, Notification, PostCategory } from "@/types"
 import { useT } from "@/i18n"
@@ -118,18 +121,6 @@ function LazyImage({
 function PostImages({ images }: { images: string[] }) {
   const { t } = useT()
   const [preview, setPreview] = React.useState<number | null>(null)
-  const closeRef = React.useRef<HTMLButtonElement>(null)
-
-  // ESC 关闭预览
-  React.useEffect(() => {
-    if (preview === null) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPreview(null)
-    }
-    document.addEventListener("keydown", onKey)
-    closeRef.current?.focus()
-    return () => document.removeEventListener("keydown", onKey)
-  }, [preview])
 
   if (images.length === 0) return null
 
@@ -165,28 +156,14 @@ function PostImages({ images }: { images: string[] }) {
         ))}
       </div>
       {current && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("feedback.preview")}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
-          onClick={() => setPreview(null)}
-        >
-          <img
-            src={current}
-            alt={t("cm.postImageNth", { n: (preview ?? 0) + 1 })}
-            className="max-h-full max-w-full rounded-lg object-contain"
-          />
-          <button
-            ref={closeRef}
-            type="button"
-            className="absolute right-4 top-4 rounded-full bg-white/10 p-2 text-white hover:bg-white/20"
-            onClick={() => setPreview(null)}
-            aria-label={t("feedback.closePreview")}
-          >
-            <X className="h-5 w-5" aria-hidden="true" />
-          </button>
-        </div>
+        <ImageLightbox
+          src={current}
+          alt={t("cm.postImageNth", { n: (preview ?? 0) + 1 })}
+          onClose={() => setPreview(null)}
+          dialogLabel={t("feedback.preview")}
+          closeLabel={t("feedback.closePreview")}
+          zoomHint={t("lightbox.hint")}
+        />
       )}
     </>
   )
