@@ -34,7 +34,21 @@ const IMAGE_TYPES: Record<string, string> = {
   "image/webp": "webp",
   "image/gif": "gif",
 }
-const CHAT_IMG_KEY_RE = /^chat\/([0-9a-f-]{36})\/([A-Za-z0-9-]+\.(?:jpg|png|webp|gif))$/i
+/**
+ * key → URL 的解析规则。**用户 id 有两种长度，必须都收**：
+ *   · 36 位标准 UUID（`crypto.randomUUID()`，绝大多数账号，1370 个）
+ *   · 32 位无横线 hex（早期建的账号，线上只有站长 `Doulor`）
+ *
+ * ⚠️ 2026-10-06 修：原先写死 `{36}` 只认标准 UUID ⇒ 站长的图上传后
+ * `chatImageKeyToUrl` 匹配失败返回**空串**，前端往输入框插的是 `![]()`，
+ * 表现为「粘贴图片变成空占位符」。同一天 `serveChatImage` 的只读校验也有同样问题
+ * （即使 URL 对了也会 404）。
+ */
+const USER_ID_PATTERN = "[0-9a-f-]{32,36}"
+const CHAT_IMG_KEY_RE = new RegExp(
+  `^chat/(${USER_ID_PATTERN})/([A-Za-z0-9-]+\\.(?:jpg|png|webp|gif))$`,
+  "i"
+)
 
 /** 由 key 还原出可引用的 URL（前端把它塞进 markdown 的 `![]()` 里） */
 export function chatImageKeyToUrl(key: string): string {
@@ -93,7 +107,11 @@ export async function serveChatImage(
   if (!/^[A-Za-z0-9-]+\.(jpg|jpeg|png|webp|gif)$/i.test(filename)) {
     return new Response("Not Found", { status: 404 })
   }
-  if (!/^[0-9a-f-]{36}$/i.test(userId)) return new Response("Not Found", { status: 404 })
+  // ⚠️ userId 必须与 CHAT_IMG_KEY_RE 用同一套规则（32 或 36 位），否则
+  // 早期建的 32 位 id 账号传的图「能上传但读不出来」，一律 404。
+  if (!new RegExp(`^${USER_ID_PATTERN}$`, "i").test(userId)) {
+    return new Response("Not Found", { status: 404 })
+  }
   if (!(await isStorageConfigured(env))) return new Response("Not Found", { status: 404 })
 
   const bucketId = await getPlatformBucketId(env)

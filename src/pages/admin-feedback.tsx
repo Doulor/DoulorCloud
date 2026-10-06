@@ -48,6 +48,7 @@ import {
   ImageGallery,
 } from "@/components/feedback-image"
 import { EmojiPicker } from "@/components/emoji-picker"
+import { StickerPanel } from "@/components/sticker-panel"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
 import { useImageDrop } from "@/hooks/use-image-drop"
 import type { AdminFeedbackItem, AdminFeedbackOverview } from "@/types"
@@ -483,6 +484,9 @@ export function FeedbackPanel() {
                 />
                 <div className="flex items-center gap-1">
                   <EmojiPicker onPick={insertReplyEmoji} />
+                  {/* 表情包：与用户端提交反馈、社区、私信保持一致的入口
+                      （2026-10-06 站长反馈「反馈里只有 emoji、没有表情包」） */}
+                  <StickerPanel onPick={insertReplyEmoji} />
                 </div>
                 <ImagePickerField
                   images={replyImages.images}

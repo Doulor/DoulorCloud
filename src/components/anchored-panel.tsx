@@ -14,6 +14,12 @@
  *
  * ⚠️ 面板是 `fixed` 定位、不跟随锚点，所以**滚动或缩放时直接关闭** ——
  * 比跟着锚点跑更省事，也不会出现「面板飘在原地、按钮已经滚走了」的错位。
+ *
+ * ⚠️ z-index 必须**高于 Dialog**（`ui/dialog.tsx` 用的 z-50），所以这里是 z-[60]。
+ * 原先也是 z-50，结果「弹窗里的表情面板能显示但点不动」：两者同层，
+ * Radix Dialog 的内容包了一层（z-50、DOM 顺序靠后）把面板盖住，
+ * 点击全落到那层上 —— 2026-10-06 站长反馈「反馈里选 emoji 选不了」即此因。
+ * 强制确认类弹窗（notice-ack / appeal-ack）是 z-[100]，仍在其上，符合预期。
  */
 import * as React from "react"
 import { createPortal } from "react-dom"
@@ -108,7 +114,7 @@ export function AnchoredPanel({
       // 没有这个标记的话点面板自身会被当成「点了外部」而立刻关掉
       data-anchored-panel=""
       style={{ position: "fixed", top: pos.top, left: pos.left, width, height }}
-      className="z-50 flex flex-col rounded-xl border bg-popover p-2 shadow-lg"
+      className="z-[60] flex flex-col rounded-xl border bg-popover p-2 shadow-lg"
     >
       {children}
     </div>,
