@@ -34,6 +34,7 @@ import {
 import { sendMail, renderMail, parseBrevoKeys } from "../mailer"
 import { fetchWithTimeout } from "../async-utils"
 import { cfListDestinations } from "../cloudflare"
+import { likeContains } from "../sql-like"
 import { normalizePermissions, parsePermissions, FEATURES, type Permissions } from "../permissions"
 import { normalizeEmailDomains } from "../email-domains"
 import { normalizeCheckinMilestones } from "../checkin-config"
@@ -44,6 +45,9 @@ import {
 } from "../identity"
 import { listReservedSubdomains } from "../reserved-names"
 import { getSettingNumber } from "../settings"
+// 帖子分类的归一化：与读取侧（community.ts 的 postCategoryDefs）用同一份实现，
+// 避免「存进去的规则」和「读出来的规则」分家 —— 那种不一致极难排查。
+import { parsePostCategories } from "./community"
 import {
   QUOTA_FEATURES,
   QUOTA_FEATURE_LABELS,
@@ -495,36 +499,84 @@ function parseJsonArray(raw: string | null): number[] {
 }
 
 // GET /api/admin/users —— 用户列表
+// 2026-10-08 性能：实测（1399 用户）该接口 ~1.7s 才回首字节，大头是**串行 D1 往返**
+// （权限 1 次 + 主查询 1 次 + 注销留痕 1 次）。两处改法：
+//   1. 主查询 / 注销留痕 / 分页计数改 `batch()` —— 3 次往返合成 1 次（省 ~400ms）；
+//   2. 支持 ?limit=&offset=&q= 服务端分页搜索（**不传 = 维持旧行为返回全量**，
+//      管理页旧前端不受影响；传了则只回该页数据 + total，供新前端做真分页）。
+//      搜索按用户名/邮箱/命名空间过滤；用户输入进 LIKE 一律走 likeContains
+//      （D1 模式超 50 字符直接 500，见 sql-like.ts）。
 export async function listUsers(env: Env, request: Request): Promise<Response> {
   await requireAdminScope(env, request, "users.view")
-  const rows = await env.DB.prepare(
-    // 列表只展示「各模块是否已开通」与「名片是否已启用」，不再回传子域名/DNS/
-    // 邮箱/邮件的计数 —— 那些明细在用户详情里看。四个模块的判定与各 handler
-    // 里的 isActivated / loadAccount 完全一致（有记录 **且** enabled=1）。
-    `SELECT u.id, u.uid, u.username, u.email, u.namespace, u.role, u.status, u.permissions, u.max_subdomains, u.created_at,
-            u.invite_code_id,
-            ic.code AS invite_code,
-            ic.created_at AS invite_created_at,
-            creator.username AS invite_created_by,
-            EXISTS(SELECT 1 FROM storage_accounts sa WHERE sa.user_id = u.id AND sa.enabled = 1) AS storage_on,
-            EXISTS(SELECT 1 FROM newapi_accounts na WHERE na.user_id = u.id) AS ai_on,
-            EXISTS(SELECT 1 FROM frp_accounts fa WHERE fa.user_id = u.id AND fa.enabled = 1) AS frp_on,
-            EXISTS(SELECT 1 FROM proxy_activation pa WHERE pa.user_id = u.id AND pa.enabled = 1) AS proxy_on,
-            p.published AS profile_published,
-            p.slug AS profile_slug,
-            p.fqdn AS profile_fqdn,
-            -- 注册时用的 IP：没存在 users 表上，只在 audit_logs 的 register 记录里（取最早一条）
-            (SELECT a.ip FROM audit_logs a
-              WHERE a.user_id = u.id AND a.action = 'register'
-              ORDER BY a.created_at ASC LIMIT 1) AS register_ip
-       FROM users u
-       LEFT JOIN invite_codes ic ON ic.id = u.invite_code_id
-       LEFT JOIN users creator ON creator.id = ic.created_by
-       LEFT JOIN profiles p ON p.user_id = u.id
-      ORDER BY u.created_at DESC`
-  ).all()
+  const url = new URL(request.url)
+  const rawQ = (url.searchParams.get("q") ?? "").trim()
+  const like = likeContains(rawQ)
+  const hasPage = url.searchParams.has("limit") || url.searchParams.has("offset")
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200)
+  const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0)
 
-  const activeUsers = (rows.results ?? []).map((r: Record<string, unknown>) => ({
+  // 搜索条件（有 q 时启用；用户名/邮箱/命名空间任一命中）
+  const qWhere = rawQ ? " WHERE (u.username LIKE ? OR u.email LIKE ? OR u.namespace LIKE ?)" : ""
+  const qBinds: unknown[] = rawQ ? [like, like, like] : []
+  const pageSuffix = hasPage ? " LIMIT ? OFFSET ?" : ""
+  const pageBinds: unknown[] = hasPage ? [limit, offset] : []
+
+  const [mainRes, tombRes, countRes] = await env.DB.batch([
+    env.DB.prepare(
+      // 列表只展示「各模块是否已开通」与「名片是否已启用」，不再回传子域名/DNS/
+      // 邮箱/邮件的计数 —— 那些明细在用户详情里看。四个模块的判定与各 handler
+      // 里的 isActivated / loadAccount 完全一致（有记录 **且** enabled=1）。
+      `SELECT u.id, u.uid, u.username, u.email, u.namespace, u.role, u.status, u.permissions, u.max_subdomains, u.created_at,
+              u.invite_code_id,
+              ic.code AS invite_code,
+              ic.created_at AS invite_created_at,
+              creator.username AS invite_created_by,
+              EXISTS(SELECT 1 FROM storage_accounts sa WHERE sa.user_id = u.id AND sa.enabled = 1) AS storage_on,
+              EXISTS(SELECT 1 FROM newapi_accounts na WHERE na.user_id = u.id) AS ai_on,
+              EXISTS(SELECT 1 FROM frp_accounts fa WHERE fa.user_id = u.id AND fa.enabled = 1) AS frp_on,
+              EXISTS(SELECT 1 FROM proxy_activation pa WHERE pa.user_id = u.id AND pa.enabled = 1) AS proxy_on,
+              p.published AS profile_published,
+              p.slug AS profile_slug,
+              p.fqdn AS profile_fqdn,
+              -- 注册时用的 IP：没存在 users 表上，只在 audit_logs 的 register 记录里（取最早一条）
+              (SELECT a.ip FROM audit_logs a
+                WHERE a.user_id = u.id AND a.action = 'register'
+                ORDER BY a.created_at ASC LIMIT 1) AS register_ip
+         FROM users u
+         LEFT JOIN invite_codes ic ON ic.id = u.invite_code_id
+         LEFT JOIN users creator ON creator.id = ic.created_by
+         LEFT JOIN profiles p ON p.user_id = u.id${qWhere}
+        ORDER BY u.created_at DESC${pageSuffix}`
+    ).bind(...qBinds, ...pageBinds),
+    // 已注销/被删的用户：留痕行只读地附在后面（见下方 deletedUsers 的映射）。
+    // 带 q 搜索时留痕行也按同条件过滤 —— 否则搜索结果后面会跟一串无关的注销用户。
+    // ⚠️ 分页模式（hasPage）下留痕**只在第一页附**：它不参与 total、也不参与
+    // LIMIT/OFFSET 切页，若每页都带会在翻页中反复出现（2026-10-08 修）。
+    // 留痕量很小（目前 20 行）且封顶 50，全附在第一页即可。
+    hasPage && offset > 0
+      ? env.DB.prepare(
+          `SELECT NULL AS id, NULL AS uid, NULL AS username, NULL AS email, NULL AS namespace,
+              NULL AS role, NULL AS reason, NULL AS created_at, NULL AS deleted_at WHERE 0`
+        )
+      : rawQ
+        ? env.DB.prepare(
+            `SELECT id, uid, username, email, namespace, role, reason, created_at, deleted_at
+               FROM deleted_users
+              WHERE (username LIKE ? OR email LIKE ? OR (namespace IS NOT NULL AND namespace LIKE ?))
+              ORDER BY deleted_at DESC LIMIT 50`
+          ).bind(like, like, like)
+        : env.DB.prepare(
+            `SELECT id, uid, username, email, namespace, role, reason, created_at, deleted_at
+               FROM deleted_users
+              ORDER BY deleted_at DESC LIMIT 50`
+          ),
+    // 分页版才需要 total（给前端算总页数）；全量版这条就是个占位（不取值）
+    hasPage
+      ? env.DB.prepare(`SELECT COUNT(*) AS c FROM users u${qWhere}`).bind(...qBinds)
+      : env.DB.prepare("SELECT 1 AS x"),
+  ])
+  const rows = mainRes
+  const activeUsers = (((rows.results ?? []) as unknown as Record<string, unknown>[]).map((r) => ({
     id: r.id,
     // 按注册顺序的展示用编号（migration 0070 加的 users.uid）；老数据可能为 null
     uid: (r.uid as number | null) ?? null,
@@ -554,25 +606,24 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
     deleted: false,
     deletedAt: null as string | null,
     deletedReason: null as string | null,
-  }))
+  })))
 
   // 已注销/被删的用户：从 deleted_users 取留痕，作为只读行附在列表末尾。
   // 这样管理员能查到「某人注销过」，但用户名/邮箱已释放、可被重新注册。
-  const tombstones = await env.DB.prepare(
-    `SELECT id, uid, username, email, namespace, role, reason, created_at, deleted_at
-       FROM deleted_users
-      ORDER BY deleted_at DESC`
-  ).all<{
-    id: string
-    uid: number | null
-    username: string
-    email: string
-    namespace: string | null
-    role: string | null
-    reason: string
-    created_at: string | null
-    deleted_at: string
-  }>()
+  // （2026-10-08：已并入上面的 batch，结果在 tombRes 里）
+  const tombstones = tombRes as unknown as {
+    results?: {
+      id: string
+      uid: number | null
+      username: string
+      email: string
+      namespace: string | null
+      role: string | null
+      reason: string
+      created_at: string | null
+      deleted_at: string
+    }[]
+  }
 
   const deletedUsers = (tombstones.results ?? []).map((t) => ({
     id: t.id,
@@ -602,7 +653,21 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
     deletedReason: t.reason,
   }))
 
-  return json({ users: [...activeUsers, ...deletedUsers] })
+  return json({
+    users: [...activeUsers, ...deletedUsers],
+    // 分页信息：只有显式带 limit/offset 的请求才有意义（旧调用方忽略即可）
+    ...(hasPage
+      ? {
+          total: Number(
+            ((countRes as unknown as { results?: { c: number }[] }).results?.[0] as
+              | { c: number }
+              | undefined)?.c ?? activeUsers.length
+          ),
+          limit,
+          offset,
+        }
+      : {}),
+  })
 }
 
 // GET /api/admin/users/:username —— 用户详情（子域名/DNS/邮箱/邮件/会话）
@@ -610,6 +675,48 @@ export async function getUser(env: Env, request: Request, username: string): Pro
   await requireAdminScope(env, request, "users.view")
   const user = await targetUser(env, username)
   return json(await userDetail(env, user))
+}
+
+/**
+ * GET /api/admin/users/:username/activity?offset=0&limit=20
+ * 用户详情的「最近活动」分页（2026-10-07 站长要求：支持查看更多 + 懒加载）。
+ * 默认 20 条、最多 100 条；返回 hasMore 让前端决定还要不要给「加载更多」。
+ * 顺带把审计日志的 IP 带出来 —— 排查滥用时 IP 是关键线索。
+ */
+export async function getUserActivity(
+  env: Env,
+  request: Request,
+  username: string
+): Promise<Response> {
+  await requireAdminScope(env, request, "users.view")
+  const user = await targetUser(env, username)
+
+  const url = new URL(request.url)
+  const offset = Math.max(0, Math.trunc(Number(url.searchParams.get("offset")) || 0))
+  const limitRaw = Math.trunc(Number(url.searchParams.get("limit")) || 20)
+  const limit = Math.min(Math.max(1, limitRaw), 100)
+
+  // 多取一条用于判断「还有没有下一页」，省一次 count 查询
+  const rows = await env.DB.prepare(
+    `SELECT id, action, detail, ip, created_at
+       FROM audit_logs WHERE user_id = ?
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?`
+  )
+    .bind(user.id, limit + 1, offset)
+    .all<{ id: string; action: string; detail: string | null; ip: string | null; created_at: string }>()
+
+  const all = rows.results ?? []
+  const hasMore = all.length > limit
+  const activity = all.slice(0, limit).map((a) => ({
+    id: a.id,
+    action: a.action,
+    detail: a.detail ?? "",
+    ip: a.ip ?? null,
+    createdAt: a.created_at,
+  }))
+
+  return json({ activity, hasMore, offset, limit })
 }
 
 // PUT /api/admin/users/:username —— 更新用户状态（封禁/解封/设管理员/昵称等）
@@ -1063,7 +1170,7 @@ interface InviteRow {
   created_at: string
 }
 
-function toPublicInvite(row: InviteRow) {
+function toPublicInvite(row: InviteRow & { created_by_name?: string | null }) {
   return {
     id: row.id,
     code: row.code,
@@ -1073,17 +1180,140 @@ function toPublicInvite(row: InviteRow) {
     permissions: parsePermissions(row.permissions),
     createdAt: row.created_at,
     createdBy: row.created_by ?? null,
+    /** 创建者用户名（LEFT JOIN 带出；老数据 created_by 为空时为 null） */
+    createdByName: row.created_by_name ?? null,
   }
 }
 
-// GET /api/admin/invites —— 邀请码列表
+// GET /api/admin/invites —— 邀请码列表（带创建者用户名，便于直接在列表里溯源）
 export async function listInvites(env: Env, request: Request): Promise<Response> {
   await requireAdminScope(env, request, "invites")
   const rows = await env.DB.prepare(
-    "SELECT * FROM invite_codes ORDER BY created_at DESC"
-  ).all<InviteRow>()
+    `SELECT c.*, u.username AS created_by_name
+       FROM invite_codes c
+       LEFT JOIN users u ON u.id = c.created_by
+      ORDER BY c.created_at DESC`
+  ).all<InviteRow & { created_by_name: string | null }>()
 
   return json({ invites: (rows.results ?? []).map(toPublicInvite) })
+}
+
+/**
+ * GET /api/admin/invites/:id/trace —— 邀请码溯源（2026-10-07 站长要求）。
+ *
+ * 回答四个问题：**谁建的、什么时候建的、谁用了、什么时候用的**，
+ * 并顺带把每个使用者的**注册 IP** 与创建者的注册 IP 一起给出 ——
+ * 同 IP 就是「一人多号」的硬证据（站长反馈：滥用者会刻意换 IP 规避，
+ * 所以一旦出现同 IP，基本可以确定）。
+ *
+ * `id` 参数同时接受**邀请码 id** 和**邀请码字符串**（DC-XXXX 形式）：
+ * 用户列表里只存了码字符串，点码即查，不必先换成 id。
+ */
+export async function traceInvite(
+  env: Env,
+  request: Request,
+  idOrCode: string
+): Promise<Response> {
+  await requireAdminScope(env, request, "invites")
+
+  const code = await env.DB.prepare(
+    "SELECT * FROM invite_codes WHERE id = ? OR code = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(idOrCode, idOrCode)
+    .first<InviteRow>()
+  if (!code) throw new ApiError(404, "邀请码不存在", "NOT_FOUND")
+
+  /** 取某个用户的注册 IP（audit_logs 里最早那条 register） */
+  const regIpSql =
+    "(SELECT a.ip FROM audit_logs a WHERE a.user_id = u.id AND a.action = 'register' ORDER BY a.created_at ASC LIMIT 1)"
+
+  const creator = code.created_by
+    ? await env.DB.prepare(
+        `SELECT u.id, u.username, u.email, u.uid, u.status, u.role, u.created_at,
+                ${regIpSql} AS register_ip
+           FROM users u WHERE u.id = ?`
+      )
+        .bind(code.created_by)
+        .first<{
+          id: string
+          username: string
+          email: string
+          uid: number | null
+          status: string
+          role: string
+          created_at: string
+          register_ip: string | null
+        }>()
+    : null
+
+  const usedRows = await env.DB.prepare(
+    `SELECT u.id, u.username, u.email, u.uid, u.status, u.role, u.created_at,
+            ${regIpSql} AS register_ip
+       FROM users u
+      WHERE u.invite_code_id = ?
+      ORDER BY u.created_at ASC`
+  )
+    .bind(code.id)
+    .all<{
+      id: string
+      username: string
+      email: string
+      uid: number | null
+      status: string
+      role: string
+      created_at: string
+      register_ip: string | null
+    }>()
+
+  const users = (usedRows.results ?? []).map((u) => ({
+    id: u.id,
+    username: u.username,
+    email: u.email,
+    uid: u.uid ?? null,
+    status: u.status,
+    role: u.role,
+    usedAt: u.created_at,
+    registerIp: u.register_ip ?? null,
+  }))
+
+  // 同 IP 分组：创建者与使用者之间、以及使用者互相之间
+  const ipGroups: Record<string, string[]> = {}
+  const push = (ip: string | null, name: string) => {
+    if (!ip) return
+    ;(ipGroups[ip] = ipGroups[ip] || []).push(name)
+  }
+  if (creator) push(creator.register_ip, creator.username)
+  for (const u of users) push(u.registerIp, u.username)
+  const sharedIps = Object.entries(ipGroups)
+    .filter(([, names]) => names.length >= 2)
+    .map(([ip, names]) => ({ ip, names }))
+
+  return json({
+    invite: {
+      id: code.id,
+      code: code.code,
+      maxUses: code.max_uses,
+      usedCount: code.used_count,
+      expiresAt: code.expires_at,
+      permissions: parsePermissions(code.permissions),
+      createdAt: code.created_at,
+    },
+    creator: creator
+      ? {
+          id: creator.id,
+          username: creator.username,
+          email: creator.email,
+          uid: creator.uid ?? null,
+          status: creator.status,
+          role: creator.role,
+          createdAt: creator.created_at,
+          registerIp: creator.register_ip ?? null,
+        }
+      : null,
+    users,
+    /** 至少 2 个账号共用的注册 IP（一人多号信号） */
+    sharedIps,
+  })
 }
 
 // POST /api/admin/invites —— 创建邀请码
@@ -1720,6 +1950,26 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
         .filter(Boolean)
         .map((s) => s.slice(0, 16))
       values[key] = parts.join(",").slice(0, 500)
+      continue
+    }
+
+    // post_categories：帖子分类（JSON 数组，管理面板可配，2026-10-07）。
+    //
+    // ⚠️ 必须单独处理：通用兜底会把它**截断到 100 字符**，而 4 个分类的 JSON 就有 ~250 字符
+    //    —— 截断后 JSON 直接损坏，读取侧只能回落默认，表现成
+    //    「管理员改了、点了保存、看着也成功了，但线上一点没变」。
+    // 归一化用 community.ts 的 parsePostCategories（**与读取侧同一份实现**）：
+    // 非法项当场丢弃；整份都不合法则**拒绝保存**（而不是默默存个坏值让读取侧回落）。
+    if (key === "post_categories") {
+      const parsed = parsePostCategories(String(raw))
+      if (parsed.length === 0) {
+        throw new ApiError(
+          400,
+          "帖子分类至少要有 1 个合法分类（标识只用小写字母/数字/下划线/连字符，不能重复，且至少填一个名字）",
+          "INVALID_INPUT"
+        )
+      }
+      values[key] = JSON.stringify(parsed)
       continue
     }
 

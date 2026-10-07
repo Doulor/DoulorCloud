@@ -3,6 +3,8 @@ import { Link } from "react-router-dom"
 import {
   Ban,
   Compass,
+  ChevronLeft,
+  ChevronRight,
   KeyRound,
   Loader2,
   Ticket,
@@ -203,6 +205,9 @@ import type {
   RecommendedTier,
   AttentionCounts,
   AdminPermCategory,
+  PostCategoryDef,
+  AdminInviteTrace,
+  AuditLog,
 } from "@/types"
 import { FEATURE_LABELS } from "@/types"
 import { fmtUid } from "@/lib/format"
@@ -224,6 +229,53 @@ import { onAttentionChanged, notifyAttentionChanged } from "@/lib/attention-even
 function isSettingOn(raw: string | undefined, fallback = false): boolean {
   if (raw === undefined || raw === "") return fallback
   return raw === "1" || raw.toLowerCase() === "true"
+}
+
+/**
+ * 解析设置里的 `post_categories`（JSON 数组）。
+ *
+ * 前端**只做宽松解析、不做合法性校验** —— 校验是后端 `parsePostCategories` 的职责。
+ * 这里再实现一套规则迟早与后端走偏，而不一致时"该信谁"没有答案。
+ * 所以坏值原样带出来给管理员看/改，保存时由后端决定丢弃还是拒绝。
+ */
+function parseCategorySetting(raw: string | undefined): PostCategoryDef[] {
+  if (!raw) return []
+  try {
+    const arr = JSON.parse(raw)
+    if (!Array.isArray(arr)) return []
+    return arr
+      .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+      .map((o) => ({
+        key: String(o.key ?? ""),
+        zh: String(o.zh ?? ""),
+        en: String(o.en ?? ""),
+        ...(o.water === true ? { water: true } : {}),
+      }))
+  } catch {
+    return []
+  }
+}
+
+/** 与 parseCategorySetting 对称地写回设置值（后端保存时还会再校验一遍） */
+function serializeCategories(list: PostCategoryDef[]): string {
+  const out: PostCategoryDef[] = []
+  for (const c of list) {
+    const key = c.key.trim().toLowerCase()
+    const zh = c.zh.trim()
+    const en = c.en.trim()
+    // 整行都空 = 管理员加了一行但没填，跳过（别往设置里写空分类）
+    if (!key && !zh && !en) continue
+    out.push({
+      key,
+      // 只有一个名字时用另一个补上：后端要求「至少一个名字」。
+      // 前端先补好，免得管理员只填了中文就保存失败、还不知道为什么。
+      zh: zh || en,
+      en: en || zh,
+      // ⚠️ water 标记**必须原样带回去** —— 漏了它「不看水帖」就静默失效
+      ...(c.water ? { water: true } : {}),
+    })
+  }
+  return JSON.stringify(out)
 }
 
 function formatBytes(bytes: number): string {
@@ -419,6 +471,18 @@ function parseVoteRule(v: unknown): EventVoteRewardRule {
  */
 function needsDrawForVote(rule: EventVoteRewardRule): boolean {
   return rule === "fixed" || rule === "majority" || rule === "minority"
+}
+
+/**
+ * 投票活动的**总票数**（= 已投票人数）。
+ *
+ * ⚠️ 不能用 `claimCount` 代替：开奖前还没有人产生领取记录，claimCount 恒为 0，
+ * 拿它当「参与人数」会在开奖确认框里显示「当前 0 人投票」（2026-10-07 修）。
+ * 票数只有**管理端**接口才恒下发 —— 用户端在「未投票且未开奖」时拿到的是空对象
+ * （后端 voteCountsVisible 收口，防止控制台偷看实时票数照着投）。
+ */
+function voteTotal(ev: EventItem): number {
+  return Object.values(ev.voteCounts ?? {}).reduce((a, b) => a + b, 0)
 }
 
 /**
@@ -630,6 +694,14 @@ export default function AdminPage() {
   const { user } = useAuth()
   const [users, setUsers] = React.useState<AdminUser[]>([])
   const [filter, setFilter] = React.useState("")
+  /**
+   * 用户列表服务端分页（2026-10-08 性能）：全量模式 1399 用户 ~870KB、TTFB ~1.7s，
+   * 改为每页 50 条 + 服务端搜索（~20KB、~1.0s）。`serverTotal` 为 null 表示仍在
+   * 兼容模式（不该出现，只在接口异常回退时兜底显示「无分页信息」）。
+   */
+  const [userPage, setUserPage] = React.useState(0)
+  const [serverTotal, setServerTotal] = React.useState<number | null>(null)
+  const USER_PAGE_SIZE = 50
   /** 「注册 IP」列默认隐藏（站长 2026-10-03 要求）：列较多时默认不占地方，需要时用搜索框右边的开关打开 */
   const [showRegisterIp, setShowRegisterIp] = React.useState(false)
   const [loading, setLoading] = React.useState(true)
@@ -681,6 +753,18 @@ export default function AdminPage() {
     // （与后端 allPermissions() 的口径一致，见 worker/src/permissions.ts）
     doulor: false,
   })
+
+  /** 邀请码溯源弹窗（站长 2026-10-07：用户列表点邀请码、邀请码列表点码都能打开） */
+  const [traceCode, setTraceCode] = React.useState<string | null>(null)
+  const [traceData, setTraceData] = React.useState<AdminInviteTrace | null>(null)
+  const [traceBusy, setTraceBusy] = React.useState(false)
+  /**
+   * 用户详情「最近活动」懒加载分页（2026-10-07 站长要求：支持查看更多）。
+   * 首屏 20 条来自详情接口本身，更多走 /users/:username/activity 往后翻。
+   */
+  const [activityExtra, setActivityExtra] = React.useState<AuditLog[]>([])
+  const [activityHasMore, setActivityHasMore] = React.useState(false)
+  const [activityBusy, setActivityBusy] = React.useState(false)
 
   // 子域名配额编辑
   const [quotaDraft, setQuotaDraft] = React.useState<string | null>(null)
@@ -1036,22 +1120,61 @@ export default function AdminPage() {
   const [communityImageMaxKb, setCommunityImageMaxKb] = React.useState("1024")
   /** 站点时区偏移（小时），默认 8 = 北京时间 0 点翻篇 */
   const [siteTzOffsetHours, setSiteTzOffsetHours] = React.useState("8")
+  /**
+   * 帖子分类（管理面板可配，2026-10-07）。
+   * 空数组 = 还没加载到（保存时若为空则**不动这项**，避免把分类清空）。
+   */
+  const [postCategories, setPostCategories] = React.useState<PostCategoryDef[]>([])
 
-  const load = React.useCallback(async () => {
-    setLoading(true)
-    try {
-      const res = await adminApi.listUsers()
-      setUsers(res.users)
-    } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("adm.1"))
-    } finally {
-      setLoading(false)
-    }
+  /** 改动第 i 个分类的某个字段（分类编辑区用） */
+  const patchCategory = React.useCallback((i: number, patch: Partial<PostCategoryDef>) => {
+    setPostCategories((list) => list.map((x, j) => (j === i ? { ...x, ...patch } : x)))
   }, [])
 
+  /**
+   * 拉用户列表（服务端分页）。`page`/`filter` 由调用处给（刷新场景保留当前页），
+   * 不从 state 读 —— 这样「删完用户刷新」可以显式选择回第一页或留在原页。
+   */
+  const loadUserPage = React.useCallback(
+    async (page: number, q: string) => {
+      setLoading(true)
+      try {
+        const res = await adminApi.listUsers({
+          q: q || undefined,
+          limit: USER_PAGE_SIZE,
+          offset: page * USER_PAGE_SIZE,
+        })
+        setUsers(res.users)
+        setServerTotal(res.total ?? null)
+      } catch (err) {
+        toast.error(err instanceof HttpError ? err.message : t("adm.1"))
+      } finally {
+        setLoading(false)
+      }
+    },
+    [t]
+  )
+
+  // 搜索防抖：停手 300ms 再发请求（每次击键都打 D1 既慢又费）。
+  // 搜索词变了就回到第一页 —— 用 ref 记上一次的词：直接给 loadUserPage 传 page=0
+  // （发请求的是它），setUserPage(0) 只是同步状态；即便它触发 effect 重跑，
+  // 上一个 300ms 的定时器也已被 cleanup 取消，不会双请求。
+  const lastFilterRef = React.useRef(filter)
   React.useEffect(() => {
-    void load()
-  }, [load])
+    const q = filter.trim()
+    const page = lastFilterRef.current === q ? userPage : 0
+    if (lastFilterRef.current !== q) {
+      lastFilterRef.current = q
+      setUserPage(0)
+    }
+    const h = window.setTimeout(() => void loadUserPage(page, q), 300)
+    return () => window.clearTimeout(h)
+  }, [loadUserPage, userPage, filter])
+
+  /** 初始加载与「操作后刷新」：留在当前页/当前搜索词 */
+  const load = React.useCallback(async () => {
+    await loadUserPage(userPage, filter.trim())
+  }, [loadUserPage, userPage, filter])
 
   const loadInvites = React.useCallback(async () => {
     setInviteLoading(true)
@@ -1710,6 +1833,7 @@ export default function AdminPage() {
         String(Math.round(Number(s.community_image_max_bytes ?? 1048576) / 1024))
       )
       setSiteTzOffsetHours(s.site_timezone_offset_hours ?? "8")
+      setPostCategories(parseCategorySetting(s.post_categories))
       const basicRaw = (s.invite_basic_features ?? "r2").split(",").map((x) => x.trim()).filter(Boolean)
       setInviteBasic({
         r2: basicRaw.includes("r2"),
@@ -1840,6 +1964,11 @@ export default function AdminPage() {
         community_post_max_images: Math.round(Number(communityPostMaxImages) || 9),
         community_image_max_bytes: Math.round(Number(communityImageMaxKb) * 1024),
         site_timezone_offset_hours: String(Math.round(Number(siteTzOffsetHours) || 8)),
+        // ⚠️ 只在**确实加载到过分类**时才提交这一项：加载失败时 postCategories 是空数组，
+        //    无脑提交会把线上分类清空 ——「前端看不见」不等于「要删掉」。
+        ...(postCategories.length > 0
+          ? { post_categories: serializeCategories(postCategories) }
+          : {}),
         // 邀请码模块权限：基础 vs 受限，逗号分隔
         invite_basic_features: Object.entries(inviteBasic)
           .filter(([, on]) => on)
@@ -2566,7 +2695,7 @@ export default function AdminPage() {
     const summary = voteDraw
       ? t("adm.voteDrawConfirm", {
           v0: ev.title,
-          v1: ev.claimCount ?? 0,
+          v1: voteTotal(ev),
           v2: ev.vote?.options.length ?? 0,
         })
       : t("adm.941", { v0: ev.title, v1: ev.claimCount ?? 0 }) +
@@ -2911,9 +3040,10 @@ export default function AdminPage() {
     }
   }
 
-  const filtered = users.filter((u) =>
-    (u.username + u.email + u.namespace).toLowerCase().includes(filter.toLowerCase())
-  )
+  // 2026-10-08：搜索已改服务端（后端按用户名/邮箱/命名空间同口径过滤），
+  // 这里不再做本地过滤 —— 旧写法在全量数据上过滤，分页后会对「当前页」重复过滤，
+  // 口径一致所以结果相同，纯属浪费，删掉。
+  const filtered = users
 
   // 用户邀请码列表的搜索（用户名 / 邮箱 / 域名），与用户列表同口径
   const quotaUsers = (inviteQuotas?.users ?? []).filter((u) =>
@@ -2939,10 +3069,51 @@ export default function AdminPage() {
         res.storage ? String(Math.round((res.storage.quotaBytes / 1024 / 1024) * 100) / 100) : ""
       )
       setDetailUser(username)
+      // 「最近活动」懒加载状态随详情一起重置：首屏正好 20 条时大概率还有下一页
+      setActivityExtra([])
+      setActivityHasMore(res.activity.length >= 20)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.125"))
     } finally {
       setBusy(false)
+    }
+  }
+
+  /**
+   * 打开邀请码溯源弹窗。`idOrCode` 同时接受**邀请码 id** 和**码字符串**
+   * （用户列表里只存了码，点码即查，不必先换成 id）。
+   */
+  const openInviteTrace = async (idOrCode: string) => {
+    setTraceCode(idOrCode)
+    setTraceData(null)
+    setTraceBusy(true)
+    try {
+      setTraceData(await adminApi.traceInvite(idOrCode))
+    } catch (err) {
+      // 拉不到（码已删 / 网络问题）就关掉弹窗，只留 toast，别卡在「正在加载」
+      setTraceCode(null)
+      setTraceData(null)
+      toast.error(err instanceof HttpError ? err.message : t("adm.1284"))
+    } finally {
+      setTraceBusy(false)
+    }
+  }
+
+  /** 「最近活动」加载更多：offset = 首屏条数 + 已追加条数 */
+  const loadMoreActivity = async () => {
+    if (!detail || activityBusy) return
+    setActivityBusy(true)
+    try {
+      const res = await adminApi.getUserActivity(
+        detail.user.username,
+        detail.activity.length + activityExtra.length
+      )
+      setActivityExtra((prev) => [...prev, ...res.activity])
+      setActivityHasMore(res.hasMore)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.1285"))
+    } finally {
+      setActivityBusy(false)
     }
   }
 
@@ -3596,6 +3767,7 @@ export default function AdminPage() {
                             <button
                               type="button"
                               className="font-mono text-xs text-primary hover:underline"
+                              onClick={() => void openInviteTrace(u.inviteCode!)}
                             >
                               {u.inviteCode}
                             </button>
@@ -3607,6 +3779,7 @@ export default function AdminPage() {
                                 ? fmtTime(u.inviteCreatedAt)
                                 : t("adm.149")}
                             </p>
+                            <p className="mt-1 text-primary">{t("adm.1287")}</p>
                           </TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
@@ -3730,6 +3903,42 @@ export default function AdminPage() {
           </Table>
         </div>
       )}
+
+      {/* 服务端分页控件（2026-10-08）：总数/页码来自接口，翻页即拉对应页 */}
+      {!loading && serverTotal != null && serverTotal > USER_PAGE_SIZE && (
+        <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
+          <span>
+            {t("adm.userPageInfo", {
+              from: userPage * USER_PAGE_SIZE + 1,
+              to: Math.min((userPage + 1) * USER_PAGE_SIZE, serverTotal),
+              total: serverTotal,
+            })}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={userPage === 0}
+              onClick={() => setUserPage((p) => Math.max(0, p - 1))}
+            >
+              <ChevronLeft className="mr-1 h-3.5 w-3.5" />
+              {t("adm.userPagePrev")}
+            </Button>
+            <span className="tabular-nums">
+              {userPage + 1} / {Math.ceil(serverTotal / USER_PAGE_SIZE)}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={(userPage + 1) * USER_PAGE_SIZE >= serverTotal}
+              onClick={() => setUserPage((p) => p + 1)}
+            >
+              {t("adm.userPageNext")}
+              <ChevronRight className="ml-1 h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
+      )}
         </TabsContent>
 
         <TabsContent value="invites">
@@ -3793,7 +4002,14 @@ export default function AdminPage() {
                     return (
                       <TableRow key={inv.id}>
                         <TableCell className="font-mono text-sm">
-                          {inv.code}
+                          <button
+                            type="button"
+                            className="font-mono text-sm text-primary hover:underline"
+                            onClick={() => void openInviteTrace(inv.code)}
+                            title={t("adm.1288")}
+                          >
+                            {inv.code}
+                          </button>
                         </TableCell>
                         <TableCell>
                           {inv.usedCount} / {inv.maxUses}
@@ -3834,6 +4050,15 @@ export default function AdminPage() {
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground"
+                              onClick={() => void openInviteTrace(inv.code)}
+                              title={t("adm.1288")}
+                            >
+                              <Network className="h-4 w-4" />
+                            </Button>
                             <Button
                               variant="ghost"
                               size="icon"
@@ -5088,6 +5313,7 @@ export default function AdminPage() {
                               {t("adm.voteBadge", {
                                 v0: t(VOTE_RULE_LABEL_KEY[ev.vote.rewardRule]),
                                 v1: ev.vote.options.length,
+                                v2: voteTotal(ev),
                               })}
                             </Badge>
                           )}
@@ -6975,6 +7201,76 @@ export default function AdminPage() {
                       />
                     </div>
                   </div>
+
+                  {/* 帖子分类（2026-10-07：从硬编码改为可配）
+                      保存后前端立即生效 —— 分类是 /community/config 下发的，不需要重新发版 */}
+                  <div className="space-y-2 rounded-md border p-3">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="space-y-0.5">
+                        <p className="text-sm font-medium">{t("adm.cat.title")}</p>
+                        <p className="text-xs text-muted-foreground">{t("adm.cat.hint")}</p>
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          setPostCategories((list) => [...list, { key: "", zh: "", en: "" }])
+                        }
+                      >
+                        <Plus className="h-3.5 w-3.5" /> {t("adm.cat.add")}
+                      </Button>
+                    </div>
+                    {postCategories.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">{t("adm.cat.empty")}</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {postCategories.map((c, i) => (
+                          <div key={i} className="flex flex-wrap items-center gap-2">
+                            <Input
+                              className="w-[128px] font-mono text-xs"
+                              value={c.key}
+                              placeholder={t("adm.cat.key")}
+                              onChange={(e) => patchCategory(i, { key: e.target.value })}
+                            />
+                            <Input
+                              className="w-[128px]"
+                              value={c.zh}
+                              placeholder={t("adm.cat.zh")}
+                              onChange={(e) => patchCategory(i, { zh: e.target.value })}
+                            />
+                            <Input
+                              className="w-[128px]"
+                              value={c.en}
+                              placeholder={t("adm.cat.en")}
+                              onChange={(e) => patchCategory(i, { en: e.target.value })}
+                            />
+                            <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4"
+                                checked={!!c.water}
+                                onChange={(e) => patchCategory(i, { water: e.target.checked })}
+                              />
+                              {t("adm.cat.water")}
+                            </label>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              aria-label={t("common.delete")}
+                              onClick={() =>
+                                setPostCategories((list) => list.filter((_, j) => j !== i))
+                              }
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
                   <div className="flex items-center justify-between rounded-md border p-3">
                     <div className="space-y-0.5">
                       <p className="text-sm font-medium">{t("adm.623")}</p>
@@ -8116,6 +8412,163 @@ export default function AdminPage() {
               {t("adm.754")}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 邀请码溯源弹窗：用户列表点邀请码 / 邀请码列表点码都能打开 */}
+      <Dialog
+        open={traceCode !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setTraceCode(null)
+            setTraceData(null)
+          }
+        }}
+      >
+        <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Network className="h-4 w-4" />
+              {t("adm.1289")}
+            </DialogTitle>
+            <DialogDescription>
+              {traceData ? t("adm.1290", { v0: traceData.invite.code }) : t("adm.1291")}
+            </DialogDescription>
+          </DialogHeader>
+          {traceBusy ? (
+            <LoadingBlock />
+          ) : traceData ? (
+            <div className="space-y-4">
+              {/* 一人多号警示：出现共享注册 IP 时置顶显示 */}
+              {traceData.sharedIps.length > 0 && (
+                <div className="space-y-1 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-xs">
+                  <p className="flex items-center gap-1.5 font-medium text-destructive">
+                    <ShieldAlert className="h-3.5 w-3.5" />
+                    {t("adm.1292")}
+                  </p>
+                  {traceData.sharedIps.map((g) => (
+                    <p key={g.ip} className="font-mono break-all">
+                      {g.ip} — {g.names.join("、")}
+                    </p>
+                  ))}
+                  <p className="text-muted-foreground">{t("adm.1293")}</p>
+                </div>
+              )}
+
+              {/* 邀请码本体 */}
+              <div className="space-y-1 rounded-md border p-3 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">{t("adm.344")}</span>
+                  <span>{fmtTime(traceData.invite.createdAt)}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">{t("adm.342")}</span>
+                  <span>
+                    {traceData.invite.usedCount} / {traceData.invite.maxUses}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">{t("adm.1294")}</span>
+                  <span>
+                    {traceData.invite.expiresAt
+                      ? fmtTime(traceData.invite.expiresAt)
+                      : t("adm.1295")}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1 pt-1">
+                  <span className="text-muted-foreground">{t("adm.343")}</span>
+                  {FEATURES.filter((f) => traceData.invite.permissions[f.key]).length === 0 ? (
+                    <Badge variant="destructive">{t("adm.347")}</Badge>
+                  ) : (
+                    FEATURES.filter((f) => traceData.invite.permissions[f.key]).map((f) => (
+                      <Badge key={f.key} variant="outline">
+                        {t(f.label)}
+                      </Badge>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* 创建者 */}
+              <section>
+                <h4 className="mb-2 text-sm font-medium">{t("adm.1296")}</h4>
+                <div className="space-y-1 rounded-md border p-3 text-xs">
+                  {traceData.creator ? (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          className="font-mono text-sm text-primary hover:underline"
+                          onClick={() => void openDetail(traceData.creator!.username)}
+                        >
+                          {traceData.creator.username}
+                        </button>
+                        {traceData.creator.uid != null && (
+                          <span className="text-muted-foreground">
+                            {fmtUid(traceData.creator.uid)}
+                          </span>
+                        )}
+                        <span className="text-muted-foreground">{traceData.creator.email}</span>
+                        <Badge
+                          variant={
+                            traceData.creator.status === "suspended" ? "destructive" : "success"
+                          }
+                        >
+                          {traceData.creator.status}
+                        </Badge>
+                      </div>
+                      <p className="text-muted-foreground">
+                        {t("adm.1301")} {fmtTime(traceData.creator.createdAt)} · {t("adm.1300")}{" "}
+                        {traceData.creator.registerIp ?? t("adm.981")}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-muted-foreground">{t("adm.1297")}</p>
+                  )}
+                </div>
+              </section>
+
+              {/* 使用者 */}
+              <section>
+                <h4 className="mb-2 text-sm font-medium">
+                  {t("adm.1298", { v0: traceData.users.length })}
+                </h4>
+                {traceData.users.length === 0 ? (
+                  <p className="rounded-md border px-3 py-4 text-sm text-muted-foreground">
+                    {t("adm.1299")}
+                  </p>
+                ) : (
+                  <div className="divide-y rounded-md border">
+                    {traceData.users.map((u) => (
+                      <div
+                        key={u.id}
+                        className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-xs"
+                      >
+                        <button
+                          type="button"
+                          className="font-mono text-sm text-primary hover:underline"
+                          onClick={() => void openDetail(u.username)}
+                        >
+                          {u.username}
+                        </button>
+                        {u.uid != null && (
+                          <span className="text-muted-foreground">{fmtUid(u.uid)}</span>
+                        )}
+                        <span className="text-muted-foreground">{u.email}</span>
+                        <Badge variant={u.status === "suspended" ? "destructive" : "success"}>
+                          {u.status}
+                        </Badge>
+                        <span className="ml-auto shrink-0 text-muted-foreground">
+                          {t("adm.1301")} {fmtTime(u.usedAt)} · {t("adm.1300")}{" "}
+                          {u.registerIp ?? t("adm.981")}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            </div>
+          ) : null}
         </DialogContent>
       </Dialog>
 
@@ -9515,14 +9968,16 @@ export default function AdminPage() {
                   </div>
                 </section>
 
-                {/* ---- 最近活动 ---- */}
+                {/* ---- 最近活动（首屏 20 条，更多懒加载） ---- */}
                 <section>
-                  <h3 className="mb-2 text-sm font-medium">{t("adm.1174", { v0: detail.activity.length })}</h3>
+                  <h3 className="mb-2 text-sm font-medium">
+                    {t("adm.1174", { v0: detail.activity.length + activityExtra.length })}
+                  </h3>
                   <div className="rounded-md border">
-                    {detail.activity.length === 0 ? (
+                    {detail.activity.length + activityExtra.length === 0 ? (
                       <p className="px-3 py-4 text-sm text-muted-foreground">{t("adm.868")}</p>
                     ) : (
-                      detail.activity.map((a) => (
+                      [...detail.activity, ...activityExtra].map((a) => (
                         <div
                           key={a.id}
                           className="flex items-center justify-between border-b px-3 py-2 text-xs last:border-b-0"
@@ -9535,6 +9990,19 @@ export default function AdminPage() {
                       ))
                     )}
                   </div>
+                  {activityHasMore && (
+                    <div className="mt-2 flex justify-center">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void loadMoreActivity()}
+                        disabled={activityBusy}
+                      >
+                        {activityBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                        {t("adm.1286")}
+                      </Button>
+                    </div>
+                  )}
                 </section>
 
                 <section>

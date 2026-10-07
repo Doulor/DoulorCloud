@@ -1,5 +1,6 @@
 import {
   type AdminInvite,
+  type AdminInviteTrace,
   type AdminSettings,
   type AdminUser,
   type AdminUserDetail,
@@ -80,6 +81,7 @@ import {
   type ChatPresenceUser,
   type Notification,
   type CommunityStats,
+  type CommunityConfig,
   type AdminCommunityPost,
   type AdminNewApiConfig,
   type AdminNewApiCredentialSource,
@@ -118,6 +120,7 @@ import {
   type PointOrder,
   type PointProduct,
   type PointProductPayload,
+  type PublicPurchase,
   type UserProductPayload,
   type AdminPointsOverview,
   type AdminShopData,
@@ -134,6 +137,8 @@ import {
   type AdminDnsFindingsResponse,
   type AdminDnsAuditSummary,
   type AdminDnsCfDiff,
+  type AdminSubdomain,
+  type AdminSubdomainListResponse,
   type Sticker,
 } from "@/types"
 import type { FunLinkCategory } from "@/lib/fun-links"
@@ -475,7 +480,23 @@ export const domainApi = {
 // ---- 管理员 ----
 
 export const adminApi = {
-  listUsers: () => request<{ users: AdminUser[] }>("/admin/users"),
+  /**
+   * 用户列表。不传参数 = 旧的全量模式（向后兼容）；
+   * 传 limit/offset/q = 服务端分页搜索（响应带 total，数据量从 ~870KB 降到 ~20KB）。
+   */
+  listUsers: (opts?: { q?: string; limit?: number; offset?: number }) => {
+    const p = new URLSearchParams()
+    if (opts?.q) p.set("q", opts.q)
+    if (opts?.limit != null) p.set("limit", String(opts.limit))
+    if (opts?.offset != null) p.set("offset", String(opts.offset))
+    const qs = p.toString()
+    return request<{
+      users: AdminUser[]
+      total?: number
+      limit?: number
+      offset?: number
+    }>(`/admin/users${qs ? `?${qs}` : ""}`)
+  },
 
   /** 管理员权限树（两级）+ 当前用户权限 + 侧边栏过滤开关 */
   getPermissionTree: () =>
@@ -612,6 +633,19 @@ export const adminApi = {
 
   deleteInvite: (id: string) =>
     request<void>(`/admin/invites/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  /** 邀请码溯源：谁建的、什么时候建的、谁用了、什么时候用的（含注册 IP） */
+  traceInvite: (id: string) =>
+    request<AdminInviteTrace>(`/admin/invites/${encodeURIComponent(id)}/trace`),
+
+  /** 用户「最近活动」分页（查看更多 / 懒加载） */
+  getUserActivity: (username: string, offset: number, limit = 20) =>
+    request<{
+      activity: { id: string; action: string; detail: string; ip: string | null; createdAt: string }[]
+      hasMore: boolean
+      offset: number
+      limit: number
+    }>(`/admin/users/${encodeURIComponent(username)}/activity?offset=${offset}&limit=${limit}`),
 
   /** 修改邀请码权限 / 可用次数（只影响之后注册的新账号） */
   updateInvite: (
@@ -1241,15 +1275,15 @@ export const emailApi = {
     }),
 
   /**
-   * 以用户自己的域名邮箱身份回信。
-   * 收件人与发件人都由服务端从原邮件 / 邮箱归属推导，前端**不传**收件人，
-   * 避免这个接口被当成开放中继使用。
+   * 站内互发：以指定邮箱身份发给**本站另一个邮箱**（收件人必须是本站根域邮箱）。
+   * 直接落对方收件箱，不需要付费的 Cloudflare Email Sending。
+   * 发件地址由服务端从邮箱推导，前端只传收件人/主题/正文。
    */
-  reply: (mailboxId: string, messageId: string, text: string) =>
-    request<{ ok: boolean; to: string; subject: string; messageId: string | null }>(
-      `/mailbox/${mailboxId}/messages/${messageId}/reply`,
-      { method: "POST", body: JSON.stringify({ text }) }
-    ),
+  sendInternal: (mailboxId: string, payload: { to: string; subject: string; text: string }) =>
+    request<{ ok: boolean; to: string }>(`/mailbox/${mailboxId}/send`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 }
 
 // ---- 个人名片 ----
@@ -1286,6 +1320,8 @@ export const profileApi = {
     musicLyrics: string
     contacts: ProfileContact[]
     modules: ProfileModule[]
+    /** 设计系统参数（全量 JSON，服务端 sanitizeDesign 白名单清洗） */
+    design: Record<string, unknown>
   }>) =>
     request<{ profile: Profile }>("/profile", {
       method: "PUT",
@@ -1671,11 +1707,21 @@ export const publicApi = {
       prefix: string | null
       createdAt: string | null
       lastUsedAt: string | null
+      /** 当前这把 Key 是否带管理员权限（不受速率/数量限制） */
+      isAdmin: boolean
+      /** 当前用户能否生成管理员 Key（只有管理员能） */
+      canCreateAdminKey: boolean
     }>("/api-key"),
 
-  /** 生成新 Key（已有则覆盖，旧 Key 立即作废）。明文只返回这一次 */
-  generateKey: () =>
-    request<{ apiKey: string; prefix: string }>("/api-key", { method: "POST" }),
+  /**
+   * 生成新 Key（已有则覆盖，旧 Key 立即作废）。明文只返回这一次。
+   * `admin: true` = 管理员 Key（不受 API 速率、子域名速率、子域名数量、邮箱数量限制），仅管理员可用。
+   */
+  generateKey: (admin?: boolean) =>
+    request<{ apiKey: string; prefix: string; isAdmin: boolean }>("/api-key", {
+      method: "POST",
+      body: JSON.stringify({ admin: admin === true }),
+    }),
 
   /** 删除 Key（禁用 API 调用） */
   deleteKey: () => request<{ ok: boolean }>("/api-key", { method: "DELETE" }),
@@ -1779,6 +1825,16 @@ export const pointsApi = {
       method: "POST",
       body: JSON.stringify({ productId }),
     }),
+  /**
+   * 商品公示的购买记录（最近 10 条：买家用户名 + 下单时间）。
+   *
+   * ⚠️ 商品没开「公示购买记录」时后端返回 404 —— 调用方要当成「没有这块内容」，
+   * 而不是「加载失败」（详情弹窗里不该为它弹错误提示）。
+   */
+  productPurchases: (productId: string) =>
+    request<{ purchases: PublicPurchase[] }>(
+      `/points/products/${encodeURIComponent(productId)}/purchases`
+    ),
 
   // ---- 用户商城（自己上架 / 交付 / 确认收货）----
 
@@ -2046,11 +2102,29 @@ export const communityApi = {
       { method: "POST", body: JSON.stringify({ pinned }) }
     ),
 
-  getConfig: () => request<{ guestAccess: boolean; enabled: boolean }>("/community/config"),
-  listPosts: (cursor?: string) =>
-    request<{ posts: Post[]; nextCursor: string | null }>(
-      `/community/posts${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`
-    ),
+  getConfig: () => request<CommunityConfig>("/community/config"),
+  /**
+   * 帖子列表（两层筛选，2026-10-07）。
+   *   · sort="hot"        —— 按热度（点赞+评论）；不传 = 按时间倒序
+   *   · category="<key>"  —— 只看某个分类
+   *   · excludeWater      —— 看全部但不含水帖（与 category 互斥，由调用方保证）
+   */
+  listPosts: (opts?: {
+    cursor?: string
+    sort?: "latest" | "hot"
+    category?: string
+    excludeWater?: boolean
+  }) => {
+    const q = new URLSearchParams()
+    if (opts?.cursor) q.set("cursor", opts.cursor)
+    if (opts?.sort === "hot") q.set("sort", "hot")
+    if (opts?.category) q.set("category", opts.category)
+    if (opts?.excludeWater) q.set("exclude_water", "1")
+    const qs = q.toString()
+    return request<{ posts: Post[]; nextCursor: string | null }>(
+      `/community/posts${qs ? `?${qs}` : ""}`
+    )
+  },
   getStats: () => request<CommunityStats>("/community/stats"),
   newPostsCount: () => request<{ count: number }>("/community/new-posts-count"),
   /** 记下「我刚打开过社区」—— 侧边栏新帖角标据此清零 */
@@ -2343,6 +2417,14 @@ export const notificationApi = {
 
 export const eventApi = {
   list: () => request<{ events: EventItem[]; now: string }>("/events"),
+  /**
+   * 历史投票：已结束的投票活动（含最终票数、获奖选项、我投了谁、我的结算结果）。
+   *
+   * 活动一过截止时间就从 `/events`（活动推广列表）消失，而「截止后开奖」的结果
+   * 偏偏是在截止之后才出来的 —— 这条是那些活动的回看入口。
+   * 只返回原本就出现在「活动推广」里的（promo_hidden = 0）。
+   */
+  voteHistory: () => request<{ events: EventItem[]; now: string }>("/events/vote-history"),
   /** 单个活动（公开）：活动分享链接用；draft / scheduled 会 404 */
   get: (id: string) => request<{ event: EventItem }>(`/events/${encodeURIComponent(id)}`),
   /** 认证码活动必须带 code；其余活动 code 可省略 */
@@ -3334,4 +3416,56 @@ export const adminDnsApi = {
     request<{ ok: boolean }>(`/admin/dns/cf-orphan/${encodeURIComponent(cfId)}`, {
       method: "DELETE",
     }),
+}
+
+/**
+ * 子域名管理（管理面板）。
+ *
+ * 与用户侧 `domainApi` 的分工：那套只能管自己的域名；这套按 dns 管理权限
+ * 鉴权，可代替任意用户增删改（改名会同步 DNS/名片/网盘/Cloudflare）。
+ */
+export const adminSubdomainsApi = {
+  /** 全站列表（可按域名/用户名/邮箱搜索） */
+  list: (params: { q?: string; page?: number; pageSize?: number } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.q) sp.set("q", params.q)
+    if (params.page) sp.set("page", String(params.page))
+    if (params.pageSize) sp.set("pageSize", String(params.pageSize))
+    const qs = sp.toString()
+    return request<AdminSubdomainListResponse>(`/admin/subdomains${qs ? "?" + qs : ""}`)
+  },
+
+  /** 归属用户联想搜索（按用户名/邮箱，最多 20 条） */
+  searchOwners: (q: string) =>
+    request<{ owners: { id: string; username: string; email: string; status: string }[] }>(
+      `/admin/subdomains/owners?q=${encodeURIComponent(q)}`
+    ),
+
+  /**
+   * 代替指定用户创建。
+   * `parentId` 指定时归属由父级决定（传 owner 会被拒）；
+   * 一级必须给 `userId` 或 `username`，`rootDomain` 省略则用默认域。
+   */
+  create: (payload: {
+    userId?: string
+    username?: string
+    name: string
+    parentId?: string
+    rootDomain?: string
+  }) =>
+    request<{ subdomain: AdminSubdomain }>("/admin/subdomains", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 改名 / 转移所有者（可同时传） */
+  update: (id: string, payload: { name?: string; userId?: string; username?: string }) =>
+    request<{ subdomain: AdminSubdomain }>(`/admin/subdomains/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 删除（含全部下级；主域名不可删） */
+  remove: (id: string) =>
+    request<void>(`/admin/subdomains/${encodeURIComponent(id)}`, { method: "DELETE" }),
 }

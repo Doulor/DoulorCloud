@@ -2,7 +2,7 @@ import { ApiError, json, SAFE_JSON_HEADERS, readBodyCapped, assertContentLengthW
 import { requireUser, isPrivileged, type UserRow, isAnyAdmin } from "../auth"
 import { decodeCursor, encodeCursor, groupComments, canPostAgain, type RawComment } from "../community-logic"
 import { uuid } from "../crypto"
-import { getSettingNumber, getSettingBool, audit } from "../settings"
+import { getSetting, getSettingNumber, getSettingBool, SETTING_DEFAULTS, audit } from "../settings"
 import { sendMail, renderMail } from "../mailer"
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
 import { hardenUserContentResponse } from "../content-type"
@@ -13,12 +13,87 @@ import type { Env } from "../env"
 
 const DEFAULT_LIMIT = 20
 
-/** 帖子分类（用户反馈 2026-10-03）：闲聊 / 求助 / 资源共享，默认闲聊 */
-export const POST_CATEGORIES = ["chat", "help", "resource"] as const
-export type PostCategory = (typeof POST_CATEGORIES)[number]
+/** 分类数量上限：够用即可，也防止有人往设置里塞几百项把社区页拖垮 */
+const MAX_POST_CATEGORIES = 20
 
-function isPostCategory(v: unknown): v is PostCategory {
-  return typeof v === "string" && (POST_CATEGORIES as readonly string[]).includes(v)
+/**
+ * 帖子分类（**管理面板可配**）。
+ *
+ * 2026-10-07 站长要求：从硬编码（原本是写死的 chat/help/resource）改成后台可改，并加「水帖」。
+ *   · `key`   —— 存进 `posts.category` 的值。**建立后不要改**，改了老帖子会变成孤儿（显示不出分类）
+ *   · `zh/en` —— 双语显示名。本站中英双语，分类名得随配置走，不能再放在 i18n 词条里
+ *   · `water` —— 标记「低质 / 水帖」类；帖子广场的「不看水帖」筛掉的就是带这个标记的分类。
+ *                用标记而不是写死 `key === "water"`：站长改个名、或再加一个「低质」分类都能直接生效
+ *
+ * ⚠️ 解析必须是**宽容**的：任何一项不合法就丢弃该项；整份都不合法时**回落内置默认**。
+ *    分类配置写坏了最坏是回到三个内置分类，绝不该让整个社区页打不开。
+ */
+export interface PostCategoryDef {
+  key: string
+  zh: string
+  en: string
+  water?: boolean
+}
+
+/** 纯解析：把设置里的 JSON 段变成合法分类列表。非法项丢弃；全非法返回空数组（由调用方决定怎么兜底） */
+export function parsePostCategories(raw: string | null | undefined): PostCategoryDef[] {
+  if (!raw) return []
+  let arr: unknown
+  try {
+    arr = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(arr)) return []
+
+  const out: PostCategoryDef[] = []
+  const seen = new Set<string>()
+  for (const item of arr) {
+    if (!item || typeof item !== "object") continue
+    const o = item as Record<string, unknown>
+    const key = typeof o.key === "string" ? o.key.trim().toLowerCase() : ""
+    const zh = typeof o.zh === "string" ? o.zh.trim() : ""
+    const en = typeof o.en === "string" ? o.en.trim() : ""
+    // key 限 [a-z0-9_-]{1,32}：它既进 posts.category，也进列表接口的查询参数，
+    // 放开字符集等于把「分类」变成注入/越权面
+    if (!/^[a-z0-9_-]{1,32}$/.test(key)) continue
+    if (seen.has(key)) continue
+    // 两个名字都空的话前端没法显示这一项，等于配了个空分类
+    if (!zh && !en) continue
+    seen.add(key)
+    out.push({ key, zh: zh || en, en: en || zh, ...(o.water === true ? { water: true } : {}) })
+    if (out.length >= MAX_POST_CATEGORIES) break
+  }
+  return out
+}
+
+/**
+ * 读取生效的帖子分类。
+ *
+ * 设置缺失 / 为非法 JSON / 全是不合法项 → 回落 `SETTING_DEFAULTS.post_categories`
+ * （内置那份是唯一真源，不在这里另抄一份默认值，否则两边迟早走偏）。
+ * 再用最后一道兜底保证**永远非空** —— 空列表会让发帖框没有分类可选。
+ */
+export async function postCategoryDefs(env: Env): Promise<PostCategoryDef[]> {
+  const fromSetting = parsePostCategories(await getSetting(env, "post_categories"))
+  if (fromSetting.length > 0) return fromSetting
+  const builtin = parsePostCategories(SETTING_DEFAULTS.post_categories)
+  return builtin.length > 0 ? builtin : [{ key: "chat", zh: "闲聊", en: "Chit-chat" }]
+}
+
+/** 默认分类 = 列表第一项（发帖没带/带了不存在的分类时用它） */
+export function defaultPostCategory(defs: PostCategoryDef[]): string {
+  return defs[0]?.key ?? "chat"
+}
+
+/** 某个 key 是不是当前生效的分类 */
+export function isPostCategoryKey(defs: PostCategoryDef[], v: unknown): boolean {
+  return typeof v === "string" && defs.some((d) => d.key === v)
+}
+
+/** 把 key 列表里被标记为「水帖」的那些挑出来（给「不看水帖」筛选用） */
+export function waterCategoryKeys(defs: PostCategoryDef[]): string[] {
+  return defs.filter((d) => d.water).map((d) => d.key)
 }
 
 /**
@@ -120,7 +195,9 @@ function toPostDto(r: PostRow, viewerLiked: boolean, isMine: boolean) {
     liked: viewerLiked,
     isMine,
     pinned: Boolean(r.pinned),
-    category: isPostCategory(r.category) ? r.category : "chat",
+    // 分类原样回传（不再在这里归一化）：分类是**可配置**的，这里拿不到设置就得写死一份默认值。
+    // 空值 / 已被管理员删掉的分类由前端显示成中性文案，写库侧的校验保证新帖一定合法。
+    category: r.category ?? "",
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     editCount: r.edit_count ?? 0,
@@ -178,25 +255,93 @@ export async function communityConfig(env: Env, _request: Request): Promise<Resp
   return json({
     guestAccess: await getSettingBool(env, "community_guest_access"),
     enabled: await getSettingBool(env, "community_enabled"),
+    /**
+     * 帖子分类（管理面板可配）。前端发帖下拉框与帖子卡片都从这里取，
+     * 不再有硬编码列表 —— 加了新分类前端立刻能用，无需发版。
+     */
+    categories: await postCategoryDefs(env),
   })
 }
 
 /** GET /api/community/posts?cursor=&limit= */
+/**
+ * 「最热」的热度口径：**点赞 + 评论**。
+ *
+ * 刻意不做时间衰减：衰减系数是个调参黑洞（写成什么样都能自圆其说，却没人说得清
+ * 为什么是那个数），而本站帖子量还小、时间跨度短，最直白的「互动多 = 热」既好解释
+ * 又符合直觉。以后要改只改这一个表达式（游标里的 h 与它是同一个值，务必同步）。
+ */
+const POST_HOT_EXPR = "(p.like_count + p.comment_count)"
+
+/**
+ * GET /api/community/posts?cursor=&limit=&sort=&category=&exclude_water=
+ *
+ * 两层筛选（2026-10-07 站长要求）：
+ *   · 第一层 sort：`latest`（默认，按发布时间）/ `hot`（按热度）
+ *   · 第二层范围：`category=<key>`（只看某个分类）/ `exclude_water=1`（看全部但不含水帖）
+ *                 两者都不传 = 全部
+ */
 export async function listPosts(env: Env, request: Request): Promise<Response> {
   const url = new URL(request.url)
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? DEFAULT_LIMIT) || DEFAULT_LIMIT, 1), 50)
   const cursor = url.searchParams.get("cursor")
-  const viewer = await readViewer(env, request)
+
+  const isHot = url.searchParams.get("sort") === "hot"
+  const decoded = cursor ? decodeCursor(cursor) : null
+
+  // 2026-10-08 性能：实测该接口 ~1.5s 才回首字节。原实现是**六步串行 D1 往返**
+  // （会话 → 分类 → 主查询 → 点赞交集 → 高赞阈值 → 高赞评论），每往返 ~200ms。
+  // 改法：① 会话/分类/阈值三者互不依赖 → Promise.all 并行；② 点赞交集与高赞
+  // 评论都只依赖主查询的 ids、互不依赖 → batch() 合一。墙钟从 6 步降到 3 步。
+  const [viewer, defs, hotThreshold] = await Promise.all([
+    readViewer(env, request),
+    postCategoryDefs(env),
+    hotCommentThreshold(env),
+  ])
+  const categoryParam = (url.searchParams.get("category") ?? "").trim()
+  const excludeWater = url.searchParams.get("exclude_water") === "1"
 
   let where = "p.deleted_at IS NULL"
   const binds: unknown[] = []
-  if (cursor) {
-    const c = decodeCursor(cursor)
-    if (c) {
-      where += " AND (p.created_at < ? OR (p.created_at = ? AND p.id < ?))"
-      binds.push(c.createdAt, c.createdAt, c.id)
+
+  // —— 第二层：范围筛选 ——
+  // 传了 category 就以它为准（两个参数由前端保证互斥，服务端只做「有就用」）。
+  // 分类不存在（比如管理员刚把它删了）→ 当「全部」处理，**不报错**：
+  // 分类是动态的，为这个报错只会让用户看到一页空白还不知道为什么。
+  if (categoryParam && isPostCategoryKey(defs, categoryParam)) {
+    where += " AND p.category = ?"
+    binds.push(categoryParam)
+  } else if (excludeWater) {
+    const water = waterCategoryKeys(defs)
+    if (water.length > 0) {
+      where += ` AND COALESCE(p.category, '') NOT IN (${water.map(() => "?").join(", ")})`
+      binds.push(...water)
     }
   }
+
+  // —— 第一层：排序 + 对应的游标条件 ——
+  // 游标的条件必须与 ORDER BY **完全同构**，否则翻页会漏帖或重复。
+  let orderBy: string
+  if (isHot) {
+    // 同热度时退到 (created_at, id) 继续比，保证同分帖子的翻页也是确定的
+    if (decoded) {
+      const h = decoded.hot ?? 0
+      where += ` AND (${POST_HOT_EXPR} < ? OR (${POST_HOT_EXPR} = ? AND (p.created_at < ? OR (p.created_at = ? AND p.id < ?))))`
+      binds.push(h, h, decoded.createdAt, decoded.createdAt, decoded.id)
+    }
+    orderBy = `${POST_HOT_EXPR} DESC, p.created_at DESC, p.id DESC`
+  } else {
+    if (decoded) {
+      where += " AND (p.created_at < ? OR (p.created_at = ? AND p.id < ?))"
+      binds.push(decoded.createdAt, decoded.createdAt, decoded.id)
+    }
+    orderBy = "p.created_at DESC, p.id DESC"
+  }
+
+  // 置顶只出现在**第一页**：置顶帖的时间/热度是任意的，若让它参与游标分页，
+  // 页码就会「从它的排序键继续」⇒ 跳过一大批本该出现的帖子（老实现有这个问题）。
+  // 翻页时排除置顶，剩下的就是干净的「按排序键往下续」。
+  if (decoded) where += " AND p.pinned = 0"
 
   const rows = await env.DB.prepare(
     `SELECT p.*, u.username, u.nickname, u.avatar_key, u.role AS author_role,
@@ -206,52 +351,67 @@ export async function listPosts(env: Env, request: Request): Promise<Response> {
        LEFT JOIN user_titles ut ON ut.user_id = u.id AND ut.is_display = 1
        LEFT JOIN custom_titles ct ON ct.id = ut.title_id
       WHERE ${where}
-      -- 置顶的排最前（2026-10-01）；置顶内部仍按时间倒序。
-      -- 游标分页仍按 created_at：置顶只是「整体提到前面」，不影响翻页连续性。
-      ORDER BY p.pinned DESC, p.created_at DESC, p.id DESC
+      ORDER BY ${decoded ? "" : "p.pinned DESC, "}${orderBy}
       LIMIT ?`
   ).bind(...binds, limit).all<PostRow>()
 
   const posts = rows.results ?? []
-  // ⚠️ 2026-09-25 审计（M17）：原实现是
-  //   SELECT target_id FROM post_likes WHERE user_id = ? AND target_type = 'post'
-  // —— 不带任何 LIMIT/IN，把该用户**历史上点过的所有帖子**都读出来再取交集。
-  // 一页只显示 ≤50 条，却要拉全部历史点赞（老用户轻松上千行），
-  // 每次翻页都重复付一遍行读成本。改成只查本页这几十个 id。
   const ids = posts.map((p) => p.id)
-  const likedSet = viewer && ids.length > 0
-    ? new Set((await env.DB.prepare(
-        `SELECT target_id FROM post_likes
-          WHERE user_id = ? AND target_type = 'post'
-            AND target_id IN (${ids.map(() => "?").join(", ")})`
-      ).bind(viewer.id, ...ids).all<{ target_id: string }>()).results?.map((x) => x.target_id) ?? [])
-    : new Set<string>()
 
-  // 高赞评论预览（用户反馈 2026-10-03）：每个帖子下方展示最多 2 条「全社区前 20%」的评论
-  const hotThreshold = await hotCommentThreshold(env)
+  // 点赞交集 + 高赞评论：都只依赖本页 ids、互不依赖 → batch 一次往返。
+  // ⚠️ 2026-09-25 审计（M17）：点赞交集只查**本页这几十个 id**（老实现把该用户
+  // 历史上点过的所有帖子都读出来，老用户轻松上千行）。此处保持只查本页。
+  const placeholderIds = ids.map(() => "?").join(", ")
+  const stmts: D1PreparedStatement[] = [
+    env.DB.prepare(
+      viewer && ids.length > 0
+        ? `SELECT target_id FROM post_likes
+            WHERE user_id = ? AND target_type = 'post'
+              AND target_id IN (${placeholderIds})`
+        : `SELECT NULL AS target_id WHERE 0` // 未登录/空页：占位保持结果位次稳定
+    ),
+    env.DB.prepare(
+      // 高赞评论预览（用户反馈 2026-10-03）：每帖最多 2 条「全社区前 20%」的评论。
+      // 阈值为 0（评论还很少）时不查 —— bind 0 会把所有评论都捞回来，反而最慢。
+      ids.length > 0 && hotThreshold > 0
+        ? `SELECT c.post_id, c.id, c.body, c.like_count, u.username, u.nickname, u.avatar_key
+             FROM post_comments c JOIN users u ON u.id = c.user_id
+            WHERE c.post_id IN (${placeholderIds}) AND c.deleted_at IS NULL AND c.like_count >= ?
+            ORDER BY c.like_count DESC, c.created_at ASC`
+        : `SELECT NULL AS post_id, NULL AS id, NULL AS body, NULL AS like_count, NULL AS username, NULL AS nickname, NULL AS avatar_key WHERE 0`
+    ),
+  ]
+  const batchBinds: unknown[][] = [
+    viewer && ids.length > 0 ? [viewer.id, ...ids] : [],
+    ids.length > 0 && hotThreshold > 0 ? [...ids, hotThreshold] : [],
+  ]
+  const [likesRes, commentRowsRes] = await env.DB.batch([
+    stmts[0].bind(...batchBinds[0]),
+    stmts[1].bind(...batchBinds[1]),
+  ])
+
+  const likedSet = new Set<string>(
+    ((likesRes.results ?? []) as unknown as { target_id: string | null }[])
+      .map((x) => x.target_id)
+      .filter((x): x is string => !!x)
+  )
+
   const topByPost = new Map<
     string,
     { id: string; body: string; likeCount: number; username: string; nickname: string | null; hasAvatar: boolean }[]
   >()
-  if (ids.length > 0 && hotThreshold > 0) {
-    const placeholders = ids.map(() => "?").join(", ")
-    const commentRows = await env.DB.prepare(
-      `SELECT c.post_id, c.id, c.body, c.like_count, u.username, u.nickname, u.avatar_key
-         FROM post_comments c JOIN users u ON u.id = c.user_id
-        WHERE c.post_id IN (${placeholders}) AND c.deleted_at IS NULL AND c.like_count >= ?
-        ORDER BY c.like_count DESC, c.created_at ASC`
-    )
-      .bind(...ids, hotThreshold)
-      .all<{
-        post_id: string
-        id: string
-        body: string
-        like_count: number
-        username: string
-        nickname: string | null
-        avatar_key: string | null
-      }>()
-    for (const c of commentRows.results ?? []) {
+  {
+    const commentRows = (commentRowsRes.results ?? []) as unknown as {
+      post_id: string | null
+      id: string | null
+      body: string | null
+      like_count: number | null
+      username: string | null
+      nickname: string | null
+      avatar_key: string | null
+    }[]
+    for (const c of commentRows) {
+      if (!c.post_id || !c.id) continue
       const arr = topByPost.get(c.post_id) ?? []
       if (arr.length < 2) {
         arr.push({
@@ -260,7 +420,7 @@ export async function listPosts(env: Env, request: Request): Promise<Response> {
           // 这里把图片语法摘掉换成占位符，纯文本正常截断。
           body: String(c.body ?? "").replace(/!\[[^\]]*\]\([^)\s]+\)/g, "〔图片〕").slice(0, 120),
           likeCount: Number(c.like_count) || 0,
-          username: c.username,
+          username: c.username ?? "",
           nickname: c.nickname ?? null,
           hasAvatar: Boolean(c.avatar_key),
         })
@@ -274,7 +434,15 @@ export async function listPosts(env: Env, request: Request): Promise<Response> {
     topComments: topByPost.get(r.id) ?? [],
   }))
   const last = posts[posts.length - 1]
-  const nextCursor = posts.length === limit && last ? encodeCursor(last.created_at, last.id) : null
+  // 「最热」要把热度写进游标，下一页才知道从哪个热度续；与 ORDER BY 的表达式同源
+  const nextCursor =
+    posts.length === limit && last
+      ? encodeCursor(
+          last.created_at,
+          last.id,
+          isHot ? (last.like_count ?? 0) + (last.comment_count ?? 0) : undefined
+        )
+      : null
   return json({ posts: out, nextCursor })
 }
 
@@ -514,8 +682,14 @@ export async function createPost(env: Env, request: Request): Promise<Response> 
   if (!text) throw new ApiError(400, "内容不能为空", "INVALID_INPUT")
   if (text.length > 5000) throw new ApiError(400, "内容过长（上限 5000 字）", "TOO_LARGE")
 
-  // 分类：只认三种，非法值回落到「闲聊」（前端下拉框已限，这里兜底不报错）
-  const category: PostCategory = isPostCategory(body.category) ? body.category : "chat"
+  // 分类：只接受**当前生效的分类**（管理员可在后台增删），非法值回落默认分类。
+  //
+  // ⚠️ 刻意**不报错**：分类现在是动态的，管理员删掉某个分类时，正开着发帖框的用户
+  // 手上还是旧列表 —— 提交时报 400 会让他完全发不出去，而"落到默认分类"是能用的结果。
+  const categoryDefs = await postCategoryDefs(env)
+  const category = isPostCategoryKey(categoryDefs, body.category)
+    ? String(body.category)
+    : defaultPostCategory(categoryDefs)
 
   const last = await env.DB.prepare("SELECT created_at FROM posts WHERE user_id=? ORDER BY created_at DESC LIMIT 1")
     .bind(user.id).first<{ created_at: string }>()

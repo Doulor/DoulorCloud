@@ -1439,15 +1439,44 @@ export async function listAllDonations(
 ): Promise<Response> {
   await requireAdminUser(env, request, "donations.ai")
 
-  const rows = await env.DB.prepare(
-    `SELECT d.*, u.username FROM donations d
-       JOIN users u ON u.id = d.user_id
-      ORDER BY d.created_at DESC`
-  ).all<DonationRow & { username: string }>()
+  // 2026-10-08 性能：实测全量（853 条 / 559KB 响应）打开捐献管理要 2~8s。
+  // 加 ?limit=&offset= 服务端分页 —— **不传 = 维持旧行为返回全量**，旧前端不受影响；
+  // 传了则只回该页 + total，供新前端做真分页。
+  const url = new URL(request.url)
+  const hasPage = url.searchParams.has("limit") || url.searchParams.has("offset")
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200)
+  const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0)
+
+  const pageSuffix = hasPage ? " LIMIT ? OFFSET ?" : ""
+  const pageBinds: unknown[] = hasPage ? [limit, offset] : []
+
+  const [rows, countRes] = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT d.*, u.username FROM donations d
+         JOIN users u ON u.id = d.user_id
+        ORDER BY d.created_at DESC${pageSuffix}`
+    ).bind(...pageBinds),
+    hasPage
+      ? env.DB.prepare(`SELECT COUNT(*) AS c FROM donations`)
+      : env.DB.prepare(`SELECT 1 AS x`),
+  ])
 
   return json({
-    donations: (rows.results ?? []).map((r) => toPublicDonation(r, r.username)),
+    donations: ((rows.results ?? []) as unknown as (DonationRow & { username: string })[]).map(
+      (r) => toPublicDonation(r, r.username)
+    ),
     typeLabels: DONATION_TYPE_LABELS,
+    ...(hasPage
+      ? {
+          total: Number(
+            ((countRes as unknown as { results?: { c: number }[] }).results?.[0] as
+              | { c: number }
+              | undefined)?.c ?? 0
+          ),
+          limit,
+          offset,
+        }
+      : {}),
   })
 }
 
