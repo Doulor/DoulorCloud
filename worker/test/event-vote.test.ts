@@ -708,6 +708,87 @@ describe("投票：积分可以为负数（扣积分）", () => {
   })
 })
 
+describe("投票：票数分布的下发收口（防控制台偷看实时票数）", () => {
+  /**
+   * 背景（2026-10-07 站长报的安全问题）：接口原来把每个投票活动的完整实时票数
+   * 无条件下发给所有人，前端虽然在「未投票」时不渲染，但数据已在 JSON 里 ——
+   * 用户在控制台 `fetch('/api/events')` 就能读到，于是「选少数」变成照着答案投。
+   * 这一组测试锁死「服务端不下发」，别只依赖前端不显示。
+   */
+  const listCounts = async (req: Request, evId: string) => {
+    const res = await fetchSelf(req)
+    const body = await res.json<{
+      events: { id: string; voteCounts?: Record<string, number> }[]
+    }>()
+    return body.events.find((e) => e.id === evId)?.voteCounts ?? null
+  }
+  const ANON_LIST = () => new Request("https://cloud.doulor.cn/api/events")
+
+  it("未投票且未开奖：详情与列表都拿不到票数（哪怕别人已经投了）", async () => {
+    const ev = await seedVote({ rule: "minority" })
+    const voted = await makeUser({})
+    const watcher = await makeUser({})
+    expect((await vote(ev, voted, "a")).status).toBe(200)
+
+    const detail = await fetchSelf(authRequest(watcher, `/api/events/${ev}`))
+    const dj = await detail.json<{ event: { voteCounts: Record<string, number> } }>()
+    expect(dj.event.voteCounts).toEqual({})
+
+    expect(await listCounts(authRequest(watcher, "/api/events"), ev)).toEqual({})
+  })
+
+  it("未登录同样拿不到（列表接口匿名可访问）", async () => {
+    const ev = await seedVote({ rule: "minority" })
+    await vote(ev, await makeUser({}), "a")
+
+    const detail = await fetchSelf(new Request(`https://cloud.doulor.cn/api/events/${ev}`))
+    const dj = await detail.json<{ event: { voteCounts: Record<string, number> } }>()
+    expect(dj.event.voteCounts).toEqual({})
+
+    expect(await listCounts(ANON_LIST(), ev)).toEqual({})
+  })
+
+  it("投过票之后可见真实票数（投完能看别人选了什么）", async () => {
+    const ev = await seedVote({ rule: "minority" })
+    const a = await makeUser({})
+    const b = await makeUser({})
+    await vote(ev, a, "a")
+    await vote(ev, b, "b")
+
+    const res = await fetchSelf(authRequest(a, `/api/events/${ev}`))
+    const j = await res.json<{ event: { voteCounts: Record<string, number> } }>()
+    expect(j.event.voteCounts).toEqual({ a: 1, b: 1 })
+
+    expect(await listCounts(authRequest(a, "/api/events"), ev)).toEqual({ a: 1, b: 1 })
+  })
+
+  it("开奖后对所有人公开（含从未投票、非管理员的人）", async () => {
+    const admin = await makeAdmin()
+    const ev = await seedVote({ rule: "minority" })
+    const a = await makeUser({})
+    const outsider = await makeUser({})
+    await vote(ev, a, "a")
+    expect((await draw(ev, admin)).status).toBe(200)
+
+    const res = await fetchSelf(authRequest(outsider, `/api/events/${ev}`))
+    const j = await res.json<{ event: { voteCounts: Record<string, number> } }>()
+    expect(j.event.voteCounts).toEqual({ a: 1 })
+  })
+
+  it("管理端列表始终含票数（未开奖也要能判断何时开奖）", async () => {
+    const admin = await makeAdmin()
+    const ev = await seedVote({ rule: "minority" })
+    await vote(ev, await makeUser({}), "a")
+
+    const res = await fetchSelf(authRequest(admin, "/api/admin/events"))
+    expect(res.status).toBe(200)
+    const j = await res.json<{
+      events: { id: string; voteCounts?: Record<string, number> }[]
+    }>()
+    expect(j.events.find((e) => e.id === ev)?.voteCounts).toEqual({ a: 1 })
+  })
+})
+
 describe("投票：奖励类型可选（不限于积分）", () => {
   it("邀请码额度：中奖者拿到邀请码额度而不是积分", async () => {
     const admin = await makeAdmin()

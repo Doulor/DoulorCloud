@@ -10,7 +10,7 @@
  *   - 发放失败不能让用户卡在 pending：异常时把 claim 置 failed 并允许重试。
  */
 import { ApiError, json, assertContentLengthWithin, readBodyCapped } from "../http"
-import { requireUser } from "../auth"
+import { requireUser, isAnyAdmin } from "../auth"
 import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
@@ -200,6 +200,31 @@ async function loadOne(env: Env, id: string): Promise<EventRow> {
 // ---- 用户端 ----
 
 /**
+ * 票数分布（voteCounts）是否对**这个请求方**公开。
+ *
+ * 🔴 为什么必须收口（2026-10-07 站长报的安全问题）：
+ *   `/api/events` 与 `/api/events/:id` 原来把每个投票活动的**完整实时票数分布
+ *   无条件下发**（连未登录的都能拿到）。前端投票组件虽然只在「已投票 / 已开奖」
+ *   之后才把票数渲染出来，但**数据本身已经在 JSON 里了** —— 用户只要在浏览器
+ *   控制台里 `fetch('/api/events')` 就能读到全部票数，于是「选少数」直接变成
+ *   「照着当前最少的那项投」，活动完全失去意义。
+ *   ⇒ **前端收口只做到"看不见"，服务端收口才是"拿不到"，两者缺一不可。**
+ *
+ * 公开条件（与前端 `revealed = !!myVote || vote.drawn` 严格一致，改一处要改两处）：
+ *   · 已经投过票 —— 票不能改，看到分布没有作弊空间；而且「投完能看到别人选了什么」
+ *     本来就是体验的一部分；
+ *   · 或者已经开奖 —— 结果已经定死，公开是合理的（也让没中的人知道答案）；
+ *   · 管理员始终可见（含未开奖）—— 后台要靠票数判断够不够、什么时候开奖。
+ */
+function voteCountsVisible(opts: {
+  hasVoted: boolean
+  drawn: boolean
+  isAdmin: boolean
+}): boolean {
+  return opts.isAdmin || opts.hasVoted || opts.drawn
+}
+
+/**
  * GET /api/events —— 当前用户可见的活动（已上线且未结束），附自己的领取状态。
  * 未登录也允许访问（社区页/概览可能展示活动），但不返回领取状态。
  */
@@ -284,6 +309,9 @@ export async function listEvents(env: Env, request: Request): Promise<Response> 
     }
   }
 
+  // 管理员在用户端列表里也要能看到票数（实际上后台走的是 /admin/events）
+  const isAdmin = !!user && isAnyAdmin(user.role)
+
   return json({
     events: events.map((e) => ({
       ...e,
@@ -291,8 +319,20 @@ export async function listEvents(env: Env, request: Request): Promise<Response> 
       claimCount: countMap[e.id] ?? 0,
       /** 不满足奖励前置条件时的原因（空 = 可正常领取）；仅登录用户有值 */
       claimBlockedReason: blocked[e.id] ?? null,
-      /** 投票活动：{ 选项id: 票数 }；非投票活动是空对象 */
-      voteCounts: voteCountMap[e.id] ?? {},
+      /**
+       * 投票活动：{ 选项id: 票数 }；非投票活动是空对象。
+       *
+       * ⚠️ 「未投票且未开奖」时下发的是**空对象**，含义是「不告诉你」，
+       * **不是**「票数为 0」—— 前端请用 `myVote` / `vote.drawn` 判断是否公开，
+       * 不要用票数之和是否为 0 来判断有没有人投过。判定口径见 voteCountsVisible。
+       */
+      voteCounts: voteCountsVisible({
+        hasVoted: myVotes[e.id] != null,
+        drawn: !!e.vote?.drawn,
+        isAdmin,
+      })
+        ? voteCountMap[e.id] ?? {}
+        : {},
       /** 投票活动：我投的选项 id；没投过 / 未登录为 null */
       myVote: myVotes[e.id] ?? null,
     })),
@@ -321,16 +361,8 @@ export async function getEvent(env: Env, request: Request, id: string): Promise<
     .bind(id)
     .first<{ c: number }>()
 
-  // 投票：本活动的票数分布（选项 id → 票数）
-  const voteTally = await env.DB.prepare(
-    "SELECT option_id, COUNT(*) AS c FROM event_votes WHERE event_id = ? GROUP BY option_id"
-  )
-    .bind(id)
-    .all<{ option_id: string; c: number }>()
-  const voteCounts: Record<string, number> = {}
-  for (const r of voteTally.results ?? []) voteCounts[r.option_id] = r.c
-
   const user = await optionalUser(env, request)
+  const isAdmin = !!user && isAnyAdmin(user.role)
   let myClaim: { rewardStatus: string; rewardDetail: string | null } | null = null
   let claimBlockedReason: string | null = null
   let myVote: string | null = null
@@ -351,6 +383,23 @@ export async function getEvent(env: Env, request: Request, id: string): Promise<
       .bind(id, user.id)
       .first<{ option_id: string }>()
     myVote = v?.option_id ?? null
+  }
+
+  // 投票：本活动的票数分布（选项 id → 票数）。
+  //
+  // ⚠️ 只有「该公开」时才**真的查库** —— 不只是不下发。这样票数不会出现在任何中间
+  // 变量/对象里，少一条泄漏路径（判定口径见 voteCountsVisible）。
+  const voteCounts: Record<string, number> = {}
+  if (
+    row.condition_type === "vote" &&
+    voteCountsVisible({ hasVoted: myVote != null, drawn: !!row.drawn_at, isAdmin })
+  ) {
+    const voteTally = await env.DB.prepare(
+      "SELECT option_id, COUNT(*) AS c FROM event_votes WHERE event_id = ? GROUP BY option_id"
+    )
+      .bind(id)
+      .all<{ option_id: string; c: number }>()
+    for (const r of voteTally.results ?? []) voteCounts[r.option_id] = r.c
   }
 
   return json({
@@ -1280,10 +1329,22 @@ export async function listAllEvents(env: Env, request: Request): Promise<Respons
   ).all<{ event_id: string; c: number }>()
   const countMap = Object.fromEntries((counts.results ?? []).map((r) => [r.event_id, r.c]))
 
+  // 投票票数：管理端**始终可见**（后台要靠它判断票数够不够、什么时候开奖）。
+  // 用户端列表则按 voteCountsVisible 收口 —— 这里不能跟着一起收。
+  const voteRows = await env.DB.prepare(
+    "SELECT event_id, option_id, COUNT(*) AS c FROM event_votes GROUP BY event_id, option_id"
+  ).all<{ event_id: string; option_id: string; c: number }>()
+  const voteCountMap: Record<string, Record<string, number>> = {}
+  for (const r of voteRows.results ?? []) {
+    const m = (voteCountMap[r.event_id] ??= {})
+    m[r.option_id] = r.c
+  }
+
   return json({
     events: (rows.results ?? []).map((r) => ({
       ...toEvent(r, now, true),
       claimCount: countMap[r.id] ?? 0,
+      voteCounts: voteCountMap[r.id] ?? {},
     })),
   })
 }
