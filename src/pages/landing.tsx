@@ -26,6 +26,7 @@ import {
 
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { GitHubMark } from "@/components/github-mark"
 import {
   Dialog,
   DialogContent,
@@ -36,6 +37,7 @@ import {
 import { useAuth } from "@/hooks/use-auth"
 import { useInstallPrompt } from "@/hooks/use-install-prompt"
 import { useT } from "@/i18n"
+import { QQ_GROUP_URL, REPO_URL, TELEGRAM_URL } from "@/lib/site-links"
 
 /**
  * 功能模块的开放档位。
@@ -425,7 +427,7 @@ export default function LandingPage() {
           <p className="mb-8 text-muted-foreground">{t("landing.contactSub")}</p>
           <div className="flex flex-wrap justify-center gap-4">
             <a
-              href="https://qm.qq.com/q/5zrDzWPcMU"
+              href={QQ_GROUP_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="group flex items-center gap-3 rounded-2xl border bg-card/70 px-6 py-4 backdrop-blur-sm transition-all duration-300 hover:-translate-y-1 hover:border-foreground/20 hover:shadow-xl"
@@ -436,7 +438,7 @@ export default function LandingPage() {
               <span className="font-medium">{t("landing.contact.qq")}</span>
             </a>
             <a
-              href="https://t.me/DoulorCloud"
+              href={TELEGRAM_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="group flex items-center gap-3 rounded-2xl border bg-card/70 px-6 py-4 backdrop-blur-sm transition-all duration-300 hover:-translate-y-1 hover:border-foreground/20 hover:shadow-xl"
@@ -445,6 +447,18 @@ export default function LandingPage() {
                 <Send className="h-5 w-5 text-muted-foreground" />
               </span>
               <span className="font-medium">{t("landing.contact.tg")}</span>
+            </a>
+            {/* 开源仓库：与上面两个社区入口并列，访客能直接去看源码 / 提 issue */}
+            <a
+              href={REPO_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="group flex items-center gap-3 rounded-2xl border bg-card/70 px-6 py-4 backdrop-blur-sm transition-all duration-300 hover:-translate-y-1 hover:border-foreground/20 hover:shadow-xl"
+            >
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl border bg-background transition-colors group-hover:bg-accent">
+                <GitHubMark className="h-5 w-5 text-muted-foreground" />
+              </span>
+              <span className="font-medium">{t("landing.contact.gh")}</span>
             </a>
           </div>
         </div>
@@ -470,6 +484,25 @@ export default function LandingPage() {
           )}
         </div>
       </section>
+
+      {/* 页脚：版权 + 开源仓库入口。
+          开源项目里访客/贡献者最常找的就是这里，放页脚是最不打扰、也最符合直觉的位置。 */}
+      <footer className="mt-8 flex flex-col items-center justify-between gap-3 border-t py-8 text-sm text-muted-foreground sm:flex-row">
+        <p className="text-center sm:text-left">
+          © {new Date().getFullYear()} Doulor Cloud
+          <span className="mx-2 hidden sm:inline">·</span>
+          <span className="block sm:inline">{t("landing.footer.builtWith")}</span>
+        </p>
+        <a
+          href={REPO_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex shrink-0 items-center gap-2 rounded-md px-2 py-1 underline-offset-4 transition-colors hover:text-foreground hover:underline"
+        >
+          <GitHubMark className="h-4 w-4" />
+          {t("landing.footer.repo")}
+        </a>
+      </footer>
     </div>
   )
 }
