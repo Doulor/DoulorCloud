@@ -622,6 +622,7 @@ function CommentItem({
               placeholder={t("cm.replyPh", { name: node.author.nickname ?? node.author.username })}
               className="text-sm"
             />
+            <DraftImagePreview text={text} className="mt-1.5" setText={setText} />
             <div className="mt-1.5 flex items-center gap-1">
               <EmojiPicker onPick={insertEmoji} />
               <StickerPanel onPick={insertEmoji} />
@@ -1162,6 +1163,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
             placeholder={t("cm.commentPh")}
             className="text-sm"
           />
+          <DraftImagePreview text={text} className="mt-2" setText={setText} />
           <div className="mt-2 flex items-center gap-1">
             <EmojiPicker onPick={insertEmoji} />
             <StickerPanel onPick={insertEmoji} />
@@ -1403,7 +1405,7 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
       )}
 
       {/* 表情包/图片实时预览：正文里贴的表情包发送前就渲染成缩略图 */}
-      {!preview && <DraftImagePreview text={draft} className="mt-2" />}
+      {!preview && <DraftImagePreview text={draft} className="mt-2" setText={setDraft} />}
 
       {/* 图片预览 */}
       {images.length > 0 && (

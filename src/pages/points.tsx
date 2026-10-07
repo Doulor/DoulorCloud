@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Coins,
   Copy,
+  Eye,
   Flame,
   Loader2,
   Package,
@@ -56,6 +57,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { pointsApi, errMsg, HttpError } from "@/services/api"
+import { useAuth } from "@/hooks/use-auth"
 import { PRODUCT_CATEGORY_LABELS, type ProductCategory } from "@/types"
 import { notifyPointsChanged } from "@/components/points-badge"
 import { fmtDateTime } from "@/lib/format"
@@ -720,6 +722,7 @@ const SHOP_PAGE_SIZE = 9
 
 export default function PointsPage() {
   const { t } = useT()
+  const { user } = useAuth()
   const [data, setData] = React.useState<PointsOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
 
@@ -756,6 +759,8 @@ export default function PointsPage() {
   const [editingId, setEditingId] = React.useState<string | null>(null)
   const [form, setForm] = React.useState<UploadForm>(emptyUpload())
   const [formBusy, setFormBusy] = React.useState(false)
+  /** 发布效果预览弹窗 */
+  const [previewOpen, setPreviewOpen] = React.useState(false)
 
   // 封面图直传（2026-10-01）：传完把返回的同源 URL 填进 imageUrl，卖家不用再找图床
   const [coverUploading, setCoverUploading] = React.useState(false)
@@ -1027,6 +1032,45 @@ export default function PointsPage() {
     setForm(uploadOf(p))
     setUploadOpen(true)
   }
+
+  /** 发布效果预览：用当前表单值拼一个 PointProduct，直接复用商品卡片渲染 */
+  const previewProduct: PointProduct | null = React.useMemo(() => {
+    if (!previewOpen) return null
+    const p = uploadPayload(form)
+    const now = new Date().toISOString()
+    return {
+      id: "__preview__",
+      name: p.name,
+      description: p.description,
+      imageUrl: p.imageUrl,
+      category: p.category,
+      icon: p.icon,
+      price: p.price,
+      stock: p.stock,
+      dailyLimit: null,
+      dailySold: 0,
+      // 预览的是「尚未发布」的商品 ⇒ 累计售出必然是 0
+      // （合并 origin/main 时补的：`soldCount` 是本地给 PointProduct 新增的字段，
+      //  远程的预览构造器还不知道它，两边合起来才缺）
+      soldCount: 0,
+      perUserLimit: null,
+      // 用户商品交付方式固定为人工
+      delivery: "manual",
+      quotaYuan: null,
+      deliveryParams: null,
+      enabled: p.enabled,
+      sort: 0,
+      ownerId: "__preview__",
+      ownerName: user?.username ?? null,
+      reviewStatus: "pending",
+      reviewNote: null,
+      reviewedAt: null,
+      billingMode: p.billingMode,
+      rentalDays: p.rentalDays,
+      createdAt: now,
+      updatedAt: now,
+    }
+  }, [previewOpen, form, user])
 
   const submitUpload = async () => {
     const payload = uploadPayload(form)
@@ -2544,6 +2588,15 @@ export default function PointsPage() {
           </div>
 
           <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setPreviewOpen(true)}
+              disabled={formBusy}
+            >
+              <Eye className="mr-1.5 h-4 w-4" />
+              {t("pt.preview.open")}
+            </Button>
             <Button variant="outline" onClick={() => setUploadOpen(false)} disabled={formBusy}>
               {t("common.cancel")}
             </Button>
@@ -2552,6 +2605,27 @@ export default function PointsPage() {
               {editingId ? t("common.save") : t("pt.submitReview")}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 发布效果预览：复用商品卡片，按当前表单值实时渲染 */}
+      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{t("pt.preview.title")}</DialogTitle>
+            <DialogDescription>{t("pt.preview.hint")}</DialogDescription>
+          </DialogHeader>
+          {previewProduct && (
+            // 预览不产生交互：私信链接禁用，购买按钮为空操作
+            <div className="[&_a]:pointer-events-none">
+              <ProductCard
+                product={previewProduct}
+                balance={Number.MAX_SAFE_INTEGER}
+                sellerName={previewProduct.ownerName}
+                onBuy={() => {}}
+              />
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

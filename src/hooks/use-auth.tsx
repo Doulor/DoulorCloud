@@ -48,11 +48,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener("auth:expired", onExpired)
   }, [])
 
-  return (
-    <AuthContext.Provider value={{ user, loading, setUser }}>
-      {children}
-    </AuthContext.Provider>
+  // value 收敛成稳定引用：AuthProvider 任何一次重渲染都不该让全部 useAuth
+  // 消费者（概览页卡片等 memo 化子树）被 context 打穿而白渲染
+  const value = React.useMemo(
+    () => ({ user, loading, setUser }),
+    [user, loading, setUser]
   )
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 
 export function useAuth() {

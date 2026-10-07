@@ -735,7 +735,7 @@ export function parseVoteConfig(params: Record<string, unknown> | null): VoteCon
   }
   if (options.length < 2) return null
   const rule = String(params.rewardRule ?? "")
-  if (!(VOTE_REWARD_RULES as readonly string[]).includes(rule)) return null
+  if (!isVoteRewardRule(rule)) return null
   const applied = rule as VoteRewardRule
   // 「指定选项获奖」必须配一个**真实存在**的选项 id。
   // ⚠️ 不能只存下来不校验：配错（或选项后来被删了）时，判奖会算出「一个不存在的选项获奖」，
@@ -758,10 +758,10 @@ export function validateVoteCondition(params: unknown): string | null {
   if (p.options.length < 2) return "投票至少要配置 2 个选项"
   if (p.options.length > MAX_VOTE_OPTIONS) return `投票选项最多 ${MAX_VOTE_OPTIONS} 个`
   const rule = String(p.rewardRule ?? "")
-  if (!(VOTE_REWARD_RULES as readonly string[]).includes(rule)) {
+  if (!isVoteRewardRule(rule)) {
     return "获奖规则不合法（参与即可获奖 / 固定选项 / 多数 / 少数，各分立刻结算或截止后开奖）"
   }
-  if (isFixedVoteRule(rule as VoteRewardRule)) {
+  if (isFixedVoteRule(rule)) {
     const fixed = typeof p.fixedOptionId === "string" ? p.fixedOptionId.trim() : ""
     if (!fixed) return "「固定选项获奖」需要指定获奖的那个选项"
   }

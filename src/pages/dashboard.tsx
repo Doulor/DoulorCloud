@@ -26,7 +26,8 @@ import { toast } from "sonner"
 import {
   DndContext,
   DragOverlay,
-  PointerSensor,
+  MouseSensor,
+  TouchSensor,
   closestCorners,
   useDroppable,
   useSensor,
@@ -100,31 +101,22 @@ function useCopy() {
   return { copied, copy }
 }
 
-/** AI 中转站详情卡：额度 + Base URL + Key 列表 */
-function AiCard() {
+/**
+ * AI 中转站详情卡：额度 + Base URL + Key 列表。
+ *
+ * 数据由页面级 useDashboardCards 统一拉取（受控组件）——卡片编辑的拖拽跨列、
+ * DragOverlay 浮层都会让卡片反复 unmount/mount，自带请求会重复发（实测拖一次
+ * AI 卡至少多发 2 次 /api/dev/status 并闪一次骨架屏）。
+ */
+const AiCard = React.memo(function AiCard({
+  status,
+  loading,
+}: {
+  status: NewApiStatus | null
+  loading: boolean
+}) {
   const { t } = useT()
-  const [status, setStatus] = React.useState<NewApiStatus | null>(null)
-  const [loading, setLoading] = React.useState(true)
   const { copied, copy } = useCopy()
-
-  React.useEffect(() => {
-    let cancelled = false
-    newapiApi
-      .status()
-      .then((res: NewApiStatus) => !cancelled && setStatus(res))
-      .catch((err) => {
-        if (cancelled) return
-        // 无权限（未解锁 AI 中转站）是新用户的正常状态，静默显示「未绑定」，不弹错误
-        if (err instanceof HttpError && err.code === "FEATURE_NOT_PERMITTED") {
-          return
-        }
-        toast.error(errMsg(err, t("dash.err.aiStatus")))
-      })
-      .finally(() => !cancelled && setLoading(false))
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   const acc = status?.account
   const symbol = status?.currencySymbol ?? "¥"
@@ -259,28 +251,20 @@ function AiCard() {
       </CardContent>
     </Card>
   )
-}
+})
 
-/** 名片预览卡：头像 + 昵称 + 签名 + 查看按钮 */
-function ProfileCard({ compact = false }: { compact?: boolean }) {
+/** 名片预览卡：头像 + 昵称 + 签名 + 查看按钮（数据由页面级统一拉取） */
+const ProfileCard = React.memo(function ProfileCard({
+  data,
+  loading,
+  compact = false,
+}: {
+  data: ProfileOverview | null
+  loading: boolean
+  compact?: boolean
+}) {
   const { t } = useT()
   const { user } = useAuth()
-  const [data, setData] = React.useState<ProfileOverview | null>(null)
-  const [loading, setLoading] = React.useState(true)
-
-  React.useEffect(() => {
-    let cancelled = false
-    profileApi
-      .get()
-      .then((res) => !cancelled && setData(res))
-      .catch((err) => {
-        if (!cancelled) toast.error(errMsg(err, t("dash.err.profile")))
-      })
-      .finally(() => !cancelled && setLoading(false))
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   const p = data?.profile
   const publicUrl = p?.fqdn ? `https://${p.fqdn}` : `${window.location.origin}${p?.profilePath ?? ""}`
@@ -357,10 +341,10 @@ function ProfileCard({ compact = false }: { compact?: boolean }) {
       </CardContent>
     </Card>
   )
-}
+})
 
 /** 最近邮件卡：标题点击跳转正文 + 右侧未读数 */
-function RecentMailCard({
+const RecentMailCard = React.memo(function RecentMailCard({
   data,
   loading,
   compact = false,
@@ -437,10 +421,16 @@ function RecentMailCard({
       </CardContent>
     </Card>
   )
-}
+})
 
 /** 网盘用量卡：进度条 + 最近文件 */
-function StorageCard({ data, loading }: { data: MeResponse | null; loading: boolean }) {
+const StorageCard = React.memo(function StorageCard({
+  data,
+  loading,
+}: {
+  data: MeResponse | null
+  loading: boolean
+}) {
   const { t } = useT()
   const { copied, copy } = useCopy()
   const used = data?.stats?.storageUsedBytes ?? 0
@@ -532,7 +522,7 @@ function StorageCard({ data, loading }: { data: MeResponse | null; loading: bool
       </CardContent>
     </Card>
   )
-}
+})
 
 /**
  * 公告弹窗：根据公告的 popup_mode 决定是否弹、怎么弹。
@@ -541,32 +531,30 @@ function StorageCard({ data, loading }: { data: MeResponse | null; loading: bool
  *   - once 模式：关闭后记录「已看过」，不再弹
  *   - every 模式：每次进入都弹，但用户可点「不再显示」永久屏蔽
  * localStorage 键：doulor:ann-seen:<id>（已看/已屏蔽）
+ *
+ * 公告数据由页面级统一拉取（与「网站动态」卡共享一次请求，原来各发一次）。
  */
-function AnnouncementPopup() {
+const AnnouncementPopup = React.memo(function AnnouncementPopup({
+  announcements,
+}: {
+  announcements: Announcement[]
+}) {
   const { t } = useT()
   const [popup, setPopup] = React.useState<Announcement | null>(null)
+  /** 只决定一次弹窗；公告列表后续再变（本页只拉一次）也不重复弹 */
+  const decidedRef = React.useRef(false)
 
   React.useEffect(() => {
-    let cancelled = false
-    announcementApi
-      .list()
-      .then((res) => {
-        if (cancelled) return
-        // 找第一个需要弹的公告
-        const target = res.announcements.find((a) => {
-          if (a.popupMode === "none") return false
-          const seen = localStorage.getItem(`doulor:ann-seen:${a.id}`)
-          return !seen
-        })
-        if (target) setPopup(target)
-      })
-      .catch(() => {
-        /* 弹窗加载失败静默，不影响概览 */
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+    if (decidedRef.current || announcements.length === 0) return
+    decidedRef.current = true
+    // 找第一个需要弹的公告
+    const target = announcements.find((a) => {
+      if (a.popupMode === "none") return false
+      const seen = localStorage.getItem(`doulor:ann-seen:${a.id}`)
+      return !seen
+    })
+    if (target) setPopup(target)
+  }, [announcements])
 
   if (!popup) return null
 
@@ -604,13 +592,17 @@ function AnnouncementPopup() {
       </DialogContent>
     </Dialog>
   )
-}
+})
 
-/** 网站动态卡：公告列表 */
-function AnnouncementsCard() {
+/** 网站动态卡：公告列表（数据由页面级统一拉取，与弹窗共享一次请求） */
+const AnnouncementsCard = React.memo(function AnnouncementsCard({
+  items,
+  loading,
+}: {
+  items: Announcement[]
+  loading: boolean
+}) {
   const { t } = useT()
-  const [items, setItems] = React.useState<Announcement[]>([])
-  const [loading, setLoading] = React.useState(true)
   /**
    * 展开中的公告 id。
    *
@@ -619,20 +611,6 @@ function AnnouncementsCard() {
    * 现在点整条即可展开/收起（键盘 Enter/Space 同样可用）。
    */
   const [expandedId, setExpandedId] = React.useState<string | null>(null)
-
-  React.useEffect(() => {
-    let cancelled = false
-    announcementApi
-      .list()
-      .then((res) => !cancelled && setItems(res.announcements))
-      .catch((err) => {
-        if (!cancelled) toast.error(errMsg(err, t("dash.err.announcements")))
-      })
-      .finally(() => !cancelled && setLoading(false))
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   const categoryLabel: Record<string, string> = {
     general: t("dash.cat.general"),
@@ -713,10 +691,16 @@ function AnnouncementsCard() {
       </CardContent>
     </Card>
   )
-}
+})
 
 /** 资源快览徽章行：紧凑横排几个核心数字，点击跳转，既是概览也是导航 */
-function ResourceBadges({ data, loading }: { data: MeResponse | null; loading: boolean }) {
+const ResourceBadges = React.memo(function ResourceBadges({
+  data,
+  loading,
+}: {
+  data: MeResponse | null
+  loading: boolean
+}) {
   const { t } = useT()
   const stats = data?.stats
   const items = [
@@ -752,10 +736,10 @@ function ResourceBadges({ data, loading }: { data: MeResponse | null; loading: b
       ))}
     </div>
   )
-}
+})
 
 /** 快捷操作入口：常用动作直达 */
-function QuickActions() {
+const QuickActions = React.memo(function QuickActions() {
   const { t } = useT()
   const actions = [
     { label: t("dash.quick.mail"), icon: Mail, to: "/dashboard/email" },
@@ -783,7 +767,7 @@ function QuickActions() {
       </CardContent>
     </Card>
   )
-}
+})
 
 /**
  * 审计动作 → 文案 key（2026-10-04 ventus 反馈：概览「最近活动」直接显示
@@ -879,7 +863,13 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
 }
 
 /** 最近活动：audit_logs 的最近操作记录 */
-function RecentActivityCard({ data, loading }: { data: MeResponse | null; loading: boolean }) {
+const RecentActivityCard = React.memo(function RecentActivityCard({
+  data,
+  loading,
+}: {
+  data: MeResponse | null
+  loading: boolean
+}) {
   const { t } = useT()
   const items = data?.recentActivity ?? []
   return (
@@ -927,7 +917,7 @@ function RecentActivityCard({ data, loading }: { data: MeResponse | null; loadin
       </CardContent>
     </Card>
   )
-}
+})
 
 // ---- 卡片布局（可拖拽自定义）----
 
@@ -1009,16 +999,11 @@ function saveLayout(layout: CardLayout): void {
   }
 }
 
-/** 从布局中移除某卡片（用于拖拽时先摘出） */
-function withoutCard(layout: CardLayout, id: CardId): CardLayout {
-  return {
-    left: layout.left.filter((c) => c !== id),
-    right: layout.right.filter((c) => c !== id),
-  }
-}
+// （原 withoutCard 已删除：拖拽预览不再摘除被拖卡片 —— 摘卡会让 dnd-kit 的
+//   active 节点卸载，排序与浮层全部失效，正是「拖拽不跟手」的根源之一。）
 
 /** 带排序能力的卡片包装：dnd-kit 的 useSortable 负责让位动画与拖拽状态 */
-function SortableCard({
+const SortableCard = React.memo(function SortableCard({
   id,
   editing,
   render,
@@ -1027,7 +1012,7 @@ function SortableCard({
   editing: boolean
   render: (id: CardId) => React.ReactNode
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+  const { attributes, listeners, setNodeRef, transform, isDragging } =
     useSortable({ id, disabled: !editing })
 
   return (
@@ -1035,7 +1020,12 @@ function SortableCard({
       ref={setNodeRef}
       style={{
         transform: CSS.Transform.toString(transform),
-        transition,
+        /**
+         * 让位动画用「回弹」弹簧曲线（overshoot 后收敛），替代 dnd-kit 默认的
+         * 平缓 ease —— 卡片被挤开时先冲过头一点再弹回，接近 iOS 的物理手感。
+         * 时长 260ms：短了看不出弹性，长了拖拽会感觉迟滞。
+         */
+        transition: "transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1)",
         // 被拖的卡片本身让 DragOverlay 接管，原位保留占位（透明）保持空间
         opacity: isDragging ? 0 : 1,
         zIndex: isDragging ? 0 : undefined,
@@ -1051,18 +1041,21 @@ function SortableCard({
       <div
         {...attributes}
         {...listeners}
+        // Jiggle 抖动挂在**内层**：外层 transform 归 dnd-kit 排序管，
+        // 动画属性撞车会把拖拽位移盖掉（详见 index.css 的 card-jiggle 注释）
         className={cn(
-          editing && !isDragging && "cursor-grab active:cursor-grabbing"
+          editing && !isDragging && "cursor-grab active:cursor-grabbing",
+          editing && !isDragging && "card-jiggle"
         )}
       >
         {render(id)}
       </div>
     </div>
   )
-}
+})
 
 /** 可放置列：每列是一个 droppable，处理跨列拖拽 */
-function SortableColumn({
+const SortableColumn = React.memo(function SortableColumn({
   col,
   ids,
   editing,
@@ -1114,7 +1107,7 @@ function SortableColumn({
       )}
     </div>
   )
-}
+})
 
 /** 由列的 droppable id 还原列名 */
 function colOf(id: string): "left" | "right" {
@@ -1162,6 +1155,88 @@ function reorderLayout(
   return targetCol === "left" ? { left: targetArr, right } : { left, right: targetArr }
 }
 
+/**
+ * 概览页卡片数据统一拉取。
+ *
+ * AiCard / ProfileCard / AnnouncementsCard（及公告弹窗）原来各自在挂载时发请求，
+ * 而卡片编辑（拖拽跨列、DragOverlay 浮层）会让组件反复 unmount/mount —— 每跨
+ * 一次列就多发一次请求、骨架屏闪一下（实测拖一次 AI 卡至少多发 2 次
+ * /api/dev/status）。提升到页面级后卡片是纯受控组件：拖拽重排只比对 props，
+ * 不再触发任何网络请求，「网站动态」卡与公告弹窗也共享同一次请求。
+ */
+function useDashboardCards() {
+  const { t } = useT()
+  /** 请求只发一次，但错误提示要跟当前语言 → 用 ref 兜住 t 的引用变化 */
+  const tRef = React.useRef(t)
+  React.useEffect(() => {
+    tRef.current = t
+  }, [t])
+
+  const [aiStatus, setAiStatus] = React.useState<NewApiStatus | null>(null)
+  const [aiLoading, setAiLoading] = React.useState(true)
+  const [profile, setProfile] = React.useState<ProfileOverview | null>(null)
+  const [profileLoading, setProfileLoading] = React.useState(true)
+  const [announcements, setAnnouncements] = React.useState<Announcement[]>([])
+  const [announcementsLoading, setAnnouncementsLoading] = React.useState(true)
+
+  React.useEffect(() => {
+    let cancelled = false
+    newapiApi
+      .status()
+      .then((res: NewApiStatus) => !cancelled && setAiStatus(res))
+      .catch((err) => {
+        if (cancelled) return
+        // 无权限（未解锁 AI 中转站）是新用户的正常状态，静默显示「未绑定」，不弹错误
+        if (err instanceof HttpError && err.code === "FEATURE_NOT_PERMITTED") {
+          return
+        }
+        toast.error(errMsg(err, tRef.current("dash.err.aiStatus")))
+      })
+      .finally(() => !cancelled && setAiLoading(false))
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  React.useEffect(() => {
+    let cancelled = false
+    profileApi
+      .get()
+      .then((res) => !cancelled && setProfile(res))
+      .catch((err) => {
+        if (!cancelled) toast.error(errMsg(err, tRef.current("dash.err.profile")))
+      })
+      .finally(() => !cancelled && setProfileLoading(false))
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  React.useEffect(() => {
+    let cancelled = false
+    announcementApi
+      .list()
+      .then((res) => !cancelled && setAnnouncements(res.announcements))
+      .catch((err) => {
+        if (!cancelled)
+          toast.error(errMsg(err, tRef.current("dash.err.announcements")))
+      })
+      .finally(() => !cancelled && setAnnouncementsLoading(false))
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return {
+    aiStatus,
+    aiLoading,
+    profile,
+    profileLoading,
+    announcements,
+    announcementsLoading,
+  }
+}
+
 export default function DashboardPage() {
   const { t } = useT()
   const { user } = useAuth()
@@ -1187,15 +1262,34 @@ export default function DashboardPage() {
   }, [])
   const [data, setData] = React.useState<MeResponse | null>(null)
   const [loading, setLoading] = React.useState(true)
+  /** AI / 名片 / 公告（含弹窗）的共享数据，见 useDashboardCards */
+  const {
+    aiStatus,
+    aiLoading,
+    profile,
+    profileLoading,
+    announcements,
+    announcementsLoading,
+  } = useDashboardCards()
 
   const [layout, setLayout] = React.useState<CardLayout>(() => loadLayout())
   const [editing, setEditing] = React.useState(false)
   /** 正在拖拽的卡片 id（用于 DragOverlay 浮层） */
   const [dragging, setDragging] = React.useState<CardId | null>(null)
+  /** layout 的同步镜像：拖拽结束的持久化回调里读到的必须是最新已提交布局 */
+  const layoutRef = React.useRef(layout)
 
-  /** 只启用指针传感器，且编辑模式下才允许拖拽 */
+  /**
+   * 拖拽传感器：
+   * - 鼠标：移动 6px 即激活（原有行为不变）。
+   * - 触屏：按住 250ms（容差 10px）才激活 —— 否则手指按住拖 6px 就开始拖卡，
+   *   与页面滚动手势直接冲突（dnd-kit pointer-sensor 文档建议按 pointerType 分支）。
+   */
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
+    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 250, tolerance: 10 },
+    })
   )
 
   React.useEffect(() => {
@@ -1212,65 +1306,97 @@ export default function DashboardPage() {
     }
   }, [])
 
-  // 布局变化即持久化
-  React.useEffect(() => {
-    saveLayout(layout)
+  // 布局持久化：刻意**不**挂保存 effect —— 拖拽中 onDragOver 每次实时重排都会
+  // 改 layout，挂 effect 等于每个拖拽事件都 JSON.stringify + localStorage.setItem
+  // （同步 IO，主线程），正是拖拽发卡的来源之一。改为在「落位 / 取消 / 重置」
+  // 这些真正需要落盘的时刻显式写一次。
+  // layoutRef 用 useLayoutEffect 同步：dragend 回调读它时必须是最新已提交布局
+  // （useEffect 异步 flush，快速连拖时可能读到上一轮的旧值）。
+  React.useLayoutEffect(() => {
+    layoutRef.current = layout
   }, [layout])
 
-  /** 卡片 id → 渲染内容 */
-  const renderCard = (id: CardId) => {
-    switch (id) {
-      case "mail":
-        return <RecentMailCard data={data} loading={loading} />
-      case "storage":
-        return <StorageCard data={data} loading={loading} />
-      case "activity":
-        return <RecentActivityCard data={data} loading={loading} />
-      case "ai":
-        return <AiCard />
-      case "profile":
-        return <ProfileCard />
-      case "announcements":
-        return <AnnouncementsCard />
-      case "quick":
-        return <QuickActions />
-    }
-  }
+  /** 卡片 id → 渲染内容；useCallback 固定引用，配合 React.memo 挡住拖拽中的高频重渲染 */
+  const renderCard = React.useCallback(
+    (id: CardId) => {
+      switch (id) {
+        case "mail":
+          return <RecentMailCard data={data} loading={loading} />
+        case "storage":
+          return <StorageCard data={data} loading={loading} />
+        case "activity":
+          return <RecentActivityCard data={data} loading={loading} />
+        case "ai":
+          return <AiCard status={aiStatus} loading={aiLoading} />
+        case "profile":
+          return <ProfileCard data={profile} loading={profileLoading} />
+        case "announcements":
+          return <AnnouncementsCard items={announcements} loading={announcementsLoading} />
+        case "quick":
+          return <QuickActions />
+      }
+    },
+    [
+      data,
+      loading,
+      aiStatus,
+      aiLoading,
+      profile,
+      profileLoading,
+      announcements,
+      announcementsLoading,
+    ]
+  )
 
   /**
-   * 预览布局：拖拽中的卡片从原位摘出，其它卡按 layout 渲染。
-   * 注意：拖拽中的卡片位置随 onDragOver 在 layout 里实时更新，
-   * 这里只保证被拖卡不重复渲染在原有位置。
+   * 预览布局：**不能**把被拖的卡从渲染里摘出去（历史 bug：withoutCard 摘卡
+   * 导致 active 节点卸载，dnd-kit 的排序状态直接失效 —— 拖到哪儿别的卡都
+   * 不让位、浮层位置计算也失去宿主，就是「拖拽不跟手」的一半根源）。
+   * 正确姿势是 dnd-kit 官方模式：卡留在列表里，拖起时 isDragging → 透明占位
+   * 保持空间，视觉本体交给 DragOverlay；跨列顺序由 onDragOver 实时重排。
    */
-  const preview = React.useMemo<CardLayout>(() => {
-    if (!dragging) return layout
-    return withoutCard(layout, dragging)
-  }, [layout, dragging])
+  const preview = React.useMemo<CardLayout>(() => layout, [layout, dragging])
 
-  /** 提交：把拖拽结果写入布局（松手时最终落位） */
-  const commitDrop = (overId: string) => {
-    if (dragging) {
+  /** 提交：把拖拽结果写入布局并落盘（松手时最终落位） */
+  const commitDrop = React.useCallback(
+    (overId: string) => {
+      const current = layoutRef.current
+      const next = dragging
+        ? reorderLayout(current, dragging, overId)
+        : current
+      const result = sameLayout(current, next) ? current : next
+      if (result !== current) setLayout(result)
+      saveLayout(result)
+      setDragging(null)
+    },
+    [dragging]
+  )
+
+  /** 拖拽中实时重排：边拖边让位挤压，不等松手。仅在 over 真正变化时计算 */
+  const lastOverRef = React.useRef<string | null>(null)
+  const handleDragOver = React.useCallback(
+    (e: DragOverEvent) => {
+      if (!dragging || !e.over?.id) return
+      const overId = String(e.over.id)
+      if (overId === lastOverRef.current) return
+      lastOverRef.current = overId
       setLayout((prev) => {
         const next = reorderLayout(prev, dragging, overId)
         return sameLayout(prev, next) ? prev : next
       })
-    }
-    setDragging(null)
-  }
+    },
+    [dragging]
+  )
 
-  /** 拖拽中实时重排：边拖边让位挤压，不等松手 */
-  const handleDragOver = (e: DragOverEvent) => {
-    if (!dragging || !e.over?.id) return
-    const overId = String(e.over.id)
-    setLayout((prev) => {
-      const next = reorderLayout(prev, dragging, overId)
-      return sameLayout(prev, next) ? prev : next
-    })
-  }
+  /** 拖拽取消：实时重排可能已改过布局，同样落盘保持所见即所得 */
+  const handleDragCancel = React.useCallback(() => {
+    saveLayout(layoutRef.current)
+    setDragging(null)
+  }, [])
 
   return (
-    <div className="space-y-6">
-      <AnnouncementPopup />
+    <div className={cn("space-y-6", editing && "dash-editing")}>
+      <AnnouncementPopup announcements={announcements} />
       <PageHeader
         title={t("dash.welcome", { name: user?.username ?? "" })}
         // 根域由后端下发（不写死 doulor.cn）：换域后这里要跟着变
@@ -1284,6 +1410,7 @@ export default function DashboardPage() {
                 size="sm"
                 onClick={() => {
                   setLayout(DEFAULT_LAYOUT)
+                  saveLayout(DEFAULT_LAYOUT)
                   toast.success(t("dash.layout.reset"))
                 }}
               >
@@ -1317,18 +1444,35 @@ export default function DashboardPage() {
       <DndContext
         sensors={sensors}
         collisionDetection={closestCorners}
-        onDragStart={(e: DragStartEvent) => setDragging(e.active.id as CardId)}
+        onDragStart={(e: DragStartEvent) => {
+          lastOverRef.current = null
+          setDragging(e.active.id as CardId)
+        }}
         onDragOver={handleDragOver}
         onDragEnd={(e: DragOverEvent) => commitDrop(String(e.over?.id ?? ""))}
-        onDragCancel={() => setDragging(null)}
+        onDragCancel={handleDragCancel}
       >
         <div className="grid gap-6 lg:grid-cols-2">
           <SortableColumn col="left" ids={preview.left} editing={editing} render={renderCard} />
           <SortableColumn col="right" ids={preview.right} editing={editing} render={renderCard} />
         </div>
-        <DragOverlay>
+        <DragOverlay
+          /**
+           * ⚠️ 这个 class 不能删：浮层的包裹层由 dnd-kit 渲染在 DndContext 内部，
+           * 正好命中 `.page-enter > * > *` 的入场动画选择器。CSS 动画的值优先级
+           * 高于内联 style，会把浮层靠 translate3d 的定位整段盖掉（拖拽不跟手）。
+           * index.css 用 `:not(.dnd-drag-overlay)` 把它排除在入场动画之外。
+           */
+          className="dnd-drag-overlay"
+          // 松手落位：短促带回弹的收束（常规 dropAnimation 是纯淡出，很"纸片"）
+          dropAnimation={{
+            duration: 260,
+            easing: "cubic-bezier(0.18, 1.35, 0.4, 1)",
+          }}
+        >
           {dragging ? (
-            <div className="cursor-grabbing rounded-xl shadow-xl ring-2 ring-primary/40">
+            // 拖起中：比原卡片略大 + 轻微倾斜 + 大阴影 —— 「拿在手里」的实感
+            <div className="scale-[1.03] rotate-[1.2deg] cursor-grabbing rounded-xl shadow-2xl ring-2 ring-primary/50 transition-transform">
               {renderCard(dragging)}
             </div>
           ) : null}
