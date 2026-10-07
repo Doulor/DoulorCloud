@@ -2297,6 +2297,21 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   },
 
   {
+    // 编辑帖子时删除单张图片（含 R2 对象）。必须排在上面 POST /images 之前无所谓，
+    // 方法不同不会冲突，但要在 /community/posts/:id 兜底 GET 之前。
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)\/images\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (communityImageDelMatch: RegExpMatchArray) =>
+      communityHandlers.deletePostImage(
+        env,
+        request,
+        decodeURIComponent(communityImageDelMatch[1]),
+        decodeURIComponent(communityImageDelMatch[2])
+      ),
+  },
+
+  {
     kind: "exact",
     path: "/notifications",
     method: "GET",

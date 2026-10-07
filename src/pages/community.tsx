@@ -14,6 +14,7 @@ import { CustomTitleBadge } from "@/components/custom-title-badge"
 import { Markdown } from "@/components/markdown"
 import { useStickerSaveMenu } from "@/components/sticker-save-menu"
 import { DraftImagePreview } from "@/components/draft-image-preview"
+import { MdComposer } from "@/components/md-composer"
 import { EmojiPicker } from "@/components/emoji-picker"
 import { StickerPanel } from "@/components/sticker-panel"
 import { Button } from "@/components/ui/button"
@@ -835,6 +836,9 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
   const [editing, setEditing] = React.useState(false)
   const [editText, setEditText] = React.useState("")
   const [editBusy, setEditBusy] = React.useState(false)
+  // 编辑期间的帖子图片本地副本（删一张立即从网格消失，保存与否互不影响）
+  const [editImages, setEditImages] = React.useState<string[]>([])
+  const editTaRef = React.useRef<HTMLTextAreaElement>(null)
   // 编辑历史（时间列表）
   const [edits, setEdits] = React.useState<{ editedAt: string }[]>([])
   const [editsOpen, setEditsOpen] = React.useState(false)
@@ -935,6 +939,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
   const startEdit = () => {
     if (!post) return
     setEditText(post.body)
+    setEditImages(post.images)
     setEditing(true)
   }
 
@@ -952,10 +957,10 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
     setEditBusy(true)
     try {
       await communityApi.updatePost(post.id, editText.trim())
-      // 更新本地 post
+      // 更新本地 post（图片可能在编辑期间被删过，同步最新列表）
       setPost((p) =>
         p
-          ? { ...p, body: editText.trim(), updatedAt: new Date().toISOString(), editCount: p.editCount + 1 }
+          ? { ...p, body: editText.trim(), images: editImages, updatedAt: new Date().toISOString(), editCount: p.editCount + 1 }
           : p
       )
       setEditing(false)
@@ -1063,16 +1068,16 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
         </div>
         <div className="min-w-0 p-4">
           {editing ? (
-            <div
-              {...dropProps}
-              className={cn("relative space-y-2", dragging && "rounded-md ring-2 ring-primary")}
-            >
-              <Textarea
+            <div className="space-y-2">
+              <MdComposer
                 value={editText}
-                onChange={(e) => setEditText(e.target.value)}
-                rows={5}
-                className="text-sm"
+                onChange={setEditText}
+                textareaRef={editTaRef}
                 placeholder={t("cm.editPh")}
+                rows={5}
+                postId={post.id}
+                postImages={editImages}
+                onPostImagesChange={setEditImages}
               />
               <div className="flex items-center gap-2">
                 <Button size="sm" onClick={() => void submitEdit()} disabled={editBusy}>
@@ -1302,14 +1307,15 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
   const insertEmoji = useEmojiInsert(taRef, draft, setDraft)
 
   /**
-   * 拖入 / 粘贴图片：与「选图片」按钮走同一条路（压缩 + 加入结构化 images 列表），
-   * 而不是插 `![](url)` 到正文。
+   * ⚠️ 这里**不要**再挂 `useImageDrop` / `dropProps`（2026-10-07 合并 PR #22 时删掉的）。
    *
-   * 为什么（2026-10-06 社区反馈）：正文 markdown 里的图不会被 PostImages 渲染，
-   * 于是① 点不开、不能放大；② 不计入「图文并茂」成就（成就统计的是 posts.images 列）。
-   * 两条路径统一后，粘贴的图和本地上传的图行为完全一致。
+   * 发帖框已经换成 `MdComposer`，它**自带**一条独立的拖入/粘贴上传管线
+   * （内部自己建 useImageDrop）。若在外层容器再摊一份 `dropProps`，同一个容器上会挂着
+   * 两套处理逻辑 —— 这正是 PR #22 修的 bug 2：编辑/发帖时粘贴的图片被插到了**评论区**里。
+   *
+   * 「选图片」按钮那条路仍然保留（下面的隐藏 file input → pickFiles），
+   * 它和 MdComposer 不冲突。
    */
-  const { dragging, dropProps } = useImageDrop({ onFiles: (files) => void pickFiles(files) })
 
   const submit = async () => {
     if (!draft.trim() && images.length === 0) return
@@ -1360,10 +1366,8 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
 
   return (
     <div
-      {...dropProps}
       className={cn(
-        "relative mb-5 rounded-xl border bg-card p-4",
-        dragging && "ring-2 ring-primary"
+        "relative mb-5 rounded-xl border bg-card p-4"
       )}
     >
       <div className="mb-2.5 flex items-center gap-2">
@@ -1387,20 +1391,15 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
           )}
         </div>
       ) : (
-        <Textarea
-          ref={taRef}
-          autoFocus
+        <MdComposer
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={setDraft}
+          textareaRef={taRef}
           placeholder={t("cm.postPh")}
           rows={4}
-          className="resize-none border-0 px-0 text-sm focus-visible:ring-0"
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-              e.preventDefault()
-              void submit()
-            }
-          }}
+          autoFocus
+          className="border-0"
+          onCmdEnter={() => void submit()}
         />
       )}
 
