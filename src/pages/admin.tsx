@@ -74,6 +74,7 @@ import { DnsAdminPanel } from "./admin-dns"
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { NavItem, NavGroup } from "@/components/sub-nav"
+import { SlidingPill } from "@/components/motion/sliding-pill"
 import { AdminApiTab } from "@/components/admin-api-tab"
 import { AdminPermissionsPanel } from "@/components/admin-permissions"
 import { Textarea } from "@/components/ui/textarea"
@@ -1274,6 +1275,16 @@ export default function AdminPage() {
   const [donationTypeFilter, setDonationTypeFilter] = React.useState<string>("")
   const [donationLoading, setDonationLoading] = React.useState(false)
   const [donationBusy, setDonationBusy] = React.useState(false)
+  /**
+   * 捐献列表服务端分页（2026-10-08 性能，与用户列表同批）：全量 853 条 = 559KB、
+   * 打开 2~8s，改每页 50 条 + 服务端筛选。两层筛选徽标的计数不再靠前端在全量
+   * 数据上数（分页后只有当前页，数不准），改用接口同批返回的 GROUP BY 计数。
+   */
+  const [donationPage, setDonationPage] = React.useState(0)
+  const [donationTotal, setDonationTotal] = React.useState<number | null>(null)
+  /** counts[type][status]，空串 = 合计；来自接口的 GROUP BY，分页模式才有 */
+  const [donationCounts, setDonationCounts] = React.useState<Record<string, Record<string, number>> | null>(null)
+  const DONATION_PAGE_SIZE = 50
   // 待审核目标 + 理由弹窗
   const [reviewTarget, setReviewTarget] = React.useState<{
     donation: Donation
@@ -1281,17 +1292,45 @@ export default function AdminPage() {
   } | null>(null)
   const [reviewNote, setReviewNote] = React.useState("")
 
+  /**
+   * 拉捐献列表（服务端分页 + 筛选）。筛选/页码显式传入：审核/撤销后的 5 处刷新
+   * 调用 `loadDonations()` 保留当前页与筛选；筛选按钮变化走下面的 effect（回第一页）。
+   */
+  const loadDonationPage = React.useCallback(
+    async (page: number, type: string, status: string) => {
+      setDonationLoading(true)
+      try {
+        const res = await donationApi.listAll({
+          limit: DONATION_PAGE_SIZE,
+          offset: page * DONATION_PAGE_SIZE,
+          type: type || undefined,
+          status: status || undefined,
+        })
+        setDonations(res.donations)
+        setDonationTotal(res.total ?? null)
+        setDonationCounts(res.counts ?? null)
+      } catch (err) {
+        toast.error(err instanceof HttpError ? err.message : t("adm.7"))
+      } finally {
+        setDonationLoading(false)
+      }
+    },
+    [t]
+  )
+
+  // 筛选或页码变化 → 重新拉。⚠️ 门卫：初次挂载不拉 —— 旧行为是**切到捐献 tab
+  // 才加载**（见 3493 行的 tab 切换 effect），无门卫的话打开管理页（哪怕看的是
+  // 用户 tab）也会多发一个捐献请求。首次加载由 loadDonations() 把 ref 置真。
+  const donationsLoadedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (!donationsLoadedRef.current) return
+    void loadDonationPage(donationPage, donationTypeFilter, donationFilter)
+  }, [loadDonationPage, donationPage, donationTypeFilter, donationFilter])
+
   const loadDonations = React.useCallback(async () => {
-    setDonationLoading(true)
-    try {
-      const res = await donationApi.listAll()
-      setDonations(res.donations)
-    } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("adm.7"))
-    } finally {
-      setDonationLoading(false)
-    }
-  }, [])
+    donationsLoadedRef.current = true
+    await loadDonationPage(donationPage, donationTypeFilter, donationFilter)
+  }, [loadDonationPage, donationPage, donationTypeFilter, donationFilter])
 
   const handleReviewDonation = async (
     d: Donation,
@@ -3539,6 +3578,12 @@ export default function AdminPage() {
             </Link>
 
             <nav className="flex flex-col gap-0.5 lg:overflow-y-auto lg:pr-1">
+              {/* 动效层：栏目切换的滑动高亮（关=现状：关掉时滑块不渲染，
+                  NavItem 自己的 active 背景在 CSS 侧被还回来） */}
+              <SlidingPill
+                activeSelector='[data-nav-active="1"]'
+                className="rounded-md bg-accent"
+              />
               {canSeeTab("users") && (
                 <NavItem active={activeTab === "users"} icon={Users} label={t("adm.214")} onClick={() => handleTabChange("users")} />
               )}
@@ -4842,20 +4887,21 @@ export default function AdminPage() {
             </Button>
           </div>
 
-          {/* 类别筛选（上层）：全部 / AI / 内网穿透 / 代理 / 商汤 */}
+          {/* 类别筛选（上层）：全部 / AI / 内网穿透 / 代理 / 商汤。
+              计数来自接口的 GROUP BY（donationCounts）—— 分页后当前页数据数不准 */}
           <div className="mb-2 flex flex-wrap gap-2">
             {DONATION_TYPE_FILTERS.map((f) => {
               const n =
                 f.key === ""
-                  ? donations.length
-                  : donations.filter((d) => d.type === f.key).length
+                  ? donationCounts?.[""]?.[""] ?? donations.length
+                  : donationCounts?.[f.key]?.[""] ?? donations.filter((d) => d.type === f.key).length
               const active = donationTypeFilter === f.key
               return (
                 <Button
                   key={f.key || "all"}
                   size="sm"
                   variant={active ? "default" : "outline"}
-                  onClick={() => setDonationTypeFilter(f.key)}
+                  onClick={() => { setDonationTypeFilter(f.key); setDonationPage(0) }}
                 >
                   {t(f.label)}
                   <span className="ml-1.5 tabular-nums opacity-70">{n}</span>
@@ -4864,20 +4910,20 @@ export default function AdminPage() {
             })}
           </div>
 
-          {/* 状态分类（下层）：数字是「当前类别下」各状态的条数 */}
+          {/* 状态分类（下层）：数字是「当前类别下」各状态的条数（同样来自 GROUP BY） */}
           <div className="mb-4 flex flex-wrap gap-2">
             {DONATION_FILTERS.map((f) => {
               const n =
                 f.key === ""
-                  ? filterDonationsByTypeAndStatus(donations, donationTypeFilter, "").length
-                  : filterDonationsByTypeAndStatus(donations, donationTypeFilter, f.key).length
+                  ? donationCounts?.[donationTypeFilter]?.[""] ?? filterDonationsByTypeAndStatus(donations, donationTypeFilter, "").length
+                  : donationCounts?.[donationTypeFilter]?.[f.key] ?? filterDonationsByTypeAndStatus(donations, donationTypeFilter, f.key).length
               const active = donationFilter === f.key
               return (
                 <Button
                   key={f.key || "all"}
                   size="sm"
                   variant={active ? "default" : "outline"}
-                  onClick={() => setDonationFilter(f.key)}
+                  onClick={() => { setDonationFilter(f.key); setDonationPage(0) }}
                 >
                   {t(f.label)}
                   <span className="ml-1.5 tabular-nums opacity-70">{n}</span>
@@ -4893,14 +4939,9 @@ export default function AdminPage() {
               title={t("adm.269")}
               description={t("adm.270")}
             />
-          ) : filterDonationsByTypeAndStatus(donations, donationTypeFilter, donationFilter).length === 0 ? (
-            <EmptyState
-              title={t("adm.271")}
-              description={t("adm.272")}
-            />
           ) : (
             <div className="space-y-3">
-              {filterDonationsByTypeAndStatus(donations, donationTypeFilter, donationFilter).map((d) => (
+              {donations.map((d) => (
                 <div key={d.id} className="rounded-lg border bg-card p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0 space-y-1.5">
@@ -5041,6 +5082,42 @@ export default function AdminPage() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* 服务端分页控件（2026-10-08，与用户列表同款）：total 来自接口 */}
+          {!donationLoading && donationTotal != null && donationTotal > DONATION_PAGE_SIZE && (
+            <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
+              <span>
+                {t("adm.userPageInfo", {
+                  from: donationPage * DONATION_PAGE_SIZE + 1,
+                  to: Math.min((donationPage + 1) * DONATION_PAGE_SIZE, donationTotal),
+                  total: donationTotal,
+                })}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={donationPage === 0}
+                  onClick={() => setDonationPage((p) => Math.max(0, p - 1))}
+                >
+                  <ChevronLeft className="mr-1 h-3.5 w-3.5" />
+                  {t("adm.userPagePrev")}
+                </Button>
+                <span className="tabular-nums">
+                  {donationPage + 1} / {Math.ceil(donationTotal / DONATION_PAGE_SIZE)}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={(donationPage + 1) * DONATION_PAGE_SIZE >= donationTotal}
+                  onClick={() => setDonationPage((p) => p + 1)}
+                >
+                  {t("adm.userPageNext")}
+                  <ChevronRight className="ml-1 h-3.5 w-3.5" />
+                </Button>
+              </div>
             </div>
           )}
 

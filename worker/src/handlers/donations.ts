@@ -1440,26 +1440,68 @@ export async function listAllDonations(
   await requireAdminUser(env, request, "donations.ai")
 
   // 2026-10-08 性能：实测全量（853 条 / 559KB 响应）打开捐献管理要 2~8s。
-  // 加 ?limit=&offset= 服务端分页 —— **不传 = 维持旧行为返回全量**，旧前端不受影响；
-  // 传了则只回该页 + total，供新前端做真分页。
+  // 分页模式（传 limit/offset）下一次 batch 返回三样东西：
+  //   1. 当前页数据（支持 ?type= / ?status= 服务端筛选）
+  //   2. 筛选后的 total（前端算总页数）
+  //   3. **全表按 (type, status) 分组的计数** —— 前端两层筛选按钮上的计数徽标
+  //      原本靠前端在全量数据上数出来；分页后当前页数不准，改由这条 GROUP BY
+  //      一次算清（仍是同一次往返）。全量模式（不传参数）不返回 counts，
+  //      旧行为旧前端完全不受影响。
   const url = new URL(request.url)
   const hasPage = url.searchParams.has("limit") || url.searchParams.has("offset")
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200)
   const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0)
+  const typeFilter = url.searchParams.get("type") ?? ""
+  const statusFilter = url.searchParams.get("status") ?? ""
+
+  const conds: string[] = []
+  const binds: unknown[] = []
+  if (typeFilter) {
+    conds.push("d.type = ?")
+    binds.push(typeFilter)
+  }
+  if (statusFilter) {
+    conds.push("d.status = ?")
+    binds.push(statusFilter)
+  }
+  const where = conds.length ? ` WHERE ${conds.join(" AND ")}` : ""
 
   const pageSuffix = hasPage ? " LIMIT ? OFFSET ?" : ""
-  const pageBinds: unknown[] = hasPage ? [limit, offset] : []
+  const pageBinds: unknown[] = hasPage ? [...binds, limit, offset] : []
 
-  const [rows, countRes] = await env.DB.batch([
+  const [rows, countRes, groupRes] = await env.DB.batch([
     env.DB.prepare(
       `SELECT d.*, u.username FROM donations d
-         JOIN users u ON u.id = d.user_id
+         JOIN users u ON u.id = d.user_id${where}
         ORDER BY d.created_at DESC${pageSuffix}`
     ).bind(...pageBinds),
     hasPage
-      ? env.DB.prepare(`SELECT COUNT(*) AS c FROM donations`)
+      ? env.DB.prepare(`SELECT COUNT(*) AS c FROM donations d${where}`).bind(...binds)
       : env.DB.prepare(`SELECT 1 AS x`),
+    hasPage
+      ? env.DB.prepare(
+          `SELECT type, status, COUNT(*) AS c FROM donations GROUP BY type, status`
+        )
+      : env.DB.prepare(`SELECT NULL AS type, NULL AS status, NULL AS c WHERE 0`),
   ])
+
+  // counts：两层筛选徽标的数据源。结构 = { "": { "": n, "pending": m, ... }, ai: {...} }，
+  // 外层 key 是 type（空串 = 全部），内层 key 是 status（空串 = 该类合计）。
+  const counts: Record<string, Record<string, number>> = {}
+  for (const r of (groupRes.results ?? []) as unknown as {
+    type: string | null
+    status: string | null
+    c: number | null
+  }[]) {
+    if (r.type == null) continue
+    const typeKey = r.type
+    counts[typeKey] = counts[typeKey] ?? {}
+    counts[typeKey][r.status ?? ""] = Number(r.c) || 0
+    counts[""] = counts[""] ?? {}
+    counts[""][r.status ?? ""] = (counts[""][r.status ?? ""] ?? 0) + (Number(r.c) || 0)
+    counts[""][""] = (counts[""][""] ?? 0) + (Number(r.c) || 0)
+    counts[typeKey][""] = (counts[typeKey][""] ?? 0) + (Number(r.c) || 0)
+  }
 
   return json({
     donations: ((rows.results ?? []) as unknown as (DonationRow & { username: string })[]).map(
@@ -1475,6 +1517,7 @@ export async function listAllDonations(
           ),
           limit,
           offset,
+          counts,
         }
       : {}),
   })

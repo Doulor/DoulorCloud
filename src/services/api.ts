@@ -1435,11 +1435,33 @@ export const donationApi = {
   cancel: (id: string) =>
     request<void>(`/donations/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
-  /** 管理端：全部申请（含完整 payload，管理页核验资源用） */
-  listAll: () =>
-    request<{ donations: Donation[]; typeLabels: Record<string, string> }>(
-      "/admin/donations"
-    ),
+  /**
+   * 管理端：全部申请（含完整 payload，管理页核验资源用）。
+   * 不传参数 = 旧的全量模式；传 limit/offset/type/status = 服务端分页筛选，
+   * 响应带 total 与 counts（两层筛选徽标的计数，按 type/status 分组）。
+   */
+  listAll: (opts?: {
+    limit?: number
+    offset?: number
+    type?: string
+    status?: string
+  }) => {
+    const p = new URLSearchParams()
+    if (opts?.limit != null) p.set("limit", String(opts.limit))
+    if (opts?.offset != null) p.set("offset", String(opts.offset))
+    if (opts?.type) p.set("type", opts.type)
+    if (opts?.status) p.set("status", opts.status)
+    const qs = p.toString()
+    return request<{
+      donations: Donation[]
+      typeLabels: Record<string, string>
+      total?: number
+      limit?: number
+      offset?: number
+      /** counts[type][status]：type/status 为空串表示「合计」。分页模式才有。 */
+      counts?: Record<string, Record<string, number>>
+    }>(`/admin/donations${qs ? `?${qs}` : ""}`)
+  },
 
   review: (id: string, action: "approve" | "reject", note?: string) =>
     request<{ ok: boolean; status: string }>("/admin/donations/review", {
