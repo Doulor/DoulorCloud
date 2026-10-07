@@ -17,6 +17,13 @@ import { useT } from "@/i18n"
 
 type Mode = "draw" | "dice" | "coin" | "group"
 
+/**
+ * 单次能掷的骰子个数上限。
+ * 2026-10-08 站长要求从 12 提到 100（跑团/大批量随机时够用）。
+ * 上限的两处约束（输入框 max 与 onChange 的夹逼）共用它，别只改一处。
+ */
+const MAX_DICE = 100
+
 function parseNames(text: string): string[] {
   return text
     .split(/[\n,，、;；]/)
@@ -167,6 +174,9 @@ function DicePanel() {
   }
 
   const total = values.reduce((a, b) => a + b, 0)
+  // 骰子多的时候按比例缩小，否则 100 个 64px 的方块会铺满好几屏。
+  const compact = count > 40
+  const chip = compact ? "h-10 w-10 text-sm" : "h-16 w-16 text-2xl"
 
   return (
     <ToolSection title={t("rp.dice.section")}>
@@ -176,9 +186,9 @@ function DicePanel() {
           <Input
             type="number"
             min={1}
-            max={12}
+            max={MAX_DICE}
             value={count}
-            onChange={(e) => setCount(Math.max(1, Math.min(12, Number(e.target.value) || 1)))}
+            onChange={(e) => setCount(Math.max(1, Math.min(MAX_DICE, Number(e.target.value) || 1)))}
           />
         </div>
         <div className="space-y-1.5">
@@ -211,7 +221,10 @@ function DicePanel() {
           values.map((v, i) => (
             <span
               key={i}
-              className="flex h-16 w-16 items-center justify-center rounded-lg border bg-background font-mono text-2xl font-medium tabular-nums"
+              className={cn(
+                "flex items-center justify-center rounded-lg border bg-background font-mono font-medium tabular-nums",
+                chip
+              )}
             >
               {v}
             </span>
