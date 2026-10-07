@@ -312,7 +312,7 @@ export async function acknowledgeAppealNote(env: Env, request: Request): Promise
 
 /** GET /api/admin/risk-accounts —— 风险账户列表 */
 export async function listRiskAccounts(env: Env, request: Request): Promise<Response> {
-  await requireAdminScope(env, request, "moderation.suspend")
+  await requireAdminScope(env, request, "moderation.risk")
   const rows = await env.DB.prepare(
     `SELECT r.user_id, r.username, r.risk_level, r.score, r.reasons, r.peak_per_min,
             r.requests_7d, r.first_seen_at, r.last_seen_at, r.status,
@@ -359,7 +359,7 @@ export async function updateRiskStatus(
   request: Request,
   userId: string
 ): Promise<Response> {
-  const admin = await requireAdminScope(env, request, "moderation.suspend")
+  const admin = await requireAdminScope(env, request, "moderation.risk")
   assertContentLengthWithin(request, MAX_BODY_BYTES, "内容过长")
   const body = (await request.json().catch(() => ({}))) as { status?: unknown }
   const status = String(body.status ?? "")

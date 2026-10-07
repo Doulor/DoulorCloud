@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Link, useParams, useNavigate, useLocation } from "react-router-dom"
-import { AlertCircle, ArrowLeft, Eye, FileQuestion, Flame, Heart, Image as ImageIcon, ImageOff, ImagePlus, Loader2, MessageCircle, MessagesSquare, PenSquare, Pin, RotateCw, Send, Share2, Trash2, TrendingUp, Users, WifiOff, X } from "lucide-react"
+import { AlertCircle, ArrowLeft, Bell, Eye, FileQuestion, Flame, Heart, Image as ImageIcon, ImageOff, ImagePlus, Loader2, MessageCircle, MessagesSquare, PenSquare, Pin, RotateCw, Send, Share2, Trash2, TrendingUp, Users, WifiOff, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -12,6 +12,7 @@ import { UserCardPopover } from "@/components/user-card"
 import { RoleBadge } from "@/components/role-badge"
 import { CustomTitleBadge } from "@/components/custom-title-badge"
 import { Markdown } from "@/components/markdown"
+import { useStickerSaveMenu } from "@/components/sticker-save-menu"
 import { DraftImagePreview } from "@/components/draft-image-preview"
 import { EmojiPicker } from "@/components/emoji-picker"
 import { StickerPanel } from "@/components/sticker-panel"
@@ -344,6 +345,8 @@ function PostCard({
 }) {
   const navigate = useNavigate()
   const { t } = useT()
+  const { onContextMenu: onStickerContextMenu, renderMenu: renderStickerMenu } =
+    useStickerSaveMenu()
   return (
     <article
       onClick={() => {
@@ -368,8 +371,8 @@ function PostCard({
           </Badge>
         </div>
         {post.body && (
-          <div className="mt-2.5">
-            <Markdown>{post.body}</Markdown>
+          <div className="mt-2.5" onContextMenu={onStickerContextMenu}>
+            <Markdown stickerSaveButton={false}>{post.body}</Markdown>
           </div>
         )}
         <PostImages images={post.images} />
@@ -411,6 +414,7 @@ function PostCard({
           basePath={basePath}
         />
       </div>
+      {renderStickerMenu()}
     </article>
   )
 }
@@ -459,6 +463,9 @@ function CommentItem({
   const [text, setText] = React.useState("")
   const [busy, setBusy] = React.useState(false)
   const taRef = React.useRef<HTMLTextAreaElement>(null)
+  /** 评论里的表情包：右键弹「存到我的表情包」（与聊天室/私信一致） */
+  const { onContextMenu: onStickerContextMenu, renderMenu: renderStickerMenu } =
+    useStickerSaveMenu()
 
   const submit = async () => {
     if (!user) {
@@ -575,8 +582,8 @@ function CommentItem({
           </p>
         )}
 
-        <div className="mt-1">
-          <Markdown>{node.body}</Markdown>
+        <div className="mt-1" onContextMenu={onStickerContextMenu}>
+          <Markdown stickerSaveButton={false}>{node.body}</Markdown>
         </div>
 
         <div className="mt-1.5 flex items-center gap-3">
@@ -631,6 +638,7 @@ function CommentItem({
           </div>
         )}
       </div>
+      {renderStickerMenu()}
     </div>
   )
 }
@@ -801,6 +809,9 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
   const [text, setText] = React.useState("")
   const [busy, setBusy] = React.useState(false)
   const taRef = React.useRef<HTMLTextAreaElement>(null)
+  /** 正文/评论里的表情包：右键弹「存到我的表情包」 */
+  const { onContextMenu: onStickerContextMenu, renderMenu: renderStickerMenu } =
+    useStickerSaveMenu()
 
   // 进详情页滚到顶部（从列表点进来时，窗口还停在列表的滚动位置）。
   // 只在「详情」时滚 —— 返回列表时不能滚，否则会把要恢复的位置清零。
@@ -1075,8 +1086,8 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
           ) : (
             <>
               {post.body && (
-                <div className="text-sm">
-                  <Markdown>{post.body}</Markdown>
+                <div className="text-sm" onContextMenu={onStickerContextMenu}>
+                  <Markdown stickerSaveButton={false}>{post.body}</Markdown>
                 </div>
               )}
               <PostImages images={post.images} />
@@ -1197,6 +1208,7 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
           )}
         </DialogContent>
       </Dialog>
+      {renderStickerMenu()}
     </div>
   )
 }
@@ -1252,7 +1264,7 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
     setOpen(false)
   }
 
-  const pickFiles = async (files: FileList | null) => {
+  const pickFiles = async (files: FileList | File[] | null) => {
     if (!files || files.length === 0) return
     const room = MAX_IMAGES - images.length
     if (room <= 0) {
@@ -1287,8 +1299,15 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
 
   const insertEmoji = useEmojiInsert(taRef, draft, setDraft)
 
-  /** 拖入 / 粘贴图片：上传后把 `![](url)` 插到光标处 */
-  const { dragging, dropProps } = useImageDrop({ onImage: insertEmoji })
+  /**
+   * 拖入 / 粘贴图片：与「选图片」按钮走同一条路（压缩 + 加入结构化 images 列表），
+   * 而不是插 `![](url)` 到正文。
+   *
+   * 为什么（2026-10-06 社区反馈）：正文 markdown 里的图不会被 PostImages 渲染，
+   * 于是① 点不开、不能放大；② 不计入「图文并茂」成就（成就统计的是 posts.images 列）。
+   * 两条路径统一后，粘贴的图和本地上传的图行为完全一致。
+   */
+  const { dragging, dropProps } = useImageDrop({ onFiles: (files) => void pickFiles(files) })
 
   const submit = async () => {
     if (!draft.trim() && images.length === 0) return
@@ -1419,7 +1438,7 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
         onChange={(e) => void pickFiles(e.target.files)}
       />
 
-      <div className="mt-2 flex items-center gap-1 border-t pt-2.5">
+      <div className="mt-2 flex flex-wrap items-center gap-1 border-t pt-2.5">
         {/* 分类选择：闲聊 / 求助 / 资源共享（默认闲聊） */}
         <div className="mr-1 flex items-center gap-0.5 rounded-md border p-0.5">
           {(POST_CATEGORIES as readonly PostCategory[]).map((c) => (
@@ -1717,7 +1736,13 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
     }
     tick()
     const t = setInterval(tick, 30000)
-    return () => clearInterval(t)
+    // 已读互通：消息中心把社交消息标成已读后会广播一次，这里收到立即重拉，
+    // 顶部「N 条新互动」不用等下一次 30 秒轮询才消失。
+    const off = onMessagesChanged(tick)
+    return () => {
+      clearInterval(t)
+      off()
+    }
   }, [user])
 
   const navigate = useNavigate()
@@ -1757,6 +1782,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
       setNotifOpen(false)
       await notificationApi.markRead([n.id])
       setUnread((u) => Math.max(0, u - 1))
+      notifyMessagesChanged()
       navigate("/dashboard/feedback")
       return
     }
@@ -1764,6 +1790,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
     setNotifOpen(false)
     await notificationApi.markRead([n.id])
     setUnread((u) => Math.max(0, u - 1))
+    notifyMessagesChanged()
     navigate(`${basePath}/${n.postId}`)
   }
 
@@ -1772,6 +1799,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
     await notificationApi.markRead(undefined, true)
     setUnread(0)
     setNotifs((prev) => prev.map((n) => ({ ...n, read: true })))
+    notifyMessagesChanged()
   }
 
   /** 点赞：乐观更新，失败回滚（不重拉列表） */
@@ -1871,12 +1899,11 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
               <button
                 type="button"
                 onClick={() => void openNotifications()}
-                className="ml-2 inline-flex items-center"
+                className="ml-2 inline-flex items-center gap-1.5 rounded-full border border-primary/25 bg-primary/10 px-2.5 py-0.5 align-middle text-xs font-medium text-primary transition-colors hover:bg-primary/15"
                 title={t("cm.notif.title")}
               >
-                <Badge variant="destructive" className="h-5 cursor-pointer tabular-nums hover:opacity-90">
-                  {t("cm.notif.unread", { n: unread })}
-                </Badge>
+                <Bell className="h-3.5 w-3.5" />
+                {t("cm.notif.unread", { n: unread })}
               </button>
             )}
           </p>
@@ -1970,14 +1997,11 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
             <div className="max-h-80 space-y-2 overflow-y-auto">
               {notifs.map((n) => {
                 const name = n.actorNickname || n.actorUsername || t("msg.someone")
-                // feedback_reply 是「管理员回复了我的反馈」——没有帖子可跳，
-                // 点击直接进反馈页（见 openNotification 的首个分支）
-                const verb =
-                  n.type === "feedback_reply"
-                    ? t("cm.notif.feedbackReply")
-                    : n.type === "comment_reply"
-                      ? t("cm.notif.commentReply")
-                      : t("cm.notif.postComment")
+                // 文案与类型图标复用消息中心（socialNotifText / socialNotifIcon）：
+                // 点赞 = 赞了你的帖子/评论（爱心）；评论 = 回复了你的评论（气泡）；
+                // 反馈 = 回复了你的反馈（方气泡）。之前这里漏了 post_like/comment_like，
+                // 点赞评论会 fallthrough 成「评论了你的帖子」—— 已修。
+                const TypeIcon = socialNotifIcon(n)
                 return (
                   <button
                     key={n.id}
@@ -1988,31 +2012,45 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
                       "w-full rounded-md border p-3 text-left transition-colors " +
                       (n.postDeleted
                         ? "cursor-not-allowed opacity-50"
-                        : "hover:bg-accent/50")
+                        : n.read
+                          ? "hover:bg-accent/50"
+                          : "border-primary/40 hover:bg-accent/50")
                     }
                   >
-                    <div className="flex items-center gap-2 text-sm">
-                      <span className="font-medium">{name}</span>
-                      <span className="text-muted-foreground">{verb}</span>
-                      {!n.read && (
-                        <span className="ml-auto h-2 w-2 shrink-0 rounded-full bg-primary" />
-                      )}
+                    <div className="flex items-start gap-2.5">
+                      <span
+                        className={
+                          "relative mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full " +
+                          (n.read ? "bg-muted text-muted-foreground" : "bg-primary/10 text-primary")
+                        }
+                      >
+                        <TypeIcon className="h-4 w-4" aria-hidden />
+                        {!n.read && (
+                          <span
+                            className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-primary"
+                            aria-hidden
+                          />
+                        )}
+                      </span>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <p className="text-sm font-medium">{socialNotifText(n, name, t)}</p>
+                        {n.commentPreview ? (
+                          <p className="line-clamp-3 rounded-md bg-muted/50 px-2.5 py-1.5 text-sm text-foreground/90">
+                            {n.commentPreview}
+                          </p>
+                        ) : n.postPreview ? (
+                          <p className="line-clamp-2 text-xs text-muted-foreground">
+                            {t("msg.postPreview", { text: n.postPreview })}
+                          </p>
+                        ) : null}
+                        {n.postDeleted && (
+                          <p className="text-xs text-muted-foreground">{t("msg.postDeletedShort")}</p>
+                        )}
+                        <p className="text-[11px] text-muted-foreground/70">
+                          {relTime(n.createdAt)}
+                        </p>
+                      </div>
                     </div>
-                    {n.commentPreview ? (
-                      <p className="mt-1.5 line-clamp-3 rounded-md bg-muted/50 px-2.5 py-1.5 text-sm text-foreground/90">
-                        {n.commentPreview}
-                      </p>
-                    ) : n.postPreview ? (
-                      <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                        {n.postPreview}
-                      </p>
-                    ) : null}
-                    {n.postDeleted && (
-                      <p className="mt-1 text-xs text-muted-foreground">{t("msg.postDeletedShort")}</p>
-                    )}
-                    <p className="mt-1 text-[11px] text-muted-foreground/70">
-                      {relTime(n.createdAt)}
-                    </p>
                   </button>
                 )
               })}

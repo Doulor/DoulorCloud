@@ -6,9 +6,11 @@
  */
 import * as React from "react"
 import { toast } from "sonner"
-import { Loader2, Gift, CalendarCheck, ChevronRight } from "lucide-react"
+import { Loader2, Gift, CalendarCheck, ChevronRight, Ticket, CalendarDays } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
+import { CheckinCalendar } from "@/components/checkin-calendar"
 import {
   Dialog,
   DialogContent,
@@ -30,6 +32,9 @@ type Status = {
   todayBonus: number
   milestones: { days: number; points: number }[]
   next: { days: number; points: number; daysLeft: number } | null
+  makeupCards: number
+  canMakeup: boolean
+  autoCheckin: boolean
 }
 
 export function CheckinDialog({
@@ -45,6 +50,7 @@ export function CheckinDialog({
   const { t } = useT()
   const [status, setStatus] = React.useState<Status | null>(null)
   const [busy, setBusy] = React.useState(false)
+  const [calendarOpen, setCalendarOpen] = React.useState(false)
 
   const load = React.useCallback(async () => {
     try {
@@ -72,13 +78,49 @@ export function CheckinDialog({
     }
   }
 
+  const doMakeup = async () => {
+    setBusy(true)
+    try {
+      const res = await checkinApi.makeup()
+      toast.success(t("ck.makeupDone", { streak: res.streak }))
+      await load()
+      onDone?.()
+    } catch (err) {
+      toast.error(errMsg(err, t("ck.makeupFailed")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggleAuto = async (v: boolean) => {
+    // 先本地乐观更新，再落库
+    setStatus((s) => (s ? { ...s, autoCheckin: v } : s))
+    try {
+      await checkinApi.setAuto(v)
+      toast.success(v ? t("ck.autoOn") : t("ck.autoOff"))
+    } catch (err) {
+      toast.error(errMsg(err, t("ck.autoFailed")))
+      setStatus((s) => (s ? { ...s, autoCheckin: !v } : s)) // 失败回滚
+    }
+  }
+
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <CalendarCheck className="h-4 w-4" />
             {t("ck.title")}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ml-auto gap-1.5"
+              onClick={() => setCalendarOpen(true)}
+            >
+              <CalendarDays className="h-4 w-4" />
+              {t("ck.calendar")}
+            </Button>
           </DialogTitle>
           <DialogDescription>
             {t("ck.desc")}
@@ -113,6 +155,36 @@ export function CheckinDialog({
                   {t("ck.checkin")}
                 </Button>
               )}
+            </div>
+
+            {/* 补签卡：有卡时显示；昨天漏签才能点「补签」 */}
+            {status.makeupCards > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3">
+                <div className="flex items-center gap-2">
+                  <Ticket className="h-4 w-4 text-primary" />
+                  <span className="text-sm">{t("ck.makeupCards", { n: status.makeupCards })}</span>
+                </div>
+                {status.canMakeup ? (
+                  <Button size="sm" variant="outline" onClick={() => void doMakeup()} disabled={busy}>
+                    {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                    {t("ck.makeup")}
+                  </Button>
+                ) : (
+                  <span className="text-xs text-muted-foreground">{t("ck.makeupIdle")}</span>
+                )}
+              </div>
+            )}
+
+            {/* 自动签到开关 */}
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium">{t("ck.autoLabel")}</p>
+                <p className="text-xs text-muted-foreground">{t("ck.autoHint")}</p>
+              </div>
+              <Switch
+                checked={status.autoCheckin}
+                onCheckedChange={(v) => void toggleAuto(v)}
+              />
             </div>
 
             {/* 里程碑 */}
@@ -163,5 +235,10 @@ export function CheckinDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
+    <CheckinCalendar
+      open={calendarOpen}
+      onOpenChange={setCalendarOpen}
+      onDone={() => void load()}
+    />
+  </>)
 }

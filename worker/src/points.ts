@@ -233,6 +233,8 @@ export async function getRedeemConfig(env: Env): Promise<{
   yuanPerPoint: number
   /** 每日兑换次数上限（0 = 不限） */
   dailyLimit: number
+  /** 用户商城：卖家交付后多少天自动确认收货（0 = 关闭） */
+  autoConfirmDays: number
 }> {
   // ⚠️ 用 getSettingBool 而不是 `=== "1"`：管理员保存过一次之后库里可能是 "true"
   //   （见 updateSettingsHandler 的布尔归一化 / admin.tsx 的 isSettingOn 注释）。
@@ -241,7 +243,11 @@ export async function getRedeemConfig(env: Env): Promise<{
   const raw = await getSettingNumber(env, "points_yuan_per_point")
   const yuanPerPoint = Number.isFinite(raw) && raw > 0 ? Math.min(raw, 100_000) : 1
   const dailyLimit = Math.max(0, Math.round(await getSettingNumber(env, "points_redeem_daily_limit")))
-  return { enabled, yuanPerPoint, dailyLimit }
+  const autoConfirmDays = Math.max(
+    0,
+    Math.round(await getSettingNumber(env, "shop_auto_confirm_days"))
+  )
+  return { enabled, yuanPerPoint, dailyLimit, autoConfirmDays }
 }
 
 // ---------------------------------------------------------------------------

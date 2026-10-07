@@ -201,6 +201,122 @@ export interface StarCheck {
 }
 
 /**
+ * 拉取一个仓库的全部 PR 作者（带缓存）。
+ *
+ * 与 stargazers 同样的思路：一次拉取整个列表并缓存，几十个人来领也只消耗
+ * 一次请求（未鉴权 60 次/小时是按出口 IP 算的，共享 IP 很容易打光）。
+ *
+ * `state=all` 覆盖 open + closed（**已合并的 PR 也是 closed**，带 merged_at），
+ * 所以「提交过 PR」与「有 PR 被合并」两种口径都能从这一份列表里判定。
+ *
+ * 失败一律返回 null，调用方按「核验不了」处理，不要当成「没提交过」。
+ */
+interface CachedPullAuthors {
+  repo: string
+  at: number
+  /** 提交过 PR（任意状态）的用户名集合（小写） */
+  authors: Set<string>
+  /** 有 PR 被合并的用户名集合（小写） */
+  mergedAuthors: Set<string>
+  /** 是否被分页上限截断（截断时更早的 PR 认不出来，要如实告诉管理员） */
+  truncated: boolean
+}
+
+let pullCache: CachedPullAuthors | null = null
+let pullLastError: string | null = null
+
+async function loadPullAuthors(env: Env, repo: string): Promise<CachedPullAuthors | null> {
+  const now = Date.now()
+  if (pullCache && pullCache.repo === repo && now - pullCache.at < CACHE_TTL_MS) return pullCache
+
+  const token = (env as unknown as { GITHUB_TOKEN?: string }).GITHUB_TOKEN
+  const headers: Record<string, string> = {
+    accept: "application/vnd.github+json",
+    "user-agent": "doulor-cloud-event-check",
+    "x-github-api-version": "2022-11-28",
+  }
+  if (token) headers.authorization = `Bearer ${token}`
+
+  const authors = new Set<string>()
+  const mergedAuthors = new Set<string>()
+  let truncated = false
+  try {
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const res = await fetch(
+        `https://api.github.com/repos/${repo}/pulls?state=all&per_page=100&page=${page}`,
+        { headers }
+      )
+      if (!res.ok) {
+        const need = res.headers.get("x-accepted-github-permissions")
+        if (res.status === 403 && need) {
+          pullLastError = `GitHub 拒绝了读取：当前 Token 缺少权限（它要求 ${need}）。`
+        } else if (res.status === 404) {
+          pullLastError = `仓库 ${repo} 不存在，或者它是私有仓库（私有仓库读不到 PR 列表）`
+        } else {
+          pullLastError = `GitHub 返回 ${res.status}`
+        }
+        console.error("读取 GitHub pulls 失败:", repo, res.status, need ?? "")
+        return null
+      }
+      const list = (await res.json()) as { user?: { login?: string }; merged_at?: string | null }[]
+      if (!Array.isArray(list)) return null
+      for (const pr of list) {
+        const login = pr?.user?.login?.toLowerCase()
+        if (!login) continue
+        authors.add(login)
+        if (pr.merged_at) mergedAuthors.add(login)
+      }
+      if (list.length < 100) break
+      if (page === MAX_PAGES) truncated = true
+    }
+  } catch (err) {
+    console.error("读取 GitHub pulls 异常:", repo, err)
+    return null
+  }
+
+  pullLastError = null
+  pullCache = { repo, at: now, authors, mergedAuthors, truncated }
+  return pullCache
+}
+
+/**
+ * 判断 `username` 是否给 `repo` 提交过 PR。
+ *
+ * `mergedOnly = true` 时只认「有 PR 被合并」；默认 false 认「提交过任意 PR」。
+ *
+ * 返回 `error` 的三种情况（都会让活动方给出「稍后再试」而不是「你没提交过」）：
+ *   - 仓库地址不合法
+ *   - 仓库不存在或**是私有仓库**（未鉴权时 GitHub 一律 404）
+ *   - 限额打光 / 网络异常
+ */
+export async function checkContributedPr(
+  env: Env,
+  repo: string,
+  username: string,
+  mergedOnly = false
+): Promise<StarCheck> {
+  const slug = repo.trim()
+  const who = username.trim().replace(/^@/, "").toLowerCase()
+  if (!isRepoSlug(slug)) {
+    return { ok: false, error: "活动配置的仓库地址不合法（应形如 owner/repo）" }
+  }
+  if (!/^[A-Za-z0-9-]{1,39}$/.test(who)) {
+    return { ok: false, error: "GitHub 用户名不合法（只能包含字母、数字和连字符）" }
+  }
+
+  const data = await loadPullAuthors(env, slug)
+  if (!data) {
+    const hasToken = Boolean((env as unknown as { GITHUB_TOKEN?: string }).GITHUB_TOKEN)
+    const why = hasToken
+      ? (pullLastError ?? "读不到仓库的 PR 列表")
+      : "站点未配置 GitHub Token（GitHub 要求鉴权才返回 PR 列表）"
+    return { ok: false, error: why }
+  }
+  const set = mergedOnly ? data.mergedAuthors : data.authors
+  return { ok: set.has(who), truncated: data.truncated }
+}
+
+/**
  * 判断 `username` 是否给 `repo` 点过 star。
  *
  * 返回 `error` 的三种情况（都会让活动方给出「稍后再试」而不是「你没点 star」）：

@@ -24,6 +24,10 @@ export interface UserRow {
   email_verify_requested_at?: string | null
   /** 功能权限 JSON（NULL=全开，见 permissions.ts） */
   permissions?: string | null
+  /** 引用的管理员权限组 id（可空 = 未加入任何组） */
+  admin_role_id?: string | null
+  /** 自定义管理员白名单（JSON 数组；非空 = 覆盖权限组） */
+  admin_scope?: string | null
   /** 中文昵称（可空，未设置时回退显示 username） */
   nickname?: string | null
   /** 头像在 R2 的对象键（可空） */

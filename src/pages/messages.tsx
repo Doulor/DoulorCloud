@@ -5,12 +5,10 @@ import {
   Bell,
   Check,
   CheckCheck,
-  Heart,
   Loader2,
   Megaphone,
-  MessageCircle,
-  MessagesSquare,
   MessageSquare,
+  MessagesSquare,
   Package,
   PartyPopper,
   Gift,
@@ -18,7 +16,8 @@ import {
   Clock,
   AlertCircle,
   Users,
-  Share2,
+  Vote,
+  Link2,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -26,6 +25,7 @@ import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { Markdown } from "@/components/markdown"
+import { EventVote, VOTE_RULE_LABEL_KEY, VOTE_RULE_HINT_KEY, isInstantVoteRule } from "@/components/event-vote"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -34,6 +34,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAuth } from "@/hooks/use-auth"
 import { notificationApi, pointsApi, eventApi, errMsg } from "@/services/api"
 import { notifyMessagesChanged } from "@/lib/message-events"
+import { socialNotifIcon, socialNotifText } from "@/lib/notification-meta"
 import { notifyPointsChanged } from "@/components/points-badge"
 import type {
   EventItem,
@@ -293,6 +294,8 @@ export default function MessagesPage() {
   const [codeDrafts, setCodeDrafts] = React.useState<Record<string, string>>({})
   /** 每个活动的 GitHub 用户名输入：{ eventId: github }，「点 Star」活动才需要 */
   const [githubDrafts, setGithubDrafts] = React.useState<Record<string, string>>({})
+  /** 每个活动投票时选中的选项：{ eventId: optionId }，投票活动才需要 */
+  const [voteDrafts, setVoteDrafts] = React.useState<Record<string, string>>({})
 
   const claim = async (ev: EventItem) => {
     setClaiming(ev.id)
@@ -300,15 +303,27 @@ export default function MessagesPage() {
       const res = await eventApi.claim(
         ev.id,
         codeDrafts[ev.id] ?? "",
-        githubDrafts[ev.id] ?? ""
+        githubDrafts[ev.id] ?? "",
+        voteDrafts[ev.id] ?? ""
       )
-      toast.success(res.detail || t("msg.claimOk"))
+      /**
+       * 投票「立刻结算」那一档可能返回 `lost`（没中奖）—— 那是一次**正常的结果**
+       * 而不是失败：走成功提示会让人以为中奖了，走错误提示又像系统出了问题。
+       * 用中性 toast，并把具体结论留在卡片上的状态里。
+       */
+      if (res.status === "lost") toast.message(res.detail || t("msg.claimOk"))
+      else toast.success(res.detail || t("msg.claimOk"))
       setCodeDrafts((d) => {
         const next = { ...d }
         delete next[ev.id]
         return next
       })
       setGithubDrafts((d) => {
+        const next = { ...d }
+        delete next[ev.id]
+        return next
+      })
+      setVoteDrafts((d) => {
         const next = { ...d }
         delete next[ev.id]
         return next
@@ -378,6 +393,8 @@ export default function MessagesPage() {
                 onGithubChange={(id, v) =>
                   setGithubDrafts((d) => ({ ...d, [id]: v }))
                 }
+                voteDrafts={voteDrafts}
+                onVoteChange={(id, v) => setVoteDrafts((d) => ({ ...d, [id]: v }))}
                 onClaim={(ev) => void claim(ev)}
               />
             ) : !messages[c] ? (
@@ -508,13 +525,10 @@ function OrderMessageActions({
 /**
  * 左侧类型图标：一眼能分出「点赞」还是「评论」（站长 2026-10-03 要求）。
  * 点赞 = 爱心；评论/回复 = 气泡；反馈 = 方气泡；网站动态 = 喇叭；系统 = 铃铛。
+ * 社交类的图标/文案逻辑统一走 shared/lib 的 notification-meta，社区弹窗共用。
  */
 function notifIcon(n: Notification) {
-  if (n.category === "social") {
-    if (n.type === "post_like" || n.type === "comment_like") return Heart
-    if (n.type === "feedback_reply") return MessageSquare
-    return MessageCircle
-  }
+  if (n.category === "social") return socialNotifIcon(n)
   return n.category === "site" ? Megaphone : Bell
 }
 
@@ -561,17 +575,7 @@ function MessageRow({
             )}
             {!isSiteOrSystem && (
               <p className="text-sm font-medium">
-                {/* ⚠️ 口径必须和后端 latestNotification 一致（浏览器通知拿的是那份） */}
-                {n.type === "post_like"
-                  ? t("msg.liked", { actor: who })
-                  : n.type === "comment_like"
-                    ? t("msg.likedComment", { actor: who })
-                    : n.type === "comment_reply"
-                      ? t("msg.repliedComment", { actor: who })
-                      : n.type === "feedback_reply"
-                        ? // 反馈回复关联的是反馈单，不是帖子 —— 说成「帖子」用户会找不到东西
-                          `${who} ${t("cm.notif.feedbackReply")}`
-                        : t("msg.replied", { actor: who })}
+                {socialNotifText(n, who, t)}
               </p>
             )}
             <span className="text-xs text-muted-foreground">
@@ -615,6 +619,8 @@ function EventList({
   onCodeChange,
   githubDrafts,
   onGithubChange,
+  voteDrafts,
+  onVoteChange,
   onClaim,
 }: {
   events: EventItem[]
@@ -626,8 +632,12 @@ function EventList({
   /** GitHub 用户名草稿：{ eventId: 已输入的用户名 } */
   githubDrafts: Record<string, string>
   onGithubChange: (id: string, v: string) => void
+  /** 投票草稿：{ eventId: 选中的选项 id } */
+  voteDrafts: Record<string, string>
+  onVoteChange: (id: string, optionId: string) => void
   onClaim: (ev: EventItem) => void
-}) {  const { t } = useT()
+}) {
+  const { t } = useT()
 
   if (loading && events.length === 0) return <LoadingBlock />
   if (events.length === 0) {
@@ -651,6 +661,8 @@ function EventList({
           onCodeChange={(v) => onCodeChange(ev.id, v)}
           github={githubDrafts[ev.id] ?? ""}
           onGithubChange={(v) => onGithubChange(ev.id, v)}
+          vote={voteDrafts[ev.id] ?? ev.myVote ?? null}
+          onVoteChange={(v) => onVoteChange(ev.id, v)}
           onClaim={() => onClaim(ev)}
         />
       ))}
@@ -665,6 +677,8 @@ function EventCard({
   onCodeChange,
   github,
   onGithubChange,
+  vote,
+  onVoteChange,
   onClaim,
 }: {
   ev: EventItem
@@ -675,6 +689,9 @@ function EventCard({
   /** 当前输入的 GitHub 用户名（仅「点 Star」活动用） */
   github: string
   onGithubChange: (v: string) => void
+  /** 投票活动：当前选中的选项 id（未选为 null） */
+  vote: string | null
+  onVoteChange: (optionId: string) => void
   onClaim: () => void
 }) {
   const { t } = useT()
@@ -682,13 +699,18 @@ function EventCard({
   const claimed = !!claim && claim.rewardStatus !== "failed"
   /** 认证码活动：领取前必须输入管理员公布的口令（如 QQ 群群公告里的码） */
   const needsCode = ev.conditionType === "code" && !claimed
-  /** 「点 GitHub star」活动：领取前必须填 GitHub 用户名，服务端据此核验。
+  /** 「点 GitHub star / 提交 GitHub PR」活动：领取前必须填 GitHub 用户名，服务端据此核验。
    *  ⚠️ 这里之前漏了（只在专属页 /activity/:id 有），消息中心的卡片因此看不到输入框。 */
-  const needsGithub = ev.conditionType === "github_star" && !claimed
+  const needsGithub =
+    (ev.conditionType === "github_star" || ev.conditionType === "github_pr") && !claimed
   /** 抽奖活动：参与只是报名，开奖后由服务端随机抽人发积分 */
   const isLottery = ev.conditionType === "lottery"
   /** 抽奖已开奖：不能再报名（报了也拿不到奖），按钮置灰 */
   const lotteryClosed = isLottery && !!ev.lottery?.drawn
+  /** 投票活动：选项在卡片里选，提交按钮由投票区提供（与抽奖/认证码的按钮不同） */
+  const isVote = ev.conditionType === "vote"
+  /** 投票已开奖：不能再投（后端 VOTE_DRAWN 会拦） */
+  const voteClosed = isVote && !!ev.vote?.drawn
   /** 未满足奖励前置条件（如未开通中转站）：按钮置灰并说明原因，避免点了才失败 */
   const blockedReason = claimed ? "" : ev.claimBlockedReason ?? ""
 
@@ -726,6 +748,17 @@ function EventCard({
         <div className="flex flex-wrap items-center gap-2">
           <Gift className="h-4 w-4 text-primary" />
           <p className="text-base font-semibold">{ev.title}</p>
+          {/* 分享链接快捷复制：放在标题旁边，随手可点（活动靠 /activity/<id> 链接传播） */}
+          <button
+            type="button"
+            onClick={() => void shareLink()}
+            title={t("msg.shareLinkTip")}
+            aria-label={t("msg.shareLinkTip")}
+            className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <Link2 className="h-3 w-3" />
+            {t("msg.share")}
+          </button>
           {ev.claimState === "ended" && <Badge variant="secondary">{t("msg.ended")}</Badge>}
           {ev.claimState === "not_started" && <Badge variant="outline">{t("msg.notStarted")}</Badge>}
         </div>
@@ -768,6 +801,15 @@ function EventCard({
               })}
             </span>
           )}
+          {ev.vote && (
+            <span className="inline-flex items-center gap-1">
+              <Vote className="h-3.5 w-3.5" />
+              {t("vote.summary", {
+                n: ev.vote.options.length,
+                rule: t(VOTE_RULE_LABEL_KEY[ev.vote.rewardRule]),
+              })}
+            </span>
+          )}
           {ev.rewardLabel && (
             <span className="inline-flex items-center gap-1 font-medium text-foreground">
               <Gift className="h-3.5 w-3.5" />
@@ -781,6 +823,8 @@ function EventCard({
             <Badge variant={claim?.rewardStatus === "granted" ? "success" : "secondary"}>
               {claim?.rewardDetail ?? t("msg.claimed")}
             </Badge>
+          ) : isVote ? ( // 投票的主操作在下面的投票区（要先选一个选项），这里不放按钮
+            null
           ) : (
             <>
               {needsCode && (
@@ -846,11 +890,22 @@ function EventCard({
               {claim.rewardDetail}
             </span>
           )}
-          <Button variant="outline" size="sm" onClick={() => void shareLink()}>
-            <Share2 className="h-4 w-4" />
-            {t("msg.share")}
-          </Button>
+          {/* 「分享」已移到标题旁（见上方），这里不再重复放一个同动作按钮 */}
         </div>
+
+        {/* 投票区：选项 + 票数 + 自己的选择。已投票 / 已开奖后自动切成只读展示 */}
+        {isVote && (
+          <EventVote
+            ev={ev}
+            selected={vote}
+            onSelect={onVoteChange}
+            onSubmit={onClaim}
+            busy={busy}
+            disabled={
+              ev.claimState !== "open" || !!blockedReason || voteClosed
+            }
+          />
+        )}
         {needsCode && (
           <p className="text-xs text-muted-foreground">{t("msg.codeHint")}</p>
         )}
@@ -862,6 +917,18 @@ function EventCard({
             {t("msg.lottery.hint", {
               mode: ev.lottery?.mode === "even" ? t("msg.mode.even") : t("msg.mode.random"),
             })}
+          </p>
+        )}
+        {/* 投票规则说明：每档不一样（什么时候出结果、凭什么赢），必须逐档讲清楚 */}
+        {isVote && !claimed && ev.vote && (
+          <p
+            className={
+              isInstantVoteRule(ev.vote.rewardRule)
+                ? "text-xs text-amber-600 dark:text-amber-400"
+                : "text-xs text-muted-foreground"
+            }
+          >
+            {t(VOTE_RULE_HINT_KEY[ev.vote.rewardRule])}
           </p>
         )}
         {blockedReason && (

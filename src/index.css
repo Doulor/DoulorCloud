@@ -227,6 +227,21 @@
   animation: role-ring-spin 3s linear infinite;
 }
 
+@utility role-ring-super {
+  /* 超级管理员：淡紫底(purple-100) + 浅紫光斑(purple-400) */
+  background: conic-gradient(
+    from var(--ring-angle),
+    rgba(206, 203, 246, 1) 0deg,
+    rgba(127, 119, 221, 1) 50deg,
+    rgba(206, 203, 246, 1) 105deg,
+    rgba(206, 203, 246, 1) 180deg,
+    rgba(127, 119, 221, 1) 230deg,
+    rgba(206, 203, 246, 1) 285deg,
+    rgba(206, 203, 246, 1) 360deg
+  );
+  animation: role-ring-spin 3s linear infinite;
+}
+
 @utility role-ring-strong {
   /* 站长：淡粉底(rose-100) + 浅红光斑(rose-400) */
   background: conic-gradient(
@@ -264,6 +279,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .role-ring,
+  .role-ring-super,
   .role-ring-strong,
   .title-ring {
     animation: none;

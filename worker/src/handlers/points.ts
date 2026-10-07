@@ -66,6 +66,7 @@ import {
   adminCancelOrder,
   adminResolveAfterSale,
   adminSettleOrder,
+  autoConfirmDeliveries,
   buyProduct,
   cancelAfterSale,
   clearUnusedProductCodes,
@@ -80,6 +81,7 @@ import {
   listAfterSaleOrders,
   listOrders,
   listProducts,
+  rejectDelivery,
   requestAfterSale,
   reviewProduct,
   sellerDeliverOrder,
@@ -529,6 +531,30 @@ export async function escalateAfterSaleHandler(
   return json({ order })
 }
 
+/**
+ * POST /api/points/orders/:id/reject —— 买家拒收（直达平台介入）
+ *
+ * 卖家点了「已交付」但买家实际没收到 / 货不对板时用，不用先向卖家申请退款。
+ */
+export async function rejectDeliveryHandler(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  // 与申请退款同一档限流：都会写库 + 给对方发消息
+  await guardRateLimit(env, `shop:after-sale:user:${user.id}`, 10, 3600, "拒收申请过于频繁，请稍后再试")
+  assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  const body = (await request.json().catch(() => ({}))) as { reason?: string }
+  const order = await rejectDelivery(env, user.id, id, body.reason ?? "")
+  return json({ order })
+}
+
+/** 定时任务入口：用户商城自动确认收货（卖家交付满 N 天，N 由设置项控制） */
+export async function runAutoConfirmDeliveries(env: Env): Promise<number> {
+  return autoConfirmDeliveries(env)
+}
+
 /** POST /api/points/orders/:id/after-sale/decide —— 卖家处理退款申请（同意 / 拒绝） */
 export async function sellerResolveAfterSaleHandler(
   env: Env,
@@ -771,6 +797,8 @@ export async function savePointsConfig(env: Env, request: Request): Promise<Resp
     enabled?: unknown
     yuanPerPoint?: unknown
     dailyLimit?: unknown
+    /** 用户商城：卖家交付后多少天自动确认收货（0 = 关闭） */
+    autoConfirmDays?: unknown
     /** 捐献奖励：档位 → 积分数（只提交要改的档位即可） */
     donationRewards?: unknown
     /** 捐献奖励的每人每日发放次数上限（0 = 不限） */
@@ -798,6 +826,14 @@ export async function savePointsConfig(env: Env, request: Request): Promise<Resp
       throw new ApiError(400, "每日兑换次数上限需在 0 ~ 1000 之间", "INVALID_INPUT")
     }
     values.points_redeem_daily_limit = String(n)
+  }
+  if (body.autoConfirmDays !== undefined) {
+    const n = Math.trunc(Number(body.autoConfirmDays))
+    // 上限 90 天：再长就等于没有兜底（卖家永远收不到钱）
+    if (!Number.isFinite(n) || n < 0 || n > 90) {
+      throw new ApiError(400, "自动收货天数需在 0 ~ 90 之间（0 = 关闭）", "INVALID_INPUT")
+    }
+    values.shop_auto_confirm_days = String(n)
   }
   if (body.donationRewards !== undefined) {
     const raw = body.donationRewards

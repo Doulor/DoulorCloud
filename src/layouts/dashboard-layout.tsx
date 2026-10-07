@@ -32,6 +32,7 @@ import { DmBell } from "@/components/dm-bell"
 import { PointsBadge } from "@/components/points-badge"
 import { ScrollToTop } from "@/components/scroll-to-top"
 import { PageEnter } from "@/components/page-enter"
+import { AutoCheckin } from "@/components/auto-checkin"
 import { Button } from "@/components/ui/button"
 import { UserAvatar } from "@/components/user-avatar"
 import {
@@ -506,6 +507,8 @@ export function DashboardLayout({
 
   return (
     <div className="min-h-screen">
+      {/* 自动签到：进站触发，无 UI（见组件内说明） */}
+      <AutoCheckin />
       {/* 这层刻意不铺 bg-background：底色由 body 提供，云纹背景画在 body 上，
           这里再铺一次不透明色就会把它整块盖住。
           侧边栏用 glass-sidebar（轻度档，与卡片同档）—— 原为不透明的 bg-card。 */}

@@ -15,6 +15,7 @@ import {
   resolveAdminScope,
   assertAdminScope,
 } from "../src/handlers/admin"
+import { serveFeedbackImage } from "../src/handlers/feedback"
 import type { Env } from "../src/env"
 
 const HOST = "https://cloud.doulor.cn"
@@ -215,5 +216,39 @@ describe("权限组 / 成员权限 API", () => {
     const s2 = (await get2.json()) as { custom: boolean; adminRoleId: string | null }
     expect(s2.custom).toBe(true) // 覆盖后标记自定义
     expect(s2.adminRoleId).toBe(id) // 仍在组里
+  })
+})
+
+describe("反馈图片：自定义 admin 的可见性", () => {
+  it("admin 有 feedback 权限 → 能看别人的反馈图片（不 403）", async () => {
+    const uploader = await makeUser()
+    const admin = await makeUser({ role: "admin" })
+    await env.DB.prepare("UPDATE users SET admin_scope = ? WHERE id = ?")
+      .bind(JSON.stringify(["feedback"]), admin.id).run()
+
+    const res = await serveFeedbackImage(
+      env as unknown as Env,
+      req(admin, "/api/feedback/image/x/y.png"),
+      uploader.id,
+      "00000000-0000-0000-0000-000000000000.png"
+    )
+    // 守卫放行后，走到 R2（测试环境未配置）会 404，而不是 403
+    expect(res.status).not.toBe(403)
+  })
+
+  it("admin 没有 feedback 权限 → 403", async () => {
+    const uploader = await makeUser()
+    const admin = await makeUser({ role: "admin" })
+    await env.DB.prepare("UPDATE users SET admin_scope = ? WHERE id = ?")
+      .bind(JSON.stringify(["points.adjust"]), admin.id).run()
+
+    await expect(
+      serveFeedbackImage(
+        env as unknown as Env,
+        req(admin, "/api/feedback/image/x/y.png"),
+        uploader.id,
+        "00000000-0000-0000-0000-000000000000.png"
+      )
+    ).rejects.toMatchObject({ code: "FORBIDDEN" })
   })
 })

@@ -58,7 +58,7 @@ export default function RandomPickerTool() {
             onClick={() => setMode(m.id)}
           >
             <m.icon className="h-4 w-4" />
-            {m.label}
+            {t(m.label)}
           </Button>
         ))}
       </div>

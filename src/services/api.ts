@@ -477,9 +477,14 @@ export const domainApi = {
 export const adminApi = {
   listUsers: () => request<{ users: AdminUser[] }>("/admin/users"),
 
-  /** 管理员权限树（两级） */
+  /** 管理员权限树（两级）+ 当前用户权限 + 侧边栏过滤开关 */
   getPermissionTree: () =>
-    request<{ groups: AdminPermGroup[]; categories: AdminPermCategory[] }>("/admin/permissions/tree"),
+    request<{
+      groups: AdminPermGroup[]
+      categories: AdminPermCategory[]
+      myScope: string[]
+      sidebarOnlyPermitted: boolean
+    }>("/admin/permissions/tree"),
 
   /** 权限组列表 */
   listPermissionGroups: () =>
@@ -1701,6 +1706,9 @@ export const checkinApi = {
       todayBonus: number
       milestones: { days: number; points: number }[]
       next: { days: number; points: number; daysLeft: number } | null
+      makeupCards: number
+      canMakeup: boolean
+      autoCheckin: boolean
     }>("/checkin"),
 
   do: () =>
@@ -1713,6 +1721,26 @@ export const checkinApi = {
       milestoneHit: { days: number; points: number } | null
       next: { days: number; points: number; daysLeft: number } | null
     }>("/checkin", { method: "POST" }),
+
+  makeup: (date?: string) =>
+    request<{ ok: boolean; makeupDate: string; streak: number; makeupCards: number }>(
+      "/checkin/makeup",
+      { method: "POST", body: JSON.stringify(date ? { date } : {}) }
+    ),
+
+  history: (month: string) =>
+    request<{
+      month: string
+      today: string
+      makeupCards: number
+      days: { date: string; points: number; isMakeup: boolean }[]
+    }>(`/checkin/history?month=${encodeURIComponent(month)}`),
+
+  setAuto: (enabled: boolean) =>
+    request<{ ok: boolean; autoCheckin: boolean }>("/checkin/auto", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
 }
 
 export const pointsApi = {
@@ -1820,6 +1848,12 @@ export const pointsApi = {
       `/points/orders/${encodeURIComponent(orderId)}/after-sale/escalate`,
       { method: "POST" }
     ),
+  /** 买家：拒收（卖家点了已交付但没收到货 / 货不对板）→ 直达平台介入，不用先向卖家申请退款 */
+  rejectOrder: (orderId: string, reason: string) =>
+    request<{ order: PointOrder }>(`/points/orders/${encodeURIComponent(orderId)}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
   /** 卖家：处理买家的退款申请（同意即退款；拒绝要写明理由） */
   sellerResolveAfterSale: (orderId: string, approve: boolean, note?: string) =>
     request<{ order: PointOrder }>(
@@ -2209,17 +2243,18 @@ export const eventApi = {
   get: (id: string) => request<{ event: EventItem }>(`/events/${encodeURIComponent(id)}`),
   /** 认证码活动必须带 code；其余活动 code 可省略 */
   /**
-   * 领取活动奖励。
+   * 领取活动奖励 / 参与活动。
    *
-   * `code` 用于「凭认证码」的活动，`github` 用于「点了 GitHub star」的活动 ——
-   * 两者都只是**线索**，服务端一律重新核验，前端传什么都不信。
+   * `code` 用于「凭认证码」的活动，`github` 用于「点了 GitHub star」的活动，
+   * `optionId` 用于投票活动（投给哪个选项）—— 三者都只是**线索**，
+   * 服务端一律重新核验（选项是否存在、名字是否已被占用等），前端传什么都不信。
    */
-  claim: (id: string, code?: string, github?: string) =>
+  claim: (id: string, code?: string, github?: string, optionId?: string) =>
     request<{ status: string; detail: string }>(
       `/events/${encodeURIComponent(id)}/claim`,
       {
         method: "POST",
-        body: JSON.stringify({ code: code ?? "", github: github ?? "" }),
+        body: JSON.stringify({ code: code ?? "", github: github ?? "", optionId: optionId ?? "" }),
       }
     ),
 }
@@ -2245,12 +2280,34 @@ export const adminEventApi = {
       `/admin/events/${encodeURIComponent(id)}/claims/${encodeURIComponent(claimId)}/grant`,
       { method: "POST", body: JSON.stringify({ detail }) }
     ),
-  /** 抽奖开奖：从报名者里随机抽人发积分（已开过奖会返回 409） */
+  /**
+   * 开奖：抽奖从报名者里随机抽人；投票按「多数/少数得奖」计票。
+   * 已开过奖会返回 409；对「参与即可获奖」/「立刻结算」的投票会返回 400
+   * （那两档在投票时就已经结算完了）。
+   * `winningOptions` 只有投票开奖才会返回（平票时是多个选项 id）。
+   */
   draw: (id: string) =>
-    request<{ ok: boolean; winners: number; distributed: number; participants: number; failed: number }>(
-      `/admin/events/${encodeURIComponent(id)}/draw`,
-      { method: "POST" }
-    ),
+    request<{
+      ok: boolean
+      winners: number
+      distributed: number
+      participants: number
+      failed: number
+      winningOptions?: string[]
+    }>(`/admin/events/${encodeURIComponent(id)}/draw`, { method: "POST" }),
+  /**
+   * 上传投票选项配图。返回的 `url` 是**同源相对路径**（`/api/event-img/<userId>/<file>`），
+   * 直接填进选项的 image 字段即可 —— 活动是公开分享的，配图必须任何人可读。
+   */
+  uploadImage: (file: File) => {
+    const headers = new Headers()
+    headers.set("Content-Type", file.type)
+    return request<{ key: string; url: string }>("/admin/events/image", {
+      method: "POST",
+      body: file,
+      headers,
+    })
+  },
 }
 
 /**
@@ -2449,6 +2506,8 @@ export const adminPointsApi = {
     enabled?: boolean
     yuanPerPoint?: number
     dailyLimit?: number
+    /** 用户商城：卖家交付后多少天自动确认收货（0 = 关闭） */
+    autoConfirmDays?: number
     donationRewards?: Record<string, number>
     donationDailyLimit?: number
     invitePoints?: Partial<InvitePointsConfig>

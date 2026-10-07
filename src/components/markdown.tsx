@@ -371,6 +371,46 @@ function StickerImage({
   )
 }
 
+/**
+ * 普通 markdown 图片：点击放大（与表情包同款遮罩，portal 到 body）。
+ *
+ * 为什么需要（2026-10-06 社区反馈）：粘贴/拖入的图会以 `![](url)` 落在正文里，
+ * 走的就是这条 renderImage 分支 —— 以前它只是个静态 <img>，点不开也放不大，
+ * 而「选图片」按钮上传的图走 PostImages 组件、自带放大，两种入口体验不一致。
+ * 这里补齐，让正文 markdown 图也能点开放大（含历史帖子与评论里的图）。
+ */
+function ZoomableImage({ src, alt }: { src: string; alt: string }) {
+  const { t } = useT()
+  const [zoom, setZoom] = React.useState(false)
+  return (
+    <>
+      <img
+        src={src}
+        alt={alt}
+        loading="lazy"
+        decoding="async"
+        className="my-2 max-h-80 max-w-full cursor-zoom-in rounded-md border"
+        onClick={(e) => {
+          // 阻止冒泡：帖子卡片整体可点（跳详情），不拦的话点图会「放大 + 跳转」双触发
+          e.stopPropagation()
+          setZoom(true)
+        }}
+      />
+      {zoom && (
+        <ImageLightbox
+          src={src}
+          alt={alt}
+          onClose={() => setZoom(false)}
+          dialogLabel={t("feedback.preview")}
+          closeLabel={t("feedback.closePreview")}
+          zoomHint={t("lightbox.hint")}
+          resizeLabel={t("lightbox.resize")}
+        />
+      )}
+    </>
+  )
+}
+
 function renderImage(
   { src, alt }: React.ComponentProps<"img">,
   showSaveButton: boolean
@@ -380,15 +420,7 @@ function renderImage(
   if (/\/api\/stickers\/[0-9a-f-]{36}\/image/.test(url)) {
     return <StickerImage src={url} alt={alt ?? ""} showSaveButton={showSaveButton} />
   }
-  return (
-    <img
-      src={url}
-      alt={alt ?? ""}
-      loading="lazy"
-      decoding="async"
-      className="my-2 max-h-80 max-w-full rounded-md border"
-    />
-  )
+  return <ZoomableImage src={url} alt={alt ?? ""} />
 }
 
 export function Markdown({

@@ -1038,7 +1038,15 @@ function countColumns(owner: string, excludeApi: boolean): string {
          WHERE e.editor_id = {OWNER} AND p.deleted_at IS NULL) AS post_edits,
        (SELECT COUNT(*) FROM posts
          WHERE user_id = {OWNER} AND deleted_at IS NULL
-           AND json_array_length(CASE WHEN json_valid(images) THEN images ELSE '[]' END) > 0) AS post_images,
+           AND (
+             -- 「图片」按钮上传的图（结构化列）
+             json_array_length(CASE WHEN json_valid(images) THEN images ELSE '[]' END) > 0
+             -- 或者正文里贴的图（粘贴/拖入进的 /api/chat/image/，或外链 http 图）
+             -- 2026-10-06：以前只认 images 列，导致粘贴的图不算「图文并茂」。
+             -- 表情包（/api/stickers/）**不算配图**（站长定），所以只匹配这两种前缀。
+             OR body LIKE '%![%](/api/chat/image/%'
+             OR body LIKE '%![%](http%'
+           )) AS post_images,
        (SELECT COUNT(*) FROM post_comments
          WHERE user_id = {OWNER} AND parent_id IS NOT NULL AND deleted_at IS NULL) AS comment_replies,
        (SELECT COUNT(*) FROM notifications

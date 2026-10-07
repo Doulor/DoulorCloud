@@ -11,11 +11,13 @@ import {
   PartyPopper,
   Share2,
   Users,
+  Vote,
 } from "lucide-react"
 import { toast } from "sonner"
 
 import { LoadingBlock } from "@/components/loading-block"
 import { Markdown } from "@/components/markdown"
+import { EventVote, VOTE_RULE_LABEL_KEY, VOTE_RULE_HINT_KEY, isInstantVoteRule } from "@/components/event-vote"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -48,6 +50,8 @@ export default function ActivityPage() {
   const [code, setCode] = React.useState("")
   /** 「点了 GitHub star」活动里用户自己填的 GitHub 用户名 */
   const [github, setGithub] = React.useState("")
+  /** 投票活动里当前选中的选项 id（未选为 null） */
+  const [optionId, setOptionId] = React.useState<string | null>(null)
   const [copied, setCopied] = React.useState(false)
 
   const load = React.useCallback(async () => {
@@ -55,6 +59,9 @@ export default function ActivityPage() {
     try {
       const res = await eventApi.get(id)
       setEv(res.event)
+      // 已投过票 / 已开奖时，把「我投的那个」同步进选中态 —— 否则投票区会显示成
+      // 一张还没投票的表（票数条已在展示，却没有任何一项被选中）。
+      setOptionId(res.event.myVote ?? null)
     } catch {
       setNotFound(true)
     } finally {
@@ -75,8 +82,14 @@ export default function ActivityPage() {
     }
     setBusy(true)
     try {
-      const res = await eventApi.claim(ev.id, code.trim(), github.trim())
-      toast.success(res.detail)
+      const res = await eventApi.claim(ev.id, code.trim(), github.trim(), optionId ?? "")
+      /**
+       * 「立刻结算」那一档可能返回 `lost`（没中奖）—— 那是**正常结果**不是错误，
+       * 走 toast.success 会让人以为中了奖，走 error 又像出故障了。
+       * 用中性提示，具体原因在卡片上的状态里也能看到（myClaim.rewardDetail）。
+       */
+      if (res.status === "lost") toast.message(res.detail)
+      else toast.success(res.detail)
       notifyMessagesChanged()
       await load()
     } catch (err) {
@@ -126,13 +139,22 @@ export default function ActivityPage() {
   const claim = ev.myClaim
   const claimed = !!claim && claim.rewardStatus !== "failed"
   const isLottery = ev.conditionType === "lottery"
+  const isVote = ev.conditionType === "vote"
   const lotteryClosed = isLottery && !!ev.lottery?.drawn
+  /** 投票已开奖：不能再投（后端 VOTE_DRAWN 会拦，这里只是别让按钮看着能点） */
+  const voteClosed = isVote && !!ev.vote?.drawn
   const needsCode = ev.conditionType === "code" && !claimed
-  /** 「点 GitHub star」活动：领取前必须让用户填 GitHub 用户名，服务端据此核验 */
-  const needsGithub = ev.conditionType === "github_star" && !claimed
+  /** 「点 GitHub star / 提交 GitHub PR」活动：领取前必须让用户填 GitHub 用户名，服务端据此核验 */
+  const needsGithub =
+    (ev.conditionType === "github_star" || ev.conditionType === "github_pr") && !claimed
   const blockedReason = claimed ? "" : ev.claimBlockedReason ?? ""
   /** 参与条件的规则说明（静态规则，与用户当前状态无关） */
   const conditionHint = claimed ? "" : ev.conditionHint ?? ""
+  /**
+   * 投票区是否只读：未登录、不在进行中、配置有前置条件没满足、已开奖 —— 任一成立就不能投。
+   * 「已投过票」不在这里管 —— EventVote 内部按 myVote 自己会切成只读展示。
+   */
+  const voteLocked = !user || ev.claimState !== "open" || !!blockedReason || voteClosed
 
   const timeText = (() => {
     const locale = t("msg.dateLocale")
@@ -211,6 +233,15 @@ export default function ActivityPage() {
                 })}
               </span>
             )}
+            {ev.vote && (
+              <span className="inline-flex items-center gap-1">
+                <Vote className="h-3.5 w-3.5" />
+                {t("vote.summary", {
+                  n: ev.vote.options.length,
+                  rule: t(VOTE_RULE_LABEL_KEY[ev.vote.rewardRule]),
+                })}
+              </span>
+            )}
             {ev.rewardLabel && (
               <span className="inline-flex items-center gap-1 font-medium text-foreground">
                 <Gift className="h-3.5 w-3.5" />
@@ -221,9 +252,30 @@ export default function ActivityPage() {
 
           <div className="flex flex-wrap items-center gap-2">
             {claimed ? (
-              <Badge variant={claim?.rewardStatus === "granted" ? "success" : "secondary"}>
+              <Badge
+                variant={
+                  claim?.rewardStatus === "granted"
+                    ? "success"
+                    : // lost = 参与但没中奖（投票的少数/多数、立刻结算都可能是它）。
+                      // 用 secondary（不是 success）—— 免得没中奖的人也看到一片绿。
+                      "secondary"
+                }
+              >
                 {claim?.rewardDetail ?? t("act.joined")}
               </Badge>
+            ) : isVote ? (
+              // 投票活动的主操作在下面的投票区里（用户得先选一个选项），
+              // 这里只在未登录时给一个登录入口 —— 未登录选不了选项（见 voteLocked）。
+              !user && (
+                <Button
+                  size="sm"
+                  onClick={() =>
+                    navigate("/login", { state: { from: { pathname: `/activity/${ev.id}` } } })
+                  }
+                >
+                  {t("act.btn.loginJoin")}
+                </Button>
+              )
             ) : (
               <>
                 {needsCode && (
@@ -267,6 +319,18 @@ export default function ActivityPage() {
             </Button>
           </div>
 
+          {/* 投票区：选项 + 票数 + 自己的选择。已投票 / 已开奖后自动切成只读展示 */}
+          {isVote && (
+            <EventVote
+              ev={ev}
+              selected={optionId}
+              onSelect={setOptionId}
+              onSubmit={handleClaim}
+              busy={busy}
+              disabled={voteLocked}
+            />
+          )}
+
           {!claimed && claim?.rewardStatus === "failed" && claim.rewardDetail && (
             <p className="inline-flex items-center gap-1 text-xs text-destructive">
               <AlertCircle className="h-3.5 w-3.5" />
@@ -296,6 +360,19 @@ export default function ActivityPage() {
               {t("msg.lottery.hint", {
                 mode: ev.lottery?.mode === "even" ? t("msg.mode.even") : t("msg.mode.random"),
               })}
+            </p>
+          )}
+          {/* 投票规则说明：每档不一样（什么时候出结果、凭什么赢），必须逐档讲清楚，
+              否则用户会拿错的预期来判断，然后把「投了没中」当成 bug */}
+          {isVote && !claimed && ev.vote && (
+            <p
+              className={
+                isInstantVoteRule(ev.vote.rewardRule)
+                  ? "text-xs text-amber-600 dark:text-amber-400"
+                  : "text-xs text-muted-foreground"
+              }
+            >
+              {t(VOTE_RULE_HINT_KEY[ev.vote.rewardRule])}
             </p>
           )}
           {!user && (

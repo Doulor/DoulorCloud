@@ -53,6 +53,7 @@ import * as eventHandlers from "./handlers/events"
 import * as moderationHandlers from "./handlers/moderation"
 import * as moderationListHandlers from "./handlers/moderation-lists"
 import * as pointHandlers from "./handlers/points"
+import * as dbBackupHandlers from "./handlers/db-backup"
 import * as attentionHandlers from "./handlers/attention"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
@@ -2371,6 +2372,25 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: (eventMatch: RegExpMatchArray) =>
       eventHandlers.deleteEvent(env, request, decodeURIComponent(eventMatch[1])),
   },
+  {
+    // 投票选项配图上传（管理员）：返回可直接填进选项 image 字段的同源 URL
+    kind: "exact",
+    path: "/admin/events/image",
+    method: "POST",
+    handle: () => eventHandlers.uploadEventImage(env, request),
+  },
+  {
+    // 选项配图公开读取。⚠️ 与 /shop-img/* 同理，必须挂在 /api 前缀下才会进 API Worker。
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/event-img\/([^/]+)\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (eventImgMatch: RegExpMatchArray) =>
+      eventHandlers.serveEventImage(
+        env,
+        decodeURIComponent(eventImgMatch[1]),
+        decodeURIComponent(eventImgMatch[2])
+      ),
+  },
 
   // ---- 积分系统（余额 / 流水 / 兑换中转站余额）----
   {
@@ -2398,6 +2418,24 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/checkin",
     method: "POST",
     handle: () => checkinHandlers.doCheckin(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/checkin/makeup",
+    method: "POST",
+    handle: () => checkinHandlers.makeupCheckin(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/checkin/auto",
+    method: "POST",
+    handle: () => checkinHandlers.setAutoCheckin(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/checkin/history",
+    method: "GET",
+    handle: () => checkinHandlers.getCheckinHistory(env, request),
   },
 
   // ---- 公开 API（API Key 认证 + 限额）----
@@ -2645,6 +2683,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
         decodeURIComponent(afterSaleEscalateMatch[1])
       ),
   },
+  // 拒收：买家没收到货 / 货不对板 → 直达平台介入（不用先向卖家申请退款）
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/points\/orders\/([^/]+)\/reject$/),
+    methods: ["POST"],
+    handle: (rejectMatch: RegExpMatchArray) =>
+      pointHandlers.rejectDeliveryHandler(env, request, decodeURIComponent(rejectMatch[1])),
+  },
   // 售后：卖家处理（同意退款 / 拒绝）
   {
     kind: "regex",
@@ -2797,6 +2843,35 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       storageHandlers.createUploadUrl(env, request),
+  },
+
+  // 数据库备份直传 R2（家里云每日 cron 用；X-Backup-Token 鉴权，见 handlers/db-backup.ts）
+  {
+    kind: "exact",
+    path: "/internal/db-backup/url",
+    method: "GET",
+    handle: () => dbBackupHandlers.dbBackupUrlHandler(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/internal/db-backup/chunk",
+    method: "POST",
+    handle: () => dbBackupHandlers.dbBackupChunkHandler(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/internal/db-backup/delete",
+    method: "POST",
+    handle: () => dbBackupHandlers.dbBackupDeleteHandler(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/internal/db-backup/prune",
+    method: "POST",
+    handle: () => dbBackupHandlers.dbBackupPruneHandler(env, request),
   },
 
   {
@@ -3709,6 +3784,13 @@ export default {
         if (report.warnings.length > 0) {
           console.warn("运维自检告警:", report.warnings.join(" | "))
         }
+      })
+    )
+    // 用户商城自动确认收货：卖家交付满 N 天自动结算给卖家（避免买家一直不点收货，
+    // 积分永远卡在托管里）。N 由设置项 shop_auto_confirm_days 控制，0 = 关闭。
+    ctx.waitUntil(
+      pointHandlers.runAutoConfirmDeliveries(env).then((n) => {
+        if (n > 0) console.log("自动确认收货:", n, "笔")
       })
     )
     // 批量刷新中转站调用次数/额度：排行榜读的是 newapi_accounts.request_count

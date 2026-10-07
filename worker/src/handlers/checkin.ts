@@ -55,6 +55,12 @@ export interface CheckinStatus {
   milestones: { days: number; points: number }[]
   /** 下一个里程碑（未签时用于提示「再签 N 天」） */
   next: { days: number; points: number; daysLeft: number } | null
+  /** 补签卡余额（0 = 没有） */
+  makeupCards: number
+  /** 现在能否补签（昨天漏签 + 有卡） */
+  canMakeup: boolean
+  /** 是否开了自动签到 */
+  autoCheckin: boolean
 }
 
 /**
@@ -65,10 +71,11 @@ export interface CheckinStatus {
  */
 export async function getCheckinStatus(env: Env, request: Request): Promise<Response> {
   const enabled = await getSettingBool(env, "checkin_enabled")
-  if (!enabled) return json({ enabled: false, checkedIn: false, streak: 0, milestones: [] })
+  if (!enabled) return json({ enabled: false, checkedIn: false, streak: 0, milestones: [], makeupCards: 0, canMakeup: false, autoCheckin: false })
 
   const user = await requireUser(env, request)
   const today = siteDayString(new Date(), await siteOffsetHours(env))
+  const yesterday = prevDateString(today)
 
   const todayRow = await env.DB.prepare(
     `SELECT points, base_points, bonus_points, streak FROM daily_checkins
@@ -77,17 +84,32 @@ export async function getCheckinStatus(env: Env, request: Request): Promise<Resp
     .bind(user.id, today)
     .first<{ points: number; base_points: number; bonus_points: number; streak: number }>()
 
+  // 补签卡余额 + 自动签到开关 + 昨天是否已签
+  const balance = await env.DB.prepare(
+    `SELECT checkin_makeup_cards AS c, auto_checkin AS a FROM users WHERE id = ?`
+  )
+    .bind(user.id)
+    .first<{ c: number; a: number }>()
+  const makeupCards = Number(balance?.c ?? 0)
+  const autoCheckin = Number(balance?.a ?? 0) === 1
+  const yesterdayRow = await env.DB.prepare(
+    `SELECT 1 FROM daily_checkins WHERE user_id = ? AND checkin_date = ?`
+  )
+    .bind(user.id, yesterday)
+    .first()
+  const canMakeup = !yesterdayRow && makeupCards > 0
+
   // 当前连续天数：今天签了用今天的 streak；没签则看昨天
   let streak = 0
   if (todayRow) {
     streak = todayRow.streak
   } else {
-    const yesterday = await env.DB.prepare(
+    const yesterdayStreak = await env.DB.prepare(
       `SELECT streak FROM daily_checkins WHERE user_id = ? AND checkin_date = ?`
     )
-      .bind(user.id, prevDateString(today))
+      .bind(user.id, yesterday)
       .first<{ streak: number }>()
-    streak = yesterday?.streak ?? 0
+    streak = yesterdayStreak?.streak ?? 0
   }
 
   const milestones = parseCheckinMilestones(await getSetting(env, "checkin_milestones"))
@@ -102,6 +124,9 @@ export async function getCheckinStatus(env: Env, request: Request): Promise<Resp
     todayBonus: todayRow?.bonus_points ?? 0,
     milestones,
     next: nxt ? { days: nxt.days, points: nxt.points, daysLeft: nxt.days - streak } : null,
+    makeupCards,
+    canMakeup,
+    autoCheckin,
   } satisfies CheckinStatus)
 }
 
@@ -171,4 +196,143 @@ export async function doCheckin(env: Env, request: Request): Promise<Response> {
     milestoneHit: bonus ? { days: bonus.days, points: bonus.points } : null,
     next: nxt ? { days: nxt.days, points: nxt.points, daysLeft: nxt.days - streak } : null,
   })
+}
+
+/**
+ * POST /api/checkin/makeup —— 补签（消耗一张补签卡，补指定日期的漏签）。
+ *
+ * body：`{ date?: "YYYY-MM-DD" }`，缺省补「昨天」（向后兼容）。
+ * 补的是**连续天数**，不发放当天积分奖励（积分只属于当天正常签到）。
+ * 一次补一天、消耗一张卡；断签多天需要多张卡逐天补回。
+ */
+export async function makeupCheckin(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const enabled = await getSettingBool(env, "checkin_enabled")
+  if (!enabled) throw new ApiError(403, "签到功能已关闭", "CHECKIN_DISABLED")
+
+  const today = siteDayString(new Date(), await siteOffsetHours(env))
+  const body = (await request.json().catch(() => ({}))) as { date?: string }
+  const target =
+    body.date && /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : prevDateString(today)
+
+  // 只能补「过去」的日期，今天与未来走正常签到
+  if (target >= today) throw new ApiError(400, "只能补签过去的日期", "INVALID_MAKEUP_DATE")
+
+  // 该日已签 → 无需补
+  const already = await env.DB.prepare(
+    `SELECT 1 FROM daily_checkins WHERE user_id = ? AND checkin_date = ?`
+  )
+    .bind(user.id, target)
+    .first()
+  if (already) throw new ApiError(409, "该日期已经签过到了，无需补签", "ALREADY_CHECKED_IN")
+
+  // 补签卡余额
+  const bal = await env.DB.prepare(
+    `SELECT checkin_makeup_cards AS c FROM users WHERE id = ?`
+  )
+    .bind(user.id)
+    .first<{ c: number }>()
+  const cards = Number(bal?.c ?? 0)
+  if (cards < 1) throw new ApiError(409, "没有可用的补签卡", "NO_MAKEUP_CARDS")
+
+  // 补签后该日的连续天数 = 前一天连续 + 1（前一天没有则从 1 重新算）
+  const dayBefore = await env.DB.prepare(
+    `SELECT streak FROM daily_checkins WHERE user_id = ? AND checkin_date = ?`
+  )
+    .bind(user.id, prevDateString(target))
+    .first<{ streak: number }>()
+  const streak = (dayBefore?.streak ?? 0) + 1
+
+  // 先写补签记录（PK 兜底并发），再扣卡。并发重复补签会被 PK 拦住、不会多扣卡。
+  await env.DB.prepare(
+    `INSERT INTO daily_checkins (user_id, checkin_date, points, base_points, bonus_points, streak, is_makeup, created_at)
+     VALUES (?, ?, 0, 0, 0, ?, 1, ?)`
+  )
+    .bind(user.id, target, streak, new Date().toISOString())
+    .run()
+
+  await env.DB.prepare(
+    `UPDATE users SET checkin_makeup_cards = checkin_makeup_cards - 1 WHERE id = ?`
+  )
+    .bind(user.id)
+    .run()
+
+  // 重算 target 之后所有已签到行的连续天数：补的是中间某天，后面的链要接上，
+  // 否则「补了 3 天前、2 天前却还是旧的断链值」会让后续签到算错。
+  const after = await env.DB.prepare(
+    `SELECT checkin_date FROM daily_checkins
+      WHERE user_id = ? AND checkin_date > ? ORDER BY checkin_date ASC`
+  )
+    .bind(user.id, target)
+    .all<{ checkin_date: string }>()
+  let prevDate = target
+  let prevStreak = streak
+  for (const r of after.results ?? []) {
+    const s = prevDateString(r.checkin_date) === prevDate ? prevStreak + 1 : 1
+    await env.DB.prepare(
+      `UPDATE daily_checkins SET streak = ? WHERE user_id = ? AND checkin_date = ?`
+    )
+      .bind(s, user.id, r.checkin_date)
+      .run()
+    prevDate = r.checkin_date
+    prevStreak = s
+  }
+
+  return json({ ok: true, makeupDate: target, streak, makeupCards: cards - 1 })
+}
+
+/**
+ * GET /api/checkin/history?month=YYYY-MM —— 某个月的签到日历数据。
+ * 返回该月每天的签到情况（含补签标记），供前端日历展示与「点击补签」判断用。
+ */
+export async function getCheckinHistory(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const url = new URL(request.url)
+  const defaultMonth = siteDayString(new Date(), await siteOffsetHours(env)).slice(0, 7)
+  const month = url.searchParams.get("month") ?? defaultMonth
+  if (!/^\d{4}-\d{2}$/.test(month)) throw new ApiError(400, "无效的月份", "INVALID_INPUT")
+
+  const start = `${month}-01`
+  const [y, m] = month.split("-").map(Number)
+  const end = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, "0")}-01`
+
+  const rows = await env.DB.prepare(
+    `SELECT checkin_date, points, is_makeup FROM daily_checkins
+      WHERE user_id = ? AND checkin_date >= ? AND checkin_date < ?
+      ORDER BY checkin_date ASC`
+  )
+    .bind(user.id, start, end)
+    .all<{ checkin_date: string; points: number; is_makeup: number }>()
+
+  const bal = await env.DB.prepare(
+    `SELECT checkin_makeup_cards AS c FROM users WHERE id = ?`
+  )
+    .bind(user.id)
+    .first<{ c: number }>()
+
+  return json({
+    month,
+    today: siteDayString(new Date(), await siteOffsetHours(env)),
+    makeupCards: Number(bal?.c ?? 0),
+    days: (rows.results ?? []).map((r) => ({
+      date: r.checkin_date,
+      points: Number(r.points ?? 0),
+      isMakeup: Number(r.is_makeup) === 1,
+    })),
+  })
+}
+
+/**
+ * POST /api/checkin/auto —— 开关自动签到（开了之后进站会自动签一次）。
+ */
+export async function setAutoCheckin(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const body = (await request.json().catch(() => ({}))) as { enabled?: unknown }
+  const enabled = body.enabled === true || body.enabled === "1"
+  await env.DB.prepare(
+    `UPDATE users SET auto_checkin = ?, updated_at = ? WHERE id = ?`
+  )
+    .bind(enabled ? 1 : 0, new Date().toISOString(), user.id)
+    .run()
+  return json({ ok: true, autoCheckin: enabled })
 }

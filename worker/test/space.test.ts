@@ -184,6 +184,31 @@ describe("computeAchievements", () => {
     expect(byId.get("feature_count")?.value).toBeGreaterThanOrEqual(1)
   })
 
+  it("图文并茂：正文里的粘贴图算，表情包不算（2026-10-06）", async () => {
+    const u = await makeUser()
+    const now = new Date().toISOString()
+    const post = (id: string, body: string) =>
+      env.DB.prepare(
+        `INSERT INTO posts (id, user_id, channel, body, images, created_at)
+         VALUES (?, ?, 'general', ?, NULL, ?)`
+      )
+        .bind(id, u.id, body, now)
+        .run()
+    // 1) 正文里的粘贴站内图 → 算
+    await post(`p_paste_${u.id}`, "看图 ![](/api/chat/image/abc/1.png)")
+    // 2) 只有表情包 → 不算
+    await post(
+      `p_stk_${u.id}`,
+      "哈哈 ![笑](/api/stickers/11111111-1111-1111-1111-111111111111/image)"
+    )
+    // 3) 外链图 → 算
+    await post(`p_link_${u.id}`, "外链 ![](https://example.com/a.png)")
+
+    const snap = computeAchievements(await loadUserCounts(env, u.id))
+    const v = snap.achievements.find((a) => a.id === "post_images")!.value
+    expect(v).toBe(2) // 粘贴图 + 外链图；表情包那条不算
+  })
+
   it("分级成就按阈值算等级，不越界", async () => {
     const u = await makeUser()
     const now = new Date().toISOString()

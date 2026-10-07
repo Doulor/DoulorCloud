@@ -13,7 +13,7 @@
  */
 import { ApiError, json, readBodyCapped } from "../http"
 import { requireUser, isPrivileged, isAnyAdmin } from "../auth"
-import { requireAdminScope } from "./admin"
+import { requireAdminScope, resolveAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
 import { getSetting, audit as recordAudit } from "../settings"
@@ -546,7 +546,17 @@ export async function serveFeedbackImage(
   filename: string
 ): Promise<Response> {
   const user = await requireUser(env, request)
-  if (user.id !== userId && !isPrivileged(user.role)) {
+  // 非上传者时，谁能看？root/superadmin 全放行；自定义 admin 需有 feedback 权限。
+  let canViewAsAdmin = false
+  if (user.id !== userId && isAnyAdmin(user.role)) {
+    if (isPrivileged(user.role)) {
+      canViewAsAdmin = true
+    } else {
+      const scope = await resolveAdminScope(env, user)
+      canViewAsAdmin = scope.has("feedback")
+    }
+  }
+  if (user.id !== userId && !canViewAsAdmin) {
     // 非上传者、非管理员：再查「这个图片是否出现在当前用户的某条工单里」。
     //
     // 为什么：管理员回复时上传的图，key 前缀是**管理员的 id**（uploadFeedbackImage 用

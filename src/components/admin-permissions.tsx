@@ -487,6 +487,8 @@ export function AdminPermissionsPanel({ isRoot }: { isRoot: boolean }) {
   const [candidates, setCandidates] = React.useState<MemberCandidate[]>([])
   /** superadmin 能否管权限组（默认关，root 可切换） */
   const [superadminCanManage, setSuperadminCanManage] = React.useState(false)
+  /** admin 是否只看到自己有权限的侧边栏栏目（默认开，root 可切换） */
+  const [sidebarOnlyPermitted, setSidebarOnlyPermitted] = React.useState(true)
   const [toggleBusy, setToggleBusy] = React.useState(false)
 
   const load = React.useCallback(async () => {
@@ -501,6 +503,7 @@ export function AdminPermissionsPanel({ isRoot }: { isRoot: boolean }) {
       setPermissionGroups(pg.groups)
       if (settings) {
         setSuperadminCanManage(settings.settings.superadmin_manage_permission_groups === "1")
+        setSidebarOnlyPermitted(settings.settings.admin_sidebar_only_permitted !== "0")
       }
     } catch (err) {
       toast.error(errMsg(err, t("adm.perm.loadFailed")))
@@ -518,6 +521,19 @@ export function AdminPermissionsPanel({ isRoot }: { isRoot: boolean }) {
     try {
       await adminApi.updateSettings({ superadmin_manage_permission_groups: v ? "1" : "0" })
       setSuperadminCanManage(v)
+      toast.success(t("adm.perm.saved"))
+    } catch (err) {
+      toast.error(errMsg(err, t("adm.perm.saveFailed")))
+    } finally {
+      setToggleBusy(false)
+    }
+  }
+
+  const toggleSidebarOnlyPermitted = async (v: boolean) => {
+    setToggleBusy(true)
+    try {
+      await adminApi.updateSettings({ admin_sidebar_only_permitted: v ? "1" : "0" })
+      setSidebarOnlyPermitted(v)
       toast.success(t("adm.perm.saved"))
     } catch (err) {
       toast.error(errMsg(err, t("adm.perm.saveFailed")))
@@ -556,27 +572,52 @@ export function AdminPermissionsPanel({ isRoot }: { isRoot: boolean }) {
   return (
     <div className="space-y-6">
       {isRoot && (
-        <div className="flex items-center justify-between rounded-lg border px-3 py-2.5">
-          <div className="text-sm">
-            <div className="font-medium">{t("adm.perm.superadminToggle")}</div>
-            <div className="text-xs text-muted-foreground">{t("adm.perm.superadminToggleHint")}</div>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between rounded-lg border px-3 py-2.5">
+            <div className="text-sm">
+              <div className="font-medium">{t("adm.perm.superadminToggle")}</div>
+              <div className="text-xs text-muted-foreground">{t("adm.perm.superadminToggleHint")}</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={superadminCanManage}
+              disabled={toggleBusy}
+              onClick={() => void toggleSuperadminCanManage(!superadminCanManage)}
+              className={cn(
+                "relative h-6 w-11 rounded-full transition-colors",
+                superadminCanManage ? "bg-primary" : "bg-muted-foreground/30"
+              )}
+            >
+              <span
+                className="absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all"
+                style={{ left: superadminCanManage ? "22px" : "2px" }}
+              />
+            </button>
           </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={superadminCanManage}
-            disabled={toggleBusy}
-            onClick={() => void toggleSuperadminCanManage(!superadminCanManage)}
-            className={cn(
-              "relative h-6 w-11 rounded-full transition-colors",
-              superadminCanManage ? "bg-primary" : "bg-muted-foreground/30"
-            )}
-          >
-            <span
-              className="absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all"
-              style={{ left: superadminCanManage ? "22px" : "2px" }}
-            />
-          </button>
+
+          <div className="flex items-center justify-between rounded-lg border px-3 py-2.5">
+            <div className="text-sm">
+              <div className="font-medium">{t("adm.perm.sidebarOnlyToggle")}</div>
+              <div className="text-xs text-muted-foreground">{t("adm.perm.sidebarOnlyToggleHint")}</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={sidebarOnlyPermitted}
+              disabled={toggleBusy}
+              onClick={() => void toggleSidebarOnlyPermitted(!sidebarOnlyPermitted)}
+              className={cn(
+                "relative h-6 w-11 rounded-full transition-colors",
+                sidebarOnlyPermitted ? "bg-primary" : "bg-muted-foreground/30"
+              )}
+            >
+              <span
+                className="absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all"
+                style={{ left: sidebarOnlyPermitted ? "22px" : "2px" }}
+              />
+            </button>
+          </div>
         </div>
       )}
 
@@ -605,7 +646,41 @@ export function AdminPermissionsPanel({ isRoot }: { isRoot: boolean }) {
                   {t("adm.perm.groupMeta", { n: g.memberCount, m: g.scope.length })}
                 </span>
               </div>
-              <div className="mt-2 flex gap-1.5">
+
+              {/* 图形化成员列表：首字母头像 + 用户名；自定义覆盖的标星号 */}
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {g.members.length === 0 ? (
+                  <span className="text-xs text-muted-foreground">{t("adm.perm.noMembers")}</span>
+                ) : (
+                  g.members.map((m) => (
+                    <span
+                      key={m.username}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs",
+                        m.custom
+                          ? "border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/40"
+                          : ""
+                      )}
+                      title={m.custom ? t("adm.perm.customMember") : undefined}
+                    >
+                      <span
+                        className={cn(
+                          "flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-medium",
+                          m.custom
+                            ? "bg-amber-400 text-amber-950"
+                            : "bg-primary/10 text-primary"
+                        )}
+                      >
+                        {m.username[0]?.toUpperCase()}
+                      </span>
+                      {m.username}
+                      {m.custom && <span className="text-amber-600 dark:text-amber-300">*</span>}
+                    </span>
+                  ))
+                )}
+              </div>
+
+              <div className="mt-3 flex gap-1.5">
                 <Button size="sm" variant="outline" onClick={() => { setEditor(g); setEditorOpen(true) }}>
                   <Pencil className="mr-1 h-3 w-3" />
                   {t("common.edit")}

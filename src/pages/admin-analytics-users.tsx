@@ -47,6 +47,7 @@ const FEATURE_COLORS: Record<string, string> = {
 const ROLE_LABELS: Record<string, string> = {
   user: "au2.role.user",
   admin: "au.role.admin",
+  superadmin: "au.role.superadmin",
   root: "au.role.root",
 }
 const STATUS_LABELS: Record<string, string> = {

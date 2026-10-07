@@ -15,6 +15,10 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),
+      // jsmediatags 的 ReactNativeFileReader.js 顶部 import RNFS from "react-native-fs"，
+      // 浏览器永远不走到那个 reader，但 Rolldown 打包时会解析这个 import 而报错。
+      // alias 到空 shim 兜底（详见 src/shims/react-native-fs.ts）。
+      "react-native-fs": path.resolve(import.meta.dirname, "./src/shims/react-native-fs.ts"),
     },
   },
   server: {

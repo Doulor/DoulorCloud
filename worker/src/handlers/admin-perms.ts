@@ -9,7 +9,7 @@
  */
 import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
-import { requireAdmin } from "./admin"
+import { requireAdmin, resolveAdminScope } from "./admin"
 import { isPrivileged } from "../auth"
 import { getSettingBool, audit } from "../settings"
 import {
@@ -50,10 +50,27 @@ async function requireGroupManager(env: Env, request: Request) {
   throw new ApiError(403, "只有站长或超级管理员可以管理权限组", "FORBIDDEN")
 }
 
-/** GET /api/admin/permissions/tree —— 权限树（供前端渲染勾选界面） */
+/** GET /api/admin/permissions/tree —— 权限树 + 当前用户权限（供前端渲染勾选界面 + 侧边栏过滤） */
 export async function getPermissionTree(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request)
-  return json({ groups: ADMIN_GROUPS, categories: ADMIN_PERMISSIONS })
+  const admin = await requireAdmin(env, request)
+  let myScope: string[]
+  if (isPrivileged(admin.role)) {
+    // root / superadmin 全权：返回全部叶子 key
+    myScope = []
+    for (const cat of ADMIN_PERMISSIONS) {
+      if (cat.children && cat.children.length > 0) myScope.push(...cat.children.map((l) => l.key))
+      else myScope.push(cat.key)
+    }
+  } else {
+    myScope = Array.from(await resolveAdminScope(env, admin))
+  }
+  const sidebarOnly = await getSettingBool(env, "admin_sidebar_only_permitted")
+  return json({
+    groups: ADMIN_GROUPS,
+    categories: ADMIN_PERMISSIONS,
+    myScope,
+    sidebarOnlyPermitted: sidebarOnly,
+  })
 }
 
 /** GET /api/admin/permission-groups —— 列出权限组（含成员数） */
@@ -64,11 +81,26 @@ export async function listPermissionGroups(env: Env, request: Request): Promise<
             (SELECT COUNT(*) FROM users u WHERE u.admin_role_id = g.id) AS member_count
        FROM admin_roles g ORDER BY g.created_at ASC`
   ).all<{ id: string; name: string; scope: string; created_at: string; member_count: number }>()
+
+  // 一次性取所有组的所有成员（用户名 + 是否自定义覆盖），前端图形化展示
+  const members = await env.DB.prepare(
+    `SELECT admin_role_id, username, nickname, admin_scope FROM users
+      WHERE admin_role_id IS NOT NULL AND role IN ('user','admin')`
+  ).all<{ admin_role_id: string; username: string; nickname: string | null; admin_scope: string | null }>()
+  const memberMap = new Map<string, { username: string; custom: boolean }[]>()
+  for (const m of members.results ?? []) {
+    const custom = Boolean(m.admin_scope && m.admin_scope.trim() !== "" && m.admin_scope.trim() !== "[]")
+    const list = memberMap.get(m.admin_role_id) ?? []
+    list.push({ username: m.username, custom })
+    memberMap.set(m.admin_role_id, list)
+  }
+
   const groups = (rows.results ?? []).map((g) => ({
     id: g.id,
     name: g.name,
     scope: parseAdminScope(g.scope) ? Array.from(parseAdminScope(g.scope)) : [],
     memberCount: g.member_count ?? 0,
+    members: memberMap.get(g.id) ?? [],
     createdAt: g.created_at,
   }))
   return json({ groups })

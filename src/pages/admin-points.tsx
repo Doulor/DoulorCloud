@@ -77,6 +77,7 @@ const DELIVERY_LABELS: Record<PointDelivery, string> = {
   feature: "ap.dlv.feature",
   subscription: "ap.dlv.subscription",
   invite_quota: "ap.dlv.inviteQuota",
+  checkin_makeup: "ap.dlv.checkinMakeup",
   code: "ap.dlv.code",
   content: "ap.dlv.content",
 }
@@ -88,6 +89,7 @@ const DELIVERY_HINTS: Record<PointDelivery, string> = {
   feature: "ap.hint.feature",
   subscription: "ap.hint.subscription",
   invite_quota: "ap.hint.inviteQuota",
+  checkin_makeup: "ap.hint.checkinMakeup",
   code: "ap.hint.code",
   content: "ap.hint.content",
 }
@@ -350,6 +352,8 @@ function payloadOf(f: FormState): PointProductPayload {
     deliveryParams = { planId: Math.trunc(Number(f.planId) || 0) }
   } else if (f.delivery === "invite_quota") {
     deliveryParams = { count: Math.trunc(Number(f.inviteCount) || 0) }
+  } else if (f.delivery === "checkin_makeup") {
+    deliveryParams = { count: Math.trunc(Number(f.inviteCount) || 0) }
   } else if (f.delivery === "content") {
     deliveryParams = { content: f.content }
   }
@@ -502,6 +506,8 @@ function ShopTab() {
   const [cfgEnabled, setCfgEnabled] = React.useState(true)
   const [cfgRatio, setCfgRatio] = React.useState("1")
   const [cfgDaily, setCfgDaily] = React.useState("5")
+  /** 用户商城：卖家交付后多少天自动确认收货（0 = 关闭） */
+  const [cfgAutoConfirm, setCfgAutoConfirm] = React.useState("7")
   const [cfgBusy, setCfgBusy] = React.useState(false)
   /** 「兑换中转站余额」这一行的编辑弹窗 */
   const [redeemOpen, setRedeemOpen] = React.useState(false)
@@ -596,6 +602,7 @@ function ShopTab() {
           setCfgEnabled(res.config.enabled)
           setCfgRatio(String(res.config.yuanPerPoint))
           setCfgDaily(String(res.config.dailyLimit))
+          setCfgAutoConfirm(String(res.config.autoConfirmDays ?? 7))
           // `?? []` 是防御性的：老版本后端不下发这个字段，直接 .map 会让整页白屏
           setDonationList(res.donationRewards ?? [])
           setDonationDraft(draftOf(res.donationRewards ?? []))
@@ -658,12 +665,18 @@ function ShopTab() {
       toast.error(t("ap.err.dailyLimitNegative"))
       return
     }
+    const autoConfirm = Math.trunc(Number(cfgAutoConfirm))
+    if (!Number.isFinite(autoConfirm) || autoConfirm < 0 || autoConfirm > 90) {
+      toast.error(t("ap.err.autoConfirmRange"))
+      return
+    }
     setCfgBusy(true)
     try {
       const res = await adminPointsApi.saveConfig({
         enabled: cfgEnabled,
         yuanPerPoint: ratio,
         dailyLimit: daily,
+        autoConfirmDays: autoConfirm,
       })
       toast.success(t("ap.toast.rateSaved", { v: fmtMoney(res.config.yuanPerPoint) }))
       setRedeemOpen(false)
@@ -804,6 +817,10 @@ function ShopTab() {
     }
     if (payload.delivery === "invite_quota" && !(Number(payload.deliveryParams?.count) > 0)) {
       toast.error(t("ap.err.inviteCountRequired"))
+      return
+    }
+    if (payload.delivery === "checkin_makeup" && !(Number(payload.deliveryParams?.count) > 0)) {
+      toast.error(t("ap.err.makeupCountRequired"))
       return
     }
     if (payload.delivery === "content" && !payload.deliveryParams?.content?.trim()) {
@@ -2007,6 +2024,17 @@ function ShopTab() {
                 {t("ap.redeemDailyHint")}
               </p>
             </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="pointsAutoConfirm">{t("ap.autoConfirmLabel")}</Label>
+              <Input
+                id="pointsAutoConfirm"
+                inputMode="numeric"
+                value={cfgAutoConfirm}
+                onChange={(e) => setCfgAutoConfirm(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">{t("ap.autoConfirmHint")}</p>
+            </div>
           </div>
 
           <DialogFooter>
@@ -2311,9 +2339,13 @@ function ShopTab() {
               </div>
             )}
 
-            {form.delivery === "invite_quota" && (
+            {(form.delivery === "invite_quota" || form.delivery === "checkin_makeup") && (
               <div className="space-y-2">
-                <Label htmlFor="pdInvite">{t("ap.inviteCountLabel")}</Label>
+                <Label htmlFor="pdInvite">
+                  {form.delivery === "checkin_makeup"
+                    ? t("ap.makeupCountLabel")
+                    : t("ap.inviteCountLabel")}
+                </Label>
                 <Input
                   id="pdInvite"
                   inputMode="numeric"
@@ -2322,7 +2354,9 @@ function ShopTab() {
                   onChange={(e) => setForm((f) => ({ ...f, inviteCount: e.target.value }))}
                 />
                 <p className="text-xs text-muted-foreground">
-                  {t("ap.inviteCountHint")}
+                  {form.delivery === "checkin_makeup"
+                    ? t("ap.makeupCountHint")
+                    : t("ap.inviteCountHint")}
                 </p>
               </div>
             )}

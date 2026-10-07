@@ -58,3 +58,19 @@ dist-new/
 .toports.txt
 .markports.txt
 %SystemDrive%/
+
+# ⚠️ 运营数据 / 用户名单 —— 本仓库是**公开**的，这些绝不能提交
+# （2026-10-07 加固：当时工作区里躺着 6 个用户名单 + 域名映射，差点被 git add -A 带走）
+.sp.json
+*.csv
+QQ群公告-*.txt
+未贡献workbuddy*.txt
+用站长带ai邀请码注册的用户.txt
+中转站用户名单*.csv
+
+# 内容文案（写给站长自己发的，不是代码）
+活动宣传公告.md
+活动题目总览.md
+
+# 验证产物目录
+.verify-dist*/

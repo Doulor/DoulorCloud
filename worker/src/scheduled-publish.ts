@@ -13,7 +13,7 @@
  * 所以「每分钟跑一次」和「被重复调用」都是安全的。
  */
 import { publishAnnouncementNow } from "./handlers/announcements"
-import { activateScheduledEvent, drawDueLotteries } from "./handlers/events"
+import { activateScheduledEvent, drawDueLotteries, drawDueVotes } from "./handlers/events"
 import type { Env } from "./env"
 
 /** 单次最多处理多少条，避免一次 cron 跑太久（剩下的下一次继续） */
@@ -24,6 +24,8 @@ export interface ScheduledPublishResult {
   events: number
   /** 到点自动开奖的抽奖活动数 */
   lotteries: number
+  /** 到点自动开奖的投票活动数（仅「多数/少数得奖」那一档需要开奖） */
+  votes: number
   errors: number
 }
 
@@ -102,5 +104,17 @@ export async function processScheduledPublishes(
     console.error("到点开奖扫描失败:", err)
   }
 
-  return { announcements, events, lotteries, errors }
+  // 4) 到点自动开奖：投票活动（仅「多数/少数得奖」那一档）。
+  // 「参与即可获奖」和「投票后立刻结算」在投票时就发完了，drawDueVotes 内部会跳过。
+  let votes = 0
+  try {
+    const r = await drawDueVotes(env)
+    votes = r.drawn
+    errors += r.errors
+  } catch (err) {
+    errors++
+    console.error("投票到点开奖扫描失败:", err)
+  }
+
+  return { announcements, events, lotteries, votes, errors }
 }

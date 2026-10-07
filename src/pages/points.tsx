@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Coins,
   Copy,
+  Flame,
   Loader2,
   Package,
   Pencil,
@@ -142,9 +143,48 @@ function canEscalateAfterSale(o: PointOrder): boolean {
   return o.afterSaleStatus === "requested" || o.afterSaleStatus === "rejected"
 }
 
+/**
+ * 买家能不能「拒收」（2026-10-06 站长要求）。
+ *
+ * 卖家点了「已交付」但买家实际没收到 / 货不对板时，一键直达平台介入，
+ * 不用先向卖家申请退款（卖家自己声称交付了，让他审自己的退款没意义）。
+ * 只对**用户商品**订单（有卖家）生效；官方商品走「申请售后」。
+ */
+function canRejectDelivery(o: PointOrder): boolean {
+  if (o.sellerId === null) return false
+  if (o.status !== "delivered") return false
+  const s = o.afterSaleStatus
+  return s === null || s === "rejected" || s === "closed"
+}
+
 /** 买家能不能自己撤销（已经申请平台介入后要等客服判定，不能自撤） */
 function canWithdrawAfterSale(o: PointOrder): boolean {
   return o.afterSaleStatus === "requested"
+}
+
+/** 售后对话框三种模式各自的文案 key（申请退款 / 卖家拒绝 / 买家拒收） */
+const AFTER_SALE_DIALOG: Record<
+  "request" | "reject" | "rejectDelivery",
+  { title: string; desc: string; label: string; placeholder: string }
+> = {
+  request: {
+    title: "pt.afterSale.request",
+    desc: "pt.afterSale.requestDesc",
+    label: "pt.afterSale.reasonLabel",
+    placeholder: "pt.afterSale.reasonPlaceholder",
+  },
+  reject: {
+    title: "pt.afterSale.reject",
+    desc: "pt.afterSale.rejectDesc",
+    label: "pt.afterSale.rejectNote",
+    placeholder: "pt.afterSale.rejectPlaceholder",
+  },
+  rejectDelivery: {
+    title: "pt.afterSale.rejectDelivery",
+    desc: "pt.afterSale.rejectDeliveryDesc",
+    label: "pt.afterSale.reasonLabel",
+    placeholder: "pt.afterSale.rejectDeliveryPlaceholder",
+  },
 }
 
 /** 自己上架商品的审核状态 → 标签 */
@@ -723,7 +763,9 @@ export default function PointsPage() {
 
   // 售后（退款）：买家「申请退款」与卖家「拒绝并说明理由」共用一个对话框，用 mode 区分
   const [afterSaleTarget, setAfterSaleTarget] = React.useState<PointOrder | null>(null)
-  const [afterSaleMode, setAfterSaleMode] = React.useState<"request" | "reject">("request")
+  const [afterSaleMode, setAfterSaleMode] = React.useState<
+    "request" | "reject" | "rejectDelivery"
+  >("request")
   const [afterSaleText, setAfterSaleText] = React.useState("")
   const [afterSaleBusy, setAfterSaleBusy] = React.useState(false)
   const handleCoverPick = async (file: File | undefined) => {
@@ -894,12 +936,19 @@ export default function PointsPage() {
     setAfterSaleTarget(o)
   }
 
-  /** 提交对话框 —— 买家申请 / 卖家拒绝共用 */
+  /** 买家：打开「拒收」对话框（没收到货 / 货不对板 → 直达平台介入） */
+  const openRejectDelivery = (o: PointOrder) => {
+    setAfterSaleMode("rejectDelivery")
+    setAfterSaleText("")
+    setAfterSaleTarget(o)
+  }
+
+  /** 提交对话框 —— 买家申请 / 卖家拒绝 / 买家拒收 共用 */
   const submitAfterSale = async () => {
     const o = afterSaleTarget
     if (!o) return
     const text = afterSaleText.trim()
-    if (afterSaleMode === "request" && text.length < 4) {
+    if ((afterSaleMode === "request" || afterSaleMode === "rejectDelivery") && text.length < 4) {
       toast.error(t("pt.afterSale.reasonTooShort"))
       return
     }
@@ -912,6 +961,9 @@ export default function PointsPage() {
       if (afterSaleMode === "request") {
         await pointsApi.requestAfterSale(o.id, text)
         toast.success(t("pt.toast.afterSaleRequested"))
+      } else if (afterSaleMode === "rejectDelivery") {
+        await pointsApi.rejectOrder(o.id, text)
+        toast.success(t("pt.toast.rejected"))
       } else {
         await pointsApi.sellerResolveAfterSale(o.id, false, text)
         toast.success(t("pt.toast.afterSaleRejected"))
@@ -1040,8 +1092,29 @@ export default function PointsPage() {
   const userProducts: PointProduct[] = data?.userProducts ?? []
   /** 用户商城的分类筛选：all / it / other */
   const [shopCat, setShopCat] = React.useState<ProductCategory | "all">("all")
-  const shownUserProducts =
-    shopCat === "all" ? userProducts : userProducts.filter((p) => p.category === shopCat)
+  /** 官方商城自己的排序/有货开关（2026-10-05 站长要求：两个商城分开起作用） */
+  const [officialSort, setOfficialSort] = React.useState<"default" | "hot">("default")
+  const [officialStockOnly, setOfficialStockOnly] = React.useState(false)
+  /** 用户商城自己的排序/有货开关 */
+  const [shopSort, setShopSort] = React.useState<"default" | "hot">("default")
+  const [shopStockOnly, setShopStockOnly] = React.useState(false)
+
+  /** 「热度排序 + 只看有货」，官方与用户商城各用各的开关 */
+  const applyControls = (
+    list: PointProduct[],
+    sort: "default" | "hot",
+    stockOnly: boolean
+  ): PointProduct[] => {
+    let out = stockOnly ? list.filter((p) => p.stock === null || p.stock > 0) : list
+    if (sort === "hot") out = [...out].sort((a, b) => b.soldCount - a.soldCount)
+    return out
+  }
+
+  const shownUserProducts = applyControls(
+    shopCat === "all" ? userProducts : userProducts.filter((p) => p.category === shopCat),
+    shopSort,
+    shopStockOnly
+  )
   const sellerOrders: PointOrder[] = data?.sellerOrders ?? []
 
   /** 用户商城的页码：商品变少导致页码越界（如删到只剩 1 页）时自动收回到最后一页 */
@@ -1248,6 +1321,11 @@ export default function PointsPage() {
                       {t("pt.afterSale.request")}
                     </Button>
                   )}
+                  {canRejectDelivery(o) && (
+                    <Button size="sm" variant="outline" onClick={() => openRejectDelivery(o)}>
+                      {t("pt.afterSale.rejectDelivery")}
+                    </Button>
+                  )}
                   {canEscalateAfterSale(o) && (
                     <Button
                       size="sm"
@@ -1444,7 +1522,7 @@ export default function PointsPage() {
                     （2026-10-03 站长要求：原来它是页面底部一整张卡片，太靠下） */}
                 <div ref={tradesBtnRef} className="relative">
                   <Button
-                    variant="outline"
+                    variant="default"
                     size="sm"
                     onClick={() => setTradesMenuOpen((v) => !v)}
                   >
@@ -1513,9 +1591,27 @@ export default function PointsPage() {
 
           {/* 官方商城：兑换也是其中一张卡 */}
           <div>
-            <div className="mb-3 flex items-center gap-2">
+            <div className="mb-3 flex flex-wrap items-center gap-2">
               <ShoppingBag className="h-4 w-4 text-primary" />
               <h2 className="text-base font-semibold">{t("pt.officialShop")}</h2>
+              <div className="ml-auto flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant={officialSort === "hot" ? "default" : "outline"}
+                  onClick={() => setOfficialSort((s) => (s === "hot" ? "default" : "hot"))}
+                >
+                  <Flame className="mr-1.5 h-3.5 w-3.5" />
+                  {t("pt.sortHot")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant={officialStockOnly ? "default" : "outline"}
+                  onClick={() => setOfficialStockOnly((v) => !v)}
+                >
+                  <Package className="mr-1.5 h-3.5 w-3.5" />
+                  {t("pt.inStockOnly")}
+                </Button>
+              </div>
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -1560,7 +1656,7 @@ export default function PointsPage() {
                 </CardContent>
               </Card>
 
-              {data.products.map((p) => (
+              {applyControls(data.products, officialSort, officialStockOnly).map((p) => (
                 <ProductCard key={p.id} product={p} balance={balance} onBuy={setBuyTarget} onDetail={setDetailTarget} />
               ))}
             </div>
@@ -1600,6 +1696,29 @@ export default function PointsPage() {
                   {t(f.label)}
                 </Button>
               ))}
+              <span className="mx-1 hidden w-px self-stretch bg-border sm:block" />
+              <Button
+                size="sm"
+                variant={shopSort === "hot" ? "default" : "outline"}
+                onClick={() => {
+                  setShopPage(1)
+                  setShopSort((s) => (s === "hot" ? "default" : "hot"))
+                }}
+              >
+                <Flame className="mr-1.5 h-3.5 w-3.5" />
+                {t("pt.sortHot")}
+              </Button>
+              <Button
+                size="sm"
+                variant={shopStockOnly ? "default" : "outline"}
+                onClick={() => {
+                  setShopPage(1)
+                  setShopStockOnly((v) => !v)
+                }}
+              >
+                <Package className="mr-1.5 h-3.5 w-3.5" />
+                {t("pt.inStockOnly")}
+              </Button>
             </div>
 
             {userProducts.length === 0 ? (
@@ -1698,36 +1817,18 @@ export default function PointsPage() {
       >
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>
-              {t(afterSaleMode === "request" ? "pt.afterSale.request" : "pt.afterSale.reject")}
-            </DialogTitle>
-            <DialogDescription>
-              {t(
-                afterSaleMode === "request"
-                  ? "pt.afterSale.requestDesc"
-                  : "pt.afterSale.rejectDesc"
-              )}
-            </DialogDescription>
+            <DialogTitle>{t(AFTER_SALE_DIALOG[afterSaleMode].title)}</DialogTitle>
+            <DialogDescription>{t(AFTER_SALE_DIALOG[afterSaleMode].desc)}</DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <Label htmlFor="afterSaleText">
-              {t(
-                afterSaleMode === "request"
-                  ? "pt.afterSale.reasonLabel"
-                  : "pt.afterSale.rejectNote"
-              )}
-            </Label>
+            <Label htmlFor="afterSaleText">{t(AFTER_SALE_DIALOG[afterSaleMode].label)}</Label>
             <Textarea
               id="afterSaleText"
               value={afterSaleText}
               onChange={(e) => setAfterSaleText(e.target.value)}
               maxLength={300}
               rows={3}
-              placeholder={t(
-                afterSaleMode === "request"
-                  ? "pt.afterSale.reasonPlaceholder"
-                  : "pt.afterSale.rejectPlaceholder"
-              )}
+              placeholder={t(AFTER_SALE_DIALOG[afterSaleMode].placeholder)}
             />
             {afterSaleTarget && (
               <p className="text-xs text-muted-foreground">

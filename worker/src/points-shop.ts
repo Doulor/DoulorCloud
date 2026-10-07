@@ -68,6 +68,11 @@ export type ProductDelivery =
   | "feature"
   | "subscription"
   | "invite_quota"
+  /**
+   * 补签卡：购买后给用户累计「补签卡」数量，可在签到页消耗一张补签一次漏签的签到
+   * （2026-10-05 站长要求）。一次性消耗品、可叠加多张，故不允许租用。
+   */
+  | "checkin_makeup"
   /** 卡密/Key：下单时从商品卡密池原子取出一条交付（2026-10-03） */
   | "code"
   /**
@@ -148,7 +153,7 @@ export interface DeliveryParams {
   feature?: Feature
   /** delivery='subscription'：NewAPI 套餐 id（管理员自己填，代码里不写死） */
   planId?: number
-  /** delivery='invite_quota'：增加的邀请码创建额度 */
+  /** delivery='invite_quota' / 'checkin_makeup'：数量（邀请码额度 / 补签卡张数） */
   count?: number
   /** delivery='content'：人人相同的固定交付内容（网盘链接 / 说明 / 通用兑换码） */
   content?: string
@@ -177,6 +182,8 @@ export interface PointProduct {
   dailyLimit: number | null
   /** 今日已售数；与 buyProduct 的每日计数同日期口径（站点时区日），无每日限时恒 0 */
   dailySold: number
+  /** 累计售出（delivered + settled 订单数）——「按热度排序」用 */
+  soldCount: number
   /** 每人限购件数；null = 不限 */
   perUserLimit: number | null
   delivery: ProductDelivery
@@ -305,6 +312,8 @@ const MAX_PER_USER_LIMIT = 10_000
 const MAX_PLAN_ID = 1_000_000
 /** 单件可发放的邀请码创建额度上限 */
 const MAX_INVITE_QUOTA = 1_000
+/** 补签卡单件最多发多少张（防手滑写个天文数字） */
+const MAX_MAKEUP_CARDS = 100
 /**
  * 「统一内容」交付的内容长度上限（字符）。
  *
@@ -334,6 +343,7 @@ const DELIVERIES: readonly ProductDelivery[] = [
   "feature",
   "subscription",
   "invite_quota",
+  "checkin_makeup",
   "code",
   "content",
 ]
@@ -408,6 +418,9 @@ function parseDeliveryParams(
     if (delivery === "invite_quota" && Number.isInteger(Number(o.count)) && Number(o.count) > 0) {
       out.count = Number(o.count)
     }
+    if (delivery === "checkin_makeup" && Number.isInteger(Number(o.count)) && Number(o.count) > 0) {
+      out.count = Number(o.count)
+    }
     if (delivery === "content" && typeof o.content === "string" && o.content.trim()) {
       out.content = o.content.slice(0, MAX_DELIVERY_CONTENT_LEN)
     }
@@ -432,6 +445,8 @@ function rowToProduct(r: Record<string, unknown>): PointProduct {
     dailyLimit: r.daily_limit == null ? null : Number(r.daily_limit),
     /** 今日已售数（不限量商品恒 0）—— 与 buyProduct 的每日计数同日期口径 */
     dailySold: Number(r.daily_sold ?? 0),
+    /** 累计售出（delivered + settled 的订单数）——「按热度排序」用 */
+    soldCount: Number(r.sold_count ?? 0),
     perUserLimit: r.per_user_limit == null ? null : Number(r.per_user_limit),
     delivery,
     quotaYuan: r.quota_yuan == null ? null : Number(r.quota_yuan),
@@ -625,6 +640,16 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
       )
     }
     deliveryParams = { count: n }
+  } else if (delivery === "checkin_makeup") {
+    const n = Number(params.count)
+    if (!Number.isInteger(n) || n <= 0 || n > MAX_MAKEUP_CARDS) {
+      throw new ApiError(
+        400,
+        `补签卡数量需为 1 ~ ${MAX_MAKEUP_CARDS} 的整数`,
+        "INVALID_INPUT"
+      )
+    }
+    deliveryParams = { count: n }
   } else if (delivery === "content") {
     // 统一内容：必须非空（空内容 = 用户花积分买到空气），并限制长度。
     // 换行保留（网盘链接常带说明，可能多行），只做首尾裁剪。
@@ -743,7 +768,9 @@ export async function listProducts(
     // `(category = 'other')` 在 SQLite 里求值为 0/1，升序即「非 other 在前」。
     `SELECT point_products.*,
             COALESCE((SELECT sold FROM point_product_daily_sales
-                       WHERE product_id = point_products.id AND date = ?), 0) AS daily_sold
+                       WHERE product_id = point_products.id AND date = ?), 0) AS daily_sold,
+            (SELECT COUNT(*) FROM point_orders
+              WHERE product_id = point_products.id AND status IN ('delivered', 'settled')) AS sold_count
        FROM point_products ${where}
       ORDER BY (category = 'other') ASC, sort DESC, created_at DESC LIMIT ?`
   )
@@ -764,7 +791,9 @@ export async function getProduct(env: Env, id: string): Promise<PointProduct | n
   const row = await env.DB.prepare(
     `SELECT point_products.*,
             COALESCE((SELECT sold FROM point_product_daily_sales
-                       WHERE product_id = point_products.id AND date = ?), 0) AS daily_sold
+                       WHERE product_id = point_products.id AND date = ?), 0) AS daily_sold,
+            (SELECT COUNT(*) FROM point_orders
+              WHERE product_id = point_products.id AND status IN ('delivered', 'settled')) AS sold_count
        FROM point_products WHERE id = ?`
   )
     .bind(day, id)
@@ -831,7 +860,7 @@ export async function createProduct(env: Env, raw: unknown): Promise<PointProduc
   )
     .bind(...productBindings(id, input, now))
     .run()
-  return { id, ...input, reviewNote: null, reviewedAt: now, createdAt: now, updatedAt: now, dailySold: 0 }
+  return { id, ...input, reviewNote: null, reviewedAt: now, createdAt: now, updatedAt: now, dailySold: 0, soldCount: 0 }
 }
 
 /**
@@ -998,7 +1027,7 @@ export async function createUserProduct(
   )
     .bind(...productBindings(id, withOwner, now))
     .run()
-  return { id, ...withOwner, reviewNote: null, reviewedAt: null, createdAt: now, updatedAt: now, dailySold: 0 }
+  return { id, ...withOwner, reviewNote: null, reviewedAt: null, createdAt: now, updatedAt: now, dailySold: 0, soldCount: 0 }
 }
 
 /**
@@ -1024,8 +1053,8 @@ export async function updateUserProduct(
   await env.DB.prepare(
     `UPDATE point_products SET
        name = ?, description = ?, image_url = ?, icon = ?, price = ?, stock = ?,
-       per_user_limit = NULL, delivery = 'manual', quota_yuan = NULL,
-       delivery_params = NULL, billing_mode = ?, rental_days = ?,
+       per_user_limit = NULL, delivery = ?, quota_yuan = NULL,
+       delivery_params = ?, billing_mode = ?, rental_days = ?,
        enabled = ?, sort = 0, category = ?,
        review_status = 'pending', review_note = NULL, reviewed_at = NULL,
        updated_at = ?
@@ -1038,6 +1067,8 @@ export async function updateUserProduct(
       input.icon,
       input.price,
       input.stock,
+      input.delivery,
+      input.deliveryParams ? JSON.stringify(input.deliveryParams) : null,
       input.billingMode,
       input.rentalDays,
       input.enabled ? 1 : 0,
@@ -1526,6 +1557,20 @@ async function deliverAuto(
       return { summary: `已自动增加 ${count} 个邀请码创建额度` }
     }
 
+    case "checkin_makeup": {
+      const count = product.deliveryParams?.count
+      if (!count) throw new Error("商品未配置补签卡数量")
+      await env.DB.prepare(
+        `UPDATE users
+            SET checkin_makeup_cards = COALESCE(checkin_makeup_cards, 0) + ?,
+                updated_at = ?
+          WHERE id = ?`
+      )
+        .bind(count, new Date().toISOString(), userId)
+        .run()
+      return { summary: `已获得 ${count} 张补签卡` }
+    }
+
     case "code": {
       // 卡密交付（用户反馈 a977d1cf）：原子取出一条未使用的卡密并标记占用。
       // 用 UPDATE ... WHERE id = (SELECT ... LIMIT 1) RETURNING code —— 单语句完成
@@ -1656,6 +1701,9 @@ export async function buyProduct(
     throw new ApiError(500, "该商品配置有误，请联系管理员", "PRODUCT_MISCONFIGURED")
   }
   if (product.delivery === "invite_quota" && !product.deliveryParams?.count) {
+    throw new ApiError(500, "该商品配置有误，请联系管理员", "PRODUCT_MISCONFIGURED")
+  }
+  if (product.delivery === "checkin_makeup" && !product.deliveryParams?.count) {
     throw new ApiError(500, "该商品配置有误，请联系管理员", "PRODUCT_MISCONFIGURED")
   }
   // 卡密池空了要在扣分**之前**拦住（deliverAuto 也能拦，但那已经扣过分、
@@ -2177,6 +2225,62 @@ export async function adminSettleOrder(
   return settleEscrow(env, order, adminId, "管理员结算")
 }
 
+/**
+ * 自动确认收货（2026-10-06 站长要求）。
+ *
+ * 背景：卖家点「已交付」后，买家可以一直不点「确认收货」—— 积分就永远卡在托管里、
+ * 卖家拿不到，订单也一直悬着。这里由定时任务兜底：**交付满 N 天**的订单自动结算给卖家，
+ * 与主流电商一致。
+ *
+ * 天数由设置项 `shop_auto_confirm_days` 控制（<=0 = 关闭自动收货）。
+ *
+ * 只挑**没有售后在处理**的单子（after_sale_status 为空 / 已被拒 / 已关闭）——
+ * 正在争议的订单绝不能被自动结算掉。
+ *
+ * 用 limit 分批，避免一次扫出太多把定时任务的子请求额度打光；单笔失败只记日志不中断。
+ */
+export async function autoConfirmDeliveries(env: Env): Promise<number> {
+  const days = Number(await getSetting(env, "shop_auto_confirm_days")) || 0
+  if (days <= 0) return 0
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+  const rows = await env.DB.prepare(
+    `SELECT id FROM point_orders
+      WHERE status = 'delivered' AND seller_id IS NOT NULL
+        AND delivered_at IS NOT NULL AND delivered_at <= ?
+        AND (after_sale_status IS NULL OR after_sale_status IN ('rejected', 'closed'))
+      ORDER BY delivered_at ASC LIMIT 200`
+  )
+    .bind(cutoff)
+    .all<{ id: string }>()
+
+  let n = 0
+  for (const row of rows.results ?? []) {
+    const order = await getOrder(env, row.id)
+    if (!order) continue
+    try {
+      await settleEscrow(
+        env,
+        order,
+        order.userId,
+        `系统自动确认收货（卖家交付已满 ${days} 天）`
+      )
+      // settleEscrow 内部只通知卖家，买家这边补一条，免得他一脸懵
+      await notifyOrder(env, order.userId, {
+        event: "settled",
+        title: `已自动确认收货：「${order.productName}」`,
+        body: `卖家交付已满 ${days} 天，系统已自动确认收货，${order.price} 积分已结算给卖家。若你实际没有收到货，请尽快联系管理员。`,
+        orderId: order.id,
+        peer: order.sellerName,
+      })
+      n++
+    } catch (err) {
+      console.error("自动确认收货失败:", order.id, err)
+    }
+  }
+  if (n > 0) console.log(`自动确认收货：本批结算 ${n} 笔`)
+  return n
+}
+
 // ---------------------------------------------------------------- 售后（退款）
 
 /** 售后理由 / 处理意见的长度上限（够说清楚，又不至于把列表撑爆） */
@@ -2424,6 +2528,84 @@ export async function requestAfterSale(
       dedupSuffix,
     })
   }
+
+  const updated = await getOrder(env, order.id)
+  if (!updated) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  return updated
+}
+
+/**
+ * 买家：拒收（2026-10-06 站长要求）。
+ *
+ * 场景：卖家点了「已交付」，但买家其实没收到东西 / 货不对板。原先买家只能先
+ * 「向卖家申请退款」，等卖家处理 —— 可卖家既然自己声称交付了，让他审自己的退款
+ * 没有意义，买家还得多等一轮。所以这里给一条**直达平台介入**的路：
+ * 买家填个理由，订单直接进 `after_sale_status = 'platform'`，由管理员判定。
+ *
+ * 只对**用户商品**订单生效（官方商品本来就走 platform，不需要这步）。
+ */
+export async function rejectDelivery(
+  env: Env,
+  buyerId: string,
+  orderId: string,
+  reason: string
+): Promise<PointOrder> {
+  const order = await getOrder(env, orderId)
+  if (!order) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  if (order.userId !== buyerId) throw new ApiError(403, "这不是你的订单", "FORBIDDEN")
+  if (!order.sellerId) {
+    throw new ApiError(409, "官方商品订单请用「申请售后」提交", "NOT_USER_ORDER")
+  }
+  if (order.status !== "delivered") {
+    throw new ApiError(
+      409,
+      "只有「卖家已交付、你还没确认收货」的订单才能拒收",
+      "NOT_DELIVERED"
+    )
+  }
+  if (afterSaleInProgress(order.afterSaleStatus)) {
+    throw new ApiError(409, "这笔订单已有售后在处理中", "AFTER_SALE_EXISTS")
+  }
+
+  const text = String(reason ?? "").trim().slice(0, MAX_AFTER_SALE_REASON)
+  if (text.length < MIN_AFTER_SALE_REASON) {
+    throw new ApiError(400, `请填写拒收原因（至少 ${MIN_AFTER_SALE_REASON} 个字）`, "INVALID_INPUT")
+  }
+
+  const now = new Date().toISOString()
+  await env.DB.prepare(
+    "UPDATE point_orders SET after_sale_status = 'platform', after_sale_reason = ?, " +
+      "after_sale_requested_at = ?, after_sale_note = NULL, after_sale_resolved_at = NULL " +
+      "WHERE id = ?"
+  )
+    .bind(text, now, order.id)
+    .run()
+
+  await audit(
+    env,
+    buyerId,
+    "points.shop.reject",
+    `${order.username} 拒收订单「${order.productName}」（${order.price} 积分）：${text}`
+  )
+
+  const dedupSuffix = `:reject:${now}`
+  // 通知卖家：买家已拒收、平台将介入
+  if (order.sellerId) {
+    await notifyOrder(env, order.sellerId, {
+      event: "after_sale_requested",
+      title: `买家拒收：「${order.productName}」`,
+      body: `${order.username} 表示没有收到货 / 货不对板，已提交平台介入（理由：${text}）。请等待管理员判定。`,
+      orderId: order.id,
+      dedupSuffix,
+    })
+  }
+  await notifyOrder(env, order.userId, {
+    event: "after_sale_requested",
+    title: `已拒收，平台将介入：「${order.productName}」`,
+    body: `管理员会尽快核实并判定（理由：${text}）。`,
+    orderId: order.id,
+    dedupSuffix,
+  })
 
   const updated = await getOrder(env, order.id)
   if (!updated) throw new ApiError(404, "订单不存在", "NOT_FOUND")

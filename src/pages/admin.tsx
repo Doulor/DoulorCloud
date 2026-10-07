@@ -8,6 +8,7 @@ import {
   Ticket,
   Pencil,
   Plus,
+  ImagePlus,
   Megaphone,
   Database,
   RefreshCw,
@@ -20,6 +21,8 @@ import {
   Network,
   Zap,
   CheckCircle2,
+  Check,
+  Link2,
   XCircle,
   Trash2,
   UserCheck,
@@ -79,6 +82,9 @@ import {
   TooltipProvider,
 } from "@/components/ui/tooltip"
 import { LoadingBlock } from "@/components/loading-block"
+// 投票规则的判断 / 文案映射与用户端共用一份 —— 两处各写一遍迟早会出现
+// 「后台显示多数得奖、用户端显示少数得奖」这种自相矛盾
+import { isInstantVoteRule, VOTE_RULE_LABEL_KEY } from "@/components/event-vote"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -174,6 +180,7 @@ import type {
   EventStatus,
   EventRewardType,
   EventConditionType,
+  EventVoteRewardRule,
   R2Bucket,
   R2BucketsResponse,
   R2Operations,
@@ -195,6 +202,7 @@ import type {
   AdminCli2ApiPool,
   RecommendedTier,
   AttentionCounts,
+  AdminPermCategory,
 } from "@/types"
 import { FEATURE_LABELS } from "@/types"
 import { fmtUid } from "@/lib/format"
@@ -306,6 +314,23 @@ interface EventDraft {
   lotteryPool: string
   /** 抽奖：分配方式（平均分 / 随机分） */
   lotteryMode: "even" | "random"
+  /**
+   * 投票（conditionType = vote）的选项。
+   * ⚠️ 每一项都带一个稳定的 `key`（= 提交时的选项 id），用于 React 列表与
+   * 「改标题不影响已投出的票」—— 选项 id 一旦生成就不随标题变化。
+   */
+  voteOptions: { key: string; label: string; desc: string; image: string }[]
+  /** 投票：获奖规则（七档，见 EventVoteRewardRule） */
+  voteRule: EventVoteRewardRule
+  /**
+   * 「固定选项获奖」指定的那个选项（草稿里存的是选项的 key）。
+   * 仅在 voteRule 是 fixed / instant_fixed 时有意义。
+   */
+  voteFixedOptionId: string
+  /**
+   * true = 不在消息中心「活动推广」里显示、也不广播通知，只能通过链接参与。
+   */
+  promoHidden: boolean
   /** 限量总份数：留空 = 不限量；先到先得，领满即止。抽奖时是「参与人数上限」 */
   maxClaims: string
   /** 定时上线时间（datetime-local）；status=scheduled 时用 */
@@ -333,9 +358,100 @@ function emptyEventDraft(): EventDraft {
     lotteryWinners: "10",
     lotteryPool: "1000",
     lotteryMode: "even",
+    // 默认给两个空选项：投票至少要有 2 个（后端也会拒少于 2 个的配置），
+    // 默认就摆两行能省掉「点新建再加一行」这一步
+    voteOptions: [
+      { key: newOptionKey(), label: "", desc: "", image: "" },
+      { key: newOptionKey(), label: "", desc: "", image: "" },
+    ],
+    voteRule: "all",
+    voteFixedOptionId: "",
+    promoHidden: false,
     maxClaims: "",
     publishAt: "",
   }
+}
+
+/**
+ * 生成投票选项的稳定 id。
+ *
+ * 为什么不用数组下标：选项的 id 会随投票一起落库，中途删掉中间一项会让
+ * 后面所有选项的 id 整体前移，已经投出去的票就对到别的选项上了（计数直接错）。
+ * 用随机串 + 编辑时保持不动，才谈得上「选项改了标题，票还在它名下」。
+ */
+function newOptionKey(): string {
+  return `o${Math.random().toString(36).slice(2, 10)}`
+}
+
+/** 合法的投票获奖规则（与后端 VOTE_REWARD_RULES 一一对应） */
+const VOTE_RULE_VALUES: readonly EventVoteRewardRule[] = [
+  "all",
+  "instant_fixed",
+  "instant_majority",
+  "instant_minority",
+  "fixed",
+  "majority",
+  "minority",
+]
+
+/** 「指定选项获奖」的两档：需要额外选一个获奖选项 */
+function isFixedVoteRule(r: EventVoteRewardRule): boolean {
+  return r === "fixed" || r === "instant_fixed"
+}
+
+/**
+ * 解析投票获奖规则（认不出来的值一律当「参与即可获奖」）。
+ * 用显式列表而不是 `as` 断言 —— 断言会把任意非法字符串当合法值交给后端（保存时才失败），
+ * 这里回落成 all 至少是可见的、不会静默丢配置。
+ */
+function parseVoteRule(v: unknown): EventVoteRewardRule {
+  return typeof v === "string" && (VOTE_RULE_VALUES as readonly string[]).includes(v)
+    ? (v as EventVoteRewardRule)
+    : "all"
+}
+
+/**
+ * 这条投票规则是不是「要等截止后开奖」才出结果。
+ *
+ * 用来决定列表里显不显示「开奖」按钮、徽章标不标「待开奖」：
+ * `all`（参与即可获奖）与三条 `instant_*`（投票后立刻结算）在投票那一刻就结算完了，
+ * 给它们显示开奖按钮等于引导站长去点一个必然报错的操作（后端会拒）。
+ */
+function needsDrawForVote(rule: EventVoteRewardRule): boolean {
+  return rule === "fixed" || rule === "majority" || rule === "minority"
+}
+
+/**
+ * 把活动和库里的投票配置还原成表单草稿。
+ *
+ * ⚠️ 必须**保留原选项 id**：编辑活动时若重新生成 id，已经投出去的票就会指向
+ * 一个不存在的选项 —— 开奖时按「现存选项」过滤，那批票会被静默丢掉（用户
+ * 明明投了却显示未参与）。id 只在新建选项时才生成。
+ *
+ * 少于 2 项时补空行：投票至少要有 2 个选项，否则表单连合法配置都编不出来。
+ */
+function voteOptionsFromParams(
+  params: Record<string, unknown> | null | undefined
+): EventDraft["voteOptions"] {
+  const raw = params?.options
+  const list = Array.isArray(raw) ? raw : []
+  const mapped: EventDraft["voteOptions"] = []
+  for (const item of list) {
+    const o = (item ?? {}) as Record<string, unknown>
+    const label = typeof o.label === "string" ? o.label : ""
+    const id = typeof o.id === "string" && o.id ? o.id : ""
+    if (!label && !id) continue
+    mapped.push({
+      key: id || newOptionKey(),
+      label,
+      desc: typeof o.desc === "string" ? o.desc : "",
+      image: typeof o.image === "string" ? o.image : "",
+    })
+  }
+  while (mapped.length < 2) {
+    mapped.push({ key: newOptionKey(), label: "", desc: "", image: "" })
+  }
+  return mapped
 }
 
 /** ISO → datetime-local 输入框的值（本地时区） */
@@ -366,15 +482,26 @@ function eventDraftToPayload(d: EventDraft): EventPayload {
         ? { count: Number.isFinite(amount) && amount > 0 ? Math.floor(amount) : 2 }
         : d.rewardType === "points"
           ? d.pointsRandom
-            ? // 区间随机：下限至少 1，上限不小于下限（后端还会再校验一遍）
-              {
-                min: Math.max(1, Math.floor(Number(d.rewardMin)) || 1),
-                max: Math.max(
-                  Math.max(1, Math.floor(Number(d.rewardMin)) || 1),
-                  Math.floor(Number(d.rewardMax)) || 1
-                ),
+            ? (() => {
+                // 区间随机：**允许负数**（扣积分），也允许跨越 0。
+                // 只做「空/非数字 → 回落」的兜底，具体合法性（上限不小于下限、
+                // 绝对值上限）交给后端 validatePointsReward 统一判 —— 两边各写一套
+                // 迟早出现「前端放过、后端拒绝」的不一致。
+                const num = (raw: string, fallback: number) =>
+                  raw.trim() !== "" && Number.isFinite(Number(raw))
+                    ? Math.trunc(Number(raw))
+                    : fallback
+                const lo = num(d.rewardMin, 1)
+                const hi = num(d.rewardMax, lo)
+                return { min: lo, max: Math.max(lo, hi) }
+              })()
+            : {
+                // 固定值：允许负数（扣积分）；空/非数字 → 回落 10（与旧行为一致）
+                amount: (() => {
+                  const n = Number(d.rewardAmount)
+                  return d.rewardAmount.trim() !== "" && Number.isFinite(n) ? Math.trunc(n) : 10
+                })(),
               }
-            : { amount: Number.isFinite(amount) && amount > 0 ? Math.floor(amount) : 10 }
           : null
   const conditionParams = isLottery
     ? {
@@ -382,13 +509,29 @@ function eventDraftToPayload(d: EventDraft): EventPayload {
         pool: Math.floor(Number(d.lotteryPool)) || 1,
         mode: d.lotteryMode,
       }
-    : d.conditionType === "has_feature"
-      ? { feature: d.conditionFeature }
-      : d.conditionType === "code"
-        ? { code: d.conditionCode.trim() }
-        : d.conditionType === "github_star"
-          ? { repo: d.conditionRepo.trim() }
-          : null
+    : d.conditionType === "vote"
+      ? {
+          // 只提交填了标题的选项（空行是编辑时的占位，不该进库）；
+          // 后端还会再校验「至少 2 个」并在不满足时拒掉。
+          options: d.voteOptions
+            .filter((o) => o.label.trim())
+            .map((o) => ({
+              id: o.key,
+              label: o.label.trim(),
+              ...(o.desc.trim() ? { desc: o.desc.trim() } : {}),
+              ...(o.image.trim() ? { image: o.image.trim() } : {}),
+            })),
+          rewardRule: d.voteRule,
+          // 「指定选项获奖」必须带上获奖选项；其它规则不提交（避免残留脏值让后端误判）
+          ...(isFixedVoteRule(d.voteRule) ? { fixedOptionId: d.voteFixedOptionId } : {}),
+        }
+      : d.conditionType === "has_feature"
+        ? { feature: d.conditionFeature }
+        : d.conditionType === "code"
+          ? { code: d.conditionCode.trim() }
+          : d.conditionType === "github_star" || d.conditionType === "github_pr"
+            ? { repo: d.conditionRepo.trim() }
+            : null
 
   const maxClaims = d.maxClaims.trim() === "" ? null : Math.floor(Number(d.maxClaims))
   return {
@@ -402,11 +545,13 @@ function eventDraftToPayload(d: EventDraft): EventPayload {
     // 非正数/Nan → null（不限量）
     maxClaims: maxClaims != null && Number.isFinite(maxClaims) && maxClaims >= 1 ? maxClaims : null,
     rewardLabel: d.rewardLabel.trim() || null,
-    // 抽奖固定发积分（后端也会校验，这里是为了提交值自洽）
+    // 抽奖固定发积分（后端也会校验，这里是为了提交值自洽）。
+    // 投票不限奖励类型 —— 站长要求「奖励不一定是积分，做成可选」。
     rewardType: isLottery ? "points" : d.rewardType,
     rewardParams,
     conditionType: d.conditionType,
     conditionParams,
+    promoHidden: d.promoHidden,
   }
 }
 
@@ -436,8 +581,24 @@ const CONDITION_TYPE_OPTIONS: { value: EventConditionType; label: string }[] = [
   { value: "has_feature", label: "adm.cond.feature" },
   // 抽奖：参与只是「报名」，开奖时从报名者里随机抽取中奖者发积分（奖励类型固定为积分）
   { value: "lottery", label: "adm.cond.lottery" },
+  // 投票：给定若干选项，一人一票；奖励规则可选「参与即可获奖 / 多数 / 少数」，
+  // 其中多数与少数又分「投票后立刻按当前票数结算」和「截止后开奖」两种
+  { value: "vote", label: "adm.cond.vote" },
   // 点 star：用户填自己的 GitHub 用户名，服务端去该仓库的 stargazers 名单里核验
   { value: "github_star", label: "adm.cond.githubStar" },
+  // 提交 PR：用户填自己的 GitHub 用户名，服务端核验其有没有给该仓库提过 PR
+  { value: "github_pr", label: "adm.cond.githubPr" },
+]
+
+/** 投票获奖规则的可选项（顺序 = 表单里的展示顺序：先「立刻结算」再「截止后开奖」） */
+const VOTE_RULE_OPTIONS: { value: EventVoteRewardRule; label: string }[] = [
+  { value: "all", label: "vote.rule.all" },
+  { value: "instant_fixed", label: "vote.rule.instantFixed" },
+  { value: "instant_majority", label: "vote.rule.instantMajority" },
+  { value: "instant_minority", label: "vote.rule.instantMinority" },
+  { value: "fixed", label: "vote.rule.fixed" },
+  { value: "majority", label: "vote.rule.majority" },
+  { value: "minority", label: "vote.rule.minority" },
 ]
 
 const EVENT_STATUS_BADGE: Record<EventStatus, "default" | "secondary" | "success" | "outline"> = {
@@ -482,6 +643,11 @@ export default function AdminPage() {
   })
   // 各栏目「待处理」角标（反馈 / 捐献 / 积分 / 活动），与侧边栏「管理」总角标同源
   const [attention, setAttention] = React.useState<AttentionCounts["admin"]>(null)
+
+  // 权限树 + 当前管理员权限，用于「只显示有权限的侧边栏栏目」
+  const [permCategories, setPermCategories] = React.useState<AdminPermCategory[]>([])
+  const [myScope, setMyScope] = React.useState<Set<string> | null>(null)
+  const [sidebarOnlyPermitted, setSidebarOnlyPermitted] = React.useState(false)
 
   const [detail, setDetail] = React.useState<AdminUserDetail | null>(null)
   const [detailUser, setDetailUser] = React.useState<string>("")
@@ -596,6 +762,40 @@ export default function AdminPage() {
   const [claimsEvent, setClaimsEvent] = React.useState<EventItem | null>(null)
   const [claims, setClaims] = React.useState<EventClaim[]>([])
   const [claimsLoading, setClaimsLoading] = React.useState(false)
+  /**
+   * 投票选项配图上传：`voteImgTarget` 记住「这次点的是哪个选项的按钮」。
+   *
+   * 为什么用一个隐藏 input + 记住目标：每个选项都放一个 <input type="file">
+   * 会让 DOM 里堆一批同构控件；共用一个 input、点击前记下目标选项更省，
+   * 代价是必须在选中后立刻清空 value（否则同一个文件再选一次不触发 change）。
+   */
+  const voteImgInputRef = React.useRef<HTMLInputElement>(null)
+  const voteImgTargetRef = React.useRef<string | null>(null)
+  /** 正在上传配图的选项 key（null = 没有上传在进行） */
+  const [voteImgUploading, setVoteImgUploading] = React.useState<string | null>(null)
+  /** 刚复制过链接的活动 id（用于把图标短暂切成「已复制」，2 秒后复原） */
+  const [copiedEventId, setCopiedEventId] = React.useState<string | null>(null)
+
+  /**
+   * 复制某场活动的分享链接（`/activity/<id>`，未登录也能打开）。
+   *
+   * 与用户端卡片上的「分享」是同一个地址。管理端需要它是因为
+   * 「不在活动推广显示」的活动只能靠链接传播 —— 站长得有个地方方便地把链接拿出来。
+   *
+   * 剪贴板 API 在非 https / 无权限时会抛错，此时降级成把链接显示出来让用户手动复制
+   * （与用户端 event card 的处理一致，不要静默失败）。
+   */
+  const copyEventLink = async (ev: EventItem) => {
+    const url = `${window.location.origin}/activity/${ev.id}`
+    try {
+      await navigator.clipboard.writeText(url)
+      setCopiedEventId(ev.id)
+      setTimeout(() => setCopiedEventId((cur) => (cur === ev.id ? null : cur)), 2000)
+      toast.success(t("msg.shareCopied"))
+    } catch {
+      toast.message(t("msg.shareCopyFailed"), { description: url })
+    }
+  }
 
   // R2 多桶管理
   const [r2Data, setR2Data] = React.useState<R2BucketsResponse | null>(null)
@@ -2282,6 +2482,11 @@ export default function AdminPage() {
             lotteryWinners: String(ev.conditionParams?.winners ?? "10"),
             lotteryPool: String(ev.conditionParams?.pool ?? "1000"),
             lotteryMode: ev.conditionParams?.mode === "random" ? "random" : "even",
+            // 投票选项：把库里的 {id,label,desc,image} 灌回草稿（保留原 id，见 helper 注释）
+            voteOptions: voteOptionsFromParams(ev.conditionParams),
+            voteRule: parseVoteRule(ev.conditionParams?.rewardRule),
+            voteFixedOptionId: String(ev.conditionParams?.fixedOptionId ?? ""),
+            promoHidden: ev.promoHidden === true,
             maxClaims: ev.maxClaims != null ? String(ev.maxClaims) : "",
             publishAt: toLocalInput(ev.publishAt),
           }
@@ -2302,6 +2507,22 @@ export default function AdminPage() {
     if (eventDraft.maxClaims.trim() !== "" && !(Number(eventDraft.maxClaims) >= 1)) {
       toast.error(t("adm.95"))
       return
+    }
+    // 投票：至少 2 个填了标题的选项（后端也会拒，这里先给明确提示免得白跑一次）
+    if (eventDraft.conditionType === "vote") {
+      const filled = eventDraft.voteOptions.filter((o) => o.label.trim())
+      if (filled.length < 2) {
+        toast.error(t("vote.adm.errNeedTwo"))
+        return
+      }
+      // 「指定选项获奖」必须真的选一个 —— 漏了后端会 400，但错误信息不如这里直白
+      if (
+        isFixedVoteRule(eventDraft.voteRule) &&
+        !filled.some((o) => o.key === eventDraft.voteFixedOptionId)
+      ) {
+        toast.error(t("vote.adm.errFixedOption"))
+        return
+      }
     }
     setEventBusy(true)
     try {
@@ -2336,25 +2557,42 @@ export default function AdminPage() {
     }
   }
 
-  /** 抽奖开奖：二次确认后调接口（不可撤销，且真发积分） */
+  /** 开奖（抽奖 / 多数少数得奖的投票共用）：二次确认后调接口（不可撤销，且真发奖励） */
   const handleDrawEvent = async (ev: EventItem) => {
     const l = ev.lottery
-    if (!l) return
-    if (
-      !confirm(
-        t("adm.941", { v0: ev.title, v1: ev.claimCount ?? 0 }) +
-          t("adm.942", { v0: Math.min(l.winners, ev.claimCount ?? 0) }) +
-          t("adm.943", { v0: l.pool, v1: l.mode === "even" ? t("adm.944") : t("adm.945") }) +
-          t("adm.946")
-      )
-    ) {
+    const voteDraw = ev.vote && needsDrawForVote(ev.vote.rewardRule)
+    // 既不是抽奖、也不是「要开奖」的投票 → 没有可开的奖（后端也会拒）
+    if (!l && !voteDraw) return
+    const summary = voteDraw
+      ? t("adm.voteDrawConfirm", {
+          v0: ev.title,
+          v1: ev.claimCount ?? 0,
+          v2: ev.vote?.options.length ?? 0,
+        })
+      : t("adm.941", { v0: ev.title, v1: ev.claimCount ?? 0 }) +
+        t("adm.942", { v0: Math.min(l!.winners, ev.claimCount ?? 0) }) +
+        t("adm.943", { v0: l!.pool, v1: l!.mode === "even" ? t("adm.944") : t("adm.945") })
+    if (!confirm(summary + t("adm.946"))) {
       return
     }
     setEventBusy(true)
     try {
       const res = await adminEventApi.draw(ev.id)
+      // 投票还会回报「哪个选项获奖」（平票时是多个），对站长是关键信息
+      const winning =
+        voteDraw && res.winningOptions?.length
+          ? t("adm.voteDrawWinners", {
+              v0: res.winningOptions
+                .map(
+                  (id) =>
+                    ev.vote?.options.find((o) => o.id === id)?.label ?? id
+                )
+                .join(" / "),
+            })
+          : ""
       toast.success(
         t("adm.947", { v0: res.participants, v1: res.winners, v2: res.distributed }) +
+          winning +
           (res.failed > 0 ? t("adm.948", { v0: res.failed }) : "")
       )
       void loadEvents()
@@ -2362,6 +2600,43 @@ export default function AdminPage() {
       toast.error(err instanceof HttpError ? err.message : t("adm.101"))
     } finally {
       setEventBusy(false)
+    }
+  }
+
+  /**
+   * 上传投票选项配图（管理员接口，存 events/ 前缀）。
+   *
+   * 校验放在前端只是为了快速反馈（格式 / 大小），服务端仍会再校验一遍
+   * —— 前端不传图不代表后端可信，这里两处都要有。
+   */
+  const handleVoteImagePick = async (file: File | undefined) => {
+    const target = voteImgTargetRef.current
+    // 先清空，保证「同一个文件再选一次」也能触发 change（见 input 的注释）
+    if (voteImgInputRef.current) voteImgInputRef.current.value = ""
+    voteImgTargetRef.current = null
+    if (!file || !target) return
+    if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type)) {
+      toast.error(t("vote.adm.errImageFormat"))
+      return
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error(t("vote.adm.errImageSize"))
+      return
+    }
+    setVoteImgUploading(target)
+    try {
+      const res = await adminEventApi.uploadImage(file)
+      setEventDraft((d) => ({
+        ...d,
+        voteOptions: d.voteOptions.map((o) =>
+          o.key === target ? { ...o, image: res.url } : o
+        ),
+      }))
+      toast.success(t("vote.adm.imageUploaded"))
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("vote.adm.errImageUpload"))
+    } finally {
+      setVoteImgUploading(null)
     }
   }
 
@@ -2988,6 +3263,43 @@ export default function AdminPage() {
     }
   }, [activeTab])
 
+  // 加载权限树 + 当前管理员权限（侧边栏过滤用；root/superadmin 恒看全部，不拉）
+  React.useEffect(() => {
+    const isPrivileged = user?.role === "root" || user?.role === "superadmin"
+    if (isPrivileged) {
+      setMyScope(null)
+      setSidebarOnlyPermitted(false)
+      return
+    }
+    let cancelled = false
+    adminApi
+      .getPermissionTree()
+      .then((r) => {
+        if (cancelled) return
+        setPermCategories(r.categories)
+        setMyScope(new Set(r.myScope))
+        setSidebarOnlyPermitted(r.sidebarOnlyPermitted)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [user?.role])
+
+  /**
+   * 当前管理员能否看到某个侧边栏栏目。
+   * root/superadmin 恒可见；admin 在「只显示有权限的栏目」开启时，
+   * 只有该栏目对应大类下有任意一个叶子权限在自身白名单里才可见。
+   */
+  const canSeeTab = (tabKey: string): boolean => {
+    if (myScope === null) return true // 全权，或尚未加载
+    if (!sidebarOnlyPermitted) return true
+    const cat = permCategories.find((c) => c.key === tabKey)
+    if (!cat) return true // 无映射的栏目（如权限管理）交给别处的角色判断
+    const leaves = cat.children?.map((l) => l.key) ?? [cat.key]
+    return leaves.some((k) => myScope.has(k))
+  }
+
   /** 切换管理面板 tab：切到对应标签时懒加载该标签的数据 */
   const handleTabChange = (v: string) => {
     setActiveTab(v)
@@ -3056,99 +3368,117 @@ export default function AdminPage() {
             </Link>
 
             <nav className="flex flex-col gap-0.5 lg:overflow-y-auto lg:pr-1">
-              <NavItem active={activeTab === "users"} icon={Users} label={t("adm.214")} onClick={() => handleTabChange("users")} />
+              {canSeeTab("users") && (
+                <NavItem active={activeTab === "users"} icon={Users} label={t("adm.214")} onClick={() => handleTabChange("users")} />
+              )}
               <NavGroup label={t("adm.215")}>
-                <NavItem active={activeTab === "invites"} icon={KeyRound} label={t("adm.216")} onClick={() => handleTabChange("invites")} />
-                <NavItem active={activeTab === "inviteQuotas"} icon={Ticket} label={t("adm.217")} onClick={() => handleTabChange("inviteQuotas")} />
-                <NavItem active={activeTab === "reserved"} icon={ShieldBan} label={t("adm.218")} onClick={() => handleTabChange("reserved")} />
-                <NavItem active={activeTab === "titles"} icon={Medal} label={t("adm.219")} onClick={() => handleTabChange("titles")} />
+                {canSeeTab("invites") && <NavItem active={activeTab === "invites"} icon={KeyRound} label={t("adm.216")} onClick={() => handleTabChange("invites")} />}
+                {canSeeTab("inviteQuotas") && <NavItem active={activeTab === "inviteQuotas"} icon={Ticket} label={t("adm.217")} onClick={() => handleTabChange("inviteQuotas")} />}
+                {canSeeTab("reserved") && <NavItem active={activeTab === "reserved"} icon={ShieldBan} label={t("adm.218")} onClick={() => handleTabChange("reserved")} />}
+                {canSeeTab("titles") && <NavItem active={activeTab === "titles"} icon={Medal} label={t("adm.219")} onClick={() => handleTabChange("titles")} />}
                 {/* 监管：风险账户（自动扫描）+ 封禁申诉；后续风控规则都归这里。
                     角标只数**封禁申诉** —— 风险账户是自动观察名单，没人处理也不该
                     一直挂着角标（站长要求），否则这个数永远不归零。 */}
-                <NavItem
-                  active={activeTab === "moderation"}
-                  icon={ShieldAlert}
-                  label={t("adm.moderation")}
-                  count={attention?.appeals}
-                  onClick={() => handleTabChange("moderation")}
-                />
+                {canSeeTab("moderation") && (
+                  <NavItem
+                    active={activeTab === "moderation"}
+                    icon={ShieldAlert}
+                    label={t("adm.moderation")}
+                    count={attention?.appeals}
+                    onClick={() => handleTabChange("moderation")}
+                  />
+                )}
                 {/* 通知：站长给单个/多个用户发强制已读通知，可选确认前禁用权限 */}
-                <NavItem
-                  active={activeTab === "notices"}
-                  icon={Megaphone}
-                  label={t("adm.notices")}
-                  onClick={() => handleTabChange("notices")}
-                />
+                {canSeeTab("notices") && (
+                  <NavItem
+                    active={activeTab === "notices"}
+                    icon={Megaphone}
+                    label={t("adm.notices")}
+                    onClick={() => handleTabChange("notices")}
+                  />
+                )}
               </NavGroup>
               <NavGroup label={t("adm.220")}>
-                <NavItem active={activeTab === "newapi"} icon={Sparkles} label={t("adm.221")} onClick={() => handleTabChange("newapi")} />
+                {canSeeTab("newapi") && <NavItem active={activeTab === "newapi"} icon={Sparkles} label={t("adm.221")} onClick={() => handleTabChange("newapi")} />}
                 {/* 三条免审核捐献通道（wb2api / cli2api / 商汤）合并在一个选项卡里 */}
-                <NavItem active={activeTab === "wb2api"} icon={Unplug} label={t("adm.222")} onClick={() => handleTabChange("wb2api")} />
-                <NavItem active={activeTab === "r2"} icon={Database} label={t("adm.223")} onClick={() => handleTabChange("r2")} />
+                {canSeeTab("wb2api") && <NavItem active={activeTab === "wb2api"} icon={Unplug} label={t("adm.222")} onClick={() => handleTabChange("wb2api")} />}
+                {canSeeTab("r2") && <NavItem active={activeTab === "r2"} icon={Database} label={t("adm.223")} onClick={() => handleTabChange("r2")} />}
                 {/* 角标 = 待审核的内网穿透申请数（用户提交后等管理员批） */}
-                <NavItem
-                  active={activeTab === "frp"}
-                  icon={Network}
-                  label={t("adm.224")}
-                  count={attention?.frpApplications}
-                  onClick={() => handleTabChange("frp")}
-                />
-                <NavItem active={activeTab === "proxy"} icon={Zap} label={t("adm.225")} onClick={() => handleTabChange("proxy")} />
+                {canSeeTab("frp") && (
+                  <NavItem
+                    active={activeTab === "frp"}
+                    icon={Network}
+                    label={t("adm.224")}
+                    count={attention?.frpApplications}
+                    onClick={() => handleTabChange("frp")}
+                  />
+                )}
+                {canSeeTab("proxy") && <NavItem active={activeTab === "proxy"} icon={Zap} label={t("adm.225")} onClick={() => handleTabChange("proxy")} />}
 
                 {/* 此处刻意**不挂角标**：DNS 合规扫描的发现是「看一眼」的体检报告，
                     不是等你逐条处理的队列（站长要求 2026-10-02 移除）。
                     标签用 dns.* 前缀，避开并发进行的 adm.* 编号 */}
-                <NavItem
-                  active={activeTab === "dns"}
-                  icon={Globe}
-                  label={t("dns.nav")}
-                  onClick={() => handleTabChange("dns")}
-                />
+                {canSeeTab("dns") && (
+                  <NavItem
+                    active={activeTab === "dns"}
+                    icon={Globe}
+                    label={t("dns.nav")}
+                    onClick={() => handleTabChange("dns")}
+                  />
+                )}
               </NavGroup>
               <NavGroup label={t("adm.226")}>
-                <NavItem active={activeTab === "announcements"} icon={Megaphone} label={t("adm.227")} onClick={() => handleTabChange("announcements")} />
-                <NavItem active={activeTab === "funLinks"} icon={Compass} label={t("adm.228")} onClick={() => handleTabChange("funLinks")} />
+                {canSeeTab("announcements") && <NavItem active={activeTab === "announcements"} icon={Megaphone} label={t("adm.227")} onClick={() => handleTabChange("announcements")} />}
+                {canSeeTab("funLinks") && <NavItem active={activeTab === "funLinks"} icon={Compass} label={t("adm.228")} onClick={() => handleTabChange("funLinks")} />}
                 {/* 角标 = 活动奖励里「自动发放失败、要人工发」的条数（见各活动的「领取名单」） */}
-                <NavItem
-                  active={activeTab === "events"}
-                  icon={PartyPopper}
-                  label={t("adm.229")}
-                  count={attention?.eventClaims}
-                  onClick={() => handleTabChange("events")}
-                />
+                {canSeeTab("events") && (
+                  <NavItem
+                    active={activeTab === "events"}
+                    icon={PartyPopper}
+                    label={t("adm.229")}
+                    count={attention?.eventClaims}
+                    onClick={() => handleTabChange("events")}
+                  />
+                )}
                 {/* 「积分」角标 = 待审核商品（不含待处理订单 —— 2026-10-03 站长要求，
                     订单多是等卖家交付/买家确认的正常流程态，不该挂角标虚高） */}
-                <NavItem
-                  active={activeTab === "points"}
-                  icon={Coins}
-                  label={t("adm.230")}
-                  count={attention?.pointProducts ?? 0}
-                  onClick={() => handleTabChange("points")}
-                />
-                <NavItem active={activeTab === "community"} icon={MessagesSquare} label={t("adm.231")} onClick={() => handleTabChange("community")} />
-                <NavItem
-                  active={activeTab === "donations"}
-                  icon={Heart}
-                  label={t("adm.232")}
-                  count={attention?.donations}
-                  onClick={() => handleTabChange("donations")}
-                />
-                <NavItem
-                  active={activeTab === "feedback"}
-                  icon={MessageSquare}
-                  label={t("adm.233")}
-                  count={attention?.feedback}
-                  onClick={() => handleTabChange("feedback")}
-                />
+                {canSeeTab("points") && (
+                  <NavItem
+                    active={activeTab === "points"}
+                    icon={Coins}
+                    label={t("adm.230")}
+                    count={attention?.pointProducts ?? 0}
+                    onClick={() => handleTabChange("points")}
+                  />
+                )}
+                {canSeeTab("community") && <NavItem active={activeTab === "community"} icon={MessagesSquare} label={t("adm.231")} onClick={() => handleTabChange("community")} />}
+                {canSeeTab("donations") && (
+                  <NavItem
+                    active={activeTab === "donations"}
+                    icon={Heart}
+                    label={t("adm.232")}
+                    count={attention?.donations}
+                    onClick={() => handleTabChange("donations")}
+                  />
+                )}
+                {canSeeTab("feedback") && (
+                  <NavItem
+                    active={activeTab === "feedback"}
+                    icon={MessageSquare}
+                    label={t("adm.233")}
+                    count={attention?.feedback}
+                    onClick={() => handleTabChange("feedback")}
+                  />
+                )}
               </NavGroup>
               <NavGroup label={t("adm.234")}>
-                <NavItem active={activeTab === "oauth"} icon={KeyRound} label={t("adm.235")} onClick={() => handleTabChange("oauth")} />
-                <NavItem active={activeTab === "analytics"} icon={BarChart3} label={t("adm.236")} onClick={() => handleTabChange("analytics")} />
-                <NavItem active={activeTab === "cfQuota"} icon={Gauge} label={t("adm.237")} onClick={() => handleTabChange("cfQuota")} />
-                <NavItem active={activeTab === "audit"} icon={ScrollText} label={t("adm.238")} onClick={() => handleTabChange("audit")} />
-                <NavItem active={activeTab === "mail"} icon={Mail} label={t("adm.239")} onClick={() => handleTabChange("mail")} />
-                <NavItem active={activeTab === "settings"} icon={SlidersHorizontal} label={t("adm.240")} onClick={() => handleTabChange("settings")} />
-                <NavItem active={activeTab === "api"} icon={Webhook} label={t("adm.api.tab")} onClick={() => handleTabChange("api")} />
+                {canSeeTab("oauth") && <NavItem active={activeTab === "oauth"} icon={KeyRound} label={t("adm.235")} onClick={() => handleTabChange("oauth")} />}
+                {canSeeTab("analytics") && <NavItem active={activeTab === "analytics"} icon={BarChart3} label={t("adm.236")} onClick={() => handleTabChange("analytics")} />}
+                {canSeeTab("cfQuota") && <NavItem active={activeTab === "cfQuota"} icon={Gauge} label={t("adm.237")} onClick={() => handleTabChange("cfQuota")} />}
+                {canSeeTab("audit") && <NavItem active={activeTab === "audit"} icon={ScrollText} label={t("adm.238")} onClick={() => handleTabChange("audit")} />}
+                {canSeeTab("mail") && <NavItem active={activeTab === "mail"} icon={Mail} label={t("adm.239")} onClick={() => handleTabChange("mail")} />}
+                {canSeeTab("settings") && <NavItem active={activeTab === "settings"} icon={SlidersHorizontal} label={t("adm.240")} onClick={() => handleTabChange("settings")} />}
+                {canSeeTab("api") && <NavItem active={activeTab === "api"} icon={Webhook} label={t("adm.api.tab")} onClick={() => handleTabChange("api")} />}
                 {/* 权限管理：只有 root / superadmin 能进（后端守卫一致） */}
                 {(user?.role === "root" || user?.role === "superadmin") && (
                   <NavItem active={activeTab === "permissions"} icon={ShieldCheck} label={t("adm.perm.tab")} onClick={() => handleTabChange("permissions")} />
@@ -4746,9 +5076,52 @@ export default function AdminPage() {
                           {ev.lottery && (
                             <Badge variant={ev.lottery.drawn ? "secondary" : "default"}>{t("adm.1035", { v0: ev.lottery.drawn ? t("adm.1036") : t("adm.1037"), v1: ev.lottery.winners, v2: ev.lottery.pool, v3: ev.lottery.mode === "even" ? t("adm.1038") : t("adm.1039") })}</Badge>
                           )}
+                          {ev.vote && (
+                            <Badge
+                              variant={
+                                // 「多数/少数得奖」要开奖，没开就标成待开（与抽奖同款视觉）
+                                ev.vote.drawn || !needsDrawForVote(ev.vote.rewardRule)
+                                  ? "secondary"
+                                  : "default"
+                              }
+                            >
+                              {t("adm.voteBadge", {
+                                v0: t(VOTE_RULE_LABEL_KEY[ev.vote.rewardRule]),
+                                v1: ev.vote.options.length,
+                              })}
+                            </Badge>
+                          )}
+                          {/* 隐藏于「活动推广」的活动在列表里要能一眼认出来，
+                              否则站长会疑惑「我发的活动用户怎么看不到」 */}
+                          {ev.promoHidden && (
+                            <Badge variant="outline">{t("vote.adm.promoOffBadge")}</Badge>
+                          )}
                           <span className="text-xs text-muted-foreground">{t("adm.1040", { v0: ev.claimCount ?? 0, v1: ev.maxClaims != null ? `/${ev.maxClaims}` : "" })}</span>
                         </div>
-                        <p className="text-sm font-medium">{ev.title}</p>
+                        <p className="flex flex-wrap items-center gap-1.5 text-sm font-medium">
+                          {ev.title}
+                          {/* 分享链接快捷复制：活动靠 /activity/<id> 链接传播，
+                              「不在活动推广显示」的活动更是只能靠链接，随手可复制很重要 */}
+                          <button
+                            type="button"
+                            onClick={() => void copyEventLink(ev)}
+                            title={t("adm.copyEventLink")}
+                            aria-label={t("adm.copyEventLink")}
+                            className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-xs font-normal text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                          >
+                            {copiedEventId === ev.id ? (
+                              <>
+                                <Check className="h-3 w-3" />
+                                {t("common.copied")}
+                              </>
+                            ) : (
+                              <>
+                                <Link2 className="h-3 w-3" />
+                                {t("adm.copyLinkShort")}
+                              </>
+                            )}
+                          </button>
+                        </p>
                         <p className="whitespace-pre-wrap text-xs text-muted-foreground">
                           {ev.body}
                         </p>
@@ -4760,6 +5133,8 @@ export default function AdminPage() {
                         </p>
                       </div>
                       <div className="flex shrink-0 items-center gap-1">
+                        {/* 开奖按钮：抽奖与「多数/少数得奖」的投票都需要（后端按条件类型分发）。
+                            「参与即可获奖」「投票后立刻结算」两档在投票时就发完了，不显示按钮。 */}
                         {ev.lottery && !ev.lottery.drawn && (
                           <Button
                             variant="outline"
@@ -4769,6 +5144,17 @@ export default function AdminPage() {
                             onClick={() => void handleDrawEvent(ev)}
                           >
                             {t("adm.424")}
+                          </Button>
+                        )}
+                        {ev.vote && !ev.vote.drawn && needsDrawForVote(ev.vote.rewardRule) && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7"
+                            disabled={eventBusy}
+                            onClick={() => void handleDrawEvent(ev)}
+                          >
+                            {t("adm.voteDraw")}
                           </Button>
                         )}
                         <Button
@@ -8029,8 +8415,8 @@ export default function AdminPage() {
                           <Input
                             id="evRewardMin"
                             type="number"
-                            min={1}
-                            placeholder="5"
+                            // 不设 min：下限允许负数 = 扣积分（2026-10-07 站长要求）
+                            placeholder={t("adm.ph.pointsMin")}
                             value={eventDraft.rewardMin}
                             onChange={(e) =>
                               setEventDraft((d) => ({ ...d, rewardMin: e.target.value }))
@@ -8042,8 +8428,7 @@ export default function AdminPage() {
                           <Input
                             id="evRewardMax"
                             type="number"
-                            min={1}
-                            placeholder="20"
+                            placeholder={t("adm.ph.pointsMax")}
                             value={eventDraft.rewardMax}
                             onChange={(e) =>
                               setEventDraft((d) => ({ ...d, rewardMax: e.target.value }))
@@ -8063,12 +8448,12 @@ export default function AdminPage() {
                         <Input
                           id="evAmount"
                           type="number"
-                          min={1}
+                          // 不设 min：积分填负数 = 扣积分（其它两种奖励类型由后端兜底校验正整数）
                           placeholder={
                             eventDraft.rewardType === "newapi_quota"
                               ? "1"
                               : eventDraft.rewardType === "points"
-                                ? "10"
+                                ? t("adm.ph.pointsFixed")
                                 : "2"
                           }
                           value={eventDraft.rewardAmount}
@@ -8082,7 +8467,10 @@ export default function AdminPage() {
                       <p className="text-xs text-muted-foreground">{t("adm.1135", { v0: " ", v1: quotaPerUnit.toLocaleString(), v2: t("adm.794") })}</p>
                     )}
                     {eventDraft.rewardType === "points" && (
-                      <p className="text-xs text-muted-foreground">{t("adm.1136", { v0: t("adm.795"), v1: t("adm.796"), v2: t("adm.797") })}{eventDraft.pointsRandom && (
+                      <p className="text-xs text-muted-foreground">{t("adm.1136", { v0: t("adm.795"), v1: t("adm.796"), v2: t("adm.797") })}
+                        <br />
+                        {t("adm.pointsNegative")}
+                        {eventDraft.pointsRandom && (
                           <>
                             <br />
                             {t("adm.798")}
@@ -8097,7 +8485,8 @@ export default function AdminPage() {
 
             <div className="space-y-2">
               <Label htmlFor="evMaxClaims">
-                {eventDraft.conditionType === "lottery"
+                {/* 抽奖与投票限制的都是「参与人数」，与限量领取的份数不是一回事 */}
+                {eventDraft.conditionType === "lottery" || eventDraft.conditionType === "vote"
                   ? t("adm.194")
                   : t("adm.195")}
               </Label>
@@ -8110,7 +8499,7 @@ export default function AdminPage() {
                 onChange={(e) => setEventDraft((d) => ({ ...d, maxClaims: e.target.value }))}
               />
               <p className="text-xs text-muted-foreground">
-                {eventDraft.conditionType === "lottery"
+                {eventDraft.conditionType === "lottery" || eventDraft.conditionType === "vote"
                   ? t("adm.196")
                   : t("adm.197")}
               </p>
@@ -8175,7 +8564,8 @@ export default function AdminPage() {
                   </p>
                 </div>
               )}
-              {eventDraft.conditionType === "github_star" && (
+              {(eventDraft.conditionType === "github_star" ||
+                eventDraft.conditionType === "github_pr") && (
                 <div className="space-y-1.5 pt-1">
                   <Input
                     placeholder={t("adm.313")}
@@ -8186,16 +8576,29 @@ export default function AdminPage() {
                     }
                   />
                   <p className="text-xs text-muted-foreground">
-                    {t("adm.803")}
-                    <span className="font-medium">{t("adm.804")}</span>
-                    {t("adm.805")}
-                    {t("adm.806")}
-                    {t("adm.807")}
-                    <br />
-                    <span className="font-medium text-destructive">
-                      {t("adm.808")}
-                    </span>{t("adm.1137")}<code className="font-mono">GITHUB_TOKEN</code>）：
-                    {t("adm.809")}
+                    {eventDraft.conditionType === "github_pr" ? (
+                      <>
+                        {t("adm.condPrHint")}
+                        <br />
+                        <span className="font-medium text-destructive">
+                          {t("adm.808")}
+                        </span>{t("adm.1137")}<code className="font-mono">GITHUB_TOKEN</code>）：
+                        {t("adm.condPrTokenHint")}
+                      </>
+                    ) : (
+                      <>
+                        {t("adm.803")}
+                        <span className="font-medium">{t("adm.804")}</span>
+                        {t("adm.805")}
+                        {t("adm.806")}
+                        {t("adm.807")}
+                        <br />
+                        <span className="font-medium text-destructive">
+                          {t("adm.808")}
+                        </span>{t("adm.1137")}<code className="font-mono">GITHUB_TOKEN</code>）：
+                        {t("adm.809")}
+                      </>
+                    )}
                   </p>
                 </div>
               )}
@@ -8260,13 +8663,225 @@ export default function AdminPage() {
                     )}
                 </div>
               )}
+              {eventDraft.conditionType === "vote" && (
+                <div className="space-y-4 pt-1">
+                  {/* 选项编辑器：至少 2 项，可增删；每项 = 标题 + 说明 + 配图 */}
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <Label>{t("vote.adm.options")}</Label>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={eventDraft.voteOptions.length >= 20}
+                        onClick={() =>
+                          setEventDraft((d) => ({
+                            ...d,
+                            voteOptions: [
+                              ...d.voteOptions,
+                              { key: newOptionKey(), label: "", desc: "", image: "" },
+                            ],
+                          }))
+                        }
+                      >
+                        <Plus className="h-4 w-4" />
+                        {t("vote.adm.addOption")}
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{t("vote.adm.optionsHint")}</p>
+
+                    {eventDraft.voteOptions.map((opt, i) => (
+                      <div key={opt.key} className="space-y-2 rounded-md border p-3">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground">
+                            {t("vote.adm.optionN", { n: i + 1 })}
+                          </span>
+                          <div className="flex-1" />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            // 至少留 2 行：投不了票的表单没有意义（后端也会拒）
+                            disabled={eventDraft.voteOptions.length <= 2}
+                            onClick={() =>
+                              setEventDraft((d) => ({
+                                ...d,
+                                voteOptions: d.voteOptions.filter((o) => o.key !== opt.key),
+                              }))
+                            }
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <Input
+                            placeholder={t("vote.adm.optionLabel")}
+                            maxLength={60}
+                            value={opt.label}
+                            onChange={(e) =>
+                              setEventDraft((d) => ({
+                                ...d,
+                                voteOptions: d.voteOptions.map((o) =>
+                                  o.key === opt.key ? { ...o, label: e.target.value } : o
+                                ),
+                              }))
+                            }
+                          />
+                          <Input
+                            placeholder={t("vote.adm.optionDesc")}
+                            maxLength={200}
+                            value={opt.desc}
+                            onChange={(e) =>
+                              setEventDraft((d) => ({
+                                ...d,
+                                voteOptions: d.voteOptions.map((o) =>
+                                  o.key === opt.key ? { ...o, desc: e.target.value } : o
+                                ),
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {opt.image ? (
+                            <>
+                              <img
+                                src={opt.image}
+                                alt=""
+                                className="h-14 w-14 rounded-md border object-cover"
+                              />
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() =>
+                                  setEventDraft((d) => ({
+                                    ...d,
+                                    voteOptions: d.voteOptions.map((o) =>
+                                      o.key === opt.key ? { ...o, image: "" } : o
+                                    ),
+                                  }))
+                                }
+                              >
+                                {t("vote.adm.removeImage")}
+                              </Button>
+                            </>
+                          ) : (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={voteImgUploading !== null}
+                              onClick={() => {
+                                voteImgTargetRef.current = opt.key
+                                voteImgInputRef.current?.click()
+                              }}
+                            >
+                              {voteImgUploading === opt.key ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <ImagePlus className="h-4 w-4" />
+                              )}
+                              {t("vote.adm.addImage")}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label>{t("vote.adm.rule")}</Label>
+                    <Select
+                      value={eventDraft.voteRule}
+                      onValueChange={(v) =>
+                        setEventDraft((d) => ({ ...d, voteRule: v as EventVoteRewardRule }))
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {VOTE_RULE_OPTIONS.map((o) => (
+                          <SelectItem key={o.value} value={o.value}>
+                            {t(o.label)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">{t("vote.adm.ruleHint")}</p>
+
+                    {/* 「指定选项获奖」：选一个获奖选项（只能从填了标题的选项里选） */}
+                    {isFixedVoteRule(eventDraft.voteRule) && (
+                      <div className="space-y-1.5 pt-1">
+                        <Label>{t("vote.adm.fixedOption")}</Label>
+                        <Select
+                          value={eventDraft.voteFixedOptionId}
+                          onValueChange={(v) =>
+                            setEventDraft((d) => ({ ...d, voteFixedOptionId: v }))
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder={t("vote.adm.fixedOptionPlaceholder")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {eventDraft.voteOptions
+                              .filter((o) => o.label.trim())
+                              .map((o) => (
+                                <SelectItem key={o.key} value={o.key}>
+                                  {o.label.trim()}
+                                </SelectItem>
+                              ))}
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          {t("vote.adm.fixedOptionHint")}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* 「立刻结算」三档的副作用各不相同，分开提示 */}
+                    {isInstantVoteRule(eventDraft.voteRule) && (
+                      <p className="text-xs text-amber-600 dark:text-amber-400">
+                        {isFixedVoteRule(eventDraft.voteRule)
+                          ? t("vote.adm.instantFixedWarn")
+                          : t("vote.adm.instantWarn")}
+                      </p>
+                    )}
+                    {needsDrawForVote(eventDraft.voteRule) && (
+                      <p className="text-xs text-muted-foreground">{t("vote.adm.drawHint")}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* 消息中心「活动推广」开关：关了只能通过 /activity/<id> 链接参与 */}
+            <div className="flex items-center justify-between rounded-md border px-3 py-2">
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium">{t("vote.adm.promo")}</p>
+                <p className="text-xs text-muted-foreground">{t("vote.adm.promoHint")}</p>
+              </div>
+              <Switch
+                checked={!eventDraft.promoHidden}
+                onCheckedChange={(v) =>
+                  setEventDraft((d) => ({ ...d, promoHidden: !v }))
+                }
+              />
             </div>
           </div>
+
+          {/* 投票选项配图的隐藏文件输入（各选项共用一个，见 voteImgInputRef 注释） */}
+          <input
+            ref={voteImgInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/gif"
+            className="hidden"
+            onChange={(e) => void handleVoteImagePick(e.target.files?.[0])}
+          />
           <DialogFooter>
             <Button variant="outline" onClick={() => setEventOpen(false)}>
               {t("adm.821")}
-            </Button>
-            <Button onClick={() => void handleSaveEvent()} disabled={eventBusy}>
+            </Button>            <Button onClick={() => void handleSaveEvent()} disabled={eventBusy}>
               {eventBusy && <Loader2 className="h-4 w-4 animate-spin" />}
               {eventDraft.status === "draft"
                 ? t("adm.198")
@@ -8308,6 +8923,16 @@ export default function AdminPage() {
                   <TableRow key={c.id}>
                     <TableCell className="font-medium">
                       {c.nickname || c.username || c.userId}
+                      {/* 投票活动：显示这个人投给了哪个选项（选项标题要回活动配置里查） */}
+                      {c.optionId && claimsEvent?.vote && (
+                        <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                          {t("adm.votedFor", {
+                            v0:
+                              claimsEvent.vote.options.find((o) => o.id === c.optionId)?.label ??
+                              c.optionId,
+                          })}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {new Date(c.claimedAt).toLocaleString("zh-CN")}

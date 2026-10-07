@@ -13,7 +13,8 @@
  *   3. 正常下单 → 订单 note 是摘要、delivery_content 是**完整原文**
  *   4. 多个买家拿到的是**同一份**内容（与卡密「一人一条」区分开）
  *   5. 内容快照不随商品改动而变（商品事后被改，历史订单仍是当时那份）
- *   6. 通知里带完整正文（用户靠消息复制链接）
+ *   6. 完整正文通过**私聊**发给买家（2026-10-06 改：此前只塞在通知里，
+ *      而通知是右下角一闪而过的弹窗，站长反馈「一瞬间就没了」）
  */
 import { describe, expect, it } from "vitest"
 import { env } from "cloudflare:workers"
@@ -217,14 +218,27 @@ describe("统一内容自动发货", () => {
     const res = await buy(buyer, pid)
     expect(res.status).toBe(200)
 
+    // 完整原文落在**私信**里：会话可反复翻看、可复制，不会被弹窗刷掉
+    const dm = await env.DB.prepare(
+      "SELECT from_user_id, to_user_id, body FROM direct_messages WHERE to_user_id = ? " +
+        "ORDER BY created_at DESC LIMIT 1"
+    )
+      .bind(buyer.id)
+      .first<{ from_user_id: string; to_user_id: string; body: string }>()
+    expect(dm).not.toBeNull()
+    expect(dm!.to_user_id).toBe(buyer.id)
+    expect(dm!.body).toContain("https://pan.example.com/s/abcd")
+    expect(dm!.body).toContain("提取码：1234")
+
+    // 通知只留一句指路（不再把整段内容塞进一闪而过的弹窗）
     const note = await env.DB.prepare(
       "SELECT body FROM notifications WHERE user_id = ? AND type = 'order_delivered' " +
         "ORDER BY created_at DESC LIMIT 1"
     )
       .bind(buyer.id)
       .first<{ body: string }>()
-    expect(note?.body).toContain("https://pan.example.com/s/abcd")
-    expect(note?.body).toContain("提取码：1234")
+    expect(note?.body).toContain("私聊")
+    expect(note?.body).not.toContain("提取码：1234")
   })
 
   it("统一内容不能设为租用（一次性发出去的文字收不回来）", async () => {

@@ -30,8 +30,15 @@ export interface Env {
   R2_BUCKET?: string
   R2_S3_ACCESS_KEY_ID?: string
   R2_S3_SECRET_ACCESS_KEY?: string
-  // 全局 R2 凭据（唯一的 R2 token）：一个 Cloudflare API Token 覆盖所有账户。
-  // 用途：
+  /**
+   * 数据库备份直传令牌（2026-10-06）。
+   *
+   * 家里云的每日 cron 拿它换一个预签名上传地址，把 new-api 主库的 pg_dump
+   * 直接 PUT 到 R2 平台桶（`db-backups/`）。见 handlers/db-backup.ts。
+   * ⚠️ 未配置时该功能整体关闭（503），不会退化成公开上传口。
+   */
+  BACKUP_UPLOAD_TOKEN?: string
+  // 全局 R2 凭据（唯一的 R2 token）：一个 Cloudflare API Token 覆盖所有账户。  // 用途：
   //   1. 桶操作 —— 桶记录里凭据留空时回退到这里（新增桶无需重复填凭据）
   //   2. 读 A/B 类操作数 —— 桶记录里 analytics_token_enc 可覆盖
   // 所需权限：Account → Workers R2 Storage → Edit

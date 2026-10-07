@@ -63,7 +63,7 @@ export const ADMIN_PERMISSIONS: AdminPermCategory[] = [
     label: "监管",
     group: "account",
     children: [
-      { key: "moderation.suspend", label: "封禁 / 解封" },
+      { key: "moderation.risk", label: "风险账户处置" },
       { key: "moderation.appeals", label: "申诉处理" },
       { key: "moderation.whitelist", label: "白名单管理" },
       { key: "moderation.blacklist", label: "IP 黑名单" },

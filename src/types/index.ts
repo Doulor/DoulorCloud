@@ -2190,6 +2190,32 @@ export interface EventItem {
     /** 是否已开奖 */
     drawn: boolean
   } | null
+  /**
+   * 投票活动的展示信息；非投票（或配置异常）为 null。
+   * 与 conditionParams 分开下发同理（后者对普通用户恒为 null）。
+   */
+  vote: {
+    options: EventVoteOption[]
+    /** 获奖规则（三类七档，见 EventVoteRewardRule） */
+    rewardRule: EventVoteRewardRule
+    /** 是否已开奖（`all` 与「立刻结算」两档不会开奖，恒 false） */
+    drawn: boolean
+    /**
+     * 「固定选项获奖」指定的那个选项 id；其它规则为 null。
+     * ⚠️ 普通用户**开奖前拿不到**（服务端只在已开奖时才下发）——
+     * 提前公开等于把答案印在题目上。
+     */
+    fixedOptionId?: string | null
+  } | null
+  /** 投票活动：{ 选项id: 票数 }；非投票活动为空对象 */
+  voteCounts?: Record<string, number>
+  /** 投票活动：我投的选项 id；没投过 / 未登录为 null */
+  myVote?: string | null
+  /**
+   * true = 不在消息中心「活动推广」里显示，只能通过 /activity/<id> 链接参与。
+   * 管理端列表用它显示状态。
+   */
+  promoHidden: boolean
   createdAt: string
   updatedAt: string
   /** 服务端算出的可参与状态：open / not_started / ended / offline */
@@ -2213,8 +2239,57 @@ export type EventConditionType =
   | "has_feature"
   | "code"
   | "lottery"
+  /**
+   * 投票：用户从若干选项里选一个投出（一人一票，投完不能改）。
+   * 获奖规则见 EventVoteRewardRule —— 参与即可获奖 / 多数 / 少数，
+   * 其中「多数 / 少数」又分「投票后立刻按当前票数结算」与「截止后开奖」。
+   */
+  | "vote"
   /** 点 GitHub star：用户填自己的 GitHub 用户名，服务端去仓库的 stargazers 名单里核验 */
   | "github_star"
+  /** 提交 GitHub PR：用户填自己的 GitHub 用户名，服务端核验其有没有给该仓库提过 PR */
+  | "github_pr"
+
+/** 投票的一个选项 */
+export interface EventVoteOption {
+  /** 稳定 id（改标题不影响已投出的票） */
+  id: string
+  /** 选项标题 */
+  label: string
+  /** 一句话说明（可空） */
+  desc?: string
+  /** 配图 URL（同源相对路径，可空） */
+  image?: string
+}
+
+/**
+ * 投票的获奖规则（三类七档）：
+ *
+ * 「指定选项」
+ *   instant_fixed      投票后立刻结算：投中**指定选项** ⇒ 当场发
+ *   fixed              截止后开奖：**指定选项**获奖
+ * 「多数」
+ *   instant_majority   投票后立刻按当前票数结算：投的选项是多数 ⇒ 当场发
+ *   majority           截止后开奖，得票最多的选项获奖
+ * 「少数」
+ *   instant_minority   同上，少数 ⇒ 当场发
+ *   minority           截止后开奖，得票最少（≥1 票）的选项获奖
+ * 「无条件」
+ *   all                参与即可获奖（投完当场发）
+ *
+ * 后三组（fixed / majority / minority）需配 `fixedOptionId`（仅 fixed 类）。
+ *
+ * ⚠️ 「立刻结算」三档的副作用：越早投越容易赢（多数/少数）；「指定选项」更好猜 ——
+ * 多开小号投一次看有没有中奖就能反推答案。要防探查就用「截止后开奖」那一档。
+ */
+export type EventVoteRewardRule =
+  | "all"
+  | "instant_fixed"
+  | "instant_majority"
+  | "instant_minority"
+  | "fixed"
+  | "majority"
+  | "minority"
 
 // ---- 账号监管（封禁申诉 + 风险账户）----
 
@@ -2348,6 +2423,11 @@ export interface EventPayload {
   rewardParams: Record<string, unknown> | null
   conditionType: EventConditionType
   conditionParams: Record<string, unknown> | null
+  /**
+   * true = 不在消息中心「活动推广」里显示、也不广播通知，
+   * 只能通过 /activity/<id> 链接参与。
+   */
+  promoHidden?: boolean
 }
 
 export interface EventClaim {
@@ -2360,6 +2440,8 @@ export interface EventClaim {
   rewardDetail: string | null
   claimedAt: string
   grantedAt: string | null
+  /** 投票活动：这条记录对应的投票选项 id；非投票活动为 null */
+  optionId?: string | null
 }
 
 export interface CommunityActiveUser {
@@ -2504,6 +2586,8 @@ export interface PointsConfig {
   yuanPerPoint: number
   /** 每日兑换次数上限（0 = 不限） */
   dailyLimit: number
+  /** 用户商城：卖家交付后多少天自动确认收货（0 = 关闭） */
+  autoConfirmDays: number
 }
 
 /**
@@ -2522,6 +2606,7 @@ export type PointDelivery =
   | "feature"
   | "subscription"
   | "invite_quota"
+  | "checkin_makeup"
   | "code"
   | "content"
 
@@ -2531,7 +2616,7 @@ export interface PointDeliveryParams {
   feature?: FeatureKey
   /** delivery='subscription'：NewAPI 套餐 id（管理员自己填） */
   planId?: number
-  /** delivery='invite_quota'：增加的邀请码创建额度 */
+  /** delivery='invite_quota' / 'checkin_makeup'：数量（邀请码额度 / 补签卡张数） */
   count?: number
   /** delivery='content'：人人相同的固定交付内容（网盘链接 / 说明 / 通用兑换码） */
   content?: string
@@ -2581,6 +2666,8 @@ export interface PointProduct {
   dailyLimit: number | null
   /** 今日已售数（与后端每日限量计数同口径 UTC 日）；无每日限时恒 0 */
   dailySold: number
+  /** 累计售出（已交付 + 已结算订单数），「按热度排序」用 */
+  soldCount: number
   /** 每人限购件数；null = 不限 */
   perUserLimit: number | null
   delivery: PointDelivery
@@ -3113,12 +3200,14 @@ export interface AdminPermCategory {
   children?: AdminPermLeaf[]
 }
 
-/** 权限组（一套权限 + 成员数） */
+/** 权限组（一套权限 + 成员数 + 成员列表） */
 export interface AdminPermissionGroup {
   id: string
   name: string
   scope: string[]
   memberCount: number
+  /** 组内成员；custom=true 表示该成员做了单人自定义覆盖（非标准组权限） */
+  members: { username: string; custom: boolean }[]
   createdAt: string
 }
 
