@@ -37,6 +37,14 @@ export function SlidingPill({
   className?: string
 }) {
   const ref = React.useRef<HTMLSpanElement>(null)
+  /**
+   * 本容器上一次渲染时是否有选中项。
+   *
+   * 侧边栏把导航分成「上组 / 底组」两个独立容器，选中项在任一时刻只可能落在
+   * 其中一组里。用这个标记区分「同组内换项」（该滑）与「从另一组切过来」
+   * （该直接落位），见下面 place() 里的说明。
+   */
+  const hadActive = React.useRef(true)
 
   React.useLayoutEffect(() => {
     const el = ref.current
@@ -63,15 +71,38 @@ export function SlidingPill({
     const place = () => {
       const active = parent.querySelector(activeSelector) as HTMLElement | null
       if (!active) {
+        // 这个容器里当前没有选中项（如侧边栏的「上组/底组」分开放时，
+        // 选中项在另一组）——隐藏滑块，并记住「本容器此刻是空的」。
+        hadActive.current = false
         el.style.opacity = "0"
         return
       }
+      /*
+       * 本容器上一次是「空的」，现在突然有了选中项 ⇒ 说明用户是从**另一组**
+       * 切过来的。此时必须**直接落位**，不能滑：滑块里存的还是很久以前那次的
+       * transform，若让它过渡过去，会看到一块背景从回忆里的旧位置横穿过来。
+       * 做法：临时禁用 transition → 写目标位置 → 强制 reflow 应用 → 交还给 CSS
+       * 的过渡（供后续同组切换继续平滑滑动）。
+       */
+      const jump = !hadActive.current
+      hadActive.current = true
+      const w = `${active.offsetWidth}px`
+      const h = `${active.offsetHeight}px`
+      const tf = `translate(${active.offsetLeft}px, ${active.offsetTop}px)`
+      if (jump) {
+        el.style.transition = "none"
+        el.style.width = w
+        el.style.height = h
+        el.style.transform = tf
+        void el.offsetWidth
+        el.style.transition = ""
+        el.style.opacity = "1"
+        return
+      }
       el.style.opacity = "1"
-      el.style.width = `${active.offsetWidth}px`
-      el.style.height = `${active.offsetHeight}px`
-      // 用 transform 滑（left/top 不参与过渡），量出来的是布局位置 ——
-      // 容器自身滚动（管理后台侧边栏 overflow-y-auto）不影响布局位置
-      el.style.transform = `translate(${active.offsetLeft}px, ${active.offsetTop}px)`
+      el.style.width = w
+      el.style.height = h
+      el.style.transform = tf
     }
 
     place()

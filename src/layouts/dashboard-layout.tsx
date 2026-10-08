@@ -69,6 +69,7 @@ import type { AttentionCounts } from "@/types"
 import { cn } from "@/lib/utils"
 import { onAttentionChanged } from "@/lib/attention-events"
 import { idlePreload, preloadRoute } from "@/lib/route-preload"
+import { SlidingPill } from "@/components/motion/sliding-pill"
 import { toast } from "sonner"
 
 /** 角标轮询间隔（社区/聊天室/反馈/管理共用一次请求） */
@@ -393,6 +394,9 @@ export function DashboardLayout({
         onMouseEnter={warm}
         onFocus={warm}
         onTouchStart={warm}
+        // data-nav-active：动效层滑动指示器的定位锚点（与 sub-nav 的 NavItem 同一约定）。
+        // 用独立属性而非类名：属性不参与样式，motion 关闭时对现状零影响。
+        data-nav-active={active ? "1" : undefined}
         className={cn(
           "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
           active
@@ -471,12 +475,27 @@ export function DashboardLayout({
       <div className="flex h-14 shrink-0 items-center border-b px-3">
         <Logo tagline />
       </div>
+      {/*
+        两组导航各放一个滑动指示器（动效层）：
+        上组与底组在视觉上是两段（中间隔着 mt-auto 撑开的大片空白），
+        用**一个**跨组滑块会看到一块背景横穿空白滑过去，很怪；分开放则
+        「同组换项平滑滑、跨组切换直接落位」（落位逻辑见 SlidingPill 的 hadActive）。
+        关＝现状：关掉动效时滑块不显示，导航项自带的 active 背景由 CSS 还回来。
+      */}
       <nav className="flex flex-col gap-1 px-3">
+        <SlidingPill
+          activeSelector='[data-nav-active="1"]'
+          className="rounded-md bg-accent"
+        />
         {baseNav.map((item) => renderNavItem(item))}
       </nav>
 
       {/* 底部固定区：与上方功能之间留白，紧贴账户信息 */}
       <div className="mt-auto flex flex-col gap-1 px-3 pt-6">
+        <SlidingPill
+          activeSelector='[data-nav-active="1"]'
+          className="rounded-md bg-accent"
+        />
         {bottomNav.map((item) => renderNavItem(item))}
       </div>
 
