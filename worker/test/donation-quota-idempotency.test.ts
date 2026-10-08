@@ -5,7 +5,7 @@
 //   发过没有」。`id != ?` 把这行自己排除在外 ⇒ 该行对自己不可见 ⇒ 只要在审批那一刻
 //   库里没有**别的** approved 行，就再发一轮额度。
 //
-// 四条可触发路径（全部由本文件的用例覆盖，前三条在旧代码上稳定失败）：
+// 四条可触发路径（全部由本文件的用例覆盖，四条在旧代码上均稳定失败）：
 //   ① 单行反复覆盖重提：同一上游再提交 → 复用同一行 id、重置 pending → 自动审核
 //      通过 → 闸门看不到「别的 approved」→ 再发。实测 10 轮 bonus 2→20。
 //   ② 撤销 → 重新批准同一单据：撤销把它置回 pending，闸门随之变假 → 重批再发。
@@ -21,12 +21,19 @@
 //   ⑤ 并发审批：两个请求都读到「没有别的 approved」⇒ 双发。改为原子占位后由 D1
 //      的单条 UPDATE 串行化兜住。注：这条在旧代码上**不稳定复现**（miniflare 会把
 //      D1 语句串行化），因此它是不变式守护，不是「旧代码必红」的证据。
+//      实测：两条 pending 同时批准那条，单独复跑 8 次 = 1 红 7 绿；
+//      同一单据被并发批准那条，复跑 6 次全绿。
 //
 // 反向守护（旧代码也绿，用来防止把闸门改宽或改死）：
 //   · 全新账号第一笔正常发 2 / 1；
 //   · 真·第二份不同上游不再发（H2「同类型只发一次」的上界保持不变）；
 //   · ai 与 proxy 互不影响；
 //   · 历史数据回填后，老账号仍不发第二份。
+//
+// 另有一例守护通知文案：没发额度时不许声称发了（旧代码会误报，故单独分组）。
+//
+// 旧代码实测（把 donations.ts 换回 5f7b7d9 的版本复跑）：①②③④ 与文案共
+// **7 例稳定红**，其余 7 例绿（含 ⑤ 两条不稳定）。
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest"
 import { env } from "cloudflare:workers"
 import { authRequest, fetchSelf, makeUser, setPermissions, type TestUser } from "./helpers"
@@ -385,6 +392,36 @@ describe("捐献额度：用户级幂等（② 撤销后重批 / ③ 两条同�
     // 关键断言：四轮撤销重批之后额度**纹丝不动**
     expect(await quotaOf(user.id)).toEqual({ bonus: 2, ai: 1 })
   })
+
+  it("④ 撤销 → 用户删除单据 → 重提同一上游：仍不涨（旧代码每轮 +2）", async () => {
+    const admin = await makeUser({ role: "superadmin" })
+    const user = await makeDonor()
+    stubFetch((url) => (url.startsWith(UP1) ? upstreamModels(["gpt-4o"]) : undefined))
+    stubNewApiChannelFlow({ testOk: true })
+
+    const a = await submitAi(user, UP1)
+    expect(await quotaOf(user.id)).toEqual({ bonus: 2, ai: 1 })
+
+    // 撤销（管理员）→ 单据变 pending → 用户删掉它 → 重提同一上游
+    // 这条路绕过「行级」标记：cancelDonation 是直接 DELETE，行没了标记也没了。
+    // 所以额度标记必须挂在 users 上（见迁移 0128 的说明）。
+    let lastId: string | null = null
+    for (let round = 0; round < 3; round++) {
+      const cur = round === 0 ? a.id : lastId!
+      const rev = await fetchSelf(
+        authRequest(admin, `/admin/donations/${cur}/revoke`, { method: "POST" })
+      )
+      expect(rev.status).toBe(200)
+      const del = await fetchSelf(authRequest(user, `/donations/${cur}`, { method: "DELETE" }))
+      expect(del.status).toBe(204)
+      const again = await submitAi(user, UP1)
+      expect(again.status).toBe("approved")
+      lastId = again.id
+    }
+
+    // 关键断言：三轮「撤销 → 删除 → 重提」之后额度纹丝不动
+    expect(await quotaOf(user.id)).toEqual({ bonus: 2, ai: 1 })
+  })
 })
 
 describe("捐献额度：用户级幂等（⑤ 并发审批）", () => {
@@ -514,36 +551,6 @@ describe("捐献额度：反向守护（不该被改宽或改死）", () => {
     }
   })
 
-  it("④ 撤销 → 用户删除单据 → 重提同一上游：仍不涨（旧代码每轮 +2）", async () => {
-    const admin = await makeUser({ role: "superadmin" })
-    const user = await makeDonor()
-    stubFetch((url) => (url.startsWith(UP1) ? upstreamModels(["gpt-4o"]) : undefined))
-    stubNewApiChannelFlow({ testOk: true })
-
-    const a = await submitAi(user, UP1)
-    expect(await quotaOf(user.id)).toEqual({ bonus: 2, ai: 1 })
-
-    // 撤销（管理员）→ 单据变 pending → 用户删掉它 → 重提同一上游
-    // 这条路绕过「行级」标记：cancelDonation 是直接 DELETE，行没了标记也没了。
-    // 所以额度标记必须挂在 users 上（见迁移 0128 的说明）。
-    let lastId: string | null = null
-    for (let round = 0; round < 3; round++) {
-      const cur = round === 0 ? a.id : lastId!
-      const rev = await fetchSelf(
-        authRequest(admin, `/admin/donations/${cur}/revoke`, { method: "POST" })
-      )
-      expect(rev.status).toBe(200)
-      const del = await fetchSelf(authRequest(user, `/donations/${cur}`, { method: "DELETE" }))
-      expect(del.status).toBe(204)
-      const again = await submitAi(user, UP1)
-      expect(again.status).toBe("approved")
-      lastId = again.id
-    }
-
-    // 关键断言：三轮「撤销 → 删除 → 重提」之后额度纹丝不动
-    expect(await quotaOf(user.id)).toEqual({ bonus: 2, ai: 1 })
-  })
-
   it("历史回填：老账号已有 approved 单据时，新批一笔不发", async () => {
     const user = await makeDonor()
     stubFetch((url) => (url.startsWith(UP1) ? upstreamModels(["gpt-4o"]) : undefined))
@@ -586,7 +593,9 @@ describe("捐献额度：反向守护（不该被改宽或改死）", () => {
     // 关键断言：老账号不因为新单据而再拿一份
     expect(await quotaOf(user.id)).toEqual({ bonus: 2, ai: 1 })
   })
+})
 
+describe("捐献额度：通知文案与发放结果一致（旧代码会误报）", () => {
   it("没发额度时，站内消息不再声称「获得 2 个邀请码创建额度」", async () => {
     const user = await makeDonor()
     stubFetch((url) =>
