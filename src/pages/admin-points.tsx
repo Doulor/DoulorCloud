@@ -2,6 +2,8 @@ import * as React from "react"
 import {
   CalendarClock,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Coins,
   Gift,
   Loader2,
@@ -238,7 +240,8 @@ export function PointsAdminPanel() {
       </div>
 
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
+        {/* h-auto + flex-wrap：移动端窄屏放不下时换行，而不是横向溢出屏幕外 */}
+        <TabsList className="h-auto max-w-full flex-wrap">
           <TabsTrigger value="shop" className="gap-1.5">
             <ShoppingBag className="h-3.5 w-3.5" />
             {t("ap.tab.shop")}
@@ -1033,7 +1036,7 @@ function ShopTab() {
         </CardHeader>
         <CardContent>
           {loading && !data ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : (
             <div className="overflow-x-auto rounded-lg border">
               <table className="table-actions-sticky w-full text-sm">
@@ -1227,7 +1230,7 @@ function ShopTab() {
         </CardHeader>
         <CardContent>
           {loading && !data ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : userProducts.length === 0 ? (
             <EmptyState
               icon={Store}
@@ -1349,7 +1352,7 @@ function ShopTab() {
         </CardHeader>
         <CardContent>
           {loading && !data ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : orders.length === 0 ? (
             <EmptyState icon={Coins} title={t("ap.ordersEmpty")} description={t("ap.ordersEmptyDesc")} />
           ) : (
@@ -1485,7 +1488,7 @@ function ShopTab() {
         </CardHeader>
         <CardContent>
           {afterSaleLoading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : afterSales.length === 0 ? (
             <EmptyState
               icon={Coins}
@@ -2438,6 +2441,14 @@ function MembersTab() {
   const [data, setData] = React.useState<AdminPointsOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [query, setQuery] = React.useState("")
+  /**
+   * 用户列表服务端分页（2026-10-08）。
+   * 站长反馈「只能看见最后两百个用户、没有分页」——原接口写死 LIMIT 200，且
+   * 「持有积分人数 / 在手总量」是从这 200 人里数出来的（全站 683 人 / 118273 分，
+   * 页面却显示 100 / 14795）。现在列表分页、统计聚合全表，两者彻底解耦。
+   */
+  const [page, setPage] = React.useState(0)
+  const POINTS_PAGE_SIZE = 50
 
   // 发放/扣减弹窗
   const [adjustTarget, setAdjustTarget] = React.useState<AdminPointsUser | null>(null)
@@ -2450,20 +2461,43 @@ function MembersTab() {
   const [history, setHistory] = React.useState<PointTransaction[] | null>(null)
   const [historyLoading, setHistoryLoading] = React.useState(false)
 
-  const load = React.useCallback(async (q?: string) => {
-    setLoading(true)
-    try {
-      setData(await adminPointsApi.list(q?.trim() || undefined))
-    } catch (err) {
-      toast.error(errMsg(err, t("ap.err.loadMembers")))
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+  /**
+   * 拉积分总览。`q`/`p` 显式传入（不读 state），因为搜索与翻页都要能指定目标页：
+   * 搜索词变化时回第一页，翻页时保留当前搜索词。
+   */
+  const loadPage = React.useCallback(
+    async (q: string, p: number) => {
+      setLoading(true)
+      try {
+        setData(
+          await adminPointsApi.list({
+            query: q.trim() || undefined,
+            limit: POINTS_PAGE_SIZE,
+            offset: p * POINTS_PAGE_SIZE,
+          })
+        )
+      } catch (err) {
+        toast.error(errMsg(err, t("ap.err.loadMembers")))
+      } finally {
+        setLoading(false)
+      }
+    },
+    [t]
+  )
+
+  /** 刷新当前页（保留搜索词与页码） */
+  const load = React.useCallback(
+    async (q?: string) => {
+      await loadPage(q ?? query, page)
+    },
+    [loadPage, query, page]
+  )
 
   React.useEffect(() => {
-    void load()
-  }, [load])
+    void loadPage("", 0)
+    // 只在挂载时跑一次（后续由搜索/翻页显式触发）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadPage])
 
   const openAdjust = (u: AdminPointsUser) => {
     setAdjustTarget(u)
@@ -2546,7 +2580,10 @@ function MembersTab() {
           className="relative max-w-sm flex-1"
           onSubmit={(e) => {
             e.preventDefault()
-            void load(query)
+            // 搜索词变了要回第一页，否则会停在「上一条搜索结果的第 N 页」上，
+            // 命中数不够时直接显示空白。
+            setPage(0)
+            void loadPage(query, 0)
           }}
         >
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -2565,7 +2602,7 @@ function MembersTab() {
 
       {/* 列表 */}
       {loading && !data ? (
-        <LoadingBlock />
+        <LoadingBlock variant="list" />
       ) : !data || data.users.length === 0 ? (
         <EmptyState
           icon={Coins}
@@ -2626,6 +2663,50 @@ function MembersTab() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* 服务端分页控件（2026-10-08）：total 来自接口，翻页即拉对应页 */}
+      {!loading && data?.total != null && data.total > POINTS_PAGE_SIZE && (
+        <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
+          <span>
+            {t("adm.userPageInfo", {
+              from: page * POINTS_PAGE_SIZE + 1,
+              to: Math.min((page + 1) * POINTS_PAGE_SIZE, data.total),
+              total: data.total,
+            })}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page === 0}
+              onClick={() => setPage((p) => {
+                const next = Math.max(0, p - 1)
+                void loadPage(query, next)
+                return next
+              })}
+            >
+              <ChevronLeft className="mr-1 h-3.5 w-3.5" />
+              {t("adm.userPagePrev")}
+            </Button>
+            <span className="tabular-nums">
+              {page + 1} / {Math.ceil(data.total / POINTS_PAGE_SIZE)}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={(page + 1) * POINTS_PAGE_SIZE >= data.total}
+              onClick={() => setPage((p) => {
+                const next = p + 1
+                void loadPage(query, next)
+                return next
+              })}
+            >
+              {t("adm.userPageNext")}
+              <ChevronRight className="ml-1 h-3.5 w-3.5" />
+            </Button>
+          </div>
         </div>
       )}
 
@@ -2694,7 +2775,7 @@ function MembersTab() {
             <DialogDescription>{t("ap.txDesc")}</DialogDescription>
           </DialogHeader>
           {historyLoading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : !history || history.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">{t("ap.txEmpty")}</p>
           ) : (

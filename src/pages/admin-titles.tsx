@@ -173,7 +173,7 @@ export function TitlesAdminPanel() {
         </CardHeader>
         <CardContent>
           {loading && !titles ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : (titles?.length ?? 0) === 0 ? (
             <EmptyState
               icon={Medal}

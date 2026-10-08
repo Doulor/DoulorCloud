@@ -22,7 +22,7 @@ import {
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
-import { LoadingBlock } from "@/components/loading-block"
+import { FeatureCardsSkeleton } from "@/components/skeletons"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -834,7 +834,7 @@ export default function ProfilePage() {
     return (
       <div>
         <PageHeader title={t("pf.title")} description={t("pf.subtitle")} />
-        <LoadingBlock />
+        <FeatureCardsSkeleton />
       </div>
     )
   }

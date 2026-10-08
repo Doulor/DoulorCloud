@@ -268,7 +268,7 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
     void load()
   }, [load])
 
-  if (loading && !data) return <LoadingBlock />
+  if (loading && !data) return <LoadingBlock variant="cards" />
   if (!data) return null
 
   const res = data.resources

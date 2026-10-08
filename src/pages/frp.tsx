@@ -1,4 +1,5 @@
 import * as React from "react"
+import { FeatureCardsSkeleton } from "@/components/skeletons"
 import {
   AlertTriangle,
   Copy,
@@ -16,7 +17,6 @@ import { toast } from "sonner"
 import { PageHeader } from "@/components/page-header"
 import { FeatureLockedNotice } from "@/components/feature-locked-notice"
 import { EmptyState } from "@/components/empty-state"
-import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -380,7 +380,7 @@ export default function FrpPage() {
     return (
       <div>
         <PageHeader title={t("frp.title")} description={t("frp.subtitle")} />
-        <LoadingBlock />
+        <FeatureCardsSkeleton />
       </div>
     )
   }

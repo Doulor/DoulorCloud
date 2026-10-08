@@ -85,6 +85,7 @@ import {
   TooltipProvider,
 } from "@/components/ui/tooltip"
 import { LoadingBlock } from "@/components/loading-block"
+import { AdminInvitesSkeleton, AdminUsersSkeleton } from "@/components/skeletons"
 // 投票规则的判断 / 文案映射与用户端共用一份 —— 两处各写一遍迟早会出现
 // 「后台显示多数得奖、用户端显示少数得奖」这种自相矛盾
 import { isInstantVoteRule, VOTE_RULE_LABEL_KEY } from "@/components/event-vote"
@@ -139,6 +140,7 @@ import {
   cli2apiApi,
   attentionApi,
   HttpError,
+  errMsg,
 } from "@/services/api"
 import { useT, tStatic } from "@/i18n"
 import { useAuth } from "@/hooks/use-auth"
@@ -165,6 +167,19 @@ const DONATION_GRANT_ITEMS: { key: string; label: string; desc: string }[] = [
   { key: "proxy", label: "adm.1277", desc: "adm.1278" },
   { key: "wb2api", label: "adm.1279", desc: "adm.1280" },
   { key: "cli2api", label: "adm.1281", desc: "adm.1282" },
+]
+
+/**
+ * 「捐献发放可转授额度」的开关项（与后端 settings.ts 的
+ * donation_transfer_features 一一对应，四个模块各自一个开关）。
+ *
+ * 顺序与 QUOTA_FEATURES 一致（r2/ai/frp/proxy）；label 复用 feat.* 的模块名。
+ */
+const DONATION_QUOTA_ITEMS: { key: string; label: string; desc: string }[] = [
+  { key: "ai", label: "feat.ai", desc: "adm.1304" },
+  { key: "frp", label: "feat.frp", desc: "adm.1305" },
+  { key: "proxy", label: "feat.proxy", desc: "adm.1307" },
+  { key: "r2", label: "feat.r2", desc: "adm.1308" },
 ]
 
 import type {
@@ -695,6 +710,12 @@ export default function AdminPage() {
   const { user } = useAuth()
   const [users, setUsers] = React.useState<AdminUser[]>([])
   const [filter, setFilter] = React.useState("")
+  /** 用户列表的行级多选（id 集合）。列表每次重新加载都会清空——翻页/搜索后旧勾选不再可信 */
+  const [selectedUserIds, setSelectedUserIds] = React.useState<Set<string>>(new Set())
+  /** 批量编辑功能权限弹窗 */
+  const [bulkOpen, setBulkOpen] = React.useState(false)
+  const [bulkChecked, setBulkChecked] = React.useState<Set<string>>(new Set())
+  const [bulkBusy, setBulkBusy] = React.useState(false)
   /**
    * 用户列表服务端分页（2026-10-08 性能）：全量模式 1399 用户 ~870KB、TTFB ~1.7s，
    * 改为每页 50 条 + 服务端搜索（~20KB、~1.0s）。`serverTotal` 为 null 表示仍在
@@ -702,6 +723,8 @@ export default function AdminPage() {
    */
   const [userPage, setUserPage] = React.useState(0)
   const [serverTotal, setServerTotal] = React.useState<number | null>(null)
+  /** 不受搜索影响的总数，供页面头部统计用（serverTotal 会随搜索结果变化） */
+  const [userTotalAll, setUserTotalAll] = React.useState<number | null>(null)
   const USER_PAGE_SIZE = 50
   /** 「注册 IP」列默认隐藏（站长 2026-10-03 要求）：列较多时默认不占地方，需要时用搜索框右边的开关打开 */
   const [showRegisterIp, setShowRegisterIp] = React.useState(false)
@@ -745,6 +768,16 @@ export default function AdminPage() {
   const [inviteBusy, setInviteBusy] = React.useState(false)
   /** 邀请码分类筛选："" 全部 / "unused" 未使用 / "partial" 部分使用 / "used" 已使用 */
   const [inviteFilter, setInviteFilter] = React.useState<string>("")
+  /**
+   * 邀请码列表服务端分页（2026-10-08）：原先无分页、切到该 tab 要等明显一下。
+   * `inviteTotalAll` 是**不受筛选影响的总数**，供页面头部统计显示（进页面即有值）。
+   */
+  const [invitePage, setInvitePage] = React.useState(0)
+  const [inviteTotal, setInviteTotal] = React.useState<number | null>(null)
+  const [inviteTotalAll, setInviteTotalAll] = React.useState<number | null>(null)
+  /** counts[""] = 全部，其余为各分类；来自接口的 GROUP BY */
+  const [inviteCounts, setInviteCounts] = React.useState<Record<string, number> | null>(null)
+  const invitesLoadedRef = React.useRef(false)
   const [invitePerms, setInvitePerms] = React.useState<Permissions>({
     r2: true,
     ai: true,
@@ -1112,6 +1145,10 @@ export default function AdminPage() {
     wb2api: true,
     cli2api: true,
   })
+  // 捐献可发放「可转授额度」的模块（四个独立开关，默认全开；见 settings.ts）
+  const [donationQuotaFeatures, setDonationQuotaFeatures] = React.useState<
+    Record<string, boolean>
+  >({ r2: true, ai: true, frp: true, proxy: true })
 
   // ---- 社区管理 ----
   const [communityPosts, setCommunityPosts] = React.useState<AdminCommunityPost[]>([])
@@ -1152,7 +1189,11 @@ export default function AdminPage() {
           offset: page * USER_PAGE_SIZE,
         })
         setUsers(res.users)
+        // 列表换了（翻页/搜索/操作后刷新）⇒ 旧勾选作废，避免对看不见的行做批量操作
+        setSelectedUserIds(new Set())
         setServerTotal(res.total ?? null)
+        // 无搜索词时记下「全站总数」，供页面头部统计（搜索时 total 会变，不能拿它当总数）
+        if (!q && res.total != null) setUserTotalAll(res.total)
       } catch (err) {
         toast.error(err instanceof HttpError ? err.message : t("adm.1"))
       } finally {
@@ -1183,15 +1224,77 @@ export default function AdminPage() {
     await loadUserPage(userPage, filter.trim())
   }, [loadUserPage, userPage, filter])
 
-  const loadInvites = React.useCallback(async () => {
-    setInviteLoading(true)
+  /** 批量开通功能：只加不减（语义见 admin-users-bulk.ts 头注释），不支持全选 */
+  const submitBulkFeatures = async () => {
+    setBulkBusy(true)
     try {
-      const res = await adminApi.listInvites()
-      setInvites(res.invites)
+      const res = await adminApi.bulkGrantFeatures({
+        userIds: [...selectedUserIds],
+        features: [...bulkChecked],
+      })
+      toast.success(t("adm.bulk.done", { n: String(res.updated) }))
+      setBulkOpen(false)
+      setBulkChecked(new Set())
+      setSelectedUserIds(new Set())
+      await load()
     } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("adm.2"))
+      toast.error(errMsg(err, t("adm.bulk.failed")))
     } finally {
-      setInviteLoading(false)
+      setBulkBusy(false)
+    }
+  }
+
+  /**
+   * 拉邀请码列表（服务端分页 + 分类筛选，2026-10-08 与用户/捐献同批）。
+   * 原先无分页、一次拉全量，切到该 tab 要等明显一下。
+   */
+  const loadInvitePage = React.useCallback(
+    async (page: number, status: string) => {
+      setInviteLoading(true)
+      try {
+        const res = await adminApi.listInvites({
+          limit: INVITE_PAGE_SIZE,
+          offset: page * INVITE_PAGE_SIZE,
+          status: status || undefined,
+        })
+        setInvites(res.invites)
+        setInviteTotal(res.total ?? null)
+        setInviteCounts(res.counts ?? null)
+      } catch (err) {
+        toast.error(err instanceof HttpError ? err.message : t("adm.2"))
+      } finally {
+        setInviteLoading(false)
+      }
+    },
+    [t]
+  )
+
+  // 分类或页码变化 → 重新拉。⚠️ 门卫同捐献 tab：初次挂载不拉，
+  // 首次加载由 loadInvites() 把 ref 置真（那颗 ref 见下）。
+  React.useEffect(() => {
+    if (!invitesLoadedRef.current) return
+    void loadInvitePage(invitePage, inviteFilter)
+  }, [loadInvitePage, invitePage, inviteFilter])
+
+  /** 拉邀请码列表（保留当前页与筛选）；首次调用顺带打开门卫 */
+  const loadInvites = React.useCallback(async () => {
+    invitesLoadedRef.current = true
+    await loadInvitePage(invitePage, inviteFilter)
+  }, [loadInvitePage, invitePage, inviteFilter])
+
+  /**
+   * 页面头部的统计「已注册用户 N 个 · 邀请码 M 个」。
+   * 邀请码总数以前要等用户切到 invite tab 才有值（一直显示 0）—— 这里在挂载时
+   * 单独取一次（count_only，只一条 COUNT，很轻），进页面就能看到正确数字。
+   */
+  React.useEffect(() => {
+    let cancelled = false
+    adminApi
+      .listInvites({ countOnly: true })
+      .then((r) => !cancelled && setInviteTotalAll(r.total ?? 0))
+      .catch(() => {})
+    return () => {
+      cancelled = true
     }
   }, [])
 
@@ -1207,7 +1310,11 @@ export default function AdminPage() {
       setInviteCode("")
       setInviteMax("1")
       setInviteOpen(false)
-      void loadInvites()
+      // 新码按创建时间倒序排在最前；若停在别的页会看不到，所以回第一页。
+      // 直接给 loadInvitePage 传 page=0 / status=""（列表按创建时间倒序、新码必在全部里）。
+      setInvitePage(0)
+      setInviteFilter("")
+      void loadInvitePage(0, "")
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.4"))
     } finally {
@@ -1926,6 +2033,18 @@ export default function AdminPage() {
         wb2api: isSettingOn(s.donation_grant_wb2api, true),
         cli2api: isSettingOn(s.donation_grant_cli2api, true),
       })
+      // 捐献可发放「可转授额度」的模块：缺省/取不到时按「四个都发」显示
+      // （与后端 parseDonationQuotaFeatures 的缺省口径一致）
+      const dqRaw = (s.donation_transfer_features ?? "r2,ai,frp,proxy")
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean)
+      setDonationQuotaFeatures({
+        r2: dqRaw.includes("r2"),
+        ai: dqRaw.includes("ai"),
+        frp: dqRaw.includes("frp"),
+        proxy: dqRaw.includes("proxy"),
+      })
       // ---- 2026-09-26 补齐的设置项 ----
       setNewapiFreePlanId(s.newapi_free_plan_id ?? "1")
       setQuotaPerUnitInput(s.newapi_quota_per_unit ?? "500000")
@@ -2048,6 +2167,11 @@ export default function AdminPage() {
         donation_grant_proxy: donationGrants.proxy,
         donation_grant_wb2api: donationGrants.wb2api,
         donation_grant_cli2api: donationGrants.cli2api,
+        // 可转授额度的模块，逗号分隔；全关时发空串（后端 = 一个都不发）
+        donation_transfer_features: Object.entries(donationQuotaFeatures)
+          .filter(([, on]) => on)
+          .map(([k]) => k)
+          .join(","),
         // 反代账号捐献通道
         wb2api_enabled: wb2apiEnabled,
         wb2api_donation_visible: wb2apiDonationVisible,
@@ -3592,7 +3716,12 @@ export default function AdminPage() {
     <div>
       <PageHeader
         title={t("adm.213")}
-        description={t("adm.978", { v0: users.length, v1: invites.length })}
+        // ⚠️ 必须用服务端返回的 total，不能用 users.length —— 分页后那只是**当前页**
+        // （50 条 + 20 条注销留痕 = 70），页面头部一度因此显示「已注册用户 70 个」。
+        description={t("adm.978", {
+          v0: userTotalAll ?? serverTotal ?? users.length,
+          v1: inviteTotalAll ?? inviteTotal ?? invites.length,
+        })}
       />
 
       <Tabs value={activeTab} onValueChange={handleTabChange}>
@@ -3762,10 +3891,83 @@ export default function AdminPage() {
               )}
               {t("adm.registerIp")}
             </Button>
+            {/* 行级多选的操作条：勾选 ≥1 行才出现（列表刷新时勾选会被清空） */}
+            {selectedUserIds.size > 0 && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="secondary">
+                  {t("adm.bulk.selected", { n: String(selectedUserIds.size) })}
+                </Badge>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setBulkChecked(new Set())
+                    setBulkOpen(true)
+                  }}
+                >
+                  <UserCheck className="mr-1.5 h-3.5 w-3.5" />
+                  {t("adm.bulk.edit")}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setSelectedUserIds(new Set())}>
+                  {t("adm.bulk.clear")}
+                </Button>
+              </div>
+            )}
           </div>
 
+        {/* 批量编辑功能权限：只开通勾选的功能、不回收任何现有权限；不提供全选
+            （doulor 主域权限敏感，逐项勾选是刻意留的摩擦——语义见 admin-users-bulk.ts） */}
+        <Dialog open={bulkOpen} onOpenChange={setBulkOpen}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle>{t("adm.bulk.title")}</DialogTitle>
+              <DialogDescription>
+                {t("adm.bulk.desc", { n: String(selectedUserIds.size) })}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-1.5">
+              {FEATURES.map((f) => (
+                <label
+                  key={f.key}
+                  className="flex cursor-pointer items-center gap-2.5 rounded-md border p-2.5 text-sm transition-colors hover:bg-accent/40"
+                >
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-primary"
+                    checked={bulkChecked.has(f.key)}
+                    onChange={(e) => {
+                      setBulkChecked((prev) => {
+                        const next = new Set(prev)
+                        if (e.target.checked) next.add(f.key)
+                        else next.delete(f.key)
+                        return next
+                      })
+                    }}
+                  />
+                  <span>{t(f.label)}</span>
+                </label>
+              ))}
+            </div>
+            <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-600 dark:text-amber-400">
+              {t("adm.bulk.onlyGrant")}
+            </p>
+            <p className="text-xs text-muted-foreground">{t("adm.bulk.noSelectAll")}</p>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setBulkOpen(false)}>
+                {t("common.cancel")}
+              </Button>
+              <Button
+                disabled={bulkBusy || bulkChecked.size === 0}
+                onClick={() => void submitBulkFeatures()}
+              >
+                {bulkBusy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+                {t("adm.bulk.confirm")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
       {loading ? (
-        <LoadingBlock />
+        <AdminUsersSkeleton withRegisterIp={showRegisterIp} />
       ) : filtered.length === 0 ? (
         <EmptyState title={t("adm.242")} description={t("adm.243")} />
       ) : (
@@ -3773,6 +3975,8 @@ export default function AdminPage() {
           <Table wrapperClassName="overflow-x-auto lg:overflow-clip">
             <TableHeader>
               <TableRow>
+                {/* 行级多选（无全选：批量权限的摩擦是刻意的） */}
+                <TableHead className="sticky top-[56px] z-10 w-10 border-b bg-card" />
                 <TableHead className="sticky top-[56px] z-10 w-16 border-b bg-card">UID</TableHead>
                 <TableHead className="sticky top-[56px] z-10 border-b bg-card">{t("adm.327")}</TableHead>
                 <TableHead className="sticky top-[56px] z-10 border-b bg-card">{t("adm.328")}</TableHead>
@@ -3799,7 +4003,7 @@ export default function AdminPage() {
                     <TableCell className="font-mono text-xs">
                       {u.uid != null ? fmtUid(u.uid) : "—"}
                     </TableCell>
-                    <TableCell colSpan={10}>
+                    <TableCell colSpan={11}>
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono text-sm line-through">{u.username}</span>
                         <span className="text-xs">{u.email}</span>
@@ -3813,6 +4017,22 @@ export default function AdminPage() {
                   </TableRow>
                 ) : (
                 <TableRow key={u.id}>
+                  <TableCell className="w-10 align-top">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 cursor-pointer accent-primary"
+                      checked={selectedUserIds.has(u.id)}
+                      onChange={(e) => {
+                        setSelectedUserIds((prev) => {
+                          const next = new Set(prev)
+                          if (e.target.checked) next.add(u.id)
+                          else next.delete(u.id)
+                          return next
+                        })
+                      }}
+                      aria-label={u.username}
+                    />
+                  </TableCell>
                   <TableCell className="font-mono text-xs text-muted-foreground">
                     {u.uid != null ? fmtUid(u.uid) : "—"}
                   </TableCell>
@@ -4031,14 +4251,18 @@ export default function AdminPage() {
           {/* 分类筛选：数字是各分类的条数 */}
           <div className="mb-4 flex flex-wrap gap-2">
             {INVITE_FILTERS.map((f) => {
-              const n = f.key === "" ? invites.length : filterInvites(invites, f.key).length
+              const n = inviteCounts?.[f.key] ?? (f.key === "" ? invites.length : filterInvites(invites, f.key).length)
               const active = inviteFilter === f.key
               return (
                 <Button
                   key={f.key || "all"}
                   size="sm"
                   variant={active ? "default" : "outline"}
-                  onClick={() => setInviteFilter(f.key)}
+                  onClick={() => {
+                    setInviteFilter(f.key)
+                    // 换分类回第一页（React 自动批处理，下面的 effect 只会跑一次）
+                    setInvitePage(0)
+                  }}
                 >
                   {t(f.label)}
                   <span className="ml-1.5 tabular-nums opacity-70">{n}</span>
@@ -4048,14 +4272,18 @@ export default function AdminPage() {
           </div>
 
           {inviteLoading ? (
-            <LoadingBlock />
+            <AdminInvitesSkeleton />
           ) : invites.length === 0 ? (
-            <EmptyState title={t("adm.248")} description={t("adm.249")} />
-          ) : filterInvites(invites, inviteFilter).length === 0 ? (
-            <EmptyState
-              title={t("adm.984", { v0: t(INVITE_FILTERS.find((f) => f.key === inviteFilter)?.label ?? "") })}
-              description={t("adm.250")}
-            />
+            // 服务端筛选后为空要分清两种情况：全站一个码都没有 vs 只是该分类没有。
+            // counts[""] 是「全部」的总数（GROUP BY 带出），有它就能区分。
+            (inviteCounts?.[""] ?? 0) === 0 ? (
+              <EmptyState title={t("adm.248")} description={t("adm.249")} />
+            ) : (
+              <EmptyState
+                title={t("adm.984", { v0: t(INVITE_FILTERS.find((f) => f.key === inviteFilter)?.label ?? "") })}
+                description={t("adm.250")}
+              />
+            )
           ) : (
             <div className="rounded-lg border bg-card">
               <Table>
@@ -4070,7 +4298,7 @@ export default function AdminPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {filterInvites(invites, inviteFilter).map((inv) => {
+                  {invites.map((inv) => {
                     const exhausted = inv.usedCount >= inv.maxUses
                     const expired =
                       inv.expiresAt !== null &&
@@ -4162,6 +4390,42 @@ export default function AdminPage() {
               </Table>
             </div>
           )}
+
+          {/* 服务端分页控件（2026-10-08，与用户/捐献列表同款） */}
+          {!inviteLoading && inviteTotal != null && inviteTotal > INVITE_PAGE_SIZE && (
+            <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
+              <span>
+                {t("adm.userPageInfo", {
+                  from: invitePage * INVITE_PAGE_SIZE + 1,
+                  to: Math.min((invitePage + 1) * INVITE_PAGE_SIZE, inviteTotal),
+                  total: inviteTotal,
+                })}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={invitePage === 0}
+                  onClick={() => setInvitePage((p) => Math.max(0, p - 1))}
+                >
+                  <ChevronLeft className="mr-1 h-3.5 w-3.5" />
+                  {t("adm.userPagePrev")}
+                </Button>
+                <span className="tabular-nums">
+                  {invitePage + 1} / {Math.ceil(inviteTotal / INVITE_PAGE_SIZE)}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={(invitePage + 1) * INVITE_PAGE_SIZE >= inviteTotal}
+                  onClick={() => setInvitePage((p) => p + 1)}
+                >
+                  {t("adm.userPageNext")}
+                  <ChevronRight className="ml-1 h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="frp">
@@ -4218,7 +4482,7 @@ export default function AdminPage() {
           </div>
 
           {frpLoading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : (
             <div className="space-y-4">
               {frpApps.length === 0 ? (
@@ -4564,7 +4828,7 @@ export default function AdminPage() {
           </div>
 
           {proxyLoading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : proxySubs.length === 0 ? (
             <EmptyState
               title={t("adm.257")}
@@ -4672,7 +4936,7 @@ export default function AdminPage() {
           </div>
 
           {inviteQuotaLoading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="table" />
           ) : (inviteQuotas?.users.length ?? 0) === 0 ? (
             <EmptyState title={t("adm.260")} description={t("adm.261")} />
           ) : quotaUsers.length === 0 ? (
@@ -4801,7 +5065,7 @@ export default function AdminPage() {
           </div>
 
           {reservedLoading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="table" />
           ) : reserved.length === 0 ? (
             <EmptyState title={t("adm.265")} description={t("adm.266")} />
           ) : (
@@ -4964,7 +5228,7 @@ export default function AdminPage() {
           </div>
 
           {donationLoading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : donations.length === 0 ? (
             <EmptyState
               title={t("adm.269")}
@@ -5275,7 +5539,7 @@ export default function AdminPage() {
             </Button>
           </div>
           {announcementLoading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : announcements.length === 0 ? (
             <EmptyState
               icon={Megaphone}
@@ -5387,7 +5651,7 @@ export default function AdminPage() {
             </Button>
           </div>
           {eventLoading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : events.length === 0 ? (
             <EmptyState
               icon={PartyPopper}
@@ -5543,7 +5807,7 @@ export default function AdminPage() {
           </div>
 
           {r2Loading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="cards" />
           ) : !r2Data || (r2Data.buckets.length === 0 && !r2Data.legacyBucket) ? (
             <EmptyState
               icon={Database}
@@ -5889,7 +6153,7 @@ export default function AdminPage() {
           </div>
 
           {communityLoading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : communityPosts.length === 0 ? (
             <EmptyState
               icon={MessagesSquare}
@@ -5974,7 +6238,7 @@ export default function AdminPage() {
               </CardHeader>
               <CardContent className="space-y-4">
                 {newapiCredLoading ? (
-                  <LoadingBlock />
+                  <LoadingBlock variant="form" />
                 ) : (
                   <>
                     <div className="space-y-1 rounded-md border p-3 text-sm">
@@ -6431,7 +6695,7 @@ export default function AdminPage() {
               </CardHeader>
               <CardContent className="space-y-4">
                 {wb2apiLoading ? (
-                  <LoadingBlock />
+                  <LoadingBlock variant="list" />
                 ) : (
                   <>
                     <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -6720,7 +6984,7 @@ export default function AdminPage() {
               </CardHeader>
               <CardContent className="space-y-4">
                 {cli2apiLoading ? (
-                  <LoadingBlock />
+                  <LoadingBlock variant="list" />
                 ) : (
                   <>
                     <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -6965,7 +7229,7 @@ export default function AdminPage() {
 
         <TabsContent value="settings">
           {settingsLoading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="form" />
           ) : (
             <div className="space-y-6">
               <Card>
@@ -7715,6 +7979,39 @@ export default function AdminPage() {
                     </div>
                   ))}
                   <p className="text-xs text-muted-foreground">{t("adm.1283")}</p>
+                </CardContent>
+              </Card>
+
+              {/* 捐献发放「可转授的模块权限额度」：四个模块**各自一个开关**。
+                  ⚠️ 与上面那张「捐献授予权限」不是一回事，别合并：
+                  那张管「捐献者自己**能不能用**该模块」，这张管「**能不能把该模块
+                  转授给别人**」（建邀请码时勾选的额度）。站长 2026-10-08 要求：
+                  捐献了也不一定该换出可转授的额度，否则用户捐个 AI 渠道就能建成
+                  邀请码直接给别人开通中转站；且要能**逐模块**单独控制。 */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{t("adm.1302")}</CardTitle>
+                  <CardDescription>{t("adm.1303")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {DONATION_QUOTA_ITEMS.map((item) => (
+                    <div
+                      key={item.key}
+                      className="flex items-center justify-between rounded-md border p-3"
+                    >
+                      <div className="space-y-0.5">
+                        <p className="text-sm font-medium">{t(item.label)}</p>
+                        <p className="text-xs text-muted-foreground">{t(item.desc)}</p>
+                      </div>
+                      <Switch
+                        checked={donationQuotaFeatures[item.key] ?? false}
+                        onCheckedChange={(v) =>
+                          setDonationQuotaFeatures((prev) => ({ ...prev, [item.key]: v }))
+                        }
+                      />
+                    </div>
+                  ))}
+                  <p className="text-xs text-muted-foreground">{t("adm.1306")}</p>
                 </CardContent>
               </Card>
 
@@ -8544,7 +8841,7 @@ export default function AdminPage() {
             </DialogDescription>
           </DialogHeader>
           {traceBusy ? (
-            <LoadingBlock />
+            <LoadingBlock variant="cards" />
           ) : traceData ? (
             <div className="space-y-4">
               {/* 一人多号警示：出现共享注册 IP 时置顶显示 */}
@@ -9466,7 +9763,7 @@ export default function AdminPage() {
             </DialogDescription>
           </DialogHeader>
           {claimsLoading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="table" />
           ) : claims.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">{t("adm.823")}</p>
           ) : (
@@ -10870,6 +11167,9 @@ function inviteBucket(inv: AdminInvite): "unused" | "partial" | "used" {
   if (inv.usedCount >= inv.maxUses) return "used"
   return "partial"
 }
+
+/** 邀请码列表每页条数（与用户/捐献列表一致） */
+const INVITE_PAGE_SIZE = 50
 
 const INVITE_FILTERS: { key: string; label: string }[] = [
   { key: "", label: "adm.1206" },

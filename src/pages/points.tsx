@@ -1,4 +1,5 @@
 import * as React from "react"
+import { FeatureCardsSkeleton } from "@/components/skeletons"
 import { Link } from "react-router-dom"
 import {
   CalendarClock,
@@ -31,7 +32,6 @@ import { toast } from "sonner"
 import { PageHeader } from "@/components/page-header"
 import { AnchoredPanel } from "@/components/anchored-panel"
 import { EmptyState } from "@/components/empty-state"
-import { LoadingBlock } from "@/components/loading-block"
 import { ShopIconPicker } from "@/components/shop-icon-picker"
 import { CheckinDialog } from "@/components/checkin-dialog"
 import { Button } from "@/components/ui/button"
@@ -1554,7 +1554,7 @@ export default function PointsPage() {
       />
 
       {loading && !data ? (
-        <LoadingBlock />
+        <FeatureCardsSkeleton />
       ) : !data ? (
         <EmptyState
           title={t("pt.loadFailed")}

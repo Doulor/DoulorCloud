@@ -1,4 +1,5 @@
 import * as React from "react"
+import { FeatureCardsSkeleton } from "@/components/skeletons"
 import {
   AlertTriangle,
   ChevronDown,
@@ -15,7 +16,6 @@ import { toast } from "sonner"
 import { PageHeader } from "@/components/page-header"
 import { FeatureLockedNotice } from "@/components/feature-locked-notice"
 import { EmptyState } from "@/components/empty-state"
-import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -423,7 +423,7 @@ export default function ProxyPage() {
     return (
       <div>
         <PageHeader title={t("px.title")} description={t("px.subtitle")} />
-        <LoadingBlock />
+        <FeatureCardsSkeleton />
       </div>
     )
   }

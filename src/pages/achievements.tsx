@@ -5,7 +5,7 @@ import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
-import { LoadingBlock } from "@/components/loading-block"
+import { FeatureCardsSkeleton } from "@/components/skeletons"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -285,7 +285,7 @@ export default function AchievementsPage() {
     return (
       <div>
         <PageHeader title={t("ach.title")} description={t("ach.desc")} />
-        <LoadingBlock />
+        <FeatureCardsSkeleton />
       </div>
     )
   }

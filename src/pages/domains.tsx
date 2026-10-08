@@ -4,7 +4,7 @@ import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
-import { LoadingBlock } from "@/components/loading-block"
+import { DomainRecordsSkeleton } from "@/components/skeletons"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -515,7 +515,7 @@ export default function DomainsPage() {
         </div>
         <div className="space-y-3 p-3">
           {loading && subdomains.length === 0 ? (
-            <LoadingBlock />
+            <DomainRecordsSkeleton />
           ) : subdomains.length === 0 ? (
             <p className="px-2 py-6 text-sm text-muted-foreground">{t("dm.empty")}</p>
           ) : (

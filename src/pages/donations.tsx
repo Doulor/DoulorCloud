@@ -378,7 +378,7 @@ export default function DonationPage() {
    */
   const renderRecords = (...types: string[]) => {
     const rows = (data?.donations ?? []).filter((d) => types.includes(d.type))
-    if (loading) return <LoadingBlock />
+    if (loading) return <LoadingBlock variant="list" />
     if (failed) {
       return (
         <EmptyState

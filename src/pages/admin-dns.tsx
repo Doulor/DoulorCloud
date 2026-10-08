@@ -50,6 +50,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { AdminMailboxes } from "@/components/admin-mailboxes"
 import { adminDnsApi, adminSubdomainsApi, errMsg } from "@/services/api"
 import { fmtDateTime } from "@/lib/format"
 import { notifyAttentionChanged } from "@/lib/attention-events"
@@ -604,8 +605,11 @@ export function DnsAdminPanel() {
       </Card>
 
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
+        {/* h-auto + flex-wrap：移动端窄屏放不下时换行，而不是横向溢出屏幕外 */}
+        <TabsList className="h-auto max-w-full flex-wrap">
           <TabsTrigger value="subdomains">{t("dns.tab.subdomains")}</TabsTrigger>
+          {/* 邮箱管理与子域名管理同形态（跨用户增删改 + 查看内容），紧挨着放 */}
+          <TabsTrigger value="mailboxes">{t("dns.tab.mailboxes")}</TabsTrigger>
           <TabsTrigger value="records">{t("dns.tab.records")}</TabsTrigger>
           <TabsTrigger value="findings">
             {t("dns.tab.findings")}
@@ -646,7 +650,7 @@ export function DnsAdminPanel() {
           </div>
 
           {subLoading && !subData ? (
-            <LoadingBlock />
+            <LoadingBlock variant="table" />
           ) : !subData || subData.subdomains.length === 0 ? (
             <EmptyState
               title={t("dns.sub.empty.title")}
@@ -770,6 +774,11 @@ export function DnsAdminPanel() {
           )}
         </TabsContent>
 
+        {/* ================= 邮箱管理（与子域名管理同形态）================= */}
+        <TabsContent value="mailboxes" className="space-y-3">
+          <AdminMailboxes />
+        </TabsContent>
+
         {/* ================= 记录列表 ================= */}
         <TabsContent value="records" className="space-y-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -838,7 +847,7 @@ export function DnsAdminPanel() {
           </div>
 
           {loading && !data ? (
-            <LoadingBlock />
+            <LoadingBlock variant="table" />
           ) : !data || data.records.length === 0 ? (
             <EmptyState title={t("dns.empty.records.title")} description={t("dns.empty.records.desc")} />
           ) : (
@@ -1004,7 +1013,7 @@ export function DnsAdminPanel() {
               </p>
             </div>
           ) : findingsLoading && !findings ? (
-            <LoadingBlock />
+            <LoadingBlock variant="table" />
           ) : !findings || findings.findings.length === 0 ? (
             <EmptyState title={t("dns.empty.findings.title")} description={t("dns.empty.findings.desc")} />
           ) : (
@@ -1130,7 +1139,7 @@ export function DnsAdminPanel() {
           </div>
 
           {cfLoading && !cfDiff ? (
-            <LoadingBlock />
+            <LoadingBlock variant="table" />
           ) : !cfDiff ? (
             <EmptyState title={t("dns.cf.empty.title")} description={t("dns.cf.empty.desc")} />
           ) : (

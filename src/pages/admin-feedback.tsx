@@ -49,6 +49,7 @@ import {
 } from "@/components/feedback-image"
 import { EmojiPicker } from "@/components/emoji-picker"
 import { StickerPanel } from "@/components/sticker-panel"
+import { Markdown } from "@/components/markdown"
 import { useEmojiInsert } from "@/hooks/use-emoji-insert"
 import { DraftImagePreview } from "@/components/draft-image-preview"
 import { useImageDrop } from "@/hooks/use-image-drop"
@@ -152,6 +153,13 @@ export function FeedbackPanel() {
     const text = replyText.trim()
     if (!text) {
       toast.error(t("af.err.replyEmpty"))
+      return
+    }
+    // 后端对回复是 `slice(0, 2000)` **静默截断**；输入框的 maxLength 只拦用户手打，
+    // 拦不住「程序化插入表情包」把长度顶上去。所以在这里明确拦一次，
+    // 免得站长以为文字丢了（2026-10-08）。
+    if (text.length > 2000) {
+      toast.error(t("af.err.replyTooLong"))
       return
     }
     setReplyBusy(true)
@@ -288,7 +296,7 @@ export function FeedbackPanel() {
       </div>
 
       {loading && !data ? (
-        <LoadingBlock />
+        <LoadingBlock variant="list" />
       ) : items.length === 0 ? (
         <EmptyState
           icon={MessageSquare}
@@ -318,9 +326,9 @@ export function FeedbackPanel() {
                         </span>
                       </div>
 
-                      <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
-                        {f.body}
-                      </p>
+                      {/* 工单正文：用户提交时也能插表情包，所以同样按 Markdown 渲染
+                          （否则 `![](/api/stickers/<id>/image)` 会原样显示成代码） */}
+                      <Markdown>{f.body}</Markdown>
                       <ImageGallery images={f.images} />
 
                       {/* 对话消息（用户追加 + 管理员回复） */}
@@ -365,7 +373,12 @@ export function FeedbackPanel() {
                                 · {fmtDateTime(m.createdAt)}
                               </span>
                             </div>
-                            <p className="whitespace-pre-wrap break-words text-sm">{m.body}</p>
+                            {/* 「回复历史」里的每条消息：用 Markdown 渲染。
+                                ⚠️ 站长报的「只看到表情包代码、没文字」看的就是这里
+                                （2026-10-08）—— 纯文本会把 `![](/api/stickers/<id>/image)`
+                                原样显示成一长串代码。用户端本来就是 Markdown 渲染，
+                                这里对齐。 */}
+                            <Markdown>{m.body}</Markdown>
                             <ImageGallery images={m.images} />
                           </div>
                         )
@@ -389,7 +402,12 @@ export function FeedbackPanel() {
                                 </Badge>
                               )}
                             </p>
-                            <p className="whitespace-pre-wrap break-words text-sm">{f.adminReply}</p>
+                            {/* 用 Markdown 渲染而非纯文本：回复里带表情包时插进来的是
+                                `![](/api/stickers/<id>/image)`，纯文本会把这一长串代码
+                                直接显示出来（2026-10-08 站长反馈「只看到表情包的代码」）。
+                                用户端一直是用 Markdown 渲染的（见 pages/feedback.tsx），
+                                这里只是把两端口径对齐。 */}
+                            <Markdown>{f.adminReply}</Markdown>
                           </div>
                         </>
                       )}
@@ -454,11 +472,9 @@ export function FeedbackPanel() {
 
           {replyTarget && (
             <div className="space-y-4">
-              {/* 原正文放出来，回复时不用来回切页面看上下文 */}
+              {/* 原正文放出来，回复时不用来回切页面看上下文（同样走 Markdown） */}
               <div className="max-h-40 overflow-y-auto rounded-md border bg-muted/30 p-3">
-                <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
-                  {replyTarget.body}
-                </p>
+                <Markdown>{replyTarget.body}</Markdown>
               </div>
 
               <div

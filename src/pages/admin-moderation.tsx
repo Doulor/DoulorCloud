@@ -3,8 +3,10 @@ import {
   AlertTriangle,
   CheckCircle2,
   Loader2,
+  Network,
   Plus,
   RefreshCw,
+  Search,
   ShieldAlert,
   ShieldBan,
   ShieldCheck,
@@ -40,7 +42,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { adminApi, adminModerationApi, errMsg } from "@/services/api"
+import { adminApi, adminModerationApi, errMsg, type IpWatchResult } from "@/services/api"
 import { useT } from "@/i18n"
 import type {
   AccountAppeal,
@@ -108,6 +110,23 @@ export function ModerationAdminPanel() {
   const [condMetric, setCondMetric] = React.useState<ModerationConditionMetric>("achievement_points")
   const [condOp, setCondOp] = React.useState<ModerationConditionOp>("gt")
   const [condValue, setCondValue] = React.useState("20")
+
+  // ---- IP 监管（2026-10-08 站长要求）----
+  // 刻意做成「点按钮才查」：全表聚合 + 一次可能返回几千行明细，
+  // 每次切到这个页签都自动跑一遍没必要。
+  const [ipResult, setIpResult] = React.useState<IpWatchResult | null>(null)
+  const [ipBusy, setIpBusy] = React.useState(false)
+
+  const runIpWatch = async () => {
+    setIpBusy(true)
+    try {
+      setIpResult(await adminModerationApi.ipWatch())
+    } catch (err) {
+      toast.error(errMsg(err, t("mod.err.load")))
+    } finally {
+      setIpBusy(false)
+    }
+  }
 
   const loadLists = React.useCallback(async () => {
     try {
@@ -266,9 +285,18 @@ export function ModerationAdminPanel() {
 
   const pendingAppeals = appeals.filter((a) => a.status === "pending").length
   const openRisks = risks.filter((r) => r.status === "open").length
+  /**
+   * 白名单人数**按人去重**。
+   *
+   * ⚠️ 不能写成「手动人数 + 各条件分组人数之和」：条件之间是并集，同一个人
+   * 可能同时满足多个条件、出现在多个分组里（例如既有称号又够成就点），
+   * 那样相加会把一个人算好几遍（实测 15 人手动 + 22 + 13 = 50，而真实只有 35 人）。
+   */
   const whitelistTotal = lists
-    ? lists.whitelist.manual.length +
-      lists.whitelist.groups.reduce((n, g) => n + g.users.length, 0)
+    ? new Set([
+        ...lists.whitelist.manual.map((u) => u.username),
+        ...lists.whitelist.groups.flatMap((g) => g.users.map((u) => u.username)),
+      ]).size
     : 0
   const blacklistTotal = lists
     ? lists.blacklist.manual.length + lists.blacklist.auto.length
@@ -285,7 +313,8 @@ export function ModerationAdminPanel() {
       </div>
 
       <Tabs defaultValue="risk">
-        <TabsList>
+        {/* h-auto + flex-wrap：移动端窄屏放不下时换行，而不是横向溢出屏幕外 */}
+        <TabsList className="h-auto max-w-full flex-wrap">
           <TabsTrigger value="risk" className="gap-1.5">
             <ShieldAlert className="h-3.5 w-3.5" />
             {t("mod.tab.risk")}
@@ -322,12 +351,21 @@ export function ModerationAdminPanel() {
               </Badge>
             )}
           </TabsTrigger>
+          <TabsTrigger value="ipwatch" className="gap-1.5">
+            <Network className="h-3.5 w-3.5" />
+            {t("mod.tab.ipwatch")}
+            {ipResult && ipResult.ipCount > 0 && (
+              <Badge variant="destructive" className="h-4 px-1 text-[10px] tabular-nums">
+                {ipResult.ipCount}
+              </Badge>
+            )}
+          </TabsTrigger>
         </TabsList>
 
         {/* ---- 风险账户 ---- */}
         <TabsContent value="risk" className="mt-4">
           {loading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : risks.length === 0 ? (
             <EmptyState
               icon={ShieldCheck}
@@ -413,7 +451,7 @@ export function ModerationAdminPanel() {
         {/* ---- 封禁申诉 ---- */}
         <TabsContent value="appeals" className="mt-4">
           {loading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : appeals.length === 0 ? (
             <EmptyState
               icon={ShieldCheck}
@@ -506,7 +544,7 @@ export function ModerationAdminPanel() {
           </div>
 
           {!lists ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : (
             <div className="space-y-3">
               <div className="rounded-lg border bg-card p-4">
@@ -543,6 +581,10 @@ export function ModerationAdminPanel() {
                       {g.metric === "custom_title"
                         ? t("mod.wl.groupTitleCustom")
                         : t("mod.wl.groupTitle", { op: t(`mod.op.${g.op}`), n: g.value })}
+                      {/* 条件之间是并集：同一人可以出现在多个分组里，所以各组人数之和不等于白名单总数 */}
+                      <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                        {t("mod.wl.count", { n: g.users.length })}
+                      </span>
                     </p>
                     <div className="flex items-center gap-2">
                       <Switch
@@ -661,7 +703,7 @@ export function ModerationAdminPanel() {
           </div>
 
           {!lists ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : (
             <div className="space-y-3">
               {(["manual", "auto"] as const).map((src) => {
@@ -698,6 +740,80 @@ export function ModerationAdminPanel() {
                   </div>
                 )
               })}
+            </div>
+          )}
+        </TabsContent>
+
+        {/* ---- IP 监管：多个账号共用同一个登录 IP ---- */}
+        <TabsContent value="ipwatch" className="mt-4 space-y-4">
+          <p className="text-xs leading-relaxed text-muted-foreground">{t("mod.ip.desc")}</p>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <Button size="sm" onClick={() => void runIpWatch()} disabled={ipBusy}>
+              {ipBusy ? (
+                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Search className="mr-1 h-3.5 w-3.5" />
+              )}
+              {ipBusy ? t("mod.ip.querying") : t("mod.ip.query")}
+            </Button>
+            {ipResult && (
+              <span className="text-xs text-muted-foreground">
+                {t("mod.ip.summary", { n: ipResult.ipCount, u: ipResult.userCount })}
+              </span>
+            )}
+          </div>
+
+          {!ipResult ? (
+            <div className="rounded-lg border border-dashed bg-muted/30 p-8 text-center text-xs text-muted-foreground">
+              {t("mod.ip.idle")}
+            </div>
+          ) : ipResult.groups.length === 0 ? (
+            <div className="rounded-lg border bg-card p-8 text-center text-xs text-muted-foreground">
+              <CheckCircle2 className="mx-auto mb-2 h-5 w-5 text-emerald-500" />
+              {t("mod.ip.empty")}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {ipResult.groups.map((g) => (
+                <div key={g.ip} className="overflow-hidden rounded-lg border bg-card">
+                  {/* 组头：IP + 风险提示 + 共用人数 */}
+                  <div className="flex flex-wrap items-center gap-2 border-b bg-destructive/5 px-4 py-2.5">
+                    <Badge variant="destructive" className="gap-1">
+                      <AlertTriangle className="h-3 w-3" />
+                      {t("mod.ip.riskBadge")}
+                    </Badge>
+                    <span className="break-all font-mono text-sm font-medium">{g.ip}</span>
+                    <Badge variant="secondary" className="ml-auto shrink-0">
+                      {t("mod.ip.userCount", { n: g.userCount })}
+                    </Badge>
+                  </div>
+                  {/* 明细：这个 IP 下出现过的每个账号 */}
+                  <ul className="divide-y">
+                    {g.users.map((u) => (
+                      <li
+                        key={u.username}
+                        className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-2"
+                      >
+                        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+                          <span className="text-sm font-medium">{u.nickname || u.username}</span>
+                          {u.nickname && (
+                            <span className="font-mono text-xs text-muted-foreground">
+                              @{u.username}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex shrink-0 items-center gap-3 text-[11px] text-muted-foreground">
+                          <span className="tabular-nums">{t("mod.ip.times", { n: u.times })}</span>
+                          <span>
+                            {t("mod.ip.lastSeen", { time: fmt(u.lastSeenAt) })}
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
             </div>
           )}
         </TabsContent>

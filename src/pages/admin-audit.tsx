@@ -129,7 +129,7 @@ export function AuditPanel() {
       </div>
 
       {loading && !data ? (
-        <LoadingBlock />
+        <LoadingBlock variant="list" />
       ) : !data || data.items.length === 0 ? (
         <EmptyState
           icon={ScrollText}

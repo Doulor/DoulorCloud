@@ -210,7 +210,7 @@ export function FunLinksAdminPanel() {
         </CardHeader>
         <CardContent>
           {loading && !links ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : (links?.length ?? 0) === 0 ? (
             <EmptyState
               icon={Sparkles}

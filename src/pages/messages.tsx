@@ -1,6 +1,7 @@
 import * as React from "react"
 import { useT } from "@/i18n"
 import { useNavigate, useParams } from "react-router-dom"
+import { suppressNextPageEnter } from "@/components/page-enter"
 import {
   Bell,
   Check,
@@ -198,6 +199,9 @@ export default function MessagesPage() {
     const c = v as MessageCategory
     if (!TABS.includes(c) || c === tab || lastNavRef.current === c) return
     lastNavRef.current = c
+    // 换分类只是换了 URL 上的一个参数、页面主体没变：
+    // 告诉 PageEnter 别重播整页入场，否则整个界面会闪一下（2026-10-08 站长反馈）
+    suppressNextPageEnter()
     navigate(`/dashboard/messages/${c}`)
   }
 
@@ -408,7 +412,7 @@ export default function MessagesPage() {
               </div>
             ) : !messages[c] ? (
               // 该分类还没加载过（首次进入 / 深链直达）→ 骨架
-              <LoadingBlock />
+              <LoadingBlock variant="list" />
             ) : (messages[c] ?? []).length === 0 ? (
               <EmptyState
                 icon={CATEGORY_META[c].icon}
@@ -648,7 +652,7 @@ function EventList({
 }) {
   const { t } = useT()
 
-  if (loading && events.length === 0) return <LoadingBlock />
+  if (loading && events.length === 0) return <LoadingBlock variant="list" />
   if (events.length === 0) {
     return (
       <EmptyState

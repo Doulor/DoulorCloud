@@ -1630,6 +1630,49 @@ export interface AdminSubdomainListResponse {
   rootDomains: { name: string; label: string }[]
 }
 
+// ---- 邮箱管理（管理端 · 与子域名管理同形态）----
+
+/** 管理端看到的邮箱（跨用户） */
+export interface AdminMailbox {
+  id: string
+  address: string
+  /** 主邮箱（注册时分配的那个地址）：删除前要在确认框里点名提醒 */
+  primary: boolean
+  /** 临时邮箱（用完就换的那类） */
+  isTemp: boolean
+  /** 转发目标 + 是否已验证（「待验证」= 用户还没走完验证流程） */
+  forwardingTo: { email: string; verified: boolean }[]
+  messageCount: number
+  unreadCount: number
+  createdAt: string
+  /** 建这个邮箱的来源：web（用户自建）/ api（公开 API）/ admin（管理端代建） */
+  source: string
+  owner: { id: string; username: string; email: string; status: string }
+}
+
+export interface AdminMailboxListResponse {
+  mailboxes: AdminMailbox[]
+  total: number
+  page: number
+  pageSize: number
+  /** 代建时可选的根域（已启用） */
+  rootDomains: { name: string; label: string }[]
+}
+
+/** 管理端邮件列表项（不含正文） */
+export interface AdminMailboxMessage {
+  id: string
+  fromAddress: string
+  subject: string
+  read: boolean
+  receivedAt: string
+}
+
+/** 管理端单封邮件（含正文）。⚠️ 管理端读取**不会**把它标成已读 */
+export interface AdminMailboxMessageDetail extends AdminMailboxMessage {
+  textBody: string
+}
+
 // ---- 捐献 ----
 
 export interface Donation {
@@ -2968,6 +3011,10 @@ export interface AdminPointsUser {
 /** GET /api/admin/points 响应 */
 export interface AdminPointsOverview {
   users: AdminPointsUser[]
+  /** 分页信息（只有显式带 limit/offset 的请求才返回） */
+  total?: number
+  limit?: number
+  offset?: number
   stats: {
     /** 累计发放（**不含**用户商城的卖家收益 —— 那是用户间的转移，不是平台增发） */
     issued: number
@@ -2975,9 +3022,9 @@ export interface AdminPointsOverview {
     redeemed: number
     /** 用户商城的累计成交额（买家付出的积分总和） */
     traded: number
-    /** 列表内用户手上的积分总量 */
+    /** 当前在用户手上的积分总量（**全站**，不受分页影响） */
     holding: number
-    /** 持有积分（>0）的人数 */
+    /** 持有积分（>0）的人数（**全站**，不受分页影响） */
     holders: number
   }
 }

@@ -308,7 +308,7 @@ export function CfQuotaPanel() {
     void load()
   }, [load])
 
-  if (loading || !data) return <LoadingBlock />
+  if (loading || !data) return <LoadingBlock variant="cards" />
 
   const paid = data.plan === "paid"
   const planLabel = paid ? t("cq.labelPaid") : t("cq.labelFree")

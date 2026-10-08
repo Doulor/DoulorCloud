@@ -104,7 +104,7 @@ function VoteHistoryDialog({
         </DialogHeader>
 
         {loading && items === null ? (
-          <LoadingBlock />
+          <LoadingBlock variant="list" />
         ) : !items || items.length === 0 ? (
           <p className="py-8 text-center text-sm text-muted-foreground">{t("vote.hist.empty")}</p>
         ) : (

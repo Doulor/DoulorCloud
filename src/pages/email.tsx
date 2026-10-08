@@ -723,7 +723,7 @@ export default function EmailPage() {
         {/* 邮箱侧栏 */}
         <div className="flex flex-col gap-3">
           {loadingMailboxes ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : normalMailboxes.length === 0 ? (
             <EmptyState
               icon={Mail}
@@ -966,7 +966,7 @@ export default function EmailPage() {
               </div>
               <div className="max-h-[560px] overflow-y-auto">
                 {loadingMessages ? (
-                  <LoadingBlock />
+                  <LoadingBlock variant="list" />
                 ) : messages.length === 0 ? (
                   <EmptyState
                     icon={Inbox}

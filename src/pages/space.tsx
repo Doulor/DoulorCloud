@@ -16,7 +16,7 @@ import {
 import { toast } from "sonner"
 
 import { UserAvatar } from "@/components/user-avatar"
-import { LoadingBlock } from "@/components/loading-block"
+import { FeatureCardsSkeleton } from "@/components/skeletons"
 import { RoleBadge } from "@/components/role-badge"
 import { CustomTitleBadge } from "@/components/custom-title-badge"
 import { Badge } from "@/components/ui/badge"
@@ -269,7 +269,7 @@ export default function SpacePage() {
   if (loading) {
     return (
       <div className="mx-auto max-w-3xl px-4 py-8">
-        <LoadingBlock />
+        <FeatureCardsSkeleton />
       </div>
     )
   }

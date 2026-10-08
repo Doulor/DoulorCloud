@@ -329,7 +329,7 @@ export function OAuthAdminPanel() {
         </CardHeader>
         <CardContent>
           {loading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : clients.length === 0 ? (
             <EmptyState
               icon={KeyRound}

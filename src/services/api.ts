@@ -139,6 +139,10 @@ import {
   type AdminDnsCfDiff,
   type AdminSubdomain,
   type AdminSubdomainListResponse,
+  type AdminMailbox,
+  type AdminMailboxListResponse,
+  type AdminMailboxMessage,
+  type AdminMailboxMessageDetail,
   type Sticker,
 } from "@/types"
 import type { FunLinkCategory } from "@/lib/fun-links"
@@ -498,6 +502,16 @@ export const adminApi = {
     }>(`/admin/users${qs ? `?${qs}` : ""}`)
   },
 
+  /**
+   * 用户列表批量开通功能（只加不减：勾选的功能加到每个选中用户身上，
+   * 未勾选的一律不动；回收走用户详情逐人操作）。单次上限 200 人。
+   */
+  bulkGrantFeatures: (payload: { userIds: string[]; features: string[] }) =>
+    request<{ ok: boolean; updated: number; features: string[] }>("/admin/users/bulk-features", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   /** 管理员权限树（两级）+ 当前用户权限 + 侧边栏过滤开关 */
   getPermissionTree: () =>
     request<{
@@ -604,7 +618,32 @@ export const adminApi = {
   /** 每把 Brevo Key 的当日剩余额度（实时探测，无缓存） */
   brevoQuota: () => request<BrevoQuotaOverview>("/admin/mail/brevo-quota"),
 
-  listInvites: () => request<{ invites: AdminInvite[] }>("/admin/invites"),
+  /**
+   * 邀请码列表。不传参数 = 旧的全量模式；
+   * 传 limit/offset/status = 服务端分页筛选（响应带 total 与 counts）；
+   * countOnly = 只要总数（管理页头部的「邀请码 N 个」用，进页面即可显示）。
+   */
+  listInvites: (opts?: {
+    limit?: number
+    offset?: number
+    status?: string
+    countOnly?: boolean
+  }) => {
+    const p = new URLSearchParams()
+    if (opts?.countOnly) p.set("count_only", "1")
+    if (opts?.limit != null) p.set("limit", String(opts.limit))
+    if (opts?.offset != null) p.set("offset", String(opts.offset))
+    if (opts?.status) p.set("status", opts.status)
+    const qs = p.toString()
+    return request<{
+      invites: AdminInvite[]
+      total?: number
+      limit?: number
+      offset?: number
+      /** counts[""] = 全部，其余为 unused/partial/used。分页模式才有。 */
+      counts?: Record<string, number>
+    }>(`/admin/invites${qs ? `?${qs}` : ""}`)
+  },
 
   /** 所有用户的邀请码额度概况 */
   listInviteQuotas: () =>
@@ -2685,15 +2724,47 @@ export const adminModerationApi = {
       method: "POST",
       body: JSON.stringify({ action, ip, reason }),
     }),
+  /** IP 监管：查出被多个不同（未封禁）账号共用的登录 IP */
+  ipWatch: () => request<IpWatchResult>("/admin/moderation/ip-watch"),
+}
+
+/** 「IP 监管」里共用一个 IP 的某个账号 */
+export interface SharedIpUser {
+  username: string
+  nickname: string | null
+  firstSeenAt: string
+  lastSeenAt: string
+  times: number
+}
+
+/** 「IP 监管」里的一个可疑 IP 分组 */
+export interface SharedIpGroup {
+  ip: string
+  userCount: number
+  users: SharedIpUser[]
+}
+
+export interface IpWatchResult {
+  groups: SharedIpGroup[]
+  ipCount: number
+  userCount: number
 }
 
 /** 管理端积分接口 */
 export const adminPointsApi = {
-  /** 积分总览：用户列表（含 0 分用户）+ 全站汇总；query 可按用户名/昵称搜索 */
-  list: (query?: string) =>
-    request<AdminPointsOverview>(
-      `/admin/points${query ? `?query=${encodeURIComponent(query)}` : ""}`
-    ),
+  /**
+   * 积分总览：用户列表（含 0 分用户）+ 全站汇总；query 可按用户名/昵称搜索。
+   * 不传 limit/offset = 旧行为（最新 200 人）；传了 = 服务端分页（响应带 total）。
+   */
+  list: (opts?: { query?: string; limit?: number; offset?: number }) => {
+    const p = new URLSearchParams()
+    const q = opts?.query?.trim()
+    if (q) p.set("query", q)
+    if (opts?.limit != null) p.set("limit", String(opts.limit))
+    if (opts?.offset != null) p.set("offset", String(opts.offset))
+    const qs = p.toString()
+    return request<AdminPointsOverview>(`/admin/points${qs ? `?${qs}` : ""}`)
+  },
   /** 发放（delta>0）/ 扣减（delta<0）积分 */
   adjust: (payload: { username: string; delta: number; detail?: string }) =>
     request<{ balance: number }>("/admin/points/adjust", {
@@ -3091,8 +3162,12 @@ export const twoFactorApi = {
     }),
 
   /** 开关邮箱验证方式 */
+  /**
+   * 开关邮箱二次验证。
+   * ⚠️ 开启时若当前没有可用的恢复码，服务端会发一批新的（明文只出现在这次响应里）。
+   */
   setEmail: (enabled: boolean) =>
-    request<{ ok: boolean; emailEnabled: boolean }>("/settings/2fa/email", {
+    request<{ ok: boolean; emailEnabled: boolean; recoveryCodes?: string[] }>("/settings/2fa/email", {
       method: "POST",
       body: JSON.stringify({ enabled }),
     }),
@@ -3341,22 +3416,6 @@ export const adminTitlesApi = {
     }),
 }
 
-/** App 端通知（给 WebToApp 打包的安卓 App 用的轮询令牌） */
-export interface AppNotifyToken {
-  token: string
-  /** App 通知配置里要填的请求地址 */
-  url: string
-  /** 人类可读形式的请求头，方便直接抄 */
-  header: string
-  /** 同一份请求头的 JSON 形式（App 的「自定义 Headers」输入框要 JSON） */
-  headerJson: string
-}
-
-export const appNotifyApi = {
-  get: () => request<AppNotifyToken>("/app/notify-token"),
-  rotate: () => request<AppNotifyToken>("/app/notify-token/rotate", { method: "POST" }),
-}
-
 // ---- 管理面板 · DNS 解析管理（2026-10-01）----
 //
 // 独立成对象而不是塞进 adminApi：adminApi 已经很长，且这个模块有自己的
@@ -3500,4 +3559,73 @@ export const adminSubdomainsApi = {
   /** 删除（含全部下级；主域名不可删） */
   remove: (id: string) =>
     request<void>(`/admin/subdomains/${encodeURIComponent(id)}`, { method: "DELETE" }),
+}
+
+/**
+ * 管理端 · 邮箱管理（与子域名管理同一形态，按 dns 管理scope鉴权）。
+ *
+ * 与用户侧 `/mailbox` 的差异：可跨用户增删改（含改地址）、转发目标免验证、
+ * 不占用户 3 个名额、可删主邮箱、可查看邮件内容（只读，不改用户已读状态）。
+ */
+export const adminMailboxesApi = {
+  /** 全站列表（可按地址/用户名/邮箱搜索） */
+  list: (params: { q?: string; page?: number; pageSize?: number } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.q) sp.set("q", params.q)
+    if (params.page) sp.set("page", String(params.page))
+    if (params.pageSize) sp.set("pageSize", String(params.pageSize))
+    const qs = sp.toString()
+    return request<AdminMailboxListResponse>(`/admin/mailboxes${qs ? "?" + qs : ""}`)
+  },
+
+  /** 归属用户联想搜索（按用户名/邮箱，最多 20 条） */
+  searchOwners: (q: string) =>
+    request<{ owners: { id: string; username: string; email: string; status: string }[] }>(
+      `/admin/mailboxes/owners?q=${encodeURIComponent(q)}`
+    ),
+
+  /** 代替指定用户创建邮箱（不占用户名额；根域仍须已启用） */
+  create: (payload: { userId?: string; username?: string; localPart: string; domain?: string }) =>
+    request<{ mailbox: AdminMailbox }>("/admin/mailboxes", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 改名（前缀/域）与转发目标；`forwardingTo` 传 `[]` = 清空转发 */
+  update: (
+    id: string,
+    payload: { localPart?: string; domain?: string; forwardingTo?: string[] | null }
+  ) =>
+    request<{ mailbox: AdminMailbox }>(`/admin/mailboxes/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 删除（含邮件；与用户侧同一条清理路径。⚠️ 主邮箱也能删） */
+  remove: (id: string) =>
+    request<{ ok: boolean; address: string }>(`/admin/mailboxes/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  /** 邮件列表（不含正文，游标翻页）。⚠️ 只读，不会把邮件标成已读 */
+  messages: (id: string, params: { cursor?: string; limit?: number } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.cursor) sp.set("cursor", params.cursor)
+    if (params.limit) sp.set("limit", String(params.limit))
+    const qs = sp.toString()
+    return request<{
+      mailbox: { id: string; address: string; ownerUsername: string }
+      messages: AdminMailboxMessage[]
+      nextCursor: string | null
+    }>(`/admin/mailboxes/${encodeURIComponent(id)}/messages${qs ? "?" + qs : ""}`)
+  },
+
+  /** 单封邮件详情（含正文；同样不会标已读，但会记一条审计） */
+  message: (id: string, messageId: string) =>
+    request<{
+      mailbox: { id: string; address: string; ownerUsername: string }
+      message: AdminMailboxMessageDetail
+    }>(
+      `/admin/mailboxes/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`
+    ),
 }

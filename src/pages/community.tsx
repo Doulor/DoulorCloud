@@ -6,7 +6,7 @@ import { toast } from "sonner"
 import { PageHeader } from "@/components/page-header"
 import { DataFade } from "@/components/data-fade"
 import { EmptyState } from "@/components/empty-state"
-import { LoadingBlock } from "@/components/loading-block"
+import { CommunityFeedSkeleton, SkeletonList } from "@/components/skeletons"
 import { UserAvatar } from "@/components/user-avatar"
 import { UserCardPopover } from "@/components/user-card"
 import { RoleBadge } from "@/components/role-badge"
@@ -2061,7 +2061,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
             </Select>
           </div>
 
-          <DataFade loading={loading} skeleton={<LoadingBlock />}>
+          <DataFade loading={loading} skeleton={<CommunityFeedSkeleton />}>
           {failed ? (
             <EmptyState
               icon={WifiOff}
@@ -2127,7 +2127,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
             </Button>
           </div>
           {notifLoading ? (
-            <LoadingBlock />
+            <SkeletonList />
           ) : notifs.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">{t("cm.notif.empty")}</p>
           ) : (

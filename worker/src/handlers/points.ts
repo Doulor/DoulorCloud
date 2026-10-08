@@ -643,6 +643,12 @@ export async function listPointsOverview(env: Env, request: Request): Promise<Re
   // 50 字符（见 sql-like.ts）。原来允许 64 ⇒ 搜长邮箱/长用户名会直接 500。
   const query = (url.searchParams.get("query") ?? "").trim().slice(0, 40)
 
+  // 2026-10-08：加服务端分页（站长反馈「只能看见最后两百个用户、没有分页」）。
+  // 不传 limit/offset = 维持旧的「最新 200 人」行为，兼容旧调用方。
+  const hasPage = url.searchParams.has("limit") || url.searchParams.has("offset")
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200)
+  const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0)
+
   // 以 users 为主表 LEFT JOIN：从来没得过积分的用户也要出现在列表里
   // （否则管理员搜一个「0 积分」的用户会以为他不存在）。
   //
@@ -652,18 +658,47 @@ export async function listPointsOverview(env: Env, request: Request): Promise<Re
     "SELECT u.id, u.uid, u.username, u.email, u.nickname, u.role, u.status, " +
     "u.created_at, COALESCE(p.balance, 0) AS balance, p.updated_at " +
     "FROM users u LEFT JOIN user_points p ON p.user_id = u.id "
-  const rows = query
-    ? await env.DB.prepare(
-        `${base} WHERE u.username LIKE ? OR u.nickname LIKE ? OR u.email LIKE ? ` +
-          "ORDER BY u.created_at DESC, u.id LIMIT 200"
-      )
-        .bind(likeContains(query), likeContains(query), likeContains(query))
-        .all<Record<string, unknown>>()
-    : await env.DB.prepare(`${base} ORDER BY u.created_at DESC, u.id LIMIT 200`).all<
-        Record<string, unknown>
-      >()
+  const where = query
+    ? " WHERE u.username LIKE ? OR u.nickname LIKE ? OR u.email LIKE ? "
+    : ""
+  const whereBinds: unknown[] = query
+    ? [likeContains(query), likeContains(query), likeContains(query)]
+    : []
 
-  const users = (rows.results ?? []).map((r) => ({
+  const [rowsRes, totalsRes, holderRes, countRes] = await env.DB.batch([
+    env.DB.prepare(
+      `${base}${where}ORDER BY u.created_at DESC, u.id` + (hasPage ? " LIMIT ? OFFSET ?" : " LIMIT 200")
+    ).bind(...whereBinds, ...(hasPage ? [limit, offset] : [])),
+    // 全站汇总：总发放 / 总消耗 / 商城成交（按 reason 归类）
+    //
+    // ⚠️ 两类**用户间转移**必须从「累计发放」里排除，它们不是平台增发：
+    //    · `shop_sell` —— 用户商城的卖家收益，钱来自买家那笔 `shop` 支出；
+    //    · `transfer_in` —— 用户间转账的收款方，钱来自转出方的 `transfer_out`。
+    //    算进去的话，用户互相买卖/转账一次，平台「累计发放」就凭空涨一倍。
+    env.DB.prepare(
+      `SELECT
+         COALESCE(SUM(CASE WHEN delta > 0 AND reason NOT IN ('shop_sell','transfer_in') THEN delta ELSE 0 END), 0) AS issued,
+         COALESCE(SUM(CASE WHEN reason IN ('redeem', 'shop') AND delta < 0 THEN -delta ELSE 0 END), 0) AS redeemed,
+         COALESCE(SUM(CASE WHEN reason IN ('shop_sell','transfer_in') AND delta > 0 THEN delta ELSE 0 END), 0) AS traded
+       FROM point_transactions`
+    ),
+    // 🚨 2026-10-08 修复：「持有积分人数」与「用户在手总量」**必须直接聚合全表**。
+    // 原实现是从上面那个「最新 200 人」列表里 filter/reduce 出来的 ⇒ 页面上显示的是
+    // 「这 200 人里有 100 人持有、共 14795 分」，而真实全站是 683 人 / 118273 分。
+    // 这两个数字的标签写的是「人数」「总量」，管理员拿它做全站判断，错得离谱。
+    // 教训：**统计值和列表数据必须解耦** —— 列表一旦分页/限量，任何从它派生的
+    // 汇总都只代表那一页。
+    env.DB.prepare(
+      `SELECT COUNT(*) AS holders, COALESCE(SUM(balance), 0) AS holding
+         FROM user_points WHERE balance > 0`
+    ),
+    hasPage
+      ? env.DB.prepare(`SELECT COUNT(*) AS c FROM users u${where}`).bind(...whereBinds)
+      : env.DB.prepare(`SELECT 1 AS x`),
+  ])
+
+  const rows = rowsRes
+  const users = (((rows.results ?? []) as unknown) as Record<string, unknown>[]).map((r) => ({
     id: r.id,
     uid: (r.uid as number | null) ?? null,
     username: r.username,
@@ -676,33 +711,34 @@ export async function listPointsOverview(env: Env, request: Request): Promise<Re
     updatedAt: r.updated_at ?? null,
   }))
 
-  // 全站汇总：总发放 / 总消耗（按 reason 归类，给管理员一个全局感知）
-  //
-  // ⚠️ 两类**用户间转移**必须从「累计发放」里排除，它们不是平台增发：
-  //    · `shop_sell` —— 用户商城的卖家收益，钱来自买家那笔 `shop` 支出；
-  //    · `transfer_in` —— 用户间转账的收款方，钱来自转出方的 `transfer_out`。
-  //    算进去的话，用户互相买卖/转账一次，平台「累计发放」就凭空涨一倍。
-  const totals = await env.DB.prepare(
-    `SELECT
-       COALESCE(SUM(CASE WHEN delta > 0 AND reason NOT IN ('shop_sell','transfer_in') THEN delta ELSE 0 END), 0) AS issued,
-       COALESCE(SUM(CASE WHEN reason IN ('redeem', 'shop') AND delta < 0 THEN -delta ELSE 0 END), 0) AS redeemed,
-       COALESCE(SUM(CASE WHEN reason IN ('shop_sell','transfer_in') AND delta > 0 THEN delta ELSE 0 END), 0) AS traded
-     FROM point_transactions`
-  ).first<{ issued: number; redeemed: number; traded: number }>()
-
-  const holding = users.reduce((sum, u) => sum + (u.balance > 0 ? u.balance : 0), 0)
+  const totals = ((totalsRes as unknown as { results?: Record<string, unknown>[] }).results?.[0] ??
+    {}) as { issued?: number; redeemed?: number; traded?: number }
+  const holderRow = ((holderRes as unknown as { results?: Record<string, unknown>[] }).results?.[0] ??
+    {}) as { holders?: number; holding?: number }
 
   return json({
     users,
     stats: {
-      issued: Number(totals?.issued ?? 0),
-      redeemed: Number(totals?.redeemed ?? 0),
+      issued: Number(totals.issued ?? 0),
+      redeemed: Number(totals.redeemed ?? 0),
       /** 用户商城的累计成交额（买家付出的积分总和，零和转移） */
-      traded: Number(totals?.traded ?? 0),
-      /** 当前在用户手上的积分总量（列表内，最多 200 人） */
-      holding,
-      holders: users.filter((u) => u.balance > 0).length,
+      traded: Number(totals.traded ?? 0),
+      /** 当前在用户手上的积分总量（**全站**，不受分页影响） */
+      holding: Number(holderRow.holding ?? 0),
+      /** 持有积分（>0）的人数（**全站**，不受分页影响） */
+      holders: Number(holderRow.holders ?? 0),
     },
+    ...(hasPage
+      ? {
+          total: Number(
+            ((countRes as unknown as { results?: { c: number }[] }).results?.[0] as
+              | { c: number }
+              | undefined)?.c ?? 0
+          ),
+          limit,
+          offset,
+        }
+      : {}),
   })
 }
 

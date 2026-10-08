@@ -54,7 +54,7 @@ function TrafficPanel({ days }: { days: string }) {
     void load()
   }, [load])
 
-  if (loading || !data) return <LoadingBlock />
+  if (loading || !data) return <LoadingBlock variant="cards" />
 
   const maxPathPv = Math.max(1, ...data.byPath.map((p) => p.pv))
   const maxDayPv = Math.max(1, ...data.byDay.map((d) => d.pv))

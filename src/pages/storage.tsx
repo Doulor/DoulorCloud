@@ -5,7 +5,7 @@ import { toast } from "sonner"
 import { PageHeader } from "@/components/page-header"
 import { FeatureLockedNotice } from "@/components/feature-locked-notice"
 import { EmptyState } from "@/components/empty-state"
-import { LoadingBlock } from "@/components/loading-block"
+import { StorageSkeleton } from "@/components/skeletons"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -432,7 +432,7 @@ export default function StoragePage() {
     return (
       <div>
         <PageHeader title={t("st.title")} description={t("st.subtitle")} />
-        <LoadingBlock />
+        <StorageSkeleton />
       </div>
     )
   }

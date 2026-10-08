@@ -350,7 +350,7 @@ export default function FeedbackPage() {
           </div>
 
           {loading ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : items.length === 0 ? (
             <EmptyState
               icon={MessageSquare}

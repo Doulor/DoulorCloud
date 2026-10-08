@@ -203,7 +203,7 @@ export function AdminNoticesPanel() {
         </CardHeader>
         <CardContent>
           {notices === null ? (
-            <LoadingBlock />
+            <LoadingBlock variant="list" />
           ) : notices.length === 0 ? (
             <EmptyState icon={Megaphone} title={t("adm.notice.empty")} />
           ) : (
