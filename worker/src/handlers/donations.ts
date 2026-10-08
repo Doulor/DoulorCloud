@@ -530,7 +530,7 @@ async function applyDonationApproval(
      */
     grantRewards?: boolean
   }
-): Promise<{ voucherCode: string | null }> {
+): Promise<{ voucherCode: string | null; quotaGranted: boolean }> {
   const feature = DONATION_TYPES[app.type] as Feature
   const grantRewards = opts.grantRewards !== false
   const now = new Date().toISOString()
@@ -593,8 +593,7 @@ async function applyDonationApproval(
   // 放在 permissions 更新之后，失败会让整次审核报错，避免「权限给了但额度没给」
   // 的静默不一致（管理员可重试）。
   //
-  // ⚠️ 2026-09-25 审计（H2）：把奖励限制成「**同一类型只发一次**」——
-  // 这是本次修复的核心。
+  // ⚠️ 2026-09-25 审计（H2）：奖励限制成「**同一类型只发一次**」。
   //
   // 原先只要 `grantRewards` 就发，与「这次是不是又贡献了一份新资源」无关。而
   // 「重复提交同一份资源」在系统里是**拦不干净**的：
@@ -614,25 +613,69 @@ async function applyDonationApproval(
   //   拿它当发放条件会变成**一个人都发不出来**。
   //   （这不是推测：第一版就是这么写的，被回归测试当场抓住。）
   //
-  // 改用「库里是否已有同类型的已批准捐献」作为判据 —— 与 permissions 的
-  // 兼容语义完全无关，且是真正落库的事实：
-  //   · 同一类型最多奖励一次 ⇒ 单个用户一生最多拿 3 份（ai / proxy / frp；
-  //     sensenova 本来就 grantRewards:false），刷额度这条路变成**有界**的；
-  //   · 必须 `id != app.id`：上面那个 batch 已经把**当前这笔**置成 approved 了。
+  // ⚠️ 2026-10-08：原判据是「库里是否已有同类型的**别的**已批准捐献」
+  //   （`... AND id != ?`）。它问的不是「这个用户的这类额度发过没有」，
+  //   而 `id != ?` 恰好把这行自己排除在外 ⇒ 只要审批那一刻没有别的 approved 行，
+  //   就再发一轮。四条实测可触发的重发路径（都有回归用例守着）：
+  //     ① 单行反复覆盖重提：同一上游再提交复用同一行 id 并重置 pending，
+  //        自动审核通过后闸门看不到「别的 approved」⇒ 实测 10 轮 2→20；
+  //     ② 撤销 → 重新批准同一单据：撤销置回 pending，闸门随之变假 ⇒ 再发；
+  //     ③ 两条**同时**非 approved 时逐条重批 ⇒ 每轮 +2，实测 4 轮 2→10；
+  //     ④ 撤销 → 用户删掉那条 pending 单据（`cancelDonation` 是直接 DELETE）→
+  //        重提同一上游 ⇒ 新建一条 ⇒ 再发，实测 3 轮 2→8。
+  //   另有第五条，根因不同：原实现是「先读后判再写」（read-then-act），并发审批
+  //   时两个请求会同时读到「没有别的 approved」⇒ 双发。改为原子占位后由单条
+  //   UPDATE 串行化兜住；该窗口在 miniflare 下不稳定复现，故只用不变式守护。
   //
-  // 取舍（如实记录）：用户捐第二份**真正不同**的资源时不会再拿到第二份奖励。
+  //   故改为**用户级原子占位**：`users.donation_quota_types` 记「这个用户的
+  //   这类额度发过没有」（积分靠 `dedup_key='donation:<id>'`、首捐券靠
+  //   `vouchers.source`，只有额度此前没有幂等键）。
+  //
+  //   ⚠️ 为什么是**用户级**而不是单据级：④ 证明行级标记拦不住删除 —— 行没了，
+  //   标记跟着没了。而 H2 原本的语义（本段开头）本来就是用户级的
+  //   （「同一类型最多奖励一次 ⇒ 单个用户一生最多拿 3 份」），用行级查询去表达它
+  //   正是这批漏洞的共同来源。挂在 users 上，删除 / 撤销 / 覆盖重提都动不了它。
+  //
+  //   占位语句把「判据 + 写入」合成一次 D1 往返（`... AND json_extract(...) IS NULL
+  //   ... RETURNING`），拿到行才算「本次由我发放」：并发下只有一个请求能拿到
+  //   （原实现是 read-then-act，会双发）。
+  //
+  //   取舍（如实记录）：用户捐第二份**真正不同**的资源时不会再拿到第二份奖励。
   //   这是有意的 —— 在无法区分「真·第二份贡献」与「重放同一份资源」之前，
   //   宁可少发，也不能让奖励无界。
-  const priorSameType = await env.DB.prepare(
-    `SELECT 1 AS x FROM donations
-      WHERE user_id = ? AND type = ? AND status = 'approved' AND id != ?
-      LIMIT 1`
-  )
-    .bind(app.user_id, app.type, app.id)
-    .first()
+  let quotaGranted = false
+  if (grantRewards) {
+    const keyPath = `$."${app.type}"`
+    // json_valid 兜底：该列可空（历史行），且将来可能被写坏；
+    // `json_extract(NULL, …)` 是 NULL、`json_extract('{坏', …)` 会**抛错**（打成 500）。
+    // 兜成 '{}' 后，NULL / 损坏一律按「没发过」起算 —— 与 parseCounts 的「宁可少算」同一口径。
+    const typesExpr =
+      "CASE WHEN json_valid(donation_quota_types) THEN donation_quota_types ELSE '{}' END"
+    const claimed = await env.DB.prepare(
+      `UPDATE users
+          SET donation_quota_types = json_set(${typesExpr}, ?, 1),
+              updated_at = ?
+        WHERE id = ? AND json_extract(${typesExpr}, ?) IS NULL
+        RETURNING id`
+    )
+      .bind(keyPath, now, app.user_id, keyPath)
+      .first<{ id: string }>()
 
-  if (grantRewards && !priorSameType) {
-    await grantQuotaForDonation(env, app.user_id, feature)
+    if (claimed) {
+      try {
+        await grantQuotaForDonation(env, app.user_id, feature)
+        quotaGranted = true
+      } catch (err) {
+        // 占位成功但发放失败：把标记撤回，保持「占位 == 已发放」的不变式，
+        // 否则该用户会被永久判为「已发过」，而实际一分没拿到。
+        await env.DB.prepare(
+          `UPDATE users SET donation_quota_types = json_remove(${typesExpr}, ?) WHERE id = ?`
+        )
+          .bind(keyPath, app.user_id)
+          .run()
+        throw err
+      }
+    }
   }
 
   // 捐献奖励积分：**每通过一笔捐献就发一次** —— 这是用户**可重复赚积分**的通道
@@ -643,9 +686,9 @@ async function applyDonationApproval(
   //   · 同一笔单据被重复审核（撤销后重新批准）→ 不会重复发；
   //   · 用户再捐一份**新资源**（新单据）→ 会再发一次。
   //
-  // ⚠️ 与上面的 `priorSameType`（邀请码额度「同类型只发一次」）**刻意分开**：
-  //    那条是为了堵「无限邀请权」而收紧的，只作用于邀请码额度，与积分无关，
-  //    别把两者的口径混为一谈。
+  // ⚠️ 与上面额度发放的**用户级占位**（`users.donation_quota_types`，「同类型只发
+  //    一次」）**刻意分开**：那个是为了堵「无限邀请权」而收紧的，只作用于邀请码
+  //    额度，与积分无关，别把两者的口径混为一谈。
   // ⚠️ 与 `grantRewards` 无关：商汤通道刻意不发邀请码额度与首捐券
   //    （门槛太低容易被刷），但站长明确要求它照样发 2 积分，所以这里单独判。
   if (isDonationRewardKind(app.type)) {
@@ -723,7 +766,7 @@ async function applyDonationApproval(
       console.error("发放首捐券失败:", app.user_id, err)
     }
   }
-  return { voucherCode }
+  return { voucherCode, quotaGranted }
 }
 
 /**
@@ -841,6 +884,7 @@ async function autoReviewProxyDonation(
   await notifyDonationResult(env, app, true, null, {
     auto: true,
     voucherCode: applied.voucherCode,
+    noQuotaLine: !applied.quotaGranted,
   })
   return {
     status: "approved",
@@ -1049,7 +1093,7 @@ async function autoProvisionAiDonation(
   }
 
   const note = `自动校验通过：${result.detail}`
-  const { voucherCode } = await applyDonationApproval(env, app, {
+  const { voucherCode, quotaGranted } = await applyDonationApproval(env, app, {
     adminId: null,
     note,
     channelId: result.channelId,
@@ -1057,7 +1101,11 @@ async function autoProvisionAiDonation(
   // 把没通过测试的模型落库，交给定时任务重试（此前只写进 review_note 文本，
   // 于是「当时抖了一下」的模型永远不会被补回渠道）
   await recordFailedModelRetries(env, input.id, result, result.channelId)
-  await notifyDonationResult(env, app, true, null, { auto: true, voucherCode })
+  await notifyDonationResult(env, app, true, null, {
+    auto: true,
+    voucherCode,
+    noQuotaLine: !quotaGranted,
+  })
   return { status: "approved", note, channelId: result.channelId, voucherCode }
 }
 
@@ -1256,6 +1304,14 @@ async function notifyDonationResult(
     voucherCode?: string | null
     /** 不发放额度/券（商汤 Key 通道：只解锁权限） */
     noReward?: boolean
+    /**
+     * 本次审核**没有**发放邀请码额度（同类型已发过）。
+     *
+     * 与 `noReward` 分开：`noReward` 是「这条通道压根不发」（商汤），
+     * 这里是「该发的类型，但这笔没发」—— 文案不能再说「同时获得 2 个额度」，
+     * 否则用户看到「说给我了却没涨」。
+     */
+    noQuotaLine?: boolean
     /** 「自动校验未完成、转人工」——既不是通过也不是失败，文案要另写 */
     pending?: boolean
     /**
@@ -1272,15 +1328,18 @@ async function notifyDonationResult(
   const quotaFeature = feature as QuotaFeature
   try {
     const basic = await isBasicFeature(env, quotaFeature)
-    // 基础权限模块的人人可授，获批时无需发放模块额度，文案也要同步去掉
-    const quotaLine = opts.noReward
-      ? ""
-      : basic
-        ? `同时获得 ${INVITE_BONUS_PER_DONATION} 个邀请码创建额度` +
-          `（「${QUOTA_FEATURE_LABELS[quotaFeature] ?? FEATURE_LABELS[feature]}」已是基础权限，人人可授）。`
-        : `同时获得 ${INVITE_BONUS_PER_DONATION} 个邀请码创建额度，` +
-          `以及 1 个「${QUOTA_FEATURE_LABELS[quotaFeature] ?? FEATURE_LABELS[feature]}」权限额度` +
-          "（创建邀请码时可授予该权限）。"
+    // 基础权限模块的人人可授，获批时无需发放模块额度，文案也要同步去掉。
+    // `noQuotaLine`：这次真的没发（同类型已发过）—— 不能再说「同时获得 2 个额度」，
+    // 否则用户看到「说给我了却没涨」（2026-10-08：这正是用户反馈的另一面）。
+    const quotaLine =
+      opts.noReward || opts.noQuotaLine
+        ? ""
+        : basic
+          ? `同时获得 ${INVITE_BONUS_PER_DONATION} 个邀请码创建额度` +
+            `（「${QUOTA_FEATURE_LABELS[quotaFeature] ?? FEATURE_LABELS[feature]}」已是基础权限，人人可授）。`
+          : `同时获得 ${INVITE_BONUS_PER_DONATION} 个邀请码创建额度，` +
+            `以及 1 个「${QUOTA_FEATURE_LABELS[quotaFeature] ?? FEATURE_LABELS[feature]}」权限额度` +
+            "（创建邀请码时可授予该权限）。"
     const lines = opts.revoked
       ? [
           `捐献类型：${FEATURE_LABELS[feature]}`,
@@ -1847,6 +1906,11 @@ export async function createDonation(env: Env, request: Request): Promise<Respon
   if (overwriteId) {
     // 覆盖：写入新 payload / 邮箱 / 备注，重置为待审核并清掉上次的审核痕迹
     // （newapi_channel_id 刻意**保留** —— 自动接入据此就地替换渠道里的 Key）
+    //
+    // ⚠️ `quota_granted` 是**用户级**标记（`users.donation_quota_types`），
+    //    不在这张表上、也不在这条 UPDATE 的列里：覆盖重置了 status，
+    //    若额度标记挂在行上就会随覆盖/删除一起消失 —— 那正是 2026-10-08
+    //    修掉的那批漏洞（见 applyDonationApproval 的说明）。
     await env.DB.prepare(
       `UPDATE donations
           SET payload = ?, notify_email = ?, remark = ?, status = 'pending',
@@ -2021,6 +2085,8 @@ export async function reviewDonation(env: Env, request: Request): Promise<Respon
   const now = new Date().toISOString()
   const feature = DONATION_TYPES[app.type] as Feature
   let voucherCode: string | null = null
+  /** 本次批准是否真的发了邀请码额度（false = 同类型已发过，文案不能再提额度） */
+  let quotaGranted = false
 
   if (approve) {
     // AI / 商汤类型：批准时把渠道接进中转站（best-effort）。
@@ -2058,6 +2124,7 @@ export async function reviewDonation(env: Env, request: Request): Promise<Respon
       grantRewards: app.type !== "sensenova",
     })
     voucherCode = applied.voucherCode
+    quotaGranted = applied.quotaGranted
   } else {
     await env.DB.prepare(
       `UPDATE donations SET status = 'rejected', review_note = ?, reviewed_by = ?, reviewed_at = ?, auto_reviewed = 0 WHERE id = ?`
@@ -2079,6 +2146,8 @@ export async function reviewDonation(env: Env, request: Request): Promise<Respon
     voucherCode,
     // 商汤通道的邮件文案要去掉额度/券那几行（该通道不发奖励）
     noReward: app.type === "sensenova",
+    // 额度没发（同类型已发过）时同样去掉那一行，别让用户以为发了
+    noQuotaLine: approve && !quotaGranted,
   })
 
   return json({ ok: true, status: approve ? "approved" : "rejected", voucherCode })
@@ -2373,6 +2442,7 @@ export async function promoteRecoveredDonations(
       await notifyDonationResult(env, app, true, note, {
         auto: true,
         voucherCode: applied.voucherCode,
+        noQuotaLine: !applied.quotaGranted,
       })
       promoted.push(id)
     } catch (err) {
