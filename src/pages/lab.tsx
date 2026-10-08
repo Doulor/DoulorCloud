@@ -166,10 +166,14 @@ function customEndpoint(raw: string): string {
   return `${base}/v1/chat/completions`
 }
 
-/** 解析 SSE 流：把每个 delta 交给 onDelta */
+/**
+ * 解析 SSE 流：正文 delta 交给 onDelta，模型的**思考内容**（reasoning_content）
+ * 交给 onReasoning。两家分开走 —— 思考内容不能混进正文，否则会污染标签协议解析。
+ */
 async function consumeSSE(
   res: Response,
-  onDelta: (delta: string) => void
+  onDelta: (delta: string) => void,
+  onReasoning?: (delta: string) => void
 ): Promise<void> {
   const reader = res.body?.getReader()
   if (!reader) return
@@ -189,10 +193,19 @@ async function consumeSSE(
         if (!payload || payload === "[DONE]") continue
         try {
           const j = JSON.parse(payload) as {
-            choices?: { delta?: { content?: unknown } }[]
+            choices?: {
+              delta?: { content?: unknown; reasoning_content?: unknown }
+            }[]
           }
-          const delta = j?.choices?.[0]?.delta?.content
-          if (typeof delta === "string" && delta) onDelta(delta)
+          const d = j?.choices?.[0]?.delta
+          if (typeof d?.content === "string" && d.content) onDelta(d.content)
+          // 各种模型/中转站对思考内容的字段名不完全一致，能认的都认一下
+          const think =
+            (typeof d?.reasoning_content === "string" && d.reasoning_content) ||
+            (typeof (d as { reasoning?: unknown } | undefined)?.reasoning ===
+              "string" &&
+              ((d as { reasoning?: string }).reasoning as string))
+          if (think && onReasoning) onReasoning(think)
         } catch {
           /* 单行坏数据跳过 */
         }
@@ -255,6 +268,8 @@ export default function LabPage() {
   // 时间线
   const [entries, setEntries] = React.useState<Entry[]>([])
   const [live, setLive] = React.useState<Entry[] | null>(null)
+  /** 当前轮模型的思考内容（reasoning）实时快照 —— 流式期间逐渐长出来 */
+  const [liveThink, setLiveThink] = React.useState("")
   const [input, setInput] = React.useState("")
   const [streaming, setStreaming] = React.useState(false)
 
@@ -295,6 +310,9 @@ export default function LabPage() {
   const liveTimer = React.useRef<number | null>(null)
   const pendingLive = React.useRef<Entry[] | null>(null)
   const accRef = React.useRef("")
+  /** 本轮思考内容的原文累积 + 它的节流刷新计时器 */
+  const thinkRef = React.useRef("")
+  const thinkTimer = React.useRef<number | null>(null)
 
   // 自动保存到本地文件夹（防浏览器崩溃丢稿）
   const [autoSave, setAutoSave] = React.useState(() => {
@@ -503,7 +521,24 @@ export default function LabPage() {
     }
   }, [])
 
-  const timeline = live ? [...entries, ...live] : entries
+  // 流式期间：模型的思考内容排在本轮正文之前（跟真实时序一致）
+  const timeline: Entry[] = live
+    ? [
+        ...entries,
+        ...(liveThink
+          ? [
+              {
+                key: "live-think",
+                kind: "text" as const,
+                text: liveThink,
+                live: true,
+                collapsible: true,
+              },
+            ]
+          : []),
+        ...live,
+      ]
+    : entries
   const timelineLen = timeline.length
   /** 只有「本来就在底部」时才自动跟随，用户往上翻看历史时不打扰 */
   const nearBottomRef = React.useRef(true)
@@ -533,6 +568,23 @@ export default function LabPage() {
       liveTimer.current = null
       if (pendingLive.current) setLive(pendingLive.current)
     }, 90)
+  }
+
+  /** 思考内容也 90ms 一帧地刷 —— 逐字重排同样吃不消 */
+  const pushThink = () => {
+    if (thinkTimer.current != null) return
+    thinkTimer.current = window.setTimeout(() => {
+      thinkTimer.current = null
+      setLiveThink(thinkRef.current)
+    }, 90)
+  }
+
+  /** 一轮收尾：停掉思考的流式刷新计时器 */
+  const settleThink = () => {
+    if (thinkTimer.current != null) {
+      window.clearTimeout(thinkTimer.current)
+      thinkTimer.current = null
+    }
   }
 
   const persistModel = (m: string) => {
@@ -751,22 +803,32 @@ export default function LabPage() {
 
     let acc = ""
     let lastPreview = 0
-    await consumeSSE(res, (delta) => {
-      acc += delta
-      accRef.current = acc
-      const segs = parseAgentText(acc)
-      segs.forEach((s, i) => {
-        if (s.type === "action" && s.complete && !applied.has(i)) {
-          applied.set(i, applyAction(s) ?? "")
+    // 每轮从头开始攒思考内容，别把上一轮的带过来
+    thinkRef.current = ""
+    setLiveThink("")
+    await consumeSSE(
+      res,
+      (delta) => {
+        acc += delta
+        accRef.current = acc
+        const segs = parseAgentText(acc)
+        segs.forEach((s, i) => {
+          if (s.type === "action" && s.complete && !applied.has(i)) {
+            applied.set(i, applyAction(s) ?? "")
+          }
+        })
+        pushLive(segmentsToEntries(segs, round, false))
+        const now = Date.now()
+        if (now - lastPreview > 700) {
+          lastPreview = now
+          onPreviewTick()
         }
-      })
-      pushLive(segmentsToEntries(segs, round, false))
-      const now = Date.now()
-      if (now - lastPreview > 700) {
-        lastPreview = now
-        onPreviewTick()
+      },
+      (think) => {
+        thinkRef.current += think
+        pushThink()
       }
-    })
+    )
     return acc
   }
 
@@ -818,8 +880,28 @@ export default function LabPage() {
             applied.set(i, applyAction(s) ?? "")
           }
         })
-        setEntries((prev) => [...prev, ...segmentsToEntries(segs, round, true)])
+        // 思考内容归档成这一轮开头的折叠块（用户点开还能看），正文照旧
+        const thinkText = thinkRef.current.trim()
+        const thinkEntry: Entry[] = thinkText
+          ? [
+              {
+                key: `r${round}-think`,
+                kind: "text",
+                text: thinkText,
+                live: false,
+                collapsible: true,
+              },
+            ]
+          : []
+        setEntries((prev) => [
+          ...prev,
+          ...thinkEntry,
+          ...segmentsToEntries(segs, round, true),
+        ])
         setLive(null)
+        setLiveThink("")
+        thinkRef.current = ""
+        settleThink()
         if (liveTimer.current != null) {
           window.clearTimeout(liveTimer.current)
           liveTimer.current = null
@@ -884,6 +966,23 @@ export default function LabPage() {
         window.clearTimeout(liveTimer.current)
         liveTimer.current = null
       }
+      // 中途停止/报错时可能还有没归档的思考 —— 别让它凭空消失
+      const leftoverThink = thinkRef.current.trim()
+      if (leftoverThink) {
+        setEntries((prev) => [
+          ...prev,
+          {
+            key: `think-${Date.now()}`,
+            kind: "text",
+            text: leftoverThink,
+            live: false,
+            collapsible: true,
+          },
+        ])
+      }
+      thinkRef.current = ""
+      setLiveThink("")
+      settleThink()
       setLive(null)
       setStreaming(false)
       abortRef.current = null
@@ -899,6 +998,8 @@ export default function LabPage() {
     }
     setEntries([])
     setLive(null)
+    setLiveThink("")
+    thinkRef.current = ""
     convoRef.current = []
     filesRef.current = {}
     setFiles({})
@@ -1171,7 +1272,10 @@ export default function LabPage() {
                   <TimelineEntry key={e.key} entry={e} />
                 ))}
                 {/* AI 还没吐出第一个字：在「它该出现的位置」显示等待态 */}
-                {streaming && (!live || live.length === 0) && <ThinkingBubble />}
+                {streaming &&
+                  (!live || live.length === 0) &&
+                  // 已经有真实思考内容了就不再显示空等待态
+                  !liveThink && <ThinkingBubble />}
               </div>
             )}
           </div>
