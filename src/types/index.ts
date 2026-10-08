@@ -1363,6 +1363,37 @@ export interface ProxyNode {
   details: Record<string, string>
   /** 相同节点检测：本节点在另一个订阅源里也出现了（值是那个订阅源的名称） */
   duplicateOf?: string
+  /**
+   * 探活健康快照（后端按指纹从 proxy_node_health 读出后附着）。
+   *
+   * ⚠️ 三态里**没有「不可用」**：`down` 的含义是「本站连续多轮都没握上手」，
+   * 可能是我们的出网被该节点挡了 —— 界面上请显示成「测不到」而不是「不可用」。
+   * 从未探过、或协议是 QUIC/UDP（hysteria/hysteria2/tuic）的节点都是 `unknown`。
+   */
+  health?: ProxyNodeHealth
+}
+
+/** 节点探活的三态（与后端 proxy-node-health.ts 的 NodeHealthStatus 一致） */
+export type ProxyNodeHealthStatus = "up" | "down" | "unknown"
+
+export interface ProxyNodeHealth {
+  status: ProxyNodeHealthStatus
+  /** 最近一次握手成功的耗时；从未成功过为 null */
+  latencyMs: number | null
+  /** 最近一次探活时间；从未探过为 null */
+  checkedAt: string | null
+  /** 最近一次失败原因（中性措辞）；最近一次成功则为 null */
+  error: string | null
+}
+
+/** 一个订阅源的节点健康分布（后端 summarizeNodeHealth 的产出） */
+export interface ProxyHealthSummary {
+  up: number
+  unknown: number
+  down: number
+  total: number
+  /** 该订阅源里最新的一次探活时间；一个都没探过则为 null */
+  checkedAt: string | null
 }
 
 export interface ProxySubscription {
@@ -1384,10 +1415,14 @@ export interface ProxySubscription {
   lastSyncedAt: string | null
   /** 抓取/解析失败的提示（成功则为 null） */
   fetchError?: string | null
-  /** 节点列表（订阅源解析结果） */
+  /** 节点列表（订阅源解析结果）。**已按「可用 → 未知 → 测不到」排好序**（后端排的） */
   nodes: ProxyNode[]
   /** 订阅源附带的流量/到期信息；解析不到则为 null */
   usage: { used: string | null; total: string | null; expire: string | null }
+  /** 节点健康分布（可用/未知/测不到 各几个 + 最近探活时间） */
+  health?: ProxyHealthSummary
+  /** 该订阅源最近一次逐节点探活时间；从未探过为 null */
+  healthCheckedAt?: string | null
 }
 
 /**
@@ -1406,6 +1441,11 @@ export interface ProxyNodeLatency {
   latencyMs: number | null
   /** ok=false 时面向用户的原因（中性措辞） */
   reason: string
+  /**
+   * 与历史探活结果合并后的状态（服务端已落库，含迟滞：一次成功即 up、
+   * 连续失败两次才 down）。前端据此更新徽标并重排，不必再拉一次总览。
+   */
+  status: ProxyNodeHealthStatus
 }
 
 /** POST /proxy/latency 的返回（一次一批，前端按 offset 循环） */

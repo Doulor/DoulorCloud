@@ -36,7 +36,7 @@ import { autoPriceNewModels } from "./newapi-client"
 import { cli2DeleteAccount } from "./cli2api-client"
 import { expireRentalOrders } from "./points-shop"
 import { scanDns } from "./dns-audit"
-import { syncProxySubscriptionStatuses } from "./handlers/proxy"
+import { syncProxySubscriptionStatuses, probeProxyNodeHealth } from "./handlers/proxy"
 
 /** 过期会话保留期（天）：留一点用于排查"刚掉线"的投诉 */
 const SESSION_RETENTION_DAYS = 7
@@ -162,6 +162,12 @@ export interface MaintenanceReport {
   dnsAudit: { scanned: number; found: number; high: number; medium: number; low: number } | null
   tableRows: Record<string, number>
   proxySync: { checked: number; offline: number; unknown: number; recovered: number } | null
+  /**
+   * 代理节点逐节点探活结果（2026-10-08）。
+   * 轮转增量：每轮只探「最久没探过」的几个订阅源，见 handlers/proxy.ts 的
+   * PROBE_MAX_SUBSCRIPTIONS_PER_RUN。`nodes` 是本轮写入/更新的健康行数。
+   */
+  proxyProbe: { subscriptions: number; nodes: number; up: number; down: number; unknown: number } | null
   warnings: string[]
   errors: string[]
 }
@@ -302,6 +308,8 @@ async function recordRun(
           sensenovaAuditRevoked: report.sensenovaAudit.permissionsRevoked,
           rentalExpired: report.rentalExpiry.handled,
           rentalPermissionsRevoked: report.rentalExpiry.permissionsRevoked,
+          proxyProbeNodes: report.proxyProbe?.nodes ?? 0,
+          proxyProbeUp: report.proxyProbe?.up ?? 0,
           tableRows: report.tableRows,
         }),
         report.warnings.length > 0 ? JSON.stringify(report.warnings) : null
@@ -768,6 +776,37 @@ export async function runMaintenance(
     }
   }
 
+  // 9e) 代理节点逐节点探活（2026-10-08）
+  //
+  // 与 9d 的分工：9d 只回答「订阅地址还打得开吗」，这里回答「节点本身还连得上吗」——
+  // 前者对了后者未必：订阅地址能拉，里面一半节点可能早就死了。
+  //
+  // 为什么是**轮转增量**而不是每轮全探：探活对每个节点都要真建 TCP 连接，
+  // 而 Cloudflare 把 connect() 计入子请求额度；本站订阅源是三位数级别、
+  // 每源又有几十个节点，全量一轮是上万次连接，必然撞限额。
+  // 所以每轮只挑「最久没探过」的几个源（判定与上限见 handlers/proxy.ts）。
+  //
+  // 说明：这里会**再抓一次**订阅（9d 刚抓过）。看似浪费，但刻意不复用 ——
+  // 9d 的口径是「过时检测」、只关心能否解析出节点，与探活的轮转集合并不一致，
+  // 把两者耦合起来会让「过时检测」被迫承担探活预算，改一处动全身。
+  // 多出的请求是每轮个位数，相对于 9d 的全量抓取可以忽略。
+  let proxyProbe: MaintenanceReport["proxyProbe"] = null
+  if (!dryRun) {
+    try {
+      const r = await probeProxyNodeHealth(env)
+      proxyProbe = {
+        subscriptions: r.subscriptions,
+        nodes: r.nodes,
+        up: r.up,
+        down: r.down,
+        unknown: r.unknown,
+      }
+      for (const e of r.errors) errors.push(`节点探活：${e}`)
+    } catch (err) {
+      // 表未迁移 / D1 抖动：只记日志，不影响其它运维项
+      console.error("代理节点探活失败（表可能未迁移）:", err)
+    }
+  }
   // 10) 清理失败也算告警（否则"静默失败"永远没人知道）
   if (errors.length > 0) {
     warnings.push(`本次运维有 ${errors.length} 项失败：${errors.slice(0, 3).join("；")}`)
@@ -794,6 +833,7 @@ export async function runMaintenance(
     dnsAudit,
     tableRows,
     proxySync,
+    proxyProbe,
     warnings,
     errors,
   }
