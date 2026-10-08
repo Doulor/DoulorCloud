@@ -15,9 +15,17 @@
  *   - ⚠️ 剩余流量 / 到期日：**依赖订阅源是否在响应里附带**
  *     （如 v2board 的 info 参数 / INFO= 行 / clash header），
  *     解析不到时该字段为 null，前端显示「未知」。
- *   - ⚠️ 延迟：Worker 侧只能对「订阅 URL 本身」做 HTTP 探活（Cloudflare
- *     出网限制无法对节点的任意 TCP/UDP 端口做真延迟测试），
- *     结果作为该订阅源的近似延迟。
+ *   - ⚠️ 延迟：Worker 只能对节点的 `server:port` 做 **TCP 握手**（见 proxy-latency.ts），
+ *     做不了 Clash 那种「经节点转发一次请求」的完整代理延迟 —— Worker 里没有代理内核，
+ *     也建不了 UDP 连接。所以 hysteria/hysteria2/tuic 这类 QUIC 节点「探不了」，
+ *     一律按**未知**处理，绝不判成不可用。
+ *
+ * ## 节点探活与排序（2026-10-08）
+ *
+ * 逐节点握手结果会按指纹落 `proxy_node_health`（见 proxy-node-health.ts），
+ * 由每小时运维任务 `probeProxyNodeHealth` 定期刷新，用户侧接口据此把节点重排为
+ * 「可用 → 未知 → 不可用」。判定与排序规则全部在 proxy-node-health.ts 里，
+ * 本文件只负责「抓订阅 → 解析 → 测 → 落库 → 读出来排序」这条流水线。
  *
  * 所有接口先过 requireFeatureUser(env, request, "proxy")。
  */
@@ -34,6 +42,16 @@ import {
   latencyTargets,
   measureNodes,
 } from "../proxy-latency"
+import {
+  emptyHealthRecord,
+  loadSubscriptionNodeHealth,
+  nextHealthRecord,
+  orderNodesByHealth,
+  saveNodeHealth,
+  summarizeNodeHealth,
+  type NodeHealthRecord,
+  type NodeHealthStatus,
+} from "../proxy-node-health"
 import type { Env } from "../env"
 
 /**
@@ -84,8 +102,24 @@ interface ProxySubscriptionRow {
   note: string | null
   last_synced_at: string | null
   last_error: string | null
+  /** 最近一次**逐节点探活**的时间（0128）；与 last_synced_at（订阅地址抓取）不是一回事 */
+  health_checked_at: string | null
   created_at: string
   updated_at: string
+}
+
+/**
+ * 附着在单个节点上的健康快照（0128）。前端据此显示「可用 / 未知 / 测不到」徽标。
+ * 三态的含义与边界见 proxy-node-health.ts —— 尤其「测不到」不等于「不可用」。
+ */
+export interface NodeHealthView {
+  status: NodeHealthStatus
+  /** 最近一次握手成功的耗时；从未成功过为 null */
+  latencyMs: number | null
+  /** 最近一次探活时间；从未探过为 null */
+  checkedAt: string | null
+  /** 最近一次失败原因（中性措辞）；最近一次成功则为 null */
+  error: string | null
 }
 
 /** 解析后的单个代理节点 */
@@ -103,6 +137,11 @@ export interface ProxyNodeInfo {
   details: Record<string, string>
   /** 相同节点检测：本节点在**另一个**订阅源里也出现了（值是那个订阅源的名称） */
   duplicateOf?: string
+  /**
+   * 探活健康快照（0128，`GET /api/proxy` 才填）。
+   * 只是**附加信息**：解析层（parseSubscription）不产出它，别在解析相关代码里依赖它。
+   */
+  health?: NodeHealthView
 }
 
 function toPublicSubscription(row: ProxySubscriptionRow) {
@@ -1365,6 +1404,213 @@ export async function syncProxySubscriptionStatuses(
   return { checked, offline, unknown, recovered }
 }
 
+// ---- 逐节点探活（定时轮转） ----
+
+/**
+ * 单次运维最多刷几个订阅源、每个订阅源最多测几个节点。
+ *
+ * 为什么必须设上限（而不是「每轮全量探一遍」）：
+ *   探活对每个节点都要真建一条 TCP 连接，而 Cloudflare 把 `connect()` 也计入
+ *   **每次调用的子请求额度**。本站的订阅源是三位数级别（见 getProxyOverview 的分页注释），
+ *   每个源又常有几十个节点 —— 全量探一轮是**上万次连接**，一次 cron 绝无可能跑完，
+ *   硬跑只会撞限额、留下半截结果。
+ *
+ * 所以这里改成**轮转增量**：每轮挑「最久没探过」的订阅源先探（依据
+ * `proxy_subscriptions.health_checked_at`，NULL = 从未探过，排最前），
+ * 探满上限就收工。代价是覆盖一轮需要若干小时，收益是**长期稳定、不爆限额**。
+ * 想立刻得到某个订阅源的结论，用户/管理员点一下「测速」即可 ——
+ * 那条路径（testProxyNodeLatency）与本函数共用同一套判定与落库逻辑。
+ */
+export const PROBE_MAX_SUBSCRIPTIONS_PER_RUN = 6
+export const PROBE_MAX_NODES_PER_SUBSCRIPTION = 20
+
+/** 单次 cron 里同时探几个订阅源（每个源内部还会再并发，别把两个数字乘起来超过 6） */
+const PROBE_SUBSCRIPTION_CONCURRENCY = 2
+/** 探活时的连接并发度。比用户手动测速（4）低，因为外层还有并发，且 cron 不赶时间 */
+const PROBE_NODE_CONCURRENCY = 2
+
+export interface ProxyProbeReport {
+  /** 本轮实际探过的订阅源数 */
+  subscriptions: number
+  /** 本轮写入/更新的节点健康行数 */
+  nodes: number
+  up: number
+  down: number
+  unknown: number
+  /** 单个订阅源失败不影响别的（只记录，不抛出） */
+  errors: string[]
+}
+
+/** 探活结果 → 附着在节点上的健康快照 */
+function toHealthView(record: NodeHealthRecord | undefined): NodeHealthView {
+  if (!record) {
+    // 无记录 = 从未探过，或该协议（hysteria/hysteria2/tuic）探不了 —— 一律「未知」
+    return { status: "unknown", latencyMs: null, checkedAt: null, error: null }
+  }
+  return {
+    status: record.status,
+    latencyMs: record.latencyMs,
+    checkedAt: record.checkedAt || null,
+    error: record.lastError,
+  }
+}
+
+/**
+ * 把一批测速结果合并进健康表，并回写订阅源的 `health_checked_at`。
+ *
+ * 本函数是**唯一**的写入口：手动测速（testProxyNodeLatency）与定时探活
+ * （probeSubscriptionNodeHealth）都走它 —— 两条路径各写一套判定规则必然漂移。
+ *
+ * @param nodes   与测速结果下标对应的节点数组（`measureNodes` 的 index 就是指它）
+ * @param results 本批测速结果
+ * @param opts.liveFingerprints 传入「该订阅源**当前**的完整节点指纹」时，会顺手删掉
+ *        健康表里已经不在其中的行（节点被订阅方移除）。**手动测速必须不传** ——
+ *        它是分批的，一次只覆盖 B 个节点，把「本轮没测到的」当已消失会误删其他批次的结论。
+ *        （表里没有指纹数上限保护，所以用「先读出来再逐个删」，不在 SQL 里拼 NOT IN。）
+ */
+async function persistNodeHealth(
+  env: Env,
+  subscriptionId: string,
+  nodes: readonly ProxyNodeInfo[],
+  results: readonly { index: number; ok: boolean; latencyMs: number | null; reason: string }[],
+  opts: { liveFingerprints?: readonly string[] } = {}
+): Promise<{ statuses: Map<string, NodeHealthStatus>; up: number; down: number; unknown: number }> {
+  const now = new Date().toISOString()
+  const prev = await loadSubscriptionNodeHealth(env, subscriptionId)
+  const next = new Map<string, NodeHealthRecord>()
+  const statuses = new Map<string, NodeHealthStatus>()
+  let up = 0
+  let down = 0
+  let unknown = 0
+
+  for (const r of results) {
+    const node = nodes[r.index]
+    if (!node) continue
+    const fp = nodeFingerprint(node)
+    if (next.has(fp)) continue // 同一订阅里的重复节点只算一次
+    const record = nextHealthRecord(
+      prev.get(fp) ?? emptyHealthRecord(),
+      { ok: r.ok, latencyMs: r.latencyMs, reason: r.reason },
+      now
+    )
+    next.set(fp, record)
+    statuses.set(fp, record.status)
+    if (record.status === "up") up++
+    else if (record.status === "down") down++
+    else unknown++
+  }
+
+  let stale: string[] = []
+  if (opts.liveFingerprints) {
+    const live = new Set(opts.liveFingerprints)
+    stale = [...prev.keys()].filter((fp) => !live.has(fp))
+  }
+
+  await saveNodeHealth(env, subscriptionId, next, stale)
+  await env.DB.prepare("UPDATE proxy_subscriptions SET health_checked_at = ? WHERE id = ?")
+    .bind(now, subscriptionId)
+    .run()
+
+  return { statuses, up, down, unknown }
+}
+
+/**
+ * 探活**一个**订阅源的全部（可测速）节点并落库。
+ *
+ * 与 testProxyNodeLatency 的分工：那个接口是「用户要看这一批的即时结果」，
+ * 本函数是「后台把结论沉淀下来」。判定与落库都由 persistNodeHealth 统一。
+ */
+export async function probeSubscriptionNodeHealth(
+  env: Env,
+  row: { id: string; url: string },
+  opts: { maxNodes?: number; concurrency?: number } = {}
+): Promise<{ probed: number; up: number; down: number; unknown: number }> {
+  const maxNodes = Math.max(1, opts.maxNodes ?? PROBE_MAX_NODES_PER_SUBSCRIPTION)
+  const { text, ok } = await fetchSubscriptionText(env, row.url, true)
+  if (!ok) throw new ApiError(502, "订阅地址无法访问", "PROXY_FETCH_FAILED")
+
+  const nodes = usableNodes(parseSubscription(text))
+  const live = nodes.map(nodeFingerprint)
+  // 只探「能用 TCP 握手测」的协议；QUIC/UDP 那类探不了，按未知处理（不落库）
+  const targets = latencyTargets(nodes).slice(0, maxNodes)
+
+  if (targets.length === 0) {
+    // 没有任何可测节点（例如整份订阅都是 hysteria2）：仍要记下「探过了」，
+    // 否则该订阅源在轮转里永远是 NULL、每轮都被排到最前，白占预算。
+    // 顺便清掉「节点已全部消失」的旧行。
+    const prev = await loadSubscriptionNodeHealth(env, row.id)
+    const liveSet = new Set(live)
+    const stale = [...prev.keys()].filter((fp) => !liveSet.has(fp))
+    await saveNodeHealth(env, row.id, new Map(), stale)
+    await env.DB.prepare("UPDATE proxy_subscriptions SET health_checked_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), row.id)
+      .run()
+    return { probed: 0, up: 0, down: 0, unknown: 0 }
+  }
+
+  const results = await measureNodes(targets, {
+    concurrency: opts.concurrency ?? PROBE_NODE_CONCURRENCY,
+  })
+  const { statuses, up, down, unknown } = await persistNodeHealth(env, row.id, nodes, results, {
+    liveFingerprints: live,
+  })
+  return { probed: statuses.size, up, down, unknown }
+}
+
+/**
+ * 定时探活入口（由 maintenance.ts 的每小时运维调用）。
+ *
+ * 轮转：`health_checked_at` 为 NULL（从未探过）的排最前，其次按时间升序（最久没探的先探）。
+ * 这样即使订阅源数量远超每轮上限，也不会出现「总也轮不到某个源」。
+ */
+export async function probeProxyNodeHealth(
+  env: Env,
+  opts: { dryRun?: boolean; maxSubscriptions?: number } = {}
+): Promise<ProxyProbeReport> {
+  const dryRun = opts.dryRun === true
+  const maxSubscriptions = Math.max(1, opts.maxSubscriptions ?? PROBE_MAX_SUBSCRIPTIONS_PER_RUN)
+
+  const rows = await env.DB.prepare(
+    `SELECT id, url FROM proxy_subscriptions
+      WHERE enabled = 1
+      ORDER BY (health_checked_at IS NOT NULL) ASC, health_checked_at ASC
+      LIMIT ?`
+  )
+    .bind(maxSubscriptions)
+    .all<{ id: string; url: string }>()
+
+  const targets = rows.results ?? []
+  const report: ProxyProbeReport = {
+    subscriptions: 0,
+    nodes: 0,
+    up: 0,
+    down: 0,
+    unknown: 0,
+    errors: [],
+  }
+  // dry-run 只报「这一轮会探哪些」，不真建连接（探活有外部副作用，且很贵）
+  if (dryRun) {
+    report.subscriptions = targets.length
+    return report
+  }
+
+  await mapLimit(targets, PROBE_SUBSCRIPTION_CONCURRENCY, async (row) => {
+    try {
+      const r = await probeSubscriptionNodeHealth(env, row)
+      report.subscriptions++
+      report.nodes += r.probed
+      report.up += r.up
+      report.down += r.down
+      report.unknown += r.unknown
+    } catch (err) {
+      // 单个订阅源抓不到 / 测不动，不该中断整轮（下一个源可能好好的）
+      report.errors.push(`${row.id}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  })
+
+  return report
+}
+
 // ---- 代理节点捐献的自动审核 ----
 
 /** 单次捐献最多校验多少个订阅链接（每个都要真拉一次，太多会把提交拖到超时） */
@@ -1507,15 +1753,36 @@ export async function getProxyOverview(env: Env, request: Request): Promise<Resp
 
   const subscriptions = await Promise.all(
     page.map(async (row) => {
-      const base = toPublicSubscription(row)
+      const base = {
+        ...toPublicSubscription(row),
+        /** 该订阅源最近一次逐节点探活时间（0128）；从未探过为 null */
+        healthCheckedAt: row.health_checked_at ?? null,
+      }
       try {
         const { nodes, usage } = await syncSubscription(env, row)
-        return { ...base, nodes, usage, fetchError: null as string | null }
+        // 逐节点探活结论：按指纹从 proxy_node_health 读出来，附着到节点上，
+        // 并把顺序重排为「可用 → 未知 → 测不到」（规则见 proxy-node-health.ts）。
+        // ⚠️ 排序必须在**附着健康信息之后**做，且只影响下标顺序、不丢节点 ——
+        // 前端「相同节点检测」与「复制节点链接」都依赖这里返回的完整列表。
+        const health = await loadSubscriptionNodeHealth(env, row.id)
+        const ordered = orderNodesByHealth(nodes, nodeFingerprint, health).map((node) => ({
+          ...node,
+          health: toHealthView(health.get(nodeFingerprint(node))),
+        }))
+        return {
+          ...base,
+          nodes: ordered,
+          usage,
+          /** 该订阅源节点的健康分布（可用/未知/测不到 各几个） */
+          health: summarizeNodeHealth(nodes, nodeFingerprint, health),
+          fetchError: null as string | null,
+        }
       } catch (err) {
         return {
           ...base,
           nodes: [] as ProxyNodeInfo[],
           usage: { used: null, total: null, expire: null },
+          health: summarizeNodeHealth<ProxyNodeInfo>([], nodeFingerprint, new Map()),
           fetchError: err instanceof ApiError ? err.message : "解析失败",
         }
       }
@@ -1734,6 +2001,19 @@ export async function testProxyNodeLatency(env: Env, request: Request): Promise<
     throw new ApiError(503, "服务端暂时无法做节点测速，请稍后再试", "LATENCY_UNAVAILABLE")
   }
 
+  // 把本批结论沉淀进健康表（与定时探活共用 persistNodeHealth 的判定）。
+  //
+  // ⚠️ 不传 liveFingerprints：本接口一次只测一段（offset/limit），
+  // 若顺手以「本批就是全部」去清理，会把其余批次的结论全删掉。
+  // 「节点已从订阅里消失」的清理交给定时探活 —— 它每轮拿到的是完整节点列表。
+  let statuses = new Map<string, NodeHealthStatus>()
+  try {
+    statuses = (await persistNodeHealth(env, row.id, nodes, results)).statuses
+  } catch (err) {
+    // 落库失败不该让用户拿不到这次的测速结果（结果本身已经测出来了，是对的）
+    console.error("节点健康落库失败:", err)
+  }
+
   return json({
     /** 这个订阅里一共有多少节点 */
     total: nodes.length,
@@ -1742,12 +2022,20 @@ export async function testProxyNodeLatency(env: Env, request: Request): Promise<
     offset,
     limit,
     tested: results.length,
-    results: results.map((r) => ({
-      index: r.index,
-      ok: r.ok,
-      latencyMs: r.latencyMs,
-      reason: r.reason,
-    })),
+    results: results.map((r) => {
+      const node = nodes[r.index]
+      return {
+        index: r.index,
+        ok: r.ok,
+        latencyMs: r.latencyMs,
+        reason: r.reason,
+        /**
+         * 与历史合并后的健康状态（含迟滞：一次成功即 up，连续失败两次才 down）。
+         * 前端据此更新徽标并重排，不必再拉一次总览。
+         */
+        status: (node ? statuses.get(nodeFingerprint(node)) : undefined) ?? "unknown",
+      }
+    }),
   })
 }
 
@@ -1956,5 +2244,7 @@ export async function deleteProxySubscription(
   await env.DB.prepare("DELETE FROM proxy_subscriptions WHERE id = ?").bind(id).run()
   // 对称清理节点指纹，避免「已删订阅源」的指纹仍挡着后续导入
   await env.DB.prepare("DELETE FROM proxy_node_fingerprints WHERE subscription_id = ?").bind(id).run()
+  // 同理清理逐节点探活结论（0128）—— 订阅源都没了，留下一堆健康行只会白占 D1 行读
+  await env.DB.prepare("DELETE FROM proxy_node_health WHERE subscription_id = ?").bind(id).run()
   return new Response(null, { status: 204 })
 }

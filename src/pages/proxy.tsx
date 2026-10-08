@@ -38,6 +38,7 @@ import { fmtTime } from "@/lib/format"
 import { useT, tStatic } from "@/i18n"
 import type {
   ProxyNode,
+  ProxyNodeHealth,
   ProxyNodeLatency,
   ProxyOverview,
   ProxySubscription,
@@ -65,11 +66,32 @@ function canTestLatency(protocol: string): boolean {
 const LATENCY_BATCH = 16
 
 /**
- * 延迟徽标。
- * 分级参照 Clash 的习惯（绿/黄/灰），但**失败不标红**：服务端握不上手
- * 可能只是本站出网到该节点不通，标红会让人误以为节点坏了。
+ * 延迟数值的配色分级（参照 Clash 的习惯：绿/黄/橙）。
+ * 抽出来是为了让「本次测速」与「历史探活」两条来源的配色完全一致。
  */
-function LatencyBadge({ latency, testable }: { latency?: ProxyNodeLatency; testable: boolean }) {
+function latencyClass(ms: number): string {
+  return ms < 150 ? "text-emerald-600" : ms < 400 ? "text-amber-600" : "text-orange-600"
+}
+
+/**
+ * 节点探活徽标。
+ *
+ * 两条数据来源，优先级固定为：**本次手动测速的即时结果** > 服务端定期探活沉淀的结论。
+ * 前者是用户刚点的、最贴近他此刻的预期；后者是后台轮转探活写进库里的，页面一加载就有。
+ *
+ * ⚠️ **失败一律不标红**：服务端握不上手可能只是本站出网到该节点不通（Cloudflare
+ * 封了部分目标 IP），标红会让人误以为节点坏了。这与后端 proxy-node-health.ts
+ * 的「没能验证 ≠ 不可用」是同一条原则 —— 文案统一用中性的「测不到」。
+ */
+function NodeProbeBadge({
+  latency,
+  health,
+  testable,
+}: {
+  latency?: ProxyNodeLatency
+  health?: ProxyNodeHealth
+  testable: boolean
+}) {
   const { t } = useT()
   if (!testable) {
     return (
@@ -78,22 +100,43 @@ function LatencyBadge({ latency, testable }: { latency?: ProxyNodeLatency; testa
       </span>
     )
   }
-  if (!latency) {
-    return <span className="text-xs text-muted-foreground">{t("px.lat.untested")}</span>
-  }
-  if (!latency.ok) {
+  // 1) 本次手动测速的结果优先
+  if (latency) {
+    if (!latency.ok) {
+      return (
+        <span className="text-xs text-muted-foreground" title={latency.reason}>
+          {t("px.lat.unreachable")}
+        </span>
+      )
+    }
+    const ms = latency.latencyMs ?? 0
     return (
-      <span className="text-xs text-muted-foreground" title={latency.reason}>
-        {t("px.lat.unreachable")}
+      <span className={`font-mono text-xs ${latencyClass(ms)}`} title={t("px.lat.hint")}>
+        {ms} ms
       </span>
     )
   }
-  const ms = latency.latencyMs ?? 0
-  // 与项目里其它地方一致用 emerald / amber（不用 green）
-  const cls =
-    ms < 150 ? "text-emerald-600" : ms < 400 ? "text-amber-600" : "text-orange-600"
+  // 2) 回落到服务端定期探活沉淀的结论
+  if (!health || health.status === "unknown") {
+    return (
+      <span className="text-xs text-muted-foreground" title={t("px.health.hint")}>
+        {t("px.health.unknown")}
+      </span>
+    )
+  }
+  if (health.status === "down") {
+    return (
+      <span
+        className="text-xs text-muted-foreground"
+        title={health.error ?? t("px.health.hint")}
+      >
+        {t("px.health.down")}
+      </span>
+    )
+  }
+  const ms = health.latencyMs ?? 0
   return (
-    <span className={`font-mono text-xs ${cls}`} title={t("px.lat.hint")}>
+    <span className={`font-mono text-xs ${latencyClass(ms)}`} title={t("px.health.upHint")}>
       {ms} ms
     </span>
   )
@@ -398,7 +441,10 @@ export default function ProxyPage() {
       } else {
         toast.success(
           t("px.speed.done", { ok, total: testable }) +
-          (fastest != null ? t("px.speed.fastest", { ms: fastest }) : "")
+          (fastest != null ? t("px.speed.fastest", { ms: fastest }) : "") +
+          // 服务端已把本批结论写进代理节点健康表（与定时探活共用判定），
+          // 下次刷新页面就会按「可用 → 未探活 → 测不到」重新排列
+          t("px.speed.saved")
         )
       }
     } catch (err) {
@@ -571,10 +617,22 @@ export default function ProxyPage() {
                           <span className="text-xs text-muted-foreground">{sub.region}</span>
                         )}
                         <SubStatusBadge sub={sub} />
+                        {sub.health && sub.health.total > 0 && (
+                          <Badge variant="outline" className="text-xs font-normal" title={t("px.health.hint")}>
+                            {t("px.health.summary", {
+                              up: sub.health.up,
+                              unknown: sub.health.unknown,
+                              down: sub.health.down,
+                            })}
+                          </Badge>
+                        )}
                       </div>
                       <CardDescription className="text-xs">
                         {t("px.sub.nodes", { n: sub.nodes.length })}
                         {sub.lastSyncedAt ? t("px.sub.syncedAt", { time: fmtTime(sub.lastSyncedAt) }) : ""}
+                        {sub.healthCheckedAt
+                          ? t("px.health.checkedAt", { time: fmtTime(sub.healthCheckedAt) })
+                          : t("px.health.never")}
                         {sub.statusNote ? ` · ${sub.statusNote}` : ""}
                       </CardDescription>
                     </div>
@@ -725,8 +783,9 @@ export default function ProxyPage() {
                                     {t("px.duplicateOf", { name: node.duplicateOf })}
                                   </Badge>
                                 )}
-                                <LatencyBadge
+                                <NodeProbeBadge
                                   latency={nodeLatency[nodeKey]}
+                                  health={node.health}
                                   testable={canTestLatency(node.protocol)}
                                 />
                               </div>
