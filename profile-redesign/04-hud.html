@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>方向 4 · 赛博仪表盘 HUD</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{--bg:#04080c;--ink:#d7f5ff;--accent:#22d3ee;--dim:#4d7a8a;--line:rgba(34,211,238,.22)}
+  body{background:var(--bg);color:var(--ink);
+    font-family:ui-monospace,"SF Mono","Cascadia Code",monospace;
+    min-height:100vh;padding:26px 3vw;
+    background-image:repeating-linear-gradient(0deg,transparent 0 39px,rgba(34,211,238,.04) 39px 40px),
+      repeating-linear-gradient(90deg,transparent 0 39px,rgba(34,211,238,.04) 39px 40px)}
+  .hud{border:1px solid var(--line);padding:0}
+  .hud .bar{display:flex;justify-content:space-between;padding:10px 18px;border-bottom:1px solid var(--line);
+    font-size:11px;letter-spacing:.24em;color:var(--dim);text-transform:uppercase}
+  .bar .live{color:var(--accent)}
+  .bar .live::before{content:"●";margin-right:6px;animation:b 1.4s infinite}
+  @keyframes b{50%{opacity:.2}}
+  .main{display:grid;grid-template-columns:280px 1fr}
+  .left{border-right:1px solid var(--line);padding:26px;text-align:center}
+  .avatar{width:120px;height:120px;margin:0 auto;object-fit:cover;border-radius:6px;border:1px solid var(--accent);
+    box-shadow:0 0 24px rgba(34,211,238,.4);clip-path:polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px)}
+  .name{margin-top:18px;font-size:26px;font-weight:700;letter-spacing:.06em}
+  .name::before{content:"> ";color:var(--accent)}
+  .bio{font-size:12px;color:var(--dim);margin-top:6px;line-height:1.6}
+  .status{display:inline-block;margin-top:14px;font-size:11px;color:var(--accent);
+    border:1px solid var(--line);padding:5px 12px;letter-spacing:.12em}
+  .right{padding:26px;display:flex;flex-direction:column;gap:22px}
+  .mod{border:1px solid var(--line);background:rgba(10,20,26,.4)}
+  .mod .mh{font-size:10px;letter-spacing:.3em;color:var(--accent);padding:9px 14px;border-bottom:1px solid var(--line);text-transform:uppercase}
+  .mod .mh::before{content:":: "}
+  .mod .mb{padding:16px 14px}
+  .quote{font-size:19px;line-height:1.6}
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{font-size:12px;color:var(--ink);border:1px solid var(--line);padding:4px 12px}
+  .chip::before{content:"#";color:var(--accent);margin-right:2px}
+  .link{display:flex;justify-content:space-between;padding:10px 0;font-size:13px;border-bottom:1px dashed var(--line)}
+  .link:last-child{border-bottom:0}
+  .link::before{content:">";color:var(--accent);margin-right:8px}
+  .link span:last-child{color:var(--dim)}
+  .link:hover{background:rgba(34,211,238,.08)}
+  @media(max-width:760px){.main{grid-template-columns:1fr}.left{border-right:0;border-bottom:1px solid var(--line)}}
+</style>
+</head>
+<body>
+  <div class="hud">
+    <div class="bar"><span>SYS.PERSONAL_CARD / v3.0</span><span class="live">ONLINE</span><span>UID #001</span></div>
+    <div class="main">
+      <div class="left">
+        <img class="avatar" src="https://api.dicebear.com/9.x/adventurer/svg?seed=Doulor" alt="avatar">
+        <div class="name">Doulor</div>
+        <div class="bio">一个有点内向的人</div>
+        <div class="status">☕ BUILDING_DOULOR_CLOUD</div>
+      </div>
+      <div class="right">
+        <div class="mod"><div class="mh">quote.log</div><div class="mb"><div class="quote">旧人不知我近况，新人不知我过往</div></div></div>
+        <div class="mod"><div class="mh">tags[]</div><div class="mb"><div class="chips"><span class="chip">肝帝</span><span class="chip">建站</span><span class="chip">极简</span></div></div></div>
+        <div class="mod"><div class="mh">contact.list</div><div class="mb">
+          <a class="link" href="#"><span>GitHub — Doulor</span><span>[open]</span></a>
+          <a class="link" href="#"><span>QQ — 2737855297</span><span>[open]</span></a>
+          <a class="link" href="#"><span>微信 — AIDoulor</span><span>[open]</span></a>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

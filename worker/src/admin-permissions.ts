@@ -68,6 +68,7 @@ export const ADMIN_PERMISSIONS: AdminPermCategory[] = [
       { key: "moderation.appeals", label: "申诉处理" },
       { key: "moderation.whitelist", label: "白名单管理" },
       { key: "moderation.blacklist", label: "IP 黑名单" },
+      { key: "moderation.ip", label: "IP 监管" },
     ],
   },
   { key: "notices", label: "通知", group: "account" },

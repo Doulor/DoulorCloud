@@ -293,8 +293,38 @@ export async function refundQuotaForInvite(
 }
 
 /**
+ * 解析 `donation_transfer_features`（逗号分隔模块名）为集合。
+ *
+ * 语义与 `parseBasicFeatures` / `first_donation_voucher_features` 同一套，
+ * 三条都不许搞混（这是本文件反复出现的坑）：
+ *   · 缺省（键不存在 / null）→ **四个模块全可发**（维持原行为）；
+ *   · **空串（四个开关全关后保存）→ 空集合**，即一个都不发；
+ *   · 认不出的名字直接丢掉。
+ */
+export function parseDonationQuotaFeatures(
+  raw: string | null | undefined
+): Set<QuotaFeature> {
+  if (raw === null || raw === undefined) return new Set<QuotaFeature>(QUOTA_FEATURES)
+  const out = new Set<QuotaFeature>()
+  for (const seg of raw.split(",")) {
+    const f = seg.trim() as QuotaFeature
+    if ((QUOTA_FEATURES as readonly string[]).includes(f)) out.add(f)
+  }
+  return out
+}
+
+/**
  * 捐献获批时发放额度：+2 邀请码额度。
  * 仅「受限模式」的模块再 +1 对应模块额度；基础权限模块本就人人都能授，无需转授额度。
+ *
+ * ⚠️ 2026-10-08 新增设置项 `donation_transfer_features`（默认四个模块全发）：
+ * 站长要能**逐模块**停掉「捐献换出可转授额度」这条路 —— 否则用户捐一个 AI 渠道
+ * 就拿到 +1 的 ai 额度，再把它做成邀请码直接给别人开通中转站。
+ * 关掉某模块后：该模块不再 +1；其余模块照发。
+ *
+ * 刻意**只停模块额度**、不停 +2 邀请码额度：后者是通用的「能建几个码」，
+ * 与「转授某个模块」是两件事（且模块额度一停，就算有码也勾不上那些模块）。
+ * 已经在手上的额度不回收，只影响之后新批的捐献。
  *
  * ⚠️ 同样按 M1 改为**相对累加**，不再先读后写：
  * 原实现下「发放」与「消费」并发时，谁后写谁的结果生效，
@@ -306,9 +336,17 @@ export async function grantQuotaForDonation(
   feature: string
 ): Promise<void> {
   const isQuotaFeature = (QUOTA_FEATURES as readonly string[]).includes(feature)
+  // 该模块是否允许发放「可转授额度」（管理员可逐模块关闭）
+  const allowed = parseDonationQuotaFeatures(
+    await getSetting(env, "donation_transfer_features")
+  )
 
   let quotaExpr = FEATURE_QUOTA_JSON
-  if (isQuotaFeature && !(await isBasicFeature(env, feature as QuotaFeature))) {
+  if (
+    isQuotaFeature &&
+    allowed.has(feature as QuotaFeature) &&
+    !(await isBasicFeature(env, feature as QuotaFeature))
+  ) {
     const f = feature as QuotaFeature
     quotaExpr = `json_set(${quotaExpr}, '$.${f}', COALESCE(json_extract(${quotaExpr}, '$.${f}'), 0) + 1)`
   }

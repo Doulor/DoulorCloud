@@ -168,8 +168,14 @@ export async function incomingEmail(
     return
   }
 
+  // 连归属用户的状态一起取出来：**被封禁的用户，其邮箱应停止收信与转发**
+  // （2026-10-08 站长要求）。此前这里只按地址找信箱，看都不看信箱属于谁、
+  // 那人封没封 —— 于是「封了人，他的邮箱照常收信、照常往外转」。
   const mailbox = await env.DB.prepare(
-    "SELECT * FROM mailboxes WHERE address = ? COLLATE NOCASE"
+    `SELECT m.*, u.status AS owner_status
+       FROM mailboxes m
+       LEFT JOIN users u ON u.id = m.user_id
+      WHERE m.address = ? COLLATE NOCASE`
   )
     .bind(recipient)
     .first<{
@@ -177,6 +183,7 @@ export async function incomingEmail(
       user_id: string
       address: string
       forwarding_to: string | null
+      owner_status: string | null
     }>()
 
   if (!mailbox) {
@@ -189,6 +196,17 @@ export async function incomingEmail(
     // 处理方式：**拒收**（发信人会收到「收件人不存在」的退信）。
     // 这是刻意的选择，别改成静默丢弃：静默丢信会让群发者以为地址有效、继续发，
     // 而退信能立刻告诉写错地址的人「这个地址不存在」。
+    message.setReject("收件人不存在")
+    return
+  }
+
+  // 归属用户被封禁 ⇒ 该邮箱停止服务（收信与转发都不做）。
+  //
+  // 用**拒收**而不是静默丢弃：与上面「地址不存在」保持同一口径 ——
+  // 静默丢信会让发信人以为地址有效、继续发（本文件顶部也写了这条理由）。
+  // 文案刻意用「收件人不存在」：不必向外界暴露「这个账号被封了」。
+  // 用户解封后信箱自动恢复（这里只做读取时判定，没有任何数据改动）。
+  if (mailbox.owner_status && mailbox.owner_status !== "active") {
     message.setReject("收件人不存在")
     return
   }

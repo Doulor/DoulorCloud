@@ -566,7 +566,7 @@ export async function deleteMailbox(env: Env, request: Request, id: string): Pro
  * messages 行靠 ON DELETE CASCADE 一并清除（schema 已声明），
  * 所以刷新临时邮箱会顺带清掉旧地址收到的邮件，不会在 D1 里堆垃圾。
  */
-async function purgeMailbox(env: Env, mailbox: MailboxRow): Promise<void> {
+export async function purgeMailbox(env: Env, mailbox: MailboxRow): Promise<void> {
   // 规则删除失败不阻断：表行必须删掉，否则用户界面上会出现「删不掉的邮箱」。
   // 残留规则只会让旧地址继续把信投进 Worker，而 Worker 查不到 mailboxes 行时会直接拒收。
   if (mailbox.rule_id) {

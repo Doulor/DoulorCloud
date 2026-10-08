@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>方向 2 · 大字报 Brutalist</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{--bg:#0e0e0e;--ink:#f2f2f2;--accent:#ffe600;--line:#f2f2f2}
+  body{background:var(--bg);color:var(--ink);font-family:"PingFang SC","Microsoft YaHei",sans-serif;
+    min-height:100vh;padding:0}
+  .top{border-bottom:6px solid var(--accent);padding:20px 5vw;display:flex;justify-content:space-between;align-items:center}
+  .mark{font-weight:900;font-size:20px;letter-spacing:-.02em}
+  .mark span{background:var(--accent);color:#000;padding:2px 8px}
+  .uid{font-size:12px;opacity:.6;font-family:monospace}
+  .hero{padding:56px 5vw;border-bottom:1px solid var(--line)}
+  .avatar{width:110px;height:110px;object-fit:cover;border:3px solid var(--ink);filter:grayscale(.2)}
+  .name{font-size:clamp(56px,14vw,180px);font-weight:900;line-height:.9;letter-spacing:-.04em;
+    text-transform:uppercase;margin-top:18px;word-break:break-all}
+  .name .ghost{-webkit-text-stroke:2px var(--ink);color:transparent}
+  .bio{display:inline-block;background:var(--accent);color:#000;font-weight:700;
+    font-size:15px;padding:6px 12px;margin-top:22px}
+  .status{display:inline-block;border:2px solid var(--ink);font-size:13px;padding:6px 12px;margin-top:22px;margin-left:10px}
+  .row{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--line)}
+  .cell{padding:34px 5vw}
+  .cell:first-child{border-right:1px solid var(--line)}
+  .cell h3{font-size:12px;letter-spacing:.3em;text-transform:uppercase;color:var(--accent);margin-bottom:16px;font-family:monospace}
+  .quote{font-size:26px;font-weight:900;line-height:1.4;text-transform:uppercase}
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{border:2px solid var(--ink);font-size:13px;padding:5px 12px;font-weight:700}
+  .chip:hover{background:var(--accent);color:#000;border-color:var(--accent)}
+  .links{border-bottom:1px solid var(--line)}
+  .link{display:flex;justify-content:space-between;align-items:center;padding:22px 5vw;
+    border-top:1px solid var(--line);font-size:19px;font-weight:800;text-transform:uppercase}
+  .link:first-child{border-top:0}
+  .link:hover{background:var(--accent);color:#000}
+  .link .n{font-family:monospace;font-size:13px;opacity:.55}
+  @media(max-width:720px){.row{grid-template-columns:1fr}.cell:first-child{border-right:0;border-bottom:1px solid var(--line)}}
+</style>
+</head>
+<body>
+  <div class="top"><div class="mark">PERSONAL<span>CARD</span></div><div class="uid">UID #001</div></div>
+  <div class="hero">
+    <img class="avatar" src="https://api.dicebear.com/9.x/adventurer/svg?seed=Doulor" alt="avatar">
+    <h1 class="name">Dou<span class="ghost">lor</span></h1>
+    <div><span class="bio">一个有点内向的人</span><span class="status">☕ 正在完善 Doulor Cloud</span></div>
+  </div>
+  <div class="row">
+    <div class="cell"><h3>// 名言</h3><div class="quote">旧人不知我近况<br>新人不知我过往</div></div>
+    <div class="cell"><h3>// 标签</h3><div class="chips"><span class="chip">肝帝</span><span class="chip">建站</span><span class="chip">极简</span><span class="chip">WORKBUDDY</span></div></div>
+  </div>
+  <div class="links">
+    <a class="link" href="#"><span>GitHub — Doulor</span><span class="n">01 ↗</span></a>
+    <a class="link" href="#"><span>QQ — 2737855297</span><span class="n">02 ↗</span></a>
+    <a class="link" href="#"><span>微信 — AIDoulor</span><span class="n">03 ↗</span></a>
+  </div>
+</body>
+</html>

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>骨架 3 · 中轴 spine</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0b0e14;--card:rgba(255,255,255,.05);--card-line:rgba(255,255,255,.1);
+  --ink:#e8ecf1;--dim:#8a94a3;--accent:#7c9eff;--radius:16px}
+body{background:var(--bg);color:var(--ink);font-family:"PingFang SC","Microsoft YaHei",sans-serif;min-height:100vh}
+.avatar{width:84px;height:84px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,.15)}
+.name{font-size:28px;font-weight:700;letter-spacing:-.01em}
+.bio{color:var(--dim);font-size:14.5px;line-height:1.7}
+.status{display:inline-flex;gap:6px;font-size:12.5px;color:var(--ink);background:rgba(124,158,255,.1);
+  border:1px solid rgba(124,158,255,.3);padding:5px 14px;border-radius:999px}
+.mod{background:var(--card);border:1px solid var(--card-line);border-radius:var(--radius);padding:20px}
+.mod h3{font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin-bottom:14px}
+.quote{font-size:17px;line-height:1.7;border-left:3px solid var(--accent);padding-left:16px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font-size:13px;border:1px solid rgba(124,158,255,.35);color:var(--ink);padding:5px 14px;border-radius:999px}
+.link{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-radius:12px;
+  background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);font-size:14px;margin-bottom:10px}
+.link:last-child{margin-bottom:0}
+.player{display:flex;align-items:center;gap:12px}
+.cover{width:48px;height:48px;border-radius:8px;background:linear-gradient(135deg,#c9b8ff,#8fb8ff)}
+.play{width:36px;height:36px;border-radius:50%;background:var(--accent);color:#0b0e14;display:flex;align-items:center;justify-content:center;font-size:11px}
+
+/* ===== 骨架：中轴（一条竖轴，模块左右交错） ===== */
+.wrap{max-width:880px;margin:0 auto;padding:52px 24px;position:relative}
+.hero{text-align:center;margin-bottom:56px}
+.hero .avatar{margin:0 auto 16px}
+.hero .bio{margin:6px 0 12px}
+.mods{position:relative}
+.mods::before{content:"";position:absolute;left:50%;top:0;bottom:0;width:2px;
+  background:linear-gradient(180deg,transparent,var(--accent) 12%,var(--accent) 88%,transparent);
+  transform:translateX(-50%);opacity:.4}
+.mod{width:calc(50% - 34px);position:relative;margin-bottom:36px}
+.mod::before{content:"";position:absolute;top:26px;width:12px;height:12px;border-radius:50%;
+  background:var(--accent);box-shadow:0 0 0 5px var(--bg)}
+.mod:nth-child(odd){margin-right:auto}
+.mod:nth-child(odd)::before{right:-40px}
+.mod:nth-child(even){margin-left:auto}
+.mod:nth-child(even)::before{left:-40px}
+@media(max-width:680px){
+  .mods::before{left:8px}
+  .mod{width:calc(100% - 40px);margin-left:40px!important;margin-right:0!important}
+  .mod::before{left:-40px!important;right:auto!important}
+}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <img class="avatar" src="https://api.dicebear.com/9.x/adventurer/svg?seed=Doulor" alt="">
+      <h1 class="name">Doulor</h1>
+      <p class="bio">一个有点内向的人</p>
+      <span class="status">☕ 正在完善 Doulor Cloud</span>
+    </header>
+    <main class="mods">
+      <section class="mod"><h3>名言</h3><div class="quote">旧人不知我近况，新人不知我过往</div></section>
+      <section class="mod"><h3>标签</h3><div class="chips"><span class="chip">肝帝</span><span class="chip">建站</span><span class="chip">极简</span></div></section>
+      <section class="mod"><h3>联系</h3>
+        <a class="link" href="#"><span>GitHub — Doulor</span><span>↗</span></a>
+        <a class="link" href="#"><span>QQ — 2737855297</span><span>↗</span></a>
+      </section>
+      <section class="mod"><h3>正在听</h3>
+        <div class="player"><div class="cover"></div><div style="flex:1"><div style="font-weight:600;font-size:14px">magnolia</div><div style="font-size:12px;color:var(--dim)">keshi</div></div><div class="play">▶</div></div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

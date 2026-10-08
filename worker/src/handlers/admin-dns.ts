@@ -54,6 +54,8 @@ interface DnsRow extends DnsRecordLike {
   zone_id?: string | null
   /** 归属用户的账号状态（banned 等）—— 被禁用户还留着解析记录值得关注 */
   user_status?: string | null
+  /** 因封禁被停用的时刻（迁移 0130）；null = 正常在解析 */
+  banned_at?: string | null
 }
 
 /** 列表里的单条记录（含风险标记） */
@@ -69,6 +71,8 @@ interface AdminDnsRecordView {
   srv: { weight: number; port: number; target: string } | null
   status: string
   hasCf: boolean
+  /** 因封禁被停用的时刻（null = 正常；非空 = CF 上已删、本地保留待恢复） */
+  bannedAt: string | null
   subdomainId: string | null
   createdAt: string
   updatedAt: string
@@ -162,6 +166,14 @@ function toView(
         : null,
     status: row.status,
     hasCf: Boolean(row.cf_id),
+    /**
+     * 因封禁被停用的时刻（null = 正常）。
+     *
+     * 2026-10-08 起封禁会删掉 CF 上的记录，所以管理端仍能看到这行
+     * （本地数据保留、解封可重建），但**CF 上已经没有**了 —— 不带出这个字段
+     * 的话，管理员会以为它还在正常解析。
+     */
+    bannedAt: row.banned_at ?? null,
     subdomainId: row.subdomain_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

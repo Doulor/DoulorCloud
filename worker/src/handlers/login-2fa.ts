@@ -106,7 +106,7 @@ export async function verifyLoginTwoFactor(env: Env, request: Request): Promise<
     `二次验证通过（${method}）`,
     clientIp(request)
   )
-  return completeLogin(env, user)
+  return completeLogin(env, request, user)
 }
 
 /**

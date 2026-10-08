@@ -140,7 +140,6 @@ import {
   cli2apiApi,
   attentionApi,
   HttpError,
-  errMsg,
 } from "@/services/api"
 import { useT, tStatic } from "@/i18n"
 import { useAuth } from "@/hooks/use-auth"
@@ -710,11 +709,12 @@ export default function AdminPage() {
   const { user } = useAuth()
   const [users, setUsers] = React.useState<AdminUser[]>([])
   const [filter, setFilter] = React.useState("")
-  /** 用户列表的行级多选（id 集合）。列表每次重新加载都会清空——翻页/搜索后旧勾选不再可信 */
+  /** 用户列表多选模式：常驻只有一个「编辑」按钮，进了模式才出现行勾选框 */
+  const [selectMode, setSelectMode] = React.useState(false)
   const [selectedUserIds, setSelectedUserIds] = React.useState<Set<string>>(new Set())
-  /** 批量编辑功能权限弹窗 */
-  const [bulkOpen, setBulkOpen] = React.useState(false)
-  const [bulkChecked, setBulkChecked] = React.useState<Set<string>>(new Set())
+  /** 批量封禁 / 解封弹窗 */
+  const [bulkAction, setBulkAction] = React.useState<"suspend" | "unsuspend" | null>(null)
+  const [bulkReason, setBulkReason] = React.useState("")
   const [bulkBusy, setBulkBusy] = React.useState(false)
   /**
    * 用户列表服务端分页（2026-10-08 性能）：全量模式 1399 用户 ~870KB、TTFB ~1.7s，
@@ -1189,7 +1189,7 @@ export default function AdminPage() {
           offset: page * USER_PAGE_SIZE,
         })
         setUsers(res.users)
-        // 列表换了（翻页/搜索/操作后刷新）⇒ 旧勾选作废，避免对看不见的行做批量操作
+        // 列表换了（翻页/搜索）⇒ 勾选作废：对看不见的行做批量操作太危险
         setSelectedUserIds(new Set())
         setServerTotal(res.total ?? null)
         // 无搜索词时记下「全站总数」，供页面头部统计（搜索时 total 会变，不能拿它当总数）
@@ -1224,21 +1224,33 @@ export default function AdminPage() {
     await loadUserPage(userPage, filter.trim())
   }, [loadUserPage, userPage, filter])
 
-  /** 批量开通功能：只加不减（语义见 admin-users-bulk.ts 头注释），不支持全选 */
-  const submitBulkFeatures = async () => {
+  /** 批量封禁 / 解封：走与单人编辑完全同一条后端链路（资源停用、IP 拉黑、NewAPI 同步） */
+  const submitBulkStatus = async () => {
+    if (!bulkAction) return
+    if (bulkAction === "suspend" && !bulkReason.trim()) {
+      toast.error(t("adm.suspendReasonRequired"))
+      return
+    }
     setBulkBusy(true)
     try {
-      const res = await adminApi.bulkGrantFeatures({
+      const res = await adminApi.bulkSetStatus({
         userIds: [...selectedUserIds],
-        features: [...bulkChecked],
+        action: bulkAction,
+        ...(bulkAction === "suspend" ? { reason: bulkReason.trim() } : {}),
       })
-      toast.success(t("adm.bulk.done", { n: String(res.updated) }))
-      setBulkOpen(false)
-      setBulkChecked(new Set())
+      toast.success(
+        bulkAction === "suspend"
+          ? t("adm.sel.suspendDone", { n: String(res.updated) })
+          : t("adm.sel.unsuspendDone", { n: String(res.updated) })
+      )
+      setBulkAction(null)
+      setBulkReason("")
       setSelectedUserIds(new Set())
+      setSelectMode(false)
       await load()
     } catch (err) {
-      toast.error(errMsg(err, t("adm.bulk.failed")))
+      // 与文件内其它接口同一套错误口径（admin.tsx 不用 errMsg）
+      toast.error(err instanceof HttpError ? err.message : t("adm.sel.failed"))
     } finally {
       setBulkBusy(false)
     }
@@ -3891,80 +3903,53 @@ export default function AdminPage() {
               )}
               {t("adm.registerIp")}
             </Button>
-            {/* 行级多选的操作条：勾选 ≥1 行才出现（列表刷新时勾选会被清空） */}
-            {selectedUserIds.size > 0 && (
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="secondary">
-                  {t("adm.bulk.selected", { n: String(selectedUserIds.size) })}
+            {/* 多选模式：常驻只有一个「编辑」按钮，点它才出现行勾选框与批量操作 */}
+            <Button
+              size="sm"
+              variant={selectMode ? "default" : "outline"}
+              className="shrink-0"
+              onClick={() => {
+                const next = !selectMode
+                setSelectMode(next)
+                if (!next) setSelectedUserIds(new Set())
+              }}
+            >
+              {selectMode ? (
+                <Check className="mr-1.5 h-3.5 w-3.5" />
+              ) : (
+                <Pencil className="mr-1.5 h-3.5 w-3.5" />
+              )}
+              {selectMode ? t("adm.sel.done") : t("adm.sel.edit")}
+            </Button>
+            {selectMode && selectedUserIds.size > 0 && (
+              <>
+                <Badge variant="secondary" className="shrink-0">
+                  {t("adm.sel.selected", { n: String(selectedUserIds.size) })}
                 </Badge>
                 <Button
                   size="sm"
+                  variant="destructive"
+                  className="shrink-0"
                   onClick={() => {
-                    setBulkChecked(new Set())
-                    setBulkOpen(true)
+                    setBulkReason("")
+                    setBulkAction("suspend")
                   }}
                 >
-                  <UserCheck className="mr-1.5 h-3.5 w-3.5" />
-                  {t("adm.bulk.edit")}
+                  <Ban className="mr-1.5 h-3.5 w-3.5" />
+                  {t("adm.sel.suspend")}
                 </Button>
-                <Button size="sm" variant="ghost" onClick={() => setSelectedUserIds(new Set())}>
-                  {t("adm.bulk.clear")}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0"
+                  onClick={() => setBulkAction("unsuspend")}
+                >
+                  <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                  {t("adm.sel.unsuspend")}
                 </Button>
-              </div>
+              </>
             )}
           </div>
-
-        {/* 批量编辑功能权限：只开通勾选的功能、不回收任何现有权限；不提供全选
-            （doulor 主域权限敏感，逐项勾选是刻意留的摩擦——语义见 admin-users-bulk.ts） */}
-        <Dialog open={bulkOpen} onOpenChange={setBulkOpen}>
-          <DialogContent className="max-w-sm">
-            <DialogHeader>
-              <DialogTitle>{t("adm.bulk.title")}</DialogTitle>
-              <DialogDescription>
-                {t("adm.bulk.desc", { n: String(selectedUserIds.size) })}
-              </DialogDescription>
-            </DialogHeader>
-            <div className="space-y-1.5">
-              {FEATURES.map((f) => (
-                <label
-                  key={f.key}
-                  className="flex cursor-pointer items-center gap-2.5 rounded-md border p-2.5 text-sm transition-colors hover:bg-accent/40"
-                >
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-primary"
-                    checked={bulkChecked.has(f.key)}
-                    onChange={(e) => {
-                      setBulkChecked((prev) => {
-                        const next = new Set(prev)
-                        if (e.target.checked) next.add(f.key)
-                        else next.delete(f.key)
-                        return next
-                      })
-                    }}
-                  />
-                  <span>{t(f.label)}</span>
-                </label>
-              ))}
-            </div>
-            <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-600 dark:text-amber-400">
-              {t("adm.bulk.onlyGrant")}
-            </p>
-            <p className="text-xs text-muted-foreground">{t("adm.bulk.noSelectAll")}</p>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setBulkOpen(false)}>
-                {t("common.cancel")}
-              </Button>
-              <Button
-                disabled={bulkBusy || bulkChecked.size === 0}
-                onClick={() => void submitBulkFeatures()}
-              >
-                {bulkBusy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
-                {t("adm.bulk.confirm")}
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
 
       {loading ? (
         <AdminUsersSkeleton withRegisterIp={showRegisterIp} />
@@ -3975,8 +3960,10 @@ export default function AdminPage() {
           <Table wrapperClassName="overflow-x-auto lg:overflow-clip">
             <TableHeader>
               <TableRow>
-                {/* 行级多选（无全选：批量权限的摩擦是刻意的） */}
-                <TableHead className="sticky top-[56px] z-10 w-10 border-b bg-card" />
+                {/* 多选模式才有勾选列；**没有全选**（表头 deliberately 留空） */}
+                {selectMode && (
+                  <TableHead className="sticky top-[56px] z-10 w-10 border-b bg-card" />
+                )}
                 <TableHead className="sticky top-[56px] z-10 w-16 border-b bg-card">UID</TableHead>
                 <TableHead className="sticky top-[56px] z-10 border-b bg-card">{t("adm.327")}</TableHead>
                 <TableHead className="sticky top-[56px] z-10 border-b bg-card">{t("adm.328")}</TableHead>
@@ -4003,7 +3990,7 @@ export default function AdminPage() {
                     <TableCell className="font-mono text-xs">
                       {u.uid != null ? fmtUid(u.uid) : "—"}
                     </TableCell>
-                    <TableCell colSpan={11}>
+                    <TableCell colSpan={selectMode ? 11 : 10}>
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono text-sm line-through">{u.username}</span>
                         <span className="text-xs">{u.email}</span>
@@ -4017,22 +4004,24 @@ export default function AdminPage() {
                   </TableRow>
                 ) : (
                 <TableRow key={u.id}>
-                  <TableCell className="w-10 align-top">
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 cursor-pointer accent-primary"
-                      checked={selectedUserIds.has(u.id)}
-                      onChange={(e) => {
-                        setSelectedUserIds((prev) => {
-                          const next = new Set(prev)
-                          if (e.target.checked) next.add(u.id)
-                          else next.delete(u.id)
-                          return next
-                        })
-                      }}
-                      aria-label={u.username}
-                    />
-                  </TableCell>
+                  {selectMode && (
+                    <TableCell className="w-10 align-top">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 cursor-pointer accent-primary"
+                        checked={selectedUserIds.has(u.id)}
+                        onChange={(e) => {
+                          setSelectedUserIds((prev) => {
+                            const next = new Set(prev)
+                            if (e.target.checked) next.add(u.id)
+                            else next.delete(u.id)
+                            return next
+                          })
+                        }}
+                        aria-label={u.username}
+                      />
+                    </TableCell>
+                  )}
                   <TableCell className="font-mono text-xs text-muted-foreground">
                     {u.uid != null ? fmtUid(u.uid) : "—"}
                   </TableCell>
@@ -10710,6 +10699,56 @@ export default function AdminPage() {
               }}
             >
               {t("adm.876")}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 批量封禁 / 解封（用户列表多选模式；后端复用单人封禁的全部联动） */}
+      <Dialog
+        open={bulkAction !== null}
+        onOpenChange={(open) => {
+          if (!open && !bulkBusy) setBulkAction(null)
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {bulkAction === "suspend" ? t("adm.sel.suspendTitle") : t("adm.sel.unsuspendTitle")}
+            </DialogTitle>
+            <DialogDescription>
+              {bulkAction === "suspend"
+                ? t("adm.sel.suspendDesc", { n: String(selectedUserIds.size) })
+                : t("adm.sel.unsuspendDesc", { n: String(selectedUserIds.size) })}
+            </DialogDescription>
+          </DialogHeader>
+          {bulkAction === "suspend" && (
+            <Textarea
+              rows={4}
+              maxLength={300}
+              autoFocus
+              value={bulkReason}
+              onChange={(e) => setBulkReason(e.target.value)}
+              placeholder={t("adm.suspendReasonPh")}
+            />
+          )}
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={bulkBusy}
+              onClick={() => setBulkAction(null)}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              size="sm"
+              variant={bulkAction === "suspend" ? "destructive" : "default"}
+              disabled={bulkBusy}
+              onClick={() => void submitBulkStatus()}
+            >
+              {bulkBusy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+              {bulkAction === "suspend" ? t("adm.876") : t("adm.sel.unsuspendConfirm")}
             </Button>
           </div>
         </DialogContent>

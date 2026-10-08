@@ -58,6 +58,7 @@ import {
   quotaFeaturesFromStored,
 } from "../quotas"
 import { purgeUserStorage, recalculateUsage } from "./storage"
+import { suspendUserResources, restoreUserResources } from "../user-suspension"
 import { normalizeBaseUrl } from "../donation-provision"
 import { purgeUserExternalResources } from "../user-cleanup"
 
@@ -505,8 +506,10 @@ function parseJsonArray(raw: string | null): number[] {
 //   1. 主查询 / 注销留痕 / 分页计数改 `batch()` —— 3 次往返合成 1 次（省 ~400ms）；
 //   2. 支持 ?limit=&offset=&q= 服务端分页搜索（**不传 = 维持旧行为返回全量**，
 //      管理页旧前端不受影响；传了则只回该页数据 + total，供新前端做真分页）。
-//      搜索按用户名/邮箱/命名空间过滤；用户输入进 LIKE 一律走 likeContains
-//      （D1 模式超 50 字符直接 500，见 sql-like.ts）。
+//      搜索按用户名/邮箱/命名空间/**注册 IP** 过滤；用户输入进 LIKE 一律走
+//      likeContains（D1 模式超 50 字符直接 500，见 sql-like.ts）。
+//      注册 IP 走 audit_logs 的 register 记录 —— 与列表「注册 IP」列同源，
+//      搜出来的就是列上看到的那个 IP（站长用它查同 IP 多号）。
 export async function listUsers(env: Env, request: Request): Promise<Response> {
   await requireAdminScope(env, request, "users.view")
   const url = new URL(request.url)
@@ -516,9 +519,15 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200)
   const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0)
 
-  // 搜索条件（有 q 时启用；用户名/邮箱/命名空间任一命中）
-  const qWhere = rawQ ? " WHERE (u.username LIKE ? OR u.email LIKE ? OR u.namespace LIKE ?)" : ""
-  const qBinds: unknown[] = rawQ ? [like, like, like] : []
+  // 搜索条件（有 q 时启用）：用户名 / 邮箱 / 命名空间任一命中即可。
+  // IP 走 EXISTS 子查询而非 LIKE 列 —— 注册 IP 不在 users 表上，而在
+  // audit_logs 的 register 记录里（与列表带出的 registerIp 同一口径）。
+  const regIpExists =
+    "(EXISTS(SELECT 1 FROM audit_logs a WHERE a.user_id = u.id AND a.action = 'register' AND a.ip LIKE ?))"
+  const qWhere = rawQ
+    ? ` WHERE (u.username LIKE ? OR u.email LIKE ? OR u.namespace LIKE ? OR ${regIpExists})`
+    : ""
+  const qBinds: unknown[] = rawQ ? [like, like, like, like] : []
   const pageSuffix = hasPage ? " LIMIT ? OFFSET ?" : ""
   const pageBinds: unknown[] = hasPage ? [limit, offset] : []
 
@@ -720,6 +729,219 @@ export async function getUserActivity(
   return json({ activity, hasMore, offset, limit })
 }
 
+/**
+ * 应用一次「封禁 / 解封」的**全部**副作用。
+ *
+ * 单人编辑（updateUser）与用户列表的批量封禁（admin-users-status.ts）共用这一份。
+ * 为什么必须共用：封禁的联动项很多（原因落库、DNS/子域名停用、注册 IP 拉黑、
+ * NewAPI 账户同步、每一步审计），任何一处另写一份都会漂移 —— 表现成
+ * 「单人封禁全联动、批量封禁只改了个 status」，而这种漂移在测试里看不出来。
+ *
+ * 权限校验由调用方负责（`users.suspend`）；白名单拦截仍放在本函数里
+ * （与 updateUser 同口径，迁移 0114 的数据库触发器是最后兜底）。
+ *
+ * 返回 false = 状态本来就是目标值，什么都没做（调用方据此统计「跳过」）。
+ */
+export async function applyUserStatusChange(
+  env: Env,
+  operator: { id: string; username: string },
+  user: { id: string; username: string; status: string },
+  next: "active" | "suspended",
+  reason: string | null,
+  request: Request
+): Promise<boolean> {
+  if (user.status === next) return false
+  const now = new Date().toISOString()
+
+  // 白名单用户不会被封禁（与 updateUser 同一条错误口径，别改成静默跳过 ——
+  // 批量场景里「悄悄跳过白名单用户」比「明确报错」危险得多）
+  if (next === "suspended") {
+    const white = await isUsernameWhitelisted(env, user.username)
+    if (white) {
+      throw new ApiError(
+        400,
+        `「${user.username}」在白名单里，不会被封禁。如需封禁请先从白名单移除。`,
+        "USER_WHITELISTED"
+      )
+    }
+  }
+
+  await env.DB.prepare("UPDATE users SET status = ?, updated_at = ? WHERE id = ?")
+    .bind(next, now, user.id)
+    .run()
+
+  if (next === "suspended") {
+    // 封禁原因 + 时间（解封时由下面的分支清空）
+    await env.DB.prepare("UPDATE users SET suspend_reason = ?, suspend_at = ? WHERE id = ?")
+      .bind(reason, now, user.id)
+      .run()
+
+    /**
+     * 停用**对外生效**的资源（2026-10-08 站长要求）。
+     *
+     * 此前封禁只拦住「本人登录」，但他留下的 DNS 解析、子域名照样对外响应
+     * （邮箱与邀请码分别在 email-delivery / 注册流程里就地校验，无需改数据）。
+     * 这里把 CF 上的记录删掉并标记，解封时按本地留存字段重建。
+     *
+     * ⚠️ 失败**不阻断封禁**：cloud 侧 status 已经落库、才是主操作。
+     *    删不掉的记录会保留 cf_id 并由维护任务兜底（见 user-suspension.ts）。
+     */
+    try {
+      const res = await suspendUserResources(env, user.id)
+      await recordAudit(
+        env,
+        user.id,
+        "admin.user.resources_suspended",
+        `封禁联动停用资源：DNS 记录 ${res.dnsSuspended} 条` +
+          (res.dnsDeferred > 0 ? `（另有 ${res.dnsDeferred} 条排入维护任务）` : "") +
+          `、子域名 ${res.subdomainsSuspended} 个` +
+          (res.errors.length > 0 ? `；部分失败：${res.errors.slice(0, 3).join("；")}` : ""),
+        request.headers.get("CF-Connecting-IP")
+      )
+    } catch (err) {
+      // 连本地标记都失败（表未迁移等）：只记审计，不让封禁失败
+      await recordAudit(
+        env,
+        user.id,
+        "admin.user.resources_suspend_failed",
+        `封禁已生效，但停用其 DNS/子域名失败：${err instanceof Error ? err.message : String(err)}`,
+        request.headers.get("CF-Connecting-IP")
+      )
+    }
+
+    /**
+     * 封禁联动黑名单（站长 2026-10-03）：
+     * 把这个账号的**注册 IP** 自动加进黑名单 —— 同一 IP 批量注册的小号被封后，新注册直接挡。
+     * 取的是「注册时的 IP」（audit_logs 的 register 行），不是最后一次登录 IP。
+     */
+    const reg = await env.DB.prepare(
+      "SELECT ip FROM audit_logs WHERE user_id = ? AND action = 'register' ORDER BY created_at ASC LIMIT 1"
+    )
+      .bind(user.id)
+      .first<{ ip: string | null }>()
+    if (reg?.ip) {
+      await addIpToBlacklist(env, reg.ip, `账号 ${user.username} 被封禁`, "auto")
+    }
+  } else {
+    // 解封：清掉原因与时间（否则登录页还挂着上次的封禁理由）
+    await env.DB.prepare(
+      "UPDATE users SET suspend_reason = NULL, suspend_at = NULL WHERE id = ?"
+    )
+      .bind(user.id)
+      .run()
+
+    /**
+     * 恢复被停用的资源（与上面的停用严格对称）：在 Cloudflare 上重建记录。
+     * 同样**不阻断解封** —— 重建失败的记录保留 banned_at，下次会再试。
+     */
+    try {
+      const res = await restoreUserResources(env, user.id)
+      if (res.dnsRestored > 0 || res.subdomainsRestored > 0 || res.dnsFailed > 0) {
+        await recordAudit(
+          env,
+          user.id,
+          "admin.user.resources_restored",
+          `解封联动恢复资源：DNS 记录 ${res.dnsRestored} 条、子域名 ${res.subdomainsRestored} 个` +
+            (res.dnsFailed > 0 ? `；${res.dnsFailed} 条重建失败待重试` : "")
+        )
+      }
+    } catch (err) {
+      await recordAudit(
+        env,
+        user.id,
+        "admin.user.resources_restore_failed",
+        `解封已生效，但恢复其 DNS/子域名失败：${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+
+    /**
+     * 解封时**对称地**把「封禁联动」加进来的 IP 撤掉 —— 否则误封一次，
+     * 那个 IP 就永久被拉黑、连新账号都注册不了，且没人会想到去黑名单里清。
+     * 但若该 IP 上还有**别的仍被封禁**的账号，则保留（那个号的封禁理由还在）。
+     */
+    const regIp = await env.DB.prepare(
+      "SELECT ip FROM audit_logs WHERE user_id = ? AND action = 'register' ORDER BY created_at ASC LIMIT 1"
+    )
+      .bind(user.id)
+      .first<{ ip: string | null }>()
+    if (regIp?.ip) {
+      const stillBanned = await env.DB.prepare(
+        `SELECT 1 AS x FROM users u
+           JOIN audit_logs a ON a.user_id = u.id AND a.action = 'register'
+          WHERE a.ip = ? AND u.status = 'suspended' AND u.id <> ?
+          LIMIT 1`
+      )
+        .bind(regIp.ip, user.id)
+        .first<{ x: number }>()
+      if (!stillBanned) {
+        await env.DB.prepare(
+          "DELETE FROM moderation_blacklist WHERE ip = ? AND source = 'auto'"
+        )
+          .bind(regIp.ip)
+          .run()
+      }
+    }
+  }
+
+  // 封禁/解封联动 NewAPI 账户（2026-09-25 新增）。
+  //
+  // 需求：技术封禁 cloud 账户时，连带封禁他在中转站（NewAPI）里对应的账户，
+  //      使其 API Key 立即失效（NewAPI 的 disable 会清 token 缓存）。
+  // 解封时对称地 enable 回来。
+  //
+  // 设计取舍：
+  //   - NewAPI 未配置、或该用户没开通中转站账户时静默跳过（没有可禁的对象）。
+  //   - **NewAPI 调用失败不阻断 cloud 侧封禁**：cloud 的 status 是主操作、已经落库；
+  //     NewAPI 只是附带同步，失败时记审计日志、不向上抛错 —— 否则管理员会看到
+  //     「封禁失败」，但用户其实已经被 cloud 侧停用了，反而误以为没封成。
+  const account = await env.DB.prepare(
+    "SELECT newapi_user_id FROM newapi_accounts WHERE user_id = ?"
+  )
+    .bind(user.id)
+    .first<{ newapi_user_id: number }>()
+
+  if (account && (await isNewApiConfigured(env))) {
+    try {
+      await adminSetUserStatus(
+        env,
+        account.newapi_user_id,
+        next === "suspended" ? "disable" : "enable"
+      )
+      await recordAudit(
+        env,
+        user.id,
+        next === "suspended" ? "admin.newapi.suspend" : "admin.newapi.activate",
+        `cloud ${next} → NewAPI 账户 #${account.newapi_user_id} 已同步${
+          next === "suspended" ? "禁用" : "启用"
+        }`
+      )
+    } catch (err) {
+      // 附带同步失败：只记审计，不回滚、不抛错（cloud 封禁已生效）
+      await recordAudit(
+        env,
+        user.id,
+        "admin.newapi.sync_failed",
+        `cloud ${next} 已生效，但 NewAPI 账户 #${account.newapi_user_id} 同步失败：${
+          err instanceof Error ? err.message : String(err)
+        }`
+      )
+    }
+  }
+
+  // 状态变更本身也要留痕（记在**目标用户**名下：用户详情的「最近活动」按目标查；
+  // 操作人写进 detail）。此前只有联动事件有审计，「谁封的」反倒查不到。
+  await recordAudit(
+    env,
+    user.id,
+    next === "suspended" ? "admin.user.suspend" : "admin.user.activate",
+    `管理员 ${operator.username} ${next === "suspended" ? "封禁" : "解封"} ${user.username}` +
+      (next === "suspended" && reason ? `：${reason}` : ""),
+    request.headers.get("CF-Connecting-IP")
+  )
+
+  return true
+}
+
 // PUT /api/admin/users/:username —— 更新用户状态（封禁/解封/设管理员/昵称等）
 export async function updateUser(env: Env, request: Request, username: string): Promise<Response> {
   const operator = await requireAdminScope(env, request, "users.view")
@@ -846,11 +1068,12 @@ export async function updateUser(env: Env, request: Request, username: string): 
     }
   }
 
+  // status 由 applyUserStatusChange 单独写（它带着原因/资源/IP/NewAPI 一整套联动），
+  // 这里只管角色与权限，避免两条路径都写 status。
   await env.DB.prepare(
-    "UPDATE users SET status = COALESCE(?, status), role = COALESCE(?, role), permissions = COALESCE(?, permissions), updated_at = ? WHERE id = ?"
+    "UPDATE users SET role = COALESCE(?, role), permissions = COALESCE(?, permissions), updated_at = ? WHERE id = ?"
   )
     .bind(
-      body.status ?? null,
       body.role ?? null,
       perms,
       new Date().toISOString(),
@@ -896,116 +1119,21 @@ export async function updateUser(env: Env, request: Request, username: string): 
   }
 
   /**
-   * 封禁原因 / 封禁时间（2026-10-02）。
-   *
-   * · 封禁 → 记下原因（用户在登录页会看到，所以宁可写清楚）；
-   * · 解封 → **清空**，否则会出现「已解封但登录页还挂着上次封禁理由」的怪状态。
-   *
-   * ⚠️ 只在本次**确实改了 status** 时才动这两列 —— 否则管理员改个昵称
-   *    就会把封禁原因默默冲掉（或把解封后的残留又写回去）。
+   * 封禁/解封的全部联动（原因落库、资源停用、IP 黑名单、NewAPI 同步、审计）
+   * 收敛到 applyUserStatusChange —— 用户列表的批量封禁复用同一个函数，
+   * 避免「单人全联动、批量只改 status」这种漂移。
    */
-  if (statusChanged === "suspended") {
-    const reason = String(body.suspendReason ?? "").trim().slice(0, 300)
-    const now = new Date().toISOString()
-    await env.DB.prepare("UPDATE users SET suspend_reason = ?, suspend_at = ? WHERE id = ?")
-      .bind(reason || null, now, user.id)
-      .run()
-
-    /**
-     * 封禁联动黑名单（站长 2026-10-03）：
-     * 把这个账号的**注册 IP** 自动加进黑名单 —— 同一 IP 批量注册的小号被封后，新注册直接挡。
-     * 取的是「注册时的 IP」（audit_logs 的 register 行），不是最后一次登录 IP。
-     */
-    const reg = await env.DB.prepare(
-      "SELECT ip FROM audit_logs WHERE user_id = ? AND action = 'register' ORDER BY created_at ASC LIMIT 1"
+  if (statusChanged !== null) {
+    await applyUserStatusChange(
+      env,
+      operator,
+      user,
+      statusChanged,
+      statusChanged === "suspended"
+        ? String(body.suspendReason ?? "").trim().slice(0, 300) || null
+        : null,
+      request
     )
-      .bind(user.id)
-      .first<{ ip: string | null }>()
-    if (reg?.ip) {
-      await addIpToBlacklist(env, reg.ip, `账号 ${user.username} 被封禁`, "auto")
-    }
-  } else if (statusChanged === "active") {
-    await env.DB.prepare(
-      "UPDATE users SET suspend_reason = NULL, suspend_at = NULL WHERE id = ?"
-    )
-      .bind(user.id)
-      .run()
-
-    /**
-     * 解封时**对称地**把「封禁联动」加进来的 IP 撤掉 —— 否则误封一次，
-     * 那个 IP 就永久被拉黑、连新账号都注册不了，且没人会想到去黑名单里清。
-     * 但若该 IP 上还有**别的仍被封禁**的账号，则保留（那个号的封禁理由还在）。
-     */
-    const regIp = await env.DB.prepare(
-      "SELECT ip FROM audit_logs WHERE user_id = ? AND action = 'register' ORDER BY created_at ASC LIMIT 1"
-    )
-      .bind(user.id)
-      .first<{ ip: string | null }>()
-    if (regIp?.ip) {
-      const stillBanned = await env.DB.prepare(
-        `SELECT 1 AS x FROM users u
-           JOIN audit_logs a ON a.user_id = u.id AND a.action = 'register'
-          WHERE a.ip = ? AND u.status = 'suspended' AND u.id <> ?
-          LIMIT 1`
-      )
-        .bind(regIp.ip, user.id)
-        .first<{ x: number }>()
-      if (!stillBanned) {
-        await env.DB.prepare(
-          "DELETE FROM moderation_blacklist WHERE ip = ? AND source = 'auto'"
-        )
-          .bind(regIp.ip)
-          .run()
-      }
-    }
-  }
-
-  // 封禁/解封联动 NewAPI 账户（2026-09-25 新增）。
-  //
-  // 需求：技术封禁 cloud 账户时，连带封禁他在中转站（NewAPI）里对应的账户，
-  //      使其 API Key 立即失效（NewAPI 的 disable 会清 token 缓存）。
-  // 解封时对称地 enable 回来。
-  //
-  // 设计取舍：
-  //   - 只在「本次确实改了 status」时触发，避免每次编辑昵称/权限都白调一次 NewAPI。
-  //   - NewAPI 未配置、或该用户没开通中转站账户时静默跳过（没有可禁的对象）。
-  //   - **NewAPI 调用失败不阻断 cloud 侧封禁**：cloud 的 status 是主操作、已经落库；
-  //     NewAPI 只是附带同步，失败时记审计日志、不向上抛错 —— 否则管理员会看到
-  //     「封禁失败」，但用户其实已经被 cloud 侧停用了，反而误以为没封成。
-  if (statusChanged) {
-    const account = await env.DB.prepare(
-      "SELECT newapi_user_id FROM newapi_accounts WHERE user_id = ?"
-    )
-      .bind(user.id)
-      .first<{ newapi_user_id: number }>()
-
-    if (account && (await isNewApiConfigured(env))) {
-      try {
-        await adminSetUserStatus(
-          env,
-          account.newapi_user_id,
-          statusChanged === "suspended" ? "disable" : "enable"
-        )
-        await recordAudit(
-          env,
-          user.id,
-          statusChanged === "suspended" ? "admin.newapi.suspend" : "admin.newapi.activate",
-          `cloud ${statusChanged} → NewAPI 账户 #${account.newapi_user_id} 已同步${
-            statusChanged === "suspended" ? "禁用" : "启用"
-          }`
-        )
-      } catch (err) {
-        // 附带同步失败：只记审计，不回滚、不抛错（cloud 封禁已生效）
-        await recordAudit(
-          env,
-          user.id,
-          "admin.newapi.sync_failed",
-          `cloud ${statusChanged} 已生效，但 NewAPI 账户 #${account.newapi_user_id} 同步失败：${
-            err instanceof Error ? err.message : String(err)
-          }`
-        )
-      }
-    }
   }
 
   if (quotaUpdate) {
@@ -1248,16 +1376,90 @@ function toPublicInvite(row: InviteRow & { created_by_name?: string | null }) {
 }
 
 // GET /api/admin/invites —— 邀请码列表（带创建者用户名，便于直接在列表里溯源）
+// GET /api/admin/invites —— 邀请码列表（带创建者用户名，便于直接在列表里溯源）
+// 2026-10-08 性能：与用户/捐献列表同批改造。原先无分页、一次全量返回
+// （201 个码，且随使用量增长），管理页切到该 tab 要等明显的一下。
+//   ?limit=&offset= 服务端分页；?status= 按「未使用/部分使用/已使用」筛选
+//   （判定口径与前端 inviteBucket 完全一致：used_count 与 max_uses 比较）；
+//   ?count_only=1 只要总数（管理页头部那行「邀请码 N 个」用，进页面就要显示，
+//   不能等用户切到 invite tab —— 那正是它以前一直显示 0 的原因）。
+// 不传任何参数 = 旧的全量行为，兼容旧调用方。
 export async function listInvites(env: Env, request: Request): Promise<Response> {
   await requireAdminScope(env, request, "invites")
-  const rows = await env.DB.prepare(
-    `SELECT c.*, u.username AS created_by_name
-       FROM invite_codes c
-       LEFT JOIN users u ON u.id = c.created_by
-      ORDER BY c.created_at DESC`
-  ).all<InviteRow & { created_by_name: string | null }>()
+  const url = new URL(request.url)
+  const countOnly = url.searchParams.get("count_only") === "1"
+  const hasPage = url.searchParams.has("limit") || url.searchParams.has("offset")
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200)
+  const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0)
+  const status = url.searchParams.get("status") ?? ""
 
-  return json({ invites: (rows.results ?? []).map(toPublicInvite) })
+  // 分类条件：与前端 inviteBucket() 同口径（unused: <=0；used: >=max；其余 partial）
+  const statusWhere =
+    status === "unused"
+      ? " WHERE c.used_count <= 0"
+      : status === "used"
+        ? " WHERE c.used_count >= c.max_uses"
+        : status === "partial"
+          ? " WHERE c.used_count > 0 AND c.used_count < c.max_uses"
+          : ""
+
+  /** 只要总数：一次 COUNT 就够，别把列表也查出来 */
+  if (countOnly) {
+    const row = await env.DB.prepare("SELECT COUNT(*) AS c FROM invite_codes").first<{ c: number }>()
+    return json({ total: Number(row?.c ?? 0) })
+  }
+
+  const pageSuffix = hasPage ? " LIMIT ? OFFSET ?" : ""
+  const pageBinds: unknown[] = hasPage ? [limit, offset] : []
+
+  const [rows, countRes, groupRes] = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT c.*, u.username AS created_by_name
+         FROM invite_codes c
+         LEFT JOIN users u ON u.id = c.created_by${statusWhere}
+        ORDER BY c.created_at DESC${pageSuffix}`
+    ).bind(...pageBinds),
+    hasPage
+      ? env.DB.prepare(`SELECT COUNT(*) AS c FROM invite_codes c${statusWhere}`)
+      : env.DB.prepare(`SELECT 1 AS x`),
+    hasPage
+      ? env.DB.prepare(
+          `SELECT CASE
+                    WHEN used_count <= 0 THEN 'unused'
+                    WHEN used_count >= max_uses THEN 'used'
+                    ELSE 'partial'
+                  END AS bucket,
+                  COUNT(*) AS c
+             FROM invite_codes GROUP BY bucket`
+        )
+      : env.DB.prepare(`SELECT NULL AS bucket, NULL AS c WHERE 0`),
+  ])
+
+  // counts：分类筛选按钮上的数字。"" = 全部，其余为各 bucket。
+  const counts: Record<string, number> = {}
+  for (const r of (groupRes.results ?? []) as unknown as { bucket: string | null; c: number | null }[]) {
+    if (!r.bucket) continue
+    counts[r.bucket] = Number(r.c) || 0
+    counts[""] = (counts[""] ?? 0) + (Number(r.c) || 0)
+  }
+
+  return json({
+    invites: ((rows.results ?? []) as unknown as (InviteRow & { created_by_name: string | null })[]).map(
+      toPublicInvite
+    ),
+    ...(hasPage
+      ? {
+          total: Number(
+            ((countRes as unknown as { results?: { c: number }[] }).results?.[0] as
+              | { c: number }
+              | undefined)?.c ?? 0
+          ),
+          limit,
+          offset,
+          counts,
+        }
+      : {}),
+  })
 }
 
 /**
@@ -1831,6 +2033,26 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
           throw new ApiError(
             400,
             `首捐奖励券可兑换模块只支持：${FEATURES.join("、")}`,
+            "INVALID_INPUT"
+          )
+        }
+      }
+      values[key] = parts.join(",")
+      continue
+    }
+
+    // donation_transfer_features：捐献可发放「可转授额度」的模块，空串 = 一个都不发。
+    // 必须和上面几项一样排在 `str === "" continue` 之前，否则「四个开关全关掉」
+    // 永远清不掉（表现为：全关 → 保存 → 刷新后开关又自己弹回来了）。
+    // 取值范围是 QUOTA_FEATURES（r2/ai/frp/proxy），与 quotas.ts 的
+    // parseDonationQuotaFeatures 校验口径一致。
+    if (key === "donation_transfer_features") {
+      const parts = String(raw).split(",").map((s) => s.trim()).filter(Boolean)
+      for (const p of parts) {
+        if (!(QUOTA_FEATURES as readonly string[]).includes(p)) {
+          throw new ApiError(
+            400,
+            `可转授额度的模块只支持：${QUOTA_FEATURES.join("、")}`,
             "INVALID_INPUT"
           )
         }

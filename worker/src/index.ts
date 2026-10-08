@@ -9,6 +9,8 @@ import * as subdomainHandlers from "./handlers/subdomains"
 import * as adminHandlers from "./handlers/admin"
 import * as adminDnsHandlers from "./handlers/admin-dns"
 import * as adminSubdomainHandlers from "./handlers/admin-subdomains"
+import * as adminMailboxHandlers from "./handlers/admin-mailboxes"
+import * as adminUsersStatusHandlers from "./handlers/admin-users-status"
 import * as adminRootDomainHandlers from "./handlers/admin-root-domains"
 import * as adminChannelHandlers from "./handlers/admin-channels"
 import * as adminPermHandlers from "./handlers/admin-perms"
@@ -16,6 +18,7 @@ import * as noticeHandlers from "./handlers/notices"
 import * as storageHandlers from "./handlers/storage"
 import { rootDomainFor } from "./root-domains"
 import * as newapiHandlers from "./handlers/newapi"
+import * as labHandlers from "./handlers/lab"
 import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
 import * as voucherHandlers from "./handlers/vouchers"
@@ -36,7 +39,6 @@ import * as r2AdminHandlers from "./handlers/r2-admin"
 import * as achievementHandlers from "./handlers/achievements"
 import * as leaderboardHandlers from "./handlers/leaderboard"
 import * as communityHandlers from "./handlers/community"
-import * as appNotifyHandlers from "./handlers/app-notify"
 import * as spaceHandlers from "./handlers/space"
 import * as analyticsHandlers from "./handlers/analytics"
 import * as auditHandlers from "./handlers/audit"
@@ -384,6 +386,15 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       adminHandlers.listUsers(env, request),
   },
 
+  // 用户列表批量封禁 / 解封（勾选多行 → 批量操作；复用单人封禁的全部联动）。
+  // ⚠️ 固定路径必须排在下面的 `/admin/users/:username` 正则之前，否则会被当成 username。
+  {
+    kind: "exact",
+    path: "/admin/users/bulk-status",
+    method: "POST",
+    handle: () => adminUsersStatusHandlers.bulkSetUserStatus(env, request),
+  },
+
   // 用户「最近活动」分页（支持查看更多 / 懒加载）
   {
     kind: "regex",
@@ -550,6 +561,13 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/admin/moderation/blacklist",
     method: "POST",
     handle: () => moderationListHandlers.updateBlacklist(env, request),
+  },
+  // IP 监管：查出被多个不同（未封禁）账号共用的登录 IP
+  {
+    kind: "exact",
+    path: "/admin/moderation/ip-watch",
+    method: "GET",
+    handle: () => moderationListHandlers.getIpWatch(env, request),
   },
 
   {
@@ -930,6 +948,76 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
         env,
         request,
         decodeURIComponent(adminSubdomainMatch[1])
+      ),
+  },
+
+  // ---- 邮箱管理（管理面板 → DNS → 「邮箱管理」tab）----
+  // 与子域名管理同一把钥匙（dns scope）：都是「用户的域名资源」，
+  // 可代替任意用户增删改邮箱、并查看邮箱里的邮件（只读，不改已读状态）。
+  // ⚠️ 固定路径 `/admin/mailboxes/owners` 必须排在 `/admin/mailboxes/:id` 正则之前；
+  //    邮件详情 `/admin/mailboxes/:id/messages/:mid` 也必须排在
+  //    `/admin/mailboxes/:id/messages` 之前（虽然 arity 不同，仍按从具体到宽泛排）。
+  {
+    kind: "exact",
+    path: "/admin/mailboxes/owners",
+    method: "GET",
+    handle: () => adminMailboxHandlers.searchMailboxOwners(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/mailboxes",
+    method: "GET",
+    handle: () => adminMailboxHandlers.listAdminMailboxes(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/mailboxes",
+    method: "POST",
+    handle: () => adminMailboxHandlers.createAdminMailbox(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/mailboxes\/([^/]+)\/messages\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (adminMailboxMsgMatch: RegExpMatchArray) =>
+      adminMailboxHandlers.getAdminMailboxMessage(
+        env,
+        request,
+        decodeURIComponent(adminMailboxMsgMatch[1]),
+        decodeURIComponent(adminMailboxMsgMatch[2])
+      ),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/mailboxes\/([^/]+)\/messages$/),
+    methods: ["GET"],
+    handle: (adminMailboxListMatch: RegExpMatchArray) =>
+      adminMailboxHandlers.listAdminMailboxMessages(
+        env,
+        request,
+        decodeURIComponent(adminMailboxListMatch[1])
+      ),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/mailboxes\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (adminMailboxPutMatch: RegExpMatchArray) =>
+      adminMailboxHandlers.updateAdminMailbox(
+        env,
+        request,
+        decodeURIComponent(adminMailboxPutMatch[1])
+      ),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/mailboxes\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (adminMailboxDelMatch: RegExpMatchArray) =>
+      adminMailboxHandlers.deleteAdminMailbox(
+        env,
+        request,
+        decodeURIComponent(adminMailboxDelMatch[1])
       ),
   },
 
@@ -2413,29 +2501,6 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       communityHandlers.markRead(env, request),
   },
 
-  // ---- App 端通知（WebToApp 打包的安卓 App，用轮询前台服务拉取）----
-  {
-    kind: "exact",
-    path: "/app/notifications",
-    method: "GET",
-    handle: () =>
-      appNotifyHandlers.pullAppNotifications(env, request),
-  },
-  {
-    kind: "exact",
-    path: "/app/notify-token",
-    method: "GET",
-    handle: () =>
-      appNotifyHandlers.getAppNotifyToken(env, request),
-  },
-  {
-    kind: "exact",
-    path: "/app/notify-token/rotate",
-    method: "POST",
-    handle: () =>
-      appNotifyHandlers.rotateAppNotifyToken(env, request),
-  },
-
   // ---- 活动系统（消息中心「活动推广」）----
   {
     kind: "exact",
@@ -3118,6 +3183,17 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       newapiHandlers.getStatus(env, request),
   },
 
+  // 「全部可用模型」清单（懒加载）：单独成接口是因为拉全量模型很慢
+  // （无缓存 + 一趟上游往返），原先内联在 /dev/status 里拖慢整个首屏。
+  // 前端只在用户展开「全部模型」折叠卡片时才请求它。
+  {
+    kind: "exact",
+    path: "/dev/models",
+    method: "GET",
+    handle: () =>
+      newapiHandlers.getModels(env, request),
+  },
+
   {
     kind: "exact",
     path: "/dev/sync",
@@ -3510,6 +3586,64 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       request,
       decodeURIComponent(devKeyMatch[1])
       ),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/dev\/key\/([^/]+)\/reveal$/),
+    methods: ["POST"],
+    handle: (devKeyRevealMatch: RegExpMatchArray) =>
+      newapiHandlers.revealKey(
+      env,
+      request,
+      decodeURIComponent(devKeyRevealMatch[1])
+      ),
+  },
+
+  // ================= 网页实验室（AI 聊天生成小网页 → 保存作品）=================
+
+  {
+    kind: "exact",
+    path: "/lab/chat",
+    method: "POST",
+    handle: () => labHandlers.chat(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/lab/models",
+    method: "GET",
+    handle: () => labHandlers.listModels(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/lab/projects",
+    method: "GET",
+    handle: () => labHandlers.listProjects(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/lab/projects",
+    method: "POST",
+    handle: () => labHandlers.saveProject(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/lab\/projects\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (labProjectMatch: RegExpMatchArray) =>
+      labHandlers.getProject(env, request, decodeURIComponent(labProjectMatch[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/lab\/projects\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (labProjectMatch: RegExpMatchArray) =>
+      labHandlers.deleteProject(env, request, decodeURIComponent(labProjectMatch[1])),
   },
 
   // ================= OAuth 2.0 授权服务器（Doulor Cloud 作为身份提供方）=================

@@ -42,12 +42,21 @@ export async function mapLimit<T, R>(
  *
  * 注意：超时抛出的错误与网络错误一样是 `AbortError`/`TypeError`，
  * 调用方原有的 try/catch 与错误映射逻辑无需改动。
+ *
+ * ⚠️ 2026-10-08：**调用方自带 `signal` 时必须以它为准**。
+ * 以前这里无条件用内部的 controller 覆盖 `init.signal`，于是
+ * `AbortSignal.timeout(5000)` 这类调用方超时**完全失效**（实际变成这里的
+ * timeoutMs）：健康检查本该 5 秒放弃、却跟着挂到 20 秒；`testChannel` 的 10 秒
+ * 也失效，而且它靠 `err.name === "TimeoutError"` 判定超时，被覆盖后拿到的是
+ * `AbortError`，提示文案也跟着错。自带 signal 的调用方自己负责超时时长。
  */
 export async function fetchWithTimeout(
   input: string,
   init: RequestInit = {},
   timeoutMs = 10_000
 ): Promise<Response> {
+  // 调用方已声明超时（或取消）语义 —— 尊重它，不再叠加内部计时器
+  if (init.signal) return fetch(input, init)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {

@@ -113,6 +113,8 @@ export default function RegisterPage() {
         "INVITE_USED",
         "INVITE_EXPIRED",
         "INVITE_REQUIRED",
+        // 邀请人被封禁 ⇒ 码失效。同属「换个码」这一类，所以要一起标出来。
+        "INVITE_DISABLED",
       ]
       if (e?.code && inviteCodeErr.includes(e.code)) {
         setInviteError(true)

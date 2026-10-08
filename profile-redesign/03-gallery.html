@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>方向 3 · 极简画廊 Gallery</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{--bg:#fafafa;--ink:#111;--dim:#9a9a9a;--line:#e6e6e6}
+  body{background:var(--bg);color:var(--ink);font-family:"PingFang SC","Microsoft YaHei",sans-serif;
+    min-height:100vh;padding:64px 6vw}
+  .head{display:flex;align-items:flex-end;justify-content:space-between;gap:30px;flex-wrap:wrap}
+  .id{display:flex;align-items:center;gap:22px}
+  .avatar{width:84px;height:84px;border-radius:50%;object-fit:cover}
+  .name{font-size:44px;font-weight:700;letter-spacing:-.02em}
+  .bio{color:var(--dim);font-size:15px;margin-top:2px}
+  .status{font-size:12.5px;color:var(--dim);border:1px solid var(--line);padding:5px 14px;border-radius:999px}
+  .gallery{display:grid;grid-template-columns:repeat(12,1fr);gap:18px;margin-top:64px}
+  .piece{background:#fff;border:1px solid var(--line);border-radius:14px;padding:28px;
+    transition:transform .25s ease,box-shadow .25s ease}
+  .piece:hover{transform:translateY(-4px);box-shadow:0 18px 44px rgba(0,0,0,.07)}
+  .piece .cap{font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--dim);margin-bottom:14px}
+  .span8{grid-column:span 8}.span6{grid-column:span 6}.span4{grid-column:span 4}.span12{grid-column:span 12}
+  .quote{font-size:24px;line-height:1.6;font-weight:600}
+  .mood{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{font-size:13px;color:#444;border:1px solid var(--line);border-radius:999px;padding:6px 14px;background:#fff}
+  .link{display:flex;justify-content:space-between;align-items:center;padding:12px 0;font-size:15px;border-bottom:1px solid var(--line)}
+  .link:last-child{border-bottom:0}
+  .link:hover{color:#000}
+  .link .arrow{color:var(--dim)}
+  .music{display:flex;align-items:center;gap:14px}
+  .cover{width:54px;height:54px;border-radius:10px;background:linear-gradient(135deg,#c9b8ff,#8fb8ff)}
+  .play{width:40px;height:40px;border-radius:50%;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px}
+  @media(max-width:760px){.span8,.span6,.span4{grid-column:span 12}}
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="id">
+      <img class="avatar" src="https://api.dicebear.com/9.x/adventurer/svg?seed=Doulor" alt="avatar">
+      <div><div class="name">Doulor</div><div class="bio">一个有点内向的人</div></div>
+    </div>
+    <span class="status">☕ 正在完善 Doulor Cloud</span>
+  </div>
+  <div class="gallery">
+    <div class="piece span8">
+      <div class="cap">名言 / 01</div>
+      <div class="quote">旧人不知我近况，新人不知我过往</div>
+    </div>
+    <div class="piece span4">
+      <div class="cap">标签</div>
+      <div class="mood"><span class="chip">肝帝</span><span class="chip">建站</span><span class="chip">极简</span></div>
+    </div>
+    <div class="piece span4">
+      <div class="cap">正在听</div>
+      <div class="music"><div class="cover"></div><div style="flex:1"><div style="font-weight:600;font-size:14px">magnolia</div><div style="font-size:12px;color:var(--dim)">keshi</div></div><div class="play">▶</div></div>
+    </div>
+    <div class="piece span8">
+      <div class="cap">联系</div>
+      <a class="link" href="#"><span>GitHub — Doulor</span><span class="arrow">↗</span></a>
+      <a class="link" href="#"><span>QQ — 2737855297</span><span class="arrow">↗</span></a>
+      <a class="link" href="#"><span>微信 — AIDoulor</span><span class="arrow">↗</span></a>
+    </div>
+  </div>
+</body>
+</html>

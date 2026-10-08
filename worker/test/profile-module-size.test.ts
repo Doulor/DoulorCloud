@@ -86,7 +86,7 @@ describe("模块宽度 —— 渲染", () => {
 describe("模块宽度 —— 桌面两列 CSS", () => {
   it("只在有人设过宽度时才把 .mods 切成两列网格（:has() 做开关）", async () => {
     const css = await previewHtml("center")
-    const grid = rule(css, "body:not(.layout-bento) .mods:has(>[data-size])")
+    const grid = rule(css, "body:not(.layout-bento):not(.layout-masthead):not(.layout-spine):not(.layout-masonry) .mods:has(>[data-size])")
     expect(grid, "应有一条 :has() 开关规则").not.toBeNull()
     expect(grid).toContain("display:grid")
     expect(grid).toMatch(/grid-template-columns:\s*1fr\s+1fr/)
@@ -96,13 +96,13 @@ describe("模块宽度 —— 桌面两列 CSS", () => {
     const css = await previewHtml("center")
     // 没设宽度的模块身上**没有** data-size 属性，必须靠这条兜底跨列；
     // 否则它们不匹配任何规则，掉进 grid 默认行为占 1 列 —— 变成半宽，比改动前更糟
-    expect(rule(css, "body:not(.layout-bento) .mods>.mod")).toMatch(/grid-column:\s*1\/-1/)
-    expect(rule(css, 'body:not(.layout-bento) .mods>[data-size="half"]')).toMatch(
+    expect(rule(css, "body:not(.layout-bento):not(.layout-masthead):not(.layout-spine):not(.layout-masonry) .mods>.mod")).toMatch(/grid-column:\s*1\/-1/)
+    expect(rule(css, 'body:not(.layout-bento):not(.layout-masthead):not(.layout-spine):not(.layout-masonry) .mods>[data-size="half"]')).toMatch(
       /grid-column:\s*span 1/
     )
     // 兜底必须排在 half 规则**之前**：同 specificity 时后者胜
-    const base = css.indexOf("body:not(.layout-bento) .mods>.mod{")
-    const half = css.indexOf('body:not(.layout-bento) .mods>[data-size="half"]')
+    const base = css.indexOf("body:not(.layout-bento):not(.layout-masthead):not(.layout-spine):not(.layout-masonry) .mods>.mod{")
+    const half = css.indexOf('body:not(.layout-bento):not(.layout-masthead):not(.layout-spine):not(.layout-masonry) .mods>[data-size="half"]')
     expect(base).toBeGreaterThan(-1)
     expect(half).toBeGreaterThan(base)
   })

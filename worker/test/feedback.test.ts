@@ -576,6 +576,69 @@ describe("反馈回复附带积分奖励", () => {
 // 站长要求：之后会多管理员，用户得知道具体是哪个管理员回复的反馈。
 // 每个对话消息都带 sender（头像 / 昵称 / 用户名 / 角色徽章 / 称号），
 // 形状与社区广场的 author 一致，前端可直接复用 UserAvatar / RoleBadge / CustomTitleBadge。
+describe("反馈：不能给自己的反馈发积分奖励（2026-10-07）", () => {
+  /**
+   * 「回复反馈」现在是一条**权限**（feedback），不再是仅管理员可用 ⇒
+   * 有该权限的普通用户如果能给自己的单子点回复、顺手填奖励，就是凭空刷积分。
+   *
+   * ⚠️ 这里用 `superadmin` 而不是 `admin`：admin 角色走 requireAdminScope 时还需要
+   * 权限组 / 白名单，测试里没配 ⇒ 一律 403（既有基线问题，与本功能无关）。
+   * 用 superadmin 才能真的走到「发奖励」那段逻辑，否则测试会因为 403 而"通过得毫无意义"。
+   */
+  const reply = (user: { cookie: string }, payload: Record<string, unknown>) =>
+    fetchSelf(
+      authRequest(user, "/api/admin/feedback/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+    )
+
+  it("自己给自己的反馈发奖励 → 400 拒绝，且一分没发出去", async () => {
+    const me = await makeUser({ role: "superadmin" })
+    const id = await submit(me, { category: "other", title: "我自己提的单子", body: "……" })
+
+    const res = await reply(me, { id, reply: "自己批自己", rewardPoints: 100 })
+    expect(res.status).toBe(400)
+    expect(await getPointsBalance(env, me.id)).toBe(0)
+  })
+
+  it("自己回复自己的反馈但**不带奖励** → 允许（自留备注是正常用法）", async () => {
+    const me = await makeUser({ role: "superadmin" })
+    const id = await submit(me, { category: "other", title: "自留备注", body: "……" })
+
+    const res = await reply(me, { id, reply: "记一下，稍后处理" })
+    expect(res.status).toBe(200)
+    expect((await res.json<{ reward: unknown }>()).reward).toBeNull()
+    expect(await getPointsBalance(env, me.id)).toBe(0)
+  })
+
+  it("给自己发奖励的拦截也挡住 rewardPoints 传 0 以外的负数/非法值（不会误伤正常回复）", async () => {
+    const me = await makeUser({ role: "superadmin" })
+    const id = await submit(me, { category: "other", title: "非法奖励值", body: "……" })
+
+    // 0 / 负数 / NaN 本来就不发奖 —— 不应因为「是本人」而被拒
+    for (const bad of [0, -5, "abc"]) {
+      const res = await reply(me, { id, reply: "收到", rewardPoints: bad })
+      expect(res.status).toBe(200)
+    }
+    expect(await getPointsBalance(env, me.id)).toBe(0)
+  })
+
+  it("给别人发奖励不受影响（正常路径没被误伤）", async () => {
+    const author = await makeUser()
+    const other = await makeUser({ role: "superadmin" })
+    const id = await submit(author, { category: "bug", title: "别人的单子", body: "……" })
+
+    const res = await reply(other, { id, reply: "已修复", rewardPoints: 30 })
+    expect(res.status).toBe(200)
+    expect((await res.json<{ reward: { amount: number } }>()).reward.amount).toBe(30)
+    expect(await getPointsBalance(env, author.id)).toBe(30)
+    // 给奖励的人**不会**拿到分
+    expect(await getPointsBalance(env, other.id)).toBe(0)
+  })
+})
+
 describe("反馈消息带发送者资料", () => {
   /**
    * 造一个「能处理反馈」的管理员。

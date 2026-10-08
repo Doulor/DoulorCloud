@@ -41,6 +41,7 @@ import {
   listTokens,
   listUserSubscriptions,
   login,
+  readApiKey,
   redeemCode,
   checkHealth,
   changePassword as changePasswordRemote,
@@ -78,7 +79,7 @@ interface NewApiAccountRow {
   created_at: string
 }
 
-async function loadAccount(
+export async function loadAccount(
   env: Env,
   userId: string
 ): Promise<NewApiAccountRow | null> {
@@ -111,10 +112,14 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
   ])
   const account = configured ? accountRow : null
 
-  // ⚠️ 同样并行：币种 / 健康 / 定价互不依赖，且三者都有 TTL 缓存
+  // ⚠️ 同样并行：币种 / 健康互不依赖，且两者都有 TTL 缓存
   // （见 newapi-client.ts 的 newapiGlobalCache）。原先是串行 3 次
   // 「Worker→CF→隧道→VPS1」往返，首屏要等 3 倍时间。
-  const [currency, health, pricing] = await Promise.all([
+  //
+  // ⚠️ 2026-10-08：定价（`listPricing`）已从这里移除 —— 它只服务于「模型清单」，
+  // 而那部分整体拆到了 GET /api/dev/models 懒加载（见 getModels）。首屏因此
+  // 少一趟「Worker→CF→隧道→VPS1」往返，也不用去上游拉全量模型（实测 2.8~20s）。
+  const [currency, health] = await Promise.all([
     // 币种与换算率以 NewAPI 站点为准
     configured
       ? getCurrencyInfo(env)
@@ -125,7 +130,6 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
         }),
     // 中转站健康状态（在线/离线 + 延迟），供界面顶部徽章显示
     checkHealth(env),
-    listPricing(env),
   ])
   const perUnit = currency.perUnit
 
@@ -166,14 +170,15 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
       : null,
   }
 
-  // 未开通就不必拉模型列表，避免无谓地消耗 NewAPI 的速率限制
-  // 未开通也要给出可用分组（前端用于说明默认/付费分组的差异）
+  // 未开通：模型清单相关的三个字段一律给空 —— 前端在这个状态下只渲染
+  // 「开通 / 绑定密码」卡片，根本用不到它们（模型清单只在已绑定账户的
+  // 「全部模型」折叠区里用）。真实清单走 GET /api/dev/models。
   if (!account) {
     return json({
       ...base,
       models: [],
       modelGroups: [],
-      availableGroups: collectGroups(pricing),
+      availableGroups: [],
       groupModels: {},
       // 未开通必然没有订阅；字段要给全，前端按类型直接读（不做 undefined 兜底）
       subscription: null,
@@ -182,55 +187,13 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     })
   }
 
-  let models: string[] = []
-  try {
-    models = await runWithUserToken(env, account, (token, userId) =>
-      listModels(env, token, userId)
-    )
-  } catch (err) {
-    console.error("获取模型列表失败:", err)
-  }
-
-  // 按分组归类模型。展示的分组由设置项 newapi_visible_groups 控制（默认只 default），
-  // donation（捐献）分组始终动态追加 —— 这样「∞」等管理员专用分组不会暴露给普通用户。
-  // （pricing 已在函数开头与币种/健康并行取好，见上面的 Promise.all）
-  const allGroups = collectGroups(pricing)
-  const visible = (settings.newapi_visible_groups ?? "default")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-  const availableGroups = allGroups.filter((g) => visible.includes(g))
-
-  // 「捐献」分组：模型名以 donation 开头的，统一归到这里，
-  // 不再出现在 default / 付费分组里（管理员用来标记「捐献解锁的模型」）。
+  // ⚠️ 2026-10-08：模型清单（`listModels` + 分组归类）整体移出本函数，
+  // 改由 GET /api/dev/models 懒加载（见下面的 getModels）。
   //
-  // ⚠️ 2026-10-01：这里**不能**再要求 `models.includes(p.model)`。
-  // 捐献渠道已移到独立分组（`newapi_donation_group`），而 `models` 是用
-  // 用户那个 `default` 分组的令牌拉的 ⇒ 捐献模型根本不在里面，加了这层过滤
-  // 会让整个「捐献」分组凭空消失。改成只看 pricing（管理员凭据拉的、不过滤分组）
-  // 里的模型名前缀 —— 这正是「用户还没建捐献 Key，也看得到自己能得到什么」的语义。
-  const isDonationModel = (name: string) => /^donation/i.test(name)
-  const donationModels = new Set(
-    pricing.filter((p) => isDonationModel(p.model)).map((p) => p.model)
-  )
-
-  const groupModels: Record<string, string[]> = {}
-  for (const g of availableGroups) {
-    groupModels[g] = pricing
-      .filter(
-        (p) =>
-          p.groups.includes(g) &&
-          models.includes(p.model) &&
-          !donationModels.has(p.model)
-      )
-      .map((p) => p.model)
-  }
-
-  // 有捐献模型时才追加「捐献」分组（排在最后）
-  if (donationModels.size > 0) {
-    availableGroups.push("donation")
-    groupModels["donation"] = Array.from(donationModels)
-  }
+  // 原因：`listModels` 每次都去上游 NewAPI 拉**全量模型清单**，且**没有缓存**
+  // （币种/健康/定价有 TTL 缓存，它和订阅是用户维度的，不在缓存里）。
+  // 而它唯一的用途是页面上那个**默认折叠**的「全部模型」卡片 ⇒ 每次打开
+  // AI 中转站页都要为它多等一趟「Worker→CF→隧道→VPS1」往返（实测 TTFB 2.8~20s）。
 
   // 全部活跃订阅：一个用户可能同时持有多张（免费套餐 + 各档邀请/奖励套餐）。
   // 消费时按 `end_time asc, id asc` 逐张接力，所以「总额度 = 各张之和」。
@@ -294,11 +257,17 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
 
   return json({
     ...base,
-    models,
-    /** 可用分组名列表（顺序：默认分组在前） */
-    availableGroups,
-    /** 分组 → 该分组可用模型；仅包含用户可用的模型 */
-    groupModels,
+    /**
+     * ⚠️ 2026-10-08：`models` / `availableGroups` / `groupModels` 三个字段
+     * 已移到 GET /api/dev/models 懒加载返回。这里保留**空值**只是为了不改变
+     * 响应形状（前端类型仍声明了它们，旧客户端也不会读到 undefined）。
+     * 前端已改为：只有用户展开「全部模型」卡片时才去取真实清单。
+     */
+    models: [],
+    /** 可用分组名列表（顺序：默认分组在前）—— 见上，懒加载 */
+    availableGroups: [] as string[],
+    /** 分组 → 该分组可用模型 —— 见上，懒加载 */
+    groupModels: {} as Record<string, string[]>,
     /**
      * 捐献渠道所在的分组名（默认 `donation`）。
      * 前端要拿它提示用户「捐献模型得单独建一个选这个分组的 Key」——
@@ -318,6 +287,85 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     /** 全部活跃订阅（按套餐类型合并），供奖励订阅卡片分段展示 */
     subscriptions,
   })
+}
+
+/**
+ * 「全部可用模型」清单 + 分组归类（懒加载接口，路由 GET /api/dev/models）。
+ *
+ * 为什么要单独一个接口：`getStatus` 原先每次都要等 `listModels` 去上游 NewAPI
+ * 拉**全量模型清单**（无缓存，实测 TTFB 2.8~20s），而这份清单唯一的用途是页面
+ * 底部那个**默认折叠**的「全部模型」卡片 ⇒ 首屏白白被它拖住。
+ * 现在前端只在用户真正展开那张卡片时才请求这里。
+ *
+ * 返回口径与原来内联在 getStatus 里的完全一致（models / availableGroups /
+ * groupModels），前端只是把数据来源从 status 换成这个接口，展示逻辑不用动。
+ */
+export async function getModels(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "ai")
+  // 四项互不依赖：设置 / 是否配置 / 账号行 / 定价（定价有 2 分钟 TTL 缓存）
+  const [settings, configured, accountRow, pricing] = await Promise.all([
+    getSettings(env),
+    isNewApiConfigured(env),
+    loadAccount(env, user.id),
+    listPricing(env),
+  ])
+  const account = configured ? accountRow : null
+  if (!account) {
+    return json({ models: [], availableGroups: [], groupModels: {} })
+  }
+
+  // 用用户自己的 token 拉（受其所属分组限制）。上游抖动时降级为空清单，
+  // 不能让整个接口 500 —— 前端拿到空清单会显示「暂无可用模型」。
+  let models: string[] = []
+  try {
+    models = await runWithUserToken(env, account, (token, userId) =>
+      listModels(env, token, userId)
+    )
+  } catch (err) {
+    console.error("获取模型列表失败:", err)
+  }
+
+  // 按分组归类模型。展示的分组由设置项 newapi_visible_groups 控制（默认只 default），
+  // donation（捐献）分组始终动态追加 —— 这样「∞」等管理员专用分组不会暴露给普通用户。
+  const allGroups = collectGroups(pricing)
+  const visible = (settings.newapi_visible_groups ?? "default")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const availableGroups = allGroups.filter((g) => visible.includes(g))
+
+  // 「捐献」分组：模型名以 donation 开头的，统一归到这里，
+  // 不再出现在 default / 付费分组里（管理员用来标记「捐献解锁的模型」）。
+  //
+  // ⚠️ 2026-10-01：这里**不能**要求 `models.includes(p.model)`。
+  // 捐献渠道已移到独立分组（`newapi_donation_group`），而 `models` 是用
+  // 用户那个 `default` 分组的令牌拉的 ⇒ 捐献模型根本不在里面，加了这层过滤
+  // 会让整个「捐献」分组凭空消失。改成只看 pricing（管理员凭据拉的、不过滤分组）
+  // 里的模型名前缀 —— 这正是「用户还没建捐献 Key，也看得到自己能得到什么」的语义。
+  const isDonationModel = (name: string) => /^donation/i.test(name)
+  const donationModels = new Set(
+    pricing.filter((p) => isDonationModel(p.model)).map((p) => p.model)
+  )
+
+  const groupModels: Record<string, string[]> = {}
+  for (const g of availableGroups) {
+    groupModels[g] = pricing
+      .filter(
+        (p) =>
+          p.groups.includes(g) &&
+          models.includes(p.model) &&
+          !donationModels.has(p.model)
+      )
+      .map((p) => p.model)
+  }
+
+  // 有捐献模型时才追加「捐献」分组（排在最后）
+  if (donationModels.size > 0) {
+    availableGroups.push("donation")
+    groupModels["donation"] = Array.from(donationModels)
+  }
+
+  return json({ models, availableGroups, groupModels })
 }
 
 /** 收集全部分组名，默认分组排在最前 */
@@ -432,7 +480,7 @@ async function loginWithStoredPassword(
  * 正常路径下 login 次数从「每次操作 1 次」降到「几乎为 0」，同时保留自愈能力：
  * 缓存被 disable/enable、转组等操作吊销时，用户无感（不会被迫重新绑定）。
  */
-async function runWithUserToken<T>(
+export async function runWithUserToken<T>(
   env: Env,
   account: NewApiAccountRow,
   fn: (token: string, userId: number) => Promise<T>
@@ -452,7 +500,7 @@ async function runWithUserToken<T>(
 
 /** 把「用户 access token 失效」统一转成 USER_TOKEN_EXPIRED，前端据此弹出重新绑定框。
  *  其余错误原样抛出。 */
-function mapUserTokenError(err: unknown): unknown {
+export function mapUserTokenError(err: unknown): unknown {
   if (err instanceof ApiError && err.code === "NEWAPI_TOKEN_INVALID") {
     return new ApiError(
       401,
@@ -885,7 +933,7 @@ export async function createKey(env: Env, request: Request): Promise<Response> {
         tokenId: created.tokenId,
         name,
         group,
-        // 完整 key 仅此一次下发，服务端不保存
+        // 完整 key 随创建响应下发；之后可用 POST /dev/key/:id/reveal 随时再取
         fullKey: created.fullKey,
         maskedKey: created.maskedKey,
         createdAt: now,
@@ -927,6 +975,41 @@ export async function removeKey(
   await audit(env, user.id, "newapi.key.delete", `删除 API Key「${row.name}」`)
 
   return new Response(null, { status: 204 })
+}
+
+/**
+ * POST /api/dev/key/:id/reveal —— 读取某个 Key 的完整内容（随时复制用）。
+ *
+ * 背景：原先「完整 Key 只在创建时显示一次」，用户丢了只能删掉重建。
+ * 现在每次**现取现复制**：从 NewAPI 按 token id 取回，本地不缓存明文。
+ * 只能取自己的 Key（user_id 归属校验）。
+ */
+export async function revealKey(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "ai")
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通 AI 中转站", "NOT_BOUND")
+
+  const row = await env.DB.prepare(
+    "SELECT id, token_id FROM newapi_keys WHERE id = ? AND user_id = ?"
+  )
+    .bind(id, user.id)
+    .first<{ id: string; token_id: number }>()
+  if (!row) throw new ApiError(404, "Key 不存在", "NOT_FOUND")
+
+  let key: string
+  try {
+    key = await runWithUserToken(env, account, (token, userId) =>
+      readApiKey(env, token, userId, row.token_id)
+    )
+  } catch (err) {
+    throw mapUserTokenError(err)
+  }
+
+  return json({ key })
 }
 
 /**

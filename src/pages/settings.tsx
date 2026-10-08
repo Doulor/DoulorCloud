@@ -742,7 +742,7 @@ export default function SettingsPage() {
         </Card>
         )}
 
-        {/* 手机 App 通知：给打包成 App 的移动端提供拉取地址与令牌 */}
+        {/* 消息通知：网页通知（浏览器 / App WebView 里都会桥接成系统通知） */}
         {show("notify") && (
         <MessageNotifyCard />
         )}

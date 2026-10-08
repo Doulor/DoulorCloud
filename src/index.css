@@ -127,6 +127,90 @@
   }
 }
 
+/* 网页实验室：「正在思考」的 AI 星标旋转 + 文字流光（仿 Gemini 那种等待态） */
+@keyframes lab-think-spin {
+  0% {
+    transform: rotate(0deg) scale(0.9);
+    opacity: 0.7;
+  }
+  50% {
+    transform: rotate(180deg) scale(1.05);
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(360deg) scale(0.9);
+    opacity: 0.7;
+  }
+}
+
+@keyframes lab-think-sweep {
+  0% {
+    background-position: 160% 0;
+  }
+  100% {
+    background-position: -60% 0;
+  }
+}
+
+@utility lab-think-icon {
+  animation: lab-think-spin 2.4s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+}
+
+@utility lab-think-text {
+  background-image: linear-gradient(
+    90deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 38%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 62%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: lab-think-sweep 1.7s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lab-think-icon,
+  .lab-think-text {
+    animation: none;
+    color: var(--muted-foreground);
+    background-image: none;
+  }
+}
+
+/* 流式输出时的光标（跟在正在生成的那句话后面闪） */
+@keyframes lab-caret-blink {
+  0%,
+  50% {
+    opacity: 0.65;
+  }
+  50.01%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@utility lab-caret {
+  display: inline-block;
+  width: 0.45em;
+  height: 1em;
+  margin-left: 0.12em;
+  vertical-align: -0.15em;
+  border-radius: 1px;
+  background: currentColor;
+  animation: lab-caret-blink 1s steps(1, end) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lab-caret {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
 /* 角色徽章流光：管理员金色（role-sheen）、站长红色更浓（role-sheen-strong） */
 @keyframes role-sheen {
   0% {

@@ -40,6 +40,7 @@ import {
   type MeResponse,
   type NewApiKey,
   type NewApiPreflight,
+  type NewApiModels,
   type NewApiStatus,
   type StorageAccount,
   type StorageObject,
@@ -216,6 +217,46 @@ export function errMsg(err: unknown, fallback: string): string {
   return fallback
 }
 
+/**
+ * 把非 2xx 响应按统一规则翻译并抛 HttpError。
+ *
+ * 抽出来是因为请求分两条路：普通 JSON 请求（request）与流式请求（requestStream）——
+ * 错误处理必须共用一份，否则「会话失效登出」「邮箱未验证弹窗」这类副作用
+ * 会在某一条路上悄悄漏掉（行为漂移）。
+ */
+async function throwHttpError(res: Response): Promise<never> {
+  const data = await res.json().catch(() => null)
+  // 后端 message 一律是中文（worker 侧既是给用户看的、也是运维/日志原文），
+  // 所以在这里就地翻一次：翻不到会原样返回，不影响任何错误处理逻辑。
+  // 放在**构造 HttpError 的地方**而不是每个调用点 —— 全站 `err.message` 的用法
+  // 有一百多处（`err instanceof HttpError ? err.message : t("…")`），逐个改必漏。
+  const raw = (data as ApiError | null)?.error
+  const message = raw
+    ? translateApiMessage(raw)
+    : tStatic("api.requestFailed", { status: res.status })
+  const code = (data as ApiError | null)?.code
+
+  // 仅在「会话本身失效」时清空用户态。
+  // 不能对所有 401 一律登出：登录密码错误、修改密码时当前密码错误
+  // 同样是 401（code=INVALID_CREDENTIALS），误判会把正常用户直接踢下线。
+  const sessionExpired =
+    res.status === 401 && (code === undefined || code === "UNAUTHORIZED")
+  if (sessionExpired) {
+    notifySessionExpired()
+  }
+
+  // 邮箱未验证：功能接口被服务端拦下（见 worker/src/auth.ts 的
+  // EMAIL_VERIFY_REQUIRED_PREFIXES），广播一次让外壳弹出验证对话框。
+  // 仍然照常抛错，调用方原有的错误处理不受影响。
+  if (res.status === 403 && code === "EMAIL_NOT_VERIFIED") {
+    notifyEmailUnverified()
+  }
+
+  // 完整响应体一并带进异常：有些错误除了文案还要**把用户需要的信息**传出去
+  // （如登录时账号被封禁 → 封禁原因与申诉处理结果，见 login.tsx 的展示）
+  throw new HttpError(res.status, message, code, data as Record<string, unknown> | null)
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {}
@@ -231,44 +272,15 @@ async function request<T>(
     credentials: "include",
   })
 
+  if (!res.ok) {
+    await throwHttpError(res)
+  }
+
   if (res.status === 204) {
     return undefined as T
   }
 
   const data = await res.json().catch(() => null)
-
-  if (!res.ok) {
-    // 后端 message 一律是中文（worker 侧既是给用户看的、也是运维/日志原文），
-    // 所以在这里就地翻一次：翻不到会原样返回，不影响任何错误处理逻辑。
-    // 放在**构造 HttpError 的地方**而不是每个调用点 —— 全站 `err.message` 的用法
-    // 有一百多处（`err instanceof HttpError ? err.message : t("…")`），逐个改必漏。
-    const raw = (data as ApiError | null)?.error
-    const message = raw
-      ? translateApiMessage(raw)
-      : tStatic("api.requestFailed", { status: res.status })
-    const code = (data as ApiError | null)?.code
-
-    // 仅在「会话本身失效」时清空用户态。
-    // 不能对所有 401 一律登出：登录密码错误、修改密码时当前密码错误
-    // 同样是 401（code=INVALID_CREDENTIALS），误判会把正常用户直接踢下线。
-    const sessionExpired =
-      res.status === 401 && (code === undefined || code === "UNAUTHORIZED")
-
-    if (sessionExpired) {
-      notifySessionExpired()
-    }
-
-    // 邮箱未验证：功能接口被服务端拦下（见 worker/src/auth.ts 的
-    // EMAIL_VERIFY_REQUIRED_PREFIXES），广播一次让外壳弹出验证对话框。
-    // 仍然照常抛错，调用方原有的错误处理不受影响。
-    if (res.status === 403 && code === "EMAIL_NOT_VERIFIED") {
-      notifyEmailUnverified()
-    }
-
-    // 完整响应体一并带进异常：有些错误除了文案还要**把用户需要的信息**传出去
-    // （如登录时账号被封禁 → 封禁原因与申诉处理结果，见 login.tsx 的展示）
-    throw new HttpError(res.status, message, code, data as Record<string, unknown> | null)
-  }
 
   // 200 但响应体不是 JSON（例如静态站点把 /api 请求兜底成了 index.html）。
   // 此时 data 是 null，若直接返回会让调用方在 `res.posts` 上抛 TypeError，
@@ -503,11 +515,21 @@ export const adminApi = {
   },
 
   /**
-   * 用户列表批量开通功能（只加不减：勾选的功能加到每个选中用户身上，
-   * 未勾选的一律不动；回收走用户详情逐人操作）。单次上限 200 人。
+   * 用户列表批量封禁 / 解封。后端复用单人封禁的完整链路（停用 DNS/子域名、
+   * 拉黑注册 IP、同步 NewAPI），单次上限 90 人；封禁必须带原因。
    */
-  bulkGrantFeatures: (payload: { userIds: string[]; features: string[] }) =>
-    request<{ ok: boolean; updated: number; features: string[] }>("/admin/users/bulk-features", {
+  bulkSetStatus: (payload: {
+    userIds: string[]
+    action: "suspend" | "unsuspend"
+    reason?: string
+  }) =>
+    request<{
+      ok: boolean
+      action: string
+      updated: number
+      skipped: number
+      usernames: string[]
+    }>("/admin/users/bulk-status", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
@@ -1067,6 +1089,12 @@ export const storageApi = {
 export const newapiApi = {
   status: () => request<NewApiStatus>("/dev/status"),
 
+  /**
+   * 「全部可用模型」清单 —— **懒加载**，只在用户展开那张卡片时才调。
+   * 拉全量模型很慢（上游无缓存 + 一趟隧道往返），不能放在首屏的 status 里。
+   */
+  models: () => request<NewApiModels>("/dev/models"),
+
   /** 开通前探测：该用户名在中转站是否已存在 */
   preflight: () => request<NewApiPreflight>("/dev/preflight"),
 
@@ -1086,11 +1114,20 @@ export const newapiApi = {
       method: "POST",
     }),
 
-  /** 创建 Key —— 完整 key 只在这条响应里返回，之后无法再取回 */
+  /** 创建 Key —— 随响应返回完整 key（之后仍可用 revealKey 随时再取） */
   createKey: (name: string, group?: string) =>
     request<{ key: NewApiKey & { fullKey: string } }>("/dev/key", {
       method: "POST",
       body: JSON.stringify({ name, group }),
+    }),
+
+  /**
+   * 读取某个 Key 的完整内容 —— 供「随时复制」。
+   * 每次现取现复制（服务端不缓存明文），失败时按统一错误映射处理。
+   */
+  revealKey: (id: string) =>
+    request<{ key: string }>(`/dev/key/${encodeURIComponent(id)}/reveal`, {
+      method: "POST",
     }),
 
   /** 用兑换码（邀请码）充值额度 */
@@ -3628,4 +3665,71 @@ export const adminMailboxesApi = {
     }>(
       `/admin/mailboxes/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`
     ),
+}
+
+// ---- 网页实验室 ----
+
+
+/** 作品摘要（列表用，不含文件内容） */
+export interface LabProjectSummary {
+  id: string
+  name: string
+  slug: string
+  icon: string
+  description: string
+  visibility: string
+  views: number
+  likes: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** 作品详情（含文件：路径 → 内容） */
+export interface LabProject extends LabProjectSummary {
+  files: Record<string, string>
+}
+
+/** 发起一次流式聊天（SSE），返回原始 Response 交给页面解析。
+ *  非 2xx 已按全站统一规则翻译成 HttpError 抛出。 */
+export async function streamLabChat(payload: {
+  model: string
+  messages: { role: string; content: string }[]
+  signal?: AbortSignal
+}): Promise<Response> {
+  const res = await fetch(`${BASE}/lab/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ model: payload.model, messages: payload.messages }),
+    signal: payload.signal,
+  })
+  if (!res.ok) {
+    await throwHttpError(res)
+  }
+  return res
+}
+
+export const labApi = {
+  /** 站内额度下可用的模型列表（未开通/未绑定时抛 NOT_BOUND，据此引导） */
+  models: () => request<{ models: string[] }>("/lab/models"),
+
+  listProjects: () => request<{ projects: LabProjectSummary[] }>("/lab/projects"),
+
+  getProject: (id: string) =>
+    request<{ project: LabProject }>(`/lab/projects/${encodeURIComponent(id)}`),
+
+  saveProject: (payload: {
+    id?: string
+    name: string
+    description?: string
+    icon?: string
+    files: Record<string, string>
+  }) =>
+    request<{ project: LabProject }>("/lab/projects", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteProject: (id: string) =>
+    request<void>(`/lab/projects/${encodeURIComponent(id)}`, { method: "DELETE" }),
 }

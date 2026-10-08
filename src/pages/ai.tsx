@@ -22,7 +22,7 @@ import { toast } from "sonner"
 import { PageHeader } from "@/components/page-header"
 import { FeatureLockedNotice } from "@/components/feature-locked-notice"
 import { EmptyState } from "@/components/empty-state"
-import { FeatureCardsSkeleton } from "@/components/skeletons"
+import { FeatureCardsSkeleton, SkeletonList, SkeletonTable } from "@/components/skeletons"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -64,6 +64,7 @@ import { useT, tStatic } from "@/i18n"
 import type {
   NewApiHealth,
   NewApiKey,
+  NewApiModels,
   NewApiPreflight,
   NewApiStatus,
   NewApiSubscriptionGroup,
@@ -446,10 +447,17 @@ export default function AiPage() {
   const navigate = useNavigate()
   const [status, setStatus] = React.useState<NewApiStatus | null>(null)
   const [keys, setKeys] = React.useState<NewApiKey[]>([])
+  /**
+   * Key 列表单独一个加载态：它要额外去上游拉「每个 Key 所属分组」（慢），
+   * **不能让它拖住整页首屏** —— 页面主体只等 status，Key 卡片自己转骨架。
+   */
+  const [keysLoading, setKeysLoading] = React.useState(false)
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
   const [syncing, setSyncing] = React.useState(false)
   const [deletingKeyId, setDeletingKeyId] = React.useState<string | null>(null)
+  /** 正在「取回完整 Key 并复制」的行 id（现取现复制，本地不留明文） */
+  const [revealingKeyId, setRevealingKeyId] = React.useState<string | null>(null)
   /** 订阅下次重置的倒计时文案（每秒刷新） */
   const [resetCountdown, setResetCountdown] = React.useState<string | null>(null)
 
@@ -477,6 +485,14 @@ export default function AiPage() {
   const donationGroup = status?.donationGroup ?? "donation"
   /** 全部模型清单默认折叠：推荐分档已给出选择建议，完整清单是查漏用途 */
   const [modelsOpen, setModelsOpen] = React.useState(false)
+  /**
+   * 全部模型清单（懒加载）。**不在首屏拉** —— 上游返回全量模型很慢且无缓存，
+   * 原先内联在 /dev/status 里会把整个页面拖住好几秒。只有用户展开下面那张
+   * 「全部可用模型」卡片时才请求。
+   */
+  const [modelCatalog, setModelCatalog] = React.useState<NewApiModels | null>(null)
+  const [modelsLoading, setModelsLoading] = React.useState(false)
+  const [modelsError, setModelsError] = React.useState(false)
 
   // 兑换码
   const [redeemCode, setRedeemCode] = React.useState("")
@@ -487,7 +503,7 @@ export default function AiPage() {
   const [aiPwOpen, setAiPwOpen] = React.useState(false)
   const [aiPw, setAiPw] = React.useState({ current: "", next: "", confirm: "" })
   const [aiPwBusy, setAiPwBusy] = React.useState(false)
-  /** 完整 key 只在创建时展示一次，不落库 */
+  /** 创建后弹窗里展示的完整 key（本地只保留到弹窗关闭；之后可在列表中随时再复制） */
   const [createdKey, setCreatedKey] = React.useState<string | null>(null)
 
   /** 拉取状态与 Key 列表；silent 用于对话框流程中刷新，避免整页 loading 卸载弹窗 */
@@ -499,9 +515,20 @@ export default function AiPage() {
     try {
       const res = await newapiApi.status()
       setStatus(res)
+      // ⚠️ 首屏只等 status！`listKeys` 会额外去上游拉每个 Key 的分组（慢，
+      // 实测出现过几十秒），以前是 await 在这里 ⇒ 整页骨架一直转到它回来。
+      // 现在先放行渲染，Key 列表在自己的卡片里单独转骨架。
+      if (!silent) setLoading(false)
       if (res.account) {
-        const k = await newapiApi.listKeys()
-        setKeys(k.keys)
+        // silent 刷新（建 Key / 同步后的回调）不切成骨架，保持旧列表可见，
+        // 免得弹窗流程里表格闪一下
+        if (!silent) setKeysLoading(true)
+        try {
+          const k = await newapiApi.listKeys()
+          setKeys(k.keys)
+        } finally {
+          if (!silent) setKeysLoading(false)
+        }
       } else {
         setKeys([])
       }
@@ -519,6 +546,32 @@ export default function AiPage() {
   React.useEffect(() => {
     void load()
   }, [load])
+
+  /**
+   * 拉「全部可用模型」清单（懒加载）。已加载过就直接复用，不重复请求；
+   * 失败时只标记错误、不弹 toast 打断 —— 页面上会显示「加载失败 + 重试」。
+   */
+  const loadModels = React.useCallback(async () => {
+    if (modelCatalog || modelsLoading) return // 已有清单 / 正在拉，不重复请求
+    setModelsLoading(true)
+    setModelsError(false)
+    try {
+      setModelCatalog(await newapiApi.models())
+    } catch {
+      setModelsError(true)
+    } finally {
+      setModelsLoading(false)
+    }
+  }, [modelCatalog, modelsLoading])
+
+  /** 展开/收起模型清单；展开时若还没拉过就顺手拉一次 */
+  const toggleModels = React.useCallback(() => {
+    setModelsOpen((open) => {
+      const next = !open
+      if (next) void loadModels()
+      return next
+    })
+  }, [loadModels])
 
   // 订阅下次重置倒计时：每秒刷新
   React.useEffect(() => {
@@ -801,6 +854,24 @@ export default function AiPage() {
       reportAiError(err, "ai.err.delete")
     } finally {
       setDeletingKeyId(null)
+    }
+  }
+
+  /**
+   * 复制完整 Key —— 从服务端现取现复制，本地不缓存明文。
+   * 原先「完整 Key 只在创建时显示一次」，用户没存下来就只能删了重建；
+   * 现在列表里随时可复制（取回失败/登录失效都走统一错误处理）。
+   */
+  const handleCopyKey = async (key: NewApiKey) => {
+    if (revealingKeyId) return
+    setRevealingKeyId(key.id)
+    try {
+      const res = await newapiApi.revealKey(key.id)
+      await copyText(res.key, t("ai.key.copied"))
+    } catch (err) {
+      reportAiError(err, "ai.err.copy")
+    } finally {
+      setRevealingKeyId(null)
     }
   }
 
@@ -1112,7 +1183,9 @@ export default function AiPage() {
               </div>
             </div>
 
-            {keys.length === 0 ? (
+            {keysLoading ? (
+              <SkeletonTable rows={3} cols={5} />
+            ) : keys.length === 0 ? (
               <EmptyState
                 title={t("ai.key.empty")}
                 description={t("ai.key.emptyDesc")}
@@ -1133,7 +1206,24 @@ export default function AiPage() {
                     <TableRow key={k.id}>
                       <TableCell className="text-sm">{k.name}</TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">
-                        {k.maskedKey}
+                        <div className="flex items-center gap-1">
+                          <span>{k.maskedKey}</span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 shrink-0"
+                            onClick={() => void handleCopyKey(k)}
+                            disabled={revealingKeyId !== null}
+                            title={t("ai.key.copy")}
+                            aria-label={t("ai.key.copy")}
+                          >
+                            {revealingKeyId === k.id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Copy className="h-3.5 w-3.5" />
+                            )}
+                          </Button>
+                        </div>
                       </TableCell>
                       <TableCell>
                         {/* 分组决定这个 Key 能调哪些模型（捐献模型在独立分组里） */}
@@ -1249,17 +1339,22 @@ export default function AiPage() {
           )}
         </Card>
 
-        {/* 全部模型：默认折叠。推荐分档已给出选择建议，完整清单是「查漏」用途 */}
+        {/* 全部模型：默认折叠。推荐分档已给出选择建议，完整清单是「查漏」用途。
+            ⚠️ 清单是**懒加载**的：展开时才请求 /dev/models（上游拉全量模型很慢），
+            首屏不再为它等待。 */}
         <Card>
           <CardHeader
             className="cursor-pointer select-none"
-            onClick={() => setModelsOpen((v) => !v)}
+            onClick={toggleModels}
           >
             <div className="flex items-center justify-between gap-4">
               <div>
                 <CardTitle className="flex items-center gap-2 text-base">
                   <Bot className="h-4 w-4 text-muted-foreground" />
-                  {t("ai.models.title", { n: status.models.length })}
+                  {/* 清单没拉回来之前不知道有几种，就不显示计数，别先写个「0」 */}
+                  {modelCatalog
+                    ? t("ai.models.title", { n: modelCatalog.models.length })
+                    : t("ai.models.titlePlain")}
                 </CardTitle>
                 <CardDescription>
                   {t("ai.models.desc")}
@@ -1274,11 +1369,20 @@ export default function AiPage() {
           </CardHeader>
           {modelsOpen && (
             <CardContent className="space-y-4">
-              {status.models.length === 0 ? (
+              {modelsLoading && !modelCatalog ? (
+                <SkeletonList count={3} />
+              ) : modelsError ? (
+                <div className="flex items-center gap-3">
+                  <p className="text-sm text-muted-foreground">{t("ai.err.load")}</p>
+                  <Button size="sm" variant="outline" onClick={() => void loadModels()}>
+                    {t("common.retry")}
+                  </Button>
+                </div>
+              ) : !modelCatalog || modelCatalog.models.length === 0 ? (
                 <p className="text-sm text-muted-foreground">{t("ai.models.empty")}</p>
               ) : (
-                status.availableGroups.map((g) => {
-                  const list = status.groupModels[g] ?? []
+                modelCatalog.availableGroups.map((g) => {
+                  const list = modelCatalog.groupModels[g] ?? []
                   if (list.length === 0) return null
                   // ⚠️ 分组名来自服务端（可在管理面板改），别在前端写死 "donation"
                   const isDonation = g === donationGroup

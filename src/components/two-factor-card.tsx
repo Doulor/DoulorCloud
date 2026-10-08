@@ -105,7 +105,11 @@ export function TwoFactorCard() {
   const toggleEmail = async (enabled: boolean) => {
     setBusy(true)
     try {
-      await twoFactorApi.setEmail(enabled)
+      const res = await twoFactorApi.setEmail(enabled)
+      // 开启方式时可能发了一批新恢复码 —— 立即展示（明文只出现这一次）
+      if (res.recoveryCodes && res.recoveryCodes.length > 0) {
+        setRecoveryCodes(res.recoveryCodes)
+      }
       await load()
       toast.success(enabled ? t("s2fa.emailOn") : t("s2fa.emailOff"))
     } catch (err) {

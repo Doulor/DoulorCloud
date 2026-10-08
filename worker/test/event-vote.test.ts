@@ -897,6 +897,143 @@ describe("投票：到点自动开奖", () => {
   })
 })
 
+describe("投票：历史投票（/api/events/vote-history）", () => {
+  /** 把活动的结束时间改到过去。⚠️ 必须先投完再改 —— 活动已结束就投不了了 */
+  async function endEvent(ev: string) {
+    const past = new Date(Date.now() - 60_000).toISOString()
+    await env.DB.prepare("UPDATE events SET ends_at = ? WHERE id = ?").bind(past, ev).run()
+  }
+
+  /** 历史投票列表项（只声明本组用例用到的字段） */
+  interface HistItem {
+    id: string
+    voteCounts?: Record<string, number>
+    myVote?: string | null
+    claimCount?: number
+    grantedCount?: number
+    vote: { drawn: boolean; fixedOptionId?: string | null; rewardRule: string } | null
+  }
+
+  async function historyOf(user: TestUser | null): Promise<HistItem[]> {
+    const res = user
+      ? await fetchSelf(authRequest(user, "/api/events/vote-history"))
+      : await fetchSelf(new Request("https://cloud.doulor.cn/api/events/vote-history"))
+    expect(res.status).toBe(200)
+    return (await res.json<{ events: HistItem[] }>()).events
+  }
+
+  it("已结束的投票出现在历史里：票数、参与人数、我投了谁、中奖人数都在", async () => {
+    const a = await makeUser({})
+    const b = await makeUser({})
+    const ev = await seedVote({ rule: "majority" })
+    await vote(ev, a, "a")
+    await vote(ev, b, "a")
+    await endEvent(ev)
+    await drawDueVotes(env) // 历史视图关心的就是开奖后的结果
+
+    const item = (await historyOf(a)).find((e) => e.id === ev)
+    expect(item).toBeTruthy()
+    expect(item?.voteCounts).toEqual({ a: 2 })
+    expect(item?.myVote).toBe("a")
+    expect(item?.claimCount).toBe(2)
+    expect(item?.grantedCount).toBe(2)
+    expect(item?.vote?.drawn).toBe(true)
+  })
+
+  it("未登录也能看（历史是公开记录），但不带「我投了谁」", async () => {
+    const u = await makeUser({})
+    const ev = await seedVote({ rule: "majority" })
+    await vote(ev, u, "b")
+    await endEvent(ev)
+    await drawDueVotes(env)
+
+    const item = (await historyOf(null)).find((e) => e.id === ev)
+    expect(item?.voteCounts).toEqual({ b: 1 })
+    expect(item?.myVote ?? null).toBeNull()
+  })
+
+  it("进行中的投票不进历史（它还在活动推广列表里）", async () => {
+    const u = await makeUser({})
+    const live = await seedVote({ rule: "majority" })
+    expect((await historyOf(u)).map((e) => e.id)).not.toContain(live)
+  })
+
+  it("promo_hidden 的投票不进历史（定向活动不该被公开回看）", async () => {
+    const u = await makeUser({})
+    const hidden = await seedVote({ rule: "majority", promoHidden: 1 })
+    await endEvent(hidden)
+    expect((await historyOf(u)).map((e) => e.id)).not.toContain(hidden)
+  })
+
+  it("非投票活动（抽奖 / 认证码…）不进历史", async () => {
+    const u = await makeUser({})
+    const id = `ev_lot_${Math.random().toString(36).slice(2, 8)}`
+    const now = new Date().toISOString()
+    const past = new Date(Date.now() - 60_000).toISOString()
+    await env.DB.prepare(
+      `INSERT INTO events
+         (id, title, body, status, starts_at, ends_at, max_claims, reward_label, reward_type,
+          reward_params, condition_type, condition_params, promo_hidden, created_by,
+          created_at, updated_at)
+       VALUES (?, '抽奖', '正文', 'active', NULL, ?, NULL, '奖励', 'points', ?, 'lottery', ?, 0, NULL, ?, ?)`
+    )
+      .bind(id, past, JSON.stringify({ amount: 10 }), JSON.stringify({ winners: 1, pool: 10 }), now, now)
+      .run()
+
+    expect((await historyOf(u)).map((e) => e.id)).not.toContain(id)
+  })
+
+  it("「指定选项获奖」结束后下发 fixedOptionId（历史要能看出是哪个选项获奖）", async () => {
+    const u = await makeUser({})
+    const ev = await seedVote({ rule: "fixed", fixedOptionId: "b" })
+    await vote(ev, u, "b")
+    await endEvent(ev)
+    // 即便还没开奖，活动已结束 ⇒ 结果该给了
+    expect((await historyOf(u)).find((e) => e.id === ev)?.vote?.fixedOptionId).toBe("b")
+  })
+
+  it("活动结束 ⇒ 没投过票的人在详情页也看得到票数（与历史口径一致）", async () => {
+    const voter = await makeUser({})
+    const other = await makeUser({})
+    const ev = await seedVote({ rule: "fixed", fixedOptionId: "c" })
+    await vote(ev, voter, "c")
+    await endEvent(ev)
+
+    const res = await fetchSelf(authRequest(other, `/api/events/${ev}`))
+    const body = await res.json<{
+      event: { voteCounts: Record<string, number>; vote: { fixedOptionId?: string | null } | null }
+    }>()
+    expect(body.event.voteCounts).toEqual({ c: 1 })
+    expect(body.event.vote?.fixedOptionId).toBe("c")
+  })
+
+  it("进行中的活动：没投过票的人仍然拿不到票数（不能照着票数投）", async () => {
+    const voter = await makeUser({})
+    const other = await makeUser({})
+    const ev = await seedVote({ rule: "majority" })
+    await vote(ev, voter, "a")
+
+    const res = await fetchSelf(authRequest(other, `/api/events/${ev}`))
+    const body = await res.json<{ event: { voteCounts: Record<string, number> } }>()
+    expect(body.event.voteCounts).toEqual({})
+  })
+
+  it("管理员提前置 ended 的投票，到点仍会自动开奖（结算不漏）", async () => {
+    const ev = await seedVote({ rule: "majority" })
+    const u = await makeUser({})
+    await vote(ev, u, "a")
+    const past = new Date(Date.now() - 60_000).toISOString()
+    // 管理员手动提前结束：状态 ended（原先 drawDueVotes 只扫 active ⇒ 这场永远不会开奖）
+    await env.DB.prepare("UPDATE events SET status = 'ended', ends_at = ? WHERE id = ?")
+      .bind(past, ev)
+      .run()
+
+    await drawDueVotes(env)
+    expect(await drawnAt(ev)).not.toBeNull()
+    expect(await claimStatus(ev, u)).toBe("granted")
+  })
+})
+
 describe("投票：创建/更新活动的参数校验", () => {
   it("投票活动缺少选项 → 400", async () => {
     const admin = await makeAdmin()

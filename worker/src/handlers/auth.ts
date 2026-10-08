@@ -17,6 +17,7 @@ import { getDefaultRootDomain, resolveZoneId, isOwnDomain } from "../root-domain
 import { grantInvitePoints } from "../points"
 import { evaluateTwoFactorGate, createLoginChallenge, maskEmail } from "./two-factor"
 import { createSession, destroySession, requireUser, sessionCookie, clearedSessionCookie, getSessionTokens, toPublicUser, loadPendingReply, type UserRow, isPrivileged } from "../auth"
+import { recordLoginIp } from "../login-ip"
 import type { Env } from "../env"
 
 /**
@@ -256,10 +257,15 @@ export async function register(env: Env, request: Request): Promise<Response> {
   } | null = null
 
   if (inviteCode) {
+    // ⚠️ JOIN 之后**每列都必须带表前缀**：`invite_codes` 与 `users` 都有 `id`，
+    //    不限定的话 SQLite 直接报 "ambiguous column name" ⇒ 注册接口 500。
+    //    （这个坑真实踩过：2026-10-08 加 JOIN 当天注册就 500。）
     const found = await env.DB.prepare(
-      `SELECT id, code, permissions, max_uses, used_count, expires_at
-         FROM invite_codes
-        WHERE code = ? COLLATE NOCASE
+      `SELECT i.id, i.code, i.permissions, i.max_uses, i.used_count, i.expires_at,
+              u.status AS inviter_status
+         FROM invite_codes i
+         LEFT JOIN users u ON u.id = i.created_by
+        WHERE i.code = ? COLLATE NOCASE
         LIMIT 1`
     )
       .bind(inviteCode)
@@ -270,13 +276,24 @@ export async function register(env: Env, request: Request): Promise<Response> {
         max_uses: number
         used_count: number
         expires_at: string | null
+        /** 邀请码创建者（`invite_codes.created_by`）的账号状态；管理员建的码为 null */
+        inviter_status: string | null
       }>()
-
     const expired =
       !!found?.expires_at && found.expires_at <= new Date().toISOString()
     const usedUp = !!found && found.used_count >= found.max_uses
+    /**
+     * 邀请人被封禁 ⇒ 邀请码失效（2026-10-08 站长要求）。
+     *
+     * 此前注册只校验邀请码本身「存在 / 没过期 / 没用完」，**完全不看邀请人状态**，
+     * 于是封了一个人他还是能继续发码把人拉进来 —— 封禁根本没堵住拉人这条路，
+     * 而且从数据上看不出任何异常（码本身是「有效」的）。
+     *
+     * `created_by` 为空（管理员建的码）不受影响：那种码不该因为某个用户被封而失效。
+     */
+    const inviterDisabled = !!found?.inviter_status && found.inviter_status !== "active"
 
-    if (found && !expired && !usedUp) {
+    if (found && !expired && !usedUp && !inviterDisabled) {
       invite = found
     } else if (!openRegistration) {
       if (!found) {
@@ -284,6 +301,10 @@ export async function register(env: Env, request: Request): Promise<Response> {
       }
       if (expired) {
         throw new ApiError(400, "该邀请码已过期，请向邀请你的人索取新的邀请链接", "INVITE_EXPIRED")
+      }
+      if (inviterDisabled) {
+        // 文案不写成「邀请人已被封禁」：那是站方的处置信息，没必要透给被邀请的人。
+        throw new ApiError(400, "该邀请码已失效，请向邀请你的人索取新的邀请链接", "INVITE_DISABLED")
       }
       throw new ApiError(
         400,
@@ -497,6 +518,10 @@ export async function register(env: Env, request: Request): Promise<Response> {
     codeConsumed: !!invite && !inviteReusable,
   })
 
+  // 注册 IP 也进 IP 监管表：这样「同一 IP 批量注册小号」在监管页一眼可见，
+  // 不必再去 audit_logs 里翻（那边只有注册，看不到后续登录）。
+  await recordLoginIp(env, id, clientIp(request))
+
   const token = await createSession(env, id)
   const user: UserRow = {
     id,
@@ -651,7 +676,7 @@ export async function login(env: Env, request: Request): Promise<Response> {
     })
   }
 
-  return completeLogin(env, user, { mustSetupTwoFactor: gate.mustSetup })
+  return completeLogin(env, request, user, { mustSetupTwoFactor: gate.mustSetup })
 }
 
 /**
@@ -666,6 +691,7 @@ export async function login(env: Env, request: Request): Promise<Response> {
  */
 export async function completeLogin(
   env: Env,
+  request: Request,
   user: UserRow,
   extra: { mustSetupTwoFactor?: boolean } = {}
 ): Promise<Response> {
@@ -681,6 +707,11 @@ export async function completeLogin(
   } catch (err) {
     console.error("记录最后登录时间失败:", user.username, err)
   }
+
+  // 记下这次登录的来源 IP（供管理端「IP 监管」反查同 IP 多账号）。
+  // 放在这里而不是各条登录分支里：口令直登和 2FA 通过都会走 completeLogin，
+  // 分开写必然漏一边。失败静默（见 recordLoginIp 注释）。
+  await recordLoginIp(env, user.id, clientIp(request))
 
   const token = await createSession(env, user.id)
   // 补发未读的申诉回复：用户已解封但还没确认看过回复时，登录后由前端强制弹窗展示

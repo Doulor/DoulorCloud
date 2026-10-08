@@ -241,8 +241,12 @@ const AiCard = React.memo(function AiCard({
                 )}
               </Button>
             </div>
+            {/* ⚠️ 2026-10-08：这里原先还有一个「{n} 模型」徽标，数据取自
+                status.models。模型清单已改为**懒加载**（GET /api/dev/models），
+                status 里不再带它 —— 概览页不该为了一个装饰性数字去让上游拉一次
+                全量模型（既慢又白耗中转站速率）。想在概览页看数量，去
+                「AI 中转站」页展开「全部可用模型」卡片即可。 */}
             <div className="flex flex-wrap items-center gap-1.5">
-              <Badge variant="secondary">{t("dash.ai.models", { n: status?.models.length ?? 0 })}</Badge>
               {status?.accountGroup && (
                 <Badge variant="outline">{status.accountGroup}</Badge>
               )}

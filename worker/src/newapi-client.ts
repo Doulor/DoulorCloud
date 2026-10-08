@@ -106,6 +106,19 @@ async function config(env: Env): Promise<NewApiConfig> {
   }
 }
 
+/** 上游 baseUrl（去掉尾部斜杠）。站内 AI 功能（网页实验室）直连 /v1 时用。 */
+export function newApiBaseUrl(env: Env): string {
+  const baseUrl = env.NEWAPI_BASE_URL
+  if (!baseUrl) {
+    throw new ApiError(
+      503,
+      "AI 中转站未配置（缺少 NEWAPI_BASE_URL）",
+      "NEWAPI_NOT_CONFIGURED"
+    )
+  }
+  return baseUrl.replace(/\/+$/, "")
+}
+
 /** 站点地址与管理员令牌是否都已具备（决定 AI 功能可用性） */
 export async function isNewApiConfigured(env: Env): Promise<boolean> {
   if (!env.NEWAPI_BASE_URL) return false
@@ -661,7 +674,16 @@ async function asUser(
   headers.set("Content-Type", "application/json")
   headers.set("Authorization", `Bearer ${accessToken}`)
   headers.set("New-Api-User", String(userId))
-  return fetch(`${cfg.baseUrl}${path}`, { ...init, headers })
+  // ⚠️ 2026-10-08：这里以前是**裸 fetch，没有任何超时** —— 所有「以用户身份」
+  // 的调用（列 Key / 拉模型 / 查自额度 …）在隧道被黑洞（连不上也断不开）时会
+  // 一直挂着，直到平台层兜底。线上实测 `/api/dev/keys` 出现过 **44 秒**的响应，
+  // 而 AI 中转站页首屏要等它 ⇒ 整页卡到一分钟。
+  // 与 `newApiFetch` 一致，统一按 NEWAPI_TIMEOUT_MS 兜底。
+  return fetchWithTimeout(
+    `${cfg.baseUrl}${path}`,
+    { ...init, headers },
+    NEWAPI_TIMEOUT_MS
+  )
 }
 
 /** 读取用户自身信息（额度 / 用量） */
@@ -765,23 +787,37 @@ export async function createApiKey(
     throw new ApiError(502, "创建 Key 后未能定位到该 Key", "NEWAPI_ERROR")
   }
 
-  const keyRes = await asUser(
+  return {
+    tokenId: created.id,
+    fullKey: await readApiKey(env, accessToken, userId, created.id),
+    maskedKey: created.key,
+  }
+}
+
+/**
+ * 读取某个 Token 的完整 Key（创建后首次读取、以及日后随时复制，共用这一条）。
+ *
+ * NewAPI 的列表接口只回掩码（`abcd**********wxyz`），完整 Key 得靠
+ * `/api/token/:id/key` 单独取；本站只在响应里透传，不落库明文。
+ */
+export async function readApiKey(
+  env: Env,
+  accessToken: string,
+  userId: number,
+  tokenId: number
+): Promise<string> {
+  const res = await asUser(
     env,
     accessToken,
     userId,
-    `/api/token/${created.id}/key`,
+    `/api/token/${tokenId}/key`,
     { method: "POST" }
   )
-  const keyData = await unwrap<{ key?: string }>(keyRes, "读取完整 Key")
-  if (!keyData?.key) {
+  const data = await unwrap<{ key?: string }>(res, "读取完整 Key")
+  if (!data?.key) {
     throw new ApiError(502, "NewAPI 未返回完整 Key", "NEWAPI_ERROR")
   }
-
-  return {
-    tokenId: created.id,
-    fullKey: keyData.key,
-    maskedKey: created.key,
-  }
+  return data.key
 }
 
 /** 删除某个 API Key */

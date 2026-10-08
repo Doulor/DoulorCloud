@@ -20,6 +20,7 @@ import {
   MessagesSquare,
   MessageSquare,
   Wrench,
+  FlaskConical,
   LogIn,
 } from "lucide-react"
 
@@ -86,6 +87,7 @@ const baseNav = [
   { to: "/dashboard/proxy", labelKey: "nav.proxy", icon: Zap, end: false },
   { to: "/dashboard/profile", labelKey: "nav.profile", icon: Contact, end: false },
   { to: "/dashboard/community", labelKey: "nav.community", icon: MessagesSquare, end: false },
+  { to: "/dashboard/lab", labelKey: "nav.lab", icon: FlaskConical, end: false, experimental: true },
   { to: "/dashboard/toolbox", labelKey: "nav.toolbox", icon: Wrench, end: false },
 ]
 
@@ -363,6 +365,8 @@ export function DashboardLayout({
     labelKey: string
     icon: React.ElementType
     end: boolean
+    /** 「实验中」小标签（网页实验室等尚在打磨的新功能） */
+    experimental?: boolean
   }) => {
     const active = item.end
       ? location.pathname === item.to
@@ -406,6 +410,11 @@ export function DashboardLayout({
       >
         <item.icon className="h-4 w-4" />
         {t(item.labelKey)}
+        {item.experimental && (
+          <span className="rounded-full border border-dashed border-muted-foreground/50 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+            {t("nav.experimental")}
+          </span>
+        )}
         {badgeFor(item.to) > 0 && (
           <span
             className={cn(

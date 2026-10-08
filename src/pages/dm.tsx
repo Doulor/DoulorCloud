@@ -22,6 +22,7 @@ import { ArrowLeft, ArrowDown, Loader2, MessageSquarePlus, Send, Users, Copy, Pl
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
+import { suppressNextPageEnter } from "@/components/page-enter"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { EmojiPicker } from "@/components/emoji-picker"
@@ -689,7 +690,11 @@ export default function DmPage() {
       await dmApi.respondRequest(peerName, action)
       toast.success(action === "accept" ? t("dmsg.req.accepted") : t("dmsg.req.declined"))
       await loadConversations()
-      if (action === "accept") navigate(`/dashboard/dm/${encodeURIComponent(peerName)}`)
+      if (action === "accept") {
+        // 同页换会话（只变 URL 参数）：别让整页重播入场动画
+        suppressNextPageEnter()
+        navigate(`/dashboard/dm/${encodeURIComponent(peerName)}`)
+      }
     } catch (err) {
       toast.error(errMsg(err, t("dmsg.req.failed")))
     }
@@ -702,6 +707,9 @@ export default function DmPage() {
       toast.error(t("dmsg.err.self"))
       return
     }
+    // 同页换会话（只变 URL 参数）：别让整页重播入场动画，
+    // 否则每点一个会话整个界面都闪一下（2026-10-08 站长反馈）
+    suppressNextPageEnter()
     navigate(`/dashboard/dm/${encodeURIComponent(target)}`)
   }
 
@@ -1113,7 +1121,14 @@ export default function DmPage() {
                     <Link
                       key={c.peer.id}
                       to={`/dashboard/dm/${encodeURIComponent(c.peer.username)}`}
-                      onClick={() => setShowChat(false)}
+                      onClick={() => {
+                        // 换会话只是换了 URL 参数、页面主体没变：
+                        // 告诉 PageEnter 别重播整页入场（2026-10-08 站长反馈）。
+                        // ⚠️ 这里是 <Link> 直接跳转，不经过 openPeer() 的 navigate，
+                        // 所以必须在本处单独调用，别以为改一处就够了。
+                        suppressNextPageEnter()
+                        setShowChat(false)
+                      }}
                       className={cn(
                         "flex items-center gap-3 px-3 py-2.5 transition-colors hover:bg-accent",
                         active && "bg-accent"

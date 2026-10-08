@@ -109,6 +109,31 @@ export const SETTING_DEFAULTS = {
    */
   first_donation_voucher_features: "r2,ai,frp,proxy,doulor",
   /**
+   * 捐献获批时**哪些模块**可以发放「可转授的模块权限额度」（逗号分隔模块名）。
+   *
+   * ⚠️ **键名刻意不含 quota**：`updateSettingsHandler` 有一条通用校验
+   * 「键名匹配 /bytes|quota|count/i 就当数值处理」，叫 `..._quota_features`
+   * 会在保存时被拒（报「需要非负数值」）。同类的 `first_donation_voucher_features`
+   * 也是因此得名，别改成带 quota 的名字。
+   *
+   * 背景：捐献获批除了 +2 邀请码额度，还会按捐献的模块 +1 「可转授额度」
+   * （见 quotas.grantQuotaForDonation）。有了它，用户就能建一张邀请码、
+   * 勾上该模块、把「开通中转站 / 内网穿透 / 代理节点 / 网盘」的资格直接送给别人。
+   * 站长要能**逐模块**停掉这条路（2026-10-08：管理面板上是四个独立开关）。
+   *
+   * 语义（与 `first_donation_voucher_features` 同一套，别把空串当「没配」）：
+   *   · 缺省（键不存在）→ **四个模块都可发** —— 维持原行为；
+   *   · 空串（四个开关全关后保存）→ **一个都不发**；
+   *   · 只认 QUOTA_FEATURES（r2/ai/frp/proxy）里的名字，认不出的直接丢掉。
+   *
+   * ⚠️ 只约束「可转授的模块额度」，**不动另外两件事**（刻意为之，别顺手扩大）：
+   *   · +2 邀请码额度照发 —— 它是通用的建码额度，与「转授某个模块」无关；
+   *   · 捐献者的**自己那份权限**照常解锁（那是捐献的正当回报，
+   *     另有 donation_grant_* 那组开关专门管它）。
+   * 已经在手上的额度也不会被回收，只影响之后新批的捐献。
+   */
+  donation_transfer_features: "r2,ai,frp,proxy",
+  /**
    * 免权限访问的模块（逗号分隔的模块名列表）。
    *
    * 设置后该模块**不再要求用户权限**，没有权限的人也能访问/启用 ——

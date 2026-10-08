@@ -654,6 +654,22 @@ export interface RecommendedTier {
   models: string[]
 }
 
+/**
+ * 「全部可用模型」清单 —— 由 `GET /api/dev/models` **懒加载**返回。
+ *
+ * ⚠️ 这几个字段原先内联在 `NewApiStatus` 里，导致 AI 中转站页每次打开都要等
+ * 上游 NewAPI 拉一趟全量模型（无缓存，实测 2.8~20s），而它唯一的用途是页面
+ * 底部那个**默认折叠**的卡片。现在拆成独立接口，用户展开卡片时才请求。
+ */
+export interface NewApiModels {
+  /** 用户当前可用模型名（受其所属分组限制） */
+  models: string[]
+  /** 可用分组（默认分组在前；有捐献模型时 donation 排在最后） */
+  availableGroups: string[]
+  /** 分组 → 该分组可用模型 */
+  groupModels: Record<string, string[]>
+}
+
 export interface NewApiStatus {
   configured: boolean
   featureEnabled: boolean
@@ -666,11 +682,6 @@ export interface NewApiStatus {
   trialQuotaUsd: number
   group: string
   account: NewApiAccount | null
-  models: string[]
-  /** 可用分组（默认分组在前） */
-  availableGroups: string[]
-  /** 分组 → 该分组可用模型 */
-  groupModels: Record<string, string[]>
   /**
    * 捐献渠道所在的分组名（默认 donation）。
    * 捐献模型只能被「选了这个分组」的 Key 调用，前端据此提示用户。

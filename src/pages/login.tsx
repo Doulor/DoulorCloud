@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom"
-import { Loader2, ShieldAlert } from "lucide-react"
+import { Loader2, Mail, ShieldAlert } from "lucide-react"
 import { toast } from "sonner"
 
 import { AuthShell, AuthFooterLink } from "@/components/auth-shell"
@@ -48,6 +48,15 @@ export default function LoginPage() {
   const [code, setCode] = React.useState("")
   const [method, setMethod] = React.useState("")
   const [sendingCode, setSendingCode] = React.useState(false)
+  /**
+   * 本次挑战是否已经**由用户手动点过**「发送验证码」。
+   *
+   * 2026-10-08 站长要求：**不要一进这个界面就自动发邮件**。
+   * 因为邮箱验证码只是可选方式之一 —— 想用认证器 App（TOTP）的人
+   * 会平白收到一封没用的验证码邮件，既打扰人又浪费发送额度。
+   * 所以改成「用户自己点发送才发」。这个标记只用来切换提示文案与按钮形态。
+   */
+  const [codeSent, setCodeSent] = React.useState(false)
   /** 登录被拒是因为账号被封禁（SUSPENDED）→ 换成申诉界面 */
   const [suspended, setSuspended] = React.useState(false)
   /**
@@ -119,11 +128,17 @@ export default function LoginPage() {
     navigate(from, { replace: true })
   }
 
-  /** 给当前挑战的账号重发一封邮箱验证码 */
+  /**
+   * 给当前挑战的账号发一封邮箱验证码。
+   *
+   * ⚠️ 只由用户**手动点击**触发（首次发送 / 重新发送），不在进界面或切方式时自动调用 ——
+   * 见 `codeSent` 的注释。
+   */
   const sendLoginEmailCode = async (challengeId: string) => {
     setSendingCode(true)
     try {
       await twoFactorApi.sendLoginEmail(challengeId)
+      setCodeSent(true)
       toast.success(t("lg.2fa.codeSent"))
     } catch (err) {
       toast.error(errMsg(err, t("lg.2fa.codeSendFailed")))
@@ -175,13 +190,12 @@ export default function LoginPage() {
           methods,
           maskedEmail: res.maskedEmail ?? "",
         })
-        // 默认选第一种；若含邮箱方式，顺手把码发出去（省一次点击）
-        const first = methods[0] ?? ""
-        setMethod(first)
+        // 默认选第一种；**不自动发邮件验证码** ——
+        // 选了认证器 App 的人没必要平白收一封验证码邮件。
+        // 邮箱方式下由用户自己点「发送验证码」（见 codeSent 注释）。
+        setMethod(methods[0] ?? "")
         setCode("")
-        if (methods.includes("email")) {
-          void sendLoginEmailCode(res.challengeId)
-        }
+        setCodeSent(false)
         return
       }
 
@@ -208,7 +222,7 @@ export default function LoginPage() {
         setSuspended(true)
         return
       }
-      setError(err instanceof HttpError ? err.message : "登录失败，请稍后重试")
+      setError(err instanceof HttpError ? err.message : t("login.failed"))
     } finally {
       setLoading(false)
     }
@@ -294,23 +308,30 @@ export default function LoginPage() {
 
   return (
     <AuthShell
-      title="登录"
-      description="使用用户名或邮箱登录你的命名空间。"
+      title={t("login.title")}
+      description={t("login.desc")}
       footer={
         <>
-          还没有账户？<AuthFooterLink to="/register" label="注册" />
+          {t("login.noAccount")}
+          <AuthFooterLink to="/register" label={t("nav.register")} />
         </>
       }
     >
       {challenge ? (
         /*
           二次验证界面。此界面出现时**尚未登录**（后端故意没发 cookie），
-          所以除了「提交验证码」和「重发邮件」，不放任何需要登录态的东西。
+          所以除了「发送验证码」「提交验证码」「重新发送」，不放任何需要登录态的东西。
+
+          ⚠️ 进这个界面**不会**自动发邮件验证码（2026-10-08 站长要求）：
+          邮箱只是可选方式之一，想用认证器 App 的人不该平白收一封没用的验证码。
+          邮箱方式的码由用户自己点按钮触发。
         */
         <form onSubmit={handleVerify} className="space-y-4">
           <p className="text-sm text-muted-foreground">
             {method === "email"
-              ? t("lg.2fa.emailSentTo", { email: challenge.maskedEmail })
+              ? codeSent
+                ? t("lg.2fa.emailSentTo", { email: challenge.maskedEmail })
+                : t("lg.2fa.emailNotSent", { email: challenge.maskedEmail })
               : method === "totp"
                 ? t("lg.2fa.enterTotp")
                 : t("lg.2fa.enterRecovery")}
@@ -327,14 +348,31 @@ export default function LoginPage() {
                   onClick={() => {
                     setMethod(m)
                     setCode("")
-                    // 切到邮箱方式时立刻补发一封，否则用户面对空输入框不知从哪拿码
-                    if (m === "email") void sendLoginEmailCode(challenge.id)
+                    // 切方式**不**自动发码：邮箱方式下由用户点「发送验证码」触发
                   }}
                 >
                   {t(`lg.2fa.method.${m}`)}
                 </Button>
               ))}
             </div>
+          )}
+
+          {/* 邮箱方式且还没发过 → 由用户点这个按钮才发（不再自动发） */}
+          {method === "email" && !codeSent && (
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              disabled={sendingCode}
+              onClick={() => void sendLoginEmailCode(challenge.id)}
+            >
+              {sendingCode ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Mail className="h-4 w-4" />
+              )}
+              {sendingCode ? t("lg.2fa.sending") : t("lg.2fa.sendCode")}
+            </Button>
           )}
 
           <div className="space-y-2">
@@ -361,7 +399,9 @@ export default function LoginPage() {
           </Button>
 
           <div className="flex items-center justify-between text-xs">
-            {method === "email" ? (
+            {/* 「重新发送」只在**已经发过一次**之后出现；
+                还没发过时上面那个大按钮才是入口，两个同时出现会让人不知道点哪个 */}
+            {method === "email" && codeSent ? (
               <button
                 type="button"
                 className="text-muted-foreground underline-offset-4 hover:underline disabled:opacity-50"
@@ -389,11 +429,11 @@ export default function LoginPage() {
       ) : (
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="space-y-2">
-          <Label htmlFor="identifier">用户名 / 邮箱</Label>
+          <Label htmlFor="identifier">{t("login.identifier")}</Label>
           <Input
             id="identifier"
             autoComplete="username"
-            placeholder="example 或 example@mail.com"
+            placeholder={t("login.identifierPlaceholder")}
             value={identifier}
             onChange={(e) => setIdentifier(e.target.value)}
             required
@@ -401,12 +441,12 @@ export default function LoginPage() {
         </div>
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <Label htmlFor="password">密码</Label>
+            <Label htmlFor="password">{t("login.password")}</Label>
             <Link
               to="/forgot-password"
               className="text-xs text-muted-foreground hover:text-foreground"
             >
-              忘记密码？
+              {t("login.forgot")}
             </Link>
           </div>
           <Input
@@ -421,16 +461,16 @@ export default function LoginPage() {
         {error && <p className="text-sm text-destructive">{error}</p>}
         <Button type="submit" className="w-full" disabled={loading}>
           {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-          登录
+          {t("login.submit")}
         </Button>
         <p className="text-center text-xs text-muted-foreground">
-          点击「登录」即表示你已阅读并同意{" "}
+          {t("login.agree.prefix")}{" "}
           <button
             type="button"
             className="text-foreground underline underline-offset-2 hover:text-primary"
             onClick={() => setTermsOpen(true)}
           >
-            《服务条款》
+            {t("reg.agree.terms")}
           </button>
         </p>
       </form>

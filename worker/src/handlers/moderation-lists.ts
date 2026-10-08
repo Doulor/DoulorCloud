@@ -20,10 +20,17 @@ import { uuid } from "../crypto"
 import { clientIp } from "../ratelimit"
 import { audit } from "../settings"
 import { achievementPointsOf, loadAllUserCounts } from "./achievements"
+import { listSharedLoginIps } from "../login-ip"
 import type { Env } from "../env"
 
 export type ConditionMetric = "achievement_points" | "custom_title"
 export type ConditionOp = "gt" | "gte" | "lt" | "lte"
+
+/** 条件命中名单里的一个人（`points` 只为界面展示成就点，称号条件恒为 0） */
+export interface MatchedUser {
+  username: string
+  points: number
+}
 
 const OPS: Record<ConditionOp, (a: number, b: number) => boolean> = {
   gt: (a, b) => a > b,
@@ -43,17 +50,25 @@ interface ConditionRow {
 
 /**
  * 算出每个**启用中**的条件命中的用户（含成就点，用于界面展示）。
- * 每个用户只归入**第一个**命中的条件 —— whitelist 表 username 有唯一索引，
- * 一个人只能挂在一个来源下；否则关掉 A 条件时他会「消失」而不是落到 B。
+ *
+ * ⚠️ 语义是**并集**（2026-10-08 站长明确）：
+ *   条件之间互不排斥 —— 一个人同时满足「成就点 > 50」和「有自定义称号」，
+ *   就会**同时出现在这两个条件的名单里**。满足任意一个条件即进白名单。
+ *   所以这里**不能**加 `break` 之类的「先命中先算」逻辑，
+ *   也不要拿下面 `syncWhitelist` 的归属结果来当展示口径 —— 那是两回事。
+ *
+ * （`moderation_whitelist` 表本身一个人只有一行，因为 username 有唯一索引；
+ *   那里存的是「他属于哪个条件」的**单一归属**，只为「关掉 A 条件时他落到 B
+ *   而不是凭空消失」这个行为服务，不代表展示口径。见 syncWhitelist 注释。）
  */
 async function evaluateConditions(
   env: Env
-): Promise<Map<string, { username: string; points: number }[]>> {
+): Promise<Map<string, MatchedUser[]>> {
   const conds = await env.DB.prepare(
     "SELECT id, metric, op, value, enabled, created_at FROM moderation_conditions ORDER BY created_at ASC"
   ).all<ConditionRow>()
   const enabled = (conds.results ?? []).filter((c) => Number(c.enabled) === 1)
-  const out = new Map<string, { username: string; points: number }[]>()
+  const out = new Map<string, MatchedUser[]>()
   for (const c of enabled) out.set(c.id, [])
   if (enabled.length === 0) return out
 
@@ -75,12 +90,12 @@ async function evaluateConditions(
       histByUser.get(r.user_id)!.set(r.achievement_id, r.lv)
     }
 
+    // 每个条件各自判断，**不 break**：满足多个条件的人会出现在多个条件里（并集语义）
     for (const c of counts) {
       const points = achievementPointsOf(c, histByUser.get(c.uid) ?? new Map())
       for (const cond of apConds) {
         if (OPS[cond.op as ConditionOp](points, cond.value)) {
           out.get(cond.id)!.push({ username: c.username, points })
-          break
         }
       }
     }
@@ -110,8 +125,17 @@ async function evaluateConditions(
  *   · 不再命中 / 条件已关 / 条件已删 的 auto 行删掉。
  * 站点是 1241 个用户量级，`loadAllUserCounts` 实测 ~9ms（见 achievements.ts 注释），
  * 所以直接在读取列表时同步即可，不必上定时任务。
+ *
+ * ⚠️ 这里有一处**故意的不对称**，改之前务必看懂：
+ *   白名单表一个人只能有一行（username 唯一索引），所以必须给他挑**一个**归属条件
+ *   （`desired` 取先遍历到的那个）。这不是「取交集」，也不代表他只满足那一个条件 ——
+ *   只是为了「关掉 A 条件时他会**落到 B**，而不是凭空消失」。
+ *   **界面展示不要用这里的结果**，要用 `evaluateConditions` 的完整命中名单（并集）。
+ *
+ * 返回值就是 `evaluateConditions` 的结果，供调用方直接拿去展示，
+ * 省得为了展示再算一遍（`loadAllUserCounts` 虽快，也没必要算两次）。
  */
-async function syncWhitelist(env: Env): Promise<void> {
+async function syncWhitelist(env: Env): Promise<Map<string, MatchedUser[]>> {
   const matched = await evaluateConditions(env)
 
   const manualRows = await env.DB.prepare(
@@ -119,7 +143,7 @@ async function syncWhitelist(env: Env): Promise<void> {
   ).all<{ username: string }>()
   const manualSet = new Set((manualRows.results ?? []).map((r) => r.username))
 
-  const desired = new Map<string, string>() // username -> conditionId
+  const desired = new Map<string, string>() // username -> conditionId（单一归属，见上）
   for (const [cid, users] of matched) {
     for (const u of users) {
       if (manualSet.has(u.username)) continue
@@ -156,6 +180,7 @@ async function syncWhitelist(env: Env): Promise<void> {
     }
   }
   if (stmts.length) await env.DB.batch(stmts)
+  return matched
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +245,8 @@ export async function addIpToBlacklist(
 /** GET /api/admin/moderation/lists —— 白名单（按来源分组）+ 黑名单 */
 export async function listModerationLists(env: Env, request: Request): Promise<Response> {
   await requireAdminScope(env, request, "moderation.whitelist")
-  await syncWhitelist(env)
+  // 同步一次并按条件取回**完整命中名单**（并集语义，见 evaluateConditions 注释）
+  const matched = await syncWhitelist(env)
 
   const [conds, wl, bl] = await Promise.all([
     env.DB.prepare(
@@ -255,15 +281,25 @@ export async function listModerationLists(env: Env, request: Request): Promise<R
     .map(asUser)
     .sort((a, b) => a.username.localeCompare(b.username))
 
+  /**
+   * 用户名 → 昵称。白名单表刚刚同步过，`matched` 里的人必然都在表里
+   * （自动命中的进 auto 行，手工加过的进 manual 行），所以这一张表够用。
+   */
+  const nickByUsername = new Map(wlRows.map((r) => [r.username, r.nickname]))
+
+  /**
+   * 每个条件列出**所有满足它的人**（并集：同时满足多个条件就出现在多个分组里）。
+   * ⚠️ 不要改回「按 whitelist.condition_id 过滤」——那是一个人只挂一个条件的
+   * **存储归属**，会让「成就点 > 50」这种条件只显示零头的人（2026-10-08 修）。
+   */
   const groups = (conds.results ?? []).map((c) => ({
     id: c.id,
     metric: c.metric as ConditionMetric,
     op: c.op as ConditionOp,
     value: c.value,
     enabled: Number(c.enabled) === 1,
-    users: wlRows
-      .filter((r) => r.source === "auto" && r.condition_id === c.id)
-      .map(asUser)
+    users: (matched.get(c.id) ?? [])
+      .map((u) => ({ username: u.username, nickname: nickByUsername.get(u.username) ?? null }))
       .sort((a, b) => a.username.localeCompare(b.username)),
   }))
 
@@ -278,6 +314,27 @@ export async function listModerationLists(env: Env, request: Request): Promise<R
         .filter((r) => r.source !== "manual")
         .map((r) => ({ ip: r.ip, reason: r.reason, createdAt: r.created_at })),
     },
+  })
+}
+
+/**
+ * GET /api/admin/moderation/ip-watch —— 「IP 监管」：查出被多个不同账号共用的 IP。
+ *
+ * 用途：小号 / 团伙排查的**线索**。同 IP 不等于同一个人（一家人、同宿舍、
+ * 同一个出口或同一个机场节点都会撞），所以这里只呈现、不自动处置，
+ * 由站长自己判断。
+ *
+ * ⚠️ 口径：只算 `status = 'active'` 的账号（已封禁的不再制造噪音）。
+ */
+export async function getIpWatch(env: Env, request: Request): Promise<Response> {
+  await requireAdminScope(env, request, "moderation.ip")
+  const groups = await listSharedLoginIps(env)
+  return json({
+    /** 有共用情况的 IP 组（按共用人数降序） */
+    groups,
+    /** 这些组里出现过的不同账号总数（用于界面顶部概览） */
+    ipCount: groups.length,
+    userCount: new Set(groups.flatMap((g) => g.users.map((u) => u.username))).size,
   })
 }
 

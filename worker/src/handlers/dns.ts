@@ -29,6 +29,8 @@ interface DnsRow {
   srv_port: number | null
   srv_target: string | null
   status: string
+  /** 因封禁被停用的时刻（null = 正常）。见 migrations/0130 与 user-suspension.ts */
+  banned_at: string | null
   created_at: string
   updated_at: string
 }
@@ -208,7 +210,10 @@ export async function listDns(env: Env, request: Request): Promise<Response> {
     if (!sub) throw new ApiError(403, "无权访问该子域名", "FORBIDDEN")
 
     rows = await env.DB.prepare(
-      "SELECT * FROM dns_records WHERE subdomain_id = ? ORDER BY created_at ASC"
+      // banned_at IS NOT NULL = 因封禁被停用（CF 上已删）。过滤掉它，
+      // 否则解封后用户会在列表里看到一条「本地有、CF 上没有」的幽灵记录
+      // ——点它解析不到，只会让人以为站点坏了。
+      "SELECT * FROM dns_records WHERE subdomain_id = ? AND banned_at IS NULL ORDER BY created_at ASC"
     )
       .bind(subdomainId)
       .all<DnsRow>()
@@ -217,7 +222,7 @@ export async function listDns(env: Env, request: Request): Promise<Response> {
     if (!domain) return json({ records: [] })
     rootDomain = domain.name
     rows = await env.DB.prepare(
-      "SELECT * FROM dns_records WHERE domain_id = ? ORDER BY created_at ASC"
+      "SELECT * FROM dns_records WHERE domain_id = ? AND banned_at IS NULL ORDER BY created_at ASC"
     )
       .bind(domain.id)
       .all<DnsRow>()

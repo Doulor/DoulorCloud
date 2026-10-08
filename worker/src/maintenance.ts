@@ -36,6 +36,7 @@ import { autoPriceNewModels } from "./newapi-client"
 import { cli2DeleteAccount } from "./cli2api-client"
 import { expireRentalOrders } from "./points-shop"
 import { scanDns } from "./dns-audit"
+import { sweepSuspendedDns, retrySuspendedDnsRestore } from "./user-suspension"
 import { syncProxySubscriptionStatuses } from "./handlers/proxy"
 
 /** 过期会话保留期（天）：留一点用于排查"刚掉线"的投诉 */
@@ -162,6 +163,8 @@ export interface MaintenanceReport {
   dnsAudit: { scanned: number; found: number; high: number; medium: number; low: number } | null
   tableRows: Record<string, number>
   proxySync: { checked: number; offline: number; unknown: number; recovered: number } | null
+  /** 封禁用户遗留/待恢复的 CF DNS 记录兜底（removed = 删掉、restored = 重建） */
+  suspendedDns: { removed: number; restored: number; errors: string[] }
   warnings: string[]
   errors: string[]
 }
@@ -773,6 +776,47 @@ export async function runMaintenance(
     warnings.push(`本次运维有 ${errors.length} 项失败：${errors.slice(0, 3).join("；")}`)
   }
 
+  // 4d) 封禁用户遗留的 Cloudflare DNS 记录（2026-10-08）
+  //
+  // 两个方向都要兜底，否则「封禁/解封」各有一半不闭环：
+  //   · sweepSuspendedDns —— **停用方向**：封禁那一跳受单请求子请求上限约束
+  //     （见 user-suspension.ts 的 SUSPEND_BATCH），记录多的用户一次删不完；
+  //     CF 瞬时故障也会留下一批。只处理「已标记停用、但 cf_id 还在」的行。
+  //   · retrySuspendedDnsRestore —— **恢复方向**：解封时 CF 重建失败的记录会
+  //     保留 banned_at，而用户端列表会过滤掉它 ⇒ 人解封了、解析少一条、自己还
+  //     看不见，只能等管理员发现。这里按「归属用户已 active」重试。
+  let suspendedDns = { removed: 0, restored: 0, errors: [] as string[] }
+  try {
+    if (dryRun) {
+      const stuck = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM dns_records WHERE banned_at IS NOT NULL AND cf_id IS NOT NULL"
+      ).first<{ c: number }>()
+      const pending = await env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM dns_records r
+          WHERE r.banned_at IS NOT NULL
+            AND (r.subdomain_id IN (SELECT id FROM subdomains
+                                     WHERE user_id IN (SELECT id FROM users WHERE status = 'active'))
+                 OR r.domain_id IN (SELECT id FROM domains
+                                     WHERE user_id IN (SELECT id FROM users WHERE status = 'active')))`
+      ).first<{ c: number }>()
+      warnings.push(
+        `有 ${stuck?.c ?? 0} 条已停用记录仍挂在 Cloudflare、${pending?.c ?? 0} 条待恢复重建（dryRun 不处理）`
+      )
+    } else {
+      const swept = await sweepSuspendedDns(env)
+      const retried = await retrySuspendedDnsRestore(env)
+      suspendedDns = {
+        removed: swept.removed,
+        restored: retried.restored,
+        errors: [...swept.errors, ...retried.errors],
+      }
+      for (const e of suspendedDns.errors) errors.push(`封禁记录兜底失败: ${e}`)
+    }
+  } catch (err) {
+    // 表未迁移（0130 未应用）不该让整个运维任务失败
+    console.error("停用记录兜底失败（表可能未迁移）:", err)
+  }
+
   const report: MaintenanceReport = {
     ranAt: new Date().toISOString(),
     dryRun,
@@ -794,6 +838,7 @@ export async function runMaintenance(
     dnsAudit,
     tableRows,
     proxySync,
+    suspendedDns,
     warnings,
     errors,
   }

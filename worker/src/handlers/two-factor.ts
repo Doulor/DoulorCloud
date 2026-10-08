@@ -90,17 +90,28 @@ export async function loadTwoFactorState(
 
   const totpConfirmed = Boolean(row?.totp_confirmed && row.totp_secret)
   const emailEnabled = Boolean(row?.email_enabled)
+  // 🔴 恢复码**不是一种独立的验证方式**，只是「已开启方式」的自救手段。
+  // 没有任何真正的方式（邮箱 / TOTP）开着时，遗留的恢复码一律视为失效：
+  //   · 不能让它们把 2FA 顶成「已开启」—— 否则把两种方式都关掉的用户，
+  //     登录时还会被拦在二次验证页、只给「输恢复码」一条路（2026-10-08 站长实测：
+  //     旧版本遗留的 10 张恢复码就是这样把人锁住的，设置页还显示剩 10 张）；
+  //   · 设置页也不再显示恢复码（这里直接算 0）。
+  // 遗留的失效行会在下次开启任一方式时被 regenerateRecoveryCodesFor 全量替换掉。
+  const active = emailEnabled || totpConfirmed
+  const recoveryLeft = active ? rec?.n ?? 0 : 0
+
   const methods: string[] = []
   if (emailEnabled) methods.push("email")
   if (totpConfirmed) methods.push("totp")
-  if ((rec?.n ?? 0) > 0) methods.push("recovery")
+  // 恢复码只作为「已开启 2FA」时挑战里的一个可选项（自救通道），有剩余才列出来
+  if (recoveryLeft > 0) methods.push("recovery")
 
   return {
-    enabled: methods.length > 0,
+    enabled: active,
     methods,
     totpConfirmed,
     emailEnabled,
-    recoveryLeft: rec?.n ?? 0,
+    recoveryLeft,
   }
 }
 
@@ -463,6 +474,12 @@ async function regenerateRecoveryCodesFor(env: Env, userId: string): Promise<str
 export async function regenerateRecoveryCodes(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
   await guardRateLimit(env, `2fa-rec:${user.id}`, 5, 60, "操作过于频繁")
+  // 🔴 2FA 没开时禁止发恢复码：恢复码只是已开启方式的自救手段，
+  // 单独发一堆只会留下「幽灵恢复码」（它们不拦登录，但会让人以为 2FA 还开着）
+  const state = await loadTwoFactorState(env, user.id)
+  if (!state.enabled) {
+    throw new ApiError(400, "请先开启任一二次验证方式，再生成恢复码", "TWO_FACTOR_OFF")
+  }
   const codes = await regenerateRecoveryCodesFor(env, user.id)
   await recordAudit(env, user.id, "2fa.recovery.regenerate", "重新生成恢复码")
   return json({ recoveryCodes: codes })
@@ -479,6 +496,16 @@ export async function setEmailTwoFactor(env: Env, request: Request): Promise<Res
     throw new ApiError(400, "请先验证邮箱后再开启这种方式", "EMAIL_NOT_VERIFIED")
   }
 
+  // 🔴 恢复码跟着「有没有方式在开着」走（2026-10-08 站长定的口径）：
+  //   · 开启：若**这次开启之前** 2FA 没开着（或没有可用的恢复码），发一批新的，
+  //     明文只在这一次响应里返回 —— 「下次再开启又会显示新的恢复码」。
+  //     ⚠️ 必须用**改动前**的状态判断：历史遗留的失效码（2FA 关着时留下的）会让
+  //     改动后的 recoveryLeft 看起来非零，但它们按口径已全部失效，必须整批换新。
+  //     若 TOTP 已开着且码还有剩，就不动它们（开关邮箱不该把别人的救命码作废）。
+  //   · 关掉且这是最后一个方式：恢复码一并作废（与 disableTotp 同一套处理），
+  //     否则遗留的码会在设置页阴魂不散。
+  const before = await loadTwoFactorState(env, user.id)
+
   const now = new Date().toISOString()
   await env.DB.prepare(
     `INSERT INTO user_2fa (user_id, totp_secret, totp_confirmed, email_enabled, created_at, updated_at)
@@ -489,13 +516,33 @@ export async function setEmailTwoFactor(env: Env, request: Request): Promise<Res
     .bind(user.id, enabled ? 1 : 0, now, now)
     .run()
 
+  let recoveryCodes: string[] | undefined
+  if (enabled) {
+    if (!before.enabled || before.recoveryLeft === 0) {
+      recoveryCodes = await regenerateRecoveryCodesFor(env, user.id)
+    }
+  } else {
+    const after = await loadTwoFactorState(env, user.id)
+    if (!after.totpConfirmed) {
+      await env.DB.prepare(`DELETE FROM user_2fa_recovery WHERE user_id = ?`).bind(user.id).run()
+    }
+  }
+
   await recordAudit(
     env,
     user.id,
     enabled ? "2fa.email.enable" : "2fa.email.disable",
-    enabled ? "开启邮箱二次认证" : "关闭邮箱二次认证"
+    recoveryCodes && recoveryCodes.length > 0
+      ? "开启邮箱二次认证（同时发放新恢复码）"
+      : enabled
+        ? "开启邮箱二次认证"
+        : "关闭邮箱二次认证"
   )
-  return json({ ok: true, emailEnabled: enabled })
+  return json({
+    ok: true,
+    emailEnabled: enabled,
+    ...(recoveryCodes ? { recoveryCodes } : {}),
+  })
 }
 
 /**
