@@ -2,11 +2,7 @@ import { ApiError, json } from "../http"
 import { requireUser, type UserRow, isPrivileged } from "../auth"
 import { getSettingBool } from "../settings"
 import { FEATURE_LABELS, parsePermissions, type Feature } from "../permissions"
-import {
-  ACHIEVEMENT_GROUPS,
-  computeAchievements,
-  loadUserCounts,
-} from "./achievements"
+import { ACHIEVEMENT_GROUPS, loadAchievementSnapshot } from "./achievements"
 import { getTitleForUser } from "./titles"
 import { DONATION_TYPE_LABELS } from "./donations"
 import type { Env } from "../env"
@@ -29,8 +25,12 @@ import type { Env } from "../env"
  *      （只回 `masked: true` + 提示），而不是「返回了再让前端用 CSS 糊住」——
  *      后者在浏览器里一看网络请求就全露了。
  *
- * 数据全部实时计算（不冗余落库）：空间与成就页共用 `loadUserCounts` /
- * `computeAchievements`，避免两处各写一份统计口径。
+ * 数据全部实时计算（不冗余落库）：空间与成就页共用 `loadAchievementSnapshot`
+ * （实时计算 + 历史最高等级合并 + summary/title 重算），避免两处口径漂移。
+ *
+ * ⚠️ 2026-10-08：这里曾只调 `computeAchievements` 而漏掉历史合并 —— 删过资源的
+ * 用户会看到个人空间点数/称号**低于**成就页与排行榜（实测排行榜前 15 名里 13 名
+ * 不一致，最大差 17 点）。展示成就点一律走 `loadAchievementSnapshot`，别再手拼。
  */
 
 /** 一个空间的分区开关（user_spaces 行；无行时用这里的默认值） */
@@ -154,9 +154,9 @@ export async function getSpace(
   const target = await loadUserByName(env, username)
   const isOwner = viewer?.id === target.id
 
-  const [settings, counts] = await Promise.all([
+  const [settings, { snapshot, counts }] = await Promise.all([
     loadSpaceSettings(env, target.id),
-    loadUserCounts(env, target.id),
+    loadAchievementSnapshot(env, target.id),
   ])
 
   const joinedAt = counts.created_at ?? target.created_at
@@ -164,8 +164,7 @@ export async function getSpace(
     ? Math.max(0, Math.floor((Date.now() - new Date(joinedAt).getTime()) / 86400000))
     : 0
 
-  // ---- 成就 / 称号 ----
-  const snapshot = computeAchievements(counts)
+  // ---- 成就 / 称号（snapshot 已含历史合并，与成就页/排行榜同口径） ----
   const achievements = settings.show_achievements
     ? {
         unlocked: snapshot.summary.unlocked,
@@ -368,11 +367,10 @@ export async function getSpaceCard(
   const target = await loadUserByName(env, username)
   const isOwner = viewer?.id === target.id
 
-  const [settings, counts] = await Promise.all([
+  const [settings, { snapshot, counts }] = await Promise.all([
     loadSpaceSettings(env, target.id),
-    loadUserCounts(env, target.id),
+    loadAchievementSnapshot(env, target.id),
   ])
-  const snapshot = computeAchievements(counts)
   const joinedAt = counts.created_at ?? target.created_at
 
   return json({

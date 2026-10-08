@@ -9,7 +9,9 @@ import { describe, it, expect, beforeEach } from "vitest"
 import { env } from "cloudflare:workers"
 import { authRequest, fetchSelf, makeUser, setPermissions, setSetting, type TestUser } from "./helpers"
 import {
+  achievementPointsOf,
   computeAchievements,
+  loadHistoryLevels,
   loadUserCounts,
   titleFor,
 } from "../src/handlers/achievements"
@@ -417,5 +419,91 @@ describe("GET /api/space/:username/card", () => {
     const res = await publicGet(`/api/space/${target.username}/card`)
     const body = (await res.json()) as { username: string }
     expect(body.username).toBe(target.username) // 而不是 "card"
+  })
+})
+
+// ---- 成就点口径：四处必须一致（2026-10-08 回归） ----
+
+/**
+ * 事故背景：`space.ts` 的个人空间与名片卡只调了 `computeAchievements`，
+ * 漏掉「历史最高等级合并」（成就语义是**只升不降**，见 mergeHistoricalLevels）——
+ * 删过资源的用户会看到个人空间的成就点/称号**低于**成就页与排行榜。
+ * 线上实测：排行榜前 15 名里 13 名不一致，最大差 17 点。
+ */
+describe("成就点口径一致（个人空间 / 名片卡 / 成就页 / 排行榜）", () => {
+  /** 造 n 条帖子（posts 成就分级 [1, 5, 20]） */
+  async function seedPosts(userId: string, n: number): Promise<void> {
+    const now = new Date().toISOString()
+    for (let i = 0; i < n; i++) {
+      await env.DB.prepare(
+        `INSERT INTO posts (id, user_id, channel, body, created_at) VALUES (?, ?, 'general', ?, ?)`
+      )
+        .bind(`pp_${userId}_${i}`, userId, `口径测试 ${i}`, now)
+        .run()
+    }
+  }
+
+  it("资源降级后，个人空间 / 名片卡 与 成就页 / 排行榜 的点数与称号一致", async () => {
+    const u = await makeUser()
+    await seedPosts(u.id, 5) // → posts 成就 Lv2（1 / 5 / 20）
+
+    // 打开一次成就页：把已解锁等级写入历史（user_achievements）
+    const first = await fetchSelf(authRequest(u, "/api/achievements"))
+    expect(first.status).toBe(200)
+    const firstBody = (await first.json()) as {
+      summary: { points: number }
+      title: { name: string }
+    }
+    const beforePoints = firstBody.summary.points
+
+    // 降级：软删到只剩 1 条（计数条件是 deleted_at IS NULL）→ 实时 posts 掉回 Lv1
+    await env.DB.prepare("UPDATE posts SET deleted_at = ? WHERE user_id = ? AND id != ?")
+      .bind(new Date().toISOString(), u.id, `pp_${u.id}_0`)
+      .run()
+
+    // 实时口径（不含历史）确实掉了一级 —— 证明这个场景真的会触发"只升不降"
+    const realtime = computeAchievements(await loadUserCounts(env, u.id)).summary.points
+    expect(realtime).toBe(beforePoints - 1)
+
+    const ach = (await (await fetchSelf(authRequest(u, "/api/achievements"))).json()) as {
+      summary: { points: number }
+      title: { name: string }
+    }
+    const space = (await (await publicGet(`/api/space/${u.username}`)).json()) as {
+      achievements: { points: number; title: { name: string } }
+    }
+    const card = (await (await publicGet(`/api/space/${u.username}/card`)).json()) as {
+      points: number
+      title: string
+    }
+    const board = achievementPointsOf(
+      await loadUserCounts(env, u.id),
+      await loadHistoryLevels(env, u.id)
+    )
+
+    // 成就页保住历史等级（只升不降）
+    expect(ach.summary.points).toBe(beforePoints)
+    // ← 以下三条是回归点：修复前 space/card 会比成就页少（这里少 1 点）
+    expect(space.achievements.points).toBe(ach.summary.points)
+    expect(card.points).toBe(ach.summary.points)
+    expect(board).toBe(ach.summary.points)
+    // 称号也必须同口径（修复前 space 用未合并的点数算 title）
+    expect(space.achievements.title.name).toBe(ach.title.name)
+    expect(card.title).toBe(ach.title.name)
+  })
+
+  it("没有历史记录时四处也一致（未打开过成就页的用户）", async () => {
+    const u = await makeUser()
+    await seedPosts(u.id, 5)
+
+    const space = (await (await publicGet(`/api/space/${u.username}`)).json()) as {
+      achievements: { points: number }
+    }
+    const card = (await (await publicGet(`/api/space/${u.username}/card`)).json()) as {
+      points: number
+    }
+    const realtime = computeAchievements(await loadUserCounts(env, u.id)).summary.points
+    expect(space.achievements.points).toBe(realtime)
+    expect(card.points).toBe(realtime)
   })
 })

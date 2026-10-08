@@ -770,6 +770,58 @@ export function achievementPointsOf(counts: UserCounts, history: Map<string, num
   return res.achievements.reduce((sum, a) => sum + a.level, 0)
 }
 
+/**
+ * 读某人的历史最高等级（`user_achievements` 按成就取 `MAX(level)`）。
+ *
+ * 单人版；排行榜走的是全表 GROUP BY 的批量版（见 leaderboard.ts）。
+ * ⚠️ 绝不能拿这张表的**行数**当分数 —— 它只在用户「打开过成就页」时才写。
+ */
+export async function loadHistoryLevels(env: Env, userId: string): Promise<Map<string, number>> {
+  const rows = await env.DB.prepare(
+    "SELECT achievement_id, MAX(level) AS lv FROM user_achievements WHERE user_id = ? GROUP BY achievement_id"
+  )
+    .bind(userId)
+    .all<{ achievement_id: string; lv: number }>()
+  const history = new Map<string, number>()
+  for (const r of rows.results ?? []) history.set(r.achievement_id, r.lv)
+  return history
+}
+
+/**
+ * 合并历史等级后**重算 summary / title**（纯函数）。
+ *
+ * `mergeHistoricalLevels` 只改每个成就的 level —— summary.points / title 不会
+ * 自动跟着变；漏了这步，页面上的点数/称号就会与徽章列表自相矛盾。
+ */
+export function recountAfterMerge(snapshot: ReturnType<typeof computeAchievements>): void {
+  snapshot.summary = {
+    unlocked: snapshot.achievements.filter((a) => a.level > 0).length,
+    total: snapshot.achievements.length,
+    points: snapshot.achievements.reduce((sum, a) => sum + a.level, 0),
+    maxPoints: snapshot.summary.maxPoints,
+  }
+  snapshot.title = titleFor(snapshot.summary.points)
+}
+
+/**
+ * 完整口径的成就快照：实时计算 + 历史最高等级合并 + summary/title 重算。
+ *
+ * ⚠️ **所有「单用户展示成就点」的接口都必须走它**（成就页 / 个人空间 / 名片卡）。
+ * 2026-10-08 线上事故：`space.ts` 的两处只调了 `computeAchievements` 而漏掉
+ * 历史合并 —— 实测排行榜前 15 名里 13 名的个人空间点数**低于**排行榜/成就页，
+ * 最大差 17 点（删过资源后实时等级下降，而成就语义是「只升不降」）。
+ */
+export async function loadAchievementSnapshot(
+  env: Env,
+  userId: string
+): Promise<{ snapshot: ReturnType<typeof computeAchievements>; counts: UserCounts }> {
+  const counts = await loadUserCounts(env, userId)
+  const snapshot = computeAchievements(counts)
+  mergeHistoricalLevels(snapshot.achievements, await loadHistoryLevels(env, userId))
+  recountAfterMerge(snapshot)
+  return { snapshot, counts }
+}
+
 export interface AchievementProgress {  id: string
   name: string
   desc: string
@@ -1293,15 +1345,9 @@ export async function getAchievements(env: Env, request: Request): Promise<Respo
   }
   mergeHistoricalLevels(snapshot.achievements, history)
 
-  // 合并历史等级后 summary 会变，必须重算 —— 否则徽章数/成就点数与列表对不上。
+  // 合并历史等级后 summary/title 必须重算（共用函数，避免各处漏算）。
   // ⚠️ 必须放在 grantAchievementRewards 之前：那个函数按点数发订阅，用旧值会少发。
-  snapshot.summary = {
-    unlocked: snapshot.achievements.filter((a) => a.level > 0).length,
-    total: snapshot.achievements.length,
-    points: snapshot.achievements.reduce((sum, a) => sum + a.level, 0),
-    maxPoints: snapshot.summary.maxPoints,
-  }
-  snapshot.title = titleFor(snapshot.summary.points)
+  recountAfterMerge(snapshot)
 
   // 成就奖励：每满 N 点发放一份 AI 订阅（防重复见 achievement_rewards 表）。
   // 大多数用户不跨档位、会立即返回；只有刚满档的用户才会真正调 NewAPI 发订阅。
