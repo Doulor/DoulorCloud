@@ -3327,6 +3327,31 @@ export default function AdminPage() {
    * 刻意做成「先确认再执行」：清掉之后对方会退化成「只有密码」的状态，
    * 万一他是被钓鱼骗着点的，损失会很大。
    */
+  /**
+   * 重置密码（rootOnly）：给当前查看的用户直接设一个新密码。
+   * 后端会哈希入库并清空该用户全部会话 / OAuth 令牌。
+   */
+  const handleSetPassword = async () => {
+    if (!detail || pwBusy) return
+    const name = detail.user.username
+    if (pwValue.length < 8) {
+      toast.error(t("adm.pw.tooShort"))
+      return
+    }
+    setPwBusy(true)
+    try {
+      await adminApi.setUserPassword(name, pwValue)
+      toast.success(t("adm.pw.ok", { v0: name }))
+      setPwOpen(false)
+      setPwValue("")
+      setPwShow(false)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.pw.failed"))
+    } finally {
+      setPwBusy(false)
+    }
+  }
+
   const handleResetTwoFactor = async () => {
     if (!detail) return
     const name = detail.user.username
@@ -9853,6 +9878,33 @@ export default function AdminPage() {
                       </Button>
                     </div>
                   )}
+
+                  {/* 重置密码：同样只有站长能做（后端 rootOnly）。
+                      与「重置二次认证」同级危险 —— 重置后对方全部会话失效，
+                      必须用新密码重登，所以沿用同一套琥珀色警示样式。 */}
+                  {user?.role === "root" && (
+                    <div className="mt-2 flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 dark:border-amber-800 dark:bg-amber-950/40">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium">{t("adm.pw.title")}</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {t("adm.pw.hint")}
+                        </div>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="shrink-0"
+                        onClick={() => {
+                          // 每次打开都清空，避免上一次输入的密码留在框里
+                          setPwValue("")
+                          setPwShow(false)
+                          setPwOpen(true)
+                        }}
+                      >
+                        {t("adm.pw.action")}
+                      </Button>
+                    </div>
+                  )}
                 </section>
 
                 {/* ---- 各模块用量与开通状态 ---- */}
@@ -10247,6 +10299,67 @@ export default function AdminPage() {
               </div>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/*
+        重置密码（rootOnly）。刻意与用户详情分成两个独立弹窗，
+        不在详情弹窗里再叠一层：嵌套 Radix Dialog 的 Esc / 焦点会互相干扰，
+        而且关闭时容易出现「关掉内层顺手把详情也关了」。
+      */}
+      <Dialog
+        open={pwOpen}
+        onOpenChange={(open) => {
+          // 提交中不允许关闭：请求已发出，关掉会让站长以为没生效
+          if (!open && !pwBusy) setPwOpen(false)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("adm.pw.title")}</DialogTitle>
+            <DialogDescription>
+              {t("adm.pw.confirm", { v0: detail?.user.username ?? "" })}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="admNewPw">{t("adm.pw.label")}</Label>
+            <div className="flex gap-2">
+              <Input
+                id="admNewPw"
+                type={pwShow ? "text" : "password"}
+                autoComplete="new-password"
+                value={pwValue}
+                onChange={(e) => setPwValue(e.target.value)}
+                placeholder={t("adm.pw.placeholder")}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                onClick={() => setPwShow((v) => !v)}
+              >
+                {pwShow ? t("adm.pw.hide") : t("adm.pw.show")}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">{t("adm.pw.note")}</p>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setPwOpen(false)}
+              disabled={pwBusy}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              onClick={() => void handleSetPassword()}
+              disabled={pwBusy || pwValue.length < 8}
+            >
+              {pwBusy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+              {t("adm.pw.submit")}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

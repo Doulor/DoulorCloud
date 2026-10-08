@@ -68,6 +68,7 @@ import {
 import type { AttentionCounts } from "@/types"
 import { cn } from "@/lib/utils"
 import { onAttentionChanged } from "@/lib/attention-events"
+import { idlePreload, preloadRoute } from "@/lib/route-preload"
 import { toast } from "sonner"
 
 /** 角标轮询间隔（社区/聊天室/反馈/管理共用一次请求） */
@@ -314,6 +315,28 @@ export function DashboardLayout({
     : [feedbackNav, donationNav, pointsNav, settingsNav]
 
   /**
+   * 空闲预载侧边栏一级入口（2026-10-08）。
+   *
+   * 目的是让侧边栏「点哪到哪」——与管理员面板的手感对齐。悬停时的那一次预载
+   * （见 renderNavItem）已能覆盖绝大多数点击，这里再补一层：用户进了控制台
+   * 之后没事的那几秒，把一级页面的 chunk 慢慢取回来，那么**直接点**（触屏、
+   * 或手快没停顿）也不用等。
+   *
+   * 三个刻意的约束：
+   *   · 挂在布局组件而非 App 根：只有真进了控制台才预载，访客在落地页浏览时
+   *     不会白白下载一堆用不到的页面代码；
+   *   · 用 bottomNav 而不是硬写列表：它已按权限过滤，普通用户不会去下
+   *     admin.tsx（那是全站最大的单个页面 chunk，几百 KB）；
+   *   · 移动端不做（idlePreload 内部判断 hover 能力），免得替用户花流量。
+   */
+  React.useEffect(() => {
+    const paths = [...baseNav.map((n) => n.to), ...bottomNav.map((n) => n.to)]
+    return idlePreload(paths)
+    // bottomNav 只随 isAdmin 变化；baseNav 是模块级常量，永远不变
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin])
+
+  /**
    * 每个入口该显示多少角标。
    * 口径都在服务端（`/api/attention`），前端只做「哪个入口看哪个数」的映射。
    */
@@ -349,12 +372,27 @@ export function DashboardLayout({
       allowGuest && !user && !GUEST_PUBLIC_PATHS.includes(item.to)
     const to = guestBlocked ? "/login" : item.to
     const state = guestBlocked ? { from: item.to } : undefined
+    /**
+     * 悬停/聚焦/触摸按下即预载目标页面（2026-10-08）。
+     *
+     * 用户把鼠标移到某一项上时，他大概率就是要进去 —— 趁这几百毫秒把那个页面
+     * 的 JS chunk 取回来，点下去就直接渲染，不再出现整页转圈。这正是管理员面板
+     * 侧边栏「点哪到哪」的手感来源（那边是同一文件内的切换，无需下载）。
+     *
+     * 三个事件都要：鼠标悬停（桌面主力）、键盘聚焦（Tab 导航要同样跟手）、
+     * touchstart（触屏没有 hover，按下瞬间就开始取，比 click 早一点点）。
+     * 游客态会跳登录页，预载原目标没有意义，故直接跳过（guestBlocked）。
+     */
+    const warm = guestBlocked ? undefined : () => preloadRoute(item.to)
     return (
       <Link
         key={item.to}
         to={to}
         state={state}
         onClick={() => setOpen(false)}
+        onMouseEnter={warm}
+        onFocus={warm}
+        onTouchStart={warm}
         className={cn(
           "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
           active

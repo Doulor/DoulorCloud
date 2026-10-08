@@ -6,6 +6,7 @@ import { LandingLayout } from "@/layouts/landing-layout"
 import { DashboardLayout } from "@/layouts/dashboard-layout"
 import { useAuth } from "@/hooks/use-auth"
 import { communityApi } from "@/services/api"
+import { page } from "@/lib/route-preload"
 import { AnalyticsTracker } from "@/components/analytics-tracker"
 import { CursorGlow } from "@/components/cursor-effect"
 import { ClickSpark } from "@/components/motion/click-spark"
@@ -21,34 +22,41 @@ import NotFoundPage from "@/pages/not-found"
 
 // 其余页面按路由懒加载：不登录的访客不必为管理后台等重页面付出下载与解析成本。
 // 其中 admin.tsx 单个文件就有 4000+ 行，是首屏包体的最大来源。
-const DashboardPage = React.lazy(() => import("@/pages/dashboard"))
-const DomainsPage = React.lazy(() => import("@/pages/domains"))
-const EmailPage = React.lazy(() => import("@/pages/email"))
-const StoragePage = React.lazy(() => import("@/pages/storage"))
-const AiPage = React.lazy(() => import("@/pages/ai"))
-const FrpPage = React.lazy(() => import("@/pages/frp"))
-const ProfilePage = React.lazy(() => import("@/pages/profile"))
-const ProxyPage = React.lazy(() => import("@/pages/proxy"))
-const TempboxPage = React.lazy(() => import("@/pages/tempbox"))
-const OAuthConsentPage = React.lazy(() => import("@/pages/oauth-consent"))
-const SettingsPage = React.lazy(() => import("@/pages/settings"))
-const DonationPage = React.lazy(() => import("@/pages/donations"))
-const FeedbackPage = React.lazy(() => import("@/pages/feedback"))
-const AchievementsPage = React.lazy(() => import("@/pages/achievements"))
-const LeaderboardPage = React.lazy(() => import("@/pages/leaderboard"))
-const PointsPage = React.lazy(() => import("@/pages/points"))
-const AdminPage = React.lazy(() => import("@/pages/admin"))
-const MessagesPage = React.lazy(() => import("@/pages/messages"))
-const DmPage = React.lazy(() => import("@/pages/dm"))
-const CommunityPage = React.lazy(() => import("@/pages/community"))
-const ToolboxPage = React.lazy(() => import("@/pages/toolbox"))
+//
+// ⚠️ 一律用 route-preload 的 `page(路径, loader)` 而不是裸 React.lazy：
+// 它额外登记「路径 → 预载函数」，侧边栏悬停时就能提前把 chunk 取回来，
+// 点下去直接渲染（2026-10-08 站长反馈「侧边栏点一下要等，管理面板点一下就到」）。
+// **新增页面务必带上路径**，漏了不会报错，只是那一个页面没有预载。
+const DashboardPage = page("/dashboard", () => import("@/pages/dashboard"))
+const DomainsPage = page("/dashboard/domains", () => import("@/pages/domains"))
+const EmailPage = page("/dashboard/email", () => import("@/pages/email"))
+const StoragePage = page("/dashboard/storage", () => import("@/pages/storage"))
+const AiPage = page("/dashboard/ai", () => import("@/pages/ai"))
+const FrpPage = page("/dashboard/frp", () => import("@/pages/frp"))
+const ProfilePage = page("/dashboard/profile", () => import("@/pages/profile"))
+const ProxyPage = page("/dashboard/proxy", () => import("@/pages/proxy"))
+const TempboxPage = page("/dashboard/tempbox", () => import("@/pages/tempbox"))
+const OAuthConsentPage = page("/oauth/consent", () => import("@/pages/oauth-consent"))
+const SettingsPage = page("/dashboard/settings", () => import("@/pages/settings"))
+const DonationPage = page("/dashboard/donations", () => import("@/pages/donations"))
+const FeedbackPage = page("/dashboard/feedback", () => import("@/pages/feedback"))
+const AchievementsPage = page("/dashboard/achievements", () => import("@/pages/achievements"))
+const LeaderboardPage = page("/dashboard/leaderboard", () => import("@/pages/leaderboard"))
+const PointsPage = page("/dashboard/points", () => import("@/pages/points"))
+const AdminPage = page("/dashboard/admin", () => import("@/pages/admin"))
+const MessagesPage = page("/dashboard/messages", () => import("@/pages/messages"))
+const DmPage = page("/dashboard/dm", () => import("@/pages/dm"))
+const CommunityPage = page("/dashboard/community", () => import("@/pages/community"))
+const ToolboxPage = page("/dashboard/toolbox", () => import("@/pages/toolbox"))
+// 工具详情页挂在 /dashboard/toolbox 之下，不单独登记（同前缀会互相覆盖注册项）：
+// 用户是先进列表、再点某个工具，那时 ToolboxPage 早已加载，详情按需加载即可。
 const ToolboxDetailPage = React.lazy(() => import("@/pages/toolbox-detail"))
-const SpacePage = React.lazy(() => import("@/pages/space"))
-const ActivityPage = React.lazy(() => import("@/pages/activity"))
-const AppealPage = React.lazy(() => import("@/pages/appeal"))
-const ChatPage = React.lazy(() => import("@/pages/chat"))
-const TermsPage = React.lazy(() => import("@/pages/terms"))
-const PrivacyPage = React.lazy(() => import("@/pages/privacy"))
+const SpacePage = page("/space", () => import("@/pages/space"))
+const ActivityPage = page("/activity", () => import("@/pages/activity"))
+const AppealPage = page("/appeal", () => import("@/pages/appeal"))
+const ChatPage = page("/dashboard/chat", () => import("@/pages/chat"))
+const TermsPage = page("/terms", () => import("@/pages/terms"))
+const PrivacyPage = page("/privacy", () => import("@/pages/privacy"))
 const ForgotPasswordPage = React.lazy(() => import("@/pages/forgot-password"))
 const ResetPasswordPage = React.lazy(() => import("@/pages/reset-password"))
 
