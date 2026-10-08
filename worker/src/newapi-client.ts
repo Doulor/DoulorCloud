@@ -1680,11 +1680,18 @@ export async function autoPriceNewModels(env: Env): Promise<number> {
  * 管理员给用户开通订阅套餐（免支付，立即生效）。
  * 对应 NewAPI `POST /api/subscription/admin/users/:id/subscriptions`，body 只认 plan_id。
  * 返回订阅是否成功，以及可能的提示（如「用户分组将升级到 xxx」）。
+ *
+ * `strictLimit`：NewAPI 的套餐若设了 `max_purchase_per_user` 且已达上限，会返回
+ * 「已达到该套餐购买上限」。对**免费订阅重复领取**这类幂等场景，它等同成功
+ * （用户已持有）；但对「按档位发放」的成就 / 邀请奖励，它是**真实失败**——
+ * 若当成成功，站点账本会推进而订阅并未创建，导致静默少发
+ * （2026-10-08 线上：套餐限购 5 份，第 6 份起全部被吞）。这类场景必须 strictLimit: true。
  */
 export async function adminGrantSubscription(
   env: Env,
   newapiUserId: number,
-  planId: number
+  planId: number,
+  opts: { strictLimit?: boolean } = {}
 ): Promise<{ ok: boolean; message: string }> {
   try {
     const res = await newApiFetch(
@@ -1700,16 +1707,43 @@ export async function adminGrantSubscription(
     return { ok: true, message: msg }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    // 「已达到该套餐购买上限」这类错误，说明用户已有订阅，视为已开通
-    if (/上限|已订阅|already|limit/i.test(msg)) {
+    // 「已达到该套餐购买上限」这类错误，说明用户已有订阅，视为已开通。
+    // ⚠️ 仅限免费订阅领取等幂等场景；按档位发放必须 strictLimit，否则静默丢发。
+    if (!opts.strictLimit && /上限|已订阅|already|limit/i.test(msg)) {
       return { ok: true, message: "你已领取过免费订阅" }
     }
     return { ok: false, message: msg }
   }
 }
 
+/**
+ * 管理员**删除**一张用户订阅（NewAPI 硬删除，`DELETE /api/subscription/admin/user_subscriptions/:id`）。
+ *
+ * 用途：成就奖励「两端对齐」的撤回侧。注意与 invalidate（软失效，status=cancelled）
+ * 的区别：NewAPI 的套餐限购 `max_purchase_per_user` 按**行数**计数（不筛 status），
+ * 软失效不释放名额——只有硬删除才能真正减少计数，让后续补发不被上限卡死。
+ */
+export async function adminDeleteUserSubscription(
+  env: Env,
+  subscriptionId: number
+): Promise<{ ok: boolean; message: string }> {
+  try {
+    const res = await newApiFetch(
+      env,
+      `/api/subscription/admin/user_subscriptions/${subscriptionId}`,
+      { method: "DELETE" }
+    )
+    const data = await unwrap<{ message?: string } | null>(res, "删除订阅")
+    return { ok: true, message: (data && data.message) || "" }
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : String(err) }
+  }
+}
+
 /** 用户的一条订阅（用于展示实时剩余额度 / 下次重置时间） */
 export interface UserSubscriptionInfo {
+  /** 订阅行 id（NewAPI `user_subscriptions.id`；撤回删除时必需） */
+  id: number
   planId: number
   amountTotal: number
   amountUsed: number
@@ -1719,8 +1753,15 @@ export interface UserSubscriptionInfo {
   nextResetTime: number
 }
 
-/** 拉取某用户的订阅列表（未过滤 status） */
-async function fetchUserSubscriptions(
+/**
+ * 拉取某用户的订阅列表（**未过滤 status**，含 active / expired / cancelled）。
+ *
+ * 导出给成就奖励的「两端对齐」使用：对齐必须以 NewAPI 为真相源，且必须能区分
+ * 「读取失败（抛错）」与「真的没有订阅（空数组）」——所以这里**不吞异常**
+ * （对照 listAllUserSubscriptions 的 catch → []，那个把两种情形混为一谈，
+ * 拿来做对齐会误判成 0 份而疯狂补发）。
+ */
+export async function fetchUserSubscriptions(
   env: Env,
   newapiUserId: number
 ): Promise<UserSubscriptionInfo[]> {
@@ -1738,6 +1779,7 @@ async function fetchUserSubscriptions(
     .map((d) => d.subscription)
     .filter((s): s is Record<string, unknown> => Boolean(s))
     .map((s) => ({
+      id: Number(s.id ?? 0),
       planId: Number(s.plan_id ?? 0),
       amountTotal: Number(s.amount_total ?? 0),
       amountUsed: Number(s.amount_used ?? 0),
@@ -1781,11 +1823,18 @@ export async function listAllUserSubscriptions(
   }
 }
 
-/** 套餐定义（只取展示需要的字段） */
+/** 套餐定义（只取展示与限购预警需要的字段） */
 export interface SubscriptionPlanInfo {
   planId: number
   /** 套餐名，如「wb邀请套餐」 */
   title: string
+  /**
+   * 每用户限购份数（NewAPI `max_purchase_per_user`，0 = 不限）。
+   *
+   * 供发放方预警：应发份数超过限购时，补发必然被 NewAPI 拒绝
+   * （「已达到该套餐购买上限」），提前在审计里说明，别等发放失败才发现。
+   */
+  maxPurchasePerUser: number
 }
 
 /**
@@ -1815,6 +1864,7 @@ export async function listSubscriptionPlans(
       .map((p) => ({
         planId: Number(p.id ?? 0),
         title: String(p.title ?? ""),
+        maxPurchasePerUser: Number(p.max_purchase_per_user ?? 0),
       }))
   } catch (err) {
     console.error("读取订阅套餐失败:", err)

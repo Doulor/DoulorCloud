@@ -226,15 +226,6 @@ export async function makeupCheckin(env: Env, request: Request): Promise<Respons
     .first()
   if (already) throw new ApiError(409, "该日期已经签过到了，无需补签", "ALREADY_CHECKED_IN")
 
-  // 补签卡余额
-  const bal = await env.DB.prepare(
-    `SELECT checkin_makeup_cards AS c FROM users WHERE id = ?`
-  )
-    .bind(user.id)
-    .first<{ c: number }>()
-  const cards = Number(bal?.c ?? 0)
-  if (cards < 1) throw new ApiError(409, "没有可用的补签卡", "NO_MAKEUP_CARDS")
-
   // 补签后该日的连续天数 = 前一天连续 + 1（前一天没有则从 1 重新算）
   const dayBefore = await env.DB.prepare(
     `SELECT streak FROM daily_checkins WHERE user_id = ? AND checkin_date = ?`
@@ -243,19 +234,46 @@ export async function makeupCheckin(env: Env, request: Request): Promise<Respons
     .first<{ streak: number }>()
   const streak = (dayBefore?.streak ?? 0) + 1
 
-  // 先写补签记录（PK 兜底并发），再扣卡。并发重复补签会被 PK 拦住、不会多扣卡。
-  await env.DB.prepare(
-    `INSERT INTO daily_checkins (user_id, checkin_date, points, base_points, bonus_points, streak, is_makeup, created_at)
-     VALUES (?, ?, 0, 0, 0, ?, 1, ?)`
-  )
-    .bind(user.id, target, streak, new Date().toISOString())
-    .run()
-
-  await env.DB.prepare(
-    `UPDATE users SET checkin_makeup_cards = checkin_makeup_cards - 1 WHERE id = ?`
+  // 原子扣卡：`>= 1` 条件 + RETURNING 让「判余额」与「扣卡」合成一次 D1 往返，
+  // 且以**扣减结果**为真相源（扣不到就是没卡）。
+  //
+  // ⚠️ 不能先 SELECT 再在 JS 里判 `cards < 1`：那是「先读后判」，
+  // 两个并发请求补**不同**日期时都会读到同一份余额、都判定「还有卡」、
+  // 各扣一次 —— 余额被扣成负数，等于一张卡补了两天。
+  // （`daily_checkins` 的主键是 (user_id, checkin_date)，只能拦住**同一日期**的重复补签，
+  // 拦不住不同日期。这里刻意不与 PK 兜底混为一谈。）
+  const claimed = await env.DB.prepare(
+    `UPDATE users
+        SET checkin_makeup_cards = checkin_makeup_cards - 1
+      WHERE id = ? AND checkin_makeup_cards >= 1
+    RETURNING checkin_makeup_cards`
   )
     .bind(user.id)
-    .run()
+    .first<{ checkin_makeup_cards: number }>()
+  if (!claimed) throw new ApiError(409, "没有可用的补签卡", "NO_MAKEUP_CARDS")
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO daily_checkins (user_id, checkin_date, points, base_points, bonus_points, streak, is_makeup, created_at)
+       VALUES (?, ?, 0, 0, 0, ?, 1, ?)`
+    )
+      .bind(user.id, target, streak, new Date().toISOString())
+      .run()
+  } catch (err) {
+    // 记录没写成功（同一日期的并发补签撞 PK、D1 抖动…）：把刚扣的卡退回去，
+    // 否则就是「扣了卡但没补上签」。退回失败也不影响原始报错。
+    await env.DB.prepare(
+      `UPDATE users SET checkin_makeup_cards = checkin_makeup_cards + 1 WHERE id = ?`
+    )
+      .bind(user.id)
+      .run()
+      .catch(() => {})
+    const message = err instanceof Error ? err.message : String(err)
+    if (/unique constraint|sqlite_constraint_unique/i.test(message)) {
+      throw new ApiError(409, "该日期已经签过到了，无需补签", "ALREADY_CHECKED_IN")
+    }
+    throw err
+  }
 
   // 重算 target 之后所有已签到行的连续天数：补的是中间某天，后面的链要接上，
   // 否则「补了 3 天前、2 天前却还是旧的断链值」会让后续签到算错。
@@ -278,7 +296,12 @@ export async function makeupCheckin(env: Env, request: Request): Promise<Respons
     prevStreak = s
   }
 
-  return json({ ok: true, makeupDate: target, streak, makeupCards: cards - 1 })
+  return json({
+    ok: true,
+    makeupDate: target,
+    streak,
+    makeupCards: claimed.checkin_makeup_cards,
+  })
 }
 
 /**

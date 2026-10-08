@@ -67,7 +67,7 @@ export interface DnsRecordLike {
    *
    * 2026-10-08 起封禁会删掉 CF 上的记录，所以这行仍留在本地（解封可重建），
    * 但 Cloudflare 上已经没有了 —— 看到非空值就别再当「正常解析」评估。
-   * 见 migrations/0130 与 user-suspension.ts。
+   * 见 migrations/0134 与 user-suspension.ts。
    */
   banned_at?: string | null
   created_at: string

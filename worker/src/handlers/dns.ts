@@ -29,7 +29,7 @@ interface DnsRow {
   srv_port: number | null
   srv_target: string | null
   status: string
-  /** 因封禁被停用的时刻（null = 正常）。见 migrations/0130 与 user-suspension.ts */
+  /** 因封禁被停用的时刻（null = 正常）。见 migrations/0134 与 user-suspension.ts */
   banned_at: string | null
   created_at: string
   updated_at: string
