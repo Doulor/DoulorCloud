@@ -51,6 +51,7 @@ export const ADMIN_PERMISSIONS: AdminPermCategory[] = [
       { key: "users.permissions", label: "调整功能权限" },
       { key: "users.quota", label: "调整配额 / 额度" },
       { key: "users.role", label: "切换角色", rootOnly: true },
+      { key: "users.password", label: "重置密码", rootOnly: true },
       { key: "users.2fa", label: "重置二次认证", rootOnly: true },
     ],
   },

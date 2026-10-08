@@ -48,7 +48,10 @@ const DialogContent = React.forwardRef<
         // 带长链接的备注 —— 都会把**整列**撑宽，连标题一起变形；
         // 视觉上像"内容被放大了"并出现横向滚动。`grid-cols-1` 展开是
         // `repeat(1, minmax(0, 1fr))`，列宽被钉在容器内，超长内容照常省略号截断。
-        "fixed left-1/2 top-1/2 z-50 grid grid-cols-1 max-h-[85vh] w-[calc(100vw-2rem)] max-w-lg gap-4 overflow-y-auto border bg-background p-6 shadow-lg sm:rounded-lg",
+        // `dialog-motion`：动效层的标记类（index.css 里只在 html.motion-on 下命中）。
+        // 弹窗进出用独立的 scale/opacity 属性做 —— 居中靠下面的内联 transform，
+        // 动画绝不能碰 transform（会顶掉居中），scale 属性与 transform 是组合关系不冲突。
+        "dialog-motion fixed left-1/2 top-1/2 z-50 grid grid-cols-1 max-h-[85vh] w-[calc(100vw-2rem)] max-w-lg gap-4 overflow-y-auto border bg-background p-6 shadow-lg sm:rounded-lg",
         className
       )}
       style={{ transform: "translate(-50%, -50%)" }}

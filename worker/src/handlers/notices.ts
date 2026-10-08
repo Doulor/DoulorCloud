@@ -190,9 +190,54 @@ async function restrictUserFeatures(
 /** 还原权限 + 重新启用 NewAPI（满足门槛后确认收到 / 撤回时调用） */
 async function restoreUserFeatures(env: Env, notice: NoticeRow): Promise<void> {
   if (notice.restore_permissions) {
-    await env.DB.prepare("UPDATE users SET permissions = ?, updated_at = ? WHERE id = ?")
-      .bind(notice.restore_permissions, new Date().toISOString(), notice.user_id)
-      .run()
+    // ⚠️ 2026-10-07 修复：原实现是「把 permissions 整串覆盖回快照」。
+    //
+    // 快照是**限制权限的那一刻**拍的，而用户完全可能在「通知发出」到「确认收到」
+    // 之间又拿到了新权限（积分商城买、捐献通过、兑换券…）。整串覆盖会把那些
+    // 新权限一起抹掉，用户看到的就是「我明明有内网穿透权限，怎么进不去」
+    // （实例：a229740548 —— 通知 10-04 创建，他 10-05 买了内网穿透 + 直链网盘，
+    //  10-07 确认通知后两个权限双双消失）。
+    //
+    // 现在只做「补回」：把**本通知当时确实收回、且现在仍为 false** 的权限置回 true，
+    // 其余字段一律不动。既不误删新权限，也能把被误删的权限找回来。
+    const target = await env.DB.prepare("SELECT permissions FROM users WHERE id = ?")
+      .bind(notice.user_id)
+      .first<{ permissions: string | null }>()
+    if (target) {
+      const snapshot = parsePermissions(notice.restore_permissions)
+      const current = parsePermissions(target.permissions)
+      type F = (typeof FEATURES)[number]
+
+      // 本通知申请限制的功能；老数据 restrict_features 可能为空，
+      // 那就退化成「快照里为 true 的都算被收回过」。
+      let restricted: string[] = []
+      try {
+        const raw = notice.restrict_features ? JSON.parse(notice.restrict_features) : []
+        if (Array.isArray(raw)) {
+          restricted = raw.filter((x): x is string => typeof x === "string")
+        }
+      } catch {
+        restricted = []
+      }
+      if (restricted.length === 0) {
+        restricted = FEATURES.filter((f) => snapshot[f] === true)
+      }
+
+      let changed = false
+      for (const f of restricted) {
+        if (!(FEATURES as readonly string[]).includes(f)) continue
+        const key = f as F
+        if (snapshot[key] === true && current[key] !== true) {
+          current[key] = true
+          changed = true
+        }
+      }
+      if (changed) {
+        await env.DB.prepare("UPDATE users SET permissions = ?, updated_at = ? WHERE id = ?")
+          .bind(JSON.stringify(current), new Date().toISOString(), notice.user_id)
+          .run()
+      }
+    }
   }
   if (notice.newapi_disabled === 1) {
     const acct = await env.DB.prepare("SELECT newapi_user_id FROM newapi_accounts WHERE user_id = ?")

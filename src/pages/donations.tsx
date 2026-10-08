@@ -31,6 +31,7 @@ import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { NavItem, NavGroup } from "@/components/sub-nav"
+import { SlidingPill } from "@/components/motion/sliding-pill"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -531,6 +532,11 @@ export default function DonationPage() {
               {t("space.backToConsole")}
             </Link>
             <nav className="flex flex-col gap-0.5">
+              {/* 动效层：栏目切换的滑动高亮（关=现状） */}
+              <SlidingPill
+                activeSelector='[data-nav-active="1"]'
+                className="rounded-md bg-accent"
+              />
               <NavItem
                 active={activeTab === "overview"}
                 icon={LayoutDashboard}

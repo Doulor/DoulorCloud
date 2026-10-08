@@ -13,10 +13,14 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": true
   },
+  // ⚠️ 2026-10-08：cloud.doulor.cn 的 DNS 已切「灰云 CNAME → cf.877774.xyz（CDN 优选）」，
+  // 由下面这条路由承载。**永远不要把 cloud.doulor.cn 加回 custom_domain**：
+  // 自定义域名会生成 read_only 的 AAAA 100:: 占位记录并锁死 DNS（PATCH/DELETE 1043、
+  // 建新记录 81062），只能删自定义域名才能解锁。详见 Documents\\Cloudflare优选IP接入方法.md。
   "routes": [
     {
-      "pattern": "cloud.doulor.cn",
-      "custom_domain": true
+      "pattern": "cloud.doulor.cn/*",
+      "zone_name": "doulor.cn"
     }
   ]
 }

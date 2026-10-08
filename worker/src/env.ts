@@ -38,6 +38,25 @@ export interface Env {
    * ⚠️ 未配置时该功能整体关闭（503），不会退化成公开上传口。
    */
   BACKUP_UPLOAD_TOKEN?: string
+  /**
+   * 中转站 step-up 安全验证（2026-10-07）。
+   *
+   * new-api 新版给「改用户状态/角色」等敏感写操作加了二次验证：必须用**会话型身份**
+   * （具名访问令牌）先调 `/api/verify` 换一个**一次性** proof，再带 `X-Security-Proof`
+   * 头调 `/api/user/manage`。老式访问令牌（`NEWAPI_ADMIN_TOKEN`）拿不到会话身份，
+   * 所以这条链路必须用下面这对凭据：
+   *   · `NEWAPI_STEPUP_TOKEN`    —— 一个**具名** Access token（需含 `user:write` 作用域）
+   *   · `NEWAPI_STEPUP_PASSWORD` —— 该令牌所属账号的登录密码（`method=password` 要用）
+   *
+   * ⚠️ 所属账号**不能开 2FA**：开了之后 new-api 只提供 2FA 动态码方式，密码方式不再列出，
+   * 自动化就用不了（`securityVerificationPolicy()`：`if state.HasTwoFA { methods = ["2fa"] }`）。
+   * 因此建议单独建一个「机器人管理员账号」专用，别用 root。
+   *
+   * 两者都没配时，`adminSetUserStatus` 退回老路径（在 rc.41 上会失败并记审计）。
+   */
+  NEWAPI_STEPUP_TOKEN?: string
+  NEWAPI_STEPUP_PASSWORD?: string
+
   // 全局 R2 凭据（唯一的 R2 token）：一个 Cloudflare API Token 覆盖所有账户。  // 用途：
   //   1. 桶操作 —— 桶记录里凭据留空时回退到这里（新增桶无需重复填凭据）
   //   2. 读 A/B 类操作数 —— 桶记录里 analytics_token_enc 可覆盖

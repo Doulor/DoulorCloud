@@ -108,7 +108,27 @@ function claimState(row: EventRow, now: number): "not_started" | "open" | "ended
   return "open"
 }
 
-function toEvent(row: EventRow, now: number, isAdmin = false) {
+/**
+ * 活动是否已经**结束**（投票/参与窗口已关闭）。
+ *
+ * 与 claimState 的区别：claimState 对「状态不是 active」的活动一律返回 offline
+ * （`ended` / `archived` 都算），这里关心的是「窗口关没关」——
+ * 管理员提前结束、归档，或仍是 active 但过了 ends_at，都算结束。
+ *
+ * 用途：票数公开口径（投票关闭后看票没有作弊空间，见 voteCountsVisible），
+ * 以及历史投票的取数口径（与前端 event-vote.tsx 的 ended 判定必须一致）。
+ */
+function isEventOver(row: EventRow, now: number): boolean {
+  if (row.status === "ended" || row.status === "archived") return true
+  return !!row.ends_at && Date.parse(row.ends_at) < now
+}
+
+function toEvent(
+  row: EventRow,
+  now: number,
+  isAdmin = false,
+  opts: { revealVoteResult?: boolean } = {}
+) {
   // ⚠️ 认证码（condition_params.code）绝不能下发到用户端 —— listEvents 未登录可访问，
   // 原样返回等于把答案印在题目上。用户侧置 null（conditionType 已足够前端渲染输入框），
   // 仅管理端保留完整参数。
@@ -176,8 +196,13 @@ function toEvent(row: EventRow, now: number, isAdmin = false) {
            * 也让没中奖的人知道答案是哪个，不至于怀疑是黑箱。
            * 「立刻结算」那一档没有开奖时刻（drawn_at 恒为 null）⇒ 对用户恒不下发；
            * 每个投票的人本来就能从自己的结果知道自己的情况。
+           *
+           * `opts.revealVoteResult`：历史投票列表用 —— 活动**已经结束**，
+           * 继续藏着这个常量没有任何意义（投票窗口都关了），而历史视图要显示
+           * 「哪个选项获奖」才算把结果讲清楚。
            */
-          fixedOptionId: isAdmin || row.drawn_at ? vote.fixedOptionId ?? null : null,
+          fixedOptionId:
+            isAdmin || row.drawn_at || opts.revealVoteResult ? vote.fixedOptionId ?? null : null,
         }
       : null,
     /** true = 不在消息中心「活动推广」里显示，只能通过链接参与 */
@@ -210,18 +235,23 @@ async function loadOne(env: Env, id: string): Promise<EventRow> {
  *   「照着当前最少的那项投」，活动完全失去意义。
  *   ⇒ **前端收口只做到"看不见"，服务端收口才是"拿不到"，两者缺一不可。**
  *
- * 公开条件（与前端 `revealed = !!myVote || vote.drawn` 严格一致，改一处要改两处）：
+ * 公开条件（与前端 event-vote.tsx 的 `revealed` 严格一致，改一处必须改另一处）：
  *   · 已经投过票 —— 票不能改，看到分布没有作弊空间；而且「投完能看到别人选了什么」
  *     本来就是体验的一部分；
  *   · 或者已经开奖 —— 结果已经定死，公开是合理的（也让没中的人知道答案）；
+ *   · 或者活动**已经结束**（投票窗口关闭，含管理员提前结束 / 归档）——
+ *     这时看票同样没有作弊空间，而「截止后开奖」那一档的结果本来就是在结束后才出来，
+ *     不公开票数的话用户看不到自己那一票到底算不算数；
  *   · 管理员始终可见（含未开奖）—— 后台要靠票数判断够不够、什么时候开奖。
  */
 function voteCountsVisible(opts: {
   hasVoted: boolean
   drawn: boolean
   isAdmin: boolean
+  /** 活动是否已结束（isEventOver）：投票窗口关闭 ⇒ 票数公开 */
+  ended: boolean
 }): boolean {
-  return opts.isAdmin || opts.hasVoted || opts.drawn
+  return opts.isAdmin || opts.hasVoted || opts.drawn || opts.ended
 }
 
 /**
@@ -247,7 +277,8 @@ export async function listEvents(env: Env, request: Request): Promise<Response> 
     .bind(nowIso)
     .all<EventRow>()
 
-  const events = (rows.results ?? []).map((r) => toEvent(r, now))
+  const rowList = rows.results ?? []
+  const events = rowList.map((r) => toEvent(r, now))
 
   // 附每个活动的已领份数（一次 GROUP BY，避免 N+1）。
   // 用户端据 maxClaims - claimCount 显示「剩余 N 份」——限量活动的先到先得必须可见，
@@ -313,7 +344,7 @@ export async function listEvents(env: Env, request: Request): Promise<Response> 
   const isAdmin = !!user && isAnyAdmin(user.role)
 
   return json({
-    events: events.map((e) => ({
+    events: events.map((e, i) => ({
       ...e,
       myClaim: claims[e.id] ?? null,
       claimCount: countMap[e.id] ?? 0,
@@ -330,10 +361,108 @@ export async function listEvents(env: Env, request: Request): Promise<Response> 
         hasVoted: myVotes[e.id] != null,
         drawn: !!e.vote?.drawn,
         isAdmin,
+        // 本列表的 SQL 只放未结束的活动，这里仍按真实行算 —— 以后动 SQL 口径不会静默跑偏
+        ended: isEventOver(rowList[i], now),
       })
         ? voteCountMap[e.id] ?? {}
         : {},
       /** 投票活动：我投的选项 id；没投过 / 未登录为 null */
+      myVote: myVotes[e.id] ?? null,
+    })),
+    now: nowIso,
+  })
+}
+
+/**
+ * GET /api/events/vote-history —— 历史投票：已结束的投票活动 + 结果。
+ *
+ * 为什么需要它：`/api/events`（消息中心「活动推广」列表）按 `ends_at >= now` 过滤，
+ * 活动一过截止时间就从推广页消失。而「截止后开奖」那一档的**结果恰恰是在截止之后
+ * 才出来的** —— 用户回到推广页只会发现「活动不见了」，既看不到最后谁获奖，
+ * 也查不到自己那一票中没中。所以把已结束的投票单独列出来供回看。
+ *
+ * 取数口径：
+ *   · 只收投票活动（condition_type = 'vote'）；
+ *   · 只收已结束的：状态已置 ended / archived，或仍是 active 但过了 ends_at（isEventOver）；
+ *   · 只收原本就在「活动推广」里出现过的（promo_hidden = 0）—— 站长刻意做成
+ *     「仅链接可见」的定向活动不该在这里被公开，那等于绕过他的投放范围；
+ *   · 投票窗口已关 ⇒ 票数一律公开（没有「照着票数投」的作弊空间），
+ *     `fixedOptionId` 也一并下发（活动都结束了，继续藏着没有意义）。
+ *
+ * ⚠️ 路由必须注册在 `/events/:id` 之前（见 worker/src/index.ts），
+ *    否则这条会被当成 id = "vote-history" 匹配掉，直接 404。
+ */
+export async function listVoteHistory(env: Env, request: Request): Promise<Response> {
+  const now = Date.now()
+  const nowIso = new Date(now).toISOString()
+
+  const rows = await env.DB.prepare(
+    `SELECT * FROM events
+      WHERE condition_type = 'vote' AND COALESCE(promo_hidden, 0) = 0
+        AND (status IN ('ended', 'archived') OR (ends_at IS NOT NULL AND ends_at < ?))
+      ORDER BY COALESCE(ends_at, updated_at) DESC
+      LIMIT 50`
+  )
+    .bind(nowIso)
+    .all<EventRow>()
+
+  const rowList = rows.results ?? []
+  // 全量下发结果：已结束 ⇒ 票数与「指定选项」都不再敏感（口径见 voteCountsVisible 的 ended）
+  const events = rowList.map((r) => toEvent(r, now, false, { revealVoteResult: true }))
+
+  // 参与人数 / 中奖人数 / 票数分布：各一次 GROUP BY 拿完（与 listEvents 同套做法，
+  // 活动总量很小，逐个活动查反而多一圈往返）。
+  const claimRows = await env.DB.prepare(
+    "SELECT event_id, COUNT(*) AS c FROM event_claims GROUP BY event_id"
+  ).all<{ event_id: string; c: number }>()
+  const claimCountMap = Object.fromEntries((claimRows.results ?? []).map((r) => [r.event_id, r.c]))
+
+  const grantedRows = await env.DB.prepare(
+    "SELECT event_id, COUNT(*) AS c FROM event_claims WHERE reward_status = 'granted' GROUP BY event_id"
+  ).all<{ event_id: string; c: number }>()
+  const grantedMap = Object.fromEntries((grantedRows.results ?? []).map((r) => [r.event_id, r.c]))
+
+  const voteRows = await env.DB.prepare(
+    "SELECT event_id, option_id, COUNT(*) AS c FROM event_votes GROUP BY event_id, option_id"
+  ).all<{ event_id: string; option_id: string; c: number }>()
+  const voteCountMap: Record<string, Record<string, number>> = {}
+  for (const r of voteRows.results ?? []) {
+    const m = (voteCountMap[r.event_id] ??= {})
+    m[r.option_id] = r.c
+  }
+
+  // 我投了谁 / 我的结算结果（未登录不带；历史页是公开的，登录后才个性化）
+  let claims: Record<string, { rewardStatus: string; rewardDetail: string | null }> = {}
+  let myVotes: Record<string, string> = {}
+  const user = await optionalUser(env, request)
+  if (user) {
+    const mineClaims = await env.DB.prepare(
+      "SELECT event_id, reward_status, reward_detail FROM event_claims WHERE user_id = ?"
+    )
+      .bind(user.id)
+      .all<{ event_id: string; reward_status: string; reward_detail: string | null }>()
+    claims = Object.fromEntries(
+      (mineClaims.results ?? []).map((c) => [
+        c.event_id,
+        { rewardStatus: c.reward_status, rewardDetail: c.reward_detail },
+      ])
+    )
+    const myVoteRows = await env.DB.prepare(
+      "SELECT event_id, option_id FROM event_votes WHERE user_id = ?"
+    )
+      .bind(user.id)
+      .all<{ event_id: string; option_id: string }>()
+    myVotes = Object.fromEntries((myVoteRows.results ?? []).map((v) => [v.event_id, v.option_id]))
+  }
+
+  return json({
+    events: events.map((e) => ({
+      ...e,
+      myClaim: claims[e.id] ?? null,
+      claimCount: claimCountMap[e.id] ?? 0,
+      /** 这场投票里已经成功拿到奖励的人数（历史视图显示「N 人中奖」） */
+      grantedCount: grantedMap[e.id] ?? 0,
+      voteCounts: voteCountMap[e.id] ?? {},
       myVote: myVotes[e.id] ?? null,
     })),
     now: nowIso,
@@ -353,7 +482,10 @@ export async function getEvent(env: Env, request: Request, id: string): Promise<
     throw new ApiError(404, "活动不存在", "NOT_FOUND")
   }
   const now = Date.now()
-  const event = toEvent(row, now)
+  const ended = isEventOver(row, now)
+  // 活动已结束时把「固定选项」一并下发：投票窗口关了，继续藏着没有意义，
+  // 而「已结束」的活动页上要能看出是哪个选项获奖（口径同 voteCountsVisible 的 ended）。
+  const event = toEvent(row, now, false, { revealVoteResult: ended })
 
   const count = await env.DB.prepare(
     "SELECT COUNT(*) AS c FROM event_claims WHERE event_id = ?"
@@ -392,7 +524,7 @@ export async function getEvent(env: Env, request: Request, id: string): Promise<
   const voteCounts: Record<string, number> = {}
   if (
     row.condition_type === "vote" &&
-    voteCountsVisible({ hasVoted: myVote != null, drawn: !!row.drawn_at, isAdmin })
+    voteCountsVisible({ hasVoted: myVote != null, drawn: !!row.drawn_at, isAdmin, ended })
   ) {
     const voteTally = await env.DB.prepare(
       "SELECT option_id, COUNT(*) AS c FROM event_votes WHERE event_id = ? GROUP BY option_id"
@@ -1262,13 +1394,30 @@ export async function drawVoteEvent(
  *     一次开太多会让 cron 跑很久，没开完的下一次 tick 继续。
  *   - 「参与即可获奖」和「投票后立刻结算」两档在投票时就发完了，**必须跳过** ——
  *     否则每次 tick 都白扫一遍，而且真的开奖会重复发放（见 drawVoteEvent 的拦截）。
+ *
+ * ⚠️ `status IN ('active','ended')`（2026-10-08 修）：原先只扫 active，
+ *    管理员若在截止前后手动把活动置成 ended，这场投票就**永远不会开奖** ——
+ *    投票的人一直停在「等待开奖」，而活动已经从推广页消失，用户根本无从发现。
+ *    ended 也是「已结束」，同样该结算；archived 是对外刻意收起来的归档态，不动它。
+ *
+ * ⚠️ `rewardRule IN (…)` 过滤（2026-10-08 修，同一处）：只挑「截止后开奖」那一档进候选。
+ *    「参与即可获奖」「投票后立刻结算」两档 `drawn_at` **永远是 NULL**，
+ *    但它们同样满足「投票活动 + 已过 ends_at + 未开奖」——
+ *    留在候选里会被每 tick 选中、又立刻 `continue` 跳过，**永久占着 LIMIT 5 的名额**，
+ *    把真正要开奖的活动饿死在队列外面（ORDER BY ends_at ASC，它们恰好是最老的）。
+ *    规则存在 condition_params 里，JSON 表达式按 permissions.ts 的既有写法兜底
+ *    （json_extract 遇到损坏 JSON 会抛错 → 整个 cron 报错）。
  */
 export async function drawDueVotes(env: Env): Promise<{ drawn: number; errors: number }> {
   const nowIso = new Date().toISOString()
   const rows = await env.DB.prepare(
     `SELECT id FROM events
-      WHERE status = 'active' AND condition_type = 'vote'
+      WHERE condition_type = 'vote' AND status IN ('active', 'ended')
         AND drawn_at IS NULL AND ends_at IS NOT NULL AND ends_at < ?
+        AND json_extract(
+              CASE WHEN json_valid(condition_params) THEN condition_params ELSE '{}' END,
+              '$.rewardRule'
+            ) IN ('fixed', 'majority', 'minority')
       ORDER BY ends_at ASC LIMIT 5`
   )
     .bind(nowIso)

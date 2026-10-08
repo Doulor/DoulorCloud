@@ -17,6 +17,7 @@ import {
   Upload,
   UserRound,
   X,
+  ZapOff,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -44,6 +45,8 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { ProfileDesignPanel } from "@/components/profile-design-panel"
+import { designCss as designCssLocal, PREVIEW_NO_ANIM_CSS } from "@/lib/profile-design-css"
 import { profileApi, identityApi, HttpError } from "@/services/api"
 import { compressImage } from "@/lib/image-compress"
 import { cn } from "@/lib/utils"
@@ -287,6 +290,41 @@ function LayoutWireframe({ id }: { id: string }) {
           <rect x="6" y="27" width="36" height="3" rx="1.5" stroke={c} opacity=".4" {...common} />
         </>
       )}
+      {/* 刊头：顶部横排身份条 + 下方双列 */}
+      {id === "masthead" && (
+        <>
+          <rect x="4" y="4" width="8" height="8" rx="4" fill={c} opacity=".35" {...common} />
+          <rect x="15" y="6" width="16" height="2" rx="1" fill={c} opacity=".5" />
+          <rect x="15" y="10" width="24" height="1.5" rx=".75" fill={c} opacity=".3" />
+          <rect x="4" y="14.5" width="40" height="1" rx=".5" fill={c} opacity=".35" />
+          <rect x="4" y="18" width="19" height="4" rx="1" stroke={c} opacity=".4" {...common} />
+          <rect x="25" y="18" width="19" height="4" rx="1" stroke={c} opacity=".4" {...common} />
+          <rect x="4" y="24" width="19" height="4" rx="1" stroke={c} opacity=".4" {...common} />
+          <rect x="25" y="24" width="19" height="4" rx="1" stroke={c} opacity=".4" {...common} />
+        </>
+      )}
+      {/* 中轴：一条竖轴 + 左右交错 */}
+      {id === "spine" && (
+        <>
+          <rect x="19" y="2" width="10" height="6" rx="3" fill={c} opacity=".35" {...common} />
+          <rect x="23.5" y="9" width="1" height="21" fill={c} opacity=".45" {...common} />
+          <rect x="5" y="11" width="16" height="4" rx="1" stroke={c} opacity=".4" {...common} />
+          <rect x="27" y="16" width="16" height="4" rx="1" stroke={c} opacity=".4" {...common} />
+          <rect x="5" y="21" width="16" height="4" rx="1" stroke={c} opacity=".4" {...common} />
+          <rect x="27" y="26" width="16" height="4" rx="1" stroke={c} opacity=".4" {...common} />
+        </>
+      )}
+      {/* 瀑布流：顶部小身份条 + 错落双列 */}
+      {id === "masonry" && (
+        <>
+          <rect x="4" y="3" width="6" height="6" rx="3" fill={c} opacity=".35" {...common} />
+          <rect x="12" y="5" width="12" height="2" rx="1" fill={c} opacity=".5" />
+          <rect x="4" y="12" width="19" height="6" rx="1" stroke={c} opacity=".4" {...common} />
+          <rect x="25" y="12" width="19" height="9" rx="1" stroke={c} opacity=".4" {...common} />
+          <rect x="4" y="20" width="19" height="9" rx="1" stroke={c} opacity=".4" {...common} />
+          <rect x="25" y="23" width="19" height="6" rx="1" stroke={c} opacity=".4" {...common} />
+        </>
+      )}
     </svg>
   )
 }
@@ -420,6 +458,8 @@ export default function ProfilePage() {
   })
   const [contacts, setContacts] = React.useState<ProfileContact[]>([])
   const [modules, setModules] = React.useState<ProfileModule[]>(() => normalizeModules([]))
+  /** 设计系统参数（`{}` = 完全跟随主题）；逐项调节，全量随表单保存 */
+  const [design, setDesign] = React.useState<Record<string, unknown>>({})
   const [published, setPublished] = React.useState(false)
 
   const [previewHtml, setPreviewHtml] = React.useState<string | null>(null)
@@ -435,6 +475,28 @@ export default function ProfilePage() {
   const [previewMode, setPreviewMode] = React.useState<"portrait" | "landscape">("portrait")
   const previewBoxRef = React.useRef<HTMLDivElement | null>(null)
   const [previewBox, setPreviewBox] = React.useState({ w: 0, h: 0 })
+
+  /** 预览 iframe（portrait/landscape 同一时刻只渲染一个，共用一个 ref） */
+  const iframeRef = React.useRef<HTMLIFrameElement | null>(null)
+  /** 预览时禁用入场动画（编辑器手顺设置，存 localStorage，不进名片数据） */
+  const [previewNoAnim, setPreviewNoAnim] = React.useState(() => {
+    try {
+      return localStorage.getItem("profile:previewNoAnim") === "1"
+    } catch {
+      return false
+    }
+  })
+  const togglePreviewNoAnim = () => {
+    setPreviewNoAnim((v) => {
+      const next = !v
+      try {
+        localStorage.setItem("profile:previewNoAnim", next ? "1" : "0")
+      } catch {
+        // 忽略：隐私模式下写不进
+      }
+      return next
+    })
+  }
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -471,6 +533,7 @@ export default function ProfilePage() {
       })
       setContacts(p.contacts)
       setModules(normalizeModules(p.modules))
+      setDesign(p.design ?? {})
       setPublished(p.published)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("pf.err.load"))
@@ -490,15 +553,21 @@ export default function ProfilePage() {
   const boundToRootDomain =
     !!profile?.fqdn && profile.fqdn === window.location.hostname.replace(/^cloud\./, "")
 
-  // 实时预览：表单/联系方式/模块任一变化，防抖后请求服务端渲染公开页 HTML。
-  // 渲染走与线上完全相同的 renderProfileHtml，所见即所得。
+  // 实时预览分两层：
+  //   ① 服务端渲染「基础 HTML」（表单/联系方式/模块变化时，防抖后请求，
+  //      走与线上完全相同的 renderProfileHtml）—— 这里**不带 design**，
+  //      因为 design 有 24 个滑块，每次拖动都走网络会又慢又抖。
+  //   ② design 参数在前端直接往 iframe 注入 CSS（见下面 applyLive），
+  //      拖滑块零网络延迟。两边输出同源（src/lib/profile-design-css 与 worker 同步）。
   const hasProfile = Boolean(data?.profile)
   React.useEffect(() => {
     if (!hasProfile) return
     setPreviewLoading(true)
     const timer = setTimeout(() => {
+      // design 传 {}：基础 HTML 不带任何设计参数，design 全部由前端 postMessage 实时注入。
+      // 这样基础 HTML 不随滑块变化（不重载），也避免「已保存的旧设计参数」残留成脏值。
       profileApi
-        .preview({ ...form, contacts, modules })
+        .preview({ ...form, contacts, modules, design: {} })
         .then((res) => setPreviewHtml(res.html))
         .catch(() => {
           // 预览失败静默：不影响编辑
@@ -508,6 +577,41 @@ export default function ProfilePage() {
     return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form, contacts, modules, hasProfile])
+
+  /** design + 预览动画开关 → 注入到 iframe 的那段 CSS */
+  const livePreviewCss = React.useMemo(
+    () => designCssLocal(design) + (previewNoAnim ? "\n" + PREVIEW_NO_ANIM_CSS : ""),
+    [design, previewNoAnim]
+  )
+
+  /**
+   * 把 design CSS 送进预览 iframe（不重载、不走网络）。
+   * 两种时机调用：① iframe 加载完新 base HTML 后（onLoad）；② design/开关变化时（useEffect）。
+   *
+   * ⚠️ 走 postMessage 而不是直接改 contentDocument：
+   * 预览 iframe 带 sandbox（**故意不含 allow-same-origin**，保持隔离），
+   * 此时 contentDocument 是 null —— 直接注入会静默失败（2026-10-07 踩过，
+   * 「禁用入场动画」和设计参数即时预览一起失效就是这个原因）。
+   * contentWindow 不受此限制，postMessage 能跨沙箱送达；接收端见 worker 的 previewLiveJs。
+   */
+  const applyLivePreview = React.useCallback(() => {
+    const win = iframeRef.current?.contentWindow
+    if (!win) return
+    win.postMessage(
+      {
+        type: "pd-live",
+        css: livePreviewCss,
+        lift: typeof design.hoverLift === "number",
+        vignette: typeof design.vignette === "number" && design.vignette > 0,
+      },
+      "*"
+    )
+  }, [livePreviewCss, design])
+
+  // design 或动画开关变化：立刻更新已加载的 iframe（不重载）
+  React.useEffect(() => {
+    applyLivePreview()
+  }, [applyLivePreview])
 
   // 横版预览要把 1280px 宽的 iframe 等比缩进容器，得先知道容器的真实尺寸。
   // 用 ResizeObserver 而不是一次性测量：预览栏宽度会随窗口/侧边栏变化。
@@ -537,7 +641,7 @@ export default function ProfilePage() {
   const handleSave = async () => {
     setSaving(true)
     try {
-      const res = await profileApi.update({ ...form, contacts, modules })
+      const res = await profileApi.update({ ...form, contacts, modules, design })
       setData((d) => (d ? { ...d, profile: res.profile } : d))
       toast.success(t("pf.ok.saved"))
     } catch (err) {
@@ -690,6 +794,25 @@ export default function ProfilePage() {
       return { ...f, effects: Array.from(new Set(next)) }
     })
   }
+
+  // ---- 设计系统 ----
+  /**
+   * 设置某个设计参数；传 undefined = 删除该项（回退到主题默认值）。
+   * 这样「调回默认」不需要用户知道默认值是多少，一个「重置」按钮就回到跟随主题。
+   */
+  const setDesignKey = (key: string, value: unknown) => {
+    setDesign((d) => {
+      const next = { ...d }
+      if (value === undefined) {
+        delete next[key]
+      } else {
+        next[key] = value
+      }
+      return next
+    })
+  }
+  /** 清空全部设计参数 → 完全跟随主题 */
+  const resetDesign = () => setDesign({})
 
   // ---- 模块操作 ----
   const updateModule = (id: ProfileModuleId, patch: Partial<ProfileModule>) => {
@@ -1256,6 +1379,21 @@ export default function ProfilePage() {
                   </div>
                 </CardContent>
               </Card>
+
+              {/* ============ 设计系统：逐项微调，叠加在皮肤之上 ============ */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{t("pd.title")}</CardTitle>
+                  <CardDescription>{t("pd.desc")}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ProfileDesignPanel
+                    design={design}
+                    onChange={setDesignKey}
+                    onReset={resetDesign}
+                  />
+                </CardContent>
+              </Card>
             </TabsContent>
 
             {/* ============ 模块 ============ */}
@@ -1777,6 +1915,18 @@ export default function ProfilePage() {
                 )}
               </div>
               <div className="flex items-center gap-2">
+                {/* 预览时禁用入场动画：开屏/模块入场在每次渲染时都会重播，
+                    调设计参数时很干扰，这个开关只在编辑器预览里生效（不进名片数据） */}
+                <Button
+                  variant={previewNoAnim ? "secondary" : "ghost"}
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  onClick={togglePreviewNoAnim}
+                  title={t("pf.preview.noAnimHint")}
+                >
+                  <ZapOff className="mr-1 h-3.5 w-3.5" />
+                  {t("pf.preview.noAnim")}
+                </Button>
                 <div className="flex items-center rounded-md border p-0.5">
                   <Button
                     variant={previewMode === "portrait" ? "secondary" : "ghost"}
@@ -1812,6 +1962,8 @@ export default function ProfilePage() {
               {previewHtml ? (
                 previewMode === "portrait" ? (
                   <iframe
+                    ref={iframeRef}
+                    onLoad={applyLivePreview}
                     title={t("pf.preview.cardTitle")}
                     sandbox="allow-scripts allow-popups"
                     srcDoc={previewHtml}
@@ -1821,6 +1973,8 @@ export default function ProfilePage() {
                   /* 横版：iframe 内部按 1280px 布局（触发桌面断点），再整体缩进容器里。
                      外层 overflow-hidden 负责裁掉缩放后溢出的部分。 */
                   <iframe
+                    ref={iframeRef}
+                    onLoad={applyLivePreview}
                     title={t("pf.preview.cardTitleLandscape")}
                     sandbox="allow-scripts allow-popups"
                     srcDoc={previewHtml}

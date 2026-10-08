@@ -254,6 +254,19 @@ export const SETTING_DEFAULTS = {
   feedback_admin_notify_email: "",
   /** 社区发帖最多图片数 */
   community_post_max_images: "9",
+  /**
+   * 帖子分类（JSON 数组，管理面板可改）。每项：`{ key, zh, en, water? }`
+   *
+   * 2026-10-07 站长要求从硬编码改成可配，并加了「水帖」。
+   *   · `key`   —— 存进 `posts.category` 的值，**建立后不要改**（改了等于把老帖子变成孤儿）
+   *   · `water` —— 标记为「低质/水帖」类：帖子广场的「不看水帖」筛掉的就是它们。
+   *                用标记而不是写死 key='water'，站长改名或再加一个「低质」分类都能直接生效。
+   *
+   * 解析在 `handlers/community.ts` 的 postCategoryDefs()：**任何一项不合法就整份回落默认**，
+   * 保证前端永远拿到一个可用的非空列表（配置写坏了不该让社区整页打不开）。
+   */
+  post_categories:
+    '[{"key":"chat","zh":"闲聊","en":"Chit-chat"},{"key":"help","zh":"求助","en":"Help"},{"key":"resource","zh":"资源共享","en":"Resources"},{"key":"water","zh":"水帖","en":"Off-topic","water":true}]',
   /** 社区广场总开关 */
   community_enabled: "1",
   /**

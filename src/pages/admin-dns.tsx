@@ -7,10 +7,12 @@ import {
   Globe,
   Loader2,
   Pencil,
+  Plus,
   RefreshCw,
   ScanSearch,
   ShieldAlert,
   Trash2,
+  UserCog,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -48,7 +50,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { adminDnsApi, errMsg } from "@/services/api"
+import { adminDnsApi, adminSubdomainsApi, errMsg } from "@/services/api"
 import { fmtDateTime } from "@/lib/format"
 import { notifyAttentionChanged } from "@/lib/attention-events"
 import { useT } from "@/i18n"
@@ -59,8 +61,18 @@ import type {
   AdminDnsFindingsResponse,
   AdminDnsListResponse,
   AdminDnsRecord,
+  AdminSubdomain,
+  AdminSubdomainListResponse,
   DnsSeverity,
 } from "@/types"
+
+/** 归属用户联想搜索的候选项（与后端 searchSubdomainOwners 对齐） */
+interface OwnerOption {
+  id: string
+  username: string
+  email: string
+  status: string
+}
 
 /**
  * 管理面板 → DNS 解析。
@@ -111,7 +123,7 @@ interface DraftState {
 export function DnsAdminPanel() {
   const { t } = useT()
 
-  const [tab, setTab] = React.useState("records")
+  const [tab, setTab] = React.useState("subdomains")
 
   // ---- 记录列表 ----
   const [data, setData] = React.useState<AdminDnsListResponse | null>(null)
@@ -136,6 +148,28 @@ export function DnsAdminPanel() {
   const [deleting, setDeleting] = React.useState<AdminDnsRecord | null>(null)
   const [reviewing, setReviewing] = React.useState<AdminDnsFindingRow | null>(null)
   const [reviewNote, setReviewNote] = React.useState("")
+
+  // ---- 子域名管理 ----
+  const [subData, setSubData] = React.useState<AdminSubdomainListResponse | null>(null)
+  const [subLoading, setSubLoading] = React.useState(false)
+  const [subQ, setSubQ] = React.useState("")
+  const [subPage, setSubPage] = React.useState(1)
+  // 新建（parent 非空 = 在某域名下建子子域名，归属由父级决定）
+  const [subCreate, setSubCreate] = React.useState<{ parent: AdminSubdomain | null } | null>(null)
+  const [subCreateForm, setSubCreateForm] = React.useState({
+    name: "",
+    rootDomain: "",
+  })
+  // 改名 / 转移
+  const [subEdit, setSubEdit] = React.useState<AdminSubdomain | null>(null)
+  const [subEditForm, setSubEditForm] = React.useState({ name: "" })
+  // 删除
+  const [subDelete, setSubDelete] = React.useState<AdminSubdomain | null>(null)
+  // 归属用户：联想搜索词 + 当前选中（编辑时预填为现归属）
+  const [ownerQuery, setOwnerQuery] = React.useState("")
+  const [ownerOptions, setOwnerOptions] = React.useState<OwnerOption[]>([])
+  const [ownerSelected, setOwnerSelected] = React.useState<OwnerOption | null>(null)
+  const [ownerSearching, setOwnerSearching] = React.useState(false)
 
   // ---- CF 对账 ----
   const [cfDiff, setCfDiff] = React.useState<AdminDnsCfDiff | null>(null)
@@ -183,6 +217,24 @@ export function DnsAdminPanel() {
     }
   }, [t])
 
+  const loadSubdomains = React.useCallback(async () => {
+    setSubLoading(true)
+    try {
+      const res = await adminSubdomainsApi.list({ q: subQ.trim() || undefined, page: subPage })
+      setSubData(res)
+      // 新建对话框可能在列表数据到达之前就打开了（页面刚进、手快点「新建」）：
+      // 那时根域下拉是空的，预览会显示成「名字.」这种缺后缀的样子。数据到了
+      // 就补上默认根域——只在用户还没选过时补（选过的以用户为准）。
+      if (res.rootDomains.length > 0) {
+        setSubCreateForm((f) => (f.rootDomain ? f : { ...f, rootDomain: res.rootDomains[0].name }))
+      }
+    } catch (err) {
+      toast.error(errMsg(err, t("dns.err.load")))
+    } finally {
+      setSubLoading(false)
+    }
+  }, [subQ, subPage, t])
+
   React.useEffect(() => {
     void loadRecords()
   }, [loadRecords])
@@ -193,9 +245,47 @@ export function DnsAdminPanel() {
   }, [q, typeFilter, severityFilter, proxiedFilter, statusFilter])
 
   React.useEffect(() => {
+    setSubPage(1)
+  }, [subQ])
+
+  React.useEffect(() => {
     if (tab === "findings") void loadFindings()
     if (tab === "cf") void loadCfDiff()
-  }, [tab, loadFindings, loadCfDiff])
+    if (tab === "subdomains") void loadSubdomains()
+  }, [tab, loadFindings, loadCfDiff, loadSubdomains])
+
+  /**
+   * 归属用户联想搜索（防抖 300ms）。
+   *
+   * 只在新建/转移对话框打开时才发请求 —— 关着的时候搜纯属浪费。
+   */
+  React.useEffect(() => {
+    if (!subCreate && !subEdit) return
+    const query = ownerQuery.trim()
+    if (!query) {
+      setOwnerOptions([])
+      return
+    }
+    let alive = true
+    setOwnerSearching(true)
+    const timer = setTimeout(() => {
+      adminSubdomainsApi
+        .searchOwners(query)
+        .then((res) => {
+          if (alive) setOwnerOptions(res.owners)
+        })
+        .catch(() => {
+          if (alive) setOwnerOptions([])
+        })
+        .finally(() => {
+          if (alive) setOwnerSearching(false)
+        })
+    }, 300)
+    return () => {
+      alive = false
+      clearTimeout(timer)
+    }
+  }, [ownerQuery, subCreate, subEdit])
 
   /** 跑一次扫描。deep = 额外做真实解析探测（慢，但能发现悬空 CNAME） */
   const runScan = async (deep: boolean) => {
@@ -302,6 +392,155 @@ export function DnsAdminPanel() {
   const stats = data?.stats
   const pageCount = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1
   const findingPageCount = findings ? Math.max(1, Math.ceil(findings.total / findings.pageSize)) : 1
+  const subPageCount = subData ? Math.max(1, Math.ceil(subData.total / subData.pageSize)) : 1
+
+  /** 新建对话框打开时的默认根域（取列表里第一个，通常是默认域） */
+  const openSubCreate = (parent: AdminSubdomain | null) => {
+    setOwnerQuery("")
+    setOwnerOptions([])
+    setOwnerSelected(null)
+    setSubCreateForm({
+      name: "",
+      rootDomain: subData?.rootDomains[0]?.name ?? "",
+    })
+    setSubCreate({ parent })
+  }
+
+  const submitSubCreate = async () => {
+    if (!subCreate) return
+    const name = subCreateForm.name.trim().toLowerCase()
+    if (!name) {
+      toast.error(t("dns.sub.err.nameRequired"))
+      return
+    }
+    // 一级必须选归属用户；建子子域名时归属由父级决定（后端会校验）
+    if (!subCreate.parent && !ownerSelected) {
+      toast.error(t("dns.sub.err.ownerRequired"))
+      return
+    }
+    setBusy(true)
+    try {
+      const res = await adminSubdomainsApi.create({
+        name,
+        ...(subCreate.parent
+          ? { parentId: subCreate.parent.id }
+          : {
+              userId: ownerSelected!.id,
+              ...(subCreateForm.rootDomain ? { rootDomain: subCreateForm.rootDomain } : {}),
+            }),
+      })
+      toast.success(t("dns.sub.ok.created", { fqdn: res.subdomain.fqdn }))
+      setSubCreate(null)
+      await loadSubdomains()
+    } catch (err) {
+      toast.error(errMsg(err, t("dns.sub.err.createFailed")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const openSubEdit = (sub: AdminSubdomain) => {
+    setOwnerQuery("")
+    setOwnerOptions([])
+    setOwnerSelected({
+      id: sub.owner.id,
+      username: sub.owner.username,
+      email: sub.owner.email,
+      status: sub.owner.status,
+    })
+    setSubEditForm({ name: sub.name })
+    setSubEdit(sub)
+  }
+
+  const submitSubEdit = async () => {
+    if (!subEdit) return
+    const name = subEditForm.name.trim().toLowerCase()
+    setBusy(true)
+    try {
+      await adminSubdomainsApi.update(subEdit.id, {
+        // 名字没改就不传：传相同的值会被后端拒绝（NAME_UNCHANGED）
+        ...(name && name !== subEdit.name ? { name } : {}),
+        ...(ownerSelected && ownerSelected.id !== subEdit.owner.id
+          ? { userId: ownerSelected.id }
+          : {}),
+      })
+      toast.success(t("dns.sub.ok.updated"))
+      setSubEdit(null)
+      await loadSubdomains()
+    } catch (err) {
+      toast.error(errMsg(err, t("dns.sub.err.updateFailed")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const submitSubDelete = async () => {
+    if (!subDelete) return
+    setBusy(true)
+    try {
+      await adminSubdomainsApi.remove(subDelete.id)
+      toast.success(t("dns.sub.ok.deleted"))
+      setSubDelete(null)
+      await loadSubdomains()
+    } catch (err) {
+      toast.error(errMsg(err, t("dns.sub.err.deleteFailed")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 归属用户选择器（新建一级 / 转移共用） */
+  const renderOwnerPicker = () => (
+    <div className="space-y-1.5">
+      <Label htmlFor="sub-owner">{t("dns.sub.owner")}</Label>
+      <Input
+        id="sub-owner"
+        value={ownerQuery}
+        onChange={(e) => setOwnerQuery(e.target.value)}
+        placeholder={t("dns.sub.ownerSearch")}
+      />
+      {ownerSelected && (
+        <p className="flex flex-wrap items-center gap-1.5 text-xs">
+          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+          <span className="font-medium">{ownerSelected.username}</span>
+          <span className="text-muted-foreground">{ownerSelected.email}</span>
+          <button
+            type="button"
+            className="text-muted-foreground underline"
+            onClick={() => setOwnerSelected(null)}
+          >
+            {t("dns.sub.ownerClear")}
+          </button>
+        </p>
+      )}
+      <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border p-1">
+        {ownerSearching ? (
+          <p className="px-2 py-3 text-center text-xs text-muted-foreground">
+            <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />
+            {t("dns.sub.ownerSearching")}
+          </p>
+        ) : ownerOptions.length === 0 ? (
+          <p className="px-2 py-3 text-center text-xs text-muted-foreground">
+            {ownerQuery.trim() ? t("dns.sub.ownerNoResult") : t("dns.sub.ownerHint")}
+          </p>
+        ) : (
+          ownerOptions.map((o) => (
+            <button
+              key={o.id}
+              type="button"
+              className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-muted ${
+                o.id === ownerSelected?.id ? "bg-muted" : ""
+              }`}
+              onClick={() => setOwnerSelected(o)}
+            >
+              <span className="font-medium">{o.username}</span>
+              <span className="text-muted-foreground">{o.email}</span>
+            </button>
+          ))
+        )}
+      </div>
+    </div>
+  )
 
   return (
     <div className="space-y-6">
@@ -366,6 +605,7 @@ export function DnsAdminPanel() {
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
+          <TabsTrigger value="subdomains">{t("dns.tab.subdomains")}</TabsTrigger>
           <TabsTrigger value="records">{t("dns.tab.records")}</TabsTrigger>
           <TabsTrigger value="findings">
             {t("dns.tab.findings")}
@@ -375,6 +615,160 @@ export function DnsAdminPanel() {
           </TabsTrigger>
           <TabsTrigger value="cf">{t("dns.tab.cf")}</TabsTrigger>
         </TabsList>
+
+        {/* ================= 子域名管理 ================= */}
+        <TabsContent value="subdomains" className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              value={subQ}
+              onChange={(e) => setSubQ(e.target.value)}
+              placeholder={t("dns.sub.search")}
+              className="h-8 w-64"
+            />
+            <Button size="sm" onClick={() => openSubCreate(null)}>
+              <Plus className="mr-1.5 h-4 w-4" />
+              {t("dns.sub.new")}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={subLoading}
+              onClick={() => void loadSubdomains()}
+            >
+              <RefreshCw className={`mr-1.5 h-4 w-4 ${subLoading ? "animate-spin" : ""}`} />
+              {t("common.refresh")}
+            </Button>
+            {subData && (
+              <span className="text-xs text-muted-foreground">
+                {t("dns.sub.total", { n: String(subData.total) })}
+              </span>
+            )}
+          </div>
+
+          {subLoading && !subData ? (
+            <LoadingBlock />
+          ) : !subData || subData.subdomains.length === 0 ? (
+            <EmptyState
+              title={t("dns.sub.empty.title")}
+              description={t("dns.sub.empty.desc")}
+            />
+          ) : (
+            <div className="rounded-lg border bg-card">
+              <Table wrapperClassName="overflow-x-auto">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t("dns.sub.col.fqdn")}</TableHead>
+                    <TableHead>{t("dns.sub.col.owner")}</TableHead>
+                    <TableHead className="w-28">{t("dns.sub.col.parent")}</TableHead>
+                    <TableHead className="w-20 text-right">{t("dns.sub.col.records")}</TableHead>
+                    <TableHead className="w-36">{t("dns.sub.col.created")}</TableHead>
+                    <TableHead className="w-44 text-right">{t("dns.col.actions")}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {subData.subdomains.map((sub) => (
+                    <TableRow key={sub.id}>
+                      <TableCell className="align-top">
+                        <div className="font-mono text-xs break-all">{sub.fqdn}</div>
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                          {sub.name === "@" && (
+                            <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
+                              {t("dns.sub.primary")}
+                            </Badge>
+                          )}
+                          {sub.owner.status !== "active" && (
+                            <Badge
+                              variant="outline"
+                              className="h-5 border-destructive/40 px-1.5 text-[10px] text-destructive"
+                            >
+                              {sub.owner.status}
+                            </Badge>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="align-top text-xs">
+                        <div className="font-medium">{sub.owner.username}</div>
+                        <div className="text-muted-foreground">{sub.owner.email}</div>
+                      </TableCell>
+                      <TableCell className="align-top font-mono text-xs break-all">
+                        {sub.parentFqdn ?? <span className="text-muted-foreground">—</span>}
+                      </TableCell>
+                      <TableCell className="align-top text-right tabular-nums">
+                        {sub.recordCount}
+                      </TableCell>
+                      <TableCell className="align-top text-xs text-muted-foreground">
+                        {fmtDateTime(sub.createdAt)}
+                      </TableCell>
+                      <TableCell className="align-top">
+                        <div className="flex flex-wrap items-center justify-end gap-1">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 text-xs"
+                            onClick={() => openSubEdit(sub)}
+                          >
+                            <UserCog className="mr-1 h-3.5 w-3.5" />
+                            {t("dns.sub.editBtn")}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 text-xs"
+                            onClick={() => openSubCreate(sub)}
+                          >
+                            <Plus className="mr-1 h-3.5 w-3.5" />
+                            {t("dns.sub.child")}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 text-xs text-destructive"
+                            disabled={sub.name === "@"}
+                            title={sub.name === "@" ? t("dns.sub.primaryNoDelete") : undefined}
+                            onClick={() => setSubDelete(sub)}
+                          >
+                            <Trash2 className="mr-1 h-3.5 w-3.5" />
+                            {t("common.delete")}
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+
+          {subData && subData.total > subData.pageSize && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">
+                {t("dns.pageInfo", {
+                  total: String(subData.total),
+                  page: String(subData.page),
+                  pages: String(subPageCount),
+                })}
+              </span>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={subPage <= 1}
+                  onClick={() => setSubPage((p) => p - 1)}
+                >
+                  {t("common.back")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={subPage >= subPageCount}
+                  onClick={() => setSubPage((p) => p + 1)}
+                >
+                  {t("common.next")}
+                </Button>
+              </div>
+            </div>
+          )}
+        </TabsContent>
 
         {/* ================= 记录列表 ================= */}
         <TabsContent value="records" className="space-y-3">
@@ -1057,6 +1451,172 @@ export function DnsAdminPanel() {
             >
               {busy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
               {t("common.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- 新建子域名 ---- */}
+      <Dialog
+        open={subCreate !== null}
+        onOpenChange={(o) => {
+          if (!o) setSubCreate(null)
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {subCreate?.parent ? t("dns.sub.create.childTitle") : t("dns.sub.create.title")}
+            </DialogTitle>
+            <DialogDescription>
+              {subCreate?.parent
+                ? t("dns.sub.create.childDesc", { parent: subCreate.parent.fqdn })
+                : t("dns.sub.create.desc")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {subCreate?.parent ? (
+              // 建子子域名：归属由父级决定，只让填名字
+              <p className="rounded-md border bg-muted/40 p-2 text-xs">
+                <span className="text-muted-foreground">{t("dns.sub.col.owner")}：</span>
+                <span className="font-medium">{subCreate.parent.owner.username}</span>
+                <span className="ml-2 text-muted-foreground">{subCreate.parent.owner.email}</span>
+              </p>
+            ) : (
+              <>
+                {renderOwnerPicker()}
+                {subData && subData.rootDomains.length > 0 && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="sub-root">{t("dns.sub.create.root")}</Label>
+                    <Select
+                      value={subCreateForm.rootDomain}
+                      onValueChange={(v) => setSubCreateForm({ ...subCreateForm, rootDomain: v })}
+                    >
+                      <SelectTrigger id="sub-root">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {subData.rootDomains.map((r) => (
+                          <SelectItem key={r.name} value={r.name}>
+                            {r.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+              </>
+            )}
+            <div className="space-y-1.5">
+              <Label htmlFor="sub-name">{t("dns.sub.create.name")}</Label>
+              <Input
+                id="sub-name"
+                value={subCreateForm.name}
+                onChange={(e) => setSubCreateForm({ ...subCreateForm, name: e.target.value })}
+                className="font-mono text-xs"
+                placeholder="my-site"
+              />
+              <p className="text-[11px] text-muted-foreground">{t("dns.sub.create.nameHint")}</p>
+              {subCreateForm.name.trim() && (
+                <p className="font-mono text-xs">
+                  {t("dns.sub.create.preview")}：
+                  <span className="font-medium">
+                    {subCreateForm.name.trim().toLowerCase()}.
+                    {subCreate?.parent
+                      ? subCreate.parent.fqdn
+                      : (subData?.rootDomains.find((r) => r.name === subCreateForm.rootDomain)
+                          ?.name ?? (subCreateForm.rootDomain || subData?.rootDomains[0]?.name) ?? "")}
+                  </span>
+                </p>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSubCreate(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button disabled={busy} onClick={() => void submitSubCreate()}>
+              {busy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+              {t("common.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- 改名 / 转移 ---- */}
+      <Dialog
+        open={subEdit !== null}
+        onOpenChange={(o) => {
+          if (!o) setSubEdit(null)
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("dns.sub.edit.title")}</DialogTitle>
+            <DialogDescription className="font-mono text-xs">{subEdit?.fqdn}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="sub-edit-name">{t("dns.sub.edit.name")}</Label>
+              <Input
+                id="sub-edit-name"
+                value={subEditForm.name}
+                onChange={(e) => setSubEditForm({ ...subEditForm, name: e.target.value })}
+                className="font-mono text-xs"
+              />
+              {subEdit && subEditForm.name.trim() && subEditForm.name.trim() !== subEdit.name && (
+                <p className="font-mono text-xs">
+                  {t("dns.sub.create.preview")}：
+                  <span className="font-medium">
+                    {subEditForm.name.trim().toLowerCase()}.
+                    {subEdit.fqdn.slice(subEdit.name.length + 1)}
+                  </span>
+                </p>
+              )}
+              <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-600">
+                {t("dns.sub.edit.renameWarn")}
+              </p>
+            </div>
+            {renderOwnerPicker()}
+            <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-600">
+              {t("dns.sub.edit.transferWarn")}
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSubEdit(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button disabled={busy} onClick={() => void submitSubEdit()}>
+              {busy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+              {t("common.save")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- 删除子域名确认 ---- */}
+      <Dialog
+        open={subDelete !== null}
+        onOpenChange={(o) => {
+          if (!o) setSubDelete(null)
+        }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{t("dns.sub.delete.title")}</DialogTitle>
+            <DialogDescription>{t("dns.sub.delete.desc")}</DialogDescription>
+          </DialogHeader>
+          <p className="rounded-md border bg-muted/40 p-2 font-mono text-xs">
+            {subDelete?.fqdn}
+            <span className="ml-2 text-muted-foreground">@{subDelete?.owner.username}</span>
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSubDelete(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button variant="destructive" disabled={busy} onClick={() => void submitSubDelete()}>
+              {busy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+              {t("common.delete")}
             </Button>
           </DialogFooter>
         </DialogContent>

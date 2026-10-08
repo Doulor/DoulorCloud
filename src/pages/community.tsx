@@ -21,6 +21,13 @@ import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
   Dialog,
   DialogContent,
   DialogHeader,
@@ -38,16 +45,37 @@ import { communityApi, notificationApi, HttpError, errMsg } from "@/services/api
 import { compressImage } from "@/lib/image-compress"
 import { ImageLightbox } from "@/components/image-lightbox"
 import { fmtTime, relTime } from "@/lib/format"
-import type { Post, CommentNode, CommunityStats, Notification, PostCategory } from "@/types"
+import type {
+  Post,
+  CommentNode,
+  CommunityStats,
+  Notification,
+  PostCategoryDef,
+} from "@/types"
 import { useT } from "@/i18n"
 
-/** 帖子分类（2026-10-03）：闲聊 / 求助 / 资源共享 */
-const POST_CATEGORIES = ["chat", "help", "resource"] as const
-const POST_CATEGORY_LABELS: Record<PostCategory, string> = {
-  chat: "cm.cat.chat",
-  help: "cm.cat.help",
-  resource: "cm.cat.resource",
+/**
+ * 分类显示名（2026-10-07：分类改为**管理面板可配**，不再走 i18n 词条）。
+ *
+ * 从下发的分类列表里按当前语言查；查不到时退回 key 本身 —— 分类是动态的，
+ * 帖子完全可能带着「管理员刚删掉的分类」或历史 key，显示成空白会让用户以为界面坏了。
+ */
+function categoryLabel(defs: PostCategoryDef[], key: string, lang: "zh" | "en"): string {
+  const def = defs.find((d) => d.key === key)
+  if (!def) return key || "—"
+  return (lang === "en" ? def.en : def.zh) || def.key
 }
+
+/**
+ * 第二层筛选（范围）的两个**哨兵值**。
+ *
+ * 不用空串表示「全部」：Radix Select 里 `value=""` 是「清空」的保留值，
+ * 拿它当普通选项会表现成「选了没反应」。用不可能与分类 key 撞车的哨兵值最省心
+ * （分类 key 的格式被后端限制为 `[a-z0-9_-]`，不会出现下划线开头的双下划线形式）。
+ */
+const SCOPE_ALL = "__all"
+/** 看全部，但把带「水帖」标记的分类排除掉 */
+const SCOPE_NO_WATER = "__nowater"
 
 /**
  * 社区列表的滚动位置记忆（用户反馈 d89b9a86）： * 从广场点进帖子后，返回时帖子「跑到下面去了」—— 点开帖子前存下 window.scrollY，
@@ -334,6 +362,7 @@ function PostCard({
   onPin,
   canPin,
   basePath,
+  categories,
 }: {
   post: Post
   onLike: (p: Post) => void
@@ -343,9 +372,12 @@ function PostCard({
   onPin?: (p: Post) => void
   canPin?: boolean
   basePath: string
+  /** 生效中的分类列表（管理面板可配），用来把 post.category 翻译成显示名 */
+  categories: PostCategoryDef[]
 }) {
   const navigate = useNavigate()
-  const { t } = useT()
+  // 分类名走管理面板配置的列表（见 categoryLabel），所以这里只需要当前语言
+  const { lang } = useT()
   const { onContextMenu: onStickerContextMenu, renderMenu: renderStickerMenu } =
     useStickerSaveMenu()
   return (
@@ -359,16 +391,13 @@ function PostCard({
       <span className="absolute inset-y-0 left-0 w-1 rounded-l-xl bg-gradient-to-b from-primary/40 to-primary/10" />
       <div className="min-w-0 pl-2">
         <AuthorLine post={post} />
-        {/* 分类标签：闲聊 / 求助 / 资源共享 */}
+        {/* 分类标签：名字来自管理面板配置的分类列表 */}
         <div className="mt-1.5">
           <Badge
             variant="outline"
             className="text-[10px] font-normal text-muted-foreground"
           >
-            {t(
-              POST_CATEGORY_LABELS[(post.category as PostCategory) ?? "chat"] ??
-                POST_CATEGORY_LABELS.chat
-            )}
+            {categoryLabel(categories, post.category ?? "", lang)}
           </Badge>
         </div>
         {post.body && (
@@ -1221,8 +1250,17 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
 }
 
 /** 发帖入口：点击占位条展开，支持图片与表情 */
-function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: string }) {
-  const { t } = useT()
+function PostComposer({
+  onPosted,
+  basePath,
+  categories,
+}: {
+  onPosted: () => void
+  basePath: string
+  /** 生效中的分类列表（管理面板可配） */
+  categories: PostCategoryDef[]
+}) {
+  const { t, lang } = useT()
   const { user } = useAuth()
   const [open, setOpen] = React.useState(false)
   const [draft, setDraft] = React.useState("")
@@ -1232,8 +1270,18 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
   const [compressing, setCompressing] = React.useState(false)
   /** Markdown 实时预览开关（用户反馈：编辑时看不到排版效果） */
   const [preview, setPreview] = React.useState(false)
-  /** 帖子分类：闲聊（默认）/ 求助 / 资源共享（用户反馈 2026-10-03） */
-  const [category, setCategory] = React.useState<PostCategory>("chat")
+  /**
+   * 帖子分类（管理面板可配）。
+   *
+   * 初值是空串而不是写死 "chat"：分类列表是异步拿的，而且管理员随时可能把
+   * 「第一个分类」换成别的。用一个「选了但已失效 / 还没选」都能兜住的做法：
+   * 真正提交时统一走 effectiveCategory —— 选中项还在列表里就用它，
+   * 否则用列表第一项（发帖永远发得出去，不会被失效分类卡住）。
+   */
+  const [category, setCategory] = React.useState<string>("")
+  /** 实际会提交的分类 */
+  const effectiveCategory =
+    categories.some((c) => c.key === category) ? category : (categories[0]?.key ?? "")
   const fileRef = React.useRef<HTMLInputElement>(null)
   const taRef = React.useRef<HTMLTextAreaElement>(null)
 
@@ -1322,7 +1370,7 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
     setBusy(true)
     try {
       // 1) 先建帖拿到 id（图片 key 需要 postId）
-      const { post } = await communityApi.createPost(draft.trim(), [], category)
+      const { post } = await communityApi.createPost(draft.trim(), [], effectiveCategory)
       // 2) 逐张上传；单张失败不阻塞其余，最后统一提示
       let failed = 0
       for (const img of images) {
@@ -1440,21 +1488,21 @@ function PostComposer({ onPosted, basePath }: { onPosted: () => void; basePath: 
       />
 
       <div className="mt-2 flex flex-wrap items-center gap-1 border-t pt-2.5">
-        {/* 分类选择：闲聊 / 求助 / 资源共享（默认闲聊） */}
-        <div className="mr-1 flex items-center gap-0.5 rounded-md border p-0.5">
-          {(POST_CATEGORIES as readonly PostCategory[]).map((c) => (
+        {/* 分类选择：名字与数量都来自管理面板配置 */}
+        <div className="mr-1 flex flex-wrap items-center gap-0.5 rounded-md border p-0.5">
+          {categories.map((c) => (
             <button
-              key={c}
+              key={c.key}
               type="button"
-              onClick={() => setCategory(c)}
+              onClick={() => setCategory(c.key)}
               className={cn(
                 "rounded px-2 py-1 text-xs transition-colors",
-                category === c
+                effectiveCategory === c.key
                   ? "bg-primary text-primary-foreground"
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
-              {t(POST_CATEGORY_LABELS[c])}
+              {(lang === "en" ? c.en : c.zh) || c.key}
             </button>
           ))}
         </div>
@@ -1626,12 +1674,18 @@ function SidePanel({ stats }: { stats: CommunityStats | null }) {
 }
 
 export default function CommunityPage({ inDashboard = false }: { inDashboard?: boolean }) {
-  const { t } = useT()
+  const { t, lang } = useT()
   const { user } = useAuth()
   const basePath = inDashboard ? "/dashboard/community" : "/community"
   const { id } = useParams<{ id: string }>()
   const [posts, setPosts] = React.useState<Post[]>([])
   const [cursor, setCursor] = React.useState<string | undefined>(undefined)
+  /** 生效中的分类（管理面板可配）：发帖框、帖子卡片、筛选下拉都从这里取名字 */
+  const [categories, setCategories] = React.useState<PostCategoryDef[]>([])
+  /** 第一层筛选：排序方式 */
+  const [sort, setSort] = React.useState<"latest" | "hot">("latest")
+  /** 第二层筛选：范围（全部 / 某个分类 / 不看水帖） */
+  const [scope, setScope] = React.useState<string>(SCOPE_ALL)
   const [loading, setLoading] = React.useState(true)
   const [failed, setFailed] = React.useState(false)
   const [loadingMore, setLoadingMore] = React.useState(false)
@@ -1650,7 +1704,13 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
       setFailed(false)
     }
     try {
-      const res = await communityApi.listPosts(c)
+      const res = await communityApi.listPosts({
+        cursor: c,
+        sort,
+        // 哨兵值不当作分类传下去：「全部」两个参数都不传，「不看水帖」只传 excludeWater
+        category: scope !== SCOPE_ALL && scope !== SCOPE_NO_WATER ? scope : undefined,
+        excludeWater: scope === SCOPE_NO_WATER,
+      })
       setPosts((prev) => (c ? [...prev, ...res.posts] : res.posts))
       setCursor(res.nextCursor ?? undefined)
     } catch (err) {
@@ -1664,7 +1724,8 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
       setLoading(false)
       setLoadingMore(false)
     }
-  }, [])
+    // ⚠️ 必须依赖 sort/scope：换筛选条件要生成新的 load，下面的 effect 才会重新拉第一页
+  }, [sort, scope])
 
   /** 侧栏统计：失败不影响主流程，静默即可 */
   const loadStats = React.useCallback(async () => {
@@ -1689,6 +1750,43 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
   }, [])
 
   // 列表是否已加载过第一页：从详情返回时**不重新拉列表**，保留缓存 posts，
+  /**
+   * 分类列表：只拉一次，供发帖框 / 帖子卡片 / 筛选下拉共用。
+   * 拉不到（社区接口异常）时保持空数组 —— 各处渲染都有兜底（退回显示 key），不会白屏。
+   */
+  React.useEffect(() => {
+    let cancelled = false
+    communityApi
+      .getConfig()
+      .then((c) => {
+        if (!cancelled) setCategories(c.categories ?? [])
+      })
+      .catch(() => {
+        /* 静默：分类拉不到不影响浏览帖子 */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  /**
+   * 两层筛选变化 → 清空并从第一页重新加载。
+   *
+   * 跳过首次运行（首次由下面的挂载 effect 负责，否则会白拉一次）。
+   * ⚠️ 这里**不能**复用「从详情返回保留列表」的那套缓存逻辑：
+   *    换筛选条件是用户明确要求换一批数据，必须重新拉。
+   */
+  const filtersMountedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (!filtersMountedRef.current) {
+      filtersMountedRef.current = true
+      return
+    }
+    setPosts([])
+    setCursor(undefined)
+    void load()
+  }, [load])
+
   // 否则返回只恢复滚动位置、内容却只剩第一页，滚不到原来的深度（用户反馈 d89b9a86）
   const listLoadedOnceRef = React.useRef(false)
 
@@ -1919,12 +2017,49 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
           </div>
           <PostComposer
             basePath={basePath}
+            categories={categories}
             onPosted={() => {
               void load()
               bumpStats(1)
               void loadStats()
             }}
           />
+
+          {/* 两层筛选（2026-10-07 站长要求）
+              第一层：排序「最新 / 最热」；第二层：范围「全部 / 某个分类 / 不看水帖」 */}
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-0.5 rounded-md border p-0.5">
+              {(["latest", "hot"] as const).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setSort(s)}
+                  className={cn(
+                    "rounded px-2.5 py-1 text-xs transition-colors",
+                    sort === s
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {t(s === "hot" ? "cm.sort.hot" : "cm.sort.latest")}
+                </button>
+              ))}
+            </div>
+            <Select value={scope} onValueChange={setScope}>
+              <SelectTrigger className="h-8 w-[132px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={SCOPE_ALL}>{t("cm.filter.all")}</SelectItem>
+                <SelectItem value={SCOPE_NO_WATER}>{t("cm.filter.noWater")}</SelectItem>
+                {categories.map((c) => (
+                  <SelectItem key={c.key} value={c.key}>
+                    {(lang === "en" ? c.en : c.zh) || c.key}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
 
           <DataFade loading={loading} skeleton={<LoadingBlock />}>
           {failed ? (
@@ -1942,7 +2077,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
             <EmptyState
               icon={MessageCircle}
               title={t("cm.empty")}
-              description={t("cm.emptyDesc")}
+              description={scope === SCOPE_ALL ? t("cm.emptyDesc") : t("cm.filter.empty")}
             />
           ) : (
             <div className="space-y-3">
@@ -1950,6 +2085,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
                 <PostCard
                   key={p.id}
                   post={p}
+                  categories={categories}
                   onLike={handleLike}
                   onShare={handleShare}
                   onDelete={handleDelete}

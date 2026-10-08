@@ -8,6 +8,8 @@ import { useAuth } from "@/hooks/use-auth"
 import { communityApi } from "@/services/api"
 import { AnalyticsTracker } from "@/components/analytics-tracker"
 import { CursorGlow } from "@/components/cursor-effect"
+import { ClickSpark } from "@/components/motion/click-spark"
+import { RevealAll } from "@/components/motion/reveal"
 import { AppealAckGate } from "@/components/appeal-ack-dialog"
 import { NoticeAckGate } from "@/components/notice-ack-dialog"
 
@@ -140,6 +142,11 @@ export default function App() {
     <React.Suspense fallback={<PageLoader />}>
       <AnalyticsTracker />
       <CursorGlow />
+      {/* 动效层：全局点击粒子。启停跟 <html> 的 .motion-on 类走
+          （个人设置「界面动效」开关），关闭时不挂监听、一粒不出 */}
+      <ClickSpark />
+      {/* 动效层：滚动入场的全局观察器（谁加 .motion-reveal 类谁生效） */}
+      <RevealAll />
       {/* 申诉回复强制确认：全站挂一次，登录后只要有未读回复就弹不可关闭的窗 */}
       <AppealAckGate />
       {/* 管理端通知强制已读：同样全站挂一次 */}

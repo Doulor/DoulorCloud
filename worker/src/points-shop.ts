@@ -184,6 +184,15 @@ export interface PointProduct {
   dailySold: number
   /** 累计售出（delivered + settled 订单数）——「按热度排序」用 */
   soldCount: number
+  /**
+   * 是否在商品详情里**公示购买记录**（2026-10-08 站长要求）。
+   *
+   * 开启后 `listPublicPurchases()` 会返回这件商品最近 10 条订单的
+   * **买家用户名 + 下单时间**，用户点开详情弹窗就能看到，用来做「有人买过」的背书。
+   *
+   * 默认 false —— 买家用户名属于个人信息，必须逐件显式开启（见迁移 0127 的说明）。
+   */
+  showPurchases: boolean
   /** 每人限购件数；null = 不限 */
   perUserLimit: number | null
   delivery: ProductDelivery
@@ -288,6 +297,8 @@ export interface ProductInput {
   stock: number | null
   /** 每日限量（自然日）；null = 不限 */
   dailyLimit: number | null
+  /** 是否公示购买记录（默认 false；见 PointProduct.showPurchases） */
+  showPurchases: boolean
   perUserLimit: number | null
   delivery: ProductDelivery
   quotaYuan: number | null
@@ -447,6 +458,8 @@ function rowToProduct(r: Record<string, unknown>): PointProduct {
     dailySold: Number(r.daily_sold ?? 0),
     /** 累计售出（delivered + settled 的订单数）——「按热度排序」用 */
     soldCount: Number(r.sold_count ?? 0),
+    /** 公示购买记录（迁移 0127 新增列；老行默认 0） */
+    showPurchases: Number(r.show_purchases ?? 0) === 1,
     perUserLimit: r.per_user_limit == null ? null : Number(r.per_user_limit),
     delivery,
     quotaYuan: r.quota_yuan == null ? null : Number(r.quota_yuan),
@@ -579,6 +592,10 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
   const limitRaw = asUser ? null : nullableInt(b.perUserLimit, "每人限购", 0, MAX_PER_USER_LIMIT)
   const perUserLimit = limitRaw && limitRaw > 0 ? limitRaw : null
 
+  // 公示购买记录：默认**关**。认不出的值一律当 false —— 这是「要不要公开买家用户名」
+  // 的开关，宁可少开也不能误开（老前端不带这个字段时不能变成公示）。
+  const showPurchases = b.showPurchases === undefined ? false : Boolean(b.showPurchases)
+
   // 交付方式：
   //   · 官方商品 —— 全部可选（管理员代表平台，能发任何东西）
   //   · 用户商品 —— 只允许 manual / code / content（2026-10-04 站长放开）。
@@ -701,6 +718,7 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
     price,
     stock,
     dailyLimit,
+    showPurchases,
     perUserLimit,
     delivery,
     quotaYuan,
@@ -816,10 +834,10 @@ const PRODUCT_COLUMNS =
   // ⚠️ 新增列一律追加到**末尾**：列顺序一变，INSERT 占位符就要整体重排，
   //    极易漏一处而变成「字段整体错位」的脏数据。这里只改个数。
   " owner_id, owner_name, review_status, review_note, reviewed_at, created_at, updated_at, " +
-  "category, daily_limit)"
+  "category, daily_limit, show_purchases)"
 
 /** PRODUCT_COLUMNS 的列数 —— INSERT 的占位符个数必须与它一致 */
-const PRODUCT_COLUMN_COUNT = 24
+const PRODUCT_COLUMN_COUNT = 25
 
 function productBindings(id: string, input: ProductInput, now: string): unknown[] {
   return [
@@ -847,6 +865,7 @@ function productBindings(id: string, input: ProductInput, now: string): unknown[
     now,
     input.category,
     input.dailyLimit,
+    input.showPurchases ? 1 : 0,
   ]
 }
 
@@ -886,7 +905,7 @@ export async function updateProduct(env: Env, id: string, raw: unknown): Promise
        name = ?, description = ?, image_url = ?, icon = ?, price = ?, stock = ?,
        per_user_limit = ?, delivery = ?, quota_yuan = ?, delivery_params = ?,
        billing_mode = ?, rental_days = ?,
-       enabled = ?, sort = ?, category = ?, daily_limit = ?, updated_at = ?
+       enabled = ?, sort = ?, category = ?, daily_limit = ?, show_purchases = ?, updated_at = ?
      WHERE id = ?`
   )
     .bind(
@@ -906,6 +925,7 @@ export async function updateProduct(env: Env, id: string, raw: unknown): Promise
       input.sort,
       input.category,
       input.dailyLimit,
+      input.showPurchases ? 1 : 0,
       now,
       id
     )
@@ -1368,6 +1388,57 @@ async function getOrder(env: Env, id: string): Promise<PointOrder | null> {
     .bind(id)
     .first<Record<string, unknown>>()
   return row ? rowToOrder(row) : null
+}
+
+/**
+ * 公示给所有用户看的购买记录条目（2026-10-08 站长要求）。
+ *
+ * 刻意只给这两个字段：公示的目的是「有人买过」，不该顺带把买家的 user id、
+ * 买了多少件、有没有售后这些信息一起漏出去。
+ */
+export interface PublicPurchase {
+  /** 买家用户名（订单里的下单快照） */
+  username: string
+  /** 下单时间（ISO） */
+  createdAt: string
+}
+
+/** 公示的条数上限 —— 站长要求「看最近 10 条」 */
+const PUBLIC_PURCHASE_LIMIT = 10
+
+/**
+ * 某商品**公示出来的**购买记录（给商品详情弹窗用）。
+ *
+ * 商品不存在、或没开「公示购买记录」时返回 **null**，由调用方转成 404 ——
+ * 不能返回空数组：那样前端无法区分「这件商品没开公示」和「开了但还没人买」，
+ * 会把「没开」也画成一块空列表。
+ *
+ * 三个口径：
+ *   · **排除已取消订单**（cancelled）—— 那笔积分已经原路退回，不算真买过；
+ *     `pending` 保留：买家已经付了积分，就是一次真实购买。
+ *   · 按 `created_at DESC, id DESC` 稳定排序 —— 同一秒下的两单不会因为排序不稳定
+ *     而在两次刷新之间互换位置。
+ *   · 不做「买家已注销就隐藏」之类的加工：`username` 是下单时的快照，
+ *     删号也不影响这条历史记录（与订单列表同一口径）。
+ */
+export async function listPublicPurchases(
+  env: Env,
+  productId: string
+): Promise<PublicPurchase[] | null> {
+  const product = await getProduct(env, productId)
+  if (!product || !product.showPurchases) return null
+  const rows = await env.DB.prepare(
+    `SELECT username, created_at FROM point_orders
+      WHERE product_id = ? AND status != 'cancelled'
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?`
+  )
+    .bind(productId, PUBLIC_PURCHASE_LIMIT)
+    .all<{ username: string; created_at: string }>()
+  return (rows.results ?? []).map((r) => ({
+    username: String(r.username ?? ""),
+    createdAt: String(r.created_at ?? ""),
+  }))
 }
 
 /** 某用户在某商品上「已买过几件」（已取消的不算） */

@@ -32,7 +32,7 @@ export interface SendMailInput {
 /**
  * 把 Cloudflare 的发送错误转成可操作的中文业务错误。
  *
- * 单独抽出来是因为「回信」与「通知」要走完全一样的错误分类 ——
+ * 集中一处，让各条发送路径（验证码 / 通知 / 群发）走完全一样的错误分类，
  * 否则用户看到的提示会不一致（一个说"请先 Onboard"，另一个只说"发送失败"）。
  */
 function mapSendError(err: unknown): ApiError {
@@ -406,65 +406,6 @@ export async function sendMail(
     throw new ApiError(502, detail.slice(0, 400), "MAIL_SEND_FAILED")
   }
   throw new ApiError(503, "没有可用的邮件发送通道", "MAIL_NOT_CONFIGURED")
-}
-
-export interface SendReplyInput {
-  /** 发件地址：用户本人的域名邮箱（如 alice@doulor.cn） */
-  from: string
-  to: string
-  subject: string
-  text: string
-  /** 原邮件的 Message-ID，用于给邮件客户端串成同一会话 */
-  inReplyTo?: string | null
-}
-
-/**
- * 以用户自己的域名邮箱身份回复一封邮件（网页端「回信」）。
- *
- * 与 sendMail 的区别：
- *   1. 发件人是**用户自己的邮箱地址**，不是 no-reply@；
- *   2. 带上 `In-Reply-To` / `References`，让对方邮件客户端把两封信归到同一会话；
- *   3. 不设 HTML 正文 —— 纯文本足够，且避免用户输入被当 HTML 渲染的 XSS 风险。
- *
- * ⚠️ 前置条件（部署侧，不是代码能解决的）：
- *   `worker/wrangler.toml` 的 `[[send_email]].allowed_sender_addresses` 若只列了
- *   no-reply@/support@，则**从这里发出的信会被 Cloudflare 拒绝**（发件地址不在白名单）。
- *   要支持"用户以自己的地址回信"，必须删掉该键（或确认 CF 是否支持通配）。
- *   该键的取舍见 HANDOFF §4 与 docs/审计报告 §七。
- *
- * ⚠️ 另外：在 Email Sending 域名 Onboard 之前，CF 只允许发往账户内已验证的
- *   destination address。所以本功能在 Onboard 完成后才能真正对任意外部地址生效。
- */
-export async function sendReply(
-  env: Env,
-  input: SendReplyInput
-): Promise<{ messageId: string | null }> {
-  if (!env.EMAIL) {
-    throw new ApiError(
-      503,
-      "邮件发送未配置（缺少 send_email 绑定）",
-      "MAIL_NOT_CONFIGURED"
-    )
-  }
-
-  const headers: Record<string, string> = {}
-  if (input.inReplyTo) {
-    headers["In-Reply-To"] = input.inReplyTo
-    headers["References"] = input.inReplyTo
-  }
-
-  try {
-    const result = await env.EMAIL.send({
-      from: { email: input.from, name: input.from.split("@")[0] },
-      to: input.to,
-      subject: input.subject,
-      text: input.text,
-      ...(Object.keys(headers).length > 0 ? { headers } : {}),
-    })
-    return { messageId: result?.messageId ?? null }
-  } catch (err) {
-    throw mapSendError(err)
-  }
 }
 
 /** HTML 转义（与 profile-page.ts 的 esc 同口径，覆盖 &<>"'） */

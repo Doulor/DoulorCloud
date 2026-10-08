@@ -18,13 +18,14 @@
  * DNS 30 次/分钟）继续生效，与 API 限额是**两层**，互不干扰。
  */
 import { ApiError, json } from "../http"
-import { sessionCookie, requireUser } from "../auth"
+import { sessionCookie, requireUser, isPrivileged } from "../auth"
 import { hashToken, generateToken, uuid } from "../crypto"
 import { clientIp } from "../ratelimit"
-import { API_SOURCE_HEADER } from "../api-source"
+import { API_SOURCE_HEADER, API_ADMIN_HEADER } from "../api-source"
 import { getApiFeatureConfig, enforceApiLimit, getUserAchievementPoints, tierFor, accountLimitFor, listApiFeatures } from "../api-engine"
 import * as dnsHandlers from "./dns"
 import * as emailHandlers from "./email"
+import * as subdomainHandlers from "./subdomains"
 import type { Env } from "../env"
 
 const API_KEY_PREFIX = "doulor_"
@@ -41,25 +42,32 @@ function extractApiKey(request: Request): string {
  * 用 API Key 认证，返回对应用户。
  * 顺带更新 last_used_at（Key 管理页能显示「这把 key 最近用过」）。
  */
-async function requireApiKeyUser(env: Env, request: Request): Promise<{ id: string; role: string; status: string }> {
+async function requireApiKeyUser(
+  env: Env,
+  request: Request
+): Promise<{ id: string; role: string; status: string; isAdmin: boolean }> {
   const key = extractApiKey(request)
   if (!key) throw new ApiError(401, "缺少 API Key（用 Authorization: Bearer 携带）", "UNAUTHORIZED")
   const hash = await hashToken(key)
   const row = await env.DB.prepare(
-    `SELECT u.id, u.role, u.status
+    `SELECT u.id, u.role, u.status, k.is_admin
        FROM user_api_keys k
        JOIN users u ON u.id = k.user_id
       WHERE k.key_hash = ?`
   )
     .bind(hash)
-    .first<{ id: string; role: string; status: string }>()
+    .first<{ id: string; role: string; status: string; is_admin: number | null }>()
   if (!row) throw new ApiError(401, "API Key 无效", "UNAUTHORIZED")
   if (row.status !== "active") throw new ApiError(403, "账号已被停用", "ACCOUNT_SUSPENDED")
 
   await env.DB.prepare(`UPDATE user_api_keys SET last_used_at = ? WHERE user_id = ?`)
     .bind(new Date().toISOString(), row.id)
     .run()
-  return row
+  // 双重保险：标记为管理员 Key，但该用户**现在**已经不是「超级管理员 / root」了
+  // （被降权、或降成普通 admin）⇒ 不认管理员身份。
+  // 否则降权后那把 Key 还能免限额，等于权限下不来。
+  const isAdmin = row.is_admin === 1 && isPrivileged(row.role)
+  return { id: row.id, role: row.role, status: row.status, isAdmin }
 }
 
 /**
@@ -71,7 +79,7 @@ async function requireApiKeyUser(env: Env, request: Request): Promise<{ id: stri
 async function runAs(
   env: Env,
   request: Request,
-  user: { id: string },
+  user: { id: string; isAdmin?: boolean },
   fn: (env: Env, request: Request) => Promise<Response>
 ): Promise<Response> {
   const token = generateToken()
@@ -89,6 +97,9 @@ async function runAs(
   headers.set("Cookie", sessionCookie(token, 300))
   // 标记这是 API 调用，让被复用的 handler 给记录打 source='api'
   headers.set(API_SOURCE_HEADER, "api")
+  // 管理员 Key：额外打一个标记，各处的限额检查据此放行。
+  // 两个头都由 index.ts 的入口剥掉客户端版本，客户端伪造不了。
+  if (user.isAdmin) headers.set(API_ADMIN_HEADER, "1")
   const clone = new Request(request, { headers })
   try {
     return await fn(env, clone)
@@ -97,12 +108,20 @@ async function runAs(
   }
 }
 
-/** 统一的「认证 + 限额」前置，返回 user 与 config；通过后才进业务 */
+/**
+ * 统一的「认证 + 限额」前置，返回 user 与 config；通过后才进业务。
+ *
+ * ⚠️ 管理员 Key（`is_admin`）**不消耗也不受 API 速率限制** —— 直接跳过
+ * `enforceApiLimit`（按成就点分层 + IP 上限这两层都跳过）。
+ * 它豁免的只是「公开 API 这一层的限流」；被复用 handler 内部的业务上限
+ * 由各 handler 自己按 `isAdminApiRequest()` 放行（见 subdomains.ts / email.ts）。
+ */
 async function apiGate(env: Env, request: Request, feature: string) {
   const user = await requireApiKeyUser(env, request)
   const config = await getApiFeatureConfig(env, feature)
   if (!config) throw new ApiError(404, "未知的 API 功能", "NOT_FOUND")
   if (!config.enabled) throw new ApiError(403, "该功能的 API 尚未开放", "API_DISABLED")
+  if (user.isAdmin) return { user, limit: { tier: 0, accountLimit: 0, ipLimit: 0 } }
   const limit = await enforceApiLimit(env, {
     userId: user.id,
     ip: clientIp(request),
@@ -143,6 +162,29 @@ export async function apiDeleteDns(env: Env, request: Request, id: string): Prom
   return runAs(env, request, user, (e, r) => dnsHandlers.deleteDns(e, r, id))
 }
 
+// ---- 子域名（feature: subdomain）----
+//
+// 注意与 DNS 的区别：DNS 管的是「用户自己域名的解析记录」；
+// 子域名管的是「在站点根域名下开一个 xxx.doulor.cn」。两者是独立资源。
+
+/** GET /v1/subdomain —— 列自己的子域名 */
+export async function apiListSubdomain(env: Env, request: Request): Promise<Response> {
+  const { user } = await apiGate(env, request, "subdomain")
+  return runAs(env, request, user, subdomainHandlers.listSubdomains)
+}
+
+/** POST /v1/subdomain —— 创建子域名 */
+export async function apiCreateSubdomain(env: Env, request: Request): Promise<Response> {
+  const { user } = await apiGate(env, request, "subdomain")
+  return runAs(env, request, user, subdomainHandlers.createSubdomain)
+}
+
+/** DELETE /v1/subdomain/:id —— 删除子域名 */
+export async function apiDeleteSubdomain(env: Env, request: Request, id: string): Promise<Response> {
+  const { user } = await apiGate(env, request, "subdomain")
+  return runAs(env, request, user, (e, r) => subdomainHandlers.deleteSubdomain(e, r, id))
+}
+
 // ---- 邮箱（feature: mailbox）----
 
 /** GET /v1/mailbox —— 列收件箱 */
@@ -155,6 +197,12 @@ export async function apiListMailbox(env: Env, request: Request): Promise<Respon
 export async function apiCreateMailbox(env: Env, request: Request): Promise<Response> {
   const { user } = await apiGate(env, request, "mailbox")
   return runAs(env, request, user, emailHandlers.createMailbox)
+}
+
+/** DELETE /v1/mailbox/:id —— 删除邮箱（连带它的邮件） */
+export async function apiDeleteMailbox(env: Env, request: Request, id: string): Promise<Response> {
+  const { user } = await apiGate(env, request, "mailbox")
+  return runAs(env, request, user, (e, r) => emailHandlers.deleteMailbox(e, r, id))
 }
 
 /** GET /v1/mailbox/:id/messages —— 邮件列表 */
@@ -172,17 +220,6 @@ export async function apiGetMessage(
 ): Promise<Response> {
   const { user } = await apiGate(env, request, "mailbox")
   return runAs(env, request, user, (e, r) => emailHandlers.getMessage(e, r, mailboxId, messageId))
-}
-
-/** POST /v1/mailbox/:id/messages/:mid/reply —— 回复邮件 */
-export async function apiReplyMessage(
-  env: Env,
-  request: Request,
-  mailboxId: string,
-  messageId: string
-): Promise<Response> {
-  const { user } = await apiGate(env, request, "mailbox")
-  return runAs(env, request, user, (e, r) => emailHandlers.replyMessage(e, r, mailboxId, messageId))
 }
 
 // ---- 临时邮箱（feature: temp_mailbox）----
@@ -222,35 +259,60 @@ export async function apiGetTempMessage(
 export async function getApiKeyStatus(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
   const row = await env.DB.prepare(
-    `SELECT key_prefix, created_at, last_used_at FROM user_api_keys WHERE user_id = ?`
+    `SELECT key_prefix, created_at, last_used_at, is_admin FROM user_api_keys WHERE user_id = ?`
   )
     .bind(user.id)
-    .first<{ key_prefix: string; created_at: string; last_used_at: string | null }>()
+    .first<{
+      key_prefix: string
+      created_at: string
+      last_used_at: string | null
+      is_admin: number | null
+    }>()
 
   return json({
     hasKey: Boolean(row),
     prefix: row?.key_prefix ?? null,
     createdAt: row?.created_at ?? null,
     lastUsedAt: row?.last_used_at ?? null,
+    // 与 requireApiKeyUser 同口径：降权后旧的管理员 Key 不再算管理员
+    isAdmin: row?.is_admin === 1 && isPrivileged(user.role),
+    // 前端据此决定要不要显示「管理员 Key」开关（只给超级管理员 / root）
+    canCreateAdminKey: isPrivileged(user.role),
   })
 }
 
-/** POST /api/api-key —— 生成新 Key（已有则覆盖，旧 Key 立即作废）。明文只返回这一次 */
+/**
+ * POST /api/api-key —— 生成新 Key（已有则覆盖，旧 Key 立即作废）。明文只返回这一次
+ *
+ * 可选 `{ "admin": true }` 生成**管理员 Key**：不受 API 速率、子域名速率、
+ * 子域名数量、邮箱数量限制。
+ *
+ * ⚠️ **只给「超级管理员 / root」（`isPrivileged`），普通 `admin` 不行** ——
+ * 普通 admin 是「自定义管理员，只能做白名单里允许的事」，给他免限额的 Key
+ * 等于绕过白名单。实测：role=admin 请求会拿到 403，
+ * `/api/api-key` 的 `canCreateAdminKey` 也是 false（前端据此不显示开关）。
+ */
 export async function generateApiKey(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
+  const body = (await request.json().catch(() => ({}))) as { admin?: boolean }
+  const wantAdmin = body?.admin === true
+  if (wantAdmin && !isPrivileged(user.role)) {
+    throw new ApiError(403, "只有超级管理员或 root 可以生成管理员 Key", "FORBIDDEN")
+  }
+
   const key = API_KEY_PREFIX + generateToken()
   const hash = await hashToken(key)
   const now = new Date().toISOString()
   await env.DB.prepare(
-    `INSERT INTO user_api_keys (user_id, key_hash, key_prefix, created_at, last_used_at)
-     VALUES (?, ?, ?, ?, NULL)
+    `INSERT INTO user_api_keys (user_id, key_hash, key_prefix, created_at, last_used_at, is_admin)
+     VALUES (?, ?, ?, ?, NULL, ?)
      ON CONFLICT(user_id) DO UPDATE SET key_hash = excluded.key_hash,
        key_prefix = excluded.key_prefix, created_at = excluded.created_at,
-       last_used_at = NULL`
+       last_used_at = NULL, is_admin = excluded.is_admin`
   )
-    .bind(user.id, hash, key.slice(0, 8), now)
+    .bind(user.id, hash, key.slice(0, 8), now, wantAdmin ? 1 : 0)
     .run()
-  return json({ apiKey: key, prefix: key.slice(0, 8) }, 201)
+  return json({ apiKey: key, prefix: key.slice(0, 8), isAdmin: wantAdmin }, 201)
 }
 
 /** DELETE /api/api-key —— 删除 Key（禁用 API 调用） */

@@ -3,6 +3,7 @@ import { uuid } from "../crypto"
 import { isReservedName, isReservedSubdomain } from "../reserved-names"
 import { requireUser, isPrivileged } from "../auth"
 import { guardRateLimit } from "../ratelimit"
+import { isAdminApiRequest } from "../api-source"
 import { cfListDnsRecords, cfDeleteDnsRecord } from "../cloudflare"
 import { detachCustomDomain } from "../custom-domain"
 import { getSettingNumber } from "../settings"
@@ -124,8 +125,13 @@ export async function listSubdomains(env: Env, request: Request): Promise<Respon
  */
 export async function createSubdomain(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
+  // 管理员 Key 的公开 API 调用：不限速、不限配额（2026-10-07）。
+  // 标记头由入口剥过客户端伪造版本，见 api-source.ts::stripInternalHeaders。
+  const adminApi = isAdminApiRequest(request)
   // ⚠️ 2026-09-26 审计：创建会调 cfListDnsRecords 查 CF，原先零限流。
-  await guardRateLimit(env, `subdomain:create:user:${user.id}`, 10, 60, "创建子域名过于频繁，请稍后再试")
+  if (!adminApi) {
+    await guardRateLimit(env, `subdomain:create:user:${user.id}`, 10, 60, "创建子域名过于频繁，请稍后再试")
+  }
   const body = (await request.json()) as {
     name?: string
     parentId?: string
@@ -162,7 +168,7 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
     )
       .bind(parent.id)
       .first<{ c: number }>()
-    if (!isPrivileged(user.role) && (siblings?.c ?? 0) >= MAX_CHILDREN) {
+    if (!adminApi && !isPrivileged(user.role) && (siblings?.c ?? 0) >= MAX_CHILDREN) {
       throw new ApiError(
         400,
         `${parent.fqdn} 之下最多可创建 ${MAX_CHILDREN} 个子域名`,
@@ -208,7 +214,7 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
     )
       .bind(user.id)
       .first<{ c: number }>()
-    if (!isPrivileged(user.role) && (used?.c ?? 0) >= quota) {
+    if (!adminApi && !isPrivileged(user.role) && (used?.c ?? 0) >= quota) {
       throw new ApiError(
         400,
         `最多可创建 ${quota} 个一级子域名（当前 ${used?.c ?? 0} 个）`,
@@ -265,8 +271,10 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
 export async function deleteSubdomain(env: Env, request: Request, id: string): Promise<Response> {
   const user = await requireUser(env, request)
   // ⚠️ 2026-09-26 审计：删除会遍历全部后代并逐个 detachCustomDomain（删 Route + DNS），
-  // 是本次几个接口里最重的，原先零限流。
-  await guardRateLimit(env, `subdomain:delete:user:${user.id}`, 10, 60, "删除子域名过于频繁，请稍后再试")
+  // 是本次几个接口里最重的，原先零限流。管理员 Key 不限速。
+  if (!isAdminApiRequest(request)) {
+    await guardRateLimit(env, `subdomain:delete:user:${user.id}`, 10, 60, "删除子域名过于频繁，请稍后再试")
+  }
   const existing = await env.DB.prepare("SELECT * FROM subdomains WHERE id = ?")
     .bind(id)
     .first<SubdomainRow>()

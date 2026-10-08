@@ -28,6 +28,17 @@ export function isInstantVoteRule(r: EventVoteRewardRule): boolean {
 }
 
 /**
+ * 是不是「截止后开奖」那一档（到点 / 手动由服务端计票结算）。
+ *
+ * ⚠️ 必须与 worker/src/event-rewards.ts 的 `isDrawVoteRule` 一致（改一处要改两处）——
+ * 历史投票用它区分「已开奖 / 还在等开奖」，档位认错会把用户的预期带偏
+ * （明明是等开奖的活动，用户看到「已结束」却没有任何结果，只会以为吞了他的票）。
+ */
+export function isDrawVoteRule(r: EventVoteRewardRule): boolean {
+  return r === "fixed" || r === "majority" || r === "minority"
+}
+
+/**
  * 每种获奖规则给用户看一眼的说明。
  *
  * 为什么要逐档写而不是一句通用话：七档的「什么时候出结果、凭什么赢」都不一样，
@@ -73,11 +84,35 @@ export function EventVote({ ev, selected, onSelect, onSubmit, busy, disabled }: 
 
   const counts = ev.voteCounts ?? {}
   const myVote = ev.myVote ?? null
-  /** 已投过票 或 已开奖 —— 两种情况都要展示票数，且不能再改 */
-  const revealed = !!myVote || vote.drawn
+  /**
+   * 活动是否已结束（投票窗口关闭）。
+   *
+   * 判定必须与服务端 `isEventOver` 一致：管理员提前结束 / 归档，或仍是 active
+   * 但已过 endsAt —— 三种都算。⚠️ 不能只看 claimState：状态不是 active 的活动
+   * 服务端一律给 `offline`，把它当「还在进行」就会出现「活动早结束了却还让人投」。
+   */
+  const ended = ev.claimState === "ended" || ev.status === "ended" || ev.status === "archived"
+  /**
+   * 票数是否公开 —— 口径与后端 `voteCountsVisible` 严格一致（改一处必须改另一处）：
+   * 已投过票 / 已开奖 / 活动已结束（窗口关了，「照着票数投」已无从下手）。
+   * 服务端只在这些情况下才把票数放进响应，这里只决定「渲染不渲染」。
+   */
+  const revealed = !!myVote || vote.drawn || ended
   const total = vote.options.reduce((sum, o) => sum + (counts[o.id] ?? 0), 0)
-  /** 获奖选项：已开奖才有意义（开奖那一刻已经定死，前端按票数还原即可） */
-  const winning = vote.drawn
+  /**
+   * 获奖选项：
+   *  · 已开奖 ⇒ 票数在开奖那一刻定死，按最终票数还原即可；
+   *  · 「指定选项」这类**不看票数**的规则，活动结束后也能直接给出 —— 它是配置里的
+   *    常量，投票窗口都关了，继续藏着没有意义（历史投票要能看出是哪个选项获奖）。
+   * 「立刻结算的多数 / 少数」永远不标：它的结果取决于每个人投票**那一刻**的票数，
+   * 拿最终票数去标一定会标出一个当时并不成立的「赢家」。
+   */
+  const canResolveWinner =
+    vote.drawn ||
+    (ended &&
+      (vote.rewardRule === "fixed" || vote.rewardRule === "instant_fixed") &&
+      !!vote.fixedOptionId)
+  const winning = canResolveWinner
     ? winningIds(vote.options, counts, vote.rewardRule, vote.fixedOptionId)
     : null
 
@@ -124,7 +159,7 @@ export function EventVote({ ev, selected, onSelect, onSubmit, busy, disabled }: 
         </p>
       )}
 
-      {revealed && vote.drawn && winning && (
+      {revealed && winning && (
         <p className="text-xs text-muted-foreground">
           {winning.size > 1
             ? t("vote.result.tie", {

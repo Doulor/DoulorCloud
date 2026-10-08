@@ -736,6 +736,178 @@ section[id] {
 }
 
 /* ==========================================================================
+   动效层：可整体开关的统一交互动效（2026-10-08，站长要求）
+   总开关是 <html> 上的 .motion-on 类（hooks/use-motion-pref.ts 负责），
+   个人设置里有一个「界面动效」开关。
+
+   两条红线（往这一节加任何规则前必看）：
+   1) **每条规则都必须以 html.motion-on 开头** —— 开关一关、类一摘，
+      一条都不命中，「关闭 = 站点现状」就是这么保证的。
+      上面的 page-enter、cursor-glow 等既有动效不在此列、也不归这个开关管
+      （它们是「现状」的一部分，关闭时必须原样保留）。
+   2) **不碰既有元素的 transition** —— 动效层的规则只用独立属性（scale 等）
+      或自己的动画，不去覆盖页面里已经写好的过渡，避免「开了动效反而
+      把原来的悬停变色弄没了」这类隐性回归。
+
+   统一参数（动效层内的效果共用；JS 侧 click-spark.tsx 的 EASE 与之同款）：
+     缓动  cubic-bezier(0.22, 1, 0.36, 1)
+     微交互（按压、粒子）≈ 150–600ms；入场 ≈ 400–550ms；错峰步进 ≈ 45–90ms
+   ========================================================================== */
+
+/* 按钮按压：按下轻缩 4%、松手立即回弹。
+ * 刻意不写 transition —— 各按钮可能已有颜色等过渡（Tailwind transition-*），
+ * 这里若声明 transition 会把它们盖掉；瞬时回弹的「脆」感也符合按压反馈的语义。
+ * scale 是独立属性，不会顶掉元素自身的 transform（抬升、旋转都不受影响）。 */
+html.motion-on button:not(:disabled):active {
+  scale: 0.96;
+}
+
+/* ---- 选项卡内容切换（Radix Tabs：管理后台 / 捐献页 / 各工具页）----
+ * 切到哪个面板，哪个面板淡入上浮 —— 全站选项卡一个动作语言。
+ * Radix 把 inactive 面板设为 hidden，data-state 变 active 时下面的选择器
+ * 才开始命中 ⇒ 动画天然只在「切过来」那一刻播，不用 JS 参与。
+ * 终值 transform:none + 不写 fill（理由同 page-enter 的两条红线：不留 transform 祖先）。 */
+@keyframes motion-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+html.motion-on [role="tabpanel"][data-state="active"] {
+  animation: motion-rise 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ---- 按钮组当选项卡用的切换（配合 components/motion/section-enter.tsx）----
+ * 设置页分类、商城分类筛选这类「按钮组切内容」没有 data-state 可蹭，
+ * 由 SectionEnter 在切换时做「摘类 → 强制 reflow → 加回」来重播
+ * （与 PageEnter 同一手法：不重挂子树、不丢表单输入与滚动位置）。
+ * 动画打在**直接子元素**上，小步错峰。 */
+html.motion-on .section-enter > * {
+  animation: motion-rise 0.42s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+html.motion-on .section-enter > *:nth-child(2) {
+  animation-delay: 0.04s;
+}
+html.motion-on .section-enter > *:nth-child(3) {
+  animation-delay: 0.08s;
+}
+html.motion-on .section-enter > *:nth-child(4) {
+  animation-delay: 0.12s;
+}
+html.motion-on .section-enter > *:nth-child(5) {
+  animation-delay: 0.16s;
+}
+html.motion-on .section-enter > *:nth-child(6) {
+  animation-delay: 0.2s;
+}
+html.motion-on .section-enter > *:nth-child(7) {
+  animation-delay: 0.24s;
+}
+html.motion-on .section-enter > *:nth-child(n + 8) {
+  animation-delay: 0.28s;
+}
+
+/* ---- 弹窗出入场（配合 ui/dialog.tsx 的 .dialog-motion 标记类）----
+ * 弹窗内容原本是瞬间出现/消失的（现状）。动效层开着时给它一组轻的
+ * 缩放+淡入淡出 —— 与选项卡同一条缓动曲线，观感上是一套动作语言。
+ *
+ * ⚠️ 只能动 **scale / opacity 这两个独立属性**：DialogContent 的居中靠
+ * 内联 `transform: translate(-50%,-50%)`，动画一旦写 transform 就会
+ * 在播放期间把居中顶掉（弹窗会跳到屏幕左上角），scale 与 transform 是
+ * 组合关系、互不覆盖。radix 的 Presence 会等 data-state=closed 上的
+ * 动画播完才卸载，关闭时的淡出因此能真正露出来。 */
+@keyframes motion-dialog-in {
+  from {
+    opacity: 0;
+    scale: 0.96;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+@keyframes motion-dialog-out {
+  from {
+    opacity: 1;
+    scale: 1;
+  }
+  to {
+    opacity: 0;
+    scale: 0.98;
+  }
+}
+html.motion-on .dialog-motion[data-state="open"] {
+  animation: motion-dialog-in 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+html.motion-on .dialog-motion[data-state="closed"] {
+  animation: motion-dialog-out 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ---- 选项卡滑动指示器（配合 components/motion/sliding-pill.tsx）----
+ * 选中项的高亮背景从旧位置**滑**到新位置 —— 点哪个选项，背景滑过去。
+ * 滑块本体 display:none，只在 html.motion-on 下显示；与此同时把选项
+ * 「自己原本的 active 背景」摘掉（滑块是唯一高亮）。开关一关：
+ * 滑块消失 + 下面两条摘除规则失配 ⇒ 选项自己的高亮原样顶回 = 现状。 */
+.motion-pill {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: 0;
+  /* z-index: -1 让滑块压在「容器背景之上、所有文字之下」——
+     负值必须配容器的 isolation:isolate（由 SlidingPill 组件补上），
+     否则它会掉到容器外面、被容器自己的背景盖住。
+     不这么写的话，绝对定位的滑块会盖住选项卡文字（2026-10-08 站长反馈）。 */
+  z-index: -1;
+  pointer-events: none;
+  transition:
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    width 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    height 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s ease;
+}
+html.motion-on .motion-pill {
+  display: block;
+}
+/* Radix 选项卡触发器：motion-on 时把自带 active 背景交给滑块 */
+html.motion-on [role="tab"][data-state="active"] {
+  background: transparent;
+  box-shadow: none;
+}
+/* 侧边栏导航项（sub-nav 的 data-nav-active）同理 */
+html.motion-on [data-nav-active="1"] {
+  background: transparent;
+}
+
+/* ---- 标题逐字浮现（配合 components/motion/split-text.tsx）----
+ * token 是 span：inline 无法 transform，所以 motion-on 下升为 inline-block；
+ * 关闭时既无动画也无 inline-block，与一整串纯文本渲染完全一致。
+ * inline-block 只在 token 上，空格仍是纯文本节点，换行行为不变。 */
+html.motion-on .split-token {
+  display: inline-block;
+  animation: motion-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--i) * 35ms);
+}
+
+/* ---- 滚动入场（配合 components/motion/reveal.tsx 的 .motion-reveal）----
+ * 隐藏态/入场态都只写在 html.motion-on 下；translate 是独立属性，
+ * 不碰 transform（同 page-enter 的红线，避免造出 transform 祖先）。 */
+html.motion-on .motion-reveal {
+  opacity: 0;
+  translate: 0 14px;
+  transition:
+    opacity 0.55s cubic-bezier(0.22, 1, 0.36, 1),
+    translate 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
+html.motion-on .motion-reveal.motion-revealed {
+  opacity: 1;
+  translate: none;
+}
+
+/* ==========================================================================
    数据就绪：骨架 → 内容 的交叉淡化（配合 components/data-fade.tsx）
    两层用 grid 叠在同一个格子里 ⇒ 容器高度自动取两者较高的那个，
    既不用写死高度也不用 absolute，交接期间不会跳。

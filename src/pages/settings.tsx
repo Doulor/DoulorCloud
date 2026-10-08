@@ -7,6 +7,7 @@ import {
   Loader2,
   Mail,
   RefreshCw,
+  Sparkles,
   User,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -45,6 +46,8 @@ import {
   HttpError,
 } from "@/services/api"
 import { useAuth } from "@/hooks/use-auth"
+import { useMotionPref } from "@/hooks/use-motion-pref"
+import { SectionEnter } from "@/components/motion/section-enter"
 import { useT } from "@/i18n"
 import { UserAvatar } from "@/components/user-avatar"
 import { AvatarCropper, type AvatarCropResult } from "@/components/avatar-cropper"
@@ -53,6 +56,14 @@ import type { EmailSettings } from "@/types"
 export default function SettingsPage() {
   const { user, setUser } = useAuth()
   const { t } = useT()
+
+  /**
+   * 「界面动效」开关（2026-10-08 动效层）。本地偏好（存浏览器，
+   * 与主题切换同款模式），切换即时生效 —— hook 内部直接改 <html> 的类，
+   * 全局效果通过 MutationObserver 自己跟上，无需刷新。
+   * `sparkOn` 是点击粒子的独立偏好：默认关，且只在总开关开着时生效。
+   */
+  const { motionOn, setMotionOn, sparkOn, setSparkOn } = useMotionPref()
 
   /**
    * 「发给用户的根域」（如 tyu.me）。由后端下发，**不写死** ——
@@ -336,6 +347,7 @@ export default function SettingsPage() {
   const SETTING_GROUPS = [
     { key: "all", label: t("settings.group.all") },
     { key: "account", label: t("settings.group.account") },
+    { key: "general", label: t("settings.group.general") },
     { key: "security", label: t("settings.group.security") },
     { key: "notify", label: t("settings.group.notify") },
     { key: "api", label: t("settings.group.api") },
@@ -362,7 +374,8 @@ export default function SettingsPage() {
         ))}
       </div>
 
-      <div className="space-y-6">
+      {/* 动效层：分类切换时整组卡片错峰入场（开关关闭时规则不命中，行为同现状） */}
+      <SectionEnter watch={group} className="space-y-6">
         {show("account") && (
         <Card>
           <CardHeader>
@@ -624,6 +637,44 @@ export default function SettingsPage() {
         </Card>
         )}
 
+        {/* 界面动效：动效层总开关（本地偏好，不进账号） */}
+        {show("general") && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Sparkles className="h-4 w-4 text-muted-foreground" />
+              {t("settings.motion.title")}
+            </CardTitle>
+            <CardDescription>{t("settings.motion.desc")}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium">{t("settings.motion.toggle")}</p>
+                <p className="text-xs text-muted-foreground">
+                  {t("settings.motion.toggleDesc")}
+                </p>
+              </div>
+              <Switch checked={motionOn} onCheckedChange={setMotionOn} />
+            </div>
+            {/* 点击粒子：唯一默认关的效果（站长 2026-10-08 拍板），且受总开关钳制 */}
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium">{t("settings.motion.spark")}</p>
+                <p className="text-xs text-muted-foreground">
+                  {t("settings.motion.sparkDesc")}
+                </p>
+              </div>
+              <Switch
+                checked={sparkOn}
+                onCheckedChange={setSparkOn}
+                disabled={!motionOn}
+              />
+            </div>
+          </CardContent>
+        </Card>
+        )}
+
         {/* 通知偏好 */}
         {show("notify") && (
         <Card>
@@ -728,7 +779,7 @@ export default function SettingsPage() {
         {show("api") && (
         <OAuthAppsCard />
         )}
-      </div>
+      </SectionEnter>
 
       {/* 注销账号确认 */}
       <Dialog

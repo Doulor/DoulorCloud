@@ -4,8 +4,9 @@ import { isReservedName } from "../reserved-names"
 import { requireUser, type UserRow, isPrivileged } from "../auth"
 import { isApiRequest } from "../api-source"
 import { cfDeleteEmailRule } from "../cloudflare"
-import { sendReply, sendMail, renderMail, isMailerConfigured } from "../mailer"
+import { sendMail, renderMail } from "../mailer"
 import { guardRateLimit } from "../ratelimit"
+import { isAdminApiRequest } from "../api-source"
 import { audit, getSettingNumber, siteOffsetHours, siteDayString } from "../settings"
 import {
   pickRootDomain,
@@ -22,10 +23,6 @@ import type { Env } from "../env"
 const MAX_MAILBOXES_PER_USER = 3
 /** 管理员「不限」哨兵值（前端见到显示「不限」） */
 const ADMIN_UNLIMITED_MAILBOXES = 999999
-/** 回信正文上限（字符）：够写长信，又不至于把 D1 单值撑爆 */
-const MAX_REPLY_CHARS = 20_000
-/** 回信限流：每人每小时 20 封（防止账号被盗后当日志中继/发垃圾信） */
-const REPLY_LIMIT_PER_HOUR = 20
 
 /**
  * 临时邮箱：额度**独立**，不占用 MAX_MAILBOXES_PER_USER 的 3 个名额。
@@ -70,7 +67,7 @@ interface MessageRow {
   text_body: string
   read: number
   received_at: string
-  /** 原邮件的 RFC Message-ID（0029 迁移新增），回信时用于串会话 */
+  /** 原邮件的 RFC Message-ID（0029 迁移新增），用于同一封邮件去重落库 */
   rfc_message_id?: string | null
 }
 
@@ -343,7 +340,8 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
     .bind(user.id)
     .first<{ c: number }>()
 
-  if (!isPrivileged(user.role) && (count?.c ?? 0) >= MAX_MAILBOXES_PER_USER) {
+  // 管理员 Key 的公开 API 调用不受邮箱数量限制（2026-10-07）
+  if (!isAdminApiRequest(request) && !isPrivileged(user.role) && (count?.c ?? 0) >= MAX_MAILBOXES_PER_USER) {
     throw new ApiError(400, `每个用户最多 ${MAX_MAILBOXES_PER_USER} 个邮箱`, "LIMIT_REACHED")
   }
 
@@ -498,13 +496,15 @@ export async function verifyForwardTarget(env: Env, request: Request): Promise<R
   }
 
   // 发起验证：生成验证码发到目标邮箱。限流防轰炸。
-  await guardRateLimit(
-    env,
-    `forward-verify:user:${user.id}`,
-    10,
-    3600,
-    "转发验证请求过于频繁，请稍后再试"
-  )
+  if (!isAdminApiRequest(request)) {
+    await guardRateLimit(
+      env,
+      `forward-verify:user:${user.id}`,
+      10,
+      3600,
+      "转发验证请求过于频繁，请稍后再试"
+    )
+  }
 
   const code = generateVerifyCode()
   const now = new Date().toISOString()
@@ -584,13 +584,15 @@ async function purgeMailbox(env: Env, mailbox: MailboxRow): Promise<void> {
 export async function createTempMailbox(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
 
-  await guardRateLimit(
-    env,
-    `mailbox:temp:write:${user.id}`,
-    TEMP_WRITE_LIMIT_PER_HOUR,
-    3600,
-    "临时邮箱操作过于频繁"
-  )
+  if (!isAdminApiRequest(request)) {
+    await guardRateLimit(
+      env,
+      `mailbox:temp:write:${user.id}`,
+      TEMP_WRITE_LIMIT_PER_HOUR,
+      3600,
+      "临时邮箱操作过于频繁"
+    )
+  }
 
   const count = await env.DB.prepare(
     "SELECT COUNT(*) AS c FROM mailboxes WHERE user_id = ? AND is_temp = 1"
@@ -598,7 +600,7 @@ export async function createTempMailbox(env: Env, request: Request): Promise<Res
     .bind(user.id)
     .first<{ c: number }>()
 
-  if (!isPrivileged(user.role) && (count?.c ?? 0) >= MAX_TEMP_MAILBOXES_PER_USER) {
+  if (!isAdminApiRequest(request) && !isPrivileged(user.role) && (count?.c ?? 0) >= MAX_TEMP_MAILBOXES_PER_USER) {
     throw new ApiError(
       400,
       `临时邮箱最多同时存在 ${MAX_TEMP_MAILBOXES_PER_USER} 个，请先删除或刷新已有的`,
@@ -665,13 +667,15 @@ export async function refreshTempMailbox(
     throw new ApiError(400, "只有临时邮箱可以刷新地址", "NOT_TEMP_MAILBOX")
   }
 
-  await guardRateLimit(
-    env,
-    `mailbox:temp:write:${user.id}`,
-    TEMP_WRITE_LIMIT_PER_HOUR,
-    3600,
-    "临时邮箱操作过于频繁"
-  )
+  if (!isAdminApiRequest(request)) {
+    await guardRateLimit(
+      env,
+      `mailbox:temp:write:${user.id}`,
+      TEMP_WRITE_LIMIT_PER_HOUR,
+      3600,
+      "临时邮箱操作过于频繁"
+    )
+  }
 
   // 每日刷新次数上限（后台可配，默认 20；0 = 不限）。放在 purge 之前：
   // 超限那次绝不能动旧邮箱，否则用户「今天的刷新额度」被浪费掉、还得再点一次生成。
@@ -961,149 +965,97 @@ export async function batchDeleteMessages(
   return json({ deleted })
 }
 
-// ---- 网页端回信（出站邮件）----
+// ---- 站内互发（不出门，直接落对方收件箱）----
+
+/** 站内互发正文上限（字符）：够写长信，又不至于把 D1 单值撑爆 */
+const MAX_COMPOSE_CHARS = 20_000
+/** 站内互发限流：每人每小时 30 封（防止被当站内垃圾信群发器） */
+const SEND_LIMIT_PER_HOUR = 30
 
 /**
- * 从 `名字 <a@b.com>` / `<a@b.com>` / `a@b.com` 里取出纯地址。
- * 解析不出来就返回空串 —— 调用方据此拒绝，**绝不做任何猜测或兜底**，
- * 免得把信发到一个自己想当然的地址上。
+ * POST /api/mailbox/:id/send —— 站内互发（只发给本站根域邮箱）。
  *
- * ⚠️ 2026-09-25 审计（H3）：原实现只做 `/^[^\s@]+@[^\s@]+\.[^\s@]+$/` 格式校验，
- * 于是两类伪造都能通过：
- *   1. `"victim@good.com" <attacker@evil.com>` —— 界面（含前端 mailto）可能把
- *      display name 里的地址当作收件人展示，而实际发信地址是尖括号里那个。
- *      用户以为在回复 A，其实发给了 B。
- *   2. `a@b.com <c@d.com> x <e@f.com>` —— 多个尖括号组时只取第一个，
- *      一个畸形 From 头就能把回信路由到任意地址。
- * 现在：多个尖括号组一律拒绝；display name 里若出现与尖括号地址**不同**的
- * 邮箱，也一律拒绝（这是「看起来要发给 A、实际发给 B」的典型形态）。
- */
-function extractAddress(raw: string): string {
-  const input = raw ?? ""
-  const angledAll = input.match(/<[^>]*>/g) ?? []
-  // 多个尖括号组 = 畸形 / 伪造，直接拒绝
-  if (angledAll.length > 1) return ""
-
-  const angled = /<([^>]+)>/.exec(input)
-  const candidate = (angled ? angled[1] : input).trim().toLowerCase()
-  if (candidate.length > 254) return ""
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate)) return ""
-
-  // display name 里若另有邮箱且与真实地址不同，视为诱导性伪造
-  if (angled) {
-    const displayName = input.slice(0, angled.index ?? 0)
-    const lookalike = /[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+/.exec(displayName)
-    if (lookalike && lookalike[0].trim().toLowerCase() !== candidate) return ""
-  }
-
-  return candidate
-}
-
-/** 生成回复主题：已有 Re: 前缀就不重复叠加（避免 Re: Re: Re:） */
-function replySubject(subject: string): string {
-  const s = (subject ?? "").trim()
-  if (!s) return "Re: (无主题)"
-  return /^re\s*:/i.test(s) ? s : `Re: ${s}`
-}
-
-/**
- * POST /api/mailbox/:id/messages/:mid/reply —— 以用户自己的域名邮箱身份回信。
+ * 与已移除的「对外发信」的最大区别：这条**不出门**。信不需要经过 SMTP 投递，
+ * 直接把一行存进收件人的收件箱（复用入站 `email-delivery.ts` 的同一条落库口径），
+ * 所以**不需要任何付费的 Cloudflare Email Sending**，立刻可用。
  *
- * 防滥用设计（这是本平台唯一的"对外发信"出口，必须收口）：
- *   1. 只能回**已在自己收件箱里**的邮件（requireMailbox + 反查 mailbox_id）；
- *   2. 收件人只能取自原邮件的发件人，**不接受前端传入** —— 否则就成了开放中继；
- *   3. 禁止回本站域名（防止转发成环把收件箱变成回环放大器）；
- *   4. 每人每小时 20 封（fail-open 限流）；
- *   5. 纯文本正文，不拼 HTML（避免用户输入被当 HTML 渲染）。
+ * 收口设计（务必保持）：
+ *   1. 发件邮箱必须是用户自己的（requireMailbox）；
+ *   2. 收件地址必须是本站已登记的根域（isOwnDomain）—— 只允许站内互发，
+ *      外部地址一律拒绝（否则就成了开放中继）；
+ *   3. 收件邮箱必须**已存在** —— 不存在就报错，与入站同口径（不静默吞信）；
+ *   4. 发件地址由服务端从邮箱推导，**绝不接受前端传入**（否则可伪造发件人）；
+ *   5. 每人每小时 30 封（fail-open 限流）。
+ *
+ * ⚠️ 不会成环：这是**直接落库**，不走 SMTP 转发，A→B 就是往 B 的收件箱插一行，
+ *   不存在「回信又触发发送」的链路。（旧 reply 功能禁回本站域名是为了防 SMTP 转发成环，
+ *   与本路径无关。）
  */
-export async function replyMessage(
+export async function sendInternalMessage(
   env: Env,
   request: Request,
-  mailboxId: string,
-  messageId: string
+  mailboxId: string
 ): Promise<Response> {
   const user = await requireUser(env, request)
   const mailbox = await requireMailbox(env, user, mailboxId)
 
-  if (!isMailerConfigured(env)) {
-    throw new ApiError(
-      503,
-      "邮件发送未配置（缺少 send_email 绑定）",
-      "MAIL_NOT_CONFIGURED"
-    )
-  }
-
-  const row = await env.DB.prepare(
-    "SELECT * FROM messages WHERE id = ? AND mailbox_id = ?"
-  )
-    .bind(messageId, mailbox.id)
-    .first<MessageRow>()
-
-  if (!row) {
-    throw new ApiError(404, "邮件不存在", "NOT_FOUND")
-  }
-
   const body = (await request.json().catch(() => ({}))) as {
-    text?: unknown
+    to?: unknown
     subject?: unknown
+    text?: unknown
   }
+  const to = typeof body.to === "string" ? body.to.trim().toLowerCase() : ""
   const text = typeof body.text === "string" ? body.text.trim() : ""
-  if (!text) {
-    throw new ApiError(400, "回信内容不能为空", "INVALID_INPUT")
-  }
-  if (text.length > MAX_REPLY_CHARS) {
-    throw new ApiError(
-      400,
-      `回信内容过长（上限 ${MAX_REPLY_CHARS} 字）`,
-      "TOO_LARGE"
-    )
-  }
-
-  const to = extractAddress(row.from_address)
-  if (!to) {
-    throw new ApiError(
-      400,
-      "无法识别原邮件的发件地址，请改用真实邮箱回复",
-      "NO_REPLY_TARGET"
-    )
-  }
-  // 判「本站域名」要覆盖全部已登记根域（tyu.me + doulor.cn），只判主域会漏掉新域。
-  if (await isOwnDomain(env, to)) {
-    throw new ApiError(
-      400,
-      "不能回复本站域名邮箱（防止转发成环）",
-      "REPLY_LOOP"
-    )
-  }
-
-  await guardRateLimit(
-    env,
-    `email:reply:user:${user.id}`,
-    REPLY_LIMIT_PER_HOUR,
-    3600,
-    "回信过于频繁"
-  )
-
   const subject =
-    typeof body.subject === "string" && body.subject.trim()
-      ? body.subject.trim().slice(0, 300)
-      : replySubject(row.subject)
+    typeof body.subject === "string" ? body.subject.trim().slice(0, 300) : ""
 
-  const sent = await sendReply(env, {
-    from: mailbox.address,
-    to,
-    subject,
-    text,
-    inReplyTo: row.rfc_message_id ?? null,
-  })
+  if (!text) {
+    throw new ApiError(400, "正文不能为空", "INVALID_INPUT")
+  }
+  if (text.length > MAX_COMPOSE_CHARS) {
+    throw new ApiError(400, `正文过长（上限 ${MAX_COMPOSE_CHARS} 字）`, "TOO_LARGE")
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+    throw new ApiError(400, "收件地址格式不正确", "INVALID_INPUT")
+  }
+  if (!(await isOwnDomain(env, to))) {
+    throw new ApiError(400, "只能发送给本站邮箱", "NOT_INTERNAL")
+  }
+
+  const target = await env.DB.prepare(
+    "SELECT id FROM mailboxes WHERE address = ? COLLATE NOCASE"
+  )
+    .bind(to)
+    .first<{ id: string }>()
+  if (!target) {
+    throw new ApiError(404, "收件人的邮箱不存在", "NOT_FOUND")
+  }
+
+  if (!isAdminApiRequest(request)) {
+    await guardRateLimit(
+      env,
+      `email:send:user:${user.id}`,
+      SEND_LIMIT_PER_HOUR,
+      3600,
+      "发信过于频繁"
+    )
+  }
+
+  // 发件地址固定取发件邮箱本身（服务端推导，前端无从伪造）
+  await env.DB.prepare(
+    `INSERT INTO messages (id, mailbox_id, from_address, subject, text_body, read, received_at, rfc_message_id)
+     VALUES (?, ?, ?, ?, ?, 0, ?, NULL)`
+  )
+    .bind(uuid(), target.id, mailbox.address.slice(0, 320), subject, text, new Date().toISOString())
+    .run()
 
   await audit(
     env,
     user.id,
-    "email.reply",
+    "email.send_internal",
     `${mailbox.address} → ${to}`,
     request.headers.get("CF-Connecting-IP")
   )
 
-  return json({ ok: true, to, subject, messageId: sent.messageId })
+  return json({ ok: true, to })
 }

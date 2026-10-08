@@ -1,11 +1,27 @@
-/** 游标分页：按 (created_at DESC, id DESC) 排序，游标编码上一页最后一条 */
-export function encodeCursor(createdAt: string, id: string): string {
-  return btoa(JSON.stringify({ c: createdAt, i: id }))
+/**
+ * 游标分页：编码上一页最后一条的排序键。
+ *
+ * 「最新」用 (created_at DESC, id DESC)；「最热」还要带上热度值 `h`
+ * —— 否则翻页时无从判断"下一页从哪个热度继续"。
+ * 老游标（只有 c/i）照样能解，缺 `h` 时由调用方按「最热」的兜底值处理。
+ */
+export function encodeCursor(createdAt: string, id: string, hot?: number): string {
+  const payload: Record<string, unknown> = { c: createdAt, i: id }
+  if (typeof hot === "number" && Number.isFinite(hot)) payload.h = hot
+  return btoa(JSON.stringify(payload))
 }
-export function decodeCursor(cursor: string): { createdAt: string; id: string } | null {
+export function decodeCursor(
+  cursor: string
+): { createdAt: string; id: string; hot?: number } | null {
   try {
     const o = JSON.parse(atob(cursor))
-    if (typeof o.c === "string" && typeof o.i === "string") return { createdAt: o.c, id: o.i }
+    if (typeof o.c === "string" && typeof o.i === "string") {
+      return {
+        createdAt: o.c,
+        id: o.i,
+        ...(typeof o.h === "number" && Number.isFinite(o.h) ? { hot: o.h } : {}),
+      }
+    }
   } catch {}
   return null
 }

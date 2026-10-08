@@ -188,11 +188,11 @@ export const en: Record<MessageKey, string> = {
   "landing.tierContribute": "Contribute to unlock",
 
   "landing.f1.title": "Personal subdomain",
-  "landing.f1.p1": "Get yourname.doulor.cn on sign-up",
+  "landing.f1.p1": "Get yourname.tyu.me on sign-up",
   "landing.f1.p2": "Add blog, api and other subdomains",
   "landing.f1.p3": "Multi-level nesting supported",
   "landing.f2.title": "Domain email",
-  "landing.f2.p1": "yourname@doulor.cn created automatically",
+  "landing.f2.p1": "yourname@tyu.me created automatically",
   "landing.f2.p2": "Add multiple addresses",
   "landing.f2.p3": "Forward to your usual inbox",
   "landing.f3.title": "Web inbox",
@@ -234,7 +234,7 @@ export const en: Record<MessageKey, string> = {
     "This is a community-built private cloud: the admin provides domains, email and infrastructure; members contribute resources and share them with each other.",
   "landing.step1.title": "Create an account",
   "landing.step1.desc":
-    "Sign up with an invite code and immediately get yourname.doulor.cn and yourname@doulor.cn. No prerequisites.",
+    "Sign up with an invite code and immediately get yourname.tyu.me and yourname@tyu.me. No prerequisites.",
   "landing.step2.title": "Contribute a resource",
   "landing.step2.desc":
     "Submit something you already have on the Donate page — an AI model channel, a proxy subscription link, or a tunnel config.",
@@ -264,7 +264,7 @@ export const en: Record<MessageKey, string> = {
   // —— Landing · FAQ ——
   "landing.faq1.q": "How do I sign up?",
   "landing.faq1.a":
-    "You need an invite code. After signing up you immediately get yourname.doulor.cn, yourname@doulor.cn, DNS management, the temp share box and a profile card — no extra conditions.",
+    "You need an invite code. After signing up you immediately get yourname.tyu.me, yourname@tyu.me, DNS management, the temp share box and a profile card — no extra conditions.",
   "landing.faq2.q": "Why does a module say it isn't open to me?",
   "landing.faq2.a":
     "Direct-link storage, AI Gateway, tunnels and proxy nodes consume real resources (storage, API quota, bandwidth), so they use “contribute to unlock”: submit one resource and it unlocks automatically once approved. One contribution per module is enough.",
@@ -340,9 +340,11 @@ export const en: Record<MessageKey, string> = {
   "settings.group.api": "API",
   "settings.group.danger": "Danger zone",
   "settings.motion.title": "Interface motion",
-  "settings.motion.desc": "Unified site-wide interaction effects (click sparks, button press, and more). This only controls these new effects — turning it off restores the site exactly as it is now.",
+  "settings.motion.desc": "Unified site-wide interaction effects (tab transitions, dialog enter/exit, button press). Turning it off restores the site exactly as it is now.",
   "settings.motion.toggle": "Enable motion effects",
   "settings.motion.toggleDesc": "Stored in this browser only; not synced to your account.",
+  "settings.motion.spark": "Click sparks",
+  "settings.motion.sparkDesc": "Burst a few short lines at the pointer on click. Off by default; requires motion effects above to be enabled.",
   "settings.profileSectionDesc": "Avatar, nickname and basic account info",
   "s2fa.title": "Two-factor authentication",
   "s2fa.required": "Required",

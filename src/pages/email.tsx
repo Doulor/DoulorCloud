@@ -4,13 +4,13 @@ import { AlertTriangle, CheckCheck, CheckSquare, Copy, Inbox, ListChecks, Loader
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
+import { Textarea } from "@/components/ui/textarea"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
 import {
   Select,
   SelectContent,
@@ -138,6 +138,14 @@ export default function EmailPage() {
   // 添加邮箱
   const [addOpen, setAddOpen] = React.useState(false)
   const [localPart, setLocalPart] = React.useState("")
+
+  // 写邮件（站内互发）：以当前选中邮箱为发件人，发给本站另一个邮箱
+  const [composeOpen, setComposeOpen] = React.useState(false)
+  const [composeTo, setComposeTo] = React.useState("")
+  const [composeSubject, setComposeSubject] = React.useState("")
+  const [composeText, setComposeText] = React.useState("")
+  const [composeBusy, setComposeBusy] = React.useState(false)
+  const [composeError, setComposeError] = React.useState<string | null>(null)
 
   // 转发配置（按邮箱独立弹窗）
   const [forwardBox, setForwardBox] = React.useState<Mailbox | null>(null)
@@ -423,16 +431,33 @@ export default function EmailPage() {
     }
   }
 
-  /**
-   * 回信：以当前邮箱地址发出。
-   * 收件人由服务端从原邮件推导（前端不传，避免这个接口被当成开放中继），
-   * 这里只提交正文。失败时**抛出**给调用方做行内提示 —— 后端会把 Cloudflare
-   * 的失败原因翻成人话（如"请先完成 Email Sending Onboard"），吞掉就会误导用户。
-   */
-  const handleReply = async (text: string) => {
-    if (!selected || !opened) throw new Error(t("em.err.notOpen"))
-    const res = await emailApi.reply(selected.id, opened.id, text)
-    toast.success(t("em.ok.sentTo", { to: res.to }))
+  /** 写邮件：以当前选中邮箱为发件人，站内互发（只发给本站根域邮箱） */
+  const handleSendInternal = async () => {
+    if (!selected || composeBusy) return
+    const to = composeTo.trim()
+    const text = composeText.trim()
+    if (!to || !text) return
+    setComposeBusy(true)
+    setComposeError(null)
+    try {
+      const res = await emailApi.sendInternal(selected.id, {
+        to,
+        subject: composeSubject.trim(),
+        text,
+      })
+      toast.success(t("em.ok.sentInternal", { to: res.to }))
+      // 发完清空并关闭；如果收件人就是自己当前这个邮箱，顺手刷新列表让它立刻出现
+      setComposeOpen(false)
+      setComposeTo("")
+      setComposeSubject("")
+      setComposeText("")
+      if (res.to === selected.address.toLowerCase()) void loadMessages(selected.id)
+    } catch (err) {
+      // 保留内容让用户改完重试（例如收件人写错）
+      setComposeError(err instanceof HttpError ? err.message : t("em.err.send"))
+    } finally {
+      setComposeBusy(false)
+    }
   }
 
   const handleDeleteMessage = async (messageId: string) => {
@@ -674,6 +699,18 @@ export default function EmailPage() {
                 <Badge variant="secondary" className="ml-1">{totalUnread}</Badge>
               </Button>
             )}
+            <Button
+              variant="outline"
+              onClick={() => {
+                setComposeError(null)
+                setComposeOpen(true)
+              }}
+              disabled={!selected}
+              title={t("em.composeOnlyInternal")}
+            >
+              <Send className="h-4 w-4" />
+              {t("em.compose")}
+            </Button>
             <Button onClick={() => setAddOpen(true)} disabled={!canAdd}>
               <Plus className="h-4 w-4" />
               {t("em.addMailbox")}
@@ -873,7 +910,6 @@ export default function EmailPage() {
               }}
               onMarkUnread={() => void handleMarkUnread()}
               onDelete={() => void handleDeleteMessage(opened.id)}
-              onReply={handleReply}
             />
           ) : (
             <div className="overflow-hidden rounded-lg border bg-card">
@@ -1075,6 +1111,74 @@ export default function EmailPage() {
         </DialogContent>
       </Dialog>
 
+      {/* 写邮件（站内互发：只发给本站邮箱，直接落对方收件箱，不需付费通道） */}
+      <Dialog open={composeOpen} onOpenChange={setComposeOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("em.compose")}</DialogTitle>
+            <DialogDescription>
+              {t("em.composeDesc", { from: selected?.address ?? "" })}
+            </DialogDescription>
+          </DialogHeader>
+          <p className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+            <span>{t("em.composeOnlyInternal")}</span>
+          </p>
+          <div className="space-y-2">
+            <Label htmlFor="composeTo">{t("em.composeTo")}</Label>
+            <Input
+              id="composeTo"
+              placeholder={t("em.composeToPh")}
+              value={composeTo}
+              onChange={(e) => setComposeTo(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="composeSubject">{t("em.composeSubject")}</Label>
+            <Input
+              id="composeSubject"
+              value={composeSubject}
+              onChange={(e) => setComposeSubject(e.target.value)}
+              maxLength={300}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="composeText">{t("em.composeBody")}</Label>
+            <Textarea
+              id="composeText"
+              value={composeText}
+              onChange={(e) => setComposeText(e.target.value)}
+              rows={6}
+              maxLength={20000}
+              className="resize-y"
+            />
+          </div>
+          {composeError && (
+            <p className="flex items-start gap-2 text-xs text-destructive">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{composeError}</span>
+            </p>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setComposeOpen(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              onClick={() => void handleSendInternal()}
+              disabled={composeBusy || !composeTo.trim() || !composeText.trim()}
+            >
+              {composeBusy ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+              {t("em.composeSend")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* 转发设置（每个邮箱独立） */}
       <Dialog
         open={forwardBox !== null}
@@ -1230,7 +1334,6 @@ function MailMessageView({
   onBack,
   onMarkUnread,
   onDelete,
-  onReply,
 }: {
   mailbox: Mailbox
   message: MailMessage
@@ -1239,31 +1342,23 @@ function MailMessageView({
   onBack: () => void
   onMarkUnread: () => void
   onDelete: () => void
-  onReply: (text: string) => Promise<void>
 }) {
   const { t } = useT()
   const [replyOpen, setReplyOpen] = React.useState(false)
-  const [replyText, setReplyText] = React.useState("")
-  const [sending, setSending] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
 
   /**
-   * 免付费的「回信」替代路径：用本机邮件客户端回复（mailto）。
+   * 回信走 mailto：点一下把收件人/主题/原文引用填进本机邮件客户端，
+   * 在那边点发送（发件人是用户自己真实邮箱，完全免费、立刻可用）。
    *
-   * 为什么需要：网页直接发信必须先完成 Cloudflare Email Sending 域名 Onboard，
-   * 而那是**付费**功能。没 Onboard 时，直接发送只能发到账户内"已验证的收件地址"，
-   * 给任意外部来信人回信必然失败 —— 与其让用户每次都撞一次错误，
-   * 不如给一个立刻能用的出口：点一下就把收件人/主题/原文引用填进本机邮箱，
-   * 在那边点发送（发件人是用户自己的真实邮箱）。
-   *
-   * 原文引用截断到 ~1200 字：mailto 的 URL 长度在部分客户端有限制。
+   * 曾有一条「网页直接发信」的路径（Cloudflare Email Sending），但它依赖
+   * **付费**的 Email Sending 域名 Onboard；未开通时只能发到账户内已验证地址，
+   * 给任意外部来信人回信必然失败。2026-10-08 站长确认无法开通，已整体移除，
+   * mailto 成为唯一的回信方式。原文引用截断到 ~1200 字：mailto URL 有长度限制。
    */
   /**
-   * ⚠️ 2026-09-25 审计（H3）：这里的解析必须与 Worker 侧
-   * `handlers/email.ts` 的 `extractAddress()` **严格同口径** ——
-   * 前端用 mailto 显示/填入收件人，后端用同一逻辑决定实际发信地址。
-   * 两边规则不一致时，用户看到的是 A、信却发给 B（回复路由劫持）。
-   * 所以同样拒绝：多个尖括号组、以及 display name 里与真实地址不同的邮箱。
+   * 解析原邮件的发件地址（供 mailto 填入收件人）。
+   * 拒绝：多个尖括号组、以及 display name 里与真实地址不同的邮箱
+   * —— 避免「看起来要发给 A、实际发给 B」的伪装。
    */
   const replyToAddress = React.useMemo(() => {
     const input = message.from ?? ""
@@ -1292,24 +1387,6 @@ function MailMessageView({
       : ""
     return `mailto:${replyToAddress}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
   }, [replyToAddress, message.subject, message.body, message.from])
-
-  const handleSend = async () => {
-    const text = replyText.trim()
-    if (!text || sending) return
-    setSending(true)
-    setError(null)
-    try {
-      await onReply(text)
-      // 成功后收起并清空：邮件已经发出，留着草稿会让人以为还没发
-      setReplyText("")
-      setReplyOpen(false)
-    } catch (err) {
-      // 保留正文，让用户可以改完重试（例如先去 Onboard 再回来点一次）
-      setError(err instanceof HttpError ? err.message : t("em.err.sendRetry"))
-    } finally {
-      setSending(false)
-    }
-  }
 
   return (
     <Card>
@@ -1373,71 +1450,38 @@ function MailMessageView({
         )}
 
         {replyOpen && (
-          <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-              <div className="flex items-center gap-2">
-                <Reply className="h-3.5 w-3.5" />
-                {t("em.sendAs.a")}
+          <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <Reply className="h-3.5 w-3.5" />
+              {message.from ? (
+                <>
+                  <span className="font-medium text-foreground">
+                    {mailbox.address}
+                  </span>
+                  <span>{t("em.replyTo")}</span>
+                  <span className="font-medium text-foreground">{message.from}</span>
+                </>
+              ) : (
                 <span className="font-medium text-foreground">{mailbox.address}</span>
-                {t("em.sendAs.b")}
-                {message.from ? (
-                  <>
-                    {t("em.sendAs.to")}
-                    <span className="font-medium text-foreground">{message.from}</span>
-                  </>
-                ) : null}
-              </div>
-              {mailtoHref && (
-                <Button asChild variant="outline" size="sm">
-                  <a href={mailtoHref}>{t("em.useOwnMail")}</a>
-                </Button>
               )}
             </div>
             <p className="text-xs leading-relaxed text-muted-foreground">
-              {t("em.sendNote.a")}
-              <span className="font-medium text-foreground">{t("em.useOwnMail")}</span>
-              {t("em.sendNote.b")}
+              {t("em.mailtoNote")}
             </p>
-            <Textarea
-              value={replyText}
-              onChange={(e) => setReplyText(e.target.value)}
-              placeholder={t("em.replyPlaceholder")}
-              rows={6}
-              maxLength={20000}
-              disabled={sending}
-              className="resize-y bg-background"
-            />
-            {error && (
-              <p className="flex items-start gap-2 text-xs text-destructive">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span>{error}</span>
-              </p>
-            )}
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs text-muted-foreground tabular-nums">
-                {replyText.length} / 20000
-              </span>
-              <div className="flex gap-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setReplyOpen(false)
-                    setError(null)
-                  }}
-                  disabled={sending}
-                >
-                  {t("em.collapse")}
-                </Button>
-                <Button size="sm" onClick={() => void handleSend()} disabled={sending || !replyText.trim()}>
-                  {sending ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
+            <div className="flex items-center justify-end gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setReplyOpen(false)}>
+                {t("em.collapse")}
+              </Button>
+              {mailtoHref ? (
+                <Button asChild size="sm">
+                  <a href={mailtoHref}>
                     <Send className="h-3.5 w-3.5" />
-                  )}
-                  {t("fb.send")}
+                    {t("em.useOwnMail")}
+                  </a>
                 </Button>
-              </div>
+              ) : (
+                <span className="text-xs text-muted-foreground">{t("em.noReplyAddress")}</span>
+              )}
             </div>
           </div>
         )}

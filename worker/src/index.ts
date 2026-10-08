@@ -8,6 +8,7 @@ import * as emailHandlers from "./handlers/email"
 import * as subdomainHandlers from "./handlers/subdomains"
 import * as adminHandlers from "./handlers/admin"
 import * as adminDnsHandlers from "./handlers/admin-dns"
+import * as adminSubdomainHandlers from "./handlers/admin-subdomains"
 import * as adminRootDomainHandlers from "./handlers/admin-root-domains"
 import * as adminChannelHandlers from "./handlers/admin-channels"
 import * as adminPermHandlers from "./handlers/admin-perms"
@@ -48,6 +49,7 @@ import * as twoFactorHandlers from "./handlers/two-factor"
 import * as login2faHandlers from "./handlers/login-2fa"
 import * as checkinHandlers from "./handlers/checkin"
 import * as publicApiHandlers from "./handlers/public-api"
+import { stripInternalHeaders } from "./api-source"
 import * as adminApiHandlers from "./handlers/admin-api"
 import * as eventHandlers from "./handlers/events"
 import * as moderationHandlers from "./handlers/moderation"
@@ -382,6 +384,15 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       adminHandlers.listUsers(env, request),
   },
 
+  // 用户「最近活动」分页（支持查看更多 / 懒加载）
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/users\/([^/]+)\/activity$/),
+    methods: ["GET"],
+    handle: (adminUserActivityMatch: RegExpMatchArray) =>
+      adminHandlers.getUserActivity(env, request, decodeURIComponent(adminUserActivityMatch[1])),
+  },
+
   // ---- 管理员权限系统：权限树 / 权限组 / 成员管理权限 ----
   {
     kind: "exact",
@@ -565,6 +576,15 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       adminHandlers.deleteUser(env, request, decodeURIComponent(adminUserMatch[1])),
   },
 
+  // 管理员为用户重置密码（rootOnly：users.password）
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/users\/([^/]+)\/password$/),
+    methods: ["POST"],
+    handle: (adminUserPwMatch: RegExpMatchArray) =>
+      adminHandlers.setUserPassword(env, request, decodeURIComponent(adminUserPwMatch[1])),
+  },
+
   {
     kind: "regex",
     match: (routePath: string) => routePath.match(/^\/admin\/users\/([^/]+)\/messages\/([^/]+)$/),
@@ -584,6 +604,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "GET",
     handle: () =>
       adminHandlers.listInvites(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/invites\/([^/]+)\/trace$/),
+    methods: ["GET"],
+    handle: (adminInviteTraceMatch: RegExpMatchArray) =>
+      adminHandlers.traceInvite(env, request, decodeURIComponent(adminInviteTraceMatch[1])),
   },
 
   {
@@ -858,6 +886,51 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/admin/channels/enable",
     method: "POST",
     handle: () => adminChannelHandlers.enableChannels(env, request),
+  },
+
+  // ---- 子域名管理（管理面板 → 子域名板块，与 DNS 解析同页）----
+  // 与用户侧 /api/subdomains 是两套：那套只能管自己的域名，这套按 dns
+  // 管理scope鉴权，可代替任意用户增删改（含改名时同步 DNS/名片/网盘/CF）。
+  // ⚠️ 固定路径必须排在 `/admin/subdomains/:id` 正则之前。
+  {
+    kind: "exact",
+    path: "/admin/subdomains/owners",
+    method: "GET",
+    handle: () => adminSubdomainHandlers.searchSubdomainOwners(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/subdomains",
+    method: "GET",
+    handle: () => adminSubdomainHandlers.listAdminSubdomains(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/subdomains",
+    method: "POST",
+    handle: () => adminSubdomainHandlers.createAdminSubdomain(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/subdomains\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (adminSubdomainMatch: RegExpMatchArray) =>
+      adminSubdomainHandlers.updateAdminSubdomain(
+        env,
+        request,
+        decodeURIComponent(adminSubdomainMatch[1])
+      ),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/subdomains\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (adminSubdomainMatch: RegExpMatchArray) =>
+      adminSubdomainHandlers.deleteAdminSubdomain(
+        env,
+        request,
+        decodeURIComponent(adminSubdomainMatch[1])
+      ),
   },
 
   // ---- DNS 解析管理（管理面板 → DNS）----
@@ -1630,17 +1703,13 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       emailHandlers.batchDeleteMessages(env, request, decodeURIComponent(batchDeleteMatch[1])),
   },
 
+  // 站内互发（只发给本站根域邮箱；直接落对方收件箱，不需付费 Email Sending）
   {
     kind: "regex",
-    match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)\/reply$/),
+    match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)\/send$/),
     methods: ["POST"],
-    handle: (messageReplyMatch: RegExpMatchArray) =>
-      emailHandlers.replyMessage(
-      env,
-      request,
-      decodeURIComponent(messageReplyMatch[1]),
-      decodeURIComponent(messageReplyMatch[2])
-      ),
+    handle: (sendMatch: RegExpMatchArray) =>
+      emailHandlers.sendInternalMessage(env, request, decodeURIComponent(sendMatch[1])),
   },
 
   {
@@ -2374,6 +2443,15 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "GET",
     handle: () => eventHandlers.listEvents(env, request),
   },
+  // 历史投票：已结束的投票活动 + 结果（推广页的「历史投票」入口用它）。
+  // ⚠️ 必须排在下面的 /events/:id（regex）之前 —— dispatch 按声明顺序取第一个命中，
+  //    顺序反了这条会被当成 id = "vote-history"，直接 404。
+  {
+    kind: "exact",
+    path: "/events/vote-history",
+    method: "GET",
+    handle: () => eventHandlers.listVoteHistory(env, request),
+  },
   // 单个活动（公开）：活动分享链接 /activity/:id 用它拉数据
   {
     kind: "regex",
@@ -2534,7 +2612,26 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     methods: ["DELETE"],
     handle: (m: RegExpMatchArray) => publicApiHandlers.apiDeleteDns(env, request, decodeURIComponent(m[1])),
   },
-  // 邮箱：列表 / 创建 / 邮件列表 / 邮件内容 / 回复
+  // 子域名：列表 / 创建 / 删除（在站点根域名下开 xxx.doulor.cn）
+  {
+    kind: "exact",
+    path: "/v1/subdomain",
+    method: "GET",
+    handle: () => publicApiHandlers.apiListSubdomain(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/v1/subdomain",
+    method: "POST",
+    handle: () => publicApiHandlers.apiCreateSubdomain(env, request),
+  },
+  {
+    kind: "regex",
+    match: (p: string) => p.match(/^\/v1\/subdomain\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (m: RegExpMatchArray) => publicApiHandlers.apiDeleteSubdomain(env, request, decodeURIComponent(m[1])),
+  },
+  // 邮箱：列表 / 创建 / 删除 / 邮件列表 / 邮件内容 / 回复
   {
     kind: "exact",
     path: "/v1/mailbox",
@@ -2549,15 +2646,21 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   },
   {
     kind: "regex",
-    match: (p: string) => p.match(/^\/v1\/mailbox\/([^/]+)\/messages$/),
-    methods: ["GET"],
-    handle: (m: RegExpMatchArray) => publicApiHandlers.apiListMessages(env, request, decodeURIComponent(m[1])),
+    match: (p: string) => p.match(/^\/v1\/mailbox\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (m: RegExpMatchArray) => publicApiHandlers.apiDeleteMailbox(env, request, decodeURIComponent(m[1])),
   },
   {
     kind: "regex",
-    match: (p: string) => p.match(/^\/v1\/mailbox\/([^/]+)\/messages\/([^/]+)\/reply$/),
-    methods: ["POST"],
-    handle: (m: RegExpMatchArray) => publicApiHandlers.apiReplyMessage(env, request, decodeURIComponent(m[1]), decodeURIComponent(m[2])),
+    match: (p: string) => p.match(/^\/v1\/mailbox\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (m: RegExpMatchArray) => publicApiHandlers.apiDeleteMailbox(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (p: string) => p.match(/^\/v1\/mailbox\/([^/]+)\/messages$/),
+    methods: ["GET"],
+    handle: (m: RegExpMatchArray) => publicApiHandlers.apiListMessages(env, request, decodeURIComponent(m[1])),
   },
   {
     kind: "regex",
@@ -2714,6 +2817,13 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       if (method === "DELETE") return pointHandlers.clearMyProductCodes(env, request, id)
       return null
     },
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/points\/products\/([^/]+)\/purchases$/),
+    methods: ["GET"],
+    handle: (shopPurchasesMatch: RegExpMatchArray) =>
+      pointHandlers.getProductPurchases(env, request, decodeURIComponent(shopPurchasesMatch[1])),
   },
   {
     kind: "regex",
@@ -3659,6 +3769,11 @@ function withD1ReadReplication(env: Env): Env {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     env = withD1ReadReplication(env)
+    // ⚠️ 入口必做的安全动作：剥掉客户端传来的内部标记头。
+    // `X-Doulor-Api-Source` / `X-Doulor-Api-Admin` 只允许 Worker 内部
+    // （public-api 的 runAs）注入；不剥的话，任何人自己加一个
+    // `X-Doulor-Api-Admin: 1` 就能冒充「管理员 Key」，绕过全部限额。
+    request = stripInternalHeaders(request)
     try {
       const url = new URL(request.url)
 

@@ -14,8 +14,11 @@
  *
  * 检查内容：
  *   1. `settings.ts` 里 `SETTING_DEFAULTS` 声明的每个键，
- *      必须在 `worker/src/**` 的**非 settings.ts 文件**里被读取一次
+ *      必须在 `worker/src/**` 里被读取一次
  *      （`getSetting(...)` / `getSettingBool(...)` / `getSettings()` 后取属性）；
+ *      ⚠️ 读取点要求出现在**非 settings.ts 的文件**里，只有一个例外：
+ *      「封装在 settings.ts 内部的 helper」——同一行里既有键字面量、又有 getSetting*
+ *      调用才算（如 `siteOffsetHours()` 读 `site_timezone_offset_hours`）。见下方注释。
  *   2. `app_settings` 的值一律是字符串，因此禁止出现
  *      `getSetting(...) === true` / `=== false` 这类恒假的比较；
  *   3. 声明为「开关」语义（默认值 "0"/"1"）的键，若在 admin 界面里可见，
@@ -115,6 +118,29 @@ for (const file of consumers) {
       }
     })
   }
+}
+
+/**
+ * settings.ts 自身也算一个读取点来源，但**只认一种形态**：同一行里既有键字面量、
+ * 又有 `getSetting` / `getSettingBool` / `getSettingNumber` 调用。
+ *
+ * 为什么需要（2026-10-08）：有些设置项被封装成 settings.ts 内部的 helper 给各处调用
+ * —— `siteOffsetHours()` 读 `site_timezone_offset_hours`，签到 / 每日限额 / 商城限量 /
+ * 统计等十来个地方都走它。键字面量因此只出现在 settings.ts 内部，按上面「非 settings.ts」
+ * 的口径会被误报成「从未读取」。这条假红的坏处很具体：看到红字的人最可能的「修法」
+ * 是把**正在生效**的设置项从 SETTING_DEFAULTS 里删掉。
+ *
+ * ⚠️ 必须同时要求 getSetting* 调用：否则 SETTING_DEFAULTS 里的声明行本身、
+ *    以及将来可能出现的「键名清单」数组都会被算成读取点，这个检查就废了。
+ */
+const settingsLines = settingsSrc.split("\n")
+const isSettingReadCall = /getSetting(?:Bool|Number)?\s*\(/
+for (const { key } of keys) {
+  settingsLines.forEach((line, i) => {
+    if ((line.includes(`"${key}"`) || line.includes(`'${key}'`)) && isSettingReadCall.test(line)) {
+      readSites.get(key).push(`${relative(SRC, SETTINGS_FILE)}:${i + 1}（settings 内 helper）`)
+    }
+  })
 }
 
 // ---- 3. 检查每个键至少有一个读取点 ----

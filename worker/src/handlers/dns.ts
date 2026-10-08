@@ -2,6 +2,7 @@ import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
 import { requireUser } from "../auth"
 import { guardRateLimit } from "../ratelimit"
+import { isAdminApiRequest } from "../api-source"
 import { isApiRequest } from "../api-source"
 import { requireOwnedDomain, assertFqdnOwned } from "../ownership"
 import { zoneIdForFqdn } from "../root-domains"
@@ -321,7 +322,10 @@ export async function createDns(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
   // ⚠️ 2026-09-26 审计：每次调用都会真发一次 Cloudflare API 请求并写一条
   // audit_logs，原先零限流 ⇒ 脚本化调用可刷爆平台 CF 配额。
-  await guardRateLimit(env, `dns:create:user:${user.id}`, 30, 60, "DNS 操作过于频繁，请稍后再试")
+  // 管理员 Key 的公开 API 调用不限速（2026-10-07）
+  if (!isAdminApiRequest(request)) {
+    await guardRateLimit(env, `dns:create:user:${user.id}`, 30, 60, "DNS 操作过于频繁，请稍后再试")
+  }
   const body = (await request.json()) as {
     subdomainId?: string
     name?: string
@@ -455,7 +459,10 @@ export async function createDns(env: Env, request: Request): Promise<Response> {
 
 export async function updateDns(env: Env, request: Request, id: string): Promise<Response> {
   const user = await requireUser(env, request)
-  await guardRateLimit(env, `dns:update:user:${user.id}`, 30, 60, "DNS 操作过于频繁，请稍后再试")
+  // 管理员 Key 的公开 API 调用不限速（2026-10-07）
+  if (!isAdminApiRequest(request)) {
+    await guardRateLimit(env, `dns:update:user:${user.id}`, 30, 60, "DNS 操作过于频繁，请稍后再试")
+  }
   const body = (await request.json()) as {
     name?: string
     type?: string
@@ -595,7 +602,10 @@ export async function updateDns(env: Env, request: Request, id: string): Promise
 
 export async function deleteDns(env: Env, request: Request, id: string): Promise<Response> {
   const user = await requireUser(env, request)
-  await guardRateLimit(env, `dns:delete:user:${user.id}`, 30, 60, "DNS 操作过于频繁，请稍后再试")
+  // 管理员 Key 的公开 API 调用不限速（2026-10-07）
+  if (!isAdminApiRequest(request)) {
+    await guardRateLimit(env, `dns:delete:user:${user.id}`, 30, 60, "DNS 操作过于频繁，请稍后再试")
+  }
 
   const existing = await env.DB.prepare("SELECT * FROM dns_records WHERE id = ?")
     .bind(id)

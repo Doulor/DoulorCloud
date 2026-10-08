@@ -27,6 +27,7 @@ import type {
   TimelineItem,
   GalleryItem,
 } from "./handlers/profile"
+import { designCss, designHtml } from "./profile-design"
 
 /** 正则转义——域名里的点号拼进 RegExp 前必须转义，否则 `t.me` 会匹配 `tXme` */
 function escapeRe(s: string): string {
@@ -378,6 +379,37 @@ const BASE_CSS = `
   --player-cover-radius:8px;
   --gallery-radius:10px;
 }
+/* ---- 用户自定义设计的派生值 ----
+   统一在这里算一次，下面各处只消费结果。
+   每一项都是 var(--pd-x, <主题/基础值>)：用户没设 ⇒ --pd-x 未定义 ⇒ 完全回退，
+   与引入设计系统之前逐像素一致（存量名片不需要数据回填）。 */
+:root{
+  --d-density:var(--pd-density,1);
+  --d-font-scale:var(--pd-font-scale,1);
+  --d-line-height:var(--pd-line-height,1.7);
+  --d-max-width:var(--pd-max-width,460px);
+  --d-avatar-size:var(--pd-avatar-size,var(--avatar-size));
+  --d-name-size:calc(var(--name-size) * var(--pd-name-scale,1));
+  --d-name-weight:var(--pd-name-weight,var(--name-weight));
+  --d-name-ls:var(--pd-name-ls,var(--name-ls));
+  --d-title-transform:var(--pd-title-transform,uppercase);
+  --d-title-ls:var(--pd-title-ls,var(--mod-title-ls));
+  --d-radius:var(--pd-radius,var(--mod-radius,18px));
+  --d-link-radius:var(--pd-radius-sm,var(--link-radius));
+  --d-player-radius:var(--pd-radius-sm,var(--player-radius));
+  --d-gallery-radius:var(--pd-radius-xs,var(--gallery-radius));
+  --d-hover-lift:var(--pd-hover-lift,-2px);
+  /* 模块间距与内边距跟随密度整体缩放 */
+  --d-mod-gap:calc(var(--mod-gap) * var(--d-density));
+  --d-mod-padding:calc(var(--mod-padding,0px) * var(--d-density));
+  /* 配色覆盖 */
+  --d-bg:var(--pd-bg,var(--bg));
+  --d-text:var(--pd-text,var(--text));
+  --d-text-dim:var(--pd-text-dim,var(--text-dim));
+  --d-bg-overlay:var(--pd-bg-overlay,var(--bg-overlay));
+  /* surface 规则里用它当内边距，这样「材质」和「密度」能叠加 */
+  --pd-pad:calc(18px * var(--d-density));
+}
 *{box-sizing:border-box;margin:0;padding:0}
 /* html/body 不设 height:100%：设了之后 body 高度被钉死在视口高，
    而 flex 的 justify-content:center 在内容溢出时会把溢出量**平均分到上下两侧**，
@@ -387,18 +419,19 @@ const BASE_CSS = `
 html,body{height:auto}
 body{
   font-family:var(--font-body);
+  font-size:calc(16px * var(--d-font-scale));
   -webkit-font-smoothing:antialiased;
   display:flex;flex-direction:column;align-items:center;justify-content:safe center;
-  min-height:100vh;min-height:100dvh;padding:28px 22px;
+  min-height:100vh;min-height:100dvh;padding:calc(28px * var(--d-density)) 22px;
   overflow-x:hidden;
-  background:var(--bg);color:var(--text);
+  background:var(--d-bg);color:var(--d-text);
 }
 body::before{
   content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
   background:var(--bg-pattern);background-size:var(--bg-pattern-size);
 }
 a{color:inherit;text-decoration:none}
-.wrap{width:100%;max-width:460px;position:relative;z-index:1}
+.wrap{width:100%;max-width:var(--d-max-width);position:relative;z-index:1}
 
 /* ---- 自动缩放 ----
    为什么用 zoom 而不是 transform:scale：
@@ -410,20 +443,20 @@ a{color:inherit;text-decoration:none}
 
 /* ---- 身份区 ---- */
 .hero{display:flex;flex-direction:column;align-items:center;text-align:center}
-.avatar{width:var(--avatar-size);height:var(--avatar-size);border-radius:var(--avatar-radius);object-fit:cover;display:block;border:var(--avatar-border);box-shadow:var(--avatar-shadow)}
-.avatar-fallback{width:var(--avatar-size);height:var(--avatar-size);border-radius:var(--avatar-radius);display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:600;background:var(--accent);color:#fff;border:var(--avatar-border);box-shadow:var(--avatar-shadow)}
-.name{margin-top:18px;font-family:var(--font-display,var(--font-body)),var(--font-body);font-size:var(--name-size);font-weight:var(--name-weight);letter-spacing:var(--name-ls);color:var(--name-color,var(--text));text-shadow:var(--name-shadow);word-break:break-word}
-.bio{margin-top:10px;font-size:14.5px;line-height:1.7;color:var(--bio-color,var(--text-dim));white-space:pre-wrap;word-break:break-word;max-width:54ch}
+.avatar{width:var(--d-avatar-size);height:var(--d-avatar-size);border-radius:var(--avatar-radius);object-fit:cover;display:block;border:var(--avatar-border);box-shadow:var(--avatar-shadow)}
+.avatar-fallback{width:var(--d-avatar-size);height:var(--d-avatar-size);border-radius:var(--avatar-radius);display:flex;align-items:center;justify-content:center;font-size:calc(var(--d-avatar-size) * .375);font-weight:600;background:var(--accent);color:#fff;border:var(--avatar-border);box-shadow:var(--avatar-shadow)}
+.name{margin-top:18px;font-family:var(--font-display,var(--font-body)),var(--font-body);font-size:var(--d-name-size);font-weight:var(--d-name-weight);letter-spacing:var(--d-name-ls);color:var(--name-color,var(--d-text));text-shadow:var(--name-shadow);word-break:break-word}
+.bio{margin-top:10px;font-size:calc(14.5px * var(--d-font-scale));line-height:var(--d-line-height);color:var(--bio-color,var(--d-text-dim));white-space:pre-wrap;word-break:break-word;max-width:54ch}
 .status-pill{display:inline-flex;align-items:center;gap:6px;margin-top:14px;padding:5px 14px;border-radius:999px;font-size:12.5px;line-height:1.4;
-  background:rgba(var(--accent-rgb),.1);border:1px solid rgba(var(--accent-rgb),.28);color:var(--text)}
+  background:rgba(var(--accent-rgb),.1);border:1px solid rgba(var(--accent-rgb),.28);color:var(--d-text)}
 .status-pill .se{flex-shrink:0}
 .seal{display:none}
 
 /* ---- 模块 ---- */
-.mods{margin-top:var(--mod-gap);display:flex;flex-direction:column;gap:var(--mod-gap)}
-.mod{background:var(--mod-bg,transparent);border:var(--mod-border,none);border-radius:var(--mod-radius,18px);padding:var(--mod-padding,0);box-shadow:var(--mod-shadow,none);
+.mods{margin-top:var(--d-mod-gap);display:flex;flex-direction:column;gap:var(--d-mod-gap)}
+.mod{background:var(--mod-bg,transparent);border:var(--mod-border,none);border-radius:var(--d-radius);padding:var(--d-mod-padding);box-shadow:var(--mod-shadow,none);
   -webkit-backdrop-filter:var(--mod-blur,none);backdrop-filter:var(--mod-blur,none)}
-.mod-title{font-size:var(--mod-title-size);font-weight:600;letter-spacing:var(--mod-title-ls);text-transform:uppercase;color:var(--mod-title-color,var(--text-dim));margin-bottom:14px;display:flex;align-items:center;gap:12px}
+.mod-title{font-size:var(--mod-title-size);font-weight:600;letter-spacing:var(--d-title-ls);text-transform:var(--d-title-transform);color:var(--mod-title-color,var(--d-text-dim));margin-bottom:14px;display:flex;align-items:center;gap:12px}
 .mod-title::after{content:"";flex:1;height:1px;background:var(--mod-title-rule)}
 
 /* 模块宽度（桌面端）。
@@ -432,19 +465,24 @@ a{color:inherit;text-decoration:none}
    ⚠️ 默认必须写成「所有模块先跨满整行，只有设了 half 的才占一列」。
    反过来写（「只有设了 full 的才跨列」）会踩坑：没设宽度的模块身上**没有** data-size 属性，
    不匹配任何规则，于是掉进 grid 的默认行为占 1 列 —— 变成半宽，比改动前更糟。
-   ⚠️ 排除 bento：那个骨架自己把 .mods 设成 display:contents，两列网格由它自己管。 */
+   ⚠️ 排除 bento：那个骨架自己把 .mods 设成 display:contents，两列网格由它自己管。
+   ⚠️ 也排除 masthead/spine/masonry：这三个新骨架（2026-10-07）自带模块排列规则
+   （masthead 双列网格 / spine 交错 flex / masonry 多列流动），不能被套上这层通用网格。 */
 @media(min-width:641px){
-  body:not(.layout-bento) .mods:has(>[data-size]){display:grid;grid-template-columns:1fr 1fr;gap:var(--mod-gap)}
-  body:not(.layout-bento) .mods>.mod{grid-column:1/-1}
-  body:not(.layout-bento) .mods>[data-size="half"]{grid-column:span 1}
+  body:not(.layout-bento):not(.layout-masthead):not(.layout-spine):not(.layout-masonry) .mods:has(>[data-size]){display:grid;grid-template-columns:1fr 1fr;gap:var(--mod-gap)}
+  body:not(.layout-bento):not(.layout-masthead):not(.layout-spine):not(.layout-masonry) .mods>.mod{grid-column:1/-1}
+  body:not(.layout-bento):not(.layout-masthead):not(.layout-spine):not(.layout-masonry) .mods>[data-size="half"]{grid-column:span 1}
 }
 
 /* 联系方式 */
 .links{display:flex;flex-direction:column;gap:10px}
-.link{display:flex;align-items:center;gap:12px;padding:13px 16px;border-radius:var(--link-radius);font-size:14px;
+.link{display:flex;align-items:center;gap:12px;padding:13px 16px;border-radius:var(--d-link-radius);font-size:calc(14px * var(--d-font-scale));
   background:var(--link-bg);border:var(--link-border);color:var(--link-color,inherit);
   transition:transform .16s ease,background .16s ease,border .16s ease,box-shadow .16s ease,color .16s ease;will-change:transform}
+/* 悬停抬升量可调：主题若自己写了 --link-hover-transform（如 none）仍以主题为准，
+   只有用户显式设过 --pd-hover-lift 时才接管。 */
 .link:hover{transform:var(--link-hover-transform);background:var(--link-hover-bg);border:var(--link-hover-border);color:var(--link-hover-color,inherit);box-shadow:var(--link-hover-shadow)}
+body[data-pd-lift] .link:hover{transform:translateY(var(--d-hover-lift))}
 .link svg{width:18px;height:18px;flex-shrink:0}
 .link .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
@@ -896,6 +934,72 @@ body.layout-banner .stats{padding:0 30px}
 body.layout-banner .attribution{padding:0 30px}
 @media(max-width:560px){
   body.layout-banner .avatar-wrap,body.layout-banner .id-text,body.layout-banner .mods,body.layout-banner .stats{padding-left:20px;padding-right:20px}
+}`,
+  /* 刊头：身份区通栏横排做「刊头」，模块在下方双列。
+     皮肤无关 —— 只动结构与间距，颜色/材质仍由主题与设计参数决定。 */
+  masthead: `
+body.layout-masthead .wrap{max-width:920px}
+body.layout-masthead .hero{flex-direction:row;gap:24px;align-items:center;text-align:left;
+  padding-bottom:32px;border-bottom:1px solid rgba(127,127,140,.2)}
+body.layout-masthead .hero .id-text{flex:1;min-width:0}
+body.layout-masthead .hero .name{margin-top:0}
+body.layout-masthead .hero .bio{margin-top:6px}
+body.layout-masthead .hero .status-pill{margin-top:12px}
+body.layout-masthead{--avatar-size:88px}
+@media(min-width:641px){
+  /* 双列默认：模块流式两列，显式设 full 的跨满整行（data-size="half" 与默认同为半宽） */
+  body.layout-masthead .mods{display:grid;grid-template-columns:1fr 1fr;gap:var(--d-mod-gap)}
+  body.layout-masthead .mods>.mod{grid-column:span 1}
+  body.layout-masthead .mods>[data-size="full"]{grid-column:1/-1}
+  /* 只有图片墙强制整宽：它是 3 列图，半宽会被挤坏；其余模块自然两列流动。
+     用 .mods>.mod-gallery 提到与 .mods>.mod 同优先级并靠后，才能压过上面的 span 1。 */
+  body.layout-masthead .mods>.mod-gallery{grid-column:1/-1}
+}
+@media(max-width:640px){
+  body.layout-masthead .hero{flex-direction:column;text-align:center;gap:14px}
+  body.layout-masthead .hero .name{margin-top:0}
+}`,
+  /* 中轴：一条竖轴贯穿，模块在轴两侧左右交错。
+     皮肤无关；轴与圆点用 --accent，背景镂空用 --bg，自动适配任何主题。 */
+  spine: `
+body.layout-spine .wrap{max-width:880px}
+body.layout-spine .hero{align-items:center;text-align:center;margin-bottom:52px}
+body.layout-spine .mods{position:relative}
+body.layout-spine .mods::before{content:"";position:absolute;left:50%;top:0;bottom:0;width:2px;
+  background:linear-gradient(180deg,transparent,var(--accent) 12%,var(--accent) 88%,transparent);
+  transform:translateX(-50%);opacity:.4}
+@media(min-width:641px){
+  body.layout-spine .mod{width:calc(50% - 34px);position:relative}
+  body.layout-spine .mod::before{content:"";position:absolute;top:26px;width:12px;height:12px;border-radius:50%;
+    background:var(--accent);box-shadow:0 0 0 5px var(--d-bg)}
+  body.layout-spine .mod:nth-child(odd){margin-right:auto}
+  body.layout-spine .mod:nth-child(odd)::before{right:-40px}
+  body.layout-spine .mod:nth-child(even){margin-left:auto}
+  body.layout-spine .mod:nth-child(even)::before{left:-40px}
+}
+@media(max-width:640px){
+  body.layout-spine .mods::before{left:8px}
+  body.layout-spine .mod{margin-left:40px}
+  body.layout-spine .mod::before{content:"";position:absolute;top:26px;left:-40px;width:12px;height:12px;border-radius:50%;
+    background:var(--accent);box-shadow:0 0 0 5px var(--d-bg)}
+}`,
+  /* 瀑布流：hero 压成小条置顶，模块按自然高度多列错落流动（CSS columns）。
+     皮肤无关；用 --avatar-size/--name-size 走主题层默认值，设计参数仍可覆盖。 */
+  masonry: `
+body.layout-masonry .wrap{max-width:760px}
+body.layout-masonry{--avatar-size:64px;--name-size:22px}
+body.layout-masonry .hero{flex-direction:row;gap:16px;align-items:center;text-align:left;margin-bottom:30px}
+body.layout-masonry .hero .id-text{flex:1;min-width:0}
+body.layout-masonry .hero .name{margin-top:0}
+body.layout-masonry .hero .bio{margin-top:3px}
+body.layout-masonry .hero .status-pill{margin-top:0;flex-shrink:0}
+@media(min-width:641px){
+  body.layout-masonry .mods{display:block;columns:2;column-gap:var(--d-mod-gap)}
+  body.layout-masonry .mod{break-inside:avoid;margin-bottom:var(--d-mod-gap)}
+}
+@media(max-width:640px){
+  body.layout-masonry .hero{flex-direction:column;text-align:center;gap:12px}
+  body.layout-masonry .hero .name{margin-top:0}
 }`,
 }
 
@@ -1680,9 +1784,36 @@ function renderModule(m: ProfileModule, p: PublicProfile): string {
  * opts.baseHref：编辑器 iframe srcdoc 预览用——srcdoc 是 opaque origin，
  * 相对路径（/p/…、/fonts/…）无法解析，注入 <base> 让资源走绝对地址。
  */
+/**
+ * 编辑器预览专用：接收父窗口 postMessage 来的设计参数 CSS 并就地应用。
+ *
+ * 为什么走 postMessage 而不是父页面直接改 contentDocument：
+ * 预览 iframe 带 `sandbox="allow-scripts allow-popups"`（**故意不含 allow-same-origin**，
+ * 保持隔离），此时 iframe 是 opaque origin ⇒ 父页面拿到的 contentDocument 是 **null**，
+ * 任何直接注入都静默失败。而 contentWindow 是可访问的，postMessage 能跨沙箱送达。
+ * 公开页不注入这段（没人会给它发消息，白带一段脚本）。
+ */
+function previewLiveJs(): string {
+  return `(function(){
+    window.addEventListener('message', function(e){
+      var d = e.data;
+      if (!d || d.type !== 'pd-live') return;
+      var s = document.getElementById('pd-live');
+      if (!s) { s = document.createElement('style'); s.id = 'pd-live'; document.head.appendChild(s); }
+      s.textContent = d.css || '';
+      if (d.lift) document.body.setAttribute('data-pd-lift', '');
+      else document.body.removeAttribute('data-pd-lift');
+      var vg = document.querySelector('.pd-vignette');
+      if (d.vignette) {
+        if (!vg) { vg = document.createElement('div'); vg.className = 'pd-vignette'; document.body.insertBefore(vg, document.body.firstChild); }
+      } else if (vg) { vg.remove(); }
+    });
+  })();`
+}
+
 export function renderProfileHtml(
   p: PublicProfile,
-  opts?: { baseHref?: string }
+  opts?: { baseHref?: string; preview?: boolean }
 ): string {
   const avatar = safeUrl(p.avatar)
   const background = safeUrl(p.background)
@@ -1770,7 +1901,9 @@ export function renderProfileHtml(
     layoutCss(p.layout) +
     fontFaceCss(p.font, origin) +
     effectsCss(fx) +
-    introCss(intro)
+    introCss(intro) +
+    // 用户自定义设计放最后：只输出他真正设过的项，靠后定义覆盖主题默认值
+    designCss(p.design)
 
   const js =
     (faviconRounded ? faviconJs(favicon) : "") +
@@ -1781,7 +1914,8 @@ export function renderProfileHtml(
       p.scaleMode ?? "auto",
       p.scaleMin ?? 50,
       p.scaleManual ?? 100
-    )
+    ) +
+    (opts?.preview ? previewLiveJs() : "")
 
   const baseTag = opts?.baseHref ? `<base href="${esc(opts.baseHref)}">` : ""
 
@@ -1801,8 +1935,9 @@ ${avatar ? `<meta property="og:image" content="${esc(avatar)}">` : ""}
 <meta name="theme-color" content="${esc(p.accent || THEME_DEFAULT_ACCENT[p.theme] || "#6366f1")}">
 <style>${css}</style>
 </head>
-<body class="theme-${esc(p.theme)} layout-${esc(p.layout)} fcjk-${esc(p.cjkFont || "system")}">
+<body class="theme-${esc(p.theme)} layout-${esc(p.layout)} fcjk-${esc(p.cjkFont || "system")}"${p.design?.hoverLift != null ? " data-pd-lift" : ""}>
 ${blurLayer}${bgLayer}
+${designHtml(p.design)}
 ${fxLayer}
 ${introLayer}
 <div class="wrap${wrapVisibleClass}">

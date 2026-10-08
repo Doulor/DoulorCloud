@@ -795,6 +795,18 @@ export async function replyFeedback(env: Env, request: Request): Promise<Respons
   const rewardAmount = Math.floor(Number(body.rewardPoints))
   let reward: { amount: number; balance: number; duplicated: boolean } | null = null
   if (Number.isFinite(rewardAmount) && rewardAmount > 0) {
+    // 🔒 不能给自己的反馈发积分（2026-10-07 站长要求，随权限功能而来）。
+    //
+    // 「回复反馈」现在是一条**权限**（`feedback`），不再是仅管理员可用的能力 ——
+    // 拥有该权限的普通用户如果能给自己的反馈点回复、顺手填一笔奖励，
+    // 就等于**凭空给自己刷积分**（`applyPoints` 是唯一入口，但它只认数额、不认关系）。
+    // 所以这道校验必须放在服务端、且放在发放之前：前端藏输入框拦不住直接调 API 的人。
+    //
+    // 只拦「给自己 + 带奖励」这一种组合：给自己回复（不带奖励）是正常的自留备注，
+    // 别人给奖励也照常。**不做静默忽略** —— 静默会让站长以为奖励发出去了。
+    if (existing.user_id === admin.id) {
+      throw new ApiError(400, "不能给自己提交的反馈发放积分奖励", "INVALID_INPUT")
+    }
     if (rewardAmount > MAX_FEEDBACK_REWARD) {
       throw new ApiError(
         400,

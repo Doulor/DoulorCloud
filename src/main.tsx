@@ -6,7 +6,9 @@ import App from "@/App"
 import { I18nProvider } from "@/i18n"
 import { AuthProvider } from "@/hooks/use-auth"
 import { ErrorBoundary } from "@/components/error-boundary"
+import { ExternalLinkDialog } from "@/components/external-link-dialog"
 import { Toaster } from "@/components/ui/sonner"
+import { ToastCopyMenu } from "@/components/toast-copy-menu"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { reloadOnceForChunkError } from "@/lib/chunk-error"
 import "@/index.css"
@@ -47,7 +49,20 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <TooltipProvider delayDuration={200}>
               <App />
             </TooltipProvider>
+            {/*
+              外链跳转确认弹窗（2026-10-07）。
+              和 Toaster 一样是「全局单例 UI」：Markdown 里的链接点击发生在任意深度，
+              在这里挂**一次**，各处只调 requestExternalLink() 即可
+              （详见 components/external-link-dialog.tsx）。
+            */}
+            <ExternalLinkDialog />
             <Toaster />
+            {/*
+              右下角 toast 的右键复制菜单（2026-10-08 站长要求）。
+              toast 可以左右滑动关闭，选文字会被滑动手势抢走 ⇒ 右键弹出「复制」，
+              把整条通知的标题 + 描述拷进剪贴板。同样挂一次，全局生效。
+            */}
+            <ToastCopyMenu />
           </AuthProvider>
         </BrowserRouter>
       </I18nProvider>

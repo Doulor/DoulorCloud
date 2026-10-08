@@ -271,18 +271,100 @@ export async function adminSetQuota(
 }
 
 /**
+ * rc.41 step-up：换一个**一次性**安全验证凭证（proof）。
+ *
+ * 为什么需要它：new-api 新版把「改用户状态/角色」列为敏感写操作，要求调用方
+ * 先自证身份（`/api/verify`，`method=password`，`scope=admin.user.manage`，
+ * `context={user_id, action}`），拿到一次性 proof 后再带 `X-Security-Proof` 头
+ * 去调 `/api/user/manage`。**proof 与「换它的那个身份」绑定**，所以下面调
+ * manage 时必须用**同一个** `NEWAPI_STEPUP_TOKEN`，不能换成 `NEWAPI_ADMIN_TOKEN`。
+ *
+ * 返回 null 表示「没配 step-up 凭据」（调用方退回老路径）——注意这跟
+ * 「配了但验证失败」不同：后者也返回 null，但会在上游留下失败记录。
+ *
+ * ⚠️ 凭据所属账号不能开 2FA，否则服务端只提供 2FA 动态码方式，密码方式不会被列出。
+ */
+async function acquireSecurityProof(
+  env: Env,
+  scope: string,
+  context: Record<string, unknown>
+): Promise<string | null> {
+  const token = env.NEWAPI_STEPUP_TOKEN?.trim()
+  const password = env.NEWAPI_STEPUP_PASSWORD?.trim()
+  if (!token || !password) return null
+
+  const cfg = await config(env)
+  const res = await fetchWithTimeout(
+    `${cfg.baseUrl}/api/verify`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ method: "password", scope, context, password }),
+    },
+    NEWAPI_TIMEOUT_MS
+  )
+  const text = await res.text()
+  try {
+    const parsed = JSON.parse(text) as { success?: boolean; data?: { proof_token?: string } }
+    const proof = parsed?.data?.proof_token
+    return typeof proof === "string" && proof ? proof : null
+  } catch {
+    return null
+  }
+}
+
+/** 用 step-up 令牌 + 一次性 proof 调一个受保护的管理接口（proof 与身份绑定，必须同一个令牌） */
+async function stepUpFetch(
+  env: Env,
+  method: "POST" | "PUT",
+  path: string,
+  body: unknown,
+  proof: string
+): Promise<Response> {
+  const cfg = await config(env)
+  return fetchWithTimeout(
+    `${cfg.baseUrl}${path}`,
+    {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.NEWAPI_STEPUP_TOKEN?.trim()}`,
+        "X-Security-Proof": proof,
+      },
+      body: JSON.stringify(body),
+    },
+    NEWAPI_TIMEOUT_MS
+  )
+}
+
+/**
  * 管理员启用 / 禁用用户（`POST /api/user/manage` 的 enable / disable）。
  *
  * ⚠️ disable 不仅禁止登录，还会**清掉该用户所有 token 的缓存**，使其
  * 已创建的 API Key 立即失效 —— 这正是「cloud 收回权限 → 中转站 key 失效」
  * 所依赖的机制。
  * 根用户（root）不能被禁用，会返回错误；调用者角色需高于目标用户。
+ *
+ * 2026-10-07：新版 new-api 给这条接口加了 step-up 安全验证（见
+ * `acquireSecurityProof`）。配了 `NEWAPI_STEPUP_*` 时走「换 proof + 带
+ * `X-Security-Proof`」；没配则退回老式令牌直调（在 rc.41 上会因缺少安全验证
+ * 而被拒，调用方会把失败写进审计 —— 这是刻意保留的降级，避免配错时静默失效）。
  */
 export async function adminSetUserStatus(
   env: Env,
   userId: number,
   action: "enable" | "disable"
 ): Promise<void> {
+  const proof = await acquireSecurityProof(env, "admin.user.manage", { user_id: userId, action })
+  if (proof) {
+    const res = await stepUpFetch(env, "POST", "/api/user/manage", { id: userId, action }, proof)
+    await unwrap(res, action === "enable" ? "启用账号" : "禁用账号")
+    return
+  }
+
   const res = await newApiFetch(env, "/api/user/manage", {
     method: "POST",
     body: JSON.stringify({ id: userId, action }),
@@ -304,6 +386,20 @@ export async function adminSetUserPassword(
   username: string,
   password: string
 ): Promise<void> {
+  // ⚠️ 2026-10-07：rc.41 起 `PUT /api/user` **在真正设置密码时**要求 step-up 安全验证
+  //（上游 controller/user.go：`if updatePassword || AdminPermissions != nil { requireAdminUserProof(...) }`；
+  //  只改分组/显示名不触发，所以本文件里的 `adminSetUserGroup` 不受影响）。
+  // 不补这一步的后果非常隐蔽：「开通 / 重新绑定中转站」里是先
+  // `adminSetUserPassword` 再 `login` —— 设密码静默失败 ⇒ 随后用新密码登录必然失败
+  // ⇒ 前端让用户「重新输入密码」，用户输多少遍都没用
+  //（ventus 反馈的「key同步失败 / 输入密码还是不行」就是这个）。
+  const proof = await acquireSecurityProof(env, "admin.user.update", { user_id: userId })
+  if (proof) {
+    const res = await stepUpFetch(env, "PUT", "/api/user", { id: userId, username, password }, proof)
+    await unwrap(res, "设置账号密码")
+    return
+  }
+
   const res = await newApiFetch(env, "/api/user", {
     method: "PUT",
     body: JSON.stringify({

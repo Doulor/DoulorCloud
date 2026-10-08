@@ -2,21 +2,31 @@ import * as React from "react"
 import * as TabsPrimitive from "@radix-ui/react-tabs"
 
 import { cn } from "@/lib/utils"
+import { SlidingPill } from "@/components/motion/sliding-pill"
 
 const Tabs = TabsPrimitive.Root
 
 const TabsList = React.forwardRef<
   React.ElementRef<typeof TabsPrimitive.List>,
   React.ComponentPropsWithoutRef<typeof TabsPrimitive.List>
->(({ className, ...props }, ref) => (
+>(({ className, children, ...props }, ref) => (
   <TabsPrimitive.List
     ref={ref}
     className={cn(
-      "inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground",
+      // relative：给动效层的滑动指示器当定位基准（motion-pill 是 absolute）
+      "relative inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground",
       className
     )}
     {...props}
-  />
+  >
+    {/* 动效层：选中项背景滑块（关=现状：关掉时滑块 display:none，
+        触发器自己的 data-[state=active] 高亮在 CSS 侧被同步还回来） */}
+    <SlidingPill
+      activeSelector='[role="tab"][data-state="active"]'
+      className="rounded-md bg-background shadow"
+    />
+    {children}
+  </TabsPrimitive.List>
 ))
 TabsList.displayName = TabsPrimitive.List.displayName
 

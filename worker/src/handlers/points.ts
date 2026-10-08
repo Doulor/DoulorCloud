@@ -9,6 +9,7 @@
  *   POST   /api/points/products             —— 上架自己的商品（进入待审核）
  *   PUT    /api/points/products/:id         —— 改自己的商品（改完重新待审核）
  *   DELETE /api/points/products/:id         —— 删自己的商品
+ *   GET    /api/points/products/:id/purchases —— 商品公示的购买记录（最近 10 条）
  *   POST   /api/points/orders/:id/deliver   —— 卖家标记订单已交付
  *   POST   /api/points/orders/:id/confirm   —— 买家确认收货（结算积分给卖家）
  *   POST   /api/points/orders/:id/after-sale          —— 买家申请退款（售后）
@@ -81,6 +82,7 @@ import {
   listAfterSaleOrders,
   listOrders,
   listProducts,
+  listPublicPurchases,
   rejectDelivery,
   requestAfterSale,
   reviewProduct,
@@ -412,6 +414,29 @@ export async function deleteMyProduct(
   await deleteUserProduct(env, user.id, id)
   await audit(env, user.id, "points.shop.upload", `${user.username} 删除自己上架的商品 ${id}`)
   return json({ ok: true })
+}
+
+/**
+ * GET /api/points/products/:id/purchases —— 商品**公示出来的**购买记录（最近 10 条）。
+ *
+ * 两个前提都是硬性的：
+ *   · 商品必须开了「公示购买记录」—— 没开就是 404（不是空数组），
+ *     免得前端把「没开公示」画成一块空列表；
+ *   · **必须登录** —— 买家用户名属于个人信息，不交给未登录的匿名访客。
+ *
+ * 返回体只有 `[{ username, createdAt }]`，见 listPublicPurchases 的说明。
+ */
+export async function getProductPurchases(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  await requireUser(env, request)
+  const purchases = await listPublicPurchases(env, id)
+  if (!purchases) {
+    throw new ApiError(404, "该商品未开启购买记录公示", "NOT_FOUND")
+  }
+  return json({ purchases })
 }
 
 // ---- 卖家的卡密池（自己的商品 delivery='code'，2026-10-04 用户商品放开自动发货）----

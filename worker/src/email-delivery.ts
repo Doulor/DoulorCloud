@@ -204,13 +204,14 @@ export async function incomingEmail(
     subject = parsed.subject ?? ""
     if (parsed.from?.address) {
       // ⚠️ 2026-09-25 审计（H3）：显示名里**不能保留尖括号**。
-      // 这里拼出来的是 `from_address` 这一列，而网页端「回信」会用
-      // `extractAddress()` 取其中第一段 `<...>` 当收件人。发件人只要把
-      // From 头写成 `"Foo <attacker@evil.com>" <real@good.com>`，
+      // 这里拼出来的是 `from_address` 这一列，而前端「回信」按钮会用
+      // 同样的规则从中取 `<...>` 里的地址当收件人（填进 mailto）。
+      // 发件人只要把 From 头写成 `"Foo <attacker@evil.com>" <real@good.com>`，
       // 解析后就会拼成 `Foo <attacker@evil.com> <real@good.com>` ——
-      // 用户点「回信」，收件人被静默换成攻击者的地址（前端 mailto: 路径
-      // 更是立刻可用，且用的是用户本人的真实邮箱）。
+      // 用户点「回信」，收件人被静默换成攻击者的地址。
       // 去掉 <> 后，这一列里有且只有一对尖括号 = 真实地址。
+      // （注：后端那条直接发信路径 2026-10-08 已移除，但前端 mailto 仍做同样解析，
+      //   所以这层清洗照旧必要。）
       const safeName = (parsed.from.name ?? "").replace(/[<>]/g, "").trim()
       fromAddress = safeName
         ? `${safeName} <${parsed.from.address}>`
@@ -220,8 +221,8 @@ export async function incomingEmail(
     if (!text && parsed.html) {
       text = htmlToText(parsed.html)
     }
-    // 保存 Message-ID：网页端回信时要靠它写 In-Reply-To，让对方的邮件客户端
-    // 把来回两封归到同一会话。取不到就留 null（回信仍可发送，只是不串会话）。
+    // 保存 Message-ID：用于同一封邮件的去重（同 rfc_message_id 不重复落库）。
+    // 取不到就留 null。
     rfcMessageId = parsed.messageId?.trim() || null
   } catch (err) {
     console.error("邮件解析失败（仍入库）:", err)

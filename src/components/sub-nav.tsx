@@ -33,6 +33,10 @@ export function NavItem({
     <button
       type="button"
       onClick={onClick}
+      // data-nav-active：动效层滑动指示器的定位锚点（SlidingPill 观测它）。
+      // 用独立属性而不是类名：类名是「现状样式」的一部分，属性不参与样式、
+      // 不会影响 motion 关闭时的任何表现。
+      data-nav-active={active ? "1" : undefined}
       className={
         "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-sm transition-colors " +
         (active

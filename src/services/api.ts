@@ -573,6 +573,16 @@ export const adminApi = {
       body: JSON.stringify(payload),
     }),
 
+  /**
+   * 管理员直接为用户设置新密码（rootOnly）。
+   * 后端会哈希入库、清空该用户全部会话与 OAuth 令牌。
+   */
+  setUserPassword: (username: string, password: string) =>
+    request<{ ok: boolean }>(`/admin/users/${encodeURIComponent(username)}/password`, {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    }),
+
   deleteUser: (username: string) =>
     request<void>(`/admin/users/${encodeURIComponent(username)}`, {
       method: "DELETE",

@@ -139,7 +139,7 @@ function DownloadSection() {
     "mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border bg-background shadow-sm transition-colors group-hover:bg-accent"
 
   return (
-    <section id="download" className="py-12 sm:py-16">
+    <section id="download" className="motion-reveal py-12 sm:py-16">
       <div className="mb-10 text-center">
         <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">
           {t("landing.downloadTitle")}
@@ -285,7 +285,7 @@ export default function LandingPage() {
       </section>
 
       {/* 功能网格：每个含能力点 bullet + 开放档位标记 */}
-      <section id="features" className="py-12 sm:py-16">
+      <section id="features" className="motion-reveal py-12 sm:py-16">
         <div className="mb-10 text-center">
           <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">
             {t("landing.featuresTitle")}
@@ -326,7 +326,7 @@ export default function LandingPage() {
       </section>
 
       {/* 如何开始：三步说明贡献解锁模型（导航栏 /#how 指向这里） */}
-      <section id="how" className="py-12 sm:py-16">
+      <section id="how" className="motion-reveal py-12 sm:py-16">
         <div className="mb-10 text-center">
           <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">
             {t("landing.howTitle")}
@@ -353,7 +353,7 @@ export default function LandingPage() {
       </section>
 
       {/* 更新日志 */}
-      <section id="updates" className="py-12 sm:py-16">
+      <section id="updates" className="motion-reveal py-12 sm:py-16">
         <div className="mx-auto max-w-2xl">
           <h2 className="mb-8 text-center text-2xl font-semibold tracking-tight sm:text-3xl">
             {t("landing.updatesTitle")}
@@ -373,7 +373,7 @@ export default function LandingPage() {
       <DownloadSection />
 
       {/* 卖点：为什么选 Doulor Cloud */}
-      <section className="py-12 sm:py-16">
+      <section className="motion-reveal py-12 sm:py-16">
         <div className="mb-10 text-center">
           <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">
             {t("landing.whyTitle")}
@@ -399,7 +399,7 @@ export default function LandingPage() {
       </section>
 
       {/* FAQ */}
-      <section id="faq" className="py-12 sm:py-16">
+      <section id="faq" className="motion-reveal py-12 sm:py-16">
         <div className="mx-auto max-w-2xl">
           <h2 className="mb-8 text-center text-2xl font-semibold tracking-tight sm:text-3xl">
             {t("landing.faq")}
@@ -419,7 +419,7 @@ export default function LandingPage() {
       </section>
 
       {/* 联系社区：QQ 群 + Telegram */}
-      <section id="contact" className="py-12 sm:py-16">
+      <section id="contact" className="motion-reveal py-12 sm:py-16">
         <div className="mx-auto max-w-2xl text-center">
           <h2 className="mb-3 text-2xl font-semibold tracking-tight sm:text-3xl">
             {t("landing.contactTitle")}
@@ -465,7 +465,7 @@ export default function LandingPage() {
       </section>
 
       {/* CTA */}
-      <section className="flex flex-col items-center gap-4 py-16 text-center">
+      <section className="motion-reveal flex flex-col items-center gap-4 py-16 text-center">
         <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">
           {t("landing.ctaTitle")}
         </h2>

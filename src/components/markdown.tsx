@@ -22,20 +22,19 @@ import remarkBreaks from "remark-breaks"
 import { Check, Loader2, Plus } from "lucide-react"
 import { toast } from "sonner"
 import { FunLinkIcon } from "@/components/fun-link-icon"
-import { communityApi, stickerApi, errMsg } from "@/services/api"
+import { stickerApi, errMsg } from "@/services/api"
 import { GitHubMark, isGitHubUrl } from "@/components/github-mark"
 import { useAuth } from "@/hooks/use-auth"
-import { useT, tStatic } from "@/i18n"
+import { useT } from "@/i18n"
+import { hostOf, loadLinkPreview, peekLinkPreview } from "@/lib/link-preview"
+import { requestExternalLink } from "@/components/external-link-dialog"
 import { ImageLightbox } from "@/components/image-lightbox"
 import type { LinkPreview } from "@/types"
-
-/** 链接预览的模块级缓存：同一链接在同一页面只请求一次 */
-const previewCache = new Map<string, LinkPreview | null>()
 
 /** 链接卡片：异步拉取预览，渲染标题/描述/缩略图；拿不到则回退普通链接 */
 function LinkCard({ href }: { href: string }) {
   const [preview, setPreview] = React.useState<LinkPreview | null | undefined>(
-    previewCache.get(href)
+    peekLinkPreview(href)
   )
   /** og:image 加载失败时回退到站点图标（别留一块空白把文字挤到左边） */
   const [imageFailed, setImageFailed] = React.useState(false)
@@ -51,19 +50,14 @@ function LinkCard({ href }: { href: string }) {
   }, [imageUrl])
 
   React.useEffect(() => {
-    if (previewCache.has(href)) return
+    // 缓存里已有（含「查过但拿不到」的 null）就不再请求。
+    // 缓存与去重都在 lib/link-preview.ts —— 与「外链确认弹窗」共用同一份，
+    // 所以同一条链接在正文卡片和弹窗里只会真正抓取一次。
+    if (peekLinkPreview(href) !== undefined) return
     let cancelled = false
-    communityApi
-      .linkPreview(href)
-      .then((r) => {
-        const v = r.preview
-        previewCache.set(href, v)
-        if (!cancelled) setPreview(v)
-      })
-      .catch(() => {
-        previewCache.set(href, null)
-        if (!cancelled) setPreview(null)
-      })
+    void loadLinkPreview(href).then((v) => {
+      if (!cancelled) setPreview(v)
+    })
     return () => {
       cancelled = true
     }
@@ -142,15 +136,9 @@ function LinkCard({ href }: { href: string }) {
   )
 }
 
-function hostOf(url: string): string {
-  try {
-    return new URL(url).hostname
-  } catch {
-    return url
-  }
-}
-
-/** 判断 props 是不是「裸链接」（children 就是 href 本身，无其它文字） */
+/**
+ * 判断 props 是不是「裸链接」（children 就是 href 本身，无其它文字）
+ */
 function isBareLink(href: string, children: React.ReactNode): boolean {
   // 裸链接的 children 通常是单个字符串，且内容等于 href（或去掉协议后的形式）
   if (typeof children !== "string") return false
@@ -164,6 +152,10 @@ function isBareLink(href: string, children: React.ReactNode): boolean {
  * 外链二次确认（用户反馈 5f489c9a）：正文里的链接点击后先弹一次确认，
  * 避免误点直接跳走；确认后在**新标签页**打开，当前页不丢。
  * 站内/相对链接（无 http(s) 前缀或同源）不拦。
+ *
+ * 2026-10-07：确认框从**浏览器原生 confirm** 换成站内风格弹窗
+ * （见 components/external-link-dialog.tsx），并在弹窗里给出目标页的 OG 预览 ——
+ * 原生 confirm 只有一行域名，用户其实无从判断"对面是什么"。
  */
 function guardExternalClick(e: React.MouseEvent, href: string): void {
   if (!/^https?:\/\//i.test(href)) return
@@ -175,9 +167,7 @@ function guardExternalClick(e: React.MouseEvent, href: string): void {
   }
   if (!external) return
   e.preventDefault()
-  if (window.confirm(tStatic("link.leaveConfirm", { host: hostOf(href) }))) {
-    window.open(href, "_blank", "noopener,noreferrer")
-  }
+  requestExternalLink(href)
 }
 
 /** 链接渲染：裸链接走卡片，行内链接保持普通样式 */

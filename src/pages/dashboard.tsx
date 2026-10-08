@@ -76,6 +76,7 @@ import {
 import { useAuth } from "@/hooks/use-auth"
 import { useT, tStatic } from "@/i18n"
 import { UserAvatar } from "@/components/user-avatar"
+import { CountUp } from "@/components/motion/count-up"
 import type {
   Announcement,
   MeResponse,
@@ -727,7 +728,8 @@ const ResourceBadges = React.memo(function ResourceBadges({
               <Skeleton className="h-5 w-8" />
             ) : (
               <p className="animate-in fade-in duration-300 text-lg font-semibold leading-none tracking-tight">
-                {it.value}
+                {/* 动效层：数字滚动（关=现状：直接显示终值） */}
+                <CountUp value={it.value} />
               </p>
             )}
             <p className="mt-1 text-xs text-muted-foreground">{it.label}</p>

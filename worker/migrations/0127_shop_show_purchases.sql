@@ -1,0 +1,17 @@
+-- 商品「公示购买记录」开关（2026-10-08 站长要求）
+--
+-- 站长希望能在商品设置里勾选「是否公示购买记录」：开启后，用户在商品详情弹窗里
+-- 能看到这件商品最近 10 条购买记录（买家用户名 + 购买时间），用来做「有人买过」的
+-- 信任背书。
+--
+-- 默认 0（不公示）—— 买家用户名属于个人信息，必须由站长逐件显式开启，
+-- 不能因为加了这一列就默认把历史订单的买家名字公开出去。
+--
+-- 读点：
+--   · points-shop.ts 的 rowToProduct / sanitizeProductInput（读 / 写）
+--   · points-shop.ts 的 listPublicPurchases（只在 show_purchases = 1 时返回记录）
+--
+-- 执行方式（线上不跑 migrations apply）：先建结构，再部署后端。
+--   npx wrangler d1 execute doulor-mail --remote --config wrangler.toml \
+--     --file=./migrations/0127_shop_show_purchases.sql
+ALTER TABLE point_products ADD COLUMN show_purchases INTEGER NOT NULL DEFAULT 0;

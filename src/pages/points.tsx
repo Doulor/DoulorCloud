@@ -57,6 +57,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { pointsApi, errMsg, HttpError } from "@/services/api"
+import { SectionEnter } from "@/components/motion/section-enter"
 import { useAuth } from "@/hooks/use-auth"
 import { PRODUCT_CATEGORY_LABELS, type ProductCategory } from "@/types"
 import { notifyPointsChanged } from "@/components/points-badge"
@@ -71,6 +72,7 @@ import type {
   PointOrder,
   PointProduct,
   PointsOverview,
+  PublicPurchase,
   UserProductPayload,
 } from "@/types"
 
@@ -745,6 +747,14 @@ export default function PointsPage() {
   const [buyTarget, setBuyTarget] = React.useState<PointProduct | null>(null)
   /** 商品详情弹窗（用户反馈 4b720eeb：标题/描述过长在卡片里看不全） */
   const [detailTarget, setDetailTarget] = React.useState<PointProduct | null>(null)
+  /**
+   * 详情弹窗里的「购买记录」（2026-10-08 站长要求）。
+   *
+   * 三态要分清：`null` = 这件商品没开公示（不渲染这块）/ 还没加载完，
+   * `[]` = 开了公示但还没人买（渲染一句「暂无」）。后端对「没开公示」
+   * 返回的是 404 而不是空数组，正是为了能区分这两种情况。
+   */
+  const [detailPurchases, setDetailPurchases] = React.useState<PublicPurchase[] | null>(null)
   const [buyBusy, setBuyBusy] = React.useState(false)
 
   // 我的商品 / 收到的订单
@@ -810,6 +820,33 @@ export default function PointsPage() {
   React.useEffect(() => {
     void load()
   }, [load])
+
+  /**
+   * 商品详情弹窗打开时拉一次「购买记录」（仅当该商品开了公示）。
+   *
+   * ⚠️ 失败一律**静默**：商品没开公示时后端返回的就是 404，
+   *    那是正常情况（详情里本就不该有这一块），弹 toast 反而像出错。
+   *    拉不到就保持 null → 不渲染。
+   */
+  React.useEffect(() => {
+    const target = detailTarget
+    if (!target || !target.showPurchases) {
+      setDetailPurchases(null)
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await pointsApi.productPurchases(target.id)
+        if (!cancelled) setDetailPurchases(res.purchases)
+      } catch {
+        if (!cancelled) setDetailPurchases(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [detailTarget])
 
   const yuanPerPoint = data?.config.yuanPerPoint ?? 1
   const balance = data?.balance ?? 0
@@ -1053,6 +1090,9 @@ export default function PointsPage() {
       // （合并 origin/main 时补的：`soldCount` 是本地给 PointProduct 新增的字段，
       //  远程的预览构造器还不知道它，两边合起来才缺）
       soldCount: 0,
+      // 用户自己上架的商品没有「公示购买记录」开关（那是管理员在商品设置里逐件开的，
+      // 且刚发布时本来也还没有任何购买记录），预览里恒为 false
+      showPurchases: false,
       perUserLimit: null,
       // 用户商品交付方式固定为人工
       delivery: "manual",
@@ -1772,7 +1812,12 @@ export default function PointsPage() {
                 description={t("pt.userShopEmptyDesc")}
               />
             ) : (
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              /* 动效层：分类/排序/筛选/翻页变化时整组卡片重新错峰入场
+                 （开关关闭时类还在但规则不命中，行为与现状一致） */
+              <SectionEnter
+                watch={`${shopCat}|${shopSort}|${shopStockOnly}|${shopPageSafe}`}
+                className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"
+              >
                 {pagedUserProducts.map((p) => (
                   <ProductCard
                     key={p.id}
@@ -1783,7 +1828,7 @@ export default function PointsPage() {
                     onDetail={setDetailTarget}
                   />
                 ))}
-              </div>
+              </SectionEnter>
             )}
 
             {/* 分页：每页 9 个（3 列 × 3 行），只有一页时不显示 */}
@@ -2213,6 +2258,32 @@ export default function PointsPage() {
                 </p>
               ) : (
                 <p className="text-sm text-muted-foreground">{t("pt.detailNoDesc")}</p>
+              )}
+
+              {/* 购买记录公示（2026-10-08 站长要求）：只有商品开了公示才有内容 ——
+                  没开时后端返回 404，detailPurchases 保持 null，这里整块不渲染。 */}
+              {detailPurchases && (
+                <div className="space-y-2 rounded-md border p-3">
+                  <p className="text-sm font-medium">{t("pt.purchasesTitle")}</p>
+                  {detailPurchases.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">{t("pt.purchasesEmpty")}</p>
+                  ) : (
+                    <ul className="space-y-1.5">
+                      {detailPurchases.map((p, i) => (
+                        <li
+                          key={`${p.username}-${p.createdAt}-${i}`}
+                          className="flex items-baseline justify-between gap-3 text-xs"
+                        >
+                          <span className="min-w-0 truncate font-medium">{p.username}</span>
+                          <span className="shrink-0 tabular-nums text-muted-foreground">
+                            {fmtDateTime(p.createdAt)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="text-[11px] text-muted-foreground">{t("pt.purchasesHint")}</p>
+                </div>
               )}
             </div>
           )}

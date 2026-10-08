@@ -1,5 +1,5 @@
 import { ApiError, json } from "../http"
-import { uuid } from "../crypto"
+import { uuid, hashPassword } from "../crypto"
 import { requireUser, isPrivileged, isAnyAdmin, isRoot } from "../auth"
 import {
   parseAdminScope,
@@ -45,6 +45,7 @@ import {
 } from "../identity"
 import { listReservedSubdomains } from "../reserved-names"
 import { getSettingNumber } from "../settings"
+import { revokeAllUserTokens } from "../oauth-provider"
 // 帖子分类的归一化：与读取侧（community.ts 的 postCategoryDefs）用同一份实现，
 // 避免「存进去的规则」和「读出来的规则」分家 —— 那种不一致极难排查。
 import { parsePostCategories } from "./community"
@@ -1060,6 +1061,67 @@ export async function updateUser(env: Env, request: Request, username: string): 
 
   const updated = await targetUser(env, username)
   return json(await userDetail(env, updated))
+}
+
+/**
+ * POST /api/admin/users/:username/password —— 管理员直接为用户设置一个新密码。
+ *
+ * 用途：用户忘记密码又收不到找回邮件（邮箱填错 / 邮箱不可用）时，由站长代为重置，
+ * 用户拿新密码登录后自行修改。
+ *
+ * 收口（都是刻意的，别松）：
+ *   1. 只有 root 能做（权限节点 `users.password` 标了 rootOnly）—— 改密码等于接管账号，
+ *      和「重置二次认证」同级，不能开放给普通管理员；
+ *   2. 密码走同一套 `hashPassword`（pbkdf2），**绝不明文入库**；
+ *   3. 重置后**清空该用户全部会话 + 撤销全部 OAuth 令牌** —— 否则旧会话（可能是
+ *      攻击者的）还能继续用，等于没改；
+ *   4. 记审计日志（谁在什么时候给谁重置了密码）。
+ *
+ * ⚠️ 不校验旧密码：管理员场景本来就不该知道用户的旧密码。
+ */
+export async function setUserPassword(
+  env: Env,
+  request: Request,
+  username: string
+): Promise<Response> {
+  const operator = await requireAdminScope(env, request, "users.password")
+
+  const body = (await request.json().catch(() => ({}))) as { password?: unknown }
+  const password = typeof body.password === "string" ? body.password : ""
+  if (password.length < 8) {
+    throw new ApiError(400, "新密码至少需要 8 位", "WEAK_PASSWORD")
+  }
+  if (password.length > 200) {
+    throw new ApiError(400, "密码过长", "INVALID_INPUT")
+  }
+
+  const user = await targetUser(env, username)
+  // root 账户即便对站长自己也不允许在这里改（避免误操作把自己锁出去）；
+  // 站长改自己的密码走「设置」页的正常改密流程。
+  if (user.role === "root") {
+    throw new ApiError(403, "站长账户的密码请在本人的设置页修改", "FORBIDDEN")
+  }
+
+  const now = new Date().toISOString()
+  await env.DB.prepare(
+    "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?"
+  )
+    .bind(await hashPassword(password), now, user.id)
+    .run()
+
+  // 旧会话与令牌全部作废：改密码的意义就在于把别人踢下线
+  await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(user.id).run()
+  await revokeAllUserTokens(env, user.id)
+
+  await recordAudit(
+    env,
+    operator.id,
+    "user.password.admin_set",
+    `为 ${user.username} 重置了密码`,
+    request.headers.get("CF-Connecting-IP")
+  )
+
+  return json({ ok: true })
 }
 
 // DELETE /api/admin/users/:username —— 删除用户（级联 + 回收外部资源）

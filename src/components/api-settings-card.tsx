@@ -24,6 +24,7 @@ const FEATURE_LABEL_KEY: Record<string, string> = {
   dns: "apiset.featureDns",
   mailbox: "apiset.featureMailbox",
   temp_mailbox: "apiset.featureTempMailbox",
+  subdomain: "apiset.featureSubdomain",
 }
 
 /** 接口文档（按功能分组；以后加功能这里同步登记 + 后端 public-api.ts 加路由） */
@@ -38,10 +39,19 @@ const API_GROUPS = [
     ],
   },
   {
+    labelKey: "apiset.groupSubdomain",
+    endpoints: [
+      { method: "GET", path: "/api/v1/subdomain", descKey: "apiset.epSubList" },
+      { method: "POST", path: "/api/v1/subdomain", descKey: "apiset.epSubCreate" },
+      { method: "DELETE", path: "/api/v1/subdomain/:id", descKey: "apiset.epSubDelete" },
+    ],
+  },
+  {
     labelKey: "apiset.groupMailbox",
     endpoints: [
       { method: "GET", path: "/api/v1/mailbox", descKey: "apiset.epMailboxList" },
       { method: "POST", path: "/api/v1/mailbox", descKey: "apiset.epMailboxCreate" },
+      { method: "DELETE", path: "/api/v1/mailbox/:id", descKey: "apiset.epMailboxDelete" },
       { method: "GET", path: "/api/v1/mailbox/:id/messages", descKey: "apiset.epMailboxMessages" },
       { method: "GET", path: "/api/v1/mailbox/:id/messages/:mid", descKey: "apiset.epMailboxMessage" },
       { method: "POST", path: "/api/v1/mailbox/:id/messages/:mid/reply", descKey: "apiset.epMailboxReply" },
@@ -70,8 +80,12 @@ export function ApiSettingsCard() {
     prefix: string | null
     createdAt: string | null
     lastUsedAt: string | null
+    isAdmin: boolean
+    canCreateAdminKey: boolean
   } | null>(null)
   const [newKey, setNewKey] = React.useState<string | null>(null)
+  const [newKeyIsAdmin, setNewKeyIsAdmin] = React.useState(false)
+  const [wantAdmin, setWantAdmin] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
 
   const load = React.useCallback(async () => {
@@ -91,8 +105,9 @@ export function ApiSettingsCard() {
   const generate = async () => {
     setBusy(true)
     try {
-      const res = await publicApi.generateKey()
+      const res = await publicApi.generateKey(wantAdmin)
       setNewKey(res.apiKey)
+      setNewKeyIsAdmin(res.isAdmin)
       await load()
     } catch (err) {
       toast.error(errMsg(err, t("apiset.genFailed")))
@@ -144,7 +159,10 @@ export function ApiSettingsCard() {
           <div className="space-y-3">
             <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              <span>{t("apiset.keyWarn")}</span>
+              <span>
+                {t("apiset.keyWarn")}
+                {newKeyIsAdmin ? <span className="mt-1 block font-medium">{t("apiset.adminKeyWarn")}</span> : null}
+              </span>
             </div>
             <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-3">
               <code className="min-w-0 flex-1 break-all font-mono text-sm">{newKey}</code>
@@ -159,33 +177,58 @@ export function ApiSettingsCard() {
         ) : (
           <>
             {/* Key 区 */}
-            <div className="flex items-center justify-between rounded-md border p-3">
-              <div className="flex items-center gap-2 text-sm">
-                <KeyRound className="h-4 w-4 text-muted-foreground" />
+            <div className="space-y-2">
+              <div className="flex items-center justify-between rounded-md border p-3">
+                <div className="flex items-center gap-2 text-sm">
+                  <KeyRound className="h-4 w-4 text-muted-foreground" />
+                  {keyStatus.hasKey ? (
+                    <span className="flex items-center gap-2">
+                      {t("apiset.hasKey")} <code className="font-mono">{keyStatus.prefix}…</code>
+                      {keyStatus.isAdmin ? (
+                        <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[11px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
+                          {t("apiset.adminBadge")}
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : (
+                    <span>{t("apiset.noKey")}</span>
+                  )}
+                </div>
                 {keyStatus.hasKey ? (
-                  <span>
-                    {t("apiset.hasKey")} <code className="font-mono">{keyStatus.prefix}…</code>
-                  </span>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="outline" disabled={busy} onClick={() => void generate()}>
+                      <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                      {t("apiset.reset")}
+                    </Button>
+                    <Button size="sm" variant="ghost" disabled={busy} onClick={() => void remove()}>
+                      <Trash2 className="mr-1 h-3.5 w-3.5 text-destructive" />
+                      {t("common.delete")}
+                    </Button>
+                  </div>
                 ) : (
-                  <span>{t("apiset.noKey")}</span>
+                  <Button size="sm" disabled={busy} onClick={() => void generate()}>
+                    {t("apiset.generate")}
+                  </Button>
                 )}
               </div>
-              {keyStatus.hasKey ? (
-                <div className="flex gap-2">
-                  <Button size="sm" variant="outline" disabled={busy} onClick={() => void generate()}>
-                    <RefreshCw className="mr-1 h-3.5 w-3.5" />
-                    {t("apiset.reset")}
-                  </Button>
-                  <Button size="sm" variant="ghost" disabled={busy} onClick={() => void remove()}>
-                    <Trash2 className="mr-1 h-3.5 w-3.5 text-destructive" />
-                    {t("common.delete")}
-                  </Button>
-                </div>
-              ) : (
-                <Button size="sm" disabled={busy} onClick={() => void generate()}>
-                  {t("apiset.generate")}
-                </Button>
-              )}
+
+              {/* 管理员 Key 开关：只对超级管理员 / root 显示（普通 admin 不给） */}
+              {keyStatus.canCreateAdminKey ? (
+                <label className="flex cursor-pointer items-start gap-2 rounded-md border border-violet-200 bg-violet-50/60 p-3 text-xs dark:border-violet-900 dark:bg-violet-950/30">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-3.5 w-3.5 accent-violet-600"
+                    checked={wantAdmin}
+                    onChange={(e) => setWantAdmin(e.target.checked)}
+                  />
+                  <span>
+                    <span className="font-medium text-violet-800 dark:text-violet-200">
+                      {t("apiset.adminKeyTitle")}
+                    </span>
+                    <span className="mt-0.5 block text-muted-foreground">{t("apiset.adminKeyHint")}</span>
+                  </span>
+                </label>
+              ) : null}
             </div>
 
             {/* 我的层级额度 */}

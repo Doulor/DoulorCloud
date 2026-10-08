@@ -778,6 +778,12 @@ export default function AdminPage() {
   // 用户详情里的网盘配额编辑（单位 MB，与「单文件上限」同口径，避免站长手算字节）
   const [storageQuotaMbDraft, setStorageQuotaMbDraft] = React.useState("")
   const [storageQuotaBusy, setStorageQuotaBusy] = React.useState(false)
+
+  // 「重置密码」弹窗（rootOnly）：输入新密码 → 提交
+  const [pwOpen, setPwOpen] = React.useState(false)
+  const [pwValue, setPwValue] = React.useState("")
+  const [pwShow, setPwShow] = React.useState(false)
+  const [pwBusy, setPwBusy] = React.useState(false)
   /** 「把存量用户配额刷成所属桶配额」的进行中标记 */
   const [syncQuotaBusy, setSyncQuotaBusy] = React.useState(false)
 

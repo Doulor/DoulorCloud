@@ -400,6 +400,43 @@ export interface AdminInvite {
   permissions: Permissions
   createdAt: string
   createdBy: string | null
+  /** 创建者用户名（列表接口 LEFT JOIN 带出；老数据为 null） */
+  createdByName?: string | null
+}
+
+/** 邀请码溯源：谁建的、什么时候建的、谁用了、什么时候用的 */
+export interface AdminInviteTrace {
+  invite: {
+    id: string
+    code: string
+    maxUses: number
+    usedCount: number
+    expiresAt: string | null
+    permissions: Permissions
+    createdAt: string
+  }
+  creator: {
+    id: string
+    username: string
+    email: string
+    uid: number | null
+    status: string
+    role: string
+    createdAt: string
+    registerIp: string | null
+  } | null
+  users: {
+    id: string
+    username: string
+    email: string
+    uid: number | null
+    status: string
+    role: string
+    usedAt: string
+    registerIp: string | null
+  }[]
+  /** 至少 2 个账号共用的注册 IP（一人多号信号） */
+  sharedIps: { ip: string; names: string[] }[]
 }
 
 export interface AdminUserDetail {
@@ -1066,6 +1103,11 @@ export interface Profile {
   scaleManual: number
   contacts: ProfileContact[]
   modules: ProfileModule[]
+  /**
+   * 设计系统参数（`{}` = 完全跟随主题）。字段名与后端 ProfileDesign 同源；
+   * 前端只读/全量写，不逐项校验（校验在服务端 sanitizeDesign）。
+   */
+  design: Record<string, unknown>
   subdomainId: string | null
   fqdn: string | null
   profilePath: string
@@ -1562,6 +1604,30 @@ export interface ReservedSubdomain {
   name: string
   note: string | null
   createdAt: string
+}
+
+// ---- 子域名管理（管理面板 → 子域名板块） ----
+
+export interface AdminSubdomain {
+  id: string
+  name: string
+  fqdn: string
+  parentId: string | null
+  parentFqdn: string | null
+  status: string
+  /** 该域名下直接挂的 DNS 记录数（不含子子域名的） */
+  recordCount: number
+  createdAt: string
+  owner: { id: string; username: string; email: string; status: string }
+}
+
+export interface AdminSubdomainListResponse {
+  subdomains: AdminSubdomain[]
+  total: number
+  page: number
+  pageSize: number
+  /** 代建一级子域名时可选的根域（已启用） */
+  rootDomains: { name: string; label: string }[]
 }
 
 // ---- 捐献 ----
@@ -2107,8 +2173,34 @@ export interface CommunityAuthor {
   customTitle: CustomTitle | null
 }
 
-/** 帖子分类（2026-10-03）：闲聊 / 求助 / 资源共享 */
-export type PostCategory = "chat" | "help" | "resource"
+/**
+ * 帖子分类（**管理面板可配**，2026-10-07 起）。
+ *
+ * ⚠️ 不再是 `"chat" | "help" | "resource"` 这种联合字面量：分类由后端的
+ * `post_categories` 设置决定，前端只能从 `/community/config` 拿列表，
+ * 类型层面无法穷举 —— 所以是 string。**显示名一律走列表查表，别在别处写死。**
+ */
+export type PostCategory = string
+
+/** 一个帖子分类的定义（`/community/config` 下发） */
+export interface PostCategoryDef {
+  /** 存进 `posts.category` 的值；管理员建立后不应修改 */
+  key: string
+  /** 中文显示名 */
+  zh: string
+  /** 英文显示名 */
+  en: string
+  /** 标记为「水帖 / 低质」类：广场的「不看水帖」筛掉的就是它们 */
+  water?: boolean
+}
+
+/** 社区配置 */
+export interface CommunityConfig {
+  guestAccess: boolean
+  enabled: boolean
+  /** 当前生效的帖子分类（按管理员配置的顺序，第一项是发帖默认值） */
+  categories: PostCategoryDef[]
+}
 
 /** 广场列表里展示的高赞评论预览 */
 export interface PostTopComment {
@@ -2132,7 +2224,7 @@ export interface Post {
   isMine: boolean
   /** 管理员置顶（2026-10-01）；置顶的排在广场最前 */
   pinned: boolean
-  /** 帖子分类：chat（闲聊）/ help（求助）/ resource（资源共享） */
+  /** 帖子分类（key，取值来自 /community/config 的 categories） */
   category?: PostCategory
   /** 广场列表里展示的高赞评论预览（最多 2 条，全社区前 20%） */
   topComments?: PostTopComment[]
@@ -2263,6 +2355,11 @@ export interface EventItem {
    * null = 可正常领取。用于把「立即参与」置灰并说明原因。
    */
   claimBlockedReason?: string | null
+  /**
+   * 历史投票接口（`/events/vote-history`）才有：这场投票里已经拿到奖励的人数。
+   * 活动列表 / 详情页不下发它（那里 `claimCount` 已够用）。
+   */
+  grantedCount?: number
 }
 
 export type EventStatus = "draft" | "scheduled" | "active" | "ended" | "archived"
@@ -2702,6 +2799,14 @@ export interface PointProduct {
   dailySold: number
   /** 累计售出（已交付 + 已结算订单数），「按热度排序」用 */
   soldCount: number
+  /**
+   * 是否公示购买记录（2026-10-08 加）。
+   *
+   * 开启后，商品详情弹窗里会显示这件商品**最近 10 条**购买记录
+   * （买家用户名 + 下单时间，见 `GET /api/points/products/:id/purchases`）。
+   * 默认 false —— 买家用户名是个人信息，由站长逐件开启。
+   */
+  showPurchases: boolean
   /** 每人限购件数；null = 不限 */
   perUserLimit: number | null
   delivery: PointDelivery
@@ -2800,6 +2905,19 @@ export interface PointOrder {
   afterSaleRequestedAt: string | null
   /** 售后终结（退款 / 驳回）的时间 */
   afterSaleResolvedAt: string | null
+}
+
+/**
+ * 商品**公示出来的**购买记录条目（`GET /api/points/products/:id/purchases`）。
+ *
+ * 只有商品开了「公示购买记录」才拿得到，且最多 10 条 —— 见 `PointProduct.showPurchases`。
+ * 刻意只有这两个字段：公示的目的是「有人买过」，不该顺带把买家的其它信息带出去。
+ */
+export interface PublicPurchase {
+  /** 买家用户名（下单时的快照） */
+  username: string
+  /** 下单时间（ISO） */
+  createdAt: string
 }
 
 /** GET /api/points 响应 */
@@ -2928,6 +3046,8 @@ export interface PointProductPayload {
   stock: number | null
   /** 每日限量（自然日）；null = 不限 */
   dailyLimit: number | null
+  /** 是否在商品详情里公示购买记录（默认 false） */
+  showPurchases: boolean
   perUserLimit: number | null
   delivery: PointDelivery
   quotaYuan: number | null

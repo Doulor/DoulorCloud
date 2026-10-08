@@ -188,11 +188,11 @@ export const zh = {
   "landing.tierContribute": "贡献解锁",
 
   "landing.f1.title": "个人子域名",
-  "landing.f1.p1": "注册即得 yourname.doulor.cn",
+  "landing.f1.p1": "注册即得 yourname.tyu.me",
   "landing.f1.p2": "可添加 blog、api 等子域名",
   "landing.f1.p3": "支持多级嵌套",
   "landing.f2.title": "域名邮箱",
-  "landing.f2.p1": "yourname@doulor.cn 自动开通",
+  "landing.f2.p1": "yourname@tyu.me 自动开通",
   "landing.f2.p2": "可添加多个地址",
   "landing.f2.p3": "转发到常用邮箱",
   "landing.f3.title": "网页收件箱",
@@ -233,7 +233,7 @@ export const zh = {
   "landing.howSub": "这是一个共建式的私域云：站长提供域名、邮箱与基础设施，成员贡献资源，彼此共享。",
   "landing.step1.title": "注册账户",
   "landing.step1.desc":
-    "用邀请码注册，立即获得 yourname.doulor.cn 子域名与 yourname@doulor.cn 邮箱，无需任何前置条件。",
+    "用邀请码注册，立即获得 yourname.tyu.me 子域名与 yourname@tyu.me 邮箱，无需任何前置条件。",
   "landing.step2.title": "贡献一份资源",
   "landing.step2.desc": "在「捐献」页提交一份你手上已有的资源 —— AI 模型渠道、代理订阅链接，或内网穿透配置。",
   "landing.step3.title": "解锁对应模块",
@@ -257,7 +257,7 @@ export const zh = {
   // —— 落地页 · 常见问题 ——
   "landing.faq1.q": "如何注册？",
   "landing.faq1.a":
-    "需要邀请码。注册后立即获得 yourname.doulor.cn 子域名、yourname@doulor.cn 邮箱、DNS 管理、临时分享箱与个人名片，这些都不需要额外条件。",
+    "需要邀请码。注册后立即获得 yourname.tyu.me 子域名、yourname@tyu.me 邮箱、DNS 管理、临时分享箱与个人名片，这些都不需要额外条件。",
   "landing.faq2.q": "为什么有些模块提示「未向你开放」？",
   "landing.faq2.a":
     "直链网盘、AI 中转站、内网穿透、代理节点这四个模块要消耗真实资源（存储、API 额度、带宽），所以采用「贡献换权限」：提交一份资源、审核通过后自动解锁。同一模块只需贡献一次。",
@@ -348,9 +348,11 @@ export const zh = {
   "settings.group.api": "API",
   "settings.group.danger": "危险区",
   "settings.motion.title": "界面动效",
-  "settings.motion.desc": "全站统一的交互动效（点击粒子、按钮按压等）。只控制这些新增效果，关闭后界面与现在完全一致。",
+  "settings.motion.desc": "全站统一的交互动效（选项卡切换、弹窗出入场、按钮按压等）。关闭后界面与现在完全一致。",
   "settings.motion.toggle": "启用动效",
   "settings.motion.toggleDesc": "偏好保存在本浏览器，不随账号同步。",
+  "settings.motion.spark": "点击粒子",
+  "settings.motion.sparkDesc": "点击时在指针处炸开几粒短线，默认关闭；需先启用上方动效。",
   "settings.profileSectionDesc": "头像、昵称与账户基本信息",
   "s2fa.title": "二次认证",
   "s2fa.required": "必须开启",

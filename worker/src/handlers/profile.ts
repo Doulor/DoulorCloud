@@ -8,6 +8,7 @@ import { hardenUserContentResponse } from "../content-type"
 import { attachCustomDomain, detachCustomDomain } from "../custom-domain"
 import { isRootDomainItself } from "../root-domains"
 import { renderProfileHtml } from "../profile-page"
+import { parseDesign, sanitizeDesign, type ProfileDesign } from "../profile-design"
 import { isValidSource, resolveAudioUrl, searchMusic, fetchLyrics } from "../music-api"
 import type { Env } from "../env"
 
@@ -155,7 +156,17 @@ export const FONT_OPTIONS = [
  *   bento  = 网格拼贴（模块以磁贴平铺）
  *   banner = 横幅头图（顶部大图 + 下挂头像，杂志封面感）
  */
-export const LAYOUTS = ["center", "side", "split", "plain", "bento", "banner"] as const
+export const LAYOUTS = [
+  "center",
+  "side",
+  "split",
+  "plain",
+  "bento",
+  "banner",
+  "masthead",
+  "spine",
+  "masonry",
+] as const
 
 export const LAYOUT_OPTIONS = [
   { id: "center", label: "居中卡片", desc: "传统纵向居中 link-in-bio" },
@@ -164,6 +175,9 @@ export const LAYOUT_OPTIONS = [
   { id: "plain", label: "极简列", desc: "无容器，纯文字排版" },
   { id: "bento", label: "网格拼贴", desc: "模块以磁贴平铺，信息密度高" },
   { id: "banner", label: "横幅头图", desc: "顶部大图横幅，杂志封面感" },
+  { id: "masthead", label: "刊头", desc: "身份通栏横排做刊头，模块双列" },
+  { id: "spine", label: "中轴", desc: "一条竖轴贯穿，模块左右交错" },
+  { id: "masonry", label: "瀑布流", desc: "身份压成小条置顶，模块错落流动" },
 ] as const
 
 /**
@@ -484,6 +498,7 @@ interface ProfileRow {
   layout: string
   contacts: string
   modules: string
+  design: string
   cjk_font: string
   subdomain_id: string | null
   fqdn: string | null
@@ -582,8 +597,8 @@ export async function enableProfile(env: Env, request: Request): Promise<Respons
 
   const now = new Date().toISOString()
   await env.DB.prepare(
-    `INSERT INTO profiles (user_id, slug, published, contacts, theme, effects, intro, font, layout, created_at, updated_at)
-     VALUES (?, ?, 1, '[]', 'void', '[]', 'none', 'system', 'center', ?, ?)`
+    `INSERT INTO profiles (user_id, slug, published, contacts, theme, effects, intro, font, layout, design, created_at, updated_at)
+     VALUES (?, ?, 1, '[]', 'void', '[]', 'none', 'system', 'center', '{}', ?, ?)`
   )
     .bind(user.id, slug, now, now)
     .run()
@@ -624,6 +639,7 @@ function toPublicProfile(row: ProfileRow, slugOrFqdn: { profilePath: string }) {
     scaleManual: clampScale(row.scale_manual, SCALE_MANUAL_RANGE, 100),
     contacts: parseContacts(row.contacts),
     modules: parseModules(row.modules),
+    design: parseDesign(row.design),
     subdomainId: row.subdomain_id,
     fqdn: row.fqdn,
     profilePath: slugOrFqdn.profilePath,
@@ -764,6 +780,14 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
     modulesJson = JSON.stringify(sanitizeModules(body.modules))
   }
 
+  // 设计系统：一份扁平 JSON，逐项白名单 + 夹取。
+  // body.design 缺省 = 不动（前端没发这个字段时保留旧值，不会因为别的字段
+  // 保存而把用户调好的设计参数冲掉）。发来了就整个替换 —— 前端总是发全量。
+  let designJson = row.design ?? "{}"
+  if (body.design !== undefined) {
+    designJson = JSON.stringify(sanitizeDesign(body.design))
+  }
+
   /**
    * 音乐来源：搜索来的歌存 `music_source`（形如 'netease:1330348068'）。
    *
@@ -794,7 +818,7 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
        avatar_url = ?, background_url = ?, music_url = ?, music_title = ?,
        music_autoplay = ?, music_cover_url = ?, music_source = ?, music_lyrics = ?,
        theme = ?, accent = ?, effects = ?,
-       intro = ?, font = ?, layout = ?, cjk_font = ?, contacts = ?, modules = ?,
+       intro = ?, font = ?, layout = ?, cjk_font = ?, contacts = ?, modules = ?, design = ?,
        scale_mode = ?, scale_min = ?, scale_manual = ?, updated_at = ?
      WHERE user_id = ?`
   )
@@ -819,6 +843,7 @@ export async function updateProfile(env: Env, request: Request): Promise<Respons
       cjkFont,
       contactsJson,
       modulesJson,
+      designJson,
       scaleMode,
       scaleMin,
       scaleManual,
@@ -927,13 +952,16 @@ export async function previewProfile(env: Env, request: Request): Promise<Respon
     modules: Array.isArray(body.modules)
       ? sanitizeModules(body.modules)
       : parseModules(row.modules),
+    // 设计系统：预览用未保存的表单值，与保存路径同一套 sanitizeDesign
+    design: body.design !== undefined ? sanitizeDesign(body.design) : parseDesign(row.design),
     registeredAt: user.created_at ?? null,
     uid: user.uid ?? null,
     viewCount: row.view_count ?? 0,
   }
 
   const origin = new URL(request.url).origin
-  const html = renderProfileHtml(profile, { baseHref: origin })
+  // preview: true → 注入 postMessage 监听，接收编辑器发来的设计参数 CSS
+  const html = renderProfileHtml(profile, { baseHref: origin, preview: true })
   return json({ html })
 }
 
@@ -1482,6 +1510,8 @@ export interface PublicProfile {
   contacts: Contact[]
   /** 组装页面的模块（开关 + 顺序 + 各自数据） */
   modules: ProfileModule[]
+  /** 设计系统参数（`{}` = 完全跟随主题） */
+  design: ProfileDesign
   /** 用户注册时间（ISO）—— 名片页小字展示 */
   registeredAt: string | null
   /** 用户 UID（按注册顺序从 1 开始，展示层补零成 001）；名片页小字展示 */
@@ -1564,6 +1594,7 @@ export async function loadPublicProfile(
     musicLyrics: row.music_lyrics,
     contacts: parseContacts(row.contacts).filter((c) => c.visible !== false),
     modules: parseModules(row.modules),
+    design: parseDesign(row.design),
     registeredAt: row.user_created_at ?? null,
     uid: row.user_uid ?? null,
     viewCount: row.view_count ?? 0,

@@ -26,6 +26,7 @@ import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { Markdown } from "@/components/markdown"
 import { EventVote, VOTE_RULE_LABEL_KEY, VOTE_RULE_HINT_KEY, isInstantVoteRule } from "@/components/event-vote"
+import { VoteHistoryEntry } from "@/components/vote-history"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -381,22 +382,30 @@ export default function MessagesPage() {
         {TABS.map((c) => (
           <TabsContent key={c} value={c}>
             {c === "event" ? (
-              <EventList
-                events={events}
-                loading={loading}
-                claiming={claiming}
-                codeDrafts={codeDrafts}
-                onCodeChange={(id, v) =>
-                  setCodeDrafts((d) => ({ ...d, [id]: v }))
-                }
-                githubDrafts={githubDrafts}
-                onGithubChange={(id, v) =>
-                  setGithubDrafts((d) => ({ ...d, [id]: v }))
-                }
-                voteDrafts={voteDrafts}
-                onVoteChange={(id, v) => setVoteDrafts((d) => ({ ...d, [id]: v }))}
-                onClaim={(ev) => void claim(ev)}
-              />
+              <div className="space-y-3">
+                {/*
+                 * 历史投票入口：活动一过截止时间就从推广列表消失（服务端按 ends_at 过滤），
+                 * 而「截止后开奖」的结果偏偏是截止之后才出来的 —— 放最上面，
+                 * 这样活动列表为空（活动都结束了）时也进得去。
+                 */}
+                <VoteHistoryEntry />
+                <EventList
+                  events={events}
+                  loading={loading}
+                  claiming={claiming}
+                  codeDrafts={codeDrafts}
+                  onCodeChange={(id, v) =>
+                    setCodeDrafts((d) => ({ ...d, [id]: v }))
+                  }
+                  githubDrafts={githubDrafts}
+                  onGithubChange={(id, v) =>
+                    setGithubDrafts((d) => ({ ...d, [id]: v }))
+                  }
+                  voteDrafts={voteDrafts}
+                  onVoteChange={(id, v) => setVoteDrafts((d) => ({ ...d, [id]: v }))}
+                  onClaim={(ev) => void claim(ev)}
+                />
+              </div>
             ) : !messages[c] ? (
               // 该分类还没加载过（首次进入 / 深链直达）→ 骨架
               <LoadingBlock />

@@ -273,6 +273,8 @@ interface FormState {
   stock: string
   /** 每日限量（自然日）；空 = 不限 */
   dailyLimit: string
+  /** 是否公示这件商品的购买记录（买家用户名 + 下单时间，最近 10 条） */
+  showPurchases: boolean
   perUserLimit: string
   delivery: PointDelivery
   /** delivery='quota' 时每件充入多少元 */
@@ -303,6 +305,7 @@ function emptyForm(): FormState {
     price: "",
     stock: "",
     dailyLimit: "",
+    showPurchases: false,
     perUserLimit: "",
     delivery: "manual",
     quotaYuan: "",
@@ -327,6 +330,7 @@ function formOf(p: PointProduct): FormState {
     price: String(p.price),
     stock: p.stock === null ? "" : String(p.stock),
     dailyLimit: p.dailyLimit === null || p.dailyLimit === undefined ? "" : String(p.dailyLimit),
+    showPurchases: p.showPurchases === true,
     perUserLimit: p.perUserLimit === null ? "" : String(p.perUserLimit),
     delivery: p.delivery,
     quotaYuan: p.quotaYuan === null ? "" : String(p.quotaYuan),
@@ -368,6 +372,7 @@ function payloadOf(f: FormState): PointProductPayload {
     price: Math.trunc(Number(f.price) || 0),
     stock: f.stock.trim() === "" ? null : Math.trunc(Number(f.stock) || 0),
     dailyLimit: f.dailyLimit.trim() === "" ? null : Math.trunc(Number(f.dailyLimit) || 0),
+    showPurchases: f.showPurchases,
     perUserLimit: f.perUserLimit.trim() === "" ? null : Math.trunc(Number(f.perUserLimit) || 0),
     delivery: f.delivery,
     quotaYuan: f.delivery === "quota" ? Number(f.quotaYuan) || 0 : null,
@@ -2394,6 +2399,20 @@ function ShopTab() {
                   onCheckedChange={(v) => setForm((f) => ({ ...f, enabled: v }))}
                 />
               </div>
+            </div>
+
+            {/* 公示购买记录（2026-10-08 站长要求）：开启后用户点开商品详情就能看到
+                这件商品最近 10 条购买记录（买家用户名 + 下单时间）。
+                买家用户名属于个人信息，所以默认关闭，由管理员逐件决定。 */}
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div className="space-y-0.5 pr-3">
+                <p className="text-sm font-medium">{t("ap.showPurchasesLabel")}</p>
+                <p className="text-xs text-muted-foreground">{t("ap.showPurchasesHint")}</p>
+              </div>
+              <Switch
+                checked={form.showPurchases}
+                onCheckedChange={(v) => setForm((f) => ({ ...f, showPurchases: v }))}
+              />
             </div>
           </div>
 
