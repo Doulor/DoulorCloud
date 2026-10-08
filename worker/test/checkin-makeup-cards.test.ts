@@ -137,24 +137,24 @@ describe("POST /api/checkin/makeup —— 补签卡扣减的并发安全", () =>
     expect(await makeupDates(u.id)).toHaveLength(0)
   })
 
-  it("同一日期并发补签：PK 拦住重复，且被拦下的那些要把卡退回", async () => {
+  it("同一日期并发补签：只消耗 1 张卡、只留 1 条记录", async () => {
     const u = await makeUser()
     const N = 6
     await setCards(u.id, N)
 
     const date = daysBefore(siteToday(), 1)
-    // 并发打同一天：多个请求会同时通过「该日已签？」的前置查询，
-    // 各自先扣一张卡，然后抢着 INSERT —— 只有一个能成，其余撞 PK。
-    // 撞 PK 的那些必须把卡退回来，否则「同一天重复点」会白吃卡。
+    // 并发打同一天。注意：实测在本环境（miniflare 会把 D1 语句串行化）里，
+    // 除了第一个请求，其余都在**前置的「该日已签？」查询**上就被 409 挡掉了，
+    // 并没有走到「先扣卡、再撞 PK、然后退回」那条分支 —— 所以这条用例只锁
+    // 「同一天重复点不会多扣卡、也不会留下重复记录」这个不变式。
+    // 退回分支本身由下面那条注入失败的用例确定性覆盖。
     const results = await Promise.all(Array.from({ length: N }, () => makeup(u, date)))
     const okCount = results.filter((r) => r.status === 200).length
 
-    // 同一天只能补一次
     expect(okCount).toBe(1)
     expect(await makeupDates(u.id)).toHaveLength(1)
 
-    // 核心不变式：最终余额 = 初始卡数 - 成功次数。
-    // 少退回一张卡，这里就会少 1（实测把退回改成 no-op 会稳定失败）。
+    // 不变式：最终余额 = 初始卡数 - 成功次数（多扣一张这里就会少 1）
     expect(await cardsOf(u.id)).toBe(N - okCount)
   })
 
@@ -216,6 +216,26 @@ describe("POST /api/checkin/makeup —— 补签卡扣减的并发安全", () =>
     // 关键：卡必须原样退回来（3 张还是 3 张），不能被白吃一张
     expect(await cardsOf(u.id)).toBe(3)
     expect(await makeupDates(u.id)).toHaveLength(0)
+  })
+
+  it("卡数足够时并发补不同日期：应全部成功，不误拒也不漏扣", async () => {
+    const u = await makeUser()
+    const N = 8
+    await setCards(u.id, N)
+
+    const today = siteToday()
+    const dates = Array.from({ length: N }, (_, i) => daysBefore(today, i + 1))
+
+    // 反向守护：上面的用例都在断言「该拒绝的拒绝」，这一条断言「该成功的必须成功」。
+    // 如果条件写成 `> 1`、或把占位与扣减拆回两步导致误判，这条会立刻失败。
+    const results = await Promise.all(dates.map((d) => makeup(u, d)))
+    const codes = results.map((r) => r.status)
+
+    expect(codes.filter((c) => c === 200)).toHaveLength(N)
+    // 不能有 500：撞 PK / 抖动应被翻译成明确的 409，而不是漏出去
+    expect(codes.filter((c) => c === 500)).toHaveLength(0)
+    expect(await cardsOf(u.id)).toBe(0)
+    expect(await makeupDates(u.id)).toHaveLength(N)
   })
 
   it("正常路径不回归：有卡时顺序补签可连补多天，余额按次递减", async () => {
