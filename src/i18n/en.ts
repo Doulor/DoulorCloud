@@ -702,6 +702,10 @@ export const en: Record<MessageKey, string> = {
   "dash.act.pointsShopDeliver": "Shop order delivered",
   "dash.act.pointsShopAfterSale": "After-sale requested",
   "dash.act.achievementReward": "Achievement reward granted",
+  "dash.act.achievementRewardFailed": "Achievement reward failed",
+  "dash.act.achievementRewardRevoke": "Achievement reward revoked",
+  "dash.act.achievementRewardRevokeBlocked": "Achievement reward excess not revoked",
+  "dash.act.inviteRewardFailed": "Invite reward failed",
   "dash.act.noticeAck": "Notice acknowledged",
   "dash.act.noticeAckBlocked": "Notice ack blocked (donation required)",
   "dash.act.appealSubmit": "Appeal submitted",
@@ -1561,7 +1565,7 @@ export const en: Record<MessageKey, string> = {
   "ai.rewards.title": "Other subscriptions",
   "ai.rewards.why": "What are other subscriptions?",
   "ai.rewards.desc":
-    "Extra quota earned from invites, achievements and more. It stacks on top of the free plan — cards are consumed one after another, so nothing goes to waste.",
+    "Extra quota earned from invites, achievements and more. It stacks on top of the free plan — cards are consumed one after another, so nothing goes to waste. Achievement rewards: +1 card per 10 points (¥500 quota each; reset cycle shown on the card).",
   "ai.rewards.empty":
     "No extra subscription quota yet. Invite friends who donate an AI channel, link a WorkBuddy account, or earn achievement points — all of them grant extra quota.",
   "ai.rewards.invite": "Invite friends",
@@ -1583,11 +1587,11 @@ export const en: Record<MessageKey, string> = {
     "When a friend signs up with your invite code and unlocks the AI gateway, you get the matching reward:",
   "ai.dialog.invite.wb": "Link a WorkBuddy relay account → “WB invite plan”, ¥500/day",
   "ai.dialog.invite.channel":
-    "Donate an AI channel / SenseNova key and pass review → “Invite plan”, ¥200/day",
+    "Donate an AI channel / third-party key (whichever channels are open on the Donate page) and pass review → “Invite plan”, ¥200/day",
   "ai.dialog.invite.once": "Each friend counts once.",
   "ai.dialog.ach.title": "Achievement rewards",
   "ai.dialog.ach.desc":
-    "Every 10 achievement points automatically grants an “Achievement reward” subscription.",
+    "Every 10 achievement points grants an “Achievement reward” subscription (currently ¥500 quota per card, converted to model usage by price; reset cycle shown on the card).",
   "ai.dialog.resetNote":
     "Reset cycles differ (invites usually reset daily, achievements weekly) — the reset time on each card is authoritative.",
   "ai.reset.soon": "Resetting soon",

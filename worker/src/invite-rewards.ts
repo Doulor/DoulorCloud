@@ -57,7 +57,25 @@ export async function grantInviteReward(
       .first<{ newapi_user_id: number }>()
     if (!inviterAccount?.newapi_user_id) return // 邀请人自己还没开通中转站，无从发订阅
 
-    await adminGrantSubscription(env, inviterAccount.newapi_user_id, planId)
+    //    ⚠️ strictLimit：邀请套餐若被设了限购（max_purchase_per_user），NewAPI 的拒绝是
+    //    **真实失败**——不能像免费订阅重复领取那样当成功（那会让邀请人静默丢奖励，
+    //    同 2026-10-08 成就奖励事故的教训）。
+    const granted = await adminGrantSubscription(env, inviterAccount.newapi_user_id, planId, {
+      strictLimit: true,
+    })
+
+    if (!granted.ok) {
+      // 失败**不记去重**：留出「被邀请人下次解锁/捐献时重试」的机会；
+      // 同时写审计让管理员可见（记了去重就等于永久丢失，且没有任何痕迹）。
+      await audit(
+        env,
+        inviterId,
+        "invite.reward_failed",
+        `邀请奖励发放失败：被邀请人 ${invitee.username}，套餐 ${planId}，原因：${granted.message}`
+      )
+      console.error("邀请奖励发放失败(NewAPI):", invitee.username, granted.message)
+      return
+    }
 
     // 5. 记录发放（防重复 + 供邀请页展示）
     await env.DB.prepare(

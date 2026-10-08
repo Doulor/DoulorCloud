@@ -1600,9 +1600,10 @@ async function deliverAuto(
       if (newapiUserId === null) throw new Error("未绑定中转站账号")
       const planId = product.deliveryParams?.planId
       if (!planId) throw new Error("商品未配置套餐 ID")
-      // ⚠️ adminGrantSubscription 把「已达套餐上限 / 已订阅」也当成 ok，
-      //    所以这里不用额外判重 —— 重复买只会白花积分，不会报错到用户脸上。
-      const res = await adminGrantSubscription(env, newapiUserId, planId)
+      // ⚠️ strictLimit：套餐限购（max_purchase_per_user）拒绝必须是**真实失败**——
+      //    旧实现把它当成功，用户会遇到「积分扣了、订阅没到」（2026-10-08 成就奖励
+      //    事故的同类问题）。抛错会让调用方退积分 / 还原库存，远好过静默吞掉。
+      const res = await adminGrantSubscription(env, newapiUserId, planId, { strictLimit: true })
       if (!res.ok) throw new Error(res.message || "中转站拒绝了这次开通")
       return { summary: `已自动开通订阅套餐 #${planId}` }
     }
