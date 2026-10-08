@@ -1383,7 +1383,8 @@ export async function listOrders(
 }
 
 /** 读单个订单 */
-async function getOrder(env: Env, id: string): Promise<PointOrder | null> {
+/** 取订单。导出供测试直接构造/读取订单（HTTP 层的 handler 每次都会重读，测不了并发）。 */
+export async function getOrder(env: Env, id: string): Promise<PointOrder | null> {
   const row = await env.DB.prepare("SELECT * FROM point_orders WHERE id = ?")
     .bind(id)
     .first<Record<string, unknown>>()
@@ -2190,9 +2191,17 @@ export async function sellerDeliverOrder(
 /**
  * 结算：把托管的积分给卖家。买家确认收货 / 管理员强制结算都走这里。
  *
- * 幂等靠 `shop-settle:<订单号>` 这个 dedup_key：重复调用不会给两次钱。
+ * **幂等与并发**（2026-10-08 加固）：
+ *   · 先做**原子状态占位**（`WHERE status = 'delivered'`），占位成功才动钱 ——
+ *     「买家确认收货」与「售后退款」并发时，两边都会读到 delivered 快照，
+ *     各自动一次钱 = 卖家与买家同时拿到积分（平台凭空增发，可自买自卖反复刷）。
+ *   · 钱没进卖家账时把状态退回 delivered（否则订单卡在 settled 而卖家没收到钱）。
+ *   · `shop-settle:<订单号>` dedup_key 保留作第二道保险（重复调用不会给两次钱）。
+ *
+ * 导出供测试直接传入「过期快照」复现并发（HTTP 层的 handler 每次都会重读库，
+ * 串行调用永远看不到竞态窗口）。
  */
-async function settleEscrow(
+export async function settleEscrow(
   env: Env,
   order: PointOrder,
   actorId: string,
@@ -2209,6 +2218,17 @@ async function settleEscrow(
     throw new ApiError(409, "卖家还没有标记交付，不能结算", "NOT_DELIVERED")
   }
 
+  // 原子占位后再动钱（上面三行只是快速失败与友好文案，不是并发保护）
+  const now = new Date().toISOString()
+  const taken = await env.DB.prepare(
+    "UPDATE point_orders SET status = 'settled', settled_at = ? WHERE id = ? AND status = 'delivered'"
+  )
+    .bind(now, order.id)
+    .run()
+  if ((taken.meta?.changes ?? 0) === 0) {
+    throw await settleConflictError(env, order.id)
+  }
+
   const res = await applyPoints(env, {
     userId: order.sellerId,
     delta: order.price,
@@ -2216,15 +2236,16 @@ async function settleEscrow(
     detail: `卖出「${order.productName}」（买家 ${order.username}）`,
     dedupKey: `shop-settle:${order.id}`,
   })
-  // applied=false 且原因不是「重复」时，说明钱没进卖家账，不能把订单标成已结算
+  // applied=false 且原因不是「重复」时，说明钱没进卖家账：把状态退回 delivered，
+  // 别让订单卡在 settled（否则卖家没拿到钱、订单却显示已结算）。
   if (!res.applied && res.reason !== "duplicated") {
+    await env.DB.prepare(
+      "UPDATE point_orders SET status = 'delivered', settled_at = NULL WHERE id = ? AND status = 'settled'"
+    )
+      .bind(order.id)
+      .run()
     throw new ApiError(500, "结算失败，请稍后重试", "SETTLE_FAILED")
   }
-
-  const now = new Date().toISOString()
-  await env.DB.prepare("UPDATE point_orders SET status = 'settled', settled_at = ? WHERE id = ?")
-    .bind(now, order.id)
-    .run()
 
   // 用户商品的租期从**结算**（买家确认收货 / 管理员结算）起算 —— 这时才算真正交付完成。
   // 卖家的「标记已交付」只是中间态，买家可能还要验货。
@@ -2360,19 +2381,71 @@ const MAX_AFTER_SALE_REASON = 300
 const MIN_AFTER_SALE_REASON = 4
 
 /**
+ * 原子抢占退款权：把订单推进到 `cancelled`，返回**抢占前的真实状态**
+ * （`pending` / `delivered` / `settled`）；抢不到（已是终态）返回 `null`。
+ *
+ * 为什么逐级 UPDATE 而不是一条 `IN (...)`：需要拿到「原状态」——
+ * 它决定要不要从卖家收回收益，也用于失败时的回滚；而 SQLite 的 UPDATE
+ * 不返回旧值（RETURNING 给的是新行）。三条语句各自精确匹配一个状态，
+ * 谁命中谁就是原状态，既原子又省掉一次读。
+ *
+ * ⚠️ 这是退款/取消路径的并发闸门：**不能再信任调用方传入的订单快照** ——
+ * 「买家确认收货」与「卖家同意退款」并发时两边都会读到 `delivered`，
+ * 结果是卖家拿到结算款、买家又拿到退款（平台凭空增发，可自买自卖刷）。
+ */
+async function claimRefundSlot(
+  env: Env,
+  orderId: string
+): Promise<"pending" | "delivered" | "settled" | null> {
+  for (const st of ["pending", "delivered", "settled"] as const) {
+    const r = await env.DB.prepare(
+      "UPDATE point_orders SET status = 'cancelled' WHERE id = ? AND status = ?"
+    )
+      .bind(orderId, st)
+      .run()
+    if ((r.meta?.changes ?? 0) > 0) return st
+  }
+  return null
+}
+
+/** 退款占位失败时的准确报错（订单已被并发操作推进到终态） */
+async function refundConflictError(env: Env, orderId: string): Promise<ApiError> {
+  const fresh = await getOrder(env, orderId)
+  if (fresh?.status === "cancelled") {
+    return new ApiError(409, "该订单已取消（积分已退回）", "ORDER_CANCELLED")
+  }
+  return new ApiError(409, "订单状态已变化，请刷新后重试", "ORDER_STATE_CHANGED")
+}
+
+/** 结算占位失败时的准确报错（并发对手可能已经把这单结算/取消） */
+async function settleConflictError(env: Env, orderId: string): Promise<ApiError> {
+  const fresh = await getOrder(env, orderId)
+  if (fresh?.status === "settled") return new ApiError(409, "这单已经结算过了", "ALREADY_SETTLED")
+  if (fresh?.status === "cancelled") {
+    return new ApiError(409, "这单已取消（积分已退回买家）", "ORDER_CANCELLED")
+  }
+  return new ApiError(409, "订单状态已变化，请刷新后重试", "ORDER_STATE_CHANGED")
+}
+
+/**
  * 执行退款并终结订单 —— **管理员取消**与**售后退款**共用这一段。
  *
- * 步骤与顺序都有理由，别调换：
- *   1. **已结算的**先把积分从卖家手里收回。收不回来就整单失败 ——
- *      绝不把卖家余额扣成负数（与既有口径一致：让管理员先去「成员」里调整，
- *      而不是让平台默默垫一笔、账目变成负的）。
- *   2. 退买家（幂等：`shop-refund:<订单号>`，重复调用不会退两次）。
+ * 并发与顺序（每一步都有理由，别调换）：
+ *   0. **原子抢占退款权**（`claimRefundSlot`）—— 抢占成功才知道「原状态」；
+ *      抢不到（已被并发操作推进到终态）直接返回准确报错。
+ *      这是 2026-10-08 加固的核心：并发时**不能信任调用方传来的快照**。
+ *   1. 抢占前是**已结算**的：先把积分从卖家手里收回。收不回来就回滚状态、
+ *      整单失败 —— 绝不把卖家余额扣成负数（与既有口径一致：让管理员先去
+ *      「成员」里调整，而不是让平台默默垫一笔、账目变成负的）。
+ *   2. 退买家（幂等：`shop-refund:<订单号>`；失败回滚状态，保留重试机会）。
  *   3. 归还库存 —— 已过期处理过的订单不能再还，否则库存凭空变多。
  *   4. 收回租用权限 —— **必须当场收**：订单变成 cancelled 之后 cron 就再也扫不到它，
  *      不在这里收等于「退了钱还留着权限」。
- *   5. 写订单状态与备注、通知买卖双方、清掉消息里的快捷按钮。
+ *   5. 补写订单备注/售后字段、通知买卖双方、清掉消息里的快捷按钮。
+ *
+ * 导出供测试直接传入「过期快照」复现并发（HTTP 层的 handler 每次都会重读库）。
  */
-async function refundOrderCore(
+export async function refundOrderCore(
   env: Env,
   order: PointOrder,
   opts: {
@@ -2398,8 +2471,23 @@ async function refundOrderCore(
     throw new ApiError(409, "该订单已取消（积分已退回）", "ORDER_CANCELLED")
   }
 
-  // 1. 已结算的：先把钱从卖家手里收回
-  if (order.status === "settled" && order.sellerId) {
+  // 0. 原子抢占退款权（2026-10-08 并发加固）：抢占成功才知道「原状态」，
+  //    它决定要不要从卖家收回收益。不能再用调用方传入的快照判断 ——
+  //    「买家确认收货」与「卖家同意退款」并发时，两边快照都是 delivered，
+  //    结果是卖家拿到结算款、买家又拿到退款（平台凭空增发）。
+  const claimed = await claimRefundSlot(env, order.id)
+  if (!claimed) {
+    throw await refundConflictError(env, order.id)
+  }
+  /** 抢占后资金动作失败时，把订单还原成抢占前的真实状态，让操作可以重试 */
+  const rollbackClaim = async () => {
+    await env.DB.prepare("UPDATE point_orders SET status = ? WHERE id = ? AND status = 'cancelled'")
+      .bind(claimed, order.id)
+      .run()
+  }
+
+  // 1. 抢占前是**已结算**的：先把钱从卖家手里收回（收不回来就回滚并整单失败）
+  if (claimed === "settled" && order.sellerId) {
     const back = await applyPoints(env, {
       userId: order.sellerId,
       delta: -order.price,
@@ -2409,6 +2497,7 @@ async function refundOrderCore(
       createdBy: opts.actorId,
     })
     if (!back.applied && back.reason !== "duplicated") {
+      await rollbackClaim()
       throw new ApiError(
         400,
         `卖家 ${order.sellerName ?? "?"} 当前只有 ${back.balance} 积分，不够收回 ${order.price}。` +
@@ -2418,7 +2507,7 @@ async function refundOrderCore(
     }
   }
 
-  // 2. 退买家
+  // 2. 退买家（失败回滚抢占，保留重试机会）
   const refunded = await applyPoints(env, {
     userId: order.userId,
     delta: order.price,
@@ -2427,6 +2516,7 @@ async function refundOrderCore(
     dedupKey: `shop-refund:${order.id}`,
   })
   if (!refunded.applied && refunded.reason !== "duplicated") {
+    await rollbackClaim()
     throw new ApiError(500, "退款失败，请稍后重试", "REFUND_FAILED")
   }
 
@@ -2435,7 +2525,7 @@ async function refundOrderCore(
     await restoreStock(env, order.productId)
   }
 
-  // 4. 写订单：状态、备注，以及（售后流程时）售后收尾字段
+  // 4. 补写订单备注与（售后流程时）售后收尾字段 —— 状态已在第 0 步抢占时落库
   const now = new Date().toISOString()
   // 「取消」与「退款」走同一套动作，但文案要区别开：前者是卖家没交付被平台取消，
   // 后者是买家申请、卖家/平台判定同意 —— 用户看到的词不一样，心里预期也不一样。
