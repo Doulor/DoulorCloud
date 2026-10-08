@@ -65,6 +65,11 @@ export async function grantInviteReward(
     //
     //    必须放在调 NewAPI **之前**：先去开订阅再补记录的话，重复的那次副作用已经
     //    发生，记录层再怎么唯一都拦不住它（这正是旧实现的问题）。
+    //
+    //    语义：这一行在「占位成功」到「发放结束」之间是**发放中**（最多
+    //    `NEWAPI_TIMEOUT_MS` = 20s），之后要么成为「已发放」、要么被撤回。
+    //    两个读这张表的地方都不受影响：`my-invites.ts` 只是把它当奖励列表展示
+    //    （期间多显示一行、撤回后消失），`user-cleanup.ts` 只是刻意保留它作去重凭据。
     const claimed = await env.DB.prepare(
       `INSERT OR IGNORE INTO invite_rewards (invitee_user_id, inviter_user_id, granted_at, plan_id)
        VALUES (?, ?, ?, ?)`
@@ -101,6 +106,12 @@ export async function grantInviteReward(
       if (!res.ok) {
         // 失败**不记去重**：留出「被邀请人下次解锁/捐献时重试」的机会；
         // 同时写审计让管理员可见（记了去重就等于永久丢失，且没有任何痕迹）。
+        //
+        // 取舍（如实记录）：`res.ok === false` 包含**语义模糊**的失败 —— 例如 NewAPI
+        // 已经建好订阅、但响应超时（`NEWAPI_TIMEOUT_MS` = 20s）。那种情况下撤回占位，
+        // 下次触发会再开一张（`strictLimit` 只在套餐设了 `max_purchase_per_user` 时挡住）。
+        // 仍选这一侧：另一侧（失败也留占位）是**静默永久丢奖励**，正是 2026-10-08
+        // 成就奖励事故的形状；而多开一张订阅会留下痕迹，管理员可查可删。
         await audit(
           env,
           inviterId,

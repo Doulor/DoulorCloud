@@ -42,6 +42,15 @@ let restoreFetch: (() => void) | null = null
 /** 让 NewAPI 的这次开通返回失败（验证「失败不记去重」的语义） */
 let grantFails = false
 /**
+ * 让 NewAPI 以「该套餐购买上限」拒绝。
+ *
+ * 这一支必须与普通失败**分开测**：`adminGrantSubscription` 对「上限 / 已订阅 / already /
+ * limit」这类文案有一条「当作已开通」的宽容分支，只有传了 `strictLimit: true` 才不吃它。
+ * 邀请套餐一旦被设了限购，这条宽容分支会把「真实失败」误判成成功 ⇒ 邀请人静默丢奖励
+ * （2026-10-08 成就奖励事故的同款根因）。本文件守住这个开关。
+ */
+let grantLimitRejected = false
+/**
  * 人为拉宽「查去重 → 开订阅」之间的窗口，模拟真实网络往返（几十~几百 ms）。
  *
  * 不加这个延迟，两次并发调用可能在 miniflare 的语句串行化下错开，用例会侥幸通过 ——
@@ -66,6 +75,10 @@ function stubNewApi(): void {
         body: init?.body ? JSON.parse(String(init.body)) : null,
       })
       await new Promise((r) => setTimeout(r, GRANT_LATENCY_MS))
+      if (grantLimitRejected) {
+        // NewAPI model.CreateUserSubscriptionFromPlanTx 的原话
+        return jsonResponse({ success: false, message: "已达到该套餐购买上限" }, 400)
+      }
       if (grantFails) {
         return jsonResponse({ success: false, message: "上游开订阅失败" }, 500)
       }
@@ -130,6 +143,7 @@ async function rewardRows(inviteeId: string): Promise<number> {
 beforeEach(async () => {
   grantCalls = []
   grantFails = false
+  grantLimitRejected = false
   restoreFetch = null
   await setSetting("invite_reward_enabled", "1")
   // 邀请奖励记录是全局表，用例之间会互相干扰（同一被邀请人只发一次）
@@ -267,6 +281,53 @@ describe("邀请奖励：正常路径与失败语义不回归", () => {
       grants: 1,
       rows: 1,
     })
+  })
+
+  it("上游以「套餐购买上限」拒绝：算真实失败（strictLimit 没被去掉），占位撤回", async () => {
+    const { invitee } = await seedInviterAndInvitee()
+    stubNewApi()
+    grantLimitRejected = true
+
+    try {
+      await grantInviteReward(env, invitee, 2)
+    } finally {
+      restoreFetch?.()
+    }
+
+    // 若 strictLimit 被去掉，adminGrantSubscription 会把「上限」当成「已订阅」返回 ok，
+    // 于是这里会变成 rows=1（占位保留）—— 邀请人静默丢奖励。
+    expect(grantCalls).toHaveLength(1)
+    expect(await rewardRows(invitee.id)).toBe(0)
+  })
+
+  it("占位写入成功但 NewAPI 抛异常：也撤回占位（不变式两侧都守）", async () => {
+    const { invitee } = await seedInviterAndInvitee()
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (url.startsWith(NEWAPI) && url.includes("/subscription/admin/users/")) {
+        grantCalls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null })
+        // 网络层直接抛（DNS 失败 / 连接被重置）——不是 ok:false，而是异常
+        throw new Error("network down")
+      }
+      if (url.startsWith(NEWAPI)) return jsonResponse({ success: true, data: {} })
+      return original(input as RequestInfo, init)
+    }) as unknown as typeof fetch
+    restoreFetch = () => {
+      globalThis.fetch = original
+    }
+
+    try {
+      // 函数自身吞掉异常（奖励是附加项，不阻断主流程），但**占位必须撤回**：
+      // 否则该被邀请人被永久判为「已发过」，邀请人一分没拿到且无法重试。
+      await grantInviteReward(env, invitee, 2)
+    } finally {
+      restoreFetch?.()
+    }
+
+    expect(grantCalls).toHaveLength(1)
+    expect(await rewardRows(invitee.id)).toBe(0)
   })
 
   it("奖励开关关闭 / 套餐非法：不占位、不调 NewAPI", async () => {
