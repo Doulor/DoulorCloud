@@ -552,6 +552,37 @@ export interface LabPromptTemplate {
   content: string
 }
 
+/**
+ * 技能（管理端视角：带正文，可编辑）。
+ * `scope` 恒为 `'site'`（管理端只管站点默认技能，用户自己导入的归用户）。
+ */
+export interface AdminLabSkill {
+  id: string
+  name: string
+  description: string
+  content: string
+  enabled: boolean
+  sortOrder: number
+  createdAt: string
+  updatedAt: string
+}
+
+/**
+ * 技能索引（用户端，**不含正文**）。
+ * 渐进式披露：这份索引进系统提示当目录，正文等模型点名了再去取。
+ */
+export interface LabSkillIndexEntry {
+  name: string
+  description: string
+}
+
+/** 用户端能用的技能条目（站点默认 ∪ 自己导入的） */
+export interface LabSkillEntry extends LabSkillIndexEntry {
+  id: string
+  /** 是不是自己导入的 */
+  mine: boolean
+}
+
 export interface AdminLabReview {
   id: string
   name: string
@@ -886,6 +917,32 @@ export const adminApi = {
   /** 全部模板（含未启用） */
   listLabPromptTemplates: () =>
     request<{ templates: AdminLabPromptTemplate[] }>("/admin/lab/templates"),
+
+  // ---- 技能：站点默认（管理端维护，所有人可用）----
+  listLabSkills: () => request<{ skills: AdminLabSkill[] }>("/admin/lab/skills"),
+
+  createLabSkill: (payload: {
+    name: string
+    description: string
+    content: string
+    enabled?: boolean
+  }) =>
+    request<{ skill: AdminLabSkill | null }>("/admin/lab/skills", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  updateLabSkill: (
+    id: string,
+    payload: { name?: string; description?: string; content?: string; enabled?: boolean }
+  ) =>
+    request<{ skill: AdminLabSkill | null }>(`/admin/lab/skills/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteLabSkill: (id: string) =>
+    request<void>(`/admin/lab/skills/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   createLabPromptTemplate: (payload: {
     name: string
@@ -3987,7 +4044,33 @@ export const labApi = {
       agentPrompt: string
       reviewRequired?: boolean
       templates?: LabPromptTemplate[]
+      /**
+       * 技能**索引**（只有名字 + 一句话，**没有正文**）。
+       * 渐进式披露：这一份进系统提示当目录；模型要用了才去调 `readSkill` 取正文。
+       */
+      skills?: LabSkillIndexEntry[]
     }>("/lab/settings"),
+
+  /**
+   * 取一个技能的正文。
+   * ⚠️ 走的是独立路径 `/lab/skill-content`，不是 `/lab/skills/:id`
+   * —— 后者是删除用的 branch，GET 会和它抢匹配（见后端 index.ts 的注释）。
+   */
+  readSkill: (name: string) =>
+    request<{ skill: { name: string; description: string; content: string } }>(
+      `/lab/skill-content?name=${encodeURIComponent(name)}`
+    ),
+
+  listSkills: () => request<{ skills: LabSkillEntry[] }>("/lab/skills"),
+
+  importSkill: (body: { name: string; description: string; content: string }) =>
+    request<{ skill: LabSkillEntry }>("/lab/skills", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  deleteSkill: (id: string) =>
+    request<void>(`/lab/skills/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   listProjects: () => request<{ projects: LabProjectSummary[] }>("/lab/projects"),
 

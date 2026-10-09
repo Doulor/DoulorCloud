@@ -39,6 +39,7 @@ import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -127,6 +128,8 @@ import {
   streamLabChat,
   type LabProjectSummary,
   type LabPromptTemplate,
+  type LabSkillIndexEntry,
+  type LabSkillEntry,
 } from "@/services/api"
 
 /**
@@ -165,6 +168,8 @@ type Entry =
       command?: string
       /** site 用：站内操作的 op id（卡片标题上显示） */
       op?: string
+      /** skill 用：读的是哪个技能（卡片标题上显示） */
+      skill?: string
       status: "running" | "done"
       content: string
     }
@@ -345,7 +350,8 @@ function segmentsToEntries(
   final: boolean,
   files?: FileMap,
   runResults?: Map<number, string>,
-  siteResults?: Map<number, string>
+  siteResults?: Map<number, string>,
+  skillResults?: Map<number, string>
 ): Entry[] {
   const out: Entry[] = []
   segs.forEach((s, i) => {
@@ -374,6 +380,7 @@ function segmentsToEntries(
         scope: s.scope,
         command: s.tool === "run" ? s.content.trim() : undefined,
         op: s.op,
+        skill: s.skill,
         status: final || s.complete ? "done" : "running",
         // 结果不来自模型、而在本地现算：grep 命中行 / 终端命令输出 / 站内操作响应
         content: s.complete
@@ -383,7 +390,9 @@ function segmentsToEntries(
               ? runResults.get(i)!
               : s.tool === "site" && siteResults?.get(i)
                 ? siteResults.get(i)!
-                : s.content
+                : s.tool === "skill" && skillResults?.get(i)
+                  ? skillResults.get(i)!
+                  : s.content
           : s.content,
       })
     }
@@ -499,6 +508,20 @@ export default function LabPage() {
   const [agentPrompt, setAgentPrompt] = React.useState("")
   /** 管理端启用中的提示词模板；空数组 = 没启用任何模板（走 agentPrompt / 内置默认） */
   const [promptTemplates, setPromptTemplates] = React.useState<LabPromptTemplate[]>([])
+  /**
+   * 可用技能的**索引**（只有名字 + 一句话，没有正文）。
+   * 渐进式披露：这份索引拼进系统提示当目录；模型点名某个技能时才去调 readSkill 取正文。
+   * 技能是账号级的（站点默认 ∪ 自己导入的），所以从 /lab/settings 一起下发。
+   */
+  const [labSkills, setLabSkills] = React.useState<LabSkillIndexEntry[]>([])
+  /** 「技能」对话框（从输入框「+」菜单进来） */
+  const [skillOpen, setSkillOpen] = React.useState(false)
+  /**
+   * 重新拉 /lab/settings 的触发器。
+   * 用户导入新技能后，系统提示里的「技能目录」必须跟着更新，
+   * 否则要刷新整页才生效 —— 那就太反直觉了。
+   */
+  const [settingsKey, setSettingsKey] = React.useState(0)
   /** 用户选中的模板 id；空串 = 还没选（自动用第一份） */
   const [promptTemplateId, setPromptTemplateId] = React.useState(
     () => localStorage.getItem(PROMPT_TEMPLATE_KEY) ?? ""
@@ -953,6 +976,9 @@ export default function LabPage() {
         if (cancelled) return
         setAgentPrompt(res.agentPrompt || "")
         setPromptTemplates(res.templates ?? [])
+        setLabSkills(res.skills ?? [])
+        // 用户导入技能后要重新拿目录才能生效 —— 由 SkillDialog 关闭时触发一次刷新
+        // （这里只是记录加载成功，见 loadLabSettings 的调用点）
       })
       .catch(() => {
         /* 忽略：内置默认提示词照样能跑 */
@@ -960,7 +986,7 @@ export default function LabPage() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [settingsKey])
 
   /**
    * 真正生效的提示词覆盖值。
@@ -1800,7 +1826,7 @@ export default function LabPage() {
           {
             role: "system",
             content:
-              buildSystemPrompt(filesRef.current, effectivePrompt) +
+              buildSystemPrompt(filesRef.current, effectivePrompt, labSkills) +
               (siteOpRef.current
                 ? `\n\n## 本轮已启用：站内操作（用户已 @ 指定）\n` +
                   `用户这一轮明确要你处理**站内数据**。手册已经给你了，直接用 <lab_site op="…"> 执行，` +
@@ -1877,6 +1903,34 @@ export default function LabPage() {
           siteResults.set(i, r.text)
         }
 
+        // ---- 技能：模型点名要读某个技能的正文（渐进式披露第二步）----
+        // 正文在服务端，所以要单独去取一次；取回来当「工具结果」回喂。
+        const skillResults = new Map<number, string>()
+        for (let i = 0; i < segs.length; i++) {
+          const s = segs[i]
+          if (s.type !== "action" || !s.complete || s.tool !== "skill") continue
+          const wanted = (s.skill ?? "").trim()
+          if (!wanted) {
+            skillResults.set(
+              i,
+              '[技能] 没写技能名。正确写法是 <lab_skill name="技能名"/>，请重来。'
+            )
+            continue
+          }
+          try {
+            const got = await labApi.readSkill(wanted)
+            skillResults.set(
+              i,
+              `[技能 ${got.skill.name}] ${got.skill.description}\n\n${got.skill.content}`
+            )
+          } catch (e: any) {
+            skillResults.set(
+              i,
+              `[技能 ${wanted}] 读取失败：${e?.message ?? e}。只能读技能清单里列出的名字，别自己编。`
+            )
+          }
+        }
+
         // 思考内容归档成这一轮开头的折叠块（用户点开还能看），正文照旧
         const thinkText = thinkRef.current.trim()
         const thinkEntry: Entry[] = thinkText
@@ -1893,7 +1947,7 @@ export default function LabPage() {
         updateEntries((prev) => [
           ...prev,
           ...thinkEntry,
-          ...segmentsToEntries(segs, round, true, filesRef.current, runResults, siteResults),
+          ...segmentsToEntries(segs, round, true, filesRef.current, runResults, siteResults, skillResults),
         ])
         setLive(null)
         setLiveThink("")
@@ -1998,11 +2052,19 @@ export default function LabPage() {
                   s.tool === "list" ||
                   s.tool === "grep" ||
                   s.tool === "run" ||
-                  s.tool === "delete")
+                  s.tool === "delete" ||
+                  s.tool === "skill")
             )
           if (hasOtherResults) {
             parts.push(
-              buildToolResults(segs, filesRef.current, failures, runResults, siteResults)
+              buildToolResults(
+                segs,
+                filesRef.current,
+                failures,
+                runResults,
+                siteResults,
+                skillResults
+              )
             )
           } else if (siteResults.size) {
             parts.push("工具执行结果：", ...siteResults.values(), "\n请根据结果继续。")
@@ -2035,7 +2097,14 @@ export default function LabPage() {
           ...convoRef.current,
           {
             role: "user",
-            content: buildToolResults(segs, filesRef.current, failures),
+            content: buildToolResults(
+              segs,
+              filesRef.current,
+              failures,
+              undefined,
+              undefined,
+              skillResults
+            ),
           },
         ]
       }
@@ -2828,6 +2897,17 @@ export default function LabPage() {
                 }}
       sources={fxSources}
       onAttach={handleAttach}
+      /**
+       * 「技能」这一项不往输入框插 `@技能`，而是开管理对话框
+       * （用户不需要手写技能名 —— 系统提示里已经带目录，模型自己判断）。
+       */
+      onSource={(key: string) => {
+        if (key === "skills") {
+          setSkillOpen(true)
+          return true
+        }
+        return false
+      }}
       busy={streaming}
       onSend={(text: string, detail: { model?: { key: string }; attachments?: string[] }) => {
         applyFxModel(detail?.model?.key)
@@ -3205,6 +3285,15 @@ export default function LabPage() {
       </div>
 
       {/* ---- 启用浏览器终端前的确认（AI 申请时走的也是这一个）---- */}
+      <SkillDialog
+        open={skillOpen}
+        onOpenChange={(o) => {
+          setSkillOpen(o)
+          // 关掉时重拉一次设置：把刚导入的技能同步进系统提示的技能目录
+          if (!o) setSettingsKey((k) => k + 1)
+        }}
+      />
+
       <Dialog open={vmAskOpen} onOpenChange={(o) => !o && answerVM(false)}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -3593,6 +3682,7 @@ const TOOL_ICON: Record<ToolName, typeof FileText> = {
   run: Terminal,
   site: Globe,
   site_manual: BookOpen,
+  skill: Sparkles,
 }
 
 function ToolCard({
@@ -4143,6 +4233,197 @@ function ChannelDialog({
           </Button>
           <Button onClick={submit}>{t("lab.channel.save")}</Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/**
+ * 「技能」对话框（2026-10-10）。
+ *
+ * 入口是输入框「+」菜单里的「技能」——那一条被 `onSource` 劫持了，
+ * 所以点它不会往输入框里插 `@技能`，而是开这里。
+ *
+ * 两类技能都在这里看得见：
+ *   · 站点默认（管理员在后台维护，所有人可用）—— 只能看，删不了；
+ *   · 自己导入的 —— 可以删。
+ *
+ * ⚠️ 用户**不需要**在对话里 @ 某个技能：系统提示里已经带了技能目录，
+ *    模型自己判断该不该用。这个对话框存在的意义是「往里加料 / 看看有什么」。
+ */
+function SkillDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+}) {
+  const { t } = useT()
+  const [items, setItems] = React.useState<LabSkillEntry[]>([])
+  const [loading, setLoading] = React.useState(true)
+  const [busy, setBusy] = React.useState(false)
+  const [formOpen, setFormOpen] = React.useState(false)
+  const [name, setName] = React.useState("")
+  const [desc, setDesc] = React.useState("")
+  const [content, setContent] = React.useState("")
+
+  const load = React.useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await labApi.listSkills()
+      setItems(res.skills)
+    } catch {
+      /* 拉不到就当空的，不弹错 —— 这里只是「查看/添加」，不该打断用户 */
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (open) void load()
+  }, [open, load])
+
+  const resetForm = () => {
+    setName("")
+    setDesc("")
+    setContent("")
+    setFormOpen(false)
+  }
+
+  const submit = async () => {
+    setBusy(true)
+    try {
+      await labApi.importSkill({ name, description: desc, content })
+      toast.success(t("lab.skill.imported"))
+      resetForm()
+      await load()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("lab.skill.importFailed"))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (row: LabSkillEntry) => {
+    const ok = await confirmDialog({
+      title: t("lab.skill.delete"),
+      desc: t("lab.skill.deleteConfirm"),
+      okText: t("common.delete"),
+      danger: true,
+    })
+    if (!ok) return
+    try {
+      await labApi.deleteSkill(row.id)
+      setItems((prev) => prev.filter((x) => x.id !== row.id))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("lab.skill.importFailed"))
+    }
+  }
+
+  const canSubmit = name.trim() && desc.trim() && content.trim() && !busy
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) resetForm()
+        onOpenChange(o)
+      }}
+    >
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{t("lab.skill.title")}</DialogTitle>
+          <DialogDescription>{t("lab.skill.desc")}</DialogDescription>
+        </DialogHeader>
+
+        <div className="max-h-[38vh] space-y-1.5 overflow-y-auto">
+          {loading ? (
+            <p className="rounded-md border border-dashed p-5 text-center text-xs text-muted-foreground">
+              {t("lab.skill.loading")}
+            </p>
+          ) : items.length === 0 ? (
+            <p className="rounded-md border border-dashed p-5 text-center text-xs text-muted-foreground">
+              {t("lab.skill.empty")}
+            </p>
+          ) : (
+            items.map((row) => (
+              <div key={row.id} className="flex items-start gap-2 rounded-lg border p-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
+                      {row.name}
+                    </code>
+                    <span className="text-[10px] text-muted-foreground">
+                      {row.mine ? t("lab.skill.mine") : t("lab.skill.fromSite")}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                    {row.description}
+                  </p>
+                </div>
+                {row.mine && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+                    onClick={() => void remove(row)}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+
+        {formOpen ? (
+          <div className="space-y-2 border-t pt-3">
+            <div className="space-y-1">
+              <Label className="text-xs">{t("lab.skill.name")}</Label>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="pdf-forms"
+              />
+              <p className="text-[11px] text-muted-foreground">{t("lab.skill.nameHint")}</p>
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">{t("lab.skill.descLabel")}</Label>
+              <Input
+                value={desc}
+                onChange={(e) => setDesc(e.target.value)}
+                placeholder={t("lab.skill.descPlaceholder")}
+              />
+              <p className="text-[11px] text-muted-foreground">{t("lab.skill.descHint")}</p>
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">{t("lab.skill.content")}</Label>
+              <textarea
+                value={content}
+                onChange={(e) => setContent(e.target.value)}
+                rows={7}
+                className="w-full resize-none rounded-md border bg-transparent px-3 py-2 font-mono text-[12px] leading-relaxed outline-none placeholder:text-muted-foreground/70"
+                placeholder={t("lab.skill.contentPlaceholder")}
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" size="sm" onClick={resetForm}>
+                {t("common.cancel")}
+              </Button>
+              <Button size="sm" disabled={!canSubmit} onClick={() => void submit()}>
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {t("lab.skill.import")}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex justify-end border-t pt-3">
+            <Button variant="outline" size="sm" onClick={() => setFormOpen(true)}>
+              <Plus className="h-4 w-4" />
+              {t("lab.skill.import")}
+            </Button>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   )

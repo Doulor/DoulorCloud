@@ -45,6 +45,7 @@ import {
   type AdminLabChannelInput,
   type AdminLabConfig,
   type AdminLabPromptTemplate,
+  type AdminLabSkill,
   type AdminLabReview,
 } from "@/services/api"
 import { buildPreviewDoc, DEFAULT_AGENT_SYSTEM } from "@/lib/lab-agent"
@@ -694,6 +695,9 @@ export function AdminLabTab() {
       {/* 自成一个组件：它是 CRUD 列表、点了即时生效，和上面「改完要按保存」的配置不是一回事 */}
       <LabPromptTemplates />
 
+      {/* 站点默认技能：所有人可用，用户自己导入的不在这里 */}
+      <LabSkills />
+
       <div className="flex justify-end">
         <Button onClick={() => void save()} disabled={busy}>
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="mr-1.5 h-4 w-4" />}
@@ -1297,6 +1301,286 @@ function LabPromptTemplates() {
         )}
 
         <p className="text-[11px] leading-relaxed text-muted-foreground">{t("adm.lab.tplHint")}</p>
+      </CardContent>
+    </Card>
+  )
+}
+
+/**
+ * 「默认技能」管理卡片（2026-10-10）。
+ *
+ * 这里维护的是**站点默认技能**（`lab_skills` 里 `owner_user_id IS NULL` 的那些），
+ * 所有用户都能用；用户自己导入的技能不在这里出现（归他们自己管）。
+ *
+ * ⚠️ 触发方式是**渐进式披露**（站长确认）：
+ *   系统提示里只放「名字 + 一句话说明」当目录，模型判断相关时才去读正文。
+ *   所以 `description` 那一栏不是装饰 —— **它决定模型会不会想到用这个技能**，
+ *   界面里必须把这件事写清楚，否则管理员会随手写一句没信息量的说明。
+ */
+function LabSkills() {
+  const { t } = useT()
+  const [items, setItems] = React.useState<AdminLabSkill[]>([])
+  const [loading, setLoading] = React.useState(true)
+  const [busy, setBusy] = React.useState(false)
+  /** 正在展开编辑的技能 id（同时只展开一个） */
+  const [editingId, setEditingId] = React.useState<string | null>(null)
+  /** 新建表单是否展开 */
+  const [creating, setCreating] = React.useState(false)
+  const [draftName, setDraftName] = React.useState("")
+  const [draftDesc, setDraftDesc] = React.useState("")
+  const [draftContent, setDraftContent] = React.useState("")
+
+  const load = React.useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await adminApi.listLabSkills()
+      setItems(res.skills)
+    } catch (err) {
+      toast.error(errMsg(err, t("adm.lab.skillSaveFailed")))
+    } finally {
+      setLoading(false)
+    }
+  }, [t])
+
+  React.useEffect(() => {
+    void load()
+  }, [load])
+
+  const enabledCount = items.filter((x) => x.enabled).length
+
+  const resetDraft = () => {
+    setDraftName("")
+    setDraftDesc("")
+    setDraftContent("")
+  }
+
+  const create = async () => {
+    setBusy(true)
+    try {
+      const res = await adminApi.createLabSkill({
+        name: draftName,
+        description: draftDesc,
+        content: draftContent,
+        enabled: true,
+      })
+      if (res.skill) setItems((prev) => [...prev, res.skill as AdminLabSkill])
+      setCreating(false)
+      resetDraft()
+      toast.success(t("adm.lab.skillSaved"))
+    } catch (err) {
+      toast.error(errMsg(err, t("adm.lab.skillSaveFailed")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const save = async (id: string) => {
+    setBusy(true)
+    try {
+      const res = await adminApi.updateLabSkill(id, {
+        name: draftName,
+        description: draftDesc,
+        content: draftContent,
+      })
+      if (res.skill) {
+        const updated = res.skill
+        setItems((prev) => prev.map((x) => (x.id === id ? updated : x)))
+      }
+      setEditingId(null)
+      toast.success(t("adm.lab.skillSaved"))
+    } catch (err) {
+      toast.error(errMsg(err, t("adm.lab.skillSaveFailed")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggle = async (row: AdminLabSkill) => {
+    try {
+      const res = await adminApi.updateLabSkill(row.id, { enabled: !row.enabled })
+      if (res.skill) {
+        const updated = res.skill
+        setItems((prev) => prev.map((x) => (x.id === row.id ? updated : x)))
+      }
+    } catch (err) {
+      toast.error(errMsg(err, t("adm.lab.skillSaveFailed")))
+    }
+  }
+
+  const remove = async (row: AdminLabSkill) => {
+    const ok = await confirmDialog({
+      title: t("adm.lab.skillDelete"),
+      desc: t("adm.lab.skillDeleteConfirm"),
+      okText: t("common.delete"),
+      danger: true,
+    })
+    if (!ok) return
+    try {
+      await adminApi.deleteLabSkill(row.id)
+      setItems((prev) => prev.filter((x) => x.id !== row.id))
+      if (editingId === row.id) setEditingId(null)
+    } catch (err) {
+      toast.error(errMsg(err, t("adm.lab.skillSaveFailed")))
+    }
+  }
+
+  /** 新建 / 编辑共用的三个输入框 */
+  const fields = (opts: { nameDisabled?: boolean }) => (
+    <div className="space-y-2">
+      <div className="space-y-1">
+        <Label className="text-xs">{t("adm.lab.skillName")}</Label>
+        <Input
+          value={draftName}
+          onChange={(e) => setDraftName(e.target.value)}
+          placeholder="pdf-forms"
+          disabled={opts.nameDisabled}
+        />
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          {t("adm.lab.skillNameHint")}
+        </p>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs">{t("adm.lab.skillDescLabel")}</Label>
+        <Input
+          value={draftDesc}
+          onChange={(e) => setDraftDesc(e.target.value)}
+          placeholder={t("adm.lab.skillDescPlaceholder")}
+        />
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          {t("adm.lab.skillDescHint")}
+        </p>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs">{t("adm.lab.skillContent")}</Label>
+        <Textarea
+          value={draftContent}
+          onChange={(e) => setDraftContent(e.target.value)}
+          rows={8}
+          className="font-mono text-[12px]"
+          placeholder={t("adm.lab.skillContentPlaceholder")}
+        />
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          {t("adm.lab.skillContentHint")}
+        </p>
+      </div>
+    </div>
+  )
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-start justify-between space-y-0">
+        <div className="space-y-1">
+          <CardTitle className="text-base">{t("adm.lab.skillTitle")}</CardTitle>
+          <CardDescription>{t("adm.lab.skillDesc")}</CardDescription>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Badge variant={enabledCount === 0 ? "outline" : "secondary"}>
+            {t("adm.lab.skillEnabledCount", { n: enabledCount })}
+          </Badge>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            onClick={() => {
+              resetDraft()
+              setEditingId(null)
+              setCreating((v) => !v)
+            }}
+          >
+            <Plus className="h-4 w-4" />
+            {t("adm.lab.skillNew")}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {creating && (
+          <div className="space-y-2 rounded-lg border border-dashed p-3">
+            {fields({})}
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setCreating(false)}>
+                {t("common.cancel")}
+              </Button>
+              <Button size="sm" disabled={busy} onClick={() => void create()}>
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {t("common.save")}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {loading ? (
+          <p className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
+            <Loader2 className="mr-1.5 inline h-3.5 w-3.5 animate-spin" />
+            {t("adm.lab.skillLoading")}
+          </p>
+        ) : items.length === 0 && !creating ? (
+          <p className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
+            {t("adm.lab.skillEmpty")}
+          </p>
+        ) : (
+          <div className="space-y-1.5">
+            {items.map((row) => {
+              const editing = editingId === row.id
+              return (
+                <div key={row.id} className="rounded-lg border">
+                  <div className="flex flex-wrap items-center gap-2 p-2">
+                    <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 accent-[var(--primary)]"
+                        checked={row.enabled}
+                        onChange={() => void toggle(row)}
+                      />
+                      {t("adm.lab.skillEnable")}
+                    </label>
+                    <code className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
+                      {row.name}
+                    </code>
+                    <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                      {row.description}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        if (editing) {
+                          setEditingId(null)
+                          return
+                        }
+                        setCreating(false)
+                        setEditingId(row.id)
+                        setDraftName(row.name)
+                        setDraftDesc(row.description)
+                        setDraftContent(row.content)
+                      }}
+                    >
+                      {editing ? t("common.cancel") : t("common.edit")}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+                      onClick={() => void remove(row)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                  {editing && (
+                    <div className="space-y-2 border-t p-3">
+                      {fields({ nameDisabled: true })}
+                      <div className="flex justify-end">
+                        <Button size="sm" disabled={busy} onClick={() => void save(row.id)}>
+                          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                          {t("common.save")}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
       </CardContent>
     </Card>
   )

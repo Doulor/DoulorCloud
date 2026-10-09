@@ -9,6 +9,7 @@ import * as subdomainHandlers from "./handlers/subdomains"
 import * as adminHandlers from "./handlers/admin"
 import * as adminLabHandlers from "./handlers/admin-lab"
 import * as labPromptHandlers from "./handlers/lab-prompts"
+import * as labSkillHandlers from "./handlers/lab-skills"
 import * as adminDnsHandlers from "./handlers/admin-dns"
 import * as adminSubdomainHandlers from "./handlers/admin-subdomains"
 import * as adminMailboxHandlers from "./handlers/admin-mailboxes"
@@ -1639,6 +1640,33 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/admin/lab/templates",
     method: "GET",
     handle: () => labPromptHandlers.listPromptTemplates(env, request),
+  },
+
+  // ---- 技能：站点默认（管理端 CRUD）----
+  {
+    kind: "exact",
+    path: "/admin/lab/skills",
+    method: "GET",
+    handle: () => labSkillHandlers.listAdminSkills(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/lab/skills",
+    method: "POST",
+    handle: () => labSkillHandlers.createAdminSkill(env, request),
+  },
+
+  // 同 templates：一条路径接 PUT / DELETE 两种 method ⇒ 只能用 branch
+  {
+    kind: "branch",
+    match: (routePath: string) => routePath.match(/^\/admin\/lab\/skills\/([^/]+)$/),
+    handle: (skillMatch: RegExpMatchArray, method: string) => {
+      const sid = decodeURIComponent(skillMatch[1])
+      if (method === "DELETE") return labSkillHandlers.deleteAdminSkill(env, request, sid)
+      if (method === "PUT") return labSkillHandlers.updateAdminSkill(env, request, sid)
+      return null
+    },
   },
 
   {
@@ -3756,6 +3784,40 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/lab/settings",
     method: "GET",
     handle: () => labHandlers.getLabSettings(env, request),
+  },
+
+  // ---- 技能（用户端：列表 / 导入自己的技能）----
+  {
+    kind: "exact",
+    path: "/lab/skills",
+    method: "GET",
+    handle: () => labSkillHandlers.listSkills(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/lab/skills",
+    method: "POST",
+    handle: () => labSkillHandlers.importSkill(env, request),
+  },
+
+  // 取技能正文（渐进式披露第二步）。⚠️ 用独立路径而不是 /lab/skills/:id，
+  //    否则会和下面那条 branch 抢匹配（branch 只处理 DELETE，GET 会落空）。
+  {
+    kind: "exact",
+    path: "/lab/skill-content",
+    method: "GET",
+    handle: () => labSkillHandlers.getSkillContent(env, request),
+  },
+
+  {
+    kind: "branch",
+    match: (routePath: string) => routePath.match(/^\/lab\/skills\/([^/]+)$/),
+    handle: (skillMatch: RegExpMatchArray, method: string) => {
+      const sid = decodeURIComponent(skillMatch[1])
+      if (method === "DELETE") return labSkillHandlers.deleteSkill(env, request, sid)
+      return null
+    },
   },
 
   {

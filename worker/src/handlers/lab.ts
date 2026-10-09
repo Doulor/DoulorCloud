@@ -40,6 +40,7 @@ import { likeContains } from "../sql-like"
 import { LAB_KEY_NAME, LAB_KEY_NAMES, isLabKeyName } from "../lab-key"
 import { buildPreviewDoc } from "../lab-preview"
 import { loadEnabledTemplates } from "./lab-prompts"
+import { loadSkillIndex } from "./lab-skills"
 import {
   consumeLabQuota,
   isFreeModel,
@@ -530,7 +531,7 @@ export async function listLabChannels(env: Env, request: Request): Promise<Respo
  * 空串就表示「用默认」，避免同一段长文本在前后端各存一份、改一处漏一处。
  */
 export async function getLabSettings(env: Env, request: Request): Promise<Response> {
-  await requireUser(env, request)
+  const user = await requireUser(env, request)
   const agentPrompt = await getSetting(env, "lab_agent_prompt")
   const reviewRequired = (await getSetting(env, "lab_review_required")) === "1"
   /**
@@ -539,7 +540,14 @@ export async function getLabSettings(env: Env, request: Request): Promise<Respon
    * 一份都没有时前端回退到 agentPrompt / 内置默认（见 buildSystemPrompt 的优先级）。
    */
   const templates = await loadEnabledTemplates(env)
-  return json({ agentPrompt, reviewRequired, templates })
+  /**
+   * 技能**索引**（只有 name + description，**不含正文**）。
+   * 这就是「渐进式披露」：系统提示里只放一行行目录，让模型自己判断该不该用；
+   * 真要用了它输出 <lab_skill name="…"/>，由 chat 去读全文再回喂。
+   * 所以这里可以放心把索引全量下发，正文一份都不带。
+   */
+  const skills = await loadSkillIndex(env, user.id)
+  return json({ agentPrompt, reviewRequired, templates, skills })
 }
 
 // ---------------------------------------------------------------------------

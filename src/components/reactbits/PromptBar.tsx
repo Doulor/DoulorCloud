@@ -87,6 +87,12 @@ export interface PromptBarProps {
   onSend?: (text: string, detail: PromptBarSendDetail) => void;
   onStop?: () => void;
   onAttach?: () => string | string[] | void | Promise<string | string[] | void>;
+  /**
+   * ⚠️ 本站新增：给调用方一个「劫持某个 source」的口子。
+   * 比如「技能」这一项不该往输入框插 `@技能`，而应该弹一个导入/管理对话框。
+   * 返回 true 表示调用方已经处理，跳过默认的「插入 @名字」。
+   */
+  onSource?: (key: string) => boolean;
   onDictate?: () => string | void | Promise<string | void>;
   /** 允许外部替换「发送 / 停止」那枚按钮（不传则用自带的 SendGlyph）。 */
   renderSend?: (state: {
@@ -123,7 +129,10 @@ type Row = {
   attach?: boolean;
 };
 type Token = { kind: 'at' | 'slash'; query: string; start: number };
-type Latest = Pick<PromptBarProps, 'onSend' | 'onStop' | 'onAttach' | 'onDictate' | 'onEffortChange'>;
+type Latest = Pick<
+  PromptBarProps,
+  'onSend' | 'onStop' | 'onAttach' | 'onDictate' | 'onEffortChange' | 'onSource'
+>;
 type Spark = {
   x: number;
   y: number;
@@ -256,6 +265,7 @@ const PromptBar: React.FC<PromptBarProps> = ({
   onSend,
   onStop,
   onAttach,
+  onSource,
   onDictate,
   renderSend,
   labels = {},
@@ -292,7 +302,7 @@ const PromptBar: React.FC<PromptBarProps> = ({
   const lastOpen = useRef<string | null>(null);
   const dictation = useRef(0);
   const latest = useRef<Latest>({});
-  latest.current = { onSend, onStop, onAttach, onDictate, onEffortChange };
+  latest.current = { onSend, onStop, onAttach, onDictate, onEffortChange, onSource };
 
   const [draft, setDraft] = useState('');
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -537,6 +547,13 @@ const PromptBar: React.FC<PromptBarProps> = ({
       setModelKey(row.key);
       setModelOpen(false);
       focusInput();
+      return;
+    }
+    // ⚠️ 本站改动：先问调用方要不要自己处理这一项（见 onSource 的注释）。
+    //    放在「选模型」之后 —— 模型选择必须保留原行为。
+    if (latest.current.onSource?.(row.key)) {
+      setPlusOpen(false);
+      setDismissed(false);
       return;
     }
     const head = token ? draft.slice(0, token.start) : draft;

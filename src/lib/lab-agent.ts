@@ -32,6 +32,11 @@ export type ToolName =
   | "site"
   /** 请求注入「站内操作手册」——手册很长，按需给，不常驻系统提示 */
   | "site_manual"
+  /**
+   * 读取一个「技能」的正文 —— 渐进式披露的第二步。
+   * 系统提示里只有技能的「名字 + 一句话」，模型判断相关时才用它去读全文。
+   */
+  | "skill"
 
 /** 从（可能还没流完的）模型输出里解析出的片段，按出现顺序排列 */
 export type Segment =
@@ -45,6 +50,8 @@ export type Segment =
       scope?: string
       /** 仅 <lab_site> 用：要执行哪个操作（见 lab-site.ts 的 SITE_OPS） */
       op?: string
+      /** 仅 <lab_skill> 用：要读哪个技能（见迁移 0141 的 lab_skills.name） */
+      skill?: string
       content: string
       complete: boolean
     }
@@ -67,7 +74,7 @@ const MAX_READBACK_CHARS = 20_000
 // 虽然末尾的 \b 已经能挡住把 lab_site_manual 误读成 lab_site（"e" 与 "_" 之间没有词边界），
 // 但顺序写对更不容易被人改坏。
 const TAG_RE =
-  /^<lab_(write|read|replace|list|delete|grep|run|need_vm|site_manual|site)\b([^>]*?)(\/?)>$/
+  /^<lab_(write|read|replace|list|delete|grep|run|need_vm|site_manual|skill|site)\b([^>]*?)(\/?)>$/
 
 /**
  * 带正文体、需要等闭合标签的工具。
@@ -115,6 +122,8 @@ export function parseAgentText(text: string): Segment[] {
     const pattern = /pattern\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
     const scope = /\bin\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
     const op = /\bop\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
+    // <lab_skill name="pdf-forms"/> —— 用 name 属性（和站点技能表的主键同名）
+    const skill = /\bname\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
     const selfClosed = m[3] === "/"
 
     if (BODY_TOOLS.includes(tool) && !selfClosed) {
@@ -127,6 +136,7 @@ export function parseAgentText(text: string): Segment[] {
           tool,
           path,
           op,
+          skill,
           content: text.slice(gt + 1).replace(/^\n/, ""),
           complete: false,
         })
@@ -139,6 +149,7 @@ export function parseAgentText(text: string): Segment[] {
         tool,
         path,
         op,
+        skill,
         content: text.slice(gt + 1, close).replace(/^\n/, ""),
         complete: true,
       })
@@ -152,6 +163,7 @@ export function parseAgentText(text: string): Segment[] {
         pattern,
         scope,
         op,
+        skill,
         content: "",
         complete: true,
       })
@@ -195,7 +207,9 @@ export function needsToolResult(
         s.tool === "delete" ||
         s.tool === "grep" ||
         s.tool === "run" ||
-        s.tool === "site")
+        s.tool === "site" ||
+        // 技能正文要去服务端取，必须回喂一轮把正文交给模型，否则它拿不到内容
+        s.tool === "skill")
   )
 }
 
@@ -225,7 +239,8 @@ export function buildToolResults(
   files: FileMap,
   failures?: Map<number, string>,
   runResults?: Map<number, string>,
-  siteResults?: Map<number, string>
+  siteResults?: Map<number, string>,
+  skillResults?: Map<number, string>
 ): string {
   const parts: string[] = ["工具执行结果："]
   segments.forEach((s, i) => {
@@ -254,6 +269,11 @@ export function buildToolResults(
       parts.push(
         formatted ??
           `[执行命令] ${s.content.trim()}\n(没能执行：浏览器终端未就绪 —— 需要先申请 <lab_need_vm/>)`
+      )
+    } else if (s.tool === "skill") {
+      parts.push(
+        skillResults?.get(i) ??
+          `[技能 ${s.skill ?? "?"}] (没读到：这次轮次被中断了，可以重试一次)`
       )
     } else if (s.tool === "site") {
       parts.push(
@@ -887,7 +907,11 @@ export const DEFAULT_AGENT_SYSTEM = AGENT_SYSTEM
  * 把「当前有哪些文件」告诉模型，省掉一轮摸索。
  * `override` 是管理面板里配置的提示词：非空则整体替换内置提示词。
  */
-export function buildSystemPrompt(files: FileMap, override?: string): string {
+export function buildSystemPrompt(
+  files: FileMap,
+  override?: string,
+  skills?: { name: string; description: string }[]
+): string {
   const base = override && override.trim() ? override.trim() : AGENT_SYSTEM
   const paths = Object.keys(files).sort()
   const list = paths.length
@@ -895,9 +919,25 @@ export function buildSystemPrompt(files: FileMap, override?: string): string {
         .map((p) => `- ${p}（${files[p].split("\n").length} 行）`)
         .join("\n")
     : "（空项目，还没有任何文件）"
+  /**
+   * 技能索引 —— **渐进式披露的第一步**。
+   *
+   * 这里只列「名字：一句话」，**不放正文**：
+   *   · 技能再多也不会把提示词撑爆（每条就一行）；
+   *   · 模型不用为几十份用不上的说明书付 token；
+   *   · 正文等它判断相关了，用 <lab_skill name="…"/> 现读（见迁移 0141 的注释）。
+   *
+   * 措辞上刻意写「只在确实相关时才用」：不这么写，模型会倾向于「既然有技能就都试一遍」。
+   */
+  const skillBlock = skills?.length
+    ? `\n\n可用技能（**只在确实和当前任务相关时**才用，不要为了用而用）：\n` +
+      skills.map((s) => `- ${s.name}：${s.description}`).join("\n") +
+      `\n要使用某个技能：先输出 <lab_skill name="技能名"/> 读取它的完整说明，再按说明做。` +
+      `**不要凭技能名猜内容。**`
+    : ""
   // 站内操作索引**始终追加**，即使管理面板覆盖了提示词 ——
   // 否则一改提示词，模型就不知道有这组能力了（前端照样认得标签，但模型不会去用）。
-  return `${base}\n\n${SITE_CAPABILITY_INDEX}\n\n当前项目文件：\n${list}`
+  return `${base}\n\n${SITE_CAPABILITY_INDEX}\n\n当前项目文件：\n${list}${skillBlock}`
 }
 
 /**
