@@ -16,11 +16,12 @@
  * 断言取**不变式**（发放次数 == 记录行数 ≤ 1）而不是具体路径：这样即便将来实现方式
  * 再变，只要「一次奖励」的语义被破坏就会红。
  */
-import { describe, it, expect, beforeEach } from "vitest"
+import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { env } from "cloudflare:workers"
-import { makeUser, setSetting } from "./helpers"
+import { makeUser, setSetting, authRequest, fetchSelf } from "./helpers"
 import { uuid } from "../src/crypto"
 import { grantInviteReward } from "../src/invite-rewards"
+import { resetWb2ApiCache } from "../src/wb2api-client"
 
 const NEWAPI = "https://api.doulor.cn"
 
@@ -376,5 +377,187 @@ describe("邀请奖励：正常路径与失败语义不回归", () => {
 
     expect(grantCalls).toHaveLength(0)
     expect(await rewardRows(invitee.id)).toBe(0)
+  })
+})
+
+/**
+ * 端到端复现：**用户不写脚本就能撞上**的那条路径。
+ *
+ * 上面所有用例都是直接调 `grantInviteReward`，证明的是「这个函数是原子的」；
+ * 但 issue #38 的核心主张是「两条触发路径并发时用户能自然撞上」，那要证明的是
+ * 「经真实 HTTP 路由并发请求时只发一次」。两者不是同一件事 —— 中间还隔着
+ * `requireUser` 读快照、二次限额校验、`env.DB.batch` 写绑定与权限。
+ *
+ * 实测（旧代码，3 轮一致）：两个标签页各走一遍 `login/poll`，NewAPI 发订阅 **2** 次、
+ * `invite_rewards` 只有 1 行 —— 与 issue 里的探针数字吻合。
+ */
+describe("邀请奖励：经真实路由并发（用户可自然触发）", () => {
+  const BASE = "https://wb2api.doulor.cn"
+  /** poll 依次返回的上游 uid：模拟「两个标签页各登一个账号」 */
+  let uidQueue: string[] = []
+  let poolUids: string[] = []
+  let restoreRouteFetch: (() => void) | null = null
+
+  /**
+   * 打桩反代网关：`overview` 报池内容（本站据此判断「有没有带来新资源」），
+   * `login/poll` 按 `uidQueue` 依次返回不同上游账号。
+   *
+   * ⚠️ 必须用**两个不同 uid**：`wb2api_bindings.uid` 有唯一索引（0034_wb2api.sql:37），
+   * 同一账号并发时第二个请求在写绑定那步就撞索引 500 了，压根走不到发奖 ——
+   * 实测确认（同 uid 时两个 poll 状态 = 200/500）。所以「两个标签页」这个说法
+   * 必须限定为「两个上游账号」，否则不成立。
+   */
+  function stubGateway(): void {
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (url.startsWith(BASE)) {
+        if (url.includes("/panel/api/overview")) {
+          return jsonResponse({
+            ok: true,
+            total: poolUids.length,
+            healthy: poolUids.length,
+            cooling: 0,
+            disabled: 0,
+            accounts: poolUids.map((uid) => ({ uid })),
+          })
+        }
+        if (url.includes("/login/start")) {
+          return jsonResponse({ ok: true, url: "https://example.com/oauth", state: "st-1" })
+        }
+        if (url.includes("/login/poll")) {
+          const uid = uidQueue.shift() ?? "uid-fallback"
+          // 网关是先 Add 进池、再返回结果
+          poolUids.push(uid)
+          await new Promise((r) => setTimeout(r, GRANT_LATENCY_MS))
+          return jsonResponse({ ok: true, done: true, uid, nickname: uid })
+        }
+        return jsonResponse({ ok: false }, 404)
+      }
+      if (url.startsWith(NEWAPI)) {
+        if (url.includes("/subscription/admin/users/")) {
+          grantCalls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null })
+          await new Promise((r) => setTimeout(r, GRANT_LATENCY_MS))
+          return jsonResponse({ success: true, message: "ok" })
+        }
+        return jsonResponse({ success: true, data: {} })
+      }
+      return original(input as RequestInfo, init)
+    }) as unknown as typeof fetch
+    restoreRouteFetch = () => {
+      globalThis.fetch = original
+    }
+  }
+
+  /** 造一对「被邀请人（已用邀请人的码注册、ai 权限明确为 false）+ 邀请人（已开通中转站）」 */
+  async function seedForRoute() {
+    const inviter = await makeUser()
+    const now = new Date().toISOString()
+    const codeId = `code-${inviter.id}`
+    await env.DB.prepare(
+      "INSERT INTO invite_codes (id, code, created_by, max_uses, used_count, created_at)" +
+        " VALUES (?, ?, ?, 10, 1, ?)"
+    )
+      .bind(codeId, `CODE${inviter.id.slice(0, 8)}`, inviter.id, now)
+      .run()
+    await env.DB.prepare(
+      "INSERT INTO newapi_accounts (user_id, newapi_user_id, username, email, enc_token, created_at)" +
+        " VALUES (?, ?, ?, ?, 'x', ?)"
+    )
+      .bind(
+        inviter.id,
+        Math.floor(Math.random() * 100_000_000) + 1000,
+        inviter.username,
+        `${inviter.username}@doulor.cn`,
+        now
+      )
+      .run()
+
+    const invitee = await makeUser()
+    await env.DB.prepare("UPDATE users SET invite_code_id = ? WHERE id = ?")
+      .bind(codeId, invitee.id)
+      .run()
+    await env.DB.prepare("UPDATE users SET permissions = ? WHERE id = ?")
+      .bind(
+        JSON.stringify({ r2: true, ai: false, frp: true, profile: true, proxy: true }),
+        invitee.id
+      )
+      .run()
+    return { invitee, inviterId: inviter.id }
+  }
+
+  async function startLogin(user: { cookie: string }): Promise<string> {
+    const res = await fetchSelf(
+      authRequest(user, "/api/wb2api/login/start", {
+        method: "POST",
+        body: JSON.stringify({ acknowledged: true }),
+      })
+    )
+    expect(res.status).toBe(200)
+    return ((await res.json()) as { sessionId: string }).sessionId
+  }
+
+  async function poll(user: { cookie: string }, sessionId: string) {
+    const res = await fetchSelf(
+      authRequest(user, `/api/wb2api/login/poll?session=${encodeURIComponent(sessionId)}`)
+    )
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> }
+  }
+
+  beforeEach(async () => {
+    uidQueue = []
+    poolUids = []
+    restoreRouteFetch = null
+    resetWb2ApiCache()
+    await env.DB.prepare("DELETE FROM rate_limits").run()
+    await setSetting("wb2api_max_bindings", "3")
+    await setSetting("wb2api_enabled", "1")
+    await setSetting("invite_reward_enabled", "1")
+    await setSetting("invite_reward_plan_id", "2")
+  })
+
+  afterEach(() => {
+    restoreRouteFetch?.()
+    restoreRouteFetch = null
+    resetWb2ApiCache()
+  })
+
+  it("两个标签页各登一个上游账号、并发 poll：只开一张订阅（旧代码开两张）", async () => {
+    const { invitee } = await seedForRoute()
+    stubGateway()
+    uidQueue = ["uid-a", "uid-b"]
+
+    const s1 = await startLogin(invitee)
+    const s2 = await startLogin(invitee)
+    const [r1, r2] = await Promise.all([poll(invitee, s1), poll(invitee, s2)])
+
+    // 两个请求都成功走到了发奖环节（没被前置校验挡掉）—— 否则这条用例是假绿
+    expect([r1.status, r2.status]).toEqual([200, 200])
+    expect({ grants: grantCalls.length, rows: await rewardRows(invitee.id) }).toEqual({
+      grants: 1,
+      rows: 1,
+    })
+  })
+
+  it("同一上游账号并发 poll：第二个请求到不了发奖环节（钉住「两个上游账号」这个前提）", async () => {
+    const { invitee } = await seedForRoute()
+    stubGateway()
+    uidQueue = ["uid-same", "uid-same"]
+
+    const s1 = await startLogin(invitee)
+    const s2 = await startLogin(invitee)
+    const [r1, r2] = await Promise.all([poll(invitee, s1), poll(invitee, s2)])
+
+    // ⚠️ 这条用例**不验证修复**（`grants: 1` 由第一个请求单独保证，去掉占位也照样绿）。
+    //    它的作用是钉住一个前提：同 uid 并发时第二个请求根本走不到 `grantInviteReward` ——
+    //    要么 `SELECT existing` 早于对方 INSERT 提交、走 `existing` 分支（200，但那条路
+    //    `aiGranted` 恒为 false），要么撞 `wb2api_bindings.uid` 唯一索引（500）。
+    //    实测 6 轮：5 次 [200,500]、1 次 [200,200] ⇒ **不能断言状态码**，那是在赌时序。
+    //    所以 issue/PR 里「两个标签页」必须限定为「两个上游账号」，否则不成立。
+    const statuses = [r1.status, r2.status].sort()
+    expect(statuses[0]).toBe(200)
+    expect(statuses[1]).toBeGreaterThanOrEqual(200)
+    expect(grantCalls.length).toBeLessThanOrEqual(1)
   })
 })
