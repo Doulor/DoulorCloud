@@ -131,6 +131,11 @@ export interface Announcement {
   pinned: boolean
   /** 弹窗模式：none（不弹）/ once（仅一次）/ every（每次都弹） */
   popupMode: "none" | "once" | "every"
+  /**
+   * 该用户是否已「不再显示」这条公告（服务端记录，见 POST /announcements/:id/dismiss）。
+   * 管理端列表不填（恒为 false）；用户侧列表以它为准，localStorage 只作首屏快读缓存。
+   */
+  dismissed: boolean
   /** 发布状态：draft 草稿（用户不可见）/ scheduled 定时 / published 已发布 */
   status: AnnouncementStatus
   /** 定时发布时间（ISO）；scheduled 时有值 */

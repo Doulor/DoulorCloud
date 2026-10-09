@@ -1048,6 +1048,24 @@ html.motion-on .motion-reveal.motion-revealed {
   translate: none;
 }
 
+/* ---- 公告弹窗：翻到下一条时的卡片推入（配合 dashboard.tsx 的 .ann-card-swap）----
+ * 一次可能连着弹好几条公告，点「知道了 / 不再显示」翻页时给一点方向感：
+ * 新卡片从右侧轻推入 + 淡入。translate 是独立属性，不碰 transform
+ * （同 motion-reveal 的红线）。关闭「界面动效」后这条不命中，切页就是瞬切。 */
+@keyframes ann-card-in {
+  from {
+    opacity: 0;
+    translate: 18px 0;
+  }
+  to {
+    opacity: 1;
+    translate: none;
+  }
+}
+html.motion-on .ann-card-swap {
+  animation: ann-card-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 /* ==========================================================================
    数据就绪：骨架 → 内容 的交叉淡化（配合 components/data-fade.tsx）
    两层用 grid 叠在同一个格子里 ⇒ 容器高度自动取两者较高的那个，

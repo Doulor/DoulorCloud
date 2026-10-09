@@ -611,6 +611,7 @@ export const en: Record<MessageKey, string> = {
   "dash.copy.label.direct": "Direct link",
   "dash.dialog.hideForever": "Don't show again",
   "dash.dialog.gotIt": "Got it",
+  "dash.dialog.batchHint": "{n} announcements in this batch",
   "dash.cat.general": "Announcements",
   "dash.cat.frp": "Tunnels",
   "dash.cat.ai": "AI Gateway",
