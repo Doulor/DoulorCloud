@@ -1687,9 +1687,13 @@ async function deliverAuto(
 /**
  * 把商品库存还回去（有限量的商品才需要）。商品已被删时静默跳过。
  *
+ * ⚠️ 只允许用在「**还没有订单行**」的补偿路径（下单失败，`buyProduct` 第一个 catch）。
+ *    只要订单行已经落库，就必须用 `restoreStockForOrder` —— 否则「退款」与
+ *    「到期 cron」会各还一次，库存凭空变多（见该函数的说明）。
+ *
  * @returns 实际改动的行数（0 = 商品已删 / 不限量，没还成）
  */
-async function restoreStock(env: Env, productId: string | null): Promise<number> {
+async function restoreStockByProduct(env: Env, productId: string | null): Promise<number> {
   if (!productId) return 0
   const res = await env.DB.prepare(
     "UPDATE point_products SET stock = stock + 1, updated_at = ? WHERE id = ? AND stock IS NOT NULL"
@@ -1697,6 +1701,41 @@ async function restoreStock(env: Env, productId: string | null): Promise<number>
     .bind(new Date().toISOString(), productId)
     .run()
   return res.meta?.changes ?? 0
+}
+
+/**
+ * 归还某张订单占用的库存 —— **订单级原子占位**，同一张单只还一次。
+ *
+ * 为什么需要占位：归还库存有两条路径会碰到同一张单 —— 退款（`refundOrderCore`）
+ * 与到期 cron（`expireRentalOrders`）。旧实现用调用方快照的 `expireHandledAt`
+ * 判断「还过没有」，而 cron 会在两次 await 之间把标记写掉，退款那侧的快照仍是
+ * `null` ⇒ 两边各还一次，库存凭空 +1（2026-10-08 探针实测复现）。
+ *
+ * 占位拿到手才真的 +1；拿不到说明别人已经还过，静默跳过（不是错误）。
+ *
+ * ⚠️ 两条语句必须放在 `batch` 里（事务）：只有「占位」与「+1」在同一个事务里，
+ *    才不存在「占位已写、库存没加」的中间态。分开写的话，isolate 在这两条语句
+ *    之间被墙钟掐掉（cron 跑在 ctx.waitUntil 里）就会**永久吞掉一份库存** ——
+ *    该单被占位挡住，cron 与退款都不会再还它，而且没有任何 catch 会执行。
+ *
+ * 商品已删 / 不限量时库存语句匹配 0 行，但占位照样用掉（返回 0）——
+ * 免得同一张单被无限重试。
+ *
+ * @returns 实际归还的份数（0 = 已还过 / 商品已删 / 不限量）
+ */
+async function restoreStockForOrder(env: Env, orderId: string): Promise<number> {
+  const [stockRes] = await env.DB.batch([
+    // 库存 +1 只对「本单占位还是 0」生效：占位与加库存在同一事务里，互为条件。
+    env.DB.prepare(
+      "UPDATE point_products SET stock = stock + 1, updated_at = ? " +
+        "WHERE stock IS NOT NULL " +
+        "AND id = (SELECT product_id FROM point_orders WHERE id = ? AND stock_restored = 0)"
+    ).bind(new Date().toISOString(), orderId),
+    env.DB.prepare(
+      "UPDATE point_orders SET stock_restored = 1 WHERE id = ? AND stock_restored = 0"
+    ).bind(orderId),
+  ])
+  return stockRes.meta?.changes ?? 0
 }
 
 /** 归还一个「当日名额」（每日限量买的退单/失败补偿用） */
@@ -1920,7 +1959,7 @@ export async function buyProduct(
       }
     }
     if (stockReserved) {
-      try { await restoreStock(env, product.id) }
+      try { await restoreStockByProduct(env, product.id) }
       catch (stockErr) { console.error("商城库存补偿失败:", orderId, stockErr) }
     }
     if (dailyReserved) {
@@ -2056,7 +2095,8 @@ export async function buyProduct(
           detail: `购买「${product.name}」失败退回`,
           dedupKey: `shop-refund:${orderId}`,
         })
-        await restoreStock(env, product.id)
+        // 订单行已落库 ⇒ 必须走订单级占位（退款路径也可能在还同一份库存）
+        await restoreStockForOrder(env, orderId)
         if (dailyReserved) await releaseDailySlot(env, product.id)
       } catch (compensationErr) {
         console.error("自动交付失败后的商城补偿失败:", orderId, compensationErr)
@@ -2521,10 +2561,9 @@ export async function refundOrderCore(
     throw new ApiError(500, "退款失败，请稍后重试", "REFUND_FAILED")
   }
 
-  // 3. 库存还回货架（限量的商品才需要；商品已删则静默跳过）
-  if (!order.expireHandledAt) {
-    await restoreStock(env, order.productId)
-  }
+  // 3. 库存还回货架（订单级原子占位：到期 cron 也可能已经还过这份库存，
+  //    只认占位不认调用方快照 —— 商品已删 / 不限量时占位后返回 0，静默跳过）
+  await restoreStockForOrder(env, order.id)
 
   // 4. 补写订单备注与（售后流程时）售后收尾字段 —— 状态已在第 0 步抢占时落库
   const now = new Date().toISOString()
@@ -3161,8 +3200,8 @@ export async function expireRentalOrders(
       if (verdict === "revoked") res.permissionsRevoked++
       else if (verdict === "kept") res.keptWithOtherSource++
 
-      // 归还库存（不限量 / 商品已删时 restoreStock 返回 0，静默跳过）
-      if ((await restoreStock(env, order.productId)) > 0) res.stockReturned++
+      // 归还库存（订单级占位：已还过 / 不限量 / 商品已删时返回 0，静默跳过）
+      if ((await restoreStockForOrder(env, order.id)) > 0) res.stockReturned++
 
       await env.DB.prepare("UPDATE point_orders SET expire_handled_at = ? WHERE id = ?")
         .bind(now, order.id)
