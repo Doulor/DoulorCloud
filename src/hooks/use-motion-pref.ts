@@ -19,11 +19,23 @@ import * as React from "react"
 const MOTION_KEY = "doulor-motion"
 /** 点击粒子的独立偏好键（2026-10-08 站长要求：其他动效默认开，点击动效默认关） */
 const SPARK_KEY = "doulor-motion-spark"
+/**
+ * 「AI 实验室动效」独立偏好键（2026-10-09 站长要求）。
+ *
+ * 它控制的是实验室那个板块**自己的一套 UI**（聊天框、发送按钮、思考中标记、
+ * 模式切换、加载圆圈……）。和上面那个全站总闸是**并列**关系，不互相包含：
+ *   · 总闸关、实验室开 ⇒ 站点其他地方的动效停，实验室里那套照常；
+ *   · 总闸开、实验室关 ⇒ 实验室退回「普通样式」，别处不动。
+ * 默认**开**（站长指定的默认），系统要求「减少动态效果」时同样默认关。
+ */
+const LABFX_KEY = "doulor-motion-lab"
 
 /** 动效层的总闸类名：挂在 <html> 上，所有新动效规则只认它 */
 export const MOTION_CLASS = "motion-on"
 /** 点击粒子的独立开关类名：ClickSpark 要「总闸 + 这个」两个类同时在才工作 */
 export const SPARK_CLASS = "motion-spark"
+/** AI 实验室那套 UI 的开关类名：实验室里的新动效规则只认它 */
+export const LABFX_CLASS = "motion-lab"
 
 function reducedMotion(): boolean {
   return (
@@ -51,6 +63,18 @@ export function sparkPrefInitial(): boolean {
   return localStorage.getItem(SPARK_KEY) === "1"
 }
 
+/**
+ * AI 实验室动效的初始值：存过听存的；**没存过 = 默认开**，
+ * 但系统要求「减少动态」时默认关（与全站总闸同一条无障碍底线）。
+ */
+export function labFxPrefInitial(): boolean {
+  if (typeof window === "undefined") return false
+  const raw = localStorage.getItem(LABFX_KEY)
+  if (raw === "1") return true
+  if (raw === "0") return false
+  return !reducedMotion()
+}
+
 /** 把偏好立刻落到 <html> 上（类才是真正生效的总闸） */
 function applyFlag(cls: string, on: boolean) {
   document.documentElement.classList.toggle(cls, on)
@@ -64,11 +88,13 @@ function applyFlag(cls: string, on: boolean) {
 if (typeof window !== "undefined") {
   applyFlag(MOTION_CLASS, motionPrefInitial())
   applyFlag(SPARK_CLASS, sparkPrefInitial())
+  applyFlag(LABFX_CLASS, labFxPrefInitial())
 }
 
 export function useMotionPref() {
   const [motionOn, setMotionOn] = React.useState<boolean>(motionPrefInitial)
   const [sparkOn, setSparkOn] = React.useState<boolean>(sparkPrefInitial)
+  const [labFxOn, setLabFxOn] = React.useState<boolean>(labFxPrefInitial)
 
   React.useEffect(() => {
     applyFlag(MOTION_CLASS, motionOn)
@@ -80,5 +106,10 @@ export function useMotionPref() {
     localStorage.setItem(SPARK_KEY, sparkOn ? "1" : "0")
   }, [sparkOn])
 
-  return { motionOn, setMotionOn, sparkOn, setSparkOn }
+  React.useEffect(() => {
+    applyFlag(LABFX_CLASS, labFxOn)
+    localStorage.setItem(LABFX_KEY, labFxOn ? "1" : "0")
+  }, [labFxOn])
+
+  return { motionOn, setMotionOn, sparkOn, setSparkOn, labFxOn, setLabFxOn }
 }

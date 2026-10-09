@@ -43,7 +43,8 @@ import {
   type NewApiModels,
   type NewApiStatus,
   type StorageAccount,
-  type StorageObject,
+  type StorageList,
+  type StorageShare,
   type StorageOverview,
   type StoragePrefixCreated,
 
@@ -92,12 +93,12 @@ import {
   type AdminWb2ApiBinding,
   type AdminWb2ApiConfig,
   type AdminWb2ApiPool,
-  type Cli2ApiStatus,
-  type Cli2ApiLoginStart,
-  type Cli2ApiLoginPoll,
-  type AdminCli2ApiBinding,
-  type AdminCli2ApiConfig,
-  type AdminCli2ApiPool,
+  type Qoder2ApiStatus,
+  type Qoder2ApiLoginStart,
+  type Qoder2ApiLoginPoll,
+  type AdminQoder2ApiBinding,
+  type AdminQoder2ApiConfig,
+  type AdminQoder2ApiPool,
   type FeedbackOverview,
   type AdminFeedbackOverview,
   type AdminFeedbackItem,
@@ -495,6 +496,86 @@ export const domainApi = {
 
 // ---- 管理员 ----
 
+/** 管理端 · AI 实验室的一条免费渠道（密钥永不回明文，只给尾号） */
+export interface AdminLabChannel {
+  id: string
+  name: string
+  baseUrl: string
+  /** 该渠道固定的模型名；空串表示沿用用户在站内选的模型 */
+  model: string
+  hasKey: boolean
+  keyTail: string
+}
+
+/** 管理端 · AI 实验室配置 */
+export interface AdminLabConfig {
+  /** user = 各用户自己的额度；admin = 全站统一用管理员提供的 Key */
+  aiSource: "user" | "admin"
+  /** 选了 admin 但没配 Key（后端会自动退回按用户扣费）—— 面板要红字提示 */
+  adminUnavailable: boolean
+  hasAdminKey: boolean
+  adminKeyTail: string
+  /** 免费额度次数上限，0 = 不限量 */
+  freeQuota: number
+  freeQuotaPeriod: "day" | "month" | "total"
+  /**
+   * 免费模型白名单。**空数组 = 全部模型免费**；
+   * 非空时只有名单内的模型走统一 Key 并标「免费试用」，
+   * 名单外的仍可选，但改用用户自己的中转站额度。
+   */
+  freeModels: string[]
+  /** 站内模型白名单；**空数组 = 不过滤**（站内返回什么就显示什么） */
+  siteModels: string[]
+  /** 造物集：作品公开前是否需要管理员审核（默认开启） */
+  reviewRequired: boolean
+  /** 系统提示词覆盖值；空串 = 用前端内置默认 */
+  agentPrompt: string
+  channels: AdminLabChannel[]
+}
+
+/** 管理端审核队列里的一条作品 */
+/** 系统提示词模板（管理端视角：带正文，可编辑） */
+export interface AdminLabPromptTemplate {
+  id: string
+  name: string
+  content: string
+  enabled: boolean
+  sortOrder: number
+  createdAt: string
+  updatedAt: string
+}
+
+/** 系统提示词模板（用户端视角：只需要切换用的 id/名字 + 正文） */
+export interface LabPromptTemplate {
+  id: string
+  name: string
+  content: string
+}
+
+export interface AdminLabReview {
+  id: string
+  name: string
+  description: string
+  icon: string
+  hasCover: boolean
+  visibility: string
+  reviewNote: string
+  createdAt: string
+  updatedAt: string
+  publishedAt: string | null
+  authorName: string
+  authorUsername: string
+}
+
+/** 管理端提交的一条渠道（apiKey 留空 = 不修改已存的密钥） */
+export interface AdminLabChannelInput {
+  id?: string
+  name: string
+  baseUrl: string
+  model: string
+  apiKey?: string
+}
+
 export const adminApi = {
   /**
    * 用户列表。不传参数 = 旧的全量模式（向后兼容）；
@@ -750,6 +831,83 @@ export const adminApi = {
       method: "PUT",
       body: JSON.stringify(payload),
     }),
+
+  /** AI 实验室配置：模型来源、统一 Key、免费额度、提示词、免费渠道 */
+  getLabConfig: () => request<AdminLabConfig>("/admin/lab/config"),
+
+  /**
+   * 字段级更新：**没传的键一律不动**。
+   * `adminApiKey` 留空表示不修改统一 Key；要清空请显式传 `clearAdminKey`。
+   */
+  saveLabConfig: (payload: {
+    aiSource?: "user" | "admin"
+    adminApiKey?: string
+    clearAdminKey?: boolean
+    freeQuota?: number
+    freeQuotaPeriod?: "day" | "month" | "total"
+    /** 免费模型白名单；传空数组 = 全部免费 */
+    freeModels?: string[]
+    /** 站内模型白名单；传空数组 = 不过滤 */
+    siteModels?: string[]
+    /** 造物集：作品公开前是否需要审核 */
+    reviewRequired?: boolean
+    agentPrompt?: string
+    channels?: AdminLabChannelInput[]
+  }) =>
+    request<AdminLabConfig>("/admin/lab/config", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 造物集待审 / 已驳回队列 */
+  listLabReviews: (status: "pending" | "rejected" = "pending") =>
+    request<{
+      status: string
+      items: AdminLabReview[]
+      pendingCount: number
+      rejectedCount: number
+    }>(`/admin/lab/reviews?status=${status}`),
+
+  /** 放行 / 驳回一个待审作品 */
+  reviewLabProject: (id: string, action: "approve" | "reject", note = "") =>
+    request<{ id: string; visibility: string }>(
+      `/admin/lab/reviews/${encodeURIComponent(id)}`,
+      { method: "POST", body: JSON.stringify({ action, note }) }
+    ),
+
+  /** 读一份待审作品的完整文件（审核要看得见内容；走管理端接口，用户端取不到待审作品） */
+  previewLabReview: (id: string) =>
+    request<{ project: { id: string; name: string; files: Record<string, string> } }>(
+      `/admin/lab/reviews/${encodeURIComponent(id)}/preview`
+    ),
+
+  // ---- 系统提示词模板 ----
+
+  /** 全部模板（含未启用） */
+  listLabPromptTemplates: () =>
+    request<{ templates: AdminLabPromptTemplate[] }>("/admin/lab/templates"),
+
+  createLabPromptTemplate: (payload: {
+    name: string
+    content: string
+    enabled?: boolean
+  }) =>
+    request<{ template: AdminLabPromptTemplate | null }>("/admin/lab/templates", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  updateLabPromptTemplate: (
+    id: string,
+    payload: { name?: string; content?: string; enabled?: boolean }
+  ) =>
+    request<{ template: AdminLabPromptTemplate | null }>(
+      `/admin/lab/templates/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(payload) }
+    ),
+
+  deleteLabPromptTemplate: (id: string) =>
+    request<void>(`/admin/lab/templates/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   /** 公开 API 配置（功能开关 + 层级限额 + 计入成就开关） */
   getApiConfig: () =>
@@ -1015,29 +1173,61 @@ export const storageApi = {
 
   disable: () => request<{ ok: boolean }>("/storage/disable", { method: "POST" }),
 
-  list: (cursor?: string) =>
-    request<{
-      objects: StorageObject[]
-      cursor: string | null
-      truncated: boolean
-      usedBytes: number
-      quotaBytes: number
-    }>(
-      cursor
-        ? `/storage/objects?cursor=${encodeURIComponent(cursor)}`
-        : "/storage/objects"
+  /** 列出某一层（子目录 + 文件）；不传 path 即根目录 */
+  list: (path = "") =>
+    request<StorageList>(
+      path ? `/storage/objects?path=${encodeURIComponent(path)}` : "/storage/objects"
     ),
+
+  /** 新建目录（path 可含 `/` 建多级） */
+  createFolder: (path: string) =>
+    request<{ path: string }>("/storage/folder", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+
+  /** 递归删除目录及其下全部文件（不可逆） */
+  deleteFolder: (path: string) =>
+    request<{ removed: number }>("/storage/folder/delete", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+
+  /** 列出我创建的目录分享 */
+  shares: () => request<{ shares: StorageShare[] }>("/storage/shares"),
+
+  /** 为某个目录创建分享（同一目录已有启用中的分享时直接复用） */
+  createShare: (path: string, title?: string) =>
+    request<{ share: StorageShare; reused: boolean }>("/storage/shares", {
+      method: "POST",
+      body: JSON.stringify({ path, title }),
+    }),
+
+  deleteShare: (id: string) =>
+    request<{ ok: boolean }>("/storage/shares/delete", {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    }),
+
+  toggleShare: (id: string, enabled: boolean) =>
+    request<{ enabled: boolean }>("/storage/shares/toggle", {
+      method: "POST",
+      body: JSON.stringify({ id, enabled }),
+    }),
 
   /** 申请预签名上传地址（浏览器直传 R2，可显示真实上传进度） */
   uploadUrl: (payload: {
     filename: string
     size: number
     contentType?: string
+    /** 目标目录（相对账号根目录）；不传 = 根目录 */
+    folder?: string
   }) =>
     request<{
       uploadUrl: string
       key: string
       filename: string
+      path: string
       directLink: string
     }>("/storage/upload-url", {
       method: "POST",
@@ -1677,47 +1867,47 @@ export const wb2apiApi = {
   getPool: () => request<{ pool: AdminWb2ApiPool }>("/admin/wb2api/pool"),
 }
 
-// ---- CLI2API 反代账号捐献（第二条，登录即解锁 AI 权限，免审核）----
+// ---- Qoder2API 反代账号捐献（第二条，登录即解锁 AI 权限，免审核）----
 
-export const cli2apiApi = {
+export const qoder2apiApi = {
   /** 通道状态 + 当前用户的绑定列表 */
-  status: () => request<Cli2ApiStatus>("/cli2api/status"),
+  status: () => request<Qoder2ApiStatus>("/qoder2api/status"),
 
   /** 发起登录（服务端建上游账号 + 落会话，立即返回 sessionId） */
   loginStart: () =>
-    request<Cli2ApiLoginStart>("/cli2api/login/start", {
+    request<Qoder2ApiLoginStart>("/qoder2api/login/start", {
       method: "POST",
       body: JSON.stringify({ acknowledged: true }),
     }),
 
   /** 轮询登录结果（第一次会顺带返回授权链接） */
   loginPoll: (sessionId: string) =>
-    request<Cli2ApiLoginPoll>(
-      `/cli2api/login/poll?session=${encodeURIComponent(sessionId)}`
+    request<Qoder2ApiLoginPoll>(
+      `/qoder2api/login/poll?session=${encodeURIComponent(sessionId)}`
     ),
 
   // 管理端
   listBindings: () =>
-    request<{ bindings: AdminCli2ApiBinding[] }>("/admin/cli2api/bindings"),
+    request<{ bindings: AdminQoder2ApiBinding[] }>("/admin/qoder2api/bindings"),
 
   removeBinding: (id: string, revokeAi?: boolean) =>
     request<{ ok: boolean; aiRevoked: boolean; upstreamWarning: string | null }>(
-      `/admin/cli2api/bindings/${encodeURIComponent(id)}/remove`,
+      `/admin/qoder2api/bindings/${encodeURIComponent(id)}/remove`,
       {
         method: "POST",
         body: JSON.stringify(revokeAi === undefined ? {} : { revokeAi }),
       }
     ),
 
-  getConfig: () => request<AdminCli2ApiConfig>("/admin/cli2api/config"),
+  getConfig: () => request<AdminQoder2ApiConfig>("/admin/qoder2api/config"),
 
-  saveConfig: (consoleKey: string) =>
-    request<{ ok: boolean }>("/admin/cli2api/config", {
+  saveConfig: (panelPassword: string) =>
+    request<{ ok: boolean }>("/admin/qoder2api/config", {
       method: "PUT",
-      body: JSON.stringify({ consoleKey }),
+      body: JSON.stringify({ panelPassword }),
     }),
 
-  getPool: () => request<AdminCli2ApiPool>("/admin/cli2api/pool"),
+  getPool: () => request<AdminQoder2ApiPool>("/admin/qoder2api/pool"),
 }
 
 // ---- 公告 / 网站动态 ----
@@ -3667,7 +3857,7 @@ export const adminMailboxesApi = {
     ),
 }
 
-// ---- 网页实验室 ----
+// ---- AI实验室 ----
 
 
 /** 作品摘要（列表用，不含文件内容） */
@@ -3677,15 +3867,59 @@ export interface LabProjectSummary {
   slug: string
   icon: string
   description: string
+  /** private（默认）/ pending（待审核）/ public（已公开）/ rejected（已驳回） */
   visibility: string
+  /** 被驳回时的原因；其余状态为空串 */
+  reviewNote?: string
+  /** 有没有上传封面图（没有就用 icon 那个 emoji） */
+  hasCover?: boolean
+  /** 封面版本号（拼进封面 URL，换图后缓存立刻失效） */
+  coverV?: string
   views: number
   likes: number
   createdAt: string
   updatedAt: string
+  /** 首次公开的时间；从未公开过为 null */
+  publishedAt?: string | null
 }
 
 /** 作品详情（含文件：路径 → 内容） */
 export interface LabProject extends LabProjectSummary {
+  files: Record<string, string>
+}
+
+/** 造物集里的一个公开作品（列表用，不含文件内容） */
+export interface GalleryItem {
+  id: string
+  name: string
+  icon: string
+  description: string
+  /** 有封面图 ⇒ 用 `/api/gallery/:id/cover` 当封面，否则回退 icon 那个 emoji */
+  hasCover?: boolean
+  views: number
+  likes: number
+  /** 当前用户有没有点过赞 */
+  liked?: boolean
+  updatedAt: string
+  publishedAt: string | null
+  authorName: string
+  /** 真实用户名（头像 URL 要用它，不能拿「昵称优先」的 authorName 去拼） */
+  authorUsername: string
+  authorAvatar: string | null
+  /**
+   * 封面的版本号（跟着封面文件走）。
+   * ⚠️ 必须拼进封面 URL：封面接口的地址是固定的 `/gallery/:id/cover`，
+   *    换图后 URL 不变 ⇒ 浏览器/边缘缓存会一直吐旧图（2026-10-09 站长反馈）。
+   */
+  coverV?: string
+  /** 可见性：只有 public 才有可分享链接 */
+  visibility?: string
+  /** 是不是自己的作品 */
+  isMine: boolean
+}
+
+/** 公开作品详情（含文件内容，用于在沙箱 iframe 里渲染） */
+export interface GalleryDetail extends GalleryItem {
   files: Record<string, string>
 }
 
@@ -3694,13 +3928,25 @@ export interface LabProject extends LabProjectSummary {
 export async function streamLabChat(payload: {
   model: string
   messages: { role: string; content: string }[]
+  /** 思考强度档位（后端据此决定要不要带 reasoning_effort） */
+  effort?: string
+  /** 由前端按思考强度算好的温度；后端只做范围收口 */
+  temperature?: number
+  /** 选用管理员提供的免费渠道时带上它的 id（不传 = 走站内） */
+  channelId?: string
   signal?: AbortSignal
 }): Promise<Response> {
   const res = await fetch(`${BASE}/lab/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ model: payload.model, messages: payload.messages }),
+    body: JSON.stringify({
+      model: payload.model,
+      messages: payload.messages,
+      effort: payload.effort,
+      temperature: payload.temperature,
+      channelId: payload.channelId,
+    }),
     signal: payload.signal,
   })
   if (!res.ok) {
@@ -3710,8 +3956,38 @@ export async function streamLabChat(payload: {
 }
 
 export const labApi = {
-  /** 站内额度下可用的模型列表（未开通/未绑定时抛 NOT_BOUND，据此引导） */
-  models: () => request<{ models: string[] }>("/lab/models"),
+  /**
+   * 站内模型列表。
+   * `free: true` = 走的是管理员提供的统一 Key（用户端标「免费试用」）。
+   * 未开通/未绑定时抛 NOT_BOUND，据此引导。
+   */
+  models: () => request<{ models: string[]; free?: boolean; freeModels?: string[] }>("/lab/models"),
+
+  /** 管理员提供的免费渠道 + 免费额度余量（渠道不含地址与密钥，调用走服务端代理） */
+  channels: () =>
+    request<{
+      source: "user" | "admin"
+      quotaLimit: number
+      quotaPeriod: "day" | "month" | "total"
+      quotaUsed: number
+      channels: { id: string; name: string; model: string; free: boolean }[]
+    }>("/lab/channels"),
+
+  /**
+   * 实验室前端配置。
+   *
+   * 优先级（前端的 `buildSystemPrompt` 按这个顺序取）：
+   *   1. 用户当前选中的模板（`templates` 里挑一份）；
+   *   2. `agentPrompt`（管理端旧的单份覆盖值，非空才生效）；
+   *   3. 内置默认提示词。
+   * `templates` 为空 = 管理端没启用任何模板，走 2 / 3。
+   */
+  settings: () =>
+    request<{
+      agentPrompt: string
+      reviewRequired?: boolean
+      templates?: LabPromptTemplate[]
+    }>("/lab/settings"),
 
   listProjects: () => request<{ projects: LabProjectSummary[] }>("/lab/projects"),
 
@@ -3732,4 +4008,90 @@ export const labApi = {
 
   deleteProject: (id: string) =>
     request<void>(`/lab/projects/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  /**
+   * 上传作品封面（原图直传，服务端上限 600KB）。
+   * 前端负责先把图压到这个尺寸以内，这里只做「把字节扔过去」这一件事。
+   */
+  uploadCover: (id: string, blob: Blob) =>
+    request<{ hasCover: boolean; coverV?: string }>(
+      `/lab/projects/${encodeURIComponent(id)}/cover`,
+      {
+        method: "POST",
+        headers: { "Content-Type": blob.type || "image/png" },
+        body: blob,
+      }
+    ),
+
+  /** 移除封面（回退到 emoji 图标） */
+  deleteCover: (id: string) =>
+    request<{ hasCover: boolean }>(`/lab/projects/${encodeURIComponent(id)}/cover`, {
+      method: "DELETE",
+    }),
+
+  /**
+   * 公开 / 取消公开一个作品，并顺手更新对外信息（名字 / 简介 / 图标）。
+   *
+   * 刻意和 saveProject 分开：保存是编辑动作（改一行代码就会调一次），
+   * 公开是对外承诺。混在一起会出现「改个背景色把简介清空了」。
+   */
+  publish: (
+    id: string,
+    payload: {
+      /**
+       * 目标可见性。
+       * **不传 = 不改可见性**，只更新名字 / 简介 / 图标 —— 编辑「待审核」作品的
+       * 介绍信息时不会顺手把公开申请撤掉。
+       */
+      visibility?: "public" | "private"
+      name?: string
+      description?: string
+      icon?: string
+    }
+  ) =>
+    request<{ project: LabProjectSummary }>(
+      `/lab/projects/${encodeURIComponent(id)}/publish`,
+      { method: "POST", body: JSON.stringify(payload) }
+    ),
+}
+
+export const galleryApi = {
+  /** 展示大厅：全体用户的公开作品（分页 + 关键词） */
+  list: (params: { page?: number; q?: string } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.page) sp.set("page", String(params.page))
+    if (params.q) sp.set("q", params.q)
+    const qs = sp.toString()
+    return request<{
+      total: number
+      page: number
+      pageSize: number
+      items: GalleryItem[]
+    }>(`/gallery${qs ? `?${qs}` : ""}`)
+  },
+
+  /** 公开作品详情（含文件内容）。非本人访问会在后端计一次浏览。 */
+  get: (id: string) =>
+    request<{ project: GalleryDetail }>(`/gallery/${encodeURIComponent(id)}`),
+
+  /**
+   * 点赞 / 取消点赞（同一个接口来回切）。
+   * 返回的最新计数与「我现在赞没赞」由服务端算好，前端直接用，别自己 ±1。
+   */
+  like: (id: string) =>
+    request<{ likes: number; liked: boolean }>(
+      `/gallery/${encodeURIComponent(id)}/like`,
+      { method: "POST" }
+    ),
+}
+
+/**
+ * 作品封面图的 URL。
+ *
+ * 故意不做成 API 方法：`<img src>` 直接用它就够了，走字符串最省事，
+ * 也避免每次渲染都去构造一个 fetch 请求对象。
+ */
+export function galleryCoverUrl(id: string, v?: string): string {
+  const base = `${BASE}/gallery/${encodeURIComponent(id)}/cover`
+  return v ? `${base}?v=${encodeURIComponent(v)}` : base
 }

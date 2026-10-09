@@ -7,6 +7,8 @@ import * as dnsHandlers from "./handlers/dns"
 import * as emailHandlers from "./handlers/email"
 import * as subdomainHandlers from "./handlers/subdomains"
 import * as adminHandlers from "./handlers/admin"
+import * as adminLabHandlers from "./handlers/admin-lab"
+import * as labPromptHandlers from "./handlers/lab-prompts"
 import * as adminDnsHandlers from "./handlers/admin-dns"
 import * as adminSubdomainHandlers from "./handlers/admin-subdomains"
 import * as adminMailboxHandlers from "./handlers/admin-mailboxes"
@@ -23,7 +25,7 @@ import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
 import * as voucherHandlers from "./handlers/vouchers"
 import * as wb2apiHandlers from "./handlers/wb2api"
-import * as cli2apiHandlers from "./handlers/cli2api"
+import * as qoder2apiHandlers from "./handlers/qoder2api"
 import * as myInviteHandlers from "./handlers/my-invites"
 import * as frpHandlers from "./handlers/frp"
 import * as profileHandlers from "./handlers/profile"
@@ -796,50 +798,50 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       wb2apiHandlers.adminGetPool(env, request),
   },
 
-  // ---- 管理端：CLI2API 反代账号捐献 ----
+  // ---- 管理端：Qoder2API 反代账号捐献 ----
   {
     kind: "exact",
-    path: "/admin/cli2api/bindings",
+    path: "/admin/qoder2api/bindings",
     method: "GET",
     handle: () =>
-      cli2apiHandlers.adminListBindings(env, request),
+      qoder2apiHandlers.adminListBindings(env, request),
   },
 
   {
     kind: "regex",
     match: (routePath: string) =>
-      routePath.match(/^\/admin\/cli2api\/bindings\/([^/]+)\/remove$/),
+      routePath.match(/^\/admin\/qoder2api\/bindings\/([^/]+)\/remove$/),
     methods: ["POST"],
-    handle: (cli2apiRemoveMatch: RegExpMatchArray) =>
-      cli2apiHandlers.adminRemoveBinding(
+    handle: (qoder2apiRemoveMatch: RegExpMatchArray) =>
+      qoder2apiHandlers.adminRemoveBinding(
         env,
         request,
-        decodeURIComponent(cli2apiRemoveMatch[1])
+        decodeURIComponent(qoder2apiRemoveMatch[1])
       ),
   },
 
   {
     kind: "exact",
-    path: "/admin/cli2api/config",
+    path: "/admin/qoder2api/config",
     method: "GET",
     handle: () =>
-      cli2apiHandlers.adminGetConfig(env, request),
+      qoder2apiHandlers.adminGetConfig(env, request),
   },
 
   {
     kind: "exact",
-    path: "/admin/cli2api/config",
+    path: "/admin/qoder2api/config",
     method: "PUT",
     handle: () =>
-      cli2apiHandlers.adminSaveConfig(env, request),
+      qoder2apiHandlers.adminSaveConfig(env, request),
   },
 
   {
     kind: "exact",
-    path: "/admin/cli2api/pool",
+    path: "/admin/qoder2api/pool",
     method: "GET",
     handle: () =>
-      cli2apiHandlers.adminGetPool(env, request),
+      qoder2apiHandlers.adminGetPool(env, request),
   },
 
   {
@@ -1613,6 +1615,89 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       adminHandlers.updateSettingsHandler(env, request),
   },
 
+  // ================= 管理端 · AI 实验室配置 =================
+  // 单独一对接口（而不是走 /admin/settings）：这里要处理密钥加密、
+  // 渠道增删合并这类有自己的规则，塞进通用设置接口只会让它更难读。
+
+  {
+    kind: "exact",
+    path: "/admin/lab/config",
+    method: "GET",
+    handle: () => adminLabHandlers.getLabConfig(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/lab/config",
+    method: "PUT",
+    handle: () => adminLabHandlers.updateLabConfig(env, request),
+  },
+
+  // ---- 系统提示词模板（管理端 CRUD）----
+  {
+    kind: "exact",
+    path: "/admin/lab/templates",
+    method: "GET",
+    handle: () => labPromptHandlers.listPromptTemplates(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/lab/templates",
+    method: "POST",
+    handle: () => labPromptHandlers.createPromptTemplate(env, request),
+  },
+
+  // ⚠️ 与上面的 exact 不冲突：`[^/]+` 不含斜杠，`/admin/lab/templates/<id>` 走这条。
+  //    一条路径要接两种 method ⇒ 必须用 branch（regex 那种只认 `methods` 数组、
+  //    且 handle 拿不到具体是哪个 method，分不出 PUT / DELETE）。
+  {
+    kind: "branch",
+    match: (routePath: string) => routePath.match(/^\/admin\/lab\/templates\/([^/]+)$/),
+    handle: (promptMatch: RegExpMatchArray, method: string) => {
+      const id = decodeURIComponent(promptMatch[1])
+      if (method === "DELETE") return labPromptHandlers.deletePromptTemplate(env, request, id)
+      if (method === "PUT") return labPromptHandlers.updatePromptTemplate(env, request, id)
+      return null
+    },
+  },
+
+  // ---- 造物集作品审核队列 ----
+  {
+    kind: "exact",
+    path: "/admin/lab/reviews",
+    method: "GET",
+    handle: () => adminLabHandlers.listLabReviews(env, request),
+  },
+
+  // ⚠️ 必须排在 `/admin/lab/reviews` 之后也无妨（exact 与 regex 互不干扰），
+  //    但 `[^/]+` 不含斜杠，所以 `/admin/lab/reviews/<id>` 不会被 exact 那条吃掉。
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/lab\/reviews\/([^/]+)$/),
+    methods: ["POST"],
+    handle: (labReviewMatch: RegExpMatchArray) =>
+      adminLabHandlers.reviewLabProject(
+        env,
+        request,
+        decodeURIComponent(labReviewMatch[1])
+      ),
+  },
+
+  // ---- 待审作品预览（管理员看内容才能审）----
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/lab\/reviews\/([^/]+)\/preview$/),
+    methods: ["GET"],
+    handle: (labPreviewMatch: RegExpMatchArray) =>
+      adminLabHandlers.previewLabReview(
+        env,
+        request,
+        decodeURIComponent(labPreviewMatch[1])
+      ),
+  },
+
   {
     kind: "exact",
     path: "/admin/community/posts",
@@ -1979,29 +2064,29 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       wb2apiHandlers.loginPoll(env, request),
   },
 
-  // ---- CLI2API 反代账号捐献（第二条，登录即解锁 AI 权限，免审核）----
+  // ---- Qoder2API 反代账号捐献（第二条，登录即解锁 AI 权限，免审核）----
   {
     kind: "exact",
-    path: "/cli2api/status",
+    path: "/qoder2api/status",
     method: "GET",
     handle: () =>
-      cli2apiHandlers.getStatus(env, request),
+      qoder2apiHandlers.getStatus(env, request),
   },
 
   {
     kind: "exact",
-    path: "/cli2api/login/start",
+    path: "/qoder2api/login/start",
     method: "POST",
     handle: () =>
-      cli2apiHandlers.loginStart(env, request),
+      qoder2apiHandlers.loginStart(env, request),
   },
 
   {
     kind: "exact",
-    path: "/cli2api/login/poll",
+    path: "/qoder2api/login/poll",
     method: "GET",
     handle: () =>
-      cli2apiHandlers.loginPoll(env, request),
+      qoder2apiHandlers.loginPoll(env, request),
   },
 
   {
@@ -3175,6 +3260,56 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       storageHandlers.setDefaultPrefix(env, request),
   },
 
+  // 目录：目录本身不落表，靠 R2 的 `<key>/` 占位对象表示
+  {
+    kind: "exact",
+    path: "/storage/folder",
+    method: "POST",
+    handle: () =>
+      storageHandlers.createFolder(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/folder/delete",
+    method: "POST",
+    handle: () =>
+      storageHandlers.deleteFolder(env, request),
+  },
+
+  // 目录分享
+  {
+    kind: "exact",
+    path: "/storage/shares",
+    method: "GET",
+    handle: () =>
+      storageHandlers.listShares(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/shares",
+    method: "POST",
+    handle: () =>
+      storageHandlers.createShare(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/shares/delete",
+    method: "POST",
+    handle: () =>
+      storageHandlers.deleteShare(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/storage/shares/toggle",
+    method: "POST",
+    handle: () =>
+      storageHandlers.toggleShare(env, request),
+  },
+
   {
     kind: "exact",
     path: "/dev/status",
@@ -3618,6 +3753,20 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
 
   {
     kind: "exact",
+    path: "/lab/settings",
+    method: "GET",
+    handle: () => labHandlers.getLabSettings(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/lab/channels",
+    method: "GET",
+    handle: () => labHandlers.listLabChannels(env, request),
+  },
+
+  {
+    kind: "exact",
     path: "/lab/projects",
     method: "GET",
     handle: () => labHandlers.listProjects(env, request),
@@ -3644,6 +3793,100 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     methods: ["DELETE"],
     handle: (labProjectMatch: RegExpMatchArray) =>
       labHandlers.deleteProject(env, request, decodeURIComponent(labProjectMatch[1])),
+  },
+
+  // ---- 造物集：公开 / 取消公开单个作品，以及展示大厅 ----
+  // ⚠️ 这条必须比上面的 `/lab/projects/:id` 更具体：`[^/]+` 不含斜杠，
+  //    所以 `/lab/projects/<id>/publish` 不会被上面那条吃掉，两条互不干扰。
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/lab\/projects\/([^/]+)\/publish$/),
+    methods: ["POST"],
+    handle: (labPublishMatch: RegExpMatchArray) =>
+      labHandlers.publishProject(
+        env,
+        request,
+        decodeURIComponent(labPublishMatch[1])
+      ),
+  },
+
+  // ---- 作品封面上传 / 移除（走平台桶，key = lab-cover/<uid>/<pid>.<ext>）----
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/lab\/projects\/([^/]+)\/cover$/),
+    methods: ["POST"],
+    handle: (labCoverMatch: RegExpMatchArray) =>
+      labHandlers.uploadProjectCover(
+        env,
+        request,
+        decodeURIComponent(labCoverMatch[1])
+      ),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/lab\/projects\/([^/]+)\/cover$/),
+    methods: ["DELETE"],
+    handle: (labCoverMatch: RegExpMatchArray) =>
+      labHandlers.deleteProjectCover(
+        env,
+        request,
+        decodeURIComponent(labCoverMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/gallery",
+    method: "GET",
+    handle: () => labHandlers.listGallery(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/gallery\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (galleryMatch: RegExpMatchArray) =>
+      labHandlers.getGalleryItem(env, request, decodeURIComponent(galleryMatch[1])),
+  },
+
+  // ---- 点赞（切换语义）与封面读取 ----
+  // ⚠️ 两条都带一个额外路径段，所以上面的 `/gallery/:id`（`[^/]+`）不会误吞它们。
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/gallery\/([^/]+)\/like$/),
+    methods: ["POST"],
+    handle: (galleryLikeMatch: RegExpMatchArray) =>
+      labHandlers.likeGalleryItem(
+        env,
+        request,
+        decodeURIComponent(galleryLikeMatch[1])
+      ),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/gallery\/([^/]+)\/cover$/),
+    methods: ["GET"],
+    handle: (galleryCoverMatch: RegExpMatchArray) =>
+      labHandlers.serveGalleryCover(
+        env,
+        request,
+        decodeURIComponent(galleryCoverMatch[1])
+      ),
+  },
+
+  // 分享页：公开作品的可直接打开版本（`tyu.me/p/<id>` 的 iframe 直接拿它当 src）。
+  // ⚠️ **不鉴权**（要能分享给没登录的人），安全性靠响应头里那条 CSP `sandbox` 兜底。
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/gallery\/([^/]+)\/raw$/),
+    methods: ["GET"],
+    handle: (galleryRawMatch: RegExpMatchArray) =>
+      labHandlers.serveGalleryRaw(env, request, decodeURIComponent(galleryRawMatch[1])),
   },
 
   // ================= OAuth 2.0 授权服务器（Doulor Cloud 作为身份提供方）=================
@@ -3929,6 +4172,15 @@ export default {
           env,
           request,
           url.pathname.slice(4)
+        )
+      }
+
+      // 公开目录分享：/s/<token>（目录页）与 /s/<token>/f/<路径>（文件，无需鉴权）
+      if (url.pathname.startsWith("/s/")) {
+        return await storageHandlers.serveStorageShare(
+          env,
+          request,
+          url.pathname.slice(3)
         )
       }
 

@@ -233,8 +233,8 @@ export const SETTING_DEFAULTS = {
   donation_grant_proxy: "1",
   /** WorkBuddy 反代账号绑定 → ai 权限 */
   donation_grant_wb2api: "1",
-  /** CLI2API 账号绑定 → ai 权限 */
-  donation_grant_cli2api: "1",
+  /** Qoder2API 账号绑定 → ai 权限 */
+  donation_grant_qoder2api: "1",
   /**
    * 昵称附加保留词（逗号分隔，大小写不敏感）。
    * 与「保留域名」同在管理面板「保留名」标签管理。
@@ -402,7 +402,7 @@ export const SETTING_DEFAULTS = {
   /**
    * 是否在捐献页显示「贡献商汤 Key」入口（1/0，默认 1 = 显示）。
    *
-   * 语义与 `wb2api_donation_visible` / `cli2api_donation_visible` 一致：
+   * 语义与 `wb2api_donation_visible` / `qoder2api_donation_visible` 一致：
    *   - `sensenova_enabled` = **通道总开关**：关掉后不仅隐藏卡片，提交也会被拒（403）；
    *   - 本项 = **纯展示开关**：只是不在捐献页展示这个入口，提交接口照常可用
    *     （已通过审核的 Key 继续留在中转站渠道里）。
@@ -433,27 +433,25 @@ export const SETTING_DEFAULTS = {
    */
   sensenova_channel_id: "17",
 
-  /* ---- CLI2API 反代绑定通道（第二条，与 wb2api 并列）--------------------
-   * 用户登录自己的 Qoder / WorkBuddy / Trae 账号 → 账号进入 cli2api 共享池
+  /* ---- Qoder2API 反代绑定通道（第二条，与 wb2api 并列）--------------------
+   * 用户登录自己的 Qoder / WorkBuddy / Trae 账号 → 账号进入 qoder2api 共享池
    * → 自动解锁本站「AI 中转站」权限。接口形态与 wb2api 不同，故独立一套。
    */
   /** 通道总开关 */
-  cli2api_enabled: "1",
+  qoder2api_enabled: "1",
   /** 网关地址（末尾斜杠会被去掉） */
-  cli2api_base_url: "https://cli2api.doulor.cn",
-  /** 绑定时使用的上游：qoder / workbuddy / trae / devin */
-  cli2api_provider: "qoder",
-  /** 上游区域：qoder 支持 global/cn，workbuddy 支持 cn/global */
-  cli2api_region: "cn",
+  qoder2api_base_url: "https://qoder2api.doulor.cn",
+  /** 上游区域：cn（国内版）/ intl（国际版）。该通道只对接 Qoder，没有 provider 可切 */
+  qoder2api_realm: "cn",
   /** 每人可绑定的账号数上限 */
-  cli2api_max_bindings: "3",
+  qoder2api_max_bindings: "3",
   /**
-   * 是否在捐献页显示 CLI2API 捐献入口（1/0，默认 1 = 显示）。
+   * 是否在捐献页显示 Qoder2API 捐献入口（1/0，默认 1 = 显示）。
    * 语义与 `wb2api_donation_visible` 完全一致：纯展示开关，
    * 关掉后只对「还没绑定过的用户」隐藏卡片，通道本身照常工作
-   * （与 `cli2api_enabled` 那个通道总开关不是一回事）。
+   * （与 `qoder2api_enabled` 那个通道总开关不是一回事）。
    */
-  cli2api_donation_visible: "1",
+  qoder2api_donation_visible: "1",
 
   /* ---- 出站邮件发送通道（多通道 + 路由）------------------------------
    * 三种发送方式：CF Email Routing（自带 send_email 绑定）、自建 Posta 网关、
@@ -594,7 +592,7 @@ export const SETTING_DEFAULTS = {
    * 合成一个键就没法分开定价（同 DONATION_TYPE_LABELS 的理由）。
    *
    * 三个反代账号档位（workbuddy / qoder / trae）按**上游 provider** 分，
-   * 与具体走哪条通道（wb2api / cli2api）无关：cli2api 的 provider 是管理员
+   * 与具体走哪条通道（wb2api / qoder2api）无关：qoder2api 的 provider 是管理员
    * 随时可切换的，按通道定价会让「换个 provider 奖励就变了」。
    *
    * ⚠️ 编辑入口在 管理面板 → 积分 → 商城 → 「捐献奖励」，不在「设置」页。
@@ -699,6 +697,88 @@ export const SETTING_DEFAULTS = {
    */
   download_android_url: "",
   download_windows_url: "",
+  /**
+   * 网页实验室「agent 的系统提示词」覆盖值。
+   *
+   * 为什么放在设置里：agent 的行为（会用哪些标签、要不要收尾总结、有什么禁忌）
+   * 全由这段提示词决定，写死在前端就得改代码重新部署。放到这里后，
+   * 管理面板能直接改，试新写法不用发版。
+   *
+   * ⚠️ **空串 = 用前端内置的默认提示词**（`src/lib/lab-agent.ts` 的 AGENT_SYSTEM）。
+   * 前端拿到的就是原样文本，不做任何模板替换 —— 想恢复默认，清空这里即可。
+   */
+  lab_agent_prompt: "",
+  /**
+   * AI 实验室（网页 agent）的**模型来源**。
+   *   · "user"（默认）= 各用户自己的中转站专用 Key，扣自己的额度；
+   *   · "admin"       = 全站统一用管理员提供的 Key，用户端标为「免费试用」。
+   *
+   * ⚠️ 取 "admin" 但没配 `lab_admin_api_key` 时会**自动退回 "user"**，
+   * 否则所有人都会撞到一个没有任何明确指引的报错。
+   */
+  lab_ai_source: "user",
+  /**
+   * 管理员提供的中转站 Key —— **AES-GCM 密文**（形如 `v1:iv:ct`）。
+   *
+   * 明文只在服务端解密后短暂存在，**绝不回传前端**：管理面板只回尾号，
+   * 留空提交表示「不改动」。空串 = 未配置。
+   */
+  lab_admin_api_key: "",
+  /** 免费试用的次数上限。0 = 不限量。 */
+  lab_free_quota: "0",
+  /**
+   * **免费模型白名单**（逗号分隔的模型名）。
+   *
+   * 只在 `lab_ai_source === "admin"` 时有意义：
+   *   · **空串 = 全部模型都免费**（默认，保持「统一 Key 一开全站随便用」的老行为）；
+   *   · 非空 = **只有名单里的模型**走管理员统一 Key 并标「免费试用」，
+   *     名单外的模型**照常出现在列表里**，但不再免费 —— 回落成用户自己的
+   *     中转站额度（用户没开通就用不了，会看到明确的引导文案）。
+   *
+   * 管理面板里用「自动获取模型 + 多选」来维护它，不需要手敲模型名。
+   */
+  lab_free_models: "",
+  /**
+   * **站内模型白名单**（2026-10-09 加）：只有名单里的模型会出现在
+   * 「站内模型」下拉框里，也只有它们能被调用。
+   *
+   *   · 空 = **不过滤**，站内中转站返回什么就都显示（默认，保证升级后行为不变）；
+   *   · 非空 = 只显示、只允许名单里的模型。
+   *
+   * 和上面的「免费模型白名单」是**两件事**，别混：
+   *   · 免费白名单决定「谁能白嫖」—— 名单外仍可选，只是要花自己的额度；
+   *   · 站内白名单决定「谁能被看见」—— 名单外直接不出现、调了也拒。
+   * 通常会先收窄站内白名单（只放出质量靠谱的几个），再在其中挑一部分做免费。
+   *
+   * 格式与免费白名单一致：空白 / 逗号 / 分号分隔；管理面板用「自动获取 + 多选」维护。
+   */
+  lab_site_models: "",
+  /**
+   * 免费额度的重置周期：
+   *   · "day"   每天（按站点时区，见 `siteOffsetHours`）
+   *   · "month" 每月
+   *   · "total" 一次性，用完为止
+   */
+  lab_free_quota_period: "day",
+  /**
+   * 管理员提供的自定义渠道（JSON 数组字符串）。
+   *
+   * 每条形如 `{ id, name, baseUrl, model, apiKeyEnc }`，其中 `apiKeyEnc`
+   * 与 `lab_admin_api_key` 同样是密文。用户端只拿到 id / name / model，
+   * 真实调用由服务端代理转发（密钥不下发浏览器）。
+   */
+  lab_admin_channels: "[]",
+  /**
+   * 造物集：用户把作品设为「公开」时，**是否需要管理员先审核**。
+   *
+   *   · "1"（默认，开启）= 用户点「公开」→ 作品先进 `pending` 待审核队列，
+   *     管理员通过后才真正进展示大厅；驳回则置 `rejected` 并写 `review_note`。
+   *   · "0"（关闭）= 用户点「公开」直接生效（老行为）。
+   *
+   * 已经公开过的作品再次编辑介绍信息**不会**被重新拉回审核 ——
+   * 只在「从非公开 → 公开」的那一次触发，否则改个简介都要等审核。
+   */
+  lab_review_required: "1",
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS

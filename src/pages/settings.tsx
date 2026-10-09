@@ -63,7 +63,7 @@ export default function SettingsPage() {
    * 全局效果通过 MutationObserver 自己跟上，无需刷新。
    * `sparkOn` 是点击粒子的独立偏好：默认关，且只在总开关开着时生效。
    */
-  const { motionOn, setMotionOn, sparkOn, setSparkOn } = useMotionPref()
+  const { motionOn, setMotionOn, sparkOn, setSparkOn, labFxOn, setLabFxOn } = useMotionPref()
 
   /**
    * 「发给用户的根域」（如 tyu.me）。由后端下发，**不写死** ——
@@ -670,6 +670,17 @@ export default function SettingsPage() {
                 onCheckedChange={setSparkOn}
                 disabled={!motionOn}
               />
+            </div>
+            {/* AI 实验室：板块自己的一套 UI/动效。和上面的总闸**并列**，不受它钳制
+                （实验室是「新奇板块」，允许单独开一套风格，见 use-motion-pref 的注释） */}
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium">{t("settings.motion.lab")}</p>
+                <p className="text-xs text-muted-foreground">
+                  {t("settings.motion.labDesc")}
+                </p>
+              </div>
+              <Switch checked={labFxOn} onCheckedChange={setLabFxOn} />
             </div>
           </CardContent>
         </Card>

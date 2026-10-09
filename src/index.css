@@ -127,7 +127,7 @@
   }
 }
 
-/* 网页实验室：「正在思考」的 AI 星标旋转 + 文字流光（仿 Gemini 那种等待态） */
+/* AI实验室：「正在思考」的 AI 星标旋转 + 文字流光（仿 Gemini 那种等待态） */
 @keyframes lab-think-spin {
   0% {
     transform: rotate(0deg) scale(0.9);
@@ -204,11 +204,68 @@
   animation: lab-caret-blink 1s steps(1, end) infinite;
 }
 
+/* AI 实验室流式输出把光标缀在**最后一段文字**末尾。
+ * 不能直接放一个 <span class="lab-caret"> 跟在 markdown 渲染出的块级 <div> 后面 ——
+ * 那会掉到下一行，变成孤零零一个方块。所以用 ::after 挂到最后一个块级子元素上，
+ * 这样段落收尾就是「文字 + 闪烁光标」。列表/代码块收尾时它落在块尾，也能接受。 */
+.lab-streaming .markdown-body > :last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.45em;
+  height: 1em;
+  margin-left: 0.12em;
+  vertical-align: -0.15em;
+  border-radius: 1px;
+  background: currentColor;
+  animation: lab-caret-blink 1s steps(1, end) infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .lab-caret {
+  .lab-caret,
+  .lab-streaming .markdown-body > :last-child::after {
     animation: none;
     opacity: 0.5;
   }
+}
+
+/* 浏览器终端（v86）的文本屏铺满卡片。
+ *
+ * v86 把终端渲染成「容器里第一个 div 里的若干行文字」，尺寸 = 字号 × 行列数。
+ * 默认 12px 时 80×25 只有约 576×400 像素，卡片一大就缩在左上角。
+ * 字号与行高由 JS（lab.tsx）按卡片实测尺寸算好，写成 CSS 变量挂在这个容器上；
+ * `!important` 是为了压过 v86 自己写在该 div 上的内联样式（它不认变量）。 */
+.lab-term-screen > div:first-child {
+  font-size: var(--lab-term-font, 12px) !important;
+  line-height: var(--lab-term-line, 16px) !important;
+  white-space: pre !important;
+}
+
+/* 实验室的对话时间线：单独把滚动条放开，让滑块能被鼠标抓住。
+   ⚠️ 关键是那句 `scrollbar-width: auto` —— 全站那条 `* { scrollbar-width: thin }`
+   会让 Chromium **忽略后面所有 `::-webkit-scrollbar` 规则**，只剩系统自带的细条，
+   鼠标很难命中，于是「只能滚轮、拖不动滑块」（2026-10-09 站长反馈）。
+   给容器改回 auto 之后，WebKit 伪元素才重新生效，才能定 10px 的宽度。 */
+.lab-timeline {
+  scrollbar-width: auto;
+  /* ⚠️ 常驻留出滚动条的位置：否则「有内容时」内容区变窄 10px，
+     里面的消息会比下面的输入框偏左 5px，两者左边缘对不齐（2026-10-10 站长反馈）。 */
+  scrollbar-gutter: stable;
+}
+.lab-timeline::-webkit-scrollbar {
+  width: 10px;
+}
+.lab-timeline::-webkit-scrollbar-track {
+  background: transparent;
+}
+.lab-timeline::-webkit-scrollbar-thumb {
+  background: var(--muted-foreground);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.lab-timeline::-webkit-scrollbar-thumb:hover {
+  background: var(--foreground);
+  background-clip: padding-box;
 }
 
 /* 角色徽章流光：管理员金色（role-sheen）、站长红色更浓（role-sheen-strong） */
