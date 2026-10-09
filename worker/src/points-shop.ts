@@ -2189,8 +2189,15 @@ export async function deliverOrder(
   }
 
   // 人工发放 = 交付生效，租期从这里起算（买断商品 rentalDays 为空，自动跳过）
+  //
+  // 租期取**订单快照**（`order.rentalDays`），不取商品现值。订单是快照是 0079 迁移的
+  // 既定语义 —— 商品事后被改成买断 / 改了天数 / 被删掉，都不该影响这一单的租期。
+  // 取现值会让「交付时商品刚好被改过」的单拿到错误到期时间，实测三种后果：
+  // 商品租期调大 ⇒ 白送天数；调小 ⇒ 买家付了 N 天只拿到 M 天；商品被删 ⇒
+  // `expires_at` 写成 NULL（永久有效，且到期 cron 只扫非空行 ⇒ 永远扫不到）。
+  // 前端交付弹窗（admin-points.tsx 的 deliverRentalNote）与买家侧文案本就是按
+  // 快照算的，取现值等于 UI 承诺与落库结果不一致。
   if (order.productId) {
-    const product = await getProduct(env, order.productId)
     await applyRentalExpiry(
       env,
       {
@@ -2199,7 +2206,7 @@ export async function deliverOrder(
         productId: order.productId,
         renewedFrom: order.renewedFrom,
       },
-      product?.billingMode === "rental" ? product.rentalDays : null,
+      order.rentalDays,
       now
     )
   }
@@ -2341,8 +2348,9 @@ export async function settleEscrow(
 
   // 用户商品的租期从**结算**（买家确认收货 / 管理员结算）起算 —— 这时才算真正交付完成。
   // 卖家的「标记已交付」只是中间态，买家可能还要验货。
+  // 租期同样取**订单快照**（理由见 deliverOrder 那段）：买家是按商品页上的租期付的钱，
+  // 卖家/管理员在成交后改商品不该改动这一单的到期时间。
   if (order.productId) {
-    const product = await getProduct(env, order.productId)
     await applyRentalExpiry(
       env,
       {
@@ -2351,7 +2359,7 @@ export async function settleEscrow(
         productId: order.productId,
         renewedFrom: order.renewedFrom,
       },
-      product?.billingMode === "rental" ? product.rentalDays : null,
+      order.rentalDays,
       now
     )
   }
