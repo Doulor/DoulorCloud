@@ -184,7 +184,7 @@ describe("库存归还：退款 × 到期 cron 的订单级幂等", () => {
     const { admin, product, order } = await makeExpiredRentalOrder()
 
     // 模拟迁移回填：老单历史上已被 cron 处理过（expire_handled_at 有值），
-    // 0131 的回填语句会把它标成 stock_restored=1。
+    // 0135 的回填语句会把它标成 stock_restored=1。
     await env.DB.prepare(
       "UPDATE point_orders SET expire_handled_at = ?, stock_restored = 1 WHERE id = ?"
     )
