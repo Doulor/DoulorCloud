@@ -5,13 +5,13 @@
  * 站长要求「按现在调好的额度，把以前每一次捐献的积分补给所有人」。
  *
  * 幂等：复用与正常发放**完全相同**的 dedupKey
- *   （`donation:<单据id>` / `cli2api:<绑定id>` / `wb2api:<绑定id>`），
+ *   （`donation:<单据id>` / `qoder2api:<绑定id>` / `wb2api:<绑定id>`），
  * 已经发过的（上线后新产生的捐献）会撞 `point_transactions(user_id, dedup_key)`
  * 唯一索引而被 `applyPoints` 跳过。所以这个函数可以放心重复运行。
  *
  * 计入范围（与正常发放口径严格对齐）：
  *   · `donations` 里 `status = 'approved'` 的单据（rejected / revoked / pending 不算）；
- *   · `cli2api_bindings` / `wb2api_bindings` 里 `status = 'active'` 的绑定；
+ *   · `qoder2api_bindings` / `wb2api_bindings` 里 `status = 'active'` 的绑定；
  *   · 档位认不出来的跳过（provider 是外部输入）。
  *
  * ⚠️ 已知的简化：wb2api 正常发放时还要求「登录前不在网关池里」
@@ -89,20 +89,19 @@ async function collectGrants(env: Env): Promise<Grant[]> {
     })
   }
 
-  // 2) cli2api 反代账号绑定（档位按上游 provider）
-  const cli = await env.DB.prepare(
-    `SELECT b.id AS id, b.user_id AS user_id, b.provider AS provider
-       FROM cli2api_bindings b
+  // 2) qoder2api 反代账号绑定（该通道只对接 Qoder ⇒ 档位固定 qoder）
+  const qoder2 = await env.DB.prepare(
+    `SELECT b.id AS id, b.user_id AS user_id
+       FROM qoder2api_bindings b
        JOIN users u ON u.id = b.user_id
       WHERE b.status = 'active'`
-  ).all<{ id: string; user_id: string; provider: string }>()
-  for (const r of cli.results ?? []) {
-    if (!isDonationRewardKind(r.provider)) continue
+  ).all<{ id: string; user_id: string }>()
+  for (const r of qoder2.results ?? []) {
     push({
       userId: r.user_id,
-      kind: r.provider,
-      dedupKey: `cli2api:${r.id}`,
-      detail: `${donationRewardLabel(r.provider)}捐献奖励（历史补发）`,
+      kind: "qoder",
+      dedupKey: `qoder2api:${r.id}`,
+      detail: `${donationRewardLabel("qoder")}捐献奖励（历史补发）`,
     })
   }
 

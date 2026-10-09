@@ -153,6 +153,14 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
   let parent: SubdomainRow | null = null
   let fqdn: string
 
+  /**
+   * 配额守卫（供下方**原子 INSERT** 使用）：`scope` 决定数哪一批子域名，
+   * `key` 是那一批的归属，`limit` 是上限。管理员/站长拿到 `ADMIN_UNLIMITED` ⇒ 条件恒真。
+   */
+  let guardScope: "parent" | "user" = "user"
+  let guardKey: string = user.id
+  let guardLimit: number = 0
+
   if (body.parentId) {
     // ---- 二级及以下：yyy.xxx.doulor.cn ----
     parent = await env.DB.prepare(
@@ -163,18 +171,13 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
     if (!parent) throw new ApiError(404, "父级子域名不存在", "NOT_FOUND")
 
     // 二级不限位数（用户明确要求：x.xxx.doulor.cn 是允许的）
-    const siblings = await env.DB.prepare(
-      "SELECT COUNT(*) AS c FROM subdomains WHERE parent_id = ?"
-    )
-      .bind(parent.id)
-      .first<{ c: number }>()
-    if (!adminApi && !isPrivileged(user.role) && (siblings?.c ?? 0) >= MAX_CHILDREN) {
-      throw new ApiError(
-        400,
-        `${parent.fqdn} 之下最多可创建 ${MAX_CHILDREN} 个子域名`,
-        "LIMIT_REACHED"
-      )
-    }
+    // ⚠️ 兄弟数量不再在这里 COUNT 判定 —— 那一步与 INSERT 非原子，会被并发击穿
+    // （2026-10-09 渗透测试 finding#4：8 并发把 MAX_CHILDREN=5 开到了 7 个）。
+    // 真正生效的判定在下方原子 INSERT 的 WHERE 里。
+    guardScope = "parent"
+    guardKey = parent.id
+    guardLimit =
+      adminApi || isPrivileged(user.role) ? ADMIN_UNLIMITED : MAX_CHILDREN
 
     // 管理员的保留名单只约束一级（二级是用户自己的细分空间）
     fqdn = `${name}.${parent.fqdn}`
@@ -203,24 +206,15 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
 
     const globalQuota = await getSettingNumber(env, "subdomain_quota_default")
     // 管理员/站长不受配额限制（用一个足够大的数字表示「无限制」，前端据此显示）
-    const quota =
-      isPrivileged(user.role)
+    guardLimit =
+      adminApi || isPrivileged(user.role)
         ? ADMIN_UNLIMITED
         : (perUser?.max_subdomains ?? globalQuota)
+    guardScope = "user"
+    guardKey = user.id
 
     // 一级数量 = 该用户名下所有「根域直系」的域名（含注册时分配的 'xxx.doulor.cn' 主域名）
-    const used = await env.DB.prepare(
-      "SELECT COUNT(*) AS c FROM subdomains WHERE user_id = ? AND parent_id IS NULL"
-    )
-      .bind(user.id)
-      .first<{ c: number }>()
-    if (!adminApi && !isPrivileged(user.role) && (used?.c ?? 0) >= quota) {
-      throw new ApiError(
-        400,
-        `最多可创建 ${quota} 个一级子域名（当前 ${used?.c ?? 0} 个）`,
-        "LIMIT_REACHED"
-      )
-    }
+    // ⚠️ 不再在这里 COUNT 判额度 —— 见上方 guardScope 的说明与下方原子 INSERT。
 
     // 选根域：省略 = 默认域（tyu.me）；显式指定则要过权限闸
     // （doulor.cn 挂 `doulor` 权限，没解锁的人拿不到）。
@@ -251,14 +245,47 @@ export async function createSubdomain(env: Env, request: Request): Promise<Respo
 
   const id = uuid()
   const now = new Date().toISOString()
-  await env.DB.batch([
-    env.DB.prepare(
-      "INSERT INTO subdomains (id, user_id, name, fqdn, parent_id, status, created_at) VALUES (?, ?, ?, ?, ?, 'active', ?)"
-    ).bind(id, user.id, name, fqdn, parent?.id ?? null, now),
-    env.DB.prepare(
-      "INSERT INTO audit_logs (id, user_id, action, detail, created_at) VALUES (?, ?, 'subdomain.create', ?, ?)"
-    ).bind(uuid(), user.id, `创建子域名 ${fqdn}`, now),
-  ])
+
+  /**
+   * 🔴 **原子写入**（2026-10-09 渗透测试 finding#1/#4/#5）。
+   *
+   * 原来是「SELECT COUNT → 判额度 → INSERT」，中间还夹着一次慢速 CF 查询，
+   * 三条语句非原子 ⇒ 并发请求能**同时**通过额度判定。实测：limit=5 的账号
+   * 8 并发全部 201，最终名下 9 个一级子域名。
+   * 现在把配额判定直接塞进 INSERT 的 WHERE —— 单条语句，D1/SQLite 的写在同库内是
+   * 串行化的，并发再多也只有「名额内」的那几条能插进去；`meta.changes === 0`
+   * 就代表没插进去（超限）。这跟邀请码用 `UPDATE ... WHERE used_count < max_uses`
+   * 做原子扣减是同一个思路。
+   */
+  const guardSql =
+    guardScope === "parent"
+      ? "WHERE (SELECT COUNT(*) FROM subdomains WHERE parent_id = ?) < ?"
+      : "WHERE (SELECT COUNT(*) FROM subdomains WHERE user_id = ? AND parent_id IS NULL) < ?"
+
+  const ins = await env.DB.prepare(
+    `INSERT INTO subdomains (id, user_id, name, fqdn, parent_id, status, created_at)
+     SELECT ?, ?, ?, ?, ?, 'active', ?
+     ${guardSql}`
+  )
+    .bind(id, user.id, name, fqdn, parent?.id ?? null, now, guardKey, guardLimit)
+    .run()
+
+  if ((ins.meta?.changes ?? 0) === 0) {
+    throw new ApiError(
+      400,
+      guardScope === "parent"
+        ? `${parent?.fqdn ?? "该父级"} 之下最多可创建 ${MAX_CHILDREN} 个子域名`
+        : `最多可创建 ${guardLimit} 个一级子域名`,
+      "LIMIT_REACHED"
+    )
+  }
+
+  // 审计挪到写入成功**之后**：原先是 batch 里两条同生共死，而现在第一条可能「插 0 行」
+  await env.DB.prepare(
+    "INSERT INTO audit_logs (id, user_id, action, detail, created_at) VALUES (?, ?, 'subdomain.create', ?, ?)"
+  )
+    .bind(uuid(), user.id, `创建子域名 ${fqdn}`, now)
+    .run()
 
   const row = await env.DB.prepare("SELECT * FROM subdomains WHERE id = ?")
     .bind(id)

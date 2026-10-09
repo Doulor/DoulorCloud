@@ -64,14 +64,24 @@ export async function submitAppeal(env: Env, request: Request): Promise<Response
   )
     .bind(identifier, identifier)
     .first<{ id: string; username: string; status: string }>()
-  if (!user) {
-    throw new ApiError(404, "找不到这个账号，请核对用户名或邮箱是否填写正确", "NOT_FOUND")
-  }
-  if (user.status !== "suspended") {
+
+  /**
+   * 🔴 不区分「账号不存在」与「账号未被封禁」（2026-10-09 渗透测试 finding#8）。
+   *
+   * 原实现是两条分支：查不到 → `404 NOT_FOUND`；查到但状态正常 → `400 NOT_SUSPENDED`。
+   * 响应码不同，于是一个**公开**接口变成了账号枚举器 —— 实测可据此判定
+   * `doulor` / `aeson` 存在而 `admin` / `root` 不存在，为口令喷洒、定向钓鱼提供目标清单。
+   *
+   * 现在两种情况返回**同一个响应**（同码同文案），外部无法分辨；
+   * 只有「确实处于 suspended」的账号才真正受理申诉。
+   * ⚠️ 保留 200（受理成功）与 400（不受理）的区别是业务必需 —— 它只暴露
+   * 「该账号是否被封禁」，不暴露「该账号是否存在」。
+   */
+  if (!user || user.status !== "suspended") {
     throw new ApiError(
       400,
-      "该账号当前状态正常，无需申诉。如有其他问题请在站内「意见反馈」提交。",
-      "NOT_SUSPENDED"
+      "无法为该账号提交申诉：请核对用户名或邮箱是否填写正确；若账号状态正常则无需申诉。",
+      "APPEAL_NOT_ACCEPTED"
     )
   }
 

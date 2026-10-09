@@ -122,6 +122,10 @@ export const ADMIN_PERMISSIONS: AdminPermCategory[] = [
     ],
   },
   { key: "dns", label: "DNS 管理", group: "resource" },
+  // 单级大类：整个 AI 实验室配置面板共用这一个节点。
+  // 刻意不拆成 lab.config / lab.prompt —— 拆开会让「能看面板但不能改提示词」
+  // 这种半残状态出现，而这两块本来就该一起交给同一个人管。
+  { key: "lab", label: "AI 实验室", group: "resource" },
 
   // ======================= 内容与运营 =======================
   { key: "announcements", label: "公告", group: "operation" },

@@ -261,6 +261,26 @@ async function requireUploader(env: Env, request: Request): Promise<UserRow | nu
   }
 }
 
+/**
+ * 能否**覆盖**该批次里已有的同名文件。
+ *
+ * ⚠️ 这里的判定**故意比删除宽松**，别照抄 deleteTempbox / deleteTempboxFile 的属主校验：
+ *   · 删除：只有创建者本人（或管理员）能删 —— 否则别人能把你的箱子清空；
+ *   · 写入：**知道接收码就能传**是 tempbox 的产品语义 —— 接收码本身就是凭证，
+ *     典型用法是「把文件传进我的接收码」（接收方通常**不是**创建者）。
+ *     若强行要求上传者必须是创建者，这个功能就没用了。
+ *
+ * 所以要防的不是「非属主上传」，而是**非属主覆盖**：
+ * 2026-10-09 渗透测试 finding#3 实测，非属主 B 能用同名文件把 A 箱子里已有的
+ * `victim.txt` 替换掉（内容被篡改、A 看到的 size 也变了）。归属只用来决定
+ * 「能不能盖掉**已存在**的对象」，不用来决定「能不能新增」。
+ */
+function canOverwrite(user: UserRow | null, batch: TempboxBatchRow): boolean {
+  if (isAnyAdmin(user?.role)) return true
+  if (!user || !batch.creator_user_id) return false
+  return batch.creator_user_id === user.id
+}
+
 /** R2 对象 → 对外文件信息 */
 function toFileInfo(obj: { key: string; size: number; lastModified: string | null }) {
   const name = obj.key.slice(`${R2_PREFIX}/`.length).split("/").slice(1).join("/")
@@ -361,7 +381,8 @@ export async function createTempboxUploadUrl(
   }
   const uploader = await requireUploader(env, request)
   await guardTempboxUpload(env, request, uploader, "url")
-  await assertBatchAlive(env, code)
+  // 兼作「批次存在且未过期」的校验；返回值顺便复用（原来这里查了两次库）
+  const batch = await assertBatchAlive(env, code)
 
   // 管理员/站长不受分享箱配额限制
   const isAdmin = isPrivileged(uploader?.role)
@@ -384,18 +405,50 @@ export async function createTempboxUploadUrl(
     )
   }
 
-  const batch = await loadBatch(env, code)
-  if (!batch || batch.file_count >= maxFiles) {
+  if (batch.file_count >= maxFiles) {
     throw new ApiError(400, `每个接收码最多 ${maxFiles} 个文件`, "TOO_MANY_FILES")
   }
 
   const key = `${R2_PREFIX}/${code}/${filename}`
   const platformBucket = await getPlatformBucketId(env)
-  const uploadUrl = (await supportsPresign(env, platformBucket))
+
+  // 非属主不得**覆盖**箱子里已有的文件（新增不受限 —— 见 canOverwrite 的说明）
+  if (!canOverwrite(uploader, batch)) {
+    const existing = await headObject(env, key, platformBucket)
+    if (existing) {
+      throw new ApiError(409, "该文件名已被占用，请换一个文件名", "FILE_EXISTS")
+    }
+  }
+
+  const presigned = await supportsPresign(env, platformBucket)
+  const uploadUrl = presigned
     ? // 把 content-length 纳入签名（见 r2.ts 的 presign 与 P0-6）：
       // 否则可以声明 size=1 过校验，再用同一个 URL PUT 任意大小的对象。
       await presign(env, "PUT", key, 3600, platformBucket, size)
     : `/api/tempbox/${encodeURIComponent(code)}/proxy-upload?key=${encodeURIComponent(key)}`
+
+  /**
+   * 记账（2026-10-09 渗透测试 finding#7）。配额守卫 `liveUsage` 读的是
+   * `tempbox_batches.total_bytes`，而原先**只有 commit** 才写它 ⇒
+   * 「PUT 完不 commit」等于零记账，2 GiB「存活字节」上限形同虚设
+   * （对象却已经落桶、可被公开列出与下载）。
+   *
+   * 这里只给**预签名直传**路径记：直传不经 Worker，拿不到真实字节，只能按声明大小记
+   * （presign 已把 content-length 纳入签名 ⇒ 声明值可信、实际 PUT 必须等于它）。
+   * proxy 回退路径留给 `proxyTempboxUpload` 按**真实字节**记 —— 两条路径互斥
+   * （presign 为真时返回的是直传 URL，不会再走 proxy），所以不会重复计数。
+   *
+   * ⚠️ 增量记账会因「同名重复上传」偏大，但 commit / 文件删除都会用 R2 实算**覆写**
+   * 这两个字段，误差在下次 commit 时自愈，且偏保守（更早触发上限）。
+   */
+  if (presigned) {
+    await env.DB.prepare(
+      "UPDATE tempbox_batches SET total_bytes = total_bytes + ?, file_count = file_count + 1 WHERE code = ?"
+    )
+      .bind(size, code)
+      .run()
+  }
+
   return json({ uploadUrl, key, filename, code })
 }
 
@@ -411,11 +464,24 @@ export async function proxyTempboxUpload(
   // 原先这里连调了 3 次 requireUploader（等于 3 次会话查询），合并成一次
   const uploader = await requireUploader(env, request)
   await guardTempboxUpload(env, request, uploader, "url")
-  await assertBatchAlive(env, code)
+  // 兼作「批次存在且未过期」校验，返回值复用
+  const batch = await assertBatchAlive(env, code)
 
   const key = new URL(request.url).searchParams.get("key") ?? ""
   if (!key.startsWith(`${R2_PREFIX}/${code}/`)) {
     throw new ApiError(403, "非法的文件路径", "FORBIDDEN")
+  }
+
+  const platformBucket = await getPlatformBucketId(env)
+
+  // 非属主不得**覆盖**已有文件（新增不受限 —— 见 canOverwrite 的说明）。
+  // ⚠️ 这条必须在这里**再做一遍**：proxy-upload 可以跳过 upload-url 直接被 PUT
+  // （渗透测试的 PoC 就是这么打的），只在上游拦一道等于没拦。
+  if (!canOverwrite(uploader, batch)) {
+    const existing = await headObject(env, key, platformBucket)
+    if (existing) {
+      throw new ApiError(409, "该文件名已被占用，请换一个文件名", "FILE_EXISTS")
+    }
   }
 
   // 管理员/站长不受大小限制
@@ -450,7 +516,16 @@ export async function proxyTempboxUpload(
     }
   }
 
-  await putObject(env, key, buf, contentType, await getPlatformBucketId(env))
+  await putObject(env, key, buf, contentType, platformBucket)
+
+  // 记账：见 createTempboxUploadUrl 里同一段说明（proxy 路径按**真实字节**记）。
+  // 不记的话「PUT 完不 commit」就完全不进配额账（渗透测试 finding#7）。
+  await env.DB.prepare(
+    "UPDATE tempbox_batches SET total_bytes = total_bytes + ?, file_count = file_count + 1 WHERE code = ?"
+  )
+    .bind(buf.byteLength, code)
+    .run()
+
   return json({ ok: true, key, size: buf.byteLength })
 }
 

@@ -170,17 +170,12 @@ function guardExternalClick(e: React.MouseEvent, href: string): void {
   requestExternalLink(href)
 }
 
-/** 链接渲染：裸链接走卡片，行内链接保持普通样式 */
-function renderLink(props: React.ComponentPropsWithoutRef<"a">) {
+/** 普通链接（不抓取预览、不渲染富卡片）：外链先弹二次确认，站内链接直接开 */
+function renderPlainLink(props: React.ComponentPropsWithoutRef<"a">) {
   const { href, children, ...rest } = props
   if (!href) {
     return <a {...rest}>{children}</a>
   }
-  // 裸链接 → 富卡片
-  if (isBareLink(href, children)) {
-    return <LinkCard href={href} />
-  }
-  // 行内链接 → 普通
   return (
     <a
       href={href}
@@ -193,6 +188,17 @@ function renderLink(props: React.ComponentPropsWithoutRef<"a">) {
       {children}
     </a>
   )
+}
+
+/** 链接渲染：裸链接走卡片，行内链接保持普通样式 */
+function renderLink(props: React.ComponentPropsWithoutRef<"a">) {
+  const { href, children } = props
+  // 裸链接 → 富卡片
+  if (href && isBareLink(href, children)) {
+    return <LinkCard href={href} />
+  }
+  // 行内链接 → 普通
+  return renderPlainLink(props)
 }
 
 /** 代码块 + 行内代码 */
@@ -416,17 +422,25 @@ function renderImage(
 export function Markdown({
   children,
   stickerSaveButton = true,
+  linkCards = true,
 }: {
   children: string
   /** false = 表情包不显示自己的「保存」按钮（由父级右键菜单承载，如聊天室） */
   stickerSaveButton?: boolean
+  /**
+   * false = 裸链接不渲染成富链接卡片（也不去后端抓预览），退化成普通链接。
+   *
+   * 给**容器很窄**的场景用：AI 实验室的回复气泡最宽只有 85%，卡片左侧那块
+   * 80×80 缩略图会把标题挤成两三个字，还不如一个能看全的链接清楚。
+   */
+  linkCards?: boolean
 }) {
   return (
     <div className="markdown-body break-words text-sm leading-relaxed">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
         components={{
-          a: renderLink,
+          a: linkCards ? renderLink : renderPlainLink,
           code: renderCode,
           img: (props) => renderImage(props, stickerSaveButton),
         }}

@@ -10,6 +10,7 @@ import { toast } from "sonner"
 import { Loader2, KeyRound, Copy, Trash2, RefreshCw, Webhook, AlertTriangle } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { confirmDialog } from "@/components/confirm-dialog"
 import {
   Card,
   CardContent,
@@ -117,7 +118,11 @@ export function ApiSettingsCard() {
   }
 
   const remove = async () => {
-    if (!window.confirm(t("apiset.deleteConfirm"))) return
+    const ok = await confirmDialog({
+      title: t("apiset.deleteConfirm"),
+      danger: true,
+    })
+    if (!ok) return
     setBusy(true)
     try {
       await publicApi.deleteKey()

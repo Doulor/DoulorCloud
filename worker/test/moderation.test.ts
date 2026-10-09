@@ -131,18 +131,34 @@ describe("注册准入：同 IP 累计上限", () => {
 })
 
 describe("封禁申诉", () => {
-  it("正常账号不能申诉（否则等于公开留言板）", async () => {
+  /**
+   * 本文件会连续提交多次申诉，而限流窗口是 5 次/小时 ⇒ 每次打之前先清窗口，
+   * 否则后面的用例会撞 429（与判断逻辑无关的噪声）。
+   */
+  async function appeal(username: string, content: string): Promise<Response> {
+    await env.DB.prepare("DELETE FROM rate_limits").run()
+    return submitAppeal(username, content)
+  }
+
+  it("正常账号与不存在的账号：响应必须完全一致（2026-10-09 渗透 finding#8）", async () => {
     const u = await makeUser()
-    const res = await submitAppeal(u.username, "我是正常账号，随便提交一下试试看")
-    expect(res.status).toBe(400)
-    expect((await res.json<{ code?: string }>()).code).toBe("NOT_SUSPENDED")
+    const normal = await appeal(u.username, "我是正常账号，随便提交一下试试看")
+    const missing = await appeal("no_such_user_zzz", "我是正常账号，随便提交一下试试看")
+
+    // 原来「不存在 → 404 NOT_FOUND」「存在但没封 → 400 NOT_SUSPENDED」可区分 ⇒ 能用它枚举账号
+    expect(normal.status).toBe(400)
+    expect(missing.status).toBe(400)
+    const n = await normal.json<{ error?: string; code?: string }>()
+    const m = await missing.json<{ error?: string; code?: string }>()
+    // 状态码 / 错误码 / 文案少一致一处，就还能拿来枚举
+    expect(n.code).toBe(m.code)
+    expect(n.error).toBe(m.error)
   })
 
-  it("找不到账号 → 404；正文太短 → 400", async () => {
-    expect((await submitAppeal("no_such_user_zzz", "我被封了，请复核一下我的账号")).status).toBe(404)
+  it("正文太短 → 400", async () => {
     const u = await makeUser()
     await suspend(u.username)
-    expect((await submitAppeal(u.username, "太短")).status).toBe(400)
+    expect((await appeal(u.username, "太短")).status).toBe(400)
   })
 
   it("被封禁账号可申诉；管理端「通过」→ 自动解封", async () => {
@@ -150,7 +166,7 @@ describe("封禁申诉", () => {
     const u = await makeUser()
     await suspend(u.username)
 
-    const res = await submitAppeal(u.username, "我没有刷接口，都是正常使用，请复核一下")
+    const res = await appeal(u.username, "我没有刷接口，都是正常使用，请复核一下")
     expect(res.status).toBe(200)
 
     const list = await fetchSelf(authRequest(admin, "/api/admin/appeals"))
@@ -177,7 +193,7 @@ describe("封禁申诉", () => {
     const admin = await makeAdmin()
     const u = await makeUser()
     await suspend(u.username)
-    await submitAppeal(u.username, "请复核，我确实是正常使用这个账号")
+    await appeal(u.username, "请复核，我确实是正常使用这个账号")
 
     const list = await fetchSelf(authRequest(admin, "/api/admin/appeals"))
     const appeals = (await list.json<{ appeals: { id: string; username: string }[] }>()).appeals

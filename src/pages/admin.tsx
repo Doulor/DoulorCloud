@@ -13,6 +13,7 @@ import {
   ImagePlus,
   Megaphone,
   Database,
+  FlaskConical,
   RefreshCw,
   Search,
   ShieldBan,
@@ -76,6 +77,7 @@ import { EmptyState } from "@/components/empty-state"
 import { NavItem, NavGroup } from "@/components/sub-nav"
 import { SlidingPill } from "@/components/motion/sliding-pill"
 import { AdminApiTab } from "@/components/admin-api-tab"
+import { AdminLabTab } from "@/components/admin-lab-tab"
 import { AdminPermissionsPanel } from "@/components/admin-permissions"
 import { Textarea } from "@/components/ui/textarea"
 import {
@@ -90,6 +92,7 @@ import { AdminInvitesSkeleton, AdminUsersSkeleton } from "@/components/skeletons
 // 「后台显示多数得奖、用户端显示少数得奖」这种自相矛盾
 import { isInstantVoteRule, VOTE_RULE_LABEL_KEY } from "@/components/event-vote"
 import { Button } from "@/components/ui/button"
+import { confirmDialog } from "@/components/confirm-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -137,7 +140,7 @@ import {
   donationApi,
   r2AdminApi,
   wb2apiApi,
-  cli2apiApi,
+  qoder2apiApi,
   attentionApi,
   HttpError,
 } from "@/services/api"
@@ -165,7 +168,7 @@ const DONATION_GRANT_ITEMS: { key: string; label: string; desc: string }[] = [
   { key: "frp", label: "adm.1275", desc: "adm.1276" },
   { key: "proxy", label: "adm.1277", desc: "adm.1278" },
   { key: "wb2api", label: "adm.1279", desc: "adm.1280" },
-  { key: "cli2api", label: "adm.1281", desc: "adm.1282" },
+  { key: "qoder2api", label: "adm.1281", desc: "adm.1282" },
 ]
 
 /**
@@ -214,9 +217,9 @@ import type {
   AdminWb2ApiConfig,
   AdminWb2ApiBinding,
   AdminWb2ApiPool,
-  AdminCli2ApiConfig,
-  AdminCli2ApiBinding,
-  AdminCli2ApiPool,
+  AdminQoder2ApiConfig,
+  AdminQoder2ApiBinding,
+  AdminQoder2ApiPool,
   RecommendedTier,
   AttentionCounts,
   AdminPermCategory,
@@ -318,7 +321,7 @@ function fmtTime(iso: string) {
 
 /** realm（cn/global）→ 中文标签 */
 function realmLabel(realm: string | null | undefined): string {
-  if (realm === "global") return tStatic("don.realm.global")
+  if (realm === "intl" || realm === "global") return tStatic("don.realm.global")
   if (realm === "cn") return tStatic("don.realm.cn")
   return tStatic("common.unknown")
 }
@@ -701,7 +704,7 @@ const ADMIN_TAB_KEYS = new Set([
   "users", "invites", "inviteQuotas", "reserved", "titles", "points",
   "donations", "feedback", "announcements", "events", "community", "moderation", "notices",
   "dns", "newapi", "r2", "frp", "proxy", "mail", "analytics", "cfQuota", "audit",
-  "oauth", "settings", "funLinks", "wb2api", "api", "permissions",
+  "oauth", "settings", "funLinks", "wb2api", "api", "permissions", "lab",
 ])
 
 export default function AdminPage() {
@@ -1045,24 +1048,24 @@ export default function AdminPage() {
   const [wb2apiRealmCn, setWb2apiRealmCn] = React.useState(true)
   const [wb2apiRealmGlobal, setWb2apiRealmGlobal] = React.useState(true)
 
-  // ---- CLI2API 反代账号捐献（第二条通道）----
-  const [cli2apiConfig, setCli2apiConfig] = React.useState<AdminCli2ApiConfig | null>(null)
-  const [cli2apiBindings, setCli2apiBindings] = React.useState<AdminCli2ApiBinding[]>([])
-  const [cli2apiPool, setCli2apiPool] = React.useState<AdminCli2ApiPool | null>(null)
-  const [cli2apiLoading, setCli2apiLoading] = React.useState(false)
-  const [cli2apiBusy, setCli2apiBusy] = React.useState(false)
+  // ---- Qoder2API 反代账号捐献（第二条通道）----
+  const [qoder2apiConfig, setQoder2apiConfig] = React.useState<AdminQoder2ApiConfig | null>(null)
+  const [qoder2apiBindings, setQoder2apiBindings] = React.useState<AdminQoder2ApiBinding[]>([])
+  const [qoder2apiPool, setQoder2apiPool] = React.useState<AdminQoder2ApiPool | null>(null)
+  const [qoder2apiLoading, setQoder2apiLoading] = React.useState(false)
+  const [qoder2apiBusy, setQoder2apiBusy] = React.useState(false)
   /** 待更新的 console key（明文只在输入框，提交后立即清空） */
-  const [cli2apiNewKey, setCli2apiNewKey] = React.useState("")
-  const [cli2apiRemoving, setCli2apiRemoving] = React.useState<AdminCli2ApiBinding | null>(null)
-  const [cli2apiRevokeAi, setCli2apiRevokeAi] = React.useState(false)
-  /** 通道开关 / 上限 / provider / region（走全局设置接口，与其它开关一起保存） */
-  const [cli2apiEnabled, setCli2apiEnabled] = React.useState(true)
+  const [qoder2apiNewKey, setQoder2apiNewKey] = React.useState("")
+  const [qoder2apiRemoving, setQoder2apiRemoving] = React.useState<AdminQoder2ApiBinding | null>(null)
+  const [qoder2apiRevokeAi, setQoder2apiRevokeAi] = React.useState(false)
+  /** 通道开关 / 上限 / 区域（走全局设置接口，与其它开关一起保存） */
+  const [qoder2apiEnabled, setQoder2apiEnabled] = React.useState(true)
   /** 纯展示开关：是否在捐献页显示该入口（关掉不影响通道本身） */
-  const [cli2apiDonationVisible, setCli2apiDonationVisible] = React.useState(true)
-  const [cli2apiMaxBindings, setCli2apiMaxBindings] = React.useState("3")
-  const [cli2apiBaseUrl, setCli2apiBaseUrl] = React.useState("")
-  const [cli2apiProvider, setCli2apiProvider] = React.useState("qoder")
-  const [cli2apiRegion, setCli2apiRegion] = React.useState("cn")
+  const [qoder2apiDonationVisible, setQoder2apiDonationVisible] = React.useState(true)
+  const [qoder2apiMaxBindings, setQoder2apiMaxBindings] = React.useState("3")
+  const [qoder2apiBaseUrl, setQoder2apiBaseUrl] = React.useState("")
+  /** 上游区域：cn / intl（该通道只对接 Qoder，无 provider 可切） */
+  const [qoder2apiRealm, setQoder2apiRealm] = React.useState("cn")
 
   // 商汤 Key 捐献通道
   const [sensenovaEnabled, setSensenovaEnabled] = React.useState(true)
@@ -1143,7 +1146,7 @@ export default function AdminPage() {
     frp: true,
     proxy: true,
     wb2api: true,
-    cli2api: true,
+    qoder2api: true,
   })
   // 捐献可发放「可转授额度」的模块（四个独立开关，默认全开；见 settings.ts）
   const [donationQuotaFeatures, setDonationQuotaFeatures] = React.useState<
@@ -1953,13 +1956,12 @@ export default function AdminPage() {
       setWb2apiRealm(s.wb2api_realm === "global" ? "global" : "cn")
       setWb2apiRealmCn(isSettingOn(s.wb2api_realm_cn, true))
       setWb2apiRealmGlobal(isSettingOn(s.wb2api_realm_global, true))
-      // CLI2API 反代账号捐献通道
-      setCli2apiEnabled(isSettingOn(s.cli2api_enabled, true))
-      setCli2apiDonationVisible(isSettingOn(s.cli2api_donation_visible, true))
-      setCli2apiMaxBindings(s.cli2api_max_bindings ?? "3")
-      setCli2apiBaseUrl(s.cli2api_base_url ?? "")
-      setCli2apiProvider(s.cli2api_provider ?? "qoder")
-      setCli2apiRegion(s.cli2api_region ?? "cn")
+      // Qoder2API 反代账号捐献通道
+      setQoder2apiEnabled(isSettingOn(s.qoder2api_enabled, true))
+      setQoder2apiDonationVisible(isSettingOn(s.qoder2api_donation_visible, true))
+      setQoder2apiMaxBindings(s.qoder2api_max_bindings ?? "3")
+      setQoder2apiBaseUrl(s.qoder2api_base_url ?? "")
+      setQoder2apiRealm(s.qoder2api_realm ?? "cn")
       // 商汤 Key 捐献通道
       setSensenovaEnabled(isSettingOn(s.sensenova_enabled, true))
       setSensenovaDonationVisible(isSettingOn(s.sensenova_donation_visible, true))
@@ -2043,7 +2045,7 @@ export default function AdminPage() {
         frp: isSettingOn(s.donation_grant_frp, true),
         proxy: isSettingOn(s.donation_grant_proxy, true),
         wb2api: isSettingOn(s.donation_grant_wb2api, true),
-        cli2api: isSettingOn(s.donation_grant_cli2api, true),
+        qoder2api: isSettingOn(s.donation_grant_qoder2api, true),
       })
       // 捐献可发放「可转授额度」的模块：缺省/取不到时按「四个都发」显示
       // （与后端 parseDonationQuotaFeatures 的缺省口径一致）
@@ -2178,7 +2180,7 @@ export default function AdminPage() {
         donation_grant_frp: donationGrants.frp,
         donation_grant_proxy: donationGrants.proxy,
         donation_grant_wb2api: donationGrants.wb2api,
-        donation_grant_cli2api: donationGrants.cli2api,
+        donation_grant_qoder2api: donationGrants.qoder2api,
         // 可转授额度的模块，逗号分隔；全关时发空串（后端 = 一个都不发）
         donation_transfer_features: Object.entries(donationQuotaFeatures)
           .filter(([, on]) => on)
@@ -2192,13 +2194,12 @@ export default function AdminPage() {
         wb2api_realm: wb2apiRealm,
         wb2api_realm_cn: wb2apiRealmCn,
         wb2api_realm_global: wb2apiRealmGlobal,
-        // CLI2API 反代账号捐献通道
-        cli2api_enabled: cli2apiEnabled,
-        cli2api_donation_visible: cli2apiDonationVisible,
-        cli2api_max_bindings: String(Math.max(1, Math.round(Number(cli2apiMaxBindings) || 3))),
-        cli2api_base_url: cli2apiBaseUrl.trim(),
-        cli2api_provider: cli2apiProvider,
-        cli2api_region: cli2apiRegion,
+        // Qoder2API 反代账号捐献通道
+        qoder2api_enabled: qoder2apiEnabled,
+        qoder2api_donation_visible: qoder2apiDonationVisible,
+        qoder2api_max_bindings: String(Math.max(1, Math.round(Number(qoder2apiMaxBindings) || 3))),
+        qoder2api_base_url: qoder2apiBaseUrl.trim(),
+        qoder2api_realm: qoder2apiRealm,
         // 商汤 Key 捐献通道
         sensenova_enabled: sensenovaEnabled,
         sensenova_donation_visible: sensenovaDonationVisible,
@@ -2399,59 +2400,59 @@ export default function AdminPage() {
     }
   }
 
-  // ---- CLI2API 反代账号捐献（第二条通道）----
+  // ---- Qoder2API 反代账号捐献（第二条通道）----
 
-  const loadCli2api = React.useCallback(async () => {
-    setCli2apiLoading(true)
+  const loadQoder2api = React.useCallback(async () => {
+    setQoder2apiLoading(true)
     try {
-      const cfg = await cli2apiApi.getConfig()
-      setCli2apiConfig(cfg)
+      const cfg = await qoder2apiApi.getConfig()
+      setQoder2apiConfig(cfg)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.57"))
     } finally {
-      setCli2apiLoading(false)
+      setQoder2apiLoading(false)
     }
     try {
-      const b = await cli2apiApi.listBindings()
-      setCli2apiBindings(b.bindings)
+      const b = await qoder2apiApi.listBindings()
+      setQoder2apiBindings(b.bindings)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.58"))
-      setCli2apiBindings([])
+      setQoder2apiBindings([])
     }
     try {
-      const p = await cli2apiApi.getPool()
-      setCli2apiPool(p)
+      const p = await qoder2apiApi.getPool()
+      setQoder2apiPool(p)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.59"))
-      setCli2apiPool(null)
+      setQoder2apiPool(null)
     }
   }, [])
 
-  const handleSaveCli2apiKey = async () => {
-    const key = cli2apiNewKey.trim()
+  const handleSaveQoder2apiKey = async () => {
+    const key = qoder2apiNewKey.trim()
     if (!key) {
       toast.error(t("adm.60"))
       return
     }
-    setCli2apiBusy(true)
+    setQoder2apiBusy(true)
     try {
-      await cli2apiApi.saveConfig(key)
-      setCli2apiNewKey("")
+      await qoder2apiApi.saveConfig(key)
+      setQoder2apiNewKey("")
       toast.success(t("adm.61"))
-      void loadCli2api()
+      void loadQoder2api()
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.62"))
     } finally {
-      setCli2apiBusy(false)
+      setQoder2apiBusy(false)
     }
   }
 
-  const handleRemoveCli2apiBinding = async () => {
-    const b = cli2apiRemoving
+  const handleRemoveQoder2apiBinding = async () => {
+    const b = qoder2apiRemoving
     if (!b) return
-    setCli2apiBusy(true)
+    setQoder2apiBusy(true)
     try {
-      const res = await cli2apiApi.removeBinding(b.id, cli2apiRevokeAi)
+      const res = await qoder2apiApi.removeBinding(b.id, qoder2apiRevokeAi)
       toast.success(
         res.aiRevoked
           ? t("adm.63")
@@ -2460,12 +2461,12 @@ export default function AdminPage() {
       if (res.upstreamWarning) {
         toast.warning(t("adm.934", { v0: res.upstreamWarning }))
       }
-      setCli2apiRemoving(null)
-      void loadCli2api()
+      setQoder2apiRemoving(null)
+      void loadQoder2api()
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.65"))
     } finally {
-      setCli2apiBusy(false)
+      setQoder2apiBusy(false)
     }
   }
 
@@ -3491,7 +3492,11 @@ export default function AdminPage() {
   const handleResetTwoFactor = async () => {
     if (!detail) return
     const name = detail.user.username
-    if (!window.confirm(t("adm.1255", { v0: name }))) return
+    const ok = await confirmDialog({
+      title: t("adm.1255", { v0: name }),
+      danger: true,
+    })
+    if (!ok) return
     setBusy(true)
     try {
       await twoFactorApi.adminReset(detail.user.id)
@@ -3703,11 +3708,11 @@ export default function AdminPage() {
     if (v === "r2") void loadR2()
     if (v === "community") void loadCommunity()
     if (v === "newapi") { void loadSettings(); void loadNewApiConfig() }
-    // 「捐献通道」一个选项卡里放三条通道（wb2api / cli2api / 商汤），
+    // 「捐献通道」一个选项卡里放三条通道（wb2api / qoder2api / 商汤），
     // 三条的设置都走同一个 PUT /admin/settings ⇒ 进这个 tab 要一次把三方数据都拉齐
     if (v === "wb2api") {
       void loadWb2api()
-      void loadCli2api()
+      void loadQoder2api()
       void loadSettings()
     }
   }
@@ -3788,7 +3793,9 @@ export default function AdminPage() {
               </NavGroup>
               <NavGroup label={t("adm.220")}>
                 {canSeeTab("newapi") && <NavItem active={activeTab === "newapi"} icon={Sparkles} label={t("adm.221")} onClick={() => handleTabChange("newapi")} />}
-                {/* 三条免审核捐献通道（wb2api / cli2api / 商汤）合并在一个选项卡里 */}
+                {/* AI 实验室：模型来源（统一 Key / 免费试用）、免费渠道、Agent 提示词 */}
+                {canSeeTab("lab") && <NavItem active={activeTab === "lab"} icon={FlaskConical} label={t("nav.lab")} onClick={() => handleTabChange("lab")} />}
+                {/* 三条免审核捐献通道（wb2api / qoder2api / 商汤）合并在一个选项卡里 */}
                 {canSeeTab("wb2api") && <NavItem active={activeTab === "wb2api"} icon={Unplug} label={t("adm.222")} onClick={() => handleTabChange("wb2api")} />}
                 {canSeeTab("r2") && <NavItem active={activeTab === "r2"} icon={Database} label={t("adm.223")} onClick={() => handleTabChange("r2")} />}
                 {/* 角标 = 待审核的内网穿透申请数（用户提交后等管理员批） */}
@@ -6579,7 +6586,7 @@ export default function AdminPage() {
 
         <TabsContent value="wb2api">
           <div className="space-y-6">
-            {/* 三条免审核捐献通道都在这一页：① 反代账号（wb2api）② CLI2API ③ 商汤 Key。
+            {/* 三条免审核捐献通道都在这一页：① 反代账号（wb2api）② Qoder2API ③ 商汤 Key。
                 每条通道自带「通道开关」（管功能）与「显示入口」（只管捐献页给不给看）。 */}
             <p className="text-sm text-muted-foreground">{t("adm.1066")}<b className="font-medium">{t("adm.1067")}</b>{t("adm.1068", { v0: t("adm.498"), v1: t("adm.499"), v2: t("adm.500") })}</p>
 
@@ -6864,7 +6871,7 @@ export default function AdminPage() {
                 )}
               </CardContent>
             </Card>
-            {/* ============ 第二条通道：CLI2API ============
+            {/* ============ 第二条通道：Qoder2API ============
                 {t("adm.532")}
                 同一个选项卡**里，所以这里不再是 <TabsContent>，只是同一页里的一段。
                 别再拆成兄弟 tab（2026-10-01 合并，站长要求）。 */}
@@ -6886,7 +6893,7 @@ export default function AdminPage() {
                       {t("adm.538")}
                     </p>
                   </div>
-                  <Switch checked={cli2apiEnabled} onCheckedChange={setCli2apiEnabled} />
+                  <Switch checked={qoder2apiEnabled} onCheckedChange={setQoder2apiEnabled} />
                 </div>
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
@@ -6894,63 +6901,43 @@ export default function AdminPage() {
                     <p className="text-xs text-muted-foreground">{t("adm.1089")}<span className="font-medium">{t("adm.1090")}</span>{t("adm.1091", { v0: t("adm.540") })}</p>
                   </div>
                   <Switch
-                    checked={cli2apiDonationVisible}
-                    onCheckedChange={setCli2apiDonationVisible}
+                    checked={qoder2apiDonationVisible}
+                    onCheckedChange={setQoder2apiDonationVisible}
                   />
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-2">
-                    <Label htmlFor="cli2apiLimit">{t("adm.541")}</Label>
+                    <Label htmlFor="qoder2apiLimit">{t("adm.541")}</Label>
                     <Input
-                      id="cli2apiLimit"
+                      id="qoder2apiLimit"
                       type="number"
                       min={1}
-                      value={cli2apiMaxBindings}
-                      onChange={(e) => setCli2apiMaxBindings(e.target.value)}
+                      value={qoder2apiMaxBindings}
+                      onChange={(e) => setQoder2apiMaxBindings(e.target.value)}
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="cli2apiBaseUrl">{t("adm.542")}</Label>
+                    <Label htmlFor="qoder2apiBaseUrl">{t("adm.542")}</Label>
                     <Input
-                      id="cli2apiBaseUrl"
-                      placeholder="https://cli2api.doulor.cn"
-                      value={cli2apiBaseUrl}
-                      onChange={(e) => setCli2apiBaseUrl(e.target.value)}
+                      id="qoder2apiBaseUrl"
+                      placeholder="https://qoder2api.doulor.cn"
+                      value={qoder2apiBaseUrl}
+                      onChange={(e) => setQoder2apiBaseUrl(e.target.value)}
                     />
                     <p className="text-xs text-muted-foreground">{t("adm.543")}</p>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="cli2apiProvider">{t("adm.544")}</Label>
+                    <Label htmlFor="qoder2apiRealm">{t("adm.546")}</Label>
                     <Select
-                      value={cli2apiProvider}
-                      onValueChange={(v) => setCli2apiProvider(v)}
+                      value={qoder2apiRealm}
+                      onValueChange={(v) => setQoder2apiRealm(v)}
                     >
-                      <SelectTrigger id="cli2apiProvider">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="qoder">Qoder</SelectItem>
-                        <SelectItem value="workbuddy">WorkBuddy</SelectItem>
-                        <SelectItem value="trae">Trae</SelectItem>
-                        <SelectItem value="devin">Devin</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <p className="text-xs text-muted-foreground">
-                      {t("adm.545")}
-                    </p>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="cli2apiRegion">{t("adm.546")}</Label>
-                    <Select
-                      value={cli2apiRegion}
-                      onValueChange={(v) => setCli2apiRegion(v)}
-                    >
-                      <SelectTrigger id="cli2apiRegion">
+                      <SelectTrigger id="qoder2apiRealm">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="cn">{t("adm.547")}</SelectItem>
-                        <SelectItem value="global">{t("adm.548")}</SelectItem>
+                        <SelectItem value="intl">{t("adm.548")}</SelectItem>
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
@@ -6972,48 +6959,48 @@ export default function AdminPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                {cli2apiLoading ? (
+                {qoder2apiLoading ? (
                   <LoadingBlock variant="list" />
                 ) : (
                   <>
                     <div className="flex flex-wrap items-center gap-2 text-sm">
                       <Badge
                         variant={
-                          cli2apiConfig?.source === "db"
+                          qoder2apiConfig?.source === "db"
                             ? "success"
-                            : cli2apiConfig?.source === "env"
+                            : qoder2apiConfig?.source === "env"
                               ? "secondary"
                               : "destructive"
                         }
                       >
-                        {cli2apiConfig?.source === "db"
+                        {qoder2apiConfig?.source === "db"
                           ? t("adm.173")
-                          : cli2apiConfig?.source === "env"
+                          : qoder2apiConfig?.source === "env"
                             ? t("adm.174")
                             : t("adm.175")}
                       </Badge>
                       <span className="font-mono text-xs text-muted-foreground">
-                        {cli2apiConfig?.maskedKey ?? t("adm.1092")}
+                        {qoder2apiConfig?.maskedKey ?? t("adm.1092")}
                       </span>
-                      {cli2apiConfig?.updatedAt && (
-                        <span className="text-xs text-muted-foreground">{t("adm.1093", { v0: fmtTime(cli2apiConfig.updatedAt) })}</span>
+                      {qoder2apiConfig?.updatedAt && (
+                        <span className="text-xs text-muted-foreground">{t("adm.1093", { v0: fmtTime(qoder2apiConfig.updatedAt) })}</span>
                       )}
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="cli2apiKey">{t("adm.554")}</Label>
+                      <Label htmlFor="qoder2apiKey">{t("adm.554")}</Label>
                       <div className="flex gap-2">
                         <Input
-                          id="cli2apiKey"
+                          id="qoder2apiKey"
                           type="password"
                           placeholder={t("adm.299")}
-                          value={cli2apiNewKey}
-                          onChange={(e) => setCli2apiNewKey(e.target.value)}
+                          value={qoder2apiNewKey}
+                          onChange={(e) => setQoder2apiNewKey(e.target.value)}
                         />
                         <Button
-                          onClick={() => void handleSaveCli2apiKey()}
-                          disabled={cli2apiBusy || !cli2apiNewKey.trim()}
+                          onClick={() => void handleSaveQoder2apiKey()}
+                          disabled={qoder2apiBusy || !qoder2apiNewKey.trim()}
                         >
-                          {cli2apiBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                          {qoder2apiBusy && <Loader2 className="h-4 w-4 animate-spin" />}
                           {t("adm.555")}
                         </Button>
                       </div>
@@ -7032,21 +7019,21 @@ export default function AdminPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                {!cli2apiPool ? (
+                {!qoder2apiPool ? (
                   <p className="text-sm text-muted-foreground">
                     {t("adm.558")}
                   </p>
-                ) : !cli2apiPool.available ? (
-                  <p className="text-sm text-destructive">{cli2apiPool.reason}</p>
-                ) : cli2apiPool.accounts.length === 0 ? (
+                ) : !qoder2apiPool.available ? (
+                  <p className="text-sm text-destructive">{qoder2apiPool.reason}</p>
+                ) : qoder2apiPool.accounts.length === 0 ? (
                   <p className="text-sm text-muted-foreground">{t("adm.559")}</p>
                 ) : (
                   <div className="divide-y rounded-md border">
-                    {cli2apiPool.accounts.map((a) => (
+                    {qoder2apiPool.accounts.map((a) => (
                       <div key={a.id} className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm">
                         <span className="font-medium">{a.name}</span>
                         <Badge variant="outline">
-                          {a.provider}/{a.region}
+                          {realmLabel(a.realm)}
                         </Badge>
                         <Badge variant={a.enabled ? "success" : "secondary"}>
                           {a.enabled ? t("adm.1094") : t("adm.1095")}
@@ -7065,14 +7052,14 @@ export default function AdminPage() {
             {/* 绑定列表 */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">{t("adm.1097", { v0: cli2apiBindings.length })}</CardTitle>
+                <CardTitle className="text-base">{t("adm.1097", { v0: qoder2apiBindings.length })}</CardTitle>
                 <CardDescription>
                   {t("adm.560")}
                   {t("adm.561")}
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                {cli2apiBindings.length === 0 ? (
+                {qoder2apiBindings.length === 0 ? (
                   <EmptyState
                     icon={Unplug}
                     title={t("adm.300")}
@@ -7080,12 +7067,12 @@ export default function AdminPage() {
                   />
                 ) : (
                   <div className="divide-y rounded-md border">
-                    {cli2apiBindings.map((b) => (
+                    {qoder2apiBindings.map((b) => (
                       <div key={b.id} className="flex flex-wrap items-center gap-2 px-4 py-3">
                         <span className="text-sm font-medium">{b.username}</span>
                         <span className="text-sm">{b.nickname || b.accountId}</span>
                         <Badge variant="outline">
-                          {b.provider}/{b.region}
+                          {realmLabel(b.realm)}
                         </Badge>
                         <Badge variant={b.status === "active" ? "success" : "secondary"}>
                           {b.status === "active" ? t("adm.1098") : t("adm.1099")}
@@ -7099,8 +7086,8 @@ export default function AdminPage() {
                             size="sm"
                             className="text-muted-foreground hover:text-destructive"
                             onClick={() => {
-                              setCli2apiRevokeAi(false)
-                              setCli2apiRemoving(b)
+                              setQoder2apiRevokeAi(false)
+                              setQoder2apiRemoving(b)
                             }}
                           >
                             <Trash2 className="h-4 w-4" />
@@ -8154,6 +8141,10 @@ export default function AdminPage() {
                 </CardContent>
               </Card>
 
+              {/* 「AI实验室 Agent 提示词」已搬到独立的「AI 实验室」栏目
+                  （见 components/admin-lab-tab.tsx）—— 它的兄弟配置项
+                  （模型来源、免费额度、免费渠道）都在那边，留在设置页会拆成两处。 */}
+
               <div className="flex justify-end">
                 <Button onClick={() => void handleSaveSettings()} disabled={settingsBusy}>
                   {settingsBusy && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -8435,6 +8426,10 @@ export default function AdminPage() {
           <AdminApiTab />
         </TabsContent>
 
+        <TabsContent value="lab">
+          <AdminLabTab />
+        </TabsContent>
+
         <TabsContent value="permissions">
           <AdminPermissionsPanel isRoot={user?.role === "root"} />
         </TabsContent>
@@ -8487,25 +8482,25 @@ export default function AdminPage() {
         </DialogContent>
       </Dialog>
 
-      {/* 摘除 CLI2API 绑定 */}
+      {/* 摘除 Qoder2API 绑定 */}
       <Dialog
-        open={cli2apiRemoving !== null}
+        open={qoder2apiRemoving !== null}
         onOpenChange={(o) => {
-          if (!o) setCli2apiRemoving(null)
+          if (!o) setQoder2apiRemoving(null)
         }}
       >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t("adm.728")}</DialogTitle>
-            <DialogDescription>{t("adm.1121", { v0: cli2apiRemoving?.accountId, v1: cli2apiRemoving?.username, v2: t("adm.729") })}</DialogDescription>
+            <DialogDescription>{t("adm.1121", { v0: qoder2apiRemoving?.accountId, v1: qoder2apiRemoving?.username, v2: t("adm.729") })}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <label className="flex cursor-pointer items-start gap-3 rounded-md border px-4 py-3">
               <input
                 type="checkbox"
                 className="mt-0.5 h-4 w-4"
-                checked={cli2apiRevokeAi}
-                onChange={(e) => setCli2apiRevokeAi(e.target.checked)}
+                checked={qoder2apiRevokeAi}
+                onChange={(e) => setQoder2apiRevokeAi(e.target.checked)}
               />
               <span className="text-sm">
                 {t("adm.730")}
@@ -8517,15 +8512,15 @@ export default function AdminPage() {
             </label>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCli2apiRemoving(null)}>
+            <Button variant="outline" onClick={() => setQoder2apiRemoving(null)}>
               {t("adm.733")}
             </Button>
             <Button
               variant="destructive"
-              onClick={() => void handleRemoveCli2apiBinding()}
-              disabled={cli2apiBusy}
+              onClick={() => void handleRemoveQoder2apiBinding()}
+              disabled={qoder2apiBusy}
             >
-              {cli2apiBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+              {qoder2apiBusy && <Loader2 className="h-4 w-4 animate-spin" />}
               {t("adm.734")}
             </Button>
           </DialogFooter>

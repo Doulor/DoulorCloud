@@ -21,6 +21,7 @@ import {
   MessageSquare,
   Wrench,
   FlaskConical,
+  LayoutGrid,
   LogIn,
 } from "lucide-react"
 
@@ -88,6 +89,7 @@ const baseNav = [
   { to: "/dashboard/profile", labelKey: "nav.profile", icon: Contact, end: false },
   { to: "/dashboard/community", labelKey: "nav.community", icon: MessagesSquare, end: false },
   { to: "/dashboard/lab", labelKey: "nav.lab", icon: FlaskConical, end: false, experimental: true },
+  { to: "/dashboard/gallery", labelKey: "nav.gallery", icon: LayoutGrid, end: false },
   { to: "/dashboard/toolbox", labelKey: "nav.toolbox", icon: Wrench, end: false },
 ]
 
@@ -365,7 +367,7 @@ export function DashboardLayout({
     labelKey: string
     icon: React.ElementType
     end: boolean
-    /** 「实验中」小标签（网页实验室等尚在打磨的新功能） */
+    /** 「实验中」小标签（AI实验室等尚在打磨的新功能） */
     experimental?: boolean
   }) => {
     const active = item.end

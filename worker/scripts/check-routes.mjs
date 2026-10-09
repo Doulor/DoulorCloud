@@ -90,7 +90,9 @@ function queryD1Fqdns() {
 /** 固定路由清单 */
 function fixedRoutes() {
   const hosts = [`cloud.${ROOT_DOMAIN}`, ROOT_DOMAIN]
-  const paths = ["/api/*", "/dl/*", "/profile/*", "/p/*"]
+  // /s/* 是网盘的「公开目录分享页」（/s/<token>），必须挂到 API Worker，
+  // 否则会被静态 Worker 兜底成 index.html（200，很难察觉）。
+  const paths = ["/api/*", "/dl/*", "/profile/*", "/p/*", "/s/*"]
   // /u/*（账户头像）与 /c/*（社区帖子图片）仅在 cloud 子域，走 API Worker
   const cloudOnlyPaths = ["/u/*", "/c/*"]
   return [

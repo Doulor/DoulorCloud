@@ -26,9 +26,8 @@ import {
   supportsPresign,
   deletePrefix,
   pickBucketForNewUser,
-  type R2Object,
 } from "../r2"
-import { audit, getSettingBool, getSettingNumber, getSettings } from "../settings"
+import { audit, formatBytes, getSettingBool, getSettingNumber, getSettings } from "../settings"
 import {
   cfCreateDnsRecord,
   cfDeleteDnsRecord,
@@ -199,6 +198,121 @@ export function sanitizeFilename(input: string): string {
     .trim()
   const limited = cleaned.slice(0, 200)
   return limited || `file-${Date.now()}`
+}
+
+/**
+ * 规范化目录路径（相对该账号 prefix）。
+ *
+ * 目录只是 R2 的 key 前缀，所以「路径」就是若干段的拼接。这里做三件事：
+ *   1. 丢掉空段（`a//b` → `a/b`）、去掉首尾斜杠；
+ *   2. 逐段过 sanitizeFilename（去控制字符、收敛连续点），
+ *   3. **显式拒绝 `.` / `..` 段**（路径穿越）。
+ *
+ * ⚠️ 必须先判 `.`/`..` 再 sanitize：sanitizeFilename 会把 `..` 收敛成空串、
+ * 再兜底成 `file-<时间戳>`，那样「..」会被静默改成一个怪异目录名而不是被拒绝。
+ *
+ * 空输入（含 `""` / `/`）返回 `""`，表示「根目录」。
+ */
+export function normalizeFolderPath(input: unknown): string {
+  if (typeof input !== "string") return ""
+  const raw = input.split("/").map((s) => s.trim()).filter(Boolean)
+  if (raw.length === 0) return ""
+  if (raw.length > MAX_FOLDER_DEPTH) {
+    throw new ApiError(400, `目录层级过深（最多 ${MAX_FOLDER_DEPTH} 层）`, "BAD_REQUEST")
+  }
+  const segments: string[] = []
+  for (const segment of raw) {
+    if (segment === "." || segment === "..") {
+      throw new ApiError(400, "目录名不合法", "BAD_REQUEST")
+    }
+    const cleaned = sanitizeFilename(segment)
+    if (!cleaned || cleaned === "." || cleaned === "..") {
+      throw new ApiError(400, "目录名不合法", "BAD_REQUEST")
+    }
+    segments.push(cleaned)
+  }
+  return segments.join("/")
+}
+
+/** 目录最大嵌套层数：防止 `a/a/a/...` 造出超长 key（D1 与 URL 都不友好） */
+const MAX_FOLDER_DEPTH = 12
+
+/** 按段做 URI 编码：`a b/c.png` → `a%20b/c.png`（不能整串 encode，否则斜杠也被编码） */
+export function encodePathSegments(path: string): string {
+  return path.split("/").filter(Boolean).map(encodeURIComponent).join("/")
+}
+
+/**
+ * 列某一层的目录与文件（全模式通用）。
+ *
+ * 为什么不问 R2 要 delimiter：`r2.ts::listObjects` 的 token 模式（CF REST API）
+ * 与 S3 模式返回结构不同，且当前实现并未解析 `CommonPrefixes`。为了在**两种凭据
+ * 模式**下行为一致，这里改成「把该目录子树分页拉完、在前缀层面手工切一层」。
+ * 个人网盘的文件量级（几百到几千）完全可以承受，且不会因模式不同而出错。
+ *
+ * 代价：会读完整棵子树（而不是只读一层）。因此有页数上限，超出时 truncated = true。
+ */
+interface LevelListing {
+  /** `path` 一律相对**账号根目录**（不是相对当前目录），调用方直接拿来拼 R2 key 与直链 */
+  folders: { name: string; path: string }[]
+  /** `name` 是叶子文件名（用于显示）；`path` 是相对**账号根目录**的完整路径 */
+  files: { name: string; path: string; size: number; lastModified: string | null }[]
+  truncated: boolean
+}
+
+const SCAN_PAGE_SIZE = 1000
+const SCAN_MAX_PAGES = 12 // 最多扫 12000 个对象
+
+async function listLevel(
+  env: Env,
+  account: StorageAccountRow,
+  dirPath: string
+): Promise<LevelListing> {
+  const scanPrefix = dirPath ? `${account.prefix}/${dirPath}/` : `${account.prefix}/`
+  const folders = new Set<string>()
+  const files: LevelListing["files"] = []
+  let cursor: string | undefined
+  let round = 0
+
+  for (; round < SCAN_MAX_PAGES; round++) {
+    const page = await listObjects(env, scanPrefix, {
+      limit: SCAN_PAGE_SIZE,
+      cursor,
+      bucketId: account.bucket_id,
+    })
+    for (const obj of page.objects) {
+      const rel = obj.key.slice(scanPrefix.length)
+      if (!rel) continue // 该目录自身的占位对象（`<prefix>/<dir>/`）
+      const slash = rel.indexOf("/")
+      if (slash === -1) {
+        if (obj.key.endsWith(MARKER_SUFFIX)) continue
+        // 🔴 这里必须补回 `dirPath` 前缀：`rel` 只是「当前目录内」的文件名，但下游把它当
+        // 「相对账号根目录」用（拼直链 `https://<fqdn>/<path>`、拼 R2 key `<prefix>/<path>`）。
+        // 少这一层目录名的后果（2026-10-09 站长实爆）：
+        //   ① 目录里的文件，复制出来的直链指向**根目录**的同名文件 ⇒ 404 / 拿到别的文件；
+        //   ② 删除、多选删的 key 也是 `<prefix>/<文件名>` ⇒ 删了一个根本不存在的对象，静默成功的假象。
+        files.push({
+          name: rel,
+          path: dirPath ? `${dirPath}/${rel}` : rel,
+          size: obj.size,
+          lastModified: obj.lastModified,
+        })
+      } else {
+        // 只需第一段：更深的层级归到对应的子目录名下（天然去重）
+        folders.add(rel.slice(0, slash))
+      }
+    }
+    if (!page.truncated || !page.cursor) break
+    cursor = page.cursor
+  }
+
+  return {
+    folders: [...folders]
+      .sort((a, b) => a.localeCompare(b, "zh-Hans-CN"))
+      .map((name) => ({ name, path: dirPath ? `${dirPath}/${name}` : name })),
+    files: files.sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN")),
+    truncated: round >= SCAN_MAX_PAGES,
+  }
 }
 
 /**
@@ -469,7 +583,11 @@ export async function disableStorage(env: Env, request: Request): Promise<Respon
 
 // ---- 文件操作 ----
 
-/** GET /api/storage/objects —— 列出文件（以 R2 为准） */
+/**
+ * GET /api/storage/objects?path=<目录> —— 列出某一层（子目录 + 文件，以 R2 为准）。
+ * 不传 path 即根目录。旧版是按 cursor 翻页，现在改成按目录分层返回：
+ * 目录本身就是 key 前缀，所以「进目录」= 换一个 prefix 再列一次。
+ */
 export async function listStorageObjects(
   env: Env,
   request: Request
@@ -479,35 +597,91 @@ export async function listStorageObjects(
   if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
 
   const url = new URL(request.url)
-  const cursor = url.searchParams.get("cursor") ?? undefined
-  const page = await listObjects(env, `${account.prefix}/`, {
-    limit: 200,
-    cursor,
-    bucketId: account.bucket_id,
-  })
-
-  const objects = page.objects
-    .filter((o) => !o.key.endsWith(MARKER_SUFFIX))
-    .map((o) => toPublicObject(o, account.prefix))
+  const path = normalizeFolderPath(url.searchParams.get("path") ?? "")
+  const level = await listLevel(env, account, path)
 
   return json({
-    objects,
-    cursor: page.cursor,
-    truncated: page.truncated,
+    path,
+    folders: level.folders,
+    objects: level.files.map((f) => ({
+      key: `${account.prefix}/${f.path}`,
+      filename: f.name,
+      path: f.path,
+      size: f.size,
+      lastModified: f.lastModified,
+    })),
+    truncated: level.truncated,
     usedBytes: account.used_bytes,
     quotaBytes: account.quota_bytes,
   })
 }
 
-function toPublicObject(obj: R2Object, prefix: string) {
-  const filename = obj.key.slice(prefix.length + 1)
-  return {
-    key: obj.key,
-    filename,
-    size: obj.size,
-    lastModified: obj.lastModified,
-    etag: obj.etag,
+/**
+ * POST /api/storage/folder —— 新建目录。
+ * body: { path: string }（相对账号根目录，可含 `/` 建多级）
+ *
+ * 目录本身不落 D1（避免「表里有、桶里没有」的两套账）：建目录 = 写一个
+ * `<prefix>/<path>/` 的零字节占位对象，这样**空目录**也能被 listLevel 列出来。
+ */
+export async function createFolder(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "r2")
+  await guardUploadRate(env, user.id)
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+  if (account.enabled !== 1) {
+    throw new ApiError(403, "网盘已关闭，请先启用", "STORAGE_DISABLED")
   }
+
+  const body = (await request.json().catch(() => ({}))) as { path?: string }
+  const path = normalizeFolderPath(body.path ?? "")
+  if (!path) throw new ApiError(400, "请输入目录名", "BAD_REQUEST")
+
+  const key = `${account.prefix}/${path}/`
+  // 幂等：同名目录已存在时覆盖写占位对象即可，不该报错
+  await putObject(env, key, "", "application/x-directory", account.bucket_id)
+
+  await audit(env, user.id, "storage.folder.create", `新建目录 ${key}`)
+  return json({ path }, 201)
+}
+
+/**
+ * POST /api/storage/folder/delete —— 递归删除目录及其下全部文件。
+ * body: { path: string }
+ *
+ * ⚠️ 这是不可逆操作，且会连带删除目录下的所有文件（前端必须二次确认）。
+ */
+export async function deleteFolder(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "r2")
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+
+  const body = (await request.json().catch(() => ({}))) as { path?: string }
+  const path = normalizeFolderPath(body.path ?? "")
+  if (!path) throw new ApiError(400, "不能删除根目录", "BAD_REQUEST")
+
+  const target = `${account.prefix}/${path}/`
+
+  // 按 R2 实际内容递归删（含各级占位对象），再按剩余行重算用量，保持账实一致。
+  const removed = await deletePrefix(env, target, 60, account.bucket_id)
+
+  const now = new Date().toISOString()
+  await env.DB.batch([
+    // ⚠️ 用 substr 比前缀而不用 LIKE：D1 的 LIKE 模式最长 50 字符（见 src/sql-like.ts），
+    // 长目录名用 LIKE 会直接 500。substr 没有这个限制，且这里是要精确前缀匹配。
+    env.DB.prepare(
+      "DELETE FROM storage_objects WHERE user_id = ? AND substr(r2_key, 1, ?) = ?"
+    ).bind(user.id, target.length, target),
+    env.DB.prepare(
+      `UPDATE storage_accounts
+          SET used_bytes = COALESCE((SELECT SUM(size) FROM storage_objects WHERE user_id = ?), 0),
+              file_count = (SELECT COUNT(*) FROM storage_objects WHERE user_id = ?),
+              updated_at = ?
+        WHERE user_id = ?`
+    ).bind(user.id, user.id, now, user.id),
+  ])
+
+  await audit(env, user.id, "storage.folder.delete", `删除目录 ${target}（${removed} 个对象）`)
+  return json({ removed })
 }
 
 /**
@@ -530,9 +704,12 @@ export async function createUploadUrl(
     filename?: string
     size?: number
     contentType?: string
+    /** 目标目录（相对账号根目录）；不传 = 根目录 */
+    folder?: string
   }
 
   const filename = sanitizeFilename(body.filename ?? "")
+  const folder = normalizeFolderPath(body.folder ?? "")
   const size = Math.max(0, Math.trunc(Number(body.size ?? 0)))
   // 管理员不受单文件大小限制（仍受 Worker 请求体上限约束）
   const maxFile =
@@ -549,7 +726,8 @@ export async function createUploadUrl(
   }
 
   // 同名文件已存在时按覆盖处理，配额只算增量
-  const key = `${account.prefix}/${filename}`
+  const relativePath = folder ? `${folder}/${filename}` : filename
+  const key = `${account.prefix}/${relativePath}`
   const existing = await headObject(env, key, account.bucket_id)
   const delta = size - (existing?.size ?? 0)
 
@@ -589,7 +767,8 @@ export async function createUploadUrl(
     uploadUrl,
     key,
     filename,
-    directLink: `/dl/${encodeURIComponent(account.prefix)}/${encodeURIComponent(filename)}`,
+    path: relativePath,
+    directLink: `/dl/${encodeURIComponent(account.prefix)}/${encodePathSegments(relativePath)}`,
   })
 }
 
@@ -1349,6 +1528,435 @@ export async function isHostedDirectLinkHost(
   return Boolean(row)
 }
 
+// ---- 目录分享 ----
+
+interface StorageShareRow {
+  id: string
+  user_id: string
+  token: string
+  /** 相对该账号 prefix 的目录路径；'' = 分享整个根目录 */
+  path: string
+  title: string | null
+  enabled: number
+  created_at: string
+  updated_at: string
+}
+
+/** 每个用户最多保留的分享条数（防止无限刷表 / 刷 token） */
+const MAX_SHARES_PER_USER = 50
+
+/**
+ * 生成分享 token：16 字节随机 → base64url（22 字符）。
+ * 比 `generateToken()`（32 字节 hex = 64 字符）短，URL 里可读性好，且熵仍足够
+ * （2^128 空间，不可能被猜中）。
+ */
+function randomShareToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  let raw = ""
+  for (const b of bytes) raw += String.fromCharCode(b)
+  return btoa(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+}
+
+function shareDisplayName(row: StorageShareRow): string {
+  if (row.title) return row.title
+  if (row.path) return row.path.split("/").pop() ?? row.path
+  return "共享文件"
+}
+
+function toPublicShare(row: StorageShareRow, origin: string) {
+  return {
+    id: row.id,
+    token: row.token,
+    path: row.path,
+    title: shareDisplayName(row),
+    enabled: row.enabled === 1,
+    url: `${origin}/s/${row.token}`,
+    createdAt: row.created_at,
+  }
+}
+
+/** GET /api/storage/shares —— 列出我创建的目录分享 */
+export async function listShares(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "r2")
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+
+  const rows = await env.DB.prepare(
+    "SELECT * FROM storage_shares WHERE user_id = ? ORDER BY created_at DESC"
+  )
+    .bind(user.id)
+    .all<StorageShareRow>()
+
+  const origin = new URL(request.url).origin
+  return json({ shares: (rows.results ?? []).map((r) => toPublicShare(r, origin)) })
+}
+
+/**
+ * POST /api/storage/shares —— 为某个目录创建分享。
+ * body: { path?: string; title?: string }
+ *
+ * 同一个目录已有**启用中**的分享时直接复用它，避免用户点两次生成两条链接。
+ */
+export async function createShare(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "r2")
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+  if (account.enabled !== 1) {
+    throw new ApiError(403, "网盘直链已关闭，请先启用后再分享", "STORAGE_DISABLED")
+  }
+
+  const body = (await request.json().catch(() => ({}))) as { path?: string; title?: string }
+  const path = normalizeFolderPath(body.path ?? "")
+  const origin = new URL(request.url).origin
+
+  const existing = await env.DB.prepare(
+    "SELECT * FROM storage_shares WHERE user_id = ? AND path = ? AND enabled = 1 LIMIT 1"
+  )
+    .bind(user.id, path)
+    .first<StorageShareRow>()
+  if (existing) return json({ share: toPublicShare(existing, origin), reused: true })
+
+  const count = await env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM storage_shares WHERE user_id = ?"
+  )
+    .bind(user.id)
+    .first<{ c: number }>()
+  if ((count?.c ?? 0) >= MAX_SHARES_PER_USER) {
+    throw new ApiError(
+      400,
+      `分享数量已达上限（${MAX_SHARES_PER_USER} 条），请先删除不再需要的`,
+      "TOO_MANY_SHARES"
+    )
+  }
+
+  const id = uuid()
+  const token = randomShareToken()
+  const now = new Date().toISOString()
+  const title =
+    typeof body.title === "string" && body.title.trim()
+      ? body.title.trim().slice(0, 80)
+      : null
+
+  await env.DB.prepare(
+    `INSERT INTO storage_shares (id, user_id, token, path, title, enabled, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 1, ?, ?)`
+  )
+    .bind(id, user.id, token, path, title, now, now)
+    .run()
+
+  await audit(
+    env,
+    user.id,
+    "storage.share.create",
+    `分享目录 ${account.prefix}/${path ? `${path}/` : ""}`
+  )
+
+  const row: StorageShareRow = {
+    id,
+    user_id: user.id,
+    token,
+    path,
+    title,
+    enabled: 1,
+    created_at: now,
+    updated_at: now,
+  }
+  return json({ share: toPublicShare(row, origin), reused: false }, 201)
+}
+
+/** POST /api/storage/shares/delete —— 删除分享（链接立即失效） */
+export async function deleteShare(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "r2")
+  const body = (await request.json().catch(() => ({}))) as { id?: string }
+  const id = typeof body.id === "string" ? body.id : ""
+  if (!id) throw new ApiError(400, "缺少分享 ID", "BAD_REQUEST")
+
+  const row = await env.DB.prepare(
+    "SELECT id, path FROM storage_shares WHERE id = ? AND user_id = ?"
+  )
+    .bind(id, user.id)
+    .first<{ id: string; path: string }>()
+  if (!row) throw new ApiError(404, "分享不存在", "NOT_FOUND")
+
+  await env.DB.prepare("DELETE FROM storage_shares WHERE id = ? AND user_id = ?")
+    .bind(id, user.id)
+    .run()
+
+  await audit(env, user.id, "storage.share.delete", `删除目录分享 ${row.path || "(根目录)"}`)
+  return json({ ok: true })
+}
+
+/** POST /api/storage/shares/toggle —— 启用/停用分享（停用后链接 404，配置保留） */
+export async function toggleShare(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "r2")
+  const body = (await request.json().catch(() => ({}))) as { id?: string; enabled?: unknown }
+  const id = typeof body.id === "string" ? body.id : ""
+  if (!id) throw new ApiError(400, "缺少分享 ID", "BAD_REQUEST")
+  const enabled = body.enabled === true ? 1 : 0
+
+  const res = await env.DB.prepare(
+    "UPDATE storage_shares SET enabled = ?, updated_at = ? WHERE id = ? AND user_id = ?"
+  )
+    .bind(enabled, new Date().toISOString(), id, user.id)
+    .run()
+  if ((res.meta?.changes ?? 0) === 0) throw new ApiError(404, "分享不存在", "NOT_FOUND")
+
+  await audit(env, user.id, "storage.share.toggle", `${enabled ? "启用" : "停用"}目录分享 ${id}`)
+  return json({ enabled: enabled === 1 })
+}
+
+// ---- 公开分享页 ----
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+}
+
+/** 公开分享的 404：面向浏览器，回 HTML 而不是 JSON */
+function shareNotFound(): Response {
+  return new Response(
+    `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>分享不存在</title>
+<style>
+:root{--bg:#f6f6f7;--fg:#18181b;--muted:#71717a}
+@media (prefers-color-scheme:dark){:root{--bg:#0b0b0d;--fg:#f4f4f5;--muted:#a1a1aa}}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:var(--bg);color:var(--fg);
+font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+p{margin:0;font-size:.95rem;color:var(--muted)}
+</style></head>
+<body><p>该分享链接不存在、已被关闭，或分享者已停止直链。</p></body></html>`,
+    { status: 404, headers: { "Content-Type": "text/html; charset=utf-8" } }
+  )
+}
+
+/**
+ * GET /s/<token>[/f/<相对路径>] —— 公开的目录分享页。
+ *
+ *   /s/<token>                目录页（列出分享目录下的内容）
+ *   /s/<token>?p=<子目录>      子目录页（相对分享目录）
+ *   /s/<token>/f/<路径>?dl=1   读取具体文件（经 Worker 反代，复用直链的类型收口）
+ *
+ * 失效条件：分享被停用/删除、分享者关闭了网盘直链、分享者账号被封禁。
+ */
+export async function serveStorageShare(
+  env: Env,
+  request: Request,
+  rest: string
+): Promise<Response> {
+  if (!(await isStorageConfigured(env))) return shareNotFound()
+
+  const slash = rest.indexOf("/")
+  const token = safeDecode(slash === -1 ? rest : rest.slice(0, slash))
+  const tail = slash === -1 ? "" : rest.slice(slash + 1)
+  if (!token) return shareNotFound()
+
+  const share = await env.DB.prepare(
+    "SELECT * FROM storage_shares WHERE token = ? AND enabled = 1 LIMIT 1"
+  )
+    .bind(token)
+    .first<StorageShareRow>()
+  if (!share) return shareNotFound()
+
+  const account = await env.DB.prepare("SELECT * FROM storage_accounts WHERE user_id = ?")
+    .bind(share.user_id)
+    .first<StorageAccountRow>()
+  if (!account || account.enabled !== 1) return shareNotFound()
+
+  // 账号被封禁 → 分享一并失效（否则封号后链接仍在往外分发内容）
+  const owner = await env.DB.prepare("SELECT status FROM users WHERE id = ?")
+    .bind(share.user_id)
+    .first<{ status: string }>()
+  if (!owner || owner.status !== "active") return shareNotFound()
+
+  if (tail.startsWith("f/")) {
+    const rel = safeDecode(tail.slice(2))
+    const segments = rel.split("/").filter(Boolean)
+    if (segments.length === 0 || hasDotSegment(rel)) return shareNotFound()
+
+    const relative = segments.join("/")
+    const key = `${account.prefix}/${share.path ? `${share.path}/` : ""}${relative}`
+    const res = await proxyObject(env, key, request, true, account.bucket_id)
+
+    // ?dl=1 → 强制下载（白名单类型默认是 inline，分享页里「下载」按钮要的是附件）
+    const url = new URL(request.url)
+    if (url.searchParams.get("dl") === "1" && res.status < 400) {
+      const name = segments[segments.length - 1].replace(/["\\\r\n]/g, "_").slice(0, 180)
+      const headers = new Headers(res.headers)
+      headers.set(
+        "Content-Disposition",
+        `attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(name)}`
+      )
+      return new Response(res.body, { status: res.status, headers })
+    }
+    return res
+  }
+
+  return renderSharePage(env, request, token, share, account)
+}
+
+/** 站点 Logo 的云图标（lucide `cloud`，与前端 src/components/logo.tsx 同一枚） */
+const SHARE_ICON_CLOUD = '<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>'
+/** GitHub 章鱼猫（官方 octicon mark-github，16×16） */
+const GITHUB_MARK_PATH =
+  "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+/** 公开分享页页脚的仓库入口（与前端 src/lib/site-links.ts 的 REPO_URL 保持一致） */
+const SHARE_REPO_URL = "https://github.com/Doulor/DoulorCloud"
+const SHARE_ICON_FOLDER =
+  '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>'
+const SHARE_ICON_FILE =
+  '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>'
+const SHARE_ICON_DOWNLOAD =
+  '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>'
+
+/** 渲染分享目录页（黑白灰极简，跟随系统深浅色） */
+async function renderSharePage(
+  env: Env,
+  request: Request,
+  token: string,
+  share: StorageShareRow,
+  account: StorageAccountRow
+): Promise<Response> {
+  const urlPrefix = `/s/${token}`
+  const sub = normalizeFolderPath(new URL(request.url).searchParams.get("p") ?? "")
+  const dirPath = [share.path, sub].filter(Boolean).join("/")
+  const level = await listLevel(env, account, dirPath)
+
+  // 站点入口：与 handlers/oauth.ts 的 canonicalOrigin 同一口径（`cloud.<ROOT_DOMAIN>`），
+  // 不用请求自身的 Host —— 分享页在 `doulor.cn/s/*` 上也能打开，那时 Host 不是站点首页。
+  const siteUrl = `https://cloud.${env.ROOT_DOMAIN}`
+
+  const title = shareDisplayName(share)
+  const subSegments = sub.split("/").filter(Boolean)
+
+  // 面包屑：分享根 → 各级子目录
+  const crumbs: string[] = [`<span class="cur">${escapeHtml(title)}</span>`]
+  for (let i = 0; i < subSegments.length; i++) {
+    const rel = subSegments.slice(0, i + 1).join("/")
+    const isLast = i === subSegments.length - 1
+    crumbs.push(
+      isLast
+        ? `<span class="cur">${escapeHtml(subSegments[i])}</span>`
+        : `<a href="${urlPrefix}?p=${encodeURIComponent(rel)}">${escapeHtml(subSegments[i])}</a>`
+    )
+  }
+
+  const rows: string[] = []
+  for (const folder of level.folders) {
+    const rel = [sub, folder.name].filter(Boolean).join("/")
+    rows.push(
+      `<a class="row" href="${urlPrefix}?p=${encodeURIComponent(rel)}">` +
+        `<svg viewBox="0 0 24 24">${SHARE_ICON_FOLDER}</svg>` +
+        `<span class="name">${escapeHtml(folder.name)}</span>` +
+        `<span class="meta">目录</span></a>`
+    )
+  }
+  for (const file of level.files) {
+    const rel = [sub, file.name].filter(Boolean).join("/")
+    const href = `${urlPrefix}/f/${encodePathSegments(rel)}`
+    rows.push(
+      `<a class="row" href="${href}?dl=1">` +
+        `<svg viewBox="0 0 24 24">${SHARE_ICON_FILE}</svg>` +
+        `<span class="name">${escapeHtml(file.name)}</span>` +
+        `<span class="meta">${escapeHtml(formatBytes(file.size))}</span>` +
+        `<span class="dl"><svg viewBox="0 0 24 24">${SHARE_ICON_DOWNLOAD}</svg></span></a>`
+    )
+  }
+
+  const total = level.folders.length + level.files.length
+  const list = rows.length
+    ? rows.join("")
+    : `<div class="empty">这个目录还是空的</div>`
+  const moreHint = level.truncated
+    ? `<p class="hint">内容较多，仅显示部分条目，请进入具体子目录查看。</p>`
+    : ""
+
+  const html = `<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>${escapeHtml(title)} · 文件分享</title>
+<style>
+:root{--bg:#f6f6f7;--fg:#18181b;--muted:#71717a;--card:rgba(255,255,255,.72);
+--line:rgba(24,24,27,.09);--hover:rgba(24,24,27,.045)}
+@media (prefers-color-scheme:dark){:root{--bg:#0b0b0d;--fg:#f4f4f5;--muted:#a1a1aa;
+--card:rgba(24,24,27,.66);--line:rgba(244,244,245,.11);--hover:rgba(244,244,245,.055)}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);line-height:1.5;-webkit-font-smoothing:antialiased;
+font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+padding:clamp(16px,4vw,48px) clamp(12px,4vw,24px)}
+.wrap{max-width:52rem;margin:0 auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:20px;
+backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.head{display:flex;align-items:center;gap:14px;padding:18px 22px}
+.brand{width:38px;height:38px;flex:none;display:flex;align-items:center;justify-content:center;
+border-radius:12px;background:var(--fg);color:var(--bg)}
+.brand>svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.7;
+stroke-linecap:round;stroke-linejoin:round}
+h1{margin:0;font-size:1.06rem;font-weight:600;letter-spacing:-.01em}
+.sub{margin:3px 0 0;font-size:.8rem;color:var(--muted)}
+.crumbs{display:flex;flex-wrap:wrap;align-items:center;gap:2px;margin:16px 2px;font-size:.85rem}
+.crumbs a,.crumbs .cur{padding:3px 8px;border-radius:8px;text-decoration:none}
+.crumbs a{color:var(--muted)}
+.crumbs a:hover{background:var(--hover);color:var(--fg)}
+.crumbs .cur{color:var(--fg);font-weight:500}
+.crumbs .sep{color:var(--muted);opacity:.45;font-size:.8rem}
+.list{overflow:hidden}
+.row{display:flex;align-items:center;gap:12px;padding:12px 18px;color:inherit;text-decoration:none;
+border-bottom:1px solid var(--line);transition:background .12s}
+.row:last-child{border-bottom:0}
+.row:hover{background:var(--hover)}
+.row>svg{width:19px;height:19px;flex:none;fill:none;stroke:var(--muted);stroke-width:1.6;
+stroke-linecap:round;stroke-linejoin:round}
+.row .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.92rem}
+.row .meta{flex:none;font-size:.78rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.row .dl{flex:none;display:flex}
+.row .dl>svg{width:17px;height:17px;fill:none;stroke:var(--muted);stroke-width:1.6;
+stroke-linecap:round;stroke-linejoin:round}
+.empty{padding:40px 18px;text-align:center;color:var(--muted);font-size:.88rem}
+.hint{margin:12px 2px 0;font-size:.78rem;color:var(--muted)}
+footer{margin:22px 2px 0;display:flex;flex-wrap:wrap;align-items:center;justify-content:center;
+gap:8px 18px;font-size:.76rem;color:var(--muted)}
+footer a{display:inline-flex;align-items:center;gap:6px;color:inherit;text-decoration:none;
+transition:color .12s}
+footer a:hover{color:var(--fg)}
+footer svg{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;
+stroke-linecap:round;stroke-linejoin:round}
+footer a.gh svg{fill:currentColor;stroke:none}
+</style></head>
+<body><div class="wrap">
+<header class="card head">
+<span class="brand" aria-hidden="true"><svg viewBox="0 0 24 24">${SHARE_ICON_CLOUD}</svg></span>
+<div><h1>${escapeHtml(title)}</h1><p class="sub">共 ${total} 项 · 由 Doulor Cloud 网盘分享</p></div>
+</header>
+<nav class="crumbs">${crumbs.join('<span class="sep">›</span>')}</nav>
+<main class="card list">${list}</main>
+${moreHint}
+<footer>
+<a href="${escapeHtml(siteUrl)}" target="_blank" rel="noopener">
+<svg viewBox="0 0 24 24" aria-hidden="true">${SHARE_ICON_CLOUD}</svg>Doulor Cloud · 直链网盘</a>
+<a class="gh" href="${SHARE_REPO_URL}" target="_blank" rel="noopener noreferrer">
+<svg viewBox="0 0 16 16" aria-hidden="true"><path fill-rule="evenodd" d="${GITHUB_MARK_PATH}"/></svg>GitHub</a>
+</footer>
+</div></body></html>`
+
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  })
+}
+
 /** 清空某用户全部文件（管理员用） */
 export async function purgeUserStorage(env: Env, userId: string): Promise<number> {
   const account = await loadAccount(env, userId)
@@ -1356,6 +1964,8 @@ export async function purgeUserStorage(env: Env, userId: string): Promise<number
   const deleted = await deletePrefix(env, `${account.prefix}/`, 50, account.bucket_id)
   await env.DB.batch([
     env.DB.prepare("DELETE FROM storage_objects WHERE user_id = ?").bind(userId),
+    // 目录分享也要一并清掉：文件已经没了，留着空壳分享只会得到一堆 404
+    env.DB.prepare("DELETE FROM storage_shares WHERE user_id = ?").bind(userId),
     env.DB.prepare(
       "UPDATE storage_accounts SET used_bytes = 0, file_count = 0, updated_at = ? WHERE user_id = ?"
     ).bind(new Date().toISOString(), userId),

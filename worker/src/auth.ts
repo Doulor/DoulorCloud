@@ -99,7 +99,7 @@ export function isAnyAdmin(role: string | null | undefined): boolean {
 const EMAIL_VERIFY_REQUIRED_PREFIXES: readonly string[] = [
   "/dev", //             AI 中转站：开通 / 建 Key / 兑换 / 订阅
   "/wb2api", //          WorkBuddy 号池通道
-  "/cli2api", //         CLI2API 通道
+  "/qoder2api", //         Qoder2API 通道
   "/storage", //         直链网盘
   "/subdomains", //      子域名
   "/dns", //             DNS 记录

@@ -596,10 +596,45 @@ export interface StoragePrefixCreated {
 
 export interface StorageObject {
   key: string
+  /** 末段文件名（不含目录） */
   filename: string
+  /** 相对账号根目录的完整路径（含目录，如 `photos/a.png`） */
+  path: string
   size: number
   lastModified: string | null
-  etag: string | null
+  etag?: string | null
+}
+
+/** 网盘里的一个子目录（目录本身不落表，就是 R2 的 key 前缀） */
+export interface StorageFolder {
+  name: string
+  /** 相对账号根目录的路径 */
+  path: string
+}
+
+/** GET /storage/objects?path= 的返回：某一层的子目录 + 文件 */
+export interface StorageList {
+  path: string
+  folders: StorageFolder[]
+  objects: StorageObject[]
+  /** 一次列不完（内容过多）时为 true，提示用户进入子目录查看 */
+  truncated: boolean
+  usedBytes: number
+  quotaBytes: number
+}
+
+/** 目录分享 */
+export interface StorageShare {
+  id: string
+  token: string
+  /** 相对账号根目录的路径；'' = 根目录 */
+  path: string
+  /** 展示名（默认取目录名） */
+  title: string
+  enabled: boolean
+  /** 完整公开链接 */
+  url: string
+  createdAt: string
 }
 
 export interface StorageOverview {
@@ -747,6 +782,11 @@ export interface NewApiKey {
   createdAt: string
   /** 该 Key 所属分组；读不到时为 null（前端只显示「未知」） */
   group?: string | null
+  /**
+   * 系统 Key（「AI实验室」自动创建的那个）：网页端不提供复制与删除。
+   * 后端 `removeKey` / `revealKey` 也会拒绝，前端隐藏按钮只是第一层。
+   */
+  system?: boolean
 }
 
 /** 开通前探测：决定展示「绑定已有账号」还是「创建新账号」 */
@@ -1837,8 +1877,8 @@ export interface DonationOverview {
   maxSubUrls?: number
   /** WorkBuddy 反代账号捐献通道（免审核，登录成功即解锁 ai） */
   wb2api: Wb2ApiDonationBlock
-  /** CLI2API 反代账号捐献通道（第二条，免审核） */
-  cli2api: Cli2ApiDonationBlock
+  /** Qoder2API 反代账号捐献通道（第二条，免审核） */
+  qoder2api: Qoder2ApiDonationBlock
   /** 商汤 Key 捐献通道（免审核，Key 校验通过即解锁 ai） */
   sensenova: SenseNovaDonationBlock
   /**
@@ -1978,36 +2018,35 @@ export interface AdminWb2ApiPool {
   }[]
 }
 
-// ---- CLI2API 反代账号捐献（第二条通道）----
+// ---- Qoder2API 反代账号捐献（第二条通道）----
 
-/** 一条绑定：用户捐献（登录）的一个 CLI2API 账号 */
-export interface Cli2ApiBinding {
+/** 一条绑定：用户捐献（登录）的一个 Qoder2API 账号 */
+export interface Qoder2ApiBinding {
   id: string
   /** 上游账号 id（acc_xxxxxxxxxxxx） */
   accountId: string
-  provider: string
-  region: string
+  /** 上游区域：cn（国内版）/ intl（国际版） */
+  realm: string
   nickname: string | null
   status: "active" | "removed"
   createdAt: string
   removedAt: string | null
 }
 
-/** GET /api/cli2api/status */
-export interface Cli2ApiStatus {
+/** GET /api/qoder2api/status */
+export interface Qoder2ApiStatus {
   enabled: boolean
   configured: boolean
   limit: number
   used: number
   remaining: number
-  /** 当前配置要绑的上游与区域 */
-  provider: string
-  region: string
-  bindings: Cli2ApiBinding[]
+  /** 当前配置要绑的区域（cn/intl） */
+  realm: string
+  bindings: Qoder2ApiBinding[]
 }
 
-/** 捐献页用的 CLI2API 通道概况（随 GET /api/donations 一起返回） */
-export interface Cli2ApiDonationBlock {
+/** 捐献页用的 Qoder2API 通道概况（随 GET /api/donations 一起返回） */
+export interface Qoder2ApiDonationBlock {
   enabled: boolean
   /**
    * 管理员是否允许在捐献页显示该入口（纯展示开关）。
@@ -2018,34 +2057,34 @@ export interface Cli2ApiDonationBlock {
   limit: number
   used: number
   remaining: number
-  provider: string
-  region: string
-  bindings: Cli2ApiBinding[]
+  /** 当前配置要绑的区域（cn/intl） */
+  realm: string
+  bindings: Qoder2ApiBinding[]
   /** 该通道解锁的功能模块 */
   feature: string
 }
 
-/** POST /api/cli2api/login/start */
-export interface Cli2ApiLoginStart {
+/** POST /api/qoder2api/login/start */
+export interface Qoder2ApiLoginStart {
   sessionId: string
-  provider: string
-  region: string
+  realm: string
+  /** 上游一次性返回的授权链接（前端可立即打开） */
+  authUrl: string
 }
 
-/** GET /api/cli2api/login/poll */
-export interface Cli2ApiLoginPoll {
+/** GET /api/qoder2api/login/poll */
+export interface Qoder2ApiLoginPoll {
   status: "pending" | "done" | "failed"
   message?: string
   /** pending 时返回的授权链接（首次取到后缓存，之后原样带回） */
   authUrl?: string
-  result?: Cli2ApiLoginResult
+  result?: Qoder2ApiLoginResult
 }
 
-export interface Cli2ApiLoginResult {
+export interface Qoder2ApiLoginResult {
   id: string
   accountId: string
-  provider: string
-  region: string
+  realm: string
   /** 本次是否新授予了 ai 权限 */
   aiGranted: boolean
   /** 该账号此前已绑定过（幂等返回，未重复授权） */
@@ -2053,12 +2092,12 @@ export interface Cli2ApiLoginResult {
 }
 
 /** 管理端：绑定列表（含用户名） */
-export interface AdminCli2ApiBinding extends Cli2ApiBinding {
+export interface AdminQoder2ApiBinding extends Qoder2ApiBinding {
   username: string
 }
 
 /** 管理端：通道配置与凭据信息 */
-export interface AdminCli2ApiConfig {
+export interface AdminQoder2ApiConfig {
   baseUrl: string
   source: "db" | "env" | "none"
   /** 掩码后的 console key；未配置为 null。明文不下发 */
@@ -2066,19 +2105,17 @@ export interface AdminCli2ApiConfig {
   updatedAt: string | null
   enabled: boolean
   limit: number
-  provider: string
-  region: string
+  realm: string
 }
 
 /** 管理端：上游池子概览 */
-export interface AdminCli2ApiPool {
+export interface AdminQoder2ApiPool {
   available: boolean
   reason: string
   accounts: {
     id: string
     name: string
-    provider: string
-    region: string
+    realm: string
     enabled: boolean
     status?: string
     ready?: boolean

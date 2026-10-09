@@ -1298,7 +1298,7 @@ export async function deleteUser(env: Env, request: Request, username: string): 
       `自定义域 ${cleanup.customDomains}、R2 对象 ${cleanup.storageObjects}、` +
       `捐献渠道 ${cleanup.releasedChannels}、订阅源 ${cleanup.releasedSubscriptions}、` +
       `frp 节点 ${cleanup.releasedFrpNodes}、反代账号 ${cleanup.wb2Removed}、` +
-      `CLI2API 账号 ${cleanup.cli2Removed}` +
+      `Qoder2API 账号 ${cleanup.qoder2Removed}` +
       `${cleanup.newapiDisabled ? "、已禁用 NewAPI 账号" : ""}` +
       `${cleanup.errors.length > 0 ? `。⚠️ ${cleanup.errors.length} 项未清理成功：${cleanup.errors.join("；")}` : ""}`
   )
@@ -1852,7 +1852,19 @@ export async function mailStatus(env: Env, request: Request): Promise<Response> 
  * 这些值绝不能出现在任何回包里，也不能进审计日志 —— 管理面板会展示审计日志，
  * 落明文等于把密钥摊开给所有管理员看。
  */
-const SECRET_SETTING_KEYS = new Set<string>(["posta_key", "brevo_api_key"])
+/**
+ * 回包/审计时打空的设置键。
+ *
+ * ⚠️ 这里只影响 `/admin/settings` 的**回显与审计文本**。
+ * AI 实验室那两个键（统一 Key、免费渠道）本来就是密文，但密文也没必要
+ * 满世界传 —— 它们归 `handlers/admin-lab.ts` 管，那边的接口只回尾号。
+ */
+const SECRET_SETTING_KEYS = new Set<string>([
+  "posta_key",
+  "brevo_api_key",
+  "lab_admin_api_key",
+  "lab_admin_channels",
+])
 
 /** 把密钥类设置项清空后再回显（GET 与 PUT 共用同一套规则，避免只修一处） */
 function maskSecrets(
@@ -1963,6 +1975,19 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
   for (const [key, raw] of Object.entries(body)) {
     if (!(key in SETTING_DEFAULTS)) continue
     if (raw === null || raw === undefined) continue
+
+    // 🔴 AI 实验室的两个密钥键**不许**从这个通用入口写。
+    // 它们必须存 AES-GCM 密文，而下面这个通用分支是「原样落库 + 截断到 100 字符」——
+    // 真让它落进去，结果是「库里躺着一份明文、读取侧又解不开」两头不讨好。
+    // 统一走 PUT /api/admin/lab/config（那边的 buildConfig 只回尾号）。
+    // 这条只是堵「手工构造请求」的口子：前端本来就没有这两个键的输入框。
+    if (key === "lab_admin_api_key" || key === "lab_admin_channels") {
+      throw new ApiError(
+        400,
+        "AI 实验室的密钥请到管理面板「AI 实验室」栏目里配置",
+        "INVALID_INPUT"
+      )
+    }
 
     if (typeof raw === "boolean") {
       values[key] = raw ? "1" : "0"

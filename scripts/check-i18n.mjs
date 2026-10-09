@@ -43,9 +43,20 @@ function stripComments(code) {
     .replace(/(^|[^:])\/\/[^\n]*/g, "$1") // 避免误伤 https://
 }
 
+/**
+ * 这些文件里的中文是**写给模型看的**（系统提示词、能力手册、意图识别关键词），
+ * 不是界面文案 —— 翻译它们会直接改变模型的行为，所以不算「未国际化」。
+ *
+ * ⚠️ 往这里加文件前先确认：它里面确实没有面向用户的字符串。
+ * 只为了让数字好看而把自己写的 toast 混进来，等于把检查废掉。
+ */
+const PROMPT_FILES = new Set(["src/lib/lab-agent.ts", "src/lib/lab-site.ts"])
+
 const files = walk(SRC)
 const hits = []
 for (const f of files) {
+  const rel = relative(ROOT, f).replace(/\\/g, "/")
+  if (PROMPT_FILES.has(rel)) continue
   const lines = stripComments(readFileSync(f, "utf8")).split("\n")
   lines.forEach((line, i) => {
     if (CJK.test(line)) {

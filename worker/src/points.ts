@@ -258,12 +258,13 @@ export async function getRedeemConfig(env: Env): Promise<{
  * 捐献奖励的档位 —— 描述「**用户捐了什么**」，不是「解锁了什么权限」。
  *
  * `ai` 与 `sensenova` 的权限都是 ai，但一份自定义渠道和一把商汤 Key 价值不同，
- * 合成一个档位就没法分开定价。三个反代账号档位按**上游 provider** 分，
- * 与走哪条通道（wb2api / cli2api）无关 —— cli2api 的 provider 是管理员随时可切的，
- * 按通道定价会出现「换个 provider 奖励就变了」。
+ * 合成一个档位就没法分开定价。三个反代账号档位按**上游 provider** 分：
+ * wb2api 通道的 provider 由管理员配置（workbuddy / trae / …），
+ * qoder2api 通道固定是 qoder —— 一律按 provider 定价，而不是按「走哪条通道」，
+ * 否则换个 provider 奖励就变了。
  *
  * 定义放这里而不是 donations.ts：读设置只有这一处，发放点却有三处
- * （donations.ts / cli2api.ts / wb2api.ts），分散定义必然漂移。
+ * （donations.ts / qoder2api.ts / wb2api.ts），分散定义必然漂移。
  */
 export const DONATION_REWARD_KINDS = [
   { key: "ai", label: "AI 渠道" },
@@ -292,7 +293,7 @@ export const DONATION_REWARD_SETTING_KEYS: Record<DonationRewardKind, SettingKey
 }
 
 /**
- * 上游 provider 是**外部输入**（cli2api 会话里带回来的），不能直接当键用 ——
+ * 上游 provider 是**外部输入**（qoder2api 会话里带回来的），不能直接当键用 ——
  * 管理员配了个没见过的 provider 时，落到这里应当是「不发奖励」，而不是崩。
  */
 export function isDonationRewardKind(v: string): v is DonationRewardKind {
@@ -361,7 +362,7 @@ export async function grantDonationReward(
   opts: {
     userId: string
     kind: DonationRewardKind
-    /** 幂等键，如 `donation:<单据id>` / `cli2api:<绑定id>` */
+    /** 幂等键，如 `donation:<单据id>` / `qoder2api:<绑定id>` */
     dedupKey: string
     /** 流水里给用户看的那一行 */
     detail: string

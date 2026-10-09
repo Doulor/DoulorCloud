@@ -7,6 +7,7 @@ import { I18nProvider } from "@/i18n"
 import { AuthProvider } from "@/hooks/use-auth"
 import { ErrorBoundary } from "@/components/error-boundary"
 import { ExternalLinkDialog } from "@/components/external-link-dialog"
+import { ConfirmDialogHost } from "@/components/confirm-dialog"
 import { Toaster } from "@/components/ui/sonner"
 import { ToastCopyMenu } from "@/components/toast-copy-menu"
 import { TooltipProvider } from "@/components/ui/tooltip"
@@ -56,6 +57,12 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
               （详见 components/external-link-dialog.tsx）。
             */}
             <ExternalLinkDialog />
+            {/*
+              全局确认弹窗（2026-10-09）：替代浏览器自带的 confirm / prompt。
+              同样是「挂一次、全局可用」—— 各处调 confirmDialog() / promptDialog()，
+              详见 components/confirm-dialog.tsx。
+            */}
+            <ConfirmDialogHost />
             <Toaster />
             {/*
               右下角 toast 的右键复制菜单（2026-10-08 站长要求）。

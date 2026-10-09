@@ -49,6 +49,7 @@ const DmPage = page("/dashboard/dm", () => import("@/pages/dm"))
 const CommunityPage = page("/dashboard/community", () => import("@/pages/community"))
 const ToolboxPage = page("/dashboard/toolbox", () => import("@/pages/toolbox"))
 const LabPage = page("/dashboard/lab", () => import("@/pages/lab"))
+const GalleryPage = page("/dashboard/gallery", () => import("@/pages/gallery"))
 // 工具详情页挂在 /dashboard/toolbox 之下，不单独登记（同前缀会互相覆盖注册项）：
 // 用户是先进列表、再点某个工具，那时 ToolboxPage 早已加载，详情按需加载即可。
 const ToolboxDetailPage = React.lazy(() => import("@/pages/toolbox-detail"))
@@ -214,6 +215,7 @@ function AppRoutes() {
         <Route path="community/:id" element={<CommunityPage inDashboard />} />
         <Route path="toolbox" element={<ToolboxPage />} />
         <Route path="lab" element={<LabPage />} />
+        <Route path="gallery" element={<GalleryPage />} />
         <Route path="toolbox/:toolId" element={<ToolboxDetailPage />} />
         <Route path="chat" element={<ChatPage />} />
         <Route path="achievements" element={<AchievementsPage />} />

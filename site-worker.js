@@ -95,9 +95,13 @@ export default {
     }
 
     // 带内容哈希的静态资源（/assets/*、/fonts/*、favicon）
+    // ⚠️ /webvm/*（浏览器终端的 v86 运行时与镜像，约 7.4MB）也必须算长期缓存，
+    //    见下方缓存策略的分支 —— 2026-10-09 之前它落进了「不缓存」那一支，
+    //    响应头是 no-store ⇒ **每次启用终端都重新下载 7.4MB**，这就是「启用要等半天」的真凶。
     const isStaticAsset =
       url.pathname.startsWith("/assets/") ||
       url.pathname.startsWith("/fonts/") ||
+      url.pathname.startsWith("/webvm/") ||
       url.pathname === "/favicon.png"
 
     const res = await env.ASSETS.fetch(request)

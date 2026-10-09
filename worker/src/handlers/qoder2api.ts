@@ -1,14 +1,17 @@
 /**
- * 捐献通道：CLI2API 反代账号（登录即解锁 AI 权限）。
+ * 捐献通道：Qoder2API-Hub 反代账号（登录即解锁 AI 权限）。
  *
- * 与 handlers/wb2api.ts 的关系：**并行的第二条同类通道**，不是同一张表也不是同一套接口。
- * 两者都是「用户登录自己的上游账号 → 账号进共享池 → 自动解锁 ai 权限」，免管理员审核；
- * 但 cli2api 的流程是三步（建账号 → 触发登录 → 轮询），且账号由本站建在上游，
- * 所以独立实现、前端并列展示。
+ * 本文件**取代**原来的 handlers/cli2api.ts：上游从 cli2api 换成了 qoder2api-hub，
+ * 但对用户而言功能完全一样 —— 捐献者在浏览器登录自己的 Qoder 账号 → 账号进共享池
+ * → 自动解锁本站「AI 中转站」权限，免管理员审核。
  *
- * ⚠️ 本通道与 wb2api 最关键的一条差异：**账号是本站建的**（`POST /api/accounts`），
- * 所以「未完成登录的空账号」也留在上游池子里 —— 会话失败/过期时必须把它删掉
- * （见 `discardSessionAccount`），否则每次用户中途放弃都在池子里堆一个僵尸账号。
+ * 与 wb2api 通道的关系：**并行的第二条同类通道**，不是同一张表也不是同一套接口。
+ * 两者都是「登录上游账号 → 进池 → 解锁 ai」，流程形态也相近（start → poll → uid）；
+ * 但 qoder2api 走面板会话鉴权、双区（cn/intl），且**不需要本站预建账号**，故独立实现。
+ *
+ * ⚠️ 与 cli2api 的一条关键差异（简化）：**账号由上游在授权成功那一刻才创建**，
+ * 所以不存在「用户中途放弃 → 上游留个登录不上的僵尸账号」的问题，
+ * 原来那套 `discardSessionAccount` 不需要了 —— 失败时只需取消上游 state。
  *
  * 权限回收的准确性同 wb2api：用户的 `ai` 可能来自 ①本通道 ②donations 的 ai 捐献
  * ③邀请码注册时带的权限（③无法溯源）。因此移除绑定时按「有依据就不收回」实时判定，
@@ -28,30 +31,37 @@ import { audit, getSetting, getSettingBool, getSettingNumber } from "../settings
 import { clientIp, guardRateLimit } from "../ratelimit"
 import { donationRewardLabel, grantDonationReward, isDonationRewardKind } from "../points"
 import {
-  Cli2NotFoundError,
-  Cli2UnauthorizedError,
-  Cli2UpstreamError,
-  cli2CreateAccount,
-  cli2DeleteAccount,
-  cli2ListAccounts,
-  cli2PollLogin,
-  cli2StartLogin,
-  getCli2ApiCredentialInfo,
-  isCli2ApiConfigured,
-  saveCli2ApiConsoleKey,
-} from "../cli2api-client"
+  Q2UnauthorizedError,
+  Q2UpstreamError,
+  getQoder2ApiCredentialInfo,
+  isQoder2ApiConfigured,
+  normalizeRealm,
+  q2CancelLogin,
+  q2DeleteAccount,
+  q2ListAccounts,
+  q2PollLogin,
+  q2StartLogin,
+  saveQoder2ApiPassword,
+  type Qoder2ApiRealm,
+} from "../qoder2api-client"
 import { grantInviteReward } from "../invite-rewards"
 import type { Env } from "../env"
 
-/** 本站登录会话有效期（上游 device 授权链接通常也是这个量级） */
-const SESSION_TTL_MS = 15 * 60 * 1000
+/**
+ * 本站登录会话有效期。
+ * 上游设备授权窗口是 **10 分钟**（LOGIN_TTL_SECONDS=600），比原来 cli2api 的 15 分钟短，
+ * 这里对齐 10 分钟：超时后本站直接判失败，不再去轮询一个已经死掉的 state。
+ */
+const SESSION_TTL_MS = 10 * 60 * 1000
+
+/** 绑定档位（用于捐献奖励）：上游固定是 Qoder */
+const PROVIDER = "qoder"
 
 interface BindingRow {
   id: string
   user_id: string
   account_id: string
-  provider: string
-  region: string
+  realm: string
   nickname: string | null
   status: string
   granted_ai_permission: number
@@ -64,9 +74,8 @@ interface BindingRow {
 interface SessionRow {
   id: string
   user_id: string
-  account_id: string
-  provider: string
-  region: string
+  upstream_state: string
+  realm: string
   auth_url: string | null
   status: string
   message: string | null
@@ -80,26 +89,24 @@ async function requireAdminUser(env: Env, request: Request, permKey: string): Pr
   return admin as unknown as UserRow
 }
 
-/** 读取通道开关、限额、以及要绑的上游与区域（都在管理面板可改） */
+/** 读取通道开关、限额、以及要绑的区域（都在管理面板可改） */
 async function channelConfig(env: Env) {
-  const enabled = (await getSetting(env, "cli2api_enabled")) === "1"
-  // 纯展示开关：与 enabled（通道总开关）区分开 —— 见 cli2api_donation_visible 的注释
-  const visible = await getSettingBool(env, "cli2api_donation_visible")
-  const limit = await getSettingNumber(env, "cli2api_max_bindings")
-  const provider = (await getSetting(env, "cli2api_provider")).trim() || "qoder"
-  const region = (await getSetting(env, "cli2api_region")).trim() || "cn"
+  const enabled = (await getSetting(env, "qoder2api_enabled")) === "1"
+  // 纯展示开关：与 enabled（通道总开关）区分开 —— 见 qoder2api_donation_visible 的注释
+  const visible = await getSettingBool(env, "qoder2api_donation_visible")
+  const limit = await getSettingNumber(env, "qoder2api_max_bindings")
+  const realm = normalizeRealm(await getSetting(env, "qoder2api_realm"))
   return {
     enabled,
     visible,
     limit: Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : 3,
-    provider,
-    region,
+    realm,
   }
 }
 
 async function activeBindingCount(env: Env, userId: string): Promise<number> {
   const row = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM cli2api_bindings WHERE user_id = ? AND status = 'active'"
+    "SELECT COUNT(*) AS c FROM qoder2api_bindings WHERE user_id = ? AND status = 'active'"
   )
     .bind(userId)
     .first<{ c: number }>()
@@ -114,8 +121,7 @@ function toPublicBinding(row: BindingRow) {
   return {
     id: row.id,
     accountId: row.account_id,
-    provider: row.provider,
-    region: row.region,
+    realm: row.realm,
     nickname: row.nickname,
     status: row.status,
     createdAt: row.created_at,
@@ -124,33 +130,41 @@ function toPublicBinding(row: BindingRow) {
 }
 
 /**
- * 把会话在上游占用的账号删掉。
+ * 取消一次还没完成的上游登录。
  *
- * 用于「用户中途放弃 / 拿不到授权链接 / 会话过期」这些场景 —— 账号是本站建的，
- * 不删就在池子里留一个 enabled 但永远登录不上的僵尸账号。
- * 删除失败不抛错（上游抖动不该让调用方挂掉），只记日志。
+ * 用于「用户中途放弃 / 拿到链接却不授权 / 会话过期」这些场景 ——
+ * qoder2api 没有僵尸账号要删，但 state 不取消会一直挂在上游内存里到 TTL 才清。
+ * 失败不抛错（上游抖动不该让调用方挂掉），只记日志。
  */
-async function discardSessionAccount(env: Env, accountId: string): Promise<void> {
-  if (!accountId) return
+async function discardSessionLogin(env: Env, upstreamState: string): Promise<void> {
+  if (!upstreamState) return
   try {
-    await cli2DeleteAccount(env, accountId)
+    await q2CancelLogin(env, upstreamState)
   } catch (err) {
-    console.error("清理 CLI2API 僵尸账号失败（需人工处理）:", accountId, err)
+    console.error("取消 Qoder2API 登录 state 失败（不影响结果）:", upstreamState, err)
   }
+}
+
+/** 把上游鉴权/不可达错误映射成给用户看的文案 */
+function mapUpstreamError(err: unknown): never {
+  if (err instanceof Q2UnauthorizedError) {
+    throw new ApiError(503, "Qoder2API 拒绝了本站的面板密码，请联系管理员", "QODER2API_UNAUTHORIZED")
+  }
+  throw err
 }
 
 // ---------------------------------------------------------------------------
 // 用户端
 // ---------------------------------------------------------------------------
 
-/** GET /api/cli2api/status —— 通道状态 + 当前用户的绑定列表 */
+/** GET /api/qoder2api/status —— 通道状态 + 当前用户的绑定列表 */
 export async function getStatus(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  const { enabled, limit, provider, region } = await channelConfig(env)
-  const configured = await isCli2ApiConfigured(env)
+  const { enabled, limit, realm } = await channelConfig(env)
+  const configured = await isQoder2ApiConfigured(env)
 
   const rows = await env.DB.prepare(
-    "SELECT * FROM cli2api_bindings WHERE user_id = ? ORDER BY created_at DESC"
+    "SELECT * FROM qoder2api_bindings WHERE user_id = ? ORDER BY created_at DESC"
   )
     .bind(user.id)
     .all<BindingRow>()
@@ -164,22 +178,19 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     limit,
     used,
     remaining: Math.max(0, limit - used),
-    /** 当前配置要绑的上游与区域（前端展示用） */
-    provider,
-    region,
+    /** 当前配置要绑的区域（前端展示用） */
+    realm,
     bindings: bindings.map(toPublicBinding),
   })
 }
 
 /**
- * POST /api/cli2api/login/start —— 发起登录。
+ * POST /api/qoder2api/login/start —— 发起登录。
  *
  * body: { acknowledged: true }
  *
- * 只做两件事：**建上游账号 + 落会话**，立即返回（1~2 秒）。
- * 拿授权链接放在 poll 里做 —— 因为 cli2api 要先给账号起 worker 进程，
- * 实测要 ~8 秒 `login/device` 才有响应（否则 `account_not_running`）。
- * 若在这里同步等，用户点「绑定」要白等十秒。
+ * 与 cli2api 不同：上游 `/accounts/login/start` **一次性**就把授权链接给了，
+ * 所以这里直接返回 authUrl（前端可立即打开），poll 里也会带回来（兼容旧前端逻辑）。
  */
 export async function loginStart(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
@@ -193,58 +204,47 @@ export async function loginStart(env: Env, request: Request): Promise<Response> 
     )
   }
 
-  const { enabled, limit, provider, region } = await channelConfig(env)
+  const { enabled, limit, realm } = await channelConfig(env)
   if (!enabled) {
-    throw new ApiError(403, "CLI2API 账号捐献通道已关闭", "CLI2API_DISABLED")
+    throw new ApiError(403, "Qoder2API 账号捐献通道已关闭", "QODER2API_DISABLED")
   }
-  if (!(await isCli2ApiConfigured(env))) {
-    throw new ApiError(503, "CLI2API 网关未配置管理密钥，请联系管理员", "CLI2API_NOT_CONFIGURED")
+  if (!(await isQoder2ApiConfigured(env))) {
+    throw new ApiError(503, "Qoder2API 网关未配置面板密码，请联系管理员", "QODER2API_NOT_CONFIGURED")
   }
 
   const ip = clientIp(request)
-  await guardRateLimit(env, `cli2api:start:user:${user.id}`, 5, 10 * 60, "发起登录过于频繁")
-  await guardRateLimit(env, `cli2api:start:ip:${ip}`, 10, 10 * 60, "发起登录过于频繁")
+  await guardRateLimit(env, `qoder2api:start:user:${user.id}`, 5, 10 * 60, "发起登录过于频繁")
+  await guardRateLimit(env, `qoder2api:start:ip:${ip}`, 10, 10 * 60, "发起登录过于频繁")
 
   const used = await activeBindingCount(env, user.id)
   if (used >= limit) {
     throw new ApiError(
       409,
       `最多只能绑定 ${limit} 个账号，你已绑定 ${used} 个`,
-      "CLI2API_LIMIT_REACHED"
+      "QODER2API_LIMIT_REACHED"
     )
   }
 
-  // 建一个 enabled 的上游账号（cli2api 会为它起 worker，登录由那个进程处理）。
-  // 名字带上本站用户名，便于管理员在上游控制台辨认来源。
-  let accountId = ""
+  let started: { state: string; authUrl: string; realm: Qoder2ApiRealm }
   try {
-    const account = await cli2CreateAccount(env, {
-      name: `doulor-${user.username}-${uuid().slice(0, 6)}`,
-      provider,
-      region,
-      enabled: true,
-    })
-    accountId = account.id
+    started = await q2StartLogin(env, realm)
   } catch (err) {
-    if (err instanceof Cli2UnauthorizedError) {
-      throw new ApiError(503, "CLI2API 拒绝了本站的管理密钥，请联系管理员", "CLI2API_UNAUTHORIZED")
-    }
-    throw err
+    mapUpstreamError(err)
   }
 
   const sessionId = generateToken()
   const now = new Date()
   await env.DB.prepare(
-    `INSERT INTO cli2api_login_sessions
-       (id, user_id, account_id, provider, region, auth_url, status, acknowledged_ip, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, NULL, 'pending', ?, ?, ?)`
+    `INSERT INTO qoder2api_login_sessions
+       (id, user_id, upstream_state, realm, auth_url, status, acknowledged_ip, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`
   )
     .bind(
       await hashToken(sessionId),
       user.id,
-      accountId,
-      provider,
-      region,
+      started.state,
+      started.realm,
+      started.authUrl,
       ip,
       now.toISOString(),
       new Date(now.getTime() + SESSION_TTL_MS).toISOString()
@@ -254,20 +254,15 @@ export async function loginStart(env: Env, request: Request): Promise<Response> 
   await audit(
     env,
     user.id,
-    "cli2api.login.start",
-    `发起 CLI2API 账号登录（${provider}/${region}，上游账号 ${accountId}）`,
+    "qoder2api.login.start",
+    `发起 Qoder2API 账号登录（${started.realm}）`,
     ip
   )
 
-  return json({ sessionId, provider, region })
+  return json({ sessionId, realm: started.realm, authUrl: started.authUrl })
 }
 
-/**
- * GET /api/cli2api/login/poll?session= —— 轮询登录结果。
- *
- * 第一次 poll 顺带把授权链接取回来（见 loginStart 的说明）；拿到后缓存进会话，
- * 之后只查 `login/status`，不再重复触发。
- */
+/** GET /api/qoder2api/login/poll?session= —— 轮询登录结果 */
 export async function loginPoll(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
   const sessionId = new URL(request.url).searchParams.get("session") ?? ""
@@ -275,9 +270,9 @@ export async function loginPoll(env: Env, request: Request): Promise<Response> {
     throw new ApiError(400, "缺少 session 参数", "INVALID_INPUT")
   }
 
-  await guardRateLimit(env, `cli2api:poll:user:${user.id}`, 60, 5 * 60, "轮询过于频繁")
+  await guardRateLimit(env, `qoder2api:poll:user:${user.id}`, 60, 5 * 60, "轮询过于频繁")
 
-  const sess = await env.DB.prepare("SELECT * FROM cli2api_login_sessions WHERE id = ?")
+  const sess = await env.DB.prepare("SELECT * FROM qoder2api_login_sessions WHERE id = ?")
     .bind(await hashToken(sessionId))
     .first<SessionRow>()
 
@@ -288,7 +283,7 @@ export async function loginPoll(env: Env, request: Request): Promise<Response> {
     throw new ApiError(403, "该会话不属于当前账号", "FORBIDDEN")
   }
 
-  // 终态直回，不再打上游
+  // 终态直回，不再打上游（上游成功一次后 state 即被删除，重复 poll 只会拿到 unknown）
   if (sess.status === "done") {
     return json({ status: "done", result: parseResult(sess.message) })
   }
@@ -299,72 +294,45 @@ export async function loginPoll(env: Env, request: Request): Promise<Response> {
   if (new Date(sess.expires_at).getTime() < Date.now()) {
     const msg = "登录会话已过期，请重新发起"
     await failSession(env, sess.id, msg)
-    await discardSessionAccount(env, sess.account_id)
+    await discardSessionLogin(env, sess.upstream_state)
     return json({ status: "failed", message: msg })
   }
 
   try {
-    // 还没拿到授权链接：先取链接（worker 可能还在启动，此时返回 pending 让前端继续轮）
-    if (!sess.auth_url) {
-      try {
-        const started = await cli2StartLogin(env, sess.account_id)
-        if (!started.authUrl) {
-          return json({ status: "pending", message: "正在启动上游账号…" })
-        }
-        await env.DB.prepare("UPDATE cli2api_login_sessions SET auth_url = ? WHERE id = ?")
-          .bind(started.authUrl, sess.id)
-          .run()
-        return json({ status: "pending", authUrl: started.authUrl })
-      } catch (err) {
-        if (err instanceof Cli2UpstreamError && err.code === "account_not_running") {
-          return json({ status: "pending", message: "正在启动上游账号…" })
-        }
-        if (err instanceof Cli2UnauthorizedError) {
-          throw new ApiError(503, "CLI2API 拒绝了本站的管理密钥，请联系管理员", "CLI2API_UNAUTHORIZED")
-        }
-        throw err
-      }
-    }
-
-    const polled = await cli2PollLogin(env, sess.account_id)
+    const polled = await q2PollLogin(env, sess.upstream_state)
 
     if (polled.status === "failed") {
       const msg = polled.message || "上游登录失败，请重新发起"
       await failSession(env, sess.id, msg)
-      // 失败的上游账号是本站建的、且没登录成功 ⇒ 当场删掉，否则池子堆僵尸账号。
-      // （状态词表修好后失败会即时上报，不再靠 15 分钟过期兜底清理，所以这里必须收。）
-      await discardSessionAccount(env, sess.account_id)
+      await discardSessionLogin(env, sess.upstream_state)
       return json({ status: "failed", message: msg })
     }
     if (polled.status !== "done") {
       return json({
         status: "pending",
-        authUrl: sess.auth_url,
+        authUrl: sess.auth_url ?? "",
         message: polled.message || "等待浏览器完成登录",
       })
     }
 
     // 登录完成 → 落绑定
-    const result = await completeBinding(env, user, sess)
+    const result = await completeBinding(env, user, sess, polled.account!)
     return json({ status: "done", result })
   } catch (err) {
-    if (err instanceof Cli2NotFoundError) {
-      // 上游账号被删了（人工清理等）：会话无法继续
-      const msg = "上游账号已不存在，请重新发起"
+    if (err instanceof Q2UpstreamError && err.status === 404) {
+      // 上游 state 未知/已过期（人工取消过、或 TTL 到了）
+      const msg = "授权会话已在网关侧失效，请重新发起"
       await failSession(env, sess.id, msg)
       return json({ status: "failed", message: msg })
     }
-    if (err instanceof Cli2UnauthorizedError) {
-      throw new ApiError(503, "CLI2API 拒绝了本站的管理密钥，请联系管理员", "CLI2API_UNAUTHORIZED")
-    }
-    throw err
+    mapUpstreamError(err)
   }
 }
 
 /** 把会话标记为失败（只在仍 pending 时写，避免并发 poll 把成功结果抹掉） */
 async function failSession(env: Env, id: string, message: string): Promise<void> {
   await env.DB.prepare(
-    "UPDATE cli2api_login_sessions SET status = 'failed', message = ? WHERE id = ? AND status = 'pending'"
+    "UPDATE qoder2api_login_sessions SET status = 'failed', message = ? WHERE id = ? AND status = 'pending'"
   )
     .bind(message, id)
     .run()
@@ -382,19 +350,18 @@ function parseResult(raw: string | null): Record<string, unknown> | null {
 /**
  * 登录成功 → 落绑定 + 授予 ai 权限。
  *
- * ⚠️ 上游账号就是本次新建的，所以一定是「新资源」——但**权限**是否新增要看
+ * 上游账号就是本次授权新建的，所以一定是「新资源」——但**权限**是否新增要看
  * 用户当时有没有 ai（决定移除时该不该收回），以及要不要发邀请奖励。
  */
 async function completeBinding(
   env: Env,
   user: UserRow,
-  sess: SessionRow
+  sess: SessionRow,
+  account: { uid: string; nickname: string; realm: string }
 ): Promise<Record<string, unknown>> {
   // 跨用户抢绑：上游账号 id 全局唯一，被别的人绑了就直接拒绝
-  const existing = await env.DB.prepare(
-    "SELECT * FROM cli2api_bindings WHERE account_id = ?"
-  )
-    .bind(sess.account_id)
+  const existing = await env.DB.prepare("SELECT * FROM qoder2api_bindings WHERE account_id = ?")
+    .bind(account.uid)
     .first<BindingRow>()
 
   if (existing && existing.user_id !== user.id) {
@@ -402,38 +369,44 @@ async function completeBinding(
     await audit(
       env,
       user.id,
-      "cli2api.login.conflict",
-      `上游账号 ${sess.account_id} 已被用户 ${existing.user_id} 绑定`,
+      "qoder2api.login.conflict",
+      `上游账号 ${account.uid} 已被用户 ${existing.user_id} 绑定`,
       sess.acknowledged_ip
     )
-    throw new ApiError(409, "该账号已被其他用户绑定", "CLI2API_ACCOUNT_TAKEN")
+    throw new ApiError(409, "该账号已被其他用户绑定", "QODER2API_ACCOUNT_TAKEN")
   }
 
   const id = existing?.id ?? uuid()
   const now = new Date().toISOString()
+  const realm = normalizeRealm(account.realm || sess.realm)
 
   // 本次是否真的把 ai 从无变有：决定移除时该不该收回，以及是否发邀请奖励。
   // 先看「捐献授权开关」：关掉时绑定照常进池，只是不再授予 ai 权限。
   const aiGranted =
-    (await getSettingBool(env, "donation_grant_cli2api")) &&
+    (await getSettingBool(env, "donation_grant_qoder2api")) &&
     !parsePermissions(user.permissions).ai
 
   const result = {
     id,
-    accountId: sess.account_id,
-    provider: sess.provider,
-    region: sess.region,
+    accountId: account.uid,
+    realm,
+    nickname: account.nickname,
     aiGranted,
+    // 终态快照会原样回给重复 poll 的前端，故两个分支都要带上这个字段
+    alreadyBound: false,
   }
 
   if (existing) {
     // 重复登录同一个 upstream 账号：复活墓碑，不二次授权
     await env.DB.batch([
       env.DB.prepare(
-        "UPDATE cli2api_bindings SET status = 'active', removed_at = NULL, removed_by = NULL WHERE id = ?"
-      ).bind(id),
+        `UPDATE qoder2api_bindings
+            SET status = 'active', removed_at = NULL, removed_by = NULL,
+                nickname = ?, realm = ?
+          WHERE id = ?`
+      ).bind(account.nickname, realm, id),
       env.DB.prepare(
-        "UPDATE cli2api_login_sessions SET status = 'done', message = ? WHERE id = ?"
+        "UPDATE qoder2api_login_sessions SET status = 'done', message = ? WHERE id = ?"
       ).bind(JSON.stringify({ ...result, alreadyBound: true }), sess.id),
     ])
     return { ...result, alreadyBound: true }
@@ -441,22 +414,22 @@ async function completeBinding(
 
   const statements = [
     env.DB.prepare(
-      `INSERT INTO cli2api_bindings
-         (id, user_id, account_id, provider, region, nickname, status,
+      `INSERT INTO qoder2api_bindings
+         (id, user_id, account_id, realm, nickname, status,
           granted_ai_permission, acknowledged_ip, created_at)
-       VALUES (?, ?, ?, ?, ?, NULL, 'active', ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`
     ).bind(
       id,
       user.id,
-      sess.account_id,
-      sess.provider,
-      sess.region,
+      account.uid,
+      realm,
+      account.nickname,
       aiGranted ? 1 : 0,
       sess.acknowledged_ip,
       now
     ),
     env.DB.prepare(
-      "UPDATE cli2api_login_sessions SET status = 'done', message = ? WHERE id = ?"
+      "UPDATE qoder2api_login_sessions SET status = 'done', message = ? WHERE id = ?"
     ).bind(JSON.stringify(result), sess.id),
   ]
 
@@ -473,27 +446,25 @@ async function completeBinding(
   await audit(
     env,
     user.id,
-    "cli2api.login.done",
-    `CLI2API 账号绑定成功（${sess.provider}/${sess.region}，上游账号 ${sess.account_id}）` +
+    "qoder2api.login.done",
+    `Qoder2API 账号绑定成功（${realm}，上游账号 ${account.uid}）` +
       `${aiGranted ? "，已解锁 AI 权限" : ""}`,
     sess.acknowledged_ip
   )
 
   // 捐献奖励积分：**每次新绑定发一次**（dedup 用绑定 id，重复登录同一账号时
   // 走的是上面的 existing 分支，压根到不了这里）。上限由 max_bindings 天然封住。
-  //
-  // 档位取上游 provider（qoder / workbuddy / trae）：provider 是管理员随时可切的，
-  // 按通道定价会出现「换个 provider 奖励就变了」。认不出的 provider 不发。
-  if (isDonationRewardKind(sess.provider)) {
+  // 档位固定取 `qoder`（qoder2api 只对接 Qoder，不再有 provider 可切）。
+  if (isDonationRewardKind(PROVIDER)) {
     await grantDonationReward(env, {
       userId: user.id,
-      kind: sess.provider,
-      dedupKey: `cli2api:${id}`,
-      detail: `${donationRewardLabel(sess.provider)}捐献奖励`,
+      kind: PROVIDER,
+      dedupKey: `qoder2api:${id}`,
+      detail: `${donationRewardLabel(PROVIDER)}捐献奖励`,
     })
   }
 
-  // 邀请奖励：本次绑定确实带来了新账号（上游账号是新建的），且真的解锁了 ai
+  // 邀请奖励：本次绑定确实带来了新账号，且真的解锁了 ai
   if (aiGranted) {
     try {
       const planId = Number(await getSetting(env, "invite_reward_plan_id")) || 2
@@ -511,40 +482,39 @@ async function completeBinding(
 // 管理端
 // ---------------------------------------------------------------------------
 
-/** GET /api/admin/cli2api/config —— 通道配置（含掩码后的凭据信息） */
+/** GET /api/admin/qoder2api/config —— 通道配置（含掩码后的凭据信息） */
 export async function adminGetConfig(env: Env, request: Request): Promise<Response> {
   await requireAdminUser(env, request, "wb2api.config")
-  const { enabled, limit, provider, region } = await channelConfig(env)
-  const cred = await getCli2ApiCredentialInfo(env)
-  const baseUrl = (await getSetting(env, "cli2api_base_url")).trim()
+  const { enabled, limit, realm } = await channelConfig(env)
+  const cred = await getQoder2ApiCredentialInfo(env)
+  const baseUrl = (await getSetting(env, "qoder2api_base_url")).trim()
 
   return json({
     enabled,
     limit,
-    provider,
-    region,
+    realm,
     baseUrl,
     credential: cred,
   })
 }
 
-/** PUT /api/admin/cli2api/config —— 保存 console key（校验通过才落库） */
+/** PUT /api/admin/qoder2api/config —— 保存面板密码（校验通过才落库） */
 export async function adminSaveConfig(env: Env, request: Request): Promise<Response> {
   await requireAdminUser(env, request, "wb2api.config")
-  const body = (await request.json().catch(() => ({}))) as { consoleKey?: unknown }
-  const key = String(body.consoleKey ?? "").trim()
-  if (!key) throw new ApiError(400, "请填写 console key", "INVALID_INPUT")
+  const body = (await request.json().catch(() => ({}))) as { panelPassword?: unknown }
+  const pw = String(body.panelPassword ?? "").trim()
+  if (!pw) throw new ApiError(400, "请填写面板密码", "INVALID_INPUT")
 
-  await saveCli2ApiConsoleKey(env, key)
-  const cred = await getCli2ApiCredentialInfo(env)
+  await saveQoder2ApiPassword(env, pw)
+  const cred = await getQoder2ApiCredentialInfo(env)
   return json({ ok: true, credential: cred })
 }
 
-/** GET /api/admin/cli2api/bindings —— 全部绑定（含已移除） */
+/** GET /api/admin/qoder2api/bindings —— 全部绑定（含已移除） */
 export async function adminListBindings(env: Env, request: Request): Promise<Response> {
   await requireAdminUser(env, request, "wb2api.config")
   const rows = await env.DB.prepare(
-    `SELECT b.*, u.username FROM cli2api_bindings b
+    `SELECT b.*, u.username FROM qoder2api_bindings b
        LEFT JOIN users u ON u.id = b.user_id
      ORDER BY b.created_at DESC LIMIT 500`
   ).all<BindingRow & { username: string | null }>()
@@ -558,7 +528,7 @@ export async function adminListBindings(env: Env, request: Request): Promise<Res
 }
 
 /**
- * POST /api/admin/cli2api/bindings/:id/remove —— 摘除绑定（可选一并收回 ai）。
+ * POST /api/admin/qoder2api/bindings/:id/remove —— 摘除绑定（可选一并收回 ai）。
  *
  * 与 wb2api 一致：先从上游摘掉账号，再改本地状态；上游失败不阻断本地标记。
  */
@@ -570,30 +540,29 @@ export async function adminRemoveBinding(
   const admin = await requireAdminUser(env, request, "wb2api.config")
   const body = (await request.json().catch(() => ({}))) as { revokeAi?: unknown }
 
-  const binding = await env.DB.prepare("SELECT * FROM cli2api_bindings WHERE id = ?")
+  const binding = await env.DB.prepare("SELECT * FROM qoder2api_bindings WHERE id = ?")
     .bind(id)
     .first<BindingRow>()
   if (!binding) throw new ApiError(404, "绑定不存在", "NOT_FOUND")
 
   let upstreamWarning: string | null = null
   try {
-    await cli2DeleteAccount(env, binding.account_id)
+    await q2DeleteAccount(env, binding.account_id)
   } catch (err) {
     upstreamWarning = `上游账号删除失败：${errText(err)}`
-    console.error("移除 CLI2API 账号失败（本地仍标记）:", binding.account_id, err)
+    console.error("移除 Qoder2API 账号失败（本地仍标记）:", binding.account_id, err)
   }
 
   const now = new Date().toISOString()
   await env.DB.prepare(
-    "UPDATE cli2api_bindings SET status = 'removed', removed_at = ?, removed_by = ? WHERE id = ?"
+    "UPDATE qoder2api_bindings SET status = 'removed', removed_at = ?, removed_by = ? WHERE id = ?"
   )
     .bind(now, admin.id, id)
     .run()
 
   // 权限回收：默认「有依据就不收回」（还有别的 active 绑定 / 有 approved 的 ai 捐献）
   let aiRevoked = false
-  const explicit =
-    typeof body.revokeAi === "boolean" ? (body.revokeAi as boolean) : null
+  const explicit = typeof body.revokeAi === "boolean" ? (body.revokeAi as boolean) : null
   const shouldRevoke = explicit ?? (await shouldRevokeAi(env, binding))
 
   if (shouldRevoke) {
@@ -609,8 +578,8 @@ export async function adminRemoveBinding(
   await audit(
     env,
     admin.id,
-    "cli2api.binding.remove",
-    `摘除 CLI2API 绑定（用户 ${binding.user_id}，上游账号 ${binding.account_id}）；` +
+    "qoder2api.binding.remove",
+    `摘除 Qoder2API 绑定（用户 ${binding.user_id}，上游账号 ${binding.account_id}）；` +
       `AI 权限${aiRevoked ? "已收回" : "保留"}`
   )
 
@@ -621,9 +590,9 @@ export async function adminRemoveBinding(
 async function shouldRevokeAi(env: Env, binding: BindingRow): Promise<boolean> {
   // 当初绑定就没带来 ai（用户本来就有）→ 不该动
   if (binding.granted_ai_permission !== 1) return false
-  // 还有其它 active 的 cli2api 绑定 → 保留
+  // 还有其它 active 的 qoder2api 绑定 → 保留
   const other = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM cli2api_bindings WHERE user_id = ? AND status = 'active'"
+    "SELECT COUNT(*) AS c FROM qoder2api_bindings WHERE user_id = ? AND status = 'active'"
   )
     .bind(binding.user_id)
     .first<{ c: number }>()
@@ -645,15 +614,24 @@ async function shouldRevokeAi(env: Env, binding: BindingRow): Promise<boolean> {
   return true
 }
 
-/** GET /api/admin/cli2api/pool —— 上游池子概览（账号列表） */
+/** GET /api/admin/qoder2api/pool —— 上游池子概览（账号列表） */
 export async function adminGetPool(env: Env, request: Request): Promise<Response> {
   await requireAdminUser(env, request, "wb2api.config")
-  if (!(await isCli2ApiConfigured(env))) {
-    return json({ available: false, reason: "未配置 console key", accounts: [] })
+  if (!(await isQoder2ApiConfigured(env))) {
+    return json({ available: false, reason: "未配置面板密码", accounts: [] })
   }
   try {
-    const accounts = await cli2ListAccounts(env)
-    return json({ available: true, accounts })
+    const accounts = await q2ListAccounts(env)
+    return json({
+      available: true,
+      reason: "",
+      accounts: accounts.map((a) => ({
+        id: a.uid,
+        name: a.nickname,
+        realm: a.realm,
+        enabled: a.enabled,
+      })),
+    })
   } catch (err) {
     return json({ available: false, reason: errText(err), accounts: [] })
   }
@@ -663,11 +641,11 @@ export async function adminGetPool(env: Env, request: Request): Promise<Response
  * 供 donations.ts 复用：把通道概况塞进 `GET /api/donations` 的响应，
  * 让捐献页一次请求就拿到「能不能捐 / 捐了几个」。
  *
- * `visible` 是**纯展示开关**（`cli2api_donation_visible`，2026-09-30 加）：
+ * `visible` 是**纯展示开关**（`qoder2api_donation_visible`）：
  * 关掉后只对「还没有任何绑定」的用户隐藏卡片 —— 通道本身照常工作，
  * 已绑定的用户仍看得到卡片以便撤销绑定。
  */
-export async function cli2apiDonationBlock(
+export async function qoder2apiDonationBlock(
   env: Env,
   userId: string
 ): Promise<{
@@ -678,15 +656,14 @@ export async function cli2apiDonationBlock(
   limit: number
   used: number
   remaining: number
-  provider: string
-  region: string
+  realm: string
   bindings: ReturnType<typeof toPublicBinding>[]
   feature: string
 }> {
-  const { enabled, visible, limit, provider, region } = await channelConfig(env)
-  const configured = await isCli2ApiConfigured(env)
+  const { enabled, visible, limit, realm } = await channelConfig(env)
+  const configured = await isQoder2ApiConfigured(env)
   const rows = await env.DB.prepare(
-    "SELECT * FROM cli2api_bindings WHERE user_id = ? ORDER BY created_at DESC"
+    "SELECT * FROM qoder2api_bindings WHERE user_id = ? ORDER BY created_at DESC"
   )
     .bind(userId)
     .all<BindingRow>()
@@ -700,8 +677,7 @@ export async function cli2apiDonationBlock(
     limit,
     used,
     remaining: Math.max(0, limit - used),
-    provider,
-    region,
+    realm,
     bindings: bindings.map(toPublicBinding),
     feature: "ai",
   }

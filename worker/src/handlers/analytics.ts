@@ -403,7 +403,7 @@ export async function userOverview(env: Env, request: Request): Promise<Response
          (SELECT COUNT(*) FROM newapi_keys) AS aiKeys,
          (SELECT COUNT(DISTINCT user_id) FROM newapi_keys) AS aiKeyUsers,
          (SELECT COUNT(*) FROM wb2api_bindings WHERE status = 'active') AS wb2apiActive,
-         (SELECT COUNT(*) FROM cli2api_bindings WHERE status = 'active') AS cli2apiActive,
+         (SELECT COUNT(*) FROM qoder2api_bindings WHERE status = 'active') AS qoder2apiActive,
          -- 积分与商城
          (SELECT COALESCE(SUM(balance), 0) FROM user_points) AS pointsBalance,
          (SELECT COUNT(*) FROM user_points WHERE balance > 0) AS pointsHolders,
@@ -545,7 +545,7 @@ export async function userOverview(env: Env, request: Request): Promise<Response
         { label: "API Key 数", value: n(ex.aiKeys) },
         { label: "创建过 Key 的人数", value: n(ex.aiKeyUsers) },
         { label: "wb2api 有效绑定", value: n(ex.wb2apiActive) },
-        { label: "cli2api 有效绑定", value: n(ex.cli2apiActive) },
+        { label: "qoder2api 有效绑定", value: n(ex.qoder2apiActive) },
       ],
     },
     {
@@ -663,7 +663,7 @@ export async function userOverview(env: Env, request: Request): Promise<Response
         { label: "OAuth 授权数", value: n(ex.oauthGrants) },
         { label: "临时分享箱", value: n(ex.tempboxes) },
         { label: "wb2api 绑定（有效）", value: n(ex.wb2apiActive) },
-        { label: "cli2api 绑定（有效）", value: n(ex.cli2apiActive) },
+        { label: "qoder2api 绑定（有效）", value: n(ex.qoder2apiActive) },
         { label: "AI Key 用户数", value: n(ex.aiKeyUsers) },
       ],
     },

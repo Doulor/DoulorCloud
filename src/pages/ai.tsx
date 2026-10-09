@@ -10,6 +10,7 @@ import {
   Info,
   KeyRound,
   Loader2,
+  Lock,
   Plus,
   RefreshCw,
   Sparkles,
@@ -1204,25 +1205,50 @@ export default function AiPage() {
                 <TableBody>
                   {keys.map((k) => (
                     <TableRow key={k.id}>
-                      <TableCell className="text-sm">{k.name}</TableCell>
+                      <TableCell className="text-sm">
+                        <div className="flex items-center gap-1.5">
+                          <span>{k.name}</span>
+                          {k.system && (
+                            <Badge
+                              variant="secondary"
+                              className="gap-1 px-1.5 py-0 text-[10px] font-normal"
+                              title={t("ai.key.systemHint")}
+                            >
+                              <Lock className="h-2.5 w-2.5" />
+                              {t("ai.key.system")}
+                            </Badge>
+                          )}
+                        </div>
+                      </TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">
                         <div className="flex items-center gap-1">
                           <span>{k.maskedKey}</span>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-6 w-6 shrink-0"
-                            onClick={() => void handleCopyKey(k)}
-                            disabled={revealingKeyId !== null}
-                            title={t("ai.key.copy")}
-                            aria-label={t("ai.key.copy")}
-                          >
-                            {revealingKeyId === k.id ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                              <Copy className="h-3.5 w-3.5" />
-                            )}
-                          </Button>
+                          {k.system ? (
+                            // 系统 Key 不给复制：界面上不显示按钮，
+                            // 后端 revealKey 也会拒绝（藏按钮挡不住直接调接口）
+                            <span
+                              className="flex h-6 w-6 shrink-0 items-center justify-center text-muted-foreground/60"
+                              title={t("ai.key.systemHint")}
+                            >
+                              <Lock className="h-3.5 w-3.5" />
+                            </span>
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 shrink-0"
+                              onClick={() => void handleCopyKey(k)}
+                              disabled={revealingKeyId !== null}
+                              title={t("ai.key.copy")}
+                              aria-label={t("ai.key.copy")}
+                            >
+                              {revealingKeyId === k.id ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Copy className="h-3.5 w-3.5" />
+                              )}
+                            </Button>
+                          )}
                         </div>
                       </TableCell>
                       <TableCell>
@@ -1233,20 +1259,29 @@ export default function AiPage() {
                         {fmtTime(k.createdAt)}
                       </TableCell>
                       <TableCell>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                          onClick={() => void handleDeleteKey(k)}
-                          disabled={deletingKeyId !== null}
-                          title={t("common.delete")}
-                        >
-                          {deletingKeyId === k.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Trash2 className="h-4 w-4" />
-                          )}
-                        </Button>
+                        {k.system ? (
+                          <span
+                            className="flex h-8 w-8 items-center justify-center text-muted-foreground/40"
+                            title={t("ai.key.systemHint")}
+                          >
+                            <Lock className="h-4 w-4" />
+                          </span>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() => void handleDeleteKey(k)}
+                            disabled={deletingKeyId !== null}
+                            title={t("common.delete")}
+                          >
+                            {deletingKeyId === k.id ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-4 w-4" />
+                            )}
+                          </Button>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))}

@@ -33,7 +33,6 @@ import { processScheduledPublishes } from "./scheduled-publish"
 import { purgeExpiredAnalytics } from "./handlers/analytics"
 import { purgeExpiredPreviews } from "./link-preview"
 import { autoPriceNewModels } from "./newapi-client"
-import { cli2DeleteAccount } from "./cli2api-client"
 import { expireRentalOrders } from "./points-shop"
 import { scanDns } from "./dns-audit"
 import { sweepSuspendedDns, retrySuspendedDnsRestore } from "./user-suspension"
@@ -106,8 +105,8 @@ export interface MaintenanceReport {
   newapiSync: { removedOrphans: number; disabled: number; enabled: number; errors: string[] }
   /** 已清理的过期反代登录会话数（state 15 分钟即失效，不清会持续堆积） */
   wb2apiSessionsDeleted: number
-  /** 已清理的过期 CLI2API 登录会话数（顺带删掉上游僵尸账号） */
-  cli2apiSessionsDeleted: number
+  /** 已清理的过期 Qoder2API 登录会话数（顺带删掉上游僵尸账号） */
+  qoder2apiSessionsDeleted: number
   /** AI 捐献失败模型的重试结果（限流/超时的模型可能已恢复） */
   donationRetries: {
     recovered: number
@@ -467,45 +466,31 @@ export async function runMaintenance(
     console.error("反代登录会话清理失败（表可能未迁移）:", err)
   }
 
-  // 4b2) 过期的 CLI2API 登录会话（第二条通道）
+  // 4b2) 过期的 Qoder2API 登录会话（第二条通道）
   //
-  // 与 wb2api 不同：cli2api 的账号是**本站建的**，用户点了「发起登录」却没回来
-  // 轮询（或中途放弃）时，那个账号会留在上游池子里变成僵尸。
-  // 所以清理会话时，要顺带把会话关联的上游账号删掉。
-  let cli2apiSessionsDeleted = 0
+  // 与 wb2api / 原 cli2api 都不同：qoder2api 的账号由**上游在设备授权成功那一刻**才创建，
+  // 用户「发起登录」却没回来（或中途放弃）时，上游**不会**留下任何账号 ——
+  // 所以这里只要清掉本地会话行即可，没有「上游僵尸账号」要删。
+  let qoder2apiSessionsDeleted = 0
   try {
     const cutoff = daysAgoIso(1)
     if (dryRun) {
       const r = await env.DB.prepare(
-        "SELECT COUNT(*) AS c FROM cli2api_login_sessions WHERE expires_at < ?"
+        "SELECT COUNT(*) AS c FROM qoder2api_login_sessions WHERE expires_at < ?"
       )
         .bind(cutoff)
         .first<{ c: number }>()
-      cli2apiSessionsDeleted = r?.c ?? 0
+      qoder2apiSessionsDeleted = r?.c ?? 0
     } else {
-      // 先把要清理的账号 id 捞出来（删行之后就拿不到了）
-      const stale = await env.DB.prepare(
-        "SELECT account_id FROM cli2api_login_sessions WHERE expires_at < ?"
-      )
-        .bind(cutoff)
-        .all<{ account_id: string }>()
       const r = await env.DB.prepare(
-        "DELETE FROM cli2api_login_sessions WHERE expires_at < ?"
+        "DELETE FROM qoder2api_login_sessions WHERE expires_at < ?"
       )
         .bind(cutoff)
         .run()
-      cli2apiSessionsDeleted = r.meta?.changes ?? 0
-      // 逐个删上游僵尸账号；失败不阻断（账号留着也只是占个位，下次删号/人工清理会处理）
-      for (const s of stale.results ?? []) {
-        try {
-          await cli2DeleteAccount(env, s.account_id)
-        } catch (err) {
-          console.error("清理 CLI2API 僵尸账号失败:", s.account_id, err)
-        }
-      }
+      qoder2apiSessionsDeleted = r.meta?.changes ?? 0
     }
   } catch (err) {
-    console.error("CLI2API 登录会话清理失败（表可能未迁移）:", err)
+    console.error("Qoder2API 登录会话清理失败（表可能未迁移）:", err)
   }
 
   // 4c) 过期匿名统计事件 / 链接预览缓存（2026-09-25 审计 H13）
@@ -868,7 +853,7 @@ export async function runMaintenance(
     expiredPurged,
     newapiSync,
     wb2apiSessionsDeleted,
-    cli2apiSessionsDeleted,
+    qoder2apiSessionsDeleted,
     donationRetries,
     sensenovaAudit,
     rentalExpiry,

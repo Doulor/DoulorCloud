@@ -19,7 +19,7 @@ import {
 import { sendMail, renderMail } from "../mailer"
 import { isOwnDomain } from "../root-domains"
 import { wb2apiDonationBlock } from "./wb2api"
-import { cli2apiDonationBlock } from "./cli2api"
+import { qoder2apiDonationBlock } from "./qoder2api"
 import {
   grantQuotaForDonation,
   INVITE_BONUS_PER_DONATION,
@@ -189,8 +189,8 @@ const DONATION_TYPES: Record<string, Feature> = {
 /**
  * 捐献类型 → 「是否授予权限」的设置键。
  *
- * 反代账号（wb2api / cli2api）不在这里 —— 那是独立通道、走各自的绑定表，
- * 开关在其 handler 里单独读（`donation_grant_wb2api` / `donation_grant_cli2api`）。
+ * 反代账号（wb2api / qoder2api）不在这里 —— 那是独立通道、走各自的绑定表，
+ * 开关在其 handler 里单独读（`donation_grant_wb2api` / `donation_grant_qoder2api`）。
  * 未列出的类型默认授予（保守，宁可多授不漏）。
  */
 const DONATION_GRANT_SETTING: Record<string, SettingKey> = {
@@ -1443,8 +1443,8 @@ export async function listDonations(env: Env, request: Request): Promise<Respons
   // 反代账号捐献通道（WorkBuddy 网关）是**免审核**的独立通道，记录不在本表里。
   // 捐献页需要一次请求就拿到「能不能捐 / 捐了几个」，故顺带带出。
   const wb2api = await wb2apiDonationBlock(env, user.id)
-  // CLI2API 反代通道（第二条，同样免审核）—— 前端据此渲染第二张卡
-  const cli2api = await cli2apiDonationBlock(env, user.id)
+  // Qoder2API 反代通道（第二条，同样免审核）—— 前端据此渲染第二张卡
+  const qoder2api = await qoder2apiDonationBlock(env, user.id)
 
   // 商汤 Key 通道同理：前端据此决定要不要渲染那张卡（以及给控制台跳转链接）。
   // 上游地址不回传 —— 那是服务端配置，用户不需要知道，也不该能改。
@@ -1465,7 +1465,7 @@ export async function listDonations(env: Env, request: Request): Promise<Respons
     /** 代理捐献一次最多可提交多少个订阅链接（每个都要真拉一次） */
     maxSubUrls: MAX_DONATION_SUB_URLS,
     wb2api,
-    cli2api,
+    qoder2api,
     sensenova: {
       enabled: settings.sensenova_enabled === "1",
       // 纯展示开关（与 sensenova_enabled 的「通道总开关」区分）：见 settings.ts 注释
@@ -1483,7 +1483,7 @@ export async function listDonations(env: Env, request: Request): Promise<Respons
       frp: settings.donation_grant_frp !== "0",
       proxy: settings.donation_grant_proxy !== "0",
       wb2api: settings.donation_grant_wb2api !== "0",
-      cli2api: settings.donation_grant_cli2api !== "0",
+      qoder2api: settings.donation_grant_qoder2api !== "0",
     },
   })
 }
@@ -2680,7 +2680,7 @@ const SENSENOVA_AUDIT_BATCH = 10
  *
  * 只覆盖**库里能反查到的**来源。三种都在这里：
  *   · 其它已通过的 ai / 商汤捐献（用户说的「提交了好几个 ai 渠道」）
- *   · 仍 active 的反代绑定（wb2api / cli2api，绑定时也会授予 ai）
+ *   · 仍 active 的反代绑定（wb2api / qoder2api，绑定时也会授予 ai）
  *   · 用掉的 ai 权限券（vouchers.used_feature='ai'）
  *
  * 为什么券要查：券可能是**捐献之后**才兑的，那时 ai 已由捐献解锁，券会提示
@@ -2712,11 +2712,11 @@ async function findOtherAiSource(
   if (wb) return "还有在用中的反代（WorkBuddy）绑定"
 
   const cli = await env.DB.prepare(
-    "SELECT 1 AS x FROM cli2api_bindings WHERE user_id = ? AND status = 'active' LIMIT 1"
+    "SELECT 1 AS x FROM qoder2api_bindings WHERE user_id = ? AND status = 'active' LIMIT 1"
   )
     .bind(userId)
     .first()
-  if (cli) return "还有在用中的反代（CLI2API）绑定"
+  if (cli) return "还有在用中的反代（Qoder2API）绑定"
 
   const voucher = await env.DB.prepare(
     "SELECT 1 AS x FROM vouchers WHERE used_by = ? AND used_feature = 'ai' LIMIT 1"

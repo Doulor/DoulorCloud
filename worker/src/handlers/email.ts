@@ -333,18 +333,6 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
   // （doulor.cn 挂 `doulor` 权限）。pickRootDomain 会校验「域名已登记 + 已启用 + 有权限」。
   const root = await pickRootDomain(env, body.domain, userPermissions(user))
 
-  // ⚠️ 必须带 is_temp = 0：临时邮箱有自己的额度，不能挤占这 3 个名额
-  const count = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM mailboxes WHERE user_id = ? AND is_temp = 0"
-  )
-    .bind(user.id)
-    .first<{ c: number }>()
-
-  // 管理员 Key 的公开 API 调用不受邮箱数量限制（2026-10-07）
-  if (!isAdminApiRequest(request) && !isPrivileged(user.role) && (count?.c ?? 0) >= MAX_MAILBOXES_PER_USER) {
-    throw new ApiError(400, `每个用户最多 ${MAX_MAILBOXES_PER_USER} 个邮箱`, "LIMIT_REACHED")
-  }
-
   const address = `${localPart}@${root.name}`
   const exists = await env.DB.prepare(
     "SELECT id FROM mailboxes WHERE address = ? COLLATE NOCASE LIMIT 1"
@@ -367,11 +355,40 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
   // 线上 catch-all 已改为「Send to a Worker」，所有 *@doulor.cn 的信都会进本 Worker，
   // 由代码查 mailboxes 表决定去处 —— 逐地址建规则是历史包袱，还占「每域 200 条」硬配额。
   // 所以新邮箱的 rule_id 一律为 NULL；删除路径仍会摘掉历史遗留的规则（见 purgeMailbox）。
-  await env.DB.prepare(
-    "INSERT INTO mailboxes (id, user_id, address, forwarding_to, source, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+  /**
+   * 🔴 **原子写入**（2026-10-09 渗透测试 finding#1/#4）。
+   *
+   * 原来是「SELECT COUNT → 判额度 → INSERT」三步非原子，并发请求能同时通过
+   * 「COUNT < 3」的判定 —— 实测 6 并发把上限 3 的普通邮箱开到了 6 个。
+   * 现在把配额判定塞进 INSERT 的 WHERE：单条语句由 SQLite 串行化保证原子性，
+   * 并发再多也只有名额内的能插进去；`meta.changes === 0` 即超限。
+   * 「⚠️ 必须带 is_temp = 0」这条口径原样保留 —— 临时邮箱有自己的额度，不能挤占这 3 个名额。
+   */
+  const mailboxLimit =
+    isAdminApiRequest(request) || isPrivileged(user.role)
+      ? ADMIN_UNLIMITED_MAILBOXES
+      : MAX_MAILBOXES_PER_USER
+
+  const ins = await env.DB.prepare(
+    `INSERT INTO mailboxes (id, user_id, address, forwarding_to, source, created_at)
+     SELECT ?, ?, ?, ?, ?, ?
+     WHERE (SELECT COUNT(*) FROM mailboxes WHERE user_id = ? AND is_temp = 0) < ?`
   )
-    .bind(id, user.id, address, defaultForwarding, isApiRequest(request) ? "api" : "web", now)
+    .bind(
+      id,
+      user.id,
+      address,
+      defaultForwarding,
+      isApiRequest(request) ? "api" : "web",
+      now,
+      user.id,
+      mailboxLimit
+    )
     .run()
+
+  if ((ins.meta?.changes ?? 0) === 0) {
+    throw new ApiError(400, `每个用户最多 ${MAX_MAILBOXES_PER_USER} 个邮箱`, "LIMIT_REACHED")
+  }
 
   const row = await env.DB.prepare("SELECT * FROM mailboxes WHERE id = ?")
     .bind(id)
@@ -594,21 +611,20 @@ export async function createTempMailbox(env: Env, request: Request): Promise<Res
     )
   }
 
-  const count = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM mailboxes WHERE user_id = ? AND is_temp = 1"
+  /**
+   * 🔴 原子写入（2026-10-09 渗透测试 finding#4）：原来「COUNT → 判额度 → INSERT」
+   * 非原子，8 并发能把临时邮箱上限 1 开到 3 个。上限改为**随插入一起判定**
+   * （见 insertTempMailbox 的 limit 参数）。管理员/站长传 null = 不设限。
+   */
+  const tempLimit =
+    isAdminApiRequest(request) || isPrivileged(user.role) ? null : MAX_TEMP_MAILBOXES_PER_USER
+
+  const created = await insertTempMailbox(
+    env,
+    user.id,
+    isApiRequest(request) ? "api" : "web",
+    tempLimit
   )
-    .bind(user.id)
-    .first<{ c: number }>()
-
-  if (!isAdminApiRequest(request) && !isPrivileged(user.role) && (count?.c ?? 0) >= MAX_TEMP_MAILBOXES_PER_USER) {
-    throw new ApiError(
-      400,
-      `临时邮箱最多同时存在 ${MAX_TEMP_MAILBOXES_PER_USER} 个，请先删除或刷新已有的`,
-      "LIMIT_REACHED"
-    )
-  }
-
-  const created = await insertTempMailbox(env, user.id, isApiRequest(request) ? "api" : "web")
   return json(
     { mailbox: await toPublicMailbox(env, user, created, undefined, undefined, await primaryMailboxAddress(env, user)) },
     201
@@ -702,7 +718,13 @@ export async function refreshTempMailbox(
 async function insertTempMailbox(
   env: Env,
   userId: string,
-  source: "web" | "api" = "web"
+  source: "web" | "api" = "web",
+  /**
+   * 非 null = 用**原子条件 INSERT** 守「同时存在的临时邮箱数」上限；
+   * null = 不设限。管理员/站长传 null；「刷新」路径也传 null ——
+   * 它本来就先删旧行再建，不该被自己刚删掉的那个名额卡住。
+   */
+  limit: number | null = null
 ): Promise<MailboxRow> {
   // 临时邮箱也建在**默认根域**（与注册分配一致），不写死 env.ROOT_DOMAIN
   const root = (await getDefaultRootDomain(env)).name
@@ -734,11 +756,28 @@ async function insertTempMailbox(
   const now = new Date().toISOString()
   // 与普通邮箱一致：不再逐条建 Cloudflare 规则（catch-all 已由本 Worker 接管）。
   // forwarding_to 恒为 NULL：临时邮箱不提供转发配置，避免被当成转发跳板。
-  await env.DB.prepare(
-    "INSERT INTO mailboxes (id, user_id, address, forwarding_to, source, created_at, is_temp) VALUES (?, ?, ?, NULL, ?, ?, 1)"
+  //
+  // 配额判定随插入一起做（原子，见 limit 参数说明）：`meta.changes === 0` = 已满。
+  const guarded = limit !== null
+  const ins = await env.DB.prepare(
+    `INSERT INTO mailboxes (id, user_id, address, forwarding_to, source, created_at, is_temp)
+     SELECT ?, ?, ?, NULL, ?, ?, 1
+     ${guarded ? "WHERE (SELECT COUNT(*) FROM mailboxes WHERE user_id = ? AND is_temp = 1) < ?" : ""}`
   )
-    .bind(id, userId, address, source, now)
+    .bind(
+      ...(guarded
+        ? [id, userId, address, source, now, userId, limit]
+        : [id, userId, address, source, now])
+    )
     .run()
+
+  if (guarded && (ins.meta?.changes ?? 0) === 0) {
+    throw new ApiError(
+      400,
+      `临时邮箱最多同时存在 ${MAX_TEMP_MAILBOXES_PER_USER} 个，请先删除或刷新已有的`,
+      "LIMIT_REACHED"
+    )
+  }
 
   const row = await env.DB.prepare("SELECT * FROM mailboxes WHERE id = ?")
     .bind(id)

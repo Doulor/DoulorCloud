@@ -66,7 +66,7 @@ import {
   myInviteApi,
   voucherApi,
   wb2apiApi,
-  cli2apiApi,
+  qoder2apiApi,
   HttpError,
 } from "@/services/api"
 import { fmtTime } from "@/lib/format"
@@ -80,7 +80,7 @@ import type {
   SenseNovaDonationBlock,
   VoucherOverview,
   Wb2ApiDonationBlock,
-  Cli2ApiDonationBlock,
+  Qoder2ApiDonationBlock,
 } from "@/types"
 
 /**
@@ -971,10 +971,10 @@ export default function DonationPage() {
                 grantsPermission={grantPermissions?.wb2api !== false}
                 onDone={() => void load()}
               />
-              <Cli2ApiDonationCard
-                block={data?.cli2api}
+              <Qoder2ApiDonationCard
+                block={data?.qoder2api}
                 aiUnlocked={perms?.ai ?? false}
-                grantsPermission={grantPermissions?.cli2api !== false}
+                grantsPermission={grantPermissions?.qoder2api !== false}
                 onDone={() => void load()}
               />
               <SenseNovaDonationCard
@@ -2582,16 +2582,16 @@ function Wb2ApiLoginDialog({
   )
 }
 
-/** CLI2API 反代账号捐献卡（第二条，与 Wb2ApiDonationCard 并列） */
-function Cli2ApiDonationCard({
+/** Qoder2API 反代账号捐献卡（第二条，与 Wb2ApiDonationCard 并列） */
+function Qoder2ApiDonationCard({
   block,
   aiUnlocked,
   grantsPermission = true,
   onDone,
 }: {
-  block: Cli2ApiDonationBlock | undefined
+  block: Qoder2ApiDonationBlock | undefined
   aiUnlocked: boolean
-  /** cli2api 通道当前是否授予权限（关掉后文案改成「仅收录」） */
+  /** qoder2api 通道当前是否授予权限（关掉后文案改成「仅收录」） */
   grantsPermission?: boolean
   onDone: () => void
 }) {
@@ -2605,14 +2605,8 @@ function Cli2ApiDonationCard({
   if (!block.visible && block.bindings.length === 0) return null
 
   const full = block.remaining < 1
-  const providerLabel =
-    block.provider === "qoder"
-      ? "Qoder"
-      : block.provider === "workbuddy"
-        ? "WorkBuddy"
-        : block.provider === "trae"
-          ? "Trae"
-          : block.provider
+  // 该通道只对接 Qoder，没有 provider 可切
+  const providerLabel = "Qoder"
 
   return (
     <Card className="mb-6">
@@ -2628,8 +2622,8 @@ function Cli2ApiDonationCard({
         </CardTitle>
         <CardDescription>
           {grantsPermission
-            ? t("don.cli.desc", { provider: providerLabel, realm: block.region === "global" ? t("don.realm.global") : t("don.realm.cn") })
-            : t("don.cli.descNoGrant", { provider: providerLabel, realm: block.region === "global" ? t("don.realm.global") : t("don.realm.cn") })}
+            ? t("don.cli.desc", { provider: providerLabel, realm: block.realm === "cn" ? t("don.realm.cn") : t("don.realm.global") })
+            : t("don.cli.descNoGrant", { provider: providerLabel, realm: block.realm === "cn" ? t("don.realm.cn") : t("don.realm.global") })}
           {!grantsPermission && (
             <span className="mt-1 block font-semibold text-destructive">
               {t("don.grantOffAi")}
@@ -2697,9 +2691,9 @@ function Cli2ApiDonationCard({
       </CardContent>
 
       {dialogOpen && (
-        <Cli2ApiLoginDialog
+        <Qoder2ApiLoginDialog
           providerLabel={providerLabel}
-          region={block.region}
+          realm={block.realm}
           grantsPermission={grantsPermission}
           onClose={() => setDialogOpen(false)}
           onDone={() => {
@@ -2713,18 +2707,18 @@ function Cli2ApiDonationCard({
   )
 }
 
-/** CLI2API 登录弹窗：首次 poll 拿授权链接，之后轮询登录状态 */
-function Cli2ApiLoginDialog({
+/** Qoder2API 登录弹窗：首次 poll 拿授权链接，之后轮询登录状态 */
+function Qoder2ApiLoginDialog({
   onClose,
   onDone,
   providerLabel,
-  region,
+  realm,
   grantsPermission = true,
 }: {
   onClose: () => void
   onDone: () => void
   providerLabel: string
-  region: string
+  realm: string
   /** 当前通道是否授予权限（关掉后绑定成功文案改成「仅收录」） */
   grantsPermission?: boolean
 }) {
@@ -2738,12 +2732,12 @@ function Cli2ApiLoginDialog({
   const [copied, setCopied] = React.useState(false)
   const timerRef = React.useRef<number | null>(null)
 
-  // 发起登录（挂载即调一次）。cli2api 的 start 只建账号，秒回。
+  // 发起登录（挂载即调一次）。qoder2api 的 start 只建账号，秒回。
   React.useEffect(() => {
     let cancelled = false
     void (async () => {
       try {
-        const res = await cli2apiApi.loginStart()
+        const res = await qoder2apiApi.loginStart()
         if (cancelled) return
         setSessionId(res.sessionId)
         setPhase("waiting")
@@ -2765,7 +2759,7 @@ function Cli2ApiLoginDialog({
 
     const tick = async () => {
       try {
-        const res = await cli2apiApi.loginPoll(sessionId)
+        const res = await qoder2apiApi.loginPoll(sessionId)
         if (stopped) return
         if (res.authUrl) setUrl(res.authUrl)
         if (res.status === "done") {
@@ -2827,7 +2821,7 @@ function Cli2ApiLoginDialog({
       <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle>
-            {t("don.cli.dlgTitle", { provider: providerLabel, realm: region === "global" ? t("don.realm.global") : t("don.realm.cn") })}
+            {t("don.cli.dlgTitle", { provider: providerLabel, realm: realm === "cn" ? t("don.realm.cn") : t("don.realm.global") })}
           </DialogTitle>
           <DialogDescription>
             {t("don.binding.dlgDesc")}

@@ -85,12 +85,12 @@ export interface Env {
   /** 网关站点地址的 env 兜底（正常走 app_settings.wb2api_base_url） */
   WB2API_BASE_URL?: string
 
-  // ---- CLI2API 反代网关捐献通道（第二条，与 wb2api 并列）----
+  // ---- Qoder2API 反代网关捐献通道（第二条，与 wb2api 并列）----
   // ⚠️ 这是该实例的 **console key（管理员密钥）**，不是给客户端用的 API key ——
-  // cli2api 的 `/api/*` 全部要求它，泄露等于整个账号池被拿走。
-  // 作为 D1 单行表 cli2api_credentials 的回落：管理员可在管理面板在线更新（优先），
-  // 也可用 `wrangler secret put CLI2API_CONSOLE_KEY` 配置。
-  CLI2API_CONSOLE_KEY?: string
-  /** 网关站点地址的 env 兜底（正常走 app_settings.cli2api_base_url） */
-  CLI2API_BASE_URL?: string
+  // qoder2api 的 `/api/*` 全部要求它，泄露等于整个账号池被拿走。
+  // 作为 D1 单行表 qoder2api_credentials 的回落：管理员可在管理面板在线更新（优先），
+  // 也可用 `wrangler secret put QODER2API_PANEL_PASSWORD` 配置。
+  QODER2API_PANEL_PASSWORD?: string
+  /** 网关站点地址的 env 兜底（正常走 app_settings.qoder2api_base_url） */
+  QODER2API_BASE_URL?: string
 }

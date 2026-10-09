@@ -23,7 +23,7 @@ import { purgeUserStorage } from "./handlers/storage"
 import { releaseDonationChannel } from "./donation-provision"
 import { releaseSenseNovaKey } from "./sensenova"
 import { wb2RemoveAccount } from "./wb2api-client"
-import { cli2DeleteAccount } from "./cli2api-client"
+import { q2DeleteAccount } from "./qoder2api-client"
 import { adminSetUserStatus } from "./newapi-client"
 import { AVATAR_TYPES, avatarKey } from "./identity"
 import type { Env } from "./env"
@@ -38,7 +38,7 @@ export interface UserCleanupReport {
   releasedSubscriptions: number
   releasedFrpNodes: number
   wb2Removed: number
-  cli2Removed: number
+  qoder2Removed: number
   newapiDisabled: boolean
   errors: string[]
 }
@@ -64,7 +64,7 @@ export async function purgeUserExternalResources(
     releasedSubscriptions: 0,
     releasedFrpNodes: 0,
     wb2Removed: 0,
-    cli2Removed: 0,
+    qoder2Removed: 0,
     newapiDisabled: false,
     errors: [],
   }
@@ -257,18 +257,18 @@ export async function purgeUserExternalResources(
     }
   }
 
-  // ---------- 6b. CLI2API 反代网关（第二条通道） ----------
-  const cli2Bindings = await env.DB.prepare(
-    "SELECT account_id FROM cli2api_bindings WHERE user_id = ? AND status = 'active'"
+  // ---------- 6b. Qoder2API 反代网关（第二条通道） ----------
+  const qoder2Bindings = await env.DB.prepare(
+    "SELECT account_id FROM qoder2api_bindings WHERE user_id = ? AND status = 'active'"
   )
     .bind(userId)
     .all<{ account_id: string }>()
-  for (const b of cli2Bindings.results ?? []) {
+  for (const b of qoder2Bindings.results ?? []) {
     try {
-      await cli2DeleteAccount(env, b.account_id)
-      report.cli2Removed++
+      await q2DeleteAccount(env, b.account_id)
+      report.qoder2Removed++
     } catch (err) {
-      report.errors.push(`CLI2API 账号 ${b.account_id}：${errText(err)}`)
+      report.errors.push(`Qoder2API 账号 ${b.account_id}：${errText(err)}`)
     }
   }
 

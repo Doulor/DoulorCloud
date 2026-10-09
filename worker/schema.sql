@@ -264,10 +264,10 @@ CREATE TABLE IF NOT EXISTS wb2api_credentials (
   updated_at  TEXT NOT NULL
 );
 
--- ============ CLI2API 反代绑定通道（第二条，与 wb2api 并列）============
--- 用户登录自己的 Qoder / WorkBuddy / Trae 账号 → 账号进入 cli2api 共享池
--- → 自动解锁本站「AI 中转站」权限。免管理员审核，单独建表。
--- 详见 worker/migrations/0058_cli2api.sql 的说明；此处供全新安装使用。
+-- ============ CLI2API 反代绑定通道（⚠️ 已弃用，仅保留历史数据）============
+-- 2026-10-09 起本站改用 Qoder2API-Hub（见下方 qoder2api_* 段），本通道代码已删除。
+-- 这三张表**刻意保留不删**：老的捐献记录还在里面，删了就查不到「谁曾经捐过」。
+-- 详见 worker/migrations/0058_cli2api.sql。
 
 -- 绑定关系：谁贡献了哪个 cli2api 账号
 CREATE TABLE IF NOT EXISTS cli2api_bindings (
@@ -308,6 +308,49 @@ CREATE TABLE IF NOT EXISTS cli2api_credentials (
   id              INTEGER PRIMARY KEY CHECK (id = 1),
   enc_console_key TEXT NOT NULL,
   updated_at      TEXT NOT NULL
+);
+
+-- ============ Qoder2API-Hub 反代绑定通道（当前在用，替代上面的 cli2api）============
+-- 用户登录自己的 Qoder 账号 → 账号进入 qoder2api-hub 共享池 → 自动解锁「AI 中转站」权限。
+-- 免管理员审核，单独建表。详见 worker/migrations/0138_qoder2api.sql。
+
+-- 绑定关系：谁捐献了哪个 Qoder 账号
+CREATE TABLE IF NOT EXISTS qoder2api_bindings (
+  id                    TEXT PRIMARY KEY,
+  user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id            TEXT NOT NULL,
+  realm                 TEXT NOT NULL,   -- cn（qoder.com.cn）/ intl（qoder.com）
+  nickname              TEXT,
+  status                TEXT NOT NULL DEFAULT 'active',
+  granted_ai_permission INTEGER NOT NULL DEFAULT 0,
+  acknowledged_ip       TEXT,
+  created_at            TEXT NOT NULL,
+  removed_at            TEXT,
+  removed_by            TEXT REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_qoder2api_bindings_account ON qoder2api_bindings(account_id);
+CREATE INDEX IF NOT EXISTS idx_qoder2api_bindings_user ON qoder2api_bindings(user_id, status);
+
+-- 登录会话：存**上游 state**（绝不下发前端），不存账号 id（账号由上游在授权成功时才入池）
+CREATE TABLE IF NOT EXISTS qoder2api_login_sessions (
+  id              TEXT PRIMARY KEY,
+  user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  upstream_state  TEXT NOT NULL,
+  realm           TEXT NOT NULL,
+  auth_url        TEXT,
+  status          TEXT NOT NULL DEFAULT 'pending',
+  message         TEXT,
+  acknowledged_ip TEXT,
+  created_at      TEXT NOT NULL,
+  expires_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_qoder2api_sessions_expires ON qoder2api_login_sessions(expires_at);
+
+-- 面板密码（= 该实例的管理员凭据，不是客户端 key），加密落库
+CREATE TABLE IF NOT EXISTS qoder2api_credentials (
+  id                 INTEGER PRIMARY KEY CHECK (id = 1),
+  enc_panel_password TEXT NOT NULL,
+  updated_at         TEXT NOT NULL
 );
 
 -- ============ OAuth 2.0 授权服务器（Doulor Cloud 作为身份提供方）============

@@ -25,6 +25,7 @@ import {
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { confirmDialog, promptDialog } from "@/components/confirm-dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
@@ -162,7 +163,11 @@ export function OAuthAdminPanel() {
   /** 审核用户提交的应用：通过 / 驳回 */
   const doReview = async (client: OAuthClient, approve: boolean) => {    let note = ""
     if (!approve) {
-      note = window.prompt(t("ao.review.rejectPrompt", { name: client.name })) ?? ""
+      note =
+        (await promptDialog({
+          title: t("ao.review.rejectPrompt", { name: client.name }),
+          input: {},
+        })) ?? ""
       if (note.trim() === "") return // 用户取消 / 没填原因
     }
     setBusy(true)
@@ -224,13 +229,11 @@ export function OAuthAdminPanel() {
   }
 
   const doResetSecret = async (client: OAuthClient) => {
-    if (
-      !window.confirm(
-        t("ao.confirmReset", { name: client.name })
-      )
-    ) {
-      return
-    }
+    const ok = await confirmDialog({
+      title: t("ao.confirmReset", { name: client.name }),
+      danger: true,
+    })
+    if (!ok) return
     try {
       const res = await oauthAdminApi.resetSecret(client.id)
       setSecretDialog({

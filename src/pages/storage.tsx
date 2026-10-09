@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Cloud, Copy, ExternalLink, Globe, HardDrive, Loader2, Power, RefreshCw, ScrollText, Trash2, Upload, X } from "lucide-react"
+import { ChevronRight, Cloud, Copy, ExternalLink, Eye, EyeOff, Folder, FolderPlus, Globe, HardDrive, Home, Link2, Loader2, Power, RefreshCw, ScrollText, Share2, Trash2, Upload, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -42,7 +42,7 @@ import {
 } from "@/components/ui/table"
 import { storageApi, HttpError } from "@/services/api"
 import { formatBytes, fmtTime } from "@/lib/format"
-import type { StorageObject, StorageOverview } from "@/types"
+import type { StorageFolder, StorageObject, StorageOverview, StorageShare } from "@/types"
 import { useT } from "@/i18n"
 /**
  * 网盘「使用协议」。版本须与后端 STORAGE_CONSENT_VERSION 一致。
@@ -96,6 +96,13 @@ export default function StoragePage() {
   const { t } = useT()
   const [overview, setOverview] = React.useState<StorageOverview | null>(null)
   const [objects, setObjects] = React.useState<StorageObject[]>([])
+  const [folders, setFolders] = React.useState<StorageFolder[]>([])
+  /** 当前所在目录（相对账号根目录；'' = 根目录） */
+  const [path, setPath] = React.useState("")
+  const [listingTruncated, setListingTruncated] = React.useState(false)
+  /** 切换目录时的轻量加载态：不整页换骨架屏，只在这块内容上给个提示 */
+  const [navLoading, setNavLoading] = React.useState(false)
+  const [shares, setShares] = React.useState<StorageShare[]>([])
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
   // 协议同意（开通前必须勾选）
@@ -106,10 +113,10 @@ export default function StoragePage() {
   const [dragging, setDragging] = React.useState(false)
   const [domainOpen, setDomainOpen] = React.useState(false)
   const [selectedSub, setSelectedSub] = React.useState("")
+  // 新建目录
+  const [folderOpen, setFolderOpen] = React.useState(false)
+  const [folderName, setFolderName] = React.useState("")
   const fileInputRef = React.useRef<HTMLInputElement>(null)
-  // 分页：后端每次最多返回 200 个对象并带一个 cursor，接上它才能看到第 201 个之后的文件
-  const [cursor, setCursor] = React.useState<string | null>(null)
-  const [loadingMore, setLoadingMore] = React.useState(false)
   /** 多选：批量删除用（存 key） */
   const [selected, setSelected] = React.useState<Set<string>>(new Set())
 
@@ -117,18 +124,26 @@ export default function StoragePage() {
   // 无权限（403 FEATURE_NOT_PERMITTED）：整页显示提示 + 捐献入口
   const [locked, setLocked] = React.useState(false)
 
-  const load = React.useCallback(async (silent = false) => {
+  // 当前目录的即时值：load() 是异步的，若用户在其返回前切了目录，
+  // 直接用 state 会读到旧值（闭包），所以用 ref 做「是否已切走」的判定。
+  const pathRef = React.useRef(path)
+
+  const load = React.useCallback(async (silent = false, dir?: string) => {
+    const target = dir ?? pathRef.current
     if (!silent) setLoading(true)
     try {
       const res = await storageApi.overview()
       setOverview(res)
       if (res.account) {
-        const list = await storageApi.list()
+        const list = await storageApi.list(target)
+        // 请求返回时用户已切到别的目录 → 丢弃这次结果，避免串目录
+        if (pathRef.current !== target) return
         setObjects(list.objects)
-        setCursor(list.truncated ? list.cursor : null)
+        setFolders(list.folders ?? [])
+        setListingTruncated(Boolean(list.truncated))
       } else {
         setObjects([])
-        setCursor(null)
+        setFolders([])
       }
     } catch (err) {
       if (err instanceof HttpError && err.code === "FEATURE_NOT_PERMITTED") {
@@ -141,30 +156,59 @@ export default function StoragePage() {
     }
   }, [])
 
-  /** 追加下一页。按 key 去重，因为翻页期间可能有新文件被上传。 */
-  const loadMore = async () => {
-    if (!cursor || loadingMore) return
-    setLoadingMore(true)
+  /** 分享列表单独拉：失败不影响主流程，所以静默处理 */
+  const loadShares = React.useCallback(async () => {
     try {
-      const res = await storageApi.list(cursor)
-      setObjects((prev) => {
-        const seen = new Set(prev.map((o) => o.key))
-        return [...prev, ...res.objects.filter((o) => !seen.has(o.key))]
-      })
-      setCursor(res.truncated ? res.cursor : null)
-      setOverview((prev) =>
-        prev ? { ...prev, usedBytes: res.usedBytes, quotaBytes: res.quotaBytes } : prev
-      )
-    } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("st.err.loadMore"))
+      const res = await storageApi.shares()
+      setShares(res.shares)
+    } catch {
+      /* 分享是附加能力，拉取失败不打断页面 */
+    }
+  }, [])
+
+  /**
+   * 上传后刷新列表（并发合并）。
+   *
+   * 为什么需要：原来只有「整批传完」才刷一次，多文件/大文件时列表长时间一动不动，
+   * 用户会以为上传失败。现在每传完一个就刷一次。
+   *
+   * 为什么要合并：`load()` 一次要打两个接口（overview + list），批量上传几十个文件时
+   * 逐个 `await` 会把整批上传拖成串行。这里改成「同一时刻只在跑一次」，
+   * 期间又传完的文件只记一个标记，等这次回来再补刷一次 —— 最终状态一定是新的。
+   */
+  const refreshing = React.useRef(false)
+  const refreshQueued = React.useRef(false)
+  const refreshList = async () => {
+    if (refreshing.current) {
+      refreshQueued.current = true
+      return
+    }
+    refreshing.current = true
+    try {
+      await load(true)
     } finally {
-      setLoadingMore(false)
+      refreshing.current = false
+      if (refreshQueued.current) {
+        refreshQueued.current = false
+        void refreshList()
+      }
     }
   }
 
   React.useEffect(() => {
     void load()
-  }, [load])
+    void loadShares()
+  }, [load, loadShares])
+
+  /** 进入目录（必须先同步 pathRef，否则 load 里的「已切走」判定会把结果丢掉） */
+  const enterFolder = (next: string) => {
+    if (next === pathRef.current) return
+    pathRef.current = next
+    setSelected(new Set())
+    setPath(next)
+    setNavLoading(true)
+    void load(true, next).finally(() => setNavLoading(false))
+  }
 
   const handleEnable = async () => {
     if (!consent) {
@@ -204,19 +248,94 @@ export default function StoragePage() {
   }
 
   /**
-   * 生成文件直链。
-   * 若用户设置了「默认分享前缀」，则用 https://<子域名>/<文件名>，
-   * 否则回退到 https://<站点>/dl/<用户名>/<文件名>。
+   * 生成文件直链（按段编码，目录里的文件不能整串 encode，否则 `/` 也会被编码）。
+   * 若用户设置了「默认分享前缀」，则用 https://<子域名>/<路径>，
+   * 否则回退到 https://<站点>/dl/<用户名>/<路径>。
    */
-  const directLinkFor = (filename: string) => {
+  const directLinkFor = (relativePath: string) => {
     if (!overview?.account) return ""
-    const enc = encodeURIComponent(filename)
+    const enc = relativePath.split("/").filter(Boolean).map(encodeURIComponent).join("/")
     if (overview.defaultPrefix) {
       return `https://${overview.defaultPrefix.fqdn}/${enc}`
     }
     return `${window.location.origin}/dl/${encodeURIComponent(
       overview.account.prefix
     )}/${enc}`
+  }
+
+  /** 在某个目录上生成（或复用）分享链接，并复制到剪贴板 */
+  const handleShareFolder = async (folderPath: string) => {
+    setBusy(true)
+    try {
+      const res = await storageApi.createShare(folderPath)
+      await loadShares()
+      try {
+        await navigator.clipboard.writeText(res.share.url)
+        toast.success(res.reused ? t("st.share.okReused") : t("st.share.okCreated"))
+      } catch {
+        // 剪贴板不可用（非 HTTPS / 无权限）时至少让用户看到链接
+        toast.success(res.share.url)
+      }
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("st.share.errCreate"))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleDeleteShare = async (id: string) => {
+    if (!confirm(t("st.share.confirmDelete"))) return
+    try {
+      await storageApi.deleteShare(id)
+      toast.success(t("st.share.okDeleted"))
+      await loadShares()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("st.share.errOp"))
+    }
+  }
+
+  const handleToggleShare = async (share: StorageShare) => {
+    try {
+      await storageApi.toggleShare(share.id, !share.enabled)
+      toast.success(share.enabled ? t("st.share.okDisabled") : t("st.share.okEnabled"))
+      await loadShares()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("st.share.errOp"))
+    }
+  }
+
+  /** 新建目录（在当前目录下） */
+  const handleCreateFolder = async () => {
+    const name = folderName.trim()
+    if (!name) return
+    setBusy(true)
+    try {
+      const full = path ? `${path}/${name}` : name
+      await storageApi.createFolder(full)
+      toast.success(t("st.folder.okCreated", { name }))
+      setFolderOpen(false)
+      setFolderName("")
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("st.folder.errCreate"))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 删除目录（递归，含目录下所有文件） */
+  const handleDeleteFolder = async (folder: StorageFolder) => {
+    if (!confirm(t("st.folder.confirmDelete", { name: folder.name }))) return
+    setBusy(true)
+    try {
+      await storageApi.deleteFolder(folder.path)
+      toast.success(t("st.folder.okDeleted", { name: folder.name }))
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("em.err.delete"))
+    } finally {
+      setBusy(false)
+    }
   }
 
   const handleSetDefaultPrefix = async (prefixId: string | null) => {
@@ -241,8 +360,17 @@ export default function StoragePage() {
     }
   }
 
+  const copyShareUrl = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url)
+      toast.success(t("st.share.okCopied"))
+    } catch {
+      toast.error(t("ai.err.copy"))
+    }
+  }
+
   /** 单文件上传：预签名直传 R2（XHR 以获得真实进度），再回服务端登记 */
-  const uploadOne = (file: File) =>
+  const uploadOne = (file: File, folder: string) =>
     new Promise<void>((resolve) => {
       // 用唯一 id 跟踪进度：同名文件不能互相覆盖进度条目
       const uid = crypto.randomUUID()
@@ -259,6 +387,8 @@ export default function StoragePage() {
           filename: file.name,
           size: file.size,
           contentType: file.type || "application/octet-stream",
+          // 上传到「拖拽那一刻」所在的目录，避免上传途中用户切目录把文件放错地方
+          folder: folder || undefined,
         })
         .then(({ uploadUrl, key }) => {
           const xhr = new XMLHttpRequest()
@@ -318,16 +448,20 @@ export default function StoragePage() {
     try {
       const max = overview.maxFileBytes
       const list = Array.from(files)
+      const folder = path
 
       for (const f of list.filter((f) => f.size > max)) {
         toast.error(t("st.err.tooLarge", { name: f.name, size: formatBytes(max) }))
       }
 
       for (const file of list.filter((f) => f.size <= max)) {
-        await uploadOne(file)
+        await uploadOne(file, folder)
+        // 每传完一个立刻开始刷列表（不 await：否则每个文件的刷新都会拖慢整批上传）
+        void refreshList()
       }
     } finally {
       setUploadActive(false)
+      // 收尾再刷一次，保证「最后一个文件」一定出现在列表里
       await load(true)
     }
   }
@@ -585,6 +719,7 @@ export default function StoragePage() {
   }
 
   const account = overview.account
+  const pathSegments = path.split("/").filter(Boolean)
   const usedPercent =
     account.quotaBytes > 0
       ? Math.min(100, (account.usedBytes / account.quotaBytes) * 100)
@@ -844,133 +979,309 @@ export default function StoragePage() {
           </CardContent>
         </Card>
 
-        {/* 文件列表 */}
+        {/* 目录 + 文件列表 */}
         <Card>
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
-            <CardTitle className="text-base">{t("st.list.title", { n: objects.length })}</CardTitle>
-            {selected.size > 0 && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-destructive hover:text-destructive"
-                onClick={() => void handleDeleteSelected()}
-              >
-                <Trash2 className="h-4 w-4" />
-                {t("st.list.deleteSelected", { n: selected.size })}
+            <CardTitle className="text-base">
+              {t("st.list.title", { n: objects.length + folders.length })}
+            </CardTitle>
+            <div className="flex items-center gap-2">
+              {selected.size > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-destructive hover:text-destructive"
+                  onClick={() => void handleDeleteSelected()}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  {t("st.list.deleteSelected", { n: selected.size })}
+                </Button>
+              )}
+              <Button variant="outline" size="sm" onClick={() => setFolderOpen(true)}>
+                <FolderPlus className="h-4 w-4" />
+                {t("st.folder.new")}
               </Button>
-            )}
+            </div>
           </CardHeader>
-          <CardContent>
-            {objects.length === 0 ? (
+          <CardContent className="space-y-3">
+            {/* 面包屑：根目录 → 当前目录 */}
+            <div className="flex flex-wrap items-center gap-1 text-sm">
+              <button
+                type="button"
+                onClick={() => enterFolder("")}
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <Home className="h-3.5 w-3.5" />
+                {account.prefix}
+              </button>
+              {pathSegments.map((seg, i) => {
+                const target = pathSegments.slice(0, i + 1).join("/")
+                const isLast = i === pathSegments.length - 1
+                return (
+                  <React.Fragment key={target}>
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50" />
+                    {isLast ? (
+                      <span className="rounded-md px-2 py-1 font-medium">{seg}</span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => enterFolder(target)}
+                        className="rounded-md px-2 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      >
+                        {seg}
+                      </button>
+                    )}
+                  </React.Fragment>
+                )
+              })}
+            </div>
+
+            {listingTruncated && (
+              <p className="text-xs text-muted-foreground">{t("st.list.truncated")}</p>
+            )}
+
+            {navLoading && (
+              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {t("common.loading")}
+              </p>
+            )}
+
+            {folders.length > 0 && (
+              <div className="overflow-hidden rounded-lg border">
+                {folders.map((f) => (
+                  <div
+                    key={f.path}
+                    className="flex items-center gap-1 border-b px-2 py-1.5 last:border-b-0"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => enterFolder(f.path)}
+                      className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-accent"
+                    >
+                      <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <span className="truncate text-sm">{f.name}</span>
+                    </button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 shrink-0 text-muted-foreground"
+                      onClick={() => void handleShareFolder(f.path)}
+                      disabled={busy}
+                      title={t("st.share.action")}
+                    >
+                      <Share2 className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+                      onClick={() => void handleDeleteFolder(f)}
+                      disabled={busy}
+                      title={t("st.folder.delete")}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {objects.length === 0 && folders.length === 0 ? (
               <EmptyState
                 title={t("st.list.empty")}
                 description={t("st.list.emptyDesc")}
               />
+            ) : objects.length > 0 ? (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-10">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 cursor-pointer accent-primary align-middle"
+                        checked={allSelected}
+                        onChange={toggleSelectAll}
+                        aria-label={t("st.list.selectAll")}
+                      />
+                    </TableHead>
+                    <TableHead>{t("st.list.col.name")}</TableHead>
+                    <TableHead>{t("st.list.col.size")}</TableHead>
+                    <TableHead>{t("st.list.col.uploaded")}</TableHead>
+                    <TableHead className="w-32" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {objects.map((o) => {
+                    const link = directLinkFor(o.path)
+                    return (
+                      <TableRow key={o.key}>
+                        <TableCell className="w-10">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 cursor-pointer accent-primary align-middle"
+                            checked={selected.has(o.key)}
+                            onChange={() => toggleSelect(o.key)}
+                            aria-label={t("st.list.selectOne", { name: o.filename })}
+                          />
+                        </TableCell>
+                        <TableCell className="max-w-xs truncate font-mono text-xs">
+                          {o.filename}
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          {formatBytes(o.size)}
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {fmtTime(o.lastModified)}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground"
+                              onClick={() => void copyText(link)}
+                              title={t("st.list.copyLink")}
+                            >
+                              <Copy className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground"
+                              asChild
+                              title={t("st.list.openLink")}
+                            >
+                              <a href={link} target="_blank" rel="noreferrer">
+                                <ExternalLink className="h-4 w-4" />
+                              </a>
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                              onClick={() => void handleDelete(o)}
+                              title={t("common.delete")}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        {/* 目录分享管理 */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Share2 className="h-4 w-4 text-muted-foreground" />
+              {t("st.share.title")}
+            </CardTitle>
+            <CardDescription>{t("st.share.desc")}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {shares.length === 0 ? (
+              <p className="text-sm text-muted-foreground">{t("st.share.empty")}</p>
             ) : (
-              <>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-10">
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 cursor-pointer accent-primary align-middle"
-                          checked={allSelected}
-                          onChange={toggleSelectAll}
-                          aria-label={t("st.list.selectAll")}
-                        />
-                      </TableHead>
-                      <TableHead>{t("st.list.col.name")}</TableHead>
-                      <TableHead>{t("st.list.col.size")}</TableHead>
-                      <TableHead>{t("st.list.col.uploaded")}</TableHead>
-                      <TableHead className="w-32" />
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {objects.map((o) => {
-                      const link = directLinkFor(o.filename)
-                      return (
-                        <TableRow key={o.key}>
-                          <TableCell className="w-10">
-                            <input
-                              type="checkbox"
-                              className="h-4 w-4 cursor-pointer accent-primary align-middle"
-                              checked={selected.has(o.key)}
-                              onChange={() => toggleSelect(o.key)}
-                              aria-label={t("st.list.selectOne", { name: o.filename })}
-                            />
-                          </TableCell>
-                          <TableCell className="max-w-xs truncate font-mono text-xs">
-                            {o.filename}
-                          </TableCell>
-                          <TableCell className="text-sm">
-                            {formatBytes(o.size)}
-                          </TableCell>
-                          <TableCell className="text-xs text-muted-foreground">
-                            {fmtTime(o.lastModified)}
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground"
-                                onClick={() => void copyText(link)}
-                                title={t("st.list.copyLink")}
-                              >
-                                <Copy className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground"
-                                asChild
-                                title={t("st.list.openLink")}
-                              >
-                                <a href={link} target="_blank" rel="noreferrer">
-                                  <ExternalLink className="h-4 w-4" />
-                                </a>
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                                onClick={() => void handleDelete(o)}
-                                title={t("common.delete")}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      )
-                    })}
-                  </TableBody>
-                </Table>
-                {cursor && (
-                  <div className="mt-3 flex justify-center">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void loadMore()}
-                      disabled={loadingMore}
-                    >
-                      {loadingMore ? (
-                        <>
-                          <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                          {t("common.loading")}
-                        </>
-                      ) : (
-                        t("em.loadOlder")
+              shares.map((s) => (
+                <div key={s.id} className="flex items-center gap-2 rounded-lg border p-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm font-medium">{s.title}</span>
+                      {!s.enabled && (
+                        <Badge variant="secondary" className="shrink-0">
+                          {t("st.share.disabled")}
+                        </Badge>
                       )}
-                    </Button>
+                    </div>
+                    <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
+                      {s.url}
+                    </p>
                   </div>
-                )}
-              </>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 shrink-0 text-muted-foreground"
+                    onClick={() => void copyShareUrl(s.url)}
+                    title={t("common.copy")}
+                  >
+                    <Link2 className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 shrink-0 text-muted-foreground"
+                    asChild
+                    title={t("st.list.openLink")}
+                  >
+                    <a href={s.url} target="_blank" rel="noreferrer">
+                      <ExternalLink className="h-4 w-4" />
+                    </a>
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 shrink-0 text-muted-foreground"
+                    onClick={() => void handleToggleShare(s)}
+                    title={s.enabled ? t("st.share.disable") : t("st.share.enable")}
+                  >
+                    {s.enabled ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+                    onClick={() => void handleDeleteShare(s.id)}
+                    title={t("common.delete")}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))
             )}
           </CardContent>
         </Card>
       </div>
+
+      {/* 新建目录 */}
+      <Dialog open={folderOpen} onOpenChange={(v) => { setFolderOpen(v); if (!v) setFolderName("") }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("st.folder.dialogTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("st.folder.dialogDesc", { dir: path ? `${account.prefix}/${path}` : account.prefix })}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="folderName">{t("st.folder.name")}</Label>
+            <Input
+              id="folderName"
+              value={folderName}
+              onChange={(e) => setFolderName(e.target.value)}
+              placeholder={t("st.folder.namePh")}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void handleCreateFolder()
+              }}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setFolderOpen(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button onClick={() => void handleCreateFolder()} disabled={busy || !folderName.trim()}>
+              {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+              {t("st.folder.submit")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 绑定二级域名 */}
       <Dialog open={domainOpen} onOpenChange={setDomainOpen}>

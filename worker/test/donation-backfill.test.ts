@@ -5,7 +5,7 @@
 //   2. dryRun=false：按当前档位值逐笔发放，reason=donation；
 //   3. **可重复运行**：第二次跑全部被幂等键挡下（applied=0），余额不翻倍；
 //   4. 计入范围严格对齐正常发放：只认 approved 单据 / active 绑定，
-//      rejected 单据、removed 绑定、认不出的 provider 一律不计；
+//      rejected 单据、removed 绑定一律不计；
 //   5. 档位设 0 → 该笔不落账（计入 skipped）。
 //
 // 直接往表里插数据（不走捐献/绑定接口）：补发本就是给「接口上线前」的历史数据
@@ -29,7 +29,7 @@ interface Report {
 beforeEach(async () => {
   // 补发会全表扫描这三张表；清干净，免得跨用例互相污染
   await env.DB.prepare("DELETE FROM donations").run()
-  await env.DB.prepare("DELETE FROM cli2api_bindings").run()
+  await env.DB.prepare("DELETE FROM qoder2api_bindings").run()
   await env.DB.prepare("DELETE FROM wb2api_bindings").run()
   await env.DB.prepare("DELETE FROM point_transactions").run()
   await env.DB.prepare("DELETE FROM user_points").run()
@@ -46,14 +46,15 @@ async function insertDonation(userId: string, type: string, status = "approved")
   return id
 }
 
-async function insertCli(userId: string, provider: string, status = "active"): Promise<string> {
+/** 插一条 qoder2api 绑定。该通道固定对接 Qoder，没有 provider 可填 */
+async function insertCli(userId: string, status = "active"): Promise<string> {
   const id = uuid()
   await env.DB.prepare(
-    `INSERT INTO cli2api_bindings
-       (id, user_id, account_id, provider, region, status, created_at)
-     VALUES (?, ?, ?, ?, 'global', ?, ?)`
+    `INSERT INTO qoder2api_bindings
+       (id, user_id, account_id, realm, status, created_at)
+     VALUES (?, ?, ?, 'cn', ?, ?)`
   )
-    .bind(id, userId, `acc_${id}`, provider, status, new Date().toISOString())
+    .bind(id, userId, `acc_${id}`, status, new Date().toISOString())
     .run()
   return id
 }
@@ -107,11 +108,10 @@ async function seed(): Promise<{ u1: TestUser; u2: TestUser }> {
   await insertDonation(u1.id, "proxy", "approved")
   await insertDonation(u1.id, "ai", "approved")
   await insertDonation(u1.id, "proxy", "rejected")
-  await insertCli(u1.id, "qoder", "removed")
-  // u2：cli2api qoder 绑定（计 10）+ wb2api 绑定（计 10）+ 认不出的 provider（不计）
-  await insertCli(u2.id, "qoder", "active")
+  await insertCli(u1.id, "removed")
+  // u2：qoder2api 绑定（计 10）+ wb2api 绑定（计 10）
+  await insertCli(u2.id, "active")
   await insertWb(u2.id, "active")
-  await insertCli(u2.id, "unknown_provider", "active")
   return { u1, u2 }
 }
 
@@ -209,7 +209,7 @@ describe("捐献积分翻倍补差", () => {
     await grant(u1.id, 5, "AI 渠道捐献奖励（历史补发）", "donation:d2")
     await grant(u2.id, 20, "WorkBuddy 反代账号捐献奖励（历史补发）", "wb2api:b1")
     // 一条**正常发放**（不带标记）—— 绝不能被动到
-    await grant(u2.id, 10, "Qoder 反代账号捐献奖励", "cli2api:c1")
+    await grant(u2.id, 10, "Qoder 反代账号捐献奖励", "qoder2api:c1")
 
     expect(await getPointsBalance(env, u1.id)).toBe(8)
     expect(await getPointsBalance(env, u2.id)).toBe(30)

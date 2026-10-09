@@ -30,6 +30,12 @@ import type { Env } from "../env"
 
 const API_KEY_PREFIX = "doulor_"
 
+/**
+ * 会改数据的 HTTP 方法 —— 公开 API 里这些一律要过「邮箱已验证」门槛。
+ * 只读方法放行，口径与站内的 `READ_ONLY_METHODS` 一致（能进页面、能读）。
+ */
+const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"])
+
 /** 从请求头提取 API Key（Bearer 优先，其次 X-API-Key） */
 function extractApiKey(request: Request): string {
   const auth = request.headers.get("Authorization") ?? ""
@@ -45,18 +51,24 @@ function extractApiKey(request: Request): string {
 async function requireApiKeyUser(
   env: Env,
   request: Request
-): Promise<{ id: string; role: string; status: string; isAdmin: boolean }> {
+): Promise<{ id: string; role: string; status: string; emailVerified: boolean; isAdmin: boolean }> {
   const key = extractApiKey(request)
   if (!key) throw new ApiError(401, "缺少 API Key（用 Authorization: Bearer 携带）", "UNAUTHORIZED")
   const hash = await hashToken(key)
   const row = await env.DB.prepare(
-    `SELECT u.id, u.role, u.status, k.is_admin
+    `SELECT u.id, u.role, u.status, u.email_verified, k.is_admin
        FROM user_api_keys k
        JOIN users u ON u.id = k.user_id
       WHERE k.key_hash = ?`
   )
     .bind(hash)
-    .first<{ id: string; role: string; status: string; is_admin: number | null }>()
+    .first<{
+      id: string
+      role: string
+      status: string
+      email_verified: number | null
+      is_admin: number | null
+    }>()
   if (!row) throw new ApiError(401, "API Key 无效", "UNAUTHORIZED")
   if (row.status !== "active") throw new ApiError(403, "账号已被停用", "ACCOUNT_SUSPENDED")
 
@@ -67,7 +79,13 @@ async function requireApiKeyUser(
   // （被降权、或降成普通 admin）⇒ 不认管理员身份。
   // 否则降权后那把 Key 还能免限额，等于权限下不来。
   const isAdmin = row.is_admin === 1 && isPrivileged(row.role)
-  return { id: row.id, role: row.role, status: row.status, isAdmin }
+  return {
+    id: row.id,
+    role: row.role,
+    status: row.status,
+    emailVerified: row.email_verified === 1,
+    isAdmin,
+  }
 }
 
 /**
@@ -118,6 +136,32 @@ async function runAs(
  */
 async function apiGate(env: Env, request: Request, feature: string) {
   const user = await requireApiKeyUser(env, request)
+
+  /**
+   * 🔴 未验证邮箱的账号**不得经公开 API 写数据**（2026-10-09 渗透测试 finding#2/#6）。
+   *
+   * 站内那道门槛（`auth.ts::needsVerifiedEmail`）是按「去掉 /api 前缀的路径」做前缀匹配的，
+   * 而本文件的路径是 `/api/v1/xxx` ⇒ 归一化后成了 `/v1/xxx`，**不命中任何前缀**，
+   * 于是 `runAs` 造的临时会话把门槛一路绕过去了：
+   * 同一个账号走 `POST /api/mailbox` 被 403 EMAIL_NOT_VERIFIED，
+   * 走 `POST /api/v1/mailbox`（Bearer API Key）却 201 建成功。
+   *
+   * 在**这一层**统一补上，而不是去改前缀匹配 —— 后者要么给每个功能各加一条 `/v1/xxx` 前缀
+   * （新增功能必然漏），要么改成解析路由表（脆弱）。这里按「写操作 + 未验证 + 非特权」
+   * 一刀切，与站内口径一致，新加的功能自动受保护。
+   */
+  if (
+    WRITE_METHODS.has(request.method.toUpperCase()) &&
+    !user.emailVerified &&
+    !isPrivileged(user.role)
+  ) {
+    throw new ApiError(
+      403,
+      "请先验证邮箱后再使用该功能（设置 → 真实邮箱验证）",
+      "EMAIL_NOT_VERIFIED"
+    )
+  }
+
   const config = await getApiFeatureConfig(env, feature)
   if (!config) throw new ApiError(404, "未知的 API 功能", "NOT_FOUND")
   if (!config.enabled) throw new ApiError(403, "该功能的 API 尚未开放", "API_DISABLED")

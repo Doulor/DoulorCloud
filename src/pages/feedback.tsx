@@ -19,6 +19,7 @@ import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { Button } from "@/components/ui/button"
+import { confirmDialog } from "@/components/confirm-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -451,7 +452,11 @@ function FeedbackCard({
     }
   }
   const doWithdraw = async () => {
-    if (!window.confirm(t("fb.withdrawConfirm"))) return
+    const ok = await confirmDialog({
+      title: t("fb.withdrawConfirm"),
+      danger: true,
+    })
+    if (!ok) return
     setWithdrawing(true)
     try {
       await onWithdraw(item.id)
