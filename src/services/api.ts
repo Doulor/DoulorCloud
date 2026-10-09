@@ -1853,6 +1853,8 @@ export const checkinApi = {
   status: () =>
     request<{
       enabled: boolean
+      /** 站点时区下的今天（YYYY-MM-DD）——自动签到按它判定「今天是否已处理」 */
+      today: string
       checkedIn: boolean
       streak: number
       todayPoints: number
