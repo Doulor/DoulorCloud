@@ -841,6 +841,7 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   'points.shop.seller_deliver': "dash.act.pointsShopSellerDeliver",
   'points.shop.deliver': "dash.act.pointsShopDeliver",
   'points.shop.after_sale.request': "dash.act.pointsShopAfterSale",
+  'points.shop.deliver_conflict_residual': "dash.act.pointsShopDeliverConflictResidual",
   'achievement.reward': "dash.act.achievementReward",
   'achievement.reward_failed': "dash.act.achievementRewardFailed",
   'achievement.reward_revoke': "dash.act.achievementRewardRevoke",

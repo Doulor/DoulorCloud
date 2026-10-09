@@ -2020,12 +2020,27 @@ export async function buyProduct(
       const deliveredAt = new Date().toISOString()
       // note = 一行摘要（多处截断到 300）；delivery_content = 完整交付正文
       // （仅 content / code 这类有独立正文的方式非空，其余为 NULL）。
-      await env.DB.prepare(
+      //
+      // 原子占位：只允许 pending → delivered（同 deliverOrder 的守卫）。这里必须带守卫
+      // **且窗口比那两处更宽**：`deliverAuto` 里是一次真实的上游调用（NewAPI 充值 /
+      // 开订阅，最长 NEWAPI_TIMEOUT_MS = 20s），管理员取消插进来的概率远高于
+      // 「一次 D1 往返」。探针实测（2026-10-09）：`deliverAuto` 期间注入并发取消，
+      // 旧代码订单被写回 delivered、买家已退款 ⇒ 用户商品（code/content 交付）会被
+      // autoConfirmDeliveries 正常结算，**卖家二次收款 = 平台净增发**。
+      //
+      // ⚠️ 这里的语义与那两处不同：走到这一步**权益已经真的发出去了**
+      //    （额度已充 / 订阅已开 / 卡密已取），撤不回来。所以占位失败只能抛错
+      //    交由下面 `deliveryApplied` 分支记日志、留给管理员对账 —— 这是
+      //    「已交付但订单已被并发取消」的固有残留，与邀请奖励那处同形，修不掉。
+      const taken = await env.DB.prepare(
         "UPDATE point_orders SET status = 'delivered', delivered_at = ?, note = ?, " +
-          "delivery_content = ? WHERE id = ?"
+          "delivery_content = ? WHERE id = ? AND status = 'pending'"
       )
         .bind(deliveredAt, summary.slice(0, 300), content ?? null, orderId)
         .run()
+      if ((taken.meta?.changes ?? 0) === 0) {
+        throw await deliverConflictError(env, orderId)
+      }
       // 自动交付成功 = 交付生效，这里才写租期（续费会自动顺延）
       await applyRentalExpiry(
         env,
@@ -2084,6 +2099,28 @@ export async function buyProduct(
       const msg = err instanceof Error ? err.message.slice(0, 120) : ""
       if (deliveryApplied) {
         console.error("自动交付成功但订单后处理失败:", orderId, err)
+        // ⚠️ 这里必须落审计，不能只 console.error：wrangler.toml 没有配
+        //    observability/logpush，console 只进实时 tail、不落盘。而这条残留
+        //    是**真实损失** —— quota/subscription 的上游额度已发出、code 的卡密
+        //    已被取走，撤不回来。占位冲突（订单已被并发取消）也走这里。
+        //    audit() 自身吞异常，放在 catch 里安全。
+        await audit(
+          env,
+          user.id,
+          "points.shop.deliver_conflict_residual",
+          `订单「${product.name}」自动交付已完成但订单记录未落库（${product.price} 积分，` +
+            `交付方式 ${product.delivery}，订单 ${orderId}）：${msg || "未知原因"}`
+        )
+        // 订单已被并发取消（占位拿不到）与「单纯记账失败」对外必须分开说：
+        // 前者订单已是终态、**永远不会**「同步完成」，承诺「请稍后查看」是假话，
+        // 且用户已被退款、却拿到了货 —— 必须让他联系管理员，否则这笔账无声无息。
+        if (err instanceof ApiError && err.code === "ORDER_CANCELLED") {
+          throw new ApiError(
+            500,
+            "商品已发放，但订单已被取消、积分已退回。请勿重复下单，并联系管理员核对。",
+            "DELIVERED_ORDER_CANCELLED"
+          )
+        }
         throw new ApiError(500, "商品已发放，订单记录正在同步，请稍后查看", "DELIVERY_RECORDED_PENDING")
       }
       // deliverAuto 失败且权益尚未生效，才可以退款并还原库存。
@@ -2136,11 +2173,20 @@ export async function deliverOrder(
   }
 
   const now = new Date().toISOString()
-  await env.DB.prepare(
-    "UPDATE point_orders SET status = 'delivered', delivered_at = ?, delivered_by = ?, note = ? WHERE id = ?"
+  // 原子占位：只允许 pending → delivered。上面那三个 if 只是快速失败与友好文案，
+  // **不是并发保护** —— 它们是入口那次 getOrder 的快照，与这条 UPDATE 之间隔着
+  // 若干次 await，管理员取消可能正好插在中间。没有 `AND status = 'pending'` 的话，
+  // 已取消的订单会被写回 delivered，随后被到期 cron 正常结算 ⇒ 卖家二次收款，
+  // 而买家已收到退款 = 平台净增发（issue #39，探针实测）。
+  const taken = await env.DB.prepare(
+    "UPDATE point_orders SET status = 'delivered', delivered_at = ?, delivered_by = ?, note = ? " +
+      "WHERE id = ? AND status = 'pending'"
   )
     .bind(now, adminId, note ? note.trim().slice(0, 300) : order.note, orderId)
     .run()
+  if ((taken.meta?.changes ?? 0) === 0) {
+    throw await deliverConflictError(env, orderId)
+  }
 
   // 人工发放 = 交付生效，租期从这里起算（买断商品 rentalDays 为空，自动跳过）
   if (order.productId) {
@@ -2196,11 +2242,16 @@ export async function sellerDeliverOrder(
   }
 
   const now = new Date().toISOString()
-  await env.DB.prepare(
-    "UPDATE point_orders SET status = 'delivered', delivered_at = ? WHERE id = ?"
+  // 原子占位：只允许 pending → delivered（理由同 deliverOrder —— 上面三行是快照判断，
+  // 不是并发保护；缺这条守卫时并发取消会被写回 delivered，卖家二次收款）。
+  const taken = await env.DB.prepare(
+    "UPDATE point_orders SET status = 'delivered', delivered_at = ? WHERE id = ? AND status = 'pending'"
   )
     .bind(now, orderId)
     .run()
+  if ((taken.meta?.changes ?? 0) === 0) {
+    throw await deliverConflictError(env, orderId)
+  }
 
   await audit(
     env,
@@ -2464,6 +2515,27 @@ async function settleConflictError(env: Env, orderId: string): Promise<ApiError>
   if (fresh?.status === "settled") return new ApiError(409, "这单已经结算过了", "ALREADY_SETTLED")
   if (fresh?.status === "cancelled") {
     return new ApiError(409, "这单已取消（积分已退回买家）", "ORDER_CANCELLED")
+  }
+  return new ApiError(409, "订单状态已变化，请刷新后重试", "ORDER_STATE_CHANGED")
+}
+
+/**
+ * 交付占位失败时的准确报错（`deliverOrder` / `sellerDeliverOrder` 共用）。
+ *
+ * 走到这里说明订单在「入口读快照」与「写 delivered」之间被别人推进过 ——
+ * 最常见的是管理员取消（并发场景下卖家催单与管理员退款同时发生）。
+ * 按实际状态给出准确原因，而不是静默成功。
+ */
+async function deliverConflictError(env: Env, orderId: string): Promise<ApiError> {
+  const fresh = await getOrder(env, orderId)
+  if (fresh?.status === "cancelled") {
+    return new ApiError(409, "该订单已取消（积分已退回买家），无法交付", "ORDER_CANCELLED")
+  }
+  if (fresh?.status === "delivered") {
+    return new ApiError(409, "这单已经标记过交付了", "ALREADY_DELIVERED")
+  }
+  if (fresh?.status === "settled") {
+    return new ApiError(409, "这单已经结算完成", "ALREADY_SETTLED")
   }
   return new ApiError(409, "订单状态已变化，请刷新后重试", "ORDER_STATE_CHANGED")
 }
