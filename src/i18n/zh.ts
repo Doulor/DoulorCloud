@@ -679,6 +679,7 @@ export const zh = {
   "dash.act.pointsShopSellerDeliver": "商城发货",
   "dash.act.pointsShopDeliver": "商城订单交付",
   "dash.act.pointsShopAfterSale": "商城售后申请",
+  "dash.act.pointsShopDeliverConflictResidual": "商城自动交付异常（订单未落库）",
   "dash.act.achievementReward": "获得成就奖励",
   "dash.act.achievementRewardFailed": "成就奖励发放异常",
   "dash.act.achievementRewardRevoke": "成就奖励超额撤回",

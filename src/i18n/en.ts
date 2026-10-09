@@ -687,6 +687,7 @@ export const en: Record<MessageKey, string> = {
   "dash.act.pointsShopSellerDeliver": "Seller delivered",
   "dash.act.pointsShopDeliver": "Shop order delivered",
   "dash.act.pointsShopAfterSale": "After-sale requested",
+  "dash.act.pointsShopDeliverConflictResidual": "Auto-delivery anomaly (order not recorded)",
   "dash.act.achievementReward": "Achievement reward granted",
   "dash.act.achievementRewardFailed": "Achievement reward failed",
   "dash.act.achievementRewardRevoke": "Achievement reward revoked",
