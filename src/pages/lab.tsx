@@ -5,7 +5,6 @@ import {
   ArrowUp,
   Check,
   ChevronRight,
-  ExternalLink,
   Eye,
   FileText,
   FolderOpen,
@@ -13,6 +12,7 @@ import {
   Info,
   List,
   Loader2,
+  Maximize2,
   PanelRight,
   Pencil,
   Plus,
@@ -44,6 +44,7 @@ import {
   buildToolResults,
   compactHistory,
   MAX_ROUNDS,
+  missingPathReason,
   needsToolResult,
   parseAgentText,
   parseReplaceContent,
@@ -108,7 +109,11 @@ type Entry =
       kind: "tool"
       tool: ToolName
       path?: string
-      status: "running" | "done"
+      /**
+       * running = 还在写；done = 已落地；failed = 这一轮结束了但标签没收尾
+       * （多半是被上游截断）—— 不能再显示成绿勾，那等于骗用户「写好了」。
+       */
+      status: "running" | "done" | "failed"
       content: string
     }
 
@@ -139,7 +144,7 @@ function makeFolderName(base?: string): string {
   const p = (n: number) => String(n).padStart(2, "0")
   return `网页项目-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(
     d.getHours()
-  )}${p(d.getMinutes())}`
+  )}${p(d.getMinutes())}${p(d.getSeconds())}`
 }
 
 function loadCustom(): CustomChannel | null {
@@ -245,7 +250,7 @@ function segmentsToEntries(
         kind: "tool",
         tool: s.tool,
         path: s.path,
-        status: final || s.complete ? "done" : "running",
+        status: s.complete ? "done" : final ? "failed" : "running",
         content: s.content,
       })
     }
@@ -277,6 +282,8 @@ export default function LabPage() {
   const [preview, setPreview] = React.useState("")
   const [previewSeq, setPreviewSeq] = React.useState(0)
   const [previewOpen, setPreviewOpen] = React.useState(false)
+  /** 全屏预览（应用内覆盖层，仍然是带 sandbox 的 iframe —— 见 openFullPreview） */
+  const [previewFull, setPreviewFull] = React.useState(false)
 
   // 模型与渠道
   const [models, setModels] = React.useState<string[]>([])
@@ -601,7 +608,13 @@ export default function LabPage() {
    * 返回失败原因（成功返回 null）——失败时要回喂给模型，否则它会以为改成功了。
    */
   const applyAction = (a: Extract<Segment, { type: "action" }>): string | null => {
-    if (!a.complete || !a.path) return null
+    if (!a.complete) return null
+    // 缺 path 时以前直接 return null（= 当成功），模型于是以为改好了继续往下改 ——
+    // 改成明确失败，让上层回喂一轮纠正。list 本来就不需要 path。
+    if (!a.path) {
+      if (a.tool === "list") return null
+      return missingPathReason(a.tool)
+    }
     if (a.tool === "write") {
       filesRef.current = { ...filesRef.current, [a.path]: a.content }
       setFiles(filesRef.current)
@@ -993,6 +1006,8 @@ export default function LabPage() {
   const stop = () => abortRef.current?.abort()
 
   const newChat = () => {
+    // 流式还没结束就清空，进行中的那几轮会把内容重新写回来（还可能写串到新对话）
+    if (streaming) return
     if (entries.length > 0 && Object.keys(filesRef.current).length && !currentId) {
       if (!window.confirm(t("lab.newChatConfirm"))) return
     }
@@ -1088,8 +1103,18 @@ export default function LabPage() {
   }
 
   const openProject = async (id: string) => {
+    // 切项目同理：流式进行中先拦下，免得进行中的写入落到刚打开的作品上
+    if (streaming) return
     try {
       const { project } = await labApi.getProject(id)
+      // 换项目 = 换会话：时间线 / 对话历史 / 流式缓冲一起重置，
+      // 否则旧会话的对话会被拼进新作品的请求里（串写）
+      setEntries([])
+      setLive(null)
+      setLiveThink("")
+      thinkRef.current = ""
+      convoRef.current = []
+      accRef.current = ""
       filesRef.current = project.files
       setFiles(project.files)
       setPreview(buildPreviewDoc(project.files))
@@ -1146,13 +1171,18 @@ export default function LabPage() {
     }
   }
 
-  const openInNewTab = () => {
-    const doc = buildPreviewDoc(filesRef.current)
-    if (!doc) return
-    const blob = new Blob([doc], { type: "text/html" })
-    const url = URL.createObjectURL(blob)
-    window.open(url, "_blank", "noopener")
-    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  /**
+   * 全屏预览。
+   *
+   * ⚠️ 这里原来是把预览文档塞进 `blob:` 再 `window.open` —— blob 文档会
+   * **继承创建者的源**（= 本站），新窗口又没有 sandbox ⇒ 模型生成（或用户导入）
+   * 的脚本能带着用户 cookie 调本站接口、读 localStorage（自定义渠道的 Key
+   * 就存在那儿）。改成应用内覆盖层 + 同一个沙箱 iframe：预览体验不变，
+   * 生成页永远跑在不透明源里。
+   */
+  const openFullPreview = () => {
+    if (!buildPreviewDoc(filesRef.current)) return
+    setPreviewFull(true)
   }
 
   const onInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1174,7 +1204,8 @@ export default function LabPage() {
   return (
     <div className="flex h-[calc(100dvh-7.5rem)] min-h-[520px] flex-col">
       {/* ---- 顶部动作条（预览固定在右上角）---- */}
-      <div className="flex shrink-0 items-center justify-end gap-1.5">
+      {/* 窄屏靠 flex-wrap 兜底：按钮都是 nowrap 的 flex 项，不换行会被挤出屏幕外够不到 */}
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
         {localOk && (
           <>
             {autoSave && autoSavedAt && !autoNeedPerm && (
@@ -1222,11 +1253,11 @@ export default function LabPage() {
             </span>
           )}
         </Button>
-        <Button variant="ghost" size="sm" onClick={openProjects}>
+        <Button variant="ghost" size="sm" onClick={openProjects} disabled={streaming}>
           <FolderOpen className="h-4 w-4" />
           {t("lab.projects")}
         </Button>
-        <Button variant="ghost" size="sm" onClick={newChat}>
+        <Button variant="ghost" size="sm" onClick={newChat} disabled={streaming}>
           <Plus className="h-4 w-4" />
           {t("lab.newChat")}
         </Button>
@@ -1443,11 +1474,11 @@ export default function LabPage() {
                     variant="ghost"
                     size="icon"
                     className="h-8 w-8"
-                    title={t("lab.preview.newTab")}
-                    onClick={openInNewTab}
+                    title={t("lab.preview.fullscreen")}
+                    onClick={openFullPreview}
                     disabled={!preview}
                   >
-                    <ExternalLink className="h-4 w-4" />
+                    <Maximize2 className="h-4 w-4" />
                   </Button>
                   <Button
                     size="sm"
@@ -1493,6 +1524,44 @@ export default function LabPage() {
           </>
         )}
       </div>
+
+      {/* ---- 全屏预览：应用内覆盖层，仍是带 sandbox 的 iframe（生成页不得落到本站同源）---- */}
+      {previewFull && preview && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-background">
+          <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
+            <span className="text-sm font-medium">{t("lab.preview")}</span>
+            <div className="ml-auto flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                title={t("lab.preview.refresh")}
+                onClick={() => setPreviewSeq((s) => s + 1)}
+              >
+                <RefreshCw className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                title={t("lab.preview.close")}
+                onClick={() => setPreviewFull(false)}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+          <div className="relative flex-1 bg-white">
+            <iframe
+              key={`full-${previewSeq}`}
+              title="preview-full"
+              className="h-full w-full border-0"
+              sandbox="allow-scripts allow-modals allow-forms allow-popups"
+              srcDoc={preview}
+            />
+          </div>
+        </div>
+      )}
 
       {/* ---- 项目文件 ---- */}
       <Dialog
@@ -1843,6 +1912,7 @@ function ToolCard({
   const lines = entry.content ? entry.content.split("\n").length : 0
   const expandable = Boolean(entry.content)
   const running = entry.status === "running"
+  const failed = entry.status === "failed"
 
   return (
     <div className="animate-in fade-in slide-in-from-bottom-1 overflow-hidden rounded-xl border border-border/70 bg-card/50 duration-200">
@@ -1877,6 +1947,11 @@ function ToolCard({
           )}
           {running ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : failed ? (
+            <AlertTriangle
+              className="h-3.5 w-3.5 text-amber-500"
+              aria-label={t("lab.tool.incomplete")}
+            />
           ) : (
             <Check className="h-3.5 w-3.5 text-emerald-500" />
           )}

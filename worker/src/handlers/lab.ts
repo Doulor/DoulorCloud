@@ -19,10 +19,12 @@ import { requireUser } from "../auth"
 import { uuid } from "../crypto"
 import {
   createApiKey,
+  deleteApiKey,
   listTokens,
   newApiBaseUrl,
   readApiKey,
 } from "../newapi-client"
+import { getSettings } from "../settings"
 import { fetchWithTimeout } from "../async-utils"
 import {
   deleteObject,
@@ -32,7 +34,12 @@ import {
   isStorageConfigured,
   putObject,
 } from "../r2"
-import { loadAccount, mapUserTokenError, runWithUserToken } from "./newapi"
+import {
+  loadAccount,
+  mapUserTokenError,
+  runWithUserToken,
+  userSelectableGroups,
+} from "./newapi"
 import type { Env } from "../env"
 
 /** 实验室自动创建的 Key 名（在「AI 中转站」页的 Key 列表里可见、可管理） */
@@ -50,15 +57,31 @@ async function resolveLabKey(env: Env, userId: string): Promise<string> {
   }
   try {
     return await runWithUserToken(env, account, async (token, uid) => {
+      // ⚠️ 这个 Key 必须落在「用户可用的分组」里：NewAPI 是按 token 的分组
+      //    决定它能用哪些渠道的。分组留空的 Key，上游 /v1/models 直接返回空、
+      //    chat 报 `No available channel for model ... under group ...`
+      //    —— 表现为实验室「站内额度」下「没有可用模型」，功能整条不可用。
+      const group = userSelectableGroups(await getSettings(env))[0]
+
       // 1) 上游找同名 Key —— 现找现取，本地不缓存明文；被删掉会自动重建
       const tokens = await listTokens(env, token, uid)
       const existing = tokens
         .filter((t) => t.name === LAB_KEY_NAME)
         .sort((a, b) => b.id - a.id)[0]
-      if (existing) return readApiKey(env, token, uid, existing.id)
+      // 分组正常 → 直接复用
+      if (existing && existing.group.trim()) {
+        return readApiKey(env, token, uid, existing.id)
+      }
+      // 分组为空 = 早期版本建出来的坏 Key：先删掉再按正确分组重建，
+      // 否则用户会一直卡在「没有可用模型」；删干净也免得上游留两个同名 Key
+      if (existing) {
+        await deleteApiKey(env, token, uid, existing.id).catch((err) => {
+          console.error("实验室：清理无分组的旧 Key 失败:", err)
+        })
+      }
 
       // 2) 没有就建一个，并同步进本地 Key 列表（用户在 AI 页能看到它）
-      const created = await createApiKey(env, token, uid, LAB_KEY_NAME)
+      const created = await createApiKey(env, token, uid, LAB_KEY_NAME, group)
       const now = new Date().toISOString()
       await env.DB.batch([
         env.DB.prepare(
