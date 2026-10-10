@@ -588,7 +588,30 @@ export async function listModels(env: Env, request: Request): Promise<Response> 
     20_000
   )
   if (!res.ok) {
-    throw new ApiError(502, "拉取模型列表失败，请稍后重试", "UPSTREAM_ERROR")
+    /**
+     * ⚠️ 必须把**上游状态码**带出来（2026-10-10 站长反馈「模型列表空的」）：
+     * 原来只有一句「拉取模型列表失败，请稍后重试」，什么都看不出来 ——
+     * 到底是 Key 失效、被限流、还是上游挂了，全无线索，只能靠猜。
+     * 列表里没有 ≠ 不存在；报错含糊 = 排查全靠猜。
+     */
+    const upstreamText = await res.text().catch(() => "")
+    let upstreamMsg = ""
+    try {
+      const j = JSON.parse(upstreamText) as { error?: { message?: string }; message?: string }
+      upstreamMsg = j?.error?.message ?? j?.message ?? ""
+    } catch {
+      upstreamMsg = upstreamText.slice(0, 120)
+    }
+    // 只有 admin 源才提示「管理端统一 Key」—— user 源下这话会误导人
+    const hint =
+      cfg.source === "admin"
+        ? "站点用的是「管理端统一 Key」，请管理员到管理面板更新它。"
+        : ""
+    throw new ApiError(
+      502,
+      `拉取模型列表失败（上游返回 ${res.status}）${upstreamMsg ? `：${upstreamMsg}` : ""}${hint}`,
+      "UPSTREAM_ERROR"
+    )
   }
   const data = (await res.json().catch(() => null)) as {
     data?: { id?: unknown }[]
