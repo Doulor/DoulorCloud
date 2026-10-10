@@ -367,6 +367,29 @@ const NATIVE_TOOL_NAMES: ToolName[] = [
 ]
 
 /**
+ * 从**可能还不完整**的参数 JSON 里取一个字符串字段。
+ *
+ * 流式途中 `args` 是半截 JSON（例如 `{"path":"index.htm`），`JSON.parse` 必然失败 ——
+ * 但这时**已经有足够的信息把卡片画出来**了。所以退化成正则抓字符串字面量：
+ * 先试「已闭合」的，再试「还在流、没有结尾引号」的。
+ *
+ * ⚠️ **只用于显示**（complete=false 的实时卡片）。
+ *    真正执行时一律走 `JSON.parse` 的完整结果 —— 拿半截参数去写文件是灾难。
+ */
+function looseString(args: string, key: string): string | undefined {
+  const head = `"${key}"\\s*:\\s*"`
+  const closed = new RegExp(head + `((?:[^"\\\\]|\\\\.)*)"`).exec(args)
+  const m = closed ?? new RegExp(head + `((?:[^"\\\\]|\\\\.)*)$`).exec(args)
+  if (!m) return undefined
+  try {
+    return JSON.parse(`"${m[1]}"`) as string
+  } catch {
+    // 半截转义（比如刚流到 `\`）解析不了，原样给出去，下一片会修正
+    return m[1]
+  }
+}
+
+/**
  * 把**结构化工具调用**翻译成 `Segment[]`。
  *
  * 🔴 这是整个原生迁移的**关键设计**：翻译出来的 Segment 与文本标签协议
@@ -397,7 +420,16 @@ export function nativeToolCallsToSegments(
       // 模型才有机会改正；静默丢掉会让它以为调用成功了。
       a = {}
     }
-    const get = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : undefined)
+    /**
+     * 取值：**完整态**只认 JSON.parse 的结果（严格）；
+     * **实时态**（complete=false）参数可能只到一半，JSON.parse 失败了就宽松抓一把 ——
+     * 否则卡片会是「写入」两个字后面一片空白，用户看不到在写哪个文件
+     * （2026-10-10 站长反馈）。
+     */
+    const get = (k: string) => {
+      if (typeof a[k] === "string") return a[k] as string
+      return complete ? undefined : looseString(c.args, k)
+    }
     const seg: Segment = { type: "action", tool, complete, content: "", toolCallId: c.id }
     switch (tool) {
       case "read":
@@ -425,7 +457,7 @@ export function nativeToolCallsToSegments(
         break
       case "site":
         seg.op = get("op")
-        seg.content = a.payload ? JSON.stringify(a.payload) : ""
+        seg.content = a.payload ? JSON.stringify(a.payload) : complete ? "" : ""
         break
       case "skill":
         seg.skill = get("name")

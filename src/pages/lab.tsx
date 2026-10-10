@@ -3644,7 +3644,18 @@ export default function LabPage() {
               发送/停止都收在那一条里；关掉时用下面这套原来的朴素输入框。
               两者是**二选一**，不靠互相覆盖，所以关掉之后与改动前逐字一致。 */}
           {labFxOn ? (
-            <div className="relative right-[5px] mx-auto w-full max-w-3xl shrink-0 pt-6 pb-1">
+            /*
+              ⚠️（JSX 里这里只能用普通注释：`? (` 后面只能接**一个表达式**，
+              写成 `{/* *\/}` 会变成两个并列子节点 ⇒ 语法错误。）
+
+              那个 `right-[5px]` 只在**桌面**是对的：
+              时间线用 `scrollbar-gutter: stable` 预留了 10px 滚动条，消息居中基准比整列窄，
+              所以输入框要往左让一半才对齐（详见下方原注释）。
+              但**手机上滚动条是浮层、预留为 0** ⇒ 这 5px 就成了纯偏移，
+              把整条输入框推出左边界（2026-10-10 站长反馈「左边被截断、右边差一点」）。
+              ⇒ 只在 ≥sm 生效，手机上归零。
+            */
+            <div className="relative right-0 mx-auto w-full max-w-3xl shrink-0 pt-6 pb-1 sm:right-[5px]">
               {/*
                 思考强度越高，输入框外面套一层光（见 index.css 的 .lab-composer-glow）：
                   · xhigh = 常驻环绕微光；
@@ -3763,6 +3774,16 @@ export default function LabPage() {
             particles={10}
             tapSends
             /**
+             * ⚠️ 让**可点区域和看得见的圆环一样大**（2026-10-10 站长反馈
+             * 「触发位置和显示位置不同」）。
+             *
+             * 组件内部给 pad 的命中区只外扩了 6px（`after:-inset-1.5`），
+             * 但外面那圈「井」（well）比 pad 宽 22px ⇒ 每边多出 11px。
+             * 结果：用户看着 52px 的圆往下点，只有中间 42px 有反应，边上点了没动静。
+             * 这里把命中区外扩到 11px（11 < 输入框自身 12px 内边距，不会捅出去）。
+             * 组件源码保持原样，只从调用点覆盖这一个值。
+             */
+            /**
              * ⚠️ 必须显式传颜色：组件的默认值是**写死的浅色主题**（pad `#f5f5f5` / well `#27272a`），
              * 夜间模式下一个纯黑圆糊在深色背景里（2026-10-10 站长反馈）。
              * 这里全部改用主题变量，日夜自动跟着变。
@@ -3775,7 +3796,7 @@ export default function LabPage() {
             onSend={trigger}
             disabled={!canSend}
             ariaLabel={t("lab.send")}
-            className="shrink-0"
+            className="shrink-0 [&_button]:after:-inset-[11px]"
           />
                   )
                 }
@@ -3783,7 +3804,9 @@ export default function LabPage() {
               </div>
             </div>
           ) : (
-            <div className="relative right-[5px] mx-auto w-full max-w-3xl shrink-0 pt-6 pb-1">
+            // ⚠️ 同上：`right-[5px]` 是给桌面滚动条留白做的补偿，
+            //    手机上没有留白 ⇒ 会把输入框推出左边界，所以只在 ≥sm 生效。
+            <div className="relative right-0 mx-auto w-full max-w-3xl shrink-0 pt-6 pb-1 sm:right-[5px]">
           <div className="rounded-[26px] border border-border/70 bg-card/70 shadow-[0_2px_24px_-8px_rgba(0,0,0,0.18)] backdrop-blur-xl transition-[box-shadow,border-color] duration-200 focus-within:border-border focus-within:shadow-[0_6px_32px_-10px_rgba(0,0,0,0.26)]">
             <textarea
               ref={taRef}
