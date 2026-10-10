@@ -474,7 +474,7 @@ const SlingButton: React.FC<SlingButtonProps> = ({
               {children ?? (
                 <HugeiconsIcon
                   icon={ArrowUp02Icon}
-                  size={Math.round(size * 0.4)}
+                  size={Math.round(size * 0.48)}
                   strokeWidth={iconStrokeWidth}
                 />
               )}

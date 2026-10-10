@@ -320,10 +320,11 @@
    这就是「不加 mask 也能把光锁在边缘」的做法（mask-composite 各引擎差异大，少用）。 */
 .lab-composer-glow-ring {
   position: absolute;
-  /* 光带粗细就是这里：往外让 5px ⇒ 露出 5px 宽的一圈（站长要求「粗一点」）。
-     仍然是硬裁剪，所以再粗也不会飘出去。 */
-  inset: -5px;
-  border-radius: 32px;
+  /* 光带粗细就是这里：往外让 N px ⇒ 露出 N px 宽的一圈。
+     站长先要「粗一点」（5px）、再要「太粗了，3px」⇒ 定 3px。
+     仍然是硬裁剪，所以怎么调都不会飘出去。 */
+  inset: -3px;
+  border-radius: 30px;
   z-index: -1;
   /* 关键：裁剪 */
   overflow: hidden;
