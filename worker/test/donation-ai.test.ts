@@ -548,7 +548,8 @@ describe("POST /donations —— AI 自动接入", () => {
 describe("POST /admin/donations/:id/revoke —— 收回资源", () => {
   it("撤销 AI 捐献时同时删除中转站渠道并收回权限", async () => {
     // ⚠️ 必须 superadmin：`role: "admin"` 的账号 `admin_scope` 为空，管理端接口一律
-    // 403 ADMIN_SCOPE_DENIED（0119 的设计行为，见 helpers.ts 的说明）—— 用 admin 的话
+    // 403 ADMIN_SCOPE_DENIED（0119 的设计行为，见 `handlers/admin.ts` 的
+    // `resolveAdminScope` / `assertAdminScope`）—— 用 admin 的话
     // 这个用例在撤销那一步就挂了，下面的断言一条都跑不到（改前实测：3 条管理端用例
     // 全部 `expected 403 to be 200`）。
     const admin = await makeUser({ role: "superadmin" })
