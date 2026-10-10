@@ -42,6 +42,13 @@ function randInt(min: number, max: number): number {
 
 export interface CheckinStatus {
   enabled: boolean
+  /**
+   * 站点时区下的「今天」（YYYY-MM-DD）。
+   *
+   * 前端自动签到靠它判断「今天这一次是否已经处理过」—— 客户端算不出站点时区，
+   * 所以必须由服务端给出权威值（见 src/components/auto-checkin.tsx）。
+   */
+  today: string
   /** 今天是否已签到 */
   checkedIn: boolean
   /** 当前连续天数（今天已签则含今天，未签则指「已连续签到的天数」） */
@@ -71,10 +78,10 @@ export interface CheckinStatus {
  */
 export async function getCheckinStatus(env: Env, request: Request): Promise<Response> {
   const enabled = await getSettingBool(env, "checkin_enabled")
-  if (!enabled) return json({ enabled: false, checkedIn: false, streak: 0, milestones: [], makeupCards: 0, canMakeup: false, autoCheckin: false })
+  const today = siteDayString(new Date(), await siteOffsetHours(env))
+  if (!enabled) return json({ enabled: false, today, checkedIn: false, streak: 0, milestones: [], makeupCards: 0, canMakeup: false, autoCheckin: false })
 
   const user = await requireUser(env, request)
-  const today = siteDayString(new Date(), await siteOffsetHours(env))
   const yesterday = prevDateString(today)
 
   const todayRow = await env.DB.prepare(
@@ -117,6 +124,7 @@ export async function getCheckinStatus(env: Env, request: Request): Promise<Resp
 
   return json({
     enabled: true,
+    today,
     checkedIn: Boolean(todayRow),
     streak,
     todayPoints: todayRow?.points ?? 0,
