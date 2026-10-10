@@ -34,6 +34,17 @@ export type LabConvoPart =
 export interface LabConvoMessage {
   role: string
   content: string | LabConvoPart[]
+  /**
+   * 原生工具调用：assistant 消息上带的调用清单。
+   * ⚠️ 回喂工具结果时**必须原样带上**（上游要拿它对 tool_call_id）。
+   */
+  tool_calls?: {
+    id: string
+    type: "function"
+    function: { name: string; arguments: string }
+  }[]
+  /** 原生工具调用：`role:"tool"` 的消息指明它在回应哪一次调用 */
+  tool_call_id?: string
 }
 
 export type ToolName =
@@ -83,6 +94,12 @@ export type Segment =
        * 有了它就显示它，而不是把命令行原样摆给用户看。
        */
       desc?: string
+      /**
+       * **原生工具调用**专用：上游给的调用 id。
+       * 回喂结果时必须按 `role:"tool"` + `tool_call_id` 对回去，缺了上游会报错。
+       * 文本标签协议下没有这个字段（那时结果拼成一条用户消息）。
+       */
+      toolCallId?: string
       /** 仅 <lab_http> 用：目标地址 */
       url?: string
       /**
@@ -322,6 +339,106 @@ export function needsToolResult(
  *   模型只输出思考（reasoning）而没有正文时同样如此。
  *   这不是提示词问题，是循环缺少「收尾机会」——所以在这里补一次，且**只补一次**。
  */
+/**
+ * 上游返回的一条**结构化工具调用**（原生 function calling）。
+ * `args` 是原始 JSON 字符串 —— 上游分片传来，由调用方拼好。
+ */
+export interface NativeToolCall {
+  id: string
+  name: string
+  args: string
+}
+
+/** 认得的工具名（与 ToolName 一致；不在表里的调用直接丢弃） */
+const NATIVE_TOOL_NAMES: ToolName[] = [
+  "read",
+  "write",
+  "replace",
+  "list",
+  "delete",
+  "grep",
+  "run",
+  "need_vm",
+  "site",
+  "site_manual",
+  "skill",
+  "web_search",
+  "http",
+]
+
+/**
+ * 把**结构化工具调用**翻译成 `Segment[]`。
+ *
+ * 🔴 这是整个原生迁移的**关键设计**：翻译出来的 Segment 与文本标签协议
+ *    **形状完全一致** ⇒ 循环下游（applyAction、工具卡片、buildToolResults、
+ *    needsToolResult、UI）**一行都不用改**，迁移面因此小一个数量级。
+ *
+ * ⚠️ 参数名必须与 lab-tools-native.ts 的声明一一对应，改一边要改两边。
+ */
+export function nativeToolCallsToSegments(calls: NativeToolCall[]): Segment[] {
+  const out: Segment[] = []
+  for (const c of calls) {
+    if (!NATIVE_TOOL_NAMES.includes(c.name as ToolName)) continue
+    const tool = c.name as ToolName
+    let a: Record<string, unknown> = {}
+    try {
+      a = (JSON.parse(c.args || "{}") ?? {}) as Record<string, unknown>
+    } catch {
+      // 参数不是合法 JSON：**不要跳过** —— 交给下游按「参数缺失」报错回喂，
+      // 模型才有机会改正；静默丢掉会让它以为调用成功了。
+      a = {}
+    }
+    const get = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : undefined)
+    const seg: Segment = { type: "action", tool, complete: true, content: "", toolCallId: c.id }
+    switch (tool) {
+      case "read":
+      case "delete":
+        seg.path = get("path")
+        break
+      case "write":
+        seg.path = get("path")
+        seg.content = get("content") ?? ""
+        break
+      case "replace":
+        seg.path = get("path")
+        // 复用现有「三段式」正文格式 ⇒ parseReplaceContent 不用改
+        seg.content = `<<<<<<< 原文\n${get("old") ?? ""}\n=======\n${get("new") ?? ""}\n>>>>>>>`
+        break
+      case "grep":
+        seg.pattern = get("pattern")
+        seg.scope = get("in")
+        break
+      case "run":
+        // ⚠️ Segment **没有** command 字段：下游统一从 content 取命令
+        //    （见 lab.tsx 里 `command: s.tool === "run" ? s.content.trim() : undefined`）
+        seg.content = get("command") ?? ""
+        seg.desc = get("desc")
+        break
+      case "site":
+        seg.op = get("op")
+        seg.content = a.payload ? JSON.stringify(a.payload) : ""
+        break
+      case "skill":
+        seg.skill = get("name")
+        break
+      case "web_search":
+        seg.query = get("query")
+        break
+      case "http":
+        seg.url = get("url")
+        seg.httpMethod = get("method")
+        seg.httpRaw = a.raw === true
+        seg.content = get("body") ?? ""
+        break
+      default:
+        // list / need_vm / site_manual：无参数
+        break
+    }
+    out.push(seg)
+  }
+  return out
+}
+
 /**
  * 收尾补问最多补几次。
  * 补过之后模型仍可能「又只输出思考」——给它第二次机会；

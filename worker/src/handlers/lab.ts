@@ -397,6 +397,11 @@ export async function chat(env: Env, request: Request): Promise<Response> {
     messages?: unknown
     temperature?: unknown
     effort?: unknown
+    /**
+     * 原生工具调用（2026-10-10）：把前端声明的工具原样转给上游。
+     * 见 lab-agent.ts 的 NATIVE_TOOLS 与页面里 `lab_native_tools` 开关。
+     */
+    tools?: unknown
     /** 选了管理员提供的免费渠道时带上它的 id；不传 = 走站内 */
     channelId?: unknown
   } | null
@@ -489,6 +494,30 @@ export async function chat(env: Env, request: Request): Promise<Response> {
     temperature,
   }
   if (wantEffort) payload.reasoning_effort = REASONING_EFFORT_ORDER[effortIdx]
+
+  /**
+   * 原生工具调用：把 `tools` 原样转给上游。
+   * ⚠️ 只做**结构校验 + 体积上限**，不解析内容 —— 具体有哪些工具是前端的事，
+   *    后端不该知道（否则每加一个工具都要改后端）。
+   * ⚠️ 上限 64KB：tools 是我们自己生成的声明，正常几 KB；
+   *    超过这个量级的请求只可能是被人塞了东西，直接拒掉而不是转发。
+   */
+  if (body.tools !== undefined) {
+    if (!Array.isArray(body.tools)) {
+      throw new ApiError(400, "tools 必须是数组", "INVALID_TOOLS")
+    }
+    const toolsJson = JSON.stringify(body.tools)
+    if (toolsJson.length > 64_000) {
+      throw new ApiError(413, "工具声明过大", "TOOLS_TOO_LARGE")
+    }
+    for (const t of body.tools) {
+      const fn = (t as { function?: { name?: unknown } } | null)?.function
+      if (!fn || typeof fn.name !== "string" || !fn.name.trim()) {
+        throw new ApiError(400, "每个工具都要有 function.name", "INVALID_TOOLS")
+      }
+    }
+    payload.tools = body.tools
+  }
 
   const sendUpstream = async (b: Record<string, unknown>) => {
     // ⚠️ 流式请求不能用 fetchWithTimeout 包：到点会把正在输出的流掐断。
@@ -664,6 +693,11 @@ export async function listLabChannels(env: Env, request: Request): Promise<Respo
     quotaLimit: cfg.quotaLimit,
     quotaPeriod: cfg.quotaPeriod,
     quotaUsed,
+    /**
+     * 原生工具调用开关（站点设置 `lab_native_tools`）。
+     * 前端据此决定这一轮是给上游带 tools、还是走文本标签协议。
+     */
+    nativeTools: (await getSetting(env, "lab_native_tools")) === "1",
     channels: cfg.channels.map((c) => ({
       id: c.id,
       name: c.name,

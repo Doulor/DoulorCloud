@@ -75,6 +75,7 @@ import {
 } from "@hugeicons/core-free-icons"
 import { compressToLimit } from "@/lib/image-compress"
 import { buildSingleFileHtml, downloadBlob, zipFiles } from "@/lib/lab-export"
+import { NATIVE_TOOLS } from "@/lib/lab-tools-native"
 import { useMotionPref } from "@/hooks/use-motion-pref"
 import { clearLabRun, getLabRun, setLabRun, useLabRun } from "@/lib/lab-run"
 import { Markdown } from "@/components/markdown"
@@ -89,6 +90,8 @@ import {
   type LabConvoMessage,
   type LabConvoPart,
   compactHistory,
+  nativeToolCallsToSegments,
+  type NativeToolCall,
   EFFORT_DESC_KEY,
   EFFORT_LABEL_KEY,
   EFFORT_LEVELS,
@@ -264,6 +267,8 @@ interface SiteChannelsInfo {
   quotaLimit: number
   quotaPeriod: "day" | "month" | "total"
   quotaUsed: number
+  /** 原生工具调用开关（站点设置 lab_native_tools；默认关 = 走文本标签协议） */
+  nativeTools: boolean
   channels: SiteChannel[]
 }
 const CUSTOM_KEY = "doulor.lab.customChannel"
@@ -361,12 +366,23 @@ function customEndpoint(raw: string): string {
 async function consumeSSE(
   res: Response,
   onDelta: (delta: string) => void,
-  onReasoning?: (delta: string) => void
+  onReasoning?: (delta: string) => void,
+  /**
+   * 原生工具调用：上游分片传来的 `tool_calls` 在这里**按 index 拼好**，
+   * 流结束时一次性交出去（见下方 `onToolCalls`）。
+   */
+  onToolCalls?: (calls: NativeToolCall[]) => void
 ): Promise<void> {
   const reader = res.body?.getReader()
   if (!reader) return
   const decoder = new TextDecoder()
   let buf = ""
+  /**
+   * 工具调用的分片累积表：index → {id, name, args}。
+   * ⚠️ 上游是**按 index 分片**传的：先给 id 和 name，arguments 一段一段来，
+   *    必须按 index 累积并**拼接** arguments（这不是"最后一个覆盖前面"的字段）。
+   */
+  const toolAcc = new Map<number, { id: string; name: string; args: string }>()
   try {
     for (;;) {
       const { done, value } = await reader.read()
@@ -386,6 +402,25 @@ async function consumeSSE(
             }[]
           }
           const d = j?.choices?.[0]?.delta
+          // ---- 原生工具调用分片 ----
+          const tcs = (d as { tool_calls?: unknown } | undefined)?.tool_calls
+          if (Array.isArray(tcs)) {
+            for (const raw of tcs) {
+              const tc = raw as {
+                index?: number
+                id?: string
+                function?: { name?: string; arguments?: string }
+              }
+              const idx = typeof tc.index === "number" ? tc.index : 0
+              const cur = toolAcc.get(idx) ?? { id: "", name: "", args: "" }
+              if (typeof tc.id === "string" && tc.id) cur.id = tc.id
+              if (typeof tc.function?.name === "string" && tc.function.name) {
+                cur.name = tc.function.name
+              }
+              if (typeof tc.function?.arguments === "string") cur.args += tc.function.arguments
+              toolAcc.set(idx, cur)
+            }
+          }
           if (typeof d?.content === "string" && d.content) onDelta(d.content)
           // 各种模型/中转站对思考内容的字段名不完全一致，能认的都认一下
           const think =
@@ -401,6 +436,19 @@ async function consumeSSE(
     }
   } finally {
     reader.releaseLock()
+  }
+  if (onToolCalls && toolAcc.size) {
+    onToolCalls(
+      [...toolAcc.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([idx, v]) => ({
+          // 极少数上游不给 id；缺失时自己造一个稳定的，免得回喂时对不上
+          id: v.id || `call_${idx}`,
+          name: v.name,
+          args: v.args,
+        }))
+        .filter((c) => c.name)
+    )
   }
 }
 
@@ -1905,12 +1953,18 @@ export default function LabPage() {
      */
     useChannel: string,
     useModel: string,
-    useSiteChannelId: string
+    useSiteChannelId: string,
+    /** 原生工具调用：给上游带 tools、并按结构化 tool_calls 解析 */
+    useNativeTools: boolean,
+    /** 收这一轮的结构化调用（原地填充；流结束时才完整） */
+    collected: NativeToolCall[]
   ): Promise<string> => {
     let res: Response
     if (useChannel === "station" || useChannel === "site") {
       res = await streamLabChat({
         model: useModel,
+        // 原生模式：把工具声明交给上游（声明见 src/lib/lab-tools-native.ts）
+        tools: useNativeTools ? NATIVE_TOOLS : undefined,
         messages,
         effort,
         // 温度由这里算好传下去（唯一口径，见 lab-agent.ts 的 EFFORT_TEMPERATURE）
@@ -1937,6 +1991,8 @@ export default function LabPage() {
           model: useModel,
           messages,
           stream: true,
+          // 自定义渠道不经过本站后端，是否支持 tools 由对方决定（开关可随时关掉）
+          tools: useNativeTools ? NATIVE_TOOLS : undefined,
           // 自定义渠道不经过后端，reasoning_effort 各家吃不吃不确定 ⇒ 只带温度（通用安全）
           temperature: EFFORT_TEMPERATURE[effort],
         }),
@@ -1998,6 +2054,10 @@ export default function LabPage() {
       (think) => {
         thinkRef.current += think
         pushThink()
+      },
+      (calls) => {
+        // 原生工具调用：分片要在**流结束**才拼得完整，所以在这里一次性收
+        collected.push(...calls)
       }
     )
     return acc
@@ -2052,6 +2112,11 @@ export default function LabPage() {
       effChannel === "site" && pCh === "site" ? pVal : siteChannelId
     const effSiteChannel =
       siteInfo?.channels.find((c) => c.id === effSiteChannelId) ?? null
+    /**
+     * 原生工具调用开关（站点设置 `lab_native_tools`，**默认关**）。
+     * 关着 = 走原来的文本标签协议 ⇒ 这就是回滚口子。
+     */
+    const nativeToolsOn = Boolean(siteInfo?.nativeTools)
     const effModel =
       effChannel === "station"
         ? pCh === "station"
@@ -2196,6 +2261,8 @@ export default function LabPage() {
           ...compactHistory(convoRef.current),
         ]
         const applied = new Map<number, string>()
+        /** 这一轮上游给的结构化工具调用（原生模式才有内容） */
+        const nativeCalls: NativeToolCall[] = []
         const raw = await streamRound(
           messages,
           controller.signal,
@@ -2204,11 +2271,21 @@ export default function LabPage() {
           () => refreshPreview(false),
           effChannel,
           effModel,
-          effSiteChannelId
+          effSiteChannelId,
+          nativeToolsOn,
+          nativeCalls
         )
 
-        // 收尾：把没来得及执行的补齐（中止时也走这里，保住已生成的部分）
-        const segs = parseAgentText(raw)
+        /**
+         * 收尾：把没来得及执行的补齐（中止时也走这里，保住已生成的部分）。
+         *
+         * ⚠️ 两种模式在这里汇合：
+         *   · 原生：结构化调用 → 翻译成**与标签协议同形状**的 Segment；
+         *   · 文本：正则解析标签。
+         * 下游（applyAction / 工具卡片 / 回喂）完全不知道差别。
+         */
+        const useNative = nativeToolsOn && nativeCalls.length > 0
+        const segs = useNative ? nativeToolCallsToSegments(nativeCalls) : parseAgentText(raw)
         segs.forEach((s, i) => {
           if (s.type === "action" && s.complete && !applied.has(i)) {
             applied.set(i, applyAction(s) ?? "")
@@ -2387,7 +2464,25 @@ export default function LabPage() {
           window.clearTimeout(liveTimer.current)
           liveTimer.current = null
         }
-        convoRef.current = [...convoRef.current, { role: "assistant", content: raw }]
+        /**
+         * ⚠️ 原生模式下 assistant 消息**必须带上 tool_calls**：
+         * 下一轮要按 `role:"tool"` 逐条回应这些调用，上游靠这份清单校验 `tool_call_id`，
+         * 少了它就会直接报「tool 消息对不上」。
+         */
+        convoRef.current = [
+          ...convoRef.current,
+          useNative
+            ? {
+                role: "assistant",
+                content: raw,
+                tool_calls: nativeCalls.map((c) => ({
+                  id: c.id,
+                  type: "function" as const,
+                  function: { name: c.name, arguments: c.args },
+                })),
+              }
+            : { role: "assistant", content: raw },
+        ]
         refreshPreview(true)
         // 每轮结束立刻落一次本地（比定时器更及时，保住刚生成的稿子）
         void flushAutoSave()
@@ -2426,6 +2521,56 @@ export default function LabPage() {
           continue
         }
         const failures = new Map([...applied].filter(([, reason]) => reason))
+
+        /**
+         * 把这一轮的结果回喂给模型。
+         *
+         * · 文本标签协议：拼成**一条用户消息**（那时没有 tool_call_id 可对）。
+         * · 原生工具调用：**每一条调用回一条 `role:"tool"` 消息** ——
+         *   ⚠️ 必须**逐一对上**：assistant 里列了几条，就得回几条，
+         *   少一条上游直接报错（哪怕它只是个 write / need_vm 这种"不需要看结果"的动作，
+         *   也得回一句「已执行」）。
+         */
+        const feedResults = (notes: string[]) => {
+          if (useNative) {
+            const calls = segs.filter((x) => x.type === "action" && x.toolCallId)
+            for (const sg of calls) {
+              const i = segs.indexOf(sg)
+              const one = buildToolResults(
+                [sg],
+                filesRef.current,
+                new Map([[0, failures.get(i) ?? ""]]),
+                runResults,
+                siteResults,
+                skillResults,
+                searchResults,
+                httpResults
+              )
+              const body = one.replace(/^工具执行结果：\n?/, "").trim()
+              convoRef.current = [
+                ...convoRef.current,
+                {
+                  role: "tool",
+                  tool_call_id: (sg as { toolCallId: string }).toolCallId,
+                  // 有些动作本地没有"结果文本"（write/replace/need_vm），
+                  // 但**仍然必须回一条**，否则上游认为这次调用没被回应
+                  content: body || "（已执行，无返回内容）",
+                },
+              ]
+            }
+            if (notes.length) {
+              convoRef.current = [
+                ...convoRef.current,
+                { role: "user", content: notes.join("\n\n") },
+              ]
+            }
+            return
+          }
+          convoRef.current = [
+            ...convoRef.current,
+            { role: "user", content: notes.join("\n\n") },
+          ]
+        }
         const hasAction = segs.some((s) => s.type === "action" && s.complete)
         // 项目还空着、模型只吐了 markdown 代码块、而且用户确实是要做网页 → 提醒它用标签重来（只一次）
         if (
@@ -2463,10 +2608,7 @@ export default function LabPage() {
           // 所以把手册和站内结果**并进同一条消息**，别把它们丢了。
           const merged: string[] = [note, ...siteNotes]
           if (siteResults.size) merged.push(...siteResults.values())
-          convoRef.current = [
-            ...convoRef.current,
-            { role: "user", content: merged.join("\n\n") },
-          ]
+          feedResults(merged)
           continue
         }
 
@@ -2514,7 +2656,7 @@ export default function LabPage() {
                 "用户真正要求的那几步，不要顺手做别的。"
             )
           }
-          convoRef.current = [...convoRef.current, { role: "user", content: parts.join("\n\n") }]
+          feedResults(parts)
           continue
         }
 

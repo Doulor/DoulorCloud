@@ -4133,6 +4133,11 @@ export async function streamLabChat(payload: {
   temperature?: number
   /** 选用管理员提供的免费渠道时带上它的 id（不传 = 走站内） */
   channelId?: string
+  /**
+   * 原生工具调用：工具声明（OpenAI 兼容）。
+   * 不传 = 走文本标签协议。后端只做结构校验与体积上限，原样转给上游。
+   */
+  tools?: unknown[]
   signal?: AbortSignal
 }): Promise<Response> {
   const res = await fetch(`${BASE}/lab/chat`, {
@@ -4145,6 +4150,7 @@ export async function streamLabChat(payload: {
       effort: payload.effort,
       temperature: payload.temperature,
       channelId: payload.channelId,
+      tools: payload.tools,
     }),
     signal: payload.signal,
   })
@@ -4169,6 +4175,8 @@ export const labApi = {
       quotaLimit: number
       quotaPeriod: "day" | "month" | "total"
       quotaUsed: number
+      /** 原生工具调用开关（站点设置 lab_native_tools；默认关 = 文本标签协议） */
+      nativeTools: boolean
       channels: { id: string; name: string; model: string; free: boolean }[]
     }>("/lab/channels"),
 

@@ -724,6 +724,13 @@ export const SETTING_DEFAULTS = {
    * 管理员要能一键关掉，不留一个只能改代码才能关的口子。
    */
   lab_fetch_enabled: "1",
+  /**
+   * 原生工具调用（native function calling）总开关。
+   * "0"（默认）= 走原来的文本标签协议；"1" = 给上游带 tools 参数、按结构化 tool_calls 解析。
+   * ⚠️ 2026-10-10 实测上游全量支持（8/8 模型，流式也支持），但**自定义渠道不保证**
+   *    ⇒ 留这个开关做回滚口子。
+   */
+  lab_native_tools: "0",
   lab_tavily_keys: "",
   /**
    * 走**站点 key** 搜索一次扣多少积分。用户用自己的 key 不扣。
