@@ -268,6 +268,83 @@
   background-clip: padding-box;
 }
 
+/* ==========================================================================
+   思考强度 → 输入框光效（2026-10-10 站长要求）
+
+   档位越高，模型想得越久。给输入框一点「正在高强度运转」的视觉反馈：
+     · xhigh（超高）：常驻环绕微光 —— 一圈柔和光晕，缓慢呼吸；
+     · max（极致）：在微光之上再加一层**扭转光带**（一圈高光缓慢自转）。
+
+   ⚠️ 两层都是 `inset` 为负的伪元素，刻意让光**溢出到盒子外面**才看得见 ——
+      输入框自己的背景是不透明的，画在盒子内部会被整个盖住。
+   ⚠️ 父级用 `isolation: isolate` 把负 z-index 收在自己内部，
+      否则伪元素会跑到别的浮层（比如下拉菜单）后面去。
+   ========================================================================== */
+.lab-composer-glow {
+  position: relative;
+  isolation: isolate;
+  /* 输入框圆角是 26px，光往外扩 8px ⇒ 这里要跟着放大 */
+  border-radius: 34px;
+}
+.lab-composer-glow::before,
+.lab-composer-glow::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border-radius: inherit;
+  z-index: -1;
+  pointer-events: none;
+}
+/* 常驻环绕微光（xhigh 起） */
+.lab-composer-glow::before {
+  background: radial-gradient(
+    72% 170% at 50% 50%,
+    color-mix(in oklab, var(--primary) 58%, transparent),
+    transparent 72%
+  );
+  filter: blur(16px);
+  opacity: 0.5;
+  animation: lab-glow-breath 3.8s ease-in-out infinite;
+}
+/* 扭转光效（只在 max） */
+.lab-composer-glow-spin::after {
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    color-mix(in oklab, var(--primary) 88%, transparent) 42deg,
+    transparent 104deg,
+    transparent 188deg,
+    color-mix(in oklab, var(--primary) 62%, transparent) 246deg,
+    transparent 304deg
+  );
+  filter: blur(12px);
+  opacity: 0.78;
+  animation: lab-glow-spin 4.6s linear infinite;
+}
+@keyframes lab-glow-breath {
+  0%,
+  100% {
+    opacity: 0.4;
+    transform: scale(0.994);
+  }
+  50% {
+    opacity: 0.78;
+    transform: scale(1.012);
+  }
+}
+@keyframes lab-glow-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* 关掉系统动效时只留静态微光，别让光一直在转（这类持续运动会干扰阅读） */
+@media (prefers-reduced-motion: reduce) {
+  .lab-composer-glow::before,
+  .lab-composer-glow::after {
+    animation: none;
+  }
+}
+
 /* 角色徽章流光：管理员金色（role-sheen）、站长红色更浓（role-sheen-strong） */
 @keyframes role-sheen {
   0% {

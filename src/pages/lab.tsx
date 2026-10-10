@@ -6,6 +6,7 @@ import {
   ArrowUp,
   BookOpen,
   Check,
+  Copy,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -165,6 +166,12 @@ type Entry =
        * 只用于在气泡里显示「附件：xxx.txt」这种标记。
        */
       files?: string[]
+      /**
+       * 这条消息在 `convoRef` 里的下标。
+       * 「编辑重发」时从这里把对话历史截断（见 editMessage）。
+       * ⚠️ convoRef 只追加、不重排，所以当时记下的下标永远不会失效。
+       */
+      convoAt?: number
     }
   | {
       key: string
@@ -542,6 +549,12 @@ export default function LabPage() {
    * 也就不会走站点 key 花掉这个用户的积分。
    */
   const [webSearchOn, setWebSearchOn] = React.useState(false)
+  /**
+   * 往输入框里「填字」的信号（编辑历史消息用）。
+   * 输入框的草稿归 PromptBar 自己管，所以只能给它一个信号让它自己填；
+   * `at` 是时间戳 —— 每次点编辑都换一个新对象，哪怕文本一样也要重新填。
+   */
+  const [seedDraft, setSeedDraft] = React.useState<{ text: string; at: number } | null>(null)
   /** 「技能」对话框（从输入框「+」菜单进来） */
   const [skillOpen, setSkillOpen] = React.useState(false)
   /** 「联网搜索」对话框：看状态 / 填自己的 Tavily key */
@@ -1890,7 +1903,9 @@ export default function LabPage() {
     setInput("")
     updateEntries((prev) => [
       ...prev,
-      { key: `u-${Date.now()}`, kind: "user", text: typed, files },
+      // convoAt 记的是「这条消息即将被塞进 convoRef 的位置」——
+      // 编辑重发时就从这里往回切（见 editMessage）
+      { key: `u-${Date.now()}`, kind: "user", text: typed, files, convoAt: convoRef.current.length },
     ])
     /**
      * 给模型的这一份：有图就走**多模态 content 数组**。
@@ -2324,6 +2339,33 @@ export default function LabPage() {
       // 同上：这一轮彻底结束，必须落盘一次（卸载后没有任何 effect 会替我们做）
       void persistDraft()
     }
+  }
+
+  /**
+   * 编辑一条用户消息 → **回退对话进度**、把原文填回输入框。
+   *
+   * ⚠️ 只回退一半，这是站长明确要求的（2026-10-10）：
+   *   · **回退**：对话历史 —— entries 与 convoRef 都截断到这条之前，
+   *     重发之后模型不会「记得」被撤掉的那几轮；
+   *   · **不回退**：项目文件 —— AI 已经写进文件的内容原样保留。
+   *     用户要的是「改一句话重来」，不是「把已经做好的活也一起抹掉」。
+   */
+  const editMessage = (entry: Extract<Entry, { kind: "user" }>) => {
+    if (streaming) {
+      toast.error(t("lab.msg.editWhileRunning"))
+      return
+    }
+    const idx = entriesRef.current.findIndex((e) => e.key === entry.key)
+    if (idx < 0) return
+    const cut = entry.convoAt
+    updateEntries((prev) => prev.slice(0, idx))
+    // 老草稿里没记 convoAt ⇒ 不截对话（宁可多留历史，也不要截错位置）
+    if (typeof cut === "number" && cut >= 0 && cut <= convoRef.current.length) {
+      convoRef.current = convoRef.current.slice(0, cut)
+    }
+    setSeedDraft({ text: entry.text, at: Date.now() })
+    void persistDraft()
+    toast.success(t("lab.msg.editLoaded"))
   }
 
   /** 停止：优先用当前实例的手柄；从别的板块切回来时本实例没有手柄，退回单例里那个 */
@@ -2908,7 +2950,7 @@ export default function LabPage() {
             ) : (
               <div className="mx-auto w-full max-w-3xl space-y-2.5 py-2">
                 {timeline.map((e) => (
-                  <TimelineEntry key={e.key} entry={e} />
+                  <TimelineEntry key={e.key} entry={e} onEdit={editMessage} />
                 ))}
                 {/* 常驻「工作中」状态行：只要 agent 还在跑就一直挂在这，不会中途消失 */}
                 {(streaming || labRun.running) &&
@@ -3045,6 +3087,19 @@ export default function LabPage() {
               两者是**二选一**，不靠互相覆盖，所以关掉之后与改动前逐字一致。 */}
           {labFxOn ? (
             <div className="relative right-[5px] mx-auto w-full max-w-3xl shrink-0 pt-6 pb-1">
+              {/*
+                思考强度越高，输入框外面套一层光（见 index.css 的 .lab-composer-glow）：
+                  · xhigh = 常驻环绕微光；
+                  · max   = 微光 + 扭转光带。
+                包在**紧贴输入框**的这一层上（不带 padding），
+                否则光会被那圈 pt-6 撑到盒子外面去、对不上边。
+              */}
+              <div
+                className={cn(
+                  effort === "xhigh" && "lab-composer-glow",
+                  effort === "max" && "lab-composer-glow lab-composer-glow-spin"
+                )}
+              >
               <PromptBar
                 placeholder={t("lab.inputPlaceholder")}
                 models={fxModels}
@@ -3055,6 +3110,7 @@ export default function LabPage() {
                   const i = fxEfforts.indexOf(label)
                   if (i >= 0) persistEffort(EFFORT_LEVELS[i])
                 }}
+      seedDraft={seedDraft ?? undefined}
       sources={fxSources}
       onAttach={handleAttach}
       /**
@@ -3135,6 +3191,7 @@ export default function LabPage() {
                   )
                 }
               />
+              </div>
             </div>
           ) : (
             <div className="relative right-[5px] mx-auto w-full max-w-3xl shrink-0 pt-6 pb-1">
@@ -3728,10 +3785,69 @@ function WorkingIndicator({ label }: { label: string }) {
   )
 }
 
-function TimelineEntry({ entry }: { entry: Entry }) {
+/**
+ * 消息下面那排快捷操作（2026-10-10 站长要求）。
+ *
+ * ⚠️ **平时不显示**，鼠标移到这条消息上才浮出来（`group-hover`）——
+ * 常驻会让每条消息下面都挂一行图标，把对话切得很碎。
+ * 键盘用户走 `focus-within` 也能唤出来。
+ */
+function MsgActions({ text, onEdit }: { text: string; onEdit?: () => void }) {
+  const { t } = useT()
+  const [copied, setCopied] = React.useState(false)
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      // 1.2 秒后变回复制图标 —— 太短看不清、太长会让人以为卡住了
+      window.setTimeout(() => setCopied(false), 1200)
+    } catch {
+      toast.error(t("lab.msg.copyFailed"))
+    }
+  }
+
+  return (
+    <div
+      className={cn(
+        "mt-1 flex items-center gap-0.5 opacity-0 transition-opacity duration-150",
+        "group-hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none"
+      )}
+    >
+      <button
+        type="button"
+        title={t("lab.msg.copy")}
+        aria-label={t("lab.msg.copy")}
+        onClick={() => void copy()}
+        className="inline-grid h-6 w-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      >
+        {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+      </button>
+      {onEdit && (
+        <button
+          type="button"
+          title={t("lab.msg.edit")}
+          aria-label={t("lab.msg.edit")}
+          onClick={onEdit}
+          className="inline-grid h-6 w-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
+  )
+}
+
+function TimelineEntry({
+  entry,
+  onEdit,
+}: {
+  entry: Entry
+  onEdit?: (entry: Extract<Entry, { kind: "user" }>) => void
+}) {
   if (entry.kind === "user") {
     return (
-      <div className="flex justify-end">
+      <div className="group flex flex-col items-end">
         <div className="max-w-[85%] rounded-2xl bg-primary px-3.5 py-2 text-sm leading-relaxed text-primary-foreground">
           {entry.files?.length ? (
             <div className="mb-1.5 flex flex-wrap gap-1.5">
@@ -3750,6 +3866,10 @@ function TimelineEntry({ entry }: { entry: Entry }) {
             <p className="whitespace-pre-wrap break-words">{entry.text}</p>
           ) : null}
         </div>
+        <MsgActions
+          text={entry.text}
+          onEdit={onEdit ? () => onEdit(entry) : undefined}
+        />
       </div>
     )
   }
@@ -3792,7 +3912,7 @@ function ThinkingBlock({ entry }: { entry: Extract<Entry, { kind: "text" }> }) {
   // `**加粗**`、`- 列表`、```代码块``` 全以**原文**露出来，看着很粗糙。
   if (!entry.collapsible) {
     return (
-      <div className="flex justify-start" data-lab-reply="">
+      <div className="group flex flex-col items-start" data-lab-reply="">
         <div
           className={cn(
             "min-w-0 max-w-[85%] rounded-2xl bg-muted px-3.5 py-2 text-sm leading-relaxed text-foreground",
@@ -3804,6 +3924,8 @@ function ThinkingBlock({ entry }: { entry: Extract<Entry, { kind: "text" }> }) {
           {/* 还没吐字时 markdown 里没有任何块级元素，::after 无处可挂，补一个兜底光标 */}
           {entry.live && !entry.text.trim() && <span className="lab-caret" />}
         </div>
+        {/* 还在流式输出时不给复制 —— 那时内容是半截的，复制了也没用 */}
+        {!entry.live && <MsgActions text={entry.text} />}
       </div>
     )
   }

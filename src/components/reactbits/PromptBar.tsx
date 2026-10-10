@@ -93,6 +93,12 @@ export interface PromptBarProps {
    * 返回 true 表示调用方已经处理，跳过默认的「插入 @名字」。
    */
   onSource?: (key: string) => boolean;
+  /**
+   * ⚠️ 本站新增：从外部把一段文字**填进输入框**（编辑历史消息用）。
+   * 输入框的草稿归本组件自己管，外面改不了，所以开这个口子。
+   * 传一个**新对象**（哪怕文本一样）就生效 —— 调用方用时间戳当 `at` 即可。
+   */
+  seedDraft?: { text: string; at: number };
   onDictate?: () => string | void | Promise<string | void>;
   /** 允许外部替换「发送 / 停止」那枚按钮（不传则用自带的 SendGlyph）。 */
   renderSend?: (state: {
@@ -276,6 +282,7 @@ const PromptBar: React.FC<PromptBarProps> = ({
   onStop,
   onAttach,
   onSource,
+  seedDraft,
   onDictate,
   renderSend,
   labels = {},
@@ -396,6 +403,15 @@ const PromptBar: React.FC<PromptBarProps> = ({
     const max = Math.max(0, root.clientWidth - w);
     menu.style.left = `${Math.max(0, Math.min(left, max))}px`;
   }, [open]);
+  // 外部填字：只在对象变化时跑一次（调用方每次传新对象）
+  useEffect(() => {
+    if (!seedDraft) return;
+    setDraft(seedDraft.text);
+    setDismissed(false);
+    focusInput();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seedDraft]);
+
   useEffect(() => {
     if (!open) lastOpen.current = null;
   }, [open]);
