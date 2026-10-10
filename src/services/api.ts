@@ -4091,6 +4091,9 @@ export interface LabProject extends LabProjectSummary {
 }
 
 /** 造物集里的一个公开作品（列表用，不含文件内容） */
+/** 造物集的排序方式（与后端 `listGallery` 的 sort 参数一一对应） */
+export type GallerySort = "latest" | "views" | "likes"
+
 export interface GalleryItem {
   id: string
   name: string
@@ -4380,10 +4383,12 @@ export const labApi = {
 
 export const galleryApi = {
   /** 展示大厅：全体用户的公开作品（分页 + 关键词） */
-  list: (params: { page?: number; q?: string } = {}) => {
+  /** 排序：latest（最新，默认）/ views（浏览最多）/ likes（点赞最多） */
+  list: (params: { page?: number; q?: string; sort?: GallerySort } = {}) => {
     const sp = new URLSearchParams()
     if (params.page) sp.set("page", String(params.page))
     if (params.q) sp.set("q", params.q)
+    if (params.sort) sp.set("sort", params.sort)
     const qs = sp.toString()
     return request<{
       total: number

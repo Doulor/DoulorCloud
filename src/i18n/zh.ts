@@ -4697,6 +4697,11 @@ export const zh = {
   "adm.regEmailDomains": "允许注册的邮箱域名（逗号分隔，留空 = 不限制）",
   "adm.regEmailDomainsHint":
     "只放主流邮箱。临时邮箱服务（smailr.com、mailto.plus、*.kdns.fr 等）能无限免费开新邮箱，是批量注册小号最省事的入口。匹配的是 @ 之后的完整域名，不支持子域通配。",
+  "adm.donationUrlBlocklistTitle": "捐献上游地址黑名单",
+  "adm.donationUrlBlocklistDesc":
+    "自定义 AI 渠道捐献时，上游地址命中名单里任意一条就不允许捐献（只比开头部分）。",
+  "adm.donationUrlBlocklistHint":
+    "一行一条（逗号也认）。命中只有两种情况：跟这行一模一样，或者在这行后面接路径 —— 填 https://token.sensenova.cn 就会拦住它的 /v1、/、/v1/chat 等等。后面接的不是路径就不算（例如 token.sensenova.cn.evil.com 不会被拦）。大小写与 http/https 不影响判定，防止改一下大小写或换成 http 绕过。留空 = 不启用。",
   "adm.regIpDailyLimit": "同一 IP 24 小时最多注册（0 = 不限）",
   "adm.regIpDailyLimitHint":
     "按累计计数，不是速率限制。原来只有「每小时 60 次请求」的限流，挡不住「一个 IP 注册 9 个号」。建议 3。",
@@ -7158,6 +7163,9 @@ export const zh = {
   "gal.desc": "大家在 AI 实验室做出来的网页都托管在这里，点开就能直接运行。",
   "gal.tab.hall": "展示大厅",
   "gal.tab.mine": "我的造物集",
+  "gal.sort.latest": "最新",
+  "gal.sort.views": "浏览最多",
+  "gal.sort.likes": "点赞最多",
   "gal.search": "搜作品名或作者…",
   "gal.clearSearch": "清空",
   "gal.mineHint": "这里是你自己的作品。设为公开后，其他人能在「展示大厅」看到并直接运行。",

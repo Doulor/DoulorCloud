@@ -1385,6 +1385,19 @@ export async function listGallery(env: Env, request: Request): Promise<Response>
   const page = Number.isFinite(rawPage) ? Math.max(1, Math.min(500, Math.trunc(rawPage))) : 1
   const q = (url.searchParams.get("q") ?? "").trim().slice(0, 40)
 
+  /**
+   * 排序（2026-10-10 站长要求）：latest（最新，默认）/ views（浏览最多）/ likes（点赞最多）。
+   * 认不出的值一律当 latest —— 别让一个脏参数把列表变成 500。
+   */
+  const sortRaw = url.searchParams.get("sort") ?? "latest"
+  const sort = sortRaw === "views" || sortRaw === "likes" ? sortRaw : "latest"
+  const orderBy =
+    sort === "views"
+      ? "p.views DESC, p.published_at DESC, p.id DESC"
+      : sort === "likes"
+        ? "p.likes DESC, p.published_at DESC, p.id DESC"
+        : "p.published_at DESC, p.updated_at DESC, p.id DESC"
+
   // 只展示**正常账号**的公开作品：被封禁用户的作品不该继续挂在大厅里
   const where = ["p.visibility = 'public'", "u.status = 'active'"]
   const binds: unknown[] = []
@@ -1409,7 +1422,11 @@ export async function listGallery(env: Env, request: Request): Promise<Response>
        JOIN users u ON u.id = p.user_id
        LEFT JOIN lab_project_likes l ON l.project_id = p.id AND l.user_id = ?
        WHERE ${whereSql}
-       ORDER BY p.published_at DESC, p.updated_at DESC
+       ORDER BY
+         -- 🔴 置顶永远在最前（管理端设的），且置顶内部按「后置顶的在前」
+         CASE WHEN p.pinned_at IS NULL THEN 1 ELSE 0 END ASC,
+         p.pinned_at DESC,
+         ${orderBy}
        LIMIT ? OFFSET ?`
     )
       .bind(user.id, ...binds, GALLERY_PAGE_SIZE, (page - 1) * GALLERY_PAGE_SIZE)
@@ -1419,6 +1436,8 @@ export async function listGallery(env: Env, request: Request): Promise<Response>
   return json({
     total: totalRow?.c ?? 0,
     page,
+    /** 回显给前端，免得它自己猜现在的排序（刷新/翻页后要对上） */
+    sort,
     pageSize: GALLERY_PAGE_SIZE,
     items: (rows.results ?? []).map((r) => toGalleryJson(r, r.user_id === user.id)),
   })

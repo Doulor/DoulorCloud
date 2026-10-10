@@ -31,9 +31,17 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { useT } from "@/i18n"
+
+/** 排序选项（key 与后端 sort 参数、i18n 词条一一对应） */
+const GALLERY_SORTS: { key: GallerySort; label: string }[] = [
+  { key: "latest", label: "gal.sort.latest" },
+  { key: "views", label: "gal.sort.views" },
+  { key: "likes", label: "gal.sort.likes" },
+]
 import {
   galleryApi,
   galleryCoverUrl,
+  type GallerySort,
   labApi,
   errMsg,
   HttpError,
@@ -214,6 +222,11 @@ function HallView({
   const { t } = useT()
   const [input, setInput] = React.useState("")
   const [query, setQuery] = React.useState("")
+  /**
+   * 排序方式（2026-10-10 站长要求）：最新 / 浏览最多 / 点赞最多。
+   * ⚠️ 换排序要**回到第 1 页**，否则可能停在一个新排序下不存在的页码上（空列表）。
+   */
+  const [sort, setSort] = React.useState<GallerySort>("latest")
   const [page, setPage] = React.useState(1)
   const [items, setItems] = React.useState<GalleryItem[]>([])
   const [total, setTotal] = React.useState(0)
@@ -226,7 +239,7 @@ function HallView({
     setLoading(true)
     setFailed(false)
     galleryApi
-      .list({ page, q: query })
+      .list({ page, q: query, sort })
       .then((res) => {
         if (!alive) return
         setItems(res.items ?? [])
@@ -246,7 +259,7 @@ function HallView({
     return () => {
       alive = false
     }
-  }, [page, query])
+  }, [page, query, sort])
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
@@ -286,6 +299,26 @@ function HallView({
           </Button>
         )}
       </form>
+
+      {/* 排序：三个平铺按钮（和站内其它分段控件一个样式，不引新组件） */}
+      <div className="mb-3 flex flex-wrap items-center gap-1.5">
+        {GALLERY_SORTS.map((s) => (
+          <Button
+            key={s.key}
+            type="button"
+            size="sm"
+            variant={sort === s.key ? "secondary" : "ghost"}
+            className="text-xs"
+            onClick={() => {
+              if (sort === s.key) return
+              setSort(s.key)
+              setPage(1)
+            }}
+          >
+            {t(s.label)}
+          </Button>
+        ))}
+      </div>
 
       {loading ? (
         <SkeletonCards count={6} />

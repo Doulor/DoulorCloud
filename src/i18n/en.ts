@@ -4836,6 +4836,11 @@ export const en: Record<MessageKey, string> = {
   "adm.regEmailDomains": "Allowed email domains for sign-up (comma-separated, empty = no restriction)",
   "adm.regEmailDomainsHint":
     "Mainstream providers only. Disposable-mail services (smailr.com, mailto.plus, *.kdns.fr …) let anyone create unlimited free mailboxes, which is the easiest way to mass-register throwaway accounts. Matches the full domain after @, no subdomain wildcard.",
+  "adm.donationUrlBlocklistTitle": "Blocked upstream base URLs",
+  "adm.donationUrlBlocklistDesc":
+    "For custom AI channel donations: if the upstream URL starts with any entry here, the donation is not allowed.",
+  "adm.donationUrlBlocklistHint":
+    "One entry per line (commas also work). A URL matches in exactly two ways: it is identical to the entry, or the entry followed by a path — https://token.sensenova.cn blocks its /v1, /, /v1/chat and so on. A suffix that is not a path does not match (e.g. token.sensenova.cn.evil.com is not blocked). Letter case and http/https are ignored so nobody can dodge it by capitalising or switching scheme. Leave empty to disable.",
   "adm.regIpDailyLimit": "Max sign-ups per IP in 24h (0 = unlimited)",
   "adm.regIpDailyLimitHint":
     "A cumulative counter, not a rate limit. The old limit (60 requests/hour) could not stop 9 accounts from one IP. 3 is a good default.",
@@ -7307,6 +7312,9 @@ export const en: Record<MessageKey, string> = {
   "gal.desc": "Web pages built in the AI Lab are hosted here — open one and it runs right away.",
   "gal.tab.hall": "Showcase",
   "gal.tab.mine": "My creations",
+  "gal.sort.latest": "Newest",
+  "gal.sort.views": "Most viewed",
+  "gal.sort.likes": "Most liked",
   "gal.search": "Search by name or author…",
   "gal.clearSearch": "Clear",
   "gal.mineHint": "These are your own works. Once made public, anyone can see and run them in the Showcase.",
