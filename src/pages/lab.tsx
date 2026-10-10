@@ -1301,17 +1301,14 @@ export default function LabPage() {
     /**
      * 菜单里**显示**的模型名。
      *
-     * ⚠️ 为什么要加工（2026-10-10 站长反馈「模型名一长就把发送键挤出输入框」）：
-     * PromptBar 的模型按钮是 `flex-none`（**不收缩**），里面的名字也没有截断，
-     * 所以名字多长、那一行就有多宽 —— 一超就把发送键顶到输入框外面去。
-     * · 站内模型的 `workbuddy-` 前缀是内部路由用的，对用户是纯噪音 ⇒ 去掉；
-     * · 再兜底限长（自定义渠道的名字是用户自己填的，可能非常长）。
-     * ⚠️ 只改**显示名**，`key` 保持完整模型 id（它要拿去请求，改了就调不通）。
+     * ⚠️ 只去掉 `workbuddy-` 前缀 —— 那是内部路由用的标识，对用户是纯噪音。
+     * **这里不做长度截断**：展开的列表要看得到全名（2026-10-10 站长要求），
+     * 而且列表里名字长一点不影响布局。
+     * 按钮上「太长」的问题是**在按钮那一侧用 CSS 限宽**解决的（见 fxBarClass）——
+     * 按字数截不靠谱：中文/英文/自定义名字宽度差很多。
+     * ⚠️ `key` 保持完整模型 id（它要拿去请求，改了会调不通）。
      */
-    const displayName = (raw: string) => {
-      const short = raw.replace(/^workbuddy-/, "")
-      return short.length > 18 ? `${short.slice(0, 17)}…` : short
-    }
+    const displayName = (raw: string) => raw.replace(/^workbuddy-/, "")
     const gStation = t("lab.model.groupStation")
     const gSite = t("lab.model.groupSite")
     const gCustom = t("lab.model.groupCustom")
@@ -3720,6 +3717,16 @@ export default function LabPage() {
                   <span className="lab-composer-glow-ring" aria-hidden="true" />
                 )}
               <PromptBar
+                /**
+                 * ⚠️ 只对**模型按钮里的那个名字**限宽 + 省略号（2026-10-10 站长要求）：
+                 * 按钮是 `flex-none`（不收缩），名字多长按钮就多宽，一超就把发送键顶出输入框。
+                 * 这里用 CSS 限宽而不是按字数截断 —— 中英文/自定义名字宽度差很多，
+                 * 按字数截要么撑破要么截太狠。**展开的列表不受影响，显示全名。**
+                 *
+                 * 宽度取 76px：就是上一版 56px 的 4/3（站长说「按钮再长一点、约多三分之一」）。
+                 * 想再调就改这一个数字 —— 它直接决定按钮长度，也决定名字从第几个字开始省略。
+                 */
+                className="[&_button[aria-label='Choose_model']>span]:max-w-[76px] [&_button[aria-label='Choose_model']>span]:overflow-hidden [&_button[aria-label='Choose_model']>span]:text-ellipsis [&_button[aria-label='Choose_model']>span]:whitespace-nowrap"
                 placeholder={t("lab.inputPlaceholder")}
                 models={fxModels}
                 defaultModel={fxDefaultModelKey}
