@@ -1718,6 +1718,8 @@ export const en: Record<MessageKey, string> = {
   "ai.ok.keyDeleted": "Key deleted",
   "ai.ok.keysSynced": "Synced {n} keys",
   "ai.ok.noNewKeys": "No new keys",
+  "ai.ok.keysSyncedRemoved": "Synced: {n} added, {m} removed",
+  "ai.warn.keysTruncated": "You have reached the relay's single-page limit (100 keys). To avoid deleting keys by mistake, this sync only added and did not remove. Please clean up in the relay panel first.",
 
   // —— Mailbox ——
   "em.title": "Mailboxes",

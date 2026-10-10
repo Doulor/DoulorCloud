@@ -882,9 +882,22 @@ export default function AiPage() {
     try {
       const res = await newapiApi.syncKeys()
       setKeys(res.keys)
-      toast.success(
-        res.added > 0 ? t("ai.ok.keysSynced", { n: res.added }) : t("ai.ok.noNewKeys")
-      )
+      /**
+       * ⚠️ 三种情况要分开说：
+       *   · 上游列表可能被截断（≥100 条）⇒ 这次**故意没删**，必须讲清楚，
+       *     否则用户会以为「我删了的 key 怎么还在」；
+       *   · 正常删掉了一些；
+       *   · 只新增 / 没有变化。
+       */
+      if (res.truncated) {
+        toast.warning(t("ai.warn.keysTruncated"))
+      } else if (res.removed > 0) {
+        toast.success(t("ai.ok.keysSyncedRemoved", { n: res.added, m: res.removed }))
+      } else {
+        toast.success(
+          res.added > 0 ? t("ai.ok.keysSynced", { n: res.added }) : t("ai.ok.noNewKeys")
+        )
+      }
     } catch (err) {
       reportAiError(err, "ai.err.sync")
     } finally {

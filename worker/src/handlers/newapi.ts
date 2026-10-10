@@ -832,6 +832,34 @@ function userSelectableGroups(settings: {
 
 // ---- API Key ----
 
+/**
+ * 把 `newapi_keys` 的一行映射成下发给前端的形状。
+ *
+ * ⚠️ **列表接口和同步接口必须共用这一个映射**。
+ * 之前同步接口自己拼了一份「少字段」的返回（没有 `system`、名字也没归一化），
+ * 前端一点「同步」就把列表换成那份 ⇒ 「系统」标记和禁用的复制/删除按钮全没了
+ * （2026-10-10 站长反馈）。**同一个东西的两种返回形状，迟早会对不上。**
+ */
+function mapKeyRow(
+  r: Record<string, unknown>,
+  groupByTokenId: Map<number, string>
+): Record<string, unknown> {
+  // 「AI 实验室」自动建的那个 Key 是**系统 Key**：显示名统一成规范名
+  // （老库里存的是「网页实验室」），并打上标记 —— 前端据此隐藏复制/删除按钮。
+  const system = isLabKeyName(String(r.name ?? ""))
+  return {
+    id: r.id,
+    tokenId: r.token_id,
+    name: system ? LAB_KEY_NAME : r.name,
+    maskedKey: r.key_prefix,
+    /** 该 Key 所属分组；读不到为 null */
+    group: groupByTokenId.get(Number(r.token_id)) ?? null,
+    createdAt: r.created_at,
+    /** 系统 Key：供 AI 实验室内部使用，网页端不可复制、不可删除 */
+    system,
+  }
+}
+
 /** GET /api/dev/keys —— 已创建的 Key（掩码） */
 export async function listKeys(env: Env, request: Request): Promise<Response> {
   const user = await requireFeatureUser(env, request, "ai")
@@ -859,22 +887,7 @@ export async function listKeys(env: Env, request: Request): Promise<Response> {
   }
 
   return json({
-    keys: (rows.results ?? []).map((r: Record<string, unknown>) => {
-      // 「AI 实验室」自动建的那个 Key 是**系统 Key**：显示名统一成规范名
-      // （老库里存的是「网页实验室」），并打上标记 —— 前端据此隐藏复制/删除按钮。
-      const system = isLabKeyName(r.name)
-      return {
-        id: r.id,
-        tokenId: r.token_id,
-        name: system ? LAB_KEY_NAME : r.name,
-        maskedKey: r.key_prefix,
-        /** 该 Key 所属分组；读不到为 null */
-        group: groupByTokenId.get(Number(r.token_id)) ?? null,
-        createdAt: r.created_at,
-        /** 系统 Key：供 AI 实验室内部使用，网页端不可复制、不可删除 */
-        system,
-      }
-    }),
+    keys: (rows.results ?? []).map((r: Record<string, unknown>) => mapKeyRow(r, groupByTokenId)),
   })
 }
 
@@ -1098,21 +1111,54 @@ export async function syncKeys(env: Env, request: Request): Promise<Response> {
     )
   }
 
+  /**
+   * 反向：上游**已经不在了**的 Key 要从本地删掉（站长 2026-10-10 反馈「只加不删」）。
+   *
+   * ⚠️ 但**必须确认拿到的是完整列表**才敢删 —— `listTokens` 写死
+   * `page_size=100` 且只取第 1 页：正好返回 100 条时很可能还有下一页，
+   * 这时按「不在列表里」去删，会把用户**真实存在**的 Key 删掉。
+   * （这正是「上游列表静默截断」那类事故：列表里没有 ≠ 不存在。）
+   * 拿不准就**只加不删**，并把 truncated 告诉前端，让界面说清楚。
+   */
+  const PAGE_SIZE = 100
+  const truncated = remote.length >= PAGE_SIZE
+  let removed = 0
+  if (!truncated) {
+    const remoteIds = new Set(remote.map((t) => t.id))
+    const stale = Array.from(knownIds).filter((id) => !remoteIds.has(id))
+    if (stale.length > 0) {
+      await env.DB.batch(
+        stale.map((id) =>
+          env.DB.prepare("DELETE FROM newapi_keys WHERE user_id = ? AND token_id = ?").bind(
+            user.id,
+            id
+          )
+        )
+      )
+      removed = stale.length
+    }
+  }
+
   const rows = await env.DB.prepare(
     "SELECT id, token_id, name, key_prefix, created_at FROM newapi_keys WHERE user_id = ? ORDER BY created_at DESC"
   )
     .bind(user.id)
     .all()
 
+  // 分组与列表接口同样实时读（读不到就 null，不影响列表）
+  const groupByTokenId = new Map<number, string>()
+  try {
+    for (const t of remote) groupByTokenId.set(t.id, t.group)
+  } catch {
+    /* 忽略 */
+  }
+
   return json({
     added: toAdd.length,
-    keys: (rows.results ?? []).map((r: Record<string, unknown>) => ({
-      id: r.id,
-      tokenId: r.token_id,
-      name: r.name,
-      maskedKey: r.key_prefix,
-      createdAt: r.created_at,
-    })),
+    removed,
+    /** 上游列表可能被截断（≥100 条）⇒ 这次**没有删任何东西** */
+    truncated,
+    keys: (rows.results ?? []).map((r: Record<string, unknown>) => mapKeyRow(r, groupByTokenId)),
   })
 }
 // ---- 额度兑换 ----

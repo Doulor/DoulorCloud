@@ -1375,7 +1375,14 @@ export const newapiApi = {
   listKeys: () => request<{ keys: NewApiKey[] }>("/dev/keys"),
 
   syncKeys: () =>
-    request<{ added: number; keys: NewApiKey[] }>("/dev/keys/sync", {
+    request<{
+      added: number
+      /** 上游已经不在、这次被清掉的条数 */
+      removed: number
+      /** 上游列表可能被截断（≥100 条）⇒ 本次只新增、未移除 */
+      truncated: boolean
+      keys: NewApiKey[]
+    }>("/dev/keys/sync", {
       method: "POST",
     }),
 

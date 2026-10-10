@@ -1667,6 +1667,8 @@ export const zh = {
   "ai.ok.keyDeleted": "Key 已删除",
   "ai.ok.keysSynced": "已同步 {n} 个 Key",
   "ai.ok.noNewKeys": "没有新的 Key",
+  "ai.ok.keysSyncedRemoved": "同步完成：新增 {n} 个，移除 {m} 个",
+  "ai.warn.keysTruncated": "你的 Key 已达中转站单页上限（100 条），为避免误删，这次只新增、没有移除。请先到中转站后台清理。",
 
   // —— 邮箱 ——
   "em.title": "邮箱",
