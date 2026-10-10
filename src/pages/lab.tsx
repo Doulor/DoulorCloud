@@ -3723,10 +3723,14 @@ export default function LabPage() {
                  * 这里用 CSS 限宽而不是按字数截断 —— 中英文/自定义名字宽度差很多，
                  * 按字数截要么撑破要么截太狠。**展开的列表不受影响，显示全名。**
                  *
-                 * 宽度取 76px：就是上一版 56px 的 4/3（站长说「按钮再长一点、约多三分之一」）。
-                 * 想再调就改这一个数字 —— 它直接决定按钮长度，也决定名字从第几个字开始省略。
+                 * 宽度取 160px：**它是一个「防超长」的安全上限，不是通常生效的截断点**。
+                 * 我们的模型名（去掉前缀后最长 18 字）大约 110px ⇒ 正常显示**完整名字**，
+                 * 按钮就跟着名字自然变长；只有用户自己填了超长自定义名字时才会省略。
+                 * ⚠️ 上一版误把它当「截断点」取了 76px，比名字本身还窄 ⇒ 按钮反而变短了
+                 *    （2026-10-10 站长反馈「为什么按钮更短了」）。
+                 * 想再调长短就改这一个数字。
                  */
-                className="[&_button[aria-label='Choose_model']>span]:max-w-[76px] [&_button[aria-label='Choose_model']>span]:overflow-hidden [&_button[aria-label='Choose_model']>span]:text-ellipsis [&_button[aria-label='Choose_model']>span]:whitespace-nowrap"
+                className="[&_button[aria-label='Choose_model']>span]:max-w-[160px] [&_button[aria-label='Choose_model']>span]:overflow-hidden [&_button[aria-label='Choose_model']>span]:text-ellipsis [&_button[aria-label='Choose_model']>span]:whitespace-nowrap"
                 placeholder={t("lab.inputPlaceholder")}
                 models={fxModels}
                 defaultModel={fxDefaultModelKey}
