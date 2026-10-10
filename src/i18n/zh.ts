@@ -7058,6 +7058,7 @@ export const zh = {
   "lab.attach.imageFormat": "这张图的格式模型看不了（支持 png / jpg / webp / gif），换个格式再试。",
   "lab.attach.imageTooLarge": "这张图压完还是太大，换张小一点的。",
   "lab.attach.imageFailed": "这张图读取失败，换一张再试。",
+  "lab.steer.queued": "已记下，这一轮做完就按你说的改。",
   "lab.msg.copy": "复制",
   "lab.msg.copyFailed": "复制失败，请手动选中文字复制。",
   "lab.msg.edit": "编辑",

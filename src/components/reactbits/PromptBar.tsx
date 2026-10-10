@@ -688,7 +688,9 @@ const PromptBar: React.FC<PromptBarProps> = ({
     }
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      send();
+      // ⚠️ 本站改动：运行中**有内容也允许发**（中途插话）；
+      // 想中断就去点停止键或清空输入框 —— 清空后这里自然成了空操作。
+      if (!busy || draft.trim()) send();
     }
   };
 
@@ -996,7 +998,8 @@ const PromptBar: React.FC<PromptBarProps> = ({
               armed,
               canSend,
               trigger: () => {
-                if (busy) latest.current.onStop?.();
+                // ⚠️ 本站改动（中途插话）：运行中**输入框有内容就发送**，空的才是停止
+                if (busy && !draft.trim()) latest.current.onStop?.();
                 else send();
               }
             })
@@ -1014,8 +1017,9 @@ const PromptBar: React.FC<PromptBarProps> = ({
             onPointerCancel={up}
             onPointerLeave={up}
             onClick={() => {
-              if (busy) latest.current.onStop?.();
-              else send();
+              // ⚠️ 本站改动（中途插话）：同上（renderSend 与内置按钮两条路径保持一致）
+                if (busy && !draft.trim()) latest.current.onStop?.();
+                else send();
             }}
           >
             <SendGlyph busy={busy} morphDuration={morphDuration} squash={squash} tilt={tilt} />

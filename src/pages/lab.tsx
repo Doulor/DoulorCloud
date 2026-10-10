@@ -605,6 +605,12 @@ export default function LabPage() {
    */
   const [webSearchOn, setWebSearchOn] = React.useState(false)
   /**
+   * 「中途插话」队列（2026-10-10 站长要求）。
+   * 正在跑的时候用户又说了话，不能直接开新的一轮（会把当前这轮的状态搅乱），
+   * 所以先排在这儿，等这一轮跑完自动接着发。
+   */
+  const steerRef = React.useRef<string[]>([])
+  /**
    * 往输入框里「填字」的信号（编辑历史消息用）。
    * 输入框的草稿归 PromptBar 自己管，所以只能给它一个信号让它自己填；
    * `at` 是时间戳 —— 每次点编辑都换一个新对象，哪怕文本一样也要重新填。
@@ -2519,6 +2525,18 @@ export default function LabPage() {
   }
 
   /**
+   * 这一轮跑完就把排队里的下一句发出去（中途插话的兑现点）。
+   * 放 effect 里而不是循环内部：这样不用去动那个已经很复杂的 agent 循环，
+   * 少一处出错的地方。代价是「等这一轮结束才生效」而不是"立刻打断"。
+   */
+  React.useEffect(() => {
+    if (streaming) return
+    const next = steerRef.current.shift()
+    if (next) void send(next)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streaming])
+
+  /**
    * 编辑一条用户消息 → **回退对话进度**、把原文填回输入框。
    *
    * ⚠️ 只回退一半，这是站长明确要求的（2026-10-10）：
@@ -3417,6 +3435,16 @@ export default function LabPage() {
         // 用户在「+」里明确要动站内数据 ⇒ 这一轮把手册直接给他，别让他再拉一遍
         siteOpRef.current = /@站内操作|@site\b/i.test(text)
         // 附件正文由 send 内部并进「给模型的那份」，不糊在聊天里
+        /**
+         * ⚠️ 运行中不新开一轮，改成**排队**（中途插话）。
+         * 直接 send 会被「streaming 中直接 return」挡掉，用户会觉得"说了白说"，
+         * 所以这里明确告诉他已排上队。
+         */
+        if (streaming) {
+          steerRef.current.push(text)
+          toast.success(t("lab.steer.queued"))
+          return
+        }
         void send(text, detail?.attachments ?? [])
       }}
                 onStop={stop}

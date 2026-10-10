@@ -7153,6 +7153,7 @@ export const en: Record<MessageKey, string> = {
   "lab.attach.imageFormat": "The model can't read this image format (png / jpg / webp / gif only). Please convert it first.",
   "lab.attach.imageTooLarge": "This image is still too large after compression — try a smaller one.",
   "lab.attach.imageFailed": "Could not read this image — please try another one.",
+  "lab.steer.queued": "Noted — I'll follow that as soon as this round finishes.",
   "lab.msg.copy": "Copy",
   "lab.msg.copyFailed": "Copy failed — please select the text manually.",
   "lab.msg.edit": "Edit",
