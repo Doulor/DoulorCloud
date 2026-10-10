@@ -12,12 +12,14 @@
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest"
 import { env } from "cloudflare:workers"
-import { makeUser, authRequest, fetchSelf } from "./helpers"
+import { makeUser, authRequest, fetchSelf, type TestUser } from "./helpers"
 
 const restores: Array<() => void> = []
 
-/** 打桩 CF：可控「删除成功 / 删除失败」，并记录删除调用次数 */
+/** 打桩 CF：可控「删除成功 / 删除失败」，并记录删除 / 创建调用次数 */
 let cfDeleteCalls = 0
+/** 重建（POST）次数 —— 解封方向的反向守护要用 */
+let cfCreateCalls = 0
 let cfDeleteShouldFail = false
 
 function stubCloudflare(): void {
@@ -26,6 +28,7 @@ function stubCloudflare(): void {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
     if (url.includes("api.cloudflare.com")) {
       const method = (init?.method ?? "GET").toUpperCase()
+      if (method === "POST") cfCreateCalls += 1
       if (method === "DELETE") {
         cfDeleteCalls += 1
         if (cfDeleteShouldFail) {
@@ -51,11 +54,13 @@ function stubCloudflare(): void {
 afterEach(() => {
   while (restores.length) restores.pop()?.()
   cfDeleteCalls = 0
+  cfCreateCalls = 0
   cfDeleteShouldFail = false
 })
 
 beforeEach(async () => {
   cfDeleteCalls = 0
+  cfCreateCalls = 0
   cfDeleteShouldFail = false
 })
 
@@ -101,8 +106,7 @@ async function seedUserWithRecords(n: number) {
 }
 
 /** 该用户所有记录的封禁/残留统计 */
-async function snapshot(userId: string) {
-  const rows = await env.DB.prepare(
+async function snapshot(userId: string) {  const rows = await env.DB.prepare(
     "SELECT cf_id, banned_at FROM dns_records WHERE domain_id IN (SELECT id FROM domains WHERE user_id = ?)"
   )
     .bind(userId)
@@ -167,6 +171,82 @@ async function sweepRounds(rounds: number, limit = 40) {
     errors.push(...r.errors)
   }
   return { removed, errors }
+}
+
+/**
+ * 造「用户 + '@' 主域 + 二级子域名 blog」三件套，记录挂在 blog 下。
+ *
+ * 为什么必须用二级子域名：转移场景只在**二级**子域名上真实发生 ——
+ * '@' 主域被 `admin-subdomains.ts` 明确保护（主域名不可删除 / 转移语义不同）。
+ */
+async function seedWithBlog(n: number) {
+  const user = await makeUser({})
+  const now = new Date().toISOString()
+  const domainId = crypto.randomUUID()
+  const rootSubId = crypto.randomUUID()
+  const blogId = crypto.randomUUID()
+  const root = `probe-${crypto.randomUUID().slice(0, 8)}.test`
+  await env.DB.prepare(
+    "INSERT INTO domains (id, user_id, name, zone_id, status, created_at) VALUES (?, ?, ?, ?, 'active', ?)"
+  )
+    .bind(domainId, user.id, root, "probe-zone", now)
+    .run()
+  await env.DB.prepare(
+    "INSERT INTO subdomains (id, user_id, name, fqdn, status, created_at) VALUES (?, ?, '@', ?, 'active', ?)"
+  )
+    .bind(rootSubId, user.id, root, now)
+    .run()
+  await env.DB.prepare(
+    "INSERT INTO subdomains (id, user_id, name, fqdn, status, created_at) VALUES (?, ?, 'blog', ?, 'active', ?)"
+  )
+    .bind(blogId, user.id, `blog.${root}`, now)
+    .run()
+  const stmts = []
+  for (let i = 0; i < n; i++) {
+    stmts.push(
+      env.DB.prepare(
+        `INSERT INTO dns_records
+           (id, domain_id, subdomain_id, cf_id, name, fqdn, type, content, ttl, proxied, status, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'A', ?, 1, 0, 'active', 'web', ?, ?)`
+      ).bind(
+        crypto.randomUUID(),
+        domainId,
+        blogId,
+        `cf-blog-${i}`,
+        `h${i}`,
+        `h${i}.blog.${root}`,
+        `10.0.0.${i}`,
+        now,
+        now
+      )
+    )
+  }
+  await env.DB.batch(stmts)
+  return { user, domainId, rootSubId, blogId, root }
+}
+
+/** 把 blog 子域名转给另一个用户（走真实管理路由；只改 subdomains.user_id） */
+async function transferSubdomain(admin: TestUser, subId: string, toUserId: string) {
+  return fetchSelf(
+    authRequest(admin, `/api/admin/subdomains/${subId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: toUserId }),
+    })
+  )
+}
+
+/** blog 下记录的封禁/在 CF 统计 */
+async function blogSnapshot(blogId: string) {
+  const rows = await env.DB.prepare("SELECT cf_id, banned_at FROM dns_records WHERE subdomain_id = ?")
+    .bind(blogId)
+    .all<{ cf_id: string | null; banned_at: string | null }>()
+  const all = rows.results ?? []
+  return {
+    total: all.length,
+    banned: all.filter((r) => r.banned_at !== null).length,
+    withCf: all.filter((r) => r.cf_id !== null).length,
+  }
 }
 
 describe("封禁 DNS 停用闭环（issue #50）", () => {
@@ -406,8 +486,7 @@ describe("封禁 DNS 停用闭环（issue #50）", () => {
     expect(removedPerRound[2]).toBe(0)
   })
 
-  it("归属判据：无子域名的历史记录仍按域名归属兜底（不能漏）", async () => {
-    stubCloudflare()
+  it("归属判据：无子域名的历史记录仍按域名归属兜底（不能漏）", async () => {    stubCloudflare()
     const admin = await makeUser({ role: "superadmin" })
     const { user, domainId } = await seedUserWithRecords(2)
 
@@ -448,5 +527,174 @@ describe("封禁 DNS 停用闭环（issue #50）", () => {
     const rows = legacy.results ?? []
     expect(rows.length).toBe(2)
     expect(rows.every((r) => r.cf_id === null && r.banned_at !== null)).toBe(true)
+  })
+
+  /**
+   * 直接入口（suspendUserResources / restoreUserResources）的归属判据。
+   *
+   * 这两处此前用的是裸 `subdomain_id IN (…) OR domain_id IN (…)`：子域名被管理员
+   * 转给他人后（`admin-subdomains.ts:368` 只改 `subdomains.user_id`，**不动**
+   * `dns_records.domain_id`），同一行会同时命中「原主的域名」与「新主的子域名」
+   * 两侧 ⇒ 封禁 A 会删掉 B 的解析、解封 A 会重建仍处于封禁中的 B 的解析。
+   *
+   * 与 `ownerStatusSql`（兜底任务用的那份）必须同口径：**归属认子域名，
+   * 没有子域名（0003 回填前的历史行）才回退到域名**，两个分支互斥。
+   */
+  it("封禁 A 不得动到已转给 B 的解析（直接入口的归属判据）", async () => {
+    stubCloudflare()
+    const admin = await makeUser({ role: "superadmin" })
+    const a = await seedWithBlog(3)
+    const b = await makeUser({})
+
+    // A 的 blog 转给 B —— 从此这 3 条记录归 B，A 的封禁不该碰它们
+    expect((await transferSubdomain(admin, a.blogId, b.id)).status).toBe(200)
+
+    const before = await blogSnapshot(a.blogId)
+    expect(before.total).toBe(3)
+
+    cfDeleteCalls = 0
+    expect((await suspendViaRoute(admin, a.user.username)).status).toBe(200)
+
+    const after = await blogSnapshot(a.blogId)
+    console.log(
+      `[直接入口·封禁] CF DELETE=${cfDeleteCalls}，blog 封禁数 ${before.banned}→${after.banned}`
+    )
+    // B 是活跃用户，他的记录必须原样留在 CF 上
+    expect(cfDeleteCalls).toBe(0)
+    expect(after.banned).toBe(0)
+    expect(after.withCf).toBe(3)
+  })
+
+  it("解封 A 不得重建仍处于封禁中的 B 的解析（直接入口的归属判据）", async () => {
+    stubCloudflare()
+    const admin = await makeUser({ role: "superadmin" })
+    const a = await seedWithBlog(3)
+    const b = await makeUser({})
+
+    // 转给 B → B 封禁（这 3 条被正确停用）→ A 封禁
+    expect((await transferSubdomain(admin, a.blogId, b.id)).status).toBe(200)
+    expect((await suspendViaRoute(admin, b.username)).status).toBe(200)
+    expect((await suspendViaRoute(admin, a.user.username)).status).toBe(200)
+
+    const mid = await blogSnapshot(a.blogId)
+    expect(mid.banned).toBe(3)
+
+    // 解封 A：B 仍是 suspended，他的解析绝不能因为 A 的解封而复活
+    cfCreateCalls = 0
+    expect(
+      (
+        await fetchSelf(
+          authRequest(admin, `/api/admin/users/${encodeURIComponent(a.user.username)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "active" }),
+          })
+        )
+      ).status
+    ).toBe(200)
+
+    const after = await blogSnapshot(a.blogId)
+    console.log(
+      `[直接入口·解封] CF POST=${cfCreateCalls}，blog 在 CF 上 ${mid.withCf}→${after.withCf}，封禁数 ${mid.banned}→${after.banned}`
+    )
+    expect(cfCreateCalls).toBe(0)
+    expect(after.withCf).toBe(0)
+    expect(after.banned).toBe(3)
+
+    // B 自己仍然是封禁状态 —— 上面那些断言不能是靠「B 其实已解封」蒙对的
+    const bRow = await env.DB.prepare("SELECT status FROM users WHERE id = ?")
+      .bind(b.id)
+      .first<{ status: string }>()
+    expect(bRow?.status).toBe("suspended")
+  })
+
+  it("正向守护：子域名仍归自己时，封禁/解封照常生效（互斥限定不能把正常路径挡住）", async () => {
+    stubCloudflare()
+    const admin = await makeUser({ role: "superadmin" })
+    const a = await seedWithBlog(3)
+
+    // 不转移：A 封禁必须删掉自己 blog 下的 3 条
+    cfDeleteCalls = 0
+    expect((await suspendViaRoute(admin, a.user.username)).status).toBe(200)
+    const suspended = await blogSnapshot(a.blogId)
+    expect(cfDeleteCalls).toBe(3)
+    expect(suspended.banned).toBe(3)
+    expect(suspended.withCf).toBe(0)
+
+    // 解封必须把它们重建回来
+    cfCreateCalls = 0
+    expect(
+      (
+        await fetchSelf(
+          authRequest(admin, `/api/admin/users/${encodeURIComponent(a.user.username)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "active" }),
+          })
+        )
+      ).status
+    ).toBe(200)
+    const restored = await blogSnapshot(a.blogId)
+    expect(cfCreateCalls).toBe(3)
+    expect(restored.banned).toBe(0)
+    expect(restored.withCf).toBe(3)
+  })
+
+  it("反向守护：子域名转走后，原主解封不得把新主的记录一并重建（自己的记录照常恢复）", async () => {
+    stubCloudflare()
+    const admin = await makeUser({ role: "superadmin" })
+    const a = await seedWithBlog(3)
+    const b = await makeUser({})
+
+    // A 的 '@' 主域下再放一条**属于他自己**的记录：证明「A 的解封确实在重建
+    // 他自己的东西」，而不是靠整段没跑而空过。必须在封禁**之前**插入，
+    // 否则它不会被停用、也就没有「恢复」可言。
+    const now = new Date().toISOString()
+    await env.DB.prepare(
+      `INSERT INTO dns_records
+         (id, domain_id, subdomain_id, cf_id, name, fqdn, type, content, ttl, proxied, status, source, created_at, updated_at)
+       VALUES (?, ?, ?, 'cf-root-0', 'root', ?, 'A', '10.9.9.9', 1, 0, 'active', 'web', ?, ?)`
+    )
+      .bind(crypto.randomUUID(), a.domainId, a.rootSubId, `root.${a.root}`, now, now)
+      .run()
+
+    // 封禁 A（blog 3 条 + 主域 1 条一起被停用），再把 blog 转给 B
+    expect((await suspendViaRoute(admin, a.user.username)).status).toBe(200)
+    const afterSuspend = await blogSnapshot(a.blogId)
+    expect(afterSuspend.banned).toBe(3)
+    expect((await transferSubdomain(admin, a.blogId, b.id)).status).toBe(200)
+
+    cfCreateCalls = 0
+    expect(
+      (
+        await fetchSelf(
+          authRequest(admin, `/api/admin/users/${encodeURIComponent(a.user.username)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "active" }),
+          })
+        )
+      ).status
+    ).toBe(200)
+
+    const blog = await blogSnapshot(a.blogId)
+    const ownRoot = await env.DB.prepare(
+      "SELECT cf_id, banned_at FROM dns_records WHERE subdomain_id = ?"
+    )
+      .bind(a.rootSubId)
+      .all<{ cf_id: string | null; banned_at: string | null }>()
+    const ownRows = ownRoot.results ?? []
+
+    console.log(
+      `[直接入口·混合] CF POST=${cfCreateCalls}，已转走的 blog 在 CF 上=${blog.withCf}，自己主域 1 条中带 cf_id 的=${ownRows.filter((r) => r.cf_id !== null).length}`
+    )
+    // 已转走的那 3 条不得被重建（它们的归属是 B，A 的解封与它们无关）
+    expect(blog.withCf).toBe(0)
+    expect(blog.banned).toBe(3)
+    // 而 A 自己的那条必须恢复，且 CF POST 只发了这一次
+    expect(cfCreateCalls).toBe(1)
+    expect(ownRows.length).toBe(1)
+    expect(ownRows[0].cf_id).not.toBeNull()
+    expect(ownRows[0].banned_at).toBeNull()
   })
 })
