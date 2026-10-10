@@ -1297,13 +1297,28 @@ export default function LabPage() {
   const fxModels = React.useMemo(() => {
     // 按渠道分组：PromptBar 会在「换组」的地方画一条小分隔（见 PromptBarModel.group）
     const out: { key: string; name: string; tag?: string; group?: string }[] = []
+
+    /**
+     * 菜单里**显示**的模型名。
+     *
+     * ⚠️ 为什么要加工（2026-10-10 站长反馈「模型名一长就把发送键挤出输入框」）：
+     * PromptBar 的模型按钮是 `flex-none`（**不收缩**），里面的名字也没有截断，
+     * 所以名字多长、那一行就有多宽 —— 一超就把发送键顶到输入框外面去。
+     * · 站内模型的 `workbuddy-` 前缀是内部路由用的，对用户是纯噪音 ⇒ 去掉；
+     * · 再兜底限长（自定义渠道的名字是用户自己填的，可能非常长）。
+     * ⚠️ 只改**显示名**，`key` 保持完整模型 id（它要拿去请求，改了就调不通）。
+     */
+    const displayName = (raw: string) => {
+      const short = raw.replace(/^workbuddy-/, "")
+      return short.length > 18 ? `${short.slice(0, 17)}…` : short
+    }
     const gStation = t("lab.model.groupStation")
     const gSite = t("lab.model.groupSite")
     const gCustom = t("lab.model.groupCustom")
     for (const m of models) {
       out.push({
         key: `station:${m}`,
-        name: m,
+        name: displayName(m),
         group: gStation,
         tag:
           stationFree && stationFreeModels.includes(m)
@@ -1312,12 +1327,22 @@ export default function LabPage() {
       })
     }
     for (const c of siteInfo?.channels ?? []) {
-      out.push({ key: `site:${c.id}`, name: c.name, group: gSite, tag: t("lab.free.channelBadge") })
+      out.push({
+        key: `site:${c.id}`,
+        name: displayName(c.name),
+        group: gSite,
+        tag: t("lab.free.channelBadge"),
+      })
     }
     // 自定义渠道可能配了多个模型，全部列出来（老的单模型配置也能读）
     const customModels = custom?.models?.length ? custom.models : custom?.model ? [custom.model] : []
     for (const m of customModels) {
-      out.push({ key: `custom:${m}`, name: m, group: gCustom, tag: t("lab.channel.custom") })
+      out.push({
+        key: `custom:${m}`,
+        name: displayName(m),
+        group: gCustom,
+        tag: t("lab.channel.custom"),
+      })
     }
     /**
      * ⚠️ 这一条**永远要有**：旧版模型选择器里有个「自定义渠道」页签带配置按钮，
