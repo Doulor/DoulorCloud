@@ -35,7 +35,7 @@ import { purgeExpiredPreviews } from "./link-preview"
 import { autoPriceNewModels } from "./newapi-client"
 import { expireRentalOrders } from "./points-shop"
 import { scanDns } from "./dns-audit"
-import { sweepSuspendedDns, retrySuspendedDnsRestore } from "./user-suspension"
+import { sweepSuspendedDns, retrySuspendedDnsRestore, ownerStatusSql } from "./user-suspension"
 import { syncProxySubscriptionStatuses, probeProxyNodeHealth } from "./handlers/proxy"
 
 /** 过期会话保留期（天）：留一点用于排查"刚掉线"的投诉 */
@@ -795,11 +795,6 @@ export async function runMaintenance(
       console.error("代理节点探活失败（表可能未迁移）:", err)
     }
   }
-  // 10) 清理失败也算告警（否则"静默失败"永远没人知道）
-  if (errors.length > 0) {
-    warnings.push(`本次运维有 ${errors.length} 项失败：${errors.slice(0, 3).join("；")}`)
-  }
-
   // 4d) 封禁用户遗留的 Cloudflare DNS 记录（2026-10-08）
   //
   // 两个方向都要兜底，否则「封禁/解封」各有一半不闭环：
@@ -812,23 +807,28 @@ export async function runMaintenance(
   let suspendedDns = { removed: 0, restored: 0, errors: [] as string[] }
   try {
     if (dryRun) {
+      // 口径必须与 sweepSuspendedDns 一致（含归属判据）：写成
+      // `banned_at IS NOT NULL AND cf_id IS NOT NULL` 会恒报 0（见该函数注释）。
       const stuck = await env.DB.prepare(
-        "SELECT COUNT(*) AS c FROM dns_records WHERE banned_at IS NOT NULL AND cf_id IS NOT NULL"
+        `SELECT COUNT(*) AS c FROM dns_records r
+          WHERE r.cf_id IS NOT NULL AND r.cf_id != ''
+            AND ${ownerStatusSql("suspended")}`
       ).first<{ c: number }>()
       const pending = await env.DB.prepare(
         `SELECT COUNT(*) AS c FROM dns_records r
           WHERE r.banned_at IS NOT NULL
-            AND (r.subdomain_id IN (SELECT id FROM subdomains
-                                     WHERE user_id IN (SELECT id FROM users WHERE status = 'active'))
-                 OR r.domain_id IN (SELECT id FROM domains
-                                     WHERE user_id IN (SELECT id FROM users WHERE status = 'active')))`
+            AND ${ownerStatusSql("active")}`
       ).first<{ c: number }>()
       warnings.push(
         `有 ${stuck?.c ?? 0} 条已停用记录仍挂在 Cloudflare、${pending?.c ?? 0} 条待恢复重建（dryRun 不处理）`
       )
     } else {
-      const swept = await sweepSuspendedDns(env)
-      const retried = await retrySuspendedDnsRestore(env)
+      // 批量刻意小于 SUSPEND_BATCH(40)：那个 40 是给「封禁请求」留的余量
+      // （见 user-suspension.ts 的常量注释），而维护请求的预算口径不同 ——
+      // 每条记录 = 1 次 CF DELETE + 1 次 D1 UPDATE，且 runMaintenance 自己
+      // 已有约 15 个子请求。取 10 留足余量；处理不完的下一小时继续（自愈）。
+      const swept = await sweepSuspendedDns(env, 10)
+      const retried = await retrySuspendedDnsRestore(env, 10)
       suspendedDns = {
         removed: swept.removed,
         restored: retried.restored,
@@ -839,6 +839,15 @@ export async function runMaintenance(
   } catch (err) {
     // 表未迁移（0130 未应用）不该让整个运维任务失败
     console.error("停用记录兜底失败（表可能未迁移）:", err)
+  }
+
+  // 10) 清理失败也算告警（否则"静默失败"永远没人知道）
+  //
+  // ⚠️ 必须排在 4d 之后：sweep 修好后是真在干活，它的 CF 失败（429/403/子请求超限）
+  // 会 push 进 errors —— 放在 4d 之前的话这些失败既不进 warnings 也不落库
+  // （maintenance_runs 只有 stats/warnings 两列），线上永远看不见。
+  if (errors.length > 0) {
+    warnings.push(`本次运维有 ${errors.length} 项失败：${errors.slice(0, 3).join("；")}`)
   }
 
   const report: MaintenanceReport = {
