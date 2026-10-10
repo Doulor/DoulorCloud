@@ -419,6 +419,32 @@ function renderImage(
   return <ZoomableImage src={url} alt={alt ?? ""} />
 }
 
+/**
+ * `stickerSaveButton` 走 context 传给图片渲染器 —— **不能**在 `components` 里写闭包。
+ *
+ * 为什么（2026-10-09 线上排查「社区广场点赞有概率报错」）：
+ *   react-markdown 是把 `components[name]` 的**函数本身**当作 React 元素类型用的
+ *   （hast-util-to-jsx-runtime 里 `state.components[name]`）。
+ *   以前这里写的是 `img: (props) => renderImage(props, stickerSaveButton)` ——
+ *   每次渲染都是一个**新函数**，React 认为「这个位置的元素类型变了」，于是把每个
+ *   正文图片/表情包整棵**卸载再重建**（`hast-util-to-jsx-runtime` 只认引用相等）。
+ *
+ *   实测（线上 cloud.doulor.cn）：**点一次赞 = 25 次 removeChild + 25 次 insertBefore**，
+ *   全部落在 `.markdown-body` 里的图片/表情包节点上 —— 因为点赞是乐观更新，整个列表
+ *   会重渲染，列表里每张卡的正文图片都被重建一遍。
+ *   removeChild 正是「DOM 被 React 之外的东西改过」时最先崩掉的操作（浏览器翻译、
+ *   改写 DOM 的扩展都会造成引用失效），所以「点赞就报错」的概率被这一步放大了很多；
+ *   何况每次重建还会清掉图片组件自己的状态（已存表情包、放大态）。
+ *
+ *   把类型身份固定住之后，重渲染只会**更新**已有节点，不再重建（实测 removeChild 归零）。
+ */
+const StickerSaveButtonCtx = React.createContext(true)
+
+/** 稳定的图片渲染组件：类型身份不随渲染变化（详见上面 StickerSaveButtonCtx 的说明） */
+function MarkdownImage(props: React.ComponentProps<"img">) {
+  return renderImage(props, React.useContext(StickerSaveButtonCtx))
+}
+
 export function Markdown({
   children,
   stickerSaveButton = true,
@@ -437,16 +463,18 @@ export function Markdown({
 }) {
   return (
     <div className="markdown-body break-words text-sm leading-relaxed">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkBreaks]}
-        components={{
-          a: linkCards ? renderLink : renderPlainLink,
-          code: renderCode,
-          img: (props) => renderImage(props, stickerSaveButton),
-        }}
-      >
-        {children}
-      </ReactMarkdown>
+      <StickerSaveButtonCtx.Provider value={stickerSaveButton}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm, remarkBreaks]}
+          components={{
+            a: linkCards ? renderLink : renderPlainLink,
+            code: renderCode,
+            img: MarkdownImage,
+          }}
+        >
+          {children}
+        </ReactMarkdown>
+      </StickerSaveButtonCtx.Provider>
     </div>
   )
 }
