@@ -248,6 +248,13 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () => twoFactorHandlers.regenerateRecoveryCodes(env, request),
   },
+  // 已登录状态下的「二次验证码」发送入口（2026-10-10：改动 2FA 设置时要重新认证）
+  {
+    kind: "exact",
+    path: "/settings/2fa/step-up/send",
+    method: "POST",
+    handle: () => twoFactorHandlers.sendTwoFactorStepUpCode(env, request),
+  },
   {
     kind: "exact",
     path: "/settings/2fa/disable",
@@ -3815,6 +3822,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/lab/web-search",
     method: "POST",
     handle: () => labSearchHandlers.webSearch(env, request),
+  },
+
+  // 代拉自定义渠道的模型列表（浏览器直连第三方会被 CORS 拦，必须服务端代拉）
+  {
+    kind: "exact",
+    path: "/lab/probe-models",
+    method: "POST",
+    handle: () => labSearchHandlers.probeModels(env, request),
   },
 
   {

@@ -3424,6 +3424,15 @@ export const chatUploadApi = {
  * · `verifyLogin` / `sendLoginEmail` —— 登录第二步，此时**还没有登录态**；
  * · 其余 —— 登录后在设置页自助管理。
  */
+/**
+ * 改动 2FA 设置时的「二次验证」载荷（2026-10-10 起服务端强制要求）。
+ * `challengeId` 只在用**邮箱验证码**时才需要 —— 由 `twoFactorApi.sendStepUpCode()` 换回。
+ */
+export interface TwoFactorStepUp {
+  code?: string
+  challengeId?: string
+}
+
 export const twoFactorApi = {
   /** 登录第二步：提交验证码，成功后才真正建立登录态 */
   verifyLogin: (payload: { challengeId: string; method: string; code: string }) =>
@@ -3452,9 +3461,16 @@ export const twoFactorApi = {
     }>("/settings/2fa"),
 
   /** 开始配置 TOTP：拿到密钥与 otpauth 链接（前端画二维码） */
-  startTotp: () =>
+  /**
+   * 改动 2FA 设置时的「二次验证」载荷（2026-10-10 起服务端强制）：
+   *   · `code`        —— 当前可用的验证码（认证器动态码 / 恢复码 / 邮箱验证码）
+   *   · `challengeId` —— 用**邮箱验证码**时必须带上（由 `sendStepUpCode()` 换回）
+   * 账号还没开启任何 2FA 时（首次开启）不需要传。
+   */
+  startTotp: (stepUp?: TwoFactorStepUp) =>
     request<{ secret: string; otpauthUrl: string }>("/settings/2fa/totp/start", {
       method: "POST",
+      body: JSON.stringify(stepUp ?? {}),
     }),
 
   /** 用认证器上的一次动态码确认，成功则返回恢复码（仅此一次明文） */
@@ -3464,34 +3480,43 @@ export const twoFactorApi = {
       body: JSON.stringify({ code }),
     }),
 
-  /** 单独关闭 TOTP（保留邮箱验证；被强制的角色不允许） */
-  disableTotp: () =>
+  /** 单独关闭 TOTP（需验 TOTP 动态码或恢复码；被强制的角色不允许） */
+  disableTotp: (stepUp?: TwoFactorStepUp) =>
     request<{ ok: boolean }>("/settings/2fa/totp/disable", {
+      method: "POST",
+      body: JSON.stringify(stepUp ?? {}),
+    }),
+
+  /** 把二次验证码发到邮箱（仅在已开启邮箱方式时可用），返回本次挑战 id */
+  sendStepUpCode: () =>
+    request<{ challengeId: string; expiresAt: string }>("/settings/2fa/step-up/send", {
       method: "POST",
     }),
 
   /** 开关邮箱验证方式 */
   /**
    * 开关邮箱二次验证。
+   * ⚠️ 关闭时要验**邮箱验证码**（或恢复码）；开启时账号已有别的 2FA 则验任一已开启方式。
    * ⚠️ 开启时若当前没有可用的恢复码，服务端会发一批新的（明文只出现在这次响应里）。
    */
-  setEmail: (enabled: boolean) =>
+  setEmail: (enabled: boolean, stepUp?: TwoFactorStepUp) =>
     request<{ ok: boolean; emailEnabled: boolean; recoveryCodes?: string[] }>("/settings/2fa/email", {
       method: "POST",
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify({ enabled, ...(stepUp ?? {}) }),
     }),
 
-  /** 重新生成恢复码（旧的全部作废） */
-  regenerateRecovery: () =>
+  /** 重新生成恢复码（旧的全部作废；需先验一个当前可用的码） */
+  regenerateRecovery: (stepUp?: TwoFactorStepUp) =>
     request<{ recoveryCodes: string[] }>("/settings/2fa/recovery/regenerate", {
       method: "POST",
+      body: JSON.stringify(stepUp ?? {}),
     }),
 
   /** 关闭全部 2FA（需先验一个当前有效的码；被强制的角色不允许） */
-  disable: (code: string) =>
+  disable: (code: string, challengeId?: string) =>
     request<{ ok: boolean }>("/settings/2fa/disable", {
       method: "POST",
-      body: JSON.stringify({ code }),
+      body: JSON.stringify(challengeId ? { code, challengeId } : { code }),
     }),
 
   /** 站长兜底：清掉某人的 2FA（丢了手机时用） */
@@ -4102,6 +4127,17 @@ export const labApi = {
     request<{ text: string; charged: number; source: "own" | "site" }>("/lab/web-search", {
       method: "POST",
       body: JSON.stringify({ query }),
+    }),
+
+  /**
+   * 代拉自定义渠道的模型列表。
+   * ⚠️ 必须走服务端：浏览器直连第三方地址会被 CORS 拦掉（预检也过不去）。
+   * 服务端那边对地址做了内网/回环/云元数据端点的拦截。
+   */
+  probeModels: (payload: { baseUrl: string; apiKey: string }) =>
+    request<{ models: string[] }>("/lab/probe-models", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
 
   /** 我的搜索 key 状态（**只回有没有配，不回内容**） */

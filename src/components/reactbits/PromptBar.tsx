@@ -58,9 +58,15 @@ export interface PromptBarCommand {
   description?: string;
 }
 
-export interface PromptBarModel {  key: string;
+export interface PromptBarModel {
+  key: string;
   name: string;
   tag?: string;
+  /**
+   * ⚠️ 本站新增：分组名（例如「站内」「免费渠道」「自定义」）。
+   * 同一分组连续排列时，只在**第一项前面**画一条小分隔 —— 见下面的列表渲染。
+   */
+  group?: string;
 }
 
 export interface PromptBarSendDetail {
@@ -139,6 +145,8 @@ type Row = {
   tag?: string;
   icon?: ReactNode | IconSvgElement;
   attach?: boolean;
+  /** 分组名：只在同组第一项前面画一条小分隔（见列表渲染处） */
+  group?: string;
 };
 type Token = { kind: 'at' | 'slash'; query: string; start: number };
 type Latest = Pick<
@@ -779,6 +787,14 @@ const PromptBar: React.FC<PromptBarProps> = ({
                 aria-hidden="true"
               />
               {list.map((row, i) => (
+                // ⚠️ 本站改动：外面包一层 Fragment，好插「换组」的分隔标题。
+                //    分组变了才画一条，不分组时完全是原来的样子。
+                <React.Fragment key={row.key}>
+                {row.group && row.group !== list[i - 1]?.group ? (
+                  <div className="px-2 pb-0.5 pt-2 text-[10px] font-medium tracking-wider [color:color-mix(in_srgb,var(--pb-ink)_45%,transparent)]">
+                    {row.group}
+                  </div>
+                ) : null}
                 <button
                   key={row.key}
                   ref={el => {
@@ -817,6 +833,7 @@ const PromptBar: React.FC<PromptBarProps> = ({
                     </>
                   ) : null}
                 </button>
+                </React.Fragment>
               ))}
               {list.length === 0 ? (
                 <div className="flex h-9 items-center px-2 text-[12px] [color:color-mix(in_srgb,var(--pb-ink)_55%,transparent)]">

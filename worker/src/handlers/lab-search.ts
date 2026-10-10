@@ -466,3 +466,102 @@ export async function searchAvailability(env: Env): Promise<{
     cost: await loadSearchCost(env),
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* 代拉模型列表（自定义渠道）                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 🔴 这是一个**服务端代为请求用户给定地址**的接口 —— 典型的 SSRF 风险面。
+ * 必须挡住的：内网地址、回环、云元数据端点（169.254.169.254）。
+ * 挡不住的：域名解析到内网 IP 的情况（Worker 内部解析，拿不到解析结果）——
+ * 这一点在注释里写清楚，不能假装万无一失。
+ */
+function assertSafeUpstreamUrl(raw: string): URL {
+  let u: URL
+  try {
+    u = new URL(raw)
+  } catch {
+    throw new ApiError(400, "地址格式不对", "INVALID_URL")
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new ApiError(400, "只支持 http/https 地址", "INVALID_URL")
+  }
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "")
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") {
+    throw new ApiError(400, "不能填本机地址", "BLOCKED_HOST")
+  }
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  if (m) {
+    const a = Number(m[1])
+    const b = Number(m[2])
+    const blocked =
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      a >= 224 ||
+      (a === 192 && b === 168) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      // 169.254.0.0/16：链路本地，云厂商元数据端点就在这（169.254.169.254）
+      (a === 169 && b === 254)
+    if (blocked) throw new ApiError(400, "不能填内网地址", "BLOCKED_HOST")
+  }
+  return u
+}
+
+/**
+ * POST /api/lab/probe-models —— body: { baseUrl, apiKey }
+ * 去 `{baseUrl}/models` 拉一份可用模型名列表，回给前端让用户勾选。
+ *
+ * 为什么要服务端代拉：**浏览器直接请求第三方地址会被跨域（CORS）拦掉**，
+ * 前端拿不到响应；而且有些服务商要求 Authorization 头，预检也过不去。
+ */
+export async function probeModels(env: Env, request: Request): Promise<Response> {
+  await requireUser(env, request)
+  const body = (await request.json().catch(() => null)) as
+    | { baseUrl?: unknown; apiKey?: unknown }
+    | null
+  const baseUrl = typeof body?.baseUrl === "string" ? body.baseUrl.trim() : ""
+  const apiKey = typeof body?.apiKey === "string" ? body.apiKey.trim() : ""
+  if (!baseUrl) throw new ApiError(400, "先填接口地址", "INVALID_URL")
+
+  // 常见写法是填到 `/v1` 或填到站点根，两种都兼容
+  const base = assertSafeUpstreamUrl(baseUrl)
+  const target = new URL(base.toString())
+  target.pathname = `${target.pathname.replace(/\/+$/, "")}/models`
+
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 15_000)
+  try {
+    const res = await fetch(target.toString(), {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      signal: ctrl.signal,
+    })
+    if (!res.ok) {
+      throw new ApiError(
+        502,
+        `对方返回 ${res.status}${res.status === 401 || res.status === 403 ? "（API Key 可能不对）" : ""}`,
+        "UPSTREAM_ERROR"
+      )
+    }
+    const data = (await res.json()) as { data?: { id?: unknown }[]; models?: unknown[] }
+    // OpenAI 兼容是 `{data:[{id}]}`；有些自建服务直接给 `{models:[...]}`，两种都收
+    const ids: string[] = Array.isArray(data?.data)
+      ? data.data.map((m) => (typeof m?.id === "string" ? m.id : "")).filter(Boolean)
+      : Array.isArray(data?.models)
+        ? data.models.filter((m): m is string => typeof m === "string")
+        : []
+    if (!ids.length) {
+      throw new ApiError(502, "对方没返回可用的模型列表", "EMPTY_MODELS")
+    }
+    return json({ models: Array.from(new Set(ids)).sort() })
+  } catch (err) {
+    if (err instanceof ApiError) throw err
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError(504, "对方响应超时", "UPSTREAM_TIMEOUT")
+    }
+    throw new ApiError(502, "连不上这个地址", "UPSTREAM_ERROR")
+  } finally {
+    clearTimeout(timer)
+  }
+}

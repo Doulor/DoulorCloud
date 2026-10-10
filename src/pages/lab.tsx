@@ -220,7 +220,13 @@ type Entry =
 interface CustomChannel {
   baseUrl: string
   apiKey: string
+  /** 当前使用的模型（= models[0]；保留它是为了老配置能直接读） */
   model: string
+  /**
+   * 这个渠道下**可选的多个**模型（2026-10-10 站长要求「支持多选」）。
+   * 用户配一次就能在模型菜单里直接切换，不用来回改配置。
+   */
+  models?: string[]
 }
 
 /**
@@ -1151,11 +1157,16 @@ export default function LabPage() {
    * 选中即同时决定渠道和模型 —— 少一次点击，也不会出现「渠道和模型对不上」。
    */
   const fxModels = React.useMemo(() => {
-    const out: { key: string; name: string; tag?: string }[] = []
+    // 按渠道分组：PromptBar 会在「换组」的地方画一条小分隔（见 PromptBarModel.group）
+    const out: { key: string; name: string; tag?: string; group?: string }[] = []
+    const gStation = t("lab.model.groupStation")
+    const gSite = t("lab.model.groupSite")
+    const gCustom = t("lab.model.groupCustom")
     for (const m of models) {
       out.push({
         key: `station:${m}`,
         name: m,
+        group: gStation,
         tag:
           stationFree && stationFreeModels.includes(m)
             ? t("lab.free.trialBadge")
@@ -1163,10 +1174,12 @@ export default function LabPage() {
       })
     }
     for (const c of siteInfo?.channels ?? []) {
-      out.push({ key: `site:${c.id}`, name: c.name, tag: t("lab.free.channelBadge") })
+      out.push({ key: `site:${c.id}`, name: c.name, group: gSite, tag: t("lab.free.channelBadge") })
     }
-    if (custom?.model) {
-      out.push({ key: `custom:${custom.model}`, name: custom.model, tag: t("lab.channel.custom") })
+    // 自定义渠道可能配了多个模型，全部列出来（老的单模型配置也能读）
+    const customModels = custom?.models?.length ? custom.models : custom?.model ? [custom.model] : []
+    for (const m of customModels) {
+      out.push({ key: `custom:${m}`, name: m, group: gCustom, tag: t("lab.channel.custom") })
     }
     /**
      * ⚠️ 这一条**永远要有**：旧版模型选择器里有个「自定义渠道」页签带配置按钮，
@@ -1176,6 +1189,7 @@ export default function LabPage() {
     out.push({
       key: "custom-setup",
       name: t("lab.model.customSetup"),
+      group: gCustom,
       tag: custom?.model ? t("lab.model.customEdit") : t("lab.model.customAdd"),
     })
     return out
@@ -4627,21 +4641,58 @@ function ChannelDialog({
   const [baseUrl, setBaseUrl] = React.useState("")
   const [apiKey, setApiKey] = React.useState("")
   const [model, setModel] = React.useState("")
+  /** 识别出来的候选模型（服务端代拉，见 probeModels 的注释） */
+  const [fetched, setFetched] = React.useState<string[]>([])
+  /** 勾选的模型（多选） */
+  const [picked, setPicked] = React.useState<string[]>([])
+  const [probing, setProbing] = React.useState(false)
 
   React.useEffect(() => {
     if (open) {
       setBaseUrl(initial?.baseUrl ?? "")
       setApiKey(initial?.apiKey ?? "")
       setModel(initial?.model ?? "")
+      setPicked(initial?.models?.length ? initial.models : initial?.model ? [initial.model] : [])
+      setFetched([])
     }
   }, [open, initial])
+
+  /** 去对方服务拉一次可用模型。拉不到不影响手填 —— 只是少了个省事的路子 */
+  const probe = async () => {
+    if (!baseUrl.trim()) {
+      toast.error(t("lab.channel.errNoUrl"))
+      return
+    }
+    setProbing(true)
+    try {
+      const res = await labApi.probeModels({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim() })
+      setFetched(res.models)
+      // 已经勾过、且新列表里还有的保留；其余清掉（避免留下已不存在的模型）
+      setPicked((prev) => prev.filter((m) => res.models.includes(m)))
+      toast.success(t("lab.channel.probed", { n: res.models.length }))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("lab.channel.probeFailed"))
+    } finally {
+      setProbing(false)
+    }
+  }
+
+  const togglePick = (m: string) =>
+    setPicked((prev) => (prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m]))
 
   const submit = () => {
     if (!baseUrl.trim()) {
       toast.error(t("lab.channel.errNoUrl"))
       return
     }
-    onSave({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim(), model: model.trim() })
+    // 勾了就用勾的；没勾就用（或手填的）单个模型
+    const list = picked.length ? picked : model.trim() ? [model.trim()] : []
+    onSave({
+      baseUrl: baseUrl.trim(),
+      apiKey: apiKey.trim(),
+      model: list[0] ?? "",
+      models: list,
+    })
   }
 
   return (
@@ -4674,13 +4725,55 @@ function ChannelDialog({
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="lab-ch-model">{t("lab.channel.modelName")}</Label>
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="lab-ch-model">{t("lab.channel.modelName")}</Label>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-[11px]"
+                disabled={probing}
+                onClick={() => void probe()}
+              >
+                {probing ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                {probing ? t("lab.channel.probing") : t("lab.channel.probe")}
+              </Button>
+            </div>
+            {/*
+              ⚠️ 手填这一栏**必须保留**：有些服务商不提供 /models，
+              或地址写法特殊导致识别失败 —— 那时还能手动写。
+            */}
             <Input
               id="lab-ch-model"
               value={model}
               onChange={(e) => setModel(e.target.value)}
               placeholder={t("lab.channel.modelPlaceholder")}
             />
+            {fetched.length > 0 ? (
+              <div className="max-h-44 space-y-0.5 overflow-y-auto rounded-lg border p-1.5">
+                <p className="px-1 pb-1 text-[11px] text-muted-foreground">
+                  {t("lab.channel.pickHint")}
+                </p>
+                {fetched.map((m) => (
+                  <label
+                    key={m}
+                    className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-xs hover:bg-accent"
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-3.5 w-3.5 shrink-0 accent-[var(--primary)]"
+                      checked={picked.includes(m)}
+                      onChange={() => togglePick(m)}
+                    />
+                    <span className="truncate">{m}</span>
+                  </label>
+                ))}
+              </div>
+            ) : null}
+            {picked.length > 0 ? (
+              <p className="text-[11px] text-muted-foreground">
+                {t("lab.channel.pickedCount", { n: picked.length })}
+              </p>
+            ) : null}
           </div>
         </div>
         <DialogFooter>
