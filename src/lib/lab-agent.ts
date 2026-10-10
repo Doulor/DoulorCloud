@@ -99,14 +99,38 @@ const MAX_READBACK_CHARS = 20_000
 // ⚠️ 交替分支里 `site_manual` 必须排在 `site` **前面**：
 // 虽然末尾的 \b 已经能挡住把 lab_site_manual 误读成 lab_site（"e" 与 "_" 之间没有词边界），
 // 但顺序写对更不容易被人改坏。
+//
+// 属性段用 [\s\S]*?（而不是 [^>]*?）：文件名里可能带 `>`（如 a>b.html），
+// 用 [^>] 会把标签头判成非法、整段降级成旁白文字。
 const TAG_RE =
-  /^<lab_(write|read|replace|list|delete|grep|run|need_vm|site_manual|skill|web_search|site)\b([^>]*?)(\/?)>$/
+  /^<lab_(write|read|replace|list|delete|grep|run|need_vm|site_manual|skill|web_search|site)\b([\s\S]*?)(\/?)>$/
 
 /**
  * 带正文体、需要等闭合标签的工具。
  * `<lab_site>` 的正文是一段 JSON 参数（可空 → 写成自闭合也行）。
  */
 const BODY_TOOLS: ToolName[] = ["write", "replace", "run", "site"]
+
+/**
+ * 找标签头收尾的 `>` —— 跳过属性值引号里的内容。
+ *
+ * 直接 `indexOf(">")` 会在 `path="a>b.html"` 这种引号内的 `>` 处提前截断，
+ * 于是 path 解析成 undefined（上层再把它当「缺 path」处理）。这里按引号配对扫描。
+ */
+function findTagEnd(text: string, from: number): number {
+  let quote = ""
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i]
+    if (quote) {
+      if (ch === quote) quote = ""
+    } else if (ch === '"' || ch === "'") {
+      quote = ch
+    } else if (ch === ">") {
+      return i
+    }
+  }
+  return -1
+}
 
 /**
  * 解析模型输出。传入的可以是**还没流完**的半截文本：
@@ -153,7 +177,7 @@ export function parseAgentText(raw: string): Segment[] {
     }
     buf += text.slice(i, lt)
 
-    const gt = text.indexOf(">", lt)
+    const gt = findTagEnd(text, lt)
     if (gt === -1) break // 标签还没收尾，等下一个 delta
 
     const head = text.slice(lt, gt + 1)
@@ -253,6 +277,16 @@ export function parseAgentText(raw: string): Segment[] {
         : s
     )
     .filter((s) => s.type !== "text" || s.text.length > 0)
+}
+
+/**
+ * 动作缺 `path` 时回喂给模型的失败原因。
+ *
+ * 以前这种情况被静默当成功（不写任何文件、也不纠正），模型于是以为改好了继续往下改。
+ * 文案是给模型纠错用的（和 PROTOCOL_NUDGE 一样不进 i18n）。
+ */
+export function missingPathReason(tool: ToolName): string {
+  return `缺少 path：<lab_${tool}> 必须带 path="文件名"（这次没有改动任何文件，请带上文件名重发）`
 }
 
 /**

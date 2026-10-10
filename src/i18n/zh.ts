@@ -6964,6 +6964,7 @@ export const zh = {
   "lab.site.confirmCancel": "取消",
   "lab.site.confirmDesc": "这是 AI 助手申请执行的站内操作，确认后才会真正发出请求。",
   "lab.tool.lines": "{n} 行",
+  "lab.tool.incomplete": "这一步没写完（标签没收尾，内容可能被截断）",
   "lab.agent.running": "正在工作…",
   "lab.agent.thinking": "正在思考",
   "lab.agent.thought": "已完成思考",

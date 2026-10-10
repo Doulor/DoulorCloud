@@ -820,7 +820,7 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
  * 单独开通，让用户自选等于绕过计费。三处（开通转组 / 建 Key 校验 / 概览下发）
  * 共用它，避免口径漂移。
  */
-function userSelectableGroups(settings: {
+export function userSelectableGroups(settings: {
   newapi_group?: string
   newapi_donation_group?: string
 }): string[] {

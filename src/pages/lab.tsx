@@ -10,8 +10,8 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ExternalLink,
   Eye,
+  ExternalLink,
   FileText,
   FolderOpen,
   Gauge,
@@ -93,6 +93,7 @@ import {
   type EffortLevel,
   grepFiles,
   looksLikeBuildRequest,
+  missingPathReason,
   needsToolResult,
   normalizeEffort,
   openPreviewInNewTab,
@@ -217,7 +218,11 @@ type Entry =
        * 有它就**优先显示它**，而不是把命令行直接摆给用户看。
        */
       desc?: string
-      status: "running" | "done"
+      /**
+       * running = 还在写；done = 已落地；failed = 这一轮结束了但标签没收尾
+       * （多半是被上游截断）—— 不能再显示成绿勾，那等于骗用户「写好了」。
+       */
+      status: "running" | "done" | "failed"
       content: string
     }
 
@@ -319,7 +324,7 @@ function makeFolderName(base?: string): string {
   const p = (n: number) => String(n).padStart(2, "0")
   return `网页项目-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(
     d.getHours()
-  )}${p(d.getMinutes())}`
+  )}${p(d.getMinutes())}${p(d.getSeconds())}`
 }
 
 function loadCustom(): CustomChannel | null {
@@ -451,7 +456,8 @@ function segmentsToEntries(
         op: s.op,
         skill: s.skill,
         desc: s.desc,
-        status: final || s.complete ? "done" : "running",
+        // 未收尾但本轮已结束 ⇒ failed（多半被上游截断），不能再显示成绿勾
+        status: s.complete ? "done" : final ? "failed" : "running",
         // 结果不来自模型、而在本地现算：grep 命中行 / 终端命令输出 / 站内操作响应
         content: s.complete
           ? s.tool === "grep" && files
@@ -1485,7 +1491,13 @@ export default function LabPage() {
    * 返回失败原因（成功返回 null）——失败时要回喂给模型，否则它会以为改成功了。
    */
   const applyAction = (a: Extract<Segment, { type: "action" }>): string | null => {
-    if (!a.complete || !a.path) return null
+    if (!a.complete) return null
+    // 缺 path 时以前直接 return null（= 当成功），模型于是以为改好了继续往下改 ——
+    // 改成明确失败，让上层回喂一轮纠正。list 本来就不需要 path。
+    if (!a.path) {
+      if (a.tool === "list") return null
+      return missingPathReason(a.tool)
+    }
     if (a.tool === "write") {
       filesRef.current = { ...filesRef.current, [a.path]: a.content }
       setFiles(filesRef.current)
@@ -2485,6 +2497,8 @@ export default function LabPage() {
    * 用户点「新对话」的意图是「再开一条线」，不是「把上一条扔掉」。
    */
   const newChat = async () => {
+    // 流式还没结束就开新会话：进行中的那几轮会把内容重新写回来（还可能写串到新会话）
+    if (streaming) return
     if (entries.length > 0 && Object.keys(filesRef.current).length && !currentId) {
       const ok = await confirmDialog({
         title: t("lab.newChat"),
@@ -2626,8 +2640,18 @@ export default function LabPage() {
   }
 
   const openProject = async (id: string) => {
+    // 切项目同理：流式进行中先拦下，免得进行中的写入落到刚打开的作品上
+    if (streaming) return
     try {
       const { project } = await labApi.getProject(id)
+      // 换项目 = 换会话：时间线 / 对话历史 / 流式缓冲一起重置，
+      // 否则旧会话的对话会被拼进新作品的请求里（串写）
+      setEntries([])
+      setLive(null)
+      setLiveThink("")
+      thinkRef.current = ""
+      convoRef.current = []
+      accRef.current = ""
       filesRef.current = project.files
       setFiles(project.files)
       setPreview(buildPreviewDoc(project.files))
@@ -2730,7 +2754,8 @@ export default function LabPage() {
   return (
     <div className="flex h-[calc(100dvh-7.5rem)] min-h-[520px] flex-col">
       {/* ---- 顶部动作条（预览固定在右上角）---- */}
-      <div className="flex shrink-0 items-center justify-end gap-1.5">
+      {/* 窄屏靠 flex-wrap 兜底：按钮都是 nowrap 的 flex 项，不换行会被挤出屏幕外够不到 */}
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
         {localOk && (
           <>
             {autoSave && autoSavedAt && !autoNeedPerm && (
@@ -2883,7 +2908,7 @@ export default function LabPage() {
           </AnchoredPanel>
         </div>
         {/* 作品项目（放会话后面 —— 站长要求的顺序：会话 → 项目 → 提示词） */}
-        <Button variant="ghost" size="sm" onClick={openProjects}>
+        <Button variant="ghost" size="sm" onClick={openProjects} disabled={streaming}>
           <FolderOpen className="h-4 w-4" />
           {t("lab.projects")}
         </Button>
@@ -4192,9 +4217,11 @@ function ToolCard({
   const lines = entry.content ? entry.content.split("\n").length : 0
   const expandable = Boolean(entry.content)
   const running = entry.status === "running"
-  // 站内操作失败 / 被用户拒绝时别打绿勾 —— 那会让人以为改动已经生效了
+  // 站内操作失败 / 被用户拒绝时别打绿勾 —— 那会让人以为改动已经生效了。
+  // 另外：标签没收尾但这一轮已结束（多半被上游截断）也算失败（entry.status === "failed"）。
   const failed =
-    entry.tool === "site" && /\] 失败：|用户拒绝/.test(entry.content ?? "")
+    entry.status === "failed" ||
+    (entry.tool === "site" && /\] 失败：|用户拒绝/.test(entry.content ?? ""))
 
   return (
     <div
@@ -4281,7 +4308,14 @@ function ToolCard({
           )}
           {running ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : entry.status === "failed" ? (
+            // 标签没收尾 / 被上游截断：这一步其实没写完，用琥珀色三角，别打绿勾
+            <AlertTriangle
+              className="h-3.5 w-3.5 text-amber-500"
+              aria-label={t("lab.tool.incomplete")}
+            />
           ) : failed ? (
+            // 站内操作失败 / 被用户拒绝
             <X className="h-3.5 w-3.5 text-destructive" />
           ) : (
             <Check className="h-3.5 w-3.5 text-emerald-500" />

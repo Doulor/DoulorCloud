@@ -7073,6 +7073,7 @@ export const en: Record<MessageKey, string> = {
   "lab.site.confirmCancel": "Cancel",
   "lab.site.confirmDesc": "The AI assistant is asking to run a site action. Nothing is sent until you confirm.",
   "lab.tool.lines": "{n} lines",
+  "lab.tool.incomplete": "This step didn't finish (closing tag missing, output may have been truncated)",
   "lab.agent.running": "Working…",
   "lab.agent.thinking": "Thinking",
   "lab.agent.thought": "Thought",
