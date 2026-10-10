@@ -7072,6 +7072,7 @@ export const en: Record<MessageKey, string> = {
   "lab.term.stop": "Shut down",
   "lab.roundLimitReached": "It ran {n} rounds without wrapping up, so it stopped here. Say \"continue\" to keep going.",
   "lab.roundStalled": "Several rounds passed with no actual file change, so it looked stuck and was stopped. Describe what to fix and let it try again.",
+  "lab.draft.lost": "Could not restore your previous chat (the browser may have cleared it). Started a new session.",
   "lab.draft.restored": "Restored your last draft",
   "lab.session.title": "Chats",
   "lab.session.count": "{n} / {max}",

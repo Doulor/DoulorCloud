@@ -663,7 +663,6 @@ export default function LabPage() {
   /** 草稿最近一次落盘时间 */
   const [draftSavedAt, setDraftSavedAt] = React.useState<number | null>(null)
   /** 这次打开是不是从草稿恢复来的（显示一次性提示） */
-  const [resumed, setResumed] = React.useState(false)
   /** 有改动还没写进草稿 → 离开页面前拦一下 */
   const dirtyRef = React.useRef(false)
   const draftTimer = React.useRef<number | null>(null)
@@ -826,8 +825,19 @@ export default function LabPage() {
       draftReady.current = true
       if (!idx.activeId) return
       sessionLoadingRef.current = true
-      const d = await loadSessionDraft<Entry>(idx.activeId)
-      if (cancelled || !d) {
+      // 读取出错也按「丢失」处理（.catch(() => null)），别让整个页面白屏
+      const d = await loadSessionDraft<Entry>(idx.activeId).catch(() => null)
+      if (cancelled) {
+        sessionLoadingRef.current = false
+        return
+      }
+      if (!d) {
+        /**
+         * ⚠️ 索引里有当前会话、但草稿正文读不出来 ⇒ 这才是**真正的进度丢失**
+         * （浏览器清了存储、或写入中途被打断）。这种必须告诉用户，不能装没事。
+         * 与之相对：能正常恢复是**预期行为**（每次进来都会恢复），不该弹提示。
+         */
+        toast.error(t("lab.draft.lost"))
         sessionLoadingRef.current = false
         return
       }
@@ -841,7 +851,6 @@ export default function LabPage() {
       setSessionId(idx.activeId)
       restoreFromDraft(d)
       sessionLoadingRef.current = false
-      setResumed(true)
     })()
     return () => {
       cancelled = true
@@ -855,13 +864,6 @@ export default function LabPage() {
     markDirty()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [files, currentId, saveName, saveDesc, entries])
-
-  // 从草稿恢复成功 → 轻提示一下（只提示一次）
-  React.useEffect(() => {
-    if (!resumed) return
-    toast.success(t("lab.draft.restored"))
-    setResumed(false)
-  }, [resumed, t])
 
   // 关页/刷新前：还有没落盘的改动就拦一下浏览器弹确认框
   React.useEffect(() => {
@@ -2405,8 +2407,6 @@ export default function LabPage() {
     setCurrentId(null)
     setSaveName("")
     setSaveDesc("")
-    setResumed(false)
-    setDraftTipClosed(false)
     setDraftSavedAt(null)
     // 换一个干净的本地子目录，别把上一份写串
     applyFolderName(makeFolderName())

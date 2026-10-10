@@ -6966,6 +6966,7 @@ export const zh = {
   "lab.term.stop": "关闭终端",
   "lab.roundLimitReached": "连续跑了 {n} 个来回还没收工，先停在这里。要我继续就说一声「继续」。",
   "lab.roundStalled": "连续几轮没有实际改动，判断它可能卡住了，已自动停下。可以说明一下要改哪里，再让它试一次。",
+  "lab.draft.lost": "上次的聊天记录没能恢复（可能已被浏览器清掉），已经开了一个新会话。",
   "lab.draft.restored": "已恢复上次的草稿",
   "lab.session.title": "会话",
   "lab.session.count": "{n} / {max}",
