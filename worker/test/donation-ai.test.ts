@@ -547,7 +547,11 @@ describe("POST /donations —— AI 自动接入", () => {
 
 describe("POST /admin/donations/:id/revoke —— 收回资源", () => {
   it("撤销 AI 捐献时同时删除中转站渠道并收回权限", async () => {
-    const admin = await makeUser({ role: "admin" })
+    // ⚠️ 必须 superadmin：`role: "admin"` 的账号 `admin_scope` 为空，管理端接口一律
+    // 403 ADMIN_SCOPE_DENIED（0119 的设计行为，见 helpers.ts 的说明）—— 用 admin 的话
+    // 这个用例在撤销那一步就挂了，下面的断言一条都跑不到（改前实测：3 条管理端用例
+    // 全部 `expected 403 to be 200`）。
+    const admin = await makeUser({ role: "superadmin" })
     const donor = await makeDonor()
     stubFetch((url) => (url.startsWith(UPSTREAM) ? upstreamModels(["gpt-4o"]) : undefined))
     stubNewApiChannelFlow({ testOk: true })
@@ -567,6 +571,115 @@ describe("POST /admin/donations/:id/revoke —— 收回资源", () => {
 
     const perms = await readPerms(donor.id)
     expect(perms.ai).toBe(false)
+  })
+
+  // ---- granted_feature 是「历史事实」，覆盖重提不得把它抹掉（2026-10-10）----
+  //
+  // 站长 2026-10-05 定的口径：同一用户对**同一上游**再提交是**覆盖**（复用同一行、
+  // 重置为 pending）。而 `applyDonationApproval` 里那个 `granted` 标志算的是
+  // 「置 true 之前是否为 false」—— 覆盖重提时用户**已经有** ai 权限了，于是算出
+  // false，把 `granted_feature` 从 1 写成 0。
+  //
+  // 后果：`revokeDonation` 只在 `granted_feature === 1` 时收回权限 ⇒ 管理员点撤销，
+  // 渠道真删了（资源下架），用户的 ai 权限却留着。且 AI 类型**没有**自动收权巡检
+  // （`auditSenseNovaKeys` 只扫 `type = 'sensenova'`），漏了只能靠管理员在成员详情里
+  // 手工关。触发门槛很低：用户自己对同一上游重提一次即可，不需要管理员做任何事。
+  it("覆盖重提后撤销：仍要收回权限（granted_feature 不被冲掉）", async () => {
+    const admin = await makeUser({ role: "superadmin" })
+    const donor = await makeDonor()
+    stubFetch((url) => (url.startsWith(UPSTREAM) ? upstreamModels(["gpt-4o"]) : undefined))
+    stubNewApiChannelFlow({ testOk: true })
+
+    // ① 首次提交 → 自动通过，权限由这次捐献解锁（granted_feature = 1）
+    const first = await submitAiDonation(donor)
+    expect(first.body.status).toBe("approved")
+    const afterFirst = await readDonation(first.body.id)
+    expect(afterFirst?.granted_feature).toBe(1)
+    expect((await readPerms(donor.id)).ai).toBe(true)
+
+    // ② 同一上游再提交（覆盖同一条单据）→ 仍应记得「这单授予过权限」
+    const second = await submitAiDonation(donor)
+    expect(second.body.id).toBe(first.body.id) // 覆盖，不是新建
+    expect(second.body.status).toBe("approved")
+    const afterSecond = await readDonation(first.body.id)
+    expect(afterSecond?.granted_feature).toBe(1)
+
+    // ③ 管理员撤销：资源下架的同时，权限必须一起收回
+    const res = await fetchSelf(
+      authRequest(admin, `/admin/donations/${first.body.id}/revoke`, { method: "POST" })
+    )
+    expect(res.status).toBe(200)
+    const out = (await res.json()) as { releasedChannel: boolean; revokedPermission: boolean }
+    expect(out.releasedChannel).toBe(true)
+    expect(out.revokedPermission).toBe(true)
+    expect((await readPerms(donor.id)).ai).toBe(false)
+  })
+
+  it("反向守护：撤销后重新批准，granted_feature 仍是 1（不因重批而丢失）", async () => {
+    const admin = await makeUser({ role: "superadmin" })
+    const donor = await makeDonor()
+    stubFetch((url) => (url.startsWith(UPSTREAM) ? upstreamModels(["gpt-4o"]) : undefined))
+    stubNewApiChannelFlow({ testOk: true })
+
+    const { body } = await submitAiDonation(donor)
+    const before = await readDonation(body.id)
+    expect(before?.granted_feature).toBe(1)
+
+    // 撤销：权限收回、单据回到 pending、granted_feature 被清空（这是设计行为 ——
+    // 「本单尚未授予任何东西」；用户此时的 ai 权限确实已被收回）
+    const revoke = await fetchSelf(
+      authRequest(admin, `/admin/donations/${body.id}/revoke`, { method: "POST" })
+    )
+    expect(revoke.status).toBe(200)
+    const afterRevoke = await readDonation(body.id)
+    expect(afterRevoke?.granted_feature).toBeNull()
+    expect((await readPerms(donor.id)).ai).toBe(false)
+
+    // 重新批准同一单据：权限再次由这次捐献解锁 ⇒ 必须重新记 1，否则下次撤销又会收不回
+    const approve = await fetchSelf(
+      authRequest(admin, "/admin/donations/review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: body.id, action: "approve" }),
+      })
+    )
+    expect(approve.status).toBe(200)
+    const afterApprove = await readDonation(body.id)
+    expect(afterApprove?.status).toBe("approved")
+    expect(afterApprove?.granted_feature).toBe(1)
+    expect((await readPerms(donor.id)).ai).toBe(true)
+  })
+
+  it("先从 0 升到 1：关着开关批成 0，打开开关后覆盖重提必须记 1", async () => {
+    const donor = await makeDonor()
+    stubFetch((url) => (url.startsWith(UPSTREAM) ? upstreamModels(["gpt-4o"]) : undefined))
+    stubNewApiChannelFlow({ testOk: true })
+
+    // ① 先在「不授予权限」的开关下提交：这轮 granted = false ⇒ 记 0
+    await setSetting("donation_grant_ai", "0")
+    let firstId: string
+    try {
+      const first = await submitAiDonation(donor)
+      firstId = first.body.id
+      expect(first.body.status).toBe("approved")
+      const afterFirst = await readDonation(firstId)
+      expect(afterFirst?.granted_feature).toBe(0)
+      expect((await readPerms(donor.id)).ai).toBe(false)
+    } finally {
+      await setSetting("donation_grant_ai", "1")
+    }
+
+    // ② 打开开关后对同一上游覆盖重提：这次真的授予了权限 ⇒ 必须从 0 升到 1。
+    //
+    // ⚠️ 这条是 `MAX(...)` 与「只写 COALESCE(...)」的分水岭：覆盖重提时行上留着的
+    // 旧值是 **0**，`COALESCE(0, 1)` 会算出 0 —— 这次真实授予被永久卡在 0，
+    // 撤销时又收不回权限（正是本 PR 要修的那个后果）。变异测试 M1 抓的就是这条。
+    const second = await submitAiDonation(donor)
+    expect(second.body.id).toBe(firstId) // 覆盖，不是新建
+    expect(second.body.status).toBe("approved")
+    const afterSecond = await readDonation(firstId)
+    expect(afterSecond?.granted_feature).toBe(1)
+    expect((await readPerms(donor.id)).ai).toBe(true)
   })
 })
 

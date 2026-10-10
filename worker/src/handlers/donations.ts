@@ -542,13 +542,25 @@ async function applyDonationApproval(
   // 记录「这次是否真正授予了权限」：置 true 之前若为 false，才算新增。
   // ⚠️ 这个判断仍基于 app.permissions 的快照（并发下可能有微小误差）；
   // 但下面写回 permissions 走的是原子 json_set，不会再整列覆盖别人的变更。
+  //
+  // ⚠️ 2026-10-10：写库用 **MAX(COALESCE(granted_feature, 0), ?)**，单调不降。
+  // 「这单曾经授予过权限」是**历史事实**，不该被后续重批抹掉。用 `granted_feature = ?`
+  // 时，覆盖重提（站长 2026-10-05 定的口径：同一用户对同一上游再提交 → 复用同一行、
+  // 重置 pending）会把 1 冲成 0 —— 那时用户**已经有** ai 权限，`granted` 算出 false。
+  // 后果是 `revokeDonation` 只在 `granted_feature === 1` 时收权限 ⇒ 管理员点撤销，
+  // 渠道真删了、权限却留着；而 AI 类型**没有**自动收权巡检（`auditSenseNovaKeys`
+  // 只扫 `type = 'sensenova'`），漏了只能靠管理员在成员详情里手工关。
+  //
+  // 置回 NULL 的地方只有两处，都是「本单确实不再授予任何东西」：撤销
+  // （`revokeDonation`）与商汤巡检撤销（`auditSenseNovaKeys`）—— 那之后用户权限
+  // 已被收回，重新批准时 `granted` 会重新算出 true，于是又记回 1。语义闭环。
   const granted = grantPerm && parsePermissions(app.permissions)[feature] !== true
 
   const approvalStatements = [
     env.DB.prepare(
       `UPDATE donations
           SET status = 'approved', review_note = ?, reviewed_by = ?, reviewed_at = ?,
-              granted_feature = ?, auto_reviewed = ?,
+              granted_feature = MAX(COALESCE(granted_feature, 0), ?), auto_reviewed = ?,
               newapi_channel_id = COALESCE(?, newapi_channel_id)
         WHERE id = ?`
     ).bind(
