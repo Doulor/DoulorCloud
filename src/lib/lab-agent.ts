@@ -14,6 +14,8 @@
  *   <lab_grep pattern="btn|按钮" in="*.html"/>
  *   <lab_need_vm/>                 （申请启用浏览器终端，会弹给用户确认）
  *   <lab_run>ls -la</lab_run>      （在浏览器终端里执行命令）
+**desc 会直接显示给用户看**（尤其在「正在思考」那一行下面），要写成「在做什么事」，
+而不是把命令抄一遍；不写就只能把你的命令行原样摆给用户看。
  *   标签之外的自然语言会被当成「旁白」原样显示给用户。
  */
 
@@ -71,6 +73,11 @@ export type Segment =
       skill?: string
       /** 仅 <lab_web_search> 用：搜索关键词 */
       query?: string
+      /**
+       * 工具的**人话说明**（目前 <lab_run> 用）。
+       * 有了它就显示它，而不是把命令行原样摆给用户看。
+       */
+      desc?: string
       content: string
       complete: boolean
     }
@@ -167,6 +174,8 @@ export function parseAgentText(raw: string): Segment[] {
     const skill = /\bname\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
     // <lab_web_search query="…"/> —— 搜索关键词单独一个属性，别和 grep 的 pattern 混用
     const query = /\bquery\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
+    // <lab_run desc="下载环境依赖">npm ci</lab_run>
+    const desc = /\bdesc\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
     const selfClosed = m[3] === "/"
 
     if (BODY_TOOLS.includes(tool) && !selfClosed) {
@@ -181,6 +190,7 @@ export function parseAgentText(raw: string): Segment[] {
           op,
           skill,
           query,
+          desc,
           content: text.slice(gt + 1).replace(/^\n/, ""),
           complete: false,
         })
@@ -195,6 +205,7 @@ export function parseAgentText(raw: string): Segment[] {
         op,
         skill,
         query,
+        desc,
         content: text.slice(gt + 1, close).replace(/^\n/, ""),
         complete: true,
       })
@@ -210,6 +221,7 @@ export function parseAgentText(raw: string): Segment[] {
         op,
         skill,
         query,
+        desc,
         content: "",
         complete: true,
       })
@@ -939,6 +951,10 @@ ls -la
 - 找某段代码 / 某个样式在哪，先用 <lab_grep> 搜，不要一个个文件 <lab_read>。
 - 改文件前先 <lab_read> 看清现状，**不要凭记忆改** —— 记忆里的内容多半已经过时。
 - 想执行命令：**先 <lab_need_vm/> 申请**，等回执说「终端已就绪」之后再用 <lab_run>。
+
+给 <lab_run> 加一个人话说明：<lab_run desc="下载环境依赖">npm ci</lab_run>。
+**desc 会直接显示给用户看**（尤其在「正在思考」那一行下面），要写成「在做什么事」，
+而不是把命令抄一遍；不写就只能把你的命令行原样摆给用户看。
   **不要**跳过申请直接 <lab_run>（终端没启动会直接失败，白费一轮）。
 - 一次可以输出多个标签，它们会按顺序执行。
 - 标签外面**不要**贴大段的 HTML/CSS/JS 代码 —— 所有代码都放进标签里；

@@ -212,6 +212,11 @@ type Entry =
       op?: string
       /** skill 用：读的是哪个技能（卡片标题上显示） */
       skill?: string
+      /**
+       * `run` 用：模型自己写的一行人话说明（例如「下载环境依赖」）。
+       * 有它就**优先显示它**，而不是把命令行直接摆给用户看。
+       */
+      desc?: string
       status: "running" | "done"
       content: string
     }
@@ -413,13 +418,24 @@ function segmentsToEntries(
       // ⚠️ 这里**不能**要求动作已经 complete：流式期间动作天然是未完成的，
       // 若加上 complete 条件，旁白会先渲染成普通气泡、直到这一轮结束才「变成」折叠块，
       // 用户看到的就是「气泡一闪、忽然被收进思考块」。
-      const followedByAction = segs.slice(i + 1).some((n) => n.type === "action")
+      /**
+       * ⚠️ 曾经这里是 `segs.slice(i + 1).some(有 action)`，即「后面跟着工具调用就折叠」。
+       * 那个判据是**错的**，2026-10-10 站长反馈「模型一轮一直在做事、基本没说过正文」：
+       * 模型说的每一句「我先看一下 X」「搞清楚了」后面都紧跟着工具调用，
+       * 于是**整轮的话全被折进思考块**，用户什么都看不到。
+       *
+       * 现在：**正文一律不折叠**。真正该折叠的是模型的推理 ——
+       * 它走的是另一条路（`reasoning_content` → liveThink → collapsible: true），
+       * 与正文严格分开。这也与主流 agent 的行为一致：
+       * 模型说的话照常显示，只有推理才收起来。
+       */
+      const collapsible = false
       out.push({
         key,
         kind: "text",
         text: s.text,
         live: !final,
-        collapsible: followedByAction,
+        collapsible,
         model,
         at: Date.now(),
       })
@@ -434,6 +450,7 @@ function segmentsToEntries(
         command: s.tool === "run" ? s.content.trim() : undefined,
         op: s.op,
         skill: s.skill,
+        desc: s.desc,
         status: final || s.complete ? "done" : "running",
         // 结果不来自模型、而在本地现算：grep 命中行 / 终端命令输出 / 站内操作响应
         content: s.complete
@@ -4226,9 +4243,18 @@ function ToolCard({
             /{entry.pattern || ""}/{entry.scope ? ` in ${entry.scope}` : ""}
           </code>
         ) : entry.tool === "run" ? (
-          <code className="truncate font-mono text-[11px] text-muted-foreground">
-            $ {entry.command?.split("\n")[0] ?? ""}
-          </code>
+          /*
+           * ⚠️ 有 `desc`（模型给的人话说明）就显示说明，**不要直接把命令行摆出来** ——
+           * 「下载环境依赖」比 `npm ci --silent` 有意义得多（站长 2026-10-10 反馈）。
+           * 模型没给说明时才退回显示命令，并且只显示第一行。
+           */
+          entry.desc ? (
+            <span className="truncate text-[11px] text-muted-foreground">{entry.desc}</span>
+          ) : (
+            <code className="truncate font-mono text-[11px] text-muted-foreground">
+              $ {entry.command?.split("\n")[0] ?? ""}
+            </code>
+          )
         ) : entry.tool === "site" ? (
           <code className="truncate font-mono text-[11px] text-muted-foreground">
             {entry.op || "?"}
