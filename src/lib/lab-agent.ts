@@ -85,6 +85,11 @@ export type Segment =
       desc?: string
       /** 仅 <lab_http> 用：目标地址 */
       url?: string
+      /**
+       * 仅 <lab_http> 用：**原样返回**，不要转成纯文本。
+       * 「照这个网址做一版」需要看 HTML 结构/类名时用；默认转纯文本省 token。
+       */
+      httpRaw?: boolean
       /** 仅 <lab_http> 用：请求方法（缺省 GET） */
       httpMethod?: string
       content: string
@@ -188,6 +193,8 @@ export function parseAgentText(raw: string): Segment[] {
     // <lab_http url="https://…" method="GET">…</lab_http>
     const url = /\burl\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
     const httpMethod = /\bmethod\s*=\s*["']([A-Za-z]+)["']/.exec(m[2])?.[1]
+    // raw="1" ⇒ 原样返回（看 HTML 结构/类名用）
+    const httpRaw = /\braw\s*=\s*["']?(1|true|yes)["']?/i.test(m[2])
     const selfClosed = m[3] === "/"
 
     if (BODY_TOOLS.includes(tool) && !selfClosed) {
@@ -205,6 +212,7 @@ export function parseAgentText(raw: string): Segment[] {
           desc,
           url,
           httpMethod,
+          httpRaw,
           content: text.slice(gt + 1).replace(/^\n/, ""),
           complete: false,
         })
@@ -222,6 +230,7 @@ export function parseAgentText(raw: string): Segment[] {
         desc,
         url,
         httpMethod,
+        httpRaw,
         content: text.slice(gt + 1, close).replace(/^\n/, ""),
         complete: true,
       })
@@ -240,6 +249,7 @@ export function parseAgentText(raw: string): Segment[] {
         desc,
         url,
         httpMethod,
+        httpRaw,
         content: "",
         complete: true,
       })
@@ -945,9 +955,20 @@ const AGENT_SYSTEM = `你是站内「实验室」的 AI 助手。用户在这里
    - 被拒绝后**不要再申请第二次**，改用文件工具把活干完。
 
 8) 终端就绪后执行命令：
-<lab_run>
+<lab_run desc="看项目里有哪些文件">
 ls -la
 </lab_run>
+
+9) **抓一个网址**（由服务端代你去请求；返回状态码 + 正文）：
+<lab_http url="https://example.com/"/>
+<lab_http url="https://api.example.com/data" method="POST">{"q":"关键词"}</lab_http>
+   - 只支持 GET / POST / HEAD；
+   - **用户说「参考这个网址」「照这个风格做一版」「看看这个页面」时，就用它把页面抓回来看**；
+     也可以用它调公开接口取数据；
+   - 网页默认转成纯文本（省 token）。要看 HTML 结构 / 类名 / 内联样式
+     （「照着这个页面做一版」通常都要），加 raw="1" 原样返回：
+     <lab_http url="https://example.com/" raw="1"/>
+   - 抓不到别反复重试，换别的做法把活干完。
    - 项目文件会被自动同步到虚拟机的 /root/project 目录。
    - 一次只写一条命令（可以是一条带管道 | 的复合命令）；
      **不要**用需要交互输入的命令（vi、top、less 之类会卡住）。

@@ -637,7 +637,9 @@ export default function LabPage() {
     if (!url) return
     setRefBusy(true)
     try {
-      const r = await labApi.http({ url })
+      // 「参考网址」是用户主动要参考一个页面 ⇒ **原样抓 HTML**（要能看见类名/结构/内联样式，
+      // 转纯文本就把样式信息全丢了，那用户就没法「照着这个做」）。
+      const r = await labApi.http({ url, raw: true })
       const header = `【参考网址：${url}】\n（页面正文，已由服务端抓取${r.truncated ? "，内容过长已截断" : ""}）\n`
       attachedRef.current[url] = { text: header + r.body }
       if (!pendingAttachRef.current.includes(url)) pendingAttachRef.current.push(url)
@@ -2284,6 +2286,8 @@ export default function LabPage() {
             const r = await labApi.http({
               url: target,
               method: s.httpMethod,
+              // raw="1" ⇒ 不转纯文本，原样返回（看 HTML 结构/类名用）
+              raw: s.httpRaw,
               // 正文当请求体（POST/PUT 才有意义；GET 时后端会忽略）
               body: s.content?.trim() || undefined,
             })
