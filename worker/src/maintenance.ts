@@ -35,7 +35,7 @@ import { purgeExpiredPreviews } from "./link-preview"
 import { autoPriceNewModels } from "./newapi-client"
 import { expireRentalOrders } from "./points-shop"
 import { scanDns } from "./dns-audit"
-import { sweepSuspendedDns, retrySuspendedDnsRestore } from "./user-suspension"
+import { sweepSuspendedDns, retrySuspendedDnsRestore, ownerStatusSql } from "./user-suspension"
 import { syncProxySubscriptionStatuses, probeProxyNodeHealth } from "./handlers/proxy"
 
 /** 过期会话保留期（天）：留一点用于排查"刚掉线"的投诉 */
@@ -807,23 +807,17 @@ export async function runMaintenance(
   let suspendedDns = { removed: 0, restored: 0, errors: [] as string[] }
   try {
     if (dryRun) {
-      // 口径必须与 sweepSuspendedDns 一致：按「归属用户仍 suspended + cf_id 还在」筛。
-      // 写成 `banned_at IS NOT NULL AND cf_id IS NOT NULL` 会恒报 0（见该函数注释）。
+      // 口径必须与 sweepSuspendedDns 一致（含归属判据）：写成
+      // `banned_at IS NOT NULL AND cf_id IS NOT NULL` 会恒报 0（见该函数注释）。
       const stuck = await env.DB.prepare(
         `SELECT COUNT(*) AS c FROM dns_records r
-          WHERE r.cf_id IS NOT NULL
-            AND (r.subdomain_id IN (SELECT id FROM subdomains
-                                     WHERE user_id IN (SELECT id FROM users WHERE status = 'suspended'))
-                 OR r.domain_id IN (SELECT id FROM domains
-                                     WHERE user_id IN (SELECT id FROM users WHERE status = 'suspended')))`
+          WHERE r.cf_id IS NOT NULL AND r.cf_id != ''
+            AND ${ownerStatusSql("suspended")}`
       ).first<{ c: number }>()
       const pending = await env.DB.prepare(
         `SELECT COUNT(*) AS c FROM dns_records r
           WHERE r.banned_at IS NOT NULL
-            AND (r.subdomain_id IN (SELECT id FROM subdomains
-                                     WHERE user_id IN (SELECT id FROM users WHERE status = 'active'))
-                 OR r.domain_id IN (SELECT id FROM domains
-                                     WHERE user_id IN (SELECT id FROM users WHERE status = 'active')))`
+            AND ${ownerStatusSql("active")}`
       ).first<{ c: number }>()
       warnings.push(
         `有 ${stuck?.c ?? 0} 条已停用记录仍挂在 Cloudflare、${pending?.c ?? 0} 条待恢复重建（dryRun 不处理）`

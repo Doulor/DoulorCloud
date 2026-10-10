@@ -97,7 +97,7 @@ async function seedUserWithRecords(n: number) {
     )
   }
   await env.DB.batch(stmts)
-  return { user, domainId }
+  return { user, domainId, subId, root }
 }
 
 /** 该用户所有记录的封禁/残留统计 */
@@ -368,5 +368,85 @@ describe("封禁 DNS 停用闭环（issue #50）", () => {
     // 兜底失败必须出现在 warnings 里 —— 否则线上永远不会有人发现
     const hit = report.warnings.find((w) => w.includes("封禁记录兜底失败"))
     expect(hit).toBeTruthy()
+  })
+
+  it("子域名转给他人后，兜底不能每小时把新主的记录删一次又建一次", async () => {
+    stubCloudflare()
+    const admin = await makeUser({ role: "superadmin" })
+    const a = await seedUserWithRecords(3)
+    const b = await makeUser({})
+
+    // A 封禁：他的记录被删并标记
+    expect((await suspendViaRoute(admin, a.user.username)).status).toBe(200)
+
+    // 管理员把 A 的子域名转给 B（走真实路由；转移只改 subdomains.user_id，
+    // 不动 dns_records.domain_id —— 归属歧义就出在这里）
+    const transfer = await fetchSelf(
+      authRequest(admin as never, `/api/admin/subdomains/${a.subId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: b.id }),
+      })
+    )
+    expect(transfer.status).toBe(200)
+
+    // 模拟 3 小时 cron：第 1 轮 retry 会把记录重建给 B（B 是 active，正确），
+    // 之后 sweep 不该再删它们 —— 否则 B 的解析每小时断一次。
+    const { sweepSuspendedDns, retrySuspendedDnsRestore } = await import("../src/user-suspension")
+    const removedPerRound: number[] = []
+    for (let i = 0; i < 3; i++) {
+      const swept = await sweepSuspendedDns(env, 40)
+      await retrySuspendedDnsRestore(env, 40)
+      removedPerRound.push(swept.removed)
+    }
+    console.log("[转移用例] 各轮 sweep 删除数 =", JSON.stringify(removedPerRound))
+
+    // 第 1 轮删 0（记录已被首跳删过、尚未重建）；第 2、3 轮必须也是 0。
+    expect(removedPerRound[1]).toBe(0)
+    expect(removedPerRound[2]).toBe(0)
+  })
+
+  it("归属判据：无子域名的历史记录仍按域名归属兜底（不能漏）", async () => {
+    stubCloudflare()
+    const admin = await makeUser({ role: "superadmin" })
+    const { user, domainId } = await seedUserWithRecords(2)
+
+    // 先封禁（首跳会处理掉带子域名的那 2 条），**之后**再造 subdomain_id 为 NULL 的
+    // 历史行 —— 这样它们只可能被兜底收走，才测得到域名归属那条分支。
+    // （0003 回填之前的存量数据就是这个形态）
+    expect((await suspendViaRoute(admin, user.username)).status).toBe(200)
+
+    const now = new Date().toISOString()
+    for (let i = 0; i < 2; i++) {
+      await env.DB.prepare(
+        `INSERT INTO dns_records
+           (id, domain_id, subdomain_id, cf_id, name, fqdn, type, content, ttl, proxied, status, source, created_at, updated_at)
+         VALUES (?, ?, NULL, ?, ?, ?, 'A', ?, 1, 0, 'active', 'web', ?, ?)`
+      )
+        .bind(
+          crypto.randomUUID(),
+          domainId,
+          `cf-legacy-${i}`,
+          `legacy${i}`,
+          `legacy${i}.probe.test`,
+          `10.0.0.${i}`,
+          now,
+          now
+        )
+        .run()
+    }
+
+    const { removed } = await sweepRounds(3)
+
+    // 这 2 条无子域名的行必须被「域名归属」那条分支收掉，否则永远留在 CF 上
+    expect(removed).toBeGreaterThanOrEqual(2)
+    const legacy = await env.DB.prepare(
+      "SELECT cf_id, banned_at FROM dns_records WHERE domain_id = ? AND subdomain_id IS NULL"
+    )
+      .bind(domainId)
+      .all<{ cf_id: string | null; banned_at: string | null }>()
+    const rows = legacy.results ?? []
+    expect(rows.length).toBe(2)
+    expect(rows.every((r) => r.cf_id === null && r.banned_at !== null)).toBe(true)
   })
 })
