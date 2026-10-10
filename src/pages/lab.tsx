@@ -72,6 +72,7 @@ import {
   SparklesIcon,
 } from "@hugeicons/core-free-icons"
 import { compressToLimit } from "@/lib/image-compress"
+import { buildSingleFileHtml, downloadBlob, zipFiles } from "@/lib/lab-export"
 import { useMotionPref } from "@/hooks/use-motion-pref"
 import { clearLabRun, getLabRun, setLabRun, useLabRun } from "@/lib/lab-run"
 import { Markdown } from "@/components/markdown"
@@ -642,6 +643,9 @@ export default function LabPage() {
   const [channelOpen, setChannelOpen] = React.useState(false)
   const [saveOpen, setSaveOpen] = React.useState(false)
   const [projectsOpen, setProjectsOpen] = React.useState(false)
+  /** 「导出」下拉（单文件 / zip） */
+  const [exportOpen, setExportOpen] = React.useState(false)
+  const exportBtnRef = React.useRef<HTMLButtonElement>(null)
   /** 绑定域名：正在填的作品 id（null = 没开那个小弹窗） */
   const [domainFor, setDomainFor] = React.useState<string | null>(null)
   const [domainDraft, setDomainDraft] = React.useState("")
@@ -2646,6 +2650,33 @@ export default function LabPage() {
     }
   }
 
+  /**
+   * 导出当前工作区。
+   *  · 单文件：CSS/JS 内联进一个 html，双击就能看（发给别人最省事）；
+   *  · zip：保留原目录结构（多文件作品、要用构建工具的走这条）。
+   */
+  const doExport = (kind: "html" | "zip") => {
+    const files = filesRef.current
+    const paths = Object.keys(files)
+    if (!paths.length) {
+      toast.error(t("lab.export.empty"))
+      return
+    }
+    // 文件名取作品名，没有就用时间；都做一次文件名净化，别带路径分隔符
+    const base = (saveName.trim() || `lab-${Date.now()}`).replace(/[\\/:*?"<>|]/g, "-")
+    if (kind === "html") {
+      const html = buildSingleFileHtml(files)
+      if (!html) {
+        toast.error(t("lab.export.noHtml"))
+        return
+      }
+      downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), `${base}.html`)
+    } else {
+      downloadBlob(zipFiles(files), `${base}.zip`)
+    }
+    setExportOpen(false)
+  }
+
   // ---- 作品 ----
 
   const loadProjects = async () => {
@@ -2991,6 +3022,55 @@ export default function LabPage() {
             </AnchoredPanel>
           </div>
         )}
+
+        {/* 导出：单文件 HTML / zip */}
+        <div className="relative">
+          <Button
+            ref={exportBtnRef}
+            variant="ghost"
+            size="sm"
+            onClick={() => setExportOpen((v) => !v)}
+            aria-expanded={exportOpen}
+            title={t("lab.export.title")}
+          >
+            <HardDriveDownload className="h-4 w-4" />
+            {t("lab.export.title")}
+          </Button>
+          <AnchoredPanel
+            anchorRef={exportBtnRef}
+            open={exportOpen}
+            onClose={() => setExportOpen(false)}
+            width={280}
+            height={104}
+          >
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-xs transition-colors hover:bg-accent/60"
+              onClick={() => doExport("html")}
+            >
+              <FileText className="h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 flex-1">
+                {t("lab.export.html")}
+                <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                  {t("lab.export.htmlHint")}
+                </span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-xs transition-colors hover:bg-accent/60"
+              onClick={() => doExport("zip")}
+            >
+              <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 flex-1">
+                {t("lab.export.zip")}
+                <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                  {t("lab.export.zipHint")}
+                </span>
+              </span>
+            </button>
+          </AnchoredPanel>
+        </div>
 
         <Button
           variant={previewOpen ? "secondary" : "outline"}
