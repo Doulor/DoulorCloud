@@ -1146,6 +1146,16 @@ export default function LabPage() {
     if (custom?.model) {
       out.push({ key: `custom:${custom.model}`, name: custom.model, tag: t("lab.channel.custom") })
     }
+    /**
+     * ⚠️ 这一条**永远要有**：旧版模型选择器里有个「自定义渠道」页签带配置按钮，
+     * 换成 PromptBar 的平铺菜单之后那个入口没了 ⇒ 没配置过的人**根本加不了自定义模型**
+     * （2026-10-10 站长反馈）。所以这里固定放一条，点它开配置弹窗（见 onModelPick）。
+     */
+    out.push({
+      key: "custom-setup",
+      name: t("lab.model.customSetup"),
+      tag: custom?.model ? t("lab.model.customEdit") : t("lab.model.customAdd"),
+    })
     return out
   }, [models, siteInfo, custom, stationFree, stationFreeModels, t])
 
@@ -3111,6 +3121,14 @@ export default function LabPage() {
                   if (i >= 0) persistEffort(EFFORT_LEVELS[i])
                 }}
       seedDraft={seedDraft ?? undefined}
+      /** 「自定义模型…」这一项不是模型，而是开配置弹窗 */
+      onModelPick={(key: string) => {
+        if (key === "custom-setup") {
+          setChannelOpen(true)
+          return true
+        }
+        return false
+      }}
       sources={fxSources}
       onAttach={handleAttach}
       /**

@@ -297,17 +297,26 @@
 }
 /* 常驻环绕微光（xhigh 起） */
 .lab-composer-glow::before {
+  /* 收在盒子外 ~14px 内（inset -8 + blur 10）—— 再大就不像「环绕」而像「一团雾」 */
   background: radial-gradient(
-    72% 170% at 50% 50%,
-    color-mix(in oklab, var(--primary) 58%, transparent),
-    transparent 72%
+    66% 150% at 50% 50%,
+    color-mix(in oklab, var(--primary) 55%, transparent),
+    transparent 74%
   );
-  filter: blur(16px);
+  filter: blur(10px);
   opacity: 0.5;
   animation: lab-glow-breath 3.8s ease-in-out infinite;
 }
-/* 扭转光效（只在 max） */
+/* 扭转光效（只在 max）—— **贴着输入框边缘转的一圈光带**
+   ⚠️ 这里的关键是「不要它自己长出边界」：
+     · `inset` 只往外让 2px、模糊只给 3px ⇒ 光带始终是贴边的一圈；
+     · 中间大片区域**靠输入框自己不透明的背景盖住** ——
+       所以不需要 mask 挖空，光自然只留在边框那一条上。
+   2026-10-10 站长反馈「超出了输入框的范围」，就是因为原来用 inset:-8px + blur(12px)，
+   整条光带糊成一片散到外面去了。 */
 .lab-composer-glow-spin::after {
+  inset: -2px;
+  border-radius: 30px;
   background: conic-gradient(
     from 0deg,
     transparent 0deg,
@@ -317,8 +326,9 @@
     color-mix(in oklab, var(--primary) 62%, transparent) 246deg,
     transparent 304deg
   );
-  filter: blur(12px);
-  opacity: 0.78;
+  /* 只柔化 3px：既让边缘不刺眼，又不会扩散出去 */
+  filter: blur(3px);
+  opacity: 0.9;
   animation: lab-glow-spin 4.6s linear infinite;
 }
 @keyframes lab-glow-breath {

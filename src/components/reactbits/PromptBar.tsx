@@ -99,6 +99,12 @@ export interface PromptBarProps {
    * 传一个**新对象**（哪怕文本一样）就生效 —— 调用方用时间戳当 `at` 即可。
    */
   seedDraft?: { text: string; at: number };
+  /**
+   * ⚠️ 本站新增：模型菜单里的某一项要不要交给调用方处理。
+   * 用途：菜单末尾要放一条「配置自定义模型…」，点它应该开配置弹窗，
+   * 而不是把它当成一个模型选中。返回 true = 已处理、跳过默认选中。
+   */
+  onModelPick?: (key: string) => boolean;
   onDictate?: () => string | void | Promise<string | void>;
   /** 允许外部替换「发送 / 停止」那枚按钮（不传则用自带的 SendGlyph）。 */
   renderSend?: (state: {
@@ -137,7 +143,13 @@ type Row = {
 type Token = { kind: 'at' | 'slash'; query: string; start: number };
 type Latest = Pick<
   PromptBarProps,
-  'onSend' | 'onStop' | 'onAttach' | 'onDictate' | 'onEffortChange' | 'onSource'
+  | 'onSend'
+  | 'onStop'
+  | 'onAttach'
+  | 'onDictate'
+  | 'onEffortChange'
+  | 'onSource'
+  | 'onModelPick'
 >;
 type Spark = {
   x: number;
@@ -283,6 +295,7 @@ const PromptBar: React.FC<PromptBarProps> = ({
   onAttach,
   onSource,
   seedDraft,
+  onModelPick,
   onDictate,
   renderSend,
   labels = {},
@@ -319,7 +332,15 @@ const PromptBar: React.FC<PromptBarProps> = ({
   const lastOpen = useRef<string | null>(null);
   const dictation = useRef(0);
   const latest = useRef<Latest>({});
-  latest.current = { onSend, onStop, onAttach, onDictate, onEffortChange, onSource };
+  latest.current = {
+    onSend,
+    onStop,
+    onAttach,
+    onDictate,
+    onEffortChange,
+    onSource,
+    onModelPick
+  };
 
   const [draft, setDraft] = useState('');
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -571,6 +592,11 @@ const PromptBar: React.FC<PromptBarProps> = ({
 
   const pick = (row: Row) => {
     if (open === 'model') {
+      // ⚠️ 本站改动：先问调用方（见 onModelPick 的注释）
+      if (latest.current.onModelPick?.(row.key)) {
+        setModelOpen(false);
+        return;
+      }
       setModelKey(row.key);
       setModelOpen(false);
       focusInput();
