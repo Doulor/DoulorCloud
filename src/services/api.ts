@@ -918,6 +918,24 @@ export const adminApi = {
   listLabPromptTemplates: () =>
     request<{ templates: AdminLabPromptTemplate[] }>("/admin/lab/templates"),
 
+  // ---- 联网搜索：站点 key + 计费 ----
+  getLabSearchConfig: () =>
+    request<{ keys: string[]; keyCount: number; cost: number; userKeyEnabled: boolean }>(
+      "/admin/lab/search"
+    ),
+
+  updateLabSearchConfig: (payload: { keys?: string; cost?: number; userKeyEnabled?: boolean }) =>
+    request<{ keys: string[]; keyCount: number; cost: number; userKeyEnabled: boolean }>(
+      "/admin/lab/search",
+      { method: "PUT", body: JSON.stringify(payload) }
+    ),
+
+  /** 逐把 key 查 Tavily 官方额度（串行，单把失败不影响其他） */
+  checkLabSearchQuota: () =>
+    request<{
+      keys: { masked: string; ok: boolean; usage?: number; limit?: number; error?: string }[]
+    }>("/admin/lab/search/quota", { method: "POST" }),
+
   // ---- 技能：站点默认（管理端维护，所有人可用）----
   listLabSkills: () => request<{ skills: AdminLabSkill[] }>("/admin/lab/skills"),
 
@@ -4060,6 +4078,30 @@ export const labApi = {
     request<{ skill: { name: string; description: string; content: string } }>(
       `/lab/skill-content?name=${encodeURIComponent(name)}`
     ),
+
+  /**
+   * 联网搜索（Tavily）。
+   * ⚠️ 必须走服务端：key 只在服务端，浏览器拿不到。
+   * 服务端已经决定「用你自己的 key 还是站点 key、扣不扣积分」，前端不用管。
+   */
+  webSearch: (query: string) =>
+    request<{ text: string; charged: number; source: "own" | "site" }>("/lab/web-search", {
+      method: "POST",
+      body: JSON.stringify({ query }),
+    }),
+
+  /** 我的搜索 key 状态（**只回有没有配，不回内容**） */
+  searchKeyInfo: () =>
+    request<{ hasOwn: boolean; siteAvailable: boolean; cost: number; enabled: boolean }>(
+      "/lab/search-key"
+    ),
+
+  /** 设置 / 清除我自己的 Tavily key（传空串 = 清除） */
+  setSearchKey: (key: string) =>
+    request<{ hasOwn: boolean }>("/lab/search-key", {
+      method: "PUT",
+      body: JSON.stringify({ key }),
+    }),
 
   listSkills: () => request<{ skills: LabSkillEntry[] }>("/lab/skills"),
 

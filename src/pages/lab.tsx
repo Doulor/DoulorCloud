@@ -29,6 +29,7 @@ import {
   Search,
   Settings2,
   Sparkles,
+  Paperclip,
   Square,
   Terminal,
   Trash2,
@@ -152,7 +153,16 @@ import {
  */
 
 type Entry =
-  | { key: string; kind: "user"; text: string }
+  | {
+      key: string
+      kind: "user"
+      text: string
+      /**
+       * 这一轮带上来的附件**文件名**（内容不进气泡，见 send 的注释）。
+       * 只用于在气泡里显示「附件：xxx.txt」这种标记。
+       */
+      files?: string[]
+    }
   | {
       key: string
       kind: "text"
@@ -357,7 +367,8 @@ function segmentsToEntries(
   files?: FileMap,
   runResults?: Map<number, string>,
   siteResults?: Map<number, string>,
-  skillResults?: Map<number, string>
+  skillResults?: Map<number, string>,
+  searchResults?: Map<number, string>
 ): Entry[] {
   const out: Entry[] = []
   segs.forEach((s, i) => {
@@ -398,7 +409,9 @@ function segmentsToEntries(
                 ? siteResults.get(i)!
                 : s.tool === "skill" && skillResults?.get(i)
                   ? skillResults.get(i)!
-                  : s.content
+                  : s.tool === "web_search" && searchResults?.get(i)
+                    ? searchResults.get(i)!
+                    : s.content
           : s.content,
       })
     }
@@ -522,6 +535,8 @@ export default function LabPage() {
   const [labSkills, setLabSkills] = React.useState<LabSkillIndexEntry[]>([])
   /** 「技能」对话框（从输入框「+」菜单进来） */
   const [skillOpen, setSkillOpen] = React.useState(false)
+  /** 「联网搜索」对话框：看状态 / 填自己的 Tavily key */
+  const [searchKeyOpen, setSearchKeyOpen] = React.useState(false)
   /**
    * 重新拉 /lab/settings 的触发器。
    * 用户导入新技能后，系统提示里的「技能目录」必须跟着更新，
@@ -1760,8 +1775,15 @@ export default function LabPage() {
    * `override` 给 PromptBar 用 —— 输入框归它管，文字从它那边递过来，
    * 不再是「先写进我们的 state 再读出来」。
    */
-  const send = async (override?: string) => {
-    const text = (override ?? input).trim()
+  const send = async (override?: string, files: string[] = []) => {
+    /**
+     * ⚠️ 这里刻意把「模型看到的」和「用户看到的」分成两份：
+     *   · 用户气泡：只显示他自己打的字 + 附件名（附件内容平铺进聊天里非常难看，
+     *     几百行 txt 会把整屏刷掉 —— 2026-10-10 站长反馈）；
+     *   · 模型输入：正文 + 附件全文（它必须拿到内容才做得了事）。
+     */
+    const typed = (override ?? input).trim()
+    const text = foldAttachments(typed, files)
     if (!text || streaming) return
     if (channel === "station" && (stationMissing || stationAuthExpired)) {
       // 两种情况要分开说：一种是压根没开通，一种是开通了但站内登录失效
@@ -1796,7 +1818,7 @@ export default function LabPage() {
     setInput("")
     updateEntries((prev) => [
       ...prev,
-      { key: `u-${Date.now()}`, kind: "user", text },
+      { key: `u-${Date.now()}`, kind: "user", text: typed, files },
     ])
     convoRef.current = [...convoRef.current, { role: "user", content: text }]
     setStreaming(true)
@@ -1915,6 +1937,28 @@ export default function LabPage() {
           siteResults.set(i, r.text)
         }
 
+        // ---- 联网搜索：key 只存服务端，所以必须走接口 ----
+        const searchResults = new Map<number, string>()
+        for (let i = 0; i < segs.length; i++) {
+          const s = segs[i]
+          if (s.type !== "action" || !s.complete || s.tool !== "web_search") continue
+          const q = (s.query ?? "").trim()
+          if (!q) {
+            searchResults.set(
+              i,
+              '[联网搜索] 没写关键词。正确写法是 <lab_web_search query="关键词"/>，请重来。'
+            )
+            continue
+          }
+          try {
+            const r = await labApi.webSearch(q)
+            searchResults.set(i, r.text)
+          } catch (e: any) {
+            // 积分不足 / 没配 key 都是「用户要自己处理」的事，原话告诉他
+            searchResults.set(i, `[联网搜索 ${q}] 失败：${e?.message ?? e}`)
+          }
+        }
+
         // ---- 技能：模型点名要读某个技能的正文（渐进式披露第二步）----
         // 正文在服务端，所以要单独去取一次；取回来当「工具结果」回喂。
         const skillResults = new Map<number, string>()
@@ -1959,7 +2003,16 @@ export default function LabPage() {
         updateEntries((prev) => [
           ...prev,
           ...thinkEntry,
-          ...segmentsToEntries(segs, round, true, filesRef.current, runResults, siteResults, skillResults),
+          ...segmentsToEntries(
+            segs,
+            round,
+            true,
+            filesRef.current,
+            runResults,
+            siteResults,
+            skillResults,
+            searchResults
+          ),
         ])
         setLive(null)
         setLiveThink("")
@@ -2065,7 +2118,8 @@ export default function LabPage() {
                   s.tool === "grep" ||
                   s.tool === "run" ||
                   s.tool === "delete" ||
-                  s.tool === "skill")
+                  s.tool === "skill" ||
+                  s.tool === "web_search")
             )
           if (hasOtherResults) {
             parts.push(
@@ -2075,7 +2129,8 @@ export default function LabPage() {
                 failures,
                 runResults,
                 siteResults,
-                skillResults
+                skillResults,
+                searchResults
               )
             )
           } else if (siteResults.size) {
@@ -2115,7 +2170,8 @@ export default function LabPage() {
               failures,
               undefined,
               undefined,
-              skillResults
+              skillResults,
+              searchResults
             ),
           },
         ]
@@ -2924,6 +2980,10 @@ export default function LabPage() {
           setSkillOpen(true)
           return true
         }
+        if (key === "web") {
+          setSearchKeyOpen(true)
+          return true
+        }
         return false
       }}
       busy={streaming}
@@ -2931,7 +2991,8 @@ export default function LabPage() {
         applyFxModel(detail?.model?.key)
         // 用户在「+」里明确要动站内数据 ⇒ 这一轮把手册直接给他，别让他再拉一遍
         siteOpRef.current = /@站内操作|@site\b/i.test(text)
-        void send(foldAttachments(text, detail?.attachments ?? []))
+        // 附件正文由 send 内部并进「给模型的那份」，不糊在聊天里
+        void send(text, detail?.attachments ?? [])
       }}
                 onStop={stop}
       /** 组件里这几处文案写死了英文，按当前语言覆盖掉 */
@@ -3303,6 +3364,8 @@ export default function LabPage() {
       </div>
 
       {/* ---- 启用浏览器终端前的确认（AI 申请时走的也是这一个）---- */}
+      <SearchKeyDialog open={searchKeyOpen} onOpenChange={setSearchKeyOpen} />
+
       <SkillDialog
         open={skillOpen}
         onOpenChange={(o) => {
@@ -3577,7 +3640,22 @@ function TimelineEntry({ entry }: { entry: Entry }) {
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%] rounded-2xl bg-primary px-3.5 py-2 text-sm leading-relaxed text-primary-foreground">
-          <p className="whitespace-pre-wrap break-words">{entry.text}</p>
+          {entry.files?.length ? (
+            <div className="mb-1.5 flex flex-wrap gap-1.5">
+              {entry.files.map((f) => (
+                <span
+                  key={f}
+                  className="inline-flex max-w-[16rem] items-center gap-1 rounded-md bg-primary-foreground/15 px-1.5 py-0.5 text-[11px] leading-5"
+                >
+                  <Paperclip className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{f}</span>
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {entry.text ? (
+            <p className="whitespace-pre-wrap break-words">{entry.text}</p>
+          ) : null}
         </div>
       </div>
     )
@@ -3598,6 +3676,13 @@ function ThinkingBlock({ entry }: { entry: Extract<Entry, { kind: "text" }> }) {
   const [open, setOpen] = React.useState(entry.live)
   /** 用户手动点开过就不再自动收起（免得刚展开又被合上） */
   const touched = React.useRef(false)
+  /**
+   * ⚠️ 这个 hook 必须放在下面那个 `if (!entry.collapsible) return …` **之前**。
+   * 放在后面会导致「普通气泡」少一个 hook、「思考块」多一个 ——
+   * 同一个位置从气泡变成思考块时，React 发现 hook 数量对不上，
+   * 直接抛 #310（站长 2026-10-10 发消息时遇到的那条报错）。
+   */
+  const { labFxOn } = useMotionPref()
 
   React.useEffect(() => {
     if (!entry.live && !touched.current) setOpen(false)
@@ -3625,8 +3710,6 @@ function ThinkingBlock({ entry }: { entry: Extract<Entry, { kind: "text" }> }) {
   }
 
   const lines = entry.text ? entry.text.split("\n").length : 0
-  // 动效模式下这个过程块也要去掉背景胶囊（站长要求：只要文字本身）
-  const { labFxOn } = useMotionPref()
 
   return (
     <div
@@ -3701,6 +3784,7 @@ const TOOL_ICON: Record<ToolName, typeof FileText> = {
   site: Globe,
   site_manual: BookOpen,
   skill: Sparkles,
+  web_search: Globe,
 }
 
 function ToolCard({
@@ -4440,6 +4524,141 @@ function SkillDialog({
               <Plus className="h-4 w-4" />
               {t("lab.skill.import")}
             </Button>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/**
+ * 「联网搜索」对话框（2026-10-10）。
+ *
+ * 从输入框「+」菜单的「联网搜索」进来。这里只做两件事：
+ *   · 告诉用户当前能不能搜、走站点 key 要花多少积分；
+ *   · 让他填一把自己的 Tavily key（**填了自己的就不扣积分**）。
+ *
+ * ⚠️ 自己的 key 只在这里填、只存服务端密文；这个框只显示「有没有配」，不回显内容。
+ */
+function SearchKeyDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+}) {
+  const { t } = useT()
+  const [info, setInfo] = React.useState<{
+    hasOwn: boolean
+    siteAvailable: boolean
+    cost: number
+    enabled: boolean
+  } | null>(null)
+  const [loading, setLoading] = React.useState(true)
+  const [busy, setBusy] = React.useState(false)
+  const [draft, setDraft] = React.useState("")
+
+  const load = React.useCallback(async () => {
+    setLoading(true)
+    try {
+      setInfo(await labApi.searchKeyInfo())
+    } catch {
+      /* 拿不到就当不支持，界面照常显示，不弹错 */
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (open) {
+      setDraft("")
+      void load()
+    }
+  }, [open, load])
+
+  const save = async (key: string) => {
+    setBusy(true)
+    try {
+      const res = await labApi.setSearchKey(key)
+      setInfo((prev) => (prev ? { ...prev, hasOwn: res.hasOwn } : prev))
+      setDraft("")
+      toast.success(key ? t("lab.search.saved") : t("lab.search.cleared"))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("lab.search.saveFailed"))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>{t("lab.search.title")}</DialogTitle>
+          <DialogDescription>{t("lab.search.desc")}</DialogDescription>
+        </DialogHeader>
+
+        {loading ? (
+          <p className="rounded-md border border-dashed p-5 text-center text-xs text-muted-foreground">
+            {t("lab.skill.loading")}
+          </p>
+        ) : (
+          <div className="space-y-3">
+            <div className="rounded-lg border p-2.5 text-xs leading-relaxed">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">{t("lab.search.siteKey")}</span>
+                <span className={info?.siteAvailable ? "" : "text-muted-foreground"}>
+                  {info?.siteAvailable
+                    ? t("lab.search.siteCost", { n: info.cost })
+                    : t("lab.search.siteNone")}
+                </span>
+              </div>
+              <div className="mt-1 flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">{t("lab.search.ownKey")}</span>
+                <span className={info?.hasOwn ? "" : "text-muted-foreground"}>
+                  {info?.hasOwn ? t("lab.search.ownSet") : t("lab.search.ownUnset")}
+                </span>
+              </div>
+            </div>
+
+            {info?.enabled === false ? (
+              <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                {t("lab.search.disabled")}
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                <Label className="text-xs">{t("lab.search.keyLabel")}</Label>
+                <Input
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="tvly-dev-…"
+                  type="password"
+                />
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  {t("lab.search.keyHint")}
+                </p>
+                <div className="flex justify-end gap-2">
+                  {info?.hasOwn && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => void save("")}
+                    >
+                      {t("lab.search.clear")}
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    disabled={busy || !draft.trim()}
+                    onClick={() => void save(draft.trim())}
+                  >
+                    {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                    {t("common.save")}
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </DialogContent>

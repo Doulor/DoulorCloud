@@ -698,6 +698,9 @@ export function AdminLabTab() {
       {/* 站点默认技能：所有人可用，用户自己导入的不在这里 */}
       <LabSkills />
 
+      {/* 联网搜索：站点 key + 计费 */}
+      <LabSearch />
+
       <div className="flex justify-end">
         <Button onClick={() => void save()} disabled={busy}>
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="mr-1.5 h-4 w-4" />}
@@ -1580,6 +1583,201 @@ function LabSkills() {
               )
             })}
           </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+/**
+ * 「联网搜索（Tavily）」管理卡片（2026-10-10）。
+ *
+ * 站点 key 是**一个框放多把**（换行/逗号分隔），和 Brevo 的 key 同一个口径：
+ *   · 多把的意义是「额度按 key 算，轮着用摊开；一把被限流自动换下一把」；
+ *   · 已保存的 key **永不回显**（连管理员也不给看内容）—— 想改就整串重新粘一遍；
+ *     所以「框里留空」= 不改动，而不是清空。
+ *
+ * 计费：走站点 key 搜索一次扣 N 积分（用户填了自己的 key 不扣）。
+ * 「查额度」是逐把串行去问 Tavily，避免并发被风控。
+ */
+function LabSearch() {
+  const { t } = useT()
+  const [cfg, setCfg] = React.useState<{
+    keys: string[]
+    keyCount: number
+    cost: number
+    userKeyEnabled: boolean
+  } | null>(null)
+  const [loading, setLoading] = React.useState(true)
+  const [busy, setBusy] = React.useState(false)
+  const [keysDraft, setKeysDraft] = React.useState("")
+  const [costDraft, setCostDraft] = React.useState("5")
+  const [userKey, setUserKey] = React.useState(true)
+  const [quota, setQuota] = React.useState<
+    { masked: string; ok: boolean; usage?: number; limit?: number; error?: string }[] | null
+  >(null)
+  const [quotaBusy, setQuotaBusy] = React.useState(false)
+
+  const load = React.useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await adminApi.getLabSearchConfig()
+      setCfg(res)
+      setCostDraft(String(res.cost))
+      setUserKey(res.userKeyEnabled)
+      setKeysDraft("")
+    } catch (err) {
+      toast.error(errMsg(err, t("adm.lab.searchSaveFailed")))
+    } finally {
+      setLoading(false)
+    }
+  }, [t])
+
+  React.useEffect(() => {
+    void load()
+  }, [load])
+
+  const save = async () => {
+    setBusy(true)
+    try {
+      const payload: { keys?: string; cost?: number; userKeyEnabled?: boolean } = {
+        cost: Number(costDraft),
+        userKeyEnabled: userKey,
+      }
+      // 留空 = 不改动（因为已保存的 key 不回显，留空不能理解成清空）
+      if (keysDraft.trim()) payload.keys = keysDraft
+      const res = await adminApi.updateLabSearchConfig(payload)
+      setCfg(res)
+      setKeysDraft("")
+      setQuota(null)
+      toast.success(t("adm.lab.searchSaved"))
+    } catch (err) {
+      toast.error(errMsg(err, t("adm.lab.searchSaveFailed")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const checkQuota = async () => {
+    setQuotaBusy(true)
+    try {
+      const res = await adminApi.checkLabSearchQuota()
+      setQuota(res.keys)
+    } catch (err) {
+      toast.error(errMsg(err, t("adm.lab.searchSaveFailed")))
+    } finally {
+      setQuotaBusy(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-start justify-between space-y-0">
+        <div className="space-y-1">
+          <CardTitle className="text-base">{t("adm.lab.searchTitle")}</CardTitle>
+          <CardDescription>{t("adm.lab.searchDesc")}</CardDescription>
+        </div>
+        <Badge variant={cfg?.keyCount ? "secondary" : "outline"}>
+          {cfg?.keyCount
+            ? t("adm.lab.skillEnabledCount", { n: cfg.keyCount })
+            : t("adm.lab.searchNoKeys")}
+        </Badge>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {loading ? (
+          <p className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
+            <Loader2 className="mr-1.5 inline h-3.5 w-3.5 animate-spin" />
+            {t("adm.lab.skillLoading")}
+          </p>
+        ) : (
+          <>
+            {cfg?.keyCount ? (
+              <div className="flex flex-wrap gap-1.5">
+                {cfg.keys.map((k) => (
+                  <code
+                    key={k}
+                    className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
+                  >
+                    {k}
+                  </code>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="space-y-1">
+              <Label className="text-xs">{t("adm.lab.searchKeys")}</Label>
+              <Textarea
+                value={keysDraft}
+                onChange={(e) => setKeysDraft(e.target.value)}
+                rows={3}
+                className="font-mono text-[12px]"
+                placeholder={"tvly-dev-xxxx\n tvly-dev-yyyy"}
+              />
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                {t("adm.lab.searchKeysHint")}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-end gap-4">
+              <div className="space-y-1">
+                <Label className="text-xs">{t("adm.lab.searchCost")}</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={1000}
+                  value={costDraft}
+                  onChange={(e) => setCostDraft(e.target.value)}
+                  className="w-28"
+                />
+              </div>
+              <label className="flex cursor-pointer items-center gap-1.5 pb-2 text-xs">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5 accent-[var(--primary)]"
+                  checked={userKey}
+                  onChange={(e) => setUserKey(e.target.checked)}
+                />
+                {t("adm.lab.searchUserKey")}
+              </label>
+            </div>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              {t("adm.lab.searchCostHint")}
+            </p>
+
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={quotaBusy || !cfg?.keyCount}
+                onClick={() => void checkQuota()}
+              >
+                {quotaBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {t("adm.lab.searchQuota")}
+              </Button>
+              <Button size="sm" disabled={busy} onClick={() => void save()}>
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {t("common.save")}
+              </Button>
+            </div>
+
+            {quota ? (
+              <div className="space-y-1 border-t pt-2">
+                {quota.map((q) => (
+                  <div key={q.masked} className="flex items-center gap-2 text-xs">
+                    <code className="font-mono text-[11px] text-muted-foreground">{q.masked}</code>
+                    <span className={q.ok ? "" : "text-destructive"}>
+                      {q.ok
+                        ? q.usage != null && q.limit != null
+                          ? `${q.usage} / ${q.limit}`
+                          : "—"
+                        : q.error}
+                    </span>
+                  </div>
+                ))}
+                <p className="text-[11px] text-muted-foreground">{t("adm.lab.searchQuotaHint")}</p>
+              </div>
+            ) : null}
+          </>
         )}
       </CardContent>
     </Card>

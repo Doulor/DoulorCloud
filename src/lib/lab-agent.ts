@@ -37,6 +37,8 @@ export type ToolName =
    * 系统提示里只有技能的「名字 + 一句话」，模型判断相关时才用它去读全文。
    */
   | "skill"
+  /** 联网搜索（Tavily）。**必须经服务端**——key 只在服务端，浏览器拿不到。 */
+  | "web_search"
 
 /** 从（可能还没流完的）模型输出里解析出的片段，按出现顺序排列 */
 export type Segment =
@@ -52,6 +54,8 @@ export type Segment =
       op?: string
       /** 仅 <lab_skill> 用：要读哪个技能（见迁移 0141 的 lab_skills.name） */
       skill?: string
+      /** 仅 <lab_web_search> 用：搜索关键词 */
+      query?: string
       content: string
       complete: boolean
     }
@@ -74,7 +78,7 @@ const MAX_READBACK_CHARS = 20_000
 // 虽然末尾的 \b 已经能挡住把 lab_site_manual 误读成 lab_site（"e" 与 "_" 之间没有词边界），
 // 但顺序写对更不容易被人改坏。
 const TAG_RE =
-  /^<lab_(write|read|replace|list|delete|grep|run|need_vm|site_manual|skill|site)\b([^>]*?)(\/?)>$/
+  /^<lab_(write|read|replace|list|delete|grep|run|need_vm|site_manual|skill|web_search|site)\b([^>]*?)(\/?)>$/
 
 /**
  * 带正文体、需要等闭合标签的工具。
@@ -124,6 +128,8 @@ export function parseAgentText(text: string): Segment[] {
     const op = /\bop\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
     // <lab_skill name="pdf-forms"/> —— 用 name 属性（和站点技能表的主键同名）
     const skill = /\bname\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
+    // <lab_web_search query="…"/> —— 搜索关键词单独一个属性，别和 grep 的 pattern 混用
+    const query = /\bquery\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
     const selfClosed = m[3] === "/"
 
     if (BODY_TOOLS.includes(tool) && !selfClosed) {
@@ -137,6 +143,7 @@ export function parseAgentText(text: string): Segment[] {
           path,
           op,
           skill,
+          query,
           content: text.slice(gt + 1).replace(/^\n/, ""),
           complete: false,
         })
@@ -150,6 +157,7 @@ export function parseAgentText(text: string): Segment[] {
         path,
         op,
         skill,
+        query,
         content: text.slice(gt + 1, close).replace(/^\n/, ""),
         complete: true,
       })
@@ -164,6 +172,7 @@ export function parseAgentText(text: string): Segment[] {
         scope,
         op,
         skill,
+        query,
         content: "",
         complete: true,
       })
@@ -209,7 +218,9 @@ export function needsToolResult(
         s.tool === "run" ||
         s.tool === "site" ||
         // 技能正文要去服务端取，必须回喂一轮把正文交给模型，否则它拿不到内容
-        s.tool === "skill")
+        s.tool === "skill" ||
+        // 搜索结果同理：key 在服务端，结果必须回喂
+        s.tool === "web_search")
   )
 }
 
@@ -240,7 +251,8 @@ export function buildToolResults(
   failures?: Map<number, string>,
   runResults?: Map<number, string>,
   siteResults?: Map<number, string>,
-  skillResults?: Map<number, string>
+  skillResults?: Map<number, string>,
+  searchResults?: Map<number, string>
 ): string {
   const parts: string[] = ["工具执行结果："]
   segments.forEach((s, i) => {
@@ -269,6 +281,11 @@ export function buildToolResults(
       parts.push(
         formatted ??
           `[执行命令] ${s.content.trim()}\n(没能执行：浏览器终端未就绪 —— 需要先申请 <lab_need_vm/>)`
+      )
+    } else if (s.tool === "web_search") {
+      parts.push(
+        searchResults?.get(i) ??
+          `[联网搜索 ${s.query ?? "?"}] (没搜到：这次轮次被中断了，可以重试一次)`
       )
     } else if (s.tool === "skill") {
       parts.push(

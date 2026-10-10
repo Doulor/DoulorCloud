@@ -709,6 +709,20 @@ export const SETTING_DEFAULTS = {
    */
   lab_agent_prompt: "",
   /**
+   * 联网搜索（Tavily）的站点 key —— **一个字符串放多把**，换行或逗号分隔，
+   * 和 `brevo_api_key` 同一个口径（解析见 lab-search.ts 的 parseTavilyKeys）。
+   * 多把的意义：额度按 key 算，轮着用能摊开；一把被限流还能换下一把。
+   * 空 = 站点不提供联网搜索（用户仍可用自己的 key）。
+   */
+  lab_tavily_keys: "",
+  /**
+   * 走**站点 key** 搜索一次扣多少积分。用户用自己的 key 不扣。
+   * 存字符串（settings 表是 TEXT），用的时候 parse。
+   */
+  lab_tavily_credit_cost: "5",
+  /** 允许用户填自己的 Tavily key（关掉就只认站点 key） */
+  lab_user_search_key_enabled: "1",
+  /**
    * AI 实验室（网页 agent）的**模型来源**。
    *   · "user"（默认）= 各用户自己的中转站专用 Key，扣自己的额度；
    *   · "admin"       = 全站统一用管理员提供的 Key，用户端标为「免费试用」。

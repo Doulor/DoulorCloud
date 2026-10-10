@@ -71,6 +71,11 @@ export type PointReason =
    * 给它返佣等于让邀请人躺着抽成，积分会随活跃度指数膨胀。
    */
   | "checkin"
+  /**
+   * 联网搜索消耗：走**站点** Tavily key 时按次扣的分（每次多少由设置决定）。
+   * 用户填了自己的 key 就不扣。属于**平台消耗回收**，不是增发。
+   */
+  | "lab_search"
 
 /** 单笔流水（下发给前端） */
 export interface PointTransaction {

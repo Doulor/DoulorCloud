@@ -10,6 +10,7 @@ import * as adminHandlers from "./handlers/admin"
 import * as adminLabHandlers from "./handlers/admin-lab"
 import * as labPromptHandlers from "./handlers/lab-prompts"
 import * as labSkillHandlers from "./handlers/lab-skills"
+import * as labSearchHandlers from "./handlers/lab-search"
 import * as adminDnsHandlers from "./handlers/admin-dns"
 import * as adminSubdomainHandlers from "./handlers/admin-subdomains"
 import * as adminMailboxHandlers from "./handlers/admin-mailboxes"
@@ -1640,6 +1641,28 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/admin/lab/templates",
     method: "GET",
     handle: () => labPromptHandlers.listPromptTemplates(env, request),
+  },
+
+  // ---- 联网搜索：站点 key + 计费（管理端）----
+  {
+    kind: "exact",
+    path: "/admin/lab/search",
+    method: "GET",
+    handle: () => labSearchHandlers.getSearchConfig(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/lab/search",
+    method: "PUT",
+    handle: () => labSearchHandlers.updateSearchConfig(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/lab/search/quota",
+    method: "POST",
+    handle: () => labSearchHandlers.checkSearchQuota(env, request),
   },
 
   // ---- 技能：站点默认（管理端 CRUD）----
@@ -3784,6 +3807,28 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/lab/settings",
     method: "GET",
     handle: () => labHandlers.getLabSettings(env, request),
+  },
+
+  // ---- 联网搜索（Tavily）----
+  {
+    kind: "exact",
+    path: "/lab/web-search",
+    method: "POST",
+    handle: () => labSearchHandlers.webSearch(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/lab/search-key",
+    method: "GET",
+    handle: () => labSearchHandlers.getMySearchKey(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/lab/search-key",
+    method: "PUT",
+    handle: () => labSearchHandlers.setMySearchKey(env, request),
   },
 
   // ---- 技能（用户端：列表 / 导入自己的技能）----
