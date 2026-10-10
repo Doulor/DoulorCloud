@@ -3250,7 +3250,14 @@ export default function LabPage() {
   return (
     <div className="flex h-[calc(100dvh-7.5rem)] min-h-[520px] flex-col">
       {/* ---- 顶部动作条（预览固定在右上角）---- */}
-      <div className="flex shrink-0 items-center justify-end gap-1.5">
+      {/*
+        ⚠️ 必须能**换行**（2026-10-10 站长反馈「手机端上面那排按钮超出范围」）：
+        这排按钮是 `flex` 且 `shrink-0`（不收缩），按钮一多就把整行撑得比屏幕宽 ——
+        后果不只是按钮被切掉：**整个页面会横向溢出**，于是居中的聊天区和
+        新发出来的消息都被推到屏幕外（同一时间站长反馈的「发消息没反应」就是它）。
+        换行而不是横向滚动：不会有「藏在右边的按钮」这种发现不了的东西。
+      */}
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
         {localOk && (
           <>
             {autoSave && autoSavedAt && !autoNeedPerm && (
