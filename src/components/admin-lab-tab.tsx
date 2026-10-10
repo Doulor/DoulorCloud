@@ -87,6 +87,7 @@ export function AdminLabTab() {
   const [siteKeyword, setSiteKeyword] = React.useState("")
   /** 造物集：作品公开前是否需要审核 */
   const [reviewRequired, setReviewRequired] = React.useState(true)
+  const [nativeTools, setNativeTools] = React.useState(false)
   /** 「自动获取」拉到的站内模型；null = 还没拉过 */
   const [modelOptions, setModelOptions] = React.useState<string[] | null>(null)
   const [modelsLoading, setModelsLoading] = React.useState(false)
@@ -104,6 +105,7 @@ export function AdminLabTab() {
     setFreeModels(res.freeModels)
     setSiteModels(res.siteModels)
     setReviewRequired(res.reviewRequired)
+    setNativeTools(res.nativeTools)
     setAgentPrompt(res.agentPrompt)
     setChannels(
       res.channels.map((c) => ({
@@ -219,6 +221,7 @@ export function AdminLabTab() {
         freeModels,
         siteModels,
         reviewRequired,
+        nativeTools,
         agentPrompt,
         channels: channels.map((c) => ({
           id: c.id,
@@ -688,6 +691,33 @@ export function AdminLabTab() {
             />
           </div>
           <p className="text-[11px] text-muted-foreground">{t("adm.lab.reviewHint")}</p>
+        </CardContent>
+      </Card>
+
+      {/* ---------------- 原生工具调用 ---------------- */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">{t("adm.lab.nativeTitle")}</CardTitle>
+          <CardDescription>{t("adm.lab.nativeDesc")}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <SourceOption
+              active={nativeTools}
+              title={t("adm.lab.nativeOn")}
+              desc={t("adm.lab.nativeOnDesc")}
+              onSelect={() => setNativeTools(true)}
+            />
+            <SourceOption
+              active={!nativeTools}
+              title={t("adm.lab.nativeOff")}
+              desc={t("adm.lab.nativeOffDesc")}
+              onSelect={() => setNativeTools(false)}
+            />
+          </div>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            {t("adm.lab.nativeHint")}
+          </p>
         </CardContent>
       </Card>
 

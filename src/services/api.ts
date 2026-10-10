@@ -528,6 +528,8 @@ export interface AdminLabConfig {
   siteModels: string[]
   /** 造物集：作品公开前是否需要管理员审核（默认开启） */
   reviewRequired: boolean
+  /** 原生工具调用（function calling）开关 */
+  nativeTools: boolean
   /** 系统提示词覆盖值；空串 = 用前端内置默认 */
   agentPrompt: string
   channels: AdminLabChannel[]
@@ -882,6 +884,8 @@ export const adminApi = {
     siteModels?: string[]
     /** 造物集：作品公开前是否需要审核 */
     reviewRequired?: boolean
+    /** 原生工具调用（function calling）开关 */
+    nativeTools?: boolean
     agentPrompt?: string
     channels?: AdminLabChannelInput[]
   }) =>

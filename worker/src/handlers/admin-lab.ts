@@ -85,6 +85,11 @@ async function buildConfig(env: Env) {
     siteModels: parseFreeModels(s.lab_site_models),
     /** 造物集：作品公开前是否需要管理员审核（默认开启） */
     reviewRequired: s.lab_review_required === "1",
+    /**
+     * 原生工具调用（function calling）开关。
+     * 关 = 走原有的「文本标签协议」；开 = 给上游带 tools、按结构化 tool_calls 解析。
+     */
+    nativeTools: s.lab_native_tools === "1",
     agentPrompt: s.lab_agent_prompt,
     channels,
   }
@@ -182,6 +187,12 @@ export async function updateLabConfig(env: Env, request: Request): Promise<Respo
     const on = body.reviewRequired === true || body.reviewRequired === "1"
     values.lab_review_required = on ? "1" : "0"
     changed.push(on ? "作品公开需审核=开" : "作品公开需审核=关")
+  }
+
+  if ("nativeTools" in body) {
+    const on = body.nativeTools === true || body.nativeTools === "1"
+    values.lab_native_tools = on ? "1" : "0"
+    changed.push(on ? "原生工具调用=开" : "原生工具调用=关")
   }
 
   if ("channels" in body) {
