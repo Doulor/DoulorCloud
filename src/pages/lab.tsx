@@ -103,6 +103,7 @@ import {
   parseReplaceContent,
   PROTOCOL_NUDGE,
   CLOSING_NUDGE,
+  MAX_CLOSING_NUDGES,
   type FileMap,
   type Segment,
   type ToolName,
@@ -2005,6 +2006,24 @@ export default function LabPage() {
    * `override` 给 PromptBar 用 —— 输入框归它管，文字从它那边递过来，
    * 不再是「先写进我们的 state 再读出来」。
    */
+  /**
+   * 这一轮模型没给用户任何文字时的兜底说明。
+   * 只在「循环真要结束、且几轮都没留下话」时调用一次。
+   */
+  const appendSilentEndNote = () => {
+    updateEntries((prev) => [
+      ...prev,
+      {
+        key: `silent-${Date.now()}`,
+        kind: "text" as const,
+        text: t("lab.silentEnd"),
+        live: false,
+        collapsible: false,
+        at: Date.now(),
+      },
+    ])
+  }
+
   const send = async (
     override?: string,
     files: string[] = [],
@@ -2142,7 +2161,15 @@ export default function LabPage() {
      * 只给一次机会：万一模型就是不肯开口，也不能让循环卡死。
      * （成因见 lab-agent.ts 的 CLOSING_NUDGE 注释。）
      */
-    let closingNudged = false
+    /**
+     * 收尾补问的次数（**不是布尔**）。
+     *
+     * ⚠️ 原来是个「只补一次」的开关，2026-10-10 站长反馈「思考完就结束了」：
+     * 补过一次之后，如果模型**又一次**只输出思考/只调工具，就再没有机会，
+     * 循环直接 break ⇒ 用户看到「思考完，没了」。
+     * 允许补两次；真不行也不许静默结束 —— 见下面的兜底。
+     */
+    let closingNudges = 0
     let round = 0
 
     try {
@@ -2377,12 +2404,17 @@ export default function LabPage() {
          * 补问一次，让它有机会把话说完。不回喂的话用户就会看到「干完活一声不响地结束」。
          */
         const shouldNudgeClosing = !saidSomething || endedWithAction
-        const mayNudgeClosing = shouldNudgeClosing && !closingNudged
+        const mayNudgeClosing =
+          shouldNudgeClosing && closingNudges < MAX_CLOSING_NUDGES
 
         // 整轮什么都没产出（例如预算全花在思考上，正文是空的）
         if (!segs.length) {
-          if (!mayNudgeClosing) break
-          closingNudged = true
+          if (!mayNudgeClosing) {
+            // 兜底：这一轮什么都没有，循环要结束了 —— 不能让用户只看到思考
+            appendSilentEndNote()
+            break
+          }
+          closingNudges += 1
           convoRef.current = [
             ...convoRef.current,
             { role: "user", content: CLOSING_NUDGE },
@@ -2486,13 +2518,20 @@ export default function LabPage() {
         if (!needsToolResult(segs, failures)) {
           // 收尾机会：模型没留下给用户的话（空轮 / 只思考 / 以动作收尾）⇒ 补问一次
           if (mayNudgeClosing) {
-            closingNudged = true
+            closingNudges += 1
             convoRef.current = [
               ...convoRef.current,
               { role: "user", content: CLOSING_NUDGE },
             ]
             continue
           }
+          /**
+           * 🔴 兜底：到这儿就是真的要结束了。
+           * 如果这一轮模型一个字都没说（只思考 / 只调工具），**绝不能让用户
+           * 看到「思考完就结束了」** —— 补一条明确的说明，把「为什么没有话」
+           * 摆到台面上，而不是留一片空白让人猜。
+           */
+          if (!saidSomething) appendSilentEndNote()
           break
         }
         // 模型要了文件内容 / 有动作失败 → 回喂结果，让它接着改

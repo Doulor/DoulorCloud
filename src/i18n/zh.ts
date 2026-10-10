@@ -1527,7 +1527,7 @@ export const zh = {
   "ai.time.fullDate": "{year}年{month}月{day}日",
   "ai.rewards.title": "其他订阅",
   "ai.rewards.why": "其他订阅是什么？",
-  "ai.rewards.desc": "通过邀请好友、完成成就等获得的额外额度，与免费订阅叠加使用 —— 消费时逐张接力，互不浪费。成就奖励：每满 10 点成就点 +1 份（每份 ¥500 额度，重置周期见卡片）。",
+  "ai.rewards.desc": "通过邀请好友、完成成就等获得的额外额度，与免费订阅叠加使用 —— 消费时逐张接力，互不浪费。成就奖励：每满 10 点成就点 +1 份（每份 ¥250 额度，重置周期见卡片）。",
   "ai.rewards.empty":
     "还没有额外订阅额度。邀请好友捐献 AI 渠道、绑定 WorkBuddy 账号，或完成成就积累成就点，都能获得额外额度。",
   "ai.rewards.invite": "去邀请好友",
@@ -1549,7 +1549,7 @@ export const zh = {
   "ai.dialog.invite.channel": "捐献 AI 渠道 / 第三方 Key（以「捐献」页当前开放的通道为准）并通过审核 → 「邀请套餐」每天 ¥200",
   "ai.dialog.invite.once": "每个好友只计一次奖励。",
   "ai.dialog.ach.title": "成就奖励",
-  "ai.dialog.ach.desc": "每积累 10 点成就点，自动发放一份「成就奖励」订阅（当前每份 ¥500 额度，按模型价格折算调用量；重置周期见卡片）。",
+  "ai.dialog.ach.desc": "每积累 10 点成就点，自动发放一份「成就奖励」订阅（当前每份 ¥250 额度，按模型价格折算调用量；重置周期见卡片）。",
   "ai.dialog.resetNote":
     "以上额度的重置周期可能不同（邀请通常每天重置、成就可能每周重置），以卡片上各套餐标注的重置时间为准。",
   "ai.reset.soon": "即将重置",
@@ -2539,16 +2539,17 @@ export const zh = {
 
   // —— Key 分组选择器 ——
   "kg.groupDonation": "{group}（捐献模型）",
-  "kg.groupDefault": "{group}（默认）",
+  "kg.groupDefault": "{group}（自动，推荐）",
   "kg.donationModel": "捐献模型",
   "kg.donationNote.a": "用 ",
   "kg.donationNote.b": "（模型名以 ",
   "kg.donationNote.c":
     " 开头，见「全部可用模型」）。这类模型来自其他用户的捐献，稳定性不如站点自有模型，适合单独用一个 Key 试。额度同样来自你的订阅。",
-  "kg.freeNote.a": "额度来自你的免费订阅每日发放。想用 ",
-  "kg.freeNote.b": "（其他用户捐献的渠道），需要另外建一个",
-  "kg.freeNote.c": "分组的 Key —— 两类模型走不同分组，一个 Key 不能同时调用。",
-  "kg.footerNote": "来自用户捐献，需另建一个「{group}」分组的 Key 才能调用",
+  "kg.freeNote.a": "自动分组：系统在你可用的分组里自动挑 —— 包括 ",
+  "kg.freeNote.b": "（",
+  "kg.freeNote.c":
+    " 分组的捐献渠道，前提是你捐献过）。一个 Key 就能调用你全部有权限的模型，无需再按分组分开建。",
+  "kg.footerNote": "来自用户捐献；用默认（auto）分组的 Key 即可调用，前提是你捐献过",
 
   // —— 管理面板 · Brevo 额度 ——
   "bq.title": "Brevo 剩余额度",
@@ -7059,6 +7060,7 @@ export const zh = {
   "lab.attach.imageTooLarge": "这张图压完还是太大，换张小一点的。",
   "lab.attach.imageFailed": "这张图读取失败，换一张再试。",
   "lab.steer.queued": "已记下，这一轮做完就按你说的改。",
+  "lab.silentEnd": "（这一轮模型只输出了思考、没有给出说明。以上是它实际执行的操作 —— 想让我总结一下，或者直接说下一步要做什么都行。）",
   "lab.msg.copy": "复制",
   "lab.msg.copyFailed": "复制失败，请手动选中文字复制。",
   "lab.msg.edit": "编辑",

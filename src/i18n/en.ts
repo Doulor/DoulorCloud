@@ -1561,7 +1561,7 @@ export const en: Record<MessageKey, string> = {
   "ai.rewards.title": "Other subscriptions",
   "ai.rewards.why": "What are other subscriptions?",
   "ai.rewards.desc":
-    "Extra quota earned from invites, achievements and more. It stacks on top of the free plan — cards are consumed one after another, so nothing goes to waste. Achievement rewards: +1 card per 10 points (¥500 quota each; reset cycle shown on the card).",
+    "Extra quota earned from invites, achievements and more. It stacks on top of the free plan — cards are consumed one after another, so nothing goes to waste. Achievement rewards: +1 card per 10 points (¥250 quota each; reset cycle shown on the card).",
   "ai.rewards.empty":
     "No extra subscription quota yet. Invite friends who donate an AI channel, link a WorkBuddy account, or earn achievement points — all of them grant extra quota.",
   "ai.rewards.invite": "Invite friends",
@@ -1587,7 +1587,7 @@ export const en: Record<MessageKey, string> = {
   "ai.dialog.invite.once": "Each friend counts once.",
   "ai.dialog.ach.title": "Achievement rewards",
   "ai.dialog.ach.desc":
-    "Every 10 achievement points grants an “Achievement reward” subscription (currently ¥500 quota per card, converted to model usage by price; reset cycle shown on the card).",
+    "Every 10 achievement points grants an “Achievement reward” subscription (currently ¥250 quota per card, converted to model usage by price; reset cycle shown on the card).",
   "ai.dialog.resetNote":
     "Reset cycles differ (invites usually reset daily, achievements weekly) — the reset time on each card is authoritative.",
   "ai.reset.soon": "Resetting soon",
@@ -2618,17 +2618,17 @@ export const en: Record<MessageKey, string> = {
 
   // —— API key group picker ——
   "kg.groupDonation": "{group} (donation models)",
-  "kg.groupDefault": "{group} (default)",
+  "kg.groupDefault": "{group} (auto, recommended)",
   "kg.donationModel": "donation models",
   "kg.donationNote.a": "Keys in the ",
   "kg.donationNote.b": " group can call ",
   "kg.donationNote.c":
     " (model names start with the prefix shown below — see “All available models”). These come from other users' donations and are less stable than first-party models, so use a dedicated key to try them. Quota comes from your subscription the same way.",
-  "kg.freeNote.a": "Quota comes from your free plan's daily grant. To use ",
-  "kg.freeNote.b": " (channels donated by other users), create a separate key in the",
+  "kg.freeNote.a": "Auto group: the system picks from the groups you can use — including ",
+  "kg.freeNote.b": " (",
   "kg.freeNote.c":
-    " group — the two kinds of models live in different groups, and one key can't call both.",
-  "kg.footerNote": "Donated by a user — needs a separate key in the “{group}” group",
+    " donation channels, if you've donated). One key calls every model you have access to.",
+  "kg.footerNote": "Donated by a user — callable with the default (auto) key if you've donated",
 
   // —— Admin · Brevo quota ——
   "bq.title": "Brevo remaining quota",
@@ -7154,6 +7154,7 @@ export const en: Record<MessageKey, string> = {
   "lab.attach.imageTooLarge": "This image is still too large after compression — try a smaller one.",
   "lab.attach.imageFailed": "Could not read this image — please try another one.",
   "lab.steer.queued": "Noted — I'll follow that as soon as this round finishes.",
+  "lab.silentEnd": "(The model only produced reasoning this round without any explanation. The steps above are what it actually did — ask me to summarise, or just tell me what to do next.)",
   "lab.msg.copy": "Copy",
   "lab.msg.copyFailed": "Copy failed — please select the text manually.",
   "lab.msg.edit": "Edit",
