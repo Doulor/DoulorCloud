@@ -643,9 +643,14 @@ export default function LabPage() {
   const [channelOpen, setChannelOpen] = React.useState(false)
   const [saveOpen, setSaveOpen] = React.useState(false)
   const [projectsOpen, setProjectsOpen] = React.useState(false)
-  /** 「导出」下拉（单文件 / zip） */
-  const [exportOpen, setExportOpen] = React.useState(false)
-  const exportBtnRef = React.useRef<HTMLButtonElement>(null)
+  /**
+   * 正在导出哪个作品（null = 没开）。
+   * 导出放在**作品目录**里而不是工具栏：导出的是「某个作品」，
+   * 而工具栏那一份只能导当前工作区，语义对不上（2026-10-10 站长要求挪进来）。
+   */
+  const [exportFor, setExportFor] = React.useState<string | null>(null)
+  const [exportFiles, setExportFiles] = React.useState<Record<string, string> | null>(null)
+  const [exportBusy, setExportBusy] = React.useState(false)
   /** 绑定域名：正在填的作品 id（null = 没开那个小弹窗） */
   const [domainFor, setDomainFor] = React.useState<string | null>(null)
   const [domainDraft, setDomainDraft] = React.useState("")
@@ -2655,15 +2660,18 @@ export default function LabPage() {
    *  · 单文件：CSS/JS 内联进一个 html，双击就能看（发给别人最省事）；
    *  · zip：保留原目录结构（多文件作品、要用构建工具的走这条）。
    */
-  const doExport = (kind: "html" | "zip") => {
-    const files = filesRef.current
+  const doExport = (
+    kind: "html" | "zip",
+    files: Record<string, string>,
+    rawName: string
+  ) => {
     const paths = Object.keys(files)
     if (!paths.length) {
       toast.error(t("lab.export.empty"))
       return
     }
     // 文件名取作品名，没有就用时间；都做一次文件名净化，别带路径分隔符
-    const base = (saveName.trim() || `lab-${Date.now()}`).replace(/[\\/:*?"<>|]/g, "-")
+    const base = (rawName.trim() || `lab-${Date.now()}`).replace(/[\\/:*?"<>|]/g, "-")
     if (kind === "html") {
       const html = buildSingleFileHtml(files)
       if (!html) {
@@ -2674,7 +2682,24 @@ export default function LabPage() {
     } else {
       downloadBlob(zipFiles(files), `${base}.zip`)
     }
-    setExportOpen(false)
+    setExportFor(null)
+    setExportFiles(null)
+  }
+
+  /** 打开导出弹窗时先把该作品的文件拉下来（列表接口不带文件内容） */
+  const openExport = async (projectId: string) => {
+    setExportFor(projectId)
+    setExportFiles(null)
+    setExportBusy(true)
+    try {
+      const { project } = await labApi.getProject(projectId)
+      setExportFiles(project.files ?? {})
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("lab.export.loadFailed"))
+      setExportFor(null)
+    } finally {
+      setExportBusy(false)
+    }
   }
 
   // ---- 作品 ----
@@ -3022,55 +3047,6 @@ export default function LabPage() {
             </AnchoredPanel>
           </div>
         )}
-
-        {/* 导出：单文件 HTML / zip */}
-        <div className="relative">
-          <Button
-            ref={exportBtnRef}
-            variant="ghost"
-            size="sm"
-            onClick={() => setExportOpen((v) => !v)}
-            aria-expanded={exportOpen}
-            title={t("lab.export.title")}
-          >
-            <HardDriveDownload className="h-4 w-4" />
-            {t("lab.export.title")}
-          </Button>
-          <AnchoredPanel
-            anchorRef={exportBtnRef}
-            open={exportOpen}
-            onClose={() => setExportOpen(false)}
-            width={280}
-            height={104}
-          >
-            <button
-              type="button"
-              className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-xs transition-colors hover:bg-accent/60"
-              onClick={() => doExport("html")}
-            >
-              <FileText className="h-3.5 w-3.5 shrink-0" />
-              <span className="min-w-0 flex-1">
-                {t("lab.export.html")}
-                <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                  {t("lab.export.htmlHint")}
-                </span>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-xs transition-colors hover:bg-accent/60"
-              onClick={() => doExport("zip")}
-            >
-              <FolderOpen className="h-3.5 w-3.5 shrink-0" />
-              <span className="min-w-0 flex-1">
-                {t("lab.export.zip")}
-                <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                  {t("lab.export.zipHint")}
-                </span>
-              </span>
-            </button>
-          </AnchoredPanel>
-        </div>
 
         <Button
           variant={previewOpen ? "secondary" : "outline"}
@@ -3967,6 +3943,15 @@ export default function LabPage() {
                     )
                   ) : null}
                   <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 shrink-0 text-muted-foreground"
+                    title={t("lab.export.title")}
+                    onClick={() => void openExport(p.id)}
+                  >
+                    <HardDriveDownload className="h-4 w-4" />
+                  </Button>
+                  <Button
                     variant="outline"
                     size="sm"
                     onClick={() => void openProject(p.id)}
@@ -3986,6 +3971,57 @@ export default function LabPage() {
               ))
             )}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- 导出作品（单文件 / zip）---- */}
+      <Dialog open={exportFor !== null} onOpenChange={(o) => !o && setExportFor(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("lab.export.title")}</DialogTitle>
+            <DialogDescription>{t("lab.export.desc")}</DialogDescription>
+          </DialogHeader>
+          {exportBusy || !exportFiles ? (
+            <p className="rounded-md border border-dashed p-5 text-center text-xs text-muted-foreground">
+              <Loader2 className="mr-1.5 inline h-3.5 w-3.5 animate-spin" />
+              {t("lab.export.loading")}
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 rounded-lg border px-3 py-2.5 text-left text-sm transition-colors hover:bg-accent/60"
+                onClick={() => {
+                  const p = projects.find((x) => x.id === exportFor)
+                  doExport("html", exportFiles, p?.name ?? "")
+                }}
+              >
+                <FileText className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 flex-1">
+                  {t("lab.export.html")}
+                  <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                    {t("lab.export.htmlHint")}
+                  </span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 rounded-lg border px-3 py-2.5 text-left text-sm transition-colors hover:bg-accent/60"
+                onClick={() => {
+                  const p = projects.find((x) => x.id === exportFor)
+                  doExport("zip", exportFiles, p?.name ?? "")
+                }}
+              >
+                <FolderOpen className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 flex-1">
+                  {t("lab.export.zip")}
+                  <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                    {t("lab.export.zipHint")}
+                  </span>
+                </span>
+              </button>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 
