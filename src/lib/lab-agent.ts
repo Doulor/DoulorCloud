@@ -375,7 +375,16 @@ const NATIVE_TOOL_NAMES: ToolName[] = [
  *
  * ⚠️ 参数名必须与 lab-tools-native.ts 的声明一一对应，改一边要改两边。
  */
-export function nativeToolCallsToSegments(calls: NativeToolCall[]): Segment[] {
+export function nativeToolCallsToSegments(
+  calls: NativeToolCall[],
+  /**
+   * 这批调用是否已经**执行完**。
+   * · 循环里真正执行时传 true（默认）；
+   * · **流式过程中**渲染实时卡片要传 false —— 参数可能只到了一半，
+   *   绝不能拿半截参数去执行（比如 write 的内容还没传完）。
+   */
+  complete = true
+): Segment[] {
   const out: Segment[] = []
   for (const c of calls) {
     if (!NATIVE_TOOL_NAMES.includes(c.name as ToolName)) continue
@@ -389,7 +398,7 @@ export function nativeToolCallsToSegments(calls: NativeToolCall[]): Segment[] {
       a = {}
     }
     const get = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : undefined)
-    const seg: Segment = { type: "action", tool, complete: true, content: "", toolCallId: c.id }
+    const seg: Segment = { type: "action", tool, complete, content: "", toolCallId: c.id }
     switch (tool) {
       case "read":
       case "delete":

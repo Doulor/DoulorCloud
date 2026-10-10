@@ -368,8 +368,11 @@ async function consumeSSE(
   onDelta: (delta: string) => void,
   onReasoning?: (delta: string) => void,
   /**
-   * 原生工具调用：上游分片传来的 `tool_calls` 在这里**按 index 拼好**，
-   * 流结束时一次性交出去（见下方 `onToolCalls`）。
+   * 原生工具调用：上游分片传来的 `tool_calls` 在这里**按 index 拼好**。
+   *
+   * ⚠️ **每次分片变化都会回调一次**（不是流结束才回调）——
+   * 这样工具卡片能像主流 agent 那样**函数名一到就出现**、参数边流边填。
+   * 调用方拿到的永远是一份**当前快照**；最后一次回调才是完整结果。
    */
   onToolCalls?: (calls: NativeToolCall[]) => void
 ): Promise<void> {
@@ -420,6 +423,8 @@ async function consumeSSE(
               if (typeof tc.function?.arguments === "string") cur.args += tc.function.arguments
               toolAcc.set(idx, cur)
             }
+            // 立刻把快照报出去 ⇒ 卡片实时出现、参数实时长
+            if (onToolCalls) onToolCalls(snapshotToolCalls(toolAcc))
           }
           if (typeof d?.content === "string" && d.content) onDelta(d.content)
           // 各种模型/中转站对思考内容的字段名不完全一致，能认的都认一下
@@ -437,19 +442,23 @@ async function consumeSSE(
   } finally {
     reader.releaseLock()
   }
-  if (onToolCalls && toolAcc.size) {
-    onToolCalls(
-      [...toolAcc.entries()]
-        .sort((a, b) => a[0] - b[0])
-        .map(([idx, v]) => ({
-          // 极少数上游不给 id；缺失时自己造一个稳定的，免得回喂时对不上
-          id: v.id || `call_${idx}`,
-          name: v.name,
-          args: v.args,
-        }))
-        .filter((c) => c.name)
-    )
-  }
+  // 收尾再报一次：保证调用方最后拿到的一定是**完整**快照
+  if (onToolCalls && toolAcc.size) onToolCalls(snapshotToolCalls(toolAcc))
+}
+
+/** 把累积表整理成一份「当前快照」（按 index 排序、丢掉还没名字的） */
+function snapshotToolCalls(
+  acc: Map<number, { id: string; name: string; args: string }>
+): NativeToolCall[] {
+  return [...acc.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([idx, v]) => ({
+      // 极少数上游不给 id；缺失时自己造一个稳定的，免得回喂时对不上
+      id: v.id || `call_${idx}`,
+      name: v.name,
+      args: v.args,
+    }))
+    .filter((c) => c.name)
 }
 
 /** 把「解析出来的片段」变成时间线上的条目 */
@@ -2032,13 +2041,27 @@ export default function LabPage() {
           sealedRef.current = true
           setThinkSealed(true)
         }
-        const segs = parseAgentText(acc)
+        /**
+         * ⚠️ 原生模式下**绝不解析/执行正文里的标签**：
+         * 那时标签只是普通文字（模型可能只是举例），去执行它等于绕过结构化调用，
+         * 而且会在流式途中拿半截参数动手。
+         */
+        const segs = useNativeTools ? [] : parseAgentText(acc)
         segs.forEach((s, i) => {
           if (s.type === "action" && s.complete && !applied.has(i)) {
             applied.set(i, applyAction(s) ?? "")
           }
         })
-        pushLive(segmentsToEntries(segs, round, false, filesRef.current))
+        /**
+         * 实时视图 = 结构化工具卡片（原生模式）+ 正在流出的正文。
+         * ⚠️ 必须合在一起再 pushLive：文本回调会把整个实时视图**整份替换**，
+         *    只推正文的话会把刚画出来的工具卡片抹掉。
+         */
+        const liveSegs =
+          useNativeTools && collected.length
+            ? [...nativeToolCallsToSegments(collected, false), ...segs]
+            : segs
+        pushLive(segmentsToEntries(liveSegs, round, false, filesRef.current))
         /**
          * 把「跑到哪一步了」同步进模块单例。
          * ⚠️ 这个回调是**循环闭包**，页面卸载后它照样在跑 ——
@@ -2056,8 +2079,25 @@ export default function LabPage() {
         pushThink()
       },
       (calls) => {
-        // 原生工具调用：分片要在**流结束**才拼得完整，所以在这里一次性收
+        /**
+         * 原生工具调用：这份是**当前快照**（会随分片不断变完整）。
+         * · 更新 `collected`（整份替换，最后一次回调即最终结果）；
+         * · 同时渲染**实时卡片** —— 函数名一到就出现，参数边流边填，
+         *   和主流 agent 一致。⚠️ 卡片必须按「未完成」渲染（complete=false）：
+         *   参数可能只到一半，**绝不能拿半截参数去执行**（比如 write 的内容还没传完）。
+         */
+        collected.length = 0
         collected.push(...calls)
+        if (calls.length) {
+          pushLive(
+            segmentsToEntries(
+              nativeToolCallsToSegments(calls, false),
+              round,
+              false,
+              filesRef.current
+            )
+          )
+        }
       }
     )
     return acc
