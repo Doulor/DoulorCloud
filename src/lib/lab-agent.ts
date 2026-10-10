@@ -105,7 +105,29 @@ const BODY_TOOLS: ToolName[] = ["write", "replace", "run", "site"]
  * 解析模型输出。传入的可以是**还没流完**的半截文本：
  * 未闭合的 <lab_write> 会以 complete=false 返回，UI 据此显示「正在写入」。
  */
-export function parseAgentText(text: string): Segment[] {
+export function parseAgentText(raw: string): Segment[] {
+  /**
+   * 🔴 先做一次**容错归一化**（2026-10-10 站长反馈「大量代码直接正文输出」）。
+   *
+   * 有些模型不直接输出 `<lab_write …>`，而是套它们自己习惯的工具调用包装，
+   * 并且**把开头那个 `<` 吃掉**：
+   *     <tool_call>lab_write path="index.html">
+   * 我们的解析靠 `indexOf("<lab_")` 定位，这种写法里 `lab_write` 前面是 `>`，
+   * 根本搜不到 ⇒ **整段（含后面成百行代码）被当成普通文字平铺在聊天里**，
+   * 工具一次都不执行。
+   *
+   * 所以这里先把几种常见包装还原成裸标签。**不能指望模型听话** ——
+   * 提示词里已经写了「直接输出标签」，但换个渠道/模型就又不一定了，
+   * 容错必须做在这一层。
+   */
+  const text = raw
+    // 收尾标签直接删掉
+    .replace(/<\/tool_call>/gi, "")
+    // `<tool_call>lab_xxx` → `<lab_xxx`（模型吃掉了 <）
+    .replace(/<tool_call>\s*(?=lab_)/gi, "<")
+    // 其余形态（`<tool_call><lab_xxx`、或后面不是 lab_）→ 整个去掉
+    .replace(/<tool_call>\s*/gi, "")
+
   const segments: Segment[] = []
   let buf = ""
   let i = 0
@@ -207,7 +229,15 @@ export function parseAgentText(text: string): Segment[] {
   return segments
     .map((s) =>
       s.type === "text"
-        ? { ...s, text: s.text.replace(/<\/lab_[a-z_]+>/gi, "").trim() }
+        ? {
+            ...s,
+            text: s.text
+              .replace(/<\/lab_[a-z_]+>/gi, "")
+              // 模型偶尔会漏出推理收尾标签（`</think>`），也不是给人看的
+              .replace(/<\/?think(?:ing)?>/gi, "")
+              .replace(/<\/?tool_call>/gi, "")
+              .trim(),
+          }
         : s
     )
     .filter((s) => s.type !== "text" || s.text.length > 0)
@@ -850,6 +880,12 @@ const AGENT_SYSTEM = `你是站内「实验室」的 AI 助手。用户在这里
 
 5) 搜索（相当于 grep，按行返回并带行号；**先搜再读**，省时省 token）：
 <lab_grep pattern="正则表达式" in="*.html"/>
+⚠️ 上面这些标签**直接写在回复里**即可。**不要**用 <tool_call> / <function_call> /
+<invoke> 之类的壳把它们包起来，也不要自己编别的工具语法 —— 只有裸标签才认得出来；
+包了壳就整段当普通文字显示，工具一次都不会执行。
+⚠️ 上面这些标签**直接写在回复里**即可。**不要**用 <tool_call> / <function_call> /
+<invoke> 之类的壳把它们包起来，也不要自己编别的工具语法 —— 只有裸标签才认得出来；
+包了壳就整段当普通文字显示，工具一次都不会执行。
    - pattern 支持正则，例如 \`id="app"|class="btn"\`；
    - in 可省略（默认搜全部文件），也可以写 *.css、src/**/*.js。
 
