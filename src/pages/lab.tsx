@@ -29,7 +29,17 @@ import {
   Save,
   Search,
   Settings2,
+  Asterisk,
+  Bot,
+  Brain,
+  Cloud,
+  Hexagon,
+  Infinity as InfinityIcon,
+  Moon,
+  Sparkle,
   Sparkles,
+  Waves,
+  Wind,
   Paperclip,
   Square,
   Terminal,
@@ -172,6 +182,8 @@ type Entry =
        * ⚠️ convoRef 只追加、不重排，所以当时记下的下标永远不会失效。
        */
       convoAt?: number
+      /** 发出时刻（毫秒）。工具栏里鼠标悬停时才显示 */
+      at?: number
     }
   | {
       key: string
@@ -181,6 +193,10 @@ type Entry =
       live: boolean
       /** 后面跟着工具调用 → 这是「思考/计划」，折叠展示；否则是给用户的答复 */
       collapsible: boolean
+      /** 产出这条的模型名（工具栏里显示 + 小图标）。老草稿没有就不显示 */
+      model?: string
+      /** 产出时刻（毫秒）。工具栏里鼠标悬停时才显示 */
+      at?: number
     }
   | {
       key: string
@@ -378,7 +394,9 @@ function segmentsToEntries(
   runResults?: Map<number, string>,
   siteResults?: Map<number, string>,
   skillResults?: Map<number, string>,
-  searchResults?: Map<number, string>
+  searchResults?: Map<number, string>,
+  /** 产出这一轮的模型名（写到文本消息上，工具栏要显示） */
+  model?: string
 ): Entry[] {
   const out: Entry[] = []
   segs.forEach((s, i) => {
@@ -396,6 +414,8 @@ function segmentsToEntries(
         text: s.text,
         live: !final,
         collapsible: followedByAction,
+        model,
+        at: Date.now(),
       })
     } else {
       out.push({
@@ -1917,7 +1937,14 @@ export default function LabPage() {
       ...prev,
       // convoAt 记的是「这条消息即将被塞进 convoRef 的位置」——
       // 编辑重发时就从这里往回切（见 editMessage）
-      { key: `u-${Date.now()}`, kind: "user", text: typed, files, convoAt: convoRef.current.length },
+      {
+        key: `u-${Date.now()}`,
+        kind: "user",
+        text: typed,
+        files,
+        convoAt: convoRef.current.length,
+        at: Date.now(),
+      },
     ])
     /**
      * 给模型的这一份：有图就走**多模态 content 数组**。
@@ -2124,7 +2151,8 @@ export default function LabPage() {
             runResults,
             siteResults,
             skillResults,
-            searchResults
+            searchResults,
+            activeModel
           ),
         ])
         setLive(null)
@@ -3813,13 +3841,73 @@ function WorkingIndicator({ label }: { label: string }) {
 }
 
 /**
+ * 模型名 → 小图标与配色（2026-10-10 站长要求）。
+ *
+ * 按**关键字**匹配厂商，认不出就用默认的机器人图标 —— 新模型上线、
+ * 或用户填了自建渠道的怪名字，也不会显示成空白。
+ *
+ * ⚠️ 用的是通用几何图标 + 各家主色，**没有引入各家的商标图形文件** ——
+ *    商标图直接用有授权风险，而「颜色 + 形状」足够一眼分辨。
+ *    将来要换成真图标，把 svg 放进项目、改这里的 Icon 即可。
+ * 颜色都取中间调，浅色/深色主题下都看得清（深色下纯黑图标会消失）。
+ */
+const MODEL_BADGES: { test: RegExp; Icon: typeof Bot; color: string }[] = [
+  { test: /deepseek/i, Icon: Waves, color: "#4d6bfe" },
+  { test: /gpt|openai|^o[13]|davinci/i, Icon: Hexagon, color: "#10a37f" },
+  { test: /claude|anthropic|sonnet|opus|haiku/i, Icon: Asterisk, color: "#d97757" },
+  { test: /gemini|google|gemma|palm/i, Icon: Sparkle, color: "#4285f4" },
+  { test: /qwen|qwq|通义|tongyi/i, Icon: Cloud, color: "#615ced" },
+  { test: /glm|chatglm|智谱|zhipu/i, Icon: Brain, color: "#7c5cff" },
+  { test: /kimi|moonshot/i, Icon: Moon, color: "#6b7280" },
+  { test: /llama|meta/i, Icon: InfinityIcon, color: "#0866ff" },
+  { test: /mistral|mixtral|codestral/i, Icon: Wind, color: "#fa520f" },
+  { test: /grok|xai/i, Icon: Bot, color: "#6b7280" },
+]
+
+/** 模型名 → {图标, 颜色}；认不出返回默认 */
+function modelBadge(name: string): { Icon: typeof Bot; color: string } {
+  return MODEL_BADGES.find((b) => b.test.test(name)) ?? { Icon: Bot, color: "#6b7280" }
+}
+
+/** 模型名显示成一小枚标签：图标 + 名字（太长就截断，别把工具栏撑爆） */
+function ModelTag({ name }: { name: string }) {
+  const { Icon, color } = modelBadge(name)
+  return (
+    <span className="inline-flex max-w-[11rem] items-center gap-1" title={name}>
+      <Icon className="h-3.5 w-3.5 shrink-0" style={{ color }} />
+      <span className="truncate">{name}</span>
+    </span>
+  )
+}
+
+/** 毫秒 → HH:MM（跟站点语言走） */
+function fmtTime(at: number): string {
+  return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+}
+
+/**
  * 消息下面那排快捷操作（2026-10-10 站长要求）。
  *
  * ⚠️ **平时不显示**，鼠标移到这条消息上才浮出来（`group-hover`）——
  * 常驻会让每条消息下面都挂一行图标，把对话切得很碎。
  * 键盘用户走 `focus-within` 也能唤出来。
  */
-function MsgActions({ text, onEdit }: { text: string; onEdit?: () => void }) {
+function MsgActions({
+  text,
+  onEdit,
+  model,
+  at,
+  always,
+}: {
+  text: string
+  onEdit?: () => void
+  /** AI 的消息带上产出它的模型名 */
+  model?: string
+  /** 时间戳：**只在鼠标悬停这条消息时显示** */
+  at?: number
+  /** true = 整条工具栏常驻显示（AI 的消息）；false = 悬停才出现（用户的消息） */
+  always?: boolean
+}) {
   const { t } = useT()
   const [copied, setCopied] = React.useState(false)
 
@@ -3837,10 +3925,16 @@ function MsgActions({ text, onEdit }: { text: string; onEdit?: () => void }) {
   return (
     <div
       className={cn(
-        "mt-1 flex items-center gap-0.5 opacity-0 transition-opacity duration-150",
-        "group-hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none"
+        "mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground",
+        "transition-opacity duration-150 motion-reduce:transition-none",
+        always
+          ? // AI 的消息：工具栏**常驻**
+            ""
+          : // 用户的消息：鼠标靠近才浮出来
+            "opacity-0 group-hover:opacity-100 focus-within:opacity-100"
       )}
     >
+      {model && <ModelTag name={model} />}
       <button
         type="button"
         title={t("lab.msg.copy")}
@@ -3861,6 +3955,15 @@ function MsgActions({ text, onEdit }: { text: string; onEdit?: () => void }) {
           <Pencil className="h-3.5 w-3.5" />
         </button>
       )}
+      {/*
+        时间**始终是悬停才显示**，哪怕工具栏本身常驻 —— 时间只有部分场景有用，
+        常驻会让每一行都多一截数字，反而更吵。
+      */}
+      {at ? (
+        <span className="tabular-nums opacity-0 transition-opacity duration-150 group-hover:opacity-100 motion-reduce:transition-none">
+          {fmtTime(at)}
+        </span>
+      ) : null}
     </div>
   )
 }
@@ -3895,6 +3998,7 @@ function TimelineEntry({
         </div>
         <MsgActions
           text={entry.text}
+          at={entry.at}
           onEdit={onEdit ? () => onEdit(entry) : undefined}
         />
       </div>
@@ -3952,7 +4056,9 @@ function ThinkingBlock({ entry }: { entry: Extract<Entry, { kind: "text" }> }) {
           {entry.live && !entry.text.trim() && <span className="lab-caret" />}
         </div>
         {/* 还在流式输出时不给复制 —— 那时内容是半截的，复制了也没用 */}
-        {!entry.live && <MsgActions text={entry.text} />}
+        {!entry.live && (
+          <MsgActions text={entry.text} model={entry.model} at={entry.at} always />
+        )}
       </div>
     )
   }
