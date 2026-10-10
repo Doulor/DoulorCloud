@@ -2302,6 +2302,12 @@ export default function LabPage() {
      * 允许补两次；真不行也不许静默结束 —— 见下面的兜底。
      */
     let closingNudges = 0
+    /**
+     * **整轮**（这一次发送）里模型有没有跟用户说过话。
+     * 只要有一轮说过，最后就不该再补「这轮没有说明」—— 那会让用户莫名其妙
+     * （2026-10-10 站长反馈「每轮结束都要说一句…」）。
+     */
+    let turnSaidSomething = false
     let round = 0
 
     try {
@@ -2559,7 +2565,17 @@ export default function LabPage() {
          *   · `saidSomething`：有正文（会被渲染成气泡或折叠块）
          *   · `endedWithAction`：以工具调用收尾 ⇒ 模型明显还没说完
          */
-        const saidSomething = segs.some((s) => s.type === "text" && s.text.trim().length > 0)
+        /**
+         * 这一轮模型有没有**跟用户说话**。
+         *
+         * 🔴 原生模式下 `segs` **只有工具调用** —— 正文在 `raw` 里，压根不会被转成 Segment。
+         *    所以这里必须看 `raw`；否则永远判定为「没说」，于是每一轮都补问、
+         *    最后还补一条「这轮没有说明」（2026-10-10 站长反馈）。
+         */
+        const saidSomething = useNative
+          ? raw.trim().length > 0
+          : segs.some((s) => s.type === "text" && s.text.trim().length > 0)
+        if (saidSomething) turnSaidSomething = true
         const endedWithAction =
           segs.length > 0 && segs[segs.length - 1].type === "action"
 
@@ -2574,8 +2590,8 @@ export default function LabPage() {
         // 整轮什么都没产出（例如预算全花在思考上，正文是空的）
         if (!segs.length) {
           if (!mayNudgeClosing) {
-            // 兜底：这一轮什么都没有，循环要结束了 —— 不能让用户只看到思考
-            appendSilentEndNote()
+            // 兜底：整轮下来一个字都没说，循环要结束了 —— 不能让用户只看到思考
+            if (!turnSaidSomething) appendSilentEndNote()
             break
           }
           closingNudges += 1
@@ -2742,7 +2758,7 @@ export default function LabPage() {
            * 看到「思考完就结束了」** —— 补一条明确的说明，把「为什么没有话」
            * 摆到台面上，而不是留一片空白让人猜。
            */
-          if (!saidSomething) appendSilentEndNote()
+          if (!turnSaidSomething) appendSilentEndNote()
           break
         }
         // 模型要了文件内容 / 有动作失败 → 回喂结果，让它接着改
