@@ -1897,9 +1897,43 @@ export const voucherApi = {
 
 // ---- WorkBuddy 反代账号捐献（登录即解锁 AI 权限，免审核）----
 
+export interface Wb2ApiImportResult {
+  ok: boolean
+  total: number
+  bound: number
+  alreadyBound: string[]
+  skippedByLimit: string[]
+  limit: number
+  upstream: {
+    total: number | null
+    imported: number | null
+    skipped: number | null
+    errors: string[]
+  }
+}
+
 export const wb2apiApi = {
   /** 通道状态 + 当前用户的绑定列表 */
   status: () => request<Wb2ApiStatus>("/wb2api/status"),
+
+  /**
+   * 上传 cockpit 导出的 JSON，批量导入账号并绑定（2026-10-10）。
+   *
+   * ⚠️ **不能用 `request()`** —— 它见 body 就塞 `Content-Type: application/json`，
+   * 会把 multipart 的 boundary 冲掉，服务端就收不到文件了。这里直接用 fetch，
+   * 让浏览器自己带 multipart 头。
+   */
+  importAccounts: async (file: File): Promise<Wb2ApiImportResult> => {
+    const fd = new FormData()
+    fd.append("file", file)
+    const res = await fetch(`${BASE}/wb2api/import`, {
+      method: "POST",
+      body: fd,
+      credentials: "include",
+    })
+    if (!res.ok) await throwHttpError(res)
+    return (await res.json()) as Wb2ApiImportResult
+  },
 
   /**
    * 发起登录，拿到授权链接。
@@ -1924,6 +1958,32 @@ export const wb2apiApi = {
   // 管理端
   listBindings: () =>
     request<{ bindings: AdminWb2ApiBinding[] }>("/admin/wb2api/bindings"),
+
+  /**
+   * 被上游判死、需要捐献者重新登录的绑定（2026-10-10，11140 检测）。
+   * 返回里带 uid / 禁用原因 / 对应的本站用户。
+   */
+  listInvalid: () =>
+    request<{
+      invalid: {
+        uid: string
+        reason: string
+        bindingId: string
+        userId: string
+        username: string | null
+        email: string | null
+      }[]
+    }>("/admin/wb2api/invalid"),
+
+  /**
+   * 给失效账号的捐献者发「强制通知 + 收回 ai 权限」（连带禁用 NewAPI 侧用户）。
+   * `dryRun=true` 只统计不落库 —— 先看规模再决定要不要真发。
+   */
+  notifyInvalid: (dryRun = false) =>
+    request<{ candidates: number; users: number; notified: number; skipped: number }>(
+      "/admin/wb2api/invalid/notify",
+      { method: "POST", body: JSON.stringify({ dryRun }) }
+    ),
 
   /**
    * 摘掉一个绑定。`revokeAi` 省略时由服务端按「有其他依据就保留」自动判定；
@@ -1951,15 +2011,46 @@ export const wb2apiApi = {
 
 // ---- Qoder2API 反代账号捐献（第二条，登录即解锁 AI 权限，免审核）----
 
+export interface Qoder2ApiImportResult {
+  ok: boolean
+  total: number
+  bound: number
+  alreadyBound: string[]
+  skippedByLimit: string[]
+  limit: number
+  realm: string
+}
+
 export const qoder2apiApi = {
   /** 通道状态 + 当前用户的绑定列表 */
   status: () => request<Qoder2ApiStatus>("/qoder2api/status"),
 
-  /** 发起登录（服务端建上游账号 + 落会话，立即返回 sessionId） */
-  loginStart: () =>
+  /**
+   * 上传账号 JSON 批量导入并绑定（2026-10-10）。
+   * ⚠️ 同 `wb2apiApi.importAccounts`：必须绕过 `request()` —— 它会塞
+   * `Content-Type: application/json`，把 multipart 的 boundary 冲掉。
+   */
+  importAccounts: async (file: File, realm?: string): Promise<Qoder2ApiImportResult> => {
+    const fd = new FormData()
+    fd.append("file", file)
+    if (realm) fd.append("realm", realm)
+    const res = await fetch(`${BASE}/qoder2api/import`, {
+      method: "POST",
+      body: fd,
+      credentials: "include",
+    })
+    if (!res.ok) await throwHttpError(res)
+    return (await res.json()) as Qoder2ApiImportResult
+  },
+
+  /**
+   * 发起登录（服务端建上游账号 + 落会话，立即返回 sessionId）。
+   * `realm` 是捐献者自选的版本（cn / intl，2026-10-10 起）；不传则用管理员设的默认。
+   */
+  loginStart: (realm?: string) =>
     request<Qoder2ApiLoginStart>("/qoder2api/login/start", {
       method: "POST",
-      body: JSON.stringify({ acknowledged: true }),
+      body: JSON.stringify(realm ? { acknowledged: true, realm } : { acknowledged: true }),
     }),
 
   /** 轮询登录结果（第一次会顺带返回授权链接） */
@@ -4173,6 +4264,21 @@ export const labApi = {
 
   deleteSkill: (id: string) =>
     request<void>(`/lab/skills/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  // ---- 作品绑定域名（挂到用户自己的子域名上）----
+  getProjectDomain: (id: string) =>
+    request<{ fqdn: string | null }>(`/lab/projects/${encodeURIComponent(id)}/domain`),
+
+  setProjectDomain: (id: string, fqdn: string) =>
+    request<{ fqdn: string }>(`/lab/projects/${encodeURIComponent(id)}/domain`, {
+      method: "PUT",
+      body: JSON.stringify({ fqdn }),
+    }),
+
+  clearProjectDomain: (id: string) =>
+    request<{ fqdn: null }>(`/lab/projects/${encodeURIComponent(id)}/domain`, {
+      method: "DELETE",
+    }),
 
   listProjects: () => request<{ projects: LabProjectSummary[] }>("/lab/projects"),
 

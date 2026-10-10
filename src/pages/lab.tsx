@@ -642,6 +642,12 @@ export default function LabPage() {
   const [channelOpen, setChannelOpen] = React.useState(false)
   const [saveOpen, setSaveOpen] = React.useState(false)
   const [projectsOpen, setProjectsOpen] = React.useState(false)
+  /** 绑定域名：正在填的作品 id（null = 没开那个小弹窗） */
+  const [domainFor, setDomainFor] = React.useState<string | null>(null)
+  const [domainDraft, setDomainDraft] = React.useState("")
+  const [domainBusy, setDomainBusy] = React.useState(false)
+  /** projectId → 已绑域名（null = 没绑）。打开作品弹窗时逐个拉一次 */
+  const [domains, setDomains] = React.useState<Record<string, string | null>>({})
   const [filesOpen, setFilesOpen] = React.useState(false)
   const [viewFile, setViewFile] = React.useState<string | null>(null)
   const [saving, setSaving] = React.useState(false)
@@ -2609,11 +2615,51 @@ export default function LabPage() {
     }
   }
 
+  /** 绑定（或改绑）域名。成功后就地更新那一行，不用整表刷新 */
+  const bindDomain = async (projectId: string) => {
+    const fqdn = domainDraft.trim().toLowerCase()
+    if (!fqdn) return
+    setDomainBusy(true)
+    try {
+      const res = await labApi.setProjectDomain(projectId, fqdn)
+      setDomains((prev) => ({ ...prev, [projectId]: res.fqdn }))
+      setDomainFor(null)
+      setDomainDraft("")
+      toast.success(t("lab.domain.bound", { d: res.fqdn }))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("lab.domain.bindFailed"))
+    } finally {
+      setDomainBusy(false)
+    }
+  }
+
+  const unbindDomain = async (projectId: string) => {
+    setDomainBusy(true)
+    try {
+      await labApi.clearProjectDomain(projectId)
+      setDomains((prev) => ({ ...prev, [projectId]: null }))
+      toast.success(t("lab.domain.unbound"))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("lab.domain.bindFailed"))
+    } finally {
+      setDomainBusy(false)
+    }
+  }
+
   // ---- 作品 ----
 
   const loadProjects = async () => {
     try {
       const res = await labApi.listProjects()
+      // 顺带拉一遍各作品的绑定域名（数量很少，并发即可）
+      void Promise.all(
+        res.projects.map((p) =>
+          labApi
+            .getProjectDomain(p.id)
+            .then((d) => [p.id, d.fqdn] as const)
+            .catch(() => [p.id, null] as const)
+        )
+      ).then((pairs) => setDomains(Object.fromEntries(pairs)))
       setProjects(res.projects)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("lab.err.generic"))
@@ -3797,6 +3843,49 @@ export default function LabPage() {
                       {new Date(p.updatedAt).toLocaleString()}
                     </p>
                   </div>
+                  {/*
+                    绑定域名：只有**公开**的作品才给绑（后端也会再拦一道）——
+                    私密作品挂到公网域名上没有意义，还容易被当成绕过审核的路子。
+                  */}
+                  {p.visibility === "public" ? (
+                    domains[p.id] ? (
+                      <div className="flex shrink-0 items-center gap-1">
+                        <a
+                          href={`https://${domains[p.id]}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex max-w-[10rem] items-center gap-1 text-[11px] text-primary hover:underline"
+                          title={domains[p.id] ?? ""}
+                        >
+                          <Globe className="h-3 w-3 shrink-0" />
+                          <span className="truncate">{domains[p.id]}</span>
+                        </a>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground"
+                          title={t("lab.domain.unbind")}
+                          disabled={domainBusy}
+                          onClick={() => void unbindDomain(p.id)}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="shrink-0 text-[11px]"
+                        onClick={() => {
+                          setDomainFor(p.id)
+                          setDomainDraft("")
+                        }}
+                      >
+                        <Globe className="h-3.5 w-3.5" />
+                        {t("lab.domain.bind")}
+                      </Button>
+                    )
+                  ) : null}
                   <Button
                     variant="outline"
                     size="sm"
@@ -3817,6 +3906,42 @@ export default function LabPage() {
               ))
             )}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- 绑定域名（作品的子域名）---- */}
+      <Dialog open={domainFor !== null} onOpenChange={(o) => !o && setDomainFor(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("lab.domain.title")}</DialogTitle>
+            <DialogDescription>{t("lab.domain.desc")}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="lab-domain" className="text-xs">
+              {t("lab.domain.label")}
+            </Label>
+            <Input
+              id="lab-domain"
+              value={domainDraft}
+              onChange={(e) => setDomainDraft(e.target.value)}
+              placeholder="my-site.doulor.cn"
+            />
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              {t("lab.domain.hint")}
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDomainFor(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              disabled={domainBusy || !domainDraft.trim()}
+              onClick={() => domainFor && void bindDomain(domainFor)}
+            >
+              {domainBusy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
+              {t("lab.domain.confirm")}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

@@ -1275,7 +1275,7 @@ async function listWorkerRoutes(
   return data.result ?? []
 }
 
-async function createWorkerRoute(
+export async function createWorkerRoute(
   env: Env,
   fqdn: string
 ): Promise<string | null> {
@@ -1307,7 +1307,7 @@ async function createWorkerRoute(
   return data.result.id
 }
 
-async function removeWorkerRoute(env: Env, fqdn: string): Promise<void> {
+export async function removeWorkerRoute(env: Env, fqdn: string): Promise<void> {
   const pattern = `${fqdn}/*`
   let zoneId: string
   try {

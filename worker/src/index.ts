@@ -11,6 +11,7 @@ import * as adminLabHandlers from "./handlers/admin-lab"
 import * as labPromptHandlers from "./handlers/lab-prompts"
 import * as labSkillHandlers from "./handlers/lab-skills"
 import * as labSearchHandlers from "./handlers/lab-search"
+import * as labDomainHandlers from "./handlers/lab-domains"
 import * as adminDnsHandlers from "./handlers/admin-dns"
 import * as adminSubdomainHandlers from "./handlers/admin-subdomains"
 import * as adminMailboxHandlers from "./handlers/admin-mailboxes"
@@ -762,6 +763,20 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   },
 
   // ---- 管理端：WorkBuddy 反代账号捐献 ----
+  // 被上游判死、需要捐献者重新登录的账号（2026-10-10：11140 检测）
+  // 给失效账号的捐献者发通知 + 收回 ai 权限（2026-10-10：11140 处理）
+  {
+    kind: "exact",
+    path: "/admin/wb2api/invalid/notify",
+    method: "POST",
+    handle: () => wb2apiHandlers.adminNotifyInvalidBindings(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/wb2api/invalid",
+    method: "GET",
+    handle: () => wb2apiHandlers.adminListInvalidBindings(env, request),
+  },
   {
     kind: "exact",
     path: "/admin/wb2api/bindings",
@@ -2106,6 +2121,13 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       wb2apiHandlers.getStatus(env, request),
   },
 
+  // 上传 cockpit 导出的 JSON 批量导入账号（2026-10-10 站长要求）
+  {
+    kind: "exact",
+    path: "/wb2api/import",
+    method: "POST",
+    handle: () => wb2apiHandlers.importWb2ApiAccounts(env, request),
+  },
   {
     kind: "exact",
     path: "/wb2api/login/start",
@@ -2131,6 +2153,13 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       qoder2apiHandlers.getStatus(env, request),
   },
 
+  // 上传 JSON 批量导入 Qoder 账号（2026-10-10 站长要求）
+  {
+    kind: "exact",
+    path: "/qoder2api/import",
+    method: "POST",
+    handle: () => qoder2apiHandlers.importQoder2ApiAccounts(env, request),
+  },
   {
     kind: "exact",
     path: "/qoder2api/login/start",
@@ -3816,6 +3845,20 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: () => labHandlers.getLabSettings(env, request),
   },
 
+  // ---- 作品绑定域名（挂到用户自己的子域名上）----
+  //    一条路径接 GET/PUT/DELETE 三种方法 ⇒ 用 branch
+  {
+    kind: "branch",
+    match: (routePath: string) => routePath.match(/^\/lab\/projects\/([^/]+)\/domain$/),
+    handle: (domainMatch: RegExpMatchArray, method: string) => {
+      const pid = decodeURIComponent(domainMatch[1])
+      if (method === "GET") return labDomainHandlers.getProjectDomain(env, request, pid)
+      if (method === "PUT") return labDomainHandlers.setProjectDomain(env, request, pid)
+      if (method === "DELETE") return labDomainHandlers.clearProjectDomain(env, request, pid)
+      return null
+    },
+  },
+
   // ---- 联网搜索（Tavily）----
   {
     kind: "exact",
@@ -4235,6 +4278,13 @@ async function hostedDirectLink(
   // 若只看 doulor.cn 会直接 return null → 落回静态资源 → NOT_FOUND
   // （2026-10-03 反馈「example.tyu.me/xxx.jpg 返回接口不存在」）。
   if (!(await rootDomainFor(env, host))) return null
+
+  // 作品域名优先判：两者各自的表都唯一，不会撞；先判作品更直观。
+  // 命中就吐作品内容（多文件作品按路径取），不命中再交给网盘直链。
+  if (await labDomainHandlers.isHostedLabHost(env, host)) {
+    return labDomainHandlers.serveHostedLab(env, request, host)
+  }
+
   if (!(await storageHandlers.isHostedDirectLinkHost(env, host))) return null
 
   return storageHandlers.serveHostedDirectLink(env, request, host)

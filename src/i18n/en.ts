@@ -4061,6 +4061,34 @@ export const en: Record<MessageKey, string> = {
   "don.q2.realmLabel": "Which version is your account?",
   "don.q2.realmHint":
     "Pick “China” for a Qoder account on the mainland site, “International” for the global site — a wrong pick makes authorization fail; just switch and retry.",
+  "don.q2.importBtn": "Bind by uploading JSON",
+  "don.q2.importing": "Importing…",
+  "don.q2.importHint":
+    "Use this when you already have an exported Qoder accounts JSON — no need to authorize again. A JSON array or { data: [...] } both work.",
+  "don.q2.importOk": "Import finished: {total} account(s) in file, {n} bound",
+  "don.q2.importLimit":
+    "{n} account(s) were not bound because they exceed your binding limit — remove some old bindings and import again",
+  "don.q2.importFailed": "Import failed — please check the file format",
+  "adm.wbInvalidScan": "Scan invalid accounts",
+  "adm.wbInvalidNotify": "Notify & revoke",
+  "adm.wbInvalidHint":
+    "When upstream kills an account (e.g. 11140), just tell the donor to sign in with the same account again — access is restored automatically.",
+  "adm.wbInvalidNone": "No invalid accounts 👍",
+  "adm.wbInvalidFound": "Found {n} invalid account(s): {names}",
+  "adm.wbInvalidConfirmTitle": "Notify the donors of these accounts?",
+  "adm.wbInvalidConfirmDesc":
+    "Sends an acknowledgement-required notice to {u} user(s) and **temporarily revokes** their AI relay access ({n} invalid binding(s)). Access returns automatically once they sign in with the same account again.",
+  "adm.wbInvalidConfirmBtn": "Notify & revoke",
+  "adm.wbInvalidDone": "Sent {n} notice(s) (skipped {s} with an unread one already)",
+  "adm.wbInvalidFailed": "Operation failed, please try again later",
+  "don.wb.importBtn": "Bind by uploading JSON",
+  "don.wb.importing": "Importing…",
+  "don.wb.importHint":
+    "Use this when you already have an exported accounts JSON file — no need to go through the sign-in flow again. The file must be a JSON array exported by cockpit.",
+  "don.wb.importOk": "Import finished: {total} account(s) in file, {n} bound",
+  "don.wb.importLimit":
+    "{n} account(s) were not bound because they exceed your binding limit — remove some old bindings and import again",
+  "don.wb.importFailed": "Import failed — please check the file format",
   "don.intro.title": "Limited resources, opened as needed",
   "don.intro.desc":
     "The site owner's resources are limited, so some features aren't open to everyone. If you're willing to contribute the resources below, an admin review unlocks the matching permissions for you.",
@@ -7212,6 +7240,16 @@ export const en: Record<MessageKey, string> = {
   "lab.save.saved": "Saved",
   "lab.save.nothing": "Generate a page before saving",
   "lab.projects": "My projects",
+  "lab.domain.bind": "Bind domain",
+  "lab.domain.unbind": "Unbind",
+  "lab.domain.title": "Bind a domain",
+  "lab.domain.desc": "Serve this work on your own subdomain so anyone can visit it.",
+  "lab.domain.label": "Subdomain",
+  "lab.domain.hint": "A subdomain under one of this site's root domains (e.g. my-site.doulor.cn). DNS and routing are set up automatically; allow 1-2 minutes to take effect.",
+  "lab.domain.confirm": "Bind",
+  "lab.domain.bound": "Bound to {d} — allow 1-2 minutes to take effect",
+  "lab.domain.unbound": "Unbound",
+  "lab.domain.bindFailed": "Operation failed",
   "lab.projects.empty": "No saved projects yet",
   "lab.projects.open": "Open",
   "lab.projects.delete": "Delete",
