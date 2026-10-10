@@ -872,6 +872,17 @@ export const adminApi = {
    * 字段级更新：**没传的键一律不动**。
    * `adminApiKey` 留空表示不修改统一 Key；要清空请显式传 `clearAdminKey`。
    */
+  /**
+   * 造物集置顶 / 取消置顶。
+   * ⚠️ 只改一个字段：`lab_projects.pinned_at`（置顶=时间戳，取消=NULL）。
+   *    排序侧只看它，所以调用完立刻生效，不用额外刷新缓存。
+   */
+  setGalleryPinned: (projectId: string, pinned: boolean) =>
+    request<{ projectId: string; pinned: boolean }>("/admin/lab/gallery/pin", {
+      method: "POST",
+      body: JSON.stringify({ projectId, pinned }),
+    }),
+
   saveLabConfig: (payload: {
     aiSource?: "user" | "admin"
     adminApiKey?: string
@@ -4103,6 +4114,8 @@ export interface GalleryItem {
   hasCover?: boolean
   views: number
   likes: number
+  /** 置顶时间（ISO 字符串）；null / 缺省 = 未置顶。管理端用来回显置顶状态 */
+  pinned_at?: string | null
   /** 当前用户有没有点过赞 */
   liked?: boolean
   updatedAt: string

@@ -30,6 +30,7 @@ import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
 import * as voucherHandlers from "./handlers/vouchers"
 import * as wb2apiHandlers from "./handlers/wb2api"
+import * as groupSyncHandlers from "./handlers/group-sync"
 import * as qoder2apiHandlers from "./handlers/qoder2api"
 import * as myInviteHandlers from "./handlers/my-invites"
 import * as frpHandlers from "./handlers/frp"
@@ -1659,6 +1660,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: () => adminLabHandlers.updateLabConfig(env, request),
   },
 
+  // 造物集置顶（POST，带请求体）
+  {
+    kind: "exact",
+    path: "/admin/lab/gallery/pin",
+    method: "POST",
+    handle: () => adminLabHandlers.setGalleryPinned(env, request),
+  },
+
   // ---- 系统提示词模板（管理端 CRUD）----
   {
     kind: "exact",
@@ -2123,6 +2132,13 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       wb2apiHandlers.getStatus(env, request),
   },
 
+  // 给「分组同步服务」用的只读映射（X-Sync-Key 认证；见 handlers/group-sync.ts 的说明）
+  {
+    kind: "exact",
+    path: "/internal/group-map",
+    method: "GET",
+    handle: () => groupSyncHandlers.groupMap(env, request),
+  },
   // 上传 cockpit 导出的 JSON 批量导入账号（2026-10-10 站长要求）
   {
     kind: "exact",

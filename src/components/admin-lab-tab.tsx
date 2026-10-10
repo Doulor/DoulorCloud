@@ -40,6 +40,7 @@ import { confirmDialog } from "@/components/confirm-dialog"
 import {
   adminApi,
   errMsg,
+  galleryApi,
   galleryCoverUrl,
   labApi,
   type AdminLabChannelInput,
@@ -47,6 +48,7 @@ import {
   type AdminLabPromptTemplate,
   type AdminLabSkill,
   type AdminLabReview,
+  type GalleryItem,
 } from "@/services/api"
 import { buildPreviewDoc, DEFAULT_AGENT_SYSTEM } from "@/lib/lab-agent"
 import { cn } from "@/lib/utils"
@@ -88,6 +90,10 @@ export function AdminLabTab() {
   /** 造物集：作品公开前是否需要审核 */
   const [reviewRequired, setReviewRequired] = React.useState(true)
   const [nativeTools, setNativeTools] = React.useState(false)
+  /** 造物集置顶：公开作品列表（null = 还没加载完） */
+  const [works, setWorks] = React.useState<GalleryItem[] | null>(null)
+  /** 正在提交的作品 id（防连点） */
+  const [pinBusy, setPinBusy] = React.useState<string | null>(null)
   /** 「自动获取」拉到的站内模型；null = 还没拉过 */
   const [modelOptions, setModelOptions] = React.useState<string[] | null>(null)
   const [modelsLoading, setModelsLoading] = React.useState(false)
@@ -106,6 +112,12 @@ export function AdminLabTab() {
     setSiteModels(res.siteModels)
     setReviewRequired(res.reviewRequired)
     setNativeTools(res.nativeTools)
+    // 顺带拉一遍公开作品（置顶用）。⚠️ 只取第一页：置顶是人工操作，
+    // 作品量级不大；真多了再翻页也不迟。
+    void galleryApi
+      .list({ page: 1, sort: "latest" })
+      .then((r) => setWorks(r.items ?? []))
+      .catch(() => setWorks([]))
     setAgentPrompt(res.agentPrompt)
     setChannels(
       res.channels.map((c) => ({
@@ -120,6 +132,24 @@ export function AdminLabTab() {
     )
     // 密钥框每次加载都清空：里面显示的是尾号，留着会让管理员以为「已经填了」
     setAdminKeyInput("")
+  }
+
+  /** 置顶 / 取消置顶：就地改那一行的 pinned_at，不整表刷新 */
+  const togglePin = async (projectId: string, pinned: boolean) => {
+    setPinBusy(projectId)
+    try {
+      await adminApi.setGalleryPinned(projectId, pinned)
+      setWorks((prev) =>
+        (prev ?? []).map((w) =>
+          w.id === projectId ? { ...w, pinned_at: pinned ? new Date().toISOString() : null } : w
+        )
+      )
+      toast.success(t(pinned ? "adm.lab.pinDone" : "adm.lab.unpinDone"))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("adm.lab.pinFailed"))
+    } finally {
+      setPinBusy(null)
+    }
   }
 
   const load = React.useCallback(async () => {
@@ -691,6 +721,59 @@ export function AdminLabTab() {
             />
           </div>
           <p className="text-[11px] text-muted-foreground">{t("adm.lab.reviewHint")}</p>
+        </CardContent>
+      </Card>
+
+      {/* ---------------- 造物集置顶 ---------------- */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">{t("adm.lab.pinTitle")}</CardTitle>
+          <CardDescription>{t("adm.lab.pinDesc")}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {works === null ? (
+            <p className="py-3 text-center text-xs text-muted-foreground">
+              <Loader2 className="mr-1.5 inline h-3.5 w-3.5 animate-spin" />
+              {t("adm.lab.pinLoading")}
+            </p>
+          ) : works.length === 0 ? (
+            <p className="py-3 text-center text-xs text-muted-foreground">
+              {t("adm.lab.pinEmpty")}
+            </p>
+          ) : (
+            <div className="max-h-[320px] space-y-1 overflow-y-auto">
+              {works.map((w) => {
+                const isPinned = Boolean(w.pinned_at)
+                return (
+                  <div
+                    key={w.id}
+                    className="flex items-center gap-2 rounded-md border px-2 py-1.5"
+                  >
+                    <span className="min-w-0 flex-1 truncate text-sm">{w.name}</span>
+                    <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                      {w.views} / {w.likes}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant={isPinned ? "secondary" : "outline"}
+                      className="shrink-0 text-xs"
+                      disabled={pinBusy === w.id}
+                      onClick={() => void togglePin(w.id, !isPinned)}
+                    >
+                      {pinBusy === w.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : isPinned ? (
+                        t("adm.lab.pinned")
+                      ) : (
+                        t("adm.lab.pin")
+                      )}
+                    </Button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          <p className="text-[11px] text-muted-foreground">{t("adm.lab.pinHint")}</p>
         </CardContent>
       </Card>
 

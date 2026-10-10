@@ -390,3 +390,36 @@ export async function reviewLabProject(
 
   return json({ id, visibility: approve ? "public" : "rejected" })
 }
+
+/**
+ * POST /api/admin/lab/gallery/pin —— body: { projectId, pinned }
+ * 造物集置顶 / 取消置顶（2026-10-10 站长要求）。
+ *
+ * ⚠️ 只改 `lab_projects.pinned_at`：写入「当前时间」= 置顶，写 NULL = 取消。
+ *    排序侧只看这一个字段（见 listGallery 的 ORDER BY），所以这里改完立刻生效。
+ * ⚠️ 不校验作品是否公开：管理员可能想「先置顶、等它审核通过自然就上去了」。
+ *    但**必须校验作品存在**，免得写进一个不存在的 id（静默无效果）。
+ */
+export async function setGalleryPinned(env: Env, request: Request): Promise<Response> {
+  await requireAdminScope(env, request, "lab")
+  const body = (await request.json().catch(() => null)) as {
+    projectId?: unknown
+    pinned?: unknown
+  } | null
+  if (!body) throw new ApiError(400, "请求体格式错误", "INVALID_BODY")
+
+  const projectId = typeof body.projectId === "string" ? body.projectId.trim() : ""
+  if (!projectId) throw new ApiError(400, "缺少 projectId", "INVALID_ID")
+  const pinned = body.pinned === true || body.pinned === "1"
+
+  const row = await env.DB.prepare("SELECT id FROM lab_projects WHERE id = ?")
+    .bind(projectId)
+    .first<{ id: string }>()
+  if (!row) throw new ApiError(404, "作品不存在", "NOT_FOUND")
+
+  await env.DB.prepare("UPDATE lab_projects SET pinned_at = ? WHERE id = ?")
+    .bind(pinned ? new Date().toISOString() : null, projectId)
+    .run()
+
+  return json({ projectId, pinned })
+}
