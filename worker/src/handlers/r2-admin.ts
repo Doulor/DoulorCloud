@@ -840,12 +840,21 @@ export async function assignUserBucket(env: Env, request: Request): Promise<Resp
     }
 
     // 目标桶容量校验（人数上限）
+    //
+    // ⚠️ 2026-10-10：判据只看**人数**。原实现多带一个 `&& account.used_bytes === 0`，
+    // 把判据反过来 —— 桶满时**要搬文件进去的账号被放行、不占空间的空账号被拒**。
+    // 三处旁证都指向纯人数口径：同文件 `assignAllUnassigned` 写的是
+    // `(current + count) > bucket.max_users`；文案「目标桶已满（N/M 人）」与桶列表
+    // 「已分配 N 人 · 每人 X」都是人数；`src/i18n/api-messages.ts` 的译文是
+    // "The target bucket is full ({v0}/{v1} users)"。可达性上这条写反尤其致命：
+    // 管理端改派下拉只列 `usedBytes > 0` 的用户（`src/pages/admin.tsx:6053`）
+    // ⇒ UI 上能点的人恰好全是会被放行的。
     const cnt = await env.DB.prepare(
       "SELECT COUNT(*) AS c FROM storage_accounts WHERE bucket_id = ?"
     )
       .bind(bucketId)
       .first<{ c: number }>()
-    if ((cnt?.c ?? 0) >= bucket.max_users && account.used_bytes === 0) {
+    if ((cnt?.c ?? 0) >= bucket.max_users) {
       throw new ApiError(
         409,
         `目标桶已满（${cnt?.c}/${bucket.max_users} 人）`,
