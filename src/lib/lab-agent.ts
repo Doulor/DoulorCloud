@@ -56,6 +56,11 @@ export type ToolName =
   | "skill"
   /** 联网搜索（Tavily）。**必须经服务端**——key 只在服务端，浏览器拿不到。 */
   | "web_search"
+  /**
+   * 服务端抓取（取一个页面 / 调一个接口）。
+   * ⚠️ 也**必须经服务端**：浏览器直连第三方会被 CORS 拦；且服务端有 SSRF 护栏。
+   */
+  | "http"
 
 /** 从（可能还没流完的）模型输出里解析出的片段，按出现顺序排列 */
 export type Segment =
@@ -78,6 +83,10 @@ export type Segment =
        * 有了它就显示它，而不是把命令行原样摆给用户看。
        */
       desc?: string
+      /** 仅 <lab_http> 用：目标地址 */
+      url?: string
+      /** 仅 <lab_http> 用：请求方法（缺省 GET） */
+      httpMethod?: string
       content: string
       complete: boolean
     }
@@ -100,7 +109,7 @@ const MAX_READBACK_CHARS = 20_000
 // 虽然末尾的 \b 已经能挡住把 lab_site_manual 误读成 lab_site（"e" 与 "_" 之间没有词边界），
 // 但顺序写对更不容易被人改坏。
 const TAG_RE =
-  /^<lab_(write|read|replace|list|delete|grep|run|need_vm|site_manual|skill|web_search|site)\b([^>]*?)(\/?)>$/
+  /^<lab_(write|read|replace|list|delete|grep|run|need_vm|site_manual|skill|web_search|http|site)\b([^>]*?)(\/?)>$/
 
 /**
  * 带正文体、需要等闭合标签的工具。
@@ -176,6 +185,9 @@ export function parseAgentText(raw: string): Segment[] {
     const query = /\bquery\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
     // <lab_run desc="下载环境依赖">npm ci</lab_run>
     const desc = /\bdesc\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
+    // <lab_http url="https://…" method="GET">…</lab_http>
+    const url = /\burl\s*=\s*["']([^"']*)["']/.exec(m[2])?.[1]
+    const httpMethod = /\bmethod\s*=\s*["']([A-Za-z]+)["']/.exec(m[2])?.[1]
     const selfClosed = m[3] === "/"
 
     if (BODY_TOOLS.includes(tool) && !selfClosed) {
@@ -191,6 +203,8 @@ export function parseAgentText(raw: string): Segment[] {
           skill,
           query,
           desc,
+          url,
+          httpMethod,
           content: text.slice(gt + 1).replace(/^\n/, ""),
           complete: false,
         })
@@ -206,6 +220,8 @@ export function parseAgentText(raw: string): Segment[] {
         skill,
         query,
         desc,
+        url,
+        httpMethod,
         content: text.slice(gt + 1, close).replace(/^\n/, ""),
         complete: true,
       })
@@ -222,6 +238,8 @@ export function parseAgentText(raw: string): Segment[] {
         skill,
         query,
         desc,
+        url,
+        httpMethod,
         content: "",
         complete: true,
       })
@@ -277,7 +295,9 @@ export function needsToolResult(
         // 技能正文要去服务端取，必须回喂一轮把正文交给模型，否则它拿不到内容
         s.tool === "skill" ||
         // 搜索结果同理：key 在服务端，结果必须回喂
-        s.tool === "web_search")
+        s.tool === "web_search" ||
+        // 抓取结果要回喂（正文在服务端取回来的）
+        s.tool === "http")
   )
 }
 
@@ -309,7 +329,8 @@ export function buildToolResults(
   runResults?: Map<number, string>,
   siteResults?: Map<number, string>,
   skillResults?: Map<number, string>,
-  searchResults?: Map<number, string>
+  searchResults?: Map<number, string>,
+  httpResults?: Map<number, string>
 ): string {
   const parts: string[] = ["工具执行结果："]
   segments.forEach((s, i) => {
@@ -338,6 +359,11 @@ export function buildToolResults(
       parts.push(
         formatted ??
           `[执行命令] ${s.content.trim()}\n(没能执行：浏览器终端未就绪 —— 需要先申请 <lab_need_vm/>)`
+      )
+    } else if (s.tool === "http") {
+      parts.push(
+        httpResults?.get(i) ??
+          `[抓取 ${s.url ?? "?"}] (没取到：这次轮次被中断了，可以重试一次)`
       )
     } else if (s.tool === "web_search") {
       parts.push(

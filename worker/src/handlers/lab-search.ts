@@ -477,7 +477,7 @@ export async function searchAvailability(env: Env): Promise<{
  * 挡不住的：域名解析到内网 IP 的情况（Worker 内部解析，拿不到解析结果）——
  * 这一点在注释里写清楚，不能假装万无一失。
  */
-function assertSafeUpstreamUrl(raw: string): URL {
+export function assertSafeUpstreamUrl(raw: string): URL {
   let u: URL
   try {
     u = new URL(raw)

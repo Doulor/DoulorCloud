@@ -35,6 +35,7 @@ import {
   Cloud,
   Hexagon,
   Infinity as InfinityIcon,
+  Link as LinkIcon,
   Moon,
   Sparkle,
   Sparkles,
@@ -68,6 +69,7 @@ import {
 import {
   Attachment01Icon,
   Database02Icon,
+  Link01Icon,
   Search01Icon,
   SparklesIcon,
 } from "@hugeicons/core-free-icons"
@@ -218,6 +220,10 @@ type Entry =
        * 有它就**优先显示它**，而不是把命令行直接摆给用户看。
        */
       desc?: string
+      /** `http` 用：目标地址（卡片上显示） */
+      url?: string
+      /** `http` 用：请求方法 */
+      httpMethod?: string
       status: "running" | "done"
       content: string
     }
@@ -407,6 +413,7 @@ function segmentsToEntries(
   siteResults?: Map<number, string>,
   skillResults?: Map<number, string>,
   searchResults?: Map<number, string>,
+  httpResults?: Map<number, string>,
   /** 产出这一轮的模型名（写到文本消息上，工具栏要显示） */
   model?: string
 ): Entry[] {
@@ -452,6 +459,8 @@ function segmentsToEntries(
         op: s.op,
         skill: s.skill,
         desc: s.desc,
+        url: s.url,
+        httpMethod: s.httpMethod,
         status: final || s.complete ? "done" : "running",
         // 结果不来自模型、而在本地现算：grep 命中行 / 终端命令输出 / 站内操作响应
         content: s.complete
@@ -465,7 +474,9 @@ function segmentsToEntries(
                   ? skillResults.get(i)!
                   : s.tool === "web_search" && searchResults?.get(i)
                     ? searchResults.get(i)!
-                    : s.content
+                    : s.tool === "http" && httpResults?.get(i)
+                      ? httpResults.get(i)!
+                      : s.content
           : s.content,
       })
     }
@@ -603,6 +614,35 @@ export default function LabPage() {
   const [skillOpen, setSkillOpen] = React.useState(false)
   /** 「联网搜索」对话框：看状态 / 填自己的 Tavily key */
   const [searchKeyOpen, setSearchKeyOpen] = React.useState(false)
+  /** 「参考网址」对话框：贴个链接，把页面正文抓回来当上下文 */
+  const [refOpen, setRefOpen] = React.useState(false)
+  const [refDraft, setRefDraft] = React.useState("")
+  const [refBusy, setRefBusy] = React.useState(false)
+  /**
+   * 从「参考网址」进来的附件名（不在 PromptBar 的附件列表里，
+   * 所以单独记一份，发送时并进去）。存的是 URL 本身 —— 气泡里显示网址最直观。
+   */
+  const pendingAttachRef = React.useRef<string[]>([])
+
+  /** 抓一个网址当参考。抓回来的正文按「文本附件」处理，与导入文件走同一条路 */
+  const fetchRef = async () => {
+    const url = refDraft.trim()
+    if (!url) return
+    setRefBusy(true)
+    try {
+      const r = await labApi.http({ url })
+      const header = `【参考网址：${url}】\n（页面正文，已由服务端抓取${r.truncated ? "，内容过长已截断" : ""}）\n`
+      attachedRef.current[url] = { text: header + r.body }
+      if (!pendingAttachRef.current.includes(url)) pendingAttachRef.current.push(url)
+      setRefOpen(false)
+      setRefDraft("")
+      toast.success(t("lab.ref.done"))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("lab.ref.failed"))
+    } finally {
+      setRefBusy(false)
+    }
+  }
   /**
    * 重新拉 /lab/settings 的触发器。
    * 用户导入新技能后，系统提示里的「技能目录」必须跟着更新，
@@ -1251,6 +1291,14 @@ export default function LabPage() {
       { key: "site", name: t("lab.src.site"), description: t("lab.src.siteDesc"), icon: Database02Icon },
       { key: "skills", name: t("lab.src.skills"), description: t("lab.src.skillsDesc"), icon: SparklesIcon },
       { key: "web", name: t("lab.src.web"), description: t("lab.src.webDesc"), icon: Search01Icon },
+      {
+        key: "ref",
+        name: t("lab.src.ref"),
+        description: t("lab.src.refDesc"),
+        // ⚠️ 必须用 @hugeicons 的图标：这个菜单其它项都是，
+        // 换成 lucide 的组件类型对不上（而且 lucide 的 Link 还和 react-router 的 Link 重名）
+        icon: Link01Icon,
+      },
     ],
     [t]
   )
@@ -1950,7 +1998,10 @@ export default function LabPage() {
      *   · 模型输入：正文 + 附件全文（它必须拿到内容才做得了事）。
      */
     const typed = (override ?? input).trim()
-    const taken = takeAttachments(typed, files)
+    // 「参考网址」进来的附件不在 PromptBar 的列表里，这里并进去一起处理
+    const allFiles = [...(files ?? []), ...pendingAttachRef.current]
+    pendingAttachRef.current = []
+    const taken = takeAttachments(typed, allFiles)
     const text = taken.text
     // 只有图片、没打字也要能发出去（图片本身就是要看的东西）
     if (!text && !taken.images.length) return
@@ -2130,6 +2181,35 @@ export default function LabPage() {
           siteResults.set(i, r.text)
         }
 
+        // ---- 服务端抓取：正文是服务端取回来的，必须回喂一轮 ----
+        const httpResults = new Map<number, string>()
+        for (let i = 0; i < segs.length; i++) {
+          const s = segs[i]
+          if (s.type !== "action" || !s.complete || s.tool !== "http") continue
+          const target = (s.url ?? "").trim()
+          if (!target) {
+            httpResults.set(
+              i,
+              '[抓取] 没写地址。正确写法是 <lab_http url="https://…"/>，请重来。'
+            )
+            continue
+          }
+          try {
+            const r = await labApi.http({
+              url: target,
+              method: s.httpMethod,
+              // 正文当请求体（POST/PUT 才有意义；GET 时后端会忽略）
+              body: s.content?.trim() || undefined,
+            })
+            httpResults.set(
+              i,
+              `[抓取 ${target}] HTTP ${r.status}${r.truncated ? "（内容过长已截断）" : ""}\n${r.body}`
+            )
+          } catch (e: any) {
+            httpResults.set(i, `[抓取 ${target}] 失败：${e?.message ?? e}`)
+          }
+        }
+
         // ---- 联网搜索：key 只存服务端，所以必须走接口 ----
         const searchResults = new Map<number, string>()
         for (let i = 0; i < segs.length; i++) {
@@ -2205,6 +2285,7 @@ export default function LabPage() {
             siteResults,
             skillResults,
             searchResults,
+            httpResults,
             activeModel
           ),
         ])
@@ -2313,7 +2394,8 @@ export default function LabPage() {
                   s.tool === "run" ||
                   s.tool === "delete" ||
                   s.tool === "skill" ||
-                  s.tool === "web_search")
+                  s.tool === "web_search" ||
+                  s.tool === "http")
             )
           if (hasOtherResults) {
             parts.push(
@@ -2324,7 +2406,8 @@ export default function LabPage() {
                 runResults,
                 siteResults,
                 skillResults,
-                searchResults
+                searchResults,
+                httpResults
               )
             )
           } else if (siteResults.size) {
@@ -2365,7 +2448,8 @@ export default function LabPage() {
               undefined,
               undefined,
               skillResults,
-              searchResults
+              searchResults,
+              httpResults
             ),
           },
         ]
@@ -3321,6 +3405,10 @@ export default function LabPage() {
           setSearchKeyOpen(true)
           return true
         }
+        if (key === "ref") {
+          setRefOpen(true)
+          return true
+        }
         return false
       }}
       busy={streaming}
@@ -3710,6 +3798,39 @@ export default function LabPage() {
           if (!o) setSettingsKey((k) => k + 1)
         }}
       />
+
+      {/* ---- 参考网址 ---- */}
+      <Dialog open={refOpen} onOpenChange={(o) => !o && setRefOpen(false)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("lab.ref.title")}</DialogTitle>
+            <DialogDescription>{t("lab.ref.desc")}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="lab-ref-url" className="text-xs">
+              {t("lab.ref.label")}
+            </Label>
+            <Input
+              id="lab-ref-url"
+              value={refDraft}
+              onChange={(e) => setRefDraft(e.target.value)}
+              placeholder="https://example.com"
+            />
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              {t("lab.ref.hint")}
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRefOpen(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button disabled={refBusy || !refDraft.trim()} onClick={() => void fetchRef()}>
+              {refBusy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
+              {t("lab.ref.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <SkillDialog
         open={skillOpen}
@@ -4418,6 +4539,7 @@ const TOOL_ICON: Record<ToolName, typeof FileText> = {
   site_manual: BookOpen,
   skill: Sparkles,
   web_search: Globe,
+  http: LinkIcon,
 }
 
 function ToolCard({
@@ -4503,6 +4625,11 @@ function ToolCard({
               $ {entry.command?.split("\n")[0] ?? ""}
             </code>
           )
+        ) : entry.tool === "http" ? (
+          <code className="truncate font-mono text-[11px] text-muted-foreground">
+            {entry.httpMethod ? `${entry.httpMethod} ` : ""}
+            {entry.url || "?"}
+          </code>
         ) : entry.tool === "site" ? (
           <code className="truncate font-mono text-[11px] text-muted-foreground">
             {entry.op || "?"}

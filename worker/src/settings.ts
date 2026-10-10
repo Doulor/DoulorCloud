@@ -378,7 +378,7 @@ export const SETTING_DEFAULTS = {
    * 为什么要有上限：绑定成功即自动解锁 ai 权限且免审核，不限量就等于
    * 「绑几个号 = 白拿几次权限」，也容易被单人用小号占满共享池。
    */
-  wb2api_max_bindings: "3",
+  wb2api_max_bindings: "10",
   /**
    * 是否在捐献页显示「反代账号」捐献入口（1/0，默认 1 = 显示）。
    *
@@ -443,8 +443,12 @@ export const SETTING_DEFAULTS = {
   qoder2api_base_url: "https://qoder2api.doulor.cn",
   /** 上游区域：cn（国内版）/ intl（国际版）。该通道只对接 Qoder，没有 provider 可切 */
   qoder2api_realm: "cn",
+  // 用户可自选的版本（2026-10-10 站长要求，与 wb2api 的 *_realm_cn/global 同款）：
+  // 关掉的那一项在捐献页隐藏、接口拒绝用它发起绑定
+  qoder2api_realm_cn: "1",
+  qoder2api_realm_intl: "1",
   /** 每人可绑定的账号数上限 */
-  qoder2api_max_bindings: "3",
+  qoder2api_max_bindings: "10",
   /**
    * 是否在捐献页显示 Qoder2API 捐献入口（1/0，默认 1 = 显示）。
    * 语义与 `wb2api_donation_visible` 完全一致：纯展示开关，
@@ -714,6 +718,12 @@ export const SETTING_DEFAULTS = {
    * 多把的意义：额度按 key 算，轮着用能摊开；一把被限流还能换下一把。
    * 空 = 站点不提供联网搜索（用户仍可用自己的 key）。
    */
+  /**
+   * 实验室的「抓取网址」总开关（`<lab_fetch>` / `<lab_http>`）。
+   * 这是「服务端替用户请求任意地址」，万一被拿来打别人或刷额度，
+   * 管理员要能一键关掉，不留一个只能改代码才能关的口子。
+   */
+  lab_fetch_enabled: "1",
   lab_tavily_keys: "",
   /**
    * 走**站点 key** 搜索一次扣多少积分。用户用自己的 key 不扣。

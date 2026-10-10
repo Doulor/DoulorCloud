@@ -4231,6 +4231,26 @@ export const labApi = {
       body: JSON.stringify(payload),
     }),
 
+  /**
+   * 服务端抓取（工具 <lab_http> 与「参考网址」共用）。
+   * ⚠️ 必须走服务端：浏览器直连第三方会被 CORS 拦；服务端那边有 SSRF 护栏
+   * （内网/回环/云元数据端点的拦截）。
+   */
+  http: (payload: {
+    url: string
+    method?: string
+    headers?: Record<string, string>
+    body?: string
+    raw?: boolean
+  }) =>
+    request<{
+      status: number
+      contentType: string
+      truncated: boolean
+      body: string
+      finalUrl: string
+    }>("/lab/http", { method: "POST", body: JSON.stringify(payload) }),
+
   /** 我的搜索 key 状态（**只回有没有配，不回内容**） */
   searchKeyInfo: () =>
     request<{
