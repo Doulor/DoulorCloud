@@ -244,9 +244,73 @@ const MAX_MESSAGES = 60
 const MAX_CONTENT_CHARS = 160_000
 const MAX_TOTAL_CHARS = 400_000
 
+/**
+ * 多模态消息里的一段内容。
+ * 只认这两种 —— **不接受 `http(s)://` 的图片地址**：那等于让 Worker 去替用户
+ * 抓任意 URL（SSRF），而且上游多半也要自己再抓一次。图片一律走 data URL（前端已压过）。
+ */
+type ChatPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } }
+
 interface ChatMessage {
   role: "system" | "user" | "assistant"
-  content: string
+  /** 纯文本消息是 string；带图的用户消息是 part 数组 */
+  content: string | ChatPart[]
+}
+
+/** 图片 data URL 的白名单格式（只收常见位图，不收 svg —— svg 里能塞脚本） */
+const IMAGE_DATA_RE = /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/]+=*$/
+/** 单条消息最多几张图（模型对一次能看多少张有上限，也不该让一条消息无限大） */
+const MAX_IMAGES_PER_MESSAGE = 6
+/** 单张图的 base64 字符上限（≈3MB 二进制；前端已压到 1.5MB 以内，留足余量） */
+const MAX_IMAGE_CHARS = 4_000_000
+/** 所有图片合计的字符上限 */
+const MAX_TOTAL_IMAGE_CHARS = 12_000_000
+
+/** 一段内容里的纯文字长度（用于「总量超限丢最老的」那套预算） */
+function textCharsOf(content: string | ChatPart[]): number {
+  if (typeof content === "string") return content.length
+  return content.reduce((n, p) => n + (p.type === "text" ? p.text.length : 0), 0)
+}
+
+/** 一段内容里的图片字符数 */
+function imageCharsOf(content: string | ChatPart[]): number {
+  if (typeof content === "string") return 0
+  return content.reduce((n, p) => n + (p.type === "image_url" ? p.image_url.url.length : 0), 0)
+}
+
+/**
+ * 清洗多模态内容。返回 null = 这段内容不可用（调用方整条丢掉）。
+ * 规则：文字截断；图片只认 data URL、张数与体积都有上限；**任何一段图片不合法就丢掉那张**，
+ * 但整条消息只要还剩文字就保留 —— 用户辛苦打的字不该因为一张图挂了而消失。
+ */
+function cleanContent(raw: unknown): string | ChatPart[] | null {
+  if (typeof raw === "string") {
+    return raw.trim() ? raw.slice(0, MAX_CONTENT_CHARS) : null
+  }
+  if (!Array.isArray(raw)) return null
+
+  const parts: ChatPart[] = []
+  let images = 0
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue
+    const type = (item as { type?: unknown }).type
+    if (type === "text") {
+      const text = (item as { text?: unknown }).text
+      if (typeof text !== "string" || !text.trim()) continue
+      parts.push({ type: "text", text: text.slice(0, MAX_CONTENT_CHARS) })
+    } else if (type === "image_url") {
+      if (images >= MAX_IMAGES_PER_MESSAGE) continue
+      const url = (item as { image_url?: { url?: unknown } }).image_url?.url
+      if (typeof url !== "string" || !IMAGE_DATA_RE.test(url)) continue
+      if (url.length > MAX_IMAGE_CHARS) continue
+      parts.push({ type: "image_url", image_url: { url } })
+      images++
+    }
+  }
+  // 一张图都没有、也没有文字 ⇒ 这条没有意义
+  return parts.length ? parts : null
 }
 
 /** 校验并收敛消息数组：跳非法项、限单条/总量、system 只留最后一条。 */
@@ -260,24 +324,40 @@ function sanitizeMessages(raw: unknown): ChatMessage[] {
     const role = (item as { role?: unknown }).role
     const content = (item as { content?: unknown }).content
     if (role !== "system" && role !== "user" && role !== "assistant") continue
-    if (typeof content !== "string" || !content.trim()) continue
-    const text =
-      content.length > MAX_CONTENT_CHARS
-        ? content.slice(0, MAX_CONTENT_CHARS)
-        : content
-    all.push({ role, content: text })
+    const clean = cleanContent(content)
+    if (!clean) continue
+    // 图片只允许出现在用户消息里：助手/系统的「图」没有语义，多半是注入
+    if (typeof clean !== "string" && role !== "user") continue
+    all.push({ role, content: clean })
   }
 
   const system = [...all].reverse().find((m) => m.role === "system")
   let talk = all.filter((m) => m.role !== "system").slice(-MAX_MESSAGES)
 
-  // 总量超限时从最老的对话开始丢（system 与最近的内容优先保留）
+  /**
+   * 总量超限时从最老的对话开始丢（system 与最近的内容优先保留）。
+   *
+   * ⚠️ 这里**只按文字长度算**，图片单独一套预算。
+   * 否则一张 3MB 的图会让 total 直接爆掉 MAX_TOTAL_CHARS，
+   * 循环会把所有历史（包括刚带图的那条）全丢光 —— 用户看到的是「图发了没反应」。
+   */
   let total =
-    talk.reduce((sum, m) => sum + m.content.length, 0) +
-    (system?.content.length ?? 0)
+    talk.reduce((sum, m) => sum + textCharsOf(m.content), 0) +
+    (system ? textCharsOf(system.content) : 0)
   while (total > MAX_TOTAL_CHARS && talk.length > 1) {
-    total -= talk[0].content.length
+    total -= textCharsOf(talk[0].content)
     talk = talk.slice(1)
+  }
+
+  // 图片总预算：超了就从最老的带图消息开始、把它的图摘掉（文字留着）
+  let imageTotal = talk.reduce((sum, m) => sum + imageCharsOf(m.content), 0)
+  for (let i = 0; imageTotal > MAX_TOTAL_IMAGE_CHARS && i < talk.length; i++) {
+    const m = talk[i]
+    if (typeof m.content === "string") continue
+    imageTotal -= imageCharsOf(m.content)
+    const kept = m.content.filter((p) => p.type === "text")
+    // 只剩文字就是纯文本消息了 —— 转回 string，别让上游看到空数组
+    talk[i] = { role: m.role, content: kept.map((p) => p.text).join("\n") }
   }
 
   if (!talk.some((m) => m.role === "user")) {

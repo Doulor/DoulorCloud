@@ -19,6 +19,21 @@
 
 export type FileMap = Record<string, string>
 
+/**
+ * 一轮对话里给模型的消息。
+ * `content` 是字符串（纯文本）或 part 数组（带图的多模态）。
+ * ⚠️ 必须与后端 `worker/src/handlers/lab.ts` 的 `ChatMessage` 保持一致 ——
+ * 后端只认 `text` / `image_url` 两种 part，且图片只收 data URL（不收 http 地址，防 SSRF）。
+ */
+export type LabConvoPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } }
+
+export interface LabConvoMessage {
+  role: string
+  content: string | LabConvoPart[]
+}
+
 export type ToolName =
   | "write"
   | "read"
@@ -1018,13 +1033,13 @@ export function looksLikeBuildRequest(text: string): boolean {
  * 不这么做的话，几轮下来光历史就有几十万字符（模型每次都要重读一遍），
  * 而现在系统提示里已经有文件清单、模型也能随时 <lab_read> 取回。
  */
-export function compactHistory(
-  convo: { role: string; content: string }[],
-  keepRaw = 4
-): { role: string; content: string }[] {
+export function compactHistory(convo: LabConvoMessage[], keepRaw = 4): LabConvoMessage[] {
   const cut = convo.length - keepRaw
   return convo.map((m, i) => {
     if (i >= cut || m.role !== "assistant") return m
+    // 带图的多模态消息原样保留：压缩是针对「写入文件的长正文」的，
+    // 图片本来就不该被这段正则碰到（而且数组里没有 .replace）。
+    if (typeof m.content !== "string") return m
     return {
       role: m.role,
       content: m.content.replace(

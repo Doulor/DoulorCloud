@@ -4002,7 +4002,8 @@ export interface GalleryDetail extends GalleryItem {
  *  非 2xx 已按全站统一规则翻译成 HttpError 抛出。 */
 export async function streamLabChat(payload: {
   model: string
-  messages: { role: string; content: string }[]
+  /** 纯文本消息是 string；带图的是 part 数组（见 lab.tsx 的 takeAttachments） */
+  messages: { role: string; content: string | unknown[] }[]
   /** 思考强度档位（后端据此决定要不要带 reasoning_effort） */
   effort?: string
   /** 由前端按思考强度算好的温度；后端只做范围收口 */

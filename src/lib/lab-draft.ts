@@ -27,6 +27,7 @@
  *   `current`         → **旧版单份草稿**，只读一次用于迁移，之后不再写
  */
 
+import type { LabConvoMessage } from "./lab-agent"
 import type { FileMap } from "./lab-agent"
 
 const IDB_NAME = "doulor-lab-draft"
@@ -45,7 +46,8 @@ export const MAX_SESSIONS = 5
 export interface LabDraft<TEntry = unknown> {
   files: FileMap
   entries: TEntry[]
-  convo: { role: string; content: string }[]
+  /** 带图的多模态消息也存这里（类型见 lab-agent.ts 的 LabConvoMessage） */
+  convo: LabConvoMessage[]
   currentId: string | null
   saveName: string
   saveDesc: string

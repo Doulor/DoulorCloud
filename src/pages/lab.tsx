@@ -60,6 +60,7 @@ import {
   Search01Icon,
   SparklesIcon,
 } from "@hugeicons/core-free-icons"
+import { compressToLimit } from "@/lib/image-compress"
 import { useMotionPref } from "@/hooks/use-motion-pref"
 import { clearLabRun, getLabRun, setLabRun, useLabRun } from "@/lib/lab-run"
 import { Markdown } from "@/components/markdown"
@@ -71,6 +72,8 @@ import {
   buildPreviewDoc,
   buildSystemPrompt,
   buildToolResults,
+  type LabConvoMessage,
+  type LabConvoPart,
   compactHistory,
   EFFORT_DESC_KEY,
   EFFORT_LABEL_KEY,
@@ -595,7 +598,7 @@ export default function LabPage() {
   const [saveDesc, setSaveDesc] = React.useState("")
 
   const abortRef = React.useRef<AbortController | null>(null)
-  const convoRef = React.useRef<{ role: string; content: string }[]>([])
+  const convoRef = React.useRef<LabConvoMessage[]>([])
   const scrollRef = React.useRef<HTMLDivElement | null>(null)
   const taRef = React.useRef<HTMLTextAreaElement | null>(null)
   const liveTimer = React.useRef<number | null>(null)
@@ -1161,8 +1164,26 @@ export default function LabPage() {
     [t]
   )
 
-  /** 「导入文件」带进来的文本内容：key = 文件名。发送时并进这一轮正文，模型才看得到 */
-  const attachedRef = React.useRef<Record<string, string>>({})
+  /**
+   * 「导入文件」带进来的东西：key = 文件名，值是两种形态之一。
+   *   · `text`  —— 文本类文件，发送时并进正文；
+   *   · `image` —— 图片，转成 data URL 当**多模态内容**发（不是塞进正文）。
+   * 之所以分开放：图片塞进文字里模型是看不懂的（那是乱码），
+   * 必须走 content parts 才能被真正「看到」。
+   */
+  const attachedRef = React.useRef<Record<string, { text?: string; image?: string }>>({})
+
+  /** 单张图压缩后的字符上限（≈1.5MB 二进制）—— 再大就把上游请求顶爆了 */
+  const IMAGE_MAX_CHARS = 2_000_000
+
+  /** 把 File 读成 data URL */
+  const fileToDataUrl = (file: Blob): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const r = new FileReader()
+      r.onload = () => resolve(String(r.result))
+      r.onerror = () => reject(new Error("read failed"))
+      r.readAsDataURL(file)
+    })
 
   /**
    * 导入文件 —— **纯本地读，不经过服务器**。
@@ -1181,6 +1202,34 @@ export default function LabPage() {
     const names: string[] = []
     for (const f of Array.from(picked)) {
       names.push(f.name)
+      /**
+       * 图片走多模态：**必须先压缩**再转 data URL。
+       * 手机拍的原图动辄 5~10MB，base64 之后还要再涨 1/3，直接传会把请求顶爆、
+       * 也会让上游按 token 计费的部分变得很贵。压到长边 1600 / 1.5MB 以内已经够模型看清。
+       */
+      if (f.type.startsWith("image/")) {
+        try {
+          // 不能压的（或压完还是太大）就退回原图
+          const small = (await compressToLimit(f, 1_500_000)) ?? f
+          const url = await fileToDataUrl(small)
+          /**
+           * ⚠️ 只有落在**上游认的那几种格式**里才带内容。
+           * 后端白名单是 png/jpeg/webp/gif（不收 svg、avif、heic、bmp 这些）——
+           * 不在这里挡一下，用户会看到「图发出去了但模型完全不知道有这么张图」，
+           * 而且**一句提示都没有**，非常难排查。
+           */
+          if (!/^data:image\/(png|jpe?g|webp|gif);base64,/.test(url)) {
+            toast.error(t("lab.attach.imageFormat"))
+          } else if (url.length > IMAGE_MAX_CHARS) {
+            toast.error(t("lab.attach.imageTooLarge"))
+          } else {
+            attachedRef.current[f.name] = { image: url }
+          }
+        } catch {
+          toast.error(t("lab.attach.imageFailed"))
+        }
+        continue
+      }
       // 太大的别塞进上下文：200KB 以上的正文会直接把这一轮撑爆
       if (f.size > 200_000) continue
       const isText =
@@ -1188,7 +1237,7 @@ export default function LabPage() {
         /\.(txt|md|json|csv|js|ts|tsx|jsx|css|html|yml|yaml|log)$/i.test(f.name)
       if (!isText) continue
       try {
-        attachedRef.current[f.name] = await f.text()
+        attachedRef.current[f.name] = { text: await f.text() }
       } catch {
         /* 读不了就只留个文件名，不阻断发送 */
       }
@@ -1196,16 +1245,29 @@ export default function LabPage() {
     return names
   }
 
-  /** 把带进来的文件内容并进正文（并清空暂存，避免下一轮重复带上） */
-  const foldAttachments = (text: string, names: string[]): string => {
-    if (!names?.length) return text
-    const parts: string[] = []
-    for (const n of names) {
-      const body = attachedRef.current[n]
-      if (body) parts.push(`【文件：${n}】\n${body}`)
+  /**
+   * 把带进来的**文本**附件并进正文，并收集**图片**的 data URL。
+   * 一趟做完（顺带清空暂存，避免下一轮重复带上），返回两样东西
+   * —— 因为它们在消息里是两个不同的位置：文本进 content 的文字段，
+   * 图片进 image_url 段。
+   */
+  const takeAttachments = (
+    text: string,
+    names: string[]
+  ): { text: string; images: string[] } => {
+    const bodies: string[] = []
+    const images: string[] = []
+    for (const n of names ?? []) {
+      const got = attachedRef.current[n]
+      if (!got) continue
+      if (got.image) images.push(got.image)
+      else if (got.text) bodies.push(`【文件：${n}】\n${got.text}`)
     }
     attachedRef.current = {}
-    return parts.length ? `${parts.join("\n\n")}\n\n${text}` : text
+    return {
+      text: bodies.length ? `${bodies.join("\n\n")}\n\n${text}` : text,
+      images,
+    }
   }
 
   /**
@@ -1682,7 +1744,7 @@ export default function LabPage() {
 
   /** 跑一轮：请求 → 流式解析 → 边写边执行 → 返回完整文本 */
   const streamRound = async (
-    messages: { role: string; content: string }[],
+    messages: LabConvoMessage[],
     signal: AbortSignal,
     round: number,
     applied: Map<number, string>,
@@ -1790,8 +1852,11 @@ export default function LabPage() {
      *   · 模型输入：正文 + 附件全文（它必须拿到内容才做得了事）。
      */
     const typed = (override ?? input).trim()
-    const text = foldAttachments(typed, files)
-    if (!text || streaming) return
+    const taken = takeAttachments(typed, files)
+    const text = taken.text
+    // 只有图片、没打字也要能发出去（图片本身就是要看的东西）
+    if (!text && !taken.images.length) return
+    if (streaming) return
     if (channel === "station" && (stationMissing || stationAuthExpired)) {
       // 两种情况要分开说：一种是压根没开通，一种是开通了但站内登录失效
       // （后者去重新绑定密码即可，别让用户以为要重新开通）
@@ -1827,7 +1892,21 @@ export default function LabPage() {
       ...prev,
       { key: `u-${Date.now()}`, kind: "user", text: typed, files },
     ])
-    convoRef.current = [...convoRef.current, { role: "user", content: text }]
+    /**
+     * 给模型的这一份：有图就走**多模态 content 数组**。
+     * 文字在前、图片在后 —— 多数模型对「先描述再给图」的理解更稳。
+     * 没有图就保持原来的纯字符串（对老模型/免费渠道最兼容）。
+     */
+    let modelContent: string | LabConvoPart[] = text
+    if (taken.images.length) {
+      const parts: LabConvoPart[] = []
+      if (text) parts.push({ type: "text", text })
+      for (const url of taken.images) {
+        parts.push({ type: "image_url", image_url: { url } })
+      }
+      modelContent = parts
+    }
+    convoRef.current = [...convoRef.current, { role: "user", content: modelContent }]
     setStreaming(true)
     accRef.current = ""
 
@@ -3678,6 +3757,12 @@ function TimelineEntry({ entry }: { entry: Entry }) {
   return <ToolCard entry={entry} />
 }
 
+/**
+ * 一轮对话里给模型的消息。
+ * `content` 是字符串（纯文本）或 part 数组（带图的多模态）。
+ * ⚠️ 必须与后端 `worker/src/handlers/lab.ts` 的 `ChatMessage` 保持一致 ——
+ * 后端只认 `text` / `image_url` 两种 part，且图片只收 data URL。
+ */
 /**
  * 「思考过程」块（仿主流 agent 框架）：
  *   - 流式期间展开、文字逐字出现，标题带流光走马灯；
