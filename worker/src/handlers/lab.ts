@@ -160,6 +160,18 @@ async function assertFreeQuota(
   }
 }
 
+/**
+ * 用户**自己**有没有可用的额度（拿得到 Key 就说明开通了且凭据有效）。
+ * 拿不到返回 null 而不抛 —— 调用方要据此决定「降级」还是「按原样拦」。
+ */
+async function tryResolveOwnKey(env: Env, userId: string): Promise<string | null> {
+  try {
+    return await resolveLabKey(env, userId)
+  } catch {
+    return null
+  }
+}
+
 /** 拿（或自动创建）用户的实验室专用 Key 的完整值。 */
 async function resolveLabKey(env: Env, userId: string): Promise<string> {
   const account = await loadAccount(env, userId)
@@ -419,6 +431,30 @@ export async function chat(env: Env, request: Request): Promise<Response> {
     )
   }
 
+  /**
+   * 免费额度用完后**先尝试降级，而不是直接拦**（站长 2026-10-10 要求）：
+   *   · 用户开通过中转站 ⇒ 自动改用**他自己账号的 Key** 继续，前端提示一下即可；
+   *   · 没开通 ⇒ 才走原来的 429「免费额度已用完」。
+   *
+   * 直接拦的问题：明明有账号的人都用不了，还得用户自己去切渠道 —— 没必要。
+   * ⚠️ 降级后必须把 `free` 与 `channelId` 一起改掉：否则这次调用仍会被算进
+   *    免费额度（`assertFreeQuota` 与用量记账都看 `target.free`）。
+   */
+  let autoFellBack = false
+  if (target.free && cfg.quotaLimit > 0) {
+    const used = await labQuotaUsed(env, user.id, cfg.quotaPeriod)
+    if (used >= cfg.quotaLimit) {
+      const ownKey = await tryResolveOwnKey(env, user.id)
+      if (ownKey) {
+        target.key = ownKey
+        target.free = false
+        target.channelId = ""
+        // 走的是站内中转站自己的额度，端点要跟着换回去
+        target.endpoint = `${newApiBaseUrl(env)}/v1/chat/completions`
+        autoFellBack = true
+      }
+    }
+  }
   await assertFreeQuota(env, user.id, cfg, target)
   const finalModel = target.model
 
@@ -518,6 +554,12 @@ export async function chat(env: Env, request: Request): Promise<Response> {
       "Cache-Control": "no-cache",
       // 给可能存在的中间层一个「别缓冲」的提示
       "X-Accel-Buffering": "no",
+      /**
+       * 这次调用是「免费额度用完、自动改用你自己账号的额度」跑的。
+       * 前端据此弹一条提示 —— 不弹的话用户会一头雾水：
+       * 明明选的是免费模型，怎么突然开始花自己的额度了。
+       */
+      ...(autoFellBack ? { "X-Lab-Auto-Fallback": "1" } : {}),
     },
   })
 }

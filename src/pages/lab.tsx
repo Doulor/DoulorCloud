@@ -1838,6 +1838,13 @@ export default function LabPage() {
         channelId: channel === "site" ? siteChannelId : undefined,
         signal,
       })
+      /**
+       * 免费额度用完、后端**自动改用你自己账号的额度**继续（见后端 chat() 的注释）。
+       * 必须提示一下：用户选的明明是免费模型，不说明白他会以为扣错账了。
+       */
+      if (res.headers.get("X-Lab-Auto-Fallback") === "1") {
+        toast.warning(t("lab.free.autoFallback"))
+      }
     } else {
       res = await fetch(customEndpoint(custom!.baseUrl), {
         method: "POST",

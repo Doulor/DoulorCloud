@@ -4049,6 +4049,18 @@ export const en: Record<MessageKey, string> = {
   "don.fmt.anthropic": "Anthropic native (/v1/messages)",
   "don.realm.cn": "China",
   "don.realm.global": "International",
+  "don.realm.intl": "International",
+  "adm.q2RealmCn": "Allow China version",
+  "adm.q2RealmCnHint":
+    "When off, the donation page no longer offers “China”, and the API refuses to start a binding with it.",
+  "adm.q2RealmIntl": "Allow International version",
+  "adm.q2RealmIntlHint":
+    "When off, the donation page no longer offers “International”, and the API refuses to start a binding with it.",
+  "adm.q2RealmBothOff":
+    "With both versions off, the Qoder2API channel is effectively unavailable (the API rejects outright).",
+  "don.q2.realmLabel": "Which version is your account?",
+  "don.q2.realmHint":
+    "Pick “China” for a Qoder account on the mainland site, “International” for the global site — a wrong pick makes authorization fail; just switch and retry.",
   "don.intro.title": "Limited resources, opened as needed",
   "don.intro.desc":
     "The site owner's resources are limited, so some features aren't open to everyone. If you're willing to contribute the resources below, an admin review unlocks the matching permissions for you.",
@@ -7009,6 +7021,7 @@ export const en: Record<MessageKey, string> = {
   "lab.free.trialBadge": "Free trial",
   "lab.free.channelBadge": "Free to use",
   "lab.free.stationHint": "Site models are in a free trial right now — your own relay quota isn't used.",
+  "lab.free.autoFallback": "Free quota is used up — this run is using your own account's quota instead. It resets next period.",
   "lab.free.quotaLeft": "{left} of {total} free calls left this period",
   "lab.send": "Send",
   "lab.stop": "Stop",
