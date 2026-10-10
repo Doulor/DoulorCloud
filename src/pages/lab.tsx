@@ -3476,6 +3476,13 @@ export default function LabPage() {
         <Button
           variant={previewOpen ? "secondary" : "outline"}
           size="sm"
+          /**
+           * ⚠️ 手机端隐藏（2026-10-10 站长要求）：
+           * 窄屏上这个按钮挤在动作条里没什么用，还占位置。
+           * 用 `hidden sm:inline-flex` 而不是 `max-sm:hidden` —— 后者依赖较新版本，
+           * 前者任何版本都稳（Button 本身是 inline-flex，这里只是覆盖显示值）。
+           */
+          className="hidden sm:inline-flex"
           onClick={() => setPreviewOpen((v) => !v)}
           title={t("lab.preview.switchHint")}
         >

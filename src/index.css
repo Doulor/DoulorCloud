@@ -333,15 +333,23 @@
 .lab-composer-glow-ring::after {
   content: "";
   position: absolute;
-  /* 画大一圈，让旋转时四个角不会「缺料」 */
-  inset: -20%;
+  /*
+    ⚠️ 画大一圈让旋转时四角不缺料 —— 但**必须用 px，不能用百分比**
+    （2026-10-10 站长反馈「下半部分层次比上半部分清晰，是不是上下有区别」）：
+    百分比是按**各自边长的比例**展开的 —— 输入框宽 700、高 100 时，
+    `-20%` 等于左右各扩 140px、上下只扩 20px ⇒ 光带在左右和上下**粗细完全不同**，
+    上下两头看着就不一样。改成固定 px 后四边展开量一致。
+  */
+  inset: -80px;
   background: conic-gradient(
     from 0deg,
     transparent 0deg,
     color-mix(in oklab, var(--primary) 88%, transparent) 42deg,
     transparent 104deg,
     transparent 188deg,
-    color-mix(in oklab, var(--primary) 62%, transparent) 246deg,
+    /* 两个亮点**强度必须一致**：原来这里是 62%，跟上面那个 88% 差太多，
+       于是「一头亮一头暗」，正如站长看到的那样。 */
+    color-mix(in oklab, var(--primary) 88%, transparent) 246deg,
     transparent 304deg
   );
   filter: blur(4px);
