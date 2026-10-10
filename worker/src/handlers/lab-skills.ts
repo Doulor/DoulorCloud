@@ -25,8 +25,13 @@ import type { Env } from "../env"
 export const SKILL_NAME_MAX = 64
 /** 一句话说明上限：**这段会进系统提示**，太长就失去「省 token」的意义了 */
 export const SKILL_DESC_MAX = 200
-/** 正文上限：与提示词模板同量级 */
-export const SKILL_CONTENT_MAX = 60_000
+/**
+ * 正文上限。
+ * ⚠️ 比提示词模板的 60KB 更宽：技能正文**只在模型主动读时才进上下文**（渐进式披露），
+ *    所以「长」本身不是问题；而网上现成的技能（比如 taste-skill）单份就有 80KB+，
+ *    卡在 60KB 会让管理员复制进去之后**存不上**，且报错很难懂。
+ */
+export const SKILL_CONTENT_MAX = 200_000
 /** 单个归属下最多存几个技能 */
 export const SKILLS_MAX = 30
 /** 下发给用户端的技能索引条数上限（每条只占一行，可以比模板多一些） */
