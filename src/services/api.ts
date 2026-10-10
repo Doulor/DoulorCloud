@@ -1995,8 +1995,17 @@ export const qoder2apiApi = {
 // ---- 公告 / 网站动态 ----
 
 export const announcementApi = {
-  /** 登录用户：最近 5 条公告（pinned 优先） */
+  /** 登录用户：最近 5 条公告（pinned 优先）；带 dismissed 表示该用户已「不再显示」 */
   list: () => request<{ announcements: Announcement[] }>("/announcements"),
+
+  /**
+   * 记下「不再显示」（`once` 公告的「知道了」也走这条）。
+   * 落服务端 = 换设备 / 清缓存 / 重装 App 后依然记得，不再只靠 localStorage。
+   */
+  dismiss: (id: string) =>
+    request<{ ok: boolean }>(`/announcements/${encodeURIComponent(id)}/dismiss`, {
+      method: "POST",
+    }),
 
   // 管理端
   listAll: () =>

@@ -608,6 +608,7 @@ export const zh = {
   "dash.copy.label.direct": "直链",
   "dash.dialog.hideForever": "不再显示",
   "dash.dialog.gotIt": "知道了",
+  "dash.dialog.batchHint": "本次共 {n} 条公告",
   "dash.cat.general": "公告",
   "dash.cat.frp": "内网穿透",
   "dash.cat.ai": "AI 中转站",

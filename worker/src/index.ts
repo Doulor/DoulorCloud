@@ -1279,6 +1279,19 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   },
 
   {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/announcements\/([^/]+)\/dismiss$/),
+    methods: ["POST"],
+    handle: (announcementMatch: RegExpMatchArray) =>
+      announcementHandlers.dismissAnnouncement(
+        env,
+        request,
+        decodeURIComponent(announcementMatch[1])
+      ),
+  },
+
+  {
     kind: "exact",
     path: "/achievements",
     method: "GET",

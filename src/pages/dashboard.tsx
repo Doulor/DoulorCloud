@@ -529,13 +529,65 @@ const StorageCard = React.memo(function StorageCard({
   )
 })
 
+/** 公告「已看/已屏蔽」的本地键（服务端记录见 POST /announcements/:id/dismiss） */
+const ANN_SEEN_PREFIX = "doulor:ann-seen:"
+/** every 公告「知道了」的**会话级**记忆键（同一会话里不再反复弹） */
+const ANN_SESSION_PREFIX = "doulor:ann-seen-session:"
+
+/**
+ * 读写浏览器存储，一律吞异常。
+ * 隐私模式 / 存储被禁用 / 配额满时 `setItem` 会抛 —— 弹窗本身不能因此崩掉，
+ * 记忆失败最多是「下次还弹」，比白屏好。
+ */
+function readAnnFlag(storage: "local" | "session", key: string): boolean {
+  try {
+    const s = storage === "local" ? window.localStorage : window.sessionStorage
+    return s.getItem(key) === "1"
+  } catch {
+    return false
+  }
+}
+
+function writeAnnFlag(storage: "local" | "session", key: string): void {
+  try {
+    const s = storage === "local" ? window.localStorage : window.sessionStorage
+    s.setItem(key, "1")
+  } catch {
+    /* 忽略：见 readAnnFlag 的说明 */
+  }
+}
+
+/** 这条公告现在该不该弹 */
+function shouldPopupAnnouncement(a: Announcement): boolean {
+  if (a.popupMode === "none") return false
+  // 服务端记录是真相源（换设备 / 清缓存 / 重装 App 后依然作数）
+  if (a.dismissed) return false
+  // 本地缓存：首屏即时生效，避免弹一下再收回
+  if (readAnnFlag("local", ANN_SEEN_PREFIX + a.id)) return false
+  // every 公告：本会话已点过「知道了」，这次访问不再重复弹
+  if (a.popupMode === "every" && readAnnFlag("session", ANN_SESSION_PREFIX + a.id)) {
+    return false
+  }
+  return true
+}
+
 /**
  * 公告弹窗：根据公告的 popup_mode 决定是否弹、怎么弹。
  *
- * 记忆策略（存 localStorage，不落库）：
- *   - once 模式：关闭后记录「已看过」，不再弹
- *   - every 模式：每次进入都弹，但用户可点「不再显示」永久屏蔽
- * localStorage 键：doulor:ann-seen:<id>（已看/已屏蔽）
+ * 2026-10-10 站长要求的三点表现：
+ *   1. **一次把待弹公告排成队列**，点「知道了 / 不再显示」直接翻到下一条 ——
+ *      原来只弹第一条，第二条要等下次进页面才出现；
+ *   2. 翻页有卡片推入的动效，且**受「界面动效」总开关控制**
+ *      （`html.motion-on`，见 hooks/use-motion-pref.ts 与 index.css）；
+ *   3. 顶部一个数字标，标明这一批共有几条公告。
+ *
+ * 记忆策略（本地缓存 + 服务端真相源）：
+ *   - 「不再显示」→ 同时写 localStorage 与 `POST /announcements/:id/dismiss`。
+ *     只写 localStorage 时，换设备 / 清浏览器数据 / 重装 App（WebView 存储随应用走）
+ *     记录一丢就又开始弹 ——「点了不再显示却还弹」多半就是这条；
+ *   - `once` 公告的「知道了」等同于已读，走同一条落库路径；
+ *   - `every` 公告的「知道了」只记**本次会话**（sessionStorage）：同一会话里来回切
+ *     页面不再反复弹，下次访问照常提醒（后台文案即「每次进入都弹」）。
  *
  * 公告数据由页面级统一拉取（与「网站动态」卡共享一次请求，原来各发一次）。
  */
@@ -545,55 +597,85 @@ const AnnouncementPopup = React.memo(function AnnouncementPopup({
   announcements: Announcement[]
 }) {
   const { t } = useT()
-  const [popup, setPopup] = React.useState<Announcement | null>(null)
-  /** 只决定一次弹窗；公告列表后续再变（本页只拉一次）也不重复弹 */
+  /** 本次要弹的队列与当前下标；一次性决定，之后只前进 */
+  const [queue, setQueue] = React.useState<Announcement[]>([])
+  const [index, setIndex] = React.useState(0)
+  /** 只决定一次队列；公告列表后续再变（本页只拉一次）也不重排 */
   const decidedRef = React.useRef(false)
 
   React.useEffect(() => {
     if (decidedRef.current || announcements.length === 0) return
     decidedRef.current = true
-    // 找第一个需要弹的公告
-    const target = announcements.find((a) => {
-      if (a.popupMode === "none") return false
-      const seen = localStorage.getItem(`doulor:ann-seen:${a.id}`)
-      return !seen
-    })
-    if (target) setPopup(target)
+    setQueue(announcements.filter(shouldPopupAnnouncement))
   }, [announcements])
 
-  if (!popup) return null
+  const current = queue[index]
+  if (!current) return null
 
-  const close = (permanent = false) => {
-    if (permanent || popup.popupMode === "once") {
-      // 「不再显示」或 once 关闭 → 记录已看，永不再弹
-      localStorage.setItem(`doulor:ann-seen:${popup.id}`, "1")
+  /** 翻到下一条；队列走完就收窗 */
+  const advance = () => {
+    if (index + 1 < queue.length) setIndex(index + 1)
+    else setQueue([])
+  }
+
+  /** 永久不再弹：本地 + 服务端各记一笔 */
+  const hideForever = () => {
+    writeAnnFlag("local", ANN_SEEN_PREFIX + current.id)
+    // 服务端落库是真相源；失败也不打断交互（本地已经记住了，下次进来会少弹这一条）
+    void announcementApi.dismiss(current.id).catch(() => {})
+    advance()
+  }
+
+  /** 「知道了」：once = 已读（永久）；every = 只记本次会话 */
+  const gotIt = () => {
+    if (current.popupMode === "once") {
+      hideForever()
+      return
     }
-    // every 模式的普通关闭：不记录，下次进入还会弹
-    setPopup(null)
+    writeAnnFlag("session", ANN_SESSION_PREFIX + current.id)
+    advance()
   }
 
   return (
-    <Dialog open={true} onOpenChange={(o) => !o && close(false)}>
+    <Dialog open onOpenChange={(open) => !open && gotIt()}>
       <DialogContent className="max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>{popup.title}</DialogTitle>
-        </DialogHeader>
-        <div className="announcement-scroll max-h-[60vh] overflow-y-auto pr-3">
-          <Markdown>{popup.body}</Markdown>
+        {/*
+          key = 公告 id：换一条就重挂载一次，从而重放「卡片推入」动画。
+          （动画规则写在 index.css 的动效层里，只在 html.motion-on 下命中，
+           用户在「设置 → 界面动效」关掉即无动画。）
+        */}
+        <div key={current.id} className="ann-card-swap space-y-4">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 pr-6">
+              <Megaphone className="h-5 w-5 shrink-0 text-primary" />
+              <span className="min-w-0 flex-1">{current.title}</span>
+              {queue.length > 1 && (
+                <span
+                  title={t("dash.dialog.batchHint", { n: queue.length })}
+                  className="shrink-0 rounded-full border bg-muted px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground"
+                >
+                  {index + 1}/{queue.length}
+                </span>
+              )}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="announcement-scroll max-h-[60vh] overflow-y-auto pr-3">
+            <Markdown>{current.body}</Markdown>
+          </div>
+          <DialogFooter className="flex-col gap-2 sm:flex-row sm:justify-between">
+            {current.popupMode === "every" && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={hideForever}
+                className="text-muted-foreground"
+              >
+                {t("dash.dialog.hideForever")}
+              </Button>
+            )}
+            <Button onClick={gotIt}>{t("dash.dialog.gotIt")}</Button>
+          </DialogFooter>
         </div>
-        <DialogFooter className="flex-col gap-2 sm:flex-row sm:justify-between">
-          {popup.popupMode === "every" && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => close(true)}
-              className="text-muted-foreground"
-            >
-              {t("dash.dialog.hideForever")}
-            </Button>
-          )}
-          <Button onClick={() => close(false)}>{t("dash.dialog.gotIt")}</Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
