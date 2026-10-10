@@ -1893,18 +1893,27 @@ export default function LabPage() {
     signal: AbortSignal,
     round: number,
     applied: Map<number, string>,
-    onPreviewTick: () => void
+    onPreviewTick: () => void,
+    /**
+     * 这一轮**真正要用**的渠道 / 模型 / 免费渠道 id，由调用方显式传入。
+     * ⚠️ 不能在这里直接读 state：`send` 里刚 `applyFxModel()` 过，
+     * 而 setState 是异步的 —— 那一刻这些 state 还是**上一轮的值**，
+     * 结果就是「换了模型，实际请求与消息标识都还停在旧模型」。
+     */
+    useChannel: string,
+    useModel: string,
+    useSiteChannelId: string
   ): Promise<string> => {
     let res: Response
-    if (channel === "station" || channel === "site") {
+    if (useChannel === "station" || useChannel === "site") {
       res = await streamLabChat({
-        model: activeModel,
+        model: useModel,
         messages,
         effort,
         // 温度由这里算好传下去（唯一口径，见 lab-agent.ts 的 EFFORT_TEMPERATURE）
         temperature: EFFORT_TEMPERATURE[effort],
         // 免费渠道只传 id：真实地址与密钥留在服务端，浏览器拿不到
-        channelId: channel === "site" ? siteChannelId : undefined,
+        channelId: useChannel === "site" ? useSiteChannelId : undefined,
         signal,
       })
       /**
@@ -1922,7 +1931,7 @@ export default function LabPage() {
           Authorization: `Bearer ${custom!.apiKey}`,
         },
         body: JSON.stringify({
-          model: custom!.model,
+          model: useModel,
           messages,
           stream: true,
           // 自定义渠道不经过后端，reasoning_effort 各家吃不吃不确定 ⇒ 只带温度（通用安全）
@@ -1996,7 +2005,44 @@ export default function LabPage() {
    * `override` 给 PromptBar 用 —— 输入框归它管，文字从它那边递过来，
    * 不再是「先写进我们的 state 再读出来」。
    */
-  const send = async (override?: string, files: string[] = []) => {
+  const send = async (
+    override?: string,
+    files: string[] = [],
+    /**
+     * PromptBar 刚选中的模型 key（`station:xxx` / `site:xxx` / `custom:xxx`）。
+     *
+     * ⚠️ **必须显式传进来，不能只读 state**：
+     * `onSend` 里先 `applyFxModel(key)`（一连串 setState）**紧接着**就调 `send`，
+     * 而 React 的状态更新是**异步的** —— 这一刻 render 闭包里的 `channel` / `model`
+     * **还是旧值**。结果就是「换了模型，发出去的第一条用的还是上一个模型」，
+     * 消息上那枚模型标识也跟着错（2026-10-10 站长反馈「撤回说第二遍才生效」）。
+     */
+    pickedKey?: string
+  ) => {
+    // 解析出这一轮**真正要用**的渠道与模型（纯计算，不依赖 setState 有没有生效）
+    const pi = pickedKey ? pickedKey.indexOf(":") : -1
+    const pCh = pi > 0 ? pickedKey!.slice(0, pi) : ""
+    const pVal = pi > 0 ? pickedKey!.slice(pi + 1) : ""
+    const effChannel =
+      pCh === "station" || pCh === "site" || pCh === "custom"
+        ? (pCh as typeof channel)
+        : channel
+    const effSiteChannelId =
+      effChannel === "site" && pCh === "site" ? pVal : siteChannelId
+    const effSiteChannel =
+      siteInfo?.channels.find((c) => c.id === effSiteChannelId) ?? null
+    const effModel =
+      effChannel === "station"
+        ? pCh === "station"
+          ? pVal
+          : model
+        : effChannel === "site"
+          ? effSiteChannel?.model || model
+          : // 自定义渠道：多选时 key 里带的那个模型要能用上（否则永远只用第一个）
+            pCh === "custom" && pVal
+            ? pVal
+            : (custom?.model ?? "")
+
     /**
      * ⚠️ 这里刻意把「模型看到的」和「用户看到的」分成两份：
      *   · 用户气泡：只显示他自己打的字 + 附件名（附件内容平铺进聊天里非常难看，
@@ -2012,7 +2058,7 @@ export default function LabPage() {
     // 只有图片、没打字也要能发出去（图片本身就是要看的东西）
     if (!text && !taken.images.length) return
     if (streaming) return
-    if (channel === "station" && (stationMissing || stationAuthExpired)) {
+    if (effChannel === "station" && (stationMissing || stationAuthExpired)) {
       // 两种情况要分开说：一种是压根没开通，一种是开通了但站内登录失效
       // （后者去重新绑定密码即可，别让用户以为要重新开通）
       //
@@ -2026,8 +2072,8 @@ export default function LabPage() {
       toast.error(t(stationAuthExpired ? "lab.err.expired" : "lab.err.notBound"))
       return
     }
-    if (channel === "site") {
-      const picked = siteInfo?.channels.find((c) => c.id === siteChannelId)
+    if (effChannel === "site") {
+      const picked = effSiteChannel
       if (!picked) {
         toast.error(t("lab.err.siteChannelGone"))
         setChannel("station")
@@ -2035,8 +2081,8 @@ export default function LabPage() {
       }
     }
     if (
-      channel === "custom" &&
-      (!custom || !custom.baseUrl || !custom.apiKey || !custom.model)
+      effChannel === "custom" &&
+      (!custom || !custom.baseUrl || !custom.apiKey || !effModel)
     ) {
       setChannelOpen(true)
       return
@@ -2121,8 +2167,15 @@ export default function LabPage() {
           ...compactHistory(convoRef.current),
         ]
         const applied = new Map<number, string>()
-        const raw = await streamRound(messages, controller.signal, round, applied, () =>
-          refreshPreview(false)
+        const raw = await streamRound(
+          messages,
+          controller.signal,
+          round,
+          applied,
+          () => refreshPreview(false),
+          effChannel,
+          effModel,
+          effSiteChannelId
         )
 
         // 收尾：把没来得及执行的补齐（中止时也走这里，保住已生成的部分）
@@ -2292,7 +2345,7 @@ export default function LabPage() {
             skillResults,
             searchResults,
             httpResults,
-            activeModel
+            effModel
           ),
         ])
         setLive(null)
@@ -2486,7 +2539,7 @@ export default function LabPage() {
         } else {
           toast.error(err.message)
         }
-      } else if (err instanceof Error && channel === "custom") {
+      } else if (err instanceof Error && effChannel === "custom") {
         toast.error(err.message || t("lab.err.generic"))
       } else {
         toast.error(t("lab.err.stream"))
@@ -3445,7 +3498,7 @@ export default function LabPage() {
           toast.success(t("lab.steer.queued"))
           return
         }
-        void send(text, detail?.attachments ?? [])
+        void send(text, detail?.attachments ?? [], detail?.model?.key)
       }}
                 onStop={stop}
       /** 组件里这几处文案写死了英文，按当前语言覆盖掉 */
