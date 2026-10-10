@@ -27,3 +27,12 @@ export function isLabKeyName(name: unknown): boolean {
     typeof name === "string" && (LAB_KEY_NAMES as readonly string[]).includes(name)
   )
 }
+
+/**
+ * 实验室自动建的 Key 固定使用的**分组**（2026-10-10 站长要求）。
+ *
+ * 为什么写死而不是留空：留空 ⇒ 走 NewAPI 的默认分组，会跟着用户的默认分组漂。
+ * 站点正在把分组体系统一到 `auto`，这里固定住，免得站点一改分组实验室就跟着变。
+ * ⚠️ 改这个名字前先确认它在 NewAPI 的可用分组里（`GET /api/group/`）。
+ */
+export const LAB_KEY_GROUP = "auto"

@@ -38,6 +38,9 @@ import { loadAccount, mapUserTokenError, runWithUserToken } from "./newapi"
 import { getSetting } from "../settings"
 import { likeContains } from "../sql-like"
 import { LAB_KEY_NAME, LAB_KEY_NAMES, isLabKeyName } from "../lab-key"
+
+/** 实验室自动建的 Key 固定用这个分组（见 lab-key.ts 的注释） */
+import { LAB_KEY_GROUP } from "../lab-key"
 import { buildPreviewDoc } from "../lab-preview"
 import { loadEnabledTemplates } from "./lab-prompts"
 import { loadSkillIndex } from "./lab-skills"
@@ -206,7 +209,12 @@ async function resolveLabKey(env: Env, userId: string): Promise<string> {
       }
 
       // 2) 没有就建一个，并同步进本地 Key 列表（用户在 AI 页能看到它）
-      const created = await createApiKey(env, token, uid, LAB_KEY_NAME)
+      //
+      // 分组固定用 `auto`（2026-10-10 站长要求）：站点的分组体系在改，
+      // 以后统一走 `auto`。**不要传空** —— 空走的是 NewAPI 的默认分组，
+      // 那会跟着用户的默认分组走，站点一改分组这里就跟着漂。
+      // 已确认 `auto` 在 NewAPI 的可用分组列表里（`GET /api/group/`）。
+      const created = await createApiKey(env, token, uid, LAB_KEY_NAME, LAB_KEY_GROUP)
       const now = new Date().toISOString()
       await env.DB.batch([
         env.DB.prepare(
