@@ -303,7 +303,8 @@
     transparent 74%
   );
   filter: blur(10px);
-  opacity: 0.5;
+  /* 加浓但不加大范围 —— 「粗一点」要的是存在感，不是扩散 */
+  opacity: 0.62;
   animation: lab-glow-breath 3.8s ease-in-out infinite;
 }
 /* 扭转光效（只在 max）—— **被硬裁剪在输入框边缘的一圈光带**
@@ -319,8 +320,10 @@
    这就是「不加 mask 也能把光锁在边缘」的做法（mask-composite 各引擎差异大，少用）。 */
 .lab-composer-glow-ring {
   position: absolute;
-  inset: -2px;
-  border-radius: 29px;
+  /* 光带粗细就是这里：往外让 5px ⇒ 露出 5px 宽的一圈（站长要求「粗一点」）。
+     仍然是硬裁剪，所以再粗也不会飘出去。 */
+  inset: -5px;
+  border-radius: 32px;
   z-index: -1;
   /* 关键：裁剪 */
   overflow: hidden;
@@ -340,9 +343,11 @@
     color-mix(in oklab, var(--primary) 62%, transparent) 246deg,
     transparent 304deg
   );
-  filter: blur(3px);
+  filter: blur(4px);
   opacity: 0.9;
-  animation: lab-glow-spin 4.6s linear infinite;
+  /* 放慢到 8s（原来 4.6s）—— 站长要求「速度慢一点」。
+     这类常驻运动越慢越像「氛围」，越快越像「转圈」。 */
+  animation: lab-glow-spin 8s linear infinite;
 }
 
 @keyframes lab-glow-breath {
