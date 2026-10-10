@@ -31,6 +31,12 @@ export interface SlingButtonProps {
   bandColor?: string;
   size?: number;
   strokeWidth?: number;
+  /**
+   * ⚠️ 本站新增：**箭头**的描边粗细（与 `strokeWidth` 不是一回事 ——
+   * 那个管的是外圈圆环和弦的粗细）。组件原本把它写死成 2.2，
+   * 在 30px 的按钮上看着偏细，站长要求粗一点（2026-10-10）。
+   */
+  iconStrokeWidth?: number;
   armAt?: number;
   maxPull?: number;
   launchSpeed?: number;
@@ -84,6 +90,7 @@ const SlingButton: React.FC<SlingButtonProps> = ({
   bandColor = '#52525b',
   size = 56,
   strokeWidth = 3,
+  iconStrokeWidth = 3.4,
   armAt = 48,
   maxPull = 160,
   launchSpeed = 2600,
@@ -464,7 +471,13 @@ const SlingButton: React.FC<SlingButtonProps> = ({
         >
           <span className="flex h-full w-full items-center justify-center rounded-full [background:var(--sl-pad)] [color:var(--sl-icon)] [transition:transform_160ms_cubic-bezier(0.23,1,0.32,1)] group-data-[held]/pad:scale-[0.97] group-data-[armed]/pad:scale-[1.04] [@media(hover:hover)_and_(pointer:fine)]:group-hover/pad:group-not-data-[held]/pad:group-not-aria-disabled/pad:scale-[1.02] motion-reduce:transition-none motion-reduce:transform-none!">
             <span ref={iconRef} className="inline-flex will-change-transform">
-              {children ?? <HugeiconsIcon icon={ArrowUp02Icon} size={Math.round(size * 0.4)} strokeWidth={2.2} />}
+              {children ?? (
+                <HugeiconsIcon
+                  icon={ArrowUp02Icon}
+                  size={Math.round(size * 0.4)}
+                  strokeWidth={iconStrokeWidth}
+                />
+              )}
             </span>
           </span>
         </button>

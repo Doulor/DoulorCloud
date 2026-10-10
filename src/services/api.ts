@@ -4067,6 +4067,12 @@ export const labApi = {
        * 渐进式披露：这一份进系统提示当目录；模型要用了才去调 `readSkill` 取正文。
        */
       skills?: LabSkillIndexEntry[]
+      /**
+       * 联网搜索的**用户级开关**（默认关）。
+       * 只有 enabled 为 true 时前端才会把 <lab_web_search> 告诉模型 ——
+       * 关着时模型压根不知道有这东西，也就不会去搜、不会被扣分。
+       */
+      webSearch?: { enabled: boolean; siteAvailable: boolean; cost: number }
     }>("/lab/settings"),
 
   /**
@@ -4092,15 +4098,25 @@ export const labApi = {
 
   /** 我的搜索 key 状态（**只回有没有配，不回内容**） */
   searchKeyInfo: () =>
-    request<{ hasOwn: boolean; siteAvailable: boolean; cost: number; enabled: boolean }>(
-      "/lab/search-key"
-    ),
+    request<{
+      hasOwn: boolean
+      siteAvailable: boolean
+      cost: number
+      /** 站点允不允许用户自带 key */
+      enabled: boolean
+      /** **我自己的**联网搜索总开关（默认关） */
+      webSearchEnabled: boolean
+    }>("/lab/search-key"),
 
-  /** 设置 / 清除我自己的 Tavily key（传空串 = 清除） */
-  setSearchKey: (key: string) =>
-    request<{ hasOwn: boolean }>("/lab/search-key", {
+  /**
+   * 改我的联网搜索设置。
+   * ⚠️ 两个字段可以分开发：只传 `key` 不动开关，只传 `webSearchEnabled` 不动 key。
+   * `key: ""` = 清除自己的 key。
+   */
+  setSearchKey: (payload: { key?: string; webSearchEnabled?: boolean }) =>
+    request<{ hasOwn: boolean; webSearchEnabled: boolean }>("/lab/search-key", {
       method: "PUT",
-      body: JSON.stringify({ key }),
+      body: JSON.stringify(payload),
     }),
 
   listSkills: () => request<{ skills: LabSkillEntry[] }>("/lab/skills"),

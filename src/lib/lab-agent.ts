@@ -927,7 +927,9 @@ export const DEFAULT_AGENT_SYSTEM = AGENT_SYSTEM
 export function buildSystemPrompt(
   files: FileMap,
   override?: string,
-  skills?: { name: string; description: string }[]
+  skills?: { name: string; description: string }[],
+  /** 用户打开了「联网搜索」开关才为 true（默认关，见 USER_SEARCH_CAPABILITY_INDEX） */
+  webSearch?: boolean
 ): string {
   const base = override && override.trim() ? override.trim() : AGENT_SYSTEM
   const paths = Object.keys(files).sort()
@@ -954,8 +956,22 @@ export function buildSystemPrompt(
     : ""
   // 站内操作索引**始终追加**，即使管理面板覆盖了提示词 ——
   // 否则一改提示词，模型就不知道有这组能力了（前端照样认得标签，但模型不会去用）。
-  return `${base}\n\n${SITE_CAPABILITY_INDEX}\n\n当前项目文件：\n${list}${skillBlock}`
+  // 联网搜索**只在用户自己打开开关时**才告诉模型（默认关）——
+  // 关着时模型不知道有这个工具，就不会去搜，也就不会莫名其妙扣分。
+  const searchBlock = webSearch ? `\n\n${USER_SEARCH_CAPABILITY_INDEX}` : ""
+  return `${base}\n\n${SITE_CAPABILITY_INDEX}\n\n当前项目文件：\n${list}${skillBlock}${searchBlock}`
 }
+
+/**
+ * 联网搜索的能力说明 —— **只有当用户自己打开了开关**才追加进系统提示。
+ *
+ * 为什么按人开关、而不是按站点开关：走站点 key 搜索是**按次扣这个用户的积分**的。
+ * 很多人根本不需要联网，模型顺手搜一下他就被扣分了。所以默认关，
+ * 想用的人自己去「+」菜单里打开（见迁移 0143 的注释）。
+ */
+export const USER_SEARCH_CAPABILITY_INDEX = `联网搜索：你能用 <lab_web_search query="搜索词"/> 查网上的最新资料。
+**只在确实需要外部/最新信息时才用**（你不确定、或明显是近期的事实时），能凭已有知识回答的就别搜 —— 每次搜索都会花用户的钱。`
+
 
 /**
  * 「站内操作」的能力索引 —— 只有两行，真正的用法在按需注入的手册里。

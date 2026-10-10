@@ -46,6 +46,11 @@ export function maskTavilyKey(key: string): string {
   return `${key.slice(0, 10)}…${key.slice(-4)}`
 }
 
+/** 站点有没有配 key（只回数量，不回内容；给 getLabSettings 用） */
+export async function loadSiteKeysForInfo(env: Env): Promise<string[]> {
+  return loadSiteKeys(env)
+}
+
 /** 读站点 key 列表（明文，仅服务端内部用） */
 async function loadSiteKeys(env: Env): Promise<string[]> {
   const raw = await getSetting(env, "lab_tavily_keys")
@@ -59,14 +64,31 @@ export async function loadSearchCost(env: Env): Promise<number> {
   return Number.isFinite(n) && n >= 0 ? n : 5
 }
 
-/** 读用户自己的 key（解密失败按「没配」处理，别把整个搜索功能搞挂） */
-export async function loadUserSearchKey(env: Env, userId: string): Promise<string | null> {
+/**
+ * 读用户的整行设置。
+ * ⚠️ 没有行 = 全都是默认值（**联网搜索默认关**）—— 新用户不该被默认扣分。
+ */
+async function loadUserRow(
+  env: Env,
+  userId: string
+): Promise<{ tavily_key_enc: string | null; web_search_enabled: number }> {
   const row = await env.DB.prepare(
-    "SELECT tavily_key_enc FROM lab_user_settings WHERE user_id = ?"
+    "SELECT tavily_key_enc, web_search_enabled FROM lab_user_settings WHERE user_id = ?"
   )
     .bind(userId)
-    .first<{ tavily_key_enc: string | null }>()
-  if (!row?.tavily_key_enc) return null
+    .first<{ tavily_key_enc: string | null; web_search_enabled: number }>()
+  return { tavily_key_enc: row?.tavily_key_enc ?? null, web_search_enabled: row?.web_search_enabled ?? 0 }
+}
+
+/** 用户有没有打开「联网搜索」开关（默认关） */
+export async function isUserSearchEnabled(env: Env, userId: string): Promise<boolean> {
+  return (await loadUserRow(env, userId)).web_search_enabled === 1
+}
+
+/** 读用户自己的 key（解密失败按「没配」处理，别把整个搜索功能搞挂） */
+export async function loadUserSearchKey(env: Env, userId: string): Promise<string | null> {
+  const row = await loadUserRow(env, userId)
+  if (!row.tavily_key_enc) return null
   try {
     return await decryptSecret(row.tavily_key_enc, env.SESSION_SECRET ?? "")
   } catch {
@@ -159,6 +181,19 @@ export async function webSearch(env: Env, request: Request): Promise<Response> {
   const query = typeof body?.query === "string" ? body.query.trim().slice(0, 400) : ""
   if (!query) throw new ApiError(400, "缺少搜索关键词", "INVALID_QUERY")
 
+  /**
+   * ⚠️ 开关的**第二道**（第一道在前端：没打开就压根不告诉模型有这个工具）。
+   * 前端可以被绕过，而这里是真花钱的动作，所以必须自己再查一遍。
+   * 默认关 ⇒ 新用户不做任何操作就不会被扣分。
+   */
+  if (!(await isUserSearchEnabled(env, user.id))) {
+    throw new ApiError(
+      403,
+      "你还没有启用联网搜索。到输入框「+」菜单的「联网搜索」里把开关打开即可。",
+      "SEARCH_DISABLED_BY_USER"
+    )
+  }
+
   // 1) 优先用户自己的 key
   const own = await loadUserSearchKey(env, user.id)
   if (own) {
@@ -237,35 +272,62 @@ export async function getMySearchKey(env: Env, request: Request): Promise<Respon
     hasOwn: !!row?.tavily_key_enc,
     siteAvailable: keys.length > 0,
     cost: await loadSearchCost(env),
+    /** 站点允不允许用户自带 key */
     enabled: (await getSetting(env, "lab_user_search_key_enabled")) !== "0",
+    /** **用户自己的**联网搜索开关（默认关） */
+    webSearchEnabled: (await loadUserRow(env, user.id)).web_search_enabled === 1,
   })
 }
 
-/** PUT /api/lab/search-key —— body: { key: string }（空串 = 删除自己的 key） */
+/**
+ * PUT /api/lab/search-key
+ * body: { key?: string, webSearchEnabled?: boolean }
+ *   · `key` 传空串 = 删除自己的 key（**不动开关**）；
+ *   · `webSearchEnabled` 是那个总开关（默认关）。
+ * 两者可以分开发 —— 用户可能只想开开关（走站点 key），或只想清掉 key。
+ */
 export async function setMySearchKey(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  if ((await getSetting(env, "lab_user_search_key_enabled")) === "0") {
-    throw new ApiError(400, "站点已关闭自定义搜索 key", "SEARCH_KEY_DISABLED")
-  }
-  const body = (await request.json().catch(() => null)) as { key?: unknown } | null
-  const raw = typeof body?.key === "string" ? body.key.trim() : ""
+  const body = (await request.json().catch(() => null)) as
+    | { key?: unknown; webSearchEnabled?: unknown }
+    | null
+  if (!body) throw new ApiError(400, "请求体格式错误", "INVALID_BODY")
   const now = new Date().toISOString()
 
-  if (!raw) {
-    await env.DB.prepare("DELETE FROM lab_user_settings WHERE user_id = ?").bind(user.id).run()
-    return json({ hasOwn: false })
-  }
-  if (raw.length > 200) throw new ApiError(400, "key 太长，不像是 Tavily 的 key", "INVALID_KEY")
-
-  const enc = await encryptSecret(raw, env.SESSION_SECRET ?? "")
+  // 确保有一行，后面按需 UPDATE（分开 set 语句，避免把没传的字段覆盖掉）
   await env.DB.prepare(
-    `INSERT INTO lab_user_settings (user_id, tavily_key_enc, updated_at) VALUES (?, ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET tavily_key_enc = excluded.tavily_key_enc,
-                                        updated_at = excluded.updated_at`
+    "INSERT INTO lab_user_settings (user_id, updated_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING"
   )
-    .bind(user.id, enc, now)
+    .bind(user.id, now)
     .run()
-  return json({ hasOwn: true })
+
+  if ("webSearchEnabled" in body) {
+    await env.DB.prepare(
+      "UPDATE lab_user_settings SET web_search_enabled = ?, updated_at = ? WHERE user_id = ?"
+    )
+      .bind(body.webSearchEnabled === true ? 1 : 0, now, user.id)
+      .run()
+  }
+
+  if ("key" in body) {
+    if ((await getSetting(env, "lab_user_search_key_enabled")) === "0") {
+      throw new ApiError(400, "站点已关闭自定义搜索 key", "SEARCH_KEY_DISABLED")
+    }
+    const raw = typeof body.key === "string" ? body.key.trim() : ""
+    if (raw.length > 200) throw new ApiError(400, "key 太长，不像是 Tavily 的 key", "INVALID_KEY")
+    const enc = raw ? await encryptSecret(raw, env.SESSION_SECRET ?? "") : null
+    await env.DB.prepare(
+      "UPDATE lab_user_settings SET tavily_key_enc = ?, updated_at = ? WHERE user_id = ?"
+    )
+      .bind(enc, now, user.id)
+      .run()
+  }
+
+  const row = await loadUserRow(env, user.id)
+  return json({
+    hasOwn: !!row.tavily_key_enc,
+    webSearchEnabled: row.web_search_enabled === 1,
+  })
 }
 
 /* ------------------------------------------------------------------ */

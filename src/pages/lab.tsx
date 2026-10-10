@@ -533,6 +533,12 @@ export default function LabPage() {
    * 技能是账号级的（站点默认 ∪ 自己导入的），所以从 /lab/settings 一起下发。
    */
   const [labSkills, setLabSkills] = React.useState<LabSkillIndexEntry[]>([])
+  /**
+   * 用户有没有打开「联网搜索」（**默认关**）。
+   * 关着时**根本不把 <lab_web_search> 告诉模型** —— 这样它不会去试，
+   * 也就不会走站点 key 花掉这个用户的积分。
+   */
+  const [webSearchOn, setWebSearchOn] = React.useState(false)
   /** 「技能」对话框（从输入框「+」菜单进来） */
   const [skillOpen, setSkillOpen] = React.useState(false)
   /** 「联网搜索」对话框：看状态 / 填自己的 Tavily key */
@@ -998,6 +1004,7 @@ export default function LabPage() {
         setAgentPrompt(res.agentPrompt || "")
         setPromptTemplates(res.templates ?? [])
         setLabSkills(res.skills ?? [])
+        setWebSearchOn(res.webSearch?.enabled === true)
         // 用户导入技能后要重新拿目录才能生效 —— 由 SkillDialog 关闭时触发一次刷新
         // （这里只是记录加载成功，见 loadLabSettings 的调用点）
       })
@@ -1860,7 +1867,7 @@ export default function LabPage() {
           {
             role: "system",
             content:
-              buildSystemPrompt(filesRef.current, effectivePrompt, labSkills) +
+              buildSystemPrompt(filesRef.current, effectivePrompt, labSkills, webSearchOn) +
               (siteOpRef.current
                 ? `\n\n## 本轮已启用：站内操作（用户已 @ 指定）\n` +
                   `用户这一轮明确要你处理**站内数据**。手册已经给你了，直接用 <lab_site op="…"> 执行，` +
@@ -3364,7 +3371,14 @@ export default function LabPage() {
       </div>
 
       {/* ---- 启用浏览器终端前的确认（AI 申请时走的也是这一个）---- */}
-      <SearchKeyDialog open={searchKeyOpen} onOpenChange={setSearchKeyOpen} />
+      <SearchKeyDialog
+        open={searchKeyOpen}
+        onOpenChange={(o) => {
+          setSearchKeyOpen(o)
+          // 关掉时重拉设置：把刚打开的联网搜索开关同步进系统提示
+          if (!o) setSettingsKey((k) => k + 1)
+        }}
+      />
 
       <SkillDialog
         open={skillOpen}
@@ -4553,6 +4567,7 @@ function SearchKeyDialog({
     siteAvailable: boolean
     cost: number
     enabled: boolean
+    webSearchEnabled: boolean
   } | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
@@ -4576,13 +4591,19 @@ function SearchKeyDialog({
     }
   }, [open, load])
 
-  const save = async (key: string) => {
+  const save = async (payload: { key?: string; webSearchEnabled?: boolean }) => {
     setBusy(true)
     try {
-      const res = await labApi.setSearchKey(key)
-      setInfo((prev) => (prev ? { ...prev, hasOwn: res.hasOwn } : prev))
-      setDraft("")
-      toast.success(key ? t("lab.search.saved") : t("lab.search.cleared"))
+      const res = await labApi.setSearchKey(payload)
+      setInfo((prev) => (prev ? { ...prev, ...res } : prev))
+      if ("key" in payload) {
+        setDraft("")
+        toast.success(payload.key ? t("lab.search.saved") : t("lab.search.cleared"))
+      } else {
+        toast.success(
+          payload.webSearchEnabled ? t("lab.search.turnedOn") : t("lab.search.turnedOff")
+        )
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t("lab.search.saveFailed"))
     } finally {
@@ -4604,6 +4625,26 @@ function SearchKeyDialog({
           </p>
         ) : (
           <div className="space-y-3">
+            {/*
+              总开关放最上面：关着时**模型根本不知道有这个工具**，所以也就不会被扣分。
+              默认关（新用户不做任何操作就不会花钱）。
+            */}
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg border p-2.5">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--primary)]"
+                checked={info?.webSearchEnabled === true}
+                disabled={busy}
+                onChange={(e) => void save({ webSearchEnabled: e.target.checked })}
+              />
+              <span className="text-xs leading-relaxed">
+                <span className="font-medium">{t("lab.search.toggle")}</span>
+                <span className="mt-0.5 block text-muted-foreground">
+                  {t("lab.search.toggleHint")}
+                </span>
+              </span>
+            </label>
+
             <div className="rounded-lg border p-2.5 text-xs leading-relaxed">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-muted-foreground">{t("lab.search.siteKey")}</span>
@@ -4643,7 +4684,7 @@ function SearchKeyDialog({
                       variant="ghost"
                       size="sm"
                       disabled={busy}
-                      onClick={() => void save("")}
+                      onClick={() => void save({ key: "" })}
                     >
                       {t("lab.search.clear")}
                     </Button>
@@ -4651,7 +4692,7 @@ function SearchKeyDialog({
                   <Button
                     size="sm"
                     disabled={busy || !draft.trim()}
-                    onClick={() => void save(draft.trim())}
+                    onClick={() => void save({ key: draft.trim() })}
                   >
                     {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                     {t("common.save")}

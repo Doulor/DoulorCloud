@@ -41,6 +41,7 @@ import { LAB_KEY_NAME, LAB_KEY_NAMES, isLabKeyName } from "../lab-key"
 import { buildPreviewDoc } from "../lab-preview"
 import { loadEnabledTemplates } from "./lab-prompts"
 import { loadSkillIndex } from "./lab-skills"
+import { loadSearchCost, isUserSearchEnabled, loadSiteKeysForInfo } from "./lab-search"
 import {
   consumeLabQuota,
   isFreeModel,
@@ -547,7 +548,23 @@ export async function getLabSettings(env: Env, request: Request): Promise<Respon
    * 所以这里可以放心把索引全量下发，正文一份都不带。
    */
   const skills = await loadSkillIndex(env, user.id)
-  return json({ agentPrompt, reviewRequired, templates, skills })
+  /**
+   * 联网搜索的**用户级开关**（默认关）。
+   * 前端只有在这里拿到 true 时，才会把 `<lab_web_search>` 告诉模型 ——
+   * 关着时模型压根不知道有这东西，也就不会去搜、不会被扣分。
+   * 后端 `/api/lab/web-search` 还会再拦一道（前端能被绕过）。
+   */
+  return json({
+    agentPrompt,
+    reviewRequired,
+    templates,
+    skills,
+    webSearch: {
+      enabled: await isUserSearchEnabled(env, user.id),
+      siteAvailable: (await loadSiteKeysForInfo(env)).length > 0,
+      cost: await loadSearchCost(env),
+    },
+  })
 }
 
 // ---------------------------------------------------------------------------
