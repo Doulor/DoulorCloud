@@ -153,4 +153,51 @@ describe("PUT /api/admin/r2/assign —— 目标桶人数上限", () => {
     expect(res.status, "别的桶的人数不该被算进来").toBe(200)
     expect(await bucketOf(mover.id)).toBe("btarget")
   })
+
+  // ---- 改派到「自己已在的桶」不该被容量守卫拦（2026-10-10 补）----
+  //
+  // UI 的改派下拉默认值就是该用户**当前所在的桶**（`src/pages/admin.tsx:6077`
+  // 的 `value={assignTarget[u.username] ?? b.id}`），所以「点一下改派、目标=当前桶」
+  // 是正常可达的操作。这类调用**不增加任何人数**（他本来就在这个桶里），
+  // 容量守卫不该拦它 —— 否则桶一满，管理员连「再点一次改派」都会 409，
+  // 而界面上没有任何提示说明这是无操作。
+  it("改派到「用户已在的桶」：桶已满也要放行（不增加人数）", async () => {
+    const root = await makeUser({ role: "root" })
+    await makeBucket("bsame", 1)
+
+    const u = await makeUser()
+    await makeStorage(u.id, "same1", "bsame", 1024) // 他已在 bsame，且桶满 1/1
+
+    const res = await assign(root, u.username, "bsame")
+    expect(res.status, "无操作不该被容量守卫拦").toBe(200)
+    expect(await bucketOf(u.id)).toBe("bsame")
+  })
+
+  it("改派到「用户已在的桶」：桶未满时同样放行（与上一条对称）", async () => {
+    const root = await makeUser({ role: "root" })
+    await makeBucket("bsame2", 5)
+
+    const u = await makeUser()
+    await makeStorage(u.id, "same2", "bsame2", 512)
+
+    const res = await assign(root, u.username, "bsame2")
+    expect(res.status).toBe(200)
+    expect(await bucketOf(u.id)).toBe("bsame2")
+  })
+
+  it("从别的桶改派进满桶：仍要被拦（换桶确实增加人数）", async () => {
+    const root = await makeUser({ role: "root" })
+    await makeBucket("bfull3", 1)
+    await makeBucket("borig", 5)
+
+    const occupant = await makeUser()
+    await makeStorage(occupant.id, "occ9", "bfull3", 0) // 占满
+
+    const mover = await makeUser()
+    await makeStorage(mover.id, "mv9", "borig", 1024) // 在别的桶里
+
+    const res = await assign(root, mover.username, "bfull3")
+    expect(res.status, "换桶是新增一个人，必须拦").toBe(409)
+    expect(await bucketOf(mover.id)).toBe("borig") // 归属没变
+  })
 })
