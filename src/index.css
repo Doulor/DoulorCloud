@@ -286,8 +286,7 @@
   /* 输入框圆角是 26px，光往外扩 8px ⇒ 这里要跟着放大 */
   border-radius: 34px;
 }
-.lab-composer-glow::before,
-.lab-composer-glow::after {
+.lab-composer-glow::before {
   content: "";
   position: absolute;
   inset: -8px;
@@ -307,16 +306,31 @@
   opacity: 0.5;
   animation: lab-glow-breath 3.8s ease-in-out infinite;
 }
-/* 扭转光效（只在 max）—— **贴着输入框边缘转的一圈光带**
-   ⚠️ 这里的关键是「不要它自己长出边界」：
-     · `inset` 只往外让 2px、模糊只给 3px ⇒ 光带始终是贴边的一圈；
-     · 中间大片区域**靠输入框自己不透明的背景盖住** ——
-       所以不需要 mask 挖空，光自然只留在边框那一条上。
-   2026-10-10 站长反馈「超出了输入框的范围」，就是因为原来用 inset:-8px + blur(12px)，
-   整条光带糊成一片散到外面去了。 */
-.lab-composer-glow-spin::after {
+/* 扭转光效（只在 max）—— **被硬裁剪在输入框边缘的一圈光带**
+   ⚠️ 上一版只把 inset 从 -8 收到 -2、blur 从 12 降到 3，那只是「调小」，
+      并没有真正约束边界 —— 光还是会往外糊出去（站长 2026-10-10 反馈
+      「还是像探照灯一样、光束会突出来」）。
+
+   这一版改成**结构上裁死**，分两层：
+     · `.lab-composer-glow-ring` —— 只比输入框大 2px 的圆角矩形，`overflow:hidden`
+       把里面的一切裁在这个形状里 ⇒ 光**最多只能露出 2px**，物理上出不去；
+     · 它的 `::after` —— 真正在转的锥形渐变，故意画得比容器大（旋转才顺滑），
+       多出来的部分全被外层裁掉。
+   这就是「不加 mask 也能把光锁在边缘」的做法（mask-composite 各引擎差异大，少用）。 */
+.lab-composer-glow-ring {
+  position: absolute;
   inset: -2px;
-  border-radius: 30px;
+  border-radius: 29px;
+  z-index: -1;
+  /* 关键：裁剪 */
+  overflow: hidden;
+  pointer-events: none;
+}
+.lab-composer-glow-ring::after {
+  content: "";
+  position: absolute;
+  /* 画大一圈，让旋转时四个角不会「缺料」 */
+  inset: -20%;
   background: conic-gradient(
     from 0deg,
     transparent 0deg,
@@ -326,11 +340,11 @@
     color-mix(in oklab, var(--primary) 62%, transparent) 246deg,
     transparent 304deg
   );
-  /* 只柔化 3px：既让边缘不刺眼，又不会扩散出去 */
   filter: blur(3px);
   opacity: 0.9;
   animation: lab-glow-spin 4.6s linear infinite;
 }
+
 @keyframes lab-glow-breath {
   0%,
   100% {
@@ -350,7 +364,7 @@
 /* 关掉系统动效时只留静态微光，别让光一直在转（这类持续运动会干扰阅读） */
 @media (prefers-reduced-motion: reduce) {
   .lab-composer-glow::before,
-  .lab-composer-glow::after {
+  .lab-composer-glow-ring::after {
     animation: none;
   }
 }

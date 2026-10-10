@@ -3106,10 +3106,19 @@ export default function LabPage() {
               */}
               <div
                 className={cn(
+                  "relative",
                   effort === "xhigh" && "lab-composer-glow",
-                  effort === "max" && "lab-composer-glow lab-composer-glow-spin"
+                  effort === "max" && "lab-composer-glow"
                 )}
               >
+                {/*
+                  旋转光带**单独一个被裁剪的容器**，不挂在 glow 容器自己的伪元素上：
+                  见 index.css 里 .lab-composer-glow-ring 的注释 ——
+                  只有让外层 overflow:hidden 把内层裁掉，光才真的出不了输入框。
+                */}
+                {effort === "max" && (
+                  <span className="lab-composer-glow-ring" aria-hidden="true" />
+                )}
               <PromptBar
                 placeholder={t("lab.inputPlaceholder")}
                 models={fxModels}
