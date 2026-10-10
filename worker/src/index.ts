@@ -12,6 +12,7 @@ import * as labPromptHandlers from "./handlers/lab-prompts"
 import * as labSkillHandlers from "./handlers/lab-skills"
 import * as labSearchHandlers from "./handlers/lab-search"
 import * as labDomainHandlers from "./handlers/lab-domains"
+import * as labStoreHandlers from "./handlers/lab-store"
 import * as adminDnsHandlers from "./handlers/admin-dns"
 import * as adminSubdomainHandlers from "./handlers/admin-subdomains"
 import * as adminMailboxHandlers from "./handlers/admin-mailboxes"
@@ -3843,6 +3844,25 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/lab/settings",
     method: "GET",
     handle: () => labHandlers.getLabSettings(env, request),
+  },
+
+  // ---- 作品的键值存储（**公网可写**，护栏见 handlers/lab-store.ts）----
+  //    作品挂在自己的域名下，读写的都是这个接口 ⇒ 必须带 CORS 头，包含 OPTIONS 预检。
+  {
+    kind: "branch",
+    match: (routePath: string) => routePath.match(/^\/lab-store\/([^/]+)(?:\/(.+))?$/),
+    handle: (storeMatch: RegExpMatchArray, method: string) => {
+      const pid = decodeURIComponent(storeMatch[1])
+      const key = storeMatch[2]
+      if (method === "OPTIONS") return labStoreHandlers.storePreflight()
+      if (!key) {
+        return method === "GET" ? labStoreHandlers.listValues(env, request, pid) : null
+      }
+      if (method === "GET") return labStoreHandlers.getValue(env, request, pid, key)
+      if (method === "PUT") return labStoreHandlers.setValue(env, request, pid, key)
+      if (method === "DELETE") return labStoreHandlers.deleteValue(env, request, pid, key)
+      return null
+    },
   },
 
   // ---- 作品绑定域名（挂到用户自己的子域名上）----

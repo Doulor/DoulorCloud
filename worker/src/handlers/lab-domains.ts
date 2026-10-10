@@ -17,6 +17,7 @@ import { rootDomainFor, zoneIdForFqdn } from "../root-domains"
 import { cfCreateDnsRecord, cfListDnsRecords } from "../cloudflare"
 import { createWorkerRoute, removeWorkerRoute } from "./storage"
 import { readFiles, type LabProjectRow } from "./lab"
+import { buildSdk } from "./lab-store"
 import type { Env } from "../env"
 
 /** 每个用户最多绑几个域名（跟直链网盘一个量级，别让人拿来刷域名） */
@@ -241,7 +242,20 @@ export async function serveHostedLab(
     return new Response("Not Found", { status: 404 })
   }
 
-  return new Response(content, {
+  /**
+   * 往 HTML 里注入作品存储的 SDK（`window.LabStore`）。
+   * 只注入 HTML —— 其它文件（css/js/图片）不需要。
+   * 注入在这里而不是发布时：作品内容随时会改，发布时插一次会在下次保存后丢失。
+   */
+  let body = content
+  if (path.toLowerCase().endsWith(".html")) {
+    const sdk = buildSdk(row.id, `https://cloud.${env.ROOT_DOMAIN}`)
+    body = body.includes("</body>")
+      ? body.replace(/<\/body>/i, `${sdk}\n</body>`)
+      : body + sdk
+  }
+
+  return new Response(body, {
     headers: {
       "Content-Type": contentTypeFor(path),
       // 用户随时会改作品，别让边缘缓存把旧版本留太久
