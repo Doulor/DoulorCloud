@@ -53,6 +53,12 @@ import {
   StatusMark,
   ThoughtLine,
 } from "@/components/reactbits"
+import {
+  Attachment01Icon,
+  Database02Icon,
+  Search01Icon,
+  SparklesIcon,
+} from "@hugeicons/core-free-icons"
 import { useMotionPref } from "@/hooks/use-motion-pref"
 import { clearLabRun, getLabRun, setLabRun, useLabRun } from "@/lib/lab-run"
 import { Markdown } from "@/components/markdown"
@@ -1119,10 +1125,16 @@ export default function LabPage() {
    */
   const fxSources = React.useMemo(
     () => [
-      { key: "files", name: t("lab.src.files"), description: t("lab.src.filesDesc"), attach: true },
-      { key: "site", name: t("lab.src.site"), description: t("lab.src.siteDesc") },
-      { key: "skills", name: t("lab.src.skills"), description: t("lab.src.skillsDesc") },
-      { key: "web", name: t("lab.src.web"), description: t("lab.src.webDesc") },
+      {
+        key: "files",
+        name: t("lab.src.files"),
+        description: t("lab.src.filesDesc"),
+        icon: Attachment01Icon,
+        attach: true,
+      },
+      { key: "site", name: t("lab.src.site"), description: t("lab.src.siteDesc"), icon: Database02Icon },
+      { key: "skills", name: t("lab.src.skills"), description: t("lab.src.skillsDesc"), icon: SparklesIcon },
+      { key: "web", name: t("lab.src.web"), description: t("lab.src.webDesc"), icon: Search01Icon },
     ],
     [t]
   )
@@ -2880,11 +2892,17 @@ export default function LabPage() {
           )}
 
           {/* ---- 长条聊天框 ----
+              ⚠️ `relative right-[5px]` 不是随手写的：
+              消息列表在时间线里居中，而时间线被滚动条占掉 10px
+              （见 index.css 的 .lab-timeline { scrollbar-gutter: stable }），
+              所以消息的居中基准比整列窄 10px ⇒ 输入框要往左让正好一半，才能左右都对齐。
+              不能用 `mr-[10px]`：它会顶掉 `mx-auto` 的 margin-right，
+              只剩 margin-left:auto，整条输入框会被推到最右边（2026-10-10 站长反馈）。
               「AI 实验室动效」开着时用 ReactBits 的 PromptBar：模型选择、思考强度、
               发送/停止都收在那一条里；关掉时用下面这套原来的朴素输入框。
               两者是**二选一**，不靠互相覆盖，所以关掉之后与改动前逐字一致。 */}
           {labFxOn ? (
-            <div className="mx-auto w-full max-w-3xl shrink-0 pt-6 mr-[10px] pb-1">
+            <div className="relative right-[5px] mx-auto w-full max-w-3xl shrink-0 pt-6 pb-1">
               <PromptBar
                 placeholder={t("lab.inputPlaceholder")}
                 models={fxModels}
@@ -2972,7 +2990,7 @@ export default function LabPage() {
               />
             </div>
           ) : (
-            <div className="mx-auto w-full max-w-3xl shrink-0 pt-6 mr-[10px] pb-1">
+            <div className="relative right-[5px] mx-auto w-full max-w-3xl shrink-0 pt-6 pb-1">
           <div className="rounded-[26px] border border-border/70 bg-card/70 shadow-[0_2px_24px_-8px_rgba(0,0,0,0.18)] backdrop-blur-xl transition-[box-shadow,border-color] duration-200 focus-within:border-border focus-within:shadow-[0_6px_32px_-10px_rgba(0,0,0,0.26)]">
             <textarea
               ref={taRef}

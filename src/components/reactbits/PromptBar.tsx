@@ -200,8 +200,18 @@ const parseToken = (draft: string): Token | null => {
   return { kind: m[2] === '@' ? 'at' : 'slash', query: m[3].toLowerCase(), start: m.index + m[1].length };
 };
 
+/**
+ * ⚠️ 本站修复：`icon` 缺省时必须返回 null。
+ * 原来直接把它塞进 <HugeiconsIcon icon={undefined}/>，组件内部会去解构它，
+ * 于是整个菜单一打开就抛 "undefined is not iterable"，表现为「点加号没反应」
+ * （2026-10-10 站长反馈）。调用方没配图标是很正常的事，不该炸。
+ */
 const renderIcon = (icon: ReactNode | IconSvgElement, size: number) =>
-  isValidElement(icon) ? icon : <HugeiconsIcon icon={icon as IconSvgElement} size={size} strokeWidth={1.8} />;
+  !icon
+    ? null
+    : isValidElement(icon)
+      ? icon
+      : <HugeiconsIcon icon={icon as IconSvgElement} size={size} strokeWidth={1.8} />;
 
 function SendGlyph({ busy, morphDuration, squash, tilt }: SendGlyphProps) {
   const reduce = useReducedMotion();
@@ -387,7 +397,8 @@ const PromptBar: React.FC<PromptBarProps> = ({
     menu.style.left = `${Math.max(0, Math.min(left, max))}px`;
   }, [open]);
   useEffect(() => {
-    if (!open) lastOpen.current = null;  }, [open]);
+    if (!open) lastOpen.current = null;
+  }, [open]);
 
   useEffect(() => {
     if (!plusOpen && !modelOpen && !effortOpen) return undefined;
