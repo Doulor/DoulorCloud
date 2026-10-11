@@ -64,13 +64,15 @@ export interface SuspendResult {
 }
 
 /**
- * 「记录归属」判据 SQL 片段：**子域名优先，没有子域名才回退到域名**。
+ * 「记录归属」判据 SQL 片段的**唯一构造点**：归属认子域名，没有子域名才回退到域名。
  *
  * ⚠️ 不能写成 `subdomain_id IN (…) OR domain_id IN (…)`：子域名可以被管理员转移
  * （`admin-subdomains.ts` 只改 `subdomains.user_id`，**不动** `dns_records.domain_id`），
  * 于是同一行会同时命中「原主的域名」与「新主的子域名」两侧 —— 停用方向与恢复方向
  * 各认一侧，就会每小时删一次又建一次（2026-10-10 探针实测：3 轮里 sweep 删 6 条、
- * retry 建 9 条，新主的解析每小时断一次）。
+ * retry 建 9 条，新主的解析每小时断一次）。同理，**封禁 / 解封的直接入口**用两侧 OR
+ * 时会动到别人的记录（2026-10-11 探针实测：封禁 A 删掉 B 的 3 条解析；解封 A 把仍
+ * 处于封禁中的 B 的解析重建回 CF，B 的域名在封禁期间重新对外解析）。
  *
  * 归属认子域名，与代码库其余部分一致：用户端列表按 `subdomain_id` 筛
  * （`handlers/dns.ts` 的 records 查询）、改名 / 删除 / 记录计数也全按
@@ -78,14 +80,39 @@ export interface SuspendResult {
  * （`domains` 全仓无转移路径）。`subdomain_id` 为 NULL 的历史行（0003 回填之前）
  * 才回退到域名归属 —— 两个分支互斥，每行只有一个有效归属。
  *
+ * @param subdomainOwner 选出「拥有这些子域名的用户」的 SQL 子查询（不含 `r.` 前缀）
+ * @param domainOwner    同上的域名版本；两个片段里的占位符按出现顺序绑定
+ */
+function ownerPredicateSql(subdomainOwner: string, domainOwner: string): string {
+  return (
+    `((r.subdomain_id IS NOT NULL AND r.subdomain_id IN (${subdomainOwner}))` +
+    ` OR (r.subdomain_id IS NULL AND r.domain_id IN (${domainOwner})))`
+  )
+}
+
+/**
+ * 归属用户的**状态**为 `status` 的记录判据（兜底任务用）。
  * @param status 归属用户的状态；调用方需保证查询里 `dns_records` 的别名是 `r`
  */
 export function ownerStatusSql(status: "active" | "suspended"): string {
-  return (
-    `((r.subdomain_id IS NOT NULL AND r.subdomain_id IN (` +
-    `SELECT id FROM subdomains WHERE user_id IN (SELECT id FROM users WHERE status = '${status}')))` +
-    ` OR (r.subdomain_id IS NULL AND r.domain_id IN (` +
-    `SELECT id FROM domains WHERE user_id IN (SELECT id FROM users WHERE status = '${status}'))))`
+  const byStatus = `SELECT id FROM subdomains WHERE user_id IN (SELECT id FROM users WHERE status = '${status}')`
+  const byStatusDomain = `SELECT id FROM domains WHERE user_id IN (SELECT id FROM users WHERE status = '${status}')`
+  return ownerPredicateSql(byStatus, byStatusDomain)
+}
+
+/**
+ * 归属用户**就是传入的 userId 参数**的记录判据（封禁 / 解封的直接入口用）。
+ *
+ * 与 `ownerStatusSql` 的差别只在「按谁筛」：那边按用户**状态**筛（兜底任务一次
+ * 处理所有被封禁用户），这边按调用方传入的**用户 id** 筛（管理员点的是某一个人）。
+ * 两者的归属口径必须一致 —— 所以共用 `ownerPredicateSql`。
+ *
+ * 两个 `?` 都绑定同一个 userId，顺序与调用点的 `.bind(userId, userId)` 对应。
+ */
+function ownerUserIdSql(): string {
+  return ownerPredicateSql(
+    "SELECT id FROM subdomains WHERE user_id = ?",
+    "SELECT id FROM domains WHERE user_id = ?"
   )
 }
 
@@ -156,8 +183,7 @@ export async function suspendUserResources(
        FROM dns_records r
        LEFT JOIN domains d ON d.id = r.domain_id
       WHERE r.banned_at IS NULL
-        AND (r.subdomain_id IN (SELECT id FROM subdomains WHERE user_id = ?)
-             OR r.domain_id IN (SELECT id FROM domains WHERE user_id = ?))
+        AND ${ownerUserIdSql()}
       ORDER BY r.created_at ASC`
   )
     .bind(userId, userId)
@@ -226,8 +252,7 @@ export async function restoreUserResources(
        FROM dns_records r
        LEFT JOIN domains d ON d.id = r.domain_id
       WHERE r.banned_at IS NOT NULL
-        AND (r.subdomain_id IN (SELECT id FROM subdomains WHERE user_id = ?)
-             OR r.domain_id IN (SELECT id FROM domains WHERE user_id = ?))
+        AND ${ownerUserIdSql()}
       ORDER BY r.created_at ASC`
   )
     .bind(userId, userId)
