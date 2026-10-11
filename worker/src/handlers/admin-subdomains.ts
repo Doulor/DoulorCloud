@@ -348,10 +348,10 @@ export async function updateAdminSubdomain(
     if (next.id !== row.user_id) {
       // 整棵子树一起转：子子域名的父级查询带 user_id，只转父行会让子树变成孤儿
       const all = await env.DB.prepare(
-        "SELECT id, parent_id FROM subdomains WHERE user_id = ?"
+        "SELECT id, parent_id, fqdn FROM subdomains WHERE user_id = ?"
       )
         .bind(row.user_id)
-        .all<{ id: string; parent_id: string | null }>()
+        .all<{ id: string; parent_id: string | null; fqdn: string }>()
       const move = new Set<string>([row.id])
       let grew = true
       while (grew) {
@@ -368,6 +368,37 @@ export async function updateAdminSubdomain(
       await env.DB.prepare(`UPDATE subdomains SET user_id = ? WHERE id IN (${placeholders})`)
         .bind(next.id, ...ids)
         .run()
+
+      // 转移 ≠ 复制：名片 / 网盘直链的绑定属于**旧主**，不该跟着域名走到新主名下。
+      // 与删除分支（deleteAdminSubdomain）同款清理，漏掉的话（2026-10-11 探针全部实测）：
+      //   · 新主的域名被动替旧主服务 —— Host 分发按 `profiles.fqdn` / `storage_prefixes.fqdn`
+      //     查内容（index.ts 的自定义域名分发），旧主的行还挂着就命中，B 的域名渲染 A 的名片、
+      //     分发 A 的文件；
+      //   · 旧主随时可以「解绑」拆掉新主的 CF 资源（解绑只判 profiles.user_id，却对
+      //     row.fqdn 的 Route / 占位解析动手）；
+      //   · 新主想绑自己的名片 ⇒ 409（usedByStorage / usedByOtherProfile 命中旧主遗留行），
+      //     且那行不属于他，无从解绑。
+      // `dns_records` **不**动：记录本身属于子域名，随子域名一起归属新主
+      // （这也与删除分支不同 —— 那边子域名行整个消失，记录必须一并清掉）。
+      for (const movedId of ids) {
+        const moved = all.results?.find((r) => r.id === movedId)
+        if (!moved) continue
+        try {
+          await detachCustomDomain(env, moved.fqdn)
+        } catch (err) {
+          // 与删除分支同口径：单个解绑失败不阻断转移（CF 侧残留可后续手工处理）
+          console.error("转移子域名时解绑自定义域名失败:", moved.fqdn, err)
+        }
+      }
+      await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE profiles SET fqdn = NULL, subdomain_id = NULL WHERE subdomain_id IN (${placeholders})`
+        ).bind(...ids),
+        env.DB.prepare(
+          `DELETE FROM storage_prefixes WHERE subdomain_id IN (${placeholders})`
+        ).bind(...ids),
+      ])
+
       ownerId = next.id
       await recordAudit(
         env,
