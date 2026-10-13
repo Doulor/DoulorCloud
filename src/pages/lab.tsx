@@ -1,52 +1,7 @@
 import * as React from "react"
 import { Link } from "react-router-dom"
 import { toast } from "sonner"
-import {
-  AlertTriangle,
-  ArrowUp,
-  BookOpen,
-  Check,
-  Copy,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  ExternalLink,
-  Eye,
-  FileText,
-  FolderOpen,
-  Gauge,
-  Gift,
-  Globe,
-  HardDriveDownload,
-  Info,
-  List,
-  Loader2,
-  PanelRight,
-  Pencil,
-  Plus,
-  Power,
-  RefreshCw,
-  Save,
-  Search,
-  Settings2,
-  Asterisk,
-  Bot,
-  Brain,
-  Cloud,
-  Hexagon,
-  Infinity as InfinityIcon,
-  Link as LinkIcon,
-  Moon,
-  Sparkle,
-  Sparkles,
-  Waves,
-  Wind,
-  Paperclip,
-  Square,
-  Terminal,
-  Trash2,
-  X,
-} from "lucide-react"
+import { AlertTriangle, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, FileText, FolderOpen, HardDriveDownload, Info, List, Loader2, PanelRight, Plus, Power, RefreshCw, Save, Sparkles, Square, Terminal, Trash2, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -60,12 +15,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { confirmDialog } from "@/components/confirm-dialog"
 import { AnchoredPanel, isInsideAnchoredPanel } from "@/components/anchored-panel"
-import {
-  PromptBar,
-  SlingButton,
-  StatusMark,
-  ThoughtLine,
-} from "@/components/reactbits"
+import { PromptBar, SlingButton, ThoughtLine } from "@/components/reactbits"
 import {
   Attachment01Icon,
   Database02Icon,
@@ -78,39 +28,9 @@ import { buildSingleFileHtml, downloadBlob, zipFiles } from "@/lib/lab-export"
 import { NATIVE_TOOLS } from "@/lib/lab-tools-native"
 import { useMotionPref } from "@/hooks/use-motion-pref"
 import { clearLabRun, getLabRun, setLabRun, useLabRun } from "@/lib/lab-run"
-import { Markdown } from "@/components/markdown"
 import { Label } from "@/components/ui/label"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { useT } from "@/i18n"
-import {
-  applyReplace,
-  buildPreviewDoc,
-  buildSystemPrompt,
-  buildToolResults,
-  type LabConvoMessage,
-  type LabConvoPart,
-  compactHistory,
-  nativeToolCallsToSegments,
-  type NativeToolCall,
-  EFFORT_DESC_KEY,
-  EFFORT_LABEL_KEY,
-  EFFORT_LEVELS,
-  EFFORT_TEMPERATURE,
-  type EffortLevel,
-  grepFiles,
-  looksLikeBuildRequest,
-  needsToolResult,
-  normalizeEffort,
-  openPreviewInNewTab,
-  parseAgentText,
-  parseReplaceContent,
-  PROTOCOL_NUDGE,
-  CLOSING_NUDGE,
-  MAX_CLOSING_NUDGES,
-  type FileMap,
-  type Segment,
-  type ToolName,
-} from "@/lib/lab-agent"
+import { applyReplace, buildPreviewDoc, buildSystemPrompt, buildToolResults, type LabConvoMessage, type LabConvoPart, compactHistory, nativeToolCallsToSegments, type NativeToolCall, EFFORT_LABEL_KEY, EFFORT_LEVELS, EFFORT_TEMPERATURE, type EffortLevel, grepFiles, looksLikeBuildRequest, needsToolResult, normalizeEffort, openPreviewInNewTab, parseAgentText, parseReplaceContent, PROTOCOL_NUDGE, CLOSING_NUDGE, REPORT_NUDGE, MAX_CLOSING_NUDGES, type FileMap, type Segment, inlineAssets } from "@/lib/lab-agent"
 import { buildSiteManual, parseSiteArgs, runSiteOp, type SiteOp } from "@/lib/lab-site"
 import {
   bootVM,
@@ -150,15 +70,7 @@ import {
   type LocalDirHandle,
 } from "@/lib/local-fs"
 import { cn } from "@/lib/utils"
-import {
-  HttpError,
-  labApi,
-  streamLabChat,
-  type LabProjectSummary,
-  type LabPromptTemplate,
-  type LabSkillIndexEntry,
-  type LabSkillEntry,
-} from "@/services/api"
+import { HttpError, labApi, streamLabChat, type LabProjectSummary, type LabPromptTemplate, type LabSkillIndexEntry } from "@/services/api"
 
 /**
  * AI实验室：一个「网页版 agent」。
@@ -173,104 +85,8 @@ import {
  * 额度来源两种：站内额度（后端自动管理专用 Key）/ 自定义渠道（Key 只存本地）。
  */
 
-type Entry =
-  | {
-      key: string
-      kind: "user"
-      text: string
-      /**
-       * 这一轮带上来的附件**文件名**（内容不进气泡，见 send 的注释）。
-       * 只用于在气泡里显示「附件：xxx.txt」这种标记。
-       */
-      files?: string[]
-      /**
-       * 这条消息在 `convoRef` 里的下标。
-       * 「编辑重发」时从这里把对话历史截断（见 editMessage）。
-       * ⚠️ convoRef 只追加、不重排，所以当时记下的下标永远不会失效。
-       */
-      convoAt?: number
-      /** 发出时刻（毫秒）。工具栏里鼠标悬停时才显示 */
-      at?: number
-    }
-  | {
-      key: string
-      kind: "text"
-      text: string
-      /** 还在流式输出中（用于「逐渐显示 + 思考走马灯」） */
-      live: boolean
-      /** 后面跟着工具调用 → 这是「思考/计划」，折叠展示；否则是给用户的答复 */
-      collapsible: boolean
-      /** 产出这条的模型名（工具栏里显示 + 小图标）。老草稿没有就不显示 */
-      model?: string
-      /** 产出时刻（毫秒）。工具栏里鼠标悬停时才显示 */
-      at?: number
-    }
-  | {
-      key: string
-      kind: "tool"
-      tool: ToolName
-      path?: string
-      /** grep 用：搜索的正则 / 范围，展示在卡片上 */
-      pattern?: string
-      scope?: string
-      /** run 用：完整命令（卡片标题上显示） */
-      command?: string
-      /** site 用：站内操作的 op id（卡片标题上显示） */
-      op?: string
-      /** skill 用：读的是哪个技能（卡片标题上显示） */
-      skill?: string
-      /**
-       * `run` 用：模型自己写的一行人话说明（例如「下载环境依赖」）。
-       * 有它就**优先显示它**，而不是把命令行直接摆给用户看。
-       */
-      desc?: string
-      /** `http` 用：目标地址（卡片上显示） */
-      url?: string
-      /** `http` 用：请求方法 */
-      httpMethod?: string
-      status: "running" | "done"
-      content: string
-    }
-
-/** 自定义渠道配置（只存浏览器本地） */
-interface CustomChannel {
-  baseUrl: string
-  apiKey: string
-  /** 当前使用的模型（= models[0]；保留它是为了老配置能直接读） */
-  model: string
-  /**
-   * 这个渠道下**可选的多个**模型（2026-10-10 站长要求「支持多选」）。
-   * 用户配一次就能在模型菜单里直接切换，不用来回改配置。
-   */
-  models?: string[]
-}
-
-/**
- * 站内三个渠道来源。
- *   · station —— 站内模型（扣自己的中转站额度；管理员开了统一 Key 时是免费试用）
- *   · site    —— 管理员提供的免费渠道（**密钥不下发浏览器**，调用走服务端代理）
- *   · custom  —— 用户自己的自定义渠道（只存本地，浏览器直连）
- */
-type LabChannel = "station" | "site" | "custom"
-
-/** 管理员提供的一条免费渠道（前端只拿得到 id / 名字 / 模型） */
-interface SiteChannel {
-  id: string
-  name: string
-  model: string
-  free: boolean
-}
-
-/** `GET /api/lab/channels` 的返回 */
-interface SiteChannelsInfo {
-  source: "user" | "admin"
-  quotaLimit: number
-  quotaPeriod: "day" | "month" | "total"
-  quotaUsed: number
-  /** 原生工具调用开关（站点设置 lab_native_tools；默认关 = 走文本标签协议） */
-  nativeTools: boolean
-  channels: SiteChannel[]
-}
+import type { CustomChannel, Entry, LabChannel, SiteChannelsInfo } from "./lab/types"
+import { ChannelDialog, EffortPicker, ModelPicker, SearchKeyDialog, SkillDialog, TimelineEntry, toolIntent, WidthHandle, WorkingIndicator } from "./lab/parts"
 const CUSTOM_KEY = "doulor.lab.customChannel"
 const MODEL_KEY = "doulor.lab.model"
 /** 思考强度档位（off/low/medium/high） */
@@ -307,6 +123,138 @@ const DRAFT_DEBOUNCE = 600
  * 只有**从没同意过**才会看到那一次确认。用户当时点了「不用」＝不写这个标记，下次还会问。
  */
 const VM_CONSENT_KEY = "doulor.lab.vmConsent"
+
+/* --------------------------------------------------------------------------
+   内容列宽度可拖拽（2026-10-12 站长要求，规格照抄 DeepSeek Harness）
+   --------------------------------------------------------------------------
+   DSH 的三个常量与解析函数（它的 ConversationWidthControls）：
+     · `WIDTH_PREF_KEY`   —— localStorage 里存用户拖出来的宽度（px）
+     · `CONTENT_MIN = 640`         —— 最窄：再窄就没法读代码了
+     · `CONTENT_EDGE_BUDGET = 176` —— 距可视区两侧各留出的预算
+   解析规则：
+     `max = max(CONTENT_MIN, 可视宽 - CONTENT_EDGE_BUDGET)`
+     有用户偏好 → `clamp(偏好, CONTENT_MIN, max)`
+     没有偏好   → DSH 用 `clamp(可视宽 * 0.64, 680, 920)`；
+                  **我们这里默认保持 48rem（768px）**，也就是改动前的 `max-w-3xl` ——
+                  站长要的是「能调」，不该顺手把大家习惯的默认宽度也改掉。
+   -------------------------------------------------------------------------- */
+const LAB_WIDTH_KEY = "doulor.lab.contentWidth"
+const LAB_CONTENT_MIN = 640
+/**
+ * 距可视区两侧各留出的预算（总预留 = 这个值）。
+ *
+ * ⚠️ 2026-10-12 站长反馈「上限不够高、想更宽」：DSH 用的是 176，但**它的布局两侧
+ * 还有别的东西**（侧栏、工具条），我们这里整块就是聊天区 ⇒ 176 太保守
+ * （1088 宽的可视区只能拉到 912）。改成 64（两侧各 32px）：
+ *   · 内容最宽 = 可视宽 − 64（1088 → 1024，比原来多 112px）；
+ *   · 手柄在最宽处仍有 12px 可抓（见 index.css 里手柄宽度的 `- 20px`），
+ *     不会出现「拉到最大就再也抓不回来」。
+ * 还想更宽/更窄就只改这一个数（越小越宽）。
+ */
+const LAB_CONTENT_EDGE_BUDGET = 64
+/** 默认内容宽（= 原来的 max-w-3xl = 48rem = 768px） */
+const LAB_CONTENT_DEFAULT = 768
+
+function readLabWidthPref(): number | null {
+  try {
+    const raw = localStorage.getItem(LAB_WIDTH_KEY)
+    if (!raw) return null
+    const n = Number(raw)
+    return Number.isFinite(n) ? n : null
+  } catch {
+    return null
+  }
+}
+
+function resolveLabContentWidth(columnWidth: number, preference: number | null): number {
+  const max = Math.max(LAB_CONTENT_MIN, columnWidth - LAB_CONTENT_EDGE_BUDGET)
+  if (preference !== null) {
+    return Math.min(Math.max(preference, LAB_CONTENT_MIN), max)
+  }
+  return Math.min(LAB_CONTENT_DEFAULT, max)
+}
+
+/* --------------------------------------------------------------------------
+   自动「参考网址」（2026-10-12 站长要求：原来是主动触发，改成自动）
+   --------------------------------------------------------------------------
+   原来必须点「+ → 参考网址 → 贴链接 → 抓取」才会读页面；现在**消息里出现网址
+   就自动读**，与手动那条走同一条路（同一个 attachedRef / pendingAttachRef）。
+   上限 3 个：再多就等用户自己挑（也免得一条消息卡在抓取上太久）。
+   -------------------------------------------------------------------------- */
+const LAB_AUTO_REF_MAX = 3
+
+/**
+ * 「这一轮看起来卡住了」的判定阈值（毫秒）：这么久**没有任何流事件**（正文/思考/
+ * 工具分片都没有）就认为连接死了，允许下一次发送直接收掉它（见 send() 里的守卫）。
+ *
+ * ⚠️ 2026-10-12 从 90 秒收紧到 20 秒：站长反馈「手机离开一下再回来，发消息还是没反应」
+ * —— 手机切走时页面被**冻结**（连计时器都停），回来时连接基本已经断了。
+ * 90 秒的阈值意味着「离开 30 秒回来发消息」会被判成「上一轮还活着」⇒ 消息被排进队列，
+ * 而「上一轮结束」那一刻永远不来 ⇒ 看起来就是毫无反应。
+ */
+
+/**
+ * 估算 token 数（用量面板用）。
+ * ⚠️ 这是**估算**，不是真实计数：CJK 约 1.6 字/token，其余约 4 字/token。
+ * 面板上会标「≈」，不假装精确 —— 真实 usage 需要上游回 stream_options，
+ * 上游不一定给（见 lab.tsx 里 metricsRef 的注释）。
+ */
+function estTokens(text: string): number {
+  if (!text) return 0
+  const cjk = (text.match(/[\u3400-\u9fff\u3000-\u303f\uff00-\uffef]/g) ?? []).length
+  const rest = text.length - cjk
+  return Math.round(cjk / 1.6 + rest / 4)
+}
+
+/** 12_345 → 12.3k（面板里省地方） */
+function fmtTok(n: number): string {
+  if (n < 1000) return String(n)
+  return (n / 1000).toFixed(1) + "k"
+}
+
+const STUCK_MS = 20_000
+
+/**
+ * 网络类断流最多自动重试几次（见 send() 里那段注释）。
+ * 2 次足够扛过「切后台断流」「地铁里信号抖一下」；再多就是上游真挂了，
+ * 继续重试只会白烧额度。
+ */
+const MAX_NET_RETRIES = 2
+
+/** 等页面回到前台（切后台断流时用）；最多等 10 分钟，免得永远挂着 */
+function waitUntilVisible(): Promise<void> {
+  if (typeof document === "undefined" || !document.hidden) return Promise.resolve()
+  return new Promise((resolve) => {
+    const done = () => {
+      document.removeEventListener("visibilitychange", onVis)
+      window.clearTimeout(timer)
+      resolve()
+    }
+    const onVis = () => {
+      if (!document.hidden) done()
+    }
+    document.addEventListener("visibilitychange", onVis)
+    const timer = window.setTimeout(done, 600_000)
+  })
+}
+
+/** 匹配正文里的 http(s) 链接（排除空白、引号、中英文括号等紧邻字符） */
+const URL_IN_TEXT_RE = /https?:\/\/[^\s<>"'`）)】\]}，。；！？、]+/gi
+
+/**
+ * 从一段文字里挑出要抓的网址。
+ * ⚠️ 末尾常粘着标点（「看看 https://a.com。谢谢」）⇒ 剪掉尾部的标点再返回，
+ * 否则请求会带上 `。` 直接 404。
+ */
+function extractUrls(text: string): string[] {
+  const out: string[] = []
+  for (const raw of text.match(URL_IN_TEXT_RE) ?? []) {
+    const url = raw.replace(/[.,;:!?，。；：！？、）)】》"']+$/g, "")
+    if (!url || out.includes(url)) continue
+    out.push(url)
+  }
+  return out
+}
 
 function hasVmConsent(): boolean {
   try {
@@ -360,6 +308,94 @@ function customEndpoint(raw: string): string {
 }
 
 /**
+ * 流「一个字节都没来」多久算死连接（毫秒）。
+ *
+ * ⚠️ 2026-10-12 从 180 秒收紧到 45 秒：手机上切走再回来，用户根本不会等 3 分钟
+ * —— 他要的是"回来就能继续"。45 秒的完全静默（正文/思考/工具分片全都没有）
+ * 在正常调用里极少出现（真思考时也会有 reasoning 增量）。
+ */
+const STREAM_IDLE_MS = 45_000
+
+/** 读流空闲超时抛出的错误（区别于 CORS/断网，可重试） */
+class StreamIdleError extends Error {
+  constructor() {
+    super("stream idle timeout")
+    this.name = "StreamIdleError"
+  }
+}
+
+/**
+ * 给任意 promise 套上「空闲 / 回到前台时陈旧」守卫（2026-10-12）。
+ *
+ * 两种判定与 readWithIdle 完全一致（见其注释）：
+ *   ① 整整 idleMs 没有进展（这里指「没有新数据」，由调用方在活动时刷新 getLastActivity）；
+ *   ② 页面从后台回到前台时，距上次活动已经超过 staleMs —— **立刻**判定，不等定时器。
+ * 用于 **fetch（等响应头）** 和 **读流** 两处：两者都可能永远挂着。
+ * ⚠️ 守卫触发只 reject 这个 promise，**不**动调用方的中止信号 ——
+ *    这样上层才能把它当成「可重试的网络类失败」自动重试。
+ */
+function withIdleGuard<T>(
+  p: Promise<T>,
+  idleMs: number,
+  staleMs: number,
+  getLastActivity: () => number
+): Promise<T> {
+  let timer: number | undefined
+  let rejectRef: ((e: unknown) => void) | undefined
+  const onVisible = () => {
+    if (!document.hidden && Date.now() - getLastActivity() > staleMs) {
+      rejectRef?.(new StreamIdleError())
+    }
+  }
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      rejectRef = reject
+      timer = window.setTimeout(() => reject(new StreamIdleError()), idleMs)
+      document.addEventListener("visibilitychange", onVisible)
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) window.clearTimeout(timer)
+    document.removeEventListener("visibilitychange", onVisible)
+  })
+}
+
+/**
+ * 读一段流；两种情况都算「连接死了」，抛 StreamIdleError（可重试）：
+ *   ① 整整 idleMs 没有任何数据（定时器）；
+ *   ② **页面从后台回到前台时，距上次数据已经超过 staleMs** —— 手机上切走会冻结页面，
+ *      连接多半已经断了；这时**立刻**判定，不用再干等定时器（站长反馈
+ *      「手机离开一下再回来，发消息还是没反应」：等定时器要等太久，用户以为坏了）。
+ */
+async function readWithIdle(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  idleMs: number,
+  staleMs: number,
+  getLastActivity: () => number
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timer: number | undefined
+  const onVisible = () => {
+    if (!document.hidden && Date.now() - getLastActivity() > staleMs) {
+      rejectRef?.(new StreamIdleError())
+    }
+  }
+  let rejectRef: ((e: unknown) => void) | undefined
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        rejectRef = reject
+        timer = window.setTimeout(() => reject(new StreamIdleError()), idleMs)
+        document.addEventListener("visibilitychange", onVisible)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer)
+    document.removeEventListener("visibilitychange", onVisible)
+  }
+}
+
+/**
  * 解析 SSE 流：正文 delta 交给 onDelta，模型的**思考内容**（reasoning_content）
  * 交给 onReasoning。两家分开走 —— 思考内容不能混进正文，否则会污染标签协议解析。
  */
@@ -374,7 +410,12 @@ async function consumeSSE(
    * 这样工具卡片能像主流 agent 那样**函数名一到就出现**、参数边流边填。
    * 调用方拿到的永远是一份**当前快照**；最后一次回调才是完整结果。
    */
-  onToolCalls?: (calls: NativeToolCall[]) => void
+  onToolCalls?: (calls: NativeToolCall[]) => void,
+  /**
+   * 取「最近一次流里有动静的时刻」——回到前台时靠它判断这一轮是不是已经陈旧
+   * （见 readWithIdle 的 ②；不传就用 Date.now()，等于不做前台陈旧判定）
+   */
+  getLastActivity: () => number = () => Date.now()
 ): Promise<void> {
   const reader = res.body?.getReader()
   if (!reader) return
@@ -388,7 +429,22 @@ async function consumeSSE(
   const toolAcc = new Map<number, { id: string; name: string; args: string }>()
   try {
     for (;;) {
-      const { done, value } = await reader.read()
+      /**
+       * 🔴 读流带**空闲超时**（2026-10-12 站长反馈「消息发出去什么回应都没有，
+       * 连正在思考都不显示」的真凶之一）。
+       *
+       * 半开连接（切后台被中断、中间设备悄悄断链）下 `reader.read()` 会**永远挂着**：
+       * 不 resolve、也不 reject ⇒ 这一轮的 `finally` 永远不跑 ⇒ `streaming` 一直停在
+       * true ⇒ **之后每次发送都被 `if (streaming) return` 静默吞掉**（而且 PromptBar
+       * 已经先清了输入框，用户看到的就是「消息没了、什么都没发生」）。
+       * 给它一个上限：这么久一个字节都没有，就当成死连接抛出去（可重试）。
+       */
+      const { done, value } = await readWithIdle(
+        reader,
+        STREAM_IDLE_MS,
+        STUCK_MS,
+        getLastActivity
+      )
       if (done) break
       buf += decoder.decode(value, { stream: true })
       const lines = buf.split("\n")
@@ -477,7 +533,19 @@ function segmentsToEntries(
 ): Entry[] {
   const out: Entry[] = []
   segs.forEach((s, i) => {
-    const key = `r${round}-${i}`
+    /**
+     * 🔴 工具卡片的 key 用**工具调用 id**，不用数组下标（2026-10-12 修）。
+     *
+     * 下标 key 的坑：流式期间正文是**边流边长**的，而实时视图固定拼成
+     * `[正文…, 工具卡片…]` ⇒ 正文段一多，工具卡片的下标就往后挪
+     * （`r0-0` → `r0-1`…）⇒ key 变了 ⇒ React 认为换了一个组件 ⇒ **重新挂载**
+     * ⇒ 卡片里「展开/收起」的 state 被重置。
+     * 表现：点开写入卡片想看内容，几十毫秒后它自己合上了（站长反馈
+     * 「给写入框加个粘住」——其实先得让它别自己合上）。
+     * toolCallId 一轮内唯一且稳定 ⇒ 下标怎么变都对应同一个 DOM。
+     */
+    const key =
+      s.type === "action" && s.toolCallId ? `r${round}-${s.toolCallId}` : `r${round}-${i}`
     if (s.type === "text") {
       // 后面还跟着文件动作 → 这段是「思考/计划」，折叠起来；
       // 后面没有动作 → 是给用户的最终答复，正常显示。
@@ -519,6 +587,7 @@ function segmentsToEntries(
         desc: s.desc,
         url: s.url,
         httpMethod: s.httpMethod,
+        image: s.image,
         status: final || s.complete ? "done" : "running",
         // 结果不来自模型、而在本地现算：grep 命中行 / 终端命令输出 / 站内操作响应
         content: s.complete
@@ -587,6 +656,42 @@ export default function LabPage() {
   const [thinkSealed, setThinkSealed] = React.useState(false)
   const [input, setInput] = React.useState("")
   const [streaming, setStreaming] = React.useState(false)
+  /**
+   * `streaming` 的 ref 镜像：send() 里要**轮询等待**上一轮收尾（中止卡住的那轮），
+   * 那时闭包里的 state 是旧的，只能读 ref。
+   */
+  const streamingRef = React.useRef(false)
+  streamingRef.current = streaming
+  /**
+   * 最近一次「流里有动静」的时刻（正文/思考/工具分片任一到达就刷新）。
+   * 用来判断这一轮是还活着、还是卡死了（见 send() 开头的守卫与 STUCK_MS）。
+   */
+  const lastActivityRef = React.useRef(Date.now())
+  /**
+   * 本轮用量指标（2026-10-12 站长要求，仿 DSH 的上下文状态显示）：
+   * 上下文占用、分项（系统提示 / 工具声明 / 对话历史）、首 token 耗时、生成速度。
+   *
+   * ⚠️ token 是**估算**（见 estTokens）；首 token 与速度是**实测**。
+   * 之所以不用真实 usage：那要求上游支持 `stream_options:{include_usage:true}`，
+   * 而中转站不一定支持，发过去还有被 400 的风险 —— 先用估算，标「≈」。
+   */
+  const [metrics, setMetrics] = React.useState<{
+    system: number
+    tools: number
+    history: number
+    context: number
+    ttftMs: number | null
+    tokPerSec: number | null
+    outTokens: number
+    rounds: number
+  } | null>(null)
+  const metricsRef = React.useRef<{
+    start: number
+    first: number | null
+    outChars: number
+    rounds: number
+    ctx: { system: number; tools: number; history: number }
+  }>({ start: 0, first: null, outChars: 0, rounds: 0, ctx: { system: 0, tools: 0, history: 0 } })
 
   // 预览
   const [preview, setPreview] = React.useState("")
@@ -666,8 +771,25 @@ export default function LabPage() {
    * 「中途插话」队列（2026-10-10 站长要求）。
    * 正在跑的时候用户又说了话，不能直接开新的一轮（会把当前这轮的状态搅乱），
    * 所以先排在这儿，等这一轮跑完自动接着发。
+   *
+   * 🔴 2026-10-12 改成**可见队列**（站长反馈「插话后既看不到、也改不了、也不能立刻发」）：
+   *    以前只存在 ref 里 ⇒ 界面上毫无痕迹。现在用 state 存（ref 做镜像给 effect 用），
+   *    时间线上会渲染成「待发送」气泡，带**编辑 / 立即发送 / 撤回**三个动作。
    */
-  const steerRef = React.useRef<string[]>([])
+  const [steerQueue, setSteerQueue] = React.useState<
+    { id: string; text: string; at: number }[]
+  >([])
+  /** 队列的镜像：effect 里读 state 会拿到旧闭包值，所以同步写一份 ref */
+  const steerRef = React.useRef<{ id: string; text: string; at: number }[]>([])
+  const pushSteer = (text: string) => {
+    const item = { id: `steer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, text, at: Date.now() }
+    steerRef.current = [...steerRef.current, item]
+    setSteerQueue(steerRef.current)
+  }
+  const dropSteer = (id: string) => {
+    steerRef.current = steerRef.current.filter((s) => s.id !== id)
+    setSteerQueue(steerRef.current)
+  }
   /**
    * 往输入框里「填字」的信号（编辑历史消息用）。
    * 输入框的草稿归 PromptBar 自己管，所以只能给它一个信号让它自己填；
@@ -709,6 +831,57 @@ export default function LabPage() {
       setRefBusy(false)
     }
   }
+  /**
+   * 自动「参考网址」（2026-10-12 站长要求）：**消息里出现网址就自动读进来**，
+   * 不用再点「+ → 参考网址」。
+   *
+   * 与手动那条完全同路：抓到的正文写进 `attachedRef`、名字进 `pendingAttachRef`，
+   * 随后 `takeAttachments` 会把它并进给模型的正文里（气泡上也显示网址）。
+   *
+   * 几个刻意的取舍：
+   *   · **并行抓**（`allSettled`）：串行抓 3 个页面最坏要等 3 个超时；
+   *   · 单个失败**不影响整条消息**（模型照样能看到网址本身，也能自己再抓）；
+   *   · 已经在 `attachedRef` 里的（手动抓过 / 本轮已抓）跳过，不重复抓；
+   *   · 抓取期间显示「正在读取网页…」，否则用户会以为发送卡住了。
+   */
+  const autoAttachUrls = async (
+    text: string
+  ): Promise<{ done: string[]; failed: number }> => {
+    const urls = extractUrls(text)
+      .filter((u) => !attachedRef.current[u])
+      .slice(0, LAB_AUTO_REF_MAX)
+    if (!urls.length) return { done: [], failed: 0 }
+    setLabRun({
+      running: true,
+      label: t("lab.ref.autoReading"),
+      steps: [],
+      startedAt: Date.now(),
+    })
+    try {
+      const results = await Promise.allSettled(
+        urls.map((url) => labApi.http({ url, raw: true }))
+      )
+      const done: string[] = []
+      let failed = 0
+      results.forEach((r, i) => {
+        if (r.status !== "fulfilled") {
+          failed += 1
+          return
+        }
+        const url = urls[i]
+        const header = `【参考网址：${url}】\n（页面正文，已由服务端抓取${
+          r.value.truncated ? "，内容过长已截断" : ""
+        }）\n`
+        attachedRef.current[url] = { text: header + r.value.body }
+        if (!pendingAttachRef.current.includes(url)) pendingAttachRef.current.push(url)
+        done.push(url)
+      })
+      return { done, failed }
+    } finally {
+      clearLabRun()
+    }
+  }
+
   /**
    * 重新拉 /lab/settings 的触发器。
    * 用户导入新技能后，系统提示里的「技能目录」必须跟着更新，
@@ -757,12 +930,11 @@ export default function LabPage() {
   const [exportFor, setExportFor] = React.useState<string | null>(null)
   const [exportFiles, setExportFiles] = React.useState<Record<string, string> | null>(null)
   const [exportBusy, setExportBusy] = React.useState(false)
-  /** 绑定域名：正在填的作品 id（null = 没开那个小弹窗） */
-  const [domainFor, setDomainFor] = React.useState<string | null>(null)
-  const [domainDraft, setDomainDraft] = React.useState("")
-  const [domainBusy, setDomainBusy] = React.useState(false)
-  /** projectId → 已绑域名（null = 没绑）。打开作品弹窗时逐个拉一次 */
-  const [domains, setDomains] = React.useState<Record<string, string | null>>({})
+  /**
+   * ⚠️ 绑定域名的 UI **已搬到造物集**（2026-10-12 站长要求：不要放在实验室的
+   * 「我的作品」里）。这里只保留作品列表本身，域名相关的 state/弹窗/按钮全部移除 ——
+   * 见 src/pages/gallery.tsx 的 EditDialog（gal.domain.*）。
+   */
   const [filesOpen, setFilesOpen] = React.useState(false)
   const [viewFile, setViewFile] = React.useState<string | null>(null)
   const [saving, setSaving] = React.useState(false)
@@ -786,6 +958,56 @@ export default function LabPage() {
   /** 本轮思考是否已封口（用 ref 是为了在流式回调里同步判断，不等 React 重渲染） */
   const sealedRef = React.useRef(false)
   const thinkTimer = React.useRef<number | null>(null)
+  /** 「已经放出来的思考文本」长度 —— pushThink 的渐进显示靠它同步判断进度（见其注释） */
+  const thinkShownRef = React.useRef(0)
+
+  /* ---- 内容列宽度（可拖拽，规格见文件顶部 LAB_WIDTH_KEY 那段注释）---- */
+  /** 拖拽容器（= 可视区）：手柄相对它定位，CSS 变量也设在它身上 */
+  const widthBoxRef = React.useRef<HTMLDivElement | null>(null)
+  /** 用户拖出来的宽度偏好（null = 没拖过，用默认） */
+  const widthPrefRef = React.useRef<number | null>(readLabWidthPref())
+  /** 实际生效的内容宽（经过 min/max 钳制），写进 `--lab-content-width` */
+  const [contentWidth, setContentWidth] = React.useState(LAB_CONTENT_DEFAULT)
+  /**
+   * 重新解析一次生效宽度。
+   * ⚠️ 必须在**容器尺寸变化**时也重算：窗口缩小后旧的偏好可能超过可用宽度
+   * （DSH 用 ResizeObserver 做这件事，我们照抄）。
+   */
+  const publishWidth = React.useCallback(() => {
+    const box = widthBoxRef.current
+    if (!box) return
+    setContentWidth(resolveLabContentWidth(box.offsetWidth, widthPrefRef.current))
+  }, [])
+  React.useEffect(() => {
+    const box = widthBoxRef.current
+    if (!box) return
+    publishWidth()
+    const ro = new ResizeObserver(() => publishWidth())
+    ro.observe(box)
+    return () => ro.disconnect()
+  }, [publishWidth])
+  /** 手柄开始拖：以「当前生效宽度」为基准（不是偏好值 —— 可能已被窗口挤小） */
+  const onWidthStart = React.useCallback(() => contentWidth, [contentWidth])
+  /** 拖动中：钳制后写进 CSS 变量（WidthHandle 已用 rAF 节流） */
+  const onWidthDrag = React.useCallback((w: number) => {
+    const box = widthBoxRef.current
+    if (!box) return
+    setContentWidth(resolveLabContentWidth(box.offsetWidth, w))
+  }, [])
+  /** 松手：把最终宽度落盘，下次进来还是这个宽度 */
+  const onWidthCommit = React.useCallback((w: number) => {
+    const box = widthBoxRef.current
+    if (!box) return
+    const final = resolveLabContentWidth(box.offsetWidth, w)
+    widthPrefRef.current = final
+    try {
+      localStorage.setItem(LAB_WIDTH_KEY, String(final))
+    } catch {
+      /* 隐私模式：记不住就算了 */
+    }
+  }, [])
+  /** 松手后重算一次（窗口可能在拖动期间变过） */
+  const onWidthEnd = React.useCallback(() => publishWidth(), [publishWidth])
 
   // 自动保存到本地文件夹（防浏览器崩溃丢稿）
   const [autoSave, setAutoSave] = React.useState(() => {
@@ -901,6 +1123,7 @@ export default function LabPage() {
       setLive(null)
       setLiveThink("")
       thinkRef.current = ""
+    thinkShownRef.current = 0
       setPreview(buildPreviewDoc(d.files))
       setPreviewSeq((s) => s + 1)
       setDraftSavedAt(d.savedAt || Date.now())
@@ -1022,6 +1245,52 @@ export default function LabPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /**
+   * 🔴 「继续创作」（2026-10-12 站长要求）：从造物集把已发布作品的文件拉回来。
+   *
+   * 造物集那边点「继续创作」时，把作品的文件塞进 sessionStorage 的
+   * `doulor.lab.import` 再跳过来；这里挂载时认领一次（拿完立刻删，
+   * 防止刷新重复导入）。载入方式与草稿恢复一致 —— 走 restoreFromDraft
+   * 的同一套结构（时间线空、对话历史空：这是「文件的续作」，不是对话的续集）。
+   */
+  React.useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      let payload: { id?: string; name?: string; description?: string; files?: Record<string, string> } | null = null
+      try {
+        const raw = sessionStorage.getItem("doulor.lab.import")
+        if (!raw) return
+        sessionStorage.removeItem("doulor.lab.import")
+        payload = JSON.parse(raw)
+      } catch {
+        return
+      }
+      if (cancelled || !payload) return
+      const files = payload.files ?? {}
+      if (!Object.keys(files).length) return
+      // 等「草稿恢复」做完再动手（否则它随后会把恢复的草稿盖回来）
+      for (let i = 0; i < 20 && sessionLoadingRef.current; i++) {
+        await new Promise((r) => setTimeout(r, 100))
+      }
+      if (cancelled) return
+      // 先清空当前工作区，再把作品的文件作为新起点
+      resetWorkspace()
+      filesRef.current = files
+      setFiles(files)
+      setCurrentId(payload.id ?? null)
+      setSaveName(payload.name ?? "")
+      setSaveDesc(payload.description ?? "")
+      setPreview(buildPreviewDoc(files))
+      setPreviewSeq((s) => s + 1)
+      refreshPreview(true)
+      toast.success(t("gal.continueDone"))
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // 任何改动都攒一攒再落盘（含流式期间的文件写入）
   React.useEffect(() => {
     if (!draftReady.current) return
@@ -1103,7 +1372,7 @@ export default function LabPage() {
           setModels(mRes.value.models)
           setStationFree(!!mRes.value.free)
           setStationFreeModels(mRes.value.freeModels ?? [])
-          setModel((prev) => prev || mRes.value.models[0] || "")
+          setModel((prev) => prev || mRes.value.models[0] || mRes.value.freeModels?.[0] || "")
           return
         }
 
@@ -1221,24 +1490,33 @@ export default function LabPage() {
     }
   }, [promptTemplates, selectedTemplate, promptTemplateId])
 
-  // 流式期间：模型的思考内容排在本轮正文之前（跟真实时序一致）
-  const timeline: Entry[] = live
-    ? [
-        ...entries,
-        ...(liveThink
-          ? [
-              {
-                key: "live-think",
-                kind: "text" as const,
-                text: liveThink,
-                live: !thinkSealed,
-                collapsible: true,
-              },
-            ]
-          : []),
-        ...live,
-      ]
-    : entries
+  /**
+   * 流式期间：模型的思考内容排在本轮正文之前（跟真实时序一致）。
+   *
+   * 🔴 思考块**不能等 `live` 有内容才显示**（2026-10-12 站长反馈
+   * 「思考过程非流式：卡半天啥都不显示，第一个动作出现时突然刷出一长串」）：
+   * `live` 要等**正文或工具调用**到达才有内容 —— 而「纯想」阶段两者都没有，
+   * 思考块就被挡在时间线外面，攒到几十行后随第一个动作一起砸出来。
+   * 修法：`liveThink` 非空就显示（哪怕 `live` 还是空的）。
+   */
+  const timeline: Entry[] =
+    live || liveThink
+      ? [
+          ...entries,
+          ...(liveThink
+            ? [
+                {
+                  key: "live-think",
+                  kind: "text" as const,
+                  text: liveThink,
+                  live: !thinkSealed,
+                  collapsible: true,
+                },
+              ]
+            : []),
+          ...(live ?? []),
+        ]
+      : entries
   const timelineLen = timeline.length
 
   /**
@@ -1252,9 +1530,8 @@ export default function LabPage() {
     )
     const last = tools[tools.length - 1]
     if (last && last.status === "running") {
-      const verb = t(`lab.working.${last.tool}`)
-      const arg = last.tool === "grep" ? last.pattern : last.path
-      return arg ? `${verb} ${arg}` : verb
+      // 人话文案统一走 toolIntent（见 lab/parts.tsx 的注释）
+      return toolIntent(t, last)
     }
     return t("lab.working.thinking")
   }, [streaming, live, t])
@@ -1275,16 +1552,7 @@ export default function LabPage() {
     const tools = (live ?? []).filter(
       (e): e is Extract<Entry, { kind: "tool" }> => e.kind === "tool"
     )
-    return tools.map((e) => {
-      const verb = t(`lab.working.${e.tool}`)
-      const arg =
-        e.tool === "grep"
-          ? e.pattern
-          : e.tool === "run"
-            ? e.command?.split("\n")[0]
-            : e.path
-      return arg ? `${verb} ${arg}` : verb
-    })
+    return tools.map((e) => toolIntent(t, e))
   }, [streaming, live, t])
 
   /**
@@ -1322,6 +1590,26 @@ export default function LabPage() {
             ? t("lab.free.trialBadge")
             : undefined,
       })
+    }
+    /**
+     * ⚠️ 免费模型必须**单独列出来**（不能只当「站内模型的徽章」用）。
+     *
+     * 2026-10-12 站长反馈「AI 实验室 / AI 聊天没有正文」的真因之一：
+     * 站内模型清单（`lab_site_models`）为空时上面那个循环一个都没 push，
+     * 而免费模型只在徽章逻辑里被引用 ⇒ **菜单里一个能发的模型都没有**，
+     * 默认选中落到「自定义模型…」⇒ 发出去 `model:""` ⇒ 后端 400 INVALID_MODEL。
+     * 手动点过站点渠道的那几次是成功的，所以现象像「时好时坏」。
+     */
+    if (stationFree) {
+      for (const m of stationFreeModels) {
+        if (models.includes(m)) continue
+        out.push({
+          key: `station:${m}`,
+          name: displayName(m),
+          group: gStation,
+          tag: t("lab.free.trialBadge"),
+        })
+      }
     }
     for (const c of siteInfo?.channels ?? []) {
       out.push({
@@ -1546,6 +1834,28 @@ export default function LabPage() {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [timelineLen, live])
+  /**
+   * 时间线内容容器的**尺寸监听**（2026-10-12 站长要求「整体粘住底部」）。
+   *
+   * 为什么光有上面那个 effect 不够：它只在**条目数变化**（timelineLen）或 live 数组
+   * 换引用时触发 —— 而「正在思考」那块是**同一个条目在长高**（思考文字增长、工具卡片
+   * 行数增长、正文流式变长），条目数根本不变 ⇒ 内容长了、视图不跟。
+   * 用户发完消息去忙别的，回头一看还停在自己发消息那一屏（站长原话）。
+   * 用 ResizeObserver 盯住内容容器：只要它变高、且用户没往上翻，就滚到底。
+   */
+  const timelineInnerRef = React.useRef<HTMLDivElement | null>(null)
+  React.useEffect(() => {
+    const inner = timelineInnerRef.current
+    if (!inner) return
+    const ro = new ResizeObserver(() => {
+      if (!nearBottomRef.current) return
+      const el = scrollRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    })
+    ro.observe(inner)
+    return () => ro.disconnect()
+    // 空时间线时内容容器不存在，等它出现（timelineLen 从 0 变正）再挂
+  }, [timelineLen > 0])
 
   // 输入框随内容长高（上限约 6 行）
   React.useEffect(() => {
@@ -1596,20 +1906,55 @@ export default function LabPage() {
     }, 90)
   }
 
-  /** 思考内容也 90ms 一帧地刷 —— 逐字重排同样吃不消 */
+  /**
+   * 思考内容的「渐进显示」（2026-10-12 站长反馈「思考卡半天啥都不显示，
+   * 突然一次性出现 xxx 行」）。
+   *
+   * 原因：部分中转站/模型（尤其原生工具 + 高思考档）在「纯想」阶段
+   * **不发 reasoning 增量**，最后把整段一次性吐出 —— 上游就是这样的，
+   * 前端改不了它的发送方式，但可以**改变展示节奏**：
+   * `thinkRef` 是「已收到的全文」，`liveThink` 是「已经放出来的部分」。
+   * 每 40ms 放一小段（按剩余量自适应：剩余越多放得越快，约 1.6 秒内追平），
+   * 真流式时增量本来就小，观感不变；一次性大块时呈现打字机效果，
+   * 不再「半屏文字砸脸」。
+   */
   const pushThink = () => {
     if (thinkTimer.current != null) return
-    thinkTimer.current = window.setTimeout(() => {
-      thinkTimer.current = null
-      setLiveThink(thinkRef.current)
-    }, 90)
+    const step = () => {
+      const full = thinkRef.current
+      const shownLen = thinkShownRef.current
+      if (shownLen >= full.length) {
+        // 已追平：停表。下一个 reasoning 增量到来时 pushThink 会重新启动
+        thinkTimer.current = null
+        return
+      }
+      /**
+       * 每步放剩余的 1/12（至少 2 字符）：
+       * 指数衰减下 ~15 步（约 600ms）追平 —— 「一次性大块」呈现为一段
+       * 快速打字机；真流式时增量本来就小（一步就追平），观感不变。
+       * （试过 1/40：衰减太慢，2.5 秒才放完 75%，反而又变成「卡着不动」——
+       *  单元测试 _unit-think-reveal.mjs 量出来的，别改回去。）
+       */
+      const remain = full.length - shownLen
+      // 收尾别拖：剩最后一小段时一步放完，否则尾巴会以每步 2 字慢慢爬
+      const n = remain <= 48 ? remain : Math.max(2, Math.ceil(remain / 12))
+      const next = full.slice(0, shownLen + n)
+      thinkShownRef.current = next.length
+      setLiveThink(next)
+      thinkTimer.current = window.setTimeout(step, 40)
+    }
+    thinkTimer.current = window.setTimeout(step, 40)
   }
 
-  /** 一轮收尾：停掉思考的流式刷新计时器 */
+  /** 一轮收尾：停掉思考的渐进刷新，并把剩余未放出的部分**一次性补齐**（不能只显示半截） */
   const settleThink = () => {
     if (thinkTimer.current != null) {
       window.clearTimeout(thinkTimer.current)
       thinkTimer.current = null
+    }
+    if (thinkShownRef.current < thinkRef.current.length) {
+      thinkShownRef.current = thinkRef.current.length
+      setLiveThink(thinkRef.current)
     }
   }
 
@@ -1992,18 +2337,41 @@ export default function LabPage() {
   ): Promise<string> => {
     let res: Response
     if (useChannel === "station" || useChannel === "site") {
-      res = await streamLabChat({
-        model: useModel,
-        // 原生模式：把工具声明交给上游（声明见 src/lib/lab-tools-native.ts）
-        tools: useNativeTools ? NATIVE_TOOLS : undefined,
-        messages,
-        effort,
-        // 温度由这里算好传下去（唯一口径，见 lab-agent.ts 的 EFFORT_TEMPERATURE）
-        temperature: EFFORT_TEMPERATURE[effort],
-        // 免费渠道只传 id：真实地址与密钥留在服务端，浏览器拿不到
-        channelId: useChannel === "site" ? useSiteChannelId : undefined,
-        signal,
-      })
+      /**
+       * 🔴 连**等响应头**这一步也要有守卫（2026-10-12 站长反馈「手机离开过后再回来，
+       * 发消息还是没有反应」）。
+       *
+       * 之前只在「读流」那步做了空闲/前台陈旧判定 —— 但请求卡在**更早**的阶段
+       * （fetch 一直不返回：切后台时请求刚发出、或网络被掐）时那个守卫还没生效，
+       * 整轮就永远挂着。这里用**独立的 AbortController**（跟随本轮的中止信号）：
+       * 守卫触发时只掐掉这一次请求，**不把整轮标记成「用户主动中止」**
+       * （否则自动重试会被跳过）。
+       */
+      const fetchCtrl = new AbortController()
+      const onRoundAbort = () => fetchCtrl.abort()
+      if (signal.aborted) fetchCtrl.abort()
+      else signal.addEventListener("abort", onRoundAbort)
+      try {
+        res = await withIdleGuard(
+          streamLabChat({
+            model: useModel,
+            // 原生模式：把工具声明交给上游（声明见 src/lib/lab-tools-native.ts）
+            tools: useNativeTools ? NATIVE_TOOLS : undefined,
+            messages,
+            effort,
+            // 温度由这里算好传下去（唯一口径，见 lab-agent.ts 的 EFFORT_TEMPERATURE）
+            temperature: EFFORT_TEMPERATURE[effort],
+            // 免费渠道只传 id：真实地址与密钥留在服务端，浏览器拿不到
+            channelId: useChannel === "site" ? useSiteChannelId : undefined,
+            signal: fetchCtrl.signal,
+          }),
+          STREAM_IDLE_MS,
+          STUCK_MS,
+          () => lastActivityRef.current
+        )
+      } finally {
+        signal.removeEventListener("abort", onRoundAbort)
+      }
       /**
        * 免费额度用完、后端**自动改用你自己账号的额度**继续（见后端 chat() 的注释）。
        * 必须提示一下：用户选的明明是免费模型，不说明白他会以为扣错账了。
@@ -2049,12 +2417,17 @@ export default function LabPage() {
     let lastPreview = 0
     // 每轮从头开始攒思考内容，别把上一轮的带过来
     thinkRef.current = ""
+    thinkShownRef.current = 0
     setLiveThink("")
     sealedRef.current = false
     setThinkSealed(false)
     await consumeSSE(
       res,
       (delta) => {
+        lastActivityRef.current = Date.now()
+        // 用量面板埋点：第一个 delta 就是「首 token」，字符数用来估输出 token
+        if (metricsRef.current.first === null) metricsRef.current.first = Date.now()
+        metricsRef.current.outChars += delta.length
         acc += delta
         accRef.current = acc
         // 正文开始了 ⇒ 这一轮的思考已经结束（推理与正文在流里是先后关系），
@@ -2067,29 +2440,40 @@ export default function LabPage() {
          * ⚠️ 原生模式下**绝不解析/执行正文里的标签**：
          * 那时标签只是普通文字（模型可能只是举例），去执行它等于绕过结构化调用，
          * 而且会在流式途中拿半截参数动手。
+         * 但**显示**是另一回事：原生模式下正文也必须实时出现在时间线上
+         * （2026-10-12 站长反馈「流式期间完全看不到 AI 在说什么」）——
+         * 所以这里单独取一份**只用于显示**的 text 段，绝不参与执行。
          */
-        const segs = useNativeTools ? [] : parseAgentText(acc)
+        const displaySegs = useNativeTools
+          ? parseAgentText(acc).filter((s) => s.type === "text")
+          : parseAgentText(acc)
+        const segs = useNativeTools ? [] : displaySegs
         segs.forEach((s, i) => {
           if (s.type === "action" && s.complete && !applied.has(i)) {
             applied.set(i, applyAction(s) ?? "")
           }
         })
         /**
-         * 实时视图 = 结构化工具卡片（原生模式）+ 正在流出的正文。
-         * ⚠️ 必须合在一起再 pushLive：文本回调会把整个实时视图**整份替换**，
-         *    只推正文的话会把刚画出来的工具卡片抹掉。
+         * 实时视图 = 正在流出的正文 + 结构化工具卡片（原生模式）。
+         * ⚠️ 必须合在一起再 pushLive：**文本回调与工具调用回调都会把整个实时视图
+         *    整份替换**，只推一半就会把另一半抹掉（见下面工具回调里的注释）。
+         * 顺序 = **正文在前、工具卡片在后**，与这一轮结束时落盘的顺序一致
+         * （`const segs = useNative ? [正文…, 工具…] : …`）—— 两边顺序不一致的话，
+         * 这一轮一结束正文会「跳」到另一个位置。
          */
         const liveSegs =
           useNativeTools && collected.length
-            ? [...nativeToolCallsToSegments(collected, false), ...segs]
-            : segs
+            ? [...displaySegs, ...nativeToolCallsToSegments(collected, false)]
+            : displaySegs
         pushLive(segmentsToEntries(liveSegs, round, false, filesRef.current))
         /**
          * 把「跑到哪一步了」同步进模块单例。
          * ⚠️ 这个回调是**循环闭包**，页面卸载后它照样在跑 ——
          *    所以即使切走了，回来时思考动画里的步骤也是最新的（见 lib/lab-run.ts）。
+         * ⚠️ 原生模式下 `segs` 恒为空 ⇒ 步骤必须从 liveSegs（含工具卡片）里提，
+         *    否则「正在做的事」永远不更新（2026-10-12 站长反馈）。
          */
-        setLabRun({ steps: actionSteps(segs) })
+        setLabRun({ steps: actionSteps(liveSegs) })
         const now = Date.now()
         if (now - lastPreview > 700) {
           lastPreview = now
@@ -2097,6 +2481,7 @@ export default function LabPage() {
         }
       },
       (think) => {
+        lastActivityRef.current = Date.now()
         thinkRef.current += think
         pushThink()
       },
@@ -2109,18 +2494,31 @@ export default function LabPage() {
          *   参数可能只到一半，**绝不能拿半截参数去执行**（比如 write 的内容还没传完）。
          */
         collected.length = 0
+        lastActivityRef.current = Date.now()
         collected.push(...calls)
         if (calls.length) {
+          /**
+           * 🔴 这里**必须把已经流出的正文一起带上**（2026-10-12 站长反馈
+           * 「正文闪一下就没了，等写入完才又出现」）：
+           * `pushLive` 是**整份替换**，只推工具卡片的话正文会被从时间线上抹掉 ——
+           * 而写入这类工具的参数要流很久（几百行），正文就消失那么久。
+           * 顺序与文本回调、以及本轮结束时的落盘顺序保持一致：正文在前、卡片在后。
+           */
+          const textSegs = useNativeTools
+            ? parseAgentText(accRef.current).filter((s) => s.type === "text")
+            : []
           pushLive(
             segmentsToEntries(
-              nativeToolCallsToSegments(calls, false),
+              [...textSegs, ...nativeToolCallsToSegments(calls, false)],
               round,
               false,
               filesRef.current
             )
           )
         }
-      }
+      },
+      // 回到前台时用它判断「这一轮是不是已经陈旧」（见 readWithIdle 的 ②）
+      () => lastActivityRef.current
     )
     return acc
   }
@@ -2141,6 +2539,39 @@ export default function LabPage() {
         key: `silent-${Date.now()}`,
         kind: "text" as const,
         text: t("lab.silentEnd"),
+        live: false,
+        collapsible: false,
+        at: Date.now(),
+      },
+    ])
+  }
+
+  /**
+   * 🔴 「干完活但没有报告」的最终兜底（2026-10-12 站长反馈）：模型做完事
+   * 一句话不说就结束 ⇒ **前端自己写摘要**。数据来源是**真实的工具条目**
+   * （不是模型自称），从 entriesRef 里把这一整轮的 tool 条目汇总成一句话。
+   * 只在真的拿不到模型报告时出现（REPORT_NUDGE 推过仍不说），所以用户
+   * 看到它 = 模型偷懒了，摘要末尾注明是自动生成的。
+   */
+  const appendAutoReport = () => {
+    const acts: string[] = []
+    for (const e of entriesRef.current) {
+      if (e.kind !== "tool") continue
+      const arg = e.tool === "grep" ? e.pattern : e.tool === "run" ? e.command?.split("\n")[0] : e.path
+      const label = t(`lab.tool.${e.tool}`)
+      acts.push(arg ? `${label} ${arg}` : label)
+    }
+    if (!acts.length) return
+    // 去重（同一路径反复读写只记一次），最多列 8 条，多了说明是长活，点到为止
+    const uniq = [...new Set(acts)].slice(0, 8)
+    updateEntries((prev) => [
+      ...prev,
+      {
+        key: `report-${Date.now()}`,
+        kind: "text" as const,
+        text:
+          `${t("lab.autoReport.done")}\n${uniq.map((a) => `· ${a}`).join("\n")}` +
+          `\n${t("lab.autoReport.hint")}`,
         live: false,
         collapsible: false,
         at: Date.now(),
@@ -2179,8 +2610,23 @@ export default function LabPage() {
      * 关着 = 走原来的文本标签协议 ⇒ 这就是回滚口子。
      */
     const nativeToolsOn = Boolean(siteInfo?.nativeTools)
+    /**
+     * 兜底模型 —— **空模型绝不能发出去**。
+     *
+     * ⚠️ 2026-10-12 站长反馈「AI 实验室 / AI 聊天没有正文」的真因就在这儿：
+     *    `lab_site_models` 为空 ⇒ 站内模型清单为空 ⇒ `model` 状态一直是 `""`
+     *    ⇒ **直接打字发送**就带 `model:""` ⇒ 后端 400 INVALID_MODEL
+     *    ⇒ 界面上一点回复都没有（手动在菜单里选过模型的那几次是正常的，所以像「时好时坏」）。
+     * 兜底顺序跟模型菜单里能看到的顺序一致：站内清单 → 站内免费 → 站点渠道。
+     */
+    const modelFallback =
+      effChannel === "site"
+        ? effSiteChannel?.model || siteInfo?.channels[0]?.model || ""
+        : effChannel === "custom"
+          ? (custom?.model ?? "")
+          : models[0] || stationFreeModels[0] || ""
     const effModel =
-      effChannel === "station"
+      (effChannel === "station"
         ? pCh === "station"
           ? pVal
           : model
@@ -2189,7 +2635,8 @@ export default function LabPage() {
           : // 自定义渠道：多选时 key 里带的那个模型要能用上（否则永远只用第一个）
             pCh === "custom" && pVal
             ? pVal
-            : (custom?.model ?? "")
+            : (custom?.model ?? "")) ||
+      modelFallback
 
     /**
      * ⚠️ 这里刻意把「模型看到的」和「用户看到的」分成两份：
@@ -2197,15 +2644,73 @@ export default function LabPage() {
      *     几百行 txt 会把整屏刷掉 —— 2026-10-10 站长反馈）；
      *   · 模型输入：正文 + 附件全文（它必须拿到内容才做得了事）。
      */
+    /**
+     * ⚠️ 启动恢复（IndexedDB 异步）没完成前，filesRef 里还是**空的** ——
+     * 这时发消息会把「（空项目，还没有任何文件）」写进 system prompt，
+     * 模型于是「明明项目里有文件却说没有」，然后**把文件全部重写一遍**
+     * （2026-10-12 站长反馈）。
+     *
+     * 🔴 但「等」本身也出过事（同日站长反馈「消息发出去了但没有思考标记、
+     * 也没有正式开始」）：等的时候**界面完全静默** —— 输入框没清空、没有气泡、
+     * 没有思考动画，点了发送像没点。所以这里：
+     *   ① 先把用户气泡和「正在加载项目」状态**立刻**立起来（有反馈）；
+     *   ② 再等恢复完成（上限 2 秒）。
+     * 判断用 `sessionLoadingRef`（读盘期间为 true），不要用 draftReady：
+     * 没有任何会话的老用户 draftReady 很快就 true，但根本没有「恢复」要做。
+     */
+    if (sessionLoadingRef.current) {
+      setLabRun({
+        running: true,
+        label: t("lab.loadingProject"),
+        steps: [],
+        startedAt: Date.now(),
+      })
+      for (let i = 0; i < 20 && sessionLoadingRef.current; i++) {
+        await new Promise((r) => setTimeout(r, 100))
+      }
+      clearLabRun()
+    }
     const typed = (override ?? input).trim()
-    // 「参考网址」进来的附件不在 PromptBar 的列表里，这里并进去一起处理
-    const allFiles = [...(files ?? []), ...pendingAttachRef.current]
-    pendingAttachRef.current = []
-    const taken = takeAttachments(typed, allFiles)
-    const text = taken.text
-    // 只有图片、没打字也要能发出去（图片本身就是要看的东西）
-    if (!text && !taken.images.length) return
-    if (streaming) return
+    /**
+     * 空消息（既没打字、也没有任何附件）直接不发。
+     *
+     * ⚠️ 这里**不能**再用 `takeAttachments` 的结果判断：附件要等「自动读网页」
+     * 之后才汇总得出来（见下方那段），所以先做一个等价的便宜判断。
+     */
+    if (!typed && !(files ?? []).length && !pendingAttachRef.current.length) return
+    /**
+     * 🔴 「上一轮还在跑」**不能静默吞掉**（2026-10-12 站长反馈「消息发出去什么回应
+     * 都没有，连正在思考都不显示」）。
+     *
+     * 原来这里直接 `return` —— 而 PromptBar 在调 onSend 之后**已经清空了输入框**，
+     * 所以用户看到的是「消息消失了，什么都没发生」。更糟的是：半开连接下 `streaming`
+     * 可能**永远卡在 true**，于是之后每一次发送都被这条静默吃掉。
+     *
+     * 现在分两种：
+     *   · 那一轮还活着（最近有动静）⇒ 明确告诉他「上一轮还在跑」，并把它排成插话（不丢消息）；
+     *   · 那一轮已经卡住（超过 STUCK_MS 没任何动静）⇒ 直接收掉它，然后照常发这条。
+     */
+    if (streaming) {
+      const idleMs = Date.now() - lastActivityRef.current
+      if (idleMs > STUCK_MS) {
+        // 卡住了：中止 + 等循环收尾（finally 会把 streaming 置 false）
+        toast.warning(t("lab.err.stuckReset"))
+        abortRef.current?.abort()
+        for (let i = 0; i < 30 && streamingRef.current; i++) {
+          await new Promise((r) => setTimeout(r, 100))
+        }
+      } else {
+        // 还活着：不丢消息，按「中途插话」排队（时间线上会出现「待发送」气泡）
+        pushSteer(typed)
+        toast.success(t("lab.steer.queued"))
+        return
+      }
+    }
+    // 一个模型都没有：明确告诉用户，而不是把空模型发出去换回 400（见 modelFallback 的说明）
+    if (!effModel) {
+      toast.error(t("lab.err.noModel"))
+      return
+    }
     if (effChannel === "station" && (stationMissing || stationAuthExpired)) {
       // 两种情况要分开说：一种是压根没开通，一种是开通了但站内登录失效
       // （后者去重新绑定密码即可，别让用户以为要重新开通）
@@ -2237,12 +2742,13 @@ export default function LabPage() {
     }
 
     setInput("")
+    const bubbleKey = `u-${Date.now()}`
     updateEntries((prev) => [
       ...prev,
       // convoAt 记的是「这条消息即将被塞进 convoRef 的位置」——
       // 编辑重发时就从这里往回切（见 editMessage）
       {
-        key: `u-${Date.now()}`,
+        key: bubbleKey,
         kind: "user",
         text: typed,
         files,
@@ -2250,6 +2756,58 @@ export default function LabPage() {
         at: Date.now(),
       },
     ])
+    /**
+     * 发消息就**重新粘到底部**（2026-10-12 站长要求）。
+     * 用户可能正翻着上面的历史 —— 但既然发了消息，他要看的就是新回复，
+     * 所以这里强制恢复「跟随底部」；之后他自己往上翻仍会正常松开。
+     */
+    nearBottomRef.current = true
+    requestAnimationFrame(() => {
+      const el = scrollRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    })
+
+    /**
+     * 🔴 自动「参考网址」（2026-10-12 站长要求：原来要点「+ → 参考网址」才读页面，
+     * 现在消息里带网址就自动读）。
+     *
+     * ⚠️ 位置很关键：**必须排在用户气泡入队之后**。
+     *    状态行（「正在读取网页…」）挂在时间线的**非空分支**里 ——
+     *    首条消息时时间线还是空的（走的是 slogan 空状态），
+     *    抓取期间就一条状态都显示不出来（实测 0/15 次采样命中）。
+     *    先把气泡立起来，时间线非空 ⇒ 状态行才有地方渲染。
+     * 抓到的正文写进 attachedRef / pendingAttachRef，下面 takeAttachments 才会带上。
+     */
+    if (typed) {
+      const got = await autoAttachUrls(typed)
+      if (got.done.length) {
+        toast.success(t("lab.ref.autoDone", { n: String(got.done.length) }))
+      } else if (got.failed) {
+        // 全失败才提示（部分失败不吵）；模型仍能看到网址本身，也能自己再抓
+        toast.warning(t("lab.ref.autoFailed", { n: String(got.failed) }))
+      }
+    }
+    // 「参考网址」进来的附件不在 PromptBar 的列表里，这里并进去一起处理
+    const refNames = [...pendingAttachRef.current]
+    pendingAttachRef.current = []
+    const allFiles = [...(files ?? []), ...refNames]
+    const taken = takeAttachments(typed, allFiles)
+    const text = taken.text
+    // 把自动抓来的网址补到气泡的附件标签上（用户才看得出这轮读了哪些页面）
+    if (refNames.length) {
+      updateEntries((prev) =>
+        prev.map((e) =>
+          e.key === bubbleKey ? { ...e, files: [...(files ?? []), ...refNames] } : e
+        )
+      )
+    }
+    // 极端情况：只有空附件、又没打字 ⇒ 确实没东西可发（原判断挪到这里）
+    if (!text && !taken.images.length) {
+      // ⚠️ 这里用户气泡**已经入队了**，再静默 return 就会留下一条永远没有回应的消息
+      //    （2026-10-12：所有静默返回都要给个说法）
+      toast.error(t("lab.err.emptySend"))
+      return
+    }
     /**
      * 给模型的这一份：有图就走**多模态 content 数组**。
      * 文字在前、图片在后 —— 多数模型对「先描述再给图」的理解更稳。
@@ -2305,6 +2863,24 @@ export default function LabPage() {
      * （2026-10-10 站长反馈「每轮结束都要说一句…」）。
      */
     let turnSaidSomething = false
+    /**
+     * 🔴「干完活必须有报告」（2026-10-12 站长反馈「做完了直接就结束了，
+     * 没有报告没有总结」）。
+     *
+     * 原机制的洞：`turnSaidSomething` 只要有**任何一轮**说过话（哪怕开头一句
+     * 「我来做」）就置 true ⇒ 后面几轮纯工具干完、最后一轮一句话不说，
+     * 收尾补问的兜底（`!turnSaidSomething`）**整轮不触发** ⇒ 完全静默结束。
+     *
+     * 现在双保险：
+     *   ① 干过活（有文件/命令/站内动作）且**最后一轮**没跟用户说话 ⇒
+     *      发 REPORT_NUDGE（独立计数，只推 1 次）再给模型一次机会；
+     *   ② 仍不说 ⇒ **前端自己生成收尾摘要**（从工具条目汇总），用户
+     *      永远能看到「做了什么」。
+     */
+    let didRealWork = false
+    let reportNudged = false
+    /** 网络断流自动重试的计数（见循环里那段注释）—— 整轮共享，不按 round 重置 */
+    let netRetries = 0
     let round = 0
 
     try {
@@ -2314,6 +2890,9 @@ export default function LabPage() {
        * （`for (;; round++)` 的 `continue` 也会执行 round++，所以计数始终准确。）
        */
       for (;; round++) {
+        lastActivityRef.current = Date.now()
+        if (!metricsRef.current.start) metricsRef.current.start = Date.now()
+        metricsRef.current.rounds += 1
         const messages = [
           {
             role: "system",
@@ -2328,21 +2907,74 @@ export default function LabPage() {
           },
           ...compactHistory(convoRef.current),
         ]
+        // 用量面板：这一轮上下文的构成（系统提示 / 工具声明 / 对话历史）
+        metricsRef.current.ctx = {
+          system: estTokens(String((messages[0] as { content?: unknown })?.content ?? "")),
+          tools: nativeToolsOn ? estTokens(JSON.stringify(NATIVE_TOOLS)) : 0,
+          history: estTokens(
+            messages
+              .slice(1)
+              .map((m) => {
+                const c = (m as { content?: unknown }).content
+                return typeof c === "string" ? c : JSON.stringify(c ?? "")
+              })
+              .join("")
+          ),
+        }
         const applied = new Map<number, string>()
         /** 这一轮上游给的结构化工具调用（原生模式才有内容） */
         const nativeCalls: NativeToolCall[] = []
-        const raw = await streamRound(
-          messages,
-          controller.signal,
-          round,
-          applied,
-          () => refreshPreview(false),
-          effChannel,
-          effModel,
-          effSiteChannelId,
-          nativeToolsOn,
-          nativeCalls
-        )
+        /**
+         * 🔴 网络类断流**自动重试**（2026-10-12 站长反馈「切到后台就不干活了，
+         * 回来只看到『这一轮没能完成：CORS 限制 / 生成中断了』」）。
+         *
+         * 成因：SSE 是**浏览器直连**的长连接 —— 页面被切到后台（尤其手机上被挂起）
+         * 时连接会被中断，`fetch` 抛 `TypeError`。以前这一抛就直接结束整轮，
+         * 用户回来看到的是一句「CORS 限制」（其实是断流，误判）。
+         *
+         * 现在：断流最多自动重试 2 次；**如果页面当时在后台，先等它回到前台再重试**
+         * （后台重试大概率还是失败，白烧额度）。重试 = 用同一份 messages 重新发这一轮，
+         * 模型会重新生成这一步；已经写进项目的文件不受影响。
+         */
+        let raw: string
+        try {
+          raw = await streamRound(
+            messages,
+            controller.signal,
+            round,
+            applied,
+            () => refreshPreview(false),
+            effChannel,
+            effModel,
+            effSiteChannelId,
+            nativeToolsOn,
+            nativeCalls
+          )
+        } catch (err) {
+          const netErr =
+            (err instanceof TypeError ||
+              err instanceof StreamIdleError ||
+              /**
+               * 🔴 **5xx 也要重试**（2026-10-12 实测发现）：`/api/lab/chat` 会**间歇性**
+               * 返回 500「服务器内部错误」（同一个请求体，连打 3 次全 500、过一会儿又 200）。
+               * 不重试的话，用户看到的就是「发出去没反应」—— 正是站长反馈的现象。
+               * 这种偶发内部错误重试一次基本就好了。
+               */
+              (err instanceof HttpError && err.status >= 500)) &&
+            !controller.signal.aborted
+          if (netErr && netRetries < MAX_NET_RETRIES) {
+            netRetries += 1
+            setLabRun({ label: t("lab.err.retrying") })
+            toast.warning(t("lab.err.retrying"), { id: "lab-net-retry" })
+            // 页面在后台就先等回前台：后台重试多半还是断（手机还会被挂起）
+            if (document.hidden) await waitUntilVisible()
+            if (controller.signal.aborted) throw err
+            await new Promise((r) => setTimeout(r, 800 * netRetries))
+            round -= 1 // 这一轮不算数，重试同一轮
+            continue
+          }
+          throw err
+        }
 
         /**
          * 收尾：把没来得及执行的补齐（中止时也走这里，保住已生成的部分）。
@@ -2353,12 +2985,49 @@ export default function LabPage() {
          * 下游（applyAction / 工具卡片 / 回喂）完全不知道差别。
          */
         const useNative = nativeToolsOn && nativeCalls.length > 0
-        const segs = useNative ? nativeToolCallsToSegments(nativeCalls) : parseAgentText(raw)
+        /**
+         * 🔴 原生模式下**绝不能把正文丢掉**（2026-10-12 站长反馈
+         * 「所有文字都在思考里，没有以正文显示」）：
+         *
+         * `nativeToolCallsToSegments` 只返回工具调用的 Segment —— 模型在这一轮里
+         * 对用户说的**每一句话都在 `raw` 里**，原代码只把 `raw` 存进对话历史
+         * （后面 convoRef 那段），**时间线上一个字都不会出现**，用户看到的就是
+         * 「思考块 + 一堆工具卡片，没有任何正文」。
+         *
+         * 修法：把 `raw` 解析成 text Segment 拼在工具卡片**前面**。
+         * 复用 parseAgentText 是有意的：它的容错归一化会把模型偶尔
+         * 漏出来的标签残片（`</lab_write>`、`</think>` 等）滤掉，
+         * 原生模式下这些只是普通文字，显示出来反而是垃圾。
+         */
+        const segs = useNative
+          ? [
+              ...parseAgentText(raw).filter((s) => s.type === "text"),
+              ...nativeToolCallsToSegments(nativeCalls),
+            ]
+          : parseAgentText(raw)
         segs.forEach((s, i) => {
           if (s.type === "action" && s.complete && !applied.has(i)) {
             applied.set(i, applyAction(s) ?? "")
           }
         })
+        // 「干过活」标记：收尾必须有报告的判据（见 send 开头 didRealWork 的注释）
+        if (
+          segs.some(
+            (s) =>
+              s.type === "action" &&
+              s.complete &&
+              (s.tool === "write" ||
+                s.tool === "replace" ||
+                s.tool === "delete" ||
+                s.tool === "run" ||
+                s.tool === "site" ||
+                s.tool === "skill" ||
+                s.tool === "web_search" ||
+                s.tool === "http")
+          )
+        ) {
+          didRealWork = true
+        }
 
         /**
          * 每轮落盘一次。
@@ -2445,6 +3114,68 @@ export default function LabPage() {
           }
         }
 
+        // ---- 截图自检：把项目内联成单文件 HTML，交给服务端用真浏览器渲染 ----
+        const shotResults = new Map<number, string>()
+        for (let i = 0; i < segs.length; i++) {
+          const s = segs[i]
+          if (s.type !== "action" || !s.complete || s.tool !== "screenshot") continue
+          try {
+            const files = filesRef.current
+            const entryPath =
+              files["index.html"] != null
+                ? "index.html"
+                : Object.keys(files).find((p) => /\.html?$/i.test(p))
+            if (!entryPath) {
+              s.content = "截图失败：项目里没有 HTML 文件"
+              continue
+            }
+            const r = await labApi.screenshot({
+              html: inlineAssets(files[entryPath], files, entryPath),
+              fullPage: true,
+              width: 1280,
+              height: 800,
+            })
+            // ⚠️ dataUrl 只放 image（展示 + 回喂），**绝不放进 content** ——
+            //    几十 KB 的 base64 进正文会把卡片和上下文一起撑爆
+            s.image = r.dataUrl
+            shotResults.set(i, r.dataUrl)
+            s.content =
+              `截图成功 · ${Math.round(r.msUsed)}ms · 今日 ` +
+              `${Math.round(r.dayMs / 1000)}/${Math.round(r.dayLimitMs / 1000)}s`
+          } catch (e: any) {
+            s.content = `截图失败：${e?.message ?? e}`
+          }
+        }
+
+        // ---- 页面体检：文字诊断（横向溢出 / console 报错 / 资源失败）----
+        // 复用 httpResults 这个「按段下标存回执文本」的通道 —— 服务端
+        // buildToolResults 里把 inspect 与 http 同等对待（见 lab-agent.ts）。
+        for (let i = 0; i < segs.length; i++) {
+          const s = segs[i]
+          if (s.type !== "action" || !s.complete || s.tool !== "inspect") continue
+          try {
+            const files = filesRef.current
+            const entryPath =
+              files["index.html"] != null
+                ? "index.html"
+                : Object.keys(files).find((p) => /\.html?$/i.test(p))
+            if (!entryPath) {
+              s.content = "体检失败：项目里没有 HTML 文件"
+              continue
+            }
+            const r = await labApi.inspect({
+              html: inlineAssets(files[entryPath], files, entryPath),
+              width: 1280,
+              height: 800,
+            })
+            s.content = r.text
+            httpResults.set(i, r.text)
+          } catch (e: any) {
+            s.content = `体检失败：${e?.message ?? e}`
+            httpResults.set(i, s.content)
+          }
+        }
+
         // ---- 联网搜索：key 只存服务端，所以必须走接口 ----
         const searchResults = new Map<number, string>()
         for (let i = 0; i < segs.length; i++) {
@@ -2527,6 +3258,7 @@ export default function LabPage() {
         setLive(null)
         setLiveThink("")
         thinkRef.current = ""
+    thinkShownRef.current = 0
         settleThink()
         if (liveTimer.current != null) {
           window.clearTimeout(liveTimer.current)
@@ -2587,8 +3319,21 @@ export default function LabPage() {
         // 整轮什么都没产出（例如预算全花在思考上，正文是空的）
         if (!segs.length) {
           if (!mayNudgeClosing) {
+            // 🔴 干过活却始终空轮：同样给一次 REPORT_NUDGE 机会，然后前端自己写摘要
+            const lastEntry0 = entriesRef.current[entriesRef.current.length - 1]
+            const endsWithoutReport0 =
+              didRealWork && (lastEntry0?.kind === "tool" || !saidSomething)
+            if (endsWithoutReport0 && !reportNudged) {
+              reportNudged = true
+              convoRef.current = [
+                ...convoRef.current,
+                { role: "user", content: REPORT_NUDGE },
+              ]
+              continue
+            }
             // 兜底：整轮下来一个字都没说，循环要结束了 —— 不能让用户只看到思考
-            if (!turnSaidSomething) appendSilentEndNote()
+            if (endsWithoutReport0) appendAutoReport()
+            else if (!turnSaidSomething) appendSilentEndNote()
             break
           }
           closingNudges += 1
@@ -2609,6 +3354,26 @@ export default function LabPage() {
          *   少一条上游直接报错（哪怕它只是个 write / need_vm 这种"不需要看结果"的动作，
          *   也得回一句「已执行」）。
          */
+        /**
+         * 截图**必须走 user 角色**回喂（2026-10-13）：服务端 sanitizeMessages 只允许
+         * `role:"user"` 带 image part —— 塞进 `role:"tool"` 会被直接丢掉。
+         * 调用点放在工具回执**之后** ⇒ 模型先看到「截图成功」，紧接着就看到那张图。
+         */
+        const feedShots = () => {
+          for (const [, dataUrl] of shotResults) {
+            convoRef.current = [
+              ...convoRef.current,
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: "（这是刚才那张截图，用它自检）" },
+                  { type: "image_url", image_url: { url: dataUrl } },
+                ],
+              },
+            ]
+          }
+        }
+
         const feedResults = (notes: string[]) => {
           if (useNative) {
             const calls = segs.filter((x) => x.type === "action" && x.toolCallId)
@@ -2687,6 +3452,7 @@ export default function LabPage() {
           const merged: string[] = [note, ...siteNotes]
           if (siteResults.size) merged.push(...siteResults.values())
           feedResults(merged)
+        feedShots()
           continue
         }
 
@@ -2735,11 +3501,29 @@ export default function LabPage() {
             )
           }
           feedResults(parts)
+        feedShots()
           continue
         }
 
         // 只有「失败的动作」或「读/列/删」才需要回喂一轮
         if (!needsToolResult(segs, failures)) {
+          /**
+           * 🔴 原生模式下**必须先把 tool 回执补齐再走收尾**（2026-10-12 站长反馈
+           * 「模型明明写了文件，却觉得自己没写、反复重写」的真因）：
+           *
+           * OpenAI 协议要求 assistant 的**每一条 tool_call 都得有一条 `role:"tool"`
+           * 消息回应**。write/need_vm 这类"本地无返回"的动作不走上面的回喂分支，
+           * 之前在这里直接 break/continue ⇒ **悬空 tool_call** ——
+           *   · 上游（中转站/模型）对悬空调用表现各异：有的直接报错，glm-5.3 的
+           *     表现是**下一轮表现得像从没写过**（它既没收到回执，也拿不准写没写成）；
+           *   · 于是模型反复重写同一个文件。
+           * `feedResults([])` 会对每条 tool_call 回一句「已执行，无返回内容」，
+           * notes 为空 ⇒ 不额外插 user 消息（不打扰收尾逻辑）。
+           */
+          if (useNative) {
+          feedResults([])
+          feedShots()
+        }
           // 收尾机会：模型没留下给用户的话（空轮 / 只思考 / 以动作收尾）⇒ 补问一次
           if (mayNudgeClosing) {
             closingNudges += 1
@@ -2750,12 +3534,34 @@ export default function LabPage() {
             continue
           }
           /**
-           * 🔴 兜底：到这儿就是真的要结束了。
-           * 如果这一轮模型一个字都没说（只思考 / 只调工具），**绝不能让用户
-           * 看到「思考完就结束了」** —— 补一条明确的说明，把「为什么没有话」
-           * 摆到台面上，而不是留一片空白让人猜。
+           * 🔴 「干完活必须有报告」的最后一推（didRealWork 的注释见 send 开头）。
+           *
+           * ⚠️ 判据（2026-10-12 二次修）：「这一轮说没说话」**不够** ——
+           * 模型常在干完活后只回一个字（「好」「完成」）就结束，saidSomething=true，
+           * 三层全跳过 ⇒ 用户依旧看不到「做了什么」。真正该看的口径是：
+           * **时间线的最后一条是不是工具卡片** —— 收尾落在动作上 = 没有总结。
+           * （正文气泡结尾 = 模型给了说明，不打扰。）
            */
-          if (!turnSaidSomething) appendSilentEndNote()
+          const lastEntry = entriesRef.current[entriesRef.current.length - 1]
+          const endsWithoutReport =
+            didRealWork &&
+            (lastEntry?.kind === "tool" || !saidSomething)
+          if (endsWithoutReport && !reportNudged) {
+            reportNudged = true
+            convoRef.current = [
+              ...convoRef.current,
+              { role: "user", content: REPORT_NUDGE },
+            ]
+            continue
+          }
+          /**
+           * 🔴 兜底：到这儿就是真的要结束了。
+           * 干过活而收尾没有报告（最后一条是工具卡片、或这一轮没说话）⇒
+           * 前端自己把摘要写出来 —— 用户必须知道做了什么，这不该依赖模型自觉。
+           * 纯聊天没干活的静默轮才用「只输出了思考」那条提示。
+           */
+          if (endsWithoutReport) appendAutoReport()
+          else if (!turnSaidSomething) appendSilentEndNote()
           break
         }
         // 模型要了文件内容 / 有动作失败 → 回喂结果，让它接着改
@@ -2777,14 +3583,55 @@ export default function LabPage() {
         ]
       }
     } catch (err) {
-      if (controller.signal.aborted) {
+      /**
+       * 🔴 出错必须**在时间线上留痕**（2026-10-12 站长反馈「消息发出去了但没有
+       * 思考标记、也没有正式开始」）：只弹 toast 的话，手机上一闪而过/切走再回来
+       * 就什么都没有 —— 用户看到的是「我发了消息，然后就没有然后了」。
+       * 这里补一条系统错误条目，把原因写明；toast 照旧（当时在场的人能立刻看到）。
+       *
+       * ⚠️ `TypeError` 不能一律说成 CORS（2026-10-12 修）：fetch 抛 TypeError 有**两种**
+       * 常见原因 —— 真·跨域被拦，和**连接被中断**（切后台、网络抖动、手机被挂起）。
+       * 以前一律提示「这个渠道不允许浏览器直连（CORS 限制）」，把断流误诊成配置问题，
+       * 用户会跑去换渠道（白折腾）。按页面可见性/在线状态分开说。
+       *
+       * 🔴 用户**主动中止**（点停止 / 点插话的「立即发送」）**不算错误**
+       * （2026-10-12 修）：原来照样写一条「⚠️ 这一轮没能完成：生成中断了」，
+       * 于是每次打断都留个红字，用户以为出故障了。
+       */
+      const aborted = controller.signal.aborted
+      const netInterrupted =
+        !aborted && err instanceof TypeError && (document.hidden || !navigator.onLine)
+      const errText =
+        err instanceof HttpError
+          ? err.message
+          : netInterrupted
+            ? t("lab.channel.interrupted")
+            : err instanceof TypeError
+              ? t("lab.channel.cors")
+              : err instanceof Error && effChannel === "custom"
+                ? err.message || t("lab.err.generic")
+                : t("lab.err.stream")
+      if (!aborted) {
+        updateEntries((prev) => [
+          ...prev,
+          {
+            key: `err-${Date.now()}`,
+            kind: "text",
+            text: `⚠️ ${t("lab.err.roundFailed")}${errText ? `：${errText}` : ""}`,
+            live: false,
+            collapsible: false,
+            at: Date.now(),
+          },
+        ])
+      }
+      if (aborted) {
         const segs = parseAgentText(accRef.current)
         updateEntries((prev) => [
           ...prev,
           ...segmentsToEntries(segs, 99, true, filesRef.current),
         ])
       } else if (err instanceof TypeError) {
-        toast.error(t("lab.channel.cors"))
+        toast.error(netInterrupted ? t("lab.channel.interrupted") : t("lab.channel.cors"))
       } else if (err instanceof HttpError) {
         if (err.code === "NOT_BOUND") setStationMissing(true)
         if (
@@ -2827,9 +3674,28 @@ export default function LabPage() {
         ])
       }
       thinkRef.current = ""
+    thinkShownRef.current = 0
       setLiveThink("")
       settleThink()
       setLive(null)
+      // 用量面板：这一轮收尾时算出来（首 token / 速度是实测，token 是估算）
+      {
+        const m = metricsRef.current
+        const genMs = m.first !== null ? Date.now() - m.first : 0
+        const outTokens = Math.round(m.outChars / 3.4)
+        if (m.ctx.system || m.ctx.history) {
+          setMetrics({
+            system: m.ctx.system,
+            tools: m.ctx.tools,
+            history: m.ctx.history,
+            context: m.ctx.system + m.ctx.tools + m.ctx.history,
+            ttftMs: m.first !== null && m.start ? m.first - m.start : null,
+            tokPerSec: genMs > 200 ? outTokens / (genMs / 1000) : null,
+            outTokens,
+            rounds: m.rounds,
+          })
+        }
+      }
       setStreaming(false)
       abortRef.current = null
       // 单例也要清干净：否则切走再回来会显示一个永远转圈的「思考中」
@@ -2843,14 +3709,58 @@ export default function LabPage() {
   /**
    * 这一轮跑完就把排队里的下一句发出去（中途插话的兑现点）。
    * 放 effect 里而不是循环内部：这样不用去动那个已经很复杂的 agent 循环，
-   * 少一处出错的地方。代价是「等这一轮结束才生效」而不是"立刻打断"。
+   * 少一处出错的地方。代价是「等这一轮结束才生效」而不是"立刻打断"——
+   * 想立刻发就点队列气泡上的「立即发送」（它会先中止当前轮，effect 随即兑现）。
    */
   React.useEffect(() => {
     if (streaming) return
-    const next = steerRef.current.shift()
-    if (next) void send(next)
+    const next = steerRef.current[0]
+    if (!next) return
+    dropSteer(next.id)
+    void send(next.text)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streaming])
+
+  /** 「立即发送」：先中止当前轮（拿当前实例的手柄，切回来时退回单例里那个），
+   *  中止后 `streaming` 变 false ⇒ 上面那个 effect 立刻把队列第一句发出去。 */
+  const sendSteerNow = () => {
+    const ctrl = abortRef.current ?? getLabRun().abort
+    if (ctrl && !ctrl.signal.aborted) ctrl.abort()
+    else if (steerRef.current[0]) {
+      // 没有在跑的轮次（理论上不该发生）：直接发
+      const next = steerRef.current[0]
+      dropSteer(next.id)
+      void send(next.text)
+    }
+  }
+
+  /** 「编辑」排队中的插话：把文字填回输入框、并从队列里移除（用户改完再发） */
+  const editSteer = (id: string) => {
+    const item = steerRef.current.find((s) => s.id === id)
+    if (!item) return
+    dropSteer(id)
+    setSeedDraft({ text: item.text, at: Date.now() })
+  }
+
+  /**
+   * #10 失败后的两个补救动作（2026-10-12 站长要求「失败后能从这里继续」）。
+   * 原来失败只剩一条「⚠️ 这一轮没能完成」，用户只能自己重新打一遍 —— 而那一轮
+   * 的进度（已写入的文件、工具回执）都还在对话历史里，续跑是有意义的。
+   */
+  const continueRound = () => {
+    // 「继续」= 发一条系统口吻的用户消息，让模型接着上次的进度干，别从头重做
+    void send("（系统）刚才那一轮中断了，请接着上次的进度继续，不要从头重做。")
+  }
+  const resendLast = () => {
+    const last = [...convoRef.current].reverse().find((m) => m.role === "user")
+    if (!last) return
+    const c = last.content
+    const text =
+      typeof c === "string"
+        ? c
+        : c.map((p) => ("text" in p ? p.text : "")).join("")
+    if (text.trim()) void send(text)
+  }
 
   /**
    * 编辑一条用户消息 → **回退对话进度**、把原文填回输入框。
@@ -2899,6 +3809,7 @@ export default function LabPage() {
     setLive(null)
     setLiveThink("")
     thinkRef.current = ""
+    thinkShownRef.current = 0
     convoRef.current = []
     filesRef.current = {}
     setFiles({})
@@ -2989,7 +3900,101 @@ export default function LabPage() {
 
   // ---- 本地文件夹 ----
 
-  const doImportLocal = async () => {
+  /**
+ * 添加素材（图片）→ 压缩 → data URL → 存进**同一个项目文件表**。
+ *
+ * 为什么走 data URL 而不是另开二进制通道：项目文件表本来就是 `Record<路径, 字符串>`
+ * （正文甚至放在 R2 里），图片编码进去之后，保存 / 预览 / 导出 / 发布**全部现有管线都能直接用**；
+ * 预览与导出时由 `inlineAssets`（lab-agent）把它内联进 HTML，因此 iframe 里也不会 404。
+ *
+ * 上限 240KB：data URL 会膨胀约 1/3（≈320KB），仍在单文件 800KB 的服务端上限之内，
+ * 也不会一下吃掉 3MB 的总预算。
+ */
+const ASSET_MAX_BYTES = 240_000
+
+const ingestAssets = async (picked: File[]) => {
+  if (!picked.length) return
+  setLocalBusy(true)
+  try {
+    const add: Record<string, string> = {}
+    let skipped = 0
+    for (const f of picked) {
+      const ext = (f.name.split(".").pop() ?? "png").toLowerCase()
+      const base =
+        f.name.replace(/\.[^.]+$/, "").replace(/[^\w.\-]+/g, "_").slice(0, 40) || "asset"
+      const path = `assets/${base}.${ext}`
+      try {
+        // compressToLimit 压不到目标体积时返回 null（不是抛错）⇒ 计入跳过
+        const small = await compressToLimit(f, ASSET_MAX_BYTES)
+        if (!small) {
+          skipped++
+          continue
+        }
+        add[path] = await fileToDataUrl(small)
+      } catch {
+        skipped++
+      }
+    }
+    const names = Object.keys(add)
+    if (names.length === 0) {
+      toast.error(t("lab.assets.none"))
+      return
+    }
+    const merged = { ...filesRef.current, ...add }
+    filesRef.current = merged
+    setFiles(merged)
+    setPreview(buildPreviewDoc(merged))
+    setPreviewSeq((s) => s + 1)
+    toast.success(t("lab.assets.done").replace("{n}", String(names.length)))
+    if (skipped > 0) toast.warning(t("lab.assets.skipped").replace("{n}", String(skipped)))
+  } catch {
+    toast.error(t("lab.err.generic"))
+  } finally {
+    setLocalBusy(false)
+  }
+}
+
+/** 打开系统文件选择器（用程序化 input：不必为它加 state 和 JSX） */
+const doAddAssets = () => {
+  const input = document.createElement("input")
+  input.type = "file"
+  input.accept = "image/*"
+  input.multiple = true
+  input.onchange = () => void ingestAssets([...(input.files ?? [])])
+  input.click()
+}
+/**
+ * 点「可视输入框」的任何留白都聚焦输入框（2026-10-11 修移动端）。
+ *
+ * 现象（站长反馈）：输入框的**触摸位置与外观位置不一致** —— 看着能点的地方点上去没反应。
+ * 实测（iPhone 13 仿真）：可视盒子 350×82，而真正的 textarea 只有 326×22，
+ * 四周留白 12px（左右上）/ 48px（下）；点在留白上命中的是普通 div ⇒ 不会聚焦。
+ *
+ * 为什么要在这里兜一层，而不是去改 PromptBar：那是 ReactBits 的**逐字复制**组件
+ * （我们唯一允许的改动是 renderSend 接发送键），改它等于把上游代码弄脏、以后没法升级。
+ * 所以在外层包装上兜：命中按钮/链接/输入框就放行，其余一律聚焦。
+ */
+const onComposerTap = (e: React.PointerEvent<HTMLDivElement>) => {
+  const target = e.target as HTMLElement | null
+  if (!target) return
+  // 各司其职：点到按钮、链接、输入框本身、可编辑区就交给它们
+  // ⚠️ 排除「弹层内容 + 所有可交互角色」：
+    //    之前只排除了 button/a/input/textarea，于是**滑块（div[role=slider]）**、
+    //    模型列表项（role=option）、菜单项（role=menuitem）都没被排除 ⇒
+    //    点它们时这里反而去聚焦输入框、把手机软键盘顶起来（2026-10-11 站长反馈）。
+    if (
+      target.closest(
+        "button, a, input, textarea, select, [contenteditable='true'], " +
+          "[role='button'], [role='slider'], [role='listbox'], [role='option'], [role='menu'], [role='menuitem'], [role='dialog'], [role='switch'], [role='checkbox'], [role='radio'], " +
+          "[data-radix-popper-content-wrapper]"
+      )
+    ) {
+    return
+  }
+  const field = e.currentTarget.querySelector<HTMLElement>("textarea, input[type='text']")
+  field?.focus()
+}
+const doImportLocal = async () => {
     setLocalBusy(true)
     try {
       const got = await importLocalFolder()
@@ -3039,37 +4044,6 @@ export default function LabPage() {
       )
     } finally {
       setLocalBusy(false)
-    }
-  }
-
-  /** 绑定（或改绑）域名。成功后就地更新那一行，不用整表刷新 */
-  const bindDomain = async (projectId: string) => {
-    const fqdn = domainDraft.trim().toLowerCase()
-    if (!fqdn) return
-    setDomainBusy(true)
-    try {
-      const res = await labApi.setProjectDomain(projectId, fqdn)
-      setDomains((prev) => ({ ...prev, [projectId]: res.fqdn }))
-      setDomainFor(null)
-      setDomainDraft("")
-      toast.success(t("lab.domain.bound", { d: res.fqdn }))
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t("lab.domain.bindFailed"))
-    } finally {
-      setDomainBusy(false)
-    }
-  }
-
-  const unbindDomain = async (projectId: string) => {
-    setDomainBusy(true)
-    try {
-      await labApi.clearProjectDomain(projectId)
-      setDomains((prev) => ({ ...prev, [projectId]: null }))
-      toast.success(t("lab.domain.unbound"))
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t("lab.domain.bindFailed"))
-    } finally {
-      setDomainBusy(false)
     }
   }
 
@@ -3125,15 +4099,6 @@ export default function LabPage() {
   const loadProjects = async () => {
     try {
       const res = await labApi.listProjects()
-      // 顺带拉一遍各作品的绑定域名（数量很少，并发即可）
-      void Promise.all(
-        res.projects.map((p) =>
-          labApi
-            .getProjectDomain(p.id)
-            .then((d) => [p.id, d.fqdn] as const)
-            .catch(() => [p.id, null] as const)
-        )
-      ).then((pairs) => setDomains(Object.fromEntries(pairs)))
       setProjects(res.projects)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("lab.err.generic"))
@@ -3482,12 +4447,14 @@ export default function LabPage() {
            * 用 `hidden sm:inline-flex` 而不是 `max-sm:hidden` —— 后者依赖较新版本，
            * 前者任何版本都稳（Button 本身是 inline-flex，这里只是覆盖显示值）。
            */
-          className="hidden sm:inline-flex"
+          className="inline-flex"
           onClick={() => setPreviewOpen((v) => !v)}
           title={t("lab.preview.switchHint")}
         >
           <PanelRight className="h-4 w-4" />
-          {previewOpen ? t("lab.preview.back") : t("lab.previewLive")}
+          <span className="hidden sm:inline">
+            <span className="hidden sm:inline">{previewOpen ? t("lab.preview.back") : t("lab.previewLive")}</span>
+          </span>
           {/*
             ⚠️ 这个圆点**必须常驻占位**（不用时才隐藏，而不是不渲染）：
             两种情况文案都是 4 个字（「在线预览」/「回到对话」），宽度本该一模一样，
@@ -3512,9 +4479,42 @@ export default function LabPage() {
         缓动用 cubic-bezier(0.76,0,0.24,1)：先慢、中间快、收尾再慢。
       */}
       <div
+        ref={widthBoxRef}
         className="relative min-h-0 flex-1 overflow-hidden pt-3"
-        style={{ perspective: "1600px" }}
+        style={
+          {
+            perspective: "1600px",
+            /**
+             * 内容列宽度 —— 拖拽手柄写的就是它（见 index.css 的 .lab-col /
+             * .lab-width-handle）。所有内容列（时间线、输入框、横幅）都用
+             * `.lab-col` 取这个值，所以拖一次全跟着变。
+             */
+            "--lab-content-width": `${contentWidth}px`,
+          } as React.CSSProperties
+        }
       >
+        {/*
+          ---- 内容列宽度拖拽手柄（左右各一条，鼠标移过去才显示一条小竖线）----
+          预览屏打开时对话列不在可视区，就不显示手柄了（拖它也没意义）。
+        */}
+        {!previewOpen && (
+          <>
+            <WidthHandle
+              side="left"
+              onStart={onWidthStart}
+              onDrag={onWidthDrag}
+              onCommit={onWidthCommit}
+              onEnd={onWidthEnd}
+            />
+            <WidthHandle
+              side="right"
+              onStart={onWidthStart}
+              onDrag={onWidthDrag}
+              onCommit={onWidthCommit}
+              onEnd={onWidthEnd}
+            />
+          </>
+        )}
         <div
           className="flex h-full w-[200%] transition-transform duration-[640ms] ease-[cubic-bezier(0.76,0,0.24,1)] motion-reduce:transition-none"
           style={{ transform: previewOpen ? "translateX(-50%)" : "translateX(0)" }}
@@ -3558,9 +4558,70 @@ export default function LabPage() {
                 </p>
               </div>
             ) : (
-              <div className="mx-auto w-full max-w-3xl space-y-2.5 py-2">
+              <div ref={timelineInnerRef} className="lab-col space-y-2.5 py-2">
                 {timeline.map((e) => (
-                  <TimelineEntry key={e.key} entry={e} onEdit={editMessage} />
+                  <div key={e.key}>
+                    <TimelineEntry entry={e} onEdit={editMessage} />
+                    {/*
+                      #10：失败条目下面给两个补救按钮。
+                      判据是 key 前缀 —— 错误条目统一用 `err-` 开头（见 catch 里）。
+                    */}
+                    {e.kind === "text" && e.key.startsWith("err-") && !streaming && (
+                      <div className="mt-1 flex items-center gap-1.5 pl-1 text-[11px]">
+                        <button
+                          type="button"
+                          title={t("lab.err.continueHint")}
+                          onClick={continueRound}
+                          className="rounded-full border border-border/70 px-2 py-0.5 font-medium text-primary hover:bg-primary/10"
+                        >
+                          {t("lab.err.continue")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={resendLast}
+                          className="rounded-full border border-border/70 px-2 py-0.5 text-muted-foreground hover:bg-accent"
+                        >
+                          {t("lab.err.resend")}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {/*
+                  ---- 待发送的插话（2026-10-12 站长要求：可见、可改、可立刻发）----
+                  以前插话只存在 ref 里，界面上毫无痕迹。现在排在时间线末尾，
+                  一眼看得到内容，并且能编辑 / 立即发送 / 撤回。
+                */}
+                {steerQueue.map((s) => (
+                  <div key={s.id} className="flex flex-col items-end gap-1">
+                    <div className="max-w-[85%] rounded-2xl border border-dashed border-primary/50 bg-primary/10 px-3.5 py-2 text-sm leading-relaxed text-foreground">
+                      <p className="whitespace-pre-wrap break-words">{s.text}</p>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                      <span>{t("lab.steer.pending")}</span>
+                      <button
+                        type="button"
+                        onClick={sendSteerNow}
+                        className="rounded px-1.5 py-0.5 font-medium text-primary hover:bg-primary/10"
+                      >
+                        {t("lab.steer.sendNow")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => editSteer(s.id)}
+                        className="rounded px-1.5 py-0.5 hover:bg-accent"
+                      >
+                        {t("lab.steer.edit")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => dropSteer(s.id)}
+                        className="rounded px-1.5 py-0.5 text-destructive hover:bg-destructive/10"
+                      >
+                        {t("lab.steer.remove")}
+                      </button>
+                    </div>
+                  </div>
                 ))}
                 {/* 常驻「工作中」状态行：只要 agent 还在跑就一直挂在这，不会中途消失 */}
                 {(streaming || labRun.running) &&
@@ -3591,8 +4652,32 @@ export default function LabPage() {
             )}
           </div>
 
+          {/*
+            ---- 本轮用量指标（#3/#8）----
+            站长要的「像 DSH 那样的上下文状态」：占了多少、哪部分占的、
+            首 token 多久、每秒多少 token。数字前面带「≈」的是估算值。
+          */}
+          {metrics && (
+            <div className="lab-col mb-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+              <span>{t("lab.metrics.context", { n: fmtTok(metrics.context) })}</span>
+              <span>
+                {t("lab.metrics.parts", {
+                  s: fmtTok(metrics.system),
+                  tl: fmtTok(metrics.tools),
+                  h: fmtTok(metrics.history),
+                })}
+              </span>
+              {metrics.ttftMs !== null && (
+                <span>{t("lab.metrics.ttft", { s: (metrics.ttftMs / 1000).toFixed(1) })}</span>
+              )}
+              {metrics.tokPerSec !== null && (
+                <span>{t("lab.metrics.speed", { n: metrics.tokPerSec.toFixed(1) })}</span>
+              )}
+              <span>{t("lab.metrics.out", { n: fmtTok(metrics.outTokens) })}</span>
+            </div>
+          )}
           {stationMissing && channel === "station" && (
-            <div className="mx-auto mb-2 flex w-full max-w-3xl items-start gap-2 rounded-xl bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+            <div className="lab-col mb-2 flex items-start gap-2 rounded-xl bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span className="min-w-0 flex-1">
                 <span className="font-medium">{t("lab.err.notBound")}</span>
@@ -3616,7 +4701,7 @@ export default function LabPage() {
           )}
 
           {stationAuthExpired && channel === "station" && (
-            <div className="mx-auto mb-2 flex w-full max-w-3xl items-start gap-2 rounded-xl bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+            <div className="lab-col mb-2 flex items-start gap-2 rounded-xl bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span className="min-w-0 flex-1">
                 <span className="font-medium">{t("lab.err.expired")}</span>
@@ -3644,7 +4729,7 @@ export default function LabPage() {
 
           {/* ---- 草稿安全提示（有内容、且用户没关掉时出现）---- */}
           {filePaths.length > 0 && !draftTipClosed && (
-            <div className="mx-auto mb-2 flex w-full max-w-3xl items-center gap-2 rounded-xl border border-border/60 bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground">
+            <div className="lab-col mb-2 flex items-center gap-2 rounded-xl border border-border/60 bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground">
               <Info className="h-3.5 w-3.5 shrink-0" />
               <span className="min-w-0 flex-1 truncate">
                 {t("lab.draft.tip")}
@@ -3707,7 +4792,11 @@ export default function LabPage() {
               把整条输入框推出左边界（2026-10-10 站长反馈「左边被截断、右边差一点」）。
               ⇒ 只在 ≥sm 生效，手机上归零。
             */
-            <div className="relative right-0 mx-auto w-full max-w-3xl shrink-0 pt-6 pb-1 sm:right-[5px]">
+            <div
+          // 整块可视输入框都可点（见 onComposerTap 的说明）
+          onPointerDown={onComposerTap}
+          className="relative right-0 lab-col shrink-0 pt-6 pb-1 sm:right-[5px]"
+        >
               {/*
                 思考强度越高，输入框外面套一层光（见 index.css 的 .lab-composer-glow）：
                   · xhigh = 常驻环绕微光；
@@ -3744,7 +4833,7 @@ export default function LabPage() {
                  *    （2026-10-10 站长反馈「为什么按钮更短了」）。
                  * 想再调长短就改这一个数字。
                  */
-                className="[&_button[aria-label='Choose_model']>span]:max-w-[160px] [&_button[aria-label='Choose_model']>span]:overflow-hidden [&_button[aria-label='Choose_model']>span]:text-ellipsis [&_button[aria-label='Choose_model']>span]:whitespace-nowrap"
+                className="[&_button[aria-label='Choose_model']>span]:max-w-[160px] [&_button[aria-label='Choose_model']>span]:overflow-hidden [&_button[aria-label='Choose_model']>span]:text-ellipsis [&_button[aria-label='Choose_model']>span]:whitespace-nowrap [&_[role=listbox]]:max-h-[min(404px,60vh)] [&_[role=listbox]]:overflow-y-auto [&_[role=listbox]]:overscroll-contain [&_[role=slider]]:touch-none"
                 placeholder={t("lab.inputPlaceholder")}
                 models={fxModels}
                 defaultModel={fxDefaultModelKey}
@@ -3791,15 +4880,15 @@ export default function LabPage() {
         siteOpRef.current = /@站内操作|@site\b/i.test(text)
         // 附件正文由 send 内部并进「给模型的那份」，不糊在聊天里
         /**
-         * ⚠️ 运行中不新开一轮，改成**排队**（中途插话）。
-         * 直接 send 会被「streaming 中直接 return」挡掉，用户会觉得"说了白说"，
-         * 所以这里明确告诉他已排上队。
+         * ⚠️ 这里**不再自己判断 `streaming`**（2026-10-12 修）。
+         *
+         * 原来这里有一份「运行中就排队」的逻辑，和 send() 开头那份**重复**了 ——
+         * 后果是 send() 里那份（会区分「这一轮还活着」和「这一轮卡死了」）
+         * **永远轮不到**：半开连接把 `streaming` 卡住时，用户发的消息只会被默默排进
+         * 队列，而「上一轮结束」那一刻永远不来 ⇒ 表现就是「发出去什么回应都没有」。
+         * 现在统一交给 send()：活着就排队（并在时间线上显示「待发送」）、
+         * 卡死了就先收掉旧轮再发。
          */
-        if (streaming) {
-          steerRef.current.push(text)
-          toast.success(t("lab.steer.queued"))
-          return
-        }
         void send(text, detail?.attachments ?? [], detail?.model?.key)
       }}
                 onStop={stop}
@@ -3810,7 +4899,13 @@ export default function LabPage() {
         faster: t("lab.effortMenu.faster"),
         smarter: t("lab.effortMenu.smarter"),
       }}
-      width={768}
+      /**
+       * ⚠️ 宽度**必须跟着内容列走**（2026-10-12 站长反馈「拉宽后聊天框的光效没变」）：
+       * PromptBar 根元素是 `width: min(var(--pb-w), 100%)` —— 写死 768 的话，
+       * 内容列被拖宽后**消息变宽、输入框还钉在 768**，而外面那层光效挂在列宽上
+       * ⇒ 光比输入框宽一圈、看着完全对不上。传当前生效宽度即可（列宽已钳制过）。
+       */
+      width={contentWidth}
       radius={26}
       /**
        * ⚠️ 用 `--muted` 而不是 `--card`：我们这个主题里卡片色和页面底色**几乎一样**，
@@ -3862,7 +4957,25 @@ export default function LabPage() {
             onSend={trigger}
             disabled={!canSend}
             ariaLabel={t("lab.send")}
-            className="shrink-0 [&_button]:after:-inset-[11px]"
+            className={cn(
+              "shrink-0",
+              /**
+               * 🔴 修复「发送按钮左半边点不动」（2026-10-12 站长反馈）。
+               *
+               * SlingButton 的 root 靠 `[width:var(--sl-size)] [height:var(--sl-size)]`
+               * 这两个 arbitrary utility 拿尺寸 —— 实测线上**只有 width 生效、height 是 0**
+               * （Tailwind v4 对带 var() 的 arbitrary height 的生成/覆盖有问题）：
+               * root 30×0 ⇒ 里面的 pad 按钮（absolute inset-0）也是 0 高 ⇒ 命中区退化成
+               * 贴着输入框底边的一条线，`after:-inset-[11px]` 外扩也救不回来（父级 0 高）。
+               * 手机上输入框更高，这条「线」被左侧其他层盖掉一半 ⇒ 左半无反应、右半正常。
+               *
+               * 修法：调用点用**标准尺寸类**（`size-8` 生成 width+height，不依赖 var 转义）
+               * 直接把 root 撑成 32×32 —— 组件源码不动，视觉尺寸不变（SVG 圆环本来就是
+               * 绝对定位画出来的，不吃布局高度）。
+               */
+              "size-8",
+              "[&_button]:after:-inset-[11px]"
+            )}
           />
                   )
                 }
@@ -3872,7 +4985,11 @@ export default function LabPage() {
           ) : (
             // ⚠️ 同上：`right-[5px]` 是给桌面滚动条留白做的补偿，
             //    手机上没有留白 ⇒ 会把输入框推出左边界，所以只在 ≥sm 生效。
-            <div className="relative right-0 mx-auto w-full max-w-3xl shrink-0 pt-6 pb-1 sm:right-[5px]">
+            <div
+          // 整块可视输入框都可点（见 onComposerTap 的说明）
+          onPointerDown={onComposerTap}
+          className="relative right-0 lab-col shrink-0 pt-6 pb-1 sm:right-[5px]"
+        >
           <div className="rounded-[26px] border border-border/70 bg-card/70 shadow-[0_2px_24px_-8px_rgba(0,0,0,0.18)] backdrop-blur-xl transition-[box-shadow,border-color] duration-200 focus-within:border-border focus-within:shadow-[0_6px_32px_-10px_rgba(0,0,0,0.26)]">
             <textarea
               ref={taRef}
@@ -4155,6 +5272,15 @@ export default function LabPage() {
             */
             "group absolute inset-y-0 z-20 flex w-10 items-center justify-center",
             /*
+              🔴 手机上**整条隐藏**（2026-10-12 站长反馈「发送按钮左半边点不动」）：
+              这块 40px 宽的隐形命中区贴着右边**贯穿全屏**，在触屏上没有 hover、
+              圆钮永远不出现，但它**始终在挡东西** —— 发送按钮（SlingButton）就在
+              它的覆盖范围里，左半边被它吃掉，怎么点都没反应。
+              手机上切预览走顶部工具栏的「在线预览」按钮，这块命中带没有存在意义。
+              判定用 `hover:none`（无悬停能力 = 触屏）：带触屏的桌面不受影响。
+            */
+            "[@media(hover:none)]:hidden",
+            /*
               贴右边时要让开「左屏的 pr-3（12px）+ 时间线滚动条（10px）」，
               整块命中区必须落在滚动条左侧。实测：`right-[10px]` 时它的右边界
               还在滚动条上（1334~1374 vs 滚动条 1362~1372）⇒ 用 right-6（24px）留出余量。
@@ -4303,6 +5429,15 @@ export default function LabPage() {
           )}
           <DialogFooter className="sm:justify-between">
             <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void doAddAssets()}
+                disabled={localBusy}
+                title={t("lab.assets.hint")}
+              >
+                {t("lab.assets.add")}
+              </Button>
               {localOk && (
                 <>
                   <Button
@@ -4416,48 +5551,10 @@ export default function LabPage() {
                     </p>
                   </div>
                   {/*
-                    绑定域名：只有**公开**的作品才给绑（后端也会再拦一道）——
-                    私密作品挂到公网域名上没有意义，还容易被当成绕过审核的路子。
+                    绑定域名的入口**已搬到造物集**（2026-10-12 站长要求：
+                    不要放在实验室的「我的作品」里）—— 见 gallery.tsx 的 EditDialog。
+                    这里只留「导出」与「打开」两个动作。
                   */}
-                  {p.visibility === "public" ? (
-                    domains[p.id] ? (
-                      <div className="flex shrink-0 items-center gap-1">
-                        <a
-                          href={`https://${domains[p.id]}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex max-w-[10rem] items-center gap-1 text-[11px] text-primary hover:underline"
-                          title={domains[p.id] ?? ""}
-                        >
-                          <Globe className="h-3 w-3 shrink-0" />
-                          <span className="truncate">{domains[p.id]}</span>
-                        </a>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 text-muted-foreground"
-                          title={t("lab.domain.unbind")}
-                          disabled={domainBusy}
-                          onClick={() => void unbindDomain(p.id)}
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </Button>
-                      </div>
-                    ) : (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="shrink-0 text-[11px]"
-                        onClick={() => {
-                          setDomainFor(p.id)
-                          setDomainDraft("")
-                        }}
-                      >
-                        <Globe className="h-3.5 w-3.5" />
-                        {t("lab.domain.bind")}
-                      </Button>
-                    )
-                  ) : null}
                   <Button
                     variant="ghost"
                     size="icon"
@@ -4541,41 +5638,7 @@ export default function LabPage() {
         </DialogContent>
       </Dialog>
 
-      {/* ---- 绑定域名（作品的子域名）---- */}
-      <Dialog open={domainFor !== null} onOpenChange={(o) => !o && setDomainFor(null)}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t("lab.domain.title")}</DialogTitle>
-            <DialogDescription>{t("lab.domain.desc")}</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-1.5">
-            <Label htmlFor="lab-domain" className="text-xs">
-              {t("lab.domain.label")}
-            </Label>
-            <Input
-              id="lab-domain"
-              value={domainDraft}
-              onChange={(e) => setDomainDraft(e.target.value)}
-              placeholder="my-site.doulor.cn"
-            />
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              {t("lab.domain.hint")}
-            </p>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDomainFor(null)}>
-              {t("common.cancel")}
-            </Button>
-            <Button
-              disabled={domainBusy || !domainDraft.trim()}
-              onClick={() => domainFor && void bindDomain(domainFor)}
-            >
-              {domainBusy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
-              {t("lab.domain.confirm")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* ---- 绑定域名的弹窗已搬到造物集（gallery.tsx 的 EditDialog）---- */}
 
       {/* ---- 自动保存：首次开启的授权说明 ---- */}
       <Dialog open={autoIntroOpen} onOpenChange={setAutoIntroOpen}>
@@ -4624,1314 +5687,3 @@ export default function LabPage() {
  * 换轮 / 解析空档闪来闪去，观感上像「它卡住了 / 它跑完了」，用户没法判断到底还在不在干活。
  * 现在文案随当前动作走（正在思考 → 正在写入 index.html → …），期间从不消失。
  */
-function WorkingIndicator({ label }: { label: string }) {
-  return (
-    <div className="flex justify-start" data-lab-working="">
-      <div className="flex items-center gap-2.5 rounded-2xl bg-muted px-3.5 py-2.5">
-        <Sparkles className="lab-think-icon h-4 w-4 shrink-0 text-muted-foreground" />
-        <span className="lab-think-text text-sm">{label}</span>
-      </div>
-    </div>
-  )
-}
-
-/**
- * 模型名 → 小图标与配色（2026-10-10 站长要求）。
- *
- * 按**关键字**匹配厂商，认不出就用默认的机器人图标 —— 新模型上线、
- * 或用户填了自建渠道的怪名字，也不会显示成空白。
- *
- * ⚠️ 用的是通用几何图标 + 各家主色，**没有引入各家的商标图形文件** ——
- *    商标图直接用有授权风险，而「颜色 + 形状」足够一眼分辨。
- *    将来要换成真图标，把 svg 放进项目、改这里的 Icon 即可。
- * 颜色都取中间调，浅色/深色主题下都看得清（深色下纯黑图标会消失）。
- */
-const MODEL_BADGES: { test: RegExp; Icon: typeof Bot; color: string }[] = [
-  { test: /deepseek/i, Icon: Waves, color: "#4d6bfe" },
-  { test: /gpt|openai|^o[13]|davinci/i, Icon: Hexagon, color: "#10a37f" },
-  { test: /claude|anthropic|sonnet|opus|haiku/i, Icon: Asterisk, color: "#d97757" },
-  { test: /gemini|google|gemma|palm/i, Icon: Sparkle, color: "#4285f4" },
-  { test: /qwen|qwq|通义|tongyi/i, Icon: Cloud, color: "#615ced" },
-  { test: /glm|chatglm|智谱|zhipu/i, Icon: Brain, color: "#7c5cff" },
-  { test: /kimi|moonshot/i, Icon: Moon, color: "#6b7280" },
-  { test: /llama|meta/i, Icon: InfinityIcon, color: "#0866ff" },
-  { test: /mistral|mixtral|codestral/i, Icon: Wind, color: "#fa520f" },
-  { test: /grok|xai/i, Icon: Bot, color: "#6b7280" },
-]
-
-/** 模型名 → {图标, 颜色}；认不出返回默认 */
-function modelBadge(name: string): { Icon: typeof Bot; color: string } {
-  return MODEL_BADGES.find((b) => b.test.test(name)) ?? { Icon: Bot, color: "#6b7280" }
-}
-
-/** 模型名显示成一小枚标签：图标 + 名字（太长就截断，别把工具栏撑爆） */
-function ModelTag({ name }: { name: string }) {
-  const { Icon, color } = modelBadge(name)
-  return (
-    <span className="inline-flex max-w-[11rem] items-center gap-1" title={name}>
-      <Icon className="h-3.5 w-3.5 shrink-0" style={{ color }} />
-      <span className="truncate">{name}</span>
-    </span>
-  )
-}
-
-/** 毫秒 → HH:MM（跟站点语言走） */
-function fmtTime(at: number): string {
-  return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-}
-
-/**
- * 消息下面那排快捷操作（2026-10-10 站长要求）。
- *
- * ⚠️ **平时不显示**，鼠标移到这条消息上才浮出来（`group-hover`）——
- * 常驻会让每条消息下面都挂一行图标，把对话切得很碎。
- * 键盘用户走 `focus-within` 也能唤出来。
- */
-function MsgActions({
-  text,
-  onEdit,
-  model,
-  at,
-  always,
-}: {
-  text: string
-  onEdit?: () => void
-  /** AI 的消息带上产出它的模型名 */
-  model?: string
-  /** 时间戳：**只在鼠标悬停这条消息时显示** */
-  at?: number
-  /** true = 整条工具栏常驻显示（AI 的消息）；false = 悬停才出现（用户的消息） */
-  always?: boolean
-}) {
-  const { t } = useT()
-  const [copied, setCopied] = React.useState(false)
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      // 1.2 秒后变回复制图标 —— 太短看不清、太长会让人以为卡住了
-      window.setTimeout(() => setCopied(false), 1200)
-    } catch {
-      toast.error(t("lab.msg.copyFailed"))
-    }
-  }
-
-  return (
-    <div
-      className={cn(
-        "mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground",
-        "transition-opacity duration-150 motion-reduce:transition-none",
-        always
-          ? // AI 的消息：工具栏**常驻**
-            ""
-          : // 用户的消息：鼠标靠近才浮出来
-            "opacity-0 group-hover:opacity-100 focus-within:opacity-100"
-      )}
-    >
-      {model && <ModelTag name={model} />}
-      <button
-        type="button"
-        title={t("lab.msg.copy")}
-        aria-label={t("lab.msg.copy")}
-        onClick={() => void copy()}
-        className="inline-grid h-6 w-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-      >
-        {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-      </button>
-      {onEdit && (
-        <button
-          type="button"
-          title={t("lab.msg.edit")}
-          aria-label={t("lab.msg.edit")}
-          onClick={onEdit}
-          className="inline-grid h-6 w-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-        >
-          <Pencil className="h-3.5 w-3.5" />
-        </button>
-      )}
-      {/*
-        时间**始终是悬停才显示**，哪怕工具栏本身常驻 —— 时间只有部分场景有用，
-        常驻会让每一行都多一截数字，反而更吵。
-      */}
-      {at ? (
-        <span className="tabular-nums opacity-0 transition-opacity duration-150 group-hover:opacity-100 motion-reduce:transition-none">
-          {fmtTime(at)}
-        </span>
-      ) : null}
-    </div>
-  )
-}
-
-function TimelineEntry({
-  entry,
-  onEdit,
-}: {
-  entry: Entry
-  onEdit?: (entry: Extract<Entry, { kind: "user" }>) => void
-}) {
-  if (entry.kind === "user") {
-    return (
-      <div className="group flex flex-col items-end">
-        <div className="max-w-[85%] rounded-2xl bg-primary px-3.5 py-2 text-sm leading-relaxed text-primary-foreground">
-          {entry.files?.length ? (
-            <div className="mb-1.5 flex flex-wrap gap-1.5">
-              {entry.files.map((f) => (
-                <span
-                  key={f}
-                  className="inline-flex max-w-[16rem] items-center gap-1 rounded-md bg-primary-foreground/15 px-1.5 py-0.5 text-[11px] leading-5"
-                >
-                  <Paperclip className="h-3 w-3 shrink-0" />
-                  <span className="truncate">{f}</span>
-                </span>
-              ))}
-            </div>
-          ) : null}
-          {entry.text ? (
-            <p className="whitespace-pre-wrap break-words">{entry.text}</p>
-          ) : null}
-        </div>
-        <MsgActions
-          text={entry.text}
-          at={entry.at}
-          onEdit={onEdit ? () => onEdit(entry) : undefined}
-        />
-      </div>
-    )
-  }
-  if (entry.kind === "text") return <ThinkingBlock entry={entry} />
-  return <ToolCard entry={entry} />
-}
-
-/**
- * 一轮对话里给模型的消息。
- * `content` 是字符串（纯文本）或 part 数组（带图的多模态）。
- * ⚠️ 必须与后端 `worker/src/handlers/lab.ts` 的 `ChatMessage` 保持一致 ——
- * 后端只认 `text` / `image_url` 两种 part，且图片只收 data URL。
- */
-/**
- * 「思考过程」块（仿主流 agent 框架）：
- *   - 流式期间展开、文字逐字出现，标题带流光走马灯；
- *   - 这一轮说完（后面跟着工具调用）就自动折叠成一行，点一下还能展开；
- *   - 如果这段是直接给用户的答复（后面没有动作），就正常当气泡显示。
- */
-function ThinkingBlock({ entry }: { entry: Extract<Entry, { kind: "text" }> }) {
-  const { t } = useT()
-  // 流式期间默认展开；从草稿恢复出来的（live=false）默认就是收起的
-  const [open, setOpen] = React.useState(entry.live)
-  /** 用户手动点开过就不再自动收起（免得刚展开又被合上） */
-  const touched = React.useRef(false)
-  /**
-   * ⚠️ 这个 hook 必须放在下面那个 `if (!entry.collapsible) return …` **之前**。
-   * 放在后面会导致「普通气泡」少一个 hook、「思考块」多一个 ——
-   * 同一个位置从气泡变成思考块时，React 发现 hook 数量对不上，
-   * 直接抛 #310（站长 2026-10-10 发消息时遇到的那条报错）。
-   */
-  const { labFxOn } = useMotionPref()
-
-  React.useEffect(() => {
-    if (!entry.live && !touched.current) setOpen(false)
-  }, [entry.live])
-
-  // 直接给用户的答复：普通气泡。
-  // 模型输出走 markdown 渲染 —— 以前是 `whitespace-pre-wrap` 纯文本，
-  // `**加粗**`、`- 列表`、```代码块``` 全以**原文**露出来，看着很粗糙。
-  if (!entry.collapsible) {
-    return (
-      <div className="group flex flex-col items-start" data-lab-reply="">
-        <div
-          className={cn(
-            "min-w-0 max-w-[85%] rounded-2xl bg-muted px-3.5 py-2 text-sm leading-relaxed text-foreground",
-            // 流式期间由 CSS（.lab-streaming）往最后一段文字末尾缀闪烁光标
-            entry.live && "lab-streaming"
-          )}
-        >
-          <Markdown linkCards={false}>{entry.text}</Markdown>
-          {/* 还没吐字时 markdown 里没有任何块级元素，::after 无处可挂，补一个兜底光标 */}
-          {entry.live && !entry.text.trim() && <span className="lab-caret" />}
-        </div>
-        {/* 还在流式输出时不给复制 —— 那时内容是半截的，复制了也没用 */}
-        {!entry.live && (
-          <MsgActions text={entry.text} model={entry.model} at={entry.at} always />
-        )}
-      </div>
-    )
-  }
-
-  const lines = entry.text ? entry.text.split("\n").length : 0
-
-  return (
-    <div
-      className={cn(
-        labFxOn
-          ? "text-muted-foreground"
-          : "overflow-hidden rounded-xl border border-border/60 bg-muted/30"
-      )}
-    >
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => {
-          touched.current = true
-          setOpen((v) => !v)
-        }}
-        className={cn(
-          "flex w-full items-center gap-2 text-left text-xs",
-          labFxOn ? "px-0 py-1" : "px-3 py-1.5 hover:bg-accent/40"
-        )}
-      >
-        <Sparkles
-          className={cn(
-            "h-3.5 w-3.5 shrink-0 text-muted-foreground",
-            entry.live && "lab-think-icon"
-          )}
-        />
-        <span
-          className={cn(
-            "shrink-0 font-medium",
-            entry.live && "lab-think-text"
-          )}
-        >
-          {entry.live ? t("lab.agent.thinking") : t("lab.agent.thought")}
-        </span>
-        {lines > 1 && (
-          <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground/70">
-            {t("lab.agent.thoughtLines").replace("{n}", String(lines))}
-          </span>
-        )}
-        <ChevronRight
-          className={cn(
-            "ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200",
-            open && "rotate-90"
-          )}
-        />
-      </button>
-      {open && (
-        <div
-          className={cn(
-            "min-w-0 border-t border-border/50 px-3 py-2 text-[13px] leading-relaxed text-muted-foreground",
-            entry.live && "lab-streaming"
-          )}
-        >
-          <Markdown linkCards={false}>{entry.text}</Markdown>
-          {entry.live && !entry.text.trim() && <span className="lab-caret" />}
-        </div>
-      )}
-    </div>
-  )
-}
-
-const TOOL_ICON: Record<ToolName, typeof FileText> = {
-  write: FileText,
-  replace: Pencil,
-  read: Eye,
-  list: List,
-  delete: Trash2,
-  grep: Search,
-  need_vm: Power,
-  run: Terminal,
-  site: Globe,
-  site_manual: BookOpen,
-  skill: Sparkles,
-  web_search: Globe,
-  http: LinkIcon,
-}
-
-function ToolCard({
-  entry,
-}: {
-  entry: Extract<Entry, { kind: "tool" }>
-}) {
-  const { t } = useT()
-  const [open, setOpen] = React.useState(false)
-  const Icon = TOOL_ICON[entry.tool]
-  // 工具卡片的状态标要不要用动效版（设置页那个开关）
-  const { labFxOn } = useMotionPref()
-  const lines = entry.content ? entry.content.split("\n").length : 0
-  const expandable = Boolean(entry.content)
-  const running = entry.status === "running"
-  // 站内操作失败 / 被用户拒绝时别打绿勾 —— 那会让人以为改动已经生效了
-  const failed =
-    entry.tool === "site" && /\] 失败：|用户拒绝/.test(entry.content ?? "")
-
-  return (
-    <div
-      className={cn(
-        "animate-in fade-in slide-in-from-bottom-1 duration-200",
-        // 动效模式：**不要卡片**（站长要求「让文字直接悬浮在空中」），统一灰字；
-        // 朴素模式保留原来的卡片外观。
-        labFxOn ? "text-muted-foreground" : "overflow-hidden rounded-xl border border-border/70 bg-card/50"
-      )}
-    >
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => expandable && setOpen((v) => !v)}
-        className={cn(
-          "flex w-full items-center gap-2 text-left text-xs",
-          labFxOn ? "px-0 py-1.5" : "px-3 py-2",
-          expandable && !labFxOn && "hover:bg-accent/40"
-        )}
-      >
-        {labFxOn ? (
-          /*
-            动效版：动词前面那枚「转圈 → 打勾 + 划线」的状态标（status-mark 风）。
-            ⚠️ 只在本动作**还在跑**时显示：完成后站长不要绿勾、也不要横线划掉
-            （2026-10-10 反馈），所以结束态直接退回纯文字。
-          */
-          running ? (
-            <StatusMark
-              status="running"
-              label={t(`lab.tool.${entry.tool}`)}
-              size={15}
-              fontSize={12}
-              className="shrink-0 font-medium"
-            />
-          ) : (
-            <span className="shrink-0 font-medium">{t(`lab.tool.${entry.tool}`)}</span>
-          )
-        ) : (
-          <>
-            <Icon
-              className={cn(
-                "h-3.5 w-3.5 shrink-0 text-muted-foreground",
-                running && "animate-pulse"
-              )}
-            />
-            <span className={cn("shrink-0 font-medium", running && "lab-think-text")}>
-              {t(`lab.tool.${entry.tool}`)}
-            </span>
-          </>
-        )}
-        {entry.tool === "grep" ? (
-          <code className="truncate font-mono text-[11px] text-muted-foreground">
-            /{entry.pattern || ""}/{entry.scope ? ` in ${entry.scope}` : ""}
-          </code>
-        ) : entry.tool === "run" ? (
-          /*
-           * ⚠️ 有 `desc`（模型给的人话说明）就显示说明，**不要直接把命令行摆出来** ——
-           * 「下载环境依赖」比 `npm ci --silent` 有意义得多（站长 2026-10-10 反馈）。
-           * 模型没给说明时才退回显示命令，并且只显示第一行。
-           */
-          entry.desc ? (
-            <span className="truncate text-[11px] text-muted-foreground">{entry.desc}</span>
-          ) : (
-            <code className="truncate font-mono text-[11px] text-muted-foreground">
-              $ {entry.command?.split("\n")[0] ?? ""}
-            </code>
-          )
-        ) : entry.tool === "http" ? (
-          <code className="truncate font-mono text-[11px] text-muted-foreground">
-            {entry.httpMethod ? `${entry.httpMethod} ` : ""}
-            {entry.url || "?"}
-          </code>
-        ) : entry.tool === "site" ? (
-          <code className="truncate font-mono text-[11px] text-muted-foreground">
-            {entry.op || "?"}
-          </code>
-        ) : (
-          entry.path && (
-            <code className="truncate font-mono text-[11px] text-muted-foreground">
-              {entry.path}
-            </code>
-          )
-        )}
-        <span className="ml-auto flex shrink-0 items-center gap-2 text-[11px] text-muted-foreground">
-          {entry.tool === "write" && lines > 0 && (
-            <span className="tabular-nums">
-              {t("lab.tool.lines").replace("{n}", String(lines))}
-            </span>
-          )}
-          {running ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : failed ? (
-            <X className="h-3.5 w-3.5 text-destructive" />
-          ) : (
-            <Check className="h-3.5 w-3.5 text-emerald-500" />
-          )}
-          {expandable && (
-            <ChevronRight
-              className={cn(
-                "h-3.5 w-3.5 transition-transform duration-200",
-                open && "rotate-90"
-              )}
-            />
-          )}
-        </span>
-      </button>
-      {open && expandable && (
-        <pre className="max-h-64 animate-in fade-in overflow-auto border-t border-border/70 bg-muted/40 px-3 py-2 font-mono text-[11px] leading-relaxed duration-150">
-          {entry.content}
-        </pre>
-      )}
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// 模型选择器
-// ---------------------------------------------------------------------------
-
-function ModelPicker({
-  models,
-  value,
-  loading,
-  failed,
-  onChange,
-  channel,
-  onChannelChange,
-  custom,
-  onEditChannel,
-  stationFree = false,
-  stationFreeModels = [],
-  siteChannels = [],
-  siteChannelId = "",
-  onSiteChannelChange,
-  siteQuotaHint = "",
-}: {
-  models: string[]
-  value: string
-  loading: boolean
-  /** 拉取失败（不是「一个模型都没有」）—— 空列表时的文案要区分这两种情况 */
-  failed?: boolean
-  onChange: (m: string) => void
-  channel: LabChannel
-  onChannelChange: (c: LabChannel) => void
-  custom: CustomChannel | null
-  onEditChannel: () => void
-  /** 站内模型走的是管理员的统一 Key ⇒ 标「免费试用」 */
-  stationFree?: boolean
-  /**
-   * 具体哪些站内模型免费（服务端按白名单算好）。
-   * 徽标只认它 —— 管理员可以把白名单收窄到几个模型，其余的不该被标成免费。
-   */
-  stationFreeModels?: string[]
-  /** 管理员提供的免费渠道；为空则不显示「免费渠道」这一档 */
-  siteChannels?: SiteChannel[]
-  siteChannelId?: string
-  onSiteChannelChange?: (id: string) => void
-  /** 免费额度余量文案（空则不显示） */
-  siteQuotaHint?: string
-}) {
-  const { t } = useT()
-  const [open, setOpen] = React.useState(false)
-  const [keyword, setKeyword] = React.useState("")
-
-  const filtered = React.useMemo(() => {
-    const k = keyword.trim().toLowerCase()
-    const list = k ? models.filter((m) => m.toLowerCase().includes(k)) : models
-    return list.slice(0, 300)
-  }, [models, keyword])
-
-  const isStation = channel === "station"
-  const isSite = channel === "site"
-  const activeSite = isSite ? siteChannels.find((c) => c.id === siteChannelId) ?? null : null
-
-  const label = isStation
-    ? loading
-      ? t("lab.model.loading")
-      : value || t("lab.model.placeholder")
-    : isSite
-      ? activeSite?.name || t("lab.channel.sitePick")
-      : custom?.model || t("lab.channel.settings")
-
-  /**
-   * 渠道三档。中间那档「免费渠道」**有内容才出现** ——
-   * 管理员没配渠道时显示一个空列表比不显示更让人困惑。
-   */
-  const tabs: { key: LabChannel; text: string }[] = [
-    { key: "station", text: t("lab.channel.station") },
-  ]
-  if (siteChannels.length > 0) tabs.push({ key: "site", text: t("lab.channel.site") })
-  tabs.push({ key: "custom", text: t("lab.channel.custom") })
-
-  /**
-   * 两枚小标刻意分开：
-   *   · 站内模型 → 「免费试用」（**会**计入每人的免费额度，用完就没了）
-   *   · 免费渠道 → 「免费使用」（站长提供的渠道，同样计数，但语义上是「有这条就能用」）
-   * 统一写成一个词会让用户以为两者是同一回事。
-   */
-  const freeTag = (text: string) => (
-    <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] leading-none text-primary">
-      {text}
-    </span>
-  )
-
-  /** 这个模型是不是能白用（服务端已经按白名单算过，这里只做包含判断） */
-  const isModelFree = (m: string) => stationFreeModels.includes(m)
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="flex h-8 min-w-0 max-w-[140px] shrink-0 items-center gap-1.5 rounded-full border border-border/70 bg-background/60 px-3 text-xs text-muted-foreground transition-colors hover:text-foreground sm:max-w-[220px]"
-        >
-          {isStation && loading ? (
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
-          ) : isStation ? (
-            <Sparkles className="h-3.5 w-3.5 shrink-0 opacity-70" />
-          ) : isSite ? (
-            <Gift className="h-3.5 w-3.5 shrink-0 opacity-70" />
-          ) : (
-            <Settings2 className="h-3.5 w-3.5 shrink-0 opacity-70" />
-          )}
-          <span className="truncate">{label}</span>
-          {isSite
-            ? freeTag(t("lab.free.channelBadge"))
-            : isStation && isModelFree(value)
-              ? freeTag(t("lab.free.trialBadge"))
-              : null}
-          <ChevronDown className="h-3 w-3 shrink-0 opacity-50" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="start" side="top" className="pointer-events-auto w-72 p-2">
-        {/*
-          渠道切换从输入框常驻位搬到这里（2026-10-09）。
-          原来它和模型选择器并排占着输入框底部，加了思考强度之后一行放不下；
-          它本来就只影响「用哪个模型」，收进模型面板最自然，输入框也清爽了。
-        */}
-        {/*
-          ⚠️ 这里是「朴素模式」那一支（动效开着时整条输入框都被 PromptBar 换掉了，
-          不会走到这儿），所以保持原来的瞬时切换写法即可。
-        */}
-        <div className="mb-2 flex items-center gap-0.5 rounded-full bg-muted/70 p-0.5">
-          {tabs.map(({ key, text }) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => onChannelChange(key)}
-              className={cn(
-                "flex-1 rounded-full px-2.5 py-1 text-xs transition-colors",
-                channel === key
-                  ? "bg-background font-medium shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              {text}
-            </button>
-          ))}
-        </div>
-
-        {isStation ? (
-          <>
-            {stationFree && (
-              <p className="mb-2 rounded-md bg-muted/60 px-2 py-1.5 text-[11px] leading-relaxed text-muted-foreground">
-                {t("lab.free.stationHint")}
-              </p>
-            )}
-            <Input
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
-              placeholder={t("lab.model.search")}
-              className="mb-2 h-8 text-xs"
-            />
-            <div className="max-h-60 overflow-y-auto">
-              {filtered.length === 0 ? (
-                <p className="px-2 py-3 text-center text-xs text-muted-foreground">
-                  {failed ? t("lab.err.modelsFailed") : t("lab.model.empty")}
-                </p>
-              ) : (
-                filtered.map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent",
-                      m === value && "bg-accent font-medium"
-                    )}
-                    onClick={() => {
-                      onChange(m)
-                      setOpen(false)
-                    }}
-                  >
-                    <span className="min-w-0 flex-1 truncate">{m}</span>
-                    {isModelFree(m) && freeTag(t("lab.free.trialBadge"))}
-                  </button>
-                ))
-              )}
-            </div>
-          </>
-        ) : isSite ? (
-          <div className="space-y-1">
-            <p className="px-1 pb-1.5 text-[11px] leading-relaxed text-muted-foreground">
-              {t("lab.channel.siteHint")}
-            </p>
-            {siteChannels.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                onClick={() => {
-                  onSiteChannelChange?.(c.id)
-                  setOpen(false)
-                }}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent",
-                  c.id === siteChannelId && "bg-accent font-medium"
-                )}
-              >
-                <Gift className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate">{c.name}</span>
-                {c.model && (
-                  <span className="shrink-0 text-[10px] text-muted-foreground">{c.model}</span>
-                )}
-                {freeTag(t("lab.free.channelBadge"))}
-              </button>
-            ))}
-            {siteQuotaHint && (
-              <p className="px-1 pt-1.5 text-[11px] text-muted-foreground">{siteQuotaHint}</p>
-            )}
-          </div>
-        ) : (
-          <div className="space-y-2 px-1 pt-1 pb-0.5">
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              {custom?.model
-                ? t("lab.channel.current", { model: custom.model })
-                : t("lab.channel.notConfigured")}
-            </p>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 w-full gap-1.5 text-xs"
-              onClick={() => {
-                setOpen(false)
-                onEditChannel()
-              }}
-            >
-              <Settings2 className="h-3.5 w-3.5" />
-              {t("lab.channel.settings")}
-            </Button>
-          </div>
-        )}
-      </PopoverContent>
-    </Popover>
-  )
-}
-
-/**
- * 思考强度滑块（参考 Codex）。
- *
- * 它改两件事：温度（所有模型都生效）+ reasoning_effort（只有推理型模型生效）。
- * 面板里必须把「越高越费时间越费额度」讲明白，别让它看起来像个装饰。
- */
-function EffortPicker({
-  value,
-  onChange,
-}: {
-  value: EffortLevel
-  onChange: (lv: EffortLevel) => void
-}) {
-  const { t } = useT()
-  const [open, setOpen] = React.useState(false)
-  const max = EFFORT_LEVELS.length - 1
-  const idx = EFFORT_LEVELS.indexOf(value)
-  /**
-   * 滑块的**连续位置**（0..max 的浮点数）。
-   *
-   * 挡位本身是离散的，但滑块不该「一格一格生跳」—— 拖动时按浮点值走，
-   * 只在**取值**时四舍五入到最近的挡位（`Math.round`）。
-   * 外部把 value 改掉时（例如恢复默认）再把位置同步过去。
-   */
-  const [pos, setPos] = React.useState(idx)
-  React.useEffect(() => setPos(idx), [idx])
-  const pct = max === 0 ? 0 : (pos / max) * 100
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          title={t("lab.effort")}
-          className="flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-border/70 bg-background/60 px-3 text-xs text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <Gauge className="h-3.5 w-3.5 shrink-0 opacity-70" />
-          <span className="tabular-nums">{t(EFFORT_LABEL_KEY[value])}</span>
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="start" side="top" className="pointer-events-auto w-64 p-3">
-        <div className="mb-2.5 flex items-baseline justify-between gap-2">
-          <p className="text-xs font-medium">{t("lab.effort")}</p>
-          <span className="text-xs tabular-nums text-muted-foreground">
-            {t(EFFORT_LABEL_KEY[value])}
-          </span>
-        </div>
-
-        {/* 粗管道滑块：底下是粗轨道，上面盖一层已选进度 + 挡位刻度 + 圆滑块 */}
-        <div className="relative h-6">
-          <div className="absolute inset-x-0 top-1/2 h-2.5 -translate-y-1/2 rounded-full bg-muted" />
-          <div
-            className="absolute left-0 top-1/2 h-2.5 -translate-y-1/2 rounded-full bg-primary transition-[width] duration-150 ease-out"
-            style={{ width: `${pct}%` }}
-          />
-          {/* 挡位刻度：贴着管道的小凹点，让「有几档」一眼可见 */}
-          {EFFORT_LEVELS.map((lv, i) => (
-            <span
-              key={lv}
-              className="absolute top-1/2 h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-background/80"
-              style={{ left: `${max === 0 ? 0 : (i / max) * 100}%` }}
-            />
-          ))}
-          {/* 圆滑块：位置由浮点值算，所以拖动是连续的 */}
-          <div
-            className="pointer-events-none absolute top-1/2 h-[18px] w-[18px] -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary bg-background shadow-sm transition-[left] duration-150 ease-out"
-            style={{ left: `${pct}%` }}
-          />
-          {/* 真正的输入：完全透明盖在上面，键盘 / 无障碍 / 拖拽都靠它 */}
-          <input
-            type="range"
-            min={0}
-            max={max}
-            step="any"
-            value={pos}
-            aria-label={t("lab.effort")}
-            onChange={(e) => {
-              const v = Number(e.target.value)
-              setPos(v)
-              onChange(EFFORT_LEVELS[Math.round(v)])
-            }}
-            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-          />
-        </div>
-
-        <div className="mt-1.5 flex justify-between">
-          {EFFORT_LEVELS.map((lv) => (
-            <button
-              key={lv}
-              type="button"
-              onClick={() => onChange(lv)}
-              className={cn(
-                "rounded px-1 text-[11px] transition-colors",
-                lv === value
-                  ? "font-medium text-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              {t(EFFORT_LABEL_KEY[lv])}
-            </button>
-          ))}
-        </div>
-        <p className="mt-3 border-t pt-2.5 text-[11px] leading-relaxed text-muted-foreground">
-          {t(EFFORT_DESC_KEY[value])}
-        </p>
-        <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground/70">
-          {t("lab.effort.note")}
-        </p>
-      </PopoverContent>
-    </Popover>
-  )
-}
-
-/** 自定义渠道设置弹窗 */
-function ChannelDialog({
-  open,
-  onOpenChange,
-  initial,
-  onSave,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  initial: CustomChannel | null
-  onSave: (next: CustomChannel) => void
-}) {
-  const { t } = useT()
-  const [baseUrl, setBaseUrl] = React.useState("")
-  const [apiKey, setApiKey] = React.useState("")
-  const [model, setModel] = React.useState("")
-  /** 识别出来的候选模型（服务端代拉，见 probeModels 的注释） */
-  const [fetched, setFetched] = React.useState<string[]>([])
-  /** 勾选的模型（多选） */
-  const [picked, setPicked] = React.useState<string[]>([])
-  const [probing, setProbing] = React.useState(false)
-
-  React.useEffect(() => {
-    if (open) {
-      setBaseUrl(initial?.baseUrl ?? "")
-      setApiKey(initial?.apiKey ?? "")
-      setModel(initial?.model ?? "")
-      setPicked(initial?.models?.length ? initial.models : initial?.model ? [initial.model] : [])
-      setFetched([])
-    }
-  }, [open, initial])
-
-  /** 去对方服务拉一次可用模型。拉不到不影响手填 —— 只是少了个省事的路子 */
-  const probe = async () => {
-    if (!baseUrl.trim()) {
-      toast.error(t("lab.channel.errNoUrl"))
-      return
-    }
-    setProbing(true)
-    try {
-      const res = await labApi.probeModels({ baseUrl: baseUrl.trim(), apiKey: apiKey.trim() })
-      setFetched(res.models)
-      // 已经勾过、且新列表里还有的保留；其余清掉（避免留下已不存在的模型）
-      setPicked((prev) => prev.filter((m) => res.models.includes(m)))
-      toast.success(t("lab.channel.probed", { n: res.models.length }))
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t("lab.channel.probeFailed"))
-    } finally {
-      setProbing(false)
-    }
-  }
-
-  const togglePick = (m: string) =>
-    setPicked((prev) => (prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m]))
-
-  const submit = () => {
-    if (!baseUrl.trim()) {
-      toast.error(t("lab.channel.errNoUrl"))
-      return
-    }
-    // 勾了就用勾的；没勾就用（或手填的）单个模型
-    const list = picked.length ? picked : model.trim() ? [model.trim()] : []
-    onSave({
-      baseUrl: baseUrl.trim(),
-      apiKey: apiKey.trim(),
-      model: list[0] ?? "",
-      models: list,
-    })
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>{t("lab.channel.custom")}</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-3">
-          <p className="text-xs text-muted-foreground">
-            {t("lab.channel.customHint")}
-          </p>
-          <div className="space-y-1.5">
-            <Label htmlFor="lab-ch-url">{t("lab.channel.baseUrl")}</Label>
-            <Input
-              id="lab-ch-url"
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder={t("lab.channel.baseUrlPlaceholder")}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="lab-ch-key">{t("lab.channel.apiKey")}</Label>
-            <Input
-              id="lab-ch-key"
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder={t("lab.channel.keyPlaceholder")}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <Label htmlFor="lab-ch-model">{t("lab.channel.modelName")}</Label>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 text-[11px]"
-                disabled={probing}
-                onClick={() => void probe()}
-              >
-                {probing ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                {probing ? t("lab.channel.probing") : t("lab.channel.probe")}
-              </Button>
-            </div>
-            {/*
-              ⚠️ 手填这一栏**必须保留**：有些服务商不提供 /models，
-              或地址写法特殊导致识别失败 —— 那时还能手动写。
-            */}
-            <Input
-              id="lab-ch-model"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder={t("lab.channel.modelPlaceholder")}
-            />
-            {fetched.length > 0 ? (
-              <div className="max-h-44 space-y-0.5 overflow-y-auto rounded-lg border p-1.5">
-                <p className="px-1 pb-1 text-[11px] text-muted-foreground">
-                  {t("lab.channel.pickHint")}
-                </p>
-                {fetched.map((m) => (
-                  <label
-                    key={m}
-                    className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-xs hover:bg-accent"
-                  >
-                    <input
-                      type="checkbox"
-                      className="h-3.5 w-3.5 shrink-0 accent-[var(--primary)]"
-                      checked={picked.includes(m)}
-                      onChange={() => togglePick(m)}
-                    />
-                    <span className="truncate">{m}</span>
-                  </label>
-                ))}
-              </div>
-            ) : null}
-            {picked.length > 0 ? (
-              <p className="text-[11px] text-muted-foreground">
-                {t("lab.channel.pickedCount", { n: picked.length })}
-              </p>
-            ) : null}
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            {t("lab.save.cancel")}
-          </Button>
-          <Button onClick={submit}>{t("lab.channel.save")}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-/**
- * 「技能」对话框（2026-10-10）。
- *
- * 入口是输入框「+」菜单里的「技能」——那一条被 `onSource` 劫持了，
- * 所以点它不会往输入框里插 `@技能`，而是开这里。
- *
- * 两类技能都在这里看得见：
- *   · 站点默认（管理员在后台维护，所有人可用）—— 只能看，删不了；
- *   · 自己导入的 —— 可以删。
- *
- * ⚠️ 用户**不需要**在对话里 @ 某个技能：系统提示里已经带了技能目录，
- *    模型自己判断该不该用。这个对话框存在的意义是「往里加料 / 看看有什么」。
- */
-function SkillDialog({
-  open,
-  onOpenChange,
-}: {
-  open: boolean
-  onOpenChange: (o: boolean) => void
-}) {
-  const { t } = useT()
-  const [items, setItems] = React.useState<LabSkillEntry[]>([])
-  const [loading, setLoading] = React.useState(true)
-  const [busy, setBusy] = React.useState(false)
-  const [formOpen, setFormOpen] = React.useState(false)
-  const [name, setName] = React.useState("")
-  const [desc, setDesc] = React.useState("")
-  const [content, setContent] = React.useState("")
-
-  const load = React.useCallback(async () => {
-    setLoading(true)
-    try {
-      const res = await labApi.listSkills()
-      setItems(res.skills)
-    } catch {
-      /* 拉不到就当空的，不弹错 —— 这里只是「查看/添加」，不该打断用户 */
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  React.useEffect(() => {
-    if (open) void load()
-  }, [open, load])
-
-  const resetForm = () => {
-    setName("")
-    setDesc("")
-    setContent("")
-    setFormOpen(false)
-  }
-
-  const submit = async () => {
-    setBusy(true)
-    try {
-      await labApi.importSkill({ name, description: desc, content })
-      toast.success(t("lab.skill.imported"))
-      resetForm()
-      await load()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t("lab.skill.importFailed"))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const remove = async (row: LabSkillEntry) => {
-    const ok = await confirmDialog({
-      title: t("lab.skill.delete"),
-      desc: t("lab.skill.deleteConfirm"),
-      okText: t("common.delete"),
-      danger: true,
-    })
-    if (!ok) return
-    try {
-      await labApi.deleteSkill(row.id)
-      setItems((prev) => prev.filter((x) => x.id !== row.id))
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t("lab.skill.importFailed"))
-    }
-  }
-
-  const canSubmit = name.trim() && desc.trim() && content.trim() && !busy
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o) resetForm()
-        onOpenChange(o)
-      }}
-    >
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{t("lab.skill.title")}</DialogTitle>
-          <DialogDescription>{t("lab.skill.desc")}</DialogDescription>
-        </DialogHeader>
-
-        <div className="max-h-[38vh] space-y-1.5 overflow-y-auto">
-          {loading ? (
-            <p className="rounded-md border border-dashed p-5 text-center text-xs text-muted-foreground">
-              {t("lab.skill.loading")}
-            </p>
-          ) : items.length === 0 ? (
-            <p className="rounded-md border border-dashed p-5 text-center text-xs text-muted-foreground">
-              {t("lab.skill.empty")}
-            </p>
-          ) : (
-            items.map((row) => (
-              <div key={row.id} className="flex items-start gap-2 rounded-lg border p-2">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
-                      {row.name}
-                    </code>
-                    <span className="text-[10px] text-muted-foreground">
-                      {row.mine ? t("lab.skill.mine") : t("lab.skill.fromSite")}
-                    </span>
-                  </div>
-                  <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-                    {row.description}
-                  </p>
-                </div>
-                {row.mine && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
-                    onClick={() => void remove(row)}
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </Button>
-                )}
-              </div>
-            ))
-          )}
-        </div>
-
-        {formOpen ? (
-          <div className="space-y-2 border-t pt-3">
-            <div className="space-y-1">
-              <Label className="text-xs">{t("lab.skill.name")}</Label>
-              <Input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="pdf-forms"
-              />
-              <p className="text-[11px] text-muted-foreground">{t("lab.skill.nameHint")}</p>
-            </div>
-            <div className="space-y-1">
-              <Label className="text-xs">{t("lab.skill.descLabel")}</Label>
-              <Input
-                value={desc}
-                onChange={(e) => setDesc(e.target.value)}
-                placeholder={t("lab.skill.descPlaceholder")}
-              />
-              <p className="text-[11px] text-muted-foreground">{t("lab.skill.descHint")}</p>
-            </div>
-            <div className="space-y-1">
-              <Label className="text-xs">{t("lab.skill.content")}</Label>
-              <textarea
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                rows={7}
-                className="w-full resize-none rounded-md border bg-transparent px-3 py-2 font-mono text-[12px] leading-relaxed outline-none placeholder:text-muted-foreground/70"
-                placeholder={t("lab.skill.contentPlaceholder")}
-              />
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" size="sm" onClick={resetForm}>
-                {t("common.cancel")}
-              </Button>
-              <Button size="sm" disabled={!canSubmit} onClick={() => void submit()}>
-                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                {t("lab.skill.import")}
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <div className="flex justify-end border-t pt-3">
-            <Button variant="outline" size="sm" onClick={() => setFormOpen(true)}>
-              <Plus className="h-4 w-4" />
-              {t("lab.skill.import")}
-            </Button>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-/**
- * 「联网搜索」对话框（2026-10-10）。
- *
- * 从输入框「+」菜单的「联网搜索」进来。这里只做两件事：
- *   · 告诉用户当前能不能搜、走站点 key 要花多少积分；
- *   · 让他填一把自己的 Tavily key（**填了自己的就不扣积分**）。
- *
- * ⚠️ 自己的 key 只在这里填、只存服务端密文；这个框只显示「有没有配」，不回显内容。
- */
-function SearchKeyDialog({
-  open,
-  onOpenChange,
-}: {
-  open: boolean
-  onOpenChange: (o: boolean) => void
-}) {
-  const { t } = useT()
-  const [info, setInfo] = React.useState<{
-    hasOwn: boolean
-    siteAvailable: boolean
-    cost: number
-    enabled: boolean
-    webSearchEnabled: boolean
-  } | null>(null)
-  const [loading, setLoading] = React.useState(true)
-  const [busy, setBusy] = React.useState(false)
-  const [draft, setDraft] = React.useState("")
-
-  const load = React.useCallback(async () => {
-    setLoading(true)
-    try {
-      setInfo(await labApi.searchKeyInfo())
-    } catch {
-      /* 拿不到就当不支持，界面照常显示，不弹错 */
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  React.useEffect(() => {
-    if (open) {
-      setDraft("")
-      void load()
-    }
-  }, [open, load])
-
-  const save = async (payload: { key?: string; webSearchEnabled?: boolean }) => {
-    setBusy(true)
-    try {
-      const res = await labApi.setSearchKey(payload)
-      setInfo((prev) => (prev ? { ...prev, ...res } : prev))
-      if ("key" in payload) {
-        setDraft("")
-        toast.success(payload.key ? t("lab.search.saved") : t("lab.search.cleared"))
-      } else {
-        toast.success(
-          payload.webSearchEnabled ? t("lab.search.turnedOn") : t("lab.search.turnedOff")
-        )
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t("lab.search.saveFailed"))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>{t("lab.search.title")}</DialogTitle>
-          <DialogDescription>{t("lab.search.desc")}</DialogDescription>
-        </DialogHeader>
-
-        {loading ? (
-          <p className="rounded-md border border-dashed p-5 text-center text-xs text-muted-foreground">
-            {t("lab.skill.loading")}
-          </p>
-        ) : (
-          <div className="space-y-3">
-            {/*
-              总开关放最上面：关着时**模型根本不知道有这个工具**，所以也就不会被扣分。
-              默认关（新用户不做任何操作就不会花钱）。
-            */}
-            <label className="flex cursor-pointer items-start gap-2 rounded-lg border p-2.5">
-              <input
-                type="checkbox"
-                className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--primary)]"
-                checked={info?.webSearchEnabled === true}
-                disabled={busy}
-                onChange={(e) => void save({ webSearchEnabled: e.target.checked })}
-              />
-              <span className="text-xs leading-relaxed">
-                <span className="font-medium">{t("lab.search.toggle")}</span>
-                <span className="mt-0.5 block text-muted-foreground">
-                  {t("lab.search.toggleHint")}
-                </span>
-              </span>
-            </label>
-
-            <div className="rounded-lg border p-2.5 text-xs leading-relaxed">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-muted-foreground">{t("lab.search.siteKey")}</span>
-                <span className={info?.siteAvailable ? "" : "text-muted-foreground"}>
-                  {info?.siteAvailable
-                    ? t("lab.search.siteCost", { n: info.cost })
-                    : t("lab.search.siteNone")}
-                </span>
-              </div>
-              <div className="mt-1 flex items-center justify-between gap-2">
-                <span className="text-muted-foreground">{t("lab.search.ownKey")}</span>
-                <span className={info?.hasOwn ? "" : "text-muted-foreground"}>
-                  {info?.hasOwn ? t("lab.search.ownSet") : t("lab.search.ownUnset")}
-                </span>
-              </div>
-            </div>
-
-            {info?.enabled === false ? (
-              <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                {t("lab.search.disabled")}
-              </p>
-            ) : (
-              <div className="space-y-1.5">
-                <Label className="text-xs">{t("lab.search.keyLabel")}</Label>
-                <Input
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  placeholder="tvly-dev-…"
-                  type="password"
-                />
-                <p className="text-[11px] leading-relaxed text-muted-foreground">
-                  {t("lab.search.keyHint")}
-                </p>
-                <div className="flex justify-end gap-2">
-                  {info?.hasOwn && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => void save({ key: "" })}
-                    >
-                      {t("lab.search.clear")}
-                    </Button>
-                  )}
-                  <Button
-                    size="sm"
-                    disabled={busy || !draft.trim()}
-                    onClick={() => void save({ key: draft.trim() })}
-                  >
-                    {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                    {t("common.save")}
-                  </Button>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
-  )
-}

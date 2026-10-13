@@ -14,6 +14,7 @@ import * as labSearchHandlers from "./handlers/lab-search"
 import * as labDomainHandlers from "./handlers/lab-domains"
 import * as labStoreHandlers from "./handlers/lab-store"
 import * as labHttpHandlers from "./handlers/lab-http"
+import * as labShotHandlers from "./handlers/lab-shot"
 import * as adminDnsHandlers from "./handlers/admin-dns"
 import * as adminSubdomainHandlers from "./handlers/admin-subdomains"
 import * as adminMailboxHandlers from "./handlers/admin-mailboxes"
@@ -3869,6 +3870,26 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/lab/http",
     method: "POST",
     handle: () => labHttpHandlers.labHttp(env, request),
+  },
+  // ---- 截图自检（工具 <lab_screenshot>，走 Cloudflare Browser Run）----
+  {
+    kind: "exact",
+    path: "/lab/screenshot",
+    method: "POST",
+    handle: () => labShotHandlers.labScreenshot(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/lab/screenshot",
+    method: "GET",
+    handle: () => labShotHandlers.labShotStatus(env, request),
+  },
+  // ---- 页面体检（文字诊断：溢出 / console 报错 / 资源失败）----
+  {
+    kind: "exact",
+    path: "/lab/inspect",
+    method: "POST",
+    handle: () => labShotHandlers.labInspect(env, request),
   },
 
   // ---- 作品的键值存储（**公网可写**，护栏见 handlers/lab-store.ts）----

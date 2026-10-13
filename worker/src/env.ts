@@ -1,5 +1,15 @@
 export interface Env {
   DB: D1Database
+  /**
+   * Browser Run 绑定（wrangler.toml 的 [browser]）。**可选**：没绑定时截图接口
+   * 直接回 503，不会把整个 Worker 拖崩 —— 本地/未开通的账号也能跑其它功能。
+   */
+  BROWSER?: {
+    quickAction(
+      action: string,
+      options: Record<string, unknown>
+    ): Promise<Response>
+  }
   /** 出站邮件绑定（Cloudflare Email Service，见 wrangler.toml 的 [[send_email]]） */
   EMAIL?: SendEmail
   CLOUDFLARE_API_TOKEN?: string // 普通环境变量

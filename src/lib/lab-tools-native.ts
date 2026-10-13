@@ -60,7 +60,9 @@ export const NATIVE_TOOLS: NativeToolDecl[] = [
     function: {
       name: "write",
       description:
-        "把内容写入（或覆盖）一个文件。路径不存在会自动创建。**写完不要再读一遍回来确认**。",
+        "把内容写入（或覆盖）一个文件。路径不存在会自动创建。**写完不要再读一遍回来确认**。" +
+        "⚠️ 只在**新建文件**或**整段重做**时用它；只改一小段请用 replace —— " +
+        "整文件重写又慢又贵，还容易把没打算改的地方改坏。",
       parameters: {
         type: "object",
         properties: {
@@ -76,8 +78,9 @@ export const NATIVE_TOOLS: NativeToolDecl[] = [
     function: {
       name: "replace",
       description:
-        "对文件做一处精确替换：把 old 那段原文换成 new。old 必须与文件里的内容**逐字一致**" +
-        "（包括缩进），否则会失败。适合小改动；大改动直接 write 整个文件。",
+        "改文件**首选这个**：把 old 那段原文换成 new。old 要与文件里**逐字一致**（含缩进）。" +
+        "⚠️ 失败时返回里会给出「最像的那一段 + 行号」，照它修正 old **再试一次**；" +
+        "不要因为一次没匹配上就改用 write 整文件重写。",
       parameters: {
         type: "object",
         properties: {
@@ -202,6 +205,40 @@ export const NATIVE_TOOLS: NativeToolDecl[] = [
         type: "object",
         properties: { query: str("搜索关键词") },
         required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "inspect",
+      description:
+        "用真浏览器把页面跑一遍，返回**文字体检报告**：横向溢出了多少像素、哪些元素溢出、" +
+        "图片有没有加载失败、console 有没有报错（含 JS 异常）。" +
+        "⚠️ 样式改了不确定对不对、或页面「点了没反应」时用它 —— 比截图更适合定位问题，" +
+        "因为你拿到的是一行行具体结论。",
+      parameters: {
+        type: "object",
+        properties: {
+          width: { type: "number", description: "视口宽度，默认 1280" },
+          height: { type: "number", description: "视口高度，默认 800" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "screenshot",
+      description:
+        "把当前项目渲染成真实页面并**截图**，然后你就能「看见」自己做的网页。" +
+        "⚠️ 做完页面或改了样式之后用它自检：布局错位、元素重叠、文字被裁、颜色难看，" +
+        "这些只读代码是发现不了的。截图会作为图片发给你。参数都可不填。",
+      parameters: {
+        type: "object",
+        properties: {
+          fullPage: { type: "boolean", description: "是否截整页（默认 true）" },
+        },
       },
     },
   },

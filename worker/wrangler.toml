@@ -33,6 +33,12 @@ binding = "DB"
 database_name = "doulor-mail"
 database_id = "9ae6127c-75f7-4688-bbe3-31ed856859c5"
 
+# Browser Run（原 Browser Rendering）：AI 实验室的「截图自检」用（见 src/handlers/lab-shot.ts）。
+# Quick Actions 支持直接传 html（不必先把作品发布到公网），只按浏览器时长计费、
+# 失败/超时不计费；额度闸在 lab-shot.ts 里自己做（日 8 分钟 / 月 9 小时）。
+[browser]
+binding = "BROWSER"
+
 
 # 出站邮件：Cloudflare Email Service 的 send_email 绑定。
 #

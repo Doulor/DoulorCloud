@@ -4182,6 +4182,46 @@ export async function streamLabChat(payload: {
 
 export const labApi = {
   /**
+   * 自定义作品的页面名（分享链接尾部）。
+   * 撞名时服务端返回 409，调用方应把消息原样给用户看（不要静默加后缀）。
+   */
+  /**
+   * 截图自检：把内联后的单文件 HTML 交给服务端用真浏览器渲染并截图。
+   * 返回 dataUrl（可直接当图片 part 喂给模型）+ 本次/今日/本月额度用量。
+   */
+  screenshot: (payload: {
+    html: string
+    width?: number
+    height?: number
+    fullPage?: boolean
+  }) =>
+    request<{
+      dataUrl: string
+      msUsed: number
+      dayMs: number
+      dayLimitMs: number
+      monthMs: number
+      monthLimitMs: number
+    }>("/lab/screenshot", { method: "POST", body: JSON.stringify(payload) }),
+  /**
+   * 页面体检（文字诊断）：真浏览器跑一遍，回溢出/console 报错/资源失败的文字报告。
+   * 与截图共用同一个浏览器时长额度池。
+   */
+  inspect: (payload: { html: string; width?: number; height?: number }) =>
+    request<{
+      text: string
+      msUsed: number
+      dayMs: number
+      dayLimitMs: number
+      monthMs: number
+      monthLimitMs: number
+    }>("/lab/inspect", { method: "POST", body: JSON.stringify(payload) }),
+  setSlug: (id: string, slug: string) =>
+    request<{ ok: boolean; slug: string }>(
+      `/lab/projects/${encodeURIComponent(id)}/slug`,
+      { method: "POST", body: JSON.stringify({ slug }) }
+    ),
+  /**
    * 站内模型列表。
    * `free: true` = 走的是管理员提供的统一 Key（用户端标「免费试用」）。
    * 未开通/未绑定时抛 NOT_BOUND，据此引导。

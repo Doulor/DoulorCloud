@@ -68,6 +68,16 @@ export type ToolName =
   /** 联网搜索（Tavily）。**必须经服务端**——key 只在服务端，浏览器拿不到。 */
   | "web_search"
   /**
+   * 把当前项目渲染成真页面并截图（Cloudflare Browser Run）——
+   * 让模型「看得见自己做的网页」，而不是只能读自己写的代码猜效果。
+   */
+  | "screenshot"
+  /**
+   * 页面体检：用真浏览器跑一遍，回**文字诊断**（横向溢出多少、哪些元素溢出、
+   * 图片有没有 404、console 报了什么错）。改样式/排查"点了没反应"时用它。
+   */
+  | "inspect"
+  /**
    * 服务端抓取（取一个页面 / 调一个接口）。
    * ⚠️ 也**必须经服务端**：浏览器直连第三方会被 CORS 拦；且服务端有 SSRF 护栏。
    */
@@ -100,7 +110,9 @@ export type Segment =
        * 文本标签协议下没有这个字段（那时结果拼成一条用户消息）。
        */
       toolCallId?: string
-      /** 仅 <lab_http> 用：目标地址 */
+      /** screenshot 用：截图的 dataUrl（只用于展示/回喂，不参与解析） */
+  image?: string
+  /** 仅 <lab_http> 用：目标地址 */
       url?: string
       /**
        * 仅 <lab_http> 用：**原样返回**，不要转成纯文本。
@@ -324,7 +336,7 @@ export function needsToolResult(
         // 搜索结果同理：key 在服务端，结果必须回喂
         s.tool === "web_search" ||
         // 抓取结果要回喂（正文在服务端取回来的）
-        s.tool === "http")
+        (s.tool === "http" || s.tool === "inspect"))
   )
 }
 
@@ -364,6 +376,8 @@ const NATIVE_TOOL_NAMES: ToolName[] = [
   "skill",
   "web_search",
   "http",
+  "screenshot",
+  "inspect",
 ]
 
 /**
@@ -493,6 +507,23 @@ export const CLOSING_NUDGE =
   "不要再调用工具；如果还没干完：继续调用工具。不要只输出思考就停住。"
 
 /**
+ * 「干完活必须报告」的最后一推（比 CLOSING_NUDGE 更硬，2026-10-12 站长反馈
+ * 「AI 做完了直接就结束了，没有报告没有总结」）。
+ *
+ * 与 CLOSING_NUDGE 的差别：
+ *   · 明确**禁止**再调任何工具（CLOSING_NUDGE 还留了「没干完就继续调」的口子，
+ *     模型经常选错、又埋头干一轮然后还是不说）；
+ *   · 给出总结的**结构**（做了什么 / 涉及哪些文件 / 怎么看效果），模型照填即可；
+ *   · 用**独立计数**（不占 MAX_CLOSING_NUDGES 的额度）—— 这一条是产品要求，
+ *     「做完给报告」不依赖模型自觉，最多推 1 次，仍不说就由前端自己生成摘要。
+ */
+export const REPORT_NUDGE =
+  "（系统）工作已经完成，现在**必须向用户交付总结**。规则：" +
+  "① 不要再调用任何工具（包括读取/列表/搜索），一次都不要；" +
+  "② 直接输出一段中文总结，包含三点：这次做了什么、改动/新建了哪些文件（列文件名）、" +
+  "用户在哪里能看到效果（比如右侧预览）。三到六行即可。现在就写，不要思考了不写字。"
+
+/**
  * 把已执行的动作结果拼成一条「用户消息」回喂给模型（非原生 tool 协议下最稳的做法）。
  * `failures` 是「第几个动作失败了 + 为什么」，只需要在出错时才占用一轮。
  * `runResults` 是 `<lab_run>` 的结果（已由调用方格式化成文本，这里不关心它怎么来的）。
@@ -558,6 +589,20 @@ export function buildToolResults(
     } else if (failures?.get(i)) {
       const verb = s.tool === "write" ? "写入" : "修改"
       parts.push(`[${verb} ${s.path} 失败] ${failures.get(i)}`)
+    } else if (s.tool === "write" || s.tool === "replace") {
+      /**
+       * 🔴 成功的写入/修改**必须给回执**（2026-10-12 站长反馈「模型明明写了文件
+       * 却觉得自己没写、反复重写」）。原生模式下这条回执是 `role:"tool"` 消息，
+       * 没有它就是悬空 tool_call —— 模型拿不到「写成了、写进去多少行」的确认，
+       * 下一轮就会再写一遍。行数从**当前项目文件**里数（真实状态，不是它声称的）。
+       */
+      const now = s.path ? files[s.path] : undefined
+      const verb = s.tool === "write" ? "写入" : "修改"
+      parts.push(
+        now == null
+          ? `[${verb} ${s.path ?? "?"} 失败]（文件现在不在项目里 —— 可能路径不对）`
+          : `[${verb} ${s.path} 成功] 现在共 ${now.split("\n").length} 行。之后改这个文件请用 replace（先读再改），不要整个重写。`
+      )
     }
   })
   parts.push("\n请根据结果继续。")
@@ -703,6 +748,55 @@ export function applyReplace(
       }
     }
   }
+  /**
+   * 再退一步：**把行内连续空白也折叠**后再比一遍（模型常把两格缩进写成四格、
+   * 或把多个空格写成一个）。行尾 \r 一并去掉。
+   */
+  const fold = (s: string) => s.split("\n").map((l) => l.replace(/[ \t]+/g, " ").trim()).join("\n")
+  const foldedTarget = fold(oldText)
+  for (let i = 0; i + oldLines.length <= srcLines.length; i++) {
+    if (fold(srcLines.slice(i, i + oldLines.length).join("\n")) === foldedTarget) {
+      return {
+        ok: true,
+        value: [
+          ...srcLines.slice(0, i),
+          ...newText.split("\n"),
+          ...srcLines.slice(i + oldLines.length),
+        ].join("\n"),
+      }
+    }
+  }
+  /**
+   * 🔴 还是找不到 ⇒ **把最像的那一段连行号一起回给模型**
+   * （2026-10-12 站长反馈「现在的 AI 基本上只会重写，不会找问题修复」）。
+   *
+   * 原来的报错只有一句「没找到这段原文，请先 read 再来」—— 模型收到这种空反馈，
+   * 最常见的反应就是**干脆 <lab_write> 整文件重写**（把几百行重吐一遍，慢、贵、
+   * 还容易把别处改坏）。给出「第 N 行起有一段 82% 像」+ 原文片段之后，
+   * 它就有具体的东西可以对照着改 old。
+   */
+  let best = { score: 0, at: -1 }
+  for (let i = 0; i + oldLines.length <= srcLines.length; i++) {
+    let same = 0
+    for (let k = 0; k < oldLines.length; k++) {
+      if (srcLines[i + k].trim() === oldLines[k].trim()) same += 1
+    }
+    const score = same / oldLines.length
+    if (score > best.score) best = { score, at: i }
+  }
+  if (best.at >= 0 && best.score >= 0.4) {
+    const snippet = srcLines
+      .slice(best.at, best.at + oldLines.length)
+      .join("\n")
+      .slice(0, 700)
+    return {
+      ok: false,
+      reason:
+        `没找到完全一致的原文。${path} 第 ${best.at + 1} 行起有一段最像` +
+        `（约 ${Math.round(best.score * 100)}% 相同）：\n---\n${snippet}\n---\n` +
+        `请**照这段逐字**修正 old 再试一次；只有确实要整段重写时才用 <lab_write>。`,
+    }
+  }
   return {
     ok: false,
     reason: `没在 ${path} 里找到这段原文（缩进或内容对不上）。请先 <lab_read path="${path}"/> 看准确内容，再用 <lab_replace> 或 <lab_write> 重来。`,
@@ -746,6 +840,96 @@ function withStorageShim(html: string): string {
  * 所以 ./style.css、./app.js 这类相对引用必须先内联进去。
  * 只处理 link[rel=stylesheet] 与 script[src]，其余（图片、fetch）暂不支持。
  */
+/** 素材（图片/字体）的 MIME 推导表：只列我们真的会内联的类型 */
+const ASSET_MIME: Record<string, string> = {
+  svg: "image/svg+xml",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  ico: "image/x-icon",
+  woff: "font/woff",
+  woff2: "font/woff2",
+  ttf: "font/ttf",
+  otf: "font/otf",
+}
+
+/**
+ * 把一个项目文件变成可直接嵌进 HTML 的 data URL。
+ *
+ * 两种来源形态都要支持：
+ *   · **已经是 data URL**（二进制图片走「添加素材」上传时就是这么存的）⇒ 原样返回；
+ *   · **文本素材**（`.svg` 就是文本）⇒ 按 MIME 做 URL 编码。
+ * ⚠️ SVG 用 URL 编码而不是 base64：体积小约 1/3，而且出问题时肉眼可读。
+ */
+export function assetToDataUrl(ref: string, content: string): string | null {
+  if (/^data:/i.test(content.trim())) return content.trim()
+  const ext = (ref.split("?")[0].split("#")[0].split(".").pop() ?? "").toLowerCase()
+  const mime = ASSET_MIME[ext]
+  if (!mime) return null
+  if (mime === "image/svg+xml") {
+    return `data:${mime};charset=utf-8,${encodeURIComponent(content)}`
+  }
+  // 其它类型都是二进制 ⇒ 只有「已经是 data URL」那一种来源，这里没有可编码的文本
+  return null
+}
+
+/**
+ * 把 HTML 里对项目文件的引用内联成 data URL（img / 图标 / CSS 里的 url()）。
+ *
+ * ⚠️ 为什么必须有这一段：预览与导出的作品跑在**没有域名和目录概念**的 iframe / 单文件里，
+ *    `<img src="logo.svg">` 一定会 404 —— 而 `.svg` 本来就在允许的文本扩展名里
+ *    （local-fs 的 TEXT_EXT_RE 有 svg，AI 也能直接写出来），所以在这之前的状态是
+ *    **「文件明明在项目里，画面里就是不显示」**。这不是新功能，是补一个既有缺口。
+ *
+ * 外部引用（http(s)://、//、data:）一律不碰：那是用户有意为之的外链。
+ */
+export function inlineAssets(html: string, files: FileMap, entry?: string): string {
+  const base = entry && entry.includes("/") ? entry.replace(/[^/]+$/, "") : ""
+  const lookup = (ref: string): string | undefined => {
+    const clean = ref.split("?")[0].split("#")[0]
+    const direct = clean.replace(/^\.\//, "").replace(/^\/+/, "")
+    if (files[direct] != null) return files[direct]
+    return files[base + direct]
+  }
+  const asUrl = (ref: string): string | null => {
+    if (EXTERNAL_RE.test(ref) || ref.startsWith("#")) return null
+    const content = lookup(ref)
+    if (content == null) return null
+    return assetToDataUrl(ref, content)
+  }
+
+  // <img src> —— 精确替换 src 属性，不能用字符串 replace（src 可能出现在 data-src 里）
+  let out = html.replace(/<img\b[^>]*>/gi, (tag) => {
+    const src = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1]
+    if (!src) return tag
+    const url = asUrl(src)
+    if (!url) return tag
+    return tag.replace(/(\bsrc\s*=\s*["'])([^"']+)(["'])/i, (_m, a: string, _b: string, z: string) => `${a}${url}${z}`)
+  })
+
+  // <link rel="icon"> —— favicon 同理，否则标签页图标是空的
+  out = out.replace(/<link\b[^>]*>/gi, (tag) => {
+    if (!/\brel\s*=\s*["']?[^"'>]*icon/i.test(tag)) return tag
+    const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1]
+    if (!href) return tag
+    const url = asUrl(href)
+    if (!url) return tag
+    return tag.replace(/(\bhref\s*=\s*["'])([^"']+)(["'])/i, (_m, a: string, _b: string, z: string) => `${a}${url}${z}`)
+  })
+
+  // CSS 里的 url(...)：<style> 块（含上面刚内联进来的 <link> 样式表）
+  out = out.replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, (whole, css: string) => {
+    const patched = css.replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi, (m, _q, ref: string) => {
+      const url = asUrl(ref)
+      return url ? `url("${url}")` : m
+    })
+    return patched === css ? whole : whole.replace(css, patched)
+  })
+
+  return out
+}
 export function buildPreviewDoc(files: FileMap): string {
   // 注意：这里要挑的是「文件名」，不是文件内容——写成 files["index.html"] 会拿到正文，
   // 再去 files[正文] 查必然是 undefined，预览就永远空白。
@@ -786,7 +970,8 @@ export function buildPreviewDoc(files: FileMap): string {
     }
   )
 
-  return withStorageShim(html)
+  // 最后统一内联素材（图片 / 图标 / CSS url()）—— 见 inlineAssets 的说明
+  return withStorageShim(inlineAssets(html, files, entry))
 }
 
 /** 转义 HTML 属性值（把整篇作品塞进 srcdoc="…" 里时用；先 & 后 "，顺序不能反） */

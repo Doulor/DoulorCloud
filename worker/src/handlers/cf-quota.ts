@@ -946,6 +946,31 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
     }
   }
 
+  /**
+   * 截图自检用量（Cloudflare Browser Run，见 handlers/lab-shot.ts）。
+   * 表里存的是**毫秒**，面板上换算成秒更好读（浏览器时长本来就是按秒/小时算钱的）。
+   * 查询失败（比如表还没建）不影响其它额度显示。
+   */
+  let shotTodaySec: number | null = null
+  let shotMonthSec: number | null = null
+  let shotTodayCalls = 0
+  try {
+    // 与写入端（lab-shot.ts）一致的 UTC 键；dayPeriod/monthPeriod 是展示字符串，不能当键
+    const shotDay = new Date().toISOString().slice(0, 10)
+    const shotMonth = new Date().toISOString().slice(0, 7)
+    const shotRows = await env.DB.prepare(
+      "SELECT period, ms, calls FROM lab_shot_usage WHERE period IN (?, ?)"
+    )
+      .bind(shotDay, shotMonth)
+      .all<{ period: string; ms: number; calls: number }>()
+    const list = shotRows.results ?? []
+    shotTodaySec = Math.round((list.find((r) => r.period === shotDay)?.ms ?? 0) / 1000)
+    shotMonthSec = Math.round((list.find((r) => r.period === shotMonth)?.ms ?? 0) / 1000)
+    shotTodayCalls = list.find((r) => r.period === shotDay)?.calls ?? 0
+  } catch {
+    /* 忽略：表不存在/查询失败都不该把整个额度面板打挂 */
+  }
+
   const groups: QuotaGroup[] = [
     {
       key: "workers",
@@ -1212,7 +1237,28 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
         })(),
       ],
     },
-  ]
+      {
+      key: "browser_run",
+      label: "Browser Run（截图自检）",
+      description:
+        "AI 实验室的「截图自检」：agent 做完网页后用真浏览器渲染截图，自己看效果对不对。" +
+        "按**浏览器时长**计费（失败/超时不计费）；额度闸由本站自己在服务端拦（见 handlers/lab-shot.ts），" +
+        "默认日 8 分钟 + 月 9 小时，都留在包含额度以内 ⇒ 不会产生按量付费。",
+      items: [
+        flowItem({
+          key: "browser.run",
+          label: paid ? "本月浏览器时长（秒）" : "今日浏览器时长（秒）",
+          unit: "times",
+          today: shotTodaySec,
+          mtd: shotMonthSec,
+          limitFreePerDay: 480,
+          limitPaidPerMonth: 32400,
+          note:
+            `今日 ${shotTodayCalls} 次截图 · 官方额度：免费档 10 分钟/天、付费档含 10 小时/月`,
+        }),
+      ],
+    },
+]
 
   // ---- 图形化概览：占用率最高的几项 ----
   const allItems = groups.flatMap((g) => g.items)
