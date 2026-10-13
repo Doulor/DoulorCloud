@@ -66,7 +66,7 @@ export type Entry =
       image?: string
       /** `web_search` 用：搜索词（卡片上显示） */
       query?: string
-      status: "running" | "done"
+      status: "running" | "done" | "failed"
       content: string
     }
 

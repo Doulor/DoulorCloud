@@ -63,6 +63,59 @@ export interface SuspendResult {
   errors: string[]
 }
 
+/**
+ * 「记录归属」判据 SQL 片段的**唯一构造点**：归属认子域名，没有子域名才回退到域名。
+ *
+ * ⚠️ 不能写成 `subdomain_id IN (…) OR domain_id IN (…)`：子域名可以被管理员转移
+ * （`admin-subdomains.ts` 只改 `subdomains.user_id`，**不动** `dns_records.domain_id`），
+ * 于是同一行会同时命中「原主的域名」与「新主的子域名」两侧 —— 停用方向与恢复方向
+ * 各认一侧，就会每小时删一次又建一次（2026-10-10 探针实测：3 轮里 sweep 删 6 条、
+ * retry 建 9 条，新主的解析每小时断一次）。同理，**封禁 / 解封的直接入口**用两侧 OR
+ * 时会动到别人的记录（2026-10-11 探针实测：封禁 A 删掉 B 的 3 条解析；解封 A 把仍
+ * 处于封禁中的 B 的解析重建回 CF，B 的域名在封禁期间重新对外解析）。
+ *
+ * 归属认子域名，与代码库其余部分一致：用户端列表按 `subdomain_id` 筛
+ * （`handlers/dns.ts` 的 records 查询）、改名 / 删除 / 记录计数也全按
+ * `subdomain_id`（`handlers/admin-subdomains.ts`）；`domain_id` 只是 zone 指针
+ * （`domains` 全仓无转移路径）。`subdomain_id` 为 NULL 的历史行（0003 回填之前）
+ * 才回退到域名归属 —— 两个分支互斥，每行只有一个有效归属。
+ *
+ * @param subdomainOwner 选出「拥有这些子域名的用户」的 SQL 子查询（不含 `r.` 前缀）
+ * @param domainOwner    同上的域名版本；两个片段里的占位符按出现顺序绑定
+ */
+function ownerPredicateSql(subdomainOwner: string, domainOwner: string): string {
+  return (
+    `((r.subdomain_id IS NOT NULL AND r.subdomain_id IN (${subdomainOwner}))` +
+    ` OR (r.subdomain_id IS NULL AND r.domain_id IN (${domainOwner})))`
+  )
+}
+
+/**
+ * 归属用户的**状态**为 `status` 的记录判据（兜底任务用）。
+ * @param status 归属用户的状态；调用方需保证查询里 `dns_records` 的别名是 `r`
+ */
+export function ownerStatusSql(status: "active" | "suspended"): string {
+  const byStatus = `SELECT id FROM subdomains WHERE user_id IN (SELECT id FROM users WHERE status = '${status}')`
+  const byStatusDomain = `SELECT id FROM domains WHERE user_id IN (SELECT id FROM users WHERE status = '${status}')`
+  return ownerPredicateSql(byStatus, byStatusDomain)
+}
+
+/**
+ * 归属用户**就是传入的 userId 参数**的记录判据（封禁 / 解封的直接入口用）。
+ *
+ * 与 `ownerStatusSql` 的差别只在「按谁筛」：那边按用户**状态**筛（兜底任务一次
+ * 处理所有被封禁用户），这边按调用方传入的**用户 id** 筛（管理员点的是某一个人）。
+ * 两者的归属口径必须一致 —— 所以共用 `ownerPredicateSql`。
+ *
+ * 两个 `?` 都绑定同一个 userId，顺序与调用点的 `.bind(userId, userId)` 对应。
+ */
+function ownerUserIdSql(): string {
+  return ownerPredicateSql(
+    "SELECT id FROM subdomains WHERE user_id = ?",
+    "SELECT id FROM domains WHERE user_id = ?"
+  )
+}
+
 export interface RestoreResult {
   /** 已在 Cloudflare 重建并恢复的记录数 */
   dnsRestored: number
@@ -130,8 +183,7 @@ export async function suspendUserResources(
        FROM dns_records r
        LEFT JOIN domains d ON d.id = r.domain_id
       WHERE r.banned_at IS NULL
-        AND (r.subdomain_id IN (SELECT id FROM subdomains WHERE user_id = ?)
-             OR r.domain_id IN (SELECT id FROM domains WHERE user_id = ?))
+        AND ${ownerUserIdSql()}
       ORDER BY r.created_at ASC`
   )
     .bind(userId, userId)
@@ -200,8 +252,7 @@ export async function restoreUserResources(
        FROM dns_records r
        LEFT JOIN domains d ON d.id = r.domain_id
       WHERE r.banned_at IS NOT NULL
-        AND (r.subdomain_id IN (SELECT id FROM subdomains WHERE user_id = ?)
-             OR r.domain_id IN (SELECT id FROM domains WHERE user_id = ?))
+        AND ${ownerUserIdSql()}
       ORDER BY r.created_at ASC`
   )
     .bind(userId, userId)
@@ -242,14 +293,22 @@ export async function restoreUserResources(
 }
 
 /**
- * 维护任务用的兜底：把「已标记停用、但 Cloudflare 上可能还在」的记录删干净。
+ * 维护任务用的兜底：把封禁用户**留在 Cloudflare 上**的 DNS 记录删干净。
  *
  * 为什么需要它：封禁那一跳受单请求子请求上限约束（见 SUSPEND_BATCH），
- * 记录多的用户处理不完；另外 CF 瞬时故障也会留下一批。这里每轮补删一点，
- * 直到 `cf_id` 清空为止。
+ * 记录多的用户处理不完；另外 CF 瞬时故障也会留下一批。
  *
- * 只处理 `banned_at IS NOT NULL AND cf_id IS NOT NULL` 的行 —— 这批的语义
- * 明确是「该删但还没删掉」，不会误伤正常记录。
+ * ⚠️ 筛选口径是「**归属用户当前为 suspended** 且 `cf_id` 还在」（见 ownerStatusSql），
+ * 不能写成 `banned_at IS NOT NULL AND cf_id IS NOT NULL` —— 那样**恒为空集**：
+ * 唯一置 `banned_at` 的语句（上面 suspendUserResources 里那次标记）在**同一条
+ * UPDATE 里把 `cf_id` 清 NULL**，两个条件互斥。而真正需要收尾的两批恰恰停在
+ * `banned_at IS NULL`：延迟批（超过 SUSPEND_BATCH 的部分从未被标记）与失败批
+ * （CF 删失败时按「先删 CF 再标记」的顺序直接返回，从未标记）。
+ * 按「用户是否仍被禁」筛与恢复方向（retrySuspendedDnsRestore 按 active 筛）
+ * 对称，且归属判据互斥（见 ownerStatusSql），两个方向不会互相抢。
+ *
+ * 删掉后补写 `banned_at`：延迟批原本没有标记，只清 `cf_id` 会造出「本地看着正常、
+ * CF 上其实没有」的幽灵行（用户端列表按 `banned_at` 过滤，解封时也不会重建）。
  */
 export async function sweepSuspendedDns(
   env: Env,
@@ -257,30 +316,38 @@ export async function sweepSuspendedDns(
 ): Promise<{ removed: number; errors: string[] }> {
   const errors: string[] = []
   let removed = 0
+  const now = new Date().toISOString()
 
   const rows = await env.DB.prepare(
     `SELECT r.id, r.fqdn, r.name, r.cf_id, d.zone_id
        FROM dns_records r
        LEFT JOIN domains d ON d.id = r.domain_id
-      WHERE r.banned_at IS NOT NULL AND r.cf_id IS NOT NULL
+      WHERE r.cf_id IS NOT NULL AND r.cf_id != ''
+        AND ${ownerStatusSql("suspended")}
       LIMIT ?`
   )
     .bind(Math.max(1, limit))
     .all<{ id: string; fqdn: string | null; name: string; cf_id: string; zone_id: string | null }>()
 
+  /** 清 cf_id 并补标记（banned_at 已有则保留原值） */
+  const clearCfId = (id: string) =>
+    env.DB.prepare(
+      "UPDATE dns_records SET cf_id = NULL, banned_at = COALESCE(banned_at, ?), updated_at = ? WHERE id = ?"
+    ).bind(now, now, id)
+
   await mapLimit(rows.results ?? [], CF_CONCURRENCY, async (row) => {
     if (!row.zone_id) {
       // 连 zone 都没有，CF 上不可能有这条记录 ⇒ 直接清 cf_id 收尾
-      await env.DB.prepare("UPDATE dns_records SET cf_id = NULL WHERE id = ?").bind(row.id).run()
+      await clearCfId(row.id).run()
       return
     }
     try {
       await cfDeleteDnsRecord(env, row.zone_id, row.cf_id)
-      await env.DB.prepare("UPDATE dns_records SET cf_id = NULL WHERE id = ?").bind(row.id).run()
+      await clearCfId(row.id).run()
       removed += 1
     } catch (err) {
       if (isMissingRecordError(err)) {
-        await env.DB.prepare("UPDATE dns_records SET cf_id = NULL WHERE id = ?").bind(row.id).run()
+        await clearCfId(row.id).run()
         removed += 1
         return
       }
@@ -301,8 +368,8 @@ export async function sweepSuspendedDns(
  * 结果是「人解封了、解析少了一条、且他自己看不见」，只能等管理员发现。
  * 这里按「归属用户已是 active」筛出来重试，让恢复真正闭环。
  *
- * 只认**归属用户当前为 active** 的记录：仍封禁的那些就该保持停用状态，
- * 不能因为这里重试而被恢复。
+ * 只认**归属用户当前为 active** 的记录（判据见 ownerStatusSql）：仍封禁的那些就该
+ * 保持停用状态，不能因为这里重试而被恢复。
  */
 export async function retrySuspendedDnsRestore(
   env: Env,
@@ -317,10 +384,7 @@ export async function retrySuspendedDnsRestore(
        FROM dns_records r
        LEFT JOIN domains d ON d.id = r.domain_id
       WHERE r.banned_at IS NOT NULL
-        AND (r.subdomain_id IN (SELECT id FROM subdomains
-                                 WHERE user_id IN (SELECT id FROM users WHERE status = 'active'))
-             OR r.domain_id IN (SELECT id FROM domains
-                                 WHERE user_id IN (SELECT id FROM users WHERE status = 'active')))
+        AND ${ownerStatusSql("active")}
       ORDER BY r.banned_at ASC
       LIMIT ?`
   )

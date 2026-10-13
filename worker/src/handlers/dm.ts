@@ -16,7 +16,7 @@
  * 见 chat.ts 里那段注释）。created_at 是 ISO 8601 定长字符串，字典序 == 时间序。
  */
 import { ApiError, json, readBodyCapped } from "../http"
-import { requireUser, isPrivileged } from "../auth"
+import { requireUser, isPrivileged, isAnyAdmin } from "../auth"
 import { uuid } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
 import type { Env } from "../env"
@@ -131,7 +131,9 @@ async function checkSendGate(
   me: { id: string },
   peer: PeerRow
 ): Promise<SendGate> {
-  if (isPrivileged(peer.role)) return { ok: true, needRequestRow: false }
+  // ⚠️ 用 isAnyAdmin（root / superadmin / 白名单 admin），不是 isPrivileged ——
+  //    注释说的「管理员 / 站长」包含自定义白名单管理员（同 feedback.ts 的徽章判据）。
+  if (isAnyAdmin(peer.role)) return { ok: true, needRequestRow: false }
 
   const order = await env.DB.prepare(
     `SELECT 1 AS x FROM point_orders
@@ -141,19 +143,6 @@ async function checkSendGate(
     .bind(me.id, peer.id, peer.id, me.id)
     .first<{ x: number }>()
   if (order) return { ok: true, needRequestRow: false }
-
-  // ③ 已经互相聊过 = 事实上的同意。
-  //    ⚠️ 必须有这条：私信是在加「聊天申请」**之前**上线的，线上已有一批老会话
-  //    没有关系记录；不加这条的话，老用户第二天再回复一句就会被要求「先申请」，
-  //    等于把已经建立的对话掐断（2026-10-01 上线时线上已有 28 条真实消息）。
-  const prior = await env.DB.prepare(
-    `SELECT 1 AS x FROM direct_messages
-      WHERE (from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?)
-      LIMIT 1`
-  )
-    .bind(me.id, peer.id, peer.id, me.id)
-    .first<{ x: number }>()
-  if (prior) return { ok: true, needRequestRow: false }
 
   const rows = await env.DB.prepare(
     `SELECT owner_id, peer_id, status FROM dm_contacts
@@ -168,7 +157,12 @@ async function checkSendGate(
   if (rel.some((r) => r.owner_id === me.id && r.status === "request")) {
     return { ok: true, needRequestRow: false }
   }
+
   const mine = rel.find((r) => r.owner_id === peer.id && r.peer_id === me.id)
+
+  // ⚠️ 显式拒绝必须**先于**下面那条「聊过就放行」的历史消息判断。
+  //    否则「对方先回我一句、之后才点拒绝」这条真实可达路径上拒绝仍然失效
+  //    （拒绝是后来才发生的，比历史消息更新，应当覆盖它）。
   if (mine?.status === "declined") {
     return {
       ok: false,
@@ -176,6 +170,22 @@ async function checkSendGate(
       message: "对方已拒绝你的聊天申请，无法再给他发消息。",
     }
   }
+
+  // ③ 对方**已经跟我说过话** = 事实上的同意（注意是单向：只认「对方先开的口」）。
+  //    ⚠️ 必须有这条：私信是在加「聊天申请」**之前**上线的，线上已有一批老会话
+  //    没有关系记录；不加这条的话，老用户第二天再回复一句就会被要求「先申请」，
+  //    等于把已经建立的对话掐断（2026-10-01 上线时线上已有 28 条真实消息）。
+  //    ⚠️ 方向不能写成双向：申请消息本身就是 direct_messages 的一行，双向匹配会让
+  //    申请人自己的第一条消息把这条判据点亮，此后恒真 ⇒ 下面两个分支永不可达。
+  const prior = await env.DB.prepare(
+    `SELECT 1 AS x FROM direct_messages
+      WHERE from_user_id = ? AND to_user_id = ?
+      LIMIT 1`
+  )
+    .bind(peer.id, me.id)
+    .first<{ x: number }>()
+  if (prior) return { ok: true, needRequestRow: false }
+
   if (mine?.status === "request") {
     return {
       ok: false,

@@ -30,7 +30,7 @@ import { useMotionPref } from "@/hooks/use-motion-pref"
 import { clearLabRun, getLabRun, setLabRun, useLabRun } from "@/lib/lab-run"
 import { Label } from "@/components/ui/label"
 import { useT } from "@/i18n"
-import { applyReplace, buildPreviewDoc, buildSystemPrompt, buildToolResults, type LabConvoMessage, type LabConvoPart, compactHistory, nativeToolCallsToSegments, type NativeToolCall, EFFORT_LABEL_KEY, EFFORT_LEVELS, EFFORT_TEMPERATURE, type EffortLevel, grepFiles, looksLikeBuildRequest, needsToolResult, normalizeEffort, openPreviewInNewTab, parseAgentText, parseReplaceContent, PROTOCOL_NUDGE, CLOSING_NUDGE, REPORT_NUDGE, MAX_CLOSING_NUDGES, type FileMap, type Segment, inlineAssets } from "@/lib/lab-agent"
+import { applyReplace, buildPreviewDoc, missingPathReason, buildSystemPrompt, buildToolResults, type LabConvoMessage, type LabConvoPart, compactHistory, nativeToolCallsToSegments, type NativeToolCall, EFFORT_LABEL_KEY, EFFORT_LEVELS, EFFORT_TEMPERATURE, type EffortLevel, grepFiles, looksLikeBuildRequest, needsToolResult, normalizeEffort, openPreviewInNewTab, parseAgentText, parseReplaceContent, PROTOCOL_NUDGE, CLOSING_NUDGE, REPORT_NUDGE, MAX_CLOSING_NUDGES, type FileMap, type Segment, inlineAssets } from "@/lib/lab-agent"
 import { buildSiteManual, parseSiteArgs, runSiteOp, type SiteOp } from "@/lib/lab-site"
 import {
   bootVM,
@@ -280,7 +280,7 @@ function makeFolderName(base?: string): string {
   const p = (n: number) => String(n).padStart(2, "0")
   return `网页项目-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(
     d.getHours()
-  )}${p(d.getMinutes())}`
+  )}${p(d.getMinutes())}${p(d.getSeconds())}`
 }
 
 function loadCustom(): CustomChannel | null {
@@ -588,7 +588,8 @@ function segmentsToEntries(
         url: s.url,
         httpMethod: s.httpMethod,
         image: s.image,
-        status: final || s.complete ? "done" : "running",
+        // 未收尾但本轮已结束 ⇒ failed（多半被上游截断），不能再显示成绿勾
+        status: s.complete ? "done" : final ? "failed" : "running",
         // 结果不来自模型、而在本地现算：grep 命中行 / 终端命令输出 / 站内操作响应
         content: s.complete
           ? s.tool === "grep" && files
@@ -1981,7 +1982,13 @@ export default function LabPage() {
    * 返回失败原因（成功返回 null）——失败时要回喂给模型，否则它会以为改成功了。
    */
   const applyAction = (a: Extract<Segment, { type: "action" }>): string | null => {
-    if (!a.complete || !a.path) return null
+    if (!a.complete) return null
+    // 缺 path 时以前直接 return null（= 当成功），模型于是以为改好了继续往下改 ——
+    // 改成明确失败，让上层回喂一轮纠正。list 本来就不需要 path。
+    if (!a.path) {
+      if (a.tool === "list") return null
+      return missingPathReason(a.tool)
+    }
     if (a.tool === "write") {
       filesRef.current = { ...filesRef.current, [a.path]: a.content }
       setFiles(filesRef.current)
@@ -3829,6 +3836,8 @@ export default function LabPage() {
    * 用户点「新对话」的意图是「再开一条线」，不是「把上一条扔掉」。
    */
   const newChat = async () => {
+    // 流式还没结束就开新会话：进行中的那几轮会把内容重新写回来（还可能写串到新会话）
+    if (streaming) return
     if (entries.length > 0 && Object.keys(filesRef.current).length && !currentId) {
       const ok = await confirmDialog({
         title: t("lab.newChat"),
@@ -4111,8 +4120,18 @@ const doImportLocal = async () => {
   }
 
   const openProject = async (id: string) => {
+    // 切项目同理：流式进行中先拦下，免得进行中的写入落到刚打开的作品上
+    if (streaming) return
     try {
       const { project } = await labApi.getProject(id)
+      // 换项目 = 换会话：时间线 / 对话历史 / 流式缓冲一起重置，
+      // 否则旧会话的对话会被拼进新作品的请求里（串写）
+      setEntries([])
+      setLive(null)
+      setLiveThink("")
+      thinkRef.current = ""
+      convoRef.current = []
+      accRef.current = ""
       filesRef.current = project.files
       setFiles(project.files)
       setPreview(buildPreviewDoc(project.files))
@@ -4375,7 +4394,7 @@ const doImportLocal = async () => {
           </AnchoredPanel>
         </div>
         {/* 作品项目（放会话后面 —— 站长要求的顺序：会话 → 项目 → 提示词） */}
-        <Button variant="ghost" size="sm" onClick={openProjects}>
+        <Button variant="ghost" size="sm" onClick={openProjects} disabled={streaming}>
           <FolderOpen className="h-4 w-4" />
           {t("lab.projects")}
         </Button>

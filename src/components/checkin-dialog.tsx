@@ -21,10 +21,13 @@ import {
 } from "@/components/ui/dialog"
 import { checkinApi, errMsg } from "@/services/api"
 import { cn } from "@/lib/utils"
+import { shouldSignInOnEnable } from "@/lib/auto-checkin"
 import { useT } from "@/i18n"
 
 type Status = {
   enabled: boolean
+  /** 站点时区下的今天（YYYY-MM-DD） */
+  today: string
   checkedIn: boolean
   streak: number
   todayPoints: number
@@ -98,6 +101,9 @@ export function CheckinDialog({
     try {
       await checkinApi.setAuto(v)
       toast.success(v ? t("ck.autoOn") : t("ck.autoOff"))
+      // 开启自动签到时若今天还没签，立即补签一次 —— 否则要等下一次触发才生效，
+      // 用户会以为「开了没反应」（自动签到的每日判定见 auto-checkin.tsx）。
+      if (shouldSignInOnEnable(v, status)) await doCheckin()
     } catch (err) {
       toast.error(errMsg(err, t("ck.autoFailed")))
       setStatus((s) => (s ? { ...s, autoCheckin: !v } : s)) // 失败回滚

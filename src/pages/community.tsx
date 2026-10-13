@@ -1711,7 +1711,18 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
         category: scope !== SCOPE_ALL && scope !== SCOPE_NO_WATER ? scope : undefined,
         excludeWater: scope === SCOPE_NO_WATER,
       })
-      setPosts((prev) => (c ? [...prev, ...res.posts] : res.posts))
+      // 追加翻页结果时必须按 id 去重（2026-10-09 排查「点赞时报 removeChild」）：
+      // 「最热」排序的游标键是 `like_count + comment_count`，**这个值会变**——
+      // 只要有人（包括自己取消赞）改动第一页里某帖的分数，第二页的游标条件就可能
+      // 把已经出现过的帖子**再返回一次**；直接 [...prev, ...res.posts] 就会让同一个
+      // 帖子在 React 列表里出现两份，`key={p.id}` 随即重复。已用线上数据实测：
+      // 当前数据里就有 5 个帖子满足触发条件（取消一个赞即复现，40 条里唯一 id 只有 39）。
+      // 去重是最小且安全的兜底（服务端游标语义不在这里改，见 FINDINGS.md）。
+      setPosts((prev) => {
+        if (!c) return res.posts
+        const seen = new Set(prev.map((p) => p.id))
+        return [...prev, ...res.posts.filter((p) => !seen.has(p.id))]
+      })
       setCursor(res.nextCursor ?? undefined)
     } catch (err) {
       if (c) {

@@ -12,7 +12,8 @@
     "check:handlers": "cd worker && npm run check:handlers",
     "check:guards": "cd worker && npm run check:guards",
     "check:i18n": "node scripts/check-i18n.mjs",
-    "check:vendors": "node scripts/check-model-vendors.mjs"
+    "check:vendors": "node scripts/check-model-vendors.mjs",
+    "check:autocheckin": "node scripts/check-auto-checkin.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

@@ -53,7 +53,7 @@ interface AnnouncementRow {
   mail_finished_at: string | null
 }
 
-function toAnnouncement(r: AnnouncementRow) {
+function toAnnouncement(r: AnnouncementRow, dismissed = false) {
   return {
     id: r.id,
     title: r.title,
@@ -61,6 +61,12 @@ function toAnnouncement(r: AnnouncementRow) {
     category: r.category,
     pinned: r.pinned === 1,
     popupMode: r.popup_mode ?? "none",
+    /**
+     * 该用户是否已「不再显示」这条公告。
+     * 只有用户侧列表会带真实值（管理端列表不关心）；首屏据此判断弹不弹，
+     * 不再只依赖浏览器 localStorage —— 换设备 / 清缓存后依然记得。
+     */
+    dismissed,
     status: (r.status ?? "published") as AnnouncementStatus,
     publishAt: r.publish_at,
     publishedAt: r.published_at,
@@ -75,6 +81,16 @@ function toAnnouncement(r: AnnouncementRow) {
   }
 }
 
+/** 某用户已「不再显示」的公告 id 列表 */
+async function dismissedAnnouncementIds(env: Env, userId: string): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    "SELECT announcement_id FROM announcement_dismissals WHERE user_id = ?"
+  )
+    .bind(userId)
+    .all<{ announcement_id: string }>()
+  return (rows.results ?? []).map((r) => r.announcement_id)
+}
+
 /**
  * GET /api/announcements —— 登录用户拉取最近公告（pinned 优先，按时间倒序）。
  *
@@ -85,14 +101,55 @@ export async function listAnnouncements(
   env: Env,
   request: Request
 ): Promise<Response> {
-  await requireUser(env, request)
-  const rows = await env.DB.prepare(
-    `SELECT * FROM announcements
-      WHERE status = 'published'
-     ORDER BY pinned DESC, created_at DESC
-     LIMIT 5`
-  ).all<AnnouncementRow>()
-  return json({ announcements: (rows.results ?? []).map(toAnnouncement) })
+  const user = await requireUser(env, request)
+  const [rows, dismissed] = await Promise.all([
+    env.DB.prepare(
+      `SELECT * FROM announcements
+        WHERE status = 'published'
+       ORDER BY pinned DESC, created_at DESC
+       LIMIT 5`
+    ).all<AnnouncementRow>(),
+    dismissedAnnouncementIds(env, user.id),
+  ])
+  const dismissedSet = new Set(dismissed)
+  return json({
+    announcements: (rows.results ?? []).map((r) =>
+      toAnnouncement(r, dismissedSet.has(r.id))
+    ),
+  })
+}
+
+/**
+ * POST /api/announcements/:id/dismiss —— 记下「不再显示」（`once` 公告的「知道了」也走这条）。
+ *
+ * 为什么要落库：前端原来只写浏览器 localStorage，换设备 / 清缓存 / 重装 App 就丢，
+ * 用户会看到「点了不再显示，过阵子又弹」。服务端这份是真相源，localStorage 退化为
+ * 首屏快读缓存（见 dashboard.tsx 的 AnnouncementPopup）。
+ *
+ * 幂等：复合主键 + DO NOTHING，重复点只是一次无副作用的 upsert。
+ */
+export async function dismissAnnouncement(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  // 只接受真实已发布公告的 id，避免客户端塞垃圾 id 进来长出一堆无用行
+  const exists = await env.DB.prepare(
+    "SELECT 1 AS ok FROM announcements WHERE id = ? AND status = 'published'"
+  )
+    .bind(id)
+    .first<{ ok: number }>()
+  if (!exists) throw new ApiError(404, "公告不存在", "NOT_FOUND")
+
+  await env.DB.prepare(
+    `INSERT INTO announcement_dismissals (user_id, announcement_id, created_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT (user_id, announcement_id) DO NOTHING`
+  )
+    .bind(user.id, id, new Date().toISOString())
+    .run()
+  return json({ ok: true })
 }
 
 /**
@@ -694,5 +751,5 @@ export async function listAllAnnouncements(
   const rows = await env.DB.prepare(
     `SELECT * FROM announcements ORDER BY pinned DESC, created_at DESC LIMIT 100`
   ).all<AnnouncementRow>()
-  return json({ announcements: (rows.results ?? []).map(toAnnouncement) })
+  return json({ announcements: (rows.results ?? []).map((r) => toAnnouncement(r)) })
 }
