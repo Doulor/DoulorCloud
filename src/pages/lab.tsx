@@ -668,6 +668,8 @@ export default function LabPage() {
    * 用来判断这一轮是还活着、还是卡死了（见 send() 开头的守卫与 STUCK_MS）。
    */
   const lastActivityRef = React.useRef(Date.now())
+  /** 是否正处于「断线自动重试」中（跨作用域用：send 里置位、streamRound 里复位） */
+  const retryingRef = React.useRef(false)
   /**
    * 本轮用量指标（2026-10-12 站长要求，仿 DSH 的上下文状态显示）：
    * 上下文占用、分项（系统提示 / 工具声明 / 对话历史）、首 token 耗时、生成速度。
@@ -1986,7 +1988,26 @@ export default function LabPage() {
     // 缺 path 时以前直接 return null（= 当成功），模型于是以为改好了继续往下改 ——
     // 改成明确失败，让上层回喂一轮纠正。list 本来就不需要 path。
     if (!a.path) {
-      if (a.tool === "list") return null
+      /**
+       * 🔴 这些工具**本来就不需要 path**，各自有专门的执行批次（见下面的 http /
+       * web_search / run / site / screenshot / inspect 批次）。
+       * 以前只有 list 被放行，其余一律回「缺少 path」——于是模型调 screenshot /
+       * inspect 时收到「必须带 path=文件名」的**假反馈**，就一遍遍改参数瞎试
+       * （2026-10-13 站长反馈「截图读取了五六次都没读出来」）。
+       */
+      const noPathTools: string[] = [
+        "list",
+        "run",
+        "need_vm",
+        "site",
+        "site_manual",
+        "skill",
+        "web_search",
+        "http",
+        "screenshot",
+        "inspect",
+      ]
+      if (noPathTools.includes(a.tool)) return null
       return missingPathReason(a.tool)
     }
     if (a.tool === "write") {
@@ -2428,6 +2449,16 @@ export default function LabPage() {
     setLiveThink("")
     sealedRef.current = false
     setThinkSealed(false)
+    /**
+     * 🔴 连接一旦真的建立，就**立刻**把「正在自动重试…」复位（2026-10-13 站长反馈）。
+     * 复位**不能**放在 streamRound 之后 —— 那个函数要等整轮流完才返回，于是文案会
+     * 一直停在「正在重试…」直到这一轮结束（站长看到的就是「…7m 0s」）。
+     * 复位成空串 ⇒ 回落到正常的「正在思考…」。
+     */
+    if (retryingRef.current) {
+      retryingRef.current = false
+      setLabRun({ label: "" })
+    }
     await consumeSSE(
       res,
       (delta) => {
@@ -2971,6 +3002,7 @@ export default function LabPage() {
             !controller.signal.aborted
           if (netErr && netRetries < MAX_NET_RETRIES) {
             netRetries += 1
+            retryingRef.current = true
             setLabRun({ label: t("lab.err.retrying") })
             toast.warning(t("lab.err.retrying"), { id: "lab-net-retry" })
             // 页面在后台就先等回前台：后台重试多半还是断（手机还会被挂起）
@@ -2983,6 +3015,16 @@ export default function LabPage() {
           throw err
         }
 
+        /**
+         * 🔴 重试**成功**后必须把状态文案**复位**（2026-10-13 站长反馈）：
+         * 之前只设了「连接断了，正在自动重试…」却从不复位 ⇒ 明明已经接上、模型也在
+         * 正常思考，界面却一直停在「正在自动重试…7m 0s」。
+         * 复位成空串 ⇒ 回落到正常的「正在思考…」（ThoughtLine 的 label 有兜底）。
+         */
+        if (retryingRef.current) {
+      retryingRef.current = false
+      setLabRun({ label: "" })
+    }
         /**
          * 收尾：把没来得及执行的补齐（中止时也走这里，保住已生成的部分）。
          *
@@ -3758,15 +3800,48 @@ export default function LabPage() {
     // 「继续」= 发一条系统口吻的用户消息，让模型接着上次的进度干，别从头重做
     void send("（系统）刚才那一轮中断了，请接着上次的进度继续，不要从头重做。")
   }
+  /**
+   * 「重发上一条」= **原地重发**，不是再追加一条（2026-10-13 站长要求）。
+   *
+   * 站长原话：「这个重发上一条真的是重发啊，不太好，如果反复出错会占用上下文，
+   * 把这个重发的逻辑改为把那条失败的重发，也就是说哪怕一直失败、我一直点重发上一条，
+   * 记录里面只会有一条出错消息」。
+   *
+   * 所以这里先**回退**（时间线截到那条用户气泡之前 + 对话历史截回它入队前的位置），
+   * 再用同一段文字重发 ⇒ 反复点也不会累积消息，上下文不被撑大。
+   * 回退口径与 editMessage 一致；老草稿没记 convoAt 时退而求其次找最后一条 user。
+   */
   const resendLast = () => {
-    const last = [...convoRef.current].reverse().find((m) => m.role === "user")
-    if (!last) return
-    const c = last.content
-    const text =
-      typeof c === "string"
-        ? c
-        : c.map((p) => ("text" in p ? p.text : "")).join("")
-    if (text.trim()) void send(text)
+    if (streaming) return
+    const list = entriesRef.current
+    let idx = -1
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].kind === "user") {
+        idx = i
+        break
+      }
+    }
+    if (idx < 0) return
+    const bubble = list[idx] as Extract<Entry, { kind: "user" }>
+    const text = bubble.text
+    if (!text.trim()) return
+    // ① 时间线：截到这条气泡之前 —— 上一次的失败条目/错误条目随之消失
+    updateEntries((prev) => prev.slice(0, idx))
+    // ② 对话历史：截回这条消息入队前的位置
+    let cut = bubble.convoAt
+    if (typeof cut !== "number" || cut < 0 || cut > convoRef.current.length) {
+      cut = -1
+      for (let i = convoRef.current.length - 1; i >= 0; i--) {
+        if (convoRef.current[i].role === "user") {
+          cut = i
+          break
+        }
+      }
+    }
+    if (cut >= 0) convoRef.current = convoRef.current.slice(0, cut)
+    void persistDraft()
+    // ③ 用同一段文字重发（send 会重新入队一条 user + 一条气泡）
+    void send(text)
   }
 
   /**

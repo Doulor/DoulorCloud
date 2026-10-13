@@ -832,6 +832,8 @@ export function ToolCard({
    * ⚠️ 阈值取 24px（不是 0）：滚动有小数/取整误差，差 1px 会被误判成「用户翻走了」，
    *    自动滚动就永久失效了。
    */
+  /** 截图灯箱：点图放大看（手机端尤其需要） */
+  const [zoom, setZoom] = React.useState<string | null>(null)
   const bodyRef = React.useRef<HTMLPreElement | null>(null)
   const stickBodyRef = React.useRef(true)
   React.useEffect(() => {
@@ -963,28 +965,51 @@ export function ToolCard({
           )}
         </span>
       </button>
-      {open && expandable && (
+      {/*
+        ⚠️ 图片**不能**放进下面这个 `overflow-auto + overscroll-contain` 的 <pre>：
+        手机端手指落在图上滑动时，滚动会被这个容器吃掉、又因为 overscroll-contain
+        不往上传，结果**整页划不动**（2026-10-13 站长反馈）。所以图片单独一块渲染，
+        并给 `touch-pan-y` 把纵向手势交还给页面滚动。
+      */}
+      {open && entry.image && (
+        <div className="border-t border-border/60 p-2">
+          <img
+            src={entry.image}
+            alt="页面截图"
+            onClick={() => setZoom(entry.image ?? null)}
+            className="max-h-[70vh] w-auto max-w-full cursor-zoom-in touch-pan-y rounded border border-border/60"
+          />
+        </div>
+      )}
+      {open && expandable && !entry.image && (
         <pre
           ref={bodyRef}
           onScroll={onBodyScroll}
           className="max-h-64 animate-in fade-in overflow-auto overscroll-contain border-t border-border/70 bg-muted/40 px-3 py-2 font-mono text-[11px] leading-relaxed duration-150"
         >
-          {entry.image ? (
-            /*
-              截图自检的结果：直接显示成图。
-              ⚠️ dataUrl 放在 image 字段（不在 content 里），所以这里单独渲染。
-            */
-            <img
-              src={entry.image}
-              alt="页面截图"
-              className="max-h-64 w-auto rounded border border-border/60"
-            />
-          ) : entry.tool === "replace" ? (
+          {entry.tool === "replace" ? (
             <ReplaceDiff content={entry.content} />
           ) : (
             entry.content
           )}
         </pre>
+      )}
+      {/*
+        灯箱：点图放大。点任意处 / 再点图关闭。
+        `touch-auto` 是有意的 —— 让系统的手势（双指缩放、拖动）照常可用，
+        这样手机上能自己捏合放大看细节。
+      */}
+      {zoom && (
+        <div
+          onClick={() => setZoom(null)}
+          className="fixed inset-0 z-[100] flex items-center justify-center overflow-auto bg-black/85 p-3"
+        >
+          <img
+            src={zoom}
+            alt="页面截图"
+            className="max-h-full max-w-full touch-auto rounded"
+          />
+        </div>
       )}
     </div>
   )

@@ -192,7 +192,15 @@ async function resolveLabKey(env: Env, userId: string): Promise<string> {
       //    决定它能用哪些渠道的。分组留空的 Key，上游 /v1/models 直接返回空、
       //    chat 报 `No available channel for model ... under group ...`
       //    —— 表现为实验室「站内额度」下「没有可用模型」，功能整条不可用。
-      const group = userSelectableGroups(await getSettings(env))[0]
+      const groups = userSelectableGroups(await getSettings(env))
+      /**
+       * 🔴 分组**优先用 `auto`**（站长 2026-10-10 明确要求：站点分组体系在改，统一走
+       * auto；已确认 auto 在 NewAPI 的可用分组列表里）。auto 不在可选列表时才退回
+       * 第一个可用分组（PR #52 的兜底思路）。
+       * ⚠️ 分组决定这个 token 能用哪些渠道 —— 分组不对就会报
+       *    `Model "…" is not available for this group`（2026-10-13 站长遇到的正是这个）。
+       */
+      const group = groups.includes("auto") ? "auto" : groups[0]
 
       // 1) 上游找同名 Key —— 现找现取，本地不缓存明文；被删掉会自动重建
       const tokens = await listTokens(env, token, uid)
@@ -205,7 +213,8 @@ async function resolveLabKey(env: Env, userId: string): Promise<string> {
         hits.sort((a, b) => b.id - a.id)[0]
       // 分组正常 → 直接复用。顺手把老名字在**本地**改成规范名，列表显示就统一了
       // （上游名字不动，见上面的注释）。
-      if (existing && existing.group.trim()) {
+      // 只有分组**正好是我们想要的**才复用；分组不对（含空）都算坏 Key，走下面的重建
+      if (existing && existing.group.trim() === group) {
         if (existing.name !== LAB_KEY_NAME) {
           await env.DB.prepare(
             "UPDATE newapi_keys SET name = ? WHERE user_id = ? AND token_id = ?"
@@ -215,7 +224,7 @@ async function resolveLabKey(env: Env, userId: string): Promise<string> {
         }
         return readApiKey(env, token, uid, existing.id)
       }
-      // 分组为空 = 早期版本建出来的坏 Key：先删掉再按正确分组重建，
+      // 分组不对（空、或不是目标分组）= 坏 Key：先删掉再按正确分组重建，
       // 否则用户会一直卡在「没有可用模型」；删干净也免得上游留两个同名 Key
       if (existing) {
         await deleteApiKey(env, token, uid, existing.id).catch((err) => {
@@ -284,9 +293,27 @@ type ChatPart =
   | { type: "image_url"; image_url: { url: string } }
 
 interface ChatMessage {
-  role: "system" | "user" | "assistant"
+  role: "system" | "user" | "assistant" | "tool"
   /** 纯文本消息是 string；带图的用户消息是 part 数组 */
   content: string | ChatPart[]
+  /**
+   * 🔴 原生工具调用的两个专字段（2026-10-12 补 —— 之前被这里剥掉，闯了大祸）：
+   *   · assistant 的 `tool_calls`：它这一轮发起的调用清单；
+   *   · tool 消息的 `tool_call_id`：对应哪一条调用。
+   * OpenAI 协议要求**每条 tool_call 都得有一条 tool 消息回应** ——
+   * 旧的 sanitize 只认 system/user/assistant、也只保留 role+content，
+   * 等于把整条工具链**在转发层拦腰斩断**：
+   *   · 上游收到悬空 tool_calls（有的直接报错；glm-5.3 表现为
+   *     「下一轮表现得像从没写过文件」，反复重写 —— 站长 2026-10-12 反馈）；
+   *   · 模型的工具调用历史从它的视角「消失」。
+   * 前端已经把回喂拼对了（见前端 feedResults），这里必须原样放行。
+   */
+  tool_calls?: {
+    id: string
+    type: "function"
+    function: { name: string; arguments: string }
+  }[]
+  tool_call_id?: string
 }
 
 /** 图片 data URL 的白名单格式（只收常见位图，不收 svg —— svg 里能塞脚本） */
@@ -343,8 +370,13 @@ function cleanContent(raw: unknown): string | ChatPart[] | null {
   return parts.length ? parts : null
 }
 
-/** 校验并收敛消息数组：跳非法项、限单条/总量、system 只留最后一条。 */
-function sanitizeMessages(raw: unknown): ChatMessage[] {
+/**
+ * 校验并收敛消息数组：跳非法项、限单条/总量、system 只留最后一条。
+ *
+ * ⚠️ `export` 是为了测试（test/lab-tool-passthrough.test.ts）—— 2026-10-12 那次
+ * 「tool 消息被这里静默丢弃」的事故，靠的就是这套单测兜底，别去掉导出。
+ */
+export function sanitizeMessages(raw: unknown): ChatMessage[] {
   if (!Array.isArray(raw)) {
     throw new ApiError(400, "对话内容格式不对", "INVALID_MESSAGES")
   }
@@ -353,12 +385,59 @@ function sanitizeMessages(raw: unknown): ChatMessage[] {
     if (!item || typeof item !== "object") continue
     const role = (item as { role?: unknown }).role
     const content = (item as { content?: unknown }).content
-    if (role !== "system" && role !== "user" && role !== "assistant") continue
+    /**
+     * 🔴 `role:"tool"`（原生工具调用的回执）必须放行（2026-10-12 补）：
+     * 之前这里只认 system/user/assistant ⇒ tool 消息被静默丢弃，
+     * assistant 的 tool_calls 也被剥掉 ⇒ 上游收到**悬空 tool_calls** ——
+     * 模型「看不见自己写过文件」的另一半真因（另一半在前端 feedResults，
+     * 已修）。丢一条 tool 上游就报「tool 消息对不上」，整轮直接失败。
+     */
+    if (
+      role !== "system" &&
+      role !== "user" &&
+      role !== "assistant" &&
+      role !== "tool"
+    )
+      continue
     const clean = cleanContent(content)
-    if (!clean) continue
+    /**
+     * 🔴 assistant 可能「只有 tool_calls、没有正文」（原生模式常态 ——
+     * 模型一句话不说直接调工具）。content 为空时 cleanContent 返回 null，
+     * 但这条消息**不能丢**：丢了它，后面的 tool 回执就成孤儿、
+     * 上游按「调用对不上」整轮报错。空内容但有 tool_calls 的放行为 ""。
+     */
+    if (!clean && !(role === "assistant" && Array.isArray((item as { tool_calls?: unknown }).tool_calls))) continue
     // 图片只允许出现在用户消息里：助手/系统的「图」没有语义，多半是注入
-    if (typeof clean !== "string" && role !== "user") continue
-    all.push({ role, content: clean })
+    // （clean 为 null 的 assistant 只可能带 tool_calls —— 上面已放行，content 已补 ""）
+    if (clean && typeof clean !== "string" && role !== "user") continue
+    const out: ChatMessage = { role, content: clean ?? "" }
+    // assistant 的工具调用清单原样带上（上面 ChatMessage 注释里的原因）
+    if (role === "assistant" && Array.isArray((item as { tool_calls?: unknown }).tool_calls)) {
+      const rawCalls = (item as { tool_calls: unknown[] }).tool_calls
+      const calls: NonNullable<ChatMessage["tool_calls"]> = []
+      for (const c of rawCalls) {
+        if (!c || typeof c !== "object") continue
+        const fn = (c as { function?: { name?: unknown; arguments?: unknown } }).function
+        if (typeof (c as { id?: unknown }).id !== "string" || !fn || typeof fn.name !== "string")
+          continue
+        calls.push({
+          id: (c as { id: string }).id.slice(0, 64),
+          type: "function",
+          function: {
+            name: fn.name.slice(0, 64),
+            arguments:
+              typeof fn.arguments === "string" ? fn.arguments.slice(0, MAX_CONTENT_CHARS) : "",
+          },
+        })
+        if (calls.length >= 32) break
+      }
+      if (calls.length) out.tool_calls = calls
+    }
+    // tool 消息的 call id：丢了它上游配不上对
+    if (role === "tool" && typeof (item as { tool_call_id?: unknown }).tool_call_id === "string") {
+      out.tool_call_id = (item as { tool_call_id: string }).tool_call_id.slice(0, 64)
+    }
+    all.push(out)
   }
 
   const system = [...all].reverse().find((m) => m.role === "system")
@@ -393,6 +472,15 @@ function sanitizeMessages(raw: unknown): ChatMessage[] {
   if (!talk.some((m) => m.role === "user")) {
     throw new ApiError(400, "至少需要一条用户消息", "INVALID_MESSAGES")
   }
+  /**
+   * 🔴 裁剪后必须**重锚**（2026-10-12 补）：
+   * 上面两步丢最老的，边界可能正好落在「assistant(tool_calls) → tool…」
+   * 这组消息**中间** —— 开头就会残留没有 assistant 在前头的 tool 消息，
+   * 上游按「tool 消息对不上调用」直接报错，整轮失败。
+   * 处理：从头剥掉所有开头的 tool 消息（它们对应的调用已经丢了，
+   * 留着只有害处），直到第一条非 tool 消息。
+   */
+  while (talk.length && talk[0].role === "tool") talk = talk.slice(1)
   return system ? [system, ...talk] : talk
 }
 
@@ -506,6 +594,39 @@ export async function chat(env: Env, request: Request): Promise<Response> {
   if (wantEffort) payload.reasoning_effort = REASONING_EFFORT_ORDER[effortIdx]
 
   /**
+   * Prompt caching（提示词缓存）—— 成本上最大的一刀。
+   *
+   * 为什么值得做：实验室**每一轮都是一次独立请求**（循环跑在前端），而
+   * 「系统提示 + 按需注入的站内手册（2564 字）+ 工具协议」在整场任务里一个字都不变。
+   * 一个 20 轮的任务，等于同一段前缀被**重复计费 20 次**；Anthropic 的
+   * `cache_control` 把重复前缀的输入价格压到 1/10，其余优化加起来都不如它。
+   *
+   * ⚠️ 只有 Anthropic 兼容端认这个字段（OpenAI 风格多半直接 400）。所以：
+   *   ① **只对看起来是 Anthropic 的模型/端点启用** —— 不对所有渠道白发一次 400；
+   *   ② 仍然照抄思考强度那条降级链：万一被拒（400/422），摘掉缓存标记原样重发一次。
+   *      宁可悄悄退化，也不能让用户看到调用失败。
+   */
+  const wantsPromptCache =
+    /(claude|anthropic)/i.test(finalModel) || /\/v1\/messages\b/.test(target.endpoint)
+  let cacheAttempted = false
+  if (wantsPromptCache) {
+    const blockForm = messages.map((m) =>
+      m.role === "system" && typeof m.content === "string"
+        ? {
+            role: m.role,
+            content: [
+              { type: "text", text: m.content, cache_control: { type: "ephemeral" } },
+            ],
+          }
+        : m
+    )
+    if (blockForm.some((m) => Array.isArray(m.content))) {
+      payload.messages = blockForm
+      cacheAttempted = true
+    }
+  }
+
+  /**
    * 原生工具调用：把 `tools` 原样转给上游。
    * ⚠️ 只做**结构校验 + 体积上限**，不解析内容 —— 具体有哪些工具是前端的事，
    *    后端不该知道（否则每加一个工具都要改后端）。
@@ -559,6 +680,12 @@ export async function chat(env: Env, request: Request): Promise<Response> {
         delete payload.reasoning_effort
         upstream = await sendUpstream(payload)
       }
+    }
+    // 上游不认 cache_control ⇒ 摘掉缓存标记原样重发（只退一次，不循环）
+    if (cacheAttempted && !upstream.ok && (upstream.status === 400 || upstream.status === 422)) {
+      payload.messages = messages
+      cacheAttempted = false
+      upstream = await sendUpstream(payload)
     }
   } catch (err) {
     console.error("实验室直连上游失败:", err)
@@ -629,11 +756,53 @@ export async function listModels(env: Env, request: Request): Promise<Response> 
   const sk = cfg.source === "admin" ? cfg.adminKey : await resolveLabKey(env, user.id)
   const base = newApiBaseUrl(env)
 
-  const res = await fetchWithTimeout(
-    `${base}/v1/models`,
-    { headers: { Authorization: `Bearer ${sk}` } },
-    20_000
-  )
+  let res: Response | null = null
+  let failReason = ""
+  /**
+   * ⚠️ 上游 `/v1/models` 偶发超时是**抛异常**（见 async-utils 的 fetchWithTimeout），
+   *    原来会直接冒泡成 **500 INTERNAL**，而前端拿到 500 之后会连锁崩掉：
+   *      模型清单为空 ⇒ 默认选中落到「自定义模型…」⇒ 发出去的 `model` 是空串
+   *      ⇒ 后端 `400 INVALID_MODEL` ⇒ **界面上一点正文都没有**
+   *      （2026-10-12 站长反馈「AI 实验室 / AI 聊天没有正文」的真源头）。
+   *    所以这里：① 失败**重试一次**（超时/网络/5xx/429 都值得重试）；
+   *              ② 两次都失败就**退到管理员渠道的免费模型** —— 它走我们自己的渠道配置，
+   *                 不依赖站内接口，用户至少还能正常聊天；
+   *              ③ 确实一个都没有才报 502，并把上游状态写清楚（不要裸 500）。
+   *    4xx（Key 失效等）不重试：重试解决不了，直接交给下面的详细报错分支。
+   */
+  for (let attempt = 0; attempt < 2 && !res; attempt++) {
+    try {
+      const r = await fetchWithTimeout(
+        `${base}/v1/models`,
+        { headers: { Authorization: `Bearer ${sk}` } },
+        12_000
+      )
+      if (r.ok || (r.status < 500 && r.status !== 429)) {
+        res = r
+        break
+      }
+      const t = await r.text().catch(() => "")
+      failReason = `上游返回 ${r.status}${t ? `：${t.slice(0, 120)}` : ""}`
+    } catch (err) {
+      failReason = err instanceof Error ? `上游请求失败：${err.message}` : "上游请求失败"
+    }
+    // 重试前稍等，避开瞬时抖动
+    if (!res && attempt === 0) await new Promise((r) => setTimeout(r, 400))
+  }
+
+  if (!res) {
+    if (cfg.source === "admin" && cfg.freeModels.length > 0) {
+      // 退到免费模型：宁可少几个模型，也不能让用户发不出消息
+      return json({
+        models: cfg.freeModels,
+        free: true,
+        freeModels: cfg.freeModels,
+        degraded: true,
+        reason: failReason,
+      })
+    }
+    throw new ApiError(502, `拉取模型列表失败（${failReason || "上游无响应"}）`, "UPSTREAM_ERROR")
+  }
   if (!res.ok) {
     /**
      * ⚠️ 必须把**上游状态码**带出来（2026-10-10 站长反馈「模型列表空的」）：
@@ -773,6 +942,8 @@ export interface LabProjectRow {
   user_id: string
   name: string
   slug: string
+  /** 1 = 用户手改过页面名，保存时不再自动重算 */
+  slug_locked: number
   description: string
   icon: string
   files: string
@@ -1008,9 +1179,79 @@ function slugify(name: string, fallback: string): string {
   return base || `p-${fallback.replace(/[^a-z0-9]/gi, "").slice(0, 8)}`
 }
 
+/**
+ * 链接里不能占用的名字。
+ *
+ * ⚠️ 这些是**站点自己的路径**（tyu.me 的根路由、API、静态资源……）。
+ *    有人把作品命名成 `p` 或 `api`，`/p/<slug>` 与将来的根路径就会打架 ——
+ *    这类冲突一旦发生是**线上事故**（不是显示难看），所以在写入时就拒掉。
+ */
+const RESERVED_SLUGS = new Set([
+  "p", "api", "www", "admin", "root", "app", "static", "assets", "public",
+  "preview", "share", "login", "logout", "register", "dashboard", "gallery",
+  "favicon.ico", "robots.txt", "sitemap.xml", "index.html", "404", "500",
+  "null", "undefined", "true", "false", "new", "edit", "delete",
+])
+
+/** 校验用户自己填的页面名：只允许小写字母/数字/中划线，且不能是保留字 */
+function validateSlug(raw: string): { ok: true; slug: string } | { ok: false; reason: string } {
+  const slug = raw.trim().toLowerCase()
+  if (slug.length < 3) return { ok: false, reason: "至少 3 个字符" }
+  if (slug.length > 40) return { ok: false, reason: "最多 40 个字符" }
+  if (!/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(slug)) {
+    return { ok: false, reason: "只能用英文字母、数字和中划线，且不能以中划线开头或结尾" }
+  }
+  if (RESERVED_SLUGS.has(slug)) return { ok: false, reason: "这个名字被站点占用了，换一个" }
+  return { ok: true, slug }
+}
+
+/**
+ * POST /api/lab/projects/:id/slug —— 自定义作品的页面名（链接尾部）。
+ *
+ * 只靠「保存作品」时的自动命名不够：用户想把作品挂成 `tyu.me/p/starwar`，
+ * 而作品名可能是中文（自动生成会退化成 `p-xxxx`）。
+ * 所以给一个显式的改名入口，并把名字**锁定**，避免下次保存被自动重算覆盖。
+ */
+export async function setProjectSlug(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const body = (await request.json().catch(() => null)) as { slug?: unknown } | null
+  const raw = typeof body?.slug === "string" ? body.slug : ""
+  const checked = validateSlug(raw)
+  if (!checked.ok) {
+    throw new ApiError(400, `页面名不合规：${checked.reason}`, "INVALID_SLUG")
+  }
+  const row = await env.DB.prepare(
+    "SELECT id, visibility FROM lab_projects WHERE id = ? AND user_id = ?"
+  )
+    .bind(id, user.id)
+    .first<{ id: string; visibility: string }>()
+  if (!row) throw new ApiError(404, "作品不存在", "NOT_FOUND")
+
+  // 已公开作品之间全局查重：撞了就明确让用户换名字，**不能悄悄加后缀**，
+  // 否则用户以为分享出去的是自己填的那个名字。
+  const taken = await env.DB.prepare(
+    "SELECT id FROM lab_projects WHERE slug = ? AND id != ? AND visibility = 'public'"
+  )
+    .bind(checked.slug, id)
+    .first()
+  if (taken) {
+    throw new ApiError(409, "这个页面名已经被别的公开作品用了，换一个", "SLUG_TAKEN")
+  }
+
+  await env.DB.prepare(
+    "UPDATE lab_projects SET slug = ?, slug_locked = 1, updated_at = ? WHERE id = ? AND user_id = ?"
+  )
+    .bind(checked.slug, new Date().toISOString(), id, user.id)
+    .run()
+  return json({ ok: true, slug: checked.slug })
+}
 async function uniqueSlug(
   env: Env,
-  userId: string,
+  _userId: string,
   name: string,
   fallback: string,
   excludeId?: string
@@ -1019,9 +1260,9 @@ async function uniqueSlug(
   for (let i = 0; i < 20; i++) {
     const candidate = i === 0 ? base : `${base}-${i + 1}`
     const row = await env.DB.prepare(
-      "SELECT id FROM lab_projects WHERE user_id = ? AND slug = ? AND id != ?"
+      "SELECT id FROM lab_projects WHERE slug = ? AND id != ? AND visibility = 'public'"
     )
-      .bind(userId, candidate, excludeId ?? "")
+      .bind(candidate, excludeId ?? "")
       .first()
     if (!row) return candidate
   }
@@ -1136,7 +1377,10 @@ export async function saveProject(env: Env, request: Request): Promise<Response>
   const id = typeof body.id === "string" && body.id ? body.id : null
   if (id) {
     const existing = await loadProject(env, id, user.id)
-    const slug = await uniqueSlug(env, user.id, name, existing.slug, id)
+    // 用户手改过页面名（slug_locked=1）就不再自动重算 —— 否则改个作品名会把分享链接改掉
+    const slug = existing.slug_locked
+      ? existing.slug
+      : await uniqueSlug(env, user.id, name, existing.slug, id)
     // 先写文件再改行：宁可留几个 R2 孤儿对象，也不要「行在、文件没了」
     const manifest = await writeFilesToR2(
       env,
@@ -1291,6 +1535,8 @@ function toGalleryJson(row: GalleryRow, isOwner: boolean) {
     authorAvatar: row.author_avatar,
     /** 只有 public 的作品才有可分享链接（`tyu.me/p/<id>`） */
     visibility: row.visibility,
+  /** 链接尾部用的页面名（用户自定义或从作品名自动生成） */
+  slug: row.slug,
     isMine: isOwner,
   }
 }
@@ -1473,9 +1719,9 @@ export async function getGalleryItem(
      FROM lab_projects p
      JOIN users u ON u.id = p.user_id
      LEFT JOIN lab_project_likes l ON l.project_id = p.id AND l.user_id = ?
-     WHERE p.id = ? AND (p.visibility = 'public' OR p.user_id = ?)`
+     WHERE (p.id = ? OR p.slug = ?) AND (p.visibility = 'public' OR p.user_id = ?)`
   )
-    .bind(user.id, id, user.id)
+    .bind(user.id, id, id, user.id)
     .first<GalleryRow>()
   if (!row) throw new ApiError(404, "作品不存在或未公开", "NOT_FOUND")
 
@@ -1517,9 +1763,9 @@ export async function likeGalleryItem(
   const row = await env.DB.prepare(
     `SELECT p.id, p.user_id FROM lab_projects p
      JOIN users u ON u.id = p.user_id
-     WHERE p.id = ? AND p.visibility = 'public' AND u.status = 'active'`
+     WHERE (p.id = ? OR p.slug = ?) AND p.visibility = 'public' AND u.status = 'active'`
   )
-    .bind(id)
+    .bind(id, id)
     .first<{ id: string; user_id: string }>()
   if (!row) throw new ApiError(404, "作品不存在或未公开", "NOT_FOUND")
 
@@ -1578,9 +1824,9 @@ export async function serveGalleryRaw(
   const row = await env.DB.prepare(
     `SELECT p.* FROM lab_projects p
      JOIN users u ON u.id = p.user_id
-     WHERE p.id = ? AND p.visibility = 'public' AND u.status = 'active'`
+     WHERE (p.id = ? OR p.slug = ?) AND p.visibility = 'public' AND u.status = 'active'`
   )
-    .bind(id)
+    .bind(id, id)
     .first<LabProjectRow>()
   if (!row) return new Response("Not Found", { status: 404 })
 
