@@ -74,8 +74,13 @@ export const EFFECTS = [
   "float",
 ] as const
 
-/** 共用 canvas 层的动效，组内互斥 */
-export const CANVAS_EFFECTS = ["particles", "rain", "sakura", "snow"] as const
+/**
+ * ⚠️ 2026-10-13：这里原本有 `export const CANVAS_EFFECTS = ["particles","rain","sakura","snow"]`，
+ * 标记「共用 canvas 层的动效，组内互斥」。全仓复核：**worker 侧无任何消费者**，
+ * 真正做互斥判断的是前端自己那一份（`src/pages/profile.tsx` 里同名常量，
+ * 注释还写着「与服务端 CANVAS_EFFECTS 一致」）—— 两份常量靠注释对齐，是典型的漂移源。
+ * 前端那份是实际生效的，worker 这份没有任何路径会读到（本文件也不返回它），已删。
+ */
 
 /**
  * 开屏动画。enter/portal 为交互式（点击进入主界面），fade/slide/typewriter 为非交互式（自动进入）。

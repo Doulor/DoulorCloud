@@ -19,8 +19,31 @@ const PREVIEW_URL = `/api/community/link-preview?url=${encodeURIComponent(
 describe("链接预览路由 + 限流（M9 / F4）", () => {
   it("路由已注册：端到端返回 200（F4 —— 原先固定 404，链接卡片从来不出）", async () => {
     const u = await makeUser()
-    const res = await fetchSelf(authRequest(u, PREVIEW_URL))
-    expect(res.status).toBe(200)
+    /**
+     * ⚠️ 必须打桩：链接预览会**出网抓取**目标地址去解析 meta 标签。
+     * `/community/abc123` 不是合法 uuid ⇒ 不走「站内帖」那条短路 ⇒ 真的去 fetch。
+     * 单测沙箱没有出网，真实 fetch 会挂到超时（全量并行时尤其明显，
+     * 实测踩到 `Test timed out in 20000ms`）。
+     */
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (url.startsWith("https://cloud.doulor.cn/community/")) {
+        return new Response(
+          "<html><head><title>测试帖子</title>" +
+            '<meta property="og:description" content="描述"></head><body>x</body></html>',
+          { status: 200, headers: { "Content-Type": "text/html" } }
+        )
+      }
+      return original(input as RequestInfo, init)
+    }) as unknown as typeof fetch
+    try {
+      const res = await fetchSelf(authRequest(u, PREVIEW_URL))
+      expect(res.status).toBe(200)
+    } finally {
+      globalThis.fetch = original
+    }
   })
 
   it("同一用户超过上限后被限流（原先可当免费抓取代理）", async () => {

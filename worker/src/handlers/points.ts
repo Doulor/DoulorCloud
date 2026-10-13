@@ -1060,7 +1060,7 @@ export async function createShopProduct(env: Env, request: Request): Promise<Res
   return json({ product })
 }
 
-/** PUT /api/admin/points/products/:id —— 编辑官方商品 */
+/** PUT /api/admin/points/products/:id —— 编辑商品（官方 / 用户商品都可以） */
 export async function updateShopProduct(
   env: Env,
   request: Request,
@@ -1068,6 +1068,21 @@ export async function updateShopProduct(
 ): Promise<Response> {
   const admin = await requireAdminScope(env, request, "points.official")
   assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  /**
+   * ⚠️ 这里**有意**不拦用户商品（2026-10-13 澄清过，别再补那条守卫）。
+   *
+   * `points.test.ts` 里曾有一条「管理员不能直接编辑用户商品（要走审核）」期望
+   * 400 `NOT_OFFICIAL_PRODUCT`，但那个口径与本模块的设计**相反**：
+   *   · `points-shop.ts` 的 `updateProduct` 显式支持用户商品（`isUserProduct`
+   *     → `sanitizeProductInput(..., { asUser: true })`，注释写明「与用户自己编辑
+   *     保持一致，避免把官方商品字段口径写进用户商品」）；
+   *   · 真正「要走审核」的是**用户自己**改 —— 那条走 `updateUserProduct()`，
+   *     改完 `review_status` 回到待审核（防「先过审再改内容」）；
+   *   · `shop-rental-term-snapshot.test.ts` 正是靠「管理员改用户商品租期」来验证
+   *     「结算按订单快照、不按商品当前值」这条不变式的。
+   * 即：**管理员操作视为可信**（不重复审核），用户自助修改才回审核。
+   * 之前那条期望是旧口径，已按实际语义改成「管理员可以编辑」。
+   */
   const body = await request.json().catch(() => ({}))
   const product = await updateProduct(env, id, body)
   await audit(env, admin.id, "points.shop.product", `更新商品「${product.name}」（${product.price} 积分）`)

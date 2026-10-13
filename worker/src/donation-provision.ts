@@ -69,7 +69,11 @@ export function resolveDonationGroup(raw: string | null | undefined): string {
 
 /** 探测 + 建渠道的总超时预算（毫秒）。单次 fetch 用更短的超时。 */
 const PROBE_TIMEOUT_MS = 12000
-const CHANNEL_TEST_HINT_MS = 20000
+// ⚠️ 2026-10-13：这里原本还有一个 `CHANNEL_TEST_HINT_MS = 20000` 与配套的
+// `export const CHANNEL_TEST_HINT`（「渠道测试通常 1–20 秒内返回」那句提示文案）。
+// 复核结论：**全仓没有任何地方引用它**，前端的渠道测试界面也从来没渲染过这句提示
+// （前端没有对应字段，服务端 admin-channels 的测试接口也不返回它）。
+// 它既不是「等接线」，也不是「有等价内联实现」，就是一段没有渲染者的死文案 —— 已删。
 
 /** NewAPI 渠道类型（constant/channel.go）：我们只支持这两种上游格式 */
 export const DONATION_CHANNEL_OPENAI = 1
@@ -718,10 +722,8 @@ export async function releaseDonationChannel(
   }
 }
 
-/** 供管理端展示：探测超时提示文案（避免用测试接口时管理员以为卡死） */
-export const CHANNEL_TEST_HINT = `渠道测试由中转站实际发起一次对话请求，通常 1–${Math.round(
-  CHANNEL_TEST_HINT_MS / 1000
-)} 秒内返回。`
+// ⚠️ 2026-10-13：这里原本导出 `CHANNEL_TEST_HINT`（「渠道测试通常 1–20 秒内返回」）。
+// 全仓无引用（连同它的 `CHANNEL_TEST_HINT_MS` 一起删了），详见文件上方 70 行处的说明。
 
 // ---------------------------------------------------------------------------
 // 失败模型的重试与补全

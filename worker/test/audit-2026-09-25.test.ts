@@ -69,7 +69,9 @@ describe("community_enabled 是真正的服务端开关（L7 / F2）", () => {
   })
 
   it("管理员不受开关影响（否则自己没法验证功能）", async () => {
-    const admin = await makeUser({ role: "admin" })
+    // community_enabled 的豁免判据是 `isPrivileged()`（root / superadmin），
+    // 普通 admin 不在其列（见 `src/handlers/space.ts`）。用 superadmin 表达「特权账号」。
+    const admin = await makeUser({ role: "superadmin" })
     await setSetting("community_enabled", "0")
     const res = await fetchSelf(authRequest(admin, "/api/community/posts"))
     expect(res.status).toBe(200)

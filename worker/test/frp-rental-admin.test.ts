@@ -366,7 +366,10 @@ describe("内网穿透租用化 · 管理端", () => {
     // 普通 admin 必须由站长在管理端显式授予具体范围。
     // 新增的 frp.plans / frp.rentals 也必须走这条规则，不能因为「是 admin」就放行。
     await seedNode()
-    const plainAdmin = await makeUser({ role: "admin" })
+    // `adminScope: null` = 显式不给任何权限域（落 NULL）。这是本用例的本意：
+    // admin 角色不再自动拥有权限，白名单为空 ⇒ 管理端接口一律 403。
+    // 注意：不传 adminScope 时 helpers 会默认给「全量叶子权限域」，所以这里必须显式写 null。
+    const plainAdmin = await makeUser({ role: "admin", adminScope: null })
 
     const res = await fetchSelf(
       authRequest(plainAdmin, `/api/admin/frp/subscriptions`, { method: "GET" })

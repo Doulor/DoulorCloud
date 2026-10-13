@@ -5,6 +5,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest"
 import { env } from "cloudflare:workers"
 import { authRequest, fetchSelf, makeUser, setPermissions, type TestUser } from "./helpers"
+import { installOkTcpStub, restoreTcpStub } from "./tcp-stub"
 import { parsePermissions } from "../src/permissions"
 
 const SUB_HOST = "https://sub.example.com"
@@ -15,6 +16,18 @@ const VALID_SUB = [
   "vless://11111111-2222-3333-4444-555555555555@1.2.3.4:443?type=ws&security=tls#香港节点",
   "vless://11111111-2222-3333-4444-555555555555@5.6.7.8:443?type=ws&security=tls#香港节点2",
   "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@9.9.9.9:8388#美国节点",
+].join("\n")
+
+/**
+ * 与 `VALID_SUB` **节点不同**的一份订阅 —— 需要「两个订阅源都被真的导入」的用例必须用它。
+ *
+ * 为什么不能用同一份：`donations.ts` 导入前会做**节点查重**（2026-10-03 站长要求：
+ * 「全部节点都已在池里 = 同一份资源换个 URL，直接拒绝导入」）。两份内容相同 ⇒
+ * 指纹全撞 ⇒ 第二份被 `continue` 掉，只导入 1 条。
+ */
+const VALID_SUB_ALT = [
+  "vless://22222222-3333-4444-5555-666666666666@11.22.33.44:8443?type=ws&security=tls#新加坡节点",
+  "trojan://pw@55.66.77.88:443#日本节点",
 ].join("\n")
 
 interface Call {
@@ -50,13 +63,23 @@ function textResponse(body: string, status = 200): Response {
 
 beforeEach(() => {
   calls = []
-  // proxy_subscriptions 是跨用例可查的表，清掉避免互相干扰
-  return env.DB.prepare("DELETE FROM proxy_subscriptions").run()
+  // 沙箱没有真实出网 TCP：让探活结论可控（否则「连不上 → 转人工」会误伤所有期望自动通过的用例）
+  installOkTcpStub()
+  // proxy_subscriptions / proxy_node_fingerprints 都是跨用例可查的表，清掉避免互相干扰。
+  // ⚠️ 指纹表以前漏清了：自动审核导入订阅时会写 proxy_node_fingerprints，而
+  // donations.ts 的导入前查重读的正是它（「全部节点都已在池里 → 拒绝导入」）。
+  // 以前探活必然失败 ⇒ 一条都导不进来 ⇒ 没写指纹 ⇒ 掩盖了这个隔离缺陷；
+  // 探活结论可控之后，前一条用例导入的节点会把后一条用例全卡掉。
+  return env.DB.batch([
+    env.DB.prepare("DELETE FROM proxy_subscriptions"),
+    env.DB.prepare("DELETE FROM proxy_node_fingerprints"),
+  ])
 })
 
 afterEach(() => {
   for (let i = restores.length - 1; i >= 0; i--) restores[i]()
   restores = []
+  restoreTcpStub()
   vi.restoreAllMocks()
 })
 
@@ -246,11 +269,12 @@ describe("撤销代理捐献时收回订阅", () => {
       .bind(new Date().toISOString(), new Date().toISOString())
       .run()
 
-    stubFetch((url) =>
-      url.startsWith(SUB_HOST) || url.startsWith(GOOD_HOST)
-        ? textResponse(VALID_SUB)
-        : undefined
-    )
+    stubFetch((url) => {
+      // 两个订阅源给**不同的节点** —— 否则第二份会被节点查重拦掉，只导入 1 条
+      if (url.startsWith(SUB_HOST)) return textResponse(VALID_SUB)
+      if (url.startsWith(GOOD_HOST)) return textResponse(VALID_SUB_ALT)
+      return undefined
+    })
     const { body } = await submit(donor, [`${SUB_HOST}/a`, `${GOOD_HOST}/b`])
     expect(body.status).toBe("approved")
     expect(await subs()).toHaveLength(3) // 2 条捐献 + 1 条手工

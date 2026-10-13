@@ -78,6 +78,39 @@ export type TcpConnector = (address: { hostname: string; port: number }) => Sock
 const defaultConnector: TcpConnector = (address) => connect(address)
 
 /**
+ * 测试用的 connector 覆盖点 —— **必须挂在 `globalThis` 上**，不能是模块级变量。
+ *
+ * 为什么（踩过一次，记下来）：单测里 Worker 是经 `SELF.fetch()` 跑的，它加载的是
+ * **另一份模块注册表** —— 测试文件 `import` 到的 `proxy-latency` 与 Worker 内部
+ * 实际使用的**不是同一个模块实例**。所以：
+ *   · 模块级变量当覆盖点 ⇒ 测试改了，Worker 看不到（无效）
+ *   · `vi.mock("../src/handlers/proxy")` 同样拦不住（实测仍在真握手）
+ * 而 `globalThis` 是**跨注册表共享**的 —— 同仓库既有测试的 `stubFetch`（改
+ * `globalThis.fetch`）就是这么生效的。
+ *
+ * 用途：`autoReviewProxyDonation` 等**HTTP 入口**的路径会真去握手节点，而单测沙箱
+ * 没有出网 TCP ⇒ 全部失败 ⇒ 误命中「测过但一个都没连上 → 转人工」闸门，用例既拿不到
+ * 确定结果、每条还要空等 5 秒超时。挂上这个覆盖点后，探活结论变成测试的**输入**。
+ *
+ * ⚠️ 生产环境永远不会设置这个键；这里的读取不依赖任何请求输入，不构成攻击面。
+ *    `opts.connector` 的优先级仍高于它（按调用注入更精确）。
+ */
+const TCP_OVERRIDE_KEY = "__doulorTestTcpConnector"
+
+/** 仅测试用：注入假 connector（传 `null` 还原）。生产代码不得调用。 */
+export function setTcpConnectorForTest(connector: TcpConnector | null): void {
+  const g = globalThis as unknown as Record<string, unknown>
+  if (connector) g[TCP_OVERRIDE_KEY] = connector
+  else delete g[TCP_OVERRIDE_KEY]
+}
+
+function testConnectorOverride(): TcpConnector | undefined {
+  return (globalThis as unknown as Record<string, unknown>)[TCP_OVERRIDE_KEY] as
+    | TcpConnector
+    | undefined
+}
+
+/**
  * IPv6 字面量在节点链接里写作 `[::1]`（见 parseAuthorityLink），
  * 但 `connect()` 要的是不带方括号的地址。
  */
@@ -96,7 +129,7 @@ export async function measureTcpHandshake(
   opts: { timeoutMs?: number; connector?: TcpConnector } = {}
 ): Promise<{ ok: boolean; latencyMs: number | null; reason: string }> {
   const timeoutMs = opts.timeoutMs ?? LATENCY_TIMEOUT_MS
-  const connector = opts.connector ?? defaultConnector
+  const connector = opts.connector ?? testConnectorOverride() ?? defaultConnector
   const hostname = normalizeHost(host)
   if (!hostname || !Number.isFinite(port) || port <= 0) {
     return { ok: false, latencyMs: null, reason: "节点缺少地址或端口" }
@@ -168,10 +201,12 @@ export async function measureNodes(
   if (targets.length === 0) return []
   const timeoutMs = opts.timeoutMs ?? LATENCY_TIMEOUT_MS
   const concurrency = Math.max(1, Math.min(opts.concurrency ?? LATENCY_CONCURRENCY, 6))
-  const connector = opts.connector ?? defaultConnector
-
+  // ⚠️ 这里**不要**兜底 `?? defaultConnector`：`measureTcpHandshake` 才是解析
+  // connector 的唯一地方（`opts.connector` → 测试覆盖点 → 真实 connect）。
+  // 之前在这里兜底会让每一次调用都带着一个具体实现进去，把测试覆盖点**整个绕过**
+  // —— 表现为「沙箱里探活仍然真出网」，用例白等 5 秒。
   return mapLimit(targets, concurrency, async (t) => {
-    const r = await measureTcpHandshake(t.host, t.port, { timeoutMs, connector })
+    const r = await measureTcpHandshake(t.host, t.port, { timeoutMs, connector: opts.connector })
     return { index: t.index, host: t.host, port: t.port, ...r }
   })
 }

@@ -34,8 +34,13 @@ function rec(over: Partial<DnsRecordLike>): DnsRecordLike {
   }
 }
 
-const rules = (r: DnsRecordLike) => assessRecord(r, { zoneSuffix: "doulor.cn" }).map((f) => f.rule)
-const topSev = (r: DnsRecordLike) => assessRecord(r, { zoneSuffix: "doulor.cn" })[0]?.severity ?? null
+// ⚠️ 选项名是 `zoneSuffixes`（数组）：本站可能有多个根域（`allRootDomainNames`），
+// 判定「CNAME 指向平台自身命名空间」时要逐个后缀比。老写法 `zoneSuffix: "..."`（单数）
+// 已经不存在，传进去会让 `opts.zoneSuffixes.some(...)` 直接 TypeError。
+const ZONE_OPTS = { zoneSuffixes: ["doulor.cn"] } as const
+
+const rules = (r: DnsRecordLike) => assessRecord(r, ZONE_OPTS).map((f) => f.rule)
+const topSev = (r: DnsRecordLike) => assessRecord(r, ZONE_OPTS)[0]?.severity ?? null
 
 describe("DNS 合规规则 · 地址类", () => {
   it("内网地址判高风险", () => {
@@ -70,7 +75,7 @@ describe("DNS 合规规则 · 地址类", () => {
     // 定成 high 会让一批「A a / A b」式的垃圾记录把真正要紧的几条淹没
     // （线上实测：一个用户 22 条非法记录把高风险计数从 6 抬到 27）。
     expect(rules(rec({ content: "a" }))).toContain("invalid-content")
-    expect(assessRecord(rec({ content: "a" }), { zoneSuffix: "doulor.cn" })[0].severity).toBe("medium")
+    expect(assessRecord(rec({ content: "a" }), ZONE_OPTS)[0].severity).toBe("medium")
     expect(rules(rec({ content: "999.1.1.1" }))).toContain("invalid-content")
   })
 
@@ -172,7 +177,7 @@ describe("DNS 合规规则 · 名字与状态", () => {
     const dup = new Map<string, number>()
     dup.set("p.liuli.doulor.cn|A|p", 2)
     const r = rec({ name: "p", fqdn: "p.liuli.doulor.cn", content: "p" })
-    const found = assessRecord(r, { zoneSuffix: "doulor.cn", duplicateKey: dup })
+    const found = assessRecord(r, { ...ZONE_OPTS, duplicateKey: dup })
     expect(found.map((f) => f.rule)).toContain("duplicate-record")
   })
 })
@@ -181,19 +186,19 @@ describe("DNS 合规规则 · 深度探测结果", () => {
   it("悬空 CNAME 判高风险（可被抢注接管）", () => {
     const r = rec({ type: "CNAME", content: "gone.example.com" })
     const found = assessRecord(r, {
-      zoneSuffix: "doulor.cn",
+      ...ZONE_OPTS,
       resolution: { addresses: ["gone.example.com"], targetDangling: true },
     })
     expect(found.map((f) => f.rule)).toContain("dangling-cname")
   })
 
   it("解析不出来只判中风险，且探测自身失败只算提示（不冤判记录）", () => {
-    const noAddr = assessRecord(rec({}), { zoneSuffix: "doulor.cn", resolution: { addresses: [] } })
+    const noAddr = assessRecord(rec({}), { ...ZONE_OPTS, resolution: { addresses: [] } })
     expect(noAddr.map((f) => f.rule)).toContain("no-address")
     expect(noAddr.find((f) => f.rule === "no-address")?.severity).toBe("medium")
 
     const errored = assessRecord(rec({}), {
-      zoneSuffix: "doulor.cn",
+      ...ZONE_OPTS,
       resolution: { addresses: [], error: "DoH timeout" },
     })
     expect(errored.map((f) => f.rule)).toContain("resolve-failed")
@@ -205,7 +210,7 @@ describe("DNS 合规规则 · 结果排序与降噪", () => {
   it("高风险排在中/低之前", () => {
     const found = assessRecord(
       rec({ content: "192.168.1.1", name: "login", fqdn: "login.alice.doulor.cn" }),
-      { zoneSuffix: "doulor.cn" }
+      ZONE_OPTS
     )
     expect(found[0].severity).toBe("high")
     // 严重度必须是单调不降的
@@ -218,7 +223,7 @@ describe("DNS 合规规则 · 结果排序与降噪", () => {
   it("干净的记录只给「未开代理」这一条提示，不当风险报", () => {
     const found = assessRecord(
       rec({ content: "120.227.201.25", name: "linjian", fqdn: "linjian.doulor.cn" }),
-      { zoneSuffix: "doulor.cn" }
+      ZONE_OPTS
     )
     expect(found.map((f) => f.rule)).toEqual(["origin-unproxied"])
   })
@@ -226,7 +231,7 @@ describe("DNS 合规规则 · 结果排序与降噪", () => {
   it("开了代理的干净记录没有任何发现项", () => {
     const found = assessRecord(
       rec({ content: "120.227.201.25", name: "linjian", fqdn: "linjian.doulor.cn", proxied: 1 }),
-      { zoneSuffix: "doulor.cn" }
+      ZONE_OPTS
     )
     expect(found).toEqual([])
   })

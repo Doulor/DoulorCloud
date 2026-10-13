@@ -21,6 +21,8 @@
  *   - 宿主 → 虚拟机传文件走 heredoc（带引号的分隔符，避免 $ 被展开）
  */
 
+import { tStatic } from "@/i18n"
+
 export type VmPhase = "off" | "loading" | "ready" | "error"
 
 export type CommandResult = {
@@ -95,7 +97,7 @@ function waitFor<T>(fn: () => T | null, timeoutMs: number, pollMs = 200): Promis
     const tick = () => {
       const v = fn()
       if (v) return resolve(v)
-      if (Date.now() - t0 > timeoutMs) return reject(new Error("等待超时"))
+      if (Date.now() - t0 > timeoutMs) return reject(new Error(tStatic("lab.term.err.timeout")))
       setTimeout(tick, pollMs)
     }
     tick()
@@ -109,7 +111,7 @@ function loadScriptOnce(src: string): Promise<void> {
     s.src = src
     s.dataset.labVm = "1"
     s.onload = () => resolve()
-    s.onerror = () => reject(new Error("v86 运行时加载失败（可能是网络问题）"))
+    s.onerror = () => reject(new Error(tStatic("lab.term.err.runtimeLoad")))
     document.head.appendChild(s)
   })
 }
@@ -171,7 +173,7 @@ export function bootVM(): Promise<void> {
       )
       await loadScriptOnce(assetUrl("libv86.js"))
       const V86 = (window as any).V86
-      if (!V86) throw new Error("v86 运行时未就绪")
+      if (!V86) throw new Error(tStatic("lab.term.err.runtimeNotReady"))
 
       serialBuf = ""
       emulator = new V86({
@@ -248,7 +250,7 @@ export function shutdownVM() {
  * 用哨兵行判断结束；超时就返回已收集到的部分（让模型至少看到一半输出）。
  */
 export async function runCommand(cmd: string, timeoutMs = 25_000): Promise<CommandResult> {
-  if (phase !== "ready" || !emulator) throw new Error("浏览器终端还没启动")
+  if (phase !== "ready" || !emulator) throw new Error(tStatic("lab.term.err.notStarted"))
 
   const token = `__LABDONE_${Math.random().toString(36).slice(2, 10)}__`
   const before = serialBuf.length
@@ -271,7 +273,7 @@ export async function runCommand(cmd: string, timeoutMs = 25_000): Promise<Comma
   const res = cleanOutput(raw, cmd, token)
   if (!finished) {
     return {
-      output: `${res.output}\n（命令超时未结束，可能卡在交互式程序里；以上是已收到的输出）`.trim(),
+      output: `${res.output}\n${tStatic("lab.cmd.timedOutNote")}`.trim(),
       code: null,
       timedOut: true,
     }
@@ -298,7 +300,7 @@ async function writeFileToVm(fullPath: string, content: string): Promise<boolean
 export async function syncProjectFiles(
   files: Record<string, string>
 ): Promise<{ pushed: number; skipped: string[] }> {
-  if (phase !== "ready") throw new Error("浏览器终端还没启动")
+  if (phase !== "ready") throw new Error(tStatic("lab.term.err.notStarted"))
 
   const skipped: string[] = []
   const wanted = new Set(Object.keys(files))
@@ -331,15 +333,15 @@ export async function syncProjectFiles(
 
 /** 把命令输出压缩成回喂给模型的一段文本 */
 export function formatCommandResult(cmd: string, r: CommandResult): string {
-  const head = `[执行命令] ${cmd.trim()}`
+  const head = tStatic("lab.cmd.head", { cmd: cmd.trim() })
   const meta = r.timedOut
-    ? "（超时）"
+    ? tStatic("lab.cmd.meta.timeout")
     : r.code == null
       ? ""
-      : `（退出码 ${r.code}）`
-  let body = r.output || "(没有输出)"
+      : tStatic("lab.cmd.meta.exitCode", { code: r.code })
+  let body = r.output || tStatic("lab.cmd.noOutput")
   if (body.length > 6_000) {
-    body = `${body.slice(0, 2_500)}\n…（中间省略）…\n${body.slice(-2_500)}`
+    body = `${body.slice(0, 2_500)}\n${tStatic("lab.cmd.omitted")}\n${body.slice(-2_500)}`
   }
   return `${head} ${meta}\n${body}`
 }

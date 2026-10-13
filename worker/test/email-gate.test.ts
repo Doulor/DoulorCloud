@@ -93,7 +93,10 @@ describe("未验证邮箱：豁免与对照组", () => {
   })
 
   it("管理员即使未验证也豁免（否则站长被锁在后台外）", async () => {
-    const admin = await makeUser({ role: "admin", emailVerified: false })
+    // 邮箱门槛的豁免同样是 `isPrivileged()`（root / superadmin）而不是 admin_scope：
+    // `requireUser` 里 `email_verified !== 1 && !isPrivileged(role)` 才拦。
+    // 站长 / 超级管理员要能在后台自证，普通 admin 不在豁免范围。
+    const admin = await makeUser({ role: "superadmin", emailVerified: false })
     await expectNotGated(
       await fetchSelf(authRequest(admin, "/api/subdomains", post({ name: "whatever" })))
     )

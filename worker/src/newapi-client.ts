@@ -620,46 +620,31 @@ export async function checkHealth(env: Env): Promise<NewApiHealth> {
 }
 
 /**
- * 请求发送邮箱验证码（无需鉴权）。
- * 验证码由 NewAPI 服务端生成并邮件发送到本站域名邮箱，本站随后从收件箱读取。
- */
-export async function requestEmailCode(env: Env, email: string): Promise<void> {
-  const res = await newApiFetch(
-    env,
-    `/api/verification?email=${encodeURIComponent(email)}`,
-    { method: "GET", auth: "none" }
-  )
-  await unwrap(res, "发送验证码")
-}
-
-/**
- * 自助注册：**这是唯一能把 email 写入 NewAPI 的途径**
- * （管理员建号接口、/api/user/manage、PUT /api/user/self 都会丢弃 email）。
+ * ⚠️ 2026-10-13：这里原本是「NewAPI 自助注册」那一整条链的入口：
  *
- * 两个关键行为（均实测确认）：
- *   - 用户名已存在时返回「Username already exists or has been deleted」，
- *     也就是说**不能**先建号再补邮箱，必须在账号不存在时直接注册。
- *   - 该接口需要邮箱验证码（本站邮箱的收件箱能收到）。
+ *   requestEmailCode(env, email)            // /api/verification，让 NewAPI 发验证码
+ *   registerUser(env, u, p, email, code)    // /api/user/register，带 verification_code
+ *   generateAccessToken(env, session, uid)  // /api/user/token，用 session cookie 换 token
+ *   extractVerificationCode(mailText)       // 从收到的验证码邮件正文里抠出验证码
+ *
+ * 复核结论：**这条链已经作废，不是「还没接线」，所以直接删掉**（四个函数全删）。
+ *
+ * 为什么会作废 —— 开通中转站账号的路径在 2026-10-12 换成了 OIDC：
+ *   1. 现在建号由**用户在中转站点「用 Doulor Cloud 登录」**完成（OIDC），
+ *      账号上的 `oidc_id` = 本站 users.id（见 `resolveMyRelayAccount` 的认人判据）；
+ *   2. 回到本站走 `POST /api/dev/bind`（handlers/newapi.ts）：用 OIDC + 复用本站密码
+ *      给账号补密码，然后 `login()` 换长期 access token。
+ *      也就是说「拿 access token」这条需求已被 `login()` 覆盖 ——
+ *      它自 rc.40 起**直接在登录响应里返回 access_token**，不再需要
+ *      `generateAccessToken` 那套「session cookie → /api/user/token」两步换令牌。
+ *   3. 自助注册还要求本站能**读自己的收件箱**去取 NewAPI 发来的验证码，
+ *      而全仓没有任何收件/解析入站邮件的实现（`extractVerificationCode`
+ *      连调用者都没有）。留着它就是留一条「谁都调不通」的假路径。
+ *
+ * 副作用评估：这四个函数全仓无引用（`check-unused-exports.mjs` 的 ALLOW 里挂了很久），
+ * 删除后不影响任何现有流程；前端也没有「补 email 自助注册」的入口（属未开工需求）。
+ * 若将来真要做自助注册，请连同「收件箱读取」一起设计，不要只把函数放回来。
  */
-export async function registerUser(
-  env: Env,
-  username: string,
-  password: string,
-  email: string,
-  verificationCode: string
-): Promise<void> {
-  const res = await newApiFetch(env, "/api/user/register", {
-    method: "POST",
-    body: JSON.stringify({
-      username,
-      password,
-      email,
-      verification_code: verificationCode,
-    }),
-    auth: "none",
-  })
-  await unwrap(res, "注册账号")
-}
 
 // ---- 用户级操作 ----
 
@@ -707,24 +692,14 @@ export async function login(
   return { userId, accessToken, username: remoteUsername }
 }
 
-/** 生成/获取用户的长期 access token */
-export async function generateAccessToken(
-  env: Env,
-  session: string,
-  userId: number
-): Promise<string> {
-  const res = await newApiFetch(env, "/api/user/token", {
-    method: "GET",
-    headers: { Cookie: session, "New-Api-User": String(userId) },
-    auth: "none",
-  })
-  const data = await unwrap<string | { token?: string }>(res, "生成访问令牌")
-  const token = typeof data === "string" ? data : data?.token
-  if (!token) {
-    throw new ApiError(502, "NewAPI 未返回访问令牌", "NEWAPI_ERROR")
-  }
-  return token
-}
+/**
+ * ⚠️ 2026-10-13：这里原本有 `generateAccessToken(env, session, userId)`
+ * （`GET /api/user/token`，用 session cookie 换长期令牌）。已删除，理由：
+ *   · 全仓无调用点；
+ *   · `login()`（上面那个）自 NewAPI rc.40 起**在登录响应里直接返回 access_token**，
+ *     它自己的注释就写着「不再需要『session cookie → /api/user/token』两步换令牌」；
+ *   · 于是它是被 `login()` 取代的旧路径，留着只会让人以为还有两种取令牌方式。
+ */
 
 /** 以用户身份调用（使用解密后的 access token） */
 async function asUser(
@@ -903,21 +878,11 @@ export async function deleteApiKey(
 }
 
 /**
- * 从 NewAPI 验证码邮件正文中提取验证码。
- * 实际邮件形如：「您的验证码为: 56608a」，10 分钟内有效。
+ * ⚠️ 2026-10-13：这里原本有 `extractVerificationCode(text)`（从 NewAPI 验证码邮件
+ * 正文里抠验证码的正则组）。已删除：它只服务于上面那条已作废的「自助注册」链，
+ * 而那条链连同 `requestEmailCode` / `registerUser` 一起删了 —— 全仓从来没有
+ * 任何读收件箱的代码把它喂进去过。
  */
-export function extractVerificationCode(text: string): string | null {
-  const patterns = [
-    /验证码为[:：]\s*([A-Za-z0-9]{4,12})/,
-    /verification code is[:\s]+([A-Za-z0-9]{4,12})/i,
-    /(?:code|验证码)[^\w]{0,10}([A-Za-z0-9]{6})/i,
-  ]
-  for (const re of patterns) {
-    const m = re.exec(text)
-    if (m) return m[1]
-  }
-  return null
-}
 
 /**
  * 修改 NewAPI 密码（用户自助）。

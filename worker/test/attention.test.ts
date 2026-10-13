@@ -237,7 +237,11 @@ describe("角标汇总 /api/attention", () => {
   })
 
   it("管理员拿到各栏目待处理数，且 total 等于各项之和", async () => {
-    const admin = await makeUser({ role: "admin" })
+    // /api/attention 的管理角标走的是 `isPrivileged()`（root / superadmin 全权），
+    // 不是 admin_scope 白名单 —— 普通 admin 即使配了全部叶子权限域也拿不到 admin 段
+    // （见 `src/handlers/attention.ts` 的 `const privileged = isPrivileged(me.role)`）。
+    // 这里测的是「特权账号能看到待办汇总」，所以用 superadmin。
+    const admin = await makeUser({ role: "superadmin" })
     const user = await makeUser()
 
     // 待处理反馈 2 条（另 1 条已 resolved，不算）

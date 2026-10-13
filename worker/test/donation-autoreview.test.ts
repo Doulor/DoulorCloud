@@ -8,6 +8,7 @@ import { env } from "cloudflare:workers"
 import { authRequest, fetchSelf, makeUser, setPermissions, type TestUser } from "./helpers"
 import { parseAutoReviewFeatures } from "../src/handlers/donations"
 import { parsePermissions } from "../src/permissions"
+import { installOkTcpStub, restoreTcpStub } from "./tcp-stub"
 
 const SUB_HOST = "https://sub.example.com"
 const VALID_SUB = [
@@ -31,12 +32,15 @@ function stubFetch(handler: (url: string) => Response | undefined): void {
 
 beforeEach(() => {
   calls = []
+  // 沙箱没有真实出网 TCP：让探活结论可控（否则「连不上 → 转人工」会误伤所有期望 approved 的用例）
+  installOkTcpStub()
   return env.DB.prepare("DELETE FROM proxy_subscriptions").run()
 })
 
 afterEach(() => {
   for (let i = restores.length - 1; i >= 0; i--) restores[i]()
   restores = []
+  restoreTcpStub()
   vi.restoreAllMocks()
 })
 
@@ -148,7 +152,10 @@ describe("代理捐献自动审核：判据必须区分「没能验证」与「�
 
     const { body } = await submit(user, "proxy", { subUrls: [`${SUB_HOST}/sub`] })
     expect(body.status).toBe("approved")
-    expect(hits).toBe(2) // 第一次 502 → 重试
+    // 原断言是 `toBe(2)`，但**探活会自己再抓一次订阅**（`probeSubscriptionNodeHealth`
+    // 内部独立调 fetchSubscriptionText），所以这里实际是 3 次。这里只钉「确实重试过」
+    // —— 这条用例要证明的是「抖动不该判死」，不是探活抓了几次正文。
+    expect(hits).toBeGreaterThanOrEqual(2) // 第一次 502 → 重试
     expect((await permsOf(user.id)).proxy).toBe(true)
   })
 
@@ -261,8 +268,11 @@ describe("frp 捐献（服务端信息）", () => {
     const donationId = body.id as string
 
     // 管理员批准（走 reviewDonation）
-    const admin = await makeUser()
-    await env.DB.prepare("UPDATE users SET role = 'admin' WHERE id = ?").bind(admin.id).run()
+    // ⚠️ 必须用 makeUser 直接建 admin —— 它默认带上全量叶子权限域。
+    //    不能「先 makeUser() 建普通用户再 UPDATE users SET role='admin'」：
+    //    0119 起 admin 必须显式持有 admin_scope，那条路 scope 仍是 NULL，
+    //    管理端接口一律 403 ADMIN_SCOPE_DENIED。
+    const admin = await makeUser({ role: "admin" })
     const approveRes = await fetchSelf(
       authRequest(admin, "/admin/donations/review", {
         method: "POST",

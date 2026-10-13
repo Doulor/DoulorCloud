@@ -10,8 +10,15 @@
 //       实验室 Key（group="") 给 0 个。
 //
 // 本文件锁死两件事：
-//   A. 新建的实验室 Key 必须带上「站点可自选分组」（默认 default，跟随设置项）；
-//   B. 历史遗留的空分组 Key 要**删掉重建**，而不是继续复用（否则用户一直卡住）。
+//   A. 新建的实验室 Key 必须带**固定分组 `LAB_KEY_GROUP`（auto）**—— 站长 2026-10-10
+//      明确要求：留空会让 Key 跟着用户默认分组漂，站点分组体系统一走 auto。
+//      注意它**不再跟随** `newapi_group` 设置项（见 `src/handlers/lab.ts:206` 与
+//      `src/lab-key.ts` 的 `LAB_KEY_GROUP` 注释）。
+//   B. 历史遗留的空分组（或分组不是 auto 的）Key 要**删掉重建**，而不是继续复用
+//      （否则用户一直卡在「没有可用模型」）。
+//
+// 分组来源是 `userSelectableGroups()`（恒为 `["auto", 捐献分组]`），所以「auto 不在
+// 可选列表」那条兜底分支目前不可达；本文件不构造该场景，只钉住实际生效的行为。
 import { describe, it, expect, afterEach } from "vitest"
 import { env } from "cloudflare:workers"
 import { authRequest, fetchSelf, makeUser, setSetting } from "./helpers"
@@ -19,7 +26,7 @@ import { encryptSecret } from "../src/crypto"
 import { resetAdminCredentialCache } from "../src/newapi-client"
 // 从源码取规范名（2026-10-10「网页实验室」已改名「AI实验室」）——
 // 测试里写死名字会在改名后再红一次。
-import { LAB_KEY_NAME } from "../src/lab-key"
+import { LAB_KEY_NAME, LAB_KEY_GROUP } from "../src/lab-key"
 
 const BASE = "https://api.doulor.cn"
 
@@ -140,7 +147,7 @@ async function seedBoundAccount(opts: {
 }
 
 describe("网页实验室：站内额度的 Key 分组（「没有可用模型」回归）", () => {
-  it("A. 新建实验室 Key 时带上站点默认分组，上游模型列表能透传出来", async () => {
+  it("A. 新建实验室 Key 时带上固定分组 auto，上游模型列表能透传出来", async () => {
     const u = await makeUser()
     await seedBoundAccount({ userId: u.id, username: u.username, cachedToken: "tk-cached" })
     const { stub } = labTokenStub([])
@@ -153,7 +160,8 @@ describe("网页实验室：站内额度的 Key 分组（「没有可用模型�
     expect(body.models).toEqual(["model-from-upstream"])
 
     expect(stub.createBodies).toHaveLength(1)
-    expect(stub.createBodies[0]).toMatchObject({ name: LAB_KEY_NAME, group: "default" })
+    // 固定分组（auto），不是站点默认分组也不是 newapi_group 设置项
+    expect(stub.createBodies[0]).toMatchObject({ name: LAB_KEY_NAME, group: LAB_KEY_GROUP })
   })
 
   it("B. 历史遗留的空分组 Key → 删掉重建，而不是继续复用", async () => {
@@ -168,16 +176,16 @@ describe("网页实验室：站内额度的 Key 分组（「没有可用模型�
 
     expect(deleted).toEqual([1234])
     expect(stub.createBodies).toHaveLength(1)
-    expect(stub.createBodies[0]).toMatchObject({ group: "default" })
+    expect(stub.createBodies[0]).toMatchObject({ group: LAB_KEY_GROUP })
     expect(tokens).toHaveLength(1)
-    expect(tokens[0].group).toBe("default")
+    expect(tokens[0].group).toBe(LAB_KEY_GROUP)
   })
 
-  it("C. 分组正常的旧 Key → 直接复用，不重建、不重删", async () => {
+  it("C. 分组已经是 auto 的旧 Key → 直接复用，不重建、不重删", async () => {
     const u = await makeUser()
     await seedBoundAccount({ userId: u.id, username: u.username, cachedToken: "tk-cached" })
     const { stub, deleted } = labTokenStub([
-      { id: 1234, name: LAB_KEY_NAME, key: "ok**********ok", group: "default" },
+      { id: 1234, name: LAB_KEY_NAME, key: "ok**********ok", group: LAB_KEY_GROUP },
     ])
 
     const res = await fetchSelf(authRequest(u, "/api/lab/models"))
@@ -188,7 +196,7 @@ describe("网页实验室：站内额度的 Key 分组（「没有可用模型�
   })
 
   // 放在最后：这条会改全局设置项，避免影响上面的用例
-  it("D. 分组跟随站点设置（newapi_group=vip）而不是写死 default", async () => {
+  it("D. 分组写死 auto，不跟随 newapi_group 设置项", async () => {
     await setSetting("newapi_group", "vip")
     try {
       const u = await makeUser()
@@ -197,7 +205,8 @@ describe("网页实验室：站内额度的 Key 分组（「没有可用模型�
 
       const res = await fetchSelf(authRequest(u, "/api/lab/models"))
       expect(res.status).toBe(200)
-      expect(stub.createBodies[0]).toMatchObject({ group: "vip" })
+      // 站长 2026-10-10：实验室 Key 固定 auto；把站点分组改成 vip 也不该跟着漂
+      expect(stub.createBodies[0]).toMatchObject({ group: LAB_KEY_GROUP })
     } finally {
       await setSetting("newapi_group", "default")
     }

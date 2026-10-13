@@ -1,12 +1,27 @@
 import { env } from "cloudflare:workers"
 import { createSession, sessionCookie } from "../src/auth"
 import { hashPassword, uuid } from "../src/crypto"
+import { ADMIN_PERMISSIONS } from "../src/admin-permissions"
 
 export interface TestUser {
   id: string
   username: string
   cookie: string  // 形如 "doulor_session=xxx"
 }
+
+/**
+ * 权限树的**全部叶子 key**（由 `ADMIN_PERMISSIONS` 现算，不硬编码，权限树增删自动跟随）。
+ *
+ * 单级大类（没有 children 的，如 `feedback`）本身就是叶子；二级大类取 children 的 key。
+ *
+ * ⚠️ 其中三个 rootOnly 叶子（`users.role` / `users.password` / `users.2fa`）写进
+ * `admin_scope` 也**不会**放行 —— `assertAdminScope` 对 rootOnly 节点先判断、且只认
+ * `role='root'`（见 `worker/src/handlers/admin.ts`）。保留它们只是为了让这份「全量」
+ * 名副其实；碰这三类接口的用例必须显式用 `role:"root"`。
+ */
+export const ALL_ADMIN_LEAF_KEYS: readonly string[] = ADMIN_PERMISSIONS.flatMap((cat) =>
+  cat.children && cat.children.length > 0 ? cat.children.map((leaf) => leaf.key) : [cat.key]
+)
 
 /** 注册一个用户并返回带 session cookie 的请求头 */
 export async function makeUser(opts: {
@@ -23,16 +38,37 @@ export async function makeUser(opts: {
    * 要测「未验证」的行为（例如邮箱门槛本身、未验证提示），显式传 `emailVerified: false`。
    */
   emailVerified?: boolean
+  /**
+   * 管理端权限域（落库到 `users.admin_scope`，JSON 数组字符串）。
+   *
+   * 背景（2026-10-13，迁移 `0119_admin_permissions.sql`）：`role='admin'` 不再等于「全权」，
+   * 管理端每个接口都要查白名单（`requireAdminScope` / `assertAdminScope`）。而
+   * `superadmin` / `root` 是 `isPrivileged()` 直接放行、不看白名单。
+   *
+   * 语义：
+   *   * **不传** —— 当 `role === "admin"` 时默认写入**全量叶子权限域**
+   *     （`ALL_ADMIN_LEAF_KEYS`）。这样绝大多数只关心业务逻辑的用例不会因为
+   *     「忘了配权限」而在管理端接口上集体 403。对 user / superadmin / root 不写。
+   *   * `null` —— 显式**不写**（落 NULL）：白名单为空 ⇒ 管理端接口一律
+   *     403 `ADMIN_SCOPE_DENIED`。要测「没被授权的 admin 被拒」时用它。
+   *   * 数组 —— 原样写进 `admin_scope`，用来测「有 A 权限、没有 B 权限」的越权边界。
+   */
+  adminScope?: string[] | null
 } = {}): Promise<TestUser> {
   const username = opts.username ?? `u_${Math.random().toString(36).slice(2, 8)}`
   const id = uuid()
   const now = new Date().toISOString()
+  const role = opts.role ?? "user"
+  const adminScope: string | null =
+    opts.adminScope === undefined
+      ? (role === "admin" ? JSON.stringify(ALL_ADMIN_LEAF_KEYS) : null)
+      : (opts.adminScope === null ? null : JSON.stringify(opts.adminScope))
   await env.DB.prepare(
-    "INSERT INTO users (id, username, email, password_hash, namespace, role, status, email_verified, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)"
+    "INSERT INTO users (id, username, email, password_hash, namespace, role, status, email_verified, admin_scope, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)"
   ).bind(
     id, username, `${username}@doulor.cn`,
     await hashPassword("pass1234"), username,
-    opts.role ?? "user", opts.emailVerified === false ? 0 : 1, now, now
+    role, opts.emailVerified === false ? 0 : 1, adminScope, now, now
   ).run()
   const token = await createSession(env, id)
   return { id, username, cookie: sessionCookie(token) }

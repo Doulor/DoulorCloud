@@ -16,6 +16,7 @@
 import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
 import { requireAdminScope } from "./admin"
+import { guardRateLimit } from "../ratelimit"
 import { audit as recordAudit, getSetting, updateSettings } from "../settings"
 import { decryptSecret, encryptSecret } from "../crypto"
 import { applyPoints, getPointsBalance } from "../points"
@@ -25,8 +26,29 @@ import type { Env } from "../env"
 const MAX_RESULTS = 5
 /** 单次搜索的等待上限（毫秒）—— 超时就当失败，别把整轮对话卡死 */
 const SEARCH_TIMEOUT_MS = 20_000
-/** 一次对话里最多能搜几次（防模型打转把额度刷光） */
+/**
+ * 一次对话里最多能搜几次（防模型打转把额度刷光）。
+ *
+ * ⚠️ 2026-10-13：这个常量此前**只是一句愿望** —— 注释写着要限流，但
+ * `webSearch` 上既没有计数、也没挂 `guardRateLimit`，全仓只有定义处出现它。
+ * 现在真的接上了：见下面 `SEARCH_WINDOW_SECONDS` 与 `webSearch` 里的守卫。
+ */
 export const SEARCH_MAX_PER_TURN = 8
+/**
+ * 上面那个上限的**计窗口径**（秒）。
+ *
+ * ⚠️ 服务端拿不到「一次对话」的边界：`POST /api/lab/web-search` 的请求体里
+ * 只有 `query`，没有会话 / 回合 id（前端每轮对话自己调一次工具），
+ * 所以「每回合 8 次」只能用**时间窗**近似。取舍：
+ *   · 取 60 秒 —— 单次搜索上游（Tavily）实际要 1~3 秒，60 秒内连打 8 次
+ *     已远超正常使用（人工在菜单里连点两三次就到头了），只有模型打转才会到量；
+ *   · 再短（如 10 秒）会误伤「用户连着问了三个问题」这种正常场景；
+ *   · 再长（如 10 分钟）则挡不住刷额度，保护等于没有。
+ *
+ * 桶按**用户**分（key 里带 user.id），不按 IP：同一出口 IP 后面的多个用户
+ * 不该互相拖累（这与 NewAPI 的 CriticalRateLimit 按 IP 计的那个坑正好相反）。
+ */
+const SEARCH_WINDOW_SECONDS = 60
 
 /** 站点 key 的解析口径：换行或逗号分隔，去空去重 */
 export function parseTavilyKeys(raw: string): string[] {
@@ -193,6 +215,24 @@ export async function webSearch(env: Env, request: Request): Promise<Response> {
       "SEARCH_DISABLED_BY_USER"
     )
   }
+
+  /**
+   * 防「模型打转把额度刷光」—— `SEARCH_MAX_PER_TURN` 的落地（2026-10-13）。
+   *
+   * 位置是刻意的，两头都别挪：
+   *   · 放在**开关检查之后**：没开联网搜索的用户根本不会真去搜，不该占额度；
+   *   · 放在**解析 key 之前**：用用户自己的 key 虽然不花积分，但同样会打出站
+   *     请求（还可能把上游额度打光），「模型打转」这件事对它是同一笔账。
+   *
+   * 超限走 `guardRateLimit` 的统一 429，提示语里带「还剩多少秒」（用户可见）。
+   */
+  await guardRateLimit(
+    env,
+    `lab-web-search:user:${user.id}`,
+    SEARCH_MAX_PER_TURN,
+    SEARCH_WINDOW_SECONDS,
+    `联网搜索太频繁（一次对话最多 ${SEARCH_MAX_PER_TURN} 次）`
+  )
 
   // 1) 优先用户自己的 key
   const own = await loadUserSearchKey(env, user.id)

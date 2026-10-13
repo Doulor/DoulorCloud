@@ -72,8 +72,8 @@ export const MODEL_BADGES: { test: RegExp; Icon: React.ComponentType<{ className
   { test: /gpt|openai|^o[13]|davinci/i, Icon: OpenAIIcon, color: "#10a37f" },
   { test: /claude|anthropic|sonnet|opus|haiku/i, Icon: AnthropicIcon, color: "#d97757" },
   { test: /gemini|google|gemma|palm/i, Icon: GeminiIcon, color: "#4285f4" },
-  { test: /qwen|qwq|通义|tongyi|qoder/i, Icon: QwenIcon, color: "#615ced" },
-  { test: /glm|chatglm|智谱|zhipu/i, Icon: ZhipuIcon, color: "#7c5cff" },
+  { test: /qwen|qwq|通义|tongyi|qoder/i, Icon: QwenIcon, color: "#615ced" }, // i18n-exempt: 厂商别名匹配（用户给自建渠道起名「通义千问」也要认出图标），不是界面文案
+  { test: /glm|chatglm|智谱|zhipu/i, Icon: ZhipuIcon, color: "#7c5cff" }, // i18n-exempt: 同上，智谱/GLM 的厂商别名
   { test: /kimi|moonshot/i, Icon: KimiIcon, color: "#6b7280" },
   { test: /llama|meta/i, Icon: MetaIcon, color: "#0866ff" },
   { test: /mistral|mixtral|codestral/i, Icon: MistralIcon, color: "#fa520f" },
@@ -786,7 +786,7 @@ export const TOOL_ICON: Record<ToolName, typeof FileText> = {
  * 解析不出来就原样显示（宁可不漂亮，也不能显示错）。
  */
 function ReplaceDiff({ content }: { content: string }) {
-  const m = content.match(/^<<<<<<< 原文\r?\n([\s\S]*?)\r?\n=======\r?\n([\s\S]*?)\r?\n>>>>>>>\s*$/)
+  const m = content.match(/^<<<<<<< 原文\r?\n([\s\S]*?)\r?\n=======\r?\n([\s\S]*?)\r?\n>>>>>>>\s*$/) // i18n-exempt: 解析 lab-agent.ts（PROMPT_FILES 已豁免）产出的「原文/替换」三段式协议字面量，中文必须逐字一致
   if (!m) return <>{content}</>
   const oldLines = m[1].split("\n")
   const newLines = m[2].split("\n")
@@ -821,9 +821,13 @@ export function ToolCard({
   const lines = entry.content ? entry.content.split("\n").length : 0
   const expandable = Boolean(entry.content)
   const running = entry.status === "running"
-  // 站内操作失败 / 被用户拒绝时别打绿勾 —— 那会让人以为改动已经生效了
+  // 站内操作失败 / 被用户拒绝时别打绿勾 —— 那会让人以为改动已经生效了。
+  // ⚠️ 判据是**已落盘的内容文本**，所以中英两种标记都要认（用户可能中途切过语言）：
+  //   · 中文那半来自 lab-site.ts（脚本豁免的中文提示词模块）与 lab.site.fail；
+  //   · `] failed:` 来自 lab.site.fail 的英文版。
   const failed =
-    entry.tool === "site" && /\] 失败：|用户拒绝/.test(entry.content ?? "")
+    entry.tool === "site" &&
+    /\] 失败：|\] failed:|用户拒绝/i.test(entry.content ?? "") // i18n-exempt: ToolCard 红叉判据，匹配的是 lab-site.ts（PROMPT_FILES 已豁免）写回的回执文案；已补 `] failed:` 分支保证英文界面也能正确判断
 
  /**
  * 展开后的内容面板**粘住底部**（2026-10-12 站长要求，与思考块同一套规则）：
@@ -937,8 +941,8 @@ export function ToolCard({
           running && entry.tool === "write" && lines > 0 ? (
             <code className="truncate font-mono text-[11px] text-muted-foreground/70">
               {/^\s*<!doctype html|^\s*<html/i.test(entry.content ?? "")
-                ? "HTML 页面（文件名传输中…）"
-                : "（文件名传输中…）"}
+                ? t("lab.tool.fileNamePendingHtml")
+                : t("lab.tool.fileNamePending")}
             </code>
           ) : null
         )}
@@ -975,7 +979,7 @@ export function ToolCard({
         <div className="border-t border-border/60 p-2">
           <img
             src={entry.image}
-            alt="页面截图"
+            alt={t("lab.tool.shotAlt")}
             onClick={() => setZoom(entry.image ?? null)}
             className="max-h-[70vh] w-auto max-w-full cursor-zoom-in touch-pan-y rounded border border-border/60"
           />
@@ -1006,7 +1010,7 @@ export function ToolCard({
         >
           <img
             src={zoom}
-            alt="页面截图"
+            alt={t("lab.tool.shotAlt")}
             className="max-h-full max-w-full touch-auto rounded"
           />
         </div>

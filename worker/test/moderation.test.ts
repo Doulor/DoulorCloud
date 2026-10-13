@@ -285,7 +285,9 @@ describe("风险账户（管理端）", () => {
   })
 
   it("/api/attention 的 admin 计数带上待处理申诉（新表不能把接口带崩）", async () => {
-    const admin = await makeAdmin()
+    // admin 段（含 appeals / frpApplications）只在 `isPrivileged()` 时下发，
+    // 普通 admin 的 admin_scope 白名单不影响这里（见 `src/handlers/attention.ts`）。
+    const admin = await makeUser({ role: "superadmin" })
     const res = await fetchSelf(authRequest(admin, "/api/attention"))
     expect(res.status).toBe(200)
     const body = await res.json<{

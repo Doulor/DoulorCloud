@@ -1629,19 +1629,22 @@ export async function createInvite(env: Env, request: Request): Promise<Response
   return json({ invite: toPublicInvite(row!) }, 201)
 }
 
-// DELETE /api/admin/invites/:id —— 删除邀请码
-export async function deleteInvite(env: Env, request: Request, id: string): Promise<Response> {
-  await requireAdminScope(env, request, "invites")
-  const existing = await env.DB.prepare("SELECT id FROM invite_codes WHERE id = ?")
-    .bind(id)
-    .first()
-  if (!existing) {
-    throw new ApiError(404, "邀请码不存在", "NOT_FOUND")
-  }
-
-  await env.DB.prepare("DELETE FROM invite_codes WHERE id = ?").bind(id).run()
-  return new Response(null, { status: 204 })
-}
+/**
+ * ⚠️ 2026-10-13：这里原本有一个 `deleteInvite(env, request, id)` 导出，注释写着
+ * 「DELETE /api/admin/invites/:id —— 删除邀请码」，但**它从来没有被任何路由调用过**：
+ * 真正挂在 `index.ts` 那条路由上的是本文件下方的 `adminDeleteInviteWithRefund`。
+ *
+ * 两者是同一件事的前后两版，后者是严格超集：
+ *   · 都有 404 检查；
+ *   · 后者额外退还「用户自助创建且未使用」的邀请码额度（`refundQuotaForInvite`）；
+ *   · 后者额外写审计日志（`admin.invite.delete`）—— 前者连审计都没有，
+ *     真接上去会留下「删了码但查不到是谁删的」的黑洞。
+ *
+ * 所以这里不是「补一条路由」，而是把这版**过时的重复实现删掉**：
+ * 同一个路径上再挂第二条 DELETE 路由，只会让「到底跑的是哪一个」变成运气问题。
+ * 管理员撤销邀请码的能力一直是好的（路由 + 额度退还 + 审计都在，
+ * 回归用例见 test/audit-batch6.test.ts 的 L25 那组）。
+ */
 
 /**
  * POST /api/admin/mail-test —— 出站邮件自检。

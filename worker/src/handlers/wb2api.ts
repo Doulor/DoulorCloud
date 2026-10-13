@@ -30,7 +30,6 @@ import {
   getWb2ApiCredentialInfo,
   isWb2ApiConfigured,
   probeWb2ApiCredential,
-  resolveWb2ApiConfig,
   saveWb2ApiKey,
   Wb2StateGoneError,
   wb2ImportCockpit,
@@ -1251,7 +1250,12 @@ export async function wb2apiDonationBlock(
   }
 }
 
-/** 供管理端设置页展示当前地址（不暴露密钥） */
-export async function wb2apiBaseUrl(env: Env): Promise<string> {
-  return (await resolveWb2ApiConfig(env)).baseUrl
-}
+/**
+ * ⚠️ 2026-10-13：这里原本有 `wb2apiBaseUrl(env)`（一行包 `resolveWb2ApiConfig(env).baseUrl`），
+ * 注释写着「供管理端设置页展示当前地址」。全仓复核后删除，理由：
+ *   · 没有任何调用点；
+ *   · 同文件的 `adminGetConfig`（GET /api/admin/wb2api/config）**已经**把
+ *     `baseUrl: info.baseUrl` 直接放进响应（见上面 1142 行的内联实现），
+ *     管理端拿到的一直是那一份；
+ *   · 留着第二个出口只会出现「改了 A 忘了 B」的漂移。
+ */

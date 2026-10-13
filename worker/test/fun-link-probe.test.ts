@@ -255,7 +255,9 @@ describe("GET /api/fun-links/icon/:id", () => {
 
   it("下架的条目：普通用户取不到，管理员还能取", async () => {
     responder = pngResponse
-    const admin = await makeUser({ role: "admin" })
+    // 「还能取到已下架条目的图标」判据是 `isPrivileged()`（root / superadmin），
+    // 普通 admin 即便有 funLinks 权限也拿不到 —— 见 `src/handlers/fun-link-probe.ts`。
+    const admin = await makeUser({ role: "superadmin" })
     const user = await makeUser()
     const { id } = await createLink(admin, { iconUrl: "https://example.com/i.png", enabled: false })
     expect((await fetchSelf(authRequest(user, `/api/fun-links/icon/${id}`))).status).toBe(404)

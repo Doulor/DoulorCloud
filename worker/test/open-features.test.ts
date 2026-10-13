@@ -63,7 +63,10 @@ describe("免权限访问开关", () => {
   })
 
   it("管理员不受影响（原本就放行）", async () => {
-    const admin = await makeUser({ role: "admin" })
+    // 这里钉的是「特权账号不被 open_features 旁路影响」：`requireFeatureUser` 用的是
+    // `isPrivileged()`（root / superadmin），普通 admin 拿不到这个豁免 —— 他的模块权限
+    // 由 admin_scope 单独管。所以用 superadmin 表达「特权账号」。
+    const admin = await makeUser({ role: "superadmin" })
     await setPermissions(admin.id, NO_R2_AI)
     const res = await fetchSelf(authRequest(admin, "/api/storage"))
     expect(res.status).toBe(200)

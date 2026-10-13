@@ -105,7 +105,18 @@ function canonicalOrigin(env: Env, request: Request): string {
     host === "[::1]" ||
     host === "::1" ||
     host.endsWith(".localhost")
-  if (isLocal) return `https://${host}`
+  /**
+   * 🔴 本机调试分支**必须保留端口**，而且要用请求本身的协议。
+   *
+   * 原来写的是 `return \`https://${host}\``，`host` 来自 `url.hostname`（**不含端口**），
+   * 于是 `wrangler dev` 跑在 `http://localhost:8787` 时 issuer 变成 `https://localhost`
+   * —— 端口丢了、协议也错了，OIDC 客户端拿它跟实际地址比对必然失败，
+   * 「本机自测 OIDC」这条路直接断掉（2026-10-13 由 audit-batch8 的用例暴露）。
+   *
+   * 归一化意图不变：仍然用已经去过尾点的 `host`，只是把端口和协议带上。
+   */
+  const port = url.port ? `:${url.port}` : ""
+  if (isLocal) return `${url.protocol}//${host}${port}`
 
   const root = env.ROOT_DOMAIN.toLowerCase().replace(/\.+$/, "")
   // 本站域名与其平台子域（用户自建的 OAuth 客户端可绑自定义平台子域，

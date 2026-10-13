@@ -37,6 +37,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest"
 import { env } from "cloudflare:workers"
 import { authRequest, fetchSelf, makeUser, setPermissions, type TestUser } from "./helpers"
+import { installOkTcpStub, restoreTcpStub } from "./tcp-stub"
 import { loadUserQuota } from "../src/quotas"
 
 const NEWAPI = "https://api.doulor.cn"
@@ -219,11 +220,14 @@ async function rowsOf(userId: string) {
 
 beforeEach(() => {
   calls = []
+  // 沙箱没有真实出网 TCP：让探活结论可控（否则「连不上 → 转人工」会误伤所有期望自动通过的用例）
+  installOkTcpStub()
 })
 
 afterEach(() => {
   for (let i = restores.length - 1; i >= 0; i--) restores[i]()
   restores = []
+  restoreTcpStub()
   vi.restoreAllMocks()
 })
 
@@ -391,7 +395,9 @@ describe("捐献额度：用户级幂等（② 撤销后重批 / ③ 两条同�
 
     // 关键断言：四轮撤销重批之后额度**纹丝不动**
     expect(await quotaOf(user.id)).toEqual({ bonus: 2, ai: 1 })
-  })
+    // 这条要发 14 轮 HTTP（2 提交 + 4 撤销 + 4 重批 + 2 提交…），全量并行时
+    // 会超过 vitest 默认 5 秒（表现为 `Test timed out in 5000ms`，逻辑其实是对的）
+  }, 30_000)
 
   it("④ 撤销 → 用户删除单据 → 重提同一上游：仍不涨（旧代码每轮 +2）", async () => {
     const admin = await makeUser({ role: "superadmin" })

@@ -1167,13 +1167,32 @@ describe("用户商城：上架与审核", () => {
     expect(after.userProducts.map((x) => x.id)).toContain(p.id)
   })
 
-  it("用户商品强制人工交付：传 delivery=quota 也会被忽略", async () => {
+  it("用户商品不允许平台自动交付方式：传 delivery=quota 直接 400，不静默降级", async () => {
+    const seller = await makeUser()
+    // ⚠️ 2026-10-04 站长口径（见 `src/points-shop.ts` 的 sanitizeProductInput）：
+    //    用户商品只允许 manual / code / content；传 quota 等平台自动方式**直接 400**
+    //    （DELIVERY_NOT_ALLOWED_FOR_USER），刻意不「猜用户意图」悄悄改成 manual。
+    const res = await fetchSelf(
+      authRequest(seller, "/api/points/products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "假装能自动充值",
+          price: 10,
+          delivery: "quota",
+          quotaYuan: 100,
+        }),
+      })
+    )
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { code: string }).code).toBe("DELIVERY_NOT_ALLOWED_FOR_USER")
+  })
+
+  it("用户商品不接受自定义限购与排序：perUserLimit / sort 被强制清掉", async () => {
     const seller = await makeUser()
     const p = await uploadProduct(seller, {
-      name: "假装能自动充值",
+      name: "二手书",
       price: 10,
-      delivery: "quota",
-      quotaYuan: 100,
       perUserLimit: 3,
       sort: 999,
     })
@@ -1543,7 +1562,20 @@ describe("用户商城：担保交易", () => {
     expect(((await res.json()) as { code: string }).code).toBe("NOT_OFFICIAL_ORDER")
   })
 
-  it("管理员不能直接编辑用户商品（要走审核）", async () => {
+  /**
+   * ⚠️ 2026-10-13 口径澄清：管理员**可以**直接编辑用户商品。
+   *
+   * 这条用例原来断言 400 `NOT_OFFICIAL_PRODUCT`（那个 code 全仓都不存在），
+   * 但实际设计是**相反的**：
+   *   · `points-shop.ts` 的 `updateProduct` 显式支持用户商品
+   *     （`isUserProduct` → `sanitizeProductInput(..., { asUser: true })`）；
+   *   · 真正「改完要回待审核」的是**用户自己**改 —— 走 `updateUserProduct()`，
+   *     目的是防「先过审再改内容」；
+   *   · 管理员操作视为可信，不重复审核。`shop-rental-term-snapshot.test.ts`
+   *     正是靠「管理员改用户商品租期」验证结算按订单快照的不变式。
+   * 所以这里改成钉**实际语义**：200 且改动真的落库。
+   */
+  it("管理员可以直接编辑用户商品（管理员操作视为可信；用户自己改才回审核）", async () => {
     const admin = await makeUser({ role: "admin" })
     const seller = await makeUser()
     const p = await uploadProduct(seller, { name: "用户商品", price: 10 })
@@ -1555,10 +1587,16 @@ describe("用户商城：担保交易", () => {
         headers: { "Content-Type": "application/json" },
       })
     )
-    expect(res.status).toBe(400)
-    expect(((await res.json()) as { code: string }).code).toBe(
-      "NOT_OFFICIAL_PRODUCT"
-    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { product: { name: string; price: number } }
+    expect(body.product.name).toBe("被管理员改了")
+    expect(body.product.price).toBe(1)
+
+    // 同时确认「用户商品」这个身份没被管理员这次编辑抹掉
+    const row = await env.DB.prepare("SELECT owner_id FROM point_products WHERE id = ?")
+      .bind(p.id)
+      .first<{ owner_id: string | null }>()
+    expect(row?.owner_id).toBe(seller.id)
   })
 
   it("还有没交付完的订单时不能删商品", async () => {

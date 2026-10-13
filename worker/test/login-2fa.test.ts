@@ -396,10 +396,18 @@ describe("恢复码与开启状态", () => {
       authRequest(u, "/api/settings/2fa/email", jsonInit({ enabled: true }))
     )
     expect(on.status).toBe(200)
+    const onBody = await on.json<{ recoveryCodes?: string[] }>()
     expect(await recoveryCount(u.id)).toBe(10)
 
+    // ⚠️ 2026-10-10 起二次验证改设置要「关哪个验哪个」（assertTwoFactorStepUp）：
+    //    账号已经开着邮箱方式，关闭时必须带一次当前可用的验证码。
+    //    这里用刚下发的那批恢复码中的一张 —— 也正是用户丢了认证器时的真实路径。
     const off = await fetchSelf(
-      authRequest(u, "/api/settings/2fa/email", jsonInit({ enabled: false }))
+      authRequest(
+        u,
+        "/api/settings/2fa/email",
+        jsonInit({ enabled: false, code: onBody.recoveryCodes![0] })
+      )
     )
     expect(off.status).toBe(200)
     expect(await recoveryCount(u.id)).toBe(0)
@@ -431,17 +439,30 @@ describe("恢复码与开启状态", () => {
     }
 
     // 开邮箱：TOTP 的码还在用，不该被换掉
+    // ⚠️ 2026-10-10 起改 2FA 设置要 step-up 验证码；账号此时已开着 TOTP，
+    //    所以带一个当前认证器码（真实用户就是这么操作的）。
     const on = await fetchSelf(
-      authRequest(u, "/api/settings/2fa/email", jsonInit({ enabled: true }))
+      authRequest(
+        u,
+        "/api/settings/2fa/email",
+        jsonInit({ enabled: true, code: await currentTotp(secret) })
+      )
     )
     expect(on.status).toBe(200)
     const onBody = await on.json<{ recoveryCodes?: string[] }>()
     expect(onBody.recoveryCodes).toBeUndefined()
     expect(await recoveryCount(u.id)).toBe(10)
 
-    // 关邮箱：TOTP 还开着，码同样保留
+    // 关邮箱：TOTP 还开着，码同样保留。
+    // ⚠️ 关闭邮箱方式是「关哪个验哪个」（target=email）——TOTP 码**不被接受**，
+    //    所以只能用邮箱码或恢复码。测试里读不到邮件里的码，用预置的恢复码
+    //    `totp-era-0`（它的哈希就在库里，正是这条路径该走的东西）。
     const off = await fetchSelf(
-      authRequest(u, "/api/settings/2fa/email", jsonInit({ enabled: false }))
+      authRequest(
+        u,
+        "/api/settings/2fa/email",
+        jsonInit({ enabled: false, code: "totp-era-0" })
+      )
     )
     expect(off.status).toBe(200)
     expect(await recoveryCount(u.id)).toBe(10)

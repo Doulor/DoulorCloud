@@ -779,11 +779,15 @@ export async function userOverview(env: Env, request: Request): Promise<Response
  * 清理过期统计（供定时运维调用）。
  * 默认保留 90 天，更早的直接删掉，避免表无限增长。
  *
- * ⚠️ 2026-09-25 审计（H13）：这个函数**目前从未被调用** —— 全仓只有这一处
- * 定义，maintenance.ts 既没有 import 它，TABLE_WARN_ROWS 里也没有
- * analytics_events。也就是说这张「匿名每浏览写 1 行」的表实际上无界增长。
- * 补上调用点需要改 worker/src/maintenance.ts（当前被另一个 AI 占用中），
- * 见修复清单里的待办项。
+ * ⚠️ 2026-09-25 审计（H13）发现本函数**从来没有调用点** —— 全仓只有这一处定义，
+ * maintenance.ts 既没有 import 它，TABLE_WARN_ROWS 里也没有 analytics_events，
+ * 于是这张「匿名每浏览写 1 行」的表实际上无界增长。
+ *
+ * ✅ 2026-10-13：调用点已补上 —— `maintenance.ts` 的每小时运维（cron `17 * * * *`）
+ * 会走到这里，同批次还补了 `link-preview.ts` 的 `purgeExpiredPreviews`，
+ * 并把这两张表加进了 TABLE_WARN_ROWS。下面那句「90 天」必须与 maintenance.ts 的
+ * `ANALYTICS_RETENTION_DAYS` 保持一致：dryRun 分支在那里独立算截止时间，
+ * 两处不一致会让「预演说清 3 行、真跑清 300 行」。
  */
 export async function purgeExpiredAnalytics(env: Env): Promise<number> {
   const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()

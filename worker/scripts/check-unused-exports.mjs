@@ -126,94 +126,62 @@ const ENTRY = join(SRC, "index.ts")
  *
  * 与 check-api-paths.mjs 的 KNOWN_GAPS 同理：写进代码里可被搜索到，
  * 每条都必须说明**为什么现在不动它**。新增死代码不在本清单里 → CI 红。
+ *
+ * ================== 2026-10-13：本清单已清空 ==================
+ *
+ * 它此前挂着 15 条 key，其中 9 条真的出现在未引用列表里。那 9 条不是
+ * 「没法处理」，而是「还没排期」—— 现在逐条解决完了，记录如下（可搜索）：
+ *
+ *   A · 过期清理没挂定时任务（真缺陷：表无界增长）
+ *     src/handlers/analytics.ts::purgeExpiredAnalytics
+ *     src/link-preview.ts::purgeExpiredPreviews
+ *     → 已挂进 maintenance.ts 的每小时运维（cron `17 * * * *`），见该文件 4c 段。
+ *       不挂每分钟那条 tick：清过期数据不怕晚一小时，而 DELETE 是写操作。
+ *
+ *   B · handler 有了但没有路由
+ *     src/handlers/community.ts::linkPreview
+ *     → 路由已补上（index.ts 的 `GET /community/link-preview`，默认站内链接查库、
+ *       外站抓 OG），check-api-paths.mjs 的 KNOWN_GAPS 也随之清空。
+ *     src/handlers/admin.ts::deleteInvite
+ *     → 复核结论：**不缺路由**。`DELETE /api/admin/invites/:id` 一直挂着
+ *       adminDeleteInviteWithRefund（严格超集：额度退还 + 审计日志），
+ *       deleteInvite 是它的旧版、连审计都没有 → 直接删掉，不留两个同路径实现。
+ *
+ *   C · NewAPI 自助注册链（4 个函数全无调用点）
+ *     src/newapi-client.ts::requestEmailCode / registerUser /
+ *       generateAccessToken / extractVerificationCode
+ *     → 判断为**已废弃**并删除：建号已改走 OIDC（用户在中转站点「用 Doulor Cloud
+ *       登录」建号，回来 bindAccount 复用本站密码），取令牌由 login() 直接返回
+ *       （rc.40 起不再需要 session→token 两步）；且全仓没有读收件箱的代码，
+ *       这条链本来就跑不通。删除理由写在 newapi-client.ts 对应位置。
+ *
+ *   D · 写了但没实施的保护
+ *     src/handlers/lab-search.ts::SEARCH_MAX_PER_TURN
+ *     → 真的接上限流了：webSearch 上挂按用户的 guardRateLimit
+ *       （8 次 / 60 秒，窗口取舍写在同文件的 SEARCH_WINDOW_SECONDS 注释里）。
+ *
+ *   E · 确认后删除的死代码
+ *     src/donation-provision.ts::CHANNEL_TEST_HINT（连同 CHANNEL_TEST_HINT_MS）
+ *       —— 全仓无渲染者（前端渠道测试界面没有这个字段），已删。
+ *     src/handlers/profile.ts::CANVAS_EFFECTS
+ *       —— 前端 src/pages/profile.tsx 另有一份**实际生效**的同名常量，删 worker 这份。
+ *     src/handlers/wb2api.ts::wb2apiBaseUrl
+ *       —— 同文件 adminGetConfig 已直接返回 baseUrl（内联实现），删掉第二个出口。
+ *
+ * ⚠️ 本次复核还发现清单里躺着 **3 条根本没死的「误登记」**（它们从未出现在
+ *    脚本输出里，纯靠人工维护导致脱节），一并清掉：
+ *      · src/settings.ts::formatBytes —— handlers/storage.ts 一直在用；
+ *      · src/permissions.ts::userPermissions —— handlers/email.ts、
+ *        handlers/subdomains.ts 一直在用；
+ *      · src/newapi-client.ts::CHANNEL_STATUS_MANUALLY_DISABLED ——
+ *        handlers/admin-channels.ts 一直在用。
+ *
+ * 教训：本清单只按 key 匹配，**不会校验条目是否仍然有效**。往这里加条目之前，
+ * 先跑一次 `node scripts/check-unused-exports.mjs` 确认它真的在输出里，
+ * 并写清「为什么现在不动它」以及「谁在什么条件下能处理」。
  */
 const ALLOW = new Map([
-  // ---- 已确认的真缺陷：功能写好了但没接线（2026-10-13 复核）----
-  //
-  // ⚠️ 这里原先写的理由是「当前由另一 AI 占用，待其合并后再清」。
-  //    现在没有人在改这些文件了，所以那些理由已失效 —— 下面改成了**事实本身**：
-  //    它们就是还没接线的缺陷。别再拿「有人在改」当延后处理的借口。
-  [
-    "src/handlers/analytics.ts::purgeExpiredAnalytics",
-    "真实缺陷（审计 H13）：analytics_events 清理函数从未被调用，表无界增长。" +
-      "修法明确 —— 挂到 maintenance.ts 的定时任务上；未做只是因为还没排期。",
-  ],
-  [
-    "src/link-preview.ts::purgeExpiredPreviews",
-    "同上（H13）：link_previews 的过期清理从未被调用。同样要挂到 maintenance.ts。",
-  ],
-  [
-    "src/handlers/community.ts::linkPreview",
-    "真实缺陷（审计 F4）：handler 已实现但 index.ts 没有对应路由，功能完全不可用。" +
-      "已同时记录在 check-api-paths.mjs 的 KNOWN_GAPS。",
-  ],
-  [
-    "src/handlers/admin.ts::deleteInvite",
-    "管理端「删除邀请码」的 handler 存在，但没有任何路由/界面调用它 ——" +
-      "**管理员实际上无法撤销已发出的邀请码**。补一条路由 + 一个按钮即可，属于待排期。",
-  ],
-  // ---- 未接线的功能（缺的不是代码，是产品决策）----
-  [
-    "src/donation-provision.ts::CHANNEL_TEST_HINT",
-    "疑似死常量（同文件内有等价的内联实现）。无人在改这个文件了，可直接删 ——" +
-      "留在这是为了让「已复核过、确认无害」这件事有记录。",
-  ],
-  [
-    "src/newapi-client.ts::requestEmailCode",
-    "**NewAPI 自助注册那条链没做完**：requestEmailCode / registerUser /" +
-      " generateAccessToken / extractVerificationCode 四个函数都写好了，但全仓无调用点 ——" +
-      "也就是说「补 email 完成自助注册」这条路目前走不通。" +
-      "（原先的理由是「该文件紧邻另一 AI 的捐献流程，删了怕冲突」；" +
-      " 现在没人在改它，理由换成事实：**这条链就是没接线**。）",
-  ],
-  [
-    "src/newapi-client.ts::registerUser",
-    "同上：NewAPI 自助注册的调用链尚未接线。",
-  ],
-  [
-    "src/newapi-client.ts::generateAccessToken",
-    "同上。",
-  ],
-  [
-    "src/newapi-client.ts::extractVerificationCode",
-    "同上。",
-  ],
-  [
-    "src/newapi-client.ts::CHANNEL_STATUS_MANUALLY_DISABLED",
-    "同上。",
-  ],
-  [
-    "src/settings.ts::formatBytes",
-    "worker 侧确实没有消费者（前端另有一份实现）。可删；留着仅为记录已复核。",
-  ],
-  // ---- 有意的对外/预留接口 ----
-  [
-    "src/permissions.ts::userPermissions",
-    "权限解析的对外工具函数，当前无调用点；测试与后续模块都可能用到。",
-  ],
-  [
-    "src/handlers/wb2api.ts::wb2apiBaseUrl",
-    "反代网关基址解析函数，当前无调用点（同文件内有内联实现）。" +
-      "疑似重复实现，待确认后清理。",
-  ],
-  [
-    "src/handlers/profile.ts::CANVAS_EFFECTS",
-    "名片特效的「画布类」子集常量，当前无调用点。" +
-      "疑似与 EFFECTS 重复，需确认前端是否依赖它，暂保留。",
-  ],
-  // ---- 2026-10-13 复核后新登记（内网穿透改造那一轮清掉了另外 6 项）----
-  [
-    "src/handlers/lab-search.ts::SEARCH_MAX_PER_TURN",
-    "**这是一个没被实施的保护**，不是单纯的死常量：" +
-      "注释写着「一次对话里最多能搜几次（防模型打转把额度刷光）」，" +
-      "但 `webSearch` 上没有任何计数/限流（整条路由连 guardRateLimit 都没挂）。" +
-      "之所以没有直接接上：服务端拿不到「一次对话」的边界（请求里没有会话 id），" +
-      "要限流就得先定窗口与超限行为（例如「每用户 60 秒 8 次、超了回 429」），" +
-      "那是产品决策，不该由改代码的人顺手定。**已如实记在这里，别当它已经生效。**",
-  ],
-  // 注：原先还登记过一个 `src/newapi-client.ts::adminSetUserGroup`，
-  // 2026-10-13 按站长要求连同函数本体一起删了 —— 那套「绑定后转进 0 倍率免费组」
-  // 的方案已作废（仓库里从来没有过「免费组」这个设置项）。
+  // 目前为空。要加条目，请先在上面的注释块里补一段理由。
 ])
 
 const dead = []

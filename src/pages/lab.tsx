@@ -29,7 +29,7 @@ import { NATIVE_TOOLS } from "@/lib/lab-tools-native"
 import { useMotionPref } from "@/hooks/use-motion-pref"
 import { clearLabRun, getLabRun, setLabRun, useLabRun } from "@/lib/lab-run"
 import { Label } from "@/components/ui/label"
-import { useT } from "@/i18n"
+import { useT, tStatic } from "@/i18n"
 import { applyReplace, buildPreviewDoc, missingPathReason, buildSystemPrompt, buildToolResults, type LabConvoMessage, type LabConvoPart, compactHistory, nativeToolCallsToSegments, type NativeToolCall, EFFORT_LABEL_KEY, EFFORT_LEVELS, EFFORT_TEMPERATURE, type EffortLevel, grepFiles, looksLikeBuildRequest, needsToolResult, normalizeEffort, openPreviewInNewTab, parseAgentText, parseReplaceContent, PROTOCOL_NUDGE, CLOSING_NUDGE, REPORT_NUDGE, MAX_CLOSING_NUDGES, type FileMap, type Segment, inlineAssets } from "@/lib/lab-agent"
 import { buildSiteManual, parseSiteArgs, runSiteOp, type SiteOp } from "@/lib/lab-site"
 import {
@@ -278,9 +278,10 @@ function makeFolderName(base?: string): string {
   if (clean) return clean
   const d = new Date()
   const p = (n: number) => String(n).padStart(2, "0")
-  return `网页项目-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(
     d.getHours()
   )}${p(d.getMinutes())}${p(d.getSeconds())}`
+  return tStatic("lab.folder.defaultName", { stamp })
 }
 
 function loadCustom(): CustomChannel | null {
@@ -813,6 +814,16 @@ export default function LabPage() {
    */
   const pendingAttachRef = React.useRef<string[]>([])
 
+  /**
+   * 「参考网址」附件的正文头 —— 这段会**原样进模型上下文**，所以也要跟界面语言走
+   * （英文界面下模型不该再读到中文，2026-10-14）。
+   */
+  const refHeader = (url: string, truncated: boolean): string =>
+    t("lab.ref.header", {
+      url,
+      note: truncated ? t("lab.ref.headerTruncated") : "",
+    })
+
   /** 抓一个网址当参考。抓回来的正文按「文本附件」处理，与导入文件走同一条路 */
   const fetchRef = async () => {
     const url = refDraft.trim()
@@ -822,8 +833,7 @@ export default function LabPage() {
       // 「参考网址」是用户主动要参考一个页面 ⇒ **原样抓 HTML**（要能看见类名/结构/内联样式，
       // 转纯文本就把样式信息全丢了，那用户就没法「照着这个做」）。
       const r = await labApi.http({ url, raw: true })
-      const header = `【参考网址：${url}】\n（页面正文，已由服务端抓取${r.truncated ? "，内容过长已截断" : ""}）\n`
-      attachedRef.current[url] = { text: header + r.body }
+      attachedRef.current[url] = { text: refHeader(url, r.truncated) + r.body }
       if (!pendingAttachRef.current.includes(url)) pendingAttachRef.current.push(url)
       setRefOpen(false)
       setRefDraft("")
@@ -872,10 +882,7 @@ export default function LabPage() {
           return
         }
         const url = urls[i]
-        const header = `【参考网址：${url}】\n（页面正文，已由服务端抓取${
-          r.value.truncated ? "，内容过长已截断" : ""
-        }）\n`
-        attachedRef.current[url] = { text: header + r.value.body }
+        attachedRef.current[url] = { text: refHeader(url, r.value.truncated) + r.value.body }
         if (!pendingAttachRef.current.includes(url)) pendingAttachRef.current.push(url)
         done.push(url)
       })
@@ -1779,7 +1786,7 @@ export default function LabPage() {
       const got = attachedRef.current[n]
       if (!got) continue
       if (got.image) images.push(got.image)
-      else if (got.text) bodies.push(`【文件：${n}】\n${got.text}`)
+      else if (got.text) bodies.push(t("lab.attach.fileHeader", { name: n, text: got.text }))
     }
     attachedRef.current = {}
     return {
@@ -2027,7 +2034,7 @@ export default function LabPage() {
     if (a.tool === "replace") {
       const diff = parseReplaceContent(a.content)
       if (!diff) {
-        return "格式不对：正文需要 <<<<<<< 原文 ======= 新内容 >>>>>>> 三段（7 个以上符号都行）"
+        return t("lab.replace.badFormat")
       }
       const res = applyReplace(filesRef.current, a.path, diff.old, diff.new)
       if (!res.ok) return res.reason
@@ -2937,9 +2944,8 @@ export default function LabPage() {
             content:
               buildSystemPrompt(filesRef.current, effectivePrompt, labSkills, webSearchOn) +
               (siteOpRef.current
-                ? `\n\n## 本轮已启用：站内操作（用户已 @ 指定）\n` +
-                  `用户这一轮明确要你处理**站内数据**。手册已经给你了，直接用 <lab_site op="…"> 执行，` +
-                  `**不要再输出 <lab_site_manual/> 去拉一遍**。\n\n` +
+                ? t("lab.site.prompt.header") +
+                  t("lab.site.prompt.body") +
                   buildSiteManual()
                 : ""),
           },
@@ -3107,7 +3113,12 @@ export default function LabPage() {
             try {
               runResults.set(i, formatCommandResult(cmd, await runCommand(cmd)))
             } catch (e: any) {
-              runResults.set(i, `[执行命令] ${cmd}\n(执行失败：${e?.message ?? e})`)
+              runResults.set(
+                i,
+                `${t("lab.cmd.head", { cmd })}\n${t("lab.cmd.failed", {
+                  msg: String(e?.message ?? e),
+                })}`
+              )
             }
           }
         }
@@ -3125,7 +3136,10 @@ export default function LabPage() {
           if (s.type !== "action" || !s.complete || s.tool !== "site") continue
           const parsed = parseSiteArgs(s.content)
           if ("error" in parsed) {
-            siteResults.set(i, `[站内操作 ${s.op || "?"}] 失败：${parsed.error}`)
+            siteResults.set(
+              i,
+              t("lab.site.fail", { op: s.op || "?", msg: parsed.error })
+            )
             continue
           }
           const r = await runSiteOp(s.op ?? "", parsed.value, approveSite)
@@ -3139,10 +3153,7 @@ export default function LabPage() {
           if (s.type !== "action" || !s.complete || s.tool !== "http") continue
           const target = (s.url ?? "").trim()
           if (!target) {
-            httpResults.set(
-              i,
-              '[抓取] 没写地址。正确写法是 <lab_http url="https://…"/>，请重来。'
-            )
+            httpResults.set(i, t("lab.http.noUrl"))
             continue
           }
           try {
@@ -3156,10 +3167,18 @@ export default function LabPage() {
             })
             httpResults.set(
               i,
-              `[抓取 ${target}] HTTP ${r.status}${r.truncated ? "（内容过长已截断）" : ""}\n${r.body}`
+              t("lab.http.result", {
+                target,
+                status: r.status,
+                note: r.truncated ? t("lab.http.truncatedNote") : "",
+                body: r.body,
+              })
             )
           } catch (e: any) {
-            httpResults.set(i, `[抓取 ${target}] 失败：${e?.message ?? e}`)
+            httpResults.set(
+              i,
+              t("lab.http.failed", { target, msg: String(e?.message ?? e) })
+            )
           }
         }
 
@@ -3175,7 +3194,7 @@ export default function LabPage() {
                 ? "index.html"
                 : Object.keys(files).find((p) => /\.html?$/i.test(p))
             if (!entryPath) {
-              s.content = "截图失败：项目里没有 HTML 文件"
+              s.content = t("lab.shot.noHtml")
               continue
             }
             const r = await labApi.screenshot({
@@ -3188,11 +3207,13 @@ export default function LabPage() {
             //    几十 KB 的 base64 进正文会把卡片和上下文一起撑爆
             s.image = r.dataUrl
             shotResults.set(i, r.dataUrl)
-            s.content =
-              `截图成功 · ${Math.round(r.msUsed)}ms · 今日 ` +
-              `${Math.round(r.dayMs / 1000)}/${Math.round(r.dayLimitMs / 1000)}s`
+            s.content = t("lab.shot.ok", {
+              ms: Math.round(r.msUsed),
+              used: Math.round(r.dayMs / 1000),
+              limit: Math.round(r.dayLimitMs / 1000),
+            })
           } catch (e: any) {
-            s.content = `截图失败：${e?.message ?? e}`
+            s.content = t("lab.shot.failed", { msg: String(e?.message ?? e) })
           }
         }
 
@@ -3209,7 +3230,7 @@ export default function LabPage() {
                 ? "index.html"
                 : Object.keys(files).find((p) => /\.html?$/i.test(p))
             if (!entryPath) {
-              s.content = "体检失败：项目里没有 HTML 文件"
+              s.content = t("lab.inspect.noHtml")
               continue
             }
             const r = await labApi.inspect({
@@ -3220,7 +3241,7 @@ export default function LabPage() {
             s.content = r.text
             httpResults.set(i, r.text)
           } catch (e: any) {
-            s.content = `体检失败：${e?.message ?? e}`
+            s.content = t("lab.inspect.failed", { msg: String(e?.message ?? e) })
             httpResults.set(i, s.content)
           }
         }
@@ -3232,10 +3253,7 @@ export default function LabPage() {
           if (s.type !== "action" || !s.complete || s.tool !== "web_search") continue
           const q = (s.query ?? "").trim()
           if (!q) {
-            searchResults.set(
-              i,
-              '[联网搜索] 没写关键词。正确写法是 <lab_web_search query="关键词"/>，请重来。'
-            )
+            searchResults.set(i, t("lab.search.noQuery"))
             continue
           }
           try {
@@ -3243,7 +3261,10 @@ export default function LabPage() {
             searchResults.set(i, r.text)
           } catch (e: any) {
             // 积分不足 / 没配 key 都是「用户要自己处理」的事，原话告诉他
-            searchResults.set(i, `[联网搜索 ${q}] 失败：${e?.message ?? e}`)
+            searchResults.set(
+              i,
+              t("lab.search.failed", { query: q, msg: String(e?.message ?? e) })
+            )
           }
         }
 
@@ -3255,22 +3276,26 @@ export default function LabPage() {
           if (s.type !== "action" || !s.complete || s.tool !== "skill") continue
           const wanted = (s.skill ?? "").trim()
           if (!wanted) {
-            skillResults.set(
-              i,
-              '[技能] 没写技能名。正确写法是 <lab_skill name="技能名"/>，请重来。'
-            )
+            skillResults.set(i, t("lab.skill.noName"))
             continue
           }
           try {
             const got = await labApi.readSkill(wanted)
             skillResults.set(
               i,
-              `[技能 ${got.skill.name}] ${got.skill.description}\n\n${got.skill.content}`
+              t("lab.skill.result", {
+                name: got.skill.name,
+                desc: got.skill.description,
+                content: got.skill.content,
+              })
             )
           } catch (e: any) {
             skillResults.set(
               i,
-              `[技能 ${wanted}] 读取失败：${e?.message ?? e}。只能读技能清单里列出的名字，别自己编。`
+              t("lab.skill.failed", {
+                name: wanted,
+                msg: String(e?.message ?? e),
+              })
             )
           }
         }
@@ -3415,7 +3440,7 @@ export default function LabPage() {
               {
                 role: "user",
                 content: [
-                  { type: "text", text: "（这是刚才那张截图，用它自检）" },
+                  { type: "text", text: t("lab.shot.feedNote") },
                   { type: "image_url", image_url: { url: dataUrl } },
                 ],
               },
@@ -3438,7 +3463,7 @@ export default function LabPage() {
                 searchResults,
                 httpResults
               )
-              const body = one.replace(/^工具执行结果：\n?/, "").trim()
+              const body = one.replace(/^工具执行结果：\n?/, "").trim() // i18n-exempt: 剥掉 lab-agent.ts（PROMPT_FILES 已豁免）的回执前缀，中文必须与之逐字一致
               convoRef.current = [
                 ...convoRef.current,
                 {
@@ -3446,7 +3471,7 @@ export default function LabPage() {
                   tool_call_id: (sg as { toolCallId: string }).toolCallId,
                   // 有些动作本地没有"结果文本"（write/replace/need_vm），
                   // 但**仍然必须回一条**，否则上游认为这次调用没被回应
-                  content: body || "（已执行，无返回内容）",
+                  content: body || t("lab.toolResult.empty"),
                 },
               ]
             }
@@ -3487,14 +3512,11 @@ export default function LabPage() {
           const res = await ensureVM()
           let note: string
           if (res.ok) {
-            note =
-              "（系统）浏览器终端已经启动并就绪。项目文件在 /root/project 目录下" +
-              "（每次执行命令前会自动同步）。现在可以用 <lab_run> 执行命令了。"
+            note = t("lab.term.readyNote")
           } else if (res.error) {
-            note = `（系统）浏览器终端启动失败：${res.error}。请改用现有的文件工具完成任务，不要再次申请终端。`
+            note = t("lab.term.bootFailedNote", { error: res.error })
           } else {
-            note =
-              "（系统）用户拒绝启用浏览器终端。请用现有的文件工具完成剩下的工作，不要再申请。"
+            note = t("lab.term.rejectedNote")
           }
           // ⚠️ 同一轮里可能还夹着站内操作 —— 这里 `continue` 会跳过下面那段回喂，
           // 所以把手册和站内结果**并进同一条消息**，别把它们丢了。
@@ -3541,13 +3563,14 @@ export default function LabPage() {
               )
             )
           } else if (siteResults.size) {
-            parts.push("工具执行结果：", ...siteResults.values(), "\n请根据结果继续。")
+            parts.push(
+              t("lab.toolResult.head"),
+              ...siteResults.values(),
+              t("lab.toolResult.continue")
+            )
           } else {
             // 只要了手册、还没动手：明确告诉它下一步干什么，免得又空跑一轮
-            parts.push(
-              "（系统）站内操作手册已给出。现在按手册里的 op 用 <lab_site op=\"…\"> 执行" +
-                "用户真正要求的那几步，不要顺手做别的。"
-            )
+            parts.push(t("lab.site.manualGiven"))
           }
           feedResults(parts)
         feedShots()
@@ -3798,7 +3821,7 @@ export default function LabPage() {
    */
   const continueRound = () => {
     // 「继续」= 发一条系统口吻的用户消息，让模型接着上次的进度干，别从头重做
-    void send("（系统）刚才那一轮中断了，请接着上次的进度继续，不要从头重做。")
+    void send(t("lab.resumeNote"))
   }
   /**
    * 「重发上一条」= **原地重发**，不是再追加一条（2026-10-13 站长要求）。
@@ -4971,7 +4994,7 @@ const doImportLocal = async () => {
       onSend={(text: string, detail: { model?: { key: string }; attachments?: string[] }) => {
         applyFxModel(detail?.model?.key)
         // 用户在「+」里明确要动站内数据 ⇒ 这一轮把手册直接给他，别让他再拉一遍
-        siteOpRef.current = /@站内操作|@site\b/i.test(text)
+        siteOpRef.current = /@站内操作|@site\b/i.test(text) // i18n-exempt: 用户输入的 @ 提及关键词，必须同时认中英字面（「+」菜单按当前语言插入 @站内操作 / @Site operations）
         // 附件正文由 send 内部并进「给模型的那份」，不糊在聊天里
         /**
          * ⚠️ 这里**不再自己判断 `streaming`**（2026-10-12 修）。

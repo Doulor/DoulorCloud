@@ -144,7 +144,10 @@ describe("POST /api/admin/storage/sync-quota —— 存量用户刷成所属桶�
     await makeBucket("t_sync_a", 512 * MiB)
     const fallback = await globalDefaultQuota()
 
-    const admin = await makeUser({ role: "admin" })
+    // 「管理员被跳过」的判据是 `isPrivileged()`（root / superadmin）——
+    // admin 角色走后仍会被当成普通用户刷配额（见 handlers/admin.ts 的 syncStorageQuotas）。
+    // 所以这里同时用 superadmin 当操作者与被跳过的那个管理员。
+    const admin = await makeUser({ role: "superadmin" })
     const inBucket = await makeUser()
     const noBucket = await makeUser()
 

@@ -11,7 +11,7 @@
 //   3. 多发 → 撤回未使用的最新份；已使用的份不撤
 //   4. 读取失败 → 不补不撤、账本不动（不确定时不动作）
 //   5. 已对齐 → 幂等（无创建/删除调用）；账本漂移会被纠正
-import { describe, it, expect, beforeEach, afterEach } from "vitest"
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { env } from "cloudflare:workers"
 import { makeUser, setSetting } from "./helpers"
 import { grantAchievementRewards } from "../src/achievement-rewards"
@@ -41,6 +41,25 @@ let planLimit = 0
 /** 套餐定义里的 max_purchase_per_user（用于发放前的预警，不参与 stub 拒绝逻辑） */
 let planMaxPurchase = 0
 let restore: (() => void) | null = null
+
+/**
+ * 让 NewAPI「套餐定义」的进程内缓存过期（只影响需要新套餐值的用例）。
+ *
+ * `listSubscriptionPlans`（src/newapi-client.ts）从 2026-10-12 起把套餐表缓存 **10 分钟**，
+ * 而本文件各用例对同一个套餐给**不同**的 `max_purchase_per_user`：
+ * 前一条用例一旦把「限购 = 0」的套餐表缓存住，后面的限购预检就拿不到新值，
+ * 「预检挡住、不空跑 POST」这条断言会莫名其妙地红（单跑该用例却绿）。
+ *
+ * 做法：只伪造 `Date` 并把假时钟**逐次**往前推 11 分钟（模块级偏移累加，保证
+ * 一定跨过前一条用例写入的缓存时间戳），**不伪造 setTimeout** —— fetch 超时等
+ * 计时器仍走真实时钟；afterEach 里恢复真实计时器。
+ */
+let cacheClockOffsetMs = 0
+function expireNewapiPlanCache(): void {
+  cacheClockOffsetMs += 11 * 60 * 1000
+  vi.useFakeTimers({ toFake: ["Date"] })
+  vi.setSystemTime(Date.now() + cacheClockOffsetMs)
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -190,6 +209,7 @@ beforeEach(async () => {
 afterEach(() => {
   restore?.()
   restore = null
+  vi.useRealTimers()
 })
 
 describe("成就奖励两端对齐", () => {
@@ -210,6 +230,8 @@ describe("成就奖励两端对齐", () => {
   })
 
   it("限购拒绝是真实失败：不推进账本、不记成功、写失败审计（核心回归）", async () => {
+    // 套餐表缓存必须过期，否则预检读到的还是上一条用例的「限购 = 0」
+    expireNewapiPlanCache()
     const u = await makeUser()
     await bindFresh(u.id)
     seedSubs(5)
@@ -229,6 +251,9 @@ describe("成就奖励两端对齐", () => {
   })
 
   it("限购拒绝（套餐未暴露限购值时）：仍不推进账本，失败审计带原始错误", async () => {
+    // 这一条要的是「预检看不到限购值 ⇒ 真的去 POST ⇒ 被 NewAPI 拒绝」，同样必须
+    // 让上一条用例缓存的 planMaxPurchase=5 过期，否则预检会提前挡住，审计文案就变了
+    expireNewapiPlanCache()
     const u = await makeUser()
     await bindFresh(u.id)
     seedSubs(5)

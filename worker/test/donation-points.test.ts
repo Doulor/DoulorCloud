@@ -13,6 +13,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest"
 import { env } from "cloudflare:workers"
 import { authRequest, fetchSelf, makeUser, setPermissions, setSetting, type TestUser } from "./helpers"
+import { installOkTcpStub, restoreTcpStub } from "./tcp-stub"
 import { getPointsBalance } from "../src/points"
 
 const SUB_A = "https://sub-a.example.com"
@@ -52,6 +53,8 @@ function stubSubs(): void {
 }
 
 beforeEach(() => {
+  // 沙箱没有真实出网 TCP：让探活结论可控（否则「连不上 → 转人工」会误伤所有期望自动通过的用例）
+  installOkTcpStub()
   // proxy_subscriptions 是跨用例可查的表，清掉避免互相干扰
   return env.DB.prepare("DELETE FROM proxy_subscriptions").run()
 })
@@ -59,6 +62,7 @@ beforeEach(() => {
 afterEach(() => {
   for (let i = restores.length - 1; i >= 0; i--) restores[i]()
   restores = []
+  restoreTcpStub()
   vi.restoreAllMocks()
 })
 

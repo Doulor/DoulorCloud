@@ -8,6 +8,13 @@
 //
 // 这里重点验证合并口径：同类相加、张数累加、有效期取最晚、重置取最早、
 // 只算 active、以及「免费套餐」要能按设置项被单独识别出来。
+//
+// ⚠️ 2026-10-12（站长反馈进 AI 中转站页很卡）：订阅汇总整体从首屏
+//    `GET /api/dev/status` 移到了懒加载的 `GET /api/dev/usage`
+//    （见 `handlers/newapi.ts` 的 getStatus / getUsage 注释）。
+//    `getStatus` 现在只回 `subscription: null` / `subscriptions: []` 的占位值，
+//    真正的合并数据只在 `/api/dev/usage` 里 —— 所以本文件除「首屏占位」那一条外，
+//    都打 `/api/dev/usage`。
 import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { env } from "cloudflare:workers"
 import { makeUser, authRequest, fetchSelf, setSetting } from "./helpers"
@@ -101,11 +108,17 @@ async function seedAccount(userId: string, newapiUserId: number, username: strin
     .run()
 }
 
-/** 走一遍 GET /api/dev/status，返回订阅相关字段 */
+/**
+ * 走一遍**懒加载**接口 `GET /api/dev/usage`，返回订阅相关字段。
+ *
+ * 订阅汇总在 2026-10-12 从首屏 `GET /api/dev/status` 搬到了这里；
+ * `quotaPerUnit`（quota ↔ 金额换算率）仍只在首屏 status 上下发，顺带取回来，
+ * 保持原有断言语义不变。
+ */
 async function fetchSubscriptions(user: { cookie: string }) {
-  const res = await fetchSelf(authRequest(user, "/api/dev/status"))
-  expect(res.status).toBe(200)
-  return res.json<{
+  const usageRes = await fetchSelf(authRequest(user, "/api/dev/usage"))
+  expect(usageRes.status).toBe(200)
+  const usage = await usageRes.json<{
     subscription: { planId: number; amountTotal: number; endTime: number } | null
     freePlanId: number
     subscriptions: {
@@ -117,8 +130,13 @@ async function fetchSubscriptions(user: { cookie: string }) {
       nextResetTime: number
       count: number
     }[]
-    quotaPerUnit: number
   }>()
+
+  const statusRes = await fetchSelf(authRequest(user, "/api/dev/status"))
+  expect(statusRes.status).toBe(200)
+  const { quotaPerUnit } = await statusRes.json<{ quotaPerUnit: number }>()
+
+  return { ...usage, quotaPerUnit }
 }
 
 beforeEach(async () => {
@@ -140,10 +158,17 @@ afterEach(() => {
   resetAdminCredentialCache()
 })
 
-describe("GET /api/dev/status 的订阅汇总", () => {
-  it("未开通账号 → 订阅字段给全（null / 空数组），不出现 undefined", async () => {
+describe("订阅汇总（懒加载 /api/dev/usage）", () => {
+  it("未开通账号 → 首屏 status 的订阅字段给全（null / 空数组），不出现 undefined", async () => {
     const u = await makeUser()
-    const data = await fetchSubscriptions(u)
+    // 这一条钉的是**首屏**响应形状（未绑定也要给出字段），所以打 /api/dev/status
+    const res = await fetchSelf(authRequest(u, "/api/dev/status"))
+    expect(res.status).toBe(200)
+    const data = await res.json<{
+      subscription: unknown
+      subscriptions: unknown[]
+      freePlanId: number
+    }>()
     expect(data.subscription).toBeNull()
     expect(data.subscriptions).toEqual([])
     expect(data.freePlanId).toBe(1)
@@ -246,12 +271,16 @@ describe("GET /api/dev/status 的订阅汇总", () => {
     const u = await makeUser()
     await seedAccount(u.id, 107, u.username)
     plans = [] // 套餐接口返回空
+    // 故意用一个**套餐表里不可能存在**的 id：套餐定义在 newapi-client 的
+    // `listSubscriptionPlans` 里有 10 分钟进程内缓存，前几条用例已经把真实套餐
+    // 缓存住了，这里不能假设本次请求真的重新拉了套餐表。用不存在的 id，
+    // 无论走缓存还是新拉，「查不到名字」这个前提都成立。
     subs = [
-      { id: 1, planId: 3, amountTotal: 100_000_000, amountUsed: 0, endTime: 1_793_018_823, nextResetTime: 1_790_438_400 },
+      { id: 1, planId: 99, amountTotal: 100_000_000, amountUsed: 0, endTime: 1_793_018_823, nextResetTime: 1_790_438_400 },
     ]
 
     const data = await fetchSubscriptions(u)
-    expect(data.subscriptions[0].title).toBe("套餐 #3")
+    expect(data.subscriptions[0].title).toBe("套餐 #99")
     expect(data.subscriptions[0].amountTotal).toBe(100_000_000)
   })
 

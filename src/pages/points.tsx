@@ -1841,10 +1841,14 @@ export default function PointsPage() {
                   onClick={() => gotoShopPage(shopPageSafe - 1)}
                 >
                   <ChevronLeft className="h-3.5 w-3.5" />
-                  上一页
+                  {t("pt.shopPrev")}
                 </Button>
                 <span className="tabular-nums">
-                  第 {shopPageSafe} / {shopPageCount} 页 · 共 {userProducts.length} 个商品
+                  {t("pt.shopPageInfo", {
+                    page: shopPageSafe,
+                    pages: shopPageCount,
+                    n: userProducts.length,
+                  })}
                 </span>
                 <Button
                   variant="outline"
@@ -1852,7 +1856,7 @@ export default function PointsPage() {
                   disabled={shopPageSafe >= shopPageCount}
                   onClick={() => gotoShopPage(shopPageSafe + 1)}
                 >
-                  下一页
+                  {t("pt.shopNext")}
                   <ChevronRight className="h-3.5 w-3.5" />
                 </Button>
               </div>

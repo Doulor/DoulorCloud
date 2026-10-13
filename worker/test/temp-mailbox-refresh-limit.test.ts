@@ -60,7 +60,9 @@ describe("临时邮箱每日刷新上限", () => {
 
   it("管理员不受每日上限限制", async () => {
     await setSetting("temp_mailbox_refresh_daily_limit", "1")
-    const admin = await makeUser({ role: "admin" })
+    // 上限豁免走 `isPrivileged()`（root / superadmin），与 admin_scope 白名单无关
+    // （见 `src/handlers/tempbox.ts`）。用 superadmin 表达「特权账号」。
+    const admin = await makeUser({ role: "superadmin" })
     let id = await addTempMailbox(admin)
 
     for (let i = 0; i < 3; i++) {

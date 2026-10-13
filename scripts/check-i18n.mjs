@@ -36,12 +36,29 @@ function walk(dir, out = []) {
   return out
 }
 
-/** 剥掉注释：先块注释，再行注释。 */
+/**
+ * 剥掉注释：先块注释，再行注释。
+ *
+ * ⚠️ 块注释用**等长空白**替换（原来直接删成空串），为的是**保持行数不变** ——
+ * 否则一处多行块注释就会让它后面所有行的行号整体上移，报出来的 `line` 是错的
+ * （排查时要自己数行）。空白替换后 `line` 才真的能用。
+ */
 function stripComments(code) {
   return code
-    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
     .replace(/(^|[^:])\/\/[^\n]*/g, "$1") // 避免误伤 https://
 }
+
+/**
+ * 行级豁免标记：`// i18n-exempt: <理由>`
+ *
+ * 用于「这行含中文，但它**不是界面文案**」的情况 —— 例如解析协议字面量、
+ * 厂商别名正则。这类字符串必须保留中文才能和上游/协议对上，翻译反而是 bug。
+ *
+ * 🔴 **理由必填**（`\S` 要求冒号后至少有一个非空白字符）。空理由不算豁免 ——
+ *    这是防止它退化成「随手加个标记就绕过检查」的唯一闸门。
+ */
+const EXEMPT_MARK = /\/\/\s*i18n-exempt:\s*\S/
 
 /**
  * 这些文件里的中文是**写给模型看的**（系统提示词、能力手册、意图识别关键词），
@@ -50,18 +67,34 @@ function stripComments(code) {
  * ⚠️ 往这里加文件前先确认：它里面确实没有面向用户的字符串。
  * 只为了让数字好看而把自己写的 toast 混进来，等于把检查废掉。
  */
-const PROMPT_FILES = new Set(["src/lib/lab-agent.ts", "src/lib/lab-site.ts"])
+const PROMPT_FILES = new Set([
+  "src/lib/lab-agent.ts",
+  "src/lib/lab-site.ts",
+  // 2026-10-13 加：原生 function-calling 的 `tools` schema（每个工具的 description
+  // 与参数 description）。它只被塞进上游 API 的 `tools` 数组、**从不渲染到界面**
+  // （渲染走 `nativeToolNames()`，只回 ASCII 名字）。文件自述「description 是模型
+  // 唯一的说明书」，按界面语言翻译它 = 按界面语言改模型行为 —— 与上面两个同类。
+  "src/lib/lab-tools-native.ts",
+])
 
 const files = walk(SRC)
 const hits = []
+const exempted = []
 for (const f of files) {
   const rel = relative(ROOT, f).replace(/\\/g, "/")
   if (PROMPT_FILES.has(rel)) continue
-  const lines = stripComments(readFileSync(f, "utf8")).split("\n")
+  const rawText = readFileSync(f, "utf8")
+  const rawLines = rawText.split("\n")
+  const lines = stripComments(rawText).split("\n")
   lines.forEach((line, i) => {
-    if (CJK.test(line)) {
-      hits.push({ file: relative(ROOT, f).replace(/\\/g, "/"), line: i + 1, text: line.trim() })
+    if (!CJK.test(line)) return
+    const text = line.trim()
+    // 行级豁免要读**原始行** —— 注释已经被 stripComments 剥掉了
+    if (EXEMPT_MARK.test(rawLines[i] ?? "")) {
+      exempted.push({ file: rel, line: i + 1, text })
+      return
     }
+    hits.push({ file: rel, line: i + 1, text })
   })
 }
 
@@ -72,6 +105,10 @@ console.log("i18n 覆盖检查")
 console.log("  src/ 下 .ts/.tsx 文件:", files.length)
 console.log("  仍含中文（未国际化）的行:", hits.length)
 console.log("  涉及文件:", byFile.size)
+if (exempted.length) {
+  // 豁免不静默：始终把豁免了什么、理由是什么打出来，便于复核
+  console.log("  已行级豁免（// i18n-exempt: 理由）:", exempted.length, "行 —— 逐条理由见 --list")
+}
 console.log("")
 
 if (byFile.size) {
@@ -87,6 +124,13 @@ if (SHOW_LIST) {
   console.log("  逐条清单：")
   for (const h of hits) console.log("    " + h.file + ":" + h.line + "  " + h.text.slice(0, 110))
   console.log("")
+  if (exempted.length) {
+    console.log("  已豁免清单（这些**不算**未国际化，但列出来接受复核）：")
+    for (const h of exempted) {
+      console.log("    " + h.file + ":" + h.line + "  " + h.text.slice(0, 110))
+    }
+    console.log("")
+  }
 }
 
 if (hits.length) {

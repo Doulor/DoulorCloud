@@ -960,7 +960,10 @@ describe("auditSenseNovaKeys —— 商汤 Key 定期巡检", () => {
     const full = await auditSenseNovaKeys(env, { all: true })
     expect(full.checked).toBe(11)
     expect(full.invalid).toBe(0)
-  })
+    // 这条要造 11 笔捐献 + 跑两轮全量巡检；150+ 个测试文件并行时本地 D1 争用明显，
+    // 会超过 vitest 的 5 秒默认超时（表现为 `Test timed out in 5000ms`，
+    // 但逻辑其实是对的）。给 30 秒，让「超时」不再冒充「逻辑坏了」。
+  }, 30_000)
 
   it("上游地址未配置 → 整轮跳过（不发任何请求）", async () => {
     const donor = await makeDonor()

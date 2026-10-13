@@ -495,14 +495,24 @@ export async function runMaintenance(
 
   // 4c) 过期匿名统计事件 / 链接预览缓存（2026-09-25 审计 H13）
   //
-  // ⚠️ 这两个清理函数（handlers/analytics.ts 的 purgeExpiredAnalytics 90 天、
-  // link-preview.ts 的 purgeExpiredPreviews 7 天）**早就写好了，但从来没有
-  // 任何地方调用过** —— 全仓 grep 只命中定义处。而文档（docs/新功能-定时运维与
-  // 邮件回信.md、HANDOFF.md）还宣称这两件事已经做了。
-  //
+  // 这两个清理函数（handlers/analytics.ts 的 purgeExpiredAnalytics 90 天、
+  // link-preview.ts 的 purgeExpiredPreviews 7 天）在 2026-09-25 的审计里是
+  // **写好了却从来没有调用点**（全仓 grep 只命中定义处），而文档
+  // （docs/新功能-定时运维与邮件回信.md、HANDOFF.md）还宣称这两件事已经做了。
   // 后果：analytics_events 是**匿名接口每浏览写一行**，link_previews 是每条
-  // 外链一行，两张表无界增长且不在 TABLE_WARN_ROWS 里 —— 连告警都没有。
-  // 在 D1 按行读计费下，这是全库最贵的两张表。
+  // 外链一行，两张表无界增长 —— 在 D1 按行读计费下是全库最贵的地方。
+  //
+  // ✅ 2026-10-13：接线已经补上（就是下面这次调用）。两个决定记录在此：
+  //   · **挂每小时的完整运维（`17 * * * *`），不挂每分钟的发布 tick**：
+  //     过期数据早一小时清掉没有任何产品影响，而 DELETE 是写操作；
+  //     每分钟那条 cron 是给「定时公告/到点活动」用的，语义是「不能晚」，
+  //     把清理塞进去只会让一个便宜的 tick 变成一个会写库的 tick
+  //     （见 index.ts 的 SCHEDULED_PUBLISH_CRON 与 scheduled 处理器）。
+  //   · **保留期沿用硬编码常量**（ANALYTICS_RETENTION_DAYS / PREVIEW_RETENTION_DAYS），
+  //     跟着本文件其它任务（会话 7 天 / 审计 90 天 / 限流 1 天）的既有风格走，
+  //     不为这两张表单独发明「设置项驱动的保留期」机制。两个常量必须与各自
+  //     handler 内部值一致 —— 否则 dryRun 的预演数会与真跑数不符。
+  //   · 没进 TABLE_WARN_ROWS 的历史原因也已一并修掉（见文件上方那张表的注释）。
   let expiredPurged = { analyticsEvents: 0, linkPreviews: 0 }
   try {
     if (dryRun) {
