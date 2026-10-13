@@ -33,12 +33,16 @@ import {
   resolveWb2ApiConfig,
   saveWb2ApiKey,
   Wb2StateGoneError,
+  wb2ImportCockpit,
   wb2Overview,
   wb2Poll,
   wb2RemoveAccount,
   wb2Start,
+  type Wb2ImportResult,
 } from "../wb2api-client"
 import { grantInviteReward } from "../invite-rewards"
+// 复用「强制通知」那套：发通知时收权限存快照，撤回时精确还原
+import { restrictUserFeatures, restoreUserFeatures } from "./notices"
 import type { Env } from "../env"
 
 /** 本站登录会话与网关 state 的 15 分钟有效期对齐 */
@@ -116,7 +120,7 @@ async function requireAdminUser(env: Env, request: Request): Promise<UserRow> {
 async function channelConfig(env: Env) {
   const enabled = (await getSetting(env, "wb2api_enabled")) === "1"
   const limit = await getSettingNumber(env, "wb2api_max_bindings")
-  return { enabled, limit: Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : 3 }
+  return { enabled, limit: Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : 10 }
 }
 
 /** 当前用户 active 绑定的数量 */
@@ -520,17 +524,76 @@ async function completeBinding(
     return result
   }
 
-  // 二次限额校验：start 与 poll 之间用户可能已用别的会话绑满了
+  // 建绑定：与「JSON 文件导入」共用同一段逻辑（见 createWb2Binding 的说明）。
+  // ⚠️ 限额不足时它会抛错，这里补一次 failSession —— 原实现是「标失败 + 抛错」，
+  // 保持行为不变（让前端立刻知道这次会话废了，而不是一直轮询）。
+  let created: { id: string; aiGranted: boolean }
+  try {
+    created = await createWb2Binding(env, user, info, {
+      acknowledgedIp: sess.acknowledged_ip,
+      isNewToPool: inPoolBefore === false,
+    })
+  } catch (err) {
+    if (err instanceof ApiError && err.code === "WB2API_LIMIT_REACHED") {
+      await failSession(env, sess.id, err.message)
+    }
+    throw err
+  }
+  const { aiGranted } = created
+
+  const result = {
+    uid: info.uid,
+    nickname: info.nickname,
+    credits: info.credits ?? null,
+    creditsTotal: info.creditsTotal ?? null,
+    alreadyBound: false,
+    aiGranted,
+  }
+  await env.DB.prepare(
+    "UPDATE wb2api_login_sessions SET status = 'done', result_json = ? WHERE id = ?"
+  )
+    .bind(JSON.stringify(result), sess.id)
+    .run()
+
+  // 审计 / 捐献奖励 / 邀请奖励 / 通知邮件都已经在 createWb2Binding 里做过
+  // （2026-10-10 抽出来给「登录绑定」和「JSON 文件导入」共用，避免两份逻辑分家）
+  return result
+}
+
+// ---------------------------------------------------------------------------
+// 管理端
+// ---------------------------------------------------------------------------
+
+/**
+ * 建一条 wb 反代账号绑定（**登录成功**与**JSON 文件导入**两条路共用）。
+ *
+ * 为什么要抽出来：绑定不只是插一行 —— 它连带「判断该不该批 ai 权限 → 原子写回
+ * permissions → 审计 → 捐献/邀请奖励 → 发通知邮件」。复制一份必然分家
+ * （改一边漏一边），与 `public-api.ts` 里 `runAs` 的教训同源。
+ *
+ * @param opts.acknowledgedIp 免责声明的来源 IP（留痕，证明用户被告知账号进共享池）
+ * @param opts.isNewToPool    该账号在本次操作**之前**是否已在网关池里。
+ *                            只有「真的给池子添了新东西」才发奖励 —— 绑一个管理员
+ *                            早就手工加进池的账号不算贡献（原实现即此口径）。
+ */
+export async function createWb2Binding(
+  env: Env,
+  user: UserRow,
+  info: { uid: string; nickname: string | null; realm: string },
+  opts: { acknowledgedIp: string | null; isNewToPool: boolean }
+): Promise<{ id: string; aiGranted: boolean }> {
   const { limit } = await channelConfig(env)
   const used = await activeBindingCount(env, user.id)
   if (used >= limit) {
-    const msg = `最多只能绑定 ${limit} 个账号，你已绑定 ${used} 个`
-    await failSession(env, sess.id, msg)
-    throw new ApiError(409, msg, "WB2API_LIMIT_REACHED")
+    throw new ApiError(
+      409,
+      `最多只能绑定 ${limit} 个账号，你已绑定 ${used} 个`,
+      "WB2API_LIMIT_REACHED"
+    )
   }
 
   // 记录「本次绑定是否真的把 ai 从无变有」——移除时据此判断该不该收回。
-  // ⚠️ 判断基于会话用户的快照（并发下可能偏保守）；写回走原子 json_set，
+  // ⚠️ 判断基于传入用户的快照（并发下可能偏保守）；写回走原子 json_set，
   // 不会覆盖并发写入的其他模块权限。
   // 先看「捐献授权开关」：关掉时绑定照常进池，只是不再授予 ai 权限。
   const aiGranted =
@@ -552,7 +615,7 @@ async function completeBinding(
       info.nickname,
       info.realm,
       aiGranted ? 1 : 0,
-      sess.acknowledged_ip,
+      opts.acknowledgedIp,
       now
     ),
     ...(aiGranted
@@ -564,20 +627,6 @@ async function completeBinding(
       : []),
   ])
 
-  const result = {
-    uid: info.uid,
-    nickname: info.nickname,
-    credits: info.credits ?? null,
-    creditsTotal: info.creditsTotal ?? null,
-    alreadyBound: false,
-    aiGranted,
-  }
-  await env.DB.prepare(
-    "UPDATE wb2api_login_sessions SET status = 'done', result_json = ? WHERE id = ?"
-  )
-    .bind(JSON.stringify(result), sess.id)
-    .run()
-
   await audit(
     env,
     user.id,
@@ -586,27 +635,27 @@ async function completeBinding(
       (aiGranted ? "（已解锁 AI 中转站权限）" : "（用户已有该权限，未重复授予）")
   )
 
-  // 捐献奖励积分：判据与下面的邀请奖励**完全一致** —— 只有「这次真的带来了新资源」
-  // （登录前不在网关池里）才发。绑一个管理员早就手工加进池的账号不算贡献，
-  // 池快照缺失（老会话）时也按「未知」处理不发（与邀请奖励同一取舍）。
-  //
+  // 重新登录成功 ⇒ 撤回「账号失效」通知，被暂时收回的权限自动还原
+  //（站长要求：登录失效的账号，用户重新登录原账号即可解锁）
+  await revokeInvalidWbNotices(env, user.id)
+
+  // 捐献奖励积分：只有「这次真的带来了新资源」（操作前不在网关池里）才发。
   // ⚠️ 不能只看「新建了绑定行」：池里本来就有、绑定表却没登记的情况是存在的，
   //    那时新建的只是一行绑定记录，用户并没有给池子添任何东西。
-  if (inPoolBefore === false) {
+  if (opts.isNewToPool) {
     await grantDonationReward(env, {
       userId: user.id,
       kind: "workbuddy",
       dedupKey: `wb2api:${id}`,
       detail: "WorkBuddy 反代账号捐献奖励",
     })
-  }
 
-  // 邀请奖励：必须同时满足「真的从无到有解锁了 AI 权限」与「带来的是新资源」
-  // （登录前不在池里）。已解锁的人重复绑定、或绑一个本来就在池里的账号，都不算新资源。
-  if (aiGranted && inPoolBefore === false) {
-    const planId = await getSettingNumber(env, "invite_reward_plan_id")
-    if (planId && planId > 0) {
-      await grantInviteReward(env, user, planId)
+    // 邀请奖励：还必须「真的从无到有解锁了 AI 权限」
+    if (aiGranted) {
+      const planId = await getSettingNumber(env, "invite_reward_plan_id")
+      if (planId && planId > 0) {
+        await grantInviteReward(env, user, planId)
+      }
     }
   }
 
@@ -629,12 +678,320 @@ async function completeBinding(
     console.error("反代绑定通知邮件发送失败:", user.email, err)
   }
 
-  return result
+  return { id, aiGranted }
 }
 
-// ---------------------------------------------------------------------------
-// 管理端
-// ---------------------------------------------------------------------------
+/**
+ * POST /api/wb2api/import —— 上传 cockpit 导出的 JSON 文件，批量导入账号并绑定。
+ *
+ * 与「登录绑定」的区别：账号不是走授权流程进来的，而是用户手里已有的凭据文件。
+ * 导入成功后**复用 `createWb2Binding`** 建绑定 + 发放权限 + 奖励 —— 口径与登录完全一致。
+ *
+ * ⚠️ 网关的导入接口**不返回导入后的 uid 列表**（只有总/成功/跳过计数），
+ *    所以我们自己从上传的 JSON 里解析 uid（cockpit 格式的字段名就是 `uid`）。
+ *    解析不出任何一个 uid 就整体失败，绝不建「不知道绑了谁」的空绑定。
+ */
+export async function importWb2ApiAccounts(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  await guardRateLimit(env, `wb2api:import:user:${user.id}`, 5, 3600, "导入过于频繁，请稍后再试")
+
+  const { enabled, limit } = await channelConfig(env)
+  if (!enabled) {
+    throw new ApiError(403, "反代账号捐献通道已关闭", "WB2API_DISABLED")
+  }
+  if (!(await isWb2ApiConfigured(env))) {
+    throw new ApiError(503, "反代网关未配置访问密钥，请联系管理员", "WB2API_NOT_CONFIGURED")
+  }
+
+  const form = await request.formData().catch(() => null)
+  const file = form?.get("file")
+  if (!(file instanceof File)) {
+    throw new ApiError(400, "请选择要上传的 JSON 文件", "INVALID_INPUT")
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    throw new ApiError(400, "文件过大（上限 5 MB）", "FILE_TOO_LARGE")
+  }
+
+  const raw = await file.text()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new ApiError(400, "文件不是合法的 JSON", "INVALID_JSON")
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new ApiError(
+      400,
+      "文件里没有账号 —— 需要 cockpit 导出的 JSON 数组",
+      "INVALID_JSON"
+    )
+  }
+
+  // 自己解析 uid（网关不回传）；顺便算出去重后的账号数
+  const uids = Array.from(
+    new Set(
+      (parsed as Record<string, unknown>[])
+        .map((r) => String(r?.uid ?? "").trim())
+        .filter((u) => u.length > 0)
+    )
+  )
+  if (uids.length === 0) {
+    throw new ApiError(400, "文件里没有可用的账号（缺少 uid 字段）", "INVALID_JSON")
+  }
+
+  // 转发给网关（multipart 由客户端封装按契约组好）
+  // ⚠️ 上游失败会在这里抛 ApiError（含可读文案），交给全局兜底
+  let upstream: Wb2ImportResult = {}
+  upstream = await wb2ImportCockpit(env, raw)
+
+  // 名额：一次最多只能补到上限，超出的部分明确告诉用户，而不是静默丢弃
+  const used = await activeBindingCount(env, user.id)
+  const room = Math.max(0, limit - used)
+
+  const existing = await env.DB.prepare(
+    "SELECT uid FROM wb2api_bindings WHERE user_id = ? AND status = 'active'"
+  )
+    .bind(user.id)
+    .all<{ uid: string }>()
+  const mine = new Set((existing.results ?? []).map((r) => r.uid))
+
+  let bound = 0
+  const skippedByLimit: string[] = []
+  const alreadyMine: string[] = []
+
+  for (const uid of uids) {
+    if (mine.has(uid)) {
+      alreadyMine.push(uid)
+      continue
+    }
+    if (bound >= room) {
+      skippedByLimit.push(uid)
+      continue
+    }
+    // 昵称尽量从上传的文件里取（网关不回传）
+    const row = (parsed as Record<string, unknown>[]).find(
+      (r) => String(r?.uid ?? "").trim() === uid
+    )
+    const nickname = String(row?.nickname ?? row?.email ?? "").trim() || null
+    // realm 由 domain 推断，与网关内的判定一致（workbuddy.ai 家族 → global）
+    const domain = String(row?.domain ?? "").toLowerCase()
+    const realm = domain.includes("workbuddy.ai") ? "global" : "cn"
+
+    await createWb2Binding(
+      env,
+      user,
+      { uid, nickname, realm },
+      // 导入的都是「用户自己带来的新账号」；已在本账号绑定过的上面已跳过
+      { acknowledgedIp: clientIp(request), isNewToPool: true }
+    )
+    bound++
+  }
+
+  return json({
+    ok: true,
+    total: uids.length,
+    bound,
+    alreadyBound: alreadyMine,
+    skippedByLimit,
+    limit,
+    upstream: {
+      total: upstream.total ?? null,
+      imported: upstream.imported ?? null,
+      skipped: upstream.skipped ?? null,
+      errors: upstream.errors ?? [],
+    },
+  })
+}
+
+/**
+ * 扫描网关池里「被上游判死、需要捐献者重新登录」的账号，映射回本站的捐献者。
+ *
+ * 触发背景（2026-10-10 站长反馈）：号池里大量账号变成
+ * `account banned by upstream (11140 request illegal), re-login required` ——
+ * 网关收到 11140 时会 `Pool.Disable(uid, …)`，但**捐献者这边毫不知情**，
+ * 还以为自己的贡献有效、权限也该一直有效。
+ *
+ * 判定：`disabled === true` 且原因里带 11140 / banned / re-login required。
+ * 返回的每一项都带「哪个用户 / 哪条绑定」，便于管理端展示与后续批量通知。
+ *
+ * ⚠️ D1 的 `IN (?,?,…)` 参数上限约为 100 ⇒ 只取前 90 个 uid 一批
+ *（账号失效是持续状态，下一轮还能扫到剩下的，不会漏）。
+ */
+export async function scanInvalidWb2Bindings(
+  env: Env
+): Promise<{ uid: string; reason: string; bindingId: string; userId: string }[]> {
+  const pool = await wb2Overview(env)
+  const dead = (pool.accounts ?? [])
+    .filter(
+      (a) =>
+        a.disabled === true &&
+        /11140|re-?login required|banned by upstream/i.test(a.disabled_reason ?? "")
+    )
+    .slice(0, 90)
+  if (dead.length === 0) return []
+
+  const uids = dead.map((a) => a.uid)
+  const rows = await env.DB.prepare(
+    `SELECT id, user_id, uid FROM wb2api_bindings
+      WHERE status = 'active' AND uid IN (${uids.map(() => "?").join(",")})`
+  )
+    .bind(...uids)
+    .all<{ id: string; user_id: string; uid: string }>()
+
+  const reasonByUid = new Map(dead.map((a) => [a.uid, a.disabled_reason ?? ""]))
+  return (rows.results ?? []).map((r) => ({
+    uid: r.uid,
+    reason: reasonByUid.get(r.uid) ?? "",
+    bindingId: r.id,
+    userId: r.user_id,
+  }))
+}
+
+/** GET /api/admin/wb2api/invalid —— 被上游判死、需要捐献者重新登录的账号 */
+export async function adminListInvalidBindings(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  await requireAdminUser(env, request)
+  if (!(await isWb2ApiConfigured(env))) {
+    throw new ApiError(503, "反代网关未配置访问密钥", "WB2API_NOT_CONFIGURED")
+  }
+
+  const invalid = await scanInvalidWb2Bindings(env)
+  if (invalid.length === 0) {
+    return json({ invalid: [] })
+  }
+
+  const userIds = Array.from(new Set(invalid.map((i) => i.userId)))
+  const us = await env.DB.prepare(
+    `SELECT id, username, email FROM users WHERE id IN (${userIds.map(() => "?").join(",")})`
+  )
+    .bind(...userIds)
+    .all<{ id: string; username: string; email: string }>()
+  const byId = new Map((us.results ?? []).map((u) => [u.id, u]))
+
+  return json({
+    invalid: invalid.map((i) => ({
+      uid: i.uid,
+      reason: i.reason,
+      bindingId: i.bindingId,
+      userId: i.userId,
+      username: byId.get(i.userId)?.username ?? null,
+      email: byId.get(i.userId)?.email ?? null,
+    })),
+  })
+}
+
+/** 「wb 账号失效」通知的标题标记（用它识别/去重/自动撤回，改文案时别丢掉） */
+const WB_INVALID_NOTICE_TAG = "[wb-account-invalid]"
+
+/**
+ * 撤回该用户所有「wb 账号失效」通知，并**精确还原**被收回的权限。
+ *
+ * 在哪调用：用户**重新登录原账号成功**之后（见 createWb2Binding）——
+ * 站长要求「重新登录原来的账号就行，然后就可以重新解锁权限」，这就是那条恢复路径。
+ */
+async function revokeInvalidWbNotices(env: Env, userId: string): Promise<number> {
+  const rows = await env.DB.prepare(
+    `SELECT * FROM admin_notices
+      WHERE user_id = ? AND revoked_at IS NULL AND title LIKE ?`
+  )
+    .bind(userId, `%${WB_INVALID_NOTICE_TAG}%`)
+    .all<{ id: string; restore_permissions: string | null; newapi_disabled: number }>()
+
+  let n = 0
+  for (const notice of rows.results ?? []) {
+    // restoreUserFeatures 只补回「被本通知收回的字段」，不会覆盖别的模块权限
+    await restoreUserFeatures(env, notice as never)
+    await env.DB.prepare("UPDATE admin_notices SET revoked_at = ? WHERE id = ?")
+      .bind(new Date().toISOString(), notice.id)
+      .run()
+    n++
+  }
+  return n
+}
+
+/**
+ * 给「账号被上游判死」的捐献者发强制通知，并收回 ai 权限（连带禁用 NewAPI 侧用户）。
+ *
+ * 复用管理端「强制通知」那一套（`restrictUserFeatures`）：发通知时把权限快照写进
+ * `restore_permissions`，撤回时精确还原 ⇒ 用户重新登录原账号后调用
+ * `revokeInvalidWbNotices` 即可把权限还回去。
+ *
+ * ⚠️ 同一用户已有未确认的同类通知时**跳过**，避免每天刷一条。
+ */
+export async function notifyInvalidWb2Bindings(
+  env: Env,
+  opts: { dryRun?: boolean } = {}
+): Promise<{ candidates: number; users: number; notified: number; skipped: number }> {
+  const invalid = await scanInvalidWb2Bindings(env)
+  const userIds = Array.from(new Set(invalid.map((i) => i.userId)))
+  if (opts.dryRun) {
+    return { candidates: invalid.length, users: userIds.length, notified: 0, skipped: 0 }
+  }
+
+  const now = new Date().toISOString()
+  let notified = 0
+  let skipped = 0
+
+  for (const userId of userIds) {
+    const dup = await env.DB.prepare(
+      `SELECT id FROM admin_notices
+        WHERE user_id = ? AND revoked_at IS NULL AND read_at IS NULL AND title LIKE ?`
+    )
+      .bind(userId, `%${WB_INVALID_NOTICE_TAG}%`)
+      .first<{ id: string }>()
+    if (dup) {
+      skipped++
+      continue
+    }
+
+    const restricted = await restrictUserFeatures(env, userId, ["ai"])
+    await env.DB.prepare(
+      `INSERT INTO admin_notices
+         (id, user_id, title, body, require_ack, restrict_features,
+          restore_permissions, newapi_disabled, created_by, created_at)
+       VALUES (?, ?, ?, ?, 1, ?, ?, ?, NULL, ?)`
+    )
+      .bind(
+        uuid(),
+        userId,
+        `${WB_INVALID_NOTICE_TAG} 你捐献的 WorkBuddy 账号登录已失效`,
+        "你捐献的 WorkBuddy 账号被上游判定为「需要重新登录」（错误码 11140，通常是登录态过期或被风控）。\n\n" +
+          "在重新登录之前，这个账号无法继续为共享池提供额度，所以「AI 中转站」权限**已暂时收回**。\n\n" +
+          "**怎么恢复**：到「捐献与邀请」页面，用**原来那个** WorkBuddy 账号重新登录一次即可 —— 权限会自动恢复，不用联系管理员。",
+        JSON.stringify(["ai"]),
+        restricted.restore,
+        restricted.newapiDisabled ? 1 : 0,
+        now
+      )
+      .run()
+    notified++
+  }
+
+  await audit(
+    env,
+    null,
+    "wb2api.invalid.notify",
+    `扫描到 ${invalid.length} 条失效绑定（${userIds.length} 个用户），新发通知 ${notified} 条、跳过 ${skipped} 条`
+  )
+
+  return { candidates: invalid.length, users: userIds.length, notified, skipped }
+}
+
+/** POST /api/admin/wb2api/invalid/notify —— 给失效账号的捐献者发通知并收回 ai 权限 */
+export async function adminNotifyInvalidBindings(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  await requireAdminUser(env, request)
+  if (!(await isWb2ApiConfigured(env))) {
+    throw new ApiError(503, "反代网关未配置访问密钥", "WB2API_NOT_CONFIGURED")
+  }
+  const body = (await request.json().catch(() => ({}))) as { dryRun?: unknown }
+  const result = await notifyInvalidWb2Bindings(env, { dryRun: body.dryRun === true })
+  return json(result)
+}
 
 /** GET /api/admin/wb2api/bindings —— 全部绑定（含用户名） */
 export async function adminListBindings(

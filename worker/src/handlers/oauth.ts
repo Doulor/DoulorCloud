@@ -88,18 +88,31 @@ function canonicalOrigin(env: Env, request: Request): string {
   if (configured) return configured.replace(/\/+$/, "")
 
   const url = new URL(request.url)
-  const host = url.hostname.toLowerCase()
+  // 🔴 2026-10-11 渗透测试 finding#14：issuer 不能由请求 Host 原样派生。
+  // 按 OIDC 规范 issuer 应是**稳定唯一标识**，而原来的 `return url.origin`
+  // 会把它交给请求方：同一发现端点经 Cloudflare 备用端口（:8443 等，浏览器可
+  // 直接访问）或带尾部点的 Host（cloud.doulor.cn.）就返回不同的 issuer ⇒
+  // issuer 混淆 / 协议元数据不可信。所以这里先做**归一化**：
+  //   · 去掉端口（url.hostname 本身不含端口）；
+  //   · 去掉尾部点（带点 Host 是 DNS 绝对名的合法写法，但同一个站）。
+  // 再要求 Host 属于本站域名；不属于就回落到规范域名 —— 不给未知 Host
+  // 任何影响 issuer 的机会（CF 虽然会挡外域，但那是网络层的巧合，不该依赖）。
+  const host = url.hostname.toLowerCase().replace(/\.+$/, "")
+
   const isLocal =
     host === "localhost" ||
     host === "127.0.0.1" ||
     host === "[::1]" ||
     host === "::1" ||
     host.endsWith(".localhost")
-  if (isLocal) return url.origin
+  if (isLocal) return `https://${host}`
 
-  if (host.endsWith(".workers.dev")) return `https://cloud.${env.ROOT_DOMAIN}`
+  const root = env.ROOT_DOMAIN.toLowerCase().replace(/\.+$/, "")
+  // 本站域名与其平台子域（用户自建的 OAuth 客户端可绑自定义平台子域，
+  // 那种情况下自选 issuer 是有意为之，保留）
+  if (host === root || host.endsWith(`.${root}`)) return `https://${host}`
 
-  return url.origin
+  return `https://cloud.${root}`
 }
 
 /**

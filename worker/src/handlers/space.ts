@@ -95,10 +95,16 @@ async function loadSpaceSettings(env: Env, userId: string): Promise<SpaceSetting
   return row ?? DEFAULT_SETTINGS
 }
 
-/** 捐献类型 → 需要的功能权限（决定访客能不能看细节） */
-function donationFeature(type: string): Feature {
+/**
+ * 捐献类型 → 需要的功能权限（决定访客能不能看细节）。
+ *
+ * 返回 `null` 表示「这个类型不再对应任何功能权限，内容对所有登录用户可见」。
+ * `frp` 就是这样（2026-10-13）：内网穿透改成积分租用后不再有 frp 权限，
+ * 但捐献 frp 服务器这条通道仍然存在，只是它的细节不再需要门禁。
+ */
+function donationFeature(type: string): Feature | null {
   if (type === "proxy") return "proxy"
-  if (type === "frp") return "frp"
+  if (type === "frp") return null
   // ai 与 sensenova 都属于「AI 中转站」这一个权限模块
   return "ai"
 }
@@ -276,7 +282,9 @@ export async function getSpace(
     contributions = {
       items: (rows.results ?? []).map((r) => {
         const need = donationFeature(r.type)
-        const allowed = isOwner || (viewerPerms ? viewerPerms[need] === true : false)
+        // need 为 null 表示这个捐献类型不再对应任何权限门禁 → 对所有登录用户可见
+        const allowed =
+          isOwner || need === null || (viewerPerms ? viewerPerms[need] === true : false)
         return {
           id: r.id,
           type: r.type,
@@ -285,7 +293,7 @@ export async function getSpace(
           // 打码时 summary 直接是 null：内容根本没离开服务端
           summary: allowed ? summarizeDonation(r.type, r.payload) : null,
           masked: !allowed,
-          needLabel: allowed ? null : FEATURE_LABELS[need],
+          needLabel: allowed || need === null ? null : FEATURE_LABELS[need],
         }
       }),
       hiddenReason: null,

@@ -269,6 +269,87 @@
 }
 
 /* ==========================================================================
+   AI 实验室：内容列宽度可拖拽（2026-10-12 站长要求，照抄 DeepSeek Harness）
+   --------------------------------------------------------------------------
+   DSH 的实现在它的 `ConversationRoot.module.css` + `WidthHandle` 组件里，
+   规格逐条抄过来（常量见 lab.tsx 的 LAB_CONTENT_MIN / LAB_CONTENT_EDGE_BUDGET）：
+     · 手柄贴在**内容列外侧 24px**，左右各一条（`.lab-width-handle`）；
+     · 手柄自身宽度 `min(10px, (可视宽 - 内容宽)/2 - 48px)` —— 内容越宽手柄越窄，
+       挤到没空间时自然归零，不会压住内容（我们再加个 max(0px, …) 兜住负值）；
+     · 可见的「小竖线」是 `::after` 的 2px 渐变：**默认完全透明**，
+       hover 或拖拽时才 `opacity:1`（站长要的「鼠标移过去才显示」）；
+     · 竖线不是整条贯穿 —— 以指针的 Y 位置为中心，上下各 36px 渐隐、中间 8px 实心，
+       位置由 `--lab-handle-y` 在 pointermove 里写（DSH 的 `--dsh-width-handle-pointer-y`）。
+   ========================================================================== */
+.lab-col {
+  width: 100%;
+  /* 默认 48rem = 原来的 max-w-3xl，观感不变；拖拽后由内联变量覆盖 */
+  max-width: var(--lab-content-width, 48rem);
+  margin-inline: auto;
+}
+
+.lab-width-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 10;
+  width: max(
+    0px,
+    /* 20px = 手柄距内容列 20px + 距可视区边缘 12px 的余量（与 lab.tsx 的
+       LAB_CONTENT_EDGE_BUDGET=64 配套：最宽时这里还剩 12px，仍抓得住）。
+       ⚠️ 原来抄 DSH 的 `- 48px`，配上 176 的预算 ⇒ 最宽时手柄正好归零、
+       拉到头就再也拖不回来（2026-10-12 一并修掉）。 */
+    min(10px, calc((100% - var(--lab-content-width, 48rem)) / 2 - 20px))
+  );
+  cursor: col-resize;
+  /* 触屏拖动时别让浏览器把横向拖动当成滚动（与思考强度滑块同一个坑） */
+  touch-action: none;
+}
+.lab-width-handle[data-side="left"] {
+  right: calc(50% + var(--lab-content-width, 48rem) / 2 + 24px);
+}
+.lab-width-handle[data-side="right"] {
+  left: calc(50% + var(--lab-content-width, 48rem) / 2 + 24px);
+}
+.lab-width-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 2px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 150ms ease;
+  background: linear-gradient(
+    to bottom,
+    transparent calc(var(--lab-handle-y, 50%) - 36px),
+    var(--muted-foreground) calc(var(--lab-handle-y, 50%) - 8px),
+    var(--muted-foreground) calc(var(--lab-handle-y, 50%) + 8px),
+    transparent calc(var(--lab-handle-y, 50%) + 36px)
+  );
+}
+.lab-width-handle[data-side="left"]::after {
+  right: 4px;
+}
+.lab-width-handle[data-side="right"]::after {
+  left: 4px;
+}
+.lab-width-handle:hover::after,
+.lab-width-handle[data-dragging]::after {
+  opacity: 1;
+}
+.lab-width-handle[data-dragging] {
+  z-index: 30;
+}
+/* 触屏没有 hover，这条线永远不显示、也不该占命中区（与边缘圆钮同理） */
+@media (hover: none) {
+  .lab-width-handle {
+    display: none;
+  }
+}
+
+/* ==========================================================================
    思考强度 → 输入框光效（2026-10-10 站长要求）
 
    档位越高，模型想得越久。给输入框一点「正在高强度运转」的视觉反馈：

@@ -576,7 +576,7 @@ describe("捐献额度：反向守护（不该被改宽或改死）", () => {
       .bind(JSON.stringify({ ai: 1 }), user.id)
       .run()
     // 回填（与迁移 0128 的语句一致）：有该类型 approved 单据 ⇒ 标记该类型已发
-    for (const t of ["ai", "proxy", "frp"]) {
+    for (const t of ["ai", "proxy"]) {
       await env.DB.prepare(
         `UPDATE users
             SET donation_quota_types = json_set(

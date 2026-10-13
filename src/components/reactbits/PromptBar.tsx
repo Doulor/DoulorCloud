@@ -381,7 +381,25 @@ const PromptBar: React.FC<PromptBarProps> = ({
   const level = efforts[effortIndex] ?? '';
   const maxed = efforts.length > 1 && effortIndex === efforts.length - 1;
 
-  const focusInput = () => inputRef.current?.focus({ preventScroll: true });
+  /**
+ * 上一次交互的指针类型（在根容器的 onPointerDown 里记录）。
+ * 用来判断「这次点击来自手指还是鼠标」—— 见 focusInput 的说明。
+ */
+const lastPointerTypeRef = React.useRef<string>("mouse");
+
+/**
+ * ⚠️ 触摸端**不主动聚焦**（2026-10-11 站长反馈：手机上点加号 / 模型 / 思考强度会弹软键盘）。
+ *
+ * 原因：这三个按钮的 onClick（本站修复加的「先聚焦再开菜单」）以及根容器的 onClick
+ * 都走这里，而 `focus({ preventScroll: true })` 会让手机**立刻弹出软键盘** ——
+ * 用户点的是按钮，不是输入框，这是纯干扰。
+ * 桌面端保留原手感（点整条就聚焦）；触摸端想输入就直接点输入框，
+ * 那是浏览器默认行为，不需要我们代劳。
+ */
+const focusInput = () => {
+  if (lastPointerTypeRef.current === "touch") return;
+  inputRef.current?.focus({ preventScroll: true });
+};
   const closeMenus = useCallback(() => {
     setPlusOpen(false);
     setModelOpen(false);
@@ -573,6 +591,16 @@ const PromptBar: React.FC<PromptBarProps> = ({
     setEffortIndex(next);
     latest.current.onEffortChange?.(efforts[next]);
   };
+/**
+ * 拖动状态位。
+ *
+ * ⚠️ **不要用 `e.buttons & 1` 判断「手指还按着」**（2026-10-11 站长反馈：
+ * 手机上思考强度滑块「只能点、划不动」）。原因：部分移动端浏览器在**触摸的
+ * pointermove** 上把 `buttons` 报成 0（桌面内核里是 1）⇒ 桌面能拖、手机全被那行挡掉。
+ * 改成「pointerdown 置位、up/cancel/lostcapture 清除」，与指针类型无关。
+ */
+const draggingEffortRef = React.useRef(false);
+
   const effortFromPointer = (e: PointerEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const k = (e.clientX - rect.left - EDGE) / Math.max(1, rect.width - 2 * EDGE);
@@ -635,7 +663,15 @@ const PromptBar: React.FC<PromptBarProps> = ({
   };
 
   const send = () => {
-    if (!canSend || busy) return;
+    /**
+     * ⚠️ 本站修复（2026-10-12 站长反馈「流式中插话没反应」）：
+     * 原版在 `busy`（运行中）时直接 return —— 但页面层的 onSend 里有
+     * 「运行中 = 排队（steer）」的设计，这里一吞，**插话既不排队也没提示**，
+     * 用户的话就丢了。改为 busy 时也放行给 onSend，由页面决定排队/停止
+     * （renderSend 的 trigger 仍按 draft 是否为空区分「停止」还是「插话」）。
+     * canSend 的守卫保留：空的发送本来就没意义。
+     */
+    if (!canSend) return;
     latest.current.onSend?.(draft.trim(), { attachments, model, effort: level });
     setDraft('');
     setAttachments([]);
@@ -759,6 +795,8 @@ const PromptBar: React.FC<PromptBarProps> = ({
                 }
                 onPointerDown={e => {
                   if (e.button !== 0) return;
+                  // ⚠️ 拖动状态先置位，与 setPointerCapture 成败解耦（见 onPointerMove 的说明）
+                  draggingEffortRef.current = true;
                   try {
                     e.currentTarget.setPointerCapture(e.pointerId);
                   } catch {}
@@ -766,8 +804,17 @@ const PromptBar: React.FC<PromptBarProps> = ({
                   effortFromPointer(e);
                 }}
                 onPointerMove={e => {
-                  if (e.buttons & 1) effortFromPointer(e);
+                  // 鼠标：buttons=0 就是已经松开（触摸端不可信，故只对鼠标用这个判据）
+                  if (draggingEffortRef.current && e.pointerType === 'mouse' && e.buttons === 0) {
+                    draggingEffortRef.current = false;
+                    return;
+                  }
+                  if (draggingEffortRef.current) effortFromPointer(e);
                 }}
+                    onPointerUp={() => { draggingEffortRef.current = false; }}
+                    onPointerCancel={() => { draggingEffortRef.current = false; }}
+                    onLostPointerCapture={() => { draggingEffortRef.current = false; }}
+
                 onKeyDown={onEffortKey}
               >
                 <span className="absolute inset-y-0 left-0 rounded-[11px] [width:var(--pb-effort-fill)] [background:color-mix(in_srgb,var(--pb-ink)_18%,transparent)] [transition:width_220ms_cubic-bezier(0.23,1,0.32,1),background-color_300ms_ease] group-data-[max]:[background:color-mix(in_srgb,var(--pb-spark)_35%,transparent)] motion-reduce:[transition:background-color_300ms_ease]" />
@@ -852,7 +899,8 @@ const PromptBar: React.FC<PromptBarProps> = ({
         role="presentation"
         data-max={maxed ? '' : undefined}
         onPointerDown={e => {
-          if (e.target === e.currentTarget || e.target === inputRef.current) closeMenus();
+          lastPointerTypeRef.current = e.pointerType || "mouse";
+                      if (e.target === e.currentTarget || e.target === inputRef.current) closeMenus();
         }}
         onClick={focusInput}
       >

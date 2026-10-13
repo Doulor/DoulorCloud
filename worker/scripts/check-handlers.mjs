@@ -32,24 +32,186 @@ const ENTRY = join(SRC, "index.ts")
 const problems = []
 
 /**
+ * `/` 出现在这些字符之后时，它更可能是**正则字面量的起始**而不是除号。
+ * 这是启发式（JS 语法本身要求解析器上下文才能确定），但对本项目足够：
+ * 判错一次的代价只是某个正则里的注释标记被误剥，不会吞掉真正的代码。
+ */
+const REGEX_PRECEDERS = new Set([
+  "", "(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%", "<", ">", "~", "^",
+])
+
+/**
  * 剥离注释后再做模式匹配。
  * 必须做这一步：本项目习惯在注释里写「正确写法示例」，例如 quotas.ts 的
  * import { parseBasicFeatures } from "../quotas" —— 不剥注释就会把它当成真 import，
  * 报出「模块不存在」的误报（开发时真实踩到过）。
  *
- * ⚠️ 顺序很关键：**必须先删行注释、再删块注释**。
- *   reserved-names.ts 的行注释里写着「<fqdn> 加 斜杠星号 路由」（形如路径通配符），
- *   其中的块注释起始标记若被优先识别，就会一路吞到下一个结束标记，
- *   把整个 RESERVED_NAMES 数组连同下面的函数一起抹掉，产生成片的假「缺导出」
- *   （开发时真实踩到过）。先删行注释即可把这类尾巴一并带走。
+ * ⚠️ 2026-10-13 起改为**按 token 扫描**（原先是一次正则替换）。
+ *   起因：原实现的「已知局限」真的被触发了 —— storage.ts 里有
+ *     const pattern = `${fqdn}/*`
+ *   模板字面量里的 `星号斜杠` 被当成块注释起始，一路吞到下一个结束标记，
+ *   把紧随其后的 `export async function removeWorkerRoute` 整段抹掉，
+ *   于是 lab-domains.ts 对它的具名导入被误报成「缺导出」，
+ *   **check:handlers 恒为红，而源码其实完全正确**。
  *
- * 已知局限：字符串字面量或正则里出现块注释标记时仍可能误判。
- * 本项目源码里没有这种情况；若将来出现，请把本函数换成按 token 扫描。
+ *   顺带提醒：原实现「必须先删行注释、再删块注释」的顺序问题是同一类毛病的另一半 ——
+ *   reserved-names.ts 的行注释里含块注释起始标记，会被一路吞掉整个 RESERVED_NAMES。
+ *   现在两者都由扫描器一并解决：只把**真正的注释区**替换成空白，
+ *   字符串 / 模板字面量（含 `${}` 占位符）/ 正则字面量里的内容原样保留。
+ *
+ * 注释被替换成等宽空白（换行保留），因此行号与原文一致。
  */
 function stripComments(text) {
-  return text
-    .replace(/^[ \t]*\/\/.*$/gm, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
+  const n = text.length
+  let out = ""
+  let i = 0
+
+  // 扫描上下文栈：'code'（普通代码）/ 'template'（模板字面量原文）/ 'placeholder'（模板里的 ${...}）
+  const stack = ["code"]
+  // placeholder 内部的花括号深度，用于找到与 `${` 配对的 `}`
+  let depth = 0
+  // 最近一个有意义的字符 —— 判断 `/` 是正则起始还是除号
+  let prev = ""
+
+  while (i < n) {
+    const ch = text[i]
+    const nxt = text[i + 1]
+
+    // ---- 模板字面量原文：只认转义、结束反引号、以及 ${ 占位符 ----
+    if (stack[stack.length - 1] === "template") {
+      if (ch === "\\") {
+        out += ch + (nxt ?? "")
+        i += 2
+        continue
+      }
+      if (ch === "`") {
+        out += ch
+        i += 1
+        stack.pop()
+        prev = "`"
+        continue
+      }
+      if (ch === "$" && nxt === "{") {
+        out += "${"
+        i += 2
+        stack.push("placeholder")
+        depth = 0
+        prev = "{"
+        continue
+      }
+      out += ch
+      i += 1
+      continue
+    }
+
+    // ---- 以下是代码上下文（code 或 placeholder）----
+
+    // 行注释
+    if (ch === "/" && nxt === "/") {
+      while (i < n && text[i] !== "\n") {
+        out += " "
+        i += 1
+      }
+      continue
+    }
+
+    // 块注释
+    if (ch === "/" && nxt === "*") {
+      out += "  "
+      i += 2
+      while (i < n && !(text[i] === "*" && text[i + 1] === "/")) {
+        out += text[i] === "\n" ? "\n" : " "
+        i += 1
+      }
+      if (i < n) {
+        out += "  "
+        i += 2
+      }
+      continue
+    }
+
+    // 正则字面量（启发式）
+    if (ch === "/" && REGEX_PRECEDERS.has(prev)) {
+      out += "/"
+      i += 1
+      let inClass = false
+      while (i < n) {
+        const c = text[i]
+        if (c === "\n") break // 未闭合：原文已原样保留了，当除号处理即可
+        if (c === "\\") {
+          out += c + (text[i + 1] ?? "")
+          i += 2
+          continue
+        }
+        if (c === "[") inClass = true
+        else if (c === "]") inClass = false
+        else if (c === "/" && !inClass) {
+          out += "/"
+          i += 1
+          break
+        }
+        out += c
+        i += 1
+      }
+      prev = "/"
+      continue
+    }
+
+    // 单/双引号字符串
+    if (ch === '"' || ch === "'") {
+      const quote = ch
+      out += quote
+      i += 1
+      while (i < n) {
+        const c = text[i]
+        if (c === "\n") break
+        if (c === "\\") {
+          out += c + (text[i + 1] ?? "")
+          i += 2
+          continue
+        }
+        out += c
+        i += 1
+        if (c === quote) break
+      }
+      prev = quote
+      continue
+    }
+
+    // 模板字面量起始
+    if (ch === "`") {
+      out += ch
+      i += 1
+      stack.push("template")
+      prev = "`"
+      continue
+    }
+
+    // 花括号：维护 placeholder 的配对
+    if (ch === "{" || ch === "}") {
+      if (stack[stack.length - 1] === "placeholder") {
+        if (ch === "{") depth += 1
+        else if (depth > 0) depth -= 1
+        else {
+          out += ch
+          i += 1
+          stack.pop() // 与 `${` 配对，回到模板原文
+          prev = ch
+          continue
+        }
+      }
+      out += ch
+      i += 1
+      prev = ch
+      continue
+    }
+
+    out += ch
+    if (!/\s/.test(ch)) prev = ch
+    i += 1
+  }
+
+  return out
 }
 
 /** 递归收集 src/**\/*.ts */

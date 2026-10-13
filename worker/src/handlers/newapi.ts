@@ -23,15 +23,17 @@ import { primaryAddressFor } from "../root-domains"
 import { encryptSecret, decryptSecret, uuid, verifyPassword } from "../crypto"
 import { requireFeatureUser, isPrivileged } from "../auth"
 import {
+  type NewApiHealth,
   adminGrantSubscription,
   adminSetQuota,
-  adminSetUserGroup,
   adminSetUserPassword,
   adminSetUserStatus,
   createApiKey,
   deleteApiKey,
   findUserByUsername,
+  resolveMyRelayAccount,
   getCurrencyInfo,
+  peekCurrency,
   getUserSelf,
   isNewApiConfigured,
   listModels,
@@ -52,6 +54,7 @@ import { resolveDonationGroup } from "../donation-provision"
 import { hasFeature, parsePermissions, parseOpenFeatures } from "../permissions"
 import { guardRateLimit } from "../ratelimit"
 import { requireAdminScope } from "./admin"
+import { mapLimit } from "../async-utils"
 import type { Env } from "../env"
 
 function requireEncryptionSecret(env: Env): string {
@@ -120,18 +123,13 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
   // ⚠️ 2026-10-08：定价（`listPricing`）已从这里移除 —— 它只服务于「模型清单」，
   // 而那部分整体拆到了 GET /api/dev/models 懒加载（见 getModels）。首屏因此
   // 少一趟「Worker→CF→隧道→VPS1」往返，也不用去上游拉全量模型（实测 2.8~20s）。
-  const [currency, health] = await Promise.all([
-    // 币种与换算率以 NewAPI 站点为准
-    configured
-      ? getCurrencyInfo(env)
-      : Promise.resolve({
-          symbol: "$",
-          code: "USD",
-          perUnit: Number(settings.newapi_quota_per_unit),
-        }),
-    // 中转站健康状态（在线/离线 + 延迟），供界面顶部徽章显示
-    checkHealth(env),
-  ])
+  // 🔴 2026-10-12（站长反馈「进入 AI 中转站页很卡」）：本函数**不再打任何上游**。
+  // 原先这里要等「币种 + 健康」两趟 Worker→CF→隧道→VPS1，而实测上游单程
+  // 1.4~27.8s（连 401 拒绝都要 27 秒），首屏自然卡到十几秒。
+  // 现在：币种只用进程内缓存（拿不到给兜底值，随后由 /api/dev/usage 补正）；
+  // 健康徽章与订阅（都要读上游）整体移到 GET /api/dev/usage 懒加载。
+  const currency = peekCurrency(Number(settings.newapi_quota_per_unit))
+  const health: NewApiHealth | null = null
   const perUnit = currency.perUnit
 
   const base = {
@@ -202,59 +200,12 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
   //
   // 合并口径：同类多张订阅合并成一条（额度相加、张数累加、有效期取最晚一张），
   // 这样进度条上一个颜色 = 一个套餐，语义稳定。
-  let subscriptions: {
-    planId: number
-    /** 套餐名（取自套餐表；取不到时降级成「套餐 #id」） */
-    title: string
-    amountTotal: number
-    amountUsed: number
-    endTime: number
-    nextResetTime: number
-    /** 该套餐名下有几张订阅 */
-    count: number
-  }[] = []
-  /** 免费套餐订阅（按设置项 newapi_free_plan_id 定位），未领取为 null */
-  let subscription: (typeof subscriptions)[number] | null = null
+  // 订阅要从上游读（同样会慢）⇒ 一并移到 /api/dev/usage 懒加载。
+  // 这里给空值只为了不改变响应形状；前端用 usageLoaded 区分「读取中」与「没有订阅」，
+  // 不会把空数组误当成「没有订阅」展示。
+  const subscriptions: never[] = []
+  const subscription = null
   const freePlanId = Number(settings.newapi_free_plan_id ?? "0")
-  try {
-    const [active, plans] = await Promise.all([
-      listAllUserSubscriptions(env, account.newapi_user_id),
-      listSubscriptionPlans(env),
-    ])
-    const titleOf = new Map(plans.map((p) => [p.planId, p.title]))
-
-    const byPlan = new Map<number, (typeof subscriptions)[number]>()
-    for (const s of active) {
-      const cur = byPlan.get(s.planId)
-      if (cur) {
-        cur.amountTotal += s.amountTotal
-        cur.amountUsed += s.amountUsed
-        cur.count += 1
-        // 有效期取最晚的一张：合并后「有效期至」应表示这份额度最后什么时候失效
-        cur.endTime = Math.max(cur.endTime, s.endTime)
-        // 各张的重置时刻本应对齐（都是 UTC 次日 0 点），取最早的一个更保守
-        cur.nextResetTime =
-          cur.nextResetTime > 0 && s.nextResetTime > 0
-            ? Math.min(cur.nextResetTime, s.nextResetTime)
-            : cur.nextResetTime || s.nextResetTime
-      } else {
-        byPlan.set(s.planId, {
-          planId: s.planId,
-          title: titleOf.get(s.planId) || `套餐 #${s.planId}`,
-          amountTotal: s.amountTotal,
-          amountUsed: s.amountUsed,
-          endTime: s.endTime,
-          nextResetTime: s.nextResetTime,
-          count: 1,
-        })
-      }
-    }
-    // 顺序固定按 plan_id 升序：颜色与分段的对应关系不随额度变化而漂移
-    subscriptions = [...byPlan.values()].sort((a, b) => a.planId - b.planId)
-    subscription = subscriptions.find((s) => s.planId === freePlanId) ?? null
-  } catch (err) {
-    console.error("查询订阅失败:", err)
-  }
 
   return json({
     ...base,
@@ -287,6 +238,122 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     freePlanId,
     /** 全部活跃订阅（按套餐类型合并），供奖励订阅卡片分段展示 */
     subscriptions,
+  })
+}
+
+/**
+ * 订阅视图：把用户全部 active 订阅按套餐类型合并（额度相加、张数累加、有效期取最晚）。
+ *
+ * 从 getStatus 里抽出来（2026-10-12），因为它要读上游而首屏不能等 ——
+ * 现在由 GET /api/dev/usage 懒加载调用。合并口径与原实现逐字一致：
+ *   · 一张订阅里 amount_total 是**开通时的套餐额度快照**，所以额度取订阅自己的值；
+ *   · 顺序固定按 plan_id 升序，颜色与分段的对应关系不随额度变化漂移。
+ */
+async function loadSubscriptionView(
+  env: Env,
+  account: { newapi_user_id: number },
+  settings: Record<string, string>
+): Promise<{
+  subscriptions: {
+    planId: number
+    title: string
+    amountTotal: number
+    amountUsed: number
+    endTime: number
+    nextResetTime: number
+    count: number
+  }[]
+  subscription: {
+    planId: number
+    title: string
+    amountTotal: number
+    amountUsed: number
+    endTime: number
+    nextResetTime: number
+    count: number
+  } | null
+}> {
+  type Item = ReturnType<typeof buildItem>
+  function buildItem(
+    planId: number,
+    title: string,
+    s: { amountTotal: number; amountUsed: number; endTime: number; nextResetTime: number }
+  ) {
+    return {
+      planId,
+      title,
+      amountTotal: s.amountTotal,
+      amountUsed: s.amountUsed,
+      endTime: s.endTime,
+      nextResetTime: s.nextResetTime,
+      count: 1,
+    }
+  }
+
+  const freePlanId = Number(settings.newapi_free_plan_id ?? "0")
+  try {
+    const [active, plans] = await Promise.all([
+      listAllUserSubscriptions(env, account.newapi_user_id),
+      listSubscriptionPlans(env),
+    ])
+    const titleOf = new Map(plans.map((p) => [p.planId, p.title]))
+    const byPlan = new Map<number, Item>()
+    for (const s of active) {
+      const cur = byPlan.get(s.planId)
+      if (cur) {
+        cur.amountTotal += s.amountTotal
+        cur.amountUsed += s.amountUsed
+        cur.count += 1
+        cur.endTime = Math.max(cur.endTime, s.endTime)
+        cur.nextResetTime =
+          cur.nextResetTime > 0 && s.nextResetTime > 0
+            ? Math.min(cur.nextResetTime, s.nextResetTime)
+            : cur.nextResetTime || s.nextResetTime
+      } else {
+        byPlan.set(s.planId, buildItem(s.planId, titleOf.get(s.planId) || `套餐 #${s.planId}`, s))
+      }
+    }
+    const subscriptions = [...byPlan.values()].sort((a, b) => a.planId - b.planId)
+    return {
+      subscriptions,
+      subscription: subscriptions.find((s) => s.planId === freePlanId) ?? null,
+    }
+  } catch (err) {
+    console.error("查询订阅失败:", err)
+    return { subscriptions: [], subscription: null }
+  }
+}
+
+/**
+ * GET /api/dev/usage —— 「AI 中转站」页的**实时部分**（懒加载）。
+ *
+ * 2026-10-12 拆出来：健康徽章 / 币种 / 订阅都要读上游，而上游实测 1.4~27.8s。
+ * 首屏（/api/dev/status）只读 D1 立刻出骨架，前端拿到首屏后再打这个接口补数据。
+ * 三项互不依赖，一起并发（都有 TTL 缓存与硬超时，最坏 4 秒返回兜底值）。
+ */
+export async function getUsage(env: Env, request: Request): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "ai")
+  const [settings, configured, accountRow] = await Promise.all([
+    getSettings(env),
+    isNewApiConfigured(env),
+    loadAccount(env, user.id),
+  ])
+  const account = configured ? accountRow : null
+
+  // 币种与健康与「是否绑定」无关 —— 未绑定也要能显示站点在线情况
+  const [currency, health] = await Promise.all([getCurrencyInfo(env), checkHealth(env)])
+
+  if (!account) {
+    return json({ currency, health, subscription: null, subscriptions: [], freePlanId: 0 })
+  }
+
+  const { subscriptions, subscription } = await loadSubscriptionView(env, account, settings)
+  return json({
+    currency,
+    health,
+    subscription,
+    subscriptions,
+    freePlanId: Number(settings.newapi_free_plan_id ?? "0"),
   })
 }
 
@@ -585,9 +652,21 @@ export async function preflight(env: Env, request: Request): Promise<Response> {
   let exists = false
   let oidcBound = false
   try {
-    const remote = await findUserByUsername(env, user.username)
-    exists = Boolean(remote)
-    oidcBound = remote?.oidc_id === user.id
+    /**
+     * 🔴 认人用 `oidc_id`，不是用户名（2026-10-12 修）。
+     *
+     * 用户在中转站的账号是「用 Doulor Cloud 登录」时创建的，**那边的用户名可能和我们不一样**
+     * （实测：用户 `masters` 在中转站叫 `master3test`）。以前只按用户名找 ⇒ 明明绑好了
+     * 也一直提示「还没有你的账号」，用户被指去反复登录却永远开通不了。
+     * 所以候选来源要含用户名 + 邮箱，最终以 `oidc_id === 我的 id` 定性。
+     */
+    const { mine, others } = await resolveMyRelayAccount(env, {
+      userId: user.id,
+      username: user.username,
+      emails: [user.email, await primaryAddressFor(env, user.id, user.username)],
+    })
+    exists = Boolean(mine) || others.length > 0
+    oidcBound = Boolean(mine)
   } catch (err) {
     // 探测失败不阻断：按「不存在」处理，后续绑定仍会给出真实错误
     console.error("探测 NewAPI 账号失败:", err)
@@ -650,71 +729,89 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
   const secret = requireEncryptionSecret(env)
   const username = user.username
 
-  // 找到 NewAPI 侧账号。它必须是「用 OIDC 登录」创建出来的 ——
-  // 即该账号的 oidc_id 等于当前 cloud 用户的 id。
-  const remote = await findUserByUsername(env, username)
+  /**
+   * 找到**我在中转站的账号**。判定依据是 `oidc_id === 我的 cloud 用户 id`
+   * （OIDC 登录时本站签发的 sub，权威且不随用户名变化）。
+   *
+   * ⚠️ 2026-10-12 修：以前只按用户名找，且后续设密码/登录也都用我们的用户名 ——
+   * 用户在**中转站侧的用户名与我们不同**时（实测 `masters` ↔ `master3test`），
+   * 整条链路必然失败：先找不到账号，就算找到了也会用错用户名登录。
+   * 现在统一以 `remote.username`（中转站的名字）做后续动作。
+   */
+  const { mine: remote, others } = await resolveMyRelayAccount(env, {
+    userId: user.id,
+    username,
+    emails: [user.email, await primaryAddressFor(env, user.id, username)],
+  })
   if (!remote) {
     throw new ApiError(
       409,
-      "中转站里还没有你的账号。请先点击「去中转站用 Doulor Cloud 登录」完成授权，再回来开通",
-      "OIDC_NOT_BOUND"
+      others.length > 0
+        ? "中转站里的同名账号不是用 Doulor Cloud 登录创建的，无法安全绑定。请先在中转站用 Doulor Cloud 登录该账号"
+        : "中转站里还没有你的账号。请先点击「去中转站用 Doulor Cloud 登录」完成授权，再回来开通",
+      others.length > 0 ? "OIDC_MISMATCH" : "OIDC_NOT_BOUND"
     )
   }
-  if (remote.oidc_id !== user.id) {
-    throw new ApiError(
-      409,
-      "中转站里的同名账号不是用 Doulor Cloud 登录创建的，无法安全绑定。请先在中转站用 Doulor Cloud 登录该账号",
-      "OIDC_MISMATCH"
-    )
-  }
+  /** 中转站侧的用户名 —— 设密码与登录都必须用它，不能用我们站的用户名 */
+  const relayUsername = remote.username
 
   const settings2 = await getSettings(env)
   const unlimited = settings2.newapi_unlimited_quota === "1"
 
   // 1. 给 OIDC 账号补一个密码（= 复用的 cloud 密码），
   //    之后才能用它登录换 access token
-  await adminSetUserPassword(env, remote.id, username, password)
+  await adminSetUserPassword(env, remote.id, relayUsername, password)
 
-  // 2. 设试用额度。**重绑不重置额度** —— 否则把用户余额抹成试用额度，是灾难性副作用。
-  if (!unlimited && !isRebind) {
+  /**
+   * 2. 发试用额度 —— 但**只在账号确实是空的**时候发。
+   *
+   * 🔴 2026-10-12 补的安全闸门（差点造成事故）：
+   * 原逻辑是「非重绑 ⇒ 一律 override 成试用额度」。可**首次在我们站绑定**
+   * 并不意味着对方是空号 —— 用户可能早就在中转站用 Doulor Cloud 登录过，
+   * 而且自己充过值 / 用过额度。实测案例：用户 `masters` 在中转站的账号
+   * 余额 ¥1000（quota 500000000、used 3489900000），他第一次在我们站绑定
+   * 就会把余额抹成试用额度（¥1 量级）—— 不可逆的数据损毁。
+   *
+   * 所以判据从「是不是首次绑定」改成「**这个账号本身是不是空的**」：
+   * 有余额 / 有用量 / 有请求记录 ⇒ 视为老账号，一分钱都不动。
+   */
+  const isFreshRelayAccount =
+    !(Number(remote.quota ?? 0) > 0) &&
+    !(Number(remote.used_quota ?? 0) > 0) &&
+    !(Number(remote.request_count ?? 0) > 0)
+  if (!unlimited && !isRebind && isFreshRelayAccount) {
     await adminSetQuota(
       env,
       remote.id,
       Number(settings2.newapi_trial_quota),
       "override"
     )
-  }
-
-  // 2.5 转组必须在「换 access token」之前做。
-  // NewAPI 的 EditWithTx 里 group 变化会触发 AuthVersion++ 并吊销该用户所有
-  // session/access token；若放在 login 之后，会把刚换到的 token 立刻吊销，
-  // 表现为「绑定成功但建 Key 报 not logged in」。先转组、再 login，token 才能拿到
-  // group 已定型之后的版本。
-  // 失败不阻断开通主流程，只记审计（group 默认值在多数场景本来就一致）。
-  // 分组列表 = 站点分组 + 捐献分组（NewAPI 的 user.group 是逗号分隔的多选，
-  // 第一个是默认分组）。**必须把捐献分组带上**，否则用户在面板/建 Key 时
-  // 根本选不到它 —— 连带我们自己在 createKey 里传 `group: donation` 也可能被拒。
-  // 顺序有意把站点分组放第一：不显式选分组时走的还是它（付费倍率口径不变）。
-  const userGroups = userSelectableGroups(settings2)
-  try {
-    await adminSetUserGroup(env, remote.id, username, userGroups.join(","))
-  } catch (err) {
+  } else if (!isRebind && !isFreshRelayAccount) {
+    // 老账号：只记审计，不动额度（以后排查「为什么没发试用额度」有据可查）
     await audit(
       env,
       user.id,
-      "newapi.group_sync_failed",
-      `开通时转组到 ${userGroups.join(",")} 失败：${
-        err instanceof Error ? err.message : String(err)
-      }`
+      "newapi.bind.existing_account",
+      `首次绑定但中转站账号已有数据（余额 ${remote.quota ?? 0}、已用 ${remote.used_quota ?? 0}、请求 ${remote.request_count ?? 0}），按老账号处理：不覆盖额度、不发试用额度`
     )
   }
 
+  // 2.5 分组重构（2026-10-10）后**不再在开通时转组**：
+  // NewAPI 的 users.group 是单值，现在存的是「按捐献情况算出的组合组」
+  // （donation / workbuddy / donation-workbuddy / …），由 VPS2 上的
+  // group-sync 服务每 20 秒比对站点接口（/api/internal/group-map）自动纠正。
+  // 开通时无论写什么组，都会在下一个同步周期被改成正确值 —— 这里硬写
+  // 反而会制造一个「错组窗口」（例如写成 auto,donation 这种不存在的组名）。
+  // NewAPI 建号默认组够新用户撑过这 20 秒（建 Key 走 auto 也已可用）。
+
   // 3. 登录直接拿长期 access token（rc.40 起登录响应里直接返回 access_token）
-  const loginResult = await login(env, username, password)
+  const loginResult = await login(env, relayUsername, password)
   const accessToken = loginResult.accessToken
 
   const now = new Date().toISOString()
   const email = (await primaryAddressFor(env, user.id, username)).toLowerCase()
+  // 落库的 username 用**中转站侧**的名字：loadAccount 之后拿它去中转站查/改，才对得上
+  const storedUsername = relayUsername
   const encToken = await encryptSecret(accessToken, secret)
   const encPassword = await encryptSecret(password, secret)
 
@@ -726,7 +823,7 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
               enc_token = ?, enc_password = ?, synced_at = ?
         WHERE user_id = ?`
     )
-      .bind(loginResult.userId, username, email, encToken, encPassword, now, user.id)
+      .bind(loginResult.userId, storedUsername, email, encToken, encPassword, now, user.id)
       .run()
   } else {
     await env.DB.prepare(
@@ -746,7 +843,7 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
       .bind(
         user.id,
         loginResult.userId,
-        username,
+        storedUsername,
         email,
         encToken,
         encPassword,
@@ -814,18 +911,23 @@ export async function bindAccount(env: Env, request: Request): Promise<Response>
 }
 
 /**
- * 用户可以**自选**的分组（建 Key 时可选、开通账号时写进 user.group）。
+ * 用户建 Key 时可以**自选**的分组（2026-10-10 分组重构后）：**auto + 捐献分组**。
  *
- * 只有两个：站点分组 + 捐献分组。刻意不放开更多 —— 付费/管理员分组由管理员
- * 单独开通，让用户自选等于绕过计费。三处（开通转组 / 建 Key 校验 / 概览下发）
- * 共用它，避免口径漂移。
+ * - `auto`：NewAPI 会在这个用户**可用的分组**里自动挑能提供该模型的渠道
+ *   —— 捐了 wb / qoder / 自定义渠道的，一个 Key 全都能调。
+ * - 捐献分组（`newapi_donation_group`）：专门只走捐献渠道的 Key，保留给
+ *   想「只用捐献模型」的用户。
+ *
+ * 刻意不放开更多 —— 付费/管理员分组由管理员单独开通，让用户自选等于绕过计费。
+ * 两处（建 Key 校验 / 概览下发）共用它，避免口径漂移。
+ * ⚠️ **开通转组不要用这个函数**（开通时不再转组，由 group-sync 服务接管）。
  */
 export function userSelectableGroups(settings: {
   newapi_group?: string
   newapi_donation_group?: string
 }): string[] {
   return [
-    (settings.newapi_group || "").trim() || "default",
+    "auto",
     resolveDonationGroup(settings.newapi_donation_group),
   ].filter((g, i, arr) => g && arr.indexOf(g) === i)
 }
@@ -1570,4 +1672,368 @@ export async function adminSyncAllNewapiAccounts(
   await requireAdminScope(env, request, "newapi.subscriptions")
   const r = await syncAllNewapiAccounts(env)
   return json({ ok: true, ...r })
+}
+
+// ---- 管理员手动发放订阅（2026-10-10 站长要求）----
+
+/**
+ * 一次最多处理多少个用户名。
+ * 与 `/admin/users/bulk-status` 的 90 同类：管理端批量操作必须有硬上限 ——
+ * 每份订阅 = 1 次上游请求，一次手滑很容易把一轮调用预算打满。
+ */
+const MAX_GRANT_USERS = 50
+/** 单个用户一次最多发几份 */
+const MAX_GRANT_COUNT = 10
+/** 一轮总张数上限（人数 × 份数） */
+const MAX_GRANT_TOTAL = 100
+/** 上游调用并发窗口：串行太慢（一人多份要排队），全并发会打爆 NewAPI */
+const GRANT_CONCURRENCY = 4
+
+/** 把管理员粘进来的用户名列表拆开（换行 / 逗号 / 分号 / 空格都认），去重（忽略大小写） */
+function parseUsernameList(raw: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const part of (raw ?? "").split(/[\s,;]+/)) {
+    const name = part.trim()
+    if (!name) continue
+    const key = name.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(name)
+  }
+  return out
+}
+
+/**
+ * GET /api/admin/newapi/subscription-plans —— 列出中转站现有的订阅套餐。
+ *
+ * 纯展示用：让管理员在「发放订阅」里**看得见有哪些 ID 可选**，而不是凭记忆猜。
+ * 上游读不到时返回空数组（前端退化成「自己填 ID」），**不做任何拦截** ——
+ * 套餐接口可能只返回公开套餐，拿它当白名单会挡住合法的隐藏套餐。
+ */
+export async function adminListSubscriptionPlans(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  await requireAdminScope(env, request, "newapi.subscriptions")
+  return json({ plans: await listSubscriptionPlans(env) })
+}
+
+/**
+ * POST /api/admin/newapi/grant-subscriptions —— 给指定用户直接发放订阅。
+ *
+ * body: `{ usernames: "a\nb\nc", planId: 4, count: 1 }`
+ *   · `usernames` 支持换行 / 逗号 / 空格分隔（管理员从表格里粘一列名字是常态）
+ *   · `count` = 每人发几份（成就奖励那种「按档位发 N 份」手动也能复现）
+ *
+ * 🔴 **先校验、再动手**（同 bulk-status 的原则）：只要有一个用户名不存在、
+ * 或该用户还没开通 AI 中转站（订阅挂在 NewAPI 侧用户 id 上），就**一个订阅都不发**，
+ * 整体报错并列出问题用户名。批量操作里「部分成功」最难收尾 ——
+ * 管理员没法一眼看出谁成了、谁没成，还会留下一半副作用。
+ *
+ * 发放一律 `strictLimit: true`：套餐限购（`max_purchase_per_user`）撞上限时，
+ * 对成就 / 邀请奖励是**真实失败**，这里同理（站长要的是「说发几份就几份」），
+ * 不能像「免费订阅领取」那样把它当成功吞掉。
+ */
+export async function adminGrantSubscriptions(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "newapi.subscriptions")
+  if (!(await isNewApiConfigured(env))) {
+    throw new ApiError(503, "AI 中转站未配置，无法发放订阅", "NEWAPI_NOT_CONFIGURED")
+  }
+
+  const body = (await request.json()) as {
+    usernames?: unknown
+    planId?: unknown
+    count?: unknown
+  }
+
+  const names = parseUsernameList(typeof body.usernames === "string" ? body.usernames : "")
+  if (names.length === 0) {
+    throw new ApiError(400, "请填写至少一个用户名", "NO_USERNAMES")
+  }
+  if (names.length > MAX_GRANT_USERS) {
+    throw new ApiError(
+      400,
+      `一次最多 ${MAX_GRANT_USERS} 个用户名（收到 ${names.length} 个）`,
+      "TOO_MANY_USERS"
+    )
+  }
+
+  const planId = Number(body.planId)
+  if (!Number.isInteger(planId) || planId <= 0) {
+    throw new ApiError(400, "订阅 ID 必须是正整数", "INVALID_PLAN")
+  }
+  const count = Number(body.count)
+  if (!Number.isInteger(count) || count < 1 || count > MAX_GRANT_COUNT) {
+    throw new ApiError(400, `份数必须是 1 ~ ${MAX_GRANT_COUNT} 的整数`, "INVALID_COUNT")
+  }
+  const total = names.length * count
+  if (total > MAX_GRANT_TOTAL) {
+    throw new ApiError(
+      400,
+      `这次要开 ${total} 张订阅（${names.length} 人 × ${count} 份），超过一轮上限 ${MAX_GRANT_TOTAL} 张，请分批`,
+      "TOO_MANY_GRANTS"
+    )
+  }
+
+  // ---- 先校验：所有用户名都必须存在，且都已开通中转站 ----
+  const placeholders = names.map(() => "?").join(",")
+  const rows = await env.DB.prepare(
+    `SELECT u.id, u.username, a.newapi_user_id
+       FROM users u LEFT JOIN newapi_accounts a ON a.user_id = u.id
+      WHERE u.username COLLATE NOCASE IN (${placeholders})`
+  )
+    .bind(...names)
+    .all<{ id: string; username: string; newapi_user_id: number | null }>()
+
+  const byName = new Map<string, { id: string; username: string; newapiUserId: number | null }>()
+  for (const r of rows.results ?? []) {
+    byName.set(r.username.toLowerCase(), {
+      id: r.id,
+      username: r.username,
+      newapiUserId: r.newapi_user_id,
+    })
+  }
+  const missing = names.filter((n) => !byName.has(n.toLowerCase()))
+  if (missing.length > 0) {
+    throw new ApiError(404, `以下用户不存在：${missing.join("、")}`, "USER_NOT_FOUND")
+  }
+  const unbound = names.filter((n) => byName.get(n.toLowerCase())!.newapiUserId == null)
+  if (unbound.length > 0) {
+    throw new ApiError(
+      409,
+      `以下用户尚未开通 AI 中转站，订阅无从发放：${unbound.join("、")}`,
+      "NEWAPI_NOT_BOUND"
+    )
+  }
+
+  // ---- 再动手 ----
+  const results = await mapLimit(names, GRANT_CONCURRENCY, async (name) => {
+    const target = byName.get(name.toLowerCase())!
+    const newapiUserId = target.newapiUserId as number
+    let granted = 0
+    let message = ""
+    for (let i = 0; i < count; i++) {
+      const res = await adminGrantSubscription(env, newapiUserId, planId, { strictLimit: true })
+      if (!res.ok) {
+        // 这一份没开出去就停在这个用户上（继续发下去只会重复报同一个错）
+        message = res.message
+        break
+      }
+      granted += 1
+      if (res.message) message = res.message
+    }
+    return { username: target.username, ok: granted === count, granted, message }
+  })
+
+  // 审计记在**目标用户**名下（与权限变更同一惯例），detail 里写清是谁发的
+  for (const r of results) {
+    if (r.granted === 0) continue
+    const target = byName.get(r.username.toLowerCase())!
+    await audit(
+      env,
+      target.id,
+      "newapi.subscription.grant",
+      `管理员 ${admin.username} 发放订阅 ${r.granted}/${count} 份（订阅 ID ${planId}）${
+        r.ok ? "" : `：${r.message}`
+      }`
+    )
+  }
+
+  return json({
+    ok: results.every((r) => r.ok),
+    planId,
+    count,
+    users: results.length,
+    granted: results.reduce((n, r) => n + r.granted, 0),
+    results,
+  })
+}
+
+/* ------------------------------------------------------------------ *
+ * 「付费分组」授权（站长 2026-10-11 要求）
+ *
+ * 与「发放订阅」是**两件事**，别混：
+ *   · 订阅：有期限、走 NewAPI 的订阅接口、影响额度；
+ *   · 这里：只是**分组授权**（让该用户建 Key 时能选到「付费」分组），
+ *     **永久有效、不产生任何额度**。
+ *
+ * 落库后由 `handlers/group-sync.ts::composeGroup()` 读名单，把组合分组名末尾
+ * 追加 `-付费`，vps2 的 group-sync 服务每 60 秒同步进 NewAPI 的 `users."group"`。
+ *
+ * ⚠️ 必须**已开通中转站**才授权：group-sync 只遍历 `newapi_accounts` 里有记录的
+ *    用户，没开通的人授了也同步不过去 —— 与其静默无效，不如当场报错。
+ * ------------------------------------------------------------------ */
+
+/** 授权名单里一行（返回给管理端展示） */
+interface PremiumGrantRow {
+  userId: string
+  username: string
+  grantedBy: string | null
+  grantedAt: string
+  newapiUserId: number | null
+}
+
+/** GET /api/admin/newapi/premium-grants —— 当前有付费分组权限的用户 */
+export async function adminListPremiumGrants(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  await requireAdminScope(env, request, "newapi.subscriptions")
+  const rows = await env.DB.prepare(
+    `SELECT p.user_id AS userId, u.username AS username,
+            p.granted_by AS grantedBy, p.granted_at AS grantedAt,
+            a.newapi_user_id AS newapiUserId
+       FROM premium_group_grants p
+       JOIN users u ON u.id = p.user_id
+       LEFT JOIN newapi_accounts a ON a.user_id = p.user_id
+      ORDER BY p.granted_at DESC`
+  ).all<PremiumGrantRow>()
+  const grants = rows.results ?? []
+  return json({ grants, count: grants.length })
+}
+
+/**
+ * 按用户名批量授权（幂等：已授权的跳过，不报错）。
+ *
+ * 沿用「发放订阅」的约定：**先全量校验再动手** —— 有一个用户名不存在、
+ * 或没开通中转站，就整体报错、一个都不写（不留「部分成功」要收尾）。
+ */
+export async function adminGrantPremiumGroup(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "newapi.subscriptions")
+  const body = (await request.json().catch(() => ({}))) as { usernames?: unknown }
+  const names = parseUsernameList(typeof body.usernames === "string" ? body.usernames : "")
+  if (names.length === 0) {
+    throw new ApiError(400, "请填写至少一个用户名", "NO_USERNAMES")
+  }
+  if (names.length > MAX_GRANT_USERS) {
+    throw new ApiError(
+      400,
+      `一次最多 ${MAX_GRANT_USERS} 个用户名（收到 ${names.length} 个）`,
+      "TOO_MANY_USERS"
+    )
+  }
+
+  // ---- 先校验 ----
+  const placeholders = names.map(() => "?").join(",")
+  const rows = await env.DB.prepare(
+    `SELECT u.id, u.username, a.newapi_user_id
+       FROM users u LEFT JOIN newapi_accounts a ON a.user_id = u.id
+      WHERE u.username COLLATE NOCASE IN (${placeholders})`
+  )
+    .bind(...names)
+    .all<{ id: string; username: string; newapi_user_id: number | null }>()
+
+  const byName = new Map<string, { id: string; username: string; newapiUserId: number | null }>()
+  for (const r of rows.results ?? []) {
+    byName.set(r.username.toLowerCase(), {
+      id: r.id,
+      username: r.username,
+      newapiUserId: r.newapi_user_id,
+    })
+  }
+  const missing = names.filter((n) => !byName.has(n.toLowerCase()))
+  if (missing.length > 0) {
+    throw new ApiError(404, `以下用户不存在：${missing.join("、")}`, "USER_NOT_FOUND")
+  }
+  const unbound = names.filter((n) => byName.get(n.toLowerCase())!.newapiUserId == null)
+  if (unbound.length > 0) {
+    throw new ApiError(
+      409,
+      `以下用户尚未开通 AI 中转站，授权不会生效：${unbound.join("、")}`,
+      "NEWAPI_NOT_BOUND"
+    )
+  }
+
+  // ---- 再动手 ----
+  const now = new Date().toISOString()
+  let granted = 0
+  let existed = 0
+  const results: { username: string; status: "granted" | "existed" }[] = []
+  for (const name of names) {
+    const target = byName.get(name.toLowerCase())!
+    // 幂等：主键冲突就当「本来就有」，不覆盖 granted_at/granted_by（保留首次授权痕迹）
+    const res = await env.DB.prepare(
+      `INSERT OR IGNORE INTO premium_group_grants (user_id, granted_by, granted_at)
+       VALUES (?, ?, ?)`
+    )
+      .bind(target.id, admin.username, now)
+      .run()
+    const inserted = (res.meta?.changes ?? 0) > 0
+    if (inserted) granted += 1
+    else existed += 1
+    results.push({ username: target.username, status: inserted ? "granted" : "existed" })
+    // 只给**真的新增**的记审计（重复点一次不该刷审计流）
+    if (inserted) {
+      await audit(
+        env,
+        target.id,
+        "newapi.premium_group.grant",
+        `管理员 ${admin.username} 授予「付费」分组权限（永久）`
+      )
+    }
+  }
+
+  return json({ ok: true, users: names.length, granted, existed, results })
+}
+
+/** 按用户名批量取消授权（幂等：本来就没有的跳过） */
+export async function adminRevokePremiumGroup(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "newapi.subscriptions")
+  const body = (await request.json().catch(() => ({}))) as { usernames?: unknown }
+  const names = parseUsernameList(typeof body.usernames === "string" ? body.usernames : "")
+  if (names.length === 0) {
+    throw new ApiError(400, "请填写至少一个用户名", "NO_USERNAMES")
+  }
+  if (names.length > MAX_GRANT_USERS) {
+    throw new ApiError(
+      400,
+      `一次最多 ${MAX_GRANT_USERS} 个用户名（收到 ${names.length} 个）`,
+      "TOO_MANY_USERS"
+    )
+  }
+
+  const placeholders = names.map(() => "?").join(",")
+  const rows = await env.DB.prepare(
+    `SELECT id, username FROM users WHERE username COLLATE NOCASE IN (${placeholders})`
+  )
+    .bind(...names)
+    .all<{ id: string; username: string }>()
+  const byName = new Map<string, { id: string; username: string }>()
+  for (const r of rows.results ?? []) byName.set(r.username.toLowerCase(), r)
+  const missing = names.filter((n) => !byName.has(n.toLowerCase()))
+  if (missing.length > 0) {
+    throw new ApiError(404, `以下用户不存在：${missing.join("、")}`, "USER_NOT_FOUND")
+  }
+
+  let revoked = 0
+  const results: { username: string; status: "revoked" | "absent" }[] = []
+  for (const name of names) {
+    const target = byName.get(name.toLowerCase())!
+    const res = await env.DB.prepare("DELETE FROM premium_group_grants WHERE user_id = ?")
+      .bind(target.id)
+      .run()
+    const removed = (res.meta?.changes ?? 0) > 0
+    if (removed) revoked += 1
+    results.push({ username: target.username, status: removed ? "revoked" : "absent" })
+    if (removed) {
+      await audit(
+        env,
+        target.id,
+        "newapi.premium_group.revoke",
+        `管理员 ${admin.username} 取消「付费」分组权限`
+      )
+    }
+  }
+
+  return json({ ok: true, users: names.length, revoked, results })
 }

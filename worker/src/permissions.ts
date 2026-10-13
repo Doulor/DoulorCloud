@@ -5,7 +5,7 @@
  * 也可在成员详情里单独调整某个用户的权限。
  *
  * 存储：users.permissions / invite_codes.permissions 都是 JSON 文本，
- * 形如 {"r2":true,"ai":true,"frp":false}。
+ * 形如 {"r2":true,"ai":true,"proxy":false}。
  *
  * 向后兼容：字段为 NULL 时视为「全部允许」——
  * 升级前就存在的老用户不会因为新增权限系统而突然失去功能。
@@ -13,18 +13,23 @@
  * ⚠️ 个人名片（profile）**不在权限体系内**：它基本不消耗资源，全量开放。
  * 历史数据里可能残留 `"profile": false`，因该键已不在 FEATURES 中，
  * parsePermissions 会直接忽略它 —— 即存量用户自动获得完整名片功能。
+ *
+ * ⚠️ 内网穿透（frp）也**已移出权限体系**（2026-10-13）：
+ * 它改成了「积分租用」模式，任何登录用户都能自己购买、到期自动回收，
+ * 不再需要管理员预先授权。理由与做法见 docs/内网穿透租用化改造方案.md。
+ * 存量 137 名持有该权限的用户已由 migrations/0154_frp_rental_compensation.sql
+ * 每人补偿 50 积分；历史 JSON 里残留的 `"frp":true/false` 会被这里直接忽略。
  */
 import { ApiError } from "./http"
 import { getSetting } from "./settings"
 import type { Env } from "./env"
 
-export const FEATURES = ["r2", "ai", "frp", "proxy", "doulor"] as const
+export const FEATURES = ["r2", "ai", "proxy", "doulor"] as const
 export type Feature = (typeof FEATURES)[number]
 
 export const FEATURE_LABELS: Record<Feature, string> = {
   r2: "直链网盘",
   ai: "AI 中转站",
-  frp: "内网穿透",
   proxy: "代理节点",
   doulor: "doulor.cn 专属域名与邮箱",
 }
@@ -46,7 +51,7 @@ export type Permissions = Record<Feature, boolean>
  *   站长明确要求先「只定义、不放开」⇒ 它的默认值必须是 false，
  *   只能由管理员在成员详情里显式勾选。
  */
-export const DEFAULT_ALLOWED: readonly Feature[] = ["r2", "ai", "frp", "proxy"]
+export const DEFAULT_ALLOWED: readonly Feature[] = ["r2", "ai", "proxy"]
 
 /** 默认权限（“全开”指 DEFAULT_ALLOWED 里的那些；doulor 不在其中） */
 export function allPermissions(): Permissions {
@@ -259,10 +264,11 @@ export function featurePermittedGuard(feature: Feature): string {
   return `COALESCE(json_extract(${PERMISSIONS_JSON_EXPR}, '$.${feature}'), 1) = 1`
 }
 
-/** 仅用于 `WHERE` 的守卫：该模块**原本不是允许**（用于「本次是否真的新增授予」判定） */
-export function featureNotPermittedGuard(feature: Feature): string {
-  return `COALESCE(json_extract(${PERMISSIONS_JSON_EXPR}, '$.${feature}'), 1) != 1`
-}
+// 这里原本还有一个 `featureNotPermittedGuard`（`!= 1` 的反向守卫），已删除：
+// 它想表达「该模块**原本不是允许**，用于判定本次是否真的新增授予」，但全仓无调用点 ——
+// 那个判定在需要的地方都是用 JS 直接算的
+// （例如 donations.ts 的 `parsePermissions(app.permissions)[feature] !== true`）。
+// 留着一个没人用的 SQL 片段构造器，只会让人以为存在一条它参与的写入路径。
 
 /**
  * 仅用于 `WHERE` 的守卫：该用户**不在监管白名单里**。

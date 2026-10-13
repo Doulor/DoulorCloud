@@ -1,6 +1,7 @@
 import * as React from "react"
 import { Link, useSearchParams } from "react-router-dom"
 import {
+  Boxes,
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
@@ -29,6 +30,7 @@ import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
+import { RelayProviderCard } from "@/components/relay-provider-card"
 import { LoadingBlock } from "@/components/loading-block"
 import { NavItem, NavGroup } from "@/components/sub-nav"
 import { SlidingPill } from "@/components/motion/sliding-pill"
@@ -120,24 +122,38 @@ const AI_FORMATS: { value: string; label: string; channelType: number }[] = [
   { value: "anthropic", label: "don.fmt.anthropic", channelType: 14 },
 ]
 
+/** 捐献页的分区（与 URL 的 `?tab=` 一一对应；缺省 = overview） */
+const DONATION_TABS = ["overview", "invite", "relay", "ai", "frp", "proxy"] as const
+
 export default function DonationPage() {
   const { t } = useT()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [data, setData] = React.useState<DonationOverview | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
   const [dialogType, setDialogType] = React.useState<string | null>(null)
   /**
-   * 当前分区。与 admin 面板一致：用受控 state 而非 URL 路由
-   * （刷新回到默认的「概览」是可接受的）。
-   * 支持通过 `?tab=invite` 直接跳到指定分区（如 AI 页「去邀请」的快捷入口）。
+   * 当前分区**完全由 URL 决定**（2026-10-10 站长要求）。
+   *
+   * 原先是受控 state：能读 `?tab=` 但**切换时不写回 URL** ⇒ 地址栏永远只有
+   * `/dashboard/donations`，没法把「AI 栏目」的链接直接复制分享出去。
+   * 现在 URL 是唯一事实来源：
+   *   · 切栏目 → 同步写进地址栏（用 replace，不往浏览器历史里塞垃圾）；
+   *   · 概览不写参数（缺省即 overview），链接保持干净；
+   *   · 外部链接（如 AI 页的「去邀请」）与前进/后退都能正确落到对应分区。
    */
-  const [activeTab, setActiveTab] = React.useState(() => {
-    const tab = searchParams.get("tab")
-    return tab && ["overview", "invite", "ai", "frp", "proxy"].includes(tab)
-      ? tab
-      : "overview"
-  })
+  const activeTab =
+    DONATION_TABS.find((tab) => tab === searchParams.get("tab")) ?? "overview"
+
+  const changeTab = React.useCallback(
+    (next: string) => {
+      const params = new URLSearchParams(searchParams)
+      if (!next || next === "overview") params.delete("tab")
+      else params.set("tab", next)
+      setSearchParams(params, { replace: true })
+    },
+    [searchParams, setSearchParams]
+  )
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -520,7 +536,7 @@ export default function DonationPage() {
     <div>
       <PageHeader title={t("don.title")} description={t("don.subtitle")} />
 
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
+      <Tabs value={activeTab} onValueChange={changeTab}>
         <div className="flex flex-col gap-6 lg:flex-row">
           {/* 左侧二级导航：与 admin 面板同一套交互（受控 state，不改 URL 路由） */}
           <aside className="w-full shrink-0 lg:w-48">
@@ -541,32 +557,40 @@ export default function DonationPage() {
                 active={activeTab === "overview"}
                 icon={LayoutDashboard}
                 label={t("don.nav.overview")}
-                onClick={() => setActiveTab("overview")}
+                onClick={() => changeTab("overview")}
               />
               <NavItem
                 active={activeTab === "invite"}
                 icon={Ticket}
                 label={t("don.nav.invite")}
-                onClick={() => setActiveTab("invite")}
+                onClick={() => changeTab("invite")}
+              />
+              {/* 中转站入驻（2026-10-12 站长要求放在这里）：朋友登记自己的
+                  NewAPI / Sub2API，用户在 AI 页能顺便看到那边的余额与订阅 */}
+              <NavItem
+                active={activeTab === "relay"}
+                icon={Boxes}
+                label={t("relayp.nav")}
+                onClick={() => changeTab("relay")}
               />
               <NavGroup label={t("don.nav.group")}>
                 <NavItem
                   active={activeTab === "ai"}
                   icon={Sparkles}
                   label={t("don.type.ai")}
-                  onClick={() => setActiveTab("ai")}
+                  onClick={() => changeTab("ai")}
                 />
                 <NavItem
                   active={activeTab === "frp"}
                   icon={Network}
                   label={t("don.type.frp")}
-                  onClick={() => setActiveTab("frp")}
+                  onClick={() => changeTab("frp")}
                 />
                 <NavItem
                   active={activeTab === "proxy"}
                   icon={Zap}
                   label={t("don.type.proxy")}
-                  onClick={() => setActiveTab("proxy")}
+                  onClick={() => changeTab("proxy")}
                 />
               </NavGroup>
             </nav>
@@ -618,7 +642,7 @@ export default function DonationPage() {
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => setActiveTab(type)}
+                          onClick={() => changeTab(type)}
                         >
                           <Plus className="h-4 w-4" />
                           {t("don.card.contributeShort")}
@@ -643,7 +667,7 @@ export default function DonationPage() {
                       {t("don.invite.desc")}
                     </p>
                   </div>
-                  <Button size="sm" variant="outline" onClick={() => setActiveTab("invite")}>
+                  <Button size="sm" variant="outline" onClick={() => changeTab("invite")}>
                     {t("don.invite.go")}
                     <ArrowRight className="h-4 w-4" />
                   </Button>
@@ -960,6 +984,10 @@ export default function DonationPage() {
                   )}
                 </CardContent>
               </Card>
+            </TabsContent>
+
+            <TabsContent value="relay">
+              <RelayProviderCard />
             </TabsContent>
 
             <TabsContent value="ai">
@@ -2257,6 +2285,36 @@ function Wb2ApiDonationCard({
    * 不能直接 useState(block.realm)：这里在 null 检查之前，block 可能还没到。
    */
   const [realmChoice, setRealmChoice] = React.useState<"cn" | "global" | null>(null)
+  /** 上传 JSON 导入进行中（避免重复点击） */
+  const [importing, setImporting] = React.useState(false)
+
+  /**
+   * 上传 JSON 直接绑定（2026-10-10 站长要求）。
+   * 手里已经有 cockpit 导出的凭据文件时走这条路，不必再走一遍登录授权。
+   */
+  const importJson = async () => {
+    const input = document.createElement("input")
+    input.type = "file"
+    input.accept = "application/json,.json"
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      if (!file) return
+      setImporting(true)
+      try {
+        const res = await wb2apiApi.importAccounts(file)
+        toast.success(t("don.wb.importOk", { n: res.bound, total: res.total }))
+        if (res.skippedByLimit.length > 0) {
+          toast.warning(t("don.wb.importLimit", { n: res.skippedByLimit.length }))
+        }
+        onDone()
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : t("don.wb.importFailed"))
+      } finally {
+        setImporting(false)
+      }
+    }
+    input.click()
+  }
 
   // 通道未开启或未配置 → 整卡隐藏（避免用户点进去才发现不可用）
   if (!block || !block.enabled || !block.configured) return null
@@ -2349,6 +2407,20 @@ function Wb2ApiDonationCard({
           <p className="text-xs text-muted-foreground">
             {t("don.wb.realmHint")}
           </p>
+        </div>
+
+        {/* 上传 JSON 直接绑定：手里已有 cockpit 导出的凭据文件时用，省掉一遍登录授权 */}
+        <div className="space-y-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={importing}
+            onClick={() => void importJson()}
+          >
+            {importing ? t("don.wb.importing") : t("don.wb.importBtn")}
+          </Button>
+          <p className="text-xs text-muted-foreground">{t("don.wb.importHint")}</p>
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2598,6 +2670,38 @@ function Qoder2ApiDonationCard({
   const { t } = useT()
   const [acknowledged, setAcknowledged] = React.useState(false)
   const [dialogOpen, setDialogOpen] = React.useState(false)
+  /**
+   * 捐献者自选的版本（2026-10-10 起，与 wb 卡同款）。
+   * 初值 null = 还没动过 → 用管理员设的默认（block.realm）。
+   */
+  const [realmChoice, setRealmChoice] = React.useState<"cn" | "intl" | null>(null)
+  /** 上传 JSON 导入进行中 */
+  const [importing, setImporting] = React.useState(false)
+
+  /** 上传 JSON 直接绑定（与 wb 卡同一套做法，见那边的注释） */
+  const importJson = async () => {
+    const input = document.createElement("input")
+    input.type = "file"
+    input.accept = "application/json,.json"
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      if (!file) return
+      setImporting(true)
+      try {
+        const res = await qoder2apiApi.importAccounts(file, realm)
+        toast.success(t("don.q2.importOk", { n: res.bound, total: res.total }))
+        if (res.skippedByLimit.length > 0) {
+          toast.warning(t("don.q2.importLimit", { n: res.skippedByLimit.length }))
+        }
+        onDone()
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : t("don.q2.importFailed"))
+      } finally {
+        setImporting(false)
+      }
+    }
+    input.click()
+  }
 
   if (!block || !block.enabled || !block.configured) return null
 
@@ -2607,6 +2711,10 @@ function Qoder2ApiDonationCard({
   const full = block.remaining < 1
   // 该通道只对接 Qoder，没有 provider 可切
   const providerLabel = "Qoder"
+
+  const defaultRealm: "cn" | "intl" = block.realm === "intl" ? "intl" : "cn"
+  const realm: "cn" | "intl" = realmChoice ?? defaultRealm
+  const realmLabel = realm === "intl" ? t("don.realm.intl") : t("don.realm.cn")
 
   return (
     <Card className="mb-6">
@@ -2622,8 +2730,8 @@ function Qoder2ApiDonationCard({
         </CardTitle>
         <CardDescription>
           {grantsPermission
-            ? t("don.cli.desc", { provider: providerLabel, realm: block.realm === "cn" ? t("don.realm.cn") : t("don.realm.global") })
-            : t("don.cli.descNoGrant", { provider: providerLabel, realm: block.realm === "cn" ? t("don.realm.cn") : t("don.realm.global") })}
+            ? t("don.cli.desc", { provider: providerLabel, realm: realmLabel })
+            : t("don.cli.descNoGrant", { provider: providerLabel, realm: realmLabel })}
           {!grantsPermission && (
             <span className="mt-1 block font-semibold text-destructive">
               {t("don.grantOffAi")}
@@ -2632,6 +2740,41 @@ function Qoder2ApiDonationCard({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {/* 版本选择：与 wb 卡同款 —— 捐献者自己挑对接国内版还是国际版。
+            选错会让上游授权失败，所以给一句明确提示。 */}
+        <div className="space-y-2">
+          <Label className="text-xs text-muted-foreground">{t("don.q2.realmLabel")}</Label>
+          <div className="flex gap-2">
+            {(["cn", "intl"] as const)
+              .filter((r) => (block.availableRealms ?? ["cn", "intl"]).includes(r))
+              .map((r) => (
+                <Button
+                  key={r}
+                  type="button"
+                  size="sm"
+                  variant={realm === r ? "default" : "outline"}
+                  onClick={() => setRealmChoice(r)}
+                >
+                  {r === "cn" ? t("don.realm.cn") : t("don.realm.intl")}
+                </Button>
+              ))}
+          </div>
+          <p className="text-xs text-muted-foreground">{t("don.q2.realmHint")}</p>
+        </div>
+
+        {/* 上传 JSON 直接绑定：手里已有导出的账号 JSON 时用，省掉一遍授权登录 */}
+        <div className="space-y-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={importing}
+            onClick={() => void importJson()}
+          >
+            {importing ? t("don.q2.importing") : t("don.q2.importBtn")}
+          </Button>
+          <p className="text-xs text-muted-foreground">{t("don.q2.importHint")}</p>
+        </div>
         <div className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3">
           <p className="flex items-start gap-2 text-sm">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
@@ -2693,7 +2836,7 @@ function Qoder2ApiDonationCard({
       {dialogOpen && (
         <Qoder2ApiLoginDialog
           providerLabel={providerLabel}
-          realm={block.realm}
+          realm={realm}
           grantsPermission={grantsPermission}
           onClose={() => setDialogOpen(false)}
           onDone={() => {
@@ -2737,7 +2880,7 @@ function Qoder2ApiLoginDialog({
     let cancelled = false
     void (async () => {
       try {
-        const res = await qoder2apiApi.loginStart()
+        const res = await qoder2apiApi.loginStart(realm)
         if (cancelled) return
         setSessionId(res.sessionId)
         setPhase("waiting")

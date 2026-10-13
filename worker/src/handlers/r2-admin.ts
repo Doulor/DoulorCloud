@@ -769,19 +769,10 @@ export async function assignAllUnassigned(env: Env, request: Request): Promise<R
   const count = pending?.c ?? 0
   if (count === 0) return json({ ok: true, moved: 0 })
 
-  // 人数上限校验：允许因为「接管 env 桶」而超限，但要显式 force
-  const current = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM storage_accounts WHERE bucket_id = ?"
-  )
-    .bind(bucketId)
-    .first<{ c: number }>()
-  if ((current?.c ?? 0) + count > bucket.max_users && !body.force) {
-    throw new ApiError(
-      409,
-      `迁入后将有 ${(current?.c ?? 0) + count} 人，超过上限 ${bucket.max_users}。请先调高上限，或确认目标桶与默认桶是同一个物理桶后强制迁移`,
-      "BUCKET_FULL"
-    )
-  }
+  // ⚠️ 2026-10-12：这里**故意不做人数校验**。站长明确「一个桶能放无限的人，只要容量没满」——
+  // 容量由写入路径的 assertBucketHasRoom()（桶的真实 capacity_bytes）把关，与「几个人」无关。
+  // 历史上这里按人数拦过，结果同一件事两套标准（上传不拦、管理端改派拦），
+  // 而且 PR #61 指出的那个判据还写反了。`max_users` 字段保留仅用于前端展示，不再参与拦截。
 
   await env.DB.prepare(
     "UPDATE storage_accounts SET bucket_id = ?, updated_at = ? WHERE bucket_id IS NULL"
@@ -839,19 +830,8 @@ export async function assignUserBucket(env: Env, request: Request): Promise<Resp
       )
     }
 
-    // 目标桶容量校验（人数上限）
-    const cnt = await env.DB.prepare(
-      "SELECT COUNT(*) AS c FROM storage_accounts WHERE bucket_id = ?"
-    )
-      .bind(bucketId)
-      .first<{ c: number }>()
-    if ((cnt?.c ?? 0) >= bucket.max_users && account.used_bytes === 0) {
-      throw new ApiError(
-        409,
-        `目标桶已满（${cnt?.c}/${bucket.max_users} 人）`,
-        "BUCKET_FULL"
-      )
-    }
+    // ⚠️ 2026-10-12：**故意不做人数校验**（同上）。改派只是换「新文件优先写哪个桶」，
+    // 不搬动已有文件、也不改变任何桶的已用量 —— 容量约束在写入时按 capacity_bytes 判即可。
   }
 
   await env.DB.prepare(

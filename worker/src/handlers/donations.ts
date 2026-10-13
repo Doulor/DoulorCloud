@@ -20,6 +20,8 @@ import { sendMail, renderMail } from "../mailer"
 import { isOwnDomain } from "../root-domains"
 import { wb2apiDonationBlock } from "./wb2api"
 import { qoder2apiDonationBlock } from "./qoder2api"
+// 捐献审核要做「连通性校验」（2026-10-10 站长要求：能用就是有价值）
+import { probeSubscriptionNodeHealth } from "./proxy"
 import {
   grantQuotaForDonation,
   INVITE_BONUS_PER_DONATION,
@@ -63,7 +65,11 @@ import {
 import { guardRateLimit } from "../ratelimit"
 import { donationRewardLabel, grantDonationReward, isDonationRewardKind } from "../points"
 import { grantFirstDonationVoucher } from "../vouchers"
-import { getSettings, getSettingBool, getSettingNumber, type SettingKey } from "../settings"
+import { getSettings, getSetting, getSettingBool, getSettingNumber, type SettingKey } from "../settings"
+import {
+  DONATION_URL_BLOCKED_MESSAGE,
+  isUpstreamUrlBlocked,
+} from "../donation-url-blocklist"
 import { pushMessage } from "../user-messages"
 import { grantInviteReward } from "../invite-rewards"
 import {
@@ -170,10 +176,22 @@ async function hasDuplicateUpstream(
   return row?.id ?? null
 }
 
-/** 捐献类型 → 对应的功能权限 */
-const DONATION_TYPES: Record<string, Feature> = {
+/**
+ * 捐献类型 → 对应的功能权限。
+ *
+ * ⚠️ 值为 `null` 表示「这个捐献类型不再授予任何功能权限」。
+ *
+ * `frp` 就是这种情况（2026-10-13）：内网穿透改成了「积分租用」，
+ * 任何登录用户都能自己购买，不再需要管理员授权 —— 于是「捐 frp 服务器换 frp 权限」
+ * 这件事失去了意义。但**捐献本身仍然受理**：资源照收、积分与邀请码额度照发，
+ * 只是不再往 users.permissions 里写 frp。
+ *
+ * 因此判断「这个类型是否受支持」必须用 `type in DONATION_TYPES`，
+ * 不能用 `if (!DONATION_TYPES[type])` —— 后者会把 frp 当成未知类型拒掉。
+ */
+const DONATION_TYPES: Record<string, Feature | null> = {
   ai: "ai",
-  frp: "frp",
+  frp: null,
   proxy: "proxy",
   /**
    * 商汤 Key 捐献：权限仍映射到 `ai`（捐的是一个 AI 上游的 Key）。
@@ -219,6 +237,17 @@ export const DONATION_TYPE_LABELS: Record<string, string> = {
   frp: "内网穿透",
   proxy: "代理节点",
   sensenova: "商汤 Key",
+}
+
+/**
+ * 捐献在通知文案 / 审计日志里的显示名。
+ *
+ * `feature` 为 null（目前只有 frp）时回落到捐献类型自己的标签：
+ * 内网穿透虽然已不是权限模块，但在「捐献」语境里它仍然是一个正当的类型名，
+ * 文案里不该因为它不再解锁权限就显示成空白。
+ */
+function donationLabel(type: string, feature: Feature | null): string {
+  return feature === null ? (DONATION_TYPE_LABELS[type] ?? type) : FEATURE_LABELS[feature]
 }
 
 /**
@@ -531,7 +560,7 @@ async function applyDonationApproval(
     grantRewards?: boolean
   }
 ): Promise<{ voucherCode: string | null; quotaGranted: boolean }> {
-  const feature = DONATION_TYPES[app.type] as Feature
+  const feature = DONATION_TYPES[app.type]
   const grantRewards = opts.grantRewards !== false
   const now = new Date().toISOString()
 
@@ -554,7 +583,8 @@ async function applyDonationApproval(
   // 置回 NULL 的地方只有两处，都是「本单确实不再授予任何东西」：撤销
   // （`revokeDonation`）与商汤巡检撤销（`auditSenseNovaKeys`）—— 那之后用户权限
   // 已被收回，重新批准时 `granted` 会重新算出 true，于是又记回 1。语义闭环。
-  const granted = grantPerm && parsePermissions(app.permissions)[feature] !== true
+  const granted =
+    feature !== null && grantPerm && parsePermissions(app.permissions)[feature] !== true
 
   const approvalStatements = [
     env.DB.prepare(
@@ -575,7 +605,8 @@ async function applyDonationApproval(
   ]
 
   // 授权开关关掉时不写权限（granted 为 false 时同样不写 —— 本来就有的不重复写）。
-  if (granted) {
+  // `feature === null` 的类型（目前只有 frp）永远不写权限：它已经不在权限体系里了。
+  if (granted && feature !== null) {
     approvalStatements.push(
       env.DB.prepare(
         `UPDATE users SET permissions = ${featurePermissionSql(feature, true)}, updated_at = ? WHERE id = ?`
@@ -675,8 +706,13 @@ async function applyDonationApproval(
 
     if (claimed) {
       try {
-        await grantQuotaForDonation(env, app.user_id, feature)
-        quotaGranted = true
+        // feature 为 null 的类型（目前只有 frp）不再发放模块额度：
+        // 内网穿透已改为积分租用，不存在「可转授额度」这个概念了。
+        // 积分奖励照发（在上面/下面那条路径），所以捐献本身仍然有回报。
+        if (feature !== null) {
+          await grantQuotaForDonation(env, app.user_id, feature)
+          quotaGranted = true
+        }
       } catch (err) {
         // 占位成功但发放失败：把标记撤回，保持「占位 == 已发放」的不变式，
         // 否则该用户会被永久判为「已发过」，而实际一分没拿到。
@@ -761,7 +797,7 @@ async function applyDonationApproval(
     .bind(
       uuid(),
       opts.adminId ?? app.user_id,
-      `${app.username} 的${FEATURE_LABELS[feature]}捐献：${
+      `${app.username} 的${donationLabel(app.type, feature)}捐献：${
         opts.adminId ? "批准" : "系统自动批准"
       }`,
       now
@@ -877,6 +913,65 @@ async function autoReviewProxyDonation(
     return reject(
       `${subUrls.length} 个订阅链接都没有解析出节点 —— ${detail}`
     )
+  }
+
+  /**
+   * 🔴 连通性校验（站长 2026-10-10：「能用就是有价值」，0 节点 / 全是死节点的不该过审）。
+   *
+   * 原来只要「订阅能抓取 + 解析出 ≥1 个节点」就自动通过 —— 于是「格式完全正确但节点
+   * 全是死的」订阅照样拿到权限。这里复用订阅探活，对**少量节点**做真握手
+   * （单节点 3 秒超时、并发 2 ⇒ 不会把审核拖超时）。
+   *
+   * ⚠️ 探活实现会落库，这里只好拿 donation id 当临时 subscription_id，
+   * 用完**立即删除**，避免污染真实的节点健康表。
+   * ⚠️ 一次握手失败**不判死**（本身要连续 2 次失败才算 down，单次多半是抖动）
+   * ⇒ 判定为**转人工复核**而不是自动拒绝，与上面「证据不够不下终局结论」同一取向。
+   */
+  let liveNodes = 0
+  /**
+   * 「真的测过几个节点」。
+   *
+   * 🔴 2026-10-11 修正：这里原来记的是 `probe.probed - probe.unknown`（剔掉"未知"），
+   * 但健康判定规定**握手失败是弱证据、要连续多轮才降级为 down**，所以一次全新的
+   * 订阅**首次**探测时，所有失败节点都会被归成 `unknown` ⇒ 这个值恒为 0 ⇒
+   * 下面的 `> 0` 条件永远不成立 ⇒ **这道探活闸门从上线起就没关上过**。
+   * 实测：提交一行 `trojan://x@1.2.3.4:443`（1.2.3.4 无任何服务）仍被判
+   * `approved` 并白得 proxy 特性，与未加探活时完全一样。
+   *
+   * 现在只排除**压根没测**的节点（hysteria2 之类走 QUIC/UDP，Worker 建不了连接，
+   * 它们根本不会出现在结果里）—— 保留原注释第 3 条「探不动的协议绝不算失败」，
+   * 但**测过却一个都没连上**必须转到人工，这正是站长 2026-10-10 定的口径
+   * 「能用就是有价值」的反面：连不上就是没价值。
+   */
+  let probedNodes = 0
+  try {
+    const probe = await probeSubscriptionNodeHealth(
+      env,
+      { id: input.id, url: subUrls[0] },
+      { maxNodes: 2, concurrency: 2 }
+    )
+    liveNodes = probe.up
+    probedNodes = probe.probed
+  } catch {
+    // 探活本身失败（订阅站抖动等）不阻断审核：证据不足不下结论
+  } finally {
+    await env.DB.prepare("DELETE FROM proxy_node_health WHERE subscription_id = ?")
+      .bind(input.id)
+      .run()
+      .catch(() => undefined)
+  }
+
+  if (probedNodes > 0 && liveNodes === 0) {
+    const note =
+      `系统自动校验未通过：订阅能抓取、也解析出了节点，但**实测没有一个节点连得上**，` +
+      `已转人工复核（如为订阅站抖动，管理员可直接通过）。`
+    await env.DB.prepare(
+      `UPDATE donations SET review_note = ?, reviewed_at = ?, auto_reviewed = 1 WHERE id = ?`
+    )
+      .bind(note, now, input.id)
+      .run()
+    await notifyDonationResult(env, app, false, note, { auto: true, pending: true })
+    return { status: "pending", note, channelId: null }
   }
 
   const usable = good.reduce((n, c) => n + c.nodeCount, 0)
@@ -1047,6 +1142,12 @@ async function autoProvisionAiDonation(
     baseUrl = validateUpstreamUrl(parsed.baseUrl).baseUrl
   } catch (err) {
     return reject(err instanceof Error ? err.message : String(err))
+  }
+
+  // 黑名单：自动审核这一关也要拦 —— 它覆盖的是「规则上线前就已存在的待审单据」
+  // （新建单据在 createDonation 就已被挡下），统一走 reject 落 review_note。
+  if (isUpstreamUrlBlocked(baseUrl, await getSetting(env, "donation_url_blocklist"))) {
+    return reject(DONATION_URL_BLOCKED_MESSAGE)
   }
 
   if (parsed.models.length === 0) {
@@ -1336,25 +1437,27 @@ async function notifyDonationResult(
     revoked?: boolean
   } = {}
 ): Promise<void> {
-  const feature = DONATION_TYPES[app.type] as Feature
-  const quotaFeature = feature as QuotaFeature
+  const feature = DONATION_TYPES[app.type]
+  // feature 为 null（目前只有 frp）的捐献不再发模块额度：
+  // 内网穿透已改为积分租用，不存在「可转授额度」这个概念，文案里那一行也必须去掉。
+  const quotaFeature = feature === null ? null : (feature as QuotaFeature)
   try {
-    const basic = await isBasicFeature(env, quotaFeature)
+    const basic = quotaFeature === null ? false : await isBasicFeature(env, quotaFeature)
     // 基础权限模块的人人可授，获批时无需发放模块额度，文案也要同步去掉。
     // `noQuotaLine`：这次真的没发（同类型已发过）—— 不能再说「同时获得 2 个额度」，
     // 否则用户看到「说给我了却没涨」（2026-10-08：这正是用户反馈的另一面）。
     const quotaLine =
-      opts.noReward || opts.noQuotaLine
+      opts.noReward || opts.noQuotaLine || quotaFeature === null
         ? ""
         : basic
           ? `同时获得 ${INVITE_BONUS_PER_DONATION} 个邀请码创建额度` +
-            `（「${QUOTA_FEATURE_LABELS[quotaFeature] ?? FEATURE_LABELS[feature]}」已是基础权限，人人可授）。`
+            `（「${QUOTA_FEATURE_LABELS[quotaFeature]}」已是基础权限，人人可授）。`
           : `同时获得 ${INVITE_BONUS_PER_DONATION} 个邀请码创建额度，` +
-            `以及 1 个「${QUOTA_FEATURE_LABELS[quotaFeature] ?? FEATURE_LABELS[feature]}」权限额度` +
+            `以及 1 个「${QUOTA_FEATURE_LABELS[quotaFeature]}」权限额度` +
             "（创建邀请码时可授予该权限）。"
     const lines = opts.revoked
       ? [
-          `捐献类型：${FEATURE_LABELS[feature]}`,
+          `捐献类型：${donationLabel(app.type, feature)}`,
           "系统定期巡检时发现你提交的这份资源**已失效**（上游明确拒绝了它，不是网络抖动或限流）。",
           note ? `详情：${note}` : "",
           "该资源已从我们的服务里移除；如果它当时为你解锁了权限，权限也已一并收回。",
@@ -1362,7 +1465,7 @@ async function notifyDonationResult(
         ]
       : opts.pending
         ? [
-            `捐献类型：${FEATURE_LABELS[feature]}`,
+            `捐献类型：${donationLabel(app.type, feature)}`,
             "系统自动校验没能确认这份资源可用（上游未正常响应，或接口格式/名称不匹配）。",
             "**这不代表你的资源不可用**，已转交人工复核；管理员确认通过后会自动为你解锁权限。",
             note ? `详情：${note}` : "",
@@ -1372,7 +1475,7 @@ async function notifyDonationResult(
           ]
         : approve
         ? [
-            `捐献类型：${FEATURE_LABELS[feature]}`,
+            `捐献类型：${donationLabel(app.type, feature)}`,
             opts.auto
               ? "你的捐献资源已通过系统自动校验，对应功能权限已解锁。"
               : "你的捐献申请已通过审核，对应功能权限已解锁。",
@@ -1389,7 +1492,7 @@ async function notifyDonationResult(
               : "请到 Doulor Cloud 的「捐献」页面查看额度并创建邀请码。",
           ]
         : [
-            `捐献类型：${FEATURE_LABELS[feature]}`,
+            `捐献类型：${donationLabel(app.type, feature)}`,
             "很抱歉，你的捐献申请未通过审核。",
             note ? `原因：${note}` : "",
             "如有疑问可联系管理员，或修改后重新提交。",
@@ -1629,6 +1732,20 @@ export async function probeAiUpstream(env: Env, request: Request): Promise<Respo
   const format: UpstreamFormat =
     body.format === "openai" || body.format === "anthropic" ? body.format : "auto"
 
+  // 黑名单：**先拦再探测** —— 否则用户看到「测试通过」，提交时才被拒，白困惑一场。
+  // 返回体保持 UpstreamProbe 形状，前端不用为这条规则单独分支。
+  if (isUpstreamUrlBlocked(baseUrl, await getSetting(env, "donation_url_blocklist"))) {
+    return json({
+      ok: false,
+      baseUrl: "",
+      channelType: null,
+      channelTypeName: "",
+      models: [],
+      message: DONATION_URL_BLOCKED_MESSAGE,
+      attempts: [],
+    })
+  }
+
   const result = await probeUpstream(baseUrl, apiKey, format)
   return json(result)
 }
@@ -1657,7 +1774,9 @@ export async function createDonation(env: Env, request: Request): Promise<Respon
   }
 
   const type = (body.type ?? "").trim().toLowerCase()
-  if (!DONATION_TYPES[type]) {
+  // ⚠️ 必须用 `in` 判断，不能用 `!DONATION_TYPES[type]`：
+  // frp 的值是 null（不再授予权限，但类型仍然有效），用真假判断会把它当成未知类型拒掉。
+  if (!(type in DONATION_TYPES)) {
     throw new ApiError(400, "不支持的捐献类型", "INVALID_TYPE")
   }
 
@@ -1679,8 +1798,10 @@ export async function createDonation(env: Env, request: Request): Promise<Respon
     if (typeof p.baseUrl !== "string" || !p.baseUrl.trim()) {
       throw new ApiError(400, "请填写上游 API 地址", "INVALID_BASE_URL")
     }
+    // 用局部变量接住规范化结果：`p.baseUrl` 声明为 unknown，回写后 TS 的窄化就失效了
+    let normalizedUrl: string
     try {
-      p.baseUrl = validateUpstreamUrl(p.baseUrl).baseUrl
+      normalizedUrl = validateUpstreamUrl(p.baseUrl).baseUrl
     } catch (err) {
       throw new ApiError(
         400,
@@ -1688,6 +1809,12 @@ export async function createDonation(env: Env, request: Request): Promise<Respon
         "INVALID_BASE_URL"
       )
     }
+    // 黑名单（**前缀匹配**，见 donation-url-blocklist.ts）：命中就不允许捐献。
+    // 挡在入库之前 —— 早于建渠道、早于自动审核，命中时一条单据都不会产生。
+    if (isUpstreamUrlBlocked(normalizedUrl, await getSetting(env, "donation_url_blocklist"))) {
+      throw new ApiError(400, DONATION_URL_BLOCKED_MESSAGE, "URL_BLOCKED")
+    }
+    p.baseUrl = normalizedUrl
   }
 
   // frp 的 payload 含 frpc.toml 样例（最长 16 KB），放宽上限；
@@ -2009,7 +2136,7 @@ export async function createDonation(env: Env, request: Request): Promise<Respon
     try {
       const lines = [
         `用户：${user.username}`,
-        `捐献类型：${DONATION_TYPE_LABELS[type] ?? FEATURE_LABELS[feature]}`,
+        `捐献类型：${donationLabel(type, feature)}`,
         `通知邮箱：${notifyEmail}`,
         body.remark ? `备注：${body.remark.trim().slice(0, 200)}` : "",
         type === "ai" || type === "sensenova"
@@ -2095,7 +2222,7 @@ export async function reviewDonation(env: Env, request: Request): Promise<Respon
 
   let note = (body.note ?? "").trim().slice(0, 500) || null
   const now = new Date().toISOString()
-  const feature = DONATION_TYPES[app.type] as Feature
+  const feature = DONATION_TYPES[app.type]
   let voucherCode: string | null = null
   /** 本次批准是否真的发了邀请码额度（false = 同类型已发过，文案不能再提额度） */
   let quotaGranted = false
@@ -2105,6 +2232,19 @@ export async function reviewDonation(env: Env, request: Request): Promise<Respon
     // 已经接入过（channelId 有值，比如撤销后复核放行）就不再重复建。
     let channelId: number | null = app.newapi_channel_id ?? null
     if (app.type === "ai" && channelId === null) {
+      // 黑名单：不为被封禁的上游建渠道。挡在这里（而不是只在 tryProvisionForReview
+      // 里回一行说明）是为了**明确报错**，避免「批准了却没渠道」那种半成品状态。
+      const parsedAi = parseAiPayload(app.payload)
+      if (
+        parsedAi &&
+        isUpstreamUrlBlocked(parsedAi.baseUrl, await getSetting(env, "donation_url_blocklist"))
+      ) {
+        throw new ApiError(
+          409,
+          `${DONATION_URL_BLOCKED_MESSAGE}（要放行请先把它从「捐献 baseUrl 黑名单」里移除）`,
+          "URL_BLOCKED"
+        )
+      }
       const line = await tryProvisionForReview(env, app)
       if (line.channelId !== null) channelId = line.channelId
       if (line.message) {
@@ -2148,7 +2288,7 @@ export async function reviewDonation(env: Env, request: Request): Promise<Respon
       .bind(
         uuid(),
         admin.id,
-        `${app.username} 的${FEATURE_LABELS[feature]}捐献：拒绝`,
+        `${app.username} 的${donationLabel(app.type, feature)}捐献：拒绝`,
         now
       )
       .run()
@@ -2502,7 +2642,7 @@ export async function revokeDonation(env: Env, request: Request, id: string): Pr
     throw new ApiError(409, "只有已通过的捐献才能撤销", "INVALID_STATE")
   }
 
-  const feature = DONATION_TYPES[app.type] as Feature
+  const feature = DONATION_TYPES[app.type]
   const now = new Date().toISOString()
 
   const batch: D1PreparedStatement[] = [
@@ -2511,8 +2651,11 @@ export async function revokeDonation(env: Env, request: Request, id: string): Pr
     ).bind(id),
   ]
 
-  // 只有「本次确实授予了权限」才收回
-  if (app.granted_feature === 1) {
+  // 只有「本次确实授予了权限」才收回。
+  // `feature === null`（目前只有 frp）已经没有可收回的权限了 ——
+  // 历史遗留的 granted_feature=1（旧 frp 捐献）在这里直接跳过即可，
+  // 权限键本身已经从 FEATURES 移除，写它反而会留下一个无人认领的垃圾键。
+  if (app.granted_feature === 1 && feature !== null) {
     // 原子写：只把该模块置 false，不整列覆盖（见 permissions.ts 的说明）
     batch.push(
       env.DB.prepare(

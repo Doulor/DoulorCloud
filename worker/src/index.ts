@@ -19,6 +19,7 @@ import * as adminDnsHandlers from "./handlers/admin-dns"
 import * as adminSubdomainHandlers from "./handlers/admin-subdomains"
 import * as adminMailboxHandlers from "./handlers/admin-mailboxes"
 import * as adminUsersStatusHandlers from "./handlers/admin-users-status"
+import * as relayProviderHandlers from "./handlers/relay-providers"
 import * as adminRootDomainHandlers from "./handlers/admin-root-domains"
 import * as adminChannelHandlers from "./handlers/admin-channels"
 import * as adminPermHandlers from "./handlers/admin-perms"
@@ -35,6 +36,8 @@ import * as groupSyncHandlers from "./handlers/group-sync"
 import * as qoder2apiHandlers from "./handlers/qoder2api"
 import * as myInviteHandlers from "./handlers/my-invites"
 import * as frpHandlers from "./handlers/frp"
+import * as frpAgentHandlers from "./handlers/frp-agent"
+import * as frpRentalHandlers from "./handlers/frp-rental"
 import * as profileHandlers from "./handlers/profile"
 import * as identityHandlers from "./handlers/identity"
 import * as proxyHandlers from "./handlers/proxy"
@@ -68,6 +71,11 @@ import * as moderationListHandlers from "./handlers/moderation-lists"
 import * as pointHandlers from "./handlers/points"
 import * as dbBackupHandlers from "./handlers/db-backup"
 import * as attentionHandlers from "./handlers/attention"
+// 造物典藏（游戏大厅）：插件清单 + 「在线投资」玩家侧 / 管理端接口
+import * as collectionHandlers from "./handlers/collection"
+import * as collectionAdminHandlers from "./handlers/collection-admin"
+// 行情推进要在每分钟的 cron 里兜底跑一次（「没人在线时 K 线也在走」的保证）
+import { advanceAndSweep as advanceGameMarket, loadGameParams as loadGameParamsForCron } from "./game-market"
 import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
 import { runMaintenance } from "./maintenance"
@@ -1232,6 +1240,43 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       newapiHandlers.adminSyncPermissions(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/newapi/subscription-plans",
+    method: "GET",
+    // 列出中转站的订阅套餐（纯展示：让「发放订阅」能看见有哪些 ID 可选）
+    handle: () =>
+      newapiHandlers.adminListSubscriptionPlans(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/newapi/grant-subscriptions",
+    method: "POST",
+    // 按用户名批量发放订阅（先全量校验再动手；用户名不存在 / 未开通中转站时零副作用）
+    handle: () =>
+      newapiHandlers.adminGrantSubscriptions(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/newapi/premium-grants",
+    method: "GET",
+    // 当前有「付费分组」权限的用户列表（2026-10-11）
+    handle: () => newapiHandlers.adminListPremiumGrants(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/newapi/grant-premium-group",
+    method: "POST",
+    // 按用户名批量授予「付费」分组（幂等；先全量校验再动手）
+    handle: () => newapiHandlers.adminGrantPremiumGroup(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/newapi/revoke-premium-group",
+    method: "POST",
+    // 按用户名批量取消「付费」分组授权
+    handle: () => newapiHandlers.adminRevokePremiumGroup(env, request),
   },
   {
     kind: "exact",
@@ -3429,12 +3474,91 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       storageHandlers.toggleShare(env, request),
   },
 
+  // ---- 中转站登记（2026-10-12）：朋友自助登记他们的 NewAPI / Sub2API，
+  // 用户在 AI 页能顺便看到自己在那边的余额与订阅（**只读**，不代发额度）----
+  {
+    kind: "exact",
+    path: "/relay/providers",
+    method: "GET",
+    handle: () => relayProviderHandlers.listRelayProviders(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/relay/providers",
+    method: "POST",
+    handle: () => relayProviderHandlers.createRelayProvider(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/relay\/providers\/([^/]+)\/me$/),
+    methods: ["GET"],
+    handle: (m: RegExpMatchArray) =>
+      relayProviderHandlers.getRelayProviderView(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/relay\/providers\/([^/]+)\/keys$/),
+    methods: ["GET"],
+    handle: (m: RegExpMatchArray) =>
+      relayProviderHandlers.getRelayProviderKeys(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/relay\/providers\/([^/]+)\/models$/),
+    methods: ["GET"],
+    handle: (m: RegExpMatchArray) =>
+      relayProviderHandlers.getRelayProviderModels(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/relay\/providers\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (m: RegExpMatchArray) =>
+      relayProviderHandlers.updateRelayProvider(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/relay\/providers\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (m: RegExpMatchArray) =>
+      relayProviderHandlers.deleteRelayProvider(env, request, decodeURIComponent(m[1])),
+  },
+  // 站长视角：全部登记 + 一键停用
+  {
+    kind: "exact",
+    path: "/admin/relay-providers",
+    method: "GET",
+    handle: () => relayProviderHandlers.adminListRelayProviders(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/relay-providers\/([^/]+)\/enabled$/),
+    methods: ["POST"],
+    handle: (m: RegExpMatchArray) =>
+      relayProviderHandlers.adminSetRelayProviderEnabled(
+        env,
+        request,
+        decodeURIComponent(m[1])
+      ),
+  },
+
   {
     kind: "exact",
     path: "/dev/status",
     method: "GET",
     handle: () =>
       newapiHandlers.getStatus(env, request),
+  },
+
+  // 「AI 中转站」页的实时部分（健康徽章 / 币种 / 订阅）—— 懒加载。
+  // 首屏 /dev/status 只读 D1（毫秒级），前端拿到首屏后再打这个补数据；
+  // 上游实测 1.4~27.8s，绝不能让首屏等它（2026-10-12 站长反馈页面很卡）。
+  {
+    kind: "exact",
+    path: "/dev/usage",
+    method: "GET",
+    handle: () =>
+      newapiHandlers.getUsage(env, request),
   },
 
   // 「全部可用模型」清单（懒加载）：单独成接口是因为拉全量模型很慢
@@ -3520,83 +3644,70 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       newapiHandlers.changePassword(env, request),
   },
 
+  // ---- 内网穿透：用户端的「提交申请 / 启用 / 停用 / 撤回」已整体退役（2026-10-13）----
+  // 它被下面的「租用化」取代。退役理由：那套流程要求管理员手工登 frps-panel 建号，
+  // 而那个面板的网页本身已经是坏的（HTML/i18n 链路 panic，根本打不开），
+  // 且人工审核不可能规模化。详见 docs/内网穿透租用化改造方案.md。
+
+  // ---- 内网穿透「租用化」用户端（2026-10-13）----
+  // 用户用积分为自己买/续 frp 使用时长。积分变动一律走 points.ts 的 applyPoints
+  // （原子 + 余额不足拒绝 + dedup 防重复提交），代码里不直接改余额。
   {
     kind: "exact",
-    path: "/frp",
+    path: "/frp/rental/plans",
     method: "GET",
     handle: () =>
-      frpHandlers.getFrpOverview(env, request),
+      frpRentalHandlers.listRentalPlans(env, request),
   },
 
   {
     kind: "exact",
-    path: "/frp/enable",
-    method: "POST",
-    handle: () =>
-      frpHandlers.enableFrp(env, request),
-  },
-
-  {
-    kind: "exact",
-    path: "/frp/disable",
-    method: "POST",
-    handle: () =>
-      frpHandlers.disableFrp(env, request),
-  },
-
-  {
-    kind: "exact",
-    path: "/frp/apply",
-    method: "POST",
-    handle: () =>
-      frpHandlers.applyFrp(env, request),
-  },
-
-  {
-    kind: "exact",
-    path: "/frp/cancel",
-    method: "POST",
-    handle: () =>
-      frpHandlers.cancelFrp(env, request),
-  },
-
-  {
-    kind: "exact",
-    path: "/admin/frp/applications",
+    path: "/frp/rental/mine",
     method: "GET",
     handle: () =>
-      frpHandlers.listFrpApplications(env, request),
+      frpRentalHandlers.listMyRentals(env, request),
   },
 
   {
     kind: "exact",
-    path: "/admin/frp/review",
+    path: "/frp/rental/purchase",
     method: "POST",
     handle: () =>
-      frpHandlers.reviewFrpApplication(env, request),
-  },
-
-  // 编辑一条待审核的申请（账号名/密码/端口/通知邮箱/备注）
-  {
-    kind: "regex",
-    match: (routePath: string) =>
-      routePath.match(/^\/admin\/frp\/applications\/([^/]+)$/),
-    methods: ["PUT"],
-    handle: (adminFrpAppMatch: RegExpMatchArray) =>
-      frpHandlers.updateFrpApplication(
-        env,
-        request,
-        decodeURIComponent(adminFrpAppMatch[1])
-      ),
+      frpRentalHandlers.purchaseRental(env, request),
   },
 
   {
     kind: "exact",
-    path: "/admin/frp/review-revoke",
+    path: "/frp/rental/renew",
     method: "POST",
     handle: () =>
-      frpHandlers.revokeFrpApplication(env, request),
+      frpRentalHandlers.renewRental(env, request),
   },
+
+  // ---- frp-agent 通道（服务器上的守护进程调用，非浏览器）----
+  // 鉴权不是会话而是共享密钥 + HMAC 签名，见 handlers/frp-agent.ts 的 requireAgent()。
+  // 之所以要有这两个端点：Cloudflare Worker 到不了 frps 服务器上的 frps-panel
+  // （实测裸 IP 被出网策略 403、走域名撞未备案），所以只能由服务器主动来拉。
+  {
+    kind: "exact",
+    path: "/frp/agent/desired",
+    method: "GET",
+    handle: () =>
+      frpAgentHandlers.getFrpAgentDesired(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/frp/agent/report",
+    method: "POST",
+    handle: () =>
+      frpAgentHandlers.reportFrpAgentState(env, request),
+  },
+
+  // ---- 管理端：人工审核申请的路由已随该流程一并退役（2026-10-13）----
+  // 原先这里有 /admin/frp/applications（列表）、/admin/frp/review（批准/拒绝）、
+  // PUT /admin/frp/applications/:id（改申请）、/admin/frp/review-revoke（撤销批准）。
+  // 现在管理端管的是「套餐 + 订阅」，见 handlers/frp-rental.ts 的那组 admin 路由。
 
   {
     kind: "exact",
@@ -3656,6 +3767,68 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       env,
       request,
       decodeURIComponent(adminFrpNodeMatch[1])
+      ),
+  },
+
+  // ---- 内网穿透「租用化」管理端 ----
+  // 这一层只写 D1（唯一真值），不调用面板：真正的落地由服务器上的 frp-agent
+  // 轮询后完成。所以管理端操作永远不受那台服务器抖动影响。
+  // 权限：frp.plans（套餐定价）/ frp.rentals（订阅管理）。
+  {
+    kind: "exact",
+    path: "/admin/frp/plans",
+    method: "GET",
+    handle: () =>
+      frpRentalHandlers.listFrpPlans(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/frp/plans",
+    method: "POST",
+    handle: () =>
+      frpRentalHandlers.upsertFrpPlan(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/frp\/plans\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (adminFrpPlanMatch: RegExpMatchArray) =>
+      frpRentalHandlers.deleteFrpPlan(
+        env,
+        request,
+        decodeURIComponent(adminFrpPlanMatch[1])
+      ),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/frp/subscriptions",
+    method: "GET",
+    handle: () =>
+      frpRentalHandlers.listFrpSubscriptions(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/frp/subscriptions",
+    method: "POST",
+    handle: () =>
+      frpRentalHandlers.createFrpSubscription(env, request),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/frp\/subscriptions\/([^/]+)$/),
+    methods: ["POST"],
+    handle: (adminFrpSubMatch: RegExpMatchArray) =>
+      frpRentalHandlers.updateFrpSubscription(
+        env,
+        request,
+        decodeURIComponent(adminFrpSubMatch[1])
       ),
   },
 
@@ -4055,6 +4228,15 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       ),
   },
 
+  // ---- 作品页面名（分享链接尾部，可自定义）：POST /lab/projects/:id/slug ----
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/lab\/projects\/([^/]+)\/slug$/),
+    methods: ["POST"],
+    handle: (labSlugMatch: RegExpMatchArray) =>
+      labHandlers.setProjectSlug(env, request, decodeURIComponent(labSlugMatch[1])),
+  },
+
   // ---- 作品封面上传 / 移除（走平台桶，key = lab-cover/<uid>/<pid>.<ext>）----
   {
     kind: "regex",
@@ -4287,6 +4469,90 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       request,
       decodeURIComponent(oauthClientMatch[1])
       ),
+  },
+
+  // ---- 造物典藏（游戏大厅）--------------------------------------------------
+  // 清单与「在线投资」的玩家侧接口。路径全部是固定路径 + body/query 传参，
+  // 不用 /xxx/:id —— check-api-paths.mjs 靠静态分析比对前后端路径，动态段容易误判。
+  {
+    kind: "exact",
+    path: "/collection/plugins",
+    method: "GET",
+    handle: () => collectionHandlers.listPlugins(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/collection/invest/state",
+    method: "GET",
+    handle: () => collectionHandlers.investState(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/collection/invest/claim-test",
+    method: "POST",
+    handle: () => collectionHandlers.investClaimTest(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/collection/invest/candles",
+    method: "GET",
+    handle: () => collectionHandlers.investCandles(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/collection/invest/open",
+    method: "POST",
+    handle: () => collectionHandlers.investOpen(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/collection/invest/close",
+    method: "POST",
+    handle: () => collectionHandlers.investClose(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/collection/invest/history",
+    method: "GET",
+    handle: () => collectionHandlers.investHistory(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/collection/invest/leaderboard",
+    method: "GET",
+    handle: () => collectionHandlers.investLeaderboard(env, request),
+  },
+
+  // ---- 典藏设置（管理端，权限节点 `collection`）----
+  {
+    kind: "exact",
+    path: "/admin/collection/invest",
+    method: "GET",
+    handle: () => collectionAdminHandlers.getGameAdmin(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/collection/invest",
+    method: "PUT",
+    handle: () => collectionAdminHandlers.updateGameAdmin(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/collection/invest/pool",
+    method: "POST",
+    handle: () => collectionAdminHandlers.setGamePool(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/collection/invest/ledger",
+    method: "GET",
+    handle: () => collectionAdminHandlers.getGameLedger(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/collection/invest/reset",
+    method: "POST",
+    handle: () => collectionAdminHandlers.resetGame(env, request),
   },
   ]
 }
@@ -4533,14 +4799,21 @@ export default {
         // 仅在「会话本身失效」时清除 cookie。
         // 注意不能用 status===401 一刀切：登录密码错误、修改密码时当前密码错误
         // 也是 401（INVALID_CREDENTIALS），清 cookie 会把正常用户踢下线。
+        //
+        // 🔴 2026-10-11 渗透测试 finding#15（CSRF 强制登出）：
+        // 还必须要求「请求**确实带了**会话 cookie」才下发清除指令。
+        // 否则任意第三方页面提交一个跨站表单（SameSite=Lax 不带 cookie）命中
+        // 401 就能让受害者浏览器把 doulor_session 清掉 —— 攻击者不需要知道
+        // 任何东西，只需让人打开一个页面即可把人踢下线。
+        // 判定用 tokens.length：带了 cookie 但已失效才是「真·会话过期」，
+        // 一个没带的请求根本没东西可清，下不下发清除指令都与它无关。
         if (
           err.status === 401 &&
           (err.code === "UNAUTHORIZED" || err.code === "SESSION_EXPIRED")
         ) {
           const tokens = getSessionTokens(request)
           // 浏览器可能同时持有多个同名 cookie，逐个下发清除指令
-          const count = Math.max(tokens.length, 1)
-          for (let i = 0; i < count; i++) {
+          for (let i = 0; i < tokens.length; i++) {
             res.headers.append("Set-Cookie", clearedSessionCookie())
           }
         }
@@ -4601,6 +4874,35 @@ export default {
           })
         )
       }
+      /**
+       * 造物典藏「在线投资」：行情推进 + 强平扫描。
+       *
+       * 这一条是**「没人在看的时候 K 线也在走」的唯一保证**。
+       * 玩家侧每次读行情也会推进（`advanceAndSweep`），但那必须先有人开页面；
+       * 没有这个 cron，深夜的行情会是一条横线，第二天打开看到一段空白。
+       *
+       * 为什么搭在每分钟的 tick 上而不是新开一条 cron：开销很小（一行行情表 +
+       * 一次按 status 索引的强平扫描），多一条触发器反而多一份配置漂移的风险
+       * （`controller.cron` 必须与 wrangler.toml 的 crons 一一对应）。
+       *
+       * 关掉游戏（game_enabled=0）时**直接返回**：既不推进行情也不强平 ——
+       * 关停期间不该有任何后台写入。⚠️ 但玩家仍可主动平仓（见 collection.ts），
+       * 不能把已经开仓的人锁死在里面。
+       */
+      ctx.waitUntil(
+        (async () => {
+          const gameParams = await loadGameParamsForCron(env)
+          if (!gameParams.enabled) return
+          const r = await advanceGameMarket(env, gameParams)
+          if (r.liquidated > 0) {
+            console.log("造物典藏：强平", r.liquidated, "个仓位")
+          }
+        })().catch((err) => {
+          // 兜底吞掉：这个 cron 同时还要跑到点发布，不能让游戏侧的问题
+          // 把整个 scheduled 处理器打断（那会让定时公告也不上线）
+          console.warn("造物典藏行情推进失败:", err)
+        })
+      )
       return
     }
 

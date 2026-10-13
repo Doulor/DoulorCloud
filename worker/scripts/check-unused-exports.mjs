@@ -128,15 +128,19 @@ const ENTRY = join(SRC, "index.ts")
  * 每条都必须说明**为什么现在不动它**。新增死代码不在本清单里 → CI 红。
  */
 const ALLOW = new Map([
-  // ---- 需要改 worker/src/index.ts / maintenance.ts（当前由另一 AI 占用）----
+  // ---- 已确认的真缺陷：功能写好了但没接线（2026-10-13 复核）----
+  //
+  // ⚠️ 这里原先写的理由是「当前由另一 AI 占用，待其合并后再清」。
+  //    现在没有人在改这些文件了，所以那些理由已失效 —— 下面改成了**事实本身**：
+  //    它们就是还没接线的缺陷。别再拿「有人在改」当延后处理的借口。
   [
     "src/handlers/analytics.ts::purgeExpiredAnalytics",
     "真实缺陷（审计 H13）：analytics_events 清理函数从未被调用，表无界增长。" +
-      "需要挂到 maintenance.ts 的定时任务上，而该文件当前由另一 AI 占用。",
+      "修法明确 —— 挂到 maintenance.ts 的定时任务上；未做只是因为还没排期。",
   ],
   [
     "src/link-preview.ts::purgeExpiredPreviews",
-    "同上（H13）：link_previews 的过期清理从未被调用。同样要改 maintenance.ts。",
+    "同上（H13）：link_previews 的过期清理从未被调用。同样要挂到 maintenance.ts。",
   ],
   [
     "src/handlers/community.ts::linkPreview",
@@ -146,21 +150,25 @@ const ALLOW = new Map([
   [
     "src/handlers/admin.ts::deleteInvite",
     "管理端「删除邀请码」的 handler 存在，但没有任何路由/界面调用它 ——" +
-      "管理员实际上无法撤销已发出的邀请码。文件当前由另一 AI 占用。",
+      "**管理员实际上无法撤销已发出的邀请码**。补一条路由 + 一个按钮即可，属于待排期。",
   ],
-  // ---- 另一 AI 正在改的文件（改它可能冲突）----
+  // ---- 未接线的功能（缺的不是代码，是产品决策）----
   [
     "src/donation-provision.ts::CHANNEL_TEST_HINT",
-    "另一 AI 正在改这个文件（捐献模型重试）。常量本身疑似死代码，待其合并后再清。",
+    "疑似死常量（同文件内有等价的内联实现）。无人在改这个文件了，可直接删 ——" +
+      "留在这是为了让「已复核过、确认无害」这件事有记录。",
   ],
   [
     "src/newapi-client.ts::requestEmailCode",
-    "同文件里 registerUser / generateAccessToken / extractVerificationCode 也未接线。" +
-      "该文件紧邻另一 AI 的捐献流程（NewAPI 建号），删除可能与其进行中的改动冲突，先保留。",
+    "**NewAPI 自助注册那条链没做完**：requestEmailCode / registerUser /" +
+      " generateAccessToken / extractVerificationCode 四个函数都写好了，但全仓无调用点 ——" +
+      "也就是说「补 email 完成自助注册」这条路目前走不通。" +
+      "（原先的理由是「该文件紧邻另一 AI 的捐献流程，删了怕冲突」；" +
+      " 现在没人在改它，理由换成事实：**这条链就是没接线**。）",
   ],
   [
     "src/newapi-client.ts::registerUser",
-    "同上：NewAPI 自助注册补 email 的调用链尚未接线。",
+    "同上：NewAPI 自助注册的调用链尚未接线。",
   ],
   [
     "src/newapi-client.ts::generateAccessToken",
@@ -176,7 +184,7 @@ const ALLOW = new Map([
   ],
   [
     "src/settings.ts::formatBytes",
-    "该文件由另一 AI 占用；且 worker 侧确实没有消费者（前端另有一份实现）。",
+    "worker 侧确实没有消费者（前端另有一份实现）。可删；留着仅为记录已复核。",
   ],
   // ---- 有意的对外/预留接口 ----
   [
@@ -193,6 +201,19 @@ const ALLOW = new Map([
     "名片特效的「画布类」子集常量，当前无调用点。" +
       "疑似与 EFFECTS 重复，需确认前端是否依赖它，暂保留。",
   ],
+  // ---- 2026-10-13 复核后新登记（内网穿透改造那一轮清掉了另外 6 项）----
+  [
+    "src/handlers/lab-search.ts::SEARCH_MAX_PER_TURN",
+    "**这是一个没被实施的保护**，不是单纯的死常量：" +
+      "注释写着「一次对话里最多能搜几次（防模型打转把额度刷光）」，" +
+      "但 `webSearch` 上没有任何计数/限流（整条路由连 guardRateLimit 都没挂）。" +
+      "之所以没有直接接上：服务端拿不到「一次对话」的边界（请求里没有会话 id），" +
+      "要限流就得先定窗口与超限行为（例如「每用户 60 秒 8 次、超了回 429」），" +
+      "那是产品决策，不该由改代码的人顺手定。**已如实记在这里，别当它已经生效。**",
+  ],
+  // 注：原先还登记过一个 `src/newapi-client.ts::adminSetUserGroup`，
+  // 2026-10-13 按站长要求连同函数本体一起删了 —— 那套「绑定后转进 0 倍率免费组」
+  // 的方案已作废（仓库里从来没有过「免费组」这个设置项）。
 ])
 
 const dead = []

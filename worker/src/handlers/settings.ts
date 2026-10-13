@@ -117,23 +117,44 @@ export async function verifyRealEmail(env: Env, request: Request): Promise<Respo
     if (!/^\d{6}$/.test(code)) {
       throw new ApiError(400, "请输入 6 位数字验证码", "INVALID_CODE")
     }
-    const row = await env.DB.prepare(
-      "SELECT code_hash, expires_at, attempts FROM email_verify_codes WHERE user_id = ?"
+    /**
+     * 🔴 2026-10-11 渗透测试 finding#16：原来是「SELECT 读 attempts → 判断 >=5
+     * → 比对失败才 UPDATE 自增」，三步非原子。并发打上来每个请求都读到旧值 0，
+     * 于是「最多 5 次」形同虚设（实测 8 并发错误码 8/8 全被接受）。
+     *
+     * 改成**一条语句完成「检查 + 占位」**：`WHERE attempts < 5` 与自增写在同一
+     * 条 UPDATE 里，D1/SQLite 保证它原子执行；拿得到行 = 这次尝试被计数了，
+     * 拿不到 = 已达上限（或压根没有码）。并发下最多 5 个请求能通过。
+     *
+     * ⚠️ 成功路径也会把这行 attempts 加 1，但成功后紧接着就删码（见下面 batch），
+     *    所以不影响；换来的是「判定与计数不可能被拆开」。
+     */
+    const bumped = await env.DB.prepare(
+      `UPDATE email_verify_codes
+          SET attempts = attempts + 1
+        WHERE user_id = ? AND attempts < 5
+      RETURNING code_hash, expires_at, attempts`
     )
       .bind(user.id)
       .first<{ code_hash: string; expires_at: string; attempts: number }>()
-    if (!row || new Date(row.expires_at).getTime() < Date.now()) {
-      throw new ApiError(400, "验证码已过期，请重新发送", "CODE_EXPIRED")
-    }
-    if (row.attempts >= 5) {
-      throw new ApiError(400, "尝试次数过多，请重新发送", "TOO_MANY_ATTEMPTS")
-    }
-    if ((await hashToken(code)) !== row.code_hash) {
-      await env.DB.prepare(
-        "UPDATE email_verify_codes SET attempts = attempts + 1 WHERE user_id = ?"
+
+    if (!bumped) {
+      // 区分「已超限」与「没有码/已过期」只为给出准确文案；
+      // 安全判定已经由上面那条 UPDATE 完成了。
+      const exists = await env.DB.prepare(
+        "SELECT 1 AS x FROM email_verify_codes WHERE user_id = ?"
       )
         .bind(user.id)
-        .run()
+        .first<{ x: number }>()
+      throw exists
+        ? new ApiError(400, "尝试次数过多，请重新发送", "TOO_MANY_ATTEMPTS")
+        : new ApiError(400, "验证码已过期，请重新发送", "CODE_EXPIRED")
+    }
+    if (new Date(bumped.expires_at).getTime() < Date.now()) {
+      throw new ApiError(400, "验证码已过期，请重新发送", "CODE_EXPIRED")
+    }
+    if ((await hashToken(code)) !== bumped.code_hash) {
+      // 计数已在上面那条原子 UPDATE 里加过了，这里不再写库
       throw new ApiError(400, "验证码错误", "INVALID_CODE")
     }
     const now = new Date().toISOString()
@@ -153,16 +174,37 @@ export async function verifyRealEmail(env: Env, request: Request): Promise<Respo
   }
 
   // 默认：发起验证（生成验证码 + 发信）
-  const last = user.email_verify_requested_at
-  if (last && Date.now() - new Date(last).getTime() < 60_000) {
-    const wait = Math.ceil(
-      (60_000 - (Date.now() - new Date(last).getTime())) / 1000
+  //
+  // 🔴 2026-10-11 渗透测试 finding#16(b)：60 秒发送冷却原来是「读时间戳 →
+  // 判断 → 写回」，并发下 8 个请求全部读到旧值 ⇒ 一次发出 8 封验证码邮件
+  // （实测 8/8 通过）。改成**条件 UPDATE 原子占位**：只有把窗口真正推进去的
+  // 那一个请求能拿到行，其余并发请求拿不到 ⇒ 冷却期内只可能发一封。
+  const now = new Date().toISOString()
+  const cooldownCutoff = new Date(Date.now() - 60_000).toISOString()
+  const slot = await env.DB.prepare(
+    `UPDATE users SET email_verify_requested_at = ?
+      WHERE id = ?
+        AND (email_verify_requested_at IS NULL OR email_verify_requested_at <= ?)
+    RETURNING email_verify_requested_at`
+  )
+    .bind(now, user.id, cooldownCutoff)
+    .first<{ email_verify_requested_at: string }>()
+
+  if (!slot) {
+    // 冷却中。读回上次时间**只为算等待秒数给文案**，不参与安全判定。
+    const cur = await env.DB.prepare(
+      "SELECT email_verify_requested_at FROM users WHERE id = ?"
     )
+      .bind(user.id)
+      .first<{ email_verify_requested_at: string | null }>()
+    const lastMs = cur?.email_verify_requested_at
+      ? new Date(cur.email_verify_requested_at).getTime()
+      : 0
+    const wait = Math.max(1, Math.ceil((60_000 - (Date.now() - lastMs)) / 1000))
     throw new ApiError(429, `请求过于频繁，请 ${wait} 秒后再试`, "RATE_LIMITED")
   }
 
   const code = generateVerifyCode()
-  const now = new Date().toISOString()
   const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString()
 
   // 存验证码（同一用户重新发起即覆盖旧码）
@@ -430,29 +472,45 @@ export async function changeRealEmail(env: Env, request: Request): Promise<Respo
     throw new ApiError(400, "请输入 6 位数字验证码", "INVALID_CODE")
   }
 
-  const row = await env.DB.prepare(
-    "SELECT email, code_hash, expires_at, attempts FROM email_change_codes WHERE user_id = ?"
+  /**
+   * 🔴 2026-10-11 渗透测试 finding#16（同族）：与 email/verify 一样，原来
+   * 是「读 attempts → 判断 → 失败才自增」的非原子序列，并发可击穿尝试上限。
+   * 合并成一条原子 UPDATE：把「码归属本次要改成的地址」与「还没到上限」
+   * 一起放进 WHERE，拿得到行 = 这次尝试已被计数。
+   *
+   * ⚠️ 地址比较必须用 LOWER()：JS 侧原来是 `row.email.toLowerCase() !== next`，
+   *    直接写 `email = ?` 在 SQLite 里是大小写敏感的，会把「大小写不同但同一地址」
+   *    误判成没请求过。
+   */
+  const bumped = await env.DB.prepare(
+    `UPDATE email_change_codes
+        SET attempts = attempts + 1
+      WHERE user_id = ? AND LOWER(email) = LOWER(?) AND attempts < ?
+    RETURNING code_hash, expires_at`
   )
-    .bind(user.id)
-    .first<{ email: string; code_hash: string; expires_at: string; attempts: number }>()
+    .bind(user.id, next, EMAIL_CHANGE_CODE_ATTEMPTS)
+    .first<{ code_hash: string; expires_at: string }>()
 
-  // 码必须是发给「这次要改成的那个地址」的：否则可以对 A 邮箱取码、拿 B 邮箱来换，
-  // 从而把一个自己无法收信的地址标成已验证。
-  if (!row || row.email.toLowerCase() !== next) {
-    throw new ApiError(400, "请先向该邮箱发送验证码", "CODE_NOT_REQUESTED")
-  }
-  if (new Date(row.expires_at).getTime() < Date.now()) {
-    throw new ApiError(400, "验证码已过期，请重新发送", "CODE_EXPIRED")
-  }
-  if (row.attempts >= EMAIL_CHANGE_CODE_ATTEMPTS) {
-    throw new ApiError(400, "尝试次数过多，请重新发送", "TOO_MANY_ATTEMPTS")
-  }
-  if ((await hashToken(code)) !== row.code_hash) {
-    await env.DB.prepare(
-      "UPDATE email_change_codes SET attempts = attempts + 1 WHERE user_id = ?"
+  if (!bumped) {
+    // 只为给出准确文案而回读；安全判定已由上面那条 UPDATE 完成
+    const cur = await env.DB.prepare(
+      "SELECT email, expires_at FROM email_change_codes WHERE user_id = ?"
     )
       .bind(user.id)
-      .run()
+      .first<{ email: string; expires_at: string }>()
+    if (!cur || cur.email.toLowerCase() !== next) {
+      throw new ApiError(400, "请先向该邮箱发送验证码", "CODE_NOT_REQUESTED")
+    }
+    if (new Date(cur.expires_at).getTime() < Date.now()) {
+      throw new ApiError(400, "验证码已过期，请重新发送", "CODE_EXPIRED")
+    }
+    throw new ApiError(400, "尝试次数过多，请重新发送", "TOO_MANY_ATTEMPTS")
+  }
+  if (new Date(bumped.expires_at).getTime() < Date.now()) {
+    throw new ApiError(400, "验证码已过期，请重新发送", "CODE_EXPIRED")
+  }
+  if ((await hashToken(code)) !== bumped.code_hash) {
+    // 计数已在上面那条原子 UPDATE 里加过，不再写库
     throw new ApiError(400, "验证码错误", "INVALID_CODE")
   }
 

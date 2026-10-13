@@ -38,6 +38,7 @@ import {
   normalizeRealm,
   q2CancelLogin,
   q2DeleteAccount,
+  q2ImportAccounts,
   q2ListAccounts,
   q2PollLogin,
   q2StartLogin,
@@ -89,18 +90,34 @@ async function requireAdminUser(env: Env, request: Request, permKey: string): Pr
   return admin as unknown as UserRow
 }
 
+/**
+ * 当前允许对接的版本（2026-10-10 站长要求：qoder 也要能自选国内版/国际版）。
+ *
+ * 与 `wb2api.ts::availableRealms` 同款：管理员可以把某一项关掉 ——
+ * 关掉的版本在捐献页隐藏、接口拒绝用它发起绑定。返回空数组 = 通道实际不可用。
+ */
+export async function availableRealms(env: Env): Promise<string[]> {
+  const out: string[] = []
+  if (await getSettingBool(env, "qoder2api_realm_cn")) out.push("cn")
+  if (await getSettingBool(env, "qoder2api_realm_intl")) out.push("intl")
+  return out
+}
+
 /** 读取通道开关、限额、以及要绑的区域（都在管理面板可改） */
 async function channelConfig(env: Env) {
   const enabled = (await getSetting(env, "qoder2api_enabled")) === "1"
   // 纯展示开关：与 enabled（通道总开关）区分开 —— 见 qoder2api_donation_visible 的注释
   const visible = await getSettingBool(env, "qoder2api_donation_visible")
   const limit = await getSettingNumber(env, "qoder2api_max_bindings")
+  // `realm` 自 2026-10-10 起退化为**默认选中项** —— 用户可在卡片上自选版本
   const realm = normalizeRealm(await getSetting(env, "qoder2api_realm"))
   return {
     enabled,
     visible,
-    limit: Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : 3,
+    limit: Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : 10,
     realm,
+    // 与 wb2api 的字段名保持一致，前端两张卡可以共用同一套渲染逻辑
+    availableRealms: await availableRealms(env),
   }
 }
 
@@ -160,7 +177,7 @@ function mapUpstreamError(err: unknown): never {
 /** GET /api/qoder2api/status —— 通道状态 + 当前用户的绑定列表 */
 export async function getStatus(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  const { enabled, limit, realm } = await channelConfig(env)
+  const { enabled, limit, realm, availableRealms: realms } = await channelConfig(env)
   const configured = await isQoder2ApiConfigured(env)
 
   const rows = await env.DB.prepare(
@@ -178,10 +195,189 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
     limit,
     used,
     remaining: Math.max(0, limit - used),
-    /** 当前配置要绑的区域（前端展示用） */
+    /** 默认选中的区域（前端展示用） */
     realm,
+    /** 允许用户自选的版本（管理员可关掉其中一项；空数组 = 通道实际不可用） */
+    availableRealms: realms,
     bindings: bindings.map(toPublicBinding),
   })
+}
+
+/**
+ * POST /api/qoder2api/import —— 上传 JSON（账号数组）导入网关并建绑定。
+ *
+ * 用途与 wb 侧完全对称：手里已有导出的账号 JSON 时，不必再走一遍授权登录。
+ * 网关侧 `POST /accounts/import` 直接收数组；版本（cn/intl）由表单里的 `realm` 决定，
+ * 必须落在管理员开放的两个开关之内。
+ *
+ * ⚠️ 建绑定这段与 `pollLogin` 里的逻辑是**同一口径**（aiGranted 判定 + 原子写权限 + 审计 + 奖励）。
+ *    之所以没抽成共用函数：poll 里那段还夹着「墓碑复活」与「被他人占用」两个分支，
+ *    抽出来的收益不如风险。**改一处必须改两处。**
+ */
+export async function importQoder2ApiAccounts(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  await guardRateLimit(env, `qoder2api:import:user:${user.id}`, 5, 3600, "导入过于频繁，请稍后再试")
+
+  const { enabled, limit, realm: defaultRealm, availableRealms: realms } = await channelConfig(env)
+  if (!enabled) {
+    throw new ApiError(403, "Qoder2API 账号捐献通道已关闭", "QODER2API_DISABLED")
+  }
+  if (!(await isQoder2ApiConfigured(env))) {
+    throw new ApiError(503, "Qoder2API 网关未配置面板密码，请联系管理员", "QODER2API_NOT_CONFIGURED")
+  }
+  if (realms.length === 0) {
+    throw new ApiError(403, "Qoder2API 通道暂未开放任何版本", "QODER2API_DISABLED")
+  }
+
+  const form = await request.formData().catch(() => null)
+  const file = form?.get("file")
+  if (!(file instanceof File)) {
+    throw new ApiError(400, "请选择要上传的 JSON 文件", "INVALID_INPUT")
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    throw new ApiError(400, "文件过大（上限 5 MB）", "FILE_TOO_LARGE")
+  }
+
+  const raw = await file.text()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new ApiError(400, "文件不是合法的 JSON", "INVALID_JSON")
+  }
+  // 网关接受「数组」或「{data: [...]}」两种形态，这里都认
+  const rows = Array.isArray(parsed) ? parsed : (parsed as { data?: unknown })?.data
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new ApiError(
+      400,
+      "文件里没有账号 —— 需要一个 JSON 数组，或 { data: [...] }",
+      "INVALID_JSON"
+    )
+  }
+
+  // 版本：表单里可选（用户在卡片上选的），否则用管理员设的默认
+  const picked = normalizeRealm(String(form?.get("realm") ?? ""))
+  if (picked && !realms.includes(picked)) {
+    throw new ApiError(400, "该版本当前不可用，请换一个", "REALM_NOT_AVAILABLE")
+  }
+  const chosen = picked ?? (realms.includes(defaultRealm) ? defaultRealm : realms[0])
+
+  // 先进网关池
+  await q2ImportAccounts(env, rows as unknown[], chosen)
+
+  // 再建站内绑定（解析 uid 与 poll 同一字段口径）
+  const uidOf = (r: unknown): string => {
+    const o = r as Record<string, unknown> | null
+    return String(o?.uid ?? o?.id ?? "").trim()
+  }
+  const uids = Array.from(new Set((rows as unknown[]).map(uidOf).filter((u) => u.length > 0)))
+  if (uids.length === 0) {
+    throw new ApiError(400, "文件里没有可用的账号（缺少 uid 字段）", "INVALID_JSON")
+  }
+
+  const now = new Date().toISOString()
+  const ackIp = clientIp(request)
+  const used = await activeBindingCount(env, user.id)
+  let room = Math.max(0, limit - used)
+
+  const aiGranted =
+    (await getSettingBool(env, "donation_grant_qoder2api")) &&
+    !parsePermissions(user.permissions).ai
+  let granted = false
+
+  let bound = 0
+  const alreadyMine: string[] = []
+  const skippedByLimit: string[] = []
+
+  for (const uid of uids) {
+    const existing = await env.DB.prepare(
+      "SELECT id, user_id, status FROM qoder2api_bindings WHERE account_id = ?"
+    )
+      .bind(uid)
+      .first<{ id: string; user_id: string; status: string }>()
+
+    if (existing?.user_id === user.id) {
+      if (existing.status === "active") {
+        alreadyMine.push(uid)
+        continue
+      }
+      // 自己的墓碑：复活它（与 poll 里「重复登录」同一处理）
+      await env.DB.prepare(
+        `UPDATE qoder2api_bindings
+            SET status = 'active', removed_at = NULL, removed_by = NULL,
+                realm = ?, nickname = ?
+          WHERE id = ?`
+      )
+        .bind(chosen, nicknameOf(rows, uid, uidOf), existing.id)
+        .run()
+      bound++
+      continue
+    }
+    if (existing) continue // 被别人绑着，跳过（正常不会发生）
+
+    if (room <= 0) {
+      skippedByLimit.push(uid)
+      continue
+    }
+
+    const grant = aiGranted && !granted
+    await env.DB.prepare(
+      `INSERT INTO qoder2api_bindings
+         (id, user_id, account_id, realm, nickname, status,
+          granted_ai_permission, acknowledged_ip, created_at)
+       VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`
+    )
+      .bind(uuid(), user.id, uid, chosen, nicknameOf(rows, uid, uidOf), grant ? 1 : 0, ackIp, now)
+      .run()
+
+    if (grant) {
+      granted = true
+      await env.DB.prepare(
+        `UPDATE users SET permissions = ${featurePermissionSql("ai", true)}, updated_at = ? WHERE id = ?`
+      )
+        .bind(now, user.id)
+        .run()
+    }
+    bound++
+    room--
+  }
+
+  await audit(
+    env,
+    user.id,
+    "qoder2api.import",
+    `通过 JSON 文件导入绑定 ${bound} 个 Qoder2API 账号（${chosen}）` +
+      (granted ? "（已解锁 AI 中转站权限）" : "")
+  )
+
+  // 只有真的绑上了才发奖励（与 wb 侧导入同一取舍）
+  if (bound > 0) {
+    await grantDonationReward(env, {
+      userId: user.id,
+      kind: "qoder",
+      dedupKey: `qoder2api:import:${uuid()}`,
+      detail: "Qoder2API 账号捐献奖励（JSON 导入）",
+    })
+  }
+
+  return json({
+    ok: true,
+    total: uids.length,
+    bound,
+    alreadyBound: alreadyMine,
+    skippedByLimit,
+    limit,
+    realm: chosen,
+  })
+}
+
+/** 从上传的行里取昵称（`nickname` / `email` 都认） */
+function nicknameOf(rows: unknown[], uid: string, uidOf: (r: unknown) => string): string | null {
+  const row = rows.find((r) => uidOf(r) === uid) as Record<string, unknown> | undefined
+  return String(row?.nickname ?? row?.email ?? "").trim() || null
 }
 
 /**
@@ -204,10 +400,24 @@ export async function loginStart(env: Env, request: Request): Promise<Response> 
     )
   }
 
-  const { enabled, limit, realm } = await channelConfig(env)
+  const { enabled, limit, realm, availableRealms: realms } = await channelConfig(env)
   if (!enabled) {
     throw new ApiError(403, "Qoder2API 账号捐献通道已关闭", "QODER2API_DISABLED")
   }
+  if (realms.length === 0) {
+    throw new ApiError(403, "Qoder2API 通道暂未开放任何版本", "QODER2API_DISABLED")
+  }
+
+  /**
+   * 用户自选版本（2026-10-10 起，与 wb2api 同款）：
+   * 传了合法值就用它，但**必须在管理员开放的那几项里**（关掉的版本在接口层直接拒，
+   * 前端隐藏只是顺手）；没传或传了非法值 → 回落到管理员设的默认（`qoder2api_realm`）。
+   */
+  const chosen = normalizeRealm((body as { realm?: unknown }).realm)
+  if (chosen && !realms.includes(chosen)) {
+    throw new ApiError(400, "该版本当前不可用，请换一个", "REALM_NOT_AVAILABLE")
+  }
+  const useRealm = chosen ?? (realms.includes(realm) ? realm : realms[0])
   if (!(await isQoder2ApiConfigured(env))) {
     throw new ApiError(503, "Qoder2API 网关未配置面板密码，请联系管理员", "QODER2API_NOT_CONFIGURED")
   }
@@ -227,7 +437,7 @@ export async function loginStart(env: Env, request: Request): Promise<Response> 
 
   let started: { state: string; authUrl: string; realm: Qoder2ApiRealm }
   try {
-    started = await q2StartLogin(env, realm)
+    started = await q2StartLogin(env, useRealm)
   } catch (err) {
     mapUpstreamError(err)
   }

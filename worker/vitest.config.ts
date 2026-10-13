@@ -32,6 +32,10 @@ export default defineConfig(async () => {
             NEWAPI_ADMIN_TOKEN: "test-env-admin-token-1234",
             NEWAPI_ADMIN_USER_ID: "1",
             SESSION_SECRET: "test-session-secret-for-unit-tests",
+            // 内网穿透 agent 通道的共享密钥（见 handlers/frp-agent.ts）。
+            // 那条通道不走会话鉴权而是靠 HMAC 签名，所以测试里必须真的绑一个值 ——
+            // 否则所有 agent 端点都会走「未配置 → 503」那一支，签名校验逻辑根本测不到。
+            FRP_AGENT_SECRET: "test-frp-agent-secret-1234",
             // WorkBuddy 反代网关：模拟「密钥来自 Worker Secret」的回落路径
             // （库内无行时用 env）。地址取 app_settings.wb2api_base_url 的默认值，
             // 测试按该前缀打桩出站请求。

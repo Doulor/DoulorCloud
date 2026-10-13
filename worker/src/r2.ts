@@ -337,6 +337,145 @@ export async function pickBucketForNewUser(
   return best ? { id: best.id, quotaPerUser: best.quota_per_user } : null
 }
 
+/**
+ * 该账号**可能**存放文件的桶，**主桶优先**（2026-10-12 网盘跨桶改造）。
+ *
+ * ## 为什么需要
+ *
+ * 改前一个账号的所有文件都写在他开通时分到的那**一个**桶里（`storage_accounts.bucket_id`），
+ * 桶满就只能报错拒传。改后是「**文件级跨桶**」—— 主桶写满后，新文件会落到下一个还有
+ * 空间的桶。于是**所有**「找这个 key / 扫这个前缀」的操作都不能再假定只在一个桶里。
+ *
+ * ## 顺序
+ *
+ * 把主桶（`preferredId`）排第一，其余按 `sort_order` —— 这是按**命中概率**排的：
+ * 没溢出过的账号第一次就命中，只有真溢出过（主桶满了之后又传过东西）的账号才多查几个桶。
+ * 桶数量级很小（个位数），所以这点开销可以忽略。
+ *
+ * 返回**空数组**表示没配任何启用的用户桶 ⇒ 调用方按老语义回落到 env 默认桶。
+ */
+export async function candidateBucketIds(
+  env: Env,
+  preferredId?: string | null
+): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    "SELECT id FROM r2_buckets WHERE enabled = 1 AND kind = 'user' ORDER BY sort_order ASC, created_at ASC"
+  ).all<{ id: string }>()
+  const ids = (rows.results ?? []).map((r) => r.id)
+  if (preferredId && ids.includes(preferredId)) {
+    return [preferredId, ...ids.filter((i) => i !== preferredId)]
+  }
+  return ids
+}
+
+/**
+ * 跨桶找这个 key 落在哪个桶；都不在返回 `null`。
+ *
+ * 读 / 写前判断「这个文件有没有、在哪个桶」统一走这里（改前是直接 `headObject(key, 主桶)`
+ * —— 一旦账号溢出过，就会在主桶里「查不到」，把已有文件误判成新文件）。
+ */
+export async function findKeyBucket(
+  env: Env,
+  key: string,
+  preferredId?: string | null
+): Promise<string | null> {
+  for (const id of await candidateBucketIds(env, preferredId)) {
+    const head = await headObject(env, key, id)
+    if (head) return id
+  }
+  return null
+}
+
+/**
+ * 为一次**写入**挑桶：**装得下这次增量、且剩余最多**的那个。
+ *
+ * 与 `pickBucketForNewUser` 同一口径（共享池模型：桶剩余 = `capacity_bytes` − 该桶所有
+ * 账号 `used_bytes` 之和），区别是这里要**校验本次的增量 `delta` 装得下** ——
+ * 光看「剩余 > 0」不够：传一个 2GB 的文件不能塞进只剩 1MB 的桶。
+ *
+ * ## 返回 null 的两种含义（调用方按各自的老语义处理）
+ *
+ * · **没配任何用户桶** ⇒ 回落 env 默认桶（与改前一致）；
+ * · **有桶但一个都装不下** ⇒ 这里**仍返回剩余最多的那个**，交给调用方的桶容量守卫
+ *   `assertBucketHasRoom()` 去抛「存储桶已满」—— 保持错误语义与改前完全一致
+ *   （改前是「主桶满 ⇒ 报错」，现在是「所有桶都满 ⇒ 报错」）。
+ *
+ * `preferredId` 在剩余量**相同**时优先：让同一账号的文件尽量聚在少数几个桶里，
+ * 读的时候命中更快。
+ */
+export async function pickBucketForWrite(
+  env: Env,
+  delta: number,
+  preferredId?: string | null
+): Promise<string | null> {
+  const buckets = await env.DB.prepare(
+    "SELECT * FROM r2_buckets WHERE enabled = 1 AND kind = 'user' ORDER BY sort_order ASC, created_at ASC"
+  ).all<R2BucketRow>()
+  const list = buckets.results ?? []
+  if (list.length === 0) return null
+
+  // 一次查清各桶已用字节数，避免 N 次往返
+  const usedRes = await env.DB.prepare(
+    `SELECT bucket_id, COALESCE(SUM(used_bytes), 0) AS bytes FROM storage_accounts
+      WHERE bucket_id IS NOT NULL GROUP BY bucket_id`
+  ).all<{ bucket_id: string; bytes: number }>()
+  const usedMap = new Map((usedRes.results ?? []).map((r) => [r.bucket_id, r.bytes]))
+
+  let best: string | null = null // 装得下 delta 的、剩余最多的
+  let bestFree = -1
+  let fallback: string | null = null // 所有桶都装不下时，剩余最多的那个
+  let fallbackFree = -1
+  for (const b of list) {
+    const free = (b.capacity_bytes ?? 0) - (usedMap.get(b.id) ?? 0)
+    if (free > fallbackFree || (free === fallbackFree && b.id === preferredId)) {
+      fallback = b.id
+      fallbackFree = free
+    }
+    if (free < delta) continue
+    if (free > bestFree || (free === bestFree && b.id === preferredId)) {
+      best = b.id
+      bestFree = free
+    }
+  }
+  return best ?? fallback
+}
+
+/**
+ * 跨桶删除单个 key（2026-10-12 跨桶改造）。
+ *
+ * 先找它在哪个桶再删；**都不在就返回 `false`** —— 调用方按幂等处理
+ * （删一个本来就不存在的文件不该报错，与改前 `deleteObject` 的语义一致）。
+ */
+export async function deleteObjectAcrossBuckets(
+  env: Env,
+  key: string,
+  preferredId?: string | null
+): Promise<boolean> {
+  const bucketId = await findKeyBucket(env, key, preferredId)
+  if (!bucketId) return false
+  await deleteObject(env, key, bucketId)
+  return true
+}
+
+/**
+ * 跨桶删除一个前缀下的对象（目录级清理 / 注销账号清盘）。
+ *
+ * **每个可能的桶都扫一遍再删** —— 跨桶后同一个用户前缀下的东西可能散在多个桶里。
+ * 返回累计删除的对象数。
+ */
+export async function deletePrefixAcrossBuckets(
+  env: Env,
+  prefix: string,
+  preferredId?: string | null,
+  limitPerBucket = 60
+): Promise<number> {
+  let removed = 0
+  for (const bucketId of await candidateBucketIds(env, preferredId)) {
+    removed += await deletePrefix(env, prefix, limitPerBucket, bucketId)
+  }
+  return removed
+}
+
 // ---- 基础工具 ----
 
 const encoder = new TextEncoder()

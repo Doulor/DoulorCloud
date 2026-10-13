@@ -395,6 +395,32 @@ export async function wb2RemoveAccount(env: Env, uid: string): Promise<void> {
   }
 }
 
+export interface Wb2ImportResult {
+  total?: number
+  imported?: number
+  skipped?: number
+  errors?: string[]
+}
+
+/**
+ * 上传一份 cockpit tools 导出的 JSON，批量导入账号到网关池。
+ *
+ * 网关接口：`POST /panel/api/import/cockpit`，`multipart/form-data`，字段名 `file`。
+ * ⚠️ 返回里**只有计数、没有 uid 列表** —— 调用方要自己从上传的 JSON 里解析 uid
+ *（cockpit 格式的字段名就是 `uid`），否则建不出绑定。
+ */
+export async function wb2ImportCockpit(
+  env: Env,
+  jsonText: string
+): Promise<Wb2ImportResult> {
+  const form = new FormData()
+  form.append("file", new Blob([jsonText], { type: "application/json" }), "accounts.json")
+  return await wb2Fetch<Wb2ImportResult>(env, "/panel/api/import/cockpit", {
+    method: "POST",
+    body: form,
+  })
+}
+
 export interface Wb2PoolOverview {
   total: number
   healthy: number
@@ -405,6 +431,16 @@ export interface Wb2PoolOverview {
     nickname?: string
     realm?: string
     credits?: number
+    /**
+     * 2026-10-10：网关把「上游判定需要重新登录」的账号标为 disabled
+     *（例如 `11140 request illegal` → "account banned by upstream …, re-login required"）。
+     * 这类账号要通知捐献者重新登录，否则他一直以为自己贡献有效。
+     */
+    disabled?: boolean
+    /** 仅 disabled 的账号有：禁用原因（运维可见，含原始错误码） */
+    disabled_reason?: string
+    /** 运维临时让位（与 disabled 正交，不影响账号健康） */
+    paused?: boolean
   }[]
 }
 

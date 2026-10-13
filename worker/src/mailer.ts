@@ -59,9 +59,10 @@ function mapSendError(err: unknown): ApiError {
   return new ApiError(502, `邮件发送失败：${message}`, "MAIL_SEND_FAILED")
 }
 
-export function isMailerConfigured(env: Env): boolean {
-  return Boolean(env.EMAIL)
-}
+// 这里原本有一个 `isMailerConfigured(env)`（= `Boolean(env.EMAIL)`），已删除：
+// 无调用点，而且它想表达的那件事在真正发信的地方**已经做了** ——
+// `sendViaCf` 在 `!env.EMAIL` 时直接抛一个带修复指引的 ApiError。
+// 多留一个「能不能发信」的并行判断，只会让人误以为发信路径会先去问它。
 
 /** 通过 Cloudflare Email Routing（send_email 绑定）发信 —— 只能发已验证 destination */
 async function sendViaCf(env: Env, input: SendMailInput): Promise<void> {

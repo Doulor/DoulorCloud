@@ -136,7 +136,7 @@ async function checkDonation(
  * 禁用某用户的若干模块权限（并联动 NewAPI）。返回还原快照（显式 JSON）。
  * 若目标模块本来就没开（或用户不存在），返回 null = 无需禁用、也无需还原。
  */
-async function restrictUserFeatures(
+export async function restrictUserFeatures(
   env: Env,
   userId: string,
   features: string[]
@@ -188,7 +188,7 @@ async function restrictUserFeatures(
 }
 
 /** 还原权限 + 重新启用 NewAPI（满足门槛后确认收到 / 撤回时调用） */
-async function restoreUserFeatures(env: Env, notice: NoticeRow): Promise<void> {
+export async function restoreUserFeatures(env: Env, notice: NoticeRow): Promise<void> {
   if (notice.restore_permissions) {
     // ⚠️ 2026-10-07 修复：原实现是「把 permissions 整串覆盖回快照」。
     //

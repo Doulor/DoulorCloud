@@ -103,4 +103,15 @@ export interface Env {
   QODER2API_PANEL_PASSWORD?: string
   /** 网关站点地址的 env 兜底（正常走 app_settings.qoder2api_base_url） */
   QODER2API_BASE_URL?: string
+
+  /**
+   * 内网穿透 agent 的共享密钥（2026-10-13）。
+   *
+   * 服务器上的 frp-agent 用它给 `/api/frp/agent/*` 的请求做 HMAC-SHA256 签名。
+   * **未配置时该通道整体 503 关闭**，不会退化成公开接口。
+   *
+   * 为什么不用会话鉴权：调用方是服务器上的守护进程，没有 cookie，也不该有用户身份。
+   * 见 handlers/frp-agent.ts 的 requireAgent()。
+   */
+  FRP_AGENT_SECRET?: string
 }

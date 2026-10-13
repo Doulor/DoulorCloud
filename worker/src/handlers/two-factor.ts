@@ -392,6 +392,14 @@ export async function startTotpSetup(env: Env, request: Request): Promise<Respon
   const user = await requireUser(env, request)
   await guardRateLimit(env, `2fa-setup:${user.id}`, 10, 60, "操作过于频繁")
 
+  // 账号已有 2FA 时，「重新配置 TOTP」等于把第二因子换成另一台设备
+  // ⇒ 必须先证明是本人（否则偷到会话的人就能把受害者的认证器顶掉）。
+  const body = (await request.json().catch(() => ({}))) as {
+    code?: string
+    challengeId?: string
+  }
+  await assertTwoFactorStepUp(env, user.id, body, "any")
+
   const secret = generateTotpSecret()
   const enc = await encryptSecret(secret, requireSecret(env))
   const now = new Date().toISOString()
@@ -474,6 +482,14 @@ async function regenerateRecoveryCodesFor(env: Env, userId: string): Promise<str
 export async function regenerateRecoveryCodes(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
   await guardRateLimit(env, `2fa-rec:${user.id}`, 5, 60, "操作过于频繁")
+
+  // 恢复码是能绕过全部 2FA 的最强凭据 ⇒ 重发之前必须证明是本人
+  const body = (await request.json().catch(() => ({}))) as {
+    code?: string
+    challengeId?: string
+  }
+  await assertTwoFactorStepUp(env, user.id, body, "any")
+
   // 🔴 2FA 没开时禁止发恢复码：恢复码只是已开启方式的自救手段，
   // 单独发一堆只会留下「幽灵恢复码」（它们不拦登录，但会让人以为 2FA 还开着）
   const state = await loadTwoFactorState(env, user.id)
@@ -488,8 +504,19 @@ export async function regenerateRecoveryCodes(env: Env, request: Request): Promi
 /** POST /api/settings/2fa/email {enabled} —— 开关邮箱验证方式 */
 export async function setEmailTwoFactor(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  const body = (await request.json().catch(() => ({}))) as { enabled?: boolean }
+  const body = (await request.json().catch(() => ({}))) as {
+    enabled?: boolean
+    code?: string
+    challengeId?: string
+  }
   const enabled = Boolean(body.enabled)
+
+  /**
+   * 二次验证（站长 2026-10-10 定的口径）：
+   *   · 关闭邮箱方式 ⇒ 只认**邮箱验证码**（或恢复码）——「关哪个验哪个」；
+   *   · 开启邮箱方式 ⇒ 账号已有别的 2FA 时认任一已开启方式；账号本来没开 ⇒ 放行（首次加固）。
+   */
+  await assertTwoFactorStepUp(env, user.id, body, enabled ? "any" : "email")
 
   // 开启前必须邮箱已验证 —— 否则码会发到一个不属于他的地址，等于没验
   if (enabled && user.email_verified !== 1) {
@@ -546,6 +573,81 @@ export async function setEmailTwoFactor(env: Env, request: Request): Promise<Res
 }
 
 /**
+ * 变更 2FA 设置前的「重新认证」（2026-10-10 渗透测试 finding#8/#9，
+ * 规则由站长当场定死）。
+ *
+ * 站长原话：「关 TOTP 需要验证**已开启的二次验证方式** —— 我只开了邮箱验证，
+ * 关闭就只需要验证当前方式；只开了 TOTP 就只能 TOTP 或恢复码；两个都开了，
+ * 要关闭哪个就验证哪个。」
+ *
+ * 落成三档 target：
+ *   · `"totp"`  —— 只能 TOTP 动态码（**或**恢复码）。用于关闭 TOTP。
+ *   · `"email"` —— 只能邮箱验证码（**或**恢复码）。用于关闭邮箱验证。
+ *   · `"any"`   —— 已开启的任一方式都行。用于「开启新方式」「重生成恢复码」
+ *                 「关闭全部」这类**不对应某一个具体方式**的操作。
+ *
+ * 恢复码三档都放行：它本来就是「所有方式的最后退路」，少这一条会让
+ * 丢了认证器的人被彻底锁死（10-04 ventus 那次就是被这个坑到的）。
+ *
+ * ⚠️ 账号**当前还没有任何 2FA** 时直接放行 —— 此时没有「已开启的方式」可验，
+ * 而这是从「无」到「有」的加固方向，不构成「拆锁」。
+ */
+async function assertTwoFactorStepUp(
+  env: Env,
+  userId: string,
+  input: { code?: unknown; challengeId?: unknown },
+  target: "totp" | "email" | "any"
+): Promise<void> {
+  const state = await loadTwoFactorState(env, userId)
+  if (!state.enabled) return
+
+  const code = String(input.code ?? "").trim()
+  if (!code) {
+    throw new ApiError(400, "请输入当前可用的验证码", "INVALID_INPUT")
+  }
+
+  const viaTotp = target === "email" ? false : await verifyUserTotp(env, userId, code)
+  const viaEmail =
+    target === "totp" || !input.challengeId
+      ? false
+      : await verifyEmailCode(env, String(input.challengeId), code)
+  const viaRecovery = await verifyRecoveryCode(env, userId, code)
+
+  if (!(viaTotp || viaEmail || viaRecovery)) {
+    throw new ApiError(400, "验证码不正确", "INVALID_CODE")
+  }
+}
+
+/**
+ * POST /api/settings/2fa/step-up/send —— 把「二次验证码」发到用户邮箱。
+ *
+ * 为什么需要它：登录流程用的那套邮箱码（`login_challenges` + `login_email_codes`）
+ * 本来就是现成的，但它只在**登录**链路上被触发；已经登录的用户想改 2FA 设置时，
+ * 没有一个「请把码发到我邮箱」的入口。这里复用同一套机制（挑战 + 发码 + 校验），
+ * 不新造轮子。
+ *
+ * 只有「账号已开启邮箱验证方式」才有意义 —— 否则发出去的码没人认。
+ */
+export async function sendTwoFactorStepUpCode(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const state = await loadTwoFactorState(env, user.id)
+  if (!state.emailEnabled) {
+    throw new ApiError(
+      400,
+      "当前没有开启「邮箱验证」方式，无法用邮箱验证码确认",
+      "EMAIL_2FA_OFF"
+    )
+  }
+  // 复用登录挑战：只装 "email" 一种方式，作为一次性的二次验证凭据
+  const challenge = await createLoginChallenge(env, user, ["email"], request)
+  await issueEmailCode(env, challenge.id, user.id)
+  return json({ challengeId: challenge.id, expiresAt: challenge.expiresAt })
+}
+
+/**
  * POST /api/settings/2fa/disable {code} —— 关掉全部 2FA。
  *
  * ⚠️ 必须**先验一个当前有效的码**才能关：否则谁拿到一个没锁屏的浏览器，
@@ -561,15 +663,14 @@ export async function disableTwoFactor(env: Env, request: Request): Promise<Resp
       "FORBIDDEN"
     )
   }
-  const body = (await request.json().catch(() => ({}))) as { code?: string }
-  const code = String(body.code ?? "").trim()
-  if (!code) throw new ApiError(400, "请输入当前的验证码", "INVALID_INPUT")
-
-  // 任意一种当前有效的方式都算证明
-  const ok =
-    (await verifyUserTotp(env, user.id, code)) ||
-    (await verifyRecoveryCode(env, user.id, code))
-  if (!ok) throw new ApiError(400, "验证码不正确", "INVALID_CODE")
+  const body = (await request.json().catch(() => ({}))) as {
+    code?: string
+    challengeId?: string
+  }
+  // 任意一种当前有效的**已开启方式**都算证明。
+  // ⚠️ 2026-10-10 起这里也接受邮箱验证码：原来只认 TOTP/恢复码，
+  // 导致「只开了邮箱验证」的用户**关不掉全部**（10-04 ventus 那次问题的根源）。
+  await assertTwoFactorStepUp(env, user.id, body, "any")
 
   await env.DB.batch([
     env.DB.prepare(`DELETE FROM user_2fa WHERE user_id = ?`).bind(user.id),
@@ -596,6 +697,24 @@ export async function disableTotp(env: Env, request: Request): Promise<Response>
       "FORBIDDEN"
     )
   }
+
+  /**
+   * 🔴 关 TOTP 必须验 **TOTP 动态码或恢复码**（站长 2026-10-10 定的口径：
+   * 「只开了 TOTP 就只能 TOTP 或恢复码」）。
+   *
+   * 2026-10-10 渗透测试 finding#9 实测：这个端点原来**只凭会话 cookie 就能调用**，
+   * 于是「拿到 cookie → 静默拆掉第二因子 → 靠口令长期登录」这条接管链成立 ——
+   * 2FA 的实际强度被拉平到会话 cookie。
+   *
+   * ⚠️ 这里**不收邮箱验证码**（那是「关邮箱」该用的），但**收恢复码** ——
+   * 恢复码是给所有方式兜底的最后退路，丢了认证器的人不至于被锁死。
+   */
+  const body = (await request.json().catch(() => ({}))) as {
+    code?: string
+    challengeId?: string
+  }
+  await assertTwoFactorStepUp(env, user.id, body, "totp")
+
   const now = new Date().toISOString()
   await env.DB.batch([
     env.DB.prepare(

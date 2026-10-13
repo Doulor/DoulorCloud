@@ -74,6 +74,36 @@ const SKIP_DIRS = new Set([
 export const LOCAL_IMPORT_MAX_FILES = 60
 export const LOCAL_IMPORT_MAX_BYTES = 2_000_000
 export const LOCAL_IMPORT_MAX_FILE_BYTES = 400_000
+/**
+ * 素材（二进制图片）的扩展名与**单独的体积上限**。
+ *
+ * 为什么单独限额：图片要转成 data URL 存进项目（体积 ×1.37），
+ * 用文本文件那个 400KB 上限会撑爆 3MB 的总预算；而且单张图本来也不需要那么大。
+ */
+export const LOCAL_IMPORT_MAX_IMAGE_FILE_BYTES = 260_000
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|ico|avif|bmp)$/i
+const IMAGE_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  ico: "image/x-icon",
+  avif: "image/avif",
+  bmp: "image/bmp",
+}
+
+/** 把二进制文件读成 data URL（分块，避免 String.fromCharCode 参数过多爆栈） */
+async function fileToDataUrl(file: File): Promise<string> {
+  const ext = (file.name.split(".").pop() ?? "").toLowerCase()
+  const mime = IMAGE_MIME[ext] ?? "application/octet-stream"
+  const buf = new Uint8Array(await file.arrayBuffer())
+  let bin = ""
+  for (let i = 0; i < buf.length; i += 0x8000) {
+    bin += String.fromCharCode(...buf.subarray(i, i + 0x8000))
+  }
+  return `data:${mime};base64,${btoa(bin)}`
+}
 
 async function walk(
   dir: DirHandle,
@@ -87,13 +117,30 @@ async function walk(
     if (name.startsWith(".") || SKIP_DIRS.has(name)) continue
 
     if (handle.kind === "file") {
-      if (!TEXT_EXT_RE.test(name)) continue
       const file = await handle.getFile()
-      if (file.size > LOCAL_IMPORT_MAX_FILE_BYTES) continue
-      const text = await file.text()
-      if (budget.bytes + text.length > LOCAL_IMPORT_MAX_BYTES) return
-      out[prefix + name] = text
-      budget.bytes += text.length
+      // 文本：按原样读入
+      if (TEXT_EXT_RE.test(name)) {
+        if (file.size > LOCAL_IMPORT_MAX_FILE_BYTES) continue
+        const text = await file.text()
+        if (budget.bytes + text.length > LOCAL_IMPORT_MAX_BYTES) return
+        out[prefix + name] = text
+        budget.bytes += text.length
+        continue
+      }
+      /**
+       * 图片：转成 data URL 存进**同一个文件表**。
+       *
+       * ⚠️ 为什么不另开二进制通道：项目文件表本来就是 `Record<路径, 字符串>`，
+       *    正文甚至直接放在 R2 里 —— 图片编码成 data URL 就能全程复用现有管线
+       *    （保存 / 预览 / 导出 / 发布都不用改），预览与导出时由 inlineAssets 内联进 HTML。
+       */
+      if (IMAGE_EXT_RE.test(name)) {
+        if (file.size > LOCAL_IMPORT_MAX_IMAGE_FILE_BYTES) continue
+        const dataUrl = await fileToDataUrl(file)
+        if (budget.bytes + dataUrl.length > LOCAL_IMPORT_MAX_BYTES) return
+        out[prefix + name] = dataUrl
+        budget.bytes += dataUrl.length
+      }
     } else {
       await walk(handle, `${prefix}${name}/`, out, budget)
     }

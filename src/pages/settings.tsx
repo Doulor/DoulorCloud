@@ -24,6 +24,7 @@ import { MessageNotifyCard } from "@/components/message-notify-card"
 import { TwoFactorCard } from "@/components/two-factor-card"
 import { ApiSettingsCard } from "@/components/api-settings-card"
 import { OAuthAppsCard } from "@/components/oauth-apps-card"
+import { OAuthEndpointsCard } from "@/components/oauth-endpoints"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -784,6 +785,12 @@ export default function SettingsPage() {
         {/* 公开 API：Key 管理 + 层级额度 + 接口文档 */}
         {show("api") && (
         <ApiSettingsCard />
+        )}
+
+        {/* OAuth 接入信息：对方站点（如 NewAPI）要填的端点地址 —— 与用户建应用在同一处，
+            信息本身和服务端常量一致，不涉及任何密钥，用户自助接站点时照着填即可 */}
+        {show("api") && (
+        <OAuthEndpointsCard />
         )}
 
         {/* 我创建的 OAuth 应用：把「用 Doulor Cloud 登录」接到自己的站点 */}

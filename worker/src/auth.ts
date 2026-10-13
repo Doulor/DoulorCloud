@@ -119,6 +119,22 @@ const EMAIL_VERIFY_REQUIRED_PREFIXES: readonly string[] = [
   "/community/posts", // 社区发帖 / 评论 / 点赞（只读 GET 不受影响）
   "/profile/domain", //  名片绑定的自定义域名
   "/profile/asset", //   名片资源上传（占 R2）
+  // ---- 2026-10-10 渗透测试 finding#7 补漏 ----
+  // 下面这几个端点同样是「往平台 R2 写文件 / 铸凭证」，却没进这份白名单，
+  // 于是未验证邮箱的低权账号可以照常写平台桶（平台桶是网盘/头像/名片/社区图
+  // /分享箱共用的同一个物理桶）、甚至铸出 API Key。口径与既有的
+  // `/storage`、`/community/posts` 完全一致：未验证邮箱只能用**只读**功能。
+  // ⚠️ 前缀匹配会连带覆盖子路径（如 `/lab/projects/:id`），这是想要的；
+  // 只读方法（GET/HEAD/OPTIONS）本来就在上面直接放行，所以不会挡住「查看」。
+  "/lab/projects", //     AI 实验室作品的云端保存（写 R2）
+  "/stickers", //         贴纸 / 表情（写 R2）
+  "/feedback/upload-image", // 反馈截图（写 R2）—— 刻意只锁上传，不锁「提交反馈」本身
+  "/oauth/my-clients", // 自建 OAuth 客户端（铸凭证）
+  // ⚠️ 2026-10-11 补：上面四项来自 finding#7 的清单，但漏了同一份报告点名的
+  // 「铸出 API Key」端点 —— 未验证邮箱仍能 POST /api/api-key。
+  // 铸出来的 key 虽然会被 apiGate 的邮箱门挡住（那层已修），但凭证据本身还能
+  // 被铸出、占用 key 名额，口径上就该和 /oauth/my-clients 一致。
+  "/api-key", //          API Key（铸凭证）
 ]
 
 /** 只读方法一律放行 —— 「可以进页面」就是靠这条兜住的 */

@@ -209,7 +209,11 @@ describe("frp 捐献（服务端信息）", () => {
     expect(res.status).toBe(201)
     expect(body.status).toBe("pending")
     expect(body.autoReviewed).toBe(true) // 自动校验跑过，但结论是「转人工」
-    expect((await permsOf(user.id)).frp).toBe(false) // 不自动解锁
+    // 不自动解锁：frp 已移出权限体系（内网穿透改成积分租用），
+    // 所以「解锁」这件事本身不存在了 —— 这里钉的是**捐献没有顺带把别的权限打开**。
+    const perms = await permsOf(user.id)
+    expect(Object.keys(perms)).not.toContain("frp")
+    expect(perms.r2).toBe(true) // 默认权限未被动过
     // 不自动建节点（建节点在管理员批准时才做）
     const nodes = await env.DB.prepare("SELECT COUNT(*) c FROM frp_nodes").first<{ c: number }>()
     expect(nodes?.c).toBe(0)

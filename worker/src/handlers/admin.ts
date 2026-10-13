@@ -38,6 +38,7 @@ import { likeContains } from "../sql-like"
 import { normalizePermissions, parsePermissions, FEATURES, type Permissions } from "../permissions"
 import { normalizeEmailDomains } from "../email-domains"
 import { normalizeCheckinMilestones } from "../checkin-config"
+import { normalizeUrlBlocklist } from "../donation-url-blocklist"
 import {
   validateNicknameFormat,
   isReservedNickname,
@@ -2132,6 +2133,19 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
     // 与注册侧读取用的是**同一份实现** —— 两边分家就会出现「存进去的一个都匹配不上」。
     if (key === "register_email_domains") {
       values[key] = normalizeEmailDomains(String(raw))
+      continue
+    }
+
+    // donation_url_blocklist：自定义 AI 渠道捐献的 baseUrl 黑名单；**空串 = 不启用**（合法值）。
+    // ⚠️ 必须单独处理，两个原因：
+    //   1. 通用兜底会把字符串截断到 100 字符 —— 名单很容易超过（一条域名就 ~20 字符），
+    //      截断后表现为「后面几条填了却拦不住」；
+    //   2. 通用分支在 `str === ""` 处 continue，空串会被当成「不修改」，
+    //      管理员清空名单后永远清不掉（同 open_features 那批的坑）。
+    // 归一化（拆条 / 剥协议 / 小写 / 去重 / 退掉末尾 /v1）统一放在 donation-url-blocklist.ts，
+    // 与捐献提交侧的读取用**同一份实现** —— 两边分家就会出现「存进去的一个都匹配不上」。
+    if (key === "donation_url_blocklist") {
+      values[key] = normalizeUrlBlocklist(String(raw))
       continue
     }
 

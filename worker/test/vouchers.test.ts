@@ -195,20 +195,20 @@ describe("GET /api/vouchers", () => {
 
   it("返回我持有的「码」与模块选项（带是否已拥有）", async () => {
     const user = await makeUser()
-    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
     await seedVoucher({ owner: user.id, feature: null })
-    await seedVoucher({ owner: user.id, feature: "frp" })
+    await seedVoucher({ owner: user.id, feature: "proxy" })
     // 我创建的、还没用过的邀请码也应当出现在同一个列表里（码是同一种东西）
     const myInvite = await seedInvite({
       createdBy: user.id,
-      permissions: { r2: false, ai: true, frp: false, proxy: false },
+      permissions: { r2: false, ai: true, proxy: false },
     })
     // 别人的券不该出现
     const other = await makeUser()
     await seedVoucher({ owner: other.id, feature: "ai" })
     await seedInvite({
       createdBy: other.id,
-      permissions: { frp: true },
+      permissions: { proxy: true },
     })
 
     const res = await fetchSelf(authRequest(user, "/vouchers"))
@@ -224,27 +224,27 @@ describe("GET /api/vouchers", () => {
     expect(inviteCode?.code).toBe(myInvite)
     expect(inviteCode?.features).toEqual(["ai"])
     expect(body.features.find((f) => f.key === "r2")?.owned).toBe(true)
-    expect(body.features.find((f) => f.key === "frp")?.owned).toBe(false)
+    expect(body.features.find((f) => f.key === "proxy")?.owned).toBe(false)
   })
 })
 
 describe("兑换自选券", () => {
   it("选一个未拥有的模块 → 开通成功", async () => {
     const user = await makeUser()
-    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
     const code = await seedVoucher({ owner: user.id, feature: null })
 
-    const { res, body } = await redeem(user, code, "frp")
+    const { res, body } = await redeem(user, code, "proxy")
     expect(res.status).toBe(200)
-    expect(body.granted).toEqual(["frp"])
-    expect((await permsOf(user.id)).frp).toBe(true)
+    expect(body.granted).toEqual(["proxy"])
+    expect((await permsOf(user.id)).proxy).toBe(true)
     // 只开这一个，别的不动
     expect((await permsOf(user.id)).ai).toBe(false)
   })
 
   it("不选模块 → 400 FEATURE_REQUIRED", async () => {
     const user = await makeUser()
-    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
     const code = await seedVoucher({ owner: user.id, feature: null })
     const { res, body } = await redeem(user, code)
     expect(res.status).toBe(400)
@@ -253,7 +253,7 @@ describe("兑换自选券", () => {
 
   it("选一个已经拥有的模块 → 400，且券还在", async () => {
     const user = await makeUser()
-    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
     const code = await seedVoucher({ owner: user.id, feature: null })
 
     const { res, body } = await redeem(user, code, "r2")
@@ -268,10 +268,10 @@ describe("兑换自选券", () => {
 
   it("一张券只能用一次", async () => {
     const user = await makeUser()
-    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
     const code = await seedVoucher({ owner: user.id, feature: null })
 
-    expect((await redeem(user, code, "frp")).res.status).toBe(200)
+    expect((await redeem(user, code, "proxy")).res.status).toBe(200)
     const again = await redeem(user, code, "ai")
     expect(again.res.status).toBe(409)
     expect(again.body.code).toBe("ALREADY_USED")
@@ -280,8 +280,8 @@ describe("兑换自选券", () => {
   it("不是发给我的券不能替我用（transferable=0）", async () => {
     const me = await makeUser()
     const other = await makeUser()
-    await setPermissions(me.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
-    const code = await seedVoucher({ owner: other.id, feature: "frp" })
+    await setPermissions(me.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
+    const code = await seedVoucher({ owner: other.id, feature: "proxy" })
 
     const { res, body } = await redeem(me, code)
     expect(res.status).toBe(403)
@@ -291,12 +291,12 @@ describe("兑换自选券", () => {
   it("可转送的券别人能用", async () => {
     const me = await makeUser()
     const other = await makeUser()
-    await setPermissions(me.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
-    const code = await seedVoucher({ owner: other.id, feature: "frp", transferable: true })
+    await setPermissions(me.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
+    const code = await seedVoucher({ owner: other.id, feature: "proxy", transferable: true })
 
     const { res } = await redeem(me, code)
     expect(res.status).toBe(200)
-    expect((await permsOf(me.id)).frp).toBe(true)
+    expect((await permsOf(me.id)).proxy).toBe(true)
   })
 })
 
@@ -312,14 +312,12 @@ describe("首捐券可兑换的模块（管理面板设置）", () => {
     expect([...parseFirstDonationFeatures(null)].sort()).toEqual([
       "ai",
       "doulor",
-      "frp",
       "proxy",
       "r2",
     ])
     expect([...parseFirstDonationFeatures(undefined)].sort()).toEqual([
       "ai",
       "doulor",
-      "frp",
       "proxy",
       "r2",
     ])
@@ -338,9 +336,9 @@ describe("首捐券可兑换的模块（管理面板设置）", () => {
 
   it("范围外的模块被拒（400），且券不会被消耗", async () => {
     const user = await makeUser()
-    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
     const code = await seedVoucher({ owner: user.id, feature: null, source: "first_donation" })
-    await setSetting("first_donation_voucher_features", "frp")
+    await setSetting("first_donation_voucher_features", "proxy")
 
     const { res, body } = await redeem(user, code, "ai")
     expect(res.status).toBe(400)
@@ -356,30 +354,30 @@ describe("首捐券可兑换的模块（管理面板设置）", () => {
 
   it("范围内的模块正常开通", async () => {
     const user = await makeUser()
-    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
     const code = await seedVoucher({ owner: user.id, feature: null, source: "first_donation" })
-    await setSetting("first_donation_voucher_features", "frp")
+    await setSetting("first_donation_voucher_features", "proxy")
 
-    const { res, body } = await redeem(user, code, "frp")
+    const { res, body } = await redeem(user, code, "proxy")
     expect(res.status).toBe(200)
-    expect(body.granted).toEqual(["frp"])
-    expect((await permsOf(user.id)).frp).toBe(true)
+    expect(body.granted).toEqual(["proxy"])
+    expect((await permsOf(user.id)).proxy).toBe(true)
   })
 
   it("全部关掉 → 任何模块都换不了", async () => {
     const user = await makeUser()
-    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
     const code = await seedVoucher({ owner: user.id, feature: null, source: "first_donation" })
     await setSetting("first_donation_voucher_features", "")
 
-    const { res, body } = await redeem(user, code, "frp")
+    const { res, body } = await redeem(user, code, "proxy")
     expect(res.status).toBe(400)
     expect(body.code).toBe("FEATURE_NOT_ALLOWED")
   })
 
   it("只约束首捐券：别的来源的自选券不受影响", async () => {
     const user = await makeUser()
-    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
     // seedVoucher 不传 source 时默认是 "admin"
     const code = await seedVoucher({ owner: user.id, feature: null })
     await setSetting("first_donation_voucher_features", "")
@@ -392,7 +390,7 @@ describe("首捐券可兑换的模块（管理面板设置）", () => {
   it("只约束首捐券：别人给的邀请码能带什么权限与它无关", async () => {
     const owner = await makeUser()
     const me = await makeUser()
-    await setPermissions(me.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    await setPermissions(me.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
     const code = await seedInvite({ createdBy: owner.id, permissions: { ai: true } })
     await setSetting("first_donation_voucher_features", "")
 
@@ -403,16 +401,17 @@ describe("首捐券可兑换的模块（管理面板设置）", () => {
 
   it("GET /api/vouchers 会把 allowed 一起下发", async () => {
     const user = await makeUser()
-    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
-    await setSetting("first_donation_voucher_features", "r2,frp")
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
+    await setSetting("first_donation_voucher_features", "r2,proxy")
 
     const res = await fetchSelf(authRequest(user, "/vouchers"))
     expect(res.status).toBe(200)
     const body = await res.json<{ features: { key: string; allowed: boolean }[] }>()
-    expect(body.features.find((f) => f.key === "frp")?.allowed).toBe(true)
+    expect(body.features.find((f) => f.key === "proxy")?.allowed).toBe(true)
     expect(body.features.find((f) => f.key === "r2")?.allowed).toBe(true)
     expect(body.features.find((f) => f.key === "ai")?.allowed).toBe(false)
-    expect(body.features.find((f) => f.key === "proxy")?.allowed).toBe(false)
+    // 设置里没列、用户也没有的模块一律 false（原先是 frp，frp 已移出权限体系）
+    expect(body.features.find((f) => f.key === "doulor")?.allowed).toBe(false)
   })
 })
 
@@ -420,27 +419,28 @@ describe("用邀请码补权限", () => {
   it("别人给的、带模块权限的邀请码 → 补齐我缺的那些", async () => {
     const owner = await makeUser()
     const me = await makeUser()
-    await setPermissions(me.id, JSON.stringify({ r2: true, ai: true, frp: false, proxy: false }))
+    await setPermissions(me.id, JSON.stringify({ r2: true, ai: true, proxy: false }))
     const code = await seedInvite({
       createdBy: owner.id,
-      permissions: { r2: true, ai: true, frp: true, proxy: false },
+      permissions: { r2: true, ai: true, proxy: true },
     })
 
     const { res, body } = await redeem(me, code)
     expect(res.status).toBe(200)
-    expect(body.granted).toEqual(["frp"]) // r2/ai 已有 → 跳过
+    expect(body.granted).toEqual(["proxy"]) // r2/ai 已有 → 跳过
     const after = await permsOf(me.id)
-    expect(after.frp).toBe(true)
-    expect(after.proxy).toBe(false)
+    expect(after.proxy).toBe(true)
+    // 码里没写的模块不能被顺带开通（原先是 frp，frp 已移出权限体系）
+    expect(after.doulor).toBe(false)
   })
 
   it("用完会消耗该邀请码一次使用次数", async () => {
     const owner = await makeUser()
     const me = await makeUser()
-    await setPermissions(me.id, JSON.stringify({ r2: true, ai: true, frp: false, proxy: false }))
+    await setPermissions(me.id, JSON.stringify({ r2: true, ai: true, proxy: false }))
     const code = await seedInvite({
       createdBy: owner.id,
-      permissions: { frp: true },
+      permissions: { proxy: true },
       maxUses: 1,
     })
 
@@ -452,20 +452,20 @@ describe("用邀请码补权限", () => {
 
     // 已被用满 → 再兑就找不到了
     const other = await makeUser()
-    await setPermissions(other.id, JSON.stringify({ frp: false }))
+    await setPermissions(other.id, JSON.stringify({ proxy: false }))
     const second = await redeem(other, code)
     expect(second.res.status).toBe(404)
   })
 
   it("自己创建的邀请码也能给自己用（码是同一种东西）", async () => {
     const me = await makeUser()
-    await setPermissions(me.id, JSON.stringify({ r2: true, ai: true, frp: false, proxy: false }))
-    const code = await seedInvite({ createdBy: me.id, permissions: { frp: true } })
+    await setPermissions(me.id, JSON.stringify({ r2: true, ai: true, proxy: false }))
+    const code = await seedInvite({ createdBy: me.id, permissions: { proxy: true } })
 
     const { res, body } = await redeem(me, code)
     expect(res.status).toBe(200)
-    expect(body.granted).toEqual(["frp"])
-    expect((await permsOf(me.id)).frp).toBe(true)
+    expect(body.granted).toEqual(["proxy"])
+    expect((await permsOf(me.id)).proxy).toBe(true)
 
     // 自用后该码被消耗，删除时不会退还额度（used_count > 0）⇒ 不存在额度循环
     const row = await env.DB.prepare("SELECT used_count FROM invite_codes WHERE code = ?")
@@ -477,11 +477,11 @@ describe("用邀请码补权限", () => {
   it("码里的权限我都已拥有 → 400 且不消耗次数", async () => {
     const owner = await makeUser()
     const me = await makeUser()
-    await setPermissions(me.id, JSON.stringify({ r2: true, ai: true, frp: true, proxy: false }))
+    await setPermissions(me.id, JSON.stringify({ r2: true, ai: true, proxy: true }))
     // 码里所有键都显式写出（真实创建路径就是这么写的）
     const code = await seedInvite({
       createdBy: owner.id,
-      permissions: { r2: false, ai: false, frp: true, proxy: false },
+      permissions: { r2: false, ai: false, proxy: true },
     })
 
     const { res, body } = await redeem(me, code)
@@ -496,18 +496,19 @@ describe("用邀请码补权限", () => {
   it("只按码里**显式写着 true** 的键授权，缺的键不算（不能膨胀成全部权限）", async () => {
     const owner = await makeUser()
     const me = await makeUser()
-    await setPermissions(me.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
-    // 只写 frp：不能用 parsePermissions 那套「缺失 = 允许」的兜底，
+    await setPermissions(me.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
+    // 只写 proxy：不能用 parsePermissions 那套「缺失 = 允许」的兜底，
     // 否则这张码会变成「四个模块全给」
-    const code = await seedInvite({ createdBy: owner.id, permissions: { frp: true } })
+    const code = await seedInvite({ createdBy: owner.id, permissions: { proxy: true } })
 
     const { res, body } = await redeem(me, code)
     expect(res.status).toBe(200)
-    expect(body.granted).toEqual(["frp"])
+    expect(body.granted).toEqual(["proxy"])
     const after = await permsOf(me.id)
-    expect(after.frp).toBe(true)
+    expect(after.proxy).toBe(true)
     expect(after.ai).toBe(false)
-    expect(after.proxy).toBe(false)
+    // 码里没写的模块不能被顺带开通（原先是 frp，frp 已移出权限体系）
+    expect(after.doulor).toBe(false)
   })
 
   it("不存在的码 → 404", async () => {
@@ -532,7 +533,7 @@ describe("兑换接口的鉴权", () => {
 
   it("兑换码大小写不敏感", async () => {
     const user = await makeUser()
-    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }))
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
     const code = await seedVoucher({ owner: user.id, feature: "ai" })
     const { res } = await redeem(user, code.toLowerCase())
     expect(res.status).toBe(200)
@@ -562,7 +563,7 @@ describe("授予 ai 时启用中转站账号", () => {
     const user = await makeUser()
     await setPermissions(
       user.id,
-      JSON.stringify({ r2: false, ai: false, frp: false, proxy: false })
+      JSON.stringify({ r2: false, ai: false, proxy: false })
     )
     await seedAccount(user.id, 9101, user.username)
 
@@ -577,7 +578,7 @@ describe("授予 ai 时启用中转站账号", () => {
     const user = await makeUser()
     await setPermissions(
       user.id,
-      JSON.stringify({ r2: false, ai: false, frp: false, proxy: false })
+      JSON.stringify({ r2: false, ai: false, proxy: false })
     )
 
     const code = await seedVoucher({ owner: user.id, feature: "ai" })
@@ -591,7 +592,7 @@ describe("授予 ai 时启用中转站账号", () => {
     const user = await makeUser()
     await setPermissions(
       user.id,
-      JSON.stringify({ r2: false, ai: false, frp: false, proxy: false })
+      JSON.stringify({ r2: false, ai: false, proxy: false })
     )
     await seedAccount(user.id, 9102, user.username)
 

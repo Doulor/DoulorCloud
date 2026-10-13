@@ -181,7 +181,15 @@ async function visibleSubscriptions(
   const offset = Math.max(opts?.offset ?? 0, 0)
   const rows = await env.DB.prepare(
     // offline（过时）的订阅源排最后，其余按 sort_order + 创建时间（2026-10-03 站长要求）
-    "SELECT * FROM proxy_subscriptions WHERE enabled = 1 ORDER BY (status = 'offline') ASC, sort_order ASC, created_at ASC LIMIT ? OFFSET ?"
+    `SELECT * FROM proxy_subscriptions
+      WHERE enabled = 1
+      ORDER BY (status = 'offline') ASC,
+               -- 2026-10-10：探活结论接进排序 —— 实测连得上的节点多的排前面，
+               -- 否则「订阅站能打开、但节点全是死的」那种会一直霸着第一位。
+               (SELECT COUNT(*) FROM proxy_node_health h
+                 WHERE h.subscription_id = proxy_subscriptions.id AND h.status = 'up') DESC,
+               sort_order ASC, created_at ASC
+      LIMIT ? OFFSET ?`
   ).bind(limit, offset).all<ProxySubscriptionRow>()
   return rows.results ?? []
 }
@@ -1421,8 +1429,20 @@ export async function syncProxySubscriptionStatuses(
  * 想立刻得到某个订阅源的结论，用户/管理员点一下「测速」即可 ——
  * 那条路径（testProxyNodeLatency）与本函数共用同一套判定与落库逻辑。
  */
-export const PROBE_MAX_SUBSCRIPTIONS_PER_RUN = 6
-export const PROBE_MAX_NODES_PER_SUBSCRIPTION = 20
+/**
+ * 每轮探活的预算（2026-10-10 调整）。
+ *
+ * 🔴 原来 `6 订阅 × 20 节点 = 120 次握手/轮`，而线上已有 **230 个订阅** ——
+ * 每轮只能覆盖 6 个（一天 144 个订阅次），于是「探活看似没生效」：
+ * 实测库里只有 **25/230** 个订阅被探过，其余永远排不上队，
+ * 也就永远拿不到健康度、排不到后面去。
+ *
+ * 改成 `20 订阅 × 6 节点 = 120 次握手/轮`：**总成本完全不变**，
+ * 但每轮覆盖的**订阅数翻 3.3 倍**。节点侧只取前 6 个足够回答
+ * 「这个源整体还能不能用」——反正健康度是给排序用的，不需要逐个精确。
+ */
+export const PROBE_MAX_SUBSCRIPTIONS_PER_RUN = 20
+export const PROBE_MAX_NODES_PER_SUBSCRIPTION = 6
 
 /** 单次 cron 里同时探几个订阅源（每个源内部还会再并发，别把两个数字乘起来超过 6） */
 const PROBE_SUBSCRIPTION_CONCURRENCY = 2

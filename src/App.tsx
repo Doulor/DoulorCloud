@@ -50,6 +50,13 @@ const CommunityPage = page("/dashboard/community", () => import("@/pages/communi
 const ToolboxPage = page("/dashboard/toolbox", () => import("@/pages/toolbox"))
 const LabPage = page("/dashboard/lab", () => import("@/pages/lab"))
 const GalleryPage = page("/dashboard/gallery", () => import("@/pages/gallery"))
+// 造物典藏（游戏大厅）：一个插件宿主 + 每个游戏自己的全屏界面。
+// ⚠️ 只登记大厅这一条路径：`page()` 是按路径注册预载项的，同一前缀下多登记会互相覆盖
+//    （与下面 ToolboxDetailPage 同理）。游戏页与设置页都是「点了大厅之后才可能进」，
+//    那时它们的 chunk 按需加载即可，不必预载。
+const CollectionPage = page("/dashboard/gallery/collection", () => import("@/pages/collection"))
+const CollectionPluginPage = React.lazy(() => import("@/pages/collection-plugin"))
+const CollectionSettingsPage = React.lazy(() => import("@/pages/collection-settings"))
 // 工具详情页挂在 /dashboard/toolbox 之下，不单独登记（同前缀会互相覆盖注册项）：
 // 用户是先进列表、再点某个工具，那时 ToolboxPage 早已加载，详情按需加载即可。
 const ToolboxDetailPage = React.lazy(() => import("@/pages/toolbox-detail"))
@@ -215,7 +222,16 @@ function AppRoutes() {
         <Route path="community/:id" element={<CommunityPage inDashboard />} />
         <Route path="toolbox" element={<ToolboxPage />} />
         <Route path="lab" element={<LabPage />} />
+        {/* 造物集：展示大厅 / 我的造物集（?view=mine）在同一个页面里切换视图 */}
         <Route path="gallery" element={<GalleryPage />} />
+        {/*
+          造物典藏（游戏大厅 · 插件宿主）。
+          ⚠️ `settings` 必须能被静态段优先匹配到（React Router 的排序规则保证：
+             静态段 > 动态段），所以它写在 `:slug` 前面只是书写可读性，不依赖顺序。
+        */}
+        <Route path="gallery/collection" element={<CollectionPage />} />
+        <Route path="gallery/collection/settings" element={<CollectionSettingsPage />} />
+        <Route path="gallery/collection/:slug" element={<CollectionPluginPage />} />
         <Route path="toolbox/:toolId" element={<ToolboxDetailPage />} />
         <Route path="chat" element={<ChatPage />} />
         <Route path="achievements" element={<AchievementsPage />} />

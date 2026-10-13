@@ -153,15 +153,15 @@ describe("consumeQuotaForInvite 的并发原子性（M1）", () => {
       used: 0,
       bonus: 100,
       // ai 有额度、frp 没有 —— 整笔必须失败，ai 也不能被扣
-      featureQuota: JSON.stringify({ ai: 5, frp: 0 }),
-      featureUsed: JSON.stringify({ ai: 0, frp: 0 }),
+      featureQuota: JSON.stringify({ ai: 5, proxy: 0 }),
+      featureUsed: JSON.stringify({ ai: 0, proxy: 0 }),
     })
 
-    await expect(consumeQuotaForInvite(env, u.id, ["ai", "frp"])).rejects.toThrow()
+    await expect(consumeQuotaForInvite(env, u.id, ["ai", "proxy"])).rejects.toThrow()
 
     const row = await rawRow(u.id)
     expect(row?.invite_quota_used).toBe(0)
-    expect(JSON.parse(row?.feature_quota_used ?? "{}")).toEqual({ ai: 0, frp: 0 })
+    expect(JSON.parse(row?.feature_quota_used ?? "{}")).toEqual({ ai: 0, proxy: 0 })
   })
 })
 
@@ -236,17 +236,17 @@ describe("发放与退还都是相对运算（M1 的另一半）", () => {
     const u = await makeUser()
     await setQuota(u.id, {
       used: 0,
-      featureUsed: JSON.stringify({ r2: 0, ai: 0, frp: 0, proxy: 0 }),
+      featureUsed: JSON.stringify({ r2: 0, ai: 0, proxy: 0 }),
     })
 
-    await refundQuotaForInvite(env, u.id, ["r2", "ai", "frp", "proxy"])
+    await refundQuotaForInvite(env, u.id, ["r2", "ai", "proxy"])
 
     const row = await rawRow(u.id)
     expect(row?.invite_quota_used).toBe(0)
     expect(JSON.parse(row?.feature_quota_used ?? "{}")).toEqual({
       r2: 0,
       ai: 0,
-      frp: 0,
+      proxy: 0,
       proxy: 0,
     })
   })
@@ -264,8 +264,8 @@ describe("quotaFeaturesFromStored：退还必须保守（L25）", () => {
 
   it("只认明确写着 true 的模块", () => {
     expect(
-      quotaFeaturesFromStored(JSON.stringify({ r2: true, ai: false, frp: true }))
-    ).toEqual(["r2", "frp"])
+      quotaFeaturesFromStored(JSON.stringify({ r2: true, ai: false, proxy: true }))
+    ).toEqual(["r2", "proxy"])
     // 非布尔真值不算（老数据里可能有 1 / "true"）
     expect(quotaFeaturesFromStored(JSON.stringify({ r2: 1, ai: "true" }))).toEqual([])
   })
@@ -281,7 +281,7 @@ describe("quotaFeaturesFromStored：退还必须保守（L25）", () => {
       .run()
     await setQuota(u.id, {
       used: 2,
-      featureUsed: JSON.stringify({ r2: 1, ai: 1, frp: 1, proxy: 1 }),
+      featureUsed: JSON.stringify({ r2: 1, ai: 1, proxy: 1 }),
     })
 
     const res = await fetchSelf(
@@ -296,7 +296,7 @@ describe("quotaFeaturesFromStored：退还必须保守（L25）", () => {
     expect(JSON.parse(row?.feature_quota_used ?? "{}")).toEqual({
       r2: 1,
       ai: 1,
-      frp: 1,
+      proxy: 1,
       proxy: 1,
     })
   })

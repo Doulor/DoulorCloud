@@ -26,21 +26,31 @@ function normalizePath(p: string): string {
  * 那些是 CDN，内联不了（也不该替用户去下载）。
  * 找不到的文件也留着原样：宁可导出后缺一个文件，也不要静默删掉引用。
  */
-export function buildSingleFileHtml(files: Record<string, string>): string {
-  const entry =
-    files["index.html"] ??
-    Object.keys(files).find((p) => p.toLowerCase().endsWith(".html")) ??
-    null
-  if (!entry) return ""
+import { inlineAssets } from "./lab-agent"
 
-  const dir = entry.includes("/") ? entry.slice(0, entry.lastIndexOf("/") + 1) : ""
+export function buildSingleFileHtml(files: Record<string, string>): string {
+  /**
+   * ⚠️ 这里要挑的是**路径**，不是**正文**。
+   *
+   * 原来写的是 `files["index.html"] ?? …` —— 拿到的是 index.html 的**正文**，
+   * 紧接着 `files[entry]` 必然是 undefined，于是「导出单文件」**一直是崩的**
+   * （TypeError: Cannot read properties of undefined (reading 'replace')）。
+   * 2026-10-11 用真实代码跑断言时暴露，已修：只挑路径，正文另取。
+   */
+  const paths = Object.keys(files)
+  const entryPath = paths.includes("index.html")
+    ? "index.html"
+    : (paths.find((p) => p.toLowerCase().endsWith(".html")) ?? null)
+  if (!entryPath) return ""
+
+  const dir = entryPath.includes("/") ? entryPath.slice(0, entryPath.lastIndexOf("/") + 1) : ""
   const resolve = (href: string): string | null => {
     if (/^(https?:)?\/\//i.test(href) || href.startsWith("data:")) return null
     const clean = normalizePath(href.replace(/^\.\//, ""))
     return files[clean] ?? files[dir + clean] ?? null
   }
 
-  let html = files[entry]
+  let html = files[entryPath]
 
   // <link rel="stylesheet" href="x.css"> → <style>…</style>
   html = html.replace(
@@ -63,7 +73,8 @@ export function buildSingleFileHtml(files: Record<string, string>): string {
     }
   )
 
-  return html
+  // 素材也要内联：导出的单文件里没有目录概念，<img src="logo.svg"> 会 404
+  return inlineAssets(html, files, entryPath)
 }
 
 /* ------------------------------------------------------------------ */

@@ -107,9 +107,13 @@ export const ADMIN_PERMISSIONS: AdminPermCategory[] = [
     label: "内网穿透",
     group: "resource",
     children: [
-      { key: "frp.approve", label: "申请审核" },
+      // 「申请审核」(frp.approve) 已随人工申请流程一起退役（2026-10-13）：
+      // 用户端改成积分租用、自助开通，不再有人工审核这一环。
       { key: "frp.nodes", label: "节点管理" },
       { key: "frp.ports", label: "端口管理" },
+      // 租用化（2026-10-13）：套餐定价与订阅（谁在用、到期时间、同步状态）
+      { key: "frp.plans", label: "套餐定价" },
+      { key: "frp.rentals", label: "订阅管理" },
     ],
   },
   {
@@ -171,6 +175,14 @@ export const ADMIN_PERMISSIONS: AdminPermCategory[] = [
     ],
   },
   { key: "feedback", label: "反馈", group: "operation" },
+  /**
+   * 创想集（游戏大厅）—— 2026-10-11 由「造物典藏」改名。
+   *
+   * 单级节点：整个创想设置面板共用它。刻意不拆成「参数 / 池子」两个叶子 ——
+   * 能改玩法参数的人本来就该同时能动池子（垫本划拨是让游戏能玩起来的前提），
+   * 拆开只会造出「能调杠杆但不能充钱」这种半残状态。
+   */
+  { key: "collection", label: "创想集", group: "operation" },
 
   // ======================= 系统 =======================
   { key: "oauth", label: "OAuth 应用", group: "system" },

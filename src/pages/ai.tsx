@@ -1,5 +1,5 @@
 import * as React from "react"
-import { useNavigate, Link } from "react-router-dom"
+import { useNavigate, Link, useSearchParams } from "react-router-dom"
 import {
   ArrowDown,
   Bot,
@@ -60,6 +60,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { newapiApi, HttpError } from "@/services/api"
+import { RelayStationView, RelaySwitcher } from "@/components/relay-station-view"
 import { fmtTime } from "@/lib/format"
 import { useT, tStatic } from "@/i18n"
 import type {
@@ -73,9 +74,18 @@ import type {
 } from "@/types"
 
 /** 中转站在线/离线徽章，含延迟与版本 */
-function HealthBadge({ health }: { health?: NewApiHealth }) {
+function HealthBadge({ health }: { health?: NewApiHealth | null }) {
   const { t } = useT()
-  if (!health) return null
+  // health 为 null = 首屏尚未拿到（健康探测已移到 /api/dev/usage 懒加载）。
+  // 不能返回 null —— 那样徽章区域会忽隐忽现，看起来像页面在闪。
+  if (!health) {
+    return (
+      <Badge variant="outline" className="gap-1.5 text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        {t("common.loading")}
+      </Badge>
+    )
+  }
   return (
     <div className="flex items-center gap-2">
       <Badge variant={health.online ? "success" : "destructive"} className="gap-1.5">
@@ -94,6 +104,36 @@ function HealthBadge({ health }: { health?: NewApiHealth }) {
       )}
     </div>
   )
+}
+
+/**
+ * 订阅额度「下次重置」倒计时。
+ *
+ * ⚠️ 必须是**独立组件**：它每秒 setState 一次。原先这段状态放在页面主体上，
+ * 等于每秒钟把整页（40 张卡片）重渲染一遍 —— 移动端上就是肉眼可见的卡顿
+ * （2026-10-12 站长反馈「进入这个页面很卡」的一半原因）。
+ * 拆出来之后，每秒只重渲染这一个文本节点。
+ */
+function ResetCountdown({ nextResetTime }: { nextResetTime: number }) {
+  const { t } = useT()
+  const compute = React.useCallback(() => {
+    if (!nextResetTime) return formatResetTime(nextResetTime)
+    const diff = nextResetTime * 1000 - Date.now()
+    if (diff <= 0) return t("ai.reset.soon")
+    const totalSec = Math.floor(diff / 1000)
+    const h = Math.floor(totalSec / 3600)
+    const m = Math.floor((totalSec % 3600) / 60)
+    const s = totalSec % 60
+    return t("ai.reset.countdown", { h, m, s })
+  }, [nextResetTime, t])
+  const [text, setText] = React.useState(compute)
+  React.useEffect(() => {
+    setText(compute())
+    if (!nextResetTime) return
+    const timer = setInterval(() => setText(compute()), 1000)
+    return () => clearInterval(timer)
+  }, [compute, nextResetTime])
+  return <>{text}</>
 }
 
 /**
@@ -443,7 +483,15 @@ function RewardSubscriptionsCard({
   )
 }
 
-export default function AiPage() {
+/**
+ * 本站（官方）中转站页 —— 路由真正渲染的内容。
+ *
+ * ⚠️ 不要把这个函数和「选哪台站」的判断合在一起：一旦在本组件里写
+ * `if (relayId) return <别的界面/>`，两种 URL 之间切换时 **hooks 数量会变**，
+ * React 直接抛 #300（「Rendered fewer hooks than expected」），
+ * 表现就是「进页面就报错、刷新一下才好」。选站由下面的 AiPage 负责。
+ */
+function OfficialRelayPage() {
   const { t } = useT()
   const navigate = useNavigate()
   const [status, setStatus] = React.useState<NewApiStatus | null>(null)
@@ -460,7 +508,6 @@ export default function AiPage() {
   /** 正在「取回完整 Key 并复制」的行 id（现取现复制，本地不留明文） */
   const [revealingKeyId, setRevealingKeyId] = React.useState<string | null>(null)
   /** 订阅下次重置的倒计时文案（每秒刷新） */
-  const [resetCountdown, setResetCountdown] = React.useState<string | null>(null)
 
   // 开通
   const [bindOpen, setBindOpen] = React.useState(false)
@@ -511,6 +558,46 @@ export default function AiPage() {
   // 无权限（403 FEATURE_NOT_PERMITTED）：整页显示提示 + 捐献入口
   const [locked, setLocked] = React.useState(false)
 
+  /**
+   * 「实时部分」（健康徽章 / 币种 / 订阅）的加载状态。
+   * 首屏（/dev/status）只读 D1 立刻出骨架，这些要读上游的字段由 /dev/usage 补，
+   * 所以必须区分「读取中 / 已就绪 / 失败」—— 不能把「还没读到」当成「没有订阅」。
+   */
+  const [usageState, setUsageState] = React.useState<"loading" | "ready" | "failed">("loading")
+
+  /**
+   * 拉「实时部分」：健康徽章 / 币种 / 订阅。
+   *
+   * 为什么要单独一次请求：这三项都要读上游 NewAPI，实测上游单程 1.4~27.8s
+   * （2026-10-12 站长反馈「进入这个页面很卡」的根因就是首屏在等它们）。
+   * 后端 /dev/usage 自带 TTL 缓存与硬超时，最坏 4 秒返回兜底值。
+   */
+  const loadUsage = React.useCallback(async () => {
+    setUsageState((prev) => (prev === "ready" ? prev : "loading"))
+    try {
+      const u = await newapiApi.usage()
+      setStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              // 币种以这次读到的为准（首屏是兜底值，可能显示成 $）
+              currencySymbol: u.currency.symbol,
+              currencyCode: u.currency.code,
+              quotaPerUnit: u.currency.perUnit || prev.quotaPerUnit,
+              health: u.health,
+              subscription: u.subscription,
+              subscriptions: u.subscriptions,
+              freePlanId: u.freePlanId || prev.freePlanId,
+            }
+          : prev
+      )
+      setUsageState("ready")
+    } catch {
+      // 读不到就如实告诉用户「实时数据读取失败 + 重试」，绝不假装成「没有订阅」
+      setUsageState("failed")
+    }
+  }, [])
+
   const load = React.useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
@@ -520,6 +607,8 @@ export default function AiPage() {
       // 实测出现过几十秒），以前是 await 在这里 ⇒ 整页骨架一直转到它回来。
       // 现在先放行渲染，Key 列表在自己的卡片里单独转骨架。
       if (!silent) setLoading(false)
+      // 实时部分（健康/币种/订阅）与 Key 列表并行拉，互不阻塞首屏
+      void loadUsage()
       if (res.account) {
         // silent 刷新（建 Key / 同步后的回调）不切成骨架，保持旧列表可见，
         // 免得弹窗流程里表格闪一下
@@ -574,29 +663,8 @@ export default function AiPage() {
     })
   }, [loadModels])
 
-  // 订阅下次重置倒计时：每秒刷新
-  React.useEffect(() => {
-    const next = status?.subscription?.nextResetTime
-    if (!next) {
-      setResetCountdown(null)
-      return
-    }
-    const tick = () => {
-      const diff = next * 1000 - Date.now()
-      if (diff <= 0) {
-        setResetCountdown(t("ai.reset.soon"))
-        return
-      }
-      const totalSec = Math.floor(diff / 1000)
-      const h = Math.floor(totalSec / 3600)
-      const m = Math.floor((totalSec % 3600) / 60)
-      const s = totalSec % 60
-      setResetCountdown(t("ai.reset.countdown", { h, m, s }))
-    }
-    tick()
-    const timer = setInterval(tick, 1000)
-    return () => clearInterval(timer)
-  }, [status?.subscription?.nextResetTime, t])
+  // 「下次重置倒计时」已抽成独立的 ResetCountdown 组件 —— 不能让每秒一次的状态
+  // 更新把整页重渲染（见该组件的注释）。
 
   // 自动认领（account 存在但 bound=false）的用户：进入页面即强制弹出密码绑定，
   // 不允许直接使用界面。只触发一次，避免每次 status 变化都重复弹。
@@ -998,7 +1066,12 @@ export default function AiPage() {
         <PageHeader
           title={t("ai.title")}
           description={t("ai.tagline")}
-          actions={<HealthBadge health={status.health} />}
+          actions={
+            <div className="flex flex-wrap items-center gap-2">
+              <HealthBadge health={status.health} />
+              <RelaySwitcher />
+            </div>
+          }
         />
         <Card>
           <CardHeader>
@@ -1042,7 +1115,13 @@ export default function AiPage() {
       <PageHeader
         title={t("ai.title")}
         description={t("ai.accountLine", { username: account.username, email: account.email })}
-        actions={<HealthBadge health={status.health} />}
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <HealthBadge health={status.health} />
+            {/* 「去看看其他中转站」：点开是朋友登记的站列表，进去就是那台站的完整界面 */}
+            <RelaySwitcher />
+          </div>
+        }
       />
 
       <div className="space-y-6">
@@ -1052,13 +1131,30 @@ export default function AiPage() {
             <CardTitle className="flex items-center gap-2 text-base">
               <Sparkles className="h-4 w-4 text-primary" />
               {t("ai.free.title")}
+              {/* 捐献换额度的规则说明：红字提醒，写明只算 wb 账号 */}
+              <span className="text-xs font-normal text-red-500 dark:text-red-400">
+                {t("ai.free.rule")}
+              </span>
             </CardTitle>
             <CardDescription>
               {t("ai.free.mustClaim")}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            {status.subscription ? (
+            {usageState === "failed" ? (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span>{t("ai.usage.failed")}</span>
+                <Button size="sm" variant="outline" onClick={() => void loadUsage()}>
+                  {t("ai.usage.retry")}
+                </Button>
+              </div>
+            ) : usageState !== "ready" ? (
+              <div className="space-y-3" aria-busy="true">
+                <div className="h-4 w-40 animate-pulse rounded bg-muted" />
+                <div className="h-2 w-full animate-pulse rounded bg-muted" />
+                <div className="h-4 w-32 animate-pulse rounded bg-muted" />
+              </div>
+            ) : status.subscription ? (
               <div className="space-y-3">
                 <div>
                   <div className="flex items-center justify-between text-sm">
@@ -1099,7 +1195,7 @@ export default function AiPage() {
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-muted-foreground">{t("ai.nextReset")}</span>
                   <span className="font-medium tabular-nums">
-                    {resetCountdown !== null ? resetCountdown : formatResetTime(status.subscription.nextResetTime)}
+                    <ResetCountdown nextResetTime={status.subscription.nextResetTime} />
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-sm">
@@ -1127,11 +1223,13 @@ export default function AiPage() {
         </Card>
 
         {/* 其他订阅（邀请/成就等）—— 紧随免费订阅：额度叠加消费，放在一起才看得出总量 */}
-        <RewardSubscriptionsCard
-          groups={status.subscriptions.filter((s) => s.planId !== status.freePlanId)}
-          symbol={status.currencySymbol}
-          perUnit={status.quotaPerUnit}
-        />
+        {usageState === "ready" && (
+          <RewardSubscriptionsCard
+            groups={status.subscriptions.filter((s) => s.planId !== status.freePlanId)}
+            symbol={status.currencySymbol}
+            perUnit={status.quotaPerUnit}
+          />
+        )}
 
         {/* 接入信息：Base URL + API Key 管理融合在一起 —— 新用户第一件事就是"怎么用" */}
         <Card>
@@ -1766,5 +1864,23 @@ function BindDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/**
+ * 路由入口：本站中转站 / 别人登记的站 二选一。
+ *
+ * 🔴 必须**拆成两个组件再二选一**，不能在一个组件里提前 return
+ * （那些会改变 hooks 数量的写法会让 React 抛 #300，2026-10-12 实测踩过）。
+ * `?relay=<id>` 时只挂载 RelayStationView，本站那套接口一个都不打。
+ */
+export default function AiPage() {
+  const [searchParams] = useSearchParams()
+  const relayId = searchParams.get("relay")
+  // key 让「换一台站」时整棵子树重新挂载：否则会残留上一台站的状态（余额/Key 列表）
+  return relayId ? (
+    <RelayStationView key={relayId} id={relayId} />
+  ) : (
+    <OfficialRelayPage key="official" />
   )
 }

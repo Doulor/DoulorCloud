@@ -678,7 +678,7 @@ export async function listPointsOverview(env: Env, request: Request): Promise<Re
     env.DB.prepare(
       `SELECT
          COALESCE(SUM(CASE WHEN delta > 0 AND reason NOT IN ('shop_sell','transfer_in') THEN delta ELSE 0 END), 0) AS issued,
-         COALESCE(SUM(CASE WHEN reason IN ('redeem', 'shop') AND delta < 0 THEN -delta ELSE 0 END), 0) AS redeemed,
+         COALESCE(SUM(CASE WHEN reason IN ('redeem', 'shop', 'frp_rental') AND delta < 0 THEN -delta ELSE 0 END), 0) AS redeemed,
          COALESCE(SUM(CASE WHEN reason IN ('shop_sell','transfer_in') AND delta > 0 THEN delta ELSE 0 END), 0) AS traded
        FROM point_transactions`
     ),

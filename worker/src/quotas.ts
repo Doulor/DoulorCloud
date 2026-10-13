@@ -17,14 +17,20 @@ import { ApiError } from "./http"
 import { getSetting, getSettingNumber } from "./settings"
 import type { Env } from "./env"
 
-/** 可被授予的模块（profile 恒为基础权限，不在此列；域名/邮箱无需授权） */
-export const QUOTA_FEATURES = ["r2", "ai", "frp", "proxy"] as const
+/**
+ * 可被授予的模块（profile 恒为基础权限，不在此列；域名/邮箱无需授权）。
+ *
+ * ⚠️ 内网穿透（frp）**已移出**（2026-10-13）：它改成「积分租用」，
+ * 任何登录用户都能自己购买，不再有「可转授额度」这个概念。
+ * 存量额度数据保留在 users.feature_quota 里不删，只是不再参与计算 ——
+ * quotas.ts 的解析一律以本数组为准，认不出的键直接忽略。
+ */
+export const QUOTA_FEATURES = ["r2", "ai", "proxy"] as const
 export type QuotaFeature = (typeof QUOTA_FEATURES)[number]
 
 export const QUOTA_FEATURE_LABELS: Record<QuotaFeature, string> = {
   r2: "直链网盘",
   ai: "AI 中转站",
-  frp: "内网穿透",
   proxy: "代理节点",
 }
 
@@ -77,7 +83,7 @@ export async function isBasicFeature(
 export type FeatureCounts = Record<QuotaFeature, number>
 
 function emptyCounts(): FeatureCounts {
-  return { r2: 0, ai: 0, frp: 0, proxy: 0 }
+  return { r2: 0, ai: 0, proxy: 0 }
 }
 
 /** 解析 JSON 计数；非法值按 0 处理（不信任历史数据） */

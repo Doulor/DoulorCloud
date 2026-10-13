@@ -39,9 +39,8 @@ import {
 import { loadAccount, mapUserTokenError, runWithUserToken, userSelectableGroups } from "./newapi"
 import { getSetting } from "../settings"
 import { likeContains } from "../sql-like"
-import { LAB_KEY_NAME, LAB_KEY_NAMES, isLabKeyName } from "../lab-key"
+import { LAB_KEY_GROUP, LAB_KEY_NAME, LAB_KEY_NAMES, isLabKeyName } from "../lab-key"
 
-/** 实验室自动建的 Key 固定用这个分组（见 lab-key.ts 的注释） */
 import { buildPreviewDoc } from "../lab-preview"
 import { loadEnabledTemplates } from "./lab-prompts"
 import { loadSkillIndex } from "./lab-skills"
@@ -194,13 +193,17 @@ async function resolveLabKey(env: Env, userId: string): Promise<string> {
       //    —— 表现为实验室「站内额度」下「没有可用模型」，功能整条不可用。
       const groups = userSelectableGroups(await getSettings(env))
       /**
-       * 🔴 分组**优先用 `auto`**（站长 2026-10-10 明确要求：站点分组体系在改，统一走
-       * auto；已确认 auto 在 NewAPI 的可用分组列表里）。auto 不在可选列表时才退回
-       * 第一个可用分组（PR #52 的兜底思路）。
+       * 🔴 分组**优先用 `LAB_KEY_GROUP`（`auto`）**（站长 2026-10-10 明确要求：站点分组
+       * 体系在改，统一走 auto；已确认 auto 在 NewAPI 的可用分组列表里）。auto 不在可选
+       * 列表时才退回第一个可用分组（PR #52 的兜底思路）。
        * ⚠️ 分组决定这个 token 能用哪些渠道 —— 分组不对就会报
        *    `Model "…" is not available for this group`（2026-10-13 站长遇到的正是这个）。
+       *
+       * ⚠️ 这里**必须引用 `../lab-key` 的常量**，不要再写 `"auto"` 字面量：
+       *    那个常量带一整套「为什么要固定分组」的说明。两处各写一份的话，
+       *    将来改分组名必然只改一处 —— 而常量无人引用时，死代码检查会直接报红。
        */
-      const group = groups.includes("auto") ? "auto" : groups[0]
+      const group = groups.includes(LAB_KEY_GROUP) ? LAB_KEY_GROUP : groups[0]
 
       // 1) 上游找同名 Key —— 现找现取，本地不缓存明文；被删掉会自动重建
       const tokens = await listTokens(env, token, uid)

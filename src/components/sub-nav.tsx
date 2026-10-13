@@ -1,4 +1,5 @@
 import * as React from "react"
+import { Link } from "react-router-dom"
 
 /**
  * 二级子侧边栏的导航件。
@@ -64,5 +65,43 @@ export function NavGroup({ label, children }: { label: string; children: React.R
       </p>
       <div className="flex flex-col gap-0.5">{children}</div>
     </div>
+  )
+}
+
+/**
+ * `NavItem` 的**链接版**：样式与 NavItem 完全一致，只是换成 `<Link>`。
+ *
+ * 为什么需要它（2026-10-11）：造物集原来靠 `view` state 在「展示大厅 / 我的造物集」
+ * 之间切换，后来要加「造物典藏 / 典藏设置」两个**独立页面** —— 一个侧边栏里
+ * 既有按钮又有链接时，两套高亮逻辑必然漂移（改了一处忘了另一处）。
+ * 现在统一走 URL：`view` 也放进了 query，四项都是链接。
+ *
+ * ⚠️ 样式字符串与 NavItem **必须保持同步**，改一个记得改另一个。
+ */
+export function NavLinkItem({
+  to,
+  active,
+  icon: Icon,
+  label,
+}: {
+  to: string
+  active: boolean
+  icon: React.ComponentType<{ className?: string }>
+  label: string
+}) {
+  return (
+    <Link
+      to={to}
+      data-nav-active={active ? "1" : undefined}
+      className={
+        "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-sm transition-colors " +
+        (active
+          ? "bg-accent font-medium text-foreground"
+          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground")
+      }
+    >
+      <Icon className="h-4 w-4 shrink-0" />
+      <span className="truncate">{label}</span>
+    </Link>
   )
 }

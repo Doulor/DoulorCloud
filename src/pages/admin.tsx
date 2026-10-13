@@ -2,6 +2,7 @@ import * as React from "react"
 import { Link } from "react-router-dom"
 import {
   Ban,
+  AlertTriangle,
   Compass,
   ChevronLeft,
   ChevronRight,
@@ -78,6 +79,7 @@ import { NavItem, NavGroup } from "@/components/sub-nav"
 import { SlidingPill } from "@/components/motion/sliding-pill"
 import { AdminApiTab } from "@/components/admin-api-tab"
 import { AdminLabTab } from "@/components/admin-lab-tab"
+import { AdminFrpRental } from "@/components/admin-frp-rental"
 import { AdminPermissionsPanel } from "@/components/admin-permissions"
 import { Textarea } from "@/components/ui/textarea"
 import {
@@ -154,7 +156,6 @@ import { useAuth } from "@/hooks/use-auth"
 const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
   { key: "r2", label: "feat.r2", desc: "adm.feat.r2Desc" },
   { key: "ai", label: "feat.ai", desc: "adm.feat.aiDesc" },
-  { key: "frp", label: "feat.frp", desc: "adm.feat.frpDesc" },
   { key: "proxy", label: "feat.proxy", desc: "adm.feat.proxyDesc" },
   // doulor.cn 专属域：**默认关闭**，只能在这里显式打开（后端 allPermissions()
   // 不含它，见 worker/src/permissions.ts 的 DEFAULT_ALLOWED）。
@@ -165,7 +166,6 @@ const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
 const DONATION_GRANT_ITEMS: { key: string; label: string; desc: string }[] = [
   { key: "ai", label: "adm.1271", desc: "adm.1272" },
   { key: "sensenova", label: "adm.1273", desc: "adm.1274" },
-  { key: "frp", label: "adm.1275", desc: "adm.1276" },
   { key: "proxy", label: "adm.1277", desc: "adm.1278" },
   { key: "wb2api", label: "adm.1279", desc: "adm.1280" },
   { key: "qoder2api", label: "adm.1281", desc: "adm.1282" },
@@ -173,19 +173,17 @@ const DONATION_GRANT_ITEMS: { key: string; label: string; desc: string }[] = [
 
 /**
  * 「捐献发放可转授额度」的开关项（与后端 settings.ts 的
- * donation_transfer_features 一一对应，四个模块各自一个开关）。
+ * donation_transfer_features 一一对应，三个模块各自一个开关）。
  *
- * 顺序与 QUOTA_FEATURES 一致（r2/ai/frp/proxy）；label 复用 feat.* 的模块名。
+ * 顺序与 QUOTA_FEATURES 一致（r2/ai/proxy）；label 复用 feat.* 的模块名。
  */
 const DONATION_QUOTA_ITEMS: { key: string; label: string; desc: string }[] = [
   { key: "ai", label: "feat.ai", desc: "adm.1304" },
-  { key: "frp", label: "feat.frp", desc: "adm.1305" },
   { key: "proxy", label: "feat.proxy", desc: "adm.1307" },
   { key: "r2", label: "feat.r2", desc: "adm.1308" },
 ]
 
 import type {
-  AdminFrpApplication,
   AdminFrpNode,
   AdminInviteQuotasResponse,
   AdminUserInviteQuotaResponse,
@@ -784,6 +782,9 @@ export default function AdminPage() {
   const [invitePerms, setInvitePerms] = React.useState<Permissions>({
     r2: true,
     ai: true,
+    // ⚠️ `frp` 权限已随内网穿透租用化退役（后端 FEATURES 不再含它），界面上也不再
+    // 渲染这个勾选框；但 `Permissions` 类型仍要求该键，后端读权限 JSON 时会忽略这个
+    // 残留键（见 worker/src/permissions.ts 的注释），故保留占位。
     frp: true,
     proxy: true,
     // doulor.cn 专属域默认**不开**：建码时要显式勾选才会授予
@@ -1025,10 +1026,104 @@ export default function AdminPage() {
   /** 待更新的新令牌（明文只存在于当前输入框，提交后立即清空） */
   const [newapiNewToken, setNewapiNewToken] = React.useState("")
   const [newapiUserId, setNewapiUserId] = React.useState("1")
+  // ---- 手动发放订阅（按用户名批量，2026-10-10 站长要求）----
+  /** 用户名列表：换行分隔（也认逗号/空格），服务端会拆条去重 */
+  const [grantSubUsers, setGrantSubUsers] = React.useState("")
+  const [grantSubPlanId, setGrantSubPlanId] = React.useState("")
+  const [grantSubCount, setGrantSubCount] = React.useState("1")
+  const [grantSubBusy, setGrantSubBusy] = React.useState(false)
+  /** 逐人结果（发放后回显；服务端 4xx 时不填，错误直接走 toast） */
+  const [grantSubResults, setGrantSubResults] = React.useState<
+    { username: string; ok: boolean; granted: number; message: string }[]
+  >([])
+  /** 中转站的订阅套餐（只用于「点一下填 ID」；读不到就是空数组 = 手输） */
+  const [subPlans, setSubPlans] = React.useState<
+    { planId: number; title: string; maxPurchasePerUser: number }[]
+  >([])
+
+  // ---- 「付费」分组授权（2026-10-11 站长要求）----
+  //
+  // ⚠️ 与上面的「发放订阅」是两件事：这里只让该用户在**建 Key 时能选到「付费」分组**，
+  // 永久有效、**不发任何额度**。落库后由后端 group-sync 同步进 NewAPI（约 60 秒）。
+  /** 要授权的用户名（换行分隔，与发放订阅同一套解析口径） */
+  const [premUsers, setPremUsers] = React.useState("")
+  const [premBusy, setPremBusy] = React.useState(false)
+  const [premListBusy, setPremListBusy] = React.useState(false)
+  /** 名单是否已加载过（区分「还没拉」和「拉了但是空的」） */
+  const [premLoaded, setPremLoaded] = React.useState(false)
+  /** 当前有权限的名单 */
+  const [premGrants, setPremGrants] = React.useState<
+    {
+      userId: string
+      username: string
+      grantedBy: string | null
+      grantedAt: string
+      newapiUserId: number | null
+    }[]
+  >([])
 
   // ---- WorkBuddy 反代账号捐献（登录即解锁 AI 权限）----
   const [wb2apiConfig, setWb2apiConfig] = React.useState<AdminWb2ApiConfig | null>(null)
   const [wb2apiBindings, setWb2apiBindings] = React.useState<AdminWb2ApiBinding[]>([])
+  /** 失效账号（11140 等，需要捐献者重新登录）的操作态 —— 2026-10-10 */
+  const [wbInvalidBusy, setWbInvalidBusy] = React.useState(false)
+
+  /** 扫描：只统计，不改任何东西 */
+  const scanWbInvalid = async () => {
+    setWbInvalidBusy(true)
+    try {
+      const res = await wb2apiApi.listInvalid()
+      if (res.invalid.length === 0) {
+        toast.success(t("adm.wbInvalidNone"))
+      } else {
+        const names = res.invalid
+          .slice(0, 5)
+          .map((i) => i.username ?? i.uid.slice(0, 8))
+          .join("、")
+        toast.warning(
+          t("adm.wbInvalidFound", {
+            n: res.invalid.length,
+            names: names + (res.invalid.length > 5 ? " …" : ""),
+          })
+        )
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("adm.wbInvalidFailed"))
+    } finally {
+      setWbInvalidBusy(false)
+    }
+  }
+
+  /** 发通知 + 收回 ai 权限（破坏性，先让站长确认） */
+  const notifyWbInvalid = async () => {
+    setWbInvalidBusy(true)
+    try {
+      const preview = await wb2apiApi.notifyInvalid(true)
+      if (preview.candidates === 0) {
+        toast.success(t("adm.wbInvalidNone"))
+        return
+      }
+      const ok = await confirmDialog({
+        title: t("adm.wbInvalidConfirmTitle"),
+        desc: t("adm.wbInvalidConfirmDesc", {
+          n: preview.candidates,
+          u: preview.users,
+        }),
+        okText: t("adm.wbInvalidConfirmBtn"),
+        danger: true,
+      })
+      if (!ok) return
+      const res = await wb2apiApi.notifyInvalid(false)
+      toast.success(
+        t("adm.wbInvalidDone", { n: res.notified, s: res.skipped })
+      )
+      await load()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("adm.wbInvalidFailed"))
+    } finally {
+      setWbInvalidBusy(false)
+    }
+  }
   const [wb2apiPool, setWb2apiPool] = React.useState<AdminWb2ApiPool | null>(null)
   const [wb2apiLoading, setWb2apiLoading] = React.useState(false)
   const [wb2apiBusy, setWb2apiBusy] = React.useState(false)
@@ -1062,6 +1157,10 @@ export default function AdminPage() {
   const [qoder2apiEnabled, setQoder2apiEnabled] = React.useState(true)
   /** 纯展示开关：是否在捐献页显示该入口（关掉不影响通道本身） */
   const [qoder2apiDonationVisible, setQoder2apiDonationVisible] = React.useState(true)
+  /** 允许用户自选的版本（2026-10-10，与 wb2api 的两个开关同款）：
+   *  关掉的版本在捐献页隐藏、接口层拒绝用它发起绑定 */
+  const [qoder2apiRealmCn, setQoder2apiRealmCn] = React.useState(true)
+  const [qoder2apiRealmIntl, setQoder2apiRealmIntl] = React.useState(true)
   const [qoder2apiMaxBindings, setQoder2apiMaxBindings] = React.useState("3")
   const [qoder2apiBaseUrl, setQoder2apiBaseUrl] = React.useState("")
   /** 上游区域：cn / intl（该通道只对接 Qoder，无 provider 可切） */
@@ -1105,14 +1204,12 @@ export default function AdminPage() {
   const [inviteBasic, setInviteBasic] = React.useState<Record<string, boolean>>({
     r2: true,
     ai: false,
-    frp: false,
     proxy: false,
   })
   // 免权限访问：打开后该模块不再要求用户权限（没有权限的人也能用）
   const [openFeatures, setOpenFeatures] = React.useState<Record<string, boolean>>({
     r2: false,
     ai: false,
-    frp: false,
     proxy: false,
   })
   /**
@@ -1136,22 +1233,23 @@ export default function AdminPage() {
   // 自动审核：打开后该模块的捐献提交即自动审核（r2 没有捐献，不在列表里）
   const [autoReview, setAutoReview] = React.useState<Record<string, boolean>>({
     ai: true,
-    frp: false,
     proxy: true,
   })
-  // 捐献是否授予对应权限（6 条通道各自独立，默认全开；见 settings.ts 注释）
+  // 捐献是否授予对应权限（5 条通道各自独立，默认全开；见 settings.ts 注释）
   const [donationGrants, setDonationGrants] = React.useState<Record<string, boolean>>({
     ai: true,
     sensenova: true,
-    frp: true,
     proxy: true,
     wb2api: true,
     qoder2api: true,
   })
+  // 自定义 AI 渠道捐献的 baseUrl 黑名单（换行/逗号分隔，**前缀匹配**；空 = 不启用）
+  // 归一化与匹配口径见 worker/src/donation-url-blocklist.ts（保存侧与读取侧共用那一份）
+  const [donationUrlBlocklist, setDonationUrlBlocklist] = React.useState("")
   // 捐献可发放「可转授额度」的模块（四个独立开关，默认全开；见 settings.ts）
   const [donationQuotaFeatures, setDonationQuotaFeatures] = React.useState<
     Record<string, boolean>
-  >({ r2: true, ai: true, frp: true, proxy: true })
+  >({ r2: true, ai: true, proxy: true })
 
   // ---- 社区管理 ----
   const [communityPosts, setCommunityPosts] = React.useState<AdminCommunityPost[]>([])
@@ -1347,30 +1445,10 @@ export default function AdminPage() {
     }
   }
 
-  // ---- frp 内网穿透审核 ----
+  // ---- frp 内网穿透（节点 / 端口管理；申请→人工审核那套已随租用化退役） ----
 
-  const [frpApps, setFrpApps] = React.useState<AdminFrpApplication[]>([])
   const [frpNodes, setFrpNodes] = React.useState<AdminFrpNode[]>([])
-  const [frpLoading, setFrpLoading] = React.useState(false)
   const [frpBusy, setFrpBusy] = React.useState(false)
-  /** frp 申请分类筛选："" 全部 / "pending" 待审核 / "approved" 已通过 / "rejected" 已拒绝 */
-  const [frpFilter, setFrpFilter] = React.useState<string>("")
-  /** 待审核目标 + 意见弹窗 */
-  const [frpReviewTarget, setFrpReviewTarget] = React.useState<{
-    app: AdminFrpApplication
-    action: "approve" | "reject"
-  } | null>(null)
-  const [frpReviewNote, setFrpReviewNote] = React.useState("")
-  /** 编辑待审核申请的弹窗（账号名/密码/端口/通知邮箱/备注） */
-  const [frpEditTarget, setFrpEditTarget] = React.useState<AdminFrpApplication | null>(null)
-  const [frpEditDraft, setFrpEditDraft] = React.useState({
-    frpUser: "",
-    frpPassword: "",
-    /** 文本框：逗号/空格分隔，可写 a-b 范围 */
-    ports: "",
-    notifyEmail: "",
-    remark: "",
-  })
   const [nodeOpen, setNodeOpen] = React.useState(false)
   /** 节点编辑弹窗里的「占用端口」列表 + 新增草稿 */
   const [nodePorts, setNodePorts] = React.useState<
@@ -1579,63 +1657,15 @@ export default function AdminPage() {
     }
   }
 
-  const loadFrp = React.useCallback(async () => {
-    setFrpLoading(true)
+  /** 只拉节点列表：申请审核那套已退役，节点 / 端口管理仍在用 */
+  const loadFrpNodes = React.useCallback(async () => {
     try {
-      const [apps, nodes] = await Promise.all([
-        adminApi.listFrpApplications("all"),
-        adminApi.listFrpNodes(),
-      ])
-      setFrpApps(apps.applications)
+      const nodes = await adminApi.listFrpNodes()
       setFrpNodes(nodes.nodes)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.21"))
-    } finally {
-      setFrpLoading(false)
     }
   }, [])
-
-  const openReview = (app: AdminFrpApplication, action: "approve" | "reject") => {
-    setFrpReviewNote("")
-    setFrpReviewTarget({ app, action })
-  }
-
-  const confirmFrpReview = async () => {
-    if (!frpReviewTarget) return
-    setFrpBusy(true)
-    try {
-      await adminApi.reviewFrp({
-        id: frpReviewTarget.app.id,
-        action: frpReviewTarget.action,
-        note: frpReviewNote.trim() || undefined,
-      })
-      toast.success(
-        frpReviewTarget.action === "approve"
-          ? t("adm.929", { v0: frpReviewTarget.app.notifyEmail })
-          : t("adm.930", { v0: frpReviewTarget.app.notifyEmail })
-      )
-      setFrpReviewTarget(null)
-      setFrpReviewNote("")
-      await loadFrp()
-      notifyAttentionChanged() // 待审核 frp 申请角标当场减一，不用等 60 秒轮询
-    } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("adm.22"))
-    } finally {
-      setFrpBusy(false)
-    }
-  }
-
-  /** 打开编辑弹窗，把当前申请的值填进草稿 */
-  const openFrpEdit = (app: AdminFrpApplication) => {
-    setFrpEditDraft({
-      frpUser: app.frpUser,
-      frpPassword: app.frpPassword,
-      ports: app.ports.join(", "),
-      notifyEmail: app.notifyEmail,
-      remark: app.remark ?? "",
-    })
-    setFrpEditTarget(app)
-  }
 
   /** 把「23457-23460, 39000」这类文本解析成端口数组 */
   const parsePortsText = (raw: string): number[] => {
@@ -1652,48 +1682,6 @@ export default function AdminPage() {
       }
     }
     return [...new Set(out)].sort((a, b) => a - b)
-  }
-
-  const handleSaveFrpEdit = async () => {
-    if (!frpEditTarget) return
-    const ports = parsePortsText(frpEditDraft.ports)
-    if (ports.length === 0) {
-      toast.error(t("adm.1239"))
-      return
-    }
-    setFrpBusy(true)
-    try {
-      await adminApi.updateFrpApplication({
-        id: frpEditTarget.id,
-        frpUser: frpEditDraft.frpUser.trim(),
-        ...(frpEditTarget.needAccount ? { frpPassword: frpEditDraft.frpPassword } : {}),
-        ports,
-        notifyEmail: frpEditDraft.notifyEmail.trim(),
-        remark: frpEditDraft.remark,
-      })
-      toast.success(t("adm.1238"))
-      setFrpEditTarget(null)
-      await loadFrp()
-    } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("adm.1240"))
-    } finally {
-      setFrpBusy(false)
-    }
-  }
-
-  const handleRevokeFrp = async (app: AdminFrpApplication) => {
-    if (!confirm(t("adm.931", { v0: app.siteUsername }))) return
-    setFrpBusy(true)
-    try {
-      await adminApi.revokeFrp(app.id)
-      toast.success(t("adm.23"))
-      await loadFrp()
-      notifyAttentionChanged() // 撤销后回到待审核，角标当场 +1
-    } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("adm.24"))
-    } finally {
-      setFrpBusy(false)
-    }
   }
 
   // 打开节点编辑弹窗时，拉一次该节点已占用的端口
@@ -1794,7 +1782,7 @@ export default function AdminPage() {
       })
       toast.success(t("adm.25"))
       setNodeOpen(false)
-      await loadFrp()
+      await loadFrpNodes()
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.26"))
     } finally {
@@ -1806,7 +1794,7 @@ export default function AdminPage() {
     try {
       await adminApi.deleteFrpNode(id)
       toast.success(t("adm.27"))
-      await loadFrp()
+      await loadFrpNodes()
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.28"))
     }
@@ -1959,6 +1947,8 @@ export default function AdminPage() {
       // Qoder2API 反代账号捐献通道
       setQoder2apiEnabled(isSettingOn(s.qoder2api_enabled, true))
       setQoder2apiDonationVisible(isSettingOn(s.qoder2api_donation_visible, true))
+      setQoder2apiRealmCn(isSettingOn(s.qoder2api_realm_cn, true))
+      setQoder2apiRealmIntl(isSettingOn(s.qoder2api_realm_intl, true))
       setQoder2apiMaxBindings(s.qoder2api_max_bindings ?? "3")
       setQoder2apiBaseUrl(s.qoder2api_base_url ?? "")
       setQoder2apiRealm(s.qoder2api_realm ?? "cn")
@@ -2004,7 +1994,6 @@ export default function AdminPage() {
       setInviteBasic({
         r2: basicRaw.includes("r2"),
         ai: basicRaw.includes("ai"),
-        frp: basicRaw.includes("frp"),
         proxy: basicRaw.includes("proxy"),
       })
       // 免权限访问：后端存空串表示「全部按权限卡」
@@ -2012,12 +2001,11 @@ export default function AdminPage() {
       setOpenFeatures({
         r2: openRaw.includes("r2"),
         ai: openRaw.includes("ai"),
-        frp: openRaw.includes("frp"),
         proxy: openRaw.includes("proxy"),
       })
       // 首捐奖励券可兑换的模块：缺省/取不到时按「全部可兑换」显示
       // （与后端 parseFirstDonationFeatures 的缺省口径一致）
-      const fdRaw = (s.first_donation_voucher_features ?? "r2,ai,frp,proxy,doulor")
+      const fdRaw = (s.first_donation_voucher_features ?? "r2,ai,proxy,doulor")
         .split(",")
         .map((x) => x.trim())
         .filter(Boolean)
@@ -2035,28 +2023,28 @@ export default function AdminPage() {
       const autoRaw = (s.auto_review_features ?? "").split(",").map((x) => x.trim()).filter(Boolean)
       setAutoReview({
         ai: autoRaw.includes("ai"),
-        frp: autoRaw.includes("frp"),
         proxy: autoRaw.includes("proxy"),
       })
-      // 捐献是否授予对应权限（6 条通道各自独立，默认全开）
+      // 捐献是否授予对应权限（5 条通道各自独立，默认全开）
       setDonationGrants({
         ai: isSettingOn(s.donation_grant_ai, true),
         sensenova: isSettingOn(s.donation_grant_sensenova, true),
-        frp: isSettingOn(s.donation_grant_frp, true),
         proxy: isSettingOn(s.donation_grant_proxy, true),
         wb2api: isSettingOn(s.donation_grant_wb2api, true),
         qoder2api: isSettingOn(s.donation_grant_qoder2api, true),
       })
-      // 捐献可发放「可转授额度」的模块：缺省/取不到时按「四个都发」显示
+      // 捐献 baseUrl 黑名单：后端存的是归一化后的文本，这里原样回显（前端不再加工，
+      // 免得两套归一化口径打架）
+      setDonationUrlBlocklist(s.donation_url_blocklist ?? "")
+      // 捐献可发放「可转授额度」的模块：缺省/取不到时按「三个都发」显示
       // （与后端 parseDonationQuotaFeatures 的缺省口径一致）
-      const dqRaw = (s.donation_transfer_features ?? "r2,ai,frp,proxy")
+      const dqRaw = (s.donation_transfer_features ?? "r2,ai,proxy")
         .split(",")
         .map((x) => x.trim())
         .filter(Boolean)
       setDonationQuotaFeatures({
         r2: dqRaw.includes("r2"),
         ai: dqRaw.includes("ai"),
-        frp: dqRaw.includes("frp"),
         proxy: dqRaw.includes("proxy"),
       })
       // ---- 2026-09-26 补齐的设置项 ----
@@ -2174,10 +2162,9 @@ export default function AdminPage() {
           .filter(([, on]) => on)
           .map(([k]) => k)
           .join(","),
-        // 捐献是否授予对应权限（6 条通道各自独立）
+        // 捐献是否授予对应权限（5 条通道各自独立）
         donation_grant_ai: donationGrants.ai,
         donation_grant_sensenova: donationGrants.sensenova,
-        donation_grant_frp: donationGrants.frp,
         donation_grant_proxy: donationGrants.proxy,
         donation_grant_wb2api: donationGrants.wb2api,
         donation_grant_qoder2api: donationGrants.qoder2api,
@@ -2186,6 +2173,9 @@ export default function AdminPage() {
           .filter(([, on]) => on)
           .map(([k]) => k)
           .join(","),
+        // 自定义 AI 渠道捐献的 baseUrl 黑名单：空串 = 不启用（后端为它单开了保存分支，
+        // 通用分支会把空串当「不修改」跳过，导致清不掉）
+        donation_url_blocklist: donationUrlBlocklist,
         // 反代账号捐献通道
         wb2api_enabled: wb2apiEnabled,
         wb2api_donation_visible: wb2apiDonationVisible,
@@ -2196,6 +2186,8 @@ export default function AdminPage() {
         wb2api_realm_global: wb2apiRealmGlobal,
         // Qoder2API 反代账号捐献通道
         qoder2api_enabled: qoder2apiEnabled,
+        qoder2api_realm_cn: qoder2apiRealmCn,
+        qoder2api_realm_intl: qoder2apiRealmIntl,
         qoder2api_donation_visible: qoder2apiDonationVisible,
         qoder2api_max_bindings: String(Math.max(1, Math.round(Number(qoder2apiMaxBindings) || 3))),
         qoder2api_base_url: qoder2apiBaseUrl.trim(),
@@ -2325,7 +2317,116 @@ export default function AdminPage() {
     } catch {
       setModelOptions([])
     }
+    // 订阅套餐列表同样单独拉、失败静默：它只是「点一下填 ID」的便利，
+    // 读不到就退化成手输，不该弹错误打扰管理员。
+    try {
+      const p = await adminApi.listSubscriptionPlans()
+      setSubPlans(p.plans)
+    } catch {
+      setSubPlans([])
+    }
   }, [])
+
+  /**
+   * 给填进来的用户名批量发放订阅。
+   *
+   * 前端只做「非空 / 数字」这种一眼可见的校验，**真正的校验在服务端**：
+   * 用户名不存在、或用户还没开通中转站时，服务端整体 4xx 且一个订阅都不发 ——
+   * 所以这里失败分支只负责把服务端的原话展示出来。
+   */
+  const handleGrantSubscriptions = async () => {
+    const usernames = grantSubUsers.trim()
+    const planId = Number(grantSubPlanId)
+    const count = Number(grantSubCount)
+    if (!usernames) {
+      toast.error(t("adm.grantSub.needUsers"))
+      return
+    }
+    if (!Number.isInteger(planId) || planId <= 0) {
+      toast.error(t("adm.grantSub.needPlan"))
+      return
+    }
+    if (!Number.isInteger(count) || count < 1) {
+      toast.error(t("adm.grantSub.needCount"))
+      return
+    }
+    setGrantSubBusy(true)
+    setGrantSubResults([])
+    try {
+      const res = await adminApi.grantSubscriptions({ usernames, planId, count })
+      setGrantSubResults(res.results)
+      if (res.ok) {
+        toast.success(t("adm.grantSub.done").replace("{n}", String(res.granted)))
+      } else {
+        // 校验已过、但有人的订阅没发满（上游报错 / 撞限购）—— 逐人结果就在下面
+        toast.error(t("adm.grantSub.partial"))
+      }
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.grantSub.failed"))
+    } finally {
+      setGrantSubBusy(false)
+    }
+  }
+
+  // ---- 「付费」分组授权（2026-10-11 站长要求）----
+  //
+  // 与发放订阅是两件事：这里只让该用户在**建 Key 时能选到「付费」分组**，
+  // 永久有效、不发任何额度。真正的校验在服务端（用户名不存在 / 未开通中转站
+  // 会整体 4xx，零副作用），这里只负责把服务端的原话展示出来。
+
+  const loadPremiumGrants = React.useCallback(async () => {
+    setPremListBusy(true)
+    try {
+      const res = await adminApi.listPremiumGrants()
+      setPremGrants(res.grants)
+      setPremLoaded(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.prem.msg.loadFailed"))
+    } finally {
+      setPremListBusy(false)
+    }
+  }, [t])
+
+  const handleGrantPremium = async () => {
+    const usernames = premUsers.trim()
+    if (!usernames) {
+      toast.error(t("adm.prem.msg.needUsers"))
+      return
+    }
+    setPremBusy(true)
+    try {
+      const res = await adminApi.grantPremiumGroup({ usernames })
+      toast.success(
+        t("adm.prem.msg.granted")
+          .replace("{n}", String(res.granted))
+          .replace("{m}", String(res.existed))
+      )
+      setPremUsers("")
+      await loadPremiumGrants()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.prem.msg.grantFailed"))
+    } finally {
+      setPremBusy(false)
+    }
+  }
+
+  const handleRevokePremium = async (username: string) => {
+    setPremBusy(true)
+    try {
+      const res = await adminApi.revokePremiumGroup({ usernames: username })
+      if (res.revoked > 0) {
+        toast.success(t("adm.prem.msg.revoked").replace("{u}", username))
+      } else {
+        // 并发场景：别人刚取消过 —— 不报错，刷新一下名单即可
+        toast.success(t("adm.prem.msg.revoked").replace("{u}", username))
+      }
+      await loadPremiumGrants()
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.prem.msg.revokeFailed"))
+    } finally {
+      setPremBusy(false)
+    }
+  }
 
   // ---- WorkBuddy 反代账号捐献 ----
 
@@ -3698,7 +3799,7 @@ export default function AdminPage() {
       void loadR2()
     }
     if (v === "mail") void loadSettings()
-    if (v === "frp") void loadFrp()
+    if (v === "frp") void loadFrpNodes()
     if (v === "proxy") void loadProxy()
     if (v === "reserved") void loadReserved()
     if (v === "donations") { void loadDonations(); void loadWb2api() }
@@ -3707,7 +3808,13 @@ export default function AdminPage() {
     if (v === "inviteQuotas") void loadInviteQuotas()
     if (v === "r2") void loadR2()
     if (v === "community") void loadCommunity()
-    if (v === "newapi") { void loadSettings(); void loadNewApiConfig() }
+    if (v === "newapi") {
+      void loadSettings()
+      void loadNewApiConfig()
+      // 「付费」分组授权的名单（2026-10-11）—— 进这个标签页就拉一次，
+      // 免得管理员看到一个空列表还以为没人有权限
+      void loadPremiumGrants()
+    }
     // 「捐献通道」一个选项卡里放三条通道（wb2api / qoder2api / 商汤），
     // 三条的设置都走同一个 PUT /admin/settings ⇒ 进这个 tab 要一次把三方数据都拉齐
     if (v === "wb2api") {
@@ -4425,9 +4532,16 @@ export default function AdminPage() {
         </TabsContent>
 
         <TabsContent value="frp">
+          {/* 租用化（2026-10-13）：套餐与订阅放在最前面，因为这才是现在的日常操作面。
+              原先「用户申请 → 人工审核 → 管理员登 frps-panel 建号」那套申请审核界面
+              （筛选条 / 申请卡片 / 审核与编辑弹窗）已随流程退役一并删除，
+              下面只剩节点与端口管理。 */}
+          <AdminFrpRental />
+          <Separator className="my-8" />
+
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => void loadFrp()}>
+              <Button variant="outline" size="sm" onClick={() => void loadFrpNodes()}>
                 <RefreshCw className="h-3.5 w-3.5" />
                 {t("adm.351")}
               </Button>
@@ -4458,341 +4572,77 @@ export default function AdminPage() {
             </Button>
           </div>
 
-          {/* 申请分类筛选：数字是各分类的条数 */}
-          <div className="mb-4 flex flex-wrap gap-2">
-            {FRP_FILTERS.map((f) => {
-              const n = f.key === "" ? frpApps.length : filterFrpApps(frpApps, f.key).length
-              const active = frpFilter === f.key
-              return (
-                <Button
-                  key={f.key || "all"}
-                  size="sm"
-                  variant={active ? "default" : "outline"}
-                  onClick={() => setFrpFilter(f.key)}
-                >
-                  {t(f.label)}
-                  <span className="ml-1.5 tabular-nums opacity-70">{n}</span>
-                </Button>
-              )
-            })}
-          </div>
-
-          {frpLoading ? (
-            <LoadingBlock variant="list" />
-          ) : (
-            <div className="space-y-4">
-              {frpApps.length === 0 ? (
-                <EmptyState
-                  title={t("adm.254")}
-                  description={t("adm.255")}
-                />
-              ) : filterFrpApps(frpApps, frpFilter).length === 0 ? (
-                <EmptyState
-                  title={t("adm.985", { v0: t(FRP_FILTERS.find((f) => f.key === frpFilter)?.label ?? "") })}
-                  description={t("adm.256")}
-                />
-              ) : (
-                <div className="space-y-3">
-                  {filterFrpApps(frpApps, frpFilter).map((a) => (
-                    <div key={a.id} className="rounded-lg border bg-card p-4">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="space-y-1">
-                          <p className="text-sm font-medium">
-                            {a.siteUsername}
-                            <span className="ml-2 font-mono text-xs text-muted-foreground">
-                              {a.frpUser}
-                            </span>
-                            <Badge
-                              variant={
-                                a.status === "pending"
-                                  ? "secondary"
-                                  : a.status === "approved"
-                                    ? "success"
-                                    : "destructive"
-                              }
-                              className="ml-2"
-                            >
-                              {a.status === "pending"
-                                ? t("adm.150")
-                                : a.status === "approved"
-                                  ? t("adm.151")
-                                  : t("adm.152")}
-                            </Badge>
-                          </p>
-                          <p className="text-xs text-muted-foreground">{t("adm.986", { v0: a.nodeName, v1: a.ports.join(", ") })}{/* 免账号的节点没有密码可看，别展示成空白让人以为漏了 */}
-                            {a.needAccount ? (
-                              <>{t("adm.987", { v0: " " })}<code className="font-mono">{a.frpPassword}</code>
-                              </>
-                            ) : (
-                              t("adm.988")
-                            )}
-                          </p>
-                          <p className="text-xs text-muted-foreground">{t("adm.989", { v0: a.notifyEmail, v1: fmtTime(a.createdAt) })}</p>
-                          {a.tunnels.length > 0 && (
-                            <p className="font-mono text-xs text-muted-foreground">
-                              {a.tunnels
-                                .map(
-                                  (t) =>
-                                    `${t.name}(${t.type} ${t.remotePort}->${t.localPort})`
-                                )
-                                .join("、")}
-                            </p>
-                          )}
-                          {a.remark && (
-                            <p className="text-xs text-muted-foreground">{t("adm.990", { v0: a.remark })}</p>
-                          )}
-                          {a.reviewNote && (
-                            <p className="text-xs text-muted-foreground">{t("adm.991", { v0: a.reviewNote })}</p>
-                          )}
+          <div>
+            <h3 className="mb-2 text-sm font-medium">{t("adm.992", { v0: frpNodes.length })}</h3>
+            <div className="rounded-lg border bg-card">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t("adm.356")}</TableHead>
+                    <TableHead>serverAddr</TableHead>
+                    <TableHead>{t("adm.357")}</TableHead>
+                    <TableHead>{t("adm.358")}</TableHead>
+                    <TableHead className="w-28" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {frpNodes.map((n) => (
+                    <TableRow key={n.id}>
+                      <TableCell className="text-sm">
+                        {n.name}
+                        {n.region && (
+                          <span className="ml-1 text-xs text-muted-foreground">
+                            {n.region}
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {n.serverAddr}:{n.serverPort}
+                      </TableCell>
+                      <TableCell className="text-xs">{t("adm.993", { v0: n.portMin, v1: n.portMax, v2: n.maxPorts })}</TableCell>
+                      <TableCell className="text-xs">{n.usedPorts}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              setNodeForm({
+                                id: n.id,
+                                name: n.name,
+                                region: n.region ?? "",
+                                serverAddr: n.serverAddr,
+                                serverPort: String(n.serverPort),
+                                authToken: n.authToken,
+                                portMin: String(n.portMin),
+                                portMax: String(n.portMax),
+                                maxPorts: String(n.maxPorts),
+                                note: n.note ?? "",
+                                status: n.status ?? "unknown",
+                                statusNote: n.statusNote ?? "",
+                                authMode: n.authMode ?? "token",
+                              })
+                              setNodeOpen(true)
+                            }}
+                          >
+                            {t("adm.359")}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() => void handleDeleteNode(n.id)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
                         </div>
-                        {a.status === "pending" && (
-                          <div className="flex items-center gap-2">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => openFrpEdit(a)}
-                              disabled={frpBusy}
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                              {t("adm.1231")}
-                            </Button>
-                            <Button
-                              size="sm"
-                              onClick={() => openReview(a, "approve")}
-                              disabled={frpBusy}
-                            >
-                              <CheckCircle2 className="h-3.5 w-3.5" />
-                              {t("adm.353")}
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => openReview(a, "reject")}
-                              disabled={frpBusy}
-                            >
-                              <XCircle className="h-3.5 w-3.5" />
-                              {t("adm.354")}
-                            </Button>
-                          </div>
-                        )}
-                        {a.status !== "pending" && (
-                          <div className="flex items-center gap-2">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="text-muted-foreground hover:text-destructive"
-                              onClick={() => void handleRevokeFrp(a)}
-                              disabled={frpBusy}
-                            >
-                              <RotateCcw className="h-3.5 w-3.5" />
-                              {t("adm.355")}
-                            </Button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                      </TableCell>
+                    </TableRow>
                   ))}
-                </div>
-              )}
-
-              <Separator />
-
-              <div>
-                <h3 className="mb-2 text-sm font-medium">{t("adm.992", { v0: frpNodes.length })}</h3>
-                <div className="rounded-lg border bg-card">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>{t("adm.356")}</TableHead>
-                        <TableHead>serverAddr</TableHead>
-                        <TableHead>{t("adm.357")}</TableHead>
-                        <TableHead>{t("adm.358")}</TableHead>
-                        <TableHead className="w-28" />
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {frpNodes.map((n) => (
-                        <TableRow key={n.id}>
-                          <TableCell className="text-sm">
-                            {n.name}
-                            {n.region && (
-                              <span className="ml-1 text-xs text-muted-foreground">
-                                {n.region}
-                              </span>
-                            )}
-                          </TableCell>
-                          <TableCell className="font-mono text-xs">
-                            {n.serverAddr}:{n.serverPort}
-                          </TableCell>
-                          <TableCell className="text-xs">{t("adm.993", { v0: n.portMin, v1: n.portMax, v2: n.maxPorts })}</TableCell>
-                          <TableCell className="text-xs">{n.usedPorts}</TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => {
-                                  setNodeForm({
-                                    id: n.id,
-                                    name: n.name,
-                                    region: n.region ?? "",
-                                    serverAddr: n.serverAddr,
-                                    serverPort: String(n.serverPort),
-                                    authToken: n.authToken,
-                                    portMin: String(n.portMin),
-                                    portMax: String(n.portMax),
-                                    maxPorts: String(n.maxPorts),
-                                    note: n.note ?? "",
-                                    status: n.status ?? "unknown",
-                                    statusNote: n.statusNote ?? "",
-                                    authMode: n.authMode ?? "token",
-                                  })
-                                  setNodeOpen(true)
-                                }}
-                              >
-                                {t("adm.359")}
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                                onClick={() => void handleDeleteNode(n.id)}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              </div>
+                </TableBody>
+              </Table>
             </div>
-          )}
-
-          {/* frp 审核意见弹窗 */}
-          <Dialog open={frpReviewTarget !== null} onOpenChange={(o) => !o && setFrpReviewTarget(null)}>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>
-                  {frpReviewTarget?.action === "approve" ? t("adm.994") : t("adm.995")}
-                </DialogTitle>
-                <DialogDescription>{t("adm.996", { v0: frpReviewTarget?.app.siteUsername, v1: frpReviewTarget?.app.nodeName, v2: frpReviewTarget?.action === "approve" ? t("adm.997") : "。" })}</DialogDescription>
-              </DialogHeader>
-              <div className="space-y-2">
-                <Label htmlFor="frpReviewNote">
-                  {frpReviewTarget?.action === "approve" ? t("adm.998") : t("adm.999")}
-                </Label>
-                <Textarea
-                  id="frpReviewNote"
-                  rows={3}
-                  placeholder={
-                    frpReviewTarget?.action === "reject"
-                      ? t("adm.153")
-                      : t("adm.154")
-                  }
-                  value={frpReviewNote}
-                  onChange={(e) => setFrpReviewNote(e.target.value)}
-                />
-                {frpReviewTarget?.action === "approve" &&
-                  (frpReviewTarget.app.needAccount ? (
-                    <p className="text-xs text-muted-foreground">
-                      {t("adm.360")}
-                      <strong>{t("adm.1000")}</strong>（<code className="font-mono">{frpReviewTarget.app.frpPassword}</code>）
-                      {t("adm.361")}
-                    </p>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">{t("adm.1001")}<code className="font-mono">auth.token</code>，
-                      <strong>{t("adm.1002")}</strong>{t("adm.1003")}</p>
-                  ))}
-              </div>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setFrpReviewTarget(null)} disabled={frpBusy}>
-                  {t("adm.362")}
-                </Button>
-                <Button
-                  variant={frpReviewTarget?.action === "reject" ? "destructive" : "default"}
-                  onClick={() => void confirmFrpReview()}
-                  disabled={frpBusy}
-                >
-                  {frpBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}{t("adm.1004", { v0: frpReviewTarget?.action === "approve" ? t("adm.1005") : t("adm.1006") })}</Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-
-          {/* frp 编辑申请弹窗：改账号名/密码/端口/通知邮箱/备注（只对待审核生效） */}
-          <Dialog open={frpEditTarget !== null} onOpenChange={(o) => !o && setFrpEditTarget(null)}>
-            <DialogContent className="max-h-[85vh] overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle>{t("adm.1231")}</DialogTitle>
-                <DialogDescription>
-                  {t("adm.1232", { v0: frpEditTarget?.siteUsername ?? "", v1: frpEditTarget?.nodeName ?? "" })}
-                </DialogDescription>
-              </DialogHeader>
-              <div className="space-y-3">
-                <div className="space-y-2">
-                  <Label htmlFor="frpEditUser">{t("adm.1233")}</Label>
-                  <Input
-                    id="frpEditUser"
-                    className="font-mono"
-                    disabled={!frpEditTarget?.needAccount}
-                    value={frpEditDraft.frpUser}
-                    onChange={(e) => setFrpEditDraft((d) => ({ ...d, frpUser: e.target.value }))}
-                  />
-                  <p className="text-xs text-muted-foreground">{t("adm.1241")}</p>
-                </div>
-                {frpEditTarget?.needAccount && (
-                  <div className="space-y-2">
-                    <Label htmlFor="frpEditPw">{t("settings.pw.new")}</Label>
-                    <Input
-                      id="frpEditPw"
-                      className="font-mono"
-                      value={frpEditDraft.frpPassword}
-                      onChange={(e) => setFrpEditDraft((d) => ({ ...d, frpPassword: e.target.value }))}
-                    />
-                  </div>
-                )}
-                <div className="space-y-2">
-                  <Label htmlFor="frpEditPorts">{t("adm.1234")}</Label>
-                  <Input
-                    id="frpEditPorts"
-                    className="font-mono"
-                    placeholder="23457-23460, 39000"
-                    value={frpEditDraft.ports}
-                    onChange={(e) => setFrpEditDraft((d) => ({ ...d, ports: e.target.value }))}
-                  />
-                  <p className="text-xs text-muted-foreground">{t("adm.1242", { v0: frpEditTarget?.nodeName ?? "" })}</p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="frpEditMail">{t("adm.1235")}</Label>
-                  <Input
-                    id="frpEditMail"
-                    value={frpEditDraft.notifyEmail}
-                    onChange={(e) => setFrpEditDraft((d) => ({ ...d, notifyEmail: e.target.value }))}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="frpEditRemark">{t("adm.1236")}</Label>
-                  <Textarea
-                    id="frpEditRemark"
-                    rows={2}
-                    value={frpEditDraft.remark}
-                    onChange={(e) => setFrpEditDraft((d) => ({ ...d, remark: e.target.value }))}
-                  />
-                </div>
-              </div>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setFrpEditTarget(null)} disabled={frpBusy}>
-                  {t("adm.362")}
-                </Button>
-                <Button onClick={() => void handleSaveFrpEdit()} disabled={frpBusy}>
-                  {frpBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                  {t("adm.1237")}
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+          </div>
         </TabsContent>
 
         <TabsContent value="proxy">
@@ -6581,6 +6431,199 @@ export default function AdminPage() {
                 </div>
               </CardContent>
             </Card>
+
+            {/* 手动发放订阅（2026-10-10 站长要求）：按用户名批量发放。
+                ⚠️ 服务端**先全量校验再动手** —— 有一个用户名不存在、或该用户还没开通
+                中转站，就整体报错、一个订阅都不发（不会留下「部分成功」要收尾）。 */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t("adm.grantSub.title")}</CardTitle>
+                <CardDescription>{t("adm.grantSub.desc")}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="grantSubUsers">{t("adm.grantSub.users")}</Label>
+                  <Textarea
+                    id="grantSubUsers"
+                    rows={5}
+                    className="font-mono text-xs"
+                    placeholder={"alice\nbob\ncharlie"}
+                    value={grantSubUsers}
+                    onChange={(e) => setGrantSubUsers(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">{t("adm.grantSub.usersHint")}</p>
+                </div>
+
+                <div className="flex flex-wrap items-end gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="grantSubPlan">{t("adm.grantSub.plan")}</Label>
+                    <Input
+                      id="grantSubPlan"
+                      type="number"
+                      min={1}
+                      className="w-36"
+                      placeholder="1"
+                      value={grantSubPlanId}
+                      onChange={(e) => setGrantSubPlanId(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="grantSubCount">{t("adm.grantSub.count")}</Label>
+                    <Input
+                      id="grantSubCount"
+                      type="number"
+                      min={1}
+                      max={10}
+                      className="w-28"
+                      value={grantSubCount}
+                      onChange={(e) => setGrantSubCount(e.target.value)}
+                    />
+                  </div>
+                  <Button onClick={() => void handleGrantSubscriptions()} disabled={grantSubBusy}>
+                    {grantSubBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                    {t("adm.grantSub.submit")}
+                  </Button>
+                </div>
+
+                {/* 可选套餐：点一下就把 ID 填进上面的输入框。读不到就整块不显示（退化手输） */}
+                {subPlans.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{t("adm.grantSub.plansHint")}</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {subPlans.map((p) => (
+                        <button
+                          key={p.planId}
+                          type="button"
+                          onClick={() => setGrantSubPlanId(String(p.planId))}
+                          className={`rounded-md border px-2 py-1 text-xs transition-colors hover:bg-accent ${
+                            String(p.planId) === grantSubPlanId ? "border-primary bg-accent" : ""
+                          }`}
+                        >
+                          <span className="font-mono">{p.planId}</span>
+                          {p.title && <span className="ml-1.5">{p.title}</span>}
+                          {p.maxPurchasePerUser > 0 && (
+                            <span className="ml-1.5 text-muted-foreground">
+                              {t("adm.grantSub.planLimit").replace(
+                                "{n}",
+                                String(p.maxPurchasePerUser)
+                              )}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {grantSubResults.length > 0 && (
+                  <div className="space-y-1.5 rounded-md border p-3 text-sm">
+                    {grantSubResults.map((r) => (
+                      <div key={r.username} className="flex flex-wrap items-center gap-2">
+                        {r.ok ? (
+                          <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                        ) : (
+                          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                        )}
+                        <span className="font-mono">{r.username}</span>
+                        <span className="text-muted-foreground">
+                          {t("adm.grantSub.granted").replace("{n}", String(r.granted))}
+                        </span>
+                        {r.message && (
+                          <span className="text-xs text-muted-foreground">{r.message}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* 「付费」分组授权（2026-10-11 站长要求）—— 放在「手动发放订阅」旁边。
+                ⚠️ 与发放订阅是**两件事**：这里只授权「建 Key 时能选到付费分组」，
+                **永久有效、不发任何额度**。落库后由后端 group-sync 同步进 NewAPI
+                （约 60 秒一轮），所以点完授权不会立刻生效，稍等再看面板。 */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t("adm.prem.title")}</CardTitle>
+                <CardDescription>{t("adm.prem.desc")}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="premUsers">{t("adm.prem.users")}</Label>
+                  <Textarea
+                    id="premUsers"
+                    rows={4}
+                    className="font-mono text-xs"
+                    placeholder={"alice\nbob"}
+                    value={premUsers}
+                    onChange={(e) => setPremUsers(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">{t("adm.prem.usersHint")}</p>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button onClick={() => void handleGrantPremium()} disabled={premBusy}>
+                    {premBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                    {t("adm.prem.grant")}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => void loadPremiumGrants()}
+                    disabled={premListBusy}
+                  >
+                    {premListBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                    {t("adm.prem.refresh")}
+                  </Button>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>{t("adm.prem.listTitle")}</Label>
+                  {premGrants.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      {premLoaded ? t("adm.prem.empty") : t("adm.prem.notLoaded")}
+                    </p>
+                  ) : (
+                    <div className="rounded-md border">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>{t("adm.prem.colUser")}</TableHead>
+                            <TableHead>{t("adm.prem.colTime")}</TableHead>
+                            <TableHead>{t("adm.prem.colBy")}</TableHead>
+                            <TableHead className="text-right">
+                              {t("adm.prem.colAction")}
+                            </TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {premGrants.map((g) => (
+                            <TableRow key={g.userId}>
+                              <TableCell className="font-mono">{g.username}</TableCell>
+                              <TableCell className="text-muted-foreground">
+                                {new Date(g.grantedAt).toLocaleString("zh-CN")}
+                              </TableCell>
+                              <TableCell className="text-muted-foreground">
+                                {g.grantedBy ?? "—"}
+                              </TableCell>
+                              <TableCell className="text-right">
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={premBusy}
+                                  onClick={() => void handleRevokePremium(g.username)}
+                                >
+                                  {t("adm.prem.revoke")}
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
           </div>
         </TabsContent>
 
@@ -6818,6 +6861,26 @@ export default function AdminPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">{t("adm.1084", { v0: wb2apiBindings.length })}</CardTitle>
+                {/* 失效账号处理（2026-10-10）：上游把账号判死（如 11140）时需要通知捐献者重新登录 */}
+                <div className="flex flex-wrap items-center gap-2 pt-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={wbInvalidBusy}
+                    onClick={() => void scanWbInvalid()}
+                  >
+                    {t("adm.wbInvalidScan")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    disabled={wbInvalidBusy}
+                    onClick={() => void notifyWbInvalid()}
+                  >
+                    {t("adm.wbInvalidNotify")}
+                  </Button>
+                  <span className="text-xs text-muted-foreground">{t("adm.wbInvalidHint")}</span>
+                </div>
                 <CardDescription>
                   {t("adm.527")}
                   {t("adm.528")}
@@ -6894,6 +6957,21 @@ export default function AdminPage() {
                     </p>
                   </div>
                   <Switch checked={qoder2apiEnabled} onCheckedChange={setQoder2apiEnabled} />
+                </div>
+                {/* 允许用户自选的版本（与 wb 卡的两个开关同款）：关掉的版本在捐献页隐藏 */}
+                <div className="flex items-center justify-between rounded-md border px-4 py-3">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">{t("adm.q2RealmCn")}</p>
+                    <p className="text-xs text-muted-foreground">{t("adm.q2RealmCnHint")}</p>
+                  </div>
+                  <Switch checked={qoder2apiRealmCn} onCheckedChange={setQoder2apiRealmCn} />
+                </div>
+                <div className="flex items-center justify-between rounded-md border px-4 py-3">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">{t("adm.q2RealmIntl")}</p>
+                    <p className="text-xs text-muted-foreground">{t("adm.q2RealmIntlHint")}</p>
+                  </div>
+                  <Switch checked={qoder2apiRealmIntl} onCheckedChange={setQoder2apiRealmIntl} />
                 </div>
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
@@ -7988,6 +8066,30 @@ export default function AdminPage() {
                     </div>
                   ))}
                   <p className="text-xs text-muted-foreground">{t("adm.1306")}</p>
+                </CardContent>
+              </Card>
+
+              {/* 自定义 AI 渠道捐献的 baseUrl 黑名单：**前缀匹配**，命中即不允许捐献。
+                  与上面两张捐献侧开关卡片放在一起。空 = 不启用（可清空）。 */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">
+                    {t("adm.donationUrlBlocklistTitle")}
+                  </CardTitle>
+                  <CardDescription>{t("adm.donationUrlBlocklistDesc")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  <Textarea
+                    rows={4}
+                    className="font-mono text-xs"
+                    aria-label={t("adm.donationUrlBlocklistTitle")}
+                    placeholder="https://token.example.com"
+                    value={donationUrlBlocklist}
+                    onChange={(e) => setDonationUrlBlocklist(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("adm.donationUrlBlocklistHint")}
+                  </p>
                 </CardContent>
               </Card>
 
@@ -11215,19 +11317,6 @@ const INVITE_FILTERS: { key: string; label: string }[] = [
 function filterInvites(list: AdminInvite[], filter: string): AdminInvite[] {
   if (!filter) return list
   return list.filter((inv) => inviteBucket(inv) === filter)
-}
-
-/** frp 申请分类：待审核 / 已通过 / 已拒绝 */
-const FRP_FILTERS: { key: string; label: string }[] = [
-  { key: "", label: "adm.1210" },
-  { key: "pending", label: "adm.1211" },
-  { key: "approved", label: "adm.1212" },
-  { key: "rejected", label: "adm.1213" },
-]
-
-function filterFrpApps(list: AdminFrpApplication[], filter: string): AdminFrpApplication[] {
-  if (!filter) return list
-  return list.filter((a) => a.status === filter)
 }
 
 /** 按类型渲染捐献详情（payload 结构随类型不同） */

@@ -62,7 +62,7 @@ async function usedCount(code: string): Promise<number> {
 }
 
 /** 无任何模块权限的「普通邀请码」（用户建码时不勾任何模块） */
-const NO_PERMS = JSON.stringify({ r2: false, ai: false, frp: false, proxy: false })
+const NO_PERMS = JSON.stringify({ r2: false, ai: false, proxy: false })
 
 beforeEach(async () => {
   // app_settings 在用例间共享（同一个 D1），逐条清掉本文件涉及的键，避免互相污染。
@@ -96,7 +96,6 @@ describe("限时开放注册", () => {
     expect(JSON.parse(row!.permissions!)).toEqual({
       r2: true,
       ai: false,
-      frp: false,
       proxy: false,
       doulor: false,
     })
@@ -106,7 +105,7 @@ describe("限时开放注册", () => {
     // 下发到前端的用户对象也不能显示 AI 权限
     const body = await res.json<{ user: { permissions: Record<string, boolean> } }>()
     expect(body.user.permissions.ai).toBe(false)
-    expect(body.user.permissions.frp).toBe(false)
+    expect(body.user.permissions.doulor).toBe(false)
     expect(body.user.permissions.proxy).toBe(false)
   })
 
@@ -135,7 +134,7 @@ describe("限时开放注册", () => {
   it("提供邀请码时仍按码走：采用码上权限、消费码、记录 invite_code_id", async () => {
     await setSetting("open_registration", "1")
     const code = `ORC-${uuid().slice(0, 8)}`
-    await makeInvite(code, JSON.stringify({ r2: false, ai: true, frp: false, proxy: false }))
+    await makeInvite(code, JSON.stringify({ r2: false, ai: true, proxy: false }))
 
     const u = randUser("orcode")
     const res = await fetchSelf(registerReq(u, `${u}@example.com`, code, "10.9.5.1"))
@@ -145,7 +144,6 @@ describe("限时开放注册", () => {
     expect(JSON.parse(row!.permissions!)).toEqual({
       r2: false,
       ai: true,
-      frp: false,
       proxy: false,
       doulor: false,
     })
@@ -173,7 +171,6 @@ describe("限时开放注册", () => {
     expect(JSON.parse(row!.permissions!)).toEqual({
       r2: true,
       ai: false,
-      frp: false,
       proxy: false,
       doulor: false,
     })
@@ -182,7 +179,7 @@ describe("限时开放注册", () => {
   it("开放期间：已被用尽的邀请码也回退为开放注册", async () => {
     await setSetting("open_registration", "1")
     const code = `ORX-${uuid().slice(0, 8)}`
-    await makeInvite(code, JSON.stringify({ r2: false, ai: true, frp: false, proxy: false }), 1)
+    await makeInvite(code, JSON.stringify({ r2: false, ai: true, proxy: false }), 1)
     // 直接把码标成已用尽，模拟「链接被转发几手、名额已满」
     await env.DB.prepare("UPDATE invite_codes SET used_count = 1 WHERE code = ?")
       .bind(code)
@@ -242,7 +239,7 @@ describe("开放注册期间：不含权限的邀请码不消耗次数", () => {
     const code = `ORP-${uuid().slice(0, 8)}`
     await makeInvite(
       code,
-      JSON.stringify({ r2: false, ai: true, frp: false, proxy: false }),
+      JSON.stringify({ r2: false, ai: true, proxy: false }),
       1
     )
 
@@ -258,7 +255,7 @@ describe("开放注册期间：不含权限的邀请码不消耗次数", () => {
     const code = `ORB-${uuid().slice(0, 8)}`
     await makeInvite(
       code,
-      JSON.stringify({ r2: true, ai: false, frp: false, proxy: false }),
+      JSON.stringify({ r2: true, ai: false, proxy: false }),
       1
     )
 
@@ -268,7 +265,6 @@ describe("开放注册期间：不含权限的邀请码不消耗次数", () => {
     expect(JSON.parse((await userRow(u))!.permissions!)).toEqual({
       r2: true,
       ai: false,
-      frp: false,
       proxy: false,
       doulor: false,
     })

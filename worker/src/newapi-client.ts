@@ -247,6 +247,64 @@ export async function findUserByUsername(
   return match
 }
 
+/**
+ * 按邮箱找账号（NewAPI 的 search 接口同时匹配用户名 / 邮箱 / 显示名）。
+ *
+ * 为什么要按邮箱找：**中转站侧的用户名不一定等于我们站的用户名** ——
+ * 账号是用 OIDC 在中转站登录时创建/关联的，用户名可能被那边改过或另有后缀。
+ * 2026-10-12 实例：用户 `masters` 在中转站的账号叫 `master3test`
+ * （oidc_id 就是他，等于绑好了，但我们按用户名永远找不到 ⇒ 一直提示"还没有你的账号"）。
+ */
+export async function findUserByEmail(
+  env: Env,
+  email: string
+): Promise<NewApiUser | null> {
+  const target = email.trim().toLowerCase()
+  if (!target) return null
+  const res = await newApiFetch(
+    env,
+    "/api/user/search?keyword=" + encodeURIComponent(email.trim()),
+    { method: "GET" }
+  )
+  const data = await unwrap<NewApiUser[] | { items?: NewApiUser[] }>(res, "查询账号")
+  const list = Array.isArray(data) ? data : (data.items ?? [])
+  const match = list.find((u) => String(u.email ?? "").toLowerCase() === target)
+  if (!match || match.DeletedAt) return null
+  return match
+}
+
+/**
+ * 解析「**我**在中转站的账号」——绑定与开通的唯一入口（2026-10-12）。
+ *
+ * 🔴 认人的权威依据是 `oidc_id === 我的 cloud 用户 id`：那是 OIDC 登录时由本站签发的
+ * `sub`，别人伪造不了、也不会随用户名变化。用户名只是**候选**（可能被那边改过），
+ * 邮箱是次一级候选。
+ *
+ * 返回：
+ *   · `mine`   —— oidc_id 命中的那个账号（能安全绑定）
+ *   · `others` —— 找到但**不属于我**的候选（用于给出「同名账号不是用 Doulor Cloud 建的」这类提示，
+ *                 绝不能拿去绑定）
+ */
+export async function resolveMyRelayAccount(
+  env: Env,
+  opts: { userId: string; username: string; emails: string[] }
+): Promise<{ mine: NewApiUser | null; others: NewApiUser[] }> {
+  const found = new Map<number, NewApiUser>()
+  const take = (u: NewApiUser | null) => {
+    if (u) found.set(u.id, u)
+  }
+  // 三个候选来源都试；任一失败不影响其它（探测阶段不能因为一个报错就整体失败）
+  await Promise.all([
+    findUserByUsername(env, opts.username).then(take).catch(() => undefined),
+    ...opts.emails
+      .filter(Boolean)
+      .map((e) => findUserByEmail(env, e).then(take).catch(() => undefined)),
+  ])
+  const all = [...found.values()]
+  const mine = all.find((u) => u.oidc_id === opts.userId) ?? null
+  return { mine, others: all.filter((u) => u.id !== mine?.id) }
+}
+
 export interface NewApiUser {
   id: number
   username: string
@@ -424,30 +482,10 @@ export async function adminSetUserPassword(
   await unwrap(res, "设置账号密码")
 }
 
-/**
- * 管理员把用户转到指定分组（`PUT /api/user`）。
- *
- * NewAPI 的 UpdateUser 接口要求 `id` + `username`（用户名非空），
- * 分组字段 `group` 会随 `EditWithTx` 的 map 更新一并落库（实测可用）。
- * 用于「完成 cloud↔NewAPI 绑定后，把用户转进 0 倍率免费组」，
- * 使「绑定」成为通往免费的唯一闸门（未绑定者留在 default 组、按倍率烧额度）。
- */
-export async function adminSetUserGroup(
-  env: Env,
-  userId: number,
-  username: string,
-  group: string
-): Promise<void> {
-  const res = await newApiFetch(env, "/api/user", {
-    method: "PUT",
-    body: JSON.stringify({
-      id: userId,
-      username,
-      group,
-    }),
-  })
-  await unwrap(res, "设置账号分组")
-}
+// 这里原本有一个 `adminSetUserGroup`（管理员把用户转到指定分组），2026-10-13 删除。
+// 它对应的那套「绑定后转进 0 倍率免费组，让绑定成为通往免费的唯一闸门」的方案已作废：
+// 仓库里从来没有过「免费组」这个设置项，全仓也没有任何调用点。
+// 留着它只会让下一个人以为绑定流程会改分组。
 
 // ---- 用户自助注册（公开路由）----
 
@@ -479,18 +517,44 @@ function cachePut(key: string, value: unknown): void {
  * 否则同一个额度在两边显示成不同货币（本实例为 CNY，即 500000 quota = ¥1）。
  * 读取失败时回退为 USD，不影响主流程。
  */
-export async function getCurrencyInfo(
-  env: Env
-): Promise<{ symbol: string; code: string; perUnit: number }> {
-  const cached = cacheTake<{ symbol: string; code: string; perUnit: number }>(
-    "currency",
-    60_000
-  )
+/**
+ * 读 NewAPI 展示币种（无需鉴权），带缓存 + 硬超时。
+ *
+ * 🔴 2026-10-12（站长反馈 AI 中转站页很卡）：实测上游 `api.doulor.cn` 又慢又不稳 ——
+ * 同一个 `/api/status` 三次分别 16.2s / 1.4s / 7.1s，`/api/subscription/plans`
+ * 一次 27.8s（连「401 拒绝」都要等这么久）。所以：
+ *   · **必须带超时**（原先这里没有超时，上游黑洞时页面就永远转圈）；
+ *   · TTL 从 60s 拉到 10 分钟 —— 币种几乎不变，没必要每分钟去问一次；
+ *   · 再给一个不碰上游的 `peekCurrency`，供首屏使用（见 handlers/newapi.ts）。
+ */
+const CURRENCY_TTL_MS = 10 * 60 * 1000
+const CURRENCY_TIMEOUT_MS = 2500
+
+export interface NewApiCurrency {
+  symbol: string
+  code: string
+  perUnit: number
+}
+
+/** 只读缓存、不打上游 —— 首屏用（拿不到就用兜底值，由 /dev/usage 随后补正） */
+export function peekCurrency(fallbackPerUnit?: number): NewApiCurrency {
+  const hit = cacheTake<NewApiCurrency>("currency", CURRENCY_TTL_MS)
+  if (hit) return hit
+  return {
+    symbol: "$",
+    code: "USD",
+    perUnit: fallbackPerUnit || 500000,
+  }
+}
+
+export async function getCurrencyInfo(env: Env): Promise<NewApiCurrency> {
+  const cached = cacheTake<NewApiCurrency>("currency", CURRENCY_TTL_MS)
   if (cached) return cached
   try {
     const res = await newApiFetch(env, "/api/status", {
       method: "GET",
       auth: "none",
+      signal: AbortSignal.timeout(CURRENCY_TIMEOUT_MS),
     })
     const data = await unwrap<Record<string, unknown>>(res, "读取站点信息")
     const code = String(data.quota_display_type ?? "USD").toUpperCase()
@@ -522,8 +586,9 @@ export interface NewApiHealth {
  * 页面就一直转圈。5 秒拿不到结果直接当离线，比挂死强。
  */
 export async function checkHealth(env: Env): Promise<NewApiHealth> {
-  // 成功缓存 30 秒（徽章不需要秒级新鲜）；失败只缓存 10 秒，尽快恢复
-  const cached = cacheTake<NewApiHealth>("health", 30_000)
+  // 成功缓存 120 秒（徽章不需要秒级新鲜，见 2026-10-12 站长反馈的性能问题）；
+  // 失败缓存 60 秒，尽快恢复但不连续打一个慢上游。
+  const cached = cacheTake<NewApiHealth>("health", 120_000)
   if (cached) return cached
   if (!(await isNewApiConfigured(env))) {
     return { online: false, latencyMs: -1, version: null }
@@ -533,7 +598,7 @@ export async function checkHealth(env: Env): Promise<NewApiHealth> {
     const res = await newApiFetch(env, "/api/status", {
       method: "GET",
       auth: "none",
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(3000),
     })
     const data = await unwrap<Record<string, unknown>>(res, "健康检查")
     const value: NewApiHealth = {
@@ -544,10 +609,10 @@ export async function checkHealth(env: Env): Promise<NewApiHealth> {
     cachePut("health", value)
     return value
   } catch {
-    // 失败结果只缓存 10 秒（成功 30 秒）：既不连续重试打爆上游，又能较快恢复。
-    // 写法：把时间戳往前拨 20 秒 ⇒ 离 30 秒的 TTL 只剩 10 秒。
+    // 失败结果只缓存 60 秒（成功 120 秒）：既不连续重试打爆上游，又能较快恢复。
+    // 写法：把时间戳往前拨 60 秒 ⇒ 离 120 秒的 TTL 只剩 60 秒。
     newapiGlobalCache.set("health", {
-      at: Date.now() - 20_000,
+      at: Date.now() - 60_000,
       value: { online: false, latencyMs: -1, version: null },
     })
     return { online: false, latencyMs: -1, version: null }
@@ -1768,7 +1833,8 @@ export async function fetchUserSubscriptions(
   const res = await newApiFetch(
     env,
     `/api/subscription/admin/users/${newapiUserId}/subscriptions`,
-    { method: "GET" }
+    // ⚠️ 上游会慢到几十秒（2026-10-12 实测），必须带超时，不然页面一直转圈
+    { method: "GET", signal: AbortSignal.timeout(4000) }
   )
   const data = await unwrap<{ subscription?: Record<string, unknown> }[]>(
     res,
@@ -1810,13 +1876,34 @@ export async function listUserSubscriptions(
  * `end_time asc, id asc` 逐张接力，所以「总额度」= 各张之和。前端要按套餐类型
  * 分段展示这个总额，故这里必须把整份列表交出去，不能只取第一条。
  */
+/**
+ * 管理员查询某用户的**全部** active 订阅。
+ *
+ * 一个用户可能同时持有多张订阅（免费套餐 + 各档邀请/奖励套餐），消费时按
+ * `end_time asc, id asc` 逐张接力，所以「总额度」= 各张之和。前端要按套餐类型
+ * 分段展示这个总额，故这里必须把整份列表交出去，不能只取第一条。
+ *
+ * 🔴 2026-10-12：加 20 秒 TTL 缓存（站长反馈页面卡）。
+ * ⚠️ 2026-10-13：这里原本还有一个 `invalidateUserSubscriptions` 用于「兑换 / 领取订阅后
+ * 主动失效」，已按站长要求删除 —— 它从来没有任何调用点，那套「订阅变动后即时失效」的做法
+ * 已作废。因此这个缓存**只能靠 20 秒 TTL 自己过期**：订阅刚变动时，用户最多看到 20 秒的
+ * 旧额度。这是已知且被接受的取舍（缓存就是为「页面卡」加的，去掉它反而更糟）。
+ * 缓存里存的是**值**，调用方按约定不要改它。
+ */
+const USER_SUBS_TTL_MS = 20_000
+
 export async function listAllUserSubscriptions(
   env: Env,
   newapiUserId: number
 ): Promise<UserSubscriptionInfo[]> {
+  const key = `subs:${newapiUserId}`
+  const cached = cacheTake<UserSubscriptionInfo[]>(key, USER_SUBS_TTL_MS)
+  if (cached) return cached
   try {
     const all = await fetchUserSubscriptions(env, newapiUserId)
-    return all.filter((s) => s.status === "active")
+    const active = all.filter((s) => s.status === "active")
+    cachePut(key, active)
+    return active
   } catch (err) {
     console.error("查询用户订阅列表失败:", err)
     return []
@@ -1849,16 +1936,20 @@ export interface SubscriptionPlanInfo {
 export async function listSubscriptionPlans(
   env: Env
 ): Promise<SubscriptionPlanInfo[]> {
+  // 套餐定义是管理员维护的、极少变（2026-10-12 加缓存：上游实测能慢到 27.8s）
+  const cached = cacheTake<SubscriptionPlanInfo[]>("plans", 10 * 60 * 1000)
+  if (cached) return cached
   try {
     const res = await newApiFetch(env, "/api/subscription/plans", {
       method: "GET",
+      signal: AbortSignal.timeout(4000),
     })
     const data = await unwrap<{ plan?: Record<string, unknown> }[]>(
       res,
       "读取订阅套餐"
     )
     if (!Array.isArray(data)) return []
-    return data
+    const plans = data
       .map((d) => d.plan)
       .filter((p): p is Record<string, unknown> => Boolean(p))
       .map((p) => ({
@@ -1866,6 +1957,8 @@ export async function listSubscriptionPlans(
         title: String(p.title ?? ""),
         maxPurchasePerUser: Number(p.max_purchase_per_user ?? 0),
       }))
+    cachePut("plans", plans)
+    return plans
   } catch (err) {
     console.error("读取订阅套餐失败:", err)
     return []

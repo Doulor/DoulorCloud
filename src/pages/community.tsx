@@ -4,6 +4,7 @@ import { AlertCircle, ArrowLeft, Bell, Eye, FileQuestion, Flame, Heart, Image as
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
+import { useHideWater } from "@/hooks/use-plaza-pref"
 import { DataFade } from "@/components/data-fade"
 import { EmptyState } from "@/components/empty-state"
 import { CommunityFeedSkeleton, SkeletonList } from "@/components/skeletons"
@@ -67,15 +68,17 @@ function categoryLabel(defs: PostCategoryDef[], key: string, lang: "zh" | "en"):
 }
 
 /**
- * 第二层筛选（范围）的两个**哨兵值**。
+ * 第二层筛选（范围）的**哨兵值**：表示「全部」。
  *
  * 不用空串表示「全部」：Radix Select 里 `value=""` 是「清空」的保留值，
  * 拿它当普通选项会表现成「选了没反应」。用不可能与分类 key 撞车的哨兵值最省心
- * （分类 key 的格式被后端限制为 `[a-z0-9_-]`，不会出现下划线开头的双下划线形式）。
+ * （分类 key 的格式被后端限制为 `[a-z0-9_-]`）。
+ *
+ * 注：「不看水帖」原先是这里的第二个哨兵值（`__nowater`）。2026-10-12 站长要求
+ * 把它**从下拉里拿出来、做成记住的勾选**（见 `hooks/use-plaza-pref.ts`）——
+ * 这样它还能与「某个分类」叠加使用。
  */
 const SCOPE_ALL = "__all"
-/** 看全部，但把带「水帖」标记的分类排除掉 */
-const SCOPE_NO_WATER = "__nowater"
 
 /**
  * 社区列表的滚动位置记忆（用户反馈 d89b9a86）： * 从广场点进帖子后，返回时帖子「跑到下面去了」—— 点开帖子前存下 window.scrollY，
@@ -1684,8 +1687,13 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
   const [categories, setCategories] = React.useState<PostCategoryDef[]>([])
   /** 第一层筛选：排序方式 */
   const [sort, setSort] = React.useState<"latest" | "hot">("latest")
-  /** 第二层筛选：范围（全部 / 某个分类 / 不看水帖） */
+  /** 第二层筛选：范围（全部 / 某个分类） */
   const [scope, setScope] = React.useState<string>(SCOPE_ALL)
+  /**
+   * 「不看水帖」= **记住的勾选**（localStorage，长期生效），可与分类叠加。
+   * 原先它是范围下拉里的一个选项，每次刷新都要重选（站长 2026-10-12 要求拿出来）。
+   */
+  const [hideWater, setHideWater] = useHideWater()
   const [loading, setLoading] = React.useState(true)
   const [failed, setFailed] = React.useState(false)
   const [loadingMore, setLoadingMore] = React.useState(false)
@@ -1707,9 +1715,9 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
       const res = await communityApi.listPosts({
         cursor: c,
         sort,
-        // 哨兵值不当作分类传下去：「全部」两个参数都不传，「不看水帖」只传 excludeWater
-        category: scope !== SCOPE_ALL && scope !== SCOPE_NO_WATER ? scope : undefined,
-        excludeWater: scope === SCOPE_NO_WATER,
+        // 「全部」不传分类；「不看水帖」是独立勾选，可以和分类叠加
+        category: scope !== SCOPE_ALL ? scope : undefined,
+        excludeWater: hideWater,
       })
       // 追加翻页结果时必须按 id 去重（2026-10-09 排查「点赞时报 removeChild」）：
       // 「最热」排序的游标键是 `like_count + comment_count`，**这个值会变**——
@@ -1736,7 +1744,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
       setLoadingMore(false)
     }
     // ⚠️ 必须依赖 sort/scope：换筛选条件要生成新的 load，下面的 effect 才会重新拉第一页
-  }, [sort, scope])
+  }, [sort, scope, hideWater])
 
   /** 侧栏统计：失败不影响主流程，静默即可 */
   const loadStats = React.useCallback(async () => {
@@ -2037,7 +2045,8 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
           />
 
           {/* 两层筛选（2026-10-07 站长要求）
-              第一层：排序「最新 / 最热」；第二层：范围「全部 / 某个分类 / 不看水帖」 */}
+              第一层：排序「最新 / 最热」；第二层：范围「全部 / 某个分类」；
+              不看水帖 = 独立勾选（长期记住，可与分类叠加） */}
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <div className="flex items-center gap-0.5 rounded-md border p-0.5">
               {(["latest", "hot"] as const).map((s) => (
@@ -2062,7 +2071,6 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={SCOPE_ALL}>{t("cm.filter.all")}</SelectItem>
-                <SelectItem value={SCOPE_NO_WATER}>{t("cm.filter.noWater")}</SelectItem>
                 {categories.map((c) => (
                   <SelectItem key={c.key} value={c.key}>
                     {(lang === "en" ? c.en : c.zh) || c.key}
@@ -2070,6 +2078,19 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
                 ))}
               </SelectContent>
             </Select>
+            {/* 不看水帖：勾选即生效、长期记住（不用每次刷新重选） */}
+            <label
+              className="flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              title={t("cm.filter.noWaterHint")}
+            >
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 cursor-pointer accent-primary"
+                checked={hideWater}
+                onChange={(e) => setHideWater(e.target.checked)}
+              />
+              {t("cm.filter.noWater")}
+            </label>
           </div>
 
           <DataFade loading={loading} skeleton={<CommunityFeedSkeleton />}>

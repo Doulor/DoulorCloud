@@ -26,6 +26,7 @@ import {
 
 import { Button } from "@/components/ui/button"
 import { confirmDialog, promptDialog } from "@/components/confirm-dialog"
+import { OAuthEndpointsCard, copyText } from "@/components/oauth-endpoints"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
@@ -54,7 +55,7 @@ import {
   type OAuthClient,
 } from "@/services/api"
 import { fmtTime } from "@/lib/format"
-import { useT, tStatic } from "@/i18n"
+import { useT } from "@/i18n"
 
 const SCOPE_OPTIONS = [
   { value: "openid", label: "openid", hint: "ao.scope.openidHint" },
@@ -62,54 +63,16 @@ const SCOPE_OPTIONS = [
   { value: "email", label: "email", hint: "ao.scope.emailHint" },
 ]
 
-/** 供对方站点填写的端点地址。用当前 origin 拼，换域名也不会写错。 */
-function endpoints(origin: string) {
-  return [
-    { label: "Discovery URL", value: `${origin}/api/.well-known/openid-configuration` },
-    { label: "Authorization Endpoint", value: `${origin}/api/oauth/authorize` },
-    { label: "Token Endpoint", value: `${origin}/api/oauth/token` },
-    { label: "UserInfo Endpoint", value: `${origin}/api/oauth/userinfo` },
-  ]
-}
-
-async function copy(value: string, what: string) {
-  try {
-    await navigator.clipboard.writeText(value)
-    toast.success(tStatic("ao.ok.copied", { what }))
-  } catch {
-    toast.error(tStatic("ao.err.copy"))
-  }
-}
-
-/** 一条端点地址 + 复制按钮 */
-function EndpointRow({ label, value }: { label: string; value: string }) {
-  const { t } = useT()
-  return (
-    <div className="flex items-center gap-2">
-      <span className="w-44 shrink-0 text-xs text-muted-foreground">{label}</span>
-      <code className="min-w-0 flex-1 truncate rounded bg-muted px-2 py-1 font-mono text-xs">
-        {value}
-      </code>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="h-7 w-7 shrink-0"
-        onClick={() => void copy(value, label)}
-        title={t("ao.copyTitle", { label })}
-        aria-label={t("ao.copyTitle", { label })}
-      >
-        <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-      </Button>
-    </div>
-  )
-}
+/**
+ * 「接入信息」（端点地址 + 复制按钮）与用户端设置页**共用同一个组件** ——
+ * 端点是服务端全局常量，两边看到的值必须一致（见 oauth-endpoints.tsx 头注释）。
+ */
 
 export function OAuthAdminPanel() {
   const { t } = useT()
   const [clients, setClients] = React.useState<OAuthClient[]>([])
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState(false)
-  const [origin] = React.useState(() => window.location.origin)
   /** 用户自助创建当前是否「免审」（对应设置项 oauth_user_clients_open） */
   const [autoApprove, setAutoApprove] = React.useState(false)
 
@@ -273,25 +236,8 @@ export function OAuthAdminPanel() {
 
   return (
     <div className="space-y-6">
-      {/* 端点地址：用户要填进对方站点，放最前面最方便 */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{t("ao.info.title")}</CardTitle>
-          <CardDescription>
-            {t("ao.info.desc")}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          {endpoints(origin).map((e) => (
-            <EndpointRow key={e.label} label={e.label} value={e.value} />
-          ))}
-          <p className="pt-1 text-xs text-muted-foreground">
-            {t("ao.info.callbackNoteA")}
-            <code className="font-mono">{t("ao.info.peerDomain")}/oauth/oidc</code>
-            {t("ao.info.callbackNoteB")}
-          </p>
-        </CardContent>
-      </Card>
+      {/* 端点地址：用户要填进对方站点，放最前面最方便（与用户端共用同一组件） */}
+      <OAuthEndpointsCard />
 
       {/* 用户自建应用的策略开关（2026-10-06） */}
       <Card>
@@ -405,7 +351,7 @@ export function OAuthAdminPanel() {
                         variant="ghost"
                         size="icon"
                         className="h-6 w-6 shrink-0"
-                        onClick={() => void copy(c.clientId, "Client ID")}
+                        onClick={() => void copyText(c.clientId, "Client ID")}
                         aria-label={t("ao.copyClientId")}
                       >
                         <Copy className="h-3 w-3" aria-hidden="true" />
@@ -566,7 +512,7 @@ export function OAuthAdminPanel() {
                     variant="outline"
                     size="sm"
                     className="shrink-0"
-                    onClick={() => void copy(secretDialog.clientId, "Client ID")}
+                    onClick={() => void copyText(secretDialog.clientId, "Client ID")}
                   >
                     <Copy className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
                     {t("common.copy")}
@@ -584,7 +530,7 @@ export function OAuthAdminPanel() {
                     variant="outline"
                     size="sm"
                     className="shrink-0"
-                    onClick={() => void copy(secretDialog.clientSecret, "Client Secret")}
+                    onClick={() => void copyText(secretDialog.clientSecret, "Client Secret")}
                   >
                     <Copy className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
                     {t("common.copy")}

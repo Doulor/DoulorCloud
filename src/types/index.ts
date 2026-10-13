@@ -731,8 +731,14 @@ export interface NewApiStatus {
   keyGroups: string[]
   /** 账号当前所属分组 */
   accountGroup: string | null
-  /** 中转站健康状态（在线/离线 + 延迟 + 版本） */
-  health: NewApiHealth
+  /**
+   * 中转站健康状态（在线/离线 + 延迟 + 版本）。
+   *
+   * ⚠️ 2026-10-12 起首屏（/dev/status）**恒为 null** —— 健康探测要读上游
+   * （实测 1.4~27.8s），改由 `GET /api/dev/usage` 懒加载返回；前端在拿到之前
+   * 显示「读取中」。判定 `online` 前必须判空。
+   */
+  health: NewApiHealth | null
   /** 管理员维护的推荐模型分档（数组顺序即梯队顺序） */
   recommended: RecommendedTier[]
   /** 免费套餐订阅，未领取为 null */
@@ -749,8 +755,23 @@ export interface NewApiStatus {
   subscriptions: NewApiSubscriptionGroup[]
 }
 
-/** 按套餐类型合并后的一条订阅（同套餐的多张已相加） */
-export interface NewApiSubscriptionGroup {
+/**
+ * 「AI 中转站」页的**实时部分** —— 由 `GET /api/dev/usage` 懒加载返回（2026-10-12）。
+ *
+ * 为什么拆出来：健康徽章 / 币种 / 订阅都要读上游 NewAPI，而实测上游单程
+ * 1.4~27.8s（`/api/subscription/plans` 一次 27.8s，连 401 都要等这么久）。
+ * 首屏 `GET /api/dev/status` 现在只读 D1（毫秒级），前端拿到首屏后再打这个接口
+ * 补数据 —— 页面不再被慢上游拖住。
+ */
+export interface NewApiUsage {
+  currency: { symbol: string; code: string; perUnit: number }
+  health: NewApiHealth
+  subscription: NewApiSubscription | null
+  subscriptions: NewApiSubscriptionGroup[]
+  freePlanId: number
+}
+
+/** 按套餐类型合并后的一条订阅（同套餐的多张已相加） */export interface NewApiSubscriptionGroup {
   planId: number
   /** 套餐名（如「wb邀请套餐」）；套餐表读不到时降级成「套餐 #id」 */
   title: string
@@ -899,6 +920,106 @@ export interface AdminFrpNode extends FrpNode {
   usedPorts: number
   configTemplate: string | null
   sourceDonationId: string | null
+}
+
+// ---- 内网穿透「租用化」（2026-10-13）----
+//
+// 这一组类型对应 worker/handlers/frp-rental.ts。要点：
+//   · 管理端只读写 D1；真正的落地由服务器上的 frp-agent 轮询完成（最多 20 秒延迟）
+//   · `syncState` 就是「D1 期望」与「面板实际」是否一致的观测点 ——
+//     它取代了「管理员登面板肉眼比对」这个动作
+
+/** 租用套餐：时长 × 积分 */
+export interface AdminFrpPlan {
+  id: string
+  nodeId: string
+  nodeName: string | null
+  name: string
+  days: number
+  pricePoints: number
+  maxPorts: number
+  /** 该套餐可选的端口区间，形如 [[31000, 31999]] */
+  allowRanges: [number, number][]
+  sortOrder: number
+  enabled: boolean
+  note: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** 一份租约（一个用户在一个节点上） */
+export interface AdminFrpSubscription {
+  id: string
+  userId: string
+  username: string | null
+  nodeId: string
+  nodeName: string | null
+  planId: string | null
+  /** 同步给面板的账号名，形如 dcfrp_a1b2c3d4 */
+  frpUser: string
+  ports: number[]
+  /** active | expired | cancelled | pending */
+  status: string
+  startedAt: string
+  expiresAt: string
+  /** 剩余天数（负数表示已过期） */
+  daysLeft: number
+  autoRenew: boolean
+  pricePoints: number
+  /** pending | synced | error */
+  syncState: string
+  syncedAt: string | null
+  lastError: string | null
+}
+
+/** 服务器上 frp-agent 的心跳 */
+export interface AdminFrpAgent {
+  nodeId: string
+  lastSeenAt: string
+  /** 超过 2 分钟没心跳即为掉线（agent 每 20 秒一轮） */
+  online: boolean
+  revision: string | null
+  serverInfo: unknown
+  lastError: string | null
+  reportCount: number
+}
+
+/** 用户端：可购买的租用套餐 */
+export interface UserFrpPlan {
+  id: string
+  nodeId: string
+  nodeName: string | null
+  name: string
+  days: number
+  pricePoints: number
+  maxPorts: number
+  allowRanges: [number, number][]
+  /** 积分够不够 —— 前端据此置灰，省得点下去才报错 */
+  affordable: boolean
+  /** 我在这个节点上已有的租约；有则只能续期 */
+  existing: { id: string; frpUser: string; expiresAt: string } | null
+}
+
+/** 用户端：我的租约 */
+export interface UserFrpRental {
+  id: string
+  nodeId: string
+  nodeName: string | null
+  frpUser: string
+  ports: number[]
+  /** active | expired | cancelled */
+  status: string
+  startedAt: string
+  expiresAt: string
+  daysLeft: number
+  planId: string | null
+  pricePoints: number
+  syncState: string
+  lastError: string | null
+  serverAddr: string | null
+  serverPort: number | null
+  /** 可直接粘贴使用的 frpc 配置；过期后为 null */
+  configToml: string | null
 }
 
 // ---- 功能权限 ----
@@ -2045,8 +2166,10 @@ export interface Qoder2ApiStatus {
   limit: number
   used: number
   remaining: number
-  /** 当前配置要绑的区域（cn/intl） */
+  /** 默认选中的区域（cn/intl） */
   realm: string
+  /** 允许用户自选的版本（管理员可关掉其中一项）；空数组 = 通道实际不可用 */
+  availableRealms: string[]
   bindings: Qoder2ApiBinding[]
 }
 
@@ -2062,8 +2185,10 @@ export interface Qoder2ApiDonationBlock {
   limit: number
   used: number
   remaining: number
-  /** 当前配置要绑的区域（cn/intl） */
+  /** 默认选中的区域（cn/intl） */
   realm: string
+  /** 允许用户自选的版本（管理员可关掉其中一项）；空数组 = 通道实际不可用 */
+  availableRealms: string[]
   bindings: Qoder2ApiBinding[]
   /** 该通道解锁的功能模块 */
   feature: string

@@ -726,6 +726,21 @@ export async function revokeAllUserTokens(
   )
     .bind(userId)
     .run()
+
+  /**
+   * 🔴 顺带作废该用户的 API Key（2026-10-10 渗透测试 finding#11）。
+   *
+   * 这个函数是**所有「凭证变更 ⇒ 切断既有授权」路径的唯一出口**
+   * （本人改密码 / 走完密码重置 / 管理员重置密码）。此前它只管 OAuth 令牌，
+   * 漏掉了 `user_api_keys`：实测改完密码后旧 API key 仍能继续调
+   * `/api/v1/subdomain` 等受保护端点 —— 等于「偷过 Key 的人，受害者改密码也踢不掉」。
+   * 会话与 OAuth 令牌都切断了，单独留下 API Key 显然不是有意为之。
+   *
+   * ⚠️ 副作用（有意为之）：改密码后需要重新生成 API Key。安全上这是对的，
+   * 与管理端重置密码「踢下线」的语义也一致。
+   */
+  await env.DB.prepare("DELETE FROM user_api_keys WHERE user_id = ?").bind(userId).run()
+
   return res.meta?.changes ?? 0
 }
 

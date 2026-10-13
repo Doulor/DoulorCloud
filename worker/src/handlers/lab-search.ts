@@ -16,7 +16,7 @@
 import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
 import { requireAdminScope } from "./admin"
-import { audit as recordAudit, getSetting, getSettings, updateSettings } from "../settings"
+import { audit as recordAudit, getSetting, updateSettings } from "../settings"
 import { decryptSecret, encryptSecret } from "../crypto"
 import { applyPoints, getPointsBalance } from "../points"
 import type { Env } from "../env"
@@ -455,17 +455,10 @@ export async function checkSearchQuota(env: Env, request: Request): Promise<Resp
   return json({ keys: out })
 }
 
-/** 搜索是否可用（供 /lab/settings 告诉前端要不要显示「联网搜索」入口） */
-export async function searchAvailability(env: Env): Promise<{
-  siteAvailable: boolean
-  cost: number
-}> {
-  const s = await getSettings(env)
-  return {
-    siteAvailable: parseTavilyKeys(s.lab_tavily_keys ?? "").length > 0,
-    cost: await loadSearchCost(env),
-  }
-}
+// 这里原本有一个 `searchAvailability(env)`，已删除：无调用点，且它返回的两个字段
+// （`siteAvailable` / `cost`）在 `handlers/lab.ts` 的 `/lab/settings` 里已经**内联算过**
+// （`siteAvailable: (await loadSiteKeysForInfo(env)).length > 0` + `cost: await loadSearchCost(env)`）。
+// 两份实现并存，改了其中一份另一份不会变 —— 是典型的漂移源。
 
 /* ------------------------------------------------------------------ */
 /* 代拉模型列表（自定义渠道）                                          */

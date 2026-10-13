@@ -36,12 +36,10 @@
 export const FRP_AUTH_MODES = ["none", "token", "token_user", "custom"] as const
 export type FrpAuthMode = (typeof FRP_AUTH_MODES)[number]
 
-export const FRP_AUTH_MODE_LABELS: Record<FrpAuthMode, string> = {
-  none: "无鉴权（最基础的 frps）",
-  token: "全局 auth.token",
-  token_user: "全局 token + 每用户账号（带鉴权插件）",
-  custom: "其它 / 自定义插件",
-}
+// 这里原本还有一个 `FRP_AUTH_MODE_LABELS`（鉴权方式的中文名），已删除：
+// 它是服务端的一份副本，但**从来没有任何调用点** —— 真正展示这些名字的是
+// 管理端 `admin.tsx` 的 `authModeLabel`（走 i18n，有中英双语）。
+// 两份各写一份只会漂移：改了服务端那份，界面上看到的还是前端那份。
 
 export function isFrpAuthMode(v: unknown): v is FrpAuthMode {
   return typeof v === "string" && (FRP_AUTH_MODES as readonly string[]).includes(v)

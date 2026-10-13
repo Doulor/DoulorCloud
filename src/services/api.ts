@@ -31,10 +31,13 @@ import {
   type VoucherOverview,
   type RedeemResult,
   type Mailbox,
-  type AdminFrpApplication,
   type AdminFrpNode,
+  type AdminFrpPlan,
+  type AdminFrpSubscription,
+  type AdminFrpAgent,
+  type UserFrpPlan,
+  type UserFrpRental,
   type EmailSettings,
-  type FrpOverview,
   type MailMessage,
   type Permissions,
   type MeResponse,
@@ -42,6 +45,7 @@ import {
   type NewApiPreflight,
   type NewApiModels,
   type NewApiStatus,
+  type NewApiUsage,
   type StorageAccount,
   type StorageList,
   type StorageShare,
@@ -464,7 +468,8 @@ export const dnsApi = {
     request<{ record: DnsRecord }>(`/dns/${id}`, {
       method: "PUT",
       body: JSON.stringify(payload),
-    }),
+      }
+    ),
 
   remove: (id: string) =>
     request<void>(`/dns/${id}`, { method: "DELETE" }),
@@ -1047,45 +1052,10 @@ export const adminApi = {
     }>("/admin/storage/sync-quota", { method: "POST" }),
 
   // frp 内网穿透
-  listFrpApplications: (status = "pending") =>
-    request<{ applications: AdminFrpApplication[] }>(
-      `/admin/frp/applications?status=${encodeURIComponent(status)}`
-    ),
-
-  reviewFrp: (payload: { id: string; action: "approve" | "reject"; note?: string }) =>
-    request<{ ok: boolean; status: string }>("/admin/frp/review", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-
-  revokeFrp: (id: string) =>
-    request<{ ok: boolean; status: string }>("/admin/frp/review-revoke", {
-      method: "POST",
-      body: JSON.stringify({ id }),
-    }),
-
-  /** 编辑一条「待审核」的申请（账号名/密码/端口/通知邮箱/备注） */
-  updateFrpApplication: (payload: {
-    id: string
-    frpUser?: string
-    frpPassword?: string
-    ports?: number[]
-    notifyEmail?: string
-    remark?: string
-  }) =>
-    request<{ ok: boolean; frpUser: string; ports: number[] }>(
-      `/admin/frp/applications/${encodeURIComponent(payload.id)}`,
-      {
-        method: "PUT",
-        body: JSON.stringify({
-          frpUser: payload.frpUser,
-          frpPassword: payload.frpPassword,
-          ports: payload.ports,
-          notifyEmail: payload.notifyEmail,
-          remark: payload.remark,
-        }),
-      }
-    ),
+  //
+  // ⚠️ 人工审核那一组方法（listFrpApplications / reviewFrp / revokeFrp /
+  // updateFrpApplication）已于 2026-10-13 随流程退役删除。
+  // 现在管理端管的是「套餐 + 订阅」，见下方的 listFrpRentalPlans 等。
 
   listFrpNodes: () => request<{ nodes: AdminFrpNode[] }>("/admin/frp/nodes"),
 
@@ -1120,6 +1090,51 @@ export const adminApi = {
   /** 解除一批端口的占用 */
   freeFrpPorts: (payload: { nodeId: string; ports: number[] }) =>
     request<{ ok: boolean; freed: number }>("/admin/frp/ports/free", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  // ---- 内网穿透「租用化」----
+  // 只读写 D1：真正的落地由服务器上的 frp-agent 轮询完成（最多 20 秒延迟）。
+  // 因此管理端操作永远不会因为那台服务器抖动而失败，而「同步状态」是判断
+  // 「期望 vs 实际」是否一致的唯一观测点。
+  listFrpRentalPlans: () =>
+    request<{ plans: AdminFrpPlan[]; defaultPortRange: [number, number] }>(
+      "/admin/frp/plans"
+    ),
+
+  upsertFrpRentalPlan: (payload: Record<string, unknown>) =>
+    request<{ ok: boolean; id: string }>("/admin/frp/plans", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteFrpRentalPlan: (id: string) =>
+    request<void>(`/admin/frp/plans/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  listFrpRentals: () =>
+    request<{
+      subscriptions: AdminFrpSubscription[]
+      agents: AdminFrpAgent[]
+      userPrefix: string
+      defaultPortRange: [number, number]
+    }>("/admin/frp/subscriptions"),
+
+  createFrpRental: (payload: Record<string, unknown>) =>
+    request<{
+      ok: boolean
+      id: string
+      frpUser: string
+      frpToken: string
+      ports: number[]
+      expiresAt: string
+    }>("/admin/frp/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  updateFrpRental: (id: string, payload: Record<string, unknown>) =>
+    request<{ ok: boolean }>(`/admin/frp/subscriptions/${encodeURIComponent(id)}`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),
@@ -1187,6 +1202,66 @@ export const adminApi = {
       errors: string[]
       username: string | null
     }>("/admin/newapi/sync-permissions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 中转站的订阅套餐列表（纯展示：让「发放订阅」能看见有哪些 ID 可选；读不到返回空数组） */
+  listSubscriptionPlans: () =>
+    request<{
+      plans: { planId: number; title: string; maxPurchasePerUser: number }[]
+    }>("/admin/newapi/subscription-plans"),
+
+  /**
+   * 给指定用户批量发放订阅。
+   *
+   * ⚠️ 服务端**先全量校验再动手**：只要有用户名不存在、或该用户还没开通中转站，
+   * 就整体 4xx 报错且一个订阅都不发（不会出现「部分成功」）。前端直接把错误文案展示即可。
+   */
+  grantSubscriptions: (payload: { usernames: string; planId: number; count: number }) =>
+    request<{
+      ok: boolean
+      planId: number
+      count: number
+      users: number
+      granted: number
+      results: { username: string; ok: boolean; granted: number; message: string }[]
+    }>("/admin/newapi/grant-subscriptions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  // ---- 「付费分组」授权（2026-10-11）----
+  // 与发放订阅是两件事：这里只授权「建 Key 时能选付费分组」，永久有效、不发额度。
+  listPremiumGrants: () =>
+    request<{
+      grants: {
+        userId: string
+        username: string
+        grantedBy: string | null
+        grantedAt: string
+        newapiUserId: number | null
+      }[]
+      count: number
+    }>("/admin/newapi/premium-grants"),
+  grantPremiumGroup: (payload: { usernames: string }) =>
+    request<{
+      ok: boolean
+      users: number
+      granted: number
+      existed: number
+      results: { username: string; status: "granted" | "existed" }[]
+    }>("/admin/newapi/grant-premium-group", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  revokePremiumGroup: (payload: { usernames: string }) =>
+    request<{
+      ok: boolean
+      users: number
+      revoked: number
+      results: { username: string; status: "revoked" | "absent" }[]
+    }>("/admin/newapi/revoke-premium-group", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
@@ -1370,6 +1445,12 @@ export const newapiApi = {
   status: () => request<NewApiStatus>("/dev/status"),
 
   /**
+   * 「实时部分」懒加载：健康徽章 / 币种 / 订阅（都要读上游，慢）。
+   * 首屏先渲染 status（只读 D1），随后用这个接口补数据。
+   */
+  usage: () => request<NewApiUsage>("/dev/usage"),
+
+  /**
    * 「全部可用模型」清单 —— **懒加载**，只在用户展开那张卡片时才调。
    * 拉全量模型很慢（上游无缓存 + 一趟隧道往返），不能放在首屏的 status 里。
    */
@@ -1482,32 +1563,45 @@ export const tempboxApi = {
 }
 
 // ---- frp 内网穿透 ----
-
+//
+// ⚠️ 用户端的「启用 / 停用 / 提交申请 / 撤回申请」已于 2026-10-13 随人工审核流程
+// 一起退役，对应的 overview/enable/disable/apply/cancel 五个方法也一并删除 ——
+// 留着它们只会变成「调一个不存在的路由、被 SPA 兜底成 HTML」的静默失效。
+// 现在只剩「积分租用」这一组，见下方。
 export const frpApi = {
-  overview: () => request<FrpOverview>("/frp"),
+  // ---- 内网穿透「租用化」----
+  // 用户用积分为自己买 / 续使用时长。积分扣减全部在服务端走原子记账，
+  // 前端只负责展示与发起；`requestId` 用于防重复提交（双击、网络重试）。
+  listRentalPlans: () =>
+    request<{
+      balance: number
+      plans: UserFrpPlan[]
+      /** 站长把总开关关了 → 暂停销售（不影响已购租约） */
+      suspended: boolean
+      /** frpc 客户端下载地址；可能未配置 */
+      coreUrl: string | null
+      userPrefix: string
+    }>("/frp/rental/plans"),
 
-  enable: () =>
-    request<{ activated: boolean }>("/frp/enable", { method: "POST" }),
+  listMyRentals: () =>
+    request<{ balance: number; subscriptions: UserFrpRental[] }>("/frp/rental/mine"),
 
-  disable: () =>
-    request<{ activated: boolean }>("/frp/disable", { method: "POST" }),
+  purchaseRental: (payload: { planId: string; requestId?: string }) =>
+    request<{
+      ok: boolean
+      id: string
+      frpUser: string
+      ports: number[]
+      expiresAt: string
+      balance: number
+      pricePoints: number
+    }>("/frp/rental/purchase", { method: "POST", body: JSON.stringify(payload) }),
 
-  apply: (payload: {
-    nodeId: string
-    frpUser: string
-    frpPassword: string
-    ports: number[]
-    tunnels: { name: string; type: string; localIP: string; localPort: number; remotePort: number }[]
-    notifyEmail: string
-    remark?: string
-  }) =>
-    request<{ application: { id: string; status: string; createdAt: string } }>(
-      "/frp/apply",
+  renewRental: (payload: { id: string; requestId?: string }) =>
+    request<{ ok: boolean; expiresAt: string; balance: number; pricePoints: number }>(
+      "/frp/rental/renew",
       { method: "POST", body: JSON.stringify(payload) }
     ),
-
-  cancel: (id: string) =>
-    request<void>("/frp/cancel", { method: "POST", body: JSON.stringify({ id }) }),
 }
 
 // ---- 代理节点 ----
@@ -3867,6 +3961,98 @@ export const adminTitlesApi = {
     }),
 }
 
+/**
+ * 中转站登记（2026-10-12）—— 朋友把**自己**的 NewAPI / Sub2API 登记进来，
+ * 用户在 AI 页能顺便看到自己在那边的余额与订阅。
+ *
+ * ⚠️ 额度**只读**：我们只读余额与订阅，不代发额度、不建 Key、不改余额。
+ */
+export interface RelayProvider {
+  id: string
+  name: string
+  /** newapi | sub2api */
+  kind: string
+  /** 站点地址：只有本人/管理员能看到（别人的站不暴露地址） */
+  baseUrl?: string
+  enabled: boolean
+  mine: boolean
+  sort: number
+  createdAt: string
+}
+
+/** 某人在某台中转站的只读视图（余额 + 订阅） */
+export interface RelayUserView {
+  found: boolean
+  displayName: string | null
+  balance: number | null
+  currencySymbol: string
+  perUnit: number
+  subscriptions: { title: string; used: number | null; total: number | null; expiresAt: number | null }[]
+  /** false = 上游读不到（令牌失效/站点不可达）⇒ 界面要如实说「暂时读不到」 */
+  reachable: boolean
+  error?: string
+}
+
+export const relayApi = {
+  /** 我能看到的中转站（含我自己登记的、即使已停用） */
+  list: () =>
+    request<{ providers: RelayProvider[]; maxPerUser: number; mineCount: number }>(
+      "/relay/providers"
+    ),
+
+  /** 登记一台（后端会先探测令牌与地址，通了才落库） */
+  create: (payload: { name: string; kind: string; baseUrl: string; adminToken: string }) =>
+    request<{ provider: RelayProvider | null; oidcWarning?: string }>("/relay/providers", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 改（adminToken 省略 = 不改令牌） */
+  update: (
+    id: string,
+    payload: { name?: string; kind?: string; baseUrl?: string; adminToken?: string }
+  ) =>
+    request<{ provider: RelayProvider | null; oidcWarning?: string }>(
+      `/relay/providers/${encodeURIComponent(id)}`,
+      {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  remove: (id: string) =>
+    request<{ ok: boolean }>(`/relay/providers/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  /** 我在那台站的余额与订阅（只读；每次点击现取，服务端有 60 秒缓存） */
+  view: (id: string) =>
+    request<{ view: RelayUserView }>(`/relay/providers/${encodeURIComponent(id)}/me`),
+
+  /**
+   * 我在那台站的 Key 列表（只读）。
+   * ⚠️ `supported:false` = 那类站的管理员令牌读不到别人的 Key（NewAPI 就是），
+   * 界面要如实说明，不能把「读不到」显示成「没有 Key」。
+   */
+  keys: (id: string) =>
+    request<{ supported: boolean; keys: RelayKeyRow[]; detail?: string }>(
+      `/relay/providers/${encodeURIComponent(id)}/keys`
+    ),
+
+  /** 那台站的可用模型清单（只读） */
+  models: (id: string) =>
+    request<{ models: string[]; detail?: string }>(
+      `/relay/providers/${encodeURIComponent(id)}/models`
+    ),
+}
+
+/** 中转站里的一把 Key（上游给的就是打码值） */
+export interface RelayKeyRow {
+  name: string
+  keyMasked: string
+  group: string | null
+  createdAt: string | null
+}
+
 // ---- 管理面板 · DNS 解析管理（2026-10-01）----
 //
 // 独立成对象而不是塞进 adminApi：adminApi 已经很长，且这个模块有自己的
@@ -4117,6 +4303,8 @@ export interface LabProject extends LabProjectSummary {
 export type GallerySort = "latest" | "views" | "likes"
 
 export interface GalleryItem {
+  /** 链接尾部用的页面名（用户可自定义；没改过就是从作品名自动生成的） */
+  slug?: string
   id: string
   name: string
   icon: string
@@ -4486,4 +4674,330 @@ export const galleryApi = {
 export function galleryCoverUrl(id: string, v?: string): string {
   const base = `${BASE}/gallery/${encodeURIComponent(id)}/cover`
   return v ? `${base}?v=${encodeURIComponent(v)}` : base
+}
+
+/* ------------------------------------------------------------------ */
+/* 造物典藏（游戏大厅 · 插件宿主）                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 插件清单里的一条。
+ *
+ * ⚠️ `runtime` 是**宿主分流的关键**，前端不要按 slug 写死：
+ *   · `react`   —— 本站写的组件，走 `lib/collection-plugins.tsx` 的注册表；
+ *   · `sandbox` —— 用户写的 HTML，将来走沙盒 iframe 宿主（v1 还没有这种）。
+ * 现在按 slug 判断也能跑，但等用户插件上线就要把每个判断点都翻出来改一遍。
+ */
+export interface CollectionPlugin {
+  slug: string
+  name: string
+  icon: string
+  tagline: string
+  description: string
+  /** 卡片强调色（hex）；空串 = 用站点默认灰 */
+  accent: string
+  /** builtin（官方）/ user（用户作品，v1 还没有） */
+  kind: string
+  runtime: string
+  status: string
+  /** 前端入口路径（服务端给的，别在前端拼） */
+  entry: string
+  capabilities: string[]
+  /** 仅管理员可见：插件自己的配置 */
+  config?: Record<string, unknown>
+}
+
+export const collectionApi = {
+  /** 大厅清单：已上架的插件（管理员额外拿到未上架的，便于处理下架项） */
+  plugins: () =>
+    request<{ plugins: CollectionPlugin[]; canManage: boolean }>("/collection/plugins"),
+}
+
+/** 一根 K 线（含正在走的那根，形状一致） */
+export interface GameCandle {
+  openAt: string
+  openPrice: number
+  highPrice: number
+  lowPrice: number
+  closePrice: number
+  volume: number
+  trades: number
+}
+
+export interface GameMarket {
+  symbol: string
+  quote: string
+  price: number
+  /** 均值回复的目标价，画图上当「慢均线」用 */
+  anchor: number
+  candle: GameCandle
+  dayOpen: number
+  dayHigh: number
+  dayLow: number
+  change24hAbs: number
+  change24hPct: number
+  tickSeq: number
+  lastTickAt: string
+  baseIntervalSeconds: number
+}
+
+export interface GamePosition {
+  id: string
+  side: "long" | "short"
+  /**
+   * 保证金模式。同一方向下逐仓与全仓是**两行独立仓位**（不会互相合并）：
+   * 逐仓亏损上限 = 本仓保证金；全仓会把可用余额一起押进去。
+   */
+  marginMode: "isolated" | "cross"
+  leverage: number
+  margin: number
+  entryPrice: number
+  /** 名义规模 = margin × leverage */
+  size: number
+  liqPrice: number
+  openedAt: string
+  markPrice: number
+  unrealizedPnl: number
+  /** 保证金回报率（%），已含杠杆 */
+  roePct: number
+  /** 标记价离爆仓价还有多少 %；负 = 已经在爆仓价之外（通常已被强平扫掉） */
+  liqDistancePct: number
+  feeOpen: number
+}
+
+export interface GameConfig {
+  maxLeverage: number
+  minMargin: number
+  feeOpenBps: number
+  feeCloseBps: number
+  maintenanceBps: number
+  /** 订单流冲击系数：净成交额等于池子余额时价格变动多少 bps */
+  impactBps: number
+  /** 单笔冲击上限（bps） */
+  maxImpactBps: number
+  tickMs: number
+  candleMs: number
+  baseIntervalSeconds: number
+}
+
+export interface GameState {
+  enabled: boolean
+  /**
+   * 当前货币：`points` = 站内真积分 / `test` = 游戏专用测试币。
+   * 前端所有「积分」字样都按它切换，别写死。
+   */
+  currency: "points" | "test"
+  /** 测试币首次领取额度 */
+  testGrant: number
+  /** 还能不能领测试币（每人一次） */
+  canClaimTest: boolean
+  market: GameMarket
+  pool: {
+    /** 做市池余额 = 全服可赚取的上限 */
+    balance: number
+    /** 池子见底时禁止开仓 */
+    canOpen: boolean
+    /** 这一单最多能赚多少（= 池子余额），必须在下单面板上显示 */
+    maxPayout: number
+  }
+  config: GameConfig
+  me: {
+    balance: number
+    positions: GamePosition[]
+    unrealizedTotal: number
+  }
+  /**
+   * 全仓账户汇总。
+   *
+   * 全仓的强平判据是**账户级**的（权益 < 维持保证金），不是单看某个仓位的价格 ——
+   * 所以面板必须拿这几个数才讲得清「离强平还有多远」。
+   */
+  cross: {
+    positions: number
+    /** 已托管保证金合计 */
+    escrow: number
+    /** 浮动盈亏合计 */
+    pnl: number
+    /** 维持保证金合计 */
+    maintenance: number
+    /** 账户权益 = 可用余额 + 托管保证金 + 浮动盈亏 */
+    equity: number
+    /** 是否已触发强平（正常情况下会被扫描即时处理掉） */
+    liquidatable: boolean
+    /** 触发强平会从可用余额里追缴多少 */
+    shortfall: number
+  }
+  /** 本次轮询顺手强平的仓位数（>0 时前端提示一下，比静默消失好） */
+  liquidatedInThisPoll: number
+}
+
+export interface GameTrade {
+  id: string
+  kind: string
+  /**
+   * 所属仓位 id。前端用它把「一次开仓」和「一次平仓」配成同一条记录 ——
+   * 一次开仓只有一条 open 流水，对应最多一条 close/liquidate 流水。
+   */
+  positionId: string
+  side: string
+  leverage: number
+  price: number
+  size: number
+  margin: number
+  fee: number
+  pnl: number
+  balanceAfter: number | null
+  createdAt: string
+}
+
+export interface GameLeaderItem {
+  rank: number
+  username: string
+  nickname: string | null
+  hasAvatar: boolean
+  profit: number
+  trades: number
+  isMe: boolean
+}
+
+/** 「在线投资」的玩家侧接口 */
+export const investApi = {
+  /** 行情 + 我的持仓。**服务端会在这次调用里推进行情并强平**，所以轮询它就是「行情在走」 */
+  state: () => request<GameState>("/collection/invest/state"),
+  /** 领取测试币（每人一次；不是测试币模式会 400） */
+  claimTest: () =>
+    request<{ granted: number; balance: number }>("/collection/invest/claim-test", {
+      method: "POST",
+    }),
+
+  candles: (interval: string, limit = 300) =>
+    request<{ interval: string; candles: GameCandle[] }>(
+      `/collection/invest/candles?interval=${encodeURIComponent(interval)}&limit=${limit}`
+    ),
+
+  open: (payload: {
+    side: "long" | "short"
+    leverage: number
+    margin: number
+    orderNo: string
+    /** 保证金模式：逐仓（默认，亏损上限=本仓保证金）/ 全仓（余额共同担保） */
+    marginMode?: "isolated" | "cross"
+  }) =>
+    request<{
+      position: GamePosition
+      price: number
+      /** 幂等命中（重放同一下单号）：前端不要重复提示「开仓成功」 */
+      duplicated: boolean
+      balance: number
+    }>("/collection/invest/open", { method: "POST", body: JSON.stringify(payload) }),
+
+  close: (positionId: string) =>
+    request<{
+      position: {
+        id: string
+        side: string
+        leverage: number
+        margin: number
+        entryPrice: number
+        size: number
+        liqPrice: number
+        status: string
+        pnl: number | null
+        closePrice: number | null
+        closedAt: string | null
+        note: string | null
+      }
+      credit: number
+      fee: number
+      pnl: number
+      /** 盈利受对手盘上限限制（没赔满）—— 必须明确告诉用户 */
+      capped: boolean
+      balance: number
+      alreadyClosed: boolean
+    }>("/collection/invest/close", { method: "POST", body: JSON.stringify({ positionId }) }),
+
+  history: (limit = 50) =>
+    request<{ trades: GameTrade[] }>(`/collection/invest/history?limit=${limit}`),
+
+  leaderboard: (range: "today" | "week" | "all") =>
+    request<{
+      range: string
+      items: GameLeaderItem[]
+      me: { rank: number; profit: number; trades: number } | null
+    }>(`/collection/invest/leaderboard?range=${range}`),
+}
+
+/** 典藏设置（管理端）：参数 + 池子 + 统计 */
+export interface GameAdminData {
+  plugin: CollectionPlugin | null
+  /** 库里存的原始字符串（表单回显） */
+  raw: Record<string, string>
+  /** 实际生效的参数（已被服务端收口，可能与 raw 不同） */
+  effective: {
+    enabled: boolean
+    tickSeconds: number
+    candleSeconds: number
+    maxLeverage: number
+    minMargin: number
+    feeOpenBps: number
+    feeCloseBps: number
+    maintenanceBps: number
+    noiseBps: number
+    impactBps: number
+    meanReversionBps: number
+    anchorFollowBps: number
+    maxImpactBps: number
+    basePrice: number
+    /** 当前货币模式（管理面板切换器回显） */
+    currency: "points" | "test"
+    /** 测试币首次领取额度 */
+    testGrant: number
+  }
+  market: { price: number; anchor: number; tickSeq: number; lastTickAt: string; candleOpenAt: string }
+  pool: { balance: number; myBalance: number; /** 测试币池（与真积分池互不影响） */ testBalance: number }
+  stats: Record<string, number>
+}
+
+export interface PoolLedgerEntry {
+  id: string
+  delta: number
+  balanceAfter: number
+  kind: string
+  username: string | null
+  ref: string | null
+  note: string | null
+  createdAt: string
+}
+
+export const adminCollectionApi = {
+  getInvest: () => request<GameAdminData>("/admin/collection/invest"),
+
+  /**
+   * 改设置。**只提交改动过的字段** —— 服务端会把 patch 合到当前值上再清洗，
+   * 全量提交反而会把没动过的参数重置（见 collection-admin.ts 的注释）。
+   */
+  updateInvest: (payload: {
+    params?: Record<string, string | number>
+    plugin?: { status?: string; accent?: string; name?: string; tagline?: string; description?: string }
+  }) =>
+    request<GameAdminData>("/admin/collection/invest", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 划拨垫本 / 抽回资金（池子的唯一资金来源） */
+  pool: (action: "deposit" | "withdraw", amount: number) =>
+    request<{ ok: boolean; action: string; pool: number; balance: number }>(
+      "/admin/collection/invest/pool",
+      { method: "POST", body: JSON.stringify({ action, amount }) }
+    ),
+
+  ledger: (limit = 50) =>
+    request<{ entries: PoolLedgerEntry[] }>(`/admin/collection/invest/ledger?limit=${limit}`),
+
+  reset: () =>
+    request<{ ok: boolean; price: number }>("/admin/collection/invest/reset", {
+      method: "POST",
+      body: JSON.stringify({ confirm: "RESET" }),
+    }),
 }

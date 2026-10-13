@@ -281,6 +281,31 @@ function canOverwrite(user: UserRow | null, batch: TempboxBatchRow): boolean {
   return batch.creator_user_id === user.id
 }
 
+/**
+ * 校验上传侧传来的 R2 key 确实落在本批次前缀**之内**。
+ *
+ * 🔴 2026-10-10 渗透测试 finding#2/#3：原来只做字符串 `startsWith` 前缀判断，
+ * 而 `temporary/{code}/../{其它前缀}/x.txt` **满足**这个字符串前缀，
+ * 落盘时却被 fetch 的 URL 归一化把 `..` 消解掉 ⇒ 实际写到了前缀之外。
+ * 实测可写到别的批次、甚至别人的 `profiles/` 命名空间 —— 平台桶是所有子系统
+ * （网盘 / 头像 / 名片 / 社区图 / 分享箱）**共用**的同一个物理桶，所以这不是
+ * 「写错一个箱子」，而是跨用户跨子系统的对象注入。
+ *
+ * 修法与 storage.ts 的 `hasDotSegment` 同一口径：**按段**拒绝 `.` / `..`，
+ * 顺带拒掉反斜杠与空段（`a//b` 这种同样会带来歧义）。
+ * ⚠️ filename 侧（下载 / 删除）早就有 `includes("..")` 防护，唯一缺口就是这两个上传入口。
+ */
+function assertUploadKey(key: string, code: string): void {
+  const prefix = `${R2_PREFIX}/${code}/`
+  const bad = () => new ApiError(403, "非法的文件路径", "FORBIDDEN")
+  if (!key.startsWith(prefix)) throw bad()
+  const rest = key.slice(prefix.length)
+  if (!rest || rest.length > 900) throw bad()
+  for (const seg of rest.split("/")) {
+    if (!seg || seg === "." || seg === ".." || seg.includes("\\")) throw bad()
+  }
+}
+
 /** R2 对象 → 对外文件信息 */
 function toFileInfo(obj: { key: string; size: number; lastModified: string | null }) {
   const name = obj.key.slice(`${R2_PREFIX}/`.length).split("/").slice(1).join("/")
@@ -468,9 +493,7 @@ export async function proxyTempboxUpload(
   const batch = await assertBatchAlive(env, code)
 
   const key = new URL(request.url).searchParams.get("key") ?? ""
-  if (!key.startsWith(`${R2_PREFIX}/${code}/`)) {
-    throw new ApiError(403, "非法的文件路径", "FORBIDDEN")
-  }
+  assertUploadKey(key, code)
 
   const platformBucket = await getPlatformBucketId(env)
 
@@ -541,9 +564,7 @@ export async function commitTempboxUpload(
 
   const body = (await request.json().catch(() => ({}))) as { key?: string }
   const key = body.key ?? ""
-  if (!key.startsWith(`${R2_PREFIX}/${code}/`)) {
-    throw new ApiError(403, "非法的文件路径", "FORBIDDEN")
-  }
+  assertUploadKey(key, code)
 
   const platformBucket = await getPlatformBucketId(env)
   const head = await headObject(env, key, platformBucket)

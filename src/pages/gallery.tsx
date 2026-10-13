@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Link } from "react-router-dom"
+import { Link, useNavigate, useSearchParams } from "react-router-dom"
 import {
   Clock,
   Eye,
@@ -7,7 +7,6 @@ import {
   FlaskConical,
   Heart,
   ImagePlus,
-  LayoutGrid,
   Link2,
   Loader2,
   Pencil,
@@ -19,9 +18,9 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 
+import { CollectionAside } from "@/components/collection-nav"
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
-import { NavItem } from "@/components/sub-nav"
 import { UserAvatar } from "@/components/user-avatar"
 import { SkeletonCards } from "@/components/skeletons"
 import { Badge } from "@/components/ui/badge"
@@ -49,7 +48,7 @@ import {
   type GalleryItem,
   type LabProjectSummary,
 } from "@/services/api"
-import { buildPreviewDoc, openPreviewInNewTab, PREVIEW_SHARE_URL } from "@/lib/lab-agent"
+import { buildPreviewDoc, openPreviewInNewTab, PREVIEW_SHELL_ORIGIN } from "@/lib/lab-agent"
 import { compressToLimit } from "@/lib/image-compress"
 import { cn } from "@/lib/utils"
 
@@ -75,7 +74,18 @@ const COVER_MAX_BYTES = 600 * 1024
  */
 export default function GalleryPage() {
   const { t } = useT()
-  const [view, setView] = React.useState<View>("hall")
+  /**
+   * 视图（展示大厅 / 我的造物集）**放在 URL 里**，不再用组件 state。
+   *
+   * 为什么改：造物集左侧导航现在有四项，其中「造物典藏」「典藏设置」是
+   * **独立页面**（走 react-router）。一个侧边栏里既有按钮切 state、又有链接跳页面，
+   * 高亮逻辑必然漂移（改一处忘另一处）。统一成 URL 之后：
+   *   · `/dashboard/gallery`            展示大厅
+   *   · `/dashboard/gallery?view=mine`  我的造物集
+   * 高亮、刷新、分享、前进后退全都自然成立。侧边栏见 `CollectionAside`。
+   */
+  const [searchParams] = useSearchParams()
+  const view: View = searchParams.get("view") === "mine" ? "mine" : "hall"
 
   /**
    * 点赞的本地覆盖表。
@@ -165,22 +175,8 @@ export default function GalleryPage() {
       <PageHeader title={t("gal.title")} description={t("gal.desc")} />
 
       <div className="flex flex-col gap-6 lg:flex-row">
-        <aside className="w-full shrink-0 lg:w-48">
-          <nav className="flex flex-col gap-0.5">
-            <NavItem
-              active={view === "hall"}
-              icon={LayoutGrid}
-              label={t("gal.tab.hall")}
-              onClick={() => setView("hall")}
-            />
-            <NavItem
-              active={view === "mine"}
-              icon={FlaskConical}
-              label={t("gal.tab.mine")}
-              onClick={() => setView("mine")}
-            />
-          </nav>
-        </aside>
+        {/* 侧边栏是共享组件（造物典藏 / 典藏设置两个页面用同一份），四项统一走 URL */}
+        <CollectionAside />
 
         <div className="min-w-0 flex-1">
           {view === "hall" ? (
@@ -814,7 +810,63 @@ function EditDialog({
   const [name, setName] = React.useState(project.name)
   const [description, setDescription] = React.useState(project.description ?? "")
   const [icon, setIcon] = React.useState(project.icon ?? "")
+  /** 自定义链接名（分享链接尾部）；留空 = 用自动生成的那个 */
+  const [slug, setSlug] = React.useState(project.slug ?? "")
   const [saving, setSaving] = React.useState(false)
+
+  /**
+   * 🔴 绑定域名（2026-10-12 从 AI 实验室「我的作品」搬到造物集 —— 站长要求）。
+   * 打开编辑框时拉当前绑定；绑定/解绑调 labApi（接口本来就有，纯前端搬家）。
+   */
+  const [domain, setDomain] = React.useState<string | null>(null)
+  const [domainLoaded, setDomainLoaded] = React.useState(false)
+  const [domainDraft, setDomainDraft] = React.useState("")
+  const [domainBusy, setDomainBusy] = React.useState(false)
+  React.useEffect(() => {
+    let cancelled = false
+    labApi
+      .getProjectDomain(project.id)
+      .then((res) => {
+        if (cancelled) return
+        setDomain(res.fqdn)
+        setDomainLoaded(true)
+      })
+      .catch(() => {
+        if (!cancelled) setDomainLoaded(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [project.id])
+
+  const bindDomain = async () => {
+    const fqdn = domainDraft.trim().toLowerCase()
+    if (!fqdn) return
+    setDomainBusy(true)
+    try {
+      const res = await labApi.setProjectDomain(project.id, fqdn)
+      setDomain(res.fqdn)
+      setDomainDraft("")
+      toast.success(t("gal.domain.bound", { d: res.fqdn }))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("gal.domain.bindFailed"))
+    } finally {
+      setDomainBusy(false)
+    }
+  }
+
+  const unbindDomain = async () => {
+    setDomainBusy(true)
+    try {
+      await labApi.clearProjectDomain(project.id)
+      setDomain(null)
+      toast.success(t("gal.domain.unbound"))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("gal.domain.bindFailed"))
+    } finally {
+      setDomainBusy(false)
+    }
+  }
 
   const [hasCover, setHasCover] = React.useState(!!project.hasCover)
   /** 换图后用它当查询串，绕开封面接口那 5 分钟的缓存 */
@@ -835,7 +887,12 @@ function EditDialog({
         description: description.trim(),
         icon: icon.trim(),
       })
-      onSaved({ ...(updated as LabProjectSummary), hasCover })
+      // 页面名单独一个接口：撞名（409）时把服务端的话原样抛给用户，不要静默加后缀
+      const wanted = slug.trim()
+      if (wanted && wanted !== project.slug) {
+        await labApi.setSlug(project.id, wanted)
+      }
+      onSaved({ ...(updated as LabProjectSummary), hasCover, slug: wanted || project.slug })
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t("gal.saveFailed"))
     } finally {
@@ -957,6 +1014,65 @@ function EditDialog({
             </div>
             <p className="text-[11px] text-muted-foreground">{t("gal.coverHint")}</p>
           </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="gal-slug">{t("gal.slug")}</Label>
+              <Input
+                id="gal-slug"
+                value={slug}
+                onChange={(e) => setSlug(e.target.value)}
+                maxLength={40}
+                placeholder="starwar"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                {t("gal.slugHint").replace("{u}", slug.trim() ? `tyu.me/${slug.trim()}` : "tyu.me/…")}
+              </p>
+            </div>
+
+            {/* ---- 绑定域名（2026-10-12 站长要求：从 AI 实验室搬来造物集）---- */}
+            <div className="space-y-1.5">
+              <Label htmlFor="gal-domain">{t("gal.domain.label")}</Label>
+              {domainLoaded && domain ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    {t("gal.domain.current")}
+                  </span>
+                  <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+                    {domain}
+                  </code>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive"
+                    disabled={domainBusy}
+                    onClick={() => void unbindDomain()}
+                  >
+                    {t("gal.domain.unbind")}
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="gal-domain"
+                    value={domainDraft}
+                    onChange={(e) => setDomainDraft(e.target.value)}
+                    placeholder={t("gal.domain.placeholder")}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={domainBusy || !domainDraft.trim()}
+                    onClick={() => void bindDomain()}
+                  >
+                    {t("gal.domain.confirm")}
+                  </Button>
+                </div>
+              )}
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                {t("gal.domain.hint")}
+              </p>
+            </div>
 
           <div className="space-y-1.5">
             <Label htmlFor="gal-name">{t("gal.name")}</Label>
@@ -1024,6 +1140,43 @@ function DetailOverlay({
   onLikeChange: (id: string, next: { likes: number; liked: boolean }) => void
 }) {
   const { t } = useT()
+  const navigate = useNavigate()
+  const [continueBusy, setContinueBusy] = React.useState(false)
+
+  /**
+   * 🔴「继续创作」（2026-10-12 站长要求）：把已发布作品的文件拉回 AI 实验室。
+   *
+   * 路径：详情接口本来带 files（渲染预览就在用）⇒ 塞进 sessionStorage，
+   * 跳实验室；实验室挂载时认领这份载荷（见 lab.tsx 的 LAB_IMPORT_KEY），
+   * 载入工作区并当作草稿继续。**只对作品主人显示**（别人没有改它的权利）。
+   */
+  const continueInLab = async () => {
+    if (!detail) return
+    setContinueBusy(true)
+    try {
+      // 详情里已有文件就不再多拉一次；防御性兜底：没有就按 id 取
+      let files = detail.files ?? {}
+      if (!Object.keys(files).length) {
+        const { project } = await labApi.getProject(detail.id)
+        files = project.files ?? {}
+      }
+      sessionStorage.setItem(
+        "doulor.lab.import",
+        JSON.stringify({
+          id: detail.id,
+          name: detail.name,
+          description: detail.description ?? "",
+          files,
+          at: Date.now(),
+        })
+      )
+      navigate("/dashboard/lab")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("gal.continueFailed"))
+    } finally {
+      setContinueBusy(false)
+    }
+  }
 
   // 渲染用的文档只在作品加载出来后算一次（文件可能不少，别每渲染都拼）
   const doc = React.useMemo(
@@ -1041,7 +1194,7 @@ function DetailOverlay({
   /** 公开作品有**固定可分享地址**（`tyu.me/p/<id>`），未公开/没保存的只能本地注入 */
   const shareUrl =
     detail && detail.visibility === "public"
-      ? `${PREVIEW_SHARE_URL}/${encodeURIComponent(detail.id)}`
+      ? `${PREVIEW_SHELL_ORIGIN}/${encodeURIComponent(detail.slug || detail.id)}`
       : ""
 
   const openInNewTab = () => {
@@ -1128,6 +1281,23 @@ function DetailOverlay({
           )}
 
           <div className="flex shrink-0 items-center gap-2">
+            {/* 继续创作：把文件拉回 AI 实验室（只给作品主人） */}
+            {detail?.isMine && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={continueBusy}
+                onClick={() => void continueInLab()}
+                title={t("gal.continueHint")}
+              >
+                {continueBusy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Sparkles className="h-4 w-4" />
+                )}
+                <span className="hidden sm:inline">{t("gal.continue")}</span>
+              </Button>
+            )}
             {shareUrl && (
               <Button variant="outline" size="sm" onClick={() => void copyShareLink()}>
                 <Link2 className="h-4 w-4" />

@@ -42,6 +42,9 @@ export function TwoFactorCard() {
   const { t } = useT()
   const [status, setStatus] = React.useState<Status | null>(null)
   const [busy, setBusy] = React.useState(false)
+  /** 二次验证（改动 2FA 设置前的身份确认）：验证码本身 + 邮箱码的挑战 id */
+  const [stepCode, setStepCode] = React.useState("")
+  const [stepChallenge, setStepChallenge] = React.useState("")
 
   /** TOTP 配置中的临时数据（未确认前不落库，所以只存在前端） */
   const [setup, setSetup] = React.useState<{ secret: string; otpauthUrl: string } | null>(null)
@@ -73,10 +76,33 @@ export function TwoFactorCard() {
     })
   }, [setup, t])
 
+  /**
+   * 二次验证载荷（2026-10-10 起，服务端要求改动 2FA 设置前先证明是本人）。
+   * 账号还没开启任何 2FA 时是空对象 —— 服务端会放行（首次开启属于「加固」不是「拆锁」）。
+   */
+  const stepUpPayload = () => ({
+    code: stepCode.trim() || undefined,
+    challengeId: stepChallenge || undefined,
+  })
+
+  /** 把验证码发到邮箱（仅在已开启邮箱方式时可用） */
+  const requestStepUpCode = async () => {
+    setBusy(true)
+    try {
+      const res = await twoFactorApi.sendStepUpCode()
+      setStepChallenge(res.challengeId)
+      toast.success(t("s2fa.stepUpSent"))
+    } catch (err) {
+      toast.error(errMsg(err, t("s2fa.opFailed")))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const startTotp = async () => {
     setBusy(true)
     try {
-      const res = await twoFactorApi.startTotp()
+      const res = await twoFactorApi.startTotp(stepUpPayload())
       setSetup(res)
       setCode("")
     } catch (err) {
@@ -105,7 +131,7 @@ export function TwoFactorCard() {
   const toggleEmail = async (enabled: boolean) => {
     setBusy(true)
     try {
-      const res = await twoFactorApi.setEmail(enabled)
+      const res = await twoFactorApi.setEmail(enabled, stepUpPayload())
       // 开启方式时可能发了一批新恢复码 —— 立即展示（明文只出现这一次）
       if (res.recoveryCodes && res.recoveryCodes.length > 0) {
         setRecoveryCodes(res.recoveryCodes)
@@ -122,7 +148,7 @@ export function TwoFactorCard() {
   const disableTotp = async () => {
     setBusy(true)
     try {
-      await twoFactorApi.disableTotp()
+      await twoFactorApi.disableTotp(stepUpPayload())
       await load()
       toast.success(t("s2fa.totpOff"))
     } catch (err) {
@@ -135,7 +161,7 @@ export function TwoFactorCard() {
   const regenerate = async () => {
     setBusy(true)
     try {
-      const res = await twoFactorApi.regenerateRecovery()
+      const res = await twoFactorApi.regenerateRecovery(stepUpPayload())
       setRecoveryCodes(res.recoveryCodes)
       await load()
       toast.success(t("s2fa.recoveryRegenerated"))
@@ -174,6 +200,40 @@ export function TwoFactorCard() {
       </CardHeader>
 
       <CardContent className="space-y-4">
+        {/*
+          二次验证区块（2026-10-10 渗透 finding#8/#9 修复）：
+          账号已开启 2FA 时，改动任何 2FA 设置都必须先验证「已开启的方式」——
+          否则偷到会话 cookie 的人就能静默拆掉第二因子 / 换成自己的认证器。
+          规则由站长定：关 TOTP 验 TOTP 码或恢复码、关邮箱验邮箱码、其余验任一已开启方式。
+        */}
+        {status?.enabled && (
+          <div className="space-y-2 rounded-md border bg-muted/40 p-3">
+            <Label htmlFor="s2fa-stepup" className="text-xs">
+              {t("s2fa.stepUpLabel")}
+            </Label>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                id="s2fa-stepup"
+                value={stepCode}
+                onChange={(e) => setStepCode(e.target.value)}
+                placeholder={t("s2fa.stepUpPlaceholder")}
+                className="h-8 w-44 font-mono text-xs"
+                autoComplete="one-time-code"
+              />
+              {status.emailEnabled && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void requestStepUpCode()}
+                >
+                  {stepChallenge ? t("s2fa.stepUpResend") : t("s2fa.stepUpSend")}
+                </Button>
+              )}
+            </div>
+            <p className="text-[11px] text-muted-foreground">{t("s2fa.stepUpHint")}</p>
+          </div>
+        )}
         {!status ? (
           <div className="py-6">
             <Loader2 className="mx-auto h-4 w-4 animate-spin text-muted-foreground" />

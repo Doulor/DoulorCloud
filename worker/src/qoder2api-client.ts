@@ -451,6 +451,25 @@ export async function q2CancelLogin(env: Env, state: string): Promise<void> {
  * ⚠️ 上游 `GET /accounts` 默认只列**当前面板区域**的账号，所以要分区各拉一次再合并，
  * 否则管理端会「看不到另一个区捐的号」。
  */
+/**
+ * 上传账号 JSON 批量导入到网关池。
+ *
+ * 网关接口：`POST /accounts/import`，body `{ data: <数组>, realm? }`
+ *（网关的 `_coerce_account_rows` 支持多种文档形态，数组/对象都行，这里统一包成 `data`）。
+ */
+export async function q2ImportAccounts(
+  env: Env,
+  rows: unknown[],
+  realm?: string | null
+): Promise<{ imported?: number; skipped?: number; errors?: string[] }> {
+  const body: Record<string, unknown> = { data: rows }
+  if (realm) body.realm = realm
+  return await q2Fetch(env, "/accounts/import", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
 export async function q2ListAccounts(env: Env): Promise<Q2Account[]> {
   const out: Q2Account[] = []
   for (const realm of QODER2API_REALMS) {

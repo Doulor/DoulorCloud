@@ -24,8 +24,14 @@ import {
   presign,
   putObject,
   supportsPresign,
-  deletePrefix,
   pickBucketForNewUser,
+  // 2026-10-12 跨桶改造：一个账号的文件可以分散在多个桶里（主桶写满后溢出到下一个），
+  // 所以「找 key / 扫前缀 / 选写入桶」都要走这三个 helper，不能再假定只有一个桶。
+  candidateBucketIds,
+  findKeyBucket,
+  pickBucketForWrite,
+  deleteObjectAcrossBuckets,
+  deletePrefixAcrossBuckets,
 } from "../r2"
 import { audit, formatBytes, getSettingBool, getSettingNumber, getSettings } from "../settings"
 import {
@@ -271,39 +277,49 @@ async function listLevel(
   const scanPrefix = dirPath ? `${account.prefix}/${dirPath}/` : `${account.prefix}/`
   const folders = new Set<string>()
   const files: LevelListing["files"] = []
-  let cursor: string | undefined
-  let round = 0
+  /** 跨桶去重：同一个 key 理论上只在一个桶，但迁移/异常可能留下副本 ⇒ 只列一份 */
+  const seenKeys = new Set<string>()
+  let hitPageLimit = false
 
-  for (; round < SCAN_MAX_PAGES; round++) {
-    const page = await listObjects(env, scanPrefix, {
-      limit: SCAN_PAGE_SIZE,
-      cursor,
-      bucketId: account.bucket_id,
-    })
-    for (const obj of page.objects) {
-      const rel = obj.key.slice(scanPrefix.length)
-      if (!rel) continue // 该目录自身的占位对象（`<prefix>/<dir>/`）
-      const slash = rel.indexOf("/")
-      if (slash === -1) {
-        if (obj.key.endsWith(MARKER_SUFFIX)) continue
-        // 🔴 这里必须补回 `dirPath` 前缀：`rel` 只是「当前目录内」的文件名，但下游把它当
-        // 「相对账号根目录」用（拼直链 `https://<fqdn>/<path>`、拼 R2 key `<prefix>/<path>`）。
-        // 少这一层目录名的后果（2026-10-09 站长实爆）：
-        //   ① 目录里的文件，复制出来的直链指向**根目录**的同名文件 ⇒ 404 / 拿到别的文件；
-        //   ② 删除、多选删的 key 也是 `<prefix>/<文件名>` ⇒ 删了一个根本不存在的对象，静默成功的假象。
-        files.push({
-          name: rel,
-          path: dirPath ? `${dirPath}/${rel}` : rel,
-          size: obj.size,
-          lastModified: obj.lastModified,
-        })
-      } else {
-        // 只需第一段：更深的层级归到对应的子目录名下（天然去重）
-        folders.add(rel.slice(0, slash))
+  // 🔴 跨桶（2026-10-12）：账号的文件可能散在**多个桶**里（主桶满了之后溢出到别的桶）
+  // ⇒ 每个可能的桶都扫一遍再合并。主桶排第一，只有真溢出过的账号才会多扫几个桶。
+  for (const bucketId of await candidateBucketIds(env, account.bucket_id)) {
+    let cursor: string | undefined
+    let round = 0
+    for (; round < SCAN_MAX_PAGES; round++) {
+      const page = await listObjects(env, scanPrefix, {
+        limit: SCAN_PAGE_SIZE,
+        cursor,
+        bucketId,
+      })
+      for (const obj of page.objects) {
+        const rel = obj.key.slice(scanPrefix.length)
+        if (!rel) continue // 该目录自身的占位对象（`<prefix>/<dir>/`）
+        const slash = rel.indexOf("/")
+        if (slash === -1) {
+          if (obj.key.endsWith(MARKER_SUFFIX)) continue
+          if (seenKeys.has(obj.key)) continue
+          seenKeys.add(obj.key)
+          // 🔴 这里必须补回 `dirPath` 前缀：`rel` 只是「当前目录内」的文件名，但下游把它当
+          // 「相对账号根目录」用（拼直链 `https://<fqdn>/<path>`、拼 R2 key `<prefix>/<path>`）。
+          // 少这一层目录名的后果（2026-10-09 站长实爆）：
+          //   ① 目录里的文件，复制出来的直链指向**根目录**的同名文件 ⇒ 404 / 拿到别的文件；
+          //   ② 删除、多选删的 key 也是 `<prefix>/<文件名>` ⇒ 删了一个根本不存在的对象，静默成功的假象。
+          files.push({
+            name: rel,
+            path: dirPath ? `${dirPath}/${rel}` : rel,
+            size: obj.size,
+            lastModified: obj.lastModified,
+          })
+        } else {
+          // 只需第一段：更深的层级归到对应的子目录名下（天然去重）
+          folders.add(rel.slice(0, slash))
+        }
       }
+      if (!page.truncated || !page.cursor) break
+      cursor = page.cursor
     }
-    if (!page.truncated || !page.cursor) break
-    cursor = page.cursor
+    if (round >= SCAN_MAX_PAGES) hitPageLimit = true
   }
 
   return {
@@ -311,7 +327,7 @@ async function listLevel(
       .sort((a, b) => a.localeCompare(b, "zh-Hans-CN"))
       .map((name) => ({ name, path: dirPath ? `${dirPath}/${name}` : name })),
     files: files.sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN")),
-    truncated: round >= SCAN_MAX_PAGES,
+    truncated: hitPageLimit,
   }
 }
 
@@ -325,21 +341,24 @@ async function recalculateUsage(
 ): Promise<{ usedBytes: number; fileCount: number }> {
   let usedBytes = 0
   let fileCount = 0
-  let cursor: string | undefined
 
-  for (let round = 0; round < 50; round++) {
-    const page = await listObjects(env, `${account.prefix}/`, {
-      limit: 1000,
-      cursor,
-      bucketId: account.bucket_id,
-    })
-    for (const obj of page.objects) {
-      if (obj.key.endsWith(MARKER_SUFFIX)) continue
-      usedBytes += obj.size
-      fileCount++
+  // 跨桶（2026-10-12）：把该账号在**所有**桶里的对象都算进来，否则溢出过的那部分会漏计
+  for (const bucketId of await candidateBucketIds(env, account.bucket_id)) {
+    let cursor: string | undefined
+    for (let round = 0; round < 50; round++) {
+      const page = await listObjects(env, `${account.prefix}/`, {
+        limit: 1000,
+        cursor,
+        bucketId,
+      })
+      for (const obj of page.objects) {
+        if (obj.key.endsWith(MARKER_SUFFIX)) continue
+        usedBytes += obj.size
+        fileCount++
+      }
+      if (!page.truncated || !page.cursor) break
+      cursor = page.cursor
     }
-    if (!page.truncated || !page.cursor) break
-    cursor = page.cursor
   }
 
   await env.DB.prepare(
@@ -638,7 +657,9 @@ export async function createFolder(env: Env, request: Request): Promise<Response
 
   const key = `${account.prefix}/${path}/`
   // 幂等：同名目录已存在时覆盖写占位对象即可，不该报错
-  await putObject(env, key, "", "application/x-directory", account.bucket_id)
+  // 跨桶：目录标记对象是 0 字节的占位，放哪个桶都行 ⇒ 挑一个还有空间的（主桶优先）
+  const dirBucket = (await pickBucketForWrite(env, 0, account.bucket_id)) ?? account.bucket_id
+  await putObject(env, key, "", "application/x-directory", dirBucket)
 
   await audit(env, user.id, "storage.folder.create", `新建目录 ${key}`)
   return json({ path }, 201)
@@ -662,7 +683,7 @@ export async function deleteFolder(env: Env, request: Request): Promise<Response
   const target = `${account.prefix}/${path}/`
 
   // 按 R2 实际内容递归删（含各级占位对象），再按剩余行重算用量，保持账实一致。
-  const removed = await deletePrefix(env, target, 60, account.bucket_id)
+  const removed = await deletePrefixAcrossBuckets(env, target, account.bucket_id, 60)
 
   const now = new Date().toISOString()
   await env.DB.batch([
@@ -728,7 +749,11 @@ export async function createUploadUrl(
   // 同名文件已存在时按覆盖处理，配额只算增量
   const relativePath = folder ? `${folder}/${filename}` : filename
   const key = `${account.prefix}/${relativePath}`
-  const existing = await headObject(env, key, account.bucket_id)
+  // ⚠️ 跨桶（2026-10-12）：必须先在**所有**桶里找这个 key。改前只查主桶 ——
+  // 账号一旦溢出过，已有文件会被误判成「新文件」：配额按 size 而不是增量算，
+  // 而且会往另一个桶再写一份、留下两份同名对象。
+  const existingBucket = await findKeyBucket(env, key, account.bucket_id)
+  const existing = existingBucket ? await headObject(env, key, existingBucket) : null
   const delta = size - (existing?.size ?? 0)
 
   if (account.used_bytes + delta > account.quota_bytes) {
@@ -738,13 +763,20 @@ export async function createUploadUrl(
       "QUOTA_EXCEEDED"
     )
   }
-  // 桶级共享池容量守卫
-  await assertBucketHasRoom(env, account.bucket_id, delta)
 
-  const uploadUrl = (await supportsPresign(env, account.bucket_id))
+  // 目标桶：
+  //   · 已有同名文件 ⇒ **写回原桶**（覆盖就是覆盖，不搬家）；
+  //   · 新文件 ⇒ 挑一个「装得下本次增量、剩余最多」的桶，主桶优先。
+  //     = 主桶还能放下就用主桶，放不下自动落到下一个还有空间的桶。
+  const targetBucket =
+    existingBucket ?? (await pickBucketForWrite(env, delta, account.bucket_id))
+  // 桶级共享池容量守卫：所有桶都装不下时，由这里抛出「存储桶已满」
+  await assertBucketHasRoom(env, targetBucket, delta)
+
+  const uploadUrl = (await supportsPresign(env, targetBucket))
     ? // content-length 参与签名（见 r2.ts 的 presign）：否则客户端可以声明
       // size=1 通过配额校验，再用同一个预签名 URL PUT 任意大小的对象。
-      await presign(env, "PUT", key, 3600, account.bucket_id, size)
+      await presign(env, "PUT", key, 3600, targetBucket, size)
     : // token 模式不支持预签名：改走 Worker 转发上传（见 proxyUpload）
       `/api/storage/proxy-upload?key=${encodeURIComponent(key)}`
 
@@ -817,14 +849,18 @@ export async function proxyUpload(env: Env, request: Request): Promise<Response>
   // 字节数**已经在内存里**，所以这里能在落盘前就把配额判掉 —— 与预签名
   // 直传不同（那条路径的大小由客户端声明，见 r2.ts 的 presign 签名改动）。
   // 注意记账仍由 commitUpload 完成，这里只是「不满足配额就别写进 R2」。
-  const existing = await headObject(env, key, account.bucket_id)
+  // 跨桶：先找这个 key 落在哪个桶（已有 ⇒ 写回原桶；没有 ⇒ 挑一个装得下的）
+  const existingBucket = await findKeyBucket(env, key, account.bucket_id)
+  const existing = existingBucket ? await headObject(env, key, existingBucket) : null
   const delta = buf.byteLength - (existing?.size ?? 0)
   if (account.used_bytes + delta > account.quota_bytes) {
     throw new ApiError(400, "存储空间不足，上传已取消", "QUOTA_EXCEEDED")
   }
-  await assertBucketHasRoom(env, account.bucket_id, delta)
+  const targetBucket =
+    existingBucket ?? (await pickBucketForWrite(env, delta, account.bucket_id))
+  await assertBucketHasRoom(env, targetBucket, delta)
 
-  await putObject(env, key, buf, contentType, account.bucket_id)
+  await putObject(env, key, buf, contentType, targetBucket)
   return json({ ok: true, key, size: buf.byteLength })
 }
 
@@ -842,8 +878,10 @@ export async function commitUpload(env: Env, request: Request): Promise<Response
   const key = body.key ?? ""
   assertKeyOwned(account, key)
 
-  const head = await headObject(env, key, account.bucket_id)
-  if (!head) {
+  // 跨桶：文件可能落在任意一个桶里（发起上传时就按「装得下的桶」选好了），先找出来。
+  const bucketId = await findKeyBucket(env, key, account.bucket_id)
+  const head = bucketId ? await headObject(env, key, bucketId) : null
+  if (!head || !bucketId) {
     throw new ApiError(404, "上传未完成或文件不存在", "NOT_FOUND")
   }
 
@@ -861,16 +899,17 @@ export async function commitUpload(env: Env, request: Request): Promise<Response
   // 个人限额 + 桶级共享池容量：任一超限都回滚刚上传的文件，保持账实一致
   const overQuota = account.used_bytes + delta > account.quota_bytes
   let bucketFull = false
-  if (!overQuota && account.bucket_id) {
+  if (!overQuota && bucketId) {
     try {
-      await assertBucketHasRoom(env, account.bucket_id, delta)
+      // 用**文件实际所在的那个桶**判容量（跨桶后不能再按主桶算）
+      await assertBucketHasRoom(env, bucketId, delta)
     } catch (err) {
       if (err instanceof ApiError && err.code === "BUCKET_FULL") bucketFull = true
       else throw err
     }
   }
   if (overQuota || bucketFull) {
-    await deleteObject(env, key, account.bucket_id)
+    await deleteObject(env, key, bucketId)
     throw new ApiError(
       400,
       overQuota ? "存储空间不足，上传已取消" : "存储桶已满，上传已取消",
@@ -917,7 +956,7 @@ export async function commitUpload(env: Env, request: Request): Promise<Response
         .bind(key, user.id)
         .run()
     }
-    await deleteObject(env, key, account.bucket_id)
+    await deleteObjectAcrossBuckets(env, key, account.bucket_id)
     throw new ApiError(400, "存储空间不足，上传已取消", "QUOTA_EXCEEDED")
   }
 
@@ -998,7 +1037,7 @@ export async function deleteStorageObjects(
   // 逐个删 R2 对象：单个失败不阻断其余（与单删一致的容错口径）
   for (const key of keys) {
     try {
-      await deleteObject(env, key, account.bucket_id)
+      await deleteObjectAcrossBuckets(env, key, account.bucket_id)
     } catch {
       /* 忽略单个失败，下面按 DB 记录清理并重算用量 */
     }
@@ -1033,7 +1072,14 @@ export async function downloadStorageObject(
   const key = new URL(request.url).searchParams.get("key") ?? ""
   assertKeyOwned(account, key)
 
-  return proxyObject(env, key, request, false, account.bucket_id)
+  // 跨桶：文件可能在任意一个桶里，先定位（找不到则回落到默认桶，由下游报 404）
+  return proxyObject(
+    env,
+    key,
+    request,
+    false,
+    (await findKeyBucket(env, key, account.bucket_id)) ?? undefined
+  )
 }
 
 // ---- 自定义直链前缀 ----
@@ -1463,7 +1509,14 @@ export async function serveDirectLink(
     throw new ApiError(404, "文件不存在", "NOT_FOUND")
   }
 
-  return proxyObject(env, `${account.prefix}/${filename}`, request, true, account.bucket_id)
+  const shareKey = `${account.prefix}/${filename}`
+  return proxyObject(
+    env,
+    shareKey,
+    request,
+    true,
+    (await findKeyBucket(env, shareKey, account.bucket_id)) ?? undefined
+  )
 }
 
 /**
@@ -1511,7 +1564,14 @@ export async function serveHostedDirectLink(
     )
   }
 
-  return proxyObject(env, `${account.prefix}/${path}`, request, true, account.bucket_id)
+  const pubKey = `${account.prefix}/${path}`
+  return proxyObject(
+    env,
+    pubKey,
+    request,
+    true,
+    (await findKeyBucket(env, pubKey, account.bucket_id)) ?? undefined
+  )
 }
 
 /** 判断 Host 是否为一个已绑定的自定义直链域名 */
@@ -1782,7 +1842,13 @@ export async function serveStorageShare(
 
     const relative = segments.join("/")
     const key = `${account.prefix}/${share.path ? `${share.path}/` : ""}${relative}`
-    const res = await proxyObject(env, key, request, true, account.bucket_id)
+    const res = await proxyObject(
+      env,
+      key,
+      request,
+      true,
+      (await findKeyBucket(env, key, account.bucket_id)) ?? undefined
+    )
 
     // ?dl=1 → 强制下载（白名单类型默认是 inline，分享页里「下载」按钮要的是附件）
     const url = new URL(request.url)
@@ -1961,7 +2027,7 @@ ${moreHint}
 export async function purgeUserStorage(env: Env, userId: string): Promise<number> {
   const account = await loadAccount(env, userId)
   if (!account) return 0
-  const deleted = await deletePrefix(env, `${account.prefix}/`, 50, account.bucket_id)
+  const deleted = await deletePrefixAcrossBuckets(env, `${account.prefix}/`, account.bucket_id, 50)
   await env.DB.batch([
     env.DB.prepare("DELETE FROM storage_objects WHERE user_id = ?").bind(userId),
     // 目录分享也要一并清掉：文件已经没了，留着空壳分享只会得到一堆 404
