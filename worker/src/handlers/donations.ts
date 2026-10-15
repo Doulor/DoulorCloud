@@ -212,9 +212,12 @@ const DONATION_TYPES: Record<string, Feature | null> = {
  * 未列出的类型默认授予（保守，宁可多授不漏）。
  */
 const DONATION_GRANT_SETTING: Record<string, SettingKey> = {
+  // ⚠️ 这里**故意没有 frp**（2026-10-14 明确）：内网穿透已完全改为积分租用，
+  //    不再有「捐献换 frp 权限」这件事，所以也没有对应的授权开关。
+  //    捐献类型 frp 本身仍然有效（用于展示历史捐献记录），只是它 feature 为 null、
+  //    不写任何权限 —— 见下面 donationGrantsPermission 的说明。
   ai: "donation_grant_ai",
   sensenova: "donation_grant_sensenova",
-  frp: "donation_grant_frp",
   proxy: "donation_grant_proxy",
 }
 
@@ -1595,8 +1598,7 @@ export async function listDonations(env: Env, request: Request): Promise<Respons
     grantPermissions: {
       ai: settings.donation_grant_ai !== "0",
       sensenova: settings.donation_grant_sensenova !== "0",
-      frp: settings.donation_grant_frp !== "0",
-      proxy: settings.donation_grant_proxy !== "0",
+          proxy: settings.donation_grant_proxy !== "0",
       wb2api: settings.donation_grant_wb2api !== "0",
       qoder2api: settings.donation_grant_qoder2api !== "0",
     },

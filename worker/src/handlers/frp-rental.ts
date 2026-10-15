@@ -16,7 +16,7 @@
  */
 import { ApiError, json } from "../http"
 import { requireAdminScope } from "./admin"
-import { audit, getSettings } from "../settings"
+import { audit, getSettingNumber, getSettings } from "../settings"
 import { requireUser } from "../auth"
 import { applyPoints, getPointsBalance } from "../points"
 import { renderFrpcConfig } from "../frp-config"
@@ -26,11 +26,18 @@ import type { Env } from "../env"
  * 租用账号的统一前缀。
  *
  * 🔴 **必须与服务器上 agent 的 `user_prefix`、以及 handlers/frp-agent.ts 的
- * `FRP_USER_PREFIX` 三处完全一致。** agent 靠它区分「本站创建的账号」与面板里
+ * `FRP_USER_PREFIXES` 一致。** agent 靠它区分「本站创建的账号」与面板里
  * 46 个管理员人工建的历史账号，从而保证清理时绝不误删他人账号。
- * 实测这 46 个历史账号里没有任何一个以 `dcfrp_` 开头。
+ * 实测这 46 个历史账号里没有任何一个以 `DC_` 开头。
+ *
+ * 2026-10-14：`dcfrp_` 旧前缀**已彻底移除**（站长确认从未投入使用，
+ * D1 里唯一的 `dcfrp_06ed1dbb` 是一笔测试订阅，已改名为 DC_ 前缀）。
+ * 所以这里只剩 `DC_` 一个前缀。
  */
-const FRP_USER_PREFIX = "dcfrp_"
+const FRP_USER_PREFIX = "DC_"
+
+/** 边界：哪些前缀算「本站创建的账号」。 */
+const FRP_USER_PREFIXES = ["DC_"]
 
 /**
  * 默认租用端口区间（2026-10-13 站长确认）。
@@ -40,7 +47,7 @@ const DEFAULT_PORT_RANGE: [number, number] = [31000, 31999]
 
 /** 面板的 token 只接受字母与数字（实测带连字符会被拒：token format error） */
 const TOKEN_PATTERN = /^[A-Za-z0-9]{8,64}$/
-const USER_PATTERN = /^dcfrp_[a-z0-9]{4,32}$/
+const USER_PATTERN = new RegExp(`^(?:${FRP_USER_PREFIXES.join("|")})[A-Za-z0-9]{4,32}$`)
 
 const DAY_MS = 86_400_000
 
@@ -208,6 +215,64 @@ async function requireNode(env: Env, nodeId: string): Promise<{ id: string; name
 // ---------------------------------------------------------------- 套餐
 
 /** GET /api/admin/frp/plans */
+/**
+ * 把租用收入按比例分成给**节点捐献者**。
+ *
+ * 站长口径：租用者支付的积分按 `frp_rental_owner_share_percent`（默认 10%）
+ * 转给捐献者，其余销毁。比例在管理面板可改。
+ *
+ * 几个刻意的取舍：
+ *   · **自营节点不分成**：owner_user_id 为空 = 平台自己的机器，收入全额销毁。
+ *   · **自己租自己的不分成**：钱从「扣 100」变成「扣 100 再退 10」，多一次无意义
+ *     往返，还会在积分流水里刷噪声。
+ *   · **算出来是 0 就完全不动**：比例 0、或单价低到分成不足 1 分时，
+ *     不写一条 delta=0 的流水。
+ *   · **失败不影响租约**：分成是附带动作，抛错不该把用户已经付过钱的租约搞坏，
+ *     所以整段包在 try 里，出问题只记日志。
+ *
+ * 向下取整是刻意的：宁可少给一分，也不要出现「分出去比收进来多」。
+ */
+async function shareRentalToOwner(
+  env: Env,
+  nodeId: string,
+  paidPoints: number,
+  payerUserId: string,
+  detail: string,
+  dedupKey: string
+): Promise<void> {
+  try {
+    if (paidPoints <= 0) return
+
+    // 没有回退值参数：解析不出来时它自己会回落到 SETTING_DEFAULTS（也就是 10）
+    const pct = await getSettingNumber(env, "frp_rental_owner_share_percent")
+    if (pct <= 0) return
+    const effective = Math.min(pct, 100)
+
+    const node = await env.DB.prepare(
+      `SELECT owner_user_id FROM frp_nodes WHERE id = ? LIMIT 1`
+    )
+      .bind(nodeId)
+      .first<{ owner_user_id: string | null }>()
+    const ownerId = node?.owner_user_id
+    if (!ownerId) return // 自营节点
+    if (ownerId === payerUserId) return // 自己租自己的
+
+    const share = Math.floor((paidPoints * effective) / 100)
+    if (share <= 0) return
+
+    await applyPoints(env, {
+      userId: ownerId,
+      delta: share,
+      reason: "frp_rental_share",
+      detail: `节点租用分成 ${effective}% · ${detail}`,
+      dedupKey,
+    })
+  } catch (err) {
+    // 分成失败不能连累已经成立的租约
+    console.error("frp rental owner share failed", err)
+  }
+}
+
 export async function listFrpPlans(env: Env, request: Request): Promise<Response> {
   await requireAdminScope(env, request, "frp.plans")
   const { results } = await env.DB.prepare(
@@ -526,6 +591,8 @@ export async function createFrpSubscription(env: Env, request: Request): Promise
   }
 
   const id = `sub_${shortId()}${shortId()}`
+
+
   const frpUser = `${FRP_USER_PREFIX}${shortId()}`
   if (!USER_PATTERN.test(frpUser)) {
     throw new ApiError(500, `生成的账号名不合规：${frpUser}`, "BAD_SUBSCRIPTION")
@@ -597,6 +664,8 @@ export async function updateFrpSubscription(
     ports?: number[]
     /** 直接设定到期时间（管理员手工兜底用）；优先级高于 days */
     expiresAt?: string
+    /** setToken 用：新的连接密码（只允许字母数字，见 TOKEN_PATTERN） */
+    token?: string
   }
   const action = String(body.action ?? "").trim()
   const at = nowIso()
@@ -644,6 +713,27 @@ export async function updateFrpSubscription(
       .run()
     await audit(env, admin.id, "frp.subscription.extend", `${sub.frp_user} → ${nextExpiry}`)
     return json({ ok: true, expiresAt: nextExpiry })
+  }
+
+  if (action === "setToken") {
+    // 改密码。站长要求：用户名不可改（生成后固定），但密码用户自己可以改。
+    //
+    // ⚠️ 必须在这里就用 TOKEN_PATTERN 挡住 —— 面板对 token 有格式校验
+    //    （只收 A-Za-z0-9），放进去的话用户会拿到一个「面板连不上、
+    //    但看不出原因」的账号，排查成本极高。宁可在这里报错。
+    const raw = typeof body.token === "string" ? body.token.trim() : ""
+    if (!TOKEN_PATTERN.test(raw)) {
+      throw new ApiError(
+        400,
+        "密码只能用 8–64 位字母或数字（面板不收其它字符）",
+        "BAD_TOKEN"
+      )
+    }
+    await env.DB.prepare(`UPDATE frp_subscriptions SET frp_token = ?, updated_at = ? WHERE id = ?`)
+      .bind(raw, at, id)
+      .run()
+    await audit(env, admin.id, "frp.subscription.setToken", sub.frp_user)
+    return json({ ok: true, frpToken: raw })
   }
 
   if (action === "setPorts") {
@@ -913,6 +1003,16 @@ export async function purchaseRental(env: Env, request: Request): Promise<Respon
   }
 
   const id = `sub_${shortId()}${shortId()}`
+  // 扣款已成功、租约 id 也定下来了 —— 这时候再分成。
+  // 幂等键用订阅 id：一笔租约对应一次分成，重复调用不会重复给。
+  await shareRentalToOwner(
+    env,
+    plan.node_id,
+    plan.price_points,
+    user.id,
+    `${plan.name}（${plan.days} 天）`,
+    `frp_rental:share:${id}`
+  )
   const frpUser = `${FRP_USER_PREFIX}${shortId()}`
   const frpToken = generateFrpToken()
   const at = new Date()
@@ -972,6 +1072,194 @@ export async function purchaseRental(env: Env, request: Request): Promise<Respon
 }
 
 /** POST /api/frp/rental/renew —— 用积分续期 */
+/**
+ * POST /frp/rental/token —— 租约所有者改自己的 frp 密码。
+ *
+ * 站长要求：账号名生成后**不可改**，但密码用户可以自己在 DoulorCloud 里改。
+ *
+ * 🔴 查询必须限定 user_id —— token 是 frp 唯一的连接凭据，越权改掉别人的密码
+ *    等于把人家的隧道顶掉。越权时返回 **404 而不是 403**：403 等于告诉攻击者
+ *    「这个租约 id 确实存在」。
+ *
+ * 格式校验和面板 v1 的 setToken 共用 TOKEN_PATTERN，理由见那里。
+ */
+export async function setMyRentalToken(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const body = (await request.json()) as { id?: string; token?: string }
+  const id = String(body.id ?? "").trim()
+  if (!id) throw new ApiError(400, "缺少租约", "BAD_TOKEN")
+
+  const sub = await env.DB.prepare(
+    `SELECT * FROM frp_subscriptions WHERE id = ? AND user_id = ?`
+  )
+    .bind(id, user.id)
+    .first<SubscriptionRow>()
+  if (!sub) throw new ApiError(404, "租约不存在", "SUBSCRIPTION_NOT_FOUND")
+  if (sub.status === "cancelled") {
+    throw new ApiError(409, "该租约已被停用，请联系管理员", "SUBSCRIPTION_CANCELLED")
+  }
+
+  // 面板只收 A-Za-z0-9（实测带连字符会被拒：operate failed, token format error）。
+  // 不在这里挡住，用户会拿到一个「面板连不上、但看不出原因」的账号，排查成本极高。
+  const raw = typeof body.token === "string" ? body.token.trim() : ""
+  if (!TOKEN_PATTERN.test(raw)) {
+    throw new ApiError(
+      400,
+      "密码只能用 8–64 位字母或数字（面板不收其它字符）",
+      "BAD_TOKEN"
+    )
+  }
+
+  await env.DB.prepare(`UPDATE frp_subscriptions SET frp_token = ?, updated_at = ? WHERE id = ?`)
+    .bind(raw, nowIso(), id)
+    .run()
+  await audit(env, user.id, "frp.rental.setToken", sub.frp_user)
+  return json({ ok: true, frpToken: raw })
+}
+
+/**
+ * 开关「自动续费」（用户只能改自己的租约）。
+ *
+ * 语义：到期前 24 小时内，如果开着自动续费且积分够，就自动按当前套餐续一期。
+ *
+ * ⚠️ 为什么用 `WHERE id = ? AND user_id = ?` 而不是先查后判断：
+ *    先查再更新中间有窗口，而且"查到了但不属于你"和"不存在"必须返回**同样的 404**
+ *    —— 否则拿着别人的 id 试探就能区分出"这个 id 存在但不是你的"，
+ *    等于泄露了别人租约的 id。这和改令牌那条是同一个道理。
+ */
+export async function setMyRentalAutoRenew(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const body = (await request.json().catch(() => ({}))) as { id?: unknown; autoRenew?: unknown }
+  const id = String(body.id || "").trim()
+  if (!id) throw new ApiError(400, "缺少租约 id", "BAD_REQUEST")
+  if (typeof body.autoRenew !== "boolean") {
+    throw new ApiError(400, "autoRenew 必须是布尔值", "BAD_REQUEST")
+  }
+
+  const res = await env.DB.prepare(
+    `UPDATE frp_subscriptions SET auto_renew = ?, updated_at = ?
+     WHERE id = ? AND user_id = ?`
+  )
+    .bind(body.autoRenew ? 1 : 0, new Date().toISOString(), id, user.id)
+    .run()
+
+  if (!res.meta.changes) {
+    throw new ApiError(404, "租约不存在", "NOT_FOUND")
+  }
+  return json({ ok: true, id, autoRenew: body.autoRenew })
+}
+
+/**
+ * 自动续费引擎（由 cron 调用）。
+ *
+ * 规则：`auto_renew = 1` 且**到期时间已进入 24 小时窗口**的活跃租约，
+ * 自动再买一期；积分不够就把开关**关掉**并记下原因。
+ *
+ * 几个刻意的决定：
+ *
+ *   · **提前 24 小时续，而不是到期后再续**
+ *     到期后才续的话，用户会有一段服务中断的空窗（下一次 cron、面板同步、
+ *     用户重连都要时间）。提前续是"无缝"的。
+ *
+ *   · **只处理一次，不会连买多期**
+ *     续完 `expires_at` 就推到 24 小时窗口之外了，所以同一条租约在下一轮
+ *     不会再被选中 —— 天然幂等，不需要额外的"已处理"标记。
+ *
+ *   · **积分不够就关掉开关，而不是反复重试**
+ *     反复重试会在每轮 cron 里刷失败日志，用户也永远不知道发生了什么。
+ *     关掉开关 + 留下原因，用户下次打开页面就能看见。
+ *
+ *   · **没有套餐的租约直接跳过**
+ *     `plan_id` 可空（早期数据/手工建的租约）。没有套餐就没有价格，
+ *     续不了，也不该把开关关掉 —— 那是数据本身不完整，不是用户的问题。
+ */
+export async function autoRenewDueRentals(
+  env: Env
+): Promise<{ renewed: number; insufficient: number; skipped: number }> {
+  const out = { renewed: 0, insufficient: 0, skipped: 0 }
+  const nowMs = Date.now()
+  const horizon = new Date(nowMs + 24 * 3600 * 1000).toISOString()
+  const nowIso = new Date(nowMs).toISOString()
+
+  const rows = await env.DB.prepare(
+    `SELECT s.id, s.user_id, s.plan_id, s.expires_at,
+            p.price_points, p.days, p.name
+       FROM frp_subscriptions s
+       JOIN frp_plans p ON p.id = s.plan_id
+      WHERE s.auto_renew = 1
+        AND s.status = 'active'
+        AND s.plan_id IS NOT NULL
+        AND s.expires_at <= ?
+      LIMIT 200`
+  )
+    .bind(horizon)
+    .all<{
+      id: string
+      user_id: string
+      plan_id: string
+      expires_at: string
+      price_points: number
+      days: number
+      name: string
+    }>()
+
+  const due = rows.results ?? []
+  if (due.length === 0) return out
+
+  for (const r of due) {
+    const price = Number(r.price_points) || 0
+    const days = Number(r.days) || 0
+
+    // 0 积分的套餐：直接续，不需要扣款（免费套餐不该因为"没分"而断掉）
+    let applied = true
+    let balance = 0
+    if (price > 0) {
+      const deducted = await applyPoints(env, {
+        userId: r.user_id,
+        delta: -price,
+        reason: "frp_rental",
+        detail: `内网穿透 · 自动续费 ${r.name}（+${days} 天）`,
+        // 幂等键带上原到期时间：同一期只续一次，即使 cron 重复触发
+        dedupKey: `frp_rental:autorenew:${r.id}:${r.expires_at}`,
+      })
+      applied = deducted.applied
+      balance = deducted.balance
+    }
+
+    if (!applied) {
+      // 积分不够（或已处理过）→ 关掉开关，留下原因让用户看得见
+      await env.DB.prepare(
+        `UPDATE frp_subscriptions
+            SET auto_renew = 0, last_error = ?, updated_at = ?
+          WHERE id = ?`
+      )
+        .bind(`自动续费失败：积分不足（需要 ${price}，当前 ${balance}）`, nowIso, r.id)
+        .run()
+      out.insufficient++
+      continue
+    }
+
+    // 从**原到期时间**往后推，而不是从现在推 ——
+    // 否则 cron 延迟执行会把用户的时间"吃掉"几个小时。
+    const base = Date.parse(r.expires_at)
+    const from = Number.isFinite(base) ? base : nowMs
+    const next = new Date(from + days * 86400000).toISOString()
+    await env.DB.prepare(
+      `UPDATE frp_subscriptions
+          SET expires_at = ?, sync_state = 'pending', last_error = NULL, updated_at = ?
+        WHERE id = ?`
+    )
+      .bind(next, nowIso, r.id)
+      .run()
+
+    // 面板账号的到期注释要跟着改，否则用户看到的是旧日期。
+    // 同步由 agent 在 20 秒内完成（它读 sync_state='pending'）。
+    out.renewed++
+  }
+
+  return out
+}
+
 export async function renewRental(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
   const body = (await request.json()) as { id?: string; requestId?: string }

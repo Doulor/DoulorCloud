@@ -34,10 +34,12 @@ import {
 } from "@/components/ui/table"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { DnsRentalPanel } from "@/components/dns-rental-panel"
 import { dnsApi, domainApi, HttpError } from "@/services/api"
 import { useT } from "@/i18n"
 import { useAuth } from "@/hooks/use-auth"
-import type { DnsRecord, DnsRecordType, RootDomainOption, Subdomain } from "@/types"
+import type { DnsRecord, DnsRecordType, DnsRentalState, RootDomainOption, Subdomain } from "@/types"
 
 const RECORD_TYPES: DnsRecordType[] = ["A", "AAAA", "CNAME", "TXT", "MX", "SRV"]
 
@@ -68,9 +70,109 @@ export default function DomainsPage() {
   const [createRoot, setCreateRoot] = React.useState("")
   const ownDomain = `${user?.namespace}.${rootDomain}`
 
+  /**
+   * DNS 解析是否**本来就有免费额度**（权限位 / 管理员特权）。
+   *
+   * 口径与后端 `dnsAccessFor` 的 `full` 档一致，否则会出现「看得见但点不动」
+   * 或「有权限却没入口」两种都很难解释的状态：
+   *   · 有 `dns` 权限位 —— 后端放行；
+   *   · `root` / `superadmin` —— 后端 `isPrivileged()` 直接放行。**必须**带上这一条：
+   *     他们的 permissions 里 dns 大概率是 false（迁移不给管理员写），
+   *     只看权限位就等于把站长自己关在门外。
+   *     ⚠️ 普通 `admin` **不算**：后端 isPrivileged 只认 root/superadmin。
+   *
+   * ⚠️ 2026-10-14 起 DNS 改成**积分租用**后，没有权限位的用户也能用 ——
+   * 只是要自己买（见下方 dnsRental 与 DnsRentalPanel）。所以「选项卡是否渲染」
+   * 不再由这个布尔量决定：**所有人都能看到两个选项卡**，买不起的人看到的是价目表。
+   */
+  const hasFreeDns =
+    user?.permissions?.dns === true ||
+    user?.role === "root" ||
+    user?.role === "superadmin"
+
+  /**
+   * 我的 DNS 租用状态（价目 + 我的租约 + 我到底能不能建记录）。
+   *
+   * 只在**没有免费额度**时才请求：有权限位 / 管理员的人不需要它，
+   * 让他们白付一次 D1 往返没有意义。
+   */
+  const [dnsRental, setDnsRental] = React.useState<DnsRentalState | null>(null)
+  const [dnsRentalLoading, setDnsRentalLoading] = React.useState(false)
+  /** 「新建记录」时选中的**域名**（一级子域名的 id；非一级由选中项自己决定） */
+  const [createDnsSub, setCreateDnsSub] = React.useState("")
+
+  const loadDnsRental = React.useCallback(async () => {
+    setDnsRentalLoading(true)
+    try {
+      setDnsRental(await dnsApi.rental())
+    } catch (err) {
+      // 不打 toast：这条请求挂了不影响页面其它部分，而面板自己会显示「加载失败」
+      // （state 保持 null），再弹一条 toast 只是重复同一件事。
+      console.error("读取 DNS 租用状态失败:", err)
+      setDnsRental(null)
+    } finally {
+      setDnsRentalLoading(false)
+    }
+  }, [])
+
+  /**
+   * 当前访问档位（rented = 有有效租约；expired = 只剩过期租约，只能删记录）。
+   * `hasFreeDns` 时后端返回的一定是 full，不必等这个请求回来。
+   */
+  const dnsAccessMode = hasFreeDns ? "full" : (dnsRental?.accessMode ?? "none")
+  /** 能不能看记录列表（expired 也放行 —— 后端允许他们删掉自己的旧记录） */
+  const canManageDns = hasFreeDns || dnsAccessMode === "rented" || dnsAccessMode === "expired"
+  /** 能不能**新建 / 修改**记录（到期后就不行了，只能删） */
+  const canWriteDns = hasFreeDns || dnsAccessMode === "rented"
+
+  /** 新建记录时可选的根域（买过 / 有权限的才算，与后端闸门口径一致） */
+  const dnsRootChoices = React.useMemo(() => {
+    if (hasFreeDns) {
+      return rootOptions.map((r) => ({ name: r.name, label: r.label || r.name }))
+    }
+    return (dnsRental?.options ?? [])
+      .filter((o) => o.usable)
+      .map((o) => ({ name: o.name, label: o.label || o.name }))
+  }, [hasFreeDns, rootOptions, dnsRental])
+
   const [subdomains, setSubdomains] = React.useState<Subdomain[]>([])
   const [selected, setSelected] = React.useState<Subdomain | null>(null)
+
+  /**
+   * 「新建记录」时可选的**域名**（= 我名下的一级域名，含 '@' 主域名）。
+   *
+   * 为什么不是直接列根域：DNS 记录必须挂在用户**确实拥有**的子域名之下
+   * （后端 `assertFqdnOwned` 就是这么卡的，它只认 `subdomains` 表里的行）。
+   * 所以「记录建在哪个根域下」在数据结构上的等价说法是「建在我名下的哪个域名下」——
+   * 列根域再拼一个 `用户名.<根域>`，拼出来的是用户并不拥有的 fqdn，必然 403。
+   *
+   * 可选范围 = 我的一级域名 ∩ 我能用的根域：
+   *   · 有权限位 / 管理员 ⇒ 能用的根域是后端下发的全部 rootDomains；
+   *   · 租用用户 ⇒ 只有买过的那个根域（买 200 的 tyu.me 不等于能用 500 的 7u.nz）。
+   */
+  const recordDomainChoices = React.useMemo(() => {
+    const usableRoots = new Set(dnsRootChoices.map((r) => r.name.toLowerCase()))
+    return subdomains
+      .filter((s) => !s.parentId)
+      .map((s) => {
+        const root = dnsRootChoices.find((r) =>
+          s.fqdn.toLowerCase().endsWith(`.${r.name.toLowerCase()}`)
+        )
+        return root ? { id: s.id, fqdn: s.fqdn, root: root.name } : null
+      })
+      .filter((x): x is { id: string; fqdn: string; root: string } => x !== null)
+      .filter((x) => usableRoots.has(x.root.toLowerCase()))
+  }, [subdomains, dnsRootChoices])
   const [records, setRecords] = React.useState<DnsRecord[]>([])
+  /**
+   * DNS 记录用量（**服务端口径**：跨该用户全部域名），null = 还没拉到。
+   * 见 `dnsApi.list` 的注释：不本地数 `records.length` —— 那是当前子域名的条数，
+   * 而上限是全账号合计的，两者对不上就会显示出一个假的「已用」。
+   */
+  const [dnsUsage, setDnsUsage] = React.useState<{
+    used: number
+    limit: number | null
+  } | null>(null)
   const [loading, setLoading] = React.useState(true)
   // 配额由服务端下发（用户级覆盖 > 全局设置 > 默认 5）
   const [quota, setQuota] = React.useState(5)
@@ -150,6 +252,8 @@ export default function DomainsPage() {
     try {
       const res = await dnsApi.list(subdomainId)
       setRecords(res.records)
+      // 用量跟着列表一起回来（服务端算好），新建/删除后的重载会顺带刷新它
+      setDnsUsage(res.dnsUsage)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("dm.err.loadRecords"))
       setRecords([])
@@ -163,8 +267,18 @@ export default function DomainsPage() {
   }, [loadSubdomains])
 
   React.useEffect(() => {
+    // 有免费额度的人不需要租用状态（后端给他们的一定是 full 档）
+    if (hasFreeDns) return
+    void loadDnsRental()
+  }, [hasFreeDns, loadDnsRental])
+
+  React.useEffect(() => {
+    // 拿不到额度就**不要**请求记录：后端会 403，用户每打开一次页面
+    // 都会看到一条权限报错 —— 那是噪音，他并没有做错什么，只是还没买。
+    // （2026-10-14 起「没额度」的表现是面板里的一张价目表，不是报错。）
+    if (!canManageDns) return
     if (selected) void loadRecords(selected.id)
-  }, [selected?.id, loadRecords])
+  }, [selected?.id, loadRecords, canManageDns])
 
   const handleCreateSubdomain = async () => {
     setSaving(true)
@@ -278,9 +392,24 @@ export default function DomainsPage() {
         await dnsApi.update(editingId, payload)
         toast.success(t("dm.ok.recordUpdated"))
       } else {
-        await dnsApi.create({ subdomainId: selected.id, ...payload })
+        // 弹窗里可能换了域名：归属子域名与 rootDomain 必须跟着一起换。
+        // `rootDomain` 是给服务端做「声明的根域 vs 子域名实际根域」一致性校验用的
+        // （见 handlers/dns.ts 的 ROOT_DOMAIN_MISMATCH），不传也能建，但传了才
+        // 能挡住「前端选择器与实际子域对不上」这种不一致。
+        const target = recordDomainChoices.find((d) => d.id === createDnsSub)
+        await dnsApi.create({
+          subdomainId: target?.id ?? selected.id,
+          ...(target ? { rootDomain: target.root } : {}),
+          ...payload,
+        })
         toast.success(t("dm.ok.recordCreated"))
-        bumpRecordCount(selected.id, 1)
+        bumpRecordCount(target?.id ?? selected.id, 1)
+        // 建到别的域名下时把选中项切过去，否则用户看不到刚建的那条
+        // （列表是按选中域名过滤的），会以为「建了但没生效」。
+        if (target && target.id !== selected.id) {
+          const next = subdomains.find((s) => s.id === target.id) ?? null
+          if (next) setSelected(next)
+        }
       }
       closeDnsDialog()
       void loadRecords(selected.id)
@@ -479,8 +608,30 @@ export default function DomainsPage() {
   const rootSubs = subdomains.filter((s) => !s.parentId)
   const childrenOf = (id: string) => subdomains.filter((s) => s.parentId === id)
   const canAddRoot = rootSubs.length < quota
-  // 选中子域名的 fqdn 即 DNS 记录的基准（例如 xxx1.doulor.cn）
-  const base = selected ? selected.fqdn : ownDomain
+  /**
+   * DNS 记录数是否已达上限（服务端口径）。
+   * `limit === null` = 不限（管理员 / 管理员 Key）⇒ 恒 false。
+   * 未拿到用量（还没加载完）时也一律 false：宁可先让人点，也不要拿一个
+   * 还没确认的数字去禁用按钮（服务端始终是最终裁判，真到顶了会返回
+   * DNS_RECORD_LIMIT 并由 toast 说明）。
+   */
+  const atDnsLimit =
+    dnsUsage !== null && dnsUsage.limit !== null && dnsUsage.used >= dnsUsage.limit
+  /**
+   * 「新建 / 修改」是否被禁用：到上限，或租用已到期（到期后只能删，不能再写）。
+   * 删除**不**受这两者影响 —— 它是用户腾出额度、也是腾出 CF zone 配额的手段。
+   */
+  const writeDisabled = atDnsLimit || !canWriteDns
+  // 选中子域名的 fqdn 即 DNS 记录的基准（例如 xxx1.doulor.cn）。
+  //
+  // 弹窗里如果选了**另一个域名**，基准跟着换成它的 fqdn —— 也就是说
+  // 「新建记录时选域名」= 换一个 base + 换一个归属子域名（两者必须同步，
+  // 只换 base 会撞上 assertFqdnOwned，见 recordDomainChoices 的注释）。
+  const base = (() => {
+    if (!selected) return ownDomain
+    if (editingId) return selected.fqdn
+    return recordDomainChoices.find((d) => d.id === createDnsSub)?.fqdn ?? selected.fqdn
+  })()
 
   return (
     <div>
@@ -489,367 +640,431 @@ export default function DomainsPage() {
         description={ownDomain}
       />
 
-      {/* 子域名列表 */}
-      <div className="mb-6 rounded-lg border bg-card">
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <div className="text-sm font-medium">
-            {t("dm.myDomains")}
-            <span className="ml-2 text-xs font-normal text-muted-foreground">
-              {quota >= 999999
-                ? t("dm.quota.admin", { n: rootSubs.length })
-                : t("dm.quota.user", { n: rootSubs.length, quota })}
-            </span>
-          </div>
-          <Button
-            size="sm"
-            onClick={() => {
-              setParentFor(null)
-              setSubName("")
-              setOpenSub(true)
-            }}
-            disabled={!canAddRoot}
-          >
-            <Plus className="h-4 w-4" />
-            {t("common.add")}
-          </Button>
-        </div>
-        <div className="space-y-3 p-3">
-          {loading && subdomains.length === 0 ? (
-            <DomainRecordsSkeleton />
-          ) : subdomains.length === 0 ? (
-            <p className="px-2 py-6 text-sm text-muted-foreground">{t("dm.empty")}</p>
-          ) : (
-            rootSubs.map((sub) => {
-              const children = childrenOf(sub.id)
-              const canAddChild = children.length < childQuota
-              return (
-                <div key={sub.id} className="space-y-1.5">
-                  {/* 一级。
-                      整块可点选（而不是只有域名文字）：一行里能点的区域越大越好点。
-                      外层用 div + onClick 而非 button —— 里面已经有删除/加子域名两个
-                      真按钮，HTML 不允许按钮嵌套按钮。
-                      键盘可达性靠域名文字那个 button 保住（Tab 聚焦 + Enter 触发），
-                      鼠标则点整块任意位置都行。 */}
-                  <div
-                    onClick={() => setSelected(sub)}
-                    className={`group flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 transition-colors ${
-                      selected?.id === sub.id ? "bg-accent" : "hover:bg-accent/50"
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      className="font-mono text-sm"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setSelected(sub)
-                      }}
-                    >
-                      {sub.fqdn}
-                    </button>
-                    {sub.name === "@" ? (
-                      <Badge variant="outline">{t("dm.primary")}</Badge>
-                    ) : (
-                      <button
-                        type="button"
-                        className="hidden text-muted-foreground hover:text-destructive group-hover:block"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          void handleDeleteSubdomain(sub)
-                        }}
-                        title={t("dm.deleteTitle")}
-                      >
-                        {deletingId === sub.id ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Trash2 className="h-3.5 w-3.5" />
-                        )}
-                      </button>
-                    )}
-                    {/* 该域名下挂了几条解析。只算**直接挂的**，不含子子域名的 ——
-                        列表里父子各占一行，各算各的才对得上点进去看到的那份列表 */}
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      {t("dm.recordCount", { n: sub.recordCount ?? 0 })}
-                    </span>
-                    {/* 在一级之下加子子域名 */}
-                    <button
-                      type="button"
-                      className="ml-auto hidden items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground group-hover:inline-flex"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setParentFor(sub)
-                        setSubName("")
-                        setOpenSub(true)
-                      }}
-                      disabled={!canAddChild}
-                      title={
-                        canAddChild
-                          ? t("dm.addChildUnder", { name: sub.name })
-                          : t("dm.childQuota", { n: childQuota })
-                      }
-                    >
-                      <Plus className="h-3 w-3" />
-                      {t("dm.subdomains")}
-                    </button>
-                  </div>
+      {/* 两块功能拆成两个选项卡：子域名（人人可用）+ DNS 解析（积分租用）。
+          ⚠️ 2026-10-14 起第二个选项卡**对所有人渲染** —— DNS 改成了明码标价的
+          积分租用，入口藏起来等于让想买的人找不到地方；没买的人在面板里看到的是
+          一张价目表（components/dns-rental-panel.tsx），而不是一个点不动的按钮。
+          defaultValue 固定指向第一个选项卡：先看域名列表是这一页的主线。 */}
+      <Tabs defaultValue="subdomain">
+        <TabsList className="mb-4">
+          <TabsTrigger value="subdomain">{t("dm.tab.subdomains")}</TabsTrigger>
+          <TabsTrigger value="dns">{t("dm.tab.dns")}</TabsTrigger>
+        </TabsList>
 
-                  {/* 子子域名 */}
-                  {children.map((child) => (
-                    <div
-                      key={child.id}
-                      onClick={() => setSelected(child)}
-                      className={`group ml-4 flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 transition-colors ${
-                        selected?.id === child.id ? "bg-accent" : "hover:bg-accent/50"
-                      }`}
-                    >
-                      <CornerDownRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      <button
-                        type="button"
-                        className="font-mono text-sm"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setSelected(child)
-                        }}
-                      >
-                        {child.fqdn}
-                      </button>
-                      <span className="shrink-0 text-xs text-muted-foreground">
-                        {t("dm.recordCount", { n: child.recordCount ?? 0 })}
-                      </span>
-                      <button
-                        type="button"
-                        className="ml-auto hidden text-muted-foreground hover:text-destructive group-hover:block"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          void handleDeleteSubdomain(child)
-                        }}
-                        title={t("dm.deleteTitle")}
-                      >
-                        {deletingId === child.id ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Trash2 className="h-3.5 w-3.5" />
-                        )}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )
-            })
-          )}
-        </div>
-      </div>
-
-      {/* DNS 记录 */}
-      {!selected ? (
-        <EmptyState
-          title={t("dm.selectTitle")}
-          description={t("dm.selectDesc")}
-        />
-      ) : (
-        <>
-          <div className="mb-4 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Globe className="h-4 w-4 text-muted-foreground" />
-              <h2 className="text-sm font-medium">{t("dm.recordsOf", { fqdn: selected.fqdn })}</h2>
-              <span className="text-xs text-muted-foreground">
-                {t("dm.recordCount", { n: records.length })}
-              </span>
+        <TabsContent value="subdomain">
+          {/* 子域名列表 */}
+          <div className="mb-6 rounded-lg border bg-card">
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <div className="text-sm font-medium">
+                {t("dm.myDomains")}
+                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                  {quota >= 999999
+                    ? t("dm.quota.admin", { n: rootSubs.length })
+                    : t("dm.quota.user", { n: rootSubs.length, quota })}
+                </span>
+              </div>
+              <Button
+                size="sm"
+                onClick={() => {
+                  setParentFor(null)
+                  setSubName("")
+                  setOpenSub(true)
+                }}
+                disabled={!canAddRoot}
+              >
+                <Plus className="h-4 w-4" />
+                {t("common.add")}
+              </Button>
             </div>
-            <div className="flex items-center gap-2">
-              {batchSelecting ? (
-                <>
-                  <Button variant="outline" size="sm" onClick={toggleBatchSelectAll}>
-                    <ListChecks className="mr-1 h-3.5 w-3.5" />
-                    {allDeletableSelected ? t("dm.batch.deselectAll") : t("dm.batch.selectAll")}
-                  </Button>
-                  <span className="text-xs text-muted-foreground">
-                    {t("dm.batch.selected", { n: String(batchSelected.size) })}
-                  </span>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    disabled={batchBusy || batchSelected.size === 0}
-                    onClick={() => setBatchDeleteOpen(true)}
-                  >
-                    <Trash2 className="mr-1 h-3.5 w-3.5" />
-                    {t("dm.batch.delete")}
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={exitBatchSelecting}>
-                    {t("common.cancel")}
-                  </Button>
-                </>
+            <div className="space-y-3 p-3">
+              {loading && subdomains.length === 0 ? (
+                <DomainRecordsSkeleton />
+              ) : subdomains.length === 0 ? (
+                <p className="px-2 py-6 text-sm text-muted-foreground">{t("dm.empty")}</p>
               ) : (
-                <>
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    onClick={() => void loadRecords(selected.id)}
-                    aria-label={t("common.refresh")}
-                  >
-                    <RefreshCw className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      setBatchText("")
-                      setBatchAddOpen(true)
-                    }}
-                  >
-                    {t("dm.batch.add")}
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => setBatchSelecting(true)}>
-                    <Pencil className="mr-1 h-3.5 w-3.5" />
-                    {t("common.edit")}
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      // 明确走「新建」：清掉可能残留的编辑态，否则会误改成编辑上一条
-                      setEditingId(null)
-                      resetForm()
-                      setOpenDns(true)
-                    }}
-                  >
-                    <Plus className="h-4 w-4" />
-                    {t("dm.addRecord")}
-                  </Button>
-                </>
+                rootSubs.map((sub) => {
+                  const children = childrenOf(sub.id)
+                  const canAddChild = children.length < childQuota
+                  return (
+                    <div key={sub.id} className="space-y-1.5">
+                      {/* 一级。
+                          整块可点选（而不是只有域名文字）：一行里能点的区域越大越好点。
+                          外层用 div + onClick 而非 button —— 里面已经有删除/加子域名两个
+                          真按钮，HTML 不允许按钮嵌套按钮。
+                          键盘可达性靠域名文字那个 button 保住（Tab 聚焦 + Enter 触发），
+                          鼠标则点整块任意位置都行。 */}
+                      <div
+                        onClick={() => setSelected(sub)}
+                        className={`group flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 transition-colors ${
+                          selected?.id === sub.id ? "bg-accent" : "hover:bg-accent/50"
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          className="font-mono text-sm"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setSelected(sub)
+                          }}
+                        >
+                          {sub.fqdn}
+                        </button>
+                        {sub.name === "@" ? (
+                          <Badge variant="outline">{t("dm.primary")}</Badge>
+                        ) : (
+                          <button
+                            type="button"
+                            className="hidden text-muted-foreground hover:text-destructive group-hover:block"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              void handleDeleteSubdomain(sub)
+                            }}
+                            title={t("dm.deleteTitle")}
+                          >
+                            {deletingId === sub.id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                        )}
+                        {/* 该域名下挂了几条解析。只算**直接挂的**，不含子子域名的 ——
+                            列表里父子各占一行，各算各的才对得上点进去看到的那份列表 */}
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {t("dm.recordCount", { n: sub.recordCount ?? 0 })}
+                        </span>
+                        {/* 在一级之下加子子域名 */}
+                        <button
+                          type="button"
+                          className="ml-auto hidden items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground group-hover:inline-flex"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setParentFor(sub)
+                            setSubName("")
+                            setOpenSub(true)
+                          }}
+                          disabled={!canAddChild}
+                          title={
+                            canAddChild
+                              ? t("dm.addChildUnder", { name: sub.name })
+                              : t("dm.childQuota", { n: childQuota })
+                          }
+                        >
+                          <Plus className="h-3 w-3" />
+                          {t("dm.subdomains")}
+                        </button>
+                      </div>
+
+                      {/* 子子域名 */}
+                      {children.map((child) => (
+                        <div
+                          key={child.id}
+                          onClick={() => setSelected(child)}
+                          className={`group ml-4 flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 transition-colors ${
+                            selected?.id === child.id ? "bg-accent" : "hover:bg-accent/50"
+                          }`}
+                        >
+                          <CornerDownRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <button
+                            type="button"
+                            className="font-mono text-sm"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setSelected(child)
+                            }}
+                          >
+                            {child.fqdn}
+                          </button>
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            {t("dm.recordCount", { n: child.recordCount ?? 0 })}
+                          </span>
+                          <button
+                            type="button"
+                            className="ml-auto hidden text-muted-foreground hover:text-destructive group-hover:block"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              void handleDeleteSubdomain(child)
+                            }}
+                            title={t("dm.deleteTitle")}
+                          >
+                            {deletingId === child.id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                })
               )}
             </div>
           </div>
+        </TabsContent>
 
-          {records.length === 0 ? (
+        {/* DNS 解析：租用价目 +（有额度时）记录管理。
+            Radix 的 TabsContent 默认**按需挂载**（未选中即不渲染），
+            所以不打开这个选项卡就不会产生任何 DNS 请求。 */}
+        <TabsContent value="dns" className="space-y-6">
+          {/* 没有免费额度的人先看到价目与自己的租期。有权限位 / 管理员不显示 ——
+              他们本来就不用买，摆一排「购买」按钮只会让人以为自己也要付钱。 */}
+          {!hasFreeDns && (
+            <DnsRentalPanel
+              state={dnsRental}
+              loading={dnsRentalLoading}
+              onChanged={loadDnsRental}
+            />
+          )}
+
+          {/* 还没买（或买过但已到期且只想删记录）时不渲染记录界面：
+              后端会 403，渲染出来只会是一堆报错。 */}
+          {!canManageDns ? null : !selected ? (
             <EmptyState
-              title={t("dm.noRecords")}
-              description={t("dm.noRecordsDesc")}
+              title={t("dm.selectTitle")}
+              description={t("dm.selectDesc")}
             />
           ) : (
-            <div className="rounded-lg border bg-card">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    {batchSelecting && (
-                      <TableHead className="w-10">
-                        <input
-                          type="checkbox"
-                          aria-label={t("dm.batch.selectAll")}
-                          className="h-4 w-4 accent-primary"
-                          checked={allDeletableSelected}
-                          onChange={toggleBatchSelectAll}
-                        />
-                      </TableHead>
-                    )}
-                    <TableHead>Name</TableHead>
-                    <TableHead>Type</TableHead>
-                    <TableHead>Content</TableHead>
-                    <TableHead>TTL</TableHead>
-                    <TableHead>Proxy</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead className="w-12" />
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {records.map((r) => (
-                    <TableRow key={r.id}>
-                      {batchSelecting && (
-                        <TableCell>
-                          {!r.managed && (
-                            <input
-                              type="checkbox"
-                              aria-label={r.name}
-                              className="h-4 w-4 accent-primary"
-                              checked={batchSelected.has(r.id)}
-                              onChange={() => toggleBatchSelect(r.id)}
-                            />
-                          )}
-                        </TableCell>
-                      )}
-                      <TableCell className="font-mono text-sm">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span>{r.name}</span>
-                          {r.managed && (
-                            <Badge
-                              variant="secondary"
-                              className="font-sans text-[10px] font-normal"
-                            >
-                              {t("dm.managed.badge", {
-                                module: t(
-                                  r.managedBy === "storage"
-                                    ? "dm.managed.storage"
-                                    : "dm.managed.profile"
-                                ),
-                              })}
-                            </Badge>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline">{r.type}</Badge>
-                      </TableCell>
-                      <TableCell className="max-w-[240px] truncate font-mono text-xs">
-                        {r.content}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {r.ttl === 1 ? "Auto" : r.ttl}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {r.proxied ? t("dm.proxied") : t("dm.dnsOnly")}
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge status={r.status} />
-                      </TableCell>
-                      <TableCell>
-                        {/* 平台自动创建的解析不给删除入口：删了域名就解析不到本站，
-                            而名片/网盘那边仍显示已绑定，用户无从自查 */}
-                        {r.managed ? (
-                          <span
-                            className="text-xs text-muted-foreground"
-                            title={t("dm.managed.hint")}
-                          >
-                            —
-                          </span>
-                        ) : (
-                          <div className="flex items-center justify-end gap-0.5">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                              onClick={() => openEditDns(r)}
-                              aria-label={t("dm.editRecord")}
-                              title={t("dm.editRecord")}
-                            >
-                              <Pencil className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                              onClick={() => void handleDeleteDns(r)}
-                              disabled={deletingId === r.id}
-                            >
-                              {deletingId === r.id ? (
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                              ) : (
-                                <Trash2 className="h-4 w-4" />
-                              )}
-                            </Button>
-                          </div>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-              {records.some((r) => r.managed) && (
-                <p className="border-t px-4 py-3 text-xs text-muted-foreground">
-                  {t("dm.managed.hint")}
+            <>
+              <div className="mb-4 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Globe className="h-4 w-4 text-muted-foreground" />
+                  <h2 className="text-sm font-medium">{t("dm.recordsOf", { fqdn: selected.fqdn })}</h2>
+                  <span className="text-xs text-muted-foreground">
+                    {t("dm.recordCount", { n: records.length })}
+                  </span>
+                  {/* 账号级用量（跨该用户全部域名，服务端算好随列表下发）。
+                      与左边那个「本域名 N 条解析」口径不同 —— 一个只数当前域名、
+                      一个数全账号合计，并排显示才不会把两者误读成同一个数字。 */}
+                  {dnsUsage && (
+                    <span className="text-xs text-muted-foreground">
+                      {dnsUsage.limit === null
+                        ? t("dm.dnsUsage.admin", { used: dnsUsage.used })
+                        : t("dm.dnsUsage", { used: dnsUsage.used, limit: dnsUsage.limit })}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {batchSelecting ? (
+                    <>
+                      <Button variant="outline" size="sm" onClick={toggleBatchSelectAll}>
+                        <ListChecks className="mr-1 h-3.5 w-3.5" />
+                        {allDeletableSelected ? t("dm.batch.deselectAll") : t("dm.batch.selectAll")}
+                      </Button>
+                      <span className="text-xs text-muted-foreground">
+                        {t("dm.batch.selected", { n: String(batchSelected.size) })}
+                      </span>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        disabled={batchBusy || batchSelected.size === 0}
+                        onClick={() => setBatchDeleteOpen(true)}
+                      >
+                        <Trash2 className="mr-1 h-3.5 w-3.5" />
+                        {t("dm.batch.delete")}
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={exitBatchSelecting}>
+                        {t("common.cancel")}
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        onClick={() => void loadRecords(selected.id)}
+                        aria-label={t("common.refresh")}
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        // 批量添加也受同一个上限约束（它就是一条条调 create）：
+                        // 到顶时一并禁用，免得用户粘 20 行、逐条失败之后才从 toast 里知道原因。
+                        // 同理，租用已到期时也禁用（那时连单条都建不了）。
+                        disabled={writeDisabled}
+                        onClick={() => {
+                          setBatchText("")
+                          setBatchAddOpen(true)
+                        }}
+                      >
+                        {t("dm.batch.add")}
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={() => setBatchSelecting(true)}>
+                        <Pencil className="mr-1 h-3.5 w-3.5" />
+                        {t("common.edit")}
+                      </Button>
+                      <Button
+                        size="sm"
+                        // 到上限 / 租用已到期就禁用（服务端也会拒，这里是提前告知）。
+                        // disabled 的按钮不触发 hover 提示，所以文案另外用下面那行 <p> 说明。
+                        disabled={writeDisabled}
+                        onClick={() => {
+                          // 明确走「新建」：清掉可能残留的编辑态，否则会误改成编辑上一条
+                          setEditingId(null)
+                          resetForm()
+                          // 默认选中「当前正在看的那个域名」，避免用户一开弹窗
+                          // 就把记录建到另一个域下（那正是最容易出错的一步）
+                          setCreateDnsSub(selected.id)
+                          setOpenDns(true)
+                        }}
+                      >
+                        <Plus className="h-4 w-4" />
+                        {t("dm.addRecord")}
+                      </Button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* 到上限的明确提示：光禁用按钮不说原因，用户只会以为是页面坏了 */}
+              {atDnsLimit && (
+                <p className="mb-3 text-xs text-destructive">
+                  {t("dm.dnsLimitReached", { limit: String(dnsUsage?.limit ?? "") })}
                 </p>
               )}
-            </div>
+              {/* 租用到期：与「到上限」是两回事，文案必须分开 ——
+                  一个要删记录，一个要续费，让人看错会白折腾半天 */}
+              {!canWriteDns && (
+                <p className="mb-3 text-xs text-destructive">{t("dm.dnsRentalExpired")}</p>
+              )}
+
+              {records.length === 0 ? (
+                <EmptyState
+                  title={t("dm.noRecords")}
+                  description={t("dm.noRecordsDesc")}
+                />
+              ) : (
+                <div className="rounded-lg border bg-card">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        {batchSelecting && (
+                          <TableHead className="w-10">
+                            <input
+                              type="checkbox"
+                              aria-label={t("dm.batch.selectAll")}
+                              className="h-4 w-4 accent-primary"
+                              checked={allDeletableSelected}
+                              onChange={toggleBatchSelectAll}
+                            />
+                          </TableHead>
+                        )}
+                        <TableHead>Name</TableHead>
+                        <TableHead>Type</TableHead>
+                        <TableHead>Content</TableHead>
+                        <TableHead>TTL</TableHead>
+                        <TableHead>Proxy</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead className="w-12" />
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {records.map((r) => (
+                        <TableRow key={r.id}>
+                          {batchSelecting && (
+                            <TableCell>
+                              {!r.managed && (
+                                <input
+                                  type="checkbox"
+                                  aria-label={r.name}
+                                  className="h-4 w-4 accent-primary"
+                                  checked={batchSelected.has(r.id)}
+                                  onChange={() => toggleBatchSelect(r.id)}
+                                />
+                              )}
+                            </TableCell>
+                          )}
+                          <TableCell className="font-mono text-sm">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span>{r.name}</span>
+                              {r.managed && (
+                                <Badge
+                                  variant="secondary"
+                                  className="font-sans text-[10px] font-normal"
+                                >
+                                  {t("dm.managed.badge", {
+                                    module: t(
+                                      r.managedBy === "storage"
+                                        ? "dm.managed.storage"
+                                        : "dm.managed.profile"
+                                    ),
+                                  })}
+                                </Badge>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline">{r.type}</Badge>
+                          </TableCell>
+                          <TableCell className="max-w-[240px] truncate font-mono text-xs">
+                            {r.content}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {r.ttl === 1 ? "Auto" : r.ttl}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {r.proxied ? t("dm.proxied") : t("dm.dnsOnly")}
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge status={r.status} />
+                          </TableCell>
+                          <TableCell>
+                            {/* 平台自动创建的解析不给删除入口：删了域名就解析不到本站，
+                                而名片/网盘那边仍显示已绑定，用户无从自查 */}
+                            {r.managed ? (
+                              <span
+                                className="text-xs text-muted-foreground"
+                                title={t("dm.managed.hint")}
+                              >
+                                —
+                              </span>
+                            ) : (
+                              <div className="flex items-center justify-end gap-0.5">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                  onClick={() => openEditDns(r)}
+                                  // 租用到期后只能删、不能改（改记录是「写」能力）
+                                  disabled={!canWriteDns}
+                                  aria-label={t("dm.editRecord")}
+                                  title={t("dm.editRecord")}
+                                >
+                                  <Pencil className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                  onClick={() => void handleDeleteDns(r)}
+                                  disabled={deletingId === r.id}
+                                >
+                                  {deletingId === r.id ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Trash2 className="h-4 w-4" />
+                                  )}
+                                </Button>
+                              </div>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                  {records.some((r) => r.managed) && (
+                    <p className="border-t px-4 py-3 text-xs text-muted-foreground">
+                      {t("dm.managed.hint")}
+                    </p>
+                  )}
+                </div>
+              )}
+            </>
           )}
-        </>
-      )}
+        </TabsContent>
+      </Tabs>
 
       {/* 域名服务声明 / 免责条款（用户反馈 43441cdb + 9dcdbaab） */}
       <div className="mt-6 rounded-lg border bg-card">
@@ -1062,6 +1277,34 @@ export default function DomainsPage() {
           </DialogHeader>
 
           <div className="space-y-4">
+            {/* 建在哪个**域名**下（2026-10-14 站长要求）。
+                DNS 改成按根域计的积分租用后，「记录落在哪个域」必须能明着选，
+                而不是只能悄悄用注册时分到的那个域。
+                只列**我名下的一级域名**（每个都属于某个根域），因为记录必须挂在
+                用户确实拥有的子域名下（见 recordDomainChoices 的注释）：
+                列根域再拼一个 `用户名.<根域>`，拼出来的是用户并不拥有的 fqdn，必然 403。
+                只在「新建 + 有多个可选域名」时显示：
+                  · 编辑时改域名等于换一条记录（后端按原 base 重建），不做；
+                  · 只有一个可选域名时多一个下拉框纯属噪音。 */}
+            {!editingId && recordDomainChoices.length > 1 && (
+              <div className="space-y-2">
+                <Label htmlFor="dnsRoot">{t("dm.dnsRoot")}</Label>
+                <Select value={createDnsSub || selected?.id || ""} onValueChange={setCreateDnsSub}>
+                  <SelectTrigger id="dnsRoot">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {recordDomainChoices.map((d) => (
+                      <SelectItem key={d.id} value={d.id}>
+                        {d.fqdn}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t("dm.dnsRootHint")}</p>
+              </div>
+            )}
+
             {form.type !== "SRV" ? (
               <div className="space-y-2">
                 <Label htmlFor="name">{t("dm.recordName")}</Label>

@@ -14,11 +14,19 @@ import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
 import { uuid } from "../crypto"
 import { rootDomainFor, zoneIdForFqdn } from "../root-domains"
-import { cfCreateDnsRecord, cfListDnsRecords } from "../cloudflare"
+import { RESERVED_NAMES } from "../reserved-names"
+import {
+  cfCreateDnsRecord,
+  cfListDnsRecords,
+  cfDeleteDnsRecord,
+  isCoveredByWildcard,
+} from "../cloudflare"
 import { createWorkerRoute, removeWorkerRoute } from "./storage"
 import { readFiles, type LabProjectRow } from "./lab"
 import { buildSdk } from "./lab-store"
 import type { Env } from "../env"
+import { canUseRootDomain } from "../root-domains"
+import { userPermissions } from "../permissions"
 
 /** 每个用户最多绑几个域名（跟直链网盘一个量级，别让人拿来刷域名） */
 const MAX_DOMAINS_PER_USER = 5
@@ -113,8 +121,50 @@ export async function setProjectDomain(
     throw new ApiError(400, "先把作品设为公开，才能绑定域名", "NOT_PUBLIC")
   }
   // 只允许本站根域名之下的子域名 —— 否则会去给别人家的域名建 DNS 记录
-  if (!(await rootDomainFor(env, fqdn))) {
+  const rootRow = await rootDomainFor(env, fqdn)
+  if (!rootRow) {
     throw new ApiError(400, "只能绑定本站根域名下的子域名", "INVALID_FQDN")
+  }
+
+  // 🔴 保留名保护（2026-10-14 安全事件后补上）
+  //
+  // 这一段缺失的后果，真实发生过，不是理论推演：
+  //
+  //   · 普通用户（无 doulor 权益）能把作品绑到 **cloud.doulor.cn**；
+  //   · 而 index.ts 的 hostedDirectLink 会在 API 路由**之前**接管「任何命中作品表的
+  //     Host」，于是主应用整个 /api/* 面被替换成攻击者 HTML —— 可在主品牌域上钓鱼、
+  //     收割会话；
+  //   · 解绑时 removeWorkerRoute 会删掉 `<fqdn>/*`，**把主应用自己的 Worker 路由删掉**。
+  //     2026-10-14 主站打不开的直接原因就是这条：cloud.doulor.cn/* 先被删、再被重建时
+  //     指错了 Worker（指到 API Worker 而不是前端 Worker），首页因此永远返回 404。
+  //
+  // 保留名清单本来就在 reserved-names.ts 里（cloud / wb2api / panel 相关都在），
+  // 注释里甚至写明「绑定会创建 <fqdn>/* 路由」——只是这个接口从来没调用它。
+  const label = fqdn.split(".")[0]
+  if (RESERVED_NAMES.has(label)) {
+    throw new ApiError(403, "这个域名属于平台保留名，不能绑定作品", "RESERVED_HOSTNAME")
+  }
+
+  // 二级保留名也要挡：`x.panel.doulor.cn` 这种只判首标签是拦不住的。
+  // 做法是逐段检查（不是只看第一个标签），成本一样。
+  const segs = fqdn.split(".")
+  for (let i = 0; i < segs.length - 2; i++) {
+    if (RESERVED_NAMES.has(segs[i])) {
+      throw new ApiError(403, "这个域名属于平台保留名，不能绑定作品", "RESERVED_HOSTNAME")
+    }
+  }
+
+  // 🔴 权益门禁（补上 2026-10-14 事故的另一半）
+  //
+  // 上面只挡了保留名，但**非保留名**的 doulor.cn 子域仍然能被任何普通用户绑定 ——
+  // 而绑上去之后，`hostedDirectLink` 会在 API 路由之前接管该 Host 的整个 /api/* 面。
+  // 也就是说：攻击者绑 `evil.doulor.cn`，就得到一个「在运营方品牌域下、可执行同源
+  // 脚本」的托管点（可做钓鱼，也可用作同站 CSRF 的跳板，见 finding#8/#13）。
+  //
+  // 同站其它入口（邮箱、子域申请）都是走这条门禁的，这里一直漏了：
+  //   POST /api/subdomains、POST /api/mailbox → canUseRootDomain/pickRootDomain
+  if (!canUseRootDomain(userPermissions(user), rootRow)) {
+    throw new ApiError(403, "没有绑定该根域名下子域的权益", "ROOT_DOMAIN_NOT_PERMITTED")
   }
 
   // 域名全局唯一：被别人占了就报错，不静默抢
@@ -142,7 +192,26 @@ export async function setProjectDomain(
   //    zone 按 fqdn 解析，不能写死 —— 记录可能属于 tyu.me 而不是 doulor.cn
   const zoneId = await zoneIdForFqdn(env, fqdn)
   const existing = await cfListDnsRecords(env, zoneId, fqdn)
-  if (!existing.length) {
+
+  // 已经有解析记录 ≠ 允许接管。只有「我们自己为作品域名建的那种记录」
+  // （AAAA 100:: + 开代理，见下面 cfCreateDnsRecord）才可复用；
+  // 其余情况说明这个主机名**正在承载别的服务**（主站、网关、别人的站点……），
+  // 一旦接管就等于把它整站顶掉 —— 必须拒绝，而不是"跳过建记录继续绑"。
+  if (existing.length) {
+    // 只认内容：cfListDnsRecords 的类型只暴露 {id,type,content}，拿不到 proxied 标志；
+    // 而 100:: 正是本接口为作品域名写的那种占位地址（见下面 cfCreateDnsRecord）。
+    const ours = existing.some(
+      (r) => r.type === "AAAA" && String(r.content || "").startsWith("100::")
+    )
+    if (!ours) {
+      throw new ApiError(409, "这个域名已经在承载其他服务，不能绑定作品", "HOSTNAME_IN_USE")
+    }
+  }
+
+  // 该根域已配 `*.<根域>` 泛解析时**不建记录** —— 泛解析已经能把它解析到
+  // Cloudflare，再建一条只会白占配额（配额耗尽的后果见 isCoveredByWildcard 注释）。
+  const wildcardCovered = await isCoveredByWildcard(env, fqdn)
+  if (!existing.length && !wildcardCovered) {
     try {
       await cfCreateDnsRecord(env, zoneId, {
         type: "AAAA",
@@ -160,8 +229,15 @@ export async function setProjectDomain(
   // 2) Worker 路由
   await createWorkerRoute(env, fqdn)
 
-  // 3) 落库（同一作品换域名 = 先删旧行再加新行；旧域名的路由**不动** ——
-  //    删它要动 DNS，风险大于收益，留着也不会有流量进来）
+  // 3) 落库（同一作品换域名 = 先删旧行再加新行）
+  //
+  // ⚠️ 换绑时必须**释放旧域名占的解析记录**，否则记录只增不减，
+  //    最终撞上 Cloudflare 的记录数上限（81045），届时所有用户都绑不了新域名。
+  //    这是 2026-10-15 那次事故的根因，别把它改回去。
+  const previous = await getBoundDomain(env, projectId)
+  if (previous && previous.toLowerCase() !== fqdn.toLowerCase()) {
+    await releaseLabDnsRecord(env, previous)
+  }
   await env.DB.prepare("DELETE FROM lab_project_domains WHERE project_id = ?")
     .bind(projectId)
     .run()
@@ -172,6 +248,37 @@ export async function setProjectDomain(
     .run()
 
   return json({ fqdn })
+}
+
+/**
+ * 释放某个作品域名占用的 DNS 记录。
+ *
+ * 🔴 为什么必须有（2026-10-15 生产事故）：
+ *   在此之前，改绑与解绑**都不删 DNS 记录**（旧注释写着"删它要动 DNS，风险大于收益"）。
+ *   于是每绑一次就**永久占用一条解析记录**，只增不减 —— 而 Cloudflare 免费套餐的
+ *   zone 有**记录数硬上限**（约 200 条），撞上之后**任何**新记录都建不了，
+ *   报错是 `81045 Record quota exceeded`。
+ *
+ *   实际后果：站长的 `deity` 想在 lab 里绑 `sandbox` 子域，界面提示"本地已保存，
+ *   但 Cloudflare 拒绝了这次修改"，解析自然也就一直是失效的 —— 配额满了，
+ *   记录根本没建出来。而占满配额的主要是安全测试那几天反复绑/解绑留下的孤儿记录。
+ *
+ * 安全性：只删**我们自己特征**的那一条（AAAA + `100::`，正是本接口下面创建的写法）。
+ * 用户自己的域名下可能另有在用的解析，绝不能被我们顺手删掉。
+ */
+async function releaseLabDnsRecord(env: Env, fqdn: string): Promise<void> {
+  try {
+    const zoneId = await zoneIdForFqdn(env, fqdn)
+    const records = await cfListDnsRecords(env, zoneId, fqdn)
+    for (const r of records) {
+      const ours = r.type === "AAAA" && String(r.content || "").startsWith("100::")
+      if (!ours) continue
+      await cfDeleteDnsRecord(env, zoneId, r.id)
+    }
+  } catch (err) {
+    // 释放失败不阻断解绑：留一条遗留记录远好过让用户卡在"解绑失败"
+    console.error("释放作品域名 DNS 记录失败（已解绑，忽略）:", fqdn, err)
+  }
 }
 
 /** DELETE /api/lab/projects/:id/domain —— 解绑 */
@@ -187,12 +294,14 @@ export async function clearProjectDomain(
     await env.DB.prepare("DELETE FROM lab_project_domains WHERE project_id = ?")
       .bind(projectId)
       .run()
-    // 路由删掉；DNS 记录留着（可能是用户自己域名下别处在用的解析）
+    // 路由删掉，DNS 记录也一并释放
+    // （只删我们建的那种 AAAA 100::；用户自己域名下的解析不会被动到）
     try {
       await removeWorkerRoute(env, bound)
     } catch (err) {
       console.error("删除作品域名路由失败（已解绑，忽略）:", bound, err)
     }
+    await releaseLabDnsRecord(env, bound)
   }
   return json({ fqdn: null })
 }
@@ -255,11 +364,30 @@ export async function serveHostedLab(
       : body + sdk
   }
 
-  return new Response(body, {
-    headers: {
-      "Content-Type": contentTypeFor(path),
-      // 用户随时会改作品，别让边缘缓存把旧版本留太久
-      "Cache-Control": "public, max-age=60",
-    },
-  })
+  // ---------------------------------------------------------------- 安全响应头
+  //
+  // 🔴 少这三个头会出事，而且出的是大事（2026-10-14 安全审计，findings #3/#4/#10）：
+  //
+  //   · 用户作品是**完全可控内容**，却以同源方式交付。没有 CSP 时，作品页里的内联脚本
+  //     就能注册 scope 落在本域下的 Service Worker —— 而 SW **一旦装上就无法被服务端撤销**
+  //     （脚本后来 404 也不会注销既有注册，这是 SW 规范的预期行为）。
+  //     受害者浏览器因此被长期劫持，运营方恢复服务端也无济于事。
+  //   · 同样因为同源，作品脚本能读同源 Cookie/存储、调用带凭据的同源 API。
+  //
+  // `sandbox` **不带 allow-same-origin** ⇒ 页面落到不透明源（opaque origin）：
+  //   脚本照常运行、表单/弹窗照常，但拿不到同源权限 —— SW 注册被拒、Cookie/存储读不到、
+  //   带凭据的同源请求失效。这条链路就此切断，而普通静态作品（HTML/CSS/JS/图片）不受影响。
+  //
+  // 口径与 handlers/lab.ts 的相册原始文件一致（那里早就加了 sandbox），不要只改一边。
+  const headers: Record<string, string> = {
+    "Content-Type": contentTypeFor(path),
+    // 用户随时会改作品，别让边缘缓存把旧版本留太久
+    "Cache-Control": "public, max-age=60",
+    // 防「非 HTML 却拿回 text/html」之类的嗅探（本站已在多处踩过这个坑）
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy":
+      "sandbox allow-scripts allow-modals allow-forms allow-popups allow-downloads allow-pointer-lock",
+  }
+
+  return new Response(body, { headers })
 }

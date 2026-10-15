@@ -1014,6 +1014,8 @@ export interface UserFrpRental {
   daysLeft: number
   planId: string | null
   pricePoints: number
+  /** 自动续费：开着的话服务端每小时检查，到期前 24 小时内自动续一期 */
+  autoRenew: boolean
   syncState: string
   lastError: string | null
   serverAddr: string | null
@@ -1028,7 +1030,7 @@ export interface UserFrpRental {
  * 受权限控制的模块（与后端 permissions.ts 的 FEATURES 一致）。
  * ⚠️ 不含「个人名片」：名片不消耗资源，已从权限体系移出、全量开放。
  */
-export type FeatureKey = "r2" | "ai" | "frp" | "proxy" | "doulor"
+export type FeatureKey = "r2" | "ai" | "frp" | "proxy" | "doulor" | "dns"
 
 export interface Permissions {
   r2: boolean
@@ -1043,6 +1045,14 @@ export interface Permissions {
    * 而主域还要负责给全站发验证码与找回密码。所以只由管理员显式授予。
    */
   doulor: boolean
+  /**
+   * DNS 解析记录（自己已有域名下的记录列表 / 新建 / 修改 / 删除）。
+   *
+   * ⚠️ 同样**默认 false**，但理由不是风险而是**配额**：Cloudflare 每个 zone 的
+   * 解析记录数有硬上限，全站共用少数几个 zone。它与 `doulor` 是两件事 ——
+   * `doulor` 管「能建在哪个根域」，`dns` 管「能不能建记录」，互不推导。
+   */
+  dns: boolean
 }
 
 export const FEATURE_LABELS: Record<FeatureKey, string> = {
@@ -1051,6 +1061,7 @@ export const FEATURE_LABELS: Record<FeatureKey, string> = {
   frp: "feat.frp",
   proxy: "feat.proxy",
   doulor: "feat.doulor",
+  dns: "feat.dns",
 }
 
 /**
@@ -1063,6 +1074,90 @@ export interface RootDomainOption {
   name: string
   label: string
   isDefault: boolean
+}
+
+// ---- DNS 解析「积分租用」（2026-10-14）----
+
+/**
+ * 一条 DNS 解析租约（用户端与管理端共用同一形状）。
+ *
+ * `status` 由服务端算好：**到期即视为 expired**，不等后台 cron 把数据库里的
+ * status 翻过来 —— 否则「cron 还没跑」的那段窗口里，界面会显示成还在生效。
+ */
+export interface DnsRental {
+  id: string
+  rootDomain: string
+  /** 成交价快照（积分/年）——不随根域后续调价变动 */
+  pricePoints: number
+  status: "active" | "expired" | "cancelled" | string
+  startedAt: string
+  expiresAt: string
+  /** 剩余天数（服务端算，负数表示已过期多少天） */
+  daysLeft: number
+  autoRenew: boolean
+  /** 自动续费失败的原因（服务端在积分不够时会关掉开关并写在这里） */
+  lastError: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** 一个「可以租的根域」及其对我当前的使用状态 */
+export interface DnsRentalRootOption {
+  name: string
+  label: string
+  isDefault: boolean
+  /** 非空 = 需要先解锁该功能权限才能用（如 doulor.cn 要 doulor） */
+  requiresFeature: string | null
+  /** 年价（积分/年）；0 = 不参与租用售卖 */
+  yearPrice: number
+  /**
+   * 按**当前租期**（`DnsRentalState.rentalDays`）折算的实收集分。
+   *
+   * 与 `yearPrice` 是两个不同的数：根域价是年价，租期不等于 365 天时服务端按
+   * `年价 × 租期 ÷ 365` 向上取整收（口径见 worker/src/handlers/dns-rental.ts
+   * 的 priceForDays）。**购买确认、余额够不够、小票上写多少分，一律用这个** ——
+   * 用 yearPrice 会在站长把租期改成 30 天时按一年的价去拦人 / 显示。
+   */
+  termPrice: number
+  forSale: boolean
+  /** 权限闸是否放行（不放行的域根本不该出现在价目里） */
+  permitted: boolean
+  /** 我是否本来就有免费额度（权限位 / 免权限访问 / 管理员） */
+  freeAccess: boolean
+  /** 我现在到底能不能在这个根域下建记录 */
+  usable: boolean
+  /** 我在这个根域上的租约（可能已过期） */
+  rental: DnsRental | null
+}
+
+export interface DnsRentalState {
+  balance: number
+  /** full=免费全放开；rented=有有效租约；expired=只剩过期租约（仅能删记录） */
+  accessMode: "full" | "rented" | "expired" | "none"
+  freeAccess: boolean
+  /**
+   * 我的账号当前能建多少条解析记录（**跨我名下所有域名**，不含被封禁的行）。
+   *
+   * `null` = **不限**（管理员 / 站长 / 管理员 Key），不是「0 条」也不是「没拿到」——
+   * 前端必须按「不限」渲染，绝不能当 0 写进文案（那会把「随便建」说成「一条都不能建」）。
+   *
+   * 服务端下发的是**每用户**口径，与 `GET /api/dns` 的 `dnsUsage.limit` 同一个函数
+   * 算出来（用户级覆盖 `users.max_dns_records` > 全局设置 `dns_records_per_user`），
+   * 与具体根域无关，所以价目表里每张卡上写的都是这个数。
+   * 口径出处：worker/src/handlers/dns.ts 的 dnsRecordLimit。
+   */
+  recordLimit: number | null
+  /**
+   * 当前设置的租期（天，默认 365 = 一年，站长可在管理面板改）。
+   *
+   * 面板上写「租 N 天」用它，**不要**自己写死 365 —— 否则站长把租期改成
+   * 30 天后，界面上的说法会与实收积分对不上（实收按租期折算）。
+   * 每次购买 / 续期都是这个时长；已有租约的到期日不受影响。
+   */
+  rentalDays: number
+  options: DnsRentalRootOption[]
+  /** 我的全部租约（含已过期 / 已停用） */
+  rentals: DnsRental[]
 }
 
 // ---- 排行榜 ----
@@ -2599,6 +2694,25 @@ export interface EventItem {
   /** 投票活动：我投的选项 id；没投过 / 未登录为 null */
   myVote?: string | null
   /**
+   * 集合投票（问卷）配置。
+   * ⚠️ 服务端**不会**下发 correctOptionId —— 每题对错只能从交卷回执里拿
+   * （且只有 reveal=immediate 时才有）。
+   */
+  quiz?: {
+    mode: "quiz"
+    retake: "once" | "best" | "unlimited"
+    reveal: "immediate" | "afterDeadline" | "never"
+    timeLimit: { totalSec?: number; perQuestionSec?: number } | null
+    scoring:
+      | { kind: "linear"; maxPoints: number }
+      | { kind: "tiers"; tiers: { minPercent: number; rewardType: string; params?: Record<string, unknown> }[] }
+    questions: {
+      id: string
+      title: string
+      options: { id: string; label: string; desc?: string; image?: string }[]
+    }[]
+  }
+  /**
    * true = 不在消息中心「活动推广」里显示，只能通过 /activity/<id> 链接参与。
    * 管理端列表用它显示状态。
    */
@@ -3572,6 +3686,178 @@ export interface AdminDnsAuditSummary {
   /** 本次新出现的问题数 */
   fresh: number
   note?: string
+}
+
+// ---- 管理端 · 根域与租用（2026-10-14）----
+
+/** 管理端看到的根域：定价 + 容量 */
+export interface AdminDnsRentalRoot {
+  name: string
+  label: string
+  zoneId: string | null
+  isDefault: boolean
+  enabled: boolean
+  requiresFeature: string | null
+  /** 年价（积分/年）；0 = 不参与租用售卖 */
+  yearPrice: number
+  /** 该根域下本地台账里的记录数 */
+  recordsUsed: number
+  /** Cloudflare 每 zone 记录数上限（恒定 200，来源见后端 CF_ZONE_RECORD_LIMIT 注释） */
+  recordsLimit: number
+  rentalsTotal: number
+  rentalsActive: number
+}
+
+/** 管理端看到的「与 DNS 有关的用户」一行 */
+export interface AdminDnsRentalUser {
+  id: string
+  uid: number | null
+  username: string
+  email: string
+  role: string
+  status: string
+  /** 权限位上的 dns 值（只是其中一条来源，见 source） */
+  dnsPermission: boolean
+  /** privileged=管理员特权 / permission=权限位 / rental=租用中 / expired=租约已过期 / none */
+  source: "privileged" | "permission" | "rental" | "expired" | "none"
+  /** 有效租约覆盖的根域 */
+  activeRoots: string[]
+  /** 最近一次到期（有效租约里最早的一份） */
+  expiresAt: string | null
+  daysLeft: number | null
+  rentals: DnsRental[]
+  recordsUsed: number
+  /** 当前生效的上限；null = 不限（管理员 / 站长） */
+  recordLimit: number | null
+  /** 是否用了用户级覆盖（而不是全局设置项） */
+  limitOverridden: boolean
+  lastRecordAt: string | null
+  createdAt: string
+}
+
+export interface AdminDnsRentalsResponse {
+  roots: AdminDnsRentalRoot[]
+  users: AdminDnsRentalUser[]
+  summary: {
+    totalRecords: number
+    byRoot: Record<string, number>
+    rentalsActive: number
+    rentalsExpired: number
+    /** 30 天内到期（含已过期但 cron 还没翻的 active） */
+    expiringSoon: number
+    usersTracked: number
+    usersWithRecords: number
+    globalRecordLimit: number
+    cfZoneRecordLimit: number
+    expiringSoonDays: number
+  }
+}
+
+// ---- 管理端 · 根域导入 / 删除（2026-10-15）----
+//
+// 这一组对应「从 Cloudflare 导入 + 自动初始化」与「删除根域」两个新入口：
+//   GET  /admin/root-domains        列表（含 Email Routing 现状 + 可选权限清单）
+//   GET  /admin/root-domains/cf-zones  可导入的 zone 候选（已排除已登记的）
+//   POST /admin/root-domains/import    选中一个 zone → 登记 + 初始化（幂等）
+//   POST /admin/root-domains/action    delete（需要 confirm；CF 记录默认保留）
+
+/** 管理端看到的根域（与 `/admin/root-domains` 一一对应） */
+export interface AdminRootDomainInfo {
+  name: string
+  label: string | null
+  zoneId: string | null
+  requiresFeature: string | null
+  dnsPricePerYear: number
+  isDefault: boolean
+  enabled: boolean
+  /** Email Routing 现状：`workerMatches` 为 false 就说明这个域现在收不到信 */
+  emailRouting: {
+    enabled: boolean
+    catchAllTarget: string | null
+    catchAllEnabled: boolean
+    workerMatches: boolean
+  }
+}
+
+export interface AdminRootDomainsResponse {
+  rootDomains: AdminRootDomainInfo[]
+  /** catch-all 应当指向的 Worker 名 */
+  emailWorker: string
+  /** 可选的 `requires_feature` 清单（与后端 FEATURES 同源，前端不硬编码） */
+  features: { key: string; label: string }[]
+  siteDomain: string
+  hasCfToken: boolean
+}
+
+/**
+ * 一个可导入的 Cloudflare zone。
+ *
+ * `wildcard` 是后端对 `*.{name}` 现状的判定，**不是**「有没有记录」这么简单：
+ * 灰云的占位记录看着配好了、实际接不住 Worker 路由，所以要分成五种状态展示。
+ */
+export interface AdminCfZoneCandidate {
+  name: string
+  zoneId: string
+  /** CF 的 zone 状态：active / pending / moved … */
+  status: string
+  paused: boolean
+  plan: string | null
+  /** 该 zone 上已用的 DNS 记录数（含邮件/路由记录）；null = 读不到 */
+  recordsUsed: number | null
+  recordsLimit: number
+  wildcard: "ok" | "no-proxy" | "conflict" | "missing" | "unknown"
+  wildcardDetail: string | null
+}
+
+export interface AdminCfZonesResponse {
+  zones: AdminCfZoneCandidate[]
+  /** 已登记的根域（候选里已排除它们，这里只是给界面一个上下文） */
+  registered: string[]
+  recordsLimit: number
+  hasCfToken: boolean
+  /**
+   * Token 的可见范围：`single-zone` 说明它只授权了一个 zone，
+   * 「列表里没有我的新域」多半是权限问题而不是域不存在。
+   */
+  tokenScope: "account" | "single-zone" | "unknown"
+  /** zone 数触到翻页上限（列表可能不全） */
+  truncated: boolean
+  siteDomain: string
+}
+
+export interface AdminRootDomainImportResult {
+  ok: boolean
+  name: string
+  zoneId: string
+  /** 每一步的结果（register / wildcard / wildcardRoots / setDefault），排障用 */
+  steps: { step: string; state: string }[]
+  wildcard: { state: string; detail: string }
+  wildcardRoots: string
+  isDefault: boolean
+  /** true = 本次是在已登记的行上「补初始化」（重试） */
+  wasExisting: boolean
+}
+
+/** 删根域前的影响面（服务端现算，不采信前端传的数字） */
+export interface AdminRootDomainUsage {
+  /** 本地台账里挂在该根域下的解析记录数 */
+  records: number
+  /** 库里挂在该根域下的域名/子域名行数 */
+  domains: number
+  /** 租约总数；-1 = 读不到（租约表未建） */
+  rentalsTotal: number
+  /** 其中有效租约数；-1 = 读不到 */
+  rentalsActive: number
+}
+
+/** 删除根域的结果 */
+export interface AdminRootDomainDeleteResult {
+  ok: boolean
+  name: string
+  usage: AdminRootDomainUsage
+  /** null = 按默认保留 Cloudflare 记录；否则是删除明细 */
+  cf: { deleted: string[]; failed: string[]; kept: string[]; keptTotal: number } | null
+  wildcardRoots: string
 }
 
 /** 本地台账 vs Cloudflare 实际记录的对账结果 */

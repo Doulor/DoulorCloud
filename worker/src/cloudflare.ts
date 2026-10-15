@@ -96,6 +96,32 @@ export interface CfDnsRecordPayload {
   }
 }
 
+/**
+ * 这个 fqdn 是否已被「泛解析」覆盖 —— 覆盖时不必再为它单独建记录。
+ *
+ * 见 settings.ts 的 `dns_wildcard_roots` 注释：Cloudflare 每个 zone 的记录数有硬上限，
+ * 逐个子域建记录会让配额随用户数增长而耗尽（81045），配了泛解析的根域则不需要。
+ *
+ * 只按设置里**明确声明**的根域判断，不做 DNS 探测：
+ *   · 探测要多一次 API 调用，且会在高频绑定路径上放大成本；
+ *   · 声明式更安全 —— 没配泛解析的根域一旦被误判为"已覆盖"，用户的域名就解析不了。
+ */
+export async function isCoveredByWildcard(env: Env, fqdn: string): Promise<boolean> {
+  try {
+    const { getSetting } = await import("./settings")
+    const raw = (await getSetting(env, "dns_wildcard_roots")) || ""
+    const f = fqdn.trim().toLowerCase().replace(/\.$/, "")
+    for (const r of raw.split(",")) {
+      const root = r.trim().toLowerCase().replace(/^\./, "")
+      if (!root) continue
+      if (f === root || f.endsWith("." + root)) return true
+    }
+  } catch {
+    /* 设置读不到时按"未覆盖"处理 —— 保守，退化成原来的行为 */
+  }
+  return false
+}
+
 export async function cfCreateDnsRecord(
   env: Env,
   zoneId: string,
@@ -143,19 +169,25 @@ export async function cfDeleteDnsRecord(
 
 /**
  * 查询 zone 上某 fqdn 的现有记录（用于分配子域名前的占位冲突检测）。
+ *
+ * `name` 是**精确匹配**（CF 的过滤条件不是模糊搜索），所以 `*.example.com`
+ * 这种泛解析记录也能按字面量查到 —— 2026-10-15 起返回里带上 `proxied`：
+ * 「根域导入」要靠它判断那条泛解析到底是不是**开着代理**的
+ * （灰云的 AAAA 记录不会被 Worker 路由接住，等于用户子域解析不了，
+ * 只按 type/content 判断会把这种半坏状态当成「已初始化」放行）。
  */
 export async function cfListDnsRecords(
   env: Env,
   zoneId: string,
   fqdn: string
-): Promise<{ id: string; type: string; content: string }[]> {
+): Promise<{ id: string; type: string; content: string; proxied?: boolean }[]> {
   const res = await callCloudflare(
     env,
     `/zones/${zoneId}/dns_records?name=${encodeURIComponent(fqdn)}&per_page=20`,
     { method: "GET" }
   )
   const data = (await res.json()) as {
-    result?: { id: string; type: string; content: string }[]
+    result?: { id: string; type: string; content: string; proxied?: boolean }[]
     errors?: { message: string }[]
   }
   if (!data.result) {
@@ -166,6 +198,58 @@ export async function cfListDnsRecords(
     )
   }
   return data.result
+}
+
+/** zone 上一条 DNS 记录的完整形状（分页拉全时用） */
+export interface CfDnsRecord {
+  id: string
+  name: string
+  type: string
+  content: string
+  proxied?: boolean
+  ttl?: number
+  comment?: string | null
+}
+
+/**
+ * 拉取 zone 上**全部** DNS 记录（分页拉全）。
+ *
+ * 为什么需要「全量」：CF 的 `?name=` 过滤是精确匹配，而「删掉某根域下平台的记录」
+ * 需要按**后缀**（`fqdn === root` 或 `fqdn.endsWith("." + root)`）判断归属 ——
+ * 只能把该 zone 的记录全拿回来自己筛（admin-dns.ts 的 CF 对账也是这个思路，
+ * 那份实现留在原处不动，避免为了共用而改一个与本次需求无关的模块）。
+ *
+ * ⚠️ 翻页上限 20 页（per_page=100 ⇒ 2000 条）是兜底：正常 zone 远到不了，
+ * 真到了说明有人把 zone 当台账用，此时宁可少删也不能无限翻。
+ */
+export async function cfListAllDnsRecords(
+  env: Env,
+  zoneId: string
+): Promise<CfDnsRecord[]> {
+  const all: CfDnsRecord[] = []
+  for (let page = 1; page <= 20; page++) {
+    const res = await callCloudflare(
+      env,
+      `/zones/${zoneId}/dns_records?per_page=100&page=${page}`,
+      { method: "GET" }
+    )
+    const data = (await res.json()) as {
+      result?: CfDnsRecord[]
+      result_info?: { total_pages?: number }
+      errors?: { message: string }[]
+    }
+    if (!data.result) {
+      throw new ApiError(
+        502,
+        data.errors?.[0]?.message ?? "查询 DNS 记录失败",
+        "CF_ERROR"
+      )
+    }
+    all.push(...data.result)
+    const totalPages = data.result_info?.total_pages ?? 1
+    if (data.result.length === 0 || page >= totalPages) break
+  }
+  return all
 }
 
 /**

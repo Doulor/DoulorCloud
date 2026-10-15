@@ -123,7 +123,7 @@ describe("内网穿透租用化 · 管理端", () => {
 
     const res = await createSub(admin, { userId: user.id, nodeId, days: 30, portCount: 2 })
     expect(res.status).toBe(200)
-    expect(res.body.frpUser).toMatch(/^dcfrp_[0-9a-f]{8}$/)
+    expect(res.body.frpUser).toMatch(/^DC_[0-9a-f]{8}$/)
     expect(res.body.ports).toHaveLength(2)
     for (const p of res.body.ports!) {
       expect(p).toBeGreaterThanOrEqual(31000)
@@ -389,7 +389,7 @@ describe("内网穿透租用化 · 管理端", () => {
 
     const ok = await createSub(admin, { username: user.username, nodeId, days: 7, portCount: 1 })
     expect(ok.status).toBe(200)
-    expect(ok.body.frpUser).toMatch(/^dcfrp_/)
+    expect(ok.body.frpUser).toMatch(/^DC_/)
 
     const missing = await createSub(admin, { username: "__查无此人__", nodeId, days: 7, portCount: 1 })
     expect(missing.status).toBe(404)

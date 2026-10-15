@@ -31,6 +31,7 @@ import {
   type RelayKind,
 } from "../relay-adapters"
 import type { Env } from "../env"
+import { isPrivateOrLocalHost } from "../url-guard"
 
 /** 每人最多登记几台（含站长自己的那台之外的其它站） */
 const MAX_PER_USER = 5
@@ -74,22 +75,19 @@ function normalizeBaseUrl(raw: unknown): string {
     host.endsWith(".local") ||
     host.endsWith(".internal") ||
     host.endsWith("doulor.cn") // 不给自己开环：防止把本站当地址绕圈
-  // 内网 / 环回 / 链路本地 IP 一律拒绝（IPv4 与常见 IPv6 写法都盖到）
-  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
-  let privateIp = false
-  if (ipv4) {
-    const [a, b] = [Number(ipv4[1]), Number(ipv4[2])]
-    privateIp =
-      a === 10 ||
-      a === 127 ||
-      a === 0 ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      (a === 169 && b === 254)
-  }
-  const ipv6Private =
-    host === "[::1]" || host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80")
-  if (blockedHost || privateIp || ipv6Private) {
+  // 内网 / 环回 / 链路本地 IP 一律拒绝。
+  //
+  // 🔴 统一到 url-guard.ts 那一份（2026-10-14 安全审计）。
+  //   这里原先自己拼了一份 IPv4 黑名单，与 url-guard 的不一致：
+  //     · 漏了 100.64.0.0/16（运营商级 NAT，CGNAT）
+  //     · 漏了 192.0.0.0/24、198.18.0.0/15 等保留段
+  //   同一件事维护两份实现，迟早只修一边 —— 现在只有 url-guard 一处。
+  //
+  // ⚠️ 仍然挡不住的：域名**解析到**内网 IP 的情况（sslip.io 之流）。
+  //   Worker 的 fetch 在边缘解析 DNS，我们拿不到解析结果，无法在调用前判断。
+  //   实际影响有限：Cloudflare 边缘**不会**把请求发到私网地址（会直接返回 1003），
+  //   所以这条路径的终点是"请求失败"，不是"读到内网服务"。
+  if (blockedHost || isPrivateOrLocalHost(host)) {
     throw new ApiError(400, "这个地址不允许登记（内网 / 本机地址）", "INVALID_URL")
   }
   url.search = ""

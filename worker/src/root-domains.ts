@@ -36,6 +36,15 @@ export interface RootDomainRow {
   label: string | null
   /** 非空 = 必须先解锁该权限才能把子域名/邮箱建在这个域下 */
   requires_feature: string | null
+  /**
+   * DNS 解析租用的年价（积分/年，迁移 0160）。0 = 该根域不参与租用售卖。
+   *
+   * ⚠️ 这里带出来的是**读缓存里的值**（10 秒 TTL）。用于展示（管理端列表、
+   * 用户端价目卡）没问题，但**扣分那一刻必须再直查一次库** ——
+   * 拿缓存里的旧价去扣会实收一个已经不存在的价格，见 handlers/dns-rental.ts
+   * 的 priceOf。
+   */
+  dns_price_per_year: number | null
   is_default: number
   enabled: number
   created_at: string
@@ -69,6 +78,7 @@ function fallbackRow(env: Env): RootDomainRow {
     zone_id: env.ZONE_ID ?? null,
     label: null,
     requires_feature: null,
+    dns_price_per_year: 0,
     is_default: 1,
     enabled: 1,
     created_at: "",
@@ -83,7 +93,7 @@ export async function listRootDomains(env: Env): Promise<RootDomainRow[]> {
   let rows: RootDomainRow[] = []
   try {
     const res = await env.DB.prepare(
-      `SELECT name, zone_id, label, requires_feature, is_default, enabled, created_at
+      `SELECT name, zone_id, label, requires_feature, dns_price_per_year, is_default, enabled, created_at
          FROM root_domains
         ORDER BY is_default DESC, name ASC`
     ).all<RootDomainRow>()
@@ -311,6 +321,46 @@ export async function isOwnDomain(env: Env, hostOrAddress: string): Promise<bool
 /** 所有根域名字（含禁用），给「保留名 / 冲突检测」用 */
 export async function allRootDomainNames(env: Env): Promise<string[]> {
   return (await listRootDomains(env)).map((r) => r.name)
+}
+
+/**
+ * 解析 `dns_wildcard_roots` 设置项（逗号分隔）成规范化的根域数组。
+ *
+ * 规范化 = 去空白 + 转小写 + 去掉可能被手写进来的前导点（`.tyu.me`），
+ * 与 `cloudflare.ts` 的 `isCoveredByWildcard` **同一口径** —— 那个函数决定
+ * 「这个 fqdn 要不要单独建记录」，口径不一致会出现「设置里看着有、实际没覆盖」。
+ *
+ * 为什么在写路径上也要走一遍（而不是直接拼字符串）：这个设置项是**手写文本框**，
+ * 站长很可能写成 `tyu.me, 7u.nz ,.doulor.cn`；不去重不排序地追加会让它越长越乱，
+ * 最后没人敢改它。
+ */
+export function parseWildcardRoots(raw: string | null | undefined): string[] {
+  const out: string[] = []
+  for (const part of (raw ?? "").split(",")) {
+    const name = part.trim().toLowerCase().replace(/^\.+/, "")
+    if (!name) continue
+    if (!out.includes(name)) out.push(name)
+  }
+  return out
+}
+
+/**
+ * 把某个根域加进 `dns_wildcard_roots`：已存在则原样返回（幂等），
+ * 否则**追加到末尾**（保持既有顺序稳定，站长在设置页看到的前后关系不会跳）。
+ */
+export function addWildcardRoot(raw: string | null | undefined, name: string): string {
+  const target = name.trim().toLowerCase()
+  const list = parseWildcardRoots(raw)
+  if (!list.includes(target)) list.push(target)
+  return list.join(",")
+}
+
+/** 从 `dns_wildcard_roots` 里摘掉某个根域（不存在则原样返回，幂等） */
+export function removeWildcardRoot(raw: string | null | undefined, name: string): string {
+  const target = name.trim().toLowerCase()
+  return parseWildcardRoots(raw)
+    .filter((r) => r !== target)
+    .join(",")
 }
 
 /**

@@ -13,6 +13,7 @@ import { ToastCopyMenu } from "@/components/toast-copy-menu"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { reloadOnceForChunkError } from "@/lib/chunk-error"
 import "@/index.css"
+import { selfHealServiceWorkers } from "@/lib/chunk-error"
 
 /**
  * 部署后旧 chunk 404 的兜底（详见 lib/chunk-error.ts）。
@@ -33,6 +34,9 @@ window.addEventListener("unhandledrejection", (e) => {
   reloadOnceForChunkError(e.reason)
 })
 
+
+// 启动时做一次性安全自愈（见函数注释：清理被投毒 SW/缓存）
+selfHealServiceWorkers()
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ErrorBoundary>

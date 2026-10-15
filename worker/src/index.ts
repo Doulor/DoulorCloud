@@ -4,6 +4,7 @@ import type { Env } from "./env"
 import * as authHandlers from "./handlers/auth"
 import * as stickerHandlers from "./handlers/stickers"
 import * as dnsHandlers from "./handlers/dns"
+import * as dnsRentalHandlers from "./handlers/dns-rental"
 import * as emailHandlers from "./handlers/email"
 import * as subdomainHandlers from "./handlers/subdomains"
 import * as adminHandlers from "./handlers/admin"
@@ -38,6 +39,8 @@ import * as myInviteHandlers from "./handlers/my-invites"
 import * as frpHandlers from "./handlers/frp"
 import * as frpAgentHandlers from "./handlers/frp-agent"
 import * as frpRentalHandlers from "./handlers/frp-rental"
+import * as frpDonateHandlers from "./handlers/frp-donate"
+import { reconcileAllNodes } from "./handlers/frp-node-push"
 import * as profileHandlers from "./handlers/profile"
 import * as identityHandlers from "./handlers/identity"
 import * as proxyHandlers from "./handlers/proxy"
@@ -376,6 +379,39 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     methods: ["DELETE"],
     handle: (dnsMatch: RegExpMatchArray) =>
       dnsHandlers.deleteDns(env, request, decodeURIComponent(dnsMatch[1])),
+  },
+
+  // ---- DNS 解析「积分租用」（2026-10-14）----
+  // 用户为自己买 / 续某个根域下的解析能力。与内网穿透租用同源（见
+  // handlers/dns-rental.ts 顶部注释）：扣分全部走 applyPoints，前端只负责展示。
+  // ⚠️ 这些路径是 GET/POST，与上面 `/dns/:id` 的 PUT/DELETE 正则不冲突
+  //    （dispatch 会先比方法），但依然按「固定路径在前」的习惯排在这里。
+  {
+    kind: "exact",
+    path: "/dns/rental",
+    method: "GET",
+    handle: () => dnsRentalHandlers.listDnsRentalOptions(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dns/rental/purchase",
+    method: "POST",
+    handle: () => dnsRentalHandlers.purchaseDnsRental(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dns/rental/renew",
+    method: "POST",
+    handle: () => dnsRentalHandlers.renewDnsRental(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/dns/rental/auto-renew",
+    method: "POST",
+    handle: () => dnsRentalHandlers.setDnsRentalAutoRenew(env, request),
   },
 
   {
@@ -1091,6 +1127,23 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: () => adminDnsHandlers.compareCfDns(env, request),
   },
 
+  // 根域与租用（2026-10-14）：根域定价/启停 + 用户维度 + 租约处置 + 全局汇总。
+  // ⚠️ 与上面几条一样，固定路径必须排在 `/admin/dns/:id` 正则之前，
+  //    否则 `rentals` 会被当成记录 id 吃掉。
+  {
+    kind: "exact",
+    path: "/admin/dns/rentals",
+    method: "GET",
+    handle: () => adminDnsHandlers.listAdminDnsRentals(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/dns/rental-action",
+    method: "POST",
+    handle: () => adminDnsHandlers.dnsRentalAction(env, request),
+  },
+
   // 「台账与 Cloudflare 对不上」的修复口：fqdn 换了归属域（如整体换到 tyu.me）后，
   // 老 cf_id 指向的是**另一个 zone** 的记录 —— 这里按当前 fqdn 重建并回填。
   {
@@ -1164,6 +1217,24 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/admin/root-domains/action",
     method: "POST",
     handle: () => adminRootDomainHandlers.rootDomainAction(env, request),
+  },
+
+  // 「从 Cloudflare 导入」：cf-zones 列候选（排除已登记），import 一次做完
+  // 「登记 + 建泛解析 + 追加 dns_wildcard_roots + 失效缓存」。
+  // ⚠️ 两条都是 exact，与上面的 /admin/root-domains 同前缀但不冲突；
+  //    必须与 /admin/root-domains/:name 这类**正则**路由区分开（本文件里目前没有）。
+  {
+    kind: "exact",
+    path: "/admin/root-domains/cf-zones",
+    method: "GET",
+    handle: () => adminRootDomainHandlers.listImportableCfZones(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/root-domains/import",
+    method: "POST",
+    handle: () => adminRootDomainHandlers.importAdminRootDomain(env, request),
   },
 
   {
@@ -2774,6 +2845,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: (eventGetMatch: RegExpMatchArray) =>
       eventHandlers.getEvent(env, request, decodeURIComponent(eventGetMatch[1])),
   },
+  // 集合投票（问卷）交卷 —— ⚠️ 必须排在 /events/:id 之前
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/events\/([^/]+)\/quiz$/),
+    methods: ["POST"],
+    handle: (eventQuizMatch: RegExpMatchArray) =>
+      eventHandlers.submitQuiz(env, request, decodeURIComponent(eventQuizMatch[1])),
+  },
   {
     kind: "regex",
     match: (routePath: string) => routePath.match(/^\/events\/([^/]+)\/claim$/),
@@ -3684,6 +3763,42 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       frpRentalHandlers.renewRental(env, request),
   },
 
+  // 用户改自己租约的 frp 密码。账号名不可改（生成后固定），只有密码归用户。
+  {
+    kind: "exact",
+    path: "/frp/rental/auto-renew",
+    method: "POST",
+    handle: () => frpRentalHandlers.setMyRentalAutoRenew(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/frp/rental/token",
+    method: "POST",
+    handle: () =>
+      frpRentalHandlers.setMyRentalToken(env, request),
+  },
+
+  // ---- 代理节点「一键捐献」----
+  // 领令牌：要登录态（网页发起）。
+  // 登记节点：**故意不要登录态** —— 脚本在捐献者的服务器上跑，没有浏览器会话，
+  // 靠一次性 HMAC 令牌鉴权；这是本 Worker 里唯一这样的写接口，所以它的
+  // 参数校验与防重放都在 handlers/frp-donate.ts 里自己扛。
+  {
+    kind: "exact",
+    path: "/frp/donate/token",
+    method: "POST",
+    handle: () =>
+      frpDonateHandlers.issueDonateToken(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/frp/donate/register",
+    method: "POST",
+    handle: () =>
+      frpDonateHandlers.registerDonatedNode(env, request),
+  },
+
   // ---- frp-agent 通道（服务器上的守护进程调用，非浏览器）----
   // 鉴权不是会话而是共享密钥 + HMAC 签名，见 handlers/frp-agent.ts 的 requireAgent()。
   // 之所以要有这两个端点：Cloudflare Worker 到不了 frps 服务器上的 frps-panel
@@ -4585,6 +4700,52 @@ async function dispatch(
   return null
 }
 
+/**
+ * 跨站请求来源校验（CSRF 兜底）。
+ *
+ * 🔴 为什么需要（2026-10-14 安全审计 findings #8/#13）：
+ *   本站会话 cookie 是 `SameSite=Lax`，它**挡得住跨站 POST**，但挡不住两件事：
+ *     1. 顶级导航式 GET（Lax 会带上 cookie）触发的副作用接口；
+ *     2. **同站**子域发起的请求 —— Lax 对"同站"完全不拦。
+ *   而第 2 条恰好有现成的落地条件：用户可以在 `*.doulor.cn` 下托管自己的作品页
+ *   （见 lab 域名绑定），于是攻击者能在同一站点内拿到一个执行点，
+ *   再带着 cookie 打 `/api/points/transfer` 这类写接口 —— 转积分、删资源、改资料。
+ *
+ * 判定策略（**只拦跨站，不拦同站**）：
+ *   · `Sec-Fetch-Site: cross-site`  → 拒绝（现代浏览器的权威信号）
+ *   · 有 `Origin` 且其 host 与本次请求的 host 不同 → 拒绝
+ *   · 头都没有（命令行 / 老客户端 / 服务端调用）→ 放行
+ *
+ * 为什么"没有头就放行"是安全的：现代浏览器发写请求时**一定会带** Origin，
+ * 所以攻击者无法靠"不带头"绕过；而放行才能不误伤 API 客户端与内部调用。
+ *
+ * 为什么**不**拦同站：自定义域名的作品页需要调本站 API（lab-store 等），
+ * 拦同站会直接打死这个功能。同站那条路要靠"不允许普通用户在品牌域下托管作品"
+ * 来根治（见 lab-domains.ts 的保留名 + 权益门禁），不是靠这一层。
+ */
+function assertNotCrossSite(request: Request, url: URL): void {
+  const m = request.method.toUpperCase()
+  if (m === "GET" || m === "HEAD" || m === "OPTIONS") return
+
+  const sfs = (request.headers.get("Sec-Fetch-Site") || "").toLowerCase()
+  if (sfs === "cross-site") {
+    throw new ApiError(403, "跨站请求已被拒绝", "CSRF_BLOCKED")
+  }
+
+  const origin = request.headers.get("Origin")
+  if (origin) {
+    let host = ""
+    try {
+      host = new URL(origin).host.toLowerCase()
+    } catch {
+      throw new ApiError(403, "跨站请求已被拒绝", "CSRF_BLOCKED")
+    }
+    if (host !== url.host.toLowerCase()) {
+      throw new ApiError(403, "跨站请求已被拒绝", "CSRF_BLOCKED")
+    }
+  }
+}
+
 async function route(
   env: Env,
   request: Request,
@@ -4788,6 +4949,9 @@ export default {
       const hosted = await hostedDirectLink(env, request)
       if (hosted) return hosted
 
+      // 跨站写请求一律拒绝（放在 route 之前，覆盖全部接口）
+      assertNotCrossSite(request, url)
+
       return await route(env, request, ctx)
     } catch (err) {
       if (err instanceof ApiError) {
@@ -4875,6 +5039,26 @@ export default {
         )
       }
       /**
+       * 捐献节点的「定期收敛」：每 5 分钟把 D1 的期望状态重推一遍。
+       *
+       * 为什么必须有它：写订阅之后我们会立刻推一次（尽快生效），但那是一次性的
+       * **事件**，网络抖动 / 面板重启 / Worker 冷启动都可能丢。丢了之后没人补，
+       * 用户就会遇到「我付了钱，但偶尔就是没开」—— 这种偶发最难查。
+       * 每 5 分钟重推一遍就把「最终一致」补上了。
+       *
+       * 为什么搭在每分钟的 tick 上而不是新增一条 cron：多一条触发器就多一份
+       * `controller.cron` 与 wrangler.toml 一一对应的配置漂移风险。
+       * 而且它很轻 —— 只处理「有一键捐献面板信息」的节点，通常只有个位数。
+       */
+      if (new Date(controller.scheduledTime).getUTCMinutes() % 5 === 0) {
+        ctx.waitUntil(
+          reconcileAllNodes(env).then((r) => {
+            if (r.failed > 0) console.warn("frp 节点收敛有失败:", JSON.stringify(r))
+          })
+        )
+      }
+
+      /**
        * 造物典藏「在线投资」：行情推进 + 强平扫描。
        *
        * 这一条是**「没人在看的时候 K 线也在走」的唯一保证**。
@@ -4921,6 +5105,52 @@ export default {
         if (n > 0) console.log("自动确认收货:", n, "笔")
       })
     )
+    /**
+     * 内网穿透「自动续费」：每小时检查一次即将到期的租约。
+     *
+     * 为什么必须是定时任务、而不是等用户打开页面时顺手续：
+     *   「自动续费」这个开关的意义就是**用户不在的时候也别断**。
+     *   只在有人访问时才续的话，它和手动续费没有任何区别 —— 用户没上线，
+     *   租约就断了，回来发现服务停了还得自己排查。
+     *
+     * 为什么是每小时而不是更频繁：续费窗口是**到期前 24 小时**，
+     * 每小时检查一次意味着最迟在到期前约 23 小时就会续上，余量充足。
+     * 真正决定"提前多久"的是窗口，不是检查频率 —— 所以没必要更密。
+     *
+     * 为什么搭在已有的每小时 cron 上而不是新开一条：新开一条触发器就多一份
+     * `controller.cron` 与 wrangler.toml 一一对应的配置漂移风险，而且会实实在在地
+     * 多消耗配额；挂在已有的那条上，增量只是**一次按索引的 SELECT**
+     * （绝大多数情况下返回 0 行就直接结束）。
+     */
+    ctx.waitUntil(
+      frpRentalHandlers.autoRenewDueRentals(env).then((r) => {
+        if (r.renewed > 0 || r.insufficient > 0) {
+          console.log("frp 自动续费:", JSON.stringify(r))
+        }
+      })
+    )
+
+    /**
+     * DNS 解析租用：到期回收 + 自动续费（2026-10-14）。
+     *
+     * 为什么必须有「回收」这一步：访问判定本来就带 `expires_at > now`
+     * （见 handlers/dns-rental.ts 的 dnsAccessFor），所以到期那一刻能力就已经没了。
+     * 但**状态**还停在 active —— 站长在管理端看到的会是「有效租约 + 已过期」这种
+     * 自相矛盾的数据，用户端也会显示成还在生效。这一步把状态翻正，让两边看到的
+     * 都是事实。
+     *
+     * 为什么搭在已有的每小时 cron 上而不是新开一条：同 frp（见上面那段注释）——
+     * 多一条触发器就多一份 `controller.cron` 与 wrangler.toml 一一对应的漂移风险，
+     * 而这条增量只是一次按索引的 UPDATE + 一次 SELECT。
+     */
+    ctx.waitUntil(
+      dnsRentalHandlers.expireAndAutoRenewDnsRentals(env).then((r) => {
+        if (r.expired > 0 || r.renewed > 0 || r.insufficient > 0) {
+          console.log("DNS 租约回收/续费:", JSON.stringify(r))
+        }
+      })
+    )
+
     // 批量刷新中转站调用次数/额度：排行榜读的是 newapi_accounts.request_count
     // 的本地缓存，只在用户打开中转站页时刷新 —— 不打开就一直是旧的（排行榜
     // 于是「数据不对」）。这里每小时刷一批（从最旧开始，限量防上游限流）。

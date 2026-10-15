@@ -7,6 +7,7 @@ import {
   Copy,
   Download,
   FileCode2,
+  KeyRound,
   Loader2,
   Network,
   ShoppingCart,
@@ -16,6 +17,7 @@ import {
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { confirmDialog } from "@/components/confirm-dialog"
 import {
@@ -47,6 +49,26 @@ export function FrpRentalPanel() {
   const [balance, setBalance] = React.useState(0)
   const [plans, setPlans] = React.useState<UserFrpPlan[]>([])
   const [subs, setSubs] = React.useState<UserFrpRental[]>([])
+  /** 正在切换自动续费的租约 id（避免连点） */
+  const [autoRenewBusy, setAutoRenewBusy] = React.useState<string | null>(null)
+
+  async function toggleAutoRenew(s: UserFrpRental, on: boolean) {
+    setAutoRenewBusy(s.id)
+    try {
+      await frpApi.setAutoRenew({ id: s.id, autoRenew: on })
+      // 成功就本地更新这一条，不必整页重拉（重拉会让列表闪一下）
+      setSubs((prev) =>
+        prev.map((x) =>
+          x.id === s.id ? { ...x, autoRenew: on, lastError: on ? null : x.lastError } : x
+        )
+      )
+      toast.success(on ? t("frpu.autoRenew.on") : t("frpu.autoRenew.off"))
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : t("frpu.autoRenew.err"))
+    } finally {
+      setAutoRenewBusy(null)
+    }
+  }
   /** frpc 客户端下载地址（站长在设置里配）；租用用户同样需要它 */
   const [coreUrl, setCoreUrl] = React.useState<string | null>(null)
   /** 站长把「内网穿透」总开关关了 → 暂停销售（已购租约不受影响） */
@@ -55,6 +77,10 @@ export function FrpRentalPanel() {
   /** 正在处理的动作标识，避免同一按钮被连点 */
   const [busy, setBusy] = React.useState("")
   const [configOf, setConfigOf] = React.useState<UserFrpRental | null>(null)
+  /** 正在改密码的那条租约；null = 弹窗关着 */
+  const [pwTarget, setPwTarget] = React.useState<UserFrpRental | null>(null)
+  const [pwValue, setPwValue] = React.useState("")
+  const [pwError, setPwError] = React.useState("")
 
   const load = React.useCallback(async () => {
     try {
@@ -121,6 +147,35 @@ export function FrpRentalPanel() {
       await load()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t("frpu.renewFailed"))
+    } finally {
+      setBusy("")
+    }
+  }
+
+  /**
+   * 改 frp 密码。
+   *
+   * ⚠️ 账号名（frpUser）**不可改** —— 它同时是 frps 的 user 字段和面板里的凭据标识，
+   *    改了等于换一个账号，用户手上所有 frpc 配置立刻失效。只有密码归用户自己。
+   * ⚠️ 面板只收字母数字，这里先做同样的校验，免得提交完才被服务端打回来。
+   */
+  const changeToken = async () => {
+    if (!pwTarget) return
+    const value = pwValue.trim()
+    if (!/^[A-Za-z0-9]{8,64}$/.test(value)) {
+      setPwError(t("frpu.pwRule"))
+      return
+    }
+    setBusy(`token:${pwTarget.id}`)
+    try {
+      await frpApi.setMyRentalToken({ id: pwTarget.id, token: value })
+      toast.success(t("frpu.pwSaved"))
+      setPwTarget(null)
+      setPwValue("")
+      setPwError("")
+      await load()
+    } catch (err) {
+      setPwError(err instanceof Error ? err.message : t("frpu.pwFailed"))
     } finally {
       setBusy("")
     }
@@ -320,6 +375,39 @@ export function FrpRentalPanel() {
                             : t("frpu.expiredAgo", { v0: Math.abs(s.daysLeft) })}
                         </span>
                       </div>
+
+                      {/*
+                        自动续费开关。
+                        「失败原因」直接读服务端写下的 last_error —— 服务端在积分不够时
+                        会主动关掉开关并把原因留在那儿，用户在这里就能看到"为什么没续上"，
+                        而不是过几天发现隧道断了再来问。
+                      */}
+                      <div className="mt-2 rounded-md border p-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="space-y-0.5">
+                            <p className="text-xs font-medium">{t("frpu.autoRenew.title")}</p>
+                            <p className="text-[11px] text-muted-foreground">
+                              {t("frpu.autoRenew.hint")}
+                            </p>
+                          </div>
+                          <Switch
+                            checked={!!s.autoRenew}
+                            disabled={expired || autoRenewBusy === s.id}
+                            onCheckedChange={(v) => void toggleAutoRenew(s, v)}
+                          />
+                        </div>
+                        {s.lastError ? (
+                          <p className="mt-1.5 text-[11px] text-destructive">
+                            {t("frpu.autoRenew.failed")}
+                            {s.lastError}
+                          </p>
+                        ) : null}
+                        {!s.autoRenew && !s.lastError && s.daysLeft <= 2 && !expired ? (
+                          <p className="mt-1.5 text-[11px] text-amber-600 dark:text-amber-500">
+                            {t("frpu.autoRenew.soon")}
+                          </p>
+                        ) : null}
+                      </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       <Button
@@ -330,6 +418,19 @@ export function FrpRentalPanel() {
                       >
                         <FileCode2 className="h-3.5 w-3.5" />
                         {t("frpu.config")}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!!busy || s.status === "cancelled"}
+                        onClick={() => {
+                          setPwTarget(s)
+                          setPwValue("")
+                          setPwError("")
+                        }}
+                      >
+                        <KeyRound className="h-3.5 w-3.5" />
+                        {t("frpu.pwBtn")}
                       </Button>
                       <Button
                         size="sm"
@@ -356,6 +457,46 @@ export function FrpRentalPanel() {
           </CardContent>
         </Card>
       ) : null}
+
+      {/* ---- 改密码弹窗 ---- */}
+      <Dialog open={pwTarget !== null} onOpenChange={(v) => !v && setPwTarget(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("frpu.pwTitle")}</DialogTitle>
+            <DialogDescription>{t("frpu.pwDesc", { v0: pwTarget?.frpUser ?? "" })}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <label htmlFor="frp-new-token" className="text-sm font-medium">
+              {t("frpu.pwLabel")}
+            </label>
+            <input
+              id="frp-new-token"
+              value={pwValue}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={t("frpu.pwPlaceholder")}
+              onChange={(e) => {
+                setPwValue(e.target.value)
+                setPwError("")
+              }}
+              className="w-full rounded-md border bg-background px-3 py-2 font-mono text-sm
+                         outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+            <p className="text-xs text-muted-foreground">{t("frpu.pwRule")}</p>
+            {pwError ? <p className="text-xs text-destructive">{pwError}</p> : null}
+            <p className="text-xs text-muted-foreground">{t("frpu.pwWarn")}</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPwTarget(null)} disabled={!!busy}>
+              {t("frpu.pwCancel")}
+            </Button>
+            <Button onClick={() => void changeToken()} disabled={!!busy}>
+              {busy.startsWith("token:") ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {t("frpu.pwSave")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ---- 配置弹窗 ---- */}
       <Dialog open={configOf !== null} onOpenChange={(v) => !v && setConfigOf(null)}>

@@ -15,11 +15,31 @@ compatibility_date = "2026-09-21"
 # 已建的路由。故这里不声明，全部 Route 由 CF dashboard + 运行时 API 维护。
 # 另加 workers_dev = false，不暴露 *.workers.dev 预览域名。
 #
-# 当前线上应存在的固定 Route（如被误删需手动在 dashboard 重建，均指向 doulor-mail-api）：
-#   doulor.cn/api/*          cloud.doulor.cn/api/*
-#   doulor.cn/dl/*           cloud.doulor.cn/dl/*
-#   doulor.cn/profile/*      cloud.doulor.cn/profile/*
-#   doulor.cn/p/*            cloud.doulor.cn/p/*
+# 当前线上应存在的固定 Route。**分工不能搞错**（见下面的真实事故）。
+#
+# 🔴 2026-10-14 线上事故 —— 这段清单原先写的是「均指向 doulor-mail-api」，**是错的**：
+#   照它重建会把最宽的那条 `cloud.doulor.cn/*` 也指到 API Worker，而 `/*` 是
+#   **前端入口**。后果：https://cloud.doulor.cn/ 走进 API Worker，它没有 `/` 这个
+#   接口 ⇒ 返回 {"error":"接口不存在"}，前端 HTML 压根没下发 ⇒ 浏览器拿不到入口 JS
+#   ⇒ React 起不来，页面报「服务响应异常，请检查网络或稍后重试」。
+#
+#   最迷惑的地方：/api/* 等子路径本来就归 API Worker，所以**接口全好、只有根路径坏**，
+#   很容易误判成"网络问题"或"前端 bug"。排查时先看这条路由。
+#
+#   正确分工 —— **最宽的那条 `/*` 必须给前端 Worker `doulor-mail`**：
+#
+#   属于 doulor-mail（前端，最宽，缺了整站打不开）：
+#     cloud.doulor.cn/*
+#
+#   属于 doulor-mail-api（只给具体子路径）：
+#     doulor.cn/api/*          cloud.doulor.cn/api/*
+#     doulor.cn/dl/*           cloud.doulor.cn/dl/*
+#     doulor.cn/profile/*      cloud.doulor.cn/profile/*
+#     doulor.cn/p/*            cloud.doulor.cn/p/*
+#     cloud.doulor.cn/c/*      cloud.doulor.cn/u/*      cloud.doulor.cn/s/*
+#
+#   好消息：前端 wrangler.jsonc 里声明了 `cloud.doulor.cn/* -> doulor-mail`，
+#   所以**部署前端时会自动把它修回正确值** —— 这也是它平时一直是对的原因。
 # 动态 Route（由 attachCustomDomain / detachCustomDomain 维护）：
 #   <用户绑定的子域名>/*  如 xxx.doulor.cn/*、abc.doulor.cn/*
 workers_dev = false

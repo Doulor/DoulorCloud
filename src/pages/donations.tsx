@@ -65,6 +65,7 @@ import {
 import {
   authApi,
   donationApi,
+  frpApi,
   myInviteApi,
   voucherApi,
   wb2apiApi,
@@ -504,18 +505,33 @@ export default function DonationPage() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           {t(TYPE_META[type]?.label ?? "")}
-          {perms?.[type as keyof Permissions] ? (
-            <Badge variant="success">{t("don.unlocked")}</Badge>
-          ) : (
-            <Badge variant="secondary">{t("don.locked")}</Badge>
-          )}
+          {/*
+            内网穿透**不显示解锁/未解锁徽章**（2026-10-14 明确）：
+            它已经不属于权限体系了（后端 FEATURES 里没有 frp），perms.frp 永远是
+            undefined —— 照着这个逻辑渲染会一直显示「未解锁」，而实际上
+            它根本不走权限这条路，改成积分租用。显示一个恒为"未解锁"的徽章
+            会让用户以为"我还没被批准"，而他其实现在就能用。
+          */}
+          {type !== "frp" &&
+            (perms?.[type as keyof Permissions] ? (
+              <Badge variant="success">{t("don.unlocked")}</Badge>
+            ) : (
+              <Badge variant="secondary">{t("don.locked")}</Badge>
+            ))}
         </CardTitle>
         <CardDescription>
           {t(TYPE_META[type]?.desc ?? "")}
           {/* 站长关掉这条通道的授权后，别再说「通过即解锁」误导用户 */}
-          {grantPermissions?.[type] !== false
-            ? t("don.card.note")
-            : t("don.card.noteNoGrant")}
+          {/*
+              内网穿透**没有权限可解锁**了（2026-10-14 明确）：它已完全改为积分租用 ——
+              谁都能进这个页面，真正使用时用积分下单租节点。
+              所以这里不能再显示「通过即解锁对应功能权限」——那句话已经不对了。
+            */}
+            {type === "frp"
+              ? t("don.card.noteRental")
+              : grantPermissions?.[type] !== false
+                ? t("don.card.note")
+                : t("don.card.noteNoGrant")}
           {grantPermissions?.[type] === false && (
             <span className="mt-1 block font-semibold text-destructive">
               {t("don.grantOff")}
@@ -524,11 +540,20 @@ export default function DonationPage() {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <Button size="sm" onClick={() => setDialogType(type)}>
-          <Plus className="h-4 w-4" />
-          {t("don.card.contribute", { label: t(TYPE_META[type]?.label ?? "") })}
-        </Button>
-      </CardContent>
+          {/*
+            内网穿透已经改成「一键搭节点」，不再需要用户上传 config.yml。
+            这里不放「贡献一份…」按钮 —— 留着它会把人引到那个已废弃的表单上。
+            （上面的卡片就是新的入口。）
+          */}
+          {type === "frp" ? (
+            <p className="text-xs text-muted-foreground">{t("don.frp1.noConfig")}</p>
+          ) : (
+            <Button size="sm" onClick={() => setDialogType(type)}>
+              <Plus className="h-4 w-4" />
+              {t("don.card.contribute", { label: t(TYPE_META[type]?.label ?? "") })}
+            </Button>
+          )}
+        </CardContent>
     </Card>
   )
 
@@ -1016,6 +1041,7 @@ export default function DonationPage() {
             </TabsContent>
 
             <TabsContent value="frp">
+              <FrpNodeOneClickDonate />
               {renderResourceIntro("frp")}
               {renderRecords("frp")}
             </TabsContent>
@@ -1161,23 +1187,6 @@ function DonationForm({
   const [subUrls, setSubUrls] = React.useState("")
 
   // ---- frp 捐献：登记一台 frps 服务端 ----
-  const [frpForm, setFrpForm] = React.useState({
-    nodeName: "",
-    region: "",
-    serverAddr: "",
-    serverPort: "7000",
-    portMin: "",
-    portMax: "",
-    maxPorts: "5",
-    authMode: "token_user" as "none" | "token" | "token_user" | "custom",
-    authToken: "",
-    configSample: "",
-    note: "",
-  })
-  const setFrp = (k: string, v: string) =>
-    setFrpForm((prev) => ({ ...prev, [k]: v }))
-
-  // ---- AI 捐献：探测上游 → 勾选模型 ----
   const [probing, setProbing] = React.useState(false)
   const [probe, setProbe] = React.useState<AiProbeResult | null>(null)
   const [selected, setSelected] = React.useState<string[]>([])
@@ -1286,26 +1295,6 @@ function DonationForm({
           models,
           channelType,
           ...(manual ? { manualModels: true } : {}),
-        }
-      } else if (type === "frp") {
-        // 服务端信息：必填字段在服务端还会校验一次，这里先做轻量提示
-        if (!frpForm.serverAddr.trim() || !frpForm.configSample.trim()) {
-          toast.error(t("don.err.frpRequired"))
-          setBusy(false)
-          return
-        }
-        payload = {
-          nodeName: frpForm.nodeName.trim(),
-          region: frpForm.region.trim(),
-          serverAddr: frpForm.serverAddr.trim(),
-          serverPort: Number(frpForm.serverPort) || 7000,
-          portMin: Number(frpForm.portMin) || 0,
-          portMax: Number(frpForm.portMax) || 0,
-          maxPorts: Number(frpForm.maxPorts) || 5,
-          authMode: frpForm.authMode,
-          authToken: frpForm.authToken.trim(),
-          configSample: frpForm.configSample.trim(),
-          note: frpForm.note.trim(),
         }
       } else {
         const urls = subUrls.split("\n").map((s) => s.trim()).filter(Boolean)
@@ -1580,139 +1569,17 @@ function DonationForm({
               )}
             </>
           )}
-          {type === "frp" && (
-            <>
-              <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                {t("don.frp.a")}<span className="text-foreground">{t("don.frp.bold")}</span>{t("don.frp.b")}
-                {t("don.frp.c")}
-                <span className="text-foreground">{t("don.frp.bold2")}</span>，
-                {t("don.frp.d")}
-              </div>
+              {/*
+                内网穿透的 config.yml 表单已删除（2026-10-14）。
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label>{t("don.frp.name")}</Label>
-                  <Input
-                    placeholder={t("don.frp.namePh")}
-                    value={frpForm.nodeName}
-                    onChange={(e) => setFrp("nodeName", e.target.value)}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>{t("don.frp.region")}</Label>
-                  <Input
-                    placeholder={t("don.frp.regionPh")}
-                    value={frpForm.region}
-                    onChange={(e) => setFrp("region", e.target.value)}
-                  />
-                </div>
-              </div>
+                原来的流程是「用户填一份可用的 config.yml → 系统校验 → 人工复核 → 建节点」。
+                现在改成「一键搭节点」：用户在 frp 标签页填自己的公网 IPv4 拿到一条命令，
+                在本机跑完就自动登记 + 自动上架套餐。**服务端参数由脚本自己生成**，
+                用户不再需要提供任何配置 —— 那份表单也就没有存在意义了。
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label>{t("don.frp.addr")}</Label>
-                  <Input
-                    placeholder={t("don.frp.addrPh")}
-                    value={frpForm.serverAddr}
-                    onChange={(e) => setFrp("serverAddr", e.target.value)}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>{t("don.frp.port")}</Label>
-                  <Input
-                    placeholder="7000"
-                    value={frpForm.serverPort}
-                    onChange={(e) => setFrp("serverPort", e.target.value)}
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                <div className="space-y-1.5">
-                  <Label>{t("don.frp.rangeFrom")}</Label>
-                  <Input
-                    placeholder="20000"
-                    value={frpForm.portMin}
-                    onChange={(e) => setFrp("portMin", e.target.value)}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>{t("don.frp.rangeTo")}</Label>
-                  <Input
-                    placeholder="50000"
-                    value={frpForm.portMax}
-                    onChange={(e) => setFrp("portMax", e.target.value)}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>{t("don.frp.maxPorts")}</Label>
-                  <Input
-                    placeholder="5"
-                    value={frpForm.maxPorts}
-                    onChange={(e) => setFrp("maxPorts", e.target.value)}
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label>{t("don.frp.authMode")}</Label>
-                <Select
-                  value={frpForm.authMode}
-                  onValueChange={(v) => setFrp("authMode", v)}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">{t("don.frp.auth.none")}</SelectItem>
-                    <SelectItem value="token">{t("don.frp.auth.token")}</SelectItem>
-                    <SelectItem value="token_user">
-                      {t("don.frp.auth.tokenUser")}
-                    </SelectItem>
-                    <SelectItem value="custom">{t("don.frp.auth.custom")}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              {(frpForm.authMode === "token" || frpForm.authMode === "token_user") && (
-                <div className="space-y-1.5">
-                  <Label>{t("don.frp.authToken")}</Label>
-                  <Input
-                    placeholder={t("don.frp.authTokenPh")}
-                    value={frpForm.authToken}
-                    onChange={(e) => setFrp("authToken", e.target.value)}
-                  />
-                </div>
-              )}
-
-              <div className="space-y-1.5">
-                <Label>{t("don.frp.sample")}</Label>
-                <Textarea
-                  rows={10}
-                  className="font-mono text-xs"
-                  placeholder={
-                    'serverAddr = "firef.cc.cd"\nserverPort = 7000\n\nauth.token = "..."\n\nuser = "..."\n[metadatas]\ntoken = "..."'
-                  }
-                  value={frpForm.configSample}
-                  onChange={(e) => setFrp("configSample", e.target.value)}
-                />
-                <p className="text-xs text-muted-foreground">
-                  {t("don.frp.sampleHintA")}
-                  <b>{t("don.frp.sampleHintB")}</b>
-                  {t("don.frp.sampleHintC")}
-                </p>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label>{t("don.remark")}</Label>
-                <Input
-                  placeholder={t("don.frp.remarkPh")}
-                  value={frpForm.note}
-                  onChange={(e) => setFrp("note", e.target.value)}
-                />
-              </div>
-            </>
-          )}
+                保留一个空分支而不是整块删掉，是为了让 `type` 的三种取值在 JSX 里
+                仍然一一对应，读代码时不会以为漏了 frp。
+              */}
           {type === "proxy" && (
             <>
               <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
@@ -3041,5 +2908,113 @@ function Qoder2ApiLoginDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/**
+ * 「一键捐献服务器节点」（2026-10-14）
+ *
+ * 用户只要填自己的 IPv4，就能拿到一条命令；把命令粘到那台服务器上跑完，
+ * 脚本会自检 frps 和面板都在运行，然后自动登记 + 自动上架默认套餐。
+ *
+ * 为什么把「生成命令」放在前端而不是后端返回一整段文本：
+ *   令牌是**一次性**的、1 小时过期，页面每次点「生成命令」都要重新领。
+ *   后端返回死文本的话，用户刷新页面就拿到一个过期命令，报错还看不懂。
+ */
+function FrpNodeOneClickDonate() {
+  const { t } = useT()
+  const [ip, setIp] = React.useState("")
+  const [cmd, setCmd] = React.useState("")
+  const [busy, setBusy] = React.useState(false)
+  const [err, setErr] = React.useState("")
+
+  const CDN = "https://pub-4362b2869bc5460aa18128ac9126e59c.r2.dev/install"
+
+  const gen = async () => {
+    setErr("")
+    const v = ip.trim()
+    const parts = v.split(".")
+    const okIp =
+      parts.length === 4 &&
+      parts.every((x) => /^\d{1,3}$/.test(x) && Number(x) >= 0 && Number(x) <= 255)
+    if (!okIp) {
+      setErr(t("don.frp1.badIp"))
+      return
+    }
+    setBusy(true)
+    try {
+      const res = await frpApi.issueDonateToken()
+      setCmd(`curl -fsSL ${CDN}/frp-node.sh | bash -s -- ${v} ${res.token}`)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : t("don.frp1.failed"))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(cmd)
+      toast.success(t("don.frp1.copied"))
+    } catch {
+      toast.error(t("don.frp1.copyFailed"))
+    }
+  }
+
+  return (
+    <div className="mb-4 rounded-lg border bg-card p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium">{t("don.frp1.title")}</span>
+        <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[11px] text-primary">
+          {t("don.frp1.badge")}
+        </span>
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">{t("don.frp1.desc")}</p>
+
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <div className="min-w-[200px] flex-1">
+          <label htmlFor="frp-donate-ip" className="text-xs text-muted-foreground">
+            {t("don.frp1.ipLabel")}
+          </label>
+          <Input
+            id="frp-donate-ip"
+            value={ip}
+            onChange={(e) => {
+              setIp(e.target.value)
+              setErr("")
+            }}
+            placeholder="1.2.3.4"
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </div>
+        <Button onClick={() => void gen()} disabled={busy}>
+          {busy ? t("don.frp1.generating") : t("don.frp1.gen")}
+        </Button>
+      </div>
+      {err ? <p className="mt-2 text-xs text-destructive">{err}</p> : null}
+
+      {cmd ? (
+        <div className="mt-3 space-y-2">
+          <p className="text-xs text-muted-foreground">{t("don.frp1.howto")}</p>
+          <div className="flex items-start gap-2">
+            <pre className="min-w-0 flex-1 overflow-x-auto rounded-md border bg-muted/40 p-2 text-xs">
+              <code>{cmd}</code>
+            </pre>
+            <Button variant="outline" size="sm" onClick={() => void copy()}>
+              {t("don.frp1.copy")}
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">{t("don.frp1.note")}</p>
+          <details className="text-xs text-muted-foreground">
+            <summary className="cursor-pointer">{t("don.frp1.winTitle")}</summary>
+            <p className="mt-1">{t("don.frp1.winDesc")}</p>
+            <pre className="mt-1 overflow-x-auto rounded-md border bg-muted/40 p-2">
+              <code>{`irm ${CDN}/frp-node.ps1 -OutFile $env:TEMP\\frp-node.ps1\npowershell -ExecutionPolicy Bypass -File $env:TEMP\\frp-node.ps1 -Ip ${ip.trim() || "你的IPv4"} -Token ${cmd.split(" ").pop()}`}</code>
+            </pre>
+          </details>
+        </div>
+      ) : null}
+    </div>
   )
 }

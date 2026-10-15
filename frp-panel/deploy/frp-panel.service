@@ -1,0 +1,42 @@
+# DoulorCloud frp 面板 —— systemd unit
+#
+# 安装：
+#   sudo cp deploy/frp-panel.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now frp-panel
+#
+# ⚠️ 部署时**必须先停掉旧面板**（frps-panel）—— 两者都用 7200 端口，会抢。
+#    旧面板若由别的方式拉起来（如宝塔、nohup），先确认它不会自动重启。
+
+[Unit]
+Description=DoulorCloud frp panel (replaces frps-panel)
+Documentation=file:///home/frp/frppanel-new/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/frp/frppanel-new
+ExecStart=/usr/bin/python3 /home/frp/frppanel-new/panel.py --config /home/frp/frppanel-new/panel.json
+
+# 这个服务是「授权关口」，异常退出必须拉起来；否则 frps 调不到插件会 fail-closed，
+# 所有用户都连不上。
+Restart=always
+RestartSec=2
+
+# 日志进 journald；面板自己也会写 panel.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=frp-panel
+
+# --- 加固 ---
+# 只监听本机、不需要任何特权端口
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/home/frp/frppanel-new
+
+[Install]
+WantedBy=multi-user.target

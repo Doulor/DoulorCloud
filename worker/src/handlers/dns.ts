@@ -1,11 +1,14 @@
 import { ApiError, json } from "../http"
 import { uuid } from "../crypto"
-import { requireUser } from "../auth"
+import { requireUser, isPrivileged, type UserRow } from "../auth"
+import { requireFeature, userPermissions } from "../permissions"
+import { dnsAccessFor, dnsAccessCovers, type DnsAccess } from "./dns-rental"
 import { guardRateLimit } from "../ratelimit"
 import { isAdminApiRequest } from "../api-source"
 import { isApiRequest } from "../api-source"
 import { requireOwnedDomain, assertFqdnOwned } from "../ownership"
-import { zoneIdForFqdn } from "../root-domains"
+import { zoneIdForFqdn, pickRootDomain, rootDomainFor } from "../root-domains"
+import { getSettingNumber } from "../settings"
 import {
   cfCreateDnsRecord,
   cfUpdateDnsRecord,
@@ -36,6 +39,120 @@ interface DnsRow {
 }
 
 const ALLOWED_TYPES = new Set(["A", "AAAA", "CNAME", "TXT", "MX", "SRV"])
+
+/**
+ * 每用户 DNS 记录数上限。
+ *
+ * 取值的优先级与 `handlers/subdomains.ts` 的一级子域名配额**完全一致**：
+ *   用户级覆盖（`users.max_dns_records`，迁移 0161）> 全局设置
+ *   （`app_settings.dns_records_per_user`，默认 10）。
+ *
+ * 为什么要用户级覆盖：全局那条线是给所有人定的，站长经常只需要给**某一个人**
+ * 放宽（他确实要用 30 条）或收紧（他在刷）。没有覆盖列的话，唯一办法是抬高
+ * 全局上限 —— 那等于对全站放宽。
+ *
+ * 返回 `null` 表示**不限**，只有两种情况：
+ *   · 管理员 / 站长（`isPrivileged`）—— 他们本来就要能替任何账号排查、修复记录，
+ *     卡住管理员只会让「某个用户被上限卡死」这类故障没法现场处理；
+ *   · 管理员 Key 的公开 API（`isAdminApiRequest`）—— 与站内其它限额一致
+ *     （「管理员 Key 不限速不限配额」，2026-10-07；见 api-source.ts）。
+ *
+ * ⚠️ 2026-10-15 起本函数**导出**，并被 handlers/dns-rental.ts 的
+ * `GET /api/dns/rental` 复用（价目卡上要写「这个账号每用户能建几条记录」）。
+ * 这是**刻意**让 dns.ts ⇄ dns-rental.ts 形成一处循环 import（反向那条是本文件
+ * 顶部引 dns-rental.ts 的 `dnsAccessFor`）：
+ * 上限只能有**一处**实现，各写一份迟早出现「价目卡说 3 条、DNS 页说 10 条」
+ * 这种谁也说不清哪个对的账（管理员改 `users.max_dns_records` 后尤其明显）。
+ * ESM 的函数声明会被提升，两边的调用都发生在请求处理期（不是模块求值期），
+ * 所以这个环不会读到未初始化的绑定。
+ */
+export async function dnsRecordLimit(
+  env: Env,
+  request: Request,
+  user: UserRow
+): Promise<number | null> {
+  if (isAdminApiRequest(request) || isPrivileged(user.role)) return null
+  // 覆盖列是迁移 0161 才加的：老环境（未执行迁移）里它是 undefined，
+  // 此时按「没有覆盖」处理、回落全局设置，而不是误判成 0 把所有人锁死。
+  if (typeof user.max_dns_records === "number") return user.max_dns_records
+  return await getSettingNumber(env, "dns_records_per_user")
+}
+
+/**
+ * DNS 解析的「能力闸」（2026-10-14 改造）。
+ *
+ * 改造前这里只有一条路：`requireFeatureUser(env, request, "dns")` —— 权限位为 false
+ * 就 403。现在 DNS 改成了**积分租用**（与内网穿透同一套做法），于是闸门变成三档
+ * （权限位 / 免权限访问 / 有效租约），判定细节全在 handlers/dns-rental.ts 里。
+ *
+ * 为什么把「模式为 none」的那一档仍然交给 `requireFeature` 抛：
+ *   · 错误码与文案与改造前**一模一样**（`FEATURE_NOT_PERMITTED`），
+ *     已有的接口消费者、API 文档、以及 dns-permission.test.ts 的断言都不必改；
+ *   · 「没有任何权限」这件事没变，变的只是「有权限」的判定多了一条租约路径。
+ *
+ * ⚠️ 所有四个接口（列表 / 建 / 改 / 删）都必须先过这里，且**必须排在 404 之前** ——
+ *    否则无权用户能靠错误码差异探测「某条记录存不存在」
+ *    （这条口径是 dns-permission.test.ts 明确钉住的）。
+ */
+async function requireDnsAccess(env: Env, user: UserRow): Promise<DnsAccess> {
+  const access = await dnsAccessFor(env, user)
+  if (access.mode === "none") requireFeature(userPermissions(user), "dns")
+  return access
+}
+
+/**
+ * 该 fqdn 所在根域是否被当前档位覆盖；不覆盖则 403。
+ *
+ * `allowExpired` 只在删除路径上传 true（理由见 dns-rental.ts 的 DnsAccess 注释：
+ * 过期用户腾不掉的记录会永久占着 CF 的 zone 配额，得给他一个清理出口）。
+ */
+async function assertDnsRootCovered(
+  env: Env,
+  access: DnsAccess,
+  fqdn: string,
+  opts: { allowExpired?: boolean } = {}
+): Promise<void> {
+  if (access.mode === "full") return
+  const root = (await rootDomainFor(env, fqdn))?.name ?? ""
+  if (dnsAccessCovers(access, root, opts)) return
+  const where = root || "该根域"
+  if (access.mode === "expired") {
+    throw new ApiError(
+      403,
+      `你的 DNS 解析租用已到期，${where} 下不能再操作解析记录。续期后即可继续使用。`,
+      "DNS_RENTAL_REQUIRED"
+    )
+  }
+  throw new ApiError(
+    403,
+    `${where} 的 DNS 解析需要先租用（按年计费，见「域名 → DNS 解析」的价格），或联系管理员开通权限。`,
+    "DNS_RENTAL_REQUIRED"
+  )
+}
+
+/**
+ * 统计该用户名下的 DNS 记录数 —— **跨他名下所有 domain / subdomain**。
+ *
+ * 为什么按 `domains` 归属统计、而不是像列表页那样 JOIN `subdomains`：
+ * `dns_records.subdomain_id` 可能是空的（0003 迁移之前的老数据），只认子域名会漏算
+ * 这些行；而上限要对齐的是「这个用户在 CF zone 里到底占了多少条记录」，漏算 = 上限放松。
+ *
+ * 为什么排除 `banned_at` 不为空的行：那些记录已经**从 CF 上删掉**（只留本地台账，
+ * 见 migrations/0134），既不占 zone 配额，用户在界面上也看不到它们
+ * （listDns 把它们过滤掉了）。算进来的话，被处置过的用户会凭空少掉几条额度，
+ * 却又找不到任何东西可删 —— 死结。
+ */
+async function countUserDnsRecords(env: Env, userId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS c
+       FROM dns_records r
+       JOIN domains d ON d.id = r.domain_id
+      WHERE d.user_id = ? AND r.banned_at IS NULL`
+  )
+    .bind(userId)
+    .first<{ c: number }>()
+  return Number(row?.c ?? 0)
+}
 
 /**
  * SRV 记录的端口/优先级/权重上限（RFC 2782 + CF 的字段约束：0–65535）。
@@ -193,8 +310,13 @@ function relativeName(fqdn: string, rootDomain: string): string {
 }
 
 // GET /api/dns?subdomainId=xxx —— DNS 记录列表
+//
+// 权限闸与另外三个接口一致（读接口也要卡）：只读接口同样不能是后门 ——
+// 权限一律服务端强制，绝不靠前端隐藏入口（仓库既有约定）。
+// 2026-10-14 起闸门多了「有效租约」这一档（见 requireDnsAccess）。
 export async function listDns(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
+  await requireDnsAccess(env, user)
   const url = new URL(request.url)
   const subdomainId = url.searchParams.get("subdomainId")
 
@@ -261,7 +383,20 @@ export async function listDns(env: Env, request: Request): Promise<Response> {
     })
   }
 
-  return json({ records })
+  /**
+   * 顺带下发「已用 / 上限」，供前端在选项卡顶部显示用量、并在到顶时禁用「新建记录」。
+   *
+   * 为什么由服务端算、而不是让前端数 `records.length`：上限是**跨该用户全部域名**
+   * 的（见 countUserDnsRecords），而这里下发的 records 只是**当前选中子域名**的那一批
+   * —— 前端本地数出来的数字会随选中项跳变，跟服务端真正卡的那条线对不上。
+   * 跟着列表一起下发，则每次新建/删除后的重载都会同步刷新，不需要额外接口或额外请求。
+   *
+   * `limit === null` = 不限（管理员 / 管理员 Key），前端据此显示「不限」而不是假上限。
+   */
+  const limit = await dnsRecordLimit(env, request, user)
+  const used = await countUserDnsRecords(env, user.id)
+
+  return json({ records, dnsUsage: { used, limit } })
 }
 
 /** 请求体里 SRV 相关字段的形状（create / update 共用） */
@@ -324,15 +459,54 @@ function normalizeSrv(
 }
 
 export async function createDns(env: Env, request: Request): Promise<Response> {
+  // 闸一 · 权限：没有「DNS 解析」权限、也没有有效租约 → 403。
+  //
+  // 2026-10-14 起的档位（细节见 requireDnsAccess）：
+  //   · full    —— 权限位 / 免权限访问 / 管理员，所有根域都行；
+  //   · rented  —— 只覆盖自己租过的根域，**按记录的根域判**（见下方 assertDnsRootCovered）；
+  //   · expired —— 只剩过期租约：连建都不许（删除仍放行，那是腾配额的手段）。
   const user = await requireUser(env, request)
+  const access = await requireDnsAccess(env, user)
+  if (access.mode === "expired") {
+    throw new ApiError(
+      403,
+      "你的 DNS 解析租用已到期，续期后才能新建记录（已建好的记录不受影响）",
+      "DNS_RENTAL_REQUIRED"
+    )
+  }
   // ⚠️ 2026-09-26 审计：每次调用都会真发一次 Cloudflare API 请求并写一条
   // audit_logs，原先零限流 ⇒ 脚本化调用可刷爆平台 CF 配额。
   // 管理员 Key 的公开 API 调用不限速（2026-10-07）
   if (!isAdminApiRequest(request)) {
     await guardRateLimit(env, `dns:create:user:${user.id}`, 30, 60, "DNS 操作过于频繁，请稍后再试")
   }
+  // 闸二 · 数量：每用户记录数上限（权限之后、任何 CF 调用之前）。
+  // 先数量后校验请求体的好处：到顶的用户拿到的是一条**说清为什么**的错误，
+  // 而不是「名称和内容不能为空」这种无关的报错；也不会白白消耗一次 CF API 调用
+  // —— 真撞到 CF 那边，回来的是 zone 级的 `81045`，比这里难懂得多。
+  const limit = await dnsRecordLimit(env, request, user)
+  if (limit !== null) {
+    const used = await countUserDnsRecords(env, user.id)
+    if (used >= limit) {
+      throw new ApiError(
+        400,
+        `DNS 记录数已达上限（${limit} 条），请先删除不再使用的记录`,
+        "DNS_RECORD_LIMIT"
+      )
+    }
+  }
   const body = (await request.json()) as {
     subdomainId?: string
+    /**
+     * 顶级记录（挂在 '@' 主域名下）想建在**哪个根域**下，省略 = 沿用现状。
+     *
+     * 为什么要有它（2026-10-14 站长要求）：DNS 改成按根域定价的积分租用后，
+     * 「我这个域名（比如 xxx.7u.nz）下的解析」必须能**明着选**，而不是只能
+     * 悄悄用注册时分的那个默认根域。前端从 `/api/dns/rental` 拿到可选根域
+     * （已按权限 + 租约筛过），后端在这里**再校验一次** —— 前端隐藏只是省事，
+     * 真正的闸必须在服务端（仓库既有约定）。
+     */
+    rootDomain?: string
     name?: string
     type?: string
     content?: string
@@ -350,6 +524,13 @@ export async function createDns(env: Env, request: Request): Promise<Response> {
   if (!domain) {
     throw new ApiError(400, "尚未分配域名", "NO_DOMAIN")
   }
+
+  // 根域闸：`pickRootDomain` 会把「不认识的域」「已停用」「requires_feature 没解锁」
+  // 三种情况全部挡掉（400 / 400 / 403），与建子域名走的是同一个函数 ——
+  // doulor.cn 需要 `doulor` 权限这件事因此不可能在两条路径上出现不同口径。
+  const chosenRoot = body.rootDomain
+    ? await pickRootDomain(env, body.rootDomain, userPermissions(user))
+    : null
 
   // SRV 的 content 由 service/proto/weight/port/target 推导，用户不直接填；
   // 其余类型的 content 是必填的。
@@ -384,9 +565,33 @@ export async function createDns(env: Env, request: Request): Promise<Response> {
   const priority = srv ? srv.priority : type === "MX" ? body.priority ?? 10 : undefined
 
   // 记录挂在子域名下时，fqdn 以该子域名为基准（xxx.doulor.cn → 前缀.xxx.doulor.cn）
+  //
+  // ⚠️ 与改造前**完全一致**：base 只由「选中的子域名」决定。
+  //    `rootDomain` 不是用来改 base 的（那会造出用户并不拥有的 fqdn，
+  //    assertFqdnOwned 会直接 403），它的作用是**声明这条记录应该落在哪个根域**，
+  //    由后端校验「声明的根域」与「子域名实际所属的根域」是否一致 —— 见下。
   const base = subdomain.name === "@" ? domain.name : subdomain.fqdn
+  if (chosenRoot) {
+    // 2026-10-14：DNS 改成按根域定价后，前端会把「我选的是哪个根域」一起发上来。
+    // 它必须是**声明**而不是**指令** —— 两者不一致说明前端选择器与实际子域名
+    // 对不上（前端版本旧 / 被人为构造），这时宁可 400 也不要静默按子域名建，
+    // 否则用户会在 A 域下建出记录却以为建在 B 域，账单与事实对不上。
+    const subRoot = (await rootDomainFor(env, subdomain.fqdn))?.name ?? ""
+    if (chosenRoot.name !== subRoot) {
+      throw new ApiError(
+        400,
+        `${subdomain.fqdn} 属于 ${subRoot || "另一个根域"}，不能把它的记录归到 ${chosenRoot.name} 下`,
+        "ROOT_DOMAIN_MISMATCH"
+      )
+    }
+  }
   const fqdn = name === "@" || name === "" ? base : `${name}.${base}`
   await assertFqdnOwned(env, user.id, fqdn)
+
+  // 闸三 · 租用覆盖：记录最终落在哪个根域，就必须对那个根域有额度。
+  // 放在 fqdn 定下来**之后**：只有这时才知道这条记录到底属于哪个域。
+  // （管理员 / 权限位持有者走 full 档，直接放行，不受租期影响。）
+  await assertDnsRootCovered(env, access, fqdn)
 
   const ttl = body.ttl ?? 1
   const proxied =
@@ -424,6 +629,12 @@ export async function createDns(env: Env, request: Request): Promise<Response> {
 
   const id = uuid()
   const now = new Date().toISOString()
+  // ⚠️ `domain_id` 一律写用户**主域名**那一行，即便这条记录的 fqdn 落在另一个根域下
+  // （例如主域名是 paji.tyu.me、记录建在 paji.7u.nz）—— 这是改造前就有的行为：
+  // dns_records 的归属事实由 `fqdn` 承担（zone 也是按 fqdn 的后缀解析的），
+  // 而 domain_id 只用于「这条记录属于谁」的归属校验与用量统计。
+  // 改成按根域去建/找 domains 行会引入一整套「同一个用户多行 domains」的数据模型，
+  // 而 subdomains 表本来就不挂 domain_id —— 那是一次独立的迁移，不该夹带在这里。
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO dns_records
@@ -463,7 +674,10 @@ export async function createDns(env: Env, request: Request): Promise<Response> {
 }
 
 export async function updateDns(env: Env, request: Request, id: string): Promise<Response> {
+  // 改记录同样属「DNS 解析」权限范围；但**不做数量检查** —— 修改不会新增记录，
+  // 拿上限去卡修改只会让「已到顶的用户连改个 IP 都改不了」。
   const user = await requireUser(env, request)
+  const access = await requireDnsAccess(env, user)
   // 管理员 Key 的公开 API 调用不限速（2026-10-07）
   if (!isAdminApiRequest(request)) {
     await guardRateLimit(env, `dns:update:user:${user.id}`, 30, 60, "DNS 操作过于频繁，请稍后再试")
@@ -564,6 +778,12 @@ export async function updateDns(env: Env, request: Request, id: string): Promise
   const fqdn = name === "@" || name === "" ? base : `${name}.${base}`
   await assertFqdnOwned(env, user.id, fqdn)
 
+  // 租用覆盖：既看记录**现在**在哪个根域（你得有资格动它），也看**改完**落在哪 ——
+  // 只查前者的话，用户可以把记录改名搬到没租的根域下（base 由 subdomain 决定，
+  // 但 name 是用户随便填的）。两边都查才没有缺口。
+  await assertDnsRootCovered(env, access, existing.fqdn)
+  await assertDnsRootCovered(env, access, fqdn)
+
   if (existing.cf_id) {
     await cfUpdateDnsRecord(env, await zoneIdForFqdn(env, fqdn), existing.cf_id, {
       type,
@@ -606,7 +826,15 @@ export async function updateDns(env: Env, request: Request, id: string): Promise
 }
 
 export async function deleteDns(env: Env, request: Request, id: string): Promise<Response> {
+  // 删除同样只要权限、不看数量 —— 恰恰相反，删记录是用户腾出额度的手段，
+  // 若在到顶时把删除也卡住，用户就彻底出不来了。
+  //
+  // 2026-10-14：租用**到期**的用户也放行删除（`allowExpired`）。理由与上面那句同源 ——
+  // 他删不掉的记录会永久占着 Cloudflare 的 zone 配额（每 zone 200 条，全站共用几个域），
+  // 而管理员并不知道哪条是他不再需要的。锁住删除只会把成本转嫁给全站。
+  // ⚠️ 只有「曾经租过这个根域」的人有这条出口；完全没权限的人仍然 403。
   const user = await requireUser(env, request)
+  const access = await requireDnsAccess(env, user)
   // 管理员 Key 的公开 API 调用不限速（2026-10-07）
   if (!isAdminApiRequest(request)) {
     await guardRateLimit(env, `dns:delete:user:${user.id}`, 30, 60, "DNS 操作过于频繁，请稍后再试")
@@ -621,6 +849,9 @@ export async function deleteDns(env: Env, request: Request, id: string): Promise
   }
 
   await requireOwnedDomain(env, user.id, existing.domain_id)
+  // 删除路径放行「已过期」档位（理由见本函数顶部注释）：删自己的旧记录是腾配额，
+  // 不是新增能力。完全没租过 / 没权限的人在 requireDnsAccess 那一步就已经 403 了。
+  await assertDnsRootCovered(env, access, existing.fqdn, { allowExpired: true })
 
   if (existing.cf_id) {
     // ⚠️ 必须用**记录自己的 fqdn** 判 zone，不能用「用户主域的名字」：

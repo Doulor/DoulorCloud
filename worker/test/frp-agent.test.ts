@@ -147,7 +147,7 @@ describe("frp-agent 通道", () => {
   it("签名正确时下发期望状态，并声明本站账号前缀", async () => {
     const nodeId = await seedNode()
     const user = await makeUser()
-    const frpUser = `dcfrp_${uuid().slice(0, 8)}`
+    const frpUser = `DC_${uuid().slice(0, 8)}`
     await seedSubscription({ nodeId, userId: user.id, frpUser, ports: [30001, 30002] })
 
     const res = await agentCall({ method: "GET", path: `/frp/agent/desired?node=${nodeId}` })
@@ -157,7 +157,7 @@ describe("frp-agent 通道", () => {
     expect(body.ok).toBe(true)
     expect(body.node.id).toBe(nodeId)
     // agent 靠这个前缀区分「本站创建的账号」与面板里 46 个历史账号
-    expect(body.userPrefix).toBe("dcfrp_")
+    expect(body.userPrefix).toBe("DC_")
     expect(body.revision).toMatch(/^[0-9a-f]{16}$/)
 
     const mine = body.users.find((u) => u.user === frpUser)
@@ -171,7 +171,7 @@ describe("frp-agent 通道", () => {
   it("已过期的订阅以 enable=false 下发（停用而非删号）", async () => {
     const nodeId = await seedNode()
     const user = await makeUser()
-    const frpUser = `dcfrp_${uuid().slice(0, 8)}`
+    const frpUser = `DC_${uuid().slice(0, 8)}`
     await seedSubscription({
       nodeId,
       userId: user.id,
@@ -239,7 +239,7 @@ describe("frp-agent 通道", () => {
   it("report 回写同步状态与心跳（管理端「期望 vs 实际」观测点）", async () => {
     const nodeId = await seedNode()
     const user = await makeUser()
-    const frpUser = `dcfrp_${uuid().slice(0, 8)}`
+    const frpUser = `DC_${uuid().slice(0, 8)}`
     await seedSubscription({ nodeId, userId: user.id, frpUser, ports: [30004] })
 
     const payload = JSON.stringify({
@@ -276,7 +276,7 @@ describe("frp-agent 通道", () => {
   it("report 里 agent 报错的账号被记为 error 并保留原因", async () => {
     const nodeId = await seedNode()
     const user = await makeUser()
-    const frpUser = `dcfrp_${uuid().slice(0, 8)}`
+    const frpUser = `DC_${uuid().slice(0, 8)}`
     await seedSubscription({ nodeId, userId: user.id, frpUser, ports: [30005] })
 
     const payload = JSON.stringify({
@@ -298,7 +298,7 @@ describe("frp-agent 通道", () => {
   it("report 里非本站前缀的账号一律忽略（绝不碰别人的账号）", async () => {
     const nodeId = await seedNode()
     const user = await makeUser()
-    const frpUser = `dcfrp_${uuid().slice(0, 8)}`
+    const frpUser = `DC_${uuid().slice(0, 8)}`
     await seedSubscription({ nodeId, userId: user.id, frpUser, ports: [30006] })
 
     const payload = JSON.stringify({

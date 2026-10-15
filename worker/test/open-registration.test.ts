@@ -93,11 +93,14 @@ describe("限时开放注册", () => {
     const row = await userRow(u)
     // ⚠️ 关键：绝不能是 NULL（NULL = 全开）
     expect(row?.permissions).not.toBeNull()
+    // 键要跟 `permissions.ts` 的 FEATURES 保持一一对应（新增模块时这里会红）——
+    // 逐键写死才是这个用例的意义：漏一个键就等于「该模块按缺键兜底」，而不是 false。
     expect(JSON.parse(row!.permissions!)).toEqual({
       r2: true,
       ai: false,
       proxy: false,
       doulor: false,
+      dns: false,
     })
     // 无码注册不该挂任何邀请码
     expect(row?.invite_code_id).toBeNull()
@@ -146,6 +149,7 @@ describe("限时开放注册", () => {
       ai: true,
       proxy: false,
       doulor: false,
+      dns: false,
     })
     expect(row?.invite_code_id).not.toBeNull()
 
@@ -173,6 +177,7 @@ describe("限时开放注册", () => {
       ai: false,
       proxy: false,
       doulor: false,
+      dns: false,
     })
   })
 
@@ -267,6 +272,7 @@ describe("开放注册期间：不含权限的邀请码不消耗次数", () => {
       ai: false,
       proxy: false,
       doulor: false,
+      dns: false,
     })
     expect(await usedCount(code)).toBe(0)
   })

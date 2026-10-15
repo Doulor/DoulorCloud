@@ -30,6 +30,16 @@ const SHOT_TIMEOUT_MS = 25_000
 const MAX_HTML_CHARS = 1_500_000
 /** 默认日闸：8 分钟（免费档 10 分钟/天，留 2 分钟余量） */
 const DEFAULT_DAILY_MS = 8 * 60 * 1000
+/**
+ * 设备档位 → 视口（多断点截图/体检用）。
+ * 手机/平板是「一眼就看出问题」的两档：只截桌面会漏掉塌掉/溢出/挤成一团。
+ */
+const DEVICE_VIEWPORTS: Record<string, { width: number; height: number }> = {
+  desktop: { width: 1280, height: 800 },
+  mobile: { width: 390, height: 844 },
+  tablet: { width: 820, height: 1180 },
+}
+
 /** 默认月闸：9 小时（付费档含 10 小时/月，留 1 小时余量 ⇒ 不会按量付费） */
 const DEFAULT_MONTHLY_MS = 9 * 60 * 60 * 1000
 
@@ -123,6 +133,7 @@ export async function labScreenshot(env: Env, request: Request): Promise<Respons
 
   const body = (await request.json().catch(() => null)) as {
     html?: unknown
+    device?: unknown
     width?: unknown
     height?: unknown
     fullPage?: unknown
@@ -158,8 +169,9 @@ export async function labScreenshot(env: Env, request: Request): Promise<Respons
     )
   }
 
-  const width = Math.min(Math.max(Number(body?.width) || 1280, 320), 2560)
-  const height = Math.min(Math.max(Number(body?.height) || 800, 240), 2000)
+  const dev = DEVICE_VIEWPORTS[String(body?.device ?? "").toLowerCase()]
+  const width = Math.min(Math.max(Number(body?.width) || dev?.width || 1280, 320), 2560)
+  const height = Math.min(Math.max(Number(body?.height) || dev?.height || 800, 240), 2000)
   const selector = typeof body?.selector === "string" && body.selector.trim() ? body.selector : undefined
 
   let res: Response
@@ -235,8 +247,11 @@ export async function labInspect(env: Env, request: Request): Promise<Response> 
   }
   const body = (await request.json().catch(() => null)) as {
     html?: unknown
+    device?: unknown
     width?: unknown
     height?: unknown
+    /** 交互步骤：点击 / 输入 / 等待 / 滚动（见下面的执行器） */
+    steps?: unknown
   } | null
   const html = typeof body?.html === "string" ? body.html : ""
   if (!html.trim()) throw new ApiError(400, "缺少 html", "INVALID_HTML")
@@ -258,8 +273,9 @@ export async function labInspect(env: Env, request: Request): Promise<Response> 
     )
   }
 
-  const width = Math.min(Math.max(Number(body?.width) || 1280, 320), 2560)
-  const height = Math.min(Math.max(Number(body?.height) || 800, 240), 2000)
+  const dev = DEVICE_VIEWPORTS[String(body?.device ?? "").toLowerCase()]
+  const width = Math.min(Math.max(Number(body?.width) || dev?.width || 1280, 320), 2560)
+  const height = Math.min(Math.max(Number(body?.height) || dev?.height || 800, 240), 2000)
 
   const puppeteer = (await import("@cloudflare/puppeteer")).default
   const started = Date.now()
@@ -273,7 +289,12 @@ export async function labInspect(env: Env, request: Request): Promise<Response> 
         on: (ev: string, cb: (a: unknown) => void) => void
         setViewport: (v: { width: number; height: number }) => Promise<void>
         setContent: (h: string, o: Record<string, unknown>) => Promise<void>
-        evaluate: <T>(fn: () => T) => Promise<T>
+        evaluate: <T>(fn: (arg?: unknown) => T, arg?: unknown) => Promise<T>
+        $: (sel: string) => Promise<{
+          click: () => Promise<void>
+          type: (t: string) => Promise<void>
+        } | null>
+        keyboard: { press: (k: string) => Promise<void> }
       }>
     }
     const page = await b.newPage()
@@ -349,8 +370,88 @@ export async function labInspect(env: Env, request: Request): Promise<Response> 
       }
     })
 
+    /**
+     * 🔴 **交互步骤**（#1 页面交互）：让 agent 不只看，还能**点/输入/等待**。
+     * 支持：
+     *   { type: "click",   selector }      点一个元素
+     *   { type: "type",    selector, text } 往输入框里打字
+     *   { type: "press",   key }           按一个键（如 Enter）
+     *   { type: "wait",    ms }            等一会儿（等异步渲染/请求）
+     *   { type: "scroll",  y }             滚到某个位置
+     * ⚠️ 每步都**单独捕获异常**：一步失败不能让整份报告丢掉 —— 失败信息本身
+     *    就是最有价值的诊断（比如"选择器没匹配到"）。
+     */
+    const stepLines: string[] = []
+    const rawSteps = Array.isArray(body?.steps) ? body.steps.slice(0, 20) : []
+    for (const raw of rawSteps) {
+      const st = (raw ?? {}) as Record<string, unknown>
+      const type = String(st.type ?? "")
+      const sel = typeof st.selector === "string" ? st.selector : ""
+      const label = type + (sel ? ` ${sel}` : "")
+      try {
+        if (type === "click") {
+          if (!sel) throw new Error("缺少 selector")
+          const el = await page.$(sel)
+          if (!el) throw new Error("选择器没匹配到元素")
+          await el.click()
+          stepLines.push(`· ✅ 点击 ${sel}`)
+        } else if (type === "type") {
+          if (!sel) throw new Error("缺少 selector")
+          const el = await page.$(sel)
+          if (!el) throw new Error("选择器没匹配到元素")
+          await el.type(String(st.text ?? ""))
+          stepLines.push(`· ✅ 在 ${sel} 输入「${String(st.text ?? "").slice(0, 40)}」`)
+        } else if (type === "press") {
+          await page.keyboard.press(String(st.key ?? "Enter"))
+          stepLines.push(`· ✅ 按键 ${String(st.key ?? "Enter")}`)
+        } else if (type === "wait") {
+          const ms = Math.min(Math.max(Number(st.ms) || 500, 0), 5000)
+          await new Promise((r) => setTimeout(r, ms))
+          stepLines.push(`· ✅ 等待 ${ms}ms`)
+        } else if (type === "scroll") {
+          const y = Number(st.y) || 0
+          await page.evaluate((yy: unknown) => {
+            ;(globalThis as unknown as { scrollTo: (a: number, b: number) => void }).scrollTo(
+              0,
+              Number(yy) || 0
+            )
+          }, y)
+          stepLines.push(`· ✅ 滚动到 y=${y}`)
+        } else {
+          stepLines.push(`· ⚠️ 不认识的步骤「${type}」（支持 click/type/press/wait/scroll）`)
+        }
+      } catch (e) {
+        stepLines.push(`· 🔴 ${label} 失败：${String((e as Error)?.message ?? e).slice(0, 120)}`)
+      }
+    }
+    // 交互后再抓一次 console 与布局（很多问题只在交互后才出现）
+    const after = await page.evaluate(() => {
+      const g = globalThis as unknown as {
+        document: {
+          documentElement: { scrollWidth: number; clientWidth: number }
+          body: { innerText: string } | null
+        }
+      }
+      const de = g.document.documentElement
+      return {
+        scrollWidth: de.scrollWidth,
+        clientWidth: de.clientWidth,
+        textLen: (g.document.body?.innerText ?? "").length,
+      }
+    })
+
     const lines: string[] = []
     lines.push(`页面体检（视口 ${m.viewport}）`)
+    if (stepLines.length) {
+      lines.push(`· 交互步骤（${stepLines.length} 步）：`)
+      stepLines.forEach((x) => lines.push(`  ${x}`))
+      const over2 = after.scrollWidth - after.clientWidth
+      lines.push(
+        over2 > 2
+          ? `· 🔴 交互后出现**横向溢出 ${over2}px**`
+          : `· ✅ 交互后没有横向溢出（正文 ${after.textLen} 字）`
+      )
+    }
     const over = m.scrollWidth - m.clientWidth
     lines.push(
       over > 2

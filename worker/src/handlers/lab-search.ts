@@ -21,6 +21,7 @@ import { audit as recordAudit, getSetting, updateSettings } from "../settings"
 import { decryptSecret, encryptSecret } from "../crypto"
 import { applyPoints, getPointsBalance } from "../points"
 import type { Env } from "../env"
+import { isPrivateOrLocalHost } from "../url-guard"
 
 /** 一次最多返回几条搜索结果（Tavily 上限 20；5 条足够模型判断，也省 token） */
 const MAX_RESULTS = 5
@@ -511,6 +512,12 @@ export async function checkSearchQuota(env: Env, request: Request): Promise<Resp
  * 这一点在注释里写清楚，不能假装万无一失。
  */
 export function assertSafeUpstreamUrl(raw: string): URL {
+  // 🔴 统一到 url-guard.ts 那一份（2026-10-14 安全审计）。
+  //
+  // 原先这里自己维护了一份黑名单，与 url-guard.ts 的那份**不一致**：
+  // 这里漏了 100.64.0.0/16（运营商级 NAT，CGNAT），而 url-guard 那份有。
+  // 同一件事维护两份实现，迟早只修一边 —— 这次就是。
+  // 现在只有一处实现（url-guard.ts:isPrivateOrLocalHost），改一处即全局生效。
   let u: URL
   try {
     u = new URL(raw)
@@ -521,23 +528,8 @@ export function assertSafeUpstreamUrl(raw: string): URL {
     throw new ApiError(400, "只支持 http/https 地址", "INVALID_URL")
   }
   const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "")
-  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") {
-    throw new ApiError(400, "不能填本机地址", "BLOCKED_HOST")
-  }
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
-  if (m) {
-    const a = Number(m[1])
-    const b = Number(m[2])
-    const blocked =
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      a >= 224 ||
-      (a === 192 && b === 168) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      // 169.254.0.0/16：链路本地，云厂商元数据端点就在这（169.254.169.254）
-      (a === 169 && b === 254)
-    if (blocked) throw new ApiError(400, "不能填内网地址", "BLOCKED_HOST")
+  if (isPrivateOrLocalHost(host)) {
+    throw new ApiError(400, "不能填内网地址", "BLOCKED_HOST")
   }
   return u
 }

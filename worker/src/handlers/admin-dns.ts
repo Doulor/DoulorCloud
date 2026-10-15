@@ -26,9 +26,20 @@ import {
   cfListDnsRecords,
   cfUpdateDnsRecord,
 } from "../cloudflare"
-import { allRootDomainNames, zoneIdForFqdn } from "../root-domains"
+import { allRootDomainNames, zoneIdForFqdn, listRootDomains, resetRootDomainCache } from "../root-domains"
 import { attachCustomDomain, detachCustomDomain } from "../custom-domain"
-import { audit as recordAudit } from "../settings"
+import { audit as recordAudit, getSettingNumber } from "../settings"
+import {
+  featurePermissionSql,
+  hasFeature,
+  notWhitelistedGuard,
+  parsePermissions,
+} from "../permissions"
+import {
+  grantDnsRental,
+  listAllDnsRentals,
+  toPublicDnsRental,
+} from "./dns-rental"
 import { likeContains } from "../sql-like"
 import {
   assessRecord,
@@ -999,4 +1010,439 @@ export async function rebindCustomDomain(env: Env, request: Request): Promise<Re
   )
 
   return json({ ok: true, dnsCreated: attached.dnsCreated, detached })
+}
+
+/* --------------------------------------------------------------------------
+ * 根域与租用（2026-10-14）
+ *
+ * DNS 改成「按根域定价的积分租用」之后，站长要回答的问题变成了三个，
+ * 而且必须能在**一个界面**里回答完：
+ *   1. 每个根域卖多少钱、开没开、CF 配额用掉多少 → 一眼看容量与定价；
+ *   2. 具体某个人是「免费开通」还是「租的」、什么时候到期、占了多少条
+ *      → 用户说「我明明买了为什么不能用」时，这里就是唯一的现场；
+ *   3. 全局汇总 → 判断「要不要涨价 / 要不要扩容 / 谁在刷」。
+ *
+ * 因此列表接口一次把这些全查出来，而不是让人在三个页面之间拼。
+ *
+ * ⚠️ 鉴权用 `dns` 管理 scope，与「子域名管理」「邮箱管理」一致 ——
+ *    它们管的是同一类东西（用户手上的域名资源）。改年价属于新能力，
+ *    没有历史行为需要兼容；站长（root）本来就不看白名单。
+ * ----------------------------------------------------------------------- */
+
+/**
+ * Cloudflare 每个 zone 的 DNS 记录数硬上限。
+ *
+ * 来源：Cloudflare 官方配额 —— **Free 套餐、且 zone 创建于 2024-09-01 之后**
+ * 是 200 条（更早创建的 Free zone 是 1000 条，付费套餐更高）。
+ * 取 200 是**刻意保守**：本仓所有 zone 都是 Free，而这个数字的用途是
+ * 「让站长在撞上 81045 之前先看见快满了」。低估只会让人早点扩容；
+ * 高估则会让人以为还有余量，等真撞上时**所有用户一起建不了记录**
+ * （CF 报 `81045 Record quota exceeded`），表现为「绑定子域名却解析不了」，
+ * 是极难定位的一类故障（同见 permissions.ts 里 dns 权限的注释）。
+ *
+ * 为什么不做成设置项：它是 Cloudflare 侧的客观事实、不是站长的策略，
+ * 做成设置项就要多一个「能改但改了只会误导自己」的开关。
+ */
+export const CF_ZONE_RECORD_LIMIT = 200
+
+/** 「即将到期」的判定窗口（天）—— 用来提前提醒用户与站长 */
+const EXPIRING_SOON_DAYS = 30
+
+/**
+ * GET /api/admin/dns/rentals —— 根域 + 用户 + 全局汇总。
+ *
+ * `q` 可选：按用户名 / 邮箱过滤用户维度（站长排查某个人时用），
+ * 不传则返回全部「与 DNS 有关」的用户（有权限位、有租约、或有记录的人）。
+ */
+export async function listAdminDnsRentals(env: Env, request: Request): Promise<Response> {
+  await requireAdminScope(env, request, "dns")
+  const url = new URL(request.url)
+  const q = (url.searchParams.get("q") ?? "").trim()
+  const qLike = q ? likeContains(q) : ""
+
+  const roots = await listRootDomains(env)
+  const rentals = await listAllDnsRentals(env)
+  const globalLimit = await getSettingNumber(env, "dns_records_per_user")
+
+  // ---- 根域维度：记录数按**记录自己的 fqdn 后缀**统计，而不是按 domain_id ----
+  // domain_id 一律指向用户的主域名行（见 handlers/dns.ts 的注释），
+  // 拿它统计会把「建在 7u.nz 下的记录」全算到 tyu.me 头上，配额看起来永远是空的。
+  const rootRows = []
+  for (const r of roots) {
+    const used = await env.DB.prepare(
+      // fqdn = 根域本身，或 fqdn 以 .根域 结尾（LIKE 的 % 通配符）
+      `SELECT COUNT(*) AS c FROM dns_records
+        WHERE fqdn = ? COLLATE NOCASE OR fqdn LIKE ? COLLATE NOCASE`
+    )
+      .bind(r.name, `%.${r.name}`)
+      .first<{ c: number }>()
+
+    const rootRentals = rentals.filter((x) => x.root_domain.toLowerCase() === r.name)
+    rootRows.push({
+      name: r.name,
+      label: r.label ?? r.name,
+      zoneId: r.zone_id,
+      isDefault: r.is_default === 1,
+      enabled: r.enabled === 1,
+      requiresFeature: r.requires_feature,
+      yearPrice: Number(r.dns_price_per_year ?? 0),
+      /** 该根域下本地台账里的记录数（不含 CF 上绕过本站建的） */
+      recordsUsed: Number(used?.c ?? 0),
+      /** CF 侧上限（常量，来源见 CF_ZONE_RECORD_LIMIT 注释） */
+      recordsLimit: CF_ZONE_RECORD_LIMIT,
+      rentalsTotal: rootRentals.length,
+      rentalsActive: rootRentals.filter((x) => x.status === "active" && Date.parse(x.expires_at) > Date.now()).length,
+    })
+  }
+
+  // ---- 用户维度 ----
+  //
+  // 候选集刻意用 SQL 粗筛（`permissions LIKE '%"dns"%'`）再用 parsePermissions
+  // 精判：权限 JSON 的兜底语义是「缺键 = 允许」，所以**不能**用 SQL 判断
+  // 「这人到底有没有 dns」—— 那是 parsePermissions 的活。
+  // 完全没有 DNS 痕迹（无权限位、无租约、无记录）的用户不该出现在这里，
+  // 否则 1000+ 行里 99% 都是噪音。
+  const userSql = `
+    SELECT u.id, u.uid, u.username, u.email, u.role, u.status, u.permissions,
+           u.max_dns_records, u.created_at,
+           (SELECT COUNT(*) FROM dns_records r JOIN domains d ON d.id = r.domain_id
+             WHERE d.user_id = u.id AND r.banned_at IS NULL) AS records_used,
+           (SELECT MAX(r.created_at) FROM dns_records r JOIN domains d ON d.id = r.domain_id
+             WHERE d.user_id = u.id) AS last_record_at
+      FROM users u
+     WHERE u.id IN (SELECT user_id FROM dns_rentals)
+        OR u.id IN (SELECT d.user_id FROM dns_records r JOIN domains d ON d.id = r.domain_id)
+        OR u.permissions LIKE '%"dns"%'
+        ${qLike ? "AND (u.username LIKE ? OR u.email LIKE ?)" : ""}
+     LIMIT 500`
+  const userBinds = qLike ? [qLike, qLike] : []
+  const usersRes = await env.DB.prepare(userSql).bind(...userBinds).all<{
+    id: string
+    uid: number | null
+    username: string
+    email: string
+    role: string
+    status: string
+    permissions: string | null
+    max_dns_records: number | null
+    created_at: string
+    records_used: number
+    last_record_at: string | null
+  }>()
+
+  const rentalsByUser = new Map<string, typeof rentals>()
+  for (const r of rentals) {
+    const list = rentalsByUser.get(r.user_id) ?? []
+    list.push(r)
+    rentalsByUser.set(r.user_id, list)
+  }
+
+  const now = Date.now()
+  const users = (usersRes.results ?? [])
+    .map((u) => {
+      const perms = parsePermissions(u.permissions)
+      const freePermission = hasFeature(perms, "dns")
+      const mine = (rentalsByUser.get(u.id) ?? []).slice().sort((a, b) => a.expires_at.localeCompare(b.expires_at))
+      const active = mine.filter(
+        (r) => r.status === "active" && Date.parse(r.expires_at) > now
+      )
+      const soonest = active[0] ?? null
+      // 「角色特权」也是一条独立来源：管理员/站长根本不受权限位与租期约束，
+      // 界面上必须显示出来，否则站长会以为自己的 dns:false 意味着不能用。
+      const privileged = u.role === "superadmin" || u.role === "root"
+      const source = privileged
+        ? "privileged"
+        : freePermission
+          ? "permission"
+          : active.length > 0
+            ? "rental"
+            : mine.length > 0
+              ? "expired"
+              : "none"
+      return {
+        id: u.id,
+        uid: u.uid ?? null,
+        username: u.username,
+        email: u.email,
+        role: u.role,
+        status: u.status,
+        /** 权限位上的 dns 值（**只是其中一条来源**，见 source） */
+        dnsPermission: freePermission,
+        /** privileged / permission / rental / expired / none */
+        source,
+        /** 有效租约覆盖的根域 */
+        activeRoots: active.map((r) => r.root_domain),
+        /** 最近一次到期（有效租约里最早的） */
+        expiresAt: soonest?.expires_at ?? null,
+        daysLeft: soonest
+          ? Math.ceil((Date.parse(soonest.expires_at) - now) / 86_400_000)
+          : null,
+        rentals: mine.map(toPublicDnsRental),
+        recordsUsed: Number(u.records_used ?? 0),
+        /**
+         * 该用户当前生效的记录数上限。null = 不限（管理员/站长）。
+         * 口径必须与 handlers/dns.ts 的 dnsRecordLimit 完全一致：
+         * 用户级覆盖 > 全局设置 > 特权不限。
+         */
+        recordLimit: privileged ? null : (u.max_dns_records ?? globalLimit),
+        /** 是否用了用户级覆盖（前端据此提示「这是单独设过的」） */
+        limitOverridden: u.max_dns_records !== null && u.max_dns_records !== undefined,
+        lastRecordAt: u.last_record_at,
+        createdAt: u.created_at,
+      }
+    })
+    // 有记录的先看：站长最关心的是「谁在占配额」，而不是字母序
+    .sort((a, b) => b.recordsUsed - a.recordsUsed || a.username.localeCompare(b.username))
+
+  // ---- 全局汇总 ----
+  const totalRecords = await env.DB.prepare("SELECT COUNT(*) AS c FROM dns_records").first<{ c: number }>()
+  const usersWithRecords = users.filter((u) => u.recordsUsed > 0).length
+
+  return json({
+    roots: rootRows,
+    users,
+    summary: {
+      totalRecords: Number(totalRecords?.c ?? 0),
+      byRoot: Object.fromEntries(rootRows.map((r) => [r.name, r.recordsUsed])),
+      /** 有效租约数（按行算，一个用户租两个根域算两条） */
+      rentalsActive: rentals.filter(
+        (r) => r.status === "active" && Date.parse(r.expires_at) > now
+      ).length,
+      rentalsExpired: rentals.filter(
+        (r) => r.status !== "active" || Date.parse(r.expires_at) <= now
+      ).length,
+      /** 30 天内到期（含已过期的 active —— 那些就是 cron 还没来得及翻的） */
+      expiringSoon: rentals.filter((r) => {
+        if (r.status !== "active") return false
+        const left = (Date.parse(r.expires_at) - now) / 86_400_000
+        return left <= EXPIRING_SOON_DAYS
+      }).length,
+      usersTracked: users.length,
+      usersWithRecords,
+      globalRecordLimit: globalLimit,
+      cfZoneRecordLimit: CF_ZONE_RECORD_LIMIT,
+      expiringSoonDays: EXPIRING_SOON_DAYS,
+    },
+  })
+}
+
+/**
+ * POST /api/admin/dns/rental-action —— 站长对根域 / 用户 / 租约的处置动作。
+ *
+ * 一个接口多个动作（与 rootDomainAction 同一形态）：每个动作都要写审计，
+ * 拆成七个接口只会让审计文案、鉴权、错误处理各写七遍。
+ *
+ * 动作清单：
+ *   set-price          { name, dnsPricePerYear }        改某个根域的年价
+ *   set-enabled        { name, enabled }                启用 / 停用某个根域
+ *   grant-permission   { username }                     手工开 dns 权限位（不要钱）
+ *   revoke-permission  { username }                     收回 dns 权限位
+ *   set-limit          { username, limit }              改某用户的每用户记录数上限（null = 取消覆盖）
+ *   create-rental      { username, rootDomain, days }   手工开一份租约（不扣分）
+ *   extend-rental      { id, days }                     给某份租约续期
+ *   revoke-rental      { id }                           停用某份租约
+ */
+export async function dnsRentalAction(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "dns")
+  const body = (await request.json()) as {
+    action?: string
+    name?: string
+    username?: string
+    rootDomain?: string
+    id?: string
+    days?: number
+    limit?: number | null
+    enabled?: boolean
+    dnsPricePerYear?: number
+  }
+  const action = String(body.action ?? "").trim()
+  const ip = request.headers.get("CF-Connecting-IP")
+
+  switch (action) {
+    case "set-price": {
+      const name = String(body.name ?? "").trim().toLowerCase()
+      if (!name) throw new ApiError(400, "缺少根域名", "INVALID_INPUT")
+      const n = Math.trunc(Number(body.dnsPricePerYear))
+      if (!Number.isFinite(n) || n < 0 || n > 1_000_000) {
+        throw new ApiError(400, "年价必须是 0–1000000 之间的整数（积分/年，0 = 不租用）", "INVALID_INPUT")
+      }
+      const res = await env.DB.prepare(
+        "UPDATE root_domains SET dns_price_per_year = ? WHERE name = ? COLLATE NOCASE"
+      )
+        .bind(n, name)
+        .run()
+      if (!res.meta.changes) throw new ApiError(404, "根域不存在", "NOT_FOUND")
+      // 价格进了模块级读缓存（10 秒 TTL），改完必须立刻失效 ——
+      // 否则用户端价目卡还会显示旧价，而扣分走的是直查（见 dns-rental.ts 的 priceOf），
+      // 两边不一致会变成「显示 200、扣了 500」这种最难解释的一类问题。
+      resetRootDomainCache()
+      await recordAudit(env, admin.id, "admin.dns.rental.setPrice", `${name} 年价 → ${n}`, ip)
+      return json({ ok: true, name, dnsPricePerYear: n })
+    }
+
+    case "set-enabled": {
+      const name = String(body.name ?? "").trim().toLowerCase()
+      if (!name) throw new ApiError(400, "缺少根域名", "INVALID_INPUT")
+      const res = await env.DB.prepare(
+        "UPDATE root_domains SET enabled = ? WHERE name = ? COLLATE NOCASE"
+      )
+        .bind(body.enabled ? 1 : 0, name)
+        .run()
+      if (!res.meta.changes) throw new ApiError(404, "根域不存在", "NOT_FOUND")
+      resetRootDomainCache()
+      await recordAudit(
+        env,
+        admin.id,
+        "admin.dns.rental.setEnabled",
+        `${name} → ${body.enabled ? "启用" : "停用"}`,
+        ip
+      )
+      return json({ ok: true, name, enabled: Boolean(body.enabled) })
+    }
+
+    case "grant-permission":
+    case "revoke-permission": {
+      const username = String(body.username ?? "").trim()
+      if (!username) throw new ApiError(400, "缺少用户名", "INVALID_INPUT")
+      const grant = action === "grant-permission"
+      // 收回权限必须带 `notWhitelistedGuard()`：监管白名单里的用户受数据库触发器
+      // 保护（见 permissions.ts 的注释），不带守卫的 UPDATE 会直接抛
+      // SQLITE_CONSTRAINT_TRIGGER，把一个正常业务动作打成 500。
+      const sql = grant
+        ? `UPDATE users SET permissions = ${featurePermissionSql("dns", true)}, updated_at = ?
+             WHERE username = ? COLLATE NOCASE`
+        : `UPDATE users SET permissions = ${featurePermissionSql("dns", false)}, updated_at = ?
+             WHERE username = ? COLLATE NOCASE AND ${notWhitelistedGuard()}`
+      const res = await env.DB.prepare(sql)
+        .bind(new Date().toISOString(), username)
+        .run()
+      if (!res.meta.changes) {
+        throw new ApiError(
+          404,
+          grant ? `用户不存在：${username}` : `没有改动（用户不存在，或在监管白名单里受保护）`,
+          "NOT_FOUND"
+        )
+      }
+      await recordAudit(
+        env,
+        admin.id,
+        grant ? "admin.dns.permission.grant" : "admin.dns.permission.revoke",
+        `${grant ? "开通" : "收回"} ${username} 的 DNS 解析权限`,
+        ip
+      )
+      return json({ ok: true, username, dnsPermission: grant })
+    }
+
+    case "set-limit": {
+      const username = String(body.username ?? "").trim()
+      if (!username) throw new ApiError(400, "缺少用户名", "INVALID_INPUT")
+      // null / 空 = 取消用户级覆盖（回落全局设置）。刻意与 0 区分：
+      // 0 是一个合法的上限（一条都不许建），混起来会让「把他锁死」静默失效。
+      let limit: number | null = null
+      if (body.limit !== null && body.limit !== undefined) {
+        const n = Math.trunc(Number(body.limit))
+        if (!Number.isFinite(n) || n < 0 || n > 10_000) {
+          throw new ApiError(400, "上限必须是 0–10000 之间的整数，或留空表示取消覆盖", "INVALID_INPUT")
+        }
+        limit = n
+      }
+      const res = await env.DB.prepare(
+        "UPDATE users SET max_dns_records = ?, updated_at = ? WHERE username = ? COLLATE NOCASE"
+      )
+        .bind(limit, new Date().toISOString(), username)
+        .run()
+      if (!res.meta.changes) throw new ApiError(404, `用户不存在：${username}`, "NOT_FOUND")
+      await recordAudit(
+        env,
+        admin.id,
+        "admin.dns.limit.set",
+        `${username} 的 DNS 记录数上限 → ${limit === null ? "（取消覆盖，回落全局）" : limit}`,
+        ip
+      )
+      return json({ ok: true, username, limit })
+    }
+
+    case "create-rental": {
+      const username = String(body.username ?? "").trim()
+      const rootDomain = String(body.rootDomain ?? "").trim().toLowerCase()
+      const days = Math.trunc(Number(body.days ?? 365))
+      if (!username) throw new ApiError(400, "缺少用户名", "INVALID_INPUT")
+      if (!rootDomain) throw new ApiError(400, "缺少根域", "INVALID_INPUT")
+      if (!Number.isFinite(days) || days < 1 || days > 3650) {
+        throw new ApiError(400, "天数必须是 1~3650 的整数", "INVALID_INPUT")
+      }
+      const user = await env.DB.prepare(
+        "SELECT id FROM users WHERE username = ? COLLATE NOCASE"
+      )
+        .bind(username)
+        .first<{ id: string }>()
+      if (!user) throw new ApiError(404, `用户不存在：${username}`, "NOT_FOUND")
+      // 根域必须真的存在（否则会写出一条永远匹配不到任何 fqdn 的孤儿租约）
+      const root = await env.DB.prepare(
+        "SELECT name FROM root_domains WHERE name = ? COLLATE NOCASE"
+      )
+        .bind(rootDomain)
+        .first<{ name: string }>()
+      if (!root) throw new ApiError(404, `根域不存在：${rootDomain}`, "NOT_FOUND")
+
+      const created = await grantDnsRental(env, admin.id, user.id, root.name, days)
+      await recordAudit(
+        env,
+        admin.id,
+        "admin.dns.rental.create",
+        `手工开给 ${username}：${root.name} / ${days} 天 → ${created.expiresAt}`,
+        ip
+      )
+      return json({ ok: true, id: created.id, expiresAt: created.expiresAt })
+    }
+
+    case "extend-rental": {
+      const id = String(body.id ?? "").trim()
+      const days = Math.trunc(Number(body.days ?? 365))
+      if (!id) throw new ApiError(400, "缺少租约 id", "INVALID_INPUT")
+      if (!Number.isFinite(days) || days < 1 || days > 3650) {
+        throw new ApiError(400, "天数必须是 1~3650 的整数", "INVALID_INPUT")
+      }
+      const row = await env.DB.prepare(
+        "SELECT id, root_domain, expires_at, status FROM dns_rentals WHERE id = ?"
+      )
+        .bind(id)
+        .first<{ id: string; root_domain: string; expires_at: string; status: string }>()
+      if (!row) throw new ApiError(404, "租约不存在", "NOT_FOUND")
+      // 与用户端续期同一口径：未过期从原到期日顺延，已过期从现在起算
+      const base = Math.max(Date.now(), Date.parse(row.expires_at) || 0)
+      const next = new Date(base + days * 86_400_000).toISOString()
+      await env.DB.prepare(
+        "UPDATE dns_rentals SET expires_at = ?, status = 'active', last_error = NULL, updated_at = ? WHERE id = ?"
+      )
+        .bind(next, new Date().toISOString(), id)
+        .run()
+      await recordAudit(
+        env,
+        admin.id,
+        "admin.dns.rental.extend",
+        `${row.root_domain} +${days} 天 → ${next}`,
+        ip
+      )
+      return json({ ok: true, id, expiresAt: next })
+    }
+
+    case "revoke-rental": {
+      const id = String(body.id ?? "").trim()
+      if (!id) throw new ApiError(400, "缺少租约 id", "INVALID_INPUT")
+      // 置 cancelled 而不是删行：见 0161 迁移的注释（租约历史是对账的唯一凭据）。
+      // 唯一索引只约束 status='active'，所以停用之后用户可以立刻重新购买。
+      const res = await env.DB.prepare(
+        "UPDATE dns_rentals SET status = 'cancelled', updated_at = ? WHERE id = ?"
+      )
+        .bind(new Date().toISOString(), id)
+        .run()
+      if (!res.meta.changes) throw new ApiError(404, "租约不存在", "NOT_FOUND")
+      await recordAudit(env, admin.id, "admin.dns.rental.revoke", `停用租约 ${id}`, ip)
+      return json({ ok: true, id, status: "cancelled" })
+    }
+
+    default:
+      throw new ApiError(400, `未知动作：${action || "(空)"}`, "INVALID_INPUT")
+  }
 }

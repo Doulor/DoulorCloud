@@ -12,7 +12,22 @@
 //   普通刷新拿不到新版（chunk 哈希变了但旧缓存仍在）。升版本强制清一次，让所有人
 //   下次加载拿到最新版本。历史：2026-10-02 升 v2 修「不存在的 /assets/*.js 被兜底成
 //   200 + text/html、SW 把坏响应也缓存」的问题（见 site-worker.js）。
-const CACHE = "doulor-shell-v3"
+// 🔴 2026-10-14 升 v4：**安全**原因，不是功能原因。
+//
+//   攻击链（findings #3/#4，已实测）：普通用户把作品绑到 cloud.doulor.cn 后，
+//   其页面以同源 text/html 交付并执行脚本，而该脚本可以 `caches.open("doulor-shell-v3")`
+//   然后把**本域全部 /assets/*.js（含 SPA 入口）覆盖成攻击者载荷**。
+//   本 SW 对静态资源是 cache-first、命中即返回，于是被篡改的入口脚本从此长期生效 ——
+//   即使在服务端解绑、主应用完全复原之后依然如此（投毒写在**浏览器**里，服务端撤不掉）。
+//
+//   升级缓存名能让所有受害者恢复：新版本用新缓存名，旧的（被投毒）缓存会在
+//   activate 阶段被删除，被篡改的 /assets/*.js 条目就不再可达。
+//   这是唯一能"回溯修复"已中毒浏览器的手段 —— CSP 只能防住以后。
+//
+//   ⚠️ 代价：所有人下次加载会重新拉一遍静态资源（和 2026-10-03 升 v3 一样的代价）。
+//   兜底：投毒窗口内改绑解绑过的用户，若其浏览器仍持有旧 SW，需等本 SW 更新到 v4 才恢复；
+//   app 侧另有主动注销异常注册的逻辑（见 src/lib/chunk-error.ts）。
+const CACHE = "doulor-shell-v4"
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

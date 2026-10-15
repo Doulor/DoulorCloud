@@ -2236,6 +2236,30 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
       continue
     }
 
+    // dns_rental_days：DNS 解析租用的租期（天）。
+    //
+    // 为什么要单开一条而不是走上面那条通用数值分支（/bytes|quota|count/）：
+    //   1. 键名**刻意不含** quota/count/bytes —— 通用分支只要求「非负」，
+    //      也就是允许 0，而 0 天的租约 = 用户付了积分当场到期；
+    //   2. 上限也要卡：3650 天 ≈ 10 年，防手滑把 365 写成 365000 开出一份
+    //      「百年租约」。
+    // 于是本分支只接受 **[1, 3650] 的整数**，越界直接 400、不入库（挡住绕过管理面板
+    // 直接打 API 写入脏值的路）。
+    //
+    // ⚠️ 与读取侧（handlers/dns-rental.ts 的 rentalDays）**不是同一种口径**，别混：
+    //    读取侧面对的是「库里已经存在的值」，对空串 / 0 / 负数一律回落成 **365 天**
+    //    而不是夹到 1 天 —— 1 天的租约同样是「付完当场到期」，站长填错时宁可多给；
+    //    管理面板提交前也会把空 / 非法输入换成 365 再发过来。
+    //    所以这里收到脏值属于「有人绕过面板」，直接拒掉比悄悄改一个值更好排查。
+    if (key === "dns_rental_days") {
+      const n = Number(str)
+      if (!Number.isFinite(n) || n < 1 || n > 3650) {
+        throw new ApiError(400, "DNS 租用租期需为 1 ~ 3650 天（整数）", "INVALID_INPUT")
+      }
+      values[key] = String(Math.trunc(n))
+      continue
+    }
+
     // wb2api_base_url：网关地址。必须是 http(s) 绝对地址。
     // 留空 = 用内置默认值 —— 空串已在上面 `str === "" continue` 处跳过，
     // 即「提交空串」等价于不修改本项（前端也提示了「留空则用内置默认值」）。

@@ -24,7 +24,7 @@ import { ApiError } from "./http"
 import { getSetting } from "./settings"
 import type { Env } from "./env"
 
-export const FEATURES = ["r2", "ai", "proxy", "doulor"] as const
+export const FEATURES = ["r2", "ai", "proxy", "doulor", "dns"] as const
 export type Feature = (typeof FEATURES)[number]
 
 export const FEATURE_LABELS: Record<Feature, string> = {
@@ -32,7 +32,24 @@ export const FEATURE_LABELS: Record<Feature, string> = {
   ai: "AI 中转站",
   proxy: "代理节点",
   doulor: "doulor.cn 专属域名与邮箱",
+  dns: "DNS 解析",
 }
+
+/**
+ * ⚠️ `dns` 与 `doulor` 是**两个不同的东西**，别把它们当成一件事：
+ *   · `doulor` 管的是**根域**：能不能把子域名 / 邮箱建在 doulor.cn 上（用哪个域）；
+ *   · `dns`    管的是**能力**：能不能给自己已有的域名建解析记录（能不能建记录）。
+ * 于是下面这两种组合都是正常状态，代码里不要互相推断：
+ *   · 有 doulor、无 dns —— 能在主域下开子域名，但不能自己建解析记录；
+ *   · 有 dns、无 doulor —— 能在 tyu.me 下管解析，但碰不到 doulor.cn。
+ *
+ * 为什么 dns 要**默认关闭**（不在 DEFAULT_ALLOWED 里）：它不是风险闸而是配额闸 ——
+ * Cloudflare 每个 zone 的 DNS 记录数有硬上限（Free 套餐、2024-09-01 之后创建的
+ * zone 是 200 条），而全站用户共用少数几个 zone。不设闸的话少数用户就能把配额吃光，
+ * 届时**所有人**都建不了新记录（CF 报 `81045 Record quota exceeded`），
+ * 表现出来却是「绑定子域名却解析不了」这种极难定位的现象。
+ * 存量用户的显式 false 由 migrations/0159_dns_permission.sql 落库。
+ */
 
 export type Permissions = Record<Feature, boolean>
 
@@ -50,6 +67,10 @@ export type Permissions = Record<Feature, boolean>
  *   而主域同时承担「给用户发验证码 / 找回密码」的发件人角色。
  *   站长明确要求先「只定义、不放开」⇒ 它的默认值必须是 false，
  *   只能由管理员在成员详情里显式勾选。
+ *
+ * `dns`（DNS 解析记录）同理**必须**留在名单之外，理由见上方 FEATURES 的注释：
+ * 它是配额闸（CF 每 zone 200 条记录，全站共用几个 zone），漏进这里就等于
+ * 给所有存量用户、以及所有显式 JSON 里缺这个键的新账号**白送**建记录的能力。
  */
 export const DEFAULT_ALLOWED: readonly Feature[] = ["r2", "ai", "proxy"]
 

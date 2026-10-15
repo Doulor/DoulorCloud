@@ -570,6 +570,20 @@ export async function serveFeedbackImage(
   if (!/^[A-Za-z0-9-]+\.(jpg|jpeg|png|webp|gif)$/i.test(filename)) {
     return new Response("Not Found", { status: 404 })
   }
+  // 🔴 userId 也必须校验（2026-10-14 安全审计补齐）。
+  //
+  // 这里原本只校验 filename，userId 直接来自路由并用 decodeURIComponent 解过码，
+  // 于是 `..%2Fprofiles%2F某人` 解码成 `../profiles/某人`，拼出的 key 是
+  // `feedback/../profiles/某人/x.png` —— 而 R2 的 URL 归一化会把 `..` 消解掉，
+  // 实际读到的是 `profiles/某人/x.png`。**任何登录用户即可穿越读他人私有资产**
+  // （含未发布的名片图），且绕过了 profile 那边的公开性门控。
+  //
+  // 同一机制仓库里已经吃过一次亏（见 tempbox.ts 的注释），但当时只修了写路径。
+  // 同族的 serveChatImage 一直有这道校验（chat-upload.ts 的 USER_ID_PATTERN），
+  // 这里属于漏掉了同一条。
+  if (!/^[0-9a-f-]{32,36}$/i.test(userId)) {
+    return new Response("Not Found", { status: 404 })
+  }
   if (!(await isStorageConfigured(env))) return new Response("Not Found", { status: 404 })
   const bucketId = await getPlatformBucketId(env)
   const key = `feedback/${userId}/${filename}`

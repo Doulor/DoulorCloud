@@ -51,6 +51,8 @@ export type ToolName =
   | "write"
   | "read"
   | "replace"
+  /** 一次改多处（hunks），见 lab-tools-native.ts 的说明 */
+  | "patch"
   | "list"
   | "delete"
   | "grep"
@@ -110,7 +112,16 @@ export type Segment =
        * 文本标签协议下没有这个字段（那时结果拼成一条用户消息）。
        */
       toolCallId?: string
-      /** screenshot 用：截图的 dataUrl（只用于展示/回喂，不参与解析） */
+      /** screenshot / inspect 用：视口（多断点截图/体检） */
+  width?: number
+  height?: number
+  /** screenshot / inspect 用：设备档位简写（desktop / mobile / tablet） */
+  device?: string
+  /** patch 用：一次要改的若干处 {old,new} */
+  hunks?: { old: string; new: string }[]
+  /** inspect 用：交互步骤（点击/输入/等待/滚动） */
+  steps?: unknown[]
+  /** screenshot 用：截图的 dataUrl（只用于展示/回喂，不参与解析） */
   image?: string
   /** 仅 <lab_http> 用：目标地址 */
       url?: string
@@ -400,6 +411,7 @@ const NATIVE_TOOL_NAMES: ToolName[] = [
   "read",
   "write",
   "replace",
+  "patch",
   "list",
   "delete",
   "grep",
@@ -488,6 +500,19 @@ export function nativeToolCallsToSegments(
         seg.path = get("path")
         seg.content = get("content") ?? ""
         break
+      case "patch": {
+        seg.path = get("path")
+        // 实时态参数可能只到一半，宽松抓一把即可（执行前会再校验）
+        const hs = Array.isArray(a.hunks) ? a.hunks : []
+        seg.hunks = hs
+          .filter((h): h is { old: string; new: string } => {
+            const o = (h ?? {}) as { old?: unknown; new?: unknown }
+            return typeof o.old === "string" && typeof o.new === "string"
+          })
+          .slice(0, 12)
+        seg.content = ""
+        break
+      }
       case "replace":
         seg.path = get("path")
         // 复用现有「三段式」正文格式 ⇒ parseReplaceContent 不用改
@@ -518,6 +543,14 @@ export function nativeToolCallsToSegments(
         seg.httpMethod = get("method")
         seg.httpRaw = a.raw === true
         seg.content = get("body") ?? ""
+        break
+      case "screenshot":
+      case "inspect":
+        // 多断点：把视口参数带下去（缺省由服务端兜底）
+        seg.width = typeof a.width === "number" ? a.width : undefined
+        seg.height = typeof a.height === "number" ? a.height : undefined
+        seg.device = get("device")
+        if (tool === "inspect" && Array.isArray(a.steps)) seg.steps = a.steps
         break
       default:
         // list / need_vm / site_manual：无参数
@@ -598,7 +631,7 @@ export function buildToolResults(
       const formatted = runResults?.get(i)
       parts.push(
         formatted ??
-          `[执行命令] ${s.content.trim()}\n(没能执行：浏览器终端未就绪 —— 需要先申请 <lab_need_vm/>)`
+          `[执行命令] ${s.content.trim()}\n(这条命令**本轮没有执行**。若终端刚启动完成，直接**再调用一次 run** 即可；只有终端确实没起来（面板显示未启用/启动失败）时才需要再申请 <lab_need_vm/>)`
       )
     } else if (s.tool === "http") {
       parts.push(

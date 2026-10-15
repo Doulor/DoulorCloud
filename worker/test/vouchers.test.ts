@@ -309,14 +309,17 @@ describe("首捐券可兑换的模块（管理面板设置）", () => {
   })
 
   it("设置项缺失 = 全部可兑换（这就是「默认全都可以兑换」）", () => {
+    // 「全部」= FEATURES 的全部（r2/ai/proxy/doulor/dns），新增模块会自动进这份名单
     expect([...parseFirstDonationFeatures(null)].sort()).toEqual([
       "ai",
+      "dns",
       "doulor",
       "proxy",
       "r2",
     ])
     expect([...parseFirstDonationFeatures(undefined)].sort()).toEqual([
       "ai",
+      "dns",
       "doulor",
       "proxy",
       "r2",

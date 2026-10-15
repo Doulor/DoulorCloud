@@ -302,6 +302,17 @@ export async function syncProjectFiles(
 ): Promise<{ pushed: number; skipped: string[] }> {
   if (phase !== "ready") throw new Error(tStatic("lab.term.err.notStarted"))
 
+  /**
+   * 🔴 **先把项目目录建出来**（2026-10-13 站长实测的真凶）。
+   *
+   * 原来只在「有文件要写」时由 writeFileToVm 顺带 mkdir -p —— 项目**为空**时
+   * 一次都不跑，于是 /root/project 根本不存在。而工具说明与就绪回执都写着
+   * 「项目文件在 /root/project 下」，模型一 ls 就拿到
+   * `ls: /root/project: No such file or directory` ⇒ 它判定「终端没接上」，
+   * 于是反复 run / 反复申请（站长看到的 20+ 次空转）。
+   */
+  await runCommand(`mkdir -p ${quote(VM_PROJECT_DIR)}`, 8_000)
+
   const skipped: string[] = []
   const wanted = new Set(Object.keys(files))
 

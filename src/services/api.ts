@@ -143,6 +143,12 @@ import {
   type AdminDnsFindingsResponse,
   type AdminDnsAuditSummary,
   type AdminDnsCfDiff,
+  type AdminDnsRentalsResponse,
+  type AdminCfZonesResponse,
+  type AdminRootDomainDeleteResult,
+  type AdminRootDomainImportResult,
+  type AdminRootDomainsResponse,
+  type DnsRentalState,
   type AdminSubdomain,
   type AdminSubdomainListResponse,
   type AdminMailbox,
@@ -424,6 +430,13 @@ export async function getDefaultRootDomain(): Promise<string> {
 export interface CreateDnsPayload {
   subdomainId?: string
   /**
+   * 顶级记录（挂在 '@' 主域名下）建在**哪个根域**下；省略 = 沿用现状。
+   *
+   * 服务端会用 `pickRootDomain` 再校验一次（启用状态 + `requires_feature`），
+   * 所以这里传什么都没关系 —— 前端的下拉框只是把可选范围摆明。
+   */
+  rootDomain?: string
+  /**
    * 相对前缀。
    *
    * SRV 记录下这个字段的语义不同：它是「服务标签之后、基准域名之前」的那一段
@@ -453,8 +466,19 @@ export interface CreateDnsPayload {
 }
 
 export const dnsApi = {
+  /**
+   * 列出 DNS 记录。
+   *
+   * `dnsUsage` 是**服务端**算好的「该用户全部域名的记录数 / 上限」——
+   * 上限是跨域名的，而这里返回的 records 只是当前选中子域名的那一批，
+   * 前端自己数 records.length 会得出一个跟服务端卡的那条线对不上的数字。
+   * `limit === null` 表示不限（管理员 / 管理员 Key）。
+   */
   list: (subdomainId?: string) =>
-    request<{ records: DnsRecord[] }>(
+    request<{
+      records: DnsRecord[]
+      dnsUsage: { used: number; limit: number | null }
+    }>(
       subdomainId ? `/dns?subdomainId=${encodeURIComponent(subdomainId)}` : "/dns"
     ),
 
@@ -473,6 +497,48 @@ export const dnsApi = {
 
   remove: (id: string) =>
     request<void>(`/dns/${id}`, { method: "DELETE" }),
+
+  /**
+   * DNS 解析租用：可租根域价目 + 我的积分 + 我的租约。
+   *
+   * 用户端面板与「新建记录」的根域下拉框共用这一份数据 ——
+   * 两处需要的是同一个事实（哪些根域我买得起 / 已经能用），
+   * 拆成两个接口迟早会漂移。
+   */
+  rental: () =>
+    request<DnsRentalState>("/dns/rental"),
+
+  /**
+   * 买下某个根域的解析能力（一年）。
+   * `requestId` 用于服务端幂等 —— 双击 / 网络重试不会重复扣分。
+   */
+  purchaseRental: (payload: { rootDomain: string; requestId?: string }) =>
+    request<{
+      ok: boolean
+      id: string
+      rootDomain: string
+      expiresAt: string
+      balance: number
+      pricePoints: number
+    }>("/dns/rental/purchase", { method: "POST", body: JSON.stringify(payload) }),
+
+  renewRental: (payload: { id: string; requestId?: string }) =>
+    request<{ ok: boolean; expiresAt: string; balance: number; pricePoints: number }>(
+      "/dns/rental/renew",
+      { method: "POST", body: JSON.stringify(payload) }
+    ),
+
+  /**
+   * 开关自动续费。
+   *
+   * 开着的话服务端每小时检查一次：到期前 24 小时内按**当前年价**自动续一期。
+   * 积分不够时服务端会**自动关掉它**并把原因写进 last_error（面板上会显示）。
+   */
+  setRentalAutoRenew: (payload: { id: string; autoRenew: boolean }) =>
+    request<{ ok: boolean; id: string; autoRenew: boolean }>("/dns/rental/auto-renew", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 }
 
 // ---- 子域名 ----
@@ -1586,6 +1652,18 @@ export const frpApi = {
   listMyRentals: () =>
     request<{ balance: number; subscriptions: UserFrpRental[] }>("/frp/rental/mine"),
 
+  /**
+   * 开关「自动续费」。
+   *
+   * 开着的话，服务端每小时检查一次：到期前 24 小时内会自动按当前套餐续一期。
+   * 积分不够时服务端会**自动关掉它**并把原因写进 last_error（页面上会显示）。
+   */
+  setAutoRenew: (payload: { id: string; autoRenew: boolean }) =>
+    request<{ ok: boolean; id: string; autoRenew: boolean }>("/frp/rental/auto-renew", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   purchaseRental: (payload: { planId: string; requestId?: string }) =>
     request<{
       ok: boolean
@@ -1602,6 +1680,30 @@ export const frpApi = {
       "/frp/rental/renew",
       { method: "POST", body: JSON.stringify(payload) }
     ),
+
+  /**
+   * 改自己租约的 frp 密码。
+   *
+   * 账号名（frpUser）生成后不可改 —— 它同时是面板里的凭据标识和 frps 的 user 字段，
+   * 改了等于换一个账号，历史隧道配置全部失效。只有密码归用户自己。
+   */
+  setMyRentalToken: (payload: { id: string; token: string }) =>
+    request<{ ok: boolean; frpToken: string }>("/frp/rental/token", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /**
+   * 领一枚「一键捐献服务器」令牌。
+   *
+   * 令牌是 HMAC 签名的（含过期时间，1 小时），前端拿它拼进给用户的命令里。
+   * ⚠️ 它是**一次性**的 —— 每次生成命令都重新领，不要缓存复用。
+   */
+  issueDonateToken: () =>
+    request<{ ok: boolean; token: string; expiresInSec: number }>("/frp/donate/token", {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
 }
 
 // ---- 代理节点 ----
@@ -2575,6 +2677,7 @@ export const identityApi = {
     })
   },
 
+
   deleteAvatar: () =>
     request<{ ok: boolean }>("/settings/avatar", { method: "DELETE" }),
 }
@@ -3015,6 +3118,30 @@ export const eventApi = {
    * 偏偏是在截止之后才出来的 —— 这条是那些活动的回看入口。
    * 只返回原本就出现在「活动推广」里的（promo_hidden = 0）。
    */
+  /**
+   * 集合投票（问卷）交卷。
+   * 服务端按活动配置算答对率、落档、发奖；**每题对错只在 reveal=immediate 时返回**
+   * （afterDeadline/never 一律不带，避免被小号探答案）。
+   */
+  submitQuiz: (id: string, answers: Record<string, string>, elapsedSec?: number) =>
+    request<{
+      ok: boolean
+      /** 第几次作答（retake=once 时恒为 1） */
+      attempt: number
+      /** 答对率 0..100（分母是题目总数，没答的按错） */
+      percent: number
+      rightCount: number
+      total: number
+      /** 人话说明：达到哪一档 / 没达到 / 超时不计 */
+      rewardNote: string
+      granted: boolean
+      grantDetail: string
+      revealed: boolean
+      perQuestion: { id: string; answered: string; correct?: boolean; answer?: string }[]
+    }>(`/events/${encodeURIComponent(id)}/quiz`, {
+      method: "POST",
+      body: JSON.stringify({ answers, elapsedSec }),
+    }),
   voteHistory: () => request<{ events: EventItem[]; now: string }>("/events/vote-history"),
   /** 单个活动（公开）：活动分享链接用；draft / scheduled 会 404 */
   get: (id: string) => request<{ event: EventItem }>(`/events/${encodeURIComponent(id)}`),
@@ -4144,6 +4271,89 @@ export const adminDnsApi = {
     request<{ ok: boolean }>(`/admin/dns/cf-orphan/${encodeURIComponent(cfId)}`, {
       method: "DELETE",
     }),
+
+  /**
+   * 根域与租用（2026-10-14）：根域定价/容量 + 用户维度 + 全局汇总。
+   *
+   * `q` 只过滤用户维度（按用户名/邮箱），根域与汇总始终返回全量 ——
+   * 站长搜某个人时不该把上面的容量概览一起搜没。
+   */
+  rentals: (q?: string) =>
+    request<AdminDnsRentalsResponse>(
+      `/admin/dns/rentals${q ? `?q=${encodeURIComponent(q)}` : ""}`
+    ),
+
+  /**
+   * 根域 / 用户 / 租约的处置动作（一个接口多个动作，与后端 switch 一一对应）。
+   *
+   * 每个动作都会写审计；`limit` 传 null 表示取消用户级覆盖（回落全局设置）。
+   */
+  rentalAction: (
+    payload:
+      | { action: "set-price"; name: string; dnsPricePerYear: number }
+      | { action: "set-enabled"; name: string; enabled: boolean }
+      | { action: "grant-permission" | "revoke-permission"; username: string }
+      | { action: "set-limit"; username: string; limit: number | null }
+      | { action: "create-rental"; username: string; rootDomain: string; days: number }
+      | { action: "extend-rental"; id: string; days: number }
+      | { action: "revoke-rental"; id: string }
+  ) =>
+    request<{ ok: boolean }>("/admin/dns/rental-action", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+}
+
+/**
+ * 根域的「导入 / 初始化 / 删除」（管理面板 → DNS 解析 → 根域与租用）。
+ *
+ * 与 `adminDnsApi.rentalAction` 的分工：那套管**已登记**根域的定价与配额；
+ * 这套管「把一个 Cloudflare zone 变成可用根域」这件事本身 ——
+ * 它要调 CF 建泛解析、改 `dns_wildcard_roots` 设置项，都比改一行价格重得多，
+ * 所以单独一个接口前缀，也单独一套审计文案。
+ */
+export const adminRootDomainsApi = {
+  /** 根域列表 + Email Routing 现状 + 可选权限清单（导入对话框要用后者） */
+  list: () => request<AdminRootDomainsResponse>("/admin/root-domains"),
+
+  /** 可导入的 zone 候选（后端已排除已经登记过的） */
+  cfZones: () => request<AdminCfZonesResponse>("/admin/root-domains/cf-zones"),
+
+  /**
+   * 导入并初始化。
+   *
+   * 幂等：重复提交同一个 zone 不会重复建泛解析/重复追加设置项，
+   * 所以第一次失败（例如 CF 配额满）之后可以原样重试。
+   */
+  import: (payload: {
+    name: string
+    zoneId: string
+    dnsPricePerYear: number
+    requiresFeature?: string
+    isDefault?: boolean
+    label?: string
+  }) =>
+    request<AdminRootDomainImportResult>("/admin/root-domains/import", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /**
+   * 根域动作。
+   *
+   * `delete` 必须带 `confirm`（= 完整域名）：后端会独立校验一遍，
+   * 这是「手滑点删除」与「真的知道自己在删什么」之间唯一的区别。
+   * `deleteCfRecords` 默认 false —— 删 CF 记录会静默掐断用户正在跑的服务。
+   */
+  action: (
+    payload:
+      | { action: "delete"; name: string; confirm: string; deleteCfRecords?: boolean }
+      | { action: "enable-email" | "set-catchall" | "resolve-zone" | "set-default"; name: string }
+  ) =>
+    request<AdminRootDomainDeleteResult | { ok: boolean }>("/admin/root-domains/action", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 }
 
 /**
@@ -4392,6 +4602,8 @@ export const labApi = {
     html: string
     width?: number
     height?: number
+    /** 设备档位简写：desktop / mobile / tablet */
+    device?: string
     fullPage?: boolean
   }) =>
     request<{
@@ -4406,7 +4618,15 @@ export const labApi = {
    * 页面体检（文字诊断）：真浏览器跑一遍，回溢出/console 报错/资源失败的文字报告。
    * 与截图共用同一个浏览器时长额度池。
    */
-  inspect: (payload: { html: string; width?: number; height?: number }) =>
+  inspect: (payload: {
+    html: string
+    width?: number
+    height?: number
+    /** 设备档位简写：desktop / mobile / tablet */
+    device?: string
+    /** 交互步骤：点击/输入/按键/等待/滚动（最多 20 步） */
+    steps?: unknown[]
+  }) =>
     request<{
       text: string
       msUsed: number

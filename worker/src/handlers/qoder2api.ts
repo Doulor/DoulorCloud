@@ -289,6 +289,8 @@ export async function importQoder2ApiAccounts(
   let granted = false
 
   let bound = 0
+  // 本次真正“新建”的第一个账号 uid —— 奖励的幂等键用它（下面有说明）
+  let firstNewUid = ""
   const alreadyMine: string[] = []
   const skippedByLimit: string[] = []
 
@@ -343,6 +345,7 @@ export async function importQoder2ApiAccounts(
     }
     bound++
     room--
+    if (!firstNewUid) firstNewUid = uid
   }
 
   await audit(
@@ -358,7 +361,15 @@ export async function importQoder2ApiAccounts(
     await grantDonationReward(env, {
       userId: user.id,
       kind: "qoder",
-      dedupKey: `qoder2api:import:${uuid()}`,
+      // 🔴 用「本次新建的第一个账号 uid」而不是随机 uuid（2026-10-14 安全审计）。
+      //
+      // 原来这里是 `qoder2api:import:${uuid()}` —— 每次调用都是新键，幂等**完全失效**：
+      // 只要循环里新建了 1 个绑定就发一次奖励，于是「一个一个反复导入」就能反复领分。
+      // 对照 wb 侧（wb2api.ts）用的是稳定的 `wb2api:${id}`（按绑定），属明显不对称。
+      //
+      // 改成按账号后：重复导入同一账号不再发分（第一次已经发过），
+      // 而导入**新**账号仍然正常发 —— 与「每个反代账号算一次捐献」的产品语义一致。
+      dedupKey: `qoder2api:import:${firstNewUid}`,
       detail: "Qoder2API 账号捐献奖励（JSON 导入）",
     })
   }

@@ -754,6 +754,18 @@ export function parseVoteConfig(params: Record<string, unknown> | null): VoteCon
 /** 投票配置的写入时校验（文案面向管理员），返回 null = 合法 */
 export function validateVoteCondition(params: unknown): string | null {
   const p = (params ?? {}) as Record<string, unknown>
+  /**
+   * 🔴 **问卷（集合投票）的形状完全不同**（questions 而不是 options）。
+   * 不先分流的话，管理端保存问卷会被下面那句「投票活动需要配置选项」挡下来 ——
+   * 实测：POST /admin/events 带问卷配置直接 400，站长根本存不进去。
+   * 合法就放行；不合法要给出**面向问卷**的原因，而不是"需要配置选项"这种误导文案。
+   */
+  if (p.mode === "quiz" || Array.isArray(p.questions)) {
+    if (!parseQuizConfig(p)) {
+      return "问卷配置不合法：至少 1 道题、每题至少 2 个选项、正确答案必须是该题的选项之一、发奖口径（scoring）必须有效"
+    }
+    return null
+  }
   if (!Array.isArray(p.options)) return "投票活动需要配置选项"
   if (p.options.length < 2) return "投票至少要配置 2 个选项"
   if (p.options.length > MAX_VOTE_OPTIONS) return `投票选项最多 ${MAX_VOTE_OPTIONS} 个`
@@ -819,4 +831,210 @@ export function isRewardType(v: string): v is RewardType {
 
 export function isConditionType(v: string): v is ConditionType {
   return (CONDITION_TYPES as readonly string[]).includes(v)
+}
+
+/* --------------------------------------------------------------------------
+   集合投票（问卷）：一种「一个活动里含多道题」的投票形态。
+   --------------------------------------------------------------------------
+   与普通投票的关系：**复用整套 events / event_claims / REWARD_HANDLERS**，
+   只是把 condition_params 里的投票配置换成下面这个形状（mode: "quiz"）。
+   四项策略全部可配置（站长 2026-10-14 明确要求）：
+     retake  —— 能否重答：once（一次）/ best（可重考，取最高分）/ unlimited
+     scoring —— 发奖口径：tiers（按答对率分档）或 linear（按答对率线性折算积分）
+     reveal  —— 对错可见性：immediate（交卷即显）/ afterDeadline（截止后）/ never
+     timeLimit —— 限时：整卷秒数 / 每题秒数，或 null（不限时）
+   -------------------------------------------------------------------------- */
+
+/** 能否重答 */
+export const QUIZ_RETAKE_MODES = ["once", "best", "unlimited"] as const
+export type QuizRetakeMode = (typeof QUIZ_RETAKE_MODES)[number]
+
+/** 对错何时可见 */
+export const QUIZ_REVEAL_MODES = ["immediate", "afterDeadline", "never"] as const
+export type QuizRevealMode = (typeof QUIZ_REVEAL_MODES)[number]
+
+export const MAX_QUIZ_QUESTIONS = 20
+export const MAX_QUIZ_OPTIONS = 8
+/** 重考次数上限（unlimited 也封顶，免得被刷） */
+export const MAX_QUIZ_ATTEMPTS = 10
+
+export interface QuizQuestion {
+  id: string
+  /** 题干 */
+  title: string
+  options: VoteOption[]
+  /**
+   * 正确答案的选项 id。
+   * 🔴 **绝不下发给前端**（与 fixedOptionId 同一原则）—— 下发了就等于送答案。
+   * 只有后台编辑与结算侧读它。
+   */
+  correctOptionId: string
+}
+
+/** 分档发奖的一档：答对率 ≥ minPercent 就给这个奖励 */
+export interface QuizTier {
+  minPercent: number
+  rewardType: RewardType
+  params?: Record<string, unknown>
+}
+
+export type QuizScoring =
+  | { kind: "tiers"; tiers: QuizTier[] }
+  /** 按答对率线性折算积分：答对 100% = maxPoints，0% = 0（四舍五入） */
+  | { kind: "linear"; maxPoints: number; rewardType: RewardType; params?: Record<string, unknown> }
+
+export interface QuizConfig {
+  mode: "quiz"
+  questions: QuizQuestion[]
+  retake: QuizRetakeMode
+  scoring: QuizScoring
+  reveal: QuizRevealMode
+  timeLimit: { totalSec?: number; perQuestionSec?: number } | null
+}
+
+/** 归一化题干/选项（与投票的 normalizeVoteOption 同一套风格） */
+function normalizeQuizQuestion(raw: unknown, index: number): QuizQuestion | null {
+  if (!raw || typeof raw !== "object") return null
+  const q = raw as Record<string, unknown>
+  const title = typeof q.title === "string" ? q.title.trim().slice(0, 200) : ""
+  if (!title) return null
+  const id = typeof q.id === "string" && q.id.trim() ? q.id.trim() : `q${index + 1}`
+  const rawOptions = Array.isArray(q.options) ? q.options : []
+  const options: VoteOption[] = []
+  rawOptions.slice(0, MAX_QUIZ_OPTIONS).forEach((o, i) => {
+    const n = normalizeVoteOption(o, i)
+    if (n && !options.some((x) => x.id === n.id)) options.push(n)
+  })
+  if (options.length < 2) return null
+  const correctOptionId =
+    typeof q.correctOptionId === "string" ? q.correctOptionId.trim() : ""
+  // 🔴 正确答案必须真的在选项里 —— 否则这道题**永远答不对**（静默错判最难查）
+  if (!correctOptionId || !options.some((o) => o.id === correctOptionId)) return null
+  return { id, title, options, correctOptionId }
+}
+
+/**
+ * 解析 + 校验问卷配置。**非法一律返回 null**（与 parseVoteConfig 一致：
+ * 不做静默回落，宁可拒绝写入，也不要出现「答对了却判错」这种查不出来的问题）。
+ */
+export function parseQuizConfig(raw: unknown): QuizConfig | null {
+  if (!raw || typeof raw !== "object") return null
+  const c = raw as Record<string, unknown>
+  const rawQuestions = Array.isArray(c.questions) ? c.questions : []
+  const questions: QuizQuestion[] = []
+  rawQuestions.slice(0, MAX_QUIZ_QUESTIONS).forEach((q, i) => {
+    const n = normalizeQuizQuestion(q, i)
+    // 题目 id 去重（重复 id 会让答案互相覆盖）
+    if (n && !questions.some((x) => x.id === n.id)) questions.push(n)
+  })
+  if (!questions.length) return null
+
+  const retake: QuizRetakeMode = (QUIZ_RETAKE_MODES as readonly string[]).includes(
+    String(c.retake)
+  )
+    ? (c.retake as QuizRetakeMode)
+    : "once"
+
+  const reveal: QuizRevealMode = (QUIZ_REVEAL_MODES as readonly string[]).includes(
+    String(c.reveal)
+  )
+    ? (c.reveal as QuizRevealMode)
+    : "afterDeadline"
+
+  // ---- 发奖口径 ----
+  let scoring: QuizScoring
+  const rawScoring = (c.scoring ?? {}) as Record<string, unknown>
+  if (rawScoring.kind === "linear") {
+    const maxPoints = Math.floor(Number(rawScoring.maxPoints) || 0)
+    if (maxPoints <= 0 || maxPoints > MAX_ABS_POINTS) return null
+    scoring = {
+      kind: "linear",
+      maxPoints,
+      rewardType: "points",
+      // ⚠️ points handler 读的是 **amount**（不是 points）—— 写错会在发奖那一刻才失败
+      params: { amount: maxPoints },
+    }
+  } else {
+    const rawTiers = Array.isArray(rawScoring.tiers) ? rawScoring.tiers : []
+    const tiers: QuizTier[] = []
+    for (const rt of rawTiers) {
+      const t = (rt ?? {}) as Record<string, unknown>
+      const minPercent = Math.floor(Number(t.minPercent))
+      if (!Number.isFinite(minPercent) || minPercent < 0 || minPercent > 100) continue
+      const rewardType = String(t.rewardType ?? "")
+      if (!isRewardType(rewardType)) continue
+      const tierParams = (t.params ?? undefined) as Record<string, unknown> | undefined
+      /**
+       * 🔴 **档位参数在写入时就校验**（2026-10-15 实测教训）：
+       * 原来档位参数原样存下，配错了要到**发奖那一刻**才失败，用户看到的是
+       * 「奖励发放失败」，站长完全不知道是自己参数名写错了（points vs amount）。
+       * 这里按奖励类型跑一遍现成的校验器，配错直接拒绝保存。
+       */
+      if (rewardType === "points") {
+        /**
+         * ⚠️ **必须写明发多少积分**（amount 或 min/max）。
+         * 只靠 validatePointsReward 不够 —— 它对「没配 amount」是宽容的（那个校验器
+         * 还要服务其它允许不配积分的场景），所以 {points:2} 这种**字段名写错**的配置
+         * 会被当成"没配"而放过，直到发奖那一刻才失败（实测踩过）。
+         */
+        const hasAmount = tierParams?.amount !== undefined
+        const hasRange = tierParams?.min !== undefined || tierParams?.max !== undefined
+        if (!hasAmount && !hasRange) return null
+        const err = validatePointsReward(tierParams ?? {})
+        if (err) return null
+      }
+      tiers.push({
+        minPercent,
+        rewardType,
+        params: tierParams,
+      })
+    }
+    if (!tiers.length) return null
+    // 从高到低排 —— 结算时取「第一个满足」的档，顺序错了会发少
+    tiers.sort((a, b) => b.minPercent - a.minPercent)
+    scoring = { kind: "tiers", tiers }
+  }
+
+  // ---- 限时 ----
+  let timeLimit: QuizConfig["timeLimit"] = null
+  if (c.timeLimit && typeof c.timeLimit === "object") {
+    const t = c.timeLimit as Record<string, unknown>
+    const totalSec = Math.floor(Number(t.totalSec) || 0)
+    const perQuestionSec = Math.floor(Number(t.perQuestionSec) || 0)
+    const total = totalSec > 0 ? Math.min(totalSec, 7200) : undefined
+    const per = perQuestionSec > 0 ? Math.min(perQuestionSec, 1800) : undefined
+    if (total || per) timeLimit = { totalSec: total, perQuestionSec: per }
+  }
+
+  return { mode: "quiz", questions, retake, scoring, reveal, timeLimit }
+}
+
+/**
+ * 答对率（0..100，四舍五入）。
+ * ⚠️ 分母是**题目总数**（不是已答题数）：没答的题按错算 —— 否则只答对一题交卷就是 100%。
+ */
+export function quizScorePercent(
+  questions: Pick<QuizQuestion, "id" | "correctOptionId">[],
+  answers: Record<string, string>
+): number {
+  if (!questions.length) return 0
+  let right = 0
+  for (const q of questions) {
+    if (answers[q.id] && answers[q.id] === q.correctOptionId) right += 1
+  }
+  return Math.round((right / questions.length) * 100)
+}
+
+/** 按答对率挑档：tiers 必须已从高到低排好；都不满足返回 null */
+export function pickQuizTier(tiers: QuizTier[], percent: number): QuizTier | null {
+  for (const t of tiers) {
+    if (percent >= t.minPercent) return t
+  }
+  return null
+}
+
+/** 线性折算积分：100% → maxPoints，0% → 0（四舍五入） */
+export function quizLinearPoints(maxPoints: number, percent: number): number {
+  const p = Math.max(0, Math.min(100, percent))
+  return Math.round((maxPoints * p) / 100)
 }

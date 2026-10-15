@@ -32,7 +32,9 @@ import type { Env } from "../env"
  * 「本站创建的账号」与「别人的账号」，从而保证 prune 时**绝不会误删他人账号**。
  * 实测这 46 个账号里没有任何一个以 `dcfrp_` 开头。
  */
-const FRP_USER_PREFIX = "dcfrp_"
+const FRP_USER_PREFIXES = ["DC_"]
+/** 下发给 agent 的边界说明（逗号分隔），agent 会按它过滤要管的账号 */
+const FRP_USER_PREFIX = FRP_USER_PREFIXES.join(",")
 
 /** 允许的签名时间偏差（秒）。服务器时间与 Cloudflare 通常只差毫秒级，300s 已经很宽松。 */
 const AGENT_TS_TOLERANCE_SEC = 300
@@ -136,10 +138,42 @@ async function requireAgent(env: Env, request: Request, rawBody: string): Promis
     await sha256Hex(rawBody),
   ].join("\n")
 
-  const expected = await hmacSha256Hex(secret, canonical)
-  if (!timingSafeEqual(expected, sig)) {
-    throw new ApiError(401, "agent 签名不匹配", "FRP_AGENT_UNAUTHORIZED")
+  // 候选密钥：
+  //   1. 全局 FRP_AGENT_SECRET —— **只给我自己那台服务器**用（它管着 node-bj）。
+  //   2. 该节点的专属 agent_key —— 给**捐献节点**用。
+  //
+  // 🔴 为什么要分开：这个密钥要交给捐献者（脚本靠它拉期望状态）。如果所有捐献者
+  //    共用全局密钥，任何一个人都能把 `?node=` 换成别人的节点，拉到**其他用户的
+  //    frp 令牌**（那是面板账号的密码）。每节点一把密钥，泄露的半径就限于他自己那台。
+  const secrets: (string | null | undefined)[] = [secret]
+  // 节点标识两种来源都要认：
+  //   · /desired 是 GET，节点在 query（?node=xxx）
+  //   · /report 是 POST，节点在 **body**（{"nodeId": "xxx"}）
+  // 只看 query 的话，report 永远匹配不到节点密钥，会一直 401 ——
+  // 表现为「账号能同步过去，但管理端的同步状态永远停在待同步」。
+  let claimedNode = url.searchParams.get("node")
+  if (!claimedNode && rawBody) {
+    try {
+      const parsed = JSON.parse(rawBody) as { nodeId?: unknown; node?: unknown }
+      const fromBody = parsed.nodeId ?? parsed.node
+      if (typeof fromBody === "string") claimedNode = fromBody
+    } catch {
+      /* body 不是 JSON 就当没有节点标识，回落到全局密钥 */
+    }
   }
+  if (claimedNode) {
+    const row = await env.DB.prepare(`SELECT agent_key FROM frp_nodes WHERE id = ? LIMIT 1`)
+      .bind(claimedNode)
+      .first<{ agent_key: string | null }>()
+    if (row?.agent_key) secrets.push(row.agent_key)
+  }
+
+  for (const candidate of secrets) {
+    if (!candidate) continue
+    const expected = await hmacSha256Hex(candidate, canonical)
+    if (timingSafeEqual(expected, sig)) return
+  }
+  throw new ApiError(401, "agent 签名不匹配", "FRP_AGENT_UNAUTHORIZED")
 }
 
 function parsePorts(raw: string): number[] {
@@ -299,7 +333,10 @@ export async function reportFrpAgentState(env: Env, request: Request): Promise<R
   const statements = reported
     .filter(
       (u): u is AgentReportUser & { user: string } =>
-        typeof u.user === "string" && u.user.startsWith(FRP_USER_PREFIX)
+        typeof u.user === "string" &&
+        // ⚠️ 这里必须把 u.user 收进局部变量：TS 的类型收窄**进不去** arrow function，
+        //    直接写 u.user.startsWith(p) 会报「'u.user' is of type 'unknown'」。
+        FRP_USER_PREFIXES.some((p) => (u.user as string).startsWith(p))
     )
     .map((u) => {
       const present = u.present !== false

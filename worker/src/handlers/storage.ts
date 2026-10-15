@@ -46,6 +46,8 @@ import { guardRateLimit } from "../ratelimit"
 import { contentDispositionFor } from "../content-type"
 import { isPlaceholderDnsRecord } from "../custom-domain"
 import type { Env } from "../env"
+import { RESERVED_NAMES } from "../reserved-names"
+import { isCoveredByWildcard } from "../cloudflare"
 
 const MARKER_SUFFIX = "/" // 目录占位对象，如 "ruben/"
 
@@ -1215,7 +1217,9 @@ export async function bindStorageDomain(
   //    而该子域名其实在 tyu.me 下 —— 解析不出来，且是静默错误。
   const zoneId = await zoneIdForFqdn(env, sub.fqdn)
   const existingCf = await cfListDnsRecords(env, zoneId, sub.fqdn)
-  const ensuredDns = existingCf.length > 0
+  // 根域已配泛解析时视为"已有解析"（不建记录，省配额）
+  const ensuredDns =
+    existingCf.length > 0 || (await isCoveredByWildcard(env, sub.fqdn))
   if (!ensuredDns) {
     try {
       await cfCreateDnsRecord(env, zoneId, {
@@ -1354,6 +1358,22 @@ export async function createWorkerRoute(
 }
 
 export async function removeWorkerRoute(env: Env, fqdn: string): Promise<void> {
+  // 🔴 第二道防线：永不删除平台保留主机的路由（2026-10-14 事故后补）
+  //
+  // 第一道防线在 setProjectDomain（拒绝绑定保留名），这里是兜底 ——
+  // 万一有别的调用方、或历史遗留的绑定行，删除路径也不该把平台自己的路由干掉。
+  //
+  // 为什么必须兜底：`DELETE /api/lab/projects/:id/domain` 会走到这里，而它删的是
+  // `<fqdn>/*`。只要有一个用户成功绑过 cloud.doulor.cn，他解绑一次就会
+  // **删掉主应用的 Worker 路由** —— 2026-10-14 主站打不开正是这个链路：
+  // 路由被删后又被人重建，重建时指到了 API Worker，首页于是一直 404。
+  // 删掉的路由不会自动回来，代价是整个主站。
+  const label = fqdn.trim().toLowerCase().split(".")[0]
+  if (RESERVED_NAMES.has(label)) {
+    console.error("拒绝删除保留主机的路由:", fqdn)
+    return
+  }
+
   const pattern = `${fqdn}/*`
   let zoneId: string
   try {
@@ -1366,6 +1386,23 @@ export async function removeWorkerRoute(env: Env, fqdn: string): Promise<void> {
     (r) => r.pattern.toLowerCase() === pattern.toLowerCase()
   )
   if (!existing) return
+
+  // 🔴 归属校验：只删「指向本 Worker」的路由（2026-10-14 事故后补）
+  //
+  // 原来这里只按 pattern 找到就删，不看这条路由指向谁。后果是真实的、不是推演：
+  // 普通用户能把 lab 作品绑到 cloud.doulor.cn（见 setProjectDomain），
+  // 而他一旦解绑，这个函数就会删掉 `cloud.doulor.cn/*` —— **那是前端 Worker 的路由，
+  // 不是我们的**。路由删掉后主站首页直接 404，而且不会自动恢复
+  //（2026-10-14 主站打不开就是这个链路：被删 → 重建 → 重建时指到了 API Worker）。
+  //
+  // 加上这道判断后：指向 `doulor-mail`（前端）等其它 Worker 的路由，本函数一律不碰。
+  // 代价是「绑定时已存在的路由改绑后可能留下来」，但留下一条多余路由远好过删掉主站。
+  const owner = env.WORKER_NAME ?? "doulor-mail-api"
+  if (existing.script && existing.script !== owner) {
+    console.error("拒绝删除不属于本 Worker 的路由:", pattern, existing.script)
+    return
+  }
+
   await cfWorkersApi(env, `/zones/${zoneId}/workers/routes/${existing.id}`, {
     method: "DELETE",
   })

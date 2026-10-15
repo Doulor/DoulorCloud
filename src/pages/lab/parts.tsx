@@ -1,7 +1,7 @@
 import * as React from "react"
 import { createPortal } from "react-dom"
 import { toast } from "sonner"
-import { BookOpen, Check, Copy, ChevronDown, ChevronRight, Eye, FileText, Gauge, Gift, Globe, List, Loader2, Pencil, Plus, Power, Search, Settings2, Bot, Link as LinkIcon, Sparkles, Paperclip, Terminal, Trash2, X, Camera } from "lucide-react"
+import { BookOpen, Check, Copy, ChevronDown, ChevronRight, Eye, FileText, Gauge, Gift, Globe, List, Loader2, Pencil, Plus, Power, Search, Settings2, Bot, Link as LinkIcon, Sparkles, Paperclip, Terminal, Trash2, X, Camera, FileDiff } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -578,6 +578,8 @@ export function toolIntent(
       return e.path ? t("lab.act.write", { what: e.path }) : t("lab.act.writing")
     case "replace":
       return e.path ? t("lab.act.replace", { what: e.path }) : t("lab.act.replacing")
+    case "patch":
+      return e.path ? t("lab.act.patch", { what: e.path }) : t("lab.act.patching")
     case "delete":
       return e.path ? t("lab.act.delete", { what: e.path }) : t("lab.act.deleting")
     case "list":
@@ -776,6 +778,7 @@ export const TOOL_ICON: Record<ToolName, typeof FileText> = {
   http: LinkIcon,
   screenshot: Camera,
   inspect: Search,
+  patch: FileDiff,
 }
 
 /**

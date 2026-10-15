@@ -160,6 +160,9 @@ const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
   // doulor.cn 专属域：**默认关闭**，只能在这里显式打开（后端 allPermissions()
   // 不含它，见 worker/src/permissions.ts 的 DEFAULT_ALLOWED）。
   { key: "doulor", label: "feat.doulor", desc: "adm.feat.doulorDesc" },
+  // DNS 解析记录：同样**默认关闭**，但理由是配额（CF 每 zone 记录数有硬上限）
+  // 而不是风险。与上面的 doulor 是两件事，别互相推断（见 permissions.ts 的 FEATURES）。
+  { key: "dns", label: "feat.dns", desc: "adm.feat.dnsDesc" },
 ]
 
 /** 「捐献是否授予对应权限」的开关项（与后端 settings.ts 的 donation_grant_* 一一对应） */
@@ -388,6 +391,13 @@ interface EventDraft {
    * 「改标题不影响已投出的票」—— 选项 id 一旦生成就不随标题变化。
    */
   voteOptions: { key: string; label: string; desc: string; image: string }[]
+  /**
+   * 投票形态：普通投票（选一个选项）还是**问卷**（多题、按答对率发奖）。
+   * 问卷配置直接粘 JSON —— 结构比普通投票深一层，结构化表单是后续的事。
+   */
+  quizMode: boolean
+  /** 问卷 JSON（与后端 parseQuizConfig 的形状一致，见 worker/src/event-rewards.ts） */
+  quizJson: string
   /** 投票：获奖规则（七档，见 EventVoteRewardRule） */
   voteRule: EventVoteRewardRule
   /**
@@ -428,6 +438,8 @@ function emptyEventDraft(): EventDraft {
     lotteryMode: "even",
     // 默认给两个空选项：投票至少要有 2 个（后端也会拒少于 2 个的配置），
     // 默认就摆两行能省掉「点新建再加一行」这一步
+    quizMode: false,
+    quizJson: "",
     voteOptions: [
       { key: newOptionKey(), label: "", desc: "", image: "" },
       { key: newOptionKey(), label: "", desc: "", image: "" },
@@ -589,7 +601,10 @@ function eventDraftToPayload(d: EventDraft): EventPayload {
         pool: Math.floor(Number(d.lotteryPool)) || 1,
         mode: d.lotteryMode,
       }
-    : d.conditionType === "vote"
+    : d.conditionType === "vote" && d.quizMode
+      ? // 问卷：直接把粘贴的 JSON 解析后作为 condition_params（形状由后端 parseQuizConfig 校验）
+        (JSON.parse(d.quizJson) as Record<string, unknown>)
+      : d.conditionType === "vote"
       ? {
           // 只提交填了标题的选项（空行是编辑时的占位，不该进库）；
           // 后端还会再校验「至少 2 个」并在不满足时拒掉。
@@ -697,6 +712,38 @@ const EVENT_STATUS_TEXT: Record<EventStatus, string> = {
   archived: "adm.evStatus.archivedShort",
 }
 
+/**
+ * 问卷 JSON 的一键示例（后台「填入示例」按钮用）。
+ *
+ * ⚠️ 档位参数必须是 **amount** —— points 发奖 handler 读的就是这个字段，
+ * 写成 points 会在**保存时**被服务端拒掉（见 worker/src/event-rewards.ts 的校验）。
+ * 这个模板本身就是「能被保存、能跑通」的最小可用配置，改标题/选项即可用。
+ */
+const QUIZ_TEMPLATE = JSON.stringify(
+  {
+    mode: "quiz",
+    questions: [
+      {
+        id: "q1",
+        title: "1 + 1 等于几？",
+        options: [
+          { id: "a", label: "2" },
+          { id: "b", label: "3" },
+        ],
+        correctOptionId: "a",
+      },
+    ],
+    retake: "once",
+    reveal: "immediate",
+    scoring: {
+      kind: "tiers",
+      tiers: [{ minPercent: 60, rewardType: "points", params: { amount: 2 } }],
+    },
+  },
+  null,
+  2
+)
+
 /** 管理面板全部子 tab（用于 URL hash 校验：/dashboard/admin#users 直达） */
 const ADMIN_TAB_KEYS = new Set([
   "users", "invites", "inviteQuotas", "reserved", "titles", "points",
@@ -790,6 +837,8 @@ export default function AdminPage() {
     // doulor.cn 专属域默认**不开**：建码时要显式勾选才会授予
     // （与后端 allPermissions() 的口径一致，见 worker/src/permissions.ts）
     doulor: false,
+    // DNS 解析记录同样默认**不开**（配额闸，见 worker/src/permissions.ts）
+    dns: false,
   })
 
   /** 邀请码溯源弹窗（站长 2026-10-07：用户列表点邀请码、邀请码列表点码都能打开） */
@@ -808,6 +857,18 @@ export default function AdminPage() {
   const [quotaDraft, setQuotaDraft] = React.useState<string | null>(null)
   const [globalQuota, setGlobalQuota] = React.useState(5)
   const [subQuota, setSubQuota] = React.useState("5")
+  // 每用户 DNS 记录数上限（dns_records_per_user，默认 10）。
+  // 它与「子域名配额」是两个独立旋钮：一个是能开几个域名，一个是能建几条解析。
+  const [dnsRecordsPerUser, setDnsRecordsPerUser] = React.useState("10")
+  /**
+   * DNS 解析租用的租期（dns_rental_days，单位**天**，默认 365 = 一年）。
+   *
+   * ⚠️ 它不是「纯展示」的到期日参数：根域价是**年价**（root_domains.dns_price_per_year），
+   * 租期不是 365 天时按 `年价 × 租期 ÷ 365` 折算实收集分（向上取整，最小 1 分）。
+   * 换算口径与例子见 worker/src/handlers/dns-rental.ts 的 priceForDays ——
+   * 所以下面那张卡上要同时把这条口径写给站长看。
+   */
+  const [dnsRentalDays, setDnsRentalDays] = React.useState("365")
 
   // 用户详情里的昵称编辑（与配额一样先存草稿，点保存才提交）
   const [nickDraft, setNickDraft] = React.useState("")
@@ -1236,6 +1297,25 @@ export default function AdminPage() {
     proxy: true,
   })
   // 捐献是否授予对应权限（5 条通道各自独立，默认全开；见 settings.ts 注释）
+  /**
+   * 一键捐献节点的「默认上架配置」（2026-10-14）。
+   *
+   * 捐献脚本自检通过后，系统按这几个值自动给新节点上架一个套餐。
+   * 站长要求这些在管理面板可改，所以这里做成可编辑，而不是写死在代码里。
+   */
+  const [donateDefaults, setDonateDefaults] = React.useState({
+    days: "30",
+    points: "100",
+    portMin: "10000",
+    portMax: "10010",
+    maxPorts: "11",
+    // 防火墙/安全组要放行的段。和套餐段分开：套餐段决定"发给用户哪些口"，
+    // 这个决定"服务器放行哪些口"，通常是前者的超集。
+    openPortMin: "10000",
+    openPortMax: "11000",
+    ownerShare: "10",
+    autoList: true,
+  })
   const [donationGrants, setDonationGrants] = React.useState<Record<string, boolean>>({
     ai: true,
     sensenova: true,
@@ -1966,6 +2046,8 @@ export default function AdminPage() {
       }
       setGlobalQuota(Number(s.subdomain_quota_default ?? 5))
       setSubQuota(s.subdomain_quota_default ?? "5")
+      setDnsRecordsPerUser(s.dns_records_per_user ?? "10")
+      setDnsRentalDays(s.dns_rental_days ?? "365")
       setFrpEnabled(isSettingOn(s.frp_enabled, true))
       setFrpCoreUrl(s.frp_core_url ?? "")
       setFrpNotifyEmail(s.frp_admin_notify_email ?? "")
@@ -2026,6 +2108,17 @@ export default function AdminPage() {
         proxy: autoRaw.includes("proxy"),
       })
       // 捐献是否授予对应权限（5 条通道各自独立，默认全开）
+      setDonateDefaults({
+        days: s.frp_donate_default_days ?? "30",
+        points: s.frp_donate_default_points ?? "100",
+        portMin: s.frp_donate_default_port_min ?? "10000",
+        portMax: s.frp_donate_default_port_max ?? "10010",
+        maxPorts: s.frp_donate_default_max_ports ?? "11",
+        openPortMin: s.frp_donate_open_port_min ?? "10000",
+        openPortMax: s.frp_donate_open_port_max ?? "11000",
+        ownerShare: s.frp_rental_owner_share_percent ?? "10",
+        autoList: isSettingOn(s.frp_donate_auto_list, true),
+      })
       setDonationGrants({
         ai: isSettingOn(s.donation_grant_ai, true),
         sensenova: isSettingOn(s.donation_grant_sensenova, true),
@@ -2168,6 +2261,16 @@ export default function AdminPage() {
         donation_grant_proxy: donationGrants.proxy,
         donation_grant_wb2api: donationGrants.wb2api,
         donation_grant_qoder2api: donationGrants.qoder2api,
+        // 一键捐献节点的默认上架配置
+        frp_donate_default_days: donateDefaults.days,
+        frp_donate_default_points: donateDefaults.points,
+        frp_donate_default_port_min: donateDefaults.portMin,
+        frp_donate_default_port_max: donateDefaults.portMax,
+        frp_donate_default_max_ports: donateDefaults.maxPorts,
+        frp_donate_open_port_min: donateDefaults.openPortMin,
+        frp_donate_open_port_max: donateDefaults.openPortMax,
+        frp_rental_owner_share_percent: donateDefaults.ownerShare,
+        frp_donate_auto_list: donateDefaults.autoList ? "1" : "0",
         // 可转授额度的模块，逗号分隔；全关时发空串（后端 = 一个都不发）
         donation_transfer_features: Object.entries(donationQuotaFeatures)
           .filter(([, on]) => on)
@@ -2201,6 +2304,17 @@ export default function AdminPage() {
         // ---- 2026-09-26 补齐：原先有输入框但漏在 payload 里 / 完全没有入口的设置项 ----
         // ⚠️ subdomain_quota_default 原先就是「有框但不保存」，改完会被 loadSettings 刷回去
         subdomain_quota_default: Math.max(0, Math.round(Number(subQuota) || 0)),
+        // 每用户 DNS 记录数上限；0 是合法值（= 一条都不允许建），所以只兜 NaN
+        dns_records_per_user: Math.max(0, Math.round(Number(dnsRecordsPerUser) || 0)),
+        // DNS 租用租期（天）。与上面的记录数**不同**：空 / 非数字 / 0 / 负数都不是
+        // 合法值 —— 0 天租约等于「用户付了积分当场到期」，而 1 天同样是「当场到期」，
+        // 所以**不夹到 1**，一律回落 365 天（与后端 dns-rental.ts 的 rentalDays 同一条口径，
+        // 否则会出现「后台存了 1 天、用户以为是一年」这种对不上账的情况）；
+        // 只有上限夹到 3650 天（≈10 年）防手滑。
+        dns_rental_days: (() => {
+          const n = Math.trunc(Number(dnsRentalDays))
+          return Number.isFinite(n) && n >= 1 ? Math.min(3650, n) : 365
+        })(),
         newapi_free_plan_id: Math.max(0, Math.round(Number(newapiFreePlanId) || 0)),
         newapi_quota_per_unit: Math.max(1, Math.round(Number(quotaPerUnitInput) || 500000)),
         invite_reward_enabled: inviteRewardEnabled,
@@ -2895,6 +3009,11 @@ export default function AdminPage() {
             lotteryPool: String(ev.conditionParams?.pool ?? "1000"),
             lotteryMode: ev.conditionParams?.mode === "random" ? "random" : "even",
             // 投票选项：把库里的 {id,label,desc,image} 灌回草稿（保留原 id，见 helper 注释）
+            quizMode: ev.conditionParams?.mode === "quiz",
+            quizJson:
+              ev.conditionParams?.mode === "quiz"
+                ? JSON.stringify(ev.conditionParams, null, 2)
+                : "",
             voteOptions: voteOptionsFromParams(ev.conditionParams),
             voteRule: parseVoteRule(ev.conditionParams?.rewardRule),
             voteFixedOptionId: String(ev.conditionParams?.fixedOptionId ?? ""),
@@ -2920,8 +3039,32 @@ export default function AdminPage() {
       toast.error(t("adm.95"))
       return
     }
+    /**
+     * 问卷：JSON 必须能解析，且形状基本正确。
+     * ⚠️ 这里只做「能解析 + 关键字段在」的粗校验 —— 真正的规则（选项≥2、正确答案必须在选项里、
+     * 分档非空…）由服务端 parseQuizConfig 把关，前端重复实现一套只会两边不一致。
+     */
+    if (eventDraft.conditionType === "vote" && eventDraft.quizMode) {
+      try {
+        const parsed = JSON.parse(eventDraft.quizJson) as {
+          questions?: unknown[]
+          scoring?: unknown
+        }
+        if (!Array.isArray(parsed.questions) || !parsed.questions.length) {
+          toast.error(t("quiz.adm.errQuestions"))
+          return
+        }
+        if (!parsed.scoring) {
+          toast.error(t("quiz.adm.errScoring"))
+          return
+        }
+      } catch {
+        toast.error(t("quiz.adm.errJson"))
+        return
+      }
+    }
     // 投票：至少 2 个填了标题的选项（后端也会拒，这里先给明确提示免得白跑一次）
-    if (eventDraft.conditionType === "vote") {
+    if (eventDraft.conditionType === "vote" && !eventDraft.quizMode) {
       const filled = eventDraft.voteOptions.filter((o) => o.label.trim())
       if (filled.length < 2) {
         toast.error(t("vote.adm.errNeedTwo"))
@@ -3040,7 +3183,7 @@ export default function AdminPage() {
       const res = await adminEventApi.uploadImage(file)
       setEventDraft((d) => ({
         ...d,
-        voteOptions: d.voteOptions.map((o) =>
+        voteOptions: d.quizMode ? [] : d.voteOptions.map((o) =>
           o.key === target ? { ...o, image: res.url } : o
         ),
       }))
@@ -7313,6 +7456,55 @@ export default function AdminPage() {
                 </CardContent>
               </Card>
 
+              {/* DNS 记录配额：与上面的「子域名配额」是两个独立旋钮 ——
+                  一个管「能开几个域名」，一个管「能建几条解析记录」。
+                  后者受 Cloudflare 每 zone 的记录数硬上限约束，见 dns.ts 的说明。 */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{t("adm.dnsQuota.title")}</CardTitle>
+                  <CardDescription>{t("adm.dnsQuota.desc")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  <Label htmlFor="dnsRecordsPerUser">{t("adm.dnsQuota.label")}</Label>
+                  <Input
+                    id="dnsRecordsPerUser"
+                    type="number"
+                    min={0}
+                    max={1000}
+                    className="w-32"
+                    value={dnsRecordsPerUser}
+                    onChange={(e) => setDnsRecordsPerUser(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">{t("adm.dnsQuota.hint")}</p>
+                </CardContent>
+              </Card>
+
+              {/* DNS 租用租期：与上面那张「记录配额」卡是两个维度 ——
+                  配额管「能建几条解析」，租期管「买一次能用多久、扣多少分」。
+                  单独一张卡而不是塞进上面那张，是因为它的副作用更大（会改实收积分）。 */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{t("adm.dnsRental.title")}</CardTitle>
+                  <CardDescription>{t("adm.dnsRental.desc")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  <Label htmlFor="dnsRentalDays">{t("adm.dnsRental.label")}</Label>
+                  <Input
+                    id="dnsRentalDays"
+                    type="number"
+                    min={1}
+                    max={3650}
+                    className="w-32"
+                    value={dnsRentalDays}
+                    onChange={(e) => setDnsRentalDays(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">{t("adm.dnsRental.hint")}</p>
+                  {/* 价格口径必须写在界面上：站长改天数时最直接的问题是
+                      「那用户到底会被扣多少分」，只写「单位是天」等于没说。 */}
+                  <p className="text-xs text-muted-foreground">{t("adm.dnsRental.priceHint")}</p>
+                </CardContent>
+              </Card>
+
               {/* 每日签到配置 */}
               <Card>
                 <CardHeader>
@@ -7960,6 +8152,51 @@ export default function AdminPage() {
                     {t("adm.648")}
                     {t("adm.649")}
                   </p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">{t("adm.frpDonateTitle")}</CardTitle>
+                  <CardDescription>{t("adm.frpDonateDesc")}</CardDescription>
+                  <CardDescription>{t("adm.frpDonateDesc2")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    {([
+                      ["days", "adm.frpDonateDays"],
+                      ["points", "adm.frpDonatePoints"],
+                      ["portMin", "adm.frpDonatePortMin"],
+                      ["portMax", "adm.frpDonatePortMax"],
+                      ["maxPorts", "adm.frpDonateMaxPorts"],
+                      ["openPortMin", "adm.frpDonateOpenMin"],
+                      ["openPortMax", "adm.frpDonateOpenMax"],
+                      ["ownerShare", "adm.frpOwnerShare"],
+                    ] as const).map(([k, labelKey]) => (
+                      <div key={k} className="space-y-1">
+                        <label className="text-xs text-muted-foreground" htmlFor={`frp-donate-${k}`}>
+                          {t(labelKey)}
+                        </label>
+                        <Input
+                          id={`frp-donate-${k}`}
+                          value={donateDefaults[k]}
+                          inputMode="numeric"
+                          onChange={(e) =>
+                            setDonateDefaults((prev) => ({ ...prev, [k]: e.target.value }))
+                          }
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex items-center justify-between rounded-md border p-3">
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium">{t("adm.frpDonateAutoList")}</p>
+                      <p className="text-xs text-muted-foreground">{t("adm.frpDonateAutoListHint")}</p>
+                    </div>
+                    <Switch
+                      checked={donateDefaults.autoList}
+                      onCheckedChange={(v) => setDonateDefaults((prev) => ({ ...prev, autoList: v }))}
+                    />
+                  </div>
                 </CardContent>
               </Card>
 
@@ -9633,6 +9870,68 @@ export default function AdminPage() {
                       </Button>
                     </div>
                     <p className="text-xs text-muted-foreground">{t("vote.adm.optionsHint")}</p>
+
+                    {/* 投票形态：普通投票 / 问卷（问卷直接粘 JSON，见 quizJson 注释） */}
+
+                    <div className="flex flex-wrap items-center gap-3">
+
+                      <label className="flex items-center gap-2 text-sm">
+
+                        <input
+
+                          type="checkbox"
+
+                          checked={eventDraft.quizMode}
+
+                          onChange={(e) => setEventDraft({ ...eventDraft, quizMode: e.target.checked })}
+
+                        />
+
+                        {t("quiz.adm.mode")}
+
+                      </label>
+
+                      <span className="text-xs text-muted-foreground">{t("quiz.adm.modeHint")}</span>
+
+                    </div>
+
+                    {eventDraft.quizMode && (
+
+                      <textarea
+
+                        className="mt-2 h-64 w-full rounded-lg border border-border bg-background p-3 font-mono text-xs"
+
+                        placeholder={t("quiz.adm.placeholder")}
+
+                        value={eventDraft.quizJson}
+
+                        onChange={(e) => setEventDraft({ ...eventDraft, quizJson: e.target.value })}
+
+                      />
+
+                    )}
+
+                    {eventDraft.quizMode && (
+
+                      <Button
+
+                        type="button"
+
+                        variant="outline"
+
+                        size="sm"
+
+                        className="mt-2"
+
+                        onClick={() => setEventDraft({ ...eventDraft, quizJson: QUIZ_TEMPLATE })}
+
+                      >
+
+                        {t("quiz.adm.fillExample")}
+
+                      </Button>
+
+                    )}
 
                     {eventDraft.voteOptions.map((opt, i) => (
                       <div key={opt.key} className="space-y-2 rounded-md border p-3">

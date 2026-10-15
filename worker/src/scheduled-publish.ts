@@ -13,7 +13,7 @@
  * 所以「每分钟跑一次」和「被重复调用」都是安全的。
  */
 import { publishAnnouncementNow } from "./handlers/announcements"
-import { activateScheduledEvent, drawDueLotteries, drawDueVotes } from "./handlers/events"
+import { activateScheduledEvent, drawDueLotteries, drawDueVotes, settleDueQuizzes } from "./handlers/events"
 import type { Env } from "./env"
 
 /** 单次最多处理多少条，避免一次 cron 跑太久（剩下的下一次继续） */
@@ -109,6 +109,12 @@ export async function processScheduledPublishes(
   let votes = 0
   try {
     const r = await drawDueVotes(env)
+  // 可重答问卷：按「最高分」在截止后统一结算（retake=once 的已在交卷时发完）
+  try {
+    await settleDueQuizzes(env)
+  } catch (err) {
+    console.error("问卷定时结算异常:", err)
+  }
     votes = r.drawn
     errors += r.errors
   } catch (err) {

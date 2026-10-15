@@ -29,6 +29,11 @@ import {
   parseLotteryConfig,
   splitPool,
   parseVoteConfig,
+  parseQuizConfig,
+  quizScorePercent,
+  pickQuizTier,
+  quizLinearPoints,
+  MAX_QUIZ_ATTEMPTS,
   pickWinningOptions,
   pickPointsAmount,
   voteScopeOf,
@@ -42,6 +47,7 @@ import {
   type ConditionType,
   type VoteConfig,
   type VoteScope,
+  type QuizConfig,
 } from "../event-rewards"
 import { applyPoints } from "../points"
 import type { Env } from "../env"
@@ -140,6 +146,19 @@ function toEvent(
   // ⚠️ 它必须与上面的 conditionParams 分开下发：后者对普通用户恒为 null（保护认证码）。
   const vote =
     row.condition_type === "vote" ? parseVoteConfig(parseJson(row.condition_params)) : null
+  /**
+   * 问卷（集合投票）：普通用户拿**剥掉正确答案**的版本，管理端拿完整的
+   * （管理端要能编辑正确答案 —— 它本来就只在登录管理员时下发）。
+   */
+  const quiz =
+    row.condition_type === "vote"
+      ? (() => {
+          const raw = parseJson(row.condition_params)
+          const quiz = parseQuizConfig(raw)
+          if (!quiz) return null
+          return isAdmin ? quiz : publicQuizConfig(quiz)
+        })()
+      : null
   return {
     id: row.id,
     title: row.title,
@@ -183,6 +202,7 @@ function toEvent(
      * 非投票活动或配置异常为 null —— 前端据此决定要不要渲染投票区块。
      * 票数与「我投了哪个」在 listEvents / getEvent 里补（那两个地方才查得到票）。
      */
+    quiz,
     vote: vote
       ? {
           options: vote.options,
@@ -485,16 +505,22 @@ export async function getEvent(env: Env, request: Request, id: string): Promise<
   const ended = isEventOver(row, now)
   // 活动已结束时把「固定选项」一并下发：投票窗口关了，继续藏着没有意义，
   // 而「已结束」的活动页上要能看出是哪个选项获奖（口径同 voteCountsVisible 的 ended）。
-  const event = toEvent(row, now, false, { revealVoteResult: ended })
+  /**
+   * 🔴 **管理端必须拿到 isAdmin=true**（2026-10-15 实测抓到）：
+   * 原来这里恒传 false，而 isAdmin 是在下面才计算的 —— 顺序反了。
+   * 后果：后台编辑已有问卷时，回填的 JSON 是**剥掉正确答案**的版本，
+   * 管理员一保存就把答案抹掉（题目从此永远答不对）。
+   * ⚠️ 非管理员一律 false：正确答案只在管理员会话下发（与 conditionParams.code 同一原则）。
+   */
+  const user = await optionalUser(env, request)
+  const isAdmin = !!user && isAnyAdmin(user.role)
+  const event = toEvent(row, now, isAdmin, { revealVoteResult: ended })
 
   const count = await env.DB.prepare(
     "SELECT COUNT(*) AS c FROM event_claims WHERE event_id = ?"
   )
     .bind(id)
     .first<{ c: number }>()
-
-  const user = await optionalUser(env, request)
-  const isAdmin = !!user && isAnyAdmin(user.role)
   let myClaim: { rewardStatus: string; rewardDetail: string | null } | null = null
   let claimBlockedReason: string | null = null
   let myVote: string | null = null
@@ -705,6 +731,360 @@ async function resolveWinningOptions(
     if (valid.has(t.option_id)) counts.set(t.option_id, t.c)
   }
   return { winning: pickWinningOptions(counts, scope), counts }
+}
+
+/**
+ * POST /events/:id/quiz —— 交卷（集合投票 / 问卷）。
+ *
+ * body: { answers: { [questionId]: optionId }, elapsedSec?: number }
+ *
+ * 结算口径（全部来自活动的 quiz 配置，站长可配）：
+ *   · 答对率 = 答对题数 / **题目总数**（没答的按错算，见 quizScorePercent）
+ *   · scoring.kind = "tiers"  → 按答对率落档，取第一个满足的档发奖
+ *   · scoring.kind = "linear" → 按答对率线性折算积分
+ *   · retake = "once" → **交卷即结算**（一人一次，event_claims 唯一索引就是锁）
+ *   · retake = "best" / "unlimited" → 允许重答，**奖励留到截止后按最高分结算**
+ *     （复用现有「截止后开奖」那套：可重答还即时发奖的话，先随便答一次拿低档、
+ *      再刷高分也拿不到更好档，等于骗人；留到截止统一按最高分发才是对的）
+ *   · timeLimit.totalSec 超时 → 答案照记（用户能看到错在哪），但**不发奖**
+ *   · reveal 决定回执里给不给「每题对错」
+ */
+/**
+ * 下发给前端的问卷配置 —— **必须剥掉 correctOptionId**。
+ *
+ * 🔴 这是安全边界：listEvents 未登录也能访问，带上正确答案等于把答案公开
+ * （和 condition_params.code、fixedOptionId 同一条原则：能在服务端藏的就别下发）。
+ * 每题对错只由交卷接口按 reveal 决定给不给。
+ */
+function publicQuizConfig(cfg: QuizConfig) {
+  return {
+    mode: "quiz" as const,
+    retake: cfg.retake,
+    reveal: cfg.reveal,
+    timeLimit: cfg.timeLimit,
+    scoring: cfg.scoring.kind === "linear"
+      ? { kind: "linear" as const, maxPoints: cfg.scoring.maxPoints }
+      : {
+          kind: "tiers" as const,
+          // 分档只下发「门槛 + 奖励类型」，params 里可能含站长配置细节，一并保留（前端要展示奖励）
+          tiers: cfg.scoring.tiers.map((t) => ({
+            minPercent: t.minPercent,
+            rewardType: t.rewardType,
+            params: t.params,
+          })),
+        },
+    questions: cfg.questions.map((q) => ({
+      id: q.id,
+      title: q.title,
+      // ⚠️ 只给 label/desc/image，绝不给 correctOptionId
+      options: q.options.map((o) => ({ id: o.id, label: o.label, desc: o.desc, image: o.image })),
+    })),
+  }
+}
+
+/**
+ * 问卷「取最高分」结算（可重答专用）。
+ *
+ * 口径：对每个交过卷的用户，取他**历次作答中的最高答对率**，按 scoring 挑档发奖。
+ *   · 幂等：靠 event_claims 的 (event_id,user_id) 唯一索引 —— 重复调用不会重复发
+ *   · 只发一次：已经发过的用户直接跳过（**不升级**，因为 REWARD_HANDLERS 发的是定额，
+ *     补差额需要每档都记流水，复杂且容易发错；要升级就得改成"结算前不发、结算时一次发对"，
+ *     而可重答正是这么做的 ⇒ 已经发过说明是 retake=once 的活动，本函数会跳过）
+ *   · 没达到任何档位的用户：不产生 claim（避免刷出一堆空的领取记录）
+ *
+ * 返回：发了几个、跳过几个、出错几个 —— 管理端要能看到结果。
+ */
+/**
+ * 定时任务：把**到点结束**的可重答问卷结算掉（见 settleQuizEvent）。
+ *
+ * 为什么只处理 retake != "once"：
+ *   · retake=once 的活动交卷当场就发奖了，没有"待结算"状态；
+ *   · 可重答的奖励按「最高分」在截止后统一发，必须有定时任务兜底 ——
+ *     否则只有站长手动点「开奖」才会发（站长会忘，用户就一直等不到）。
+ *
+ * 判「到点」用与开奖一致的口径：ends_at 已过，或状态是 ended/archived。
+ */
+export async function settleDueQuizzes(
+  env: Env
+): Promise<{ settled: number; errors: number }> {
+  const nowIso = new Date().toISOString()
+  const rows = await env.DB.prepare(
+    `SELECT id FROM events
+      WHERE condition_type = 'vote'
+        AND (status = 'ended' OR status = 'archived' OR (ends_at IS NOT NULL AND ends_at < ?))
+      ORDER BY ends_at ASC
+      LIMIT 50`
+  )
+    .bind(nowIso)
+    .all<{ id: string }>()
+  let settled = 0
+  let errors = 0
+  for (const r of rows.results ?? []) {
+    try {
+      const row = await loadOne(env, r.id)
+      const cfg = parseQuizConfig(parseJson(row.condition_params))
+      // 不是问卷、或是一次性问卷（交卷即发）⇒ 跳过
+      if (!cfg || cfg.retake === "once") continue
+      await settleQuizEvent(env, r.id)
+      settled++
+    } catch (err) {
+      console.error("问卷定时结算失败:", r.id, err)
+      errors++
+    }
+  }
+  return { settled, errors }
+}
+
+export async function settleQuizEvent(
+  env: Env,
+  id: string
+): Promise<{ granted: number; skipped: number; errors: number }> {
+  const row = await loadOne(env, id)
+  const cfg = parseQuizConfig(parseJson(row.condition_params))
+  if (!cfg) return { granted: 0, skipped: 0, errors: 0 }
+
+  // 每个用户的所有答案（历次 attempt 都取出来，按用户分组算最高分）
+  const rows = await env.DB.prepare(
+    "SELECT user_id, question_id, option_id, attempt FROM event_quiz_answers WHERE event_id = ? ORDER BY user_id, attempt"
+  )
+    .bind(id)
+    .all<{ user_id: string; question_id: string; option_id: string; attempt: number }>()
+
+  /** user_id → attempt → (question_id → option_id) */
+  const byUser = new Map<string, Map<number, Record<string, string>>>()
+  for (const r of rows.results ?? []) {
+    let attempts = byUser.get(r.user_id)
+    if (!attempts) {
+      attempts = new Map()
+      byUser.set(r.user_id, attempts)
+    }
+    let ans = attempts.get(r.attempt)
+    if (!ans) {
+      ans = {}
+      attempts.set(r.attempt, ans)
+    }
+    ans[r.question_id] = r.option_id
+  }
+
+  let granted = 0
+  let skipped = 0
+  let errors = 0
+  const iso = new Date().toISOString()
+  for (const [userId, attempts] of byUser) {
+    // 取最高答对率
+    let best = 0
+    for (const ans of attempts.values()) {
+      const p = quizScorePercent(cfg.questions, ans)
+      if (p > best) best = p
+    }
+    let rewardType: RewardType | null = null
+    let rewardParams: Record<string, unknown> = {}
+    if (cfg.scoring.kind === "linear") {
+      const pts = quizLinearPoints(cfg.scoring.maxPoints, best)
+      if (pts > 0) {
+        rewardType = "points"
+        rewardParams = { points: pts }
+      }
+    } else {
+      const tier = pickQuizTier(cfg.scoring.tiers, best)
+      if (tier) {
+        rewardType = tier.rewardType
+        rewardParams = tier.params ?? {}
+      }
+    }
+    if (!rewardType) {
+      skipped++
+      continue
+    }
+    const claimId = uuid()
+    const ins = await env.DB.prepare(
+      "INSERT OR IGNORE INTO event_claims (id, event_id, user_id, reward_type, reward_status, reward_detail, claimed_at) VALUES (?, ?, ?, ?, 'pending', '', ?)"
+    )
+      .bind(claimId, id, userId, rewardType, iso)
+      .run()
+    if ((ins.meta?.changes ?? 0) === 0) {
+      skipped++ // 已经发过（幂等）
+      continue
+    }
+    try {
+      const user = await env.DB.prepare("SELECT username FROM users WHERE id = ?")
+        .bind(userId)
+        .first<{ username: string }>()
+      await grantAndRecord(env, claimId, row, userId, user?.username ?? "", {
+        rewardType,
+        params: rewardParams,
+      })
+      granted++
+    } catch (err) {
+      console.error("问卷结算发奖失败:", id, userId, err)
+      errors++
+    }
+  }
+  return { granted, skipped, errors }
+}
+
+export async function submitQuiz(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  // 防刷：交卷要写库 + 可能发奖，限流比普通领取更严一点
+  await guardRateLimit(env, `event-quiz:${user.id}`, 10, 60, "操作过于频繁，请稍后再试")
+  assertContentLengthWithin(request, 32 * 1024, "请求内容过大")
+  const body = (await request.json().catch(() => ({}))) as {
+    answers?: unknown
+    elapsedSec?: unknown
+  }
+
+  const row = await loadOne(env, id)
+  const now = Date.now()
+  const state = claimState(row, now)
+  if (state === "offline") throw new ApiError(400, "活动已下线", "EVENT_OFFLINE")
+  if (state === "not_started") throw new ApiError(400, "活动尚未开始", "NOT_STARTED")
+  if (state === "ended") throw new ApiError(400, "活动已结束", "ENDED")
+  if ((row.condition_type as ConditionType) !== "vote") {
+    throw new ApiError(400, "这个活动不是问卷", "NOT_QUIZ")
+  }
+  const cfg = parseQuizConfig(parseJson(row.condition_params))
+  if (!cfg || cfg.mode !== "quiz") {
+    throw new ApiError(400, "这个投票不是问卷形态", "NOT_QUIZ")
+  }
+
+  // ---- 答案归一化：只认配置里真实存在的题目与选项（服务端校验，不信前端）----
+  const rawAnswers = (body.answers ?? {}) as Record<string, unknown>
+  const answers: Record<string, string> = {}
+  for (const q of cfg.questions) {
+    const v = rawAnswers[q.id]
+    if (typeof v === "string" && q.options.some((o) => o.id === v)) answers[q.id] = v
+  }
+
+  /**
+   * 🔴 **一个答案都没收到就拒绝**（2026-10-14 实测抓到）：
+   * 原来空 body / 非法 JSON 也会被当成「全答错」正常收下 —— 而 retake=once 时
+   * 这一次提交会把**唯一一次机会**消耗掉，用户从此 409 再也答不了。
+   * 请求体不合法属于「客户端没传对」，必须让用户重发，不能算一次作答。
+   */
+  if (!Object.keys(answers).length) {
+    throw new ApiError(400, "没有收到任何答案，请重新提交", "QUIZ_EMPTY_ANSWERS")
+  }
+
+  // ---- 重考次数 ----
+  const usedRow = await env.DB.prepare(
+    "SELECT COUNT(DISTINCT attempt) AS n FROM event_quiz_answers WHERE event_id = ? AND user_id = ?"
+  )
+    .bind(id, user.id)
+    .first<{ n: number }>()
+  const used = usedRow?.n ?? 0
+  if (cfg.retake === "once" && used >= 1) {
+    throw new ApiError(409, "这份问卷只能答一次", "QUIZ_ONCE")
+  }
+  if (used >= MAX_QUIZ_ATTEMPTS) {
+    throw new ApiError(429, `最多可以答 ${MAX_QUIZ_ATTEMPTS} 次`, "QUIZ_TOO_MANY")
+  }
+  const attempt = used + 1
+
+  // ---- 限时 ----
+  const elapsedSec = Math.max(0, Math.floor(Number(body.elapsedSec) || 0))
+  // 容 5 秒误差（网络往返 + 用户点交卷的手速），别把正常交卷判成超时
+  const overTime = Boolean(cfg.timeLimit?.totalSec && elapsedSec > cfg.timeLimit.totalSec + 5)
+
+  // ---- 计分 ----
+  const percent = quizScorePercent(cfg.questions, answers)
+  let rightCount = 0
+  for (const q of cfg.questions) if (answers[q.id] === q.correctOptionId) rightCount += 1
+
+  // ---- 落答案（attempt 进主键 ⇒ 重考留痕，不覆盖历史）----
+  const iso = new Date().toISOString()
+  await env.DB.batch(
+    cfg.questions.map((q) =>
+      env.DB.prepare(
+        "INSERT OR REPLACE INTO event_quiz_answers (event_id, user_id, question_id, option_id, attempt, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+      ).bind(id, user.id, q.id, answers[q.id] ?? "", attempt, iso)
+    )
+  )
+
+  // ---- 发奖 ----
+  let rewardType: RewardType | null = null
+  let rewardParams: Record<string, unknown> = {}
+  let rewardNote = ""
+  if (overTime) {
+    rewardNote = "超时交卷，这次不计奖励"
+  } else if (cfg.scoring.kind === "linear") {
+    const pts = quizLinearPoints(cfg.scoring.maxPoints, percent)
+    if (pts > 0) {
+      rewardType = "points"
+      rewardParams = { points: pts }
+      rewardNote = `答对 ${percent}%，折算 ${pts} 积分`
+    } else {
+      rewardNote = "答对率不足，本次没有奖励"
+    }
+  } else {
+    const tier = pickQuizTier(cfg.scoring.tiers, percent)
+    if (tier) {
+      rewardType = tier.rewardType
+      rewardParams = tier.params ?? {}
+      rewardNote = `达到 ${tier.minPercent}% 档`
+    } else {
+      rewardNote = "没有达到任何奖励档位"
+    }
+  }
+
+  let granted = false
+  let grantDetail = ""
+  /**
+   * 可重答（best / unlimited）⇒ **不当场发奖**，留到截止后按最高分统一结算
+   * （settleQuizEvent）。这样「先低分达标、后考高分」也能拿到高档奖励。
+   * ⚠️ 必须保证结算真的会被触发：管理端手动开奖接口 + 定时任务都会调 settleQuizEvent；
+   *    结算没跑之前用户拿不到奖（这是「取最高分」的代价，已在回执里写明）。
+   */
+  if (cfg.retake !== "once") {
+    rewardNote = rewardNote + "（可重答：奖励将在活动结束后按你的最高分统一发放）"
+  } else if (rewardType) {
+    // 一人一次：event_claims 的 (event_id,user_id) 唯一索引就是并发锁
+    const claimId = uuid()
+    const ins = await env.DB.prepare(
+      // ⚠️ 列名必须与线上表一致（实测：event_claims 没有 reward_params，时间列是 claimed_at）——
+      //    写错列名会直接 500，而答案已经落库、retake=once 的机会也被消耗掉
+      "INSERT OR IGNORE INTO event_claims (id, event_id, user_id, reward_type, reward_status, reward_detail, claimed_at) VALUES (?, ?, ?, ?, 'pending', '', ?)"
+    )
+      // ⚠️ 占位符个数必须与列数一致（去掉 reward_params 列后，bind 也要去掉那个参数 ——
+      //    否则 D1 报 Wrong number of parameter bindings，整个交卷 500）
+      .bind(claimId, id, user.id, rewardType, iso)
+      .run()
+    if ((ins.meta?.changes ?? 0) > 0) {
+      await grantAndRecord(env, claimId, row, user.id, user.username, {
+        rewardType,
+        params: rewardParams,
+      })
+      granted = true
+      grantDetail = "奖励已发放"
+    } else {
+      rewardNote = rewardNote + "（奖励此前已发放过）"
+    }
+  }
+
+  // ---- 回执：reveal 决定给不给每题对错 ----
+  const showKey = cfg.reveal === "immediate"
+  const perQuestion = cfg.questions.map((q) => ({
+    id: q.id,
+    answered: answers[q.id] ?? "",
+    ...(showKey ? { correct: answers[q.id] === q.correctOptionId, answer: q.correctOptionId } : {}),
+  }))
+
+  return json({
+    ok: true,
+    attempt,
+    percent,
+    rightCount,
+    total: cfg.questions.length,
+    rewardNote,
+    granted,
+    grantDetail,
+    /** 只在 reveal=immediate 时带上每题对错；afterDeadline/never 一律不带 */
+    revealed: showKey,
+    perQuestion,
+  })
 }
 
 export async function claimEvent(
@@ -967,9 +1347,14 @@ async function grantAndRecord(
   claimId: string,
   row: EventRow,
   userId: string,
-  username: string
+  username: string,
+  /**
+   * 问卷用：**奖励随答对档位变**，不能只看活动级 reward_params。
+   * 不传 = 原有行为（抽奖/投票/普通领取都走这条）。
+   */
+  override?: { rewardType: RewardType; params: Record<string, unknown> }
 ): Promise<Response> {
-  const rewardType = row.reward_type as RewardType
+  const rewardType = override?.rewardType ?? (row.reward_type as RewardType)
   const handler = REWARD_HANDLERS[rewardType]
   let result: { status: string; detail: string }
 
@@ -981,7 +1366,7 @@ async function grantAndRecord(
         env,
         userId,
         username,
-        params: parseJson(row.reward_params) ?? {},
+        params: override?.params ?? (parseJson(row.reward_params) ?? {}),
         eventId: row.id,
       })
     } catch (err) {
@@ -1452,6 +1837,17 @@ export async function adminDrawEvent(
   request: Request,
   id: string
 ): Promise<Response> {
+  /**
+   * 问卷（可重答）：「开奖」时顺带把**最高分**结算掉（见 settleQuizEvent）。
+   * 普通投票 / 抽奖继续走下面的分支。
+   */
+  {
+    const quizRow = await loadOne(env, id)
+    if (parseQuizConfig(parseJson(quizRow.condition_params))) {
+      const r = await settleQuizEvent(env, id)
+      return json({ ok: true, quiz: r })
+    }
+  }
   const admin = await requireAdminScope(env, request, "events.grant")
   // 两种开奖的语义完全不同（抽奖随机抽人 vs 投票按得票算），按条件类型分发。
   const row = await loadOne(env, id)

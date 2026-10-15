@@ -206,6 +206,32 @@ function estTokens(text: string): number {
   return Math.round(cjk / 1.6 + rest / 4)
 }
 
+/**
+ * 本轮改动清单（#5）：对比「这一轮开始前」的快照，列出新增 / 修改 / 删除的文件。
+ * 行数差用 ± 表示 —— 模型和用户都能一眼看出"这一轮到底动了什么、动了多少"。
+ * 只做展示，不参与任何执行判断。
+ */
+function diffFileMap(
+  before: Record<string, string>,
+  after: Record<string, string>
+): string[] {
+  const rows: string[] = []
+  for (const [p, c] of Object.entries(after)) {
+    const old = before[p]
+    const nowLines = c ? c.split("\n").length : 0
+    if (old === undefined) {
+      rows.push(`+ ${p}（新增，${nowLines} 行）`)
+    } else if (old !== c) {
+      const d = nowLines - (old ? old.split("\n").length : 0)
+      rows.push(`~ ${p}（${d >= 0 ? "+" : ""}${d} 行，共 ${nowLines} 行）`)
+    }
+  }
+  for (const p of Object.keys(before)) {
+    if (!(p in after)) rows.push(`- ${p}（删除）`)
+  }
+  return rows
+}
+
 /** 12_345 → 12.3k（面板里省地方） */
 function fmtTok(n: number): string {
   if (n < 1000) return String(n)
@@ -256,11 +282,16 @@ function extractUrls(text: string): string[] {
   return out
 }
 
+/**
+ * 是否已同意启动浏览器终端。
+ * 🔴 **默认视为已同意**（站长 2026-10-13 要求：默认就是同意状态，AI 该静默启动终端）。
+ * 只有显式关掉过（写入 "0"）才再问一次；隐私模式下 localStorage 抛异常也按已同意。
+ */
 function hasVmConsent(): boolean {
   try {
-    return localStorage.getItem(VM_CONSENT_KEY) === "1"
+    return localStorage.getItem(VM_CONSENT_KEY) !== "0"
   } catch {
-    return false
+    return true
   }
 }
 
@@ -711,6 +742,16 @@ export default function LabPage() {
   const [vmAskOpen, setVmAskOpen] = React.useState(false)
   const vmAskResolve = React.useRef<((ok: boolean) => void) | null>(null)
   const termScreenRef = React.useRef<HTMLDivElement | null>(null)
+  /**
+   * **隐藏的终端画面挂载点**（2026-10-13）。
+   *
+   * 背景：v86 必须有一个真实尺寸的 DOM 容器才能跑；原来画面只挂在终端面板里，
+   * 而面板是条件渲染的 ⇒ AI 申请终端时如果不把界面切过去，容器就是 null、
+   * 虚拟机根本起不来（我试过直接不切界面，结果 run 永远拿不到输出）。
+   * 所以这里常驻一个**移出视口**的容器：界面留在聊天页，虚拟机照常在后台跑。
+   * ⚠️ 用 left:-10000px 而不是 display:none —— 后者量不到尺寸，v86 会算不出画面。
+   */
+  const hiddenVmRef = React.useRef<HTMLDivElement | null>(null)
 
   /**
    * 终端是否正显示在右侧面板上（预览面板开着 **且** 停在终端页签）。
@@ -2017,6 +2058,36 @@ export default function LabPage() {
       if (noPathTools.includes(a.tool)) return null
       return missingPathReason(a.tool)
     }
+    /**
+     * patch：一次改多处（#3）。逐处调用 applyReplace —— 复用同一套「精确匹配 +
+     * 模糊兜底 + 失败时给最像的一段」逻辑，不另写一份替换实现。
+     * ⚠️ 逐处**基于上一处的结果**继续（前一处改了行数，后一处的 old 仍按新内容匹配 ✅）。
+     */
+    if (a.tool === "patch") {
+      const hunks = a.hunks ?? []
+      if (!hunks.length) return "patch 失败：没有给出 hunks（每项要 {old,new}）"
+      let cur = filesRef.current[a.path]
+      if (cur == null) return `patch 失败：文件 ${a.path} 不存在`
+      const notes: string[] = []
+      let okCount = 0
+      for (let hi = 0; hi < hunks.length; hi++) {
+        const r = applyReplace({ [a.path]: cur }, a.path, hunks[hi].old, hunks[hi].new)
+        if (r.ok) {
+          cur = r.value
+          okCount++
+        } else {
+          notes.push(`第 ${hi + 1} 处失败：${r.reason}`)
+        }
+      }
+      if (okCount) {
+        filesRef.current = { ...filesRef.current, [a.path]: cur }
+        setFiles(filesRef.current)
+      }
+      return (
+        `[修改 ${a.path} ${okCount}/${hunks.length} 处成功]\n` +
+        (notes.length ? notes.join("\n") : "全部改好了。")
+      )
+    }
     if (a.tool === "write") {
       filesRef.current = { ...filesRef.current, [a.path]: a.content }
       setFiles(filesRef.current)
@@ -2091,10 +2162,14 @@ export default function LabPage() {
    */
   React.useEffect(() => () => shutdownVM(), [])
 
-  // 终端画面挂载点：面板是条件渲染的，所以 ref 要跟着开关重新登记
+  /**
+   * 终端画面挂载点：面板是条件渲染的，所以 ref 要跟着开关重新登记。
+   * 面板没开（= 用户在聊天页）时挂到**隐藏容器**上 —— 虚拟机照常运行，
+   * 界面不会被切走；等用户真打开终端页，effect 会把画面改挂到可见容器。
+   */
   React.useEffect(() => {
-    mountVmScreen(termScreenRef.current)
-  }, [previewOpen, termTab])
+    mountVmScreen(termScreenRef.current ?? hiddenVmRef.current)
+  }, [previewOpen, termTab, vmPhase])
 
   /**
    * 让 v86 的终端铺满整个卡片。
@@ -2152,8 +2227,7 @@ export default function LabPage() {
    */
   const askVMEnable = () =>
     new Promise<boolean>((resolve) => {
-      // 先把终端页拉出来，让用户看得见「点了之后会得到什么」
-      revealTermPanel()
+      // 不再切界面（站长要求留在聊天页）；弹窗本身已说明清楚
       vmAskResolve.current = resolve
       setVmAskOpen(true)
     })
@@ -2174,7 +2248,13 @@ export default function LabPage() {
    *
    * 返回 `{ ok }`：ok=false 且没有 error ⇒ 用户拒绝了；有 error ⇒ 启动失败。
    */
-  const ensureVM = async (): Promise<{ ok: boolean; error?: string }> => {
+  const ensureVM = async (
+    /**
+     * 是否把界面切到终端页。AI 申请时传 false —— **留在聊天页**
+     * （画面挂在隐藏容器上，见 hiddenVmRef 的注释）。
+     */
+    reveal = true
+  ): Promise<{ ok: boolean; error?: string }> => {
     if (getVmPhase() === "ready") return { ok: true }
 
     if (!hasVmConsent()) {
@@ -2183,12 +2263,25 @@ export default function LabPage() {
       markVmConsent()
     }
 
-    // 走到这里＝已授权：不再打扰，直接把界面切到终端并启动
-    revealTermPanel()
+    // 走到这里＝已授权：不再打扰，直接启动（要不要切界面由 reveal 决定）
+    if (reveal) revealTermPanel()
     // 给一个明确的状态，别让用户对着空面板猜「怎么卡住了」
     toast.message(t("lab.term.autoOn"), { duration: 2500 })
     try {
       await bootVM()
+      /**
+       * ⚠️ **等它就绪，别立刻判死**：bootVM() 返回时 phase 往往还是 loading
+       * （内核还在起），马上检查会把慢启动误判成失败。最多等 30 秒。
+       */
+      for (let i = 0; i < 60 && getVmPhase() !== "ready"; i++) {
+        await new Promise((r) => setTimeout(r, 500))
+      }
+      if (getVmPhase() !== "ready") {
+        return {
+          ok: false,
+          error: `等待 30 秒后终端状态仍是「${getVmPhase()}」而不是就绪 —— 多半是虚拟机资源没加载出来`,
+        }
+      }
       return { ok: true }
     } catch (e: any) {
       return { ok: false, error: e?.message || String(e) }
@@ -2922,6 +3015,10 @@ export default function LabPage() {
      *   ② 仍不说 ⇒ **前端自己生成收尾摘要**（从工具条目汇总），用户
      *      永远能看到「做了什么」。
      */
+    /**
+     * 本轮改动清单（#5）的基准快照 —— 整个 send 期间共享，结束时对比一次。
+     */
+    const filesAtTurnStart = { ...filesRef.current }
     let didRealWork = false
     let reportNudged = false
     /** 网络断流自动重试的计数（见循环里那段注释）—— 整轮共享，不按 round 重置 */
@@ -3148,13 +3245,22 @@ export default function LabPage() {
 
         // ---- 服务端抓取：正文是服务端取回来的，必须回喂一轮 ----
         const httpResults = new Map<number, string>()
+        /**
+         * 🔴 #6 **并行**（2026-10-14）：同一轮里的多个抓取互相独立（结果按下标存），
+         * 串行会让总耗时 = 各次之和；并行后 = 最慢的那一次。
+         * ⚠️ 只并行**网络型**批次：VM 命令共享一个终端、站内写操作要按顺序批准，
+         * 那些必须保持串行（下面不动）。
+         */
+        const httpJobs: Promise<void>[] = []
         for (let i = 0; i < segs.length; i++) {
           const s = segs[i]
           if (s.type !== "action" || !s.complete || s.tool !== "http") continue
+          httpJobs.push(
+            (async () => {
           const target = (s.url ?? "").trim()
           if (!target) {
             httpResults.set(i, t("lab.http.noUrl"))
-            continue
+            return
           }
           try {
             const r = await labApi.http({
@@ -3180,7 +3286,10 @@ export default function LabPage() {
               t("lab.http.failed", { target, msg: String(e?.message ?? e) })
             )
           }
+            })()
+          )
         }
+        await Promise.all(httpJobs)
 
         // ---- 截图自检：把项目内联成单文件 HTML，交给服务端用真浏览器渲染 ----
         const shotResults = new Map<number, string>()
@@ -3200,8 +3309,10 @@ export default function LabPage() {
             const r = await labApi.screenshot({
               html: inlineAssets(files[entryPath], files, entryPath),
               fullPage: true,
-              width: 1280,
-              height: 800,
+              // 多断点：模型给了 device/width/height 就用它的，否则服务端兜底 1280×800
+              ...(s.device ? { device: s.device } : {}),
+              ...(s.width ? { width: s.width } : {}),
+              ...(s.height ? { height: s.height } : {}),
             })
             // ⚠️ dataUrl 只放 image（展示 + 回喂），**绝不放进 content** ——
             //    几十 KB 的 base64 进正文会把卡片和上下文一起撑爆
@@ -3235,8 +3346,10 @@ export default function LabPage() {
             }
             const r = await labApi.inspect({
               html: inlineAssets(files[entryPath], files, entryPath),
-              width: 1280,
-              height: 800,
+              ...(s.device ? { device: s.device } : {}),
+              ...(s.width ? { width: s.width } : {}),
+              ...(s.height ? { height: s.height } : {}),
+              ...(s.steps?.length ? { steps: s.steps } : {}),
             })
             s.content = r.text
             httpResults.set(i, r.text)
@@ -3248,13 +3361,17 @@ export default function LabPage() {
 
         // ---- 联网搜索：key 只存服务端，所以必须走接口 ----
         const searchResults = new Map<number, string>()
+        // #6 同上：搜索也是网络型、互相独立 ⇒ 并行
+        const searchJobs: Promise<void>[] = []
         for (let i = 0; i < segs.length; i++) {
           const s = segs[i]
           if (s.type !== "action" || !s.complete || s.tool !== "web_search") continue
+          searchJobs.push(
+            (async () => {
           const q = (s.query ?? "").trim()
           if (!q) {
             searchResults.set(i, t("lab.search.noQuery"))
-            continue
+            return
           }
           try {
             const r = await labApi.webSearch(q)
@@ -3266,7 +3383,10 @@ export default function LabPage() {
               t("lab.search.failed", { query: q, msg: String(e?.message ?? e) })
             )
           }
+            })()
+          )
         }
+        await Promise.all(searchJobs)
 
         // ---- 技能：模型点名要读某个技能的正文（渐进式披露第二步）----
         // 正文在服务端，所以要单独去取一次；取回来当「工具结果」回喂。
@@ -3453,15 +3573,26 @@ export default function LabPage() {
             const calls = segs.filter((x) => x.type === "action" && x.toolCallId)
             for (const sg of calls) {
               const i = segs.indexOf(sg)
+              /**
+               * 🔴 **必须把「按原始下标存的」结果 map 重映射成 0**：
+               * buildToolResults([sg], …) 内部是 segments.forEach((s, i) => …)，
+               * 这个 i 是**传入数组**的下标（单元素数组恒为 0），而结果 map 是按
+               * 原始段下标存的 ⇒ 除第 0 段外永远查不到。failures 早就重映射了，其它漏了。
+               * ⚠️ undefined 不放进 map，否则会顶掉下游兜底文案。
+               */
+              const rekey = (m?: Map<number, string>) => {
+                const v = m?.get(i)
+                return v === undefined ? undefined : new Map([[0, v]])
+              }
               const one = buildToolResults(
                 [sg],
                 filesRef.current,
-                new Map([[0, failures.get(i) ?? ""]]),
-                runResults,
-                siteResults,
-                skillResults,
-                searchResults,
-                httpResults
+                rekey(failures),
+                rekey(runResults),
+                rekey(siteResults),
+                rekey(skillResults),
+                rekey(searchResults),
+                rekey(httpResults)
               )
               const body = one.replace(/^工具执行结果：\n?/, "").trim() // i18n-exempt: 剥掉 lab-agent.ts（PROMPT_FILES 已豁免）的回执前缀，中文必须与之逐字一致
               convoRef.current = [
@@ -3509,12 +3640,17 @@ export default function LabPage() {
           (s) => s.type === "action" && s.tool === "need_vm" && s.complete
         )
         if ((wantsVm || hasRun) && getVmPhase() !== "ready") {
-          const res = await ensureVM()
+          // AI 申请：**不切界面**，留在聊天页；画面挂隐藏容器
+          const res = await ensureVM(false)
           let note: string
           if (res.ok) {
             note = t("lab.term.readyNote")
           } else if (res.error) {
             note = t("lab.term.bootFailedNote", { error: res.error })
+            // 🔴 同时弹给用户：否则界面上什么都看不到，只能看着 AI 一直跑不起来
+            toast.error(t("lab.term.bootFailedToast", { error: res.error }), {
+              duration: 8000,
+            })
           } else {
             note = t("lab.term.rejectedNote")
           }
@@ -3645,8 +3781,13 @@ export default function LabPage() {
               segs,
               filesRef.current,
               failures,
-              undefined,
-              undefined,
+              /**
+               * 🔴 这两行原来是 undefined（真凶）：**终端命令的真实输出被整段丢掉**，
+               * 回执只剩「(没能执行：…)」，模型以为终端坏了、反复 run/反复申请。
+               * segs 是完整数组，下标天然对齐，直接传入即可。站内结果同理。
+               */
+              runResults,
+              siteResults,
               skillResults,
               searchResults,
               httpResults
@@ -3750,6 +3891,29 @@ export default function LabPage() {
       setLiveThink("")
       settleThink()
       setLive(null)
+      /**
+       * 本轮改动清单（#5）：把「这一轮从头到尾改了哪些文件、多少行」列成一条，
+       * 挂到时间线上。原来只能逐个工具卡片去看，一轮改了五六个文件根本对不上账。
+       * ⚠️ 中止/出错也走这里 —— 已经落盘的改动同样要让人看见。
+       */
+      {
+        const rows = diffFileMap(filesAtTurnStart, filesRef.current)
+        if (rows.length) {
+          updateEntries((prev) => [
+            ...prev,
+            {
+              key: `changes-${Date.now()}`,
+              kind: "text" as const,
+              text:
+                `${t("lab.round.changes")}\n` +
+                rows.map((r) => `· ${r}`).join("\n"),
+              live: false,
+              collapsible: false,
+              at: Date.now(),
+            },
+          ])
+        }
+      }
       // 用量面板：这一轮收尾时算出来（首 token / 速度是实测，token 是估算）
       {
         const m = metricsRef.current
@@ -5499,6 +5663,16 @@ const doImportLocal = async () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/*
+        隐藏的终端画面容器：见 hiddenVmRef 的注释。
+        常驻渲染（不在视口内），这样 AI 申请终端时不必切界面也能启动虚拟机。
+      */}
+      <div
+        ref={hiddenVmRef}
+        aria-hidden
+        className="lab-term-screen pointer-events-none fixed left-[-10000px] top-0 h-[400px] w-[640px] overflow-hidden opacity-0"
+      />
 
       {/* ---- 项目文件 ---- */}
       <Dialog

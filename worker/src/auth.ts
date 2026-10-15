@@ -34,6 +34,12 @@ export interface UserRow {
   avatar_key?: string | null
   /** 用户 UID（按注册顺序从 1 开始；迁移 0070，老数据可能为 NULL） */
   uid?: number | null
+  /**
+   * 每用户 DNS 记录数上限的**用户级覆盖**（迁移 0161；NULL = 沿用全局设置项
+   * `dns_records_per_user`）。与 `max_subdomains` 是同一套「用户级覆盖 > 全局设置」
+   * 机制，见 handlers/dns.ts 的 dnsRecordLimit。
+   */
+  max_dns_records?: number | null
   created_at: string
   updated_at: string
 }

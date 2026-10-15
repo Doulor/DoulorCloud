@@ -114,7 +114,7 @@ describe("内网穿透租用化 · 用户端", () => {
     }>(user, "/frp/rental/purchase", { planId })
 
     expect(res.status).toBe(200)
-    expect(res.body.frpUser).toMatch(/^dcfrp_[0-9a-f]{8}$/)
+    expect(res.body.frpUser).toMatch(/^DC_[0-9a-f]{8}$/)
     expect(res.body.ports).toHaveLength(1)
     expect(res.body.ports[0]).toBeGreaterThanOrEqual(31000)
     expect(res.body.ports[0]).toBeLessThanOrEqual(31999)

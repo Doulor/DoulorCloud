@@ -17,6 +17,7 @@ import { toast } from "sonner"
 
 import { LoadingBlock } from "@/components/loading-block"
 import { Markdown } from "@/components/markdown"
+import { EventQuiz } from "@/components/event-quiz"
 import { EventVote, VOTE_RULE_LABEL_KEY, VOTE_RULE_HINT_KEY, isInstantVoteRule } from "@/components/event-vote"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -320,7 +321,12 @@ export default function ActivityPage() {
           </div>
 
           {/* 投票区：选项 + 票数 + 自己的选择。已投票 / 已开奖后自动切成只读展示 */}
-          {isVote && (
+          {/* 集合投票（问卷）：一个活动多道题，交卷后按答对率结算 */}
+          {isVote && ev.quiz ? (
+            <EventQuiz ev={ev} />
+          ) : null}
+
+          {isVote && !ev.quiz && (
             <EventVote
               ev={ev}
               selected={optionId}

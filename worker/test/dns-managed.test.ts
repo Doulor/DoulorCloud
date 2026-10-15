@@ -10,9 +10,26 @@
 //   2. 用户自己已经有同 fqdn 的真实记录时，以他自己那条为准，不重复展示
 import { describe, it, expect } from "vitest"
 import { env } from "cloudflare:workers"
-import { makeUser, authRequest, fetchSelf, type TestUser } from "./helpers"
+import { makeUser, authRequest, fetchSelf, setPermissions, type TestUser } from "./helpers"
 
 const listDns = (u: TestUser) => authRequest(u, "/api/dns")
+
+/**
+ * 建一个**有 DNS 权限**的用户。
+ *
+ * ⚠️ 必须显式给权限（2026 加）：`dns` 不在 permissions.ts 的 `DEFAULT_ALLOWED` 里
+ * （它是 CF zone 配额闸，默认关闭），`makeUser()` 出来的账号默认没有它，
+ * `GET /api/dns` 会直接 403。本文件测的是列表里的派生展示，不是权限本身 ——
+ * 权限的用例见 dns-permission.test.ts。
+ */
+async function makeDnsUser(): Promise<TestUser> {
+  const u = await makeUser()
+  await setPermissions(
+    u.id,
+    JSON.stringify({ r2: true, ai: false, proxy: true, doulor: false, dns: true })
+  )
+  return u
+}
 
 interface Seed {
   domainId: string
@@ -76,7 +93,7 @@ async function recordsOf(u: TestUser): Promise<DnsItem[]> {
 
 describe("DNS 列表 —— 平台托管的解析", () => {
   it("绑定自定义域名后，解析会出现在列表里并带 managed 标记", async () => {
-    const u = await makeUser()
+    const u = await makeDnsUser()
     const s = await seedDomain(u, `root-${u.username}.doulor.cn`, "pan")
     await bindStorage(u, s)
 
@@ -92,7 +109,7 @@ describe("DNS 列表 —— 平台托管的解析", () => {
   })
 
   it("用户自己已有同 fqdn 的真实记录时，以他自己的那条为准，不重复", async () => {
-    const u = await makeUser()
+    const u = await makeDnsUser()
     const s = await seedDomain(u, `root-${u.username}.doulor.cn`, "blog")
     await bindStorage(u, s)
     await createOwnRecord(u, s, "TXT", "hello")
@@ -105,13 +122,13 @@ describe("DNS 列表 —— 平台托管的解析", () => {
   })
 
   it("没有绑定关系时不凭空造记录", async () => {
-    const u = await makeUser()
+    const u = await makeDnsUser()
     await seedDomain(u, `root-${u.username}.doulor.cn`, "plain")
     expect(await recordsOf(u)).toHaveLength(0)
   })
 
   it("按子域名筛选时，派生项只在它自己的子域名下出现", async () => {
-    const u = await makeUser()
+    const u = await makeDnsUser()
     const root = `root-${u.username}.doulor.cn`
     const bound = await seedDomain(u, root, "pan")
     const other = await seedDomain(u, root, "other", bound.domainId)

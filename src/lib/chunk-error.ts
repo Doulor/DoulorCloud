@@ -86,6 +86,59 @@ export function reloadOnceForChunkError(err: unknown): boolean {
  * 同时带一个 cache-busting 查询参数，绕过 浏览器/边缘 对 HTML 的缓存。
  * SW 会在下次加载时自动重新注册，用户无感。
  */
+/**
+ * 启动时的安全自愈（2026-10-14）。
+ *
+ * 🔴 治什么：findings #3/#4 —— 普通用户能把 lab 作品绑到主应用主机名 cloud.doulor.cn，
+ *   其页面以同源 text/html 交付并执行脚本，从而：
+ *     · 向**真实 root SW 的源级缓存** `doulor-shell-v3` 写入投毒内容
+ *       （把全部 /assets/*.js 覆盖成攻击者载荷）；
+ *     · 或者注册一个 scope = `https://<本站>/api/` 的 Service Worker —— 而 SW 一旦装上，
+ *       **服务端无法撤销**（脚本后来 404 也不会注销既有注册，这是 SW 规范的预期行为）。
+ *
+ *   所以即使我们修好了绑定接口、CSP 也拦住了新攻击，**已经被投毒的浏览器**
+ *   仍然会继续加载被篡改的入口脚本。这段代码就是给那些浏览器兜底的：
+ *   每次进主站时主动把异常状态清掉。
+ *
+ * 为什么敢无脑清：
+ *   · scope 落在 `/api/` 下的 SW **从来不是本站的正常状态**（本站 SW 的 scope 是 `/`）；
+ *   · `doulor-shell-v3` 已被 v4 取代，留着只有被投毒的内容，删掉零损失；
+ *   · 都是幂等操作，正常用户跑一遍什么都不会发生。
+ *
+ * 失败一律静默：自愈是尽力而为，绝不能因为它出错而影响主站启动。
+ */
+export function selfHealServiceWorkers(): void {
+  try {
+    if (!("serviceWorker" in navigator)) return
+    void navigator.serviceWorker
+      .getRegistrations()
+      .then((regs) => {
+        for (const r of regs) {
+          try {
+            const path = new URL(r.scope).pathname
+            // 正常的只有 "/"；任何 /api/ 下的注册都是攻击遗留物
+            if (path !== "/" && path.startsWith("/api")) {
+              void r.unregister()
+            }
+          } catch {
+            /* 单个注册处理失败不影响其它 */
+          }
+        }
+      })
+      .catch(() => {})
+  } catch {
+    /* ignore */
+  }
+  try {
+    if ("caches" in window) {
+      // 被投毒的那一版缓存（v3）。v4 是当前版本，不动它。
+      void caches.delete("doulor-shell-v3").catch(() => {})
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 export async function hardResetAndReload(): Promise<void> {
   try {
     if ("serviceWorker" in navigator) {

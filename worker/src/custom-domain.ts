@@ -19,6 +19,7 @@ import {
 import { fetchWithTimeout } from "./async-utils"
 import { zoneIdForFqdn } from "./root-domains"
 import type { Env } from "./env"
+import { isCoveredByWildcard } from "./cloudflare"
 
 /** 绑定自定义域名的 CF API 超时（2026-09-25 审计 H15） */
 const CF_WORKERS_API_TIMEOUT_MS = 15_000
@@ -82,7 +83,8 @@ export async function attachCustomDomain(
   // 1. DNS：AAAA 100:: + 橙云代理（与平台上其它 Worker 路由域名一致）
   //    已有解析则跳过，不覆盖用户既有配置
   const existing = await cfListDnsRecords(env, zoneId, fqdn)
-  const dnsCreated = existing.length === 0
+  // 根域已配泛解析时不必建记录（省配额；泛解析已能解析到 Cloudflare）
+  const dnsCreated = existing.length === 0 && !(await isCoveredByWildcard(env, fqdn))
   if (dnsCreated) {
     try {
       await cfCreateDnsRecord(env, zoneId, {

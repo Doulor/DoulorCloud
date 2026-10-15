@@ -8,7 +8,7 @@
 //   ③ 校验边界（端口 0 非法、优先级 0 合法、65536 越界）
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest"
 import { env } from "cloudflare:workers"
-import { authRequest, fetchSelf, makeUser, type TestUser } from "./helpers"
+import { authRequest, fetchSelf, makeUser, setPermissions, type TestUser } from "./helpers"
 import { uuid } from "../src/crypto"
 
 const CF = "https://api.cloudflare.com"
@@ -88,6 +88,11 @@ afterEach(() => {
  *
  * `createDns` 要求 users → domains → subdomains 三层都存在，缺任一层都会
  * 提前返回 NO_DOMAIN，测不到 SRV 逻辑。
+ *
+ * ⚠️ 还必须显式授予 `dns` 权限（2026 加）：`dns` 不在 permissions.ts 的
+ * `DEFAULT_ALLOWED` 里（它是 CF zone 配额闸），`makeUser()` 出来的账号默认
+ * 没有它，POST /dns 会先被 requireFeatureUser 挡成 403 —— 那样本文件测的
+ * 就不是 SRV 拼装而是权限了。权限本身的用例见 dns-permission.test.ts。
  */
 async function makeUserWithDomain(suffix = "sub"): Promise<{
   user: TestUser
@@ -96,6 +101,10 @@ async function makeUserWithDomain(suffix = "sub"): Promise<{
   base: string
 }> {
   const user = await makeUser()
+  await setPermissions(
+    user.id,
+    JSON.stringify({ r2: true, ai: false, proxy: true, doulor: false, dns: true })
+  )
   const domainId = uuid()
   const subdomainId = uuid()
   const now = new Date().toISOString()

@@ -95,6 +95,36 @@ export const NATIVE_TOOLS: NativeToolDecl[] = [
   {
     type: "function",
     function: {
+      name: "patch",
+      description:
+        "**一次改多处**：给 path + hunks（每项 {old,new}），按顺序做精确替换。" +
+        "⚠️ 同一个文件要改好几个地方时用它，别连着调多次 replace —— 每次调用都要多跑一轮，" +
+        "又慢又费额度。每处 old 仍要与文件里**逐字一致**（含缩进）；" +
+        "失败会单独报出是哪一处、并给出最像的那段，照它修正再试。",
+      parameters: {
+        type: "object",
+        properties: {
+          path: str("文件路径"),
+          hunks: {
+            type: "array",
+            description: "要替换的若干处，按顺序执行（最多 12 处）",
+            items: {
+              type: "object",
+              properties: {
+                old: str("要被替换掉的原文（与文件里逐字一致，含缩进）"),
+                new: str("替换成的新内容"),
+              },
+              required: ["old", "new"],
+            },
+          },
+        },
+        required: ["path", "hunks"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "list",
       description: "列出项目里的所有文件路径。想了解项目结构先调它。",
       parameters: { type: "object", properties: {} },
@@ -216,12 +246,38 @@ export const NATIVE_TOOLS: NativeToolDecl[] = [
         "用真浏览器把页面跑一遍，返回**文字体检报告**：横向溢出了多少像素、哪些元素溢出、" +
         "图片有没有加载失败、console 有没有报错（含 JS 异常）。" +
         "⚠️ 样式改了不确定对不对、或页面「点了没反应」时用它 —— 比截图更适合定位问题，" +
-        "因为你拿到的是一行行具体结论。",
+        "因为你拿到的是一行行具体结论。" +
+        "🔴 **还能做交互**：给 steps 就能点按钮 / 填输入框 / 按回车 / 等异步 / 滚动，" +
+        "每步结果和交互后的 console、布局都会回报 —— 「点了没反应」这类问题必须先真的点一次才知道。",
       parameters: {
         type: "object",
         properties: {
           width: { type: "number", description: "视口宽度，默认 1280" },
           height: { type: "number", description: "视口高度，默认 800" },
+          device: {
+            type: "string",
+            enum: ["desktop", "mobile", "tablet"],
+            description: "按设备档位体检（mobile 390×844 / tablet 820×1180）",
+          },
+          steps: {
+            type: "array",
+            description: "要执行的交互步骤（最多 20 步），按顺序执行",
+            items: {
+              type: "object",
+              properties: {
+                type: {
+                  type: "string",
+                  enum: ["click", "type", "press", "wait", "scroll"],
+                },
+                selector: { type: "string", description: "CSS 选择器（click/type 用）" },
+                text: { type: "string", description: "输入的内容（type 用）" },
+                key: { type: "string", description: "按键名，如 Enter（press 用）" },
+                ms: { type: "number", description: "等待毫秒（wait 用）" },
+                y: { type: "number", description: "滚动位置（scroll 用）" },
+              },
+              required: ["type"],
+            },
+          },
         },
       },
     },
@@ -233,11 +289,20 @@ export const NATIVE_TOOLS: NativeToolDecl[] = [
       description:
         "把当前项目渲染成真实页面并**截图**，然后你就能「看见」自己做的网页。" +
         "⚠️ 做完页面或改了样式之后用它自检：布局错位、元素重叠、文字被裁、颜色难看，" +
-        "这些只读代码是发现不了的。截图会作为图片发给你。参数都可不填。",
+        "这些只读代码是发现不了的。截图会作为图片发给你。" +
+        "🔴 **做响应式时必须多截几档**：默认桌面 1280×800；手机用 device=\"mobile\"（390×844），" +
+        "平板用 device=\"tablet\"（820×1180）。只截桌面会漏掉手机上塌掉/溢出/挤成一团的问题。",
       parameters: {
         type: "object",
         properties: {
           fullPage: { type: "boolean", description: "是否截整页（默认 true）" },
+          device: {
+            type: "string",
+            enum: ["desktop", "mobile", "tablet"],
+            description: "按设备档位截图（desktop 1280×800 / mobile 390×844 / tablet 820×1180）",
+          },
+          width: { type: "number", description: "自定义视口宽度（给了 device 就忽略它）" },
+          height: { type: "number", description: "自定义视口高度" },
         },
       },
     },
