@@ -4845,6 +4845,8 @@ export const en: Record<MessageKey, string> = {
   "dns.root.mail.catchall": "Point to this Worker",
   "dns.root.mail.enabledOk": "Email Routing enabled — now point the catch-all at this Worker",
   "dns.root.mail.catchallOk": "Catch-all now points at this Worker; the domain can receive mail",
+  "dns.root.mail.enableFail": "Email Routing was not enabled: Cloudflare created no mail routing, so this domain cannot receive mail",
+  "dns.root.mail.catchallFail": "Catch-all was not set: this domain cannot receive mail",
   "dns.root.mail.needsRouting": "Cloudflare Email Routing is not enabled yet",
   "dns.root.mail.needsCatchall": "Catch-all does not point at this Worker — the domain cannot receive mail",
   "dns.root.import": "Import from Cloudflare",

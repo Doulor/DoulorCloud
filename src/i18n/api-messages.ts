@@ -1054,6 +1054,10 @@ export const API_MESSAGE_PATTERNS: { src: string; en: string }[] = [
   { src: "^\\*\\.(.+?) 已存在（(.+?)），但没有开 Cloudflare 代理（灰云）。", en: "*.{v0} already exists ({v1}) but isn't proxied by Cloudflare (grey cloud). A wildcard must be proxied for Worker routes to catch it — otherwise subdomains under this domain won't resolve. Turn its proxy on in Cloudflare, then import again." },
   { src: "^\\*\\.(.+?) 上已存在记录（(.+?)），不是本站的占位解析（AAAA 100::）。", en: "A record already exists at *.{v0} ({v1}) and it isn't this site's placeholder (AAAA 100::). To avoid overwriting your own wildcard, the import was stopped: sort it out in Cloudflare first." },
   { src: "^无法确认 \\*\\.(.+?) 的现状（查询 Cloudflare 失败）。", en: "Couldn't confirm the current state of *.{v0} (the Cloudflare query failed). This usually means the token lacks DNS read access for that zone. No record is created without confirming, so that existing records can't be clashed with." },
+  // 开通邮件路由两条路都失败（2026-10-16）。这里只匹配消息的**前半段**：
+  // worker 侧那句是由两段模板字符串拼起来的，check:i18n 只能看到第一段，
+  // 而正则不加 `$` 锚，运行时正好命中完整消息的前缀 —— 与上面几条同一写法。
+  { src: "^开通 (.+?) 的 Email Routing 失败：Cloudflare 未接受 enable 与 dns 两条路径", en: "Couldn't enable Email Routing for {v0}: Cloudflare rejected both the enable and the dns path" },
 ]
 
 /**

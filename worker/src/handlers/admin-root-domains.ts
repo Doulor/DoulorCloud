@@ -1027,7 +1027,22 @@ export async function rootDomainAction(env: Env, request: Request): Promise<Resp
           attempts.push(`${p}=${err instanceof Error ? err.message.slice(0, 120) : "err"}`)
         }
       }
+
+      // 现状探测放在判定**之前**：两个接口都报错，未必等于「没开通」。
+      // 典型的假失败是「这个 zone 早就开好了，CF 对重复开通回 4xx」——
+      // 此时真实状态（`enabled`）才是唯一可信的依据，只看 POST 的成败会把
+      // 「本来就配好了」报成错误。所以先读状态，再决定要不要失败。
       const status = await emailRoutingStatus(env, zoneId)
+      if (!ok && status.enabled) {
+        attempts.push("(两个接口都报错，但 Email Routing 处于已启用状态，按成功处理)")
+        ok = true
+      }
+
+      // 审计在**判定之前**写：这条记的是「谁在什么时候试图开通哪个域」，
+      // 失败也要留下痕迹（detail 里带着两次失败的原因）。
+      // ⚠️ 注意这与 set-catchall 相反 —— 那边的审计在 PUT **成功之后**，
+      // 因为它的 detail 是「已经把 catch-all 指过去了」这种既成事实。
+      // 两处口径不同是刻意的，别为了「统一」把某一边改齐。
       await recordAudit(
         env,
         admin.id,
@@ -1035,6 +1050,28 @@ export async function rootDomainAction(env: Env, request: Request): Promise<Resp
         `开通 ${name} 的 Email Routing（${attempts.join(" / ")}）`,
         request.headers.get("CF-Connecting-IP")
       )
+
+      // ⚠️ 失败必须是**非 2xx**，不能是 200 + `ok:false`（2026-10-16 修）。
+      //
+      // 原先这里失败时返回 200 + `ok:false`，而前端的请求封装只把非 2xx 当错误
+      // （见 src/services/api.ts 的 throwHttpError），于是「CF 上一条记录都没建」
+      // 会被前端当成成功、弹出「已开通 Email Routing」。假成功比报错更坏：
+      // 站长以为配好了，而那个域**收不到任何信**，且界面上看不出异常。
+      //
+      // 选 502 + `EMAIL_ROUTING_ENABLE_FAILED`：与本文件其它 CF 侧失败
+      // （CF_ERROR / CF_ZONE_UNRESOLVED / CF_DELETE_FAILED）保持同一口径 ——
+      // 故障出在上游（Cloudflare），不是请求本身有问题，所以不是 4xx。
+      // `ok` 字段两边都保留（成功 true、失败 false）：万一还有调用方在读它，
+      // 行为不变；只是它**不再是**失败的唯一信号，状态码才是。
+      if (!ok) {
+        throw new ApiError(
+          502,
+          `开通 ${name} 的 Email Routing 失败：Cloudflare 未接受 enable 与 dns 两条路径` +
+            `（${attempts.join(" / ")}）`,
+          "EMAIL_ROUTING_ENABLE_FAILED",
+          { ok: false, attempts, emailRouting: status }
+        )
+      }
       return json({ ok, attempts, emailRouting: status })
     }
 

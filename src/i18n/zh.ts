@@ -4715,6 +4715,10 @@ export const zh = {
   "dns.root.mail.catchall": "指向本 Worker",
   "dns.root.mail.enabledOk": "已开通 Email Routing，接着把 catch-all 指向本 Worker",
   "dns.root.mail.catchallOk": "catch-all 已指向本 Worker，该域现在能收信了",
+  // 失败提示与上面两条成功提示成对出现：这两个动作只要没落到位，
+  // 结果都是「该域收不到信」—— 文案必须把后果说清楚，不能只说「操作失败」。
+  "dns.root.mail.enableFail": "开通 Email Routing 未成功：Cloudflare 上没有建起邮件路由，该域现在收不到信",
+  "dns.root.mail.catchallFail": "catch-all 未设置成功：该域现在收不到信",
   "dns.root.mail.needsRouting": "还没开通 Cloudflare Email Routing",
   "dns.root.mail.needsCatchall": "catch-all 未指向本 Worker —— 该域现在收不到信",
   "dns.root.import": "从 Cloudflare 导入",

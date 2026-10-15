@@ -448,7 +448,18 @@ export function DnsAdminPanel() {
   ) => {
     setRootBusy(`mail:${name}:${action}`)
     try {
-      await adminRootDomainsApi.action({ action, name })
+      const res = await adminRootDomainsApi.action({ action, name })
+      // ⚠️ 200 不等于成功：后端历史上在「开通失败」时也回 200 + `ok:false`。
+      // 那时只 await 响应就弹「已开通 Email Routing」，站长以为配好了、
+      // 实际 CF 上一条记录都没建，该域**收不到任何信** —— 假成功比报错更坏。
+      // 后端已改成失败回 502（走下面的 catch），这里再复核一次 `ok`：
+      // 两侧都拦，任一侧将来退化都不会再出现「200 就报喜」。
+      if (!res.ok) {
+        toast.error(
+          t(action === "enable-email" ? "dns.root.mail.enableFail" : "dns.root.mail.catchallFail")
+        )
+        return
+      }
       toast.success(
         t(action === "enable-email" ? "dns.root.mail.enabledOk" : "dns.root.mail.catchallOk")
       )
