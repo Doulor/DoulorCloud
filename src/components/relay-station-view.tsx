@@ -25,6 +25,7 @@ import {
   ExternalLink,
   KeyRound,
   Loader2,
+  ShieldAlert,
   Sparkles,
   Wallet,
 } from "lucide-react"
@@ -54,6 +55,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { PageHeader } from "@/components/page-header"
+import { LoadingBlock } from "@/components/loading-block"
 import { RelayViewBlock } from "@/components/relay-provider-card"
 import {
   relayApi,
@@ -128,7 +130,17 @@ export function RelaySwitcher({ currentId }: { currentId?: string }) {
                 >
                   <span className="font-medium">{p.name}</span>
                   <Badge variant="outline">{t(`relayp.kind.${p.kind}`)}</Badge>
-                  {!p.enabled && <Badge variant="destructive">{t("relayp.disabled")}</Badge>}
+                  {/* 审核制（2026-10-16）：这里可能出现**我自己**待审/被拒的站，
+                      状态照实标出来，免得点进去才发现用不了 */}
+                  {p.reviewStatus === "pending" && (
+                    <Badge variant="secondary">{t("relayp.review.pending")}</Badge>
+                  )}
+                  {p.reviewStatus === "rejected" && (
+                    <Badge variant="destructive">{t("relayp.review.rejected")}</Badge>
+                  )}
+                  {p.reviewStatus === "approved" && !p.enabled && (
+                    <Badge variant="destructive">{t("relayp.disabled")}</Badge>
+                  )}
                   <ExternalLink className="ml-auto h-3.5 w-3.5 text-muted-foreground" />
                 </Link>
               ))
@@ -174,23 +186,36 @@ export function RelayStationView({ id }: { id: string }) {
           return
         }
         setProvider(found)
+        /**
+         * 🔴 审核制（2026-10-16）：**先确认这台站可用，再去读它的三块数据**。
+         *
+         * 原先是四路并发一起发，未通过审核时后端一律 403，而这里的 catch 是
+         * 「忽略错误」（上游是别人家的站，读不到不该拖垮页面）——结果三块都会
+         * 永远停在「加载中」，看起来像页面卡死。现在改成：不可用就根本不发请求，
+         * 直接渲染状态卡片（待审核 / 已拒绝+理由 / 已停用）。
+         *
+         * 代价是多一次串行等待（先拿列表再取数据，约一个 RTT）：
+         * 这条路径只在「点进某台中转站」时走，且 `usable` 只有列表接口知道
+         * （它由服务端算，前端不自己拼），值得。
+         */
+        if (!found.usable) return
+        // 三块数据各自拉：任一慢/失败都不该拖住整页（对方站是别人家的，可能很慢）
+        void relayApi
+          .view(id)
+          .then((r) => !stopped && setView(r.view))
+          .catch(() => undefined)
+        void relayApi
+          .keys(id)
+          .then((r) => !stopped && setKeys(r))
+          .catch(() => undefined)
+        void relayApi
+          .models(id)
+          .then((r) => !stopped && setModels(r))
+          .catch(() => undefined)
       } catch {
         if (!stopped) setNotFound(true)
       }
     })()
-    // 三块数据各自拉：任一慢/失败都不该拖住整页（对方站是别人家的，可能很慢）
-    void relayApi
-      .view(id)
-      .then((r) => !stopped && setView(r.view))
-      .catch(() => undefined)
-    void relayApi
-      .keys(id)
-      .then((r) => !stopped && setKeys(r))
-      .catch(() => undefined)
-    void relayApi
-      .models(id)
-      .then((r) => !stopped && setModels(r))
-      .catch(() => undefined)
     return () => {
       stopped = true
     }
@@ -212,6 +237,7 @@ export function RelayStationView({ id }: { id: string }) {
 
   const baseUrl = provider?.baseUrl ?? ""
   const keyCount = keys?.keys.length ?? 0
+  const usable = provider?.usable ?? false
 
   return (
     <div>
@@ -234,6 +260,50 @@ export function RelayStationView({ id }: { id: string }) {
       />
 
       <div className="space-y-6">
+        {/* 列表还没回来：先给骨架，免得整页空白（可用性判断依赖列表接口的 usable） */}
+        {!provider && <LoadingBlock variant="cards" />}
+
+        {/* 未通过审核：把状态说清楚，并把三块上游数据整段换成一句解释 */}
+        {provider && !usable && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <ShieldAlert className="h-4 w-4 text-muted-foreground" />
+                {t("relayp.review.title")}
+              </CardTitle>
+              <CardDescription>{t("relayp.review.notUsable")}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {provider.reviewStatus === "pending" ? (
+                <Badge variant="secondary">{t("relayp.review.pending")}</Badge>
+              ) : provider.reviewStatus === "rejected" ? (
+                <Badge variant="destructive">{t("relayp.review.rejected")}</Badge>
+              ) : (
+                <Badge variant="destructive">{t("relayp.disabled")}</Badge>
+              )}
+              <p className="text-sm text-muted-foreground">
+                {provider.reviewStatus === "pending"
+                  ? t("relayp.review.pendingHint")
+                  : provider.reviewStatus === "rejected"
+                    ? provider.reviewNote
+                      ? t("relayp.review.rejectedHint", { reason: provider.reviewNote })
+                      : t("relayp.review.rejectedNoReason")
+                    : t("relayp.review.disabledHint")}
+              </p>
+              {provider.mine && provider.reviewStatus !== "approved" && (
+                <Button size="sm" variant="outline" asChild>
+                  <Link to="/dashboard/donations?tab=relay">
+                    <KeyRound className="mr-1.5 h-3.5 w-3.5" />
+                    {t("relayp.review.manage")}
+                  </Link>
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {provider && usable && (
+          <>
         {/* 接入信息：与本站那套同款写法（Base URL + 说明） */}
         <Card>
           <CardHeader>
@@ -389,7 +459,10 @@ export function RelayStationView({ id }: { id: string }) {
             )}
           </CardContent>
         </Card>
+          </>
+        )}
 
+        {/* 底部直达入口：无论审核态都给「回到本站中转站」与「前往对方站」 */}
         <div className="flex flex-wrap gap-2">
           <Button asChild variant="outline" size="sm">
             <Link to="/dashboard/ai">

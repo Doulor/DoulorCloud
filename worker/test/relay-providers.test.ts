@@ -1,16 +1,19 @@
 /**
- * 中转站登记（2026-10-12）的接口边界。
+ * 中转站登记（2026-10-12）的接口边界 + 审核制（2026-10-16）。
  *
  * 守住的语义：
  *   · 令牌**永不回显**（响应里只能有 baseUrl，不能有 token 字段）；
  *   · 地址是**用户随手填的**，必须挡 SSRF（内网 / 本机 / 非 https）；
  *   · 登记前**先探测**：探测不通就不许落库（坏配置不进库）；
- *   · 只有登记人（或站长）能改 / 删。
+ *   · 只有登记人（或站长）能改 / 删；
+ *   · 🔴 审核制：新登记是 pending 且**不可用**；批准后才可用；被拒（带理由）不可用；
+ *     所有者**看得见**自己那台待审/被拒的站，但**用不了**（读上游一律 403）。
  *
- * ⚠️ 这里不试真连上游：探测用的地址是 `https://127.0.0.1` 这类被挡的，
- * 以及一个必然连不上的域名 —— 断言的是「拒绝」而不是「连得上」。
+ * ⚠️ 上游一律打桩：这里换掉 globalThis.fetch 只接管假中转站那一台主机
+ *   （`relay-review.example.com`），其余请求原样放行 —— 与 profile-music.test.ts
+ *   同一套做法。真连别人的站会让这个文件随时变红。
  */
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it } from "vitest"
 import { env } from "cloudflare:workers"
 import { authRequest, fetchSelf, makeUser } from "./helpers"
 
@@ -29,6 +32,99 @@ async function createRelay(
   body: Record<string, unknown>
 ): Promise<Response> {
   return fetchSelf(authRequest(user, "/api/relay/providers", json("POST", body)))
+}
+
+/* ------------------------------------------------------------ 上游打桩 */
+
+/** 假中转站的站点地址（https + 非内网，能过 normalizeBaseUrl 的 SSRF 闸门） */
+const FAKE_BASE = "https://relay-review.example.com"
+const FAKE_ADMIN_TOKEN = "admin-token-1234567890"
+
+let restores: Array<() => void> = []
+
+function jsonRes(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  })
+}
+
+/**
+ * 打桩一台**已经配好 OIDC 的 NewAPI**：登记时的探测（读用户资料）与 OIDC 检测
+ * 都会走过这些接口；批准后读余额、模型也走它。
+ */
+function stubFakeNewApi(owner: U): void {
+  const email = `${owner.username}@doulor.cn`
+  const routes: Record<string, unknown> = {
+    "/api/user/search": { data: [{ id: 7, username: owner.username, email, quota: 2500000 }] },
+    "/api/status": { data: { quota_display_type: "CNY", quota_per_unit: 500000 } },
+    "/api/subscription/admin/users/7/subscriptions": { data: [] },
+    "/api/subscription/plans": { data: [] },
+    // OIDC 指向本站 ⇒ 允许入驻（与真实检测同一条判据）
+    "/api/option/": {
+      data: [
+        { key: "oidc.enabled", value: "true" },
+        { key: "oidc.authorization_endpoint", value: "https://cloud.doulor.cn/oauth/authorize" },
+        { key: "oidc.client_id", value: "doulor-cloud" },
+      ],
+    },
+    "/api/models": { data: ["gpt-4o-mini"] },
+  }
+  const original = globalThis.fetch
+  const stub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const raw =
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+    const url = new URL(raw)
+    if (url.hostname === "relay-review.example.com") {
+      const hit = routes[url.pathname]
+      return jsonRes(hit ?? { success: true, data: null })
+    }
+    return original(input as RequestInfo, init)
+  }) as unknown as typeof fetch
+  globalThis.fetch = stub
+  restores.push(() => {
+    globalThis.fetch = original
+  })
+}
+
+afterEach(() => {
+  for (const r of restores) r()
+  restores = []
+})
+
+/** 登记一台假站（打桩已就绪），返回它的 id */
+async function registerFake(owner: U, name = "审核测试站"): Promise<string> {
+  const res = await createRelay(owner, {
+    name,
+    kind: "newapi",
+    baseUrl: FAKE_BASE,
+    adminToken: FAKE_ADMIN_TOKEN,
+  })
+  expect(res.status, await res.clone().text()).toBe(200)
+  const body = await res.json<{ provider: { id: string } }>()
+  return body.provider.id
+}
+
+async function listOf(user: U): Promise<Record<string, unknown>[]> {
+  const res = await fetchSelf(authRequest(user, "/api/relay/providers"))
+  expect(res.status).toBe(200)
+  const body = await res.json<{ providers: Record<string, unknown>[] }>()
+  return body.providers
+}
+
+async function reviewAs(
+  admin: U,
+  id: string,
+  action: "approve" | "reject",
+  note?: string
+): Promise<Response> {
+  return fetchSelf(
+    authRequest(
+      admin,
+      `/api/admin/relay-providers/${encodeURIComponent(id)}/review`,
+      json("POST", note ? { action, note } : { action })
+    )
+  )
 }
 
 describe("中转站登记", () => {
@@ -126,5 +222,210 @@ describe("中转站登记", () => {
     const user = await makeUser({})
     const res = await fetchSelf(authRequest(user, "/api/admin/relay-providers"))
     expect(res.status).toBe(403)
+  })
+})
+
+/* ---------------------------------------------------------------- 审核制 */
+
+describe("中转站审核制（2026-10-16）", () => {
+  it("新入驻是 pending 且不可用：能看见自己的站、读不了任何上游数据", async () => {
+    const owner = await makeUser({})
+    const other = await makeUser({})
+    stubFakeNewApi(owner)
+    const id = await registerFake(owner, "等审核的站")
+
+    // 落库状态：审核列 pending，enabled 仍为 1（两把锁是分开的）
+    const row = await env.DB.prepare(
+      "SELECT review_status, enabled FROM relay_providers WHERE id = ?"
+    )
+      .bind(id)
+      .first<{ review_status: string; enabled: number }>()
+    expect(row?.review_status).toBe("pending")
+    expect(row?.enabled).toBe(1)
+
+    // 登记接口的响应就要如实说明「还不能用」
+    const created = await fetchSelf(authRequest(owner, "/api/relay/providers"))
+    const mine = (await created.json<{ providers: Record<string, unknown>[] }>()).providers.find(
+      (p) => p.id === id
+    )
+    expect(mine?.reviewStatus).toBe("pending")
+    expect(mine?.usable).toBe(false)
+    expect(mine?.mine).toBe(true)
+
+    // 所有者看得见（上面刚断言）—— 但**别人看不见**这台未审核的站
+    expect((await listOf(other)).some((p) => p.id === id)).toBe(false)
+
+    // 所有者自己也不能「用」它：/me、/keys、/models 一律 403 PENDING_REVIEW
+    for (const suffix of ["me", "keys", "models"]) {
+      const res = await fetchSelf(
+        authRequest(owner, `/api/relay/providers/${encodeURIComponent(id)}/${suffix}`)
+      )
+      expect(res.status, `${suffix} 应当被审核闸拦住`).toBe(403)
+      expect((await res.json<{ code: string }>()).code).toBe("PENDING_REVIEW")
+    }
+  })
+
+  it("批准之后可用：别的用户也看得到，/me 真的读到余额", async () => {
+    const owner = await makeUser({})
+    const other = await makeUser({})
+    const admin = await makeUser({ role: "admin" })
+    stubFakeNewApi(owner)
+    const id = await registerFake(owner, "待批准的站")
+
+    const res = await reviewAs(admin, id, "approve")
+    expect(res.status).toBe(200)
+    expect((await res.json<{ reviewStatus: string }>()).reviewStatus).toBe("approved")
+
+    // 普通用户现在能在列表里看到它
+    const seen = (await listOf(other)).find((p) => p.id === id)
+    expect(seen?.usable).toBe(true)
+    expect(seen?.reviewStatus).toBe("approved")
+
+    // /me 通了（上游被打桩：¥2500000 / 500000 = ¥5.00）
+    const me = await fetchSelf(authRequest(other, `/api/relay/providers/${encodeURIComponent(id)}/me`))
+    expect(me.status).toBe(200)
+    const view = (await me.json<{ view: { reachable: boolean; balance: number | null } }>()).view
+    expect(view.reachable).toBe(true)
+    expect(view.balance).toBeCloseTo(5)
+
+    // /models 也放行（这条路径原先**没有**任何状态检查，是本次一并补上的漏洞）
+    const models = await fetchSelf(
+      authRequest(other, `/api/relay/providers/${encodeURIComponent(id)}/models`)
+    )
+    expect(models.status).toBe(200)
+    expect((await models.json<{ models: string[] }>()).models).toEqual(["gpt-4o-mini"])
+  })
+
+  it("拒绝必须带理由，被拒后不可用、且理由能读到", async () => {
+    const owner = await makeUser({})
+    const admin = await makeUser({ role: "admin" })
+    stubFakeNewApi(owner)
+    const id = await registerFake(owner, "会被拒的站")
+
+    // 不写理由 ⇒ 400（否则用户不知道要改什么）
+    const noReason = await reviewAs(admin, id, "reject")
+    expect(noReason.status).toBe(400)
+    expect((await noReason.json<{ code: string }>()).code).toBe("REASON_REQUIRED")
+
+    const note = "管理员令牌权限不足，读不到用户列表"
+    expect((await reviewAs(admin, id, "reject", note)).status).toBe(200)
+
+    // 所有者侧：列表带状态与理由
+    const mine = (await listOf(owner)).find((p) => p.id === id)
+    expect(mine?.reviewStatus).toBe("rejected")
+    expect(mine?.reviewNote).toBe(note)
+    expect(mine?.usable).toBe(false)
+
+    // 用不了，且错误消息把理由带回来（界面上直接就有话说）
+    const me = await fetchSelf(authRequest(owner, `/api/relay/providers/${encodeURIComponent(id)}/me`))
+    expect(me.status).toBe(403)
+    const err = await me.json<{ code: string; error: string }>()
+    expect(err.code).toBe("REVIEW_REJECTED")
+    expect(err.error).toContain(note)
+
+    // 改一改就能重新排队（否则被拒 = 死局，只能删掉重登记）
+    const put = await fetchSelf(
+      authRequest(owner, `/api/relay/providers/${encodeURIComponent(id)}`, json("PUT", { name: "改过名的站" }))
+    )
+    expect(put.status).toBe(200)
+    const after = (await put.json<{ provider: Record<string, unknown> }>()).provider
+    expect(after.reviewStatus).toBe("pending")
+    expect(after.reviewNote).toBeNull()
+  })
+
+  it("批准后仍可临时停用：停用立刻读不到上游，恢复后又可以", async () => {
+    const owner = await makeUser({})
+    const other = await makeUser({})
+    const admin = await makeUser({ role: "admin" })
+    stubFakeNewApi(owner)
+    const id = await registerFake(owner, "会被停用的站")
+    expect((await reviewAs(admin, id, "approve")).status).toBe(200)
+
+    const meUrl = `/api/relay/providers/${encodeURIComponent(id)}/me`
+    expect((await fetchSelf(authRequest(other, meUrl))).status).toBe(200)
+
+    // 停用（审核态不动）⇒ 立刻不可用；连登记人自己也读不到（原先是 owner 例外）
+    const off = await fetchSelf(
+      authRequest(admin, `/api/admin/relay-providers/${encodeURIComponent(id)}/enabled`, json("POST", { enabled: false }))
+    )
+    expect(off.status).toBe(200)
+    expect((await off.json<{ usable: boolean }>()).usable).toBe(false)
+    expect((await fetchSelf(authRequest(other, meUrl))).status).toBe(403)
+    const own = await fetchSelf(authRequest(owner, meUrl))
+    expect(own.status).toBe(403)
+    expect((await own.json<{ code: string }>()).code).toBe("DISABLED")
+
+    // 恢复 ⇒ 又能用，且审核态仍是 approved（两把锁互不覆盖）
+    const on = await fetchSelf(
+      authRequest(admin, `/api/admin/relay-providers/${encodeURIComponent(id)}/enabled`, json("POST", { enabled: true }))
+    )
+    expect((await on.json<{ usable: boolean }>()).usable).toBe(true)
+    expect((await fetchSelf(authRequest(other, meUrl))).status).toBe(200)
+  })
+
+  it("「恢复启用」一台未批准的站：接口明说它仍然不可用", async () => {
+    const owner = await makeUser({})
+    const admin = await makeUser({ role: "admin" })
+    stubFakeNewApi(owner)
+    const id = await registerFake(owner, "未批准的站")
+
+    const res = await fetchSelf(
+      authRequest(admin, `/api/admin/relay-providers/${encodeURIComponent(id)}/enabled`, json("POST", { enabled: true }))
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json<{ enabled: boolean; usable: boolean }>()
+    expect(body.enabled).toBe(true)
+    // 两把锁只开了一把 ⇒ 管理端不能显示成「已生效」
+    expect(body.usable).toBe(false)
+  })
+
+  it("普通用户不能批准 / 拒绝（403），管理端列表要求权限域", async () => {
+    const owner = await makeUser({})
+    const normal = await makeUser({})
+    stubFakeNewApi(owner)
+    const id = await registerFake(owner, "谁都别想批的站")
+
+    expect((await reviewAs(normal, id, "approve")).status).toBe(403)
+    expect((await reviewAs(normal, id, "reject", "随便拒一下")).status).toBe(403)
+
+    // 动作值非法也要挡住（不能靠拼字符串绕过审核语义）
+    const admin = await makeUser({ role: "admin" })
+    const bad = await fetchSelf(
+      authRequest(admin, `/api/admin/relay-providers/${encodeURIComponent(id)}/review`, json("POST", { action: "delete" }))
+    )
+    expect(bad.status).toBe(400)
+    expect((await bad.json<{ code: string }>()).code).toBe("INVALID_ACTION")
+
+    // 管理端列表：普通用户 403、且**不含**令牌字段
+    expect((await fetchSelf(authRequest(normal, "/api/admin/relay-providers"))).status).toBe(403)
+    const adminList = await fetchSelf(authRequest(admin, "/api/admin/relay-providers"))
+    expect(adminList.status).toBe(200)
+    const text = await adminList.text()
+    expect(text).not.toMatch(/token_enc|tokenEnc|adminToken/i)
+    const list = JSON.parse(text) as { providers: Record<string, unknown>[] }
+    const row = list.providers.find((p) => p.id === id)
+    expect(row?.reviewStatus).toBe("pending")
+    expect(row?.ownerUsername).toBe(owner.username)
+    expect(typeof row?.sort).toBe("number")
+    expect(row?.createdAt).toBeTruthy()
+  })
+
+  it("审核态认不出来的值按「待审核」处理（fail-closed）", async () => {
+    const owner = await makeUser({})
+    const now = new Date().toISOString()
+    // 直接写库造一个「列被手工改坏」的行：不能因为认不出状态就放行
+    await env.DB.prepare(
+      `INSERT INTO relay_providers
+         (id, name, kind, base_url, token_enc, owner_user_id, enabled, sort, review_status, created_at, updated_at)
+       VALUES ('rp_bad_status', '状态坏的站', 'newapi', 'https://relay-review.example.com', 'x', ?, 1, 100, 'weird', ?, ?)`
+    )
+      .bind(owner.id, now, now)
+      .run()
+
+    const res = await fetchSelf(
+      authRequest(owner, "/api/relay/providers/rp_bad_status/me")
+    )
+    expect(res.status).toBe(403)
+    expect((await res.json<{ code: string }>()).code).toBe("PENDING_REVIEW")
   })
 })

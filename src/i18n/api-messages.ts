@@ -767,6 +767,11 @@ export const API_MESSAGES_EN: Record<string, string> = {
   "这单已经结算完成": "This order has already been settled",
   "这单已经结算过了": "This order has already been settled",
   "这台中转站已被停用": "This gateway has been disabled",
+  // 中转站审核制（2026-10-16）：新文案见 worker/src/handlers/relay-providers.ts
+  "这台中转站还在等站长审核，审核通过后才能使用": "This gateway is still waiting for the site owner's review — it becomes usable once approved",
+  "这台中转站的入驻申请被拒绝": "This gateway's onboarding request was rejected",
+  "审核动作只能是批准（approve）或拒绝（reject）": "A review action must be either approve or reject",
+  "请填写拒绝理由（会展示给登记人）": "Fill in a rejection reason — it's shown to the registrant",
   "这台服务器你已经提交过了": "You've already submitted this server",
   "这是一张自选券，请先选择要开通的权限": "This is a pick-your-own voucher — choose which permission to activate first",
   "这是用户上架的商品，请用审核操作处理": "This is a user listing — handle it with the review action instead",
@@ -978,6 +983,8 @@ export const API_MESSAGE_PATTERNS: { src: string; en: string }[] = [
   { src: "^无法登录\\ Qoder2API\\ 面板：(.+?)$", en: "Couldn't sign in to the Qoder2API panel: {v0}" },
   { src: "^最多保存\\ (.+?)\\ 个表情包，先删掉一些再传$", en: "You can save at most {v0} emoji packs — delete some before uploading more" },
   { src: "^最多登记\\ (.+?)\\ 台中转站，请先删掉不用的$", en: "You can register at most {v0} gateways — delete the ones you don't use first" },
+  // 审核制（2026-10-16）：拒绝理由会拼进错误消息里，所以要一条模板
+  { src: "^这台中转站的入驻申请被拒绝：(.+?)$", en: "This gateway's onboarding request was rejected: {v0}" },
   { src: "^Qoder2API\\ 响应超时（(.+?)\\ 秒）$", en: "Qoder2API timed out ({v0} seconds)" },
   { src: "^父级\\ (.+?)\\ 属于\\ (.+?)，不能建在其他人名下$", en: "The parent {v0} belongs to {v1} — you can't create it under someone else" },
   { src: "^一次最多\\ (.+?)\\ 个用户名（收到\\ (.+?)\\ 个）$", en: "At most {v0} usernames per batch ({v1} received)" },

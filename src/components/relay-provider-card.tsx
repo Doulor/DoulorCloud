@@ -127,6 +127,8 @@ export function RelayProviderCard() {
       } else {
         const res = await relayApi.create({ name, kind, baseUrl, adminToken: adminToken.trim() })
         warning = res.oidcWarning
+        // 审核制（2026-10-16）：登记**不等于**生效，这句必须说清楚，
+        // 否则用户会以为「登记完了怎么在别人那边看不到」是 bug。
         toast.success(t("relayp.ok.created"))
       }
       // 检测不到 OIDC 时放行但要说清楚（对方可能只是开了登录验证码）
@@ -228,7 +230,23 @@ export function RelayProviderCard() {
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-medium">{p.name}</span>
                 <Badge variant="outline">{t(`relayp.kind.${p.kind}`)}</Badge>
-                {!p.enabled && <Badge variant="destructive">{t("relayp.disabled")}</Badge>}
+                {/*
+                  状态徽章（2026-10-16 审核制）—— 三层含义各自一个徽章，别合并：
+                    · 待审核   = 等站长看（还没有结论）
+                    · 已拒绝   = 有结论，且理由就写在下面（用户知道要改什么）
+                    · 已停用   = 审过了，但站长临时关了（审核态仍是 approved）
+                  最后一种沿用原来的 destructive 徽章，避免站长停用后用户
+                  误以为「又要重新审核」。
+                */}
+                {p.reviewStatus === "pending" && (
+                  <Badge variant="secondary">{t("relayp.review.pending")}</Badge>
+                )}
+                {p.reviewStatus === "rejected" && (
+                  <Badge variant="destructive">{t("relayp.review.rejected")}</Badge>
+                )}
+                {p.reviewStatus === "approved" && !p.enabled && (
+                  <Badge variant="destructive">{t("relayp.disabled")}</Badge>
+                )}
                 <span className="ml-auto text-xs text-muted-foreground">
                   {t("relayp.createdAt", { time: fmtTime(p.createdAt) })}
                 </span>
@@ -239,10 +257,30 @@ export function RelayProviderCard() {
                 </p>
               )}
 
+              {/* 审核态说明：待审核 / 被拒（带理由）都要有一句话解释「现在能不能用」 */}
+              {p.reviewStatus === "pending" && (
+                <p className="mt-2 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                  {t("relayp.review.pendingHint")}
+                </p>
+              )}
+              {p.reviewStatus === "rejected" && (
+                <p className="mt-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  {p.reviewNote
+                    ? t("relayp.review.rejectedHint", { reason: p.reviewNote })
+                    : t("relayp.review.rejectedNoReason")}
+                  <br />
+                  {t("relayp.review.resubmit")}
+                </p>
+              )}
+
               <div className="mt-3 flex flex-wrap gap-2">
                 <Button
                   size="sm"
                   variant="outline"
+                  // 不能用时把按钮灰掉（而不是让它点了必 403）：usable 由服务端算，
+                  // 包含「已批准」与「未停用」两半，前端不再自己拼这两个条件。
+                  disabled={!p.usable}
+                  title={p.usable ? undefined : t("relayp.review.notUsable")}
                   onClick={() => void loadView(p, views[p.id] !== undefined)}
                 >
                   {views[p.id] === "loading" ? (
@@ -329,6 +367,11 @@ export function RelayProviderCard() {
               <p className="text-xs text-muted-foreground">
                 {kind === "sub2api" ? t("relayp.tokenHint.sub2api") : t("relayp.tokenHint.newapi")}
               </p>
+            </div>
+            <div className="flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+              <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              {/* 保存前先告知「提交 ≠ 生效」：这个预期必须在动手填之前建立 */}
+              <span>{t("relayp.review.createHint")}</span>
             </div>
             <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-600 dark:text-amber-400">
               <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />

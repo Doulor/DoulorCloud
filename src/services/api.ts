@@ -4100,7 +4100,13 @@ export const adminTitlesApi = {
  * 用户在 AI 页能顺便看到自己在那边的余额与订阅。
  *
  * ⚠️ 额度**只读**：我们只读余额与订阅，不代发额度、不建 Key、不改余额。
+ *
+ * 🔴 2026-10-16 起是**审核制**：登记后是 `pending`，站长批准（`approved`）后才对
+ * 其他用户出现、也才能读上游；被拒（`rejected`）时带一句 `reviewNote`。
+ * 见 worker/migrations/0162_relay_provider_review.sql。
  */
+export type RelayReviewStatus = "pending" | "approved" | "rejected"
+
 export interface RelayProvider {
   id: string
   name: string
@@ -4108,7 +4114,19 @@ export interface RelayProvider {
   kind: string
   /** 站点地址：只有本人/管理员能看到（别人的站不暴露地址） */
   baseUrl?: string
+  /** 站长的「临时停用」开关（与审核态是两把锁，不能只看它） */
   enabled: boolean
+  /** 审核态：pending = 等站长审；rejected = 被拒（理由见 reviewNote） */
+  reviewStatus: RelayReviewStatus
+  /** 拒绝理由（只有 rejected 时后端才返回，其余为 null） */
+  reviewNote?: string | null
+  /** 审核时间（存量数据在迁移里被直接置为 approved，没有这一项 ⇒ null） */
+  reviewedAt?: string | null
+  /**
+   * **服务端算的**「现在到底能不能用」（= approved 且 enabled）。
+   * 界面请用它来决定按钮是否可用，不要自己拼这两个字段 —— 那样迟早跟后端漂移。
+   */
+  usable: boolean
   mine: boolean
   sort: number
   createdAt: string
@@ -4176,6 +4194,49 @@ export const relayApi = {
   models: (id: string) =>
     request<{ models: string[]; detail?: string }>(
       `/relay/providers/${encodeURIComponent(id)}/models`
+    ),
+}
+
+/**
+ * 管理端：中转站入驻的审核与停用（2026-10-16 审核制）。
+ *
+ * 与用户侧 relayApi 分开：这一组全部要求 `newapi.subscriptions` 权限域，
+ * 单独放一份能让「谁都能调的接口」和「只有站长能调的接口」在代码里一眼分开。
+ *
+ * ⚠️ 列表里**没有令牌字段**，永远也不会有：token_enc 是密文，管理端同样不解密展示
+ * （要换令牌由登记人自己在用户侧编辑）。
+ */
+export interface AdminRelayProvider {
+  id: string
+  name: string
+  kind: string
+  baseUrl: string
+  ownerUsername: string | null
+  enabled: boolean
+  reviewStatus: RelayReviewStatus
+  reviewNote: string | null
+  reviewedAt: string | null
+  /** 展示排序（小的在前） */
+  sort: number
+  createdAt: string
+}
+
+export const adminRelayApi = {
+  /** 全部登记（含待审核 / 已拒绝 / 已停用） */
+  list: () => request<{ providers: AdminRelayProvider[] }>("/admin/relay-providers"),
+
+  /** 一键启用 / 停用（审核态不变：批准后仍可临时停用） */
+  setEnabled: (id: string, enabled: boolean) =>
+    request<{ ok: boolean; enabled: boolean; usable: boolean }>(
+      `/admin/relay-providers/${encodeURIComponent(id)}/enabled`,
+      { method: "POST", body: JSON.stringify({ enabled }) }
+    ),
+
+  /** 批准 / 拒绝（拒绝必填理由，会展示给登记人） */
+  review: (id: string, action: "approve" | "reject", note?: string) =>
+    request<{ ok: boolean; reviewStatus: RelayReviewStatus; reviewNote: string | null }>(
+      `/admin/relay-providers/${encodeURIComponent(id)}/review`,
+      { method: "POST", body: JSON.stringify(note ? { action, note } : { action }) }
     ),
 }
 

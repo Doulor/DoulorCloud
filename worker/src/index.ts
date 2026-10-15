@@ -3554,7 +3554,8 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   },
 
   // ---- 中转站登记（2026-10-12）：朋友自助登记他们的 NewAPI / Sub2API，
-  // 用户在 AI 页能顺便看到自己在那边的余额与订阅（**只读**，不代发额度）----
+  // 用户在 AI 页能顺便看到自己在那边的余额与订阅（**只读**，不代发额度）。
+  // ⚠️ 2026-10-16 起是**审核制**：登记落库为 pending，站长批准后才对其他人可用 ----
   {
     kind: "exact",
     path: "/relay/providers",
@@ -3602,7 +3603,7 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: (m: RegExpMatchArray) =>
       relayProviderHandlers.deleteRelayProvider(env, request, decodeURIComponent(m[1])),
   },
-  // 站长视角：全部登记 + 一键停用
+  // 站长视角：全部登记（含待审核 / 已拒绝）+ 一键停用 + 批准/拒绝（审核制，2026-10-16）
   {
     kind: "exact",
     path: "/admin/relay-providers",
@@ -3615,6 +3616,17 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     methods: ["POST"],
     handle: (m: RegExpMatchArray) =>
       relayProviderHandlers.adminSetRelayProviderEnabled(
+        env,
+        request,
+        decodeURIComponent(m[1])
+      ),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/relay-providers\/([^/]+)\/review$/),
+    methods: ["POST"],
+    handle: (m: RegExpMatchArray) =>
+      relayProviderHandlers.adminReviewRelayProvider(
         env,
         request,
         decodeURIComponent(m[1])
