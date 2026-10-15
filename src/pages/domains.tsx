@@ -37,6 +37,11 @@ import { Textarea } from "@/components/ui/textarea"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { DnsRentalPanel } from "@/components/dns-rental-panel"
 import { dnsApi, domainApi, HttpError } from "@/services/api"
+import {
+  dnsAccessView,
+  recordDomainChoices as deriveRecordDomainChoices,
+  usableDnsRoots,
+} from "@/lib/dns-access"
 import { useT } from "@/i18n"
 import { useAuth } from "@/hooks/use-auth"
 import type { DnsRecord, DnsRecordType, DnsRentalState, RootDomainOption, Subdomain } from "@/types"
@@ -103,6 +108,10 @@ export default function DomainsPage() {
    * ⚠️ 2026-10-14 起 DNS 改成**积分租用**后，没有权限位的用户也能用 ——
    * 只是要自己买（见下方 dnsRental 与 DnsRentalPanel）。所以「选项卡是否渲染」
    * 不再由这个布尔量决定：**所有人都能看到两个选项卡**，买不起的人看到的是价目表。
+   *
+   * ⚠️ 2026-10-16（paji 故障后）：这个布尔量只是**乐观短路**，不是权威口径 ——
+   * 它依赖 `/api/me` 的用户快照（可能还没到、也可能拿不到），而权威是服务端
+   * `dnsAccessFor` 判出的档位。真正的判定一律走下面的 access（见 lib/dns-access.ts）。
    */
   const hasFreeDns =
     user?.permissions?.dns === true ||
@@ -135,24 +144,49 @@ export default function DomainsPage() {
   }, [])
 
   /**
-   * 当前访问档位（rented = 有有效租约；expired = 只剩过期租约，只能删记录）。
-   * `hasFreeDns` 时后端返回的一定是 full，不必等这个请求回来。
+   * 访问档位与「能不能看 / 能不能写」的唯一出处（推导见 lib/dns-access.ts）。
+   *
+   * 🔴 2026-10-16 修的真实故障（站长报的 paji）：这里原先是
+   *   `canManageDns = hasFreeDns || dnsAccessMode === "rented" || ... === "expired"`
+   * —— **漏掉了服务端的 "full" 档**。服务端 `dnsAccessFor` 是三档（权限位 /
+   * 免权限访问 / 有效租约），"full" 正是「有免费额度」那一档；而前端只认
+   * rented / expired，于是「服务端说 full、前端自己的 hasFreeDns 快照却是 false」
+   * 的用户会被整块关在门外：只看到价目表 + 「你的账号已开通 DNS 解析额度」横幅
+   * （横幅的渲染条件就是服务端 `freeAccess === true`），看不到记录列表、也看不到
+   * 「添加记录」按钮 —— 可服务端对他其实是全放开的（GET /api/dns 200）。
+   *
+   * 前端快照为 false 而服务端为 full 是**合法**状态，至少两种：
+   *   · 管理面板把 dns 设成「免权限访问」（open_features 含 dns）—— 与权限位互相独立；
+   *   · `/api/me` 还没回来 / 失败（useAuth 失败时把 user 置 null，而本页不看 loading）。
+   * 所以现在**以服务端 accessMode 为准**，前端快照只作为「还没等到服务端回答时的
+   * 乐观短路」—— 有权限位的人不必白等一次 D1 往返。
    */
-  const dnsAccessMode = hasFreeDns ? "full" : (dnsRental?.accessMode ?? "none")
+  const access = dnsAccessView(hasFreeDns, dnsRental?.accessMode)
   /** 能不能看记录列表（expired 也放行 —— 后端允许他们删掉自己的旧记录） */
-  const canManageDns = hasFreeDns || dnsAccessMode === "rented" || dnsAccessMode === "expired"
+  const canManageDns = access.canManage
   /** 能不能**新建 / 修改**记录（到期后就不行了，只能删） */
-  const canWriteDns = hasFreeDns || dnsAccessMode === "rented"
+  const canWriteDns = access.canWrite
+  /**
+   * 手上还有租约（含已过期）—— 即使当前是 full 档也要把租用面板显示出来。
+   *
+   * 为什么需要这条例外：full 档的人本来不用再买，隐藏价目表是合理的；但他**已经买过**
+   * 的那份租约（尤其是开着自动续费的）必须有地方看与关 —— 免权限访问（open_features）
+   * 一旦开着，所有人都会变成 full 档，那时若连「我的租约」都藏掉，
+   * 一个开着自动续费的用户会**在界面上找不到任何关闭入口**却继续被扣分。
+   * 面板里 full 档用户的购买/续期按钮本来就不渲染（见 dns-rental-panel 的 freeAccess 分支），
+   * 所以显示它不会诱导他重复付费。
+   */
+  const hasRentalsToManage = (dnsRental?.rentals.length ?? 0) > 0
 
-  /** 新建记录时可选的根域（买过 / 有权限的才算，与后端闸门口径一致） */
-  const dnsRootChoices = React.useMemo(() => {
-    if (hasFreeDns) {
-      return rootOptions.map((r) => ({ name: r.name, label: r.label || r.name }))
-    }
-    return (dnsRental?.options ?? [])
-      .filter((o) => o.usable)
-      .map((o) => ({ name: o.name, label: o.label || o.name }))
-  }, [hasFreeDns, rootOptions, dnsRental])
+  /**
+   * 新建记录时可选的根域（买过 / 有权限的才算，与后端闸门口径一致）。
+   * `access.mode === "full"` 而不是 `hasFreeDns`：服务端判定的 freeAccess
+   * 同样要给全部根域（否则免权限访问的用户连自己已有的域都选不到）。
+   */
+  const dnsRootChoices = React.useMemo(
+    () => usableDnsRoots(access.mode === "full", rootOptions, dnsRental?.options ?? []),
+    [access.mode, rootOptions, dnsRental]
+  )
 
   const [subdomains, setSubdomains] = React.useState<Subdomain[]>([])
   const [selected, setSelected] = React.useState<Subdomain | null>(null)
@@ -199,19 +233,15 @@ export default function DomainsPage() {
    * 全部子域名，两处口径一致才不会被问「为什么这里看不到我的 xxx.blog 域名」。
    * `root` 仍然按 fqdn 的后缀从可用根域里取，新建时随 `subdomainId` 一起上报，
    * 让服务端做「声明的根域 vs 实际子域名」的一致性校验（见 handlers/dns.ts）。
+   *
+   * 推导本身抽到了 lib/dns-access.ts 的 recordDomainChoices（纯函数，可单测）：
+   * 它的**返回可能是空数组**（名下子域名都不在当前可用根域之下），
+   * 那时记录区照常渲染，只是新建入口 disabled —— 见那边的注释。
    */
-  const recordDomainChoices = React.useMemo(() => {
-    const usableRoots = new Set(dnsRootChoices.map((r) => r.name.toLowerCase()))
-    return subdomains
-      .map((s) => {
-        const root = dnsRootChoices.find((r) =>
-          s.fqdn.toLowerCase().endsWith(`.${r.name.toLowerCase()}`)
-        )
-        return root ? { id: s.id, fqdn: s.fqdn, root: root.name } : null
-      })
-      .filter((x): x is { id: string; fqdn: string; root: string } => x !== null)
-      .filter((x) => usableRoots.has(x.root.toLowerCase()))
-  }, [subdomains, dnsRootChoices])
+  const recordDomainChoices = React.useMemo(
+    () => deriveRecordDomainChoices(subdomains, dnsRootChoices),
+    [subdomains, dnsRootChoices]
+  )
   const [records, setRecords] = React.useState<DnsRecord[]>([])
   /**
    * DNS 记录用量（**服务端口径**：跨该用户全部域名），null = 还没拉到。
@@ -1007,9 +1037,14 @@ export default function DomainsPage() {
             Radix 的 TabsContent 默认**按需挂载**（未选中即不渲染），
             所以不打开这个选项卡就不会产生任何 DNS 请求。 */}
         <TabsContent value="dns" className="space-y-6">
-          {/* 没有免费额度的人先看到价目与自己的租期。有权限位 / 管理员不显示 ——
-              他们本来就不用买，摆一排「购买」按钮只会让人以为自己也要付钱。 */}
-          {!hasFreeDns && (
+          {/* 已经有免费额度的（权限位 / 管理员 / **服务端判定的 full**）不显示价目面板 ——
+              他们本来就不用买，摆一排「购买」按钮只会让人以为自己也要付钱。
+              ⚠️ 判据必须是 access.showRentalPanel（= 档位非 full），不能只看 `hasFreeDns`：
+              只看前端快照的话，免权限访问（open_features）的用户会一边看到
+              「已开通额度」横幅、一边被藏掉整块记录界面（2026-10-16 paji 的故障）。
+              例外：手上还有租约时照样显示（见 hasRentalsToManage —— 否则开着自动续费
+              的人连「在哪关掉它」都找不到）。 */}
+          {(access.showRentalPanel || hasRentalsToManage) && (
             <DnsRentalPanel
               state={dnsRental}
               loading={dnsRentalLoading}
