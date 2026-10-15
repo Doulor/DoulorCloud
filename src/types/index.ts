@@ -44,6 +44,14 @@ export interface Subdomain {
 export interface DnsRecord {
   id: string
   subdomainId: string | null
+  /**
+   * 记录所属**子域名**的 fqdn（如 `xxxxx.tyu.me`，服务端 LEFT JOIN 下发）。
+   *
+   * 列表默认跨全部域名，一屏里混着好几个域的记录 —— 没有这一列就分不清哪条属于哪个域。
+   * 老数据 `subdomainId` 可能为空，此时服务端给 null，前端按「fqdn 去掉记录名」兜底
+   * （见 pages/domains.tsx 的 ownerFqdn）。
+   */
+  subdomainFqdn?: string | null
   name: string
   fqdn: string
   type: DnsRecordType

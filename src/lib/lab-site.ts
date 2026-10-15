@@ -197,7 +197,8 @@ export const SITE_OPS: SiteOp[] = [
   {
     id: "dns.list",
     group: "DNS",
-    desc: "列出 DNS 记录。不给 subdomainId 就是账号主域名的记录",
+    desc:
+      "列出 DNS 记录。不给 subdomainId 就是账号名下**全部域名**的记录（每条带 subdomainFqdn，说明它属于哪个域名）；给 subdomainId 则只看该域名",
     args: '{"subdomainId":"可选，子域名 id"}',
     build: (a) => ({ method: "GET", path: `/dns${qs({ subdomainId: optStr(a, "subdomainId") })}` }),
   },

@@ -52,6 +52,25 @@ function StatusBadge({ status }: { status: DnsRecord["status"] }) {
   return <Badge variant="destructive">error</Badge>
 }
 
+/**
+ * 一条记录挂在哪个域名下（列表的 Domain 列、编辑弹窗的基准域名都用它）。
+ *
+ * 为什么不在组件里现算：列表、弹窗、提交前的校验都要用到同一个答案，
+ * 各写一份迟早出现「列表说是 A 域、弹窗按 B 域算」的不一致。
+ *
+ * 优先用服务端下发的 `subdomainFqdn`（LEFT JOIN subdomains 得来）；老数据的
+ * `subdomain_id` 为空时服务端给 null，这里按「fqdn 去掉记录名」兜底：
+ * `blog.xxxxx.tyu.me` 去掉 `blog` 就是 `xxxxx.tyu.me`；记录名是 `@` 时
+ * fqdn 本身就是它所在的域名。`managed`（平台派生）项同理。
+ */
+function ownerFqdn(r: DnsRecord): string {
+  if (r.subdomainFqdn) return r.subdomainFqdn
+  if (r.name && r.name !== "@" && r.fqdn.endsWith(`.${r.name}`)) {
+    return r.fqdn.slice(0, r.fqdn.length - r.name.length - 1)
+  }
+  return r.fqdn
+}
+
 export default function DomainsPage() {
   const { t } = useT()
   const { user } = useAuth()
@@ -139,21 +158,51 @@ export default function DomainsPage() {
   const [selected, setSelected] = React.useState<Subdomain | null>(null)
 
   /**
-   * 「新建记录」时可选的**域名**（= 我名下的一级域名，含 '@' 主域名）。
+   * DNS 记录列表的域名筛选：`"all"` = 跨全部域名（默认），否则是某个子域名 id。
+   *
+   * 为什么默认「全部」而不是跟着上面选中的域名（2026-10-16 站长要求）：
+   * 他名下有 3 个子域名，记录都建在 `xxxxx.tyu.me` 下，但页面默认停在
+   * `ttest.tyu.me`，于是显示「0 条解析 / 还没有 DNS 记录」——看着像记录丢了。
+   * 记录本来就都在自己名下，默认全看见才不会漏。
+   * 下拉筛选仍然保留：要只看某一个域时选它即可。
+   *
+   * ⚠️ 这个状态**只**影响「看哪些记录」，绝不参与编辑/删除的参数 ——
+   * 那两个动作一律按记录自己的 id/域名走（见 handleSubmitDns / handleDeleteDns）。
+   */
+  const [dnsFilter, setDnsFilter] = React.useState("all")
+  /**
+   * 实际生效的筛选。
+   *
+   * 指向的子域名已经不存在时（比如刚把它删了）回落「全部」：否则 Select 会显示空值、
+   * 列表也拉不到任何东西，用户看到的是一个「什么都没有」的页面而且不知道该改哪里。
+   */
+  const activeFilter = React.useMemo(() => {
+    if (dnsFilter === "all") return "all"
+    return subdomains.some((s) => s.id === dnsFilter) ? dnsFilter : "all"
+  }, [dnsFilter, subdomains])
+
+  /**
+   * 「新建记录」时可选的**域名**（= 我名下的子域名，含 '@' 主域名与二级子域名）。
    *
    * 为什么不是直接列根域：DNS 记录必须挂在用户**确实拥有**的子域名之下
    * （后端 `assertFqdnOwned` 就是这么卡的，它只认 `subdomains` 表里的行）。
    * 所以「记录建在哪个根域下」在数据结构上的等价说法是「建在我名下的哪个域名下」——
    * 列根域再拼一个 `用户名.<根域>`，拼出来的是用户并不拥有的 fqdn，必然 403。
    *
-   * 可选范围 = 我的一级域名 ∩ 我能用的根域：
+   * 可选范围 = 我名下的子域名 ∩ 我能用的根域：
    *   · 有权限位 / 管理员 ⇒ 能用的根域是后端下发的全部 rootDomains；
    *   · 租用用户 ⇒ 只有买过的那个根域（买 200 的 tyu.me 不等于能用 500 的 7u.nz）。
+   *
+   * ⚠️ 2026-10-16：二级子域名**也**列进来（原先只列一级）。理由是那次改造把
+   * 「批量添加」的目标域名从「当前选中的域名」换成了这个列表 —— 只列一级的话，
+   * 批量添加就没法再建在二级子域名下了，属于功能倒退。而且过滤下拉本来就列出
+   * 全部子域名，两处口径一致才不会被问「为什么这里看不到我的 xxx.blog 域名」。
+   * `root` 仍然按 fqdn 的后缀从可用根域里取，新建时随 `subdomainId` 一起上报，
+   * 让服务端做「声明的根域 vs 实际子域名」的一致性校验（见 handlers/dns.ts）。
    */
   const recordDomainChoices = React.useMemo(() => {
     const usableRoots = new Set(dnsRootChoices.map((r) => r.name.toLowerCase()))
     return subdomains
-      .filter((s) => !s.parentId)
       .map((s) => {
         const root = dnsRootChoices.find((r) =>
           s.fqdn.toLowerCase().endsWith(`.${r.name.toLowerCase()}`)
@@ -166,8 +215,9 @@ export default function DomainsPage() {
   const [records, setRecords] = React.useState<DnsRecord[]>([])
   /**
    * DNS 记录用量（**服务端口径**：跨该用户全部域名），null = 还没拉到。
-   * 见 `dnsApi.list` 的注释：不本地数 `records.length` —— 那是当前子域名的条数，
-   * 而上限是全账号合计的，两者对不上就会显示出一个假的「已用」。
+   * 见 `dnsApi.list` 的注释：不本地数 `records.length` —— 它随筛选变化、
+   * 还会带上平台托管的派生项，而上限是全账号**真实记录**合计的，两者对不上
+   * 就会显示出一个假的「已用」。
    */
   const [dnsUsage, setDnsUsage] = React.useState<{
     used: number
@@ -197,6 +247,24 @@ export default function DomainsPage() {
    * 容易把 SRV 的 service/proto 弄丢，也让「改了什么」变得难以追溯。
    */
   const [editingId, setEditingId] = React.useState<string | null>(null)
+  /**
+   * 正在编辑的**那条记录本身**（新建时为 null）。
+   *
+   * 为什么要留整条而不只是 id（2026-10-16，跨域名列表）：弹窗里的基准域名、
+   * 「记录名能否留空」的校验、提交的目标，都必须取**这条记录自己的**归属域名，
+   * 而不是「当前筛选/选中的域名」—— 全部视图下那两者根本没关系，
+   * 拿后者去算会显示错域名、改错记录。
+   */
+  const [editingRecord, setEditingRecord] = React.useState<DnsRecord | null>(null)
+  /**
+   * 增删改后让列表重新拉一次的计数器。
+   *
+   * 把「重新加载」收敛成一件事：筛选变化、手动刷新、增删改之后都走同一个 effect
+   * （依赖里带它）。原先每个操作各自 `void loadRecords(selected.id)`——
+   * 那种写法在跨域名视图下必然传错域名，而且漏掉一处就静默失效。
+   */
+  const [reloadTick, setReloadTick] = React.useState(0)
+  const reloadRecords = React.useCallback(() => setReloadTick((n) => n + 1), [])
 
   const [openSub, setOpenSub] = React.useState(false)
   const [openDns, setOpenDns] = React.useState(false)
@@ -247,12 +315,19 @@ export default function DomainsPage() {
     }
   }, [])
 
+  /**
+   * 拉记录列表。
+   *
+   * `subdomainId` 不传 = 要**全部域名**的记录（后端语义，见 dnsApi.list）。
+   * 用 `filter`（而不是某个 ref）当参数：每次加载都跟着当前筛选走，
+   * 不会出现「筛着 A 域却拉到 B 域」的错配。
+   */
   const loadRecords = React.useCallback(async (subdomainId?: string) => {
     setLoading(true)
     try {
       const res = await dnsApi.list(subdomainId)
       setRecords(res.records)
-      // 用量跟着列表一起回来（服务端算好），新建/删除后的重载会顺带刷新它
+      // 用量跟着列表一起回来（服务端算好，与筛选无关），增删改后的重载会顺带刷新它
       setDnsUsage(res.dnsUsage)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("dm.err.loadRecords"))
@@ -277,8 +352,11 @@ export default function DomainsPage() {
     // 都会看到一条权限报错 —— 那是噪音，他并没有做错什么，只是还没买。
     // （2026-10-14 起「没额度」的表现是面板里的一张价目表，不是报错。）
     if (!canManageDns) return
-    if (selected) void loadRecords(selected.id)
-  }, [selected?.id, loadRecords, canManageDns])
+    // 连域名都没有时没什么可列（也用不着为此多发一次请求）；
+    // 依赖里的 selected?.id 同时负责「域名列表刚加载完」这一次触发。
+    if (!selected) return
+    void loadRecords(activeFilter === "all" ? undefined : activeFilter)
+  }, [activeFilter, selected?.id, reloadTick, loadRecords, canManageDns])
 
   const handleCreateSubdomain = async () => {
     setSaving(true)
@@ -307,6 +385,9 @@ export default function DomainsPage() {
     try {
       await domainApi.remove(sub.id)
       toast.success(t("dm.ok.subDeleted"))
+      // 正在筛这个域名就退回「全部」：否则筛选指向一个已经不存在 id，
+      // 列表会显示成空的，看着像「删个域名把解析也删没了」
+      if (dnsFilter === sub.id) setDnsFilter("all")
       await loadSubdomains()
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("dm.err.deleteFailed"))
@@ -353,26 +434,48 @@ export default function DomainsPage() {
       srvTarget: r.srv?.target ?? "",
     })
     setEditingId(r.id)
+    // 记录整条留下：弹窗的基准域名与校验都要看**它自己的**归属域名（见 editingRecord）
+    setEditingRecord(r)
     setOpenDns(true)
   }
 
-  /** 提交：editingId 为空走新建，否则走更新 */
+  /**
+   * 提交：editingId 为空走新建，否则走更新。
+   *
+   * ⚠️ 跨域名列表下最容易写错的一步就在这里，两条铁律：
+   *   · **编辑 / 删除一律用记录自己的 id**（`dnsApi.update(editingId, …)` /
+   *     `dnsApi.remove(record.id)`）—— update 的域名基准由服务端按该记录
+   *     `subdomain_id` 现算（handlers/dns.ts 的 updateDns），前端传域名不但没用，
+   *     还会改成别的域下的同名记录。所以 payload 里**不带** subdomainId / rootDomain。
+   *   · **只有新建才需要明确目标域名**（`subdomainId` + `rootDomain`）——
+   *     记录只能建在自己确实拥有的子域名下（服务端 assertFqdnOwned 会拒），
+   *     「全部」视图下没有「当前域名」可依赖，必须由 createTarget 给出答案。
+   */
   const handleSubmitDns = async () => {
-    if (!selected) return
+    // 编辑：目标就是这条记录自己（openEditDns 与 editingId 一起设置，这里只是防御，
+    // 真丢了就静默放弃 —— 弹一条「修改失败」会让人以为改动丢了）。
+    // 新建：必须有一个**具体**的目标域名（一个可选域名都没有时为 null，见下方禁用）。
+    if (editingId) {
+      if (!editingRecord) return
+    } else if (!createTarget) {
+      toast.error(t("dm.err.noTargetDomain"))
+      return
+    }
     // SRV 不填「内容」（由 service/proto/权重/端口/目标推导），校验分开走
     if (form.type === "SRV") {
       if (!form.srvService.trim() || !form.srvPort.trim() || !form.srvTarget.trim()) {
         toast.error(t("dm.err.srvRequired"))
         return
       }
-    } else if (!form.content || (!form.name && selected.name !== "@")) {
+    } else if (!form.content || (!form.name && !nameMayBeEmpty)) {
+      // 「名称留空」只在记录直接挂在域名根部时成立（口径沿用改造前，见 nameMayBeEmpty）
       toast.error(t("dm.err.recordRequired"))
       return
     }
     setSaving(true)
     try {
       const payload = {
-        name: selected.name === "@" ? (form.name || "@") : form.name || "@",
+        name: form.name || "@",
         type: form.type,
         content: form.content,
         ttl: form.ttl === "1" ? 1 : Number(form.ttl),
@@ -389,30 +492,30 @@ export default function DomainsPage() {
           : {}),
       }
       if (editingId) {
+        // 只带记录自己的 id 与记录内容：域名不在请求里，改不到别的域上去
         await dnsApi.update(editingId, payload)
         toast.success(t("dm.ok.recordUpdated"))
       } else {
-        // 弹窗里可能换了域名：归属子域名与 rootDomain 必须跟着一起换。
+        // 新建：归属子域名与 `rootDomain` 必须同步给出。
         // `rootDomain` 是给服务端做「声明的根域 vs 子域名实际根域」一致性校验用的
         // （见 handlers/dns.ts 的 ROOT_DOMAIN_MISMATCH），不传也能建，但传了才
         // 能挡住「前端选择器与实际子域对不上」这种不一致。
-        const target = recordDomainChoices.find((d) => d.id === createDnsSub)
         await dnsApi.create({
-          subdomainId: target?.id ?? selected.id,
-          ...(target ? { rootDomain: target.root } : {}),
+          subdomainId: createTarget!.id,
+          rootDomain: createTarget!.root,
           ...payload,
         })
         toast.success(t("dm.ok.recordCreated"))
-        bumpRecordCount(target?.id ?? selected.id, 1)
-        // 建到别的域名下时把选中项切过去，否则用户看不到刚建的那条
-        // （列表是按选中域名过滤的），会以为「建了但没生效」。
-        if (target && target.id !== selected.id) {
-          const next = subdomains.find((s) => s.id === target.id) ?? null
-          if (next) setSelected(next)
+        bumpRecordCount(createTarget!.id, 1)
+        // 建到别的域名下时把筛选切过去，否则用户在「只看 A 域」的视图里
+        // 看不到刚建在 B 域的那条，会以为「建了但没生效」。
+        // 「全部」视图不用切 —— 它本来就看得见。
+        if (activeFilter !== "all" && activeFilter !== createTarget!.id) {
+          setDnsFilter(createTarget!.id)
         }
       }
       closeDnsDialog()
-      void loadRecords(selected.id)
+      reloadRecords()
     } catch (err) {
       toast.error(
         err instanceof HttpError
@@ -428,6 +531,7 @@ export default function DomainsPage() {
   const closeDnsDialog = () => {
     setOpenDns(false)
     setEditingId(null)
+    setEditingRecord(null)
     resetForm()
   }
 
@@ -448,14 +552,26 @@ export default function DomainsPage() {
     )
   }
 
+  /**
+   * 按**记录自己的归属**调整域名列表里的条数。
+   *
+   * 老数据 `subdomainId` 可能为空，那种情况下什么都不改 —— 拿「当前选中的域名」
+   * 顶替只会把另一个域名的数字改错（跨域名视图下这是常态，不是边角）。
+   */
+  const bumpRecordCountOf = (r: DnsRecord, delta: number) => {
+    if (r.subdomainId) bumpRecordCount(r.subdomainId, delta)
+  }
+
   const handleDeleteDns = async (record: DnsRecord) => {
     setDeletingId(record.id)
     try {
+      // ⚠️ 删除用记录自己的 id：服务端按它查出这条记录、按记录自己的域判权限与 zone。
+      // 这里**不传**任何域名参数（接口也没有这个参数），所以「当前筛选的是哪个域」
+      // 不可能影响删哪一条。
       await dnsApi.remove(record.id)
       toast.success(t("dm.ok.recordDeleted"))
-      // 优先按记录自己的归属改数字；老数据 subdomainId 可能为空，退回当前选中项
-      bumpRecordCount(record.subdomainId ?? selected?.id ?? "", -1)
-      void loadRecords(selected?.id)
+      bumpRecordCountOf(record, -1)
+      reloadRecords()
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("dm.err.deleteFailed"))
     } finally {
@@ -464,11 +580,12 @@ export default function DomainsPage() {
   }
 
   // ---------- 批量删除 ----------
-  // 切域名或刷新列表后清空勾选并退出编辑模式：勾选只在当前域名当前列表内有效
+  // 切筛选后清空勾选并退出编辑模式：勾选只在当前这份列表内有效。
+  // 依赖筛选（而不是上面选中的域名）：跨域名视图下两者已经不是一回事。
   React.useEffect(() => {
     setBatchSelected(new Set())
     setBatchSelecting(false)
-  }, [selected?.id])
+  }, [activeFilter])
 
   /** 可勾选的记录：平台托管（managed）的没有删除入口，不进批量 */
   const deletableRecords = React.useMemo(() => records.filter((r) => !r.managed), [records])
@@ -519,8 +636,11 @@ export default function DomainsPage() {
       setBatchSelecting(false)
       if (fail === 0) toast.success(t("dm.batch.deletedOk", { n: String(ok) }))
       else toast.warning(t("dm.batch.deletedPart", { ok: String(ok), fail: String(fail) }))
-      if (selected) bumpRecordCount(selected.id, -ok)
-      void loadRecords(selected?.id)
+      // 每条按**自己的**归属域名改数字：批量列表在跨域名视图下可能横跨好几个域
+      for (const r of records) {
+        if (batchSelected.has(r.id)) bumpRecordCountOf(r, -1)
+      }
+      reloadRecords()
     } finally {
       setBatchBusy(false)
     }
@@ -572,7 +692,9 @@ export default function DomainsPage() {
   const batchValid = parsedBatch.filter((l) => !l.error)
 
   const submitBatchAdd = async () => {
-    if (!selected || batchValid.length === 0) return
+    // 批量添加同样必须**明确目标域名**：整批建在同一个用户选定的域名下
+    // （「全部」视图下没有「当前域名」可用，见 createTarget）。
+    if (!createTarget || batchValid.length === 0) return
     setBatchBusy(true)
     let ok = 0
     let fail = 0
@@ -580,7 +702,8 @@ export default function DomainsPage() {
       for (const l of batchValid) {
         try {
           await dnsApi.create({
-            subdomainId: selected.id,
+            subdomainId: createTarget.id,
+            rootDomain: createTarget.root,
             name: l.name,
             type: l.type as DnsRecordType,
             content: l.content,
@@ -597,8 +720,12 @@ export default function DomainsPage() {
       setBatchText("")
       if (fail === 0) toast.success(t("dm.batch.addedOk", { n: String(ok) }))
       else toast.warning(t("dm.batch.addedPart", { ok: String(ok), fail: String(fail) }))
-      bumpRecordCount(selected.id, ok)
-      void loadRecords(selected.id)
+      bumpRecordCount(createTarget.id, ok)
+      // 与单条新建同一处理：建到别的域名下时切过去，否则用户看不到刚建的那批
+      if (activeFilter !== "all" && activeFilter !== createTarget.id) {
+        setDnsFilter(createTarget.id)
+      }
+      reloadRecords()
     } finally {
       setBatchBusy(false)
     }
@@ -622,16 +749,89 @@ export default function DomainsPage() {
    * 删除**不**受这两者影响 —— 它是用户腾出额度、也是腾出 CF zone 配额的手段。
    */
   const writeDisabled = atDnsLimit || !canWriteDns
-  // 选中子域名的 fqdn 即 DNS 记录的基准（例如 xxx1.doulor.cn）。
-  //
-  // 弹窗里如果选了**另一个域名**，基准跟着换成它的 fqdn —— 也就是说
-  // 「新建记录时选域名」= 换一个 base + 换一个归属子域名（两者必须同步，
-  // 只换 base 会撞上 assertFqdnOwned，见 recordDomainChoices 的注释）。
-  const base = (() => {
-    if (!selected) return ownDomain
-    if (editingId) return selected.fqdn
-    return recordDomainChoices.find((d) => d.id === createDnsSub)?.fqdn ?? selected.fqdn
-  })()
+
+  /** 取某个子域名在域名列表里的 `name`（`'@'` = 主域名那一行）；找不到给空串 */
+  const subNameOf = (id?: string | null) =>
+    subdomains.find((s) => s.id === id)?.name ?? ""
+
+  /**
+   * 「新建记录」的目标域名（弹窗里选中的那个）。
+   *
+   * 优先弹窗里明确选的；没选 / 选了个已不存在的就依次回落到
+   * 「当前筛选的域名」→「域名列表里选中的域名」→ 第一个可用域名。
+   * 兜底顺序刻意让**筛选视图**优先：用户在「只看 xxxxx.tyu.me」时点添加，
+   * 想要的多半就是建在那个域下。
+   *
+   * 为什么这里必须算出一个**具体域名**而不能是「全部」：记录只能挂在自己拥有的
+   * 子域名下（服务端 assertFqdnOwned 会拒），「全部」不是可以落记录的地方。
+   */
+  const createTarget = React.useMemo(() => {
+    const pick = (id?: string | null) => recordDomainChoices.find((d) => d.id === id) ?? null
+    return (
+      pick(createDnsSub) ??
+      pick(activeFilter === "all" ? null : activeFilter) ??
+      pick(selected?.id) ??
+      recordDomainChoices[0] ??
+      null
+    )
+  }, [createDnsSub, recordDomainChoices, activeFilter, selected])
+
+  /**
+   * 当前筛选的域名**不是**一个可落记录的目标（它现在没有解析额度 / 权限）。
+   *
+   * 这时 createTarget 会回落到另一个域名，必须让用户看见 —— 否则他会以为记录建在
+   * 正在看的那个域下（改造前是把选中的子域名直接发给服务端、由后端 403 明确报错，
+   * 现在静默换域就更糟）。见下面 showCreateTargetPicker 与那段琥珀色提示。
+   */
+  const filterTargetUnusable = activeFilter !== "all" && createTarget?.id !== activeFilter
+
+  /**
+   * 新建记录时是否显示「域名」选择器：
+   *   · 可选域名多于一个 —— 当然要能选；
+   *   · 当前是「全部域名」视图 —— 哪怕只有一个可选域名也摆出来：这时没有
+   *     「当前域名」可依赖，必须让用户**看见**记录将建在哪里；
+   *   · 筛选的域名不可用（见 filterTargetUnusable）—— 同上，目标已经被换掉了。
+   */
+  const showCreateTargetPicker =
+    !editingId &&
+    recordDomainChoices.length > 0 &&
+    (recordDomainChoices.length > 1 || activeFilter === "all" || filterTargetUnusable)
+
+  /**
+   * 记录名能否留空。
+   *
+   * 留空在服务端等于「直接挂在基准域名上」（createDns 里 `name === ""` 走 base），
+   * 所以只有基准就是 `'@'` 主域名、或这条记录本来就叫 `'@'` 时才算合法 ——
+   * 口径与改造前一致。⚠️ 判断依据必须是**这条记录/这个目标域名自己**的名字，
+   * 不能是「当前筛选的域名」：全部视图下后者与记录毫无关系，
+   * 拿它来判会把「改一条 @ 记录」误报成「名称和内容不能为空」（2026-10-16 前的老毛病）。
+   */
+  const nameMayBeEmpty = editingId
+    ? editingRecord?.name === "@" || subNameOf(editingRecord?.subdomainId) === "@"
+    : subNameOf(createTarget?.id) === "@"
+
+  /**
+   * 弹窗里显示的记录基准域名。
+   *
+   * 编辑时取**这条记录自己的**归属域名（ownerFqdn）—— 跨域名列表下「当前筛选的
+   * 域名」跟它没关系，用它会让弹窗显示错域名、用户以为自己改的是另一条。
+   * 新建时取弹窗里选中的目标域名（createTarget），没有可选域名时退化成展示用的 ownDomain。
+   */
+  const base = editingId
+    ? (editingRecord ? ownerFqdn(editingRecord) : ownDomain)
+    : (createTarget?.fqdn ?? ownDomain)
+
+  /**
+   * 点域名列表里的某个域名：既让它成为「新建记录」的默认归属，也把 DNS 列表筛到它。
+   *
+   * 同步筛选是改造前就有的行为（点一个域名 = 看它的记录），保留下来才不别扭 ——
+   * 只是现在多了一个「全部域名」可以退回去。⚠️ 它只影响**看哪些记录**，
+   * 编辑/删除永远按记录自己的 id 走（见 handleSubmitDns）。
+   */
+  const selectSubdomain = (sub: Subdomain) => {
+    setSelected(sub)
+    setDnsFilter(sub.id)
+  }
 
   return (
     <div>
@@ -694,7 +894,7 @@ export default function DomainsPage() {
                           键盘可达性靠域名文字那个 button 保住（Tab 聚焦 + Enter 触发），
                           鼠标则点整块任意位置都行。 */}
                       <div
-                        onClick={() => setSelected(sub)}
+                        onClick={() => selectSubdomain(sub)}
                         className={`group flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 transition-colors ${
                           selected?.id === sub.id ? "bg-accent" : "hover:bg-accent/50"
                         }`}
@@ -704,7 +904,7 @@ export default function DomainsPage() {
                           className="font-mono text-sm"
                           onClick={(e) => {
                             e.stopPropagation()
-                            setSelected(sub)
+                            selectSubdomain(sub)
                           }}
                         >
                           {sub.fqdn}
@@ -759,7 +959,7 @@ export default function DomainsPage() {
                       {children.map((child) => (
                         <div
                           key={child.id}
-                          onClick={() => setSelected(child)}
+                          onClick={() => selectSubdomain(child)}
                           className={`group ml-4 flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 transition-colors ${
                             selected?.id === child.id ? "bg-accent" : "hover:bg-accent/50"
                           }`}
@@ -770,7 +970,7 @@ export default function DomainsPage() {
                             className="font-mono text-sm"
                             onClick={(e) => {
                               e.stopPropagation()
-                              setSelected(child)
+                              selectSubdomain(child)
                             }}
                           >
                             {child.fqdn}
@@ -826,16 +1026,44 @@ export default function DomainsPage() {
             />
           ) : (
             <>
-              <div className="mb-4 flex items-center justify-between">
-                <div className="flex items-center gap-2">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Globe className="h-4 w-4 text-muted-foreground" />
-                  <h2 className="text-sm font-medium">{t("dm.recordsOf", { fqdn: selected.fqdn })}</h2>
-                  <span className="text-xs text-muted-foreground">
-                    {t("dm.recordCount", { n: records.length })}
-                  </span>
+                  <h2 className="text-sm font-medium">{t("dm.recordsOf")}</h2>
+                  {/* 域名筛选：默认「全部域名」，选某个域名 = 只看它的记录。
+                      站长反馈（2026-10-16）：他 3 个子域名、记录都在其中一个下，
+                      而列表原来看的只是「当前选中的域名」，于是显示 0 条、以为丢了。
+                      默认全量 + 这个下拉，两个方向都能一眼看明白。 */}
+                  <Select value={activeFilter} onValueChange={setDnsFilter}>
+                    <SelectTrigger
+                      className="h-8 w-[220px]"
+                      aria-label={t("dm.dnsFilter.label")}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">{t("dm.dnsFilter.all")}</SelectItem>
+                      {subdomains.map((s) => (
+                        <SelectItem key={s.id} value={s.id}>
+                          {s.fqdn}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {/* 条数口径（与筛选联动，别再写死「当前域名」）：
+                      · 筛选到某个域名时，写「该域名 N 条解析」；
+                      · 「全部」视图下**不**单独显示列表条数 —— 右边那句 dnsUsage
+                        说的就是同一个数（跨全部域名的真实记录数），两个数字并排
+                        只会让人怀疑哪个才是真的（列表还可能多出平台托管的派生项，
+                        数字对不上时更没法解释）。 */}
+                  {activeFilter !== "all" && (
+                    <span className="text-xs text-muted-foreground">
+                      {t("dm.recordsInDomain", { n: records.length })}
+                    </span>
+                  )}
                   {/* 账号级用量（跨该用户全部域名，服务端算好随列表下发）。
-                      与左边那个「本域名 N 条解析」口径不同 —— 一个只数当前域名、
-                      一个数全账号合计，并排显示才不会把两者误读成同一个数字。 */}
+                      筛选视图下它与左边那个「该域名 N 条」口径不同 —— 一个是这个域、
+                      一个是全账号合计，文案里都写清楚了，并排显示也不会误读。 */}
                   {dnsUsage && (
                     <span className="text-xs text-muted-foreground">
                       {dnsUsage.limit === null
@@ -872,7 +1100,7 @@ export default function DomainsPage() {
                       <Button
                         variant="outline"
                         size="icon"
-                        onClick={() => void loadRecords(selected.id)}
+                        onClick={reloadRecords}
                         aria-label={t("common.refresh")}
                       >
                         <RefreshCw className="h-4 w-4" />
@@ -883,9 +1111,13 @@ export default function DomainsPage() {
                         // 批量添加也受同一个上限约束（它就是一条条调 create）：
                         // 到顶时一并禁用，免得用户粘 20 行、逐条失败之后才从 toast 里知道原因。
                         // 同理，租用已到期时也禁用（那时连单条都建不了）。
-                        disabled={writeDisabled}
+                        // ⚠️ 没有任何可选域名（createTarget 为空）时也禁用：那样点开也建不了。
+                        disabled={writeDisabled || !createTarget}
                         onClick={() => {
                           setBatchText("")
+                          // 与单条新建同一套目标域名解析：批量也必须落在**明确的**域名下，
+                          // 「全部」视图下没有「当前域名」可以依赖（见 createTarget）。
+                          setCreateDnsSub(createTarget?.id ?? "")
                           setBatchAddOpen(true)
                         }}
                       >
@@ -899,14 +1131,18 @@ export default function DomainsPage() {
                         size="sm"
                         // 到上限 / 租用已到期就禁用（服务端也会拒，这里是提前告知）。
                         // disabled 的按钮不触发 hover 提示，所以文案另外用下面那行 <p> 说明。
-                        disabled={writeDisabled}
+                        // 没有任何可选域名（createTarget 为空）时同样禁用 —— 记录必须
+                        // 挂在自己拥有的子域名下，没有目标就无从建起。
+                        disabled={writeDisabled || !createTarget}
                         onClick={() => {
                           // 明确走「新建」：清掉可能残留的编辑态，否则会误改成编辑上一条
                           setEditingId(null)
+                          setEditingRecord(null)
                           resetForm()
-                          // 默认选中「当前正在看的那个域名」，避免用户一开弹窗
-                          // 就把记录建到另一个域下（那正是最容易出错的一步）
-                          setCreateDnsSub(selected.id)
+                          // 目标域名取 createTarget（筛选中的域名 → 域名列表里选中的 →
+                          // 第一个可用）；「全部」视图下它保证是一个**具体**的域名，
+                          // 而不是一个没法落记录的「全部」
+                          setCreateDnsSub(createTarget?.id ?? "")
                           setOpenDns(true)
                         }}
                       >
@@ -931,10 +1167,35 @@ export default function DomainsPage() {
               )}
 
               {records.length === 0 ? (
-                <EmptyState
-                  title={t("dm.noRecords")}
-                  description={t("dm.noRecordsDesc")}
-                />
+                // 空状态要分清两种「0 条」，否则又会误导人（站长这次就是这么被绕进去的）：
+                //   · 筛到某个域名、但账号里其实有记录 ⇒ 说明白「其它域名下还有 N 条」
+                //     并给一个一键切回「全部」的出口，而不是干巴巴一句「还没有 DNS 记录」；
+                //   · 真的是一条都没有（全部视图下 0 条）⇒ 才是「还没有 DNS 记录」。
+                // dnsUsage.used 是全账号真实记录数；筛选视图下列表为空时，那 N 条必然
+                // 都在别的域名下，所以这里直接用它，不必再发一次请求。
+                activeFilter !== "all" && (dnsUsage?.used ?? 0) > 0 ? (
+                  <div className="space-y-3">
+                    <EmptyState
+                      title={t("dm.noRecordsHere")}
+                      description={t("dm.elsewhere", { n: dnsUsage?.used ?? 0 })}
+                    />
+                    <div className="flex justify-center">
+                      <Button variant="outline" size="sm" onClick={() => setDnsFilter("all")}>
+                        <Globe className="mr-1 h-3.5 w-3.5" />
+                        {t("dm.dnsFilter.viewAll")}
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <EmptyState
+                    title={t("dm.noRecords")}
+                    description={
+                      activeFilter === "all"
+                        ? t("dm.noRecordsDescAll")
+                        : t("dm.noRecordsDesc")
+                    }
+                  />
+                )
               ) : (
                 <div className="rounded-lg border bg-card">
                   <Table>
@@ -952,6 +1213,10 @@ export default function DomainsPage() {
                           </TableHead>
                         )}
                         <TableHead>Name</TableHead>
+                        {/* 归属域名列（跨域名列表的必要信息）：
+                            一屏里混着好几个子域名的记录，没有它用户分不清哪条是谁的 ——
+                            站长「记录丢了」的观感正是由此而来。 */}
+                        <TableHead>Domain</TableHead>
                         <TableHead>Type</TableHead>
                         <TableHead>Content</TableHead>
                         <TableHead>TTL</TableHead>
@@ -968,7 +1233,8 @@ export default function DomainsPage() {
                               {!r.managed && (
                                 <input
                                   type="checkbox"
-                                  aria-label={r.name}
+                                  // 无障碍名带上归属域名：跨域名列表里同名记录不止一条
+                                  aria-label={`${r.name} (${ownerFqdn(r)})`}
                                   className="h-4 w-4 accent-primary"
                                   checked={batchSelected.has(r.id)}
                                   onChange={() => toggleBatchSelect(r.id)}
@@ -994,6 +1260,11 @@ export default function DomainsPage() {
                                 </Badge>
                               )}
                             </div>
+                          </TableCell>
+                          {/* 归属域名取记录**自己**的（ownerFqdn），不是当前筛选的那个 ——
+                              编辑/删除也一律按这个归属走，见 handleSubmitDns */}
+                          <TableCell className="font-mono text-xs text-muted-foreground">
+                            {ownerFqdn(r)}
                           </TableCell>
                           <TableCell>
                             <Badge variant="outline">{r.type}</Badge>
@@ -1112,8 +1383,9 @@ export default function DomainsPage() {
             {records
               .filter((r) => batchSelected.has(r.id))
               .map((r) => (
+                // 带上归属域名：跨域名列表里两条同名记录（如各自的 '@'）光看名字分不清谁是谁
                 <p key={r.id} className="font-mono text-xs">
-                  {r.name} · {r.type} {r.content}
+                  {r.name} · {ownerFqdn(r)} · {r.type} {r.content}
                 </p>
               ))}
           </div>
@@ -1135,9 +1407,32 @@ export default function DomainsPage() {
           <DialogHeader>
             <DialogTitle>{t("dm.batch.addTitle")}</DialogTitle>
             <DialogDescription>
-              {t("dm.batch.addDesc", { fqdn: selected?.fqdn ?? "" })}
+              {t("dm.batch.addDesc", { fqdn: createTarget?.fqdn ?? "" })}
             </DialogDescription>
           </DialogHeader>
+          {/* 目标域名：与单条新建同一个选择器与同一个 state（createTarget）。
+              批量同样是「写」，必须落在**明确的**域名下 —— 「全部」视图下没有
+              「当前域名」可以默认，所以这里也要能选（见 createTarget 的兜底顺序）。 */}
+          {recordDomainChoices.length > 0 && (
+            <div className="space-y-2">
+              <Label htmlFor="dnsBatchRoot">{t("dm.dnsRoot")}</Label>
+              <Select
+                value={createTarget?.id ?? ""}
+                onValueChange={setCreateDnsSub}
+              >
+                <SelectTrigger id="dnsBatchRoot">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {recordDomainChoices.map((d) => (
+                    <SelectItem key={d.id} value={d.id}>
+                      {d.fqdn}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div className="space-y-1.5">
             <Label htmlFor="dm-batch-text">{t("dm.batch.addLabel")}</Label>
             <Textarea
@@ -1280,16 +1575,25 @@ export default function DomainsPage() {
             {/* 建在哪个**域名**下（2026-10-14 站长要求）。
                 DNS 改成按根域计的积分租用后，「记录落在哪个域」必须能明着选，
                 而不是只能悄悄用注册时分到的那个域。
-                只列**我名下的一级域名**（每个都属于某个根域），因为记录必须挂在
+                只列**我名下的子域名**（含二级，每个都属于某个根域），因为记录必须挂在
                 用户确实拥有的子域名下（见 recordDomainChoices 的注释）：
                 列根域再拼一个 `用户名.<根域>`，拼出来的是用户并不拥有的 fqdn，必然 403。
-                只在「新建 + 有多个可选域名」时显示：
-                  · 编辑时改域名等于换一条记录（后端按原 base 重建），不做；
-                  · 只有一个可选域名时多一个下拉框纯属噪音。 */}
-            {!editingId && recordDomainChoices.length > 1 && (
+                显示条件（见 showCreateTargetPicker）：
+                  · 编辑时**不显示**（改域名等于换一条记录，后端按原 base 重建）——
+                    改为在弹窗说明里写出这条记录自己的域名（base）；
+                  · 新建且可选域名多于一个 —— 当然要能选；
+                  · 新建且当前是「全部域名」视图 —— 哪怕只有一个可选域名也显示出来：
+                    这时没有「当前域名」可依赖，必须让用户**看见**记录将建在哪里
+                    （2026-10-16：目标域名由 createTarget 兜底选中，这里负责可见）；
+                  · 新建且当前筛选的域名不可用（没额度）—— 目标已被换到别的域名，
+                    更要摆出来，不能让用户在不知情的情况下建到另一个域下。 */}
+            {showCreateTargetPicker && (
               <div className="space-y-2">
                 <Label htmlFor="dnsRoot">{t("dm.dnsRoot")}</Label>
-                <Select value={createDnsSub || selected?.id || ""} onValueChange={setCreateDnsSub}>
+                <Select
+                  value={createTarget?.id ?? ""}
+                  onValueChange={setCreateDnsSub}
+                >
                   <SelectTrigger id="dnsRoot">
                     <SelectValue />
                   </SelectTrigger>
@@ -1302,6 +1606,19 @@ export default function DomainsPage() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">{t("dm.dnsRootHint")}</p>
+                {/* 目标域名是**替用户默认选好的**，明说一句，免得他以为记录会
+                    「自动落到某个域」：全部视图下没有「当前域名」，
+                    筛选的域名又可能因为没有额度而落选。 */}
+                {activeFilter === "all" && createTarget && (
+                  <p className="text-xs text-amber-600 dark:text-amber-500">
+                    {t("dm.dnsRootAllHint", { fqdn: createTarget.fqdn })}
+                  </p>
+                )}
+                {filterTargetUnusable && createTarget && (
+                  <p className="text-xs text-amber-600 dark:text-amber-500">
+                    {t("dm.dnsRootOtherHint", { fqdn: createTarget.fqdn })}
+                  </p>
+                )}
               </div>
             )}
 
@@ -1311,7 +1628,9 @@ export default function DomainsPage() {
                 <div className="flex items-center gap-1">
                   <Input
                     id="name"
-                    placeholder={selected?.name === "@" ? "blog" : "@"}
+                    // 提示与「记录名能否留空」同源：能留空（= 记录就挂在域名根部）
+                    // 时提示写个子名，否则提示写 `@`。
+                    placeholder={nameMayBeEmpty ? "blog" : "@"}
                     value={form.name}
                     onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
                     className="flex-1"

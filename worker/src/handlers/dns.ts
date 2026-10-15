@@ -36,6 +36,16 @@ interface DnsRow {
   banned_at: string | null
   created_at: string
   updated_at: string
+  /**
+   * 该记录所属**子域名**的 fqdn（`xxxxx.tyu.me`）——由列表查询 LEFT JOIN subdomains 得来，
+   * 不是 dns_records 自己的列。
+   *
+   * 为什么要有它（2026-10-16）：列表改成**跨全部域名**下发后，一屏里混着好几个域的记录，
+   * 前端必须能逐行标出「这条属于哪个域」，否则用户根本分不清 3 个子域名里哪条是哪个。
+   * 老数据的 `subdomain_id` 可能为空（0003 迁移之前），此时左连接给 null，
+   * 前端按「fqdn 去掉记录名」兜底 —— 这里不猜，猜错比留空更糟。
+   */
+  subdomain_fqdn?: string | null
 }
 
 const ALLOWED_TYPES = new Set(["A", "AAAA", "CNAME", "TXT", "MX", "SRV"])
@@ -229,6 +239,12 @@ function toPublicRecord(row: DnsRow) {
   return {
     id: row.id,
     subdomainId: row.subdomain_id,
+    /**
+     * 记录所属子域名的 fqdn（见 DnsRow.subdomain_fqdn）。
+     * 列表接口一定带上它；单条读写（建/改）也带上，保持返回体形状一致 ——
+     * 免得前端只在列表里能显示归属、建完那一下却拿不到。
+     */
+    subdomainFqdn: row.subdomain_fqdn ?? null,
     name: row.name,
     fqdn: row.fqdn,
     type: row.type,
@@ -263,6 +279,24 @@ async function loadUserDomain(env: Env, userId: string) {
 }
 
 /**
+ * 取**一条**记录（带它所属子域名的 fqdn）。
+ *
+ * 建 / 改这两个接口返回单条记录，也需要 `subdomainFqdn` 才能与列表返回体保持同一形状
+ * （前端只认一种形状，省掉「列表里有、创建响应里没有」这种半吊子状态）。
+ * 一次 LEFT JOIN 拿到，不做第二次查询。
+ */
+async function loadRecord(env: Env, id: string): Promise<DnsRow | null> {
+  return env.DB.prepare(
+    `SELECT r.*, s.fqdn AS subdomain_fqdn
+       FROM dns_records r
+       LEFT JOIN subdomains s ON s.id = r.subdomain_id
+      WHERE r.id = ?`
+  )
+    .bind(id)
+    .first<DnsRow>()
+}
+
+/**
  * 平台自己建的解析：个人名片 / 网盘直链绑定自定义域名时，`attachCustomDomain`
  * （见 custom-domain.ts）会为那个 fqdn 建一条 `AAAA 100::` 占位记录 —— 但它只存在
  * 于 Cloudflare，不落 `dns_records`。于是用户在「DNS 记录」页里既看不到自己名片的
@@ -278,18 +312,27 @@ async function loadUserDomain(env: Env, userId: string) {
 interface ManagedDnsRow {
   fqdn: string
   subdomain_id: string | null
+  /** 所属子域名的 fqdn（左连接得来，可能为 null），与 DnsRow.subdomain_fqdn 同义 */
+  subdomain_fqdn: string | null
   ts: string | null
   kind: string
 }
 
 async function loadManagedDns(env: Env, userId: string): Promise<ManagedDnsRow[]> {
   try {
+    // 左连接 subdomains 只为一个字段：这条派生记录挂在哪个域名下。
+    // 跨域名列表里没有它就无法标出归属（用户看到的会是一堆不认识的主机名）。
     const res = await env.DB.prepare(
-      `SELECT fqdn, subdomain_id, updated_at AS ts, 'profile' AS kind FROM profiles
-         WHERE user_id = ? AND fqdn IS NOT NULL AND fqdn != ''
+      `SELECT p.fqdn AS fqdn, p.subdomain_id AS subdomain_id, s.fqdn AS subdomain_fqdn,
+              p.updated_at AS ts, 'profile' AS kind
+         FROM profiles p
+         LEFT JOIN subdomains s ON s.id = p.subdomain_id
+        WHERE p.user_id = ? AND p.fqdn IS NOT NULL AND p.fqdn != ''
        UNION ALL
-       SELECT fqdn, subdomain_id, created_at AS ts, 'storage' AS kind FROM storage_prefixes
-         WHERE user_id = ? AND fqdn IS NOT NULL AND fqdn != ''`
+       SELECT sp.fqdn, sp.subdomain_id, s.fqdn, sp.created_at, 'storage'
+         FROM storage_prefixes sp
+         LEFT JOIN subdomains s ON s.id = sp.subdomain_id
+        WHERE sp.user_id = ? AND sp.fqdn IS NOT NULL AND sp.fqdn != ''`
     )
       .bind(userId, userId)
       .all<ManagedDnsRow>()
@@ -309,11 +352,30 @@ function relativeName(fqdn: string, rootDomain: string): string {
   return fqdn.split(".")[0]
 }
 
-// GET /api/dns?subdomainId=xxx —— DNS 记录列表
+// GET /api/dns[?subdomainId=xxx] —— DNS 记录列表
 //
 // 权限闸与另外三个接口一致（读接口也要卡）：只读接口同样不能是后门 ——
 // 权限一律服务端强制，绝不靠前端隐藏入口（仓库既有约定）。
 // 2026-10-14 起闸门多了「有效租约」这一档（见 requireDnsAccess）。
+//
+// ── 参数语义（2026-10-16 定）──
+//   · 带 `subdomainId` ⇒ 只返回**该子域名**下的记录（原行为，逐字保留）；
+//   · 不带（`undefined`）⇒ 返回该用户名下**全部域名**的记录。
+//
+// 为什么不另开一个 `all=1` 显式参数：
+//   ① 不带参数本来就不是「某一条」——它按 `domain_id` 过滤，而这个字段对同一用户
+//      永远是他那一行主域名（见 createDns 里的注释），所以历史上它**已经**近似
+//      「该用户的全部记录」；显式改成按 `d.user_id` 过滤只是把这个既成事实写准，
+//      顺带修掉「用户有第二行 domain 时少给记录」的边角。
+//   ② 真正的风险方向是**滤得太窄**而不是太宽：站长这次的故障就是前端一直传着
+//      `subdomainId`，记录明明在，界面却说 0 条。参数漏传时返回「全部自己的记录」
+//      最多显得罗嗦；返回「某个猜出来的域名」却会让人以为数据丢了 ——
+//      后者的代价高得多。
+//  ③ 安全性上没有放宽：过滤条件从 `d.user_id = ?` 出发，无论传不传参数都只可能
+//      拿到**调用者自己**的记录（跨用户由这一句保证，不是由前端参数保证）。
+// 反对意见也记在这里：省略即全量确实会掩盖前端「忘传参数」的 bug。为此前端并不
+// 依赖默认值 —— domains.tsx 明确区分「全部视图」与「某个域名」两种请求，
+// 而 `subdomainId` 一旦给出就仍然精确过滤（dns-list-all.test.ts 钉住了这条）。
 export async function listDns(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
   await requireDnsAccess(env, user)
@@ -321,7 +383,6 @@ export async function listDns(env: Env, request: Request): Promise<Response> {
   const subdomainId = url.searchParams.get("subdomainId")
 
   let rows
-  let rootDomain = ""
   if (subdomainId) {
     // 校验该子域名属于当前用户
     const sub = await env.DB.prepare(
@@ -335,18 +396,33 @@ export async function listDns(env: Env, request: Request): Promise<Response> {
       // banned_at IS NOT NULL = 因封禁被停用（CF 上已删）。过滤掉它，
       // 否则解封后用户会在列表里看到一条「本地有、CF 上没有」的幽灵记录
       // ——点它解析不到，只会让人以为站点坏了。
-      "SELECT * FROM dns_records WHERE subdomain_id = ? AND banned_at IS NULL ORDER BY created_at ASC"
+      //
+      // 左连接只为带出 `subdomain_fqdn`（归属列），条件与过滤都用不着它 ——
+      // 一条 JOIN 解决，绝不按域名逐个再查一遍（N+1）。
+      `SELECT r.*, s.fqdn AS subdomain_fqdn
+         FROM dns_records r
+         LEFT JOIN subdomains s ON s.id = r.subdomain_id
+        WHERE r.subdomain_id = ? AND r.banned_at IS NULL
+        ORDER BY r.created_at ASC`
     )
       .bind(subdomainId)
       .all<DnsRow>()
   } else {
-    const domain = await loadUserDomain(env, user.id)
-    if (!domain) return json({ records: [] })
-    rootDomain = domain.name
+    // 不带 subdomainId ⇒ 跨该用户**所有** domain 行的记录（一次 JOIN domains 拿全）。
+    //
+    // 为什么按 `domains.user_id` 而不是先取一行 domain 再按 domain_id 过滤：
+    // 归属事实是「这条记录属于哪个用户」，domain_id 只是实现细节；按 user_id 过滤
+    // 既与 countUserDnsRecords 的用量口径**逐字一致**（否则会出现「列表少一条、
+    // 用量多一条」这种谁也解释不清的差），也不会在多 domain 行时漏数据。
     rows = await env.DB.prepare(
-      "SELECT * FROM dns_records WHERE domain_id = ? AND banned_at IS NULL ORDER BY created_at ASC"
+      `SELECT r.*, s.fqdn AS subdomain_fqdn
+         FROM dns_records r
+         JOIN domains d ON d.id = r.domain_id
+         LEFT JOIN subdomains s ON s.id = r.subdomain_id
+        WHERE d.user_id = ? AND r.banned_at IS NULL
+        ORDER BY r.created_at ASC`
     )
-      .bind(domain.id)
+      .bind(user.id)
       .all<DnsRow>()
   }
 
@@ -354,19 +430,22 @@ export async function listDns(env: Env, request: Request): Promise<Response> {
 
   // 追加平台托管的解析（只读）。已有同 fqdn 的真实记录时不重复展示 ——
   // 那属于历史数据，用户当初手工建过，列表里以他自己那条为准。
-  if (!rootDomain) {
-    const d = await loadUserDomain(env, user.id)
-    rootDomain = d?.name ?? ""
-  }
+  //
+  // rootDomain 只用于算派生项的 `name`（相对根域的前缀）；跨域名列表下它取用户的
+  // 第一行主域名 —— 派生项的 fqdn 基本都是某个子域名本身，算出来就是那个子域名名。
+  const d = await loadUserDomain(env, user.id)
+  const rootDomain = d?.name ?? ""
   const seen = new Set(records.map((r) => r.fqdn.toLowerCase()))
   for (const m of await loadManagedDns(env, user.id)) {
     const key = m.fqdn.toLowerCase()
     if (seen.has(key)) continue
+    // 按子域名筛选时，派生项只在它自己的子域名下出现
     if (subdomainId && m.subdomain_id !== subdomainId) continue
     seen.add(key)
     records.push({
       id: `managed:${m.kind}:${key}`,
       subdomainId: m.subdomain_id,
+      subdomainFqdn: m.subdomain_fqdn,
       name: relativeName(m.fqdn, rootDomain),
       fqdn: m.fqdn,
       type: "AAAA",
@@ -387,8 +466,8 @@ export async function listDns(env: Env, request: Request): Promise<Response> {
    * 顺带下发「已用 / 上限」，供前端在选项卡顶部显示用量、并在到顶时禁用「新建记录」。
    *
    * 为什么由服务端算、而不是让前端数 `records.length`：上限是**跨该用户全部域名**
-   * 的（见 countUserDnsRecords），而这里下发的 records 只是**当前选中子域名**的那一批
-   * —— 前端本地数出来的数字会随选中项跳变，跟服务端真正卡的那条线对不上。
+   * 的（见 countUserDnsRecords）—— 前端本地数出来的数字会随筛选跳变
+   * （「全部」视图下还要多算平台托管的派生项），跟服务端真正卡的那条线对不上。
    * 跟着列表一起下发，则每次新建/删除后的重载都会同步刷新，不需要额外接口或额外请求。
    *
    * `limit === null` = 不限（管理员 / 管理员 Key），前端据此显示「不限」而不是假上限。
@@ -666,9 +745,7 @@ export async function createDns(env: Env, request: Request): Promise<Response> {
     ).bind(uuid(), user.id, `创建 DNS 记录 ${fqdn} (${type})`, request.headers.get("CF-Connecting-IP"), now),
   ])
 
-  const row = await env.DB.prepare("SELECT * FROM dns_records WHERE id = ?")
-    .bind(id)
-    .first<DnsRow>()
+  const row = await loadRecord(env, id)
 
   return json({ record: toPublicRecord(row!) }, 201)
 }
@@ -818,9 +895,7 @@ export async function updateDns(env: Env, request: Request, id: string): Promise
     )
     .run()
 
-  const row = await env.DB.prepare("SELECT * FROM dns_records WHERE id = ?")
-    .bind(id)
-    .first<DnsRow>()
+  const row = await loadRecord(env, id)
 
   return json({ record: toPublicRecord(row!) })
 }

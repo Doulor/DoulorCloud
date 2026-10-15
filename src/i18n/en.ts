@@ -1090,6 +1090,23 @@ export const en: Record<MessageKey, string> = {
   "dm.dnsRentalExpired": "Your DNS quota has expired: you can only delete records now. Renew to create or edit again.",
   "dm.dnsRoot": "Domain",
   "dm.dnsRootHint": "The record will live under this domain. Choices are the domains you own that currently have DNS access; prices differ per root domain (see the price list).",
+  // Shown in the "All domains" view, where the target domain is picked for the user:
+  // records can only live under a concrete domain, so say that out loud.
+  "dm.dnsRootAllHint": "You're viewing all domains, so {fqdn} is selected by default. A record can only live under one concrete domain — change it above if needed.",
+  // The filtered domain has no DNS quota right now, so the target fell back to a usable one.
+  // Say it out loud instead of creating the record somewhere the user didn't expect.
+  "dm.dnsRootOtherHint": "The domain you're filtering by can't take new records right now (no DNS quota), so {fqdn} is selected instead. Change it above if needed.",
+  // Domain filter for the record list (2026-10-16). Defaults to "all domains": the site
+  // owner had 3 subdomains with every record under one of them, while the list only showed
+  // the *selected* domain, so it read "0 records" and looked like the records were gone.
+  "dm.dnsFilter.all": "All domains",
+  "dm.dnsFilter.label": "Filter by domain",
+  "dm.dnsFilter.viewAll": "View all domains",
+  "dm.recordsInDomain": "{n} records on this domain",
+  "dm.noRecordsHere": "No records on this domain yet",
+  "dm.elsewhere": "Other domains still hold {n} records.",
+  "dm.noRecordsDescAll": "Your account has no DNS records yet. Click “Add record” and pick the domain it should live under.",
+  "dm.err.noTargetDomain": "Pick the domain this record should live under first",
   // ---- DNS quota rental, user side (components/dns-rental-panel.tsx, 2026-10-14) ----
   // What's rented is a DNS **quota**, not "DNS records": one quota per root domain,
   // free to create and edit inside it (switching an A record to CNAME costs nothing),
@@ -1154,7 +1171,10 @@ export const en: Record<MessageKey, string> = {
   "dm.empty": "no domains yet",
   "dm.primary": "Primary",
   "dm.deleteTitle": "Delete this domain",
-  "dm.recordCount": "{n} records on this domain",
+  // Only says "how many records this domain has" — never "the current domain":
+  // it is reused by every row of the domain list and by the admin user-stats card.
+  // The record list itself uses dm.recordsInDomain, whose scope follows the filter.
+  "dm.recordCount": "{n} records",
   "dm.subdomains": "Subdomains",
   "dm.addChildUnder": "Add a subdomain under {name}",
   "dm.addChildUnderFull": "Add under {fqdn}",
