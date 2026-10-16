@@ -1211,7 +1211,8 @@ function validateSlug(raw: string): { ok: true; slug: string } | { ok: false; re
 /**
  * POST /api/lab/projects/:id/slug —— 自定义作品的页面名（链接尾部）。
  *
- * 只靠「保存作品」时的自动命名不够：用户想把作品挂成 `tyu.me/p/starwar`，
+ * 只靠「保存作品」时的自动命名不够：用户想把作品挂成 `tyu.me/starwar`
+ * （根级单段路径；`/p` 是实验室预览空壳页，见 scripts/tyu-site-worker），
  * 而作品名可能是中文（自动生成会退化成 `p-xxxx`）。
  * 所以给一个显式的改名入口，并把名字**锁定**，避免下次保存被自动重算覆盖。
  */
@@ -1536,7 +1537,14 @@ function toGalleryJson(row: GalleryRow, isOwner: boolean) {
     authorName: row.author_name,
     authorUsername: row.author_username,
     authorAvatar: row.author_avatar,
-    /** 只有 public 的作品才有可分享链接（`tyu.me/p/<id>`） */
+    /**
+     * 只有 public 的作品才有可分享链接。
+     *
+     * ⚠️ 实际地址是**根级**的 `https://tyu.me/<页面名>`（不是早期注释里写的
+     * `tyu.me/p/<id>`）：`/p` 现在只是实验室「新标签预览」的空壳页，
+     * 作品页由 scripts/tyu-site-worker 的单段路径分支承载。改地址前先看那份
+     * wrangler.toml —— 它记了「顶点必须有代理记录，路由才生效」这条前置条件。
+     */
     visibility: row.visibility,
   /** 链接尾部用的页面名（用户自定义或从作品名自动生成） */
   slug: row.slug,
@@ -1807,8 +1815,10 @@ export async function likeGalleryItem(
 // ---------------------------------------------------------------------------
 // 分享页：把公开作品吐成一份「谁都能打开」的 HTML
 //
-// 造物集的分享链接是 `https://tyu.me/p/<id>` —— 那个壳页里的 iframe 直接把这个
-// 接口当 src 用，所以这里**不能要求登录**，只认「作品已公开 + 作者账号正常」。
+// 造物集的分享链接是 `https://tyu.me/<页面名>`（根级单段路径，早期写成
+// `tyu.me/p/<id>` 的注释已过时）—— 那个壳页里的 iframe 直接把这个接口当 src 用，
+// 所以这里**不能要求登录**，只认「作品已公开 + 作者账号正常」。
+// 传入的 key 既可以是作品 id 也可以是页面名（用户的「自定义链接」）。
 // ---------------------------------------------------------------------------
 
 /**

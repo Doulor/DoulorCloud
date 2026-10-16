@@ -93,6 +93,7 @@ import { LoadingBlock } from "@/components/loading-block"
 import { AdminInvitesSkeleton, AdminUsersSkeleton } from "@/components/skeletons"
 // 投票规则的判断 / 文案映射与用户端共用一份 —— 两处各写一遍迟早会出现
 // 「后台显示多数得奖、用户端显示少数得奖」这种自相矛盾
+import { QuizEditor } from "@/components/quiz-editor"
 import { isInstantVoteRule, VOTE_RULE_LABEL_KEY } from "@/components/event-vote"
 import { Button } from "@/components/ui/button"
 import { confirmDialog } from "@/components/confirm-dialog"
@@ -164,7 +165,22 @@ const FEATURES: { key: FeatureKey; label: string; desc: string }[] = [
   // DNS 解析记录：同样**默认关闭**，但理由是配额（CF 每 zone 记录数有硬上限）
   // 而不是风险。与上面的 doulor 是两件事，别互相推断（见 permissions.ts 的 FEATURES）。
   { key: "dns", label: "feat.dns", desc: "adm.feat.dnsDesc" },
+  // 中转站免审入驻：**默认关闭**（后端 DEFAULT_ALLOWED 不含它）。它不是功能模块而是
+  // 「信任」—— 勾上的人在登记中转站时直接 approved，绕过的正是审核制那道闸，
+  // 所以只能在这里逐个用户显式授权（见 worker/src/handlers/relay-providers.ts）。
+  { key: "relay_auto", label: "feat.relay_auto", desc: "adm.feat.relay_autoDesc" },
 ]
+
+/**
+ * 「首捐奖励券可兑换模块」（设置项 first_donation_voucher_features）的候选清单：
+ * **刻意排除 `relay_auto`**。
+ *
+ * 理由：首捐券是**使用者自选**换哪个模块的 —— 让它能换「中转站免审」等于给每个
+ * 持券用户开一条自助取得免审资格的路，而站长这次的口径是「管理员在管理端逐个
+ * 用户勾选」。后端 `vouchers.parseFirstDonationFeatures` 把同一个键做了结构性排除
+ * （见那边的注释）；两处必须一致，否则这里会多出一个「点了也没用」的开关。
+ */
+const FIRST_DONATION_FEATURES = FEATURES.filter((f) => f.key !== "relay_auto")
 
 /** 「捐献是否授予对应权限」的开关项（与后端 settings.ts 的 donation_grant_* 一一对应） */
 const DONATION_GRANT_ITEMS: { key: string; label: string; desc: string }[] = [
@@ -840,6 +856,9 @@ export default function AdminPage() {
     doulor: false,
     // DNS 解析记录同样默认**不开**（配额闸，见 worker/src/permissions.ts）
     dns: false,
+    // 中转站免审入驻同样默认**不开**：它是「信任」不是「功能」，
+    // 建码时默认带上它等于把中转站审核制从邀请码这条路绕过去。
+    relay_auto: false,
   })
 
   /** 邀请码溯源弹窗（站长 2026-10-07：用户列表点邀请码、邀请码列表点码都能打开） */
@@ -1281,7 +1300,7 @@ export default function AdminPage() {
    */
   const [firstDonationFeatures, setFirstDonationFeatures] = React.useState<
     Record<string, boolean>
-  >(() => Object.fromEntries(FEATURES.map((f) => [f.key, true])))
+  >(() => Object.fromEntries(FIRST_DONATION_FEATURES.map((f) => [f.key, true])))
   // 限时开放注册：打开后注册无需邀请码；可设截止时间（datetime-local 本地值）
   const [openRegistration, setOpenRegistration] = React.useState(false)
   const [openRegistrationUntil, setOpenRegistrationUntil] = React.useState("")
@@ -2093,7 +2112,7 @@ export default function AdminPage() {
         .map((x) => x.trim())
         .filter(Boolean)
       setFirstDonationFeatures(
-        Object.fromEntries(FEATURES.map((f) => [f.key, fdRaw.includes(f.key)]))
+        Object.fromEntries(FIRST_DONATION_FEATURES.map((f) => [f.key, fdRaw.includes(f.key)]))
       )
       // 限时开放注册：总开关 + 截止时间（后端存 ISO，转成本地 datetime-local 显示）
       setOpenRegistration(isSettingOn(s.open_registration, false))
@@ -9914,20 +9933,26 @@ export default function AdminPage() {
                     </div>
 
                     {eventDraft.quizMode && (
-
-                      <textarea
-
-                        className="mt-2 h-64 w-full rounded-lg border border-border bg-background p-3 font-mono text-xs"
-
-                        placeholder={t("quiz.adm.placeholder")}
-
-                        value={eventDraft.quizJson}
-
-                        onChange={(e) => setEventDraft({ ...eventDraft, quizJson: e.target.value })}
-
-                      />
-
-                    )}
+                <>
+                  {/* 图形化编辑器：题目/选项/正确答案/发奖分档都能点着改（站长要求） */}
+                  <QuizEditor
+                    value={eventDraft.quizJson}
+                    onChange={(json) => setEventDraft({ ...eventDraft, quizJson: json })}
+                  />
+                  {/* 高级：直接改 JSON。它和上面的表单是**同一份数据**，双向同步 */}
+                  <details className="mt-3">
+                    <summary className="cursor-pointer text-xs text-muted-foreground">
+                      {t("quiz.adm.advanced")}
+                    </summary>
+                    <textarea
+                      className="mt-2 h-56 w-full rounded-lg border border-border bg-background p-3 font-mono text-xs"
+                      placeholder={t("quiz.adm.placeholder")}
+                      value={eventDraft.quizJson}
+                      onChange={(e) => setEventDraft({ ...eventDraft, quizJson: e.target.value })}
+                    />
+                  </details>
+                </>
+              )}
 
                     {eventDraft.quizMode && (
 

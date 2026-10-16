@@ -22,9 +22,15 @@
  *   · **所有者能看见、但不能用**自己那台待审/被拒的站：列表里连同状态一起返回，
  *     但 /me、/keys、/models 一律拒绝 —— 否则「提交完立刻读余额」就是绕过审核的路径；
  *   · 存量数据在迁移里一次性回填成 approved（线上现有 3 条行为不变）。
+ *
+ * 🔴 同一批需求里的**免审**（站长 2026-10-16）：站长/管理员（`isPrivileged` = root /
+ *   superadmin），以及被管理员**逐个勾上** `relay_auto` 权限位的用户，登记时直接 approved，
+ *   并把 `reviewed_at` / `reviewed_by` 一并写上（不留 NULL）。判据见 canSkipReview。
+ *   免审只免掉「事前排队」，**不免掉事后的刹车**：免审通过的站照样能被管理端一键停用。
  */
 import { ApiError, json } from "../http"
-import { requireUser } from "../auth"
+import { isPrivileged, requireUser } from "../auth"
+import { parsePermissions, hasFeature } from "../permissions"
 import { guardRateLimit } from "../ratelimit"
 import { assertAdminScope } from "./admin"
 import { encryptSecret, decryptSecret, uuid } from "../crypto"
@@ -257,6 +263,28 @@ export async function listRelayProviders(env: Env, request: Request): Promise<Re
   })
 }
 
+/**
+ * 🔴 「免审入驻」资格（2026-10-16 站长要求）—— 谁登记中转站可以**直接 approved**。
+ *
+ * 两类人：
+ *   1. 管理员 / 站长 —— 直接复用 `auth.ts` 的 `isPrivileged()`。
+ *      ⚠️ 口径以那份实现为准：它**只认 `root` 与 `superadmin`**，普通 `admin`
+ *      （自定义管理员）**不在内** —— 他仍要排队，除非另外被勾上 `relay_auto`。
+ *      这里刻意照搬而不自己再写一份「谁算自己人」，否则口径迟早漂移。
+ *   2. 持 `relay_auto` 权限位的用户 —— 管理员在成员详情里**逐个**勾选的人才算。
+ *
+ * ⚠️ 判据只从**服务端的用户行**（会话 JOIN 出来的 role / permissions）取，
+ *    绝不看请求体里的任何字段 —— 否则提交者能自己给自己发一把免审钥匙，
+ *    这道闸就等于不存在。
+ * ⚠️ permissions 为 NULL 时 `parsePermissions` 按「缺失键 = 允许」兜底，但
+ *    `relay_auto` **不在** `DEFAULT_ALLOWED` 里，所以 NULL 用户拿到的是 false
+ *    （这正是它必须留在名单外的原因，见 permissions.ts 的注释）。
+ */
+function canSkipReview(user: { role: string; permissions?: string | null }): boolean {
+  if (isPrivileged(user.role)) return true
+  return hasFeature(parsePermissions(user.permissions), "relay_auto")
+}
+
 /** POST /api/relay/providers —— 自助登记一台（先探测，通了才落库） */
 export async function createRelayProvider(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
@@ -311,26 +339,55 @@ export async function createRelayProvider(env: Env, request: Request): Promise<R
   const id = uuid()
   const now = new Date().toISOString()
   /**
-   * 落库即「待审核」（2026-10-16 审核制）。
+   * 落库即「待审核」（2026-10-16 审核制）——**免审资格者除外**。
    *
-   *   · `review_status` 显式写 'pending'，不依赖列默认值 —— 默认值只是兜底，
+   *   · `review_status` 显式写出来，不依赖列默认值 —— 默认值只是兜底，
    *     这道闸的主语是这里的业务决策，写出来才看得见（将来谁改默认值也改不掉它）；
    *   · `enabled` 仍然写 1：它与审核态是两把**独立**的锁，新站「审核过了就该能用」，
-   *     不该要求站长批完再审一次「启用」。停用是事后的紧急刹车（管理端一个按钮）。
+   *     不该要求站长批完再审一次「启用」。停用是事后的紧急刹车（管理端一个按钮），
+   *     对免审通过的站**同样有效** —— 免审只免掉「事前排队」，不免掉事后的刹车。
    */
+  const skipReview = canSkipReview(user)
+  /**
+   * 免审时把审核痕迹**写全**，不留 NULL（站长 2026-10-16 明确要求）：
+   *   · `reviewed_at` = 本次登记时刻 —— 它就是「审核发生的时间」，写 NULL 会让
+   *     管理端显示成「审核制之前登记的」，与事实不符；
+   *   · `reviewed_by` = 登记者本人的 user id —— 这一次没有第二个人参与：站长/管理员
+   *     是自己人，`relay_auto` 用户则是拿着管理员**事先**给的资格。写自己的 id 而不是
+   *     编一个 "system" 之类的哨兵值，是为了让这一列**始终是合法的 users.id**
+   *     （将来要做联表统计/展示也不会被脏值打坏）；「为什么免审」写在审计里
+   *     （见下面的 recordAudit 文案）与这条注释里。
+   */
+  const reviewStatus = skipReview ? "approved" : "pending"
   await env.DB.prepare(
     `INSERT INTO relay_providers
-       (id, name, kind, base_url, token_enc, owner_user_id, enabled, sort, review_status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 1, 100, 'pending', ?, ?)`
+       (id, name, kind, base_url, token_enc, owner_user_id, enabled, sort,
+        review_status, review_note, reviewed_at, reviewed_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 1, 100, ?, NULL, ?, ?, ?, ?)`
   )
-    .bind(id, name, kind, baseUrl, await encryptSecret(adminToken, env.SESSION_SECRET!), user.id, now, now)
+    .bind(
+      id,
+      name,
+      kind,
+      baseUrl,
+      await encryptSecret(adminToken, env.SESSION_SECRET!),
+      user.id,
+      reviewStatus,
+      skipReview ? now : null,
+      skipReview ? user.id : null,
+      now,
+      now
+    )
     .run()
 
   await recordAudit(
     env,
     user.id,
     "relay.provider.create",
-    `登记中转站「${name}」（${kind}，${baseUrl}），等待站长审核`,
+    `登记中转站「${name}」（${kind}，${baseUrl}）` +
+      (skipReview
+        ? "，免审直接通过（登记者具备免审资格：站长/管理员角色或 relay_auto 权限）"
+        : "，等待站长审核"),
     request.headers.get("CF-Connecting-IP")
   )
   invalidateRelayViewCache()

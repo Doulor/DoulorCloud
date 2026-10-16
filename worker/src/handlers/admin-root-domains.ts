@@ -240,6 +240,72 @@ async function wildcardStatusOf(
 }
 
 /**
+ * 根域**顶点**（就是 `{root}` 本身，Cloudflare 里记录名写作 `@`）的现状。
+ *
+ * 为什么必须单独探它：**通配符 `*.{root}` 不覆盖顶点**（DNS 规范如此）。
+ * 于是「这个域下的子域全都好用」和「这个域本身能不能打开」是两件毫不相干的事，
+ * 只看泛解析会把「子域全通、顶点全断」误判成「这个域已经配好了」。
+ *
+ * 🔴 线上真实案例（2026-10-16 站长报障，本探测就是为它加的）：
+ *   tyu.me 的 `*.tyu.me` 泛解析与 67 条子域 Worker 路由**全都正常**，
+ *   但顶点 `https://tyu.me/` 是 **DNS 解析失败**（该域名下只有 MX/TXT，没有任何
+ *   A/AAAA/CNAME）。而造物集「自定义链接」给用户看的公开地址正好挂在顶点上
+ *   （`tyu.me/<页面名>`，由 scripts/tyu-site-worker 承载）⇒ 那个链接整条打不开，
+ *   界面上却照样显示「别人的访问地址：tyu.me/flybird」。
+ *   教训：顶点没接入这件事，必须有地方能看见。
+ *
+ * ⚠️ 本函数**只读**。导入流程刻意**不**替站长补顶点记录 —— 理由写在
+ *    `ensureWildcardRecord` 上方那段「为什么不建顶点」的注释里，改之前务必读。
+ */
+type ApexStatus =
+  /** 有 A/AAAA/CNAME 且走 CF 代理：顶点可达，平台的 Worker 路由也接得住 */
+  | "ok"
+  /**
+   * 有记录但**没开代理**（灰云）：顶点由源站直出（`doulor.cn` 就是这种，
+   * A 指向真实源站），本身能打开，但平台的 Worker 路由接不住它 ——
+   * 这是**正常且合法**的一种形态，不是故障，所以界面上不能标成错误。
+   */
+  | "no-proxy"
+  /** A/AAAA/CNAME 一条都没有：顶点**根本解析不了**，`https://{root}/…` 全部打不开 */
+  | "missing"
+  /** 查询失败（Token 权限不足 / 接口抖动 / zone 未解析） */
+  | "unknown"
+
+async function apexStatusOf(
+  env: Env,
+  zoneId: string | null,
+  root: string
+): Promise<{ status: ApexStatus; detail: string | null }> {
+  if (!zoneId) return { status: "unknown", detail: null }
+
+  let records: { id: string; type: string; content: string; proxied?: boolean }[]
+  try {
+    // `?name=` 是**精确**匹配，所以这里拿到的就是顶点自己的记录（不含任何子域）
+    records = await cfListDnsRecords(env, zoneId, root)
+  } catch (err) {
+    console.error("探测根域顶点失败:", root, err)
+    return { status: "unknown", detail: null }
+  }
+
+  // 只看能承载 HTTP 的三种类型。顶点上通常还有 MX/TXT（邮件通道）——
+  // 那些记录**不代表**顶点能打开，混进来会把「解析不了」误判成「已配好」，
+  // 这正是泛解析探测里 `no-proxy` 那个坑的同构版本。
+  const http = records.filter((r) =>
+    ["A", "AAAA", "CNAME"].includes((r.type ?? "").toUpperCase())
+  )
+  if (http.length === 0) return { status: "missing", detail: null }
+
+  const live = http.find((r) => r.proxied !== false)
+  if (!live) {
+    return {
+      status: "no-proxy",
+      detail: `${http[0].type} ${http[0].content}（灰云：源站直出，平台路由接不住）`,
+    }
+  }
+  return { status: "ok", detail: `${live.type} ${live.content}（已开代理）` }
+}
+
+/**
  * GET /api/admin/root-domains/cf-zones —— 「从 Cloudflare 导入」的候选 zone。
  *
  * 已经登记在 `root_domains` 里的域**不返回**（站长要的是「还有哪些能加」，
@@ -382,6 +448,34 @@ async function removeRootFromWildcardSetting(env: Env, name: string): Promise<st
  *
  * 只有「一条都没有」时才创建，此时失败会由调用方回滚掉刚插入的表行
  * （见 importAdminRootDomain），所以不会留下半成品。
+ *
+ * 🔴 刻意**只建 `*.{root}`、不建顶点 `{root}`** —— 这是评估过的结论，不是漏了。
+ *    「顶点该不该有记录」和「子域该不该有记录」是两个不同的问题：
+ *
+ *    1) **泛解析是平台能自己负责的事**，顶点不是。`*.{root}` 只服务「给用户分
+ *       子域名」这一个用途，建它不会动到任何既有服务。而顶点是**一个域的门面**，
+ *       它指向哪里是「这个域该由谁提供服务」的决定 —— 那个决定不在解析层，
+ *       而在 Worker 路由层（见 worker/wrangler.toml 里那张分工清单，以及
+ *       scripts/tyu-site-worker/wrangler.toml 的 `tyu.me/*`）。
+ *       先建记录、后等路由，中间态就是一个 522 错误页。
+ *
+ *    2) **会打坏靠源站提供服务的顶点**（本仓库出过同类事故）。实测：`doulor.cn`
+ *       顶点是一条**灰云 A → 39.97.183.32 的真实源站**。若这里无条件补一条
+ *       代理着的 `AAAA 100::`，Cloudflare 就开始接管这个顶点的 HTTP，真实站点
+ *       的 TLS / 回源 / 缓存行为全变 —— 正是 wrangler.toml L18-22 记的那种
+ *       「加一条宽泛的东西，把靠源站提供服务的域打成坏的」。
+ *       反过来，只要按「一条 A/AAAA/CNAME 都没有才建」来放宽，也仍有坑：
+ *       顶点当前为空、站长准备过两天挂源站时，平台已经塞进去的代理占位记录
+ *       会和后来的 A 记录并存 ⇒ 两个地址轮流命中，故障极难排查。
+ *
+ *    3) **顶点为空 ≠ 这个域坏了**。`7u.nz` 顶点也是空的，但那儿没有任何服务，
+ *       属于正常。真正需要接顶点的域（如 tyu.me）必须由**知道该域要挂哪个
+ *       Worker** 的人显式接入 —— 那是 Workers 侧的部署动作，不是 DNS 批量导入
+ *       能替它决定的。
+ *
+ *    所以本流程的选择是：**顶点交给 `apexStatusOf()` 探测 + 界面显式提示**，
+ *    由站长按提示手工补（导入结果里也会回报顶点的现状）。这样既不会静默地
+ *    把某个域打坏，也不会再让「顶点没接入」变成一个看不见的盲区。
  */
 async function ensureWildcardRecord(
   env: Env,
@@ -627,13 +721,24 @@ export async function importAdminRootDomain(
 
   resetRootDomainCache()
 
+  /**
+   * 顶点现状：**只回报、不修**（理由见 ensureWildcardRecord 上方那段）。
+   *
+   * 放在这里是为了让「导入成功了，但顶点还是空的」当场可见：不然站长会以为
+   * 导入完成 = 这个域已经能用，而挂在顶点上的东西（如 `tyu.me/<页面名>` 的
+   * 作品分享链接）其实压根解析不了 —— 线上就是这么踩的。
+   */
+  const apex = await apexStatusOf(env, zoneId, name)
+  steps.push({ step: "apex", state: apex.status })
+
   await recordAudit(
     env,
     admin.id,
     "admin.rootdomain.import",
     `${existingRow ? "重新初始化" : "导入"}根域 ${name}（zone ${zoneId}，年价 ${price}${
       rawFeature ? `，需 ${rawFeature} 权限` : ""
-    }${wantDefault ? "，设为默认" : ""}）：泛解析 ${wildcard.state}/${wildcard.detail}`,
+    }${wantDefault ? "，设为默认" : ""}）：泛解析 ${wildcard.state}/${wildcard.detail}；` +
+      `顶点 ${apex.status}${apex.detail ? `/${apex.detail}` : ""}`,
     ip
   )
 
@@ -646,6 +751,7 @@ export async function importAdminRootDomain(
     wildcardRoots,
     isDefault: wantDefault,
     wasExisting: Boolean(existingRow),
+    apex,
   })
 }
 
@@ -667,7 +773,12 @@ export async function listAdminRootDomains(
         /* 解析失败保持 null，前端会显示「未解析」 */
       }
     }
-    const mail = await emailRoutingStatus(env, zoneId)
+    // 收信通道与顶点现状是两次互不依赖的 CF 查询，并行发出去（根域只有几个，
+    // 但这一步在管理页每次打开都要跑，串行纯属白等一个往返）
+    const [mail, apex] = await Promise.all([
+      emailRoutingStatus(env, zoneId),
+      apexStatusOf(env, zoneId, r.name),
+    ])
     items.push({
       name: r.name,
       label: r.label,
@@ -683,6 +794,14 @@ export async function listAdminRootDomains(
       isDefault: r.is_default === 1,
       enabled: r.enabled === 1,
       emailRouting: mail,
+      /**
+       * 顶点（`{root}` 本身）现状。**泛解析不覆盖顶点**，所以这一项与
+       * `dns_wildcard_roots` 是否配好完全无关：它回答的是「`https://{root}/…`
+       * 打不打得到 Cloudflare」——挂在该顶点上的作品分享链接（`{root}/<页面名>`）
+       * 就死在这一项上是 `missing` 的时候。判定与「为什么不自动补」见 apexStatusOf。
+       */
+      apex: apex.status,
+      apexDetail: apex.detail,
     })
   }
 

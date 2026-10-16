@@ -15,7 +15,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest"
 import { env } from "cloudflare:workers"
-import { authRequest, fetchSelf, makeUser } from "./helpers"
+import { authRequest, fetchSelf, makeUser, setPermissions } from "./helpers"
 
 type U = Awaited<ReturnType<typeof makeUser>>
 
@@ -427,5 +427,175 @@ describe("中转站审核制（2026-10-16）", () => {
     )
     expect(res.status).toBe(403)
     expect((await res.json<{ code: string }>()).code).toBe("PENDING_REVIEW")
+  })
+})
+
+/* ------------------------------------------------- 免审入驻（2026-10-16 站长要求） */
+
+/**
+ * 「部分用户免审、入驻即批准」。
+ *
+ * 两类免审（判据见 handlers/relay-providers.ts 的 canSkipReview）：
+ *   1. `isPrivileged()` —— **只认 root / superadmin**（worker/src/auth.ts）；
+ *      普通 `admin`（自定义管理员）**不在内**，这一点在下面有一条专门的用例钉住。
+ *   2. 持 `relay_auto` 权限位的用户 —— 管理员在成员详情里逐个勾选。
+ * 两者都没有 ⇒ 仍然 pending（审核制原样不动）。
+ */
+describe("中转站免审入驻（2026-10-16）", () => {
+  /** 直读库里那一行的审核痕迹 —— 免审的关键证据就在这里（不留 NULL） */
+  async function reviewRow(id: string) {
+    return env.DB.prepare(
+      "SELECT review_status, reviewed_at, reviewed_by FROM relay_providers WHERE id = ?"
+    )
+      .bind(id)
+      .first<{
+        review_status: string
+        reviewed_at: string | null
+        reviewed_by: string | null
+      }>()
+  }
+
+  // ⚠️ 分成两个 it（而不是一个 it 里循环两个角色）：stubFakeNewApi 每次调用都会往
+  //    afterEach 的还原栈里压一条，同一个用例里压两条会让还原顺序反过来、
+  //    把打桩后的 fetch 留到下一个用例（打桩泄漏）。一个用例只打一次桩最省心。
+  // ⚠️ 站点名要避开 assertClientNameAllowed 的敏感词表（"admin" / "管理" / "官方"…），
+  //    否则 400 卡在登记之前，测的就不是免审了。
+  const roleNames = { superadmin: "免审站-超管", root: "免审站-站长" } as const
+  for (const role of ["superadmin", "root"] as const) {
+    it(`${role}（isPrivileged）登记即 approved：痕迹写全、立刻对所有人可用`, async () => {
+      const owner = await makeUser({ role })
+      stubFakeNewApi(owner)
+      const id = await registerFake(owner, roleNames[role])
+
+      const row = await reviewRow(id)
+      expect(row?.review_status, `${role} 应当免审`).toBe("approved")
+      // 「别留 NULL」是这次明确要求的：免审 ≠ 没有审核痕迹
+      expect(row?.reviewed_at).toBeTruthy()
+      expect(row?.reviewed_by).toBe(owner.id)
+
+      // 免审 = 不用等人点那一下：别的用户现在就能看到它、并且真的读得到上游
+      const other = await makeUser({})
+      const seen = (await listOf(other)).find((p) => p.id === id)
+      expect(seen?.usable).toBe(true)
+      expect(seen?.reviewStatus).toBe("approved")
+      const me = await fetchSelf(
+        authRequest(other, `/api/relay/providers/${encodeURIComponent(id)}/me`)
+      )
+      expect(me.status).toBe(200)
+    })
+  }
+
+  it("普通 admin（自定义管理员）**不在** isPrivileged 内 ⇒ 仍然要排队", async () => {
+    // isPrivileged 的真实口径是 root / superadmin；admin 只是「被授权做事的人」，
+    // 不因为顶着 admin 的头衔就自动免审（要免审得另外勾 relay_auto）。
+    const owner = await makeUser({ role: "admin" })
+    stubFakeNewApi(owner)
+    const id = await registerFake(owner, "免审站-普通角色")
+    expect((await reviewRow(id))?.review_status).toBe("pending")
+  })
+
+  it("持 relay_auto 权限位的用户免审（reviewed_at 非空）；没有该权限位的仍 pending", async () => {
+    // 打一次桩就够：NewAPI 探测在「只搜到一条」时会回落到那一条（见 relay-adapters.ts），
+    // 因此同一个桩可以支撑多个不同用户的登记。
+    const stubHost = await makeUser({})
+    stubFakeNewApi(stubHost)
+
+    // ---- 1) 被勾上 relay_auto：直接 approved，且审核痕迹写全 ----
+    const trusted = await makeUser({})
+    await setPermissions(
+      trusted.id,
+      JSON.stringify({ r2: true, ai: true, proxy: true, doulor: false, dns: false, relay_auto: true })
+    )
+    const id = await registerFake(trusted, "免审用户的站")
+    const row = await reviewRow(id)
+    expect(row?.review_status).toBe("approved")
+    expect(row?.reviewed_at).toBeTruthy()
+    expect(row?.reviewed_at).not.toBeNull()
+    expect(row?.reviewed_by).toBe(trusted.id)
+
+    // 别人也能立刻看到（免审的意义就在这里）
+    const other = await makeUser({})
+    expect((await listOf(other)).find((p) => p.id === id)?.usable).toBe(true)
+
+    // ---- 2) 权限 JSON 为 NULL（绝大多数新用户）⇒ 仍 pending ----
+    // 这一条是「新权限键**绝不能**进 DEFAULT_ALLOWED」的回归测试：
+    // parsePermissions 对缺失的键按 allPermissions() 兜底，relay_auto 必须落在 false。
+    const normal = await makeUser({})
+    const normalId = await registerFake(normal, "普通用户的站")
+    expect((await reviewRow(normalId))?.review_status).toBe("pending")
+
+    // ---- 3) 显式写成 false（管理员取消勾选后的形态）⇒ 同样 pending ----
+    const revoked = await makeUser({})
+    await setPermissions(revoked.id, JSON.stringify({ relay_auto: false }))
+    const revokedId = await registerFake(revoked, "被取消免审的站")
+    expect((await reviewRow(revokedId))?.review_status).toBe("pending")
+  })
+
+  it("管理端勾选 relay_auto 能真的落库（PUT /admin/users/:username 往返不被过滤）", async () => {
+    // 这条钉的是「管理端那个开关不是摆设」，也顺带钉住站长关心的那个坑：
+    // 前端是把**整份 permissions 对象**回传的（admin.tsx 的 handleTogglePermission），
+    // 后端必须原样认下这个新键 —— normalizePermissions 是按 FEATURES 迭代的，
+    // 只要 FEATURES 里有 relay_auto 就不会被过滤掉。
+    const admin = await makeUser({ role: "root" })
+    const target = await makeUser()
+    stubFakeNewApi(target)
+
+    const put = await fetchSelf(
+      authRequest(admin, `/api/admin/users/${encodeURIComponent(target.username)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          permissions: {
+            r2: true,
+            ai: false,
+            proxy: false,
+            doulor: false,
+            dns: false,
+            relay_auto: true,
+          },
+        }),
+      })
+    )
+    expect(put.status, await put.clone().text()).toBe(200)
+
+    const stored = await env.DB.prepare("SELECT permissions FROM users WHERE id = ?")
+      .bind(target.id)
+      .first<{ permissions: string | null }>()
+    const parsed = JSON.parse(stored?.permissions ?? "null") as Record<string, boolean>
+    expect(parsed.relay_auto).toBe(true)
+
+    // 端到端：管理端勾上之后，这个人登记的中转站直接 approved
+    const id = await registerFake(target, "勾选后登记的站")
+    expect((await reviewRow(id))?.review_status).toBe("approved")
+  })
+
+  it("免审通过的站，管理员**仍然**能一键停用（事后兜底不动）", async () => {
+    const owner = await makeUser({})
+    await setPermissions(owner.id, JSON.stringify({ relay_auto: true }))
+    stubFakeNewApi(owner)
+    const id = await registerFake(owner, "免审但会被停用的站")
+    expect((await reviewRow(id))?.review_status).toBe("approved")
+
+    const admin = await makeUser({ role: "admin" })
+    const meUrl = `/api/relay/providers/${encodeURIComponent(id)}/me`
+    const other = await makeUser({})
+    expect((await fetchSelf(authRequest(other, meUrl))).status).toBe(200)
+
+    const off = await fetchSelf(
+      authRequest(
+        admin,
+        `/api/admin/relay-providers/${encodeURIComponent(id)}/enabled`,
+        json("POST", { enabled: false })
+      )
+    )
+    expect(off.status).toBe(200)
+    expect((await off.json<{ usable: boolean }>()).usable).toBe(false)
+
+    // 审核态不动（两把锁互不覆盖），但已经不可用：连登记人自己也读不到
+    expect((await reviewRow(id))?.review_status).toBe("approved")
+    expect((await fetchSelf(authRequest(other, meUrl))).status).toBe(403)
+    const own = await fetchSelf(authRequest(owner, meUrl))
+    expect(own.status).toBe(403)
+    expect((await own.json<{ code: string }>()).code).toBe("DISABLED")
   })
 })

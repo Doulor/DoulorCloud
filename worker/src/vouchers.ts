@@ -105,24 +105,48 @@ export function featureLabel(f: string): string {
 }
 
 /**
+ * 首捐奖励券**结构性地**不给兑换的模块（2026-10-16 加 `relay_auto` 时补）。
+ *
+ * 为什么 `relay_auto`（中转站免审入驻）必须在这里被排除：
+ *   · 它不是「功能」而是「信任」—— 免掉的正是中转站审核制那道闸，站长定的口径是
+ *     **管理员在管理端逐个用户勾选**（见 handlers/relay-providers.ts 的 canSkipReview）；
+ *   · 而首捐券是**使用者自选**换哪个模块的 —— 一旦它进了候选，任何拿到自选券的用户
+ *     都能自己给自己发一份免审资格，「逐个勾选」这条口径就被绕开了。
+ *
+ * ⚠️ 刻意做成**解析层的结构性排除**，而不是「靠管理端把那个开关关掉」：
+ *   即便有人手工把 relay_auto 写进 `first_donation_voucher_features`（或那个设置项
+ *   整行被删、走「缺省 = 全部」的兜底分支），兑换时也会在这里被丢掉
+ *   （`redeemVoucher` 用的就是本函数的返回值）。少一个开关，就少一种「没关住」的方式。
+ */
+export const FIRST_DONATION_EXCLUDED_FEATURES: readonly Feature[] = ["relay_auto"]
+
+/**
  * 首捐奖励券**可兑换**的模块集合（设置项 `first_donation_voucher_features`）。
  *
  * 口径刻意与 `quotas.parseBasicFeatures` 保持一致，别在这里做「猜意图」的兜底：
- *   · `null` / `undefined`（设置项真的缺失）→ **全部模块**
+ *   · `null` / `undefined`（设置项真的缺失）→ **全部可兑换模块**
  *     （这正是「默认全都可以兑换」；缺省时若回落成空集，
  *      站长没配过这个键就会把所有人的首捐券变成废纸）；
  *   · **空串**（站长在全关之后保存）→ **空集合**，即一个都不给；
  *   · 其余按字面解析，认不出的名字直接丢掉（写入口已校验）。
+ *
+ * ⚠️ 上面三种情形都要再扣掉 `FIRST_DONATION_EXCLUDED_FEATURES`（见那段注释）。
  */
 export function parseFirstDonationFeatures(
   raw: string | null | undefined
 ): Set<Feature> {
-  if (raw === null || raw === undefined) return new Set<Feature>(FEATURES)
+  if (raw === null || raw === undefined) {
+    return new Set<Feature>(
+      FEATURES.filter((f) => !FIRST_DONATION_EXCLUDED_FEATURES.includes(f))
+    )
+  }
 
   const out = new Set<Feature>()
   for (const seg of raw.split(",")) {
     const f = seg.trim() as Feature
-    if ((FEATURES as readonly string[]).includes(f)) out.add(f)
+    if (!(FEATURES as readonly string[]).includes(f)) continue
+    if (FIRST_DONATION_EXCLUDED_FEATURES.includes(f)) continue
+    out.add(f)
   }
   return out
 }

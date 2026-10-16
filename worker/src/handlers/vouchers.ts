@@ -9,6 +9,7 @@ import { requireUser } from "../auth"
 import { guardRateLimit } from "../ratelimit"
 import { FEATURES, FEATURE_LABELS } from "../permissions"
 import {
+  FIRST_DONATION_EXCLUDED_FEATURES,
   featuresInInvite,
   getAllowedFirstDonationFeatures,
   loadPermissions,
@@ -94,8 +95,13 @@ export async function listMyVouchers(env: Env, request: Request): Promise<Respon
      * （设置项 first_donation_voucher_features，默认全部）。
      * ⚠️ 它只约束**首捐券**这一条路；别人给的邀请码带什么权限由码自己决定，
      *    与这一列无关，所以前端不能拿 `allowed` 去过滤邀请码那部分。
+     * ⚠️ `FIRST_DONATION_EXCLUDED_FEATURES`（relay_auto）**整项不出现**：
+     *    这份候选列表唯一的用途就是渲染「自选券挑哪个模块」的下拉框，
+     *    而 relay_auto 永远不能被自选券换到（见 vouchers.ts 的注释）。
+     *    留着它只会让每个用户在下拉框里看到一个灰色的「中转站免审入驻」——
+     *    既选不了，又把一个内部管理概念摆到用户面前。
      */
-    features: FEATURES.map((f) => ({
+    features: FEATURES.filter((f) => !FIRST_DONATION_EXCLUDED_FEATURES.includes(f)).map((f) => ({
       key: f,
       label: FEATURE_LABELS[f],
       owned: perms[f],

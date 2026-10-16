@@ -24,7 +24,7 @@ import { ApiError } from "./http"
 import { getSetting } from "./settings"
 import type { Env } from "./env"
 
-export const FEATURES = ["r2", "ai", "proxy", "doulor", "dns"] as const
+export const FEATURES = ["r2", "ai", "proxy", "doulor", "dns", "relay_auto"] as const
 export type Feature = (typeof FEATURES)[number]
 
 export const FEATURE_LABELS: Record<Feature, string> = {
@@ -33,6 +33,10 @@ export const FEATURE_LABELS: Record<Feature, string> = {
   proxy: "代理节点",
   doulor: "doulor.cn 专属域名与邮箱",
   dns: "DNS 解析",
+  // 「中转站入驻免审」：**不是**一个功能模块，而是「这个人的中转站登记直接批准」的资格位。
+  // 它之所以挂在 permissions 里（而不是单加一列/一张表），是因为它天然就是「按用户逐个授权」
+  // 的语义，复用现成的成员详情开关、权限审计、邀请码/券的读写链路，不必再造一套。
+  relay_auto: "中转站免审入驻",
 }
 
 /**
@@ -71,6 +75,13 @@ export type Permissions = Record<Feature, boolean>
  * `dns`（DNS 解析记录）同理**必须**留在名单之外，理由见上方 FEATURES 的注释：
  * 它是配额闸（CF 每 zone 200 条记录，全站共用几个 zone），漏进这里就等于
  * 给所有存量用户、以及所有显式 JSON 里缺这个键的新账号**白送**建记录的能力。
+ *
+ * `relay_auto`（中转站免审入驻）同样**默认关闭**，而且比上面两个更硬 ——
+ * 它绕过的正是「中转站审核制」这道站长刚装上的闸：
+ *   · 漏进这里 ⇒ **所有存量用户 + 所有缺这个键的新账号**一次性全部获得免审，
+ *     等于把审核制废掉，而且是无声地废掉（界面上一切正常，只是新登记的中转站
+ *     突然全都直接生效）；
+ *   · 它必须由管理员在成员详情里**逐个**勾选（站长 2026-10-16 的口径）。
  */
 export const DEFAULT_ALLOWED: readonly Feature[] = ["r2", "ai", "proxy"]
 

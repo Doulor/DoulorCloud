@@ -1191,7 +1191,15 @@ function DetailOverlay({
    * 顶层打开会拿到完整身份（详见 `lib/lab-agent.ts` 的 `openPreviewInNewTab`）。
    * 这里和实验室走**同一份**实现：优先 tyu.me 空壳页，失败就地降级。
    */
-  /** 公开作品有**固定可分享地址**（`tyu.me/p/<id>`），未公开/没保存的只能本地注入 */
+  /**
+   * 公开作品有**固定可分享地址**：`https://tyu.me/<页面名>`（根级单段路径，
+   * 由 scripts/tyu-site-worker 承载；早期注释写的 `tyu.me/p/<id>` 是过时的形态）。
+   * 未公开/没保存的作品没有真链接，只能本地注入空壳。
+   *
+   * 🔴 这个地址能打开的前提是 **tyu.me 顶点有代理记录**：通配符 `*.tyu.me`
+   * 不覆盖顶点，泛解析配得再好也救不了 `tyu.me/...`。线上踩过这个坑
+   * （链接能复制、界面显示正常，点开却是 DNS 解析失败）。
+   */
   const shareUrl =
     detail && detail.visibility === "public"
       ? `${PREVIEW_SHELL_ORIGIN}/${encodeURIComponent(detail.slug || detail.id)}`

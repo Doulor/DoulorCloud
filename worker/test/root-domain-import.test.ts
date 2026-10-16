@@ -23,6 +23,7 @@ import { getSetting } from "../src/settings"
 import { resetRootDomainCache } from "../src/root-domains"
 import {
   importAdminRootDomain,
+  listAdminRootDomains,
   listImportableCfZones,
   rootDomainAction,
 } from "../src/handlers/admin-root-domains"
@@ -525,6 +526,118 @@ describe("导入根域 —— 自动初始化的幂等性", () => {
       "SELECT name FROM root_domains WHERE is_default = 1"
     ).all<{ name: string }>()
     expect((defaults.results ?? []).map((r) => r.name)).toEqual(["new.test"])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2.5 根域**顶点**（「泛解析不覆盖顶点」这条 DNS 规则的回归线）
+// ---------------------------------------------------------------------------
+
+/**
+ * 背景（2026-10-16 站长报障）：造物集里某个作品设了自定义链接 `flybird`，
+ * 界面显示「别人的访问地址：tyu.me/flybird」，但那个地址**打不开**。
+ *
+ * 排查结论：既不是显示错，也不是 Worker 路由缺失 —— `tyu.me/*` 的路由与承载它的
+ * `doulor-tyu-site` 都好好地在线上。缺的是 **tyu.me 顶点的一条代理记录**：
+ * 通配符 `*.tyu.me` **不覆盖顶点**（DNS 规范如此），而顶点上只有 MX/TXT（邮件），
+ * 于是 `tyu.me/*` 整条链路从 DNS 这一步就断了。
+ *
+ * 这一组用例锁的就是「**顶点与泛解析必须分开判定**」：只要有人把 apex 的判定
+ * 退化成「看看泛解析」，线上这种「子域全通、顶点全断」的状态就会再次隐身 ——
+ * 而用户看到的是一个能点、能复制、却打不开的链接。
+ */
+describe("根域顶点现状（泛解析不覆盖顶点）", () => {
+  async function listRoots() {
+    const res = await listAdminRootDomains(
+      env,
+      authRequest(admin, "/api/admin/root-domains")
+    )
+    expect(res.status).toBe(200)
+    return (await res.json()) as {
+      rootDomains: { name: string; apex: string; apexDetail: string | null }[]
+    }
+  }
+
+  it("顶点只有 MX/TXT（邮件记录）⇒ missing：这就是 tyu.me 的形态", async () => {
+    // 泛解析好得很（子域全通），顶点只有邮件记录 —— 两者合起来正是线上那个 bug
+    seedZone("tyu.test", [
+      { name: "*.tyu.test", type: "AAAA", content: "100::" },
+      { name: "tyu.test", type: "MX", content: "10 route1.mx.cloudflare.net" },
+      { name: "tyu.test", type: "TXT", content: "v=spf1 -all" },
+    ])
+    await seedRoot("tyu.test", { zoneId: "zone-tyu.test" })
+
+    const row = (await listRoots()).rootDomains.find((d) => d.name === "tyu.test")!
+    // 🔴 关键：MX/TXT **不算**顶点已接入 —— 它们承载邮件，不代表顶点能打开
+    expect(row.apex).toBe("missing")
+    expect(row.apexDetail).toBeNull()
+  })
+
+  it("顶点是走代理的占位记录 ⇒ ok（已接入）", async () => {
+    seedZone("ok.test", [{ name: "ok.test", type: "AAAA", content: "100::" }])
+    await seedRoot("ok.test", { zoneId: "zone-ok.test" })
+
+    const row = (await listRoots()).rootDomains.find((d) => d.name === "ok.test")!
+    expect(row.apex).toBe("ok")
+    expect(row.apexDetail).toContain("100::")
+    expect(row.apexDetail).toContain("已开代理")
+  })
+
+  it("顶点是灰云源站（doulor.cn 那种形态）⇒ no-proxy，且**不是**故障", async () => {
+    // 站长自己的站点直出（实测线上 doulor.cn 顶点就是 A → 真实源站）。
+    // 这一态必须与 missing 分开：它是正常形态，而给这种顶点塞一条代理占位记录，
+    // 等于把站长的源站换成 Cloudflare 回源 —— 那才是真的会打坏东西。
+    seedZone("origin.test", [
+      { name: "origin.test", type: "A", content: "39.97.183.32", proxied: false },
+    ])
+    await seedRoot("origin.test", { zoneId: "zone-origin.test" })
+
+    const row = (await listRoots()).rootDomains.find((d) => d.name === "origin.test")!
+    expect(row.apex).toBe("no-proxy")
+    expect(row.apexDetail).toContain("39.97.183.32")
+  })
+
+  it("顶点有走代理的记录（站点自己也上了 CF）⇒ ok", async () => {
+    seedZone("cf.test", [{ name: "cf.test", type: "A", content: "203.0.113.9" }])
+    await seedRoot("cf.test", { zoneId: "zone-cf.test" })
+
+    const row = (await listRoots()).rootDomains.find((d) => d.name === "cf.test")!
+    expect(row.apex).toBe("ok")
+  })
+
+  it("zone 解析不出来 ⇒ unknown，不瞎猜成 ok/missing", async () => {
+    // 一个 zone 都不种 ⇒ resolveZoneId 拿不到 id ⇒ 探测不了，只能标 unknown
+    await seedRoot("nozone.test")
+
+    const row = (await listRoots()).rootDomains.find((d) => d.name === "nozone.test")!
+    expect(row.apex).toBe("unknown")
+  })
+
+  it("导入**不会**顺手建顶点记录，但会把顶点现状回报出来", async () => {
+    // 顶点指向哪里是「谁给这个域提供服务」的决定，属于 Worker 路由层，
+    // 不是 DNS 批量导入能替站长决定的（详见 ensureWildcardRecord 的注释）。
+    seedZone("apexless.test", [
+      { name: "apexless.test", type: "MX", content: "10 route1.mx.cloudflare.net" },
+    ])
+    const res = await importAdminRootDomain(
+      env,
+      importReq(admin, { name: "apexless.test", zoneId: "zone-apexless.test" })
+    )
+    const body = (await res.json()) as {
+      apex: { status: string; detail: string | null }
+      steps: { step: string; state: string }[]
+    }
+
+    expect(body.apex.status).toBe("missing")
+    expect(body.steps).toContainEqual({ step: "apex", state: "missing" })
+
+    // 🔴 唯一的一条写操作必须是泛解析，**不能**多出一条顶点记录
+    const creates = cfCalls.filter((c) => c.method === "POST")
+    expect(creates.map((c) => (c.body as { name?: string }).name)).toEqual(["*.apexless.test"])
+    expect(cfZones.get("apexless.test")!.records.map((r) => r.name)).toEqual([
+      "apexless.test",
+      "*.apexless.test",
+    ])
   })
 })
 

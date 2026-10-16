@@ -309,7 +309,10 @@ describe("首捐券可兑换的模块（管理面板设置）", () => {
   })
 
   it("设置项缺失 = 全部可兑换（这就是「默认全都可以兑换」）", () => {
-    // 「全部」= FEATURES 的全部（r2/ai/proxy/doulor/dns），新增模块会自动进这份名单
+    // 「全部」= FEATURES 里**可兑换**的那些（r2/ai/proxy/doulor/dns）；新增功能模块会自动进这份名单。
+    // ⚠️ 唯一的例外是 `relay_auto`（中转站免审入驻）：它是「信任」不是「功能」，
+    //    被 `FIRST_DONATION_EXCLUDED_FEATURES` 结构性排除 —— 首捐券是用户**自选**换哪个模块的，
+    //    能换免审就等于让持券用户自己给自己发一份免审资格，绕开「管理员逐个勾选」的口径。
     expect([...parseFirstDonationFeatures(null)].sort()).toEqual([
       "ai",
       "dns",
@@ -324,6 +327,15 @@ describe("首捐券可兑换的模块（管理面板设置）", () => {
       "proxy",
       "r2",
     ])
+  })
+
+  it("relay_auto 永远换不到：缺省分支与显式写进设置项都不行", () => {
+    // 缺省（「全部可兑换」）分支
+    expect(parseFirstDonationFeatures(null).has("relay_auto")).toBe(false)
+    // 显式写进设置项也照样被丢掉 —— 不靠「管理端记得关掉那个开关」来兜
+    const explicit = parseFirstDonationFeatures("r2,relay_auto")
+    expect(explicit.has("relay_auto")).toBe(false)
+    expect(explicit.has("r2")).toBe(true)
   })
 
   it("空串 = 一个都不给（不是「没配」）", () => {

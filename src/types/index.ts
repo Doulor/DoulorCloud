@@ -1037,8 +1037,10 @@ export interface UserFrpRental {
 /**
  * 受权限控制的模块（与后端 permissions.ts 的 FEATURES 一致）。
  * ⚠️ 不含「个人名片」：名片不消耗资源，已从权限体系移出、全量开放。
+ * ⚠️ 含 `relay_auto`：它不是功能模块，而是「中转站入驻免审」的资格位，
+ *    但同样走这套按用户逐个授权的开关（后端 FEATURES 里有它，别漏）。
  */
-export type FeatureKey = "r2" | "ai" | "frp" | "proxy" | "doulor" | "dns"
+export type FeatureKey = "r2" | "ai" | "frp" | "proxy" | "doulor" | "dns" | "relay_auto"
 
 export interface Permissions {
   r2: boolean
@@ -1061,6 +1063,15 @@ export interface Permissions {
    * `doulor` 管「能建在哪个根域」，`dns` 管「能不能建记录」，互不推导。
    */
   dns: boolean
+  /**
+   * 中转站**免审入驻**（登记即 `approved`，不用排队等站长审）。
+   *
+   * ⚠️ 它与上面几项不是一回事：上面管「能用什么功能」，这一项管「**要不要被审核**」。
+   * 默认 **false**（后端 `DEFAULT_ALLOWED` 不含它）：它是「信任」而不是「功能」，
+   * 一旦缺省放行就等于把刚上线的中转站审核制废掉（见 worker/src/permissions.ts）。
+   * 由管理员在成员详情里逐个勾选；勾上之后仍可被一键停用（两把锁互不覆盖）。
+   */
+  relay_auto: boolean
 }
 
 export const FEATURE_LABELS: Record<FeatureKey, string> = {
@@ -1070,6 +1081,7 @@ export const FEATURE_LABELS: Record<FeatureKey, string> = {
   proxy: "feat.proxy",
   doulor: "feat.doulor",
   dns: "feat.dns",
+  relay_auto: "feat.relay_auto",
 }
 
 /**
@@ -3769,6 +3781,24 @@ export interface AdminDnsRentalsResponse {
 //   POST /admin/root-domains/import    选中一个 zone → 登记 + 初始化（幂等）
 //   POST /admin/root-domains/action    delete（需要 confirm；CF 记录默认保留）
 
+/**
+ * 根域**顶点**（`{root}` 本身）的接入现状。
+ *
+ * 为什么与 `wildcard` 分开：**通配符 `*.{root}` 不覆盖顶点**（DNS 规范如此）。
+ * 一个域可以「所有子域都好用、顶点却完全解析不了」—— 线上 tyu.me 就是这样，
+ * 而造物集给用户看的分享地址（`tyu.me/<页面名>`）正好挂在顶点上。
+ * 判定与「为什么不自动补记录」见 worker/src/handlers/admin-root-domains.ts。
+ */
+export type AdminRootDomainApex =
+  /** 有 A/AAAA/CNAME 且走 CF 代理：可达，平台 Worker 路由也接得住 */
+  | "ok"
+  /** 有记录但灰云（源站直出，如 doulor.cn）：能打开，但平台路由接不住 —— 合法形态，不是故障 */
+  | "no-proxy"
+  /** A/AAAA/CNAME 一条都没有：顶点解析不了，`https://{root}/…` 全部打不开 */
+  | "missing"
+  /** 查询失败（Token 权限 / 接口抖动 / zone 未解析），界面上标「未知」 */
+  | "unknown"
+
 /** 管理端看到的根域（与 `/admin/root-domains` 一一对应） */
 export interface AdminRootDomainInfo {
   name: string
@@ -3785,6 +3815,9 @@ export interface AdminRootDomainInfo {
     catchAllEnabled: boolean
     workerMatches: boolean
   }
+  /** 顶点现状；`apexDetail` 是给人看的原始记录（如 `A 39.97.183.32（灰云…）`） */
+  apex: AdminRootDomainApex
+  apexDetail: string | null
 }
 
 export interface AdminRootDomainsResponse {
@@ -3837,13 +3870,19 @@ export interface AdminRootDomainImportResult {
   ok: boolean
   name: string
   zoneId: string
-  /** 每一步的结果（register / wildcard / wildcardRoots / setDefault），排障用 */
+  /** 每一步的结果（register / wildcard / wildcardRoots / setDefault / apex），排障用 */
   steps: { step: string; state: string }[]
   wildcard: { state: string; detail: string }
   wildcardRoots: string
   isDefault: boolean
   /** true = 本次是在已登记的行上「补初始化」（重试） */
   wasExisting: boolean
+  /**
+   * 导入完成后顶点的现状。**只回报、不修改** —— 导入流程刻意不替站长建顶点记录
+   * （理由见后端 ensureWildcardRecord 的注释）。`status === "missing"` 就说明
+   * 「这个域的子域都能用，但 `https://{root}/…` 还是打不开」，需要人工接入。
+   */
+  apex: { status: AdminRootDomainApex; detail: string | null }
 }
 
 /** 删根域前的影响面（服务端现算，不采信前端传的数字） */

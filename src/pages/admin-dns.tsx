@@ -69,6 +69,7 @@ import type {
   AdminDnsRentalRoot,
   AdminDnsRentalsResponse,
   AdminDnsRentalUser,
+  AdminRootDomainApex,
   AdminRootDomainsResponse,
   AdminSubdomain,
   AdminSubdomainListResponse,
@@ -381,6 +382,15 @@ export function DnsAdminPanel() {
       )
       setImportOpen(false)
       await Promise.all([loadRentals(), loadRootInfo()])
+      /**
+       * 顶点是**只回报、不自动修**的（后端刻意不建，理由见 ensureWildcardRecord
+       * 的注释）。所以「导入成功」≠「这个域已经能用」：顶点为空时 `https://该域/…`
+       * 依旧打不开，而挂在顶点上的东西（造物集作品的 `tyu.me/<页面名>` 分享链接）
+       * 会静默失效。这里必须明说，否则站长会以为导入完就万事大吉。
+       */
+      if (res.apex.status === "missing") {
+        toast.warning(t("dns.root.import.apexMissing", { v0: res.name }))
+      }
     } catch (err) {
       toast.error(errMsg(err, t("dns.root.import.err")))
     } finally {
@@ -1598,6 +1608,7 @@ export function DnsAdminPanel() {
                         <TableHead>{t("dns.rental.roots.usage")}</TableHead>
                         <TableHead>{t("dns.rental.roots.rentals")}</TableHead>
                         <TableHead>{t("dns.root.mail")}</TableHead>
+                        <TableHead>{t("dns.root.apex")}</TableHead>
                         <TableHead />
                       </TableRow>
                     </TableHeader>
@@ -1610,8 +1621,12 @@ export function DnsAdminPanel() {
                         const ratio = r.recordsUsed / r.recordsLimit
                         // 该根域在 CF 侧的收信通道现状（rootInfo 拉不到时是 undefined，
                         // 单元格会显示「—」，不影响定价与配额这两列可用）
-                        const mail = rootInfo?.rootDomains.find((d) => d.name === r.name)
-                          ?.emailRouting
+                        const rootCf = rootInfo?.rootDomains.find((d) => d.name === r.name)
+                        const mail = rootCf?.emailRouting
+                        // 顶点现状与收信、泛解析都无关（**泛解析不覆盖顶点**）：
+                        // 这一列回答的是「https://该域/… 打不打得到 Cloudflare」。
+                        const apex = rootCf?.apex
+                        const apexDetail = rootCf?.apexDetail ?? null
                         // 两道禁删线与后端一致：默认域（注册无处可去）＋站点主域
                         // （`cloud.doulor.cn` 等入口都从它拼出来）。后端也会拒，
                         // 前端禁用只是别让站长白点一次。
@@ -1714,6 +1729,19 @@ export function DnsAdminPanel() {
                                 busy={rootBusy}
                                 onAction={runRootMailAction}
                               />
+                            </TableCell>
+                            <TableCell>
+                              {/* rootInfo 还没拉到（首屏 / 请求失败）时显示「—」而不是
+                                  「未知」：把加载状态说成故障状态会误导排查方向。 */}
+                              {apex ? (
+                                <RootApexBadge
+                                  domain={r.name}
+                                  status={apex}
+                                  detail={apexDetail}
+                                />
+                              ) : (
+                                <span className="text-xs text-muted-foreground">—</span>
+                              )}
                             </TableCell>
                             <TableCell className="text-right">
                               {/* 禁用按钮上挂 Tooltip 需要一个真实的包裹元素：
@@ -2518,6 +2546,62 @@ function WildcardBadge({
       </span>
       {detail && <span className="font-mono text-[10px] text-muted-foreground">{detail}</span>}
     </span>
+  )
+}
+
+/**
+ * 根域**顶点**现状的徽标（根域列表用）。
+ *
+ * 为什么不能省这一列：**通配符 `*.域` 不覆盖顶点**（DNS 规范如此），所以
+ * 「该域的子域全都好用」完全不代表「这个域本身能用」。线上 tyu.me 就是这么坏的：
+ * 泛解析和 67 条子域路由全部正常，`https://tyu.me/` 却是 DNS 解析失败，
+ * 于是挂在顶点上的造物集作品自定义链接（`tyu.me/<页面名>`）全部打不开 ——
+ * 而界面上依旧显示「别人的访问地址：tyu.me/flybird」，从现象上根本看不出是 DNS 问题。
+ *
+ * 三种状态的**轻重不一样**，配色必须区分，否则真正坏的那个会被淹没：
+ *   · missing（顶点一条 A/AAAA/CNAME 都没有 ⇒ 解析不了）= 真故障 ⇒ 警告色 + 提示修法；
+ *   · no-proxy（站长自备源站直出，如 doulor.cn）= **正常形态** ⇒ 中性色，只是说明
+ *     平台路由接不住它，不要吓人；
+ *   · ok = 已接入（可达且走 CF 代理）⇒ 正常色。
+ */
+function RootApexBadge({
+  domain,
+  status,
+  detail,
+}: {
+  domain: string
+  status: AdminRootDomainApex
+  detail: string | null
+}) {
+  const { t } = useT()
+  const cls =
+    status === "ok"
+      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600"
+      : status === "missing"
+        ? "border-amber-500/30 bg-amber-500/10 text-amber-600"
+        : "border-border bg-muted/40 text-muted-foreground"
+  const hint =
+    status === "missing"
+      ? t("dns.root.apex.missingHint", { v0: domain })
+      : status === "no-proxy"
+        ? t("dns.root.apex.noProxyHint", { v0: domain })
+        : null
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="flex flex-col gap-0.5">
+          <span
+            className={`inline-flex w-fit rounded-md border px-1.5 py-0.5 text-[10px] ${cls}`}
+          >
+            {t(`dns.root.apex.${status}`)}
+          </span>
+          {detail && (
+            <span className="font-mono text-[10px] text-muted-foreground">{detail}</span>
+          )}
+        </span>
+      </TooltipTrigger>
+      {hint && <TooltipContent className="max-w-xs">{hint}</TooltipContent>}
+    </Tooltip>
   )
 }
 
