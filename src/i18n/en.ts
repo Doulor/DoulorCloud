@@ -1703,7 +1703,7 @@ export const en: Record<MessageKey, string> = {
   "ai.rewards.title": "Other subscriptions",
   "ai.rewards.why": "What are other subscriptions?",
   "ai.rewards.desc":
-    "Extra quota earned from invites, achievements and more. It stacks on top of the free plan — cards are consumed one after another, so nothing goes to waste. Achievement rewards: +1 card per 10 points (per-card quota shown on the card).",
+    "Extra quota earned from invites, achievements and more. It stacks on top of the free plan — cards are consumed one after another, so nothing goes to waste. Achievement rewards: +1 card per 10 points (per-card quota shown on the card). Note: the number of cards is capped by the plan's per-user purchase limit — cards that expire or get used up are not topped back up beyond it.",
   "ai.rewards.empty":
     "no extra subscription quota yet. Invite friends who donate an AI channel, link a WorkBuddy account, or earn achievement points — all of them grant extra quota.",
   "ai.rewards.invite": "Invite friends",
@@ -1729,7 +1729,7 @@ export const en: Record<MessageKey, string> = {
   "ai.dialog.invite.once": "Each friend counts once.",
   "ai.dialog.ach.title": "Achievement rewards",
   "ai.dialog.ach.desc":
-    "Every 10 achievement points grants an “Achievement reward” subscription (per-card quota shown on the card, converted to model usage by price; reset cycle shown on the card).",
+    "Every 10 achievement points grants an “Achievement reward” subscription (per-card quota shown on the card, converted to model usage by price; reset cycle shown on the card). Note: grants are capped by the plan's per-user purchase limit — beyond it, higher tiers are paused; cards that expire or get used up are not topped back up.",
   "ai.dialog.resetNote":
     "Reset cycles differ (invites usually reset daily, achievements weekly) — the reset time on each card is authoritative.",
   "ai.reset.soon": "Resetting soon",
