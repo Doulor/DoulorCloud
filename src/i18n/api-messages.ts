@@ -832,6 +832,30 @@ export const API_MESSAGES_EN: Record<string, string> = {
   "验证码不正确，请确认手机时间是否准确": "Incorrect code — check that your phone's clock is accurate",
   "验证码已过期，请重新发送": "The verification code has expired — send a new one",
   "验证码错误": "Incorrect verification code",
+  // 2026-10-17 补：这些后端文案原先没有英文译文，英文界面会直接显示中文
+  //（用户反馈「英文网页有部分中文」）。
+  "作品作者不存在": "The project author doesn't exist",
+  "状态只能是 public / private / pending / rejected": "Status must be one of public / private / pending / rejected",
+  "这个活动不是问卷": "This activity isn't a quiz",
+  "这个投票不是问卷形态": "This poll isn't in quiz form",
+  "没有收到任何答案，请重新提交": "No answers were received — please submit again",
+  "这份问卷只能答一次": "This quiz can only be taken once",
+  "缺少签名密钥，无法生成捐献令牌": "Missing signing key — can't generate a donation token",
+  "捐献令牌无效或已过期，请回到 DoulorCloud 重新生成命令": "The donation token is invalid or has expired — go back to DoulorCloud and regenerate the command",
+  "IPv4 地址不合法": "Invalid IPv4 address",
+  "frps 端口不合法": "Invalid frps port",
+  "面板端口不合法": "Invalid panel port",
+  "frps 端口与面板端口不能相同": "The frps port and the panel port must be different",
+  "frps token 太短": "The frps token is too short",
+  "令牌对应的账号已不存在": "The account this token belongs to no longer exists",
+  "这枚捐献令牌已经用过了，请回到 DoulorCloud 重新生成命令": "This donation token has already been used — go back to DoulorCloud and regenerate the command",
+  "账号名分配失败，请重试": "Couldn't allocate an account name — please try again",
+  "密码只能用 8–64 位字母或数字（面板不收其它字符）": "The password must be 8–64 letters or digits (the panel rejects other characters)",
+  "这个域名已经在承载其他服务，不能绑定作品": "This domain already serves something else, so it can't be bound to a project",
+  "这个作品里没有 HTML 文件，公开出去别人打开会是空白页 —— 让它先有一个 index.html": "This project has no HTML file, so publishing it would show visitors a blank page — give it an index.html first",
+  "上游网关暂时不可用，本次导入已取消（未建绑定、未发放任何权限或积分），请稍后重试": "The upstream gateway is temporarily unavailable. This import was cancelled (no bindings created, no permissions or points granted) — please try again later",
+  "无法向上游核实账号，本次导入已取消（未建绑定、未发放任何权限或积分），请稍后重试": "Couldn't verify the accounts upstream. This import was cancelled (no bindings created, no permissions or points granted) — please try again later",
+  "跨站请求已被拒绝": "Cross-site request blocked",
   "默认域不可删除，请先指定别的默认域": "The default domain can't be deleted — set another default domain first",
 }
 
@@ -1065,6 +1089,12 @@ export const API_MESSAGE_PATTERNS: { src: string; en: string }[] = [
   // worker 侧那句是由两段模板字符串拼起来的，check:i18n 只能看到第一段，
   // 而正则不加 `$` 锚，运行时正好命中完整消息的前缀 —— 与上面几条同一写法。
   { src: "^开通 (.+?) 的 Email Routing 失败：Cloudflare 未接受 enable 与 dns 两条路径", en: "Couldn't enable Email Routing for {v0}: Cloudflare rejected both the enable and the dns path" },
+  // 2026-10-17 补：带插值的后端文案（英文界面原先会显示中文）
+  { src: "^(.+?) 属于 (.+?)，不能把它的记录归到 (.+?) 下$", en: "{v0} belongs to {v1} — its records can't be moved under {v2}" },
+  { src: "^最多可以答 (.+?) 次$", en: "You can answer this quiz at most {v0} times" },
+  { src: "^签名绑定的节点（(.+?)）与请求的节点（(.+?)）不一致：不允许用某个节点的密钥操作另一个节点$", en: "The signed node ({v0}) doesn't match the requested node ({v1}): a node's key must not operate another node" },
+  { src: "^一次最多导入 (.+?) 个账号（本次 (.+?) 个），请分批上传$", en: "You can import at most {v0} accounts at a time (this upload had {v1}) — please split it into batches" },
+  { src: "^该商品每日每人限购 (.+?) 件，你今天已购买 (.+?) 件，明天再来吧。$", en: "This item is limited to {v0} per person per day — you've already bought {v1} today. Come back tomorrow." },
 ]
 
 /**
