@@ -3545,6 +3545,17 @@ export const zh = {
   "cm.editHistoryDesc": "共编辑 {n} 次，按时间倒序。",
   "cm.noEdits": "暂无编辑记录。",
   "cm.editNth": "第 {n} 次编辑",
+  // 评论编辑 / 删除（2026-10-17）
+  "cm.editCount": "已修改 {n} 次",
+  "cm.commentDeleted": "该评论已删除",
+  "cm.editCommentPh": "编辑评论内容（支持 Markdown）…",
+  "cm.editRemaining": "还可修改 {n} 次",
+  "cm.editLimitReached": "已达到修改次数上限（{n} 次）",
+  "cm.confirmDeleteComment": "确定删除这条评论？删除后原内容会被清除，仅保留「该评论已删除」占位。",
+  "cm.ok.commentUpdated": "评论已更新",
+  "cm.ok.commentDeleted": "评论已删除",
+  "cm.err.editComment": "编辑评论失败",
+  "cm.err.deleteComment": "删除评论失败",
   "cm.sharePrompt": "{name}，分享点什么？",
   "cm.post": "发帖",
   "cm.postPh": "说点什么吧…（Ctrl+Enter 发布）",
@@ -5848,6 +5859,9 @@ export const zh = {
   "adm.620": "用户发帖、评论、点赞的公共社区；关闭后页面提示不可用。",
   "adm.621": "每帖图片上限",
   "adm.622": "单图大小上限（KB）",
+  "adm.commentEditLimit": "评论最多可修改次数",
+  "adm.commentEditLimitHint":
+    "0 = 禁止修改；默认 2 次。修改过的评论右上角会显示次数，删除的评论保留「该评论已删除」占位。",
   // 帖子分类编辑器（2026-10-07：分类从硬编码改为可配）
   "adm.cat.title": "帖子分类",
   "adm.cat.hint":

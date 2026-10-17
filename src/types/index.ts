@@ -2576,6 +2576,8 @@ export interface CommunityConfig {
   enabled: boolean
   /** 当前生效的帖子分类（按管理员配置的顺序，第一项是发帖默认值） */
   categories: PostCategoryDef[]
+  /** 评论最多可修改次数（0 = 不允许修改）；由设置 community_comment_edit_limit 下发 */
+  commentEditLimit: number
 }
 
 /** 广场列表里展示的高赞评论预览 */
@@ -2613,6 +2615,8 @@ export interface Post {
 
 export interface CommentNode {
   id: string
+  /** 评论作者的用户 id —— 判断「是不是我发的」必须用它，不能用 username（用户名可改） */
+  user_id: string
   body: string
   createdAt: string
   author: CommunityAuthor
@@ -2622,6 +2626,12 @@ export interface CommentNode {
   hot?: boolean
   /** 当前登录用户是否点过赞（未登录恒 false） */
   liked?: boolean
+  /** 被修改过几次（0 / 缺省 = 未修改）；后端按站点设置限制上限 */
+  editCount?: number
+  /** 最近一次修改时间（未修改为 null） */
+  updatedAt?: string | null
+  /** 已删除：正文已由服务端清空，前端只渲染「该评论已删除」占位 */
+  deleted?: boolean
   replies: CommentNode[]
 }
 

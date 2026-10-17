@@ -1388,6 +1388,8 @@ export default function AdminPage() {
   const [communityGuestAccess, setCommunityGuestAccess] = React.useState(true)
   const [communityPostMaxImages, setCommunityPostMaxImages] = React.useState("9")
   const [communityImageMaxKb, setCommunityImageMaxKb] = React.useState("1024")
+  /** 评论最多可修改次数（0 = 禁止修改）；2026-10-17 站长要求默认 2 次 */
+  const [communityCommentEditLimit, setCommunityCommentEditLimit] = React.useState("2")
   /** 站点时区偏移（小时），默认 8 = 北京时间 0 点翻篇 */
   const [siteTzOffsetHours, setSiteTzOffsetHours] = React.useState("8")
   /**
@@ -2115,6 +2117,7 @@ export default function AdminPage() {
       setCommunityImageMaxKb(
         String(Math.round(Number(s.community_image_max_bytes ?? 1048576) / 1024))
       )
+      setCommunityCommentEditLimit(s.community_comment_edit_limit ?? "2")
       setSiteTzOffsetHours(s.site_timezone_offset_hours ?? "8")
       setPostCategories(parseCategorySetting(s.post_categories))
       const basicRaw = (s.invite_basic_features ?? "r2").split(",").map((x) => x.trim()).filter(Boolean)
@@ -2267,6 +2270,11 @@ export default function AdminPage() {
         community_guest_access: communityGuestAccess,
         community_post_max_images: Math.round(Number(communityPostMaxImages) || 9),
         community_image_max_bytes: Math.round(Number(communityImageMaxKb) * 1024),
+        // 留空 = 用默认 2 次（不要因为空输入把编辑功能关掉）；非法输入夹到 0–10
+        community_comment_edit_limit:
+          communityCommentEditLimit.trim() === ""
+            ? 2
+            : Math.min(10, Math.max(0, Math.round(Number(communityCommentEditLimit) || 0))),
         site_timezone_offset_hours: String(Math.round(Number(siteTzOffsetHours) || 8)),
         // ⚠️ 只在**确实加载到过分类**时才提交这一项：加载失败时 postCategories 是空数组，
         //    无脑提交会把线上分类清空 ——「前端看不见」不等于「要删掉」。
@@ -7989,6 +7997,21 @@ export default function AdminPage() {
                         value={communityImageMaxKb}
                         onChange={(e) => setCommunityImageMaxKb(e.target.value)}
                       />
+                    </div>
+                    {/* 评论修改次数上限（2026-10-17）：0 = 禁止修改，默认 2 */}
+                    <div className="space-y-2">
+                      <Label htmlFor="communityCommentEditLimit">{t("adm.commentEditLimit")}</Label>
+                      <Input
+                        id="communityCommentEditLimit"
+                        type="number"
+                        min={0}
+                        max={10}
+                        value={communityCommentEditLimit}
+                        onChange={(e) => setCommunityCommentEditLimit(e.target.value)}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {t("adm.commentEditLimitHint")}
+                      </p>
                     </div>
                   </div>
 
