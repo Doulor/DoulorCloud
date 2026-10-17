@@ -6970,6 +6970,7 @@ export const en: Record<MessageKey, string> = {
   "ap.oneTime": "One-time",
   "ap.noOfficialProducts": "nothing listed yet — click “new item” in the top right to add one.",
   "ap.userProducts": "User listings",
+  "ap.order.stale": "Overdue {n}d undelivered",
   "ap.pendingReviewBadge": "{n} awaiting review",
   "ap.userProductsDesc": "Items listed by users. These can only be delivered manually, and they only appear in the user-facing marketplace once approved. Points are held by the platform until the seller delivers and the buyer confirms receipt.",
   "ap.userProductsEmpty": "no user listings yet",

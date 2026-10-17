@@ -6829,6 +6829,7 @@ export const zh = {
   "ap.oneTime": "买断",
   "ap.noOfficialProducts": "还没有上架商品，点右上角「新建商品」加一件吧。",
   "ap.userProducts": "用户上架的商品",
+  "ap.order.stale": "超时 {n} 天未交付",
   "ap.pendingReviewBadge": "{n} 件待审核",
   "ap.userProductsDesc": "用户自己挂的东西，只能人工交付；审核通过后才会出现在用户端的「用户们的商城」里。别人买下的积分先由平台保管，卖家发货、买家确认收货后才结算给卖家。",
   "ap.userProductsEmpty": "还没有用户上架商品",
