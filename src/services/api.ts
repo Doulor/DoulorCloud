@@ -3048,12 +3048,21 @@ export const communityApi = {
   /** 链接预览：返回目标 URL 的标题/描述/图片（拿不到则 preview=null） */
   linkPreview: (url: string) =>
     request<{ preview: LinkPreview | null }>(`/community/link-preview?url=${encodeURIComponent(url)}`),
-  // ⚠️ 2026-09-25：这里原本有一个 deleteComment(id) 调 DELETE /community/comments/:id，
-  // 但**后端从来没有这个 handler**（handlers/community.ts 里没有 deleteComment），
-  // 且前端没有任何组件引用它 —— 一个纯死方法，还会让 check-api-paths 门禁报警。
-  // 已删除（见 worker/scripts/check-api-paths.mjs 的 KNOWN_GAPS）。
-  // 将来要做「删除评论」，顺序必须是：先在后端加 handler（需定清权限：评论作者 /
-  // 帖子作者 / 管理员分别能删什么）+ 路由 + 回归测试，再在这里加回客户端方法。
+  /**
+   * 编辑自己的评论（2026-10-17）。后端按设置 community_comment_edit_limit
+   * 限制次数，超额返回 403 EDIT_LIMIT_REACHED；并发冲突返回 409 CONFLICT。
+   */
+  updateComment: (id: string, body: string) =>
+    request<{ ok: boolean; unchanged?: boolean; editCount: number; updatedAt?: string }>(
+      `/community/comments/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify({ body }) }
+    ),
+  /** 删除评论（作者或管理员）：软删 + 清空正文，列表保留「该评论已删除」占位 */
+  deleteComment: (id: string) =>
+    request<{ ok: boolean; alreadyDeleted?: boolean }>(
+      `/community/comments/${encodeURIComponent(id)}`,
+      { method: "DELETE" }
+    ),
 }
 
 // ---- 网站统计（管理员）----

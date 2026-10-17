@@ -3630,6 +3630,18 @@ export const en: Record<MessageKey, string> = {
   "cm.editHistoryDesc": "Edited {n} times, newest first.",
   "cm.noEdits": "no edit records.",
   "cm.editNth": "Edit #{n}",
+  // Comment edit / delete (2026-10-17)
+  "cm.editCount": "Edited {n}×",
+  "cm.commentDeleted": "This comment has been deleted",
+  "cm.editCommentPh": "Edit your comment (Markdown supported)…",
+  "cm.editRemaining": "{n} edit(s) left",
+  "cm.editLimitReached": "Edit limit reached ({n} times)",
+  "cm.confirmDeleteComment":
+    "Delete this comment? The original content will be erased and only a \"deleted\" placeholder will remain.",
+  "cm.ok.commentUpdated": "Comment updated",
+  "cm.ok.commentDeleted": "Comment deleted",
+  "cm.err.editComment": "Couldn't edit the comment",
+  "cm.err.deleteComment": "Couldn't delete the comment",
   "cm.sharePrompt": "{name}, what's on your mind?",
   "cm.post": "Post",
   "cm.postPh": "Say something… (Ctrl+Enter to post)",
@@ -5984,6 +5996,9 @@ export const en: Record<MessageKey, string> = {
   "adm.620": "A public community for posting, commenting and liking; when off, the page reports it as unavailable.",
   "adm.621": "Max images per post",
   "adm.622": "Max image size (KB)",
+  "adm.commentEditLimit": "Max comment edits",
+  "adm.commentEditLimitHint":
+    "0 = no edits allowed; default 2. Edited comments show an edit count in the top-right; deleted comments keep a \"deleted\" placeholder.",
   // Post category editor (2026-10-07: categories became configurable)
   "adm.cat.title": "Post categories",
   "adm.cat.hint":

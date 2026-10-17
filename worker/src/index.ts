@@ -2810,6 +2810,24 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   },
 
   {
+    // 编辑自己的评论（2026-10-17）：次数上限由设置 community_comment_edit_limit 控制
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/comments\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (communityCommentMatch: RegExpMatchArray) =>
+      communityHandlers.updateComment(env, request, decodeURIComponent(communityCommentMatch[1])),
+  },
+
+  {
+    // 删除评论（2026-10-17）：作者或管理员，软删 + 清空正文，列表保留占位
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/comments\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (communityCommentMatch: RegExpMatchArray) =>
+      communityHandlers.deleteComment(env, request, decodeURIComponent(communityCommentMatch[1])),
+  },
+
+  {
     kind: "regex",
     match: (routePath: string) => routePath.match(/^\/community\/posts\/([^/]+)\/share$/),
     methods: ["POST"],
