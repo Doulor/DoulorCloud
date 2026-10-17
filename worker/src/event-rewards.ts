@@ -1156,3 +1156,81 @@ export function quizLinearPoints(maxPoints: number, percent: number): number {
   const p = Math.max(0, Math.min(100, percent))
   return Math.round((maxPoints * p) / 100)
 }
+
+/**
+ * 自动补发「因未开通中转站而挂起」的额度奖励（2026-10-17，用户 hsyy 反馈触发）。
+ *
+ * 真实场景：答完问卷时用户还没开中转站 ⇒ newapi_quota 发不出去，
+ * 领奖记录落成 `manual`，文案是「你还未开通 AI 中转站，无法自动发放 500 钱包余额」。
+ * 用户往往**几分钟后就开通了**，但没有任何机制回头补发 —— 只能等管理员人工处理，
+ * 而人工处理往往就是忘了（队列里躺着好几条这种）。
+ *
+ * 这里每小时扫一遍：只挑「文案标明是因未开通挂起的」且「现在已经有中转站账号」的记录，
+ * 金额从**我们自己写的**那句文案里解析（格式由本文件的 newapi_quota handler 生成，
+ * 稳定可控；解析不到就跳过，保持 manual 不动）。
+ *
+ * ⚠️ 幂等：更新时带 `AND reward_status='manual'` 条件，并发下只有一个能改成功；
+ *    已 granted 的不会被重复发。
+ */
+export async function retryPendingQuotaClaims(
+  env: Env
+): Promise<{ granted: number; skipped: number }> {
+  const rows = await env.DB.prepare(
+    `SELECT c.id, c.user_id, c.event_id, c.reward_detail, u.username
+       FROM event_claims c
+       JOIN users u ON u.id = c.user_id
+       JOIN newapi_accounts a ON a.user_id = c.user_id
+      WHERE c.reward_status = 'manual'
+        AND c.reward_type = 'newapi_quota'
+        AND c.reward_detail LIKE '%未开通 AI 中转站%'
+      LIMIT 50`
+  ).all<{
+    id: string
+    user_id: string
+    event_id: string
+    reward_detail: string
+    username: string
+  }>()
+
+  let granted = 0
+  let skipped = 0
+  for (const row of rows.results ?? []) {
+    const m = /无法自动发放\s*(\d+(?:\.\d+)?)\s*钱包余额/.exec(row.reward_detail ?? "")
+    const amount = m ? Number(m[1]) : NaN
+    if (!Number.isFinite(amount) || amount <= 0) {
+      skipped++
+      continue
+    }
+    try {
+      const res = await REWARD_HANDLERS.newapi_quota({
+        env,
+        userId: row.user_id,
+        username: row.username,
+        params: { amount },
+        eventId: row.event_id,
+      })
+      if (res.status === "granted") {
+        // 带上状态条件，避免和别的路径（人工发放）重复发
+        const upd = await env.DB.prepare(
+          `UPDATE event_claims SET reward_status = 'granted', reward_detail = ?
+            WHERE id = ? AND reward_status = 'manual'`
+        )
+          .bind(res.detail, row.id)
+          .run()
+        if ((upd.meta?.changes ?? 0) > 0) granted++
+        else skipped++
+      } else {
+        skipped++
+        await env.DB.prepare(
+          "UPDATE event_claims SET reward_detail = ? WHERE id = ? AND reward_status = 'manual'"
+        )
+          .bind(res.detail, row.id)
+          .run()
+      }
+    } catch (err) {
+      skipped++
+      console.error("自动补发额度奖励失败:", row.id, err)
+    }
+  }
+  return { granted, skipped }
+}
