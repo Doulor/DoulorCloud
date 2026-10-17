@@ -4319,6 +4319,8 @@ export const en: Record<MessageKey, string> = {
   "don.q2.importOk": "Import finished: {total} account(s) in file, {n} bound",
   "don.q2.importLimit":
     "{n} account(s) were not bound because they exceed your binding limit — remove some old bindings and import again",
+  "don.q2.importRejected":
+    "{n} account(s) failed upstream verification — no permissions or points were granted for them",
   "don.q2.importFailed": "Import failed — please check the file format",
   "adm.wbInvalidScan": "Scan invalid accounts",
   "adm.wbInvalidNotify": "notify & revoke",
@@ -4339,6 +4341,8 @@ export const en: Record<MessageKey, string> = {
   "don.wb.importOk": "Import finished: {total} account(s) in file, {n} bound",
   "don.wb.importLimit":
     "{n} account(s) were not bound because they exceed your binding limit — remove some old bindings and import again",
+  "don.wb.importRejected":
+    "{n} account(s) failed upstream verification — no permissions or points were granted for them",
   "don.wb.importFailed": "Import failed — please check the file format",
   "don.intro.title": "Limited resources, opened as needed",
   "don.intro.desc":

@@ -387,15 +387,30 @@ export async function deleteSubdomain(env: Env, request: Request, id: string): P
   // 留下的话这个域名会被 M14a/M14b 的互斥检查永久占用。
   const ids = [...toDelete]
   const placeholders = ids.map(() => "?").join(",")
+  // 🔴 2026-10-17（渗透报告跟进）：`lab_project_domains` 也按 fqdn 记着绑定，
+  // 而且**对 subdomains 没有外键**（它存的是 fqdn 字符串，不是 subdomain_id）。
+  // 不清理的话会出现 Content Spoofing：用户删掉子域后作品绑定仍然在出内容，
+  // 等这个 host 被**别人**重新注册，旧作品就以别人的域名继续对外 ——
+  // 与设置页关掉显示的语义完全相反。所以和 profiles / storage_prefixes 一起清。
+  const fqdns = ids.map((x) => byId.get(x)?.fqdn).filter((x): x is string => Boolean(x))
+  const fqdnPlaceholders = fqdns.map(() => "?").join(",")
   if (ids.length > 0) {
-    await env.DB.batch([
+    const statements = [
       env.DB.prepare(
         `UPDATE profiles SET fqdn = NULL, subdomain_id = NULL WHERE subdomain_id IN (${placeholders})`
       ).bind(...ids),
       env.DB.prepare(
         `DELETE FROM storage_prefixes WHERE subdomain_id IN (${placeholders})`
       ).bind(...ids),
-    ])
+    ]
+    if (fqdns.length > 0) {
+      statements.push(
+        env.DB.prepare(
+          `DELETE FROM lab_project_domains WHERE fqdn IN (${fqdnPlaceholders})`
+        ).bind(...fqdns)
+      )
+    }
+    await env.DB.batch(statements)
   }
 
   // 删父行即可级联删除后代（parent_id 上有 ON DELETE CASCADE）

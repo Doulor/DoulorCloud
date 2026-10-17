@@ -158,21 +158,34 @@ async function seedNode(over: Partial<{ panelPort: number | null; panelSecret: s
 
 /** 造一条订阅 */
 async function seedSub(nodeId: string, user: string, token: string, ports: number[],
-                       over: Partial<{ status: string; expiresAt: string }> = {}) {
+                       over: Partial<{ status: string; expiresAt: string; userId: string }> = {}) {
   const id = uuid()
   const now = new Date().toISOString()
   const expires = over.expiresAt ?? new Date(Date.now() + 7 * 86400_000).toISOString()
-  const owner = await makeUser()
+  // 默认自己造一个 active 的用户；要测「被禁用的用户」就传 userId 进来
+  const ownerId = over.userId ?? (await makeUser()).id
   await env.DB.prepare(
     `INSERT INTO frp_subscriptions
        (id, user_id, node_id, plan_id, frp_user, frp_token, ports, status,
         started_at, expires_at, auto_renew, price_points, sync_state, created_at, updated_at)
      VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 0, 0, 'pending', ?, ?)`
   )
-    .bind(id, owner.id, nodeId, user, token, JSON.stringify(ports), over.status ?? "active",
+    .bind(id, ownerId, nodeId, user, token, JSON.stringify(ports), over.status ?? "active",
           now, expires, now, now)
     .run()
   return id
+}
+
+/**
+ * 直接改 `users.status`（不走管理端接口）。
+ *
+ * 这条路径要证明的是「推送侧算期望状态时会看用户状态」，与「谁改的状态」无关 ——
+ * 用 SQL 改正好模拟管理员改状态、申诉自动解封、或别的代码路径改状态。
+ */
+async function setUserStatus(userId: string, status: string): Promise<void> {
+  await env.DB.prepare(`UPDATE users SET status = ?, updated_at = ? WHERE id = ?`)
+    .bind(status, new Date().toISOString(), userId)
+    .run()
 }
 
 beforeEach(() => {
@@ -341,5 +354,53 @@ describe("推送到捐献节点面板", () => {
       `SELECT COUNT(*) AS n FROM frp_nodes WHERE panel_port IS NULL`
     ).first<{ n: number }>()
     expect(badNode!.n).toBeGreaterThanOrEqual(1)
+  })
+
+  // ------------------------------------------- 被禁用用户必须同步停用（2026-10-15）
+  //
+  // 与 agent 拉取那条路径是**同一个 bug 的两个入口**：这里以前也只看
+  // frp_subscriptions.status + expires_at。捐献节点没有 agent，全靠这一次推送，
+  // 所以这里漏了就等于「在自己那台机器上修好、在捐献节点上照旧能连」。
+  // 判定口径见 frp-agent.ts 的 isActiveUser（users.status 只有 active/suspended）。
+
+  it("🔴 用户 suspended（订阅 active 未到期）→ 推给面板的是 enable=false", async () => {
+    const nodeId = await seedNode()
+    const owner = await makeUser()
+    await seedSub(nodeId, "DC_banned01", "tokenbanned00000", [10011], { userId: owner.id })
+    await setUserStatus(owner.id, "suspended")
+
+    const r = await pushNodeState(env as never, nodeId)
+    expect(r.ok).toBe(true)
+
+    const put = captured.find((c) => c.method === "PUT")!
+    const body = JSON.parse(put.body)
+    expect(body.enable).toBe(false)
+    // 面板 comment 要能看出被停用的原因（不是过期）
+    expect(String(body.comment)).toContain("已停用")
+  })
+
+  it("回归：用户 active 时推送仍是 enable=true", async () => {
+    const nodeId = await seedNode()
+    const owner = await makeUser()
+    await seedSub(nodeId, "DC_normal01", "tokennormal00000", [10012], { userId: owner.id })
+    await setUserStatus(owner.id, "active")
+
+    await pushNodeState(env as never, nodeId)
+    const put = captured.find((c) => c.method === "PUT")!
+    expect(JSON.parse(put.body).enable).toBe(true)
+  })
+
+  it("用户恢复 active 后重新推送即变回 enable=true（自愈，不靠人工）", async () => {
+    const nodeId = await seedNode()
+    const owner = await makeUser()
+    await seedSub(nodeId, "DC_heal0001", "tokenheal0000000", [10013], { userId: owner.id })
+
+    await setUserStatus(owner.id, "suspended")
+    await pushNodeState(env as never, nodeId)
+    expect(JSON.parse(captured.filter((c) => c.method === "PUT").pop()!.body).enable).toBe(false)
+
+    await setUserStatus(owner.id, "active")
+    await pushNodeState(env as never, nodeId)
+    expect(JSON.parse(captured.filter((c) => c.method === "PUT").pop()!.body).enable).toBe(true)
   })
 })

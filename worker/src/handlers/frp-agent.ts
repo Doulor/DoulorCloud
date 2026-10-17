@@ -59,6 +59,57 @@ interface SubscriptionRow {
   ports: string
   status: string
   expires_at: string
+  /** 归属用户的账号状态（`users.status`）。LEFT JOIN 不到用户行时为 null */
+  user_status: string | null
+}
+
+/**
+ * 平台里「用户可正常使用」的**唯一**合法值就是 `'active'`（依据见下）。
+ *
+ * 🔴 2026-10-15 修：以前这里算「期望状态」只看 `frp_subscriptions.status` 与
+ * `expires_at`，**完全没看 `users.status`** —— 站长把 `wei` 改成 `suspended` 之后，
+ * 他的 frp 隧道照旧在跑（报障时的线上状态：users.status='suspended'，那条订阅
+ * 还是 active 且未到期；复查时该行已被人手工改成 status='disabled'，但那只是
+ * 临时处置，机制上的漏洞不变）。真实访问控制在 frps + 面板那一层，D1 的期望状态
+ * 同步是**唯一**的传导机制，所以判定必须落在这里。
+ *
+ * 为什么**不**改成「在封禁接口里顺手把 frp_subscriptions 也停掉」：
+ *   那只是堵住一个入口。之后管理员手动改 `frp_subscriptions.status`、用户续期
+ *   （`renewRental` 会把 status 写回 active）、或任何新写的代码路径，都会把隧道
+ *   重新激活；而「禁用用户」这个动作与「面板该不该放行」之间就又多了一条需要
+ *   维护的隐式约定。只要判定在**算期望状态时**成立，上面所有路径都自动正确，
+ *   用户被解封后也会在下一个同步周期自动恢复（自愈，不需要管理员再操作一次）。
+ *
+ * 判定口径的依据（全部已核实）：
+ *   · `worker/schema.sql:13` —— `status TEXT NOT NULL DEFAULT 'active'  -- active | suspended`
+ *   · `handlers/admin.ts:972` —— 管理端只接受 `["active","suspended"]` 两个值
+ *   · `auth.ts:250` 的 `requireUser` —— `if (valid.status !== "active") throw 401`，
+ *     全站「正常用户」的判定就是 `=== 'active'`
+ *   · 线上 D1 实测（2026-10-15）：
+ *     `SELECT status, COUNT(*) AS n FROM users GROUP BY status`
+ *     → 只有 `active`(1332) 与 `suspended`(126)，**没有** banned/disabled/deleted
+ * 所以这里写成「必须等于 active」而不是「排除某几个值」：将来真加了新状态，
+ * 默认是**停用**（fail-closed），不会因为漏写一个值就漏放行。
+ */
+function isActiveUser(userStatus: string | null | undefined): boolean {
+  return userStatus === "active"
+}
+
+/**
+ * 这条租约现在该不该对面板 `enable=true`。
+ *
+ * ⚠️ 捐献节点的推送口径（`handlers/frp-node-push.ts` 的 `pushNodeState`）是这份逻辑的
+ * **孪生实现**，两边必须完全一致：一个走拉、一个走推，任何一边漏了用户状态，
+ * 那条路径上的被禁用户就还能连。改这里记得同步改那边。
+ */
+function isSubscriptionLive(row: SubscriptionRow, now: number): boolean {
+  const expiresAt = Date.parse(row.expires_at)
+  return (
+    isActiveUser(row.user_status) &&
+    (row.status === "active" || row.status === "pending") &&
+    Number.isFinite(expiresAt) &&
+    expiresAt > now
+  )
 }
 
 export interface DesiredUser {
@@ -291,11 +342,18 @@ export async function getFrpAgentDesired(env: Env, request: Request): Promise<Re
   // 报告 #28：验签用的节点必须就是这次要读的节点（否则拿 A 的密钥能读 B 的账号表）
   assertSameNode(auth, node.id)
 
+  // ⚠️ 必须带 `users.status`（2026-10-15，见 isActiveUser 的注释）：
+  //   查询里以前只有 frp_subscriptions 一张表，被禁用户的期望状态就永远是"放行"。
+  // 用 LEFT JOIN 而不是 INNER JOIN：用户行万一缺失（历史脏数据/删号残留），
+  // 租约仍要出现在下发列表里 → `enable=false`（停用），而不是从列表里消失
+  // （消失会让 agent 认为「这个账号不归我们管了」，反而与 prune 的语义打架）。
   const { results } = await env.DB.prepare(
-    `SELECT id, user_id, node_id, frp_user, frp_token, ports, status, expires_at
-       FROM frp_subscriptions
-      WHERE node_id = ?
-      ORDER BY frp_user ASC`
+    `SELECT s.id, s.user_id, s.node_id, s.frp_user, s.frp_token, s.ports, s.status, s.expires_at,
+            u.status AS user_status
+       FROM frp_subscriptions s
+       LEFT JOIN users u ON u.id = s.user_id
+      WHERE s.node_id = ?
+      ORDER BY s.frp_user ASC`
   )
     .bind(node.id)
     .all<SubscriptionRow>()
@@ -305,23 +363,27 @@ export async function getFrpAgentDesired(env: Env, request: Request): Promise<Re
 
   const users: DesiredUser[] = rows.map((row) => {
     const expiresAt = Date.parse(row.expires_at)
-    // 只有 active 且未到期才允许连接。pending（刚下单、等待首次同步）先放行，
-    // 否则用户付款后要等两轮同步才能连上；真正的拦截在过期判断上。
-    const live =
-      (row.status === "active" || row.status === "pending") &&
-      Number.isFinite(expiresAt) &&
-      expiresAt > now
+    // 只有「用户正常 + 订阅 active/pending + 未到期」才允许连接。
+    // pending（刚下单、等待首次同步）先放行，否则用户付款后要等两轮同步才能连上；
+    // 真正的拦截在过期判断与用户状态判断上。
+    const live = isSubscriptionLive(row, now)
 
     const expDate = Number.isFinite(expiresAt)
       ? new Date(expiresAt).toISOString().slice(0, 10)
       : "unknown"
 
+    // 面板的 comment 是给人看的（管理员过去就是在这里手写到期日），
+    // 所以这里也写成可读文本，便于以后直接看面板时一眼认出来。
+    // 用户被停用时要**明确写出原因** —— 否则面板上只会看到一条"到期 2026-11-15
+    // 却连不上"的账号，没人知道是账号被封了（这正是这次 bug 的现场）。
+    const comment = isActiveUser(row.user_status)
+      ? `DoulorCloud | ${row.status} | 到期 ${expDate}`
+      : `DoulorCloud | 用户${row.user_status ?? "缺失"}（已停用） | 到期 ${expDate}`
+
     return {
       user: row.frp_user,
       token: row.frp_token,
-      // 面板的 comment 是给人看的（管理员过去就是在这里手写到期日），
-      // 所以这里也写成可读文本，便于以后直接看面板时一眼认出来。
-      comment: `DoulorCloud | ${row.status} | 到期 ${expDate}`,
+      comment,
       enable: live,
       ports: parsePorts(row.ports),
     }

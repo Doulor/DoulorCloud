@@ -38,6 +38,36 @@ interface SubscriptionRow {
   ports: string
   status: string
   expires_at: string
+  /** 归属用户的账号状态（`users.status`）。LEFT JOIN 不到用户行时为 null */
+  user_status: string | null
+}
+
+/**
+ * 这条租约现在该不该对面板 `enable=true`。
+ *
+ * 🔴 2026-10-15 修：以前这里和 `handlers/frp-agent.ts` 的 `getFrpAgentDesired` 一样，
+ * 只看 `frp_subscriptions.status` 与 `expires_at`，**没看 `users.status`** ——
+ * 于是被禁用（`users.status='suspended'`）的用户在捐献节点上照样能连。
+ * 两条路径（自己那台服务器走 agent 拉、捐献节点走这里推）**必须同口径**：
+ * 只修一边，另一边就是活的漏洞。
+ *
+ * 判定口径依据详见 `frp-agent.ts` 里 `isActiveUser` 的注释（schema 注释 + 管理端
+ * 白名单 + requireUser + 线上 D1 实测只有 active/suspended 两种值）。
+ * 这里刻意写成「必须等于 active」（fail-closed）而不是「排除某几个值」。
+ */
+function isActiveUser(userStatus: string | null | undefined): boolean {
+  return userStatus === "active"
+}
+
+/** 与 `frp-agent.ts` 的 `isSubscriptionLive` 逐字同口径（改一处就要改另一处） */
+function isSubscriptionLive(row: SubscriptionRow, now: number): boolean {
+  const expires = Date.parse(row.expires_at)
+  return (
+    isActiveUser(row.user_status) &&
+    (row.status === "active" || row.status === "pending") &&
+    Number.isFinite(expires) &&
+    expires > now
+  )
 }
 
 export interface PushResult {
@@ -133,19 +163,24 @@ export async function pushNodeState(env: Env, nodeId: string): Promise<PushResul
   const secret = node.panel_secret
   const now = Date.now()
 
+  // ⚠️ 带 `users.status`（2026-10-15，见 isActiveUser 的注释）：被禁用的用户必须在这里
+  //   就被算成 `enable=false`，否则"禁用"只挡住了网页登录，隧道照旧通 —— 那是本次的 bug。
+  // 用 LEFT JOIN：用户行缺失时租约仍要推过去（enable=false），而不是不推
+  // （不推会被后面的删除循环当成"面板上多余的账号"直接删掉，等于绕过了停用/删号的语义）。
   const rows = await env.DB.prepare(
-    `SELECT frp_user, frp_token, ports, status, expires_at
-       FROM frp_subscriptions WHERE node_id = ?`
+    `SELECT s.frp_user, s.frp_token, s.ports, s.status, s.expires_at,
+            u.status AS user_status
+       FROM frp_subscriptions s
+       LEFT JOIN users u ON u.id = s.user_id
+      WHERE s.node_id = ?`
   )
     .bind(nodeId)
     .all<SubscriptionRow>()
 
   const subs = rows.results ?? []
-  const desired: Record<string, { token: string; ports: number[]; enable: boolean }> = {}
+  const desired: Record<string, { token: string; ports: number[]; enable: boolean; comment: string }> = {}
   for (const s of subs) {
-    const expires = Date.parse(s.expires_at)
-    const live = (s.status === "active" || s.status === "pending") &&
-      Number.isFinite(expires) && expires > now
+    const live = isSubscriptionLive(s, now)
     let ports: number[] = []
     try {
       const parsed = JSON.parse(s.ports)
@@ -153,7 +188,15 @@ export async function pushNodeState(env: Env, nodeId: string): Promise<PushResul
     } catch {
       /* 端口快照坏掉时按空处理，宁可少授权也不多授权 */
     }
-    desired[s.frp_user] = { token: s.frp_token, ports, enable: live }
+    // comment 也要能看出「为什么被停用」—— 与 agent 拉取口径保持一致，
+    // 否则在面板上一条 enable=false 的账号看不出是过期还是被封了。
+    const expDate = Number.isFinite(Date.parse(s.expires_at))
+      ? new Date(Date.parse(s.expires_at)).toISOString().slice(0, 10)
+      : "unknown"
+    const comment = isActiveUser(s.user_status)
+      ? `DoulorCloud | ${s.status} | 到期 ${expDate}`
+      : `DoulorCloud | 用户${s.user_status ?? "缺失"}（已停用） | 到期 ${expDate}`
+    desired[s.frp_user] = { token: s.frp_token, ports, enable: live, comment }
   }
 
   let pushed = 0
@@ -184,7 +227,7 @@ export async function pushNodeState(env: Env, nodeId: string): Promise<PushResul
         token: want.token,
         ports: want.ports,
         enable: want.enable,
-        comment: "DoulorCloud",
+        comment: want.comment,
       })
       if (res.status === 200) pushed++
       else errors.push(`${user} HTTP ${res.status} ${res.text.slice(0, 120)}`)

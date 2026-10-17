@@ -32,6 +32,7 @@ import {
   probeWb2ApiCredential,
   saveWb2ApiKey,
   Wb2StateGoneError,
+  Wb2UnauthorizedError,
   wb2ImportCockpit,
   wb2Overview,
   wb2Poll,
@@ -564,11 +565,16 @@ async function completeBinding(
 // ---------------------------------------------------------------------------
 
 /**
- * 建一条 wb 反代账号绑定（**登录成功**与**JSON 文件导入**两条路共用）。
+ * 建一条 wb 反代账号绑定（**登录成功**这条路的写入实现）。
  *
  * 为什么要抽出来：绑定不只是插一行 —— 它连带「判断该不该批 ai 权限 → 原子写回
  * permissions → 审计 → 捐献/邀请奖励 → 发通知邮件」。复制一份必然分家
  * （改一边漏一边），与 `public-api.ts` 里 `runAs` 的教训同源。
+ *
+ * ⚠️ 2026-10-17 起，「JSON 文件导入」**不再**复用它（见 `importWb2ApiAccounts`）：
+ *    导入必须"先核验后发放"、且要批量写 + 只发一封邮件、只发一份积分，逐条调用
+ *    这个函数做不到。两处的**收尾口径必须一致**（ai 判定 / 审计 / 通知撤回 / 积分 /
+ *    邀请奖励 / 邮件），所以：**改这里的收尾逻辑，必须同步改导入路径那一份。**
  *
  * @param opts.acknowledgedIp 免责声明的来源 IP（留痕，证明用户被告知账号进共享池）
  * @param opts.isNewToPool    该账号在本次操作**之前**是否已在网关池里。
@@ -680,15 +686,129 @@ export async function createWb2Binding(
   return { id, aiGranted }
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * JSON 导入的几条硬规则（2026-10-17，安全审计 #13 / #53 修复 —— 与 qoder2api 同口径）
+ * ---------------------------------------------------------------------------
+ *
+ * 🔴 修复前的洞：上传 JSON 里的 `uid` 被直接当成「已入池的新账号」，
+ *    对每个 uid 调用 `createWb2Binding(..., { isNewToPool: true })` ——
+ *    而「是否真的进了网关池」**从未被核实过一次**（网关的导入接口只回计数、
+ *    不回 uid 列表，老实现拿不到也就不查了）。
+ *    于是 `[{"uid":"随便编一个"}]` 就能换到：`ai` 权限 + 一次捐献积分（kind=workbuddy）
+ *    + 一个绑定位（外加邀请奖励），再顺着 `/api/dev/bind` → `/api/dev/subscription`
+ *    → `/api/dev/key` 白嫖真实计费模型（报告 #13 → #11 那条变现链）。
+ *
+ * ⚠️ 与 qoder2api 的**唯一**差异在"怎么核实"：那边的池列表是
+ *    `GET /accounts?realm=cn|intl`（两套区各拉一次）；wb 这边的池列表是
+ *    `GET /panel/api/overview` —— 一次拿全池（含 disabled 标记），没有分页参数，
+ *    cn/global 只是每个账号自己的 `realm` 字段、不是查询维度。
+ *    也就是说这里**一次上游请求**就能完成全批核验，代价与 uid 数量无关。
+ *
+ * 现在的顺序（**发权益必须在校验之后**，因为发权限/发积分是不可逆副作用）：
+ *   1. 本地解析 uid（形状校验 + 去重）→ 2. 本地查既有绑定（跳过/复活/名额）
+ *   → 3. 只把候选行送去网关导入 → 4. **拉一次池概览逐 uid 核实存在性**
+ *   → 5. 核验通过的才建绑定 → 6. 再写 ai 权限 → 7. 最后发积分。
+ *
+ * 两个显式取舍：
+ *   · 上游不可用 ⇒ **fail-closed**（整批拒绝，不建绑定、不发任何东西）；
+ *   · 部分失败 ⇒ **部分成功**（通过的发，失败的逐条列在 `rejected` 里）。
+ *
+ * ⚠️ 残余边界（诚实记录，与 qoder2api 一样）：池概览的"存在"是**存在性**背书，
+ *    不是**归属**背书 —— 归属只有 OAuth 登录（poll）那条路才拿得到。若网关的
+ *    `/panel/api/import/cockpit` 对凭据不做任何自校验就入池，伪造行仍可能进池
+ *    （进而被本函数认成"存在"）。这一层只能在网关侧关掉，本站的缓解手段是
+ *    管理端的号池观测（`adminGetPool` / `scanInvalidWb2Bindings`）与下面的 disabled 判定。
+ */
+
+/**
+ * 单次导入最多处理的账号数（与 qoder2api 的 200 对齐）。
+ *
+ * 不设上限时，一个 5 MB 的 JSON 能塞几万个 uid，建绑定就是几万次 D1 往返，
+ * 用户看到的是「500 服务器内部错误」而不是一句可读的提示。200 覆盖正常导出，
+ * 也能在一两个 `DB.batch` 轮次内跑完。
+ */
+const MAX_IMPORT_ACCOUNTS = 200
+
+/** D1 单条语句的绑定参数上限约 100 ⇒ `IN (...)` 查询按 90 分片 */
+const SQL_IN_CHUNK = 90
+
+/** 批量写绑定/复活时的单批语句数（一个 batch = 一次 D1 往返） */
+const DB_BATCH_CHUNK = 25
+
+/**
+ * 账号标识的**形状**校验。
+ *
+ * 这不是安全边界（真正的边界是下面的上游池核实），只是一道便宜的本地闸门：
+ * 把空串、控制字符、超长串这类明显不是账号的输入挡在 D1 与共享池之外 ——
+ * 这类行进了共享池会污染池子，也会让审计日志不可读。
+ * （cockpit 的 uid 是 UUID 形态，字符集与长度都落在这个范围内。）
+ */
+const UID_PATTERN = /^[A-Za-z0-9._:@+-]{1,128}$/
+
+/** 核验不通过 / 无法绑定的账号（逐条回给前端，便于用户自己排查） */
+interface RejectedAccount {
+  uid: string
+  reason: string
+}
+
+/** 池概览里我们核验时真正关心的字段（其余字段不用，别把上游全量结构带进来） */
+interface PoolAccountLite {
+  uid: string
+  nickname?: string
+  realm?: string
+  disabled?: boolean
+}
+
+/**
+ * 一次性把本批 uid 在本地的既有绑定读出来（**含墓碑**）。
+ *
+ * 一次 `IN (...)` 分片查询，而不是每个 uid 单查一次（N 次 D1 往返）。
+ * 必须含 `status='removed'` 的行：uid 上有唯一索引，墓碑还在时直接 INSERT 会撞索引
+ * 变成 500；正确做法是与 poll 路径一样「复活墓碑」。
+ */
+async function loadWb2BindingsByUid(
+  env: Env,
+  uids: string[]
+): Promise<Map<string, { id: string; user_id: string; status: string }>> {
+  const out = new Map<string, { id: string; user_id: string; status: string }>()
+  for (let i = 0; i < uids.length; i += SQL_IN_CHUNK) {
+    const chunk = uids.slice(i, i + SQL_IN_CHUNK)
+    const rows = await env.DB.prepare(
+      `SELECT id, user_id, uid, status FROM wb2api_bindings
+        WHERE uid IN (${chunk.map(() => "?").join(",")})`
+    )
+      .bind(...chunk)
+      .all<{ id: string; user_id: string; uid: string; status: string }>()
+    for (const r of rows.results ?? []) out.set(r.uid, r)
+  }
+  return out
+}
+
+/** 分批执行写语句：一个 batch = 一次往返，比逐条 await 快一个量级 */
+async function runInBatches(env: Env, statements: D1PreparedStatement[]): Promise<void> {
+  for (let i = 0; i < statements.length; i += DB_BATCH_CHUNK) {
+    await env.DB.batch(statements.slice(i, i + DB_BATCH_CHUNK))
+  }
+}
+
 /**
  * POST /api/wb2api/import —— 上传 cockpit 导出的 JSON 文件，批量导入账号并绑定。
  *
  * 与「登录绑定」的区别：账号不是走授权流程进来的，而是用户手里已有的凭据文件。
- * 导入成功后**复用 `createWb2Binding`** 建绑定 + 发放权限 + 奖励 —— 口径与登录完全一致。
+ * 因为**文件内容是用户自述**、没有任何上游背书，所以必须去网关池核实（见上面的段注释）。
  *
  * ⚠️ 网关的导入接口**不返回导入后的 uid 列表**（只有总/成功/跳过计数），
- *    所以我们自己从上传的 JSON 里解析 uid（cockpit 格式的字段名就是 `uid`）。
+ *    所以"核实"只能靠随后拉一次池概览（`GET /panel/api/overview`）做 uid→账号映射。
  *    解析不出任何一个 uid 就整体失败，绝不建「不知道绑了谁」的空绑定。
+ *
+ * ⚠️ 收尾（ai 权限 / 通知撤回 / 审计 / 积分 / 邀请奖励 / 邮件）这里是**批量版**，
+ *    与 `createWb2Binding`（登录路径）是同一套口径 —— **改一处必须改两处**。
+ *    没有直接复用 `createWb2Binding` 的原因有两个：① 它按单条绑定做完全套副作用
+ *    （含一封邮件），一次导入 200 个账号就是 200 个 D1 事务 + 200 封出站邮件，
+ *    Worker 的子请求与时长都扛不住；② 它的奖励幂等键是**新 uuid**（`wb2api:<绑定id>`），
+ *    复用它就会让「一次导入 N 个账号发 N 份捐献积分」，与 qoder2api 的
+ *    "一次导入算一次捐献"口径不一致。
  */
 export async function importWb2ApiAccounts(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
@@ -726,72 +846,317 @@ export async function importWb2ApiAccounts(env: Env, request: Request): Promise<
     )
   }
 
-  // 自己解析 uid（网关不回传）；顺便算出去重后的账号数
-  const uids = Array.from(
-    new Set(
-      (parsed as Record<string, unknown>[])
-        .map((r) => String(r?.uid ?? "").trim())
-        .filter((u) => u.length > 0)
-    )
-  )
+  // ---- 1) 解析出「想绑定」的账号标识（形状校验 + 去重，保留原始行） ----
+  // 保留原始行是必须的：送去网关导入时要按原样回传凭据字段，不能只发 uid。
+  const rowByUid = new Map<string, Record<string, unknown>>()
+  const rejected: RejectedAccount[] = []
+  for (const r of parsed as unknown[]) {
+    const row = (r ?? {}) as Record<string, unknown>
+    const uid = String(row.uid ?? "").trim()
+    if (!uid) continue // 没有标识的行既无法校验也无法绑定
+    if (!UID_PATTERN.test(uid)) {
+      rejected.push({ uid: uid.slice(0, 64), reason: "账号标识格式非法" })
+      continue
+    }
+    if (!rowByUid.has(uid)) rowByUid.set(uid, row)
+  }
+  const uids = Array.from(rowByUid.keys())
   if (uids.length === 0) {
     throw new ApiError(400, "文件里没有可用的账号（缺少 uid 字段）", "INVALID_JSON")
   }
+  if (uids.length > MAX_IMPORT_ACCOUNTS) {
+    // 早于任何上游调用就拒：超限的请求不该在网关上留下任何痕迹
+    throw new ApiError(
+      400,
+      `一次最多导入 ${MAX_IMPORT_ACCOUNTS} 个账号（本次 ${uids.length} 个），请分批上传`,
+      "IMPORT_TOO_LARGE"
+    )
+  }
 
-  // 转发给网关（multipart 由客户端封装按契约组好）
-  // ⚠️ 上游失败会在这里抛 ApiError（含可读文案），交给全局兜底
-  let upstream: Wb2ImportResult = {}
-  upstream = await wb2ImportCockpit(env, raw)
-
-  // 名额：一次最多只能补到上限，超出的部分明确告诉用户，而不是静默丢弃
+  const now = new Date().toISOString()
+  const ackIp = clientIp(request)
   const used = await activeBindingCount(env, user.id)
-  const room = Math.max(0, limit - used)
+  let room = Math.max(0, limit - used)
 
-  const existing = await env.DB.prepare(
-    "SELECT uid FROM wb2api_bindings WHERE user_id = ? AND status = 'active'"
-  )
-    .bind(user.id)
-    .all<{ uid: string }>()
-  const mine = new Set((existing.results ?? []).map((r) => r.uid))
+  // 与 createWb2Binding 同一口径：只有「本次真的把 ai 从无变有」才记 granted=1
+  const aiGranted =
+    (await getSettingBool(env, "donation_grant_wb2api")) &&
+    !parsePermissions(user.permissions).ai
+  let granted = false
 
-  let bound = 0
-  const skippedByLimit: string[] = []
+  // ---- 2) 本地分类：已在名下 / 自己的墓碑 / 别人的 / 超名额 ----
+  const existingByUid = await loadWb2BindingsByUid(env, uids)
+
   const alreadyMine: string[] = []
+  const skippedByLimit: string[] = []
+  /**
+   * 待上游核实的候选：`reviveId` 非空 = 复活自己的墓碑。墓碑也要过一遍存在性核验，
+   * 口径与新建统一（不然"先删绑定、再伪造 uid 复活"就是另一条绕过路径）。
+   */
+  const candidates: { uid: string; reviveId: string | null }[] = []
 
   for (const uid of uids) {
-    if (mine.has(uid)) {
-      alreadyMine.push(uid)
+    const existing = existingByUid.get(uid)
+    if (existing && existing.user_id !== user.id) {
+      // 网关账号 uid 全局唯一，被别人绑过就绝不能再绑一次（与 poll 的冲突判定同口径）
+      rejected.push({ uid, reason: "该账号已被其他用户绑定" })
       continue
     }
-    if (bound >= room) {
+    if (existing) {
+      if (existing.status === "active") {
+        alreadyMine.push(uid)
+        continue
+      }
+      candidates.push({ uid, reviveId: existing.id })
+      continue
+    }
+    if (room <= 0) {
       skippedByLimit.push(uid)
       continue
     }
-    // 昵称尽量从上传的文件里取（网关不回传）
-    const row = (parsed as Record<string, unknown>[]).find(
-      (r) => String(r?.uid ?? "").trim() === uid
-    )
-    const nickname = String(row?.nickname ?? row?.email ?? "").trim() || null
-    // realm 由 domain 推断，与网关内的判定一致（workbuddy.ai 家族 → global）
-    const domain = String(row?.domain ?? "").toLowerCase()
-    const realm = domain.includes("workbuddy.ai") ? "global" : "cn"
-
-    await createWb2Binding(
-      env,
-      user,
-      { uid, nickname, realm },
-      // 导入的都是「用户自己带来的新账号」；已在本账号绑定过的上面已跳过
-      { acknowledgedIp: clientIp(request), isNewToPool: true }
-    )
-    bound++
+    candidates.push({ uid, reviveId: null })
+    // 名额先到先得地扣：宁少勿多 —— 不把超额的行塞进共享池。
+    // 核验失败的候选让出的名额不回填（回填要么多打一次上游，要么把逻辑绕成两轮，不值）。
+    room--
   }
 
+  // ---- 3) 只把候选行送去网关（别把整份文件塞进共享池） ----
+  // ⚠️ 这一步不产生任何本地权益：绑定、ai 权限、积分全部在后面核验通过之后才发生。
+  let upstream: Wb2ImportResult = {}
+  if (candidates.length > 0) {
+    try {
+      // 网关收 multipart 的 `file` 字段，内容仍是 JSON 文本；这里只序列化候选行，
+      // 所以"已被别人绑定 / 超名额 / 格式非法"的行**根本不会进共享池**。
+      upstream = await wb2ImportCockpit(
+        env,
+        JSON.stringify(candidates.map((c) => rowByUid.get(c.uid)))
+      )
+    } catch (err) {
+      // 密钥错这类「管理员可修」的错误保持原样下抛，文案更可操作
+      if (err instanceof Wb2UnauthorizedError) throw err
+      /**
+       * 🔴 fail-closed（默认且唯一分支）。
+       *
+       * 上游导入失败时**一个绑定都不建**。理由：此刻我们没有任何核验结果，
+       * 无法区分「真账号」与「伪造 uid」；而发 ai 权限、发积分都是不可逆副作用，
+       * 一旦放行就只能靠事后人工回收。反过来，拒绝对正常用户的代价只是
+       * 「稍后重导一次」—— 两害相权，宁可失败也不放行。
+       *
+       * 注意上游可能已经吃进去一部分（HTTP 超时也可能入库成功），所以这里
+       * 不假装状态干净：只保证**本站**没有因此产生任何绑定/权限/积分。
+       */
+      console.error("wb2api 导入调用失败，按 fail-closed 拒绝本次导入:", err)
+      throw new ApiError(
+        503,
+        "上游网关暂时不可用，本次导入已取消（未建绑定、未发放任何权限或积分），请稍后重试",
+        "WB2API_IMPORT_UNAVAILABLE"
+      )
+    }
+  }
+
+  // ---- 4) 向上游核实：这些 uid 是否真的在网关账号池里 ----
+  const verified = new Map<string, PoolAccountLite>()
+  if (candidates.length > 0) {
+    let pool: PoolAccountLite[]
+    try {
+      /**
+       * 批量策略：**一次概览拿全池**（`GET /panel/api/overview`，无分页、无 realm 维度），
+       * 代价是常数级、与 uid 数量无关；绝不逐个 uid 打一次上游 —— 那样 1000 个 uid
+       * 就是 1000 次请求，Worker 会先撞子请求/时长上限，同时把网关面板打成限流。
+       */
+      pool = (await wb2Overview(env)).accounts
+    } catch (err) {
+      // 同上：核验不了就不放行（fail-closed），而不是「查不到就当通过」。
+      console.error("wb2api 账号池概览拉取失败，按 fail-closed 拒绝本次导入:", err)
+      throw new ApiError(
+        503,
+        "无法向上游核实账号，本次导入已取消（未建绑定、未发放任何权限或积分），请稍后重试",
+        "WB2API_VERIFY_UNAVAILABLE"
+      )
+    }
+
+    const byUid = new Map(pool.map((a) => [a.uid, a]))
+    for (const c of candidates) {
+      const acc = byUid.get(c.uid)
+      if (!acc) {
+        // 上游不认这个 uid（伪造、或网关根本没接受这条导入）→ 不建绑定、不发权益
+        rejected.push({
+          uid: c.uid,
+          reason: "上游账号池里查无此账号（伪造或导入被上游拒绝）",
+        })
+        continue
+      }
+      if (acc.disabled === true) {
+        // 网关把「上游判定需要重新登录」的账号标成 disabled（如 11140 request illegal），
+        // 这种账号进池也没用，按拒收处理；用户重新登录一次即可恢复正常绑定。
+        rejected.push({ uid: c.uid, reason: "上游已禁用该账号（需重新登录后再绑定）" })
+        continue
+      }
+      // 注：`paused`（运维临时让位）只影响派发、不影响账号有效性，故照常通过 ——
+      // 与「disabled 才是账号坏了」这条网关语义保持一致。
+      verified.set(c.uid, acc)
+    }
+  }
+
+  // ---- 5) 核验通过的才落库（批量写，一次往返顶多条） ----
+  const statements: D1PreparedStatement[] = []
+  let newlyBound = 0
+  let revived = 0
+  /** 本次真正「新建」的第一个账号 uid —— 捐献积分的幂等键用它（下面有说明） */
+  let firstNewUid = ""
+
+  for (const c of candidates) {
+    const acc = verified.get(c.uid)
+    if (!acc) continue // 未通过核验：不建绑定、不发权限、不发积分
+    const row = rowByUid.get(c.uid) ?? {}
+
+    // 昵称优先用用户文件里的（更贴近本人习惯），其次用上游池里的
+    const nickname = String(row.nickname ?? row.email ?? "").trim() || acc.nickname || null
+
+    /**
+     * realm 由 domain 推断，与网关内的判定一致（workbuddy.ai 家族 → global）。
+     * 文件里没给 domain 时退回**池概览里该账号自带的 realm**（刚核实时拿到的事实，
+     * 比无条件猜 'cn' 准）；仍不可信则回 'cn'，与历史行为一致。
+     */
+    const domain = String(row.domain ?? "").toLowerCase()
+    const poolRealm = String(acc.realm ?? "").toLowerCase()
+    const realm = domain
+      ? domain.includes("workbuddy.ai")
+        ? "global"
+        : "cn"
+      : poolRealm === "global" || poolRealm === "cn"
+        ? poolRealm
+        : "cn"
+
+    if (c.reviveId) {
+      // 复活墓碑：不动 granted_ai_permission（那是历史事实），昵称缺省时保留原值。
+      // 与 poll 路径的「重复登录」同一处理：复活本身不算新贡献，不发奖励。
+      statements.push(
+        env.DB.prepare(
+          `UPDATE wb2api_bindings
+              SET status = 'active', removed_at = NULL, removed_by = NULL,
+                  nickname = COALESCE(?, nickname), realm = ?
+            WHERE id = ?`
+        ).bind(nickname, realm, c.reviveId)
+      )
+      revived++
+      continue
+    }
+
+    const grant = aiGranted && !granted
+    if (grant) granted = true
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO wb2api_bindings
+           (id, user_id, uid, nickname, realm, status, granted_ai_permission,
+            acknowledged_ip, created_at)
+         VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`
+      ).bind(uuid(), user.id, c.uid, nickname, realm, grant ? 1 : 0, ackIp, now)
+    )
+    newlyBound++
+    if (!firstNewUid) firstNewUid = c.uid
+  }
+  await runInBatches(env, statements)
+
+  const bound = newlyBound + revived
+
+  // ---- 6) 权限：核验通过并已落库之后才写，且只写一次 ----
+  // 逐条绑定各 UPDATE 一次 users 纯属白费 D1 往返（同一行的同一个值）。
+  if (granted) {
+    await env.DB.prepare(
+      `UPDATE users SET permissions = ${featurePermissionSql("ai", true)}, updated_at = ? WHERE id = ?`
+    )
+      .bind(now, user.id)
+      .run()
+  }
+
+  // ---- 7) 重新绑定成功 ⇒ 撤回「账号失效」通知，被暂时收回的权限自动还原 ----
+  // （站长要求：登录失效的账号，用户重新登录/重导原账号即可解锁；
+  //   与 createWb2Binding 里的同一调用同口径，只是这里整批调一次。）
+  if (bound > 0) {
+    await revokeInvalidWbNotices(env, user.id)
+  }
+
+  await audit(
+    env,
+    user.id,
+    "wb2api.import",
+    `通过 JSON 文件导入反代账号：核验通过 ${bound} 个` +
+      `（新建 ${newlyBound}、复活 ${revived}），拒绝 ${rejected.length} 个，` +
+      `超名额 ${skippedByLimit.length} 个，已是本人 ${alreadyMine.length} 个` +
+      (granted ? "（已解锁 AI 中转站权限）" : "")
+  )
+
+  /**
+   * ---- 8) 积分：最后发，且只在「真的新建了一条经核验的绑定」时发 ----
+   *
+   * · 复活自己的墓碑不算新贡献（这个号本来就在池里，删了再加回来不该再算一次捐献）；
+   * · 一个都没建成（全是重复/被拒/超名额）当然也不发；
+   * · 一次导入**只发一份**（幂等键 = 本次新建的第一个 uid）：
+   *   重复导入同一批账号时上面已经进了 alreadyMine，根本走不到这里，所以不会重复发分。
+   *
+   * ⚠️ 这与修复前的行为有意不同：老实现复用了 `createWb2Binding`，奖励幂等键是
+   *    每条绑定的新 uuid ⇒ 一次导入 N 个账号就发 N 份积分。现在与 qoder2api 对齐成
+   *    "一次导入算一次捐献"，同时这也让"批量导入刷分"失去意义。
+   */
+  if (newlyBound > 0 && firstNewUid) {
+    await grantDonationReward(env, {
+      userId: user.id,
+      kind: "workbuddy",
+      dedupKey: `wb2api:import:${firstNewUid}`,
+      detail: "WorkBuddy 反代账号捐献奖励（JSON 导入）",
+    })
+
+    // 邀请奖励：口径与 createWb2Binding 一致 —— 必须「真的从无到有解锁了 AI 权限」。
+    // `grantInviteReward` 本身按被邀请人去重，故整批调一次与逐条调效果相同。
+    if (granted) {
+      const planId = await getSettingNumber(env, "invite_reward_plan_id")
+      if (planId && planId > 0) {
+        await grantInviteReward(env, user, planId)
+      }
+    }
+  }
+
+  // 通知邮件：整批只发一封（老实现每条绑定一封，一次导入 200 个账号就是 200 封）。
+  // 失败不影响绑定结果 —— 权限已生效，只是少一封告知。
+  if (bound > 0) {
+    try {
+      const { text, html } = renderMail("反代账号绑定成功", [
+        `本次导入已绑定 ${bound} 个 WorkBuddy 账号（新建 ${newlyBound}、恢复 ${revived}）。`,
+        granted
+          ? "已为你解锁「AI 中转站」权限，可到该模块创建 API Key。"
+          : "你的「AI 中转站」权限此前已解锁，本次绑定不影响。",
+        "账号已加入共享池供其他用户使用；如需移除，请在捐献页撤销或联系管理员。",
+      ])
+      await sendMail(env, {
+        to: user.email,
+        subject: "【Doulor Cloud】反代账号绑定成功",
+        text,
+        html,
+      })
+    } catch (err) {
+      console.error("反代导入绑定通知邮件发送失败:", user.email, err)
+    }
+  }
+
+  /**
+   * 部分成功语义：**只对核验通过的发放，失败的逐条列出**，不整批回滚。
+   *
+   * 为什么不做全局事务/整批回滚：
+   *   · 发放（权限/积分）不可逆，顺序上已保证「核验在前、发放在后」，
+   *     整批回滚并不会让安全性更好，只会把「45 个真号被 5 个假号拖累」变成新问题；
+   *   · 上游导入本来就是部分语义（`imported/skipped/errors`）；
+   *   · 用户拿到 `rejected` 明细才知道该删哪几行、重传什么。
+   */
   return json({
     ok: true,
     total: uids.length,
     bound,
+    newlyBound,
+    revived,
     alreadyBound: alreadyMine,
     skippedByLimit,
+    rejected,
     limit,
     upstream: {
       total: upstream.total ?? null,

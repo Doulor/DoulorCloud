@@ -19,6 +19,7 @@
 import { describe, it, expect } from "vitest"
 import { env } from "cloudflare:workers"
 import { uuid } from "../src/crypto"
+import { applyPoints } from "../src/points"
 import { authRequest, fetchSelf, makeUser, type TestUser } from "./helpers"
 
 /** 每个用例独立节点，避免 D1 在用例间共享造成串扰 */
@@ -296,5 +297,200 @@ describe("账号命名与前缀边界", () => {
 
     expect(after?.frp_user).toBe(before?.frp_user)
     expect(after?.ports).toBe(before?.ports)
+  })
+})
+
+// ============================================================ 账号命名：DC_<用户名>
+//
+// 站长 2026-10-15 的要求原话：「已有用户不改了，以后新用户用新的」。
+// 所以这里钉住四件事：
+//   1. **新**租约的账号名 = `DC_<DoulorCloud 用户名>`（管理端开、用户自己买，两条路径都要）
+//   2. 用户名不合规时按兜底规则退回 `DC_<8 位随机>`（平台用户名允许 3 位、允许连字符，
+//      而 USER_PATTERN 只收 4~32 位纯字母数字 —— 174/1458 个用户名落在外面）
+//   3. **存量**租约续期后 `frp_user` 一个字都不变 —— 改名等于打断用户已经配好的隧道
+//      （他本地的 frpc 配置里写死了旧账号名）。这也是"不写迁移"的守护测试。
+//   4. 同一节点上的命名冲突（同一用户退掉再买）不能撞 `UNIQUE(node_id, frp_user)`
+//      —— 那会变成"扣完积分才 500"。
+describe("账号命名：新租约用 DC_<用户名>（2026-10-15）", () => {
+  /** 用户端购买要扣积分，先发点 */
+  async function grant(userId: string, amount: number): Promise<void> {
+    const res = await applyPoints(env, {
+      userId,
+      delta: amount,
+      reason: "admin",
+      detail: "测试发放",
+    })
+    expect(res.applied).toBe(true)
+  }
+
+  /** 管理员替某用户开一份租约，返回接口的响应体 */
+  async function adminCreate(
+    admin: TestUser,
+    opts: { userId: string; nodeId: string; planId: string }
+  ): Promise<{ status: number; body: { frpUser?: string; code?: string } }> {
+    return call<{ frpUser?: string; code?: string }>(admin, "/admin/frp/subscriptions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: opts.userId,
+        nodeId: opts.nodeId,
+        planId: opts.planId,
+        days: 7,
+        portCount: 1,
+      }),
+    })
+  }
+
+  it("管理端开租约：账号名 = DC_<用户名>", async () => {
+    const admin = await makeUser({ role: "superadmin" })
+    const nodeId = await seedNode()
+    const planId = await makePlan(admin, nodeId)
+    const owner = await makeUser({ username: "zhangsan01" })
+
+    const res = await adminCreate(admin, { userId: owner.id, nodeId, planId })
+    expect(res.status).toBe(200)
+    expect(res.body.frpUser).toBe("DC_zhangsan01")
+    // 落库的也得是这个名字（不是只在响应里好看）
+    const row = await env.DB.prepare(
+      `SELECT frp_user FROM frp_subscriptions WHERE frp_user = ?`
+    )
+      .bind("DC_zhangsan01")
+      .first<{ frp_user: string }>()
+    expect(row?.frp_user).toBe("DC_zhangsan01")
+  })
+
+  it("用户自己买：账号名同样是 DC_<用户名>（不是随机串）", async () => {
+    const admin = await makeUser({ role: "superadmin" })
+    const nodeId = await seedNode()
+    const planId = await makePlan(admin, nodeId)
+    const buyer = await makeUser({ username: "lisi2026" })
+    await grant(buyer.id, 200)
+
+    const res = await call<{ frpUser?: string }>(buyer, "/frp/rental/purchase", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ planId }),
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.frpUser).toBe("DC_lisi2026")
+  })
+
+  it("用户名不合规 → 退回 DC_<8 位随机> 兜底（3 位 / 带连字符 / 带下划线）", async () => {
+    const admin = await makeUser({ role: "superadmin" })
+    const nodeId = await seedNode()
+    const planId = await makePlan(admin, nodeId)
+
+    // 平台真实存在这三类：3 位用户名（现在仍可注册）、带连字符（合法）、
+    // 下划线（历史/测试数据里常见）—— 它们都过不了 USER_PATTERN
+    for (const username of ["ads", "foo-bar", "u_info01"]) {
+      const owner = await makeUser({ username })
+      const res = await adminCreate(admin, { userId: owner.id, nodeId, planId })
+      expect(res.status).toBe(200)
+      // 兜底形态与存量 9 份租约完全一致：DC_ + 8 位十六进制
+      expect(res.body.frpUser).toMatch(/^DC_[0-9a-f]{8}$/)
+      expect(res.body.frpUser).not.toBe(`DC_${username}`)
+    }
+  })
+
+  it("🔴 存量格式（DC_<随机>）的租约续期后 frp_user 一个字都不变", async () => {
+    const admin = await makeUser({ role: "superadmin" })
+    const nodeId = await seedNode()
+    const planId = await makePlan(admin, nodeId)
+    const owner = await makeUser({ username: "laoyonghu" })
+    await grant(owner.id, 200)
+
+    // 直接插一条"老格式"的存量租约（模拟站长已经发出去的 9 份）
+    const subId = `sub_${uuid().slice(0, 8)}`
+    const now = new Date()
+    const nowIso = now.toISOString()
+    const expires = new Date(now.getTime() + 20 * 86_400_000).toISOString()
+    await env.DB.prepare(
+      `INSERT INTO frp_subscriptions
+         (id, user_id, node_id, plan_id, frp_user, frp_token, ports, status,
+          started_at, expires_at, auto_renew, price_points, sync_state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'DC_3f9a01bc', 'legacytoken12345', '[31888]', 'active', ?, ?, 0, 100, 'synced', ?, ?)`
+    )
+      .bind(subId, owner.id, nodeId, planId, nowIso, expires, nowIso, nowIso)
+      .run()
+
+    const res = await call<{ expiresAt?: string; code?: string }>(owner, "/frp/rental/renew", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: subId }),
+    })
+    expect(res.status).toBe(200)
+
+    const row = await env.DB.prepare(
+      `SELECT frp_user, status, expires_at FROM frp_subscriptions WHERE id = ?`
+    )
+      .bind(subId)
+      .first<{ frp_user: string; status: string; expires_at: string }>()
+    // 续期只该动到期日与状态，**绝不能**"顺手升级成新格式"
+    expect(row?.frp_user).toBe("DC_3f9a01bc")
+    expect(row?.status).toBe("active")
+    expect(Date.parse(row!.expires_at)).toBeGreaterThan(Date.parse(expires))
+  })
+
+  it("同一用户重复购买同一节点被拒（一个节点只允许一份租约）", async () => {
+    const admin = await makeUser({ role: "superadmin" })
+    const nodeId = await seedNode()
+    const planId = await makePlan(admin, nodeId)
+    const buyer = await makeUser({ username: "wangwu2026" })
+    await grant(buyer.id, 500)
+
+    const first = await call<{ frpUser?: string }>(buyer, "/frp/rental/purchase", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ planId }),
+    })
+    expect(first.status).toBe(200)
+    expect(first.body.frpUser).toBe("DC_wangwu2026")
+
+    const second = await call<{ code?: string }>(buyer, "/frp/rental/purchase", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ planId }),
+    })
+    expect(second.status).toBe(409)
+    expect(second.body.code).toBe("ALREADY_SUBSCRIBED")
+
+    // 没被扣第二笔
+    const subs = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM frp_subscriptions WHERE user_id = ?`
+    )
+      .bind(buyer.id)
+      .first<{ n: number }>()
+    expect(subs?.n).toBe(1)
+  })
+
+  it("退掉（cancelled）后再买同一节点：自动避开已占用的名字，而不是撞唯一索引", async () => {
+    const admin = await makeUser({ role: "superadmin" })
+    const nodeId = await seedNode()
+    const planId = await makePlan(admin, nodeId)
+    const buyer = await makeUser({ username: "zhaoliu2026" })
+    await grant(buyer.id, 500)
+
+    const first = await call<{ id?: string; frpUser?: string }>(buyer, "/frp/rental/purchase", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ planId }),
+    })
+    expect(first.status).toBe(200)
+    expect(first.body.frpUser).toBe("DC_zhaoliu2026")
+
+    // 管理员停用（行**保留**：已取消的租约仍然占着那个账号名）
+    await env.DB.prepare(`UPDATE frp_subscriptions SET status = 'cancelled' WHERE id = ?`)
+      .bind(first.body.id!)
+      .run()
+
+    const again = await call<{ frpUser?: string }>(buyer, "/frp/rental/purchase", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ planId }),
+    })
+    // 关键：是 200（换名重开），不是 500（SQLITE_CONSTRAINT）
+    expect(again.status).toBe(200)
+    expect(again.body.frpUser).toMatch(/^DC_/)
+    expect(again.body.frpUser).not.toBe("DC_zhaoliu2026")
   })
 })

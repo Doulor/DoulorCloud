@@ -9,6 +9,13 @@
  *
  * 相关函数直接复用 `handlers/storage.ts` 的 `createWorkerRoute` / `removeWorkerRoute`，
  * 保证两边行为一致（否则一处修了另一处没修，迟早出事）。
+ *
+ * 🔴 绑定的三条不可退让的约束（都踩过坑，别拆）：
+ *   1. **归属**：fqdn 必须真在这个用户名下（`assertFqdnOwned`）—— 否则任何人
+ *      都能把作品挂到别人的子域上，整站被顶掉（finding#9）；
+ *   2. **唯一**：一个 fqdn 只能绑一个作品（表上的 UNIQUE + 友好判重）；
+ *   3. **数量**：每人最多 `MAX_DOMAINS_PER_USER` 个，且这条判定必须与写入在
+ *      同一条 SQL 里（finding#29，并发可击穿"先 COUNT 再 INSERT"）。
  */
 import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
@@ -24,12 +31,22 @@ import {
 import { createWorkerRoute, removeWorkerRoute } from "./storage"
 import { readFiles, type LabProjectRow } from "./lab"
 import { buildSdk } from "./lab-store"
+import { assertFqdnOwned } from "../ownership"
 import type { Env } from "../env"
 import { canUseRootDomain } from "../root-domains"
 import { userPermissions } from "../permissions"
 
 /** 每个用户最多绑几个域名（跟直链网盘一个量级，别让人拿来刷域名） */
 const MAX_DOMAINS_PER_USER = 5
+
+/** `lab_project_domains` 的一行（换绑回滚要把它**原样**放回去，所以取全字段） */
+interface LabProjectDomainRow {
+  id: string
+  project_id: string
+  user_id: string
+  fqdn: string
+  created_at: string
+}
 
 /** 归一化并校验域名：只收「本站根域名之下的子域名」 */
 function cleanFqdn(raw: unknown): string {
@@ -167,7 +184,45 @@ export async function setProjectDomain(
     throw new ApiError(403, "没有绑定该根域名下子域的权益", "ROOT_DOMAIN_NOT_PERMITTED")
   }
 
+  // ── 当前绑定（换绑要释放旧 DNS；幂等重绑要认得出「没变」）───────────────
+  //
+  // 取**整行**而不只是 fqdn：下面「先预占、再打 Cloudflare」的顺序下，CF 失败时
+  // 必须把旧行原样放回去（`restorePreemptedBinding`），只记 fqdn 是补不回来的。
+  const prevRow = await env.DB.prepare(
+    "SELECT id, project_id, user_id, fqdn, created_at FROM lab_project_domains WHERE project_id = ? LIMIT 1"
+  )
+    .bind(projectId)
+    .first<LabProjectDomainRow>()
+  const previous = prevRow?.fqdn ?? null
+
+  // 幂等重绑：请求的 fqdn 与**当前绑定的那一个**完全一致 ⇒ 这次调用没有"新增"
+  //
+  // 这个分支要放开归属校验，理由是线上有存量行绑在自己没登记过的 host 上
+  // （2026-10-16 核实：`starfall.tyu.me` 属于站长账号，但该账号的 subdomains 里
+  //  从未有过这一行 ⇒ assertFqdnOwned 必然 403）。同 fqdn 重存不产生任何新权力
+  //  （行本来就在、内容本来就在出），但用户"修一下解析/路由"的能力得以保留。
+  // 换绑到任何**别的** host 仍然必须过归属校验。
+  const unchanged = previous !== null && previous.toLowerCase() === fqdn
+
+  // 🔴 归属校验（2026-10-16 渗透测试 finding#9：跨用户子域劫持 / Content Spoofing）
+  //
+  // 在此之前本函数只校验「根域已登记 + 不是保留名 + 有该根域权益 + 表内唯一 +
+  // 目标主机名没有现成解析」，**从没问过"这个 fqdn 到底是不是你的"**。
+  // 后果（线上真实数据已证实）：`teest` 把作品绑到了 `idortest01.tyu.me` ——
+  // 那是 `idortest01` 名下的子域名。只要受害者还没建 AAAA 记录
+  // （`/api/subdomains` 本身不建记录），`existing.length === 0` 就直接过
+  // HOSTNAME_IN_USE 那关 ⇒ 建 AAAA 100:: + Route + 落库 ⇒ 整站被顶掉。
+  //
+  // assertFqdnOwned 的口径（`ownership.ts`，与 dns.ts 写记录时**同一把尺子**）：
+  //   · 用户拥有 `blog.tyu.me` ⇒ `blog.tyu.me` 本身、以及 `x.blog.tyu.me` 都算他的；
+  //   · 不含别人的一级子域（`alice.tyu.me`）⇒ 403 FORBIDDEN。
+  // 放在 FQDN_TAKEN 之前：否则攻击者可以拿 409/403 的差别探测「别人的域名有没有被绑过」。
+  if (!unchanged) {
+    await assertFqdnOwned(env, user.id, fqdn)
+  }
+
   // 域名全局唯一：被别人占了就报错，不静默抢
+  // （只是快路径/友好报错；真正的唯一性由 fqdn 的 UNIQUE 约束兜底，见下面的 INSERT）
   const taken = await env.DB.prepare(
     "SELECT project_id FROM lab_project_domains WHERE fqdn = ? COLLATE NOCASE LIMIT 1"
   )
@@ -177,77 +232,185 @@ export async function setProjectDomain(
     throw new ApiError(409, "这个域名已经绑给另一个作品了", "FQDN_TAKEN")
   }
 
-  // 数量上限（换绑自己已有的不算新增）
-  const cnt =
-    (await env.DB.prepare(
-      "SELECT COUNT(*) AS c FROM lab_project_domains WHERE user_id = ? AND project_id != ?"
-    )
-      .bind(user.id, projectId)
-      .first<{ c: number }>())?.c ?? 0
-  if (cnt >= MAX_DOMAINS_PER_USER) {
-    throw new ApiError(400, `最多绑定 ${MAX_DOMAINS_PER_USER} 个域名`, "TOO_MANY_DOMAINS")
+  const newId = uuid()
+  const now = new Date().toISOString()
+
+  /**
+   * 🔴 数量上限 + 落库：**一条事务，守卫写在 SQL 里**（2026-10-16 渗透测试 finding#29）
+   *
+   * 原实现是 `SELECT COUNT(*)` → 判 `>= 5` → 打两次 CF API → `DELETE` + `INSERT`。
+   * 判定与写入之间隔着两次远程调用，既无事务也无守卫 ⇒ 并发请求可以**同时**通过
+   * 那条判定。线上现场：账号 `idortest01` 名下 8 条 `race-N-probe.tyu.me`
+   * （上限 5，8 并发全部成功）。
+   *
+   * 现在照抄 `handlers/subdomains.ts` 的原子额度写法（同一个思路还见
+   * `quotas.ts` 的 `consumeQuotaForInvite`）：把额度判定塞进 INSERT 的 WHERE，
+   * D1/SQLite 对同库的写是串行化的，并发再多也只有名额内的几条能插进去；
+   * `meta.changes === 0` 就是"没插进去"（超限），据此给业务错误而不是 500。
+   *
+   * ⚠️ 为什么是「先插后删」而不是「先删后插」：
+   *   1. 先删的话，删完到插入之间有一个窗口 —— 此时这个项目**名下无域名**，
+   *      并发的另一个请求会看到"空出来的名额"并把它占走，于是本次 INSERT
+   *      撞上上限 ⇒ 用户从「有 1 个域名」变成「0 个」，正常换绑被搞坏。
+   *   2. 先插的话，INSERT 失败（超限 / 唯一冲突）时旧行**原封不动**，
+   *      失败的换绑退化成"什么都没发生"，而不是"把原来的弄丢了"。
+   *   3. 两条语句必须同一个事务：`DB.batch` 是一次 SQL 事务（与
+   *      `points-shop.ts:1764` 的注释同一口径），所以不存在"插进去了没删掉旧的"
+   *      或"删了旧的没插进新的"的中间态。
+   *
+   * ⚠️ DELETE 上的 `EXISTS` 守卫是故意的：超限时 INSERT 插 0 行，若 DELETE 照删，
+   *    就把旧绑定删没了 —— 这正是上面第 2 点要防的事。EXISTS 让它只在
+   *    「新行真的插进去了」时才执行（同一事务内看得见刚插入的行）。
+   *
+   * ⚠️ 额度用 COUNT(*) 而不是 COUNT(DISTINCT project_id)：语义与原实现一致
+   *    （一行 = 一个已绑定的域名）。`project_id <> ?` 让换绑**不占新名额**。
+   */
+  if (!unchanged) {
+    let inserted: boolean
+    try {
+      const [ins] = await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO lab_project_domains (id, project_id, user_id, fqdn, created_at)
+           SELECT ?, ?, ?, ?, ?
+            WHERE (SELECT COUNT(*) FROM lab_project_domains
+                    WHERE user_id = ? AND project_id <> ?) < ?`
+        ).bind(newId, projectId, user.id, fqdn, now, user.id, projectId, MAX_DOMAINS_PER_USER),
+        env.DB.prepare(
+          `DELETE FROM lab_project_domains
+            WHERE project_id = ? AND id <> ?
+              AND EXISTS (SELECT 1 FROM lab_project_domains WHERE id = ?)`
+        ).bind(projectId, newId, newId),
+      ])
+      inserted = (ins.meta?.changes ?? 0) > 0
+    } catch (err) {
+      // fqdn 是 UNIQUE：并发抢同一个域名时，两个请求都会过上面的友好判重，
+      // 但只有一个能插进去 —— 另一个在这里撞约束，按业务错误返回而不是 500。
+      if (/UNIQUE constraint failed/i.test(String(err))) {
+        throw new ApiError(409, "这个域名已经绑给另一个作品了", "FQDN_TAKEN")
+      }
+      throw err
+    }
+    if (!inserted) {
+      throw new ApiError(400, `最多绑定 ${MAX_DOMAINS_PER_USER} 个域名`, "TOO_MANY_DOMAINS")
+    }
   }
 
   // 1) DNS 记录：AAAA 100:: + 开代理（与直链网盘同一口径）
   //    zone 按 fqdn 解析，不能写死 —— 记录可能属于 tyu.me 而不是 doulor.cn
-  const zoneId = await zoneIdForFqdn(env, fqdn)
-  const existing = await cfListDnsRecords(env, zoneId, fqdn)
+  //
+  // ⚠️ 顺序：DB 预占已经成功，这里才开始动 Cloudflare。CF 侧任何一步失败都要
+  //    **回滚预占**（`restorePreemptedBinding`），否则用户会拿到一个"库里绑了、
+  //    实际解析不出来"的域名，而且旧绑定已经被同一条事务里的 DELETE 删掉了。
+  //    这也是「先预占再动 CF」的代价，必须成对写。
+  let dnsCreated = false
+  try {
+    const zoneId = await zoneIdForFqdn(env, fqdn)
+    const existing = await cfListDnsRecords(env, zoneId, fqdn)
 
-  // 已经有解析记录 ≠ 允许接管。只有「我们自己为作品域名建的那种记录」
-  // （AAAA 100:: + 开代理，见下面 cfCreateDnsRecord）才可复用；
-  // 其余情况说明这个主机名**正在承载别的服务**（主站、网关、别人的站点……），
-  // 一旦接管就等于把它整站顶掉 —— 必须拒绝，而不是"跳过建记录继续绑"。
-  if (existing.length) {
-    // 只认内容：cfListDnsRecords 的类型只暴露 {id,type,content}，拿不到 proxied 标志；
-    // 而 100:: 正是本接口为作品域名写的那种占位地址（见下面 cfCreateDnsRecord）。
-    const ours = existing.some(
-      (r) => r.type === "AAAA" && String(r.content || "").startsWith("100::")
-    )
-    if (!ours) {
-      throw new ApiError(409, "这个域名已经在承载其他服务，不能绑定作品", "HOSTNAME_IN_USE")
+    // 已经有解析记录 ≠ 允许接管。只有「我们自己为作品域名建的那种记录」
+    // （AAAA 100:: + 开代理，见下面 cfCreateDnsRecord）才可复用；
+    // 其余情况说明这个主机名**正在承载别的服务**（主站、网关、别人的站点……），
+    // 一旦接管就等于把它整站顶掉 —— 必须拒绝，而不是"跳过建记录继续绑"。
+    //
+    // 🔴 归属校验加上之后，这条**仍然必须留**（两者防的不是同一件事）：
+    //    · assertFqdnOwned 回答「这个域名是不是你的」；
+    //    · HOSTNAME_IN_USE 回答「这个域名是不是已经在干别的活」——
+    //      它可以是**用户自己的** host：`cloud.xxx.tyu.me` 那种自己给自己建的
+    //      网关/邮箱网页、管理员手工加过的 A/AAAA、平台在某 host 上配的路由。
+    //      这类主机名一旦被作品接管，被顶掉的是用户自己/平台正在跑的服务，
+    //      归属校验一点都拦不住（它本来就属于这个用户）。
+    //    另外它也覆盖「同一个 fqdn 的旧作品行已被清掉但解析记录还在」这种
+    //    历史遗留状态：那种记录是我们签名的（100::）⇒ 放行并复用，不重复建。
+    if (existing.length) {
+      // 只认内容：cfListDnsRecords 的类型只暴露 {id,type,content}，拿不到 proxied 标志；
+      // 而 100:: 正是本接口为作品域名写的那种占位地址（见下面 cfCreateDnsRecord）。
+      const ours = existing.some(
+        (r) => r.type === "AAAA" && String(r.content || "").startsWith("100::")
+      )
+      if (!ours) {
+        throw new ApiError(409, "这个域名已经在承载其他服务，不能绑定作品", "HOSTNAME_IN_USE")
+      }
     }
+
+    // 该根域已配 `*.<根域>` 泛解析时**不建记录** —— 泛解析已经能把它解析到
+    // Cloudflare，再建一条只会白占配额（配额耗尽的后果见 isCoveredByWildcard 注释）。
+    const wildcardCovered = await isCoveredByWildcard(env, fqdn)
+    if (!existing.length && !wildcardCovered) {
+      try {
+        await cfCreateDnsRecord(env, zoneId, {
+          type: "AAAA",
+          name: fqdn,
+          content: "100::",
+          ttl: 1,
+          proxied: true,
+        })
+        dnsCreated = true
+      } catch (err) {
+        console.error("作品域名 DNS 记录创建失败:", fqdn, err)
+        throw new ApiError(502, "无法为该域名创建解析记录，请稍后再试", "CF_ERROR")
+      }
+    }
+
+    // 2) Worker 路由
+    await createWorkerRoute(env, fqdn)
+  } catch (err) {
+    // 回滚：把预占的绑定行退回换绑前的样子，并清掉**这一次**新建的解析记录
+    //（只清我们刚建的：上面 `!existing.length` 已保证这条是本请求创建的）。
+    if (!unchanged) {
+      await restorePreemptedBinding(env, newId, prevRow)
+    }
+    if (dnsCreated) {
+      await releaseLabDnsRecord(env, fqdn)
+    }
+    throw err
   }
 
-  // 该根域已配 `*.<根域>` 泛解析时**不建记录** —— 泛解析已经能把它解析到
-  // Cloudflare，再建一条只会白占配额（配额耗尽的后果见 isCoveredByWildcard 注释）。
-  const wildcardCovered = await isCoveredByWildcard(env, fqdn)
-  if (!existing.length && !wildcardCovered) {
-    try {
-      await cfCreateDnsRecord(env, zoneId, {
-        type: "AAAA",
-        name: fqdn,
-        content: "100::",
-        ttl: 1,
-        proxied: true,
-      })
-    } catch (err) {
-      console.error("作品域名 DNS 记录创建失败:", fqdn, err)
-      throw new ApiError(502, "无法为该域名创建解析记录，请稍后再试", "CF_ERROR")
-    }
-  }
-
-  // 2) Worker 路由
-  await createWorkerRoute(env, fqdn)
-
-  // 3) 落库（同一作品换域名 = 先删旧行再加新行）
+  // 3) 换绑：释放旧域名占用的解析记录
+  //
+  // ⚠️ 必须放在**落库成功之后**（原来在 DELETE/INSERT 之前）：
+  //    先释放、再发现插入失败的话，旧绑定行还在、它的解析记录却已经被删掉，
+  //    用户的域名当场就解析不了了。
   //
   // ⚠️ 换绑时必须**释放旧域名占的解析记录**，否则记录只增不减，
   //    最终撞上 Cloudflare 的记录数上限（81045），届时所有用户都绑不了新域名。
   //    这是 2026-10-15 那次事故的根因，别把它改回去。
-  const previous = await getBoundDomain(env, projectId)
   if (previous && previous.toLowerCase() !== fqdn.toLowerCase()) {
     await releaseLabDnsRecord(env, previous)
   }
-  await env.DB.prepare("DELETE FROM lab_project_domains WHERE project_id = ?")
-    .bind(projectId)
-    .run()
-  await env.DB.prepare(
-    "INSERT INTO lab_project_domains (id, project_id, user_id, fqdn, created_at) VALUES (?, ?, ?, ?, ?)"
-  )
-    .bind(uuid(), projectId, user.id, fqdn, new Date().toISOString())
-    .run()
 
   return json({ fqdn })
+}
+
+/**
+ * 把「已经预占的绑定行」退回换绑前的样子（Cloudflare 侧失败时用）。
+ *
+ * 语义：
+ *   · 删掉本次插入的新行；
+ *   · 若换绑前有旧行，按**原 id / 原 created_at** 放回去（不新建一个"看起来像"的行）。
+ *
+ * 两条语句放在同一个 `DB.batch`（事务）里：只有"删新 + 还原旧"一起生效，
+ * 才不会出现「新的删了、旧的也没回来」—— 那等于用户的绑定凭空消失。
+ *
+ * 失败只记日志不往上抛：调用点正在处理 CF 的原始错误，把它盖掉会更难排查。
+ */
+async function restorePreemptedBinding(
+  env: Env,
+  newId: string,
+  prev: LabProjectDomainRow | null
+): Promise<void> {
+  const stmts = [env.DB.prepare("DELETE FROM lab_project_domains WHERE id = ?").bind(newId)]
+  if (prev) {
+    stmts.push(
+      env.DB.prepare(
+        "INSERT OR IGNORE INTO lab_project_domains (id, project_id, user_id, fqdn, created_at) VALUES (?, ?, ?, ?, ?)"
+      ).bind(prev.id, prev.project_id, prev.user_id, prev.fqdn, prev.created_at)
+    )
+  }
+  try {
+    await env.DB.batch(stmts)
+  } catch (err) {
+    console.error("回滚作品域名绑定失败，请手工核对 lab_project_domains:", newId, err)
+  }
 }
 
 /**

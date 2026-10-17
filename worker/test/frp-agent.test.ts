@@ -178,6 +178,19 @@ async function seedSubscription(opts: {
   return id
 }
 
+/**
+ * 直接改 `users.status`。
+ *
+ * 刻意**不走**管理端接口：这次的 bug 要修的是「算期望状态时带上用户状态」，
+ * 而不是「封禁接口里加联动」。用 SQL 改状态正好模拟「管理员改状态」「申诉通过自动解封」
+ * 「别的代码路径改了状态」这些入口 —— 只要同步侧的判定对了，从哪条路进来的都自动生效。
+ */
+async function setUserStatus(userId: string, status: string): Promise<void> {
+  await env.DB.prepare(`UPDATE users SET status = ?, updated_at = ? WHERE id = ?`)
+    .bind(status, new Date().toISOString(), userId)
+    .run()
+}
+
 describe("frp-agent 通道", () => {
   it("签名正确时下发期望状态，并声明本站账号前缀", async () => {
     const nodeId = await seedNode()
@@ -498,5 +511,88 @@ describe("frp-agent 通道", () => {
     expect(res.status).toBe(200)
     const body = (await res.json()) as DesiredBody
     expect(body.node.id).toBe(nodeA)
+  })
+
+  // ------------------------------------------------- 被禁用用户必须同步停用（2026-10-15）
+  //
+  // 线上实证的 bug：站长把 `wei` 改成 `suspended`，他的 frp 隧道照旧在跑 ——
+  // 因为这里算期望状态时只看 `frp_subscriptions.status` 与 `expires_at`，
+  // **完全没看 `users.status`**。真实访问控制在 frps + 面板那一层，D1 的期望状态
+  // 同步是唯一的传导机制，所以修在同步侧（详见 handlers/frp-agent.ts 的 isActiveUser）。
+  //
+  // 三条用例分别钉住：停用生效 / 正常用户不受影响（回归）/ 解封后自动恢复（自愈）。
+
+  it("🔴 用户 suspended（订阅仍 active 且未到期）→ 该账号 enable=false", async () => {
+    const nodeId = await seedNode()
+    const user = await makeUser()
+    const frpUser = `DC_${uuid().slice(0, 8)}`
+    await seedSubscription({ nodeId, userId: user.id, frpUser, ports: [30031] })
+    await setUserStatus(user.id, "suspended")
+
+    const res = await agentCall({ method: "GET", path: `/frp/agent/desired?node=${nodeId}` })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as DesiredBody
+    const mine = body.users.find((u) => u.user === frpUser)
+    // 仍要在列表里（agent 据此**停用**而不是删号）
+    expect(mine).toBeDefined()
+    expect(mine!.enable).toBe(false)
+    // 面板 comment 要能看出「不是到期，是账号被停用」——
+    // 否则运维在面板上只会看到一条「到期日还没到却连不上」的账号，无从下手
+    expect(mine!.comment).toContain("已停用")
+    expect(mine!.comment).toContain("suspended")
+  })
+
+  it("回归：用户 active 时行为与修复前一致（enable=true，comment 不变形）", async () => {
+    const nodeId = await seedNode()
+    const user = await makeUser()
+    const frpUser = `DC_${uuid().slice(0, 8)}`
+    await seedSubscription({ nodeId, userId: user.id, frpUser, ports: [30032] })
+    // 明确把状态写成 active（makeUser 本来就是 active，这里只是让用例自解释）
+    await setUserStatus(user.id, "active")
+
+    const res = await agentCall({ method: "GET", path: `/frp/agent/desired?node=${nodeId}` })
+    const body = (await res.json()) as DesiredBody
+    const mine = body.users.find((u) => u.user === frpUser)
+    expect(mine!.enable).toBe(true)
+    expect(mine!.comment).not.toContain("已停用")
+    expect(mine!.comment).toContain("DoulorCloud")
+  })
+
+  it("用户恢复 active 后，期望状态自己变回 enable=true（不需要管理员再操作一次）", async () => {
+    const nodeId = await seedNode()
+    const user = await makeUser()
+    const frpUser = `DC_${uuid().slice(0, 8)}`
+    await seedSubscription({ nodeId, userId: user.id, frpUser, ports: [30033] })
+
+    const desired = async () => {
+      const res = await agentCall({ method: "GET", path: `/frp/agent/desired?node=${nodeId}` })
+      const body = (await res.json()) as DesiredBody
+      return body.users.find((u) => u.user === frpUser)!
+    }
+
+    await setUserStatus(user.id, "suspended")
+    expect((await desired()).enable).toBe(false)
+
+    await setUserStatus(user.id, "active")
+    const back = await desired()
+    expect(back.enable).toBe(true)
+    expect(back.comment).not.toContain("已停用")
+  })
+
+  it("订阅已 cancelled 时，即便用户是 active 也仍是 enable=false（两种判定都要成立）", async () => {
+    const nodeId = await seedNode()
+    const user = await makeUser()
+    const frpUser = `DC_${uuid().slice(0, 8)}`
+    await seedSubscription({
+      nodeId,
+      userId: user.id,
+      frpUser,
+      ports: [30034],
+      status: "cancelled",
+    })
+
+    const res = await agentCall({ method: "GET", path: `/frp/agent/desired?node=${nodeId}` })
+    const body = (await res.json()) as DesiredBody
+    expect(body.users.find((u) => u.user === frpUser)!.enable).toBe(false)
   })
 })

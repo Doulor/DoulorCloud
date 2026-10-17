@@ -47,6 +47,21 @@ const DEFAULT_PORT_RANGE: [number, number] = [31000, 31999]
 
 /** 面板的 token 只接受字母与数字（实测带连字符会被拒：token format error） */
 const TOKEN_PATTERN = /^[A-Za-z0-9]{8,64}$/
+/**
+ * 账号名格式。注意 `{4,32}` 量的是**前缀之后**的部分（前缀在最外层，不计入）。
+ *
+ * 2026-10-15 起 `prefix` 后面可能是两种东西，这个正则**同时接受**：
+ *   · `DC_<8 位随机十六进制>` —— 存量 9 份租约（以及所有兜底新号）的形态
+ *   · `DC_<DoulorCloud 用户名>` —— 新租约的首选形态
+ * 「同时接受」是刻意的：**存量租约一个都不改名**（站长明确要求），既然库里会长期
+ * 共存两种形态，任何校验都不能只认其中一种，否则会出现「老订单被判非法、被重建」。
+ *
+ * 为什么下限仍是 4 而不是跟着平台用户名的 3 位（`handlers/auth.ts` 的
+ * `isValidUsername` 是 3-32 位）：
+ *   3 位用户名（`ads` / `byd` / `wei` …）拼出来是 `DC_ads` 这种 3 位后缀，过不了这条
+ *   正则 —— 按站长给的兜底规则它们**本来就走随机名**，没有必要为了它们放宽格式。
+ *   保持 `{4,32}` 等于保持"能写进库的形态"和"历史上真的写进去过的形态"一致。
+ */
 const USER_PATTERN = new RegExp(`^(?:${FRP_USER_PREFIXES.join("|")})[A-Za-z0-9]{4,32}$`)
 
 const DAY_MS = 86_400_000
@@ -94,6 +109,63 @@ function shortId(): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("")
+}
+
+/**
+ * 这个账号名在本节点上是否已被占用（**任何状态**都算占用）。
+ *
+ * 为什么必须查库、不能只看 USER_PATTERN：
+ *   `frp_subscriptions` 上有 `UNIQUE(node_id, frp_user)`（迁移
+ *   `0153_frp_rental.sql:80` 的 `idx_frp_subs_node_user`），而**已取消/已过期的行
+ *   仍然占着那个名字**（我们从不因为状态变化就改名或删行）。同一用户"退掉再买"
+ *   是允许的（`purchaseRental` 的重复购买检查排除了 cancelled），此时若直接用
+ *   `DC_<用户名>` 插入，就会撞唯一索引 —— 表现是"扣完积分才 500"（虽然下面有退款，
+ *   但用户看到的是"买不了"，而且日志里只有一句 SQLITE_CONSTRAINT）。
+ */
+async function frpUserTaken(env: Env, nodeId: string, frpUser: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT 1 AS n FROM frp_subscriptions WHERE node_id = ? AND frp_user = ? LIMIT 1`
+  )
+    .bind(nodeId, frpUser)
+    .first<{ n: number }>()
+  return Boolean(row)
+}
+
+/**
+ * 决定一份**新**租约的 frp 账号名（2026-10-15 站长要求：以后新用户用 `DC_<用户名>`，
+ * 「已有用户不改了」）。
+ *
+ * 规则（按顺序）：
+ *   1. `DC_<username>`，通过 USER_PATTERN（即用户名是 4~32 位纯字母数字）且本节点上
+ *      没被占用 → 用它。好处是打开面板一眼就知道这条隧道属于谁（以前是 DC_3f9a01bc，
+ *      谁都得回 D1 反查）。
+ *   2. 否则退回 `DC_<8 位随机十六进制>`（= 老格式）。
+ *
+ * 为什么兜底选「随机 8 位」而不是「`DC_u` + user.id 前 8 位」：
+ *   · 随机串是**已经在生产跑着的形态**（存量 9 份租约全是它），面板 / agent / 前端 /
+ *     文档对它零新增假设 —— 兜底路径的要求本来就是"零风险"，不该再引入一种新形态；
+ *   · 用户名不合规的原因很杂（3 位太短、带连字符、以后可能还有别的规则），
+ *     "按 id 派生"还得让人去理解那段 id 的含义；随机串一眼就知道是兜底号；
+ *   · 8 位十六进制与本节点的占用检查天然不易冲突（下面还有重试）。
+ *
+ * ⚠️ 这里**只影响新插入的行**。存量租约一个都不改名：
+ *   · 没有迁移、不会因为"格式不对"重建任何订单；
+ *   · `renewRental` / 管理员的 `extend` 只改 `expires_at`（和 status），从不写
+ *     `frp_user` —— 改名会直接打断用户已经配好并可能正在跑的隧道（他本地的 frpc
+ *     配置里写死了旧账号名）。
+ */
+async function allocateFrpUser(env: Env, nodeId: string, username: string): Promise<string> {
+  const preferred = `${FRP_USER_PREFIX}${username}`
+  if (USER_PATTERN.test(preferred) && !(await frpUserTaken(env, nodeId, preferred))) {
+    return preferred
+  }
+  // 兜底：随机 8 位。理论上仍可能撞（同一节点历史上退号重买过），所以最多试 5 次；
+  // 全都撞了才报错 —— 概率约等于 0，但绝不能静默写入一个会撞唯一索引的名字。
+  for (let i = 0; i < 5; i++) {
+    const candidate = `${FRP_USER_PREFIX}${shortId()}`
+    if (!(await frpUserTaken(env, nodeId, candidate))) return candidate
+  }
+  throw new ApiError(500, "账号名分配失败，请重试", "FRP_USER_ALLOC_FAILED")
 }
 
 /**
@@ -593,8 +665,11 @@ export async function createFrpSubscription(env: Env, request: Request): Promise
   const id = `sub_${shortId()}${shortId()}`
 
 
-  const frpUser = `${FRP_USER_PREFIX}${shortId()}`
+  // 账号名：新租约优先 `DC_<用户名>`，不合规/被占用时退回随机名（见 allocateFrpUser）
+  const frpUser = await allocateFrpUser(env, nodeId, user.username)
   if (!USER_PATTERN.test(frpUser)) {
+    // allocateFrpUser 内部已经保证合规；这里再断言一次，防止以后有人改分配逻辑
+    // 忘了校验 —— 写进库的名字必须过正则，否则面板/agent 两侧的假设都不成立。
     throw new ApiError(500, `生成的账号名不合规：${frpUser}`, "BAD_SUBSCRIPTION")
   }
   const frpToken = generateFrpToken()
@@ -984,6 +1059,10 @@ export async function purchaseRental(env: Env, request: Request): Promise<Respon
     )
   }
 
+  // 账号名也在扣分之前定下来：allocateFrpUser 会查一次 D1（本节点是否已占用），
+  // 这一步失败绝不能让用户白掉积分。见 allocateFrpUser 的注释。
+  const frpUser = await allocateFrpUser(env, plan.node_id, user.username)
+
   const deducted = await applyPoints(env, {
     userId: user.id,
     delta: -plan.price_points,
@@ -1013,7 +1092,6 @@ export async function purchaseRental(env: Env, request: Request): Promise<Respon
     `${plan.name}（${plan.days} 天）`,
     `frp_rental:share:${id}`
   )
-  const frpUser = `${FRP_USER_PREFIX}${shortId()}`
   const frpToken = generateFrpToken()
   const at = new Date()
   const expires = new Date(at.getTime() + plan.days * DAY_MS).toISOString()

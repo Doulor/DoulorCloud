@@ -86,9 +86,17 @@ Ping **会**被回调 —— 但需要**双端**都配：
 ============================= 运行 =============================
     python3 panel.py --config panel.json
 默认只监听 127.0.0.1:7200（**绝不绑 0.0.0.0**）。
+
+运行期会有两个数据文件（都在进程的工作目录，路径可在配置里改）：
+  · accounts.json —— 账号与凭据。低频写（增删改账号时），可以直接 `cat` 排障。
+  · activity.json —— 每个账号的「最后活动时间」（插件心跳时间戳）。
+                    最多每 30 秒写一次（见「在线状态」一节的节流说明），
+                    **丢了/删了都不影响鉴权**，只是列表里的「在线/离线/上次活动」
+                    要从下一个心跳重新开始算。
 """
 import argparse
 import base64
+import calendar
 import hashlib
 import hmac
 import html
@@ -117,6 +125,10 @@ DEFAULT_CONFIG = {
     "listen_host": "127.0.0.1",       # 🔴 默认只监听本机
     "listen_port": 7200,
     "data_file": "accounts.json",
+    # 「最后活动时间」的落盘文件（相对路径按进程工作目录，跟 accounts.json 同一套规则）。
+    # 为什么单独一个文件、不塞进 accounts.json：见下面「在线状态」一节的说明。
+    # 置为空串 = 只在内存里记，不落盘（重启后「上次活动」丢失，但在线判定照常）。
+    "activity_file": "activity.json",
     "log_file": "panel.log",
     # agent 通道 HMAC 密钥（与 DoulorCloud 的 FRP_AGENT_SECRET 一致）；
     # 留空则 agent 专用端点全部 503，不会退化成「无鉴权可用」
@@ -169,6 +181,10 @@ DEFAULT_CONFIG = {
     "expiring_soon_days": 3,
     # 后台巡检间隔（秒）
     "sweep_interval_seconds": 300,
+    # 「在线」判定阈值（秒）：最后一次插件心跳距今不超过它就算在线。
+    # ⚠️ 它的精度**完全由 frps 的 ping 间隔决定**，所以必须配得比那个间隔大。
+    #    详见下面「在线状态」一节 —— 默认 90 秒 = frp 默认的 heartbeatTimeout。
+    "online_ttl_seconds": 90,
 }
 
 CONFIG = dict(DEFAULT_CONFIG)
@@ -550,42 +566,293 @@ def verify_agent_request(method, path_with_query, headers, body):
 #   · 时间戳法自带自愈：客户端断了心跳就停，TTL 一过自然变离线；
 #     面板重启也只是暂时显示全部离线，下一个心跳周期就恢复。
 #
-# ⚠️ 必须加锁：插件回调是多线程的（ThreadingHTTPServer）。
-#    这个坑在主题/密度上踩过一次 —— 全局可变状态不加锁，高并发下会读到写坏的 dict。
+# ⚠️ 必须加锁：插件回调是多线程的 —— build_server() 用的就是本文件顶部自己拼的
+#    `ThreadingHTTPServer`（3.6 没有 http.server.ThreadingHTTPServer，见「坑 3」），
+#    每个请求一个线程。全局可变状态不加锁，高并发下会读到写坏的 dict ——
+#    这个坑在主题/密度上踩过一次（表现为偶尔读到另一个主题的值）。
+#
+# ---- 「在线」阈值：为什么是 90 秒 ----
+# 判定精度**完全由 frps 的 ping 间隔决定**，而那个间隔不在 panel.py 里：
+# 它是 frps/frpc 的 `transport.heartbeatInterval`（frp 默认 30 秒；
+# `transport.heartbeatTimeout` 默认 90 秒 = 连续 3 次没心跳就断）。
+# 本文件顶部「坑 4」的实测抓包用的是 heartbeatInterval = 10（为了快速复现），
+# 所以现场值可能是 10~60 之间 —— 从这里**读不出来**，只能按 frp 的默认值取上界。
+# → 取 90 秒：等于 frp 自己的默认 heartbeatTimeout，也就是「容忍 3 个默认间隔」。
+#   默认配置下连续丢 1~2 个 Ping 仍然算在线（不会因为一次网络抖动就在界面上闪一下灰），
+#   真断线时最迟 90 秒 + 一个心跳周期就变灰 —— 对「谁在线」这个用途足够了。
+#   ⚠️ 如果把 heartbeatInterval 调到 90 秒以上，这里必须跟着调大（设置页可改），
+#      否则每个心跳周期的间隙里都会闪成「离线」。
 ONLINE_TTL_SEC = 90
+
+# ---- 「最后活动时间」怎么存：单独一个 activity.json，不塞进 accounts.json ----
+# 为什么不上 accounts.json 的每账号字段（虽然那样最直观）：
+#   1. Store 有 reload_if_changed()：文件 mtime 一变就整份重读。
+#      心跳几十秒一次 → 每隔几十秒就把 accounts.json 重读一遍，还会刷一行
+#      「检测到账号文件被外部修改，重新载入」的日志 —— 纯噪音，且白白放大竞争窗口。
+#   2. normalise_account() 是白名单式的：任何走 /update、网页编辑、agent 同步的账号
+#      都会被**重建**成那几个固定字段，多出来的 last_active_at 会被静默丢掉。
+#      也就是说塞进 accounts.json 的字段并不可靠，除非把它加进白名单并传到每一处。
+#   3. accounts.json 是**凭据文件**（含 token），外部工具/备份/rsync 都在看它；
+#      而这份活动记录是纯瞬态数据，丢了最多是「上次活动」显示不出来。
+#      高频写凭据文件既没必要，也让「凭据文件什么时候被改过」这件事失去意义。
+# 代价：多一个文件。它坏了/被删了都不影响鉴权，只是列表里少一列时间。
+#
+# ---- 写盘节流（这是硬性要求，不然会拖死这个单线程语义的服务）----
+# Ping 每几十秒一次 × 42 个账号 ≈ 每分钟几十次心跳。**绝不**每次心跳都写盘：
+#   · note_online() 只动内存 + 置一个 dirty 标记（O(1)，纯内存，不加任何 I/O）；
+#   · 后台线程每 ACTIVITY_TICK_SEC(5s) 醒一次，只有「有 dirty」且
+#     「距上次写盘 ≥ ACTIVITY_FLUSH_SEC(30s)」才真正写一次；
+#   · 也就是**最坏**每 30 秒写一个小 JSON（几十条记录），和心跳频率无关；
+#     完全没活动的时候一次都不写。
+#   · 写盘放在后台线程而不是请求线程里：插件回调是 frps 在等的同步请求，
+#     万一磁盘卡一下，不能让它把回调拖到超时。
+# 崩溃代价：最多丢最后 30 秒的活动时间（下次心跳就补回来），可接受。
+ACTIVITY_FLUSH_SEC = 30       # 两次写盘的最小间隔
+ACTIVITY_TICK_SEC = 5        # 后台线程的检查周期
+ACTIVITY_RETENTION_SEC = 30 * 24 * 3600   # 内存/文件里最多留 30 天，再老就丢掉
+
+# 三态：界面上的绿 / 灰 / 红
+STATE_ONLINE = "online"
+STATE_OFFLINE = "offline"
+STATE_DISABLED = "disabled"
+
 _online_lock = threading.Lock()
-_online_seen = {}
+_online_seen = {}            # user -> 最后一次心跳的 epoch 秒（内存里的权威值）
+_activity_dirty = False
+_activity_last_flush = 0.0
+
+
+def online_ttl():
+    """「在线」阈值（秒）。配错了就退回默认值，绝不让一个坏配置把所有人都判成离线。"""
+    try:
+        value = int(CONFIG.get("online_ttl_seconds") or ONLINE_TTL_SEC)
+    except (TypeError, ValueError):
+        value = ONLINE_TTL_SEC
+    return max(15, value)
+
+
+def _activity_path():
+    return str(CONFIG.get("activity_file") or "").strip()
+
+
+def activity_iso(ts):
+    """epoch 秒 -> ISO8601 UTC 字符串。风格跟 accounts.json 里的 expire_at / updated_at 一致。"""
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(ts)))
+    except (TypeError, ValueError):
+        return ""
+
+
+def _parse_activity_ts(value):
+    """
+    解析活动时间：ISO8601 字符串（我们自己写的），也接受 epoch 数字
+    （手工改文件或早期版本可能写成数字）。认不出来就返回 None —— 当作「没有记录」。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return float(calendar.timegm(time.strptime(text, fmt)))
+        except ValueError:
+            continue
+    return None
+
+
+def load_activity():
+    """
+    启动时把上次的「最后活动时间」读回来。
+
+    为什么值得读回来：面板重启后如果内存是空的，所有账号会显示「离线」直到下一个心跳
+    （最多一个心跳周期）。读回来之后，重启前 90 秒内还有心跳的账号**立刻**仍显示在线，
+    而离线账号也能直接显示「上次活动：3 小时前」而不是「从未连接」。
+    读失败一律当空处理：这只是个显示用的辅助数据，绝不能因为它启动不了。
+    """
+    path = _activity_path()
+    if not path:
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except IOError:
+        return 0
+    except ValueError as exc:
+        log("WARN 活动文件解析失败，按空处理（原文件保留）：%s" % exc)
+        return 0
+    items = raw.get("activity") if isinstance(raw, dict) else None
+    if not isinstance(items, dict):
+        return 0
+    now = time.time()
+    loaded = 0
+    with _online_lock:
+        for user, value in items.items():
+            ts = _parse_activity_ts(value)
+            if ts is None or now - ts > ACTIVITY_RETENTION_SEC:
+                continue
+            name = str(user)
+            # 已存在的（更新的）内存值优先 —— 载入不该把刚收到的心跳往回拨
+            if _online_seen.get(name, 0) < ts:
+                _online_seen[name] = ts
+            loaded += 1
+    log("活动记录已载入：%d 个账号的最后活动时间（%s）" % (loaded, path))
+    return loaded
+
+
+def save_activity(force=False):
+    """
+    把内存里的「最后活动时间」批量写盘（节流见上面 ACTIVITY_FLUSH_SEC）。
+
+    返回 True 表示这次真的写了。写失败不清 dirty、也不抛异常：
+    活动时间丢了只是显示不准，绝不能让一个只读文件系统把后台线程搞死。
+    """
+    global _activity_dirty, _activity_last_flush
+    path = _activity_path()
+    if not path:
+        return False
+    now = time.time()
+    with _online_lock:
+        if not _activity_dirty:
+            return False
+        if not force and now - _activity_last_flush < ACTIVITY_FLUSH_SEC:
+            return False
+        snapshot = dict(_online_seen)
+        _activity_dirty = False
+        _activity_last_flush = now
+    payload = {
+        "version": 1,
+        "updated_at": activity_iso(now),
+        # 排序只为让 diff/日志好看；JSON 对象本身无序，读的时候也不依赖顺序
+        "activity": {u: activity_iso(t) for u, t in sorted(snapshot.items())},
+    }
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        # ⚠️ 又是 os.replace 而不是 os.rename：Windows 上 rename 目标已存在会抛
+        #    （Store._save_locked 里为这个踩过一次，见那里的注释）
+        os.replace(tmp, path)
+        return True
+    except (IOError, OSError) as exc:
+        log("WARN 写活动文件失败（下次再试，不影响在线判定）：%s" % exc)
+        with _online_lock:
+            _activity_dirty = True
+        return False
+
+
+def start_activity_flusher():
+    """
+    后台线程：定时把攒着的心跳时间落盘。模式跟 start_sweeper 一样（daemon + 死循环）。
+
+    注意它**不是**在线判定的必要条件 —— 判定只看内存里的 _online_seen。
+    这个线程挂了，界面上的三态照样准，只是「上次活动时间」在重启后归零。
+    """
+    def loop():
+        while True:
+            try:
+                time.sleep(ACTIVITY_TICK_SEC)
+                save_activity()
+            except Exception as exc:  # noqa: BLE001
+                log("WARN 活动写盘线程异常：%s: %s" % (type(exc).__name__, exc))
+
+    t = threading.Thread(target=loop)
+    t.daemon = True
+    t.start()
+    return t
+
+
+def flush_activity():
+    """退出前强制写一次（不然最后 30 秒的心跳时间白记）。"""
+    return save_activity(force=True)
 
 
 def note_online(user):
-    """记下这个账号刚刚活动过。插件回调的成功路径都要调它。"""
+    """记下这个账号刚刚活动过。插件回调的**成功路径**都要调它。"""
+    global _activity_dirty
     name = str(user or "")
     if not name:
         return
     now = time.time()
     with _online_lock:
         _online_seen[name] = now
-        # 长期运行时 dict 会无限增长，顺手清掉过期项
+        _activity_dirty = True
+        # 长期运行时 dict 会无限增长。清理用**保留期**而不是 TTL：
+        # 离线账号的记录要留着，否则列表里就永远只有「从未连接」。
         if len(_online_seen) > 2000:
-            for stale in [k for k, t in _online_seen.items() if now - t > ONLINE_TTL_SEC]:
+            cutoff = now - ACTIVITY_RETENTION_SEC
+            for stale in [k for k, t in _online_seen.items() if t < cutoff]:
                 _online_seen.pop(stale, None)
 
 
 def online_map():
     """返回 {user: 距上次活动的秒数}，只含 TTL 内的。"""
     now = time.time()
+    ttl = online_ttl()
     with _online_lock:
-        return {u: now - t for u, t in _online_seen.items() if now - t <= ONLINE_TTL_SEC}
+        return {u: now - t for u, t in _online_seen.items() if now - t <= ttl}
+
+
+def activity_map():
+    """返回 {user: 最后一次活动的 epoch 秒}，**含已过期/已离线的**（用来显示「上次活动」）。"""
+    with _online_lock:
+        return dict(_online_seen)
+
+
+def account_state(account, activity, now=None, ttl=None):
+    """
+    三态判定。返回 (state, last_active_epoch 或 None)。
+
+    规则（顺序就是优先级）：
+      停用  = enable == False                                  → 红
+      在线  = enable == True 且 最后一次活动在 ttl 内           → 绿
+      离线  = enable == True 但 超过 ttl 或从来没有过活动       → 灰
+
+    为什么「停用」优先于「在线」：停用账号根本过不了插件鉴权，
+    它不可能有心跳；但万一内存里还留着停用之前的时间戳，也不该显示成在线。
+    """
+    now = time.time() if now is None else now
+    ttl = online_ttl() if ttl is None else ttl
+    user = str((account or {}).get("user") or "")
+    last = activity.get(user)
+    if not bool((account or {}).get("enable", True)):
+        return STATE_DISABLED, last
+    if last is not None and now - last <= ttl:
+        return STATE_ONLINE, last
+    return STATE_OFFLINE, last
+
+
+def state_counts(accounts, now=None):
+    """
+    三种状态各有多少个。返回 {state: 数量}。
+
+    ⚠️ 统计的是**传进来的账号列表**，不是在线表 —— 在线表里可能有已删除账号的残留，
+    直接 len() 会出现「指标说有 2 个在线，列表里只看得到 1 个」。
+    """
+    now = time.time() if now is None else now
+    ttl = online_ttl()
+    activity = activity_map()
+    out = {STATE_ONLINE: 0, STATE_OFFLINE: 0, STATE_DISABLED: 0}
+    for account in accounts:
+        state, _last = account_state(account, activity, now, ttl)
+        out[state] += 1
+    return out
 
 
 def human_since(seconds):
-    """把秒数说成人话。"""
+    """把秒数说成人话。超过一天的走「天」—— 离线几天的账号别显示成「72 小时前」。"""
     seconds = int(seconds or 0)
     if seconds < 60:
         return "%d 秒前" % seconds
     if seconds < 3600:
         return "%d 分钟前" % (seconds // 60)
-    return "%d 小时前" % (seconds // 3600)
+    if seconds < 86400:
+        return "%d 小时前" % (seconds // 3600)
+    return "%d 天前" % (seconds // 86400)
 
 
 # ---------------------------------------------------------------- 插件回调
@@ -648,6 +915,9 @@ def handle_plugin_op(op, content, store):
             )
         log("ALLOW  NewProxy user=%r proxy=%r port=%d"
             % (user, content.get("proxy_name"), remote_port))
+        # NewProxy 也算活动：frpc 刚建好隧道，说明它显然是活的。
+        # （Login / Ping / NewWorkConn / NewUserConn 在各自的成功路径上也都记一笔。）
+        note_online(user)
         return plugin_response_allow()
 
     if op in ("Ping", "NewWorkConn", "NewUserConn"):
@@ -664,7 +934,9 @@ def handle_plugin_op(op, content, store):
         #    之前这里不打日志，导致「Ping 在正常工作」被我误读成「Ping 从不回调」，
         #    白白绕了很久。凡是回调，进出都要留痕。
         log("ALLOW  %s user=%r" % (op, user))
-        # 心跳 = 这个账号还活着。这是「谁在线」的唯一数据来源。
+        # 心跳 = 这个账号还活着。这是「谁在线」的**唯一**数据来源
+        # （frps 的 dashboard/webServer 已经被关掉，拿不到 /api/proxy/tcp 那套状态）。
+        # 只动内存 + 置 dirty，真正写盘交给后台线程节流处理（见「在线状态」一节）。
         note_online(user)
         return plugin_response_allow()
 
@@ -1340,7 +1612,27 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .pill.ok{color:var(--ok);border-color:var(--ok-container);background:var(--ok-container)}
 .pill.warn{color:var(--warn);border-color:var(--warn-container);background:var(--warn-container)}
 .pill.bad{color:var(--bad);border-color:var(--bad-container);background:var(--bad-container)}
+/* ============================================================================
+   账号状态的三色就是上面这两行 + `.pill` 的默认色，没有新造任何颜色：
+     .pill.ok   = 在线 → --ok（深色主题是柔和绿，亮色主题自动变成深绿 #1f6b45）
+     .pill.off  = 离线 → 不另设色，走 .pill 的 --md-on-surface-variant，两套主题都是中性灰
+     .pill.bad  = 停用 → --bad（M3 的 error 体系，两套主题各自配过 container）
+   为什么复用而不是硬编码 #22c55e / #9ca3af / #ef4444：这三档状态色本来就是
+   按 M3 的 harmonize 思路**为两套主题分别算过**的（见文件顶部那段配色说明），
+   再塞一组 hex 必然在其中一种主题下对比度不够 —— 下面 .live 原来就是这么翻车的。
+   ============================================================================ */
 .pill.off{color:var(--md-on-surface-variant)}
+/* 到期角标：状态胶囊旁边的**次要**标记。比 pill 小一号、没有圆点，
+   于是"三态"永远是第一眼看到的东西，到期只是附加信息（但仍一眼可见，没有丢）。 */
+.exp{display:inline-block;font-size:11px;line-height:16px;font-weight:500;
+  padding:1px 7px;margin-left:6px;border-radius:var(--sh-xs);white-space:nowrap;
+  border:1px solid transparent;vertical-align:middle}
+.exp.warn{color:var(--warn);background:var(--warn-container);border-color:var(--warn-container)}
+.exp.bad{color:var(--bad);background:var(--bad-container);border-color:var(--bad-container)}
+/* 状态列第二行：上次活动时间（只在离线/停用行出现，免得和账号名旁的心跳指示重复） */
+.lastact{font-size:11px;line-height:16px;margin-top:6px;
+  color:var(--md-on-surface-variant);font-variant-numeric:tabular-nums;white-space:nowrap}
+.col-state{min-width:104px}
 
 .ports{display:flex;gap:6px;flex-wrap:wrap;max-width:280px}
 .chip{font:500 12px/16px ui-monospace,Menlo,Consolas,monospace;
@@ -1484,6 +1776,8 @@ pre .s{color:var(--ok)}
 .metric.ok .v{color:var(--ok)}
 .metric.warn .v{color:var(--warn)}
 .metric.bad .v{color:var(--bad)}
+/* 离线：中性灰（和 .pill.off 同一档），不用新颜色 */
+.metric.off .v{color:var(--md-on-surface-variant)}
 .metric .sub{font-size:12px;line-height:16px;color:var(--md-on-surface-variant);margin-top:2px}
 .metric .track{height:5px;border-radius:var(--sh-full);overflow:hidden;margin-top:12px;
   background:var(--md-surface-container-highest)}
@@ -1615,14 +1909,20 @@ main a:not(.btn){color:var(--md-primary);text-decoration:underline;
 main a:not(.btn):hover{text-decoration-thickness:2px}
 main a:not(.btn):focus-visible{outline:3px solid var(--md-primary);outline-offset:2px;border-radius:2px}
 
-/* 在线指示：贴着账号名，绿点 + 文字。
-   不用纯色圆点 —— 只靠颜色区分状态对色觉障碍用户不友好，必须同时有文字。 */
+/* 在线指示：贴着账号名，绿点 + 「· 心跳 N 秒前」。
+   为什么还留这一小段：它回答的是「多久之前的心跳」，而状态列只回答「在不在线」。
+   「在线」「离线」「停用」这三个词由状态列的胶囊负责（见 .pill.ok/.off/.bad），
+   所以这里不再重复一个「在线」—— 两个一模一样的词挨在一起纯属噪音。
+   ⚠️ 这里原来写的是 var(--md-ok,#3ddc84)：**--md-ok 这个变量根本不存在**
+   （全文件只在 .live / .metric.good 两处出现，从没定义过），于是永远取 fallback
+   #3ddc84 —— 那是个只适合深色底的亮绿，亮色主题下压在 #fef7ff 上对比度约 1.7:1，
+   基本看不见。改用已经按两套主题算过的 --ok。 */
 .live{display:inline-flex;align-items:center;margin-left:8px;font-size:11px;
-  font-weight:500;color:var(--md-ok,#3ddc84);letter-spacing:.2px}
+  font-weight:500;color:var(--ok);letter-spacing:.2px}
 .live::before{content:"";width:6px;height:6px;border-radius:50%;
   background:currentColor;margin-right:4px;
   box-shadow:0 0 0 3px color-mix(in srgb,currentColor 22%,transparent)}
-.metric.good .v{color:var(--md-ok,#3ddc84)}
+.metric.good .v{color:var(--ok)}
 
 /* ---------- 设置行 ---------- */
 .setrow{margin:16px 0}
@@ -1906,16 +2206,16 @@ def render_accounts(accounts, now=None, show_tokens=False, csrf="", message="",
                     is_error=False):
     now = now or time.time()
     soon_days = int(CONFIG.get("expiring_soon_days") or 3)
-    # 在线状态只在渲染开始时取一次快照 —— 每行都去问一次既慢，同一页里还可能前后不一致。
-    online = online_map()
-    # ⚠️ 指标卡只能统计「账号列表里真实存在的」在线账号。
-    #    在线表可能有已删除账号的残留（删除不会清在线表，等 TTL 自然过期），
-    #    直接 len(online) 会出现「指标说有 2 个在线，列表里只看得到 1 个」——
-    #    管理员会以为界面漏画了，实际上是在线表里有个已经不存在的账号。
-    account_names = {str(a.get("user") or "") for a in accounts}
-    online_here = {u: age for u, age in online.items() if u in account_names}
+    ttl = online_ttl()
+    # 活动时间只在渲染开始时取一次快照 —— 每行都去问一次既慢，同一页里还可能前后不一致
+    # （同一页里 A 行显示在线、指标卡却不认，这种不一致最容易让人怀疑面板坏了）。
+    activity = activity_map()
+    # ⚠️ 统计口径是「账号列表里的行」，不是在线表 ——
+    #    在线表里可能有已删除账号的残留（删除不会清在线表，等保留期自然过期），
+    #    直接 len() 会出现「指标说有 2 个在线，列表里只看得到 1 个」，
+    #    管理员会以为界面漏画了。所以三态计数全都在下面的循环里数出来。
     rows = []
-    active = expired = disabled = expiring = 0
+    online_n = offline_n = expired = disabled = expiring = 0
 
     for a in sorted(accounts, key=lambda x: (x.get("user") or "").lower()):
         user = a.get("user") or ""
@@ -1929,22 +2229,57 @@ def render_accounts(accounts, now=None, show_tokens=False, csrf="", message="",
         enabled = bool(a.get("enable", True))
         token = a.get("token") or ""
 
-        if not enabled:
-            state, cls, dot = "已停用", "off", "off"
+        # ---- 三态判定（绿 / 灰 / 红）----
+        #   停用 = enable == False                        → 红（.pill.bad，M3 error 体系）
+        #   在线 = 启用 且 最后一次心跳在 ttl（默认 90s）内  → 绿（.pill.ok）
+        #   离线 = 启用 但 心跳已过期 / 从来没连过           → 灰（.pill.off →
+        #                                                       --md-on-surface-variant，
+        #                                                       深色浅色两套主题下都是中性灰）
+        # ⚠️ 到期状态**不再是**主状态了（站长要的是"谁在连"），但信息一点都不能丢：
+        #    它被降级成状态胶囊旁边的「即将到期 / 已到期」角标（.exp），
+        #    而「到期 / 剩余」列本来就在显示天数，两处互相印证。
+        row_state, last = account_state(a, activity, now, ttl)
+        if row_state == STATE_DISABLED:
+            state, cls = "停用", "bad"
             disabled += 1
             row_cls = "disabled"
-        elif is_expired:
-            state, cls, dot = "已到期", "bad", "bad"
-            expired += 1
-            row_cls = "expired"
-        elif is_soon:
-            state, cls, dot = "即将到期", "warn", "warn"
-            expiring += 1
+            state_title = "账号已停用：插件会拒绝它的 Login / Ping / NewWorkConn"
+        elif row_state == STATE_ONLINE:
+            state, cls = "在线", "ok"
+            online_n += 1
             row_cls = ""
+            state_title = "最近 %d 秒内收到过插件心跳" % ttl
         else:
-            state, cls, dot = "正常", "ok", "ok"
-            active += 1
+            state, cls = "离线", "off"
+            offline_n += 1
             row_cls = ""
+            state_title = "启用中，但超过 %d 秒没有心跳" % ttl
+
+        # 行底色仍然按「已到期」标红（跟状态是两件正交的事：一个账号可以既在线又到期）。
+        if row_cls != "disabled" and is_expired:
+            row_cls = "expired"
+
+        # 到期角标：已到期 > 即将到期（两个同时成立时只显更严重的那个）
+        exp_badge = ""
+        if is_expired:
+            exp_badge = '<span class="exp bad">已到期</span>'
+            expired += 1
+        elif is_soon:
+            exp_badge = '<span class="exp warn">即将到期</span>'
+            expiring += 1
+
+        # 「上次活动」：在线行由账号名旁边的「· 心跳 N 秒前」承担（同一行别把同一件事说两遍），
+        # 离线/停用行才在这里显示 —— 对这两种状态来说「断了多久 / 有没有连过」才是要看的信息。
+        last_html = ""
+        age = None if last is None else max(0.0, now - last)
+        if row_state != STATE_ONLINE:
+            if last is None:
+                last_html = ('<div class="lastact" title="面板还没收到过这个账号的插件心跳">'
+                             '从未连接</div>')
+            else:
+                last_html = ('<div class="lastact" title="最后一次插件心跳：%s">'
+                             '上次活动 %s</div>'
+                             % (html.escape(activity_iso(last)), human_since(age)))
 
         # 端口：最多平铺 4 个，其余折叠成 +N（超大端口列表不该把表格撑烂）
         # %s 而不是 %d —— 端口可能是个区间字符串
@@ -1993,12 +2328,14 @@ def render_accounts(accounts, now=None, show_tokens=False, csrf="", message="",
         # 勾选框用 form="bulkform" 关联到表格外的批量表单 ——
         # 如果把整张表包进 <form>，行内的启停/删除表单就成了嵌套表单（无效 HTML）。
         rows.append(
-            '<tr class="%(row)s" data-search="%(search)s">'
+            '<tr class="%(row)s" data-state="%(state_key)s" data-search="%(search)s">'
             '<td class="col-sel"><input type="checkbox" name="users" value="%(user_raw)s" '
             'form="bulkform" aria-label="选择账号 %(user)s"></td>'
             '<td><div class="who" translate="no">%(user)s%(live)s</div>%(csub)s</td>'
             '<td class="col-ports"><div class="ports">%(ports)s</div></td>'
-            '<td><span class="pill %(cls)s"><i></i>%(state)s</span></td>'
+            # 状态列：主状态胶囊（绿/灰/红）+ 到期角标（次要信息）+ 上次活动（仅离线/停用）
+            '<td class="col-state"><span class="pill %(cls)s" title="%(state_title)s">'
+            '<i></i>%(state)s</span>%(exp)s%(last)s</td>'
             '<td><div class="mono">%(expire)s</div>%(left)s</td>'
             '<td class="col-token">%(token)s</td>'
             '<td class="col-comment dim" style="max-width:26ch;overflow:hidden;'
@@ -2015,15 +2352,21 @@ def render_accounts(accounts, now=None, show_tokens=False, csrf="", message="",
             'aria-label="删除账号 %(user)s" title="删除">%(ico_trash)s</button></form>'
             '</div></td></tr>' % {
                 "row": row_cls, "user": esc_user, "user_raw": html.escape(user, True),
-                # 在线指示：只在 TTL 内显示。用 title 说明"多久前活动过"，
-                # 免得管理员分不清"刚断"和"断了很久"。
-                "live": ('<span class="live" title="%s">· 在线</span>' % human_since(online[user]))
-                        if user in online else "",
+                # 行内的心跳新鲜度：只在**在线**行显示，说的是「多久之前有心跳」，
+                # 而不是重复一遍「在线」（那个词在状态列里）。title 给准确时间，
+                # 免得管理员分不清「刚断」和「断了很久」。
+                "live": ('<span class="live" title="最后一次插件心跳：%s">· 心跳 %s</span>'
+                         % (html.escape(activity_iso(last)), human_since(age)))
+                        if row_state == STATE_ONLINE else "",
                 "search": html.escape(
                     ("%s %s %s" % (user, comment, " ".join(str(p) for p in ports))).lower(), True),
                 "csub": ('<div class="who-sub">%s</div>' % html.escape(comment)) if comment else "",
                 "ports": chips or '<span class="dim">—</span>',
-                "cls": cls, "state": state, "expire": html.escape(expire or "—"),
+                # ⚠️ state_key 必须和筛选按钮的 data-filter 取值完全一致
+                #    （页面底部 JS 用 r.dataset.state === filter 比对），改一处就要改两处。
+                "state_key": row_state, "state_title": state_title,
+                "cls": cls, "state": state, "exp": exp_badge, "last": last_html,
+                "expire": html.escape(expire or "—"),
                 "left": left_html, "token": token_html,
                 "comment": html.escape(comment or "—"),
                 "u": urllib.parse.quote(user), "csrf": csrf_field(csrf),
@@ -2063,19 +2406,31 @@ def render_accounts(accounts, now=None, show_tokens=False, csrf="", message="",
                 '<div class="sub">%s</div>%s</div>'
                 % (tone, label, value, sub, extra))
 
-    metrics = '<div class="metrics">%s%s%s%s%s</div>' % (
+    metrics = '<div class="metrics">%s%s%s%s%s%s</div>' % (
         metric("账号总数", len(accounts),
-               "启用 %d · 停用 %d" % (active + expiring + expired, disabled)),
-        # 「谁在线」—— 数据来自插件心跳（Login/Ping/NewWorkConn 都算），90 秒没动静就算离线
-        # （这里不放"只看这些 →"筛选链接：列表页并没有 live 这个筛选值，
-        #   放一个点了没反应的链接比不放更糟。）
-        metric("在线", len(online_here),
-               "刚刚有心跳" if online_here else "暂无客户端连接",
-               "good" if online_here else ""),
-        metric("即将到期", expiring, "%d 天内" % soon_days, "warn",
-               ('<a href="/?st=warn">只看这些 →</a>') if expiring else ""),
-        metric("已到期", expired, "插件已拒绝其连接", "bad",
-               ('<a href="/?st=bad">只看这些 →</a>') if expired else ""),
+               "启用 %d · 停用 %d" % (len(accounts) - disabled, disabled)),
+        # 「谁在线」—— 数据来自插件心跳（Login/NewProxy/Ping/NewWorkConn/NewUserConn 都算），
+        # 超过 online_ttl_seconds（默认 90 秒）没动静就算离线。
+        # 三张卡片的颜色就是行内胶囊的三色，扫一眼就知道有没有人被踢下去了。
+        metric("在线", online_n,
+               "刚刚有心跳" if online_n else "暂无客户端连接",
+               "ok" if online_n else "",
+               ('<a href="/?st=online">只看这些 →</a>') if online_n else ""),
+        metric("离线", offline_n,
+               "启用中但已无心跳" if offline_n else "没有掉线的账号",
+               "off" if offline_n else "",
+               ('<a href="/?st=offline">只看这些 →</a>') if offline_n else ""),
+        metric("停用", disabled,
+               "插件会直接拒绝其连接" if disabled else "没有停用账号",
+               "bad" if disabled else "",
+               ('<a href="/?st=disabled">只看这些 →</a>') if disabled else ""),
+        # 到期信息**没有丢**，只是从"主状态"降级成独立指标 + 行内角标（见状态列的 .exp）。
+        # ⚠️ 这里不再挂 ?st= 链接：筛选按钮现在只有 全部/在线/离线/停用 四个值，
+        #    指到一个不存在的筛选值会让列表变空，比不放链接更糟。
+        metric("已到期", expired,
+               ("%d 个在 %d 天内到期" % (expiring, soon_days)) if expiring
+               else "插件已拒绝到期账号的连接",
+               "bad" if expired else ("warn" if expiring else "")),
         metric("端口占用", "%d%%" % util, port_sub,
                "", '<div class="track"><i style="width:%d%%"></i></div>' % util),
     )
@@ -2117,10 +2472,9 @@ def render_accounts(accounts, now=None, show_tokens=False, csrf="", message="",
     autocomplete="off"><kbd>/</kbd></div>
   <div class="seg" role="group" aria-label="按状态筛选">
     <button type="button" data-filter="all" aria-pressed="true">全部</button>
-    <button type="button" data-filter="ok" aria-pressed="false">正常</button>
-    <button type="button" data-filter="warn" aria-pressed="false">即将到期</button>
-    <button type="button" data-filter="bad" aria-pressed="false">已到期</button>
-    <button type="button" data-filter="off" aria-pressed="false">停用</button>
+    <button type="button" data-filter="online" aria-pressed="false">在线</button>
+    <button type="button" data-filter="offline" aria-pressed="false">离线</button>
+    <button type="button" data-filter="disabled" aria-pressed="false">停用</button>
   </div>
   <select class="sort" id="sort" aria-label="排序">
     <option value="name">按账号名</option>
@@ -2150,7 +2504,7 @@ def render_accounts(accounts, now=None, show_tokens=False, csrf="", message="",
 <div class="table-wrap"><table>
 <thead><tr>
   <th class="col-sel"><input type="checkbox" id="selall" aria-label="全选可见账号"></th>
-  <th>账号</th><th class="col-ports">端口</th><th>状态</th><th>到期 / 剩余</th>
+  <th>账号</th><th class="col-ports">端口</th><th class="col-state">状态</th><th>到期 / 剩余</th>
   <th class="col-token">令牌</th><th class="col-comment">备注</th>
   <th style="text-align:right">操作</th>
 </tr></thead>
@@ -2160,11 +2514,17 @@ def render_accounts(accounts, now=None, show_tokens=False, csrf="", message="",
   var q=document.getElementById('q'), rows=[].slice.call(document.querySelectorAll('#rows tr'));
   var count=document.getElementById('count'), seg=[].slice.call(document.querySelectorAll('.seg button'));
   var sort=document.getElementById('sort'), filter='all';
+  // 筛选值必须与按钮的 data-filter、行上的 data-state 三处一致：
+  // all / online / offline / disabled
+  var FILTERS={all:1, online:1, offline:1, disabled:1};
   function apply(push){
     var s=(q.value||'').trim().toLowerCase(), n=0;
     rows.forEach(function(r){
       var hitText = !s || (r.dataset.search||'').indexOf(s)>=0;
-      var hitFilt = filter==='all' || r.querySelector('.pill').classList.contains(filter);
+      // 状态筛选读 tr 上的 data-state，**不再**从 .pill 的 class 里猜：
+      // 状态列里现在同时挂着「到期」角标，pill 的类名还被日志页/设置页共用，
+      // 用 class 匹配很容易匹配到错误的元素（而且换个角标样式就会静默失效）。
+      var hitFilt = filter==='all' || (r.dataset.state||'')===filter;
       var show = hitText && hitFilt;
       r.hidden = !show; if(show) n++;
     });
@@ -2184,7 +2544,11 @@ def render_accounts(accounts, now=None, show_tokens=False, csrf="", message="",
     var p=new URLSearchParams(location.search);
     if(p.get('q')) q.value=p.get('q');
     var st=p.get('st');
-    if(st){ filter=st; seg.forEach(function(x){ x.setAttribute('aria-pressed', String(x.dataset.filter===st)); }); }
+    // 只认四种合法值。老书签/老链接里的 ?st=ok|warn|bad|off 已经不存在了 ——
+    // 直接忽略（否则 filter 会变成一个没人匹配得上的值，整张表变空，看着像坏了）。
+    if(st && FILTERS[st]===1){
+      filter=st; seg.forEach(function(x){ x.setAttribute('aria-pressed', String(x.dataset.filter===st)); });
+    }
     if(p.get('sort')){ sort.value=p.get('sort'); sort.dispatchEvent(new Event('change')); }
   })();
   q.addEventListener('input', function(){ apply(); });
@@ -2701,6 +3065,12 @@ SETTINGS_FIELDS = [
          "新建账号时租期输入框的默认值"),
         ("expiring_soon_days", "「即将到期」阈值（天）", "int",
          "距到期还剩这么多天就在列表里标黄"),
+        ("online_ttl_seconds", "「在线」判定阈值（秒）", "int",
+         "最后一次插件心跳距今不超过这个秒数就算在线（绿），否则算离线（灰）。"
+         "**必须大于 frps 的 transport.heartbeatInterval**：默认心跳 30 秒、"
+         "默认超时 90 秒，所以这里默认 90 —— 连续丢 1~2 个心跳不会闪成离线。"
+         "把 heartbeatInterval 调大过 90 秒的话，这里要跟着调大。"
+         "调小则更灵敏，但网络抖动会让状态来回跳。"),
         ("default_port_start", "默认端口区间起", "int", "新建账号时建议分配的区间起始"),
         ("default_port_end", "默认端口区间止", "int", "同上，含两端"),
         ("auto_disable_expired", "巡检时把已到期账号的 enable 也置为停用", "bool",
@@ -2725,6 +3095,7 @@ SETTINGS_READONLY = [
     ("allow_public_bind", "允许非本机监听", "安全开关，必须改文件"),
     ("user_prefix", "可管理前缀", "自动化只能碰这个前缀的账号（安全边界），必须改文件"),
     ("data_file", "账号数据文件", "改它会指向另一份账号数据"),
+    ("activity_file", "活动记录文件", "记「最后活动时间」的轻量文件，丢了只影响在线状态显示"),
     ("log_file", "日志文件", "操作日志页读的就是它"),
     ("session_secret", "会话签名密钥", "改它会让所有已登录会话立即失效"),
 ]
@@ -2920,7 +3291,9 @@ X-Frp-Agent-Signature: <span class="s">&lt;上面算出的十六进制&gt;</span
 <tr><td>本机回环</td><td>全部</td><td>免登录（frps 插件和 agent 都从回环来）</td></tr>
 <tr><td>外部</td><td><code>/handler</code></td><td><b>403</b>，插件回调只收本机</td></tr>
 <tr><td>外部</td><td><code>/api/admin/*</code></td><td>HMAC 签名</td></tr>
-<tr><td>外部</td><td><code>/health</code></td><td>放行（不含敏感信息）</td></tr>
+<tr><td>外部</td><td><code>/health</code></td>
+<td>放行（只返回汇总计数：<code>accounts</code> / <code>online</code> / <code>offline</code> /
+<code>disabled</code>，不含任何账号名）</td></tr>
 <tr><td>外部</td><td>其它（网页、<code>/tokens</code>、<code>/api/token/&lt;user&gt;</code>）</td>
 <td>必须登录；令牌默认不上屏，点「显示」才按需取且每次记日志</td></tr>
 </tbody></table>
@@ -3223,6 +3596,16 @@ class PanelHandler(BaseHTTPRequestHandler):
                     updates[key] = one(key) == "1"
                 elif kind == "int":
                     text = one(key).strip()
+                    # 表单里**压根没有**这个键 → 保留当前值，不判错。
+                    # 为什么：页面上的表单会把所有可改项都渲染出来，但两种情况会缺字段 ——
+                    #   1. 浏览器里开着一个**旧版页面**（比如刚升级面板、还没刷新），
+                    #      提交时自然没有后来新增的键；
+                    #   2. 脚本/自定义表单只提交了关心的那几个键（tests/test-settings.py 就是）。
+                    # 以前这种情况会整次保存被判失败（"XX 必须是整数"），而页面上只是
+                    # 一句红字 —— 很容易被当成"保存坏了"。填了乱码仍然照常报错。
+                    if not text and key not in form:
+                        updates[key] = CONFIG.get(key, DEFAULT_CONFIG.get(key))
+                        continue
                     try:
                         value = int(text)
                     except (TypeError, ValueError):
@@ -3768,7 +4151,18 @@ class PanelHandler(BaseHTTPRequestHandler):
                 "data": accounts,
             })
         if path == "/health":
-            return self._json({"ok": True, "accounts": len(self.store.all())})
+            # ⚠️ 这个端点是**无鉴权**公开的（监控在用），所以只给汇总计数：
+            #    绝不带账号名、端口、令牌。三态计数在这里一起给出去，
+            #    外部监控可以直接按「在线数掉了」报警，不用登面板。
+            accounts = self.store.all()
+            counts = state_counts(accounts)
+            return self._json({
+                "ok": True,
+                "accounts": len(accounts),
+                "online": counts[STATE_ONLINE],
+                "offline": counts[STATE_OFFLINE],
+                "disabled": counts[STATE_DISABLED],
+            })
         return self._json({"code": 1, "msg": "not found", "data": []}, 404)
 
     def do_POST(self):
@@ -4224,14 +4618,24 @@ def main():
 
     server, store = build_server()
     start_sweeper(store)
+    # 把上次的「最后活动时间」读回来（重启前刚有心跳的账号仍然显示在线，
+    # 离线账号则直接显示「上次活动：3 小时前」而不是「从未连接」）。
+    load_activity()
+    # 心跳时间的落盘是异步节流的：插件回调只动内存，这个线程每 30 秒最多写一次盘。
+    start_activity_flusher()
     log("启动：监听 http://%s:%d  数据文件=%s  可管理前缀=%r"
         % (CONFIG["listen_host"], CONFIG["listen_port"], CONFIG["data_file"],
            CONFIG["user_prefix"]))
     log("插件回调端点：POST /handler?op=Login|NewProxy|CloseProxy|Ping|NewWorkConn|NewUserConn")
+    log("在线判定：最后一次插件心跳在 %d 秒内算在线（阈值来自 frps 的心跳间隔）"
+        % online_ttl())
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         log("收到中断，退出")
+    finally:
+        # 退出前把攒着的心跳时间写下去，不然最后 30 秒的活动时间白记
+        flush_activity()
 
 
 if __name__ == "__main__":

@@ -2173,6 +2173,10 @@ function Wb2ApiDonationCard({
         if (res.skippedByLimit.length > 0) {
           toast.warning(t("don.wb.importLimit", { n: res.skippedByLimit.length }))
         }
+        // 同 Qoder 卡：未通过上游核验的账号没有任何权益被发放，必须明确告警
+        if (res.rejected && res.rejected.length > 0) {
+          toast.warning(t("don.wb.importRejected", { n: res.rejected.length }))
+        }
         onDone()
       } catch (err) {
         toast.error(err instanceof Error ? err.message : t("don.wb.importFailed"))
@@ -2559,6 +2563,12 @@ function Qoder2ApiDonationCard({
         toast.success(t("don.q2.importOk", { n: res.bound, total: res.total }))
         if (res.skippedByLimit.length > 0) {
           toast.warning(t("don.q2.importLimit", { n: res.skippedByLimit.length }))
+        }
+        // 未通过上游核验的账号（伪造 uid / 上游禁用 / 被别人占用）：
+        // 它们**没有**建绑定、没有发权限、没有发积分，必须明确告警，
+        // 否则用户会以为「导入完成 = 全绑上了」。只报数量，明细在审计日志里。
+        if (res.rejected && res.rejected.length > 0) {
+          toast.warning(t("don.q2.importRejected", { n: res.rejected.length }))
         }
         onDone()
       } catch (err) {

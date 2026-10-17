@@ -43,6 +43,7 @@ import {
   q2PollLogin,
   q2StartLogin,
   saveQoder2ApiPassword,
+  type Q2Account,
   type Qoder2ApiRealm,
 } from "../qoder2api-client"
 import { grantInviteReward } from "../invite-rewards"
@@ -203,6 +204,97 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
   })
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * JSON 导入的几条硬规则（2026-10-17，安全审计 #13 / #53 修复）
+ * ---------------------------------------------------------------------------
+ *
+ * 🔴 修复前的洞：上传的 JSON 里写什么 `uid`，就直接 INSERT 成一条 active 绑定，
+ *    **完全不核实这个 uid 在上游是否真的存在**（原循环里唯一的「拦」是「已被别人绑过」，
+ *    而伪造出来的 uid 当然谁也没绑过，等于一路放行）。
+ *    于是 `[{"uid":"随便编一个"}]` 就能换到：`ai` 权限 + 一次捐献积分（+ 一个占用的绑定名额），
+ *    再顺着 `/api/dev/bind` → `/api/dev/subscription` → `/api/dev/key` 白嫖真实计费模型
+ *    （即报告 #13 → #11 那条变现链）。这一侧的上游是网关自己 ——
+ *    「账号真的在网关池里」就是它能提供的最强存在性背书。
+ *    （注：邀请奖励只在本文件的 `completeBinding`（登录/poll）里发，导入路径不发。）
+ *
+ * ⚠️ 残余边界（诚实记录）：网关池的「存在」是**存在性**背书，不是**归属**背书 ——
+ *    归属只有 OAuth 登录那条路（poll）才拿得到。若网关的 `/accounts/import` 对
+ *    凭据不做任何自校验就入池，那么伪造行仍可能进池（进而被本函数认成"存在"）。
+ *    这一层只能用「入池前自校验」在网关侧关掉，本站无能为力；缓解手段是管理端的
+ *    号池观测（`adminListBindings` / 网关 control panel）与下方的启用状态判定。
+ *
+ * 现在的顺序（**发权益必须在校验之后**，因为发权限/发积分是不可逆副作用）：
+ *   1. 本地解析 uid（形状校验 + 去重）→ 2. 本地查既有绑定（跳过/复活/名额）
+ *   → 3. 只把候选行送去网关导入 → 4. **拉一次网关池列表逐 uid 核实存在性**
+ *   → 5. 核验通过的才建绑定 → 6. 再写 ai 权限 → 7. 最后发积分。
+ *
+ * 两个显式取舍（都写在对应代码旁边）：
+ *   · 上游不可用 ⇒ **fail-closed**（整批拒绝，不建绑定、不发任何东西）；
+ *   · 部分失败 ⇒ **部分成功**（通过的发，失败的逐条列在 `rejected` 里），
+ *     而不是整批回滚 —— 理由见下面 :verify 段的注释。
+ */
+
+/**
+ * 单次导入最多处理的账号数。
+ *
+ * 不设上限时，一个 5 MB 的 JSON 能塞几万个 uid，建绑定就是几万次 D1 往返，
+ * 用户看到的是「500 服务器内部错误」而不是一句可读的提示。200 覆盖正常导出
+ * （实测几十到一百多个），也能在一两个 batch 轮次内跑完。
+ */
+const MAX_IMPORT_ACCOUNTS = 200
+
+/** D1 单条语句的绑定参数上限约 100 ⇒ `IN (...)` 查询按 90 分片 */
+const SQL_IN_CHUNK = 90
+
+/** 批量写绑定/复活时的单批语句数（一个 batch = 一次 D1 往返） */
+const DB_BATCH_CHUNK = 25
+
+/**
+ * 账号标识的**形状**校验。
+ *
+ * 这不是安全边界（真正的边界是下面的上游池核实），只是一道便宜的本地闸门：
+ * 把空串、控制字符、超长串这类明显不是账号的输入挡在 D1 与共享池之外 ——
+ * 这类行进了共享池会污染池子，也会让审计日志不可读。
+ */
+const UID_PATTERN = /^[A-Za-z0-9._:@+-]{1,128}$/
+
+/** 核验不通过 / 无法绑定的账号（逐条回给前端，便于用户自己排查） */
+interface RejectedAccount {
+  uid: string
+  reason: string
+}
+
+/**
+ * 一次性把本批 uid 在本地已有的绑定读出来。
+ *
+ * 不这么写就要为每个 uid 单查一次（N 次 D1 往返）；D1 绑定参数上限约 100，故按 90 分片。
+ */
+async function loadBindingsByAccountId(
+  env: Env,
+  uids: string[]
+): Promise<Map<string, { id: string; user_id: string; status: string }>> {
+  const out = new Map<string, { id: string; user_id: string; status: string }>()
+  for (let i = 0; i < uids.length; i += SQL_IN_CHUNK) {
+    const chunk = uids.slice(i, i + SQL_IN_CHUNK)
+    const rows = await env.DB.prepare(
+      `SELECT id, user_id, account_id, status FROM qoder2api_bindings
+        WHERE account_id IN (${chunk.map(() => "?").join(",")})`
+    )
+      .bind(...chunk)
+      .all<{ id: string; user_id: string; account_id: string; status: string }>()
+    for (const r of rows.results ?? []) out.set(r.account_id, r)
+  }
+  return out
+}
+
+/** 分批执行写语句：一个 batch = 一次往返，比逐条 await 快一个量级 */
+async function runInBatches(env: Env, statements: D1PreparedStatement[]): Promise<void> {
+  for (let i = 0; i < statements.length; i += DB_BATCH_CHUNK) {
+    await env.DB.batch(statements.slice(i, i + DB_BATCH_CHUNK))
+  }
+}
+
 /**
  * POST /api/qoder2api/import —— 上传 JSON（账号数组）导入网关并建绑定。
  *
@@ -213,6 +305,9 @@ export async function getStatus(env: Env, request: Request): Promise<Response> {
  * ⚠️ 建绑定这段与 `pollLogin` 里的逻辑是**同一口径**（aiGranted 判定 + 原子写权限 + 审计 + 奖励）。
  *    之所以没抽成共用函数：poll 里那段还夹着「墓碑复活」与「被他人占用」两个分支，
  *    抽出来的收益不如风险。**改一处必须改两处。**
+ *
+ * ⚠️ 与 `pollLogin` 的**本质差异**：poll 的账号是上游 OAuth 刚授权出来的（天然有归属背书），
+ *    而这里的一切信息都来自**用户自己上传的文件**，所以必须额外去上游核实（见上面的段注释）。
  */
 export async function importQoder2ApiAccounts(
   env: Env,
@@ -265,17 +360,33 @@ export async function importQoder2ApiAccounts(
   }
   const chosen = picked ?? (realms.includes(defaultRealm) ? defaultRealm : realms[0])
 
-  // 先进网关池
-  await q2ImportAccounts(env, rows as unknown[], chosen)
-
-  // 再建站内绑定（解析 uid 与 poll 同一字段口径）
+  // ---- 1) 解析出「想绑定」的账号标识（解析 uid 与 poll 同一字段口径） ----
   const uidOf = (r: unknown): string => {
     const o = r as Record<string, unknown> | null
     return String(o?.uid ?? o?.id ?? "").trim()
   }
-  const uids = Array.from(new Set((rows as unknown[]).map(uidOf).filter((u) => u.length > 0)))
+  // 同一 uid 出现多次只算一次，但**保留原始行对象** —— 上游导入接口要按原样回传凭据字段
+  const rowByUid = new Map<string, unknown>()
+  const rejected: RejectedAccount[] = []
+  for (const r of rows as unknown[]) {
+    const uid = uidOf(r)
+    if (!uid) continue // 没有标识的行既无法校验也无法绑定
+    if (!UID_PATTERN.test(uid)) {
+      rejected.push({ uid: uid.slice(0, 64), reason: "账号标识格式非法" })
+      continue
+    }
+    if (!rowByUid.has(uid)) rowByUid.set(uid, r)
+  }
+  const uids = Array.from(rowByUid.keys())
   if (uids.length === 0) {
     throw new ApiError(400, "文件里没有可用的账号（缺少 uid 字段）", "INVALID_JSON")
+  }
+  if (uids.length > MAX_IMPORT_ACCOUNTS) {
+    throw new ApiError(
+      400,
+      `一次最多导入 ${MAX_IMPORT_ACCOUNTS} 个账号（本次 ${uids.length} 个），请分批上传`,
+      "IMPORT_TOO_LARGE"
+    )
   }
 
   const now = new Date().toISOString()
@@ -288,107 +399,226 @@ export async function importQoder2ApiAccounts(
     !parsePermissions(user.permissions).ai
   let granted = false
 
-  let bound = 0
-  // 本次真正“新建”的第一个账号 uid —— 奖励的幂等键用它（下面有说明）
-  let firstNewUid = ""
+  // ---- 2) 本地分类：已在名下 / 自己的墓碑 / 别人的 / 超名额 ----
+  // 一次查询取回整批 uid 的既有绑定（分片 IN），而不是每个 uid 单查一次。
+  const existingByUid = await loadBindingsByAccountId(env, uids)
+
   const alreadyMine: string[] = []
   const skippedByLimit: string[] = []
+  /**
+   * 待上游核实的候选：`reviveId` 非空 = 复活自己的墓碑（账号当初是登录进来的，
+   * 但既然要重新置为 active，就和其他候选一样过一遍存在性核验，口径统一）。
+   */
+  const candidates: { uid: string; reviveId: string | null }[] = []
 
   for (const uid of uids) {
-    const existing = await env.DB.prepare(
-      "SELECT id, user_id, status FROM qoder2api_bindings WHERE account_id = ?"
-    )
-      .bind(uid)
-      .first<{ id: string; user_id: string; status: string }>()
-
-    if (existing?.user_id === user.id) {
+    const existing = existingByUid.get(uid)
+    if (existing && existing.user_id !== user.id) {
+      // 上游账号 id 全局唯一，被别人绑过就绝不能再绑一次（与 poll 的冲突判定同口径）
+      rejected.push({ uid, reason: "该账号已被其他用户绑定" })
+      continue
+    }
+    if (existing) {
       if (existing.status === "active") {
         alreadyMine.push(uid)
         continue
       }
       // 自己的墓碑：复活它（与 poll 里「重复登录」同一处理）
-      await env.DB.prepare(
-        `UPDATE qoder2api_bindings
-            SET status = 'active', removed_at = NULL, removed_by = NULL,
-                realm = ?, nickname = ?
-          WHERE id = ?`
-      )
-        .bind(chosen, nicknameOf(rows, uid, uidOf), existing.id)
-        .run()
-      bound++
+      candidates.push({ uid, reviveId: existing.id })
       continue
     }
-    if (existing) continue // 被别人绑着，跳过（正常不会发生）
-
     if (room <= 0) {
       skippedByLimit.push(uid)
       continue
     }
+    candidates.push({ uid, reviveId: null })
+    // 名额先到先得地扣：宁少勿多 —— 不把超额的行塞进共享池，
+    // 失败的候选让出的名额不回填（回填要么多打一次上游，要么把逻辑绕成两轮，不值）。
+    room--
+  }
+
+  // ---- 3) 只把候选行送去网关（别把整份文件塞进共享池） ----
+  // ⚠️ 这一步不产生任何本地权益：绑定、ai 权限、积分全部在后面核验通过之后才发生。
+  let upstreamCounts: { imported?: number; skipped?: number; errors?: string[] } = {}
+  if (candidates.length > 0) {
+    try {
+      upstreamCounts = await q2ImportAccounts(
+        env,
+        candidates.map((c) => rowByUid.get(c.uid)),
+        chosen
+      )
+    } catch (err) {
+      // 面板密码错这类「管理员可修」的错误保持原样下抛，文案更可操作
+      if (err instanceof Q2UnauthorizedError) throw err
+      /**
+       * 🔴 fail-closed（默认且唯一分支）。
+       *
+       * 上游导入失败时**一个绑定都不建**。理由：此刻我们没有任何核验结果，
+       * 无法区分「真账号」与「伪造 uid」；而发 ai 权限、发积分都是不可逆副作用，
+       * 一旦放行就只能靠事后人工回收。反过来，拒绝对正常用户的代价只是
+       * 「稍后重导一次」—— 两害相权，宁可失败也不放行。
+       *
+       * 注意上游可能已经吃进去一部分（HTTP 超时也可能入库成功），所以这里
+       * 不假装状态干净：只保证**本站**没有因此产生任何绑定/权限/积分。
+       */
+      console.error("Qoder2API 导入调用失败，按 fail-closed 拒绝本次导入:", err)
+      throw new ApiError(
+        503,
+        "上游网关暂时不可用，本次导入已取消（未建绑定、未发放任何权限或积分），请稍后重试",
+        "QODER2API_UPSTREAM_UNAVAILABLE"
+      )
+    }
+  }
+
+  // ---- 4) 向上游核实：这些 uid 是否真的在网关账号池里 ----
+  const verified = new Map<string, Q2Account>()
+  if (candidates.length > 0) {
+    let pool: Q2Account[]
+    try {
+      /**
+       * 批量策略：**一次列表拿全池**（内部 cn/intl 各一次），代价是常数级、与 uid 数量无关；
+       * 绝不逐个 uid 打一次上游 —— 那样 1000 个 uid 就是 1000 次请求，Worker 会先撞
+       * 子请求/时长上限，同时把网关面板打成限流（同样 1000 个 uid，这里是 2 次）。
+       */
+      pool = await q2ListAccounts(env)
+    } catch (err) {
+      // 同上：核验不了就不放行（fail-closed），而不是「查不到就当通过」。
+      console.error("Qoder2API 账号池列表拉取失败，按 fail-closed 拒绝本次导入:", err)
+      throw new ApiError(
+        503,
+        "无法向上游核实账号，本次导入已取消（未建绑定、未发放任何权限或积分），请稍后重试",
+        "QODER2API_VERIFY_UNAVAILABLE"
+      )
+    }
+
+    const byUid = new Map(pool.map((a) => [a.uid, a]))
+    for (const c of candidates) {
+      const acc = byUid.get(c.uid)
+      if (!acc) {
+        // 上游不认这个 uid（伪造、或网关根本没接受这条导入）→ 不建绑定、不发权益
+        rejected.push({ uid: c.uid, reason: "上游账号池里查无此账号（伪造或导入被上游拒绝）" })
+        continue
+      }
+      if (acc.enabled === false) {
+        rejected.push({ uid: c.uid, reason: "上游已禁用该账号" })
+        continue
+      }
+      verified.set(c.uid, acc)
+    }
+  }
+
+  // ---- 5) 核验通过的才落库（批量写，一次往返顶多条） ----
+  const statements: D1PreparedStatement[] = []
+  let newlyBound = 0
+  let revived = 0
+  // 本次真正「新建」的第一个账号 uid —— 奖励的幂等键用它（下面有说明）
+  let firstNewUid = ""
+
+  for (const c of candidates) {
+    const acc = verified.get(c.uid)
+    if (!acc) continue // 未通过核验：不建绑定、不发权限、不发积分
+    // 昵称优先用用户文件里的（更贴近本人习惯），其次用上游池里的
+    const raw = rowByUid.get(c.uid) as Record<string, unknown> | undefined
+    const nickname =
+      String(raw?.nickname ?? raw?.email ?? "").trim() || acc.nickname || null
+
+    if (c.reviveId) {
+      statements.push(
+        env.DB.prepare(
+          `UPDATE qoder2api_bindings
+              SET status = 'active', removed_at = NULL, removed_by = NULL,
+                  realm = ?, nickname = ?
+            WHERE id = ?`
+        ).bind(chosen, nickname, c.reviveId)
+      )
+      revived++
+      continue
+    }
 
     const grant = aiGranted && !granted
-    await env.DB.prepare(
-      `INSERT INTO qoder2api_bindings
-         (id, user_id, account_id, realm, nickname, status,
-          granted_ai_permission, acknowledged_ip, created_at)
-       VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`
+    if (grant) granted = true
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO qoder2api_bindings
+           (id, user_id, account_id, realm, nickname, status,
+            granted_ai_permission, acknowledged_ip, created_at)
+         VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`
+      ).bind(uuid(), user.id, c.uid, chosen, nickname, grant ? 1 : 0, ackIp, now)
     )
-      .bind(uuid(), user.id, uid, chosen, nicknameOf(rows, uid, uidOf), grant ? 1 : 0, ackIp, now)
-      .run()
-
-    if (grant) {
-      granted = true
-      await env.DB.prepare(
-        `UPDATE users SET permissions = ${featurePermissionSql("ai", true)}, updated_at = ? WHERE id = ?`
-      )
-        .bind(now, user.id)
-        .run()
-    }
-    bound++
-    room--
-    if (!firstNewUid) firstNewUid = uid
+    newlyBound++
+    if (!firstNewUid) firstNewUid = c.uid
   }
+  await runInBatches(env, statements)
+
+  // ---- 6) 权限：核验通过并已落库之后才写，且只写一次 ----
+  // 原来每新建一条绑定就 UPDATE 一次 users，纯属白费 D1 往返（同一行的同一个值）。
+  if (granted) {
+    await env.DB.prepare(
+      `UPDATE users SET permissions = ${featurePermissionSql("ai", true)}, updated_at = ? WHERE id = ?`
+    )
+      .bind(now, user.id)
+      .run()
+  }
+
+  const bound = newlyBound + revived
 
   await audit(
     env,
     user.id,
     "qoder2api.import",
-    `通过 JSON 文件导入绑定 ${bound} 个 Qoder2API 账号（${chosen}）` +
+    `通过 JSON 文件导入 Qoder2API 账号：核验通过 ${bound} 个` +
+      `（新建 ${newlyBound}、复活 ${revived}），拒绝 ${rejected.length} 个，` +
+      `超名额 ${skippedByLimit.length} 个，已是本人 ${alreadyMine.length} 个（${chosen}）` +
       (granted ? "（已解锁 AI 中转站权限）" : "")
   )
 
-  // 只有真的绑上了才发奖励（与 wb 侧导入同一取舍）
-  if (bound > 0) {
+  /**
+   * ---- 7) 积分：最后发，且只在「真的新建了一条经核验的绑定」时发 ----
+   *
+   * · 复活自己的墓碑不算新贡献（这个号本来就在池里，删了再加回来不该再算一次捐献）；
+   * · 一个都没建成（全是重复/被拒/超名额）当然也不发。
+   *
+   * 幂等键用「本次新建的第一个 uid」（2026-10-14 审计修复的口径保持）：
+   * 重复导入同一账号时上面已经进了 alreadyMine，根本走不到这里，所以不会重复发分；
+   * 导入**新**账号仍然正常发 —— 与「每个反代账号算一次捐献」的产品语义一致。
+   */
+  if (newlyBound > 0 && firstNewUid) {
     await grantDonationReward(env, {
       userId: user.id,
       kind: "qoder",
-      // 🔴 用「本次新建的第一个账号 uid」而不是随机 uuid（2026-10-14 安全审计）。
-      //
-      // 原来这里是 `qoder2api:import:${uuid()}` —— 每次调用都是新键，幂等**完全失效**：
-      // 只要循环里新建了 1 个绑定就发一次奖励，于是「一个一个反复导入」就能反复领分。
-      // 对照 wb 侧（wb2api.ts）用的是稳定的 `wb2api:${id}`（按绑定），属明显不对称。
-      //
-      // 改成按账号后：重复导入同一账号不再发分（第一次已经发过），
-      // 而导入**新**账号仍然正常发 —— 与「每个反代账号算一次捐献」的产品语义一致。
       dedupKey: `qoder2api:import:${firstNewUid}`,
       detail: "Qoder2API 账号捐献奖励（JSON 导入）",
     })
   }
 
+  /**
+   * 部分成功语义：**只对核验通过的发放，失败的逐条列出**，不整批回滚。
+   *
+   * 为什么不做全局事务/整批回滚：
+   *   · 发放（权限/积分）不可逆，所以顺序上已经保证「核验在前、发放在后」，
+   *     整批回滚并不会让安全性更好，只会把「45 个真号被 5 个假号拖累」变成新问题；
+   *   · 上游导入本来就是部分语义（`imported/skipped/errors`），强行造原子性只会
+   *     在「上游已入池、本地回滚」时留下更难解释的中间态；
+   *   · 用户拿到 `rejected` 明细才知道该删哪几行、重传什么，比一句「整批失败」有用。
+   */
   return json({
     ok: true,
     total: uids.length,
     bound,
+    newlyBound,
+    revived,
     alreadyBound: alreadyMine,
     skippedByLimit,
+    rejected,
     limit,
     realm: chosen,
+    // 网关自己的计数也回给前端/排障：`imported` 明显小于候选数时，问题在上游那边
+    upstream: {
+      imported: upstreamCounts.imported ?? null,
+      skipped: upstreamCounts.skipped ?? null,
+      errors: upstreamCounts.errors ?? [],
+    },
   })
-}
-
-/** 从上传的行里取昵称（`nickname` / `email` 都认） */
-function nicknameOf(rows: unknown[], uid: string, uidOf: (r: unknown) => string): string | null {
-  const row = rows.find((r) => uidOf(r) === uid) as Record<string, unknown> | undefined
-  return String(row?.nickname ?? row?.email ?? "").trim() || null
 }
 
 /**

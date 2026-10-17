@@ -2115,12 +2115,29 @@ export const voucherApi = {
 
 // ---- WorkBuddy 反代账号捐献（登录即解锁 AI 权限，免审核）----
 
+/**
+ * 导入时被拒的账号（逐条回显，便于用户自己排查该删哪几行）。
+ *
+ * 出现原因：伪造/格式非法的 uid、上游池里查无此账号、上游已禁用（需重新登录）、
+ * 已被其他用户绑定。**这些账号不会建绑定、不会发权限、不会发积分**。
+ */
+export interface ImportRejectedAccount {
+  uid: string
+  reason: string
+}
+
 export interface Wb2ApiImportResult {
   ok: boolean
   total: number
   bound: number
+  /** 本次**新建**的绑定数（`bound = newlyBound + revived`） */
+  newlyBound: number
+  /** 复活自己墓碑的绑定数（不算新贡献，不发捐献积分） */
+  revived: number
   alreadyBound: string[]
   skippedByLimit: string[]
+  /** 未通过上游核验 / 被他人占用 / 格式非法 —— 逐条原因 */
+  rejected?: ImportRejectedAccount[]
   limit: number
   upstream: {
     total: number | null
@@ -2233,10 +2250,22 @@ export interface Qoder2ApiImportResult {
   ok: boolean
   total: number
   bound: number
+  /** 本次**新建**的绑定数（`bound = newlyBound + revived`） */
+  newlyBound: number
+  /** 复活自己墓碑的绑定数（不算新贡献，不发捐献积分） */
+  revived: number
   alreadyBound: string[]
   skippedByLimit: string[]
+  /** 未通过上游核验 / 被他人占用 / 格式非法 —— 逐条原因 */
+  rejected?: ImportRejectedAccount[]
   limit: number
   realm: string
+  /** 网关自己的计数（`imported` 明显小于候选数时，问题在上游那边） */
+  upstream?: {
+    imported: number | null
+    skipped: number | null
+    errors: string[]
+  }
 }
 
 export const qoder2apiApi = {
