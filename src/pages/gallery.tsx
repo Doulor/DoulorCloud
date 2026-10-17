@@ -199,6 +199,7 @@ export default function GalleryPage() {
             <HallView
               onOpen={openDetail}
               likeOverrides={likeOverrides}
+              onLikeChange={onLikeChange}
             />
           ) : (
             <MineView onOpen={openDetail} reviewRequired={reviewRequired} />
@@ -227,9 +228,11 @@ export default function GalleryPage() {
 function HallView({
   onOpen,
   likeOverrides,
+  onLikeChange,
 }: {
   onOpen: (id: string) => void
   likeOverrides: LikeMap
+  onLikeChange: (id: string, next: { likes: number; liked: boolean }) => void
 }) {
   const { t } = useT()
   const [input, setInput] = React.useState("")
@@ -364,6 +367,7 @@ function HallView({
             items={items}
             onOpen={onOpen}
             likeOverrides={likeOverrides}
+            onLikeChange={onLikeChange}
           />
           <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
             <p className="text-xs text-muted-foreground">
@@ -509,10 +513,12 @@ function GalleryGrid({
   items,
   onOpen,
   likeOverrides,
+  onLikeChange,
 }: {
   items: GalleryItem[]
   onOpen: (id: string) => void
   likeOverrides: LikeMap
+  onLikeChange: (id: string, next: { likes: number; liked: boolean }) => void
 }) {
   const { t } = useT()
   return (
@@ -570,11 +576,20 @@ function GalleryGrid({
                 <Eye className="h-3.5 w-3.5" />
                 {it.views}
               </span>
-              {/* 点赞的**按钮**只在预览浮层右上角；卡片上留一个只读的计数当热度参考 */}
-              <span className="flex items-center gap-1 text-xs tabular-nums text-muted-foreground">
-                <Heart className="h-3.5 w-3.5" />
-                {likeOverrides[it.id]?.likes ?? it.likes}
-              </span>
+              {/*
+               * 2026-10-17（站长要求）：卡片上直接点赞，不用先进预览浮层。
+               * 复用详情那份 `LikeButton` —— 它有乐观更新、失败回滚，
+               * 命中后是红心（text-rose-500 + fill-current）。
+               * 计数与「我赞没赞」都读父级 `likeOverrides`，
+               * 所以卡片点的赞会**同步反映到预览浮层**，反之亦然（同一份状态）。
+               */}
+              <LikeButton
+                id={it.id}
+                likes={it.likes}
+                liked={!!it.liked}
+                override={likeOverrides[it.id]}
+                onChange={onLikeChange}
+              />
             </span>
           </div>
         </div>
