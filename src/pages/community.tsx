@@ -908,13 +908,23 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
     void load()
   }, [load])
 
+  /**
+   * 连点保护：请求还没回来就忽略后续点击。
+   *
+   * 后端已经改成幂等（不再 500），但**语义上**连点仍然会打架：
+   * 第一次点「赞」还没落库，第二次点又走一遍「取反」，用户会看到爱心闪一下又还原。
+   * 这里直接掐掉重复请求，是更干脆的修法。
+   */
+  const likeBusyRef = React.useRef(false)
+
   /** 点赞：乐观更新，失败回滚 */
   const handleLike = async () => {
     if (!user) {
       navigate("/login", { state: { from: `${basePath}/${id}` } })
       return
     }
-    if (!post) return
+    if (!post || likeBusyRef.current) return
+    likeBusyRef.current = true
     const before = post
     const optimistic = {
       ...post,
@@ -928,6 +938,8 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
     } catch (err) {
       setPost(before)
       toast.error(errMsg(err, t("em.err.op")))
+    } finally {
+      likeBusyRef.current = false
     }
   }
 
@@ -1920,9 +1932,14 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
     notifyMessagesChanged()
   }
 
+  /** 连点保护（按帖子 id）：同一条还在请求中就不再发第二次，理由见详情页那份 */
+  const likeBusyRef = React.useRef<Set<string>>(new Set())
+
   /** 点赞：乐观更新，失败回滚（不重拉列表） */
   const handleLike = async (p: Post) => {
     if (!requireLogin()) return
+    if (likeBusyRef.current.has(p.id)) return
+    likeBusyRef.current.add(p.id)
     const optimistic = {
       ...p,
       liked: !p.liked,
@@ -1937,6 +1954,8 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
     } catch (err) {
       setPosts((prev) => prev.map((x) => (x.id === p.id ? p : x)))
       toast.error(errMsg(err, t("em.err.op")))
+    } finally {
+      likeBusyRef.current.delete(p.id)
     }
   }
 

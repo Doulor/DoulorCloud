@@ -802,17 +802,35 @@ export async function toggleLike(env: Env, request: Request, id: string): Promis
   const existing = await env.DB.prepare(
     "SELECT 1 FROM post_likes WHERE user_id=? AND target_type='post' AND target_id=?"
   ).bind(user.id, id).first()
+  // ⚠️ 2026-10-17 修「社区广场点赞有概率出现界面报错」（2026-10-09 反馈）。
+  //
+  // 原来这里是一条 batch：SELECT 判存在 → 不存在就 INSERT + 给帖子 +1。
+  // 但 SELECT 与 INSERT 之间**不原子**：手快连点两下，两个请求都判定「还没赞过」，
+  // 第二个 INSERT 撞 post_likes 的主键约束（sqlite_autoindex_post_likes_1）→ 500，
+  // 前端 catch 到就弹「操作失败」—— 表现就是「有概率报错」。
+  // 而且撞约束的那一次里，同 batch 的 like_count +1 也可能已经生效，计数会漂。
+  //
+  // 现在改成**幂等**：INSERT OR IGNORE，只有真的插进了新行才 +1；
+  // 删除同理，只有真的删掉了一行才 -1。并发下重复请求既不报错也不改计数。
   if (existing) {
-    await env.DB.batch([
-      env.DB.prepare("DELETE FROM post_likes WHERE user_id=? AND target_type='post' AND target_id=?").bind(user.id, id),
-      env.DB.prepare("UPDATE posts SET like_count = MAX(0, like_count - 1) WHERE id=?").bind(id),
-    ])
+    const del = await env.DB.prepare(
+      "DELETE FROM post_likes WHERE user_id=? AND target_type='post' AND target_id=?"
+    )
+      .bind(user.id, id)
+      .run()
+    if ((del.meta?.changes ?? 0) > 0) {
+      await env.DB.prepare("UPDATE posts SET like_count = MAX(0, like_count - 1) WHERE id=?").bind(id).run()
+    }
     return json({ liked: false, likeCount: await likeCount(env, id) })
   }
-  await env.DB.batch([
-    env.DB.prepare("INSERT INTO post_likes (user_id, target_type, target_id, created_at) VALUES (?, 'post', ?, ?)").bind(user.id, id, new Date().toISOString()),
-    env.DB.prepare("UPDATE posts SET like_count = like_count + 1 WHERE id=?").bind(id),
-  ])
+  const inserted = await env.DB.prepare(
+    "INSERT OR IGNORE INTO post_likes (user_id, target_type, target_id, created_at) VALUES (?, 'post', ?, ?)"
+  )
+    .bind(user.id, id, new Date().toISOString())
+    .run()
+  if ((inserted.meta?.changes ?? 0) > 0) {
+    await env.DB.prepare("UPDATE posts SET like_count = like_count + 1 WHERE id=?").bind(id).run()
+  }
 
   // 社交消息：被赞时通知帖子作者。
   // dedup_key 用 `like:<postId>:<点赞者id>` —— 取消赞后再赞不会产生第二条，
@@ -862,22 +880,30 @@ export async function toggleCommentLike(
   )
     .bind(user.id, id)
     .first()
+  // 与帖子点赞同一处竞态（见上面 toggleLike 的说明）：并发重复请求会撞主键。
+  // 这里同样改成幂等写法，只有行数真的变了才动 like_count。
   if (existing) {
-    await env.DB.batch([
-      env.DB.prepare(
-        "DELETE FROM post_likes WHERE user_id=? AND target_type='comment' AND target_id=?"
-      ).bind(user.id, id),
-      env.DB.prepare("UPDATE post_comments SET like_count = MAX(0, like_count - 1) WHERE id=?").bind(id),
-    ])
+    const del = await env.DB.prepare(
+      "DELETE FROM post_likes WHERE user_id=? AND target_type='comment' AND target_id=?"
+    )
+      .bind(user.id, id)
+      .run()
+    if ((del.meta?.changes ?? 0) > 0) {
+      await env.DB.prepare(
+        "UPDATE post_comments SET like_count = MAX(0, like_count - 1) WHERE id=?"
+      ).bind(id).run()
+    }
     return json({ liked: false, likeCount: await commentLikeCount(env, id) })
   }
 
-  await env.DB.batch([
-    env.DB.prepare(
-      "INSERT INTO post_likes (user_id, target_type, target_id, created_at) VALUES (?, 'comment', ?, ?)"
-    ).bind(user.id, id, new Date().toISOString()),
-    env.DB.prepare("UPDATE post_comments SET like_count = like_count + 1 WHERE id=?").bind(id),
-  ])
+  const inserted = await env.DB.prepare(
+    "INSERT OR IGNORE INTO post_likes (user_id, target_type, target_id, created_at) VALUES (?, 'comment', ?, ?)"
+  )
+    .bind(user.id, id, new Date().toISOString())
+    .run()
+  if ((inserted.meta?.changes ?? 0) > 0) {
+    await env.DB.prepare("UPDATE post_comments SET like_count = like_count + 1 WHERE id=?").bind(id).run()
+  }
 
   if (comment.user_id !== user.id) {
     await pushMessage(env, comment.user_id, {
