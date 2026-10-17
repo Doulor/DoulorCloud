@@ -159,7 +159,16 @@ export function EventQuiz({ ev, onSubmitted }: { ev: EventItem; onSubmitted?: ()
           </p>
           <p className="mt-1 text-muted-foreground">{result.rewardNote}</p>
           {!result.revealed && (
-            <p className="mt-1 text-xs text-muted-foreground">{t("quiz.notRevealed")}</p>
+            /*
+             * 2026-10-17（用户 fxz 反馈「问卷建议」第 2 点）：
+             * 原来不管哪种模式都写「将在活动结束后公布」。但 `never` 那一档是**永不公布**，
+             * 这句话就成了假承诺；而 `never` 恰恰就是他要的「只给正确率、不给答案、
+             * 把答案传出去也没用」的防作弊口径（回执里本来就有 percent，见上面 quiz.score）。
+             * 所以这里按模式给不同说法，并让编辑器那一档的名字直接写明"只给正确率"。
+             */
+            <p className="mt-1 text-xs text-muted-foreground">
+              {quiz.reveal === "never" ? t("quiz.notRevealedNever") : t("quiz.notRevealed")}
+            </p>
           )}
         </div>
       ) : (
