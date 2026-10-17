@@ -180,11 +180,33 @@ export async function registerDonatedNode(env: Env, request: Request): Promise<R
   //    同一 IP 建出两条节点（比如捐献者改了个 frps 端口重跑脚本），那两条节点
   //    会各自把对方的账号当成「多余的」删掉 —— 互相删，谁也开不出来。
   //    一台机器 = 一个面板 = 一个节点，这条不变式必须靠查重键来保证。
+  //
+  // 🔴 2026-10-15 安全修复（渗透报告 #8，HIGH）——「复用」不等于「谁都复用」：
+  //    查重键只有 IP，所以任何人提交一个**别人**已经登记过的 server_addr 都会命中
+  //    下面的复用分支。修复前那个分支会把库里的 agent_key 原样回显，于是攻击者
+  //    只要知道别人节点的 IP 就能拿到它的 HMAC 密钥 —— 那把密钥能签出该节点的
+  //    /frp/agent/desired，里面的 frp 令牌等于面板账号密码（可顶掉别人的隧道）。
+  //    所以归属校验必须钉在复用分支的**入口**上，而不是先返回再补救。
   const dup = await env.DB.prepare(
-    `SELECT id FROM frp_nodes WHERE server_addr = ? LIMIT 1`
+    `SELECT id, owner_user_id FROM frp_nodes WHERE server_addr = ? LIMIT 1`
   )
     .bind(ip)
-    .first<{ id: string }>()
+    .first<{ id: string; owner_user_id: string | null }>()
+
+  if (dup && dup.owner_user_id !== user.id) {
+    // owner_user_id 为 NULL 的是「配置式捐献」时代的老节点（那时还没有归属列），
+    // 谁也证明不了自己是主人 —— 同样按「不可复用」处理，交管理员人工介入。
+    //
+    // ⚠️ 这里**只报归属，不带任何节点字段**（错误体只有 error/code）：连 nodeId
+    //    都不给，否则等于免费帮攻击者把「IP → nodeId」的映射摸出来。
+    throw new ApiError(
+      409,
+      dup.owner_user_id
+        ? "该机器已被他人登记，如需变更登记人请联系管理员"
+        : "该机器已登记但归属无法确认，请联系管理员",
+      "FRP_NODE_ADDR_TAKEN"
+    )
+  }
 
   const settings = (await getSettings(env)) as unknown as Record<string, string>
   const days = intSetting(settings, "frp_donate_default_days", 30)
@@ -242,10 +264,14 @@ export async function registerDonatedNode(env: Env, request: Request): Promise<R
   //    任何捐献者都能拿它去拉**别的节点**的期望状态 —— 那里有**其他用户的
   //    frp 令牌**（面板账号的密码），等于把所有用户的凭据发给每一个捐献者。
   //    全局密钥继续保留，只给我自己那台服务器用；捐献节点一律用专属密钥。
-  let agentKey = randomKey(48)
+  //
+  // ⚠️ 2026-10-15（报告 #8）：密钥**只在首次创建时**生成并返回。复用分支一个字段
+  //    都不回显（连本人都一样）—— 理由见下面复用分支处的注释。
+  let agentKey: string | null = null
 
   if (!nodeId) {
     nodeId = uuid()
+    agentKey = randomKey(48)
     await env.DB.prepare(
       `INSERT INTO frp_nodes
          (id, name, region, server_addr, server_port, auth_token, token_prefix,
@@ -281,29 +307,23 @@ export async function registerDonatedNode(env: Env, request: Request): Promise<R
     created = true
   }
 
-  // 复用已有节点时补一次密钥：配置式捐献来的老节点没有 agent_key，
-  // 补上它才能用「一键脚本」的新流程（老节点靠人工填 config，没有面板接入信息）。
-  if (!created) {
-    // ⚠️ 复用已有节点时，必须返回**库里已经存着的那把**密钥，而不是刚生成的新密钥。
-    //
-    // 否则会出现这种情况：用户重跑一键脚本（很常见 —— 令牌过期、换端口、
-    // 机器重装），脚本拿到新密钥并写进 agent 配置，而 D1 里存的是第一次那把，
-    // 于是 agent 每次签名都失败、永远 401。用户看到的是"装了但一直同步不了"。
-    //
-    // 库里没有才补写（老节点是配置式捐献进来的，可能没有 agent_key）。
-    const existing = await env.DB.prepare(
-      `SELECT agent_key FROM frp_nodes WHERE id = ? LIMIT 1`
-    )
-      .bind(nodeId)
-      .first<{ agent_key: string | null }>()
-    if (existing?.agent_key) {
-      agentKey = existing.agent_key
-    } else {
-      await env.DB.prepare(`UPDATE frp_nodes SET agent_key = ? WHERE id = ?`)
-        .bind(agentKey, nodeId)
-        .run()
-    }
-  }
+  // 🔴 复用分支：**不生成、不回显任何密钥**（2026-10-15，渗透报告 #8）。
+  //
+  // 修复前这里会返回「库里已经存着的那把」agent_key，本意是让重跑一键脚本的人拿到
+  // 同一把钥匙。但这条路径的入口只是一枚**不记名令牌**（谁拿到谁用，不代表节点主人），
+  // 于是它顺带变成了「知道别人 IP 就能取走别人密钥」的口子 —— 那条密钥能签出该节点的
+  // 期望状态，里面的 frp 令牌等价于面板账号密码，别人的隧道就此被顶掉。
+  //
+  // 所以现在的规则是：密钥只在**首次创建**那一次出现在响应里，之后无论是不是本人
+  // 一律不再回显（D1 里存的那把不动，已部署 agent 手里的钥匙继续有效 —— 这是本改动
+  // 能保持向后兼容的关键：我们只是**不再外发**，不是作废/轮换）。真要重新签发，
+  // 交给管理端人工处理；本次不新增「重置密钥」接口。
+  //
+  // ⚠️ 兼容性影响（写在这里免得以后有人以为是 bug）：重跑一键脚本时登记仍会 200，
+  //    但响应里没有 agentKey，`install/frp-node.sh` 那句「登记响应里缺少
+  //    nodeIdForAgent / agentKey」会拦住后续装 agent 的步骤。已经装好并跑着的 agent
+  //    不受影响（它们不会再调用本接口），受影响的是「重装/换机重跑脚本」这条路，
+  //    那是需要人工重新签发密钥的场景。
 
   // 自动上架默认套餐。站长要求：捐献成功即自动上架 30 天 / 100 积分 / 端口 10000-10010，
   // 且这些默认值在管理面板可改（所以读的是设置项而不是写死常量）。
@@ -343,10 +363,13 @@ export async function registerDonatedNode(env: Env, request: Request): Promise<R
     // ⚠️ agentKey 是每节点独立的 —— 绝不返回全局 FRP_AGENT_SECRET，
     //    否则任何捐献者都能拉取别的节点的期望状态（里面有别人的 frp 令牌）。
     nodeIdForAgent: nodeId,
-    agentKey,
+    // 🔴 密钥字段**只在本次真的创建了节点时存在**，复用分支连这个键都没有
+    //    （不是置 null —— 少一个字段，别人写「顺手读一下 agentKey」的代码时
+    //     拿到的就是 undefined，不会被误当成"拿到了但为空"）。理由见上面复用分支。
+    ...(created && agentKey ? { agentKey } : {}),
     message: created
       ? "节点已登记，默认套餐已自动上架"
-      : "这台服务器之前已经登记过，已复用原节点",
+      : "这台服务器之前已经登记过，已复用原节点；密钥不再随本响应回显，如已丢失请联系管理员重新签发",
   })
 }
 

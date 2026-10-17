@@ -1085,6 +1085,7 @@ export default function PointsPage() {
       price: p.price,
       stock: p.stock,
       dailyLimit: null,
+    dailyPerUserLimit: null,
       dailySold: 0,
       // 预览的是「尚未发布」的商品 ⇒ 累计售出必然是 0
       // （合并 origin/main 时补的：`soldCount` 是本地给 PointProduct 新增的字段，

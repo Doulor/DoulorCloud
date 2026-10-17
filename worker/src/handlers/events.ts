@@ -31,7 +31,7 @@ import {
   parseVoteConfig,
   parseQuizConfig,
   quizScorePercent,
-  pickQuizTier,
+  pickQuizTiers,
   quizLinearPoints,
   MAX_QUIZ_ATTEMPTS,
   pickWinningOptions,
@@ -43,6 +43,7 @@ import {
   validateGithubRepoCondition,
   validateGithubPrCondition,
   validateVoteCondition,
+  validateQuizCondition,
   type RewardType,
   type ConditionType,
   type VoteConfig,
@@ -61,7 +62,19 @@ const MAX_JSON_BODY_BYTES = 64 * 1024
  *   active    已上线，用户端可见、可参与
  *   ended     已结束；archived 已归档（都不可见）
  */
-const EVENT_STATUSES = ["draft", "scheduled", "active", "ended", "archived"] as const
+const EVENT_STATUSES = [
+  "draft",
+  /**
+   * 仅管理可见（2026-10-15 站长要求）：配好了但先不给用户看。
+   * 与 draft 的区别是**语义**：draft 是"还没写完"，这个可以随时一键改成 active 上线。
+   * 行为上两者一致：不进公开列表、直接访问活动页 404。
+   */
+  "admin_only",
+  "scheduled",
+  "active",
+  "ended",
+  "archived",
+] as const
 
 interface EventRow {
   id: string
@@ -146,12 +159,17 @@ function toEvent(
   // ⚠️ 它必须与上面的 conditionParams 分开下发：后者对普通用户恒为 null（保护认证码）。
   const vote =
     row.condition_type === "vote" ? parseVoteConfig(parseJson(row.condition_params)) : null
+  /** 问卷：独立类型 quiz；旧的 vote + mode:"quiz" 也认（兼容已建的活动） */
+  const isQuizRow =
+    row.condition_type === "quiz" ||
+    (row.condition_type === "vote" &&
+      (parseJson(row.condition_params) as { mode?: unknown } | null)?.mode === "quiz")
   /**
    * 问卷（集合投票）：普通用户拿**剥掉正确答案**的版本，管理端拿完整的
    * （管理端要能编辑正确答案 —— 它本来就只在登录管理员时下发）。
    */
   const quiz =
-    row.condition_type === "vote"
+    isQuizRow
       ? (() => {
           const raw = parseJson(row.condition_params)
           const quiz = parseQuizConfig(raw)
@@ -230,7 +248,12 @@ function toEvent(
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     /** 当前时间下这个活动的可参与状态 */
-    claimState: claimState(row, now),
+    /**
+   * 「仅管理可见」：对**管理员**算 open（按钮可点、能进去测试），
+   * 对普通用户仍算 offline（他们本来就拿不到这个活动）。
+   * 否则站长在活动推广里看到的「立即参与」是**灰的**（站长 2026-10-15 反馈）。
+   */
+  claimState: isAdmin && row.status === "admin_only" ? "open" : claimState(row, now),
   }
 }
 
@@ -288,9 +311,21 @@ export async function listEvents(env: Env, request: Request): Promise<Response> 
   // `COALESCE(promo_hidden, 0) = 0`：把这个活动从「活动推广」里摘掉。
   // 它仍然可以通过 /activity/<id> 链接访问、可以参与（getEvent 不过滤这个），
   // 只是不再出现在列表里 —— 站长用它做「小范围 / 定向」的活动。
+  /**
+   * 🔴 **管理员额外能看到「仅管理可见」的活动**（站长 2026-10-15 反馈：
+   * "设置了仅管理可见，为什么没有出现在活动推广里面"）。
+   *
+   * 「仅管理可见」的本意是"别给用户看"，但不该连站长自己也看不到 ——
+   * 那样就没法从活动推广点进去测试/预览了。所以：
+   *   普通用户 → 只看得到 active；管理员 → active + admin_only。
+   * ⚠️ 状态值是我们自己的枚举常量，直接拼进 SQL 是安全的（没有任何用户输入）。
+   */
+  const listViewer = await optionalUser(env, request)
+  const listIsAdmin = !!listViewer && isAnyAdmin(listViewer.role)
   const rows = await env.DB.prepare(
     `SELECT * FROM events
-      WHERE status = 'active' AND (ends_at IS NULL OR ends_at >= ?)
+      WHERE status IN (${listIsAdmin ? "'active', 'admin_only'" : "'active'"})
+        AND (ends_at IS NULL OR ends_at >= ?)
         AND COALESCE(promo_hidden, 0) = 0
       ORDER BY created_at DESC LIMIT 50`
   )
@@ -298,7 +333,8 @@ export async function listEvents(env: Env, request: Request): Promise<Response> 
     .all<EventRow>()
 
   const rowList = rows.results ?? []
-  const events = rowList.map((r) => toEvent(r, now))
+  // 把「是不是管理员」传下去：仅管理可见的活动对管理员要算 open（能测试）
+  const events = rowList.map((r) => toEvent(r, now, listIsAdmin))
 
   // 附每个活动的已领份数（一次 GROUP BY，避免 N+1）。
   // 用户端据 maxClaims - claimCount 显示「剩余 N 份」——限量活动的先到先得必须可见，
@@ -418,7 +454,7 @@ export async function listVoteHistory(env: Env, request: Request): Promise<Respo
 
   const rows = await env.DB.prepare(
     `SELECT * FROM events
-      WHERE condition_type = 'vote' AND COALESCE(promo_hidden, 0) = 0
+      WHERE condition_type IN ('vote', 'quiz') AND COALESCE(promo_hidden, 0) = 0
         AND (status IN ('ended', 'archived') OR (ends_at IS NOT NULL AND ends_at < ?))
       ORDER BY COALESCE(ends_at, updated_at) DESC
       LIMIT 50`
@@ -498,7 +534,17 @@ export async function listVoteHistory(env: Env, request: Request): Promise<Respo
  */
 export async function getEvent(env: Env, request: Request, id: string): Promise<Response> {
   const row = await loadOne(env, id)
-  if (row.status === "draft" || row.status === "scheduled") {
+  /**
+   * draft / scheduled 一律 404；「仅管理可见」对普通用户 404、**对管理员放行** ——
+   * 否则站长自己都点不开，没法在上线前测试（2026-10-15 站长要求）。
+   */
+  const peekUser = await optionalUser(env, request)
+  const peekIsAdmin = !!peekUser && isAnyAdmin(peekUser.role)
+  if (
+    row.status === "draft" ||
+    row.status === "scheduled" ||
+    (row.status === "admin_only" && !peekIsAdmin)
+  ) {
     throw new ApiError(404, "活动不存在", "NOT_FOUND")
   }
   const now = Date.now()
@@ -877,47 +923,50 @@ export async function settleQuizEvent(
       const p = quizScorePercent(cfg.questions, ans)
       if (p > best) best = p
     }
-    let rewardType: RewardType | null = null
-    let rewardParams: Record<string, unknown> = {}
+    // 本次要发的奖励：线性=1 条；分档=**最高满足门槛上的全部档**（同门槛可配多档）
+    const rewards: { rewardType: RewardType; params: Record<string, unknown> }[] = []
     if (cfg.scoring.kind === "linear") {
       const pts = quizLinearPoints(cfg.scoring.maxPoints, best)
-      if (pts > 0) {
-        rewardType = "points"
-        rewardParams = { points: pts }
-      }
+      // ⚠️ points 发奖 handler 读的是 amount（不是 points）—— 写成 points 会在发奖那一刻失败
+      if (pts > 0) rewards.push({ rewardType: "points", params: { amount: pts } })
     } else {
-      const tier = pickQuizTier(cfg.scoring.tiers, best)
-      if (tier) {
-        rewardType = tier.rewardType
-        rewardParams = tier.params ?? {}
+      for (const t of pickQuizTiers(cfg.scoring.tiers, best)) {
+        rewards.push({ rewardType: t.rewardType, params: t.params ?? {} })
       }
     }
-    if (!rewardType) {
+    if (!rewards.length) {
       skipped++
       continue
     }
-    const claimId = uuid()
-    const ins = await env.DB.prepare(
-      "INSERT OR IGNORE INTO event_claims (id, event_id, user_id, reward_type, reward_status, reward_detail, claimed_at) VALUES (?, ?, ?, ?, 'pending', '', ?)"
-    )
-      .bind(claimId, id, userId, rewardType, iso)
-      .run()
-    if ((ins.meta?.changes ?? 0) === 0) {
-      skipped++ // 已经发过（幂等）
-      continue
-    }
-    try {
-      const user = await env.DB.prepare("SELECT username FROM users WHERE id = ?")
-        .bind(userId)
-        .first<{ username: string }>()
-      await grantAndRecord(env, claimId, row, userId, user?.username ?? "", {
-        rewardType,
-        params: rewardParams,
-      })
-      granted++
-    } catch (err) {
-      console.error("问卷结算发奖失败:", id, userId, err)
-      errors++
+    const username =
+      (
+        await env.DB.prepare("SELECT username FROM users WHERE id = ?")
+          .bind(userId)
+          .first<{ username: string }>()
+      )?.username ?? ""
+    // 多笔奖励：seq = 0,1,2…（唯一索引 (event_id,user_id,seq) 保证幂等）
+    for (let si = 0; si < rewards.length; si++) {
+      const r = rewards[si]
+      const claimId = uuid()
+      const ins = await env.DB.prepare(
+        "INSERT OR IGNORE INTO event_claims (id, event_id, user_id, reward_type, reward_status, reward_detail, claimed_at, seq) VALUES (?, ?, ?, ?, 'pending', '', ?, ?)"
+      )
+        .bind(claimId, id, userId, r.rewardType, iso, si)
+        .run()
+      if ((ins.meta?.changes ?? 0) === 0) {
+        skipped++ // 已经发过（幂等）
+        continue
+      }
+      try {
+        await grantAndRecord(env, claimId, row, userId, username, {
+          rewardType: r.rewardType,
+          params: r.params,
+        })
+        granted++
+      } catch (err) {
+        console.error("问卷结算发奖失败:", id, userId, err)
+        errors++
+      }
     }
   }
   return { granted, skipped, errors }
@@ -935,15 +984,24 @@ export async function submitQuiz(
   const body = (await request.json().catch(() => ({}))) as {
     answers?: unknown
     elapsedSec?: unknown
+    /** true = 到点自动交卷（允许空卷） */
+    autoSubmit?: unknown
   }
 
   const row = await loadOne(env, id)
   const now = Date.now()
-  const state = claimState(row, now)
+  /**
+   * 「仅管理可见」的活动：**管理员可以照常交卷测试**，但走"测试模式"——
+   * 成绩照常算给你看，**不写答卷、不发奖、不占次数**（可以反复测）。
+   * 普通用户拿不到这个活动（getEvent 已 404），所以这里只需判管理员。
+   */
+  const testMode = (row.condition_type as ConditionType) === "quiz" && row.status === "admin_only"
+  const state = testMode ? "open" : claimState(row, now)
   if (state === "offline") throw new ApiError(400, "活动已下线", "EVENT_OFFLINE")
   if (state === "not_started") throw new ApiError(400, "活动尚未开始", "NOT_STARTED")
   if (state === "ended") throw new ApiError(400, "活动已结束", "ENDED")
-  if ((row.condition_type as ConditionType) !== "vote") {
+  // 独立类型 quiz，以及旧的 vote+mode:"quiz"，都要放行
+  if ((row.condition_type as ConditionType) !== "vote" && (row.condition_type as ConditionType) !== "quiz") {
     throw new ApiError(400, "这个活动不是问卷", "NOT_QUIZ")
   }
   const cfg = parseQuizConfig(parseJson(row.condition_params))
@@ -965,7 +1023,12 @@ export async function submitQuiz(
    * 这一次提交会把**唯一一次机会**消耗掉，用户从此 409 再也答不了。
    * 请求体不合法属于「客户端没传对」，必须让用户重发，不能算一次作答。
    */
-  if (!Object.keys(answers).length) {
+  /**
+   * 空卷：**手动**提交一律拒绝（防误提交白白消耗唯一一次机会）；
+   * 但**到点自动交卷**是用户有意为之（一题没答也算交卷）⇒ 放行，按 0% 结算。
+   * 标记由前端带（autoSubmit），伪造它最多是"自己把这次机会用掉"，无风险。
+   */
+  if (!Object.keys(answers).length && body.autoSubmit !== true) {
     throw new ApiError(400, "没有收到任何答案，请重新提交", "QUIZ_EMPTY_ANSWERS")
   }
 
@@ -996,8 +1059,10 @@ export async function submitQuiz(
 
   // ---- 落答案（attempt 进主键 ⇒ 重考留痕，不覆盖历史）----
   const iso = new Date().toISOString()
-  await env.DB.batch(
-    cfg.questions.map((q) =>
+  // 测试模式不落库（站长要求：测试成绩不保存）
+  if (!testMode)
+    await env.DB.batch(
+      cfg.questions.map((q) =>
       env.DB.prepare(
         "INSERT OR REPLACE INTO event_quiz_answers (event_id, user_id, question_id, option_id, attempt, created_at) VALUES (?, ?, ?, ?, ?, ?)"
       ).bind(id, user.id, q.id, answers[q.id] ?? "", attempt, iso)
@@ -1005,26 +1070,34 @@ export async function submitQuiz(
   )
 
   // ---- 发奖 ----
-  let rewardType: RewardType | null = null
-  let rewardParams: Record<string, unknown> = {}
+  /**
+   * 本次要发的奖励（**可能是多条**）：
+   *   · 线性折算 → 1 条
+   *   · 分档 → 最高满足门槛上的**全部档**（站长 2026-10-15：≥100% 可同时配"额度 3000"和"积分 500"）
+   * 不跨门槛累加：≥80% 的人只拿 80% 那一档。
+   */
+  const rewards: { rewardType: RewardType; params: Record<string, unknown> }[] = []
   let rewardNote = ""
   if (overTime) {
     rewardNote = "超时交卷，这次不计奖励"
   } else if (cfg.scoring.kind === "linear") {
     const pts = quizLinearPoints(cfg.scoring.maxPoints, percent)
+    // ⚠️ points 发奖 handler 读的是 amount（不是 points）
     if (pts > 0) {
-      rewardType = "points"
-      rewardParams = { points: pts }
+      rewards.push({ rewardType: "points", params: { amount: pts } })
       rewardNote = `答对 ${percent}%，折算 ${pts} 积分`
     } else {
       rewardNote = "答对率不足，本次没有奖励"
     }
   } else {
-    const tier = pickQuizTier(cfg.scoring.tiers, percent)
-    if (tier) {
-      rewardType = tier.rewardType
-      rewardParams = tier.params ?? {}
-      rewardNote = `达到 ${tier.minPercent}% 档`
+    const tiers = pickQuizTiers(cfg.scoring.tiers, percent)
+    if (tiers.length) {
+      for (const tier of tiers) {
+        rewards.push({ rewardType: tier.rewardType, params: tier.params ?? {} })
+      }
+      rewardNote =
+        `达到 ${tiers[0].minPercent}% 档` +
+        (tiers.length > 1 ? `（该档含 ${tiers.length} 项奖励，一起发放）` : "")
     } else {
       rewardNote = "没有达到任何奖励档位"
     }
@@ -1033,34 +1106,34 @@ export async function submitQuiz(
   let granted = false
   let grantDetail = ""
   /**
-   * 可重答（best / unlimited）⇒ **不当场发奖**，留到截止后按最高分统一结算
-   * （settleQuizEvent）。这样「先低分达标、后考高分」也能拿到高档奖励。
-   * ⚠️ 必须保证结算真的会被触发：管理端手动开奖接口 + 定时任务都会调 settleQuizEvent；
-   *    结算没跑之前用户拿不到奖（这是「取最高分」的代价，已在回执里写明）。
+   * 可重答（best / unlimited）⇒ **不当场发奖**，留到截止后按最高分统一结算（settleQuizEvent）。
+   * 一次性（once）⇒ 当场发；同门槛多档按 seq=0,1,2… 逐笔写，
+   * 幂等由唯一索引 (event_id, user_id, seq) 保证（旧流程一律 seq=0，行为不变）。
    */
-  if (cfg.retake !== "once") {
+  if (testMode) {
+    // 测试模式：只算分，不发奖、不写领取记录
+    rewardNote = "（测试模式：成绩不会记录，也不会发奖）" + (rewardNote ? "｜" + rewardNote : "")
+  } else if (cfg.retake !== "once") {
     rewardNote = rewardNote + "（可重答：奖励将在活动结束后按你的最高分统一发放）"
-  } else if (rewardType) {
-    // 一人一次：event_claims 的 (event_id,user_id) 唯一索引就是并发锁
-    const claimId = uuid()
-    const ins = await env.DB.prepare(
-      // ⚠️ 列名必须与线上表一致（实测：event_claims 没有 reward_params，时间列是 claimed_at）——
-      //    写错列名会直接 500，而答案已经落库、retake=once 的机会也被消耗掉
-      "INSERT OR IGNORE INTO event_claims (id, event_id, user_id, reward_type, reward_status, reward_detail, claimed_at) VALUES (?, ?, ?, ?, 'pending', '', ?)"
-    )
-      // ⚠️ 占位符个数必须与列数一致（去掉 reward_params 列后，bind 也要去掉那个参数 ——
-      //    否则 D1 报 Wrong number of parameter bindings，整个交卷 500）
-      .bind(claimId, id, user.id, rewardType, iso)
-      .run()
-    if ((ins.meta?.changes ?? 0) > 0) {
-      await grantAndRecord(env, claimId, row, user.id, user.username, {
-        rewardType,
-        params: rewardParams,
-      })
-      granted = true
-      grantDetail = "奖励已发放"
-    } else {
-      rewardNote = rewardNote + "（奖励此前已发放过）"
+  } else if (rewards.length) {
+    for (let si = 0; si < rewards.length; si++) {
+      const r = rewards[si]
+      const claimId = uuid()
+      const ins = await env.DB.prepare(
+        "INSERT OR IGNORE INTO event_claims (id, event_id, user_id, reward_type, reward_status, reward_detail, claimed_at, seq) VALUES (?, ?, ?, ?, 'pending', '', ?, ?)"
+      )
+        .bind(claimId, id, user.id, r.rewardType, iso, si)
+        .run()
+      if ((ins.meta?.changes ?? 0) > 0) {
+        await grantAndRecord(env, claimId, row, user.id, user.username, {
+          rewardType: r.rewardType,
+          params: r.params,
+        })
+        granted = true
+        grantDetail = rewards.length > 1 ? `已发放 ${rewards.length} 项奖励` : "奖励已发放"
+      } else {
+        rewardNote = rewardNote + "（该奖励此前已发放过）"
+      }
     }
   }
 
@@ -2014,8 +2087,12 @@ export async function createEvent(env: Env, request: Request): Promise<Response>
   }
   // 投票：至少 2 个选项、每个都要有标题、选项 id 不能重复、获奖规则必须三选一。
   // 与抽奖不同，这里**不限制奖励类型** —— 站长要求「奖励不一定是积分，做成可选」。
-  if (conditionType === "vote") {
-    const bad = validateVoteCondition(body.conditionParams)
+  // 投票与问卷都在这里校验（问卷的形状完全不同，走 validateQuizCondition）
+  if (conditionType === "vote" || conditionType === "quiz") {
+    const bad =
+      conditionType === "quiz"
+        ? validateQuizCondition(body.conditionParams)
+        : validateVoteCondition(body.conditionParams)
     if (bad) throw new ApiError(400, bad, "INVALID_INPUT")
   }
   // 积分奖励的数额配置（固定值 / 区间随机）必须**写入时**就校验：
@@ -2167,12 +2244,13 @@ export async function updateEvent(
   // 投票：参数（新的或沿用的）必须合法 —— 理由同 createEvent。
   // 沿用旧值时也校验一遍：选项被改成只剩 1 个时，往后就再也保存不了了（这是对的，
   // 只剩 1 项的投票根本没有意义）。
-  if (conditionType === "vote") {
+  if (conditionType === "vote" || conditionType === "quiz") {
     const resolved =
       body.conditionParams !== undefined
         ? body.conditionParams
         : parseJson(existing.condition_params)
-    const bad = validateVoteCondition(resolved)
+    const bad =
+      conditionType === "quiz" ? validateQuizCondition(resolved) : validateVoteCondition(resolved)
     if (bad) throw new ApiError(400, bad, "INVALID_INPUT")
   }
 
@@ -2287,6 +2365,30 @@ export async function listEventClaims(
 }
 
 /** POST /api/admin/events/:id/claims/:claimId/grant —— 标记人工发放完成 */
+/**
+ * 删除一条领取记录（管理员）。
+ *
+ * 用途：误参与 / 测试数据 / 走错路径卡住的人 —— 删掉后对方可以重新参与。
+ * ⚠️ 只删记录，**不回收已发出的奖励**：奖励可能已经变成中转站余额或积分，
+ *    回收需要冲正流水，那是另一件事（要的话单独做）。删除前请自行确认对方没拿到东西。
+ */
+export async function deleteEventClaim(
+  env: Env,
+  request: Request,
+  id: string,
+  claimId: string
+): Promise<Response> {
+  await requireAdminScope(env, request, "events.grant")
+  await loadOne(env, id)
+  const res = await env.DB.prepare("DELETE FROM event_claims WHERE id = ? AND event_id = ?")
+    .bind(claimId, id)
+    .run()
+  if ((res.meta?.changes ?? 0) === 0) {
+    throw new ApiError(404, "领取记录不存在", "NOT_FOUND")
+  }
+  return json({ ok: true })
+}
+
 export async function grantEventClaim(
   env: Env,
   request: Request,

@@ -9,6 +9,7 @@
 //   · 签名不对                       → 401
 //   · 时间戳超出窗口（重放）         → 401
 //   · 把 ?node=A 的签名挪去请求 ?node=B → 401（证明查询串确实在签名覆盖范围内）
+//   · 用 A 节点的密钥签名却把写入指向 B 节点 → 403（报告 #28：跨节点签名混淆）
 //
 // 另外钉两条业务语义：
 //   · 过期订阅必须以 enable=false 下发 —— agent 据此**停用**而不是删号，
@@ -30,7 +31,8 @@ async function sha256Hex(input: string): Promise<string> {
 }
 
 /** 与 handlers/frp-agent.ts 的 requireAgent() 逐字对应 */
-async function sign(
+async function signWith(
+  secret: string,
   ts: string,
   method: string,
   pathWithQuery: string,
@@ -38,13 +40,23 @@ async function sign(
 ): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
-    enc.encode(SECRET),
+    enc.encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"]
   )
   const canonical = [ts, method.toUpperCase(), pathWithQuery, await sha256Hex(body)].join("\n")
   return hex(new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(canonical))))
+}
+
+/** 全局密钥签名（自己那台服务器的身份） */
+async function sign(
+  ts: string,
+  method: string,
+  pathWithQuery: string,
+  body: string
+): Promise<string> {
+  return signWith(SECRET, ts, method, pathWithQuery, body)
 }
 
 async function agentCall(opts: {
@@ -54,6 +66,8 @@ async function agentCall(opts: {
   ts?: string
   /** 直接指定签名（测拒绝路径用）；不给则按 canonical 现算 */
   signature?: string
+  /** 用哪把密钥签名（默认全局密钥；测节点专属密钥时传节点那把） */
+  secret?: string
   omitSignature?: boolean
   omitTimestamp?: boolean
 }): Promise<Response> {
@@ -64,7 +78,8 @@ async function agentCall(opts: {
   if (!opts.omitSignature) {
     headers.set(
       "X-Frp-Agent-Signature",
-      opts.signature ?? (await sign(ts, opts.method, opts.path, body))
+      opts.signature ??
+        (await signWith(opts.secret ?? SECRET, ts, opts.method, opts.path, body))
     )
   }
   if (body) headers.set("Content-Type", "application/json")
@@ -103,6 +118,26 @@ async function seedNode(authMode = "token_user"): Promise<string> {
      VALUES (?, '测试节点', 'frp.test', 7000, 'shared-secret', '', 30000, 31000, 5, 1, 0, ?, ?, ?)`
   )
     .bind(id, authMode, now, now)
+    .run()
+  return id
+}
+
+/**
+ * 造一个带「节点专属 agent_key」的节点（报告 #28 的用例要用它来签名）。
+ *
+ * 为什么必须真的落 agent_key：跨节点混淆的前提就是「A 的密钥能过验签」，
+ * 而 requireAgent 是拿 frp_nodes.agent_key 当候选密钥的 —— 不写这一列，攻击路径根本走不到。
+ */
+async function seedKeyedNode(agentKey: string): Promise<string> {
+  const id = `n_${uuid().slice(0, 8)}`
+  const now = new Date().toISOString()
+  await env.DB.prepare(
+    `INSERT INTO frp_nodes
+       (id, name, server_addr, server_port, auth_token, token_prefix,
+        port_min, port_max, max_ports, enabled, sort_order, auth_mode, agent_key, created_at, updated_at)
+     VALUES (?, '带密钥节点', 'frp.keyed', 7000, 'shared-secret', '', 30000, 31000, 5, 1, 0, 'token_user', ?, ?, ?)`
+  )
+    .bind(id, agentKey, now, now)
     .run()
   return id
 }
@@ -320,5 +355,148 @@ describe("frp-agent 通道", () => {
       .bind(frpUser)
       .first<{ sync_state: string }>()
     expect(sub?.sync_state).toBe("pending")
+  })
+
+  // ---------------------------------------------------------------- 报告 #28（MEDIUM）
+  //
+  // 漏洞形状：验签用的节点标识是 `nodeId ?? node`（含 body 里的 nodeId），而写入目标
+  // 用的是 `body.node`，两者**不校验相等** ⇒ 持 A 节点密钥可以声明 nodeId=A 过验签、
+  // 却用 node=B 让写落口落到 B 上（跨节点签名混淆：改别人节点的同步状态与心跳）。
+  //
+  // 兼容性上最要紧的一条：**签名串一个字都不能改**（节点标识本来就在 canonical 的
+  // path+query 段与 body 摘要里，改了只会让所有已部署 agent 立刻 401）。所以这里测的
+  // 全是「相等校验」的行为，而不是新的签名口径。
+
+  it("🔴 用 A 节点的密钥签名、却让写入落到 B 节点 → 403，且一行都没写", async () => {
+    const keyA = "agent-key-A-0123456789abcdef0123"
+    const keyB = "agent-key-B-0123456789abcdef0123"
+    const nodeA = await seedKeyedNode(keyA)
+    const nodeB = await seedKeyedNode(keyB)
+
+    const user = await makeUser()
+    const frpUser = `DC_${uuid().slice(0, 8)}`
+    const subId = await seedSubscription({ nodeId: nodeB, userId: user.id, frpUser, ports: [30021] })
+
+    const payload = JSON.stringify({
+      nodeId: nodeA, // 验签用它（keyA 能过）
+      node: nodeB, // 写入却用它 —— 修复前这两者不校验相等
+      revision: "aaaaaaaaaaaaaaaa",
+      users: [{ user: frpUser, present: true, ports: [30021] }],
+      serverInfo: { clientCounts: 999 },
+    })
+    const res = await agentCall({
+      method: "POST",
+      path: "/frp/agent/report",
+      body: payload,
+      secret: keyA,
+    })
+    expect(res.status).toBe(403)
+    const body = (await res.json()) as { code: string; error: string }
+    expect(body.code).toBe("FRP_AGENT_NODE_MISMATCH")
+    // 错误信息要能让人看懂是「节点不一致」，而不是一句笼统的 403
+    expect(body.error).toContain("不一致")
+
+    // B 的订阅没被动过（仍是 pending），也没给 A/B 写心跳
+    const sub = await env.DB.prepare(`SELECT sync_state FROM frp_subscriptions WHERE id = ?`)
+      .bind(subId)
+      .first<{ sync_state: string }>()
+    expect(sub?.sync_state).toBe("pending")
+    const state = await env.DB.prepare(
+      `SELECT node_id FROM frp_agent_state WHERE node_id IN (?, ?)`
+    )
+      .bind(nodeA, nodeB)
+      .all<{ node_id: string }>()
+    expect(state.results?.length ?? 0).toBe(0)
+  })
+
+  it("nodeId 与 node 指向同一个节点 → 通过（节点专属密钥的日常路径）", async () => {
+    const keyA = "agent-key-same-node-0123456789abcd"
+    const nodeA = await seedKeyedNode(keyA)
+    const user = await makeUser()
+    const frpUser = `DC_${uuid().slice(0, 8)}`
+    const subId = await seedSubscription({ nodeId: nodeA, userId: user.id, frpUser, ports: [30022] })
+
+    const payload = JSON.stringify({
+      nodeId: nodeA,
+      node: nodeA,
+      revision: "bbbbbbbbbbbbbbbb",
+      users: [{ user: frpUser, present: true, ports: [30022] }],
+    })
+    const res = await agentCall({
+      method: "POST",
+      path: "/frp/agent/report",
+      body: payload,
+      secret: keyA,
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { ok: boolean; applied: number }
+    expect(body.applied).toBe(1)
+
+    const sub = await env.DB.prepare(`SELECT sync_state FROM frp_subscriptions WHERE id = ?`)
+      .bind(subId)
+      .first<{ sync_state: string }>()
+    expect(sub?.sync_state).toBe("synced")
+    const hb = await env.DB.prepare(
+      `SELECT revision FROM frp_agent_state WHERE node_id = ?`
+    )
+      .bind(nodeA)
+      .first<{ revision: string }>()
+    expect(hb?.revision).toBe("bbbbbbbbbbbbbbbb")
+  })
+
+  it("兼容：老 agent 只在 body 里发 nodeId → 仍 200，且写进它自己的节点（不回落）", async () => {
+    const keyA = "agent-key-legacy-body-0123456789"
+    const nodeA = await seedKeyedNode(keyA)
+    // 「抢位」节点：sort_order=0、enabled —— 如果实现回落到「第一个启用节点」，
+    // 这条报告就会写到它身上（那正是修复前的老行为，也是这次顺手修掉的隐患）。
+    const decoy = await seedNode()
+    const user = await makeUser()
+    const frpUser = `DC_${uuid().slice(0, 8)}`
+    const subId = await seedSubscription({ nodeId: nodeA, userId: user.id, frpUser, ports: [30023] })
+
+    // 只有 nodeId，没有 node —— 老版 agent 就是这么发的
+    const payload = JSON.stringify({
+      nodeId: nodeA,
+      revision: "cccccccccccccccc",
+      users: [{ user: frpUser, present: true, ports: [30023] }],
+    })
+    const res = await agentCall({
+      method: "POST",
+      path: "/frp/agent/report",
+      body: payload,
+      secret: keyA,
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { applied: number }
+    expect(body.applied).toBe(1)
+
+    const sub = await env.DB.prepare(`SELECT sync_state FROM frp_subscriptions WHERE id = ?`)
+      .bind(subId)
+      .first<{ sync_state: string }>()
+    expect(sub?.sync_state).toBe("synced")
+
+    // 心跳落在 A 身上，而不是被回落写进了别人（decoy）
+    const mine = await env.DB.prepare(`SELECT revision FROM frp_agent_state WHERE node_id = ?`)
+      .bind(nodeA)
+      .first<{ revision: string }>()
+    expect(mine?.revision).toBe("cccccccccccccccc")
+    const wrong = await env.DB.prepare(`SELECT revision FROM frp_agent_state WHERE node_id = ?`)
+      .bind(decoy)
+      .first<{ revision: string }>()
+    expect(wrong).toBeNull()
+  })
+
+  it("节点专属密钥也能正常拉期望状态（GET ?node=A）", async () => {
+    const keyA = "agent-key-desired-0123456789abcd"
+    const nodeA = await seedKeyedNode(keyA)
+
+    const res = await agentCall({
+      method: "GET",
+      path: `/frp/agent/desired?node=${nodeA}`,
+      secret: keyA,
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as DesiredBody
+    expect(body.node.id).toBe(nodeA)
   })
 })

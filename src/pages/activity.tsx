@@ -141,6 +141,13 @@ export default function ActivityPage() {
   const claimed = !!claim && claim.rewardStatus !== "failed"
   const isLottery = ev.conditionType === "lottery"
   const isVote = ev.conditionType === "vote"
+  /**
+   * 是不是问卷。
+   * ⚠️ 问卷是**独立的参与类型 quiz**（与 vote 平级），但旧的「投票 + 问卷形态」也要认 ——
+   * 所以这里既看类型、也看有没有下发 quiz 配置。之前只判断了 vote ⇒ 独立类型两边都不匹配，
+   * 页面上只剩通用的「参与」按钮，用户根本找不到答题的地方（站长 2026-10-15 实测反馈）。
+   */
+  const isQuiz = ev.conditionType === "quiz" || !!ev.quiz
   const lotteryClosed = isLottery && !!ev.lottery?.drawn
   /** 投票已开奖：不能再投（后端 VOTE_DRAWN 会拦，这里只是别让按钮看着能点） */
   const voteClosed = isVote && !!ev.vote?.drawn
@@ -180,13 +187,35 @@ export default function ActivityPage() {
     return isLottery ? t("msg.btn.joinLottery") : t("msg.btn.join")
   })()
 
+  /**
+   * 有没有"上一级"可回。history.length > 1 是浏览器层面的近似判断
+   * （包含本次会话里访问过的页面），够用且不需要额外状态。
+   */
+  const canGoBack = typeof window !== "undefined" && window.history.length > 1
+
   return (
     <div className="mx-auto max-w-3xl space-y-5 px-4 py-8">
       <div className="flex items-center justify-between">
-        <Link to="/dashboard" className="text-sm text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="mr-1 inline h-3.5 w-3.5" />
-          {t("space.console")}
-        </Link>
+        {/*
+          左上角返回：**优先「返回上一级」**（站长 2026-10-15）——
+          从消息中心的活动卡片点进来时，回"上一级"才符合直觉；
+          直接回控制台会丢掉"我刚才是从哪来的"。没有上一级时才退回控制台。
+        */}
+        {canGoBack ? (
+          <button
+            type="button"
+            onClick={() => window.history.back()}
+            className="cursor-pointer text-sm text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="mr-1 inline h-3.5 w-3.5" />
+            {t("act.backPrev")}
+          </button>
+        ) : (
+          <Link to="/dashboard" className="text-sm text-muted-foreground hover:text-foreground">
+            <ArrowLeft className="mr-1 inline h-3.5 w-3.5" />
+            {t("space.console")}
+          </Link>
+        )}
         <span className="text-xs text-muted-foreground">{t("act.brandLine")}</span>
       </div>
 
@@ -297,6 +326,8 @@ export default function ActivityPage() {
                     onChange={(e) => setGithub(e.target.value)}
                   />
                 )}
+                {/* 问卷不靠「参与」按钮：答题 + 交卷才算参与 */}
+                {!isQuiz && (
                 <Button
                   size="sm"
                   onClick={() => void handleClaim()}
@@ -312,6 +343,7 @@ export default function ActivityPage() {
                   {busy && <Loader2 className="h-4 w-4 animate-spin" />}
                   {buttonLabel}
                 </Button>
+                )}
               </>
             )}
             <Button variant="outline" size="sm" onClick={() => void handleShare()}>
@@ -322,9 +354,39 @@ export default function ActivityPage() {
 
           {/* 投票区：选项 + 票数 + 自己的选择。已投票 / 已开奖后自动切成只读展示 */}
           {/* 集合投票（问卷）：一个活动多道题，交卷后按答对率结算 */}
-          {isVote && ev.quiz ? (
-            <EventQuiz ev={ev} />
-          ) : null}
+          {/* 问卷：奖励规格 + 答题区（答完交卷按答对率结算） */}
+          {isQuiz && (
+            <div className="space-y-3">
+              {/* 奖励规格：让用户答题前就知道能拿到什么 */}
+              {ev.quiz?.scoring.kind === "tiers" && ev.quiz.scoring.tiers.length > 0 && (
+                <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+                  <p className="mb-1 text-xs font-medium">{t("quiz.rewardTitle")}</p>
+                  <ul className="space-y-0.5 text-xs text-muted-foreground">
+                    {[...ev.quiz.scoring.tiers]
+                      .sort((a, b) => a.minPercent - b.minPercent)
+                      .map((tier, i) => (
+                        <li key={i}>
+                          · 答对 {tier.minPercent}% 以上：
+                          {tier.rewardType === "points"
+                            ? `${(tier.params as { amount?: number } | undefined)?.amount ?? 0} 积分`
+                            : tier.rewardType === "newapi_quota"
+                              ? `中转站额度 ${(tier.params as { amount?: number } | undefined)?.amount ?? 0}`
+                              : tier.rewardType === "invite_quota"
+                                ? `邀请额度 ${(tier.params as { count?: number } | undefined)?.count ?? 0} 个`
+                                : t(`quiz.ed.reward.${tier.rewardType}`)}
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              )}
+              {ev.quiz?.scoring.kind === "linear" && (
+                <div className="rounded-lg border border-border/70 bg-muted/20 p-3 text-xs text-muted-foreground">
+                  {t("quiz.rewardLinear", { n: String(ev.quiz.scoring.maxPoints) })}
+                </div>
+              )}
+              <EventQuiz ev={ev} />
+            </div>
+          )}
 
           {isVote && !ev.quiz && (
             <EventVote

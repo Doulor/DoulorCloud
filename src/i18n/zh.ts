@@ -9,6 +9,8 @@
  */
 export const zh = {
   // —— 通用 ——
+  "quiz.rewardTitle": "奖励规格",
+  "quiz.rewardLinear": "按答对率折算积分：答对 100% 可得 {n} 积分。",
   "quiz.progress": "已答 {done}/{total}",
   "quiz.remaining": "剩余 {time}",
   "quiz.retake.best": "可重答（取最高分）",
@@ -38,6 +40,9 @@ export const zh = {
   "quiz.ed.points": "积分",
   "quiz.ed.atLeast": "答对率 ≥",
   "quiz.ed.addTier": "加一档",
+  "quiz.ed.unit.points": "积分",
+  "quiz.ed.unit.newapi_quota": "钱包余额",
+  "quiz.ed.unit.invite_quota": "个邀请额度",
   "quiz.ed.reward.points": "积分",
   "quiz.ed.reward.newapi_quota": "中转站额度",
   "quiz.ed.reward.invite_quota": "邀请额度",
@@ -1604,6 +1609,7 @@ export const zh = {
 
   // —— 活动分享页 ——
   "act.notFound": "这个活动不存在，或者还没发布",
+  "act.backPrev": "返回上一级",
   "act.brandLine": "Doulor Cloud · 活动",
   "act.limitPeople": "限 {n} 人参与",
   "act.limitClaims": "限量 {n} 份",
@@ -6219,6 +6225,8 @@ export const zh = {
   "adm.824": "用户",
   "adm.825": "领取时间",
   "adm.826": "状态",
+  "adm.claimDeleteConfirm": "确定删除 {user} 的这条领取记录吗？\n\n只删记录，不会回收已经发出去的奖励；删除后对方可以重新参与。",
+  "adm.claimDeleted": "领取记录已删除",
   "adm.827": "标记已发放",
   "adm.828": "选择桶",
   "adm.829": "正在读取账户与桶…",
@@ -6654,6 +6662,8 @@ export const zh = {
   "ap.contentPlaceholder": "例如：\n链接：https://pan.example.com/s/abcd\n提取码：1234",
   "ap.contentHint": "下单后原样发给买家（保留换行），最长 2000 字符。当前 {n} 字符。所有买家看到的都是这段内容，请勿放一次性卡密。",
   "ap.err.contentRequired": "请填写要自动发放的内容",
+  "ap.dailyPerUserLabel": "每日每人限购（留空 = 不限）",
+  "ap.dailyPerUserHint": "按自然日计算，同一个人每天最多买几件；隔天自动恢复。与上面的「每日限量」是两个维度：那个限制全站今天总共卖多少。",
   "ap.dailyLimitLabel": "每日限量（留空 = 不限）",
   "ap.dailyLimitHint": "按自然日计算，每天最多卖出多少件；隔天自动恢复，不需要手动补货。",
   "ap.showPurchasesLabel": "公示购买记录",
@@ -7366,6 +7376,8 @@ export const zh = {
   "common.prev": "上一页",
   "dm.err.create": "创建失败",
   "don.probe.result": "已把「{name}」的 {n} 个模型接入中转站",
+  "adm.evStatus.adminOnly": "仅管理可见",
+  "adm.evStatus.adminOnlyShort": "仅管理",
   "adm.evStatus.draft": "草稿",
   "adm.evStatus.scheduled": "定时发布",
   "adm.evStatus.active": "进行中",

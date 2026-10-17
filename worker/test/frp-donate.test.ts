@@ -14,6 +14,8 @@
 //   · 默认套餐的值来自设置项，不是写死的常量 —— 站长改设置要立刻生效
 //   · 同一台机器重复捐献复用已有节点，不在节点列表里堆同一个 IP 的死节点
 //   · 令牌过期/伪造一律拒绝
+//   · 🔴 复用分支只认自己的节点（报告 #8）：别人的 IP 提交上来 → 409 且**不回显任何
+//     密钥**；本人复用同样不回显；首次创建才返回密钥
 import { describe, it, expect } from "vitest"
 import { env } from "cloudflare:workers"
 import { uuid } from "../src/crypto"
@@ -47,6 +49,37 @@ async function mintToken(user: TestUser): Promise<string> {
   return body.token
 }
 
+/**
+ * 每个用例一个**专属**的 server_addr。
+ *
+ * 原来这里是 `203.0.113.<Math.random()*200>`。报告 #8 的修复让「同一 IP 被别人登记过」
+ * 直接 409，随机 IP 一旦撞上别的用例（同一个文件里也要跑七八次登记）就会偶发变红 ——
+ * 那不是代码坏了，是测试自己在掷骰子。改成自增序号 + 专用网段，唯一性由序号保证。
+ */
+let ipSeq = 0
+function uniqueIp(): string {
+  ipSeq += 1
+  return `198.18.${Math.floor(ipSeq / 250)}.${(ipSeq % 250) + 1}`
+}
+
+/** 断言响应体里没有任何「密钥/凭据」字段，也没有给定的密钥明文 */
+function expectNoSecrets(body: Record<string, unknown>, leaked?: string) {
+  const raw = JSON.stringify(body)
+  for (const field of [
+    "agentKey",
+    "agent_key",
+    "panelSecret",
+    "panel_secret",
+    "authToken",
+    "auth_token",
+    "frpsToken",
+    "agentSecret",
+  ]) {
+    expect(raw, `${field} 不该出现在响应里`).not.toContain(field)
+  }
+  if (leaked) expect(raw).not.toContain(leaked)
+}
+
 /** 模拟脚本回报（**不带登录态** —— 脚本在别人的服务器上跑，没有浏览器会话） */
 async function register(payload: Record<string, unknown>) {
   const res = await fetchSelf(
@@ -67,7 +100,7 @@ async function register(payload: Record<string, unknown>) {
 
 function goodPayload(token: string, over: Record<string, unknown> = {}) {
   return {
-    ip: "203.0.113." + (Math.floor(Math.random() * 200) + 1),
+    ip: uniqueIp(),
     frpsPort: 7000,
     panelPort: 7200,
     frpsToken: "abcdefghijklmnop1234567890",
@@ -164,7 +197,7 @@ describe("代理节点一键捐献 · 端到端", () => {
 
   it("同一台机器用新令牌再捐一次 → 复用已有节点，不堆死节点", async () => {
     const user = await makeUser()
-    const ip = "203.0.113." + (Math.floor(Math.random() * 200) + 1)
+    const ip = uniqueIp()
 
     const first = await register(goodPayload(await mintToken(user), { ip }))
     expect(first.status).toBe(200)
@@ -221,7 +254,7 @@ describe("代理节点一键捐献 · 端到端", () => {
 
   it("默认套餐的值来自设置项，改了立刻生效（站长要求可改）", async () => {
     const user = await makeUser()
-    const ip = "203.0.113." + (Math.floor(Math.random() * 200) + 1)
+    const ip = uniqueIp()
 
     // 管理员把默认值改成 7 天 / 250 积分 / 端口 20000-20005
     for (const [k, v] of [
@@ -265,5 +298,88 @@ describe("代理节点一键捐献 · 端到端", () => {
         await env.DB.prepare(`DELETE FROM app_settings WHERE key = ?`).bind(k).run()
       }
     }
+  })
+
+  // ------------------------------------------------------------------ 报告 #8（HIGH）
+  //
+  // 漏洞形状：查重键只有 server_addr，而「已存在」分支会把库里的 agent_key 原样回显。
+  // 于是**只要知道别人的节点 IP** 就能拿到它的 HMAC 密钥（= 可冒充该节点拉期望状态，
+  // 那里有该节点全部用户的 frp 令牌）。下面三条把修复钉死：
+  //   · 不是本人 → 409，且响应里连一个凭据字段都没有
+  //   · 是本人复用 → 200，但同样不回显密钥（D1 里那把也不许动，否则已部署 agent 全挂）
+  //   · 归属为 NULL 的老节点不因为「没主人」就变成谁都能复用
+
+  it("🔴 别人已登记的 server_addr 再提交 → 409，且响应里没有任何密钥", async () => {
+    const owner = await makeUser()
+    const intruder = await makeUser()
+    const ip = uniqueIp()
+
+    const first = await register(goodPayload(await mintToken(owner), { ip }))
+    expect(first.status).toBe(200)
+    expect(first.body.created).toBe(true)
+    // 首次创建 → 密钥必须给（脚本要靠它装 agent）
+    const ownerKey = String(first.body.agentKey)
+    expect(ownerKey).toMatch(/^[A-Za-z0-9]{48}$/)
+
+    const attacked = await register(goodPayload(await mintToken(intruder), { ip }))
+    expect(attacked.status).toBe(409)
+    // 错误体只有统一的 error/code 两个字段 —— 连 nodeId 都不给，
+    // 不帮攻击者把「IP → nodeId」映射摸出来
+    expect(Object.keys(attacked.body).sort()).toEqual(["code", "error"])
+    expect(attacked.body.code).toBe("FRP_NODE_ADDR_TAKEN")
+    expectNoSecrets(attacked.body, ownerKey)
+
+    // 归属与密钥都没被这次请求动过，也没有冒出第二个节点
+    const node = await env.DB.prepare(
+      `SELECT owner_user_id, agent_key FROM frp_nodes WHERE server_addr = ?`
+    )
+      .bind(ip)
+      .first<{ owner_user_id: string; agent_key: string }>()
+    expect(node!.owner_user_id).toBe(owner.id)
+    expect(node!.agent_key).toBe(ownerKey)
+  })
+
+  it("🔴 本人复用节点时也不再回显密钥，但库里那把不许动（已部署 agent 靠它活着）", async () => {
+    const user = await makeUser()
+    const ip = uniqueIp()
+
+    const first = await register(goodPayload(await mintToken(user), { ip }))
+    expect(first.status).toBe(200)
+    const agentKey = String(first.body.agentKey)
+    expect(agentKey).toBeTruthy()
+
+    const again = await register(goodPayload(await mintToken(user), { ip }))
+    expect(again.status).toBe(200)
+    expect(again.body.created).toBe(false)
+    expect(String(again.body.nodeIdForAgent)).toBe(String(first.body.nodeId))
+    // 字段本身就不存在（不是 null）—— 免得调用方把「拿到但为空」当成有效值
+    expect("agentKey" in again.body).toBe(false)
+    expectNoSecrets(again.body, agentKey)
+
+    // 🔴 兼容性红线：复用分支只是「不再外发」，**不能**顺手轮换/补写密钥。
+    //    已经装在用户机器上的 agent 用着第一次那把，轮换就等于把它们全部踢下线。
+    const node = await env.DB.prepare(`SELECT agent_key FROM frp_nodes WHERE id = ?`)
+      .bind(String(first.body.nodeId))
+      .first<{ agent_key: string }>()
+    expect(node!.agent_key).toBe(agentKey)
+  })
+
+  it("🔴 归属为 NULL 的老节点（配置式捐献时代）也不允许被别人复用", async () => {
+    const user = await makeUser()
+    const ip = uniqueIp()
+    const now = new Date().toISOString()
+    await env.DB.prepare(
+      `INSERT INTO frp_nodes
+         (id, name, server_addr, server_port, auth_token, token_prefix,
+          port_min, port_max, max_ports, enabled, sort_order, auth_mode, created_at, updated_at)
+       VALUES (?, '老节点', ?, 7000, 'tok-legacy-1234', 'DC_', 10000, 10010, 11, 1, 0, 'token_user', ?, ?)`
+    )
+      .bind(`n_${uuid().slice(0, 8)}`, ip, now, now)
+      .run()
+
+    const res = await register(goodPayload(await mintToken(user), { ip }))
+    expect(res.status).toBe(409)
+    expect(res.body.code).toBe("FRP_NODE_ADDR_TAKEN")
+    expectNoSecrets(res.body)
   })
 })

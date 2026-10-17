@@ -276,6 +276,8 @@ interface FormState {
   stock: string
   /** 每日限量（自然日）；空 = 不限 */
   dailyLimit: string
+  /** 每日每人限购（自然日）；空 = 不限。与 dailyLimit（每日全站）是两个维度 */
+  dailyPerUserLimit: string
   /** 是否公示这件商品的购买记录（买家用户名 + 下单时间，最近 10 条） */
   showPurchases: boolean
   perUserLimit: string
@@ -308,6 +310,7 @@ function emptyForm(): FormState {
     price: "",
     stock: "",
     dailyLimit: "",
+    dailyPerUserLimit: "",
     showPurchases: false,
     perUserLimit: "",
     delivery: "manual",
@@ -333,6 +336,10 @@ function formOf(p: PointProduct): FormState {
     price: String(p.price),
     stock: p.stock === null ? "" : String(p.stock),
     dailyLimit: p.dailyLimit === null || p.dailyLimit === undefined ? "" : String(p.dailyLimit),
+    dailyPerUserLimit:
+      p.dailyPerUserLimit === null || p.dailyPerUserLimit === undefined
+        ? ""
+        : String(p.dailyPerUserLimit),
     showPurchases: p.showPurchases === true,
     perUserLimit: p.perUserLimit === null ? "" : String(p.perUserLimit),
     delivery: p.delivery,
@@ -375,6 +382,8 @@ function payloadOf(f: FormState): PointProductPayload {
     price: Math.trunc(Number(f.price) || 0),
     stock: f.stock.trim() === "" ? null : Math.trunc(Number(f.stock) || 0),
     dailyLimit: f.dailyLimit.trim() === "" ? null : Math.trunc(Number(f.dailyLimit) || 0),
+    dailyPerUserLimit:
+      f.dailyPerUserLimit.trim() === "" ? null : Math.trunc(Number(f.dailyPerUserLimit) || 0),
     showPurchases: f.showPurchases,
     perUserLimit: f.perUserLimit.trim() === "" ? null : Math.trunc(Number(f.perUserLimit) || 0),
     delivery: f.delivery,
@@ -2192,6 +2201,15 @@ function ShopTab() {
                   onChange={(e) => setForm((f) => ({ ...f, dailyLimit: e.target.value }))}
                 />
                 <p className="text-[11px] text-muted-foreground">{t("ap.dailyLimitHint")}</p>
+                <Label htmlFor="pdDailyPerUser">{t("ap.dailyPerUserLabel")}</Label>
+                <Input
+                  id="pdDailyPerUser"
+                  inputMode="numeric"
+                  placeholder={t("pt.form.unlimited")}
+                  value={form.dailyPerUserLimit}
+                  onChange={(e) => setForm((f) => ({ ...f, dailyPerUserLimit: e.target.value }))}
+                />
+                <p className="text-[11px] text-muted-foreground">{t("ap.dailyPerUserHint")}</p>
               </div>
             </div>
 

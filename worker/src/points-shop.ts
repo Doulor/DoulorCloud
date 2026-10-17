@@ -195,6 +195,11 @@ export interface PointProduct {
   showPurchases: boolean
   /** 每人限购件数；null = 不限 */
   perUserLimit: number | null
+  /**
+   * 每日**每人**限购件数；null = 不限。
+   * 与 dailyLimit（每日全站）不同：这个只约束"同一个人今天买了几件"。
+   */
+  dailyPerUserLimit: number | null
   delivery: ProductDelivery
   /** delivery='quota' 时每件充入多少元 */
   quotaYuan: number | null
@@ -300,6 +305,11 @@ export interface ProductInput {
   /** 是否公示购买记录（默认 false；见 PointProduct.showPurchases） */
   showPurchases: boolean
   perUserLimit: number | null
+  /**
+   * 每日**每人**限购件数；null = 不限。
+   * 与 dailyLimit（每日全站）不同：这个只约束"同一个人今天买了几件"。
+   */
+  dailyPerUserLimit: number | null
   delivery: ProductDelivery
   quotaYuan: number | null
   deliveryParams: DeliveryParams | null
@@ -461,6 +471,9 @@ function rowToProduct(r: Record<string, unknown>): PointProduct {
     /** 公示购买记录（迁移 0127 新增列；老行默认 0） */
     showPurchases: Number(r.show_purchases ?? 0) === 1,
     perUserLimit: r.per_user_limit == null ? null : Number(r.per_user_limit),
+    /** 每日每人限购；null = 不限（与 dailyLimit 的日期口径一致） */
+    dailyPerUserLimit:
+      r.daily_per_user_limit == null ? null : Number(r.daily_per_user_limit),
     delivery,
     quotaYuan: r.quota_yuan == null ? null : Number(r.quota_yuan),
     deliveryParams: parseDeliveryParams(r.delivery_params, delivery),
@@ -590,7 +603,14 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
   const dailyLimit = dailyRaw && dailyRaw > 0 ? dailyRaw : null
   // 限购：0 与 null 都当「不限」，统一存 null；用户商品一律不限
   const limitRaw = asUser ? null : nullableInt(b.perUserLimit, "每人限购", 0, MAX_PER_USER_LIMIT)
+  // 每日每人限购：0 与 null 都当「不限」，统一存 null（与上面的口径一致）
+  const dailyPerUserRaw = asUser
+    ? null
+    : nullableInt(b.dailyPerUserLimit, "每日每人限购", 0, MAX_PER_USER_LIMIT)
   const perUserLimit = limitRaw && limitRaw > 0 ? limitRaw : null
+  // 每日每人限购：同样把 0 归一成 null（0 = 不限）
+  const dailyPerUserLimit =
+    dailyPerUserRaw && dailyPerUserRaw > 0 ? dailyPerUserRaw : null
 
   // 公示购买记录：默认**关**。认不出的值一律当 false —— 这是「要不要公开买家用户名」
   // 的开关，宁可少开也不能误开（老前端不带这个字段时不能变成公示）。
@@ -720,6 +740,7 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
     dailyLimit,
     showPurchases,
     perUserLimit,
+    dailyPerUserLimit,
     delivery,
     quotaYuan,
     deliveryParams,
@@ -834,10 +855,10 @@ const PRODUCT_COLUMNS =
   // ⚠️ 新增列一律追加到**末尾**：列顺序一变，INSERT 占位符就要整体重排，
   //    极易漏一处而变成「字段整体错位」的脏数据。这里只改个数。
   " owner_id, owner_name, review_status, review_note, reviewed_at, created_at, updated_at, " +
-  "category, daily_limit, show_purchases)"
+  "category, daily_limit, show_purchases, daily_per_user_limit)"
 
 /** PRODUCT_COLUMNS 的列数 —— INSERT 的占位符个数必须与它一致 */
-const PRODUCT_COLUMN_COUNT = 25
+const PRODUCT_COLUMN_COUNT = 26
 
 function productBindings(id: string, input: ProductInput, now: string): unknown[] {
   return [
@@ -866,6 +887,7 @@ function productBindings(id: string, input: ProductInput, now: string): unknown[
     input.category,
     input.dailyLimit,
     input.showPurchases ? 1 : 0,
+    input.dailyPerUserLimit,
   ]
 }
 
@@ -905,7 +927,8 @@ export async function updateProduct(env: Env, id: string, raw: unknown): Promise
        name = ?, description = ?, image_url = ?, icon = ?, price = ?, stock = ?,
        per_user_limit = ?, delivery = ?, quota_yuan = ?, delivery_params = ?,
        billing_mode = ?, rental_days = ?,
-       enabled = ?, sort = ?, category = ?, daily_limit = ?, show_purchases = ?, updated_at = ?
+       enabled = ?, sort = ?, category = ?, daily_limit = ?, show_purchases = ?,
+      daily_per_user_limit = ?, updated_at = ?
      WHERE id = ?`
   )
     .bind(
@@ -926,6 +949,7 @@ export async function updateProduct(env: Env, id: string, raw: unknown): Promise
       input.category,
       input.dailyLimit,
       input.showPurchases ? 1 : 0,
+      input.dailyPerUserLimit,
       now,
       id
     )
@@ -1443,6 +1467,30 @@ export async function listPublicPurchases(
 }
 
 /** 某用户在某商品上「已买过几件」（已取消的不算） */
+/**
+ * 今天（站点时区自然日）这个用户在这件商品上已买几件 —— 「每日每人限购」用。
+ *
+ * 口径与 countUserOrders 完全一致（同样的 `status != 'cancelled'`），只多一条时间下界。
+ * 时间下界在 JS 里算：站点时区当日 00:00 对应的 **UTC 时刻**，再与 created_at（ISO UTC）比。
+ * （不在 SQL 里做时区换算：daily_sold 那套写法我没完整读到，抄错一处就会
+ *  出现"商品说还有货、用户却被拦"这种对不上的怪事。）
+ */
+async function countUserOrdersToday(
+  env: Env,
+  userId: string,
+  productId: string
+): Promise<number> {
+  const offsetH = await siteOffsetHours(env)
+  const day = siteDayString(new Date(), offsetH) // YYYY-MM-DD（站点时区）
+  const startIso = new Date(Date.parse(`${day}T00:00:00Z`) - offsetH * 3600_000).toISOString()
+  const row = await env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM point_orders WHERE user_id = ? AND product_id = ? AND status != 'cancelled' AND created_at >= ?"
+  )
+    .bind(userId, productId, startIso)
+    .first<{ c: number }>()
+  return Number(row?.c ?? 0)
+}
+
 async function countUserOrders(env: Env, userId: string, productId: string): Promise<number> {
   const row = await env.DB.prepare(
     "SELECT COUNT(*) AS c FROM point_orders WHERE user_id = ? AND product_id = ? AND status != 'cancelled'"
@@ -1799,6 +1847,22 @@ export async function buyProduct(
         400,
         `该商品每人限购 ${product.perUserLimit} 件，你已购买 ${used} 件。`,
         "PURCHASE_LIMIT"
+      )
+    }
+  }
+
+  /**
+   * 每日**每人**限购（站长 2026-10-15 要求）。
+   * 与上面的「每人限购」是两个维度：那个管累计，这个管"今天"。
+   * ⚠️ 必须排在扣积分之前（与其它前置检查一致）—— 扣了分才说超限是最糟的体验。
+   */
+  if (!isRental && product.dailyPerUserLimit && product.dailyPerUserLimit > 0) {
+    const usedToday = await countUserOrdersToday(env, user.id, product.id)
+    if (usedToday >= product.dailyPerUserLimit) {
+      throw new ApiError(
+        400,
+        `该商品每日每人限购 ${product.dailyPerUserLimit} 件，你今天已购买 ${usedToday} 件，明天再来吧。`,
+        "PURCHASE_DAILY_LIMIT"
       )
     }
   }

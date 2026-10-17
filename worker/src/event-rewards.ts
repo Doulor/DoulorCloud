@@ -359,6 +359,8 @@ export const CONDITION_TYPES = [
   "code",
   "lottery",
   "vote",
+  /** 问卷（集合投票）：多题、按答对率发奖 —— 与 vote 平级，见 validateQuizCondition */
+  "quiz",
   "github_star",
   "github_pr",
 ] as const
@@ -381,6 +383,7 @@ export const CONDITION_HINTS: Record<ConditionType, string> = {
   code: "需要填写正确的活动口令",
   lottery: "",
   vote: "从下面的选项里选一个投出去即可参与（一人一票，投完不能改）",
+  quiz: "问卷",
   github_star: "需要给仓库点 Star（刚点完最多 5 分钟后才会识别到）",
   github_pr: "需要给仓库提交过 PR（刚提交最多 5 分钟后才会识别到）",
 }
@@ -496,6 +499,11 @@ export const CONDITION_HANDLERS: Record<ConditionType, ConditionHandler> = {
     const res = await checkStarred(env, repo, who)
     return res.ok
   },
+  /**
+   * 问卷：**不通过 claim 参与**（交卷走 POST /events/:id/quiz）。
+   * 这里恒返回 true，是为了让 claimEvent 万一被调到也不会报"条件配置异常"。
+   */
+  quiz: async () => true,
 
   /**
    * 「有没有给我的 GitHub 仓库提交过 PR」（2026-10-05 站长要求，借鉴 github_star）。
@@ -752,6 +760,23 @@ export function parseVoteConfig(params: Record<string, unknown> | null): VoteCon
 }
 
 /** 投票配置的写入时校验（文案面向管理员），返回 null = 合法 */
+/**
+ * 问卷配置的写入时校验（文案面向管理员）。返回 null = 合法。
+ *
+ * 与 validateVoteCondition 分开：问卷的形状完全不同（questions 而不是 options），
+ * 合成一个函数只会让两边的错误文案互相串味（之前"投票活动需要配置选项"就是这么来的）。
+ */
+export function validateQuizCondition(params: unknown): string | null {
+  const p = (params ?? {}) as Record<string, unknown>
+  if (p.mode !== "quiz") {
+    return "问卷配置缺少 mode=\"quiz\"（如果这是普通投票，请把参与类型改成「投票」）"
+  }
+  if (!parseQuizConfig(p)) {
+    return "问卷配置不合法：至少 1 道题、每题至少 2 个选项、正确答案必须是该题的选项之一、发奖口径（scoring）必须有效（积分要写 amount / min-max）"
+  }
+  return null
+}
+
 export function validateVoteCondition(params: unknown): string | null {
   const p = (params ?? {}) as Record<string, unknown>
   /**
@@ -853,7 +878,13 @@ export type QuizRetakeMode = (typeof QUIZ_RETAKE_MODES)[number]
 export const QUIZ_REVEAL_MODES = ["immediate", "afterDeadline", "never"] as const
 export type QuizRevealMode = (typeof QUIZ_REVEAL_MODES)[number]
 
-export const MAX_QUIZ_QUESTIONS = 20
+/**
+ * 题目数上限。
+ * ⚠️ 原来写的是 20 —— 结果是**超出部分被静默截断**：站长粘 25 题的问卷，
+ * 存进去只剩 20 题，判分也按 20 题算，界面上完全看不出少了几题（实测踩到）。
+ * 提到 50：足够做"站内知识问卷"这类长问卷，同时仍然防住"塞一千题"的滥用。
+ */
+export const MAX_QUIZ_QUESTIONS = 50
 export const MAX_QUIZ_OPTIONS = 8
 /** 重考次数上限（unlimited 也封顶，免得被刷） */
 export const MAX_QUIZ_ATTEMPTS = 10
@@ -960,7 +991,17 @@ export function parseQuizConfig(raw: unknown): QuizConfig | null {
     for (const rt of rawTiers) {
       const t = (rt ?? {}) as Record<string, unknown>
       const minPercent = Math.floor(Number(t.minPercent))
-      if (!Number.isFinite(minPercent) || minPercent < 0 || minPercent > 100) continue
+      /**
+       * 🔴 门槛必须在 0–100，且**同一门槛只能有一档**（2026-10-15 实测补的）。
+       *
+       * 原来非法档位是 `continue`（静默跳过）：站长配了 ≥120% 那一档，保存成功、
+       * 界面也不报错，但**答对率上限就是 100%** ⇒ 那一档永远不可能命中，
+       * 站长会一直以为"配了两档、高分拿大额"。同一门槛配两档同理（第二档永远轮不到）。
+       * 所以这里改成**拒绝整份配置**，与其它字段"非法一律拒绝"的口径一致。
+       */
+      if (!Number.isFinite(minPercent) || minPercent < 0 || minPercent > 100) return null
+      // ⚠️ **同一门槛允许配多档**（2026-10-15 站长要求）：≥100% 同时给"额度 3000"和"积分 500"，
+      //    满分时两份一起发。所以这里**不做去重** —— 之前加过一条"重复门槛就拒绝"，已撤掉。
       const rewardType = String(t.rewardType ?? "")
       if (!isRewardType(rewardType)) continue
       const tierParams = (t.params ?? undefined) as Record<string, unknown> | undefined
@@ -1031,6 +1072,22 @@ export function pickQuizTier(tiers: QuizTier[], percent: number): QuizTier | nul
     if (percent >= t.minPercent) return t
   }
   return null
+}
+
+/**
+ * 取**所有**满足的档里门槛最高的那一档（可能多档 —— 同门槛可以配多个奖励）。
+ *
+ * 站长 2026-10-15 的需求：≥100% 同时给"额度 3000"和"积分 500"，满分时两份一起发。
+ * 所以结算不再只取一档，而是"取最高门槛上的全部档"。
+ * ⚠️ 不会跨门槛累加：≥80% 的人只拿 80% 那一档，不会把 ≥50% 的也加上。
+ */
+export function pickQuizTiers(tiers: QuizTier[], percent: number): QuizTier[] {
+  let best = -1
+  for (const t of tiers) {
+    if (percent >= t.minPercent && t.minPercent > best) best = t.minPercent
+  }
+  if (best < 0) return []
+  return tiers.filter((t) => t.minPercent === best)
 }
 
 /** 线性折算积分：100% → maxPoints，0% → 0（四舍五入） */

@@ -42,6 +42,51 @@ interface QuizShape {
   scoring: { kind: "tiers"; tiers: QuizTier[] } | { kind: "linear"; maxPoints: number }
 }
 
+/** 一键示例（与后台「填入示例」同形状，必须能通过服务端 parseQuizConfig） */
+
+const QUIZ_TEMPLATE_FOR_EDITOR = JSON.stringify(
+
+  {
+
+    mode: "quiz",
+
+    questions: [
+
+      {
+
+        id: "q1",
+
+        title: "1 + 1 等于几？",
+
+        options: [
+
+          { id: "a", label: "2" },
+
+          { id: "b", label: "3" },
+
+        ],
+
+        correctOptionId: "a",
+
+      },
+
+    ],
+
+    retake: "once",
+
+    reveal: "immediate",
+
+    scoring: { kind: "linear", maxPoints: 10 },
+
+  },
+
+  null,
+
+  2
+
+)
+
+
 /** 生成稳定 id（与后台普通投票的选项 id 同一思路：随机串，生成后不变） */
 const rid = (p: string) => `${p}${Math.random().toString(36).slice(2, 8)}`
 
@@ -72,9 +117,19 @@ export function QuizEditor({
 
   if (!parsed) {
     return (
-      <p className="mt-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
-        {t("quiz.ed.errJson")}
-      </p>
+      <div className="mt-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3">
+        <p className="text-xs text-destructive">{t("quiz.ed.errJson")}</p>
+        {/* 给条出路：不然 JSON 是空/写坏时用户就卡在这儿了（站长实测反馈） */}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-2"
+          onClick={() => onChange(QUIZ_TEMPLATE_FOR_EDITOR)}
+        >
+          {t("quiz.adm.fillExample")}
+        </Button>
+      </div>
     )
   }
 
@@ -209,24 +264,32 @@ export function QuizEditor({
                     </option>
                   ))}
                 </select>
-                {tier.rewardType === "points" && (
-                  <>
-                    <input
-                      type="number"
-                      min={1}
-                      className="w-20 rounded-md border border-border bg-background px-2 py-1.5"
-                      value={String((tier.params as { amount?: number } | undefined)?.amount ?? 1)}
-                      onChange={(e) =>
-                        update((d) => {
-                          if (d.scoring.kind === "tiers") {
-                            d.scoring.tiers[ti].params = { amount: Number(e.target.value) || 0 }
-                          }
-                        })
-                      }
-                    />
-                    <span>{t("quiz.ed.points")}</span>
-                  </>
-                )}
+                {/*
+                  ⚠️ 三种奖励的**参数字段名不一样**（读 worker/src/event-rewards.ts）：
+                    points        → amount（积分）
+                    newapi_quota  → amount（中转站钱包余额）
+                    invite_quota  → count （邀请码创建额度）
+                  原来只给 points 画了输入框 ⇒ 选中转站额度时**没有数量框**，只能靠手改 JSON。
+                */}
+                <input
+                  type="number"
+                  min={1}
+                  className="w-20 rounded-md border border-border bg-background px-2 py-1.5"
+                  value={String(
+                    (tier.params as { amount?: number; count?: number } | undefined)?.[
+                      tier.rewardType === "invite_quota" ? "count" : "amount"
+                    ] ?? 1
+                  )}
+                  onChange={(e) =>
+                    update((d) => {
+                      if (d.scoring.kind !== "tiers") return
+                      const v = Number(e.target.value) || 0
+                      d.scoring.tiers[ti].params =
+                        tier.rewardType === "invite_quota" ? { count: v } : { amount: v }
+                    })
+                  }
+                />
+                <span>{t(`quiz.ed.unit.${tier.rewardType}`)}</span>
                 <Button
                   type="button"
                   variant="ghost"

@@ -2757,8 +2757,9 @@ export interface EventItem {
   grantedCount?: number
 }
 
-export type EventStatus = "draft" | "scheduled" | "active" | "ended" | "archived"
+export type EventStatus = "draft" | "admin_only" | "scheduled" | "active" | "ended" | "archived"
 export type EventRewardType = "none" | "newapi_quota" | "invite_quota" | "points"
+/** 参与条件类型。quiz = 问卷（多题、按答对率发奖），与 vote 平级 */
 export type EventConditionType =
   | "always"
   | "has_profile"
@@ -2771,6 +2772,11 @@ export type EventConditionType =
    * 其中「多数 / 少数」又分「投票后立刻按当前票数结算」与「截止后开奖」。
    */
   | "vote"
+  /**
+   * 问卷：一个活动里含多道题，交卷后按答对率发奖（与 vote 平级，不用选项那套）。
+   * 配置形状见 worker/src/event-rewards.ts 的 QuizConfig。
+   */
+  | "quiz"
   /** 点 GitHub star：用户填自己的 GitHub 用户名，服务端去仓库的 stargazers 名单里核验 */
   | "github_star"
   /** 提交 GitHub PR：用户填自己的 GitHub 用户名，服务端核验其有没有给该仓库提过 PR */
@@ -3190,6 +3196,8 @@ export interface PointProduct {
   stock: number | null
   /** 每日限量（自然日）；null = 不限 */
   dailyLimit: number | null
+  /** 每日**每人**限购；null = 不限（与 dailyLimit 的日期口径一致） */
+  dailyPerUserLimit: number | null
   /** 今日已售数（与后端每日限量计数同口径 UTC 日）；无每日限时恒 0 */
   dailySold: number
   /** 累计售出（已交付 + 已结算订单数），「按热度排序」用 */
@@ -3445,6 +3453,8 @@ export interface PointProductPayload {
   stock: number | null
   /** 每日限量（自然日）；null = 不限 */
   dailyLimit: number | null
+  /** 每日**每人**限购；null = 不限（与 dailyLimit 的日期口径一致） */
+  dailyPerUserLimit: number | null
   /** 是否在商品详情里公示购买记录（默认 false） */
   showPurchases: boolean
   perUserLimit: number | null

@@ -618,7 +618,7 @@ function eventDraftToPayload(d: EventDraft): EventPayload {
         pool: Math.floor(Number(d.lotteryPool)) || 1,
         mode: d.lotteryMode,
       }
-    : d.conditionType === "vote" && d.quizMode
+    : (d.conditionType === "quiz" || (d.conditionType === "vote" && d.quizMode))
       ? // 问卷：直接把粘贴的 JSON 解析后作为 condition_params（形状由后端 parseQuizConfig 校验）
         (JSON.parse(d.quizJson) as Record<string, unknown>)
       : d.conditionType === "vote"
@@ -669,6 +669,7 @@ function eventDraftToPayload(d: EventDraft): EventPayload {
 
 const EVENT_STATUS_OPTIONS: { value: EventStatus; label: string }[] = [
   { value: "draft", label: "adm.evStatus.draft" },
+  { value: "admin_only", label: "adm.evStatus.adminOnly" },
   { value: "scheduled", label: "adm.evStatus.scheduled" },
   { value: "active", label: "adm.evStatus.active" },
   { value: "ended", label: "adm.evStatus.ended" },
@@ -696,6 +697,7 @@ const CONDITION_TYPE_OPTIONS: { value: EventConditionType; label: string }[] = [
   // 投票：给定若干选项，一人一票；奖励规则可选「参与即可获奖 / 多数 / 少数」，
   // 其中多数与少数又分「投票后立刻按当前票数结算」和「截止后开奖」两种
   { value: "vote", label: "adm.cond.vote" },
+  { value: "quiz", label: "问卷（多题，按答对率发奖）" },
   // 点 star：用户填自己的 GitHub 用户名，服务端去该仓库的 stargazers 名单里核验
   { value: "github_star", label: "adm.cond.githubStar" },
   // 提交 PR：用户填自己的 GitHub 用户名，服务端核验其有没有给该仓库提过 PR
@@ -715,6 +717,7 @@ const VOTE_RULE_OPTIONS: { value: EventVoteRewardRule; label: string }[] = [
 
 const EVENT_STATUS_BADGE: Record<EventStatus, "default" | "secondary" | "success" | "outline"> = {
   draft: "secondary",
+  admin_only: "secondary",
   scheduled: "default",
   active: "success",
   ended: "outline",
@@ -723,6 +726,7 @@ const EVENT_STATUS_BADGE: Record<EventStatus, "default" | "secondary" | "success
 
 const EVENT_STATUS_TEXT: Record<EventStatus, string> = {
   draft: "adm.evStatus.draft",
+  admin_only: "adm.evStatus.adminOnlyShort",
   scheduled: "adm.evStatus.scheduledShort",
   active: "adm.evStatus.activeShort",
   ended: "adm.evStatus.endedShort",
@@ -752,10 +756,9 @@ const QUIZ_TEMPLATE = JSON.stringify(
     ],
     retake: "once",
     reveal: "immediate",
-    scoring: {
-      kind: "tiers",
-      tiers: [{ minPercent: 60, rewardType: "points", params: { amount: 2 } }],
-    },
+    // 默认给「按答对率线性折算」：答对 80% 就拿满分的 80%。
+    // 想改成"达到门槛给固定分"，在图形化界面的「发奖口径」里切成"按答对率分档"即可。
+    scoring: { kind: "linear", maxPoints: 10 },
   },
   null,
   2
@@ -966,6 +969,12 @@ export default function AdminPage() {
   const [eventOpen, setEventOpen] = React.useState(false)
   const [eventBusy, setEventBusy] = React.useState(false)
   const [eventDraft, setEventDraft] = React.useState<EventDraft>(emptyEventDraft())
+  /**
+   * 当前是不是在编「问卷」。
+   * 独立类型 quiz 与旧的「投票 + 问卷形态」都算 —— 界面统一用它判断，
+   * 这样下拉里选「问卷」就**立即**出现图形化编辑器、并且投票那套（选项/获奖规则）自动消失。
+   */
+  const quizActive = eventDraft.conditionType === "quiz" || eventDraft.quizMode
   /** 领取名单弹窗 */
   const [claimsOpen, setClaimsOpen] = React.useState(false)
   const [claimsEvent, setClaimsEvent] = React.useState<EventItem | null>(null)
@@ -3029,9 +3038,9 @@ export default function AdminPage() {
             lotteryPool: String(ev.conditionParams?.pool ?? "1000"),
             lotteryMode: ev.conditionParams?.mode === "random" ? "random" : "even",
             // 投票选项：把库里的 {id,label,desc,image} 灌回草稿（保留原 id，见 helper 注释）
-            quizMode: ev.conditionParams?.mode === "quiz",
+            quizMode: ev.conditionType === "quiz" || ev.conditionParams?.mode === "quiz",
             quizJson:
-              ev.conditionParams?.mode === "quiz"
+              ev.conditionType === "quiz" || ev.conditionParams?.mode === "quiz"
                 ? JSON.stringify(ev.conditionParams, null, 2)
                 : "",
             voteOptions: voteOptionsFromParams(ev.conditionParams),
@@ -3064,7 +3073,10 @@ export default function AdminPage() {
      * ⚠️ 这里只做「能解析 + 关键字段在」的粗校验 —— 真正的规则（选项≥2、正确答案必须在选项里、
      * 分档非空…）由服务端 parseQuizConfig 把关，前端重复实现一套只会两边不一致。
      */
-    if (eventDraft.conditionType === "vote" && eventDraft.quizMode) {
+    if (
+      eventDraft.conditionType === "quiz" ||
+      (eventDraft.conditionType === "vote" && eventDraft.quizMode)
+    ) {
       try {
         const parsed = JSON.parse(eventDraft.quizJson) as {
           questions?: unknown[]
@@ -3229,6 +3241,33 @@ export default function AdminPage() {
       setClaimsLoading(false)
     }
   }
+
+  /**
+
+   * 删除一条领取记录（管理员）。⚠️ 只删记录，**不回收已发出的奖励** ——
+
+   * 所以二次确认里把这点写清楚，避免误删已到账的人。
+
+   */
+
+  /**
+   * 删除一条领取记录（管理员）。⚠️ 只删记录，**不回收已发出的奖励** ——
+   * 二次确认里把这点写清楚，避免误删已到账的人。
+   */
+  const handleDeleteClaim = async (claim: EventClaim) => {
+    if (!claimsEvent) return
+    if (!window.confirm(t("adm.claimDeleteConfirm", { user: claim.username ?? "" }))) return
+    try {
+      await adminEventApi.deleteClaim(claimsEvent.id, claim.id)
+      toast.success(t("adm.claimDeleted"))
+      const res = await adminEventApi.claims(claimsEvent.id)
+      setClaims(res.claims)
+      notifyAttentionChanged() // 活动角标当场减一
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.104"))
+    }
+  }
+
 
   const handleGrantClaim = async (claim: EventClaim) => {
     if (!claimsEvent) return
@@ -9733,6 +9772,13 @@ export default function AdminPage() {
                     conditionType: v as EventConditionType,
                     // 抽奖固定发积分：选它时顺手把奖励类型切过去，避免提交时被后端拒绝
                     rewardType: v === "lottery" ? "points" : d.rewardType,
+                    /**
+                     * 🔴 选「问卷」时**顺手把问卷 JSON 填上模板**（站长 2026-10-15 反馈
+                     * "类型选了问卷，下面啥都没显示"）。
+                     * 原因：新活动的 quizJson 是空串 ⇒ 图形化编辑器解析不出东西，只显示一行
+                     * 报错，看起来就像界面坏了。给个能直接用的模板，改题干/选项即可。
+                     */
+                    quizJson: v === "quiz" && !d.quizJson.trim() ? QUIZ_TEMPLATE : d.quizJson,
                   }))
                 }
               >
@@ -9881,6 +9927,32 @@ export default function AdminPage() {
                     )}
                 </div>
               )}
+              {/*
+                问卷（独立类型 quiz）：与投票**平级**，不走选项 / 获奖规则那套。
+                ⚠️ 必须放在上面「投票」那段的**外面** —— 之前放在里面，选了问卷后
+                   conditionType 不再是 vote ⇒ 整段（含编辑器）被跳过 ⇒ 界面上啥都没有
+                   （站长 2026-10-15 实测反馈）。
+              */}
+              {eventDraft.conditionType === "quiz" && (
+                <>
+                  <QuizEditor
+                    value={eventDraft.quizJson}
+                    onChange={(json) => setEventDraft({ ...eventDraft, quizJson: json })}
+                  />
+                  <details className="mt-3">
+                    <summary className="cursor-pointer text-xs text-muted-foreground">
+                      {t("quiz.adm.advanced")}
+                    </summary>
+                    <textarea
+                      className="mt-2 h-56 w-full rounded-lg border border-border bg-background p-3 font-mono text-xs"
+                      placeholder={t("quiz.adm.placeholder")}
+                      value={eventDraft.quizJson}
+                      onChange={(e) => setEventDraft({ ...eventDraft, quizJson: e.target.value })}
+                    />
+                  </details>
+                </>
+              )}
+
               {eventDraft.conditionType === "vote" && (
                 <div className="space-y-4 pt-1">
                   {/* 选项编辑器：至少 2 项，可增删；每项 = 标题 + 说明 + 配图 */}
@@ -9932,7 +10004,7 @@ export default function AdminPage() {
 
                     </div>
 
-                    {eventDraft.quizMode && (
+                    {quizActive && (
                 <>
                   {/* 图形化编辑器：题目/选项/正确答案/发奖分档都能点着改（站长要求） */}
                   <QuizEditor
@@ -9954,7 +10026,7 @@ export default function AdminPage() {
                 </>
               )}
 
-                    {eventDraft.quizMode && (
+                    {quizActive && (
 
                       <Button
 
@@ -9976,7 +10048,9 @@ export default function AdminPage() {
 
                     )}
 
-                    {eventDraft.voteOptions.map((opt, i) => (
+                    {/* 问卷模式下隐藏普通投票的选项列表（它和问卷是两种形态） */}
+                    {!quizActive &&
+                      eventDraft.voteOptions.map((opt, i) => (
                       <div key={opt.key} className="space-y-2 rounded-md border p-3">
                         <div className="flex items-center gap-2">
                           <span className="text-xs text-muted-foreground">
@@ -10076,6 +10150,9 @@ export default function AdminPage() {
                   </div>
 
                   <div className="space-y-2">
+                    {/* 问卷形态下「获奖规则」不适用（问卷按答对率发奖，见上面的「发奖口径」） */}
+                    {!quizActive && (
+                      <>
                     <Label>{t("vote.adm.rule")}</Label>
                     <Select
                       value={eventDraft.voteRule}
@@ -10095,6 +10172,8 @@ export default function AdminPage() {
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">{t("vote.adm.ruleHint")}</p>
+                      </>
+                    )}
 
                     {/* 「指定选项获奖」：选一个获奖选项（只能从填了标题的选项里选） */}
                     {isFixedVoteRule(eventDraft.voteRule) && (
@@ -10259,6 +10338,15 @@ export default function AdminPage() {
                           {t("adm.827")}
                         </Button>
                       )}
+                      {/* 删除这条领取记录：误参与 / 测试数据 / 卡住的人都能清掉，对方可重新参与 */}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="ml-1 h-7 text-destructive hover:text-destructive"
+                        onClick={() => void handleDeleteClaim(c)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}

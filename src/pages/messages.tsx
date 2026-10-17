@@ -303,6 +303,14 @@ export default function MessagesPage() {
   const [voteDrafts, setVoteDrafts] = React.useState<Record<string, string>>({})
 
   const claim = async (ev: EventItem) => {
+    /**
+     * 问卷活动**不走 claim** —— 那条路是「参与即领奖」，问卷必须让用户去答题。
+     * 否则用户点「立即参与」会看到「该活动不自动发放奖励，请联系管理员领取」。
+     */
+    if (ev.conditionType === "quiz" || ev.quiz) {
+      window.location.assign(`/activity/${ev.id}`)
+      return
+    }
     setClaiming(ev.id)
     try {
       const res = await eventApi.claim(
@@ -708,6 +716,16 @@ function EventCard({
   onClaim: () => void
 }) {
   const { t } = useT()
+  /**
+   * 点卡片空白处 → 进活动详情页。
+   * ⚠️ 卡片里有按钮/输入框（立即参与、口令、投票选项…），点它们不该跳转 ——
+   *    用 closest 一次性挡掉，不用给每个控件都加 stopPropagation。
+   */
+  const openDetail = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest("button, input, a, select, textarea, label")) return
+    window.location.assign(`/activity/${ev.id}`)
+  }
+
   const claim = ev.myClaim
   const claimed = !!claim && claim.rewardStatus !== "failed"
   /** 认证码活动：领取前必须输入管理员公布的口令（如 QQ 群群公告里的码） */
@@ -756,7 +774,11 @@ function EventCard({
   }
 
   return (
-    <Card className="border-primary/30">
+    <Card
+      onClick={openDetail}
+      // cursor-pointer：鼠标移上去变"食指"，别人才知道整张卡片能点（站长 2026-10-15）
+      className="cursor-pointer border-primary/30 transition-colors hover:border-primary/60"
+    >
       <CardContent className="space-y-3 p-5">
         <div className="flex flex-wrap items-center gap-2">
           <Gift className="h-4 w-4 text-primary" />

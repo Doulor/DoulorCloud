@@ -2885,6 +2885,20 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       ),
   },
   {
+    // 同一个路径的 DELETE：删掉这条领取记录（误参与/测试数据）
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/events\/([^/]+)\/claims\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (eventClaimDelMatch: RegExpMatchArray) =>
+      eventHandlers.deleteEventClaim(
+        env,
+        request,
+        decodeURIComponent(eventClaimDelMatch[1]),
+        decodeURIComponent(eventClaimDelMatch[2])
+      ),
+  },
+  {
     kind: "regex",
     match: (routePath: string) => routePath.match(/^\/admin\/events\/([^/]+)\/claims$/),
     methods: ["GET"],

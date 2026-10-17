@@ -18,6 +18,8 @@
  *   · 重放被时间戳窗口挡住
  *   · 路径与查询串不可替换（不能把 /desired 的签名挪到别的路径）
  *   · 请求体不可篡改
+ *   · 节点身份不可混淆（2026-10-15 补，渗透报告 #28）：签名用哪把节点密钥验过，
+ *     就只能操作那个节点 —— 见 requireAgent() / assertSameNode()。
  * 未配置 `FRP_AGENT_SECRET` 时整个通道 503 关闭，不会退化成公开接口。
  */
 import { ApiError, json } from "../http"
@@ -93,12 +95,28 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
 }
 
 /**
- * 校验 agent 签名。
+ * agent 鉴权的结论。
+ *
+ * `claimedNode` 是**签名实际绑定**的那一个节点标识，而且只有用「节点专属 agent_key」
+ * 验过签名时才有值：
+ *   · 用节点专属密钥通过 → claimedNode = 该节点 id，调用方必须保证「验的」与「写的是」
+ *     同一个节点（2026-10-15，渗透报告 #28：修复前两步用的标识可以不一样 ——
+ *     拿 A 的密钥签 nodeId=A 过验签，却用 node=B 落库，等于跨节点签名混淆）。
+ *   · 用全局 FRP_AGENT_SECRET 通过 → claimedNode = null。全局密钥是**我们自己那台
+ *     服务器**的身份（它管着 node-bj，且没有"某一个节点"的概念），它本来就能跨节点，
+ *     所以对它跳过相等校验 —— 这样已部署的自己人也完全不受影响。
+ */
+interface AgentAuth {
+  claimedNode: string | null
+}
+
+/**
+ * 校验 agent 签名，并返回「这次签名到底绑定到了哪个节点」。
  *
  * @param rawBody 请求体原文（GET 传空串）。**调用方必须先把它读出来**——
  *   读流是一次性的，这里再读就永远为空，签名会永远对不上。
  */
-async function requireAgent(env: Env, request: Request, rawBody: string): Promise<void> {
+async function requireAgent(env: Env, request: Request, rawBody: string): Promise<AgentAuth> {
   const secret = env.FRP_AGENT_SECRET
   if (!secret) {
     throw new ApiError(
@@ -145,7 +163,20 @@ async function requireAgent(env: Env, request: Request, rawBody: string): Promis
   // 🔴 为什么要分开：这个密钥要交给捐献者（脚本靠它拉期望状态）。如果所有捐献者
   //    共用全局密钥，任何一个人都能把 `?node=` 换成别人的节点，拉到**其他用户的
   //    frp 令牌**（那是面板账号的密码）。每节点一把密钥，泄露的半径就限于他自己那台。
-  const secrets: (string | null | undefined)[] = [secret]
+  //
+  // 候选按「密钥 → 它代表的节点」成对存：验签通过时要能说清是哪一把钥匙过的，
+  // 否则后端无法判断「这次请求被允许以哪个节点的身份行事」（报告 #28）。
+  //
+  // 关于要不要把节点标识绑进签名串（报告 #28 第 3 条）—— **不需要，也不该改**：
+  //   节点标识本来就在签名覆盖范围内：/desired 的 `?node=` 落在 canonical 的
+  //   `pathname+search` 段，/report 的 `nodeId` / `node` 落在 body 里，而 body 以
+  //   sha256 摘要的形式进 canonical。所以签名本身早就把标识绑住了，漏的是**验签
+  //   与落库各取一个来源**。真正要修的只有下面的相等校验。
+  //   改签名串（例如把节点 id 追加成第 5 段）会让所有**已部署**的 agent 立刻 401 ——
+  //   它们跑在用户机器上、按旧口径签名，我们没法保证它们能同步升级。这是红线。
+  const candidates: { secret: string | null | undefined; node: string | null }[] = [
+    { secret, node: null },
+  ]
   // 节点标识两种来源都要认：
   //   · /desired 是 GET，节点在 query（?node=xxx）
   //   · /report 是 POST，节点在 **body**（{"nodeId": "xxx"}）
@@ -165,15 +196,35 @@ async function requireAgent(env: Env, request: Request, rawBody: string): Promis
     const row = await env.DB.prepare(`SELECT agent_key FROM frp_nodes WHERE id = ? LIMIT 1`)
       .bind(claimedNode)
       .first<{ agent_key: string | null }>()
-    if (row?.agent_key) secrets.push(row.agent_key)
+    if (row?.agent_key) candidates.push({ secret: row.agent_key, node: claimedNode })
   }
 
-  for (const candidate of secrets) {
-    if (!candidate) continue
-    const expected = await hmacSha256Hex(candidate, canonical)
-    if (timingSafeEqual(expected, sig)) return
+  for (const candidate of candidates) {
+    if (!candidate.secret) continue
+    const expected = await hmacSha256Hex(candidate.secret, canonical)
+    if (timingSafeEqual(expected, sig)) {
+      // 用哪把钥匙过的验签，就返回哪把钥匙代表的节点（全局钥匙 → null）
+      return { claimedNode: candidate.node }
+    }
   }
   throw new ApiError(401, "agent 签名不匹配", "FRP_AGENT_UNAUTHORIZED")
+}
+
+/**
+ * 断言「验签用的节点」与「这次要读/写的节点」是同一个。
+ *
+ * 报告 #28（MEDIUM）就是这一步缺失：持 A 节点密钥的人可以声明 nodeId=A 过验签，
+ * 却用 node=B 让写入落到 B 上。global 密钥（claimedNode=null）不参与该约束 —— 见
+ * AgentAuth 的说明。
+ */
+function assertSameNode(auth: AgentAuth, nodeId: string): void {
+  if (auth.claimedNode && auth.claimedNode !== nodeId) {
+    throw new ApiError(
+      403,
+      `签名绑定的节点（${auth.claimedNode}）与请求的节点（${nodeId}）不一致：不允许用某个节点的密钥操作另一个节点`,
+      "FRP_AGENT_NODE_MISMATCH"
+    )
+  }
 }
 
 function parsePorts(raw: string): number[] {
@@ -231,10 +282,14 @@ async function resolveNode(env: Env, requested: string): Promise<NodeRow> {
  * agent 下一次收到 `prune=true` 且列表里没有它，才会从面板移除。
  */
 export async function getFrpAgentDesired(env: Env, request: Request): Promise<Response> {
-  await requireAgent(env, request, "")
+  const auth = await requireAgent(env, request, "")
 
   const url = new URL(request.url)
-  const node = await resolveNode(env, url.searchParams.get("node") ?? "")
+  // 目标节点：优先用显式 `?node=`，退了就用「签名实际绑定的那个节点」。
+  // 后者是给「签名里带节点、但没写 query」的调用方兜底，保证「验的」和「读的」同源。
+  const node = await resolveNode(env, url.searchParams.get("node") ?? auth.claimedNode ?? "")
+  // 报告 #28：验签用的节点必须就是这次要读的节点（否则拿 A 的密钥能读 B 的账号表）
+  assertSameNode(auth, node.id)
 
   const { results } = await env.DB.prepare(
     `SELECT id, user_id, node_id, frp_user, frp_token, ports, status, expires_at
@@ -310,7 +365,7 @@ interface AgentReportUser {
  */
 export async function reportFrpAgentState(env: Env, request: Request): Promise<Response> {
   const raw = await request.text()
-  await requireAgent(env, request, raw)
+  const auth = await requireAgent(env, request, raw)
 
   let body: {
     node?: string
@@ -325,7 +380,20 @@ export async function reportFrpAgentState(env: Env, request: Request): Promise<R
     throw new ApiError(400, "报告体不是合法 JSON", "FRP_AGENT_BAD_REPORT")
   }
 
-  const node = await resolveNode(env, typeof body.node === "string" ? body.node : "")
+  // 目标节点：**优先认 body.node**（这是本接口的历史口径，已部署 agent 就是这么发的），
+  // 没有才退到「签名实际绑定的节点」。
+  //
+  // ⚠️ 为什么「没有 body.node 时退到 claimedNode」而不是继续退到 resolveNode 的
+  //    「第一个启用节点」：旧版 agent 只在 body 里发 `nodeId`，如果这里退到"第一个
+  //    启用节点"，那么加上下面的相等校验后这些 agent 会集体 403（多节点部署下一个都
+  //    同步不了）。退到 claimedNode 既保住了它们，也顺手修掉一个**既有的写错节点**
+  //    隐患：以前这类报告其实把同步状态/心跳写到了 sort_order 最小的那个节点上。
+  const requestedNode =
+    typeof body.node === "string" && body.node ? body.node : (auth.claimedNode ?? "")
+  const node = await resolveNode(env, requestedNode)
+  // 报告 #28：验签用的节点必须就是这次要写的节点 —— 否则「持 A 的密钥、写 B」成立，
+  // 等于一个捐献者能改别人节点的同步状态与心跳。
+  assertSameNode(auth, node.id)
 
   const reported = Array.isArray(body.users) ? body.users : []
   const now = new Date().toISOString()

@@ -31,6 +31,11 @@ export function EventQuiz({ ev, onSubmitted }: { ev: EventItem; onSubmitted?: ()
   const [result, setResult] = React.useState<QuizResult | null>(null)
   /** 已用秒数：交卷时带给服务端做限时判定（服务端才是权威） */
   const [elapsed, setElapsed] = React.useState(0)
+  /**
+  /**
+   * 计时起点：**只在内存里**（站长 2026-10-15 要求）。
+   * 重新进入页面就重新计时 —— 不做跨会话持久化，也不写 localStorage。
+   */
   const startedAt = React.useRef(Date.now())
 
   const total = quiz?.questions.length ?? 0
@@ -68,6 +73,7 @@ export function EventQuiz({ ev, onSubmitted }: { ev: EventItem; onSubmitted?: ()
       setBusy(false)
     }
   }
+
 
   /** 每题对错只在服务端允许时才有（reveal=immediate），其余一律 undefined */
   const verdictOf = (qid: string): boolean | undefined => {

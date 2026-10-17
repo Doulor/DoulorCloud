@@ -3130,7 +3130,13 @@ export const eventApi = {
    * 服务端按活动配置算答对率、落档、发奖；**每题对错只在 reveal=immediate 时返回**
    * （afterDeadline/never 一律不带，避免被小号探答案）。
    */
-  submitQuiz: (id: string, answers: Record<string, string>, elapsedSec?: number) =>
+  submitQuiz: (
+    id: string,
+    answers: Record<string, string>,
+    elapsedSec?: number,
+    /** true = 到点自动交卷（允许空卷） */
+    autoSubmit?: boolean
+  ) =>
     request<{
       ok: boolean
       /** 第几次作答（retake=once 时恒为 1） */
@@ -3147,7 +3153,7 @@ export const eventApi = {
       perQuestion: { id: string; answered: string; correct?: boolean; answer?: string }[]
     }>(`/events/${encodeURIComponent(id)}/quiz`, {
       method: "POST",
-      body: JSON.stringify({ answers, elapsedSec }),
+      body: JSON.stringify({ answers, elapsedSec, autoSubmit: autoSubmit === true }),
     }),
   voteHistory: () => request<{ events: EventItem[]; now: string }>("/events/vote-history"),
   /** 单个活动（公开）：活动分享链接用；draft / scheduled 会 404 */
@@ -3186,6 +3192,12 @@ export const adminEventApi = {
     request<{ ok: boolean }>(`/admin/events/${encodeURIComponent(id)}`, { method: "DELETE" }),
   claims: (id: string) =>
     request<{ claims: EventClaim[] }>(`/admin/events/${encodeURIComponent(id)}/claims`),
+  /** 删除一条领取记录（误参与 / 测试数据；**不回收已发奖励**） */
+  deleteClaim: (id: string, claimId: string) =>
+    request<{ ok: boolean }>(
+      `/admin/events/${encodeURIComponent(id)}/claims/${encodeURIComponent(claimId)}`,
+      { method: "DELETE" }
+    ),
   grant: (id: string, claimId: string, detail?: string) =>
     request<{ ok: boolean }>(
       `/admin/events/${encodeURIComponent(id)}/claims/${encodeURIComponent(claimId)}/grant`,

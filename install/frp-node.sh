@@ -751,8 +751,26 @@ if not os.path.exists(report_path):
 resp = json.load(open(report_path))
 node_id = resp.get("nodeIdForAgent")
 agent_key = resp.get("agentKey")
-if not node_id or not agent_key:
-    raise SystemExit("登记响应里缺少 nodeIdForAgent / agentKey")
+if not node_id:
+    raise SystemExit("登记响应里缺少 nodeIdForAgent")
+
+# 复用分支（2026-10-17 安全修复 #8 之后）：登记接口对**已登记过的机器**不再回显
+# agentKey —— 否则任何人提交别人已登记的 IP 就能拿到那把密钥、冒充该节点。
+# 所以这里不能当成错误：agent 配置不重新生成，退出码 0，
+# 让外层跳过 agent 安装、**保留机器上原有的 agent 与密钥不动**。
+if not agent_key:
+    print("注意：该机器此前已登记过，登记响应里不含 agent 密钥（安全策略）。")
+    print("      本次跳过 agent 配置生成，机器上原有的 agent 与密钥保持不变。")
+    print("      如确实需要重新签发密钥，请联系管理员。")
+    # 留一个标记：python 是以子进程方式跑的，SystemExit(0) 只结束 python，
+    # 外层的 bash 仍会继续执行到 install_daemon —— 那会把机器上原有的 agent
+    # 用一份**没被更新过**的配置重启（虽然配置还在，但重启本身是多余动作，
+    # 且若用户删过配置文件就会把一个空转的 agent 装上去）。用标记文件让 bash 显式跳过。
+    try:
+        open("/tmp/doulor-agent-skip", "w").write("1")
+    except OSError:
+        pass
+    raise SystemExit(0)
 
 cfg = {
     "cloud_base": api_base,
@@ -773,8 +791,15 @@ os.chmod(p, 0o600)
 print("agent 配置已生成")
 PY
 
-install_daemon frp-agent "/usr/bin/env python3 -u $INSTALL_DIR/frp-agent.py --config $INSTALL_DIR/agent-config.json" "agent"
-sleep 6
+# 复用分支（上面 python 里 raise SystemExit(0) + 标记文件）不安装/不重启 agent：
+# 那台机器上原本就有一个跑着的 agent，配置也没变，重启它没有意义。
+if [ -f /tmp/doulor-agent-skip ]; then
+  rm -f /tmp/doulor-agent-skip
+  ok "机器上已有 agent（本次未重新生成配置，保留原样）"
+else
+  install_daemon frp-agent "/usr/bin/env python3 -u $INSTALL_DIR/frp-agent.py --config $INSTALL_DIR/agent-config.json" "agent"
+  sleep 6
+fi
 
 if pgrep -f "$INSTALL_DIR/frp-agent.py" >/dev/null 2>&1; then
   ok "agent 已启动（每 20 秒同步一次）"

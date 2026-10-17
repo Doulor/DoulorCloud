@@ -9,6 +9,8 @@ import type { MessageKey } from "./zh"
  */
 export const en: Record<MessageKey, string> = {
   // —— Common ——
+  "quiz.rewardTitle": "Rewards",
+  "quiz.rewardLinear": "Points are prorated by score: 100% earns {n} points.",
   "quiz.progress": "Answered {done}/{total}",
   "quiz.remaining": "{time} left",
   "quiz.retake.best": "Retakes allowed (best score counts)",
@@ -38,6 +40,9 @@ export const en: Record<MessageKey, string> = {
   "quiz.ed.points": "points",
   "quiz.ed.atLeast": "score ≥",
   "quiz.ed.addTier": "Add tier",
+  "quiz.ed.unit.points": "points",
+  "quiz.ed.unit.newapi_quota": "wallet balance",
+  "quiz.ed.unit.invite_quota": "invite slots",
   "quiz.ed.reward.points": "Points",
   "quiz.ed.reward.newapi_quota": "API quota",
   "quiz.ed.reward.invite_quota": "Invite quota",
@@ -1623,6 +1628,7 @@ export const en: Record<MessageKey, string> = {
 
   // —— Activity share page ——
   "act.notFound": "This event doesn't exist, or hasn't been published yet",
+  "act.backPrev": "Back",
   "act.brandLine": "Doulor Cloud · Events",
   "act.limitPeople": "Up to {n} participants",
   "act.limitClaims": "Limited to {n} claims",
@@ -6353,6 +6359,8 @@ export const en: Record<MessageKey, string> = {
   "adm.824": "User",
   "adm.825": "Claimed at",
   "adm.826": "Status",
+  "adm.claimDeleteConfirm": "Delete the claim record for {user}?\n\nThis only removes the record — rewards already granted are NOT clawed back. The user can participate again.",
+  "adm.claimDeleted": "Claim record deleted",
   "adm.827": "Mark as issued",
   "adm.828": "Pick a bucket",
   "adm.829": "Loading accounts and buckets…",
@@ -6793,6 +6801,8 @@ export const en: Record<MessageKey, string> = {
   "ap.contentPlaceholder": "e.g.\nLink: https://drive.example.com/s/abcd\nCode: 1234",
   "ap.contentHint": "Sent to the buyer verbatim (line breaks preserved), up to 2000 characters. Currently {n}. Every buyer sees this same text — do not put one-time codes here.",
   "ap.err.contentRequired": "Enter the content to deliver",
+  "ap.dailyPerUserLabel": "Per-user daily limit (blank = unlimited)",
+  "ap.dailyPerUserHint": "Max units one person can buy per calendar day; resets automatically. Separate from the site-wide daily cap above.",
   "ap.dailyLimitLabel": "Daily limit (blank = unlimited)",
   "ap.dailyLimitHint": "Max units sold per calendar day; resets automatically the next day — no manual restocking.",
   "ap.showPurchasesLabel": "Publish purchase history",
@@ -7505,6 +7515,8 @@ export const en: Record<MessageKey, string> = {
   "common.prev": "Previous",
   "dm.err.create": "Couldn't create",
   "don.probe.result": "Connected {n} models from “{name}”",
+  "adm.evStatus.adminOnly": "Admins only",
+  "adm.evStatus.adminOnlyShort": "Admins",
   "adm.evStatus.draft": "Draft",
   "adm.evStatus.scheduled": "Scheduled",
   "adm.evStatus.active": "Active",
