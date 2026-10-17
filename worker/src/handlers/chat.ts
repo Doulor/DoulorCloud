@@ -801,7 +801,26 @@ export async function heartbeat(env: Env, request: Request): Promise<Response> {
 
 /** GET /api/chat/presence —— 在线用户（头像堆叠用） */
 export async function presence(env: Env, request: Request): Promise<Response> {
-  await requireChatUser(env, request)
+  const user = await requireChatUser(env, request)
+  const now = new Date().toISOString()
+  /*
+   * 🔴 2026-10-17 修（用户 yangshu 反馈「进入公共聊天室，明明有人在线却显示 0」）。
+   *
+   * 原来这里**只读不写**。而前端进聊天室时，pollPresence() 与 heartbeat() 是在
+   * 同一个 effect 里连着发出去的两个 void 调用 —— presence 的 SELECT 经常先于
+   * heartbeat 的 INSERT 到达，于是返回的在线列表里没有自己：页面上就是「0 人在线」，
+   * 得等 30 秒后的下一次轮询才补上。人越多、首屏越容易看到这个 0。
+   *
+   * 「来问谁在线」本身就意味着「我在线」，所以这里先把调用者自己写进
+   * chat_presence（与 heartbeat 完全同一句 UPSERT），再查列表。
+   * 这样既修掉首屏 0 人，也顺手让前端不再依赖两个请求的先后顺序。
+   */
+  await env.DB.prepare(
+    `INSERT INTO chat_presence (user_id, last_seen_at) VALUES (?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET last_seen_at = excluded.last_seen_at`
+  )
+    .bind(user.id, now)
+    .run()
   const cutoff = new Date(Date.now() - ONLINE_WINDOW_SECONDS * 1000).toISOString()
   const rows = await env.DB.prepare(
     `SELECT p.user_id, p.last_seen_at, u.username, u.nickname, u.avatar_key
