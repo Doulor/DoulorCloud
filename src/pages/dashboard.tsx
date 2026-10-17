@@ -129,9 +129,24 @@ const AiCard = React.memo(function AiCard({
   //      原来又减了一次累计消耗 `usedQuota` ⇒ 用超的用户直接显示成负数。
   // 没有订阅数据时才回落到账户剩余（同样**不再减** used）。
   const subs = status?.subscriptions ?? []
-  const remaining = subs.length
-    ? subs.reduce((sum, g) => sum + Math.max(0, g.amountTotal - g.amountUsed), 0) / perUnit
-    : Math.max(0, acc?.quotaUsd ?? 0)
+  /**
+   * 🔴 2026-10-17 修（用户 onevergiveupa 反馈「AI 中转站余额显示有问题」）。
+   *
+   * 原来这里是**二选一**：
+   *   有订阅 → 只算订阅剩余；没订阅 → 才算账户余额。
+   * 于是在「既有订阅、账户里又有钱」的用户那儿，`account.quota`
+   * （捐献 / 活动奖励直接充进钱包的那笔）被整段忽略 —— 看起来就是"余额少了"。
+   *
+   * 它们本来就是**两笔独立的钱**：订阅额度逐张接力消费，账户余额是钱包，
+   * 谁也不包含谁（上面坑 #1 已经写明 account.quota 不含订阅额度）。
+   * 所以「总共还剩多少」必须相加，不能二选一。
+   */
+  const subsRemaining = subs.reduce(
+    (sum, g) => sum + Math.max(0, g.amountTotal - g.amountUsed),
+    0
+  ) / perUnit
+  const accountRemaining = Math.max(0, acc?.quotaUsd ?? 0)
+  const remaining = subsRemaining + accountRemaining
 
   return (
     <Card>
