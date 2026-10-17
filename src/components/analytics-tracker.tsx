@@ -9,6 +9,8 @@
  */
 import * as React from "react"
 import { useLocation } from "react-router-dom"
+import { perfRouteChange } from "@/lib/perf-collect"
+import { diagRoute } from "@/lib/diag-log"
 
 const VISITOR_KEY = "doulor:visitor"
 
@@ -56,6 +58,29 @@ export function AnalyticsTracker() {
     } catch {
       /* 埋点失败静默 */
     }
+  }, [location.pathname])
+
+  return null
+}
+
+/**
+ * 性能采集 + 诊断日志的路由钩子（2026-10-10）。
+ *
+ * 与 AnalyticsTracker 同一模式：路由变化时做两件事（都内部判开关，未启用时零开销）：
+ *   · perfRouteChange：上报「切换耗时」样本（从上一次路由解析到现在 = 新页面可交互）；
+ *   · diagRoute：诊断日志记一条路由切换（用户反馈附日志时还原操作路径全靠它）。
+ */
+export function PerfTracker() {
+  const location = useLocation()
+  const lastRouteAt = React.useRef(Date.now())
+
+  React.useEffect(() => {
+    const now = Date.now()
+    const navMs = now - lastRouteAt.current
+    lastRouteAt.current = now
+    // 挂载后的第一次解析是「首屏」（perfRouteChange 内部识别，不发切换样本）
+    perfRouteChange(location.pathname, navMs)
+    diagRoute(location.pathname)
   }, [location.pathname])
 
   return null

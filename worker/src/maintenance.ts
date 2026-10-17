@@ -52,6 +52,16 @@ const RATE_LIMIT_RETENTION_DAYS = 1
  */
 const ANALYTICS_RETENTION_DAYS = 90
 /**
+ * 性能样本（perf_samples）保留期（天）。RUM 样本是滚动排障数据，
+ * 只要看最近几天的分布，两周足够；久留只会白白吃 D1 行读计费。
+ */
+const PERF_RETENTION_DAYS = 14
+/**
+ * 诊断日志（diagnostic_logs）保留期（天）。
+ * 附在反馈上的日志，反馈处理完就没用了；反馈本身不删，日志到期清。
+ */
+const DIAG_LOG_RETENTION_DAYS = 14
+/**
  * 链接预览缓存保留期（天）。同样必须与 `link-preview.ts` 的 `PREVIEW_TTL_DAYS` 一致。
  */
 const PREVIEW_RETENTION_DAYS = 7
@@ -102,6 +112,8 @@ export interface MaintenanceReport {
   oauthPurged: { codes: number; tokens: number }
   /** 已清理的过期匿名统计事件 / 链接预览缓存数（H13：这两个函数原先从未被调用） */
   expiredPurged: { analyticsEvents: number; linkPreviews: number }
+  /** 已清理的过期性能样本 / 诊断日志数（0145/0146，14 天保留期） */
+  observabilityPurged: { perfSamples: number; diagLogs: number }
   /** NewAPI 权限同步结果（孤儿清理 / 禁用 / 启用） */
   newapiSync: { removedOrphans: number; disabled: number; enabled: number; errors: string[] }
   /** 已清理的过期反代登录会话数（state 15 分钟即失效，不清会持续堆积） */
@@ -316,6 +328,8 @@ async function recordRun(
           rateLimits: report.rateLimitsDeleted,
           analyticsEvents: report.expiredPurged.analyticsEvents,
           linkPreviews: report.expiredPurged.linkPreviews,
+          perfSamples: report.observabilityPurged.perfSamples,
+          diagLogs: report.observabilityPurged.diagLogs,
           storageMismatches: report.storageMismatches.length,
           sensenovaAuditRevoked: report.sensenovaAudit.permissionsRevoked,
           rentalExpired: report.rentalExpiry.handled,
@@ -573,6 +587,47 @@ export async function runMaintenance(
   } catch (err) {
     // 表未迁移：只记日志。这两张表清不掉不该让整个运维任务报错
     console.error("过期统计/预览缓存清理失败（表可能未迁移）:", err)
+  }
+
+  // 4d) 过期性能样本 / 诊断日志（0145/0146，14 天保留期）
+  //
+  // perf_samples 是「每次页面加载可能写一行」的高频表，diagnostic_logs 单行
+  // 可达 64KB —— 两张都按保留期整行清，拖久了在 D1 按行读计费下都是大账。
+  // 表未迁移时只记日志（老部署先跑迁移再部署后端的顺序没跟上也不炸运维）。
+  let observabilityPurged = { perfSamples: 0, diagLogs: 0 }
+  try {
+    if (dryRun) {
+      const perfCutoff = daysAgoIso(PERF_RETENTION_DAYS)
+      const diagCutoff = daysAgoIso(DIAG_LOG_RETENTION_DAYS)
+      const p = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM perf_samples WHERE created_at < ?"
+      )
+        .bind(perfCutoff)
+        .first<{ c: number }>()
+      const d = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM diagnostic_logs WHERE created_at < ?"
+      )
+        .bind(diagCutoff)
+        .first<{ c: number }>()
+      observabilityPurged = { perfSamples: p?.c ?? 0, diagLogs: d?.c ?? 0 }
+    } else {
+      const p = await env.DB.prepare(
+        "DELETE FROM perf_samples WHERE created_at < ?"
+      )
+        .bind(daysAgoIso(PERF_RETENTION_DAYS))
+        .run()
+      const d = await env.DB.prepare(
+        "DELETE FROM diagnostic_logs WHERE created_at < ?"
+      )
+        .bind(daysAgoIso(DIAG_LOG_RETENTION_DAYS))
+        .run()
+      observabilityPurged = {
+        perfSamples: p.meta?.changes ?? 0,
+        diagLogs: d.meta?.changes ?? 0,
+      }
+    }
+  } catch (err) {
+    console.error("性能样本/诊断日志清理失败（表可能未迁移）:", err)
   }
 
   // 5) 网盘记账自检（只报告）
@@ -905,6 +960,7 @@ export async function runMaintenance(
     rateLimitsDeleted,
     oauthPurged,
     expiredPurged,
+    observabilityPurged,
     newapiSync,
     wb2apiSessionsDeleted,
     qoder2apiSessionsDeleted,

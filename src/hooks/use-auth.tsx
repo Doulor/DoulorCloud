@@ -1,6 +1,8 @@
 import * as React from "react"
 import { authApi } from "@/services/api"
 import type { MeResponse } from "@/types"
+import { startPerfCollect } from "@/lib/perf-collect"
+import { startDiagLog } from "@/lib/diag-log"
 
 interface AuthContextValue {
   user: MeResponse["user"] | null
@@ -28,7 +30,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     authApi
       .me()
       .then((res) => {
-        if (!cancelled && epochRef.current === epochAtStart) setUserState(res.user)
+        if (!cancelled && epochRef.current === epochAtStart) {
+          setUserState(res.user)
+          // 前端可观测性开关（2026-10-10）：站点设置 perf_collect_enabled /
+          // diag_log_enabled 打开时启用性能采集与诊断日志记录器。
+          // 两个记录器自身幂等（start* 只生效一次），失败静默。
+          try {
+            if (res.perfCollectEnabled) startPerfCollect()
+            if (res.diagLogEnabled) startDiagLog()
+          } catch {
+            // 可观测性绝不影响登录流程
+          }
+        }
       })
       .catch(() => {
         if (!cancelled && epochRef.current === epochAtStart) setUserState(null)

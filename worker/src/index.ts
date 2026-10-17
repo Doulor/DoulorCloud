@@ -61,6 +61,8 @@ import * as chatHandlers from "./handlers/chat"
 import * as dmHandlers from "./handlers/dm"
 import * as oauthHandlers from "./handlers/oauth"
 import * as feedbackHandlers from "./handlers/feedback"
+import * as diagLogHandlers from "./handlers/diag-logs"
+import * as perfHandlers from "./handlers/perf"
 import * as chatUploadHandlers from "./handlers/chat-upload"
 import * as twoFactorHandlers from "./handlers/two-factor"
 import * as login2faHandlers from "./handlers/login-2fa"
@@ -1684,6 +1686,50 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       feedbackHandlers.deleteFeedback(env, request),
   },
 
+  // 单条反馈详情（2026-10-10 列表瘦身配套：列表只给摘要，点开再拉全量）
+  {
+    kind: "exact",
+    path: "/admin/feedback/detail",
+    method: "GET",
+    handle: () =>
+      feedbackHandlers.feedbackDetail(env, request),
+  },
+
+  // ---- 诊断日志（反馈附带的前端运行记录）----
+  {
+    kind: "exact",
+    path: "/diag-logs",
+    method: "POST",
+    handle: () =>
+      diagLogHandlers.uploadDiagLog(env, request),
+  },
+
+  // ---- 前端性能样本（RUM）----
+  // /perf/collect 用 sendBeacon 上报（POST，无响应感知）；管理聚合在 /admin/perf/*
+  {
+    kind: "exact",
+    path: "/perf/collect",
+    method: "POST",
+    handle: () =>
+      perfHandlers.collect(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/perf/overview",
+    method: "GET",
+    handle: () =>
+      perfHandlers.overview(env, request),
+  },
+
+  {
+    kind: "exact",
+    path: "/admin/perf/samples",
+    method: "GET",
+    handle: () =>
+      perfHandlers.pageSamples(env, request),
+  },
+
   {
     kind: "exact",
     path: "/admin/r2/buckets",
@@ -2807,6 +2853,24 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     methods: ["POST"],
     handle: (communityCommentLikeMatch: RegExpMatchArray) =>
       communityHandlers.toggleCommentLike(env, request, decodeURIComponent(communityCommentLikeMatch[1])),
+  },
+
+  {
+    // 编辑自己的评论（2026-10-17）：次数上限由设置 community_comment_edit_limit 控制
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/comments\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (communityCommentMatch: RegExpMatchArray) =>
+      communityHandlers.updateComment(env, request, decodeURIComponent(communityCommentMatch[1])),
+  },
+
+  {
+    // 删除评论（2026-10-17）：作者或管理员，软删 + 清空正文，列表保留占位
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/community\/comments\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (communityCommentMatch: RegExpMatchArray) =>
+      communityHandlers.deleteComment(env, request, decodeURIComponent(communityCommentMatch[1])),
   },
 
   {
@@ -5043,13 +5107,21 @@ export default {
       }
 
       // 名片资源：/p/<用户名>/<avatar|background|music|music-cover>（公开，无需鉴权）
+      // 2026-10-10 性能：内容型 200 补 `public, max-age=60` —— 与公开名片页 HTML
+      // 的缓存窗口一致。资源没换时浏览器 60s 内直接用缓存，不再每个访客都打
+      // R2；换了内容，60 秒内是旧图 —— 与页面 HTML 同步过期，整体一致。
+      // 音乐 302（时效签名）在 handler 内部自带 no-store，这里只动 200。
       const assetMatch = url.pathname.match(/^\/p\/([^/]+)\/([a-z-]+)$/)
       if (assetMatch && request.method === "GET") {
-        return await profileHandlers.serveAssetByUsername(
+        const res = await profileHandlers.serveAssetByUsername(
           env,
           decodeURIComponent(assetMatch[1]),
-          assetMatch[2]
+          decodeURIComponent(assetMatch[2])
         )
+        if (res.status === 200 && !res.headers.has("Cache-Control")) {
+          res.headers.set("Cache-Control", "public, max-age=60")
+        }
+        return res
       }
 
       // 公开名片页：/profile/<slug>

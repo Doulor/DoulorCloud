@@ -54,6 +54,7 @@ import {
   Eye,
   EyeOff,
   Webhook,
+  Activity,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -65,6 +66,8 @@ import { CfQuotaPanel } from "./admin-cf-quota"
 import { BrevoQuotaPanel } from "./admin-brevo-quota"
 // 反馈面板同理单独成文件（本文件太大，新增内容尽量外置）
 import { FeedbackPanel } from "./admin-feedback"
+// 性能监控（2026-10-10 新工具）：UI 本体单独成文件
+import { PerfPanel } from "./admin-perf"
 import { AuditPanel } from "./admin-audit"
 import { PointsAdminPanel } from "./admin-points"
 import { FunLinksAdminPanel } from "./admin-fun-links"
@@ -772,7 +775,7 @@ const ADMIN_TAB_KEYS = new Set([
   "users", "invites", "inviteQuotas", "reserved", "titles", "points",
   "donations", "feedback", "announcements", "events", "community", "moderation", "notices",
   "dns", "newapi", "relay", "r2", "frp", "proxy", "mail", "analytics", "cfQuota", "audit",
-  "oauth", "settings", "funLinks", "wb2api", "api", "permissions", "lab",
+  "oauth", "settings", "funLinks", "wb2api", "api", "permissions", "lab", "perf",
   // 造物集（2026-10-17 站长要求：从「AI 实验室」里独立出来）
   "gallery",
 ])
@@ -1388,6 +1391,8 @@ export default function AdminPage() {
   const [communityGuestAccess, setCommunityGuestAccess] = React.useState(true)
   const [communityPostMaxImages, setCommunityPostMaxImages] = React.useState("9")
   const [communityImageMaxKb, setCommunityImageMaxKb] = React.useState("1024")
+  /** 评论最多可修改次数（0 = 禁止修改）；2026-10-17 站长要求默认 2 次 */
+  const [communityCommentEditLimit, setCommunityCommentEditLimit] = React.useState("2")
   /** 站点时区偏移（小时），默认 8 = 北京时间 0 点翻篇 */
   const [siteTzOffsetHours, setSiteTzOffsetHours] = React.useState("8")
   /**
@@ -2115,6 +2120,7 @@ export default function AdminPage() {
       setCommunityImageMaxKb(
         String(Math.round(Number(s.community_image_max_bytes ?? 1048576) / 1024))
       )
+      setCommunityCommentEditLimit(s.community_comment_edit_limit ?? "2")
       setSiteTzOffsetHours(s.site_timezone_offset_hours ?? "8")
       setPostCategories(parseCategorySetting(s.post_categories))
       const basicRaw = (s.invite_basic_features ?? "r2").split(",").map((x) => x.trim()).filter(Boolean)
@@ -2267,6 +2273,11 @@ export default function AdminPage() {
         community_guest_access: communityGuestAccess,
         community_post_max_images: Math.round(Number(communityPostMaxImages) || 9),
         community_image_max_bytes: Math.round(Number(communityImageMaxKb) * 1024),
+        // 留空 = 用默认 2 次（不要因为空输入把编辑功能关掉）；非法输入夹到 0–10
+        community_comment_edit_limit:
+          communityCommentEditLimit.trim() === ""
+            ? 2
+            : Math.min(10, Math.max(0, Math.round(Number(communityCommentEditLimit) || 0))),
         site_timezone_offset_hours: String(Math.round(Number(siteTzOffsetHours) || 8)),
         // ⚠️ 只在**确实加载到过分类**时才提交这一项：加载失败时 postCategories 是空数组，
         //    无脑提交会把线上分类清空 ——「前端看不见」不等于「要删掉」。
@@ -4241,6 +4252,7 @@ export default function AdminPage() {
                 {canSeeTab("oauth") && <NavItem active={activeTab === "oauth"} icon={KeyRound} label={t("adm.235")} onClick={() => handleTabChange("oauth")} />}
                 {canSeeTab("analytics") && <NavItem active={activeTab === "analytics"} icon={BarChart3} label={t("adm.236")} onClick={() => handleTabChange("analytics")} />}
                 {canSeeTab("cfQuota") && <NavItem active={activeTab === "cfQuota"} icon={Gauge} label={t("adm.237")} onClick={() => handleTabChange("cfQuota")} />}
+                {canSeeTab("perf") && <NavItem active={activeTab === "perf"} icon={Activity} label={t("perf.tab")} onClick={() => handleTabChange("perf")} />}
                 {canSeeTab("audit") && <NavItem active={activeTab === "audit"} icon={ScrollText} label={t("adm.238")} onClick={() => handleTabChange("audit")} />}
                 {canSeeTab("mail") && <NavItem active={activeTab === "mail"} icon={Mail} label={t("adm.239")} onClick={() => handleTabChange("mail")} />}
                 {canSeeTab("settings") && <NavItem active={activeTab === "settings"} icon={SlidersHorizontal} label={t("adm.240")} onClick={() => handleTabChange("settings")} />}
@@ -7588,6 +7600,10 @@ export default function AdminPage() {
           <AnalyticsPanel />
         </TabsContent>
 
+        <TabsContent value="perf">
+          <PerfPanel />
+        </TabsContent>
+
         <TabsContent value="cfQuota">
           <CfQuotaPanel />
         </TabsContent>
@@ -7989,6 +8005,21 @@ export default function AdminPage() {
                         value={communityImageMaxKb}
                         onChange={(e) => setCommunityImageMaxKb(e.target.value)}
                       />
+                    </div>
+                    {/* 评论修改次数上限（2026-10-17）：0 = 禁止修改，默认 2 */}
+                    <div className="space-y-2">
+                      <Label htmlFor="communityCommentEditLimit">{t("adm.commentEditLimit")}</Label>
+                      <Input
+                        id="communityCommentEditLimit"
+                        type="number"
+                        min={0}
+                        max={10}
+                        value={communityCommentEditLimit}
+                        onChange={(e) => setCommunityCommentEditLimit(e.target.value)}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {t("adm.commentEditLimitHint")}
+                      </p>
                     </div>
                   </div>
 
