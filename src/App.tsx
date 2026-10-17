@@ -71,7 +71,17 @@ const ResetPasswordPage = React.lazy(() => import("@/pages/reset-password"))
 
 function PageLoader() {
   return (
-    <div className="flex min-h-[60vh] items-center justify-center">
+    /*
+     * `data-boot-pending` 是给开屏动画的「就绪探针」看的标记
+     *（见 components/boot-ready-probe.tsx）。
+     *
+     * 为什么需要它：开屏判定「应用好了没有」的办法是观察 #root 的 DOM 有没有静下来。
+     * 可是这个兜底**本身是静态 DOM**（转圈只是 CSS 动画，不产生任何 DOM 变化），
+     * 于是探针会把它当成「已经渲染完」⇒ 开屏提前揭开 ⇒
+     * 用户看到「云已画完进去了，却是一个空白页 + 转圈」（2026-10-17 线上反馈）。
+     * 带上这个标记后，探针只要看到它就一定继续等。
+     */
+    <div className="flex min-h-[60vh] items-center justify-center" data-boot-pending="1">
       <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
     </div>
   )
