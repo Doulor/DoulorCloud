@@ -33,7 +33,7 @@ import { processScheduledPublishes } from "./scheduled-publish"
 import { purgeExpiredAnalytics } from "./handlers/analytics"
 import { purgeExpiredPreviews } from "./link-preview"
 import { autoPriceNewModels } from "./newapi-client"
-import { expireRentalOrders } from "./points-shop"
+import { expireRentalOrders, remindStaleOrders } from "./points-shop"
 import { scanDns } from "./dns-audit"
 import { sweepSuspendedDns, retrySuspendedDnsRestore, ownerStatusSql } from "./user-suspension"
 import { syncProxySubscriptionStatuses, probeProxyNodeHealth } from "./handlers/proxy"
@@ -152,6 +152,13 @@ export interface MaintenanceReport {
     notes: string[]
     errors: string[]
   }
+  /**
+   * 订单超时未交付 → 提醒卖家的条数（2026-10-17）。
+   *
+   * 只是「本次检查到几单」，不是「发了几条通知」—— 通知本身按订单号幂等，
+   * 同一单只会真正推送一次（见 points-shop.ts 的 remindStaleOrders）。
+   */
+  staleOrderReminders: number
   /** 网盘记账与实际记录数不一致的用户（只报告，不自动修） */
   storageMismatches: { prefix: string; fileCount: number; actual: number; usedBytes: number }[]
   /**
@@ -310,6 +317,7 @@ async function recordRun(
           sensenovaAuditRevoked: report.sensenovaAudit.permissionsRevoked,
           rentalExpired: report.rentalExpiry.handled,
           rentalPermissionsRevoked: report.rentalExpiry.permissionsRevoked,
+          staleOrderReminders: report.staleOrderReminders,
           proxyProbeNodes: report.proxyProbe?.nodes ?? 0,
           proxyProbeUp: report.proxyProbe?.up ?? 0,
           tableRows: report.tableRows,
@@ -437,6 +445,17 @@ export async function runMaintenance(
   } catch (err) {
     // 表未迁移：只记日志。OAuth 清理失败不该让整个运维任务报错
     console.error("OAuth 过期数据清理失败（表可能未迁移）:", err)
+  }
+
+  // 4a-2) 订单超时未交付 → 再提醒卖家一次（2026-10-17）
+  //
+  // 只提醒、不动钱；幂等由 notifyOrder 的 dedupKey 保证，跑多少次都只提醒一次。
+  let staleOrderReminders = 0
+  try {
+    const r = await remindStaleOrders(env)
+    staleOrderReminders = r.considered
+  } catch (err) {
+    console.error("订单超时提醒失败:", err)
   }
 
   // 4b) 过期的反代登录会话
@@ -876,6 +895,7 @@ export async function runMaintenance(
     donationRetries,
     sensenovaAudit,
     rentalExpiry,
+    staleOrderReminders,
     announcementMails,
     storageMismatches,
     dnsAudit,

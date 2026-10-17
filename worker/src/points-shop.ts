@@ -1372,6 +1372,61 @@ async function notifyOrder(
   })
 }
 
+/**
+ * 给「48 小时还没交付」的卖家再提醒一次（2026-10-17，巡检发现）。
+ *
+ * 背景：线上有 13 单停在 pending、涉及 11 个买家、共 289 积分锁在托管里，
+ * 最久的挂了 15 天。根因不是系统缺陷 —— 下单时卖家**确实**收到了一条带
+ * 「去交付」按钮的站内消息（notifyOrder），但卖家不看/不管，就再没人管了：
+ * 没有超时退款、没有二次提醒，列表上也看不出异常。
+ *
+ * 这里只做**提醒**，不动钱：
+ *   · 卖家在线下会收到一条「有订单还没交付（N 天）」
+ *   · 幂等靠 notifyOrder 的 dedupKey（`order-remind:<订单号>`），
+ *     所以这个函数可以被定时任务反复调用，同一单只会提醒一次
+ *   · 只提醒 seller_id 非空的（用户商品订单），官方商品由管理员手动发放
+ *
+ * 为什么不自动退款/取消：那是动钱的策略决定，得站长拍板；
+ * 而且卖家可能只是慢，一刀切退款会误伤。
+ */
+export async function remindStaleOrders(env: Env): Promise<{ considered: number }> {
+  const cutoff = new Date(Date.now() - 48 * 3600_000).toISOString()
+  const rows = await env.DB.prepare(
+    `SELECT id, seller_id, username, product_name, price, created_at
+       FROM point_orders
+      WHERE status = 'pending' AND seller_id IS NOT NULL AND created_at < ?
+      ORDER BY created_at ASC
+      LIMIT 50`
+  )
+    .bind(cutoff)
+    .all<{
+      id: string
+      seller_id: string
+      username: string
+      product_name: string
+      price: number
+      created_at: string
+    }>()
+
+  let considered = 0
+  for (const o of rows.results ?? []) {
+    const days = Math.max(
+      2,
+      Math.floor((Date.now() - Date.parse(o.created_at)) / 86_400_000)
+    )
+    await notifyOrder(env, o.seller_id, {
+      event: "remind",
+      title: `有订单还没交付（已等 ${days} 天）`,
+      body: `买家「${o.username}」的「${o.product_name}」（${o.price} 积分）还在等你交付，积分一直托管着。交付后买家确认即可结算；如果无法交付，请尽快联系买家或管理员取消并退款。`,
+      orderId: o.id,
+      action: "deliver",
+      peer: o.username,
+    })
+    considered++
+  }
+  return { considered }
+}
+
 /** 订单列表。给 userId 看买家单，给 sellerId 看卖家单；status 可选过滤 */
 export async function listOrders(
   env: Env,
