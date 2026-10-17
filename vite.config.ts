@@ -67,14 +67,35 @@ export default defineConfig({
           if (/[\\/]node_modules[\\/](react|react-dom|react-router|react-router-dom)[\\/]/.test(id)) {
             return "vendor-react"
           }
+          // ⚠️ lucide-react **故意不放进 vendor-ui**：它里面是几百个「一图标一文件」的
+          // 模块，装箱后不管某个图标只被管理后台用到，也会跟着首屏一起下载
+          // （实测这样多拖了 ~100KB、二十多个图标）。不装箱的话，入口用到的那几个
+          // 自然留在入口/共享静态 chunk，只给懒加载页用的图标留在那些页面自己的 chunk 里。
           if (
-            /[\\/]node_modules[\\/](lucide-react|sonner|class-variance-authority|clsx|tailwind-merge)[\\/]/.test(
-              id
-            )
+            /[\\/]node_modules[\\/](sonner|class-variance-authority|clsx|tailwind-merge)[\\/]/.test(id)
           ) {
             return "vendor-ui"
           }
-          return "vendor"
+          // ⚠️ 其它依赖**不要**再兜底装箱（原来 `return "vendor"`）。
+          //
+          // 为什么（2026-10 首屏瘦身）：manualChunks 是「按模块打成一箱」，
+          // 只要箱子里**有一个**模块被入口静态 import，整箱就必须随首屏下载。
+          // 原来所有 node_modules 都被兜进同一个 `vendor`，于是只在懒加载页里
+          // 用到的 xlsx（~325KB）/ pdfjs-dist（~312KB）/ pdf-lib（~281KB）/
+          // framer-motion（~180KB）/ react-markdown 全家（~215KB）……全被拖进首屏，
+          // 那个 chunk 因此长到 1.8MB，而首屏真正需要的只有几十 KB 的 radix。
+          //
+          // 返回 undefined 表示「交回打包器按 import 关系自然切分」：谁静态 import
+          // 它，它就跟谁进同一个（或共享的静态）chunk；只有懒加载页 import 的，
+          // 就只会待在那些页面自己的动态 chunk 里，首屏根本看不见。
+          //
+          // 代价（有意接受）：被「入口 + 某个懒加载页」同时用到的小模块
+          // （radix 的几十个工具包、单个 lucide 图标）会各自独立成 0.2～3KB 的
+          // 小 chunk，首屏请求数从 11 个变成 33 个。换来的是首屏少下 2.3MB。
+          // 这些请求都由 index.html 里的 modulepreload 一次并行发出（HTTP/2 多路复用），
+          // 不增加往返；若哪天更在意请求数而不是体积，把 lucide-react 加回上面
+          // vendor-ui 那一组即可（代价：首屏多 ~55KB）。
+          return
         },
       },
     },
