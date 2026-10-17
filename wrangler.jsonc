@@ -17,6 +17,18 @@
   // 由下面这条路由承载。**永远不要把 cloud.doulor.cn 加回 custom_domain**：
   // 自定义域名会生成 read_only 的 AAAA 100:: 占位记录并锁死 DNS（PATCH/DELETE 1043、
   // 建新记录 81062），只能删自定义域名才能解锁。详见 Documents\\Cloudflare优选IP接入方法.md。
+  // 2026-10-17：给前端 Worker 绑一个到 API Worker 的 service binding。
+  // 用途只有一个 —— 把根级的 OIDC 端点（/.well-known/openid-configuration、
+  // /oauth/token、/oauth/userinfo、/oauth/authorize）转发过去，见 site-worker.js
+  // 里 shouldProxyToApi 的注释（用户 ventus 报的「中转站 oauth 登不进去」）。
+  // 用 service binding 而不是去 dashboard 加 Route：不需要 Workers Routes 权限，
+  // 也不用担心 wrangler deploy 会覆盖线上 Route 那个老坑。
+  "services": [
+    {
+      "binding": "API",
+      "service": "doulor-mail-api"
+    }
+  ],
   "routes": [
     {
       "pattern": "cloud.doulor.cn/*",

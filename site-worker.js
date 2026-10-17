@@ -72,10 +72,48 @@ function withSecurityHeaders(res) {
   return copy
 }
 
+/**
+ * 需要转发给 API Worker 的**根级**路径白名单（2026-10-17）。
+ *
+ * 背景（用户 ventus 反馈「中转站用 oauth 登不进去」）：
+ *   API Worker 在 CF 上只挂了 `api/* dl/* p/* u/* c/* profile/*` 这些 Route
+ *   （见 worker/wrangler.toml 的清单），于是根级的 `/.well-known/*` 与 `/oauth/*`
+ *   全落进本 Worker，被 SPA 兜底成 index.html —— NewAPI 的「自动发现」拿回一段
+ *   HTML，解析失败；手动填根级地址换取令牌同样失败。
+ *
+ *   而 `worker/src/handlers/oauth.ts` 的 `oauthBase()` 里 `/api` 是**写死**的，
+ *   所以只要把发现文档这一个路径代理过去，它宣告的 issuer 与三个端点就都是
+ *   `/api/...`（本来就可用）—— 对方的自动发现即可成功，**不用改任何配置**。
+ *   顺手把 token / userinfo / authorize 也代理上，让手动填根级地址的人也能用。
+ *
+ * ⚠️ `/oauth/consent` 是**前端**的同意页，绝不能进这个白名单，
+ *    否则同意页会被 API Worker 截走（worker/src/index.ts 的注释也强调了这一点）。
+ */
+function shouldProxyToApi(pathname) {
+  if (pathname === "/.well-known/openid-configuration") return true
+  if (pathname === "/oauth/token") return true
+  if (pathname === "/oauth/userinfo") return true
+  // authorize 及其子路径（/oauth/authorize/context、/decision）都是 API 端点；
+  // 注意 /oauth/consent 不在这个前缀下，仍然是 SPA 页面。
+  if (pathname === "/oauth/authorize" || pathname.startsWith("/oauth/authorize/")) return true
+  return false
+}
+
+/** 服务绑定不可用时的明确报错（不要静默回落到 SPA，否则又变成"拿到 HTML"） */
+function apiBindingUnavailable() {
+  return new Response(
+    JSON.stringify({ error: "api_binding_unavailable", message: "API 服务绑定缺失" }),
+    {
+      status: 503,
+      headers: { "Content-Type": "application/json; charset=utf-8", ...SECURITY_HEADERS },
+    }
+  )
+}
+
 export default {
   /**
    * @param {Request} request
-   * @param {{ ASSETS?: { fetch: (r: Request) => Promise<Response> } }} env
+   * @param {{ ASSETS?: { fetch: (r: Request) => Promise<Response> }, API?: { fetch: (r: Request) => Promise<Response> } }} env
    * @returns {Promise<Response>}
    */
   async fetch(request, env) {
@@ -84,6 +122,16 @@ export default {
     if (url.protocol === "http:") {
       url.protocol = "https:"
       return Response.redirect(url.toString(), 301)
+    }
+
+    // OIDC 根级端点 → 转发给 API Worker（白名单见上）
+    if (shouldProxyToApi(url.pathname)) {
+      if (!env || !env.API || typeof env.API.fetch !== "function") {
+        return apiBindingUnavailable()
+      }
+      // 原样转发：request.url 仍是 cloud.doulor.cn 上的地址，
+      // API Worker 的 canonicalOrigin() 据此得出正确 issuer ✅
+      return env.API.fetch(request)
     }
 
     // assets 绑定缺失时不要抛错（否则整站 1101），尽力返回请求本身
