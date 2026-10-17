@@ -14,6 +14,7 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { reloadOnceForChunkError } from "@/lib/chunk-error"
 import "@/index.css"
 import { selfHealServiceWorkers } from "@/lib/chunk-error"
+import { BootReadyProbe } from "@/components/boot-ready-probe"
 
 /**
  * 部署后旧 chunk 404 的兜底（详见 lib/chunk-error.ts）。
@@ -43,6 +44,12 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <I18nProvider>
         <BrowserRouter>
           <AuthProvider>
+            {/*
+              开屏动画的就绪探针（2026-10-17）：认证就绪 + 首屏真正画出来之后，
+              通知 index.html 里那段开屏收尾（详见 components/boot-ready-probe.tsx）。
+              不渲染任何东西，纯副作用。
+            */}
+            <BootReadyProbe />
             {/*
               TooltipProvider 必须挂在根上。
               背景（2026-10-01 站长反馈「DNS 管理界面用不了，报 Tooltip must be

@@ -50,48 +50,6 @@
       云用的是站上同一个图标（lucide Cloud），放大到 160px、不带外框。
     -->
     <style>
-      @keyframes boot-splash-draw {
-        to {
-          stroke-dashoffset: 0;
-        }
-      }
-      @keyframes boot-splash-name {
-        0% {
-          opacity: 0;
-        }
-        11% {
-          opacity: 1;
-        }
-        64% {
-          opacity: 1;
-        }
-        100% {
-          opacity: 0;
-        }
-      }
-      @keyframes boot-splash-out {
-        from {
-          opacity: 1;
-          transform: scale(1);
-        }
-        to {
-          opacity: 0;
-          transform: scale(1.5);
-        }
-      }
-      @keyframes boot-splash-bg-out {
-        to {
-          opacity: 0;
-        }
-      }
-      .splash {
-        position: fixed;
-        inset: 0;
-        z-index: 100;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
       /* ⚠️ 这里刻意用写死的颜色、不用 var(--background)：
          开屏必须在 CSS 文件下载完之前就能正确渲染，而变量定义在按需加载的样式表里，
          否则会回落到 fallback —— 深色模式下就是「白底一闪」。
@@ -102,7 +60,7 @@
         position: absolute;
         inset: 0;
         background: #ffffff;
-        animation: boot-splash-bg-out 0.3s ease 0.94s both;
+        transition: opacity 0.34s ease;
       }
       html.dark .splash-bg {
         background: #0a0a0a;
@@ -117,7 +75,10 @@
       }
       .splash-cloud {
         color: #0a0a0a;
-        animation: boot-splash-out 0.45s cubic-bezier(0.4, 0, 0.2, 1) 0.87s both;
+        transition:
+          opacity 0.45s cubic-bezier(0.4, 0, 0.2, 1),
+          transform 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+        will-change: opacity, transform;
       }
       html.dark .splash-cloud {
         color: #fafafa;
@@ -127,21 +88,39 @@
         height: 160px;
         overflow: visible;
       }
-      /* 55.39 是这条 path 的实测长度（getTotalLength）。写大了会「画完了还在空走」，写小了会画不满。 */
+      /* 55.39 是这条 path 的实测长度（getTotalLength）。写大了会「画完了还在空走」，写小了会画不满。
+         ⚠️ 这里**没有** animation：进度完全由下面那段内联脚本按「应用是否就绪」驱动。
+            原来用 CSS 定时（0.72s 画完就收尾），跟应用准备好没有毫无关系，
+            于是 JS 慢一点就会出现「云画完了、界面还只有背景」。 */
       .splash-cloud path {
         stroke-dasharray: 55.39;
         stroke-dashoffset: 55.39;
-        animation: boot-splash-draw 0.72s cubic-bezier(0.3, 0.4, 0.6, 0.8) both;
       }
       .splash-name {
         font-size: 30px;
         font-weight: 500;
         letter-spacing: -0.02em;
         color: #0a0a0a;
-        animation: boot-splash-name 1.36s ease both;
+        opacity: 0;
+        transition: opacity 0.34s ease;
       }
       html.dark .splash-name {
         color: #fafafa;
+      }
+      /* 站名在云朵起笔之后淡入（类由内联脚本加） */
+      .splash.is-named .splash-name {
+        opacity: 1;
+      }
+      /* 收尾：整块淡出（类由内联脚本在云朵闭合之后加） */
+      .splash.is-out .splash-cloud {
+        opacity: 0;
+        transform: scale(1.5);
+      }
+      .splash.is-out .splash-name {
+        opacity: 0;
+      }
+      .splash.is-out .splash-bg {
+        opacity: 0;
       }
       @media (max-width: 480px) {
         .splash-cloud svg {
@@ -191,11 +170,143 @@
       }
     </script>
     <script>
-      // 动画播完（1.32s）就从 DOM 里摘掉：虽然那时已经全透明，但留着会挡住鼠标点击。
-      setTimeout(function () {
+      /**
+       * 开屏动画的驱动（2026-10-17 重做，站长要求）。
+       *
+       * 原来整条时间线由 CSS 定时写死：0.72s 云朵画完 -> 1.32s 收尾 -> 1.5s 摘 DOM。
+       * 它跟「应用到底准备好没有」完全没有关系，所以 JS 慢一点就会出现
+       * 「云画完了、界面还只有背景」；而提前撤掉又会露出半成品界面。
+       *
+       * 现在的规则：
+       *   · 云朵先画到 **差一点闭合** 就停下来等（HOLD）；
+       *   · React 侧（src/lib/boot-signal.ts）在「认证就绪 + 首屏内容已上屏」时
+       *     调 window.__bootReady()；
+       *   · 收到信号才把最后那一小段接上（闭合），然后整块淡出；
+       *   · 信号来早的时候（云还没画到等待点）**不打断、不重排**：
+       *     只把这一段动画的终点从 HOLD 改成 0，进度继续走 --
+       *     位置连续、速度连续，所以不会有一下顿挫；
+       *   · 信号一直不来（JS 全挂）-> 10 秒后自己收尾，把页面交给
+       *     已有的「12 秒未挂载就自动刷新」兜底。
+       */
+      (function () {
         var el = document.getElementById("boot-splash");
-        if (el) el.remove();
-      }, 1500);
+        if (!el) return;
+        var path = el.querySelector(".splash-cloud path");
+
+        var LEN = 55.39;        /* 与 CSS 的 stroke-dasharray 一致（实测 getTotalLength） */
+        var HOLD = LEN * 0.13;  /* 等待点：还差这么长才闭合 */
+        var DRAW_MS = 620;      /* 起笔画到等待点的时间 */
+        var CLOSE_MS = 190;     /* 最后闭合那一段的时间 */
+        var FALLBACK_MS = 10000;
+        var REMOVE_MS = 900;
+
+        var target = HOLD;      /* 这一段动画的终点；就绪时改成 0 */
+        var ready = false;
+        var done = false;
+        var raf = 0;
+        /* 时间基准在**第一帧真正画出来时**才设（见 draw）：
+           原来取脚本执行时刻，而浏览器从解析到这里到第一帧 rAF 之间还有样式/布局工作，
+           差个几十毫秒很常见 —— 配上陡峭的缓动，第一帧就会瞬移一大截，
+           看起来正是一下顿挫。 */
+        var startedAt = 0;
+
+        function setOffset(v) {
+          if (path) path.style.strokeDashoffset = String(v);
+        }
+        function easeOutCubic(p) {
+          return 1 - Math.pow(1 - p, 3);
+        }
+        /* 描边用 easeInOutCubic：起步和收笔都柔和。
+           若用 easeOutCubic，开头速度是最末尾的 3 倍 —— 配合下面「以首帧为基准」
+           会让前几帧跨得特别开，看起来就是一顿。 */
+        function easeInOutCubic(p) {
+          return p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+        }
+
+        setOffset(LEN);
+
+        /* 站名比云朵稍晚淡入，保留原来「先画出来、再出字」的节奏 */
+        setTimeout(function () {
+          if (!done) el.classList.add("is-named");
+        }, 140);
+
+        function endOut() {
+          if (done) return;
+          done = true;
+          if (raf) cancelAnimationFrame(raf);
+          raf = 0;
+          el.classList.add("is-out");
+          setTimeout(function () {
+            var node = document.getElementById("boot-splash");
+            if (node) node.remove();
+          }, REMOVE_MS);
+        }
+
+        /* 已经停在等待点：把 HOLD -> 0 这一段补上（闭合） */
+        function closeNow() {
+          var from = path ? parseFloat(path.style.strokeDashoffset || "0") : 0;
+          if (!isFinite(from)) from = 0;
+          if (from <= 0.05) {
+            setOffset(0);
+            endOut();
+            return;
+          }
+          var t0 = performance.now();
+          /* 距离越长给的时间越多，但有个下限，免得最后几像素慢到像卡住 */
+          var dur = Math.max(80, CLOSE_MS * (from / Math.max(HOLD, 1)));
+          function step(now) {
+            if (done) return;
+            var p = Math.min(1, (now - t0) / dur);
+            setOffset(from * (1 - easeOutCubic(p)));
+            if (p < 1) {
+              raf = requestAnimationFrame(step);
+              return;
+            }
+            raf = 0;
+            setOffset(0);
+            endOut();
+          }
+          raf = requestAnimationFrame(step);
+        }
+
+        function draw(now) {
+          if (done) return;
+          if (!startedAt) startedAt = now;
+          var p = Math.min(1, (now - startedAt) / DRAW_MS);
+          setOffset(LEN - (LEN - target) * easeInOutCubic(p));
+          if (p < 1) {
+            raf = requestAnimationFrame(draw);
+            return;
+          }
+          raf = 0;
+          /* 画到终点时若已就绪（信号恰好在最后一帧到）-> 直接收尾 */
+          if (target < HOLD - 0.5) {
+            setOffset(0);
+            endOut();
+          }
+        }
+        raf = requestAnimationFrame(draw);
+
+        window.__bootReady = function () {
+          if (done || ready) return;
+          ready = true;
+          var p = startedAt ? Math.min(1, (performance.now() - startedAt) / DRAW_MS) : 0;
+          if (p < 1) {
+            /* 还在画：只改终点，动画继续跑（不重启 => 不会顿） */
+            target = 0;
+            return;
+          }
+          /* 已经停在等待点：补最后一段 */
+          if (raf) cancelAnimationFrame(raf);
+          raf = 0;
+          closeNow();
+        };
+
+        /* 信号迟迟不来：自己收尾，别把开屏永远留在屏幕上 */
+        setTimeout(function () {
+          window.__bootReady();
+        }, FALLBACK_MS);
+      })();
     </script>
     <script>
       /**
