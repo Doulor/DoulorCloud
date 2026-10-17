@@ -18,6 +18,7 @@ import { ApiError, json, readBodyCapped } from "../http"
 import { requireUser } from "../auth"
 import { uuid } from "../crypto"
 import { hardenUserContentResponse } from "../content-type"
+import { buildSdk } from "./lab-store"
 import { guardRateLimit } from "../ratelimit"
 import {
   createApiKey,
@@ -2013,6 +2014,24 @@ export async function serveGalleryRaw(
   const doc = buildPreviewDoc(await readFiles(env, row))
   if (!doc) return new Response("Not Found", { status: 404 })
 
+  /**
+   * 注入作品存储 SDK（`window.LabStore`）。
+   *
+   * 🔴 2026-10-17 修的一个真实缺口：这条路径（`/api/gallery/:id/raw` ——
+   *    也就是 `tyu.me/<页面名>` 分享页 iframe 加载的那个地址）**从来没有注入过**，
+   *    只有「绑了自定义域名」的作品在 lab-domains.ts 里注入了。
+   *    结果是：走默认分享链接打开的作品 `window.LabStore` 是 undefined，
+   *    用到存储的功能只能走作者自己写的兜底分支
+   *    （表现就是「明明发布了，保存记录却提示要发布才能用」）。
+   *
+   *    两条交付路径必须都注入，口径与 lab-domains.ts 一致；
+   *    apiBase 由服务端按 ROOT_DOMAIN 算，不写死（换域名不用改代码）。
+   */
+  const sdk = buildSdk(row.id, `https://cloud.${env.ROOT_DOMAIN}`)
+  const docWithStore = doc.includes("</body>")
+    ? doc.replace(/<\/body>/i, `${sdk}\n</body>`)
+    : doc + sdk
+
   const headers = new Headers({
     "content-type": "text/html;charset=utf-8",
     // 沙箱：脚本/弹窗/表单允许（作品要用），但**不给同源** ⇒ 不透明源
@@ -2023,7 +2042,7 @@ export async function serveGalleryRaw(
     // 作品可能随时被作者改，别让边缘缓存拿太久
     "cache-control": "public, max-age=60",
   })
-  return new Response(doc, { status: 200, headers })
+  return new Response(docWithStore, { status: 200, headers })
 }
 
 // ---------------------------------------------------------------------------
