@@ -3743,6 +3743,8 @@ export const en: Record<MessageKey, string> = {
   "px.consent.dialogDesc": "Enabling this feature means you accept the terms below.",
   "px.empty": "no subscriptions available",
   "px.emptyDesc": "The admin hasn't added any proxy subscription yet — check back later.",
+  "px.activeOnly": "Active only",
+  "px.noActive": "No active subscription sources (all are marked offline)",
   "px.showMore": "View more",
   "px.loading": "Loading…",
   "px.duplicateOf": "Duplicate of {name}",

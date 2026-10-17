@@ -3655,6 +3655,8 @@ export const zh = {
   "px.consent.dialogDesc": "启用本功能即视为同意以下条款。",
   "px.empty": "暂无可用订阅源",
   "px.emptyDesc": "管理员还没有添加代理订阅源，请稍后再来。",
+  "px.activeOnly": "只看活跃",
+  "px.noActive": "没有活跃的订阅源（都已标记为下线）",
   "px.showMore": "查看更多",
   "px.loading": "加载中…",
   "px.duplicateOf": "与 {name} 重复",

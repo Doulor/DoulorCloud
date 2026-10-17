@@ -273,6 +273,15 @@ export default function ProxyPage() {
   const [expandedNodes, setExpandedNodes] = React.useState<Record<string, boolean>>({})
   /** 已加载的订阅列表（懒加载，分批累计） */
   const [subs, setSubs] = React.useState<ProxySubscription[]>([])
+  /**
+   * 「只看活跃」（2026-10-17 用户 onevergiveupa 反馈：「旧订阅已经挂的订阅一直在最前面」）。
+   *
+   * 默认 false：**不隐藏**任何订阅，只把活跃的排到前面去（挂了的不再占头屏）；
+   * 勾上之后才把 status=offline 的过滤掉。
+   * 排序权重：online > maintenance > unknown > offline；
+   * 同状态内用原下标兜底，保证服务端返回的顺序不被 JS 的 sort 打乱。
+   */
+  const [activeOnly, setActiveOnly] = React.useState(false)
   const [hasMore, setHasMore] = React.useState(false)
   const [loadingMore, setLoadingMore] = React.useState(false)
   /** 逐节点测速结果：`<订阅id>-<节点下标>` → 结果 */
@@ -347,6 +356,15 @@ export default function ProxyPage() {
       setLoadingMore(false)
     }
   }
+
+  const shownSubs = React.useMemo(() => {
+    const rank: Record<string, number> = { online: 0, maintenance: 1, unknown: 2, offline: 3 }
+    const list = activeOnly ? subs.filter((x) => x.status !== "offline") : subs
+    return list
+      .map((x, i) => ({ x, i }))
+      .sort((a, b) => (rank[a.x.status] ?? 9) - (rank[b.x.status] ?? 9) || a.i - b.i)
+      .map((o) => o.x)
+  }, [subs, activeOnly])
 
   const handleEnable = async () => {
     if (!consent) {
@@ -579,6 +597,20 @@ export default function ProxyPage() {
         }
       />
 
+      {subs.length > 0 && (
+        <div className="flex items-center justify-end">
+          <label className="flex cursor-pointer select-none items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 accent-primary"
+              checked={activeOnly}
+              onChange={(e) => setActiveOnly(e.target.checked)}
+            />
+            {t("px.activeOnly")}
+          </label>
+        </div>
+      )}
+
       {subs.length === 0 ? (
         <EmptyState
           title={t("px.empty")}
@@ -586,7 +618,10 @@ export default function ProxyPage() {
         />
       ) : (
         <div className="space-y-6">
-          {subs.map((sub) => {
+          {shownSubs.length === 0 && (
+            <p className="py-6 text-center text-sm text-muted-foreground">{t("px.noActive")}</p>
+          )}
+          {shownSubs.map((sub) => {
             const result = checkResult[sub.id]
             const subKey = `sub-${sub.id}`
             const subExpanded = expandedSubs[subKey] ?? false
