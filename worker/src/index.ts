@@ -5209,6 +5209,24 @@ export default {
       }
 
       /**
+       * 活动领奖的「发放中」兜底收敛（2026-10-17）。
+       *
+       * 每 15 分钟扫一次：把 claimed_at 超过 30 分钟仍停在 pending 的领奖记录
+       * 标成 failed 并写清原因，让管理员在「活动 → 领取名单」里看到并人工补发。
+       * **不自动补发** —— 原发放可能已经成功，自动重试会重复发（详见函数注释）。
+       *
+       * 搭在每分钟的 tick 上而不是新开 cron：这条极轻（一条按 status 的 UPDATE，
+       * 通常 0 行），多一条触发器反而多一份 controller.cron 与配置漂移的风险。
+       */
+      if (new Date(controller.scheduledTime).getUTCMinutes() % 15 === 0) {
+        ctx.waitUntil(
+          eventHandlers.reconcileStaleClaims(env).then((r) => {
+            if (r.swept > 0) console.warn("活动领奖兜底收敛:", r.swept, "条")
+          })
+        )
+      }
+
+      /**
        * 造物典藏「在线投资」：行情推进 + 强平扫描。
        *
        * 这一条是**「没人在看的时候 K 线也在走」的唯一保证**。

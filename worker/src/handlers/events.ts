@@ -2597,3 +2597,34 @@ export async function serveEventImage(
     return new Response("Not Found", { status: 404 })
   }
 }
+
+/**
+ * 兜底：把「发放中」卡住的领奖记录收敛掉（2026-10-17，巡检发现）。
+ *
+ * 背景（线上真实案例）：领奖流程是「先写 pending 占位 → 发放 → 回写状态」。
+ * 发放**失败**时会删掉占位让用户重试（见 grantAndRecord 的 catch），但
+ * **Worker 中途被掐断**（超时 / 崩溃 / 部署滚动重放）时，占位会永久留在 pending ——
+ * 用户以为"发放中"，其实什么都没发。线上曾出现同一人 3 条、最长卡 7 天。
+ *
+ * ⚠️ 这里**只标记、绝不自动补发**：原发放很可能其实已经成功了（额度已加、积分已记），
+ *    丢的只是回写状态那一步；自动重试会造成**重复发放**。
+ *    标成 failed 并写清原因后，它会出现在管理端「活动 → 领取名单」里，
+ *    由人核对后走既有的「人工发放」入口：
+ *      POST /api/admin/events/:id/claims/:claimId/grant
+ *
+ * 阈值取 30 分钟：正常发放是秒级，超过半小时基本可以断定已经中断。
+ */
+export async function reconcileStaleClaims(env: Env): Promise<{ swept: number }> {
+  const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString()
+  const r = await env.DB.prepare(
+    `UPDATE event_claims
+        SET reward_status = 'failed',
+            reward_detail = '发放过程中断（网络或超时），奖励未确认到账；请联系管理员核对后补发。'
+      WHERE reward_status = 'pending' AND claimed_at < ?`
+  )
+    .bind(cutoff)
+    .run()
+  const swept = r.meta?.changes ?? 0
+  if (swept > 0) console.warn("活动领奖：清理卡住的「发放中」记录", swept, "条")
+  return { swept }
+}
