@@ -7940,7 +7940,7 @@ export const en: Record<MessageKey, string> = {
   "gal.domain.desc": "Host this work on your own subdomain — anyone visiting that domain sees it.",
   "gal.domain.label": "Subdomain",
   "gal.domain.placeholder": "my-site.tyu.me",
-  "gal.domain.hint": "Use a subdomain under the site root domain (e.g. my-site.tyu.me). DNS and routing are set up automatically — takes 1–2 minutes.",
+  "gal.domain.hint": "You can only use a subdomain you own (apply for one on the Subdomains page first). DNS and routing are set up automatically; allow 1-2 minutes.",
   "gal.domain.confirm": "Bind",
   "gal.domain.unbind": "Unbind",
   "gal.domain.bound": "Bound to {d} — live in 1–2 minutes",
