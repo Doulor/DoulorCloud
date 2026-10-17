@@ -1299,7 +1299,7 @@ export async function deleteUser(env: Env, request: Request, username: string): 
       `自定义域 ${cleanup.customDomains}、R2 对象 ${cleanup.storageObjects}、` +
       `捐献渠道 ${cleanup.releasedChannels}、订阅源 ${cleanup.releasedSubscriptions}、` +
       `frp 节点 ${cleanup.releasedFrpNodes}、反代账号 ${cleanup.wb2Removed}、` +
-      `Qoder2API 账号 ${cleanup.qoder2Removed}` +
+      `Qoder2API 账号 ${cleanup.qoder2Removed}、积分商店商品 ${cleanup.shopProducts}` +
       `${cleanup.newapiDisabled ? "、已禁用 NewAPI 账号" : ""}` +
       `${cleanup.errors.length > 0 ? `。⚠️ ${cleanup.errors.length} 项未清理成功：${cleanup.errors.join("；")}` : ""}`
   )

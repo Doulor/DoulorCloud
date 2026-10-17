@@ -40,6 +40,8 @@ export interface UserCleanupReport {
   wb2Removed: number
   qoder2Removed: number
   newapiDisabled: boolean
+  /** 清掉的「用户自营商品」条数（积分商店 owner_id 没有 FK，必须显式清） */
+  shopProducts: number
   errors: string[]
 }
 
@@ -66,6 +68,7 @@ export async function purgeUserExternalResources(
     wb2Removed: 0,
     qoder2Removed: 0,
     newapiDisabled: false,
+    shopProducts: 0,
     errors: [],
   }
 
@@ -297,6 +300,36 @@ export async function purgeUserExternalResources(
   }
   // `invite_rewards` 刻意**保留**：它是「某被邀请人只发过一次奖励」的去重凭据，
   // 删掉会让同一个被邀请人重新注册后被再次计入奖励。悬空引用不影响任何查询。
+
+  // 积分商店里**用户自己上架**的商品。`point_products.owner_id` 是后加的列、
+  // **没有外键**，不显式清的话删号后商品会永远留在店里 ——
+  // 后台「待审核」列表里会挂着一条作者已不存在的垃圾（2026-10-17 线上就是这样：
+  // 渗透测试号 teest 留下了 19 条 `i4249-p1-*` / `i4059-w1-*`，删号时全成了孤儿）。
+  //
+  // ⚠️ 只删「商品 + 它的兑换码 + 日销量计数」；`point_orders` 是**真实交易记录**
+  //    （别的用户真花积分买的），必须保留 —— 商品没了订单里的 product_id 会悬空，
+  //    但金额/时间/买家都还在，对账不受影响。
+  try {
+    const products = await env.DB.prepare("SELECT id FROM point_products WHERE owner_id = ?")
+      .bind(userId)
+      .all<{ id: string }>()
+    const productIds = (products.results ?? []).map((r) => r.id)
+    if (productIds.length > 0) {
+      const ph = productIds.map(() => "?").join(",")
+      await env.DB.batch([
+        env.DB.prepare(`DELETE FROM point_product_codes WHERE product_id IN (${ph})`).bind(
+          ...productIds
+        ),
+        env.DB.prepare(
+          `DELETE FROM point_product_daily_sales WHERE product_id IN (${ph})`
+        ).bind(...productIds),
+        env.DB.prepare(`DELETE FROM point_products WHERE id IN (${ph})`).bind(...productIds),
+      ])
+      report.shopProducts = productIds.length
+    }
+  } catch (err) {
+    report.errors.push(`积分商店商品：${errText(err)}`)
+  }
 
   return report
 }
