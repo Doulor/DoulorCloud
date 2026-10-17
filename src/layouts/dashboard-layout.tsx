@@ -479,7 +479,21 @@ export function DashboardLayout({
   )
 
   const sidebar = (
-    <div className="flex h-full flex-col gap-6 overflow-y-auto pb-4">
+    /*
+     * 🔴 2026-10-17 修（用户 zzy 反馈）：「要下滑左侧栏才能看到头像和设置按钮」。
+     *
+     * 原来整条侧边栏（Logo + 导航 + 底部导航 + 账户区）都套在**同一个
+     * `overflow-y-auto` 容器**里。导航项一多（控制台现在有十几项），内容超出视口高度，
+     * 账户区就被推出滚动区 —— 必须往下滚才看得见头像和设置。
+     *
+     * 现在拆成三段：
+     *   · Logo   —— 固定不动
+     *   · 导航区 —— **唯一可滚动**的部分（`min-h-0` 是必须的：flex 子项默认
+     *               `min-height:auto` 不会收缩，不加它 overflow 不生效）
+     *   · 账户区 —— 固定贴底，任何屏幕高度下都一眼可见
+     * 底部导航组仍用 `mt-auto` 贴在滚动区末尾，视觉上与改动前一致。
+     */
+    <div className="flex h-full flex-col pb-4">
       {/* Logo 区与顶栏同高（h-14）并各带一条 border-b，两条线在同一水平线上
           连成一条；Logo 垂直居中后副标题离下边界有约 13px 留白，不再贴线。
           左右内边距下移到各区块，让分隔线横贯侧边栏整个宽度。 */}
@@ -493,24 +507,27 @@ export function DashboardLayout({
         「同组换项平滑滑、跨组切换直接落位」（落位逻辑见 SlidingPill 的 hadActive）。
         关＝现状：关掉动效时滑块不显示，导航项自带的 active 背景由 CSS 还回来。
       */}
-      <nav className="flex flex-col gap-1 px-3">
-        <SlidingPill
-          activeSelector='[data-nav-active="1"]'
-          className="rounded-md bg-accent"
-        />
-        {baseNav.map((item) => renderNavItem(item))}
-      </nav>
+      <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto pt-6">
+        <nav className="flex flex-col gap-1 px-3">
+          <SlidingPill
+            activeSelector='[data-nav-active="1"]'
+            className="rounded-md bg-accent"
+          />
+          {baseNav.map((item) => renderNavItem(item))}
+        </nav>
 
-      {/* 底部固定区：与上方功能之间留白，紧贴账户信息 */}
-      <div className="mt-auto flex flex-col gap-1 px-3 pt-6">
-        <SlidingPill
-          activeSelector='[data-nav-active="1"]'
-          className="rounded-md bg-accent"
-        />
-        {bottomNav.map((item) => renderNavItem(item))}
+        {/* 底部固定区：与上方功能之间留白，紧贴账户信息 */}
+        <div className="mt-auto flex flex-col gap-1 px-3 pt-6">
+          <SlidingPill
+            activeSelector='[data-nav-active="1"]'
+            className="rounded-md bg-accent"
+          />
+          {bottomNav.map((item) => renderNavItem(item))}
+        </div>
       </div>
 
-      <div className="flex flex-col gap-2 px-3">
+      {/* 账户区：**固定贴底**，不再随导航一起滚走 */}
+      <div className="flex shrink-0 flex-col gap-2 px-3 pt-4">
         <Separator className="mb-2" />
         {user ? (
           <div className="flex items-center gap-3">
