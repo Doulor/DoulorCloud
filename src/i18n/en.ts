@@ -8011,6 +8011,8 @@ export const en: Record<MessageKey, string> = {
   "gal.like": "Like",
   "gal.unlike": "Unlike",
   "gal.likeFailed": "Couldn't save your like. Please try again.",
+  "gal.pinned": "Pinned",
+
   "gal.pending": "In review",
   "gal.rejected": "Rejected",
   "gal.rejectReason": "Reason: ",

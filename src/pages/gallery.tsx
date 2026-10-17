@@ -9,6 +9,7 @@ import {
   Link2,
   Loader2,
   Pencil,
+  Pin,
   Search,
   Sparkles,
   X,
@@ -535,7 +536,18 @@ function GalleryGrid({
             onClick={() => onOpen(it.id)}
             className="flex flex-1 flex-col text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
-            <div className="flex h-24 items-center justify-center overflow-hidden bg-muted/40 text-3xl">
+            {/* relative 是给「置顶」角标定位用的 */}
+            <div className="relative flex h-24 items-center justify-center overflow-hidden bg-muted/40 text-3xl">
+              {/* 置顶角标：管理端在后台置顶过的作品在大厅里永远排最前，这里视觉上也标出来 */}
+              {it.pinned_at && (
+                <span
+                  className="absolute left-2 top-2 z-10 flex items-center gap-1 rounded-full bg-amber-500/95 px-1.5 py-0.5 text-[10px] font-medium leading-none text-white shadow-sm"
+                  title={t("gal.pinned")}
+                >
+                  <Pin className="h-3 w-3 fill-current" />
+                  {t("gal.pinned")}
+                </span>
+              )}
               <CoverMedia
                 id={it.id}
                 hasCover={it.hasCover}

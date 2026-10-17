@@ -970,6 +970,13 @@ export interface LabProjectRow {
   bucket_id: string | null
   /** R2 封面对象 key（平台桶）；NULL = 没上传，前端回退 emoji */
   cover_key: string | null
+  /**
+   * 管理端置顶时间（ISO）；NULL = 未置顶。
+   *
+   * 迁移 0146 加的列。排序一直在用它（置顶恒排最前），但类型里原先没有 ——
+   * 2026-10-17 补上，因为大厅 JSON 要把它下发给前端画「置顶」角标。
+   */
+  pinned_at: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -1600,6 +1607,14 @@ function toGalleryJson(row: GalleryRow, isOwner: boolean) {
     likes: row.likes,
     /** 我有没有赞过（决定按钮是不是已点亮） */
     liked: !!row.liked,
+    /**
+     * 置顶时间（ISO）；null = 未置顶。
+     *
+     * 排序里早就在用 `pinned_at`（置顶恒排最前），但**没有下发**它 ——
+     * 于是前端卡片根本不知道哪张是置顶的，没法画标记。
+     * 2026-10-17 补上：卡片要显示「置顶」角标。
+     */
+    pinned_at: row.pinned_at ?? null,
     updatedAt: row.updated_at,
     publishedAt: row.published_at,
     authorName: row.author_name,

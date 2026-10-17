@@ -7870,6 +7870,8 @@ export const zh = {
   "gal.like": "点赞",
   "gal.unlike": "取消点赞",
   "gal.likeFailed": "点赞失败，请稍后重试",
+  "gal.pinned": "置顶",
+
   "gal.pending": "待审核",
   "gal.rejected": "已驳回",
   "gal.rejectReason": "驳回原因：",
