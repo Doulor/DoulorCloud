@@ -4846,6 +4846,25 @@ function assertNotCrossSite(request: Request, url: URL): void {
   const m = request.method.toUpperCase()
   if (m === "GET" || m === "HEAD" || m === "OPTIONS") return
 
+  /**
+   * 🔴 2026-10-17 修的线上故障：`lab-store` 必须豁免。
+   *
+   * 它是本站**唯一一个对公网开放写入**的接口，设计上就**不依赖 cookie**
+   * （`Access-Control-Allow-Origin: *` 且不带凭据，见 handlers/lab-store.ts），
+   * 所以 CSRF 这层在这里没有任何东西要保护 —— 攻击者不借任何身份就能直接 curl 写，
+   * 豁免不增加任何风险。
+   *
+   * 而不豁免的后果是**功能完全不可用**，两条交付路径全被拦：
+   *   · 作品在用户自己的子域（`foo.tyu.me`）→ 调 `cloud.doulor.cn` → host 不同 → 403
+   *   · 作品在 `tyu.me/<页面名>` 的 CSP sandbox 里 → 浏览器发 `Origin: null`
+   *     → `new URL("null")` 抛错 → 403
+   * 表现就是作品里存一条记录直接 403 CSRF_BLOCKED，而作者完全看不出原因。
+   *
+   * ⚠️ 只豁免这一条前缀，别扩大：其它写接口都是带 cookie 的，正是这层要挡的。
+   */
+  const p = url.pathname.replace(/\/+$/, "")
+  if (p === "/api/lab-store" || p.startsWith("/api/lab-store/")) return
+
   const sfs = (request.headers.get("Sec-Fetch-Site") || "").toLowerCase()
   if (sfs === "cross-site") {
     throw new ApiError(403, "跨站请求已被拒绝", "CSRF_BLOCKED")
