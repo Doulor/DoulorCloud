@@ -21,6 +21,7 @@ import {
   Pencil,
   RotateCcw,
   ChevronDown,
+  Loader2,
 } from "lucide-react"
 import { toast } from "sonner"
 import {
@@ -112,9 +113,20 @@ function useCopy() {
 const AiCard = React.memo(function AiCard({
   status,
   loading,
+  usageState,
+  onRetryUsage,
 }: {
   status: NewApiStatus | null
   loading: boolean
+  /**
+   * 订阅/币种/健康的懒加载状态（`GET /api/dev/usage`）。
+   *
+   * ⚠️ 2026-10-12 起 `/api/dev/status` 里的 `subscription` / `subscriptions`
+   * **恒为空**（订阅要读上游，已挪到 usage 接口）。这里必须区分「还没读到」
+   * 与「真的没有订阅」，否则已领取的用户也会看到「尚未领取免费订阅」。
+   */
+  usageState: "loading" | "ready" | "failed"
+  onRetryUsage: () => void
 }) {
   const { t } = useT()
   const { copied, copy } = useCopy()
@@ -195,7 +207,24 @@ const AiCard = React.memo(function AiCard({
                 <p className="text-sm font-semibold">{acc.requestCount ?? 0}</p>
               </div>
             </div>
-            {status?.subscription ? (
+            {usageState === "loading" ? (
+              <div className="flex items-center gap-2 rounded-md border p-3 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {t("dash.sub.loading")}
+              </div>
+            ) : usageState === "failed" ? (
+              <div className="rounded-md border p-3 text-xs text-muted-foreground">
+                {t("dash.sub.loadFailed")}
+                <Button
+                  variant="link"
+                  size="sm"
+                  className="ml-1 h-auto p-0"
+                  onClick={onRetryUsage}
+                >
+                  {t("dash.sub.retry")}
+                </Button>
+              </div>
+            ) : status?.subscription ? (
               <div className="rounded-md border p-3">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-muted-foreground">{t("dash.sub.freeToday")}</span>
@@ -204,7 +233,7 @@ const AiCard = React.memo(function AiCard({
                     {(
                       (status.subscription.amountTotal -
                         status.subscription.amountUsed) /
-                      500000
+                      perUnit
                     ).toFixed(2)}
                   </span>
                 </div>
@@ -232,7 +261,7 @@ const AiCard = React.memo(function AiCard({
                 <Button
                   variant="link"
                   size="sm"
-                  className="h-auto p-0"
+                  className="ml-1 h-auto p-0"
                   asChild
                 >
                   <Link to="/dashboard/ai">{t("dash.sub.claim")}</Link>
@@ -1286,12 +1315,54 @@ function useDashboardCards() {
   const [profileLoading, setProfileLoading] = React.useState(true)
   const [announcements, setAnnouncements] = React.useState<Announcement[]>([])
   const [announcementsLoading, setAnnouncementsLoading] = React.useState(true)
+  /**
+   * 订阅 / 币种 / 健康的懒加载状态。
+   *
+   * ⚠️ 2026-10-12 起 `/api/dev/status` 里的订阅字段**恒为空**（要读上游，已拆到
+   * `GET /api/dev/usage`）。概览页必须自己补这一次请求，并且要区分「读取中 /
+   * 已就绪 / 失败」—— 不能把「还没读到」当成「没有订阅」，否则已领取的用户
+   * 也会被提示「尚未领取免费订阅」。
+   */
+  const [aiUsageState, setAiUsageState] =
+    React.useState<"loading" | "ready" | "failed">("loading")
+
+  const loadAiUsage = React.useCallback(async () => {
+    setAiUsageState("loading")
+    try {
+      const u = await newapiApi.usage()
+      setAiStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              // 币种以这次读到的为准（首屏是兜底值，可能显示成 $）
+              currencySymbol: u.currency.symbol,
+              currencyCode: u.currency.code,
+              quotaPerUnit: u.currency.perUnit || prev.quotaPerUnit,
+              health: u.health,
+              subscription: u.subscription,
+              subscriptions: u.subscriptions,
+              freePlanId: u.freePlanId || prev.freePlanId,
+            }
+          : prev
+      )
+      setAiUsageState("ready")
+    } catch {
+      // 读不到就如实告诉用户「读取失败 + 重试」，绝不假装成「没有订阅」
+      setAiUsageState("failed")
+    }
+  }, [])
 
   React.useEffect(() => {
     let cancelled = false
     newapiApi
       .status()
-      .then((res: NewApiStatus) => !cancelled && setAiStatus(res))
+      .then((res: NewApiStatus) => {
+        if (cancelled) return
+        setAiStatus(res)
+        // 首屏只等 status（只读 D1，快）；订阅等实时字段独立拉，不阻塞卡片渲染
+        if (res.account) void loadAiUsage()
+        else setAiUsageState("ready")
+      })
       .catch((err) => {
         if (cancelled) return
         // 无权限（未解锁 AI 中转站）是新用户的正常状态，静默显示「未绑定」，不弹错误
@@ -1304,7 +1375,7 @@ function useDashboardCards() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [loadAiUsage])
 
   React.useEffect(() => {
     let cancelled = false
@@ -1338,6 +1409,8 @@ function useDashboardCards() {
   return {
     aiStatus,
     aiLoading,
+    aiUsageState,
+    retryAiUsage: loadAiUsage,
     profile,
     profileLoading,
     announcements,
@@ -1374,6 +1447,8 @@ export default function DashboardPage() {
   const {
     aiStatus,
     aiLoading,
+    aiUsageState,
+    retryAiUsage,
     profile,
     profileLoading,
     announcements,
@@ -1435,7 +1510,14 @@ export default function DashboardPage() {
         case "activity":
           return <RecentActivityCard data={data} loading={loading} />
         case "ai":
-          return <AiCard status={aiStatus} loading={aiLoading} />
+          return (
+            <AiCard
+              status={aiStatus}
+              loading={aiLoading}
+              usageState={aiUsageState}
+              onRetryUsage={retryAiUsage}
+            />
+          )
         case "profile":
           return <ProfileCard data={profile} loading={profileLoading} />
         case "announcements":
@@ -1449,6 +1531,8 @@ export default function DashboardPage() {
       loading,
       aiStatus,
       aiLoading,
+      aiUsageState,
+      retryAiUsage,
       profile,
       profileLoading,
       announcements,

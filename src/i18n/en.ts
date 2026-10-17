@@ -642,7 +642,10 @@ export const en: Record<MessageKey, string> = {
   "dash.view": "View",
   "dash.notOpened": "not enabled",
   "dash.sub.freeToday": "Free plan · left today",
-  "dash.sub.notClaimed": "You haven't claimed the free plan yet — claim it to get a daily quota.",
+  "dash.sub.notClaimed": "No active free plan yet — claim it to get a daily quota reset.",
+  "dash.sub.loading": "Loading subscription…",
+  "dash.sub.loadFailed": "Couldn't load subscription info.",
+  "dash.sub.retry": "Retry",
   "dash.sub.claim": "Claim now",
   "dash.profile.card": "Personal card",
   "dash.profile.subtitle": "Your public homepage",
@@ -1780,9 +1783,9 @@ export const en: Record<MessageKey, string> = {
   "ai.free.mustClaim": "Claim the free plan first — it's required to create API keys and call models.",
   "ai.free.rule": "¥50/day with no donations; ¥400/day per WorkBuddy account (wb accounts only; Qoder not counted)",
   "ai.free.rulesClaimed":
-    "How it works: the free plan grants quota daily (default quota shown on the card, billed per call). Once today's quota runs out you wait for the next reset. Unused quota stays valid until the subscription expires.",
+    "How it works: the free plan resets your quota every day (default quota shown on the card, billed per call). Unused quota doesn't carry over — it's restored to the plan amount the next day. See the expiry above.",
   "ai.free.rulesUnclaimed":
-    "How it works: after claiming, quota is granted daily (¥50/day with no donations; ¥400/day per WorkBuddy account), billed by model price. Without claiming you can't create keys or call models.",
+    "How it works: after claiming, quota resets daily (¥50/day with no donations; ¥400/day per WorkBuddy account), billed by model price. Without claiming you can't create keys or call models.",
   "ai.free.claim": "Claim the free plan",
   "ai.access.title": "Connection info",
   "ai.access.desc":

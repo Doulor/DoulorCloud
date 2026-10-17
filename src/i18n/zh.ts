@@ -633,7 +633,10 @@ export const zh = {
   "dash.view": "查看",
   "dash.notOpened": "未开通",
   "dash.sub.freeToday": "免费订阅 · 今日剩余",
-  "dash.sub.notClaimed": "尚未领取免费订阅，领取后每天自动发放额度。",
+  "dash.sub.notClaimed": "还没有有效的免费订阅。领取后每天自动恢复额度。",
+  "dash.sub.loading": "订阅信息读取中…",
+  "dash.sub.loadFailed": "订阅信息暂时读取失败。",
+  "dash.sub.retry": "重试",
   "dash.sub.claim": "去领取",
   "dash.profile.card": "个人名片",
   "dash.profile.subtitle": "你的对外主页",
@@ -1748,9 +1751,9 @@ export const zh = {
   "ai.free.rule": "无捐献每天 ¥50；每捐献 1 个 WorkBuddy 账号 = 每天 ¥400（只算 wb 账号，Qoder 不计）",
   "ai.free.mustClaim": "必须先领取免费订阅，才能创建 API Key 并调用模型。",
   "ai.free.rulesClaimed":
-    "订阅规则：免费订阅每天自动发放额度（默认额度见卡片，按次计费），当天额度用完则需等次日重置。额度长期有效，持续到订阅到期。",
+    "订阅规则：免费订阅每天自动重置额度（默认额度见卡片，按次计费），当天未用完的额度不累积，次日恢复为套餐额度；订阅有效期见上方。",
   "ai.free.rulesUnclaimed":
-    "订阅规则：领取免费订阅后，每天自动发放额度（无捐献 ¥50/天，每捐献 1 个 WorkBuddy 账号 ¥400/天），按模型价格计费。未领取订阅将无法创建 Key 和调用模型。",
+    "订阅规则：领取免费订阅后，每天自动重置额度（无捐献 ¥50/天，每捐献 1 个 WorkBuddy 账号 ¥400/天），按模型价格计费。未领取订阅将无法创建 Key 和调用模型。",
   "ai.free.claim": "领取免费订阅",
   "ai.access.title": "接入信息",
   "ai.access.desc": "在任意 OpenAI 兼容客户端中填入 Base URL 与 API Key 即可使用。",
