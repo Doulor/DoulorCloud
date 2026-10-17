@@ -1887,6 +1887,7 @@ export const en: Record<MessageKey, string> = {
   "em.forward.pending": "Awaiting verification",
   "em.forward.pendingShort": "Pending",
   "em.forward.unknown": "Unknown",
+  "em.forward.errNotVerified": "This destination isn't verified on Cloudflare's side yet. Your own code verification is NOT enough: an admin must add the address as a Cloudflare Email Routing destination, and you must click the verification link Cloudflare sends to that inbox. Forwarding starts only after both steps are done — please pass this to the admin.",
   "em.forward.lastFailed": "Last forwarding attempt failed",
   "em.forward.title": "Forwarding settings",
   "em.forward.desc": "Mail sent to {address} is forwarded to these addresses; leave empty to disable.",

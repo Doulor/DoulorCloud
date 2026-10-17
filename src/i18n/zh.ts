@@ -1850,6 +1850,7 @@ export const zh = {
   "em.forward.pendingShort": "待验证",
   "em.forward.unknown": "状态未知",
   "em.forward.lastFailed": "最近一次转发失败",
+  "em.forward.errNotVerified": "目标地址还没在 Cloudflare 侧完成验证。你自己的验证码通过 ≠ Cloudflare 侧验证完成 —— 还需要管理员把这个地址加为 Cloudflare Email Routing 的转发目标，然后你去该收件邮箱点开 Cloudflare 发来的验证邮件。两件都完成后转发才会生效。 请把这句话转给管理员。",
   "em.forward.title": "转发设置",
   "em.forward.desc": "{address} 收到的邮件会转发到以下地址，留空则不转发。",
   "em.forward.target": "转发目标",

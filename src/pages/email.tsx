@@ -1288,7 +1288,17 @@ export default function EmailPage() {
                   {t("em.forward.lastFailed")}
                 </p>
                 <p className="mt-0.5 break-words text-xs text-muted-foreground">
-                  {forwardBox.lastForwardError}
+                  {/*
+                    Cloudflare 原文 `destination address not verified` 对用户毫无指导意义，
+                    而且容易误解：本站的「验证码验证」只证明**这个地址属于你**；CF 侧另有
+                    一层**账户级** destination 验证 —— 管理员在 CF 里加为 Email Routing
+                    destination 后，CF 会给该地址发验证邮件，**收件人点开**才算完成。
+                    这一步用户自己做不到，所以必须明确说要找管理员。线上 2 例
+                    （ttest@tyu.me、planck@tyu.me）卡在这层。
+                  */}
+                  {/destination address not verified/i.test(forwardBox.lastForwardError)
+                    ? t("em.forward.errNotVerified")
+                    : forwardBox.lastForwardError}
                 </p>
               </div>
             )}
