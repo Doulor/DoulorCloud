@@ -7,7 +7,7 @@ import { DashboardLayout } from "@/layouts/dashboard-layout"
 import { useAuth } from "@/hooks/use-auth"
 import { communityApi } from "@/services/api"
 import { page } from "@/lib/route-preload"
-import { AnalyticsTracker } from "@/components/analytics-tracker"
+import { AnalyticsTracker, PerfTracker } from "@/components/analytics-tracker"
 import { CursorGlow } from "@/components/cursor-effect"
 import { ClickSpark } from "@/components/motion/click-spark"
 import { RevealAll } from "@/components/motion/reveal"
@@ -168,6 +168,7 @@ export default function App() {
   return (
     <React.Suspense fallback={<PageLoader />}>
       <AnalyticsTracker />
+      <PerfTracker />
       <CursorGlow />
       {/* 动效层：全局点击粒子。启停跟 <html> 的 .motion-on 类走
           （个人设置「界面动效」开关），关闭时不挂监听、一粒不出 */}

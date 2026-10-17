@@ -4,7 +4,7 @@ import { clientIp, normalizeKeyPart, guardRateLimit } from "../ratelimit"
 import { isReservedName } from "../reserved-names"
 import { revokeAllUserTokens } from "../oauth-provider"
 import { sendMail, renderMail } from "../mailer"
-import { getSettings } from "../settings"
+import { getSettings, getSettingBool } from "../settings"
 import {
   isBasicOnlyInvitePermissions,
   permissionsFromFeatures,
@@ -901,6 +901,11 @@ export async function me(
       detail: r.detail,
       createdAt: r.created_at,
     })),
+    // 前端可观测性开关（2026-10-10）：性能采集与诊断日志记录器是否启用。
+    // 放在 /api/me（登录后每次加载必调）而不是单独接口 —— 不增加请求数；
+    // 两个开关都默认关，站长在管理面板打开后，前端下一次加载才生效。
+    perfCollectEnabled: await getSettingBool(env, "perf_collect_enabled"),
+    diagLogEnabled: await getSettingBool(env, "diag_log_enabled"),
   })
 }
 

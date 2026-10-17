@@ -393,6 +393,13 @@ export const SETTING_DEFAULTS = {
   /** 社区发帖最多图片数 */
   community_post_max_images: "9",
   /**
+   * 社区评论最多可修改次数（0 = 禁止修改）。默认 2，管理面板可改（允许 0–10）。
+   *
+   * 2026-10-17 站长要求：评论发布后可修改，但最多 2 次，且次数由管理员控制。
+   * 读取点在 handlers/community.ts 的 commentEditLimit()（编辑接口与 /community/config 共用）。
+   */
+  community_comment_edit_limit: "2",
+  /**
    * 帖子分类（JSON 数组，管理面板可改）。每项：`{ key, zh, en, water? }`
    *
    * 2026-10-07 站长要求从硬编码改成可配，并加了「水帖」。
@@ -443,6 +450,22 @@ export const SETTING_DEFAULTS = {
    * 2026-10-05 站长要求。root / superadmin 不受影响（恒看全部）。
    */
   admin_sidebar_only_permitted: "1",
+  /**
+   * 前端性能采集（RUM）开关（2026-10-10，配合管理面板「性能监控」工具）。
+   * 开（"1"）：已登录前端在页面加载 / 路由切换后上报性能样本（sendBeacon，
+   *   失败静默），落到 perf_samples 表供 /admin/perf 聚合。
+   * 关（"0"，默认）：前端完全不采集不上报 —— 管理员在性能监控页打开后才生效。
+   * 读取点：GET /api/me（handlers/auth.ts，登录后每次加载必调）把本项
+   *   与 diag_log_enabled 一起带给前端；perf-collect / diag-log 据此启停。
+   */
+  perf_collect_enabled: "0",
+  /**
+   * 诊断日志记录器开关（2026-10-10，配合「反馈附诊断日志」）。
+   * 开（"1"）：前端环形缓冲记录器启用（路由 / JS 错误 / 接口失败 / 长任务），
+   *   数据只在内存 + 会话内，用户提交反馈勾选时间窗后才上传所选片段。
+   * 关（"0"，默认）：不记录 —— 站长需要排障时再打开。
+   */
+  diag_log_enabled: "0",
   /**
    * 用户能否**自助创建** OAuth 应用（让别的站点接本站登录用）。
    *

@@ -361,6 +361,9 @@ export interface MeResponse {
   recentActivity: AuditLog[]
   recentMessages?: RecentMessage[]
   recentStorageFiles?: RecentStorageFile[]
+  /** 前端可观测性开关（2026-10-10）：性能采集 / 诊断日志记录器是否启用（站点设置下发） */
+  perfCollectEnabled?: boolean
+  diagLogEnabled?: boolean
 }
 
 export interface AdminUser {
@@ -2576,6 +2579,8 @@ export interface CommunityConfig {
   enabled: boolean
   /** 当前生效的帖子分类（按管理员配置的顺序，第一项是发帖默认值） */
   categories: PostCategoryDef[]
+  /** 评论最多可修改次数（0 = 不允许修改）；由设置 community_comment_edit_limit 下发 */
+  commentEditLimit: number
 }
 
 /** 广场列表里展示的高赞评论预览 */
@@ -2613,6 +2618,8 @@ export interface Post {
 
 export interface CommentNode {
   id: string
+  /** 评论作者的用户 id —— 判断「是不是我发的」必须用它，不能用 username（用户名可改） */
+  user_id: string
   body: string
   createdAt: string
   author: CommunityAuthor
@@ -2622,6 +2629,12 @@ export interface CommentNode {
   hot?: boolean
   /** 当前登录用户是否点过赞（未登录恒 false） */
   liked?: boolean
+  /** 被修改过几次（0 / 缺省 = 未修改）；后端按站点设置限制上限 */
+  editCount?: number
+  /** 最近一次修改时间（未修改为 null） */
+  updatedAt?: string | null
+  /** 已删除：正文已由服务端清空，前端只渲染「该评论已删除」占位 */
+  deleted?: boolean
   replies: CommentNode[]
 }
 
@@ -3051,6 +3064,106 @@ export interface AdminFeedbackItem extends FeedbackItem {
   userId: string
   username: string
   nickname: string | null
+}
+
+/**
+ * 管理端反馈列表项（2026-10-10 摘要化）。
+ * 列表不再带全文/消息/图片 URL（响应从几 MB 降到几十 KB），点开详情才拉全量。
+ */
+export interface AdminFeedbackSummary {
+  id: string
+  category: string
+  title: string
+  /** 截断后的正文预览（≤280 字符） */
+  bodyPreview: string
+  status: string
+  hasReply: boolean
+  hasImages: boolean
+  hasDiagLog: boolean
+  messageCount: number
+  userId: string
+  username: string
+  nickname: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** 管理端反馈列表响应（分页） */
+export interface AdminFeedbackList {
+  feedback: AdminFeedbackSummary[]
+  counts: Record<string, number>
+  total: number
+  page: number
+  pageSize: number
+  categories: FeedbackOption[]
+  statusLabels: Record<string, string>
+}
+
+/** 单条反馈的完整详情（detail 接口响应） */
+export interface FeedbackDetail {
+  feedback: AdminFeedbackItem
+  diagLog: DiagLogView | null
+  statusLabels: Record<string, string>
+}
+
+/** 前端性能样本聚合（管理端性能监控，GET /admin/perf/overview） */
+export interface PerfOverview {
+  days: number
+  summary: {
+    samples: number
+    longTasks: number
+    errors: number
+    avgTtfb: number
+    avgLcp: number
+    avgNav: number
+  }
+  byDay: {
+    day: string
+    samples: number
+    avgTtfb: number
+    avgLcp: number
+    avgNav: number
+    longTasks: number
+    errors: number
+  }[]
+  byPage: {
+    page: string
+    samples: number
+    avgTtfb: number
+    avgLcp: number
+    avgNav: number
+    maxTtfb: number
+    maxLcp: number
+    longTasks: number
+    errors: number
+    mobileShare: number
+  }[]
+  byDevice: { device: string; samples: number }[]
+}
+
+/** 单页面的原始样本（GET /admin/perf/samples） */
+export interface PerfPageSamples {
+  page: string
+  samples: {
+    ttfbMs: number | null
+    dclMs: number | null
+    lcpMs: number | null
+    longTasks: number
+    errors: number
+    navMs: number | null
+    device: string
+    createdAt: string
+  }[]
+}
+
+/** 诊断日志（管理端查看 / 用户上传后的回执视图） */
+export interface DiagLogView {
+  id: string
+  windowMinutes: number
+  entryCount: number
+  truncated: boolean
+  createdAt: string
+  entries: { t: number; k: string; p: string; d?: number; s?: string }[]
 }
 
 export interface FeedbackOverview {
