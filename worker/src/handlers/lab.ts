@@ -45,6 +45,15 @@ import { buildPreviewDoc } from "../lab-preview"
 import { loadEnabledTemplates } from "./lab-prompts"
 import { loadSkillIndex } from "./lab-skills"
 import { loadSearchCost, isUserSearchEnabled, loadSiteKeysForInfo } from "./lab-search"
+/**
+ * 删作品时要把绑定域名一起释放（Route + DNS 记录），那份逻辑在 lab-domains.ts。
+ *
+ * ⚠️ 这是一处**有意的循环依赖**（lab-domains 也 import 了本文件的 `readFiles`）：
+ *    两边都是函数声明，模块求值阶段不会互相调用，ESM 的 live binding 拿得到；
+ *    之所以不把它挪走，是因为「按 Host 出内容」与「作品绑定」本来就同属一个模块，
+ *    拆开反而会出现两份 CF 路由知识。
+ */
+import { releaseProjectDomain } from "./lab-domains"
 import {
   consumeLabQuota,
   isFreeModel,
@@ -1209,6 +1218,42 @@ function validateSlug(raw: string): { ok: true; slug: string } | { ok: false; re
 }
 
 /**
+ * 页面名的落地：校验 → 全局查重 → 写入（并锁定，免得下次保存被自动重算覆盖）。
+ *
+ * ⚠️ **不做任何归属判断**：调用方必须先自己确认「你有权改这个作品」
+ *    （用户侧 `setProjectSlug` 用 `loadProject` 带 `user_id` 查；管理端走
+ *    `requireAdminScope`）。所以这里只按 id 写。
+ */
+export async function applyProjectSlug(
+  env: Env,
+  projectId: string,
+  raw: unknown
+): Promise<string> {
+  const checked = validateSlug(typeof raw === "string" ? raw : "")
+  if (!checked.ok) {
+    throw new ApiError(400, `页面名不合规：${checked.reason}`, "INVALID_SLUG")
+  }
+
+  // 已公开作品之间全局查重：撞了就明确让用户换名字，**不能悄悄加后缀**，
+  // 否则用户以为分享出去的是自己填的那个名字。
+  const taken = await env.DB.prepare(
+    "SELECT id FROM lab_projects WHERE slug = ? AND id != ? AND visibility = 'public'"
+  )
+    .bind(checked.slug, projectId)
+    .first()
+  if (taken) {
+    throw new ApiError(409, "这个页面名已经被别的公开作品用了，换一个", "SLUG_TAKEN")
+  }
+
+  await env.DB.prepare(
+    "UPDATE lab_projects SET slug = ?, slug_locked = 1, updated_at = ? WHERE id = ?"
+  )
+    .bind(checked.slug, new Date().toISOString(), projectId)
+    .run()
+  return checked.slug
+}
+
+/**
  * POST /api/lab/projects/:id/slug —— 自定义作品的页面名（链接尾部）。
  *
  * 只靠「保存作品」时的自动命名不够：用户想把作品挂成 `tyu.me/starwar`
@@ -1223,35 +1268,10 @@ export async function setProjectSlug(
 ): Promise<Response> {
   const user = await requireUser(env, request)
   const body = (await request.json().catch(() => null)) as { slug?: unknown } | null
-  const raw = typeof body?.slug === "string" ? body.slug : ""
-  const checked = validateSlug(raw)
-  if (!checked.ok) {
-    throw new ApiError(400, `页面名不合规：${checked.reason}`, "INVALID_SLUG")
-  }
-  const row = await env.DB.prepare(
-    "SELECT id, visibility FROM lab_projects WHERE id = ? AND user_id = ?"
-  )
-    .bind(id, user.id)
-    .first<{ id: string; visibility: string }>()
-  if (!row) throw new ApiError(404, "作品不存在", "NOT_FOUND")
-
-  // 已公开作品之间全局查重：撞了就明确让用户换名字，**不能悄悄加后缀**，
-  // 否则用户以为分享出去的是自己填的那个名字。
-  const taken = await env.DB.prepare(
-    "SELECT id FROM lab_projects WHERE slug = ? AND id != ? AND visibility = 'public'"
-  )
-    .bind(checked.slug, id)
-    .first()
-  if (taken) {
-    throw new ApiError(409, "这个页面名已经被别的公开作品用了，换一个", "SLUG_TAKEN")
-  }
-
-  await env.DB.prepare(
-    "UPDATE lab_projects SET slug = ?, slug_locked = 1, updated_at = ? WHERE id = ? AND user_id = ?"
-  )
-    .bind(checked.slug, new Date().toISOString(), id, user.id)
-    .run()
-  return json({ ok: true, slug: checked.slug })
+  // 先按「本人 + 这个 id」确认真有这件作品，再谈名字合不合规 ——
+  // 否则连「这个 id 存不存在」都不需要猜就能从错误码里分辨出来。
+  await loadProject(env, id, user.id)
+  return json({ ok: true, slug: await applyProjectSlug(env, id, body?.slug) })
 }
 async function uniqueSlug(
   env: Env,
@@ -1288,7 +1308,13 @@ export function coverVersionOf(key: string | null | undefined): string {
   return i === -1 ? "" : stem.slice(i + 1)
 }
 
-function toClientJson(row: LabProjectRow, files?: Record<string, string>) {
+/**
+ * 作品行的对外 JSON（前端 `LabProjectSummary` 的形状）。
+ *
+ * 管理端的造物集接口也用它 —— 两边**必须**同一个形状，否则「作者看到的编辑框」
+ * 和「管理员看到的编辑框」会在某个字段上悄悄分家（管理端弹窗复用的就是这个组件）。
+ */
+export function toClientJson(row: LabProjectRow, files?: Record<string, string>) {
   return {
     id: row.id,
     name: row.name,
@@ -1321,6 +1347,23 @@ async function loadProject(
     "SELECT * FROM lab_projects WHERE id = ? AND user_id = ?"
   )
     .bind(id, userId)
+    .first<LabProjectRow>()
+  if (!row) throw new ApiError(404, "作品不存在", "NOT_FOUND")
+  return row
+}
+
+/**
+ * 按 id 取作品行（**不带归属条件**）。
+ *
+ * ⚠️ 只能给「已经自己做过授权判定」的调用方用 —— 目前唯一的使用者是
+ *    `handlers/admin-lab.ts` 的造物集管理接口（它们先过
+ *    `requireAdminScope(env, request, "lab")`，与 `setGalleryPinned` 同一把闸）。
+ *    用户侧的接口一律走上面的 `loadProject`（带 `user_id`），
+ *    这样「普通用户改别人的作品」在 SQL 层就是查不到行，不依赖任何旁路判断。
+ */
+export async function loadProjectById(env: Env, id: string): Promise<LabProjectRow> {
+  const row = await env.DB.prepare("SELECT * FROM lab_projects WHERE id = ?")
+    .bind(id)
     .first<LabProjectRow>()
   if (!row) throw new ApiError(404, "作品不存在", "NOT_FOUND")
   return row
@@ -1466,10 +1509,36 @@ export async function deleteProject(
 ): Promise<Response> {
   const user = await requireUser(env, request)
   const existing = await loadProject(env, id, user.id)
-  // 先删行再清 R2：万一清理失败只会留孤儿对象，不会留下「行在、文件没了」的坏作品
-  await env.DB.prepare("DELETE FROM lab_projects WHERE id = ?").bind(id).run()
+  await deleteProjectCascade(env, existing)
+  return new Response(null, { status: 204 })
+}
+
+/**
+ * 彻底删掉一个作品（行 + 绑定域名 + R2 文件 + 封面）。
+ *
+ * ⚠️ 调用方必须先确认「有权删」（作者本人 `loadProject`，或管理端的
+ *    `requireAdminScope`）。这里只负责把东西清干净。
+ *
+ * 🔴 顺序：**先释放域名再删行**。`lab_project_domains.project_id` 上挂着
+ *    `ON DELETE CASCADE`，若先删 `lab_projects`，域名行会被顺手带走，
+ *    于是我们再也读不到那个 fqdn ⇒ 它的 Worker Route 与 AAAA 记录就永久留在
+ *    Cloudflare 上（每个都占 zone 的记录配额，攒够了整个 zone 建不了新记录，
+ *    就是 2026-10-15 那次 81045 事故的同款）。所以必须先读出 fqdn、释放在前。
+ *
+ * ⚠️ 然后才是删行、清 R2：万一清理失败只会留孤儿对象，不会留下
+ *    「行在、文件没了」的坏作品。
+ */
+export async function deleteProjectCascade(env: Env, existing: LabProjectRow): Promise<void> {
+  // 1) 绑定域名：DB 行 + Worker Route + DNS 记录（`releaseProjectDomain` 里成对做）
+  await releaseProjectDomain(env, existing.id)
+  // 2) 作品行 + 点赞明细（点赞表没有外键，不显式删就会永远留在库里）
+  await env.DB.prepare("DELETE FROM lab_projects WHERE id = ?").bind(existing.id).run()
+  await env.DB.prepare("DELETE FROM lab_project_likes WHERE project_id = ?")
+    .bind(existing.id)
+    .run()
+  // 3) R2 里的作品文件
   await purgeProjectFiles(env, existing)
-  // 封面在平台桶，和作品文件不在一个前缀里，要单独清
+  // 4) 封面在平台桶，和作品文件不在一个前缀里，要单独清
   if (existing.cover_key && (await isStorageConfigured(env))) {
     try {
       await deleteObject(env, existing.cover_key, await getPlatformBucketId(env))
@@ -1477,7 +1546,6 @@ export async function deleteProject(
       /* 尽力而为 */
     }
   }
-  return new Response(null, { status: 204 })
 }
 
 // ---------------------------------------------------------------------------
@@ -1550,6 +1618,90 @@ function toGalleryJson(row: GalleryRow, isOwner: boolean) {
   slug: row.slug,
     isMine: isOwner,
   }
+}
+
+/**
+ * 只改**对外展示信息**（名字 / 简介 / 图标），可见性一概不动。
+ *
+ * 与 `publishProject` 的关系：那边把「改介绍」和「改可见性」写在同一条 UPDATE 里，
+ * 因为要保证「点公开」那一刻字段与状态一起生效。这里的调用者是管理端的
+ * 造物集管理台（编辑别人的作品信息），**绝不该顺手改可见性** ——
+ * 一次保存把待审作品悄悄放行，就是线上事故。所以单独一条，只碰这三列。
+ *
+ * ⚠️ 不含归属判断：调用方先过 `requireAdminScope`。
+ */
+export async function updateProjectMeta(
+  env: Env,
+  row: LabProjectRow,
+  patch: { name?: unknown; description?: unknown; icon?: unknown }
+): Promise<LabProjectRow> {
+  const name =
+    typeof patch.name === "string" ? patch.name.trim().slice(0, 60) : row.name
+  if (!name) throw new ApiError(400, "给作品起个名字", "INVALID_NAME")
+  const description =
+    typeof patch.description === "string"
+      ? patch.description.trim().slice(0, 200)
+      : row.description
+  const icon =
+    typeof patch.icon === "string" && patch.icon.trim()
+      ? patch.icon.trim().slice(0, 8)
+      : row.icon
+
+  await env.DB.prepare(
+    `UPDATE lab_projects SET name = ?, description = ?, icon = ?, updated_at = ?
+     WHERE id = ?`
+  )
+    .bind(name, description, icon, new Date().toISOString(), row.id)
+    .run()
+  return loadProjectById(env, row.id)
+}
+
+/**
+ * 直接把作品设成某个状态（**管理端专用**）。
+ *
+ * 用户侧没有这条路径：他们只能「公开 / 取消公开」，具体落到 pending 还是
+ * public 由站点设置 `lab_review_required` 决定（见 `publishProject`）。
+ * 站长要的是「我能直接改成任意状态」，包括绕过审核直接放行、或把人打回待审。
+ *
+ * `review_note` 的口径：
+ *   · 只有 rejected 写理由；其余状态一律清空；
+ *   · 取消公开（→ private）时**也要清**：私密作品带着一条「未通过审核」
+ *     留在库里，下次它被重新送审时前端会先显示旧理由，看起来像刚被驳回。
+ *
+ * ⚠️ 不含归属判断：调用方先过 `requireAdminScope`。
+ */
+export async function setProjectVisibility(
+  env: Env,
+  row: LabProjectRow,
+  visibility: "public" | "private" | "pending" | "rejected",
+  note?: unknown
+): Promise<LabProjectRow> {
+  // 没有 HTML 入口的作品公开出去，别人打开就是一片空白 —— 这条闸用户侧有，
+  // 管理端也必须走同一把尺子，否则「管理员放行的作品打不开」更难解释。
+  if (visibility === "public" && !hasHtmlEntry(row)) {
+    throw new ApiError(
+      400,
+      "这个作品里没有 HTML 文件，公开出去别人打开会是空白页 —— 让它先有一个 index.html",
+      "NO_HTML_ENTRY"
+    )
+  }
+
+  const now = new Date().toISOString()
+  const reviewNote =
+    visibility === "rejected"
+      ? (typeof note === "string" ? note.trim().slice(0, 200) : "") || "未通过审核"
+      : null
+
+  await env.DB.prepare(
+    `UPDATE lab_projects
+     SET visibility = ?, review_note = ?,
+         published_at = CASE WHEN ? = 'public' THEN COALESCE(published_at, ?) ELSE published_at END,
+         updated_at = ?
+     WHERE id = ?`
+  )
+    .bind(visibility, reviewNote, visibility, now, now, row.id)
+    .run()
+  return loadProjectById(env, row.id)
 }
 
 /**
@@ -1894,35 +2046,28 @@ function legacyCoverKeyOf(userId: string, projectId: string, ext: string): strin
   return `lab-cover/${userId}/${projectId}.${ext}`
 }
 
-/** POST /api/lab/projects/:id/cover —— 上传作品封面（原图直传，≤600KB） */
-export async function uploadProjectCover(
+/**
+ * 保存封面（写对象 + 清旧对象 + 更新行）。
+ *
+ * ⚠️ 同样**不含归属判断**：调用方已经确认过权限（作者 `loadProject` /
+ *    管理员 `requireAdminScope`）。作者侧与管理端共用这一份实现，
+ *    免得「换封面时清旧对象」这种容易漏的一步被抄漏一次。
+ */
+export async function saveProjectCover(
   env: Env,
-  request: Request,
-  id: string
-): Promise<Response> {
-  const user = await requireUser(env, request)
-  await guardRateLimit(env, `lab-cover:${user.id}`, 20, 60, "封面上传过于频繁")
-  const row = await loadProject(env, id, user.id)
-
+  row: LabProjectRow,
+  buf: ArrayBuffer | Uint8Array,
+  contentType: string
+): Promise<{ hasCover: boolean; coverV: string }> {
   if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "存储未配置，无法上传封面", "R2_NOT_CONFIGURED")
   }
-  const contentType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim()
   const ext = COVER_TYPES[contentType]
   if (!ext) throw new ApiError(400, "仅支持 JPG / PNG / WebP / GIF", "INVALID_TYPE")
 
-  const buf = await readBodyCapped(
-    request,
-    COVER_MAX_BYTES,
-    "封面过大，上限 600 KB",
-    400,
-    "TOO_LARGE"
-  )
-  if (buf.byteLength === 0) throw new ApiError(400, "文件为空", "INVALID_INPUT")
-
   const bucketId = await getPlatformBucketId(env)
   const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
-  const key = coverKeyOf(user.id, id, ext, token)
+  const key = coverKeyOf(row.user_id, row.id, ext, token)
   await putObject(env, key, buf, contentType, bucketId)
 
   // 写入成功后清理旧对象：上一版封面 + 升级前遗留的无 token 各扩展名版本。
@@ -1930,7 +2075,7 @@ export async function uploadProjectCover(
   const stale = new Set<string>()
   if (row.cover_key && row.cover_key !== key) stale.add(row.cover_key)
   for (const e of Object.values(COVER_TYPES)) {
-    stale.add(legacyCoverKeyOf(user.id, id, e))
+    stale.add(legacyCoverKeyOf(row.user_id, row.id, e))
   }
   stale.delete(key)
   for (const oldKey of stale) {
@@ -1944,24 +2089,18 @@ export async function uploadProjectCover(
   await env.DB.prepare("UPDATE lab_projects SET cover_key = ?, updated_at = ? WHERE id = ?")
     .bind(key, new Date().toISOString(), row.id)
     .run()
-  return json({ hasCover: true, coverV: coverVersionOf(key) })
+  return { hasCover: true, coverV: coverVersionOf(key) }
 }
 
-/** DELETE /api/lab/projects/:id/cover —— 移除封面（回退 emoji） */
-export async function deleteProjectCover(
-  env: Env,
-  request: Request,
-  id: string
-): Promise<Response> {
-  const user = await requireUser(env, request)
-  const row = await loadProject(env, id, user.id)
+/** 移除封面（回退 emoji）；对象与行一起清。 */
+export async function removeProjectCover(env: Env, row: LabProjectRow): Promise<void> {
   if (await isStorageConfigured(env)) {
     const bucketId = await getPlatformBucketId(env)
     // 当前这一版（带 token）+ 升级前遗留的无 token 老 key，全部清掉
     const keys = new Set<string>()
     if (row.cover_key) keys.add(row.cover_key)
     for (const ext of Object.values(COVER_TYPES)) {
-      keys.add(legacyCoverKeyOf(user.id, id, ext))
+      keys.add(legacyCoverKeyOf(row.user_id, row.id, ext))
     }
     for (const key of keys) {
       try {
@@ -1974,6 +2113,56 @@ export async function deleteProjectCover(
   await env.DB.prepare("UPDATE lab_projects SET cover_key = NULL, updated_at = ? WHERE id = ?")
     .bind(new Date().toISOString(), row.id)
     .run()
+}
+
+/**
+ * 从请求里读出封面并保存 —— 类型 / 大小这两道闸在这里，作者侧与管理端共用。
+ * （管理端也要过同一套闸：管理员传错类型同样该收到明确的 400，而不是 500。）
+ */
+export async function saveCoverFromRequest(
+  env: Env,
+  request: Request,
+  row: LabProjectRow
+): Promise<{ hasCover: boolean; coverV: string }> {
+  if (!(await isStorageConfigured(env))) {
+    throw new ApiError(503, "存储未配置，无法上传封面", "R2_NOT_CONFIGURED")
+  }
+  const contentType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim()
+  if (!COVER_TYPES[contentType]) {
+    throw new ApiError(400, "仅支持 JPG / PNG / WebP / GIF", "INVALID_TYPE")
+  }
+  const buf = await readBodyCapped(
+    request,
+    COVER_MAX_BYTES,
+    "封面过大，上限 600 KB",
+    400,
+    "TOO_LARGE"
+  )
+  if (buf.byteLength === 0) throw new ApiError(400, "文件为空", "INVALID_INPUT")
+  return saveProjectCover(env, row, buf, contentType)
+}
+
+/** POST /api/lab/projects/:id/cover —— 上传作品封面（原图直传，≤600KB） */
+export async function uploadProjectCover(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  await guardRateLimit(env, `lab-cover:${user.id}`, 20, 60, "封面上传过于频繁")
+  const row = await loadProject(env, id, user.id)
+  return json(await saveCoverFromRequest(env, request, row))
+}
+
+/** DELETE /api/lab/projects/:id/cover —— 移除封面（回退 emoji） */
+export async function deleteProjectCover(
+  env: Env,
+  request: Request,
+  id: string
+): Promise<Response> {
+  const user = await requireUser(env, request)
+  const row = await loadProject(env, id, user.id)
+  await removeProjectCover(env, row)
   return json({ hasCover: false })
 }
 

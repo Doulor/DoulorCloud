@@ -130,9 +130,35 @@ export async function setProjectDomain(
 ): Promise<Response> {
   const user = await requireUser(env, request)
   const body = (await request.json().catch(() => null)) as { fqdn?: unknown } | null
+  // 先按格式挡掉（与改造前同序：格式错误不必先查库）
   const fqdn = cleanFqdn(body?.fqdn)
-
   const project = await loadOwnedProject(env, projectId, user.id)
+  return json({ fqdn: await bindProjectDomain(env, project, fqdn, user) })
+}
+
+/**
+ * 绑定 / 改绑域名的**核心**（作者侧与管理端共用）。
+ *
+ * 调用方必须先确认「有权改这个作品」：作者侧 `loadOwnedProject`，
+ * 管理端 `requireAdminScope(env, request, "lab")`。
+ *
+ * ⚠️ 下面所有校验都是按**作品的作者**（`owner`）算的，与「谁在点按钮」无关：
+ *    · 归属校验 —— 域名必须真在作者名下，管理员代绑也不能挪到别人子域上；
+ *    · 保留名 / 根域权益 —— 管理员代绑不该替作者绕过权益门禁；
+ *    · 数量上限 —— 算在作者头上（`lab_project_domains.user_id`）。
+ *    管理员能做的是「替作者操作」，不是「以管理员身份获得额外权力」。
+ */
+export async function bindProjectDomain(
+  env: Env,
+  project: LabProjectRow,
+  rawFqdn: unknown,
+  owner: { id: string; permissions?: string | null }
+): Promise<string> {
+  // 下面沿用 `user` / `projectId` 两个局部名（改造前就是这样），语义是「作品作者」与「作品 id」
+  const user = owner
+  const projectId = project.id
+  const fqdn = cleanFqdn(rawFqdn)
+
   // 只有**公开**的作品才对外供；私密作品绑域名没有意义（也避免被当成绕过审核的后门）
   if (project.visibility !== "public") {
     throw new ApiError(400, "先把作品设为公开，才能绑定域名", "NOT_PUBLIC")
@@ -378,7 +404,7 @@ export async function setProjectDomain(
     await releaseLabDnsRecord(env, previous)
   }
 
-  return json({ fqdn })
+  return fqdn
 }
 
 /**
@@ -444,6 +470,36 @@ async function releaseLabDnsRecord(env: Env, fqdn: string): Promise<void> {
   }
 }
 
+/**
+ * 释放某个作品的域名绑定：DB 行 + Worker Route + DNS 记录。
+ *
+ * 解绑（`clearProjectDomain`）与删作品（`lab.ts` 的 `deleteProjectCascade`）
+ * 共用这一份 —— 删作品时若只删 `lab_project_domains` 行，Route 与 AAAA 记录
+ * 会永久留在 Cloudflare 上，就是 2026-10-15 那次记录配额被占满（81045）的同款成因。
+ *
+ * 返回被释放的 fqdn（本来没绑就是 null）。所有 CF 操作都是尽力而为：
+ * 失败只记日志，不阻断「解绑 / 删除」这件用户可见的事。
+ */
+export async function releaseProjectDomain(
+  env: Env,
+  projectId: string
+): Promise<string | null> {
+  const bound = await getBoundDomain(env, projectId)
+  if (!bound) return null
+  await env.DB.prepare("DELETE FROM lab_project_domains WHERE project_id = ?")
+    .bind(projectId)
+    .run()
+  // 路由删掉，DNS 记录也一并释放
+  // （只删我们建的那种 AAAA 100::；用户自己域名下的解析不会被动到）
+  try {
+    await removeWorkerRoute(env, bound)
+  } catch (err) {
+    console.error("删除作品域名路由失败（已解绑，忽略）:", bound, err)
+  }
+  await releaseLabDnsRecord(env, bound)
+  return bound
+}
+
 /** DELETE /api/lab/projects/:id/domain —— 解绑 */
 export async function clearProjectDomain(
   env: Env,
@@ -452,20 +508,7 @@ export async function clearProjectDomain(
 ): Promise<Response> {
   const user = await requireUser(env, request)
   await loadOwnedProject(env, projectId, user.id)
-  const bound = await getBoundDomain(env, projectId)
-  if (bound) {
-    await env.DB.prepare("DELETE FROM lab_project_domains WHERE project_id = ?")
-      .bind(projectId)
-      .run()
-    // 路由删掉，DNS 记录也一并释放
-    // （只删我们建的那种 AAAA 100::；用户自己域名下的解析不会被动到）
-    try {
-      await removeWorkerRoute(env, bound)
-    } catch (err) {
-      console.error("删除作品域名路由失败（已解绑，忽略）:", bound, err)
-    }
-    await releaseLabDnsRecord(env, bound)
-  }
+  await releaseProjectDomain(env, projectId)
   return json({ fqdn: null })
 }
 

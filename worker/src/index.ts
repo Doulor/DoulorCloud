@@ -1798,6 +1798,99 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: () => adminLabHandlers.setGalleryPinned(env, request),
   },
 
+  // ---- 造物集管理台（2026-10-17 站长要求）----
+  // 作品列表：全部作品（不只公开的）+ 关键词 + 状态筛选 + 服务端分页。
+  // ⚠️ 必须排在各条 `/admin/lab/gallery/:id/...` 之前“读起来”才不别扭；
+  //    实际不冲突 —— exact 只认完全相等的路径，而下面每条都比它多几段。
+  {
+    kind: "exact",
+    path: "/admin/lab/gallery",
+    method: "GET",
+    handle: () => adminLabHandlers.listGalleryProjects(env, request),
+  },
+
+  // 单件作品：只接 DELETE（删作品要连域名、R2、封面一起清）
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/lab\/gallery\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (adminGalleryMatch: RegExpMatchArray) =>
+      adminLabHandlers.deleteGalleryProject(
+        env,
+        request,
+        decodeURIComponent(adminGalleryMatch[1])
+      ),
+  },
+
+  // 作品绑定域名：一条路径接 GET/PUT/DELETE 三种方法 ⇒ 用 branch
+  {
+    kind: "branch",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/lab\/gallery\/([^/]+)\/domain$/),
+    handle: (adminGalleryDomainMatch: RegExpMatchArray, method: string) => {
+      const pid = decodeURIComponent(adminGalleryDomainMatch[1])
+      if (method === "GET") return adminLabHandlers.getGalleryProjectDomain(env, request, pid)
+      if (method === "PUT") return adminLabHandlers.setGalleryProjectDomain(env, request, pid)
+      if (method === "DELETE") return adminLabHandlers.clearGalleryProjectDomain(env, request, pid)
+      return null
+    },
+  },
+
+  // 封面：一条路径接 POST/DELETE ⇒ branch
+  {
+    kind: "branch",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/lab\/gallery\/([^/]+)\/cover$/),
+    handle: (adminGalleryCoverMatch: RegExpMatchArray, method: string) => {
+      const pid = decodeURIComponent(adminGalleryCoverMatch[1])
+      if (method === "POST") return adminLabHandlers.uploadGalleryProjectCover(env, request, pid)
+      if (method === "DELETE") return adminLabHandlers.deleteGalleryProjectCover(env, request, pid)
+      return null
+    },
+  },
+
+  // 对外信息（名字 / 简介 / 图标）：可见性一概不动
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/lab\/gallery\/([^/]+)\/meta$/),
+    methods: ["POST"],
+    handle: (adminGalleryMetaMatch: RegExpMatchArray) =>
+      adminLabHandlers.updateGalleryProjectMeta(
+        env,
+        request,
+        decodeURIComponent(adminGalleryMetaMatch[1])
+      ),
+  },
+
+  // 页面名（分享链接尾部）
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/lab\/gallery\/([^/]+)\/slug$/),
+    methods: ["POST"],
+    handle: (adminGallerySlugMatch: RegExpMatchArray) =>
+      adminLabHandlers.setGalleryProjectSlug(
+        env,
+        request,
+        decodeURIComponent(adminGallerySlugMatch[1])
+      ),
+  },
+
+  // 直接设置状态（public / private / pending / rejected）
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/admin\/lab\/gallery\/([^/]+)\/visibility$/),
+    methods: ["POST"],
+    handle: (adminGalleryVisMatch: RegExpMatchArray) =>
+      adminLabHandlers.setGalleryProjectVisibility(
+        env,
+        request,
+        decodeURIComponent(adminGalleryVisMatch[1])
+      ),
+  },
+
   // ---- 系统提示词模板（管理端 CRUD）----
   {
     kind: "exact",

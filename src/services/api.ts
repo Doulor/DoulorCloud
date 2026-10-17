@@ -678,6 +678,38 @@ export interface AdminLabReview {
   authorUsername: string
 }
 
+/**
+ * 造物集管理台里的一件作品。
+ *
+ * 与 `GalleryItem`（大厅列表）的区别：这里是**全部作品**（含私有 / 待审 / 已驳回），
+ * 而且要能直接喂给作者那一屏「编辑作品信息」弹窗（所以带 slug / hasCover / coverV）。
+ */
+export interface AdminGalleryProject {
+  id: string
+  name: string
+  slug: string
+  description: string
+  icon: string
+  hasCover: boolean
+  /** 封面版本号（拼进封面 URL，换图后缓存立刻失效） */
+  coverV: string
+  /** private（默认）/ pending（待审核）/ public（已公开）/ rejected（已驳回） */
+  visibility: string
+  /** 被驳回时的理由；其余状态为空串 */
+  reviewNote: string
+  views: number
+  likes: number
+  /** 置顶时间；null = 未置顶 */
+  pinnedAt: string | null
+  authorName: string
+  /** 真实用户名（头像 URL 要用它，不能拿「昵称优先」的 authorName 去拼） */
+  authorUsername: string
+  authorAvatar: string | null
+  createdAt: string
+  updatedAt: string
+  publishedAt: string | null
+}
+
 /** 管理端提交的一条渠道（apiKey 留空 = 不修改已存的密钥） */
 export interface AdminLabChannelInput {
   id?: string
@@ -1004,6 +1036,108 @@ export const adminApi = {
     request<{ project: { id: string; name: string; files: Record<string, string> } }>(
       `/admin/lab/reviews/${encodeURIComponent(id)}/preview`
     ),
+
+  // ---- 造物集管理台（2026-10-17 站长要求）----
+  //
+  // 与用户侧 `/lab/projects/*` 是**两组接口**：那组按作者身份鉴权，管理员拿去改
+  // 别人的作品必然 403（见 worker/src/handlers/admin-lab.ts 的说明）。
+  // 这一组全部要求 `lab` 权限，复用同一套核心函数，落库效果与作者自己改一致。
+
+  /**
+   * 作品列表（全部作品，不只是公开的）。
+   * `q` 搜名字 / 简介 / 页面名 / 作者；`status` 筛选四种状态；服务端分页。
+   */
+  listGalleryProjects: (
+    params: { page?: number; q?: string; status?: string; pinned?: boolean } = {}
+  ) => {
+    const sp = new URLSearchParams()
+    if (params.page) sp.set("page", String(params.page))
+    if (params.q) sp.set("q", params.q)
+    if (params.status) sp.set("status", params.status)
+    if (params.pinned) sp.set("pinned", "1")
+    const qs = sp.toString()
+    return request<{
+      total: number
+      page: number
+      pageSize: number
+      status: string
+      /** 各状态的作品数（**不受当前筛选影响**，用于筛选按钮上的数字） */
+      counts: { all: number; public: number; private: number; pending: number; rejected: number }
+      items: AdminGalleryProject[]
+    }>(`/admin/lab/gallery${qs ? `?${qs}` : ""}`)
+  },
+
+  /** 作品当前绑定的域名（编辑弹窗打开时拉） */
+  getGalleryProjectDomain: (id: string) =>
+    request<{ fqdn: string | null }>(
+      `/admin/lab/gallery/${encodeURIComponent(id)}/domain`
+    ),
+
+  /** 绑定 / 改绑域名（归属与根域权益仍按作品作者判定） */
+  setGalleryProjectDomain: (id: string, fqdn: string) =>
+    request<{ fqdn: string }>(`/admin/lab/gallery/${encodeURIComponent(id)}/domain`, {
+      method: "PUT",
+      body: JSON.stringify({ fqdn }),
+    }),
+
+  /** 解绑域名（Worker Route 与 DNS 记录一并释放） */
+  clearGalleryProjectDomain: (id: string) =>
+    request<{ fqdn: null }>(`/admin/lab/gallery/${encodeURIComponent(id)}/domain`, {
+      method: "DELETE",
+    }),
+
+  /** 改对外信息（名字 / 简介 / 图标）；**可见性一概不动** */
+  updateGalleryProjectMeta: (
+    id: string,
+    payload: { name?: string; description?: string; icon?: string }
+  ) =>
+    request<{ project: AdminGalleryProject }>(
+      `/admin/lab/gallery/${encodeURIComponent(id)}/meta`,
+      { method: "POST", body: JSON.stringify(payload) }
+    ),
+
+  /** 改页面名（撞名 409，消息原样给用户看） */
+  setGalleryProjectSlug: (id: string, slug: string) =>
+    request<{ ok: boolean; slug: string }>(
+      `/admin/lab/gallery/${encodeURIComponent(id)}/slug`,
+      { method: "POST", body: JSON.stringify({ slug }) }
+    ),
+
+  /** 直接设置状态（public / private / pending / rejected） */
+  setGalleryProjectVisibility: (
+    id: string,
+    visibility: string,
+    note?: string
+  ) =>
+    request<{ project: AdminGalleryProject }>(
+      `/admin/lab/gallery/${encodeURIComponent(id)}/visibility`,
+      { method: "POST", body: JSON.stringify({ visibility, note }) }
+    ),
+
+  /** 上传封面（走平台桶，服务端上限 600KB；前端先压） */
+  uploadGalleryProjectCover: (id: string, blob: Blob) =>
+    request<{ hasCover: boolean; coverV?: string }>(
+      `/admin/lab/gallery/${encodeURIComponent(id)}/cover`,
+      {
+        method: "POST",
+        headers: { "Content-Type": blob.type || "image/png" },
+        body: blob,
+      }
+    ),
+
+  /** 移除封面（回退 emoji 图标） */
+  deleteGalleryProjectCover: (id: string) =>
+    request<{ hasCover: boolean }>(
+      `/admin/lab/gallery/${encodeURIComponent(id)}/cover`,
+      { method: "DELETE" }
+    ),
+
+  /**
+   * 删除别人的作品（连绑定域名、R2 文件、封面一起清）。
+   * ⚠️ 不可逆，调用前必须二次确认。
+   */
+  deleteGalleryProject: (id: string) =>
+    request<void>(`/admin/lab/gallery/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   // ---- 系统提示词模板 ----
 

@@ -45,6 +45,7 @@ import {
   Globe,
   ArrowLeft,
   ExternalLink,
+  Images,
   Mail,
   PartyPopper,
   Clock,
@@ -80,6 +81,8 @@ import { NavItem, NavGroup } from "@/components/sub-nav"
 import { SlidingPill } from "@/components/motion/sliding-pill"
 import { AdminApiTab } from "@/components/admin-api-tab"
 import { AdminLabTab } from "@/components/admin-lab-tab"
+// 造物集：从「AI 实验室」里独立出来的选项卡（作品列表 / 编辑 / 状态 / 置顶 / 删除）
+import { AdminGalleryTab } from "@/components/admin-gallery-tab"
 import { AdminFrpRental } from "@/components/admin-frp-rental"
 import { AdminPermissionsPanel } from "@/components/admin-permissions"
 import { Textarea } from "@/components/ui/textarea"
@@ -770,6 +773,8 @@ const ADMIN_TAB_KEYS = new Set([
   "donations", "feedback", "announcements", "events", "community", "moderation", "notices",
   "dns", "newapi", "relay", "r2", "frp", "proxy", "mail", "analytics", "cfQuota", "audit",
   "oauth", "settings", "funLinks", "wb2api", "api", "permissions", "lab",
+  // 造物集（2026-10-17 站长要求：从「AI 实验室」里独立出来）
+  "gallery",
 ])
 
 export default function AdminPage() {
@@ -4116,6 +4121,12 @@ export default function AdminPage() {
                 )}
                 {/* AI 实验室：模型来源（统一 Key / 免费试用）、免费渠道、Agent 提示词 */}
                 {canSeeTab("lab") && <NavItem active={activeTab === "lab"} icon={FlaskConical} label={t("nav.lab")} onClick={() => handleTabChange("lab")} />}
+                {/* 造物集（2026-10-17 站长要求：从实验室里独立成一个选项卡）。
+                    ⚠️ 可见性跟 `lab` 走**而不是**自己新开一个权限节点：这一栏所有接口
+                    都要求 `lab` 权限（`requireAdminScope(..., "lab")`）。若只看一个
+                    不存在的 `gallery` 节点，没 lab 权限的自定义管理员会看到入口、
+                    点进去全是 403。 */}
+                {canSeeTab("lab") && <NavItem active={activeTab === "gallery"} icon={Images} label={t("adm.gal.tab")} onClick={() => handleTabChange("gallery")} />}
                 {/* 三条免审核捐献通道（wb2api / qoder2api / 商汤）合并在一个选项卡里 */}
                 {canSeeTab("wb2api") && <NavItem active={activeTab === "wb2api"} icon={Unplug} label={t("adm.222")} onClick={() => handleTabChange("wb2api")} />}
                 {canSeeTab("r2") && <NavItem active={activeTab === "r2"} icon={Database} label={t("adm.223")} onClick={() => handleTabChange("r2")} />}
@@ -8843,6 +8854,11 @@ export default function AdminPage() {
 
         <TabsContent value="lab">
           <AdminLabTab />
+        </TabsContent>
+
+        {/* 造物集：作品列表 / 编辑 / 状态 / 置顶 / 删除（组件自己拉数据，无需懒加载入口） */}
+        <TabsContent value="gallery">
+          <AdminGalleryTab />
         </TabsContent>
 
         <TabsContent value="permissions">

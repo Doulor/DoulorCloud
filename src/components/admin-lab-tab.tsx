@@ -15,8 +15,6 @@ import { toast } from "sonner"
 import {
   AlertTriangle,
   Check,
-  CheckCircle2,
-  Eye,
   Gift,
   KeyRound,
   Loader2,
@@ -24,10 +22,8 @@ import {
   Plus,
   RefreshCw,
   Save,
-  Sparkles,
   Trash2,
   X,
-  XCircle,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -40,17 +36,13 @@ import { confirmDialog } from "@/components/confirm-dialog"
 import {
   adminApi,
   errMsg,
-  galleryApi,
-  galleryCoverUrl,
   labApi,
   type AdminLabChannelInput,
   type AdminLabConfig,
   type AdminLabPromptTemplate,
   type AdminLabSkill,
-  type AdminLabReview,
-  type GalleryItem,
 } from "@/services/api"
-import { buildPreviewDoc, DEFAULT_AGENT_SYSTEM } from "@/lib/lab-agent"
+import { DEFAULT_AGENT_SYSTEM } from "@/lib/lab-agent"
 import { cn } from "@/lib/utils"
 import { useT } from "@/i18n"
 
@@ -90,10 +82,6 @@ export function AdminLabTab() {
   /** 造物集：作品公开前是否需要审核 */
   const [reviewRequired, setReviewRequired] = React.useState(true)
   const [nativeTools, setNativeTools] = React.useState(false)
-  /** 造物集置顶：公开作品列表（null = 还没加载完） */
-  const [works, setWorks] = React.useState<GalleryItem[] | null>(null)
-  /** 正在提交的作品 id（防连点） */
-  const [pinBusy, setPinBusy] = React.useState<string | null>(null)
   /** 「自动获取」拉到的站内模型；null = 还没拉过 */
   const [modelOptions, setModelOptions] = React.useState<string[] | null>(null)
   const [modelsLoading, setModelsLoading] = React.useState(false)
@@ -112,12 +100,6 @@ export function AdminLabTab() {
     setSiteModels(res.siteModels)
     setReviewRequired(res.reviewRequired)
     setNativeTools(res.nativeTools)
-    // 顺带拉一遍公开作品（置顶用）。⚠️ 只取第一页：置顶是人工操作，
-    // 作品量级不大；真多了再翻页也不迟。
-    void galleryApi
-      .list({ page: 1, sort: "latest" })
-      .then((r) => setWorks(r.items ?? []))
-      .catch(() => setWorks([]))
     setAgentPrompt(res.agentPrompt)
     setChannels(
       res.channels.map((c) => ({
@@ -132,24 +114,6 @@ export function AdminLabTab() {
     )
     // 密钥框每次加载都清空：里面显示的是尾号，留着会让管理员以为「已经填了」
     setAdminKeyInput("")
-  }
-
-  /** 置顶 / 取消置顶：就地改那一行的 pinned_at，不整表刷新 */
-  const togglePin = async (projectId: string, pinned: boolean) => {
-    setPinBusy(projectId)
-    try {
-      await adminApi.setGalleryPinned(projectId, pinned)
-      setWorks((prev) =>
-        (prev ?? []).map((w) =>
-          w.id === projectId ? { ...w, pinned_at: pinned ? new Date().toISOString() : null } : w
-        )
-      )
-      toast.success(t(pinned ? "adm.lab.pinDone" : "adm.lab.unpinDone"))
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t("adm.lab.pinFailed"))
-    } finally {
-      setPinBusy(null)
-    }
   }
 
   const load = React.useCallback(async () => {
@@ -724,59 +688,6 @@ export function AdminLabTab() {
         </CardContent>
       </Card>
 
-      {/* ---------------- 造物集置顶 ---------------- */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{t("adm.lab.pinTitle")}</CardTitle>
-          <CardDescription>{t("adm.lab.pinDesc")}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          {works === null ? (
-            <p className="py-3 text-center text-xs text-muted-foreground">
-              <Loader2 className="mr-1.5 inline h-3.5 w-3.5 animate-spin" />
-              {t("adm.lab.pinLoading")}
-            </p>
-          ) : works.length === 0 ? (
-            <p className="py-3 text-center text-xs text-muted-foreground">
-              {t("adm.lab.pinEmpty")}
-            </p>
-          ) : (
-            <div className="max-h-[320px] space-y-1 overflow-y-auto">
-              {works.map((w) => {
-                const isPinned = Boolean(w.pinned_at)
-                return (
-                  <div
-                    key={w.id}
-                    className="flex items-center gap-2 rounded-md border px-2 py-1.5"
-                  >
-                    <span className="min-w-0 flex-1 truncate text-sm">{w.name}</span>
-                    <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-                      {w.views} / {w.likes}
-                    </span>
-                    <Button
-                      size="sm"
-                      variant={isPinned ? "secondary" : "outline"}
-                      className="shrink-0 text-xs"
-                      disabled={pinBusy === w.id}
-                      onClick={() => void togglePin(w.id, !isPinned)}
-                    >
-                      {pinBusy === w.id ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : isPinned ? (
-                        t("adm.lab.pinned")
-                      ) : (
-                        t("adm.lab.pin")
-                      )}
-                    </Button>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-          <p className="text-[11px] text-muted-foreground">{t("adm.lab.pinHint")}</p>
-        </CardContent>
-      </Card>
-
       {/* ---------------- 原生工具调用 ---------------- */}
       <Card>
         <CardHeader>
@@ -820,324 +731,6 @@ export function AdminLabTab() {
           {t("common.save")}
         </Button>
       </div>
-
-      {/* ---------------- 作品审核队列 ----------------
-          它是**操作台**、点了即时生效，和上面「改完要按保存」的配置不是一回事，
-          所以单独一张卡、自己拉数据。 */}
-      <LabReviewQueue />
-    </div>
-  )
-}
-
-/**
- * 造物集待审队列。
- *
- * · 「待审核」列出等放行的作品，「已驳回」留个记录（也方便反悔 —— 但驳回后再通过
- *   要用户重新提交，因为 `reviewLabProject` 只处理 pending，这里只读不写）；
- * · 预览走管理端专用接口（用户端详情接口看不到待审作品）；
- * · 作品一律塞进 `sandbox`（**不带 allow-same-origin**）的 iframe 里渲染。
- */
-function LabReviewQueue() {
-  const { t } = useT()
-  const [status, setStatus] = React.useState<"pending" | "rejected">("pending")
-  const [items, setItems] = React.useState<AdminLabReview[]>([])
-  const [pendingCount, setPendingCount] = React.useState(0)
-  const [rejectedCount, setRejectedCount] = React.useState(0)
-  const [loading, setLoading] = React.useState(true)
-  const [failed, setFailed] = React.useState(false)
-  const [busyId, setBusyId] = React.useState<string | null>(null)
-  /** 正在写驳回理由的那一条 */
-  const [rejecting, setRejecting] = React.useState<AdminLabReview | null>(null)
-  /** 正在预览的作品文件 */
-  const [preview, setPreview] = React.useState<{ name: string; doc: string } | null>(null)
-  const [previewing, setPreviewing] = React.useState<string | null>(null)
-
-  const load = React.useCallback(async () => {
-    setLoading(true)
-    setFailed(false)
-    try {
-      const res = await adminApi.listLabReviews(status)
-      setItems(res.items)
-      setPendingCount(res.pendingCount)
-      setRejectedCount(res.rejectedCount)
-    } catch {
-      setItems([])
-      setFailed(true)
-    } finally {
-      setLoading(false)
-    }
-  }, [status])
-
-  React.useEffect(() => {
-    void load()
-  }, [load])
-
-  const approve = async (item: AdminLabReview) => {
-    setBusyId(item.id)
-    try {
-      await adminApi.reviewLabProject(item.id, "approve")
-      toast.success(t("adm.lab.reviewApproved", { name: item.name }))
-      await load()
-    } catch (err) {
-      toast.error(errMsg(err, t("adm.lab.reviewFailed")))
-    } finally {
-      setBusyId(null)
-    }
-  }
-
-  const reject = async (item: AdminLabReview, note: string) => {
-    setBusyId(item.id)
-    try {
-      await adminApi.reviewLabProject(item.id, "reject", note)
-      toast.success(t("adm.lab.reviewRejected", { name: item.name }))
-      setRejecting(null)
-      await load()
-    } catch (err) {
-      toast.error(errMsg(err, t("adm.lab.reviewFailed")))
-    } finally {
-      setBusyId(null)
-    }
-  }
-
-  const openPreview = async (item: AdminLabReview) => {
-    setPreviewing(item.id)
-    try {
-      const { project } = await adminApi.previewLabReview(item.id)
-      const doc = buildPreviewDoc(project.files ?? {})
-      if (!doc) {
-        toast.error(t("adm.lab.reviewNoPreview"))
-        return
-      }
-      setPreview({ name: project.name || item.name, doc })
-    } catch (err) {
-      toast.error(errMsg(err, t("adm.lab.reviewFailed")))
-    } finally {
-      setPreviewing(null)
-    }
-  }
-
-  const tabBtn = (key: "pending" | "rejected", label: string, count: number) => (
-    <button
-      key={key}
-      type="button"
-      onClick={() => setStatus(key)}
-      className={cn(
-        "rounded-md border px-3 py-1.5 text-xs transition-colors",
-        status === key
-          ? "border-primary bg-primary text-primary-foreground"
-          : "hover:bg-accent"
-      )}
-    >
-      {label}
-      {count > 0 && <span className="ml-1.5 tabular-nums opacity-80">{count}</span>}
-    </button>
-  )
-
-  return (
-    <Card>
-      <CardHeader className="flex flex-row items-start justify-between space-y-0">
-        <div className="space-y-1">
-          <CardTitle className="text-base">{t("adm.lab.reviewQueueTitle")}</CardTitle>
-          <CardDescription>{t("adm.lab.reviewQueueDesc")}</CardDescription>
-        </div>
-        <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-          {t("adm.lab.reviewRefresh")}
-        </Button>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="flex flex-wrap gap-2">
-          {tabBtn("pending", t("adm.lab.reviewPending"), pendingCount)}
-          {tabBtn("rejected", t("adm.lab.reviewRejectedTab"), rejectedCount)}
-        </div>
-
-        {loading ? (
-          <div className="py-8">
-            <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
-          </div>
-        ) : failed ? (
-          <p className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
-            {t("adm.lab.reviewLoadFailed")}
-          </p>
-        ) : items.length === 0 ? (
-          <p className="rounded-md border border-dashed p-6 text-center text-xs text-muted-foreground">
-            {status === "pending" ? t("adm.lab.reviewEmptyPending") : t("adm.lab.reviewEmptyRejected")}
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {items.map((it) => (
-              <div
-                key={it.id}
-                className="flex flex-wrap items-center gap-3 rounded-md border p-3"
-              >
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-muted/50 text-lg">
-                  {it.hasCover ? (
-                    <img
-                      src={galleryCoverUrl(it.id)}
-                      alt=""
-                      className="h-full w-full object-cover"
-                    />
-                  ) : it.icon?.trim() ? (
-                    <span className="leading-none">{it.icon}</span>
-                  ) : (
-                    <Sparkles className="h-4 w-4 text-muted-foreground" />
-                  )}
-                </span>
-
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="truncate font-medium">{it.name}</p>
-                    <Badge variant="outline" className="shrink-0">
-                      {it.authorName}
-                    </Badge>
-                  </div>
-                  <p className="truncate text-xs text-muted-foreground">
-                    {it.description || t("gal.noDesc")}
-                  </p>
-                  {status === "rejected" && it.reviewNote && (
-                    <p className="mt-0.5 truncate text-xs text-destructive">{it.reviewNote}</p>
-                  )}
-                </div>
-
-                <div className="flex shrink-0 flex-wrap items-center gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={previewing === it.id}
-                    onClick={() => void openPreview(it)}
-                  >
-                    {previewing === it.id ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Eye className="h-4 w-4" />
-                    )}
-                    {t("adm.lab.reviewPreview")}
-                  </Button>
-                  {status === "pending" && (
-                    <>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="text-destructive"
-                        disabled={busyId === it.id}
-                        onClick={() => setRejecting(it)}
-                      >
-                        <XCircle className="h-4 w-4" />
-                        {t("adm.lab.reviewReject")}
-                      </Button>
-                      <Button
-                        size="sm"
-                        disabled={busyId === it.id}
-                        onClick={() => void approve(it)}
-                      >
-                        {busyId === it.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <CheckCircle2 className="h-4 w-4" />
-                        )}
-                        {t("adm.lab.reviewApprove")}
-                      </Button>
-                    </>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-
-      {rejecting && (
-        <RejectDialog
-          item={rejecting}
-          busy={busyId === rejecting.id}
-          onCancel={() => setRejecting(null)}
-          onConfirm={(note) => void reject(rejecting, note)}
-        />
-      )}
-
-      {preview && (
-        <div
-          className="fixed inset-0 z-50 flex flex-col bg-background/80 p-2 backdrop-blur-sm sm:p-5"
-          onClick={() => setPreview(null)}
-        >
-          <div
-            className="mx-auto flex h-full w-full max-w-5xl flex-col overflow-hidden rounded-2xl border bg-card shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <header className="flex items-center gap-3 border-b px-4 py-2.5">
-              <p className="min-w-0 flex-1 truncate font-medium">{preview.name}</p>
-              <Button variant="ghost" size="icon" onClick={() => setPreview(null)} aria-label={t("common.close")}>
-                <X className="h-4 w-4" />
-              </Button>
-            </header>
-            <div className="min-h-0 flex-1 bg-white">
-              <iframe
-                title={preview.name}
-                className="h-full w-full border-0"
-                sandbox="allow-scripts allow-modals allow-forms allow-popups"
-                srcDoc={preview.doc}
-              />
-            </div>
-          </div>
-        </div>
-      )}
-    </Card>
-  )
-}
-
-/** 驳回理由输入框（理由会原样回给作者，所以别写太长） */
-function RejectDialog({
-  item,
-  busy,
-  onCancel,
-  onConfirm,
-}: {
-  item: AdminLabReview
-  busy: boolean
-  onCancel: () => void
-  onConfirm: (note: string) => void
-}) {
-  const { t } = useT()
-  const [note, setNote] = React.useState("")
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-background/70 p-4 backdrop-blur-sm"
-      onClick={onCancel}
-    >
-      <Card className="w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-        <CardContent className="space-y-4 p-5">
-          <div className="flex items-center justify-between gap-2">
-            <h2 className="font-medium">{t("adm.lab.rejectTitle")}</h2>
-            <Button variant="ghost" size="icon" onClick={onCancel} aria-label={t("common.close")}>
-              <X className="h-4 w-4" />
-            </Button>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {t("adm.lab.rejectDesc", { name: item.name })}
-          </p>
-          <Textarea
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            rows={3}
-            maxLength={200}
-            placeholder={t("adm.lab.rejectPlaceholder")}
-          />
-          <div className="flex justify-end gap-2">
-            <Button variant="ghost" onClick={onCancel} disabled={busy}>
-              {t("common.cancel")}
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={busy}
-              onClick={() => onConfirm(note.trim())}
-            >
-              {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-              {t("adm.lab.reviewReject")}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   )
 }
