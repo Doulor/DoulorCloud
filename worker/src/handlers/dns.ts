@@ -61,11 +61,20 @@ const ALLOWED_TYPES = new Set(["A", "AAAA", "CNAME", "TXT", "MX", "SRV"])
  * 放宽（他确实要用 30 条）或收紧（他在刷）。没有覆盖列的话，唯一办法是抬高
  * 全局上限 —— 那等于对全站放宽。
  *
- * 返回 `null` 表示**不限**，只有两种情况：
+ * 返回 `null` 表示**不限**，三种情况：
  *   · 管理员 / 站长（`isPrivileged`）—— 他们本来就要能替任何账号排查、修复记录，
  *     卡住管理员只会让「某个用户被上限卡死」这类故障没法现场处理；
  *   · 管理员 Key 的公开 API（`isAdminApiRequest`）—— 与站内其它限额一致
- *     （「管理员 Key 不限速不限配额」，2026-10-07；见 api-source.ts）。
+ *     （「管理员 Key 不限速不限配额」，2026-10-07；见 api-source.ts）；
+ *   · **持有 `dns` 权限位的用户**（`userPermissions(user).dns`）——
+ *     🔴 2026-10-17 站长明确要求：`dns` 权限位是**他一个一个手动点开**的，
+ *     那一下就等于「我信任这个人，让他随便建」，再叠一个记录数上限等于授权没生效。
+ *     记录数上限的本意是防**租用**侧滥用（谁都能花钱买、能刷），而权限位是人工闸，
+ *     两者不是一回事。
+ *
+ * ⚠️ 但 `users.max_dns_records` **仍然优先于**权限位豁免：那是管理员显式对
+ * 某一个账号下的「收紧/放宽」，必须有最高优先级，否则「他在刷」时就没有手段了。
+ * 所以顺序是：管理员/Key → 用户级覆盖 → 权限位 → 全局额度。
  *
  * ⚠️ 2026-10-15 起本函数**导出**，并被 handlers/dns-rental.ts 的
  * `GET /api/dns/rental` 复用（价目卡上要写「这个账号每用户能建几条记录」）。
@@ -84,7 +93,13 @@ export async function dnsRecordLimit(
   if (isAdminApiRequest(request) || isPrivileged(user.role)) return null
   // 覆盖列是迁移 0161 才加的：老环境（未执行迁移）里它是 undefined，
   // 此时按「没有覆盖」处理、回落全局设置，而不是误判成 0 把所有人锁死。
+  //
+  // 顺序刻意是「用户级覆盖」在「权限位豁免」**之前**：管理员显式给某人设的数字
+  // 优先级最高（放宽或收紧都要能落地），不能被权限位把豁免兜走。
   if (typeof user.max_dns_records === "number") return user.max_dns_records
+  // 2026-10-17：持有 `dns` 权限位 = 站长手动授权 = 不限记录数（详见上方注释）。
+  // 落在全局额度之前的判断，所以租用/无权限用户的行为完全不变。
+  if (userPermissions(user).dns) return null
   return await getSettingNumber(env, "dns_records_per_user")
 }
 

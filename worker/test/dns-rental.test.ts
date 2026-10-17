@@ -610,7 +610,18 @@ describe("DNS 每用户上限：用户级覆盖", () => {
   })
 
   it("覆盖为空 ⇒ 回落全局设置（NULL 不是 0）", async () => {
-    const fx = await makeUserWithDomains(WITH_DNS)
+    // 🔴 2026-10-17：持有 dns 权限位的用户**不再受每用户记录数上限约束**
+    // （权限位 = 站长手动授权 = 信任）。所以要验「NULL 走全局设置」这条路，
+    // 必须换成「靠有效租约放行」的用户，否则上限根本不会被走到。
+    const fx = await makeUserWithDomains(WITHOUT_DNS)
+    const nowIso = new Date().toISOString()
+    const laterIso = new Date(Date.now() + 30 * 24 * 3600_000).toISOString()
+    await env.DB.prepare(
+      `INSERT INTO dns_rentals (id, user_id, root_domain, price_points, status, started_at, expires_at, created_at, updated_at)
+       VALUES (?, ?, 'tyu.me', 0, 'active', ?, ?, ?, ?)`
+    )
+      .bind(uuid(), fx.user.id, nowIso, laterIso, nowIso, nowIso)
+      .run()
     await setSetting("dns_records_per_user", "1")
     await seedRecord(fx, fx.primarySubId, `${fx.user.username}.tyu.me`)
     await env.DB.prepare("UPDATE users SET max_dns_records = NULL WHERE id = ?")

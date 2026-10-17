@@ -252,9 +252,34 @@ describe("DNS 权限闸", () => {
   })
 })
 
+/**
+ * 「租用用户」：**没有** dns 权限位，但有一份有效的根域租约。
+ *
+ * 🔴 2026-10-17 起持有 `dns` 权限位的用户**不再受每用户记录数上限约束**
+ * （权限位 = 站长手动授权 = 信任，见 dns.ts 的 dnsRecordLimit）。因此要验「配额本身」，
+ * 必须用「靠租约放行」的用户 —— 否则上限根本走不到，用例会变成空转。
+ */
+async function grantDnsRental(user: TestUser, root = "doulor.cn"): Promise<void> {
+  const now = new Date().toISOString()
+  const expires = new Date(Date.now() + 30 * 24 * 3600_000).toISOString()
+  await env.DB.prepare(
+    `INSERT INTO dns_rentals (id, user_id, root_domain, price_points, status, started_at, expires_at, created_at, updated_at)
+     VALUES (?, ?, ?, 0, 'active', ?, ?, ?, ?)`
+  )
+    .bind(uuid(), user.id, root, now, expires, now, now)
+    .run()
+}
+
+/** 没有权限位、靠有效租约放行的用户（每用户记录数上限对这类用户生效） */
+async function makeRentedUserWithDomain(): Promise<Fixture> {
+  const fx = await makeUserWithDomain(false)
+  await grantDnsRental(fx.user)
+  return fx
+}
+
 describe("每用户 DNS 记录数上限", () => {
   it("达到上限 → 400 DNS_RECORD_LIMIT，报错里带上限数字", async () => {
-    const fx = await makeUserWithDomain(true)
+    const fx = await makeRentedUserWithDomain()
     await setSetting("dns_records_per_user", "2")
     await seedRecord(fx)
     await seedRecord(fx)
@@ -272,7 +297,7 @@ describe("每用户 DNS 记录数上限", () => {
   })
 
   it("未达上限 → 正常建（201）", async () => {
-    const fx = await makeUserWithDomain(true)
+    const fx = await makeRentedUserWithDomain()
     await setSetting("dns_records_per_user", "2")
     await seedRecord(fx)
     stubCloudflare()
@@ -281,7 +306,7 @@ describe("每用户 DNS 记录数上限", () => {
   })
 
   it("上限读的是设置项：改小立刻拦住、改大立刻放行", async () => {
-    const fx = await makeUserWithDomain(true)
+    const fx = await makeRentedUserWithDomain()
     await seedRecord(fx)
     stubCloudflare()
 
@@ -298,7 +323,7 @@ describe("每用户 DNS 记录数上限", () => {
   })
 
   it("上限跨子域名合计（另一个子域名下的记录也占额度）", async () => {
-    const fx = await makeUserWithDomain(true)
+    const fx = await makeRentedUserWithDomain()
     const childId = await addChildSubdomain(fx, "blog")
     await setSetting("dns_records_per_user", "2")
     // 两条都挂在 '@' 下
@@ -313,8 +338,8 @@ describe("每用户 DNS 记录数上限", () => {
   })
 
   it("别人的记录不算进我的额度（统计必须带用户条件）", async () => {
-    const mine = await makeUserWithDomain(true)
-    const other = await makeUserWithDomain(true)
+    const mine = await makeRentedUserWithDomain()
+    const other = await makeRentedUserWithDomain()
     await setSetting("dns_records_per_user", "2")
     await seedRecord(other)
     await seedRecord(other)
@@ -324,7 +349,7 @@ describe("每用户 DNS 记录数上限", () => {
   })
 
   it("被处置（banned_at 非空）的记录不占额度 —— 它们在 CF 上已经不存在了", async () => {
-    const fx = await makeUserWithDomain(true)
+    const fx = await makeRentedUserWithDomain()
     await setSetting("dns_records_per_user", "2")
     await seedRecord(fx, { banned: true })
     await seedRecord(fx, { banned: true })
@@ -335,7 +360,7 @@ describe("每用户 DNS 记录数上限", () => {
   })
 
   it("管理员不受上限限制（上限设成 1、库里已有 3 条也照建）", async () => {
-    const fx = await makeUserWithDomain(true)
+    const fx = await makeRentedUserWithDomain()
     await env.DB.prepare("UPDATE users SET role = 'root' WHERE id = ?")
       .bind(fx.user.id)
       .run()
@@ -350,8 +375,8 @@ describe("每用户 DNS 记录数上限", () => {
 })
 
 describe("GET /dns 下发的用量", () => {
-  it("dnsUsage 给出跨域名的真实条数 + 设置项里的上限", async () => {
-    const fx = await makeUserWithDomain(true)
+  it("dnsUsage 给出跨域名的真实条数 + 设置项里的上限（租用用户；权限位持有者拿到的是 null）", async () => {
+    const fx = await makeRentedUserWithDomain()
     const childId = await addChildSubdomain(fx, "blog")
     await setSetting("dns_records_per_user", "7")
     await seedRecord(fx)
@@ -365,6 +390,39 @@ describe("GET /dns 下发的用量", () => {
       dnsUsage: { used: number; limit: number | null }
     }
     expect(body.dnsUsage).toEqual({ used: 2, limit: 7 })
+  })
+
+  it("持有 dns 权限位 → limit=null（权限位 = 站长手动授权，不再叠记录数上限）", async () => {
+    // 2026-10-17 站长明确要求：`dns` 权限位是他一个个手动点开的，那一下就等于信任，
+    // 再叠一个「3 条上限」等于授权没生效。所以权限位持有者一律不限。
+    const fx = await makeUserWithDomain(true)
+    await setSetting("dns_records_per_user", "1")
+    await seedRecord(fx)
+    await seedRecord(fx)
+
+    const listed = await listRecords(fx.user)
+    const body = (await listed.json()) as { dnsUsage: { used: number; limit: number | null } }
+    expect(body.dnsUsage.limit).toBeNull()
+    expect(body.dnsUsage.used).toBe(2)
+
+    // 真正的证据：上限设成 1、已有 2 条，仍然能建
+    stubCloudflare()
+    expect((await createRecord(fx.user, fx.subdomainId)).status).toBe(201)
+  })
+
+  it("显式 users.max_dns_records 覆盖优先于权限位豁免（收紧手段仍然有效）", async () => {
+    // 权限位给的是「默认不限」，但管理员对某个具体账号显式设的数字优先级更高 ——
+    // 否则「他在刷」时就没有任何收紧手段了。
+    const fx = await makeUserWithDomain(true)
+    await setSetting("dns_records_per_user", "99")
+    await env.DB.prepare("UPDATE users SET max_dns_records = 2 WHERE id = ?").bind(fx.user.id).run()
+    await seedRecord(fx)
+    await seedRecord(fx)
+    stubCloudflare()
+
+    const res = await createRecord(fx.user, fx.subdomainId)
+    expect(res.status).toBe(400)
+    expect((await res.json<ErrorBody>()).code).toBe("DNS_RECORD_LIMIT")
   })
 
   it("管理员拿到 limit=null（表示不限，而不是一个假的上限数字）", async () => {

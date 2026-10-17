@@ -5898,9 +5898,9 @@ export const en: Record<MessageKey, string> = {
   "adm.586": "Default count",
   "adm.587": "A top-level subdomain looks like xxx.doulor.cn (at least 3 characters); each one can also hold 5 second-level domains.",
   "adm.dnsQuota.title": "DNS record quota",
-  "adm.dnsQuota.desc": "How many DNS records each user can create in total, across all of their domains.",
+  "adm.dnsQuota.desc": "How many DNS records each user can create in total, across all of their domains. (unlimited for permission holders and admins)",
   "adm.dnsQuota.label": "Limit per user",
-  "adm.dnsQuota.hint": "Cloudflare caps DNS records per zone (200 on Free zones) and all users share a handful of zones; without a limit a few users can exhaust the whole site's quota, after which nobody can create records. 0 disallows creating any record. Admins and admin API keys are exempt.",
+  "adm.dnsQuota.hint": "Cloudflare caps DNS records per zone (200 on Free zones) and all users share a handful of zones; without a limit a few users can exhaust the whole site's quota, after which nobody can create records. 0 disallows creating any record. Admins and admin API keys are exempt.Users holding the DNS permission are exempt (granting that permission is a manual act of trust, so their record count is unlimited); an explicit per-user override still takes precedence.",
   // ---- DNS rental term (configurable since 2026-10-15) ----
   "adm.dnsRental.title": "DNS rental term",
   "adm.dnsRental.desc": "How long one DNS rental purchase lasts, in days. Default 365 days = one year, consistent with every other rental term on the site (frp plans and shop rental items are counted in days too).",
