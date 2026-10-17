@@ -611,6 +611,25 @@ const ACHIEVEMENTS: AchievementDef[] = [
     tierNames: ["积少成多", "积分有余", "积分富户"],
     tierReqs: ["累计获得 100 分", "累计获得 500 分", "累计获得 2000 分"],
   },
+  /**
+   * 2026-10-17 新增（用户 ventus 反馈「添加历史消耗积分的成就」）。
+   *
+   * 为什么必须和「积分积累家」成对存在：那个只统计**收入**（delta > 0），
+   * 于是"花得多"在成就里完全没有体现 —— 用得越多反而越没痕迹。
+   * 这里按历史**支出**统计（delta < 0 取绝对值），商城下单 / 租用 / 兑换都算在内。
+   * 数据全部来自既有流水表 point_transactions，不需要新增任何埋点。
+   */
+  {
+    id: "points_spent",
+    name: "大方出手",
+    desc: "累计消耗积分",
+    icon: "coins",
+    group: "usage",
+    how: "在积分商城下单、租用资源、兑换等支出都算，按历史累计支出计算（不含被退回的部分）。",
+    tiers: [100, 500, 2000],
+    tierNames: ["初次消费", "消费达人", "挥金如土"],
+    tierReqs: ["累计消耗 100 分", "累计消耗 500 分", "累计消耗 2000 分"],
+  },
   {
     id: "checkin_streak",
     name: "连续打卡",
@@ -922,6 +941,8 @@ export interface UserCounts {
   feature_count: number
   /** 历史累计获得的正积分 */
   points_earned: number
+  /** 历史累计消耗的积分（负流水取绝对值；「大方出手」用它） */
+  points_spent: number
   /** 历史最高连续签到天数 */
   checkin_streak: number
   /** 注册时间（「坚守者」按天数算，个人空间也要显示加入时间） */
@@ -979,6 +1000,7 @@ function emptyCounts(): UserCounts {
     profile_modules: 0,
     feature_count: 0,
     points_earned: 0,
+    points_spent: 0,
     checkin_streak: 0,
     created_at: null,
   }
@@ -1122,6 +1144,8 @@ function countColumns(owner: string, excludeApi: boolean): string {
        )) AS feature_count,
        (SELECT COALESCE(SUM(CASE WHEN delta > 0 THEN delta ELSE 0 END), 0)
           FROM point_transactions WHERE user_id = {OWNER}) AS points_earned,
+       (SELECT COALESCE(SUM(CASE WHEN delta < 0 THEN -delta ELSE 0 END), 0)
+          FROM point_transactions WHERE user_id = {OWNER}) AS points_spent,
        (SELECT COALESCE(MAX(streak), 0) FROM daily_checkins WHERE user_id = {OWNER}) AS checkin_streak,
        (SELECT created_at FROM users WHERE id = {OWNER}) AS created_at
      `.replaceAll("{OWNER}", owner)
@@ -1236,6 +1260,7 @@ export function computeAchievements(counts: UserCounts): {
     profile_modules: c?.profile_modules ?? 0,
     feature_count: c?.feature_count ?? 0,
     points_earned: c?.points_earned ?? 0,
+    points_spent: c?.points_spent ?? 0,
     checkin_streak: c?.checkin_streak ?? 0,
   }
 
