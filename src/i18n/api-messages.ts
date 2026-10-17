@@ -832,6 +832,7 @@ export const API_MESSAGES_EN: Record<string, string> = {
   "验证码不正确，请确认手机时间是否准确": "Incorrect code — check that your phone's clock is accurate",
   "验证码已过期，请重新发送": "The verification code has expired — send a new one",
   "验证码错误": "Incorrect verification code",
+  "该中转站账号开启了二次验证（2FA），登录无法自动完成。请先在中转站里关闭二次验证，或联系管理员在你这边重置。": "This relay account has two-factor authentication (2FA) enabled, so signing in can't be completed automatically. Turn off 2FA on the relay, or ask an admin to reset it for you.",
   // 2026-10-17 补：这些后端文案原先没有英文译文，英文界面会直接显示中文
   //（用户反馈「英文网页有部分中文」）。
   "作品作者不存在": "The project author doesn't exist",
@@ -1090,6 +1091,8 @@ export const API_MESSAGE_PATTERNS: { src: string; en: string }[] = [
   // 而正则不加 `$` 锚，运行时正好命中完整消息的前缀 —— 与上面几条同一写法。
   { src: "^开通 (.+?) 的 Email Routing 失败：Cloudflare 未接受 enable 与 dns 两条路径", en: "Couldn't enable Email Routing for {v0}: Cloudflare rejected both the enable and the dns path" },
   // 2026-10-17 补：带插值的后端文案（英文界面原先会显示中文）
+  { src: "^NewAPI 登录没有返回访问令牌（响应字段：(.+?)）。请确认中转站密码是否正确；如果刚改过密码，在本站重新绑定一次即可。$", en: "The NewAPI sign-in returned no access token (response fields: {v0}). Check that the relay password is correct; if you just changed it, re-bind once on this site." },
+  { src: "^NewAPI 登录没有返回用户 ID（响应字段：(.+?)）。请把这个字段列表发给管理员排查。$", en: "The NewAPI sign-in returned no user ID (response fields: {v0}). Please send that field list to an admin so they can investigate." },
   { src: "^(.+?) 属于 (.+?)，不能把它的记录归到 (.+?) 下$", en: "{v0} belongs to {v1} — its records can't be moved under {v2}" },
   { src: "^最多可以答 (.+?) 次$", en: "You can answer this quiz at most {v0} times" },
   { src: "^签名绑定的节点（(.+?)）与请求的节点（(.+?)）不一致：不允许用某个节点的密钥操作另一个节点$", en: "The signed node ({v0}) doesn't match the requested node ({v1}): a node's key must not operate another node" },

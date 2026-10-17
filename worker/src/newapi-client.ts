@@ -676,18 +676,56 @@ export async function login(
     username?: string
     access_token?: string
     user?: { id: number; username?: string }
+    /** 开启二次验证时 NewAPI 只回这个标记，既不带 id 也不带 token */
+    require_2fa?: boolean
   }>(res, "登录")
+
+  /**
+   * 🔴 2026-10-17 修（用户 xhstu 反馈「AI中转站无法新建KEY」，2026-10-12）。
+   *
+   * 原实现先判 `!userId`、再判 `!accessToken`。而**两个字段同时缺失**的情况不止一种：
+   *   · 账号开了二次验证 —— NewAPI 只回 `require_2fa`，登录其实没完成；
+   *   · 账号状态异常 / 密码刚被改过。
+   * 于是用户不管遇到哪种，拿到的永远是「NewAPI 登录未返回用户 ID」——
+   * 既不是真原因，也完全不知道下一步该干什么（他的原话：反复操作最后卡在这一句）。
+   *
+   * 现在按真实情况分别报：
+   *   · 二次验证 → 明确说要去关 2FA；
+   *   · 没令牌   → 说密码可能不对 / 需要重新绑定（这才是「登录没成功」的本义）；
+   *   · 没用户ID → 极少见，带上响应字段名便于排查。
+   */
+  const shape = (() => {
+    if (!data || typeof data !== "object") return String(data)
+    const keys = Object.keys(data as Record<string, unknown>)
+    return keys.length ? keys.join(", ") : "空对象"
+  })()
+
+  if (data.require_2fa) {
+    throw new ApiError(
+      409,
+      "该中转站账号开启了二次验证（2FA），登录无法自动完成。请先在中转站里关闭二次验证，或联系管理员在你这边重置。",
+      "NEWAPI_2FA_REQUIRED"
+    )
+  }
 
   // 兼容新旧两种响应结构
   const userId = data.user?.id ?? data.id
   const remoteUsername = data.user?.username ?? data.username
   const accessToken = data.access_token ?? ""
 
-  if (!userId) {
-    throw new ApiError(502, "NewAPI 登录未返回用户 ID", "NEWAPI_ERROR")
-  }
   if (!accessToken) {
-    throw new ApiError(502, "NewAPI 登录未返回访问令牌", "NEWAPI_ERROR")
+    throw new ApiError(
+      502,
+      `NewAPI 登录没有返回访问令牌（响应字段：${shape}）。请确认中转站密码是否正确；如果刚改过密码，在本站重新绑定一次即可。`,
+      "NEWAPI_ERROR"
+    )
+  }
+  if (!userId) {
+    throw new ApiError(
+      502,
+      `NewAPI 登录没有返回用户 ID（响应字段：${shape}）。请把这个字段列表发给管理员排查。`,
+      "NEWAPI_ERROR"
+    )
   }
   return { userId, accessToken, username: remoteUsername }
 }
