@@ -34,7 +34,7 @@ import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAuth } from "@/hooks/use-auth"
-import { notificationApi, pointsApi, eventApi, errMsg } from "@/services/api"
+import { notificationApi, pointsApi, eventApi, errMsg, HttpError } from "@/services/api"
 import { notifyMessagesChanged } from "@/lib/message-events"
 import { socialNotifIcon, socialNotifText } from "@/lib/notification-meta"
 import { notifyPointsChanged } from "@/components/points-badge"
@@ -505,6 +505,14 @@ function OrderMessageActions({
       notifyPointsChanged()
       onChanged(n.id)
     } catch (err) {
+      // 已结算 = 之前那次其实成功了（或并发重复点击）。
+      // 当成成功处理并通知父级刷新，否则按钮会永远留在消息里。
+      if (err instanceof HttpError && err.code === "ALREADY_SETTLED") {
+        toast.success(t("msg.order.confirmed"))
+        notifyPointsChanged()
+        onChanged(n.id)
+        return
+      }
       toast.error(errMsg(err, isDeliver ? t("msg.order.deliverFailed") : t("msg.order.confirmFailed")))
     } finally {
       setBusy(false)

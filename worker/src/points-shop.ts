@@ -2410,50 +2410,88 @@ export async function settleEscrow(
     throw new ApiError(500, "结算失败，请稍后重试", "SETTLE_FAILED")
   }
 
+  // ── 以下都是「钱已经动了」之后的收尾 ──
+  //
+  // 🔴 2026-10-17 修线上反馈：原来这几步是裸 await，**任何一步抛错都会让已经成功的
+  //    结算返回 500** —— 买家看到「服务器内部错误」，再点一次却得到「这单已经结算过了」，
+  //    而界面上的按钮还在（前端因为 500 根本没刷新）。线上原话：
+  //    「第一次点击提示服务器内部错误，后续一直说确认过了。但是 ui 还在」。
+  //
+  //    结算一旦落库、积分一旦进了卖家账，这单就必须算成功；
+  //    收尾失败只记日志（管理端据此可补），绝不把成功改判成失败。
+  const aftercare: Array<[string, () => Promise<unknown>]> = []
+
   // 用户商品的租期从**结算**（买家确认收货 / 管理员结算）起算 —— 这时才算真正交付完成。
   // 卖家的「标记已交付」只是中间态，买家可能还要验货。
   // 租期同样取**订单快照**（理由见 deliverOrder 那段）：买家是按商品页上的租期付的钱，
   // 卖家/管理员在成交后改商品不该改动这一单的到期时间。
   if (order.productId) {
-    await applyRentalExpiry(
-      env,
-      {
-        id: order.id,
-        userId: order.userId,
-        productId: order.productId,
-        renewedFrom: order.renewedFrom,
-      },
-      order.rentalDays,
-      now
-    )
+    aftercare.push([
+      "租期顺延",
+      () =>
+        applyRentalExpiry(
+          env,
+          {
+            id: order.id,
+            userId: order.userId,
+            productId: order.productId,
+            renewedFrom: order.renewedFrom,
+          },
+          order.rentalDays,
+          now
+        ),
+    ])
   }
 
-  await audit(
-    env,
-    actorId,
-    "points.shop.settle",
-    `${actorLabel}：订单「${order.productName}」结算 ${order.price} 积分给卖家 ${order.sellerName ?? "?"}`
-  )
+  aftercare.push([
+    "审计",
+    () =>
+      audit(
+        env,
+        actorId,
+        "points.shop.settle",
+        `${actorLabel}：订单「${order.productName}」结算 ${order.price} 积分给卖家 ${order.sellerName ?? "?"}`
+      ),
+  ])
 
   // 结算完成 → 这个订单**所有**快捷按钮都该消失了：
   // 买家的「确认收货」（不管他是从消息里点的还是从积分页点的），
   // 以及卖家残留的「标记已交付」。不摘的话按钮永远留在消息里，
   // 点了只会得到「这单已经结算过了」（2026-10-01 用户反馈）。
-  await clearOrderActionButtons(env, order.id, ["confirm", "deliver"])
+  aftercare.push(["清理消息按钮", () => clearOrderActionButtons(env, order.id, ["confirm", "deliver"])])
 
   // 通知卖家：钱到账了。`actorLabel` 区分是买家确认的还是管理员强制结算的，
   // 免得卖家以为「买家一直没确认，钱怎么自己来了」。
-  await notifyOrder(env, order.sellerId, {
-    event: "settled",
-    title: `积分到账：卖出「${order.productName}」`,
-    body: `${order.price} 积分已入账（${actorLabel}，买家 ${order.username}）。`,
-    orderId: order.id,
-    peer: order.username,
-  })
+  if (order.sellerId) {
+    const sellerId = order.sellerId
+    aftercare.push([
+      "通知卖家",
+      () =>
+        notifyOrder(env, sellerId, {
+          event: "settled",
+          title: `积分到账：卖出「${order.productName}」`,
+          body: `${order.price} 积分已入账（${actorLabel}，买家 ${order.username}）。`,
+          orderId: order.id,
+          peer: order.username,
+        }),
+    ])
+  }
 
-  const updated = await getOrder(env, order.id)
-  if (!updated) throw new ApiError(404, "订单不存在", "NOT_FOUND")
-  return updated
+  for (const [label, run] of aftercare) {
+    try {
+      await run()
+    } catch (err) {
+      // 不中断：钱已经到位，这单就是成功的。留日志方便事后补
+      console.error(`结算收尾失败（${label}）:`, order.id, err)
+    }
+  }
+
+  const updated = await getOrder(env, order.id).catch((err) => {
+    // 读不到也不能把成功改判成失败（前端拿到 500 会以为没成功，界面就不刷新）
+    console.error("结算后读取订单失败:", order.id, err)
+    return null
+  })
+  return updated ?? order
 }
 
 /** 买家：确认收货（把托管的积分结算给卖家） */

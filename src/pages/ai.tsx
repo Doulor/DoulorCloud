@@ -251,15 +251,16 @@ function formatExpiry(ts: number): string {
  * 每个颜色成对出现：`solid` 画「剩余」，`faded` 画「已用」。同色系的两档
  * 让「这段属于哪个套餐」在部分消耗后依然一目了然（比跨段盖一层灰罩准确）。
  *
- * 颜色走中性灰阶 + 一个暖琥珀点缀，与站点「黑白灰 + 暖橙」的整体风格一致，
- * 避免冷调的蓝/绿/紫在页面上显得突兀。
+ * 🔴 2026-10-17 修「颜色不统一」：原来 5 个色是 zinc-600 / stone-500 / neutral-500 /
+ *    stone-600 这种**深浅几乎一样的中性灰**，相邻两段在屏幕上根本分不开。
+ *    现在改成「深-浅-深-浅」交替的色阶（琥珀打头当强调色），相邻段一定有明显明度差。
  */
 const SEGMENT_COLORS = [
-  { solid: "bg-zinc-600 dark:bg-zinc-300", faded: "bg-zinc-600/20 dark:bg-zinc-300/20" },
-  { solid: "bg-stone-500 dark:bg-stone-400", faded: "bg-stone-500/20 dark:bg-stone-400/20" },
   { solid: "bg-amber-600 dark:bg-amber-500", faded: "bg-amber-600/20 dark:bg-amber-500/20" },
-  { solid: "bg-neutral-500 dark:bg-neutral-400", faded: "bg-neutral-500/20 dark:bg-neutral-400/20" },
-  { solid: "bg-stone-600 dark:bg-stone-300", faded: "bg-stone-600/20 dark:bg-stone-300/20" },
+  { solid: "bg-zinc-700 dark:bg-zinc-200", faded: "bg-zinc-700/20 dark:bg-zinc-200/20" },
+  { solid: "bg-zinc-400 dark:bg-zinc-500", faded: "bg-zinc-400/20 dark:bg-zinc-500/20" },
+  { solid: "bg-stone-700 dark:bg-stone-300", faded: "bg-stone-700/20 dark:bg-stone-300/20" },
+  { solid: "bg-stone-400 dark:bg-stone-500", faded: "bg-stone-400/20 dark:bg-stone-500/20" },
 ]
 
 /**
@@ -352,18 +353,23 @@ function RewardSubscriptionsCard({
                   {groups.map((g, i) => {
                     const c = SEGMENT_COLORS[i % SEGMENT_COLORS.length]
                     const planRemaining = Math.max(0, g.amountTotal - g.amountUsed)
+                    // 段宽 ∝ 该套餐总额度，但**给小套餐一个下限**：
+                    // 占比很小的套餐会被压成一两个像素，看起来就像「没有额度」
+                    //（线上反馈：「活跃群友套餐满额度看着像没额度」）。
+                    // 下限取总额的 5%，比例仍然大致正确，但每段都一定看得见。
+                    const segWeight = Math.max(g.amountTotal, total * 0.05)
+                    const remainPct =
+                      g.amountTotal > 0 ? (planRemaining / g.amountTotal) * 100 : 0
                     return (
                       <Tooltip key={g.planId}>
                         <TooltipTrigger asChild>
                           <div
                             className={`relative h-full overflow-hidden rounded-full ${c.faded}`}
-                            style={{ flexGrow: g.amountTotal, flexBasis: 0 }}
+                            style={{ flexGrow: segWeight, flexBasis: 0 }}
                           >
                             <div
                               className={`absolute inset-y-0 left-0 rounded-full ${c.solid}`}
-                              style={{
-                                width: `${(planRemaining / g.amountTotal) * 100}%`,
-                              }}
+                              style={{ width: `${remainPct}%` }}
                             />
                           </div>
                         </TooltipTrigger>

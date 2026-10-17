@@ -958,6 +958,15 @@ export default function PointsPage() {
       notifyPointsChanged()
       await load()
     } catch (err) {
+      // 「已经结算过了」不是错误：说明上一次点击其实成功了，只是响应没回到前端
+      //（或者用户连点了两下）。按成功处理并刷新，按钮才会消失 ——
+      // 否则用户会看到「点一次报错、再点说确认过了、按钮还在」的诡异局面。
+      if (err instanceof HttpError && err.code === "ALREADY_SETTLED") {
+        toast.success(t("pt.toast.receiptConfirmed"))
+        notifyPointsChanged()
+        await load()
+        return
+      }
       toast.error(errMsg(err, t("pt.err.confirmReceipt")))
     }
   }

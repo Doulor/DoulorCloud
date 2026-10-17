@@ -107,6 +107,26 @@ function decodeEntities(input: string): string {
     .replace(/&amp;/gi, "&")
 }
 
+/**
+ * 从 `<a ...>` 标签文本里取出可用的 href。
+ *
+ * 只认 http / https / mailto —— 其它协议（`javascript:` / `data:` / 自定义 scheme）
+ * 一律返回 null。因为取出来的地址会被塞进正文、前端再变成可点链接，
+ * 不能让危险协议走到那一步。
+ */
+function hrefFromAnchorTag(tag: string): string | null {
+  const m = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(tag)
+  if (!m) return null
+  const raw = decodeEntities(m[1] ?? m[2] ?? m[3] ?? "").trim()
+  if (!raw) return null
+  const lower = raw.toLowerCase()
+  if (!lower.startsWith("http://") && !lower.startsWith("https://") && !lower.startsWith("mailto:")) {
+    return null
+  }
+  // 超长地址不往正文里塞：正常验证链接远到不了这个量级，到的基本是垃圾/攻击样本
+  return raw.length > 2048 ? null : raw
+}
+
 function htmlToText(html: string): string {
   // 上限兜底：即使调用方传进来 2MB，也不会让单次投递做无谓的大量工作
   const src = html.length > MAX_HTML_CHARS ? html.slice(0, MAX_HTML_CHARS) : html
@@ -115,6 +135,20 @@ function htmlToText(html: string): string {
   let i = 0
   // 正在跳过的原始文本元素名（script/style）；非 null 时丢弃其间所有内容
   let skipping: string | null = null
+
+  /**
+   * 🔴 2026-10-17 修：`<a href>` 的地址必须保留下来。
+   *
+   * 原实现把标签整个丢掉、只留锚文本，于是「点击这里验证邮箱」这类邮件的
+   * **URL 彻底消失** —— 用户收到一封验证邮件，正文只有一句话，没有任何可点的地址，
+   * 这类邮件直接不可用（线上反馈：「需要验证登录或二次跳转的邮件无法使用」）。
+   *
+   * 现在的做法：进 `<a>` 时记下 href 和「此刻 out 已有多少片段」，
+   * 出 `</a>` 时看这段锚文本里**有没有**已经包含这个地址；
+   * 没有就把地址补在后面（绝大多数邮件锚文本就是 URL，此时不会重复）。
+   */
+  let pendingHref: string | null = null
+  let hrefOutIdx = 0
 
   while (i < n) {
     const lt = src.indexOf("<", i)
@@ -140,6 +174,20 @@ function htmlToText(html: string): string {
     }
     if (!closing && (name === "script" || name === "style")) {
       skipping = name
+      i = tagEnd
+      continue
+    }
+    if (name === "a") {
+      if (!closing) {
+        // 记下 href 与「锚文本从 out 的第几个片段开始」
+        pendingHref = hrefFromAnchorTag(src.slice(lt, tagEnd))
+        hrefOutIdx = out.length
+      } else if (pendingHref) {
+        // 锚文本里没有这个地址（比如只写了「点击这里」）⇒ 补上，否则链接就丢了
+        const anchorText = out.slice(hrefOutIdx).join("")
+        if (!anchorText.includes(pendingHref)) out.push(` ${pendingHref}`)
+        pendingHref = null
+      }
       i = tagEnd
       continue
     }

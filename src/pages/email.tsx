@@ -7,6 +7,7 @@ import { PageHeader } from "@/components/page-header"
 import { Textarea } from "@/components/ui/textarea"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
+import { LinkifiedText } from "@/components/linkified-text"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -1444,9 +1445,17 @@ function MailMessageView({
             {t("em.loadingBody")}
           </div>
         ) : (
-          <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed">
-            {message.body || t("em.noBody")}
-          </pre>
+          /*
+           * 2026-10-17：正文里的 URL 改成可点链接（站长反馈「验证邮件无法使用」）。
+           * 后端 `htmlToText` 同时补了一条：`<a href>` 的地址会保留进正文，
+           * 否则「点击这里验证」这类邮件的地址根本不会出现。
+           * 点击走全站统一的外链确认弹窗（收信人点的是陌生人给的链接）。
+           */
+          <LinkifiedText
+            text={message.body}
+            className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed"
+            fallback={t("em.noBody")}
+          />
         )}
 
         {replyOpen && (

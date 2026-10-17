@@ -158,16 +158,29 @@ export function CheckinCalendar({
           })}
         </div>
 
-        {/* 图例 */}
+        {/*
+         * 图例（2026-10-17 修）：
+         * 原来三个色块是 10px 的**纯色小方块**，跟真正的日期格子（圆角 + 数字 + ✓）
+         * 长得完全不像，用户看不出「这个绿色代表已签到」——反馈原话是
+         *「示例显示不正常，是不是应该显示已签到啊」。文案一直是对的，错的是样子。
+         * 现在让色块跟格子同款：绿底 + ✓、琥珀底 + 「补」、虚线框。
+         */}
         <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <span className="inline-block h-2.5 w-2.5 rounded-sm bg-emerald-500" /> {t("ck.legendNormal")}
+          <span className="flex items-center gap-1.5">
+            <span className="flex h-4 w-4 items-center justify-center rounded-[3px] bg-emerald-500 text-white dark:bg-emerald-600">
+              <Check className="h-2.5 w-2.5" />
+            </span>
+            {t("ck.legendNormal")}
           </span>
-          <span className="flex items-center gap-1">
-            <span className="inline-block h-2.5 w-2.5 rounded-sm bg-amber-500" /> {t("ck.legendMakeup")}
+          <span className="flex items-center gap-1.5">
+            <span className="flex h-4 w-4 items-center justify-center rounded-[3px] bg-amber-500 text-[8px] font-medium leading-none text-white dark:bg-amber-600">
+              {t("ck.makeupMark")}
+            </span>
+            {t("ck.legendMakeup")}
           </span>
-          <span className="flex items-center gap-1">
-            <span className="inline-block h-2.5 w-2.5 rounded-sm border border-dashed border-muted-foreground/50" /> {t("ck.legendMissed")}
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-4 w-4 rounded-[3px] border border-dashed border-muted-foreground/50" />
+            {t("ck.legendMissed")}
           </span>
         </div>
 
