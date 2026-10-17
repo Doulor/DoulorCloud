@@ -580,7 +580,9 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
     //    聊天页轮询是最大头（2s 拉消息 = 4.3 万次/天/人）。改成 5s / 30s / 60s，
     //    并且**只在页面可见时跑**（见 src/lib/visible-interval.ts），
     //    切回标签页会立刻刷一次，不会看到旧数据。
-    const stopMessages = setVisibleInterval(() => void pollNew(), 5000)
+    // 焦点感知节奏（2026-10-17）：人正盯着聊天室时 2.5s，其它情况仍是 5s。
+    // 整体降回 2s 会把 9-30 那种额度打满的风险带回来，所以只在 hasFocus 时加速。
+    const stopMessages = setVisibleInterval(() => void pollNew(), 5000, 2500)
     const stopPresence = setVisibleInterval(() => void pollPresence(), 30000)
     // 心跳：只有登录用户才报（表示「我在聊天室」）
     const stopHeartbeat = user
