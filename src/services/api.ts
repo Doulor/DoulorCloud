@@ -1377,6 +1377,21 @@ export const adminApi = {
   // 中转站管理员凭据（令牌轮换后可在网页上直接更新）
   getNewApiConfig: () => request<AdminNewApiConfig>("/admin/newapi/config"),
 
+  /**
+   * 中转站「请求失败重试次数」（NewAPI 系统设置 RetryTimes）。
+   * 用户反馈（yuan）想改这个，但原来只能去中转站后台手点 —— 2026-10-17 加的站内入口。
+   * available=false 表示对方版本没有这个设置项或读取失败，此时前端只展示原因、不给改。
+   */
+  getRelayRetryTimes: () =>
+    request<{ available: boolean; retryTimes: number | null; reason?: string }>(
+      "/admin/newapi/retry-times"
+    ),
+  setRelayRetryTimes: (retryTimes: number) =>
+    request<{ retryTimes: number }>("/admin/newapi/retry-times", {
+      method: "PUT",
+      body: JSON.stringify({ retryTimes }),
+    }),
+
   updateNewApiConfig: (payload: { token: string; adminUserId?: string }) =>
     request<{
       ok: boolean

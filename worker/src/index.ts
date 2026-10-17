@@ -1300,6 +1300,18 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
 
   {
     kind: "exact",
+    path: "/admin/newapi/retry-times",
+    method: "GET",
+    handle: () => adminHandlers.getRelayRetryTimes(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/newapi/retry-times",
+    method: "PUT",
+    handle: () => adminHandlers.setRelayRetryTimes(env, request),
+  },
+  {
+    kind: "exact",
     path: "/admin/newapi/models",
     method: "GET",
     handle: () =>

@@ -30,6 +30,8 @@ import {
   listPricing,
   maskToken,
   adminSetUserStatus,
+  readNewApiOption,
+  writeNewApiOption,
 } from "../newapi-client"
 import { sendMail, renderMail, parseBrevoKeys } from "../mailer"
 import { fetchWithTimeout } from "../async-utils"
@@ -1729,6 +1731,73 @@ export async function getNewApiAdminConfig(env: Env, request: Request): Promise<
     configured: await isNewApiConfigured(env),
     health,
   })
+}
+
+/**
+ * 中转站的「请求失败重试次数」设置项键名。
+ *
+ * 对应 NewAPI（one-api 系）后台「运营设置 → 重试次数」。用户在反馈里提到的就是它：
+ * 一次请求内部会自动重试，重试次数越高单次请求越慢，但成功率越高。
+ * ⚠️ 写之前一定先读：键不存在（不同版本可能改名）就报 409 让站长去对方后台改，
+ * 绝不硬写一个猜出来的键名 —— 那样会在对方配置里留下垃圾项。
+ */
+const RELAY_RETRY_TIMES_KEY = "RetryTimes"
+
+/**
+ * GET /api/admin/newapi/retry-times —— 读中转站的失败重试次数。
+ *
+ * 读失败不抛错（管理面板只是展示，不该因为对方掉线就整页报错）：
+ * 返回 { available:false, reason } 让前端显示"读不到"。
+ */
+export async function getRelayRetryTimes(env: Env, request: Request): Promise<Response> {
+  await requireAdminScope(env, request, "newapi.channels")
+  if (!(await isNewApiConfigured(env))) {
+    return json({ available: false, retryTimes: null, reason: "newapi_not_configured" })
+  }
+  try {
+    const raw = await readNewApiOption(env, RELAY_RETRY_TIMES_KEY)
+    if (raw === null) return json({ available: false, retryTimes: null, reason: "option_not_found" })
+    const n = Number(raw)
+    return json({ available: true, retryTimes: Number.isFinite(n) ? n : null })
+  } catch (err) {
+    return json({
+      available: false,
+      retryTimes: null,
+      reason: err instanceof ApiError ? err.message : String(err),
+    })
+  }
+}
+
+/**
+ * PUT /api/admin/newapi/retry-times —— 改中转站的失败重试次数。
+ * body: { retryTimes: number }，只接受 0~10 的整数（再多只会让每次请求更慢）。
+ */
+export async function setRelayRetryTimes(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "newapi.channels")
+  const body = (await request.json().catch(() => ({}))) as { retryTimes?: number }
+  const n = Number(body.retryTimes)
+  if (!Number.isInteger(n) || n < 0 || n > 10) {
+    throw new ApiError(400, "重试次数需为 0~10 的整数", "INVALID_INPUT")
+  }
+  if (!(await isNewApiConfigured(env))) {
+    throw new ApiError(409, "中转站未配置，无法修改", "NEWAPI_NOT_CONFIGURED")
+  }
+  const current = await readNewApiOption(env, RELAY_RETRY_TIMES_KEY)
+  if (current === null) {
+    throw new ApiError(
+      409,
+      "中转站没有 RetryTimes 这个设置项（版本可能不同），请直接去中转站后台修改",
+      "OPTION_NOT_FOUND"
+    )
+  }
+  await writeNewApiOption(env, RELAY_RETRY_TIMES_KEY, String(n))
+  await recordAudit(
+    env,
+    admin.id,
+    "admin.relay_retry_times",
+    `中转站失败重试次数：${current || "?"} → ${n}`
+  )
+  return json({ retryTimes: n })
 }
 
 /**

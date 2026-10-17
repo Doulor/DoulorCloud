@@ -1967,3 +1967,31 @@ export async function listSubscriptionPlans(
     return []
   }
 }
+
+/**
+ * 读取中转站（NewAPI）的一个**系统设置项**，返回 null 表示该项不存在。
+ *
+ * 用途（2026-10-17）：用户 yuan 反馈「中转站设置重试次数」—— 那是 NewAPI 后台的
+ * `RetryTimes`，本站原本没有任何入口，只能让站长去对方后台手点。有了这两个函数，
+ * 管理面板就能直接读写它（写之前**必须先读**，确认该项存在，见 admin.ts）。
+ */
+export async function readNewApiOption(env: Env, key: string): Promise<string | null> {
+  const res = await newApiFetch(env, "/api/option/", { method: "GET" })
+  const list = await unwrap<{ key?: string; value?: string }[]>(res, "读取中转站设置")
+  const hit = (Array.isArray(list) ? list : []).find((o) => o.key === key)
+  return hit ? (hit.value ?? "") : null
+}
+
+/**
+ * 写入中转站的一个系统设置项。
+ *
+ * ⚠️ 调用方必须先 `readNewApiOption` 确认键存在再写 —— 拼错键名时 NewAPI 可能
+ * 静默新建一条无意义配置，排查起来很费劲。
+ */
+export async function writeNewApiOption(env: Env, key: string, value: string): Promise<void> {
+  const res = await newApiFetch(env, "/api/option/", {
+    method: "PUT",
+    body: JSON.stringify({ key, value }),
+  })
+  await unwrap(res, "更新中转站设置")
+}

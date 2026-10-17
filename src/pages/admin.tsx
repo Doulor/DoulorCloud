@@ -1118,6 +1118,17 @@ export default function AdminPage() {
   const [newapiCred, setNewapiCred] = React.useState<AdminNewApiConfig | null>(null)
   const [newapiCredLoading, setNewapiCredLoading] = React.useState(false)
   const [newapiCredBusy, setNewapiCredBusy] = React.useState(false)
+  /**
+   * 中转站「失败重试次数」（2026-10-17，用户 yuan 的反馈）。
+   * 只在中转站配置了、且对方确实有 RetryTimes 这一项时可改（available）。
+   */
+  const [relayRetry, setRelayRetry] = React.useState<{
+    available: boolean
+    retryTimes: number | null
+    reason?: string
+  } | null>(null)
+  const [relayRetryInput, setRelayRetryInput] = React.useState("")
+  const [relayRetryBusy, setRelayRetryBusy] = React.useState(false)
   /** 待更新的新令牌（明文只存在于当前输入框，提交后立即清空） */
   const [newapiNewToken, setNewapiNewToken] = React.useState("")
   const [newapiUserId, setNewapiUserId] = React.useState("1")
@@ -2445,6 +2456,26 @@ export default function AdminPage() {
     }
   }
 
+  /** 保存中转站重试次数（2026-10-17，用户 yuan 的反馈） */
+  const handleSaveRelayRetry = async () => {
+    const n = Number(relayRetryInput)
+    if (!Number.isInteger(n) || n < 0 || n > 10) {
+      toast.error(t("adm.retry.range"))
+      return
+    }
+    setRelayRetryBusy(true)
+    try {
+      const res = await adminApi.setRelayRetryTimes(n)
+      setRelayRetry({ available: true, retryTimes: res.retryTimes })
+      setRelayRetryInput(String(res.retryTimes))
+      toast.success(t("adm.retry.ok"))
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.retry.fail"))
+    } finally {
+      setRelayRetryBusy(false)
+    }
+  }
+
   // ---- 中转站管理员凭据 ----
 
   const loadNewApiConfig = React.useCallback(async () => {
@@ -2457,6 +2488,14 @@ export default function AdminPage() {
       toast.error(err instanceof HttpError ? err.message : t("adm.47"))
     } finally {
       setNewapiCredLoading(false)
+    }
+    // 中转站重试次数：读不到不弹错、不影响上面的凭据卡片（对方版本可能没这一项）
+    try {
+      const r = await adminApi.getRelayRetryTimes()
+      setRelayRetry(r)
+      setRelayRetryInput(r.retryTimes === null ? "" : String(r.retryTimes))
+    } catch {
+      setRelayRetry({ available: false, retryTimes: null })
     }
     // 模型候选单独拉：失败只是没有下拉可选（降级为手输），不该弹错误打扰管理员
     try {
@@ -6395,6 +6434,52 @@ export default function AdminPage() {
                         {t("adm.478")}
                       </Button>
                     </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* 中转站「失败重试次数」= NewAPI 系统设置 RetryTimes。
+                用户反馈（yuan）想调它，但原本只能去对方后台手点 —— 这里做成站内入口。
+                写之前后端会先读一次确认该项存在，不存在就明确报错，绝不硬写猜的键名。 */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t("adm.retry.title")}</CardTitle>
+                <CardDescription>{t("adm.retry.desc")}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {relayRetry?.available === false ? (
+                  <p className="text-sm text-muted-foreground">
+                    {relayRetry?.reason === "newapi_not_configured"
+                      ? t("adm.retry.notConfigured")
+                      : t("adm.retry.unavailable")}
+                  </p>
+                ) : (
+                  <>
+                    <div className="flex flex-wrap items-end gap-3">
+                      <div className="space-y-2">
+                        <Label htmlFor="relayRetryInput">{t("adm.retry.label")}</Label>
+                        <Input
+                          id="relayRetryInput"
+                          inputMode="numeric"
+                          className="w-28"
+                          value={relayRetryInput}
+                          onChange={(e) =>
+                            setRelayRetryInput(e.target.value.replace(/[^0-9]/g, ""))
+                          }
+                        />
+                      </div>
+                      <Button onClick={() => void handleSaveRelayRetry()} disabled={relayRetryBusy}>
+                        {relayRetryBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                        {t("common.save")}
+                      </Button>
+                      {relayRetry?.retryTimes !== null && relayRetry?.retryTimes !== undefined && (
+                        <span className="pb-2 text-xs text-muted-foreground">
+                          {t("adm.retry.current", { v0: String(relayRetry.retryTimes) })}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground">{t("adm.retry.hint")}</p>
                   </>
                 )}
               </CardContent>
