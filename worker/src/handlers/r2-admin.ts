@@ -54,7 +54,6 @@ function toPublicBucket(row: R2BucketRow, envHasAnalytics: boolean) {
     accountId: row.account_id,
     endpoint: row.endpoint,
     bucketName: row.bucket_name,
-    maxUsers: row.max_users,
     quotaPerUser: row.quota_per_user,
     capacityBytes: row.capacity_bytes,
     enabled: row.enabled === 1,
@@ -174,9 +173,10 @@ export async function listR2Buckets(env: Env, request: Request): Promise<Respons
 
   const items = buckets.map((b) => {
     const a = aggMap.get(b.id)
-    // 共享池：桶容量 = 桶的真实容量，不是 max_users × quota_per_user
-    // （后者是旧「每人保留配额」模型，会让开通不用的空间显得「被浪费」）
-    const capacity = b.capacity_bytes ?? b.max_users * b.quota_per_user
+    // 桶容量 = capacity_bytes（NOT NULL 列）。
+    // 2026-10-17 清掉了旧的 `?? max_users × quota_per_user` 兜底：列是 NOT NULL，
+    // 那一支永远走不到，纯死代码。
+    const capacity = b.capacity_bytes
     // 平台桶用「真的列一遍 R2」的用量；用户网盘桶用 storage_accounts 聚合
     const isPlatform = b.kind === "platform"
     const pu = platformUsage.get(b.id)
@@ -227,7 +227,6 @@ export async function listR2Buckets(env: Env, request: Request): Promise<Respons
         accountId: null,
         endpoint: env.R2_S3_ENDPOINT ?? "",
         bucketName: env.R2_BUCKET ?? "",
-        maxUsers: 0,
         quotaPerUser: 0,
         enabled: true,
         sortOrder: -1,
@@ -341,7 +340,7 @@ export async function discoverBuckets(env: Env, request: Request): Promise<Respo
 
 /**
  * POST /api/admin/r2/buckets —— 新建桶
- * body: { id, name, accountId?, endpoint, bucketName, accessKeyId, secretAccessKey, analyticsToken?, maxUsers?, quotaPerUser?, sortOrder? }
+ * body: { id, name, accountId?, endpoint, bucketName, accessKeyId, secretAccessKey, analyticsToken?, quotaPerUser?, sortOrder? }
  */
 export async function createR2Bucket(env: Env, request: Request): Promise<Response> {
   const admin = await requireAdminScope(env, request, "r2.buckets")
@@ -380,7 +379,6 @@ export async function createR2Bucket(env: Env, request: Request): Promise<Respon
   if (existing) throw new ApiError(409, "该 id 已存在", "CONFLICT")
 
   const analyticsToken = str("analyticsToken", 500)
-  const maxUsers = Math.max(1, Math.trunc(Number(body.maxUsers ?? 8)) || 8)
   const quotaPerUser =
     Math.max(0, Math.trunc(Number(body.quotaPerUser ?? 1073741824))) || 1073741824
   const capacityBytes =
@@ -407,8 +405,8 @@ export async function createR2Bucket(env: Env, request: Request): Promise<Respon
     `INSERT INTO r2_buckets
        (id, name, account_id, endpoint, bucket_name,
         access_key_id_enc, secret_key_enc, analytics_token_enc,
-        max_users, quota_per_user, capacity_bytes, enabled, sort_order, kind, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`
+        quota_per_user, capacity_bytes, enabled, sort_order, kind, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`
   )
     .bind(
       id,
@@ -420,7 +418,6 @@ export async function createR2Bucket(env: Env, request: Request): Promise<Respon
       accessKeyId ? await encryptSecret(accessKeyId, env.SESSION_SECRET) : "",
       secretAccessKey ? await encryptSecret(secretAccessKey, env.SESSION_SECRET) : "",
       analyticsToken ? await encryptSecret(analyticsToken, env.SESSION_SECRET) : null,
-      maxUsers,
       quotaPerUser,
       capacityBytes,
       sortOrder,
@@ -470,10 +467,6 @@ export async function updateR2Bucket(
   const endpoint = str("endpoint", 200) ?? row.endpoint
   const bucketName = str("bucketName", 100) ?? row.bucket_name
   const accountId = str("accountId", 60) ?? row.account_id
-  const maxUsers =
-    body.maxUsers === undefined
-      ? row.max_users
-      : Math.max(1, Math.trunc(Number(body.maxUsers)) || 8)
   const quotaPerUser =
     body.quotaPerUser === undefined
       ? row.quota_per_user
@@ -505,7 +498,7 @@ export async function updateR2Bucket(
     `UPDATE r2_buckets SET
        name = ?, account_id = ?, endpoint = ?, bucket_name = ?,
        access_key_id_enc = ?, secret_key_enc = ?, analytics_token_enc = ?,
-       max_users = ?, quota_per_user = ?, capacity_bytes = ?, enabled = ?, sort_order = ?, updated_at = ?
+       quota_per_user = ?, capacity_bytes = ?, enabled = ?, sort_order = ?, updated_at = ?
      WHERE id = ?`
   )
     .bind(
@@ -516,7 +509,6 @@ export async function updateR2Bucket(
       accessEnc,
       secretEnc,
       analyticsEnc,
-      maxUsers,
       quotaPerUser,
       capacityBytes,
       enabled,
@@ -772,7 +764,9 @@ export async function assignAllUnassigned(env: Env, request: Request): Promise<R
   // ⚠️ 2026-10-12：这里**故意不做人数校验**。站长明确「一个桶能放无限的人，只要容量没满」——
   // 容量由写入路径的 assertBucketHasRoom()（桶的真实 capacity_bytes）把关，与「几个人」无关。
   // 历史上这里按人数拦过，结果同一件事两套标准（上传不拦、管理端改派拦），
-  // 而且 PR #61 指出的那个判据还写反了。`max_users` 字段保留仅用于前端展示，不再参与拦截。
+  // 而且 PR #61 指出的那个判据还写反了。
+  // 2026-10-17：「人数上限」这个概念整体清掉（max_users 字段一并 drop），
+  // 桶只按 capacity_bytes 判容量，放多少人与容量无关。
 
   await env.DB.prepare(
     "UPDATE storage_accounts SET bucket_id = ?, updated_at = ? WHERE bucket_id IS NULL"

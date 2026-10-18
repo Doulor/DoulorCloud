@@ -1040,7 +1040,6 @@ export default function AdminPage() {
     accessKeyId: "",
     secretAccessKey: "",
     analyticsToken: "",
-    maxUsers: "8",
     /** 单位 MB（界面按 MB 填，提交时 ×1024×1024 换算成字节） */
     quotaPerUser: "1024",
     /** 单位 GB（提交时 ×1024³ 换算成字节） */
@@ -3379,7 +3378,6 @@ export default function AdminPage() {
         accessKeyId: "",
         secretAccessKey: "",
         analyticsToken: "",
-        maxUsers: String(bucket.maxUsers),
         // 草稿单位 MB（库里存的是字节）
         quotaPerUser: String(Math.round((bucket.quotaPerUser / 1024 / 1024) * 100) / 100),
         // 桶容量草稿单位 GB
@@ -3398,7 +3396,6 @@ export default function AdminPage() {
         accessKeyId: "",
         secretAccessKey: "",
         analyticsToken: "",
-        maxUsers: "8",
         quotaPerUser: "1024",
         capacityBytes: "10",
         sortOrder: "0",
@@ -3461,7 +3458,6 @@ export default function AdminPage() {
         accountId: r2Draft.accountId || undefined,
         endpoint: r2Draft.endpoint,
         bucketName: r2Draft.bucketName,
-        maxUsers: Number(r2Draft.maxUsers) || 8,
         // 草稿是 MB，后端要字节
         quotaPerUser: Math.round((Number(r2Draft.quotaPerUser) || 1024) * 1024 * 1024),
         // 草稿是 GB，后端要字节
@@ -6069,8 +6065,8 @@ export default function AdminPage() {
                           </div>
                         </div>
 
-                        {/* 容量分配 + 人数分配：仅用户网盘桶有意义 */}
-                        {b.kind !== "platform" && b.maxUsers > 0 && (
+                        {/* 容量分配：仅用户网盘桶有意义（2026-10-17 起不再有「人数」这个概念） */}
+                        {b.kind !== "platform" && (
                           <div className="space-y-1.5">
                             <div className="flex items-center justify-between text-sm">
                               <span className="text-muted-foreground">{t("adm.435")}</span>
@@ -6090,7 +6086,7 @@ export default function AdminPage() {
                           </div>
                         )}
 
-                        {/* 人数分配 */}
+                        {/* 文件统计 */}
                         {b.kind === "platform" ? (
                           <div className="grid grid-cols-2 gap-3">
                             <div className="rounded-md border px-3 py-2">

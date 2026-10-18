@@ -2907,7 +2907,6 @@ export const r2AdminApi = {
     accessKeyId: string
     secretAccessKey: string
     analyticsToken?: string
-    maxUsers?: number
     quotaPerUser?: number
     sortOrder?: number
     /** 'user' = 用户网盘桶；'platform' = 平台数据桶 */
@@ -2926,7 +2925,6 @@ export const r2AdminApi = {
     accessKeyId: string
     secretAccessKey: string
     analyticsToken: string
-    maxUsers: number
     quotaPerUser: number
     sortOrder: number
     enabled: boolean

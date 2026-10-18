@@ -35,8 +35,8 @@ async function makeBucket(id: string, capacityBytes: number, sortOrder: number) 
   await env.DB.prepare(
     `INSERT OR REPLACE INTO r2_buckets
        (id, name, account_id, endpoint, bucket_name, access_key_id_enc, secret_key_enc,
-        max_users, quota_per_user, capacity_bytes, enabled, sort_order, kind, created_at, updated_at)
-     VALUES (?, ?, NULL, 'https://x.r2.cloudflarestorage.com', 'network', ?, ?, 999, ?, ?, 1, ?, 'user', ?, ?)`
+        quota_per_user, capacity_bytes, enabled, sort_order, kind, created_at, updated_at)
+     VALUES (?, ?, NULL, 'https://x.r2.cloudflarestorage.com', 'network', ?, ?, ?, ?, 1, ?, 'user', ?, ?)`
   )
     .bind(
       id,

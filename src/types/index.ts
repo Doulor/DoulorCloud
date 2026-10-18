@@ -2487,7 +2487,6 @@ export interface R2Bucket {
   accountId: string | null
   endpoint: string
   bucketName: string
-  maxUsers: number
   /** 每人最大上传限额（软上限，字节） */
   quotaPerUser: number
   /** 桶的真实容量（共享池，字节） */

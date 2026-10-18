@@ -65,7 +65,6 @@ export interface R2BucketRow {
   access_key_id_enc: string
   secret_key_enc: string
   analytics_token_enc: string | null
-  max_users: number
   /** 每人最大上传限额（软上限，不保留空间） */
   quota_per_user: number
   /** 桶的真实容量（共享池上限，默认 10 GB 免费额度） */

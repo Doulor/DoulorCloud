@@ -1,0 +1,17 @@
+-- 0166_drop_r2_buckets_max_users.sql
+-- 删掉 r2_buckets.max_users（「人数上限」），2026-10-17。
+--
+-- 背景：这个字段原本限制「一个桶最多放几个人」。2026-10-12（提交 373c200）已明确
+-- 改成「一个桶能放无限的人，只要容量没满」—— 人数校验整段删除，容量由写入路径的
+-- assertBucketHasRoom() 按真实 capacity_bytes 判。
+--
+-- 从此 max_users 只剩一个用途：capacity_bytes 缺失时的容量兜底
+-- （capacity = capacity_bytes ?? max_users * quota_per_user）。但 capacity_bytes 是
+-- NOT NULL DEFAULT 10 GiB 的列，那个兜底分支**永远走不到**，属于死代码。
+--
+-- 所以这里彻底删掉：代码侧已同步移除所有读写（API 不再收/发 maxUsers，管理端也不再展示）。
+-- quota_per_user **保留** —— 它仍有实际语义：新开通网盘时作为「每人上传限额」使用
+-- （见 handlers/storage.ts），不是死字段。
+--
+-- SQLite 3.35+ 支持 DROP COLUMN；该列无索引/约束/视图依赖。
+ALTER TABLE r2_buckets DROP COLUMN max_users;

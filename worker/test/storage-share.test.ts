@@ -62,8 +62,8 @@ beforeAll(async () => {
   await env.DB.prepare(
     `INSERT INTO r2_buckets
        (id, name, account_id, endpoint, bucket_name, access_key_id_enc, secret_key_enc,
-        analytics_token_enc, max_users, quota_per_user, enabled, sort_order, kind, created_at, updated_at)
-     VALUES (?, ?, NULL, ?, 'network', ?, ?, NULL, 16, ?, 1, 0, 'user', ?, ?)`
+        analytics_token_enc, quota_per_user, enabled, sort_order, kind, created_at, updated_at)
+     VALUES (?, ?, NULL, ?, 'network', ?, ?, NULL, ?, 1, 0, 'user', ?, ?)`
   )
     .bind(
       BUCKET_ID,
