@@ -24,6 +24,7 @@ import {
   SparklesIcon,
 } from "@hugeicons/core-free-icons"
 import { compressToLimit } from "@/lib/image-compress"
+import { decodeTextBytes, isTextLikeFile, readLabAttachments, type AttachIssueReason, type AttachPayload } from "@/lib/lab-attach"
 import { buildSingleFileHtml, downloadBlob, zipFiles } from "@/lib/lab-export"
 import { NATIVE_TOOLS } from "@/lib/lab-tools-native"
 import { useMotionPref } from "@/hooks/use-motion-pref"
@@ -649,6 +650,22 @@ function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(2)} MB`
 }
+
+/**
+ * 识别「二进制素材」在项目表里的形态（data URL）。
+ * 素材对话框原本会把整串 base64 直接铺进 `<pre>`（图片也一样），
+ * 一行几十万字符既卡又没法看 —— 这里改成按类型给出真正的预览。
+ */
+function dataUrlMeta(content: string): { mime: string; bytes: number } | null {
+  const m = /^data:([^;,]+)(;base64)?,/i.exec(content)
+  if (!m) return null
+  const body = content.length - m[0].length
+  // base64 每 4 个字符 3 字节；URL 编码的文本按字符数粗略估算
+  return { mime: m[1].toLowerCase(), bytes: m[2] ? Math.floor((body * 3) / 4) : body }
+}
+
+/** 单个素材超过体积上限（与「读取失败」区分开，提示文案不同） */
+class AssetTooLarge extends Error {}
 
 export default function LabPage() {
   const { t } = useT()
@@ -1731,18 +1748,15 @@ export default function LabPage() {
   )
 
   /**
-   * 「导入文件」带进来的东西：key = 文件名，值是两种形态之一。
-   *   · `text`  —— 文本类文件，发送时并进正文；
-   *   · `image` —— 图片，转成 data URL 当**多模态内容**发（不是塞进正文）。
+   * 「导入文件」带进来的东西：key = 文件名，值是两种形态的组合。
+   *   · `text`   —— 文本 / 文档抽取结果，发送时并进正文；
+   *   · `images` —— 图片（或扫描版 PDF 的页面），转成 data URL 当**多模态内容**发。
    * 之所以分开放：图片塞进文字里模型是看不懂的（那是乱码），
    * 必须走 content parts 才能被真正「看到」。
    */
-  const attachedRef = React.useRef<Record<string, { text?: string; image?: string }>>({})
+  const attachedRef = React.useRef<Record<string, AttachPayload>>({})
 
-  /** 单张图压缩后的字符上限（≈1.5MB 二进制）—— 再大就把上游请求顶爆了 */
-  const IMAGE_MAX_CHARS = 2_000_000
-
-  /** 把 File 读成 data URL */
+  /** 把 File 读成 data URL（添加素材也用） */
   const fileToDataUrl = (file: Blob): Promise<string> =>
     new Promise((resolve, reject) => {
       const r = new FileReader()
@@ -1751,10 +1765,16 @@ export default function LabPage() {
       r.readAsDataURL(file)
     })
 
+  /** 提示里最多列 3 个文件名，剩下的用「等 N 个」收口 */
+  const namesPreview = (names: string[]): string => {
+    const shown = names.slice(0, 3).join(t("lab.attach.sep"))
+    return names.length > 3 ? `${shown}${t("lab.attach.more", { n: names.length - 3 })}` : shown
+  }
+
   /**
    * 导入文件 —— **纯本地读，不经过服务器**。
-   * 只读文本类（txt/md/json/csv/代码/日志…）；图片等二进制只登记名字，
-   * 因为「能不能真的看图」取决于渠道是否支持多模态，这里不替它做假设。
+   * 支持文本/代码、PDF（扫描件渲染成图）、Word / Excel / PPT / EPUB、压缩包、
+   * 图片等；读不了的文件会**明确提示原因**，不再像以前那样静默丢掉。
    */
   const handleAttach = async (): Promise<string[]> => {
     const picked = await new Promise<FileList | null>((resolve) => {
@@ -1765,50 +1785,37 @@ export default function LabPage() {
       input.click()
     })
     if (!picked?.length) return []
-    const names: string[] = []
-    for (const f of Array.from(picked)) {
-      names.push(f.name)
-      /**
-       * 图片走多模态：**必须先压缩**再转 data URL。
-       * 手机拍的原图动辄 5~10MB，base64 之后还要再涨 1/3，直接传会把请求顶爆、
-       * 也会让上游按 token 计费的部分变得很贵。压到长边 1600 / 1.5MB 以内已经够模型看清。
-       */
-      if (f.type.startsWith("image/")) {
-        try {
-          // 不能压的（或压完还是太大）就退回原图
-          const small = (await compressToLimit(f, 1_500_000)) ?? f
-          const url = await fileToDataUrl(small)
-          /**
-           * ⚠️ 只有落在**上游认的那几种格式**里才带内容。
-           * 后端白名单是 png/jpeg/webp/gif（不收 svg、avif、heic、bmp 这些）——
-           * 不在这里挡一下，用户会看到「图发出去了但模型完全不知道有这么张图」，
-           * 而且**一句提示都没有**，非常难排查。
-           */
-          if (!/^data:image\/(png|jpe?g|webp|gif);base64,/.test(url)) {
-            toast.error(t("lab.attach.imageFormat"))
-          } else if (url.length > IMAGE_MAX_CHARS) {
-            toast.error(t("lab.attach.imageTooLarge"))
-          } else {
-            attachedRef.current[f.name] = { image: url }
-          }
-        } catch {
-          toast.error(t("lab.attach.imageFailed"))
-        }
-        continue
+    const loadingId = toast.loading(t("lab.attach.reading"))
+    try {
+      const { items, issues, truncated } = await readLabAttachments(Array.from(picked))
+      for (const [name, payload] of Object.entries(items)) {
+        attachedRef.current[name] = payload
       }
-      // 太大的别塞进上下文：200KB 以上的正文会直接把这一轮撑爆
-      if (f.size > 200_000) continue
-      const isText =
-        /^text\/|json|csv|javascript|xml|html|markdown/.test(f.type) ||
-        /\.(txt|md|json|csv|js|ts|tsx|jsx|css|html|yml|yaml|log)$/i.test(f.name)
-      if (!isText) continue
-      try {
-        attachedRef.current[f.name] = { text: await f.text() }
-      } catch {
-        /* 读不了就只留个文件名，不阻断发送 */
+
+      const namesOf = (reason: AttachIssueReason): string[] =>
+        issues.filter((i) => i.reason === reason).map((i) => i.name)
+      const warn = (reason: AttachIssueReason, key: string) => {
+        const names = namesOf(reason)
+        if (names.length) toast.warning(t(key, { n: names.length, names: namesPreview(names) }))
       }
+      warn("unsupported", "lab.attach.unsupported")
+      warn("tooLarge", "lab.attach.tooLarge")
+      warn("readFailed", "lab.attach.readFailed")
+      warn("imageFormat", "lab.attach.imageIssue")
+      warn("imageTooLarge", "lab.attach.imageTooLargeList")
+      warn("imageLimit", "lab.attach.imageLimit")
+      if (truncated.length) {
+        toast.info(t("lab.attach.truncated", { n: truncated.length, names: namesPreview(truncated) }))
+      }
+
+      // 只把**真的读到内容**的挂到输入框；失败的文件已由上面的提示说明
+      return Object.keys(items)
+    } catch {
+      toast.error(t("lab.err.generic"))
+      return []
+    } finally {
+      toast.dismiss(loadingId)
     }
-    return names
   }
 
   /**
@@ -1826,8 +1833,8 @@ export default function LabPage() {
     for (const n of names ?? []) {
       const got = attachedRef.current[n]
       if (!got) continue
-      if (got.image) images.push(got.image)
-      else if (got.text) bodies.push(t("lab.attach.fileHeader", { name: n, text: got.text }))
+      if (got.text) bodies.push(t("lab.attach.fileHeader", { name: n, text: got.text }))
+      if (got.images) images.push(...got.images)
     }
     attachedRef.current = {}
     return {
@@ -4172,52 +4179,160 @@ export default function LabPage() {
   // ---- 本地文件夹 ----
 
   /**
- * 添加素材（图片）→ 压缩 → data URL → 存进**同一个项目文件表**。
+ * 添加素材 → 存进**同一个项目文件表**。
  *
- * 为什么走 data URL 而不是另开二进制通道：项目文件表本来就是 `Record<路径, 字符串>`
- * （正文甚至放在 R2 里），图片编码进去之后，保存 / 预览 / 导出 / 发布**全部现有管线都能直接用**；
+ * 为什么走「字符串」而不是另开二进制通道：项目文件表本来就是 `Record<路径, 字符串>`
+ * （正文甚至放在 R2 里），素材编码进去之后，保存 / 预览 / 导出 / 发布**全部现有管线都能直接用**；
  * 预览与导出时由 `inlineAssets`（lab-agent）把它内联进 HTML，因此 iframe 里也不会 404。
  *
- * 上限 240KB：data URL 会膨胀约 1/3（≈320KB），仍在单文件 800KB 的服务端上限之内，
- * 也不会一下吃掉 3MB 的总预算。
+ * 支持范围（2026-10-17 站长反馈：原来只收图片，应该不限格式）：
+ *   · 图片 —— 栅格图压到 240KB 以内再转 data URL；**SVG 保留原文**（矢量、可编辑）；
+ *   · 文本类（json / gltf / obj / js / css / md…）—— 直接存原文，AI 也能读改；
+ *   · 其余二进制（字体、音频、视频、glb…）—— data URL 原样存。
+ *
+ * 体积约束来自服务端（worker/src/handlers/lab.ts）：单文件 800KB、作品合计 3MB。
+ * 这里按 **700KB / 2.9MB** 先挡，避免用户点保存时才被整单拒绝。
  */
 const ASSET_MAX_BYTES = 240_000
+const ASSET_MAX_CHARS = 700_000
+const ASSET_TOTAL_CHARS = 2_900_000
+
+const assetExt = (f: File): string => {
+  const i = f.name.lastIndexOf(".")
+  if (i > 0 && i < f.name.length - 1) return f.name.slice(i + 1).toLowerCase()
+  const sub = /^(?:image|audio|video|font)\/([\w.+-]+)$/i.exec(f.type)?.[1]
+  return sub ? sub.toLowerCase() : "bin"
+}
+
+/**
+ * Windows 上不少素材类型 `File.type` 是空串或 `application/octet-stream`
+ * （ttf/otf/glb 都这样）。直接 FileReader 会把 data URL 标成 octet-stream，
+ * 预览里显示得莫名其妙，浏览器按 MIME 处理字体/模型时也可能不认。
+ * 这里按扩展名补一份常见类型。
+ */
+const ASSET_MIME: Record<string, string> = {
+  heic: "image/heic",
+  heif: "image/heif",
+  avif: "image/avif",
+  bmp: "image/bmp",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  ttf: "font/ttf",
+  otf: "font/otf",
+  woff: "font/woff",
+  woff2: "font/woff2",
+  eot: "application/vnd.ms-fontobject",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  ogg: "audio/ogg",
+  m4a: "audio/mp4",
+  flac: "audio/flac",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mov: "video/quicktime",
+  glb: "model/gltf-binary",
+  gltf: "model/gltf+json",
+  obj: "text/plain",
+  stl: "model/stl",
+  wasm: "application/wasm",
+  pdf: "application/pdf",
+  zip: "application/zip",
+}
+
+const assetBlob = (f: File): Blob => {
+  const type =
+    f.type && f.type !== "application/octet-stream" ? f.type : ASSET_MIME[assetExt(f)] ?? f.type
+  return type && type !== f.type ? new Blob([f], { type }) : f
+}
+
+const readAssetContent = async (f: File): Promise<string> => {
+  const readText = async (): Promise<string> => {
+    // 4MB 以上不可能压到 700k 字符以内（UTF-8 一个字符至少 1 字节），先挡掉再读
+    if (f.size > ASSET_MAX_CHARS * 4) throw new AssetTooLarge()
+    return decodeTextBytes(new Uint8Array(await f.arrayBuffer())).replace(/\u0000/g, "")
+  }
+  // SVG 是文本：存原文比转位图更小、可缩放、AI 还能直接改
+  if (f.type === "image/svg+xml" || assetExt(f) === "svg") {
+    const text = await readText()
+    if (text.length > ASSET_MAX_CHARS) throw new AssetTooLarge()
+    return text
+  }
+  if (f.type.startsWith("image/")) {
+    // compressToLimit 压不到目标体积时返回 null（不是抛错）
+    const small = await compressToLimit(f, ASSET_MAX_BYTES)
+    if (small) return fileToDataUrl(small)
+    /**
+     * 浏览器解不了这张图（HEIC 之类），或压不下去。
+     * 只要原始体积还在单文件预算内，就**原样存** —— 用户要的是「素材能进项目」，
+     * 网页里用不用得了由浏览器能力决定，不该由我们直接拒收。
+     */
+    if (f.size <= Math.floor(ASSET_MAX_CHARS * 0.73)) {
+      const url = await fileToDataUrl(assetBlob(f))
+      if (url.length <= ASSET_MAX_CHARS) return url
+    }
+    throw new AssetTooLarge()
+  }
+  if (isTextLikeFile(f.name, f.type)) {
+    const text = await readText()
+    if (text.length > ASSET_MAX_CHARS) throw new AssetTooLarge()
+    return text
+  }
+  // 其余按二进制处理：先按 base64 膨胀 1/3 粗判，再按实际 data URL 长度收口
+  if (f.size > Math.floor(ASSET_MAX_CHARS * 0.73)) throw new AssetTooLarge()
+  const url = await fileToDataUrl(assetBlob(f))
+  if (url.length > ASSET_MAX_CHARS) throw new AssetTooLarge()
+  return url
+}
 
 const ingestAssets = async (picked: File[]) => {
   if (!picked.length) return
   setLocalBusy(true)
   try {
     const add: Record<string, string> = {}
-    let skipped = 0
+    /** 预算表：同一个路径重复添加时按「替换」算，不重复占额度 */
+    const budget: Record<string, string> = { ...filesRef.current }
+    let total = Object.values(budget).reduce((n, s) => n + s.length, 0)
+    let tooLarge = 0
+    let failed = 0
+    let overLimit = 0
+
     for (const f of picked) {
-      const ext = (f.name.split(".").pop() ?? "png").toLowerCase()
+      const ext = assetExt(f)
+      // 保留中文/Unicode 字母，别把「字体.ttf」压成「__.ttf」
       const base =
-        f.name.replace(/\.[^.]+$/, "").replace(/[^\w.\-]+/g, "_").slice(0, 40) || "asset"
+        f.name.replace(/\.[^.]+$/, "").replace(/[^\p{L}\p{N}._-]+/gu, "_").slice(0, 40) || "asset"
       const path = `assets/${base}.${ext}`
       try {
-        // compressToLimit 压不到目标体积时返回 null（不是抛错）⇒ 计入跳过
-        const small = await compressToLimit(f, ASSET_MAX_BYTES)
-        if (!small) {
-          skipped++
+        const content = await readAssetContent(f)
+        const baseLen = total - (budget[path]?.length ?? 0)
+        if (baseLen + content.length > ASSET_TOTAL_CHARS) {
+          overLimit++
           continue
         }
-        add[path] = await fileToDataUrl(small)
-      } catch {
-        skipped++
+        add[path] = content
+        budget[path] = content
+        total = baseLen + content.length
+      } catch (e) {
+        if (e instanceof AssetTooLarge) tooLarge++
+        else failed++
       }
     }
+
     const names = Object.keys(add)
     if (names.length === 0) {
       toast.error(t("lab.assets.none"))
-      return
+    } else {
+      const merged = { ...filesRef.current, ...add }
+      filesRef.current = merged
+      setFiles(merged)
+      setPreview(buildPreviewDoc(merged))
+      setPreviewSeq((s) => s + 1)
+      toast.success(t("lab.assets.done").replace("{n}", String(names.length)))
     }
-    const merged = { ...filesRef.current, ...add }
-    filesRef.current = merged
-    setFiles(merged)
-    setPreview(buildPreviewDoc(merged))
-    setPreviewSeq((s) => s + 1)
-    toast.success(t("lab.assets.done").replace("{n}", String(names.length)))
-    if (skipped > 0) toast.warning(t("lab.assets.skipped").replace("{n}", String(skipped)))
+    // 失败原因照常提示（即使一个都没成功，用户也需要知道是「太大」还是「读取失败」）
+    if (tooLarge > 0) toast.warning(t("lab.assets.skipped").replace("{n}", String(tooLarge)))
+    if (failed > 0) toast.warning(t("lab.assets.failed").replace("{n}", String(failed)))
+    if (overLimit > 0) toast.warning(t("lab.assets.limit").replace("{n}", String(overLimit)))
   } catch {
     toast.error(t("lab.err.generic"))
   } finally {
@@ -4229,7 +4344,7 @@ const ingestAssets = async (picked: File[]) => {
 const doAddAssets = () => {
   const input = document.createElement("input")
   input.type = "file"
-  input.accept = "image/*"
+  // ⚠️ 刻意**不设 accept**：素材不只图片，字体/音频/视频/模型/JSON 都要能选
   input.multiple = true
   input.onchange = () => void ingestAssets([...(input.files ?? [])])
   input.click()
@@ -5727,9 +5842,55 @@ const doImportLocal = async () => {
                   </button>
                 ))}
               </div>
-              <pre className="max-h-[50vh] overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-[11px] leading-relaxed">
-                {files[viewFile ?? filePaths[0]] ?? ""}
-              </pre>
+              {(() => {
+                const content = files[viewFile ?? filePaths[0]] ?? ""
+                const meta = dataUrlMeta(content)
+                if (!meta) {
+                  return (
+                    <pre className="max-h-[50vh] overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-[11px] leading-relaxed">
+                      {content}
+                    </pre>
+                  )
+                }
+                if (meta.mime.startsWith("image/")) {
+                  return (
+                    <div className="flex max-h-[50vh] flex-col items-center justify-center gap-2 overflow-auto rounded-md border bg-muted/40 p-3">
+                      <img src={content} alt="" className="max-h-[42vh] max-w-full object-contain" />
+                      <span className="text-[10px] text-muted-foreground">
+                        {meta.mime} · {formatBytes(meta.bytes)}
+                      </span>
+                    </div>
+                  )
+                }
+                if (meta.mime.startsWith("audio/")) {
+                  return (
+                    <div className="flex flex-col justify-center gap-2 rounded-md border bg-muted/40 p-4">
+                      <audio controls src={content} className="w-full" />
+                      <span className="text-[10px] text-muted-foreground">
+                        {meta.mime} · {formatBytes(meta.bytes)}
+                      </span>
+                    </div>
+                  )
+                }
+                if (meta.mime.startsWith("video/")) {
+                  return (
+                    <div className="flex flex-col gap-2 rounded-md border bg-muted/40 p-3">
+                      <video controls src={content} className="max-h-[42vh] w-full rounded" />
+                      <span className="text-[10px] text-muted-foreground">
+                        {meta.mime} · {formatBytes(meta.bytes)}
+                      </span>
+                    </div>
+                  )
+                }
+                return (
+                  <div className="flex max-h-[50vh] flex-col items-center justify-center gap-1 overflow-auto rounded-md border bg-muted/40 p-6 text-center">
+                    <p className="text-xs font-medium">{t("lab.files.binary")}</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {meta.mime} · {formatBytes(meta.bytes)}
+                    </p>
+                  </div>
+                )
+              })()}
             </div>
           )}
           <DialogFooter className="sm:justify-between">

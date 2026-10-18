@@ -7,13 +7,14 @@
  * 所以调用方必须先看 supportsLocalFs()，不支持就别显示按钮。
  */
 import type { FileMap } from "./lab-agent"
+import { dataUrlToBytes } from "./data-url"
 
 type FileHandle = {
   kind: "file"
   name: string
   getFile(): Promise<File>
   createWritable(): Promise<{
-    write(data: string): Promise<void>
+    write(data: string | Uint8Array): Promise<void>
     close(): Promise<void>
   }>
 }
@@ -220,7 +221,9 @@ export async function writeFilesInto(
     }
     const fh = await cur.getFileHandle(parts[parts.length - 1], { create: true })
     const writable = await fh.createWritable()
-    await writable.write(content)
+    // data URL 素材（图片/字体/音频…）写成真正的二进制文件
+    const bytes = dataUrlToBytes(content)
+    await writable.write(bytes ?? content)
     await writable.close()
     written++
   }

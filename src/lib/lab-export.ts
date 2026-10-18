@@ -9,6 +9,8 @@
  * 代价是导出的包比能压缩的大一些 —— 作品都是文本，几百 KB 量级，可以接受。
  */
 
+import { dataUrlToBytes } from "@/lib/data-url"
+
 /** HTML 里的转义（内联脚本内容时不能让它提前闭合） */
 function escapeForInlineScript(code: string): string {
   return code.replace(/<\/script/gi, "<\\/script")
@@ -121,7 +123,8 @@ export function zipFiles(files: Record<string, string>): Blob {
     const name = normalizePath(rawPath)
     if (!name) continue
     const nameBytes = enc.encode(name)
-    const data = enc.encode(content)
+    // data URL（图片/字体/音频…）导出成真正的二进制，而不是把 base64 文本写进文件
+    const data = dataUrlToBytes(content) ?? enc.encode(content)
     const crc = crc32(data)
 
     const local = [

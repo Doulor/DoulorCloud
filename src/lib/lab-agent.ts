@@ -967,23 +967,57 @@ export function inlineAssets(html: string, files: FileMap, entry?: string): stri
     return assetToDataUrl(ref, content)
   }
 
-  // <img src> —— 精确替换 src 属性，不能用字符串 replace（src 可能出现在 data-src 里）
-  let out = html.replace(/<img\b[^>]*>/gi, (tag) => {
-    const src = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1]
-    if (!src) return tag
-    const url = asUrl(src)
+  // 精确替换某个标签上的属性值（不能用字符串 replace：src 可能出现在 data-src 里）
+  const inlineAttr = (tag: string, attr: string): string => {
+    // 前面必须是空白：否则 `\bsrc` 会把 `data-src` 也匹配进来
+    const re = new RegExp(`(?:^|\\s)${attr}\\s*=\\s*["']([^"']+)["']`, "i")
+    const ref = re.exec(tag)?.[1]
+    if (!ref) return tag
+    const url = asUrl(ref)
     if (!url) return tag
-    return tag.replace(/(\bsrc\s*=\s*["'])([^"']+)(["'])/i, (_m, a: string, _b: string, z: string) => `${a}${url}${z}`)
-  })
+    const rep = new RegExp(`((?:^|\\s)${attr}\\s*=\\s*["'])([^"']+)(["'])`, "i")
+    return tag.replace(rep, (_m, a: string, _b: string, z: string) => `${a}${url}${z}`)
+  }
+
+  /**
+   * 素材引用：图片之外还要覆盖**字体 / 音频 / 视频 / 嵌入对象**。
+   * 「添加素材」已经不限于图片（2026-10-17），这些标签不内联的话，
+   * 素材虽然进了项目表，预览里依然 404 —— 用户只会以为文件没加成功。
+   */
+  const TAG_ATTRS: [string, string][] = [
+    ["img", "src"],
+    ["audio", "src"],
+    ["video", "src"],
+    ["video", "poster"],
+    ["source", "src"],
+    ["track", "src"],
+    ["embed", "src"],
+    ["object", "data"],
+    ["input", "src"], // <input type="image">
+  ]
+  let out = html
+  for (const [tag, attr] of TAG_ATTRS) {
+    out = out.replace(new RegExp(`<${tag}\\b[^>]*>`, "gi"), (t) => inlineAttr(t, attr))
+  }
+
+  // 读标签属性（支持双引号 / 单引号 / 不带引号；rel 可能是 "shortcut icon" 这种多词值）
+  const attrValue = (tag: string, name: string): string => {
+    const m = new RegExp(
+      `(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
+      "i"
+    ).exec(tag)
+    return m?.[1] ?? m?.[2] ?? m?.[3] ?? ""
+  }
 
   // <link rel="icon"> —— favicon 同理，否则标签页图标是空的
+  // <link rel="preload" as="font|image|audio|video|style"> —— 预加载的素材也要能解析
   out = out.replace(/<link\b[^>]*>/gi, (tag) => {
-    if (!/\brel\s*=\s*["']?[^"'>]*icon/i.test(tag)) return tag
-    const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1]
-    if (!href) return tag
-    const url = asUrl(href)
-    if (!url) return tag
-    return tag.replace(/(\bhref\s*=\s*["'])([^"']+)(["'])/i, (_m, a: string, _b: string, z: string) => `${a}${url}${z}`)
+    const rel = attrValue(tag, "rel")
+    const as = attrValue(tag, "as")
+    if (!/icon/i.test(rel) && !(/preload/i.test(rel) && /^(font|image|audio|video|style)$/i.test(as))) {
+      return tag
+    }
+    return inlineAttr(tag, "href")
   })
 
   // CSS 里的 url(...)：<style> 块（含上面刚内联进来的 <link> 样式表）
