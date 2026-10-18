@@ -393,6 +393,13 @@ export const SETTING_DEFAULTS = {
   /** 社区发帖最多图片数 */
   community_post_max_images: "9",
   /**
+   * 社区评论最多可修改次数（0 = 禁止修改）。默认 2，管理面板可改（允许 0–10）。
+   *
+   * 2026-10-17 站长要求：评论发布后可修改，但最多 2 次，且次数由管理员控制。
+   * 读取点在 handlers/community.ts 的 commentEditLimit()（编辑接口与 /community/config 共用）。
+   */
+  community_comment_edit_limit: "2",
+  /**
    * 帖子分类（JSON 数组，管理面板可改）。每项：`{ key, zh, en, water? }`
    *
    * 2026-10-07 站长要求从硬编码改成可配，并加了「水帖」。
