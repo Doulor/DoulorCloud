@@ -2284,6 +2284,18 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
       continue
     }
 
+    // community_comment_edit_limit：评论最多可修改次数（2026-10-17）。
+    // 0 = 禁止修改；上限 10。必须单独校验：通用分支（/bytes|quota|count/）不匹配这个键名，
+    // 会走最后 `str.slice(0, 100)` 把任意字符串（"abc"、"-1"）原样存进去。
+    if (key === "community_comment_edit_limit") {
+      const n = Number(str)
+      if (!Number.isInteger(n) || n < 0 || n > 10) {
+        throw new ApiError(400, "评论修改次数上限需为 0 ~ 10 的整数", "INVALID_INPUT")
+      }
+      values[key] = String(n)
+      continue
+    }
+
     // temp_mailbox_refresh_daily_limit：临时邮箱每天最多刷新次数，非负整数（0 = 不限）。
     if (key === "temp_mailbox_refresh_daily_limit") {
       const n = Number(str)

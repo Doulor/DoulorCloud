@@ -119,6 +119,24 @@ const REASON_LABEL: Record<string, string> = {
   transfer_in: "pt.reason.transferIn",
 }
 
+/**
+ * 「超过 48 小时仍未交付」的天数；不满足返回 null（2026-10-19）。
+ *
+ * 为什么加：人工交付的订单如果卖家一直不发货，**买家的积分会一直锁在托管里**，
+ * 而原先列表上和其他 pending 长得一模一样，管理员根本看不出哪些已经烂掉。
+ * 线上实测：13 单、11 个买家、289 积分锁着，最久的挂了 14 天。
+ *
+ * 只对「等对方交付」的中间态（pending）生效 —— delivered 之后主动权在买家手上，
+ * 有自动确认收货兜底，不该算超时。阈值 48 小时：正常人工交付当天就该完成。
+ */
+function staleOrderDays(order: { status: string; createdAt: string }): number | null {
+  if (order.status !== "pending") return null
+  const t = Date.parse(order.createdAt)
+  if (Number.isNaN(t)) return null
+  const days = Math.floor((Date.now() - t) / 86_400_000)
+  return days >= 2 ? days : null
+}
+
 /** 订单状态 → 标签（用户商品订单的 pending/delivered 含义不同，用 orderStatusText 区分） */
 const ORDER_STATUS: Record<string, { label: string; variant: "default" | "outline" | "secondary" | "success" }> = {
   pending: { label: "pt.status.pending", variant: "default" },
@@ -1415,6 +1433,12 @@ function ShopTab() {
                           <Badge variant={st.variant} className="text-[10px]">
                             {t(orderStatusText(o.status, isUserOrder))}
                           </Badge>
+                          {/* 超时未交付：红标，让管理员一眼看出哪些单已经烂在托管里 */}
+                          {staleOrderDays(o) !== null && (
+                            <Badge variant="destructive" className="ml-1 text-[10px]">
+                              {t("ap.order.stale", { n: String(staleOrderDays(o)) })}
+                            </Badge>
+                          )}
                           {o.note && (
                             <p className="mt-0.5 max-w-[16rem] truncate text-[10px] text-muted-foreground">
                               {o.note}

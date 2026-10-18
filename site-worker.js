@@ -73,6 +73,20 @@ function withSecurityHeaders(res) {
 }
 
 /**
+ * 整站 301 到主站的域名（2026-10-17 站长要求：让 7u.nz 跳转到自己的网站）。
+ *
+ * ⚠️ **只**包含根域与 www —— `*.7u.nz` 是站内用户绑定的子域名（名片 / 网盘直链），
+ *    它们由 API Worker 的动态 Route 处理，绝不能被这里截走，所以：
+ *    · 不匹配泛域名，逐个 host 精确判断
+ *    · 子域名不会命中这个 Set
+ *
+ * 用 301 而不是 302：这两个 host 之前**没有对外提供过任何内容**（根域无 DNS 记录、
+ * www 走通配占位返回 522），所以不存在"用户浏览器已缓存 301 改不回来"的风险；
+ * 反过来 301 能正确把搜索权重合并到主站。
+ */
+const SITE_REDIRECTS = new Map([["7u.nz", "https://cloud.doulor.cn"], ["www.7u.nz", "https://cloud.doulor.cn"]])
+
+/**
  * 需要转发给 API Worker 的**根级**路径白名单（2026-10-17）。
  *
  * 背景（用户 ventus 反馈「中转站用 oauth 登不进去」）：
@@ -122,6 +136,12 @@ export default {
     if (url.protocol === "http:") {
       url.protocol = "https:"
       return Response.redirect(url.toString(), 301)
+    }
+
+    // 整站跳转（7u.nz / www.7u.nz → 主站），保留原路径与查询串
+    const redirectBase = SITE_REDIRECTS.get(url.hostname)
+    if (redirectBase) {
+      return Response.redirect(redirectBase + url.pathname + url.search, 301)
     }
 
     // OIDC 根级端点 → 转发给 API Worker（白名单见上）

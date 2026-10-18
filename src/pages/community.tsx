@@ -471,6 +471,7 @@ function CommentItem({
   postId,
   basePath,
   onReplied,
+  editLimit,
   lineUp = false,
   lineDown = false,
   parentAuthor = null,
@@ -480,6 +481,8 @@ function CommentItem({
   postId: string
   basePath: string
   onReplied: () => void
+  /** 站点允许的最大修改次数（0 = 不允许修改），来自 /community/config */
+  editLimit: number
   /** 上方是否需要补一小段竖线（自己是别人的回复） */
   lineUp?: boolean
   /** 头像下方是否需要画竖线（自己还有下级回复） */
@@ -552,8 +555,67 @@ function CommentItem({
     }
   }
 
+  // ---- 评论编辑 / 删除（2026-10-17）----
+  const editCount = Number(node.editCount) || 0
+  /** 只有作者本人能改；管理员要处理违规内容请用删除 */
+  const isMine = Boolean(user && user.id === node.user_id)
+  const canEdit = isMine && !node.deleted && editLimit > 0 && editCount < editLimit
+  const canDelete = !node.deleted && (isMine || Boolean(user && user.role !== "user"))
+
+  const [editing, setEditing] = React.useState(false)
+  const [editText, setEditText] = React.useState("")
+  const [editBusy, setEditBusy] = React.useState(false)
+  const editTaRef = React.useRef<HTMLTextAreaElement>(null)
+  const insertEditEmoji = useEmojiInsert(editTaRef, editText, setEditText)
+  const { dragging: editDragging, dropProps: editDropProps } = useImageDrop({ onImage: insertEditEmoji })
+
+  const startEdit = () => {
+    setEditText(node.body)
+    setEditing(true)
+    setReplying(false)
+    // 等 textarea 挂载后再聚焦
+    setTimeout(() => editTaRef.current?.focus(), 0)
+  }
+
+  const submitEdit = async () => {
+    if (!editText.trim() || editBusy) return
+    if (editText.trim() === node.body) {
+      setEditing(false)
+      return
+    }
+    setEditBusy(true)
+    try {
+      await communityApi.updateComment(node.id, editText.trim())
+      setEditing(false)
+      toast.success(t("cm.ok.commentUpdated"))
+      onReplied()
+    } catch (err) {
+      // 次数上限 / 并发冲突 / 已删除都由后端给出准确文案，优先展示
+      toast.error(errMsg(err, t("cm.err.editComment")))
+      // 失败后刷新一次：把最新 editCount 与「已被删除」状态同步下来
+      onReplied()
+    } finally {
+      setEditBusy(false)
+    }
+  }
+
+  const removeComment = async () => {
+    if (!confirm(t("cm.confirmDeleteComment"))) return
+    try {
+      await communityApi.deleteComment(node.id)
+      toast.success(t("cm.ok.commentDeleted"))
+      onReplied()
+    } catch (err) {
+      toast.error(errMsg(err, t("cm.err.deleteComment")))
+    }
+  }
+
   return (
-    <div className={cn("relative flex gap-3 px-3 py-3", topBorder && "border-t")}>
+    <div
+      className={cn("relative flex gap-3 px-3 py-3", topBorder && "border-t")}
+      data-comment-id={node.id}
+      data-comment-deleted={node.deleted ? "1" : undefined}
+    >
       {/* 盖楼竖线：与上下相邻行接续，构成推特那种连续连线 */}
       {lineUp && (
         <span
@@ -605,6 +667,15 @@ function CommentItem({
           <span className="shrink-0 text-xs text-muted-foreground" title={fmtTime(node.createdAt)}>
             · {relTime(node.createdAt)}
           </span>
+          {/* 修改次数（站长要求放右上角）：只对未删除且改过的评论显示 */}
+          {!node.deleted && editCount > 0 && (
+            <span
+              className="ml-auto shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+              title={node.updatedAt ? t("cm.editedAt", { time: fmtTime(node.updatedAt) }) : undefined}
+            >
+              {t("cm.editCount", { n: editCount })}
+            </span>
+          )}
         </div>
 
         {/* 盖楼标注：不再用缩进，改成「回复 @某某」一行 */}
@@ -615,34 +686,110 @@ function CommentItem({
           </p>
         )}
 
-        <div className="mt-1" onContextMenu={onStickerContextMenu}>
-          <Markdown stickerSaveButton={false}>{node.body}</Markdown>
-        </div>
-
-        <div className="mt-1.5 flex items-center gap-3">
-          <button
-            onClick={() => void toggleLike()}
-            className={cn(
-              "flex items-center gap-1 text-xs transition-colors",
-              liked ? "text-primary" : "text-muted-foreground hover:text-foreground"
-            )}
-            title={t("cm.like")}
+        {node.deleted ? (
+          /* 已删除评论：内容已由服务端清空，这里只留一条划线占位，回复树不断链 */
+          <p className="mt-1 text-sm italic text-muted-foreground line-through decoration-muted-foreground/40">
+            {t("cm.commentDeleted")}
+          </p>
+        ) : editing ? (
+          <div
+            {...editDropProps}
+            className={cn("relative mt-2", editDragging && "rounded-md ring-2 ring-primary")}
           >
-            <Heart className={cn("h-3.5 w-3.5", liked && "fill-current")} />
-            {likeCount > 0 && <span className="tabular-nums">{likeCount}</span>}
-            <span>{t("cm.like")}</span>
-          </button>
-          {user && (
-            <button
-              onClick={() => setReplying((v) => !v)}
-              className="text-xs text-muted-foreground transition-colors hover:text-foreground"
-            >
-              {replying ? t("cm.cancelReply") : t("cm.reply")}
-            </button>
-          )}
-        </div>
+            <Textarea
+              ref={editTaRef}
+              value={editText}
+              onChange={(e) => setEditText(e.target.value)}
+              rows={3}
+              placeholder={t("cm.editCommentPh")}
+              className="text-sm"
+            />
+            <DraftImagePreview text={editText} className="mt-1.5" setText={setEditText} />
+            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+              <EmojiPicker onPick={insertEditEmoji} />
+              <StickerPanel onPick={insertEditEmoji} />
+              <span className="ml-auto text-[11px] text-muted-foreground">
+                {t("cm.editRemaining", { n: Math.max(0, editLimit - editCount) })}
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setEditing(false)}
+                disabled={editBusy}
+              >
+                {t("common.cancel")}
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => void submitEdit()}
+                disabled={editBusy || !editText.trim()}
+              >
+                {editBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {t("common.save")}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-1" onContextMenu={onStickerContextMenu}>
+            <Markdown stickerSaveButton={false}>{node.body}</Markdown>
+          </div>
+        )}
 
-        {replying && (
+        {/* 已删除的占位不提供点赞 / 回复 / 再编辑 */}
+        {!node.deleted && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-3">
+            <button
+              onClick={() => void toggleLike()}
+              className={cn(
+                "flex items-center gap-1 text-xs transition-colors",
+                liked ? "text-primary" : "text-muted-foreground hover:text-foreground"
+              )}
+              title={t("cm.like")}
+            >
+              <Heart className={cn("h-3.5 w-3.5", liked && "fill-current")} />
+              {likeCount > 0 && <span className="tabular-nums">{likeCount}</span>}
+              <span>{t("cm.like")}</span>
+            </button>
+            {user && (
+              <button
+                onClick={() => {
+                  setReplying((v) => !v)
+                  setEditing(false)
+                }}
+                className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+              >
+                {replying ? t("cm.cancelReply") : t("cm.reply")}
+              </button>
+            )}
+            {canEdit && !editing && (
+              <button
+                onClick={startEdit}
+                className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <PenSquare className="h-3.5 w-3.5" />
+                {t("common.edit")}
+              </button>
+            )}
+            {canDelete && (
+              <button
+                onClick={() => void removeComment()}
+                className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-destructive"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {t("common.delete")}
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* 次数用尽时给出明确原因，避免用户以为编辑入口消失了 */}
+        {!node.deleted && isMine && !canEdit && editLimit > 0 && editCount >= editLimit && (
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            {t("cm.editLimitReached", { n: editLimit })}
+          </p>
+        )}
+
+        {!node.deleted && replying && (
           <div
             {...dropProps}
             className={cn("relative mt-2", dragging && "rounded-md ring-2 ring-primary")}
@@ -726,11 +873,13 @@ function CommentTree({
   postId,
   basePath,
   onReplied,
+  editLimit,
 }: {
   comments: CommentNode[]
   postId: string
   basePath: string
   onReplied: () => void
+  editLimit: number
 }) {
   const { t } = useT()
   const [expanded, setExpanded] = React.useState<Set<string>>(() => new Set())
@@ -753,6 +902,7 @@ function CommentTree({
             postId={postId}
             basePath={basePath}
             onReplied={onReplied}
+            editLimit={editLimit}
             parentAuthor={row.parentAuthor}
             lineUp={row.lineUp}
             lineDown={row.lineDown}
@@ -827,7 +977,16 @@ function PostDetailSkeleton() {
   )
 }
 
-function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
+function PostDetail({
+  id,
+  inDashboard,
+  commentEditLimit,
+}: {
+  id: string
+  inDashboard: boolean
+  /** 评论最多可修改次数（来自 /community/config，默认 2） */
+  commentEditLimit: number
+}) {
   const { t } = useT()
   const [post, setPost] = React.useState<Post | null>(null)
   const [comments, setComments] = React.useState<CommentNode[]>([])
@@ -1192,7 +1351,13 @@ function PostDetail({ id, inDashboard }: { id: string; inDashboard: boolean }) {
             {t("cm.noComments")}
           </div>
         ) : (
-          <CommentTree comments={comments} postId={id} basePath={basePath} onReplied={reloadComments} />
+          <CommentTree
+            comments={comments}
+            postId={id}
+            basePath={basePath}
+            onReplied={reloadComments}
+            editLimit={commentEditLimit}
+          />
         )}
       </div>
 
@@ -1697,6 +1862,11 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
   const [cursor, setCursor] = React.useState<string | undefined>(undefined)
   /** 生效中的分类（管理面板可配）：发帖框、帖子卡片、筛选下拉都从这里取名字 */
   const [categories, setCategories] = React.useState<PostCategoryDef[]>([])
+  /**
+   * 评论最多可修改次数（0 = 不允许修改）。默认 2 与后端默认值一致，
+   * 配置拉不到时也不会把「编辑」入口整个藏掉。
+   */
+  const [commentEditLimit, setCommentEditLimit] = React.useState(2)
   /** 第一层筛选：排序方式 */
   const [sort, setSort] = React.useState<"latest" | "hot">("latest")
   /** 第二层筛选：范围（全部 / 某个分类） */
@@ -1790,7 +1960,10 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
     communityApi
       .getConfig()
       .then((c) => {
-        if (!cancelled) setCategories(c.categories ?? [])
+        if (!cancelled) {
+          setCategories(c.categories ?? [])
+          if (Number.isFinite(c.commentEditLimit)) setCommentEditLimit(c.commentEditLimit)
+        }
       })
       .catch(() => {
         /* 静默：分类拉不到不影响浏览帖子 */
@@ -2019,7 +2192,7 @@ export default function CommunityPage({ inDashboard = false }: { inDashboard?: b
     }
   }
 
-  if (id) return <PostDetail id={id} inDashboard={inDashboard} />
+  if (id) return <PostDetail id={id} inDashboard={inDashboard} commentEditLimit={commentEditLimit} />
 
   return (
     <div>

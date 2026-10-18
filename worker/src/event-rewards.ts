@@ -10,7 +10,7 @@
  * 唯一索引 + INSERT OR IGNORE 就是并发锁，handler 本身不需要再判重。
  */
 import { parsePermissions, hasFeature, FEATURES, type Feature } from "./permissions"
-import { adminSetQuota, getCurrencyInfo } from "./newapi-client"
+import { adminSetQuota, getCurrencyInfo, findUserByUsername } from "./newapi-client"
 import { getSetting } from "./settings"
 import { applyPoints } from "./points"
 import { checkStarred, checkContributedPr, isRepoSlug } from "./github"
@@ -179,6 +179,66 @@ export function pickPointsAmount(
   return { amount: fixed, min: fixed, max: fixed, random: false }
 }
 
+/**
+ * 给中转站钱包**加**额度，并对上游抖动做「带校验的」重试（2026-10-18）。
+ *
+ * 为什么需要：线上反复出现发奖失败，全是上游抖动 ——
+ *   · `NewAPI 设置额度失败: HTTP 502`
+ *   · `The operation was aborted`（客户端超时）
+ * 这 4 条失败记录最后都变成了人工补发。但 `adminSetQuota(..., "add")` 是
+ * **非幂等**的（加钱），盲目重试会**重复发钱**，那比人工补发更糟。
+ *
+ * 所以每次失败后**先读一次真实余额**再决定：
+ *   · 余额确实涨了 → 说明请求其实已经落地（丢的只是响应），直接当成功，不再重试
+ *   · 余额没变     → 说明请求没落地，可以安全重试
+ *   · 读不到基准值 → **一律不重试**（宁可真失败让人工兜，也不冒重复发钱的风险）
+ *
+ * 最多 3 次尝试，退避 300ms / 800ms。最终仍失败则抛出，由调用方记 failed +
+ * 管理端「领取名单」人工补发。
+ */
+async function addQuotaWithVerify(
+  env: Env,
+  newapiUserId: number,
+  username: string,
+  rawQuota: number
+): Promise<void> {
+  /** 读当前余额；读不到返回 null（**读不到就不重试**，见上） */
+  const quotaOf = async (): Promise<number | null> => {
+    try {
+      const u = await findUserByUsername(env, username)
+      return typeof u?.quota === "number" ? u.quota : null
+    } catch {
+      return null
+    }
+  }
+
+  const before = await quotaOf()
+  let lastErr: unknown = null
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await adminSetQuota(env, newapiUserId, rawQuota, "add")
+      if (attempt > 0) console.warn("发额度：第", attempt + 1, "次尝试成功", username)
+      return
+    } catch (err) {
+      lastErr = err
+      if (before === null) break // 没有基准值，不能安全重试
+      const after = await quotaOf()
+      if (after !== null && after !== before) {
+        // 请求报错了，但余额已经变了 —— 说明其实发成功了，别再发一次
+        console.warn(
+          "发额度：请求报错但余额已变化，按成功处理", username,
+          `${before} → ${after}`
+        )
+        return
+      }
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, attempt === 0 ? 300 : 800))
+      }
+    }
+  }
+  throw lastErr ?? new Error("发中转站额度失败")
+}
+
 export const REWARD_HANDLERS: Record<RewardType, RewardHandler> = {
   none: async () => ({
     status: "manual",
@@ -197,7 +257,7 @@ export const REWARD_HANDLERS: Record<RewardType, RewardHandler> = {
    * 从 ¥100,000,000.000 变 ¥100,000,000.001，界面上完全看不出来 ——
    * tianya 报「领的 500 余额没到账」就是这个原因。
    */
-  newapi_quota: async ({ env, userId, params }) => {
+  newapi_quota: async ({ env, userId, username, params }) => {
     const amount = readAmount(params, "amount", 0)
     if (amount <= 0) return { status: "failed", detail: "活动配置的金额无效。" }
 
@@ -217,7 +277,8 @@ export const REWARD_HANDLERS: Record<RewardType, RewardHandler> = {
     const perUnit = Number(await getSetting(env, "newapi_quota_per_unit")) || 500_000
     const rawQuota = Math.round(amount * perUnit)
 
-    await adminSetQuota(env, account.newapi_user_id, rawQuota, "add")
+    // 非幂等操作 + 上游抖动 ⇒ 走「带校验的重试」，避免偶发 502/aborted 变成人工补发
+    await addQuotaWithVerify(env, account.newapi_user_id, username, rawQuota)
     // 币种符号跟随中转站设置（本实例为 ¥），避免只写「500」让用户分不清是多少钱
     const { symbol } = await getCurrencyInfo(env)
     return {
@@ -1094,4 +1155,82 @@ export function pickQuizTiers(tiers: QuizTier[], percent: number): QuizTier[] {
 export function quizLinearPoints(maxPoints: number, percent: number): number {
   const p = Math.max(0, Math.min(100, percent))
   return Math.round((maxPoints * p) / 100)
+}
+
+/**
+ * 自动补发「因未开通中转站而挂起」的额度奖励（2026-10-17，用户 hsyy 反馈触发）。
+ *
+ * 真实场景：答完问卷时用户还没开中转站 ⇒ newapi_quota 发不出去，
+ * 领奖记录落成 `manual`，文案是「你还未开通 AI 中转站，无法自动发放 500 钱包余额」。
+ * 用户往往**几分钟后就开通了**，但没有任何机制回头补发 —— 只能等管理员人工处理，
+ * 而人工处理往往就是忘了（队列里躺着好几条这种）。
+ *
+ * 这里每小时扫一遍：只挑「文案标明是因未开通挂起的」且「现在已经有中转站账号」的记录，
+ * 金额从**我们自己写的**那句文案里解析（格式由本文件的 newapi_quota handler 生成，
+ * 稳定可控；解析不到就跳过，保持 manual 不动）。
+ *
+ * ⚠️ 幂等：更新时带 `AND reward_status='manual'` 条件，并发下只有一个能改成功；
+ *    已 granted 的不会被重复发。
+ */
+export async function retryPendingQuotaClaims(
+  env: Env
+): Promise<{ granted: number; skipped: number }> {
+  const rows = await env.DB.prepare(
+    `SELECT c.id, c.user_id, c.event_id, c.reward_detail, u.username
+       FROM event_claims c
+       JOIN users u ON u.id = c.user_id
+       JOIN newapi_accounts a ON a.user_id = c.user_id
+      WHERE c.reward_status = 'manual'
+        AND c.reward_type = 'newapi_quota'
+        AND c.reward_detail LIKE '%未开通 AI 中转站%'
+      LIMIT 50`
+  ).all<{
+    id: string
+    user_id: string
+    event_id: string
+    reward_detail: string
+    username: string
+  }>()
+
+  let granted = 0
+  let skipped = 0
+  for (const row of rows.results ?? []) {
+    const m = /无法自动发放\s*(\d+(?:\.\d+)?)\s*钱包余额/.exec(row.reward_detail ?? "")
+    const amount = m ? Number(m[1]) : NaN
+    if (!Number.isFinite(amount) || amount <= 0) {
+      skipped++
+      continue
+    }
+    try {
+      const res = await REWARD_HANDLERS.newapi_quota({
+        env,
+        userId: row.user_id,
+        username: row.username,
+        params: { amount },
+        eventId: row.event_id,
+      })
+      if (res.status === "granted") {
+        // 带上状态条件，避免和别的路径（人工发放）重复发
+        const upd = await env.DB.prepare(
+          `UPDATE event_claims SET reward_status = 'granted', reward_detail = ?
+            WHERE id = ? AND reward_status = 'manual'`
+        )
+          .bind(res.detail, row.id)
+          .run()
+        if ((upd.meta?.changes ?? 0) > 0) granted++
+        else skipped++
+      } else {
+        skipped++
+        await env.DB.prepare(
+          "UPDATE event_claims SET reward_detail = ? WHERE id = ? AND reward_status = 'manual'"
+        )
+          .bind(res.detail, row.id)
+          .run()
+      }
+    } catch (err) {
+      skipped++
+      console.error("自动补发额度奖励失败:", row.id, err)
+    }
+  }
+  return { granted, skipped }
 }

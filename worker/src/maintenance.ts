@@ -33,7 +33,8 @@ import { processScheduledPublishes } from "./scheduled-publish"
 import { purgeExpiredAnalytics } from "./handlers/analytics"
 import { purgeExpiredPreviews } from "./link-preview"
 import { autoPriceNewModels } from "./newapi-client"
-import { expireRentalOrders } from "./points-shop"
+import { expireRentalOrders, remindStaleOrders } from "./points-shop"
+import { retryPendingQuotaClaims } from "./event-rewards"
 import { scanDns } from "./dns-audit"
 import { sweepSuspendedDns, retrySuspendedDnsRestore, ownerStatusSql } from "./user-suspension"
 import { syncProxySubscriptionStatuses, probeProxyNodeHealth } from "./handlers/proxy"
@@ -164,6 +165,15 @@ export interface MaintenanceReport {
     notes: string[]
     errors: string[]
   }
+  /**
+   * 订单超时未交付 → 提醒卖家的条数（2026-10-17）。
+   *
+   * 只是「本次检查到几单」，不是「发了几条通知」—— 通知本身按订单号幂等，
+   * 同一单只会真正推送一次（见 points-shop.ts 的 remindStaleOrders）。
+   */
+  staleOrderReminders: number
+  /** 本次自动补发的「因未开通中转站而挂起」的额度奖励笔数（2026-10-17） */
+  quotaClaimsRetried: number
   /** 网盘记账与实际记录数不一致的用户（只报告，不自动修） */
   storageMismatches: { prefix: string; fileCount: number; actual: number; usedBytes: number }[]
   /**
@@ -324,6 +334,8 @@ async function recordRun(
           sensenovaAuditRevoked: report.sensenovaAudit.permissionsRevoked,
           rentalExpired: report.rentalExpiry.handled,
           rentalPermissionsRevoked: report.rentalExpiry.permissionsRevoked,
+          staleOrderReminders: report.staleOrderReminders,
+          quotaClaimsRetried: report.quotaClaimsRetried,
           proxyProbeNodes: report.proxyProbe?.nodes ?? 0,
           proxyProbeUp: report.proxyProbe?.up ?? 0,
           tableRows: report.tableRows,
@@ -451,6 +463,29 @@ export async function runMaintenance(
   } catch (err) {
     // 表未迁移：只记日志。OAuth 清理失败不该让整个运维任务报错
     console.error("OAuth 过期数据清理失败（表可能未迁移）:", err)
+  }
+
+  // 4a-2) 订单超时未交付 → 再提醒卖家一次（2026-10-17）
+  //
+  // 只提醒、不动钱；幂等由 notifyOrder 的 dedupKey 保证，跑多少次都只提醒一次。
+  let staleOrderReminders = 0
+  try {
+    const r = await remindStaleOrders(env)
+    staleOrderReminders = r.considered
+  } catch (err) {
+    console.error("订单超时提醒失败:", err)
+  }
+
+  // 4a-3) 补发「因未开通中转站而挂起」的额度奖励（2026-10-17）
+  //
+  // 用户答完问卷时还没开中转站 → 奖励落成 manual；往往几分钟后就开通了，
+  // 但没有机制回头补。这里每小时扫一遍，谁开通了就补上（金额从我们自己的文案里解析）。
+  let quotaClaimsRetried = 0
+  try {
+    const r = await retryPendingQuotaClaims(env)
+    quotaClaimsRetried = r.granted
+  } catch (err) {
+    console.error("补发挂起的额度奖励失败:", err)
   }
 
   // 4b) 过期的反代登录会话
@@ -932,6 +967,8 @@ export async function runMaintenance(
     donationRetries,
     sensenovaAudit,
     rentalExpiry,
+    staleOrderReminders,
+    quotaClaimsRetried,
     announcementMails,
     storageMismatches,
     dnsAudit,

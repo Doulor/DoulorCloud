@@ -250,6 +250,24 @@ async function requireCommunityUser(env: Env, request: Request): Promise<UserRow
   return user
 }
 
+/**
+ * 评论可修改次数上限（2026-10-17）。
+ *
+ * 站长口径：评论发布后可以改，但默认最多改 2 次；次数由管理面板控制
+ * （设置项 `community_comment_edit_limit`，0 = 禁止修改）。
+ *
+ * 这里做二次夹取而不是直接信任库值：设置是字符串，历史脏数据可能是
+ * 负数 / 小数 / 超大值。读取侧兜底成 [0, 10] 的整数，避免出现
+ * 「无限改」或「一次都不让改」这种管理员没预期的行为。
+ * 写入侧（handlers/admin.ts）也会按同一区间校验，正常不会走到兜底。
+ */
+const COMMENT_EDIT_LIMIT_MAX = 10
+export async function commentEditLimit(env: Env): Promise<number> {
+  const n = await getSettingNumber(env, "community_comment_edit_limit")
+  if (!Number.isFinite(n)) return 2
+  return Math.min(COMMENT_EDIT_LIMIT_MAX, Math.max(0, Math.trunc(n)))
+}
+
 /** GET /api/community/config —— 公开配置（访客访问开关、广场开关） */
 export async function communityConfig(env: Env, _request: Request): Promise<Response> {
   return json({
@@ -260,6 +278,8 @@ export async function communityConfig(env: Env, _request: Request): Promise<Resp
      * 不再有硬编码列表 —— 加了新分类前端立刻能用，无需发版。
      */
     categories: await postCategoryDefs(env),
+    /** 评论最多可修改次数（0 = 不允许修改），前端据此决定是否显示「编辑」 */
+    commentEditLimit: await commentEditLimit(env),
   })
 }
 
@@ -581,7 +601,7 @@ export async function listComments(env: Env, request: Request, id: string): Prom
        LEFT JOIN users ru ON ru.id = c.reply_to_user_id
        LEFT JOIN user_titles ut ON ut.user_id = u.id AND ut.is_display = 1
        LEFT JOIN custom_titles ct ON ct.id = ut.title_id
-      WHERE c.post_id = ? AND c.deleted_at IS NULL
+      WHERE c.post_id = ?
       ORDER BY c.created_at ASC`
   ).bind(id).all()
   const comments = (rows.results ?? []).map((c: Record<string, unknown>) => ({
@@ -589,7 +609,16 @@ export async function listComments(env: Env, request: Request, id: string): Prom
     post_id: c.post_id as string,
     user_id: c.user_id as string,
     parent_id: (c.parent_id as string | null) ?? null,
-    body: c.body as string,
+    /**
+     * 已删除评论（2026-10-17）：不再从列表里剔除，而是作为**占位**保留在回复树里
+     * （否则它下面的回复会被 groupComments 提成根节点，盖楼上下文全乱）。
+     * 删除时后端已经把 body 清空，这里再兜一层 —— 即使历史数据残留正文，
+     * 也绝不把已删除内容下发给前端。
+     */
+    body: c.deleted_at ? "" : (c.body as string),
+    deleted: c.deleted_at != null,
+    editCount: Number(c.edit_count) || 0,
+    updatedAt: (c.updated_at as string | null) ?? null,
     createdAt: c.created_at as string,
     author: {
       username: c.username as string,
@@ -626,7 +655,8 @@ export async function listComments(env: Env, request: Request, id: string): Prom
         ...c,
         liked: likedSet.has(c.id),
         likeCount: Number(c.likeCount) || 0,
-        hot: (Number(c.likeCount) || 0) > 0 && (Number(c.likeCount) || 0) >= hotThreshold,
+        // 已删除的占位不参与高赞（它的赞数没有意义，也不该被顶到最上面）
+        hot: !c.deleted && (Number(c.likeCount) || 0) > 0 && (Number(c.likeCount) || 0) >= hotThreshold,
       })) as unknown as RawComment[]
     ),
   })
@@ -1039,6 +1069,95 @@ export async function createComment(env: Env, request: Request, id: string): Pro
     recipientId: post.user_id, replyToUserId: replyToUserId ?? undefined,
   })
   return json({ comment: { id: cid } }, 201)
+}
+
+/**
+ * PUT /api/community/comments/:id —— 编辑自己的评论（2026-10-17）。
+ *
+ * 权限与次数口径：
+ *   · **只有作者本人**能改（管理员要处理违规评论请用删除；改别人的话等于替人发言，
+ *     与帖子编辑「作者或管理员」的口径刻意不同 —— 帖子是作者自己的长文，
+ *     管理员偶尔要修标题/正文里的违规内容，评论则是即时对话，改字会篡改语境）；
+ *   · 次数上限来自设置 `community_comment_edit_limit`（默认 2，0 = 禁止）；
+ *   · 内容没变直接返回 unchanged，**不消耗次数**。
+ *
+ * 并发：两个标签页同时保存时，用 `WHERE edit_count = 旧值` 做乐观锁，
+ * 只有一次能成功；另一次返回 409 让前端刷新，避免把上限刷穿。
+ */
+export async function updateComment(env: Env, request: Request, id: string): Promise<Response> {
+  const user = await requireCommunityUser(env, request)
+  const row = await env.DB.prepare(
+    "SELECT user_id, body, edit_count, deleted_at FROM post_comments WHERE id=?"
+  )
+    .bind(id)
+    .first<{ user_id: string; body: string; edit_count: number; deleted_at: string | null }>()
+  if (!row || row.deleted_at) throw new ApiError(404, "评论不存在", "NOT_FOUND")
+  if (row.user_id !== user.id) throw new ApiError(403, "无权编辑该评论", "FORBIDDEN")
+
+  assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  const body = (await request.json().catch(() => ({}))) as { body?: string }
+  const text = (body.body ?? "").trim()
+  if (!text) throw new ApiError(400, "评论不能为空", "INVALID_INPUT")
+  if (text.length > 1000) throw new ApiError(400, "评论过长", "TOO_LARGE")
+
+  const editCount = Number(row.edit_count) || 0
+  if (text === row.body) {
+    return json({ ok: true, unchanged: true, editCount })
+  }
+
+  const limit = await commentEditLimit(env)
+  if (limit <= 0) throw new ApiError(403, "站点已关闭评论修改", "EDIT_DISABLED")
+  if (editCount >= limit) {
+    throw new ApiError(403, `评论最多修改 ${limit} 次`, "EDIT_LIMIT_REACHED")
+  }
+
+  const now = new Date().toISOString()
+  const res = await env.DB.prepare(
+    "UPDATE post_comments SET body = ?, edit_count = edit_count + 1, updated_at = ? WHERE id = ? AND edit_count = ? AND deleted_at IS NULL"
+  )
+    .bind(text, now, id, editCount)
+    .run()
+  if (!res.meta.changes) {
+    // 并发修改：另一个请求先落库了。让前端刷新后按最新次数再决定。
+    throw new ApiError(409, "评论已被修改，请刷新后重试", "CONFLICT")
+  }
+  return json({ ok: true, editCount: editCount + 1, updatedAt: now })
+}
+
+/**
+ * DELETE /api/community/comments/:id —— 软删评论并清空正文（2026-10-17）。
+ *
+ * 站长要求「删除不能不留痕」：保留这一行（deleted_at + body=''），列表接口
+ * 会把它渲染成「该评论已删除」占位，回复树因此不会断链。
+ *
+ * 权限：作者本人或任何管理员（含自定义白名单 admin）。重复删除幂等。
+ * 帖子作者**不能**删别人在自己帖子下的评论 —— 那属于管理员/作者的 moderation
+ * 权力边界问题，本次不扩权（需要的话走举报/管理员）。
+ */
+export async function deleteComment(env: Env, request: Request, id: string): Promise<Response> {
+  const user = await requireCommunityUser(env, request)
+  const row = await env.DB.prepare(
+    "SELECT user_id, post_id, deleted_at FROM post_comments WHERE id=?"
+  )
+    .bind(id)
+    .first<{ user_id: string; post_id: string; deleted_at: string | null }>()
+  if (!row) throw new ApiError(404, "评论不存在", "NOT_FOUND")
+  if (row.user_id !== user.id && !isAnyAdmin(user.role)) {
+    throw new ApiError(403, "无权删除", "FORBIDDEN")
+  }
+  if (row.deleted_at) return json({ ok: true, alreadyDeleted: true })
+
+  await env.DB.prepare(
+    "UPDATE post_comments SET body = '', deleted_at = ? WHERE id = ? AND deleted_at IS NULL"
+  )
+    .bind(new Date().toISOString(), id)
+    .run()
+
+  // 管理员删别人的评论要留审计（谁、什么时候、删了谁的哪条）。
+  if (row.user_id !== user.id) {
+    await audit(env, user.id, "community.comment.delete", `删除用户 ${row.user_id} 在帖子 ${row.post_id} 下的评论 ${id}`)
+  }
+  return json({ ok: true })
 }
 
 /** DELETE /api/community/posts/:id —— 作者或管理员软删 */

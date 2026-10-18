@@ -85,6 +85,7 @@ import { renderProfileHtml, renderNotFoundHtml } from "./profile-page"
 import { incomingEmail } from "./email-delivery"
 import { runMaintenance } from "./maintenance"
 import { processScheduledPublishes } from "./scheduled-publish"
+import { retryPendingQuotaClaims } from "./event-rewards"
 import { scanRiskAccounts } from "./risk-scan"
 
 /**
@@ -5250,6 +5251,23 @@ export default {
           if (r.errors > 0) console.warn("到点发布有失败项:", JSON.stringify(r))
         })
       )
+      /**
+       * 补发「因未开通中转站而挂起」的额度奖励 —— 每 5 分钟一次（2026-10-17）。
+       *
+       * 为什么不只放每小时运维：用户开通中转站后最想**立刻**拿到那笔奖励，
+       * 等一小时太慢（线上 hsyy / link 都是开通后几分钟就来反馈「没到账」）。
+       * 查询只走 event_claims 里 manual + newapi_quota 的小子集，成本可忽略；
+       * 幂等由 `UPDATE ... WHERE reward_status='manual'` 条件保证。
+       * 每小时运维里也调了一次（那份负责把笔数写进 stats）。
+       */
+      if (new Date(controller.scheduledTime).getUTCMinutes() % 5 === 0) {
+        ctx.waitUntil(
+          retryPendingQuotaClaims(env).then((r) => {
+            if (r.granted > 0) console.warn("自动补发额度奖励:", r.granted, "笔")
+          })
+        )
+      }
+
       // 风险账户扫描：每 10 分钟一次（窗口也是 10 分钟，首尾正好相接）。
       // 搭在每分钟的 tick 上而不是新增一条 cron —— 它本身很轻（几条 SELECT +
       // 一两次 NewAPI 请求），不值得为它多开一条触发器。
