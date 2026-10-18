@@ -41,7 +41,11 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: "https://127.0.0.1:8787",
-        changeOrigin: true,
+        // ⚠️ 必须保留浏览器侧的 Host（localhost:5173）：worker 的 CSRF 兜底
+        // （assertNotCrossSite，2026-10-14 上游加入）会比较 Origin 与 request.url
+        // 的 host。changeOrigin: true 会把 Host 改写成 127.0.0.1:8787 ⇒ 本地
+        // 所有写请求 403 CSRF_BLOCKED（登录都进不去）。
+        changeOrigin: false,
         // wrangler dev 本地强制 https（worker 代码 http→https 301，且只监听 TLS），
         // 自签证书必须关校验，否则代理报 SELF_SIGNED_CERT_IN_CHAIN
         secure: false,
@@ -49,7 +53,7 @@ export default defineConfig({
       // 社区帖子图片（/c/<postId>/<filename>）也由 worker 服务，本地同样要代理
       "/c": {
         target: "https://127.0.0.1:8787",
-        changeOrigin: true,
+        changeOrigin: false,
         secure: false,
       },
     },

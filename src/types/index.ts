@@ -361,6 +361,9 @@ export interface MeResponse {
   recentActivity: AuditLog[]
   recentMessages?: RecentMessage[]
   recentStorageFiles?: RecentStorageFile[]
+  /** 前端可观测性开关（2026-10-10）：性能采集 / 诊断日志记录器是否启用（站点设置下发） */
+  perfCollectEnabled?: boolean
+  diagLogEnabled?: boolean
 }
 
 export interface AdminUser {
@@ -3061,6 +3064,106 @@ export interface AdminFeedbackItem extends FeedbackItem {
   userId: string
   username: string
   nickname: string | null
+}
+
+/**
+ * 管理端反馈列表项（2026-10-10 摘要化）。
+ * 列表不再带全文/消息/图片 URL（响应从几 MB 降到几十 KB），点开详情才拉全量。
+ */
+export interface AdminFeedbackSummary {
+  id: string
+  category: string
+  title: string
+  /** 截断后的正文预览（≤280 字符） */
+  bodyPreview: string
+  status: string
+  hasReply: boolean
+  hasImages: boolean
+  hasDiagLog: boolean
+  messageCount: number
+  userId: string
+  username: string
+  nickname: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** 管理端反馈列表响应（分页） */
+export interface AdminFeedbackList {
+  feedback: AdminFeedbackSummary[]
+  counts: Record<string, number>
+  total: number
+  page: number
+  pageSize: number
+  categories: FeedbackOption[]
+  statusLabels: Record<string, string>
+}
+
+/** 单条反馈的完整详情（detail 接口响应） */
+export interface FeedbackDetail {
+  feedback: AdminFeedbackItem
+  diagLog: DiagLogView | null
+  statusLabels: Record<string, string>
+}
+
+/** 前端性能样本聚合（管理端性能监控，GET /admin/perf/overview） */
+export interface PerfOverview {
+  days: number
+  summary: {
+    samples: number
+    longTasks: number
+    errors: number
+    avgTtfb: number
+    avgLcp: number
+    avgNav: number
+  }
+  byDay: {
+    day: string
+    samples: number
+    avgTtfb: number
+    avgLcp: number
+    avgNav: number
+    longTasks: number
+    errors: number
+  }[]
+  byPage: {
+    page: string
+    samples: number
+    avgTtfb: number
+    avgLcp: number
+    avgNav: number
+    maxTtfb: number
+    maxLcp: number
+    longTasks: number
+    errors: number
+    mobileShare: number
+  }[]
+  byDevice: { device: string; samples: number }[]
+}
+
+/** 单页面的原始样本（GET /admin/perf/samples） */
+export interface PerfPageSamples {
+  page: string
+  samples: {
+    ttfbMs: number | null
+    dclMs: number | null
+    lcpMs: number | null
+    longTasks: number
+    errors: number
+    navMs: number | null
+    device: string
+    createdAt: string
+  }[]
+}
+
+/** 诊断日志（管理端查看 / 用户上传后的回执视图） */
+export interface DiagLogView {
+  id: string
+  windowMinutes: number
+  entryCount: number
+  truncated: boolean
+  createdAt: string
+  entries: { t: number; k: string; p: string; d?: number; s?: string }[]
 }
 
 export interface FeedbackOverview {

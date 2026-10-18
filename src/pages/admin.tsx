@@ -54,6 +54,7 @@ import {
   Eye,
   EyeOff,
   Webhook,
+  Activity,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -65,6 +66,8 @@ import { CfQuotaPanel } from "./admin-cf-quota"
 import { BrevoQuotaPanel } from "./admin-brevo-quota"
 // 反馈面板同理单独成文件（本文件太大，新增内容尽量外置）
 import { FeedbackPanel } from "./admin-feedback"
+// 性能监控（2026-10-10 新工具）：UI 本体单独成文件
+import { PerfPanel } from "./admin-perf"
 import { AuditPanel } from "./admin-audit"
 import { PointsAdminPanel } from "./admin-points"
 import { FunLinksAdminPanel } from "./admin-fun-links"
@@ -772,7 +775,7 @@ const ADMIN_TAB_KEYS = new Set([
   "users", "invites", "inviteQuotas", "reserved", "titles", "points",
   "donations", "feedback", "announcements", "events", "community", "moderation", "notices",
   "dns", "newapi", "relay", "r2", "frp", "proxy", "mail", "analytics", "cfQuota", "audit",
-  "oauth", "settings", "funLinks", "wb2api", "api", "permissions", "lab",
+  "oauth", "settings", "funLinks", "wb2api", "api", "permissions", "lab", "perf",
   // 造物集（2026-10-17 站长要求：从「AI 实验室」里独立出来）
   "gallery",
 ])
@@ -4249,6 +4252,7 @@ export default function AdminPage() {
                 {canSeeTab("oauth") && <NavItem active={activeTab === "oauth"} icon={KeyRound} label={t("adm.235")} onClick={() => handleTabChange("oauth")} />}
                 {canSeeTab("analytics") && <NavItem active={activeTab === "analytics"} icon={BarChart3} label={t("adm.236")} onClick={() => handleTabChange("analytics")} />}
                 {canSeeTab("cfQuota") && <NavItem active={activeTab === "cfQuota"} icon={Gauge} label={t("adm.237")} onClick={() => handleTabChange("cfQuota")} />}
+                {canSeeTab("perf") && <NavItem active={activeTab === "perf"} icon={Activity} label={t("perf.tab")} onClick={() => handleTabChange("perf")} />}
                 {canSeeTab("audit") && <NavItem active={activeTab === "audit"} icon={ScrollText} label={t("adm.238")} onClick={() => handleTabChange("audit")} />}
                 {canSeeTab("mail") && <NavItem active={activeTab === "mail"} icon={Mail} label={t("adm.239")} onClick={() => handleTabChange("mail")} />}
                 {canSeeTab("settings") && <NavItem active={activeTab === "settings"} icon={SlidersHorizontal} label={t("adm.240")} onClick={() => handleTabChange("settings")} />}
@@ -7594,6 +7598,10 @@ export default function AdminPage() {
 
         <TabsContent value="analytics">
           <AnalyticsPanel />
+        </TabsContent>
+
+        <TabsContent value="perf">
+          <PerfPanel />
         </TabsContent>
 
         <TabsContent value="cfQuota">

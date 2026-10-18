@@ -48,6 +48,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ProfileDesignPanel } from "@/components/profile-design-panel"
 import { designCss as designCssLocal, PREVIEW_NO_ANIM_CSS } from "@/lib/profile-design-css"
 import { profileApi, identityApi, HttpError } from "@/services/api"
+import { getCachedProfile, setCachedProfile, invalidateProfileCache } from "@/lib/profile-cache"
 import { compressImage } from "@/lib/image-compress"
 import { cn } from "@/lib/utils"
 import { useT } from "@/i18n"
@@ -478,6 +479,17 @@ export default function ProfilePage() {
 
   /** 预览 iframe（portrait/landscape 同一时刻只渲染一个，共用一个 ref） */
   const iframeRef = React.useRef<HTMLIFrameElement | null>(null)
+
+  // ---- 编辑器缩略图的版本化 URL（2026-10-10 冷缓存配套）----
+  //
+  // 背景：/api/profile/asset 这类鉴权缩略图没有可靠的缓存头，浏览器每次进
+  // 编辑页都回源重拉（头像当年就是这个原因被 issue #3 专门补过 60s 缓存）。
+  // 现在用「URL 带版本号」让浏览器把每个版本的图当不同资源正常缓存：
+  //   · 版本号 = 名片的 updatedAt（服务端权威的「内容什么时候换过」）+
+  //     本次会话内的上传计数 ref（上传后不等重新 load 完就先换 URL）；
+  //   · 内容没换 → URL 没变 → 浏览器 disk cache 直接命中，零请求；
+  //   · 上传/删除后版本号变 → URL 变 → 必然拉新图，绝不会显示旧图。
+  const assetVersionRef = React.useRef(0)
   /** 预览时禁用入场动画（编辑器手顺设置，存 localStorage，不进名片数据） */
   const [previewNoAnim, setPreviewNoAnim] = React.useState(() => {
     try {
@@ -498,17 +510,46 @@ export default function ProfilePage() {
     })
   }
 
-  const load = React.useCallback(async () => {
-    setLoading(true)
-    try {
-      const res = await profileApi.get()
+  /** 表单是否被用户改过（后台刷新回来时不覆盖用户手上的编辑） */
+  const formDirtyRef = React.useRef(false)
+  /** 最近一次由 applyOverview **程序写入**的表单指纹（脏检查的基线） */
+  const appliedFingerprintRef = React.useRef("")
+  const initializedRef = React.useRef(false)
+  const formFingerprint = React.useMemo(
+    () => JSON.stringify({ f: form, c: contacts, m: modules, d: design }),
+    [form, contacts, modules, design]
+  )
+  // 只有「偏离最近一次程序写入」才算用户改动。
+  // ⚠️ 不能「任何变化都置脏」：applyOverview 写表单本身也是一次变化，那样
+  // 冷缓存先渲染 → 立刻被标脏 → 后台 revalidate 回来的真数据被丢弃，页面
+  // 会一直停在缓存内容上。
+  React.useEffect(() => {
+    if (!initializedRef.current) {
+      initializedRef.current = true
+      return
+    }
+    formDirtyRef.current = formFingerprint !== appliedFingerprintRef.current
+  }, [formFingerprint])
+
+  /**
+   * 把一次 ProfileOverview 落进各状态（load 与冷缓存共用）。
+   * ⚠️ 表单「脏检查」：后台刷新带回的数据若与用户**正在编辑**的表单冲突，
+   * 不覆盖（用户手上的编辑优先）；只在表单还是「刚加载的原样」时才应用新数据。
+   */
+  const applyOverview = React.useCallback(
+    (res: ProfileOverview) => {
       setData(res)
       const p = res.profile
       if (!p) {
         // 未开通：不填充表单，由下方开通引导页接管
         return
       }
-      setForm({
+      // 用户正在编辑：表单相关状态一概不动（发布状态这类非表单字段仍同步）
+      if (formDirtyRef.current) {
+        setPublished(p.published)
+        return
+      }
+      const nextForm = {
         slug: p.slug,
         displayName: p.displayName ?? "",
         bio: p.bio ?? "",
@@ -530,23 +571,79 @@ export default function ProfilePage() {
         scaleMode: p.scaleMode ?? "auto",
         scaleMin: p.scaleMin ?? 50,
         scaleManual: p.scaleManual ?? 100,
+      }
+      const nextContacts = p.contacts
+      const nextModules = normalizeModules(p.modules)
+      const nextDesign = p.design ?? {}
+      // 先登记基线，再 setState：effect 在渲染后按指纹比对，才不会把
+      // 「这次程序写入」误判成用户编辑。
+      appliedFingerprintRef.current = JSON.stringify({
+        f: nextForm,
+        c: nextContacts,
+        m: nextModules,
+        d: nextDesign,
       })
-      setContacts(p.contacts)
-      setModules(normalizeModules(p.modules))
-      setDesign(p.design ?? {})
+      setForm(nextForm)
+      setContacts(nextContacts)
+      setModules(nextModules)
+      setDesign(nextDesign)
       setPublished(p.published)
-    } catch (err) {
-      toast.error(err instanceof HttpError ? err.message : t("pf.err.load"))
-    } finally {
+    },
+    []
+  )
+
+  const load = React.useCallback(async () => {
+    // 冷缓存（2026-10-10）：内存/localStorage 里有上次的数据就先渲染（秒开），
+    // 然后再拉网络；缓存命中时连 loading 态都不进（用户无感）。
+    // 写操作（保存/上传/删除）已把缓存清掉（invalidateProfileCache），
+    // 所以这里渲染的缓存要么是「上次打开时的服务端数据」要么没有 —— 不会停留旧值。
+    const cached = getCachedProfile()
+    if (cached) {
+      applyOverview(cached)
       setLoading(false)
+    } else {
+      setLoading(true)
+    }
+    try {
+      const res = await profileApi.get()
+      setCachedProfile(res)
+      applyOverview(res)
+      setLoading(false)
+    } catch (err) {
+      // 有缓存兜底时，网络失败不必弹错（用户看到的是上一次的数据，页面能用）
+      if (!cached) {
+        toast.error(err instanceof HttpError ? err.message : t("pf.err.load"))
+        setLoading(false)
+      }
     }
   }, [])
 
   React.useEffect(() => {
+    // load() 内部已经包含 SWR 的两步：缓存先渲染 → 随即发一次网络请求替换。
+    // 不要再额外调一次 background load（那会让每次进页面发两个 /api/profile）。
     void load()
   }, [load])
 
   const profile = data?.profile
+
+  // ---- 编辑器缩略图的版本化 URL（2026-10-10 冷缓存配套）----
+  //
+  // /api/profile/asset 这类鉴权缩略图过去没有可靠的缓存头，浏览器每次进
+  // 编辑页都回源重拉（头像当年就是这个原因被 issue #3 专门补过 60s 缓存）。
+  // 现在用「URL 带版本号」让浏览器把每个版本的图当不同资源正常缓存：
+  //   · 版本号 = 名片的 updatedAt（服务端权威的「内容什么时候换过」）+
+  //     本次会话内的上传计数 ref（上传后不等重新 load 完就先换 URL）；
+  //   · 内容没换 → URL 没变 → 浏览器 disk cache 直接命中，零请求；
+  //   · 上传/删除后版本号变 → URL 变 → 必然拉新图，绝不会显示旧图。
+  const assetThumbUrl = React.useCallback(
+    (path: string) => {
+      const v = `${profile?.updatedAt ?? "0"}-${assetVersionRef.current}`
+      const sep = path.includes("?") ? "&" : "?"
+      return `${path}${sep}v=${encodeURIComponent(v)}`
+    },
+    [profile?.updatedAt]
+  )
+
   const defaultUrl = `${window.location.origin}${profile?.profilePath ?? ""}`
   const customUrl = profile?.fqdn ? `https://${profile.fqdn}` : null
 
@@ -559,16 +656,42 @@ export default function ProfilePage() {
   //      因为 design 有 24 个滑块，每次拖动都走网络会又慢又抖。
   //   ② design 参数在前端直接往 iframe 注入 CSS（见下面 applyLive），
   //      拖滑块零网络延迟。两边输出同源（src/lib/profile-design-css 与 worker 同步）。
+  //
+  // 冷缓存（2026-10-10）：基础 HTML 按表单指纹（form+contacts+modules 的 JSON）
+  // 缓存在会话内存里 —— 「切走再切回来」「内容没改又打开」这类场景，指纹命中
+  // 就直接复用上次的 HTML，不发 preview 请求、不闪 loading。编辑内容一变指纹
+  // 立即失效，绝无「改了内容预览没跟上」的可能（指纹覆盖全部预览输入）。
   const hasProfile = Boolean(data?.profile)
+  // key = 指纹，value = 该指纹的预览 HTML。会话级（刷新重建），上限 3 份
+  const previewCacheRef = React.useRef<Map<string, string>>(new Map())
+  const previewFingerprint = React.useMemo(
+    () => JSON.stringify({ f: form, c: contacts, m: modules }),
+    [form, contacts, modules]
+  )
   React.useEffect(() => {
     if (!hasProfile) return
+    const cached = previewCacheRef.current.get(previewFingerprint)
+    if (cached !== undefined) {
+      // 指纹命中：直接复用，零网络零闪动
+      setPreviewHtml(cached)
+      setPreviewLoading(false)
+      return
+    }
     setPreviewLoading(true)
     const timer = setTimeout(() => {
       // design 传 {}：基础 HTML 不带任何设计参数，design 全部由前端 postMessage 实时注入。
       // 这样基础 HTML 不随滑块变化（不重载），也避免「已保存的旧设计参数」残留成脏值。
       profileApi
         .preview({ ...form, contacts, modules, design: {} })
-        .then((res) => setPreviewHtml(res.html))
+        .then((res) => {
+          const cache = previewCacheRef.current
+          if (cache.size >= 3) {
+            const oldest = cache.keys().next()
+            if (!oldest.done) cache.delete(oldest.value)
+          }
+          cache.set(previewFingerprint, res.html)
+          setPreviewHtml(res.html)
+        })
         .catch(() => {
           // 预览失败静默：不影响编辑
         })
@@ -576,7 +699,7 @@ export default function ProfilePage() {
     }, 650)
     return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form, contacts, modules, hasProfile])
+  }, [form, contacts, modules, hasProfile, previewFingerprint])
 
   /** design + 预览动画开关 → 注入到 iframe 的那段 CSS */
   const livePreviewCss = React.useMemo(
@@ -629,6 +752,7 @@ export default function ProfilePage() {
     setEnabling(true)
     try {
       await profileApi.enable()
+      invalidateProfileCache() // 开通是写操作：冷缓存作废，load 必走网络
       await load()
       toast.success(t("pf.ok.created"))
     } catch (err) {
@@ -642,7 +766,14 @@ export default function ProfilePage() {
     setSaving(true)
     try {
       const res = await profileApi.update({ ...form, contacts, modules, design })
-      setData((d) => (d ? { ...d, profile: res.profile } : d))
+      // 本地合并 + 写缓存（保存成功的值就是服务端确认的值，直接进缓存
+      // 免得下次进页面又拿 localStorage 里的旧快照）
+      const merged = data ? { ...data, profile: res.profile } : data
+      if (merged) {
+        setData(merged)
+        setCachedProfile(merged)
+      }
+      formDirtyRef.current = false
       toast.success(t("pf.ok.saved"))
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("em.err.save"))
@@ -683,6 +814,10 @@ export default function ProfilePage() {
         }
         await profileApi.uploadAsset(kind, file)
       }
+      // 资源换新了：缩略图 URL 要带新版本号（见 assetThumbUrl），
+      // 冷缓存也作废 —— load 必走网络拿新 updatedAt
+      invalidateProfileCache()
+      assetVersionRef.current += 1
       await load()
       toast.success(t("pf.ok.uploaded"))
     } catch (err) {
@@ -700,6 +835,8 @@ export default function ProfilePage() {
       } else {
         await profileApi.deleteAsset(kind)
       }
+      invalidateProfileCache()
+      assetVersionRef.current += 1
       await load()
       toast.success(t("pf.ok.removed"))
     } catch (err) {
@@ -1206,7 +1343,7 @@ export default function ProfilePage() {
                       <div className="flex items-center gap-3">
                         {user?.hasAvatar ? (
                           <img
-                            src={`/u/${encodeURIComponent(user.username)}/avatar`}
+                            src={assetThumbUrl(`/u/${encodeURIComponent(user.username)}/avatar`)}
                             alt={t("pf.media.avatar")}
                             className="h-14 w-14 rounded-full border object-cover"
                           />
@@ -1259,7 +1396,7 @@ export default function ProfilePage() {
                           <img
                             src={
                               profile?.backgroundKey
-                                ? `/api/profile/asset?kind=background`
+                                ? assetThumbUrl("/api/profile/asset?kind=background")
                                 : form.backgroundUrl
                             }
                             alt={t("pf.media.background")}
@@ -1714,7 +1851,7 @@ export default function ProfilePage() {
                         <img
                           src={
                             profile?.musicCoverKey
-                              ? `/api/profile/asset?kind=music-cover`
+                              ? assetThumbUrl("/api/profile/asset?kind=music-cover")
                               : form.musicCoverUrl
                           }
                           alt={t("pf.music.cover")}

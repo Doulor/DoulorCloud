@@ -1236,15 +1236,28 @@ async function isProfilePubliclyReadable(
  * `kind=gallery&id=<id>`：图片墙单张的**本人预览**通道。
  * 为什么需要它：`/p/<用户名>/gallery/<id>` 现在对未发布名片只放行本人，
  * 而那个路由拿不到请求（无法鉴权），所以编辑器预览必须走这条带会话的接口。
+ *
+ * 2026-10-10 性能：编辑器缩略图统一补一个**短缓存**头。
+ * 原状况：背景/封面缩略图裸透传 R2（无 Cache-Control）、图墙被
+ * hardenUserContentResponse 兜底成 `private, no-store` —— 浏览器无法可靠缓存，
+ * 每次进编辑页都回源拉 R2。现在前端把缩略图 URL 带上 `?v=<updatedAt>`（内容
+ * 换了 URL 就换），这里给 `private, max-age=300` 也安全：版本号变了 URL 就变，
+ * 不会命中旧图；就算前端忘了带 v，5 分钟的窗口对编辑器场景也可接受。
+ * （音乐 302 不在此列 —— 它带时效签名，必须 no-store，见 serveAssetByUsername。）
  */
 export async function readOwnAsset(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
   const params = new URL(request.url).searchParams
   const kind = params.get("kind") ?? ""
-  if (kind === "gallery") {
-    return serveGalleryObject(env, user.username, params.get("id") ?? "")
+  const res =
+    kind === "gallery"
+      ? await serveGalleryObject(env, user.username, params.get("id") ?? "")
+      : await serveAssetByUsername(env, user.username, kind, user.id)
+  // 只给「内容型 200」补缓存头；302（音乐）与 404 原样返回
+  if (res.status === 200) {
+    res.headers.set("Cache-Control", "private, max-age=300")
   }
-  return serveAssetByUsername(env, user.username, kind, user.id)
+  return res
 }
 
 /**

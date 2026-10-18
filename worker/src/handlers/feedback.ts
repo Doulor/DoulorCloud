@@ -21,6 +21,7 @@ import { sendMail, renderMail } from "../mailer"
 import { applyPoints } from "../points"
 import { isStorageConfigured, putObject, getObject, deleteObject, getPlatformBucketId } from "../r2"
 import { hardenUserContentResponse } from "../content-type"
+import { getDiagLogForFeedback } from "./diag-logs"
 import type { Env } from "../env"
 
 /**
@@ -62,6 +63,18 @@ const MAX_FEEDBACK_REWARD = 10_000
 const MAX_JSON_BODY_BYTES = 32 * 1024
 /** 一次最多返回多少条（前端不做分页：单用户反馈量本就很小） */
 const LIST_LIMIT = 50
+/**
+ * 管理端列表分页（2026-10-10 性能）。
+ *
+ * 原状况：`GET /admin/feedback` 固定 `LIMIT 200` 且把每条工单的**全部对话消息**
+ * 一并下发（含发送者资料联表），响应轻松几 MB；前端 200 张卡全展开渲染，
+ * 每条消息还是一个 react-markdown 重组件 —— 管理员打开「反馈」标签就是一次
+ * 秒级卡顿。现在列表只下发摘要（不含消息、正文截断），消息在点开单条详情时
+ * 按 id 再取；分页每页 20 条。
+ */
+export const ADMIN_PAGE_SIZE = 20
+/** 摘要正文截断长度（点开详情才看全文） */
+const SUMMARY_BODY_CHARS = 280
 
 // ---- 反馈图片 ----
 /** 单张图片大小上限（5 MB，报错文案用） */
@@ -128,6 +141,8 @@ interface FeedbackRow {
   admin_reply: string | null
   replied_at: string | null
   user_read: number
+  /** 附带的诊断日志 id（0145 迁移后才有，可能为 NULL） */
+  diag_log_id?: string | null
   created_at: string
   updated_at: string
   /** 联表取的用户名（管理端列表用） */
@@ -160,6 +175,32 @@ function toAdmin(r: FeedbackRow) {
     userId: r.user_id,
     username: r.username ?? "",
     nickname: r.nickname ?? null,
+  }
+}
+
+/**
+ * 管理端列表摘要 DTO：正文截断、不带消息、只带「有没有诊断日志」的标志。
+ *
+ * 为什么不直接用 toAdmin：列表一次 20 条，每条都带全文 body（最长 2000 字）
+ * 也会把响应撑到几百 KB；对话消息更是大头（联表 3 张表）。管理员先扫摘要，
+ * 点开哪条再拉哪条的全量（detail 接口）。
+ */
+function toAdminSummary(r: FeedbackRow, hasDiagLog: boolean) {
+  return {
+    id: r.id,
+    category: r.category,
+    title: r.title,
+    bodyPreview: r.body.slice(0, SUMMARY_BODY_CHARS),
+    status: r.status,
+    hasReply: Boolean(r.admin_reply),
+    hasImages: Boolean(r.images),
+    hasDiagLog,
+    messageCount: 0,
+    userId: r.user_id,
+    username: r.username ?? "",
+    nickname: r.nickname ?? null,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
   }
 }
 
@@ -361,13 +402,25 @@ export async function createFeedback(env: Env, request: Request): Promise<Respon
   // 图片 key 必须属于本人（normalizeImageKeys 已按 userId 过滤），空数组则存 NULL
   const imageKeys = normalizeImageKeys(body.images, user.id)
 
+  // 附带的诊断日志：必须是**本人刚上传**的一份（uploadDiagLog 已校验归属），
+  // 这里只防「拿别人的日志 id」——查一下归属再落库。
+  let diagLogId: string | null = null
+  if (typeof body.diagLogId === "string" && body.diagLogId) {
+    const log = await env.DB.prepare(
+      "SELECT id FROM diagnostic_logs WHERE id = ? AND user_id = ?"
+    )
+      .bind(body.diagLogId, user.id)
+      .first<{ id: string }>()
+    diagLogId = log?.id ?? null
+  }
+
   const id = uuid()
   const now = new Date().toISOString()
   await env.DB.prepare(
-    `INSERT INTO feedback (id, user_id, category, title, body, images, status, user_read, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`
+    `INSERT INTO feedback (id, user_id, category, title, body, images, status, user_read, diag_log_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`
   )
-    .bind(id, user.id, parseCategory(body.category), title, text, imageKeys.length ? JSON.stringify(imageKeys) : null, now, now)
+    .bind(id, user.id, parseCategory(body.category), title, text, imageKeys.length ? JSON.stringify(imageKeys) : null, diagLogId, now, now)
     .run()
 
   const row = await env.DB.prepare("SELECT * FROM feedback WHERE id = ?")
@@ -713,7 +766,15 @@ export async function replyMyFeedback(env: Env, request: Request): Promise<Respo
 // ---- 管理端 ----
 
 /**
- * GET /api/admin/feedback —— 全部反馈（可按状态过滤）。
+ * GET /api/admin/feedback —— 全部反馈（可按状态过滤，分页）。
+ *
+ * 2026-10-10 性能改造（治「管理员打开反馈标签卡几秒」）：
+ *   · 原来固定 `LIMIT 200` 且每条带全部对话消息（联表 users/titles 三张表），
+ *     响应几 MB、JSON.parse + 全量渲染都是秒级 —— 现在只下发**摘要**
+ *     （正文截断、无消息、无图片 URL），每页 20 条；
+ *   · 主查询 / 计数合并成一次 `env.DB.batch`（D1 往返是慢的主因，
+ *     与 admin.ts listUsers 2026-10-08 的优化同一招）；
+ *   · 全文与消息走 `GET /admin/feedback/detail?id=`（点开单条才拉）。
  *
  * 联表取作者名：管理端列表要能看出「谁提的」，但只有 username/nickname
  * 两个字段，不带邮箱等更多隐私信息（需要时点进用户详情看）。
@@ -722,12 +783,21 @@ export async function listAllFeedback(env: Env, request: Request): Promise<Respo
   await requireAdminScope(env, request, "feedback")
   const url = new URL(request.url)
   const status = url.searchParams.get("status") ?? ""
+  const pageRaw = Number(url.searchParams.get("page"))
+  const page = Number.isFinite(pageRaw) && pageRaw > 0 ? Math.min(Math.floor(pageRaw), 1000) : 1
+  const offset = (page - 1) * ADMIN_PAGE_SIZE
 
   const where = (FEEDBACK_STATUSES as readonly string[]).includes(status)
     ? "WHERE f.status = ?"
     : ""
-  const stmt = env.DB.prepare(
-    `SELECT f.*, u.username AS username, u.nickname AS nickname
+  const params = where ? [status] : []
+
+  // 一条语句里带出「有没有诊断日志」：LEFT JOIN 比每行再查一次省 N 次往返
+  const listStmt = env.DB.prepare(
+    `SELECT f.id, f.user_id, f.category, f.title, f.body, f.images, f.status,
+            f.admin_reply, f.replied_at, f.user_read, f.created_at, f.updated_at,
+            f.diag_log_id IS NOT NULL AS has_diag_log,
+            u.username AS username, u.nickname AS nickname
        FROM feedback f
        LEFT JOIN users u ON u.id = f.user_id
        ${where}
@@ -735,23 +805,93 @@ export async function listAllFeedback(env: Env, request: Request): Promise<Respo
         -- 未处理的排在最前（待处理 → 处理中 → 已处理/已关闭），同组内按时间倒序
         CASE f.status WHEN 'pending' THEN 0 WHEN 'processing' THEN 1 ELSE 2 END,
         f.created_at DESC
-      LIMIT 200`
+      LIMIT ${ADMIN_PAGE_SIZE} OFFSET ${offset}`
   )
-  const rows = where ? await stmt.bind(status).all<FeedbackRow>() : await stmt.all<FeedbackRow>()
-
-  // 各状态计数（用于管理端的过滤标签上显示数量）
-  const counts = await env.DB.prepare(
+  const countsStmt = env.DB.prepare(
     "SELECT status, COUNT(*) AS c FROM feedback GROUP BY status"
-  ).all<{ status: string; c: number }>()
-  const countMap: Record<string, number> = {}
-  for (const r of counts.results ?? []) countMap[r.status] = r.c
+  )
+  const [listRes, countsRes] = await env.DB.batch(
+    where ? [listStmt.bind(...params), countsStmt] : [listStmt, countsStmt]
+  )
 
-  const items = rows.results ?? []
-  const msgs = await loadMessagesFor(env, items.map((r) => r.id))
+  const rows = (listRes.results ?? []) as Array<FeedbackRow & { has_diag_log: number }>
+
+  const counts = (countsRes.results ?? []) as Array<{ status: string; c: number }>
+  const countMap: Record<string, number> = {}
+  let total = 0
+  for (const r of counts) {
+    countMap[r.status] = r.c
+    total += r.c
+  }
+  // 当前筛选下的总数（分页器用）：无筛选 = 全部计数和；有筛选 = 该状态计数
+  const filteredTotal = where ? (countMap[status] ?? 0) : total
+
   return json({
-    feedback: items.map((r) => ({ ...toAdmin(r), messages: msgs.get(r.id) ?? [] })),
+    feedback: rows.map((r) => toAdminSummary(r, r.has_diag_log === 1)),
     counts: countMap,
+    total: filteredTotal,
+    page,
+    pageSize: ADMIN_PAGE_SIZE,
     categories: FEEDBACK_CATEGORIES.map((k) => ({ key: k, label: FEEDBACK_CATEGORY_LABELS[k] })),
+    statusLabels: FEEDBACK_STATUS_LABELS,
+  })
+}
+
+/**
+ * GET /api/admin/feedback/detail?id=... —— 单条反馈的完整内容。
+ *
+ * 列表（listAllFeedback）只给摘要，点开卡片才走这里：全文、图片 URL、
+ * 全部对话消息（含发送者资料）、附带的诊断日志。一次只取一条，
+ * 服务端把明细查询全合并进一个 batch（1 次 D1 往返）。
+ */
+export async function feedbackDetail(env: Env, request: Request): Promise<Response> {
+  await requireAdminScope(env, request, "feedback")
+  const id = new URL(request.url).searchParams.get("id")?.trim() ?? ""
+  if (!id) throw new ApiError(400, "缺少反馈 id", "INVALID_INPUT")
+
+  const [rowRes, msgsRes] = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT f.*, u.username AS username, u.nickname AS nickname
+         FROM feedback f LEFT JOIN users u ON u.id = f.user_id
+        WHERE f.id = ?`
+    ).bind(id),
+    env.DB.prepare(
+      `SELECT m.id, m.feedback_id, m.sender_id, m.body, m.images, m.created_at,
+              u.username AS sender_username, u.nickname AS sender_nickname,
+              u.avatar_key AS sender_avatar_key, u.role AS sender_role,
+              ct.name AS sender_title_name, ct.color_from AS sender_title_from,
+              ct.color_to AS sender_title_to
+         FROM feedback_messages m
+         LEFT JOIN users u ON u.id = m.sender_id
+         LEFT JOIN user_titles ut ON ut.user_id = u.id AND ut.is_display = 1
+         LEFT JOIN custom_titles ct ON ct.id = ut.title_id
+        WHERE m.feedback_id = ?
+        ORDER BY m.created_at ASC`
+    ).bind(id),
+  ])
+
+  const row = (rowRes.results ?? [])[0] as FeedbackRow | undefined
+  if (!row) throw new ApiError(404, "反馈不存在", "NOT_FOUND")
+
+  const messages: FeedbackMessageDto[] = []
+  for (const r of msgsRes.results ?? []) {
+    const sender = senderOf(r as Parameters<typeof senderOf>[0])
+    messages.push({
+      id: (r as { id: string }).id,
+      senderId: (r as { sender_id: string }).sender_id,
+      isAdmin: sender.isAdmin,
+      body: (r as { body: string }).body,
+      images: imageKeysToUrls(parseImageKeys((r as { images: string | null }).images)),
+      createdAt: (r as { created_at: string }).created_at,
+      sender: sender.username ? sender : UNKNOWN_SENDER,
+    })
+  }
+
+  const diagLog = await getDiagLogForFeedback(env, row.diag_log_id ?? null)
+
+  return json({
+    feedback: { ...toAdmin(row), messages },
+    diagLog,
     statusLabels: FEEDBACK_STATUS_LABELS,
   })
 }

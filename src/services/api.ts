@@ -104,7 +104,10 @@ import {
   type AdminQoder2ApiConfig,
   type AdminQoder2ApiPool,
   type FeedbackOverview,
-  type AdminFeedbackOverview,
+  type AdminFeedbackList,
+  type FeedbackDetail,
+  type PerfOverview,
+  type PerfPageSamples,
   type AdminFeedbackItem,
   type FeedbackItem,
   type MessageCategory,
@@ -169,6 +172,8 @@ import { tStatic, translateApiMessage } from "@/i18n"
  * 本地开发时 Vite 会将 /api 代理到 http://localhost:8787（见 vite.config.ts），
  * 生产环境由 Cloudflare Pages + Workers 同源路由处理，无需额外配置。
  */
+
+import { diagApi } from "@/lib/diag-log"
 
 const BASE = "/api"
 
@@ -236,6 +241,14 @@ export function errMsg(err: unknown, fallback: string): string {
  * 会在某一条路上悄悄漏掉（行为漂移）。
  */
 async function throwHttpError(res: Response): Promise<never> {
+  // 诊断日志（2026-10-10）：失败的 API 请求记一条（接口路径 + 状态码）。
+  // 用户反馈附日志时，这就是「哪个接口报了什么错」的直接证据。
+  // diagApi 内部判开关、try-catch 包死，未启用时近零开销。
+  try {
+    diagApi(new URL(res.url).pathname, res.status)
+  } catch {
+    /* 忽略 */
+  }
   const data = await res.json().catch(() => null)
   // 后端 message 一律是中文（worker 侧既是给用户看的、也是运维/日志原文），
   // 所以在这里就地翻一次：翻不到会原样返回，不影响任何错误处理逻辑。
@@ -4071,10 +4084,21 @@ export const twoFactorApi = {
     }),
 }
 
+/** 前端性能监控（RUM 聚合；scope=perf） */
+export const perfApi = {
+  overview: (days: number) =>
+    request<PerfOverview>(`/admin/perf/overview?days=${days}`),
+
+  pageSamples: (page: string, days = 7) =>
+    request<PerfPageSamples>(
+      `/admin/perf/samples?days=${days}&page=${encodeURIComponent(page)}`
+    ),
+}
+
 export const feedbackApi = {  /** 我提交过的反馈 + 分类/状态标签（标签文案由服务端下发，前端不硬编码） */
   list: () => request<FeedbackOverview>("/feedback"),
 
-  create: (payload: { category: string; title: string; body: string; images?: string[] }) =>
+  create: (payload: { category: string; title: string; body: string; images?: string[]; diagLogId?: string }) =>
     request<{ feedback: FeedbackOverview["feedback"][number] }>("/feedback", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -4114,11 +4138,22 @@ export const feedbackApi = {  /** 我提交过的反馈 + 分类/状态标签（
   withdraw: (id: string) =>
     request<{ ok: boolean }>(`/feedback/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
-  // 管理端
-  listAll: (status?: string) =>
-    request<AdminFeedbackOverview>(
-      `/admin/feedback${status ? `?status=${encodeURIComponent(status)}` : ""}`
+  // 管理端（2026-10-10 改分页 + 摘要：正文/消息/诊断日志在 detail 里按条拉）
+  listAll: (status?: string, page = 1) =>
+    request<AdminFeedbackList>(
+      `/admin/feedback?page=${page}${status ? `&status=${encodeURIComponent(status)}` : ""}`
     ),
+
+  /** 单条反馈详情：全文 + 对话消息 + 附带的诊断日志 */
+  detail: (id: string) =>
+    request<FeedbackDetail>(`/admin/feedback/detail?id=${encodeURIComponent(id)}`),
+
+  /** 上传一份诊断日志包（提交反馈勾选「附日志」时先调这个拿 id） */
+  uploadDiagLog: (pack: { windowMinutes: number; entries: unknown[]; truncated: boolean }) =>
+    request<{ id: string }>("/diag-logs", {
+      method: "POST",
+      body: JSON.stringify(pack),
+    }),
 
   /**
    * 回复一条反馈。

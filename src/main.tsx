@@ -6,12 +6,14 @@ import App from "@/App"
 import { I18nProvider } from "@/i18n"
 import { AuthProvider } from "@/hooks/use-auth"
 import { ErrorBoundary } from "@/components/error-boundary"
+import { FeedbackErrorCatcher } from "@/components/feedback-error-catcher"
 import { ExternalLinkDialog } from "@/components/external-link-dialog"
 import { ConfirmDialogHost } from "@/components/confirm-dialog"
 import { Toaster } from "@/components/ui/sonner"
 import { ToastCopyMenu } from "@/components/toast-copy-menu"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { reloadOnceForChunkError } from "@/lib/chunk-error"
+import { diagError } from "@/lib/diag-log"
 import "@/index.css"
 import { selfHealServiceWorkers } from "@/lib/chunk-error"
 import { BootReadyProbe } from "@/components/boot-ready-probe"
@@ -24,15 +26,27 @@ import { BootReadyProbe } from "@/components/boot-ready-probe"
 // Vite 的模块预加载失败事件（Vite 5+）；类型不在标准 lib 里，用 any 收口
 window.addEventListener("vite:preloadError" as never, ((e: Event) => {
   e.preventDefault?.()
+  diagError(String((e as unknown as { payload?: unknown }).payload ?? e), "vite:preloadError")
   reloadOnceForChunkError((e as unknown as { payload?: unknown }).payload ?? e)
 }) as never)
 
 window.addEventListener("error", (e) => {
+  // 诊断日志（若站点开关打开）：记一条错误。chunk 错误之外的也记 ——
+  // 这正是「用户反馈附日志」要抓的内容。记录本身纳秒级、try-catch 包死。
+  diagError(
+    e.message || String(e.error ?? "error"),
+    e.error instanceof Error ? e.error.stack : undefined
+  )
   reloadOnceForChunkError(e.error ?? e.message)
 })
 
 window.addEventListener("unhandledrejection", (e) => {
-  reloadOnceForChunkError(e.reason)
+  const reason = (e as PromiseRejectionEvent).reason
+  diagError(
+    reason instanceof Error ? reason.message : String(reason ?? "unhandledrejection"),
+    reason instanceof Error ? reason.stack : undefined
+  )
+  reloadOnceForChunkError(reason)
 })
 
 
@@ -74,6 +88,13 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
               详见 components/confirm-dialog.tsx。
             */}
             <ConfirmDialogHost />
+            {/*
+              报错 toast 的「附日志反馈」入口（2026-10-10）。
+              全局监听 window error / unhandledrejection：同一会话内错误攒够 3 条
+              就弹一次 sonner toast，点按钮跳到反馈页并预选「附诊断日志」。
+              挂一次全局生效；内部有冷却（10 分钟最多提示一次），不会骚扰。
+            */}
+            <FeedbackErrorCatcher />
             <Toaster />
             {/*
               右下角 toast 的右键复制菜单（2026-10-08 站长要求）。

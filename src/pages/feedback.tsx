@@ -11,8 +11,9 @@ import {
   MessageSquare,
   Send,
   Sparkles,
+  Stethoscope,
 } from "lucide-react"
-import { Link } from "react-router-dom"
+import { Link, useLocation } from "react-router-dom"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -51,6 +52,14 @@ import {
 } from "@/components/feedback-image"
 import type { FeedbackItem, FeedbackOverview } from "@/types"
 import { useT, translateApiMessage } from "@/i18n"
+import {
+  DIAG_WINDOWS,
+  exportWindow,
+  isDiagLogEnabled,
+  persistDiag,
+  type DiagWindow,
+} from "@/lib/diag-log"
+import type { FeedbackDiagNavState } from "@/components/feedback-error-catcher"
 
 /**
  * 反馈页。
@@ -103,6 +112,24 @@ export default function FeedbackPage() {
   const [expanded, setExpanded] = React.useState<string | null>(null)
   /** 提交表单的待上传图片 */
   const formImages = usePickedImages()
+
+  // ---- 诊断日志（2026-10-10）----
+  // 站点开关 diag_log_enabled 打开时，用户可勾选「附上诊断日志」并选时间窗。
+  // 提交时才真正打包上传（POST /diag-logs 拿 id，随反馈一起落库）。
+  const diagAvailable = isDiagLogEnabled()
+  const location = useLocation()
+  const [attachDiag, setAttachDiag] = React.useState(false)
+  const [diagWindow, setDiagWindow] = React.useState<DiagWindow>(5)
+  // 报错 toast 的「附日志反馈」按钮：导航时带 state 过来，预选「附诊断日志」
+  // 并把时间窗放宽到 15 分钟（报错往往发生在点按钮之前一小会儿）。
+  // 用 effect 而不是初始 state：用户已经停留在反馈页时点 toast，组件不会
+  // 重新挂载，只有 location.state 变化这一条路径能收到。
+  React.useEffect(() => {
+    const st = location.state as FeedbackDiagNavState | null
+    if (!diagAvailable || !st?.attachDiag) return
+    setAttachDiag(true)
+    setDiagWindow(15)
+  }, [location.state, diagAvailable])
 
   /**
    * 拖入图片 → 交给 `formImages`（它自带压缩与上传）。
@@ -167,7 +194,22 @@ export default function FeedbackPage() {
           failed++
         }
       }
-      await feedbackApi.create({ category, title: ttl, body: b, images: keys })
+      // 勾了「附诊断日志」：先打包上传窗口内的记录拿 id（失败不阻断提交，
+      // 提示一声即可 —— 反馈本身比日志重要，日志只是帮站长定位）
+      let diagLogId: string | undefined
+      if (attachDiag && diagAvailable) {
+        try {
+          const pack = exportWindow(diagWindow)
+          if (pack.entries.length > 0) {
+            const res = await feedbackApi.uploadDiagLog(pack)
+            diagLogId = res.id
+            persistDiag()
+          }
+        } catch {
+          toast.warning(t("fb.diag.uploadFailed"))
+        }
+      }
+      await feedbackApi.create({ category, title: ttl, body: b, images: keys, diagLogId })
       if (failed > 0) {
         toast.warning(t("fb.ok.submittedWithImages", { n: failed }))
       } else {
@@ -178,6 +220,7 @@ export default function FeedbackPage() {
       setTitle("")
       setBody("")
       formImages.reset()
+      setAttachDiag(false)
       await load()
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("fb.err.submit"))
@@ -327,6 +370,49 @@ export default function FeedbackPage() {
               onRemove={formImages.remove}
               fileRef={formImages.fileRef}
             />
+
+            {/* 诊断日志（站点开关打开才显示）：勾选后提交时附带所选时间窗内的
+                前端运行记录（路由 / 报错 / 接口失败 / 卡顿），帮站长不用 1:1
+                复现就能看到现场。数据只在你提交反馈时才上传。 */}
+            {diagAvailable && (
+              <div className="space-y-2 rounded-md border bg-muted/20 p-3">
+                <label className="flex cursor-pointer items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={attachDiag}
+                    onChange={(e) => setAttachDiag(e.target.checked)}
+                  />
+                  <span className="flex items-center gap-1.5 text-sm font-medium">
+                    <Stethoscope className="h-4 w-4 text-muted-foreground" />
+                    {t("fb.diag.attach")}
+                  </span>
+                </label>
+                <p className="text-xs text-muted-foreground">{t("fb.diag.desc")}</p>
+                {attachDiag && (
+                  <div className="flex flex-wrap items-center gap-2 pl-6">
+                    <span className="text-xs text-muted-foreground">{t("fb.diag.window")}</span>
+                    <div className="flex gap-1.5">
+                      {DIAG_WINDOWS.map((w) => (
+                        <button
+                          key={w}
+                          type="button"
+                          onClick={() => setDiagWindow(w)}
+                          className={
+                            "rounded-md border px-2.5 py-1 text-xs transition-colors " +
+                            (diagWindow === w
+                              ? "border-primary bg-primary/5 font-medium text-foreground"
+                              : "text-muted-foreground hover:bg-accent hover:text-foreground")
+                          }
+                        >
+                          {t("fb.diag.windowLast", { n: w })}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="flex justify-end">
               <Button onClick={() => void submit()} disabled={busy}>
