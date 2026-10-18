@@ -65,9 +65,11 @@ export function PerfPanel() {
     void adminApi
       .getSettings()
       .then((s) => {
-        const raw = s as unknown as Record<string, unknown>
-        setCollectOn(raw.perf_collect_enabled === "1")
-        setDiagOn(raw.diag_log_enabled === "1")
+        // ⚠️ 2026-10-18 修正：设置是**嵌在 `.settings` 里**的（见 AdminSettings 类型），
+        // 之前这里读的是顶层字段，恒为 undefined ⇒ 两个开关永远显示「关」，
+        // 哪怕库里已经是 "1"。用户反馈「开了之后刷新又自动关掉」就是这个。
+        setCollectOn(s.settings.perf_collect_enabled === "1")
+        setDiagOn(s.settings.diag_log_enabled === "1")
       })
       .catch(() => {
         setCollectOn(null)
