@@ -76,7 +76,15 @@ export async function uploadDiagLog(env: Env, request: Request): Promise<Respons
   return json({ id }, 201)
 }
 
-/** 反馈详情用：按 id 读一份日志（校验归属），不存在的返回 null */
+/**
+ * 反馈详情用：按 id 读一份日志，不存在的返回 null。
+ *
+ * ⚠️ 这里**不做归属校验**，因为唯一调用方是管理端的反馈详情
+ * （handlers/feedback.ts 的 adminFeedbackDetail，路由 /api/admin/feedback/detail，
+ * 已由 requireAdminScope 把关）。日志的 id 是 uuid，不对普通用户暴露任何读接口，
+ * 所以不存在「枚举别人的日志」这条面 —— 加 user_id 条件反而会让「管理员看
+ * 用户反馈附带的日志」这个唯一用途失效。
+ */
 export async function getDiagLogForFeedback(
   env: Env,
   logId: string | null

@@ -35,6 +35,15 @@ export function PerfPanel() {
   // 采集开关（站点设置 perf_collect_enabled）：管理页里直接启停
   const [collectOn, setCollectOn] = React.useState<boolean | null>(null)
   const [toggling, setToggling] = React.useState(false)
+  /**
+   * 诊断日志开关（站点设置 diag_log_enabled）。
+   *
+   * 2026-10-18 补：PR #67 带了这个设置项、`/api/me` 也会下发，但**只有 perf 的
+   * 开关有界面**，诊断日志一直只能在库里手改 —— 等于「反馈附诊断日志」这个
+   * 功能站长根本打不开。这里补回 UI，和性能采集放在一起（同属前端可观测性）。
+   */
+  const [diagOn, setDiagOn] = React.useState<boolean | null>(null)
+  const [togglingDiag, setTogglingDiag] = React.useState(false)
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -56,9 +65,14 @@ export function PerfPanel() {
     void adminApi
       .getSettings()
       .then((s) => {
-        setCollectOn((s as unknown as Record<string, unknown>).perf_collect_enabled === "1")
+        const raw = s as unknown as Record<string, unknown>
+        setCollectOn(raw.perf_collect_enabled === "1")
+        setDiagOn(raw.diag_log_enabled === "1")
       })
-      .catch(() => setCollectOn(null))
+      .catch(() => {
+        setCollectOn(null)
+        setDiagOn(null)
+      })
   }, [])
 
   const toggleCollect = async (on: boolean) => {
@@ -71,6 +85,19 @@ export function PerfPanel() {
       toast.error(errMsg(err, t("perf.collect.err")))
     } finally {
       setToggling(false)
+    }
+  }
+
+  const toggleDiag = async (on: boolean) => {
+    setTogglingDiag(true)
+    try {
+      await adminApi.updateSettings({ diag_log_enabled: on })
+      setDiagOn(on)
+      toast.success(on ? t("perf.diag.on") : t("perf.diag.off"))
+    } catch (err) {
+      toast.error(errMsg(err, t("perf.diag.err")))
+    } finally {
+      setTogglingDiag(false)
     }
   }
 
@@ -136,11 +163,31 @@ export function PerfPanel() {
             />
           )}
         </div>
+        <div className="flex items-center gap-2.5">
+          <Label htmlFor="diagLog" className="text-sm text-muted-foreground">
+            {t("perf.diag.label")}
+          </Label>
+          {diagOn === null ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : (
+            <Switch
+              id="diagLog"
+              checked={diagOn}
+              disabled={togglingDiag}
+              onCheckedChange={(v) => void toggleDiag(v)}
+            />
+          )}
+        </div>
       </div>
 
       {collectOn === false && (
         <p className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
           {t("perf.collect.hintOff")}
+        </p>
+      )}
+      {diagOn === false && (
+        <p className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          {t("perf.diag.hintOff")}
         </p>
       )}
 
