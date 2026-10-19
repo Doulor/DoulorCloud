@@ -136,7 +136,7 @@ export async function compileLabSources(
       outputs.push(target)
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : String(err ?? "编译失败")
+        err instanceof Error ? err.message : String(err ?? "compile failed")
       // Sucrase 的报错常带一大段堆栈/定位，只留第一行给人看
       errors.push({ path, message: message.split("\n")[0].slice(0, 300) })
     }
