@@ -335,7 +335,8 @@ export const API_MESSAGES_EN: Record<string, string> = {
   "缺少 nodeId": "Missing nodeId",
   "缺少 projectId": "Missing projectId",
   "缺少 url": "Missing url",
-  "缺少入口文件 index.html": "Missing the entry file index.html",
+  "作品里至少要有一个 HTML 文件作为入口（建议命名为 index.html）":
+    "The work needs at least one HTML file as its entry (naming it index.html is recommended)",
   "缺少分享 ID": "Missing share ID",
   "缺少参数": "Missing parameter",
   "缺少套餐": "Missing plan",

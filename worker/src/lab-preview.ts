@@ -8,6 +8,12 @@
  *
  * ⚠️ 两份实现要**成对修改**：入口挑选规则、link/script 内联、localStorage 垫片，
  *    任何一处改了这里也要跟着改（`src/lib/lab-agent.ts` 的 `buildPreviewDoc` / `STORAGE_SHIM`）。
+ *
+ * ⚠️ `type="module"` 的脚本**不能**像普通脚本那样摊平内联（2026-10-20，配合 JSX/TS 编译）：
+ *    丢掉了 type 就是语法错误，保留 type 又因为内联后没有目录基准而 import 失败。
+ *    所以这里把整张相对依赖图编成一串 `data:` URL 再让浏览器去 import。
+ *    前端那份用 blob URL（浏览器本地）、这里用 data URL（自包含）——
+ *    两边的差异仅此一处，其余规则必须保持一致。
  */
 
 /**
@@ -43,6 +49,80 @@ export function pickEntry(files: Record<string, string>): string {
   return paths.find((p) => p.toLowerCase().endsWith(".html")) ?? paths[0]
 }
 
+/** 匹配 `from "…"` / `import("…")` / `import "…"`，捕获前缀、引号、引用路径 */
+const IMPORT_REF_RE =
+  /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(["'])(\.{1,2}\/[^"']*)\2/g
+
+/** 把 `from` 所在目录 + 相对引用解析成作品内的绝对路径 */
+function resolveInProject(from: string, ref: string): string {
+  const base = from.includes("/") ? from.replace(/[^/]+$/, "") : ""
+  const stack: string[] = []
+  for (const seg of (base + ref).split("/")) {
+    if (!seg || seg === ".") continue
+    if (seg === "..") stack.pop()
+    else stack.push(seg)
+  }
+  return stack.join("/")
+}
+
+/** 把 JS 源码编成 `data:` URL（浏览器能直接 import，服务端不需要 Blob） */
+function toDataUrl(code: string): string {
+  const bytes = new TextEncoder().encode(code)
+  let bin = ""
+  for (const b of bytes) bin += String.fromCharCode(b)
+  return "data:text/javascript;base64," + btoa(bin)
+}
+
+/**
+ * 把 ESM 依赖图内联成一串 `data:` URL，返回入口的 URL。
+ *
+ * 为什么服务端要用 data URL 而不是 blob：
+ *   blob URL 是**创建它的进程**本地的，服务端生成一个 blob 链接给浏览器是打不开的。
+ *   data URL 是自包含的，浏览器可以直接 `import`。
+ *
+ * 循环依赖返回 null（data URL 也是先编后引用，做不到互相指向），调用方保持原样输出。
+ */
+export function inlineModuleGraphData(
+  files: Record<string, string>,
+  entryPath: string
+): string | null {
+  if (files[entryPath] == null) return null
+  const order: string[] = []
+  const state = new Map<string, "visiting" | "done">()
+
+  const visit = (path: string): boolean => {
+    const st = state.get(path)
+    if (st === "done") return true
+    if (st === "visiting") return false
+    const code = files[path]
+    if (code == null) return false
+    state.set(path, "visiting")
+    for (const m of code.matchAll(IMPORT_REF_RE)) {
+      const dep = resolveInProject(path, m[3])
+      if (files[dep] == null) continue
+      if (!visit(dep)) return false
+    }
+    state.set(path, "done")
+    order.push(path) // 后序：依赖先入列
+    return true
+  }
+
+  if (!visit(entryPath)) return null
+
+  const urls = new Map<string, string>()
+  for (const path of order) {
+    const code = files[path].replace(
+      IMPORT_REF_RE,
+      (whole, prefix: string, quote: string, ref: string) => {
+        const depUrl = urls.get(resolveInProject(path, ref))
+        return depUrl ? `${prefix}${quote}${depUrl}${quote}` : whole
+      }
+    )
+    urls.set(path, toDataUrl(code))
+  }
+  return urls.get(entryPath) ?? null
+}
+
 /**
  * 内联成单文件 HTML。
  * iframe 里没有「域名 + 目录」的概念，`./style.css`、`./app.js` 这类相对引用
@@ -54,13 +134,23 @@ export function buildPreviewDoc(files: Record<string, string>): string {
   let html = files[entry]
   if (!html) return ""
 
-  const lookup = (ref: string): string | undefined => {
+  /**
+   * 与前端 `lookup` 同口径，但返回**解析后的项目内路径** ——
+   * ESM 依赖图内联需要入口的真实路径，不能只有内容。
+   */
+  const resolvePath = (ref: string): string | undefined => {
     const clean = ref.split("?")[0].split("#")[0]
     const direct = clean.replace(/^\.\//, "").replace(/^\/+/, "")
-    if (files[direct] != null) return files[direct]
+    if (files[direct] != null) return direct
     // 相对入口文件所在目录解析（入口在子目录时也能对上）
     const base = entry.includes("/") ? entry.replace(/[^/]+$/, "") : ""
-    return files[base + direct]
+    const joined = base + direct
+    return files[joined] != null ? joined : undefined
+  }
+
+  const lookup = (ref: string): string | undefined => {
+    const path = resolvePath(ref)
+    return path == null ? undefined : files[path]
   }
 
   html = html.replace(/<link\b[^>]*>/gi, (tag) => {
@@ -75,9 +165,26 @@ export function buildPreviewDoc(files: Record<string, string>): string {
     /<script\b([^>]*?)\ssrc\s*=\s*["']([^"']+)["']([^>]*?)>\s*<\/script>/gi,
     (tag, pre: string, src: string, post: string) => {
       if (EXTERNAL_RE.test(src)) return tag
-      const js = lookup(src)
-      if (js == null) return tag
-      const attrs = `${pre}${post}`.replace(/\stype\s*=\s*["'][^"']*["']/i, "")
+      const attrsRaw = `${pre}${post}`
+      const path = resolvePath(src)
+      if (path == null) return tag
+
+      /**
+       * `type="module"` 单独处理（2026-10-20，配合 JSX/TS 编译）。
+       * 普通脚本摊平成内联脚本没问题；module 不行 —— 丢了 type 就是语法错误，
+       * 而不丢 type 又因为没有目录基准而 import 失败。所以整张相对依赖图编成 data URL。
+       */
+      if (/\stype\s*=\s*["']module["']/i.test(attrsRaw)) {
+        const url = inlineModuleGraphData(files, path)
+        if (url) {
+          const attrs = attrsRaw.replace(/\stype\s*=\s*["']module["']/i, "")
+          return `<script type="module"${attrs} src="${url}"></script>`
+        }
+        return tag
+      }
+
+      const js = files[path]
+      const attrs = attrsRaw.replace(/\stype\s*=\s*["'][^"']*["']/i, "")
       return `<script${attrs}>\n${js}\n</script>`
     }
   )

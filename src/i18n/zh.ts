@@ -7621,6 +7621,8 @@ export const zh = {
   "lab.save.cancel": "取消",
   "lab.save.saved": "已保存",
   "lab.save.nothing": "先生成一个网页再保存",
+  "lab.compile.failed": "{file} 编译失败 —— 检查这个文件里的语法（JSX / TS 必须是合法的）",
+  "lab.compile.badge": "编译错误",
   "lab.projects": "我的作品",
   "lab.domain.bind": "绑定域名",
   "lab.domain.unbind": "解绑",

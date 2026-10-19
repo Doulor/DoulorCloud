@@ -31,6 +31,7 @@ import {
 import { createWorkerRoute, removeWorkerRoute } from "./storage"
 import { readFiles, type LabProjectRow } from "./lab"
 import { buildSdk } from "./lab-store"
+import { pickEntry } from "../lab-preview"
 import { assertFqdnOwned } from "../ownership"
 import type { Env } from "../env"
 import { canUseRootDomain } from "../root-domains"
@@ -550,9 +551,23 @@ export async function serveHostedLab(
   }
 
   const files = await readFiles(env, row)
+
+  /**
+   * 入口解析统一走 `pickEntry()`（index.html → 任意 .html → 第一个文件）。
+   *
+   * 2026-10-20 修：原来这里死取 `index.html`，入口叫 main.html 的作品绑了域名后
+   * 打开首页直接 404 —— 而同一个作品在编辑器里预览却正常（预览用的 pickEntry）。
+   * 两套解析逻辑不一致，用户看到的是「预览好好的，绑域名就白屏」。
+   */
+  const entryPath = pickEntry(files)
+  if (!entryPath) {
+    return new Response("Not Found", { status: 404 })
+  }
   const raw = new URL(request.url).pathname.replace(/^\/+/, "")
-  const path = raw || "index.html"
-  const content = files[path] ?? (path === "index.html" ? "" : files["index.html"])
+  // 请求 `/`（或空）走入口；其它路径精确匹配，不中则回落入口（SPA 友好）。
+  // 注意用 `!== undefined` 判断存在性——空文件也是合法文件。
+  const path = raw && files[raw] !== undefined ? raw : entryPath
+  const content = files[path]
   if (!content) {
     return new Response("Not Found", { status: 404 })
   }

@@ -1055,8 +1055,21 @@ function normalizeFiles(raw: unknown): Record<string, string> {
   if (total > MAX_TOTAL_BYTES) {
     throw new ApiError(413, "作品太大（合计超过 3MB），精简后再保存", "TOO_LARGE")
   }
-  if (!out["index.html"]) {
-    throw new ApiError(400, "缺少入口文件 index.html", "INVALID_FILES")
+  /**
+   * 入口要求：**有任意一个 .html 即可**，不再强制必须叫 `index.html`。
+   *
+   * 2026-10-20 放宽。原来这里硬性要求 `index.html`，而其它环节（预览 pickEntry、
+   * 导出 lab-export、公开 hasHtmlEntry）都接受「任意 .html」—— 结果 AI 偶尔把入口
+   * 命名成 main.html / app.html 时，用户能预览、能公开、能导出，**唯独一保存就报错**。
+   * 现在保存这条路径与其它环节对齐；`index.html` 只是「推荐命名」，由提示词引导，
+   * 不再作为硬门槛。真正的入口解析统一由 `pickEntry()` 负责。
+   */
+  if (!Object.keys(out).some((p) => p.toLowerCase().endsWith(".html"))) {
+    throw new ApiError(
+      400,
+      "作品里至少要有一个 HTML 文件作为入口（建议命名为 index.html）",
+      "INVALID_FILES"
+    )
   }
   return out
 }

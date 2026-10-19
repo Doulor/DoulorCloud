@@ -8004,6 +8004,8 @@ export const en: Record<MessageKey, string> = {
   "lab.save.cancel": "Cancel",
   "lab.save.saved": "Saved",
   "lab.save.nothing": "Generate a page before saving",
+  "lab.compile.failed": "{file} failed to compile — check the syntax in that file (JSX / TS must be valid)",
+  "lab.compile.badge": "Compile error",
   "lab.projects": "My projects",
   "lab.domain.bind": "Bind domain",
   "lab.domain.unbind": "Unbind",

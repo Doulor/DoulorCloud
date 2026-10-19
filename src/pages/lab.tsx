@@ -33,6 +33,7 @@ import { Label } from "@/components/ui/label"
 import { useT, tStatic } from "@/i18n"
 import { applyReplace, buildPreviewDoc, missingPathReason, buildSystemPrompt, buildToolResults, type LabConvoMessage, type LabConvoPart, compactHistory, nativeToolCallsToSegments, type NativeToolCall, EFFORT_LABEL_KEY, EFFORT_LEVELS, EFFORT_TEMPERATURE, type EffortLevel, grepFiles, looksLikeBuildRequest, needsToolResult, normalizeEffort, openPreviewInNewTab, parseAgentText, parseReplaceContent, PROTOCOL_NUDGE, CLOSING_NUDGE, REPORT_NUDGE, MAX_CLOSING_NUDGES, type FileMap, type Segment, inlineAssets } from "@/lib/lab-agent"
 import { buildSiteManual, parseSiteArgs, runSiteOp, type SiteOp } from "@/lib/lab-site"
+import { compileLabSources, needsCompile, type CompileError } from "@/lib/lab-compile"
 import {
   bootVM,
   formatCommandResult,
@@ -749,6 +750,12 @@ export default function LabPage() {
   const [preview, setPreview] = React.useState("")
   const [previewSeq, setPreviewSeq] = React.useState(0)
   const [previewOpen, setPreviewOpen] = React.useState(false)
+  /**
+   * JSX / TS 源码的编译错误。
+   * 作品里写了 `.jsx`/`.tsx`/`.ts` 时，保存与预览前会就地编译成 `.js`；
+   * 编不过就把错误显示出来（不要静默失败 —— 否则用户只看到白屏，无从下手）。
+   */
+  const [compileErrors, setCompileErrors] = React.useState<CompileError[]>([])
 
   // ---- 浏览器终端（v86）：跑在用户自己的浏览器里，用户点了才加载 ----
   /** 右侧面板当前显示的是「终端」还是「预览」 */
@@ -1348,9 +1355,8 @@ export default function LabPage() {
       setCurrentId(payload.id ?? null)
       setSaveName(payload.name ?? "")
       setSaveDesc(payload.description ?? "")
-      setPreview(buildPreviewDoc(files))
-      setPreviewSeq((s) => s + 1)
-      refreshPreview(true)
+      // 注意：这里要先编译（作品里可能有 .jsx/.tsx），再生成预览 —— 所以统一走 refreshPreview
+      await refreshPreview(true)
       toast.success(t("gal.continueDone"))
     })()
     return () => {
@@ -2145,8 +2151,30 @@ export default function LabPage() {
     [t]
   )
 
-  const refreshPreview = (bump: boolean) => {
-    setPreview(buildPreviewDoc(filesRef.current))
+  /**
+   * 编译作品里的 JSX / TS 源码，把产物写回文件集。
+   *
+   * 预览、保存、新标签页预览三条路径都要先过这一步 —— 否则保存到 R2 的只有源码，
+   * 绑定的域名和审核预览都拿不到能跑的 `.js`。
+   * 没有可编译文件时**零开销**（compileLabSources 内部直接返回，连编译器都不加载）。
+   */
+  const syncCompiled = async (): Promise<FileMap> => {
+    const cur = filesRef.current
+    if (!Object.keys(cur).some(needsCompile)) {
+      if (compileErrors.length) setCompileErrors([])
+      return cur
+    }
+    const { files: next, errors } = await compileLabSources(cur)
+    setCompileErrors(errors)
+    // 编译失败也把成功的部分写回去：整页白屏比缺一个文件更难排查
+    filesRef.current = next
+    setFiles(next)
+    return next
+  }
+
+  const refreshPreview = async (bump: boolean) => {
+    const next = await syncCompiled()
+    setPreview(buildPreviewDoc(next))
     if (bump) setPreviewSeq((s) => s + 1)
   }
 
@@ -3091,7 +3119,7 @@ export default function LabPage() {
             controller.signal,
             round,
             applied,
-            () => refreshPreview(false),
+            () => void refreshPreview(false),
             effChannel,
             effModel,
             effSiteChannelId,
@@ -3484,7 +3512,7 @@ export default function LabPage() {
               }
             : { role: "assistant", content: raw },
         ]
-        refreshPreview(true)
+        await refreshPreview(true)
         // 每轮结束立刻落一次本地（比定时器更及时，保住刚生成的稿子）
         void flushAutoSave()
         void persistDraft()
@@ -3943,7 +3971,7 @@ export default function LabPage() {
       abortRef.current = null
       // 单例也要清干净：否则切走再回来会显示一个永远转圈的「思考中」
       clearLabRun()
-      refreshPreview(true)
+      await refreshPreview(true)
       // 同上：这一轮彻底结束，必须落盘一次（卸载后没有任何 effect 会替我们做）
       void persistDraft()
     }
@@ -4545,7 +4573,13 @@ const doImportLocal = async () => {
   }
 
   const doSave = async () => {
-    const current = filesRef.current
+    // 保存前必须先把 JSX/TS 编出 .js —— R2 里只放源码的话，绑定的域名会打不开
+    const compiled = await syncCompiled()
+    if (compileErrors.length) {
+      toast.error(t("lab.compile.failed", { file: compileErrors[0].path }))
+      return
+    }
+    const current = compiled
     if (!Object.keys(current).length) {
       toast.error(t("lab.save.nothing"))
       return
@@ -4579,8 +4613,16 @@ const doImportLocal = async () => {
    * 统一收在 `lib/lab-agent.ts` 的 `openPreviewInNewTab()` 里 —— 造物集也走同一份，
    * 免得两条入口各自实现、修了一处漏另一处。
    */
-  const openInNewTab = () => {
-    const doc = buildPreviewDoc(filesRef.current)
+  const openInNewTab = async () => {
+    // 新标签页里跑的是静态产物，先把 JSX/TS 编译出来
+    const next = await syncCompiled()
+    if (compileErrors.length) {
+      toast.error(
+        t("lab.compile.failed", { file: compileErrors[0].path })
+      )
+      return
+    }
+    const doc = buildPreviewDoc(next)
     if (!doc) return
     if (!openPreviewInNewTab(doc)) {
       // 只有「弹窗被拦」这一种情况需要提示，其余都已就地处理
@@ -5641,25 +5683,43 @@ const doImportLocal = async () => {
                 </div>
 
                 {/* ---- 作品预览 ---- */}
-                <div className={cn("h-full w-full", termTab && "hidden")}>
-                  {preview ? (
-                    <iframe
-                      key={previewSeq}
-                      title="preview"
-                      className="h-full w-full border-0"
-                      sandbox="allow-scripts allow-modals allow-forms allow-popups"
-                      srcDoc={preview}
-                    />
-                  ) : (
-                    <div className="flex h-full flex-col items-center justify-center gap-1.5 bg-card px-6 text-center">
-                      <p className="text-sm text-muted-foreground">
-                        {t("lab.preview.empty")}
-                      </p>
-                      <p className="text-xs text-muted-foreground/80">
-                        {t("lab.preview.emptyDesc")}
-                      </p>
+                <div className={cn("flex h-full w-full flex-col", termTab && "hidden")}>
+                  {/*
+                    JSX / TS 编译失败时必须显式告诉用户 —— 否则产物缺失，他看到的只是一片白屏，
+                    完全联想不到是「某个源码文件语法错了」。
+                  */}
+                  {compileErrors.length > 0 && (
+                    <div className="shrink-0 border-b border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
+                      <span className="font-medium">
+                        {t("lab.compile.badge")}：
+                      </span>
+                      {compileErrors.map((e, i) => (
+                        <span key={`${e.path}-${i}`} className="mr-3 inline-block">
+                          {e.path} — {e.message}
+                        </span>
+                      ))}
                     </div>
                   )}
+                  <div className="min-h-0 flex-1">
+                    {preview ? (
+                      <iframe
+                        key={previewSeq}
+                        title="preview"
+                        className="h-full w-full border-0"
+                        sandbox="allow-scripts allow-modals allow-forms allow-popups"
+                        srcDoc={preview}
+                      />
+                    ) : (
+                      <div className="flex h-full flex-col items-center justify-center gap-1.5 bg-card px-6 text-center">
+                        <p className="text-sm text-muted-foreground">
+                          {t("lab.preview.empty")}
+                        </p>
+                        <p className="text-xs text-muted-foreground/80">
+                          {t("lab.preview.emptyDesc")}
+                        </p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
           </aside>

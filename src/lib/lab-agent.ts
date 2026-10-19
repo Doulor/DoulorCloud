@@ -19,6 +19,10 @@
  *   标签之外的自然语言会被当成「旁白」原样显示给用户。
  */
 
+// ESM 依赖图内联（预览要在 srcdoc 里跑 module 脚本，见文件里的说明）。
+// 单独拆成零依赖文件，避免把 Sucrase 连带拉进这个 chunk。
+import { inlineModuleGraph } from "./lab-module-graph"
+
 export type FileMap = Record<string, string>
 
 /**
@@ -1043,13 +1047,22 @@ export function buildPreviewDoc(files: FileMap): string {
   if (!html) return ""
 
   const lookup = (ref: string): string | undefined => {
+    const path = resolvePath(ref)
+    return path == null ? undefined : files[path]
+  }
+
+  /**
+   * 与 lookup 同口径，但返回**解析后的项目内路径**。
+   * ESM 依赖图内联需要知道入口的真实路径（不能只拿到内容）。
+   */
+  const resolvePath = (ref: string): string | undefined => {
     const clean = ref.split("?")[0].split("#")[0]
     const direct = clean.replace(/^\.\//, "").replace(/^\/+/, "")
-    if (files[direct] != null) return files[direct]
+    if (files[direct] != null) return direct
     // 相对入口文件所在目录解析（入口在子目录时也能对上）
     const base = entry.includes("/") ? entry.replace(/[^/]+$/, "") : ""
     const joined = base + direct
-    return files[joined]
+    return files[joined] != null ? joined : undefined
   }
 
   html = html.replace(/<link\b[^>]*>/gi, (tag) => {
@@ -1064,9 +1077,31 @@ export function buildPreviewDoc(files: FileMap): string {
     /<script\b([^>]*?)\ssrc\s*=\s*["']([^"']+)["']([^>]*?)>\s*<\/script>/gi,
     (tag, pre: string, src: string, post: string) => {
       if (EXTERNAL_RE.test(src)) return tag
-      const js = lookup(src)
-      if (js == null) return tag
-      const attrs = `${pre}${post}`.replace(/\stype\s*=\s*["'][^"']*["']/i, "")
+      const attrsRaw = `${pre}${post}`
+      const path = resolvePath(src)
+      if (path == null) return tag
+
+      /**
+       * `type="module"` 单独处理（2026-10-20，配合 JSX/TS 编译）。
+       *
+       * 普通脚本可以直接摊平成内联脚本；**module 不行**：
+       *   · 内联后没有了 `type="module"`，里面的 import/export 会变成语法错误；
+       *   · srcdoc 没有目录概念，`import "./App.js"` 没有基准 URL 可解析。
+       * 所以这里把整张相对依赖图打包成 blob URL，再把 src 指过去。
+       */
+      if (/\stype\s*=\s*["']module["']/i.test(attrsRaw)) {
+        const graph = inlineModuleGraph(files, path)
+        if (graph) {
+          const attrs = attrsRaw.replace(/\stype\s*=\s*["']module["']/i, "")
+          // blob 由浏览器在文档卸载时回收；预览刷新频率低，不必手工 revoke
+          return `<script type="module"${attrs} src="${graph.url}"></script>`
+        }
+        // 有循环依赖等内联不了的情况：保持原样，至少不会因为丢 type 变成语法错误
+        return tag
+      }
+
+      const js = files[path]
+      const attrs = attrsRaw.replace(/\stype\s*=\s*["'][^"']*["']/i, "")
       return `<script${attrs}>\n${js}\n</script>`
     }
   )
@@ -1453,7 +1488,7 @@ ls -la
 - 改文件前先 <lab_read> 看清现状，**不要凭记忆改** —— 记忆里的内容多半已经过时。
 - 想执行命令：**先 <lab_need_vm/> 申请**，等回执说「终端已就绪」之后再用 <lab_run>。
 
-给 <lab_run> 加一个人话说明：<lab_run desc="下载环境依赖">npm ci</lab_run>。
+给 <lab_run> 加一个人话说明：<lab_run desc="看项目里有哪些文件">ls -la</lab_run>。
 **desc 会直接显示给用户看**（尤其在「正在思考」那一行下面），要写成「在做什么事」，
 而不是把命令抄一遍；不写就只能把你的命令行原样摆给用户看。
   **不要**跳过申请直接 <lab_run>（终端没启动会直接失败，白费一轮）。
@@ -1465,7 +1500,30 @@ ls -la
   多出来的闭合标签会被当成普通文字显示给用户，看起来就是一堆莫名其妙的符号。
 - 用 <lab_write> 时必须给**完整文件内容**，不能只给片段、不能用「…」省略。
 - 做网页项目时：入口用 index.html，多文件之间用相对路径互相引用（如 ./style.css、./app.js）。
-- 页面必须带 <meta name="viewport">，手机上也正常；第三方库用 CDN（cdn.jsdelivr.net、unpkg.com）。
+- 页面必须带 <meta name="viewport">，手机上也正常。
+- **技术栈不限，但不能依赖构建步骤** —— 预览和发布都是直接跑静态文件，
+  没有 npm install、没有 vite/webpack、没有 TypeScript 编译。按这个前提选栈：
+  - 原生 HTML/CSS/JS —— 默认，最稳。
+  - React / Vue / Preact / Svelte —— 用 importmap + esm.sh 直接 import。
+    **支持 JSX / TSX / TS 源码**：直接写 App.jsx / App.tsx / utils.ts 就行，保存和预览前
+    系统会自动用 Sucrase 编译成**同名 .js**（App.jsx → App.js）。记住两条约定：
+      ① HTML 里引用**编译后的 .js**（./App.js），不要引用源码（./App.jsx）；
+      ② importmap 里必须给 "react/jsx-runtime"，否则编译产物 import 不到它。
+    示例：
+      <script type="importmap">{"imports":{
+        "react":"https://esm.sh/react@18",
+        "react-dom/client":"https://esm.sh/react-dom@18/client",
+        "react/jsx-runtime":"https://esm.sh/react@18/jsx-runtime"}}</script>
+      <script type="module" src="./App.js"></script>
+    然后 App.jsx 里正常写 import 和 JSX。TS 只剥离类型、**不做类型检查**，类型写错不会报错。
+  - Vue：import { createApp } from "https://esm.sh/vue@3"，组件用 template 字符串或 render()；
+    **.vue 单文件组件不支持**（没有 SFC 编译器）。
+  - 不想用 JSX 时，React 也可以直接 createElement（h 函数）。两条路都合法，看哪个顺手。
+  - Tailwind / Bootstrap / DaisyUI / Three.js / Chart.js / GSAP / 任意 npm 库
+    —— 一律 CDN（esm.sh、cdn.jsdelivr.net、unpkg.com），别去装包。
+  - 需要拆组件就写多个 .js 文件，用相对路径互相 import。
+- 用户**明确点名**要用某个框架（React / Vue / Three.js…）就照做，不要擅自换成原生写法；
+  他没说就用原生，别硬塞框架。
 - 界面文字用中文，配色干净现代。
 - **预览是沙箱环境**：作品跑在没有同源权限的 iframe 里，localStorage / sessionStorage
   已经由系统垫了一层内存版（能读能写，但刷新即清空）；fetch 相对路径拿不到东西、
