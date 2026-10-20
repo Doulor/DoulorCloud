@@ -104,7 +104,7 @@ export function waterCategoryKeys(defs: PostCategoryDef[]): string[] {
  * 避免每条评论、每个帖子都重算一遍全局统计。
  */
 let hotThresholdCache: { t: number; value: number } | null = null
-async function hotCommentThreshold(env: Env): Promise<number> {
+export async function hotCommentThreshold(env: Env): Promise<number> {
   const now = Date.now()
   if (hotThresholdCache && now - hotThresholdCache.t < 60_000) {
     return hotThresholdCache.value
@@ -158,7 +158,7 @@ interface PostRow {
 }
 
 /** 从查询行的 title_* 列拼出前端要的称号对象（未授予回 null） */
-function titleOf(r: { title_name?: string | null; title_color_from?: string | null; title_color_to?: string | null }) {
+export function titleOf(r: { title_name?: string | null; title_color_from?: string | null; title_color_to?: string | null }) {
   return r.title_name
     ? { name: r.title_name, colorFrom: r.title_color_from ?? "#64748b", colorTo: r.title_color_to ?? "#64748b" }
     : null

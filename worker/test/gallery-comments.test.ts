@@ -304,3 +304,164 @@ describe("造物集评论：删除权限", () => {
     expect(row?.deleted_at).toBeNull()
   })
 })
+
+describe("造物集评论：点赞（对齐社区）", () => {
+  it("点赞 → 取消，计数正确变化", async () => {
+    const owner = await makeUser()
+    const liker = await makeUser()
+    const pid = await makeProject(owner)
+    const r = await fetchSelf(
+      authRequest(owner, `/api/gallery/${pid}/comments`, {
+        method: "POST",
+        body: JSON.stringify({ body: "给我点个赞" }),
+        headers: jsonHeaders,
+      })
+    )
+    const cid = (await r.json<{ comment: { id: string } }>()).comment.id
+
+    const l1 = await fetchSelf(
+      authRequest(liker, `/api/gallery/${pid}/comments/${cid}/like`, { method: "POST" })
+    )
+    expect(l1.status).toBe(200)
+    expect(await l1.json()).toMatchObject({ liked: true, likeCount: 1 })
+
+    // 幂等：再点一次是取消
+    const l2 = await fetchSelf(
+      authRequest(liker, `/api/gallery/${pid}/comments/${cid}/like`, { method: "POST" })
+    )
+    expect(await l2.json()).toMatchObject({ liked: false, likeCount: 0 })
+  })
+
+  it("列表里带 liked 标记（只有点过的人看到 true）", async () => {
+    const owner = await makeUser()
+    const liker = await makeUser()
+    const pid = await makeProject(owner)
+    const r = await fetchSelf(
+      authRequest(owner, `/api/gallery/${pid}/comments`, {
+        method: "POST",
+        body: JSON.stringify({ body: "被人赞的评论" }),
+        headers: jsonHeaders,
+      })
+    )
+    const cid = (await r.json<{ comment: { id: string } }>()).comment.id
+    await fetchSelf(authRequest(liker, `/api/gallery/${pid}/comments/${cid}/like`, { method: "POST" }))
+
+    const mine = await fetchSelf(authRequest(liker, `/api/gallery/${pid}/comments`))
+    const md = await mine.json<{ comments: { liked: boolean; likeCount: number }[] }>()
+    expect(md.comments[0]).toMatchObject({ liked: true, likeCount: 1 })
+
+    const others = await fetchSelf(authRequest(owner, `/api/gallery/${pid}/comments`))
+    const od = await others.json<{ comments: { liked: boolean; likeCount: number }[] }>()
+    expect(od.comments[0]).toMatchObject({ liked: false, likeCount: 1 })
+  })
+})
+
+describe("造物集评论：编辑（对齐社区的次数上限）", () => {
+  it("作者能改，editCount 递增", async () => {
+    const owner = await makeUser()
+    const pid = await makeProject(owner)
+    const r = await fetchSelf(
+      authRequest(owner, `/api/gallery/${pid}/comments`, {
+        method: "POST",
+        body: JSON.stringify({ body: "原始内容" }),
+        headers: jsonHeaders,
+      })
+    )
+    const cid = (await r.json<{ comment: { id: string } }>()).comment.id
+
+    const up = await fetchSelf(
+      authRequest(owner, `/api/gallery/${pid}/comments/${cid}`, {
+        method: "PUT",
+        body: JSON.stringify({ body: "改过的内容" }),
+        headers: jsonHeaders,
+      })
+    )
+    expect(up.status).toBe(200)
+    expect(await up.json()).toMatchObject({ unchanged: false, editCount: 1 })
+  })
+
+  it("内容没变 → unchanged 且不消耗次数", async () => {
+    const owner = await makeUser()
+    const pid = await makeProject(owner)
+    const r = await fetchSelf(
+      authRequest(owner, `/api/gallery/${pid}/comments`, {
+        method: "POST",
+        body: JSON.stringify({ body: "一模一样" }),
+        headers: jsonHeaders,
+      })
+    )
+    const cid = (await r.json<{ comment: { id: string } }>()).comment.id
+    const up = await fetchSelf(
+      authRequest(owner, `/api/gallery/${pid}/comments/${cid}`, {
+        method: "PUT",
+        body: JSON.stringify({ body: "一模一样" }),
+        headers: jsonHeaders,
+      })
+    )
+    expect(await up.json()).toMatchObject({ unchanged: true, editCount: 0 })
+  })
+
+  it("别人改不了 → 403", async () => {
+    const owner = await makeUser()
+    const other = await makeUser()
+    const pid = await makeProject(owner)
+    const r = await fetchSelf(
+      authRequest(owner, `/api/gallery/${pid}/comments`, {
+        method: "POST",
+        body: JSON.stringify({ body: "不许改" }),
+        headers: jsonHeaders,
+      })
+    )
+    const cid = (await r.json<{ comment: { id: string } }>()).comment.id
+    const up = await fetchSelf(
+      authRequest(other, `/api/gallery/${pid}/comments/${cid}`, {
+        method: "PUT",
+        body: JSON.stringify({ body: "我要改" }),
+        headers: jsonHeaders,
+      })
+    )
+    expect(up.status).toBe(403)
+  })
+})
+
+describe("造物集评论：删除后保留占位（回复树不断链）", () => {
+  it("父评论被删后，子回复仍在树里且正文被清空", async () => {
+    const owner = await makeUser()
+    const commenter = await makeUser()
+    const pid = await makeProject(owner)
+
+    const root = await fetchSelf(
+      authRequest(commenter, `/api/gallery/${pid}/comments`, {
+        method: "POST",
+        body: JSON.stringify({ body: "会被删的父评论" }),
+        headers: jsonHeaders,
+      })
+    )
+    const rootId = (await root.json<{ comment: { id: string } }>()).comment.id
+
+    await env.DB.prepare("UPDATE gallery_comments SET created_at = ? WHERE id = ?")
+      .bind(new Date(Date.now() - 60_000).toISOString(), rootId)
+      .run()
+    const child = await fetchSelf(
+      authRequest(owner, `/api/gallery/${pid}/comments`, {
+        method: "POST",
+        body: JSON.stringify({ body: "我的父评论被删了", parentId: rootId }),
+        headers: jsonHeaders,
+      })
+    )
+    expect(child.status).toBe(201)
+
+    // 评论作者删掉自己的父评论
+    await fetchSelf(authRequest(commenter, `/api/gallery/${pid}/comments/${rootId}`, { method: "DELETE" }))
+
+    const list = await fetchSelf(authRequest(owner, `/api/gallery/${pid}/comments`))
+    const data = await list.json<{
+      comments: { deleted?: boolean; body: string; replies: unknown[] }[]
+    }>()
+    // 父评论仍在（作为占位），正文已清空，子回复没被提成根节点
+    expect(data.comments).toHaveLength(1)
+    expect(data.comments[0].deleted).toBe(true)
+    expect(data.comments[0].body).toBe("")
+    expect(data.comments[0].replies).toHaveLength(1)
+  })
+})

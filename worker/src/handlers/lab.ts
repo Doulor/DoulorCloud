@@ -55,6 +55,9 @@ import { loadSearchCost, isUserSearchEnabled, loadSiteKeysForInfo } from "./lab-
  *    拆开反而会出现两份 CF 路由知识。
  */
 import { releaseProjectDomain } from "./lab-domains"
+// 评论数只在列表/详情出口用一次（批量 COUNT），不引入循环依赖：
+// gallery-comments → community / community-logic，二者都不 import lab
+import { countCommentsByProjects } from "./gallery-comments"
 import {
   consumeLabQuota,
   isFreeModel,
@@ -1607,7 +1610,7 @@ function hasHtmlEntry(row: LabProjectRow): boolean {
   return filePathsOf(row).some((p) => p.toLowerCase().endsWith(".html"))
 }
 
-function toGalleryJson(row: GalleryRow, isOwner: boolean) {
+function toGalleryJson(row: GalleryRow, isOwner: boolean, commentCount = 0) {
   return {
     id: row.id,
     name: row.name,
@@ -1619,6 +1622,14 @@ function toGalleryJson(row: GalleryRow, isOwner: boolean) {
     coverV: coverVersionOf(row.cover_key),
     views: row.views,
     likes: row.likes,
+    /**
+     * 评论数（2026-10-21）：概览卡片上要在「点赞」旁边显示评论图标 + 数字。
+     *
+     * 不做冗余列 —— 由调用方从 `gallery_comments` 批量 COUNT 后传进来
+     * （见 `countCommentsByProjects`）。大厅一页 20 张卡片，
+     * 逐个 COUNT 就是 20 次 D1 往返，所以那里是**一次 IN 查询**。
+     */
+    commentCount,
     /** 我有没有赞过（决定按钮是不是已点亮） */
     liked: !!row.liked,
     /**
@@ -1881,13 +1892,19 @@ export async function listGallery(env: Env, request: Request): Promise<Response>
       .all<GalleryRow>(),
   ])
 
+  // 评论数：一次 IN 查询批量取（见 countCommentsByProjects 的注释）
+  const ids = (rows.results ?? []).map((r) => r.id)
+  const commentCounts = await countCommentsByProjects(env, ids)
+
   return json({
     total: totalRow?.c ?? 0,
     page,
     /** 回显给前端，免得它自己猜现在的排序（刷新/翻页后要对上） */
     sort,
     pageSize: GALLERY_PAGE_SIZE,
-    items: (rows.results ?? []).map((r) => toGalleryJson(r, r.user_id === user.id)),
+    items: (rows.results ?? []).map((r) =>
+      toGalleryJson(r, r.user_id === user.id, commentCounts[r.id] ?? 0)
+    ),
   })
 }
 
@@ -1928,7 +1945,11 @@ export async function getGalleryItem(
   }
 
   const files = await readFiles(env, row)
-  return json({ project: { ...toGalleryJson(row, isOwner), files } })
+  // 详情的评论数：直接发一次 COUNT（只有一条，不需要批量）
+  const commentCounts = await countCommentsByProjects(env, [row.id])
+  return json({
+    project: { ...toGalleryJson(row, isOwner, commentCounts[row.id] ?? 0), files },
+  })
 }
 
 // ---------------------------------------------------------------------------

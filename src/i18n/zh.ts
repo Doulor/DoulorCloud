@@ -3561,6 +3561,8 @@ export const zh = {
   "cm.comment": "评论",
   "cm.comments": "评论",
   "cm.commentPh": "写下你的评论…",
+  "cm.send": "发送",
+  "cm.loginToComment": "登录后即可评论",
   "cm.noComments": "还没有评论，来说点什么？",
   "cm.afterLoginComment": "后可评论。",
   "cm.afterLoginPost": "后可发帖、评论、点赞，和朋友们聊聊。",
@@ -8014,6 +8016,8 @@ export const zh = {
   "gal.iconHint": "没有上传封面时，列表里显示这个图标",
   // ---- 造物集评论区（2026-10-21）。评论按**单个作品**隔离，各作品互不相通 ----
   "gal.cmt.title": "评论",
+  "gal.cmt.hide": "隐藏评论",
+  "gal.cmt.show": "显示评论",
   "gal.cmt.empty": "还没有评论，来说两句？",
   "gal.cmt.placeholder": "说点什么…（Ctrl / ⌘ + Enter 发送）",
   "gal.cmt.reply": "回复",

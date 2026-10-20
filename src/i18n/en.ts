@@ -3650,6 +3650,8 @@ export const en: Record<MessageKey, string> = {
   "cm.comment": "Comment",
   "cm.comments": "Comments",
   "cm.commentPh": "Write a comment…",
+  "cm.send": "Send",
+  "cm.loginToComment": "Sign in to comment",
   "cm.noComments": "no comments yet — be the first.",
   "cm.afterLoginComment": " to comment.",
   "cm.afterLoginPost": " to post, comment, like and chat with friends.",
@@ -8157,6 +8159,8 @@ export const en: Record<MessageKey, string> = {
   "gal.iconHint": "Shown in lists when there's no cover image",
   // ---- Gallery comments (2026-10-21). Comments are scoped to a single creation ----
   "gal.cmt.title": "Comments",
+  "gal.cmt.hide": "Hide comments",
+  "gal.cmt.show": "Show comments",
   "gal.cmt.empty": "No comments yet — say something?",
   "gal.cmt.placeholder": "Say something… (Ctrl / ⌘ + Enter to send)",
   "gal.cmt.reply": "Reply",

@@ -4831,6 +4831,11 @@ export interface GalleryItem {
   hasCover?: boolean
   views: number
   likes: number
+  /**
+   * 评论数（2026-10-21）：概览卡片上「点赞」旁边显示评论图标 + 数字。
+   * 后端由 `countCommentsByProjects` 批量算出，不是冗余列。
+   */
+  commentCount?: number
   /** 置顶时间（ISO 字符串）；null / 缺省 = 未置顶。管理端用来回显置顶状态 */
   pinned_at?: string | null
   /** 当前用户有没有点过赞 */
@@ -5232,6 +5237,8 @@ export const galleryApi = {
       count: number
       /** 当前查看者是不是作品作者 */
       isOwner: boolean
+      /** 评论可修改次数上限（与社区同一个设置项） */
+      editLimit: number
     }>(`/gallery/${encodeURIComponent(id)}/comments`),
 
   /**
@@ -5243,6 +5250,20 @@ export const galleryApi = {
     request<{ comment: { id: string; createdAt: string } }>(
       `/gallery/${encodeURIComponent(id)}/comments`,
       { method: "POST", body: JSON.stringify({ body, parentId }) }
+    ),
+
+  /** 编辑自己的评论（次数上限由后端按 community_comment_edit_limit 控制） */
+  updateComment: (id: string, commentId: string, body: string) =>
+    request<{ ok: boolean; unchanged: boolean; editCount: number }>(
+      `/gallery/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentId)}`,
+      { method: "PUT", body: JSON.stringify({ body }) }
+    ),
+
+  /** 评论点赞 / 取消（幂等切换，返回最新计数） */
+  toggleCommentLike: (id: string, commentId: string) =>
+    request<{ liked: boolean; likeCount: number }>(
+      `/gallery/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentId)}/like`,
+      { method: "POST" }
     ),
 
   /** 删除评论（软删除）。作者本人 / 作品作者 / 管理员才有权限。 */

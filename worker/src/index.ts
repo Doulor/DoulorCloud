@@ -4624,6 +4624,34 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       ),
   },
 
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/gallery\/([^/]+)\/comments\/([^/]+)$/),
+    methods: ["PUT"],
+    handle: (m: RegExpMatchArray) =>
+      galleryCommentHandlers.updateGalleryComment(
+        env,
+        request,
+        decodeURIComponent(m[1]),
+        decodeURIComponent(m[2])
+      ),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/gallery\/([^/]+)\/comments\/([^/]+)\/like$/),
+    methods: ["POST"],
+    handle: (m: RegExpMatchArray) =>
+      galleryCommentHandlers.toggleGalleryCommentLike(
+        env,
+        request,
+        decodeURIComponent(m[1]),
+        decodeURIComponent(m[2])
+      ),
+  },
+
   // ---- 点赞（切换语义）与封面读取 ----
   // ⚠️ 两条都带一个额外路径段，所以上面的 `/gallery/:id`（`[^/]+`）不会误吞它们。
   {

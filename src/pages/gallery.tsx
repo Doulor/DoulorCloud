@@ -8,7 +8,10 @@ import {
   Heart,
   Link2,
   Loader2,
+  MessageSquare,
   Pencil,
+  PanelRightClose,
+  PanelRightOpen,
   Pin,
   Search,
   Sparkles,
@@ -603,6 +606,11 @@ function GalleryGrid({
                 override={likeOverrides[it.id]}
                 onChange={onLikeChange}
               />
+              {/* 评论数（2026-10-21 站长要求）：放在点赞旁边，纯展示不进浮层 */}
+              <span className="flex items-center gap-1 text-xs tabular-nums text-muted-foreground">
+                <MessageSquare className="h-3.5 w-3.5" />
+                {it.commentCount ?? 0}
+              </span>
             </span>
           </div>
         </div>
@@ -850,6 +858,13 @@ function DetailOverlay({
   const { t } = useT()
   const navigate = useNavigate()
   const [continueBusy, setContinueBusy] = React.useState(false)
+  /**
+   * 评论区显隐（2026-10-21 站长要求）：默认**打开**。
+   * 隐藏后预览能占满整个宽度 —— 看复杂作品（比如全屏游戏）时需要这个。
+   * 不持久化到 localStorage：每次打开详情按「默认展开」来，
+   * 省得有人某次收起后，之后打开每个作品都以为评论功能坏了。
+   */
+  const [commentsOpen, setCommentsOpen] = React.useState(true)
 
   /**
    * 🔴「继续创作」（2026-10-12 站长要求）：把已发布作品的文件拉回 AI 实验室。
@@ -1014,6 +1029,23 @@ function DetailOverlay({
                 <span className="hidden sm:inline">{t("gal.continue")}</span>
               </Button>
             )}
+            {/* 评论区显隐开关（放在「分享」左边，站长指定位置）：默认展开 */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCommentsOpen((v) => !v)}
+              title={commentsOpen ? t("gal.cmt.hide") : t("gal.cmt.show")}
+              aria-pressed={commentsOpen}
+            >
+              {commentsOpen ? (
+                <PanelRightClose className="h-4 w-4" />
+              ) : (
+                <PanelRightOpen className="h-4 w-4" />
+              )}
+              <span className="hidden sm:inline">
+                {commentsOpen ? t("gal.cmt.hide") : t("gal.cmt.show")}
+              </span>
+            </Button>
             {shareUrl && (
               <Button variant="outline" size="sm" onClick={() => void copyShareLink()}>
                 <Link2 className="h-4 w-4" />
@@ -1068,7 +1100,7 @@ function DetailOverlay({
           </div>
 
           {/* 评论按作品隔离：key 带作品 id，切换作品时组件整体重建，不会串数据 */}
-          {detail && (
+          {detail && commentsOpen && (
             <aside className="flex min-h-0 w-full shrink-0 flex-col border-t sm:w-96 sm:border-l sm:border-t-0">
               <GalleryComments key={detail.id} projectId={detail.id} />
             </aside>
