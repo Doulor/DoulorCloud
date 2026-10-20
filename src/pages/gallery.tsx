@@ -21,6 +21,7 @@ import { CollectionAside } from "@/components/collection-nav"
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { EditProjectDialog, type EditProjectActions } from "@/components/lab-edit-project-dialog"
+import { GalleryComments } from "@/components/gallery-comments"
 import { UserAvatar } from "@/components/user-avatar"
 import { SkeletonCards } from "@/components/skeletons"
 import { Badge } from "@/components/ui/badge"
@@ -941,7 +942,7 @@ function DetailOverlay({
       onClick={onClose}
     >
       <div
-        className="mx-auto flex h-full w-full max-w-6xl flex-col overflow-hidden rounded-2xl border bg-card shadow-xl"
+        className="mx-auto flex h-full w-full max-w-7xl flex-col overflow-hidden rounded-2xl border bg-card shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex flex-wrap items-center gap-3 border-b px-3 py-2.5 sm:px-4">
@@ -1036,25 +1037,41 @@ function DetailOverlay({
           </div>
         </header>
 
-        <div className="min-h-0 flex-1 bg-white">
-          {loading ? (
-            <div className="flex h-full items-center justify-center gap-2 text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              <span className="text-sm">{t("gal.loading")}</span>
-            </div>
-          ) : doc ? (
-            <iframe
-              title={detail?.name ?? "preview"}
-              className={cn("h-full w-full border-0")}
-              sandbox="allow-scripts allow-modals allow-forms allow-popups"
-              srcDoc={doc}
-            />
-          ) : (
-            <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 text-center">
-              <Sparkles className="h-5 w-5 text-muted-foreground" />
-              <p className="text-sm font-medium">{t("gal.noPreview")}</p>
-              <p className="max-w-sm text-xs text-muted-foreground">{t("gal.noPreviewDesc")}</p>
-            </div>
+        {/*
+          2026-10-21 站长要求：预览**靠左**、右侧挂评论区。
+          宽屏左右分栏（预览 flex-1 吃掉剩余宽度、评论固定 384px）；
+          窄屏退回上下堆叠 —— 手机上左右分栏会把预览挤成一条缝。
+        */}
+        <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
+          <div className="min-h-0 flex-1 bg-white">
+            {loading ? (
+              <div className="flex h-full items-center justify-center gap-2 text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span className="text-sm">{t("gal.loading")}</span>
+              </div>
+            ) : doc ? (
+              <iframe
+                title={detail?.name ?? "preview"}
+                className={cn("h-full w-full border-0")}
+                sandbox="allow-scripts allow-modals allow-forms allow-popups"
+                srcDoc={doc}
+              />
+            ) : (
+              <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 text-center">
+                <Sparkles className="h-5 w-5 text-muted-foreground" />
+                <p className="text-sm font-medium">{t("gal.noPreview")}</p>
+                <p className="max-w-sm text-xs text-muted-foreground">
+                  {t("gal.noPreviewDesc")}
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* 评论按作品隔离：key 带作品 id，切换作品时组件整体重建，不会串数据 */}
+          {detail && (
+            <aside className="flex min-h-0 w-full shrink-0 flex-col border-t sm:w-96 sm:border-l sm:border-t-0">
+              <GalleryComments key={detail.id} projectId={detail.id} />
+            </aside>
           )}
         </div>
       </div>

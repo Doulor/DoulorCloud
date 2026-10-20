@@ -29,6 +29,7 @@ import * as storageHandlers from "./handlers/storage"
 import { rootDomainFor } from "./root-domains"
 import * as newapiHandlers from "./handlers/newapi"
 import * as labHandlers from "./handlers/lab"
+import * as galleryCommentHandlers from "./handlers/gallery-comments"
 import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
 import * as voucherHandlers from "./handlers/vouchers"
@@ -4588,6 +4589,39 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     methods: ["GET"],
     handle: (galleryMatch: RegExpMatchArray) =>
       labHandlers.getGalleryItem(env, request, decodeURIComponent(galleryMatch[1])),
+  },
+
+  // ---- 评论区（2026-10-21）----
+  // ⚠️ 必须排在上面 `/gallery/:id` 那条 `[^/]+` 之后**读起来**才顺，
+  //    实际不会冲突：那条的正则带了结尾 `$`，吞不掉多段路径。
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/gallery\/([^/]+)\/comments$/),
+    methods: ["GET"],
+    handle: (m: RegExpMatchArray) =>
+      galleryCommentHandlers.listGalleryComments(env, request, decodeURIComponent(m[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/gallery\/([^/]+)\/comments$/),
+    methods: ["POST"],
+    handle: (m: RegExpMatchArray) =>
+      galleryCommentHandlers.createGalleryComment(env, request, decodeURIComponent(m[1])),
+  },
+
+  {
+    kind: "regex",
+    match: (routePath: string) =>
+      routePath.match(/^\/gallery\/([^/]+)\/comments\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (m: RegExpMatchArray) =>
+      galleryCommentHandlers.deleteGalleryComment(
+        env,
+        request,
+        decodeURIComponent(m[1]),
+        decodeURIComponent(m[2])
+      ),
   },
 
   // ---- 点赞（切换语义）与封面读取 ----

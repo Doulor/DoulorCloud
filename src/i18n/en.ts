@@ -8155,6 +8155,19 @@ export const en: Record<MessageKey, string> = {
   "gal.coverRemoved": "Cover removed",
   "gal.coverFailed": "Cover operation failed. Please try again.",
   "gal.iconHint": "Shown in lists when there's no cover image",
+  // ---- Gallery comments (2026-10-21). Comments are scoped to a single creation ----
+  "gal.cmt.title": "Comments",
+  "gal.cmt.empty": "No comments yet — say something?",
+  "gal.cmt.placeholder": "Say something… (Ctrl / ⌘ + Enter to send)",
+  "gal.cmt.reply": "Reply",
+  "gal.cmt.replyPlaceholder": "Reply to @{name}…",
+  "gal.cmt.send": "Send",
+  "gal.cmt.delete": "Delete",
+  "gal.cmt.confirmDelete": "Delete this comment?",
+  "gal.cmt.loginRequired": "Sign in to comment",
+  "gal.cmt.errLoad": "Failed to load comments",
+  "gal.cmt.errPost": "Failed to post comment",
+  "gal.cmt.errDelete": "Failed to delete comment",
 
   // —— Collection (the game hall inside the gallery; builtin and future user plugins
   //    share one host) ——

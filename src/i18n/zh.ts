@@ -8012,6 +8012,19 @@ export const zh = {
   "gal.coverRemoved": "封面已移除",
   "gal.coverFailed": "封面操作失败，请稍后重试",
   "gal.iconHint": "没有上传封面时，列表里显示这个图标",
+  // ---- 造物集评论区（2026-10-21）。评论按**单个作品**隔离，各作品互不相通 ----
+  "gal.cmt.title": "评论",
+  "gal.cmt.empty": "还没有评论，来说两句？",
+  "gal.cmt.placeholder": "说点什么…（Ctrl / ⌘ + Enter 发送）",
+  "gal.cmt.reply": "回复",
+  "gal.cmt.replyPlaceholder": "回复 @{name}…",
+  "gal.cmt.send": "发送",
+  "gal.cmt.delete": "删除",
+  "gal.cmt.confirmDelete": "确定删除这条评论？",
+  "gal.cmt.loginRequired": "登录后即可评论",
+  "gal.cmt.errLoad": "读取评论失败",
+  "gal.cmt.errPost": "发表评论失败",
+  "gal.cmt.errDelete": "删除评论失败",
 
   // —— 造物典藏（造物集里的**游戏大厅**：内置插件与将来的用户插件共用同一套宿主） ——
   //   卡片形态比造物集更放开：游戏注定不多，所以卡片做大、强调色由插件自己声明。

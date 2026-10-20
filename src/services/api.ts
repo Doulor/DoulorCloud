@@ -5161,6 +5161,35 @@ export const labApi = {
     ),
 }
 
+/**
+ * 造物集评论（2026-10-21）。
+ *
+ * **按作品隔离**：每条评论都挂在某个具体作品下（`project_id`），
+ * 不同作品的评论区互不相通。结构对齐社区的 `CommentNode`（支持任意层级回复），
+ * 额外带了作者展示字段，省得前端再查一次用户表。
+ *
+ * ⚠️ 字段命名与社区 `CommentNode` 保持同款「混合风格」（库字段 snake、派生字段 camel），
+ * 别按洁癖统一 —— 统一了反而和后端 SQL 别名对不上，改一处忘一处更容易出 bug。
+ */
+export interface GalleryCommentNode {
+  id: string
+  /** 所属作品 id —— 评论按作品独立，这个字段是隔离的依据 */
+  project_id: string
+  user_id: string
+  parent_id: string | null
+  reply_to_user_id: string | null
+  body: string
+  likeCount: number
+  createdAt: string
+  authorName: string
+  /** 头像 URL 要用户名（不能用昵称优先的显示名） */
+  authorUsername: string
+  authorAvatar: boolean
+  /** 是不是我发的 —— 前端据此显示「删除」 */
+  isMine: boolean
+  replies: GalleryCommentNode[]
+}
+
 export const galleryApi = {
   /** 展示大厅：全体用户的公开作品（分页 + 关键词） */
   /** 排序：latest（最新，默认）/ views（浏览最多）/ likes（点赞最多） */
@@ -5190,6 +5219,37 @@ export const galleryApi = {
     request<{ likes: number; liked: boolean }>(
       `/gallery/${encodeURIComponent(id)}/like`,
       { method: "POST" }
+    ),
+
+  // ---- 评论（2026-10-21）----
+  // 全部按**单个作品**隔离：路径里带作品 id，后端每个接口都会先校验
+  // 「这个作品你能看吗」，再看评论。不同作品的评论区互不相通。
+
+  /** 列出某作品的评论（已按回复关系建好树，前端直接递归渲染） */
+  listComments: (id: string) =>
+    request<{
+      comments: GalleryCommentNode[]
+      count: number
+      /** 当前查看者是不是作品作者 */
+      isOwner: boolean
+    }>(`/gallery/${encodeURIComponent(id)}/comments`),
+
+  /**
+   * 发表评论 / 回复。
+   * `parentId` 必须属于**同一个作品**（后端会校验），否则 400。
+   * 回复目标由服务端从父评论推导，前端不用传 replyToUserId。
+   */
+  addComment: (id: string, body: string, parentId?: string) =>
+    request<{ comment: { id: string; createdAt: string } }>(
+      `/gallery/${encodeURIComponent(id)}/comments`,
+      { method: "POST", body: JSON.stringify({ body, parentId }) }
+    ),
+
+  /** 删除评论（软删除）。作者本人 / 作品作者 / 管理员才有权限。 */
+  deleteComment: (id: string, commentId: string) =>
+    request<{ ok: boolean }>(
+      `/gallery/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentId)}`,
+      { method: "DELETE" }
     ),
 }
 

@@ -627,6 +627,8 @@ export const API_MESSAGES_EN: Record<string, string> = {
   "评论不能为空": "A comment can't be empty",
   "评论太频繁": "You're commenting too often",
   "评论过长": "The comment is too long",
+  // 造物集评论区（2026-10-21）
+  "无权删除该评论": "You can't delete that comment",
   "该 id 已存在": "That id already exists",
   "该会话不属于当前账号": "That session doesn't belong to the current account",
   "该名称不在保留列表中": "That name isn't on the reserved list",
