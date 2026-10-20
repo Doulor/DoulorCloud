@@ -1005,6 +1005,12 @@ export interface UserFrpPlan {
   pricePoints: number
   maxPorts: number
   allowRanges: [number, number][]
+  /**
+   * 节点此刻能不能真开通（服务端按 agent 心跳判活，2026-10-21）。
+   * false ⇒ 前端置灰并显示「节点维护中」，让用户点不下去。
+   * 套餐**仍然列出来**（凭空消失会让人以为页面坏了）。
+   */
+  nodeOnline: boolean
   /** 积分够不够 —— 前端据此置灰，省得点下去才报错 */
   affordable: boolean
   /** 我在这个节点上已有的租约；有则只能续期 */
@@ -1029,6 +1035,11 @@ export interface UserFrpRental {
   autoRenew: boolean
   syncState: string
   lastError: string | null
+  /**
+   * 这次开通从什么时候开始等的（`sync_state` 翻成 `pending` 的时刻）。
+   * 不是 pending 时为 null。前端用它判断「开通中」是真在同步、还是卡死了。
+   */
+  pendingSince: string | null
   serverAddr: string | null
   serverPort: number | null
   /** 可直接粘贴使用的 frpc 配置；过期后为 null */

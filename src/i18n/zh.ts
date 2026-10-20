@@ -8390,12 +8390,16 @@ export const zh = {
   "frpu.sync.pending": "开通中",
   "frpu.sync.synced": "已生效",
   "frpu.sync.error": "同步失败",
+  "frpu.sync.stale": "节点无响应",
+  "frpu.sync.staleHint": "从 {time} 起就没同步成功 —— 节点侧的接入端没有响应，请刷新后再看，或联系管理员",
 
   "frpu.plans.title": "租用内网穿透",
   "frpu.plans.desc": "用积分购买使用时长，自动开通、到期自动回收，无需等待人工审核。你当前有 {v0} 积分。",
   "frpu.plans.empty": "暂时没有可购买的套餐",
   "frpu.plans.emptyHint": "站长还没有上架套餐，稍后再来看看。",
   "frpu.plans.owned": "已拥有",
+  "frpu.plans.nodeOffline": "节点维护中",
+  "frpu.plans.nodeOfflineHint": "该节点的接入端暂时没响应，现在买也开通不了，请选其它节点",
 
   "frpu.buy": "购买",
   "frpu.buyConfirm": "用 {v1} 积分购买「{v0}」？\n\n时长 {v2} 天，{v3} 个公网端口。购买后账号与端口会自动开通（约 20 秒内生效），到期后自动停用。",

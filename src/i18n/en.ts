@@ -8532,12 +8532,16 @@ export const en: Record<MessageKey, string> = {
   "frpu.sync.pending": "Provisioning",
   "frpu.sync.synced": "Live",
   "frpu.sync.error": "Sync failed",
+  "frpu.sync.stale": "Node not responding",
+  "frpu.sync.staleHint": "Hasn't synced since {time} — the node's agent isn't responding. Refresh to check again, or contact the admin.",
 
   "frpu.plans.title": "Rent FRP tunnelling",
   "frpu.plans.desc": "Spend points to buy usage time. Provisioning is automatic and expiry is reclaimed automatically — no manual review. You currently have {v0} points.",
   "frpu.plans.empty": "No plans available right now",
   "frpu.plans.emptyHint": "The site owner has not listed any plan yet. Check back later.",
   "frpu.plans.owned": "Owned",
+  "frpu.plans.nodeOffline": "Node in maintenance",
+  "frpu.plans.nodeOfflineHint": "This node's agent isn't responding right now, so a purchase wouldn't work. Please pick another node.",
 
   "frpu.buy": "Buy",
   "frpu.buyConfirm": "Buy “{v0}” for {v1} points?\n\nDuration {v2} days, {v3} public port(s). The account and ports are provisioned automatically (live within about 20 seconds) and disabled automatically on expiry.",

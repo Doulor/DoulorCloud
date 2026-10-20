@@ -97,6 +97,12 @@ interface SubscriptionRow {
   synced_at: string | null
   sync_state: string
   last_error: string | null
+  /**
+   * 最后一次改动时间。购买/续期时与 `sync_state='pending'` 一起写入，
+   * 所以它能当「这次开通是从什么时候开始等的」用 —— 前端据此判断
+   * 「开通中」是真在同步、还是卡死了（见 frp-rental-panel 的 syncText）。
+   */
+  updated_at: string
 }
 
 function nowIso(): string {
@@ -898,6 +904,34 @@ function rentalConfigToml(row: RentalRow): string {
   })
 }
 
+/**
+ * 节点「此刻真能接单」的判活窗口（2026-10-21）。
+ *
+ * 🔴 判活**只能**看 `frp_agent_state.last_seen_at`（agent 每 20 秒主动上报一轮），
+ *    **绝不能**看 `frp_nodes.last_push_at` —— 那是云端「盲推」配置的时间戳，
+ *    agent 死透了云端照样每轮刷新它。hk159 就是这么骗过了所有人：
+ *    `status=ok`、`last_push_at` 天天更新，但 agent 从 10-16 起就没再上报，
+ *    新买的用户配置永远下发不出去，界面卡在「开通中」19 小时。
+ *
+ * 窗口给 10 分钟（心跳 20 秒一轮，正常抖动远小于此）：宁可晚 10 分钟下架，
+ * 也不要在网络抖一下的时候把节点误杀、让用户买不了。
+ */
+const NODE_HEARTBEAT_GRACE_MS = 10 * 60 * 1000
+
+/**
+ * 生成「该节点 agent 心跳新鲜」的 SQL 表达式。
+ * 调用方需要为它 bind 一个 ISO 时间点（窗口起点），**且注意占位符顺序**。
+ */
+function nodeAliveExpr(nodeAlias: string): string {
+  return `EXISTS (SELECT 1 FROM frp_agent_state a
+                   WHERE a.node_id = ${nodeAlias}.id AND a.last_seen_at > ?)`
+}
+
+/** 心跳窗口起点（ISO）：早于它的 last_seen_at 都算失联 */
+function heartbeatCutoff(): string {
+  return new Date(Date.now() - NODE_HEARTBEAT_GRACE_MS).toISOString()
+}
+
 /** GET /api/frp/rental/plans —— 可购买的套餐 + 我的积分余额 */
 export async function listRentalPlans(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
@@ -921,12 +955,14 @@ export async function listRentalPlans(env: Env, request: Request): Promise<Respo
   }
 
   const { results } = await env.DB.prepare(
-    `SELECT p.*, n.name AS node_name
+    `SELECT p.*, n.name AS node_name, ${nodeAliveExpr("n")} AS node_alive
        FROM frp_plans p
        JOIN frp_nodes n ON n.id = p.node_id
-      WHERE p.enabled = 1 AND n.enabled = 1
+      WHERE p.enabled = 1 AND n.enabled = 1 AND n.status NOT IN ('offline', 'disabled')
       ORDER BY p.sort_order ASC, p.price_points ASC`
-  ).all<PlanRow & { node_name: string | null }>()
+  )
+    .bind(heartbeatCutoff())
+    .all<PlanRow & { node_name: string | null; node_alive: number }>()
 
   // 我在该节点上已有的租约 —— 前端据此把「购买」换成「续期」
   const mine = await env.DB.prepare(
@@ -952,6 +988,13 @@ export async function listRentalPlans(env: Env, request: Request): Promise<Respo
       pricePoints: p.price_points,
       maxPorts: p.max_ports,
       allowRanges: parseRanges(p.allow_ranges),
+      /**
+       * 节点此刻是否真能开通（agent 心跳新鲜，见 NODE_HEARTBEAT_GRACE_MS）。
+       *
+       * 失联的**仍然列出来**、只是置灰 —— 直接让它从商店里消失的话，
+       * 用户只会觉得「套餐怎么凭空少了一半」，反而更像故障。
+       */
+      nodeOnline: Number(p.node_alive) === 1,
       /** 买得起吗 —— 前端据此置灰按钮，省得点下去才报错 */
       affordable: balance >= p.price_points,
       /** 我在这个节点上已有的租约（有则只能续期，不能重复购买） */
@@ -1000,6 +1043,12 @@ export async function listMyRentals(env: Env, request: Request): Promise<Respons
         pricePoints: row.price_points,
         syncState: row.sync_state,
         lastError: row.last_error,
+        /**
+         * 这次开通从什么时候开始等的（sync_state 翻成 pending 时写入）。
+         * 前端用它给「开通中」加超时：超过 10 分钟还没 synced，
+         * 说明节点侧的 agent 没在干活，不能再无限转圈骗用户。
+         */
+        pendingSince: row.sync_state === "pending" ? row.updated_at : null,
         serverAddr: row.server_addr,
         serverPort: row.server_port,
         /** 只有还在有效期内才给配置，避免用户拿着连不上的配置来回试 */
@@ -1028,11 +1077,29 @@ export async function purchaseRental(env: Env, request: Request): Promise<Respon
   if (!plan) throw new ApiError(404, "套餐不存在", "PLAN_NOT_FOUND")
   if (plan.enabled !== 1) throw new ApiError(409, "该套餐已下架", "PLAN_DISABLED")
 
-  const node = await env.DB.prepare(`SELECT id, name, enabled FROM frp_nodes WHERE id = ?`)
-    .bind(plan.node_id)
-    .first<{ id: string; name: string; enabled: number }>()
+  // 节点可用性三重校验（与 listRentalPlans 同一口径）：
+  //   1. 后台没停用；2. 状态不是 offline/disabled；3. agent 心跳新鲜。
+  // 前端已经把不可用的套餐置灰了，但**不能只靠前端** ——
+  // 判据会随时间过期（页面开着不动，10 分钟后节点可能就掉线了），
+  // 而且直接 POST 接口就能绕过一切置灰。
+  const node = await env.DB.prepare(
+    `SELECT n.id, n.name, n.enabled, n.status, ${nodeAliveExpr("n")} AS alive
+       FROM frp_nodes n WHERE n.id = ?`
+  )
+    .bind(heartbeatCutoff(), plan.node_id)
+    .first<{ id: string; name: string; enabled: number; status: string; alive: number }>()
   if (!node) throw new ApiError(404, "节点不存在", "FRP_NODE_NOT_FOUND")
   if (node.enabled !== 1) throw new ApiError(409, "该节点已停用", "NODE_DISABLED")
+  if (node.status === "offline" || node.status === "disabled") {
+    throw new ApiError(409, `节点「${node.name}」正在维护，暂时无法开通`, "NODE_OFFLINE")
+  }
+  if (Number(node.alive) !== 1) {
+    throw new ApiError(
+      409,
+      `节点「${node.name}」的接入端暂无响应，暂时无法开通，请换个节点或稍后再试`,
+      "NODE_NO_AGENT"
+    )
+  }
 
   // 一个节点上只保留一份有效租约：多份会让「续期哪一份」变得含糊，也容易被用来囤端口
   const existing = await env.DB.prepare(
@@ -1260,25 +1327,30 @@ export async function autoRenewDueRentals(
   const nowIso = new Date(nowMs).toISOString()
 
   const rows = await env.DB.prepare(
-    `SELECT s.id, s.user_id, s.plan_id, s.expires_at,
-            p.price_points, p.days, p.name
+    `SELECT s.id, s.user_id, s.plan_id, s.expires_at, s.node_id,
+            p.price_points, p.days, p.name,
+            n.name AS node_name, ${nodeAliveExpr("n")} AS node_alive
        FROM frp_subscriptions s
        JOIN frp_plans p ON p.id = s.plan_id
+       LEFT JOIN frp_nodes n ON n.id = s.node_id
       WHERE s.auto_renew = 1
         AND s.status = 'active'
         AND s.plan_id IS NOT NULL
         AND s.expires_at <= ?
       LIMIT 200`
   )
-    .bind(horizon)
+    .bind(heartbeatCutoff(), horizon)
     .all<{
       id: string
       user_id: string
       plan_id: string
       expires_at: string
+      node_id: string
       price_points: number
       days: number
       name: string
+      node_name: string | null
+      node_alive: number
     }>()
 
   const due = rows.results ?? []
@@ -1287,6 +1359,29 @@ export async function autoRenewDueRentals(
   for (const r of due) {
     const price = Number(r.price_points) || 0
     const days = Number(r.days) || 0
+
+    /**
+     * 节点 agent 已失联 → **不扣分、不续期**，关掉开关并写明原因。
+     *
+     * 这条是 hk159 事故的直接教训：那个节点的 agent 从 10-16 就停了，
+     * 但只要用户开着自动续费，cron 会照常每小时扣一次分，
+     * 换来的是一份永远下发不出去的配置。机器可以坏，但不能一边坏一边收钱。
+     */
+    if (Number(r.node_alive) !== 1) {
+      await env.DB.prepare(
+        `UPDATE frp_subscriptions
+            SET auto_renew = 0, last_error = ?, updated_at = ?
+          WHERE id = ?`
+      )
+        .bind(
+          `自动续费已暂停：节点「${r.node_name ?? r.node_id}」的接入端失联，未扣分。请联系管理员`,
+          nowIso,
+          r.id
+        )
+        .run()
+      out.skipped++
+      continue
+    }
 
     // 0 积分的套餐：直接续，不需要扣款（免费套餐不该因为"没分"而断掉）
     let applied = true
@@ -1362,6 +1457,33 @@ export async function renewRental(env: Env, request: Request): Promise<Response>
     .bind(sub.plan_id)
     .first<PlanRow>()
   if (!plan) throw new ApiError(409, "原套餐已删除，请联系管理员续期", "PLAN_GONE")
+
+  /**
+   * 节点不可用就别收钱（与购买同一口径）。
+   * 续期是「为下一期付费」，节点已经接不了新配置，收钱等于白收 ——
+   * 而且用户看到的是「续期成功、到期日 +30 天」，比直接报错更糟。
+   */
+  const hostNode = await env.DB.prepare(
+    `SELECT n.name, n.enabled, n.status, ${nodeAliveExpr("n")} AS alive
+       FROM frp_nodes n WHERE n.id = ?`
+  )
+    .bind(heartbeatCutoff(), sub.node_id)
+    .first<{ name: string; enabled: number; status: string; alive: number }>()
+  if (!hostNode) {
+    throw new ApiError(409, "该租约所在节点已不存在，请联系管理员", "NODE_GONE")
+  }
+  if (
+    hostNode.enabled !== 1 ||
+    hostNode.status === "offline" ||
+    hostNode.status === "disabled" ||
+    Number(hostNode.alive) !== 1
+  ) {
+    throw new ApiError(
+      409,
+      `节点「${hostNode.name}」当前不可用，暂时无法续期（未扣分）。请联系管理员`,
+      "NODE_UNAVAILABLE"
+    )
+  }
 
   const deducted = await applyPoints(env, {
     userId: user.id,

@@ -32,6 +32,18 @@ import { EmptyState } from "@/components/empty-state"
 import { useT } from "@/i18n"
 import { frpApi } from "@/services/api"
 import type { UserFrpPlan, UserFrpRental } from "@/types"
+import { fmtTime } from "@/lib/format"
+import { cn } from "@/lib/utils"
+
+/**
+ * 「开通中」最多转多久（2026-10-21）。
+ *
+ * 服务端把订阅置成 `pending` 后，等节点上的 agent 来推配置 —— 它 20 秒一轮。
+ * 超过这个时长还没变 synced，基本只剩一种可能：**agent 没在跑**。
+ * 那就别再转圈了（有人盯着转圈等了 19 小时，以为再等等就好）。
+ * 取 10 分钟：给足抖动余量，又不至于让用户白等半天。
+ */
+const SYNC_PENDING_TIMEOUT_MS = 10 * 60 * 1000
 
 /**
  * 内网穿透「租用」用户端（2026-10-13）。
@@ -224,6 +236,25 @@ export function FrpRentalPanel() {
         </span>
       )
     }
+    /**
+     * 「开通中」不能无限转（2026-10-21）。
+     *
+     * 服务端把订阅标成 `pending` 后等 agent 来推配置（20 秒一轮）。agent 若已停摆，
+     * 状态会永远停在 pending —— 有人就这么盯了 19 小时转圈，还以为「再等等就好」。
+     * 超过阈值就明说是节点那边没响应，别再骗用户。
+     */
+    const since = s.pendingSince ? Date.parse(s.pendingSince) : NaN
+    if (Number.isFinite(since) && Date.now() - since > SYNC_PENDING_TIMEOUT_MS) {
+      return (
+        <span
+          className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-500"
+          title={t("frpu.sync.staleHint", { time: fmtTime(s.pendingSince as string) })}
+        >
+          <AlertTriangle className="h-3.5 w-3.5" />
+          {t("frpu.sync.stale")}
+        </span>
+      )
+    }
     return (
       <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -278,14 +309,25 @@ export function FrpRentalPanel() {
                 return (
                   <div
                     key={p.id}
-                    className="flex flex-col gap-2 rounded-lg border bg-card p-4"
+                    className={cn(
+                      "flex flex-col gap-2 rounded-lg border bg-card p-4",
+                      // 节点不可用时整卡压暗，一眼看出是「暂时买不了」而不是「我买不起」
+                      !p.nodeOnline && "opacity-60"
+                    )}
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="space-y-0.5">
                         <p className="text-sm font-medium">{p.name}</p>
                         <p className="text-xs text-muted-foreground">{p.nodeName}</p>
                       </div>
-                      {mine ? <Badge variant="secondary">{t("frpu.plans.owned")}</Badge> : null}
+                      <div className="flex shrink-0 flex-col items-end gap-1">
+                        {mine ? <Badge variant="secondary">{t("frpu.plans.owned")}</Badge> : null}
+                        {!p.nodeOnline ? (
+                          <Badge variant="outline" className="text-amber-600 dark:text-amber-500">
+                            {t("frpu.plans.nodeOffline")}
+                          </Badge>
+                        ) : null}
+                      </div>
                     </div>
                     <div className="space-y-1 text-sm">
                       <p className="flex items-center gap-1.5">
@@ -304,7 +346,8 @@ export function FrpRentalPanel() {
                       <Button
                         size="sm"
                         className="mt-auto"
-                        disabled={!!busy}
+                        disabled={!!busy || !p.nodeOnline}
+                        title={!p.nodeOnline ? t("frpu.plans.nodeOfflineHint") : undefined}
                         onClick={() => void renew(subs.find((s) => s.id === mine.id) ?? {
                           // 理论上不会走到这里：有 existing 就一定有对应订阅
                           id: mine.id,
@@ -319,7 +362,8 @@ export function FrpRentalPanel() {
                       <Button
                         size="sm"
                         className="mt-auto"
-                        disabled={!!busy || !p.affordable}
+                        disabled={!!busy || !p.affordable || !p.nodeOnline}
+                        title={!p.nodeOnline ? t("frpu.plans.nodeOfflineHint") : undefined}
                         onClick={() => void buy(p)}
                       >
                         {busy === `buy:${p.id}` ? (

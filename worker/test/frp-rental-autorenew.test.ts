@@ -27,6 +27,17 @@ async function seedNode(): Promise<string> {
   )
     .bind(id, NODE_ADDR, NODE_AUTH, now, now)
     .run()
+
+  // agent 心跳（2026-10-21）：购买/续期按 `last_seen_at` 判活 ——
+  // 失联节点一律不卖、不续期、不自动扣费（hk159 事故后加的护栏）。
+  // 真节点每 20 秒上报一次，测试里也必须造出这条，否则节点会被判成死的。
+  await env.DB.prepare(
+    `INSERT INTO frp_agent_state (node_id, last_seen_at, revision, report_count)
+     VALUES (?, ?, 'test', 1)
+     ON CONFLICT(node_id) DO UPDATE SET last_seen_at = excluded.last_seen_at`
+  )
+    .bind(id, new Date().toISOString())
+    .run()
   return id
 }
 
