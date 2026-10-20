@@ -5406,10 +5406,20 @@ export const en: Record<MessageKey, string> = {
   "adm.prem.empty": "nobody has paid-group access yet.",
   "adm.prem.notLoaded": "List not loaded yet — click \"Refresh list\".",
   "adm.prem.colUser": "Username",
+  "adm.prem.colSource": "Source",
   "adm.prem.colTime": "Granted at",
   "adm.prem.colBy": "Granted by",
   "adm.prem.colAction": "Action",
+  "adm.prem.srcManual": "Manual",
+  "adm.prem.srcTitle": "Title \"{title}\"",
+  "adm.prem.autoHint":
+    "Users holding the \"{title}\" title get paid-group access automatically (revoking the title removes it) — no need to add them here.",
+  "adm.prem.degraded":
+    "⚠️ Could not read title data; this list only contains manually granted users and may be incomplete.",
   "adm.prem.revoke": "Revoke",
+  "adm.prem.revokeNA": "Controlled by title",
+  "adm.prem.revokeViaTitle":
+    "This access comes from the \"{title}\" title — revoke the title in the Titles panel",
   "adm.prem.msg.loadFailed": "Failed to load the list",
   "adm.prem.msg.needUsers": "Enter at least one username",
   "adm.prem.msg.granted": "Granted {n} user(s) ({m} already had it)",

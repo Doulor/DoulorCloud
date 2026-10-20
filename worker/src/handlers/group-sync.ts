@@ -62,6 +62,9 @@ const BASE_YUAN_NO_CONTRIB = 50
  * （不是 `default-付费`）：NewAPI 的 `GetUserUsableGroups` 对任何 userGroup 都会
  * 兜底把标签自身加进可用集合，所以 `付费` 这个标签天然让该用户能用「付费」分组，
  * NewAPI 侧**不需要**为它单独配 special 规则。
+ *
+ * ---
+ * 「付费」这一维的两条来源（2026-10-20 起）见下方 `PREMIUM_TITLE_NAME`。
  */
 function composeGroup(
   hasDonation: boolean,
@@ -76,6 +79,26 @@ function composeGroup(
   if (hasPremium) parts.push("付费")
   return parts.length === 0 ? "default" : parts.join("-")
 }
+
+/**
+ * 「赞助伙伴」自定义称号的名字 —— 拥有它的用户**自动**获得付费分组。
+ *
+ * 2026-10-20 站长要求。付费分组原先只有一条来源：管理面板手动输用户名往
+ * `premium_group_grants` 里加。但同一批人往往也带着「赞助伙伴」称号，两边靠手工
+ * 同步必然漏 —— 改动前实测：21 人有称号、22 人在白名单，只有 15 人两边都有，
+ * 于是 6 个「有称号却没付费」的人（yuan 就在其中）被漏掉了。
+ *
+ * 现在两条来源取**并集**：
+ *   · `premium_group_grants` —— 手动白名单，永久有效（可给没有称号的人）
+ *   · 「赞助伙伴」称号        —— 自动生效，撤销称号即失效
+ * 互不覆盖：白名单里的人即使没称号也仍然有效。
+ *
+ * ⚠️ 称号名是**数据**（管理员可在「称号」面板改名），改名后要同步改这里。
+ *
+ * 导出给 `newapi.ts` 的管理端名单复用 —— 那边要按同一口径列出「谁有付费权限」，
+ * 口径分家会变成「面板显示没权限、实际已经生效」，比不显示更糟。
+ */
+export const PREMIUM_TITLE_NAME = "赞助伙伴"
 
 /**
  * GET /api/internal/group-map
@@ -129,6 +152,30 @@ export async function groupMap(env: Env, request: Request): Promise<Response> {
     for (const r of g.results ?? []) premiumSet.add(r.user_id)
   } catch (err) {
     console.error("读取付费分组白名单失败（迁移 0152 未应用？本轮按无人有权限处理）:", err)
+  }
+
+  /**
+   * 「赞助伙伴」称号 → 自动付费（2026-10-20）。
+   *
+   * 与白名单**取并集**（不是替换）：手动授予仍然保留，称号只是多一条来源。
+   * 同样单独查 + 兜底 —— 迁移 0086/0093（custom_titles / user_titles）没应用时，
+   * 不能因为这一条把整个分组同步带挂。
+   */
+  try {
+    const t = await env.DB.prepare(
+      `SELECT ut.user_id AS user_id
+         FROM user_titles ut
+         JOIN custom_titles ct ON ct.id = ut.title_id
+        WHERE ct.name = ?`
+    )
+      .bind(PREMIUM_TITLE_NAME)
+      .all<{ user_id: string }>()
+    for (const r of t.results ?? []) premiumSet.add(r.user_id)
+  } catch (err) {
+    console.error(
+      "读取「赞助伙伴」称号失败（迁移 0086/0093 未应用？本轮只按手动白名单处理）:",
+      err
+    )
   }
 
   const users: Record<string, string> = {}

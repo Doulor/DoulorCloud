@@ -51,6 +51,7 @@ import {
 import { audit, getSetting, getSettings, parseRecommendedModels } from "../settings"
 import { LAB_KEY_NAME, isLabKeyName } from "../lab-key"
 import { resolveDonationGroup } from "../donation-provision"
+import { PREMIUM_TITLE_NAME } from "./group-sync"
 import { hasFeature, parsePermissions, parseOpenFeatures } from "../permissions"
 import { guardRateLimit } from "../ratelimit"
 import { requireAdminScope } from "./admin"
@@ -1874,27 +1875,86 @@ interface PremiumGrantRow {
   userId: string
   username: string
   grantedBy: string | null
-  grantedAt: string
+  /** 手动授权的才有时间；来自称号的是 null */
+  grantedAt: string | null
   newapiUserId: number | null
+  /**
+   * 权限来源：
+   *   `manual` —— `premium_group_grants` 里的手动白名单（永久有效）
+   *   `title`  —— 因为持有「赞助伙伴」称号自动获得（撤销称号即失效）
+   */
+  source: "manual" | "title"
 }
 
-/** GET /api/admin/newapi/premium-grants —— 当前有付费分组权限的用户 */
+/**
+ * GET /api/admin/newapi/premium-grants —— 当前有付费分组权限的用户。
+ *
+ * 2026-10-20 起「有付费权限」有**两条来源**（手动白名单 ∪ 「赞助伙伴」称号），
+ * 这里必须把两者都列出来：只列白名单会让管理员看到 22 人、实际生效 28 人，
+ * 于是「他明明没在名单里怎么有权限」和「取消授权了怎么还生效」都会发生。
+ * 同一用户同时命中两边时只出现一次，按 `manual` 记（那是显式授权，信息更多）。
+ */
 export async function adminListPremiumGrants(
   env: Env,
   request: Request
 ): Promise<Response> {
   await requireAdminScope(env, request, "newapi.subscriptions")
-  const rows = await env.DB.prepare(
-    `SELECT p.user_id AS userId, u.username AS username,
-            p.granted_by AS grantedBy, p.granted_at AS grantedAt,
-            a.newapi_user_id AS newapiUserId
-       FROM premium_group_grants p
-       JOIN users u ON u.id = p.user_id
-       LEFT JOIN newapi_accounts a ON a.user_id = p.user_id
-      ORDER BY p.granted_at DESC`
-  ).all<PremiumGrantRow>()
-  const grants = rows.results ?? []
-  return json({ grants, count: grants.length })
+
+  const SQL_UNION = `
+    SELECT p.user_id AS userId, u.username AS username,
+           p.granted_by AS grantedBy, p.granted_at AS grantedAt,
+           a.newapi_user_id AS newapiUserId, 'manual' AS source
+      FROM premium_group_grants p
+      JOIN users u ON u.id = p.user_id
+      LEFT JOIN newapi_accounts a ON a.user_id = p.user_id
+    UNION ALL
+    SELECT ut.user_id AS userId, u.username AS username,
+           NULL AS grantedBy, NULL AS grantedAt,
+           a.newapi_user_id AS newapiUserId, 'title' AS source
+      FROM user_titles ut
+      JOIN custom_titles ct ON ct.id = ut.title_id
+      JOIN users u ON u.id = ut.user_id
+      LEFT JOIN newapi_accounts a ON a.user_id = ut.user_id
+     WHERE ct.name = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM premium_group_grants g WHERE g.user_id = ut.user_id
+       )
+     ORDER BY (grantedAt IS NULL), grantedAt DESC, username`
+
+  let grants: PremiumGrantRow[] = []
+  try {
+    const rows = await env.DB.prepare(SQL_UNION)
+      .bind(PREMIUM_TITLE_NAME)
+      .all<PremiumGrantRow>()
+    grants = rows.results ?? []
+  } catch (err) {
+    // 称号表没迁移（0086/0093 未应用）时不能让整个名单 500 ——
+    // 退回只列手动白名单，并在返回体里声明降级，避免管理员误以为这就是全部。
+    console.error("列出付费权限（含称号来源）失败，退回只列手动白名单:", err)
+    const rows = await env.DB.prepare(
+      `SELECT p.user_id AS userId, u.username AS username,
+              p.granted_by AS grantedBy, p.granted_at AS grantedAt,
+              a.newapi_user_id AS newapiUserId, 'manual' AS source
+         FROM premium_group_grants p
+         JOIN users u ON u.id = p.user_id
+         LEFT JOIN newapi_accounts a ON a.user_id = p.user_id
+        ORDER BY p.granted_at DESC`
+    ).all<PremiumGrantRow>()
+    grants = rows.results ?? []
+    return json({
+      grants,
+      count: grants.length,
+      degraded: true,
+      premiumTitle: PREMIUM_TITLE_NAME,
+    })
+  }
+
+  return json({
+    grants,
+    count: grants.length,
+    degraded: false,
+    premiumTitle: PREMIUM_TITLE_NAME,
+  })
 }
 
 /**

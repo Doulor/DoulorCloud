@@ -1159,16 +1159,21 @@ export default function AdminPage() {
   const [premListBusy, setPremListBusy] = React.useState(false)
   /** 名单是否已加载过（区分「还没拉」和「拉了但是空的」） */
   const [premLoaded, setPremLoaded] = React.useState(false)
-  /** 当前有权限的名单 */
+  /** 当前有权限的名单（含「赞助伙伴」称号自动带来的，靠 source 区分） */
   const [premGrants, setPremGrants] = React.useState<
     {
       userId: string
       username: string
       grantedBy: string | null
-      grantedAt: string
+      grantedAt: string | null
       newapiUserId: number | null
+      source: "manual" | "title"
     }[]
   >([])
+  /** 名单不完整（称号表没迁移）—— 提示管理员别当成全部 */
+  const [premDegraded, setPremDegraded] = React.useState(false)
+  /** 自动付费所依据的称号名，用于文案 */
+  const [premTitle, setPremTitle] = React.useState("赞助伙伴")
 
   // ---- WorkBuddy 反代账号捐献（登录即解锁 AI 权限）----
   const [wb2apiConfig, setWb2apiConfig] = React.useState<AdminWb2ApiConfig | null>(null)
@@ -2576,6 +2581,8 @@ export default function AdminPage() {
     try {
       const res = await adminApi.listPremiumGrants()
       setPremGrants(res.grants)
+      setPremDegraded(res.degraded === true)
+      if (res.premiumTitle) setPremTitle(res.premiumTitle)
       setPremLoaded(true)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.prem.msg.loadFailed"))
@@ -6901,6 +6908,14 @@ export default function AdminPage() {
 
                 <div className="space-y-2">
                   <Label>{t("adm.prem.listTitle")}</Label>
+                  {premDegraded && (
+                    <p className="text-xs text-amber-600 dark:text-amber-500">
+                      {t("adm.prem.degraded")}
+                    </p>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    {t("adm.prem.autoHint", { title: premTitle })}
+                  </p>
                   {premGrants.length === 0 ? (
                     <p className="text-sm text-muted-foreground">
                       {premLoaded ? t("adm.prem.empty") : t("adm.prem.notLoaded")}
@@ -6911,6 +6926,7 @@ export default function AdminPage() {
                         <TableHeader>
                           <TableRow>
                             <TableHead>{t("adm.prem.colUser")}</TableHead>
+                            <TableHead>{t("adm.prem.colSource")}</TableHead>
                             <TableHead>{t("adm.prem.colTime")}</TableHead>
                             <TableHead>{t("adm.prem.colBy")}</TableHead>
                             <TableHead className="text-right">
@@ -6922,20 +6938,46 @@ export default function AdminPage() {
                           {premGrants.map((g) => (
                             <TableRow key={g.userId}>
                               <TableCell className="font-mono">{g.username}</TableCell>
+                              <TableCell>
+                                {g.source === "title" ? (
+                                  <span className="text-xs text-muted-foreground">
+                                    {t("adm.prem.srcTitle", { title: premTitle })}
+                                  </span>
+                                ) : (
+                                  <span className="text-xs">{t("adm.prem.srcManual")}</span>
+                                )}
+                              </TableCell>
                               <TableCell className="text-muted-foreground">
-                                {new Date(g.grantedAt).toLocaleString("zh-CN")}
+                                {g.grantedAt
+                                  ? new Date(g.grantedAt).toLocaleString("zh-CN")
+                                  : "—"}
                               </TableCell>
                               <TableCell className="text-muted-foreground">
                                 {g.grantedBy ?? "—"}
                               </TableCell>
                               <TableCell className="text-right">
+                                {/*
+                                  称号带来的权限不能在这里撤销 —— 手动删一条根本不存在的
+                                  白名单记录什么也不会发生，只会让人以为「撤销失败了」。
+                                  要收回就去「称号」面板撤称号。
+                                */}
                                 <Button
                                   size="sm"
                                   variant="ghost"
-                                  disabled={premBusy}
-                                  onClick={() => void handleRevokePremium(g.username)}
+                                  disabled={premBusy || g.source === "title"}
+                                  title={
+                                    g.source === "title"
+                                      ? t("adm.prem.revokeViaTitle", { title: premTitle })
+                                      : undefined
+                                  }
+                                  onClick={() =>
+                                    g.source === "manual" &&
+                                    void handleRevokePremium(g.username)
+                                  }
                                 >
-                                  {t("adm.prem.revoke")}
+                                  {g.source === "title"
+                                    ? t("adm.prem.revokeNA")
+                                    : t("adm.prem.revoke")}
                                 </Button>
                               </TableCell>
                             </TableRow>

@@ -1468,16 +1468,24 @@ export const adminApi = {
 
   // ---- 「付费分组」授权（2026-10-11）----
   // 与发放订阅是两件事：这里只授权「建 Key 时能选付费分组」，永久有效、不发额度。
+  //
+  // 2026-10-20：名单除了手动白名单，还包含「赞助伙伴」称号自动带来的那批人 ——
+  // `source` 区分来源，`grantedAt` 对称号来源为 null（没有授权时间这回事）。
   listPremiumGrants: () =>
     request<{
       grants: {
         userId: string
         username: string
         grantedBy: string | null
-        grantedAt: string
+        grantedAt: string | null
         newapiUserId: number | null
+        source: "manual" | "title"
       }[]
       count: number
+      /** true = 称号表没迁移，本次只列出手动白名单（名单不完整） */
+      degraded: boolean
+      /** 自动付费所依据的称号名（展示用） */
+      premiumTitle: string
     }>("/admin/newapi/premium-grants"),
   grantPremiumGroup: (payload: { usernames: string }) =>
     request<{
