@@ -76,6 +76,21 @@ function ownerFqdn(r: DnsRecord): string {
   return r.fqdn
 }
 
+/**
+ * 记录名是不是「就挂在基准域名本身」（2026-10-21）。
+ *
+ * `@`、全角 `＠`、留空 都算 —— 与后端 `normalizeRecordName` 完全同一口径。
+ * 前端拿它决定两件事：预览里要不要拼 `.<base>` 尾缀、要不要提示「@ = 你的域名」。
+ *
+ * ⚠️ 之前预览是死写 `(form.name || "@") + "." + base`，用户填 `@` 会看到
+ *    `@.xxx.tyu.me` —— 看着像要建一条坏记录，实际服务端建的是对的。
+ *    预览必须说真话，否则没人敢用 `@`。
+ */
+function isApexName(raw: string): boolean {
+  const v = (raw ?? "").trim().replace(/＠/g, "@").replace(/\.+$/, "")
+  return v === "" || v === "@"
+}
+
 export default function DomainsPage() {
   const { t } = useT()
   const { user } = useAuth()
@@ -497,9 +512,11 @@ export default function DomainsPage() {
         toast.error(t("dm.err.srvRequired"))
         return
       }
-    } else if (!form.content || (!form.name && !nameMayBeEmpty)) {
-      // 「名称留空」只在记录直接挂在域名根部时成立（口径沿用改造前，见 nameMayBeEmpty）
-      toast.error(t("dm.err.recordRequired"))
+    } else if (!form.content) {
+      // 记录名现在可以留空（2026-10-21）：留空与填 `@` 同义 = 直接挂在基准域名上，
+      // 服务端按同一口径放开。所以这里只卡内容 ——
+      // 再拿「名称不能为空」挡人，会和「填 @ 也行」自相矛盾。
+      toast.error(t("dm.err.contentRequired"))
       return
     }
     setSaving(true)
@@ -780,10 +797,6 @@ export default function DomainsPage() {
    */
   const writeDisabled = atDnsLimit || !canWriteDns
 
-  /** 取某个子域名在域名列表里的 `name`（`'@'` = 主域名那一行）；找不到给空串 */
-  const subNameOf = (id?: string | null) =>
-    subdomains.find((s) => s.id === id)?.name ?? ""
-
   /**
    * 「新建记录」的目标域名（弹窗里选中的那个）。
    *
@@ -828,17 +841,15 @@ export default function DomainsPage() {
     (recordDomainChoices.length > 1 || activeFilter === "all" || filterTargetUnusable)
 
   /**
-   * 记录名能否留空。
+   * 记录名一律可留空（2026-10-21 起）。
    *
-   * 留空在服务端等于「直接挂在基准域名上」（createDns 里 `name === ""` 走 base），
-   * 所以只有基准就是 `'@'` 主域名、或这条记录本来就叫 `'@'` 时才算合法 ——
-   * 口径与改造前一致。⚠️ 判断依据必须是**这条记录/这个目标域名自己**的名字，
-   * 不能是「当前筛选的域名」：全部视图下后者与记录毫无关系，
-   * 拿它来判会把「改一条 @ 记录」误报成「名称和内容不能为空」（2026-10-16 前的老毛病）。
+   * 留空 = 直接挂在基准域名上，与填 `@` 完全等价，服务端 `normalizeRecordName`
+   * 走同一口径。原来这里还有个 `nameMayBeEmpty`，只在「基准是 '@' 主域名」时
+   * 才允许留空 —— 那套判断的出发点是「名称不能为空」，现在前提变了（名称本来
+   * 就可以空），留着只会让同一件事有两个说法。
+   *
+   * 弹窗里仍会实时预览 `实际记录：…`，所以留空造成的后果用户看得见。
    */
-  const nameMayBeEmpty = editingId
-    ? editingRecord?.name === "@" || subNameOf(editingRecord?.subdomainId) === "@"
-    : subNameOf(createTarget?.id) === "@"
 
   /**
    * 弹窗里显示的记录基准域名。
@@ -1663,22 +1674,28 @@ export default function DomainsPage() {
                 <div className="flex items-center gap-1">
                   <Input
                     id="name"
-                    // 提示与「记录名能否留空」同源：能留空（= 记录就挂在域名根部）
-                    // 时提示写个子名，否则提示写 `@`。
-                    placeholder={nameMayBeEmpty ? "blog" : "@"}
+                    // `@` / 留空 都表示「直接挂在基准域名上」（服务端 normalizeRecordName 同口径）
+                    placeholder={t("dm.namePh")}
                     value={form.name}
                     onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
                     className="flex-1"
                   />
-                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                    .{base}
-                  </span>
+                  {/* 填 @ / 留空时，记录名就是域名本身，不该再拖一个尾缀 */}
+                  {!isApexName(form.name) && (
+                    <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                      .{base}
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {t("dm.actualRecord")}
                   <span className="font-mono">
-                    {(form.name || "@")}.{base}
+                    {isApexName(form.name) ? base : `${form.name.trim()}.${base}`}
                   </span>
+                </p>
+                {/* 把「@ 到底建在哪」说死：否则用户只能靠猜，或以为 @ 会被原样当成前缀 */}
+                <p className="text-xs text-muted-foreground">
+                  {t("dm.nameApexHint", { fqdn: base })}
                 </p>
               </div>
             ) : (

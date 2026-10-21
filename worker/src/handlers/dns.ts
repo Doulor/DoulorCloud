@@ -239,6 +239,39 @@ function normalizeSrvTarget(raw: unknown): string {
 }
 
 /**
+ * 记录名规范化（2026-10-21）。
+ *
+ * ## 为什么专门处理 `@`
+ * 用户要给自己域名**本身**加一条解析（`xxx.tyu.me`）。按 Cloudflare / DNSPod /
+ * 阿里云的通行约定，面板上就填 `@`。但本系统里记录名是「相对前缀」：
+ * `blog` → `blog.xxx.tyu.me`，想落在域名根上得让前缀为空。
+ *
+ * 这两套表达必须能互通，否则用户按惯例填 `@`，服务端会老老实实拼出
+ * `@.xxx.tyu.me` —— 一条谁也解析不出来的记录，而且创建还会「成功」。
+ *
+ * 归一化规则：
+ *   `@` / 全角 `＠` / `.` / `@.` / 空串  →  `@`（= 直接挂在基准域名上）
+ *   其它                                 →  清掉末尾点号后原样使用
+ *
+ * ⚠️ `a@b` 这种「@ 混在中间」直接 400：没有哪个面板这么写，
+ *    放过去只会造出一条永远解析不出来的记录，比报错难查得多。
+ */
+function normalizeRecordName(raw: string): string {
+  const v = (raw ?? "").trim().replace(/＠/g, "@").replace(/\.+$/, "")
+  if (v === "" || v === "@") return "@"
+  if (v.includes("@")) {
+    throw new ApiError(
+      400,
+      "记录名里的 @ 只能单独使用（表示直接挂在域名根上：填 @ 就是你的域名本身）",
+      "INVALID_NAME"
+    )
+  }
+  if (/\s/.test(v)) throw new ApiError(400, "记录名不能包含空白", "INVALID_INPUT")
+  if (v.length > 253) throw new ApiError(400, "记录名过长", "INVALID_INPUT")
+  return v
+}
+
+/**
  * SRV 记录的 content 展示串：`"优先级 权重 端口 目标"`。
  *
  * 这正是 CF 用 `data` 对象时它在面板上显示的样子，也是 DNS 里 SRV 的
@@ -628,10 +661,14 @@ export async function createDns(env: Env, request: Request): Promise<Response> {
 
   // SRV 的 content 由 service/proto/weight/port/target 推导，用户不直接填；
   // 其余类型的 content 是必填的。
+  //
+  // 记录名**可以留空**（2026-10-21）：留空和填 `@` 同义 = 直接挂在基准域名上。
+  // 原先这里把空名也一并挡掉，跟下面 `name === ""` 的分支自相矛盾 ——
+  // 要么两边都支持，要么两边都拒；现在统一成「支持」。
   const rawName = (body.name ?? "").trim()
   const content = (body.content ?? "").trim()
-  if (type !== "SRV" && (!rawName || !content)) {
-    throw new ApiError(400, "名称和内容不能为空", "INVALID_INPUT")
+  if (type !== "SRV" && !content) {
+    throw new ApiError(400, "记录内容不能为空", "INVALID_INPUT")
   }
 
   // 归属的子域名：默认是 '@' 根域
@@ -652,9 +689,10 @@ export async function createDns(env: Env, request: Request): Promise<Response> {
   }
   if (!subdomain) throw new ApiError(400, "尚未分配域名", "NO_DOMAIN")
 
-  // SRV：把 service/proto/prefix 拼成相对标签链；其余类型：name 就是前缀
+  // SRV：把 service/proto/prefix 拼成相对标签链；其余类型：name 是相对前缀，
+  // 其中 `@`（或留空）表示「挂在基准域名本身」—— 见 normalizeRecordName
   const srv = type === "SRV" ? normalizeSrv(body, rawName) : null
-  const name = srv ? srv.name : rawName
+  const name = srv ? srv.name : normalizeRecordName(rawName)
   const finalContent = srv ? srv.content : content
   const priority = srv ? srv.priority : type === "MX" ? body.priority ?? 10 : undefined
 
@@ -862,7 +900,8 @@ export async function updateDns(env: Env, request: Request, id: string): Promise
     srvTarget = srv.target
     srvData = { priority: srv.priority, weight: srv.weight, port: srv.port, target: srv.target }
   } else {
-    name = body.name?.trim() ?? existing.name
+    // 改名同样认 `@`：`blog` → `@` 就是把记录从 blog.<base> 挪到 <base> 本身
+    name = body.name !== undefined ? normalizeRecordName(body.name) : existing.name
     content = body.content?.trim() ?? existing.content
     priority = type === "MX" ? (body.priority ?? existing.priority ?? 10) : undefined
   }
