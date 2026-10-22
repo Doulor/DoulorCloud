@@ -347,7 +347,7 @@ export async function userOverview(env: Env, request: Request): Promise<Response
     ),
     // 新增用户趋势
     env.DB.prepare(
-      `SELECT substr(created_at, 1, 10) AS date, COUNT(*) AS c
+      `SELECT substr(datetime(created_at, '+8 hours'), 1, 10) AS date, COUNT(*) AS c
          FROM users WHERE created_at >= ?
         GROUP BY date ORDER BY date ASC`
     ).bind(since),
@@ -689,7 +689,12 @@ export async function userOverview(env: Env, request: Request): Promise<Response
     total,
     byRole,
     byStatus,
-    newByDay: (newByDayRes as { results?: { date: string; c: number }[] }).results ?? [],
+    // ⚠️ SQL 里的别名是 `c`，而前端类型是 { date, count }：必须在这里翻译。
+    // 直接吐 results 会让 chart 读到 undefined（柱子高度 NaN、悬停显示 undefined）——2026-10-23 修。
+    newByDay: ((newByDayRes as { results?: { date: string; c: number }[] }).results ?? []).map((r) => ({
+      date: r.date,
+      count: r.c,
+    })),
     verified: p?.verified ?? 0,
     verifiedPercent: pct(p?.verified ?? 0),
     nickname: p?.nickname ?? 0,
