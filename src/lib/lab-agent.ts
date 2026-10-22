@@ -962,7 +962,17 @@ export function inlineAssets(html: string, files: FileMap, entry?: string): stri
     const clean = ref.split("?")[0].split("#")[0]
     const direct = clean.replace(/^\.\//, "").replace(/^\/+/, "")
     if (files[direct] != null) return files[direct]
-    return files[base + direct]
+    if (files[base + direct] != null) return files[base + direct]
+    // 常见布局：入口在根、资源在 assets/ 下（S162 就是这种：index.html + assets/logos/*.svg）
+    // 不兜这一层，页面里的相对引用会全部解析失败 → 预览一片空白。
+    if (files["assets/" + direct] != null) return files["assets/" + direct]
+    // 最后按文件名兜底：仅当唯一匹配时才认，避免张冠李戴
+    const name = direct.split("/").pop() ?? ""
+    if (name) {
+      const hits = Object.keys(files).filter((p) => p.split("/").pop() === name)
+      if (hits.length === 1) return files[hits[0]]
+    }
+    return undefined
   }
   const asUrl = (ref: string): string | null => {
     if (EXTERNAL_RE.test(ref) || ref.startsWith("#")) return null
@@ -1062,7 +1072,15 @@ export function buildPreviewDoc(files: FileMap): string {
     // 相对入口文件所在目录解析（入口在子目录时也能对上）
     const base = entry.includes("/") ? entry.replace(/[^/]+$/, "") : ""
     const joined = base + direct
-    return files[joined] != null ? joined : undefined
+    if (files[joined] != null) return joined
+    // 与 inlineAssets.lookup 同口径的兜底（入口在根、资源在 assets/ 下的布局）
+    if (files["assets/" + direct] != null) return "assets/" + direct
+    const name = direct.split("/").pop() ?? ""
+    if (name) {
+      const hits = Object.keys(files).filter((p) => p.split("/").pop() === name)
+      if (hits.length === 1) return hits[0]
+    }
+    return undefined
   }
 
   html = html.replace(/<link\b[^>]*>/gi, (tag) => {
