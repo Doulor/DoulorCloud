@@ -170,3 +170,96 @@ describe("TG 机器人 · 命令菜单分级", () => {
     expect(menu.map((c) => c.command)).toEqual(["frp", "unbind", "help"])
   })
 })
+describe("TG 机器人 · 绑定码的三种入口（菜单按钮不带参数的问题）", () => {
+  /** 拦掉 Telegram 调用，返回记录到的 sendMessage 文本 */
+  function stubTelegram(): { texts: string[]; restore: () => void } {
+    const texts: string[] = []
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (url.includes("api.telegram.org")) {
+        if (url.endsWith("/sendMessage")) {
+          try {
+            texts.push(String(JSON.parse(String(init?.body ?? "{}")).text ?? ""))
+          } catch {
+            texts.push("")
+          }
+        }
+        return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 })
+      }
+      return original(input as RequestInfo, init)
+    }) as typeof fetch
+    return { texts, restore: () => (globalThis.fetch = original) }
+  }
+
+  async function seedCode(code: string): Promise<string> {
+    const user = await makeUser({ role: "user" })
+    await env.DB.prepare(
+      "INSERT INTO tg_bind_tokens (code, user_id, expires_at, used_at) VALUES (?, ?, ?, NULL)"
+    )
+      .bind(code, user.id, Date.now() + 10 * 60 * 1000)
+      .run()
+    return user.id
+  }
+
+  beforeEach(async () => {
+    await env.DB.prepare("DELETE FROM tg_bindings").run()
+    await env.DB.prepare("DELETE FROM tg_bind_tokens").run()
+    await env.DB.prepare("DELETE FROM tg_pending_binds").run()
+    await seedConfig({ enabled: true })
+  })
+
+  it("深链 /start <码> 直接完成绑定（一键，零输入）", async () => {
+    const userId = await seedCode("123456")
+    const { texts, restore } = stubTelegram()
+    try {
+      const res = await handleWebhook(env, hookRequest(privateMsg("/start 123456"), SECRET))
+      expect(res.status).toBe(200)
+      const row = await env.DB.prepare("SELECT user_id FROM tg_bindings WHERE telegram_id = ?")
+        .bind("555000111")
+        .first<{ user_id: string }>()
+      expect(row?.user_id).toBe(userId)
+      expect(texts.join("\n")).toContain("绑定成功")
+    } finally {
+      restore()
+    }
+  })
+
+  it("无参 /bind → 进入等待；下一条纯 6 位数字直接完成绑定", async () => {
+    const userId = await seedCode("654321")
+    const { texts, restore } = stubTelegram()
+    try {
+      await handleWebhook(env, hookRequest(privateMsg("/bind"), SECRET))
+      const pending = await env.DB.prepare(
+        "SELECT telegram_id FROM tg_pending_binds WHERE telegram_id = ?"
+      )
+        .bind("555000111")
+        .first<{ telegram_id: string }>()
+      expect(pending?.telegram_id).toBe("555000111")
+      expect(texts.join("\n")).toContain("6 位绑定码")
+
+      await handleWebhook(env, hookRequest(privateMsg("654321"), SECRET))
+      const row = await env.DB.prepare("SELECT user_id FROM tg_bindings WHERE telegram_id = ?")
+        .bind("555000111")
+        .first<{ user_id: string }>()
+      expect(row?.user_id).toBe(userId)
+      // 等待状态是一次性的
+      const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM tg_pending_binds").first<{ n: number }>()
+      expect(left?.n).toBe(0)
+    } finally {
+      restore()
+    }
+  })
+
+  it("没发过 /bind 时，裸 6 位数字不会被当成绑定码（不乱猜）", async () => {
+    await seedCode("111222")
+    const { restore } = stubTelegram()
+    try {
+      await handleWebhook(env, hookRequest(privateMsg("111222"), SECRET))
+      const row = await env.DB.prepare("SELECT COUNT(*) AS n FROM tg_bindings").first<{ n: number }>()
+      expect(row?.n).toBe(0)
+    } finally {
+      restore()
+    }
+  })
+})

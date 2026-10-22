@@ -7,7 +7,7 @@
  * 绑定码由后端生成（6 位、10 分钟、单次、重复申请顶掉旧码），前端只负责展示与复制。
  */
 import * as React from "react"
-import { Check, Copy, Send, Unlink } from "lucide-react"
+import { Check, Copy, ExternalLink, Send, Unlink } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -27,7 +27,12 @@ export function TgBindCard() {
     tgUsername?: string | null
     boundAt?: number
   }>({ bound: false })
-  const [code, setCode] = React.useState<{ code: string; expiresAt: number } | null>(null)
+  const [code, setCode] = React.useState<{
+    code: string
+    expiresAt: number
+    botUsername?: string | null
+    botReady?: boolean
+  } | null>(null)
   const [copied, setCopied] = React.useState(false)
 
   const load = React.useCallback(async () => {
@@ -56,7 +61,12 @@ export function TgBindCard() {
         return
       }
       if (r.code && r.expiresAt) {
-        setCode({ code: r.code, expiresAt: r.expiresAt })
+        setCode({
+          code: r.code,
+          expiresAt: r.expiresAt,
+          botUsername: r.botUsername,
+          botReady: r.botReady,
+        })
       }
     } catch (e) {
       toast.error(errMsg(e, t("tgb.failed")))
@@ -131,6 +141,22 @@ export function TgBindCard() {
             </div>
             {code ? (
               <div className="space-y-2 rounded-lg border p-3">
+                {/* 一键深链：Telegram 会把 /start <码> 直接发给 bot，用户零输入 */}
+                {code.botReady && code.botUsername ? (
+                  <Button asChild size="sm" className="w-full sm:w-auto">
+                    <a
+                      href={`https://t.me/${code.botUsername}?start=${code.code}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <ExternalLink className="mr-1 h-3.5 w-3.5" />
+                      {t("tgb.oneClick")}
+                    </a>
+                  </Button>
+                ) : (
+                  <p className="text-xs text-muted-foreground">{t("tgb.botNotReady")}</p>
+                )}
+                <p className="text-xs text-muted-foreground">{t("tgb.orManual", { code: code.code })}</p>
                 <div className="flex items-center gap-3">
                   <span className="font-mono text-2xl tracking-[0.3em]">{code.code}</span>
                   <Button size="sm" variant="ghost" onClick={() => void copy()}>

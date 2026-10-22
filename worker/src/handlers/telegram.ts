@@ -444,7 +444,16 @@ export async function createBindCode(env: Env, request: Request): Promise<Respon
   )
     .bind(code, user.id, now + BIND_CODE_TTL_MS)
     .run()
-  return json({ ok: true, code, expiresAt: now + BIND_CODE_TTL_MS })
+  // botUsername 用于前端拼一键深链 https://t.me/<bot>?start=<码>：
+  // Telegram 会把 `/start <码>` 发给 bot，用户零输入即可完成绑定。
+  const cfg = await loadConfig(env)
+  return json({
+    ok: true,
+    code,
+    expiresAt: now + BIND_CODE_TTL_MS,
+    botUsername: cfg.bot_username,
+    botReady: !!cfg.enabled && !!cfg.bot_username,
+  })
 }
 
 /* ==========================================================================
@@ -484,6 +493,74 @@ function helpText(isAdminUser: boolean): string {
   return lines.join("\n")
 }
 
+/** 记录「这个 chat 正在等绑定码」（10 分钟过期，下次成功消费即删） */
+async function setPendingBind(env: Env, chatId: string): Promise<void> {
+  await env.DB.prepare(
+    "INSERT INTO tg_pending_binds (telegram_id, created_at) VALUES (?, ?) " +
+      "ON CONFLICT(telegram_id) DO UPDATE SET created_at = excluded.created_at"
+  )
+    .bind(chatId, Date.now())
+    .run()
+}
+
+/** 消费等待状态：10 分钟内有效，命中即删（一次性） */
+async function consumePendingBind(env: Env, chatId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT created_at FROM tg_pending_binds WHERE telegram_id = ?"
+  )
+    .bind(chatId)
+    .first<{ created_at: number }>()
+  if (!row) return false
+  await env.DB.prepare("DELETE FROM tg_pending_binds WHERE telegram_id = ?").bind(chatId).run()
+  return Date.now() - row.created_at <= BIND_CODE_TTL_MS
+}
+
+/**
+ * 用绑定码完成绑定。三条入口（深链 /start <码>、/bind <码>、等待状态下直接发码）共用。
+ * 校验顺序：码有效 → 这个 TG 没绑别人 → 落库 → 消费码 → 刷菜单 → 回执。
+ */
+async function tryBindCode(
+  env: Env,
+  chatId: string,
+  code: string,
+  cfg: TgConfigRow,
+  tgUsername: string | null
+): Promise<void> {
+  const row = await env.DB.prepare(
+    "SELECT * FROM tg_bind_tokens WHERE code = ? AND used_at IS NULL AND expires_at > ?"
+  )
+    .bind(code, Date.now())
+    .first<{ code: string; user_id: string; expires_at: number }>()
+  if (!row) {
+    await sendTo(env, chatId, "❌ 绑定码无效或已过期，回网站「账号设置 → Telegram 绑定」重新生成。")
+    return
+  }
+  const taken = await bindingByTg(env, chatId)
+  if (taken && taken.user_id !== row.user_id) {
+    await sendTo(env, chatId, "❌ 这个 Telegram 已经绑定了别的账号，先 /unbind 再绑。")
+    return
+  }
+  await env.DB.prepare(
+    `INSERT INTO tg_bindings (telegram_id, user_id, tg_username, bound_at, muted_json)
+     VALUES (?, ?, ?, ?, '[]')
+     ON CONFLICT(telegram_id) DO UPDATE SET user_id = excluded.user_id, bound_at = excluded.bound_at`
+  )
+    .bind(chatId, row.user_id, tgUsername, Date.now())
+    .run()
+  await env.DB.prepare("UPDATE tg_bind_tokens SET used_at = ? WHERE code = ?")
+    .bind(Date.now(), code)
+    .run()
+  await env.DB.prepare("DELETE FROM tg_pending_binds WHERE telegram_id = ?").bind(chatId).run()
+  const u = await env.DB.prepare("SELECT username, role FROM users WHERE id = ?")
+    .bind(row.user_id)
+    .first<{ username: string; role: string }>()
+  await refreshChatMenu(env, chatId, cfg)
+  await sendTo(
+    env,
+    chatId,
+    `✅ 绑定成功：<b>${u?.username ?? ""}</b>\n命令菜单已更新，点左下角 / 查看。`
+  )
+}
 /**
  * POST /tg/webhook（公开入口）。
  * 注意：**永远返回 200**（除非回调密钥不对）——返回 4xx/5xx 会让 Telegram 反复重投，
@@ -522,62 +599,58 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
   const commands = { ...DEFAULT_COMMANDS, ...parseJson<Record<string, boolean>>(cfg.commands_json, {}) }
 
   // 自服务命令：/start /help /bind 不需要已绑定
-  if (cmd === "/start" || cmd === "/help" || cmd === "/bind") {
+  /**
+   * 绑定码的三种输入方式（Telegram 菜单里的命令按钮**不会**带参数，这是它的硬行为）：
+   *   ① 深链 `https://t.me/<bot>?start=<码>` → bot 收到 `/start <码>`，一键绑定零输入
+   *   ② `/bind 123456` 手动带参
+   *   ③ 先发 `/bind`（无参）→ 进入「等待输入」状态，下一条纯 6 位数字自动当码
+   * 三条最终都汇到 `tryBindCode`，绑定成功后的菜单刷新与提示只有一份实现。
+   */
+  const codeArg = /^\d{6}$/.test(arg) ? arg : ""
+  const looksLikeCode = /^\d{6}$/.test(text)
+
+  if (cmd === "/bind" || cmd === "/start") {
+    // ①/② 已带码（深链或手打）
+    if (codeArg) {
+      await tryBindCode(env, chatId, codeArg, cfg, msg?.from?.username ?? null)
+      return json({ ok: true })
+    }
+    // ③ 无参 /bind → 记住等待状态，让用户直接发码
     if (cmd === "/bind") {
-      if (!arg) {
-        await sendTo(env, chatId, "用法：<code>/bind 123456</code>\n绑定码在网站「账号设置 → Telegram 绑定」里生成。")
-        return json({ ok: true })
-      }
-      const row = await env.DB.prepare(
-        "SELECT * FROM tg_bind_tokens WHERE code = ? AND used_at IS NULL AND expires_at > ?"
-      )
-        .bind(arg, Date.now())
-        .first<{ code: string; user_id: string; expires_at: number }>()
-      if (!row) {
-        await sendTo(env, chatId, "❌ 绑定码无效或已过期，回网站重新生成一个。")
-        return json({ ok: true })
-      }
-      const taken = await bindingByTg(env, chatId)
-      if (taken && taken.user_id !== row.user_id) {
-        await sendTo(env, chatId, "❌ 这个 Telegram 已经绑定了别的账号，先 /unbind。")
-        return json({ ok: true })
-      }
-      await env.DB.prepare(
-        `INSERT INTO tg_bindings (telegram_id, user_id, tg_username, bound_at, muted_json)
-         VALUES (?, ?, ?, ?, '[]')
-         ON CONFLICT(telegram_id) DO UPDATE SET user_id = excluded.user_id, bound_at = excluded.bound_at`
-      )
-        .bind(chatId, row.user_id, msg?.from?.username ?? null, Date.now())
-        .run()
-      await env.DB.prepare("UPDATE tg_bind_tokens SET used_at = ? WHERE code = ?")
-        .bind(Date.now(), arg)
-        .run()
-      const u = await env.DB.prepare("SELECT username, role FROM users WHERE id = ?")
-        .bind(row.user_id)
-        .first<{ username: string; role: string }>()
-      await refreshChatMenu(env, chatId, cfg)
+      await setPendingBind(env, chatId)
       await sendTo(
         env,
         chatId,
-        `✅ 绑定成功：<b>${u?.username ?? ""}</b>\n命令菜单已更新，点左下角 / 查看。`
+        "请把 <b>6 位绑定码</b>直接发给我（不用再打 /bind）。\n\n" +
+          "绑定码在网站「账号设置 → Telegram 绑定」里生成，10 分钟内有效。"
       )
       return json({ ok: true })
     }
-    // 每次 /start、/help 都刷一次菜单：命令开关改了、刚绑定/刚解绑都能自愈，
-    // 不需要站长手动点「同步命令菜单」。
+    // /start 无参 → 欢迎 + 帮助
     await refreshChatMenu(env, chatId, cfg)
-    const bound = await bindingByTg(env, chatId)
-    const role = bound
-      ? (
-          await env.DB.prepare("SELECT role FROM users WHERE id = ?")
-            .bind(bound.user_id)
-            .first<{ role: string }>()
-        )?.role ?? ""
-      : ""
-    await sendTo(env, chatId, helpText(isAnyAdmin(role)))
+    await sendTo(env, chatId, helpText(false))
     return json({ ok: true })
   }
 
+  if (cmd === "/help") {
+    await refreshChatMenu(env, chatId, cfg)
+    const boundNow = await bindingByTg(env, chatId)
+    const roleNow = boundNow
+      ? (
+          await env.DB.prepare("SELECT role FROM users WHERE id = ?")
+            .bind(boundNow.user_id)
+            .first<{ role: string }>()
+        )?.role ?? ""
+      : ""
+    await sendTo(env, chatId, helpText(isAnyAdmin(roleNow)))
+    return json({ ok: true })
+  }
+
+  // 非命令消息：只有「刚发过无参 /bind」的 chat 才会被当成绑定码，其它一律不猜
+  if (!text.startsWith("/") && looksLikeCode && (await consumePendingBind(env, chatId))) {
+    await tryBindCode(env, chatId, text, cfg, msg?.from?.username ?? null)
+    return json({ ok: true })
+  }
   // 以下命令要求已绑定
   const binding = await bindingByTg(env, chatId)
   if (!binding) {

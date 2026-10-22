@@ -5691,7 +5691,15 @@ export const tgBindApi = {
       muted?: string[]
     }>("/me/tg/binding"),
   createCode: () =>
-    request<{ ok: boolean; code?: string; expiresAt?: number; alreadyBound?: boolean; telegramId?: string }>(
+    request<{
+      ok: boolean
+      code?: string
+      expiresAt?: number
+      alreadyBound?: boolean
+      telegramId?: string
+      botUsername?: string | null
+      botReady?: boolean
+    }>(
       "/me/tg/bind-code",
       { method: "POST" }
     ),

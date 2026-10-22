@@ -8597,6 +8597,9 @@ export const zh = {
   "tgb.failed": "操作失败，请稍后重试",
   "tg.syncMenu": "同步命令菜单",
   "tg.menuSynced": "命令菜单已同步",
+  "tgb.oneClick": "在 Telegram 中一键绑定",
+  "tgb.orManual": "或手动：给机器人发送 /bind {code}",
+  "tgb.botNotReady": "机器人还没配置好，暂时只能用下面的绑定码手动绑定。",
 } as const
 
 export type MessageKey = keyof typeof zh

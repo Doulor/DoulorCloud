@@ -8738,4 +8738,7 @@ export const en: Record<MessageKey, string> = {
   "tgb.failed": "Action failed, please retry",
   "tg.syncMenu": "Sync command menu",
   "tg.menuSynced": "Command menu synced",
+  "tgb.oneClick": "Bind in Telegram (one tap)",
+  "tgb.orManual": "Or manually: send /bind {code} to the bot",
+  "tgb.botNotReady": "The bot is not configured yet; use the code below to bind manually.",
 }
