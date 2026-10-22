@@ -3090,8 +3090,8 @@ export const analyticsApi = {
   overview: (days = 7) =>
     request<AnalyticsOverview>(`/admin/analytics?days=${days}`),
   /** 用户数据分析：模块开通率、资源占用、捐献与社区活跃度 */
-  users: (days = 30) =>
-    request<UserAnalytics>(`/admin/analytics/users?days=${days}`),
+  users: (days = 30, trendDays = 30) =>
+    request<UserAnalytics>(`/admin/analytics/users?days=${days}&trendDays=${trendDays}`),
 }
 
 // ---- 公共聊天室 ----

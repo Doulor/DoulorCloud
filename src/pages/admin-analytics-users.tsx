@@ -250,6 +250,9 @@ function Metric({
   )
 }
 
+/** 趋势图固定 30 天（站长 2026-10-23）：7 根柱子看不出趋势 */
+const TREND_DAYS = 30
+
 export function UserAnalyticsPanel({ days }: { days: string }) {
   const { t } = useT()
   const [data, setData] = React.useState<UserAnalytics | null>(null)
@@ -258,7 +261,7 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
   const load = React.useCallback(async () => {
     setLoading(true)
     try {
-      setData(await analyticsApi.users(Number(days)))
+      setData(await analyticsApi.users(Number(days), TREND_DAYS))
     } catch (err) {
       toast.error(errMsg(err, t("au2.err.load")))
     } finally {
@@ -443,7 +446,7 @@ export function UserAnalyticsPanel({ days }: { days: string }) {
             <TrendingUp className="h-4 w-4 text-muted-foreground" />
             {t("au2.trend.title")}
           </CardTitle>
-          <CardDescription>{t("au2.trend.desc", { n: days })}</CardDescription>
+          <CardDescription>{t("au2.trend.desc", { n: TREND_DAYS })}</CardDescription>
         </CardHeader>
         <CardContent>
           <ColumnChart data={data.newByDay} />

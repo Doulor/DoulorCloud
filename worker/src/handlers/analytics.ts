@@ -269,11 +269,14 @@ const DONATION_STATUS_LABELS: Record<string, string> = {
 export async function userOverview(env: Env, request: Request): Promise<Response> {
   await requireAdminScope(env, request, "analytics")
   const url = new URL(request.url)
-  const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 30) || 30, 1), 90)
+  // 新增用户趋势固定看 30 天（站长 2026-10-23 要求）：不跟页面时间范围走，
+  // 7 根柱子看不出趋势，30 天才像趋势图。上限 90 天防一次画太多柱子。
+  const trendDays = Math.min(Math.max(Number(url.searchParams.get("trendDays") ?? 30) || 30, 1), 90)
   const now = Date.now()
   /** 生成「N 天前」的 ISO 字符串，用于和 last_login_at 做字符串比较 */
   const isoAgo = (d: number) => new Date(now - d * 24 * 60 * 60 * 1000).toISOString()
-  const since = isoAgo(days)
+  // 趋势窗口用自己的天数（days 只影响本页其它指标）
+  const since = isoAgo(trendDays)
   const since1d = isoAgo(1)
   const since3d = isoAgo(3)
   const since7d = isoAgo(7)
@@ -691,10 +694,20 @@ export async function userOverview(env: Env, request: Request): Promise<Response
     byStatus,
     // ⚠️ SQL 里的别名是 `c`，而前端类型是 { date, count }：必须在这里翻译。
     // 直接吐 results 会让 chart 读到 undefined（柱子高度 NaN、悬停显示 undefined）——2026-10-23 修。
-    newByDay: ((newByDayRes as { results?: { date: string; c: number }[] }).results ?? []).map((r) => ({
-      date: r.date,
-      count: r.c,
-    })),
+    newByDay: (() => {
+      const rows = ((newByDayRes as { results?: { date: string; c: number }[] }).results ?? [])
+      const byDate = new Map(rows.map((r) => [r.date, r.c]))
+      // 补零：GROUP BY 只会有"有人注册"的那些天，缺的日子要显式给 0，
+      // 否则柱子数量不固定、横轴不等距（趋势图必须等距才有意义）。
+      const out: { date: string; count: number }[] = []
+      const nowCst = new Date(Date.now() + 8 * 3600 * 1000)
+      for (let i = trendDays - 1; i >= 0; i--) {
+        const d = new Date(nowCst.getTime() - i * 86400000)
+        const key = d.toISOString().slice(0, 10)
+        out.push({ date: key, count: byDate.get(key) ?? 0 })
+      }
+      return out
+    })(),
     verified: p?.verified ?? 0,
     verifiedPercent: pct(p?.verified ?? 0),
     nickname: p?.nickname ?? 0,
