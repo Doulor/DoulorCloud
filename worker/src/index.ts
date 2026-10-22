@@ -627,6 +627,11 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/admin/tg/logs",
     method: "GET",
     handle: () => telegramHandlers.listLogs(env, request),
+  },  {
+    kind: "exact",
+    path: "/admin/tg/commands/sync",
+    method: "POST",
+    handle: () => telegramHandlers.syncCommands(env, request),
   },
   // 普通用户也能调：给自己生成一次性绑定码（requireUser，不是 admin）
   {

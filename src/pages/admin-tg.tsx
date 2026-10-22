@@ -10,7 +10,7 @@
  *  · 解绑用户是即时生效的（DB 删除），不需要刷新机器人。
  */
 import * as React from "react"
-import { Bot, KeyRound, Link2, RefreshCw, Send, Trash2, Unlink } from "lucide-react"
+import { Bot, KeyRound, Link2, ListOrdered, RefreshCw, Send, Trash2, Unlink } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -206,6 +206,17 @@ export function AdminTgPanel() {
             >
               <Send className="mr-1 h-3.5 w-3.5" />
               {t("tg.testPush")}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy !== null || !cfg?.hasToken}
+              onClick={() =>
+                void run("menu", () => adminTgApi.syncCommands(), t("tg.menuSynced"))
+              }
+            >
+              <ListOrdered className="mr-1 h-3.5 w-3.5" />
+              {t("tg.syncMenu")}
             </Button>
             <Button
               size="sm"

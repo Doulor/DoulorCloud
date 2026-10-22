@@ -331,6 +331,15 @@ export async function setWebhook(env: Env, request: Request): Promise<Response> 
     token
   )
   if (!r.ok) throw new ApiError(400, `设置失败：${r.description ?? "未知错误"}`, "SET_WEBHOOK_FAILED")
+  // 顺手把「默认命令菜单」也注册上：没绑定的人在 / 里只看到 /bind 和 /help。
+  // 单独做一个按钮也行，但设置 webhook 本来就是一次性初始化动作，合并更省事。
+  const commands = { ...DEFAULT_COMMANDS, ...parseJson<Record<string, boolean>>(cfg.commands_json, {}) }
+  await tgApi(
+    env,
+    "setMyCommands",
+    { commands: buildCommandMenu({ bound: false, isAdminUser: false, commands }), scope: { type: "default" } },
+    token
+  )
   await recordAudit(env, admin.id, "tg.webhook.set", hookUrl)
   return json({ ok: true, url: hookUrl })
 }
@@ -465,6 +474,7 @@ function helpText(isAdminUser: boolean): string {
     "",
     "/bind &lt;绑定码&gt; —— 绑定站内账号（在网站「账号设置」里生成）",
     "/me —— 我的账号概览",
+    "/frp —— 我的内网穿透租约",
     "/unbind —— 解除绑定",
   ]
   if (isAdminUser) {
@@ -545,13 +555,17 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
       const u = await env.DB.prepare("SELECT username, role FROM users WHERE id = ?")
         .bind(row.user_id)
         .first<{ username: string; role: string }>()
+      await refreshChatMenu(env, chatId, cfg)
       await sendTo(
         env,
         chatId,
-        `✅ 绑定成功：<b>${u?.username ?? ""}</b>\n发送 /help 查看可用命令。`
+        `✅ 绑定成功：<b>${u?.username ?? ""}</b>\n命令菜单已更新，点左下角 / 查看。`
       )
       return json({ ok: true })
     }
+    // 每次 /start、/help 都刷一次菜单：命令开关改了、刚绑定/刚解绑都能自愈，
+    // 不需要站长手动点「同步命令菜单」。
+    await refreshChatMenu(env, chatId, cfg)
     const bound = await bindingByTg(env, chatId)
     const role = bound
       ? (
@@ -584,7 +598,8 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
 
   if (cmd === "/unbind") {
     await env.DB.prepare("DELETE FROM tg_bindings WHERE telegram_id = ?").bind(chatId).run()
-    await sendTo(env, chatId, "已解除绑定。")
+    await clearChatMenu(env, chatId) // 菜单回落到默认（只剩 /bind /help）
+    await sendTo(env, chatId, "已解除绑定，命令菜单已恢复为默认。")
     return json({ ok: true })
   }
 
@@ -602,6 +617,15 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
     if (typeof user.points === "number") lines.push(`积分：${user.points}`)
     lines.push("", "🌐 cloud.doulor.cn")
     await sendTo(env, chatId, lines.join("\n"))
+    return json({ ok: true })
+  }
+
+  if (cmd === "/frp") {
+    if (commands.frp === false) {
+      await sendTo(env, chatId, "/frp 已被管理员关闭。")
+      return json({ ok: true })
+    }
+    await sendTo(env, chatId, await frpSummary(env, binding.user_id))
     return json({ ok: true })
   }
 
@@ -730,4 +754,139 @@ export async function setMyMuted(env: Env, request: Request): Promise<Response> 
     .bind(JSON.stringify(muted), user.id)
     .run()
   return json({ ok: true, muted })
+}
+/* ==========================================================================
+ * 命令菜单（Telegram 的「/」按钮）
+ *
+ * 用 `setMyCommands` 的 **per-chat scope** 实现分级：
+ *   · 默认 scope（未绑定的人看到）：/bind /help
+ *   · 已绑定用户的 chat scope：/me /frp /unbind /help
+ *   · 管理员再加 /status
+ * 绑定时立刻同步一次，解绑时把该 chat 的 scope 删掉回落到默认。
+ * ========================================================================== */
+
+interface TgCommand {
+  command: string
+  description: string
+}
+
+/** 按「是否绑定 + 角色 + 命令开关」算出一份菜单；纯函数，便于单测 */
+export function buildCommandMenu(opts: {
+  bound: boolean
+  isAdminUser: boolean
+  commands: Record<string, boolean>
+}): TgCommand[] {
+  const out: TgCommand[] = []
+  if (!opts.bound) {
+    out.push({ command: "bind", description: "绑定站内账号（先在网站生成绑定码）" })
+    out.push({ command: "help", description: "查看帮助" })
+    return out
+  }
+  if (opts.commands.me !== false) out.push({ command: "me", description: "我的账号概览" })
+  if (opts.commands.frp !== false) out.push({ command: "frp", description: "我的内网穿透租约" })
+  out.push({ command: "unbind", description: "解除绑定" })
+  out.push({ command: "help", description: "查看帮助" })
+  if (opts.isAdminUser && opts.commands.status !== false) {
+    out.push({ command: "status", description: "站点状态（管理员）" })
+  }
+  return out
+}
+
+async function setChatMenu(env: Env, chatId: string, commands: TgCommand[]): Promise<boolean> {
+  const r = await tgApi(env, "setMyCommands", {
+    commands,
+    scope: { type: "chat", chat_id: Number(chatId) },
+  })
+  return r.ok
+}
+
+async function clearChatMenu(env: Env, chatId: string): Promise<boolean> {
+  const r = await tgApi(env, "deleteMyCommands", { scope: { type: "chat", chat_id: Number(chatId) } })
+  return r.ok
+}
+
+/** 按 chat 当前状态刷新菜单（绑定时 / 解绑时 / 用户发 /start、/help 时都会调） */
+async function refreshChatMenu(env: Env, chatId: string, cfg: TgConfigRow): Promise<void> {
+  const commands = { ...DEFAULT_COMMANDS, ...parseJson<Record<string, boolean>>(cfg.commands_json, {}) }
+  const binding = await bindingByTg(env, chatId)
+  if (!binding) {
+    await clearChatMenu(env, chatId)
+    return
+  }
+  const role =
+    (
+      await env.DB.prepare("SELECT role FROM users WHERE id = ?")
+        .bind(binding.user_id)
+        .first<{ role: string }>()
+    )?.role ?? ""
+  await setChatMenu(
+    env,
+    chatId,
+    buildCommandMenu({ bound: true, isAdminUser: isAnyAdmin(role), commands })
+  )
+}
+
+/** 管理端「同步命令菜单」：刷新默认 scope + 所有已绑定 chat 的 scope */
+export async function syncCommands(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "telegram")
+  const cfg = await loadConfig(env)
+  const commands = { ...DEFAULT_COMMANDS, ...parseJson<Record<string, boolean>>(cfg.commands_json, {}) }
+  const def = await tgApi(env, "setMyCommands", {
+    commands: buildCommandMenu({ bound: false, isAdminUser: false, commands }),
+    scope: { type: "default" },
+  })
+  if (!def.ok) throw new ApiError(400, `设置默认菜单失败：${def.description ?? "未知错误"}`, "SET_MENU_FAILED")
+
+  const { results } = await env.DB.prepare(
+    `SELECT b.telegram_id, u.role FROM tg_bindings b LEFT JOIN users u ON u.id = b.user_id LIMIT 500`
+  ).all<{ telegram_id: string; role: string | null }>()
+  let ok = 0
+  for (const row of results ?? []) {
+    const done = await setChatMenu(
+      env,
+      row.telegram_id,
+      buildCommandMenu({ bound: true, isAdminUser: isAnyAdmin(row.role ?? ""), commands })
+    )
+    if (done) ok++
+  }
+  await recordAudit(env, admin.id, "tg.commands.sync", `默认菜单 + ${ok} 个 chat`)
+  return json({ ok: true, chats: ok, total: results?.length ?? 0 })
+}
+
+/** /frp：查自己的内网穿透租约（用户自助，最常用） */
+async function frpSummary(env: Env, userId: string): Promise<string> {
+  const { results } = await env.DB.prepare(
+    `SELECT s.expires_at, s.status, s.ports, s.auto_renew, n.name AS node_name
+       FROM frp_subscriptions s
+       LEFT JOIN frp_nodes n ON n.id = s.node_id
+      WHERE s.user_id = ?
+      ORDER BY s.expires_at DESC
+      LIMIT 5`
+  )
+    .bind(userId)
+    .all<{
+      expires_at: string
+      status: string
+      ports: string | null
+      auto_renew: number
+      node_name: string | null
+    }>()
+  if (!results || results.length === 0) {
+    return "你还没有内网穿透租约。\n开通：cloud.doulor.cn → 内网穿透"
+  }
+  const lines = ["<b>我的内网穿透</b>"]
+  for (const r of results) {
+    const ports = parseJson<number[]>(r.ports, [])
+    const left = Math.ceil((Date.parse(r.expires_at) - Date.now()) / (24 * 3600 * 1000))
+    const state = r.status === "active" ? (left <= 0 ? "已过期" : "使用中") : r.status
+    lines.push(
+      "",
+      `节点：${r.node_name ?? "未知"}（${state}）`,
+      `端口：${ports.length ? ports.join(" / ") : "—"}`,
+      `到期：${new Date(r.expires_at).toLocaleString("zh-CN", { hour12: false })}${left > 0 ? `（${left} 天后）` : ""}`,
+      `自动续费：${r.auto_renew ? "开" : "关"}`
+    )
+  }
+  lines.push("", "管理：cloud.doulor.cn → 内网穿透")
+  return lines.join("\n")
 }

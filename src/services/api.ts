@@ -5673,6 +5673,9 @@ export const adminTgApi = {
       method: "DELETE",
     }),
 
+  syncCommands: () =>
+    request<{ ok: boolean; chats: number; total: number }>("/admin/tg/commands/sync", { method: "POST" }),
+
   logs: () => request<{ logs: AdminTgLog[] }>("/admin/tg/logs"),
 }
 

@@ -8736,4 +8736,6 @@ export const en: Record<MessageKey, string> = {
   "tgb.notBoundHint": "Signing in through the bot is not supported: generate a code here first, never hand over your password.",
   "tgb.alreadyBound": "This account is already bound",
   "tgb.failed": "Action failed, please retry",
+  "tg.syncMenu": "Sync command menu",
+  "tg.menuSynced": "Command menu synced",
 }

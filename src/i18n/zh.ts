@@ -8595,6 +8595,8 @@ export const zh = {
   "tgb.notBoundHint": "还不支持在机器人里登录：必须先在这里生成绑定码，杜绝把密码交给第三方。",
   "tgb.alreadyBound": "这个账号已经绑定过了",
   "tgb.failed": "操作失败，请稍后重试",
+  "tg.syncMenu": "同步命令菜单",
+  "tg.menuSynced": "命令菜单已同步",
 } as const
 
 export type MessageKey = keyof typeof zh

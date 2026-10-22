@@ -20,6 +20,7 @@ import {
   handleWebhook,
   getAdminConfig,
   createBindCode,
+  buildCommandMenu,
 } from "../src/handlers/telegram"
 
 const BOT_TOKEN = "123456789:AAFakeTokenForTestOnly1234567890ab"
@@ -140,5 +141,32 @@ describe("TG 机器人 · 权限边界", () => {
       .all<{ code: string }>()
     expect((results ?? []).map((r) => r.code)).toEqual([body2.code])
     expect(body2.code).not.toBe(body.code)
+  })
+})
+
+describe("TG 机器人 · 命令菜单分级", () => {
+  it("未绑定：只给 /bind 和 /help", () => {
+    const menu = buildCommandMenu({ bound: false, isAdminUser: false, commands: {} })
+    expect(menu.map((c) => c.command)).toEqual(["bind", "help"])
+  })
+
+  it("已绑定普通用户：/me /frp /unbind /help，没有 /status", () => {
+    const menu = buildCommandMenu({ bound: true, isAdminUser: false, commands: {} })
+    expect(menu.map((c) => c.command)).toEqual(["me", "frp", "unbind", "help"])
+    expect(menu.some((c) => c.command === "status")).toBe(false)
+  })
+
+  it("已绑定管理员：多出 /status", () => {
+    const menu = buildCommandMenu({ bound: true, isAdminUser: true, commands: {} })
+    expect(menu.map((c) => c.command)).toEqual(["me", "frp", "unbind", "help", "status"])
+  })
+
+  it("被关掉的命令不会出现在菜单里（菜单与处理器必须一致）", () => {
+    const menu = buildCommandMenu({
+      bound: true,
+      isAdminUser: true,
+      commands: { me: false, status: false },
+    })
+    expect(menu.map((c) => c.command)).toEqual(["frp", "unbind", "help"])
   })
 })
