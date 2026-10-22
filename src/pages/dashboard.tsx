@@ -354,7 +354,13 @@ const ProfileCard = React.memo(function ProfileCard({
           <div className="flex items-center gap-3">
             {p.avatarKey || p.avatarUrl ? (
               <img
-                src={p.avatarKey ? `/api/profile/asset?kind=avatar` : p.avatarUrl ?? ""}
+                // v=updatedAt：名片头像更新后 URL 必须变，否则会命中
+                // /api/profile/asset 的 private,max-age=300 缓存，显示旧图
+                src={
+                  p.avatarKey
+                    ? `/api/profile/asset?kind=avatar&v=${encodeURIComponent(p.updatedAt)}`
+                    : p.avatarUrl ?? ""
+                }
                 alt={p.displayName ?? ""}
                 className="h-12 w-12 shrink-0 rounded-full border object-cover"
               />

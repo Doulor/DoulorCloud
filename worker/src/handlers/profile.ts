@@ -1253,9 +1253,20 @@ export async function readOwnAsset(env: Env, request: Request): Promise<Response
     kind === "gallery"
       ? await serveGalleryObject(env, user.username, params.get("id") ?? "")
       : await serveAssetByUsername(env, user.username, kind, user.id)
-  // 只给「内容型 200」补缓存头；302（音乐）与 404 原样返回
+  // 只给「内容型 200」补缓存头；302（音乐）与 404 原样返回。
+  //
+  // ⚠️ 2026-10-22：**必须 clone 之后再改头**。`getObject` 返回的是 fetch() 的
+  // Response，其 headers 带 immutable guard，直接 `res.headers.set(...)` 会抛
+  // `TypeError: Can't modify immutable headers`，整个接口 500 —— 用户反馈的
+  // 「概览名片预览头像裂图」就是 2026-10-10 加这段缓存头时引入的。
   if (res.status === 200) {
-    res.headers.set("Cache-Control", "private, max-age=300")
+    const headers = new Headers(res.headers)
+    headers.set("Cache-Control", "private, max-age=300")
+    return new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers,
+    })
   }
   return res
 }
