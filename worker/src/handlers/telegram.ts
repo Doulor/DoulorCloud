@@ -474,7 +474,7 @@ interface TgUpdate {
   callback_query?: {
     id: string
     data?: string
-    message?: { chat?: { id?: number; type?: string } }
+    message?: { message_id?: number; chat?: { id?: number; type?: string } }
   }
 }
 
@@ -736,18 +736,14 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
   }
 
   if (cmd === "/menu") {
-    await tgApi(env, "sendMessage", {
-      chat_id: chatId,
-      text: "☁️ <b>DoulorCloud</b>\n点下面的按钮直接查，不用记命令。",
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      reply_markup: menuKeyboard(isAnyAdmin(role)),
-    })
+    const view = await renderView(env, "menu", binding, user, cfg)
+    if (view) await editOrSend(env, chatId, undefined, view)
     return json({ ok: true })
   }
 
   if (cmd === "/settings") {
-    await sendTo(env, chatId, await settingsText(env, binding))
+    const view = await renderView(env, "settings", binding, user, cfg)
+    if (view) await editOrSend(env, chatId, undefined, view)
     return json({ ok: true })
   }
 
@@ -990,12 +986,6 @@ const MUTE_LABELS: Record<string, string> = {
   daily: "每日简报",
 }
 
-function settingsKeyboard(muted: string[]): Record<string, unknown> {
-  const rows = Object.keys(MUTE_LABELS).map((k) => [
-    { text: `${muted.includes(k) ? "⛔" : "✅"} ${MUTE_LABELS[k]}`, callback_data: `s:${k}` },
-  ])
-  return { inline_keyboard: rows }
-}
 
 async function settingsText(_env: Env, binding: BindingRow): Promise<string> {
   const muted = parseJson<string[]>(binding.muted_json, [])
@@ -1009,42 +999,142 @@ async function settingsText(_env: Env, binding: BindingRow): Promise<string> {
   ].join("\n")
 }
 
-/** /menu 的快捷入口键盘：全部是 callback（不依赖前端路由，按钮永远可用） */
-function menuKeyboard(isAdminUser: boolean): Record<string, unknown> {
-  const rows: Array<Array<Record<string, unknown>>> = [
-    [
-      { text: "👤 我的账号", callback_data: "q:me" },
-      { text: "🚇 内网穿透", callback_data: "q:frp" },
-    ],
-    [
-      { text: "📮 我的邮箱", callback_data: "q:mail" },
-      { text: "☁️ 我的域名", callback_data: "q:dns" },
-    ],
-    [
-      { text: "⚙️ 通知设置", callback_data: "q:settings" },
-      { text: "☁️ 打开网站", url: SITE_URL },
-    ],
-  ]
-  if (isAdminUser) rows.push([{ text: "📊 站点状态", callback_data: "q:status" }])
-  return { inline_keyboard: rows }
-}
 
 /**
  * 处理 inline 按钮回调（callback_query）。
  * 权限口径与命令一致：只私聊、必须已绑定、管理类数据额外校验角色。
+ */
+/* ==========================================================================
+ * 单卡片导航（2026-10-22 站长要求：点按钮不要再刷出新卡片）
+ *
+ * 做法：所有按钮都是 callback_query，处理时用 **editMessageText** 原地改写同一条消息，
+ * 只保留「发新消息」作为兜底（消息被删 / 内容没变化时的 not-modified 特判）。
+ * 每个视图都带「⬅️ 返回菜单」，所以一个卡片可以在 菜单 → 账号 → 邮箱 → 菜单 之间来回切。
+ * ========================================================================== */
+
+const BACK_LABEL = "⬅️ 返回菜单"
+
+type TgView = { text: string; keyboard: Record<string, unknown> }
+
+/** /menu 的主键盘：全部是视图切换，不依赖前端路由，按钮永远可用 */
+function menuKeyboard(isAdminUser: boolean): Record<string, unknown> {
+  const rows: Array<Array<Record<string, unknown>>> = [
+    [
+      { text: "👤 我的账号", callback_data: "v:me" },
+      { text: "🚇 内网穿透", callback_data: "v:frp" },
+    ],
+    [
+      { text: "📮 我的邮箱", callback_data: "v:mail" },
+      { text: "☁️ 我的域名", callback_data: "v:dns" },
+    ],
+    [
+      { text: "⚙️ 通知设置", callback_data: "v:settings" },
+      { text: "☁️ 打开网站", url: SITE_URL },
+    ],
+  ]
+  if (isAdminUser) rows.push([{ text: "📊 站点状态", callback_data: "v:status" }])
+  return { inline_keyboard: rows }
+}
+
+/** 子视图的键盘：返回菜单 +（管理员）站点状态 */
+function subKeyboard(isAdminUser: boolean): Record<string, unknown> {
+  const row: Array<Record<string, unknown>> = [{ text: BACK_LABEL, callback_data: "v:menu" }]
+  if (isAdminUser) row.push({ text: "📊 状态", callback_data: "v:status" })
+  return { inline_keyboard: [row] }
+}
+
+/** 通知设置视图的键盘：每行一个开关 + 返回 */
+function settingsKeyboard(muted: string[], isAdminUser: boolean): Record<string, unknown> {
+  const rows: Array<Array<Record<string, unknown>>> = Object.keys(MUTE_LABELS).map((k) => [
+    { text: `${muted.includes(k) ? "⛔" : "✅"} ${MUTE_LABELS[k]}`, callback_data: `s:${k}` },
+  ])
+  const back: Array<Record<string, unknown>> = [{ text: BACK_LABEL, callback_data: "v:menu" }]
+  if (isAdminUser) back.push({ text: "📊 状态", callback_data: "v:status" })
+  rows.push(back)
+  return { inline_keyboard: rows }
+}
+
+/** 把一个视图名渲染成「正文 + 键盘」；视图名非法或无权时返回 null */
+async function renderView(
+  env: Env,
+  view: string,
+  binding: BindingRow,
+  user: Record<string, unknown>,
+  cfg: TgConfigRow
+): Promise<TgView | null> {
+  const isAdminUser = isAnyAdmin(String(user.role ?? ""))
+  switch (view) {
+    case "menu":
+      return {
+        text: "☁️ <b>DoulorCloud</b>\n点下面的按钮查看，卡片会原地切换，不用返回网页。",
+        keyboard: menuKeyboard(isAdminUser),
+      }
+    case "me":
+      return { text: await meSummary(env, user), keyboard: subKeyboard(isAdminUser) }
+    case "frp":
+      return { text: await frpSummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser) }
+    case "mail":
+      return { text: await mailSummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser) }
+    case "dns":
+      return { text: await dnsSummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser) }
+    case "settings":
+      return {
+        text: await settingsText(env, binding),
+        keyboard: settingsKeyboard(parseJson<string[]>(binding.muted_json, []), isAdminUser),
+      }
+    case "status":
+      if (!isAdminUser) return null
+      return { text: await statusSummary(env, cfg), keyboard: subKeyboard(isAdminUser) }
+    default:
+      return null
+  }
+}
+
+/**
+ * 原地改写卡片；只有「消息没了 / 改不动」才退回发新消息。
+ * `message is not modified`（用户重复点同一个按钮）视为成功，不重发。
+ */
+async function editOrSend(
+  env: Env,
+  chatId: string,
+  messageId: number | undefined,
+  view: TgView
+): Promise<void> {
+  const payload: Record<string, unknown> = {
+    chat_id: chatId,
+    text: view.text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: view.keyboard,
+  }
+  if (messageId) {
+    const r = await tgApi(env, "editMessageText", { ...payload, message_id: messageId })
+    if (r.ok) return
+    if ((r.description ?? "").toLowerCase().includes("not modified")) return
+  }
+  const sent = await tgApi(env, "sendMessage", payload)
+  await logPush(env, "message", chatId, sent.ok, sent.ok ? undefined : sent.description)
+}
+
+/**
+ * 处理 inline 按钮回调。
+ * 权限口径与命令一致：只私聊、必须已绑定、站点状态额外校验角色。
  */
 async function handleCallback(
   env: Env,
   cb: {
     id: string
     data?: string
-    message?: { chat?: { id?: number; type?: string } }
+    message?: { message_id?: number; chat?: { id?: number; type?: string } }
   },
   cfg: TgConfigRow
 ): Promise<void> {
   const chatId = cb.message?.chat?.id != null ? String(cb.message.chat.id) : ""
+  const messageId = cb.message?.message_id
   const data = cb.data ?? ""
-  const ack = (text?: string) => tgApi(env, "answerCallbackQuery", text ? { callback_query_id: cb.id, text } : { callback_query_id: cb.id })
+  const ack = (text?: string) =>
+    tgApi(env, "answerCallbackQuery", text ? { callback_query_id: cb.id, text } : { callback_query_id: cb.id })
+
   if (!chatId || cb.message?.chat?.type !== "private") {
     await ack("仅支持私聊使用")
     return
@@ -1057,8 +1147,12 @@ async function handleCallback(
   const user = await env.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(binding.user_id)
     .first<Record<string, unknown>>()
+  if (!user) {
+    await ack("账号不存在")
+    return
+  }
 
-  // 通知开关
+  // 通知开关：切完立刻原地刷新设置视图
   if (data.startsWith("s:")) {
     const key = data.slice(2)
     if (!MUTE_LABELS[key]) {
@@ -1071,71 +1165,28 @@ async function handleCallback(
       .bind(JSON.stringify(next), chatId)
       .run()
     await ack(next.includes(key) ? `已静音：${MUTE_LABELS[key]}` : `已开启：${MUTE_LABELS[key]}`)
-    await tgApi(env, "sendMessage", {
-      chat_id: chatId,
-      text: await settingsText(env, { ...binding, muted_json: JSON.stringify(next) }),
-      parse_mode: "HTML",
-      reply_markup: settingsKeyboard(next),
-    })
+    const view = await renderView(env, "settings", { ...binding, muted_json: JSON.stringify(next) }, user, cfg)
+    if (view) await editOrSend(env, chatId, messageId, view)
     return
   }
 
-  if (!user) {
-    await ack("账号不存在")
+  // 视图切换：v:me / v:frp / v:mail / v:dns / v:settings / v:status / v:menu
+  if (data.startsWith("v:")) {
+    const view = await renderView(env, data.slice(2), binding, user, cfg)
+    if (!view) {
+      await ack("无权访问或视图不存在")
+      return
+    }
+    await ack()
+    await editOrSend(env, chatId, messageId, view)
     return
   }
-  const isAdminUser = isAnyAdmin(String(user.role ?? ""))
 
-  switch (data) {
-    case "q:me":
-      await ack()
-      await sendTo(env, chatId, await meSummary(env, user))
-      return
-    case "q:frp":
-      await ack()
-      await sendTo(env, chatId, await frpSummary(env, binding.user_id))
-      return
-    case "q:mail":
-      await ack()
-      await sendTo(env, chatId, await mailSummary(env, binding.user_id))
-      return
-    case "q:dns":
-      await ack()
-      await sendTo(env, chatId, await dnsSummary(env, binding.user_id))
-      return
-    case "q:settings":
-      await ack()
-      await tgApi(env, "sendMessage", {
-        chat_id: chatId,
-        text: await settingsText(env, binding),
-        parse_mode: "HTML",
-        reply_markup: settingsKeyboard(parseJson<string[]>(binding.muted_json, [])),
-      })
-      return
-    case "q:status":
-      if (!isAdminUser) {
-        await ack("无权访问")
-        return
-      }
-      await ack()
-      await sendTo(env, chatId, await statusSummary(env, cfg))
-      return
-    default:
-      await ack()
-  }
+  await ack()
 }
-
-/* ==========================================================================
- * 供其它模块复用的推送入口（登录提醒、frp 到期、节点掉线、每日简报）
- * ========================================================================== */
 
 export type PushKind = "login" | "frpExpiry" | "nodeDown" | "daily"
 
-/**
- * 按开关把消息推给「绑定了 TG 的管理员」或「指定用户」。
- * 其它模块只需 `void pushMessage(env, "login", { userId, text })`，
- * 失败不影响主流程（内部已 try/catch 并记审计）。
- */
 export async function pushMessage(
   env: Env,
   kind: PushKind,
@@ -1358,6 +1409,6 @@ async function frpSummary(env: Env, userId: string): Promise<string> {
       `自动续费：${r.auto_renew ? "开" : "关"}`
     )
   }
-  lines.push("", "管理：${SITE_URL} → 内网穿透")
+  lines.push("", `管理：${SITE_URL} → 内网穿透`)
   return lines.join("\n")
 }

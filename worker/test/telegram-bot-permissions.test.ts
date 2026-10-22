@@ -290,3 +290,82 @@ describe("TG 机器人 · 绑定码的三种入口（菜单按钮不带参数的
     }
   })
 })
+describe("TG 机器人 · 单卡片导航（点按钮原地切换，不刷屏）", () => {
+  function cbRequest(data: string): Request {
+    return hookRequest(
+      {
+        callback_query: {
+          id: "cb-1",
+          data,
+          message: { message_id: 4242, chat: { id: 555000111, type: "private" } },
+        },
+      },
+      SECRET
+    )
+  }
+
+  beforeEach(async () => {
+    await env.DB.prepare("DELETE FROM tg_bindings").run()
+    await seedConfig({ enabled: true })
+    const user = await makeUser({ role: "user" })
+    await env.DB.prepare(
+      "INSERT INTO tg_bindings (telegram_id, user_id, tg_username, bound_at, muted_json) VALUES (?, ?, ?, ?, '[]')"
+    )
+      .bind("555000111", user.id, "tester", Date.now())
+      .run()
+  })
+
+  it("点「我的账号」只 editMessageText（带原 message_id），不发新消息", async () => {
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = []
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (url.includes("api.telegram.org")) {
+        const method = url.split("/").pop() ?? ""
+        let body: Record<string, unknown> = {}
+        try {
+          body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>
+        } catch {
+          body = {}
+        }
+        calls.push({ method, body })
+        return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 })
+      }
+      return original(input as RequestInfo, init)
+    }) as typeof fetch
+    try {
+      const res = await handleWebhook(env, cbRequest("v:me"))
+      expect(res.status).toBe(200)
+      const edit = calls.find((c) => c.method === "editMessageText")
+      expect(edit).toBeTruthy()
+      expect(edit?.body.message_id).toBe(4242)
+      expect(calls.some((c) => c.method === "sendMessage")).toBe(false)
+      // 视图里有「返回菜单」按钮，用户能切回来
+      const kb = JSON.stringify(edit?.body.reply_markup ?? {})
+      expect(kb).toContain("v:menu")
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  it("非管理员点「站点状态」不返回内容（只 ack 提示无权）", async () => {
+    const calls: string[] = []
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (url.includes("api.telegram.org")) {
+        calls.push(url.split("/").pop() ?? "")
+        return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 })
+      }
+      return original(input as RequestInfo)
+    }) as typeof fetch
+    try {
+      await handleWebhook(env, cbRequest("v:status"))
+      expect(calls).toContain("answerCallbackQuery")
+      expect(calls).not.toContain("editMessageText")
+      expect(calls).not.toContain("sendMessage")
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+})
