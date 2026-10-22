@@ -1061,9 +1061,17 @@ export function buildPreviewDoc(files: FileMap): string {
   // 注意：这里要挑的是「文件名」，不是文件内容——写成 files["index.html"] 会拿到正文，
   // 再去 files[正文] 查必然是 undefined，预览就永远空白。
   const paths = Object.keys(files)
-  const entry = paths.includes("index.html")
-    ? "index.html"
-    : (paths.find((p) => p.endsWith(".html")) ?? paths[0])
+  /**
+   * 入口选择：**取内容最大的那个 HTML**。
+   *
+   * 为什么不是「优先根 index.html」：有的作品根目录只放了一个极小的跳转壳，
+   * 真正的页面在 `assets/index.html`（S162 就是：根 index.html 1 KB、assets/index.html 65 KB）。
+   * 按老规则会挑中空壳 → 预览整片空白，而接口其实返回了完整正文（2026-10-23 实测）。
+   */
+  const htmlPaths = paths.filter((p) => p.toLowerCase().endsWith(".html"))
+  const entry =
+    htmlPaths.sort((a, b) => (files[b]?.length ?? 0) - (files[a]?.length ?? 0))[0] ??
+    paths[0]
   // ⚠️ 不能 return ""：空 srcdoc 会让 iframe 退回父文档地址（主站设了 X-Frame-Options: deny）
   if (!entry) return previewPlaceholder("这个作品还没有页面文件，加一个 index.html 就能预览")
   let html = files[entry]
