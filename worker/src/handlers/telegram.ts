@@ -65,6 +65,12 @@ const DEFAULT_COMMANDS: Record<string, boolean> = {
   frp: true,
   mail: true,
   dns: true,
+  points: true,
+  invite: true,
+  storage: true,
+  community: true,
+  notices: true,
+  security: true,
   menu: true,
   settings: true,
   status: true,
@@ -497,6 +503,12 @@ function helpText(isAdminUser: boolean): string {
     "/frp —— 我的内网穿透租约",
     "/mail —— 我的邮箱与最近邮件",
     "/dns —— 我的域名与解析",
+    "/points —— 积分与最近明细",
+    "/invite —— 我的邀请码与战绩",
+    "/storage —— 网盘用量与最近文件",
+    "/community —— 我的创作与互动",
+    "/notices —— 未读站内通知",
+    "/security —— 登录环境与活跃会话",
     "",
     "<b>设置</b>",
     "/settings —— 通知开关",
@@ -718,11 +730,8 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
   }
 
   if (cmd === "/mail") {
-    if (commands.mail === false) {
-      await sendTo(env, chatId, "/mail 已被管理员关闭。")
-      return json({ ok: true })
-    }
-    await sendTo(env, chatId, await mailSummary(env, binding.user_id))
+    const view = await renderView(env, "mail", binding, user, cfg)
+    if (view) await editOrSend(env, chatId, undefined, view)
     return json({ ok: true })
   }
 
@@ -745,6 +754,25 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
     const view = await renderView(env, "settings", binding, user, cfg)
     if (view) await editOrSend(env, chatId, undefined, view)
     return json({ ok: true })
+  }
+
+  for (const [cmdName, viewName] of [
+    ["/points", "points"],
+    ["/invite", "invite"],
+    ["/storage", "storage"],
+    ["/community", "community"],
+    ["/notices", "notices"],
+    ["/security", "security"],
+  ] as const) {
+    if (cmd === cmdName) {
+      if (commands[viewName] === false) {
+        await sendTo(env, chatId, `${cmdName} 已被管理员关闭。`)
+        return json({ ok: true })
+      }
+      const view = await renderView(env, viewName, binding, user, cfg)
+      if (view) await editOrSend(env, chatId, undefined, view)
+      return json({ ok: true })
+    }
   }
 
   if (cmd === "/status") {
@@ -868,18 +896,26 @@ async function meSummary(env: Env, user: Record<string, unknown>): Promise<strin
 }
 
 /** /mail —— 邮箱概览 + 最近几封 */
-async function mailSummary(env: Env, userId: string): Promise<string> {
+async function mailSummary(
+  env: Env,
+  userId: string,
+  page = 1
+): Promise<{ text: string; pages: number }> {
+  const SIZE = 5
   try {
+    const total = (await safeCount(env, "SELECT COUNT(*) AS n FROM mailboxes WHERE user_id = ?", userId)) ?? 0
+    const pages = Math.max(1, Math.ceil(total / SIZE))
+    const offset = (page - 1) * SIZE
     const { results: boxes } = await env.DB.prepare(
       `SELECT mb.address,
               (SELECT COUNT(*) FROM messages m WHERE m.mailbox_id = mb.id) AS total,
               (SELECT COUNT(*) FROM messages m WHERE m.mailbox_id = mb.id AND m.read = 0) AS unread
-         FROM mailboxes mb WHERE mb.user_id = ? ORDER BY mb.created_at ASC LIMIT 10`
+         FROM mailboxes mb WHERE mb.user_id = ? ORDER BY mb.created_at ASC LIMIT ? OFFSET ?`
     )
-      .bind(userId)
+      .bind(userId, SIZE, offset)
       .all<{ address: string; total: number; unread: number }>()
     if (!boxes || boxes.length === 0) {
-      return `📮 你还没有邮箱。\n开通：${SITE_URL}`
+      return { text: `📮 你还没有邮箱。\n开通：${SITE_URL}`, pages: 1 }
     }
     const { results: recent } = await env.DB.prepare(
       `SELECT m.subject, m.from_address, m.read, m.received_at
@@ -889,7 +925,7 @@ async function mailSummary(env: Env, userId: string): Promise<string> {
       .bind(userId)
       .all<{ subject: string | null; from_address: string | null; read: number; received_at: string }>()
 
-    const lines = ["📮 <b>我的邮箱</b>"]
+    const lines = [`📮 <b>我的邮箱</b>（共 ${total} 个 · 第 ${page}/${pages} 页）`]
     for (const b of boxes) {
       lines.push(`· ${b.address} —— ${b.total} 封${b.unread ? `（<b>未读 ${b.unread}</b>）` : ""}`)
     }
@@ -902,9 +938,9 @@ async function mailSummary(env: Env, userId: string): Promise<string> {
       }
     }
     lines.push("", `☁️ ${SITE_URL}`)
-    return lines.join("\n")
+    return { text: lines.join("\n"), pages }
   } catch (err) {
-    return `📮 读取邮箱失败：${err instanceof Error ? err.message : "未知错误"}`
+    return { text: `📮 读取邮箱失败：${err instanceof Error ? err.message : "未知错误"}`, pages: 1 }
   }
 }
 
@@ -1028,6 +1064,18 @@ function menuKeyboard(isAdminUser: boolean): Record<string, unknown> {
       { text: "☁️ 我的域名", callback_data: "v:dns" },
     ],
     [
+      { text: "💎 我的积分", callback_data: "v:points" },
+      { text: "🎁 我的邀请", callback_data: "v:invite" },
+    ],
+    [
+      { text: "💾 我的网盘", callback_data: "v:storage" },
+      { text: "📝 我的创作", callback_data: "v:community" },
+    ],
+    [
+      { text: "📬 站内通知", callback_data: "v:notices" },
+      { text: "🔐 账号安全", callback_data: "v:security" },
+    ],
+    [
       { text: "⚙️ 通知设置", callback_data: "v:settings" },
       { text: "☁️ 打开网站", url: SITE_URL },
     ],
@@ -1037,8 +1085,11 @@ function menuKeyboard(isAdminUser: boolean): Record<string, unknown> {
 }
 
 /** 子视图的键盘：返回菜单 +（管理员）站点状态 */
-function subKeyboard(isAdminUser: boolean): Record<string, unknown> {
-  const row: Array<Record<string, unknown>> = [{ text: BACK_LABEL, callback_data: "v:menu" }]
+function subKeyboard(isAdminUser: boolean, view: string): Record<string, unknown> {
+  const row: Array<Record<string, unknown>> = [
+    { text: "🔄 刷新", callback_data: `v:${view}` },
+    { text: BACK_LABEL, callback_data: "v:menu" },
+  ]
   if (isAdminUser) row.push({ text: "📊 状态", callback_data: "v:status" })
   return { inline_keyboard: [row] }
 }
@@ -1054,6 +1105,207 @@ function settingsKeyboard(muted: string[], isAdminUser: boolean): Record<string,
   return { inline_keyboard: rows }
 }
 
+/* ==========================================================================
+ * A. 更多信息视图（2026-10-22 第二批）
+ *
+ * /invite /points /security /storage /community /notices
+ * 全部只读、全部容错：任何一张表缺失都只让对应行消失，不影响其它行。
+ * ========================================================================== */
+
+/** /invite —— 邀请码与邀请战绩 */
+async function inviteSummary(env: Env, userId: string): Promise<string> {
+  const lines = ["☁️ <b>我的邀请</b>"]
+  try {
+    const { results: codes } = await env.DB.prepare(
+      "SELECT code, max_uses, used_count, expires_at FROM invite_codes WHERE created_by = ? ORDER BY created_at DESC LIMIT 3"
+    )
+      .bind(userId)
+      .all<{ code: string; max_uses: number; used_count: number; expires_at: string | null }>()
+    const invited = await safeCount(env, "SELECT COUNT(*) AS n FROM invite_rewards WHERE inviter_user_id = ?", userId)
+    if (invited !== null) lines.push(`👥 已邀请：<b>${invited}</b> 人`)
+    if (codes && codes.length > 0) {
+      lines.push("", "<b>我的邀请码</b>")
+      for (const c of codes) {
+        const left = c.max_uses ? `${c.used_count}/${c.max_uses} 已用` : `${c.used_count} 已用`
+        lines.push(`· <code>${c.code}</code>（${left}${c.expires_at ? `，${fmtDate(c.expires_at)} 过期` : ""}）`)
+      }
+    } else {
+      lines.push("", "还没有可用的邀请码，去网站生成一个。")
+    }
+  } catch {
+    lines.push("邀请信息暂时读不到。")
+  }
+  lines.push("", `☁️ ${SITE_URL}`)
+  return lines.join("\n")
+}
+
+/** /points —— 积分余额 + 最近明细 + 可兑换商品数 */
+async function pointsSummary(env: Env, userId: string): Promise<string> {
+  const lines = ["☁️ <b>我的积分</b>"]
+  try {
+    const bal = await env.DB.prepare("SELECT balance FROM user_points WHERE user_id = ?")
+      .bind(userId)
+      .first<{ balance: number }>()
+    lines.push(`💎 余额：<b>${(bal?.balance ?? 0).toLocaleString("zh-CN")}</b>`)
+    const products = await safeCount(env, "SELECT COUNT(*) AS n FROM point_products WHERE enabled = 1")
+    if (products !== null) lines.push(`🎁 可兑换商品：${products} 个`)
+
+    const { results: tx } = await env.DB.prepare(
+      "SELECT delta, balance, reason, detail, created_at FROM point_transactions WHERE user_id = ? ORDER BY created_at DESC LIMIT 6"
+    )
+      .bind(userId)
+      .all<{ delta: number; balance: number; reason: string | null; detail: string | null; created_at: string }>()
+    if (tx && tx.length > 0) {
+      lines.push("", "<b>最近明细</b>")
+      for (const t of tx) {
+        const sign = t.delta > 0 ? `+${t.delta}` : String(t.delta)
+        const why = (t.reason || t.detail || "积分变动").slice(0, 24)
+        lines.push(`${t.delta > 0 ? "🟢" : "🔴"} ${sign} · ${why} · ${fmtDate(t.created_at)}`)
+      }
+    }
+  } catch {
+    lines.push("积分明细暂时读不到。")
+  }
+  lines.push("", `☁️ ${SITE_URL}`)
+  return lines.join("\n")
+}
+
+/** /security —— 登录环境与活跃会话 */
+async function securitySummary(env: Env, userId: string, user: Record<string, unknown>): Promise<string> {
+  const lines = ["☁️ <b>账号安全</b>"]
+  try {
+    const nowIso = new Date().toISOString()
+    const sessions = await safeCount(
+      env,
+      "SELECT COUNT(*) AS n FROM sessions WHERE user_id = ? AND expires_at > ?",
+      userId,
+      nowIso
+    )
+    if (sessions !== null) lines.push(`🔑 活跃会话：<b>${sessions}</b> 个`)
+    if (user.last_login_at) lines.push(`🕒 最近登录：${fmtDateTimeCn(user.last_login_at)}`)
+    if (user.email_verified) lines.push("📧 邮箱：已验证 ✅")
+    else lines.push("📧 邮箱：<b>未验证</b> ⏳")
+
+    const { results: ips } = await env.DB.prepare(
+      "SELECT ip, last_seen_at, times FROM user_login_ips WHERE user_id = ? ORDER BY last_seen_at DESC LIMIT 5"
+    )
+      .bind(userId)
+      .all<{ ip: string; last_seen_at: string; times: number }>()
+    if (ips && ips.length > 0) {
+      lines.push("", "<b>最近登录 IP</b>")
+      for (const r of ips) lines.push(`· ${r.ip} · ${fmtDate(r.last_seen_at)}${r.times > 1 ? `（${r.times} 次）` : ""}`)
+    }
+    lines.push("", "发现陌生登录？立刻去网站改密码并退出其它设备。")
+  } catch {
+    lines.push("安全信息暂时读不到。")
+  }
+  lines.push("", `☁️ ${SITE_URL}`)
+  return lines.join("\n")
+}
+
+/** /storage —— 网盘用量与最近文件 */
+async function storageSummary(env: Env, userId: string): Promise<string> {
+  const lines = ["☁️ <b>我的网盘</b>"]
+  try {
+    const used = await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS n FROM storage_objects WHERE user_id = ?")
+      .bind(userId)
+      .first<{ n: number }>()
+    const quota = await env.DB.prepare("SELECT quota_bytes AS n FROM storage_accounts WHERE user_id = ?")
+      .bind(userId)
+      .first<{ n: number }>()
+    const u = used?.n ?? 0
+    const q = quota?.n ?? 0
+    if (q > 0) {
+      const pct = Math.min(100, Math.round((u / q) * 100))
+      const bar = "█".repeat(Math.round(pct / 10)).padEnd(10, "░")
+      lines.push(`💾 已用 ${fmtBytes(u)} / ${fmtBytes(q)}`)
+      lines.push(`${bar} ${pct}%`)
+    } else {
+      lines.push(`💾 已用 ${fmtBytes(u)}`)
+    }
+    const files = await safeCount(env, "SELECT COUNT(*) AS n FROM storage_objects WHERE user_id = ?", userId)
+    if (files !== null) lines.push(`📄 文件数：${files}`)
+    const { results: recent } = await env.DB.prepare(
+      "SELECT filename, size, created_at FROM storage_objects WHERE user_id = ? ORDER BY created_at DESC LIMIT 3"
+    )
+      .bind(userId)
+      .all<{ filename: string; size: number; created_at: string }>()
+    if (recent && recent.length > 0) {
+      lines.push("", "<b>最近上传</b>")
+      for (const f of recent) lines.push(`· ${f.filename.slice(0, 30)}（${fmtBytes(f.size)}）`)
+    }
+  } catch {
+    lines.push("网盘信息暂时读不到。")
+  }
+  lines.push("", `☁️ ${SITE_URL}`)
+  return lines.join("\n")
+}
+
+/** /community —— 我的创作与互动 */
+async function communitySummary(env: Env, userId: string): Promise<string> {
+  const lines = ["☁️ <b>我的创作</b>"]
+  try {
+    const posts = await env.DB.prepare(
+      `SELECT COUNT(*) AS n,
+              COALESCE(SUM(like_count), 0) AS likes,
+              COALESCE(SUM(comment_count), 0) AS comments
+         FROM posts WHERE user_id = ? AND deleted_at IS NULL`
+    )
+      .bind(userId)
+      .first<{ n: number; likes: number; comments: number }>()
+    lines.push(`📝 帖子：${posts?.n ?? 0} 条 · 获赞 ${posts?.likes ?? 0} · 收到评论 ${posts?.comments ?? 0}`)
+    const mine = await safeCount(env, "SELECT COUNT(*) AS n FROM post_comments WHERE user_id = ? AND deleted_at IS NULL", userId)
+    if (mine !== null) lines.push(`💬 我发出的评论：${mine} 条`)
+    const week = await safeCount(
+      env,
+      `SELECT COUNT(*) AS n FROM post_comments c JOIN posts p ON c.post_id = p.id
+        WHERE p.user_id = ? AND c.deleted_at IS NULL AND c.created_at > ?`,
+      userId,
+      new Date(Date.now() - 7 * 86400000).toISOString()
+    )
+    if (week !== null) lines.push(`🆕 近 7 天新评论：${week} 条`)
+  } catch {
+    lines.push("创作数据暂时读不到。")
+  }
+  lines.push("", `☁️ ${SITE_URL}`)
+  return lines.join("\n")
+}
+
+/** /notices —— 未读站内通知 */
+async function noticesSummary(env: Env, userId: string): Promise<string> {
+  const lines = ["☁️ <b>站内通知</b>"]
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT title, body, created_at, require_ack FROM admin_notices
+        WHERE user_id = ? AND read_at IS NULL AND revoked_at IS NULL
+        ORDER BY created_at DESC LIMIT 5`
+    )
+      .bind(userId)
+      .all<{ title: string; body: string; created_at: string; require_ack: number }>()
+    const unread = await safeCount(
+      env,
+      "SELECT COUNT(*) AS n FROM admin_notices WHERE user_id = ? AND read_at IS NULL AND revoked_at IS NULL",
+      userId
+    )
+    if (unread !== null) lines.push(`📬 未读：<b>${unread}</b> 条`)
+    if (!results || results.length === 0) {
+      lines.push("", "没有未读通知 ✅")
+    } else {
+      lines.push("")
+      for (const n of results) {
+        lines.push(`· <b>${n.title.slice(0, 30)}</b>${n.require_ack ? "（需确认）" : ""} · ${fmtDate(n.created_at)}`)
+        const brief = (n.body || "").replace(/\s+/g, " ").slice(0, 60)
+        if (brief) lines.push(`　${brief}`)
+      }
+      lines.push("", "去网站查看并确认：", `☁️ ${SITE_URL}`)
+    }
+  } catch {
+    lines.push("通知暂时读不到。")
+  }
+  lines.push("", `☁️ ${SITE_URL}`)
+  return lines.join("\n")
+}
+
 /** 把一个视图名渲染成「正文 + 键盘」；视图名非法或无权时返回 null */
 async function renderView(
   env: Env,
@@ -1063,20 +1315,45 @@ async function renderView(
   cfg: TgConfigRow
 ): Promise<TgView | null> {
   const isAdminUser = isAnyAdmin(String(user.role ?? ""))
-  switch (view) {
+  const [name, arg] = view.split(":")
+  switch (name) {
     case "menu":
       return {
         text: "☁️ <b>DoulorCloud</b>\n点下面的按钮查看，卡片会原地切换，不用返回网页。",
         keyboard: menuKeyboard(isAdminUser),
       }
     case "me":
-      return { text: await meSummary(env, user), keyboard: subKeyboard(isAdminUser) }
+      return { text: await meSummary(env, user), keyboard: subKeyboard(isAdminUser, name) }
     case "frp":
-      return { text: await frpSummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser) }
-    case "mail":
-      return { text: await mailSummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser) }
+      return { text: await frpSummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser, name) }
+    case "mail": {
+      const page = Math.max(1, Number(arg) || 1)
+      const { text, pages } = await mailSummary(env, binding.user_id, page)
+      const row: Array<Record<string, unknown>> = []
+      if (page > 1) row.push({ text: "⬅️ 上一页", callback_data: `v:mail:${page - 1}` })
+      if (page < pages) row.push({ text: "下一页 ➡️", callback_data: `v:mail:${page + 1}` })
+      const kb: Array<Array<Record<string, unknown>>> = []
+      if (row.length > 0) kb.push(row)
+      kb.push([
+        { text: "🔄 刷新", callback_data: `v:mail:${page}` },
+        { text: BACK_LABEL, callback_data: "v:menu" },
+      ])
+      return { text, keyboard: { inline_keyboard: kb } }
+    }
     case "dns":
-      return { text: await dnsSummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser) }
+      return { text: await dnsSummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser, name) }
+    case "points":
+      return { text: await pointsSummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser, name) }
+    case "invite":
+      return { text: await inviteSummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser, name) }
+    case "storage":
+      return { text: await storageSummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser, name) }
+    case "community":
+      return { text: await communitySummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser, name) }
+    case "notices":
+      return { text: await noticesSummary(env, binding.user_id), keyboard: subKeyboard(isAdminUser, name) }
+    case "security":
+      return { text: await securitySummary(env, binding.user_id, user), keyboard: subKeyboard(isAdminUser, name) }
     case "settings":
       return {
         text: await settingsText(env, binding),
@@ -1084,7 +1361,7 @@ async function renderView(
       }
     case "status":
       if (!isAdminUser) return null
-      return { text: await statusSummary(env, cfg), keyboard: subKeyboard(isAdminUser) }
+      return { text: await statusSummary(env, cfg), keyboard: subKeyboard(isAdminUser, name) }
     default:
       return null
   }
@@ -1185,7 +1462,15 @@ async function handleCallback(
   await ack()
 }
 
-export type PushKind = "login" | "frpExpiry" | "nodeDown" | "daily"
+export type PushKind =
+  | "login"
+  | "frpExpiry"
+  | "nodeDown"
+  | "daily"
+  | "email"
+  | "comment"
+  | "like"
+  | "points"
 
 export async function pushMessage(
   env: Env,
@@ -1305,6 +1590,12 @@ export function buildCommandMenu(opts: {
   if (opts.commands.frp !== false) out.push({ command: "frp", description: "我的内网穿透租约" })
   if (opts.commands.mail !== false) out.push({ command: "mail", description: "我的邮箱与最近邮件" })
   if (opts.commands.dns !== false) out.push({ command: "dns", description: "我的域名与解析" })
+  if (opts.commands.points !== false) out.push({ command: "points", description: "积分与最近明细" })
+  if (opts.commands.invite !== false) out.push({ command: "invite", description: "我的邀请码与战绩" })
+  if (opts.commands.storage !== false) out.push({ command: "storage", description: "网盘用量与最近文件" })
+  if (opts.commands.community !== false) out.push({ command: "community", description: "我的创作与互动" })
+  if (opts.commands.notices !== false) out.push({ command: "notices", description: "未读站内通知" })
+  if (opts.commands.security !== false) out.push({ command: "security", description: "登录环境与活跃会话" })
   if (opts.commands.settings !== false) out.push({ command: "settings", description: "通知设置" })
   out.push({ command: "unbind", description: "解除绑定" })
   out.push({ command: "help", description: "查看帮助" })

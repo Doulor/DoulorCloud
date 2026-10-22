@@ -8604,6 +8604,16 @@ export const zh = {
   "tg.cmd.mail": "/mail 邮箱与最近邮件",
   "tg.cmd.dns": "/dns 域名与解析",
   "tg.cmd.settings": "/settings 通知开关",
+  "tg.cmd.points": "/points 积分与明细",
+  "tg.cmd.invite": "/invite 邀请码与战绩",
+  "tg.cmd.storage": "/storage 网盘用量",
+  "tg.cmd.community": "/community 我的创作",
+  "tg.cmd.notices": "/notices 未读通知",
+  "tg.cmd.security": "/security 登录与安全",
+  "tg.push.email": "邮件通知（每封）",
+  "tg.push.comment": "被评论（每条）",
+  "tg.push.like": "被点赞（每条）",
+  "tg.push.points": "积分到账",
 } as const
 
 export type MessageKey = keyof typeof zh

@@ -10,6 +10,7 @@ import { guardRateLimit } from "../ratelimit"
 import { getLinkPreview } from "../link-preview"
 import { pushMessage, isMessageCategory } from "../user-messages"
 import type { Env } from "../env"
+import { pushMessage as tgPush } from "./telegram"
 
 const DEFAULT_LIMIT = 20
 
@@ -875,6 +876,14 @@ export async function toggleLike(env: Env, request: Request, id: string): Promis
     })
   }
 
+  // TG 推送：只有真的新增了点赞才推（取消赞不推，避免来回点刷通知）。
+  if ((inserted.meta?.changes ?? 0) > 0 && post.user_id !== user.id) {
+    await tgPush(env, "like", {
+      userId: post.user_id,
+      text: ["❤️ <b>你的帖子被点赞</b>", `查看：https://cloud.doulor.cn/community/${id}`].join("\n"),
+    })
+  }
+
   return json({ liked: true, likeCount: await likeCount(env, id) })
 }
 
@@ -1233,6 +1242,26 @@ async function maybeNotify(env: Env, args: {
       ).bind(uuid(), args.recipientId, args.type, args.actorId, args.postId, args.commentId, new Date().toISOString()).run()
     } catch {}
     await maybeSendMail(env, args.recipientId, args.postId)
+
+    // TG 推送（站长要求：每条都推，不做汇总）。摘要只取评论前 60 字，
+    // 失败一律忽略 —— 社交通知不能影响"发评论"本身。
+    try {
+      const c = await env.DB.prepare("SELECT body FROM post_comments WHERE id = ?")
+        .bind(args.commentId)
+        .first<{ body: string }>()
+      const snippet = (c?.body ?? "").replace(/\s+/g, " ").slice(0, 60)
+      await tgPush(env, "comment", {
+        userId: args.recipientId,
+        text: [
+          args.type === "comment_reply" ? "💬 <b>有人回复了你的评论</b>" : "💬 <b>你的帖子有新评论</b>",
+          snippet ? `“${snippet}”` : "",
+          "",
+          `查看：https://cloud.doulor.cn/community/${args.postId}`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      })
+    } catch {}
   }
 
   // 若是回复某人，且那人不是帖子作者、不是自己 → 给那人也发 comment_reply

@@ -32,6 +32,7 @@ import {
 import { titleOf, hotCommentThreshold, commentEditLimit } from "./community"
 import { uuid } from "../crypto"
 import type { Env } from "../env"
+import { pushMessage as tgPush } from "./telegram"
 
 /** 与社区广场同一口径：一条评论最多 1000 字 */
 const MAX_BODY_CHARS = 1000
@@ -220,6 +221,21 @@ export async function createGalleryComment(
   )
     .bind(cid, project.id, user.id, parentId, replyToUserId, text, now)
     .run()
+
+  // TG 推送：作品被评论（每条都推）。作者给自己评论不推。
+  if (project.userId !== user.id) {
+    try {
+      await tgPush(env, "comment", {
+        userId: project.userId,
+        text: [
+          "💬 <b>你的作品有新评论</b>",
+          `“${text.replace(/\s+/g, " ").slice(0, 60)}”`,
+          "",
+          `查看：https://cloud.doulor.cn/gallery`,
+        ].join("\n"),
+      })
+    } catch {}
+  }
 
   return json({ comment: { id: cid, createdAt: now } }, 201)
 }

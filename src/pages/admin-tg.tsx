@@ -31,8 +31,32 @@ import {
 import { fmtDateTime } from "@/lib/format"
 import { useT } from "@/i18n"
 
-const COMMAND_KEYS = ["menu", "me", "frp", "mail", "dns", "settings", "status", "help"] as const
-const PUSH_KEYS = ["login", "frpExpiry", "nodeDown", "daily"] as const
+const COMMAND_KEYS = [
+  "menu",
+  "me",
+  "frp",
+  "mail",
+  "dns",
+  "points",
+  "invite",
+  "storage",
+  "community",
+  "notices",
+  "security",
+  "settings",
+  "status",
+  "help",
+] as const
+const PUSH_KEYS = [
+  "login",
+  "frpExpiry",
+  "nodeDown",
+  "daily",
+  "email",
+  "comment",
+  "like",
+  "points",
+] as const
 
 export function AdminTgPanel() {
   const { t } = useT()
