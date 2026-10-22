@@ -805,6 +805,12 @@ export async function listProducts(
     // 排序规则（2026-10-03 站长要求）：**「其他」分类的商品一律排在别的分类下面**，
     // 同组内再按管理员设的 sort 降序、上架时间降序。
     // `(category = 'other')` 在 SQLite 里求值为 0/1，升序即「非 other 在前」。
+    //
+    // ⚠️ 2026-10-22：`sold_count` 依赖迁移 0169 的覆盖索引
+    // `idx_point_orders_product_status(product_id, status)` —— **不要删这个索引**。
+    // 没有它时，SQLite 会选 `idx_point_orders_status`，每个商品都重扫一遍全部订单
+    // （72 商品 × 429 行 ≈ 2.7 万行/次）；这个列表被前端轮询到 2.5 万次/周，实测
+    // 占全库 7% 的 D1 行读（5.97 亿行/周）。有索引后同一条 SQL 只读 ~449 行/次（降 98%）。
     `SELECT point_products.*,
             COALESCE((SELECT sold FROM point_product_daily_sales
                        WHERE product_id = point_products.id AND date = ?), 0) AS daily_sold,

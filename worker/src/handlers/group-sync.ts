@@ -122,6 +122,18 @@ export async function groupMap(env: Env, request: Request): Promise<Response> {
   }
 
   const typeList = DONATION_TYPES.map(() => "?").join(",")
+  /**
+   * ⚠️ 2026-10-22：这条 SQL 依赖迁移 0169 的覆盖索引
+   * `idx_donations_user_status_type(user_id, status, type)` —— **不要删这个索引**。
+   *
+   * 没有它时，SQLite 会给 `don` 那条相关子查询选 `idx_donations_status`，于是每个
+   * 账号都重扫一遍全部 approved 捐献（528 账号 × ~700 行 ≈ 37 万行/次）。这个接口
+   * 被 group-sync 每 20~30 秒调一次，实测吃掉全库 90% 的 D1 行读（7 天 74.7 亿行，
+   * 直接把 D1 顶进超量）。
+   *
+   * 有索引后同一条 SQL 只读 ~3.6k 行/次（降 99%），返回结果完全不变
+   * （528 行 / don 618 / wb 348 / qd 56 校验过）。
+   */
   const rows = await env.DB.prepare(
     `SELECT na.newapi_user_id AS nid, na.user_id AS uid,
             (SELECT COUNT(*) FROM donations d
