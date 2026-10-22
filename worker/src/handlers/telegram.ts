@@ -1020,10 +1020,29 @@ const MUTE_LABELS: Record<string, string> = {
   frpExpiry: "穿透到期",
   nodeDown: "节点掉线",
   daily: "每日简报",
+  // ⚠️ 这张表就是用户侧 /settings 的按钮来源：新增推送类型时**必须**同步这里，
+  // 否则 pushMessage 认得、用户却看不到开关（2026-10-22 踩过一次）。
+  email: "新邮件（每封）",
+  comment: "评论/回复（每条）",
+  like: "点赞（每个）",
+  points: "积分到账",
+}
+
+/**
+ * 防漂移自检（开发期兜底）：DEFAULT_PUSHES 里的每一类都必须有用户可见的静音开关。
+ * 两边漂移的后果是「后端会推、用户关不掉」，很难在测试里发现，只能靠这条断言喊出来。
+ */
+function assertPushLabelsInSync(): void {
+  const missing = Object.keys(DEFAULT_PUSHES).filter((k) => !(k in MUTE_LABELS))
+  if (missing.length > 0) {
+    console.error("推送类型缺少用户侧静音开关（MUTE_LABELS）:", missing.join(", "))
+  }
 }
 
 
+
 async function settingsText(_env: Env, binding: BindingRow): Promise<string> {
+  assertPushLabelsInSync()
   const muted = parseJson<string[]>(binding.muted_json, [])
   const on = Object.keys(MUTE_LABELS).filter((k) => !muted.includes(k))
   return [

@@ -387,3 +387,58 @@ describe("TG 机器人 · 单卡片导航（点按钮原地切换，不刷屏）
     }
   })
 })
+describe("TG 机器人 · 通知开关覆盖所有推送类型（防漂移）", () => {
+  it("新增的 email/comment/like/points 在 /settings 里都能静音", async () => {
+    await env.DB.prepare("DELETE FROM tg_bindings").run()
+    await seedConfig({ enabled: true })
+    const user = await makeUser({ role: "user" })
+    await env.DB.prepare(
+      "INSERT INTO tg_bindings (telegram_id, user_id, tg_username, bound_at, muted_json) VALUES (?, ?, ?, ?, '[]')"
+    )
+      .bind("555000222", user.id, "tester", Date.now())
+      .run()
+
+    const original = globalThis.fetch
+    const acks: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (url.includes("api.telegram.org")) {
+        if (url.endsWith("/answerCallbackQuery")) {
+          try {
+            acks.push(String((JSON.parse(String(init?.body ?? "{}")) as { text?: string }).text ?? ""))
+          } catch {
+            acks.push("")
+          }
+        }
+        return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 })
+      }
+      return original(input as RequestInfo, init)
+    }) as typeof fetch
+    try {
+      for (const kind of ["email", "comment", "like", "points"]) {
+        await handleWebhook(
+          env,
+          hookRequest(
+            {
+              callback_query: {
+                id: `cb-${kind}`,
+                data: `s:${kind}`,
+                message: { message_id: 1, chat: { id: 555000222, type: "private" } },
+              },
+            },
+            SECRET
+          )
+        )
+      }
+      const row = await env.DB.prepare("SELECT muted_json FROM tg_bindings WHERE telegram_id = ?")
+        .bind("555000222")
+        .first<{ muted_json: string }>()
+      const muted = JSON.parse(row?.muted_json ?? "[]") as string[]
+      expect(muted.sort()).toEqual(["comment", "email", "like", "points"])
+      // 一个都不该落到「未知选项」
+      expect(acks.join("|")).not.toContain("未知选项")
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+})
