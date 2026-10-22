@@ -63,6 +63,10 @@ interface BindingRow {
 const DEFAULT_COMMANDS: Record<string, boolean> = {
   me: true,
   frp: true,
+  mail: true,
+  dns: true,
+  menu: true,
+  settings: true,
   status: true,
   help: true,
 }
@@ -327,7 +331,7 @@ export async function setWebhook(env: Env, request: Request): Promise<Response> 
   const r = await tgApi(
     env,
     "setWebhook",
-    { url: hookUrl, secret_token: secret, allowed_updates: ["message"] },
+    { url: hookUrl, secret_token: secret, allowed_updates: ["message", "callback_query"] },
     token
   )
   if (!r.ok) throw new ApiError(400, `设置失败：${r.description ?? "未知错误"}`, "SET_WEBHOOK_FAILED")
@@ -466,6 +470,12 @@ interface TgUpdate {
     chat?: { id?: number; type?: string }
     from?: { id?: number; username?: string }
   }
+  /** inline 按钮回调（/menu、/settings 用） */
+  callback_query?: {
+    id: string
+    data?: string
+    message?: { chat?: { id?: number; type?: string } }
+  }
 }
 
 function adminTargets(env: Env): Promise<string[]> {
@@ -479,17 +489,24 @@ function adminTargets(env: Env): Promise<string[]> {
 
 function helpText(isAdminUser: boolean): string {
   const lines = [
-    "<b>DoulorCloud 机器人</b>",
+    "☁️ <b>DoulorCloud 机器人</b>",
     "",
-    "/bind &lt;绑定码&gt; —— 绑定站内账号（在网站「账号设置」里生成）",
+    "<b>查询</b>",
+    "/menu —— 快捷入口（按钮操作，不用记命令）",
     "/me —— 我的账号概览",
     "/frp —— 我的内网穿透租约",
+    "/mail —— 我的邮箱与最近邮件",
+    "/dns —— 我的域名与解析",
+    "",
+    "<b>设置</b>",
+    "/settings —— 通知开关",
+    "/bind &lt;绑定码&gt; —— 绑定站内账号",
     "/unbind —— 解除绑定",
   ]
   if (isAdminUser) {
-    lines.push("/status —— 站点与机器人状态（仅管理员）")
+    lines.push("", "<b>管理员</b>", "/status —— 站点状态")
   }
-  lines.push("", "🌐 cloud.doulor.cn")
+  lines.push("", `☁️ ${SITE_URL}`)
   return lines.join("\n")
 }
 
@@ -580,6 +597,12 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
     update = (await request.json()) as TgUpdate
   } catch {
     return json({ ok: true, ignored: "bad-json" })
+  }
+
+  // inline 按钮回调优先处理：它没有 message.text，走不到下面的命令分发
+  if (update.callback_query) {
+    await handleCallback(env, update.callback_query, cfg)
+    return json({ ok: true })
   }
 
   const msg = update.message
@@ -681,15 +704,7 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
       await sendTo(env, chatId, "/me 已被管理员关闭。")
       return json({ ok: true })
     }
-    const created = user.created_at ? new Date(String(user.created_at)).toLocaleDateString("zh-CN") : "未知"
-    const lines = [
-      `<b>${String(user.username ?? "")}</b>`,
-      `角色：${role || "user"}`,
-      `注册：${created}`,
-    ]
-    if (typeof user.points === "number") lines.push(`积分：${user.points}`)
-    lines.push("", "🌐 cloud.doulor.cn")
-    await sendTo(env, chatId, lines.join("\n"))
+    await sendTo(env, chatId, await meSummary(env, user))
     return json({ ok: true })
   }
 
@@ -702,33 +717,412 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
     return json({ ok: true })
   }
 
-  if (cmd === "/status") {
-    // 管理命令：已绑定 + 站内角色是管理员，两个条件缺一静默忽略
-    if (!isAnyAdmin(role) || commands.status === false) return json({ ok: true, ignored: "no-perm" })
-    const u = await env.DB.prepare("SELECT COUNT(*) AS n FROM users").first<{ n: number }>()
-    const b = await env.DB.prepare("SELECT COUNT(*) AS n FROM tg_bindings").first<{ n: number }>()
-    const since = Date.now() - 24 * 3600 * 1000
-    const p = await env.DB.prepare(
-      "SELECT COUNT(*) AS total, SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS failed FROM tg_push_log WHERE created_at > ?"
-    )
-      .bind(since)
-      .first<{ total: number | null; failed: number | null }>()
-    await sendTo(
-      env,
-      chatId,
-      [
-        "<b>DoulorCloud 状态</b>",
-        `用户数：${u?.n ?? 0}`,
-        `TG 绑定：${b?.n ?? 0}`,
-        `24h 推送：${p?.total ?? 0} 条（失败 ${p?.failed ?? 0}）`,
-        `机器人：${cfg.enabled ? "已启用" : "未启用"} ${cfg.bot_username ? "@" + cfg.bot_username : ""}`,
-      ].join("\n")
-    )
+  if (cmd === "/mail") {
+    if (commands.mail === false) {
+      await sendTo(env, chatId, "/mail 已被管理员关闭。")
+      return json({ ok: true })
+    }
+    await sendTo(env, chatId, await mailSummary(env, binding.user_id))
     return json({ ok: true })
   }
 
-  await sendTo(env, chatId, "未知命令，发送 /help 查看列表。")
+  if (cmd === "/dns") {
+    if (commands.dns === false) {
+      await sendTo(env, chatId, "/dns 已被管理员关闭。")
+      return json({ ok: true })
+    }
+    await sendTo(env, chatId, await dnsSummary(env, binding.user_id))
+    return json({ ok: true })
+  }
+
+  if (cmd === "/menu") {
+    await tgApi(env, "sendMessage", {
+      chat_id: chatId,
+      text: "☁️ <b>DoulorCloud</b>\n点下面的按钮直接查，不用记命令。",
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: menuKeyboard(isAnyAdmin(role)),
+    })
+    return json({ ok: true })
+  }
+
+  if (cmd === "/settings") {
+    await sendTo(env, chatId, await settingsText(env, binding))
+    return json({ ok: true })
+  }
+
+  if (cmd === "/status") {
+    // 管理命令：已绑定 + 站内角色是管理员，两个条件缺一静默忽略
+    if (!isAnyAdmin(role) || commands.status === false) return json({ ok: true, ignored: "no-perm" })
+    await sendTo(env, chatId, await statusSummary(env, cfg))
+    return json({ ok: true })
+  }
+
+  await sendTo(env, chatId, "未知命令，发送 /menu 看快捷入口，或 /help 看全部命令。")
   return json({ ok: true })
+}
+
+/* ==========================================================================
+ * 各命令的「信息正文」
+ *
+ * 设计取向：一条消息里把**用户最常看的十几个字段**一次给全，但不啰嗦 ——
+ * 每行一个模块，缺数据的模块整行省略（而不是显示「0 / 未知」占位）。
+ * 所有查询都容错：任何一张表结构变动都不该让整条命令变哑巴。
+ * ========================================================================== */
+
+const SITE_URL = "https://cloud.doulor.cn"
+
+/** 容错计数：表/列不存在时返回 null，调用方决定要不要显示 */
+async function safeCount(env: Env, sql: string, ...binds: unknown[]): Promise<number | null> {
+  try {
+    const stmt = binds.length > 0 ? env.DB.prepare(sql).bind(...binds) : env.DB.prepare(sql)
+    const row = await stmt.first<{ n: number | null }>()
+    return row?.n ?? 0
+  } catch {
+    return null
+  }
+}
+
+function fmtDate(v: unknown): string {
+  if (!v) return "—"
+  const ms = typeof v === "number" ? v : Date.parse(String(v))
+  if (!Number.isFinite(ms)) return "—"
+  return new Date(ms).toLocaleDateString("zh-CN")
+}
+
+function fmtDateTimeCn(v: unknown): string {
+  if (!v) return "—"
+  const ms = typeof v === "number" ? v : Date.parse(String(v))
+  if (!Number.isFinite(ms)) return "—"
+  return new Date(ms).toLocaleString("zh-CN", { hour12: false })
+}
+
+function fmtBytes(n: number): string {
+  if (!n) return "0 B"
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  let i = 0
+  let v = n
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`
+}
+
+/** /me —— 个人信息（用户最常看的一条） */
+async function meSummary(env: Env, user: Record<string, unknown>): Promise<string> {
+  const userId = String(user.id)
+  const [points, streak, mailboxCnt, msgCnt, unreadCnt, dnsCnt, domainCnt, subdomainCnt, storageUsed, storageQuota, frpCnt] =
+    await Promise.all([
+      env.DB.prepare("SELECT balance FROM user_points WHERE user_id = ?").bind(userId).first<{ balance: number }>().catch(() => null),
+      env.DB.prepare("SELECT streak, checkin_date FROM daily_checkins WHERE user_id = ? ORDER BY checkin_date DESC LIMIT 1")
+        .bind(userId)
+        .first<{ streak: number; checkin_date: string }>()
+        .catch(() => null),
+      safeCount(env, "SELECT COUNT(*) AS n FROM mailboxes WHERE user_id = ?", userId),
+      safeCount(env, "SELECT COUNT(*) AS n FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id WHERE mb.user_id = ?", userId),
+      safeCount(env, "SELECT COUNT(*) AS n FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id WHERE mb.user_id = ? AND m.read = 0", userId),
+      safeCount(env, "SELECT COUNT(*) AS n FROM dns_records WHERE domain_id IN (SELECT id FROM domains WHERE user_id = ?)", userId),
+      safeCount(env, "SELECT COUNT(*) AS n FROM domains WHERE user_id = ?", userId),
+      safeCount(env, "SELECT COUNT(*) AS n FROM subdomains WHERE user_id = ?", userId),
+      env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS n FROM storage_objects WHERE user_id = ?").bind(userId).first<{ n: number }>().catch(() => null),
+      env.DB.prepare("SELECT quota_bytes AS n FROM storage_accounts WHERE user_id = ?").bind(userId).first<{ n: number }>().catch(() => null),
+      safeCount(env, "SELECT COUNT(*) AS n FROM frp_subscriptions WHERE user_id = ? AND status = 'active'", userId),
+    ])
+
+  const lines: string[] = ["☁️ <b>DoulorCloud · 我的账号</b>"]
+  const nick = user.nickname ? String(user.nickname) : ""
+  lines.push(`👤 <b>${String(user.username ?? "")}</b>${nick ? `（${nick}）` : ""} · ${String(user.role ?? "user")}`)
+  if (user.uid != null) lines.push(`🆔 UID：<code>${String(user.uid)}</code>`)
+  if (user.email) {
+    lines.push(`📧 邮箱：${String(user.email)}${user.email_verified ? " ✅已验" : " ⏳未验"}`)
+  }
+  if (user.status && String(user.status) !== "active") {
+    lines.push(`⚠️ 状态：${String(user.status)}${user.suspend_reason ? `（${String(user.suspend_reason)}）` : ""}`)
+  }
+
+  // 注册时长：比单纯一个日期更有"陪伴感"
+  const created = user.created_at ? Date.parse(String(user.created_at)) : NaN
+  if (Number.isFinite(created)) {
+    const days = Math.max(1, Math.floor((Date.now() - created) / 86400000) + 1)
+    lines.push(`🕒 注册：${fmtDate(created)} · 第 ${days} 天`)
+  }
+  if (user.last_login_at) lines.push(`🔐 最近登录：${fmtDateTimeCn(user.last_login_at)}`)
+
+  if (points) lines.push(`💎 积分：<b>${points.balance.toLocaleString("zh-CN")}</b>`)
+  if (streak) {
+    const today = new Date().toISOString().slice(0, 10)
+    const signed = streak.checkin_date === today
+    lines.push(`✅ 签到：${signed ? "今日已签" : "今日未签"} · 连续 ${streak.streak ?? 0} 天`)
+  }
+  if (mailboxCnt !== null) {
+    lines.push(`📮 邮件：${mailboxCnt} 个邮箱 · ${msgCnt ?? 0} 封${unreadCnt ? ` · <b>未读 ${unreadCnt}</b>` : ""}`)
+  }
+  if (domainCnt !== null || subdomainCnt !== null) {
+    lines.push(`☁️ 域名：${domainCnt ?? 0} 个 · 解析 ${dnsCnt ?? 0} 条 · 子域 ${subdomainCnt ?? 0} 个`)
+  }
+  if (storageUsed) {
+    lines.push(`💾 网盘：${fmtBytes(storageUsed.n)}${storageQuota?.n ? ` / ${fmtBytes(storageQuota.n)}` : ""}`)
+  }
+  if (frpCnt !== null) lines.push(`🚇 内网穿透：${frpCnt} 条在用`)
+  if (user.max_subdomains != null) lines.push(`🔖 子域额度：${String(user.max_subdomains)}`)
+
+  lines.push("", `☁️ ${SITE_URL}`)
+  return lines.join("\n")
+}
+
+/** /mail —— 邮箱概览 + 最近几封 */
+async function mailSummary(env: Env, userId: string): Promise<string> {
+  try {
+    const { results: boxes } = await env.DB.prepare(
+      `SELECT mb.address,
+              (SELECT COUNT(*) FROM messages m WHERE m.mailbox_id = mb.id) AS total,
+              (SELECT COUNT(*) FROM messages m WHERE m.mailbox_id = mb.id AND m.read = 0) AS unread
+         FROM mailboxes mb WHERE mb.user_id = ? ORDER BY mb.created_at ASC LIMIT 10`
+    )
+      .bind(userId)
+      .all<{ address: string; total: number; unread: number }>()
+    if (!boxes || boxes.length === 0) {
+      return `📮 你还没有邮箱。\n开通：${SITE_URL}`
+    }
+    const { results: recent } = await env.DB.prepare(
+      `SELECT m.subject, m.from_address, m.read, m.received_at
+         FROM messages m JOIN mailboxes mb ON m.mailbox_id = mb.id
+        WHERE mb.user_id = ? ORDER BY m.received_at DESC LIMIT 3`
+    )
+      .bind(userId)
+      .all<{ subject: string | null; from_address: string | null; read: number; received_at: string }>()
+
+    const lines = ["📮 <b>我的邮箱</b>"]
+    for (const b of boxes) {
+      lines.push(`· ${b.address} —— ${b.total} 封${b.unread ? `（<b>未读 ${b.unread}</b>）` : ""}`)
+    }
+    if (recent && recent.length > 0) {
+      lines.push("", "<b>最近收到</b>")
+      for (const m of recent) {
+        const mark = m.read ? "　" : "●"
+        lines.push(`${mark} ${(m.subject || "(无主题)").slice(0, 40)}`)
+        lines.push(`　　${(m.from_address || "?").slice(0, 40)} · ${fmtDate(m.received_at)}`)
+      }
+    }
+    lines.push("", `☁️ ${SITE_URL}`)
+    return lines.join("\n")
+  } catch (err) {
+    return `📮 读取邮箱失败：${err instanceof Error ? err.message : "未知错误"}`
+  }
+}
+
+/** /dns —— 域名与解析概览 */
+async function dnsSummary(env: Env, userId: string): Promise<string> {
+  try {
+    const { results: domains } = await env.DB.prepare(
+      `SELECT d.name, d.status,
+              (SELECT COUNT(*) FROM dns_records r WHERE r.domain_id = d.id) AS records
+         FROM domains d WHERE d.user_id = ? ORDER BY d.created_at ASC`
+    )
+      .bind(userId)
+      .all<{ name: string; status: string; records: number }>()
+    const { results: subs } = await env.DB.prepare(
+      "SELECT name FROM subdomains WHERE user_id = ? AND name != '@' ORDER BY name ASC LIMIT 10"
+    )
+      .bind(userId)
+      .all<{ name: string }>()
+
+    if ((!domains || domains.length === 0) && (!subs || subs.length === 0)) {
+      return `☁️ 你还没有域名。\n申请：${SITE_URL}`
+    }
+    const lines = ["☁️ <b>我的域名</b>"]
+    for (const d of domains ?? []) {
+      lines.push(`· ${d.name} —— ${d.records} 条解析（${d.status}）`)
+    }
+    if (subs && subs.length > 0) {
+      lines.push("", "<b>子域名</b>")
+      lines.push(subs.map((s) => s.name).join(" / "))
+    }
+    lines.push("", `☁️ ${SITE_URL}`)
+    return lines.join("\n")
+  } catch (err) {
+    return `☁️ 读取域名失败：${err instanceof Error ? err.message : "未知错误"}`
+  }
+}
+
+/** /status —— 站点状态（管理员） */
+async function statusSummary(env: Env, cfg: TgConfigRow): Promise<string> {
+  const since = new Date(Date.now() - 86400000).toISOString()
+  const [users, fresh, boxes, msgs, nodes, nodesDown, rentals, bound, push] = await Promise.all([
+    safeCount(env, "SELECT COUNT(*) AS n FROM users"),
+    safeCount(env, "SELECT COUNT(*) AS n FROM users WHERE created_at > ?", since),
+    safeCount(env, "SELECT COUNT(*) AS n FROM mailboxes"),
+    safeCount(env, "SELECT COUNT(*) AS n FROM messages"),
+    safeCount(env, "SELECT COUNT(*) AS n FROM frp_nodes"),
+    safeCount(env, "SELECT COUNT(*) AS n FROM frp_nodes n LEFT JOIN frp_agent_state a ON a.node_id = n.id WHERE a.last_seen_at IS NULL OR a.last_seen_at < ?", new Date(Date.now() - 600000).toISOString()),
+    safeCount(env, "SELECT COUNT(*) AS n FROM frp_subscriptions WHERE status = 'active'"),
+    safeCount(env, "SELECT COUNT(*) AS n FROM tg_bindings"),
+    env.DB.prepare(
+      "SELECT COUNT(*) AS total, SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS failed FROM tg_push_log WHERE created_at > ?"
+    )
+      .bind(Date.now() - 86400000)
+      .first<{ total: number | null; failed: number | null }>()
+      .catch(() => null),
+  ])
+  const onlineNodes = nodes !== null && nodesDown !== null ? Math.max(0, nodes - nodesDown) : null
+  return [
+    "☁️ <b>DoulorCloud · 站点状态</b>",
+    `👥 用户：${users ?? 0}（24h 新增 ${fresh ?? 0}）`,
+    `📮 邮件：${boxes ?? 0} 个邮箱 · ${msgs ?? 0} 封`,
+    `🚇 内网穿透：节点 ${onlineNodes ?? "?"}/${nodes ?? "?"} 在线 · 在用租约 ${rentals ?? 0}`,
+    `🤖 机器人：绑定 ${bound ?? 0} 人 · 24h 推送 ${push?.total ?? 0}（失败 ${push?.failed ?? 0}）`,
+    `⚙️ 状态：${cfg.enabled ? "已启用" : "未启用"}${cfg.bot_username ? ` · @${cfg.bot_username}` : ""}`,
+    "",
+    `🕒 ${fmtDateTimeCn(Date.now())}`,
+    `☁️ ${SITE_URL}`,
+  ].join("\n")
+}
+
+/* ==========================================================================
+ * 通知设置（inline 键盘直接在聊天里开关，不用去网站）
+ * ========================================================================== */
+
+const MUTE_LABELS: Record<string, string> = {
+  login: "登录提醒",
+  frpExpiry: "穿透到期",
+  nodeDown: "节点掉线",
+  daily: "每日简报",
+}
+
+function settingsKeyboard(muted: string[]): Record<string, unknown> {
+  const rows = Object.keys(MUTE_LABELS).map((k) => [
+    { text: `${muted.includes(k) ? "⛔" : "✅"} ${MUTE_LABELS[k]}`, callback_data: `s:${k}` },
+  ])
+  return { inline_keyboard: rows }
+}
+
+async function settingsText(_env: Env, binding: BindingRow): Promise<string> {
+  const muted = parseJson<string[]>(binding.muted_json, [])
+  const on = Object.keys(MUTE_LABELS).filter((k) => !muted.includes(k))
+  return [
+    "⚙️ <b>通知设置</b>",
+    on.length > 0 ? `当前接收：${on.map((k) => MUTE_LABELS[k]).join("、")}` : "当前全部静音",
+    "",
+    "点下面的按钮切换 ✅/⛔（改完立刻生效）。",
+    `☁️ ${SITE_URL}`,
+  ].join("\n")
+}
+
+/** /menu 的快捷入口键盘：全部是 callback（不依赖前端路由，按钮永远可用） */
+function menuKeyboard(isAdminUser: boolean): Record<string, unknown> {
+  const rows: Array<Array<Record<string, unknown>>> = [
+    [
+      { text: "👤 我的账号", callback_data: "q:me" },
+      { text: "🚇 内网穿透", callback_data: "q:frp" },
+    ],
+    [
+      { text: "📮 我的邮箱", callback_data: "q:mail" },
+      { text: "☁️ 我的域名", callback_data: "q:dns" },
+    ],
+    [
+      { text: "⚙️ 通知设置", callback_data: "q:settings" },
+      { text: "☁️ 打开网站", url: SITE_URL },
+    ],
+  ]
+  if (isAdminUser) rows.push([{ text: "📊 站点状态", callback_data: "q:status" }])
+  return { inline_keyboard: rows }
+}
+
+/**
+ * 处理 inline 按钮回调（callback_query）。
+ * 权限口径与命令一致：只私聊、必须已绑定、管理类数据额外校验角色。
+ */
+async function handleCallback(
+  env: Env,
+  cb: {
+    id: string
+    data?: string
+    message?: { chat?: { id?: number; type?: string } }
+  },
+  cfg: TgConfigRow
+): Promise<void> {
+  const chatId = cb.message?.chat?.id != null ? String(cb.message.chat.id) : ""
+  const data = cb.data ?? ""
+  const ack = (text?: string) => tgApi(env, "answerCallbackQuery", text ? { callback_query_id: cb.id, text } : { callback_query_id: cb.id })
+  if (!chatId || cb.message?.chat?.type !== "private") {
+    await ack("仅支持私聊使用")
+    return
+  }
+  const binding = await bindingByTg(env, chatId)
+  if (!binding) {
+    await ack("请先绑定账号")
+    return
+  }
+  const user = await env.DB.prepare("SELECT * FROM users WHERE id = ?")
+    .bind(binding.user_id)
+    .first<Record<string, unknown>>()
+
+  // 通知开关
+  if (data.startsWith("s:")) {
+    const key = data.slice(2)
+    if (!MUTE_LABELS[key]) {
+      await ack("未知选项")
+      return
+    }
+    const muted = parseJson<string[]>(binding.muted_json, [])
+    const next = muted.includes(key) ? muted.filter((m) => m !== key) : [...muted, key]
+    await env.DB.prepare("UPDATE tg_bindings SET muted_json = ? WHERE telegram_id = ?")
+      .bind(JSON.stringify(next), chatId)
+      .run()
+    await ack(next.includes(key) ? `已静音：${MUTE_LABELS[key]}` : `已开启：${MUTE_LABELS[key]}`)
+    await tgApi(env, "sendMessage", {
+      chat_id: chatId,
+      text: await settingsText(env, { ...binding, muted_json: JSON.stringify(next) }),
+      parse_mode: "HTML",
+      reply_markup: settingsKeyboard(next),
+    })
+    return
+  }
+
+  if (!user) {
+    await ack("账号不存在")
+    return
+  }
+  const isAdminUser = isAnyAdmin(String(user.role ?? ""))
+
+  switch (data) {
+    case "q:me":
+      await ack()
+      await sendTo(env, chatId, await meSummary(env, user))
+      return
+    case "q:frp":
+      await ack()
+      await sendTo(env, chatId, await frpSummary(env, binding.user_id))
+      return
+    case "q:mail":
+      await ack()
+      await sendTo(env, chatId, await mailSummary(env, binding.user_id))
+      return
+    case "q:dns":
+      await ack()
+      await sendTo(env, chatId, await dnsSummary(env, binding.user_id))
+      return
+    case "q:settings":
+      await ack()
+      await tgApi(env, "sendMessage", {
+        chat_id: chatId,
+        text: await settingsText(env, binding),
+        parse_mode: "HTML",
+        reply_markup: settingsKeyboard(parseJson<string[]>(binding.muted_json, [])),
+      })
+      return
+    case "q:status":
+      if (!isAdminUser) {
+        await ack("无权访问")
+        return
+      }
+      await ack()
+      await sendTo(env, chatId, await statusSummary(env, cfg))
+      return
+    default:
+      await ack()
+  }
 }
 
 /* ==========================================================================
@@ -855,8 +1249,12 @@ export function buildCommandMenu(opts: {
     out.push({ command: "help", description: "查看帮助" })
     return out
   }
+  out.push({ command: "menu", description: "快捷入口（按钮操作）" })
   if (opts.commands.me !== false) out.push({ command: "me", description: "我的账号概览" })
   if (opts.commands.frp !== false) out.push({ command: "frp", description: "我的内网穿透租约" })
+  if (opts.commands.mail !== false) out.push({ command: "mail", description: "我的邮箱与最近邮件" })
+  if (opts.commands.dns !== false) out.push({ command: "dns", description: "我的域名与解析" })
+  if (opts.commands.settings !== false) out.push({ command: "settings", description: "通知设置" })
   out.push({ command: "unbind", description: "解除绑定" })
   out.push({ command: "help", description: "查看帮助" })
   if (opts.isAdminUser && opts.commands.status !== false) {
@@ -945,7 +1343,7 @@ async function frpSummary(env: Env, userId: string): Promise<string> {
       node_name: string | null
     }>()
   if (!results || results.length === 0) {
-    return "你还没有内网穿透租约。\n开通：cloud.doulor.cn → 内网穿透"
+    return "你还没有内网穿透租约。\n开通：${SITE_URL} → 内网穿透"
   }
   const lines = ["<b>我的内网穿透</b>"]
   for (const r of results) {
@@ -960,6 +1358,6 @@ async function frpSummary(env: Env, userId: string): Promise<string> {
       `自动续费：${r.auto_renew ? "开" : "关"}`
     )
   }
-  lines.push("", "管理：cloud.doulor.cn → 内网穿透")
+  lines.push("", "管理：${SITE_URL} → 内网穿透")
   return lines.join("\n")
 }

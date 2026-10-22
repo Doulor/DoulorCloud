@@ -5610,7 +5610,7 @@ export default {
                     `节点：${row.node_name ?? "未知"}`,
                     `到期：${new Date(row.expires_at).toLocaleString("zh-CN", { hour12: false })}（约 ${days} 天后）`,
                     "",
-                    "到期后隧道会断开。续费：cloud.doulor.cn → 内网穿透",
+                    "到期后隧道会断开。续费：https://cloud.doulor.cn → 内网穿透",
                   ].join("\n"),
                 })
               }
@@ -5662,12 +5662,13 @@ export default {
               await pushMessage(env, "daily", {
                 dedupeHours: 20,
                 text: [
-                  "📊 <b>DoulorCloud 每日简报</b>",
+                  "☁️ <b>DoulorCloud 每日简报</b>",
                   `用户：${users?.n ?? 0}（24h 新增 ${fresh?.n ?? 0}）`,
                   `内网穿透在用租约：${rentals?.n ?? 0}`,
                   `TG 绑定：${bound?.n ?? 0}`,
                   "",
                   new Date().toLocaleDateString("zh-CN"),
+                  "☁️ https://cloud.doulor.cn",
                 ].join("\n"),
               })
             } catch (err) {

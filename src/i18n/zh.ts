@@ -8600,6 +8600,10 @@ export const zh = {
   "tgb.oneClick": "在 Telegram 中一键绑定",
   "tgb.orManual": "或手动：给机器人发送 /bind {code}",
   "tgb.botNotReady": "机器人还没配置好，暂时只能用下面的绑定码手动绑定。",
+  "tg.cmd.menu": "/menu 快捷入口（按钮）",
+  "tg.cmd.mail": "/mail 邮箱与最近邮件",
+  "tg.cmd.dns": "/dns 域名与解析",
+  "tg.cmd.settings": "/settings 通知开关",
 } as const
 
 export type MessageKey = keyof typeof zh

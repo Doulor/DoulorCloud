@@ -8741,4 +8741,8 @@ export const en: Record<MessageKey, string> = {
   "tgb.oneClick": "Bind in Telegram (one tap)",
   "tgb.orManual": "Or manually: send /bind {code} to the bot",
   "tgb.botNotReady": "The bot is not configured yet; use the code below to bind manually.",
+  "tg.cmd.menu": "/menu quick actions (buttons)",
+  "tg.cmd.mail": "/mail mailboxes and recent mail",
+  "tg.cmd.dns": "/dns domains and records",
+  "tg.cmd.settings": "/settings notification toggles",
 }

@@ -152,13 +152,32 @@ describe("TG 机器人 · 命令菜单分级", () => {
 
   it("已绑定普通用户：/me /frp /unbind /help，没有 /status", () => {
     const menu = buildCommandMenu({ bound: true, isAdminUser: false, commands: {} })
-    expect(menu.map((c) => c.command)).toEqual(["me", "frp", "unbind", "help"])
+    expect(menu.map((c) => c.command)).toEqual([
+      "menu",
+      "me",
+      "frp",
+      "mail",
+      "dns",
+      "settings",
+      "unbind",
+      "help",
+    ])
     expect(menu.some((c) => c.command === "status")).toBe(false)
   })
 
   it("已绑定管理员：多出 /status", () => {
     const menu = buildCommandMenu({ bound: true, isAdminUser: true, commands: {} })
-    expect(menu.map((c) => c.command)).toEqual(["me", "frp", "unbind", "help", "status"])
+    expect(menu.map((c) => c.command)).toEqual([
+      "menu",
+      "me",
+      "frp",
+      "mail",
+      "dns",
+      "settings",
+      "unbind",
+      "help",
+      "status",
+    ])
   })
 
   it("被关掉的命令不会出现在菜单里（菜单与处理器必须一致）", () => {
@@ -167,7 +186,15 @@ describe("TG 机器人 · 命令菜单分级", () => {
       isAdminUser: true,
       commands: { me: false, status: false },
     })
-    expect(menu.map((c) => c.command)).toEqual(["frp", "unbind", "help"])
+    expect(menu.map((c) => c.command)).toEqual([
+      "menu",
+      "frp",
+      "mail",
+      "dns",
+      "settings",
+      "unbind",
+      "help",
+    ])
   })
 })
 describe("TG 机器人 · 绑定码的三种入口（菜单按钮不带参数的问题）", () => {

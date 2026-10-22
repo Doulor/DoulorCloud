@@ -732,7 +732,7 @@ export async function completeLogin(
       `设备：${(request.headers.get("user-agent") || "未知").slice(0, 60)}`,
       "",
       "如非本人操作，请立即修改密码。",
-      "🌐 cloud.doulor.cn",
+      "☁️ https://cloud.doulor.cn",
     ].join("\n"),
   })
   if (extra.ctx) extra.ctx.waitUntil(loginNotice)
