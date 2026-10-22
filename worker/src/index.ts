@@ -25,6 +25,7 @@ import * as adminRootDomainHandlers from "./handlers/admin-root-domains"
 import * as adminChannelHandlers from "./handlers/admin-channels"
 import * as adminPermHandlers from "./handlers/admin-perms"
 import * as noticeHandlers from "./handlers/notices"
+import * as telegramHandlers from "./handlers/telegram"
 import * as storageHandlers from "./handlers/storage"
 import { rootDomainFor } from "./root-domains"
 import * as newapiHandlers from "./handlers/newapi"
@@ -573,6 +574,65 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/admin/notices/revoke",
     method: "POST",
     handle: () => noticeHandlers.revokeNotice(env, request),
+  },
+  // ---------------- TG 机器人（全部 requireAdminScope("telegram")） ----------------
+  // 回调入口 /tg/webhook 不在这里：它在 fetch 的公开分支里（靠 secret 头校验，
+  // 走 dispatch 会被 401 挡住，因为 Telegram 没有我们的会话 cookie）。
+  {
+    kind: "exact",
+    path: "/admin/tg/config",
+    method: "GET",
+    handle: () => telegramHandlers.getAdminConfig(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/tg/config",
+    method: "POST",
+    handle: () => telegramHandlers.updateAdminConfig(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/tg/webhook",
+    method: "POST",
+    handle: () => telegramHandlers.setWebhook(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/tg/webhook/delete",
+    method: "POST",
+    handle: () => telegramHandlers.deleteWebhook(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/tg/test",
+    method: "POST",
+    handle: () => telegramHandlers.testPush(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/tg/bindings",
+    method: "GET",
+    handle: () => telegramHandlers.listBindings(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/tg\/bindings\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (m: RegExpMatchArray) =>
+      telegramHandlers.deleteBinding(env, request, decodeURIComponent(m[1])),
+  },
+  {
+    kind: "exact",
+    path: "/admin/tg/logs",
+    method: "GET",
+    handle: () => telegramHandlers.listLogs(env, request),
+  },
+  // 普通用户也能调：给自己生成一次性绑定码（requireUser，不是 admin）
+  {
+    kind: "exact",
+    path: "/me/tg/bind-code",
+    method: "POST",
+    handle: () => telegramHandlers.createBindCode(env, request),
   },
   {
     kind: "exact",
@@ -5153,6 +5213,13 @@ export default {
           decodeURIComponent(communityImgMatch[1]),
           decodeURIComponent(communityImgMatch[2])
         )
+      }
+
+      // TG 机器人回调（公开入口）：Telegram 服务器没有我们的会话 cookie，
+      // 走 dispatch 必然 401，所以在这里先接住，由 handler 内部用
+      // X-Telegram-Bot-Api-Secret-Token 校验来源。
+      if ((url.pathname === "/api/tg/webhook" || url.pathname === "/tg/webhook") && request.method === "POST") {
+        return await telegramHandlers.handleWebhook(env, request)
       }
 
 

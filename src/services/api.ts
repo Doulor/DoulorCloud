@@ -5610,3 +5610,68 @@ export const adminCollectionApi = {
       body: JSON.stringify({ confirm: "RESET" }),
     }),
 }
+
+
+/** 管理端：TG 机器人（配置 / 绑定 / 推送审计） */
+export interface AdminTgConfig {
+  enabled: boolean
+  hasToken: boolean
+  tokenMasked: string
+  botUsername: string | null
+  webhookSet: boolean
+  commands: Record<string, boolean>
+  pushes: Record<string, boolean>
+  stats: { total24h: number; failed24h: number; boundUsers: number }
+  updatedAt: number
+}
+
+export interface AdminTgBinding {
+  telegramId: string
+  userId: string
+  username: string | null
+  role: string | null
+  tgUsername: string | null
+  boundAt: number
+  muted: string[]
+}
+
+export interface AdminTgLog {
+  id: string
+  kind: string
+  target: string | null
+  ok: number
+  error: string | null
+  created_at: number
+}
+
+export const adminTgApi = {
+  config: () => request<AdminTgConfig>("/admin/tg/config"),
+
+  /** 传 token 时后端会先 getMe 验真，再加密落库；返回永远是脱敏值 */
+  update: (payload: {
+    enabled?: boolean
+    token?: string
+    commands?: Record<string, boolean>
+    pushes?: Record<string, boolean>
+    rotateSecret?: boolean
+  }) =>
+    request<{ ok: boolean; changed: boolean }>("/admin/tg/config", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  setWebhook: () => request<{ ok: boolean; url: string }>("/admin/tg/webhook", { method: "POST" }),
+  deleteWebhook: () => request<{ ok: boolean }>("/admin/tg/webhook/delete", { method: "POST" }),
+  test: () =>
+    request<{ ok: boolean; sent: number; total?: number; message?: string }>("/admin/tg/test", {
+      method: "POST",
+    }),
+
+  bindings: () => request<{ bindings: AdminTgBinding[] }>("/admin/tg/bindings"),
+  unbind: (telegramId: string) =>
+    request<{ ok: boolean }>(`/admin/tg/bindings/${encodeURIComponent(telegramId)}`, {
+      method: "DELETE",
+    }),
+
+  logs: () => request<{ logs: AdminTgLog[] }>("/admin/tg/logs"),
+}

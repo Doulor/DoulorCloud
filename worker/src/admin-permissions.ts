@@ -196,6 +196,10 @@ export const ADMIN_PERMISSIONS: AdminPermCategory[] = [
   // 单独一个 scope 而不并进 analytics：样本是纯技术排障数据，授予面可以比
   // 业务统计更宽（比如给负责前端优化的管理员单独开）。
   { key: "perf", label: "性能监控", group: "system" },
+  // TG 机器人（2026-10-22）：Bot Token、命令/推送开关、绑定用户、推送审计。
+  // 单独一个 scope 而不并进 settings：Token 等于「能以站长身份给用户发消息」的能力，
+  // 授权面应当可以比全局设置更窄。
+  { key: "telegram", label: "TG 机器人", group: "system" },
 ]
 
 /** 权限节点 key 扁平表（含叶子与 root 专属标记），用于守卫快速查找 */

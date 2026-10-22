@@ -55,6 +55,7 @@ import {
   EyeOff,
   Webhook,
   Activity,
+  Bot,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -68,6 +69,7 @@ import { BrevoQuotaPanel } from "./admin-brevo-quota"
 import { FeedbackPanel } from "./admin-feedback"
 // 性能监控（2026-10-10 新工具）：UI 本体单独成文件
 import { PerfPanel } from "./admin-perf"
+import { AdminTgPanel } from "./admin-tg"
 import { AuditPanel } from "./admin-audit"
 import { PointsAdminPanel } from "./admin-points"
 import { FunLinksAdminPanel } from "./admin-fun-links"
@@ -778,6 +780,8 @@ const ADMIN_TAB_KEYS = new Set([
   "oauth", "settings", "funLinks", "wb2api", "api", "permissions", "lab", "perf",
   // 造物集（2026-10-17 站长要求：从「AI 实验室」里独立出来）
   "gallery",
+  // TG 机器人（2026-10-22）：tab key 与权限叶子同名，canSeeTab 才能按 scope 过滤
+  "telegram",
 ])
 
 export default function AdminPage() {
@@ -4256,6 +4260,7 @@ export default function AdminPage() {
                 {canSeeTab("analytics") && <NavItem active={activeTab === "analytics"} icon={BarChart3} label={t("adm.236")} onClick={() => handleTabChange("analytics")} />}
                 {canSeeTab("cfQuota") && <NavItem active={activeTab === "cfQuota"} icon={Gauge} label={t("adm.237")} onClick={() => handleTabChange("cfQuota")} />}
                 {canSeeTab("perf") && <NavItem active={activeTab === "perf"} icon={Activity} label={t("perf.tab")} onClick={() => handleTabChange("perf")} />}
+          {canSeeTab("telegram") && <NavItem active={activeTab === "telegram"} icon={Bot} label={t("tg.nav")} onClick={() => handleTabChange("telegram")} />}
                 {canSeeTab("audit") && <NavItem active={activeTab === "audit"} icon={ScrollText} label={t("adm.238")} onClick={() => handleTabChange("audit")} />}
                 {canSeeTab("mail") && <NavItem active={activeTab === "mail"} icon={Mail} label={t("adm.239")} onClick={() => handleTabChange("mail")} />}
                 {canSeeTab("settings") && <NavItem active={activeTab === "settings"} icon={SlidersHorizontal} label={t("adm.240")} onClick={() => handleTabChange("settings")} />}
@@ -7640,6 +7645,10 @@ export default function AdminPage() {
 
         <TabsContent value="perf">
           <PerfPanel />
+        </TabsContent>
+
+        <TabsContent value="telegram">
+          <AdminTgPanel />
         </TabsContent>
 
         <TabsContent value="cfQuota">
