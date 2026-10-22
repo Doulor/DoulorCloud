@@ -1747,11 +1747,18 @@ async function frpSummary(env: Env, userId: string): Promise<string> {
  * 机器人被拉进频道时靠 `my_chat_member` 自动登记，站长不用手填 chat_id。
  * ========================================================================== */
 
-/** 频道默认订阅的事件：公告 + 新作品开，社区新帖关（默认别刷屏） */
+/**
+ * 频道默认订阅的事件：**只开公告**。
+ *
+ * 2026-10-22 站长明确要求「造物集新作品不推」—— 频道是公告栏，不是作品流：
+ * 作品量远大于公告，推到频道会把它淹掉。社区新帖同理保持关闭。
+ * 想推的频道自己在管理页点开即可（events_json 里显式写 true 会覆盖这里的默认）。
+ */
 const DEFAULT_CHANNEL_EVENTS: Record<string, boolean> = {
   announcement: true,
-  gallery: true,
+  gallery: false,
   post: false,
+  daily: false,
 }
 
 export type ChannelEvent = "announcement" | "gallery" | "post" | "daily"
