@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest"
 import { env } from "cloudflare:workers"
 import { makeUser, authRequest } from "./helpers"
 import { encryptSecret, uuid } from "../src/crypto"
+import { createSession, sessionCookie } from "../src/auth"
 import {
   maskToken,
   handleWebhook,
@@ -22,6 +23,7 @@ import {
   createBindCode,
   buildCommandMenu,
   pushToChannels,
+  updateAdminConfig,
 } from "../src/handlers/telegram"
 
 const BOT_TOKEN = "123456789:AAFakeTokenForTestOnly1234567890ab"
@@ -531,6 +533,71 @@ describe("TG 机器人 · 频道推送", () => {
       await pushToChannels(env, "post", "新帖测试")
       // 只有显式开了 post 的那个频道
       expect(targets).toEqual(["-1002"])
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+})
+describe("TG 机器人 · 关掉命令后菜单自动刷新", () => {
+  it("保存命令开关 → 立刻 setMyCommands，被关掉的命令不再出现", async () => {
+    await env.DB.prepare("DELETE FROM tg_bindings").run()
+    await seedConfig({ enabled: true })
+    // 一个已绑定用户，验证他的 chat 菜单也会被刷新
+    const normal = await makeUser({ role: "user" })
+    await env.DB.prepare(
+      "INSERT INTO tg_bindings (telegram_id, user_id, tg_username, bound_at, muted_json) VALUES (?, ?, ?, ?, '[]')"
+    )
+      .bind("555000333", normal.id, "tester", Date.now())
+      .run()
+
+    const root = await makeUser({ role: "root" })
+    const token = await createSession(env, root.id)
+
+    const sent: Array<{ scope: string; commands: string[] }> = []
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (url.includes("api.telegram.org")) {
+        if (url.endsWith("/setMyCommands")) {
+          try {
+            const body = JSON.parse(String(init?.body ?? "{}")) as {
+              commands?: Array<{ command: string }>
+              scope?: { type?: string }
+            }
+            sent.push({
+              scope: body.scope?.type ?? "?",
+              commands: (body.commands ?? []).map((c) => c.command),
+            })
+          } catch {
+            /* ignore */
+          }
+        }
+        return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 })
+      }
+      return original(input as RequestInfo, init)
+    }) as typeof fetch
+
+    try {
+      const res = await updateAdminConfig(
+        env,
+        new Request("https://cloud.doulor.cn/api/admin/tg/config", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            Cookie: sessionCookie(token),
+          },
+          body: JSON.stringify({ commands: { me: false, frp: false } }),
+        })
+      )
+      expect(res.status).toBe(200)
+      // 默认 scope + 该绑定用户的 chat scope 各刷一次
+      expect(sent.length).toBeGreaterThanOrEqual(2)
+      for (const item of sent) {
+        expect(item.commands).not.toContain("me")
+        expect(item.commands).not.toContain("frp")
+        // 没被关掉的命令仍在
+        expect(item.commands).toContain("help")
+      }
     } finally {
       globalThis.fetch = original
     }

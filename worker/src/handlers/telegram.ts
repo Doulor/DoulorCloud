@@ -316,6 +316,18 @@ export async function updateAdminConfig(env: Env, request: Request): Promise<Res
     .bind(...binds)
     .run()
   await recordAudit(env, admin.id, "tg.config.update", note.trim() || "无变化")
+
+  // 命令开关变了 → 立刻重刷菜单，被关掉的命令马上从「/」候选里消失。
+  // 刷新失败不影响保存本身（配置已经落库，站长还能手点「同步命令菜单」重试）。
+  if (body.commands && typeof body.commands === "object") {
+    try {
+      const commands = { ...DEFAULT_COMMANDS, ...body.commands }
+      await syncAllMenus(env, commands)
+    } catch (err) {
+      console.error("命令开关保存后刷新菜单失败:", err)
+    }
+  }
+
   return json({ ok: true, changed: true })
 }
 
@@ -498,29 +510,24 @@ function adminTargets(env: Env): Promise<string[]> {
     .then((r) => (r.results ?? []).map((x) => x.telegram_id))
 }
 
-function helpText(isAdminUser: boolean): string {
-  const lines = [
-    "☁️ <b>DoulorCloud 机器人</b>",
-    "",
-    "<b>查询</b>",
-    "/menu —— 快捷入口（按钮操作，不用记命令）",
-    "/me —— 我的账号概览",
-    "/frp —— 我的内网穿透租约",
-    "/mail —— 我的邮箱与最近邮件",
-    "/dns —— 我的域名与解析",
-    "/points —— 积分与最近明细",
-    "/invite —— 我的邀请码与战绩",
-    "/storage —— 网盘用量与最近文件",
-    "/community —— 我的创作与互动",
-    "/notices —— 未读站内通知",
-    "/security —— 登录环境与活跃会话",
-    "",
-    "<b>设置</b>",
-    "/settings —— 通知开关",
-    "/bind &lt;绑定码&gt; —— 绑定站内账号",
-    "/unbind —— 解除绑定",
-  ]
-  if (isAdminUser) {
+function helpText(isAdminUser: boolean, commands: Record<string, boolean>): string {
+  const on = (k: string) => commands[k] !== false
+  const lines = ["☁️ <b>DoulorCloud 机器人</b>", "", "<b>查询</b>"]
+  lines.push("/menu —— 快捷入口（按钮操作，不用记命令）")
+  if (on("me")) lines.push("/me —— 我的账号概览")
+  if (on("frp")) lines.push("/frp —— 我的内网穿透租约")
+  if (on("mail")) lines.push("/mail —— 我的邮箱与最近邮件")
+  if (on("dns")) lines.push("/dns —— 我的域名与解析")
+  if (on("points")) lines.push("/points —— 积分与最近明细")
+  if (on("invite")) lines.push("/invite —— 我的邀请码与战绩")
+  if (on("storage")) lines.push("/storage —— 网盘用量与最近文件")
+  if (on("community")) lines.push("/community —— 我的创作与互动")
+  if (on("notices")) lines.push("/notices —— 未读站内通知")
+  if (on("security")) lines.push("/security —— 登录环境与活跃会话")
+  lines.push("", "<b>设置</b>")
+  if (on("settings")) lines.push("/settings —— 通知开关")
+  lines.push("/bind &lt;绑定码&gt; —— 绑定站内账号", "/unbind —— 解除绑定")
+  if (isAdminUser && on("status")) {
     lines.push("", "<b>管理员</b>", "/status —— 站点状态")
   }
   lines.push("", `☁️ ${SITE_URL}`)
@@ -675,7 +682,7 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
     }
     // /start 无参 → 欢迎 + 帮助
     await refreshChatMenu(env, chatId, cfg)
-    await sendTo(env, chatId, helpText(false))
+    await sendTo(env, chatId, helpText(false, { ...DEFAULT_COMMANDS, ...parseJson<Record<string, boolean>>(cfg.commands_json, {}) }))
     return json({ ok: true })
   }
 
@@ -689,7 +696,7 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
             .first<{ role: string }>()
         )?.role ?? ""
       : ""
-    await sendTo(env, chatId, helpText(isAnyAdmin(roleNow)))
+    await sendTo(env, chatId, helpText(isAnyAdmin(roleNow), { ...DEFAULT_COMMANDS, ...parseJson<Record<string, boolean>>(cfg.commands_json, {}) }))
     return json({ ok: true })
   }
 
@@ -1670,11 +1677,16 @@ async function refreshChatMenu(env: Env, chatId: string, cfg: TgConfigRow): Prom
   )
 }
 
-/** 管理端「同步命令菜单」：刷新默认 scope + 所有已绑定 chat 的 scope */
-export async function syncCommands(env: Env, request: Request): Promise<Response> {
-  const admin = await requireAdminScope(env, request, "telegram")
-  const cfg = await loadConfig(env)
-  const commands = { ...DEFAULT_COMMANDS, ...parseJson<Record<string, boolean>>(cfg.commands_json, {}) }
+/**
+ * 把「默认菜单 + 每个已绑定 chat 的菜单」按当前开关重刷一遍。
+ *
+ * 保存命令开关后会自动调用（见 updateAdminConfig）—— 否则被关掉的命令会一直挂在
+ * 「/」候选里，直到用户碰巧发了 /start。返回值里的 chats 是刷新成功的 chat 数。
+ */
+async function syncAllMenus(
+  env: Env,
+  commands: Record<string, boolean>
+): Promise<{ chats: number; total: number }> {
   const def = await tgApi(env, "setMyCommands", {
     commands: buildCommandMenu({ bound: false, isAdminUser: false, commands }),
     scope: { type: "default" },
@@ -1693,8 +1705,17 @@ export async function syncCommands(env: Env, request: Request): Promise<Response
     )
     if (done) ok++
   }
-  await recordAudit(env, admin.id, "tg.commands.sync", `默认菜单 + ${ok} 个 chat`)
-  return json({ ok: true, chats: ok, total: results?.length ?? 0 })
+  return { chats: ok, total: results?.length ?? 0 }
+}
+
+/** 管理端「同步命令菜单」：手动全量重刷（保存开关时也会自动跑一次） */
+export async function syncCommands(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "telegram")
+  const cfg = await loadConfig(env)
+  const commands = { ...DEFAULT_COMMANDS, ...parseJson<Record<string, boolean>>(cfg.commands_json, {}) }
+  const { chats, total } = await syncAllMenus(env, commands)
+  await recordAudit(env, admin.id, "tg.commands.sync", `默认菜单 + ${chats} 个 chat`)
+  return json({ ok: true, chats, total })
 }
 
 /** /frp：查自己的内网穿透租约（用户自助，最常用） */
