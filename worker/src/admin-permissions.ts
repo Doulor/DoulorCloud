@@ -24,6 +24,8 @@ export interface AdminPermCategory {
   group: string
   /** 无 children = 单级大类（叶子 key = 大类 key） */
   children?: AdminPermLeaf[]
+  /** 单级大类也能声明「仅站长」（如权限管理本身，否则管理员可给自己提权） */
+  rootOnly?: boolean
 }
 
 export interface AdminPermGroup {
@@ -183,12 +185,14 @@ export const ADMIN_PERMISSIONS: AdminPermCategory[] = [
    * 拆开只会造出「能调杠杆但不能充钱」这种半残状态。
    */
   { key: "collection", label: "创想集", group: "operation" },
+  { key: "gallery", label: "造物集审核", group: "operation" },
 
   // ======================= 系统 =======================
   { key: "oauth", label: "OAuth 应用", group: "system" },
   { key: "analytics", label: "数据分析", group: "system" },
   { key: "cfQuota", label: "CF 配额", group: "system" },
   { key: "audit", label: "审计日志", group: "system" },
+  { key: "permissions", label: "管理员角色与授权", group: "system" },
   { key: "mail", label: "邮件", group: "system" },
   { key: "settings", label: "全局设置", group: "system" },
   { key: "api", label: "开放 API", group: "system" },
@@ -206,7 +210,7 @@ export const ADMIN_PERMISSIONS: AdminPermCategory[] = [
 const LEAF_MAP: Map<string, { label: string; rootOnly: boolean }> = new Map()
 for (const cat of ADMIN_PERMISSIONS) {
   if (!cat.children || cat.children.length === 0) {
-    LEAF_MAP.set(cat.key, { label: cat.label, rootOnly: false })
+    LEAF_MAP.set(cat.key, { label: cat.label, rootOnly: cat.rootOnly === true })
   } else {
     for (const leaf of cat.children) {
       LEAF_MAP.set(leaf.key, { label: leaf.label, rootOnly: leaf.rootOnly === true })

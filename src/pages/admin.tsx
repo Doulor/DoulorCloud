@@ -4038,11 +4038,17 @@ export default function AdminPage() {
    * root/superadmin 恒可见；admin 在「只显示有权限的栏目」开启时，
    * 只有该栏目对应大类下有任意一个叶子权限在自身白名单里才可见。
    */
+  /** 精确判断某个权限叶子是否在手（root/超管时 myScope 为 null，视为全有） */
+  const hasPerm = (key: string): boolean => myScope === null || myScope.has(key)
+
   const canSeeTab = (tabKey: string): boolean => {
     if (myScope === null) return true // 全权，或尚未加载
     if (!sidebarOnlyPermitted) return true
     const cat = permCategories.find((c) => c.key === tabKey)
-    if (!cat) return true // 无映射的栏目（如权限管理）交给别处的角色判断
+    // 未知栏目默认**不给看**（2026-10-23）：原来的 `return true` 让任何
+    // 没有登记进权限目录的新页面变成「人人可见、又无法限制」，正是站长反馈的问题。
+    // 新增页面时忘了登记权限节点，现在会立刻表现为「栏目消失」而不是「悄悄放开」。
+    if (!cat) return false
     const leaves = cat.children?.map((l) => l.key) ?? [cat.key]
     return leaves.some((k) => myScope.has(k))
   }
@@ -4168,7 +4174,7 @@ export default function AdminPage() {
                     可见性复用 `newapi` 那一栏 —— 后端这三个接口都在
                     `newapi.subscriptions` 权限域下（assertAdminScope），
                     这里若只看 `relay`（权限树里没有这个大类）会变成「人人可见、点了全 403」。 */}
-                {canSeeTab("newapi") && (
+                {(hasPerm("newapi.subscriptions") || hasPerm("newapi")) && (
                   <NavItem
                     active={activeTab === "relay"}
                     icon={ShieldCheck}
@@ -4178,12 +4184,11 @@ export default function AdminPage() {
                 )}
                 {/* AI 实验室：模型来源（统一 Key / 免费试用）、免费渠道、Agent 提示词 */}
                 {canSeeTab("lab") && <NavItem active={activeTab === "lab"} icon={FlaskConical} label={t("nav.lab")} onClick={() => handleTabChange("lab")} />}
-                {/* 造物集（2026-10-17 站长要求：从实验室里独立成一个选项卡）。
-                    ⚠️ 可见性跟 `lab` 走**而不是**自己新开一个权限节点：这一栏所有接口
-                    都要求 `lab` 权限（`requireAdminScope(..., "lab")`）。若只看一个
-                    不存在的 `gallery` 节点，没 lab 权限的自定义管理员会看到入口、
-                    点进去全是 403。 */}
-                {canSeeTab("lab") && <NavItem active={activeTab === "gallery"} icon={Images} label={t("adm.gal.tab")} onClick={() => handleTabChange("gallery")} />}
+                {/* 造物集（2026-10-17 独立成 tab；2026-10-23 补上专属权限节点 `gallery`）。
+                    可见性 = 有 `gallery` 节点 **或** 有历史上的 `lab`（后端 guard 也是
+                    `requireAnyAdminScope(["gallery","lab"])`，两边口径一致）。
+                    新授权直接给「造物集审核」即可，老管理员不用重新勾。 */}
+                {(canSeeTab("gallery") || hasPerm("lab")) && <NavItem active={activeTab === "gallery"} icon={Images} label={t("adm.gal.tab")} onClick={() => handleTabChange("gallery")} />}
                 {/* 三条免审核捐献通道（wb2api / qoder2api / 商汤）合并在一个选项卡里 */}
                 {canSeeTab("wb2api") && <NavItem active={activeTab === "wb2api"} icon={Unplug} label={t("adm.222")} onClick={() => handleTabChange("wb2api")} />}
                 {canSeeTab("r2") && <NavItem active={activeTab === "r2"} icon={Database} label={t("adm.223")} onClick={() => handleTabChange("r2")} />}
@@ -4265,8 +4270,9 @@ export default function AdminPage() {
                 {canSeeTab("mail") && <NavItem active={activeTab === "mail"} icon={Mail} label={t("adm.239")} onClick={() => handleTabChange("mail")} />}
                 {canSeeTab("settings") && <NavItem active={activeTab === "settings"} icon={SlidersHorizontal} label={t("adm.240")} onClick={() => handleTabChange("settings")} />}
                 {canSeeTab("api") && <NavItem active={activeTab === "api"} icon={Webhook} label={t("adm.api.tab")} onClick={() => handleTabChange("api")} />}
-                {/* 权限管理：只有 root / superadmin 能进（后端守卫一致） */}
-                {(user?.role === "root" || user?.role === "superadmin") && (
+                {/* 权限管理：root / superadmin 恒可见；2026-10-23 起也可把「管理员角色与授权」
+                    节点授给自定义管理员（等于把发权限的能力交出去，勾选时要知道代价）。 */}
+                {(user?.role === "root" || user?.role === "superadmin" || canSeeTab("permissions")) && (
                   <NavItem active={activeTab === "permissions"} icon={ShieldCheck} label={t("adm.perm.tab")} onClick={() => handleTabChange("permissions")} />
                 )}
               </NavGroup>

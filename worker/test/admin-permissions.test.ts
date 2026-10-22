@@ -252,3 +252,64 @@ describe("反馈图片：自定义 admin 的可见性", () => {
     ).rejects.toMatchObject({ code: "FORBIDDEN" })
   })
 })
+
+describe("权限覆盖度（2026-10-23 补全「给不了权限」的新页面）", () => {
+  it("造物集审核 / 管理员角色与授权 都是已登记节点（否则守卫直接 500、勾选框里也看不到）", () => {
+    expect(isKnownPermissionKey("gallery")).toBe(true)
+    expect(isKnownPermissionKey("permissions")).toBe(true)
+    expect(isRootOnlyPermission("gallery")).toBe(false)
+    // 权限管理不设 rootOnly：站长可以把它委派出去（后端另有 root/超管/开关三重判据）
+    expect(isRootOnlyPermission("permissions")).toBe(false)
+  })
+
+  it("权限树里能查到这两个节点（前端勾选界面据此渲染）", () => {
+    const keys = ADMIN_PERMISSIONS.flatMap((c) =>
+      c.children && c.children.length > 0 ? c.children.map((l) => l.key) : [c.key]
+    )
+    expect(keys).toContain("gallery")
+    expect(keys).toContain("permissions")
+  })
+
+  it("造物集审核接口：gallery 或 lab 任一即可，两个都没有则 403", async () => {
+    const withGallery = { role: "admin", admin_role_id: null, admin_scope: JSON.stringify(["gallery"]) }
+    await expect(
+      assertAdminScope(env as unknown as Env, withGallery as never, "gallery")
+    ).resolves.toBeUndefined()
+
+    const withLab = { role: "admin", admin_role_id: null, admin_scope: JSON.stringify(["lab"]) }
+    await expect(assertAdminScope(env as unknown as Env, withLab as never, "lab")).resolves.toBeUndefined()
+
+    const withNothing = { role: "admin", admin_role_id: null, admin_scope: JSON.stringify(["users.view"]) }
+    await expect(
+      assertAdminScope(env as unknown as Env, withNothing as never, "gallery")
+    ).rejects.toMatchObject({ code: "ADMIN_SCOPE_DENIED" })
+  })
+
+  it("权限管理可委派：被授予 permissions 节点的 admin 能过守卫，没授的不能", async () => {
+    const delegated = await makeUser({ role: "admin" })
+    await env.DB.prepare("UPDATE users SET admin_scope = ? WHERE id = ?")
+      .bind(JSON.stringify(["permissions"]), delegated.id)
+      .run()
+    const res = await fetchSelf(
+      req(delegated, "/api/admin/permission-groups", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "委派测试组", scope: ["users.view"] }),
+      })
+    )
+    expect(res.status).toBeLessThan(400)
+
+    const plain = await makeUser({ role: "admin" })
+    await env.DB.prepare("UPDATE users SET admin_scope = ? WHERE id = ?")
+      .bind(JSON.stringify(["users.view"]), plain.id)
+      .run()
+    const deny = await fetchSelf(
+      req(plain, "/api/admin/permission-groups", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "不该成功", scope: ["users.view"] }),
+      })
+    )
+    expect(deny.status).toBe(403)
+  })
+})

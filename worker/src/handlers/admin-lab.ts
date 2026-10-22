@@ -12,7 +12,7 @@
  * （`lab-config.ts`），混进去只会让两边都更难改。
  */
 import { ApiError, json } from "../http"
-import { requireAdminScope } from "./admin"
+import { requireAdminScope, requireAnyAdminScope } from "./admin"
 import { audit as recordAudit, getSettings, updateSettings } from "../settings"
 import {
   decryptLabSecret,
@@ -420,7 +420,7 @@ export async function reviewLabProject(
  *    但**必须校验作品存在**，免得写进一个不存在的 id（静默无效果）。
  */
 export async function setGalleryPinned(env: Env, request: Request): Promise<Response> {
-  await requireAdminScope(env, request, "lab")
+  await requireAnyAdminScope(env, request, ["gallery", "lab"])
   const body = (await request.json().catch(() => null)) as {
     projectId?: unknown
     pinned?: unknown
@@ -538,7 +538,7 @@ function toAdminGalleryJson(row: AdminGalleryRow) {
  * 管理台固定「置顶优先 + 最近更新优先」，找东西靠搜索与状态筛选。
  */
 export async function listGalleryProjects(env: Env, request: Request): Promise<Response> {
-  await requireAdminScope(env, request, "lab")
+  await requireAnyAdminScope(env, request, ["gallery", "lab"])
   const url = new URL(request.url)
   const rawPage = Number(url.searchParams.get("page") ?? "1")
   const page = Number.isFinite(rawPage) ? Math.max(1, Math.min(1000, Math.trunc(rawPage))) : 1

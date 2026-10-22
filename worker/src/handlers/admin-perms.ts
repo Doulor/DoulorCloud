@@ -47,6 +47,11 @@ async function requireGroupManager(env: Env, request: Request) {
     if (await getSettingBool(env, "superadmin_manage_permission_groups")) return admin
     throw new ApiError(403, "超级管理员管理权限组的功能未开启", "FORBIDDEN")
   }
+  // 站长可以把「权限管理」这件事**委派**给别人（2026-10-23 站长要求：每个页面都能授权）。
+  // ⚠️ 这条等于把「发权限」的能力交出去 —— 拿到它的人可以给自己加任何权限，
+  // 所以默认不给任何人（白名单语义：不勾就没有），勾选时要清楚代价。
+  const scope = await resolveAdminScope(env, admin)
+  if (scope.has("permissions")) return admin
   throw new ApiError(403, "只有站长或超级管理员可以管理权限组", "FORBIDDEN")
 }
 

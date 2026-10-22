@@ -176,6 +176,29 @@ export async function assertAdminScope(
  * - admin：查最终白名单，含 permKey 才放行，否则 403。
  * - rootOnly 节点：只有 root 能过（superadmin 也不行）。
  */
+/**
+ * 「拥有其中任意一个权限即可」的守卫（2026-10-23）。
+ *
+ * 为什么需要：造物集审核页历史上复用的是 `lab` 权限，这次给它单开了 `gallery` 节点。
+ * 为了让**已经授过 lab 的管理员不受影响**，这里允许二者任一；新授权只需给 `gallery`。
+ */
+export async function requireAnyAdminScope(
+  env: Env,
+  request: Request,
+  permKeys: string[]
+): Promise<AdminUserRow> {
+  const admin = await requireAdmin(env, request)
+  if (isPrivileged(admin.role)) return admin
+  const scope = await resolveAdminScope(env, admin)
+  const hit = permKeys.some((k) => isKnownPermissionKey(k) && scope.has(k))
+  if (hit) return admin
+  throw new ApiError(
+    403,
+    `你没有「${permKeys.map((k) => permissionLabel(k)).join(" 或 ")}」权限`,
+    "ADMIN_SCOPE_DENIED"
+  )
+}
+
 export async function requireAdminScope(
   env: Env,
   request: Request,
