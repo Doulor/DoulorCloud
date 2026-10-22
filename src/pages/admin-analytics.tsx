@@ -144,7 +144,7 @@ function TrafficPanel({ days }: { days: string }) {
                 const row = (data.byHour ?? []).find((x) => x.hour === h)
                 const pv = row?.pv ?? 0
                 return (
-                  <div key={h} className="group relative flex flex-1 flex-col items-center">
+                  <div key={h} className="group relative flex h-full flex-1 flex-col items-center justify-end">
                     <div
                       className="w-full rounded-t bg-primary/70 transition-[height] duration-500 group-hover:bg-primary"
                       style={{ height: `${Math.max((pv / maxHourPv) * 100, pv > 0 ? 4 : 1)}%` }}

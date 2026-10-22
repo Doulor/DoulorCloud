@@ -209,8 +209,10 @@ function ColumnChart({ data }: { data: { date: string; count: number }[] }) {
   const max = Math.max(1, ...data.map((d) => d.count))
   return (
     <div className="flex h-32 items-end gap-1">
+      {/* ⚠️ 柱高是百分比：h-full 必须加在柱子的**直接父元素**上，
+          否则父元素是 auto 高度、百分比解析成 0，有数据也看不见（2026-10-23 修）。 */}
       {data.map((d) => (
-        <div key={d.date} className="group relative flex-1">
+        <div key={d.date} className="group relative flex h-full flex-1 items-end">
           <div
             className="w-full rounded-t bg-primary/70 transition-[height] duration-500 group-hover:bg-primary"
             style={{ height: `${Math.max((d.count / max) * 100, 3)}%` }}
