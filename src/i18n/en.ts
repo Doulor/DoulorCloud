@@ -7929,6 +7929,8 @@ export const en: Record<MessageKey, string> = {
   "lab.model.customAdd": "Connect your own endpoint",
   "lab.model.customEdit": "Edit config",
   "lab.src.files": "Files & photos",
+  "lab.plus.title": "Add",
+  "lab.attach.remove": "Remove {name}",
   "lab.src.filesDesc": "Docs, code, images — read locally, never uploaded",
   "lab.src.site": "Site operations",
   "lab.src.siteDesc": "Subdomains / DNS / mail / drive",

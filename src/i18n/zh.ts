@@ -7848,6 +7848,8 @@ export const zh = {
   "lab.model.customAdd": "接入自己的接口",
   "lab.model.customEdit": "修改配置",
   "lab.src.files": "导入文件",
+  "lab.plus.title": "添加",
+  "lab.attach.remove": "移除 {name}",
   "lab.src.filesDesc": "照片、文档、代码等（本地读取，不走服务器）",
   "lab.src.site": "站内操作",
   "lab.src.siteDesc": "子域名 / DNS / 邮箱 / 网盘",
