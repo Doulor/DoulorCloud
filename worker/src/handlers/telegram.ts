@@ -1617,6 +1617,49 @@ export async function setMyMuted(env: Env, request: Request): Promise<Response> 
     .run()
   return json({ ok: true, muted })
 }
+/** 站内聊天室 → TG 群的上一条推送时间（毫秒）。同一个 isolate 内做 1 条/秒节流。 */
+let lastChatGroupPushAt = 0
+
+/**
+ * 把站内聊天室的一条发言推到互通群（2026-10-23，方案 A：只做单向）。
+ *
+ * 为什么不放进 pushToChannels：那个是「公告/作品/新帖」的事件广播，
+ * 受每个频道的 events_json 控制；聊天是**高频流**，需要独立节流，
+ * 否则一次热闹的聊天会把 TG 打到限流（429）并影响公告推送。
+ */
+export async function pushToChatGroups(env: Env, text: string): Promise<number> {
+  try {
+    const now = Date.now()
+    if (now - lastChatGroupPushAt < 1000) return 0 // 1 条/秒
+    lastChatGroupPushAt = now
+
+    const cfg = await loadConfig(env)
+    if (!cfg.enabled) return 0
+    const token = await botToken(env, cfg)
+    if (!token) return 0
+
+    // kind 列由迁移 0173 引入；未执行时这里会抛错，被下面的 catch 兜住（等于功能未启用）
+    const { results } = await env.DB.prepare(
+      "SELECT chat_id FROM tg_channels WHERE kind = 'group' AND enabled = 1"
+    ).all<{ chat_id: string }>()
+
+    let ok = 0
+    for (const row of results ?? []) {
+      const r = await tgApi(
+        env,
+        "sendMessage",
+        { chat_id: row.chat_id, text: text.slice(0, 3500), disable_web_page_preview: true },
+        token
+      )
+      await logPush(env, "ch:chat", row.chat_id, r.ok, r.ok ? undefined : r.description)
+      if (r.ok) ok++
+    }
+    return ok
+  } catch {
+    return 0 // 聊天发言绝不能因为推送失败而失败
+  }
+}
+
 /* ==========================================================================
  * 命令菜单（Telegram 的「/」按钮）
  *

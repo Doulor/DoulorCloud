@@ -15,6 +15,7 @@ import { uuid } from "../crypto"
 import { guardRateLimit, clientIp } from "../ratelimit"
 import { getSettingBool } from "../settings"
 import type { Env } from "../env"
+import { pushToChatGroups } from "./telegram"
 
 /**
  * 聊天室门禁：登录 + 总开关打开（管理员放行）。
@@ -582,6 +583,10 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
   )
     .bind(user.id, now)
     .run()
+
+  // 站内 → TG 群（方案 A：单向）。内部有 1 条/秒节流且全吞异常，
+  // 聊天能不能发出去与推送成败无关。
+  void pushToChatGroups(env, `${user.nickname ?? user.username}：${finalText}`).catch(() => 0)
 
   return json({
     message: {
