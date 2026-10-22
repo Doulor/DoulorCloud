@@ -658,6 +658,12 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: () => telegramHandlers.testChannel(env, request),
   },
   {
+    kind: "exact",
+    path: "/admin/tg/channels/push",
+    method: "POST",
+    handle: () => telegramHandlers.testChannelPush(env, request),
+  },
+  {
     kind: "regex",
     match: (routePath: string) => routePath.match(/^\/admin\/tg\/channels\/([^/]+)$/),
     methods: ["DELETE"],

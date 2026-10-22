@@ -1865,7 +1865,17 @@ export async function pushToChannels(env: Env, event: ChannelEvent, text: string
       }
     }
     return ok
-  } catch {
+  } catch (err) {
+    // 原来这里直接 `return 0`，把异常吃干净了 —— 线上「公告没推到频道」时
+    // 既没有发送记录也没有错误线索（2026-10-22 排查踩过）。落一条 err 记录，
+    // 管理页的投递日志里就能看到到底哪一步炸的。
+    await logPush(
+      env,
+      `ch:${event}:err`,
+      "(exception)",
+      false,
+      err instanceof Error ? err.message : String(err)
+    )
     return 0
   }
 }
@@ -2003,4 +2013,64 @@ export async function testChannel(env: Env, request: Request): Promise<Response>
   if (!r.ok) throw new ApiError(400, `发送失败：${r.description ?? "未知错误"}`, "SEND_FAILED")
   await recordAudit(env, admin.id, "tg.channel.test", chatId)
   return json({ ok: true })
+}
+
+/**
+ * POST /admin/tg/channels/push —— 直连测试「事件 → 频道」这一跳。
+ *
+ * 为什么要单独一个接口：公告发布是全站广播（会给 1000+ 用户发站内消息），
+ * 为了验证频道推送去发一条公告代价太大。这里直接调 pushToChannels，
+ * 并把频道订阅状态、最近几条投递日志一起回吐，出问题时一眼能看出是哪一步。
+ */
+export async function testChannelPush(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "telegram")
+  const body = await readJson<{ event?: string }>(request, 4 * 1024)
+  const event = (body.event ?? "announcement") as ChannelEvent
+  if (!(event in DEFAULT_CHANNEL_EVENTS)) {
+    throw new ApiError(400, "未知事件类型", "BAD_EVENT")
+  }
+  const cfg = await loadConfig(env)
+  const token = await botToken(env, cfg)
+  const { results: channels } = await env.DB.prepare(
+    "SELECT chat_id, title, enabled, events_json FROM tg_channels"
+  ).all<{ chat_id: string; title: string; enabled: number; events_json: string }>()
+
+  const sent = await pushToChannels(
+    env,
+    event,
+    [
+      "🧪 <b>频道推送自检</b>",
+      "",
+      `事件：${event}`,
+      `时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
+      "",
+      "☁️ https://cloud.doulor.cn",
+    ].join("\n")
+  )
+
+  const { results: logs } = await env.DB.prepare(
+    "SELECT kind, target, ok, error, created_at FROM tg_push_log WHERE kind LIKE 'ch:%' ORDER BY created_at DESC LIMIT 5"
+  ).all<{ kind: string; target: string; ok: number; error: string | null; created_at: number }>()
+
+  await recordAudit(env, admin.id, "tg.channel.push_test", event)
+  return json({
+    ok: true,
+    event,
+    botEnabled: !!cfg.enabled,
+    hasToken: !!token,
+    sent,
+    channels: (channels ?? []).map((c) => ({
+      chatId: c.chat_id,
+      title: c.title,
+      enabled: !!c.enabled,
+      events: { ...DEFAULT_CHANNEL_EVENTS, ...parseJson<Record<string, boolean>>(c.events_json, {}) },
+    })),
+    logs: (logs ?? []).map((l) => ({
+      kind: l.kind,
+      target: l.target,
+      ok: !!l.ok,
+      error: l.error,
+      at: l.created_at,
+    })),
+  })
 }
