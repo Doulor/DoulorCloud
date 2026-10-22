@@ -1045,6 +1045,18 @@ export function inlineAssets(html: string, files: FileMap, entry?: string): stri
 
   return out
 }
+/** 预览占位页：buildPreviewDoc 拿不到入口时用它，**绝不能返回空串**。
+ *  空 srcdoc 会让浏览器退回到父文档地址（https://cloud.doulor.cn/），
+ *  而主站设了 X-Frame-Options: deny → 预览框里直接显示「拒绝连接」。 */
+function previewPlaceholder(reason: string): string {
+  return `<!doctype html><meta charset="utf-8"><style>
+  html,body{height:100%;margin:0}
+  body{display:flex;align-items:center;justify-content:center;background:#fafafa;
+       font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;color:#6b7280}
+  .box{text-align:center;padding:24px}
+  </style><div class="box">${reason}</div></body>`
+}
+
 export function buildPreviewDoc(files: FileMap): string {
   // 注意：这里要挑的是「文件名」，不是文件内容——写成 files["index.html"] 会拿到正文，
   // 再去 files[正文] 查必然是 undefined，预览就永远空白。
@@ -1052,9 +1064,10 @@ export function buildPreviewDoc(files: FileMap): string {
   const entry = paths.includes("index.html")
     ? "index.html"
     : (paths.find((p) => p.endsWith(".html")) ?? paths[0])
-  if (!entry) return ""
+  // ⚠️ 不能 return ""：空 srcdoc 会让 iframe 退回父文档地址（主站设了 X-Frame-Options: deny）
+  if (!entry) return previewPlaceholder("这个作品还没有页面文件，加一个 index.html 就能预览")
   let html = files[entry]
-  if (!html) return ""
+  if (!html) return previewPlaceholder("页面文件是空的，先写点内容再预览")
 
   const lookup = (ref: string): string | undefined => {
     const path = resolvePath(ref)
