@@ -1,7 +1,7 @@
 import * as React from "react"
 import { Link } from "react-router-dom"
 import { toast } from "sonner"
-import { AlertTriangle, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, Database, ExternalLink, FileText, FolderOpen, HardDriveDownload, Info, Link2, List, Loader2, PanelRight, Paperclip, Plus, Power, RefreshCw, Save, Search, Sparkles, Square, Terminal, Trash2, X } from "lucide-react"
+import { AlertTriangle, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, FileText, FolderOpen, HardDriveDownload, Info, List, Loader2, PanelRight, Plus, Power, RefreshCw, Save, Sparkles, Square, Terminal, Trash2, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -16,13 +16,13 @@ import { Input } from "@/components/ui/input"
 import { confirmDialog } from "@/components/confirm-dialog"
 import { AnchoredPanel, isInsideAnchoredPanel } from "@/components/anchored-panel"
 import { PromptBar, SlingButton, ThoughtLine } from "@/components/reactbits"
+// 「+」菜单五项的唯一来源 + 点击语义 + 朴素版菜单 UI（两套输入框共用）
 import {
-  Attachment01Icon,
-  Database02Icon,
-  Link01Icon,
-  Search01Icon,
-  SparklesIcon,
-} from "@hugeicons/core-free-icons"
+  LabPlusMenu,
+  dispatchLabPlus,
+  useLabPlusItems,
+  type LabPlusHandlers,
+} from "@/components/lab-plus-menu"
 import { compressToLimit } from "@/lib/image-compress"
 import { decodeTextBytes, isTextLikeFile, readLabAttachments, type AttachIssueReason, type AttachPayload } from "@/lib/lab-attach"
 import { buildSingleFileHtml, downloadBlob, zipFiles } from "@/lib/lab-export"
@@ -880,60 +880,14 @@ export default function LabPage() {
   const pendingAttachRef = React.useRef<string[]>([])
 
   /**
-   * 朴素输入框的「+」菜单（2026-10-22）。
+   * 朴素输入框的附件列表（2026-10-22）。
    *
-   * 为什么要有它：附件 / 站内操作 / 技能 / 联网搜索 / 参考网址 这五项，
-   * 原本**只**做在动效版 PromptBar 的「+」菜单里。而 `labFxOn`（AI 实验室动效）
-   * 在没存过偏好时会跟随系统的 `prefers-reduced-motion` —— 于是任何开了
-   * 「减少动态效果」的用户（无障碍设置 / 省电模式 / 部分国产浏览器默认）拿到的是
-   * 朴素输入框，那五项**一个入口都没有**，联网开关根本没处点
-   * （用户 fxz 反馈「ai实验室缺少联网开关等选项」就是这么来的）。
-   *
-   * 结论：动效开关只该决定「长什么样」，不该决定「有没有功能」。
-   * 这里给朴素版补一套等价入口，两项能力从此与动效偏好无关。
+   * 「+」菜单本身已抽到 `components/lab-plus-menu.tsx`，两套输入框共用那一份
+   * （定义、点击语义、UI 都在那边）—— 加第六项时只改那一处，不会漏掉另一套。
+   * 这里只剩朴素版**特有**的东西：它没有 PromptBar 那套附件卡片，
+   * 所以文件名得自己存一份，发送时再交给 `send(override, files)`。
    */
-  const [plainPlusOpen, setPlainPlusOpen] = React.useState(false)
-  const plainPlusBtnRef = React.useRef<HTMLButtonElement>(null)
-  /** 朴素输入框的附件列表（动效版由 PromptBar 自己管，这里得自己存一份再交给 send） */
   const [plainAttach, setPlainAttach] = React.useState<string[]>([])
-
-  /** 朴素版「+」菜单的五项，与动效版 fxSources 一一对应（图标换成已引入的 lucide，避免类型对不上） */
-  const plainPlusItems = React.useMemo(
-    () => [
-      { key: "files", name: t("lab.src.files"), description: t("lab.src.filesDesc"), icon: Paperclip },
-      { key: "site", name: t("lab.src.site"), description: t("lab.src.siteDesc"), icon: Database },
-      { key: "skills", name: t("lab.src.skills"), description: t("lab.src.skillsDesc"), icon: Sparkles },
-      { key: "web", name: t("lab.src.web"), description: t("lab.src.webDesc"), icon: Search },
-      { key: "ref", name: t("lab.src.ref"), description: t("lab.src.refDesc"), icon: Link2 },
-    ],
-    [t]
-  )
-
-  /** 点朴素版「+」里的某一项 —— 行为与 PromptBar 的 onSource / onAttach 保持一致 */
-  const onPlainPlusPick = async (key: string) => {
-    setPlainPlusOpen(false)
-    if (key === "files") {
-      const names = await handleAttach()
-      if (names.length > 0) {
-        setPlainAttach((prev) => Array.from(new Set([...prev, ...names])))
-      }
-      return
-    }
-    if (key === "skills") {
-      setSkillOpen(true)
-      return
-    }
-    if (key === "web") {
-      setSearchKeyOpen(true)
-      return
-    }
-    if (key === "ref") {
-      setRefOpen(true)
-      return
-    }
-    // site（站内操作）：往输入框里插 `@站内操作`，与动效版插入的内容完全一致
-    setInput((v) => `${v}${v && !v.endsWith(" ") ? " " : ""}@${t("lab.src.site")} `)
-  }
 
   /**
    * 「参考网址」附件的正文头 —— 这段会**原样进模型上下文**，所以也要跟界面语言走
@@ -1482,21 +1436,6 @@ export default function LabPage() {
     return () => document.removeEventListener("mousedown", onDoc)
   }, [promptOpen])
 
-  // 朴素输入框的「+」菜单（2026-10-22）：同款外部点击关闭。
-  // ⚠️ 必须豁免锚点按钮本身，否则点它时先被这里关掉、再被 onClick 翻回来，
-  //    表现是「点一下闪一下打不开」。
-  React.useEffect(() => {
-    if (!plainPlusOpen) return
-    const onDoc = (e: MouseEvent) => {
-      if (isInsideAnchoredPanel(e.target)) return
-      if (plainPlusBtnRef.current && plainPlusBtnRef.current.contains(e.target as Node)) return
-      setPlainPlusOpen(false)
-    }
-    document.addEventListener("mousedown", onDoc)
-    return () => document.removeEventListener("mousedown", onDoc)
-  }, [plainPlusOpen])
-
-
   // 初始：拉站内模型列表（顺便探测是否已开通中转站）
   // modelsReloadKey：横幅上的「重试」按钮用它重新触发这个 effect（用户重新绑定完密码后
   // 不用刷新整页就能恢复）。
@@ -1794,33 +1733,26 @@ export default function LabPage() {
   )
 
   /**
-   * 「+」菜单里的四项。
-   * 组件原本带一批**假 demo 数据**（Photos & files / Sales data / Calendar…），
-   * 现在换成我们真有的东西。`attach: true` 的那项点击会走 `onAttach`（真开文件选择器）；
-   * 其余项由组件把 `@名字` 插进输入框。
+   * 「+」菜单的五项 —— 与朴素输入框**共用同一份定义**（`components/lab-plus-menu.tsx`）。
+   *
+   * 这里只做一次形状转换：把共用项映射成 `PromptBar` 要的 `sources`。
+   * `attach: true` 的那项点击会走 `onAttach`（真开文件选择器），
+   * 其余项交给下面 `onSource` → `dispatchLabPlus`。
+   *
+   * ⚠️ 加第六项时**只改 lab-plus-menu.tsx**，两套菜单自动都拿到。
    */
+  const labPlusItems = useLabPlusItems()
   const fxSources = React.useMemo(
-    () => [
-      {
-        key: "files",
-        name: t("lab.src.files"),
-        description: t("lab.src.filesDesc"),
-        icon: Attachment01Icon,
-        attach: true,
-      },
-      { key: "site", name: t("lab.src.site"), description: t("lab.src.siteDesc"), icon: Database02Icon },
-      { key: "skills", name: t("lab.src.skills"), description: t("lab.src.skillsDesc"), icon: SparklesIcon },
-      { key: "web", name: t("lab.src.web"), description: t("lab.src.webDesc"), icon: Search01Icon },
-      {
-        key: "ref",
-        name: t("lab.src.ref"),
-        description: t("lab.src.refDesc"),
-        // ⚠️ 必须用 @hugeicons 的图标：这个菜单其它项都是，
-        // 换成 lucide 的组件类型对不上（而且 lucide 的 Link 还和 react-router 的 Link 重名）
-        icon: Link01Icon,
-      },
-    ],
-    [t]
+    () =>
+      labPlusItems.map((item) => ({
+        key: item.key,
+        name: item.name,
+        description: item.description,
+        icon: item.huge,
+        // 只有「导入文件」是真的开文件选择器，其余是打开各自的对话框/插入 mention
+        ...(item.key === "files" ? { attach: true } : {}),
+      })),
+    [labPlusItems]
   )
 
   /**
@@ -1893,6 +1825,45 @@ export default function LabPage() {
       toast.dismiss(loadingId)
     }
   }
+
+  /**
+   * 「+」菜单的点击动作 —— 语义来自共用模块，这里只把「落到本页的哪块状态」接上。
+   *
+   * 两套输入框的差异只有 `onFiles`：
+   *   · 朴素版把文件名加进自己的附件条（`plainAttach`）；
+   *   · 动效版交给 `PromptBar` 的 `onAttach`，所以那边的 `onFiles` 是空实现
+   *     （它压根不会走到 —— 带 `attach: true` 的项由 PromptBar 自己处理）。
+   */
+  const plusCommonHandlers = React.useMemo(
+    () => ({
+      // 「站内操作」：插入的文本必须与 `send()` 里识别用的 `@站内操作 / @site` 对得上
+      onSite: () => setInput((v) => `${v}${v && !v.endsWith(" ") ? " " : ""}@${t("lab.src.site")} `),
+      onSkills: () => setSkillOpen(true),
+      onWeb: () => setSearchKeyOpen(true),
+      onRef: () => setRefOpen(true),
+    }),
+    [t]
+  )
+
+  /** 朴素输入框用：真的导入文件并加进附件条 */
+  const plainPlusHandlers = React.useMemo<LabPlusHandlers>(
+    () => ({
+      ...plusCommonHandlers,
+      onFiles: async () => {
+        const names = await handleAttach()
+        if (names.length > 0) {
+          setPlainAttach((prev) => Array.from(new Set([...prev, ...names])))
+        }
+      },
+    }),
+    [plusCommonHandlers]
+  )
+
+  /** 动效输入框用：文件走 PromptBar 自己的 onAttach，这里不做事 */
+  const fxPlusHandlers = React.useMemo<LabPlusHandlers>(
+    () => ({ ...plusCommonHandlers, onFiles: () => {} }),
+    [plusCommonHandlers]
+  )
 
   /**
    * 把带进来的**文本**附件并进正文，并收集**图片**的 data URL。
@@ -5367,23 +5338,16 @@ const doImportLocal = async () => {
       sources={fxSources}
       onAttach={handleAttach}
       /**
-       * 「技能」这一项不往输入框插 `@技能`，而是开管理对话框
-       * （用户不需要手写技能名 —— 系统提示里已经带目录，模型自己判断）。
+       * 点击「+」里的某一项。语义走共用模块，唯一的例外是 `site`：
+       * PromptBar 的草稿存在它**自己**的 state 里，我们往本页 `input` 里插对用户不可见，
+       * 所以返回 false 让它按原逻辑把 `@站内操作` 插进它自己的输入框。
+       *
+       * 「技能」这类不插 mention，而是开管理对话框 —— 用户不需要手写技能名，
+       * 系统提示里已经带目录，模型自己判断。
        */
       onSource={(key: string) => {
-        if (key === "skills") {
-          setSkillOpen(true)
-          return true
-        }
-        if (key === "web") {
-          setSearchKeyOpen(true)
-          return true
-        }
-        if (key === "ref") {
-          setRefOpen(true)
-          return true
-        }
-        return false
+        if (key === "site") return false
+        return dispatchLabPlus(key, fxPlusHandlers)
       }}
       busy={streaming}
       onSend={(text: string, detail: { model?: { key: string }; attachments?: string[] }) => {
@@ -5550,57 +5514,8 @@ const doImportLocal = async () => {
             />
 
             <div className="flex items-center gap-1.5 px-2.5 pb-2.5 pt-1">
-              {/*
-                朴素版的「+」入口（2026-10-22）。五项与动效版 PromptBar 的菜单同源，
-                差别只是图标与样式 —— 目的是让「联网搜索」这类功能**不再依赖动效偏好**。
-                没有它，凡是系统开了「减少动态效果」的用户都找不到联网开关（用户 fxz 反馈）。
-              */}
-              <button
-                ref={plainPlusBtnRef}
-                type="button"
-                className={cn(
-                  "grid h-9 w-9 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-                  plainPlusOpen && "bg-accent text-foreground"
-                )}
-                title={t("lab.plus.title")}
-                aria-label={t("lab.plus.title")}
-                aria-expanded={plainPlusOpen}
-                onClick={() => setPlainPlusOpen((v) => !v)}
-              >
-                <Plus className="h-4 w-4" />
-              </button>
-              <AnchoredPanel
-                anchorRef={plainPlusBtnRef}
-                open={plainPlusOpen}
-                onClose={() => setPlainPlusOpen(false)}
-                width={280}
-                height={Math.min(320, 16 + plainPlusItems.length * 52)}
-              >
-                <div className="mb-1 border-b px-1 pb-1.5 text-xs font-medium">
-                  {t("lab.plus.title")}
-                </div>
-                <div className="flex-1 space-y-0.5 overflow-y-auto">
-                  {plainPlusItems.map((item) => {
-                    const Icon = item.icon
-                    return (
-                      <button
-                        key={item.key}
-                        type="button"
-                        className="flex w-full items-start gap-2 rounded-md px-1.5 py-1.5 text-left text-xs transition-colors hover:bg-accent/60"
-                        onClick={() => void onPlainPlusPick(item.key)}
-                      >
-                        <Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-                        <span className="min-w-0 flex-1">
-                          <span className="block font-medium">{item.name}</span>
-                          <span className="block text-[11px] leading-snug text-muted-foreground">
-                            {item.description}
-                          </span>
-                        </span>
-                      </button>
-                    )
-                  })}
-                </div>
-              </AnchoredPanel>
+              {/* 「+」入口：菜单本体在 components/lab-plus-menu.tsx，两套输入框共用同一份 */}
+              <LabPlusMenu handlers={plainPlusHandlers} />
 
               {/*
                 一行只放「用哪个模型」和「多想多久」两个按钮。
