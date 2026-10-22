@@ -6,6 +6,7 @@ import { sendMail, renderMail, type MailTransport } from "../mailer"
 import { broadcastMessage } from "../user-messages"
 import { getSetting } from "../settings"
 import type { Env } from "../env"
+import { pushToChannels } from "./telegram"
 
 /**
  * 网站公告 / 动态。
@@ -479,6 +480,23 @@ export async function publishAnnouncementNow(
     )
   } catch (err) {
     console.error("公告消息广播失败:", id, err)
+  }
+
+  // TG 频道推送：公告是唯一「全员都该知道」的事件，这里失败不影响发布。
+  try {
+    await pushToChannels(
+      env,
+      "announcement",
+      [
+        `📢 <b>${row.title}</b>`,
+        "",
+        (row.body || "").replace(/\s+/g, " ").slice(0, 300),
+        "",
+        `☁️ https://cloud.doulor.cn/dashboard/messages/site`,
+      ].join("\n")
+    )
+  } catch (err) {
+    console.error("公告频道推送失败:", id, err)
   }
 
   // 邮件群发：入队（快照收件人）+ 后台分批发送，不阻塞调用方。

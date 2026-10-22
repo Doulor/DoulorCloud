@@ -10,7 +10,7 @@ import { guardRateLimit } from "../ratelimit"
 import { getLinkPreview } from "../link-preview"
 import { pushMessage, isMessageCategory } from "../user-messages"
 import type { Env } from "../env"
-import { pushMessage as tgPush } from "./telegram"
+import { pushMessage as tgPush, pushToChannels } from "./telegram"
 
 const DEFAULT_LIMIT = 20
 
@@ -754,6 +754,22 @@ export async function createPost(env: Env, request: Request): Promise<Response> 
   await env.DB.prepare(
     "INSERT INTO posts (id, user_id, channel, body, images, category, created_at) VALUES (?, ?, 'general', ?, NULL, ?, ?)"
   ).bind(id, user.id, text, category, now).run()
+
+  // TG 频道推送：社区新帖（频道默认**不订阅**这一类，站长可在管理页打开）。
+  try {
+    await pushToChannels(
+      env,
+      "post",
+      [
+        "📝 <b>社区新帖</b>",
+        "",
+        text.replace(/\s+/g, " ").slice(0, 200),
+        "",
+        `☁️ https://cloud.doulor.cn/community/${id}`,
+      ].join("\n")
+    )
+  } catch {}
+
   return json({ post: { id } }, 201)
 }
 

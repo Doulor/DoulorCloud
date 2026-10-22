@@ -8614,6 +8614,20 @@ export const zh = {
   "tg.push.comment": "被评论（每条）",
   "tg.push.like": "被点赞（每条）",
   "tg.push.points": "积分到账",
+  "tg.channels": "频道推送",
+  "tg.channelsHint": "把机器人设为频道管理员后会自动出现在这里；公告、新作品可按需推到频道。",
+  "tg.noChannels": "还没有频道。把机器人拉进频道并设为管理员，或手动填 chat_id。",
+  "tg.chEnabled": "推送中",
+  "tg.chDisabled": "已停推",
+  "tg.chEnableBtn": "启用推送",
+  "tg.chDisableBtn": "停推",
+  "tg.channelPlaceholder": "频道 ID 或 @用户名，如 -1001234567890",
+  "tg.channelAdd": "添加频道",
+  "tg.channelAdded": "频道已添加",
+  "tg.chev.announcement": "公告",
+  "tg.chev.gallery": "新作品",
+  "tg.chev.post": "社区新帖",
+  "tg.chev.daily": "每日简报",
 } as const
 
 export type MessageKey = keyof typeof zh

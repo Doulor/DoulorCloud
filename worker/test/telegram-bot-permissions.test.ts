@@ -21,6 +21,7 @@ import {
   getAdminConfig,
   createBindCode,
   buildCommandMenu,
+  pushToChannels,
 } from "../src/handlers/telegram"
 
 const BOT_TOKEN = "123456789:AAFakeTokenForTestOnly1234567890ab"
@@ -437,6 +438,99 @@ describe("TG 机器人 · 通知开关覆盖所有推送类型（防漂移）", 
       expect(muted.sort()).toEqual(["comment", "email", "like", "points"])
       // 一个都不该落到「未知选项」
       expect(acks.join("|")).not.toContain("未知选项")
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+})
+describe("TG 机器人 · 频道推送", () => {
+  beforeEach(async () => {
+    await env.DB.prepare("DELETE FROM tg_channels").run()
+    await seedConfig({ enabled: true })
+  })
+
+  it("机器人被拉进频道 → 自动登记（my_chat_member）", async () => {
+    const res = await handleWebhook(
+      env,
+      hookRequest(
+        {
+          my_chat_member: {
+            chat: { id: -1001234567890, title: "Doulor 频道", username: "doulor_ch", type: "channel" },
+            new_chat_member: { status: "administrator" },
+          },
+        },
+        SECRET
+      )
+    )
+    expect(res.status).toBe(200)
+    const row = await env.DB.prepare("SELECT title, enabled FROM tg_channels WHERE chat_id = ?")
+      .bind("-1001234567890")
+      .first<{ title: string; enabled: number }>()
+    expect(row?.title).toBe("Doulor 频道")
+    expect(row?.enabled).toBe(1)
+  })
+
+  it("被踢出频道 → 自动停推（enabled=0）", async () => {
+    await env.DB.prepare(
+      "INSERT INTO tg_channels (chat_id, title, events_json, enabled, created_at) VALUES (?, '旧频道', '{}', 1, ?)"
+    )
+      .bind("-1009999999999", Date.now())
+      .run()
+    await handleWebhook(
+      env,
+      hookRequest(
+        {
+          my_chat_member: {
+            chat: { id: -1009999999999, title: "旧频道", type: "channel" },
+            new_chat_member: { status: "kicked" },
+          },
+        },
+        SECRET
+      )
+    )
+    const row = await env.DB.prepare("SELECT enabled FROM tg_channels WHERE chat_id = ?")
+      .bind("-1009999999999")
+      .first<{ enabled: number }>()
+    expect(row?.enabled).toBe(0)
+  })
+
+  it("只有订阅了该事件的频道才会收到；社区新帖默认不订阅", async () => {
+    await env.DB.prepare(
+      "INSERT INTO tg_channels (chat_id, title, events_json, enabled, created_at) VALUES (?, '公告频道', '{}', 1, ?)"
+    )
+      .bind("-1001", Date.now())
+      .run()
+    await env.DB.prepare(
+      "INSERT INTO tg_channels (chat_id, title, events_json, enabled, created_at) VALUES (?, '全订阅', ?, 1, ?)"
+    )
+      .bind("-1002", JSON.stringify({ post: true }), Date.now())
+      .run()
+
+    const targets: string[] = []
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      if (url.includes("api.telegram.org")) {
+        if (url.endsWith("/sendMessage")) {
+          try {
+            targets.push(String((JSON.parse(String(init?.body ?? "{}")) as { chat_id?: unknown }).chat_id ?? ""))
+          } catch {
+            targets.push("")
+          }
+        }
+        return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 })
+      }
+      return original(input as RequestInfo, init)
+    }) as typeof fetch
+    try {
+      await pushToChannels(env, "announcement", "公告测试")
+      // 两个频道都订阅公告（默认开）
+      expect(targets.sort()).toEqual(["-1001", "-1002"])
+
+      targets.length = 0
+      await pushToChannels(env, "post", "新帖测试")
+      // 只有显式开了 post 的那个频道
+      expect(targets).toEqual(["-1002"])
     } finally {
       globalThis.fetch = original
     }

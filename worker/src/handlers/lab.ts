@@ -67,6 +67,7 @@ import {
   type LabRuntimeConfig,
 } from "../lab-config"
 import type { Env } from "../env"
+import { pushToChannels } from "./telegram"
 
 /**
  * 把管理员填的 base url 规范成 chat/completions 端点。
@@ -1831,6 +1832,27 @@ export async function publishProject(
   )
     .bind(name, description, icon, visibility, visibility, now, now, id, user.id)
     .run()
+
+  // TG 频道推送：作品**首次公开**才推（改简介、取消公开都不推）。
+  // 开了审核的作品这里是 pending，审核通过走 reviewProject，同样会命中一次。
+  if (visibility === "public" && !wasPublic) {
+    try {
+      await pushToChannels(
+        env,
+        "gallery",
+        [
+          "🎨 <b>造物集有新作品</b>",
+          "",
+          name.replace(/\s+/g, " ").slice(0, 60),
+          description ? description.replace(/\s+/g, " ").slice(0, 140) : "",
+          "",
+          `☁️ https://cloud.doulor.cn/gallery`,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      )
+    } catch {}
+  }
 
   const fresh = await loadProject(env, id, user.id)
   return json({ project: toClientJson(fresh) })

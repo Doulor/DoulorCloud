@@ -633,6 +633,37 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () => telegramHandlers.syncCommands(env, request),
   },
+  {
+    kind: "exact",
+    path: "/admin/tg/channels",
+    method: "GET",
+    handle: () => telegramHandlers.listChannels(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/tg/channels",
+    method: "POST",
+    handle: () => telegramHandlers.addChannel(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/tg/channels/update",
+    method: "POST",
+    handle: () => telegramHandlers.updateChannel(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/tg/channels/test",
+    method: "POST",
+    handle: () => telegramHandlers.testChannel(env, request),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/admin\/tg\/channels\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (chMatch: RegExpMatchArray) =>
+      telegramHandlers.deleteChannel(env, request, chMatch[1]),
+  },
   // 普通用户也能调：给自己生成一次性绑定码（requireUser，不是 admin）
   {
     kind: "exact",

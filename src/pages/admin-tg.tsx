@@ -10,7 +10,7 @@
  *  · 解绑用户是即时生效的（DB 删除），不需要刷新机器人。
  */
 import * as React from "react"
-import { Bot, KeyRound, Link2, ListOrdered, RefreshCw, Send, Trash2, Unlink } from "lucide-react"
+import { Bot, KeyRound, Link2, ListOrdered, Radio, RefreshCw, Send, Trash2, Unlink } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -26,6 +26,7 @@ import {
   errMsg,
   type AdminTgBinding,
   type AdminTgConfig,
+  type AdminTgChannel,
   type AdminTgLog,
 } from "@/services/api"
 import { fmtDateTime } from "@/lib/format"
@@ -63,6 +64,8 @@ export function AdminTgPanel() {
   const [cfg, setCfg] = React.useState<AdminTgConfig | null>(null)
   const [bindings, setBindings] = React.useState<AdminTgBinding[]>([])
   const [logs, setLogs] = React.useState<AdminTgLog[]>([])
+  const [channels, setChannels] = React.useState<AdminTgChannel[]>([])
+  const [channelInput, setChannelInput] = React.useState("")
   const [loading, setLoading] = React.useState(true)
   const [busy, setBusy] = React.useState<string | null>(null)
   /** 只在用户真的想换 token 时才有值；提交成功后清空 */
@@ -71,14 +74,16 @@ export function AdminTgPanel() {
   const load = React.useCallback(async () => {
     setLoading(true)
     try {
-      const [c, b, l] = await Promise.all([
+      const [c, b, l, ch] = await Promise.all([
         adminTgApi.config(),
         adminTgApi.bindings(),
         adminTgApi.logs(),
+        adminTgApi.channels(),
       ])
       setCfg(c)
       setBindings(b.bindings)
       setLogs(l.logs)
+      setChannels(ch.channels)
     } catch (e) {
       toast.error(errMsg(e, t("tg.saveFailed")))
     } finally {
@@ -89,6 +94,23 @@ export function AdminTgPanel() {
   React.useEffect(() => {
     void load()
   }, [load])
+
+
+  /** 频道事件的中文名（i18n 的 key 是联合类型，不能拼变量，这里显式映射） */
+  function eventLabel(k: string): string {
+    switch (k) {
+      case "announcement":
+        return t("tg.chev.announcement")
+      case "gallery":
+        return t("tg.chev.gallery")
+      case "post":
+        return t("tg.chev.post")
+      case "daily":
+        return t("tg.chev.daily")
+      default:
+        return k
+    }
+  }
 
   async function run(key: string, fn: () => Promise<unknown>, okMsg?: string) {
     setBusy(key)
@@ -307,6 +329,116 @@ export function AdminTgPanel() {
             ))}
           </CardContent>
         </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Radio className="h-4 w-4" />
+            {t("tg.channels")}
+          </CardTitle>
+          <CardDescription>{t("tg.channelsHint")}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {channels.length === 0 ? (
+            <p className="text-sm text-muted-foreground">{t("tg.noChannels")}</p>
+          ) : (
+            <div className="space-y-2">
+              {channels.map((ch) => (
+                <div key={ch.chatId} className="rounded-lg border p-3 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium">{ch.title || ch.chatId}</span>
+                    {ch.username ? (
+                      <span className="text-xs text-muted-foreground">@{ch.username}</span>
+                    ) : null}
+                    <Badge variant={ch.enabled ? "default" : "secondary"}>
+                      {ch.enabled ? t("tg.chEnabled") : t("tg.chDisabled")}
+                    </Badge>
+                    <span className="ml-auto flex gap-1">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={busy !== null}
+                        onClick={() =>
+                          void run(
+                            `ch-test-${ch.chatId}`,
+                            () => adminTgApi.testChannel(ch.chatId),
+                            t("tg.testSent")
+                          )
+                        }
+                      >
+                        <Send className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={busy !== null}
+                        onClick={() =>
+                          void run(`ch-del-${ch.chatId}`, () => adminTgApi.deleteChannel(ch.chatId))
+                        }
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {(Object.keys(ch.events) as Array<keyof typeof ch.events>).map((k) => (
+                      <Button
+                        key={String(k)}
+                        size="sm"
+                        variant={ch.events[k] ? "default" : "outline"}
+                        disabled={busy !== null}
+                        onClick={() =>
+                          void run(`ch-ev-${ch.chatId}-${String(k)}`, () =>
+                            adminTgApi.updateChannel(ch.chatId, {
+                              events: { [String(k)]: !ch.events[k] },
+                            })
+                          )
+                        }
+                      >
+                        {ch.events[k] ? "✅" : "⛔"} {eventLabel(String(k))}
+                      </Button>
+                    ))}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        void run(`ch-tog-${ch.chatId}`, () =>
+                          adminTgApi.updateChannel(ch.chatId, { enabled: !ch.enabled })
+                        )
+                      }
+                    >
+                      {ch.enabled ? t("tg.chDisableBtn") : t("tg.chEnableBtn")}
+                    </Button>
+                  </div>
+                  {ch.lastError ? (
+                    <p className="text-xs text-destructive">{ch.lastError}</p>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              value={channelInput}
+              onChange={(e) => setChannelInput(e.target.value)}
+              placeholder={t("tg.channelPlaceholder")}
+              className="max-w-xs"
+            />
+            <Button
+              size="sm"
+              disabled={busy !== null || !channelInput.trim()}
+              onClick={() =>
+                void run("ch-add", async () => {
+                  await adminTgApi.addChannel(channelInput.trim())
+                  setChannelInput("")
+                }, t("tg.channelAdded"))
+              }
+            >
+              {t("tg.channelAdd")}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
       </div>
 
       {/* ---------------- 绑定用户 ---------------- */}

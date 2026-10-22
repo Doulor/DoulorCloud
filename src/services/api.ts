@@ -5644,6 +5644,19 @@ export interface AdminTgLog {
   created_at: number
 }
 
+
+/** 频道推送（2026-10-22）：机器人被拉进频道后自动登记，也可在后台手填 chat_id */
+export interface AdminTgChannel {
+  chatId: string
+  title: string
+  username: string | null
+  enabled: boolean
+  events: Record<string, boolean>
+  createdAt: number
+  lastOkAt: number | null
+  lastError: string | null
+}
+
 export const adminTgApi = {
   config: () => request<AdminTgConfig>("/admin/tg/config"),
 
@@ -5671,6 +5684,26 @@ export const adminTgApi = {
   unbind: (telegramId: string) =>
     request<{ ok: boolean }>(`/admin/tg/bindings/${encodeURIComponent(telegramId)}`, {
       method: "DELETE",
+    }),
+
+  channels: () =>
+    request<{ channels: AdminTgChannel[]; defaults: Record<string, boolean> }>("/admin/tg/channels"),
+  addChannel: (chatId: string) =>
+    request<{ ok: boolean; chatId: string; title: string }>("/admin/tg/channels", {
+      method: "POST",
+      body: JSON.stringify({ chatId }),
+    }),
+  updateChannel: (chatId: string, patch: { enabled?: boolean; events?: Record<string, boolean> }) =>
+    request<{ ok: boolean }>("/admin/tg/channels/update", {
+      method: "POST",
+      body: JSON.stringify({ chatId, ...patch }),
+    }),
+  deleteChannel: (chatId: string) =>
+    request<{ ok: boolean }>(`/admin/tg/channels/${encodeURIComponent(chatId)}`, { method: "DELETE" }),
+  testChannel: (chatId: string) =>
+    request<{ ok: boolean }>("/admin/tg/channels/test", {
+      method: "POST",
+      body: JSON.stringify({ chatId }),
     }),
 
   syncCommands: () =>

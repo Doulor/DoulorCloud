@@ -476,6 +476,11 @@ interface TgUpdate {
     chat?: { id?: number; type?: string }
     from?: { id?: number; username?: string }
   }
+  /** 机器人被拉进/移出频道或群（频道自动登记用） */
+  my_chat_member?: {
+    chat?: { id?: number; title?: string; username?: string; type?: string }
+    new_chat_member?: { status?: string }
+  }
   /** inline 按钮回调（/menu、/settings 用） */
   callback_query?: {
     id: string
@@ -609,6 +614,13 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
     update = (await request.json()) as TgUpdate
   } catch {
     return json({ ok: true, ignored: "bad-json" })
+  }
+
+  // 机器人被拉进/移出频道：这是「频道推送」的唯一自动入口，
+  // 必须在下面的「仅私聊」判断**之前**处理 —— 频道的 chat.type 是 "channel"。
+  if (update.my_chat_member) {
+    await handleChatMember(env, update.my_chat_member)
+    return json({ ok: true })
   }
 
   // inline 按钮回调优先处理：它没有 message.text，走不到下面的命令分发
@@ -1721,4 +1733,211 @@ async function frpSummary(env: Env, userId: string): Promise<string> {
   }
   lines.push("", `管理：${SITE_URL} → 内网穿透`)
   return lines.join("\n")
+}
+
+/* ==========================================================================
+ * 频道推送（2026-10-22）
+ *
+ * 与私聊推送是两条独立的路：
+ *   · 私聊：tg_bindings（用户 ↔ telegram_id），受 pushMessage 的推送开关控制
+ *   · 频道：tg_channels（一频道一行），受**每个频道自己的** events_json 控制
+ * 两边都走 tg_push_log，kind 分别记为 `email/comment/...` 与 `ch:announcement/...`。
+ *
+ * 权限：只有管理员能增删频道（requireAdminScope("telegram")）；
+ * 机器人被拉进频道时靠 `my_chat_member` 自动登记，站长不用手填 chat_id。
+ * ========================================================================== */
+
+/** 频道默认订阅的事件：公告 + 新作品开，社区新帖关（默认别刷屏） */
+const DEFAULT_CHANNEL_EVENTS: Record<string, boolean> = {
+  announcement: true,
+  gallery: true,
+  post: false,
+}
+
+export type ChannelEvent = "announcement" | "gallery" | "post" | "daily"
+
+interface ChannelRow {
+  chat_id: string
+  title: string
+  username: string | null
+  events_json: string
+  enabled: number
+  created_at: number
+  last_ok_at: number | null
+  last_error: string | null
+}
+
+/**
+ * 往所有订阅了该事件的频道发一条消息。
+ * 单个频道失败不影响其它频道，也不影响调用方业务流程。
+ */
+export async function pushToChannels(env: Env, event: ChannelEvent, text: string): Promise<number> {
+  try {
+    const cfg = await loadConfig(env)
+    if (!cfg.enabled) return 0
+    if (!(await botToken(env, cfg))) return 0
+    const { results } = await env.DB.prepare(
+      "SELECT * FROM tg_channels WHERE enabled = 1"
+    ).all<ChannelRow>()
+    let ok = 0
+    for (const ch of results ?? []) {
+      const events = { ...DEFAULT_CHANNEL_EVENTS, ...parseJson<Record<string, boolean>>(ch.events_json, {}) }
+      if (events[event] === false) continue
+      const r = await tgApi(env, "sendMessage", {
+        chat_id: ch.chat_id,
+        text,
+        parse_mode: "HTML",
+        disable_web_page_preview: false,
+      })
+      await logPush(env, `ch:${event}`, ch.chat_id, r.ok, r.ok ? undefined : r.description)
+      if (r.ok) {
+        ok++
+        await env.DB.prepare("UPDATE tg_channels SET last_ok_at = ?, last_error = NULL WHERE chat_id = ?")
+          .bind(Date.now(), ch.chat_id)
+          .run()
+      } else {
+        await env.DB.prepare("UPDATE tg_channels SET last_error = ? WHERE chat_id = ?")
+          .bind((r.description ?? "发送失败").slice(0, 200), ch.chat_id)
+          .run()
+      }
+    }
+    return ok
+  } catch {
+    return 0
+  }
+}
+
+/** 机器人被拉进/移出频道时自动登记（webhook 的 my_chat_member） */
+export async function handleChatMember(
+  env: Env,
+  upd: {
+    chat?: { id?: number; title?: string; username?: string; type?: string }
+    new_chat_member?: { status?: string }
+  }
+): Promise<void> {
+  const chat = upd.chat
+  if (!chat?.id || chat.type !== "channel") return
+  const chatId = String(chat.id)
+  const status = upd.new_chat_member?.status ?? ""
+  if (status === "administrator" || status === "member") {
+    await env.DB.prepare(
+      `INSERT INTO tg_channels (chat_id, title, username, events_json, enabled, created_at, created_by)
+       VALUES (?, ?, ?, ?, 1, ?, 'auto:my_chat_member')
+       ON CONFLICT(chat_id) DO UPDATE SET title = excluded.title, username = excluded.username, enabled = 1`
+    )
+      .bind(chatId, chat.title ?? "", chat.username ?? null, "{}", Date.now())
+      .run()
+  } else if (status === "left" || status === "kicked") {
+    await env.DB.prepare("UPDATE tg_channels SET enabled = 0 WHERE chat_id = ?").bind(chatId).run()
+  }
+}
+
+/** GET /admin/tg/channels */
+export async function listChannels(env: Env, request: Request): Promise<Response> {
+  await requireAdminScope(env, request, "telegram")
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM tg_channels ORDER BY created_at DESC"
+  ).all<ChannelRow>()
+  return json({
+    channels: (results ?? []).map((c) => ({
+      chatId: c.chat_id,
+      title: c.title,
+      username: c.username,
+      enabled: !!c.enabled,
+      events: { ...DEFAULT_CHANNEL_EVENTS, ...parseJson<Record<string, boolean>>(c.events_json, {}) },
+      createdAt: c.created_at,
+      lastOkAt: c.last_ok_at,
+      lastError: c.last_error,
+    })),
+    defaults: DEFAULT_CHANNEL_EVENTS,
+  })
+}
+
+/** POST /admin/tg/channels —— 手工登记一个频道（会先调 getChat 校验机器人是否在里面） */
+export async function addChannel(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "telegram")
+  const body = await readJson<{ chatId?: string }>(request, 4 * 1024)
+  const chatId = (body.chatId ?? "").trim()
+  if (!chatId) throw new ApiError(400, "请填写频道 ID 或 @用户名", "INVALID_CHANNEL")
+  const cfg = await loadConfig(env)
+  const token = await botToken(env, cfg)
+  if (!token) throw new ApiError(400, "请先保存机器人 Token", "NO_TOKEN")
+  const info = await tgApi(env, "getChat", { chat_id: chatId }, token)
+  if (!info.ok) throw new ApiError(400, `读取频道失败：${info.description ?? "未知错误"}`, "CHANNEL_LOOKUP_FAILED")
+  const chat = info.result as { id?: number; title?: string; username?: string; type?: string }
+  if (chat.type !== "channel") throw new ApiError(400, "这不是频道（群组请让机器人入群后按频道方式使用）", "NOT_A_CHANNEL")
+  await env.DB.prepare(
+    `INSERT INTO tg_channels (chat_id, title, username, events_json, enabled, created_at, created_by)
+     VALUES (?, ?, ?, '{}', 1, ?, ?)
+     ON CONFLICT(chat_id) DO UPDATE SET title = excluded.title, username = excluded.username, enabled = 1`
+  )
+    .bind(String(chat.id ?? chatId), chat.title ?? "", chat.username ?? null, Date.now(), admin.id)
+    .run()
+  await recordAudit(env, admin.id, "tg.channel.add", String(chat.id ?? chatId))
+  return json({ ok: true, chatId: String(chat.id ?? chatId), title: chat.title ?? "" })
+}
+
+/** POST /admin/tg/channels/update —— 开关频道 / 改事件订阅 */
+export async function updateChannel(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "telegram")
+  const body = await readJson<{ chatId?: string; enabled?: boolean; events?: Record<string, boolean> }>(
+    request,
+    8 * 1024
+  )
+  const chatId = (body.chatId ?? "").trim()
+  if (!chatId) throw new ApiError(400, "缺少 chatId", "INVALID_CHANNEL")
+  const row = await env.DB.prepare("SELECT * FROM tg_channels WHERE chat_id = ?")
+    .bind(chatId)
+    .first<ChannelRow>()
+  if (!row) throw new ApiError(404, "频道不存在", "NOT_FOUND")
+  if (typeof body.enabled === "boolean") {
+    await env.DB.prepare("UPDATE tg_channels SET enabled = ? WHERE chat_id = ?")
+      .bind(body.enabled ? 1 : 0, chatId)
+      .run()
+  }
+  if (body.events) {
+    const merged = {
+      ...DEFAULT_CHANNEL_EVENTS,
+      ...parseJson<Record<string, boolean>>(row.events_json, {}),
+      ...body.events,
+    }
+    await env.DB.prepare("UPDATE tg_channels SET events_json = ? WHERE chat_id = ?")
+      .bind(JSON.stringify(merged), chatId)
+      .run()
+  }
+  await recordAudit(env, admin.id, "tg.channel.update", chatId)
+  return json({ ok: true })
+}
+
+/** DELETE /admin/tg/channels/:id */
+export async function deleteChannel(env: Env, request: Request, chatId: string): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "telegram")
+  await env.DB.prepare("DELETE FROM tg_channels WHERE chat_id = ?").bind(decodeURIComponent(chatId)).run()
+  await recordAudit(env, admin.id, "tg.channel.delete", chatId)
+  return json({ ok: true })
+}
+
+/** POST /admin/tg/channels/test —— 往某个频道发一条测试消息 */
+export async function testChannel(env: Env, request: Request): Promise<Response> {
+  const admin = await requireAdminScope(env, request, "telegram")
+  const body = await readJson<{ chatId?: string }>(request, 4 * 1024)
+  const chatId = (body.chatId ?? "").trim()
+  if (!chatId) throw new ApiError(400, "缺少 chatId", "INVALID_CHANNEL")
+  const cfg = await loadConfig(env)
+  const token = await botToken(env, cfg)
+  if (!token) throw new ApiError(400, "请先保存机器人 Token", "NO_TOKEN")
+  const r = await tgApi(
+    env,
+    "sendMessage",
+    {
+      chat_id: chatId,
+      text: "☁️ <b>DoulorCloud</b>\n频道推送测试成功，之后这里会收到公告与新作品通知。",
+      parse_mode: "HTML",
+    },
+    token
+  )
+  await logPush(env, "ch:test", chatId, r.ok, r.ok ? undefined : r.description)
+  if (!r.ok) throw new ApiError(400, `发送失败：${r.description ?? "未知错误"}`, "SEND_FAILED")
+  await recordAudit(env, admin.id, "tg.channel.test", chatId)
+  return json({ ok: true })
 }
