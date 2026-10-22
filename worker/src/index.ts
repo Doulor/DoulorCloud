@@ -589,7 +589,7 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     kind: "exact",
     path: "/admin/tg/config",
     method: "POST",
-    handle: () => telegramHandlers.updateAdminConfig(env, request),
+    handle: () => telegramHandlers.updateAdminConfig(env, request, ctx),
   },
   {
     kind: "exact",

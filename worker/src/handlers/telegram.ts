@@ -263,12 +263,26 @@ interface ConfigUpdateBody {
  * 传 `token` 时先 `getMe` 验真再落库（避免存一个错 token 还显示「已配置」）；
  * 落库前用 SESSION_SECRET 加密，审计只记脱敏值。
  */
-export async function updateAdminConfig(env: Env, request: Request): Promise<Response> {
+export async function updateAdminConfig(
+  env: Env,
+  request: Request,
+  ctx?: ExecutionContext
+): Promise<Response> {
   const admin = await requireAdminScope(env, request, "telegram")
   const body = await readJson<ConfigUpdateBody>(request, 8 * 1024)
   const sets: string[] = []
   const binds: unknown[] = []
   let note = ""
+
+  // ⚠️ 必须在 UPDATE **之前**取旧值：下面的「命令开关有没有变」要靠它比较。
+  // 之前这段读在 UPDATE 之后，前后永远相等 ⇒ 永远不会触发菜单刷新（2026-10-22 修的）。
+  const before = await env.DB.prepare("SELECT commands_json FROM tg_bot_config WHERE id = 1").first<{
+    commands_json: string | null
+  }>()
+  const prevCommands = {
+    ...DEFAULT_COMMANDS,
+    ...parseJson<Record<string, boolean>>(before?.commands_json ?? null, {}),
+  }
 
   if (typeof body.enabled === "boolean") {
     sets.push("enabled = ?")
@@ -317,14 +331,21 @@ export async function updateAdminConfig(env: Env, request: Request): Promise<Res
     .run()
   await recordAudit(env, admin.id, "tg.config.update", note.trim() || "无变化")
 
-  // 命令开关变了 → 立刻重刷菜单，被关掉的命令马上从「/」候选里消失。
-  // 刷新失败不影响保存本身（配置已经落库，站长还能手点「同步命令菜单」重试）。
+  // 命令开关变了 → 重刷菜单，被关掉的命令马上从「/」候选里消失。
+  //
+  // 两个性能保护：
+  //  ① 开关与库里完全一致就跳过 —— 改推送开关/启用状态时不该白刷一遍菜单；
+  //  ② 有 ctx 就走 waitUntil 后台跑 —— 管理页的「保存」不必等几百个 chat 刷完。
+  // 刷新失败不影响保存本身（配置已落库，站长还能手点「同步命令菜单」重试）。
   if (body.commands && typeof body.commands === "object") {
-    try {
-      const commands = { ...DEFAULT_COMMANDS, ...body.commands }
-      await syncAllMenus(env, commands)
-    } catch (err) {
-      console.error("命令开关保存后刷新菜单失败:", err)
+    const merged = { ...DEFAULT_COMMANDS, ...body.commands }
+    const changed = JSON.stringify(merged) !== JSON.stringify(prevCommands)
+    if (changed) {
+      const job = syncAllMenus(env, merged).catch((err) => {
+        console.error("命令开关保存后刷新菜单失败:", err)
+      })
+      if (ctx) ctx.waitUntil(job)
+      else await job
     }
   }
 
@@ -1680,12 +1701,19 @@ async function refreshChatMenu(env: Env, chatId: string, cfg: TgConfigRow): Prom
 /**
  * 把「默认菜单 + 每个已绑定 chat 的菜单」按当前开关重刷一遍。
  *
- * 保存命令开关后会自动调用（见 updateAdminConfig）—— 否则被关掉的命令会一直挂在
- * 「/」候选里，直到用户碰巧发了 /start。返回值里的 chats 是刷新成功的 chat 数。
+ * ⚠️ 为什么是「遍历」：Telegram 的菜单是**按 chat 存**的，没有"给所有用户设一次"的接口。
+ * 分档菜单（未绑定只有 /bind、绑定有全套、管理员多 /status）只能靠 chat 级 scope 实现，
+ * 而未绑定的用户我们拿不到 chat_id，所以只能反过来：已知的绑定 chat 逐个设，其余落 default。
+ *
+ * 性能：
+ *   · **并发 20 条一批** —— 串行时 500 个用户要跑 75~150 秒（Worker 直接超时）
+ *   · 调用方传 ctx 时走 waitUntil 后台跑，管理页保存秒回
+ *   · 命令开关没变化时不会进这里（见 updateAdminConfig 的前置比较）
  */
 async function syncAllMenus(
   env: Env,
-  commands: Record<string, boolean>
+  commands: Record<string, boolean>,
+  concurrency = 20
 ): Promise<{ chats: number; total: number }> {
   const def = await tgApi(env, "setMyCommands", {
     commands: buildCommandMenu({ bound: false, isAdminUser: false, commands }),
@@ -1694,21 +1722,28 @@ async function syncAllMenus(
   if (!def.ok) throw new ApiError(400, `设置默认菜单失败：${def.description ?? "未知错误"}`, "SET_MENU_FAILED")
 
   const { results } = await env.DB.prepare(
-    `SELECT b.telegram_id, u.role FROM tg_bindings b LEFT JOIN users u ON u.id = b.user_id LIMIT 500`
+    `SELECT b.telegram_id, u.role FROM tg_bindings b LEFT JOIN users u ON u.id = b.user_id LIMIT 2000`
   ).all<{ telegram_id: string; role: string | null }>()
+  const rows = results ?? []
+
   let ok = 0
-  for (const row of results ?? []) {
-    const done = await setChatMenu(
-      env,
-      row.telegram_id,
-      buildCommandMenu({ bound: true, isAdminUser: isAnyAdmin(row.role ?? ""), commands })
+  for (let i = 0; i < rows.length; i += concurrency) {
+    const batch = rows.slice(i, i + concurrency)
+    const done = await Promise.all(
+      batch.map((row) =>
+        setChatMenu(
+          env,
+          row.telegram_id,
+          buildCommandMenu({ bound: true, isAdminUser: isAnyAdmin(row.role ?? ""), commands })
+        ).catch(() => false)
+      )
     )
-    if (done) ok++
+    ok += done.filter(Boolean).length
   }
-  return { chats: ok, total: results?.length ?? 0 }
+  return { chats: ok, total: rows.length }
 }
 
-/** 管理端「同步命令菜单」：手动全量重刷（保存开关时也会自动跑一次） */
+/** 管理端「同步命令菜单」：手动全量重刷（保存命令开关时也会自动跑一次） */
 export async function syncCommands(env: Env, request: Request): Promise<Response> {
   const admin = await requireAdminScope(env, request, "telegram")
   const cfg = await loadConfig(env)
