@@ -464,6 +464,34 @@ export async function publishAnnouncementNow(
   const row = await loadOne(env, id)
   if (row.published_at) return 0 // 已发布过，幂等
 
+  /**
+   * TG 频道推送**必须排在全站广播之前**（2026-10-23 修）。
+   *
+   * 事故经过：原来它排在 `broadcastMessage` 之后，而那次广播要一次插 1000+ 行
+   * 站内通知 + 排邮件队列；就在那个窗口里 D1 报了
+   * `D1_ERROR: Network connection lost`，把后面的推送整段带走了 ——
+   * 表现就是「公告发了、站内信都到了、TG 频道一条没有」。
+   *
+   * 现在先推频道（只读配置 + 1 次 sendMessage，几十毫秒），再去干重活。
+   * 失败也不影响发布（pushToChannels 内部已兜住异常并落 ch:*:err 日志）。
+   */
+  try {
+    await pushToChannels(
+      env,
+      "announcement",
+      [
+        `📢 <b>${row.title}</b>`,
+        "",
+        (row.body || "").replace(/\s+/g, " ").slice(0, 300),
+        "",
+        `☁️ https://cloud.doulor.cn/dashboard/messages/site`,
+      ].join("\n")
+    )
+  } catch (err) {
+    console.error("公告频道推送失败:", id, err)
+  }
+
+
   // 广播到站内消息中心「网站动态」
   try {
     await broadcastMessage(
@@ -480,23 +508,6 @@ export async function publishAnnouncementNow(
     )
   } catch (err) {
     console.error("公告消息广播失败:", id, err)
-  }
-
-  // TG 频道推送：公告是唯一「全员都该知道」的事件，这里失败不影响发布。
-  try {
-    await pushToChannels(
-      env,
-      "announcement",
-      [
-        `📢 <b>${row.title}</b>`,
-        "",
-        (row.body || "").replace(/\s+/g, " ").slice(0, 300),
-        "",
-        `☁️ https://cloud.doulor.cn/dashboard/messages/site`,
-      ].join("\n")
-    )
-  } catch (err) {
-    console.error("公告频道推送失败:", id, err)
   }
 
   // 邮件群发：入队（快照收件人）+ 后台分批发送，不阻塞调用方。
