@@ -164,3 +164,47 @@ export async function hardResetAndReload(): Promise<void> {
     window.location.reload()
   }
 }
+
+
+/**
+ * 旧 Service Worker 自愈：对比「当前线上 sw.js」与「上次看到的 sw.js」。
+ *
+ * 为什么需要：SW 一旦更新不及时，会用旧的缓存策略接走 fetch —— 表现五花八门
+ * （动态 chunk 404、FetchEvent network error、iframe 加载被搅乱…），
+ * 而普通用户不会去 Application 面板手动 Unregister。
+ *
+ * 只在**版本变化**时动手，且一个会话最多自愈一次，绝不影响正常访问。
+ */
+const SW_HASH_KEY = "sw-script-hash"
+const SW_HEALED_KEY = "sw-healed-at"
+
+export function verifyServiceWorkerVersion(): void {
+  try {
+    if (!("serviceWorker" in navigator)) return
+    if (sessionStorage.getItem(SW_HEALED_KEY)) return
+    void fetch("/sw.js", { cache: "no-store" })
+      .then((r) => (r.ok ? r.text() : null))
+      .then(async (text) => {
+        if (!text) return
+        // 极简指纹：长度 + 首尾各 64 字符，足够发现"换了版本"
+        const fingerprint = `len=${text.length};head=${text.slice(0, 64)};tail=${text.slice(-64)}`
+        const prev = localStorage.getItem(SW_HASH_KEY)
+        localStorage.setItem(SW_HASH_KEY, fingerprint)
+        if (!prev || prev === fingerprint) return
+
+        const regs = await navigator.serviceWorker.getRegistrations()
+        if (regs.length === 0) return
+        await Promise.all(regs.map((r) => r.unregister().catch(() => false)))
+        if (typeof caches !== "undefined") {
+          const keys = await caches.keys()
+          await Promise.all(keys.map((k) => caches.delete(k).catch(() => false)))
+        }
+        sessionStorage.setItem(SW_HEALED_KEY, String(Date.now()))
+        // 硬刷新一次拿最新资源（有防循环标记，不会连着刷）
+        location.reload()
+      })
+      .catch(() => {})
+  } catch {
+    /* ignore */
+  }
+}

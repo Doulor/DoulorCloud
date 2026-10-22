@@ -15,7 +15,7 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { reloadOnceForChunkError } from "@/lib/chunk-error"
 import { diagError } from "@/lib/diag-log"
 import "@/index.css"
-import { selfHealServiceWorkers } from "@/lib/chunk-error"
+import { selfHealServiceWorkers, verifyServiceWorkerVersion } from "@/lib/chunk-error"
 import { BootReadyProbe } from "@/components/boot-ready-probe"
 
 /**
@@ -52,6 +52,8 @@ window.addEventListener("unhandledrejection", (e) => {
 
 // 启动时做一次性安全自愈（见函数注释：清理被投毒 SW/缓存）
 selfHealServiceWorkers()
+// 旧 SW 自愈：版本变了就 unregister + 清缓存再刷新一次（见 chunk-error.ts）
+verifyServiceWorkerVersion()
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ErrorBoundary>
