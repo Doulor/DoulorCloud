@@ -586,7 +586,9 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
 
   // 站内 → TG 群（方案 A：单向）。内部有 1 条/秒节流且全吞异常，
   // 聊天能不能发出去与推送成败无关。
-  void pushToChatGroups(env, `${user.nickname ?? user.username}：${finalText}`).catch(() => 0)
+  // ⚠️ 必须 await：Worker 返回响应后会取消悬空 Promise（今天在登录提醒上踩过同一个坑），
+  // 用 void 的话这条推送**永远发不出去**。内部 1 条/秒节流 + 全吞异常，不影响发言。
+  await pushToChatGroups(env, `${user.nickname ?? user.username}：${finalText}`)
 
   return json({
     message: {
