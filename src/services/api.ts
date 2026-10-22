@@ -5675,3 +5675,22 @@ export const adminTgApi = {
 
   logs: () => request<{ logs: AdminTgLog[] }>("/admin/tg/logs"),
 }
+
+
+/** 用户侧：Telegram 绑定（站内生成一次性码 → 到 bot 里 /bind） */
+export const tgBindApi = {
+  status: () =>
+    request<{
+      bound: boolean
+      telegramId?: string
+      tgUsername?: string | null
+      boundAt?: number
+      muted?: string[]
+    }>("/me/tg/binding"),
+  createCode: () =>
+    request<{ ok: boolean; code?: string; expiresAt?: number; alreadyBound?: boolean; telegramId?: string }>(
+      "/me/tg/bind-code",
+      { method: "POST" }
+    ),
+  unbind: () => request<{ ok: boolean }>("/me/tg/binding", { method: "DELETE" }),
+}

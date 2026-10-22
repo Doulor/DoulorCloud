@@ -26,6 +26,7 @@ import * as adminChannelHandlers from "./handlers/admin-channels"
 import * as adminPermHandlers from "./handlers/admin-perms"
 import * as noticeHandlers from "./handlers/notices"
 import * as telegramHandlers from "./handlers/telegram"
+import { pushMessage } from "./handlers/telegram"
 import * as storageHandlers from "./handlers/storage"
 import { rootDomainFor } from "./root-domains"
 import * as newapiHandlers from "./handlers/newapi"
@@ -149,7 +150,7 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/login",
     method: "POST",
     handle: () =>
-      authHandlers.login(env, request),
+      authHandlers.login(env, request, ctx),
   },
 
   // ---- 登录第二步：二次验证（2FA）----
@@ -633,6 +634,23 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/me/tg/bind-code",
     method: "POST",
     handle: () => telegramHandlers.createBindCode(env, request),
+  },  {
+    kind: "exact",
+    path: "/me/tg/binding",
+    method: "GET",
+    handle: () => telegramHandlers.getMyBinding(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/me/tg/binding",
+    method: "DELETE",
+    handle: () => telegramHandlers.deleteMyBinding(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/me/tg/binding/mute",
+    method: "POST",
+    handle: () => telegramHandlers.setMyMuted(env, request),
   },
   {
     kind: "exact",
@@ -5546,5 +5564,112 @@ export default {
         if (r.failed > 0) console.warn("中转站批量同步有失败项:", JSON.stringify(r))
       })
     )
+      /**
+       * TG 机器人定时任务（2026-10-22）：**每小时一次**，搭在已有的每分钟 tick 上，
+       * 靠「分钟数 == 23」去重 —— 新开一条 cron 只会多一份配置漂移风险
+       * （controller.cron 必须与 wrangler.toml 的 crons 一一对应）。
+       *
+       *  ① 内网穿透到期前 3 天提醒（每用户每天最多一条）
+       *  ② 节点掉线报警（发管理员，每小时最多一条）
+       *  ③ 每日简报（发管理员，20 小时内最多一条）
+       *
+       * 三条都走 pushMessage：Bot 未启用 / 推送开关关闭 / 用户没绑定 TG / 用户关掉该类通知，
+       * 内部一律直接返回 0，不需要在这里重复判断。
+       */
+      if (new Date(controller.scheduledTime).getUTCMinutes() === 23) {
+        ctx.waitUntil(
+          (async () => {
+            // ① 到期提醒：窗口 3 天，按 expires_at 升序（最急的在前），限量防一次刷爆
+            try {
+              const deadline = new Date(Date.now() + 3 * 24 * 3600 * 1000).toISOString()
+              const { results: expiring } = await env.DB.prepare(
+                `SELECT s.user_id, s.expires_at, n.name AS node_name
+                   FROM frp_subscriptions s
+                   LEFT JOIN frp_nodes n ON n.id = s.node_id
+                  WHERE s.status = 'active' AND s.expires_at <= ?
+                  ORDER BY s.expires_at ASC
+                  LIMIT 50`
+              )
+                .bind(deadline)
+                .all<{ user_id: string; expires_at: string; node_name: string | null }>()
+              for (const row of expiring ?? []) {
+                const days = Math.max(
+                  0,
+                  Math.ceil((Date.parse(row.expires_at) - Date.now()) / (24 * 3600 * 1000))
+                )
+                await pushMessage(env, "frpExpiry", {
+                  userId: row.user_id,
+                  dedupeHours: 20,
+                  text: [
+                    "⏳ <b>内网穿透即将到期</b>",
+                    `节点：${row.node_name ?? "未知"}`,
+                    `到期：${new Date(row.expires_at).toLocaleString("zh-CN", { hour12: false })}（约 ${days} 天后）`,
+                    "",
+                    "到期后隧道会断开。续费：cloud.doulor.cn → 内网穿透",
+                  ].join("\n"),
+                })
+              }
+            } catch (err) {
+              console.error("TG 到期提醒失败:", err)
+            }
+
+            // ② 节点掉线：agent 心跳超过 10 分钟没更新就报警（与 listRentalPlans 判定口径一致）
+            try {
+              const { results: nodes } = await env.DB.prepare(
+                `SELECT n.name, a.last_seen_at
+                   FROM frp_nodes n
+                   LEFT JOIN frp_agent_state a ON a.node_id = n.id`
+              ).all<{ name: string; last_seen_at: string | null }>()
+              const down = (nodes ?? []).filter(
+                (n) => n.last_seen_at && Date.now() - Date.parse(n.last_seen_at) > 10 * 60 * 1000
+              )
+              if (down.length > 0) {
+                await pushMessage(env, "nodeDown", {
+                  dedupeHours: 1,
+                  text: [
+                    "🚨 <b>内网穿透节点离线</b>",
+                    ...down.map(
+                      (n) =>
+                        `· ${n.name}（最后心跳 ${new Date(n.last_seen_at as string).toLocaleString("zh-CN", { hour12: false })}）`
+                    ),
+                    "",
+                    "用户侧租约会在购买/续费时被拦截，建议尽快排查 agent。",
+                  ].join("\n"),
+                })
+              }
+            } catch (err) {
+              console.error("TG 节点掉线报警失败:", err)
+            }
+
+            // ③ 每日简报：20 小时去重（比 24 小时短一点，避免时钟漂移导致某天漏发）
+            try {
+              const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString()
+              const [users, fresh, rentals, bound] = await Promise.all([
+                env.DB.prepare("SELECT COUNT(*) AS n FROM users").first<{ n: number }>(),
+                env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE created_at > ?")
+                  .bind(since)
+                  .first<{ n: number }>(),
+                env.DB.prepare(
+                  "SELECT COUNT(*) AS n FROM frp_subscriptions WHERE status = 'active'"
+                ).first<{ n: number }>(),
+                env.DB.prepare("SELECT COUNT(*) AS n FROM tg_bindings").first<{ n: number }>(),
+              ])
+              await pushMessage(env, "daily", {
+                dedupeHours: 20,
+                text: [
+                  "📊 <b>DoulorCloud 每日简报</b>",
+                  `用户：${users?.n ?? 0}（24h 新增 ${fresh?.n ?? 0}）`,
+                  `内网穿透在用租约：${rentals?.n ?? 0}`,
+                  `TG 绑定：${bound?.n ?? 0}`,
+                  "",
+                  new Date().toLocaleDateString("zh-CN"),
+                ].join("\n"),
+              })
+            } catch (err) {
+              console.error("TG 每日简报失败:", err)
+            }
+          })()
+        )
+      }
   },
 }

@@ -18,6 +18,7 @@ import { grantInvitePoints } from "../points"
 import { evaluateTwoFactorGate, createLoginChallenge, maskEmail } from "./two-factor"
 import { createSession, destroySession, requireUser, sessionCookie, clearedSessionCookie, getSessionTokens, toPublicUser, loadPendingReply, type UserRow, isPrivileged } from "../auth"
 import { recordLoginIp } from "../login-ip"
+import { pushMessage } from "./telegram"
 import type { Env } from "../env"
 
 /**
@@ -554,7 +555,7 @@ export async function register(env: Env, request: Request): Promise<Response> {
  * `acknowledge` 接口也要用同一份查询，放在共享的 auth 模块里避免两处各写一遍。
  */
 
-export async function login(env: Env, request: Request): Promise<Response> {
+export async function login(env: Env, request: Request, ctx?: ExecutionContext): Promise<Response> {
   const body = (await request.json()) as {
     identifier?: string
     password?: string
@@ -676,7 +677,7 @@ export async function login(env: Env, request: Request): Promise<Response> {
     })
   }
 
-  return completeLogin(env, request, user, { mustSetupTwoFactor: gate.mustSetup })
+  return completeLogin(env, request, user, { mustSetupTwoFactor: gate.mustSetup, ctx })
 }
 
 /**
@@ -693,7 +694,7 @@ export async function completeLogin(
   env: Env,
   request: Request,
   user: UserRow,
-  extra: { mustSetupTwoFactor?: boolean } = {}
+  extra: { mustSetupTwoFactor?: boolean; ctx?: ExecutionContext } = {}
 ): Promise<Response> {
   // 记下最后登录时间（存活率统计用）。
   //
@@ -712,6 +713,30 @@ export async function completeLogin(
   // 放在这里而不是各条登录分支里：口令直登和 2FA 通过都会走 completeLogin，
   // 分开写必然漏一边。失败静默（见 recordLoginIp 注释）。
   await recordLoginIp(env, user.id, clientIp(request))
+
+  /**
+   * 登录安全提醒（2026-10-22）。
+   *
+   * 必须走 `ctx.waitUntil`：Worker 一返回响应就会取消悬空 Promise，
+   * 直接 `void` 的话这条提醒**永远发不出去**（和 me() 里 bumpVisit 那是同一个坑）。
+   * 单测直接调 login 时没有 ctx，退化成 await —— 反正 pushMessage 内部全吞异常，
+   * 不会让已经通过校验的登录失败。
+   */
+  const loginNotice = pushMessage(env, "login", {
+    userId: user.id,
+    text: [
+      "🔐 <b>新登录提醒</b>",
+      `账号：${user.username}`,
+      `时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
+      `IP：${clientIp(request) || "未知"}`,
+      `设备：${(request.headers.get("user-agent") || "未知").slice(0, 60)}`,
+      "",
+      "如非本人操作，请立即修改密码。",
+      "🌐 cloud.doulor.cn",
+    ].join("\n"),
+  })
+  if (extra.ctx) extra.ctx.waitUntil(loginNotice)
+  else await loginNotice
 
   const token = await createSession(env, user.id)
   // 补发未读的申诉回复：用户已解封但还没确认看过回复时，登录后由前端强制弹窗展示

@@ -8579,6 +8579,22 @@ export const zh = {
   "tg.ok": "成功",
   "tg.fail": "失败",
   "tg.saveFailed": "操作失败，请稍后重试",
+  // —— Telegram 绑定卡片 ——
+  "tgb.title": "Telegram 绑定",
+  "tgb.desc": "绑定后可在 Telegram 里收到登录安全提醒、内网穿透到期提醒，并用命令查询自己的账号。",
+  "tgb.bound": "已绑定",
+  "tgb.unbound": "未绑定",
+  "tgb.boundAt": "绑定于",
+  "tgb.gen": "生成绑定码",
+  "tgb.hint": "打开 Telegram，给机器人发送 /bind {code}（10 分钟内有效，只能用一次）",
+  "tgb.expires": "有效期至",
+  "tgb.unbind": "解除绑定",
+  "tgb.unboundDone": "已解除绑定",
+  "tgb.copied": "已复制",
+  "tgb.copyFailed": "复制失败，请手动选中",
+  "tgb.notBoundHint": "还不支持在机器人里登录：必须先在这里生成绑定码，杜绝把密码交给第三方。",
+  "tgb.alreadyBound": "这个账号已经绑定过了",
+  "tgb.failed": "操作失败，请稍后重试",
 } as const
 
 export type MessageKey = keyof typeof zh

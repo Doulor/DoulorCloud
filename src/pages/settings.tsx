@@ -25,6 +25,7 @@ import { TwoFactorCard } from "@/components/two-factor-card"
 import { ApiSettingsCard } from "@/components/api-settings-card"
 import { OAuthAppsCard } from "@/components/oauth-apps-card"
 import { OAuthEndpointsCard } from "@/components/oauth-endpoints"
+import { TgBindCard } from "@/components/tg-bind-card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -1102,6 +1103,8 @@ export default function SettingsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <TgBindCard />
+
     </div>
   )
 }

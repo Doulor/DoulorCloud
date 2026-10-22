@@ -648,28 +648,86 @@ export type PushKind = "login" | "frpExpiry" | "nodeDown" | "daily"
 export async function pushMessage(
   env: Env,
   kind: PushKind,
-  opts: { userId?: string; text: string; adminOnly?: boolean }
-): Promise<void> {
+  opts: { userId?: string; text: string; adminOnly?: boolean; dedupeHours?: number }
+): Promise<number> {
+  let sent = 0
   try {
     const cfg = await loadConfig(env)
-    if (!cfg.enabled) return
+    if (!cfg.enabled) return 0
     const pushes = { ...DEFAULT_PUSHES, ...parseJson<Record<string, boolean>>(cfg.pushes_json, {}) }
-    if (pushes[kind] === false) return
-    if (!(await botToken(env, cfg))) return
+    if (pushes[kind] === false) return 0
+    if (!(await botToken(env, cfg))) return 0
     let targets: string[]
     if (opts.userId) {
       const row = await env.DB.prepare("SELECT telegram_id, muted_json FROM tg_bindings WHERE user_id = ?")
         .bind(opts.userId)
         .first<{ telegram_id: string; muted_json: string }>()
-      if (!row) return
+      if (!row) return 0
       const muted = parseJson<string[]>(row.muted_json, [])
-      if (muted.includes(kind)) return
+      if (muted.includes(kind)) return 0
       targets = [row.telegram_id]
     } else {
       targets = await adminTargets(env)
     }
-    for (const t of targets) await sendTo(env, t, opts.text)
+    for (const t of targets) {
+      // 去重：同一接收方在窗口内已经收过同类推送就不再发（到期提醒/掉线/日报都需要）
+      if (opts.dedupeHours && (await pushedRecently(env, kind, t, opts.dedupeHours))) continue
+      if (await sendTo(env, t, opts.text)) sent++
+    }
   } catch {
     // 推送失败绝不影响业务主流程
   }
+  return sent
+}
+
+/** 某个接收方在 N 小时内是否已收到过同类推送（配合 pushMessage 的 dedupeHours） */
+async function pushedRecently(
+  env: Env,
+  kind: string,
+  target: string,
+  hours: number
+): Promise<boolean> {
+  const since = Date.now() - hours * 3600 * 1000
+  const row = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM tg_push_log WHERE kind = ? AND target = ? AND ok = 1 AND created_at > ?"
+  )
+    .bind(kind, target, since)
+    .first<{ n: number }>()
+  return (row?.n ?? 0) > 0
+}
+
+/** GET /me/tg/binding —— 当前用户的绑定状态（没绑定返回 bound:false） */
+export async function getMyBinding(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const row = await env.DB.prepare(
+    "SELECT telegram_id, tg_username, bound_at, muted_json FROM tg_bindings WHERE user_id = ?"
+  )
+    .bind(user.id)
+    .first<{ telegram_id: string; tg_username: string | null; bound_at: number; muted_json: string }>()
+  if (!row) return json({ bound: false })
+  return json({
+    bound: true,
+    telegramId: row.telegram_id,
+    tgUsername: row.tg_username,
+    boundAt: row.bound_at,
+    muted: parseJson<string[]>(row.muted_json, []),
+  })
+}
+
+/** DELETE /me/tg/binding —— 用户自助解绑 */
+export async function deleteMyBinding(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  await env.DB.prepare("DELETE FROM tg_bindings WHERE user_id = ?").bind(user.id).run()
+  return json({ ok: true })
+}
+
+/** POST /me/tg/binding/mute —— 用户关掉某类通知（目前页面上还没露出，先留接口） */
+export async function setMyMuted(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const body = await readJson<{ muted?: string[] }>(request, 4 * 1024)
+  const muted = (body.muted ?? []).filter((k) => typeof k === "string").slice(0, 10)
+  await env.DB.prepare("UPDATE tg_bindings SET muted_json = ? WHERE user_id = ?")
+    .bind(JSON.stringify(muted), user.id)
+    .run()
+  return json({ ok: true, muted })
 }
