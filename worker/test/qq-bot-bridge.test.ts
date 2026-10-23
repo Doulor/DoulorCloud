@@ -111,10 +111,10 @@ describe("QQ 机器人 · 群 @ 消息进站内", () => {
     expect(rows[0].qq_message_id).toBe("MSG_1")
 
     const shadow = await env.DB.prepare("SELECT role, nickname FROM users WHERE qq_shadow_id = ?")
-      .bind("MEMBER_OPENID_A")
+      .bind(`group:${GROUP}`)
       .first<{ role: string; nickname: string }>()
     expect(shadow?.role).toBe("guest")
-    expect(shadow?.nickname).toContain("QQ:")
+    expect(shadow?.nickname).toBe("QQ 群友")
   })
 
   it("GROUP_MESSAGE_CREATE（全量群消息，不用 @）也能进站内", async () => {
@@ -169,7 +169,7 @@ describe("QQ 机器人 · 群 @ 消息进站内", () => {
     await handleQqWebhook(env, hook(atMessage({ content: "<@!1> 第一条", id: "M1" })))
     await handleQqWebhook(env, hook(atMessage({ content: "<@!1> 第二条", id: "M2" })))
     const n = await env.DB.prepare("SELECT COUNT(*) AS c FROM users WHERE qq_shadow_id = ?")
-      .bind("MEMBER_OPENID_A")
+      .bind(`group:${GROUP}`)
       .first<{ c: number }>()
     expect(n?.c).toBe(1)
     expect((await qqRows()).length).toBe(2)

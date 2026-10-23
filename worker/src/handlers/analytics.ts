@@ -299,7 +299,7 @@ export async function userOverview(env: Env, request: Request): Promise<Response
     newUserRes,
     extraRes,
   ] = await env.DB.batch([
-    env.DB.prepare("SELECT COUNT(*) AS c FROM users"),
+    env.DB.prepare("SELECT COUNT(*) AS c FROM users WHERE role <> 'guest'"),
     env.DB.prepare("SELECT role, COUNT(*) AS c FROM users GROUP BY role"),
     env.DB.prepare("SELECT status, COUNT(*) AS c FROM users GROUP BY status"),
     // 资料完整度 / 邀请来源
@@ -351,7 +351,7 @@ export async function userOverview(env: Env, request: Request): Promise<Response
     // 新增用户趋势
     env.DB.prepare(
       `SELECT substr(datetime(created_at, '+8 hours'), 1, 10) AS date, COUNT(*) AS c
-         FROM users WHERE created_at >= ?
+         FROM users WHERE created_at >= ? AND role <> 'guest'
         GROUP BY date ORDER BY date ASC`
     ).bind(since),
     // 存活率（按最后登录时间分桶 + 各窗口计数）
@@ -388,7 +388,7 @@ export async function userOverview(env: Env, request: Request): Promise<Response
     env.DB.prepare(
       `SELECT COUNT(*) AS registered,
               SUM(CASE WHEN last_login_at IS NOT NULL THEN 1 ELSE 0 END) AS loggedIn
-         FROM users WHERE created_at >= ?`
+         FROM users WHERE created_at >= ? AND role <> 'guest'`
     ).bind(since30d),
     // 「更多数据」：跨模块的补充指标（中转站/积分/成就/反馈/社区/邮件/邀请/其他）。
     // 一次性子查询拉全，标签在响应里服务端下发（与 FEATURE_LABELS 同约定）。

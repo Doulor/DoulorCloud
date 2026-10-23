@@ -94,11 +94,12 @@ describe("TG 群 → 站内聊天室", () => {
     expect(rows[0].tg_message_id).toBe("9001")
 
     const guest = await env.DB.prepare("SELECT id, role, nickname, username FROM users WHERE tg_shadow_id = ?")
-      .bind("700000123")
+      .bind(`group:${GROUP_ID}`)
       .first<{ id: string; role: string; nickname: string; username: string }>()
     expect(guest?.role).toBe("guest")
-    expect(guest?.username).toBe("tg_700000123")
-    expect(guest?.nickname).toContain("TG:")
+    // 2026-10-24 起：每个群只建一个访客账号（不再按人），避免用户数虚增
+    expect(guest?.username).toMatch(/^tg_guest_/)
+    expect(guest?.nickname).toBe("TG 群友")
     expect(rows[0].user_id).toBe(guest?.id)
   })
 
@@ -106,7 +107,7 @@ describe("TG 群 → 站内聊天室", () => {
     await handleWebhook(env, hook(groupMsg({ text: "第一条", fromId: 700000200, messageId: 1 })))
     await handleWebhook(env, hook(groupMsg({ text: "第二条", fromId: 700000200, messageId: 2 })))
     const n = await env.DB.prepare("SELECT COUNT(*) AS c FROM users WHERE tg_shadow_id = ?")
-      .bind("700000200")
+      .bind(`group:${GROUP_ID}`)
       .first<{ c: number }>()
     expect(n?.c).toBe(1)
     expect((await chatRows()).length).toBe(2)
@@ -125,7 +126,7 @@ describe("TG 群 → 站内聊天室", () => {
     expect(rows[0].user_id).toBe(user.id)
     // 不应为已绑定用户建影子账号
     const shadow = await env.DB.prepare("SELECT COUNT(*) AS c FROM users WHERE tg_shadow_id = ?")
-      .bind("700000300")
+      .bind(`group:${GROUP_ID}`)
       .first<{ c: number }>()
     expect(shadow?.c).toBe(0)
   })
@@ -224,17 +225,19 @@ describe("TG 群 → 站内聊天室", () => {
     expect((await chatRows()).length).toBe(0)
   })
 
-  it("影子账号不能登录（显式 403，不依赖『没有密码』这个隐性条件）", async () => {
+  it("访客账号不能登录（显式 403，不依赖『没有密码』这个隐性条件）", async () => {
     await handleWebhook(env, hook(groupMsg({ text: "先建号", fromId: 700000600 })))
-    // login() 走的是 ApiError（统一错误处理在路由层转成 403 JSON），
-    // 所以这里断言的是 reject 的 status/code，而不是 Response。
+    const guest = await env.DB.prepare("SELECT username FROM users WHERE tg_shadow_id = ?")
+      .bind(`group:${GROUP_ID}`)
+      .first<{ username: string }>()
+    expect(guest?.username).toBeTruthy()
     await expect(
       login(
         env,
         new Request("https://cloud.doulor.cn/api/login", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ identifier: "tg_700000600", password: "whatever" }),
+          body: JSON.stringify({ identifier: guest!.username, password: "whatever" }),
         })
       )
     ).rejects.toMatchObject({ status: 403, code: "GUEST_NO_LOGIN" })

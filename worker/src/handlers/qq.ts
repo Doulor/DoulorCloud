@@ -279,9 +279,9 @@ async function bridgeGroupMessage(env: Env, d: QqPayload["d"]): Promise<void> {
     return
   }
 
-  // 群里绑定过 → 记到本人名下；没绑定才建影子账号
+  // 群里绑定过 → 记到本人名下；没绑定则归到「本群访客」账号
   const bound = await bindingByQq(env, memberOpenid, "group")
-  const userId = bound ? bound.user_id : await ensureShadowUser(env, memberOpenid, d.author?.username ?? null)
+  const userId = bound ? bound.user_id : await ensureGroupGuestUser(env, groupOpenid)
 
   // 限流：同一 QQ 用户 10 条/分钟（直接数 chat_messages，不额外建表）
   const since = new Date(Date.now() - 60_000).toISOString()
@@ -308,20 +308,27 @@ async function bridgeGroupMessage(env: Env, d: QqPayload["d"]): Promise<void> {
  * 注意：QQ 的 member_openid 是**按群隔离**的 —— 同一个人在不同群里 openid 不同，
  * 所以这里一个群里的人对应一个站内影子账号，昵称无法跨群统一。
  */
-async function ensureShadowUser(env: Env, memberOpenid: string, username: string | null): Promise<string> {
+/**
+ * 本群的「访客账号」（2026-10-24 改）。
+ *
+ * 原来每个未绑定的群成员都会建一个影子账号 —— 站长实测「每有一个人说话网站就多一个用户」，
+ * 而 QQ 官方根本不提供昵称，这些账号既不可辨识又污染后台统计。
+ * 现在**每个群只保留一个访客账号**，群里未绑定成员的发言都归到它名下；
+ * 想要自己的名字出现在站内，就 `/bind` 绑定账号。
+ */
+async function ensureGroupGuestUser(env: Env, groupOpenid: string): Promise<string> {
+  const key = `group:${groupOpenid}`
   const found = await env.DB.prepare("SELECT id FROM users WHERE qq_shadow_id = ?")
-    .bind(memberOpenid)
+    .bind(key)
     .first<{ id: string }>()
   if (found) return found.id
 
   const id = uuid()
   const now = new Date().toISOString()
-  // openid 很长且含特殊字符，用户名取短哈希避免重复/超长
-  const short = Array.from(memberOpenid)
-    .reduce((acc, ch) => (acc * 31 + ch.charCodeAt(0)) % 0xffffffff, 7)
-    .toString(36)
-  const uname = `qq_${short}`.slice(0, 32)
-  const nickname = (username ? `QQ:${username}` : `QQ:${uname}`).slice(0, 32)
+  let short = 0
+  for (const ch of groupOpenid) short = (short * 31 + ch.charCodeAt(0)) % 0xffffff
+  const suffix = short.toString(16).toUpperCase().padStart(6, "0")
+  const uname = `qq_guest_${suffix}`.slice(0, 32)
   try {
     await env.DB.prepare(
       `INSERT INTO users (id, username, email, password_hash, namespace, status, role, permissions,
@@ -329,21 +336,18 @@ async function ensureShadowUser(env: Env, memberOpenid: string, username: string
        VALUES (?, ?, ?, ?, ?, 'active', 'guest', '[]', NULL,
                (SELECT COALESCE(MAX(uid), 0) + 1 FROM users), ?, ?, ?, ?)`
     )
-      .bind(id, uname, `${uname}@shadow.invalid`, "!shadow-no-login", uname, now, now, nickname, memberOpenid)
+      .bind(id, uname, `${uname}@shadow.invalid`, "!shadow-no-login", uname, now, now, "QQ 群友", key)
       .run()
     return id
   } catch {
     const again = await env.DB.prepare("SELECT id FROM users WHERE qq_shadow_id = ?")
-      .bind(memberOpenid)
+      .bind(key)
       .first<{ id: string }>()
     if (again) return again.id
     throw new ApiError(500, "创建 QQ 访客账号失败", "SHADOW_FAILED")
   }
 }
 
-/* ==========================================================================
- * 站内 → QQ 群
- * ========================================================================== */
 
 /**
  * 把站内聊天室的一条发言推到已登记的 QQ 群。

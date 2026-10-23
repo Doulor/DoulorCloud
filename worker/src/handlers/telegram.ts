@@ -1497,19 +1497,25 @@ interface TgGroupMessage {
  *   · password_hash 是不可用的占位串，任何口令都验不过
  *   · tg_shadow_id 唯一索引防重复创建（并发下靠 unique violation 兜底再查一次）
  */
-async function ensureShadowUser(env: Env, from: TgGroupMessage["from"]): Promise<string> {
-  const tgId = from?.id != null ? String(from.id) : ""
-  if (!tgId) throw new ApiError(400, "缺少发送者信息", "BAD_UPDATE")
-
+/**
+ * 本群「访客账号」：每个群一个，未绑定成员共用（2026-10-24）。
+ *
+ * 原来按人建影子账号，站长实测「每有一个人说话，网站里就多一个用户」——
+ * 这些账号不可辨识、还会虚增用户统计。现在每群只留一个。
+ */
+async function ensureGroupGuestUser(env: Env, chatId: string): Promise<string> {
+  const key = `group:${chatId}`
   const found = await env.DB.prepare("SELECT id FROM users WHERE tg_shadow_id = ?")
-    .bind(tgId)
+    .bind(key)
     .first<{ id: string }>()
   if (found) return found.id
 
   const id = uuid()
   const now = new Date().toISOString()
-  const username = `tg_${tgId}`.slice(0, 32)
-  const nickname = (from?.username ? `TG:@${from.username}` : `TG:${from?.first_name ?? tgId}`).slice(0, 32)
+  let short = 0
+  for (const ch of chatId) short = (short * 31 + ch.charCodeAt(0)) % 0xffffff
+  const suffix = short.toString(16).toUpperCase().padStart(6, "0")
+  const username = `tg_guest_${suffix}`.slice(0, 32)
   try {
     await env.DB.prepare(
       `INSERT INTO users (id, username, email, password_hash, namespace, status, role, permissions,
@@ -1517,19 +1523,17 @@ async function ensureShadowUser(env: Env, from: TgGroupMessage["from"]): Promise
        VALUES (?, ?, ?, ?, ?, 'active', 'guest', '[]', NULL,
                (SELECT COALESCE(MAX(uid), 0) + 1 FROM users), ?, ?, ?, ?)`
     )
-      .bind(id, username, `${username}@shadow.invalid`, "!shadow-no-login", username, now, now, nickname, tgId)
+      .bind(id, username, `${username}@shadow.invalid`, "!shadow-no-login", username, now, now, "TG 群友", key)
       .run()
     return id
   } catch {
-    // 并发下可能撞唯一索引：再查一次，查到就用
     const again = await env.DB.prepare("SELECT id FROM users WHERE tg_shadow_id = ?")
-      .bind(tgId)
+      .bind(key)
       .first<{ id: string }>()
     if (again) return again.id
     throw new ApiError(500, "创建访客账号失败", "SHADOW_FAILED")
   }
 }
-
 /** 把一条群消息的正文抽出来（纯文本 / 图片+说明 / 贴纸 / 文件） */
 function groupMessageBody(msg: TgGroupMessage): string | null {
   const text = (msg.text ?? "").trim()
@@ -1627,7 +1631,8 @@ async function handleGroupMessage(env: Env, msg: TgGroupMessage, cfg: TgConfigRo
 
     // ④ 身份：绑定过的用本人，没绑定的建影子账号（方案 B）
     const binding = await bindingByTg(env, tgUserId)
-    const userId = binding ? binding.user_id : await ensureShadowUser(env, msg.from)
+    // 未绑定成员统一归到「本群访客」账号（每群一个，避免用户数虚增）
+  const userId = binding ? binding.user_id : await ensureGroupGuestUser(env, groupId)
 
     // ⑤ 落库（source='tg' + tg_message_id 供删帖同步与去重）
     await env.DB.prepare(

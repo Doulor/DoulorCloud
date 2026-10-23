@@ -550,9 +550,10 @@ export async function listUsers(env: Env, request: Request): Promise<Response> {
   // audit_logs 的 register 记录里（与列表带出的 registerIp 同一口径）。
   const regIpExists =
     "(EXISTS(SELECT 1 FROM audit_logs a WHERE a.user_id = u.id AND a.action = 'register' AND a.ip LIKE ?))"
+  // 排除 role='guest'（TG/QQ 群桥接产生的访客影子账号，不是真实注册用户）
   const qWhere = rawQ
-    ? ` WHERE (u.username LIKE ? OR u.email LIKE ? OR u.namespace LIKE ? OR ${regIpExists})`
-    : ""
+    ? ` WHERE u.role <> 'guest' AND (u.username LIKE ? OR u.email LIKE ? OR u.namespace LIKE ? OR ${regIpExists})`
+    : ` WHERE u.role <> 'guest'`
   const qBinds: unknown[] = rawQ ? [like, like, like, like] : []
   const pageSuffix = hasPage ? " LIMIT ? OFFSET ?" : ""
   const pageBinds: unknown[] = hasPage ? [limit, offset] : []
