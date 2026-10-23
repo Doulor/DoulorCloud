@@ -53,7 +53,7 @@ const PUSH_KEYS = [
   "frpExpiry",
   "nodeDown",
   "daily",
-  "email",
+  
   "comment",
   "like",
   "points",

@@ -8765,7 +8765,6 @@ export const en: Record<MessageKey, string> = {
   "tg.cmd.community": "/community my content",
   "tg.cmd.notices": "/notices unread notices",
   "tg.cmd.security": "/security login and security",
-  "tg.push.email": "Mail alerts (every mail)",
   "tg.push.comment": "New comments (each)",
   "tg.push.like": "New likes (each)",
   "tg.push.points": "Points credited",

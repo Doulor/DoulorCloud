@@ -824,43 +824,35 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
     }
   }
 
-  if (cmd === "/status") {
-    // 管理命令：已绑定 + 站内角色是管理员，两个条件缺一静默忽略
     // 管理员：/公告 —— 公告快捷管理卡（非管理员静默忽略，与其它管理命令同口径）
-  // 注意：此处 cmd 已被前面的判断收窄成字面量，比较前先转成 string
   const cmdAny = cmd as string
   if (cmdAny === "/公告" || cmdAny === "/ann" || cmdAny === "/announce") {
-    const me = await env.DB.prepare("SELECT role FROM users WHERE id = ?").bind(binding.user_id).first<{ role: string }>()
+    const me = await env.DB.prepare("SELECT role FROM users WHERE id = ?")
+      .bind(binding.user_id)
+      .first<{ role: string }>()
     if (!isAnyAdmin(String(me?.role ?? ""))) return json({ ok: true, ignored: "no-perm" })
 
-    // 顺带把菜单刷一次（老用户绑定时还没这条命令）
+    // 顺带刷新该 chat 的菜单（老用户绑定时菜单里还没有 ann）
     await setChatMenu(env, chatId, buildCommandMenu({ bound: true, isAdminUser: true, commands })).catch(() => {})
 
-    /**
-     * `/公告 标题 | 正文` → 新建一条**草稿**（不会发出去），然后回管理卡片。
-     * 用 `|` 分隔标题和正文；正文可省略（只建标题）。
-     */
+    // `/公告 标题 | 正文` → 新建一条**草稿**（不发出去），然后回管理卡片
     if (arg) {
       const [rawTitle, ...rest] = arg.split("|")
       const title = (rawTitle ?? "").trim().slice(0, 100)
-      const body = rest.join("|").trim().slice(0, 1000)
+      const bodyText = rest.join("|").trim().slice(0, 1000)
       if (!title) {
         await sendTo(env, chatId, "用法：/公告 标题 | 正文（正文可省略）")
         return json({ ok: true })
       }
-      const id = uuid()
-      const nowIso = new Date().toISOString()
       try {
         await env.DB.prepare(
           `INSERT INTO announcements (id, title, body, category, pinned, created_at, status, notify_email)
            VALUES (?, ?, ?, 'general', 0, ?, 'draft', 0)`
         )
-          .bind(id, title, body || "", nowIso)
+          .bind(uuid(), title, bodyText || "", new Date().toISOString())
           .run()
         await sendTo(env, chatId, `已创建草稿：${title}\n在下面的卡片里点「🚀 发布」就会正式发出去。`)
       } catch (err) {
-        // 建草稿失败必须让人看见（否则就是"点了没反应"）
-        await logPush(env, "cmd:ann:create", chatId, false, err instanceof Error ? err.message : String(err))
         await sendTo(env, chatId, "创建草稿失败：" + (err instanceof Error ? err.message : "未知错误"))
         return json({ ok: true })
       }
@@ -870,6 +862,8 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
     return json({ ok: true })
   }
 
+  if (cmd === "/status") {
+    // 管理命令：已绑定 + 站内角色是管理员，两个条件缺一静默忽略
   if (!isAnyAdmin(role) || commands.status === false) return json({ ok: true, ignored: "no-perm" })
     await sendTo(env, chatId, await statusSummary(env, cfg))
     return json({ ok: true })
@@ -1115,7 +1109,6 @@ const MUTE_LABELS: Record<string, string> = {
   daily: "每日简报",
   // ⚠️ 这张表就是用户侧 /settings 的按钮来源：新增推送类型时**必须**同步这里，
   // 否则 pushMessage 认得、用户却看不到开关（2026-10-22 踩过一次）。
-  email: "新邮件（每封）",
   comment: "评论/回复（每条）",
   like: "点赞（每个）",
   points: "积分到账",
@@ -1891,7 +1884,6 @@ export type PushKind =
   | "frpExpiry"
   | "nodeDown"
   | "daily"
-  | "email"
   | "comment"
   | "like"
   | "points"

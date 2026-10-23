@@ -403,7 +403,7 @@ describe("TG 机器人 · 单卡片导航（点按钮原地切换，不刷屏）
   })
 })
 describe("TG 机器人 · 通知开关覆盖所有推送类型（防漂移）", () => {
-  it("新增的 email/comment/like/points 在 /settings 里都能静音", async () => {
+  it("新增的 comment/like/points 在 /settings 里都能静音", async () => {
     await env.DB.prepare("DELETE FROM tg_bindings").run()
     await seedConfig({ enabled: true })
     const user = await makeUser({ role: "user" })
@@ -430,7 +430,7 @@ describe("TG 机器人 · 通知开关覆盖所有推送类型（防漂移）", 
       return original(input as RequestInfo, init)
     }) as typeof fetch
     try {
-      for (const kind of ["email", "comment", "like", "points"]) {
+      for (const kind of ["comment", "like", "points"]) {
         await handleWebhook(
           env,
           hookRequest(
@@ -449,7 +449,7 @@ describe("TG 机器人 · 通知开关覆盖所有推送类型（防漂移）", 
         .bind("555000222")
         .first<{ muted_json: string }>()
       const muted = JSON.parse(row?.muted_json ?? "[]") as string[]
-      expect(muted.sort()).toEqual(["comment", "email", "like", "points"])
+      expect(muted.sort()).toEqual(["comment", "like", "points"])
       // 一个都不该落到「未知选项」
       expect(acks.join("|")).not.toContain("未知选项")
     } finally {

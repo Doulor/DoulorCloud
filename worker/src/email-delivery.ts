@@ -14,7 +14,6 @@ import PostalMime from "postal-mime"
 import { sendMail, renderMail } from "./mailer"
 import { isOwnDomain } from "./root-domains"
 import type { Env } from "./env"
-import { pushMessage as tgPush } from "./handlers/telegram"
 
 const MAX_RAW_BYTES = 2 * 1024 * 1024
 /** 单封信正文入库上限（字符），避免超出 D1 单值限制导致插入失败并触发重投 */
@@ -357,20 +356,6 @@ export async function incomingEmail(
     )
     .run()
 
-  // 1.5 TG 推送（站长 2026-10-22：每封都推，用户可在机器人里静音）。
-  // 只推元数据（收件箱 / 发件人 / 主题），**绝不推正文** —— 正文属于通信内容。
-  // pushMessage 内部全吞异常，投递链路不会因为它失败。
-  await tgPush(env, "email", {
-    userId: mailbox.user_id,
-    text: [
-      "📮 <b>新邮件</b>",
-      `收件箱：${mailbox.address}`,
-      `发件人：${fromAddress.slice(0, 60)}`,
-      `主题：${(subject || "(无主题)").slice(0, 80)}`,
-      "",
-      `☁️ https://cloud.doulor.cn`,
-    ].join("\n"),
-  })
 
   // 2. 转发（仅已验证的 destination 可用；失败不影响入库）
   let forwardTargets: string[] = []

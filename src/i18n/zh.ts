@@ -8624,7 +8624,6 @@ export const zh = {
   "tg.cmd.community": "/community 我的创作",
   "tg.cmd.notices": "/notices 未读通知",
   "tg.cmd.security": "/security 登录与安全",
-  "tg.push.email": "邮件通知（每封）",
   "tg.push.comment": "被评论（每条）",
   "tg.push.like": "被点赞（每条）",
   "tg.push.points": "积分到账",
