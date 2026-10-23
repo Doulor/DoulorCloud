@@ -84,7 +84,7 @@ describe("QQ 二期 · 私聊", () => {
 
     await handleQqWebhook(env, hook(c2c(`/bind ${code}`)))
     const row = await env.DB.prepare("SELECT user_id FROM qq_bindings WHERE qq_openid = ?")
-      .bind(C2C_USER)
+      .bind(`c2c:${C2C_USER}`)
       .first<{ user_id: string }>()
     expect(row?.user_id).toBe(user.id)
     // 一次性：用完即作废
@@ -97,7 +97,7 @@ describe("QQ 二期 · 私聊", () => {
   it("/签到 返回带按钮的卡片", async () => {
     const user = await makeUser({ username: "qq_checkin_user" })
     await env.DB.prepare("INSERT INTO qq_bindings (qq_openid, user_id, bound_at) VALUES (?, ?, ?)")
-      .bind(C2C_USER, user.id, Date.now())
+      .bind(`c2c:${C2C_USER}`, user.id, Date.now())
       .run()
 
     await handleQqWebhook(env, hook(c2c("/签到")))
@@ -132,7 +132,7 @@ describe("QQ 二期 · 好友与按钮", () => {
   it("按钮回调 checkin → 真正签到（与站内同一套逻辑）", async () => {
     const user = await makeUser({ username: "qq_btn_checkin" })
     await env.DB.prepare("INSERT INTO qq_bindings (qq_openid, user_id, bound_at) VALUES (?, ?, ?)")
-      .bind(C2C_USER, user.id, Date.now())
+      .bind(`c2c:${C2C_USER}`, user.id, Date.now())
       .run()
 
     await handleQqWebhook(

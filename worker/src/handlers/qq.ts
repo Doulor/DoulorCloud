@@ -226,10 +226,27 @@ async function bridgeGroupMessage(env: Env, d: QqPayload["d"]): Promise<void> {
     .replace(/^@\S+\s+/, "")
     .trim()
   if (!text) return
-  // 命令不桥接（与 TG 同口径）
-  if (/^\/[A-Za-z0-9_]{1,32}(\s|$)/.test(text)) return
+  /**
+   * 群里的命令：
+   *   · `/bind 123456` → 允许，绑定这个 QQ 用户在**本群**的身份，随后在群内简短回复
+   *   · 其它命令一律不桥接（避免站内数据被发到群里）
+   */
+  // 命令名可能是中文（/积分 /签到），所以字符类不能只写 A-Za-z0-9_
+  const groupCmd = /^\/([^\s]{1,32})(?:\s+([\s\S]*))?$/.exec(text)
+  if (groupCmd) {
+    const name = (groupCmd[1] ?? "").toLowerCase()
+    const arg = (groupCmd[2] ?? "").trim()
+    if (name === "bind" && /^\d{6}$/.test(arg)) {
+      await handleGroupBind(env, memberOpenid, groupOpenid, arg, d.id)
+    } else if (name === "bindsetop" || name === "help") {
+      await sendGroupText(env, groupOpenid, "群里只支持：/bind 123456（绑定账号）。其它命令请私聊机器人。", d.id)
+    }
+    return
+  }
 
-  const userId = await ensureShadowUser(env, memberOpenid, d.author?.username ?? null)
+  // 群里绑定过 → 记到本人名下；没绑定才建影子账号
+  const bound = await bindingByQq(env, memberOpenid, "group")
+  const userId = bound ? bound.user_id : await ensureShadowUser(env, memberOpenid, d.author?.username ?? null)
 
   // 限流：同一 QQ 用户 10 条/分钟（直接数 chat_messages，不额外建表）
   const since = new Date(Date.now() - 60_000).toISOString()
@@ -405,6 +422,13 @@ async function logPush(env: Env, kind: string, target: string, ok: boolean, erro
  * 二期（2026-10-24）：私聊命令 / 群开关 / 好友欢迎 / 按钮签到
  * ========================================================================== */
 
+/** 绑定 key 的作用域前缀：群里的 member_openid 与私聊的 user_openid 不是一回事 */
+type QqScope = "c2c" | "group"
+
+function qqIdentityKey(scope: QqScope, openid: string): string {
+  return `${scope}:${openid}`
+}
+
 /** 群开关（被移出群、群主关闭消息推送时调用） */
 export async function setGroupEnabled(env: Env, groupOpenid: string | undefined, enabled: boolean): Promise<void> {
   if (!groupOpenid) return
@@ -552,16 +576,20 @@ async function handleQqBind(env: Env, openid: string, code: string): Promise<voi
     `INSERT INTO qq_bindings (qq_openid, user_id, bound_at) VALUES (?, ?, ?)
      ON CONFLICT(qq_openid) DO UPDATE SET user_id = excluded.user_id, bound_at = excluded.bound_at`
   )
-    .bind(openid, row.user_id, Date.now())
+    .bind(qqIdentityKey("c2c", openid), row.user_id, Date.now())
     .run()
   await env.DB.prepare("UPDATE tg_bind_tokens SET used_at = ? WHERE code = ?").bind(Date.now(), code).run()
   await logPush(env, "qq:bind", openid, true)
   await sendC2c(env, openid, "绑定成功 ✅ 试试 /签到 或 /积分。")
 }
 
-async function bindingByQq(env: Env, openid: string): Promise<{ user_id: string } | null> {
+async function bindingByQq(
+  env: Env,
+  openid: string,
+  scope: QqScope = "c2c"
+): Promise<{ user_id: string } | null> {
   return await env.DB.prepare("SELECT user_id FROM qq_bindings WHERE qq_openid = ?")
-    .bind(openid)
+    .bind(qqIdentityKey(scope, openid))
     .first<{ user_id: string }>()
 }
 
@@ -689,4 +717,65 @@ export async function deleteMyQqBinding(env: Env, request: Request): Promise<Res
   await env.DB.prepare("DELETE FROM qq_bindings WHERE user_id = ?").bind(user.id).run()
   await logPush(env, "qq:unbind", user.id, true)
   return json({ ok: true })
+}
+
+/** 群内被动回复（带 msg_id 才是「被动」消息，不消耗主动消息配额） */
+async function sendGroupText(
+  env: Env,
+  groupOpenid: string,
+  content: string,
+  msgId?: string
+): Promise<boolean> {
+  const cfg = await loadConfig(env)
+  if (!cfg.enabled) return false
+  const token = await accessToken(env, cfg)
+  if (!token) return false
+  const res = await fetch(`${API}/v2/groups/${encodeURIComponent(groupOpenid)}/messages`, {
+    method: "POST",
+    headers: { authorization: `QQBot ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ content: content.slice(0, 1500), msg_type: 0, ...(msgId ? { msg_id: msgId } : {}) }),
+  })
+  if (!res.ok) {
+    const t = await res.text().catch(() => "")
+    await logPush(env, "qq:group:reply", groupOpenid, false, t.slice(0, 200))
+  }
+  return res.ok
+}
+
+/**
+ * 群里 `/bind <码>`。
+ *
+ * 安全考量：绑定码是一次性的、且在群里发出后**本群其它成员也可能看到**。
+ * 所以这里只回「绑定成功 / 无效」这类不含账号信息的短句，绝不回显账号名或邮箱。
+ */
+async function handleGroupBind(
+  env: Env,
+  memberOpenid: string,
+  groupOpenid: string,
+  code: string,
+  msgId?: string
+): Promise<void> {
+  const row = await env.DB.prepare(
+    "SELECT user_id FROM tg_bind_tokens WHERE code = ? AND used_at IS NULL AND expires_at > ?"
+  )
+    .bind(code, Date.now())
+    .first<{ user_id: string }>()
+  if (!row) {
+    await sendGroupText(env, groupOpenid, "绑定码无效或已过期，回网站「账号设置 → QQ 绑定」重新生成。", msgId)
+    return
+  }
+  const taken = await bindingByQq(env, memberOpenid, "group")
+  if (taken && taken.user_id !== row.user_id) {
+    await sendGroupText(env, groupOpenid, "这个 QQ 在本群已经绑定了别的账号。", msgId)
+    return
+  }
+  await env.DB.prepare(
+    `INSERT INTO qq_bindings (qq_openid, user_id, bound_at) VALUES (?, ?, ?)
+     ON CONFLICT(qq_openid) DO UPDATE SET user_id = excluded.user_id, bound_at = excluded.bound_at`
+  )
+    .bind(qqIdentityKey("group", memberOpenid), row.user_id, Date.now())
+    .run()
+  await env.DB.prepare("UPDATE tg_bind_tokens SET used_at = ? WHERE code = ?").bind(Date.now(), code).run()
+  await logPush(env, "qq:bind:group", groupOpenid, true)
+  await sendGroupText(env, groupOpenid, "绑定成功 ✅ 之后你在这个群的发言会记在你的账号名下。", msgId)
 }
