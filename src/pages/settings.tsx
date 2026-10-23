@@ -1,4 +1,5 @@
 import * as React from "react"
+import { Link, useSearchParams } from "react-router-dom"
 import {
   AlertTriangle,
   BadgeCheck,
@@ -346,7 +347,15 @@ export default function SettingsPage() {
   const verified = emailSettings?.verified ?? user?.emailVerified ?? false
 
   /** 设置页分类：用 chips 切换，样式与管理面板的分类筛选一致 */
-  const [group, setGroup] = React.useState("all")
+  /**
+   * 分类 tab 与 URL 同步（2026-10-24）。
+   *
+   * 之前只存局部状态：地址栏永远是 /dashboard/settings，没法把「安全」这个 tab
+   * 直接发给人。现在 `?tab=security` 就是可跳转的链接，且支持前进/后退。
+   */
+  const [searchParams] = useSearchParams()
+  const tabParam = searchParams.get("tab") ?? "all"
+  const [group, setGroup] = React.useState(tabParam)
   const SETTING_GROUPS = [
     { key: "all", label: t("settings.group.all") },
     { key: "account", label: t("settings.group.account") },
@@ -357,6 +366,11 @@ export default function SettingsPage() {
     { key: "danger", label: t("settings.group.danger") },
   ]
   /** 某分组是否可见（"all" 显示全部） */
+  // URL 变了（点 tab 链接、浏览器前进/后退）就跟着切
+  React.useEffect(() => {
+    setGroup(tabParam)
+  }, [tabParam])
+
   const show = (g: string) => group === "all" || group === g
 
   return (
@@ -366,14 +380,22 @@ export default function SettingsPage() {
       {/* 分类筛选 */}
       <div className="mb-4 flex flex-wrap gap-2">
         {SETTING_GROUPS.map((g) => (
-          <Button
+          /**
+           * 用真 `<Link>` 而不是 Button：
+           * 这样能右键「复制链接地址」、也能中键新标签打开，
+           * 分享 /dashboard/settings?tab=security 直接落到那个分类。
+           */
+          <Link
             key={g.key}
-            size="sm"
-            variant={group === g.key ? "default" : "outline"}
-            onClick={() => setGroup(g.key)}
+            to={g.key === "all" ? "/dashboard/settings" : `/dashboard/settings?tab=${g.key}`}
+            className={
+              group === g.key
+                ? "inline-flex h-8 items-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                : "inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
+            }
           >
             {g.label}
-          </Button>
+          </Link>
         ))}
       </div>
 
@@ -1104,8 +1126,13 @@ export default function SettingsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <TgBindCard />
-      <QqBindCard />
+      {/* 绑定卡属于「账户」分类：跟着 tab 走，不再在所有分类下都显示 */}
+      {show("account") && (
+        <>
+          <TgBindCard />
+          <QqBindCard />
+        </>
+      )}
 
     </div>
   )
