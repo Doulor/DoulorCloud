@@ -196,10 +196,26 @@ function htmlToText(html: string): string {
     i = tagEnd
   }
 
-  return decodeEntities(out.join(""))
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]+\n/g, "\n")
-    .trim()
+  /**
+   * 收尾清理（2026-10-24 修「临时邮箱正文大量空行」）：
+   *   ① `&nbsp;` 解出来是 U+00A0，旧的 `[ \t]+\n` 匹配不到它 →
+   *      只有空格的「空行」全留下来了，就是用户看到的「很多空行」；
+   *   ② 再逐行收拾：行尾空格去掉，连续空行最多保留一个。
+   */
+  const raw = decodeEntities(out.join("")).replace(/\u00a0/g, " ")
+  const kept: string[] = []
+  let blank = 0
+  for (const line of raw.split("\n")) {
+    const t = line.replace(/[ \t]+$/, "")
+    if (t.trim() === "") {
+      if (blank++ >= 1) continue
+      kept.push("")
+    } else {
+      blank = 0
+      kept.push(t)
+    }
+  }
+  return kept.join("\n").trim()
 }
 
 export async function incomingEmail(

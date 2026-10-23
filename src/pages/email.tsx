@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { LinkifiedText } from "@/components/linkified-text"
+import { VerificationCodeChip } from "@/components/verification-code-chip"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -1461,11 +1462,15 @@ function MailMessageView({
            * 否则「点击这里验证」这类邮件的地址根本不会出现。
            * 点击走全站统一的外链确认弹窗（收信人点的是陌生人给的链接）。
            */
-          <LinkifiedText
-            text={message.body}
-            className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed"
-            fallback={t("em.noBody")}
-          />
+          <>
+            {/* 识别到验证码就给一键复制（识别不出就不显示，绝不误导） */}
+            <VerificationCodeChip text={message.body} />
+            <LinkifiedText
+              text={message.body}
+              className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed"
+              fallback={t("em.noBody")}
+            />
+          </>
         )}
 
         {replyOpen && (

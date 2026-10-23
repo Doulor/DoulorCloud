@@ -8,6 +8,7 @@
  *   · 带变量的用 {name} 占位，例如 "已用 {used} / {total}"。
  */
 export const zh = {
+  "em.code": "验证码",
   "qqb.title": "QQ 绑定",
   "qqb.desc": "绑定后可在 QQ 里用机器人签到、查积分；群里聊天会与站内聊天室互通。",
   "qqb.bound": "已绑定",
