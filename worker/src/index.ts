@@ -715,6 +715,25 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () => qqHandlers.saveQqConfig(env, request),
   },
+  // 用户侧 QQ 绑定（与 /me/tg/* 对称）
+  {
+    kind: "exact",
+    path: "/me/qq/binding",
+    method: "GET",
+    handle: () => qqHandlers.getMyQqBinding(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/me/qq/bind-code",
+    method: "POST",
+    handle: () => qqHandlers.createMyQqBindCode(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/me/qq/binding",
+    method: "DELETE",
+    handle: () => qqHandlers.deleteMyQqBinding(env, request),
+  },
   // TG 群消息里的图片/文件经服务端中转（要求登录，避免把 bot token 暴露成直链）
   {
     kind: "regex",

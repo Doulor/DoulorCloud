@@ -19,6 +19,7 @@
  *   · 按 member_openid 限流 10 条/分钟
  */
 import { ApiError, json, readBodyCapped } from "../http"
+import { requireUser } from "../auth"
 import { requireAdminScope } from "./admin"
 import { decryptSecret, encryptSecret, uuid } from "../crypto"
 import { tgSafeText } from "./telegram"
@@ -624,4 +625,68 @@ async function handleInteraction(env: Env, payload: QqPayload): Promise<void> {
     await sendC2c(env, openid, msg.includes("已经签过") ? "今天已经签过到啦 😄" : "签到失败，稍后再试。")
     await logPush(env, "qq:checkin", openid, false, msg.slice(0, 200))
   }
+}
+
+/* ==========================================================================
+ * 用户侧：QQ 绑定（与 TG 绑定同风格：站内生成一次性码 → 到 QQ 里 /bind）
+ * ========================================================================== */
+
+/** 掩码：openid 很长，界面上只露头尾 */
+function maskOpenid(openid: string): string {
+  if (openid.length <= 10) return openid
+  return `${openid.slice(0, 6)}……${openid.slice(-4)}`
+}
+
+/** GET /me/qq/binding */
+export async function getMyQqBinding(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const row = await env.DB.prepare("SELECT qq_openid, bound_at FROM qq_bindings WHERE user_id = ?")
+    .bind(user.id)
+    .first<{ qq_openid: string; bound_at: number }>()
+  if (!row) return json({ bound: false })
+  return json({ bound: true, qqOpenid: maskOpenid(row.qq_openid), boundAt: row.bound_at })
+}
+
+/**
+ * POST /me/qq/bind-code —— 生成一次性 6 位绑定码。
+ *
+ * ⚠️ 复用 `tg_bind_tokens` 这张表：绑定码本质是「某个 user_id 的一次性凭证」，
+ * 与渠道无关。**谁先消费算谁的**（TG 或 QQ 都可以用它完成绑定）。
+ */
+export async function createMyQqBindCode(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const existing = await env.DB.prepare("SELECT qq_openid FROM qq_bindings WHERE user_id = ?")
+    .bind(user.id)
+    .first<{ qq_openid: string }>()
+  if (existing) return json({ ok: true, alreadyBound: true, qqOpenid: maskOpenid(existing.qq_openid) })
+
+  const code = String(Math.floor(100000 + Math.random() * 900000))
+  const now = Date.now()
+  const ttl = 10 * 60 * 1000
+  await env.DB.prepare("DELETE FROM tg_bind_tokens WHERE user_id = ? AND used_at IS NULL")
+    .bind(user.id)
+    .run()
+  await env.DB.prepare(
+    "INSERT INTO tg_bind_tokens (code, user_id, expires_at, used_at) VALUES (?, ?, ?, NULL)"
+  )
+    .bind(code, user.id, now + ttl)
+    .run()
+
+  const cfg = await loadConfig(env)
+  return json({
+    ok: true,
+    code,
+    expiresAt: now + ttl,
+    botReady: !!cfg.enabled && !!cfg.app_id,
+    // QQ 没有 t.me 那种深链，前端给「去 QQ 搜机器人」的提示即可
+    qqBotHint: "QQ 里搜索并添加机器人 DoulorCloud（QQ 4012701880），私聊发送 /bind 码",
+  })
+}
+
+/** DELETE /me/qq/binding */
+export async function deleteMyQqBinding(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  await env.DB.prepare("DELETE FROM qq_bindings WHERE user_id = ?").bind(user.id).run()
+  await logPush(env, "qq:unbind", user.id, true)
+  return json({ ok: true })
 }

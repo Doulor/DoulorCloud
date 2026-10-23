@@ -8,6 +8,16 @@ import type { MessageKey } from "./zh"
  * Keeping the same key order as zh.ts makes the two easy to diff by eye.
  */
 export const en: Record<MessageKey, string> = {
+  "qqb.title": "QQ binding",
+  "qqb.desc": "After binding you can check in and view points from QQ; group chat bridges to the site chat room.",
+  "qqb.bound": "Bound",
+  "qqb.notBound": "Not bound",
+  "qqb.gen": "Generate code",
+  "qqb.unbind": "Unbind",
+  "qqb.alreadyBound": "QQ is already bound",
+  "qqb.codeHint": "DM the bot on QQ and send: /bind {code}",
+  "qqb.expiresHint": "Valid 10 minutes, single use (the same code also works for Telegram — first one wins)",
+  "qqb.searchBot": "No bot yet? Search DoulorCloud (QQ 4012701880) in QQ and add it",
   // —— Common ——
   "quiz.rewardTitle": "Rewards",
   "quiz.rewardLinear": "Points are prorated by score: 100% earns {n} points.",

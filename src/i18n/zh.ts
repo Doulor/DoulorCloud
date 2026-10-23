@@ -8,6 +8,16 @@
  *   · 带变量的用 {name} 占位，例如 "已用 {used} / {total}"。
  */
 export const zh = {
+  "qqb.title": "QQ 绑定",
+  "qqb.desc": "绑定后可在 QQ 里用机器人签到、查积分；群里聊天会与站内聊天室互通。",
+  "qqb.bound": "已绑定",
+  "qqb.notBound": "未绑定",
+  "qqb.gen": "生成绑定码",
+  "qqb.unbind": "解除绑定",
+  "qqb.alreadyBound": "已经绑定过 QQ 了",
+  "qqb.codeHint": "在 QQ 里私聊机器人，发送：/bind {code}",
+  "qqb.expiresHint": "10 分钟内有效，仅可使用一次（同一个码也能用于 Telegram 绑定，谁先绑算谁的）",
+  "qqb.searchBot": "没加机器人？QQ 里搜索 DoulorCloud（QQ 4012701880）并添加",
   // —— 通用 ——
   "quiz.rewardTitle": "奖励规格",
   "quiz.rewardLinear": "按答对率折算积分：答对 100% 可得 {n} 积分。",

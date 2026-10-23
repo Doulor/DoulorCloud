@@ -5738,3 +5738,20 @@ export const tgBindApi = {
     ),
   unbind: () => request<{ ok: boolean }>("/me/tg/binding", { method: "DELETE" }),
 }
+
+/** 用户侧：QQ 绑定（与 Telegram 共用一次性绑定码，谁先消费算谁的） */
+export const qqBindApi = {
+  status: () =>
+    request<{ bound: boolean; qqOpenid?: string; boundAt?: number }>("/me/qq/binding"),
+  createCode: () =>
+    request<{
+      ok: boolean
+      code?: string
+      expiresAt?: number
+      alreadyBound?: boolean
+      qqOpenid?: string
+      botReady?: boolean
+      qqBotHint?: string
+    }>("/me/qq/bind-code", { method: "POST" }),
+  unbind: () => request<{ ok: boolean }>("/me/qq/binding", { method: "DELETE" }),
+}
