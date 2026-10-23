@@ -1947,6 +1947,17 @@ export async function listAllEvents(env: Env, request: Request): Promise<Respons
   ).all<{ event_id: string; c: number }>()
   const countMap = Object.fromEntries((counts.results ?? []).map((r) => [r.event_id, r.c]))
 
+  /**
+   * 每个活动里「自动发放失败、需要人工发」的领取记录数（2026-10-24 站长要求）。
+   *
+   * 口径与 /api/attention 的活动角标一致（reward_status='manual'），
+   * 但按活动分组 —— 这样活动列表的「领取名单」按钮旁边能显示到底哪一场有活要干。
+   */
+  const manualRows = await env.DB.prepare(
+    "SELECT event_id, COUNT(*) AS c FROM event_claims WHERE reward_status = 'manual' GROUP BY event_id"
+  ).all<{ event_id: string; c: number }>()
+  const manualMap = Object.fromEntries((manualRows.results ?? []).map((r) => [r.event_id, r.c]))
+
   // 投票票数：管理端**始终可见**（后台要靠它判断票数够不够、什么时候开奖）。
   // 用户端列表则按 voteCountsVisible 收口 —— 这里不能跟着一起收。
   const voteRows = await env.DB.prepare(
@@ -1962,6 +1973,7 @@ export async function listAllEvents(env: Env, request: Request): Promise<Respons
     events: (rows.results ?? []).map((r) => ({
       ...toEvent(r, now, true),
       claimCount: countMap[r.id] ?? 0,
+      manualClaims: manualMap[r.id] ?? 0,
       voteCounts: voteCountMap[r.id] ?? {},
     })),
   })

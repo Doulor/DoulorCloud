@@ -5903,6 +5903,12 @@ export default function AdminPage() {
                           onClick={() => void openClaimsDialog(ev)}
                         >
                           {t("adm.425")}
+                            {/* 该活动「自动发放失败、要人工发」的条数（与左侧导航活动角标同口径） */}
+                            {(ev as { manualClaims?: number }).manualClaims ? (
+                              <span className="ml-1.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive/15 px-1 text-[10px] font-medium text-destructive">
+                                {(ev as { manualClaims?: number }).manualClaims}
+                              </span>
+                            ) : null}
                         </Button>
                         <Button
                           variant="ghost"
