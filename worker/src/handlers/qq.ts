@@ -292,11 +292,16 @@ async function bridgeGroupMessage(env: Env, d: QqPayload["d"]): Promise<void> {
     .first<{ c: number }>()
   if ((recent?.c ?? 0) >= 10) return
 
+  // QQ 不提供昵称：有 username 就用它，否则用 member_openid 的短标识区分不同的人
+  const displayName = d.author?.username
+    ? `QQ:@${d.author.username}`
+    : `QQ群友 #${shortTag(memberOpenid)}`
+
   await env.DB.prepare(
-    `INSERT INTO chat_messages (id, user_id, body, created_at, source, qq_message_id, qq_group_openid)
-     VALUES (?, ?, ?, ?, 'qq', ?, ?)`
+    `INSERT INTO chat_messages (id, user_id, body, created_at, source, qq_message_id, qq_group_openid, display_name)
+     VALUES (?, ?, ?, ?, 'qq', ?, ?, ?)`
   )
-    .bind(uuid(), userId, text.slice(0, 4000), new Date().toISOString(), d.id ?? null, groupOpenid)
+    .bind(uuid(), userId, text.slice(0, 4000), new Date().toISOString(), d.id ?? null, groupOpenid, displayName)
     .run()
 
   await logPush(env, "qq:chat:in", groupOpenid, true)

@@ -1460,6 +1460,13 @@ async function editOrSend(
   await logPush(env, "message", chatId, sent.ok, sent.ok ? undefined : sent.description)
 }
 
+/** 短标识：把 openid/id 压成 6 位十六进制，用于区分群里的不同人 */
+function shortTag(raw: string): string {
+  let h = 0
+  for (const ch of raw) h = (h * 31 + ch.charCodeAt(0)) % 0xffffff
+  return h.toString(16).toUpperCase().padStart(6, "0")
+}
+
 /* ==========================================================================
  * 聊天室 ↔ TG 群 桥接（群 → 站内）
  *
@@ -1635,9 +1642,14 @@ async function handleGroupMessage(env: Env, msg: TgGroupMessage, cfg: TgConfigRo
   const userId = binding ? binding.user_id : await ensureGroupGuestUser(env, groupId)
 
     // ⑤ 落库（source='tg' + tg_message_id 供删帖同步与去重）
+    // TG 有 username 就用，没有就用短标识区分
+    const displayName = msg.from?.username
+      ? `TG:@${msg.from.username}`
+      : `TG群友 #${shortTag(tgUserId)}`
+
     await env.DB.prepare(
-      `INSERT INTO chat_messages (id, user_id, body, created_at, source, tg_message_id, tg_username, tg_chat_id)
-       VALUES (?, ?, ?, ?, 'tg', ?, ?, ?)`
+      `INSERT INTO chat_messages (id, user_id, body, created_at, source, tg_message_id, tg_username, tg_chat_id, display_name)
+       VALUES (?, ?, ?, ?, 'tg', ?, ?, ?, ?)`
     )
       .bind(
         uuid(),
@@ -1646,7 +1658,8 @@ async function handleGroupMessage(env: Env, msg: TgGroupMessage, cfg: TgConfigRo
         new Date().toISOString(),
         msg.message_id != null ? String(msg.message_id) : null,
         msg.from?.username ?? null,
-        groupId
+        groupId,
+        displayName
       )
       .run()
 

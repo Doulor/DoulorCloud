@@ -135,7 +135,8 @@ export async function listMessages(env: Env, request: Request): Promise<Response
     rows = await env.DB.prepare(
       `SELECT * FROM (SELECT m.id, m.user_id, m.body, m.created_at, m.recalled_at, m.reply_to,
                m.edited_at, m.forward_from,
-               u.username, u.nickname, u.avatar_key
+               COALESCE(m.display_name, u.username) AS username,
+             COALESCE(m.display_name, u.nickname) AS nickname, u.avatar_key
           FROM chat_messages m JOIN users u ON u.id = m.user_id
          WHERE (m.created_at < ? OR (m.created_at = ? AND m.id < ?))
          ORDER BY m.created_at DESC, m.id DESC LIMIT ?) x
