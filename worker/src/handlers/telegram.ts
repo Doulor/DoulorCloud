@@ -832,6 +832,40 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
   if (cmdAny === "/公告" || cmdAny === "/ann" || cmdAny === "/announce") {
     const me = await env.DB.prepare("SELECT role FROM users WHERE id = ?").bind(binding.user_id).first<{ role: string }>()
     if (!isAnyAdmin(String(me?.role ?? ""))) return json({ ok: true, ignored: "no-perm" })
+
+    // 顺带把菜单刷一次（老用户绑定时还没这条命令）
+    await setChatMenu(env, chatId, buildCommandMenu({ bound: true, isAdminUser: true, commands })).catch(() => {})
+
+    /**
+     * `/公告 标题 | 正文` → 新建一条**草稿**（不会发出去），然后回管理卡片。
+     * 用 `|` 分隔标题和正文；正文可省略（只建标题）。
+     */
+    if (arg) {
+      const [rawTitle, ...rest] = arg.split("|")
+      const title = (rawTitle ?? "").trim().slice(0, 100)
+      const body = rest.join("|").trim().slice(0, 1000)
+      if (!title) {
+        await sendTo(env, chatId, "用法：/公告 标题 | 正文（正文可省略）")
+        return json({ ok: true })
+      }
+      const id = uuid()
+      const nowIso = new Date().toISOString()
+      try {
+        await env.DB.prepare(
+          `INSERT INTO announcements (id, title, body, category, pinned, created_at, status, notify_email)
+           VALUES (?, ?, ?, 'general', 0, ?, 'draft', 0)`
+        )
+          .bind(id, title, body || "", nowIso)
+          .run()
+        await sendTo(env, chatId, `已创建草稿：${title}\n在下面的卡片里点「🚀 发布」就会正式发出去。`)
+      } catch (err) {
+        // 建草稿失败必须让人看见（否则就是"点了没反应"）
+        await logPush(env, "cmd:ann:create", chatId, false, err instanceof Error ? err.message : String(err))
+        await sendTo(env, chatId, "创建草稿失败：" + (err instanceof Error ? err.message : "未知错误"))
+        return json({ ok: true })
+      }
+    }
+
     await sendAnnouncementPanel(env, chatId)
     return json({ ok: true })
   }
@@ -2179,6 +2213,14 @@ export function buildCommandMenu(opts: {
   out.push({ command: "help", description: "查看帮助" })
   if (opts.isAdminUser && opts.commands.status !== false) {
     out.push({ command: "status", description: "站点状态（管理员）" })
+  }
+  /**
+   * 公告快捷管理（2026-10-24）。菜单里只能写 ASCII 命令名 —— Telegram 的
+   * BotCommand 校验是 `^[a-z][a-z0-9_]{0,31}$`，中文 `/公告` 放不进去，
+   * 所以菜单项是 `/ann`，而 `/公告` 作为别名在命令分发里同样接受。
+   */
+  if (opts.isAdminUser) {
+    out.push({ command: "ann", description: "公告快捷管理（管理员）" })
   }
   return out
 }

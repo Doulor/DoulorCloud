@@ -202,6 +202,7 @@ describe("TG 机器人 · 命令菜单分级", () => {
       "unbind",
       "help",
       "status",
+      "ann",
     ])
   })
 
@@ -225,6 +226,7 @@ describe("TG 机器人 · 命令菜单分级", () => {
       "settings",
       "unbind",
       "help",
+      "ann",
     ])
   })
 })
