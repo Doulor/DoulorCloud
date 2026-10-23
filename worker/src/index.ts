@@ -694,6 +694,14 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () => telegramHandlers.setMyMuted(env, request),
   },
+  // TG 群消息里的图片/文件经服务端中转（要求登录，避免把 bot token 暴露成直链）
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/tg\/file\/([^/]+)$/),
+    methods: ["GET"],
+    handle: (tgFileMatch: RegExpMatchArray) =>
+      telegramHandlers.serveTgFile(env, request, tgFileMatch[1]),
+  },
   {
     kind: "exact",
     path: "/admin/appeals",

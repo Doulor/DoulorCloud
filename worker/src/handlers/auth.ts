@@ -567,6 +567,22 @@ export async function login(env: Env, request: Request, ctx?: ExecutionContext):
     throw new ApiError(400, "请输入用户名和密码", "INVALID_CREDENTIALS")
   }
 
+  /**
+   * 影子账号（role='guest'）绝不能登录（2026-10-24）。
+   *
+   * 它们由「TG 群 → 站内聊天室」桥接自动创建，password_hash 是不可用的占位串 ——
+   * 本来也验不过口令，但那是**隐性依赖**：将来一旦加免密登录 / OAuth 绑定，
+   * 这些账号就会凭空获得登录能力。所以在这里显式拒绝。
+   */
+  if (identifier.startsWith("tg_")) {
+    const shadow = await env.DB.prepare("SELECT role FROM users WHERE username = ? LIMIT 1")
+      .bind(identifier)
+      .first<{ role: string }>()
+    if (shadow?.role === "guest") {
+      throw new ApiError(403, "该账号由 Telegram 群桥接自动创建，不能直接登录", "GUEST_NO_LOGIN")
+    }
+  }
+
   // 限流：登录是本站最大的爆破面（口令此前无失败锁定）。
   // 两个维度各记一次 —— IP 维度挡「一个 IP 打很多账号」，账号维度挡「很多 IP 打一个账号」。
   await guardRateLimit(

@@ -660,8 +660,16 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
   const msg = update.message
   const chatId = msg?.chat?.id != null ? String(msg.chat.id) : ""
   const text = (msg?.text ?? "").trim()
+
+  // 群 / 超级群：走「聊天室 ↔ TG 群」桥接（2026-10-24，方案 B）。
+  // 必须在「仅私聊」判断**之前**分流，否则群消息会被当成非法 update 丢掉。
+  if (msg?.chat?.type === "group" || msg?.chat?.type === "supergroup") {
+    await handleGroupMessage(env, msg, cfg)
+    return json({ ok: true })
+  }
+
   if (!chatId || !text) return json({ ok: true, ignored: "no-text" })
-  // 只处理私聊：群聊里一律不理，避免用户数据泄露到群里
+  // 私聊以外的其它类型（channel_post 等）仍然不理
   if (msg?.chat?.type !== "private") return json({ ok: true, ignored: "not-private" })
 
   if (!(await withinRateLimit(env, chatId))) {
@@ -1452,6 +1460,241 @@ async function editOrSend(
   await logPush(env, "message", chatId, sent.ok, sent.ok ? undefined : sent.description)
 }
 
+/* ==========================================================================
+ * 聊天室 ↔ TG 群 桥接（群 → 站内）
+ *
+ * 方案 B（站长 2026-10-23 定）：未绑定站内账号的群成员也能发言，以「TG:@用户名」
+ * 的访客身份进站内。护栏见 ensureShadowUser 与 handleGroupMessage。
+ * ========================================================================== */
+
+/** TG 发来的消息里我们能桥的部分 */
+interface TgGroupMessage {
+  message_id?: number
+  text?: string
+  caption?: string
+  photo?: Array<{ file_id?: string; file_size?: number }>
+  sticker?: { file_id?: string; emoji?: string }
+  document?: { file_id?: string; file_name?: string; mime_type?: string }
+  video?: { file_id?: string }
+  voice?: { file_id?: string }
+  from?: { id?: number; is_bot?: boolean; username?: string; first_name?: string }
+  chat?: { id?: number; type?: string; title?: string }
+}
+
+/**
+ * 拿（或创建）一个 Telegram 访客的影子账号，返回 user_id。
+ *
+ * 影子账号 = 不可登录的真实用户行：
+ *   · role='guest'（登录入口显式拒绝，见 auth.ts login）
+ *   · password_hash 是不可用的占位串，任何口令都验不过
+ *   · tg_shadow_id 唯一索引防重复创建（并发下靠 unique violation 兜底再查一次）
+ */
+async function ensureShadowUser(env: Env, from: TgGroupMessage["from"]): Promise<string> {
+  const tgId = from?.id != null ? String(from.id) : ""
+  if (!tgId) throw new ApiError(400, "缺少发送者信息", "BAD_UPDATE")
+
+  const found = await env.DB.prepare("SELECT id FROM users WHERE tg_shadow_id = ?")
+    .bind(tgId)
+    .first<{ id: string }>()
+  if (found) return found.id
+
+  const id = uuid()
+  const now = new Date().toISOString()
+  const username = `tg_${tgId}`.slice(0, 32)
+  const nickname = (from?.username ? `TG:@${from.username}` : `TG:${from?.first_name ?? tgId}`).slice(0, 32)
+  try {
+    await env.DB.prepare(
+      `INSERT INTO users (id, username, email, password_hash, namespace, status, role, permissions,
+                          invite_code_id, uid, created_at, updated_at, nickname, tg_shadow_id)
+       VALUES (?, ?, ?, ?, ?, 'active', 'guest', '[]', NULL,
+               (SELECT COALESCE(MAX(uid), 0) + 1 FROM users), ?, ?, ?, ?)`
+    )
+      .bind(id, username, `${username}@shadow.invalid`, "!shadow-no-login", username, now, now, nickname, tgId)
+      .run()
+    return id
+  } catch {
+    // 并发下可能撞唯一索引：再查一次，查到就用
+    const again = await env.DB.prepare("SELECT id FROM users WHERE tg_shadow_id = ?")
+      .bind(tgId)
+      .first<{ id: string }>()
+    if (again) return again.id
+    throw new ApiError(500, "创建访客账号失败", "SHADOW_FAILED")
+  }
+}
+
+/** 把一条群消息的正文抽出来（纯文本 / 图片+说明 / 贴纸 / 文件） */
+function groupMessageBody(msg: TgGroupMessage): string | null {
+  const text = (msg.text ?? "").trim()
+  if (text) return text
+
+  const caption = (msg.caption ?? "").trim()
+  /**
+   * 站内聊天室渲染的是 markdown 图片（站内表情包本身就是 `![](/api/stickers/…)`），
+   * 所以这里必须吐 `![](/api/tg/file/…)`，图才会显示出来（2026-10-24 站长实测反馈：
+   * 之前吐的是裸链接，站内只有一行文字）。`/api/tg/file` 要求登录，站内用户天然满足。
+   */
+  const image = (fileId: string) => `![](${`/api/tg/file/${encodeURIComponent(fileId)}`})`
+  // 文件/视频/语音没法内联成图片，仍然给链接（点开走服务端中转）
+  const link = (fileId: string) => `/api/tg/file/${encodeURIComponent(fileId)}`
+
+  // 图片：取分辨率最大的一张
+  if (msg.photo && msg.photo.length > 0) {
+    const best = msg.photo[msg.photo.length - 1]?.file_id
+    return best ? `${image(best)}${caption ? `\n${caption}` : ""}` : null
+  }
+  if (msg.sticker?.file_id) {
+    // 贴纸也按图片渲染，保留 emoji 作为「图挂了也能看懂」的兜底
+    return `${image(msg.sticker.file_id)}${caption ? `\n${caption}` : ""}` +
+      (msg.sticker.emoji ? `\n${msg.sticker.emoji}` : "")
+  }
+  if (msg.document?.file_id) {
+    const name = msg.document.file_name ?? "文件"
+    return `📎 [文件] ${name}${caption ? ` ${caption}` : ""}\n${link(msg.document.file_id)}`
+  }
+  if (msg.video?.file_id) return `🎬 [视频]${caption ? ` ${caption}` : ""}\n${link(msg.video.file_id)}`
+  if (msg.voice?.file_id) return `🎤 [语音]\n${link(msg.voice.file_id)}`
+  return null
+}
+
+/**
+ * 处理一条群消息：白名单 → 防回声 → 限流 → 身份映射 → 落库。
+ *
+ * 全部异常都在内部吞掉并返回（webhook 永远 200，避免 Telegram 重投同一批 update）。
+ */
+async function handleGroupMessage(env: Env, msg: TgGroupMessage, cfg: TgConfigRow): Promise<void> {
+  try {
+    const groupId = msg.chat?.id != null ? String(msg.chat.id) : ""
+    if (!groupId) return
+
+    // ① 白名单：只有登记为 kind='group' 且启用的群才桥
+    const allowed = await env.DB.prepare(
+      "SELECT 1 AS ok FROM tg_channels WHERE chat_id = ? AND kind = 'group' AND enabled = 1"
+    )
+      .bind(groupId)
+      .first<{ ok: number }>()
+    if (!allowed) return
+
+    // ② 防回声：我们自己推到群里的消息来自 bot，直接丢
+    if (msg.from?.is_bot) return
+
+    const body = groupMessageBody(msg)
+    if (!body) return
+
+    /**
+     * 群里的机器人命令**绝不能桥进站内**（2026-10-24 线上事故）。
+     *
+     * 实测有人在群里发 `/bind 1111`，这条 update 同时被 webhook 收到，
+     * 结果绑定码被当成聊天内容写进公开聊天室 —— 等于把别人的绑定码贴在大厅里。
+     *
+     * 但站长要求「群里也能绑定」，所以 `/bind <码>` 走**私信回复**：
+     * 绑定结果（含账号名、成功/失败原因）只发给本人，群里一个字都不留。
+     */
+    const cmdMatch = /^\/([A-Za-z0-9_]{1,32})(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(body)
+    if (cmdMatch) {
+      const cmd = (cmdMatch[1] ?? "").toLowerCase()
+      const arg = (cmdMatch[2] ?? "").trim()
+      const dmId = msg.from?.id != null ? String(msg.from.id) : ""
+      // /bind 123456 或深链形式的 /start 123456（群里只有 /bind 有意义）
+      if (cmd === "bind" && /^\d{6}$/.test(arg) && dmId) {
+        await tryBindCode(env, dmId, arg, cfg, msg.from?.username ?? null)
+      }
+      return // 命令一律不桥接
+    }
+    // 纯 6 位数字（绑定码的"等待输入"形态）也不要桥
+    if (/^\d{6}$/.test(body)) return
+
+    // ③ 限流：每人 10 条/分钟（与私聊命令同一套计数）
+    const tgUserId = msg.from?.id != null ? String(msg.from.id) : ""
+    if (!tgUserId) return
+    if (!(await withinRateLimit(env, `tgchat:${tgUserId}`))) return
+
+    // ④ 身份：绑定过的用本人，没绑定的建影子账号（方案 B）
+    const binding = await bindingByTg(env, tgUserId)
+    const userId = binding ? binding.user_id : await ensureShadowUser(env, msg.from)
+
+    // ⑤ 落库（source='tg' + tg_message_id 供删帖同步与去重）
+    await env.DB.prepare(
+      `INSERT INTO chat_messages (id, user_id, body, created_at, source, tg_message_id, tg_username, tg_chat_id)
+       VALUES (?, ?, ?, ?, 'tg', ?, ?, ?)`
+    )
+      .bind(
+        uuid(),
+        userId,
+        body.slice(0, 4000),
+        new Date().toISOString(),
+        msg.message_id != null ? String(msg.message_id) : null,
+        msg.from?.username ?? null,
+        groupId
+      )
+      .run()
+
+    await logPush(env, "ch:chat:in", groupId, true)
+  } catch (err) {
+    await logPush(
+      env,
+      "ch:chat:in:err",
+      "(exception)",
+      false,
+      err instanceof Error ? err.message : String(err)
+    ).catch(() => undefined)
+  }
+}
+
+/**
+ * GET /api/tg/file/<file_id> —— 把 Telegram 上的图片/文件经服务端中转给站内用户。
+ *
+ * 为什么需要：Telegram 的直链是 `https://api.telegram.org/file/bot<TOKEN>/...`，
+ * 把这种链接贴进聊天室等于把机器人 token 公开给所有人。所以服务端取文件再流式返回。
+ * 权限：必须已登录（requireUser）；只允许 file_id 形态的字符串，杜绝拿它当通用代理。
+ */
+export async function serveTgFile(env: Env, request: Request, fileId: string): Promise<Response> {
+  await requireUser(env, request)
+  const id = decodeURIComponent(fileId)
+  if (!/^[A-Za-z0-9_-]{10,200}$/.test(id)) {
+    throw new ApiError(400, "非法的文件标识", "BAD_FILE_ID")
+  }
+  const cfg = await loadConfig(env)
+  if (!cfg.enabled) throw new ApiError(404, "机器人未启用", "BOT_DISABLED")
+  const token = await botToken(env, cfg)
+  if (!token) throw new ApiError(404, "机器人未配置", "NO_TOKEN")
+
+  const info = await tgApi(env, "getFile", { file_id: id }, token)
+  if (!info.ok) throw new ApiError(404, "文件不存在或已过期", "FILE_NOT_FOUND")
+  const filePath = (info.result as { file_path?: string } | undefined)?.file_path
+  if (!filePath) throw new ApiError(404, "文件不存在或已过期", "FILE_NOT_FOUND")
+
+  const upstream = await fetch(`https://api.telegram.org/file/bot${token}/${filePath}`)
+  if (!upstream.ok || !upstream.body) throw new ApiError(502, "读取文件失败", "UPSTREAM_FAILED")
+
+  const lower = filePath.toLowerCase()
+  const type = lower.endsWith(".png")
+    ? "image/png"
+    : lower.endsWith(".jpg") || lower.endsWith(".jpeg")
+      ? "image/jpeg"
+      : lower.endsWith(".webp")
+        ? "image/webp"
+        : lower.endsWith(".gif")
+          ? "image/gif"
+          : lower.endsWith(".webm")
+            ? "video/webm"
+            : lower.endsWith(".mp4")
+              ? "video/mp4"
+              : lower.endsWith(".ogg")
+                ? "audio/ogg"
+                : lower.endsWith(".mp3")
+                  ? "audio/mpeg"
+                  : "application/octet-stream"
+  return new Response(upstream.body, {
+    status: 200,
+    headers: {
+      "Content-Type": type,
+      // 私有缓存：每个用户的浏览器缓存 1 小时，别让 CDN 变成公共图床
+      "Cache-Control": "private, max-age=3600",
+      "X-Content-Type-Options": "nosniff",
+    },
+  })
+}
+
 /**
  * 处理 inline 按钮回调。
  * 权限口径与命令一致：只私聊、必须已绑定、站点状态额外校验角色。
@@ -1617,6 +1860,26 @@ export async function setMyMuted(env: Env, request: Request): Promise<Response> 
     .run()
   return json({ ok: true, muted })
 }
+/**
+ * 把站内正文改写成 Telegram 看得懂的形式（2026-10-24）。
+ *
+ * 站内聊天室用 markdown 图片（表情包是 `![](/api/stickers/<id>/image)`），
+ * 直接丢给 Telegram 只会显示成一串源码。规则：
+ *   · 站内表情包等 `/api/...` 相对地址 → 外部取不到（要登录）→ 降级成 `[图片]`
+ *   · 绝对 http(s) 图片 → 保留 URL，Telegram 自己会生成预览
+ *   · 视频/文件链接同理保留
+ */
+export function tgSafeText(raw: string): string {
+  return raw
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt: string, url: string) => {
+      if (/^https?:\/\//i.test(url)) return url
+      const label = (alt || "").trim()
+      return label ? `[${label}]` : "[图片]"
+    })
+    // Telegram 里 markdown 的 [文字](链接) 也不解析，转成「文字 链接」更易读
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_m, text: string, url: string) => `${text} ${url}`)
+}
+
 /** 站内聊天室 → TG 群的上一条推送时间（毫秒）。同一个 isolate 内做 1 条/秒节流。 */
 let lastChatGroupPushAt = 0
 
@@ -1648,7 +1911,7 @@ export async function pushToChatGroups(env: Env, text: string): Promise<number> 
       const r = await tgApi(
         env,
         "sendMessage",
-        { chat_id: row.chat_id, text: text.slice(0, 3500), disable_web_page_preview: true },
+        { chat_id: row.chat_id, text: tgSafeText(text).slice(0, 3500), disable_web_page_preview: true },
         token
       )
       await logPush(env, "ch:chat", row.chat_id, r.ok, r.ok ? undefined : r.description)
@@ -1871,6 +2134,8 @@ interface ChannelRow {
   created_at: number
   last_ok_at: number | null
   last_error: string | null
+  /** 'channel' = 播报频道；'group' = 与站内聊天室互通的群（迁移 0173 引入） */
+  kind?: string
 }
 
 /**
@@ -1957,6 +2222,8 @@ export async function listChannels(env: Env, request: Request): Promise<Response
   return json({
     channels: (results ?? []).map((c) => ({
       chatId: c.chat_id,
+      // 'channel' = 事件播报频道；'group' = 与站内聊天室互通的群
+      kind: c.kind ?? "channel",
       title: c.title,
       username: c.username,
       enabled: !!c.enabled,
@@ -1981,16 +2248,27 @@ export async function addChannel(env: Env, request: Request): Promise<Response> 
   const info = await tgApi(env, "getChat", { chat_id: chatId }, token)
   if (!info.ok) throw new ApiError(400, `读取频道失败：${info.description ?? "未知错误"}`, "CHANNEL_LOOKUP_FAILED")
   const chat = info.result as { id?: number; title?: string; username?: string; type?: string }
-  if (chat.type !== "channel") throw new ApiError(400, "这不是频道（群组请让机器人入群后按频道方式使用）", "NOT_A_CHANNEL")
+  /**
+   * 频道与群都可以登记（2026-10-24）：
+   *   · channel / supergroup(频道形式) → kind='channel'：事件播报用
+   *   · group / supergroup(群形式)      → kind='group'：聊天室 ↔ TG 群互通用
+   * 之前这里直接拒绝非 channel，导致「群」只能手写库，管理页加不了。
+   */
+  const isGroup = chat.type === "group" || chat.type === "supergroup"
+  if (chat.type !== "channel" && !isGroup) {
+    throw new ApiError(400, "这不是频道或群（机器人需先被拉进去）", "NOT_A_CHANNEL")
+  }
+  const kind = isGroup ? "group" : "channel"
   await env.DB.prepare(
-    `INSERT INTO tg_channels (chat_id, title, username, events_json, enabled, created_at, created_by)
-     VALUES (?, ?, ?, '{}', 1, ?, ?)
-     ON CONFLICT(chat_id) DO UPDATE SET title = excluded.title, username = excluded.username, enabled = 1`
+    `INSERT INTO tg_channels (chat_id, title, username, events_json, enabled, created_at, created_by, kind)
+     VALUES (?, ?, ?, '{}', 1, ?, ?, ?)
+     ON CONFLICT(chat_id) DO UPDATE SET title = excluded.title, username = excluded.username,
+       enabled = 1, kind = excluded.kind`
   )
-    .bind(String(chat.id ?? chatId), chat.title ?? "", chat.username ?? null, Date.now(), admin.id)
+    .bind(String(chat.id ?? chatId), chat.title ?? "", chat.username ?? null, Date.now(), admin.id, kind)
     .run()
   await recordAudit(env, admin.id, "tg.channel.add", String(chat.id ?? chatId))
-  return json({ ok: true, chatId: String(chat.id ?? chatId), title: chat.title ?? "" })
+  return json({ ok: true, chatId: String(chat.id ?? chatId), title: chat.title ?? "", kind })
 }
 
 /** POST /admin/tg/channels/update —— 开关频道 / 改事件订阅 */

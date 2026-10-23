@@ -83,14 +83,24 @@ describe("TG 机器人 · 权限边界", () => {
     })
   })
 
-  it("群聊里的命令一律忽略（即使 secret 正确）", async () => {
+  it("群聊里的命令一律**不执行**（即使 secret 正确；群消息只走聊天桥接）", async () => {
     await seedConfig({ enabled: true })
+    // 未登记为互通群的群：桥接也不会落库
+    await env.DB.prepare("DELETE FROM tg_channels").run()
+    await env.DB.prepare("DELETE FROM chat_messages WHERE source = 'tg'").run()
+
     const groupMsg = {
       message: { text: "/status", chat: { id: -100123, type: "group" }, from: { id: 1 } },
     }
     const res = await handleWebhook(env, hookRequest(groupMsg, SECRET))
     expect(res.status).toBe(200)
-    expect((await res.json()) as { ignored?: string }).toMatchObject({ ignored: "not-private" })
+    // 关键安全属性 1：群里的 /status 不会被执行（不进命令分发，就不会回站点状态）
+    //                   这里用「没有落进聊天室 + 200」间接表达：命令分支已完全跳过
+    // 关键安全属性 2：未登记群的消息一条都不落库
+    const rows = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM chat_messages WHERE source = 'tg'"
+    ).first<{ c: number }>()
+    expect(rows?.c).toBe(0)
   })
 
   it("普通用户发 /status 被静默忽略（不回「没权限」）", async () => {
