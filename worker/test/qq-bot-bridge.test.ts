@@ -6,7 +6,7 @@
 //   ③ 命令不桥接、限流生效、影子账号唯一
 import { describe, it, expect, beforeEach } from "vitest"
 import { env } from "cloudflare:workers"
-import { handleQqWebhook, qqSignature, qqSeed } from "../src/handlers/qq"
+import { handleQqWebhook, normalizeQqText, qqSignature, qqSeed } from "../src/handlers/qq"
 import { encryptSecret } from "../src/crypto"
 
 const APP_ID = "1905911344"
@@ -194,5 +194,28 @@ describe("QQ 机器人 · 群 @ 消息进站内", () => {
       .bind("NEW_GROUP_X")
       .first<{ enabled: number }>()
     expect(row?.enabled).toBe(1)
+  })
+})
+
+describe("QQ 占位符归一化（normalizeQqText）", () => {
+  it("系统表情 faceId 转成 emoji", () => {
+    // 站长实测的那种：<faceType=6,faceId="0",ext="…">
+    expect(normalizeQqText('<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">')).toBe("🙂")
+    expect(normalizeQqText('好开心<faceType=6,faceId="13",ext="e30=">')).toBe("好开心😁")
+  })
+
+  it("不认识的 faceId 降级成 [表情]，不吐源码", () => {
+    const out = normalizeQqText('<faceType=6,faceId="9999",ext="e30=">')
+    expect(out).toBe("[表情]")
+    expect(out).not.toContain("faceType")
+  })
+
+  it("图片占位转成 markdown 图片", () => {
+    expect(normalizeQqText('<img src="https://example.com/a.png">')).toBe("![](https://example.com/a.png)")
+    expect(normalizeQqText('<image url="https://example.com/b.png"/>')).toBe("![](https://example.com/b.png)")
+  })
+
+  it("@ 占位被去掉，正文保留", () => {
+    expect(normalizeQqText("<@!123456> 你好")).toBe("你好")
   })
 })

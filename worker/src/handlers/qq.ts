@@ -230,12 +230,9 @@ async function bridgeGroupMessage(env: Env, d: QqPayload["d"]): Promise<void> {
     .first<{ ok: number }>()
   if (!allowed) return
 
-  // 去掉 @ 占位：平台把 mention 拼成 `<@!id>`（可能在任意位置）；
-  // 只额外清掉**开头**的 `@某个名字`，避免把正文里的邮箱/社交账号一起吃掉
-  const text = rawText
-    .replace(/<@!?[^>]+>/g, "")
-    .replace(/^@\S+\s+/, "")
-    .trim()
+  // 占位符统一处理（表情 → emoji、图片 → markdown、@ → 去掉），
+  // 再清掉开头的 `@某个名字`，避免把正文里的邮箱一起吃掉
+  const text = normalizeQqText(rawText).replace(/^@\S+\s+/, "").trim()
   if (!text) return
   /**
    * 群里的命令：
@@ -467,6 +464,43 @@ function qqIdentityKey(scope: QqScope, openid: string): string {
   return `${scope}:${openid}`
 }
 
+/**
+ * QQ 系统表情 faceId → emoji 映射（常用的一批）。
+ *
+ * QQ 群消息里的表情是 `<faceType=6,faceId="0",ext="…">` 这种占位符，
+ * 直接落库就会在站内显示成一串源码（站长实测）。
+ * 表里没有的 id 统一降级成 `[表情]` —— 宁可少一个 emoji，也不能把源码甩给用户。
+ */
+const QQ_FACES: Record<string, string> = {
+  "0": "🙂", "1": "😒", "2": "😍", "3": "😳", "4": "😎", "5": "😭", "6": "😊", "7": "🤐",
+  "8": "😴", "9": "😩", "10": "😅", "11": "😡", "12": "😜", "13": "😁", "14": "😱", "15": "😞",
+  "16": "😏", "17": "😰", "18": "😫", "19": "😷", "20": "😏", "21": "🥰", "22": "🙄", "23": "😤",
+  "24": "😋", "25": "😪", "26": "😨", "27": "😓", "28": "😄", "29": "😌", "30": "💪", "31": "🤬",
+  "32": "❓", "33": "🤫", "34": "😵", "35": "😖", "36": "😔", "37": "💀", "38": "🔨", "39": "👋",
+  "40": "😅", "41": "👃", "42": "👏", "43": "😳", "44": "😏", "47": "🥱", "48": "👎", "49": "🥺",
+  "50": "😢", "51": "😈", "52": "😘", "53": "😱", "54": "🥺", "55": "🔪", "56": "🍉", "57": "🍺",
+  "58": "🏀", "59": "🏓", "60": "☕", "61": "🍚", "62": "🐷", "63": "🌹", "64": "🥀", "65": "💗",
+  "66": "❤️", "67": "💔", "68": "🎂", "69": "⚡", "70": "💣", "71": "🔪", "72": "⚽", "74": "💩",
+  "75": "🌙", "76": "☀️", "77": "🎁", "78": "🤗", "79": "👍", "80": "👎", "81": "🤝", "82": "✌️",
+  "83": "🙏", "85": "👊", "86": "👎", "87": "💋", "88": "🙅", "89": "👌", "90": "💘", "91": "😚",
+  "96": "🙇", "99": "👋", "100": "🤩", "178": "😊", "179": "😊", "182": "😂", "212": "😭",
+}
+
+/** 把 QQ 消息正文里的占位符转成人类可读内容（表情 / 图片 / @） */
+export function normalizeQqText(raw: string): string {
+  let text = raw
+  // ① 系统表情：<faceType=6,faceId="0",ext="…">
+  text = text.replace(/<faceType=\d+\s*,\s*faceId="(\d+)"[^>]*>/gi, (_m, id: string) => QQ_FACES[id] ?? "[表情]")
+  // ② @ 占位
+  text = text.replace(/<@!?[^>]+>/g, "")
+  // ③ 图片：<img src="https://…"> / <image url="…"> → markdown 图片
+  text = text.replace(/<(?:img|image)\b[^>]*?src=["']([^"']+)["'][^>]*>/gi, (_m, url: string) => `![](${url})`)
+  text = text.replace(/<(?:img|image)\b[^>]*?url=["']([^"']+)["'][^>]*>/gi, (_m, url: string) => `![](${url})`)
+  // ④ 其它 <tag> 形式的表情包/链接残留：<faceType=…> 已处理，这里兜底清掉无主尖括号标签
+  text = text.replace(/<(?!\/?[a-z][^>]*>)[^>]{0,80}>/gi, "")
+  return text.trim()
+}
+
 /** 群开关（被移出群、群主关闭消息推送时调用） */
 export async function setGroupEnabled(env: Env, groupOpenid: string | undefined, enabled: boolean): Promise<void> {
   if (!groupOpenid) return
@@ -552,7 +586,7 @@ async function handleC2cMessage(env: Env, d: QqPayload["d"]): Promise<void> {
   if (!d) return
   const openid = c2cOpenidOf(d)
   if (!openid) return
-  const text = (d.content ?? "").trim()
+  const text = normalizeQqText(d.content ?? "")
   if (!text) return
 
   // 只有绑定过才能用的命令
