@@ -1,4 +1,5 @@
 import * as React from "react"
+import { useChatDnd } from "@/lib/chat-dnd"
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom"
 import {
   Globe,
@@ -137,6 +138,7 @@ export function DashboardLayout({
   allowGuest?: boolean
   children?: React.ReactNode
 }) {
+  const [chatDnd] = useChatDnd()
   const { user, setUser } = useAuth()
   /** 「发给用户的根域」（如 tyu.me），由后端下发，不写死 —— 管理员可改 */
   const [rootDomain, setRootDomain] = React.useState("")
@@ -297,9 +299,10 @@ export function DashboardLayout({
     return {
       ...attention,
       community: onCommunity ? 0 : attention.community,
-      chat: onChat ? 0 : attention.chat,
+      // 免打扰开启时也不显示聊天角标（与聊天页右上角那个开关联动）
+      chat: onChat || chatDnd ? 0 : attention.chat,
     }
-  }, [attention, onCommunity, onChat])
+  }, [attention, onCommunity, onChat, chatDnd])
 
   const handleLogout = async () => {
     try {

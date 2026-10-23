@@ -14,9 +14,10 @@
  *   · 日期分组、typing 指示（5 秒节流）、草稿本地保存、点引用跳回原消息。
  */
 import * as React from "react"
+import { useChatDnd } from "@/lib/chat-dnd"
 import { createPortal } from "react-dom"
 import { useNavigate } from "react-router-dom"
-import { ArrowLeft, Send, Loader2, Users, AtSign, Copy, Quote, Undo2, CornerDownLeft, X, Plus, ArrowDown, AlertCircle, PenLine, Forward } from "lucide-react"
+import {BellOff, ArrowLeft, Send, Loader2, Users, AtSign, Copy, Quote, Undo2, CornerDownLeft, X, Plus, ArrowDown, AlertCircle, PenLine, Forward } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -106,6 +107,8 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
 
   const [messages, setMessages] = React.useState<ChatMessage[]>([])
   const [online, setOnline] = React.useState<ChatPresenceUser[]>([])
+  /** 免打扰：开启后不产生聊天角标 */
+  const [dnd, setDnd] = useChatDnd()
   const [draft, setDraft] = React.useState("")
   const [sending, setSending] = React.useState(false)
   const [loading, setLoading] = React.useState(true)
@@ -1305,6 +1308,22 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
             <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Users className="h-3.5 w-3.5" />
               {t("chat.onlineCount", { n: online.length })}
+            {/* 免打扰：开启后侧边栏不显示聊天角标（偏好存本地，见 lib/chat-dnd） */}
+            <button
+              type="button"
+              onClick={() => setDnd(!dnd)}
+              aria-pressed={dnd}
+              title={dnd ? t("chat.dndOn") : t("chat.dndOff")}
+              className={
+                "ml-1 inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] leading-none transition-colors " +
+                (dnd
+                  ? "border-primary/40 bg-primary/10 text-primary"
+                  : "border-muted-foreground/30 text-muted-foreground hover:bg-accent")
+              }
+            >
+              <BellOff className="h-3 w-3" />
+              {t("chat.dnd")}
+            </button>
               {/* 正在输入：随 5 秒消息轮询下发，随窗口过期自动消失 */}
               {typingLine && (
                 <>
