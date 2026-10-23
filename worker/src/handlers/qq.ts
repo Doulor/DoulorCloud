@@ -22,6 +22,8 @@ import { ApiError, json, readBodyCapped } from "../http"
 import { requireAdminScope } from "./admin"
 import { decryptSecret, encryptSecret, uuid } from "../crypto"
 import { tgSafeText } from "./telegram"
+import { getPointsBalance } from "../points"
+import { siteDayString, siteOffsetHours } from "../settings"
 import type { Env } from "../env"
 
 const API = "https://api.sgroup.qq.com"
@@ -46,7 +48,13 @@ interface QqPayload {
     plain_token?: string
     event_ts?: string
     op_member_openid?: string
-    author?: { member_openid?: string; union_openid?: string; username?: string }
+    openid?: string
+    user_openid?: string
+    /** INTERACTION_CREATE 的按钮数据 */
+    data?: { type?: number; resolved?: { button_data?: string; button_id?: string } }
+    /** 按钮点击者的 openid（私聊场景在 d.user_openid，群场景在 d.group_openid + 点击者 member） */
+    group_member_openid?: string
+    author?: { member_openid?: string; union_openid?: string; username?: string; user_openid?: string }
   }
 }
 
@@ -161,8 +169,21 @@ export async function handleQqWebhook(env: Env, request: Request): Promise<Respo
   // ② 事件
   if (payload.op === 0) {
     try {
-      if (payload.t === "GROUP_ADD_ROBOT") {
-        await registerGroup(env, payload.d?.group_openid)
+      if (payload.t === "GROUP_ADD_ROBOT" || payload.t === "GROUP_MSG_RECEIVE") {
+        await setGroupEnabled(env, payload.d?.group_openid, true)
+      } else if (payload.t === "GROUP_DEL_ROBOT" || payload.t === "GROUP_MSG_REJECT") {
+        // 机器人被移出 / 群主关掉了消息推送 → 立刻停用，否则会一直发失败、白烧主动消息配额
+        await setGroupEnabled(env, payload.d?.group_openid, false)
+      } else if (payload.t === "C2C_MESSAGE_CREATE") {
+        await handleC2cMessage(env, payload.d)
+      } else if (payload.t === "FRIEND_ADD") {
+        await handleFriendAdd(env, payload.d)
+      } else if (payload.t === "FRIEND_DEL" || payload.t === "C2C_MSG_REJECT") {
+        await setC2cPush(env, c2cOpenidOf(payload.d), false)
+      } else if (payload.t === "C2C_MSG_RECEIVE") {
+        await setC2cPush(env, c2cOpenidOf(payload.d), true)
+      } else if (payload.t === "INTERACTION_CREATE") {
+        await handleInteraction(env, payload)
       } else if (payload.t === "GROUP_MESSAGE_CREATE" || payload.t === "GROUP_AT_MESSAGE_CREATE") {
         /**
          * 两种事件都接（2026-10-24 站长在后台看到 `GROUP_MESSAGE_CREATE` 群消息事件创建，
@@ -179,17 +200,6 @@ export async function handleQqWebhook(env: Env, request: Request): Promise<Respo
   }
 
   return json({ op: 12 })
-}
-
-/** 机器人被拉进群时登记（后续消息靠它过白名单） */
-async function registerGroup(env: Env, groupOpenid: string | undefined): Promise<void> {
-  if (!groupOpenid) return
-  await env.DB.prepare(
-    "INSERT INTO qq_channels (group_openid, title, enabled, created_at) VALUES (?, NULL, 1, ?) " +
-      "ON CONFLICT(group_openid) DO UPDATE SET enabled = 1"
-  )
-    .bind(groupOpenid, Date.now())
-    .run()
 }
 
 /** QQ 群消息（全量或 @机器人） → 站内聊天室 */
@@ -386,5 +396,232 @@ async function logPush(env: Env, kind: string, target: string, ok: boolean, erro
       .run()
   } catch {
     /* 日志失败不影响主流程 */
+  }
+}
+
+
+/* ==========================================================================
+ * 二期（2026-10-24）：私聊命令 / 群开关 / 好友欢迎 / 按钮签到
+ * ========================================================================== */
+
+/** 群开关（被移出群、群主关闭消息推送时调用） */
+export async function setGroupEnabled(env: Env, groupOpenid: string | undefined, enabled: boolean): Promise<void> {
+  if (!groupOpenid) return
+  await env.DB.prepare(
+    `INSERT INTO qq_channels (group_openid, title, enabled, created_at) VALUES (?, NULL, ?, ?)
+     ON CONFLICT(group_openid) DO UPDATE SET enabled = excluded.enabled`
+  )
+    .bind(groupOpenid, enabled ? 1 : 0, Date.now())
+    .run()
+  await logPush(env, enabled ? "qq:group:on" : "qq:group:off", groupOpenid, true)
+}
+
+/** 记录用户对主动消息的开关（C2C_MSG_REJECT / RECEIVE） */
+export async function setC2cPush(env: Env, openid: string | undefined, allow: boolean): Promise<void> {
+  if (!openid) return
+  await env.DB.prepare(
+    `INSERT INTO qq_c2c_state (qq_openid, allow_push, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(qq_openid) DO UPDATE SET allow_push = excluded.allow_push, updated_at = excluded.updated_at`
+  )
+    .bind(openid, allow ? 1 : 0, Date.now())
+    .run()
+}
+
+function c2cOpenidOf(d: QqPayload["d"]): string | undefined {
+  return d?.author?.user_openid ?? d?.user_openid ?? d?.openid
+}
+
+/**
+ * 给 QQ 用户发私聊消息（可带按钮）。
+ *
+ * keyboard 为 QQ 的按钮组件结构；用它的目的：签到卡上的按钮点击后会推
+ * INTERACTION_CREATE，我们就能在 **QQ 里直接完成签到**，不用跳浏览器。
+ */
+export async function sendC2c(
+  env: Env,
+  openid: string,
+  content: string,
+  keyboard?: unknown
+): Promise<boolean> {
+  const cfg = await loadConfig(env)
+  if (!cfg.enabled) return false
+  const token = await accessToken(env, cfg)
+  if (!token) return false
+  const res = await fetch(`${API}/v2/users/${encodeURIComponent(openid)}/messages`, {
+    method: "POST",
+    headers: { authorization: `QQBot ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ content: content.slice(0, 1500), msg_type: 0, ...(keyboard ? { keyboard } : {}) }),
+  })
+  const ok = res.ok
+  if (!ok) {
+    const body = (await res.text().catch(() => "")) ?? ""
+    await logPush(env, "qq:c2c", openid, false, body.slice(0, 200))
+  }
+  return ok
+}
+
+/** 按钮卡片：签到（点头像按钮 = 回调按钮，点下面按钮 = 跳站点） */
+function checkinKeyboard(): unknown {
+  return {
+    content: {
+      rows: [
+        {
+          buttons: [
+            {
+              id: "checkin_now",
+              render_data: { label: "立即签到", style: 1, visited_label: "已签到" },
+              action: { type: 1, permission: { type: 2 }, data: "checkin", enter: false },
+            },
+            {
+              id: "open_site",
+              render_data: { label: "打开积分页", style: 0, visited_label: "打开" },
+              action: { type: 0, permission: { type: 2 }, data: "https://cloud.doulor.cn/dashboard/points", enter: true },
+            },
+          ],
+        },
+      ],
+    },
+  }
+}
+
+/** QQ 私聊命令 */
+async function handleC2cMessage(env: Env, d: QqPayload["d"]): Promise<void> {
+  if (!d) return
+  const openid = c2cOpenidOf(d)
+  if (!openid) return
+  const text = (d.content ?? "").trim()
+  if (!text) return
+
+  // 只有绑定过才能用的命令
+  const binding = await bindingByQq(env, openid)
+  const cmd = (text.split(/\s+/)[0] ?? "").toLowerCase()
+  const arg = text.slice(cmd.length).trim()
+
+  if (cmd === "/bind" || cmd === "/start") {
+    if (!arg) return void (await sendC2c(env, openid, "用法：/bind 123456\n绑定码在网站「账号设置 → Telegram/QQ 绑定」生成（10 分钟有效、一次性）。"))
+    return void (await handleQqBind(env, openid, arg))
+  }
+
+  if (cmd === "/help" || cmd === "/") {
+    return void (await sendC2c(env, openid, ["DoulorCloud 机器人", "", "/bind 123456  绑定站内账号", "/签到  每日签到（带按钮）", "/积分  查看积分余额", "/me  账号概览"].join("\n")))
+  }
+
+  if (!binding) {
+    return void (await sendC2c(env, openid, "还没绑定账号。先到网站「账号设置」生成绑定码，然后发：/bind 123456"))
+  }
+
+  if (cmd === "/签到" || cmd === "/checkin") {
+    const status = await checkinStatusText(env, binding.user_id)
+    return void (await sendC2c(env, openid, status, checkinKeyboard()))
+  }
+  if (cmd === "/积分" || cmd === "/points") {
+    const bal = await pointsBalance(env, binding.user_id)
+    return void (await sendC2c(env, openid, `当前积分：${bal}`))
+  }
+  if (cmd === "/me") {
+    const row = await env.DB.prepare("SELECT username, nickname, role FROM users WHERE id = ?")
+      .bind(binding.user_id)
+      .first<{ username: string; nickname: string | null; role: string }>()
+    return void (await sendC2c(env, openid, `账号：${row?.username ?? "?"}\n昵称：${row?.nickname ?? "-"}\n角色：${row?.role ?? "-"}`))
+  }
+  return void (await sendC2c(env, openid, "未知命令。发 /help 看可用命令。"))
+}
+
+/** `/bind <码>`：复用站内那张一次性绑定码表（tg_bind_tokens，站内生成、10 分钟过期） */
+async function handleQqBind(env: Env, openid: string, code: string): Promise<void> {
+  if (!/^\d{6}$/.test(code)) {
+    await sendC2c(env, openid, "绑定码是 6 位数字。")
+    return
+  }
+  const row = await env.DB.prepare(
+    "SELECT user_id FROM tg_bind_tokens WHERE code = ? AND used_at IS NULL AND expires_at > ?"
+  )
+    .bind(code, Date.now())
+    .first<{ user_id: string }>()
+  if (!row) {
+    await sendC2c(env, openid, "绑定码无效或已过期，回网站重新生成。")
+    return
+  }
+  const taken = await bindingByQq(env, openid)
+  if (taken && taken.user_id !== row.user_id) {
+    await sendC2c(env, openid, "这个 QQ 已经绑定了别的账号。")
+    return
+  }
+  await env.DB.prepare(
+    `INSERT INTO qq_bindings (qq_openid, user_id, bound_at) VALUES (?, ?, ?)
+     ON CONFLICT(qq_openid) DO UPDATE SET user_id = excluded.user_id, bound_at = excluded.bound_at`
+  )
+    .bind(openid, row.user_id, Date.now())
+    .run()
+  await env.DB.prepare("UPDATE tg_bind_tokens SET used_at = ? WHERE code = ?").bind(Date.now(), code).run()
+  await logPush(env, "qq:bind", openid, true)
+  await sendC2c(env, openid, "绑定成功 ✅ 试试 /签到 或 /积分。")
+}
+
+async function bindingByQq(env: Env, openid: string): Promise<{ user_id: string } | null> {
+  return await env.DB.prepare("SELECT user_id FROM qq_bindings WHERE qq_openid = ?")
+    .bind(openid)
+    .first<{ user_id: string }>()
+}
+
+async function pointsBalance(env: Env, userId: string): Promise<number> {
+  // 复用站内的余额读取（表是 user_points，别自己拼 SQL）
+  return await getPointsBalance(env, userId)
+}
+
+async function checkinStatusText(env: Env, userId: string): Promise<string> {
+  // 「今天」必须按站点时区算（用站内同一套 helper，避免和网站对不上）
+  const today = siteDayString(new Date(), await siteOffsetHours(env))
+  const row = await env.DB.prepare(
+    "SELECT points, streak FROM daily_checkins WHERE user_id = ? AND checkin_date = ?"
+  )
+    .bind(userId, today)
+    .first<{ points: number; streak: number }>()
+  if (row) return `今天已签到 ✅ 连续 ${row.streak} 天，本次 +${row.points} 积分`
+  return "今天还没签到 —— 点下面的「立即签到」按钮即可。"
+}
+
+/** 好友添加 → 欢迎语 + 绑定引导 */
+async function handleFriendAdd(env: Env, d: QqPayload["d"]): Promise<void> {
+  const openid = c2cOpenidOf(d)
+  if (!openid) return
+  await sendC2c(
+    env,
+    openid,
+    ["👋 我是 DoulorCloud 机器人。", "", "先绑定站内账号就能在这里签到、查积分：", "1) 打开网站「账号设置」生成 6 位绑定码", "2) 这里发 /bind 123456"].join("\n")
+  )
+  await logPush(env, "qq:friend:add", openid, true)
+}
+
+/**
+ * 按钮回调（INTERACTION_CREATE）。
+ *
+ * 目前只做「立即签到」：站内 `checkinForUser` 是同一份逻辑，
+ * 所以在 QQ 里点按钮和网站里点签到效果完全一致（连续天数、里程碑都不分叉）。
+ */
+async function handleInteraction(env: Env, payload: QqPayload): Promise<void> {
+  const d = payload.d
+  const buttonData = d?.data?.resolved?.button_data ?? ""
+  const openid = c2cOpenidOf(d)
+  if (!buttonData || !openid) return
+  if (buttonData !== "checkin") return
+
+  const binding = await bindingByQq(env, openid)
+  if (!binding) {
+    await sendC2c(env, openid, "先绑定账号：/bind 123456")
+    return
+  }
+  const { checkinForUser } = await import("./checkin")
+  try {
+    const res = await checkinForUser(env, binding.user_id)
+    const body = (await res.json()) as { streak?: number; total?: number; milestoneHit?: { days: number; points: number } | null }
+    const lines = [`签到成功 ✅ 连续 ${body.streak ?? 1} 天，+${body.total ?? 0} 积分`]
+    if (body.milestoneHit) lines.push(`🎉 里程碑：连续 ${body.milestoneHit.days} 天，额外 +${body.milestoneHit.points}`)
+    await sendC2c(env, openid, lines.join("\n"))
+    await logPush(env, "qq:checkin", openid, true)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    await sendC2c(env, openid, msg.includes("已经签过") ? "今天已经签过到啦 😄" : "签到失败，稍后再试。")
+    await logPush(env, "qq:checkin", openid, false, msg.slice(0, 200))
   }
 }

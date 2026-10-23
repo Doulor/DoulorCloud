@@ -143,6 +143,17 @@ export async function getCheckinStatus(env: Env, request: Request): Promise<Resp
  */
 export async function doCheckin(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
+  return checkinForUser(env, user.id)
+}
+
+/**
+ * 签到核心（2026-10-24 抽出）。
+ *
+ * 抽出来的原因：QQ 机器人的「按钮签到」也需要同一套逻辑，但那条路径没有站内
+ * Request / 会话，只有 `qq_bindings` 换来的 user_id。**逻辑只能有一份** ——
+ * 否则积分规则、连续天数、里程碑哪天改了必然漏一处。
+ */
+export async function checkinForUser(env: Env, userId: string): Promise<Response> {
   const enabled = await getSettingBool(env, "checkin_enabled")
   if (!enabled) throw new ApiError(403, "签到功能已关闭", "CHECKIN_DISABLED")
 
@@ -152,7 +163,7 @@ export async function doCheckin(env: Env, request: Request): Promise<Response> {
   const existing = await env.DB.prepare(
     `SELECT 1 FROM daily_checkins WHERE user_id = ? AND checkin_date = ?`
   )
-    .bind(user.id, today)
+    .bind(userId, today)
     .first()
   if (existing) throw new ApiError(409, "今天已经签过到了", "ALREADY_CHECKED_IN")
 
@@ -160,7 +171,7 @@ export async function doCheckin(env: Env, request: Request): Promise<Response> {
   const yesterdayRow = await env.DB.prepare(
     `SELECT streak FROM daily_checkins WHERE user_id = ? AND checkin_date = ?`
   )
-    .bind(user.id, prevDateString(today))
+    .bind(userId, prevDateString(today))
     .first<{ streak: number }>()
   const streak = (yesterdayRow?.streak ?? 0) + 1
 
@@ -178,20 +189,20 @@ export async function doCheckin(env: Env, request: Request): Promise<Response> {
   // 先加分（幂等），再写记录
   if (total > 0) {
     await applyPoints(env, {
-      userId: user.id,
+      userId: userId,
       delta: total,
       reason: "checkin",
       detail: bonus
         ? `连续签到第 ${streak} 天：基础 ${base} + 里程碑 ${bonusPoints}`
         : `签到奖励（连续第 ${streak} 天）`,
-      dedupKey: `checkin:${user.id}:${today}`,
+      dedupKey: `checkin:${userId}:${today}`,
     })
   }
   await env.DB.prepare(
     `INSERT INTO daily_checkins (user_id, checkin_date, points, base_points, bonus_points, streak, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(user.id, today, total, base, bonusPoints, streak, new Date().toISOString())
+    .bind(userId, today, total, base, bonusPoints, streak, new Date().toISOString())
     .run()
 
   const nxt = nextMilestone(streak, milestones)
