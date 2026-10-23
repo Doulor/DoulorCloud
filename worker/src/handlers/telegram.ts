@@ -753,6 +753,20 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
   }
   const role = String(user.role ?? "")
 
+  /**
+   * 公告新建流程在等「标题 / 正文」时，这条文本归它处理（迁移 0179 的状态机）。
+   * 只在管理员身上生效，且 /ann、/公告 不拦（否则会卡住面板入口）。
+   */
+  if (
+    isAnyAdmin(role) &&
+    !text.startsWith("/ann") &&
+    !text.startsWith("/公告") &&
+    !text.startsWith("/announce") &&
+    (await annHandleText(env, chatId, text))
+  ) {
+    return json({ ok: true })
+  }
+
   if (cmd === "/unbind") {
     await env.DB.prepare("DELETE FROM tg_bindings WHERE telegram_id = ?").bind(chatId).run()
     await clearChatMenu(env, chatId) // 菜单回落到默认（只剩 /bind /help）
@@ -851,14 +865,14 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
         )
           .bind(uuid(), title, bodyText || "", new Date().toISOString())
           .run()
-        await sendTo(env, chatId, `已创建草稿：${title}\n在下面的卡片里点「🚀 发布」就会正式发出去。`)
+        await sendTo(env, chatId, `已创建草稿：${title}\n回面板列表里点开它就能发布。`)
       } catch (err) {
         await sendTo(env, chatId, "创建草稿失败：" + (err instanceof Error ? err.message : "未知错误"))
         return json({ ok: true })
       }
     }
 
-    await sendAnnouncementPanel(env, chatId)
+    await annMenu(env, chatId)
     return json({ ok: true })
   }
 
@@ -1804,45 +1818,82 @@ async function handleCallback(
     return
   }
 
-  // 公告快捷管理（管理员）：a:p/<o>/<dc>/<dd>
+  // 公告多层级面板：a:m 主菜单 / a:l 列表 / a:v 详情 / a:x 删除确认 / a:dd 真删
+  //                    a:p 发布 / a:o 下线 / a:n 新建 / a:nw 存草稿 / a:np 发布 / a:nc 取消
   if (data.startsWith("a:")) {
     if (!isAnyAdmin(String(user.role ?? ""))) {
       await ack("没有权限")
       return
     }
-    const [, action, id] = data.split(":")
-    if (action === "dc" && id) {
-      const row = await env.DB.prepare("SELECT title FROM announcements WHERE id = ?")
-        .bind(id)
-        .first<{ title: string }>()
-      await tgApi(
-        env,
-        "editMessageReplyMarkup",
-        {
-          chat_id: chatId,
-          message_id: messageId,
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: "⚠️ 确认永久删除", callback_data: `a:dd:${id}` },
-                { text: "取消", callback_data: "a:noop" },
-              ],
-            ],
-          },
-        },
-        await botToken(env, cfg)
-      )
-      await ack(`确认删除「${(row?.title ?? "").slice(0, 16)}」？`)
+    const [, act, arg1] = data.split(":")
+    if (act === "m") {
+      await ack()
+      await annMenu(env, chatId, messageId)
       return
     }
-    if (action === "noop") {
+    if (act === "l") {
+      await ack()
+      await annList(env, chatId, messageId)
+      return
+    }
+    if (act === "v" && arg1) {
+      await ack()
+      await annDetail(env, chatId, arg1, messageId)
+      return
+    }
+    if (act === "x" && arg1) {
+      await ack()
+      await annDeleteConfirm(env, chatId, arg1, messageId)
+      return
+    }
+    if (act === "dd" && arg1) {
+      await env.DB.prepare("DELETE FROM announcements WHERE id = ?").bind(arg1).run()
+      await ack("已删除")
+      await annList(env, chatId, messageId)
+      return
+    }
+    if (act === "p" && arg1) {
+      try {
+        await publishAnnouncementNow(env, arg1)
+        await ack("已发布")
+      } catch (err) {
+        await ack("发布失败：" + (err instanceof Error ? err.message : "未知错误"))
+      }
+      await annDetail(env, chatId, arg1, messageId)
+      return
+    }
+    if (act === "o" && arg1) {
+      await env.DB.prepare("UPDATE announcements SET status = 'draft', published_at = NULL WHERE id = ?")
+        .bind(arg1)
+        .run()
+      await ack("已下线")
+      await annDetail(env, chatId, arg1, messageId)
+      return
+    }
+    if (act === "n") {
+      await ack()
+      await annStartCreate(env, chatId, messageId)
+      return
+    }
+    if (act === "nw" || act === "np") {
+      await ack()
+      await annCreateSave(env, chatId, messageId, act === "np")
+      return
+    }
+    if (act === "nc") {
+      await clearAnnState(env, chatId)
       await ack("已取消")
-      await sendAnnouncementPanel(env, chatId)
+      await annMenu(env, chatId, messageId)
       return
     }
-    const msg = await handleAnnouncementAction(env, data)
-    await ack(msg.slice(0, 180))
-    await sendAnnouncementPanel(env, chatId)
+    if (act === "close") {
+      await ack()
+      if (messageId) {
+        await tgApi(env, "deleteMessage", { chat_id: chatId, message_id: messageId }, await botToken(env, cfg))
+      }
+      return
+    }
+    await ack("未知操作")
     return
   }
 
@@ -2017,98 +2068,294 @@ export function splitOutgoing(text: string): { text: string; photos: string[] } 
 }
 
 /* ==========================================================================
- * 管理员：公告快捷管理（2026-10-24）
+ * 管理员：公告管理（多层级面板，2026-10-24 重做）
  *
- * 站长要求「在 TG 里快捷管理公告」。设计成一张卡片 + 每行两个按钮：
- *   · 草稿  → [发布] [删除]
- *   · 已发布 → [下线] [删除]
- * 发布直接复用 publishAnnouncementNow（会同时推站内消息 + TG 频道 + 邮件队列）。
- * 删除是**物理删除**，所以要先点一次确认（按钮变红再点）。
+ * 站长反馈：原来平铺一行两个按钮（发布/下线 + 删除）不好看、容易误触，而且没法新建。
+ * 现在改成三级导航，**全部用 editMessageText 原地翻页**（不刷屏）：
+ *
+ *   📢 公告管理            ← /ann 或 /公告
+ *     ├─ 📋 公告列表 → 点某条进入详情
+ *     │     └─ 详情：🚀 发布 / ↓ 下线 / 🗑 删除
+ *     │            └─ 删除要过一层「确认永久删除」
+ *     └─ ➕ 新建公告 → 发标题 → 发正文 → 预览确认（存草稿 / 直接发布）
+ *
+ * 起草稿的中间状态存在 tg_bot_states（迁移 0179），一次一步，随时可 /cancel。
  * ========================================================================== */
 
-interface AnnRow {
-  id: string
-  title: string
-  status: string
-  published_at: string | null
+type AnnStateKind = "ann_title" | "ann_body" | "ann_preview"
+
+async function getAnnState(env: Env, chatId: string): Promise<{ kind: string; payload: Record<string, string> } | null> {
+  const row = await env.DB.prepare("SELECT kind, payload FROM tg_bot_states WHERE chat_id = ?")
+    .bind(chatId)
+    .first<{ kind: string; payload: string | null }>()
+  if (!row) return null
+  // 10 分钟没动作就当过期，避免用户几天后随手发句话被当成公告正文
+  return { kind: row.kind, payload: parseJson<Record<string, string>>(row.payload, {}) }
 }
 
-/** 取最近 N 条公告，生成文本 + 按钮 */
-async function announcementPanel(env: Env): Promise<{ text: string; keyboard: unknown }> {
+async function setAnnState(env: Env, chatId: string, kind: AnnStateKind, payload: Record<string, string> = {}): Promise<void> {
+  await env.DB.prepare(
+    "INSERT INTO tg_bot_states (chat_id, kind, payload, updated_at) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT(chat_id) DO UPDATE SET kind = excluded.kind, payload = excluded.payload, updated_at = excluded.updated_at"
+  )
+    .bind(chatId, kind, JSON.stringify(payload), new Date().toISOString())
+    .run()
+}
+
+async function clearAnnState(env: Env, chatId: string): Promise<void> {
+  await env.DB.prepare("DELETE FROM tg_bot_states WHERE chat_id = ?").bind(chatId).run()
+}
+
+/** 原地翻页：能 edit 就 edit，失败（消息太旧/内容相同）就新发一条 */
+async function annRender(
+  env: Env,
+  chatId: string,
+  messageId: number | undefined,
+  text: string,
+  keyboard: { text: string; callback_data: string }[][]
+): Promise<void> {
+  const token = await botToken(env, await loadConfig(env))
+  if (!token) return
+  const markup = { inline_keyboard: keyboard }
+  if (messageId) {
+    const r = await tgApi(env, "editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "HTML",
+      reply_markup: markup,
+    }, token)
+    if (r.ok) return
+  }
+  await tgApi(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", reply_markup: markup }, token)
+}
+
+const ANN_STATUS_TEXT: Record<string, string> = {
+  draft: "⚪️ 草稿",
+  scheduled: "🕒 已排期",
+  published: "🟢 已发布",
+  archived: "📦 已归档",
+}
+
+/** 一级：主菜单 */
+async function annMenu(env: Env, chatId: string, messageId?: number): Promise<void> {
   const { results } = await env.DB.prepare(
-    "SELECT id, title, status, published_at FROM announcements ORDER BY created_at DESC LIMIT 5"
-  ).all<AnnRow>()
+    "SELECT status, COUNT(*) AS c FROM announcements GROUP BY status"
+  ).all<{ status: string; c: number }>()
+  const byStatus: Record<string, number> = {}
+  for (const r of results ?? []) byStatus[r.status] = r.c
+  const total = Object.values(byStatus).reduce((a, b) => a + b, 0)
+  const summary = [
+    `共 ${total} 条`,
+    `草稿 ${byStatus.draft ?? 0}`,
+    `已发布 ${byStatus.published ?? 0}`,
+  ].join(" · ")
+  await annRender(
+    env,
+    chatId,
+    messageId,
+    `📢 <b>公告管理</b>\n${summary}\n\n发布 = 站内消息中心 + TG 频道 + 邮件队列（按公告自身设置）`,
+    [
+      [
+        { text: "📋 公告列表", callback_data: "a:l" },
+        { text: "➕ 新建公告", callback_data: "a:n" },
+      ],
+      [{ text: "✖️ 关闭", callback_data: "a:close" }],
+    ]
+  )
+}
+
+/** 二级：公告列表 */
+async function annList(env: Env, chatId: string, messageId?: number): Promise<void> {
+  const { results } = await env.DB.prepare(
+    "SELECT id, title, status FROM announcements ORDER BY created_at DESC LIMIT 8"
+  ).all<{ id: string; title: string; status: string }>()
   const rows = results ?? []
   if (!rows.length) {
-    return { text: "还没有公告。\n去网站「管理 → 公告」新建一条，回来这里就能一键发布。", keyboard: { inline_keyboard: [] } }
+    await annRender(env, chatId, messageId, "还没有公告。点「➕ 新建公告」建第一条。", [
+      [{ text: "➕ 新建公告", callback_data: "a:n" }],
+      [{ text: "⬅️ 返回", callback_data: "a:m" }],
+    ])
+    return
   }
-  const lines = ["📢 <b>公告管理</b>", ""]
-  const keyboard: { text: string; callback_data: string }[][] = []
-  rows.forEach((r, i) => {
-    const published = r.status === "published" || !!r.published_at
-    lines.push(`${i + 1}. ${published ? "🟢 已发布" : "⚪️ 草稿"} · ${r.title.slice(0, 40)}`)
-    keyboard.push(
-      published
-        ? [
-            { text: `↓ 下线 ${i + 1}`, callback_data: `a:o:${r.id}` },
-            { text: `🗑 删除 ${i + 1}`, callback_data: `a:dc:${r.id}` },
-          ]
-        : [
-            { text: `🚀 发布 ${i + 1}`, callback_data: `a:p:${r.id}` },
-            { text: `🗑 删除 ${i + 1}`, callback_data: `a:dc:${r.id}` },
-          ]
-    )
-  })
-  lines.push("", "发布 = 站内消息 + TG 频道 + 邮件队列一起发出去。")
-  return { text: lines.join("\n"), keyboard: { inline_keyboard: keyboard } }
+  const keyboard = rows.map((r) => [
+    {
+      text: `${ANN_STATUS_TEXT[r.status] ?? r.status} · ${r.title.slice(0, 26)}`,
+      callback_data: `a:v:${r.id}`,
+    },
+  ])
+  keyboard.push([{ text: "⬅️ 返回", callback_data: "a:m" }])
+  await annRender(
+    env,
+    chatId,
+    messageId,
+    `📋 <b>最近公告</b>（点一条进入操作）\n\n${rows
+      .map((r, i) => `${i + 1}. ${ANN_STATUS_TEXT[r.status] ?? r.status} ${r.title.slice(0, 40)}`)
+      .join("\n")}`,
+    keyboard
+  )
 }
 
-/** 发一张公告管理卡 */
-async function sendAnnouncementPanel(env: Env, chatId: string): Promise<void> {
-  const cfg = await loadConfig(env)
-  const token = await botToken(env, cfg)
-  if (!token) return
-  const { text, keyboard } = await announcementPanel(env)
-  await tgApi(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", reply_markup: keyboard }, token)
+/** 三级：单条详情 */
+async function annDetail(env: Env, chatId: string, id: string, messageId?: number): Promise<void> {
+  const row = await env.DB.prepare(
+    "SELECT id, title, body, status, published_at, notify_email FROM announcements WHERE id = ?"
+  )
+    .bind(id)
+    .first<{ id: string; title: string; body: string; status: string; published_at: string | null; notify_email: number }>()
+  if (!row) {
+    await annRender(env, chatId, messageId, "这条公告不存在（可能已被删除）。", [
+      [{ text: "⬅️ 返回列表", callback_data: "a:l" }],
+    ])
+    return
+  }
+  const published = row.status === "published" || !!row.published_at
+  const bodyPreview = (row.body || "").replace(/\s+/g, " ").slice(0, 160)
+  const text = [
+    `📄 <b>${row.title.slice(0, 60)}</b>`,
+    `状态：${ANN_STATUS_TEXT[row.status] ?? row.status}`,
+    `邮件通知：${row.notify_email ? "开" : "关"}`,
+    "",
+    bodyPreview ? `${bodyPreview}${(row.body || "").length > 160 ? "…" : ""}` : "<i>（无正文）</i>",
+  ].join("\n")
+  const actions: { text: string; callback_data: string }[] = []
+  if (published) actions.push({ text: "↓ 下线", callback_data: `a:o:${row.id}` })
+  else actions.push({ text: "🚀 发布", callback_data: `a:p:${row.id}` })
+  await annRender(env, chatId, messageId, text, [
+    actions,
+    [{ text: "🗑 删除", callback_data: `a:x:${row.id}` }],
+    [{ text: "⬅️ 返回列表", callback_data: "a:l" }],
+  ])
+}
+
+/** 删除确认层（单独一层，避免误触） */
+async function annDeleteConfirm(env: Env, chatId: string, id: string, messageId?: number): Promise<void> {
+  const row = await env.DB.prepare("SELECT title FROM announcements WHERE id = ?")
+    .bind(id)
+    .first<{ title: string }>()
+  if (!row) {
+    await annRender(env, chatId, messageId, "这条公告不存在。", [[{ text: "⬅️ 返回列表", callback_data: "a:l" }]])
+    return
+  }
+  await annRender(
+    env,
+    chatId,
+    messageId,
+    `⚠️ 确认<b>永久删除</b>「${row.title.slice(0, 40)}」？\n此操作不可恢复（已发出去的站内消息不受影响）。`,
+    [
+      [
+        { text: "✅ 确认删除", callback_data: `a:dd:${id}` },
+        { text: "↩️ 取消", callback_data: `a:v:${id}` },
+      ],
+    ]
+  )
+}
+
+/** 新建流程第 1 步 */
+async function annStartCreate(env: Env, chatId: string, messageId?: number): Promise<void> {
+  await setAnnState(env, chatId, "ann_title")
+  await annRender(
+    env,
+    chatId,
+    messageId,
+    "➕ <b>新建公告</b>（第 1/3 步）\n\n请直接发送公告<b>标题</b>（最长 100 字）。\n发送 /cancel 取消。",
+    [[{ text: "✖️ 取消", callback_data: "a:nc" }]]
+  )
+}
+
+/** 新建流程第 3 步：预览确认 */
+async function annPreview(env: Env, chatId: string, messageId: number | undefined, p: Record<string, string>): Promise<void> {
+  await annRender(
+    env,
+    chatId,
+    messageId,
+    [
+      "✅ <b>预览</b>（第 3/3 步）",
+      "",
+      `<b>标题</b>：${(p.title ?? "").slice(0, 80)}`,
+      `<b>正文</b>：${(p.body ?? "").slice(0, 300) || "（无）"}`,
+      "",
+      "选「直接发布」会立刻推送到站内消息中心和 TG 频道。",
+    ].join("\n"),
+    [
+      [
+        { text: "💾 存为草稿", callback_data: "a:nw" },
+        { text: "🚀 直接发布", callback_data: "a:np" },
+      ],
+      [{ text: "✖️ 取消", callback_data: "a:nc" }],
+    ]
+  )
+}
+
+/** 新建流程落库：publish=true 时立刻发布 */
+async function annCreateSave(env: Env, chatId: string, messageId: number | undefined, publish: boolean): Promise<void> {
+  const st = await getAnnState(env, chatId)
+  if (!st || st.kind !== "ann_preview") {
+    await annRender(env, chatId, messageId, "这个会话已经过期了，请重新点「➕ 新建公告」。", [
+      [{ text: "⬅️ 返回", callback_data: "a:m" }],
+    ])
+    return
+  }
+  const title = (st.payload.title ?? "").trim().slice(0, 100)
+  const bodyText = (st.payload.body ?? "").trim().slice(0, 1000)
+  const id = uuid()
+  try {
+    await env.DB.prepare(
+      "INSERT INTO announcements (id, title, body, category, pinned, created_at, status, notify_email) " +
+        "VALUES (?, ?, ?, 'general', 0, ?, 'draft', 0)"
+    )
+      .bind(id, title, bodyText, new Date().toISOString())
+      .run()
+    await clearAnnState(env, chatId)
+    if (publish) {
+      await publishAnnouncementNow(env, id)
+      await annRender(env, chatId, messageId, `🚀 已发布：<b>${title.slice(0, 40)}</b>`, [
+        [{ text: "📋 公告列表", callback_data: "a:l" }],
+      ])
+    } else {
+      await annRender(env, chatId, messageId, `💾 已存为草稿：<b>${title.slice(0, 40)}</b>`, [
+        [{ text: "📋 公告列表", callback_data: "a:l" }],
+        [{ text: "⬅️ 返回", callback_data: "a:m" }],
+      ])
+    }
+  } catch (err) {
+    await sendTo(env, chatId, "保存失败：" + (err instanceof Error ? err.message : "未知错误"))
+  }
 }
 
 /**
- * 公告操作（供 handleCallback 使用）。
- * 返回给用户的提示文本（会作为 callback 的 alert 显示）。
+ * 文本消息 → 新建流程的状态机。
+ * 返回 true 表示「这条消息已被公告流程吃掉」，调用方不要再按命令处理。
  */
-async function handleAnnouncementAction(env: Env, data: string): Promise<string> {
-  const [, action, id] = data.split(":")
-  if (!id) return "参数缺失"
-  const row = await env.DB.prepare("SELECT id, title, status FROM announcements WHERE id = ?")
-    .bind(id)
-    .first<{ id: string; title: string; status: string }>()
-  if (!row) return "公告不存在（可能已被删除）"
+async function annHandleText(env: Env, chatId: string, text: string): Promise<boolean> {
+  const st = await getAnnState(env, chatId)
+  if (!st) return false
 
-  if (action === "p") {
-    if (row.status === "published") return "这条已经是发布状态了"
-    try {
-      await publishAnnouncementNow(env, id)
-      return `已发布：${row.title.slice(0, 20)}`
-    } catch (e) {
-      return "发布失败：" + (e instanceof Error ? e.message : "未知错误")
+  if (text.trim() === "/cancel") {
+    await clearAnnState(env, chatId)
+    await sendTo(env, chatId, "已取消。")
+    return true
+  }
+  if (st.kind === "ann_title") {
+    const title = text.trim().slice(0, 100)
+    if (!title) {
+      await sendTo(env, chatId, "标题不能为空，请重新发送。")
+      return true
     }
+    await setAnnState(env, chatId, "ann_body", { title })
+    await sendTo(env, chatId, `标题已记下：<b>${title}</b>\n\n（第 2/3 步）现在发送<b>正文</b>；没有正文就发 /skip。`)
+    return true
   }
-  if (action === "o") {
-    await env.DB.prepare("UPDATE announcements SET status = 'draft', published_at = NULL WHERE id = ?")
-      .bind(id)
-      .run()
-    return `已下线：${row.title.slice(0, 20)}（站内消息不会撤回）`
+  if (st.kind === "ann_body") {
+    const bodyText = text.trim() === "/skip" ? "" : text.trim().slice(0, 1000)
+    const payload = { title: st.payload.title ?? "", body: bodyText }
+    await setAnnState(env, chatId, "ann_preview", payload)
+    await annPreview(env, chatId, undefined, payload)
+    return true
   }
-  if (action === "dc") {
-    // 两步删除：dc = 讨确认，dd = 真删
-    return "CONFIRM_DELETE"
-  }
-  if (action === "dd") {
-    await env.DB.prepare("DELETE FROM announcements WHERE id = ?").bind(id).run()
-    return `已删除：${row.title.slice(0, 20)}`
-  }
-  return "未知操作"
+  return false
 }
+
 
 /** 站内聊天室 → TG 群的上一条推送时间（毫秒）。同一个 isolate 内做 1 条/秒节流。 */
 let lastChatGroupPushAt = 0
