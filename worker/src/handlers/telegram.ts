@@ -1847,8 +1847,10 @@ async function handleCallback(
       return
     }
     if (act === "dd" && arg1) {
+      // 先删频道里那条（要 message_id），再删库
+      await deleteAnnouncementMessages(env, arg1)
       await env.DB.prepare("DELETE FROM announcements WHERE id = ?").bind(arg1).run()
-      await ack("已删除")
+      await ack("已删除（含频道消息）")
       await annList(env, chatId, messageId)
       return
     }
@@ -1972,6 +1974,36 @@ export async function pushMessage(
     // 推送失败绝不影响业务主流程
   }
   return sent
+}
+
+
+/**
+ * 删除公告在 TG 频道里的那条消息（2026-10-24）。
+ *
+ * Telegram 的限制：机器人只能删 **48 小时内** 自己发的消息，更早的会返回
+ * "message can't be deleted" —— 这种情况只记日志，不阻断删除流程。
+ */
+export async function deleteAnnouncementMessages(env: Env, announcementId: string): Promise<number> {
+  let deleted = 0
+  try {
+    const { results } = await env.DB.prepare(
+      "SELECT chat_id, message_id FROM tg_announcement_msgs WHERE announcement_id = ?"
+    )
+      .bind(announcementId)
+      .all<{ chat_id: string; message_id: number }>()
+    if (!results?.length) return 0
+    const token = await botToken(env, await loadConfig(env))
+    if (!token) return 0
+    for (const row of results) {
+      const r = await tgApi(env, "deleteMessage", { chat_id: row.chat_id, message_id: row.message_id }, token)
+      if (r.ok) deleted++
+      else await logPush(env, "ch:announcement:delete", row.chat_id, false, r.description)
+    }
+    await env.DB.prepare("DELETE FROM tg_announcement_msgs WHERE announcement_id = ?").bind(announcementId).run()
+  } catch (err) {
+    await logPush(env, "ch:announcement:delete:err", "(exception)", false, err instanceof Error ? err.message : String(err))
+  }
+  return deleted
 }
 
 /** 某个接收方在 N 小时内是否已收到过同类推送（配合 pushMessage 的 dedupeHours） */
@@ -2299,6 +2331,8 @@ async function annCreateSave(env: Env, chatId: string, messageId: number | undef
   const title = (st.payload.title ?? "").trim().slice(0, 100)
   const bodyText = (st.payload.body ?? "").trim().slice(0, 1000)
   const id = uuid()
+
+  // ① 落库：这一步失败才是真的"没存上"
   try {
     await env.DB.prepare(
       "INSERT INTO announcements (id, title, body, category, pinned, created_at, status, notify_email) " +
@@ -2306,20 +2340,58 @@ async function annCreateSave(env: Env, chatId: string, messageId: number | undef
     )
       .bind(id, title, bodyText, new Date().toISOString())
       .run()
-    await clearAnnState(env, chatId)
-    if (publish) {
-      await publishAnnouncementNow(env, id)
-      await annRender(env, chatId, messageId, `🚀 已发布：<b>${title.slice(0, 40)}</b>`, [
-        [{ text: "📋 公告列表", callback_data: "a:l" }],
-      ])
-    } else {
-      await annRender(env, chatId, messageId, `💾 已存为草稿：<b>${title.slice(0, 40)}</b>`, [
-        [{ text: "📋 公告列表", callback_data: "a:l" }],
-        [{ text: "⬅️ 返回", callback_data: "a:m" }],
-      ])
-    }
   } catch (err) {
     await sendTo(env, chatId, "保存失败：" + (err instanceof Error ? err.message : "未知错误"))
+    return
+  }
+  await clearAnnState(env, chatId)
+
+  if (!publish) {
+    await annRender(env, chatId, messageId, `💾 已存为草稿：<b>${title.slice(0, 40)}</b>`, [
+      [{ text: "📋 公告列表", callback_data: "a:l" }],
+      [{ text: "⬅️ 返回", callback_data: "a:m" }],
+    ])
+    return
+  }
+
+  /**
+   * ② 发布：会广播站内消息 + 推频道 + 入邮件队列，是最重的一步。
+   * 2026-10-24 线上踩过：广播批量写 D1 时会 `D1_ERROR: Network connection lost`，
+   * 但公告**其实已经发出去了**，旧文案却弹「保存失败」，容易让人误以为没发。
+   * 现在发布失败要回查一次状态，按真实结果说话。
+   */
+  try {
+    await publishAnnouncementNow(env, id)
+    await annRender(env, chatId, messageId, `🚀 已发布：<b>${title.slice(0, 40)}</b>`, [
+      [{ text: "📋 公告列表", callback_data: "a:l" }],
+    ])
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "未知错误"
+    const row = await env.DB.prepare("SELECT status FROM announcements WHERE id = ?")
+      .bind(id)
+      .first<{ status: string }>()
+    if (row?.status === "published") {
+      await annRender(
+        env,
+        chatId,
+        messageId,
+        `⚠️ <b>已发布</b>（状态已落库），但后续推送可能没走完：\n<code>${msg.slice(0, 120)}</code>\n\n` +
+          "可以在网页后台补发邮件，或忽略它（站内消息和频道通常已经到了）。",
+        [[{ text: "📋 公告列表", callback_data: "a:l" }]]
+      )
+    } else {
+      await annRender(
+        env,
+        chatId,
+        messageId,
+        `⚠️ 草稿已保存，但发布失败：\n<code>${msg.slice(0, 120)}</code>\n\n` +
+          "去列表里点开这条再点「🚀 发布」重试即可。",
+        [
+          [{ text: "📋 公告列表", callback_data: "a:l" }],
+          [{ text: "⬅️ 返回", callback_data: "a:m" }],
+        ]
+      )
+    }
   }
 }
 
@@ -2636,7 +2708,12 @@ interface ChannelRow {
  * 往所有订阅了该事件的频道发一条消息。
  * 单个频道失败不影响其它频道，也不影响调用方业务流程。
  */
-export async function pushToChannels(env: Env, event: ChannelEvent, text: string): Promise<number> {
+export async function pushToChannels(
+  env: Env,
+  event: ChannelEvent,
+  text: string,
+  ref?: { announcementId?: string }
+): Promise<number> {
   try {
     const cfg = await loadConfig(env)
     if (!cfg.enabled) return 0
@@ -2657,6 +2734,23 @@ export async function pushToChannels(env: Env, event: ChannelEvent, text: string
       await logPush(env, `ch:${event}`, ch.chat_id, r.ok, r.ok ? undefined : r.description)
       if (r.ok) {
         ok++
+        /**
+         * 记下频道里这条消息的 id（2026-10-24）：
+         * 站长要求删除公告时把频道里那条也删掉，而 deleteMessage 必须有 message_id。
+         * 记不下也没关系 —— 只是以后删不掉那条频道消息。
+         */
+        const mid = (r as { result?: { message_id?: number } }).result?.message_id
+        if (ref?.announcementId && typeof mid === "number") {
+          try {
+            await env.DB.prepare(
+              "INSERT OR REPLACE INTO tg_announcement_msgs (announcement_id, chat_id, message_id, created_at) VALUES (?, ?, ?, ?)"
+            )
+              .bind(ref.announcementId, ch.chat_id, mid, new Date().toISOString())
+              .run()
+          } catch {
+            /* 表还没迁移时也不该影响推送 */
+          }
+        }
         await env.DB.prepare("UPDATE tg_channels SET last_ok_at = ?, last_error = NULL WHERE chat_id = ?")
           .bind(Date.now(), ch.chat_id)
           .run()

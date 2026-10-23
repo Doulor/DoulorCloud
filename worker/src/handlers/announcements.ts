@@ -6,7 +6,7 @@ import { sendMail, renderMail, type MailTransport } from "../mailer"
 import { broadcastMessage } from "../user-messages"
 import { getSetting } from "../settings"
 import type { Env } from "../env"
-import { pushToChannels } from "./telegram"
+import { deleteAnnouncementMessages, pushToChannels } from "./telegram"
 
 /**
  * 网站公告 / 动态。
@@ -486,7 +486,7 @@ export async function publishAnnouncementNow(
         "",
         `☁️ https://cloud.doulor.cn/dashboard/messages/site`,
       ].join("\n")
-    )
+    , { announcementId: row.id })
   } catch (err) {
     console.error("公告频道推送失败:", id, err)
   }
@@ -768,6 +768,8 @@ export async function deleteAnnouncement(
 ): Promise<Response> {
   await requireAdminScope(env, request, "announcements")
   await loadOne(env, id)
+  // 先把 TG 频道里那条删掉（可能有多个频道），再删库；失败不影响删除
+  await deleteAnnouncementMessages(env, id)
   await env.DB.prepare("DELETE FROM announcements WHERE id = ?").bind(id).run()
   return json({ ok: true })
 }
