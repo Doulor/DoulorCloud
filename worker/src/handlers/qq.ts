@@ -163,8 +163,14 @@ export async function handleQqWebhook(env: Env, request: Request): Promise<Respo
     try {
       if (payload.t === "GROUP_ADD_ROBOT") {
         await registerGroup(env, payload.d?.group_openid)
-      } else if (payload.t === "GROUP_AT_MESSAGE_CREATE") {
-        await bridgeAtMessage(env, payload.d)
+      } else if (payload.t === "GROUP_MESSAGE_CREATE" || payload.t === "GROUP_AT_MESSAGE_CREATE") {
+        /**
+         * 两种事件都接（2026-10-24 站长在后台看到 `GROUP_MESSAGE_CREATE` 群消息事件创建，
+         * 说明平台已经开放**全量群消息**订阅，不再只限于 @机器人）。
+         * 两者 payload 结构相同，区别只是 GROUP_AT_MESSAGE_CREATE 的 content 里带 <@!...> 前缀。
+         * 订阅了 GROUP_MESSAGE_CREATE 就等于「不用 @ 也能进站内」。
+         */
+        await bridgeGroupMessage(env, payload.d)
       }
     } catch (err) {
       // webhook 永远回 200，避免平台重投同一批事件
@@ -186,8 +192,8 @@ async function registerGroup(env: Env, groupOpenid: string | undefined): Promise
     .run()
 }
 
-/** QQ 群的 @ 消息 → 站内聊天室 */
-async function bridgeAtMessage(env: Env, d: QqPayload["d"]): Promise<void> {
+/** QQ 群消息（全量或 @机器人） → 站内聊天室 */
+async function bridgeGroupMessage(env: Env, d: QqPayload["d"]): Promise<void> {
   if (!d) return
   const groupOpenid = d.group_openid ?? ""
   const memberOpenid = d.author?.member_openid ?? ""
@@ -202,8 +208,12 @@ async function bridgeAtMessage(env: Env, d: QqPayload["d"]): Promise<void> {
     .first<{ ok: number }>()
   if (!allowed) return
 
-  // 去掉开头的 @机器人（平台会把 mention 拼在正文里）
-  const text = rawText.replace(/^<@!?[^>]+>\s*/, "").replace(/^@\S+\s*/, "").trim()
+  // 去掉 @ 占位：平台把 mention 拼成 `<@!id>`（可能在任意位置）；
+  // 只额外清掉**开头**的 `@某个名字`，避免把正文里的邮箱/社交账号一起吃掉
+  const text = rawText
+    .replace(/<@!?[^>]+>/g, "")
+    .replace(/^@\S+\s+/, "")
+    .trim()
   if (!text) return
   // 命令不桥接（与 TG 同口径）
   if (/^\/[A-Za-z0-9_]{1,32}(\s|$)/.test(text)) return

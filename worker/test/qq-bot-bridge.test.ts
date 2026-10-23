@@ -117,6 +117,48 @@ describe("QQ 机器人 · 群 @ 消息进站内", () => {
     expect(shadow?.nickname).toContain("QQ:")
   })
 
+  it("GROUP_MESSAGE_CREATE（全量群消息，不用 @）也能进站内", async () => {
+    const res = await handleQqWebhook(
+      env,
+      hook({
+        op: 0,
+        t: "GROUP_MESSAGE_CREATE",
+        id: "EV_ALL_1",
+        d: {
+          id: "ALLMSG_1",
+          content: "普通聊天，没有艾特",
+          group_openid: GROUP,
+          author: { member_openid: "MEMBER_OPENID_B" },
+          timestamp: new Date().toISOString(),
+        },
+      })
+    )
+    expect(res.status).toBe(200)
+    const rows = await qqRows()
+    expect(rows.length).toBe(1)
+    expect(rows[0].body).toBe("普通聊天，没有艾特")
+  })
+
+  it("正文里的邮箱不会被 @ 清理规则吃掉", async () => {
+    await handleQqWebhook(
+      env,
+      hook({
+        op: 0,
+        t: "GROUP_MESSAGE_CREATE",
+        id: "EV_ALL_2",
+        d: {
+          id: "ALLMSG_2",
+          content: "联系我 a@b.com 谢谢",
+          group_openid: GROUP,
+          author: { member_openid: "MEMBER_OPENID_C" },
+          timestamp: new Date().toISOString(),
+        },
+      })
+    )
+    const rows = await qqRows()
+    expect(rows[0].body).toBe("联系我 a@b.com 谢谢")
+  })
+
   it("未登记的群 → 一条都不落库", async () => {
     await seedGroup(0)
     await handleQqWebhook(env, hook(atMessage({ content: "<@!1> 不该进来的" })))
