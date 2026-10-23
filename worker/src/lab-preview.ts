@@ -39,14 +39,24 @@ function withStorageShim(html: string): string {
 }
 
 /**
- * 挑入口文件：优先 `index.html`，否则第一个 `.html`，再否则第一个文件。
+ * 挑入口文件：**取内容最大的那个 .html**，没有 .html 就取第一个文件。
  * 返回空串 = 这个作品没有可展示的页面。
+ *
+ * 🔴 2026-10-24 修的真实故障（站长反馈「fxz 的 S16 打不开」）：
+ * 原来规则是「有根 index.html 就用它」，但有的作品根目录只放了一个**极小的空壳**
+ * （只有 `<head>` + 一点跳转逻辑，1 KB），真正的页面在 `assets/index.html`（65 KB）。
+ * 于是 `/api/gallery/<slug>/raw`（`tyu.me/<页面名>` 分享页的 iframe 直接加载它）
+ * 返回的只有空壳 —— 页面上什么都没有，看起来就是「访问不了」。
+ * 体积最大化是最稳的启发式：真正的入口几乎一定比跳转壳大。
  */
 export function pickEntry(files: Record<string, string>): string {
   const paths = Object.keys(files)
   if (!paths.length) return ""
-  if (paths.includes("index.html")) return "index.html"
-  return paths.find((p) => p.toLowerCase().endsWith(".html")) ?? paths[0]
+  const htmlPaths = paths.filter((p) => p.toLowerCase().endsWith(".html"))
+  if (htmlPaths.length > 0) {
+    return htmlPaths.sort((a, b) => (files[b]?.length ?? 0) - (files[a]?.length ?? 0))[0]
+  }
+  return paths[0]
 }
 
 /** 匹配 `from "…"` / `import("…")` / `import "…"`，捕获前缀、引号、引用路径 */
