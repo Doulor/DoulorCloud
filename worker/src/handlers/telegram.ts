@@ -1473,7 +1473,15 @@ interface TgGroupMessage {
   text?: string
   caption?: string
   photo?: Array<{ file_id?: string; file_size?: number }>
-  sticker?: { file_id?: string; emoji?: string }
+  sticker?: {
+    file_id?: string
+    emoji?: string
+    is_animated?: boolean
+    is_video?: boolean
+    /** 缩略图（webp）：动图贴纸的原始文件是 webm/tgs，<img> 渲染不了，只能靠它 */
+    thumb?: { file_id?: string }
+    thumbnail?: { file_id?: string }
+  }
   document?: { file_id?: string; file_name?: string; mime_type?: string }
   video?: { file_id?: string }
   voice?: { file_id?: string }
@@ -1543,9 +1551,18 @@ function groupMessageBody(msg: TgGroupMessage): string | null {
     return best ? `${image(best)}${caption ? `\n${caption}` : ""}` : null
   }
   if (msg.sticker?.file_id) {
-    // 贴纸也按图片渲染，保留 emoji 作为「图挂了也能看懂」的兜底
-    return `${image(msg.sticker.file_id)}${caption ? `\n${caption}` : ""}` +
-      (msg.sticker.emoji ? `\n${msg.sticker.emoji}` : "")
+    /**
+     * 动图贴纸的原始文件是 **video/webm**（.tgs 是 lottie），`<img>` 渲染不出来 ——
+     * 站长实测「只剩一个 emoji」就是这个原因。所以优先用 webp 缩略图；
+     * 连缩略图都没有（很老的贴纸）就退化成文字 + 链接，绝不放一张破图。
+     */
+    const thumbId = msg.sticker.thumb?.file_id ?? msg.sticker.thumbnail?.file_id
+    const emoji = msg.sticker.emoji ?? ""
+    if (thumbId) {
+      return `${image(thumbId)}${caption ? `\n${caption}` : ""}${emoji ? `\n${emoji}` : ""}`
+    }
+    const kind = msg.sticker.is_video ? "动图贴纸" : msg.sticker.is_animated ? "动态贴纸" : "贴纸"
+    return `🎨 [${kind}]${emoji}${caption ? ` ${caption}` : ""}\n${link(msg.sticker.file_id)}`
   }
   if (msg.document?.file_id) {
     const name = msg.document.file_name ?? "文件"
@@ -1880,6 +1897,28 @@ export function tgSafeText(raw: string): string {
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_m, text: string, url: string) => `${text} ${url}`)
 }
 
+/**
+ * 把站内正文拆成「文字 + 图片列表」（2026-10-24）。
+ *
+ * 站内聊天室用 markdown 图片（表情包是 `![](/api/stickers/<id>/image)`）。
+ * 直接丢给 Telegram 只会显示源码，而 `/api/stickers/…/image` 实测**公开可访问**，
+ * 所以完全可以交给 `sendPhoto` 发真图。
+ *
+ * 返回的 photos 是**绝对 URL**；`/api/tg/file/` 的图片要登录（Telegram 抓不到）
+ * 且本来就是我们发给站内的，不回推，直接丢弃。
+ */
+export function splitOutgoing(text: string): { text: string; photos: string[] } {
+  const photos: string[] = []
+  const rest = text.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt: string, url: string) => {
+    if (url.startsWith("/api/tg/file/")) return "" // 我们自己中转的图，不回推
+    const abs = /^https?:\/\//i.test(url) ? url : `https://cloud.doulor.cn${url.startsWith("/") ? "" : "/"}${url}`
+    if (photos.length < 3 && !photos.includes(abs)) photos.push(abs)
+    const label = (alt || "").trim()
+    return label ? `[${label}]` : "[图片]"
+  })
+  return { text: tgSafeText(rest), photos }
+}
+
 /** 站内聊天室 → TG 群的上一条推送时间（毫秒）。同一个 isolate 内做 1 条/秒节流。 */
 let lastChatGroupPushAt = 0
 
@@ -1906,16 +1945,25 @@ export async function pushToChatGroups(env: Env, text: string): Promise<number> 
       "SELECT chat_id FROM tg_channels WHERE kind = 'group' AND enabled = 1"
     ).all<{ chat_id: string }>()
 
+    const { text: plain, photos } = splitOutgoing(text)
     let ok = 0
     for (const row of results ?? []) {
-      const r = await tgApi(
-        env,
-        "sendMessage",
-        { chat_id: row.chat_id, text: tgSafeText(text).slice(0, 3500), disable_web_page_preview: true },
-        token
-      )
-      await logPush(env, "ch:chat", row.chat_id, r.ok, r.ok ? undefined : r.description)
-      if (r.ok) ok++
+      if (plain.trim()) {
+        const r = await tgApi(
+          env,
+          "sendMessage",
+          { chat_id: row.chat_id, text: plain.slice(0, 3500), disable_web_page_preview: true },
+          token
+        )
+        await logPush(env, "ch:chat", row.chat_id, r.ok, r.ok ? undefined : r.description)
+        if (r.ok) ok++
+      }
+      // 图片按真图发（Telegram 自己去抓公开 URL），失败不影响文字那条
+      for (const photo of photos) {
+        const rp = await tgApi(env, "sendPhoto", { chat_id: row.chat_id, photo }, token)
+        await logPush(env, "ch:chat:photo", row.chat_id, rp.ok, rp.ok ? undefined : rp.description)
+        if (rp.ok) ok++
+      }
     }
     return ok
   } catch {

@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach } from "vitest"
 import { env } from "cloudflare:workers"
 import { handleWebhook } from "../src/handlers/telegram"
 import { login } from "../src/handlers/auth"
-import { pushMessage, tgSafeText } from "../src/handlers/telegram"
+import { pushMessage, tgSafeText, splitOutgoing } from "../src/handlers/telegram"
 import { makeUser } from "./helpers"
 import { encryptSecret } from "../src/crypto"
 
@@ -152,11 +152,16 @@ describe("TG 群 → 站内聊天室", () => {
     expect(rows[0].body).not.toContain(BOT_TOKEN)
   })
 
-  it("贴纸消息 → 也是 markdown 图片（保留 emoji 兜底）", async () => {
+  it("贴纸消息 → 用 webp 缩略图（原文件是 webm，<img> 渲染不了）", async () => {
     const stickerMsg = {
       message: {
         message_id: 9100,
-        sticker: { file_id: "STICKER_FILE_ID_123", emoji: "👍" },
+        sticker: {
+          file_id: "STICKER_WEBM_ID_123",
+          emoji: "👍",
+          is_video: true,
+          thumb: { file_id: "STICKER_THUMB_WEBP_456" },
+        },
         from: { id: 700000700, is_bot: false, username: "stickerfan" },
         chat: { id: GROUP_ID, type: "supergroup" },
       },
@@ -164,8 +169,27 @@ describe("TG 群 → 站内聊天室", () => {
     await handleWebhook(env, hook(stickerMsg))
     const rows = await chatRows()
     expect(rows.length).toBe(1)
-    expect(rows[0].body).toContain("![](/api/tg/file/STICKER_FILE_ID_123)")
+    // 用缩略图，不用 webm 原文件
+    expect(rows[0].body).toContain("![](/api/tg/file/STICKER_THUMB_WEBP_456)")
+    expect(rows[0].body).not.toContain("STICKER_WEBM_ID_123")
     expect(rows[0].body).toContain("👍")
+  })
+
+  it("贴纸没有缩略图 → 退化成文字，不放破图", async () => {
+    const stickerMsg = {
+      message: {
+        message_id: 9101,
+        sticker: { file_id: "OLD_STICKER_NO_THUMB", emoji: "🎉", is_animated: true },
+        from: { id: 700000701, is_bot: false, username: "oldsticker" },
+        chat: { id: GROUP_ID, type: "supergroup" },
+      },
+    }
+    await handleWebhook(env, hook(stickerMsg))
+    const rows = await chatRows()
+    expect(rows.length).toBe(1)
+    expect(rows[0].body).not.toContain("![](")
+    expect(rows[0].body).toContain("动态贴纸")
+    expect(rows[0].body).toContain("/api/tg/file/OLD_STICKER_NO_THUMB")
   })
 
   it("群里的机器人命令 / 绑定码**不桥接**进站内（隐私）", async () => {
@@ -232,5 +256,30 @@ describe("站内 → TG 的正文改写（tgSafeText）", () => {
 
   it("普通文本原样返回", () => {
     expect(tgSafeText("你好呀")).toBe("你好呀")
+  })
+})
+
+describe("站内 → TG 的图片拆分（splitOutgoing）", () => {
+  it("站内表情包 → 变成绝对 URL 交给 sendPhoto 发真图", () => {
+    const r = splitOutgoing("多萝：![](/api/stickers/abc-123/image)")
+    expect(r.photos).toEqual(["https://cloud.doulor.cn/api/stickers/abc-123/image"])
+    expect(r.text).toContain("[图片]")
+  })
+
+  it("绝对 http 图片直接被收集", () => {
+    const r = splitOutgoing("![](https://example.com/a.png)")
+    expect(r.photos).toEqual(["https://example.com/a.png"])
+  })
+
+  it("/api/tg/file/（站内中转的 TG 图）不回推", () => {
+    const r = splitOutgoing("![](/api/tg/file/CAACAgUAAA)")
+    expect(r.photos).toEqual([])
+    expect(r.text).not.toContain("/api/tg/file")
+  })
+
+  it("纯文字没有图片", () => {
+    const r = splitOutgoing("你好呀")
+    expect(r.photos).toEqual([])
+    expect(r.text).toBe("你好呀")
   })
 })
