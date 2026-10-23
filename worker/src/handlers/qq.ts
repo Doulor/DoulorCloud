@@ -156,6 +156,17 @@ export async function handleQqWebhook(env: Env, request: Request): Promise<Respo
 
   const cfg = await loadConfig(env)
 
+  /**
+   * 事件探针（2026-10-24）：**任何**进来的回调都先落一条日志。
+   *
+   * 起因：站长反馈群里发「绑定 xxx」没反应，而库里连一条事件都没有 ——
+   * 有这行就能立刻区分「平台没推给我」和「推了但我处理失败」，
+   * 不用再靠猜。kind 固定 qq:event，target 写事件类型。
+   */
+  if (payload.op !== 13) {
+    await logPush(env, "qq:event", payload.t ?? `op:${payload.op ?? "?"}`, true)
+  }
+
   // ① 回调地址验证：即使机器人功能未启用也要能通过，否则后台配置不了 URL
   if (payload.op === 13) {
     const secret = await appSecret(env, cfg)
@@ -745,16 +756,36 @@ async function sendGroupText(
   if (!cfg.enabled) return false
   const token = await accessToken(env, cfg)
   if (!token) return false
-  const res = await fetch(`${API}/v2/groups/${encodeURIComponent(groupOpenid)}/messages`, {
-    method: "POST",
-    headers: { authorization: `QQBot ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ content: content.slice(0, 1500), msg_type: 0, ...(msgId ? { msg_id: msgId } : {}) }),
-  })
-  if (!res.ok) {
+  const send = async (withMsgId: boolean): Promise<{ ok: boolean; err?: string }> => {
+    const res = await fetch(`${API}/v2/groups/${encodeURIComponent(groupOpenid)}/messages`, {
+      method: "POST",
+      headers: { authorization: `QQBot ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        content: content.slice(0, 1500),
+        msg_type: 0,
+        ...(withMsgId && msgId ? { msg_id: msgId } : {}),
+      }),
+    })
+    if (res.ok) return { ok: true }
     const t = await res.text().catch(() => "")
-    await logPush(env, "qq:group:reply", groupOpenid, false, t.slice(0, 200))
+    return { ok: false, err: t.slice(0, 200) }
   }
-  return res.ok
+
+  /**
+   * 双保险（2026-10-24 实测教训）：
+   *   先按「被动回复」发（带 msg_id，不烧主动消息配额）；
+   *   万一平台说 msg_id 无效/越权（比如事件重投、或我们重试过晚），
+   *   再退化成**普通群消息**发一次 —— 宁可烧一条配额，也不能让用户
+   *   绑成功了却看不到任何确认（站长就是被这个坑到的）。
+   */
+  let r = await send(true)
+  if (!r.ok) {
+    await logPush(env, "qq:group:reply:passive", groupOpenid, false, r.err)
+    r = await send(false)
+    if (r.ok) await logPush(env, "qq:group:reply:active", groupOpenid, true)
+  }
+  await logPush(env, "qq:group:reply", groupOpenid, r.ok, r.ok ? undefined : r.err)
+  return r.ok
 }
 
 /**
