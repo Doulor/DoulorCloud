@@ -42,10 +42,10 @@ export async function getAttention(env: Env, request: Request): Promise<Response
   const me = await requireUser(env, request)
 
   const seen = await env.DB.prepare(
-    "SELECT community_seen_at, chat_seen_at FROM users WHERE id = ?"
+    "SELECT community_seen_at, chat_seen_at, chat_dnd FROM users WHERE id = ?"
   )
     .bind(me.id)
-    .first<{ community_seen_at: string | null; chat_seen_at: string | null }>()
+    .first<{ community_seen_at: string | null; chat_seen_at: string | null; chat_dnd: number }>()
 
   const fallback = new Date(Date.now() - FALLBACK_WINDOW_MS).toISOString()
   const communitySince = seen?.community_seen_at ?? fallback
@@ -121,7 +121,8 @@ export async function getAttention(env: Env, request: Request): Promise<Response
 
   return json({
     community: at(0),
-    chat: at(1),
+    // 免打扰开启时聊天角标恒为 0（服务端算，跨设备一致）
+    chat: seen?.chat_dnd ? 0 : at(1),
     feedback: at(2),
     admin,
   })

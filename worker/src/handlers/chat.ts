@@ -9,7 +9,7 @@
  * 为什么不用 WebSocket：Cloudflare Worker 原生不支持 WS 长连接（需 Durable Objects，
  * 架构重）。轮询 + 心跳对本场景最务实。
  */
-import { ApiError, json } from "../http"
+import { ApiError, json, readBodyCapped } from "../http"
 import { requireUser, isPrivileged, isAnyAdmin } from "../auth"
 import { uuid } from "../crypto"
 import { guardRateLimit, clientIp } from "../ratelimit"
@@ -895,3 +895,31 @@ export async function markChatSeen(env: Env, request: Request): Promise<Response
   return json({ ok: true })
 }
 
+/* ==========================================================================
+ * 聊天室免打扰（2026-10-24）
+ * ========================================================================== */
+
+/** GET /chat/dnd —— 我的免打扰状态 */
+export async function getMyDnd(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const row = await env.DB.prepare("SELECT chat_dnd FROM users WHERE id = ?")
+    .bind(user.id)
+    .first<{ chat_dnd: number }>()
+  return json({ dnd: !!row?.chat_dnd })
+}
+
+/** POST /chat/dnd —— 开关免打扰（开启后 /api/attention 不再报聊天未读） */
+export async function setMyDnd(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const raw = new TextDecoder().decode(await readBodyCapped(request, 1024, "请求体过大"))
+  let dnd = false
+  try {
+    dnd = Boolean((JSON.parse(raw || "{}") as { dnd?: unknown }).dnd)
+  } catch {
+    throw new ApiError(400, "请求格式错误", "INVALID_INPUT")
+  }
+  await env.DB.prepare("UPDATE users SET chat_dnd = ?, updated_at = ? WHERE id = ?")
+    .bind(dnd ? 1 : 0, new Date().toISOString(), user.id)
+    .run()
+  return json({ ok: true, dnd })
+}

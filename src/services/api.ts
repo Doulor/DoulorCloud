@@ -5775,3 +5775,13 @@ export const qqBindApi = {
       { method: "DELETE" }
     ),
 }
+
+/** 聊天室免打扰（服务端持久化，跨设备生效） */
+export const chatDndApi = {
+  get: () => request<{ dnd: boolean }>("/chat/dnd"),
+  set: (dnd: boolean) =>
+    request<{ ok: boolean; dnd: boolean }>("/chat/dnd", {
+      method: "POST",
+      body: JSON.stringify({ dnd }),
+    }),
+}

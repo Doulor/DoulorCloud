@@ -2798,6 +2798,18 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       chatHandlers.sendMessage(env, request),
   },
   {
+    kind: "exact",
+    path: "/chat/dnd",
+    method: "GET",
+    handle: () => chatHandlers.getMyDnd(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/chat/dnd",
+    method: "POST",
+    handle: () => chatHandlers.setMyDnd(env, request),
+  },
+  {
     kind: "regex",
     match: (routePath: string) => routePath.match(/^\/chat\/messages\/([^/]+)\/recall$/),
     methods: ["POST"],
