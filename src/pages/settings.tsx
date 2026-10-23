@@ -20,6 +20,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { MessageNotifyCard } from "@/components/message-notify-card"
 import { TwoFactorCard } from "@/components/two-factor-card"
 import { ApiSettingsCard } from "@/components/api-settings-card"
@@ -57,6 +58,8 @@ import { AvatarCropper, type AvatarCropResult } from "@/components/avatar-croppe
 import type { EmailSettings } from "@/types"
 
 export default function SettingsPage() {
+  /** 设置页分区（2026-10-24 从一长串卡片改成 tab） */
+  const [tab, setTab] = React.useState("profile")
   const { user, setUser } = useAuth()
   const { t } = useT()
 
@@ -379,7 +382,18 @@ export default function SettingsPage() {
 
       {/* 动效层：分类切换时整组卡片错峰入场（开关关闭时规则不命中，行为同现状） */}
       <SectionEnter watch={group} className="space-y-6">
+        <Tabs value={tab} onValueChange={setTab} className="space-y-6">
+          <TabsList className="flex w-full justify-start overflow-x-auto">
+            <TabsTrigger value="profile">{t("set.tab.profile")}</TabsTrigger>
+            <TabsTrigger value="mailbox">{t("set.tab.mailbox")}</TabsTrigger>
+            <TabsTrigger value="ai">{t("set.tab.ai")}</TabsTrigger>
+            <TabsTrigger value="notify">{t("set.tab.notify")}</TabsTrigger>
+            <TabsTrigger value="security">{t("set.tab.security")}</TabsTrigger>
+            <TabsTrigger value="danger">{t("set.tab.danger")}</TabsTrigger>
+            <TabsTrigger value="binding">{t("set.tab.binding")}</TabsTrigger>
+          </TabsList>
         {show("account") && (
+          <TabsContent value="profile" className="space-y-6">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -535,6 +549,7 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+          </TabsContent>
         )}
 
         {/* 二次认证（管理员/站长强制，普通用户可选） */}
@@ -544,6 +559,7 @@ export default function SettingsPage() {
 
         {/* 真实邮箱验证 */}
         {show("account") && (
+          <TabsContent value="mailbox" className="space-y-6">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -638,10 +654,12 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+          </TabsContent>
         )}
 
         {/* 界面动效：动效层总开关（本地偏好，不进账号） */}
         {show("general") && (
+          <TabsContent value="ai" className="space-y-6">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -687,10 +705,12 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+          </TabsContent>
         )}
 
         {/* 通知偏好 */}
         {show("notify") && (
+          <TabsContent value="notify" className="space-y-6">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -728,10 +748,12 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+          </TabsContent>
         )}
 
         {/* 安全：改密码等 */}
         {show("security") && (
+          <TabsContent value="security" className="space-y-6">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -754,6 +776,7 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+          </TabsContent>
         )}
 
         {/* 消息通知：网页通知（浏览器 / App WebView 里都会桥接成系统通知） */}
@@ -762,6 +785,7 @@ export default function SettingsPage() {
         )}
 
         {show("danger") && (
+          <TabsContent value="danger" className="space-y-6">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -782,6 +806,7 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+          </TabsContent>
         )}
 
         {/* 公开 API：Key 管理 + 层级额度 + 接口文档 */}
@@ -799,6 +824,11 @@ export default function SettingsPage() {
         {show("api") && (
         <OAuthAppsCard />
         )}
+          <TabsContent value="binding" className="space-y-6">
+            <TgBindCard />
+            <QqBindCard />
+          </TabsContent>
+        </Tabs>
       </SectionEnter>
 
       {/* 注销账号确认 */}
@@ -1104,8 +1134,6 @@ export default function SettingsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <TgBindCard />
-      <QqBindCard />
 
     </div>
   )

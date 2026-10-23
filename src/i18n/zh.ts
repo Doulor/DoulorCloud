@@ -8,6 +8,13 @@
  *   · 带变量的用 {name} 占位，例如 "已用 {used} / {total}"。
  */
 export const zh = {
+  "set.tab.profile": "账号资料",
+  "set.tab.mailbox": "邮箱",
+  "set.tab.ai": "AI 偏好",
+  "set.tab.notify": "通知",
+  "set.tab.security": "安全",
+  "set.tab.danger": "危险操作",
+  "set.tab.binding": "账号绑定",
   "qqb.title": "QQ 绑定",
   "qqb.desc": "绑定后可在 QQ 里用机器人签到、查积分；群里聊天会与站内聊天室互通。",
   "qqb.bound": "已绑定",

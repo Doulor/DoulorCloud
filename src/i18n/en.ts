@@ -8,6 +8,13 @@ import type { MessageKey } from "./zh"
  * Keeping the same key order as zh.ts makes the two easy to diff by eye.
  */
 export const en: Record<MessageKey, string> = {
+  "set.tab.profile": "Profile",
+  "set.tab.mailbox": "Mailbox",
+  "set.tab.ai": "AI",
+  "set.tab.notify": "Notifications",
+  "set.tab.security": "Security",
+  "set.tab.danger": "Danger zone",
+  "set.tab.binding": "Bindings",
   "qqb.title": "QQ binding",
   "qqb.desc": "After binding you can check in and view points from QQ; group chat bridges to the site chat room.",
   "qqb.bound": "Bound",
