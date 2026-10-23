@@ -30,6 +30,7 @@ import { requireUser, isAnyAdmin } from "../auth"
 import { requireAdminScope } from "./admin"
 import { audit as recordAudit } from "../settings"
 import { decryptSecret, encryptSecret, uuid } from "../crypto"
+import { publishAnnouncementNow } from "./announcements"
 import type { Env } from "../env"
 
 const TG_API = "https://api.telegram.org"
@@ -825,7 +826,17 @@ export async function handleWebhook(env: Env, request: Request): Promise<Respons
 
   if (cmd === "/status") {
     // 管理命令：已绑定 + 站内角色是管理员，两个条件缺一静默忽略
-    if (!isAnyAdmin(role) || commands.status === false) return json({ ok: true, ignored: "no-perm" })
+    // 管理员：/公告 —— 公告快捷管理卡（非管理员静默忽略，与其它管理命令同口径）
+  // 注意：此处 cmd 已被前面的判断收窄成字面量，比较前先转成 string
+  const cmdAny = cmd as string
+  if (cmdAny === "/公告" || cmdAny === "/ann" || cmdAny === "/announce") {
+    const me = await env.DB.prepare("SELECT role FROM users WHERE id = ?").bind(binding.user_id).first<{ role: string }>()
+    if (!isAnyAdmin(String(me?.role ?? ""))) return json({ ok: true, ignored: "no-perm" })
+    await sendAnnouncementPanel(env, chatId)
+    return json({ ok: true })
+  }
+
+  if (!isAnyAdmin(role) || commands.status === false) return json({ ok: true, ignored: "no-perm" })
     await sendTo(env, chatId, await statusSummary(env, cfg))
     return json({ ok: true })
   }
@@ -1766,6 +1777,48 @@ async function handleCallback(
     return
   }
 
+  // 公告快捷管理（管理员）：a:p/<o>/<dc>/<dd>
+  if (data.startsWith("a:")) {
+    if (!isAnyAdmin(String(user.role ?? ""))) {
+      await ack("没有权限")
+      return
+    }
+    const [, action, id] = data.split(":")
+    if (action === "dc" && id) {
+      const row = await env.DB.prepare("SELECT title FROM announcements WHERE id = ?")
+        .bind(id)
+        .first<{ title: string }>()
+      await tgApi(
+        env,
+        "editMessageReplyMarkup",
+        {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "⚠️ 确认永久删除", callback_data: `a:dd:${id}` },
+                { text: "取消", callback_data: "a:noop" },
+              ],
+            ],
+          },
+        },
+        await botToken(env, cfg)
+      )
+      await ack(`确认删除「${(row?.title ?? "").slice(0, 16)}」？`)
+      return
+    }
+    if (action === "noop") {
+      await ack("已取消")
+      await sendAnnouncementPanel(env, chatId)
+      return
+    }
+    const msg = await handleAnnouncementAction(env, data)
+    await ack(msg.slice(0, 180))
+    await sendAnnouncementPanel(env, chatId)
+    return
+  }
+
   // 通知开关：切完立刻原地刷新设置视图
   if (data.startsWith("s:")) {
     const key = data.slice(2)
@@ -1935,6 +1988,100 @@ export function splitOutgoing(text: string): { text: string; photos: string[] } 
     return label ? `[${label}]` : "[图片]"
   })
   return { text: tgSafeText(rest), photos }
+}
+
+/* ==========================================================================
+ * 管理员：公告快捷管理（2026-10-24）
+ *
+ * 站长要求「在 TG 里快捷管理公告」。设计成一张卡片 + 每行两个按钮：
+ *   · 草稿  → [发布] [删除]
+ *   · 已发布 → [下线] [删除]
+ * 发布直接复用 publishAnnouncementNow（会同时推站内消息 + TG 频道 + 邮件队列）。
+ * 删除是**物理删除**，所以要先点一次确认（按钮变红再点）。
+ * ========================================================================== */
+
+interface AnnRow {
+  id: string
+  title: string
+  status: string
+  published_at: string | null
+}
+
+/** 取最近 N 条公告，生成文本 + 按钮 */
+async function announcementPanel(env: Env): Promise<{ text: string; keyboard: unknown }> {
+  const { results } = await env.DB.prepare(
+    "SELECT id, title, status, published_at FROM announcements ORDER BY created_at DESC LIMIT 5"
+  ).all<AnnRow>()
+  const rows = results ?? []
+  if (!rows.length) {
+    return { text: "还没有公告。\n去网站「管理 → 公告」新建一条，回来这里就能一键发布。", keyboard: { inline_keyboard: [] } }
+  }
+  const lines = ["📢 <b>公告管理</b>", ""]
+  const keyboard: { text: string; callback_data: string }[][] = []
+  rows.forEach((r, i) => {
+    const published = r.status === "published" || !!r.published_at
+    lines.push(`${i + 1}. ${published ? "🟢 已发布" : "⚪️ 草稿"} · ${r.title.slice(0, 40)}`)
+    keyboard.push(
+      published
+        ? [
+            { text: `↓ 下线 ${i + 1}`, callback_data: `a:o:${r.id}` },
+            { text: `🗑 删除 ${i + 1}`, callback_data: `a:dc:${r.id}` },
+          ]
+        : [
+            { text: `🚀 发布 ${i + 1}`, callback_data: `a:p:${r.id}` },
+            { text: `🗑 删除 ${i + 1}`, callback_data: `a:dc:${r.id}` },
+          ]
+    )
+  })
+  lines.push("", "发布 = 站内消息 + TG 频道 + 邮件队列一起发出去。")
+  return { text: lines.join("\n"), keyboard: { inline_keyboard: keyboard } }
+}
+
+/** 发一张公告管理卡 */
+async function sendAnnouncementPanel(env: Env, chatId: string): Promise<void> {
+  const cfg = await loadConfig(env)
+  const token = await botToken(env, cfg)
+  if (!token) return
+  const { text, keyboard } = await announcementPanel(env)
+  await tgApi(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", reply_markup: keyboard }, token)
+}
+
+/**
+ * 公告操作（供 handleCallback 使用）。
+ * 返回给用户的提示文本（会作为 callback 的 alert 显示）。
+ */
+async function handleAnnouncementAction(env: Env, data: string): Promise<string> {
+  const [, action, id] = data.split(":")
+  if (!id) return "参数缺失"
+  const row = await env.DB.prepare("SELECT id, title, status FROM announcements WHERE id = ?")
+    .bind(id)
+    .first<{ id: string; title: string; status: string }>()
+  if (!row) return "公告不存在（可能已被删除）"
+
+  if (action === "p") {
+    if (row.status === "published") return "这条已经是发布状态了"
+    try {
+      await publishAnnouncementNow(env, id)
+      return `已发布：${row.title.slice(0, 20)}`
+    } catch (e) {
+      return "发布失败：" + (e instanceof Error ? e.message : "未知错误")
+    }
+  }
+  if (action === "o") {
+    await env.DB.prepare("UPDATE announcements SET status = 'draft', published_at = NULL WHERE id = ?")
+      .bind(id)
+      .run()
+    return `已下线：${row.title.slice(0, 20)}（站内消息不会撤回）`
+  }
+  if (action === "dc") {
+    // 两步删除：dc = 讨确认，dd = 真删
+    return "CONFIRM_DELETE"
+  }
+  if (action === "dd") {
+    await env.DB.prepare("DELETE FROM announcements WHERE id = ?").bind(id).run()
+    return `已删除：${row.title.slice(0, 20)}`
+  }
+  return "未知操作"
 }
 
 /** 站内聊天室 → TG 群的上一条推送时间（毫秒）。同一个 isolate 内做 1 条/秒节流。 */
