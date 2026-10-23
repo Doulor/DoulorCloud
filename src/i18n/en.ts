@@ -15,7 +15,7 @@ export const en: Record<MessageKey, string> = {
   "qqb.gen": "Generate code",
   "qqb.unbind": "Unbind",
   "qqb.alreadyBound": "QQ is already bound",
-  "qqb.codeHint": "DM the bot on QQ and send: /bind {code}",
+  "qqb.codeHint": "On QQ, send this in DM or in the group: 绑定 {code}",
   "qqb.expiresHint": "Valid 10 minutes, single use (the same code also works for Telegram — first one wins)",
   "qqb.searchBot": "No bot yet? Search DoulorCloud (QQ 4012701880) in QQ and add it",
   // —— Common ——

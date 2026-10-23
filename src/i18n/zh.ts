@@ -15,7 +15,7 @@ export const zh = {
   "qqb.gen": "生成绑定码",
   "qqb.unbind": "解除绑定",
   "qqb.alreadyBound": "已经绑定过 QQ 了",
-  "qqb.codeHint": "在 QQ 里私聊机器人，发送：/bind {code}",
+  "qqb.codeHint": "在 QQ 里私聊或群里发送：绑定 {code}",
   "qqb.expiresHint": "10 分钟内有效，仅可使用一次（同一个码也能用于 Telegram 绑定，谁先绑算谁的）",
   "qqb.searchBot": "没加机器人？QQ 里搜索 DoulorCloud（QQ 4012701880）并添加",
   // —— 通用 ——

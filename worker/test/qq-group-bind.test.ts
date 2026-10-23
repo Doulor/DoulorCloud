@@ -114,6 +114,21 @@ describe("QQ 群内 /bind", () => {
     expect(shadow?.c).toBe(0)
   })
 
+  it("中文写法「绑定 123456」也能绑（QQ 群不认斜杠命令）", async () => {
+    const user = await makeUser({ username: "cn_bind_user" })
+    const code = "778899"
+    await env.DB.prepare(
+      "INSERT INTO tg_bind_tokens (code, user_id, expires_at, used_at) VALUES (?, ?, ?, NULL)"
+    )
+      .bind(code, user.id, Date.now() + 600_000)
+      .run()
+    await handleQqWebhook(env, groupMsg(`绑定 ${code}`, "GB_CN"))
+    const row = await env.DB.prepare("SELECT user_id FROM qq_bindings WHERE qq_openid = ?")
+      .bind(`group:${MEMBER}`)
+      .first<{ user_id: string }>()
+    expect(row?.user_id).toBe(user.id)
+  })
+
   it("无效码 → 群里回「无效或已过期」", async () => {
     await handleQqWebhook(env, groupMsg("/bind 999999", "GB_4"))
     const reply = sent.find((s) => s.url.includes(`/v2/groups/${GROUP}/messages`))

@@ -232,14 +232,29 @@ async function bridgeGroupMessage(env: Env, d: QqPayload["d"]): Promise<void> {
    *   · 其它命令一律不桥接（避免站内数据被发到群里）
    */
   // 命令名可能是中文（/积分 /签到），所以字符类不能只写 A-Za-z0-9_
-  const groupCmd = /^\/([^\s]{1,32})(?:\s+([\s\S]*))?$/.exec(text)
+  /**
+   * 群里绑定：**必须支持不带斜杠的写法**。
+   *
+   * 踩过的坑（2026-10-24 实测）：QQ 群把 `/` 开头的文本当「指令」处理，
+   * 那条消息**根本不会推到机器人** —— 日志里连事件都没有。
+   * 所以这里同时接受「绑定 123456」「bind 123456」「!bind 123456」「/bind 123456」。
+   */
+  const bindMatch = /^[\s/!！＃#]*(?:bind|绑定)[\s:：]*([0-9]{6})$/i.exec(text)
+  if (bindMatch) {
+    await handleGroupBind(env, memberOpenid, groupOpenid, bindMatch[1], d.id)
+    return
+  }
+  // 其它以 / 或 ! 开头（或已知中文命令）的，一律不桥接，只提示去私聊
+  const groupCmd = /^[\s/!！]([^\s]{1,32})(?:\s+([\s\S]*))?$/.exec(text)
   if (groupCmd) {
     const name = (groupCmd[1] ?? "").toLowerCase()
-    const arg = (groupCmd[2] ?? "").trim()
-    if (name === "bind" && /^\d{6}$/.test(arg)) {
-      await handleGroupBind(env, memberOpenid, groupOpenid, arg, d.id)
-    } else if (name === "bindsetop" || name === "help") {
-      await sendGroupText(env, groupOpenid, "群里只支持：/bind 123456（绑定账号）。其它命令请私聊机器人。", d.id)
+    if (["bind", "绑定", "help", "帮助", "签到", "积分", "checkin", "points", "me"].includes(name)) {
+      await sendGroupText(
+        env,
+        groupOpenid,
+        "群里只支持「绑定 123456」这种绑定指令；签到/积分等请私聊机器人。",
+        d.id
+      )
     }
     return
   }
@@ -522,13 +537,13 @@ async function handleC2cMessage(env: Env, d: QqPayload["d"]): Promise<void> {
   const cmd = (text.split(/\s+/)[0] ?? "").toLowerCase()
   const arg = text.slice(cmd.length).trim()
 
-  if (cmd === "/bind" || cmd === "/start") {
+  if (cmd === "/bind" || cmd === "/start" || cmd === "bind" || cmd === "绑定") {
     if (!arg) return void (await sendC2c(env, openid, "用法：/bind 123456\n绑定码在网站「账号设置 → Telegram/QQ 绑定」生成（10 分钟有效、一次性）。"))
     return void (await handleQqBind(env, openid, arg))
   }
 
   if (cmd === "/help" || cmd === "/") {
-    return void (await sendC2c(env, openid, ["DoulorCloud 机器人", "", "/bind 123456  绑定站内账号", "/签到  每日签到（带按钮）", "/积分  查看积分余额", "/me  账号概览"].join("\n")))
+    return void (await sendC2c(env, openid, ["DoulorCloud 机器人", "", "/bind 123456 或 绑定 123456　绑定站内账号", "/签到  每日签到（带按钮）", "/积分  查看积分余额", "/me  账号概览"].join("\n")))
   }
 
   if (!binding) {
@@ -707,7 +722,7 @@ export async function createMyQqBindCode(env: Env, request: Request): Promise<Re
     expiresAt: now + ttl,
     botReady: !!cfg.enabled && !!cfg.app_id,
     // QQ 没有 t.me 那种深链，前端给「去 QQ 搜机器人」的提示即可
-    qqBotHint: "QQ 里搜索并添加机器人 DoulorCloud（QQ 4012701880），私聊发送 /bind 码",
+    qqBotHint: "QQ 里搜索并添加机器人 DoulorCloud（QQ 4012701880），私聊或群里发送「绑定 码」",
   })
 }
 
