@@ -5744,10 +5744,12 @@ export const qqBindApi = {
   status: () =>
     request<{
       bound: boolean
-      shortId?: string
-      scope?: "c2c" | "group"
-      label?: string
-      boundAt?: number
+      bindings: Array<{
+        scope: "c2c" | "group"
+        shortId: string
+        label?: string
+        boundAt: number
+      }>
       count?: number
     }>("/me/qq/binding"),
   setLabel: (label: string) =>
@@ -5764,6 +5766,12 @@ export const qqBindApi = {
       qqOpenid?: string
       botReady?: boolean
       qqBotHint?: string
+      boundCount?: number
     }>("/me/qq/bind-code", { method: "POST" }),
-  unbind: () => request<{ ok: boolean }>("/me/qq/binding", { method: "DELETE" }),
+  /** 不传 shortId = 解绑全部；传了就只解那一条 */
+  unbind: (shortId?: string) =>
+    request<{ ok: boolean }>(
+      `/me/qq/binding${shortId ? `?shortId=${encodeURIComponent(shortId)}` : ""}`,
+      { method: "DELETE" }
+    ),
 }

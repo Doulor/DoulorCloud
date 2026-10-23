@@ -705,11 +705,6 @@ function shortTag(raw: string): string {
   return h.toString(16).toUpperCase().padStart(6, "0")
 }
 
-/** 掩码：openid 很长，界面上只露头尾 */
-function maskOpenid(openid: string): string {
-  if (openid.length <= 10) return openid
-  return `${openid.slice(0, 6)}……${openid.slice(-4)}`
-}
 
 /** GET /me/qq/binding */
 export async function getMyQqBinding(env: Env, request: Request): Promise<Response> {
@@ -720,15 +715,17 @@ export async function getMyQqBinding(env: Env, request: Request): Promise<Respon
     .bind(user.id)
     .all<{ qq_openid: string; bound_at: number; scope: string; group_openid: string | null; label: string | null }>()
   const list = rows.results ?? []
-  if (!list.length) return json({ bound: false })
-  const first = list[0]
+  if (!list.length) return json({ bound: false, bindings: [] })
   return json({
     bound: true,
-    // QQ 官方 API 不返回 QQ 号，只能给一个稳定短标识让用户区分是哪个 QQ
-    shortId: shortTag(first.qq_openid),
-    scope: first.scope === "group" ? "group" : "c2c",
-    label: first.label ?? "",
-    boundAt: first.bound_at,
+    // 列表形式：一个人可能同时有「群绑定」和「私聊绑定」（openid 作用域不同）
+    bindings: list.map((r) => ({
+      scope: r.scope === "group" ? "group" : "c2c",
+      // QQ 官方 API 不返回 QQ 号，只能给稳定短标识让用户区分
+      shortId: shortTag(r.qq_openid),
+      label: r.label ?? "",
+      boundAt: r.bound_at,
+    })),
     count: list.length,
   })
 }
@@ -741,10 +738,17 @@ export async function getMyQqBinding(env: Env, request: Request): Promise<Respon
  */
 export async function createMyQqBindCode(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  const existing = await env.DB.prepare("SELECT qq_openid FROM qq_bindings WHERE user_id = ?")
+  /**
+   * 不要因为「已经绑过」就不给码（2026-10-24 站长踩到）。
+   *
+   * QQ 身份分作用域：群里是 member_openid（按群隔离）、私聊是 user_openid。
+   * 所以「群绑定」和「私聊绑定」是两条独立记录，同一个人可以都绑（甚至绑多个群）。
+   * 这里只把已有数量带回去做提示，**依然发新码**。
+   */
+  const existing = await env.DB.prepare("SELECT COUNT(*) AS c FROM qq_bindings WHERE user_id = ?")
     .bind(user.id)
-    .first<{ qq_openid: string }>()
-  if (existing) return json({ ok: true, alreadyBound: true, qqOpenid: maskOpenid(existing.qq_openid) })
+    .first<{ c: number }>()
+  const boundCount = existing?.c ?? 0
 
   const code = String(Math.floor(100000 + Math.random() * 900000))
   const now = Date.now()
@@ -764,6 +768,7 @@ export async function createMyQqBindCode(env: Env, request: Request): Promise<Re
     code,
     expiresAt: now + ttl,
     botReady: !!cfg.enabled && !!cfg.app_id,
+    boundCount,
     // QQ 没有 t.me 那种深链，前端给「去 QQ 搜机器人」的提示即可
     qqBotHint: "QQ 里搜索并添加机器人 DoulorCloud（QQ 4012701880），私聊或群里发送「绑定 码」",
   })
@@ -772,7 +777,18 @@ export async function createMyQqBindCode(env: Env, request: Request): Promise<Re
 /** DELETE /me/qq/binding */
 export async function deleteMyQqBinding(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  await env.DB.prepare("DELETE FROM qq_bindings WHERE user_id = ?").bind(user.id).run()
+  const shortId = (new URL(request.url).searchParams.get("shortId") ?? "").trim().toUpperCase()
+  if (shortId) {
+    // 解掉指定那条（前端每条绑定后面的「解除」）
+    const rows = await env.DB.prepare("SELECT qq_openid FROM qq_bindings WHERE user_id = ?")
+      .bind(user.id)
+      .all<{ qq_openid: string }>()
+    const target = (rows.results ?? []).find((r) => shortTag(r.qq_openid) === shortId)
+    if (!target) throw new ApiError(404, "找不到这条绑定", "NOT_FOUND")
+    await env.DB.prepare("DELETE FROM qq_bindings WHERE qq_openid = ?").bind(target.qq_openid).run()
+  } else {
+    await env.DB.prepare("DELETE FROM qq_bindings WHERE user_id = ?").bind(user.id).run()
+  }
   await logPush(env, "qq:unbind", user.id, true)
   return json({ ok: true })
 }

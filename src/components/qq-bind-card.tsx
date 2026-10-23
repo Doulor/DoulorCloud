@@ -24,12 +24,8 @@ export function QqBindCard() {
   const [busy, setBusy] = React.useState(false)
   const [state, setState] = React.useState<{
     bound: boolean
-    shortId?: string
-    scope?: "c2c" | "group"
-    label?: string
-    boundAt?: number
-    count?: number
-  }>({ bound: false })
+    bindings: Array<{ scope: "c2c" | "group"; shortId: string; label?: string; boundAt: number }>
+  }>({ bound: false, bindings: [] })
   const [code, setCode] = React.useState<{ code: string; expiresAt: number; qqBotHint?: string } | null>(
     null
   )
@@ -38,11 +34,10 @@ export function QqBindCard() {
   const load = React.useCallback(async () => {
     setLoading(true)
     try {
-      const st = await qqBindApi.status()
-      setState(st)
+      setState(await qqBindApi.status())
     } catch {
       // 接口未就绪时静默降级，不影响设置页其它功能
-      setState({ bound: false })
+      setState({ bound: false, bindings: [] })
     } finally {
       setLoading(false)
     }
@@ -81,21 +76,6 @@ export function QqBindCard() {
     }
   }
 
-  async function unbind() {
-    if (!window.confirm(t("qqb.unbind") + "?")) return
-    setBusy(true)
-    try {
-      await qqBindApi.unbind()
-      toast.success(t("common.saved"))
-      setCode(null)
-      await load()
-    } catch (e) {
-      toast.error(errMsg(e, t("api.networkError")))
-    } finally {
-      setBusy(false)
-    }
-  }
-
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -114,17 +94,48 @@ export function QqBindCard() {
           <div className="h-9 animate-pulse rounded bg-muted" />
         ) : state.bound ? (
           <>
-            <div className="space-y-1 text-sm text-muted-foreground">
-              <div>
-                {state.scope === "group" ? "绑定于 QQ 群" : "绑定于 QQ 私聊"}
-                {state.shortId ? ` · 标识 ${state.shortId}` : ""}
-                {state.count && state.count > 1 ? `（共 ${state.count} 个）` : ""}
-              </div>
-              <div>{state.boundAt ? fmtDateTime(new Date(state.boundAt).toISOString()) : ""}</div>
+            <div className="space-y-2">
+              {state.bindings.map((b) => (
+                <div
+                  key={b.shortId}
+                  className="flex items-center justify-between gap-2 rounded border px-2 py-1.5 text-sm"
+                >
+                  <div className="min-w-0">
+                    <span className="font-medium">
+                      {b.scope === "group" ? "QQ 群" : "QQ 私聊"}
+                    </span>
+                    <span className="ml-2 text-muted-foreground">标识 {b.shortId}</span>
+                    <div className="text-xs text-muted-foreground">
+                      {fmtDateTime(new Date(b.boundAt).toISOString())}
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy}
+                    onClick={async () => {
+                      setBusy(true)
+                      try {
+                        await qqBindApi.unbind(b.shortId)
+                        toast.success(t("common.saved"))
+                        await load()
+                      } catch (e) {
+                        toast.error(errMsg(e, t("api.networkError")))
+                      } finally {
+                        setBusy(false)
+                      }
+                    }}
+                  >
+                    <Unlink className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ))}
             </div>
-            <Button variant="outline" size="sm" disabled={busy} onClick={unbind}>
-              <Unlink className="mr-1.5 h-3.5 w-3.5" />
-              {t("qqb.unbind")}
+            <p className="text-xs text-muted-foreground">
+              群绑定和私聊绑定是两条独立记录（QQ 的 openid 作用域不同），可以各绑一次。
+            </p>
+            <Button size="sm" disabled={busy} onClick={gen}>
+              {t("qqb.gen")}
             </Button>
           </>
         ) : code ? (
