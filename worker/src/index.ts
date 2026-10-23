@@ -734,6 +734,12 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "DELETE",
     handle: () => qqHandlers.deleteMyQqBinding(env, request),
   },
+  {
+    kind: "exact",
+    path: "/me/qq/binding",
+    method: "PATCH",
+    handle: () => qqHandlers.setMyQqLabel(env, request),
+  },
   // TG 群消息里的图片/文件经服务端中转（要求登录，避免把 bot token 暴露成直链）
   {
     kind: "regex",

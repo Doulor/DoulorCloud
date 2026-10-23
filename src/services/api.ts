@@ -5742,7 +5742,19 @@ export const tgBindApi = {
 /** 用户侧：QQ 绑定（与 Telegram 共用一次性绑定码，谁先消费算谁的） */
 export const qqBindApi = {
   status: () =>
-    request<{ bound: boolean; qqOpenid?: string; boundAt?: number }>("/me/qq/binding"),
+    request<{
+      bound: boolean
+      shortId?: string
+      scope?: "c2c" | "group"
+      label?: string
+      boundAt?: number
+      count?: number
+    }>("/me/qq/binding"),
+  setLabel: (label: string) =>
+    request<{ ok: boolean; label: string }>("/me/qq/binding", {
+      method: "PATCH",
+      body: JSON.stringify({ label }),
+    }),
   createCode: () =>
     request<{
       ok: boolean

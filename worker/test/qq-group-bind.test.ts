@@ -129,10 +129,10 @@ describe("QQ 群内 /bind", () => {
     expect(row?.user_id).toBe(user.id)
   })
 
-  it("无效码 → 群里回「无效或已过期」", async () => {
-    await handleQqWebhook(env, groupMsg("/bind 999999", "GB_4"))
+  it("无效码 → 群里回「没有这个绑定码」", async () => {
+    await handleQqWebhook(env, groupMsg("绑定 999999", "GB_4"))
     const reply = sent.find((s) => s.url.includes(`/v2/groups/${GROUP}/messages`))
-    expect(reply?.body).toContain("无效或已过期")
+    expect(reply?.body).toContain("没有这个绑定码")
     const n = await env.DB.prepare("SELECT COUNT(*) AS c FROM qq_bindings").first<{ c: number }>()
     expect(n?.c).toBe(0)
   })

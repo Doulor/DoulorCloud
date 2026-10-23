@@ -255,6 +255,18 @@ async function bridgeGroupMessage(env: Env, d: QqPayload["d"]): Promise<void> {
     await handleGroupBind(env, memberOpenid, groupOpenid, bindMatch[1], d.id)
     return
   }
+  // 「绑定状态」：群里随时查自己有没有绑上
+  if (/^[\s/!！]*(?:我的绑定|绑定状态|绑定查询)[\s\S]*$/i.test(text)) {
+    const bound = await bindingByQq(env, memberOpenid, "group")
+    await sendGroupText(
+      env,
+      groupOpenid,
+      bound ? "你这个 QQ 在本群已绑定账号 ✅" : "还没绑定。回网站生成绑定码，然后在群里发「绑定 123456」。",
+      d.id
+    )
+    return
+  }
+
   // 其它以 / 或 ! 开头（或已知中文命令）的，一律不桥接，只提示去私聊
   const groupCmd = /^[\s/!！]([^\s]{1,32})(?:\s+([\s\S]*))?$/.exec(text)
   if (groupCmd) {
@@ -599,10 +611,11 @@ async function handleQqBind(env: Env, openid: string, code: string): Promise<voi
     return
   }
   await env.DB.prepare(
-    `INSERT INTO qq_bindings (qq_openid, user_id, bound_at) VALUES (?, ?, ?)
-     ON CONFLICT(qq_openid) DO UPDATE SET user_id = excluded.user_id, bound_at = excluded.bound_at`
+    `INSERT INTO qq_bindings (qq_openid, user_id, bound_at, scope, group_openid) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(qq_openid) DO UPDATE SET user_id = excluded.user_id, bound_at = excluded.bound_at,
+       scope = excluded.scope, group_openid = excluded.group_openid`
   )
-    .bind(qqIdentityKey("c2c", openid), row.user_id, Date.now())
+    .bind(qqIdentityKey("c2c", openid), row.user_id, Date.now(), "c2c", null)
     .run()
   await env.DB.prepare("UPDATE tg_bind_tokens SET used_at = ? WHERE code = ?").bind(Date.now(), code).run()
   await logPush(env, "qq:bind", openid, true)
@@ -685,6 +698,13 @@ async function handleInteraction(env: Env, payload: QqPayload): Promise<void> {
  * 用户侧：QQ 绑定（与 TG 绑定同风格：站内生成一次性码 → 到 QQ 里 /bind）
  * ========================================================================== */
 
+/** 短标识：把 openid 压成 6 位十六进制，界面上用于区分「哪个 QQ」 */
+function shortTag(raw: string): string {
+  let h = 0
+  for (const ch of raw) h = (h * 31 + ch.charCodeAt(0)) % 0xffffff
+  return h.toString(16).toUpperCase().padStart(6, "0")
+}
+
 /** 掩码：openid 很长，界面上只露头尾 */
 function maskOpenid(openid: string): string {
   if (openid.length <= 10) return openid
@@ -694,11 +714,23 @@ function maskOpenid(openid: string): string {
 /** GET /me/qq/binding */
 export async function getMyQqBinding(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  const row = await env.DB.prepare("SELECT qq_openid, bound_at FROM qq_bindings WHERE user_id = ?")
+  const rows = await env.DB.prepare(
+    "SELECT qq_openid, bound_at, scope, group_openid, label FROM qq_bindings WHERE user_id = ? ORDER BY bound_at DESC"
+  )
     .bind(user.id)
-    .first<{ qq_openid: string; bound_at: number }>()
-  if (!row) return json({ bound: false })
-  return json({ bound: true, qqOpenid: maskOpenid(row.qq_openid), boundAt: row.bound_at })
+    .all<{ qq_openid: string; bound_at: number; scope: string; group_openid: string | null; label: string | null }>()
+  const list = rows.results ?? []
+  if (!list.length) return json({ bound: false })
+  const first = list[0]
+  return json({
+    bound: true,
+    // QQ 官方 API 不返回 QQ 号，只能给一个稳定短标识让用户区分是哪个 QQ
+    shortId: shortTag(first.qq_openid),
+    scope: first.scope === "group" ? "group" : "c2c",
+    label: first.label ?? "",
+    boundAt: first.bound_at,
+    count: list.length,
+  })
 }
 
 /**
@@ -801,27 +833,72 @@ async function handleGroupBind(
   code: string,
   msgId?: string
 ): Promise<void> {
-  const row = await env.DB.prepare(
-    "SELECT user_id FROM tg_bind_tokens WHERE code = ? AND used_at IS NULL AND expires_at > ?"
-  )
-    .bind(code, Date.now())
-    .first<{ user_id: string }>()
-  if (!row) {
-    await sendGroupText(env, groupOpenid, "绑定码无效或已过期，回网站「账号设置 → QQ 绑定」重新生成。", msgId)
+  /**
+   * 绑定失败要说清是哪种（2026-10-24 站长被"无效或已过期"绕了一圈）：
+   *   ① 已经绑过了 → 直接告诉他「已绑定」，不用再找码
+   *   ② 这个码用过了（一次性）→ 说「已被使用」而不是含糊的"无效"
+   *   ③ 这个码过期了 → 说「已过期」
+   *   ④ 根本没这个码 → 说「没有这个码」
+   */
+  const taken = await bindingByQq(env, memberOpenid, "group")
+  if (taken) {
+    await sendGroupText(
+      env,
+      groupOpenid,
+      "你在这个群已经绑定过账号了 ✅\n发言会自动记在你的账号名下；想换号请先到网站解绑。",
+      msgId
+    )
     return
   }
-  const taken = await bindingByQq(env, memberOpenid, "group")
-  if (taken && taken.user_id !== row.user_id) {
-    await sendGroupText(env, groupOpenid, "这个 QQ 在本群已经绑定了别的账号。", msgId)
+
+  const any = await env.DB.prepare(
+    "SELECT user_id, used_at, expires_at FROM tg_bind_tokens WHERE code = ?"
+  )
+    .bind(code)
+    .first<{ user_id: string; used_at: number | null; expires_at: number }>()
+  if (!any) {
+    await sendGroupText(env, groupOpenid, "没有这个绑定码，回网站「账号设置 → QQ 绑定」重新生成一个。", msgId)
+    return
+  }
+  if (any.used_at) {
+    await sendGroupText(
+      env,
+      groupOpenid,
+      "这个绑定码**已经被用过了**（绑定码是一次性的）—— 回网站重新生成一个新的再发。",
+      msgId
+    )
+    return
+  }
+  if (any.expires_at <= Date.now()) {
+    await sendGroupText(env, groupOpenid, "这个绑定码已过期（10 分钟有效），回网站重新生成一个。", msgId)
     return
   }
   await env.DB.prepare(
-    `INSERT INTO qq_bindings (qq_openid, user_id, bound_at) VALUES (?, ?, ?)
-     ON CONFLICT(qq_openid) DO UPDATE SET user_id = excluded.user_id, bound_at = excluded.bound_at`
+    `INSERT INTO qq_bindings (qq_openid, user_id, bound_at, scope, group_openid) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(qq_openid) DO UPDATE SET user_id = excluded.user_id, bound_at = excluded.bound_at,
+       scope = excluded.scope, group_openid = excluded.group_openid`
   )
-    .bind(qqIdentityKey("group", memberOpenid), row.user_id, Date.now())
+    .bind(qqIdentityKey("group", memberOpenid), any.user_id, Date.now(), "group", groupOpenid)
     .run()
   await env.DB.prepare("UPDATE tg_bind_tokens SET used_at = ? WHERE code = ?").bind(Date.now(), code).run()
   await logPush(env, "qq:bind:group", groupOpenid, true)
   await sendGroupText(env, groupOpenid, "绑定成功 ✅ 之后你在这个群的发言会记在你的账号名下。", msgId)
+}
+
+/**
+ * PATCH /me/qq/binding —— 设置备注（用户可以把 QQ 号写进来）。
+ *
+ * QQ 官方 API 不返回 QQ 号（只给 openid，且不可反查），
+ * 所以「这条绑定是哪个 QQ」只能由用户自己标注，界面上原样显示。
+ */
+export async function setMyQqLabel(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const raw = new TextDecoder().decode(await readBodyCapped(request, 2 * 1024, "备注过长"))
+  const body = JSON.parse(raw || "{}") as { label?: string }
+  const label = (body.label ?? "").trim().slice(0, 40)
+  const res = await env.DB.prepare("UPDATE qq_bindings SET label = ? WHERE user_id = ?")
+    .bind(label || null, user.id)
+    .run()
+  if (!res.meta.changes) throw new ApiError(404, "还没绑定 QQ", "NOT_BOUND")
+  return json({ ok: true, label })
 }
