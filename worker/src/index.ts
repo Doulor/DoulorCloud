@@ -26,6 +26,7 @@ import * as adminChannelHandlers from "./handlers/admin-channels"
 import * as adminPermHandlers from "./handlers/admin-perms"
 import * as noticeHandlers from "./handlers/notices"
 import * as telegramHandlers from "./handlers/telegram"
+import * as qqHandlers from "./handlers/qq"
 import { pushMessage } from "./handlers/telegram"
 import * as storageHandlers from "./handlers/storage"
 import { rootDomainFor } from "./root-domains"
@@ -693,6 +694,26 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/me/tg/binding/mute",
     method: "POST",
     handle: () => telegramHandlers.setMyMuted(env, request),
+  },
+  // ================= QQ 机器人（官方开放平台）=================
+  // webhook 不能鉴权（平台来调），安全性靠 op=13 的 Ed25519 签名验证
+  {
+    kind: "exact",
+    path: "/qq/webhook",
+    method: "POST",
+    handle: () => qqHandlers.handleQqWebhook(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/qq/config",
+    method: "GET",
+    handle: () => qqHandlers.getQqConfig(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/qq/config",
+    method: "POST",
+    handle: () => qqHandlers.saveQqConfig(env, request),
   },
   // TG 群消息里的图片/文件经服务端中转（要求登录，避免把 bot token 暴露成直链）
   {

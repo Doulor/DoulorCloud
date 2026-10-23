@@ -16,6 +16,7 @@ import { guardRateLimit, clientIp } from "../ratelimit"
 import { getSettingBool } from "../settings"
 import type { Env } from "../env"
 import { pushToChatGroups } from "./telegram"
+import { pushToQqGroups } from "./qq"
 
 /**
  * 聊天室门禁：登录 + 总开关打开（管理员放行）。
@@ -589,6 +590,8 @@ export async function sendMessage(env: Env, request: Request): Promise<Response>
   // ⚠️ 必须 await：Worker 返回响应后会取消悬空 Promise（今天在登录提醒上踩过同一个坑），
   // 用 void 的话这条推送**永远发不出去**。内部 1 条/秒节流 + 全吞异常，不影响发言。
   await pushToChatGroups(env, `${user.nickname ?? user.username}：${finalText}`)
+  // QQ 群（官方机器人，主动消息有配额；内部 1 条/秒 + 全吞异常）
+  await pushToQqGroups(env, `${user.nickname ?? user.username}：${finalText}`)
 
   return json({
     message: {
