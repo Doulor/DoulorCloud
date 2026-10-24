@@ -321,22 +321,7 @@ export default function MessagesPage() {
       window.open(`https://t.me/${r.botUsername}?start=${r.code}`, "_blank", "noopener")
       toast.message(t("act.tg.bindOpened"))
     } catch (err) {
-      const code = (err as { code?: string } | undefined)?.code ?? ""
-      /**
-       * 订阅频道活动：没绑定 TG 时**直接把绑定深链打开**。
-       *
-       * 消息中心的推广卡片是紧凑列表，塞不下常驻说明；而只弹一句 toast 用户
-       * 完全不知道该去哪绑定（2026-10-24 站长就卡在这一步）。这里在点击手势内
-       * 开新窗口不会被浏览器拦。
-       */
-      if (code === "NEED_TG_BIND") {
-        toast.message(t("act.tg.bindOpened"))
-        await startTgBind()
-        return
-      }
-      if (code === "TG_NOT_MEMBER") toast.error(t("act.tg.notMember"))
-      else if (code === "TG_CHECK_UNAVAILABLE") toast.error(t("act.tg.unavailable"))
-      else toast.error(errMsg(err, t("msg.claimFailed")))
+      toast.error(errMsg(err, t("msg.claimFailed")))
     } finally {
       setTgBindBusy(false)
     }
@@ -383,7 +368,22 @@ export default function MessagesPage() {
       })
       await loadEvents()
     } catch (err) {
-      toast.error(errMsg(err, t("msg.claimFailed")))
+      const code = (err as { code?: string } | undefined)?.code ?? ""
+      /**
+       * 订阅频道活动：没绑定 TG 时**直接把绑定深链打开**。
+       * 消息中心的推广卡片是紧凑列表，塞不下常驻说明；只弹一句 toast，
+       * 用户完全不知道该去哪绑定（2026-10-24 站长就卡在这一步）。
+       * 在点击手势里开新窗口不会被浏览器拦。
+       */
+      if (code === "NEED_TG_BIND") {
+        toast.message(t("act.tg.bindOpened"))
+        await startTgBind()
+        await loadEvents()
+        return
+      }
+      if (code === "TG_NOT_MEMBER") toast.error(t("act.tg.notMember"))
+      else if (code === "TG_CHECK_UNAVAILABLE") toast.error(t("act.tg.unavailable"))
+      else toast.error(errMsg(err, t("msg.claimFailed")))
       // 条件不满足 / 已结束时刷新一下，让按钮状态与服务端一致
       await loadEvents()
     } finally {
