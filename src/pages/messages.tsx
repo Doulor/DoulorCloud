@@ -34,7 +34,7 @@ import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAuth } from "@/hooks/use-auth"
-import { notificationApi, pointsApi, eventApi, errMsg, HttpError } from "@/services/api"
+import { notificationApi, pointsApi, eventApi, errMsg, HttpError, tgBindApi } from "@/services/api"
 import { notifyMessagesChanged } from "@/lib/message-events"
 import { socialNotifIcon, socialNotifText } from "@/lib/notification-meta"
 import { notifyPointsChanged } from "@/components/points-badge"
@@ -301,6 +301,46 @@ export default function MessagesPage() {
   const [githubDrafts, setGithubDrafts] = React.useState<Record<string, string>>({})
   /** 每个活动投票时选中的选项：{ eventId: optionId }，投票活动才需要 */
   const [voteDrafts, setVoteDrafts] = React.useState<Record<string, string>>({})
+
+  /**
+   * 订阅频道活动：没绑定 TG 的提示（2026-10-24）。
+   *
+   * 消息中心的「活动推广」卡片也能直接参与，站长就是在这里点「立即参与」被卡住的
+   * —— 活动详情页有绑定入口，这里没有，所以两边都要有。
+   */
+  const [, setTgBindBusy] = React.useState(false)
+
+  const startTgBind = async () => {
+    setTgBindBusy(true)
+    try {
+      const r = await tgBindApi.createCode()
+      if (!r.botReady || !r.botUsername || !r.code) {
+        toast.error(t("act.tg.botNotReady"))
+        return
+      }
+      window.open(`https://t.me/${r.botUsername}?start=${r.code}`, "_blank", "noopener")
+      toast.message(t("act.tg.bindOpened"))
+    } catch (err) {
+      const code = (err as { code?: string } | undefined)?.code ?? ""
+      /**
+       * 订阅频道活动：没绑定 TG 时**直接把绑定深链打开**。
+       *
+       * 消息中心的推广卡片是紧凑列表，塞不下常驻说明；而只弹一句 toast 用户
+       * 完全不知道该去哪绑定（2026-10-24 站长就卡在这一步）。这里在点击手势内
+       * 开新窗口不会被浏览器拦。
+       */
+      if (code === "NEED_TG_BIND") {
+        toast.message(t("act.tg.bindOpened"))
+        await startTgBind()
+        return
+      }
+      if (code === "TG_NOT_MEMBER") toast.error(t("act.tg.notMember"))
+      else if (code === "TG_CHECK_UNAVAILABLE") toast.error(t("act.tg.unavailable"))
+      else toast.error(errMsg(err, t("msg.claimFailed")))
+    } finally {
+      setTgBindBusy(false)
+    }
+  }
 
   const claim = async (ev: EventItem) => {
     /**
