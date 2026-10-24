@@ -1858,11 +1858,25 @@ async function handleCallback(
       return
     }
     if (act === "p" && arg1) {
+      /**
+       * 发布是重活（站内广播 + 频道推送 + 邮件入队），D1 批量写偶发
+       * `Network connection lost` 时公告其实**已经发出去了**。
+       * 所以失败要回查状态，按真实结果回话（2026-10-24 踩到：面板点了发布，
+       * 弹出「发布失败」，但库里其实已是 published）。
+       */
       try {
         await publishAnnouncementNow(env, arg1)
         await ack("已发布")
       } catch (err) {
-        await ack("发布失败：" + (err instanceof Error ? err.message : "未知错误"))
+        const msg = err instanceof Error ? err.message : "未知错误"
+        const row = await env.DB.prepare("SELECT status FROM announcements WHERE id = ?")
+          .bind(arg1)
+          .first<{ status: string }>()
+        await ack(
+          row?.status === "published"
+            ? "已发布（后续推送可能没走完）"
+            : "发布失败：" + msg.slice(0, 120)
+        )
       }
       await annDetail(env, chatId, arg1, messageId)
       return
