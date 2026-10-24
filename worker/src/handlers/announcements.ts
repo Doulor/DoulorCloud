@@ -503,6 +503,8 @@ export async function publishAnnouncementNow(
         body: row.body,
         // 深链到消息中心的「网站动态」tab（消息中心每个分类都有自己的 URL）
         link: "/dashboard/messages/site",
+        // 记下公告 id：删/改公告时要把这批通知一起回收（2026-10-24）
+        payload: { announcementId: id },
       },
       { dedupKey: `ann:${id}` }
     )
@@ -652,6 +654,25 @@ export async function updateAnnouncement(
     .bind(title, text, category, pinned, popupMode, status, publishAt, publishedAt, notifyEmail, id)
     .run()
 
+  /**
+   * 已发布的公告被改了标题/正文 → 同步消息中心里那批通知（2026-10-24）。
+   *
+   * 通知是 publish 时写进 notifications 的**拷贝**，不同步的话用户那边会一直
+   * 显示旧内容（站长反馈「改过的公告在网站动态里还是旧版」）。
+   * 只动 type='announcement'，且按 payload 里的 id（新数据）或原标题（历史数据）定位。
+   */
+  if (existing.published_at) {
+    try {
+      await env.DB.prepare(
+        "UPDATE notifications SET title = ?, body = ? WHERE type = 'announcement' AND (title = ? OR payload LIKE ?)"
+      )
+        .bind(title, text, existing.title, `%"announcementId":"${id}"%`)
+        .run()
+    } catch (err) {
+      console.error("同步公告通知失败:", id, err)
+    }
+  }
+
   // 只有「编辑后应当立即发布、且此前从未发布过」才触发；
   // 已经发布过的公告改标题不会重发（广播 dedup + published_at 双重拦）。
   let mailTotal = 0
@@ -767,10 +788,27 @@ export async function deleteAnnouncement(
   id: string
 ): Promise<Response> {
   await requireAdminScope(env, request, "announcements")
-  await loadOne(env, id)
+  const target = await loadOne(env, id)
   // 先把 TG 频道里那条删掉（可能有多个频道），再删库；失败不影响删除
   await deleteAnnouncementMessages(env, id)
   await env.DB.prepare("DELETE FROM announcements WHERE id = ?").bind(id).run()
+  /**
+   * 回收消息中心「网站动态」里的那批通知（2026-10-24 站长反馈）：
+   * 那些通知是 publish 时 broadcastMessage 写进 notifications 的**拷贝**，
+   * 只删 announcements 的话用户那边会一直留着已删除的公告（test 公告就是这么漏出来的）。
+   *
+   * 两条判据叠加：payload 里记着 id 的（新数据）+ 标题完全一致的（历史数据）。
+   * 只匹配 type='announcement'，不会误伤评论/点赞通知。
+   */
+  try {
+    await env.DB.prepare(
+      "DELETE FROM notifications WHERE type = 'announcement' AND (title = ? OR payload LIKE ?)"
+    )
+      .bind(target?.title ?? "", `%"announcementId":"${id}"%`)
+      .run()
+  } catch (err) {
+    console.error("清理公告通知失败:", id, err)
+  }
   return json({ ok: true })
 }
 /** GET /api/admin/announcements —— 管理端列表（全部，不限于 5 条） */
