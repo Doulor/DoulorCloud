@@ -1825,7 +1825,10 @@ async function handleCallback(
       await ack("没有权限")
       return
     }
-    const [, act, arg1] = data.split(":")
+    const parts = data.split(":")
+    const act = parts[1] ?? ""
+    const arg1 = parts[2] ?? ""
+    const arg2 = parts[3] ?? ""
     if (act === "m") {
       await ack()
       await annMenu(env, chatId, messageId)
@@ -1875,6 +1878,27 @@ async function handleCallback(
     if (act === "n") {
       await ack()
       await annStartCreate(env, chatId, messageId)
+      return
+    }
+    // 新建向导第 3 步：选了提醒方式 → 进预览
+    if (act === "pp" && arg1) {
+      const st = await getAnnState(env, chatId)
+      if (!st || st.kind !== "ann_popup") {
+        await ack("这个会话已过期")
+        await annMenu(env, chatId, messageId)
+        return
+      }
+      const payload = { ...st.payload, popup: arg1 }
+      await setAnnState(env, chatId, "ann_preview", payload)
+      await ack("已选：" + (ANN_POPUP_SHORT[arg1] ?? arg1))
+      await annPreview(env, chatId, messageId, payload)
+      return
+    }
+    // 改已有公告的提醒方式（点一下立刻生效，不用重新发布）
+    if (act === "pm" && arg1 && arg2) {
+      await env.DB.prepare("UPDATE announcements SET popup_mode = ? WHERE id = ?").bind(arg1, arg2).run()
+      await ack("提醒方式已改为：" + (ANN_POPUP_SHORT[arg1] ?? arg1))
+      await annDetail(env, chatId, arg2, messageId)
       return
     }
     if (act === "nw" || act === "np") {
@@ -2114,7 +2138,7 @@ export function splitOutgoing(text: string): { text: string; photos: string[] } 
  * 起草稿的中间状态存在 tg_bot_states（迁移 0179），一次一步，随时可 /cancel。
  * ========================================================================== */
 
-type AnnStateKind = "ann_title" | "ann_body" | "ann_preview"
+type AnnStateKind = "ann_title" | "ann_body" | "ann_popup" | "ann_preview"
 
 async function getAnnState(env: Env, chatId: string): Promise<{ kind: string; payload: Record<string, string> } | null> {
   const row = await env.DB.prepare("SELECT kind, payload FROM tg_bot_states WHERE chat_id = ?")
@@ -2160,6 +2184,25 @@ async function annRender(
     if (r.ok) return
   }
   await tgApi(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", reply_markup: markup }, token)
+}
+
+/**
+ * 公告的提醒方式（对应 announcements.popup_mode）：
+ *   none  = 只进消息中心，不弹
+ *   once  = 用户下次进入站点时弹一次，点过就不再弹
+ *   every = 每次进入站点都弹（重要通知用）
+ * 站长 2026-10-24 反馈：机器人里建公告没法选这个，所以补上。
+ */
+const ANN_POPUP_TEXT: Record<string, string> = {
+  none: "🔕 不提醒（只进消息中心）",
+  once: "🔔 只提醒一次",
+  every: "📢 每次进入都提醒",
+}
+
+const ANN_POPUP_SHORT: Record<string, string> = {
+  none: "不提醒",
+  once: "只提醒一次",
+  every: "每次进入都提醒",
 }
 
 const ANN_STATUS_TEXT: Record<string, string> = {
@@ -2231,10 +2274,10 @@ async function annList(env: Env, chatId: string, messageId?: number): Promise<vo
 /** 三级：单条详情 */
 async function annDetail(env: Env, chatId: string, id: string, messageId?: number): Promise<void> {
   const row = await env.DB.prepare(
-    "SELECT id, title, body, status, published_at, notify_email FROM announcements WHERE id = ?"
+    "SELECT id, title, body, status, published_at, notify_email, popup_mode FROM announcements WHERE id = ?"
   )
     .bind(id)
-    .first<{ id: string; title: string; body: string; status: string; published_at: string | null; notify_email: number }>()
+    .first<{ id: string; title: string; body: string; status: string; published_at: string | null; notify_email: number; popup_mode: string }>()
   if (!row) {
     await annRender(env, chatId, messageId, "这条公告不存在（可能已被删除）。", [
       [{ text: "⬅️ 返回列表", callback_data: "a:l" }],
@@ -2246,6 +2289,7 @@ async function annDetail(env: Env, chatId: string, id: string, messageId?: numbe
   const text = [
     `📄 <b>${row.title.slice(0, 60)}</b>`,
     `状态：${ANN_STATUS_TEXT[row.status] ?? row.status}`,
+    `提醒方式：${ANN_POPUP_SHORT[row.popup_mode] ?? row.popup_mode}`,
     `邮件通知：${row.notify_email ? "开" : "关"}`,
     "",
     bodyPreview ? `${bodyPreview}${(row.body || "").length > 160 ? "…" : ""}` : "<i>（无正文）</i>",
@@ -2253,8 +2297,18 @@ async function annDetail(env: Env, chatId: string, id: string, messageId?: numbe
   const actions: { text: string; callback_data: string }[] = []
   if (published) actions.push({ text: "↓ 下线", callback_data: `a:o:${row.id}` })
   else actions.push({ text: "🚀 发布", callback_data: `a:p:${row.id}` })
+  /**
+   * 提醒方式随时可改（点一下即生效，不用重新发布）——
+   * 老板可能发完才想起"这条应该每次都弹"，让他能在机器人里直接改。
+   */
+  const popupRow = (["none", "once", "every"] as const).map((m) => ({
+    text: `${row.popup_mode === m ? "✅ " : ""}${ANN_POPUP_SHORT[m]}`,
+    callback_data: `a:pm:${m}:${row.id}`,
+  }))
   await annRender(env, chatId, messageId, text, [
     actions,
+    [{ text: "🔔 提醒方式", callback_data: "a:noop" }],
+    popupRow,
     [{ text: "🗑 删除", callback_data: `a:x:${row.id}` }],
     [{ text: "⬅️ 返回列表", callback_data: "a:l" }],
   ])
@@ -2290,22 +2344,43 @@ async function annStartCreate(env: Env, chatId: string, messageId?: number): Pro
     env,
     chatId,
     messageId,
-    "➕ <b>新建公告</b>（第 1/3 步）\n\n请直接发送公告<b>标题</b>（最长 100 字）。\n发送 /cancel 取消。",
+    "➕ <b>新建公告</b>（第 1/4 步）\n\n请直接发送公告<b>标题</b>（最长 100 字）。\n发送 /cancel 取消。",
     [[{ text: "✖️ 取消", callback_data: "a:nc" }]]
   )
 }
 
 /** 新建流程第 3 步：预览确认 */
+/** 新建第 3 步：选提醒方式 */
+async function annChoosePopup(env: Env, chatId: string, messageId?: number): Promise<void> {
+  await annRender(
+    env,
+    chatId,
+    messageId,
+    "🔔 <b>选提醒方式</b>（第 3/4 步）\n\n" +
+      "这决定公告在用户那边怎么出现：\n" +
+      Object.values(ANN_POPUP_TEXT).map((v) => "· " + v).join("\n"),
+    [
+      [
+        { text: "🔕 不提醒", callback_data: "a:pp:none" },
+        { text: "🔔 只提醒一次", callback_data: "a:pp:once" },
+      ],
+      [{ text: "📢 每次进入都提醒", callback_data: "a:pp:every" }],
+      [{ text: "✖️ 取消", callback_data: "a:nc" }],
+    ]
+  )
+}
+
 async function annPreview(env: Env, chatId: string, messageId: number | undefined, p: Record<string, string>): Promise<void> {
   await annRender(
     env,
     chatId,
     messageId,
     [
-      "✅ <b>预览</b>（第 3/3 步）",
+      "✅ <b>预览</b>（第 4/4 步）",
       "",
       `<b>标题</b>：${(p.title ?? "").slice(0, 80)}`,
       `<b>正文</b>：${(p.body ?? "").slice(0, 300) || "（无）"}`,
+      `<b>提醒方式</b>：${ANN_POPUP_SHORT[p.popup ?? "none"] ?? "不提醒"}`,
       "",
       "选「直接发布」会立刻推送到站内消息中心和 TG 频道。",
     ].join("\n"),
@@ -2335,10 +2410,10 @@ async function annCreateSave(env: Env, chatId: string, messageId: number | undef
   // ① 落库：这一步失败才是真的"没存上"
   try {
     await env.DB.prepare(
-      "INSERT INTO announcements (id, title, body, category, pinned, created_at, status, notify_email) " +
-        "VALUES (?, ?, ?, 'general', 0, ?, 'draft', 0)"
+      "INSERT INTO announcements (id, title, body, category, pinned, created_at, status, notify_email, popup_mode) " +
+        "VALUES (?, ?, ?, 'general', 0, ?, 'draft', 0, ?)"
     )
-      .bind(id, title, bodyText, new Date().toISOString())
+      .bind(id, title, bodyText, new Date().toISOString(), st.payload.popup ?? "none")
       .run()
   } catch (err) {
     await sendTo(env, chatId, "保存失败：" + (err instanceof Error ? err.message : "未知错误"))
@@ -2415,14 +2490,14 @@ async function annHandleText(env: Env, chatId: string, text: string): Promise<bo
       return true
     }
     await setAnnState(env, chatId, "ann_body", { title })
-    await sendTo(env, chatId, `标题已记下：<b>${title}</b>\n\n（第 2/3 步）现在发送<b>正文</b>；没有正文就发 /skip。`)
+    await sendTo(env, chatId, `标题已记下：<b>${title}</b>\n\n（第 2/4 步）现在发送<b>正文</b>；没有正文就发 /skip。`)
     return true
   }
   if (st.kind === "ann_body") {
     const bodyText = text.trim() === "/skip" ? "" : text.trim().slice(0, 1000)
     const payload = { title: st.payload.title ?? "", body: bodyText }
-    await setAnnState(env, chatId, "ann_preview", payload)
-    await annPreview(env, chatId, undefined, payload)
+    await setAnnState(env, chatId, "ann_popup", payload)
+    await annChoosePopup(env, chatId)
     return true
   }
   return false
