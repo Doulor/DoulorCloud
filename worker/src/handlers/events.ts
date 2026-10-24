@@ -2112,6 +2112,16 @@ export async function createEvent(env: Env, request: Request): Promise<Response>
     typeof body.conditionType === "string" && isConditionType(body.conditionType)
       ? body.conditionType
       : "always"
+
+  // 订阅频道活动：必须有 chat_id，否则用户点参与只会撞到「配置异常」
+  if (conditionType === "tg_channel") {
+    const cid = String(
+      (body.conditionParams as { chat_id?: unknown } | null | undefined)?.chat_id ?? ""
+    ).trim()
+    if (!cid) {
+      throw new ApiError(400, "订阅频道活动需要填写频道 chat_id（形如 -1004348634231）", "INVALID_INPUT")
+    }
+  }
   // 认证码条件必须配非空码：存了空码 = 任何人都领得到，还多一道假输入框
   if (conditionType === "code") {
     const p = body.conditionParams as { code?: unknown } | null | undefined
@@ -2255,6 +2265,25 @@ export async function updateEvent(
     const code = typeof p?.code === "string" ? p.code.trim() : ""
     if (!code) throw new ApiError(400, "认证码条件必须填写认证码", "INVALID_INPUT")
   }
+  /**
+   * 订阅频道（tg_channel）：参数只有 `chat_id` 一项，但**绝不能凭空丢掉**。
+   *
+   * 2026-10-24 线上踩到：管理端活动编辑器还不认识这个新类型，保存时把
+   * `conditionParams` 提交成 null，于是 `chat_id` 被抹掉 —— 用户点参与就报
+   * 「活动频道配置异常」。这里做兜底：body 没给 / 给空了，就沿用库里那份。
+   */
+  if (conditionType === "tg_channel") {
+    const incoming = body.conditionParams as { chat_id?: unknown } | null | undefined
+    const incomingId = typeof incoming?.chat_id === "string" ? incoming.chat_id.trim() : ""
+    const existingId = String((parseJson(existing.condition_params) ?? {}).chat_id ?? "").trim()
+    const chatId = incomingId || existingId
+    if (!chatId) {
+      throw new ApiError(400, "订阅频道活动需要填写频道 chat_id（形如 -1004348634231）", "INVALID_INPUT")
+    }
+    // 回填：后面拼 UPDATE 时统一用 mergeConditionParams 的结果
+    body.conditionParams = { ...(incoming ?? {}), chat_id: chatId }
+  }
+
   // 抽奖：参数（新的或沿用的）必须合法，奖励类型必须是积分（理由同 createEvent）
   if (conditionType === "lottery") {
     const params =

@@ -8,6 +8,8 @@ import type { MessageKey } from "./zh"
  * Keeping the same key order as zh.ts makes the two easy to diff by eye.
  */
 export const en: Record<MessageKey, string> = {
+  "adm.cond.tgChannel": "Join Telegram channel (verified server-side)",
+  "adm.condTgHint": "Channel chat_id (e.g. -1004348634231). The bot must be an admin of that channel; users must link Telegram first. Verification uses getChatMember — no codes.",
   "act.tg.needBind": "This event needs your Telegram linked first (one-tap, no typing):",
   "act.tg.bindNow": "Link Telegram",
   "act.tg.bindOpened": "Bot opened in Telegram — tap Start to finish linking, then come back and verify again",

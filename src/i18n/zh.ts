@@ -8,6 +8,8 @@
  *   · 带变量的用 {name} 占位，例如 "已用 {used} / {total}"。
  */
 export const zh = {
+  "adm.cond.tgChannel": "订阅 TG 频道（服务端核验）",
+  "adm.condTgHint": "填频道的 chat_id（形如 -1004348634231）。机器人必须是该频道管理员；用户需先在站内绑定 Telegram，核验走 getChatMember，不需要任何验证码。",
   "act.tg.needBind": "参加这个活动需要先绑定 Telegram（一键绑定，不用手打码）：",
   "act.tg.bindNow": "一键绑定 TG",
   "act.tg.bindOpened": "已在 TG 里打开机器人，点一下「开始」即完成绑定，然后回来再点「验证订阅」",

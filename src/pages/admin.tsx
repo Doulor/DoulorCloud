@@ -404,6 +404,8 @@ interface EventDraft {
   conditionCode: string
   /** 要核验 star 的 GitHub 仓库（conditionType = github_star 时用），形如 owner/repo */
   conditionRepo: string
+  /** 订阅频道活动的频道 chat_id（形如 -1004348634231） */
+  conditionChatId: string
   /** 抽奖（conditionType = lottery 时用）：中奖人数 */
   lotteryWinners: string
   /** 抽奖：奖池总积分（中奖者共享） */
@@ -458,6 +460,7 @@ function emptyEventDraft(): EventDraft {
     conditionFeature: "ai",
     conditionCode: "",
     conditionRepo: "Doulor/DoulorCloud",
+  conditionChatId: "-1004348634231",
     lotteryWinners: "10",
     lotteryPool: "1000",
     lotteryMode: "even",
@@ -3099,6 +3102,7 @@ export default function AdminPage() {
             conditionFeature: String(ev.conditionParams?.feature ?? "ai"),
             conditionCode: String(ev.conditionParams?.code ?? ""),
             conditionRepo: String(ev.conditionParams?.repo ?? "Doulor/DoulorCloud"),
+      conditionChatId: String(ev.conditionParams?.chat_id ?? "-1004348634231"),
             lotteryWinners: String(ev.conditionParams?.winners ?? "10"),
             lotteryPool: String(ev.conditionParams?.pool ?? "1000"),
             lotteryMode: ev.conditionParams?.mode === "random" ? "random" : "even",
@@ -10017,6 +10021,19 @@ export default function AdminPage() {
                     {t("adm.801")}
                     {t("adm.802")}
                   </p>
+                </div>
+              )}
+              {eventDraft.conditionType === "tg_channel" && (
+                <div className="space-y-1.5 pt-1">
+                  <Input
+                    placeholder="-1004348634231"
+                    maxLength={40}
+                    value={eventDraft.conditionChatId}
+                    onChange={(e) =>
+                      setEventDraft((d) => ({ ...d, conditionChatId: e.target.value }))
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">{t("adm.condTgHint")}</p>
                 </div>
               )}
               {(eventDraft.conditionType === "github_star" ||
