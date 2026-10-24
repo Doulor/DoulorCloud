@@ -621,7 +621,15 @@ async function tryBindCode(
   await sendTo(
     env,
     chatId,
-    `✅ 绑定成功：<b>${u?.username ?? ""}</b>\n命令菜单已更新，点左下角 / 查看。`
+    [
+        `✅ 绑定成功：<b>${u?.username ?? ""}</b>`,
+        "命令菜单已更新，点左下角 / 查看。",
+        "",
+        // 绑完顺手把官方频道递过去（2026-10-24 站长要求）：
+        // 「订阅频道领额度」活动的入口就在这条消息里，用户不用再回去找链接。
+        '📣 官方频道：<a href="https://t.me/DoulorCloud_pd">@DoulorCloud_pd</a>',
+        "订阅后回站内「活动」页点「验证订阅」，可领 1000 点中转站额度。",
+      ].join("\n")
   )
 }
 /**
