@@ -356,10 +356,14 @@ export default function ActivityPage() {
                     onChange={(e) => setGithub(e.target.value)}
                   />
                 )}
-                {/* 订阅频道活动：验证前给频道入口，绑定失败给一键绑定 */}
-            {ev.conditionType === "tg_channel" && !claimed && tgHint !== "none" ? (
-              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                {tgHint === "needBind" ? (
+                {/*
+              订阅频道活动：**常驻**给出「一键绑定」和「打开频道」两个入口。
+              之前只在报错后才显示，用户点一次失败看到 toast 却找不到按钮，很懵
+              （2026-10-24 站长就卡在这里）。
+            */}
+            {ev.conditionType === "tg_channel" && !claimed ? (
+              <div className="flex w-full flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                {tgHint === "needBind" || tgHint === "none" ? (
                   <>
                     <span>{t("act.tg.needBind")}</span>
                     <Button size="sm" variant="outline" disabled={tgBindBusy} onClick={() => void startTgBind()}>
@@ -367,16 +371,14 @@ export default function ActivityPage() {
                       {t("act.tg.bindNow")}
                     </Button>
                   </>
-                ) : tgHint === "notMember" ? (
-                  <>
-                    <span>{t("act.tg.notMember")}</span>
-                    <a className="underline" href="https://t.me/DoulorCloud_pd" target="_blank" rel="noreferrer">
-                      {t("act.tg.openChannel")}
-                    </a>
-                  </>
-                ) : (
-                  <span>{t("act.tg.unavailable")}</span>
-                )}
+                ) : null}
+                {tgHint === "notMember" || tgHint === "none" ? (
+                  <a className="underline" href="https://t.me/DoulorCloud_pd" target="_blank" rel="noreferrer">
+                    {t("act.tg.openChannel")}
+                  </a>
+                ) : null}
+                {tgHint === "notMember" ? <span>{t("act.tg.notMember")}</span> : null}
+                {tgHint === "unavailable" ? <span>{t("act.tg.unavailable")}</span> : null}
               </div>
             ) : null}
 
