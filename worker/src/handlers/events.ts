@@ -14,10 +14,12 @@ import { requireUser, isAnyAdmin } from "../auth"
 import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
-import { audit } from "../settings"
+import { audit, getSetting } from "../settings"
 import { checkStarred, checkContributedPr } from "../github"
 import { broadcastMessage } from "../user-messages"
 import { isStorageConfigured, putObject, getObject, getPlatformBucketId } from "../r2"
+import { checkChannelMembership } from "../tg-member"
+import { adminSetQuota } from "../newapi-client"
 import { hardenUserContentResponse } from "../content-type"
 import {
   REWARD_HANDLERS,
@@ -1198,6 +1200,39 @@ export async function claimEvent(
   // 投票同理：过了开奖时间还让人投，那票永远不会被计入（计票在开奖那一刻定死）
   if ((row.condition_type as ConditionType) === "vote" && row.drawn_at) {
     throw new ApiError(400, "本活动已开奖", "VOTE_DRAWN")
+  }
+
+  /**
+   * 订阅频道（tg_channel）：先把「没绑定 / 查不了 / 确实没订阅」三种情况分开报。
+   *
+   * 笼统的「不满足参与条件」会让用户反复点：没绑定的人会以为要订阅，
+   * 订阅了的人会以为白订阅。前端还要靠 `NEED_TG_BIND` 弹出「一键绑定 TG」深链。
+   */
+  if ((row.condition_type as ConditionType) === "tg_channel") {
+    const chatId = String((parseJson(row.condition_params) ?? {}).chat_id ?? "")
+    if (!chatId) throw new ApiError(500, "活动频道配置异常", "BAD_CONDITION")
+    const probe = await checkChannelMembership(env, chatId, user.id)
+    if (probe === "no_binding") {
+      throw new ApiError(
+        400,
+        "需要先把 Telegram 账号绑定到本站（一键绑定，不用手打码），绑定后再来点「验证订阅」",
+        "NEED_TG_BIND"
+      )
+    }
+    if (probe === "unknown") {
+      throw new ApiError(
+        503,
+        "暂时查不到频道成员状态（可能是机器人权限问题），请稍后再试或联系管理员",
+        "TG_CHECK_UNAVAILABLE"
+      )
+    }
+    if (probe === "not_member") {
+      throw new ApiError(
+        403,
+        "还没检测到你订阅了频道。先点频道链接订阅，然后回到这里再点一次「验证订阅」",
+        "TG_NOT_MEMBER"
+      )
+    }
   }
 
   // 认证码条件：先验码再走通用条件（不区分大小写，避免用户因大小写白白失败）
@@ -2639,4 +2674,88 @@ export async function reconcileStaleClaims(env: Env): Promise<{ swept: number }>
   const swept = r.meta?.changes ?? 0
   if (swept > 0) console.warn("活动领奖：清理卡住的「发放中」记录", swept, "条")
   return { swept }
+}
+
+
+/* ==========================================================================
+ * 退订复查（2026-10-24）
+ *
+ * 站长选了「领奖后退订 → 自动扣回」。每天跑一次：
+ *   · 只查 condition_type='tg_channel' 且 reward_status='granted' 的领取记录
+ *   · getChatMember 明确返回「不在」才扣回 —— `unknown`（查不了）一律跳过，
+ *     宁可留给人工复核，也不能因为接口抖动把认真订阅的人奖励收走
+ *   · 中转站额度用 adminSetQuota(..., "subtract") 扣回；积分类奖励这里只标记，
+ *     留给人工（积分扣减要走流水，混进来容易把账做花）
+ * ========================================================================== */
+export async function revokeUnsubscribedTgEventClaims(
+  env: Env
+): Promise<{ checked: number; revoked: number; unknown: number; manual: number }> {
+  const out = { checked: 0, revoked: 0, unknown: 0, manual: 0 }
+  let rows: {
+    claim_id: string
+    user_id: string
+    username: string | null
+    reward_type: string
+    reward_params: string | null
+    condition_params: string | null
+  }[] = []
+  try {
+    const q = await env.DB.prepare(
+      `SELECT c.id AS claim_id, c.user_id, u.username, c.reward_type, e.reward_params, e.condition_params
+       FROM event_claims c
+       JOIN events e ON e.id = c.event_id
+       LEFT JOIN users u ON u.id = c.user_id
+       WHERE e.condition_type = 'tg_channel' AND c.reward_status = 'granted'
+       LIMIT 200`
+    ).all<{
+      claim_id: string
+      user_id: string
+      username: string | null
+      reward_type: string
+      reward_params: string | null
+      condition_params: string | null
+    }>()
+    rows = q.results ?? []
+  } catch {
+    return out
+  }
+
+  for (const r of rows) {
+    out.checked++
+    const chatId = String((parseJson(r.condition_params) ?? {}).chat_id ?? "")
+    if (!chatId) continue
+    const res = await checkChannelMembership(env, chatId, r.user_id)
+    if (res === "member") continue
+    if (res !== "not_member") {
+      out.unknown++
+      continue
+    }
+
+    const note = "检测到已退订 Telegram 频道，活动奖励已收回（重新订阅后可再次验证领取）。"
+    if (r.reward_type === "newapi_quota") {
+      try {
+        const amount = Number((parseJson(r.reward_params) ?? {}).amount ?? 0)
+        const perUnit = Number(await getSetting(env, "newapi_quota_per_unit")) || 500_000
+        const acct = await env.DB.prepare("SELECT newapi_user_id FROM newapi_accounts WHERE user_id = ?")
+          .bind(r.user_id)
+          .first<{ newapi_user_id: number }>()
+        if (amount > 0 && acct?.newapi_user_id) {
+          await adminSetQuota(env, acct.newapi_user_id, Math.round(amount * perUnit), "subtract")
+          await env.DB.prepare("UPDATE event_claims SET reward_status = 'failed', reward_detail = ? WHERE id = ?")
+            .bind(note, r.claim_id)
+            .run()
+          out.revoked++
+          continue
+        }
+      } catch (err) {
+        console.warn("收回额度失败:", r.claim_id, err instanceof Error ? err.message : err)
+      }
+    }
+    // 积分类 / 扣回失败：标记为人工处理，别悄悄吞掉
+    await env.DB.prepare("UPDATE event_claims SET reward_status = 'manual', reward_detail = ? WHERE id = ?")
+      .bind(note + "（奖励类型需管理员手动扣回）", r.claim_id)
+      .run()
+    out.manual++
+  }
+  return out
 }

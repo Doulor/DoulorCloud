@@ -2789,6 +2789,8 @@ export type EventConditionType =
   | "has_feature"
   | "code"
   | "lottery"
+  /** 订阅 TG 频道/群：服务端 getChatMember 核验（2026-10-24） */
+  | "tg_channel"
   /**
    * 投票：用户从若干选项里选一个投出（一人一票，投完不能改）。
    * 获奖规则见 EventVoteRewardRule —— 参与即可获奖 / 多数 / 少数，

@@ -8,6 +8,13 @@
  *   · 带变量的用 {name} 占位，例如 "已用 {used} / {total}"。
  */
 export const zh = {
+  "act.tg.needBind": "参加这个活动需要先绑定 Telegram（一键绑定，不用手打码）：",
+  "act.tg.bindNow": "一键绑定 TG",
+  "act.tg.bindOpened": "已在 TG 里打开机器人，点一下「开始」即完成绑定，然后回来再点「验证订阅」",
+  "act.tg.botNotReady": "机器人还没配置好，请联系管理员",
+  "act.tg.notMember": "还没检测到你订阅了频道：先点这里订阅，再回来点「验证订阅」",
+  "act.tg.openChannel": "打开频道",
+  "act.tg.unavailable": "暂时查不到频道成员状态（可能是机器人权限问题），请稍后再试或联系管理员",
   "frp.ns.degraded": "异常",
   "chat.dnd": "免打扰",
   "chat.dndOff": "开启免打扰（不再提示未读）",

@@ -15,6 +15,7 @@ import { getSetting } from "./settings"
 import { applyPoints } from "./points"
 import { checkStarred, checkContributedPr, isRepoSlug } from "./github"
 import type { Env } from "./env"
+import { checkChannelMembership } from "./tg-member"
 
 // ---- 奖励 ----
 
@@ -424,6 +425,8 @@ export const CONDITION_TYPES = [
   "quiz",
   "github_star",
   "github_pr",
+  /** 订阅 TG 频道/群（2026-10-24）：用 getChatMember 服务端核验，不用验证码 */
+  "tg_channel",
 ] as const
 export type ConditionType = (typeof CONDITION_TYPES)[number]
 
@@ -447,6 +450,7 @@ export const CONDITION_HINTS: Record<ConditionType, string> = {
   quiz: "问卷",
   github_star: "需要给仓库点 Star（刚点完最多 5 分钟后才会识别到）",
   github_pr: "需要给仓库提交过 PR（刚提交最多 5 分钟后才会识别到）",
+  tg_channel: "需要先订阅我们的 Telegram 频道，再点「验证订阅」—— 我们会用 Telegram 官方接口核验（不需要任何验证码）",
 }
 
 /**
@@ -581,6 +585,22 @@ export const CONDITION_HANDLERS: Record<ConditionType, ConditionHandler> = {
     if (!repo || !who) return false
     const res = await checkContributedPr(env, repo, who, params.mergedOnly === true)
     return res.ok
+  },
+
+  /**
+   * 订阅 Telegram 频道 / 群。
+   *
+   * params.chat_id 形如 "-1004348634231"。核验走 `getChatMember`：
+   * 机器人是频道管理员就能查，无需验证码、也绕不开「搜一下就能看到码」的问题。
+   *
+   * 注意：`unknown`（查不了，比如 bot 被撤了管理员）这里返回 false —— 宁可让用户
+   * 找管理员，也不能把「查不了」当成「已订阅」发奖；前端会据 NEED_TG_UNKNOWN 提示。
+   */
+  tg_channel: async (env, userId, params) => {
+    const chatId = String(params.chat_id ?? "").trim()
+    if (!chatId) return false
+    const res = await checkChannelMembership(env, chatId, userId)
+    return res === "member"
   },
 }
 

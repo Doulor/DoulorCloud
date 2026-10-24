@@ -124,7 +124,7 @@ export function maskToken(token: string | null | undefined): string {
   return `${id}:${rest.slice(0, 4)}****${tail}`
 }
 
-async function loadConfig(env: Env): Promise<TgConfigRow> {
+export async function loadConfig(env: Env): Promise<TgConfigRow> {
   const row = await env.DB.prepare("SELECT * FROM tg_bot_config WHERE id = 1").first<TgConfigRow>()
   if (row) return row
   await env.DB.prepare("INSERT OR IGNORE INTO tg_bot_config (id) VALUES (1)").run()
@@ -145,7 +145,7 @@ async function loadConfig(env: Env): Promise<TgConfigRow> {
 }
 
 /** 解出明文 token；未配置返回 null（调用方必须处理，不能把 null 拼进 URL） */
-async function botToken(env: Env, config?: TgConfigRow): Promise<string | null> {
+export async function botToken(env: Env, config?: TgConfigRow): Promise<string | null> {
   const cfg = config ?? (await loadConfig(env))
   if (!cfg.token_enc) return null
   try {

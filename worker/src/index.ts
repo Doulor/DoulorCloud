@@ -81,6 +81,7 @@ import * as pointHandlers from "./handlers/points"
 import * as dbBackupHandlers from "./handlers/db-backup"
 import * as attentionHandlers from "./handlers/attention"
 import { probeFrpNodes } from "./frp-health"
+import { revokeUnsubscribedTgEventClaims } from "./handlers/events"
 // 造物典藏（游戏大厅）：插件清单 + 「在线投资」玩家侧 / 管理端接口
 import * as collectionHandlers from "./handlers/collection"
 import * as collectionAdminHandlers from "./handlers/collection-admin"
@@ -5507,6 +5508,23 @@ export default {
      * 用现成的「每分钟」cron 取模触发，不新增 cron 表达式 —— 少一条触发器就少一处配置漂移。
      * 北京节点停机时后台仍显示 online，就是因为 frp_nodes.status 从来没人更新。
      */
+    /**
+     * 「订阅频道」活动的退订复查：每天 04:00 UTC（= 12:00 CST）跑一次。
+     * 站长选了「领奖后退订自动扣回」；查不了（unknown）的一律跳过，不误伤。
+     */
+    {
+      const t = new Date()
+      if (t.getUTCHours() === 4 && t.getUTCMinutes() === 0) {
+        ctx.waitUntil(
+          revokeUnsubscribedTgEventClaims(env)
+            .then((r) => {
+              if (r.revoked > 0 || r.manual > 0) console.warn("退订复查:", JSON.stringify(r))
+            })
+            .catch((err) => console.warn("退订复查失败:", err instanceof Error ? err.message : err))
+        )
+      }
+    }
+
     if (new Date().getUTCMinutes() % 5 === 0) {
       ctx.waitUntil(
         probeFrpNodes(env)

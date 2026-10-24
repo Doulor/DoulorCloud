@@ -18,6 +18,7 @@ import { toast } from "sonner"
 import { LoadingBlock } from "@/components/loading-block"
 import { Markdown } from "@/components/markdown"
 import { EventQuiz } from "@/components/event-quiz"
+import { tgBindApi } from "@/services/api"
 import { EventVote, VOTE_RULE_LABEL_KEY, VOTE_RULE_HINT_KEY, isInstantVoteRule } from "@/components/event-vote"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -74,6 +75,31 @@ export default function ActivityPage() {
     void load()
   }, [load])
 
+  /**
+   * 「订阅频道」活动的绑定提示（2026-10-24）。
+   * needBind = 还没绑定 TG（后端返回 NEED_TG_BIND）；notMember = 绑定了但没订阅。
+   */
+  const [tgHint, setTgHint] = React.useState<"none" | "needBind" | "notMember" | "unavailable">("none")
+  const [tgBindBusy, setTgBindBusy] = React.useState(false)
+
+  /** 一键绑定：生成绑定码 → 打开 t.me/<bot>?start=<码>，用户在 TG 里点一下就完成 */
+  const startTgBind = async () => {
+    setTgBindBusy(true)
+    try {
+      const r = await tgBindApi.createCode()
+      if (!r.botReady || !r.botUsername || !r.code) {
+        toast.error(t("act.tg.botNotReady"))
+        return
+      }
+      window.open(`https://t.me/${r.botUsername}?start=${r.code}`, "_blank", "noopener")
+      toast.message(t("act.tg.bindOpened"))
+    } catch (err) {
+      toast.error(errMsg(err, t("act.err.join")))
+    } finally {
+      setTgBindBusy(false)
+    }
+  }
+
   const handleClaim = async () => {
     if (!ev) return
     // 未登录：先去登录，登录后回到本页（活动不丢）
@@ -94,6 +120,10 @@ export default function ActivityPage() {
       notifyMessagesChanged()
       await load()
     } catch (err) {
+      const code = (err as { code?: string })?.code ?? ""
+      if (code === "NEED_TG_BIND") setTgHint("needBind")
+      else if (code === "TG_NOT_MEMBER") setTgHint("notMember")
+      else if (code === "TG_CHECK_UNAVAILABLE") setTgHint("unavailable")
       toast.error(errMsg(err, t("act.err.join")))
       await load()
     } finally {
@@ -326,7 +356,31 @@ export default function ActivityPage() {
                     onChange={(e) => setGithub(e.target.value)}
                   />
                 )}
-                {/* 问卷不靠「参与」按钮：答题 + 交卷才算参与 */}
+                {/* 订阅频道活动：验证前给频道入口，绑定失败给一键绑定 */}
+            {ev.conditionType === "tg_channel" && !claimed && tgHint !== "none" ? (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                {tgHint === "needBind" ? (
+                  <>
+                    <span>{t("act.tg.needBind")}</span>
+                    <Button size="sm" variant="outline" disabled={tgBindBusy} onClick={() => void startTgBind()}>
+                      {tgBindBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                      {t("act.tg.bindNow")}
+                    </Button>
+                  </>
+                ) : tgHint === "notMember" ? (
+                  <>
+                    <span>{t("act.tg.notMember")}</span>
+                    <a className="underline" href="https://t.me/DoulorCloud_pd" target="_blank" rel="noreferrer">
+                      {t("act.tg.openChannel")}
+                    </a>
+                  </>
+                ) : (
+                  <span>{t("act.tg.unavailable")}</span>
+                )}
+              </div>
+            ) : null}
+
+            {/* 问卷不靠「参与」按钮：答题 + 交卷才算参与 */}
                 {!isQuiz && (
                 <Button
                   size="sm"

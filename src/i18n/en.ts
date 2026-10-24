@@ -8,6 +8,13 @@ import type { MessageKey } from "./zh"
  * Keeping the same key order as zh.ts makes the two easy to diff by eye.
  */
 export const en: Record<MessageKey, string> = {
+  "act.tg.needBind": "This event needs your Telegram linked first (one-tap, no typing):",
+  "act.tg.bindNow": "Link Telegram",
+  "act.tg.bindOpened": "Bot opened in Telegram — tap Start to finish linking, then come back and verify again",
+  "act.tg.botNotReady": "Bot is not configured yet, please contact the admin",
+  "act.tg.notMember": "You don't seem to be subscribed yet — subscribe here, then verify again",
+  "act.tg.openChannel": "Open channel",
+  "act.tg.unavailable": "Cannot check membership right now (bot permission issue?), please retry later",
   "frp.ns.degraded": "Degraded",
   "chat.dnd": "Mute",
   "chat.dndOff": "Turn on do-not-disturb (hide unread badge)",
