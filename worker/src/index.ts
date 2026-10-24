@@ -80,6 +80,7 @@ import * as moderationListHandlers from "./handlers/moderation-lists"
 import * as pointHandlers from "./handlers/points"
 import * as dbBackupHandlers from "./handlers/db-backup"
 import * as attentionHandlers from "./handlers/attention"
+import { probeFrpNodes } from "./frp-health"
 // 造物典藏（游戏大厅）：插件清单 + 「在线投资」玩家侧 / 管理端接口
 import * as collectionHandlers from "./handlers/collection"
 import * as collectionAdminHandlers from "./handlers/collection-admin"
@@ -5500,6 +5501,24 @@ export default {
     env: Env,
     ctx: ExecutionContext
   ): Promise<void> {
+    /**
+     * frp 节点健康探测：每 5 分钟一次（2026-10-24）。
+     *
+     * 用现成的「每分钟」cron 取模触发，不新增 cron 表达式 —— 少一条触发器就少一处配置漂移。
+     * 北京节点停机时后台仍显示 online，就是因为 frp_nodes.status 从来没人更新。
+     */
+    if (new Date().getUTCMinutes() % 5 === 0) {
+      ctx.waitUntil(
+        probeFrpNodes(env)
+          .then((r) => {
+            if (r.offline > 0 || r.degraded > 0) {
+              console.warn("frp 节点健康异常:", JSON.stringify(r))
+            }
+          })
+          .catch((err) => console.warn("frp 健康探测失败:", err instanceof Error ? err.message : err))
+      )
+    }
+
     if (controller.cron === SCHEDULED_PUBLISH_CRON) {
       ctx.waitUntil(
         processScheduledPublishes(env, ctx).then((r) => {

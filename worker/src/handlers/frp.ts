@@ -131,7 +131,7 @@ export async function upsertFrpNode(env: Env, request: Request): Promise<Respons
     enabled: body.enabled === false ? 0 : 1,
     sortOrder: Math.trunc(Number(body.sortOrder ?? 0)),
     note: (body.note ?? "").trim() || null,
-    status: ["online", "offline", "maintenance", "unknown"].includes(body.status ?? "")
+    status: ["online", "degraded", "offline", "maintenance", "unknown"].includes(body.status ?? "")
       ? (body.status as string)
       : "unknown",
     statusNote: (body.statusNote ?? "").trim() || null,

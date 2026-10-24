@@ -8,6 +8,7 @@
  *   · 带变量的用 {name} 占位，例如 "已用 {used} / {total}"。
  */
 export const zh = {
+  "frp.ns.degraded": "异常",
   "chat.dnd": "免打扰",
   "chat.dndOff": "开启免打扰（不再提示未读）",
   "chat.dndOn": "已开启免打扰，点击恢复提醒",

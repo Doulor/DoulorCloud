@@ -8,6 +8,7 @@ import type { MessageKey } from "./zh"
  * Keeping the same key order as zh.ts makes the two easy to diff by eye.
  */
 export const en: Record<MessageKey, string> = {
+  "frp.ns.degraded": "Degraded",
   "chat.dnd": "Mute",
   "chat.dndOff": "Turn on do-not-disturb (hide unread badge)",
   "chat.dndOn": "Do-not-disturb is on, click to restore",

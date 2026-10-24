@@ -338,6 +338,41 @@ export function AdminFrpRental() {
               </div>
             ))
           )}
+              {/* ---- 节点健康（2026-10-24 起自动探测：控制端口 + agent 心跳） ---- */}
+              {nodes.length > 0 ? (
+                <div className="mt-3 space-y-2 border-t pt-3">
+                  {nodes.map((n) => (
+                    <div key={n.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                      {n.status === "online" ? (
+                        <span className="inline-flex items-center gap-1 font-medium text-emerald-600">
+                          <CheckCircle2 className="h-4 w-4" />
+                          {t("frpr.node.online")}
+                        </span>
+                      ) : n.status === "degraded" ? (
+                        <span className="inline-flex items-center gap-1 font-medium text-amber-600">
+                          <AlertTriangle className="h-4 w-4" />
+                          {t("frpr.node.degraded")}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 font-medium text-destructive">
+                          <XCircle className="h-4 w-4" />
+                          {t("frpr.node.offline")}
+                        </span>
+                      )}
+                      <span className="font-medium">{n.name}</span>
+                      <span className="text-muted-foreground">{n.serverAddr}:{n.serverPort}</span>
+                      {n.statusUpdatedAt ? (
+                        <span className="text-muted-foreground">
+                          {t("frpr.node.checkedAt", { v0: new Date(n.statusUpdatedAt).toLocaleString() })}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">{t("frpr.node.neverChecked")}</span>
+                      )}
+                      {n.statusNote ? <span className="text-destructive">{n.statusNote}</span> : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
         </CardContent>
       </Card>
 

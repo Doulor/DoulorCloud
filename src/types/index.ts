@@ -843,7 +843,7 @@ export interface NewApiPreflight {
 
 // ---- frp 内网穿透 ----
 
-export type FrpNodeStatus = "online" | "offline" | "maintenance" | "unknown"
+export type FrpNodeStatus = "online" | "degraded" | "offline" | "maintenance" | "unknown"
 
 export interface FrpNode {
   id: string
