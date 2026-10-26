@@ -51,6 +51,7 @@ import {
   type AdminLabReview,
 } from "@/services/api"
 import { cn } from "@/lib/utils"
+import { FadeImage } from "@/components/fade-image"
 
 /** 状态筛选："" = 全部 */
 type StatusFilter = "" | "public" | "private" | "pending" | "rejected"
@@ -440,11 +441,10 @@ export function AdminGalleryTab() {
                 >
                   <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-muted/50 text-lg">
                     {it.hasCover ? (
-                      <img
+                      <FadeImage
                         src={galleryCoverUrl(it.id, it.coverV)}
                         alt=""
-                        loading="lazy"
-                        className="h-full w-full object-cover"
+                        className="h-full w-full"
                       />
                     ) : it.icon?.trim() ? (
                       <span className="leading-none">{it.icon}</span>

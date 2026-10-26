@@ -95,6 +95,16 @@ import type { AfterSaleStatus, OrderStatus } from "../points-shop"
 import type { Env } from "../env"
 
 const MAX_JSON_BODY_BYTES = 16 * 1024
+/**
+ * 商品保存接口（创建 / 编辑，用户端与管理端共四个路由）的请求体上限。
+ *
+ * 普通商品表单很小（名称 40 + 说明 500 + 交付内容 2000 字符），16 KB 绰绰有余；
+ * 但封面现在允许粘贴 Data URL（上限 100 KB 字符，见 points-shop 的
+ * MAX_COVER_DATA_URL_CHARS），再叠加 JSON 结构与其它字段后 16 KB 必炸 ——
+ * 用户看到的会是莫名其妙的「请求内容过大」而不是表单错误。
+ * 只对这四个路由放宽到 160 KB，转账 / 兑换等其它接口仍保持 16 KB 严格口径。
+ */
+const PRODUCT_SAVE_BODY_BYTES = 160 * 1024
 
 /** GET /api/points —— 当前用户的积分概览（余额 / 配置 / 商品 / 订单 / 我上架的商品 / 流水） */
 export async function getPoints(env: Env, request: Request): Promise<Response> {
@@ -187,9 +197,37 @@ const SHOP_IMAGE_TYPES: Record<string, string> = {
   "image/png": "png",
   "image/webp": "webp",
   "image/gif": "gif",
+  "image/svg+xml": "svg",
 }
 /** 商品封面图大小上限：封面会被压成小卡片，5MB 足够 */
 const MAX_SHOP_IMAGE_BYTES = 5 * 1024 * 1024
+/**
+ * SVG 封面单独收紧到 1 MB。
+ *
+ * SVG 是文本，1 MB 已经远超正常封面的需要；上限越低，将来被当成免费
+ * 图床存大文件的动力就越小（位图 5 MB 是老口径，保持不动）。
+ */
+const MAX_SHOP_SVG_BYTES = 1024 * 1024
+
+/**
+ * SVG 封面的轻量内容门（在 R2 写入前跑一次，读取侧才是真正的防线）。
+ *
+ * 必须长得像 SVG（找到 `<svg` 标签），且**不允许内嵌 `<script>`** ——
+ * 正常导出的封面 SVG 不会带脚本，带脚本的直接拒收，省得它进桶之后
+ * 还要靠读取侧兜底。这不是安全边界（纯文本匹配绕得过），真正的边界在
+ * serveShopImage：封面只经 `<img>` 渲染 + 直链响应带 `CSP: sandbox`，
+ * 脚本即使进了桶也执行不了。
+ */
+export function isPlausibleSvg(buf: ArrayBuffer): boolean {
+  let text: string
+  try {
+    text = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(buf)
+  } catch {
+    return false
+  }
+  const head = text.slice(0, 2048).toLowerCase()
+  return head.includes("<svg") && !text.toLowerCase().includes("<script")
+}
 
 /**
  * POST /api/points/product/image —— 上传商品封面图（2026-10-01 加）。
@@ -205,16 +243,24 @@ export async function uploadProductImage(env: Env, request: Request): Promise<Re
   const user = await requireUser(env, request)
   // 封面不常换，但按钮可能被连点；与反馈图上传同量级
   await guardRateLimit(env, `shop-image:${user.id}`, 20, 60, "上传过于频繁，请稍后再试")
+  // 类型门放在存储可用性检查**之前**：非法类型直接 400（也是无 R2 环境下
+  // 可测的路径），别让用户先传完 5 MB 才被告知格式不对。
+  const ct = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase()
+  const ext = SHOP_IMAGE_TYPES[ct]
+  if (!ext) throw new ApiError(400, "仅支持 JPG/PNG/WebP/GIF/SVG", "INVALID_TYPE")
+
   if (!(await isStorageConfigured(env))) {
     throw new ApiError(503, "存储未配置", "R2_NOT_CONFIGURED")
   }
 
-  const ct = (request.headers.get("Content-Type") ?? "").split(";")[0].trim()
-  const ext = SHOP_IMAGE_TYPES[ct]
-  if (!ext) throw new ApiError(400, "仅支持 JPG/PNG/WebP/GIF", "INVALID_TYPE")
-
-  const buf = await readBodyCapped(request, MAX_SHOP_IMAGE_BYTES, "封面图需在 5 MB 以内", 400, "TOO_LARGE")
-  if (buf.byteLength === 0) throw new ApiError(400, "封面图需在 5 MB 以内", "TOO_LARGE")
+  // SVG 是文本，1 MB 上限足够；位图维持 5 MB 老口径
+  const cap = ext === "svg" ? MAX_SHOP_SVG_BYTES : MAX_SHOP_IMAGE_BYTES
+  const capMsg = ext === "svg" ? "SVG 封面需在 1 MB 以内" : "封面图需在 5 MB 以内"
+  const buf = await readBodyCapped(request, cap, capMsg, 400, "TOO_LARGE")
+  if (buf.byteLength === 0) throw new ApiError(400, capMsg, "TOO_LARGE")
+  if (ext === "svg" && !isPlausibleSvg(buf)) {
+    throw new ApiError(400, "这不是有效的 SVG 文件", "INVALID_TYPE")
+  }
 
   const bucketId = await getPlatformBucketId(env)
   const filename = `${uuid()}.${ext}`
@@ -241,12 +287,58 @@ export async function uploadProductImage(env: Env, request: Request): Promise<Re
  * 与社区帖子图片（`/c/<postId>/<file>`，serveCommunityImage）同一套做法：
  * 任何人可读 + 文件名只允许 `<uuid>.<ext>`（防路径穿越）+ 类型收口 + nosniff。
  */
+/**
+ * GET /shop-img/<userId>/<filename> —— 商品封面图公开读取（走 Host 分发层，非 /api）。
+ *
+ * 与社区帖子图片（`/c/<postId>/<file>`，serveCommunityImage）同一套做法：
+ * 任何人可读 + 文件名只允许 `<uuid>.<ext>`（防路径穿越）+ 类型收口 + nosniff。
+ *
+ * 缓存（2026-10-26，商城冷启动优化）：文件名是上传时随机生成的 uuid、
+ * 内容永不原地改写 → **内容不可变**，直接给一年 immutable 强缓存。
+ * 此前吃 hardenUserContentResponse 的 `private, no-store` 兜底，逛商城的人
+ * 每次切分类 / 翻页（卡片重挂载）都把所有封面回源重拉一遍，图片越多越卡。
+ * 代价：商品删除后，看过的人的浏览器缓存里还留着图 —— 图本来就公开给
+ * 看过列表的人看过，列表本身才是访问入口，可接受。
+ */
+const SHOP_IMAGE_CACHE = "public, max-age=31536000, immutable"
+
+/**
+ * 给 `hardenUserContentResponse` 的结果补商城封面所需的头（纯函数，便于测试）。
+ *
+ * 非 SVG：只把缓存头换成强缓存（harden 的 `private, no-store` 兜底被覆盖）。
+ * SVG：harden 会把 `image/svg+xml` 强制降级成 `attachment` + `octet-stream`
+ * （全站对用户上传 SVG 的既定策略 —— 顶层文档可执行脚本，同源 XSS），
+ * 但商城封面需要 `<img>` 能渲染。这里对**这一条路径**单独放开内联，并把
+ * 历史 XSS 顾虑堵死：
+ *   · `<img src>` 渲染 SVG 时脚本本来就不执行（浏览器按图片解码）；
+ *   · 直链被当**顶层文档**打开时，`CSP: sandbox`（不带 allow-scripts /
+ *     allow-same-origin）把脚本、表单、同源访问全部关进不透明源 ——
+ *     GitHub 等站点对用户上传 SVG 就是这套策略。
+ * 上传侧另有 isPlausibleSvg 拒收带 `<script>` 的文件（纵深防御，非安全边界）。
+ */
+export function hardenShopCoverResponse(
+  res: Response,
+  filename: string,
+  hardened: Response
+): Response {
+  const headers = new Headers(hardened.headers)
+  headers.set("Cache-Control", SHOP_IMAGE_CACHE)
+  if (!filename.toLowerCase().endsWith(".svg")) {
+    return new Response(hardened.body, { status: hardened.status, headers })
+  }
+  headers.set("Content-Type", "image/svg+xml")
+  headers.set("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(filename)}`)
+  headers.set("Content-Security-Policy", "sandbox")
+  headers.set("X-Content-Type-Options", "nosniff")
+  return new Response(res.body, { status: hardened.status, headers })
+}
+
 export async function serveShopImage(
   env: Env,
   userId: string,
   filename: string
 ): Promise<Response> {
-  if (!/^[A-Za-z0-9-]{8,64}\.(jpg|jpeg|png|webp|gif)$/i.test(filename)) {
+  if (!/^[A-Za-z0-9-]{8,64}\.(jpg|jpeg|png|webp|gif|svg)$/i.test(filename)) {
     return new Response("Not Found", { status: 404 })
   }
   if (!/^[A-Za-z0-9-]{8,64}$/.test(userId)) {
@@ -256,7 +348,13 @@ export async function serveShopImage(
   const bucketId = await getPlatformBucketId(env)
   try {
     const res = await getObject(env, `shop/${userId}/${filename}`, undefined, bucketId)
-    return hardenUserContentResponse(res, filename)
+    const withCache = new Headers(res.headers)
+    withCache.set("Cache-Control", SHOP_IMAGE_CACHE)
+    const hardened = hardenUserContentResponse(
+      new Response(res.body, { status: res.status, headers: withCache }),
+      filename
+    )
+    return hardenShopCoverResponse(res, filename, hardened)
   } catch {
     return new Response("Not Found", { status: 404 })
   }
@@ -374,7 +472,7 @@ export async function createMyProduct(env: Env, request: Request): Promise<Respo
   // 上架要限流：用户商城是所有人共享的一块地方，不限流等于开放刷屏
   await guardRateLimit(env, `points-product-new:${user.id}`, 10, 3600, "上架太频繁，请稍后再试")
 
-  assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  assertContentLengthWithin(request, PRODUCT_SAVE_BODY_BYTES, "请求内容过大")
   const body = await request.json().catch(() => ({}))
   const product = await createUserProduct(
     env,
@@ -397,7 +495,7 @@ export async function updateMyProduct(
   id: string
 ): Promise<Response> {
   const user = await requireUser(env, request)
-  assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  assertContentLengthWithin(request, PRODUCT_SAVE_BODY_BYTES, "请求内容过大")
   const body = await request.json().catch(() => ({}))
   const product = await updateUserProduct(env, user.id, id, body)
   await audit(env, user.id, "points.shop.upload", `${user.username} 修改商品「${product.name}」（重新待审核）`)
@@ -1053,7 +1151,7 @@ export async function topUpDonations(env: Env, request: Request): Promise<Respon
 /** POST /api/admin/points/products —— 新建官方商品 */
 export async function createShopProduct(env: Env, request: Request): Promise<Response> {
   const admin = await requireAdminScope(env, request, "points.official")
-  assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  assertContentLengthWithin(request, PRODUCT_SAVE_BODY_BYTES, "请求内容过大")
   const body = await request.json().catch(() => ({}))
   const product = await createProduct(env, body)
   await audit(env, admin.id, "points.shop.product", `新建商品「${product.name}」（${product.price} 积分）`)
@@ -1067,7 +1165,7 @@ export async function updateShopProduct(
   id: string
 ): Promise<Response> {
   const admin = await requireAdminScope(env, request, "points.official")
-  assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  assertContentLengthWithin(request, PRODUCT_SAVE_BODY_BYTES, "请求内容过大")
   /**
    * ⚠️ 这里**有意**不拦用户商品（2026-10-13 澄清过，别再补那条守卫）。
    *

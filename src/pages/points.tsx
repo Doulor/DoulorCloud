@@ -63,6 +63,16 @@ import { PRODUCT_CATEGORY_LABELS, type ProductCategory } from "@/types"
 import { notifyPointsChanged } from "@/components/points-badge"
 import { fmtDateTime } from "@/lib/format"
 import { shopIcon } from "@/lib/shop-icons"
+import {
+  validateCoverInput,
+  isAllowedCoverFile,
+  coverFileTooLarge,
+  COVER_FILE_ACCEPT,
+} from "@/lib/shop-cover"
+import { getCachedPointsOverview, setCachedPointsOverview } from "@/lib/points-cache"
+import { useScrollRestore } from "@/hooks/use-scroll-restore"
+import { CoverPreview } from "@/components/cover-preview"
+import { FadeImage } from "@/components/fade-image"
 import { FEATURE_LABELS } from "@/types"
 import { useT, tStatic } from "@/i18n"
 import type {
@@ -345,6 +355,9 @@ function fmtMoney(n: number): string {
  *
  * 三种来源，优先级：**真实图片 > 用户/站长选的图标 > 默认图标**。
  * 图标单独占满整个封面区（80px 见方），是卡片上最显眼的一块。
+ *
+ * 图片走 FadeImage（2026-10-26 冷启动优化）：加载中给骨架占位、onLoad 渐入，
+ * 加载失败（链接失效 / Data URL 畸形）回退成图标封面而不是挂一张裂图。
  */
 function ProductCover({
   imageUrl,
@@ -357,20 +370,31 @@ function ProductCover({
 }) {
   if (imageUrl) {
     return (
-      <img
+      <FadeImage
         src={imageUrl}
         alt={name}
-        loading="lazy"
-        className="h-36 w-full shrink-0 rounded-t-xl object-cover"
+        className="h-36 w-full shrink-0 rounded-t-xl"
+        fallback={<IconCover icon={icon} />}
       />
     )
   }
+  return <IconCover icon={icon} />
+}
+
+/** 封面区的图标兜底（图片缺失 / 加载失败时显示） */
+function IconCover({ icon }: { icon?: string | null }) {
   const Icon = shopIcon(icon)
   return (
     <div className="flex h-36 w-full shrink-0 items-center justify-center overflow-hidden rounded-t-xl border-b bg-gradient-to-br from-primary/15 via-primary/5 to-transparent">
       <Icon className="h-20 w-20 text-primary" strokeWidth={1.25} aria-hidden />
     </div>
   )
+}
+
+/** 「我的商品」列表小缩略图的图标兜底 */
+function ThumbIconFallback({ icon }: { icon?: string | null }) {
+  const I = shopIcon(icon)
+  return <I className="h-4 w-4 text-primary" />
 }
 
 /** 商城分类筛选项（「全部」+ 各分类） */
@@ -725,8 +749,13 @@ const SHOP_PAGE_SIZE = 9
 export default function PointsPage() {
   const { t } = useT()
   const { user } = useAuth()
-  const [data, setData] = React.useState<PointsOverview | null>(null)
+  // 冷缓存（2026-10-26）：先渲染上次的数据（SPA 切页走内存层 = 零请求瞬开、
+  // 滚动位置不丢；刷新走 localStorage 层），挂载后 load() 照常重拉真数据，
+  // 到了无感替换。缓存只管首屏，不是让数据绕过服务端 —— 见 lib/points-cache.ts。
+  const [data, setData] = React.useState<PointsOverview | null>(getCachedPointsOverview)
   const [loading, setLoading] = React.useState(true)
+  // 切走再切回时回到原来的滚动位置（用户在商城翻到第 3 屏，回来不该回到顶部）
+  useScrollRestore("points")
 
   // 兑换弹窗
   const [redeemOpen, setRedeemOpen] = React.useState(false)
@@ -785,12 +814,13 @@ export default function PointsPage() {
   const [afterSaleBusy, setAfterSaleBusy] = React.useState(false)
   const handleCoverPick = async (file: File | undefined) => {
     if (!file) return
-    if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type)) {
+    // SVG（2026-10-26）：本地上传放开 image/svg+xml，体积单独收紧到 1 MB
+    if (!isAllowedCoverFile(file)) {
       toast.error(t("pt.err.coverFormat"))
       return
     }
-    if (file.size > 5 * 1024 * 1024) {
-      toast.error(t("pt.err.coverSize"))
+    if (coverFileTooLarge(file)) {
+      toast.error(file.type === "image/svg+xml" ? t("pt.err.coverSvgSize") : t("pt.err.coverSize"))
       return
     }
     setCoverUploading(true)
@@ -809,7 +839,10 @@ export default function PointsPage() {
   const load = React.useCallback(async () => {
     setLoading(true)
     try {
-      setData(await pointsApi.overview())
+      const fresh = await pointsApi.overview()
+      setData(fresh)
+      // 只有服务端确认的数据才进缓存：缓存里永远是「上一次服务端真相」
+      setCachedPointsOverview(fresh)
     } catch (err) {
       toast.error(errMsg(err, t("pt.err.load")))
     } finally {
@@ -1139,6 +1172,13 @@ export default function PointsPage() {
     // 固定内容商品：内容为空 = 买家花积分买到空气
     if (payload.delivery === "content" && !payload.deliveryParams?.content?.trim()) {
       toast.error(t("pt.err.contentRequired"))
+      return
+    }
+    // 封面前端预检（2026-10-26）：口径与服务端 sanitizeProductInput 一致，
+    // 坏值 / 超长在点保存的当场就报，不用白等一次网络往返
+    const coverVerdict = validateCoverInput(form.imageUrl)
+    if (coverVerdict !== "ok") {
+      toast.error(t(`pt.err.cover${coverVerdict === "invalid" ? "Invalid" : "TooLarge"}`))
       return
     }
     setFormBusy(true)
@@ -2356,12 +2396,14 @@ export default function PointsPage() {
                         <div className="flex min-w-0 items-center gap-3">
                           <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-md border bg-muted/40">
                             {p.imageUrl ? (
-                              <img src={p.imageUrl} alt="" className="h-full w-full object-cover" />
+                              <FadeImage
+                                src={p.imageUrl}
+                                alt=""
+                                className="h-full w-full rounded-md"
+                                fallback={<ThumbIconFallback icon={p.icon} />}
+                              />
                             ) : (
-                              (() => {
-                                const I = shopIcon(p.icon)
-                                return <I className="h-4 w-4 text-primary" />
-                              })()
+                              <ThumbIconFallback icon={p.icon} />
                             )}
                           </span>
                           <div className="min-w-0">
@@ -2463,7 +2505,7 @@ export default function PointsPage() {
                 <input
                   ref={coverInputRef}
                   type="file"
-                  accept="image/jpeg,image/png,image/webp,image/gif"
+                  accept={COVER_FILE_ACCEPT}
                   className="hidden"
                   onChange={(e) => void handleCoverPick(e.target.files?.[0])}
                 />
@@ -2474,6 +2516,7 @@ export default function PointsPage() {
                 value={form.imageUrl}
                 onChange={(e) => setForm((f) => ({ ...f, imageUrl: e.target.value }))}
               />
+              <CoverPreview value={form.imageUrl} />
               {form.imageUrl.trim() && (
                 <p className="text-xs text-muted-foreground">
                   {t("pt.form.coverHint")}

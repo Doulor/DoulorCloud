@@ -53,6 +53,14 @@ import { PRODUCT_CATEGORY_LABELS, type ProductCategory } from "@/types"
 import { fmtDateTime, fmtUid } from "@/lib/format"
 import { notifyAttentionChanged } from "@/lib/attention-events"
 import { shopIcon } from "@/lib/shop-icons"
+import {
+  validateCoverInput,
+  isAllowedCoverFile,
+  coverFileTooLarge,
+  COVER_FILE_ACCEPT,
+} from "@/lib/shop-cover"
+import { FadeImage } from "@/components/fade-image"
+import { CoverPreview } from "@/components/cover-preview"
 import { FEATURE_LABELS } from "@/types"
 import { useT, tStatic } from "@/i18n"
 import type {
@@ -504,15 +512,19 @@ function CodeManager({ productId }: { productId: string }) {
 function ProductThumb({ product }: { product: PointProduct }) {
   if (product.imageUrl) {
     return (
-      <img
+      <FadeImage
         src={product.imageUrl}
         alt=""
-        loading="lazy"
-        className="h-9 w-9 shrink-0 rounded-md border object-cover"
+        className="h-9 w-9 shrink-0 rounded-md border"
+        fallback={<ThumbFallback icon={product.icon} />}
       />
     )
   }
-  const Icon = shopIcon(product.icon)
+  return <ThumbFallback icon={product.icon} />
+}
+
+function ThumbFallback({ icon }: { icon?: string | null }) {
+  const Icon = shopIcon(icon)
   return (
     <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10">
       <Icon className="h-4 w-4 text-primary" />
@@ -605,12 +617,13 @@ function ShopTab() {
   }, [])
   const handleCoverPick = async (file: File | undefined) => {
     if (!file) return
-    if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type)) {
+    // 与用户端同一套口径（lib/shop-cover.ts）：SVG 放开、体积单独收紧
+    if (!isAllowedCoverFile(file)) {
       toast.error(t("pt.err.coverFormat"))
       return
     }
-    if (file.size > 5 * 1024 * 1024) {
-      toast.error(t("pt.err.coverSize"))
+    if (coverFileTooLarge(file)) {
+      toast.error(file.type === "image/svg+xml" ? t("pt.err.coverSvgSize") : t("pt.err.coverSize"))
       return
     }
     setCoverUploading(true)
@@ -860,6 +873,12 @@ function ShopTab() {
     }
     if (payload.delivery === "content" && !payload.deliveryParams?.content?.trim()) {
       toast.error(t("ap.err.contentRequired"))
+      return
+    }
+    // 封面前端预检：与服务端 sanitizeProductInput 同口径（Data URL 白名单 + 长度）
+    const coverVerdict = validateCoverInput(form.imageUrl)
+    if (coverVerdict !== "ok") {
+      toast.error(t(`pt.err.cover${coverVerdict === "invalid" ? "Invalid" : "TooLarge"}`))
       return
     }
     if (payload.billingMode === "rental") {
@@ -2143,7 +2162,7 @@ function ShopTab() {
                 <input
                   ref={coverInputRef}
                   type="file"
-                  accept="image/jpeg,image/png,image/webp,image/gif"
+                  accept={COVER_FILE_ACCEPT}
                   className="hidden"
                   onChange={(e) => void handleCoverPick(e.target.files?.[0])}
                 />
@@ -2154,6 +2173,7 @@ function ShopTab() {
                 value={form.imageUrl}
                 onChange={(e) => setForm((f) => ({ ...f, imageUrl: e.target.value }))}
               />
+              <CoverPreview value={form.imageUrl} />
               {form.imageUrl.trim() && (
                 <p className="text-xs text-muted-foreground">{t("pt.form.coverHint")}</p>
               )}
