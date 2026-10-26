@@ -35,6 +35,7 @@ import * as labHandlers from "./handlers/lab"
 import * as galleryCommentHandlers from "./handlers/gallery-comments"
 import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
+import * as raccoonDonateHandlers from "./handlers/raccoon-donate"
 import * as voucherHandlers from "./handlers/vouchers"
 import * as wb2apiHandlers from "./handlers/wb2api"
 import * as groupSyncHandlers from "./handlers/group-sync"
@@ -2461,6 +2462,47 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       donationHandlers.probeAiUpstream(env, request),
+  },
+
+  // ---- 小浣熊账号捐献（一键书签，2026-10-26）----
+  // 书签跑在 xiaohuanxiong.com 上下文里，跨站带不上本站 cookie，
+  // 所以用「一次性捐献码」做身份绑定；claim 是公开接口，靠码 + 限流兜底。
+  {
+    kind: "exact",
+    path: "/donations/raccoon/code",
+    method: "POST",
+    handle: () =>
+      raccoonDonateHandlers.issueRaccoonCode(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/donations/raccoon/claim",
+    method: "POST",
+    handle: () =>
+      raccoonDonateHandlers.claimRaccoonDonation(env, request),
+  },
+  {
+    // 书签若用 application/json 会先发预检；用 text/plain 则不会，但兜一手
+    kind: "exact",
+    path: "/donations/raccoon/claim",
+    method: "OPTIONS",
+    handle: () =>
+      raccoonDonateHandlers.raccoonDonatePreflight(),
+  },
+  {
+    kind: "exact",
+    path: "/donations/raccoon/mine",
+    method: "GET",
+    handle: () =>
+      raccoonDonateHandlers.listMyRaccoonDonations(env, request),
+  },
+
+  // 小浣熊：JSON 批量导入（2026-10-26）。登录态接口，单次最多 300 个账号。
+  {
+    kind: "exact",
+    path: "/donations/raccoon/import",
+    method: "POST",
+    handle: () => raccoonDonateHandlers.importRaccoonDonations(env, request),
   },
 
   {
@@ -5191,6 +5233,12 @@ function assertNotCrossSite(request: Request, url: URL): void {
    */
   const p = url.pathname.replace(/\/+$/, "")
   if (p === "/api/lab-store" || p.startsWith("/api/lab-store/")) return
+
+  // 小浣熊捐献领取同样豁免：书签脚本**必须**从小浣熊页面（跨站）提交，
+  // 且不依赖 cookie —— 身份靠「一次性捐献码」（10 分钟、一次性、按码限流，
+  // 见 handlers/raccoon-donate.ts）。这里没有可被 CSRF 借用的身份，豁免不增风险；
+  // 不豁免则浏览器侧直接 CORS 失败、功能完全不可用。⚠️ 只豁免这一条精确路径。
+  if (p === "/api/donations/raccoon/claim") return
 
   const sfs = (request.headers.get("Sec-Fetch-Site") || "").toLowerCase()
   if (sfs === "cross-site") {

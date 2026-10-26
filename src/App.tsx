@@ -39,6 +39,7 @@ const TempboxPage = page("/dashboard/tempbox", () => import("@/pages/tempbox"))
 const OAuthConsentPage = page("/oauth/consent", () => import("@/pages/oauth-consent"))
 const SettingsPage = page("/dashboard/settings", () => import("@/pages/settings"))
 const DonationPage = page("/dashboard/donations", () => import("@/pages/donations"))
+const DonateRaccoonPage = page("/dashboard/donations/raccoon", () => import("@/pages/donate-raccoon"))
 const FeedbackPage = page("/dashboard/feedback", () => import("@/pages/feedback"))
 const AchievementsPage = page("/dashboard/achievements", () => import("@/pages/achievements"))
 const LeaderboardPage = page("/dashboard/leaderboard", () => import("@/pages/leaderboard"))
@@ -256,6 +257,7 @@ function AppRoutes() {
         {/* 消息中心每个分类都有自己的 URL（深链）：/dashboard/messages/<system|site|social|event> */}
         <Route path="messages/:category" element={<MessagesPage />} />
         <Route path="donations" element={<DonationPage />} />
+            <Route path="donations/raccoon" element={<DonateRaccoonPage />} />
         <Route path="feedback" element={<FeedbackPage />} />
         <Route path="admin" element={<AdminPage />} />
       </Route>

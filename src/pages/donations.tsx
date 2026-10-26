@@ -1024,6 +1024,7 @@ export default function DonationPage() {
                 grantsPermission={grantPermissions?.wb2api !== false}
                 onDone={() => void load()}
               />
+              <RaccoonDonationCard onDone={() => void load()} />
               <Qoder2ApiDonationCard
                 block={data?.qoder2api}
                 aiUnlocked={perms?.ai ?? false}
@@ -2131,6 +2132,133 @@ function SenseNovaDonationCard({
  * 不需要人工审核。因此**必须让用户清楚自己在捐什么** —— 账号会进共享池被
  * 其他用户使用、会被自动化任务使用，且有封号风险，故做成强制勾选。
  */
+function RaccoonDonationCard({ onDone }: { onDone?: () => void }) {
+  /**
+   * 商汤小浣熊（Raccoon）账号捐献卡（2026-10-26）。
+   *
+   * 与 wb2api / Qoder 卡片同一套骨架：Card + CardHeader + CardContent + Button + Badge，
+   * 不用自定义样式，保证跟站内其他卡片的视觉、间距、暗色模式完全一致。
+   *
+   * 为什么是「跳转 + 一次性书签」而不是像 wb2api 那样内嵌登录：
+   * 小浣熊官方授权只接受 loopback 回调（http://localhost:端口），服务器侧拿不到 code，
+   * 任何公网域名都会报「授权链接无效」。所以卡内只做入口与记录展示。
+   */
+  const [rows, setRows] = React.useState<
+    { id: string; account_id?: string; account_name?: string; token_expires_at?: number; created_at?: number }[] | null
+  >(null)
+  const [loading, setLoading] = React.useState(true)
+  const [err, setErr] = React.useState("")
+
+  const load = React.useCallback(async () => {
+    setErr("")
+    try {
+      const r = await fetch("/api/donations/raccoon/mine", { credentials: "include" })
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const d = (await r.json()) as { donations?: typeof rows }
+      setRows(d.donations ?? [])
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "加载失败")
+      setRows([])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    void load()
+  }, [load])
+
+  const list = rows ?? []
+  const alive = list.filter((x) => !x.token_expires_at || x.token_expires_at > Date.now()).length
+
+  return (
+    <Card className="mb-6">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          商汤小浣熊（Raccoon）
+          <Badge variant="secondary">免审核</Badge>
+          {list.length > 0 ? <Badge variant="outline">已捐 {list.length}</Badge> : null}
+        </CardTitle>
+        <CardDescription>
+          把账号的闲置额度接入号池，立刻可用。凭据由号池自动续期；随时可在小浣熊网页端退出登录撤销。
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+          捐献只需三步：<b className="text-foreground">生成一次性书签</b>（10 分钟有效）→
+          在<b className="text-foreground">小浣熊网页版</b>点一下该收藏 →
+          自动入池。此处不需要填写任何密钥。
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button asChild>
+            <Link to="/dashboard/donations/raccoon">去捐献</Link>
+          </Button>
+          <Button
+            variant="outline"
+            disabled={loading}
+            onClick={() => {
+              setLoading(true)
+              void load()
+              onDone?.()
+            }}
+          >
+            {loading ? "刷新中…" : "刷新记录"}
+          </Button>
+          <Button variant="ghost" asChild>
+            <a href="https://xiaohuanxiong.com/work" target="_blank" rel="noreferrer">
+              打开小浣熊网页版
+            </a>
+          </Button>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            我的捐献记录
+            {list.length > 0 ? (
+              <span className="text-xs font-normal text-muted-foreground">
+                共 {list.length} 条 · 凭据有效 {alive} 个
+              </span>
+            ) : null}
+          </div>
+
+          {err ? (
+            <div className="text-sm text-destructive">加载失败：{err}（请确认已登录后重试）</div>
+          ) : loading ? (
+            <LoadingBlock />
+          ) : list.length === 0 ? (
+            <div className="text-sm text-muted-foreground">还没有捐献记录</div>
+          ) : (
+            <div className="divide-y rounded-md border">
+              {list.map((x) => {
+                const expiresMs = x.token_expires_at ?? 0
+                const expired = expiresMs > 0 && expiresMs <= Date.now()
+                return (
+                  <div key={x.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm">
+                    <Badge variant={expired ? "destructive" : "secondary"}>
+                      {expired ? "凭据已过期" : "使用中"}
+                    </Badge>
+                    <span className="font-medium">{x.account_name || "raccoon"}</span>
+                    <span className="text-xs text-muted-foreground">
+                      捐献于 {x.created_at ? fmtTime(new Date(x.created_at * 1000).toISOString()) : "—"}
+                    </span>
+                    <span className={`text-xs ${expired ? "text-destructive" : "text-muted-foreground"}`}>
+                      {expiresMs ? `凭据到期 ${fmtTime(new Date(expiresMs).toISOString())}` : "凭据到期时间未知"}
+                    </span>
+                    {x.account_id ? (
+                      <span className="text-xs text-muted-foreground/70">ID {x.account_id}</span>
+                    ) : null}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 function Wb2ApiDonationCard({
   block,
   aiUnlocked,

@@ -482,10 +482,54 @@ export async function adminSetUserPassword(
   await unwrap(res, "设置账号密码")
 }
 
-// 这里原本有一个 `adminSetUserGroup`（管理员把用户转到指定分组），2026-10-13 删除。
-// 它对应的那套「绑定后转进 0 倍率免费组，让绑定成为通往免费的唯一闸门」的方案已作废：
-// 仓库里从来没有过「免费组」这个设置项，全仓也没有任何调用点。
-// 留着它只会让下一个人以为绑定流程会改分组。
+// 2026-10-13 这里删过一个 `adminSetUserGroup`（当时的方案作废了）。
+// 2026-10-26 重新加回来，原因变了：小浣熊捐献要「捐了才能用 raccoon 渠道」，
+// 必须把捐献者加进中转站分组 —— 这是唯一可靠的授权入口。
+//
+// ⚠️ 实现要点（踩过的坑）：
+// 1. **不能直写数据库**。NewAPI 的用户对象缓存在 Redis（`user:<id>`），
+//    任何一次额度变更都会把缓存里的旧对象整条写回库，直写的分组合被覆盖掉
+//    （实测：授组成功 → 一次调用后 group 又变回原值）。
+// 2. `PUT /api/user/` 要**整对象**（GET 回来改 group 再 PUT 回去），
+//    只传 id+group 会返回 `Invalid parameters`。
+// 3. 该接口要求 step-up 安全验证，不带 `X-Security-Proof` 会返回
+//    `SECURITY_PROOF_INVALID`，所以走 `acquireSecurityProof` + `stepUpFetch`。
+//
+// 返回实际生效的新分组字符串（已包含时原样返回，调用方可判断是否变化）。
+export async function adminSetUserGroup(
+  env: Env,
+  userId: number,
+  group: string,
+  mode: "append" | "override" = "append"
+): Promise<string> {
+  const want = group.trim()
+  if (!want) throw new Error("分组名不能为空")
+
+  const curRes = await newApiFetch(env, `/api/user/${userId}`, { method: "GET" })
+  const curJson = (await curRes.json().catch(() => ({}))) as {
+    success?: boolean
+    data?: Record<string, unknown>
+  }
+  const user = curJson?.data
+  if (!user) throw new Error("读取中转站用户信息失败")
+
+  const before = String(user.group ?? "")
+  const parts = before.split("-").filter(Boolean)
+  if (parts.includes(want)) return before
+
+  const next = mode === "append" && before ? `${before}-${want}` : want
+  const body = { ...user, group: next }
+
+  // scope 必须与 `adminSetUserPassword` 那条 PUT /api/user 保持一致：
+  // 该接口的 proof scope 是 `admin.user.update`（context 只带 user_id），
+  // 不是 `admin.user.manage` —— 用错 scope 换来的 proof 会被判无效。
+  const proof = await acquireSecurityProof(env, "admin.user.update", { user_id: userId })
+  const res = proof
+    ? await stepUpFetch(env, "PUT", "/api/user", body, proof)
+    : await newApiFetch(env, "/api/user", { method: "PUT", body: JSON.stringify(body) })
+  await unwrap(res, "设置用户分组")
+  return next
+}
 
 // ---- 用户自助注册（公开路由）----
 

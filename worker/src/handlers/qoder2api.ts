@@ -179,7 +179,8 @@ function mapUpstreamError(err: unknown): never {
 export async function getStatus(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
   const { enabled, limit, realm, availableRealms: realms } = await channelConfig(env)
-  const configured = await isQoder2ApiConfigured(env)
+  // 同上：探活失败不抛错，降级成「未配置」
+  const configured = await isQoder2ApiConfigured(env).catch(() => false)
 
   const rows = await env.DB.prepare(
     "SELECT * FROM qoder2api_bindings WHERE user_id = ? ORDER BY created_at DESC"
@@ -1068,6 +1069,11 @@ async function shouldRevokeAi(env: Env, binding: BindingRow): Promise<boolean> {
 /** GET /api/admin/qoder2api/pool —— 上游池子概览（账号列表） */
 export async function adminGetPool(env: Env, request: Request): Promise<Response> {
   await requireAdminUser(env, request, "wb2api.config")
+  // 通道已下线（号池迁到 Agent2API）时别去撞死掉的网关，直接给可读原因。
+  const cfg = await channelConfig(env)
+  if (!cfg.enabled) {
+    return json({ available: false, reason: "该捐献通道已下线：号池已迁移到 Agent2API", accounts: [] })
+  }
   if (!(await isQoder2ApiConfigured(env))) {
     return json({ available: false, reason: "未配置面板密码", accounts: [] })
   }
@@ -1112,7 +1118,9 @@ export async function qoder2apiDonationBlock(
   feature: string
 }> {
   const { enabled, visible, limit, realm } = await channelConfig(env)
-  const configured = await isQoder2ApiConfigured(env)
+  // 探活失败按「未配置」处理：旧 qoder2api 网关已随号池下线，
+  // 探测抛错不能让整张捐献页（`/api/donations`）跟着 502。同 wb2api 的处理。
+  const configured = await isQoder2ApiConfigured(env).catch(() => false)
   const rows = await env.DB.prepare(
     "SELECT * FROM qoder2api_bindings WHERE user_id = ? ORDER BY created_at DESC"
   )

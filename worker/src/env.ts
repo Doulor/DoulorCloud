@@ -21,6 +21,12 @@ export interface Env {
   ADMIN_INVITE_CODES?: string // comma-separated seed invite codes
   SESSION_SECRET?: string // 用于派生 AES-GCM 密钥（加密第三方长期凭据）
   /**
+   * 小浣熊捐献入池网关的共享密钥（kr 上 /opt/donate-gateway/key.txt）。
+   * 捐献流程：书签交 token → 本站校验一次性码 → 带这个密钥调
+   * https://agent2api.doulor.cn/_donate/register 入池。缺省则捐献接口报未配置。
+   */
+  RACCOON_DONATE_KEY?: string
+  /**
    * OIDC 协议元数据的规范来源（如 `https://cloud.doulor.cn`），可留空。
    *
    * ⚠️ 2026-09-25 审计（L19）：不配置时 issuer / picture 会回落到

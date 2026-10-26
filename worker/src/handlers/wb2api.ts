@@ -1542,6 +1542,16 @@ export async function adminGetPool(
   request: Request
 ): Promise<Response> {
   await requireAdminUser(env, request)
+  // 通道关闭时给一句人话：2026-10-26 号池迁到 Agent2API 后旧的 workbuddy2api 面板已停机，
+  // 否则管理员打开「捐献通道」标签页只会看到「反代网关返回 502」，看不出是通道本身停了。
+  const { enabled } = await channelConfig(env)
+  if (!enabled) {
+    throw new ApiError(
+      410,
+      "该捐献通道已下线：号池已迁移到 Agent2API",
+      "WB2API_CHANNEL_RETIRED"
+    )
+  }
   if (!(await isWb2ApiConfigured(env))) {
     throw new ApiError(
       503,
@@ -1589,7 +1599,11 @@ export async function wb2apiDonationBlock(
 }> {
   const { enabled, limit } = await channelConfig(env)
   const visible = await getSettingBool(env, "wb2api_donation_visible")
-  const configured = await isWb2ApiConfigured(env)
+  // ⚠️ 2026-10-26：这里原本直接 `await isWb2ApiConfigured(env)`，而它会**打一次网关**探活。
+  // 号池迁移到 Agent2API 后旧网关（wb2api.doulor.cn）已下线，探测抛 502 ⇒ 整个
+  // `/api/donations` 跟着失败，捐献页直接显示「反代网关返回 502」，连小浣熊卡片都看不到。
+  // 侧车通道挂掉不该拖垮整页：探不通就按「未配置」渲染（卡片会自己走隐藏逻辑）。
+  const configured = await isWb2ApiConfigured(env).catch(() => false)
   const realm = (await getSetting(env, "wb2api_realm")).trim().toLowerCase() === "global"
     ? "global"
     : "cn"
