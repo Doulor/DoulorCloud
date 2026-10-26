@@ -8,6 +8,21 @@
  *   ① http(s) 绝对链接 —— 外链图床；
  *   ② /api/shop-img/... —— 「本地上传」返回的站内路径；
  *   ③ data:image/... —— 内联 Data URL（白名单类型 + 长度上限，见下）。
+ *
+ * ⚠️ 安全约束（改动封面渲染前必读）：
+ *
+ * ③ 的 Data URL **不经过** worker 的 hardenUserContentResponse（它内联在 JSON
+ * 里，浏览器直接从 `data:` 解析，没有响应头可以加），所以 `data:image/svg+xml`
+ * 的 XSS 面**完全依赖「只在 `<img src>` 里渲染」这一个前提** —— SVG 作为
+ * `<img>` 解码时脚本不执行、外部资源不加载。
+ *
+ * 因此：**禁止**在封面路径上新增 `<a href={imageUrl}>`、`<iframe src>`、
+ * `window.open(imageUrl)`、`<object data>` 之类的用法 —— 那会把 Data URL 变成
+ * 顶层可执行文档，等于同源 XSS。若确实需要「打开原图」的交互，只能对
+ * ② 的站内路径开（读取端已带 `CSP: sandbox`），对 ③ 一律不开。
+ *
+ * 同理，新增任何能渲染封面的组件都请用 `<img>`（或已封装好的 FadeImage），
+ * 不要把 imageUrl 交给会按文档解析的上下文。
  */
 
 /** 封面 Data URL 的类型白名单与 base64 结构判定（与服务端正则同口径） */
