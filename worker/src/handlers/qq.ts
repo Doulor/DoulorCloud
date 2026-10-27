@@ -95,13 +95,6 @@ async function accessToken(env: Env, cfg: QqConfigRow): Promise<string | null> {
       body: JSON.stringify({ appId: cfg.app_id, clientSecret: secret }),
     })
     const data = (await res.json()) as { access_token?: string; expires_in?: string | number }
-    try {
-      await env.DB.prepare("INSERT INTO qq_dbg (body, ts) VALUES (?, ?)")
-        .bind("TOKEN-RES " + String(data.access_token ? "ok" : "none") + " " + JSON.stringify(data).slice(0, 220), Math.floor(Date.now() / 1000))
-        .run()
-    } catch {
-      /* ignore */
-    }
     if (!data.access_token) return null
     const ttl = Number(data.expires_in ?? 7000)
     tokenCache = { token: data.access_token, exp: Date.now() + Math.max(60, ttl - 60) * 1000 }
@@ -338,13 +331,6 @@ async function bridgeGroupMessage(env: Env, d: QqPayload["d"]): Promise<void> {
       try {
         const hasRef = (ext || []).some((x) => String(x).includes("ref_msg_idx="))
         const hookRet = await handleGroupCommand(env, groupOpenid, memberOpenid, mine[1], (mine[2] || "").trim(), d.id, refBody, hasRef)
-          try {
-            await env.DB.prepare("INSERT INTO qq_dbg (body, ts) VALUES (?, ?)")
-              .bind("HOOK v=" + mine[1] + " msgId=" + (d.id ? "yes" : "NO") + " ret=" + hookRet, Math.floor(Date.now() / 1000))
-              .run()
-          } catch {
-            /* ignore */
-          }
           if (hookRet) return
       } catch (e) {
         const msg = String((e as Error)?.message ?? e).slice(0, 120)
@@ -1201,15 +1187,10 @@ async function sendGroupImage(
 }
 
 
-/** 诊断落库（排查完随 qq_dbg 一起删） */
-async function logDbgRow(env: Env, msg: string): Promise<void> {
-  try {
-    await env.DB.prepare("INSERT INTO qq_dbg (body, ts) VALUES (?, ?)")
-      .bind(msg.slice(0, 300), Math.floor(Date.now() / 1000))
-      .run()
-  } catch {
-    /* ignore */
-  }
+/** 调试出口（当前为空实现，保留签名便于临时排查） */
+/** 调试出口：保留签名但不再写库（排查结束后关闭，见 2026-10-27 清理） */
+async function logDbgRow(_env: Env, _msg: string): Promise<void> {
+  return
 }
 
 async function sendGroupText(
@@ -1232,11 +1213,6 @@ async function sendGroupText(
         ...(withMsgId && msgId ? { msg_id: msgId, msg_seq: nextSeq(msgId) } : {}),
       }),
     })
-    try {
-      const clone = res.clone(); const txt = await clone.text();
-      await env.DB.prepare('INSERT INTO qq_dbg (body, ts) VALUES (?, ?)')
-        .bind('SEND ' + res.status + ' ' + txt.slice(0, 240), Math.floor(Date.now()/1000)).run();
-    } catch { /* ignore */ }
     if (res.ok) return { ok: true }
     const t = await res.text().catch(() => "")
     return { ok: false, err: t.slice(0, 200) }
@@ -1342,50 +1318,3 @@ export async function setMyQqLabel(env: Env, request: Request): Promise<Response
   return json({ ok: true, label })
 }
 
-/** 自检：用 BOT_API_KEY 触发一次完整发送链路（排查用，可随时删）。 */
-export async function qqSelfTest(env: Env, request: Request): Promise<Response> {
-  const key = request.headers.get("x-bot-key") || ""
-  if (!env.BOT_API_KEY || key !== env.BOT_API_KEY) {
-    return new Response("forbidden", { status: 403 })
-  }
-  const body = (await request.json().catch(() => ({}))) as { group?: string; text?: string; msgId?: string; mode?: string }
-  const group = body.group || "C9F7819C50AFE975FE31AB3AF97CCF97"
-  const TEXT = body.text || "【自检】机器人链路测试"
-  if (body.mode === "probe") {
-    const { probeModels } = await import("./probe")
-    await probeModels(env)
-    const rows = await env.DB.prepare("SELECT name, ok, detail, ms FROM probe_latest WHERE name LIKE '模型%'").all<{ name: string; ok: number; detail: string; ms: number }>()
-    return new Response(JSON.stringify({ mode: "probe", rows: rows.results ?? [] }, null, 2),
-      { headers: { "content-type": "application/json" } })
-  }
-  if (body.mode === "img") {
-    const { statusHtml, shotHtml } = await import("./qq-card")
-    const png = await shotHtml(env, statusHtml([{ name: "自检", ok: true, detail: "HTTP 200", ms: 12 }], "自检"))
-    const bytes = png ? png.length : 0
-    const ok = png ? await sendGroupImage(env, group, png, undefined) : false
-    const rows0 = await env.DB.prepare("SELECT body FROM qq_dbg ORDER BY id DESC LIMIT 6").all<{ body: string }>()
-    return new Response(JSON.stringify({ mode: "img", bytes, ok, dbg: (rows0.results ?? []).map((r) => r.body) }, null, 2),
-      { headers: { "content-type": "application/json" } })
-  }
-  let cmdErr: string | null = null
-  if (body.mode === "cmd") {
-    try {
-      const raw = (body.text || "状态").trim()
-      const sp = raw.search(/\s/)
-      const verb = sp < 0 ? raw : raw.slice(0, sp)
-      const argText = sp < 0 ? "" : raw.slice(sp + 1).trim()
-      await handleGroupCommand(env, group, "selftest-openid", verb, argText, body.msgId, "", false)
-    } catch (e) {
-      cmdErr = String((e as Error)?.message ?? e).slice(0, 200)
-    }
-    const rows0 = await env.DB.prepare("SELECT body FROM qq_dbg ORDER BY id DESC LIMIT 8").all<{ body: string }>()
-    return new Response(JSON.stringify({ mode: "cmd", cmdErr, dbg: (rows0.results ?? []).map((r) => r.body) }, null, 2),
-      { headers: { "content-type": "application/json" } })
-  }
-  const ok = await sendGroupText(env, group, TEXT, body.msgId)
-  const rows = await env.DB.prepare("SELECT body FROM qq_dbg ORDER BY id DESC LIMIT 8").all<{ body: string }>()
-  return new Response(
-    JSON.stringify({ ok, dbg: (rows.results ?? []).map((r) => r.body) }, null, 2),
-    { headers: { "content-type": "application/json" } }
-  )
-}

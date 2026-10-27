@@ -36,9 +36,8 @@ import * as galleryCommentHandlers from "./handlers/gallery-comments"
 import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
 import * as raccoonDonateHandlers from "./handlers/raccoon-donate"
-import * as raccoonHealthHandlers from "./handlers/raccoon-health"
+import * as donationHealthHandlers from "./handlers/donation-health"
 import * as woolHandlers from "./handlers/wool"
-import { qqSelfTest } from "./handlers/qq"
 import { runProbes } from "./handlers/probe"
 import * as voucherHandlers from "./handlers/vouchers"
 import * as wb2apiHandlers from "./handlers/wb2api"
@@ -2496,12 +2495,6 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   // ---- 羊毛记录（QQ 机器人调用，x-bot-key 鉴权）----
   {
     kind: "exact",
-    path: "/qq/selftest",
-    method: "POST",
-    handle: () => qqSelfTest(env, request),
-  },
-  {
-    kind: "exact",
     path: "/wool/add",
     method: "POST",
     handle: () => woolHandlers.woolAdd(env, request),
@@ -2530,7 +2523,7 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     kind: "exact",
     path: "/donations/raccoon/health",
     method: "POST",
-    handle: () => raccoonHealthHandlers.triggerRaccoonHealth(env, request),
+    handle: () => donationHealthHandlers.triggerDonationHealth(env, request),
   },
   {
     kind: "exact",
@@ -5603,8 +5596,8 @@ export default {
       const t = new Date()
       if (t.getUTCMinutes() % 15 === 0) {
         ctx.waitUntil(
-          raccoonHealthHandlers
-            .checkRaccoonHealth(env)
+          donationHealthHandlers
+            .checkDonationHealth(env)
             .then((r) => {
               if (r.invalidated || r.recovered || r.skipped) {
                 console.log("raccoon health:", JSON.stringify(r))
