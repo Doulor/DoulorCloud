@@ -38,6 +38,7 @@ h1{font-size:26px;font-weight:800;letter-spacing:-.4px;
 .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
 .ok{background:#34d399;box-shadow:0 0 12px 1px rgba(52,211,153,.85)}
 .bad{background:#f87171;box-shadow:0 0 12px 1px rgba(248,113,113,.85)}
+.unk{background:#4b5563}
 .name{font-size:15px;font-weight:600}
 .detail{font-size:12.5px;color:#8b93a7;margin-left:auto}
 .ms{font-size:12.5px;color:#c7cede;font-family:ui-monospace,monospace;min-width:62px;text-align:right}
@@ -128,22 +129,24 @@ export async function shotHtml(env: Env, html: string): Promise<Uint8Array | nul
   }
 }
 
-export type ModelRow = { model: string; ok: boolean; ms?: number; detail?: string }
+export type ModelRow = { model: string; ok: boolean; ms?: number; detail?: string; unknown?: boolean }
 
 /** 模型状态长图：两列排布，一次能放几十个模型 */
 export function modelsHtml(rows: ModelRow[], time: string): string {
-  const okN = rows.filter((r) => r.ok).length
+  const known = rows.filter((r) => !r.unknown)
+  const okN = known.filter((r) => r.ok).length
   const body = rows
     .map((r) => {
-      const ms = r.ms ? `${r.ms}ms` : ""
-      return `<div class="mrow"><span class="dot ${r.ok ? "ok" : "bad"}"></span>
+      const ms = r.unknown ? "待探测" : r.ms ? `${r.ms}ms` : ""
+      const cls = r.unknown ? "unk" : r.ok ? "ok" : "bad"
+      return `<div class="mrow"><span class="dot ${cls}"></span>
         <span class="mname">${esc(r.model)}</span><span class="mms">${esc(ms)}</span></div>`
     })
     .join("")
   return `<!doctype html><meta charset="utf-8"><style>${CSS}</style>
 <div class="wrap"><div class="head">
   <div><h1>模型状态</h1><div class="sub" style="margin-top:6px">${esc(time)}</div></div>
-  <div class="sub">可用 ${okN} / ${rows.length}</div></div>
+  <div class="sub">可用 ${okN} / ${known.length}${known.length < rows.length ? `（待探 ${rows.length - known.length}）` : ""}</div></div>
   <div class="grid">${body}</div>
   <div class="foot"><span>仅列出已启用渠道的模型（不含 donation）</span><span>10 分钟刷新</span></div>
 </div>`

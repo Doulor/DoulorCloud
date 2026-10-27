@@ -5643,8 +5643,8 @@ export default {
       )
     }
 
-      // 模型可用性：每 10 分钟一轮（清单来自已启用渠道，排除 donation-*）
-      if (new Date().getUTCMinutes() % 10 === 0) {
+      // 模型可用性：每 5 分钟一轮（每轮 8 个，36 个模型约 25 分钟覆盖一遍）
+      if (new Date().getUTCMinutes() % 5 === 0) {
         ctx.waitUntil(
           probeModels(env).catch((err) =>
             console.warn("模型探活失败:", err instanceof Error ? err.message : err)

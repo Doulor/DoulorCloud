@@ -974,9 +974,12 @@ async function handleGroupCommand(
   }
 
   if (v === "模型" || v.toLowerCase() === "models") {
+    // 左连清单：没探过的也列出来（ok = null → 显示「待探测」），这样清单是完整的
     const rows = await env.DB.prepare(
-      "SELECT model, ok, detail, ms, checked_at FROM probe_model_latest ORDER BY ok ASC, model"
-    ).all<{ model: string; ok: number; detail: string; ms: number; checked_at: number }>()
+      `SELECT l.model AS model, p.ok AS ok, p.ms AS ms, p.checked_at AS checked_at
+         FROM probe_model_list l LEFT JOIN probe_model_latest p ON p.model = l.model
+        ORDER BY COALESCE(p.ok, -1) ASC, l.model`
+    ).all<{ model: string; ok: number | null; ms: number | null; checked_at: number | null }>()
     const items = rows.results ?? []
     if (!items.length) {
       await sendGroupText(env, groupOpenid, "【模型状态】还没有探测数据（10 分钟一轮，稍后再试）", msgId)
@@ -984,7 +987,12 @@ async function handleGroupCommand(
     }
     const last = Math.max(...items.map((r) => r.checked_at || 0))
     const ago = last ? Math.max(0, Math.floor(Date.now() / 1000) - last) : 0
-    const cardRows = items.map((r) => ({ model: r.model, ok: !!r.ok, ms: r.ms || 0, detail: r.detail || "" }))
+    const cardRows = items.map((r) => ({
+      model: r.model,
+      ok: r.ok === 1,
+      ms: r.ms || 0,
+      unknown: r.ok === null,
+    }))
     let sent = false
     try {
       const { modelsHtml, shotHtml } = await import("./qq-card")
@@ -994,7 +1002,9 @@ async function handleGroupCommand(
       console.warn("模型出图失败:", e instanceof Error ? e.message : e)
     }
     if (!sent) {
-      const body = items.map((r) => `${r.ok ? "🟢" : "🔴"} ${r.model}${r.ms ? ` · ${r.ms}ms` : ""}`).join("\n")
+      const body = items
+        .map((r) => `${r.ok === null ? "⚪" : r.ok ? "🟢" : "🔴"} ${r.model}${r.ms ? ` · ${r.ms}ms` : ""}`)
+        .join("\n")
       await sendGroupText(env, groupOpenid, `【模型状态】${ago}s 前\n${body.slice(0, 1400)}`, msgId)
     }
     return true
