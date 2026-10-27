@@ -1774,7 +1774,18 @@ export async function serveCommunityImage(
   try {
     const res = await getObject(env, key, undefined, bucketId)
     // 类型收口 + nosniff：公开读取接口不依赖写入侧校验（纵深防御）
-    return hardenUserContentResponse(res, filename)
+    //
+    // 缓存（2026-10-26）：文件名是上传时的 uuid、内容永不原地改写 → 可安全强缓存。
+    // 此前吃 harden 的 `private, no-store` 兜底，社区信息流里同一张图每个访客
+    // 每次进页都回源重拉。这里给 1 天（比商城封面的 1 年保守一档）：社区图
+    // 有审核撤下语义，长缓存会让「已撤内容」在部分访客浏览器里多留一阵；
+    // 1 天是「明显减少重复回源」与「撤图尽快失效」之间的折中。
+    const headers = new Headers(res.headers)
+    headers.set("Cache-Control", "public, max-age=86400")
+    return hardenUserContentResponse(
+      new Response(res.body, { status: res.status, headers }),
+      filename
+    )
   } catch {
     return new Response("Not Found", { status: 404 })
   }

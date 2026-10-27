@@ -355,6 +355,44 @@ const MAX_ICON_LEN = 40
  */
 const MAX_PRODUCTS_PER_USER = 20
 
+/**
+ * 封面图允许的 Data URL（issue：粘贴 data:image/... 被拒）。
+ *
+ * 封面在页面上**只经 `<img src>` 渲染**（卡片 / 详情 / 预览三处，见前端
+ * ProductCover 与对应弹窗），这个上下文里 SVG 内嵌脚本不会执行、资源也不加载，
+ * 所以 `image/svg+xml` 可以和位图一起放行；能变成可执行文档的类型
+ * （text/html、application/xhtml+xml 等）被白名单天然排除 —— 前缀不是
+ * `data:image/<白名单>` 一律进不来。
+ *
+ * 注意校验分两段而不是一条正则吞掉整体：Data URL 的 body 可能是 base64，
+ * 也可能是未编码原样粘贴的 SVG 文本（含空格、引号、尖括号），一条正则
+ * 要么误伤合法粘贴、要么松到形同虚设。这里只锚定 `data:image/<类型>` 前缀，
+ * base64 的再补一段 base64 字符集校验，其余按长度上限收口。
+ */
+const COVER_DATA_URL_PREFIX_RE =
+  /^data:image\/(png|jpeg|jpg|webp|gif|avif|svg\+xml)(;base64)?,/i
+/** base64 段的字符集（RFC 4648 标准 + URL 安全变体；允许首尾空白） */
+const COVER_DATA_URL_B64_RE = /^[A-Za-z0-9+/=_-]+\s*$/
+/**
+ * 封面 Data URL 的长度上限（字符数）。100 KB 足够放下压缩过的位图封面
+ * 和绝大多数单文件 SVG；再大的图该走「本地上传」（5 MB，存桶拿直链），
+ * 而不是把它塞进商品列表的 JSON 里拖累每个逛商城的人。
+ */
+export const MAX_COVER_DATA_URL_CHARS = 100_000
+
+/** 封面输入是否为「白名单类型 + base64 编码」的图片 Data URL */
+export function isDataImageUrl(value: string): boolean {
+  const m = COVER_DATA_URL_PREFIX_RE.exec(value)
+  if (!m) return false
+  // data:image/png;base64,xxxx —— base64 段必须是 base64 字符集，
+  // 防止有人借 base64 标签夹带任意文本（解析失败浏览器不渲染，无意义但也不该过）。
+  if (m[2]) {
+    const body = value.slice(m[0].length)
+    return body.length > 0 && COVER_DATA_URL_B64_RE.test(body.trim())
+  }
+  return value.length > m[0].length
+}
+
 /** 租期上限（天）：3650 天 ≈ 10 年。纯粹防手滑把 30 写成 30000000 */
 const MAX_RENTAL_DAYS = 3650
 
@@ -555,7 +593,8 @@ function nullableInt(raw: unknown, label: string, min: number, max: number): num
  *   · 排序强制 0（用户商品不给自定义排序，免得有人靠 sort 把自己的商品顶到最前）
  *   · 库存仍可自填（用户商品通常是有限件数的二手物，不限量也允许）
  */
-function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): ProductInput {
+/** 导出给回归测试：封面三种合法形态与坏值拒绝都直接断言这个纯函数 */
+export function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): ProductInput {
   const b = (raw ?? {}) as Record<string, unknown>
   const asUser = opts.asUser === true
 
@@ -566,17 +605,32 @@ function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = {}): Pr
 
   let imageUrl: string | null = null
   if (typeof b.imageUrl === "string" && b.imageUrl.trim()) {
-    const url = b.imageUrl.trim().slice(0, 500)
-    // 允许两种形式（2026-10-01「本地上传」上线后补的口子，当时漏改这里：
-    // 上传接口返回**相对路径**，被这里拒掉，用户保存商品时报「必须是 http(s) 链接」）：
+    const url = b.imageUrl.trim()
+    // 允许三种形式（2026-10-26 增补第③种，此前 data: 一律被拒，见 issue 反馈）：
     //   ① http(s) 绝对链接 —— 外链图床，一直以来的用法；
-    //   ② /api/shop-img/<userId>/<file> —— 本地上传接口返回的站内路径。
-    // 只放行这个前缀而不是任意相对路径：img src 塞站内路径虽多半无害，
+    //   ② /api/shop-img/<userId>/<file> —— 本地上传接口返回的站内路径
+    //     （2026-10-01 补的口子：上传返回相对路径，当时被这里拒掉）；
+    //   ③ data:image/... —— 内联 Data URL。只放白名单类型且限长
+    //     （MAX_COVER_DATA_URL_CHARS），经 <img> 渲染是安全的；这条分支
+    //     **不做** 500 字符截断 —— 截断等于把图剪坏，长度由上限把关。
+    // ①② 只放行这两种前缀而不是任意相对路径：img src 塞站内路径虽多半无害，
     // 但收口到「只可能是我们发的封面地址」最稳，也防误填前端路由。
-    if (!/^https?:\/\//i.test(url) && !url.startsWith("/api/shop-img/")) {
-      throw new ApiError(400, "封面图地址必须是 http(s) 链接，或使用「本地上传」", "INVALID_INPUT")
+    if (isDataImageUrl(url)) {
+      if (url.length > MAX_COVER_DATA_URL_CHARS) {
+        throw new ApiError(
+          400,
+          `封面 Data URL 过长（上限 ${Math.round(MAX_COVER_DATA_URL_CHARS / 1000)} KB），请压缩后再粘贴，或改用「本地上传」`,
+          "INVALID_INPUT"
+        )
+      }
+      imageUrl = url
+    } else {
+      const legacy = url.slice(0, 500)
+      if (!/^https?:\/\//i.test(legacy) && !legacy.startsWith("/api/shop-img/")) {
+        throw new ApiError(400, "封面图地址必须是 http(s) 链接，或使用「本地上传」", "INVALID_INPUT")
+      }
+      imageUrl = legacy
     }
-    imageUrl = url
   }
 
   // 分类：白名单收口，非法值回落 other

@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type { EventItem, EventVoteOption, EventVoteRewardRule } from "@/types"
 import { useT } from "@/i18n"
+import { FadeImage } from "@/components/fade-image"
 
 /**
  * 投票获奖规则 → i18n key。
@@ -269,11 +270,10 @@ function VoteOptionRow({
       <span className="relative flex items-start gap-3">
         {option.image && (
           // 选项配图：固定小方块 + object-cover，避免不同尺寸的图把行高撑得参差不齐
-          <img
+          <FadeImage
             src={option.image}
             alt=""
-            loading="lazy"
-            className="h-14 w-14 shrink-0 rounded-md border object-cover"
+            className="h-14 w-14 shrink-0 rounded-md border"
           />
         )}
         <span className="min-w-0 flex-1 space-y-0.5">

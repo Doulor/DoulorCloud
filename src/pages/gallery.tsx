@@ -52,6 +52,7 @@ import {
 } from "@/services/api"
 import { buildPreviewDoc, openPreviewInNewTab, PREVIEW_SHELL_ORIGIN } from "@/lib/lab-agent"
 import { cn } from "@/lib/utils"
+import { FadeImage } from "@/components/fade-image"
 
 /** 两个视图：大厅（别人的 + 自己的公开作品）与「我的造物集」（含未公开） */
 type View = "hall" | "mine"
@@ -434,12 +435,11 @@ function CoverMedia({
 }) {
   if (hasCover) {
     return (
-      <img
+      <FadeImage
         src={galleryCoverUrl(id, coverV)}
         alt=""
-        loading="lazy"
-        decoding="async"
-        className="h-full w-full object-cover"
+        className="h-full w-full"
+        imgClassName="object-cover"
       />
     )
   }
