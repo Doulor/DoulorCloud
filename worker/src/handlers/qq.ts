@@ -1015,10 +1015,66 @@ async function handleGroupCommand(
     // 群里和站内看到的是同一份内容（站长要求把冷清的模块用起来）。
     const raw = (arg || refBody || "").trim()
 
-    // 「羊毛 删除 <帖子ID>」—— 只能删自己发的（靠 qq_resource_posts 里记的 openid）
-    const delMatch = /^删除\s+([0-9a-fA-F-]{8,36})$/.exec(raw)
-    if (delMatch) {
-      const key = delMatch[1].toLowerCase()
+    // 删除：三种写法
+    //   「羊毛 删除」          → 列出你自己最近发的几条，回数字删
+    //   「羊毛 删除 2」        → 删列表里第 2 条（1 = 最近一条）
+    //   「羊毛 删除 <帖子ID>」  → 直接按 ID 删（兼容老用法）
+    // 必须是「删除」单独成词，否则内容以「删除」开头的帖子会被误当指令
+    if (/^删除(\s|$)/.test(raw)) {
+      const delArg = raw.replace(/^删除\s*/, "").trim()
+
+      const mine = await env.DB.prepare(
+        `SELECT p.id AS id, p.body AS body
+           FROM posts p JOIN qq_resource_posts m ON m.post_id = p.id
+          WHERE m.member_openid = ? AND p.category = 'resource' AND p.deleted_at IS NULL
+          ORDER BY p.created_at DESC LIMIT 5`
+      )
+        .bind(memberOpenid)
+        .all<{ id: string; body: string }>()
+      const mineItems = mine.results ?? []
+
+      const softDelete = async (id: string) => {
+        await env.DB.prepare("UPDATE posts SET deleted_at = ? WHERE id = ?")
+          .bind(new Date().toISOString(), id)
+          .run()
+      }
+
+      if (!delArg) {
+        if (!mineItems.length) {
+          await sendGroupText(env, groupOpenid, "你还没有发过资源共享帖。", msgId)
+          return true
+        }
+        const list = mineItems
+          .map((it, i) => `${i + 1}) ${it.body.replace(/\s+/g, " ").slice(0, 30)}`)
+          .join("\n")
+        await sendGroupText(
+          env,
+          groupOpenid,
+          `你最近发的资源共享：\n${list}\n\n回复「羊毛 删除 1」即可删掉第 1 条。`,
+          msgId
+        )
+        return true
+      }
+
+      if (/^\d+$/.test(delArg)) {
+        const idx = Number(delArg)
+        const target = mineItems[idx - 1]
+        if (!target) {
+          await sendGroupText(env, groupOpenid, `没有第 ${idx} 条，先发「羊毛 删除」看看列表。`, msgId)
+          return true
+        }
+        await softDelete(target.id)
+        await sendGroupText(
+          env,
+          groupOpenid,
+          `🗑️ 已删除：${target.body.replace(/\s+/g, " ").slice(0, 30)}`,
+          msgId
+        )
+        return true
+      }
+
+      // 兜底：按帖子 ID（前 8 位即可）
+      const key = delArg.toLowerCase()
       const row = await env.DB.prepare(
         `SELECT p.id AS id, m.member_openid AS member_openid
            FROM posts p JOIN qq_resource_posts m ON m.post_id = p.id
@@ -1028,16 +1084,14 @@ async function handleGroupCommand(
         .bind(key, key.length, key)
         .first<{ id: string; member_openid: string | null }>()
       if (!row) {
-        await sendGroupText(env, groupOpenid, `没找到这条资源共享帖（用帖子链接里的 ID，前 8 位就够）`, msgId)
+        await sendGroupText(env, groupOpenid, "没找到这条资源共享帖（可发「羊毛 删除」看列表）。", msgId)
         return true
       }
       if (row.member_openid !== memberOpenid) {
         await sendGroupText(env, groupOpenid, "只能删除自己发的资源共享帖。", msgId)
         return true
       }
-      await env.DB.prepare("UPDATE posts SET deleted_at = ? WHERE id = ?")
-        .bind(new Date().toISOString(), row.id)
-        .run()
+      await softDelete(row.id)
       await sendGroupText(env, groupOpenid, "🗑️ 已从「资源共享」删除。", msgId)
       return true
     }
