@@ -5,6 +5,9 @@
 import type { Env } from "../env"
 import { sendGroupText } from "./qq"
 
+/** 最近一次取渠道清单的失败原因（用于诊断） */
+let channelDebug = ""
+
 type Target = { name: string; url: string; expect: number[] }
 
 const TARGETS: Target[] = [
@@ -88,44 +91,134 @@ async function alertTransition(
 
 /** 模型可用性探针用的模型（挑免费/低价的，避免烧额度） */
 // 2026-10-27 实测可用（其余免费模型上游"分组无可用渠道"）：
-const PROBE_MODELS = ["donation-agents-a1-free", "MiMo-V2.6-Flash", "donation-gemini-3.7-flash"]
+/**
+ * 模型探活的候选清单：NewAPI「已启用渠道」里的模型，排除 donation-*。
+ *
+ * 为什么不直接用 /v1/models：那会把只挂在停用渠道上的模型也列出来，
+ * 那些永远探不通，纯噪音。站长要的是「现在真能用哪些」。
+ */
+export async function enabledChannelModels(env: Env): Promise<string[]> {
+  const base = (env.NEWAPI_BASE_URL || "https://api.doulor.cn").replace(/\/$/, "")
+  if (!env.NEWAPI_ADMIN_TOKEN) return []
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${env.NEWAPI_ADMIN_TOKEN}`,
+    "new-api-user": String(env.NEWAPI_ADMIN_USER_ID || "1"),
+  }
+  const out = new Set<string>()
+  channelDebug = ""
+  for (let page = 1; page <= 3; page++) {
+    let arr: { status?: number | string; models?: string }[] = []
+    try {
+      const r = await fetch(`${base}/api/channel/?p=${page}&page_size=100`, { headers })
+      if (!r.ok) {
+        channelDebug = `HTTP ${r.status} ${(await r.text().catch(() => "")).slice(0, 120)}`
+        break
+      }
+      const j = (await r.json()) as { data?: unknown }
+      const d = j.data
+      const items = Array.isArray(d) ? d : (d as { items?: unknown[] } | undefined)?.items
+      arr = (items ?? []) as typeof arr
+    } catch (e) {
+      channelDebug = String((e as Error)?.message ?? e).slice(0, 120)
+      break
+    }
+    if (!arr.length) {
+      channelDebug = channelDebug || "empty data"
+      break
+    }
+    for (const c of arr) {
+      if (Number(c.status) !== 1) continue
+      for (const m of String(c.models || "").split(",")) {
+        const name = m.trim()
+        if (!name || name.toLowerCase().startsWith("donation-")) continue
+        out.add(name)
+      }
+    }
+    if (arr.length < 100) break
+  }
+  return [...out].slice(0, 36)
+}
 
-async function probeModel(
+async function probeOneModel(
   env: Env,
   model: string
-): Promise<{ name: string; ok: boolean; detail: string; ms: number }> {
+): Promise<{ model: string; ok: boolean; detail: string; ms: number }> {
   const t0 = Date.now()
-  const name = `模型 ${model.replace(/^donation-/, "")}`
   try {
     const r = await fetch("https://api.doulor.cn/v1/chat/completions", {
       method: "POST",
-      headers: {
-        authorization: `Bearer ${env.PROBE_API_KEY}`,
-        "content-type": "application/json",
-      },
+      headers: { authorization: `Bearer ${env.PROBE_API_KEY}`, "content-type": "application/json" },
       body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
     })
     const ms = Date.now() - t0
-    if (r.ok) return { name, ok: true, detail: "可用", ms }
-    // 读一点响应体便于判断是限流还是模型下线
-    const t = (await r.text().catch(() => "")).slice(0, 60)
-    return { name, ok: false, detail: `HTTP ${r.status}${t ? " " + t.replace(/\s+/g, " ") : ""}`, ms }
+    if (r.ok) return { model, ok: true, detail: "可用", ms }
+    const t = (await r.text().catch(() => "")).slice(0, 50).replace(/\s+/g, " ")
+    return { model, ok: false, detail: `HTTP ${r.status}${t ? " " + t : ""}`, ms }
   } catch (e) {
-    return { name, ok: false, detail: String((e as Error)?.message ?? e).slice(0, 50), ms: Date.now() - t0 }
+    return { model, ok: false, detail: String((e as Error)?.message ?? e).slice(0, 40), ms: Date.now() - t0 }
   }
 }
 
-/** 模型探活：每 10 分钟一轮（由 cron 取模调用） */
+/** 模型探活：每 10 分钟一轮，结果写 probe_model_latest（与服务探针分表） */
 export async function probeModels(env: Env): Promise<void> {
   if (!env.PROBE_API_KEY) return
+
+  // 1) 候选清单：先问管理接口（已启用渠道），401/失败则回退 /v1/models 排除 donation-*
+  let models = await enabledChannelModels(env)
+  let source = "channel"
+  if (!models.length) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO probe_latest (name, ok, detail, ms, checked_at) VALUES ('dbg:chan', 0, ?, 0, ?)
+         ON CONFLICT(name) DO UPDATE SET detail=excluded.detail, checked_at=excluded.checked_at`
+      )
+        .bind(String(channelDebug || "unknown").slice(0, 200), Math.floor(Date.now() / 1000))
+        .run()
+    } catch {
+      /* ignore */
+    }
+    try {
+      const r = await fetch("https://api.doulor.cn/v1/models", {
+        headers: { authorization: `Bearer ${env.PROBE_API_KEY}` },
+      })
+      const j = (await r.json()) as { data?: { id?: string }[] }
+      models = (j.data ?? [])
+        .map((m) => String(m.id ?? ""))
+        .filter((id) => id && !id.toLowerCase().startsWith("donation-"))
+        .slice(0, 48)
+      source = "v1models"
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!models.length) return
+
   const now = Math.floor(Date.now() / 1000)
-  const results = await Promise.all(PROBE_MODELS.map((m) => probeModel(env, m)))
+  await env.DB.batch(
+    models.map((m) =>
+      env.DB.prepare(
+        `INSERT INTO probe_model_list (model, source, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(model) DO UPDATE SET source=excluded.source, updated_at=excluded.updated_at`
+      ).bind(m, source, now)
+    )
+  )
+
+  // 2) 每轮只探最久没探过的 8 个（一次探几十个会被后台执行预算掐断）
+  const due = await env.DB.prepare(
+    `SELECT l.model AS model FROM probe_model_list l
+     LEFT JOIN probe_model_latest p ON p.model = l.model
+     ORDER BY COALESCE(p.checked_at, 0) ASC LIMIT 8`
+  ).all<{ model: string }>()
+  const batch = (due.results ?? []).map((r) => r.model)
+  if (!batch.length) return
+
+  const results = await Promise.all(batch.map((m) => probeOneModel(env, m)))
   await env.DB.batch(
     results.map((r) =>
       env.DB.prepare(
-        `INSERT INTO probe_latest (name, ok, detail, ms, checked_at) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(name) DO UPDATE SET ok=excluded.ok, detail=excluded.detail, ms=excluded.ms, checked_at=excluded.checked_at`
-      ).bind(r.name, r.ok ? 1 : 0, r.detail, r.ms, now)
+        `INSERT INTO probe_model_latest (model, ok, detail, ms, checked_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(model) DO UPDATE SET ok=excluded.ok, detail=excluded.detail, ms=excluded.ms, checked_at=excluded.checked_at`
+      ).bind(r.model, r.ok ? 1 : 0, r.detail, r.ms, now)
     )
   )
 }

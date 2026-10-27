@@ -38,7 +38,7 @@ import * as donationHandlers from "./handlers/donations"
 import * as raccoonDonateHandlers from "./handlers/raccoon-donate"
 import * as donationHealthHandlers from "./handlers/donation-health"
 import * as woolHandlers from "./handlers/wool"
-import { runProbes } from "./handlers/probe"
+import { runProbes, probeModels } from "./handlers/probe"
 import * as voucherHandlers from "./handlers/vouchers"
 import * as wb2apiHandlers from "./handlers/wb2api"
 import * as groupSyncHandlers from "./handlers/group-sync"
@@ -5642,6 +5642,15 @@ export default {
           .catch((err) => console.warn("frp 健康探测失败:", err instanceof Error ? err.message : err))
       )
     }
+
+      // 模型可用性：每 10 分钟一轮（清单来自已启用渠道，排除 donation-*）
+      if (new Date().getUTCMinutes() % 10 === 0) {
+        ctx.waitUntil(
+          probeModels(env).catch((err) =>
+            console.warn("模型探活失败:", err instanceof Error ? err.message : err)
+          )
+        )
+      }
 
       // 站点/中转站探针：每 2 分钟写 probe_latest，/状态 指令只读缓存
       if (new Date().getUTCMinutes() % 2 === 0) {

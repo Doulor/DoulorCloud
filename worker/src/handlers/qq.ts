@@ -305,7 +305,7 @@ async function bridgeGroupMessage(env: Env, d: QqPayload["d"]): Promise<void> {
 
     // AT 事件的 content 带 <@!botid> 前缀（见上方注释），必须先剥掉再匹配指令
     const cleanText = text.replace(/^(\s*<@!?[^>]*>)+\s*/g, "").trim()
-    const mine = /^[\s/!！]*(状态|status|羊毛)\s*([\s\S]*)$/i.exec(cleanText)
+    const mine = /^[\s/!！]*(状态|status|模型|models|羊毛)\s*([\s\S]*)$/i.exec(cleanText)
     if (mine) {
       // 引用消息：QQ 事件只给 ref_msg_idx（被引用消息的索引），正文要靠本地 chat_messages 反查
       let refBody = ""
@@ -970,6 +970,33 @@ async function handleGroupCommand(
       await sendGroupText(env, groupOpenid, `【Doulor 状态】${ago}s 前\n${lines.join("\n")}`, msgId)
     }
     console.log("cmd:状态 用时", Date.now() - cmd_t0, "ms；数据龄", ago, "s")
+    return true
+  }
+
+  if (v === "模型" || v.toLowerCase() === "models") {
+    const rows = await env.DB.prepare(
+      "SELECT model, ok, detail, ms, checked_at FROM probe_model_latest ORDER BY ok ASC, model"
+    ).all<{ model: string; ok: number; detail: string; ms: number; checked_at: number }>()
+    const items = rows.results ?? []
+    if (!items.length) {
+      await sendGroupText(env, groupOpenid, "【模型状态】还没有探测数据（10 分钟一轮，稍后再试）", msgId)
+      return true
+    }
+    const last = Math.max(...items.map((r) => r.checked_at || 0))
+    const ago = last ? Math.max(0, Math.floor(Date.now() / 1000) - last) : 0
+    const cardRows = items.map((r) => ({ model: r.model, ok: !!r.ok, ms: r.ms || 0, detail: r.detail || "" }))
+    let sent = false
+    try {
+      const { modelsHtml, shotHtml } = await import("./qq-card")
+      const png = await shotHtml(env, modelsHtml(cardRows, `${ago}s 前 · 共 ${items.length} 个`))
+      if (png && png.length > 1000) sent = await sendGroupImage(env, groupOpenid, png, msgId)
+    } catch (e) {
+      console.warn("模型出图失败:", e instanceof Error ? e.message : e)
+    }
+    if (!sent) {
+      const body = items.map((r) => `${r.ok ? "🟢" : "🔴"} ${r.model}${r.ms ? ` · ${r.ms}ms` : ""}`).join("\n")
+      await sendGroupText(env, groupOpenid, `【模型状态】${ago}s 前\n${body.slice(0, 1400)}`, msgId)
+    }
     return true
   }
 

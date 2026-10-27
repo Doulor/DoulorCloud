@@ -49,6 +49,11 @@ h1{font-size:26px;font-weight:800;letter-spacing:-.4px;
 .p-green{background:rgba(52,211,153,.14);color:#6ee7b7;border:1px solid rgba(52,211,153,.35)}
 .p-red{background:rgba(248,113,113,.14);color:#fca5a5;border:1px solid rgba(248,113,113,.35)}
 .idx{font-family:ui-monospace,monospace;font-size:12px;color:#6b7280;min-width:26px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.mrow{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;
+  background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.075)}
+.mname{font-size:13.5px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mms{font-size:11.5px;color:#8b93a7;font-family:ui-monospace,monospace;margin-left:auto}
 .foot{margin-top:16px;font-size:11.5px;color:#6b7280;display:flex;justify-content:space-between}
 `;
 
@@ -121,4 +126,25 @@ export async function shotHtml(env: Env, html: string): Promise<Uint8Array | nul
   } catch {
     return null
   }
+}
+
+export type ModelRow = { model: string; ok: boolean; ms?: number; detail?: string }
+
+/** 模型状态长图：两列排布，一次能放几十个模型 */
+export function modelsHtml(rows: ModelRow[], time: string): string {
+  const okN = rows.filter((r) => r.ok).length
+  const body = rows
+    .map((r) => {
+      const ms = r.ms ? `${r.ms}ms` : ""
+      return `<div class="mrow"><span class="dot ${r.ok ? "ok" : "bad"}"></span>
+        <span class="mname">${esc(r.model)}</span><span class="mms">${esc(ms)}</span></div>`
+    })
+    .join("")
+  return `<!doctype html><meta charset="utf-8"><style>${CSS}</style>
+<div class="wrap"><div class="head">
+  <div><h1>模型状态</h1><div class="sub" style="margin-top:6px">${esc(time)}</div></div>
+  <div class="sub">可用 ${okN} / ${rows.length}</div></div>
+  <div class="grid">${body}</div>
+  <div class="foot"><span>仅列出已启用渠道的模型（不含 donation）</span><span>10 分钟刷新</span></div>
+</div>`
 }
