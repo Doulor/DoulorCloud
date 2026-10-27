@@ -1196,7 +1196,7 @@ async function logDbgRow(_env: Env, _msg: string): Promise<void> {
   return
 }
 
-async function sendGroupText(
+export async function sendGroupText(
   env: Env,
   groupOpenid: string,
   content: string,

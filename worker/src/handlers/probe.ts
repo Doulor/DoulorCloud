@@ -3,6 +3,7 @@
  * /状态 指令只读这张表 —— 绝不在 webhook 里做外部 fetch（会被 QQ 判定超时）。
  */
 import type { Env } from "../env"
+import { sendGroupText } from "./qq"
 
 type Target = { name: string; url: string; expect: number[] }
 
@@ -28,6 +29,9 @@ async function probeOne(t: Target): Promise<{ name: string; ok: boolean; detail:
 /** 每分钟跑一次；模型探活按 10 分钟节奏（promises 串行，别打爆上游）。 */
 export async function runProbes(env: Env): Promise<void> {
   const now = Math.floor(Date.now() / 1000)
+  // 先读旧状态，用于判断「挂了 / 恢复了」（模型行不参与告警，避免上游抖动刷屏）
+  const prevRows = await env.DB.prepare("SELECT name, ok FROM probe_latest").all<{ name: string; ok: number }>()
+  const prev = new Map((prevRows.results ?? []).map((r) => [r.name, r.ok === 1]))
   const results = await Promise.all(TARGETS.map((t) => probeOne(t)))
   const stmts = results.map((r) =>
     env.DB.prepare(
@@ -53,6 +57,33 @@ export async function runProbes(env: Env): Promise<void> {
     }
   }
   await env.DB.batch(stmts)
+  await alertTransition(env, prev, results)
+}
+
+/** 状态翻转才告警：正常→异常、异常→正常。首次探测（无旧记录）不告警。 */
+async function alertTransition(
+  env: Env,
+  prev: Map<string, boolean>,
+  results: { name: string; ok: boolean; detail: string; ms: number }[]
+): Promise<void> {
+  const lines: string[] = []
+  for (const r of results) {
+    const was = prev.get(r.name)
+    if (was === undefined) continue
+    if (was && !r.ok) lines.push(`🔴 ${r.name} 挂了 — ${r.detail} · ${r.ms}ms`)
+    else if (!was && r.ok) lines.push(`🟢 ${r.name} 恢复 — ${r.detail} · ${r.ms}ms`)
+  }
+  if (!lines.length) return
+  const ch = await env.DB.prepare(
+    "SELECT group_openid FROM qq_channels WHERE enabled = 1 ORDER BY created_at DESC LIMIT 1"
+  ).first<{ group_openid: string }>()
+  if (!ch?.group_openid) return
+  const text = `【Doulor 告警】\n${lines.join("\n")}\n\n${new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`
+  try {
+    await sendGroupText(env, ch.group_openid, text, undefined)
+  } catch (e) {
+    console.warn("告警推送失败:", e instanceof Error ? e.message : e)
+  }
 }
 
 /** 模型可用性探针用的模型（挑免费/低价的，避免烧额度） */
