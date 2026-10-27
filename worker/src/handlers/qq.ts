@@ -1106,7 +1106,10 @@ async function handleGroupCommand(
       )
       return true
     }
-    const userId = await ensureGroupGuestUser(env, groupOpenid)
+    // 绑定过 QQ 的群友，帖子挂到**他自己的站内账号**上（站长 2026-10-27 要求），
+    // 没绑定才落到「本群访客」，否则站内看到的永远是一个共用访客号。
+    const bound = await bindingByQq(env, memberOpenid, "group")
+    const userId = bound ? bound.user_id : await ensureGroupGuestUser(env, groupOpenid)
     const postId = crypto.randomUUID()
     const nowIso = new Date().toISOString()
     await env.DB.prepare(
@@ -1125,7 +1128,7 @@ async function handleGroupCommand(
     await sendGroupText(
       env,
       groupOpenid,
-      `✅ 已同步到「资源共享」：${brief}\nhttps://cloud.doulor.cn/community/${postId}`,
+      `✅ 已同步到「资源共享」：${brief}\n${bound ? "（已用你的账号发布）" : ""}https://cloud.doulor.cn/community/${postId}`,
       msgId
     )
     return true
@@ -1385,7 +1388,8 @@ async function handlePrivateCommand(env: Env, openid: string, text: string): Pro
     await sendC2c(env, openid, "用法：羊毛 <内容>\n会发布到网站「资源共享」板块。")
     return true
   }
-  const userId = await ensureGroupGuestUser(env, `c2c:${openid}`)
+  const boundP = await bindingByQq(env, openid, "c2c")
+  const userId = boundP ? boundP.user_id : await ensureGroupGuestUser(env, `c2c:${openid}`)
   const postId = crypto.randomUUID()
   await env.DB.prepare(
     "INSERT INTO posts (id, user_id, channel, body, images, category, created_at) VALUES (?, ?, 'general', ?, NULL, 'resource', ?)"
