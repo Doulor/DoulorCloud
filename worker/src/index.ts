@@ -36,8 +36,9 @@ import * as galleryCommentHandlers from "./handlers/gallery-comments"
 import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
 import * as raccoonDonateHandlers from "./handlers/raccoon-donate"
+import * as autoclawDonateHandlers from "./handlers/autoclaw-donate"
+import * as donationChannelsHandlers from "./handlers/donation-channels"
 import * as donationHealthHandlers from "./handlers/donation-health"
-import * as woolHandlers from "./handlers/wool"
 import { runProbes, probeModels } from "./handlers/probe"
 import * as voucherHandlers from "./handlers/vouchers"
 import * as wb2apiHandlers from "./handlers/wb2api"
@@ -2493,31 +2494,33 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       raccoonDonateHandlers.raccoonDonatePreflight(),
   },
   // ---- 羊毛记录（QQ 机器人调用，x-bot-key 鉴权）----
-  {
-    kind: "exact",
-    path: "/wool/add",
-    method: "POST",
-    handle: () => woolHandlers.woolAdd(env, request),
-  },
-  {
-    kind: "exact",
-    path: "/wool/list",
-    method: "POST",
-    handle: () => woolHandlers.woolList(env, request),
-  },
-  {
-    kind: "exact",
-    path: "/wool/done",
-    method: "POST",
-    handle: () => woolHandlers.woolDone(env, request),
-  },
-  {
-    kind: "exact",
-    path: "/wool/summary",
-    method: "POST",
-    handle: () => woolHandlers.woolSummary(env, request),
-  },
 
+  {
+    // 捐献渠道开通状态（捐献页顶部状态卡）
+    kind: "exact",
+    path: "/donations/channels",
+    method: "GET",
+    handle: () => donationChannelsHandlers.listDonationChannels(env, request),
+  },
+  {
+    // ---- AutoClaw（国内版）捐献：手机验证码两段式（无网页授权） ----
+    kind: "exact",
+    path: "/donations/autoclaw/sms/send",
+    method: "POST",
+    handle: () => autoclawDonateHandlers.autoclawSmsSend(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/donations/autoclaw/sms/verify",
+    method: "POST",
+    handle: () => autoclawDonateHandlers.autoclawSmsVerify(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/donations/autoclaw/mine",
+    method: "GET",
+    handle: () => autoclawDonateHandlers.listMyAutoclawDonations(env, request),
+  },
   {
     // 手动触发小浣熊捐献账号巡检（?key= 内网密钥 或 管理员）
     kind: "exact",

@@ -72,7 +72,6 @@ const esc = (s: unknown): string =>
     .replace(/"/g, "&quot;");
 
 export type ProbeRow = { name: string; ok: boolean; detail?: string; ms?: number };
-export type WoolRow = { seq: number; title: string; meta?: string; status: string };
 
 export function statusHtml(rows: ProbeRow[], time: string, footer = ""): string {
   const body = rows
@@ -93,24 +92,6 @@ export function statusHtml(rows: ProbeRow[], time: string, footer = ""): string 
 </div>`;
 }
 
-export function woolHtml(rows: WoolRow[], time: string, footer = ""): string {
-  const body = rows
-    .map((r) => {
-      const cls = r.status === "已领" ? "p-green" : r.status === "已过期" ? "p-red" : "p-blue";
-      return `<div class="row"><span class="idx">#${r.seq}</span>
-        <div class="body"><div class="title">${esc(r.title)}</div>
-        <div class="meta">${esc(r.meta || "")}</div></div>
-        <span class="pill ${cls}">${esc(r.status)}</span></div>`;
-    })
-    .join("");
-  return `<!doctype html><meta charset="utf-8"><style>${CSS}</style>
-<div class="wrap"><div class="head">
-  <div><h1>羊毛清单</h1><div class="sub" style="margin-top:6px">${esc(time)}</div></div>
-  <div class="sub">Doulor Cloud</div></div>
-  ${body}
-  <div class="foot"><span>${esc(footer)}</span><span>共 ${rows.length} 条</span></div>
-</div>`;
-}
 
 /**
  * 交给 Cloudflare 浏览器渲染出 PNG。失败返回 null（调用方降级成文本）。
@@ -158,40 +139,5 @@ export function modelsHtml(rows: ModelRow[], time: string): string {
 </div>`
 }
 
-export type WoolSummaryCounts = { open: number; done: number; dead: number }
 
 /** 羊毛汇总卡：三个数字 + 未领条目归纳 */
-export function woolSummaryHtml(
-  counts: WoolSummaryCounts,
-  openItems: WoolRow[],
-  time: string
-): string {
-  const total = counts.open + counts.done + counts.dead
-  const tiles = [
-    { n: counts.open, l: "未领" },
-    { n: counts.done, l: "已领" },
-    { n: counts.dead, l: "已过期" },
-  ]
-    .map((t) => `<div class="stat"><div class="statn">${t.n}</div><div class="statl">${t.l}</div></div>`)
-    .join("")
-
-  const body = openItems.length
-    ? openItems
-        .map(
-          (r) => `<div class="row"><span class="idx">#${r.seq}</span>
-        <div class="body"><div class="title">${esc(r.title)}</div>
-        <div class="meta">${esc(r.meta || "")}</div></div>
-        <span class="pill p-blue">未领</span></div>`
-        )
-        .join("")
-    : `<div class="row"><span class="name">暂无未领的羊毛</span></div>`
-
-  return `<!doctype html><meta charset="utf-8"><style>${CSS}</style>
-<div class="wrap"><div class="head">
-  <div><h1>羊毛汇总</h1><div class="sub" style="margin-top:6px">${esc(time)}</div></div>
-  <div class="sub">共 ${total} 条</div></div>
-  <div class="stats">${tiles}</div>
-  ${body}
-  <div class="foot"><span>用「羊毛 完成 N」标记已领</span><span>Doulor Cloud</span></div>
-</div>`
-}

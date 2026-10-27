@@ -9,6 +9,7 @@ import { hardenUserContentResponse } from "../content-type"
 import { guardRateLimit } from "../ratelimit"
 import { getLinkPreview } from "../link-preview"
 import { pushMessage, isMessageCategory } from "../user-messages"
+import { pushResourceToQq } from "./qq"
 import type { Env } from "../env"
 import { pushMessage as tgPush, pushToChannels } from "./telegram"
 
@@ -754,6 +755,13 @@ export async function createPost(env: Env, request: Request): Promise<Response> 
   await env.DB.prepare(
     "INSERT INTO posts (id, user_id, channel, body, images, category, created_at) VALUES (?, ?, 'general', ?, NULL, ?, ?)"
   ).bind(id, user.id, text, category, now).run()
+
+  // 「资源共享」分类额外同步到 QQ 群（2026-10-27 站长要求把该模块跟群打通）
+  if (category === "resource") {
+    try {
+      await pushResourceToQq(env, text, user.nickname || user.username || undefined)
+    } catch {}
+  }
 
   // TG 频道推送：社区新帖（频道默认**不订阅**这一类，站长可在管理页打开）。
   try {

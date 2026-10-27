@@ -925,12 +925,12 @@ export async function deleteMyQqBinding(env: Env, request: Request): Promise<Res
 async function handleGroupCommand(
   env: Env,
   groupOpenid: string,
-  memberOpenid: string,
+  _memberOpenid: string,
   verb: string,
   arg: string,
   msgId?: string,
   refBody = "",
-  hasRef = false
+  _hasRef = false
 ): Promise<boolean> {
   const cmd_t0 = Date.now()
   const v = verb.replace(/^[\s/!！]+/, "")
@@ -1011,239 +1011,33 @@ async function handleGroupCommand(
   }
 
   if (v === "羊毛") {
-    let effArg = arg
-    // 「引用某条消息 + @机器人 羊毛」→ 直接把被引用的正文当作要记的内容
-    // 引用了但查不到正文：明确提示，别静默变成清单
-    if (!effArg.trim() && !refBody) {
-      if (hasRef) {
-        await sendGroupText(
-          env,
-          groupOpenid,
-          "没找到被引用的消息正文（可能机器人当时不在线）。可以改用「羊毛 加 内容」手动记录。",
-          msgId
-        )
-        return true
-      }
-    }
-    if (!effArg.trim() && refBody) effArg = "加 " + refBody
-    else if (/^[^\s]+$/.test(effArg.trim()) && refBody && ["加", "add"].includes(effArg.trim().toLowerCase()))
-      effArg = "加 " + refBody
-
-    const m = /^(\S+)\s*([\s\S]*)$/.exec(effArg)
-    const sub = (m?.[1] ?? "列表").toLowerCase()
-    const rest = (m?.[2] ?? "").trim()
-    const now = Math.floor(Date.now() / 1000)
-
-    if (sub === "加" || sub === "add") {
-      if (!rest) {
-        await sendGroupText(env, groupOpenid, "用法：羊毛 加 <内容>（例如：羊毛 加 某云新人 10 元券）", msgId)
-        return true
-      }
-      const maxSeq =
-        (await env.DB.prepare(
-          "SELECT MAX(seq) AS m FROM wool_items WHERE scope = 'group' AND scope_id = ?"
-        ).bind(groupOpenid).first<{ m: number | null }>())?.m ?? 0
-      const seq = maxSeq + 1
-      const id = crypto.randomUUID()
-      const ts = now
-      await env.DB.prepare(
-        `INSERT INTO wool_items (id, seq, title, source, status, scope, scope_id, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'open', 'group', ?, ?, ?, ?)`
-      ).bind(id, seq, rest.slice(0, 120), "群友", groupOpenid, memberOpenid, ts, ts).run()
-      await sendGroupText(env, groupOpenid, `✅ 已记录 #${seq}：${rest.slice(0, 60)}`, msgId)
-      return true
-    }
-
-    if (sub === "完成" || sub === "done") {
-      const seq = Number(rest)
-      if (!Number.isFinite(seq)) {
-        await sendGroupText(env, groupOpenid, "用法：羊毛 完成 <编号>", msgId)
-        return true
-      }
-      const res = await env.DB.prepare(
-        "UPDATE wool_items SET status = 'done', updated_at = ? WHERE scope = 'group' AND scope_id = ? AND seq = ?"
-      ).bind(now, groupOpenid, seq).run()
-      const n = res.meta?.changes ?? 0
-      await sendGroupText(env, groupOpenid, n > 0 ? `✅ #${seq} 已标记为已领` : `没找到 #${seq}`, msgId)
-      return true
-    }
-
-    // 取消标记：把已领/失效改回「未领」（误标记时用）
-    if (sub === "取消" || sub === "undo" || sub === "恢复") {
-      const seq = Number(rest)
-      if (!Number.isFinite(seq)) {
-        await sendGroupText(env, groupOpenid, "用法：羊毛 取消 <编号>（把「已领」改回未领）", msgId)
-        return true
-      }
-      const res = await env.DB.prepare(
-        "UPDATE wool_items SET status = 'open', updated_at = ? WHERE scope = 'group' AND scope_id = ? AND seq = ?"
-      ).bind(now, groupOpenid, seq).run()
-      const n = res.meta?.changes ?? 0
-      await sendGroupText(env, groupOpenid, n > 0 ? `↩️ #${seq} 已改回未领` : `没找到 #${seq}`, msgId)
-      return true
-    }
-
-    // 删除记录：彻底移除（记错了用这个）
-    if (sub === "删除" || sub === "del" || sub === "remove") {
-      const seq = Number(rest)
-      if (!Number.isFinite(seq)) {
-        await sendGroupText(env, groupOpenid, "用法：羊毛 删除 <编号>", msgId)
-        return true
-      }
-      const res = await env.DB.prepare(
-        "DELETE FROM wool_items WHERE scope = 'group' AND scope_id = ? AND seq = ?"
-      ).bind(groupOpenid, seq).run()
-      const n = res.meta?.changes ?? 0
-      await sendGroupText(env, groupOpenid, n > 0 ? `🗑️ #${seq} 已删除` : `没找到 #${seq}`, msgId)
-      return true
-    }
-
-
-    // 输入编号（羊毛 5 / 羊毛 #5）→ 回该条的文字详情，方便复制给朋友
-    const numMatch = /^#?(\d+)$/.exec(sub)
-    if (numMatch) {
-      const seq = Number(numMatch[1])
-      const woolDetail = await env.DB.prepare(
-        `SELECT seq, title, source, link, value, note, status, expires_at, created_at
-           FROM wool_items WHERE scope = 'group' AND scope_id = ? AND seq = ?`
+    // 2026-10-27 改：不再单独记台账，而是直接发到网站「资源共享」板块，
+    // 群里和站内看到的是同一份内容（站长要求把冷清的模块用起来）。
+    const content = (arg || refBody || "").trim()
+    if (!content) {
+      await sendGroupText(
+        env,
+        groupOpenid,
+        "用法：@机器人 羊毛 <内容>\n会发布到网站「资源共享」板块；引用别人的消息再说「羊毛」也行，会取被引用的那条。",
+        msgId
       )
-        .bind(groupOpenid, seq)
-        .first<{
-          seq: number
-          title: string
-          source: string | null
-          link: string | null
-          value: string | null
-          note: string | null
-          status: string
-          expires_at: number | null
-          created_at: number
-        }>()
-      if (!woolDetail) {
-        await sendGroupText(env, groupOpenid, `没找到 #${seq}`, msgId)
-        return true
-      }
-      const fmt = (sec: number) =>
-        new Date(sec * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })
-      const st =
-        woolDetail.status === "done" ? "已领" : woolDetail.status === "dead" ? "已过期" : "未领"
-      const lines2 = [`#${woolDetail.seq} ${woolDetail.title}`, `状态：${st}`]
-      if (woolDetail.source) lines2.push(`来源：${woolDetail.source}`)
-      if (woolDetail.value) lines2.push(`价值：${woolDetail.value}`)
-      if (woolDetail.link) lines2.push(`链接：${woolDetail.link}`)
-      if (woolDetail.note) lines2.push(`备注：${woolDetail.note}`)
-      lines2.push(`记录：${fmt(woolDetail.created_at)}`)
-      if (woolDetail.expires_at) lines2.push(`过期：${fmt(woolDetail.expires_at)}`)
-      await sendGroupText(env, groupOpenid, lines2.join("\n"), msgId)
       return true
     }
-
-    // 汇总：统计 + 未领条目归纳（站内提过要「能归纳」的需求）
-    if (sub === "汇总" || sub === "summary") {
-      const counts = await env.DB.prepare(
-        `SELECT status, COUNT(*) AS n FROM wool_items WHERE scope = 'group' AND scope_id = ? GROUP BY status`
-      )
-        .bind(groupOpenid)
-        .all<{ status: string; n: number }>()
-      const c = { open: 0, done: 0, dead: 0 }
-      for (const r of counts.results ?? []) {
-        if (r.status === "open") c.open = r.n
-        else if (r.status === "done") c.done = r.n
-        else if (r.status === "dead") c.dead = r.n
-      }
-      const opens = await env.DB.prepare(
-        `SELECT seq, title, created_at, expires_at FROM wool_items
-          WHERE scope = 'group' AND scope_id = ? AND status = 'open'
-          ORDER BY seq DESC LIMIT 8`
-      )
-        .bind(groupOpenid)
-        .all<{ seq: number; title: string; created_at: number; expires_at: number | null }>()
-      const openRows = (opens.results ?? []).map((r) => ({
-        seq: r.seq,
-        title: r.title,
-        status: "未领",
-        meta: r.expires_at
-          ? `${Math.max(0, Math.ceil((r.expires_at - now) / 3600))} 小时后过期`
-          : new Date(r.created_at * 1000).toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai" }),
-      }))
-      let sent = false
-      try {
-        const { woolSummaryHtml, shotHtml } = await import("./qq-card")
-        const png = await shotHtml(env, woolSummaryHtml(c, openRows, `${c.open + c.done + c.dead} 条记录`))
-        if (png && png.length > 1000) sent = await sendGroupImage(env, groupOpenid, png, msgId)
-      } catch (e) {
-        console.warn("羊毛汇总出图失败:", e instanceof Error ? e.message : e)
-      }
-      if (!sent) {
-        const body = openRows.map((r) => `🎁 #${r.seq} ${r.title}`).join("\n") || "暂无未领的羊毛"
-        await sendGroupText(
-          env,
-          groupOpenid,
-          `【羊毛汇总】未领 ${c.open} / 已领 ${c.done} / 过期 ${c.dead}\n${body.slice(0, 1200)}`,
-          msgId
-        )
-      }
-      return true
-    }
-
-    // 默认：列表
+    const userId = await ensureGroupGuestUser(env, groupOpenid)
+    const postId = crypto.randomUUID()
+    const nowIso = new Date().toISOString()
     await env.DB.prepare(
-      `UPDATE wool_items SET status = 'dead', updated_at = ?
-        WHERE scope = 'group' AND scope_id = ? AND status = 'open' AND expires_at IS NOT NULL AND expires_at <= ?`
-    ).bind(now, groupOpenid, now).run()
-    // 分页：默认第 1 页，每页 10 条；「羊毛 2」「羊毛 列表 2」都指向第 2 页
-    const totalRow = await env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM wool_items WHERE scope = 'group' AND scope_id = ?"
+      "INSERT INTO posts (id, user_id, channel, body, images, category, created_at) VALUES (?, ?, 'general', ?, NULL, 'resource', ?)"
     )
-      .bind(groupOpenid)
-      .first<{ n: number }>()
-    const total = totalRow?.n ?? 0
-    const pages = Math.max(1, Math.ceil(total / 10))
-    const isListSub = sub === "列表" || sub === "list"
-    const woolPage = Math.min(Math.max(isListSub ? Number(rest) || 1 : 1, 1), pages)
-    const rows = await env.DB.prepare(
-      `SELECT seq, title, status FROM wool_items WHERE scope = 'group' AND scope_id = ?
-        ORDER BY seq DESC LIMIT 10 OFFSET ?`
+      .bind(postId, userId, content.slice(0, 1000), nowIso)
+      .run()
+    const brief = content.length > 40 ? content.slice(0, 40) + "…" : content
+    await sendGroupText(
+      env,
+      groupOpenid,
+      `✅ 已同步到「资源共享」：${brief}\nhttps://cloud.doulor.cn/community/${postId}`,
+      msgId
     )
-      .bind(groupOpenid, (woolPage - 1) * 10)
-      .all<{ seq: number; title: string; status: string }>()
-    const items = rows.results ?? []
-    if (!items.length) {
-      await sendGroupText(env, groupOpenid, "还没有羊毛记录。用「羊毛 加 <内容>」记一条。", msgId)
-      return true
-    }
-    const body = items
-      .map((it) => {
-        const tag = it.status === "done" ? "✅" : it.status === "dead" ? "⌛" : "🎁"
-        return `${tag} #${it.seq} ${it.title}`
-      })
-      .join("\n")
-    const open = items.filter((i) => i.status === "open").length
-    // 优先出图，失败降级文字
-      let woolImg = false
-      try {
-        const { woolHtml, shotHtml } = await import("./qq-card")
-        const rowsForCard = items.map((it) => ({
-          seq: it.seq,
-          title: it.title,
-          meta: it.status === "done" ? "已领" : it.status === "dead" ? "已过期" : "未领",
-          status: it.status === "done" ? "已领" : it.status === "dead" ? "已过期" : "可领",
-        }))
-        const pageNote =
-          pages > 1 ? `第 ${woolPage}/${pages} 页 · 共 ${total} 条` : `未领 ${open} 条 · 共 ${total} 条`
-        const png = await shotHtml(env, woolHtml(rowsForCard, pageNote, "发「羊毛 编号」看某条详情"))
-        if (png && png.length > 1000) woolImg = await sendGroupImage(env, groupOpenid, png, msgId)
-      } catch (e) {
-        console.warn("羊毛出图失败:", e instanceof Error ? e.message : e)
-      }
-      if (!woolImg) {
-        await sendGroupText(
-          env,
-          groupOpenid,
-          `【羊毛清单】第 ${woolPage}/${pages} 页 · 共 ${total} 条\n${body}`,
-          msgId
-        )
-      }
     return true
   }
 
@@ -1476,7 +1270,7 @@ async function handlePrivateCommand(env: Env, openid: string, text: string): Pro
   const m = /^[\s/!！]*(状态|status|羊毛)\s*([\s\S]*)$/i.exec(text.trim())
   if (!m) return false
   const verb = m[1]
-  const rest0 = (m[2] || "").trim()
+  const rest = (m[2] || "").trim()
 
   if (verb === "状态" || verb.toLowerCase() === "status") {
     const rows = await env.DB.prepare(
@@ -1487,85 +1281,46 @@ async function handlePrivateCommand(env: Env, openid: string, text: string): Pro
       await sendC2c(env, openid, "【Doulor 状态】暂无探测数据")
       return true
     }
-    const lines = items.map((r) => `${r.ok ? "🟢" : "🔴"} ${r.name} — ${(r.detail || "").slice(0, 24)}${r.ms ? ` · ${r.ms}ms` : ""}`)
+    const lines2 = items.map(
+      (r) => `${r.ok ? "🟢" : "🔴"} ${r.name} — ${(r.detail || "").slice(0, 24)}${r.ms ? ` · ${r.ms}ms` : ""}`
+    )
     const last = Math.max(...items.map((r) => r.checked_at || 0))
     const ago = last ? Math.max(0, Math.floor(Date.now() / 1000) - last) : 0
-    await sendC2c(env, openid, `【Doulor 状态】${ago}s 前\n${lines.join("\n")}`)
+    await sendC2c(env, openid, `【Doulor 状态】${ago}s 前\n${lines2.join("\n")}`)
     return true
   }
 
-  // ---- 羊毛（私聊）----
-  const now = Math.floor(Date.now() / 1000)
-  const seg = /^(\S+)\s*([\s\S]*)$/.exec(rest0)
-  const sub = (seg?.[1] ?? "列表").toLowerCase()
-  const rest = (seg?.[2] ?? "").trim()
-
-  const nextSeq = async (): Promise<number> => {
-    const r = await env.DB.prepare(
-      "SELECT MAX(seq) AS m FROM wool_items WHERE scope = 'private' AND scope_id = ?"
-    )
-      .bind(openid)
-      .first<{ m: number | null }>()
-    return (r?.m ?? 0) + 1
-  }
-
-  if (sub === "加" || sub === "add") {
-    if (!rest) {
-      await sendC2c(env, openid, "用法：羊毛 加 <内容>")
-      return true
-    }
-    const seq = await nextSeq()
-    await env.DB.prepare(
-      `INSERT INTO wool_items (id, seq, title, source, status, scope, scope_id, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, '私聊', 'open', 'private', ?, ?, ?, ?)`
-    )
-      .bind(crypto.randomUUID(), seq, rest.slice(0, 120), openid, openid, now, now)
-      .run()
-    await sendC2c(env, openid, `✅ 已记录 #${seq}：${rest.slice(0, 60)}`)
+  // 羊毛 → 网站「资源共享」
+  if (!rest) {
+    await sendC2c(env, openid, "用法：羊毛 <内容>\n会发布到网站「资源共享」板块。")
     return true
   }
-
-  if (sub === "完成" || sub === "done" || sub === "取消" || sub === "undo" || sub === "删除" || sub === "del") {
-    const seq = Number(rest)
-    if (!Number.isFinite(seq)) {
-      await sendC2c(env, openid, "用法：羊毛 完成/取消/删除 <编号>")
-      return true
-    }
-    if (sub === "删除" || sub === "del") {
-      const r = await env.DB.prepare(
-        "DELETE FROM wool_items WHERE scope = 'private' AND scope_id = ? AND seq = ?"
-      )
-        .bind(openid, seq)
-        .run()
-      await sendC2c(env, openid, (r.meta?.changes ?? 0) > 0 ? `🗑️ #${seq} 已删除` : `没找到 #${seq}`)
-      return true
-    }
-    const open = sub === "完成" || sub === "done" ? 0 : 1
-    const r = await env.DB.prepare(
-      "UPDATE wool_items SET status = ?, updated_at = ? WHERE scope = 'private' AND scope_id = ? AND seq = ?"
-    )
-      .bind(open ? "open" : "done", now, openid, seq)
-      .run()
-    const okN = (r.meta?.changes ?? 0) > 0
-    await sendC2c(env, openid, okN ? (open ? `↩️ #${seq} 已改回未领` : `✅ #${seq} 已标记为已领`) : `没找到 #${seq}`)
-    return true
-  }
-
-  // 默认：列表
-  const rows = await env.DB.prepare(
-    "SELECT seq, title, status FROM wool_items WHERE scope = 'private' AND scope_id = ? ORDER BY seq DESC LIMIT 10"
+  const userId = await ensureGroupGuestUser(env, `c2c:${openid}`)
+  const postId = crypto.randomUUID()
+  await env.DB.prepare(
+    "INSERT INTO posts (id, user_id, channel, body, images, category, created_at) VALUES (?, ?, 'general', ?, NULL, 'resource', ?)"
   )
-    .bind(openid)
-    .all<{ seq: number; title: string; status: string }>()
-  const items = rows.results ?? []
-  if (!items.length) {
-    await sendC2c(env, openid, "还没有羊毛记录。用「羊毛 加 <内容>」记一条。")
-    return true
-  }
-  const body = items
-    .map((it) => `${it.status === "done" ? "✅" : it.status === "dead" ? "⌛" : "🎁"} #${it.seq} ${it.title}`)
-    .join("\n")
-  await sendC2c(env, openid, `【羊毛清单】\n${body}`)
+    .bind(postId, userId, rest.slice(0, 1000), new Date().toISOString())
+    .run()
+  await sendC2c(
+    env,
+    openid,
+    `✅ 已同步到「资源共享」：${rest.slice(0, 40)}${rest.length > 40 ? "…" : ""}\nhttps://cloud.doulor.cn/community/${postId}`
+  )
   return true
 }
 
+/**
+ * 站点「资源共享」→ QQ 群（2026-10-27）。
+ *
+ * 站长要把冷清的资源共享模块跟 QQ 群打通：站内发的资源贴，群里也能看到。
+ * 发到最近的启用群；没配置群就静默跳过（不能因为推送失败影响发帖）。
+ */
+export async function pushResourceToQq(env: Env, body: string, author?: string): Promise<void> {
+  const ch = await env.DB.prepare(
+    "SELECT group_openid FROM qq_channels WHERE enabled = 1 ORDER BY created_at DESC LIMIT 1"
+  ).first<{ group_openid: string }>()
+  if (!ch?.group_openid) return
+  const brief = body.replace(/\s+/g, " ").slice(0, 200)
+  await sendGroupText(env, ch.group_openid, `【资源共享】${author ? `${author}：` : ""}${brief}`, undefined)
+}
