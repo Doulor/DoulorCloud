@@ -674,6 +674,9 @@ async function handleC2cMessage(env: Env, d: QqPayload["d"]): Promise<void> {
   const text = normalizeQqText(d.content ?? "")
   if (!text) return
 
+  // 状态 / 羊毛：谁都能用，不需要先绑定账号
+  if (await handlePrivateCommand(env, openid, text)) return
+
   // 只有绑定过才能用的命令
   const binding = await bindingByQq(env, openid)
   const cmd = (text.split(/\s+/)[0] ?? "").toLowerCase()
@@ -1316,5 +1319,109 @@ export async function setMyQqLabel(env: Env, request: Request): Promise<Response
     .run()
   if (!res.meta.changes) throw new ApiError(404, "还没绑定 QQ", "NOT_BOUND")
   return json({ ok: true, label })
+}
+
+/**
+ * 私聊指令（2026-10-27）：状态 / 羊毛。
+ *
+ * 和群里共用同一套表，但 scope='private'、scope_id=用户 openid，
+ * 所以私聊记的羊毛不会串到群里。私聊先只回文本（图片走 /v2/users 的
+ * 上传接口，还没接），够用且稳定。
+ */
+async function handlePrivateCommand(env: Env, openid: string, text: string): Promise<boolean> {
+  const m = /^[\s/!！]*(状态|status|羊毛)\s*([\s\S]*)$/i.exec(text.trim())
+  if (!m) return false
+  const verb = m[1]
+  const rest0 = (m[2] || "").trim()
+
+  if (verb === "状态" || verb.toLowerCase() === "status") {
+    const rows = await env.DB.prepare(
+      "SELECT name, ok, detail, ms, checked_at FROM probe_latest WHERE name NOT LIKE 'dbg:%' AND name NOT LIKE 'cmd:%' ORDER BY name"
+    ).all<{ name: string; ok: number; detail: string; ms: number; checked_at: number }>()
+    const items = rows.results ?? []
+    if (!items.length) {
+      await sendC2c(env, openid, "【Doulor 状态】暂无探测数据")
+      return true
+    }
+    const lines = items.map((r) => `${r.ok ? "🟢" : "🔴"} ${r.name} — ${r.detail || ""}${r.ms ? ` · ${r.ms}ms` : ""}`)
+    const last = Math.max(...items.map((r) => r.checked_at || 0))
+    const ago = last ? Math.max(0, Math.floor(Date.now() / 1000) - last) : 0
+    await sendC2c(env, openid, `【Doulor 状态】${ago}s 前\n${lines.join("\n")}`)
+    return true
+  }
+
+  // ---- 羊毛（私聊）----
+  const now = Math.floor(Date.now() / 1000)
+  const seg = /^(\S+)\s*([\s\S]*)$/.exec(rest0)
+  const sub = (seg?.[1] ?? "列表").toLowerCase()
+  const rest = (seg?.[2] ?? "").trim()
+
+  const nextSeq = async (): Promise<number> => {
+    const r = await env.DB.prepare(
+      "SELECT MAX(seq) AS m FROM wool_items WHERE scope = 'private' AND scope_id = ?"
+    )
+      .bind(openid)
+      .first<{ m: number | null }>()
+    return (r?.m ?? 0) + 1
+  }
+
+  if (sub === "加" || sub === "add") {
+    if (!rest) {
+      await sendC2c(env, openid, "用法：羊毛 加 <内容>")
+      return true
+    }
+    const seq = await nextSeq()
+    await env.DB.prepare(
+      `INSERT INTO wool_items (id, seq, title, source, status, scope, scope_id, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, '私聊', 'open', 'private', ?, ?, ?, ?)`
+    )
+      .bind(crypto.randomUUID(), seq, rest.slice(0, 120), openid, openid, now, now)
+      .run()
+    await sendC2c(env, openid, `✅ 已记录 #${seq}：${rest.slice(0, 60)}`)
+    return true
+  }
+
+  if (sub === "完成" || sub === "done" || sub === "取消" || sub === "undo" || sub === "删除" || sub === "del") {
+    const seq = Number(rest)
+    if (!Number.isFinite(seq)) {
+      await sendC2c(env, openid, "用法：羊毛 完成/取消/删除 <编号>")
+      return true
+    }
+    if (sub === "删除" || sub === "del") {
+      const r = await env.DB.prepare(
+        "DELETE FROM wool_items WHERE scope = 'private' AND scope_id = ? AND seq = ?"
+      )
+        .bind(openid, seq)
+        .run()
+      await sendC2c(env, openid, (r.meta?.changes ?? 0) > 0 ? `🗑️ #${seq} 已删除` : `没找到 #${seq}`)
+      return true
+    }
+    const open = sub === "完成" || sub === "done" ? 0 : 1
+    const r = await env.DB.prepare(
+      "UPDATE wool_items SET status = ?, updated_at = ? WHERE scope = 'private' AND scope_id = ? AND seq = ?"
+    )
+      .bind(open ? "open" : "done", now, openid, seq)
+      .run()
+    const okN = (r.meta?.changes ?? 0) > 0
+    await sendC2c(env, openid, okN ? (open ? `↩️ #${seq} 已改回未领` : `✅ #${seq} 已标记为已领`) : `没找到 #${seq}`)
+    return true
+  }
+
+  // 默认：列表
+  const rows = await env.DB.prepare(
+    "SELECT seq, title, status FROM wool_items WHERE scope = 'private' AND scope_id = ? ORDER BY seq DESC LIMIT 10"
+  )
+    .bind(openid)
+    .all<{ seq: number; title: string; status: string }>()
+  const items = rows.results ?? []
+  if (!items.length) {
+    await sendC2c(env, openid, "还没有羊毛记录。用「羊毛 加 <内容>」记一条。")
+    return true
+  }
+  const body = items
+    .map((it) => `${it.status === "done" ? "✅" : it.status === "dead" ? "⌛" : "🎁"} #${it.seq} ${it.title}`)
+    .join("\n")
+  await sendC2c(env, openid, `【羊毛清单】\n${body}`)
+  return true
 }
 
