@@ -1152,9 +1152,21 @@ async function handleGroupCommand(
       `UPDATE wool_items SET status = 'dead', updated_at = ?
         WHERE scope = 'group' AND scope_id = ? AND status = 'open' AND expires_at IS NOT NULL AND expires_at <= ?`
     ).bind(now, groupOpenid, now).run()
+    // 分页：默认第 1 页，每页 10 条；「羊毛 2」「羊毛 列表 2」都指向第 2 页
+    const totalRow = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM wool_items WHERE scope = 'group' AND scope_id = ?"
+    )
+      .bind(groupOpenid)
+      .first<{ n: number }>()
+    const total = totalRow?.n ?? 0
+    const pages = Math.max(1, Math.ceil(total / 10))
+    const woolPage = Math.min(Math.max(Number(rest) || 1, 1), pages)
     const rows = await env.DB.prepare(
-      "SELECT seq, title, status FROM wool_items WHERE scope = 'group' AND scope_id = ? ORDER BY seq DESC LIMIT 10"
-    ).bind(groupOpenid).all<{ seq: number; title: string; status: string }>()
+      `SELECT seq, title, status FROM wool_items WHERE scope = 'group' AND scope_id = ?
+        ORDER BY seq DESC LIMIT 10 OFFSET ?`
+    )
+      .bind(groupOpenid, (woolPage - 1) * 10)
+      .all<{ seq: number; title: string; status: string }>()
     const items = rows.results ?? []
     if (!items.length) {
       await sendGroupText(env, groupOpenid, "还没有羊毛记录。用「羊毛 加 <内容>」记一条。", msgId)
@@ -1177,13 +1189,20 @@ async function handleGroupCommand(
           meta: it.status === "done" ? "已领" : it.status === "dead" ? "已过期" : "未领",
           status: it.status === "done" ? "已领" : it.status === "dead" ? "已过期" : "可领",
         }))
-        const png = await shotHtml(env, woolHtml(rowsForCard, `未领 ${open} 条 · 共 ${items.length} 条`))
+        const pageNote =
+          pages > 1 ? `第 ${woolPage}/${pages} 页 · 共 ${total} 条` : `未领 ${open} 条 · 共 ${total} 条`
+        const png = await shotHtml(env, woolHtml(rowsForCard, pageNote))
         if (png && png.length > 1000) woolImg = await sendGroupImage(env, groupOpenid, png, msgId)
       } catch (e) {
         console.warn("羊毛出图失败:", e instanceof Error ? e.message : e)
       }
       if (!woolImg) {
-        await sendGroupText(env, groupOpenid, `【羊毛清单】未领 ${open} 条\n${body}`, msgId)
+        await sendGroupText(
+          env,
+          groupOpenid,
+          `【羊毛清单】第 ${woolPage}/${pages} 页 · 共 ${total} 条\n${body}`,
+          msgId
+        )
       }
     return true
   }
