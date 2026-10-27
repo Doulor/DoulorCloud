@@ -39,7 +39,7 @@ const FETCH_TIMEOUT_MS = 10_000
  * 上游 poll 成功那一次要顺带 `http_json(userinfo)` 补昵称，比其它短 RPC 慢一些；
  * 给足 30 秒，避免本站 abort 了但上游其实已经把账号入池（就会「账号在池里、本站没绑定」）。
  */
-const POLL_TIMEOUT_MS = 30_000
+export const POLL_TIMEOUT_MS = 30_000
 /** 响应体上限：返回的都是小 JSON（账号列表稍大），1 MiB 足够 */
 const MAX_FETCH_BYTES = 1024 * 1024
 const CONFIG_CACHE_MS = 5000
@@ -51,7 +51,7 @@ const CONFIG_CACHE_MS = 5000
 const SESSION_CACHE_MS = 10 * 60 * 1000
 
 /** 默认站点地址（设置项 qoder2api_base_url 未配置时用） */
-const DEFAULT_BASE_URL = "https://qoder2api.doulor.cn"
+const DEFAULT_BASE_URL = "https://agent2api.doulor.cn"
 
 /** 支持的区域：cn = 国内版（qoder.com.cn），intl = 国际版（qoder.com） */
 export const QODER2API_REALMS = ["cn", "intl"] as const
@@ -347,6 +347,32 @@ async function q2Fetch<T>(
 // 业务接口（路径与字段都已对线上实例核实）
 // ---------------------------------------------------------------------------
 
+/** 入池网关（2026-10-27 迁移：qoder 也并进了 Agent2API，站点不再直连老网关） */
+const DONATE_GATEWAY_Q = "https://agent2api.doulor.cn/_donate"
+
+async function donateFetchQ<T>(env: Env, path: string, init: RequestInit = {}): Promise<T> {
+  const key = env.RACCOON_DONATE_KEY
+  if (!key) throw new ApiError(503, "入池网关密钥未配置", "DONATE_KEY_MISSING")
+  const res = await fetch(`${DONATE_GATEWAY_Q}${path}`, {
+    ...init,
+    headers: {
+      "X-Donate-Key": key,
+      "content-type": "application/json",
+      ...(init.headers as Record<string, string> | undefined),
+    },
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    if (res.status === 401) throw new ApiError(502, "入池网关密钥不正确", "QODER2API_UNAUTHORIZED")
+    throw new ApiError(502, `入池网关 ${res.status}: ${text.slice(0, 160)}`, "QODER2API_UPSTREAM")
+  }
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new ApiError(502, `入池网关返回非 JSON: ${text.slice(0, 160)}`, "QODER2API_BAD_RESPONSE")
+  }
+}
+
 export interface Q2Account {
   uid: string
   nickname: string
@@ -359,7 +385,7 @@ export interface Q2Account {
 }
 
 /** 账号列表里我们只关心这几项，其余字段原样丢弃（别把上游全量结构泄到前端） */
-function toPublicAccount(raw: unknown): Q2Account | null {
+export function toPublicAccount(raw: unknown): Q2Account | null {
   if (!raw || typeof raw !== "object") return null
   const r = raw as Record<string, unknown>
   const uid = String(r.uid ?? "").trim()
@@ -384,17 +410,24 @@ export async function q2StartLogin(
   env: Env,
   realm: Qoder2ApiRealm
 ): Promise<{ state: string; authUrl: string; realm: Qoder2ApiRealm }> {
-  const data = await q2Fetch<{ state?: string; authUrl?: string; realm?: string }>(
-    env,
-    "/accounts/login/start",
-    { method: "POST", body: JSON.stringify({ platform: "CLI", realm }) }
-  )
-  const state = (data.state ?? "").trim()
-  const authUrl = (data.authUrl ?? "").trim()
-  if (!state || !authUrl) {
-    throw new ApiError(502, "Qoder2API 未返回授权链接", "QODER2API_BAD_RESPONSE")
+  const r = await donateFetchQ<{
+    ok?: boolean
+    authUrl?: string
+    state?: string
+    edition?: string
+  }>(env, "/login/start", {
+    method: "POST",
+    body: JSON.stringify({ provider: "qoder", realm }),
+  })
+  if (!r.authUrl || !r.state) {
+    throw new ApiError(502, "Qoder 授权链接获取失败", "QODER2API_BAD_RESPONSE")
   }
-  return { state, authUrl, realm: normalizeRealm(data.realm ?? realm) }
+  const ed = String(r.edition ?? realm).toLowerCase()
+  return {
+    state: r.state,
+    authUrl: r.authUrl,
+    realm: normalizeRealm(ed.includes("global") || ed.includes("intl") ? "intl" : "cn"),
+  }
 }
 
 export interface Q2PollResult {
@@ -412,30 +445,32 @@ export interface Q2PollResult {
  *   - 其余      ⇒ failed（会话没了/上游报错），文案区分「过期」与「失效」
  */
 export async function q2PollLogin(env: Env, state: string): Promise<Q2PollResult> {
-  const data = await q2Fetch<{ status?: string; message?: string; account?: unknown }>(
-    env,
-    `/accounts/login/poll?state=${encodeURIComponent(state)}`,
-    { method: "GET" },
-    POLL_TIMEOUT_MS
-  )
-  const raw = (data.status ?? "").trim().toLowerCase()
-  if (raw === "ok") {
-    const account = toPublicAccount(data.account)
-    if (!account) {
-      throw new ApiError(502, "Qoder2API 登录成功但未返回账号信息", "QODER2API_BAD_RESPONSE")
-    }
-    return { status: "done", message: "", account }
+  const r = await donateFetchQ<{
+    ok?: boolean
+    status?: string
+    message?: string
+    account?: Record<string, unknown> | null
+  }>(env, "/login/wait", { method: "POST", body: JSON.stringify({ state }) })
+
+  if (r.status === "failed") {
+    return { status: "failed", message: r.message ?? "授权失败或已过期" }
   }
-  if (raw === "pending") {
-    return { status: "pending", message: data.message || "等待浏览器完成 Qoder 设备授权" }
+  if (r.status !== "done" || !r.account) {
+    return { status: "pending", message: "" }
   }
-  if (raw === "expired") {
-    return { status: "failed", message: "授权窗口已过期（10 分钟），请重新发起" }
+  const a = r.account as Record<string, unknown>
+  const rawId = String(a.id ?? "")
+  const uid = String(a.userId ?? "").trim() || rawId.replace(/^qoder-(cn|intl)-/, "")
+  return {
+    status: "done",
+    message: "",
+    account: {
+      uid,
+      nickname: String(a.displayName ?? a.name ?? uid).slice(0, 60),
+      realm: rawId.includes("intl") ? "intl" : "cn",
+      enabled: a.enabled !== false,
+    },
   }
-  if (raw === "unknown") {
-    return { status: "failed", message: "授权会话已失效，请重新发起" }
-  }
-  return { status: "failed", message: data.message || "上游登录失败，请重新发起" }
 }
 
 /** 取消一次未完成的登录（拿不到授权链接、用户中途放弃时收尾） */
@@ -462,47 +497,87 @@ export async function q2ImportAccounts(
   rows: unknown[],
   realm?: string | null
 ): Promise<{ imported?: number; skipped?: number; errors?: string[] }> {
-  const body: Record<string, unknown> = { data: rows }
-  if (realm) body.realm = realm
-  return await q2Fetch(env, "/accounts/import", {
-    method: "POST",
-    body: JSON.stringify(body),
-  })
+  /**
+   * 2026-10-27 迁移：改投 Agent2API 入池网关。
+   *
+   * 入参是用户上传的文件里解析出来的原始行，字段形态不保证统一 —— 这里把常见的
+   * `uid / accessToken / refreshToken / nickname` 几种写法都兜一遍；缺 uid 或缺
+   * token 的行直接丢弃（网关侧还会再验一次凭证，见 verify_added_account）。
+   */
+  type Entry = { name: string; accessToken: string; refreshToken?: string; uid: string; realm?: string }
+  const accounts: Entry[] = []
+  let dropped = 0
+  for (const raw of rows) {
+    const r = (raw ?? {}) as Record<string, unknown>
+    const acc = (r.account ?? r) as Record<string, unknown>
+    const auth = (r.auth ?? {}) as Record<string, unknown>
+    const uid = String(r.uid ?? acc.uid ?? r.account_id ?? r.accountId ?? "").trim()
+    const accessToken = String(
+      auth.accessToken ?? r.accessToken ?? r.access_token ?? r.token ?? ""
+    ).trim()
+    if (!uid || !accessToken) {
+      dropped++
+      continue
+    }
+    const refreshToken = String(auth.refreshToken ?? r.refreshToken ?? r.refresh_token ?? "").trim()
+    const rowRealm = String(r.realm ?? auth.realm ?? realm ?? "").toLowerCase()
+    accounts.push({
+      uid,
+      name: String(acc.nickname ?? r.nickname ?? uid).slice(0, 60),
+      accessToken,
+      refreshToken: refreshToken || undefined,
+      realm: rowRealm || undefined,
+    })
+  }
+
+  if (accounts.length === 0) {
+    return { imported: 0, skipped: dropped, errors: dropped > 0 ? ["没有一个账号含 uid + accessToken"] : [] }
+  }
+
+  const r = await donateFetchQ<{
+    ok?: boolean
+    added?: number
+    duplicate?: number
+    failed?: number
+    errors?: { name?: string; detail?: string }[]
+  }>(env, "/import", { method: "POST", body: JSON.stringify({ provider: "qoder", accounts }) })
+
+  return {
+    imported: Number(r.added ?? 0),
+    skipped: Number(r.duplicate ?? 0) + dropped,
+    errors: (r.errors ?? []).map((e) => `${e.name ?? "账号"}：${e.detail ?? "导入失败"}`),
+  }
 }
 
 export async function q2ListAccounts(env: Env): Promise<Q2Account[]> {
+  const r = await donateFetchQ<{
+    ok?: boolean
+    accounts?: { id?: string; userId?: string; name?: string; provider?: string; enabled?: boolean }[]
+  }>(env, "/status", { method: "GET" })
+
   const out: Q2Account[] = []
-  for (const realm of QODER2API_REALMS) {
-    try {
-      const data = await q2Fetch<{ accounts?: unknown[] }>(
-        env,
-        `/accounts?realm=${realm}`,
-        { method: "GET" }
-      )
-      for (const raw of data.accounts ?? []) {
-        const acc = toPublicAccount(raw)
-        if (acc) out.push(acc)
-      }
-    } catch (err) {
-      // 单个区域失败不影响另一个（比如某区面板配置缺失）
-      if (realm === QODER2API_REALMS[0]) throw err
-      console.error(`列出 Qoder2API ${realm} 区账号失败:`, err)
-    }
+  for (const a of r.accounts ?? []) {
+    if (String(a.provider ?? "") !== "qoder") continue
+    const id = String(a.id ?? "")
+    const uid = String(a.userId ?? "").trim() || id.replace(/^qoder-(cn|intl)-/, "")
+    if (!uid) continue
+    out.push({
+      uid,
+      nickname: String(a.name ?? "").trim() || uid.slice(0, 8),
+      realm: id.includes("intl") ? "intl" : "cn",
+      enabled: a.enabled !== false,
+    })
   }
   return out
 }
 
 /** 解绑：从上游池子删掉账号。账号已不在池里视为成功（幂等）。 */
 export async function q2DeleteAccount(env: Env, uid: string): Promise<void> {
-  try {
-    await q2Fetch<{ deleted?: boolean }>(env, "/accounts/delete", {
-      method: "POST",
-      body: JSON.stringify({ uid }),
-    })
-  } catch (err) {
-    if (err instanceof Q2UpstreamError && err.status === 404) return
-    throw err
-  }
+  // 网关按 uid 反查面板 id；池里已经没有算成功（幂等）
+  await donateFetchQ(env, "/remove", {
+    method: "POST",
+    body: JSON.stringify({ uid, provider: "qoder" }),
+  })
 }
 
 // ---------------------------------------------------------------------------

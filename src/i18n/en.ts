@@ -1808,7 +1808,7 @@ export const en: Record<MessageKey, string> = {
   "ai.accountLine": "Account {username} · {email}",
   "ai.free.title": "Free plan",
   "ai.free.mustClaim": "Claim the free plan first — it's required to create API keys and call models.",
-  "ai.free.rule": "¥50/day with no donations; ¥400/day per WorkBuddy account (wb accounts only; Qoder not counted)",
+  "ai.free.rule": "无捐献每天 ¥50；每捐献 1 个 WorkBuddy 账号 = 每天 ¥400，1 个 Qoder 或 小浣熊 账号 = 每天 ¥200",
   "ai.free.rulesClaimed":
     "How it works: the free plan resets your quota every day (default quota shown on the card, billed per call). Unused quota doesn't carry over — it's restored to the plan amount the next day. See the expiry above.",
   "ai.free.rulesUnclaimed":
@@ -4651,8 +4651,8 @@ export const en: Record<MessageKey, string> = {
   "don.proxy.urls": "Subscription links (one per line)",
   "don.proxy.hint": "Only http/https subscription URLs (not single-node links); supported protocols are vless / vmess / trojan / ss / ssr / anytls / hysteria2 / tuic. We can't test whether the nodes are reachable (Cloudflare egress can't probe node ports), but link validity and node-list parsing are verified automatically.",
   "don.proxy.remarkPh": "Channel source, stability notes, etc.",
-  "don.proxyAccount.title": "Relay account",
-  "don.provider.title": "Relay account ({provider})",
+  "don.proxyAccount.title": "WorkBuddy (wb)",
+  "don.provider.title": "{provider}",
 
   "don.sn.badge": "AI gateway unlocked",
   "don.sn.desc": "Submit your Sensenova (日日新) API key and we really call the Sensenova API once to verify it. Passing unlocks AI gateway access immediately — no admin review needed.",

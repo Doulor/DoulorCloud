@@ -31,6 +31,10 @@ import { toast } from "sonner"
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { RelayProviderCard } from "@/components/relay-provider-card"
+import { OAuthAppsCard } from "@/components/oauth-apps-card"
+import { OAuthEndpointsCard } from "@/components/oauth-endpoints"
+import { AutoclawDonationCard } from "@/components/autoclaw-donation-card"
+import { ChannelStatusCard } from "@/components/channel-status-card"
 import { LoadingBlock } from "@/components/loading-block"
 import { NavItem, NavGroup } from "@/components/sub-nav"
 import { SlidingPill } from "@/components/motion/sliding-pill"
@@ -1012,10 +1016,20 @@ export default function DonationPage() {
             </TabsContent>
 
             <TabsContent value="relay">
+              {/* 三张卡片之间要有间距：外层统一给 space-y-6（各卡片自身没有 mb） */}
+              <div className="space-y-6">
+              {/* 2026-10-27 站长要求：把设置页那张「我的 OAuth 应用」卡片也放一份到这里，
+                  入驻中转站的朋友当场就能建 OIDC 应用，不用再跳设置页 */}
+              <OAuthAppsCard />
+              {/* 接入信息（三条 Endpoint）：填到对方站点，配合上面的 OIDC 应用用 */}
+              <OAuthEndpointsCard />
               <RelayProviderCard />
+              </div>
             </TabsContent>
 
             <TabsContent value="ai">
+              {/* 顶部：四个渠道的开通状态（绿=已开通 / 红=未开通） */}
+              <ChannelStatusCard />
               {/* 两条免审核通道排在最前：它们是「立刻可用」的，而下面那个
                   「贡献 AI 模型」要等自动校验 / 人工复核 */}
               <Wb2ApiDonationCard
@@ -1025,6 +1039,7 @@ export default function DonationPage() {
                 onDone={() => void load()}
               />
               <RaccoonDonationCard onDone={() => void load()} />
+              <AutoclawDonationCard />
               <Qoder2ApiDonationCard
                 block={data?.qoder2api}
                 aiUnlocked={perms?.ai ?? false}
@@ -2323,7 +2338,7 @@ function Wb2ApiDonationCard({
   if (!block.visible && block.bindings.length === 0) return null
 
   // 国内版/国际版都关掉 = 通道实际不可用，整卡隐藏
-  const availableRealms = block.availableRealms ?? ["cn", "global"]
+  const availableRealms = block.availableRealms ?? ["cn"]
   if (availableRealms.length === 0) return null
 
   const full = block.remaining < 1
@@ -2390,7 +2405,7 @@ function Wb2ApiDonationCard({
           <Label className="text-xs text-muted-foreground">{t("don.wb.realmLabel")}</Label>
           <div className="flex gap-2">
             {(["cn", "global"] as const)
-              .filter((r) => (block.availableRealms ?? ["cn", "global"]).includes(r))
+              .filter((r) => (block.availableRealms ?? ["cn"]).includes(r))
               .map((r) => (
                 <Button
                   key={r}
@@ -2751,7 +2766,7 @@ function Qoder2ApiDonationCard({
           <Label className="text-xs text-muted-foreground">{t("don.q2.realmLabel")}</Label>
           <div className="flex gap-2">
             {(["cn", "intl"] as const)
-              .filter((r) => (block.availableRealms ?? ["cn", "intl"]).includes(r))
+              .filter((r) => (block.availableRealms ?? ["cn"]).includes(r))
               .map((r) => (
                 <Button
                   key={r}

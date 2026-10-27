@@ -35,7 +35,7 @@ const FETCH_TIMEOUT_MS = 8000
  * 用通用 8s 会 abort，而网关的 handler 不受客户端断开影响、照样把账号 `Pool.Add` 进池
  * ⇒ 现象是「账号已进共享池，但本站没拿到 uid、没授 ai 权限，重试又被池去重拦下」。
  */
-const POLL_TIMEOUT_MS = 30_000
+export const POLL_TIMEOUT_MS = 30_000
 /** 响应体上限：网关返回的都是小 JSON（账号列表可能稍大），1 MiB 足够 */
 const MAX_FETCH_BYTES = 1024 * 1024
 const CREDENTIAL_CACHE_MS = 5000
@@ -57,7 +57,40 @@ let credentialCache: {
 } | null = null
 
 /** 默认站点地址（设置项 wb2api_base_url 未配置时用） */
-const DEFAULT_BASE_URL = "https://wb2api.doulor.cn"
+const DEFAULT_BASE_URL = "https://agent2api.doulor.cn"
+
+/**
+ * 入池网关（2026-10-27 迁移）。
+ *
+ * 老的 workbuddy2api 服务（wb2api.doulor.cn → 127.0.0.1:7863）已退役，
+ * 所有反代账号现在统一进 Agent2API。站点不再直连面板，而是走 hk2 上那个
+ * 只暴露 /register /import /remove /status 的网关（X-Donate-Key 鉴权）——
+ * 好处是面板密码只存在网关那一侧，Worker 里只有一把捐献密钥。
+ */
+const DONATE_GATEWAY = "https://agent2api.doulor.cn/_donate"
+
+async function donateFetch<T>(env: Env, path: string, init: RequestInit = {}): Promise<T> {
+  const key = env.RACCOON_DONATE_KEY
+  if (!key) throw new Error("入池网关密钥未配置（RACCOON_DONATE_KEY）")
+  const res = await fetch(`${DONATE_GATEWAY}${path}`, {
+    ...init,
+    headers: {
+      "X-Donate-Key": key,
+      "content-type": "application/json",
+      ...(init.headers as Record<string, string> | undefined),
+    },
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    if (res.status === 401) throw new Wb2UnauthorizedError("入池网关密钥不正确")
+    throw new Error(`入池网关 ${res.status}: ${text.slice(0, 200)}`)
+  }
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new Error(`入池网关返回非 JSON: ${text.slice(0, 200)}`)
+  }
+}
 
 /**
  * 解析网关地址与 api_key。
@@ -189,7 +222,7 @@ export class Wb2UnauthorizedError extends ApiError {
  * 错误信息一律不原样回显上游 body（网关的 401 文案里可能带请求细节），
  * 只按状态码给本站自己的文案，避免 api_key 相关线索泄露到前端。
  */
-async function wb2Fetch<T>(
+export async function wb2Fetch<T>(
   env: Env,
   path: string,
   init: RequestInit = {},
@@ -293,7 +326,7 @@ export interface Wb2StartResult {
  * 读取反代网关对接的 WorkBuddy 域：'cn'（国内版）或 'global'（国际版）。
  * 默认 'cn'，管理员可在设置项 wb2api_realm 里切换。
  */
-async function resolveRealm(env: Env): Promise<string> {
+export async function resolveRealm(env: Env): Promise<string> {
   try {
     const v = (await getSetting(env, "wb2api_realm")).trim().toLowerCase()
     if (v === "global" || v === "cn") return v
@@ -308,16 +341,29 @@ async function resolveRealm(env: Env): Promise<string> {
  * realm 取自设置项 wb2api_realm（默认国内版 'cn'）。
  */
 export async function wb2Start(env: Env, realm?: string): Promise<Wb2StartResult> {
-  const effectiveRealm = realm ?? (await resolveRealm(env))
-  const data = await wb2Fetch<{ url: string; state: string; realm?: string }>(
-    env,
-    "/panel/api/login/start",
-    { method: "POST", body: JSON.stringify({ realm: effectiveRealm }) }
-  )
-  if (!data.url || !data.state) {
-    throw new ApiError(502, "反代网关未返回授权链接", "WB2API_BAD_RESPONSE")
+  /**
+   * 2026-10-27：改走纯 Agent2API 的设备授权（面板 /api/session/login/start）。
+   * WorkBuddy 这条**没有验证码**；拿到 authUrl 后用户去授权，站点轮询 wb2Poll。
+   */
+  const r = await donateFetch<{
+    ok?: boolean
+    authUrl?: string
+    state?: string
+    provider?: string
+    edition?: string
+  }>(env, "/login/start", {
+    method: "POST",
+    body: JSON.stringify({ provider: "workbuddy", realm: realm ?? undefined }),
+  })
+  if (!r.authUrl || !r.state) {
+    throw new ApiError(502, "授权链接获取失败（上游没有返回 authUrl）", "WB2API_BAD_RESPONSE")
   }
-  return { url: data.url, state: data.state, realm: data.realm ?? effectiveRealm }
+  const ed = String(r.edition ?? realm ?? "cn").toLowerCase()
+  return {
+    url: r.authUrl,
+    state: r.state,
+    realm: ed === "global" || ed === "intl" ? "global" : "cn",
+  } as Wb2StartResult
 }
 
 export interface Wb2PollResult {
@@ -339,43 +385,32 @@ export interface Wb2PollResult {
  * 必须先把终态落库（见 handlers/wb2api.ts 的会话表）。
  */
 export async function wb2Poll(env: Env, state: string): Promise<Wb2PollResult> {
-  const data = await wb2Fetch<{
-    done?: boolean
+  const r = await donateFetch<{
+    ok?: boolean
+    status?: string
     message?: string
-    uid?: string
-    nickname?: string
-    realm?: string
-    credits?: number
-    credits_total?: number
-  }>(
-    env,
-    `/panel/api/login/poll?state=${encodeURIComponent(state)}`,
-    { method: "GET" },
-    // 登录成功那一次 poll 会同步跑完「落盘 + 热加载 + 签到 + 余额刷新」，
-    // 远慢于其它短 RPC —— 必须给足超时，否则 abort 后网关照样把账号加进池、
-    // 本站却拿不到 uid（见 POLL_TIMEOUT_MS 注释）。
-    POLL_TIMEOUT_MS
-  )
+    account?: Record<string, unknown> | null
+  }>(env, "/login/wait", { method: "POST", body: JSON.stringify({ state }) })
 
-  if (!data.done) {
-    return { done: false, pendingMessage: data.message ?? "waiting for login" }
+  if (r.status === "failed") {
+    return { status: "failed", message: r.message ?? "授权失败或已过期" } as unknown as Wb2PollResult
   }
-  if (!data.uid) {
-    throw new ApiError(
-      502,
-      "反代网关登录成功但未返回账号 uid",
-      "WB2API_BAD_RESPONSE"
-    )
+  if (r.status !== "done" || !r.account) {
+    return { status: "pending", message: "" } as unknown as Wb2PollResult
   }
+  const a = r.account as Record<string, unknown>
+  const rawId = String(a.id ?? "")
+  const uid = String(a.userId ?? "").trim() || rawId.replace(/^user-/, "")
+  const ed = String(a.edition ?? a.editionLabel ?? "cn").toLowerCase()
   return {
-    done: true,
-    uid: data.uid,
-    nickname: data.nickname,
-    realm: data.realm ?? "global",
-    credits: typeof data.credits === "number" ? data.credits : undefined,
-    creditsTotal:
-      typeof data.credits_total === "number" ? data.credits_total : undefined,
-  }
+    status: "done",
+    message: "",
+    account: {
+      uid,
+      nickname: String(a.displayName ?? a.name ?? uid).slice(0, 60),
+      realm: ed.includes("global") || ed.includes("intl") ? "global" : "cn",
+    },
+  } as unknown as Wb2PollResult
 }
 
 // ---------------------------------------------------------------------------
@@ -384,15 +419,11 @@ export async function wb2Poll(env: Env, state: string): Promise<Wb2PollResult> {
 
 /** 从网关共享池移除一个账号（摘掉捐献）。404（账号已不在池里）视为成功。 */
 export async function wb2RemoveAccount(env: Env, uid: string): Promise<void> {
-  try {
-    await wb2Fetch(env, `/panel/api/accounts/${encodeURIComponent(uid)}/remove`, {
-      method: "POST",
-    })
-  } catch (err) {
-    // 账号已不在池里 = 目标状态已达成，不算失败
-    if (err instanceof Wb2StateGoneError) return
-    throw err
-  }
+  // 面板 id = user-<uid>；账号已不在池里（not_found）也算成功
+  await donateFetch(env, "/remove", {
+    method: "POST",
+    body: JSON.stringify({ id: `user-${uid}` }),
+  })
 }
 
 export interface Wb2ImportResult {
@@ -403,22 +434,64 @@ export interface Wb2ImportResult {
 }
 
 /**
- * 上传一份 cockpit tools 导出的 JSON，批量导入账号到网关池。
+ * 上传一份 cockpit tools 导出的 JSON，批量导入账号到 Agent2API 池（2026-10-27 迁移）。
  *
- * 网关接口：`POST /panel/api/import/cockpit`，`multipart/form-data`，字段名 `file`。
- * ⚠️ 返回里**只有计数、没有 uid 列表** —— 调用方要自己从上传的 JSON 里解析 uid
- *（cockpit 格式的字段名就是 `uid`），否则建不出绑定。
+ * 入参是由调用方筛过的候选项数组（`[{account:{uid,nickname},auth:{accessToken,refreshToken,realm}}]`）。
+ * 按 `auth.realm` 分两组投递：`cn` → provider=workbuddy，`global` → provider=workbuddy-intl。
+ * `uid` 走网关的 extra 透传，面板建号时是必填。
  */
 export async function wb2ImportCockpit(
   env: Env,
   jsonText: string
 ): Promise<Wb2ImportResult> {
-  const form = new FormData()
-  form.append("file", new Blob([jsonText], { type: "application/json" }), "accounts.json")
-  return await wb2Fetch<Wb2ImportResult>(env, "/panel/api/import/cockpit", {
-    method: "POST",
-    body: form,
-  })
+  let rows: unknown
+  try {
+    rows = JSON.parse(jsonText)
+  } catch {
+    throw new Error("账号 JSON 解析失败")
+  }
+  const list = (Array.isArray(rows) ? rows : [rows]) as Record<string, unknown>[]
+
+  type Entry = { name: string; accessToken: string; refreshToken?: string; uid: string }
+  const byProvider = new Map<string, Entry[]>()
+  let total = 0
+
+  for (const row of list) {
+    const acc = (row.account ?? row) as Record<string, unknown>
+    const auth = (row.auth ?? {}) as Record<string, unknown>
+    const uid = String(acc.uid ?? row.uid ?? "").trim()
+    const accessToken = String(auth.accessToken ?? row.accessToken ?? "").trim()
+    const refreshToken = String(auth.refreshToken ?? row.refreshToken ?? "").trim()
+    if (!uid || !accessToken) continue
+    total++
+    const realm = String(auth.realm ?? row.realm ?? "cn").toLowerCase()
+    const provider = realm === "global" || realm === "intl" ? "workbuddy-intl" : "workbuddy"
+    const name = String(acc.nickname ?? row.nickname ?? uid).slice(0, 60)
+    const bucket = byProvider.get(provider) ?? []
+    bucket.push({ name, accessToken, refreshToken: refreshToken || undefined, uid })
+    byProvider.set(provider, bucket)
+  }
+
+  let imported = 0
+  let skipped = 0
+  const errors: string[] = []
+  for (const [provider, accounts] of byProvider) {
+    const r = await donateFetch<{
+      ok?: boolean
+      added?: number
+      duplicate?: number
+      failed?: number
+      errors?: { name?: string; detail?: string }[]
+    }>(env, "/import", { method: "POST", body: JSON.stringify({ provider, accounts }) })
+    imported += Number(r.added ?? 0)
+    skipped += Number(r.duplicate ?? 0)
+    for (const e of r.errors ?? []) errors.push(`${e.name ?? "账号"}：${e.detail ?? "导入失败"}`)
+    if (Number(r.failed ?? 0) > 0 && (r.errors?.length ?? 0) === 0) {
+      errors.push(`${provider} 有 ${r.failed} 个账号导入失败`)
+    }
+  }
+
+  return { total, imported, skipped, errors }
 }
 
 export interface Wb2PoolOverview {
@@ -444,27 +517,40 @@ export interface Wb2PoolOverview {
   }[]
 }
 
-/** 读取网关账号池概览（管理端展示健康度用；字段按网关 /panel/api/overview 契约） */
+/**
+ * 读取号池概览（2026-10-27 迁移：改用入池网关的 /status，它直连 Agent2API 面板）。
+ *
+ * 只统计 workbuddy / workbuddy-intl 两个 provider —— qoder / 小浣熊各有自己的入口。
+ * `uid` 由面板 id（`user-<uuid>`）反推，和站点绑定表里的 uid 对齐。
+ */
 export async function wb2Overview(env: Env): Promise<Wb2PoolOverview> {
-  const data = await wb2Fetch<{
-    total?: number
-    healthy?: number
-    cooling?: number
-    disabled?: number
-    accounts?: {
-      uid: string
-      nickname?: string
-      realm?: string
-      credits?: number
-    }[]
-  }>(env, "/panel/api/overview", { method: "GET" })
+  const r = await donateFetch<{
+    ok?: boolean
+    accounts?: { id?: string; name?: string; provider?: string; available?: boolean; enabled?: boolean }[]
+  }>(env, "/status", { method: "GET" })
+
+  const accounts: Wb2PoolOverview["accounts"] = []
+  for (const a of r.accounts ?? []) {
+    const provider = String(a.provider ?? "")
+    if (provider !== "workbuddy" && provider !== "workbuddy-intl") continue
+    const uid = String(a.id ?? "").replace(/^user-/, "")
+    if (!uid) continue
+    const disabled = a.enabled === false
+    accounts.push({
+      uid,
+      nickname: a.name,
+      realm: provider === "workbuddy-intl" ? "global" : "cn",
+      disabled,
+      disabled_reason: disabled ? "账号在号池中不可用（可能被封禁或登录态失效）" : undefined,
+    })
+  }
 
   return {
-    total: data.total ?? 0,
-    healthy: data.healthy ?? 0,
-    cooling: data.cooling ?? 0,
-    disabled: data.disabled ?? 0,
-    accounts: data.accounts ?? [],
+    total: accounts.length,
+    healthy: accounts.filter((a) => !a.disabled).length,
+    cooling: 0,
+    disabled: accounts.filter((a) => a.disabled).length,
+    accounts,
   }
 }
 
@@ -533,45 +619,35 @@ export async function saveWb2ApiKey(
 }
 
 /**
- * 用指定 api_key 真实探测一次网关（不读缓存、不落库）。
- * 走 `/panel/api/overview`：需要鉴权，且能顺带反映账号池是否正常。
+ * 探测一次「反代账号池」是否正常（2026-10-27 迁移）。
+ *
+ * 老的 api_key 概念随 workbuddy2api 一起退役了 —— 现在只用站点自己的捐献网关密钥
+ * 去问 /status，能拿到账号就说明链路通，顺带把池子规模回报给管理面板。
+ * 入参 `apiKey` 保留只为不改调用方签名。
  */
 export async function verifyWb2ApiKey(
   env: Env,
-  apiKey: string
+  _apiKey: string
 ): Promise<{ ok: boolean; message: string }> {
-  const cfg = await resolveWb2ApiConfig(env)
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
   try {
-    const res = await fetch(`${cfg.baseUrl}/panel/api/overview`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "application/json",
-      },
-      signal: controller.signal,
-    })
-    if (res.status === 401 || res.status === 403) {
-      return { ok: false, message: "访问密钥无效（网关拒绝）" }
-    }
-    if (!res.ok) {
-      return { ok: false, message: `网关返回 ${res.status}` }
-    }
-    const body = (await res.json().catch(() => null)) as {
-      total?: number
-      healthy?: number
-    } | null
-    if (!body) return { ok: false, message: "网关返回了非 JSON 响应" }
+    const r = await donateFetch<{
+      ok?: boolean
+      accounts?: { provider?: string; enabled?: boolean }[]
+    }>(env, "/status", { method: "GET" })
+    const all = r.accounts ?? []
+    const wb = all.filter(
+      (a) => a.provider === "workbuddy" || a.provider === "workbuddy-intl"
+    )
+    const live = wb.filter((a) => a.enabled !== false).length
     return {
-      ok: true,
-      message: `密钥有效（账号池 ${body.healthy ?? 0}/${body.total ?? 0} 可用）`,
+      ok: wb.length > 0,
+      message:
+        wb.length === 0
+          ? "入池网关已连通，但号池里没有 WorkBuddy 账号"
+          : `入池网关连通：号池 ${wb.length} 个 WorkBuddy 账号，其中可用 ${live} 个`,
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return { ok: false, message: `无法连接网关：${msg}` }
-  } finally {
-    clearTimeout(timer)
+    return { ok: false, message: err instanceof Error ? err.message : "入池网关探测失败" }
   }
 }
 

@@ -2862,14 +2862,14 @@ async function findOtherAiSource(
   }
 
   const wb = await env.DB.prepare(
-    "SELECT 1 AS x FROM wb2api_bindings WHERE user_id = ? AND status = 'active' LIMIT 1"
+    "SELECT 1 AS x FROM wb2api_bindings WHERE user_id = ? AND status IN ('active','invalid') LIMIT 1"
   )
     .bind(userId)
     .first()
   if (wb) return "还有在用中的反代（WorkBuddy）绑定"
 
   const cli = await env.DB.prepare(
-    "SELECT 1 AS x FROM qoder2api_bindings WHERE user_id = ? AND status = 'active' LIMIT 1"
+    "SELECT 1 AS x FROM qoder2api_bindings WHERE user_id = ? AND status IN ('active','invalid') LIMIT 1"
   )
     .bind(userId)
     .first()

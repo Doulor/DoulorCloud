@@ -1253,6 +1253,11 @@ export default function AdminPage() {
   const [wb2apiRemoving, setWb2apiRemoving] = React.useState<AdminWb2ApiBinding | null>(null)
   const [wb2apiRevokeAi, setWb2apiRevokeAi] = React.useState(false)
   /** 通道开关与限额（走全局设置接口，与其它开关一起保存） */
+  // 捐献每日额度单价（元/天/账号，2026-10-27 站长要求可配置）
+  const [quotaYuanBase, setQuotaYuanBase] = React.useState("50")
+  const [quotaYuanWb, setQuotaYuanWb] = React.useState("400")
+  const [quotaYuanQoder, setQuotaYuanQoder] = React.useState("200")
+  const [quotaYuanRaccoon, setQuotaYuanRaccoon] = React.useState("200")
   const [wb2apiEnabled, setWb2apiEnabled] = React.useState(true)
   /** 纯展示开关：是否在捐献页显示该入口（关掉不影响通道本身） */
   const [wb2apiDonationVisible, setWb2apiDonationVisible] = React.useState(true)
@@ -2092,6 +2097,11 @@ export default function AdminPage() {
       setQoder2apiRealmIntl(isSettingOn(s.qoder2api_realm_intl, true))
       setQoder2apiMaxBindings(s.qoder2api_max_bindings ?? "3")
       setQoder2apiBaseUrl(s.qoder2api_base_url ?? "")
+      // 捐献额度单价
+      setQuotaYuanBase(s.quota_yuan_base ?? "50")
+      setQuotaYuanWb(s.quota_yuan_per_wb ?? "400")
+      setQuotaYuanQoder(s.quota_yuan_per_qoder ?? "200")
+      setQuotaYuanRaccoon(s.quota_yuan_per_raccoon ?? "200")
       setQoder2apiRealm(s.qoder2api_realm ?? "cn")
       // 商汤 Key 捐献通道
       setSensenovaEnabled(isSettingOn(s.sensenova_enabled, true))
@@ -2360,6 +2370,11 @@ export default function AdminPage() {
         qoder2api_realm_intl: qoder2apiRealmIntl,
         qoder2api_donation_visible: qoder2apiDonationVisible,
         qoder2api_max_bindings: String(Math.max(1, Math.round(Number(qoder2apiMaxBindings) || 3))),
+        // 捐献每日额度单价（元/天/账号）
+        quota_yuan_base: String(Math.max(0, Math.round(Number(quotaYuanBase) || 50))),
+        quota_yuan_per_wb: String(Math.max(0, Math.round(Number(quotaYuanWb) || 400))),
+        quota_yuan_per_qoder: String(Math.max(0, Math.round(Number(quotaYuanQoder) || 200))),
+        quota_yuan_per_raccoon: String(Math.max(0, Math.round(Number(quotaYuanRaccoon) || 200))),
         qoder2api_base_url: qoder2apiBaseUrl.trim(),
         qoder2api_realm: qoder2apiRealm,
         // 商汤 Key 捐献通道
@@ -5367,6 +5382,12 @@ export default function AdminPage() {
             })}
           </div>
 
+          {/* 记录默认折叠（2026-10-27 站长要求）：列表太长，点开才看 */}
+          <details className="rounded-md border">
+            <summary className="cursor-pointer select-none px-4 py-2 text-sm text-muted-foreground hover:text-foreground">
+              📋 捐献记录（默认折叠，点此展开）
+            </summary>
+            <div className="p-3">
           {donationLoading ? (
             <LoadingBlock variant="list" />
           ) : donations.length === 0 ? (
@@ -5519,6 +5540,8 @@ export default function AdminPage() {
               ))}
             </div>
           )}
+            </div>
+          </details>
 
           {/* 服务端分页控件（2026-10-08，与用户列表同款）：total 来自接口 */}
           {!donationLoading && donationTotal != null && donationTotal > DONATION_PAGE_SIZE && (
@@ -5577,7 +5600,11 @@ export default function AdminPage() {
                 description={t("adm.274")}
               />
             ) : (
-              <div className="divide-y rounded-md border">
+              <details className="rounded-md border">
+                <summary className="cursor-pointer select-none px-4 py-3 text-sm text-muted-foreground hover:text-foreground">
+                  📋 WorkBuddy 捐献绑定（{wb2apiBindings.length} 条）—— 默认折叠，点开查看
+                </summary>
+                <div className="divide-y">
                 {wb2apiBindings.map((b) => (
                   <div
                     key={b.id}
@@ -5612,6 +5639,7 @@ export default function AdminPage() {
                   </div>
                 ))}
               </div>
+              </details>
             )}
           </div>
 
@@ -7050,6 +7078,18 @@ export default function AdminPage() {
                     onCheckedChange={setWb2apiDonationVisible}
                   />
                 </div>
+                {/* 捐献每日额度单价（2026-10-27）：group-sync 按这些单价算每人每日额度 */}
+                <div className="space-y-2 rounded-md border px-4 py-3">
+                  <p className="text-sm font-medium">捐献每日额度单价</p>
+                  <p className="text-xs text-muted-foreground">单位「元/天/账号」。最终写进中转站「免费套餐」的每日额度（1 元 = 500000 quota）；封禁/失效账号不计入。</p>
+                  <div className="grid gap-3 sm:grid-cols-4">
+                    <div className="space-y-1"><Label htmlFor="quotaYuanBase">无捐献保底</Label><Input id="quotaYuanBase" value={quotaYuanBase} onChange={(e) => setQuotaYuanBase(e.target.value)} /></div>
+                    <div className="space-y-1"><Label htmlFor="quotaYuanWb">WorkBuddy / 账号</Label><Input id="quotaYuanWb" value={quotaYuanWb} onChange={(e) => setQuotaYuanWb(e.target.value)} /></div>
+                    <div className="space-y-1"><Label htmlFor="quotaYuanQoder">Qoder / 账号</Label><Input id="quotaYuanQoder" value={quotaYuanQoder} onChange={(e) => setQuotaYuanQoder(e.target.value)} /></div>
+                    <div className="space-y-1"><Label htmlFor="quotaYuanRaccoon">小浣熊 / 账号</Label><Input id="quotaYuanRaccoon" value={quotaYuanRaccoon} onChange={(e) => setQuotaYuanRaccoon(e.target.value)} /></div>
+                  </div>
+                </div>
+
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="wb2apiLimit">{t("adm.510")}</Label>
@@ -7223,7 +7263,11 @@ export default function AdminPage() {
                       </span>
                     </div>
                     {wb2apiPool.accounts.length > 0 && (
-                      <div className="divide-y rounded-md border">
+                      <details className="rounded-md border">
+              <summary className="cursor-pointer select-none px-4 py-3 text-sm text-muted-foreground hover:text-foreground">
+                📋 WorkBuddy 号池明细（{wb2apiPool.accounts.length} 条）—— 默认折叠，点开查看
+              </summary>
+              <div className="divide-y">
                         {wb2apiPool.accounts.map((a) => (
                           <div
                             key={a.uid}
@@ -7237,6 +7281,7 @@ export default function AdminPage() {
                           </div>
                         ))}
                       </div>
+            </details>
                     )}
                   </>
                 )}
@@ -7282,7 +7327,11 @@ export default function AdminPage() {
                     description={t("adm.298")}
                   />
                 ) : (
-                  <div className="divide-y rounded-md border">
+                  <details className="rounded-md border">
+                <summary className="cursor-pointer select-none px-4 py-3 text-sm text-muted-foreground hover:text-foreground">
+                  📋 WorkBuddy 捐献绑定（{wb2apiBindings.length} 条）—— 默认折叠，点开查看
+                </summary>
+                <div className="divide-y">
                     {wb2apiBindings.map((b) => (
                       <div
                         key={b.id}
@@ -7317,6 +7366,7 @@ export default function AdminPage() {
                       </div>
                     ))}
                   </div>
+              </details>
                 )}
               </CardContent>
             </Card>
@@ -7492,7 +7542,11 @@ export default function AdminPage() {
                 ) : qoder2apiPool.accounts.length === 0 ? (
                   <p className="text-sm text-muted-foreground">{t("adm.559")}</p>
                 ) : (
-                  <div className="divide-y rounded-md border">
+                  <details className="rounded-md border">
+              <summary className="cursor-pointer select-none px-4 py-3 text-sm text-muted-foreground hover:text-foreground">
+                📋 Qoder 号池明细（{qoder2apiPool.accounts.length} 条）—— 默认折叠，点开查看
+              </summary>
+              <div className="divide-y">
                     {qoder2apiPool.accounts.map((a) => (
                       <div key={a.id} className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm">
                         <span className="font-medium">{a.name}</span>
@@ -7509,6 +7563,7 @@ export default function AdminPage() {
                       </div>
                     ))}
                   </div>
+            </details>
                 )}
               </CardContent>
             </Card>
@@ -7530,7 +7585,11 @@ export default function AdminPage() {
                     description={t("adm.301")}
                   />
                 ) : (
-                  <div className="divide-y rounded-md border">
+                  <details className="rounded-md border">
+                <summary className="cursor-pointer select-none px-4 py-3 text-sm text-muted-foreground hover:text-foreground">
+                  📋 Qoder 捐献绑定（{qoder2apiBindings.length} 条）—— 默认折叠，点开查看
+                </summary>
+                <div className="divide-y">
                     {qoder2apiBindings.map((b) => (
                       <div key={b.id} className="flex flex-wrap items-center gap-2 px-4 py-3">
                         <span className="text-sm font-medium">{b.username}</span>
@@ -7561,6 +7620,7 @@ export default function AdminPage() {
                       </div>
                     ))}
                   </div>
+              </details>
                 )}
               </CardContent>
             </Card>

@@ -23,16 +23,24 @@ import type { Env } from "../env"
 import { requireUser } from "../auth"
 import { guardRateLimit } from "../ratelimit"
 import { uuid } from "../crypto"
-import { adminSetUserGroup, findUserByEmail, findUserByUsername } from "../newapi-client"
+import { adminGrantSubscription, findUserByEmail, findUserByUsername } from "../newapi-client"
+import { getSettingNumber } from "../settings"
 
 /** 入池网关（hk2 上与 Agent2API 同机，只暴露 /_donate/* 几个动作，需 X-Donate-Key）。 */
 const GATEWAY_URL = "https://agent2api.doulor.cn/_donate/register"
 /**
- * 捐献成功后给用户加中转站分组 —— 与 wb2api 捐献同款语义：**捐了才能用对应渠道**。
- * 走 NewAPI 管理接口（`adminSetUserGroup`），因为直写数据库会被它的 Redis 缓存回写覆盖。
+ * 捐献成功后发放订阅（与 wb2api 捐献完全同一套口径）。
+ *
+ * ⚠️ 分组**不再手动 append**：本站在 NewAPI 里的分组是 `handlers/group-sync.ts`
+ * 按「有效捐献/绑定」算出来的组合名（donation / donation-workbuddy / …），
+ * 每 20~30 秒同步一次。手动 append 会被下一次同步直接覆盖掉
+ * （2026-10-27 线上实测：linhuai 捐完仍是 donation，没有 raccoon）。
+ * 所以分组维度要加到 group-sync 的 composeGroup 里，而不是在这里写库。
  */
-const GRANT_GROUP_NAME = "raccoon"
-const CODE_TTL_SECONDS = 600
+// 2026-10-27：10 分钟 → 24 小时。书签里的码是**烘死**在书签里的，
+// 用户生成后往往过一会儿才点（或第二天又点），10 分钟太容易过期。
+// 仍然是**一次性**：用掉即失效，所以放长不影响安全性。
+const CODE_TTL_SECONDS = 86400
 const CORS_ORIGIN = "https://xiaohuanxiong.com"
 
 function corsHeaders(): Record<string, string> {
@@ -205,7 +213,7 @@ export async function claimRaccoonDonation(env: Env, request: Request): Promise<
 
   // 捐献成功 → 给该用户在中转站里追加「raccoon」分组（和 wb2api 捐献同款：捐了才能用对应模型）。
   // 失败不阻塞捐献结果（号已经进池，分组可以在后台补发），但会回传 granted 让前端能提示。
-  const granted = await grantRaccoonGroup(env, row.user_id)
+  const granted = await grantRaccoonSubscription(env, row.user_id)
 
   return jsonCors({
     ok: true,
@@ -249,30 +257,34 @@ async function donorAccountName(env: Env, dolordUserId: string): Promise<string>
   }
   return base
 }
-
-/**
- * 给捐献者追加中转站分组（`raccoon`）。
- *
- * 走 NewAPI 官方接口而不是直写库，原因见 `adminSetUserGroup` 的注释：
- * NewAPI 把用户对象缓存在 Redis，任何额度变动都会把旧对象整条写回库，
- * 直写的分组合被静默覆盖（实测过，授组成功一次调用后就被打回原值）。
- *
- * 失败不阻塞捐献结果 —— 号已经进池，分组可以事后补发。
- */
-async function grantRaccoonGroup(env: Env, dolordUserId: string): Promise<string | undefined> {
-  try {
-    const donor = await env.DB.prepare(`SELECT username, email FROM users WHERE id = ?`)
-      .bind(dolordUserId)
-      .first<{ username?: string; email?: string }>()
-    if (!donor) return undefined
-    let relay = donor.email ? await findUserByEmail(env, donor.email) : null
-    if (!relay && donor.username) relay = await findUserByUsername(env, donor.username)
-    if (!relay?.id) return undefined
-    return await adminSetUserGroup(env, relay.id, GRANT_GROUP_NAME, "append")
-  } catch {
-    return undefined
+  /**
+   * 捐献成功后发放订阅（与 wb2api 捐献同一套口径）。
+   *
+   * wb / qoder 都是「捐献真的带来新资源 → grantInviteReward(套餐)」，
+   * 套餐 id 取同一个设置项 `invite_reward_plan_id`（当前 = plan 2「wb邀请套餐」：
+   * 1 个月、总额 1 亿 quota、每日重置）。
+   *
+   * ⚠️ 分组不在这里写：本站在 NewAPI 的分组由 handlers/group-sync.ts 按捐献/绑定
+   * 算出来（donation / donation-workbuddy / …），每 20~30 秒覆盖一次，
+   * 手动 append 必被回写（2026-10-27 实测 linhuai 捐完仍为 donation）。
+   */
+  async function grantRaccoonSubscription(env: Env, dolordUserId: string): Promise<string | undefined> {
+    try {
+      const donor = await env.DB.prepare(`SELECT username, email FROM users WHERE id = ?`)
+        .bind(dolordUserId)
+        .first<{ username?: string; email?: string }>()
+      if (!donor) return undefined
+      let relay = donor.email ? await findUserByEmail(env, donor.email) : null
+      if (!relay && donor.username) relay = await findUserByUsername(env, donor.username)
+      if (!relay?.id) return undefined
+      const planId = await getSettingNumber(env, "invite_reward_plan_id")
+      if (!planId || planId <= 0) return undefined
+      const res = await adminGrantSubscription(env, relay.id, planId)
+      return res.ok ? `plan:${planId}` : `plan_failed:${res.message}`
+    } catch {
+      return undefined
+    }
   }
-}
 
 /** GET /donations/raccoon/mine —— 我的捐献记录。 */
 export async function listMyRaccoonDonations(env: Env, request: Request): Promise<Response> {
@@ -427,7 +439,7 @@ export async function importRaccoonDonations(env: Env, request: Request): Promis
     }
   }
 
-  const granted = added.length ? await grantRaccoonGroup(env, user.id) : undefined
+  const granted = added.length ? await grantRaccoonSubscription(env, user.id) : undefined
   return json({
     ok: true,
     added: typeof parsed.added === "number" ? parsed.added : added.length,

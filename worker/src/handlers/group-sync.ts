@@ -21,6 +21,7 @@
  * 请求头 `X-Sync-Key` 必须等于 Worker secret `GROUP_SYNC_KEY`。
  * ⚠️ 未配置该 secret 时接口**直接 503**（绝不放行空 key）。
  */
+import { getSettingNumber } from "../settings"
 import { ApiError, json } from "../http"
 import type { Env } from "../env"
 
@@ -40,7 +41,6 @@ const DONATION_TYPES = ["ai", "proxy", "sensenova"]
  * 🔴 **只算「真实有效」的账号**：`wb2api_bindings.status = 'active'`
  * （被上游判失效 11140 / 被禁用 / 待审核的一律不计）。
  */
-const DAILY_YUAN_PER_ACCOUNT = 400
 
 /** quota 与元的换算基准（本站 QuotaPerUnit = 500000） */
 const QUOTA_PER_YUAN = 500000
@@ -49,7 +49,6 @@ const QUOTA_PER_YUAN = 500000
  * **没有任何有效贡献**的用户每天保底额度（元）—— 给个试用/兜底，不至于完全不能用。
  * 与 `DAILY_YUAN_PER_ACCOUNT` 同口径（已是 ×5 之后的数值）。
  */
-const BASE_YUAN_NO_CONTRIB = 50
 
 /**
  * 组合分组的名字规则 —— **必须与 NewAPI 侧 `group_special_usable_group` 的键一致**
@@ -70,12 +69,17 @@ function composeGroup(
   hasDonation: boolean,
   hasWb: boolean,
   hasQoder: boolean,
+  hasRaccoon: boolean,
+  hasAutoclaw: boolean,
   hasPremium: boolean
 ): string {
   const parts: string[] = []
   if (hasDonation) parts.push("donation")
   if (hasWb) parts.push("workbuddy")
   if (hasQoder) parts.push("qoder")
+  // 小浣熊（2026-10-27）：与 workbuddy/qoder 平级，组合名同样用 - 拼接
+  if (hasRaccoon) parts.push("raccoon")
+  if (hasAutoclaw) parts.push("autoclaw")
   if (hasPremium) parts.push("付费")
   return parts.length === 0 ? "default" : parts.join("-")
 }
@@ -140,14 +144,31 @@ export async function groupMap(env: Env, request: Request): Promise<Response> {
               WHERE d.user_id = na.user_id AND d.status = 'approved'
                 AND d.type IN (${typeList})) AS don,
             (SELECT COUNT(*) FROM wb2api_bindings b
-              WHERE b.user_id = na.user_id AND b.status = 'active') AS wb,
+              WHERE b.user_id = na.user_id AND b.status IN ('active','invalid')) AS wb,
+              -- 额度口径：只算 active（失效号额度要收回）
+              (SELECT COUNT(*) FROM wb2api_bindings b
+                WHERE b.user_id = na.user_id AND b.status = 'active') AS wb_live,
             (SELECT COUNT(*) FROM qoder2api_bindings q
-              WHERE q.user_id = na.user_id AND q.status = 'active') AS qd
+              WHERE q.user_id = na.user_id AND q.status IN ('active','invalid')) AS qd,
+              (SELECT COUNT(*) FROM qoder2api_bindings q
+                WHERE q.user_id = na.user_id AND q.status = 'active') AS qd_live,
+              (SELECT COUNT(*) FROM autoclaw_donations a
+                WHERE a.user_id = na.user_id AND a.status IN ('active','invalid')) AS ac,
+              (SELECT COUNT(*) FROM autoclaw_donations a
+                WHERE a.user_id = na.user_id AND a.status = 'active') AS ac_live,
+              (SELECT COUNT(*) FROM raccoon_donations r
+                WHERE r.user_id = na.user_id
+                  AND r.status IN ('active','invalid')
+                  AND (r.token_expires_at IS NULL OR r.token_expires_at > ?)) AS rc,
+              (SELECT COUNT(*) FROM raccoon_donations r
+                WHERE r.user_id = na.user_id
+                  AND r.status = 'active'
+                  AND (r.token_expires_at IS NULL OR r.token_expires_at > ?)) AS rc_live
        FROM newapi_accounts na
       WHERE na.newapi_user_id > 0`
   )
-    .bind(...DONATION_TYPES)
-    .all<{ nid: number; uid: string; don: number; wb: number; qd: number }>()
+    .bind(...DONATION_TYPES, Date.now(), Date.now())
+    .all<{ nid: number; uid: string; don: number; wb: number; wb_live: number; qd: number; qd_live: number; rc: number; rc_live: number; ac: number; ac_live: number }>()
 
   /**
    * 「付费分组」白名单（2026-10-11）。**永久有效** ⇒ 没有时效条件。
@@ -190,6 +211,13 @@ export async function groupMap(env: Env, request: Request): Promise<Response> {
     )
   }
 
+  // 单价（元/天/账号）—— 管理面板可改，缺省与线上现状一致
+  const priceBase = Number(await getSettingNumber(env, "quota_yuan_base")) || 50
+  const priceWb = Number(await getSettingNumber(env, "quota_yuan_per_wb")) || 400
+  const priceQd = Number(await getSettingNumber(env, "quota_yuan_per_qoder")) || 200
+  const priceRc = Number(await getSettingNumber(env, "quota_yuan_per_raccoon")) || 200
+  const priceAc = Number(await getSettingNumber(env, "quota_yuan_per_autoclaw")) || 200
+
   const users: Record<string, string> = {}
   /** 「多捐多得」：每人每日应得额度（quota）。按**有效** wb 账号数 × ¥80 折算 */
   const quotas: Record<string, number> = {}
@@ -197,11 +225,16 @@ export async function groupMap(env: Env, request: Request): Promise<Response> {
     const hasDon = Number(r.don) > 0
     const hasWb = Number(r.wb) > 0
     const hasQd = Number(r.qd) > 0
+    const hasRc = Number(r.rc) > 0
+    const hasAc = Number(r.ac) > 0
     const hasPrem = premiumSet.has(r.uid)
-    users[String(r.nid)] = composeGroup(hasDon, hasWb, hasQd, hasPrem)
+    users[String(r.nid)] = composeGroup(hasDon, hasWb, hasQd, hasRc, hasAc, hasPrem)
     // ⚠️ 只算有效账号（SQL 里已用 status='active' 过滤）——被禁用的账号不产生额度
     // 没有任何有效账号 ⇒ 给保底额度（¥50/天），保证还能试用
-    const yuan = Math.max(BASE_YUAN_NO_CONTRIB, Number(r.wb) * DAILY_YUAN_PER_ACCOUNT)
+    // 单价可配置（settings.quota_yuan_*，2026-10-27）：wb ¥400、qoder/raccoon ¥200、保底 ¥50
+    // 额度按**有效**账号算（invalid 的号额度已收回）；分组仍按 wb/qd/rc（含 invalid，分组不变）
+    const earned = Number(r.wb_live) * priceWb + Number(r.qd_live) * priceQd + Number(r.rc_live) * priceRc + Number(r.ac_live) * priceAc
+    const yuan = Math.max(priceBase, earned)
     quotas[String(r.nid)] = yuan * QUOTA_PER_YUAN
   }
 
@@ -210,7 +243,8 @@ export async function groupMap(env: Env, request: Request): Promise<Response> {
     quotas,
     count: Object.keys(users).length,
     /** 每账号每日额度（元），供同步服务/前端展示口径 */
-    yuanPerAccount: DAILY_YUAN_PER_ACCOUNT,
+    yuanPerAccount: priceWb,
+    yuanPrices: { base: priceBase, wb: priceWb, qoder: priceQd, raccoon: priceRc, autoclaw: priceAc },
     generatedAt: new Date().toISOString(),
   })
 }

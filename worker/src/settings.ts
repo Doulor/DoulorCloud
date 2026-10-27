@@ -515,6 +515,14 @@ export const SETTING_DEFAULTS = {
    * 「绑几个号 = 白拿几次权限」，也容易被单人用小号占满共享池。
    */
   wb2api_max_bindings: "10",
+
+  // ---- 捐献每日额度单价（2026-10-27 站长要求：可在管理面板配置）----
+  // 单位：元/天/账号。最终写进 NewAPI「免费套餐」那行订阅的额度（1 元 = 500000 quota）。
+  quota_yuan_base: "50",        // 无任何捐献的保底
+  quota_yuan_per_wb: "400",     // 每个有效 WorkBuddy 账号
+  quota_yuan_per_qoder: "200",  // 每个有效 Qoder 账号
+  quota_yuan_per_raccoon: "200",
+  quota_yuan_per_autoclaw: "200", // 每个有效小浣熊账号
   /**
    * 是否在捐献页显示「反代账号」捐献入口（1/0，默认 1 = 显示）。
    *

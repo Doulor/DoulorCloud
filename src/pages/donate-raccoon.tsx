@@ -33,6 +33,8 @@ type DonationRow = {
 
 function buildBookmarklet(code: string): string {
   // 注意：不要在这里用正则取 cookie —— 书签要经过多层转义，反斜杠极易被吃掉。
+  // 2026-10-27：点击后**先**弹一个浮层说「处理中」，再发请求 —— 捐献要走
+  // Worker → 入池网关 → 面板，真实耗时 5~20 秒，原来期间页面上毫无反应，用户以为没点上。
   const script =
     "(async()=>{try{" +
     "const H=location.hostname;" +
@@ -40,13 +42,40 @@ function buildBookmarklet(code: string): string {
     "const parts=('; '+document.cookie).split('; xhx_token=');" +
     "const t=parts.length>1?parts[1].split(';')[0]:'';" +
     "if(!t){return alert('没有读到小浣熊登录状态。\\n当前页面：'+H+'\\n请确认在这个浏览器里登录过 xiaohuanxiong.com');}" +
+    "const box=document.createElement('div');" +
+    "box.style.cssText='position:fixed;z-index:2147483647;left:50%;top:24px;transform:translateX(-50%);background:#111;color:#fff;padding:16px 22px;border-radius:12px;font:14px/1.7 system-ui,-apple-system,sans-serif;box-shadow:0 10px 34px rgba(0,0,0,.4);max-width:92vw;text-align:center';" +
+    "box.textContent='⏳ 正在处理捐献，请稍等…（通常 5~20 秒，请不要关闭本页面）';" +
+    "document.body.appendChild(box);" +
+    "const done=(ok,text,url)=>{box.textContent='';box.style.background=ok?'#0f7b3f':'#8a1f1f';box.textContent=text;if(url){const a=document.createElement('a');a.href=url;a.target='_blank';a.textContent='\\n→ 回到 Doulor Cloud 查看捐献记录';a.style.cssText='display:block;margin-top:8px;color:#9ecbff;text-decoration:underline';box.appendChild(a);}setTimeout(()=>box.remove(),ok?20000:25000);};" +
     "const r=await fetch('https://cloud.doulor.cn/api/donations/raccoon/claim',{method:'POST'," +
     "headers:{'content-type':'text/plain;charset=UTF-8'}," +
     "body:JSON.stringify({code:'" + code + "',accessToken:t})});" +
     "const j=await r.json();" +
-    "alert(j.ok?('✅ 捐献成功，已加入 Doulor 号池'+(j.duplicate?'（这个号已经在池子里了）':''))" +
-    ":('❌ 失败：'+(j.detail||j.reason||'未知错误')));" +
-    "}catch(e){alert('出错了：'+e.message)}})();"
+    "if(j.ok){done(true,'✅ 捐献成功！账号已加入 Doulor 号池'+(j.duplicate?'（这个号之前就在池子里）':'')+'\\n每日额度会在 1 分钟内生效','https://cloud.doulor.cn/dashboard/donations/raccoon');}" +
+    "else{done(false,'❌ 失败：'+(j.reason==='code_invalid'?'捐献码已失效（旧书签里的码用过或过期）——请回捐献页重新生成，并把新书签重新拖到书签栏':(j.detail||j.reason||'未知错误')),'https://cloud.doulor.cn/dashboard/donations/raccoon');}" +
+    "}catch(e){const b=document.createElement('div');b.style.cssText='position:fixed;z-index:2147483647;left:50%;top:24px;transform:translateX(-50%);background:#8a1f1f;color:#fff;padding:16px 22px;border-radius:12px;font:14px/1.7 system-ui,sans-serif;max-width:92vw;text-align:center';b.textContent='❌ 出错了：'+e.message+'（可能是网络问题，请重试）';document.body.appendChild(b);setTimeout(()=>b.remove(),20000);}});";
+  return "javascript:" + script
+}
+
+/**
+ * 「只取 token」书签（2026-10-27 新增的兜底路径）。
+ *
+ * 为什么需要：一键捐献书签要跨域 POST，可能被 CORS / CSP / 网关故障挡住，
+ * 而用户看到的只是一句技术错误，无法自救。这个书签只读 cookie、把 token 复制到
+ * 剪贴板（或弹框让他手动复制），零网络依赖 —— 出任何问题用户都能自己看清楚。
+ *
+ * ⚠️ 注意不能用 copy()：那是 DevTools Console 专用函数，书签环境里不存在。
+ */
+function buildTokenBookmarklet(): string {
+  const script =
+    "(()=>{" +
+    "const p=('; '+document.cookie).split('; xhx_token=');" +
+    "const t=p.length>1?p[1].split(';')[0]:'';" +
+    "if(!t){alert('没读到 xhx_token：可能未登录，或它是 HttpOnly，JS 读不到');return;}" +
+    "(navigator.clipboard&&navigator.clipboard.writeText?navigator.clipboard.writeText(t):Promise.reject())" +
+    ".then(()=>alert('已复制 xhx_token，回捐献页粘贴提交'))" +
+    ".catch(()=>prompt('手动复制这段：',t));" +
+    "})();"
   return "javascript:" + script
 }
 
@@ -61,22 +90,77 @@ export default function DonateRaccoonPage() {
 
   const bookmarklet = React.useMemo(() => (code ? buildBookmarklet(code) : ""), [code])
 
+  /**
+   * ⚠️ React 19 会把 `href="javascript:…"` 直接拦掉，换成
+   * `javascript:throw new Error('React has blocked a javascript: URL as a security precaution.')`
+   * —— 用户拖到书签栏的就是这句报错，等于书签彻底不能用。
+   * 所以必须绕开 React 的属性处理，用原生 setAttribute 设 href。
+   */
+  const bmRef = React.useRef<HTMLAnchorElement>(null)
+  const bmTokenRef = React.useRef<HTMLAnchorElement>(null)
+
+  React.useEffect(() => {
+    if (bmRef.current) {
+      if (bookmarklet) bmRef.current.setAttribute("href", bookmarklet)
+      else bmRef.current.removeAttribute("href")
+    }
+  }, [bookmarklet])
+
+  React.useEffect(() => {
+    if (bmTokenRef.current) bmTokenRef.current.setAttribute("href", buildTokenBookmarklet())
+  }, [])
+
   const loadMine = React.useCallback(async () => {
     try {
       const r = await fetch("/api/donations/raccoon/mine", { credentials: "include" })
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       const d = (await r.json()) as { donations?: DonationRow[] }
-      setRows(d.donations ?? [])
+      const next = d.donations ?? []
+      if (!firstLoadRef.current) {
+        const fresh = next.find((n) => !rowsRef.current.some((o) => o.id === n.id))
+        if (next.length > rowsRef.current.length && fresh) {
+          setSuccessInfo({ name: fresh.account_name || "新账号" })
+          toast.success("捐献成功！")
+        }
+      }
+      firstLoadRef.current = false
+      rowsRef.current = next
+      setRows(next)
     } catch {
       setRows([])
     }
   }, [])
 
+  /**
+   * 捐献完成后回到本站要**看得见**地告诉他成功（2026-10-27 站长要求）。
+   *
+   * 捐献是在小浣熊页面点书签完成的，本站无法直接收到结果 —— 所以这里：
+   *   · 每 8 秒（仅页面可见时）拉一次「我的捐献」，并监听 focus/visibilitychange；
+   *   · 发现记录数变多 → 顶部显示显眼的绿色成功横幅（含账号名与额度变化）。
+   */
+  const [successInfo, setSuccessInfo] = React.useState<{ name: string } | null>(null)
+  const rowsRef = React.useRef<DonationRow[]>([])
+  const firstLoadRef = React.useRef(true)
+
   React.useEffect(() => {
     void loadMine()
   }, [loadMine])
 
-  const generate = async () => {
+  React.useEffect(() => {
+    const tick = () => {
+      if (document.visibilityState === "visible") void loadMine()
+    }
+    const id = window.setInterval(tick, 8000)
+    document.addEventListener("visibilitychange", tick)
+    window.addEventListener("focus", tick)
+    return () => {
+      window.clearInterval(id)
+      document.removeEventListener("visibilitychange", tick)
+      window.removeEventListener("focus", tick)
+    }
+  }, [loadMine])
+
+  const generate = async (): Promise<string | null> => {
     setGenerating(true)
     try {
       const r = await fetch("/api/donations/raccoon/code", { method: "POST", credentials: "include" })
@@ -84,9 +168,11 @@ export default function DonateRaccoonPage() {
       if (!r.ok || !d.code) throw new Error(d.message || "生成失败")
       setCode(d.code)
       setExpiresIn(d.expiresIn ?? 600)
-      toast.success("书签已生成，10 分钟内有效")
+      toast.success("书签已生成，24 小时内有效")
+      return d.code
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "生成失败")
+      return null
     } finally {
       setGenerating(false)
     }
@@ -102,23 +188,31 @@ export default function DonateRaccoonPage() {
     }
   }
 
+  const copyTokenBookmarklet = async () => {
+    try {
+      await navigator.clipboard.writeText(buildTokenBookmarklet())
+      toast.success("已复制「只取 token」书签代码")
+    } catch {
+      toast.error("复制失败，请直接拖拽按钮")
+    }
+  }
+
   const submitManual = async () => {
     const token = manual.trim()
     if (!token) {
       toast.error("先粘贴 xhx_token")
       return
     }
-    if (!code) {
-      toast.error("请先点上面的「生成捐献书签」")
-      return
-    }
+    // 没有码就顺手生成一个（用户可能只用「只取 token」书签，没点过生成）
+    const useCode = code || (await generate())
+    if (!useCode) return
     setSubmitting(true)
     try {
       const r = await fetch("/api/donations/raccoon/claim", {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code, accessToken: token }),
+        body: JSON.stringify({ code: useCode, accessToken: token }),
       })
       const d = (await r.json()) as { ok?: boolean; detail?: string; reason?: string; duplicate?: boolean }
       if (d.ok) {
@@ -205,10 +299,47 @@ export default function DonateRaccoonPage() {
         description="把账号的闲置额度接入号池，立刻可用。凭据由号池自动续期，随时可在小浣熊网页端退出登录撤销。"
       />
 
+      {successInfo ? (
+
+        <div className="rounded-lg border-2 border-emerald-500/60 bg-emerald-500/10 p-4">
+
+          <div className="flex items-start justify-between gap-3">
+
+            <div className="space-y-1">
+
+              <p className="text-base font-semibold text-emerald-600 dark:text-emerald-400">
+
+                ✅ 捐献成功！
+
+              </p>
+
+              <p className="text-sm">
+
+                账号「{successInfo.name}」已加入 Doulor 号池，每日免费额度将在 1 分钟内自动生效
+
+                （小浣熊每个账号 ¥200/天）。账号若被上游封禁，额度会自动收回并在这里提醒你重新登录。
+
+              </p>
+
+            </div>
+
+            <Button size="sm" variant="outline" onClick={() => setSuccessInfo(null)}>
+
+              知道了
+
+            </Button>
+
+          </div>
+
+        </div>
+
+      ) : null}
+
+
       <Card>
         <CardHeader>
           <CardTitle className="text-base">捐献步骤</CardTitle>
-          <CardDescription>只需要做一次；生成的码 10 分钟内有效、一次性。</CardDescription>
+          <CardDescription>只需要做一次；生成的码 24 小时内有效、一次性。</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
           <div className="flex gap-3">
@@ -224,7 +355,7 @@ export default function DonateRaccoonPage() {
                 </Button>
                 {code ? (
                   <>
-                    <a href={bookmarklet} className="inline-flex items-center rounded-md border px-3 py-2 text-sm font-medium hover:bg-accent">
+                    <a ref={bmRef} className="inline-flex items-center rounded-md border px-3 py-2 text-sm font-medium hover:bg-accent">
                       🦝 捐献小浣熊
                     </a>
                     <Button variant="outline" onClick={() => void copyBookmarklet()}>
@@ -274,14 +405,27 @@ export default function DonateRaccoonPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">书签点不动？手动粘贴</CardTitle>
+          <CardTitle className="text-base">备用方案：只取 token 手动提交</CardTitle>
           <CardDescription>
-            在小浣熊页面按 F12 → Console，粘贴{" "}
-            <code className="rounded bg-muted px-1 text-xs">document.cookie.match(/xhx_token=([^;]+)/)[1]</code>{" "}
-            回车，把输出的字符串粘到下面。
+            一键捐献失败时（跨域被拦 / 网关故障 / 码过期）用这条路：只读 cookie、不联网，
+            因此不会失败。拿到 token 后回本页粘贴提交，码会自动补一个。
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              ref={bmTokenRef}
+              className="inline-flex items-center rounded-md border px-3 py-2 text-sm font-medium hover:bg-accent"
+            >
+              📋 只取 token
+            </a>
+            <Button variant="outline" size="sm" onClick={() => void copyTokenBookmarklet()}>
+              复制这段书签代码
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              拖到收藏夹栏，在小浣熊页面点它 → token 进剪贴板
+            </span>
+          </div>
           <Textarea
             value={manual}
             onChange={(e) => setManual(e.target.value)}

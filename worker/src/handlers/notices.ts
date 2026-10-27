@@ -115,7 +115,7 @@ async function checkDonation(
   for (const ch of channels) {
     if (ch === "wb") {
       const row = await env.DB.prepare(
-        "SELECT 1 AS x FROM wb2api_bindings WHERE user_id = ? AND status = 'active' LIMIT 1"
+        "SELECT 1 AS x FROM wb2api_bindings WHERE user_id = ? AND status IN ('active','invalid') LIMIT 1"
       )
         .bind(userId)
         .first<{ x: number }>()
