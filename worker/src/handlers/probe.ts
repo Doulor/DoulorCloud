@@ -182,9 +182,17 @@ export async function probeModels(env: Env): Promise<void> {
         headers: { authorization: `Bearer ${env.PROBE_API_KEY}` },
       })
       const j = (await r.json()) as { data?: { id?: string }[] }
+      // 大小写不同的同名模型（DeepSeek-V4-Flash / deepseek-v4-flash）只留一个
+      const seen = new Set<string>()
       models = (j.data ?? [])
         .map((m) => String(m.id ?? ""))
-        .filter((id) => id && !id.toLowerCase().startsWith("donation-"))
+        .filter((id) => {
+          if (!id || id.toLowerCase().startsWith("donation-")) return false
+          const k = id.toLowerCase()
+          if (seen.has(k)) return false
+          seen.add(k)
+          return true
+        })
         .slice(0, 48)
       source = "v1models"
     } catch {
@@ -202,6 +210,14 @@ export async function probeModels(env: Env): Promise<void> {
       ).bind(m, source, now)
     )
   )
+
+  // 管理接口可用时，清掉回退期抓进来的旧清单（只保留真正已启用渠道的模型）
+  if (source === "channel") {
+    await env.DB.prepare("DELETE FROM probe_model_list WHERE source <> 'channel'").run().catch(() => undefined)
+    await env.DB.prepare(
+      `DELETE FROM probe_model_latest WHERE model NOT IN (SELECT model FROM probe_model_list)`
+    ).run().catch(() => undefined)
+  }
 
   // 2) 每轮只探最久没探过的 8 个（一次探几十个会被后台执行预算掐断）
   const due = await env.DB.prepare(
