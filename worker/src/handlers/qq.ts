@@ -925,7 +925,7 @@ export async function deleteMyQqBinding(env: Env, request: Request): Promise<Res
 async function handleGroupCommand(
   env: Env,
   groupOpenid: string,
-  _memberOpenid: string,
+  memberOpenid: string,
   verb: string,
   arg: string,
   msgId?: string,
@@ -1013,7 +1013,36 @@ async function handleGroupCommand(
   if (v === "羊毛") {
     // 2026-10-27 改：不再单独记台账，而是直接发到网站「资源共享」板块，
     // 群里和站内看到的是同一份内容（站长要求把冷清的模块用起来）。
-    const content = (arg || refBody || "").trim()
+    const raw = (arg || refBody || "").trim()
+
+    // 「羊毛 删除 <帖子ID>」—— 只能删自己发的（靠 qq_resource_posts 里记的 openid）
+    const delMatch = /^删除\s+([0-9a-fA-F-]{8,36})$/.exec(raw)
+    if (delMatch) {
+      const key = delMatch[1].toLowerCase()
+      const row = await env.DB.prepare(
+        `SELECT p.id AS id, m.member_openid AS member_openid
+           FROM posts p JOIN qq_resource_posts m ON m.post_id = p.id
+          WHERE p.category = 'resource' AND p.deleted_at IS NULL
+            AND (p.id = ? OR substr(p.id, 1, ?) = ?)`
+      )
+        .bind(key, key.length, key)
+        .first<{ id: string; member_openid: string | null }>()
+      if (!row) {
+        await sendGroupText(env, groupOpenid, `没找到这条资源共享帖（用帖子链接里的 ID，前 8 位就够）`, msgId)
+        return true
+      }
+      if (row.member_openid !== memberOpenid) {
+        await sendGroupText(env, groupOpenid, "只能删除自己发的资源共享帖。", msgId)
+        return true
+      }
+      await env.DB.prepare("UPDATE posts SET deleted_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), row.id)
+        .run()
+      await sendGroupText(env, groupOpenid, "🗑️ 已从「资源共享」删除。", msgId)
+      return true
+    }
+
+    const content = raw
     if (!content) {
       await sendGroupText(
         env,
@@ -1031,6 +1060,13 @@ async function handleGroupCommand(
     )
       .bind(postId, userId, content.slice(0, 1000), nowIso)
       .run()
+    // 记下发起人，供「羊毛 删除」判权
+    await env.DB.prepare(
+      "INSERT INTO qq_resource_posts (post_id, group_openid, member_openid, created_at) VALUES (?, ?, ?, ?)"
+    )
+      .bind(postId, groupOpenid, memberOpenid, Math.floor(Date.now() / 1000))
+      .run()
+      .catch(() => undefined)
     const brief = content.length > 40 ? content.slice(0, 40) + "…" : content
     await sendGroupText(
       env,
