@@ -51,6 +51,12 @@ h1{font-size:26px;font-weight:800;letter-spacing:-.4px;
 .p-red{background:rgba(248,113,113,.14);color:#fca5a5;border:1px solid rgba(248,113,113,.35)}
 .idx{font-family:ui-monospace,monospace;font-size:12px;color:#6b7280;min-width:26px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+.stat{background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);
+  border-radius:14px;padding:14px 16px}
+.statn{font-size:26px;font-weight:800;letter-spacing:-.5px;
+  background:linear-gradient(92deg,#fff,#a5b4fc);-webkit-background-clip:text;background-clip:text;color:transparent}
+.statl{font-size:12px;color:#8b93a7;margin-top:2px}
 .mrow{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;
   background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.075)}
 .mname{font-size:13.5px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -149,5 +155,43 @@ export function modelsHtml(rows: ModelRow[], time: string): string {
   <div class="sub">可用 ${okN} / ${known.length}${known.length < rows.length ? `（待探 ${rows.length - known.length}）` : ""}</div></div>
   <div class="grid">${body}</div>
   <div class="foot"><span>仅列出已启用渠道的模型（不含 donation）</span><span>10 分钟刷新</span></div>
+</div>`
+}
+
+export type WoolSummaryCounts = { open: number; done: number; dead: number }
+
+/** 羊毛汇总卡：三个数字 + 未领条目归纳 */
+export function woolSummaryHtml(
+  counts: WoolSummaryCounts,
+  openItems: WoolRow[],
+  time: string
+): string {
+  const total = counts.open + counts.done + counts.dead
+  const tiles = [
+    { n: counts.open, l: "未领" },
+    { n: counts.done, l: "已领" },
+    { n: counts.dead, l: "已过期" },
+  ]
+    .map((t) => `<div class="stat"><div class="statn">${t.n}</div><div class="statl">${t.l}</div></div>`)
+    .join("")
+
+  const body = openItems.length
+    ? openItems
+        .map(
+          (r) => `<div class="row"><span class="idx">#${r.seq}</span>
+        <div class="body"><div class="title">${esc(r.title)}</div>
+        <div class="meta">${esc(r.meta || "")}</div></div>
+        <span class="pill p-blue">未领</span></div>`
+        )
+        .join("")
+    : `<div class="row"><span class="name">暂无未领的羊毛</span></div>`
+
+  return `<!doctype html><meta charset="utf-8"><style>${CSS}</style>
+<div class="wrap"><div class="head">
+  <div><h1>羊毛汇总</h1><div class="sub" style="margin-top:6px">${esc(time)}</div></div>
+  <div class="sub">共 ${total} 条</div></div>
+  <div class="stats">${tiles}</div>
+  ${body}
+  <div class="foot"><span>用「羊毛 完成 N」标记已领</span><span>Doulor Cloud</span></div>
 </div>`
 }

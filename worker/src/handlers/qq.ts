@@ -1099,6 +1099,54 @@ async function handleGroupCommand(
     }
 
 
+    // 汇总：统计 + 未领条目归纳（站内提过要「能归纳」的需求）
+    if (sub === "汇总" || sub === "summary") {
+      const counts = await env.DB.prepare(
+        `SELECT status, COUNT(*) AS n FROM wool_items WHERE scope = 'group' AND scope_id = ? GROUP BY status`
+      )
+        .bind(groupOpenid)
+        .all<{ status: string; n: number }>()
+      const c = { open: 0, done: 0, dead: 0 }
+      for (const r of counts.results ?? []) {
+        if (r.status === "open") c.open = r.n
+        else if (r.status === "done") c.done = r.n
+        else if (r.status === "dead") c.dead = r.n
+      }
+      const opens = await env.DB.prepare(
+        `SELECT seq, title, created_at, expires_at FROM wool_items
+          WHERE scope = 'group' AND scope_id = ? AND status = 'open'
+          ORDER BY seq DESC LIMIT 8`
+      )
+        .bind(groupOpenid)
+        .all<{ seq: number; title: string; created_at: number; expires_at: number | null }>()
+      const openRows = (opens.results ?? []).map((r) => ({
+        seq: r.seq,
+        title: r.title,
+        status: "未领",
+        meta: r.expires_at
+          ? `${Math.max(0, Math.ceil((r.expires_at - now) / 3600))} 小时后过期`
+          : new Date(r.created_at * 1000).toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai" }),
+      }))
+      let sent = false
+      try {
+        const { woolSummaryHtml, shotHtml } = await import("./qq-card")
+        const png = await shotHtml(env, woolSummaryHtml(c, openRows, `${c.open + c.done + c.dead} 条记录`))
+        if (png && png.length > 1000) sent = await sendGroupImage(env, groupOpenid, png, msgId)
+      } catch (e) {
+        console.warn("羊毛汇总出图失败:", e instanceof Error ? e.message : e)
+      }
+      if (!sent) {
+        const body = openRows.map((r) => `🎁 #${r.seq} ${r.title}`).join("\n") || "暂无未领的羊毛"
+        await sendGroupText(
+          env,
+          groupOpenid,
+          `【羊毛汇总】未领 ${c.open} / 已领 ${c.done} / 过期 ${c.dead}\n${body.slice(0, 1200)}`,
+          msgId
+        )
+      }
+      return true
+    }
+
     // 默认：列表
     await env.DB.prepare(
       `UPDATE wool_items SET status = 'dead', updated_at = ?
