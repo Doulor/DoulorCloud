@@ -1099,6 +1099,45 @@ async function handleGroupCommand(
     }
 
 
+    // 输入编号（羊毛 5 / 羊毛 #5）→ 回该条的文字详情，方便复制给朋友
+    const numMatch = /^#?(\d+)$/.exec(sub)
+    if (numMatch) {
+      const seq = Number(numMatch[1])
+      const woolDetail = await env.DB.prepare(
+        `SELECT seq, title, source, link, value, note, status, expires_at, created_at
+           FROM wool_items WHERE scope = 'group' AND scope_id = ? AND seq = ?`
+      )
+        .bind(groupOpenid, seq)
+        .first<{
+          seq: number
+          title: string
+          source: string | null
+          link: string | null
+          value: string | null
+          note: string | null
+          status: string
+          expires_at: number | null
+          created_at: number
+        }>()
+      if (!woolDetail) {
+        await sendGroupText(env, groupOpenid, `没找到 #${seq}`, msgId)
+        return true
+      }
+      const fmt = (sec: number) =>
+        new Date(sec * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })
+      const st =
+        woolDetail.status === "done" ? "已领" : woolDetail.status === "dead" ? "已过期" : "未领"
+      const lines2 = [`#${woolDetail.seq} ${woolDetail.title}`, `状态：${st}`]
+      if (woolDetail.source) lines2.push(`来源：${woolDetail.source}`)
+      if (woolDetail.value) lines2.push(`价值：${woolDetail.value}`)
+      if (woolDetail.link) lines2.push(`链接：${woolDetail.link}`)
+      if (woolDetail.note) lines2.push(`备注：${woolDetail.note}`)
+      lines2.push(`记录：${fmt(woolDetail.created_at)}`)
+      if (woolDetail.expires_at) lines2.push(`过期：${fmt(woolDetail.expires_at)}`)
+      await sendGroupText(env, groupOpenid, lines2.join("\n"), msgId)
+      return true
+    }
+
     // 汇总：统计 + 未领条目归纳（站内提过要「能归纳」的需求）
     if (sub === "汇总" || sub === "summary") {
       const counts = await env.DB.prepare(
@@ -1160,7 +1199,8 @@ async function handleGroupCommand(
       .first<{ n: number }>()
     const total = totalRow?.n ?? 0
     const pages = Math.max(1, Math.ceil(total / 10))
-    const woolPage = Math.min(Math.max(Number(rest) || 1, 1), pages)
+    const isListSub = sub === "列表" || sub === "list"
+    const woolPage = Math.min(Math.max(isListSub ? Number(rest) || 1 : 1, 1), pages)
     const rows = await env.DB.prepare(
       `SELECT seq, title, status FROM wool_items WHERE scope = 'group' AND scope_id = ?
         ORDER BY seq DESC LIMIT 10 OFFSET ?`
@@ -1191,7 +1231,7 @@ async function handleGroupCommand(
         }))
         const pageNote =
           pages > 1 ? `第 ${woolPage}/${pages} 页 · 共 ${total} 条` : `未领 ${open} 条 · 共 ${total} 条`
-        const png = await shotHtml(env, woolHtml(rowsForCard, pageNote))
+        const png = await shotHtml(env, woolHtml(rowsForCard, pageNote, "发「羊毛 编号」看某条详情"))
         if (png && png.length > 1000) woolImg = await sendGroupImage(env, groupOpenid, png, msgId)
       } catch (e) {
         console.warn("羊毛出图失败:", e instanceof Error ? e.message : e)
