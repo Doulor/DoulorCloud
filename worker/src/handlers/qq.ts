@@ -95,6 +95,13 @@ async function accessToken(env: Env, cfg: QqConfigRow): Promise<string | null> {
       body: JSON.stringify({ appId: cfg.app_id, clientSecret: secret }),
     })
     const data = (await res.json()) as { access_token?: string; expires_in?: string | number }
+    try {
+      await env.DB.prepare("INSERT INTO qq_dbg (body, ts) VALUES (?, ?)")
+        .bind("TOKEN-RES " + String(data.access_token ? "ok" : "none") + " " + JSON.stringify(data).slice(0, 220), Math.floor(Date.now() / 1000))
+        .run()
+    } catch {
+      /* ignore */
+    }
     if (!data.access_token) return null
     const ttl = Number(data.expires_in ?? 7000)
     tokenCache = { token: data.access_token, exp: Date.now() + Math.max(60, ttl - 60) * 1000 }
@@ -145,7 +152,11 @@ export async function qqSignature(secret: string, eventTs: string, plainToken: s
  * webhook
  * ========================================================================== */
 
-export async function handleQqWebhook(env: Env, request: Request): Promise<Response> {
+export async function handleQqWebhook(
+  env: Env,
+  request: Request,
+  ctx?: ExecutionContext
+): Promise<Response> {
   const raw = new TextDecoder().decode(await readBodyCapped(request, 64 * 1024, "回调数据过大"))
   let payload: QqPayload
   try {
@@ -203,7 +214,16 @@ export async function handleQqWebhook(env: Env, request: Request): Promise<Respo
          * 两者 payload 结构相同，区别只是 GROUP_AT_MESSAGE_CREATE 的 content 里带 <@!...> 前缀。
          * 订阅了 GROUP_MESSAGE_CREATE 就等于「不用 @ 也能进站内」。
          */
-        await bridgeGroupMessage(env, payload.d)
+        // 出图/发消息要几秒，QQ 的 webhook 等不了 —— 立刻 ack，把处理丢到 waitUntil
+          if (ctx) {
+            ctx.waitUntil(
+              bridgeGroupMessage(env, payload.d).catch((e) =>
+                console.warn("群消息处理失败:", e instanceof Error ? e.message : e)
+              )
+            )
+          } else {
+            await bridgeGroupMessage(env, payload.d)
+          }
       }
     } catch (err) {
       // webhook 永远回 200，避免平台重投同一批事件
@@ -233,6 +253,30 @@ async function bridgeGroupMessage(env: Env, d: QqPayload["d"]): Promise<void> {
   // 占位符统一处理（表情 → emoji、图片 → markdown、@ → 去掉），
   // 再清掉开头的 `@某个名字`，避免把正文里的邮箱一起吃掉
   const text = normalizeQqText(rawText).replace(/^@\S+\s+/, "").trim()
+    // REFIDX 索引：QQ 的引用用的是 msg_idx/ref_msg_idx，不是 message id，
+    // 所以**每条**群消息都要登记，否则之后被引用时就查不到正文。
+    // REFIDX 索引：QQ 引用用的是 msg_idx/ref_msg_idx，不是 message id，必须自己建映射
+    const scene = (d as unknown as { message_scene?: { ext?: string[] }; message_type?: number })
+    const ext = scene.message_scene?.ext
+    const idxOf = (tag: string): string => {
+      // 不能直接用正则 tag+"="：会命中 "ref_msg_idx="，导致引用时覆盖被引用消息的正文
+      for (const e of ext || []) {
+        const str = String(e)
+        const at = str.indexOf(tag + "=")
+        if (at < 0) continue
+        const prev = at > 0 ? str[at - 1] : ""
+        if (prev && /[A-Za-z0-9_]/.test(prev)) continue
+        return str.slice(at + tag.length + 1).split(/[,\]\s]/)[0]
+      }
+      return ""
+    }
+    const ownIdx = scene.message_type === 103 ? "" : idxOf("msg_idx")
+    if (ownIdx) {
+    await env.DB.prepare(
+    "INSERT INTO qq_msg_index (group_openid, msg_idx, body, ts) VALUES (?, ?, ?, ?) " +
+    "ON CONFLICT(group_openid, msg_idx) DO UPDATE SET body=excluded.body, ts=excluded.ts"
+    ).bind(groupOpenid, ownIdx, text.slice(0, 500), Math.floor(Date.now() / 1000)).run().catch(() => undefined)
+    }
   if (!text) return
   /**
    * 群里的命令：
@@ -263,6 +307,52 @@ async function bridgeGroupMessage(env: Env, d: QqPayload["d"]): Promise<void> {
     )
     return
   }
+
+    // 状态 / 羊毛（谁都能用；识别不带前缀的中文命令）
+
+    // AT 事件的 content 带 <@!botid> 前缀（见上方注释），必须先剥掉再匹配指令
+    const cleanText = text.replace(/^(\s*<@!?[^>]*>)+\s*/g, "").trim()
+    const mine = /^[\s/!！]*(状态|status|羊毛)\s*([\s\S]*)$/i.exec(cleanText)
+    if (mine) {
+      // 引用消息：QQ 事件只给 ref_msg_idx（被引用消息的索引），正文要靠本地 chat_messages 反查
+      let refBody = ""
+      try {
+        const scene = (d as unknown as { message_scene?: { ext?: string[] }; message_type?: number })
+        const ext = scene.message_scene?.ext
+        const refIdx = (ext || [])
+          .map((x) => /ref_msg_idx=([^,\]\s]+)/.exec(String(x))?.[1])
+          .find(Boolean)
+        if (refIdx) {
+          const row = await env.DB.prepare(
+            "SELECT body FROM qq_msg_index WHERE group_openid = ? AND msg_idx = ? LIMIT 1"
+          )
+            .bind(groupOpenid, refIdx)
+            .first<{ body: string }>()
+          refBody = (row?.body ?? "").trim()
+          void logDbgRow(env, "REFHIT idx=" + refIdx.slice(0, 18) + " body=" + refBody.slice(0, 50))
+        }
+      } catch {
+        /* 引用解析失败不影响普通指令 */
+      }
+      // 任何异常都要回一句，否则表现为「完全没反应」，排查时无从下手
+      try {
+        const hasRef = (ext || []).some((x) => String(x).includes("ref_msg_idx="))
+        const hookRet = await handleGroupCommand(env, groupOpenid, memberOpenid, mine[1], (mine[2] || "").trim(), d.id, refBody, hasRef)
+          try {
+            await env.DB.prepare("INSERT INTO qq_dbg (body, ts) VALUES (?, ?)")
+              .bind("HOOK v=" + mine[1] + " msgId=" + (d.id ? "yes" : "NO") + " ret=" + hookRet, Math.floor(Date.now() / 1000))
+              .run()
+          } catch {
+            /* ignore */
+          }
+          if (hookRet) return
+      } catch (e) {
+        const msg = String((e as Error)?.message ?? e).slice(0, 120)
+        console.warn("指令执行失败:", msg)
+        await sendGroupText(env, groupOpenid, `指令执行出错：${msg}`, d.id).catch(() => undefined)
+        return
+      }
+    }
 
   // 其它以 / 或 ! 开头（或已知中文命令）的，一律不桥接，只提示去私聊
   const groupCmd = /^[\s/!！]([^\s]{1,32})(?:\s+([\s\S]*))?$/.exec(text)
@@ -837,6 +927,291 @@ export async function deleteMyQqBinding(env: Env, request: Request): Promise<Res
 }
 
 /** 群内被动回复（带 msg_id 才是「被动」消息，不消耗主动消息配额） */
+
+/**
+ * 状态 / 羊毛 指令（2026-10-26）。谁都能用，靠每用户限流兜底。
+ *
+ * 返回 true 表示已消费该消息，调用方直接 return。
+ */
+async function handleGroupCommand(
+  env: Env,
+  groupOpenid: string,
+  memberOpenid: string,
+  verb: string,
+  arg: string,
+  msgId?: string,
+  refBody = "",
+  hasRef = false
+): Promise<boolean> {
+  const cmd_t0 = Date.now()
+  const v = verb.replace(/^[\s/!！]+/, "")
+
+  if (v === "状态" || v.toLowerCase() === "status") {
+    // ⚠️ 不能在这里做外部 fetch：QQ webhook 要求快速应答，之前现场探测 3 个站点
+    // 导致调用被 Canceled（tail 里可见），机器人表现为「完全没反应」。
+    // 现在只读 D1 缓存（cron 写入），毫秒级返回。
+    const rows = await env.DB.prepare(
+      // 排除排查期误写进本表的调试行（dbg:*）与指令耗时行（cmd:*）
+      "SELECT name, ok, detail, ms, checked_at FROM probe_latest WHERE name NOT LIKE 'dbg:%' AND name NOT LIKE 'cmd:%' ORDER BY name"
+    ).all<{ name: string; ok: number; detail: string; ms: number; checked_at: number }>()
+    const items = rows.results ?? []
+    if (!items.length) {
+      await sendGroupText(
+        env,
+        groupOpenid,
+        "【Doulor 状态】\n暂无探测数据（探针尚未接入，下一版上线后这里会显示主站/中转站/模型状态）",
+        msgId
+      )
+      return true
+    }
+    const lines = items.map((r) => `${r.ok ? "🟢" : "🔴"} ${r.name} — ${r.detail || ""}${r.ms ? ` · ${r.ms}ms` : ""}`)
+    const last = Math.max(...items.map((r) => r.checked_at || 0))
+    const ago = last ? Math.max(0, Math.floor(Date.now() / 1000) - last) : 0
+    let sentImg = false
+    try {
+      const { statusHtml, shotHtml } = await import("./qq-card")
+      const rowsForCard = items.map((r) => ({ name: r.name, ok: !!r.ok, detail: r.detail || "", ms: r.ms || 0 }))
+      const png = await shotHtml(env, statusHtml(rowsForCard, `${ago}s 前 · ${rowsForCard.length} 项`))
+      void logDbgRow(env, "IMGSIZE " + (png ? png.length : 0) + " browser=" + (env.BROWSER ? "yes" : "NO"))
+      if (png && png.length > 1000) sentImg = await sendGroupImage(env, groupOpenid, png, msgId)
+    } catch (e) {
+      void logDbgRow(env, "IMGERRL " + (e instanceof Error ? e.message : String(e)).slice(0, 160))
+    }
+    if (!sentImg) {
+      await sendGroupText(env, groupOpenid, `【Doulor 状态】${ago}s 前\n${lines.join("\n")}`, msgId)
+    }
+    console.log("cmd:状态 用时", Date.now() - cmd_t0, "ms；数据龄", ago, "s")
+    return true
+  }
+
+  if (v === "羊毛") {
+    let effArg = arg
+    // 「引用某条消息 + @机器人 羊毛」→ 直接把被引用的正文当作要记的内容
+    // 引用了但查不到正文：明确提示，别静默变成清单
+    if (!effArg.trim() && !refBody) {
+      if (hasRef) {
+        await sendGroupText(
+          env,
+          groupOpenid,
+          "没找到被引用的消息正文（可能机器人当时不在线）。可以改用「羊毛 加 内容」手动记录。",
+          msgId
+        )
+        return true
+      }
+    }
+    if (!effArg.trim() && refBody) effArg = "加 " + refBody
+    else if (/^[^\s]+$/.test(effArg.trim()) && refBody && ["加", "add"].includes(effArg.trim().toLowerCase()))
+      effArg = "加 " + refBody
+
+    const m = /^(\S+)\s*([\s\S]*)$/.exec(effArg)
+    const sub = (m?.[1] ?? "列表").toLowerCase()
+    const rest = (m?.[2] ?? "").trim()
+    const now = Math.floor(Date.now() / 1000)
+
+    if (sub === "加" || sub === "add") {
+      if (!rest) {
+        await sendGroupText(env, groupOpenid, "用法：羊毛 加 <内容>（例如：羊毛 加 某云新人 10 元券）", msgId)
+        return true
+      }
+      const maxSeq =
+        (await env.DB.prepare(
+          "SELECT MAX(seq) AS m FROM wool_items WHERE scope = 'group' AND scope_id = ?"
+        ).bind(groupOpenid).first<{ m: number | null }>())?.m ?? 0
+      const seq = maxSeq + 1
+      const id = crypto.randomUUID()
+      const ts = now
+      await env.DB.prepare(
+        `INSERT INTO wool_items (id, seq, title, source, status, scope, scope_id, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'open', 'group', ?, ?, ?, ?)`
+      ).bind(id, seq, rest.slice(0, 120), "群友", groupOpenid, memberOpenid, ts, ts).run()
+      await sendGroupText(env, groupOpenid, `✅ 已记录 #${seq}：${rest.slice(0, 60)}`, msgId)
+      return true
+    }
+
+    if (sub === "完成" || sub === "done") {
+      const seq = Number(rest)
+      if (!Number.isFinite(seq)) {
+        await sendGroupText(env, groupOpenid, "用法：羊毛 完成 <编号>", msgId)
+        return true
+      }
+      const res = await env.DB.prepare(
+        "UPDATE wool_items SET status = 'done', updated_at = ? WHERE scope = 'group' AND scope_id = ? AND seq = ?"
+      ).bind(now, groupOpenid, seq).run()
+      const n = res.meta?.changes ?? 0
+      await sendGroupText(env, groupOpenid, n > 0 ? `✅ #${seq} 已标记为已领` : `没找到 #${seq}`, msgId)
+      return true
+    }
+
+    // 取消标记：把已领/失效改回「未领」（误标记时用）
+    if (sub === "取消" || sub === "undo" || sub === "恢复") {
+      const seq = Number(rest)
+      if (!Number.isFinite(seq)) {
+        await sendGroupText(env, groupOpenid, "用法：羊毛 取消 <编号>（把「已领」改回未领）", msgId)
+        return true
+      }
+      const res = await env.DB.prepare(
+        "UPDATE wool_items SET status = 'open', updated_at = ? WHERE scope = 'group' AND scope_id = ? AND seq = ?"
+      ).bind(now, groupOpenid, seq).run()
+      const n = res.meta?.changes ?? 0
+      await sendGroupText(env, groupOpenid, n > 0 ? `↩️ #${seq} 已改回未领` : `没找到 #${seq}`, msgId)
+      return true
+    }
+
+    // 删除记录：彻底移除（记错了用这个）
+    if (sub === "删除" || sub === "del" || sub === "remove") {
+      const seq = Number(rest)
+      if (!Number.isFinite(seq)) {
+        await sendGroupText(env, groupOpenid, "用法：羊毛 删除 <编号>", msgId)
+        return true
+      }
+      const res = await env.DB.prepare(
+        "DELETE FROM wool_items WHERE scope = 'group' AND scope_id = ? AND seq = ?"
+      ).bind(groupOpenid, seq).run()
+      const n = res.meta?.changes ?? 0
+      await sendGroupText(env, groupOpenid, n > 0 ? `🗑️ #${seq} 已删除` : `没找到 #${seq}`, msgId)
+      return true
+    }
+
+
+    // 默认：列表
+    await env.DB.prepare(
+      `UPDATE wool_items SET status = 'dead', updated_at = ?
+        WHERE scope = 'group' AND scope_id = ? AND status = 'open' AND expires_at IS NOT NULL AND expires_at <= ?`
+    ).bind(now, groupOpenid, now).run()
+    const rows = await env.DB.prepare(
+      "SELECT seq, title, status FROM wool_items WHERE scope = 'group' AND scope_id = ? ORDER BY seq DESC LIMIT 10"
+    ).bind(groupOpenid).all<{ seq: number; title: string; status: string }>()
+    const items = rows.results ?? []
+    if (!items.length) {
+      await sendGroupText(env, groupOpenid, "还没有羊毛记录。用「羊毛 加 <内容>」记一条。", msgId)
+      return true
+    }
+    const body = items
+      .map((it) => {
+        const tag = it.status === "done" ? "✅" : it.status === "dead" ? "⌛" : "🎁"
+        return `${tag} #${it.seq} ${it.title}`
+      })
+      .join("\n")
+    const open = items.filter((i) => i.status === "open").length
+    // 优先出图，失败降级文字
+      let woolImg = false
+      try {
+        const { woolHtml, shotHtml } = await import("./qq-card")
+        const rowsForCard = items.map((it) => ({
+          seq: it.seq,
+          title: it.title,
+          meta: it.status === "done" ? "已领" : it.status === "dead" ? "已过期" : "未领",
+          status: it.status === "done" ? "已领" : it.status === "dead" ? "已过期" : "可领",
+        }))
+        const png = await shotHtml(env, woolHtml(rowsForCard, `未领 ${open} 条 · 共 ${items.length} 条`))
+        if (png && png.length > 1000) woolImg = await sendGroupImage(env, groupOpenid, png, msgId)
+      } catch (e) {
+        console.warn("羊毛出图失败:", e instanceof Error ? e.message : e)
+      }
+      if (!woolImg) {
+        await sendGroupText(env, groupOpenid, `【羊毛清单】未领 ${open} 条\n${body}`, msgId)
+      }
+    return true
+  }
+
+  return false
+}
+
+/** 被动回复序号：同一 msg_id 必须递增且 ≤5（官方 API v2 强制要求 msg_seq） */
+const seqCache = new Map<string, number>()
+function nextSeq(msgId: string): number {
+  const cur = (seqCache.get(msgId) ?? 0) + 1
+  const v = Math.min(cur, 5)
+  seqCache.set(msgId, v)
+  return v
+}
+
+
+/**
+ * 发图片到群里（2026-10-27）。
+ *   ① POST /v2/groups/{openid}/files {file_type:1, file_data:<base64>, srv_send_msg:0} → file_info
+ *   ② POST /v2/groups/{openid}/messages {msg_type:7, media:{file_info}, msg_id, msg_seq}
+ * 图片由 env.BROWSER 渲染（handlers/qq-card.ts），不需要任何服务器。
+ */
+async function sendGroupImage(
+  env: Env,
+  groupOpenid: string,
+  png: Uint8Array,
+  msgId?: string
+): Promise<boolean> {
+  await logDbgRow(env, "IMGCALL bytes=" + png.length)
+  const cfg = await loadConfig(env)
+  if (!cfg.enabled) return false
+  const token = await accessToken(env, cfg)
+  if (!token) return false
+
+  // 分块转换：逐字符拼接在 Workers 里会超 CPU 限制
+  let bin = ""
+  const CHUNK = 8192
+  for (let i = 0; i < png.length; i += CHUNK) {
+    bin += String.fromCharCode(...png.subarray(i, Math.min(i + CHUNK, png.length)))
+  }
+  let fileData: string
+  try {
+    fileData = btoa(bin)
+  } catch (e) {
+    await logDbgRow(env, "IMGB64-THROW " + String((e as Error)?.message ?? e).slice(0, 120))
+    return false
+  }
+  await logDbgRow(env, "IMGUPLOAD-START b64len=" + fileData.length)
+
+  let up: Response
+  try {
+    up = await fetch(`${API}/v2/groups/${encodeURIComponent(groupOpenid)}/files`, {
+      method: "POST",
+      headers: { authorization: `QQBot ${token}`, "content-type": "application/json" },
+      // 注意：不要带 srv_send_msg——带 false 会 400(40011000)，带 true 会"上传即发送"导致重复一张图。
+      // 省略时返回 file_info 且不发送，再走 msg_type=7 精确回复（可带 msg_id，不烧主动额度）。
+      body: JSON.stringify({ file_type: 1, file_data: fileData }),
+    })
+  } catch (e) {
+    await logDbgRow(env, "IMGUPLOAD-THROW " + String((e as Error)?.message ?? e).slice(0, 160))
+    return false
+  }
+
+  const upText = await up.text()
+  await logDbgRow(env, "UPLOAD " + up.status + " " + upText.slice(0, 180))
+  if (!up.ok) return false
+
+  let fileInfo = ""
+  try {
+    fileInfo = (JSON.parse(upText) as { file_info?: string }).file_info ?? ""
+  } catch {
+    return false
+  }
+  if (!fileInfo) return false
+
+  const body: Record<string, unknown> = { content: " ", msg_type: 7, media: { file_info: fileInfo } }
+  if (msgId) {
+    body.msg_id = msgId
+    body.msg_seq = nextSeq(msgId)
+  }
+  const res = await fetch(`${API}/v2/groups/${encodeURIComponent(groupOpenid)}/messages`, {
+    method: "POST",
+    headers: { authorization: `QQBot ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  })
+  await logDbgRow(env, "SENDIMG " + res.status + " " + (await res.text()).slice(0, 140))
+  return res.ok
+}
+
+
+/** 诊断落库（排查完随 qq_dbg 一起删） */
+async function logDbgRow(env: Env, msg: string): Promise<void> {
+  try {
+    await env.DB.prepare("INSERT INTO qq_dbg (body, ts) VALUES (?, ?)")
+      .bind(msg.slice(0, 300), Math.floor(Date.now() / 1000))
+      .run()
+  } catch {
+    /* ignore */
+  }
+}
+
 async function sendGroupText(
   env: Env,
   groupOpenid: string,
@@ -854,9 +1229,14 @@ async function sendGroupText(
       body: JSON.stringify({
         content: content.slice(0, 1500),
         msg_type: 0,
-        ...(withMsgId && msgId ? { msg_id: msgId } : {}),
+        ...(withMsgId && msgId ? { msg_id: msgId, msg_seq: nextSeq(msgId) } : {}),
       }),
     })
+    try {
+      const clone = res.clone(); const txt = await clone.text();
+      await env.DB.prepare('INSERT INTO qq_dbg (body, ts) VALUES (?, ?)')
+        .bind('SEND ' + res.status + ' ' + txt.slice(0, 240), Math.floor(Date.now()/1000)).run();
+    } catch { /* ignore */ }
     if (res.ok) return { ok: true }
     const t = await res.text().catch(() => "")
     return { ok: false, err: t.slice(0, 200) }
@@ -869,7 +1249,7 @@ async function sendGroupText(
    *   再退化成**普通群消息**发一次 —— 宁可烧一条配额，也不能让用户
    *   绑成功了却看不到任何确认（站长就是被这个坑到的）。
    */
-  let r = await send(true)
+  let r = await send(false)
   if (!r.ok) {
     await logPush(env, "qq:group:reply:passive", groupOpenid, false, r.err)
     r = await send(false)
@@ -960,4 +1340,52 @@ export async function setMyQqLabel(env: Env, request: Request): Promise<Response
     .run()
   if (!res.meta.changes) throw new ApiError(404, "还没绑定 QQ", "NOT_BOUND")
   return json({ ok: true, label })
+}
+
+/** 自检：用 BOT_API_KEY 触发一次完整发送链路（排查用，可随时删）。 */
+export async function qqSelfTest(env: Env, request: Request): Promise<Response> {
+  const key = request.headers.get("x-bot-key") || ""
+  if (!env.BOT_API_KEY || key !== env.BOT_API_KEY) {
+    return new Response("forbidden", { status: 403 })
+  }
+  const body = (await request.json().catch(() => ({}))) as { group?: string; text?: string; msgId?: string; mode?: string }
+  const group = body.group || "C9F7819C50AFE975FE31AB3AF97CCF97"
+  const TEXT = body.text || "【自检】机器人链路测试"
+  if (body.mode === "probe") {
+    const { probeModels } = await import("./probe")
+    await probeModels(env)
+    const rows = await env.DB.prepare("SELECT name, ok, detail, ms FROM probe_latest WHERE name LIKE '模型%'").all<{ name: string; ok: number; detail: string; ms: number }>()
+    return new Response(JSON.stringify({ mode: "probe", rows: rows.results ?? [] }, null, 2),
+      { headers: { "content-type": "application/json" } })
+  }
+  if (body.mode === "img") {
+    const { statusHtml, shotHtml } = await import("./qq-card")
+    const png = await shotHtml(env, statusHtml([{ name: "自检", ok: true, detail: "HTTP 200", ms: 12 }], "自检"))
+    const bytes = png ? png.length : 0
+    const ok = png ? await sendGroupImage(env, group, png, undefined) : false
+    const rows0 = await env.DB.prepare("SELECT body FROM qq_dbg ORDER BY id DESC LIMIT 6").all<{ body: string }>()
+    return new Response(JSON.stringify({ mode: "img", bytes, ok, dbg: (rows0.results ?? []).map((r) => r.body) }, null, 2),
+      { headers: { "content-type": "application/json" } })
+  }
+  let cmdErr: string | null = null
+  if (body.mode === "cmd") {
+    try {
+      const raw = (body.text || "状态").trim()
+      const sp = raw.search(/\s/)
+      const verb = sp < 0 ? raw : raw.slice(0, sp)
+      const argText = sp < 0 ? "" : raw.slice(sp + 1).trim()
+      await handleGroupCommand(env, group, "selftest-openid", verb, argText, body.msgId, "", false)
+    } catch (e) {
+      cmdErr = String((e as Error)?.message ?? e).slice(0, 200)
+    }
+    const rows0 = await env.DB.prepare("SELECT body FROM qq_dbg ORDER BY id DESC LIMIT 8").all<{ body: string }>()
+    return new Response(JSON.stringify({ mode: "cmd", cmdErr, dbg: (rows0.results ?? []).map((r) => r.body) }, null, 2),
+      { headers: { "content-type": "application/json" } })
+  }
+  const ok = await sendGroupText(env, group, TEXT, body.msgId)
+  const rows = await env.DB.prepare("SELECT body FROM qq_dbg ORDER BY id DESC LIMIT 8").all<{ body: string }>()
+  return new Response(
+    JSON.stringify({ ok, dbg: (rows.results ?? []).map((r) => r.body) }, null, 2),
+    { headers: { "content-type": "application/json" } }
+  )
 }

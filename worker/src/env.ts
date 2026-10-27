@@ -26,6 +26,10 @@ export interface Env {
    * https://agent2api.doulor.cn/_donate/register 入池。缺省则捐献接口报未配置。
    */
   RACCOON_DONATE_KEY?: string
+  /** QQ 机器人（官方 Bot）调本站内部接口的共享密钥，见 handlers/wool.ts */
+  BOT_API_KEY?: string
+  /** 探针用的中转站 key（handlers/probe.ts），缺省则不探鉴权项 */
+  PROBE_API_KEY?: string
   /**
    * OIDC 协议元数据的规范来源（如 `https://cloud.doulor.cn`），可留空。
    *

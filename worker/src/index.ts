@@ -36,6 +36,10 @@ import * as galleryCommentHandlers from "./handlers/gallery-comments"
 import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
 import * as raccoonDonateHandlers from "./handlers/raccoon-donate"
+import * as raccoonHealthHandlers from "./handlers/raccoon-health"
+import * as woolHandlers from "./handlers/wool"
+import { qqSelfTest } from "./handlers/qq"
+import { runProbes } from "./handlers/probe"
 import * as voucherHandlers from "./handlers/vouchers"
 import * as wb2apiHandlers from "./handlers/wb2api"
 import * as groupSyncHandlers from "./handlers/group-sync"
@@ -704,7 +708,7 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     kind: "exact",
     path: "/qq/webhook",
     method: "POST",
-    handle: () => qqHandlers.handleQqWebhook(env, request),
+    handle: () => qqHandlers.handleQqWebhook(env, request, ctx),
   },
   {
     kind: "exact",
@@ -2488,6 +2492,45 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "OPTIONS",
     handle: () =>
       raccoonDonateHandlers.raccoonDonatePreflight(),
+  },
+  // ---- 羊毛记录（QQ 机器人调用，x-bot-key 鉴权）----
+  {
+    kind: "exact",
+    path: "/qq/selftest",
+    method: "POST",
+    handle: () => qqSelfTest(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/wool/add",
+    method: "POST",
+    handle: () => woolHandlers.woolAdd(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/wool/list",
+    method: "POST",
+    handle: () => woolHandlers.woolList(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/wool/done",
+    method: "POST",
+    handle: () => woolHandlers.woolDone(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/wool/summary",
+    method: "POST",
+    handle: () => woolHandlers.woolSummary(env, request),
+  },
+
+  {
+    // 手动触发小浣熊捐献账号巡检（?key= 内网密钥 或 管理员）
+    kind: "exact",
+    path: "/donations/raccoon/health",
+    method: "POST",
+    handle: () => raccoonHealthHandlers.triggerRaccoonHealth(env, request),
   },
   {
     kind: "exact",
@@ -5551,6 +5594,28 @@ export default {
     ctx: ExecutionContext
   ): Promise<void> {
     /**
+     * 小浣熊捐献账号巡检：每 15 分钟（2026-10-27）。
+     * 沿用「每分钟」那条 cron 取模触发，不新增触发器。
+     * 账号在号池里不可用 → 标 invalid → group-sync 下一轮自动收回该号额度，
+     * 同时发站内提醒；恢复后自动加回。
+     */
+    {
+      const t = new Date()
+      if (t.getUTCMinutes() % 15 === 0) {
+        ctx.waitUntil(
+          raccoonHealthHandlers
+            .checkRaccoonHealth(env)
+            .then((r) => {
+              if (r.invalidated || r.recovered || r.skipped) {
+                console.log("raccoon health:", JSON.stringify(r))
+              }
+            })
+            .catch((e) => console.error("raccoon health check failed:", e))
+        )
+      }
+    }
+
+    /**
      * frp 节点健康探测：每 5 分钟一次（2026-10-24）。
      *
      * 用现成的「每分钟」cron 取模触发，不新增 cron 表达式 —— 少一条触发器就少一处配置漂移。
@@ -5584,6 +5649,15 @@ export default {
           .catch((err) => console.warn("frp 健康探测失败:", err instanceof Error ? err.message : err))
       )
     }
+
+      // 站点/中转站探针：每 2 分钟写 probe_latest，/状态 指令只读缓存
+      if (new Date().getUTCMinutes() % 2 === 0) {
+        ctx.waitUntil(
+          runProbes(env).catch((err) =>
+            console.warn("探针失败:", err instanceof Error ? err.message : err)
+          )
+        )
+      }
 
     if (controller.cron === SCHEDULED_PUBLISH_CRON) {
       ctx.waitUntil(
