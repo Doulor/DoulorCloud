@@ -953,13 +953,13 @@ async function handleGroupCommand(
       )
       return true
     }
-    const lines = items.map((r) => `${r.ok ? "🟢" : "🔴"} ${r.name} — ${r.detail || ""}${r.ms ? ` · ${r.ms}ms` : ""}`)
+    const lines = items.map((r) => `${r.ok ? "🟢" : "🔴"} ${r.name} — ${(r.detail || "").slice(0, 24)}${r.ms ? ` · ${r.ms}ms` : ""}`)
     const last = Math.max(...items.map((r) => r.checked_at || 0))
     const ago = last ? Math.max(0, Math.floor(Date.now() / 1000) - last) : 0
     let sentImg = false
     try {
       const { statusHtml, shotHtml } = await import("./qq-card")
-      const rowsForCard = items.map((r) => ({ name: r.name, ok: !!r.ok, detail: r.detail || "", ms: r.ms || 0 }))
+      const rowsForCard = items.map((r) => ({ name: r.name, ok: !!r.ok, detail: (r.detail || "").slice(0, 22), ms: r.ms || 0 }))
       const png = await shotHtml(env, statusHtml(rowsForCard, `${ago}s 前 · ${rowsForCard.length} 项`))
       void logDbgRow(env, "IMGSIZE " + (png ? png.length : 0) + " browser=" + (env.BROWSER ? "yes" : "NO"))
       if (png && png.length > 1000) sentImg = await sendGroupImage(env, groupOpenid, png, msgId)
@@ -1343,7 +1343,7 @@ async function handlePrivateCommand(env: Env, openid: string, text: string): Pro
       await sendC2c(env, openid, "【Doulor 状态】暂无探测数据")
       return true
     }
-    const lines = items.map((r) => `${r.ok ? "🟢" : "🔴"} ${r.name} — ${r.detail || ""}${r.ms ? ` · ${r.ms}ms` : ""}`)
+    const lines = items.map((r) => `${r.ok ? "🟢" : "🔴"} ${r.name} — ${(r.detail || "").slice(0, 24)}${r.ms ? ` · ${r.ms}ms` : ""}`)
     const last = Math.max(...items.map((r) => r.checked_at || 0))
     const ago = last ? Math.max(0, Math.floor(Date.now() / 1000) - last) : 0
     await sendC2c(env, openid, `【Doulor 状态】${ago}s 前\n${lines.join("\n")}`)
