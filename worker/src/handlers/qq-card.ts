@@ -135,7 +135,7 @@ export function modelsHtml(rows: ModelRow[], time: string): string {
   <div><h1>模型状态</h1><div class="sub" style="margin-top:6px">${esc(time)}</div></div>
   <div class="sub">可用 ${okN} / ${known.length}${known.length < rows.length ? `（待探 ${rows.length - known.length}）` : ""}</div></div>
   <div class="grid">${body}</div>
-  <div class="foot"><span>仅列出已启用渠道的模型（不含 donation）</span><span>10 分钟刷新</span></div>
+  <div class="foot"><span>仅列出已启用渠道的模型（不含 donation）</span><span>发「模型」时按需刷新</span></div>
 </div>`
 }
 

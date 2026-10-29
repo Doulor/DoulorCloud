@@ -39,7 +39,7 @@ import * as raccoonDonateHandlers from "./handlers/raccoon-donate"
 import * as autoclawDonateHandlers from "./handlers/autoclaw-donate"
 import * as donationChannelsHandlers from "./handlers/donation-channels"
 import * as donationHealthHandlers from "./handlers/donation-health"
-import { runProbes, probeModels } from "./handlers/probe"
+import { runProbes } from "./handlers/probe"
 import * as voucherHandlers from "./handlers/vouchers"
 import * as wb2apiHandlers from "./handlers/wb2api"
 import * as groupSyncHandlers from "./handlers/group-sync"
@@ -5597,6 +5597,9 @@ export default {
      */
     {
       const t = new Date()
+      if (t.getUTCMinutes() % 1 === 0)
+        ctx.waitUntil(wb2apiHandlers.resumePendingWbLogins(env, 100))
+        ctx.waitUntil(qoder2apiHandlers.resumePendingQoderLogins(env, 100))
       if (t.getUTCMinutes() % 15 === 0) {
         ctx.waitUntil(
           donationHealthHandlers
@@ -5645,15 +5648,6 @@ export default {
           .catch((err) => console.warn("frp 健康探测失败:", err instanceof Error ? err.message : err))
       )
     }
-
-      // 模型可用性：每 5 分钟一轮（每轮 8 个，36 个模型约 25 分钟覆盖一遍）
-      if (new Date().getUTCMinutes() % 5 === 0) {
-        ctx.waitUntil(
-          probeModels(env).catch((err) =>
-            console.warn("模型探活失败:", err instanceof Error ? err.message : err)
-          )
-        )
-      }
 
       // 站点/中转站探针：每 2 分钟写 probe_latest，/状态 指令只读缓存
       if (new Date().getUTCMinutes() % 2 === 0) {

@@ -149,6 +149,7 @@ async function probeOneModel(
       method: "POST",
       headers: { authorization: `Bearer ${env.PROBE_API_KEY}`, "content-type": "application/json" },
       body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+      signal: AbortSignal.timeout(15000),
     })
     const ms = Date.now() - t0
     if (r.ok) return { model, ok: true, detail: "可用", ms }
@@ -160,7 +161,7 @@ async function probeOneModel(
 }
 
 /** 模型探活：每 10 分钟一轮，结果写 probe_model_latest（与服务探针分表） */
-export async function probeModels(env: Env): Promise<void> {
+export async function probeModels(env: Env, limit = 8): Promise<void> {
   if (!env.PROBE_API_KEY) return
 
   // 1) 候选清单：先问管理接口（已启用渠道），401/失败则回退 /v1/models 排除 donation-*
@@ -223,18 +224,24 @@ export async function probeModels(env: Env): Promise<void> {
   const due = await env.DB.prepare(
     `SELECT l.model AS model FROM probe_model_list l
      LEFT JOIN probe_model_latest p ON p.model = l.model
-     ORDER BY COALESCE(p.checked_at, 0) ASC LIMIT 8`
-  ).all<{ model: string }>()
+     ORDER BY COALESCE(p.checked_at, 0) ASC LIMIT ?`
+  )
+    .bind(limit)
+    .all<{ model: string }>()
   const batch = (due.results ?? []).map((r) => r.model)
   if (!batch.length) return
 
-  const results = await Promise.all(batch.map((m) => probeOneModel(env, m)))
-  await env.DB.batch(
-    results.map((r) =>
-      env.DB.prepare(
+  // 并发探，但每个跑完立刻落库：慢模型/超时不会让整轮结果全丢
+  await Promise.all(
+    batch.map(async (m) => {
+      const r = await probeOneModel(env, m)
+      await env.DB.prepare(
         `INSERT INTO probe_model_latest (model, ok, detail, ms, checked_at) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(model) DO UPDATE SET ok=excluded.ok, detail=excluded.detail, ms=excluded.ms, checked_at=excluded.checked_at`
-      ).bind(r.model, r.ok ? 1 : 0, r.detail, r.ms, now)
-    )
+      )
+        .bind(r.model, r.ok ? 1 : 0, r.detail, r.ms, now)
+        .run()
+        .catch(() => undefined)
+    })
   )
 }

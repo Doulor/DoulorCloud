@@ -974,6 +974,22 @@ async function handleGroupCommand(
   }
 
   if (v === "模型" || v.toLowerCase() === "models") {
+    // 按需探活（2026-10-30 站长要求）：不再跑定时任务，谁发「模型」就现探一轮，
+    // 5 分钟内重复请求直接用缓存，避免连点把额度打光。
+    try {
+      const lastRow = await env.DB.prepare("SELECT MAX(checked_at) AS t FROM probe_model_latest").first<{
+        t: number | null
+      }>()
+      const lastAt = lastRow?.t ?? 0
+      const ageSec = Math.floor(Date.now() / 1000) - lastAt
+      if (ageSec > 300) {
+        const { probeModels } = await import("./probe")
+        await probeModels(env, 3)
+      }
+    } catch (e) {
+      console.warn("按需探活失败:", e instanceof Error ? e.message : e)
+    }
+
     // 左连清单：没探过的也列出来（ok = null → 显示「待探测」），这样清单是完整的
     const rows = await env.DB.prepare(
       `SELECT l.model AS model, p.ok AS ok, p.ms AS ms, p.checked_at AS checked_at
