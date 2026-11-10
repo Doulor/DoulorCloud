@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { EmptyState } from "@/components/empty-state"
 import { LoadingBlock } from "@/components/loading-block"
 import { LinkifiedText } from "@/components/linkified-text"
+import { MailHtmlBody } from "@/components/mail-html-body"
 import { VerificationCodeChip } from "@/components/verification-code-chip"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -433,7 +434,7 @@ export default function EmailPage() {
     }
   }
 
-  /** 写邮件：以当前选中邮箱为发件人，站内互发（只发给本站根域邮箱） */
+  /** 写邮件：以当前选中邮箱为发件人；站内直接落库，站外走发信通道链 */
   const handleSendInternal = async () => {
     if (!selected || composeBusy) return
     const to = composeTo.trim()
@@ -447,7 +448,11 @@ export default function EmailPage() {
         subject: composeSubject.trim(),
         text,
       })
-      toast.success(t("em.ok.sentInternal", { to: res.to }))
+      toast.success(
+        res.external
+          ? t("em.ok.sentExternal", { to: res.to })
+          : t("em.ok.sentInternal", { to: res.to }),
+      )
       // 发完清空并关闭；如果收件人就是自己当前这个邮箱，顺手刷新列表让它立刻出现
       setComposeOpen(false)
       setComposeTo("")
@@ -708,7 +713,7 @@ export default function EmailPage() {
                 setComposeOpen(true)
               }}
               disabled={!selected}
-              title={t("em.composeOnlyInternal")}
+              title={t("em.composeHint")}
             >
               <Send className="h-4 w-4" />
               {t("em.compose")}
@@ -779,10 +784,18 @@ export default function EmailPage() {
                   </div>
                 </button>
                 <div className="flex shrink-0 items-center gap-1">
+                  {/*
+                    删除按钮：桌面端「鼠标移上去才出现」，**触屏端常显**。
+                    Tailwind v4 把 `group-hover:` 整段包在 `@media (hover: hover)` 里，
+                    触屏设备这条媒体查询永远不成立 ⇒ 按钮一直是 `hidden`，
+                    手机上根本没有删除邮箱的入口（2026-11-08 站长反馈）。
+                    这里用 `pointer-coarse:block` 兜触屏（判定同 lab/parts.tsx）；
+                    iPad 接了触控板时两条规则可能同时命中，但都是 display:block，不冲突。
+                  */}
                   {!mb.primary && (
                     <button
                       type="button"
-                      className="hidden rounded p-1 text-muted-foreground hover:text-destructive group-hover:block"
+                      className="hidden rounded p-1 text-muted-foreground hover:text-destructive group-hover:block pointer-coarse:block"
                       onClick={() => void handleDeleteMailbox(mb)}
                       aria-label={t("em.deleteAria", { address: mb.address })}
                     >
@@ -1113,7 +1126,7 @@ export default function EmailPage() {
         </DialogContent>
       </Dialog>
 
-      {/* 写邮件（站内互发：只发给本站邮箱，直接落对方收件箱，不需付费通道） */}
+      {/* 写邮件：站内互发直接落库；站外走发信通道链（Brevo → CF Send） */}
       <Dialog open={composeOpen} onOpenChange={setComposeOpen}>
         <DialogContent>
           <DialogHeader>
@@ -1124,7 +1137,7 @@ export default function EmailPage() {
           </DialogHeader>
           <p className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-            <span>{t("em.composeOnlyInternal")}</span>
+            <span>{t("em.composeHint")}</span>
           </p>
           <div className="space-y-2">
             <Label htmlFor="composeTo">{t("em.composeTo")}</Label>
@@ -1359,6 +1372,21 @@ function MailMessageView({
   const [replyOpen, setReplyOpen] = React.useState(false)
 
   /**
+   * 富文本 / 纯文本视图。
+   *
+   * 默认走富文本（有 HTML 时），但**永远保留纯文本出口**：
+   *   · 历史邮件与纯文本邮件没有 html_body，只能是纯文本；
+   *   · 消毒时图片被删、`<style>` 被丢，个别邮件在富文本下确实会比原文简陋，
+   *     用户需要能切回去看原始文字。
+   */
+  const hasRich = Boolean(message.bodyHtml)
+  const [view, setView] = React.useState<"rich" | "plain">("rich")
+  // 换一封信时重置：上一封选的是纯文本，不该影响下一封
+  React.useEffect(() => {
+    setView(message.bodyHtml ? "rich" : "plain")
+  }, [message.id, message.bodyHtml])
+
+  /**
    * 回信走 mailto：点一下把收件人/主题/原文引用填进本机邮件客户端，
    * 在那边点发送（发件人是用户自己真实邮箱，完全免费、立刻可用）。
    *
@@ -1461,15 +1489,60 @@ function MailMessageView({
            * 后端 `htmlToText` 同时补了一条：`<a href>` 的地址会保留进正文，
            * 否则「点击这里验证」这类邮件的地址根本不会出现。
            * 点击走全站统一的外链确认弹窗（收信人点的是陌生人给的链接）。
+           *
+           * 2026-11-08：有 HTML 版本时默认渲染富文本（见 components/mail-html-body.tsx）。
+           * 消毒在后端入库时就做完了，这里只是把它放进沙箱 iframe —— 两层防御，
+           * 任何一层失效都不会变成同源 XSS。纯文本视图完整保留，随时可切回。
            */
           <>
-            {/* 识别到验证码就给一键复制（识别不出就不显示，绝不误导） */}
+            {/* 识别到验证码就给一键复制（识别不出就不显示，绝不误导）。两种视图都给，
+                因为富文本里的验证码未必能被圈出来，用户还是想一键复制 */}
             <VerificationCodeChip text={message.body} />
-            <LinkifiedText
-              text={message.body}
-              className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed"
-              fallback={t("em.noBody")}
-            />
+
+            {hasRich && (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="inline-flex rounded-md border p-0.5">
+                  {(
+                    [
+                      { key: "rich", label: t("em.viewRich") },
+                      { key: "plain", label: t("em.viewPlain") },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      onClick={() => setView(opt.key)}
+                      className={cn(
+                        "rounded px-2.5 py-1 text-xs transition-colors",
+                        view === opt.key
+                          ? "bg-muted font-medium text-foreground"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                {view === "rich" && (
+                  <span className="text-[11px] text-muted-foreground">
+                    {t("em.richBlocked")}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {view === "rich" && message.bodyHtml ? (
+              <MailHtmlBody
+                html={message.bodyHtml}
+                title={message.subject || t("em.viewRich")}
+              />
+            ) : (
+              <LinkifiedText
+                text={message.body}
+                className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed"
+                fallback={t("em.noBody")}
+              />
+            )}
           </>
         )}
 

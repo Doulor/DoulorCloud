@@ -870,6 +870,60 @@ export async function putObject(
   await r2OrError(res, "上传")
 }
 
+/**
+ * 服务端复制对象（2026-10-30 网盘「复制 / 剪切」）。
+ *
+ * 为什么要服务端复制：`CopyObject` 由 R2 内部完成，文件**不经过 Worker 带宽、
+ * 也不经过浏览器**。让前端「下载再上传」既慢又费流量，还会丢掉原来的
+ * Content-Type（直链打开会变成纯文本下载）。
+ *
+ * token 模式（Cloudflare REST API）没有 CopyObject ⇒ 退化成「GET 读出来再 PUT
+ * 回去」，流式转发不落内存，语义一致、只是多花一趟 Worker 带宽。
+ *
+ * ⚠️ 只在**同一个桶**内复制：跨桶（不同 R2 账号）时 CopyObject 的
+ * `x-amz-copy-source` 指向的桶未必在同一个 endpoint 上，源文件也可能在别的账户里。
+ * 调用方应把目标选在源文件所在的桶（handlers/storage.ts 的 copyStorageObjects 就是这么做的）。
+ */
+export async function copyObject(
+  env: Env,
+  srcKey: string,
+  destKey: string,
+  bucketId?: string | null,
+  contentType?: string | null
+): Promise<void> {
+  const cfg = await resolveBucket(env, bucketId)
+
+  if (cfg.mode === "token") {
+    const src = await cfApiFetch(cfg, "GET", srcKey)
+    if (!src.ok) {
+      const body = (await src.text().catch(() => "")).slice(0, 300)
+      console.error(`[r2] 复制读取源失败 status=${src.status} body=${body}`)
+      if (src.status === 404) throw new ApiError(404, "文件不存在", "NOT_FOUND")
+      throw new ApiError(502, `R2 复制失败（上游状态 ${src.status}）`, "R2_ERROR")
+    }
+    const type =
+      contentType || src.headers.get("content-type") || "application/octet-stream"
+    const res = await cfApiFetch(cfg, "PUT", destKey, {}, {
+      body: src.body,
+      headers: { "Content-Type": type },
+    })
+    await r2OrError(res, "复制")
+    return
+  }
+
+  // S3 模式：PUT + x-amz-copy-source（源路径要按 S3 规则再编码一次）
+  const copySource = `/${cfg.bucket}/${encodeS3Path(srcKey)}`
+  const res = await r2Fetch(
+    env,
+    "PUT",
+    destKey,
+    {},
+    { headers: { "x-amz-copy-source": copySource } },
+    bucketId
+  )
+  await r2OrError(res, "复制")
+}
+
 export async function deleteObject(
   env: Env,
   key: string,

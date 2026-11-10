@@ -15,6 +15,19 @@ import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
 import { getSetting, getSettingBool, getSettingNumber, siteOffsetHours, siteDayString } from "../settings"
 import { applyPoints } from "../points"
+import { achievementPointsOf, loadHistoryLevels, loadUserCounts } from "./achievements"
+
+/**
+ * 自动签到的门槛：成就点数达到「名人」档（36 点）才解锁（2026-10-29 站长要求）。
+ * 未达标时前端会提示「成就层级不够」，服务端也会拒绝开启。
+ */
+const AUTO_CHECKIN_MIN_POINTS = 36
+
+async function userAchievementPoints(env: Env, userId: string): Promise<number> {
+  const counts = await loadUserCounts(env, userId)
+  const history = await loadHistoryLevels(env, userId)
+  return achievementPointsOf(counts, history)
+}
 import {
   parseCheckinMilestones,
   parseCheckinRange,
@@ -23,12 +36,31 @@ import {
 } from "../checkin-config"
 import type { Env } from "../env"
 
-/** 某个日期字符串的前一天 */
-function prevDateString(dateStr: string): string {
+/** 某个日期字符串往前 n 天（n >= 1） */
+function dateStringBefore(dateStr: string, n: number): string {
   const d = new Date(`${dateStr}T00:00:00Z`)
-  d.setUTCDate(d.getUTCDate() - 1)
+  d.setUTCDate(d.getUTCDate() - n)
   return d.toISOString().slice(0, 10)
 }
+
+/** 某个日期字符串的前一天 */
+function prevDateString(dateStr: string): string {
+  return dateStringBefore(dateStr, 1)
+}
+
+/**
+ * 补签窗口：只能补**最近 7 天**里漏掉的签到（2026-11-04 站长要求）。
+ *
+ * 为什么必须有下界：补签的本意是「偶尔忘了一天，别让连续天数断掉」。
+ * 不设下界的话，断签很久的账号可以攒一堆卡把过去全补上 —— 连续天数与
+ * 里程碑奖励就变成**可以补票**的东西（等于用卡买里程碑），
+ * 对每天老实签到的人也不公平。
+ *
+ * 口径：**含第 7 天**。今天是 11-04 时，10-28 ~ 11-03 这 7 天可补；
+ * 10-27 及更早一律拒绝（错误码 MAKEUP_OUT_OF_WINDOW）。
+ * 前端日历用同一个数字画「可点」的格子（由接口下发，别在两处各写一遍）。
+ */
+const MAKEUP_WINDOW_DAYS = 7
 
 /** 闭区间随机整数。用 crypto 而不是 Math.random —— 奖励发放不该可预测 */
 function randInt(min: number, max: number): number {
@@ -49,6 +81,8 @@ export interface CheckinStatus {
    * 所以必须由服务端给出权威值（见 src/components/auto-checkin.tsx）。
    */
   today: string
+  /** 补签窗口（天）：只有最近这么多天内的漏签可以补（2026-11-04） */
+  makeupWindowDays: number
   /** 今天是否已签到 */
   checkedIn: boolean
   /** 当前连续天数（今天已签则含今天，未签则指「已连续签到的天数」） */
@@ -68,6 +102,12 @@ export interface CheckinStatus {
   canMakeup: boolean
   /** 是否开了自动签到 */
   autoCheckin: boolean
+  /** 当前成就点数（自动签到的门槛依据） */
+  achievementPoints: number
+  /** 是否已解锁自动签到（成就点数 ≥ autoCheckinNeeded） */
+  autoCheckinUnlocked: boolean
+  /** 解锁所需的成就点数（36 = 「名人」档） */
+  autoCheckinNeeded: number
 }
 
 /**
@@ -99,6 +139,7 @@ export async function getCheckinStatus(env: Env, request: Request): Promise<Resp
     .first<{ c: number; a: number }>()
   const makeupCards = Number(balance?.c ?? 0)
   const autoCheckin = Number(balance?.a ?? 0) === 1
+  const achPoints = await userAchievementPoints(env, user.id)
   const yesterdayRow = await env.DB.prepare(
     `SELECT 1 FROM daily_checkins WHERE user_id = ? AND checkin_date = ?`
   )
@@ -125,6 +166,8 @@ export async function getCheckinStatus(env: Env, request: Request): Promise<Resp
   return json({
     enabled: true,
     today,
+    // 补签窗口（天）：前端据此只点亮「最近 N 天」的漏签格
+    makeupWindowDays: MAKEUP_WINDOW_DAYS,
     checkedIn: Boolean(todayRow),
     streak,
     todayPoints: todayRow?.points ?? 0,
@@ -135,6 +178,9 @@ export async function getCheckinStatus(env: Env, request: Request): Promise<Resp
     makeupCards,
     canMakeup,
     autoCheckin,
+    achievementPoints: achPoints,
+    autoCheckinUnlocked: achPoints >= AUTO_CHECKIN_MIN_POINTS,
+    autoCheckinNeeded: AUTO_CHECKIN_MIN_POINTS,
   } satisfies CheckinStatus)
 }
 
@@ -180,10 +226,12 @@ export async function checkinForUser(env: Env, userId: string): Promise<Response
     await getSettingNumber(env, "checkin_points_min"),
     await getSettingNumber(env, "checkin_points_max")
   )
-  const base = randInt(min, max)
+  // 连续签到超过 30 天 → 当天奖励翻倍（2026-10-29 站长要求）
+  const multiplier = streak > 30 ? 2 : 1
+  const base = randInt(min, max) * multiplier
   const milestones = parseCheckinMilestones(await getSetting(env, "checkin_milestones"))
   const bonus = milestoneBonusFor(streak, milestones)
-  const bonusPoints = bonus?.points ?? 0
+  const bonusPoints = (bonus?.points ?? 0) * multiplier
   const total = base + bonusPoints
 
   // 先加分（幂等），再写记录
@@ -218,6 +266,61 @@ export async function checkinForUser(env: Env, userId: string): Promise<Response
 }
 
 /**
+ * 补发「连续天数跳变时被跨过」的里程碑奖励（2026-11-03 用户反馈修复）。
+ *
+ * 事故：补签只改写连续天数、从来不发里程碑奖励 —— 而正常签到只匹配
+ * 「**恰好等于**当前连续天数」那一条（设计说明见 checkin-config.ts）。
+ * 于是「连续 29 天 → 第 30 天断签 → 补签卡补回 30 天」的人会看到里程碑 chip
+ * 变绿（前端按 streak >= days 判定），但 220 积分永远不会到账：补签把天数
+ * 直接推过 30，那条里程碑再也不会被「恰好命中」。
+ *
+ * 判据用「前一行的连续天数 → 这一行的连续天数」这个区间，而不是只看当前值：
+ * 补签补的可能是**中间**某天，末尾的重算会把后面整条链一起抬高，跨过的每一个
+ * 里程碑都得补（一次补多张卡时尤其明显）。
+ *
+ * 幂等靠 dedupKey 里的**日期**：`checkin-milestone:<用户>:<日期>:<天数>`。
+ * 为什么不是只按「用户+天数」去重：补签反复改写同一条链时，同一行会被再次
+ * 判定为「跨过 30 天」，但日期相同 ⇒ dedup 命中，不会重复发；而用户**另一段**
+ * 连续签到重新爬到 30 天时日期不同，仍应照常发奖（与正常签到的口径一致）。
+ */
+async function grantCrossedMilestones(
+  env: Env,
+  userId: string,
+  events: { date: string; prevStreak: number; streak: number }[],
+  milestones: { days: number; points: number }[]
+): Promise<{ days: number; points: number }[]> {
+  const granted: { days: number; points: number }[] = []
+  for (const ev of events) {
+    const crossed = milestones.filter((m) => m.days > ev.prevStreak && m.days <= ev.streak)
+    for (const m of crossed) {
+      // 翻倍规则与正常签到一致：只有「这一天正好就是里程碑那天」且该行连续天数
+      // 已超过 30 才吃 2 倍；跨过去补发的更早里程碑按原面额发。
+      const multiplier = m.days === ev.streak && ev.streak > 30 ? 2 : 1
+      const points = m.points * multiplier
+      const res = await applyPoints(env, {
+        userId,
+        delta: points,
+        reason: "checkin",
+        detail: `补签补发里程碑（连续签到第 ${m.days} 天）`,
+        dedupKey: `checkin-milestone:${userId}:${ev.date}:${m.days}`,
+      })
+      // 幂等命中（这一行这一天已经补发过）⇒ 什么都不做，别把账面再改一遍
+      if (!res.applied) continue
+      granted.push({ days: m.days, points })
+      // 记账到那一天：签到日历里能看到「这天补发了里程碑」，否则用户只看到
+      // 连续天数涨了、积分却对不上账。
+      await env.DB.prepare(
+        `UPDATE daily_checkins SET points = points + ?, bonus_points = bonus_points + ?
+          WHERE user_id = ? AND checkin_date = ?`
+      )
+        .bind(points, points, userId, ev.date)
+        .run()
+    }
+  }
+  return granted
+}
+
+/**
  * POST /api/checkin/makeup —— 补签（消耗一张补签卡，补指定日期的漏签）。
  *
  * body：`{ date?: "YYYY-MM-DD" }`，缺省补「昨天」（向后兼容）。
@@ -236,6 +339,16 @@ export async function makeupCheckin(env: Env, request: Request): Promise<Respons
 
   // 只能补「过去」的日期，今天与未来走正常签到
   if (target >= today) throw new ApiError(400, "只能补签过去的日期", "INVALID_MAKEUP_DATE")
+
+  // 且必须落在补签窗口内（最近 7 天）—— 允许无限往前补 = 里程牌可以补票
+  const windowStart = dateStringBefore(today, MAKEUP_WINDOW_DAYS)
+  if (target < windowStart) {
+    throw new ApiError(
+      400,
+      `只能补签最近 ${MAKEUP_WINDOW_DAYS} 天内漏掉的签到（${windowStart} 之后）`,
+      "MAKEUP_OUT_OF_WINDOW"
+    )
+  }
 
   // 该日已签 → 无需补
   const already = await env.DB.prepare(
@@ -304,6 +417,13 @@ export async function makeupCheckin(env: Env, request: Request): Promise<Respons
     .all<{ checkin_date: string }>()
   let prevDate = target
   let prevStreak = streak
+  /**
+   * 连续天数「跳变」的每一处：补签那天 + 被重算抬高的后续每一天。
+   * 补发里程碑就看这些区间（跨过哪几天就补哪天），见 grantCrossedMilestones。
+   */
+  const chainEvents: { date: string; prevStreak: number; streak: number }[] = [
+    { date: target, prevStreak: dayBefore?.streak ?? 0, streak },
+  ]
   for (const r of after.results ?? []) {
     const s = prevDateString(r.checkin_date) === prevDate ? prevStreak + 1 : 1
     await env.DB.prepare(
@@ -311,15 +431,23 @@ export async function makeupCheckin(env: Env, request: Request): Promise<Respons
     )
       .bind(s, user.id, r.checkin_date)
       .run()
+    chainEvents.push({ date: r.checkin_date, prevStreak, streak: s })
     prevDate = r.checkin_date
     prevStreak = s
   }
+
+  // 补签把连续天数推过了里程碑 → 当天就该发的奖励补上（2026-11-03 用户反馈）
+  const milestones = parseCheckinMilestones(await getSetting(env, "checkin_milestones"))
+  const milestonesGranted = await grantCrossedMilestones(env, user.id, chainEvents, milestones)
 
   return json({
     ok: true,
     makeupDate: target,
     streak,
     makeupCards: claimed.checkin_makeup_cards,
+    // 这次补签补发了哪些里程碑（前端用来提示「补发 220 积分」）
+    milestonesGranted,
+    grantedPoints: milestonesGranted.reduce((n, m) => n + m.points, 0),
   })
 }
 
@@ -356,6 +484,8 @@ export async function getCheckinHistory(env: Env, request: Request): Promise<Res
     month,
     today: siteDayString(new Date(), await siteOffsetHours(env)),
     makeupCards: Number(bal?.c ?? 0),
+    // 补签窗口（天）：日历据此判断哪些漏签日还能点（与后端校验同一口径）
+    makeupWindowDays: MAKEUP_WINDOW_DAYS,
     days: (rows.results ?? []).map((r) => ({
       date: r.checkin_date,
       points: Number(r.points ?? 0),
@@ -371,6 +501,16 @@ export async function setAutoCheckin(env: Env, request: Request): Promise<Respon
   const user = await requireUser(env, request)
   const body = (await request.json().catch(() => ({}))) as { enabled?: unknown }
   const enabled = body.enabled === true || body.enabled === "1"
+  if (enabled) {
+    const points = await userAchievementPoints(env, user.id)
+    if (points < AUTO_CHECKIN_MIN_POINTS) {
+      throw new ApiError(
+        403,
+        `成就层级不够：自动签到需要达到「名人」（${AUTO_CHECKIN_MIN_POINTS} 成就点），你当前 ${points} 点`,
+        "ACHIEVEMENT_TOO_LOW"
+      )
+    }
+  }
   await env.DB.prepare(
     `UPDATE users SET auto_checkin = ?, updated_at = ? WHERE id = ?`
   )

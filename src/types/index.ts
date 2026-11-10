@@ -99,6 +99,11 @@ export interface MailMessage {
   from: string
   subject: string
   body: string
+  /**
+   * 消毒后的 HTML 正文（后端已在入库时用白名单重建）。
+   * 为空表示这封信只有纯文本版本 —— 前端必须回落到 `body`。
+   */
+  bodyHtml?: string | null
   read: boolean
   receivedAt: string
 }
@@ -418,6 +423,11 @@ export interface AdminInvite {
   createdBy: string | null
   /** 创建者用户名（列表接口 LEFT JOIN 带出；老数据为 null） */
   createdByName?: string | null
+  /**
+   * 创建者已被封禁 —— 这张码**无法再被使用**（注册时会以 INVITE_DISABLED 拒掉）。
+   * 列表里必须显示出来，否则状态列写「可用」会误导管理员继续发放。
+   */
+  creatorBanned?: boolean
 }
 
 /** 邀请码溯源：谁建的、什么时候建的、谁用了、什么时候用的 */
@@ -637,6 +647,19 @@ export interface StorageList {
   truncated: boolean
   usedBytes: number
   quotaBytes: number
+}
+
+/** POST /storage/objects/copy —— 复制 / 移动的结果 */
+export interface StorageCopyResult {
+  mode: "copy" | "move"
+  /** 成功的文件数 */
+  count: number
+  /** 成功项：相对账号根目录的 from → to */
+  items: { from: string; to: string }[]
+  /** 单个文件失败（不阻断其余） */
+  failed: { path: string; message: string }[]
+  /** 剪贴板里已经不存在（被删 / 被移动）的路径 */
+  missing: string[]
 }
 
 /** 目录分享 */
@@ -1053,13 +1076,15 @@ export interface UserFrpRental {
  * ⚠️ 不含「个人名片」：名片不消耗资源，已从权限体系移出、全量开放。
  * ⚠️ 含 `relay_auto`：它不是功能模块，而是「中转站入驻免审」的资格位，
  *    但同样走这套按用户逐个授权的开关（后端 FEATURES 里有它，别漏）。
+ * ⚠️ **不含 `frp`**：内网穿透 2026-10-13 起改为积分租用，已从后端 FEATURES 移除
+ *    （permissions.ts 里有一段专门说明）。前端类型此前没跟着删，导致「顺手用
+ *    FeatureKey 生成下拉框」的代码（如积分商城的发放模块）又把它列了出来。
  */
-export type FeatureKey = "r2" | "ai" | "frp" | "proxy" | "doulor" | "dns" | "relay_auto"
+export type FeatureKey = "r2" | "ai" | "proxy" | "doulor" | "dns" | "relay_auto"
 
 export interface Permissions {
   r2: boolean
   ai: boolean
-  frp: boolean
   proxy: boolean
   /**
    * doulor.cn 专属域（子域名 + 邮箱）。
@@ -1091,7 +1116,6 @@ export interface Permissions {
 export const FEATURE_LABELS: Record<FeatureKey, string> = {
   r2: "feat.r2",
   ai: "feat.ai",
-  frp: "feat.frp",
   proxy: "feat.proxy",
   doulor: "feat.doulor",
   dns: "feat.dns",
@@ -1243,12 +1267,33 @@ export interface LeaderboardResponse {
 /**
  * 邮件通道密钥的展示信息（明文永不返回）。
  * `brevoKeys` 是**中间打码**的 Key 列表，顺序 = 发送时的轮询顺序。
+ *
+ * 2026-11-08：`postaConfigured` 随 Posta 通道下线删除，新增 `cf-send` 的两个字段。
  */
 export interface MailSecrets {
-  postaConfigured: boolean
+  /** `cf-send` 是否可用（面板填了 Token，或 Worker 里配了 CF Token） */
+  cfSendConfigured: boolean
+  /** Token 来源：panel（设置项）/ worker（Secret 或普通变量）/ none */
+  cfSendTokenSource: "panel" | "worker" | "none"
   brevoConfigured: boolean
   brevoKeyCount: number
   brevoKeys: string[]
+}
+
+/** CF 发信的月度预算（服务端本地计数，见 mailer.ts 的 cfMailBudget） */
+export interface CfMailBudget {
+  /** 本账期已计费的发送量 */
+  used: number
+  /** 上限（0 = 不限，会用出账单） */
+  cap: number
+  /** 计费窗口，YYYY-MM */
+  period: string
+  /** 是否已到上限（到量就不再走 CF，避免扣费） */
+  blocked: boolean
+  /** 套餐含的免费额度（封/账期） */
+  includedMonthly: number
+  /** 付费版：按当前用量估算的超额费用（$），免费版为 null */
+  overageUsd: number | null
 }
 
 export interface AdminSettings {
@@ -1863,13 +1908,35 @@ export interface CfQuotaOverview {
   planSetting: string
   /** 判定过程的一句人话解释 */
   planNote: string
-  /** 付费版：本月估算总费用（含 $5 订阅底价）；免费版为 null */
+  /** 计费周期起始日（每月几号翻篇，1–28；1 = 自然月） */
+  cycleDay: number
+  /** 本计费周期起点（`YYYY-MM-DD`，UTC） */
+  cycleStart: string
+  /** 本计费周期截止（= 今天，UTC） */
+  cycleEnd: string
+  /** 付费版：本周期估算总费用（含 $5 订阅底价）；免费版为 null */
   estimatedCostUsd: number | null
   /** 付费版：费用拆解 */
   costBreakdown: { label: string; detail: string; usd: number }[]
   /** 图形化概览（占用率最高的几项） */
   highlights: CfQuotaHighlight[]
   groups: CfQuotaGroup[]
+  /**
+   * 出站邮件（Email Sending）本账期用量。
+   * 数据是**本站自己的计数**（`mail_send_usage` 表），不是 CF 的账单接口 ——
+   * 它统计的是"本站发出去的"，用于在超额扣费之前踩刹车。
+   */
+  emailSending: {
+    used: number
+    /** 自设上限（0 = 不限，会出账单） */
+    cap: number
+    period: string
+    blocked: boolean
+    /** 套餐含的免费额度（封/账期） */
+    includedMonthly: number
+    /** 付费版：估算的超额费用（$） */
+    overageUsd: number | null
+  }
   /** 整体性提醒（如分析数据整体缺权限） */
   warnings: string[]
 }
@@ -1925,6 +1992,12 @@ export interface TempboxFile {
 
 export interface TempboxBatch {
   code: string
+  /**
+   * 当前访问者能不能删这个箱子里的文件。
+   * 只有创建者本人与管理员为 true —— 后端删除接口就是这么判的，
+   * 前端据此决定要不要渲染删除按钮（否则收件人点一下就是 403）。
+   */
+  canDelete?: boolean
   expireAt: string
   remainingMinutes: number
   fileCount: number
@@ -2426,6 +2499,11 @@ export interface MyInvitesOverview {
   rewards: {
     invitee: string
     planId: number
+    /**
+     * 这一笔发的是哪一档套餐（后端按两个可配的 plan id 归类）。
+     * ⚠️ 金额不在这里 —— 它由站长在设置里改，前端只按 plan 出词条。
+     */
+    plan: "wb" | "ai" | "other"
     grantedAt: string
   }[]
 }
@@ -3254,6 +3332,7 @@ export interface PointsConfig {
  *   · feature      —— 自动授予一个模块权限（deliveryParams.feature）
  *   · subscription —— 自动开通一个 NewAPI 订阅套餐（deliveryParams.planId）
  *   · invite_quota —— 自动增加邀请码创建额度（deliveryParams.count）
+ *   · mailbox_quota —— 自动增加邮箱数量上限（deliveryParams.count）
  *   · code         —— 卡密/Key：从卡密池取一条**各不相同**的发给买家（一人一条）
  *   · content      —— 统一内容：发一段**人人相同**的固定内容（deliveryParams.content）
  */
@@ -3264,6 +3343,7 @@ export type PointDelivery =
   | "subscription"
   | "invite_quota"
   | "checkin_makeup"
+  | "mailbox_quota"
   | "code"
   | "content"
 
@@ -3273,7 +3353,7 @@ export interface PointDeliveryParams {
   feature?: FeatureKey
   /** delivery='subscription'：NewAPI 套餐 id（管理员自己填） */
   planId?: number
-  /** delivery='invite_quota' / 'checkin_makeup'：数量（邀请码额度 / 补签卡张数） */
+  /** delivery='invite_quota' / 'checkin_makeup' / 'mailbox_quota'：数量（邀请码额度 / 补签卡张数 / 邮箱扩容个数） */
   count?: number
   /** delivery='content'：人人相同的固定交付内容（网盘链接 / 说明 / 通用兑换码） */
   content?: string
@@ -3654,6 +3734,8 @@ export interface AttentionCounts {
     eventClaims: number
     /** 内网穿透申请待审核（用户提交后等管理员批） */
     frpApplications: number
+    /** 用户自助创建、仍待审核的 OAuth 应用（2026-10-30） */
+    oauthApps: number
     /** 待处理的封禁申诉（2026-10-02） */
     appeals: number
   } | null

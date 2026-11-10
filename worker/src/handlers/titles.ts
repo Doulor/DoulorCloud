@@ -145,6 +145,23 @@ export async function createTitle(env: Env, request: Request): Promise<Response>
   const colorFrom = normalizeColor(body.colorFrom)
   const colorTo = normalizeColor(body.colorTo)
 
+  /**
+   * 重名检查。
+   *
+   * ⚠️ 称号不只是装饰：名字等于 `PREMIUM_TITLE_NAME`（"赞助伙伴"）的那一条
+   * 会额外开通 NewAPI「付费」分组（group-sync.ts）与 AI 付费直连地址免认证码
+   * （ai-access.ts）。那两处都是**按名字查**的，出现两个同名称号时谁生效取决于
+   * 查询顺序 —— 所以这里必须拒绝重名，而不是让它悄悄变成两条。
+   */
+  const dup = await env.DB.prepare(
+    "SELECT 1 AS x FROM custom_titles WHERE name = ? COLLATE NOCASE LIMIT 1"
+  )
+    .bind(name)
+    .first()
+  if (dup) {
+    throw new ApiError(409, `已经有一个叫「${name}」的称号了`, "TITLE_NAME_TAKEN")
+  }
+
   const id = uuid()
   await env.DB.prepare(
     "INSERT INTO custom_titles (id, name, color_from, color_to, created_at) VALUES (?, ?, ?, ?, ?)"
@@ -176,6 +193,16 @@ export async function updateTitle(env: Env, request: Request, id: string): Promi
   const name = normalizeName(body.name, row.name)
   const colorFrom = normalizeColor(body.colorFrom, row.color_from)
   const colorTo = normalizeColor(body.colorTo, row.color_to)
+
+  // 改名同样要防重名（理由见 createTitle 里的说明：名字就是权限开关的一部分）。
+  const dup = await env.DB.prepare(
+    "SELECT 1 AS x FROM custom_titles WHERE name = ? COLLATE NOCASE AND id != ? LIMIT 1"
+  )
+    .bind(name, id)
+    .first()
+  if (dup) {
+    throw new ApiError(409, `已经有一个叫「${name}」的称号了`, "TITLE_NAME_TAKEN")
+  }
 
   await env.DB.prepare(
     "UPDATE custom_titles SET name = ?, color_from = ?, color_to = ? WHERE id = ?"

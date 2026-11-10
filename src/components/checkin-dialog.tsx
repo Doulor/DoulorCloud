@@ -85,7 +85,13 @@ export function CheckinDialog({
     setBusy(true)
     try {
       const res = await checkinApi.makeup()
-      toast.success(t("ck.makeupDone", { streak: res.streak }))
+      // 补签可能把连续天数推过里程碑（2026-11-03 修复）：把补发的积分说出来，
+      // 否则用户只看到天数涨了、余额没动，又以为是吞分。
+      toast.success(
+        res.grantedPoints > 0
+          ? t("ck.makeupDoneBonus", { streak: res.streak, points: res.grantedPoints })
+          : t("ck.makeupDone", { streak: res.streak })
+      )
       await load()
       onDone?.()
     } catch (err) {
@@ -94,6 +100,21 @@ export function CheckinDialog({
       setBusy(false)
     }
   }
+
+  const gate = (status ?? {}) as {
+    autoCheckinUnlocked?: boolean
+    achievementPoints?: number
+    autoCheckinNeeded?: number
+  }
+  /** 未解锁且当前未开启 → 置灰（已开启的人仍可关闭） */
+  const autoLocked = gate.autoCheckinUnlocked === false && !status?.autoCheckin
+  /**
+   * 门槛由后端下发（achievements 的成就点门槛），**不要写死数字**：
+   * 这里原先是 `?? 36`，一旦站内调整门槛或改名（原文案还写死了称号名「名人」），
+   * 界面就会给出一个错误的要求。拿不到就退化成不带数字的提示。
+   */
+  const needPoints = gate.autoCheckinNeeded
+  const hasPoints = gate.achievementPoints ?? 0
 
   const toggleAuto = async (v: boolean) => {
     // 先本地乐观更新，再落库
@@ -185,9 +206,16 @@ export function CheckinDialog({
             <div className="flex items-center justify-between rounded-lg border p-3">
               <div className="space-y-0.5">
                 <p className="text-sm font-medium">{t("ck.autoLabel")}</p>
-                <p className="text-xs text-muted-foreground">{t("ck.autoHint")}</p>
+                <p className="text-xs text-muted-foreground">
+                  {autoLocked
+                    ? needPoints != null
+                      ? t("ck.autoLocked", { need: needPoints, has: hasPoints })
+                      : t("ck.autoLockedNoNeed", { has: hasPoints })
+                    : t("ck.autoHint")}
+                </p>
               </div>
               <Switch
+                disabled={autoLocked}
                 checked={status.autoCheckin}
                 onCheckedChange={(v) => void toggleAuto(v)}
               />

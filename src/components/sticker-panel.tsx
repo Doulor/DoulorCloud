@@ -216,11 +216,14 @@ export function StickerPanel({ onPick }: { onPick: (markdown: string) => void })
                       className="h-full w-full object-contain"
                     />
                   </button>
+                  {/* 删除角标：桌面端悬停贴纸才出现，触屏端常显
+                      （Tailwind v4 的 `group-hover:` 被 `@media (hover: hover)` 包着，
+                      手机上永远不触发 ⇒ 以前删不了自己上传的贴纸） */}
                   <button
                     type="button"
                     onClick={() => void remove(s.id)}
                     disabled={busyId === s.id}
-                    className="absolute -right-1 -top-1 hidden h-5 w-5 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition-colors hover:text-destructive group-hover:flex"
+                    className="absolute -right-1 -top-1 hidden h-5 w-5 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition-colors hover:text-destructive group-hover:flex pointer-coarse:flex"
                     title={t("common.delete")}
                     aria-label={t("common.delete")}
                   >

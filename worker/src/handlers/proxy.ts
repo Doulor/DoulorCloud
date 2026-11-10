@@ -41,6 +41,8 @@ import {
   MAX_LATENCY_BATCH,
   latencyTargets,
   measureNodes,
+  measureWebsocketHandshake,
+  type LatencyTarget,
 } from "../proxy-latency"
 import {
   emptyHealthRecord,
@@ -1383,17 +1385,36 @@ export async function syncProxySubscriptionStatuses(
         }
       }
     } else {
-      // 回填节点指纹（供「导入时拒绝相同节点」查重；节点可能变化，先清旧再写新）
+      // 回填节点指纹（供「导入时拒绝相同节点」查重）。
+      //
+      // ⚠️ 2026-10-28：改成**只在集合真的变了**才写。原来的写法是每轮
+      //    「DELETE 本订阅源全部 + 整批 INSERT」，而订阅源的节点几乎不变，
+      //    于是每一轮都在重写同样那几十行 —— 实测 10/27 单日 60 万次 INSERT、
+      //    占全库「行写」的 68%（D1 行写是计额度、要花钱的）。
+      //    现在先读一次现有指纹（走 idx_proxy_node_fp_sub，几十行），
+      //    只删「消失的」、只插「新增的」，最终表内容与旧写法完全一致。
       if (!dryRun && fingerprints.length > 0) {
-        await env.DB.prepare(
-          "DELETE FROM proxy_node_fingerprints WHERE subscription_id = ?"
+        const existing = await env.DB.prepare(
+          "SELECT fingerprint FROM proxy_node_fingerprints WHERE subscription_id = ?"
         )
           .bind(row.id)
-          .run()
-        const stmt = env.DB.prepare(
-          "INSERT OR IGNORE INTO proxy_node_fingerprints (fingerprint, subscription_id, created_at) VALUES (?, ?, ?)"
-        )
-        await env.DB.batch(fingerprints.map((fp) => stmt.bind(fp, row.id, now)))
+          .all<{ fingerprint: string }>()
+        const have = new Set((existing.results ?? []).map((r) => r.fingerprint))
+        const want = new Set(fingerprints)
+        const gone = [...have].filter((fp) => !want.has(fp))
+        const added = fingerprints.filter((fp) => !have.has(fp))
+        if (gone.length > 0) {
+          const del = env.DB.prepare(
+            "DELETE FROM proxy_node_fingerprints WHERE fingerprint = ? AND subscription_id = ?"
+          )
+          await env.DB.batch(gone.map((fp) => del.bind(fp, row.id)))
+        }
+        if (added.length > 0) {
+          const stmt = env.DB.prepare(
+            "INSERT OR IGNORE INTO proxy_node_fingerprints (fingerprint, subscription_id, created_at) VALUES (?, ?, ?)"
+          )
+          await env.DB.batch(added.map((fp) => stmt.bind(fp, row.id, now)))
+        }
       }
       // 自动审核的订阅源恢复了 → 自动恢复 online
       if (row.status === "offline" && row.review_source === "auto") {
@@ -1441,8 +1462,8 @@ export async function syncProxySubscriptionStatuses(
  * 但每轮覆盖的**订阅数翻 3.3 倍**。节点侧只取前 6 个足够回答
  * 「这个源整体还能不能用」——反正健康度是给排序用的，不需要逐个精确。
  */
-export const PROBE_MAX_SUBSCRIPTIONS_PER_RUN = 20
-export const PROBE_MAX_NODES_PER_SUBSCRIPTION = 6
+export const PROBE_MAX_SUBSCRIPTIONS_PER_RUN = 12
+export const PROBE_MAX_NODES_PER_SUBSCRIPTION = 12
 
 /** 单次 cron 里同时探几个订阅源（每个源内部还会再并发，别把两个数字乘起来超过 6） */
 const PROBE_SUBSCRIPTION_CONCURRENCY = 2
@@ -1543,7 +1564,7 @@ async function persistNodeHealth(
 export async function probeSubscriptionNodeHealth(
   env: Env,
   row: { id: string; url: string },
-  opts: { maxNodes?: number; concurrency?: number } = {}
+  opts: { maxNodes?: number; concurrency?: number; verifyWs?: boolean } = {}
 ): Promise<{ probed: number; up: number; down: number; unknown: number }> {
   const maxNodes = Math.max(1, opts.maxNodes ?? PROBE_MAX_NODES_PER_SUBSCRIPTION)
   const { text, ok } = await fetchSubscriptionText(env, row.url, true)
@@ -1551,8 +1572,15 @@ export async function probeSubscriptionNodeHealth(
 
   const nodes = usableNodes(parseSubscription(text))
   const live = nodes.map(nodeFingerprint)
-  // 只探「能用 TCP 握手测」的协议；QUIC/UDP 那类探不了，按未知处理（不落库）
-  const targets = latencyTargets(nodes).slice(0, maxNodes)
+  // 只探「能用 TCP 握手测」的协议；QUIC/UDP 那类探不了，按未知处理（不落库）。
+  // 不再永远 slice(0, maxNodes) 卡在前几个：每轮从已测节点之后继续取一批，
+  // 后续轮转能覆盖整份订阅；到末尾后回到开头，避免老节点永久不被刷新。
+  const allTargets = latencyTargets(nodes)
+  const prevHealth = await loadSubscriptionNodeHealth(env, row.id)
+  const probed = new Set(prevHealth.keys())
+  const untested = allTargets.filter((target) => !probed.has(nodeFingerprint(nodes[target.index])))
+  const batch = (untested.length > 0 ? untested : allTargets).slice(0, maxNodes)
+  const targets = batch
 
   if (targets.length === 0) {
     // 没有任何可测节点（例如整份订阅都是 hysteria2）：仍要记下「探过了」，
@@ -1571,7 +1599,42 @@ export async function probeSubscriptionNodeHealth(
   const results = await measureNodes(targets, {
     concurrency: opts.concurrency ?? PROBE_NODE_CONCURRENCY,
   })
-  const { statuses, up, down, unknown } = await persistNodeHealth(env, row.id, nodes, results, {
+  // 审核时补一条协议级验证：TCP 能连不代表 VLESS/WS 能用。
+  // 对带 TLS + WS 参数的节点，再真正请求一次 Upgrade，拿到 101 才算通过。
+  const wsChecks = new Map<number, { ok: boolean; latencyMs: number | null; reason: string }>()
+  if (opts.verifyWs) {
+    const wsNodes = nodes.filter((node) =>
+      node.details?.network === "ws" && /^(true|1|yes)$/i.test(node.details?.tls ?? "")
+    )
+    await mapLimit(wsNodes, opts.concurrency ?? PROBE_NODE_CONCURRENCY, async (node) => {
+      const index = nodes.indexOf(node)
+      const check = await measureWebsocketHandshake({
+        protocol: node.protocol,
+        server: node.server,
+        port: node.port ?? 443,
+        servername: node.details.servername || node.details.sni,
+        host: node.details["ws-opts.headers.Host"] || node.details["ws-opts.headers.host"],
+        path: node.details["ws-opts.path"] || "/",
+      })
+      wsChecks.set(index, check)
+    })
+  }
+  const protocolResults = results.map((result) => {
+    const ws = wsChecks.get(result.index)
+    // 有 WS 节点时以协议级结果为准；没有 WS 参数的节点仍按两轮 TCP 判断。
+    return ws ? { ...result, ...ws } : result
+  })
+  // 首轮失败只算「待复核」，再独立测一轮，避免把 Cloudflare 出网抖动当死节点。
+  // 与 nextHealthRecord 的「连续两轮才 down」同一判定口径。
+  const retryTargets = protocolResults.filter((r) => !r.ok).map((r) => targets.find((t) => t.index === r.index)).filter((t): t is LatencyTarget => Boolean(t))
+  const retryResults = retryTargets.length
+    ? await measureNodes(retryTargets, { concurrency: opts.concurrency ?? PROBE_NODE_CONCURRENCY })
+    : []
+  const merged = protocolResults.map((r) => {
+    const retry = retryResults.find((candidate) => candidate.index === r.index)
+    return r.ok || !retry ? r : retry
+  })
+  const { statuses, up, down, unknown } = await persistNodeHealth(env, row.id, nodes, merged, {
     liveFingerprints: live,
   })
   return { probed: statuses.size, up, down, unknown }

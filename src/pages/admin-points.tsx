@@ -62,6 +62,7 @@ import {
 import { FadeImage } from "@/components/fade-image"
 import { CoverPreview } from "@/components/cover-preview"
 import { FEATURE_LABELS } from "@/types"
+import { POINT_REASON_LABEL } from "@/lib/points-reasons"
 import { useT, tStatic } from "@/i18n"
 import type {
   AdminPointsOverview,
@@ -88,6 +89,7 @@ const DELIVERY_LABELS: Record<PointDelivery, string> = {
   subscription: "ap.dlv.subscription",
   invite_quota: "ap.dlv.inviteQuota",
   checkin_makeup: "ap.dlv.checkinMakeup",
+  mailbox_quota: "ap.dlv.mailboxQuota",
   code: "ap.dlv.code",
   content: "ap.dlv.content",
 }
@@ -100,6 +102,7 @@ const DELIVERY_HINTS: Record<PointDelivery, string> = {
   subscription: "ap.hint.subscription",
   invite_quota: "ap.hint.inviteQuota",
   checkin_makeup: "ap.hint.checkinMakeup",
+  mailbox_quota: "ap.hint.mailboxQuota",
   code: "ap.hint.code",
   content: "ap.hint.content",
 }
@@ -110,22 +113,18 @@ function deliveryText(delivery: string, quotaYuan?: number | null): string {
   return tStatic(DELIVERY_LABELS[delivery as PointDelivery] ?? "pt.delivery.manual")
 }
 
-/** 全部模块（下拉框选项顺序） */
-const FEATURE_KEYS: FeatureKey[] = ["ai", "r2", "frp", "proxy"]
+/**
+ * 商品「发放模块权限」下拉框的候选。
+ *
+ * ⚠️ 必须与后端 `points-shop.ts` 的校验同源：那里是
+ * `(FEATURES as readonly string[]).includes(f)`，而 FEATURES = r2/ai/proxy/doulor/dns/relay_auto。
+ * 这里此前写的是 `["ai","r2","frp","proxy"]` —— 选出「内网穿透」保存**必 400**
+ * （frp 2026-10-13 已移出权限体系），同时 doulor/dns/relay_auto 又选不到。
+ */
+const FEATURE_KEYS: FeatureKey[] = ["ai", "r2", "proxy", "dns", "doulor", "relay_auto"]
 
-/** 流水来源 → 标签 */
-const REASON_LABEL: Record<string, string> = {
-  event: "pt.reason.event",
-  admin: "pt.reason.admin",
-  redeem: "pt.reason.redeem",
-  shop: "pt.reason.shop",
-  shop_sell: "pt.reason.shopSell",
-  donation: "pt.reason.donation",
-  invite: "pt.reason.invite",
-  invite_commission: "pt.reason.inviteCommission",
-  transfer_out: "pt.reason.transferOut",
-  transfer_in: "pt.reason.transferIn",
-}
+/** 流水来源 → 标签（与用户端共用一份，见 @/lib/points-reasons 的说明） */
+const REASON_LABEL = POINT_REASON_LABEL
 
 /**
  * 「超过 48 小时仍未交付」的天数；不满足返回 null（2026-10-19）。
@@ -314,7 +313,7 @@ interface FormState {
   feature: FeatureKey
   /** delivery='subscription' 时的套餐 ID（管理员自己填） */
   planId: string
-  /** delivery='invite_quota' 时增加的额度 */
+  /** delivery='invite_quota' / 'checkin_makeup' / 'mailbox_quota' 时增加的数量 */
   inviteCount: string
   /** delivery='content' 时人人相同的固定发放内容（网盘链接 / 说明 / 通用兑换码） */
   content: string
@@ -393,6 +392,8 @@ function payloadOf(f: FormState): PointProductPayload {
   } else if (f.delivery === "invite_quota") {
     deliveryParams = { count: Math.trunc(Number(f.inviteCount) || 0) }
   } else if (f.delivery === "checkin_makeup") {
+    deliveryParams = { count: Math.trunc(Number(f.inviteCount) || 0) }
+  } else if (f.delivery === "mailbox_quota") {
     deliveryParams = { count: Math.trunc(Number(f.inviteCount) || 0) }
   } else if (f.delivery === "content") {
     deliveryParams = { content: f.content }
@@ -869,6 +870,10 @@ function ShopTab() {
     }
     if (payload.delivery === "checkin_makeup" && !(Number(payload.deliveryParams?.count) > 0)) {
       toast.error(t("ap.err.makeupCountRequired"))
+      return
+    }
+    if (payload.delivery === "mailbox_quota" && !(Number(payload.deliveryParams?.count) > 0)) {
+      toast.error(t("ap.err.mailboxCountRequired"))
       return
     }
     if (payload.delivery === "content" && !payload.deliveryParams?.content?.trim()) {
@@ -2409,12 +2414,16 @@ function ShopTab() {
               </div>
             )}
 
-            {(form.delivery === "invite_quota" || form.delivery === "checkin_makeup") && (
+            {(form.delivery === "invite_quota" ||
+              form.delivery === "checkin_makeup" ||
+              form.delivery === "mailbox_quota") && (
               <div className="space-y-2">
                 <Label htmlFor="pdInvite">
                   {form.delivery === "checkin_makeup"
                     ? t("ap.makeupCountLabel")
-                    : t("ap.inviteCountLabel")}
+                    : form.delivery === "mailbox_quota"
+                      ? t("ap.mailboxCountLabel")
+                      : t("ap.inviteCountLabel")}
                 </Label>
                 <Input
                   id="pdInvite"
@@ -2426,7 +2435,9 @@ function ShopTab() {
                 <p className="text-xs text-muted-foreground">
                   {form.delivery === "checkin_makeup"
                     ? t("ap.makeupCountHint")
-                    : t("ap.inviteCountHint")}
+                    : form.delivery === "mailbox_quota"
+                      ? t("ap.mailboxCountHint")
+                      : t("ap.inviteCountHint")}
                 </p>
               </div>
             )}

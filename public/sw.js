@@ -90,3 +90,50 @@ self.addEventListener("fetch", (event) => {
     })
   )
 })
+
+/* ---- 系统通知（2026-11-10）------------------------------------------------
+ *
+ * 页面里的 `new Notification()` 在 **Android Chrome / WebView 上直接抛
+ * `Illegal constructor`** —— 手机端"开了通知却从来不弹"的根因就是它。
+ * 所以统一改走本 SW 的 `registration.showNotification()`（页面侧见
+ * src/lib/web-notify.ts），这里必须提供 `notificationclick` 才能点开跳转。
+ *
+ * 顺带接上 `push`：以后上真正的 Web Push（VAPID）时，服务端推来的消息由这里展示，
+ * 不需要再改前端。
+ */
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close()
+  const target = (event.notification.data && event.notification.data.url) || "/dashboard"
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((list) => {
+        // 已有窗口就聚焦并导航过去，别每次都开新标签
+        for (const client of list) {
+          if ("focus" in client) {
+            client.navigate(target).catch(() => {})
+            return client.focus()
+          }
+        }
+        return self.clients.openWindow(target)
+      })
+  )
+})
+
+self.addEventListener("push", (event) => {
+  let payload = {}
+  try {
+    payload = event.data ? event.data.json() : {}
+  } catch {
+    payload = { body: event.data ? event.data.text() : "" }
+  }
+  const title = payload.title || "Doulor Cloud"
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: payload.body || "",
+      icon: "/favicon.png?v=2",
+      tag: payload.tag,
+      data: { url: payload.url || "/dashboard" },
+    })
+  )
+})

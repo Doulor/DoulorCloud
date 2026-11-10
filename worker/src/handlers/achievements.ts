@@ -342,10 +342,10 @@ const ACHIEVEMENTS: AchievementDef[] = [
   {
     id: "frp_enable",
     name: "内外通达",
-    desc: "开通内网穿透",
+    desc: "租用内网穿透",
     icon: "plug",
     group: "start",
-    how: "在「内网穿透」页面开通，把家里的服务映射到公网。",
+    how: "在「内网穿透」页面用积分租一个套餐（按天计），把家里的服务映射到公网。",
   },
   {
     id: "proxy_enable",
@@ -1080,7 +1080,8 @@ function countColumns(owner: string, excludeApi: boolean): string {
        (SELECT COUNT(*) FROM donations WHERE user_id = {OWNER} AND status = 'approved') AS donations,
        (SELECT COUNT(DISTINCT type) FROM donations
          WHERE user_id = {OWNER} AND status = 'approved') AS donation_kinds,
-       (SELECT COUNT(*) FROM frp_accounts WHERE user_id = {OWNER}) AS frp,
+       (SELECT COUNT(*) FROM frp_subscriptions
+          WHERE user_id = {OWNER} AND status = 'active') AS frp,
        (SELECT COUNT(*) FROM proxy_activation WHERE user_id = {OWNER}) AS proxy,
        (SELECT COUNT(*) FROM storage_accounts WHERE user_id = {OWNER}) AS storage_acc,
        (SELECT COUNT(*) FROM newapi_accounts WHERE user_id = {OWNER}) AS ai_acc,
@@ -1139,7 +1140,8 @@ function countColumns(owner: string, excludeApi: boolean): string {
           SELECT user_id FROM storage_accounts WHERE user_id = {OWNER} AND enabled = 1
           UNION ALL SELECT user_id FROM newapi_accounts WHERE user_id = {OWNER}
           UNION ALL SELECT user_id FROM profiles WHERE user_id = {OWNER}
-          UNION ALL SELECT user_id FROM frp_accounts WHERE user_id = {OWNER} AND enabled = 1
+          UNION ALL SELECT user_id FROM frp_subscriptions
+             WHERE user_id = {OWNER} AND status = 'active'
           UNION ALL SELECT user_id FROM proxy_activation WHERE user_id = {OWNER} AND enabled = 1
        )) AS feature_count,
        (SELECT COALESCE(SUM(CASE WHEN delta > 0 THEN delta ELSE 0 END), 0)

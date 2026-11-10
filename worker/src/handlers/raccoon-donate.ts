@@ -7,7 +7,7 @@
  *   而 token 存在非 httpOnly 的 cookie `xhx_token` 里，浏览器脚本可读。
  *   于是采用「一次性捐献码 + 书签小工具」：
  *
- *     ① 用户在本站拿到 10 分钟有效的一次性码（绑定 user_id）
+ *     ① 用户在本站拿到 24 小时有效的一次性码（绑定 user_id）
  *     ② 书签脚本在小浣熊页面读出 xhx_token，连同码 POST 回本站
  *     ③ 本站校验码 → 转给 kr 上的入池网关 → 网关校验 token 可用后写进 Agent2API
  *     ④ 记录进 D1，捐献归属到用户
@@ -120,7 +120,7 @@ export async function claimRaccoonDonation(env: Env, request: Request): Promise<
 
   if (!row) return jsonCors({ ok: false, reason: "code_invalid", detail: "捐献码不存在，请回捐献页重新生成" }, 400)
   if (row.used_at) return jsonCors({ ok: false, reason: "code_used", detail: "这个捐献码已经用过了，请重新生成" }, 400)
-  if (now > row.expires_at) return jsonCors({ ok: false, reason: "code_expired", detail: "捐献码已过期（10 分钟有效），请重新生成" }, 400)
+  if (now > row.expires_at) return jsonCors({ ok: false, reason: "code_expired", detail: "捐献码已过期（24 小时有效），请重新生成" }, 400)
 
   // 同一个码被反复尝试时也要限流（按码计，防止拿一个码硬刷网关）
   await guardRateLimit(env, `raccoon:claim:code:${code}`, 5, 600, "尝试过于频繁，请重新生成捐献码")

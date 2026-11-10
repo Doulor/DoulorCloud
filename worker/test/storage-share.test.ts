@@ -26,7 +26,8 @@ const ACCOUNT_ID = "a".repeat(32)
 const S3_ORIGIN = `https://${ACCOUNT_ID}.r2.cloudflarestorage.com`
 
 /** 本次要「出现在桶里」的对象（每个用例自己设） */
-let fakeObjects: { key: string; size: number }[] = []
+/** 桩里的对象；`modified` 用于验证「按时间排序」（不传则用固定的那一天） */
+let fakeObjects: { key: string; size: number; modified?: string }[] = []
 let originalFetch: typeof globalThis.fetch
 
 function xmlEscape(s: string): string {
@@ -45,7 +46,8 @@ function listObjectsXml(prefix: string): string {
     .map(
       (o) =>
         `<Contents><Key>${xmlEscape(o.key)}</Key><Size>${o.size}</Size>` +
-        `<LastModified>2026-01-01T00:00:00.000Z</LastModified><ETag>&quot;e&quot;</ETag></Contents>`
+        `<LastModified>${o.modified ?? "2026-01-01T00:00:00.000Z"}</LastModified>` +
+        `<ETag>&quot;e&quot;</ETag></Contents>`
     )
     .join("")
   return (
@@ -228,5 +230,136 @@ describe("GET /s/<token> —— 公开分享页", () => {
     const res = await fetchSelf(new Request("https://cloud.doulor.cn/s/nope0000000000000000"))
     expect(res.status).toBe(404)
     expect(res.headers.get("Content-Type")).toContain("text/html")
+  })
+
+  // 2026-10-30 站长反馈：进到「A › B」这样的子目录后，面包屑里的 A **点不了**，
+  // 回不到分享根。根因是根那一节被写死成 `<span class="cur">`（死文字）。
+  // 这里锁住：**只有当前层不可点，其余每一层都是链接**。
+  it("子目录页：分享根可以点回去（是链接，不是死文字）", async () => {
+    const u = await makeUser()
+    const prefix = await seedAccount(u.id)
+    await makeShare(u.id, "tokcrumb000000000000001", "合集")
+    fakeObjects = [{ key: `${prefix}/合集/A/B/深层.txt`, size: 3 }]
+
+    const res = await fetchSelf(
+      new Request("https://cloud.doulor.cn/s/tokcrumb000000000000001?p=A/B")
+    )
+    expect(res.status).toBe(200)
+    const html = await res.text()
+
+    const crumbs = /<nav class="crumbs">([\s\S]*?)<\/nav>/.exec(html)?.[1] ?? ""
+    // 根（「合集」）→ 链接，指向不带 p 的分享地址
+    expect(crumbs).toContain('<a href="/s/tokcrumb000000000000001">合集</a>')
+    // 中间层 A → 链接，带上自己的 p
+    expect(crumbs).toContain('<a href="/s/tokcrumb000000000000001?p=A">A</a>')
+    // 当前层 B → 当前项，不可点，且不能出现在 <a> 里
+    expect(crumbs).toContain('<span class="cur">B</span>')
+    expect(crumbs).not.toContain('>B</a>')
+  })
+
+  it("分享根页：标题是当前层（不吃成链接）", async () => {
+    const u = await makeUser()
+    const prefix = await seedAccount(u.id)
+    await makeShare(u.id, "tokcrumb000000000000002", "合集")
+    fakeObjects = [{ key: `${prefix}/合集/a.txt`, size: 3 }]
+
+    const res = await fetchSelf(
+      new Request("https://cloud.doulor.cn/s/tokcrumb000000000000002")
+    )
+    const html = await res.text()
+    const crumbs = /<nav class="crumbs">([\s\S]*?)<\/nav>/.exec(html)?.[1] ?? ""
+    expect(crumbs).toContain('<span class="cur">合集</span>')
+    expect(crumbs).not.toContain('<a href="/s/tokcrumb000000000000002">')
+  })
+})
+
+// 2026-10-30 站长要求：子目录页给显式「返回上级」，并支持按名称 / 大小 / 时间排序。
+describe("GET /s/<token> —— 返回上级与排序", () => {
+  /** 造一条目录分享（与上一个 describe 里的同名 helper 同一写法） */
+  async function makeShare(userId: string, token: string, path: string): Promise<void> {
+    const now = new Date().toISOString()
+    await env.DB.prepare(
+      `INSERT INTO storage_shares (id, user_id, token, path, title, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, NULL, 1, ?, ?)`
+    )
+      .bind(`sh_${token}`, userId, token, path, now, now)
+      .run()
+  }
+
+  /** token 是 UNIQUE 且测试库在同一次运行里共用 ⇒ 每个用例用自己的 token */
+  let shareSeq = 0
+
+  /** 造一个带 3 个文件的分享，返回本次用的 token */
+  async function seedSortShare(): Promise<string> {
+    const token = `toksort${String(++shareSeq).padStart(17, "0")}`
+    const u = await makeUser()
+    const prefix = await seedAccount(u.id)
+    await makeShare(u.id, token, "合集")
+    fakeObjects = [
+      { key: `${prefix}/合集/b.txt`, size: 300, modified: "2026-03-01T00:00:00.000Z" },
+      { key: `${prefix}/合集/a.txt`, size: 100, modified: "2026-01-01T00:00:00.000Z" },
+      { key: `${prefix}/合集/c.txt`, size: 200, modified: "2026-02-01T00:00:00.000Z" },
+    ]
+    return token
+  }
+
+  function fileNames(html: string): string[] {
+    const list = /<main class="card list">([\s\S]*?)<\/main>/.exec(html)?.[1] ?? ""
+    return [...list.matchAll(/<span class="name">([^<]*)<\/span>/g)].map((m) => m[1])
+  }
+
+  it("默认按名称升序（与改前一致）", async () => {
+    const token = await seedSortShare()
+    const html = await (await fetchSelf(new Request(`https://cloud.doulor.cn/s/${token}`))).text()
+    expect(fileNames(html)).toEqual(["a.txt", "b.txt", "c.txt"])
+  })
+
+  it("?sort=size&dir=desc → 从大到小；升序反过来", async () => {
+    const token = await seedSortShare()
+    const desc = await (
+      await fetchSelf(new Request(`https://cloud.doulor.cn/s/${token}?sort=size&dir=desc`))
+    ).text()
+    expect(fileNames(desc)).toEqual(["b.txt", "c.txt", "a.txt"])
+
+    const asc = await (
+      await fetchSelf(new Request(`https://cloud.doulor.cn/s/${token}?sort=size&dir=asc`))
+    ).text()
+    expect(fileNames(asc)).toEqual(["a.txt", "c.txt", "b.txt"])
+  })
+
+  it("?sort=time&dir=desc → 最新在前（文件的 mtime 各不相同）", async () => {
+    const token = await seedSortShare()
+    const newest = await (
+      await fetchSelf(new Request(`https://cloud.doulor.cn/s/${token}?sort=time&dir=desc`))
+    ).text()
+    expect(fileNames(newest)).toEqual(["b.txt", "c.txt", "a.txt"])
+
+    const oldest = await (
+      await fetchSelf(new Request(`https://cloud.doulor.cn/s/${token}?sort=time&dir=asc`))
+    ).text()
+    expect(fileNames(oldest)).toEqual(["a.txt", "c.txt", "b.txt"])
+  })
+
+  it("排序链接保留当前目录，进目录后仍按所选列排", async () => {
+    const token = await seedSortShare()
+    const html = await (
+      await fetchSelf(new Request(`https://cloud.doulor.cn/s/${token}?p=sub&sort=size&dir=desc`))
+    ).text()
+    // 「名称」的链接：回到默认排序，但仍停在这个子目录里
+    expect(html).toContain(`href="/s/${token}?p=sub"`)
+    // 「大小」是当前列 → 再点一次反向（desc → asc），目录也不丢
+    expect(html).toContain(`href="/s/${token}?p=sub&sort=size&dir=asc"`)
+  })
+
+  it("子目录页有「返回上级」，指向上一级；分享根没有这个按钮", async () => {
+    const token = await seedSortShare()
+    const deep = await (
+      await fetchSelf(new Request(`https://cloud.doulor.cn/s/${token}?p=A/B`))
+    ).text()
+    expect(deep).toContain('class="back"')
+    expect(deep).toContain(`href="/s/${token}?p=A"`)
+
+    const root = await (await fetchSelf(new Request(`https://cloud.doulor.cn/s/${token}`))).text()
+    expect(root).not.toContain('class="back"')
   })
 })

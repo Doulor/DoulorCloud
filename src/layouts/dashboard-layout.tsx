@@ -73,6 +73,7 @@ import { cn } from "@/lib/utils"
 import { onAttentionChanged } from "@/lib/attention-events"
 import { idlePreload, preloadRoute } from "@/lib/route-preload"
 import { SlidingPill } from "@/components/motion/sliding-pill"
+import { MailNotifyWatcher } from "@/hooks/use-mail-notify"
 import { toast } from "sonner"
 
 /** 角标轮询间隔（社区/聊天室/反馈/管理共用一次请求） */
@@ -597,6 +598,9 @@ export function DashboardLayout({
     <div className="min-h-screen">
       {/* 自动签到：进站触发，无 UI（见组件内说明） */}
       <AutoCheckin />
+      {/* 新邮件系统通知：常驻哨兵，无 UI。
+          挂在这儿而不是邮箱页，是因为权限是用户级的 —— 只在邮箱页打开时才播报等于没有。 */}
+      <MailNotifyWatcher />
       {/* 这层刻意不铺 bg-background：底色由 body 提供，云纹背景画在 body 上，
           这里再铺一次不透明色就会把它整块盖住。
           侧边栏用 glass-sidebar（轻度档，与卡片同档）—— 原为不透明的 bg-card。 */}

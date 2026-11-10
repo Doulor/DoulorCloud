@@ -22,6 +22,7 @@ import * as adminMailboxHandlers from "./handlers/admin-mailboxes"
 import * as adminUsersStatusHandlers from "./handlers/admin-users-status"
 import * as relayProviderHandlers from "./handlers/relay-providers"
 import * as adminRootDomainHandlers from "./handlers/admin-root-domains"
+import * as cfDiagHandlers from "./handlers/admin-cf-diag"
 import * as adminChannelHandlers from "./handlers/admin-channels"
 import * as adminPermHandlers from "./handlers/admin-perms"
 import * as noticeHandlers from "./handlers/notices"
@@ -35,6 +36,8 @@ import * as labHandlers from "./handlers/lab"
 import * as galleryCommentHandlers from "./handlers/gallery-comments"
 import * as settingsHandlers from "./handlers/settings"
 import * as donationHandlers from "./handlers/donations"
+import * as aiAccessHandlers from "./handlers/ai-access"
+import * as tipQrHandlers from "./handlers/tip-qr"
 import * as raccoonDonateHandlers from "./handlers/raccoon-donate"
 import * as autoclawDonateHandlers from "./handlers/autoclaw-donate"
 import * as donationChannelsHandlers from "./handlers/donation-channels"
@@ -70,6 +73,8 @@ import * as chatHandlers from "./handlers/chat"
 import * as dmHandlers from "./handlers/dm"
 import * as oauthHandlers from "./handlers/oauth"
 import * as feedbackHandlers from "./handlers/feedback"
+import * as mailUnsubscribeHandlers from "./handlers/mail-unsubscribe"
+import * as mailImageHandlers from "./handlers/mail-image"
 import * as diagLogHandlers from "./handlers/diag-logs"
 import * as perfHandlers from "./handlers/perf"
 import * as chatUploadHandlers from "./handlers/chat-upload"
@@ -215,6 +220,27 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       authHandlers.resetPassword(env, request),
+  },
+
+  // ---- 邮件退订（公开，身份靠 URL 签名；GET 只出确认页，POST 才执行，见 handlers/mail-unsubscribe.ts）----
+  {
+    kind: "exact",
+    path: "/mail/unsubscribe",
+    method: "GET",
+    handle: () => mailUnsubscribeHandlers.unsubscribePage(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/mail/unsubscribe",
+    method: "POST",
+    handle: () => mailUnsubscribeHandlers.unsubscribe(env, request),
+  },
+  // 邮件图片代理（公开，身份靠 URL 签名；边界检查见 handlers/mail-image.ts）
+  {
+    kind: "exact",
+    path: "/mail/img",
+    method: "GET",
+    handle: () => mailImageHandlers.proxyMailImage(env, request),
   },
 
   {
@@ -1384,6 +1410,34 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   // 并提供 Cloudflare 侧的开通动作（解析 zone id / 开 Email Routing / 设 catch-all）。
   // ⚠️ 顺序：固定路径必须排在 `/admin/root-domains/:name` 之前。
   {
+    // 给 Pages 项目加自定义域名（2026-11-03）
+    kind: "exact",
+    path: "/admin/cf/pages-domain",
+    method: "POST",
+    handle: () => cfDiagHandlers.cfPagesDomain(env, request),
+  },
+  {
+    // 单条 DNS 记录的增删（2026-11-03，老博客迁移 / Route 占位记录）
+    kind: "exact",
+    path: "/admin/cf/dns-record",
+    method: "POST",
+    handle: () => cfDiagHandlers.cfDnsRecord(env, request),
+  },
+  {
+    // 把某条 Worker Route 改指到别的脚本（2026-11-02，7u.nz 顶点交给 worldlet）
+    kind: "exact",
+    path: "/admin/cf/worker-route",
+    method: "POST",
+    handle: () => cfDiagHandlers.cfRetargetRoute(env, request),
+  },
+  {
+    // 只读排障：拉某个 zone 在 CF 上的路由/重定向规则/DNS/邮件路由（2026-11-02）
+    kind: "exact",
+    path: "/admin/cf/diag",
+    method: "GET",
+    handle: () => cfDiagHandlers.cfZoneDiag(env, request),
+  },
+  {
     kind: "exact",
     path: "/admin/root-domains",
     method: "GET",
@@ -2441,6 +2495,15 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       emailHandlers.markAllRead(env, request),
   },
 
+  // 最新一封未读邮件 —— 给网页原生通知（App 桥接）轮询用，不是列表接口
+  {
+    kind: "exact",
+    path: "/mailbox/latest-unread",
+    method: "GET",
+    handle: () =>
+      emailHandlers.latestUnreadMail(env, request),
+  },
+
   {
     kind: "exact",
     path: "/donations",
@@ -2466,6 +2529,51 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       donationHandlers.probeAiUpstream(env, request),
+  },
+
+  // ---- 「付费直连地址」解锁（2026-11-02）----
+  // GET 只返回「有没有资格」，地址要点一次（reveal）才下发；无资格者靠全局认证码。
+  {
+    kind: "exact",
+    path: "/ai/direct-endpoint",
+    method: "GET",
+    handle: () =>
+      aiAccessHandlers.getAiDirectEndpoint(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/ai/direct-reveal",
+    method: "POST",
+    handle: () =>
+      aiAccessHandlers.revealAiDirectEndpoint(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/ai/direct-unlock",
+    method: "POST",
+    handle: () =>
+      aiAccessHandlers.unlockAiDirectEndpoint(env, request),
+  },
+
+  // ---- 捐献页「赞赏」二维码（2026-11-02）----
+  // 公开读取 + 管理员换图；图片存 R2，D1 只记 key（见 handlers/tip-qr.ts）
+  {
+    kind: "exact",
+    path: "/tip-qr",
+    method: "GET",
+    handle: () => tipQrHandlers.getTipQr(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/tip-qr",
+    method: "POST",
+    handle: () => tipQrHandlers.uploadTipQr(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/admin/tip-qr",
+    method: "DELETE",
+    handle: () => tipQrHandlers.deleteTipQr(env, request),
   },
 
   // ---- 小浣熊账号捐献（一键书签，2026-10-26）----
@@ -3686,6 +3794,15 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: (myOrderConfirmMatch: RegExpMatchArray) =>
       pointHandlers.confirmReceipt(env, request, decodeURIComponent(myOrderConfirmMatch[1])),
   },
+  // 买家取消「卖家还没发货」的订单（2026-10-30）：卖家一直不交付时买家的自助出口，
+  // 积分原路退回。已交付 / 已结算的单会被后端拒掉（那些走拒收 / 售后）。
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/points\/orders\/([^/]+)\/cancel$/),
+    methods: ["POST"],
+    handle: (myOrderCancelMatch: RegExpMatchArray) =>
+      pointHandlers.cancelMyOrder(env, request, decodeURIComponent(myOrderCancelMatch[1])),
+  },
   // 售后（退款）：买家申请 / 撤销
   {
     kind: "branch",
@@ -3732,6 +3849,13 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       ),
   },
 
+  {
+    // 用户上架商品审核队列（仅需 points.review，2026-10-30）
+    kind: "exact",
+    path: "/admin/points/review-queue",
+    method: "GET",
+    handle: () => pointHandlers.getProductReviewQueue(env, request),
+  },
   {
     kind: "exact",
     path: "/admin/points/shop",
@@ -3931,6 +4055,15 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "POST",
     handle: () =>
       storageHandlers.deleteStorageObjects(env, request),
+  },
+
+  // 复制 / 移动文件到某个目录（剪贴板式：前端选好 keys 与目标目录再调）
+  {
+    kind: "exact",
+    path: "/storage/objects/copy",
+    method: "POST",
+    handle: () =>
+      storageHandlers.copyStorageObjects(env, request),
   },
 
   {
@@ -5279,6 +5412,10 @@ function assertNotCrossSite(request: Request, url: URL): void {
   // 不豁免则浏览器侧直接 CORS 失败、功能完全不可用。⚠️ 只豁免这一条精确路径。
   if (p === "/api/donations/raccoon/claim") return
 
+  // 邮件一键退订（RFC 8058）：邮件客户端的服务器直接 POST，可能带任意来源头；
+  // 身份只来自 URL 上的 HMAC 签名、不读 cookie，没有可被 CSRF 借用的会话。⚠️ 只豁免这一条精确路径。
+  if (p === "/api/mail/unsubscribe") return
+
   const sfs = (request.headers.get("Sec-Fetch-Site") || "").toLowerCase()
   if (sfs === "cross-site") {
     throw new ApiError(403, "跨站请求已被拒绝", "CSRF_BLOCKED")
@@ -5433,7 +5570,10 @@ export default {
       // TG 机器人回调（公开入口）：Telegram 服务器没有我们的会话 cookie，
       // 走 dispatch 必然 401，所以在这里先接住，由 handler 内部用
       // X-Telegram-Bot-Api-Secret-Token 校验来源。
-      if ((url.pathname === "/api/tg/webhook" || url.pathname === "/tg/webhook") && request.method === "POST") {
+      if (url.pathname === "/api/tg/_diag" && (request.method === "GET" || request.method === "POST")) {
+      return await telegramHandlers.diagWebhook(env, request)
+    }
+    if ((url.pathname === "/api/tg/webhook" || url.pathname === "/tg/webhook") && request.method === "POST") {
         return await telegramHandlers.handleWebhook(env, request)
       }
 

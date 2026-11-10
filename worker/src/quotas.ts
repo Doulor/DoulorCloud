@@ -369,6 +369,67 @@ export async function grantQuotaForDonation(
 }
 
 /**
+ * 捐献额度的**用户级原子占位 + 发放**（2026-11-07 抽出，供反代通道复用）。
+ *
+ * 这段逻辑原本内联在 `handlers/donations.ts` 的审批里。现在**反代账号捐献**
+ * （wb2api / qoder2api）也要发同一份额度，就必须只有一份实现 ——
+ * 两边各写一遍，「同类型只发一次」这条防刷闸门迟早会在其中一边失守。
+ * 「为什么要限制成同类型只发一次」的完整由来（H2 审计、四条实测重发路径）
+ * 留在调用点的注释里，这里只讲机制。
+ *
+ * 机制：
+ *   1. **原子占位**：一条 UPDATE 把「判据 + 写入」合成一次 D1 往返，
+ *      靠 `... AND json_extract(...) IS NULL` + RETURNING 拿到行才算「本次由我发放」；
+ *      并发下只有一个请求能拿到（先读后判再写会双发）。
+ *   2. **json_valid 兜底**：该列可空、也可能被写坏。`json_extract(NULL, …)` 是 NULL，
+ *      但 `json_extract('{坏', …)` 会**抛错**（打成 500）；兜成 '{}' 后
+ *      NULL / 损坏一律按「没发过」起算，与 parseCounts 的「宁可少算」同一口径。
+ *   3. **占位 == 已发放**：占位成功后发放失败要回滚标记，否则该用户会被永久
+ *      判为「已发过」而实际一分没拿到。
+ *
+ * @param quotaType 占位键（写进 `users.donation_quota_types` 的 JSON key）。
+ *   反代账号与经典 AI 渠道**共用 `ai`** —— 两者奖励的都是「AI」这一类资源，
+ *   同一用户一生只该拿一次（与「单个用户最多 3 份（ai/frp/proxy）」的口径一致）。
+ * @param feature 要发额度的模块；`null` = 只占位不发（目前只有 frp：它已不在
+ *   权限体系里，不存在「可转授额度」这回事）
+ * @returns 本次是否**真的发放了额度**
+ */
+export async function claimDonationQuota(
+  env: Env,
+  userId: string,
+  quotaType: string,
+  feature: string | null
+): Promise<boolean> {
+  const keyPath = `$."${quotaType}"`
+  const typesExpr =
+    "CASE WHEN json_valid(donation_quota_types) THEN donation_quota_types ELSE '{}' END"
+  const claimed = await env.DB.prepare(
+    `UPDATE users
+        SET donation_quota_types = json_set(${typesExpr}, ?, 1), updated_at = ?
+      WHERE id = ? AND json_extract(${typesExpr}, ?) IS NULL
+      RETURNING id`
+  )
+    .bind(keyPath, new Date().toISOString(), userId, keyPath)
+    .first<{ id: string }>()
+
+  if (!claimed) return false
+  // feature 为 null 的类型只占位、不发额度（frp）
+  if (feature === null) return false
+
+  try {
+    await grantQuotaForDonation(env, userId, feature)
+    return true
+  } catch (err) {
+    await env.DB.prepare(
+      `UPDATE users SET donation_quota_types = json_remove(${typesExpr}, ?) WHERE id = ?`
+    )
+      .bind(keyPath, userId)
+      .run()
+    throw err
+  }
+}
+
+/**
  * ⚠️ 2026-09-25 审计（L25）：这里原先有一个
  *   `quotaFeaturesOf(permissions: { [k: string]: boolean }): QuotaFeature[]`
  * 已**删除**。它是 L25 那个 bug 的直接入口：签名要求调用方先拿到一个

@@ -419,7 +419,7 @@ export function FeedbackPanel() {
             disabled={page >= pageCount || loading}
             onClick={() => changePage(page + 1)}
           >
-            {t("common.next")}
+            {t("adm.userPageNext")}
             <ChevronRight className="h-4 w-4" />
           </Button>
         </div>

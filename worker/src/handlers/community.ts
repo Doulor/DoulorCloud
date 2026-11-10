@@ -3,7 +3,8 @@ import { requireUser, isPrivileged, type UserRow, isAnyAdmin } from "../auth"
 import { decodeCursor, encodeCursor, groupComments, canPostAgain, type RawComment } from "../community-logic"
 import { uuid } from "../crypto"
 import { getSetting, getSettingNumber, getSettingBool, SETTING_DEFAULTS, audit } from "../settings"
-import { sendMail, renderMail } from "../mailer"
+import { sendMail, renderMail, siteUrl } from "../mailer"
+import { unsubscribeUrl } from "../mail-unsubscribe"
 import { isStorageConfigured, putObject, deleteObject, getObject, getPlatformBucketId } from "../r2"
 import { hardenUserContentResponse } from "../content-type"
 import { guardRateLimit } from "../ratelimit"
@@ -1302,12 +1303,17 @@ async function maybeNotify(env: Env, args: {
 async function maybeSendMail(env: Env, recipientId: string, postId: string): Promise<void> {
   const u = await env.DB.prepare("SELECT email, notify_enabled FROM users WHERE id=?").bind(recipientId).first<{ email: string; notify_enabled: number }>()
   if (!u || !u.notify_enabled) return
-  const link = `https://cloud.doulor.cn/community/${postId}`
-  const { text, html } = renderMail("你在 Doulor Cloud 社区有新互动", [
-    "有人回复了你的帖子或评论。",
-    `查看：${link}`,
-  ])
-  try { await sendMail(env, { to: u.email, subject: "【Doulor Cloud】社区新互动", text, html }) } catch {}
+  // 直接落到控制台里的帖子页（/community/:id 是给未登录访客的跳转壳，多一跳）
+  const rendered = renderMail(
+    "你在 Doulor Cloud 社区有新互动",
+    ["有人回复了你的帖子或评论。"],
+    {
+      kind: "notification",
+      action: { label: "查看帖子", url: siteUrl(`/dashboard/community/${encodeURIComponent(postId)}`) },
+      unsubscribeUrl: await unsubscribeUrl(env, recipientId, "personal"),
+    }
+  )
+  try { await sendMail(env, { to: u.email, subject: "【Doulor Cloud】社区新互动", ...rendered }) } catch {}
 }
 
 /**

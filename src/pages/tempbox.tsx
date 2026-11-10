@@ -214,6 +214,25 @@ export default function TempboxPage() {
   }
 
   /**
+   * 删除**整个**分享箱（创建者或管理员；后端 deleteTempbox 同口径）。
+   *
+   * 接口一直存在（`tempboxApi.remove` → `DELETE /api/tempbox/:code`），但页面上从来没做过入口 ——
+   * 创建者想提前撤掉一次分享只能等它自然过期。这里把它补上。
+   */
+  const handleDeleteBatch = async () => {
+    if (!batch) return
+    if (!confirm(t("tb.confirmDeleteBatch", { code: batch.code }))) return
+    try {
+      await tempboxApi.remove(batch.code)
+      setBatch(null)
+      setPreviewText(null)
+      toast.success(t("tb.ok.batchDeleted"))
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("tb.err.deleteBatch"))
+    }
+  }
+
+  /**
    * 分享链接进入：`/t?code=123456` 自动填入并解锁。
    * 用 ref 防止 React StrictMode 下 effect 跑两次、白白多打一次接口
    * （那会白白消耗限流额度）。
@@ -462,6 +481,18 @@ export default function TempboxPage() {
                       {t("tb.fileSummary", { n: batch.fileCount, size: formatBytes(batch.totalBytes) })}
                     </Badge>
                   )}
+                  {/* 只有创建者/管理员能整箱删除（后端判定的 canDelete）。 */}
+                  {batch.canDelete && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="ml-auto text-xs text-muted-foreground hover:text-destructive"
+                      onClick={() => void handleDeleteBatch()}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      {t("tb.deleteBatch")}
+                    </Button>
+                  )}
                 </div>
                 <Separator />
                 {batch.isText ? (
@@ -522,15 +553,19 @@ export default function TempboxPage() {
                               <Download className="h-4 w-4" />
                             </a>
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => void handleDeleteFile(f.name)}
-                            title={t("tb.deleteFile")}
-                            className="text-destructive hover:text-destructive"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
+                          {/* 只有创建者/管理员能删（后端 deleteTempboxFile 的判定），
+                              收件人看到这个按钮点一下就是 403。 */}
+                          {batch.canDelete && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => void handleDeleteFile(f.name)}
+                              title={t("tb.deleteFile")}
+                              className="text-destructive hover:text-destructive"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          )}
                         </div>
                       </div>
                     ))}

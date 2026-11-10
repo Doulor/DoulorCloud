@@ -2,7 +2,8 @@ import { ApiError, json } from "../http"
 import { requireUser } from "../auth"
 import { requireAdminScope } from "./admin"
 import { uuid } from "../crypto"
-import { sendMail, renderMail, type MailTransport } from "../mailer"
+import { sendMail, renderMail, siteUrl, normalizeTransportOrder, isMailTransport, type MailTransport } from "../mailer"
+import { unsubscribeUrl } from "../mail-unsubscribe"
 import { broadcastMessage } from "../user-messages"
 import { getSetting } from "../settings"
 import type { Env } from "../env"
@@ -156,25 +157,28 @@ export async function dismissAnnouncement(
 /**
  * 计算公告群发实际使用的通道链。
  *
- * 规则：以 `mail_transport_order`（管理员配的全局顺序）为底，把首选通道提到
- * 最前面；**当首选是 brevo 时，把 posta 从回退链里摘掉**。
+ * 规则：以 `mail_transport_order`（管理员配的全局顺序）为底，把首选通道提到最前，
+ * 其余通道保留为回退（`normalizeTransportOrder` 负责兼容重构前的旧值）。
  *
- * 为什么必须摘掉 posta：posta 是异步队列，HTTP 200 只代表「已排队」，上游
- * （个人 QQ SMTP）的真实失败对调用方完全不可见 —— 混在回退链里会把「没发出去」
- * 记成「已发送」。2026-09-28 实测：某批 99 封里 46 封静默失败，worker 侧全部
- * 显示成功，只能去 posta 后台核对才发现。
- * 公告最怕的就是「以为发了、其实没发」：宁可如实记 failed 让管理员点重发，
- * 也不要留一个假的成功。首选 posta 时保持完整回退（那是管理员明确的选择）。
+ * 2026-11-08 起没有额外裁剪了：原先「首选 brevo 时把 posta 摘掉」的补丁随
+ * Posta 网关一起删除 —— 当时的理由是「posta 异步队列会把没发出去记成已发送」，
+ * 现在链上只剩 brevo / cf-send / cf-routing，三者的 HTTP 结果都能如实反映投递成败。
  */
 async function announcementChain(env: Env, prefer: MailTransport): Promise<MailTransport[]> {
-  const configured = (await getSetting(env, "mail_transport_order"))
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter((t): t is MailTransport => t === "posta" || t === "brevo" || t === "cf")
-  const base: MailTransport[] =
-    configured.length > 0 ? configured : ["posta", "brevo", "cf"]
-  const ordered = [prefer, ...base.filter((t) => t !== prefer)]
-  return prefer === "brevo" ? ordered.filter((t) => t !== "posta") : ordered
+  const base = normalizeTransportOrder(await getSetting(env, "mail_transport_order"))
+  return [prefer, ...base.filter((t) => t !== prefer)]
+}
+
+/**
+ * 公告群发的首选通道。
+ *
+ * 合法值 brevo / cf-send / cf-routing；其余（含重构前遗留的 `posta`）一律回落 brevo。
+ * 为什么不保留 posta 的语义：通道已下线，硬留着只会让群发永远卡在一条不存在的路上。
+ */
+export function preferredAnnouncementTransport(raw: string): MailTransport {
+  const v = raw.trim().toLowerCase()
+  if (v === "posta") return "brevo"
+  return isMailTransport(v) ? v : "brevo"
 }
 
 /**
@@ -187,12 +191,14 @@ async function announcementChain(env: Env, prefer: MailTransport): Promise<MailT
  * Brevo：`POST /v3/smtp/email` 的限流是 1000 RPS，速率完全不是瓶颈 ——
  *   真正的约束是**免费版 300 封/天**。所以这里不追速度，而是把节奏放慢，
  *   降低「短时间内大量同主题投递」被收件方判定为群发的概率。
- * Posta：出口是个人的 QQ SMTP，突发流量必被风控，同样要慢。
+ * CF Send（Email Sending REST API）：官方限流按账户算，突发大流量同样会 429，
+ *   节奏按 20 封/次 + 1 秒间隔走。
+ * CF Routing（send_email 绑定）：只发已验证地址，量本来就小，同款节奏即可。
  */
 const MAIL_BATCH_PROFILE: Record<MailTransport, { size: number; delayMs: number }> = {
   brevo: { size: 10, delayMs: 2000 },
-  posta: { size: 20, delayMs: 1000 },
-  cf: { size: 20, delayMs: 1000 },
+  "cf-send": { size: 20, delayMs: 1000 },
+  "cf-routing": { size: 20, delayMs: 1000 },
 }
 
 function sleep(ms: number): Promise<void> {
@@ -260,17 +266,23 @@ export async function runAnnouncementMailJob(
     .first<{ title: string; body: string; category: string; mail_status: string }>()
   if (!ann) return 0
 
-  // 首选通道：管理员在设置里选的（posta / brevo）。非法值回落 posta。
-  const preferRaw = (await getSetting(env, "announcement_mail_transport")).trim().toLowerCase()
-  const prefer: MailTransport = preferRaw === "brevo" ? "brevo" : "posta"
+  // 首选通道：管理员在设置里选的（brevo / cf-send / cf-routing）。
+  // 非法值（含重构前遗留的 posta）回落 brevo —— 见 preferredAnnouncementTransport。
+  const prefer = preferredAnnouncementTransport(await getSetting(env, "announcement_mail_transport"))
   const chain = await announcementChain(env, prefer)
   const { size: batchSize, delayMs: batchDelayMs } = MAIL_BATCH_PROFILE[prefer]
 
-  const { text: mailText, html } = renderMail(ann.title, [
-    ann.body,
-    `分类：${ANNOUNCEMENT_CATEGORY_LABELS[ann.category] ?? "公告"}`,
-    "详见 Doulor Cloud 消息中心「网站动态」。",
-  ])
+  // 每个收件人的退订链接不同（签名里带 user_id），所以按人渲染；模板本身是纯字符串拼接，开销可忽略
+  const renderFor = async (userId: string | null) =>
+    renderMail(
+      ann.title,
+      [ann.body, `分类：${ANNOUNCEMENT_CATEGORY_LABELS[ann.category] ?? "公告"}`],
+      {
+        kind: "announcement",
+        action: { label: "在消息中心查看", url: siteUrl("/dashboard/messages/site") },
+        unsubscribeUrl: userId ? await unsubscribeUrl(env, userId, "announcements") : null,
+      }
+    )
   const subject = `【Doulor Cloud】${ann.title}`
 
   // maxBatches 用于 cron 续跑时限制单次时长，避免一个 cron 跑太久
@@ -280,12 +292,12 @@ export async function runAnnouncementMailJob(
 
   for (let batch = 0; batch < maxBatches; batch++) {
     const rows = await env.DB.prepare(
-      `SELECT id, email FROM announcement_mail_queue
+      `SELECT id, user_id, email FROM announcement_mail_queue
         WHERE announcement_id = ? AND status = 'pending'
         ORDER BY created_at LIMIT ?`
     )
       .bind(announcementId, batchSize)
-      .all<{ id: string; email: string }>()
+      .all<{ id: string; user_id: string | null; email: string }>()
 
     const items = rows.results ?? []
     if (items.length === 0) break
@@ -296,7 +308,7 @@ export async function runAnnouncementMailJob(
       try {
         await sendMail(
           env,
-          { to: item.email, subject, text: mailText, html },
+          { to: item.email, subject, ...(await renderFor(item.user_id)) },
           { prefer, chain }
         )
         await env.DB.prepare(
@@ -696,8 +708,8 @@ export async function updateAnnouncement(
  * 显式按钮：把 failed 重置为 pending，再跑一轮。
  *
  * 请求体可选 `{ emails: string[] }`：**强制**重发这些地址（哪怕当前是 sent）。
- * 用于「worker 记成成功、其实没送到」的情况 —— posta 是异步队列，上游失败对
- * 调用方不可见，只能靠事后核对 posta 后台发现（2026-09-28 实战：46 封被误记成功）。
+ * 用于「worker 记成成功、其实没送到」的情况 —— 比如第三方通道回了 2xx 却把信丢了
+ * （Brevo 额度用尽时会这样），只能靠事后核对对方后台发现（2026-09-28 实战：46 封被误记成功）。
  * 不带 emails 时默认只重发 failed。
  *
  * 计数校正：重置时把 mail_sent 回填成「队列里真实的 sent 行数」、mail_failed 同理，

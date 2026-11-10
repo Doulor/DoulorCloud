@@ -34,5 +34,8 @@ export function socialNotifText(n: Notification, actor: string, t: TFunc): strin
   if (n.type === "comment_like") return t("msg.likedComment", { actor })
   if (n.type === "comment_reply") return t("msg.repliedComment", { actor })
   if (n.type === "feedback_reply") return `${actor} ${t("cm.notif.feedbackReply")}`
+  // 明确区分「评论了你的帖子」与「回复了你的帖子」：兜底那句是「回复」，
+  // 让 post_comment 落到兜底会把它说成"回复"（后端 TG 推送那边用的是"评论"）。
+  if (n.type === "post_comment") return t("msg.commented", { actor })
   return t("msg.replied", { actor })
 }

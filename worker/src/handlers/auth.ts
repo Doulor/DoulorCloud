@@ -1,7 +1,7 @@
 import { ApiError, json } from "../http"
 import { hashPassword, verifyPassword, needsPasswordRehash, uuid, hashToken, generateToken } from "../crypto"
 import { clientIp, normalizeKeyPart, guardRateLimit } from "../ratelimit"
-import { isReservedName } from "../reserved-names"
+import { isReservedName, isReservedSubdomain } from "../reserved-names"
 import { revokeAllUserTokens } from "../oauth-provider"
 import { sendMail, renderMail } from "../mailer"
 import { getSettings, getSettingBool } from "../settings"
@@ -171,6 +171,16 @@ export async function register(env: Env, request: Request): Promise<Response> {
   }
   if (isReservedName(username)) {
     throw new ApiError(400, "该用户名为系统保留名称", "RESERVED_NAME")
+  }
+  /**
+   * 注册会**同时建出同名子域名**（见下面 batch 里的 subdomains INSERT），
+   * 而「保留子域名」名单（管理员在面板里逐条加的）此前只在 subdomains /
+   * admin-subdomains 的创建接口里校验 —— 于是管理员刚给某个名字留位，
+   * 当天就可能被新用户注册成用户名 + 子域名，把位子占掉。
+   * 这里补同一道闸：注册即建子域名，就该按子域名的规则拒。
+   */
+  if (await isReservedSubdomain(env.DB, username)) {
+    throw new ApiError(400, "该用户名为保留名称", "RESERVED_NAME")
   }
   if (!isValidEmail(email)) {
     throw new ApiError(400, "邮箱格式不正确", "INVALID_EMAIL")
@@ -1097,20 +1107,21 @@ export async function forgotPassword(env: Env, request: Request): Promise<Respon
       .run()
 
     const link = `https://cloud.${env.ROOT_DOMAIN}/reset-password?token=${token}`
-    const { text, html } = renderMail("重置密码", [
-      `我们收到了你（${user.username}）的重置密码请求。`,
-      `请在 ${RESET_TOKEN_TTL_MINUTES} 分钟内点击下方链接设置新密码（若未发起此请求，请忽略本邮件）：`,
-    ])
-    // 链接用明文塞进正文（renderMail 会转义 HTML，纯文本里保留原样）
+    // 链接走 renderMail 的 action：卡片内的按钮 + 可复制的备用链接，纯文本版也带完整地址
+    const rendered = renderMail(
+      "重置密码",
+      [
+        `我们收到了你（${user.username}）的重置密码请求。`,
+        `请在 ${RESET_TOKEN_TTL_MINUTES} 分钟内点击下方按钮设置新密码。链接只能使用一次。`,
+        "如果这不是你本人的操作，请忽略本邮件，你的密码不会被修改。",
+      ],
+      { action: { label: "设置新密码", url: link } }
+    )
     try {
       await sendMail(env, {
         to: user.email,
         subject: "【Doulor Cloud】重置密码",
-        text: `${text}\n\n${link}`,
-        html: `${html.replace(
-          "</body></html>",
-          `<p style="margin:20px 0 12px;font-size:14px;line-height:1.6;color:#374151">请点击：<a href="${link}" style="color:#2563eb">${link}</a></p></body></html>`
-        )}`,
+        ...rendered,
       })
     } catch (err) {
       console.error("重置密码邮件发送失败:", email, err)

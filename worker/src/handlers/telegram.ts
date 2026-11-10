@@ -637,6 +637,45 @@ async function tryBindCode(
  * 注意：**永远返回 200**（除非回调密钥不对）——返回 4xx/5xx 会让 Telegram 反复重投，
  * 一条畸形 update 就能把我们打出一堆重复消息。
  */
+/** 只读诊断：查 getMe / getWebhookInfo（用 TG_DIAG_KEY 保护，可随时删） */
+function cfg0_secret(cfg: { webhook_secret: string | null }): string {
+  return cfg.webhook_secret ?? ""
+}
+
+export async function diagWebhook(env: Env, request: Request): Promise<Response> {
+  const url = new URL(request.url)
+  const key = request.headers.get("x-tg-diag") ?? url.searchParams.get("key") ?? ""
+  if (!env.TG_DIAG_KEY || key !== env.TG_DIAG_KEY) return json({ ok: false, error: "unauthorized" }, 401)
+  const token = await botToken(env)
+  if (!token) return json({ ok: false, error: "BOT_TOKEN_MISSING" })
+  const me = await tgApi(env, "getMe", {}, token)
+  // action=setwebhook：把回调地址重新挂上（幂等，可反复调）
+  if (url.searchParams.get("action") === "setwebhook") {
+    const hook = new URL("/api/tg/webhook", url.origin).toString()
+    const set = await tgApi(
+      env,
+      "setWebhook",
+      {
+        url: hook,
+        secret_token: cfg0_secret(await loadConfig(env)),
+        allowed_updates: ["message", "edited_message", "channel_post", "inline_query", "callback_query"],
+        drop_pending_updates: false,
+      },
+      token
+    )
+    const after = await tgApi(env, "getWebhookInfo", {}, token)
+    return json({ ok: true, setResult: set, webhook: after.result ?? after.description })
+  }
+  const info = await tgApi(env, "getWebhookInfo", {}, token)
+  const cfg = await loadConfig(env)
+  return json({
+    ok: true,
+    config: { enabled: cfg.enabled, bot_username: cfg.bot_username, has_secret: !!cfg.webhook_secret },
+    me: me.result ?? me.description,
+    webhook: info.result ?? info.description,
+  })
+}
+
 export async function handleWebhook(env: Env, request: Request): Promise<Response> {
   const cfg = await loadConfig(env)
   if (!cfg.enabled) return json({ ok: true, ignored: "disabled" })

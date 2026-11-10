@@ -164,6 +164,13 @@ export function TitlesAdminPanel() {
               <CardDescription>
                 {t("at.cardDesc")}
               </CardDescription>
+              {/* ⚠️ 称号不只是装饰：名字等于「赞助伙伴」的那一条会额外开通
+                  NewAPI「付费」分组（group-sync.ts 的 PREMIUM_TITLE_NAME）与
+                  AI 付费直连地址免认证码（ai-access.ts 的 BYPASS_TITLE）。
+                  那两处都是按**名字**查的，所以改名/删除会让对应权益静默消失。 */}
+              <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300">
+                {t("at.nameWarning")}
+              </p>
             </div>
             <Button size="sm" onClick={() => openDialog()}>
               <Plus className="h-4 w-4" />

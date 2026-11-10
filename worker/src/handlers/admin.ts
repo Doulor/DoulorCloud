@@ -33,7 +33,17 @@ import {
   readNewApiOption,
   writeNewApiOption,
 } from "../newapi-client"
-import { sendMail, renderMail, parseBrevoKeys } from "../mailer"
+import {
+  sendMail,
+  sendMailVia,
+  renderMail,
+  siteUrl,
+  parseBrevoKeys,
+  normalizeTransportOrder,
+  isMailTransport,
+  MAIL_TRANSPORTS,
+  type MailTransport,
+} from "../mailer"
 import { fetchWithTimeout } from "../async-utils"
 import { cfListDestinations } from "../cloudflare"
 import { likeContains } from "../sql-like"
@@ -1441,7 +1451,7 @@ export async function listInvites(env: Env, request: Request): Promise<Response>
 
   const [rows, countRes, groupRes] = await env.DB.batch([
     env.DB.prepare(
-      `SELECT c.*, u.username AS created_by_name
+      `SELECT c.*, u.username AS created_by_name, u.status AS creator_status
          FROM invite_codes c
          LEFT JOIN users u ON u.id = c.created_by${statusWhere}
         ORDER BY c.created_at DESC${pageSuffix}`
@@ -1471,9 +1481,17 @@ export async function listInvites(env: Env, request: Request): Promise<Response>
   }
 
   return json({
-    invites: ((rows.results ?? []) as unknown as (InviteRow & { created_by_name: string | null })[]).map(
-      toPublicInvite
-    ),
+    invites: ((rows.results ?? []) as unknown as (InviteRow & {
+      created_by_name: string | null
+      creator_status: string | null
+    })[]).map((r) => ({
+      ...toPublicInvite(r),
+      /**
+       * 创建者被封禁 = 这张码**无法再被使用**（注册时会以 INVITE_DISABLED 拒掉）。
+       * 列表此前对这一点的显示是「可用」，管理员会以为还能发出去。
+       */
+      creatorBanned: r.creator_status === "suspended",
+    })),
     ...(hasPage
       ? {
           total: Number(
@@ -1675,25 +1693,76 @@ export async function createInvite(env: Env, request: Request): Promise<Response
 /**
  * POST /api/admin/mail-test —— 出站邮件自检。
  *
- * 区分两种发送能力（成本与前提不同）：
- *   - 「验证码 / 账号找回」：发给**已验证的目标地址**，Cloudflare **免费**且无需 Onboard
- *   - 「公告群发」：需要先 Onboard 发送域名（付费），否则只能发已验证地址
+ * 三种模式（请求体 `channel`）：
+ *   · 省略 / `auto` —— 按当前顺序走**完整回退链**，和真实发信一模一样（默认）；
+ *   · `all`        —— **按当前 `mail_transport_order` 逐条单独试**，回一份分通道报告。
+ *                     只试顺序里真实会用到的通道 —— 不在链里的通道（例如默认配置下的
+ *                     `cf-routing`，它只服务白名单）不给它发测试信：那只会白占一次
+ *                     CF 配额、还会让人误以为它在发信链上。
+ *   · `brevo` / `cf-send` / `cf-routing` —— 只试指定的那一条（排错时要单点验证白名单路径才用）。
+ *
+ * ⚠️ 会真的发出邮件，而且每封都可能进不同的收件箱（垃圾箱/收件箱）—— 这正好也是
+ *    "哪条通道送达率高"的实测方法：逐通道各发一封，看它们分别落在哪。
  */
 export async function testMail(env: Env, request: Request): Promise<Response> {
   await requireAdminScope(env, request, "mail")
-  const body = (await request.json().catch(() => ({}))) as { to?: string }
+  const body = (await request.json().catch(() => ({}))) as { to?: string; channel?: string }
   const to = (body.to ?? "").trim()
   if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
     throw new ApiError(400, "请提供有效的收件邮箱", "INVALID_EMAIL")
   }
 
-  const { text, html } = renderMail("【Doulor Cloud】邮件自检", [
-    "如果你收到这封邮件，说明 Worker 的出站邮件已配置成功。",
-    "此功能用于：真实邮箱验证、账号找回、以及站内通知。",
-  ])
+  const rendered = renderMail(
+    "【Doulor Cloud】邮件自检",
+    [
+      "如果你收到这封邮件，说明 Worker 的出站邮件已配置成功。",
+      "此功能用于：真实邮箱验证、账号找回、以及站内通知。",
+    ],
+    {
+      kind: "admin",
+      action: { label: "回到邮件设置", url: siteUrl("/dashboard/admin#mail") },
+    }
+  )
+  const subject = "【Doulor Cloud】邮件自检"
+  const mail = { to, subject, ...rendered }
 
+  const channel = (body.channel ?? "").trim().toLowerCase()
+
+  // ---- 逐通道 / 单通道自检：失败也回 200，让面板把每条通道的结果都列出来 ----
+  if (channel === "all" || (channel !== "" && channel !== "auto")) {
+    const wanted: MailTransport[] =
+      channel === "all"
+        ? normalizeTransportOrder(await getSetting(env, "mail_transport_order"))
+        : isMailTransport(channel)
+          ? [channel]
+          : []
+    if (wanted.length === 0) {
+      throw new ApiError(
+        400,
+        `未知的邮件通道：${channel}（可选：auto / all / ${MAIL_TRANSPORTS.join(" / ")}）`,
+        "INVALID_INPUT"
+      )
+    }
+    const results: { channel: MailTransport; ok: boolean; code?: string; error?: string }[] = []
+    for (const t of wanted) {
+      try {
+        await sendMailVia(env, t, mail)
+        results.push({ channel: t, ok: true })
+      } catch (err) {
+        results.push({
+          channel: t,
+          ok: false,
+          code: err instanceof ApiError ? err.code : "MAIL_SEND_FAILED",
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+    return json({ ok: results.some((r) => r.ok), results })
+  }
+
+  // ---- 默认：走完整回退链（与真实发信完全一致） ----
   try {
-    await sendMail(env, { to, subject: "【Doulor Cloud】邮件自检", text, html })
+    await sendMail(env, mail)
   } catch (err) {
     if (err instanceof ApiError) {
       return json({ ok: false, code: err.code, error: err.message }, err.status)
@@ -1957,7 +2026,8 @@ export async function mailStatus(env: Env, request: Request): Promise<Response> 
  * 满世界传 —— 它们归 `handlers/admin-lab.ts` 管，那边的接口只回尾号。
  */
 const SECRET_SETTING_KEYS = new Set<string>([
-  "posta_key",
+  // Posta 时代的 posta_key 已随通道删除（2026-11-08）。
+  "cf_send_token",
   "brevo_api_key",
   "lab_admin_api_key",
   "lab_admin_channels",
@@ -1984,16 +2054,27 @@ function maskKeyForDisplay(key: string): string {
 }
 
 /** 邮件通道密钥的展示信息（明文不返回；GET 与 PUT 共用） */
-function mailSecretsOf(settings: Record<SettingKey, string>): {
-  postaConfigured: boolean
+function mailSecretsOf(
+  env: Env,
+  settings: Record<SettingKey, string>
+): {
+  /** `cf-send` 是否可用：面板填了 Token，或 Worker 里配了 CF Token */
+  cfSendConfigured: boolean
+  /** Token 来源：panel（设置项）/ worker（Secret 或普通变量）/ none */
+  cfSendTokenSource: "panel" | "worker" | "none"
   brevoConfigured: boolean
   brevoKeyCount: number
   /** 已配置的 Brevo Key 列表（中间打码，顺序 = 轮询顺序） */
   brevoKeys: string[]
 } {
   const brevoKeys = parseBrevoKeys(settings.brevo_api_key)
+  const hasOwnToken = Boolean(settings.cf_send_token.trim())
+  const hasEnvToken = Boolean(
+    (env.CLOUDFLARE_API_TOKEN_SECRET || env.CLOUDFLARE_API_TOKEN || "").trim()
+  )
   return {
-    postaConfigured: Boolean(settings.posta_key),
+    cfSendConfigured: hasOwnToken || hasEnvToken,
+    cfSendTokenSource: hasOwnToken ? "panel" : hasEnvToken ? "worker" : "none",
     brevoConfigured: brevoKeys.length > 0,
     brevoKeyCount: brevoKeys.length,
     brevoKeys: brevoKeys.map(maskKeyForDisplay),
@@ -2051,7 +2132,7 @@ export async function getSettingsHandler(env: Env, request: Request): Promise<Re
     /** 可作为「管理员通知邮箱」的候选项 */
     notifyEmailOptions: [...options],
     /** 邮件通道密钥是否已配置（明文不返回）；Brevo 额外给出 Key 把数与打码列表 */
-    mailSecrets: mailSecretsOf(settings),
+    mailSecrets: mailSecretsOf(env, settings),
     stats: {
       storageAccounts: infos[0]?.c ?? 0,
       storageUsedBytes: infos[0]?.used ?? 0,
@@ -2126,6 +2207,24 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
         }
       }
       values[key] = parts.join(",")
+      continue
+    }
+
+    // mailbox_external_domains：允许对外发信的发件域名。**空串 = 全部已启用根域**（合法值）。
+    // 必须排在 `str === "" continue` 之前：管理员从"只放行某几个域"改回"全放行"时，
+    // 前端提交的正是空串 —— 被当成"不修改"的话，这个收口就永远撤不掉。
+    if (key === "mailbox_external_domains") {
+      const parts = String(raw)
+        .split(/[\s,;]+/)
+        .map((s) => s.trim().toLowerCase().replace(/^@/, ""))
+        .filter(Boolean)
+      for (const p of parts) {
+        // 只做形状校验：不能带协议/路径，必须是 a.b 形式
+        if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(p)) {
+          throw new ApiError(400, `域名格式不对：${p}`, "INVALID_INPUT")
+        }
+      }
+      values[key] = [...new Set(parts)].join(",")
       continue
     }
 
@@ -2285,6 +2384,88 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
 
     const str = String(raw).trim()
     if (str === "") continue
+
+    // mail_transport_order：发信通道链。必须白名单校验 + 归一化后再入库。
+    // 走通用分支的后果很具体：管理员把 `cf-send` 拼成 `cfsend`，库里就存下这个
+    // 认不出的值，而解析侧只会**静默跳过**它 —— 表现是「顺序里明明写了，却从来没走过」。
+    if (key === "mail_transport_order") {
+      const parts = str
+        .split(/[\s,;]+/)
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean)
+      if (parts.includes("posta")) {
+        throw new ApiError(
+          400,
+          "Posta 通道已下线，请从发送顺序里删掉 posta（可选：brevo / cf-send / cf-routing）",
+          "INVALID_INPUT"
+        )
+      }
+      // `cf` 是重构前 `cf-routing` 的旧名，仍接受（normalizeTransportOrder 会改名）
+      const bad = parts.filter((p) => p !== "cf" && !isMailTransport(p))
+      if (bad.length > 0) {
+        throw new ApiError(
+          400,
+          `未知的邮件通道：${bad.join("、")}（可选：brevo / cf-send / cf-routing）`,
+          "INVALID_INPUT"
+        )
+      }
+      values[key] = normalizeTransportOrder(str).join(",")
+      continue
+    }
+
+    // announcement_mail_transport：公告群发首选通道，同样是枚举
+    if (key === "announcement_mail_transport") {
+      const v = str.toLowerCase()
+      if (v === "posta") {
+        throw new ApiError(400, "Posta 通道已下线，请改选 brevo 或 cf-send", "INVALID_INPUT")
+      }
+      if (!isMailTransport(v)) {
+        throw new ApiError(
+          400,
+          `未知的邮件通道：${v}（可选：${MAIL_TRANSPORTS.join(" / ")}）`,
+          "INVALID_INPUT"
+        )
+      }
+      values[key] = v
+      continue
+    }
+
+    // cf_send_token：CF Email Sending 的 API Token（只写不读）。
+    // 单独一条只为长度校验 —— 通用兜底会截断到 100 字符，Token 被截断后的报错
+    // 是 401「Token 无效」，管理员会以为是自己粘错了，实际是这里吃掉的。
+    if (key === "cf_send_token") {
+      if (str.length > 200) {
+        throw new ApiError(400, "CF Token 过长（正常 40 字符左右）", "INVALID_INPUT")
+      }
+      values[key] = str
+      continue
+    }
+
+    // cf_send_monthly_cap：CF 发信的月度上限（0 = 不设限，会用出账单）。
+    // 必须单独校验：通用分支对陌生键名只做 `slice(0, 100)`，「abc」也能存进去，
+    // 而读取侧拿到 NaN 只能当成 0（= 不限）—— 闸门就悄悄失效了。
+    if (key === "cf_send_monthly_cap") {
+      const n = Number(str)
+      if (!Number.isInteger(n) || n < 0 || n > 1_000_000) {
+        throw new ApiError(400, "CF 月度上限需为 0 ~ 1000000 的整数", "INVALID_INPUT")
+      }
+      values[key] = String(n)
+      continue
+    }
+
+    // mailbox_external_daily_limit：站内邮箱对外发信的每人每日上限（0 = 关闭）。
+    // 必须单独校验：非数字会被通用分支原样存下，读取侧拿到 NaN 后按 0 处理 ——
+    // 表现就是「管理员想放开到 50，结果对外发信被悄悄关掉了」。
+    if (key === "mailbox_external_daily_limit") {
+      const n = Number(str)
+      if (!Number.isInteger(n) || n < 0 || n > 500) {
+        throw new ApiError(400, "对外发信每日上限需为 0 ~ 500 的整数", "INVALID_INPUT")
+      }
+      values[key] = String(n)
+      continue
+    }
+
+    // cf_send_period_start_day 已删除：计费窗口直接复用 cf_cycle_day（与额度面板同源）
 
     // cf_plan：Cloudflare 账号套餐（额度面板口径）。只认三个固定值 ——
     // 走通用分支会变成「任意字符串都能存」，面板拿到认不出的值只能回落免费版，
@@ -2453,7 +2634,7 @@ export async function updateSettingsHandler(env: Env, request: Request): Promise
   // 一并回 mailSecrets：Brevo Key 列表是「改完立刻生效」的，前端拿到新的打码列表
   // 就能就地更新，不必整页重载设置（重载会把其它未保存的编辑冲掉）。
   const fresh = await getSettings(env)
-  return json({ settings: maskSecrets(fresh), mailSecrets: mailSecretsOf(fresh) })
+  return json({ settings: maskSecrets(fresh), mailSecrets: mailSecretsOf(env, fresh) })
 }
 
 // POST /api/admin/storage/recalculate —— 以 R2 实际内容重算所有用户用量

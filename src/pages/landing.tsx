@@ -53,14 +53,27 @@ import { QQ_GROUP_URL, REPO_URL, TELEGRAM_URL } from "@/lib/site-links"
  * 四个模块过 `requireFeatureUser`（见 worker/src/permissions.ts 的 FEATURES）。
  * 改动这里之前先确认服务端，否则落地页会再次出现「承诺了却用不了」的落差。
  */
-type FeatureTier = "free" | "contribute"
+type FeatureTier = "free" | "contribute" | "rental"
 
 const TIER_META: Record<FeatureTier, { labelKey: string; variant: "success" | "secondary" }> = {
   free: { labelKey: "landing.tierFree", variant: "success" },
   contribute: { labelKey: "landing.tierContribute", variant: "secondary" },
+  // 积分租用：内网穿透、DNS 解析额度这类「按天买」的模块，既不注册即用、也不靠捐献解锁。
+  rental: { labelKey: "landing.tierRental", variant: "secondary" },
 }
 
-/** 9 个功能模块（3×3 正好铺满），每个含能力点 bullet，强调「能做什么」。文案在词典里（landing.f1.* ~ landing.f10.*，f5 临时分享箱已下架）。 */
+/**
+ * 9 个功能模块（3×3 正好铺满），每个含能力点 bullet，强调「能做什么」。文案在词典里（landing.f1.* ~ landing.f10.*）。
+ *
+ * ⚠️ 档位必须与服务端一致（
+ *   · free       —— 注册即用；
+ *   · contribute —— 贡献换权限（r2 / ai / proxy）；
+ *   · rental     —— 积分按天租用（内网穿透；DNS 解析额度同属这一类，见 f4）。
+ * ）。改动前先看 worker/src/permissions.ts 的 FEATURES 与 DEFAULT_ALLOWED。
+ *
+ * 注：f5「临时分享箱」的卡片已撤下 —— 不是功能下架（它仍在「工具箱」里，路由 /dashboard/tempbox），
+ * 只是不再作为落地页卖点。
+ */
 const features: {
   icon: typeof Globe
   keyBase: string
@@ -72,9 +85,9 @@ const features: {
   { icon: Inbox, keyBase: "landing.f3", tier: "free", points: 3 },
   { icon: Network, keyBase: "landing.f4", tier: "free", points: 3 },
   { icon: Contact, keyBase: "landing.f6", tier: "free", points: 3 },
-  { icon: HardDrive, keyBase: "landing.f7", tier: "contribute", points: 3 },
+  { icon: HardDrive, keyBase: "landing.f7", tier: "free", points: 3 },
   { icon: Sparkles, keyBase: "landing.f8", tier: "contribute", points: 3 },
-  { icon: Zap, keyBase: "landing.f9", tier: "contribute", points: 3 },
+  { icon: Zap, keyBase: "landing.f9", tier: "rental", points: 3 },
   { icon: Wifi, keyBase: "landing.f10", tier: "contribute", points: 3 },
 ]
 

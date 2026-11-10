@@ -387,6 +387,10 @@ export interface Wb2PollResult {
 export async function wb2Poll(env: Env, state: string): Promise<Wb2PollResult> {
   const r = await donateFetch<{
     ok?: boolean
+    done?: boolean
+    uid?: string
+    nickname?: string
+    realm?: string
     status?: string
     message?: string
     account?: Record<string, unknown> | null
@@ -395,21 +399,35 @@ export async function wb2Poll(env: Env, state: string): Promise<Wb2PollResult> {
   if (r.status === "failed") {
     return { status: "failed", message: r.message ?? "授权失败或已过期" } as unknown as Wb2PollResult
   }
+  if (r.done === true && r.account && !r.status) {
+    // 网关如果直接回老格式 {done:true, uid, ...}，也认
+    const uid0 = String((r as unknown as { uid?: string }).uid ?? "").trim()
+    if (uid0) {
+      const nick0 = String((r as unknown as { nickname?: string }).nickname ?? uid0)
+      const realm0 = String((r as unknown as { realm?: string }).realm ?? "cn") === "global" ? "global" : "cn"
+      return { done: true, uid: uid0, nickname: nick0, realm: realm0 } as unknown as Wb2PollResult
+    }
+  }
   if (r.status !== "done" || !r.account) {
-    return { status: "pending", message: "" } as unknown as Wb2PollResult
+    return { done: false, status: "pending", message: "" } as unknown as Wb2PollResult
   }
   const a = r.account as Record<string, unknown>
   const rawId = String(a.id ?? "")
   const uid = String(a.userId ?? "").trim() || rawId.replace(/^user-/, "")
   const ed = String(a.edition ?? a.editionLabel ?? "cn").toLowerCase()
+  // 2026-10-29：handler 读的是 done/uid/nickname/realm（Wb2PollResult 的定义），
+  // 这里此前只返回 status/account → `polled.done` 永远是 undefined，
+  // 所有绑定都被当成"还在等"，会话永远 pending（crike/klayzhaov3 就栽在这）。
+  const nick = String(a.displayName ?? a.name ?? uid).slice(0, 60)
+  const realm = ed.includes("global") || ed.includes("intl") ? "global" : "cn"
   return {
+    done: true,
+    uid,
+    nickname: nick,
+    realm,
     status: "done",
     message: "",
-    account: {
-      uid,
-      nickname: String(a.displayName ?? a.name ?? uid).slice(0, 60),
-      realm: ed.includes("global") || ed.includes("intl") ? "global" : "cn",
-    },
+    account: { uid, nickname: nick, realm },
   } as unknown as Wb2PollResult
 }
 

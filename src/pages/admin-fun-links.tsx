@@ -68,7 +68,7 @@ export function FunLinksAdminPanel() {
       const res = await adminFunLinksApi.list()
       setLinks(res.links)
     } catch (err) {
-      toast.error(errMsg(err, t("fl.err.load")))
+      toast.error(errMsg(err, t("afl.err.load")))
     } finally {
       setLoading(false)
     }

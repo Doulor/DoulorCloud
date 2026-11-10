@@ -67,10 +67,10 @@ export interface NodeHealthRecord {
 export const HANDSHAKE_OK_STREAK_TO_UP = 1
 
 /**
- * 连续失败几次算「不可用」。2 —— 一次失败太容易是抖动，
- * 订阅站 / 节点偶发超时非常常见（同 handlers/proxy.ts 里订阅抓取的「抖动重试」思路）。
+ * 连续失败几次算「测不到」。3 —— 一轮失败很容易是 Worker 出网抖动或节点限源，
+ * 不能看到两次失败就把好节点埋到列表最后；恢复仍是一轮成功即 up。
  */
-export const HANDSHAKE_FAIL_STREAK_TO_DOWN = 2
+export const HANDSHAKE_FAIL_STREAK_TO_DOWN = 3
 
 /** 从未探过的节点（也包含探不动的 QUIC 协议节点） */
 export function emptyHealthRecord(): NodeHealthRecord {
@@ -195,11 +195,12 @@ export function summarizeNodeHealth<T>(
   const summary: NodeHealthSummary = { up: 0, unknown: 0, down: 0, total: nodes.length, checkedAt: null }
   for (const node of nodes) {
     const record = health.get(keyOf(node))
-    summary[nodeHealthRank(record?.status) === HEALTH_RANK.up
-      ? "up"
-      : record?.status === "down"
-        ? "down"
-        : "unknown"] += 1
+    // 无记录 = 从未探过或该协议探不动，必须归 unknown。
+    // 不能直接用 nodeHealthRank 反推 down：rank(unknown) 与 rank(undefined) 都为 1，
+    // 而这里的三元表达式会把「同 rank 但 record 不存在」的节点错误记成 down。
+    if (record?.status === "up") summary.up += 1
+    else if (record?.status === "down") summary.down += 1
+    else summary.unknown += 1
     if (record?.checkedAt && (!summary.checkedAt || record.checkedAt > summary.checkedAt)) {
       summary.checkedAt = record.checkedAt
     }

@@ -2820,7 +2820,7 @@ export default function LabPage() {
     const effSiteChannel =
       siteInfo?.channels.find((c) => c.id === effSiteChannelId) ?? null
     /**
-     * 原生工具调用开关（站点设置 `lab_native_tools`，**默认关**）。
+     * 原生工具调用开关（站点设置 `lab_native_tools`，**默认开**；置 0 才退回标签协议）。
      * 关着 = 走原来的文本标签协议 ⇒ 这就是回滚口子。
      */
     const nativeToolsOn = Boolean(siteInfo?.nativeTools)

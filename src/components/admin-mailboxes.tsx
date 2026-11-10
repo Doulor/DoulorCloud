@@ -285,7 +285,7 @@ export function AdminMailboxes() {
               disabled={page >= pageCount}
               onClick={() => setPage((p) => p + 1)}
             >
-              {t("common.next")}
+              {t("adm.userPageNext")}
             </Button>
           </div>
         </div>

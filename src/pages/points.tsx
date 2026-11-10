@@ -1,4 +1,6 @@
 import * as React from "react"
+
+import { POINT_REASON_LABEL } from "@/lib/points-reasons"
 import { FeatureCardsSkeleton } from "@/components/skeletons"
 import { Link } from "react-router-dom"
 import {
@@ -86,19 +88,8 @@ import type {
   UserProductPayload,
 } from "@/types"
 
-/** 流水来源 → 展示标签 */
-const REASON_LABEL: Record<string, string> = {
-  event: "pt.reason.event",
-  admin: "pt.reason.admin",
-  redeem: "pt.reason.redeem",
-  shop: "pt.reason.shop",
-  shop_sell: "pt.reason.shopSell",
-  donation: "pt.reason.donation",
-  invite: "pt.reason.invite",
-  invite_commission: "pt.reason.inviteCommission",
-  transfer_out: "pt.reason.transferOut",
-  transfer_in: "pt.reason.transferIn",
-}
+/** 流水来源 → 展示标签（与管理端共用一份，见 @/lib/points-reasons 的说明） */
+const REASON_LABEL = POINT_REASON_LABEL
 
 /** 订单状态 → 展示标签（用户商品订单的 pending/delivered 含义不同，用 orderStatusText 区分） */
 const ORDER_STATUS: Record<string, { label: string; variant: "default" | "outline" | "secondary" }> = {
@@ -176,9 +167,25 @@ function canWithdrawAfterSale(o: PointOrder): boolean {
   return o.afterSaleStatus === "requested"
 }
 
-/** 售后对话框三种模式各自的文案 key（申请退款 / 卖家拒绝 / 买家拒收） */
+/**
+ * 买家能不能「取消订单」（2026-10-30 站长要求）。
+ *
+ * 只给 `pending`（卖家还没交付）用：这时积分还在托管、谁也没拿到东西，
+ * 取消就是原路退回，对双方都是零损失 —— 之前买家在这种状态下**完全没有出口**
+ * （申请退款对 pending 会直接报错，只能去求管理员手动取消）。
+ *
+ * 卖家一旦点了「已交付」，性质就变成纠纷：必须走「拒收 / 申请退款」，
+ * 由卖家或平台判定。否则等于给「白拿货再退款」开后门（后端也按同一口径挡）。
+ */
+function canCancelPending(o: PointOrder): boolean {
+  if (o.status !== "pending") return false
+  const s = o.afterSaleStatus
+  return s === null || s === "rejected" || s === "closed"
+}
+
+/** 订单对话框四种模式各自的文案 key（申请退款 / 卖家拒绝 / 买家拒收 / 买家取消未发货订单） */
 const AFTER_SALE_DIALOG: Record<
-  "request" | "reject" | "rejectDelivery",
+  "request" | "reject" | "rejectDelivery" | "cancel",
   { title: string; desc: string; label: string; placeholder: string }
 > = {
   request: {
@@ -198,6 +205,12 @@ const AFTER_SALE_DIALOG: Record<
     desc: "pt.afterSale.rejectDeliveryDesc",
     label: "pt.afterSale.reasonLabel",
     placeholder: "pt.afterSale.rejectDeliveryPlaceholder",
+  },
+  cancel: {
+    title: "pt.cancelOrder.title",
+    desc: "pt.cancelOrder.desc",
+    label: "pt.cancelOrder.reasonLabel",
+    placeholder: "pt.cancelOrder.reasonPlaceholder",
   },
 }
 
@@ -226,6 +239,8 @@ function deliveryLabel(delivery: string): string {
       return tStatic("pt.delivery.subscription")
     case "invite_quota":
       return tStatic("pt.delivery.inviteQuota")
+    case "mailbox_quota":
+      return tStatic("pt.delivery.mailboxQuota")
     case "code":
       return tStatic("pt.delivery.code")
     case "content":
@@ -255,6 +270,8 @@ function buyHint(delivery: string, isUserProduct: boolean): string {
       return tStatic("pt.buyHint.subscription")
     case "invite_quota":
       return tStatic("pt.buyHint.inviteQuota")
+    case "mailbox_quota":
+      return tStatic("pt.buyHint.mailboxQuota")
     case "code":
       return tStatic("pt.buyHint.code")
     case "content":
@@ -808,7 +825,7 @@ export default function PointsPage() {
   // 售后（退款）：买家「申请退款」与卖家「拒绝并说明理由」共用一个对话框，用 mode 区分
   const [afterSaleTarget, setAfterSaleTarget] = React.useState<PointOrder | null>(null)
   const [afterSaleMode, setAfterSaleMode] = React.useState<
-    "request" | "reject" | "rejectDelivery"
+    "request" | "reject" | "rejectDelivery" | "cancel"
   >("request")
   const [afterSaleText, setAfterSaleText] = React.useState("")
   const [afterSaleBusy, setAfterSaleBusy] = React.useState(false)
@@ -1027,6 +1044,13 @@ export default function PointsPage() {
     setAfterSaleTarget(o)
   }
 
+  /** 买家：打开「取消订单」对话框（卖家还没发货 → 积分立刻原路退回） */
+  const openCancelOrder = (o: PointOrder) => {
+    setAfterSaleMode("cancel")
+    setAfterSaleText("")
+    setAfterSaleTarget(o)
+  }
+
   /** 提交对话框 —— 买家申请 / 卖家拒绝 / 买家拒收 共用 */
   const submitAfterSale = async () => {
     const o = afterSaleTarget
@@ -1048,6 +1072,12 @@ export default function PointsPage() {
       } else if (afterSaleMode === "rejectDelivery") {
         await pointsApi.rejectOrder(o.id, text)
         toast.success(t("pt.toast.rejected"))
+      } else if (afterSaleMode === "cancel") {
+        // 理由可以留空：后端会写成「买家主动取消（卖家尚未交付）」
+        await pointsApi.cancelPendingOrder(o.id, text)
+        toast.success(t("pt.toast.orderCancelled"))
+        // 余额当场变了，顶栏的积分徽章要跟着动
+        notifyPointsChanged()
       } else {
         await pointsApi.sellerResolveAfterSale(o.id, false, text)
         toast.success(t("pt.toast.afterSaleRejected"))
@@ -1448,6 +1478,16 @@ export default function PointsPage() {
                     <Button size="sm" onClick={() => void confirmReceipt(o)}>
                       <Check className="mr-1 h-3.5 w-3.5" />
                       {t("pt.confirmReceipt")}
+                    </Button>
+                  )}
+                  {/*
+                    卖家还没发货时的自助出口（2026-10-30）：一直等下去积分会永远锁在
+                    托管里，所以给买家一个「取消订单」。卖家一交付这个按钮就消失，
+                    转由「拒收 / 申请退款」处理（与后端的 onlyFrom: pending 同一口径）。
+                  */}
+                  {canCancelPending(o) && (
+                    <Button size="sm" variant="outline" onClick={() => openCancelOrder(o)}>
+                      {t("pt.cancelOrder.action")}
                     </Button>
                   )}
                   {canRequestAfterSale(o) && (
@@ -1951,7 +1991,7 @@ export default function PointsPage() {
         </div>
       )}
 
-      {/* 售后（退款）：买家「申请退款」与卖家「拒绝并说明理由」共用一个对话框 */}
+      {/* 订单操作对话框：买家「申请退款 / 拒收 / 取消未发货订单」与卖家「拒绝并说明理由」共用一个 */}
       <Dialog
         open={afterSaleTarget !== null}
         onOpenChange={(v) => {
@@ -1990,7 +2030,7 @@ export default function PointsPage() {
             </Button>
             <Button onClick={() => void submitAfterSale()} disabled={afterSaleBusy}>
               {afterSaleBusy && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
-              {t("pt.afterSale.submit")}
+              {t(afterSaleMode === "cancel" ? "pt.cancelOrder.submit" : "pt.afterSale.submit")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2229,9 +2269,15 @@ export default function PointsPage() {
                 </span>
               </div>
             ) : null}
-            {buyTarget?.delivery === "invite_quota" && buyTarget.deliveryParams?.count ? (
+            {(buyTarget?.delivery === "invite_quota" ||
+              buyTarget?.delivery === "mailbox_quota") &&
+            buyTarget.deliveryParams?.count ? (
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">{t("pt.inviteQuotaLabel")}</span>
+                <span className="text-muted-foreground">
+                  {buyTarget.delivery === "mailbox_quota"
+                    ? t("pt.mailboxQuotaLabel")
+                    : t("pt.inviteQuotaLabel")}
+                </span>
                 <span className="font-medium tabular-nums">
                   {t("pt.countUnit", { n: buyTarget.deliveryParams.count })}
                 </span>

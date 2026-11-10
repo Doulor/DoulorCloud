@@ -67,6 +67,13 @@ export function TermsContent() {
       <P><LegalText text={t("lt.33")} /></P>
       <P><LegalText text={t("lt.34")} /></P>
       <P><LegalText text={t("lt.35")} /></P>
+      {/* 以下三段是 2026-11 补写的：条款此前只描述「捐献换权限」，
+          而站内实际还有积分与按天租用（内网穿透、DNS 解析额度）以及积分商城，
+          用户被扣积分、被到期回收却没有条款依据。编号用 lt.35a/b/c ，
+          避免改动后面所有段落的编号。 */}
+      <P><LegalText text={t("lt.35a")} /></P>
+      <P><LegalText text={t("lt.35b")} /></P>
+      <P><LegalText text={t("lt.35c")} /></P>
 
       <H><LegalText text={t("lt.36")} /></H>
       <P><LegalText text={t("lt.37")} /></P>

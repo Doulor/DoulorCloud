@@ -59,6 +59,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
+import { TipQrCard } from "@/components/tip-qr-card"
 import {
   Select,
   SelectContent,
@@ -128,7 +129,7 @@ const AI_FORMATS: { value: string; label: string; channelType: number }[] = [
 ]
 
 /** 捐献页的分区（与 URL 的 `?tab=` 一一对应；缺省 = overview） */
-const DONATION_TABS = ["overview", "invite", "relay", "ai", "frp", "proxy"] as const
+const DONATION_TABS = ["overview", "invite", "relay", "ai", "frp", "proxy", "tip"] as const
 
 export default function DonationPage() {
   const { t } = useT()
@@ -419,7 +420,13 @@ export default function DonationPage() {
         <EmptyState
           icon={Heart}
           title={t("don.records.empty")}
-          description={t("don.records.emptyDesc")}
+          description={
+            // 内网穿透自 2026-10-14 起走「一键搭节点」：捐的是节点，不再落 donations 表，
+            // 所以这一栏只会有历史单据 —— 通用那句「贡献资源后记录会显示在这里」会显得像坏了。
+            types.includes("frp")
+              ? t("don.records.emptyFrp")
+              : t("don.records.emptyDesc")
+          }
         />
       )
     }
@@ -622,6 +629,16 @@ export default function DonationPage() {
                   onClick={() => changeTab("proxy")}
                 />
               </NavGroup>
+              {/* 赞助（2026-11-02 站长要求单独成组）：整组只有「赞助」一项，
+                  二维码由后台「设置 → 捐献页赞赏码」维护 */}
+              <NavGroup label={t("don.nav.sponsorGroup")}>
+                <NavItem
+                  active={activeTab === "tip"}
+                  icon={Heart}
+                  label={t("don.nav.sponsor")}
+                  onClick={() => changeTab("tip")}
+                />
+              </NavGroup>
             </nav>
           </aside>
 
@@ -647,7 +664,12 @@ export default function DonationPage() {
                     <p className="text-sm text-muted-foreground">{t("common.loading")}</p>
                   ) : (
                     allTypes.map(([type, label]) => {
-                      const unlocked = perms?.[type as keyof Permissions] ?? false
+                      // 内网穿透已不属于权限体系（后端 FEATURES 里没有 frp），
+                      // perms.frp 恒为 undefined ⇒ 照着渲染会一直显示「未解锁」，
+                      // 而它其实现在就能用（积分租用）。故这一行不渲染解锁徽章，
+                      // 与 renderResourceIntro 的口径保持一致。
+                      const unlocked =
+                        type === "frp" ? null : (perms?.[type as keyof Permissions] ?? false)
                       return (
                       <div
                         key={type}
@@ -656,7 +678,7 @@ export default function DonationPage() {
                         <div className="space-y-0.5">
                           <p className="flex items-center gap-2 text-sm font-medium">
                             {translateApiMessage(label)}
-                            {unlocked ? (
+                            {unlocked === null ? null : unlocked ? (
                               <Badge variant="success">{t("don.unlocked")}</Badge>
                             ) : (
                               <Badge variant="secondary">{t("don.locked")}</Badge>
@@ -1001,7 +1023,12 @@ export default function DonationPage() {
                           key={i}
                           className="flex flex-wrap items-center gap-2 px-4 py-2.5"
                         >
-                          <Badge variant="success">{t("don.rew.daily200")}</Badge>
+                          {/* 发的是哪一档套餐：此前一律写「+¥200/天」，把 WorkBuddy 那档
+                              （默认 ¥500/天）也报成了 200，少报一半以上。金额站长可配，
+                              所以这里只说档位，不写死数字。 */}
+                          <Badge variant="success">
+                            {t(`don.rew.plan.${r.plan ?? "other"}`)}
+                          </Badge>
                           <span className="text-sm">{t("don.rew.invited")}</span>
                           <span className="font-medium">{r.invitee}</span>
                           <span className="ml-auto text-xs text-muted-foreground">
@@ -1030,22 +1057,20 @@ export default function DonationPage() {
             <TabsContent value="ai">
               {/* 顶部：四个渠道的开通状态（绿=已开通 / 红=未开通） */}
               <ChannelStatusCard />
-              {/* 两条免审核通道排在最前：它们是「立刻可用」的，而下面那个
-                  「贡献 AI 模型」要等自动校验 / 人工复核 */}
-              <Wb2ApiDonationCard
-                block={data?.wb2api}
-                aiUnlocked={perms?.ai ?? false}
-                grantsPermission={grantPermissions?.wb2api !== false}
-                onDone={() => void load()}
-              />
+              {/*
+                2026-11 起 AI 捐献**全部走 agent2api 网关**，下面两张卡已停用：
+                  · WorkBuddy（wb2api）通道
+                  · Qoder2API（qoder2api）通道
+                它们曾经各自维护一套「登录自家网关 → 把账号塞进号池」的流程，
+                网关统一到 agent2api 之后就没有意义了。
+
+                这里只**撤掉入口**、不删实现：存量绑定还挂在 wb2api_bindings 上，
+                管理员仍需要「管理面板 → 捐献通道」去查看与摘除（否则那些用户
+                的 ai 权限会没法回收）。等存量清空后可以把这两个组件连同
+                wb2apiApi / qoder2apiApi 一起删掉。
+              */}
               <RaccoonDonationCard onDone={() => void load()} />
               <AutoclawDonationCard />
-              <Qoder2ApiDonationCard
-                block={data?.qoder2api}
-                aiUnlocked={perms?.ai ?? false}
-                grantsPermission={grantPermissions?.qoder2api !== false}
-                onDone={() => void load()}
-              />
               <SenseNovaDonationCard
                 block={data?.sensenova}
                 aiUnlocked={perms?.ai ?? false}
@@ -1065,6 +1090,11 @@ export default function DonationPage() {
             <TabsContent value="proxy">
               {renderResourceIntro("proxy")}
               {renderRecords("proxy")}
+            </TabsContent>
+
+            {/* 赞赏（单独栏目）：二维码与文案由后台「设置 → 捐献页赞赏码」维护 */}
+            <TabsContent value="tip">
+              <TipQrCard className="mt-0" />
             </TabsContent>
           </div>
         </div>
@@ -1328,7 +1358,9 @@ function DonationForm({
       }
 
       const res = await donationApi.create({
-        type: type as "ai" | "frp" | "proxy",
+        // 这个表单只会为 ai / proxy 打开（内网穿透那张卡不渲染「贡献」按钮，见上方的
+        // renderResourceIntro 注释），所以联合类型里不该还带着 frp —— 那是旧流程的残留。
+        type: type as "ai" | "proxy",
         payload,
         remark,
       })
@@ -2200,7 +2232,7 @@ function RaccoonDonationCard({ onDone }: { onDone?: () => void }) {
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-          捐献只需三步：<b className="text-foreground">生成一次性书签</b>（10 分钟有效）→
+          捐献只需三步：<b className="text-foreground">生成一次性书签</b>（24 小时内有效）→
           在<b className="text-foreground">小浣熊网页版</b>点一下该收藏 →
           自动入池。此处不需要填写任何密钥。
         </div>
@@ -2274,7 +2306,12 @@ function RaccoonDonationCard({ onDone }: { onDone?: () => void }) {
   )
 }
 
-function Wb2ApiDonationCard({
+/**
+ * @deprecated 2026-11 起 AI 捐献统一走 agent2api 网关，WorkBuddy 通道已停用、入口已从页面撤下。
+ * 保留实现只为「存量绑定还能被管理员查看/摘除」；存量清空后可连同 wb2apiApi 一起删除。
+ * 之所以 export：入口撤掉后它是未使用声明，会被 noUnusedLocals 报错。
+ */
+export function Wb2ApiDonationCard({
   block,
   aiUnlocked,
   grantsPermission = true,
@@ -2668,8 +2705,10 @@ function Wb2ApiLoginDialog({
   )
 }
 
-/** Qoder2API 反代账号捐献卡（第二条，与 Wb2ApiDonationCard 并列） */
-function Qoder2ApiDonationCard({
+/**
+ * @deprecated 同 {@link Wb2ApiDonationCard}：Qoder2API 通道已停用，入口已撤下，实现保留给存量清理。
+ */
+export function Qoder2ApiDonationCard({
   block,
   aiUnlocked,
   grantsPermission = true,

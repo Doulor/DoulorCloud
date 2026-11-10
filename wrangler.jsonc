@@ -37,13 +37,19 @@
     // 2026-10-17：7u.nz 整站 301 到主站（见 site-worker.js 的 SITE_REDIRECTS）。
     // 只加根域与 www —— `*.7u.nz` 是用户绑定的子域名，归 API Worker 的动态 Route，
     // 这里绝不能加泛域名路由，否则会把用户站点抢走。
-    {
-      "pattern": "7u.nz/*",
-      "zone_name": "7u.nz"
-    },
-    {
-      "pattern": "www.7u.nz/*",
-      "zone_name": "7u.nz"
-    }
+    //
+    // ⚠️ 2026-11-02：`7u.nz` / `www.7u.nz` 现在由站长的博客 Worker「worldlet」承载
+    //   （站长确认：7u.nz 是博客，两者故意分开）。同一路由不能挂两个 Worker，
+    //   所以这里永久注释掉，不要再往本 Worker 加回来 ——
+    //   否则 `npm run deploy` 会直接失败：
+    //   "Can't deploy routes that are assigned to another worker"。
+    // {
+    //   "pattern": "7u.nz/*",
+    //   "zone_name": "7u.nz"
+    // },
+    // {
+    //   "pattern": "www.7u.nz/*",
+    //   "zone_name": "7u.nz"
+    // }
   ]
 }

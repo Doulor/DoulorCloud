@@ -415,8 +415,13 @@ export const SITE_OPS: SiteOp[] = [
   {
     id: "frp.status",
     group: "内网穿透",
-    desc: "看我的 FRP 隧道状态与申请记录（不做申请/取消，那要人工审核）",
-    build: () => ({ method: "GET", path: "/frp" }),
+    desc: "看我租用的内网穿透隧道（含到期时间与端口）。内网穿透已改为积分租用，没有「申请/审核」这一步，也不能在这里下单或退订。",
+    /**
+     * ⚠️ 路径必须是 /frp/rental/mine：旧的 GET /frp 已随 2026-10-13 租用化删除
+     * （worker/src/index.ts 里只剩 /frp/rental/*、/frp/donate/*、/frp/agent/*）。
+     * 这条手册是**直接注入模型上下文**的，指错了模型每次调用都撞 404。
+     */
+    build: () => ({ method: "GET", path: "/frp/rental/mine" }),
   },
   {
     id: "events.list",

@@ -108,7 +108,8 @@ async function buildConfig(env: Env) {
      * 原生工具调用（function calling）开关。
      * 关 = 走原有的「文本标签协议」；开 = 给上游带 tools、按结构化 tool_calls 解析。
      */
-    nativeTools: s.lab_native_tools === "1",
+    // 与 lab.ts / settings.ts 同口径：只有显式 "0" 才算关闭（默认是开的）。
+  nativeTools: s.lab_native_tools !== "0",
     agentPrompt: s.lab_agent_prompt,
     channels,
   }

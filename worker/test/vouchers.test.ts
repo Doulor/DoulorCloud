@@ -266,6 +266,24 @@ describe("兑换自选券", () => {
     expect(still?.status).toBe("unused")
   })
 
+  it("首捐券显式要 doulor → 400 FEATURE_NOT_ALLOWED，券不会被消耗", async () => {
+    // doulor 是根域特权，只能管理员在「成员」里授予；首捐券是**用户自选**的，绝不能换到。
+    // （管理员自己发的券不受这条限制 —— 那是管理员逐个发出去的，不属于「自行获得」。）
+    const user = await makeUser()
+    await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false, doulor: false }))
+    const code = await seedVoucher({ owner: user.id, feature: null, source: "first_donation" })
+
+    const { res, body } = await redeem(user, code, "doulor")
+    expect(res.status).toBe(400)
+    expect(body.code).toBe("FEATURE_NOT_ALLOWED")
+    expect((await permsOf(user.id)).doulor).toBe(false)
+
+    const still = await env.DB.prepare("SELECT status FROM vouchers WHERE code = ?")
+      .bind(code)
+      .first<{ status: string }>()
+    expect(still?.status).toBe("unused")
+  })
+
   it("一张券只能用一次", async () => {
     const user = await makeUser()
     await setPermissions(user.id, JSON.stringify({ r2: true, ai: false, proxy: false }))
@@ -309,24 +327,30 @@ describe("首捐券可兑换的模块（管理面板设置）", () => {
   })
 
   it("设置项缺失 = 全部可兑换（这就是「默认全都可以兑换」）", () => {
-    // 「全部」= FEATURES 里**可兑换**的那些（r2/ai/proxy/doulor/dns）；新增功能模块会自动进这份名单。
-    // ⚠️ 唯一的例外是 `relay_auto`（中转站免审入驻）：它是「信任」不是「功能」，
-    //    被 `FIRST_DONATION_EXCLUDED_FEATURES` 结构性排除 —— 首捐券是用户**自选**换哪个模块的，
-    //    能换免审就等于让持券用户自己给自己发一份免审资格，绕开「管理员逐个勾选」的口径。
+    // 「全部」= FEATURES 里**可兑换**的那些（r2/ai/proxy/dns）；新增功能模块会自动进这份名单。
+    // 两个例外被 `FIRST_DONATION_EXCLUDED_FEATURES` 结构性排除：
+    //   · `relay_auto`（中转站免审入驻）—— 它是「信任」不是「功能」，能自选等于自己给自己发免审资格；
+    //   · `doulor`（doulor.cn 专属域名与邮箱）—— **根域特权**，只能管理员在「成员」里逐个授予，
+    //     不能让用户靠攒券/攒额度拿到（2026-11-07 站长要求）。
     expect([...parseFirstDonationFeatures(null)].sort()).toEqual([
       "ai",
       "dns",
-      "doulor",
       "proxy",
       "r2",
     ])
     expect([...parseFirstDonationFeatures(undefined)].sort()).toEqual([
       "ai",
       "dns",
-      "doulor",
       "proxy",
       "r2",
     ])
+  })
+
+  it("doulor 永远换不到：缺省分支与显式写进设置项都不行", () => {
+    expect(parseFirstDonationFeatures(null).has("doulor")).toBe(false)
+    const explicit = parseFirstDonationFeatures("r2,doulor")
+    expect(explicit.has("doulor")).toBe(false)
+    expect(explicit.has("r2")).toBe(true)
   })
 
   it("relay_auto 永远换不到：缺省分支与显式写进设置项都不行", () => {
@@ -425,8 +449,9 @@ describe("首捐券可兑换的模块（管理面板设置）", () => {
     expect(body.features.find((f) => f.key === "proxy")?.allowed).toBe(true)
     expect(body.features.find((f) => f.key === "r2")?.allowed).toBe(true)
     expect(body.features.find((f) => f.key === "ai")?.allowed).toBe(false)
-    // 设置里没列、用户也没有的模块一律 false（原先是 frp，frp 已移出权限体系）
-    expect(body.features.find((f) => f.key === "doulor")?.allowed).toBe(false)
+    // doulor 是「只能管理员授予」的权限位：整项都不下发（连灰色的选项都没有），
+    // 而不是 allowed=false —— 让它在界面上出现本身就是一种误导。
+    expect(body.features.some((f) => f.key === "doulor")).toBe(false)
   })
 })
 
@@ -447,6 +472,44 @@ describe("用邀请码补权限", () => {
     expect(after.proxy).toBe(true)
     // 码里没写的模块不能被顺带开通（原先是 frp，frp 已移出权限体系）
     expect(after.doulor).toBe(false)
+  })
+
+  it("邀请码里写了 doulor 也**不发**（只能管理员授予的权限位）", async () => {
+    // 创建入口本来就只允许 QUOTA_FEATURES，但库里可能有历史行 / 手改行写着 doulor；
+    // 兑换侧必须兜住，否则一张码就能把根域特权发出去 = 用户「自行获得」。
+    const owner = await makeUser()
+    const me = await makeUser()
+    await setPermissions(
+      me.id,
+      JSON.stringify({ r2: false, ai: false, proxy: false, doulor: false, dns: false })
+    )
+    const code = await seedInvite({
+      createdBy: owner.id,
+      permissions: { doulor: true, r2: true },
+    })
+
+    const { res, body } = await redeem(me, code)
+    expect(res.status).toBe(200)
+    // 只发 r2；doulor 被结构性丢掉
+    expect(body.granted).toEqual(["r2"])
+    const after = await permsOf(me.id)
+    expect(after.r2).toBe(true)
+    expect(after.doulor).toBe(false)
+  })
+
+  it("邀请码里**只有** doulor → 视为没有携带任何模块权限（400 NO_FEATURES）", async () => {
+    const owner = await makeUser()
+    const me = await makeUser()
+    await setPermissions(
+      me.id,
+      JSON.stringify({ r2: false, ai: false, proxy: false, doulor: false, dns: false })
+    )
+    const code = await seedInvite({ createdBy: owner.id, permissions: { doulor: true } })
+
+    const { res, body } = await redeem(me, code)
+    expect(res.status).toBe(400)
+    expect(body.code).toBe("NO_FEATURES")
+    expect((await permsOf(me.id)).doulor).toBe(false)
   })
 
   it("用完会消耗该邀请码一次使用次数", async () => {

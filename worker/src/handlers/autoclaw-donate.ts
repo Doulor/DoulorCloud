@@ -97,6 +97,17 @@ export async function autoclawSmsVerify(env: Env, request: Request): Promise<Res
   const accountId = String(acc?.id ?? "")
   const accountName = String(acc?.displayName ?? acc?.name ?? phone.slice(-4)).slice(0, 60)
 
+  // 2026-10-29：解析不到账号时**绝不能假装成功**。
+  // 原实现是 `if (accountId) { ...写库... }` 然后无条件 return ok:true —— 一旦网关
+  // 反查失败，用户会看到"捐献成功"，但库里没有记录、额度也不加，连事后补救的线索都没有。
+  if (!accountId) {
+    throw new ApiError(
+      502,
+      "验证码已通过，但暂时无法确认该账号已进入号池。请稍等一两分钟后重新发起捐献；如果反复出现请联系管理员。",
+      "AUTOCLAW_ACCOUNT_UNRESOLVED"
+    )
+  }
+
   const now = Math.floor(Date.now() / 1000)
   if (accountId) {
     const existing = await env.DB.prepare(

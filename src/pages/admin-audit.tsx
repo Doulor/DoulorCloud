@@ -212,7 +212,7 @@ export function AuditPanel() {
             disabled={page >= totalPages || loading}
             onClick={() => setPage((p) => p + 1)}
           >
-            {t("common.next")}
+            {t("adm.userPageNext")}
             <ChevronRight className="h-3.5 w-3.5" />
           </Button>
         </div>

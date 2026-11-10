@@ -15,6 +15,7 @@
 import { uuid } from "./crypto"
 import { ApiError } from "./http"
 import {
+  ADMIN_ONLY_FEATURES,
   FEATURES,
   FEATURE_LABELS,
   parsePermissions,
@@ -118,7 +119,13 @@ export function featureLabel(f: string): string {
  *   整行被删、走「缺省 = 全部」的兜底分支），兑换时也会在这里被丢掉
  *   （`redeemVoucher` 用的就是本函数的返回值）。少一个开关，就少一种「没关住」的方式。
  */
-export const FIRST_DONATION_EXCLUDED_FEATURES: readonly Feature[] = ["relay_auto"]
+// 2026-11-02 / 2026-11-07 站长要求：doulor（doulor.cn 专属域名与邮箱）**绝不**能通过
+// 首捐券获得，即便后台设置项 first_donation_voucher_features 里手滑写上 doulor 也要拦住。
+// 它是「只能管理员授予」的权限位，名单见 permissions.ADMIN_ONLY_FEATURES。
+export const FIRST_DONATION_EXCLUDED_FEATURES: readonly Feature[] = [
+  "relay_auto",
+  ...ADMIN_ONLY_FEATURES,
+]
 
 /**
  * 首捐奖励券**可兑换**的模块集合（设置项 `first_donation_voucher_features`）。
@@ -301,7 +308,12 @@ export function featuresInInvite(raw: string | null): Feature[] {
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>
     if (typeof parsed !== "object" || parsed === null) return []
-    return FEATURES.filter((f) => parsed[f] === true)
+    // ⚠️ ADMIN_ONLY_FEATURES（doulor）**永远**不算数：创建邀请码的入口本来就只允许
+    //    QUOTA_FEATURES，但库里可能有历史行 / 手改行把这个键写成 true ——
+    //    兑换侧不兜住的话，一张码就能把根域特权发出去（用户「自行获得」）。
+    return FEATURES.filter(
+      (f) => parsed[f] === true && !ADMIN_ONLY_FEATURES.includes(f)
+    )
   } catch {
     return []
   }

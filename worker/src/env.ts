@@ -28,6 +28,7 @@ export interface Env {
   RACCOON_DONATE_KEY?: string
   /** QQ 机器人（官方 Bot）调本站内部接口的共享密钥，见 handlers/wool.ts */
   BOT_API_KEY?: string
+  TG_DIAG_KEY?: string
   /** 探针用的中转站 key（handlers/probe.ts），缺省则不探鉴权项 */
   PROBE_API_KEY?: string
   /**

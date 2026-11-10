@@ -20,7 +20,7 @@ import { fmtTime } from "@/lib/format"
  *   所以走「一次性捐献码 + 书签小工具」：用户在本页拿到码，
  *   在已登录的小浣熊页面点一下书签，脚本把 token 连同码提交回来。
  *
- * 每次生成码都会重新构造书签；码 10 分钟有效、一次性。
+ * 每次生成码都会重新构造书签；码 24 小时有效、一次性（2026-10-27 从 10 分钟上调）。
  */
 
 type DonationRow = {
@@ -362,7 +362,12 @@ export default function DonateRaccoonPage() {
                       复制书签代码
                     </Button>
                     <span className="text-xs text-muted-foreground">
-                      有效期 {Math.round(expiresIn / 60)} 分钟
+                      {/* 后端 TTL 是 24 小时（2026-10-27 从 600 秒改的）。这里按秒换算，
+                          否则同一屏会出现「24 小时」和「1440 分钟」两个说法。 */}
+                      有效期{" "}
+                      {expiresIn >= 3600
+                        ? `${Math.round(expiresIn / 3600)} 小时`
+                        : `${Math.round(expiresIn / 60)} 分钟`}
                     </span>
                   </>
                 ) : null}
@@ -432,7 +437,9 @@ export default function DonateRaccoonPage() {
             placeholder="粘贴 xhx_token 的值（形如 eyJhbGciOi…）"
             className="min-h-[80px] font-mono text-xs"
           />
-          <Button onClick={() => void submitManual()} disabled={submitting || !code}>
+          {/* 不要加 !code 的禁用：submitManual 里本来就有「没有码就顺手生成一个」的兜底
+              （用户可能只用「只取 token」书签、从没点过生成），禁用会把那条路堵死。 */}
+          <Button onClick={() => void submitManual()} disabled={submitting}>
             {submitting ? "提交中…" : "提交这个 token"}
           </Button>
         </CardContent>

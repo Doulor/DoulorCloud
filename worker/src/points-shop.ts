@@ -9,6 +9,9 @@
  *        · `feature`      —— 自动授予一个模块权限（r2 / ai / frp / proxy）
  *        · `subscription` —— 自动开通一个 NewAPI 订阅套餐（planId 由管理员自己填，代码不写死）
  *        · `invite_quota` —— 自动增加「邀请码创建额度」
+ *        · `mailbox_quota` —— 自动增加「邮箱数量上限」（2026-11-04）
+
+
  *        · `code`         —— 从商品卡密池取一条**各不相同**的卡密发给买家（一人一条，用完即止）
  *        · `content`      —— 发一段**人人相同**的固定内容（网盘链接 / 说明 / 通用兑换码），
  *                            下单即到账，不消耗库存、不需要卡密池
@@ -68,6 +71,14 @@ export type ProductDelivery =
   | "feature"
   | "subscription"
   | "invite_quota"
+  /**
+   * 邮箱数量扩容：购买后给用户 `users.mailbox_quota_bonus` 累加 N，
+   * 邮箱页的「上限」随之变成「基础 3 + N」（2026-11-04 站长要求）。
+   *
+   * 与补签卡/邀请码额度同性质：**一次性消耗品、可叠加、不过期**，
+   * 因此也不允许租用 —— 邮箱名额收不回来（用户已经占用了那个地址）。
+   */
+  | "mailbox_quota"
   /**
    * 补签卡：购买后给用户累计「补签卡」数量，可在签到页消耗一张补签一次漏签的签到
    * （2026-10-05 站长要求）。一次性消耗品、可叠加多张，故不允许租用。
@@ -153,7 +164,10 @@ export interface DeliveryParams {
   feature?: Feature
   /** delivery='subscription'：NewAPI 套餐 id（管理员自己填，代码里不写死） */
   planId?: number
-  /** delivery='invite_quota' / 'checkin_makeup'：数量（邀请码额度 / 补签卡张数） */
+  /**
+   * delivery='invite_quota' / 'checkin_makeup' / 'mailbox_quota'：数量
+   * （邀请码额度 / 补签卡张数 / 邮箱数量扩容个数）
+   */
   count?: number
   /** delivery='content'：人人相同的固定交付内容（网盘链接 / 说明 / 通用兑换码） */
   content?: string
@@ -333,6 +347,8 @@ const MAX_PER_USER_LIMIT = 10_000
 const MAX_PLAN_ID = 1_000_000
 /** 单件可发放的邀请码创建额度上限 */
 const MAX_INVITE_QUOTA = 1_000
+/** 单笔「邮箱数量」扩容上限：防手滑把 5 写成 50000（邮箱是长期资源，一步到位没有意义） */
+const MAX_MAILBOX_QUOTA = 100
 /** 补签卡单件最多发多少张（防手滑写个天文数字） */
 const MAX_MAKEUP_CARDS = 100
 /**
@@ -403,6 +419,7 @@ const DELIVERIES: readonly ProductDelivery[] = [
   "subscription",
   "invite_quota",
   "checkin_makeup",
+  "mailbox_quota",
   "code",
   "content",
 ]
@@ -410,7 +427,7 @@ const DELIVERIES: readonly ProductDelivery[] = [
 /**
  * 允许搭配「租用」的交付方式。
  *
- * 排除 quota / invite_quota：额度是**一次性消耗品**，发出去就收不回来 ——
+ * 排除 quota / invite_quota / mailbox_quota：额度是**一次性消耗品**，发出去就收不回来 ——
  * 到期既没法收回、也没法判断用户用了多少，「租用」只剩个日期好看。
  * （订阅可以：订阅本身就是有期限的；feature 可以：权限能收回；
  *   manual 可以：官方人工商品与用户商品都靠人工履约，平台只记账。）
@@ -478,6 +495,9 @@ function parseDeliveryParams(
       out.count = Number(o.count)
     }
     if (delivery === "checkin_makeup" && Number.isInteger(Number(o.count)) && Number(o.count) > 0) {
+      out.count = Number(o.count)
+    }
+    if (delivery === "mailbox_quota" && Number.isInteger(Number(o.count)) && Number(o.count) > 0) {
       out.count = Number(o.count)
     }
     if (delivery === "content" && typeof o.content === "string" && o.content.trim()) {
@@ -737,6 +757,16 @@ export function sanitizeProductInput(raw: unknown, opts: { asUser?: boolean } = 
       throw new ApiError(
         400,
         `补签卡数量需为 1 ~ ${MAX_MAKEUP_CARDS} 的整数`,
+        "INVALID_INPUT"
+      )
+    }
+    deliveryParams = { count: n }
+  } else if (delivery === "mailbox_quota") {
+    const n = Number(params.count)
+    if (!Number.isInteger(n) || n <= 0 || n > MAX_MAILBOX_QUOTA) {
+      throw new ApiError(
+        400,
+        `邮箱数量需为 1 ~ ${MAX_MAILBOX_QUOTA} 的整数`,
         "INVALID_INPUT"
       )
     }
@@ -1807,6 +1837,21 @@ async function deliverAuto(
       return { summary: `已获得 ${count} 张补签卡` }
     }
 
+    case "mailbox_quota": {
+      const count = product.deliveryParams?.count
+      if (!count) throw new Error("商品未配置邮箱数量")
+      // 累加而不是覆盖：用户可能买多次，每次都要叠上去
+      await env.DB.prepare(
+        `UPDATE users
+            SET mailbox_quota_bonus = COALESCE(mailbox_quota_bonus, 0) + ?,
+                updated_at = ?
+          WHERE id = ?`
+      )
+        .bind(count, new Date().toISOString(), userId)
+        .run()
+      return { summary: `邮箱数量上限 +${count}` }
+    }
+
     case "code": {
       // 卡密交付（用户反馈 a977d1cf）：原子取出一条未使用的卡密并标记占用。
       // 用 UPDATE ... WHERE id = (SELECT ... LIMIT 1) RETURNING code —— 单语句完成
@@ -1992,6 +2037,9 @@ export async function buyProduct(
     throw new ApiError(500, "该商品配置有误，请联系管理员", "PRODUCT_MISCONFIGURED")
   }
   if (product.delivery === "invite_quota" && !product.deliveryParams?.count) {
+    throw new ApiError(500, "该商品配置有误，请联系管理员", "PRODUCT_MISCONFIGURED")
+  }
+  if (product.delivery === "mailbox_quota" && !product.deliveryParams?.count) {
     throw new ApiError(500, "该商品配置有误，请联系管理员", "PRODUCT_MISCONFIGURED")
   }
   if (product.delivery === "checkin_makeup" && !product.deliveryParams?.count) {
@@ -2803,6 +2851,21 @@ export async function refundOrderCore(
      * 以保持这条老路径的文案与 `order_cancelled` 消息类型不变。
      */
     notifyEvent?: "cancelled" | "refunded"
+    /**
+     * 只允许从指定状态退款（2026-10-30，买家自助取消订单用）。
+     *
+     * 入口那层的 `status` 判断只负责「早点报出人话」，**挡不住并发**：
+     * 卖家可能正好在买家点「取消」的同一刻点了「已交付」，两边读到的快照都是
+     * `pending`。所以真正的闸门放在**原子抢占之后** —— 抢占拿到的原状态不是它，
+     * 就立刻把订单回滚成原状态并报错，一分钱都不动。
+     */
+    onlyFrom?: {
+      status: "pending"
+      /** 原状态不符时的报错文案（买家会直接看到） */
+      message: string
+      /** 原状态不符时的错误码 */
+      code: string
+    }
   }
 ): Promise<PointOrder> {
   if (order.status === "cancelled") {
@@ -2822,6 +2885,14 @@ export async function refundOrderCore(
     await env.DB.prepare("UPDATE point_orders SET status = ? WHERE id = ? AND status = 'cancelled'")
       .bind(claimed, order.id)
       .run()
+  }
+
+  // 0b. 只允许从指定状态退款（买家自助取消）：抢占结果不是它 → 原样回滚、立即报错。
+  //     典型交错：卖家在同一刻点了「已交付」，这单就从「还没发货」变成了纠纷 ——
+  //     让买家单方面取消等于给「白拿货再退款」开后门，必须转去「拒收 / 申请退款」。
+  if (opts.onlyFrom && claimed !== opts.onlyFrom.status) {
+    await rollbackClaim()
+    throw new ApiError(409, opts.onlyFrom.message, opts.onlyFrom.code)
   }
 
   // 1. 抢占前是**已结算**的：先把钱从卖家手里收回（收不回来就回滚并整单失败）
@@ -3355,6 +3426,78 @@ export async function adminCancelOrder(
     reason,
     // 保持这条路的老文案与消息类型（order_cancelled）不变
     notifyEvent: "cancelled",
+  })
+}
+
+/**
+ * 买家：取消一笔**卖家还没发货**的订单（2026-10-30 站长要求）。
+ *
+ * 之前的死结：卖家一直不交付，积分就死死锁在托管里，而买家**完全无路可走** ——
+ * `requestAfterSale` 明确拒绝 `pending`（「卖家还没有交付，请先等卖家发货」），
+ * 唯一出口是求管理员手动「取消订单并退款」，而管理员未必知道这单存在（线上实测
+ * 有单挂了 15 天）。这里给买家一条自助出口：**只要卖家没交付就随时可以取消**，
+ * 积分原路退回。金额路径与管理员取消完全一致 —— 直接复用 `refundOrderCore`，
+ * 不另写一套退钱逻辑（两处各写一遍必然漏改）。
+ *
+ * 为什么只允许 `pending`：
+ *   · `delivered` —— 卖家声称发了货，性质就变成**纠纷**了。让买家单方面取消
+ *     等于给「白拿货再退款」开后门，必须走「拒收 / 申请退款」由卖家或平台判定；
+ *   · `settled` —— 钱已经进了卖家账户，属于售后范畴（确认收货后 7 天内可申请）。
+ *   这个限制不只写在入口，还压进 `refundOrderCore` 的 `onlyFrom` 里 ——
+ *   入口判断会被并发绕过，抢占结果不会。
+ *
+ * 不做的事：不校验「下单多久了」。刚下单就取消是买家的正当权利（下错了、
+ * 卖家私聊说没货），而且这条路径**没有套利空间**：退了钱什么都没拿到，
+ * 库存与当日名额都一并还回去。
+ *
+ * @param reason 买家填的理由（可空）—— 会拼进订单备注，并转告卖家为什么被取消
+ */
+export async function buyerCancelOrder(
+  env: Env,
+  buyerId: string,
+  orderId: string,
+  reason?: string
+): Promise<PointOrder> {
+  const order = await getOrder(env, orderId)
+  if (!order) throw new ApiError(404, "订单不存在", "NOT_FOUND")
+  if (order.userId !== buyerId) throw new ApiError(403, "这不是你的订单", "FORBIDDEN")
+  if (order.status === "cancelled") {
+    throw new ApiError(409, "该订单已取消，积分已退回", "ORDER_CANCELLED")
+  }
+  if (order.status === "delivered") {
+    throw new ApiError(
+      409,
+      "卖家已经交付了这单，不能再取消。如果你没有收到货，请用「拒收」或「申请退款」。",
+      "ALREADY_DELIVERED"
+    )
+  }
+  if (order.status === "settled") {
+    throw new ApiError(
+      409,
+      "这单已经完成，无法取消。如有异议请在确认收货后 7 天内申请退款。",
+      "ALREADY_SETTLED"
+    )
+  }
+  // 理论上 pending 的单不会有进行中的售后（申请入口就拦了），留一手防脏数据
+  if (afterSaleInProgress(order.afterSaleStatus)) {
+    throw new ApiError(409, "这笔订单已有售后在处理中，请等待处理结果", "AFTER_SALE_EXISTS")
+  }
+
+  const text = String(reason ?? "").trim().slice(0, MAX_AFTER_SALE_REASON)
+
+  return refundOrderCore(env, order, {
+    actorId: buyerId,
+    auditAction: "points.shop.buyer_cancel",
+    reason: text || "买家主动取消（卖家尚未交付）",
+    // 用 'cancelled' 而不是 'refunded'：对卖家来说这单是「被取消了」，
+    // 不是「买家申请退款成功」，两种说法的心理预期不一样。
+    notifyEvent: "cancelled",
+    onlyFrom: {
+      status: "pending",
+      code: "ALREADY_DELIVERED",
+      message:
+        "卖家刚刚已经交付了这单，不能再取消。如果你没有收到货，请用「拒收」或「申请退款」。",
+    },
   })
 }
 

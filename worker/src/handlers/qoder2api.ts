@@ -30,6 +30,7 @@ import {
 import { audit, getSetting, getSettingBool, getSettingNumber } from "../settings"
 import { clientIp, guardRateLimit } from "../ratelimit"
 import { donationRewardLabel, grantDonationReward, isDonationRewardKind } from "../points"
+import { claimDonationQuota } from "../quotas"
 import {
   Q2UnauthorizedError,
   Q2UpstreamError,
@@ -590,6 +591,13 @@ export async function importQoder2ApiAccounts(
       dedupKey: `qoder2api:import:${firstNewUid}`,
       detail: "Qoder2API 账号捐献奖励（JSON 导入）",
     })
+
+    // 邀请码额度：与单账号登录同一口径（本批只算一次捐献）
+    try {
+      await claimDonationQuota(env, user.id, "ai", "ai")
+    } catch (err) {
+      console.error("发放反代捐献额度失败（JSON 导入）:", user.id, err)
+    }
   }
 
   /**
@@ -722,7 +730,7 @@ export async function loginPoll(env: Env, request: Request): Promise<Response> {
     throw new ApiError(400, "缺少 session 参数", "INVALID_INPUT")
   }
 
-  await guardRateLimit(env, `qoder2api:poll:user:${user.id}`, 60, 5 * 60, "轮询过于频繁")
+  await guardRateLimit(env, `qoder2api:poll:user:${user.id}`, 300, 5 * 60, "轮询过于频繁")
 
   const sess = await env.DB.prepare("SELECT * FROM qoder2api_login_sessions WHERE id = ?")
     .bind(await hashToken(sessionId))
@@ -914,6 +922,17 @@ async function completeBinding(
       dedupKey: `qoder2api:${id}`,
       detail: `${donationRewardLabel(PROVIDER)}捐献奖励`,
     })
+
+    /**
+     * 邀请码额度（2026-11-07 站长要求）：反代账号捐献与经典 AI 渠道捐献同等待遇。
+     * 占位键用 `ai`：与 wb2api / 经典 AI 渠道共用同一档，同一用户一生只发一次。
+     * 失败只记日志（绑定与积分已落库；helper 会把占位撤回，下次还能再拿）。
+     */
+    try {
+      await claimDonationQuota(env, user.id, "ai", "ai")
+    } catch (err) {
+      console.error("发放反代捐献额度失败:", user.id, err)
+    }
   }
 
   // 邀请奖励：本次绑定确实带来了新账号，且真的解锁了 ai
@@ -1140,4 +1159,47 @@ export async function qoder2apiDonationBlock(
     bindings: bindings.map(toPublicBinding),
     feature: "ai",
   }
+}
+
+/**
+ * Qoder 版本的后台补完（2026-10-29 对齐 wb2api）。
+ *
+ * 原机制：绑定结果只在前端轮询时落库 —— 用户授权完关掉页面，会话永远 pending，
+ * 账号进了池却没有绑定。wb 那边已经用 cron 修掉，qoder 这里补上同样的逻辑。
+ */
+export async function resumePendingQoderLogins(env: Env, limit = 100): Promise<{ checked: number; completed: number }> {
+  const now = new Date().toISOString()
+  // 过期未完成 → 标记失败，避免界面无限转圈
+  await env.DB.prepare(
+    `UPDATE qoder2api_login_sessions
+        SET status = 'failed', message = '登录会话已过期，请重新点「链接绑定」发起一次'
+      WHERE status = 'pending' AND expires_at <= ?`
+  )
+    .bind(now)
+    .run()
+
+  const rows = await env.DB.prepare(
+    `SELECT * FROM qoder2api_login_sessions
+      WHERE status = 'pending' AND upstream_state IS NOT NULL AND upstream_state != '' AND expires_at > ?
+      ORDER BY created_at DESC LIMIT ?`
+  )
+    .bind(now, limit)
+    .all<SessionRow>()
+
+  let completed = 0
+  for (const sess of rows.results ?? []) {
+    try {
+      const user = await env.DB.prepare("SELECT * FROM users WHERE id = ? LIMIT 1")
+        .bind(sess.user_id)
+        .first<UserRow>()
+      if (!user) continue
+      const polled = await q2PollLogin(env, sess.upstream_state)
+      if (polled.status !== "done" || !polled.account) continue
+      await completeBinding(env, user, sess, polled.account)
+      completed += 1
+    } catch {
+      // 单个会话失败不影响其它；过期的会在下一轮被上面的 sweep 收掉
+    }
+  }
+  return { checked: rows.results?.length ?? 0, completed }
 }

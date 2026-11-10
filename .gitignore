@@ -79,3 +79,6 @@ QQ群公告-*.txt
 # 本地运维手册（含服务器地址/密码/隧道 UUID，绝不入库）
 多VPS协调与接管手册.md
 运维手册*.md
+
+# SubHub 已迁出为独立目录 D:\build\GitLocal\subhub（2026-10-28）
+/subhub/

@@ -893,7 +893,9 @@ export async function listLabChannels(env: Env, request: Request): Promise<Respo
      * 原生工具调用开关（站点设置 `lab_native_tools`）。
      * 前端据此决定这一轮是给上游带 tools、还是走文本标签协议。
      */
-    nativeTools: (await getSetting(env, "lab_native_tools")) === "1",
+    // 默认开：只有显式写成 "0" 才算关闭（键缺失时 getSetting 回落到默认值 "1"，
+  // 这里用 !== "0" 与之保持同一口径，避免「键缺失」被当成关闭）。
+  nativeTools: (await getSetting(env, "lab_native_tools")) !== "0",
     channels: cfg.channels.map((c) => ({
       id: c.id,
       name: c.name,

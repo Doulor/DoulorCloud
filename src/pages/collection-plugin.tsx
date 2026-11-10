@@ -73,7 +73,10 @@ export default function CollectionPluginPage() {
           <Sparkles className="h-6 w-6 text-muted-foreground" />
           <p className="text-sm font-medium">{t("col.soon")}</p>
           <p className="max-w-sm text-xs text-muted-foreground">
-            {plugin ? t("col.soonDesc") : t("gal.notFound")}
+            {/* 造物集里的是「游戏」不是「作品」，且 slug 找不到多半是**已下架**（后端
+                listPublishedPlugins 会把非 published 的过滤掉，前端拿不到那条记录）。
+                用 gal.notFound「作品不存在或未公开」既叫错了东西，也没提示"可能已下架"。 */}
+            {plugin ? t("col.soonDesc") : t("col.notFound")}
           </p>
           <Button asChild variant="secondary" size="sm">
             <Link to="/dashboard/gallery/collection">{t("col.tab.hall")}</Link>

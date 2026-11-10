@@ -24,6 +24,30 @@
 import { getSettingNumber } from "../settings"
 import { ApiError, json } from "../http"
 import type { Env } from "../env"
+import { cached } from "../short-cache"
+
+/** group-map 大 SQL 的一行（9 条相关子查询的计数结果） */
+type GroupMapAccountRow = {
+  nid: number
+  uid: string
+  don: number
+  wb: number
+  wb_live: number
+  qd: number
+  qd_live: number
+  rc: number
+  rc_live: number
+  ac: number
+  ac_live: number
+}
+
+/** 这条 SQL 的进程内缓存：键固定，值只有几百行（账号数量级） */
+const GROUP_MAP_CACHE_KEY = "group-map:accounts"
+/**
+ * 缓存时长 20 秒。外部 group-sync 自己是每 20~30 秒拉一轮，所以最坏情况是
+ * 「捐赠状态晚 20 秒生效」，对分组同步没有任何实际影响。
+ */
+const GROUP_MAP_CACHE_MS = 20_000
 
 /** 与站点「捐献」相关的口径：哪些捐献类型算「自定义 AI 渠道」 */
 const DONATION_TYPES = ["ai", "proxy", "sensenova"]
@@ -138,7 +162,11 @@ export async function groupMap(env: Env, request: Request): Promise<Response> {
    * 有索引后同一条 SQL 只读 ~3.6k 行/次（降 99%），返回结果完全不变
    * （528 行 / don 618 / wb 348 / qd 56 校验过）。
    */
-  const rows = await env.DB.prepare(
+  // ⚠️ 2026-10-28：结果放进 20 秒进程内缓存（见 GROUP_MAP_CACHE_MS 的注释）。
+  // 这条 SQL 要按账号逐个跑 9 条相关子查询（实测 8.6k 行读/次、每天约 2 千次
+  // ≈ 2 千万行，占全库行读 ~8%），而它的答案在同一分钟内基本不会变。
+  const rows = await cached<GroupMapAccountRow[]>(GROUP_MAP_CACHE_KEY, GROUP_MAP_CACHE_MS, async () => {
+    const res = await env.DB.prepare(
     `SELECT na.newapi_user_id AS nid, na.user_id AS uid,
             (SELECT COUNT(*) FROM donations d
               WHERE d.user_id = na.user_id AND d.status = 'approved'
@@ -167,8 +195,10 @@ export async function groupMap(env: Env, request: Request): Promise<Response> {
        FROM newapi_accounts na
       WHERE na.newapi_user_id > 0`
   )
-    .bind(...DONATION_TYPES, Date.now(), Date.now())
-    .all<{ nid: number; uid: string; don: number; wb: number; wb_live: number; qd: number; qd_live: number; rc: number; rc_live: number; ac: number; ac_live: number }>()
+      .bind(...DONATION_TYPES, Date.now(), Date.now())
+      .all<GroupMapAccountRow>()
+    return res.results ?? []
+  })
 
   /**
    * 「付费分组」白名单（2026-10-11）。**永久有效** ⇒ 没有时效条件。
@@ -221,7 +251,7 @@ export async function groupMap(env: Env, request: Request): Promise<Response> {
   const users: Record<string, string> = {}
   /** 「多捐多得」：每人每日应得额度（quota）。按**有效** wb 账号数 × ¥80 折算 */
   const quotas: Record<string, number> = {}
-  for (const r of rows.results ?? []) {
+  for (const r of rows) {
     const hasDon = Number(r.don) > 0
     const hasWb = Number(r.wb) > 0
     const hasQd = Number(r.qd) > 0

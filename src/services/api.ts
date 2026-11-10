@@ -48,6 +48,7 @@ import {
   type NewApiUsage,
   type StorageAccount,
   type StorageList,
+  type StorageCopyResult,
   type StorageShare,
   type StorageOverview,
   type StoragePrefixCreated,
@@ -878,6 +879,31 @@ export const adminApi = {
   brevoQuota: () => request<BrevoQuotaOverview>("/admin/mail/brevo-quota"),
 
   /**
+   * 出站邮件自检（会真的发信）。
+   *
+   * `channel`：
+   *   · 不传 / `auto` —— 按当前顺序走完整回退链（与真实发信一致）；
+   *   · `all`        —— 逐条通道单独试，返回分通道报告（排查「哪条通道坏了」用）；
+   *   · 具体通道名     —— 只试那一条。
+   * 传了 `all` / 具体通道时，失败也回 200，结果在 `results` 里（服务端不抛错）。
+   */
+  testMail: (opts: {
+    to: string
+    channel?: "auto" | "all" | "brevo" | "cf-send" | "cf-routing"
+  }) =>
+    request<{
+      ok: boolean
+      code?: string
+      error?: string
+      message?: string
+      results?: { channel: string; ok: boolean; code?: string; error?: string }[]
+    }>("/admin/mail-test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    }),
+
+  /**
    * 邀请码列表。不传参数 = 旧的全量模式；
    * 传 limit/offset/status = 服务端分页筛选（响应带 total 与 counts）；
    * countOnly = 只要总数（管理页头部的「邀请码 N 个」用，进页面即可显示）。
@@ -1662,6 +1688,21 @@ export const storageApi = {
       body: JSON.stringify({ keys }),
     }),
 
+  /**
+   * 复制 / 移动文件到某个目录（服务端 R2 CopyObject，文件不经过浏览器）。
+   * `mode: "move"` 即「剪切后粘贴」；目标目录有同名文件时自动加 ` (1)` 后缀，不覆盖。
+   */
+  copyObjects: (payload: {
+    keys: string[]
+    /** 目标目录（相对账号根目录）；不传 = 根目录 */
+    destFolder?: string
+    mode?: "copy" | "move"
+  }) =>
+    request<StorageCopyResult>("/storage/objects/copy", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   bindDomain: (subdomainId: string) =>
     request<{ prefix: StoragePrefixCreated }>("/storage/domain", {
       method: "POST",
@@ -1683,6 +1724,19 @@ export const storageApi = {
 }
 
 // ---- AI 中转站（NewAPI） ----
+
+/** 「付费直连地址」：GET 只回「有没有资格」，地址要 reveal/unlock 才下发 */
+export const aiAccessApi = {
+  directEndpoint: () =>
+    request<{ unlocked: boolean; reason?: string; title?: string }>("/ai/direct-endpoint"),
+  /** 称号持有人：点击查看（每次点击才取一次地址） */
+  revealDirect: () => request<{ url: string }>("/ai/direct-reveal", { method: "POST" }),
+  unlockDirect: (code: string) =>
+    request<{ unlocked: boolean; url: string; reason?: string }>("/ai/direct-unlock", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }),
+}
 
 export const newapiApi = {
   status: () => request<NewApiStatus>("/dev/status"),
@@ -2021,15 +2075,31 @@ export const emailApi = {
     }),
 
   /**
-   * 站内互发：以指定邮箱身份发给**本站另一个邮箱**（收件人必须是本站根域邮箱）。
-   * 直接落对方收件箱，不需要付费的 Cloudflare Email Sending。
+   * 以指定邮箱身份写一封信。
+   *
+   * 收件人是本站根域邮箱 → 站内互发（直接落对方收件箱，不花钱、即时到）；
+   * 否则走发信通道链（Brevo → CF Send）真正发出去，与系统通知共用同一份额度。
    * 发件地址由服务端从邮箱推导，前端只传收件人/主题/正文。
    */
   sendInternal: (mailboxId: string, payload: { to: string; subject: string; text: string }) =>
-    request<{ ok: boolean; to: string }>(`/mailbox/${mailboxId}/send`, {
+    request<{ ok: boolean; to: string; external?: boolean }>(`/mailbox/${mailboxId}/send`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+
+  /**
+   * 最新一封未读邮件（给「有新信就弹系统通知」用）。
+   * 返回 `null` = 没有未读；字段口径与 `notificationApi.latest` 一致，前端同一套渲染。
+   */
+  latestUnread: (lang: string) =>
+    request<{
+      id: string
+      title: string
+      body: string
+      link: string
+      mailbox: string
+      receivedAt: string
+    } | null>(`/mailbox/latest-unread?lang=${encodeURIComponent(lang)}`),
 }
 
 // ---- 个人名片 ----
@@ -2653,6 +2723,8 @@ export const checkinApi = {
       next: { days: number; points: number; daysLeft: number } | null
       makeupCards: number
       canMakeup: boolean
+      /** 补签窗口（天）：只有最近这么多天内的漏签可以补 */
+      makeupWindowDays: number
       autoCheckin: boolean
     }>("/checkin"),
 
@@ -2668,16 +2740,23 @@ export const checkinApi = {
     }>("/checkin", { method: "POST" }),
 
   makeup: (date?: string) =>
-    request<{ ok: boolean; makeupDate: string; streak: number; makeupCards: number }>(
-      "/checkin/makeup",
-      { method: "POST", body: JSON.stringify(date ? { date } : {}) }
-    ),
+    request<{
+      ok: boolean
+      makeupDate: string
+      streak: number
+      makeupCards: number
+      /** 这次补签顺带补发的里程碑（连续天数被推过里程碑时才会有） */
+      milestonesGranted: { days: number; points: number }[]
+      grantedPoints: number
+    }>("/checkin/makeup", { method: "POST", body: JSON.stringify(date ? { date } : {}) }),
 
   history: (month: string) =>
     request<{
       month: string
       today: string
       makeupCards: number
+      /** 补签窗口（天）：与本接口的 today 一起决定哪些漏签日可点 */
+      makeupWindowDays: number
       days: { date: string; points: number; isMakeup: boolean }[]
     }>(`/checkin/history?month=${encodeURIComponent(month)}`),
 
@@ -2781,6 +2860,17 @@ export const pointsApi = {
     request<{ order: PointOrder }>(
       `/points/orders/${encodeURIComponent(orderId)}/confirm`,
       { method: "POST" }
+    ),
+  /**
+   * 买家：取消「卖家还没发货」的订单，积分原路退回。
+   *
+   * 只对 pending（等卖家交付）有效 —— 卖家已交付 / 已结算的订单会 409，
+   * 那些情况要走走「拒收」或「申请退款」。
+   */
+  cancelPendingOrder: (orderId: string, reason?: string) =>
+    request<{ order: PointOrder }>(
+      `/points/orders/${encodeURIComponent(orderId)}/cancel`,
+      { method: "POST", body: JSON.stringify({ reason: reason ?? "" }) }
     ),
 
   // ---- 售后（退款）----
@@ -3705,6 +3795,9 @@ export const adminPointsApi = {
       method: "POST",
       body: JSON.stringify({ note }),
     }),
+  /** 用户上架商品的审核队列（只需「审核商品」points.review 权限即可拿到） */
+  reviewQueue: () =>
+    request<{ userProducts: PointProduct[] }>("/admin/points/review-queue"),
   /** 审核用户上架的商品：approve=true 通过，false 拒绝 */
   reviewProduct: (id: string, approve: boolean, note?: string) =>
     request<{ product: PointProduct }>(
@@ -4075,12 +4168,10 @@ export const twoFactorApi = {
       body: JSON.stringify(stepUp ?? {}),
     }),
 
-  /** 关闭全部 2FA（需先验一个当前有效的码；被强制的角色不允许） */
-  disable: (code: string, challengeId?: string) =>
-    request<{ ok: boolean }>("/settings/2fa/disable", {
-      method: "POST",
-      body: JSON.stringify(challengeId ? { code, challengeId } : { code }),
-    }),
+  // 注：这里原本还有一个 `disable(code, challengeId)` → POST /settings/2fa/disable。
+  // 关闭 2FA 现在分两条自助路径（`disableTotp` 关认证器、`setEmail(false)` 关邮箱验证），
+  // 都带 step-up 校验；那条「一次性全关」的旧接口前端已无调用方，删掉以免被误用。
+  // 后端路由保留（老客户端可能还有缓存的 JS 在调），但不再有前端入口。
 
   /** 站长兜底：清掉某人的 2FA（丢了手机时用） */
   adminReset: (userId: string) =>
@@ -4967,7 +5058,7 @@ export const labApi = {
       quotaLimit: number
       quotaPeriod: "day" | "month" | "total"
       quotaUsed: number
-      /** 原生工具调用开关（站点设置 lab_native_tools；默认关 = 文本标签协议） */
+      /** 原生工具调用开关（站点设置 lab_native_tools；**默认开**，置 0 才退回文本标签协议） */
       nativeTools: boolean
       channels: { id: string; name: string; model: string; free: boolean }[]
     }>("/lab/channels"),

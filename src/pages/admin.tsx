@@ -62,6 +62,7 @@ import { toast } from "sonner"
 // OAuth 应用的 UI 本体单独放一个文件，避免继续撑大本文件
 // （本文件已 4500+ 行，且可能有其他改动同时在动它）。
 import { OAuthAdminPanel } from "./admin-oauth"
+import { ProductReviewPanel } from "@/components/admin-product-review"
 import { AnalyticsPanel } from "./admin-analytics"
 import { CfQuotaPanel } from "./admin-cf-quota"
 import { BrevoQuotaPanel } from "./admin-brevo-quota"
@@ -89,6 +90,7 @@ import { AdminLabTab } from "@/components/admin-lab-tab"
 // 造物集：从「AI 实验室」里独立出来的选项卡（作品列表 / 编辑 / 状态 / 置顶 / 删除）
 import { AdminGalleryTab } from "@/components/admin-gallery-tab"
 import { AdminFrpRental } from "@/components/admin-frp-rental"
+import { AdminTipQrCard } from "@/components/admin-tip-qr"
 import { AdminPermissionsPanel } from "@/components/admin-permissions"
 import { Textarea } from "@/components/ui/textarea"
 import {
@@ -654,7 +656,14 @@ function eventDraftToPayload(d: EventDraft): EventPayload {
           ? { code: d.conditionCode.trim() }
           : d.conditionType === "github_star" || d.conditionType === "github_pr"
             ? { repo: d.conditionRepo.trim() }
-            : null
+            : d.conditionType === "tg_channel"
+              ? /**
+                 * 订阅 Telegram 频道（2026-10-24 后端已支持，见 event-rewards.ts 的 CONDITION_TYPES）。
+                 * 此前这里没有这一支：表单里虽然有 chat_id 输入框，**填了也不会提交**，
+                 * 所以「TG 频道」条件根本建不出来。字段名与后端一致：chat_id。
+                 */
+                { chat_id: d.conditionChatId.trim() }
+              : null
 
   const maxClaims = d.maxClaims.trim() === "" ? null : Math.floor(Number(d.maxClaims))
   return {
@@ -708,7 +717,10 @@ const CONDITION_TYPE_OPTIONS: { value: EventConditionType; label: string }[] = [
   // 投票：给定若干选项，一人一票；奖励规则可选「参与即可获奖 / 多数 / 少数」，
   // 其中多数与少数又分「投票后立刻按当前票数结算」和「截止后开奖」两种
   { value: "vote", label: "adm.cond.vote" },
-  { value: "quiz", label: "问卷（多题，按答对率发奖）" },
+  // 问卷：多题，按答对率发奖（标签走词典，别写中文 —— 英文界面下会原样显示中文）
+  { value: "quiz", label: "adm.cond.quiz" },
+  // 订阅 TG 频道：用户需先绑定 Telegram 并订阅指定频道，服务端核验成员身份后放行
+  { value: "tg_channel", label: "adm.cond.tgChannel" },
   // 点 star：用户填自己的 GitHub 用户名，服务端去该仓库的 stargazers 名单里核验
   { value: "github_star", label: "adm.cond.githubStar" },
   // 提交 PR：用户填自己的 GitHub 用户名，服务端核验其有没有给该仓库提过 PR
@@ -864,10 +876,8 @@ export default function AdminPage() {
   const [invitePerms, setInvitePerms] = React.useState<Permissions>({
     r2: true,
     ai: true,
-    // ⚠️ `frp` 权限已随内网穿透租用化退役（后端 FEATURES 不再含它），界面上也不再
-    // 渲染这个勾选框；但 `Permissions` 类型仍要求该键，后端读权限 JSON 时会忽略这个
-    // 残留键（见 worker/src/permissions.ts 的注释），故保留占位。
-    frp: true,
+    // `frp` 已于 2026-10-13 移出权限体系（改积分租用），此处与类型都不再保留这个键。
+    // 存量用户权限 JSON 里残留的 `"frp":true/false` 由后端 parsePermissions 直接忽略。
     proxy: true,
     // doulor.cn 专属域默认**不开**：建码时要显式勾选才会授予
     // （与后端 allPermissions() 的口径一致，见 worker/src/permissions.ts）
@@ -1305,14 +1315,38 @@ export default function AdminPage() {
   const [downloadAndroidUrl, setDownloadAndroidUrl] = React.useState("")
   const [downloadWindowsUrl, setDownloadWindowsUrl] = React.useState("")
   const [notifyEmailOptions, setNotifyEmailOptions] = React.useState<string[]>([])
-  // 出站邮件通道
-  const [mailTransportOrder, setMailTransportOrder] = React.useState("posta,brevo,cf")
-  const [announcementMailTransport, setAnnouncementMailTransport] = React.useState("posta")
+  // 出站邮件通道（2026-11-08：Posta 下线，新增 cf-send）
+  // 顺序默认 brevo → cf-send，前一条失败自动回退下一条（cf-routing 只走白名单，不在链里）
+  const [mailTransportOrder, setMailTransportOrder] = React.useState("brevo,cf-send")
+  const [announcementMailTransport, setAnnouncementMailTransport] = React.useState("brevo")
   const [mailCfTargets, setMailCfTargets] = React.useState("")
-  const [postaUrl, setPostaUrl] = React.useState("")
-  const [postaKey, setPostaKey] = React.useState("")
-  const [postaFrom, setPostaFrom] = React.useState("")
-  const [postaConfigured, setPostaConfigured] = React.useState(false)
+  // 站内邮箱对外发信：可发信的发件域名（留空 = 全部已启用根域）。
+  // 每人每日上限那一项在「注册与安全」卡片里（mailbox_external_daily_limit）。
+  const [mailboxExternalDomains, setMailboxExternalDomains] = React.useState("")
+  // cf-send（Cloudflare Email Sending REST API）。Token 只写不读：
+  // 已配置时输入框留空、placeholder 提示「已配置」，提交空串 = 保持原值
+  const [cfSendToken, setCfSendToken] = React.useState("")
+  const [cfSendFrom, setCfSendFrom] = React.useState("no-reply@doulor.cn")
+  const [cfSendFromName, setCfSendFromName] = React.useState("Doulor Cloud")
+  // CF 发信的月度上限（到量即停用 CF，避免超额扣费；0 = 不设限，会用出账单）
+  const [cfSendCap, setCfSendCap] = React.useState("2900")
+  const [cfSendConfigured, setCfSendConfigured] = React.useState(false)
+  /**
+   * 接口没返回 `cfSendConfigured` = 线上 API Worker 还是旧版本（本功能加了字段但没部署）。
+   *
+   * 为什么要单独区分：不区分的话面板只会显示「未配置」，看上去像"Token 没填"，
+   * 实际是**前端新、后端旧**的版本错配 —— 这种错误按"去填 Token"的方向修，永远修不好。
+   */
+  const [cfSendApiStale, setCfSendApiStale] = React.useState(false)
+  const [cfSendTokenSource, setCfSendTokenSource] = React.useState<"panel" | "worker" | "none">(
+    "none",
+  )
+  // 逐通道自检：结果按通道列出（走整链时失败的通道不会留痕迹，见 testMail 注释）
+  const [mailTestTo, setMailTestTo] = React.useState("")
+  const [mailTestBusy, setMailTestBusy] = React.useState(false)
+  const [mailTestResults, setMailTestResults] = React.useState<
+    { channel: string; ok: boolean; code?: string; error?: string }[]
+  >([])
   // Brevo 多把 Key：明文永不回前端，这里存的是「中间打码」的列表（顺序 = 轮询顺序）
   const [brevoKeys, setBrevoKeys] = React.useState<string[]>([])
   const [brevoAddInput, setBrevoAddInput] = React.useState("")
@@ -1331,12 +1365,18 @@ export default function AdminPage() {
     ai: false,
     proxy: false,
   })
-  // 免权限访问：打开后该模块不再要求用户权限（没有权限的人也能用）
-  const [openFeatures, setOpenFeatures] = React.useState<Record<string, boolean>>({
-    r2: false,
-    ai: false,
-    proxy: false,
-  })
+  /**
+   * 免权限访问：打开后该模块不再要求用户权限（没有权限的人也能用）。
+   *
+   * ⚠️ 键集合必须取 **FEATURES**（后端 permissions.ts 的那 6 项），不能手写三个键：
+   *    这个页面保存时是**整体覆盖** open_features 字符串（后端 admin.ts 的
+   *    `values[key] = parts.join(",")` 不做合并），少一个键就等于把它从库里抹掉。
+   *    2026-10-15 加 dns、2026-10-16 加 relay_auto、doulor 早就有了，此前这里只有
+   *    r2/ai/proxy 三项 ⇒ 管理员既勾不到那三个模块，每次「保存设置」还会把已有值抹掉。
+   */
+  const [openFeatures, setOpenFeatures] = React.useState<Record<string, boolean>>(() =>
+    Object.fromEntries(FEATURES.map((f) => [f.key, false]))
+  )
   /**
    * 首捐奖励券可兑换的模块（默认全部可兑换）。
    * 用户第一次捐献成功后拿到的「自选权限」券只能换这里勾上的模块。
@@ -1353,6 +1393,14 @@ export default function AdminPage() {
   const [registerIpDailyLimit, setRegisterIpDailyLimit] = React.useState("3")
   /** 临时邮箱（收件邮箱）每天最多刷新次数（0 = 不限） */
   const [tempMailboxRefreshLimit, setTempMailboxRefreshLimit] = React.useState("20")
+  /**
+   * 站内邮箱**对外发信**每人每日上限（0 = 关闭对外发信）。
+   *
+   * 与上面的 tempMailboxRefreshLimit 是两回事：那个管「临时收件地址能换几次」，
+   * 这个管「用自己的邮箱往外域寄信能寄几封」。对外发信烧的是本站的发信额度，
+   * 被当成群发出口会连累全站验证码发不出去，所以默认 20 且可一键关掉。
+   */
+  const [mailboxExternalDailyLimit, setMailboxExternalDailyLimit] = React.useState("20")
   /** 风险账户判定阈值（单账号每分钟请求数） */
   const [riskPeakThreshold, setRiskPeakThreshold] = React.useState("20")
   // 自动审核：打开后该模块的捐献提交即自动审核（r2 没有捐献，不在列表里）
@@ -1957,7 +2005,10 @@ export default function AdminPage() {
     name: "",
     region: "",
     url: "",
-    protocol: "mixed",
+    // 留空 = 保存时由后端从订阅内容自动识别（见 NODE_SCHEMES）。
+    // 原来是写死的 "mixed"：它既不在协议清单里，又会被两处开窗逻辑立刻覆盖 ——
+    // 永远到不了后端的死默认值，还容易让人以为“mixed”是个合法协议。
+    protocol: "",
     status: "unknown",
     statusNote: "",
     enabled: true,
@@ -2152,11 +2203,7 @@ export default function AdminPage() {
       })
       // 免权限访问：后端存空串表示「全部按权限卡」
       const openRaw = (s.open_features ?? "").split(",").map((x) => x.trim()).filter(Boolean)
-      setOpenFeatures({
-        r2: openRaw.includes("r2"),
-        ai: openRaw.includes("ai"),
-        proxy: openRaw.includes("proxy"),
-      })
+      setOpenFeatures(Object.fromEntries(FEATURES.map((f) => [f.key, openRaw.includes(f.key)])))
       // 首捐奖励券可兑换的模块：缺省/取不到时按「全部可兑换」显示
       // （与后端 parseFirstDonationFeatures 的缺省口径一致）
       const fdRaw = (s.first_donation_voucher_features ?? "r2,ai,proxy,doulor")
@@ -2172,6 +2219,7 @@ export default function AdminPage() {
       setRegisterEmailDomains(s.register_email_domains ?? "")
       setRegisterIpDailyLimit(s.register_ip_daily_limit ?? "3")
       setTempMailboxRefreshLimit(s.temp_mailbox_refresh_daily_limit ?? "20")
+      setMailboxExternalDailyLimit(s.mailbox_external_daily_limit ?? "20")
       setRiskPeakThreshold(s.risk_peak_per_minute_threshold ?? "20")
       // 自动审核：后端存空串表示「全部转人工」
       const autoRaw = (s.auto_review_features ?? "").split(",").map((x) => x.trim()).filter(Boolean)
@@ -2227,17 +2275,21 @@ export default function AdminPage() {
       // 积分系统的开关/比例/每日上限不在这里：改由 管理面板 → 积分 → 商城 维护
       // （见 admin-points.tsx 商品表第一行的「内置商品」行，接口是 PUT /api/admin/points/config）
       // 出站邮件通道
-      setMailTransportOrder(s.mail_transport_order ?? "posta,brevo,cf")
-      setAnnouncementMailTransport(s.announcement_mail_transport ?? "posta")
+      setMailTransportOrder(s.mail_transport_order ?? "brevo,cf-send")
+      setAnnouncementMailTransport(s.announcement_mail_transport ?? "brevo")
       setMailCfTargets(s.mail_cf_targets ?? "")
-      setPostaUrl(s.posta_url ?? "")
-      setPostaFrom(s.posta_from ?? "")
+      setMailboxExternalDomains(s.mailbox_external_domains ?? "")
+      setCfSendFrom(s.cf_send_from ?? "no-reply@doulor.cn")
+      setCfSendFromName(s.cf_send_from_name ?? "Doulor Cloud")
+      setCfSendCap(s.cf_send_monthly_cap ?? "2900")
       setBrevoSenderEmail(s.brevo_sender_email ?? "")
       setBrevoSenderName(s.brevo_sender_name ?? "Doulor Cloud")
-      setPostaConfigured(Boolean(res.mailSecrets?.postaConfigured))
+      setCfSendConfigured(Boolean(res.mailSecrets?.cfSendConfigured))
+      setCfSendApiStale(typeof res.mailSecrets?.cfSendConfigured !== "boolean")
+      setCfSendTokenSource(res.mailSecrets?.cfSendTokenSource ?? "none")
       setBrevoKeys(res.mailSecrets?.brevoKeys ?? [])
       // 密钥明文不回传，输入框清空（placeholder 显示「已配置」）
-      setPostaKey("")
+      setCfSendToken("")
       setBrevoAddInput("")
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("adm.39"))
@@ -2326,6 +2378,9 @@ export default function AdminPage() {
         register_email_domains: registerEmailDomains,
         register_ip_daily_limit: registerIpDailyLimit,
         temp_mailbox_refresh_daily_limit: Math.round(Number(tempMailboxRefreshLimit) || 0),
+        mailbox_external_daily_limit: Math.round(
+          Math.max(0, Number(mailboxExternalDailyLimit) || 0)
+        ),
         risk_peak_per_minute_threshold: riskPeakThreshold,
         // 自动审核的模块，逗号分隔；全关时发空串 = 全部转人工
         auto_review_features: Object.entries(autoReview)
@@ -2414,9 +2469,11 @@ export default function AdminPage() {
         mail_transport_order: mailTransportOrder.trim(),
         announcement_mail_transport: announcementMailTransport,
         mail_cf_targets: mailCfTargets.trim(),
-        posta_url: postaUrl.trim(),
-        posta_key: postaKey.trim(),
-        posta_from: postaFrom.trim(),
+        mailbox_external_domains: mailboxExternalDomains.trim(),
+        cf_send_token: cfSendToken.trim(),
+        cf_send_from: cfSendFrom.trim(),
+        cf_send_from_name: cfSendFromName.trim(),
+        cf_send_monthly_cap: cfSendCap.trim(),
         // brevo_api_key 不在这里提交：它的列表是「改完立刻生效」的，
         // 且前端只有打码串、无法原样回传（见 saveBrevoKeys 的 keep:<n> 协议）。
         brevo_sender_email: brevoSenderEmail.trim(),
@@ -2472,6 +2529,32 @@ export default function AdminPage() {
   const handleRemoveBrevoKey = async (index1Based: number) => {
     const keep = brevoKeys.map((_, i) => i + 1).filter((n) => n !== index1Based)
     if (await saveBrevoKeys(keep, [])) toast.success(t("adm.44"))
+  }
+
+  /**
+   * 逐通道发信自检（`channel: "all"`）。
+   *
+   * 为什么不用「走整链」那个默认模式：整链成功即停，失败的通道不会留任何痕迹，
+   * 而站长要排查的恰恰是「Brevo 到底报什么错」。逐通道跑一遍，每条通道的
+   * 错误原文都会回到面板上（后端见 admin.testMail）。
+   */
+  const handleMailChannelTest = async () => {
+    const to = mailTestTo.trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+      toast.error(t("adm.1309"))
+      return
+    }
+    setMailTestBusy(true)
+    try {
+      const res = await adminApi.testMail({ to, channel: "all" })
+      setMailTestResults(res.results ?? [])
+      if (res.ok) toast.success(t("adm.1310"))
+      else toast.error(t("adm.1311"))
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("adm.1311"))
+    } finally {
+      setMailTestBusy(false)
+    }
   }
 
   const handleSaveQuota = async () => {
@@ -4280,7 +4363,16 @@ export default function AdminPage() {
                 )}
               </NavGroup>
               <NavGroup label={t("adm.234")}>
-                {canSeeTab("oauth") && <NavItem active={activeTab === "oauth"} icon={KeyRound} label={t("adm.235")} onClick={() => handleTabChange("oauth")} />}
+                {/* 角标 = 用户自助创建、仍待审核的 OAuth 应用数（2026-10-30 站长要求） */}
+                  {canSeeTab("oauth") && (
+                    <NavItem
+                      active={activeTab === "oauth"}
+                      icon={KeyRound}
+                      label={t("adm.235")}
+                      count={attention?.oauthApps}
+                      onClick={() => handleTabChange("oauth")}
+                    />
+                  )}
                 {canSeeTab("analytics") && <NavItem active={activeTab === "analytics"} icon={BarChart3} label={t("adm.236")} onClick={() => handleTabChange("analytics")} />}
                 {canSeeTab("cfQuota") && <NavItem active={activeTab === "cfQuota"} icon={Gauge} label={t("adm.237")} onClick={() => handleTabChange("cfQuota")} />}
                 {canSeeTab("perf") && <NavItem active={activeTab === "perf"} icon={Activity} label={t("perf.tab")} onClick={() => handleTabChange("perf")} />}
@@ -4754,9 +4846,20 @@ export default function AdminPage() {
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {fmtTime(inv.createdAt)}
+                          {/* 创建者：后端早就在下发 createdByName（admin.ts），这里一直没渲染。
+                              用户现在能自助建码，管理员排障时「这个码是谁发的」是最常问的一句。 */}
+                          {inv.createdByName && (
+                            <span className="mt-0.5 block truncate">
+                              {t("adm.inviteCreator", { name: inv.createdByName })}
+                            </span>
+                          )}
                         </TableCell>
                         <TableCell>
-                          {exhausted ? (
+                          {/* 创建者被封禁的码用不了（注册会 INVITE_DISABLED），
+                              这一条要排在「已用完 / 已过期」之前 —— 它才是真正的原因。 */}
+                          {inv.creatorBanned ? (
+                            <Badge variant="destructive">{t("adm.inviteCreatorBanned")}</Badge>
+                          ) : exhausted ? (
                             <Badge variant="destructive">{t("adm.348")}</Badge>
                           ) : expired ? (
                             <Badge variant="destructive">{t("adm.349")}</Badge>
@@ -5437,7 +5540,10 @@ export default function AdminPage() {
                             : d.channelId !== null && d.channelId !== undefined
                               ? t("adm.1010", { v0: d.channelId })
                               : t("adm.162")}
-                          {d.autoReviewed && t("adm.1011")}
+                          {/* auto_reviewed 也可能出现在**仍是 pending** 的单子上（自动校验跑过、但结论是「转人工」，
+              见 donations.ts 里那条只写 review_note 不写 status 的 UPDATE）。那种情况并不是
+              「已自动审核」，标上去会让管理员以为已经处理完了。 */}
+            {d.autoReviewed && d.status !== "pending" && t("adm.1011")}
                         </p>
                       )}
                       <p className="text-xs text-muted-foreground">{t("adm.1012", { v0: d.notifyEmail, v1: fmtTime(d.createdAt) })}</p>
@@ -5579,70 +5685,11 @@ export default function AdminPage() {
             </div>
           )}
 
-          {/* 反代账号贡献：免审核通道，登录即生效，这里只做观察与摘除 */}
-          <div className="mt-6 border-t pt-6">
-            <div className="mb-3 flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-medium">{t("adm.414")}</h3>
-                <p className="text-xs text-muted-foreground">
-                  {t("adm.415")}
-                </p>
-              </div>
-              <Button variant="outline" size="sm" onClick={() => void loadWb2api()}>
-                <RefreshCw className="h-4 w-4" />
-                {t("adm.416")}
-              </Button>
-            </div>
-            {wb2apiBindings.length === 0 ? (
-              <EmptyState
-                icon={Unplug}
-                title={t("adm.273")}
-                description={t("adm.274")}
-              />
-            ) : (
-              <details className="rounded-md border">
-                <summary className="cursor-pointer select-none px-4 py-3 text-sm text-muted-foreground hover:text-foreground">
-                  📋 WorkBuddy 捐献绑定（{wb2apiBindings.length} 条）—— 默认折叠，点开查看
-                </summary>
-                <div className="divide-y">
-                {wb2apiBindings.map((b) => (
-                  <div
-                    key={b.id}
-                    className="flex flex-wrap items-center gap-2 px-4 py-3"
-                  >
-                    <span className="text-sm font-medium">{b.username}</span>
-                    <span className="text-sm">{b.nickname || b.uid}</span>
-                    <Badge variant="outline">{realmLabel(b.realm)}</Badge>
-                    <Badge variant={b.status === "active" ? "success" : "secondary"}>
-                      {b.status === "active" ? t("adm.1015") : t("adm.1016")}
-                    </Badge>
-                    <Badge variant={b.grantedAi ? "outline" : "secondary"}>
-                      {b.grantedAi ? t("adm.1017") : t("adm.1018")}
-                    </Badge>
-                    <span className="ml-auto text-xs text-muted-foreground">
-                      {fmtTime(b.createdAt)}
-                    </span>
-                    {b.status === "active" && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-muted-foreground hover:text-destructive"
-                        onClick={() => {
-                          setWb2apiRevokeAi(b.grantedAi)
-                          setWb2apiRemoving(b)
-                        }}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        {t("adm.417")}
-                      </Button>
-                    )}
-                  </div>
-                ))}
-              </div>
-              </details>
-            )}
-          </div>
-
+          {/*
+            这里原本有一份「反代账号贡献」列表，与「捐献通道」Tab 里的 WorkBuddy 绑定列表
+            是**同一份数据、同一个摘除弹窗**的第二个副本（两套逐字相同的中文词条）。
+            2026-11 该通道停用后，观察/摘除入口统一收在「捐献通道」Tab，这里整块删除。
+          */}
           {/* 审核理由弹窗 */}
           <Dialog open={reviewTarget !== null} onOpenChange={(o) => !o && setReviewTarget(null)}>
             <DialogContent>
@@ -5651,7 +5698,11 @@ export default function AdminPage() {
                   {reviewTarget?.action === "approve" ? t("adm.1019") : t("adm.1020")}
                 </DialogTitle>
                 <DialogDescription>{t("adm.1021", { v0: reviewTarget?.donation.username, v1: reviewTarget?.action === "approve"
-                    ? t("adm.163")
+                    ? /* 内网穿透通道不授予权限（后端 DONATION_TYPES.frp = null），
+                         它就是「一键搭节点」那条，批准只是把节点登记进池子。 */
+                      reviewTarget?.donation.type === "frp"
+                      ? t("adm.163frp")
+                      : t("adm.163")
                     : t("adm.164"), v2: reviewTarget?.action === "approve" &&
                     reviewTarget.donation.type === "ai" &&
                     (reviewTarget.donation.channelId === null ||
@@ -5970,7 +6021,9 @@ export default function AdminPage() {
         </TabsContent>
 
         <TabsContent value="points">
-          <PointsAdminPanel />
+          {/* 只勾了「审核商品」(points.review) 的管理员看不到官方商品/订单/配置，
+              所以他们进这一栏时只给审核队列（2026-10-30 站长反馈：此前一片空白） */}
+          {hasPerm("points.official") ? <PointsAdminPanel /> : <ProductReviewPanel />}
         </TabsContent>
 
         <TabsContent value="r2">
@@ -7043,6 +7096,16 @@ export default function AdminPage() {
 
         <TabsContent value="wb2api">
           <div className="space-y-6">
+            {/*
+              ⚠️ 2026-11 起：AI 捐献已统一走 agent2api 网关，WorkBuddy(wb2api) 与
+              Qoder2API 两条通道**已停用**，用户端入口也已撤下。
+              这一页保留，是因为「存量绑定」还需要被人看见与摘除（摘除会连带回收
+              对应的 ai 权限）—— 否则那些用户会一直占着权限而无人能处理。
+              存量清空后，可以把这一页连同 wb2api.ts / qoder2api.ts 一起删掉。
+            */}
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
+              {t("adm.wb2apiDeprecated")}
+            </div>
             {/* 三条免审核捐献通道都在这一页：① 反代账号（wb2api）② Qoder2API ③ 商汤 Key。
                 每条通道自带「通道开关」（管功能）与「显示入口」（只管捐献页给不给看）。 */}
             <p className="text-sm text-muted-foreground">{t("adm.1066")}<b className="font-medium">{t("adm.1067")}</b>{t("adm.1068", { v0: t("adm.498"), v1: t("adm.499"), v2: t("adm.500") })}</p>
@@ -7740,6 +7803,7 @@ export default function AdminPage() {
             <LoadingBlock variant="form" />
           ) : (
             <div className="space-y-6">
+              <AdminTipQrCard />
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">{t("adm.583")}</CardTitle>
@@ -8451,25 +8515,21 @@ export default function AdminPage() {
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {Object.keys(openFeatures).map((f) => (
+                  {FEATURES.map((f) => (
                     <div
-                      key={f}
+                      key={f.key}
                       className="flex items-center justify-between rounded-md border p-3"
                     >
                       <div className="space-y-0.5">
-                        <p className="text-sm font-medium">
-                          {t(FEATURE_LABELS[f as FeatureKey] ?? f)}
-                        </p>
+                        <p className="text-sm font-medium">{t(f.label)}</p>
                         <p className="text-xs text-muted-foreground">
-                          {openFeatures[f]
-                            ? t("adm.180")
-                            : t("adm.181")}
+                          {openFeatures[f.key] ? t("adm.180") : t("adm.181")}
                         </p>
                       </div>
                       <Switch
-                        checked={openFeatures[f] ?? false}
+                        checked={openFeatures[f.key] ?? false}
                         onCheckedChange={(v) =>
-                          setOpenFeatures((prev) => ({ ...prev, [f]: v }))
+                          setOpenFeatures((prev) => ({ ...prev, [f.key]: v }))
                         }
                       />
                     </div>
@@ -8896,6 +8956,8 @@ export default function AdminPage() {
                     {t("adm.693")}
                     {t("adm.694")}
                   </p>
+                  <p className="text-xs text-amber-600 dark:text-amber-500">{t("adm.709")}</p>
+                  <p className="text-xs text-muted-foreground">{t("adm.1312")}</p>
                 </div>
                 <div className="space-y-2">
                   <Label>{t("adm.695")}</Label>
@@ -8907,8 +8969,8 @@ export default function AdminPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="posta">{t("adm.696")}</SelectItem>
-                      <SelectItem value="brevo">{t("adm.697")}</SelectItem>
+                      <SelectItem value="brevo">{t("adm.696")}</SelectItem>
+                      <SelectItem value="cf-send">{t("adm.697")}</SelectItem>
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">
@@ -8935,44 +8997,83 @@ export default function AdminPage() {
 
                 <Separator />
 
+                {/* 站内邮箱对外发信（2026-11-09）：发件域名白名单 */}
+                <div className="space-y-3 rounded-md border p-3">
+                  <p className="text-sm font-medium">{t("adm.1322")}</p>
+                  <div className="space-y-2">
+                    <Label htmlFor="mailboxExternalDomains">{t("adm.1324")}</Label>
+                    <Input
+                      id="mailboxExternalDomains"
+                      value={mailboxExternalDomains}
+                      onChange={(e) => setMailboxExternalDomains(e.target.value)}
+                      placeholder="doulor.cn, tyu.me, 7u.nz"
+                      className="font-mono text-xs"
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">{t("adm.1325")}</p>
+                </div>
+
+                <Separator />
+
                 <div className="space-y-3 rounded-md border p-3">
                   <p className="text-sm font-medium">{t("adm.704")}</p>
                   <div className="space-y-2">
-                    <Label htmlFor="postaUrl">{t("adm.705")}</Label>
-                    <Input
-                      id="postaUrl"
-                      value={postaUrl}
-                      onChange={(e) => setPostaUrl(e.target.value)}
-                      placeholder="https://xxx.doulor.cn"
-                      className="font-mono text-xs"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="postaKey">
-                      API Key{postaConfigured && t("adm.1115")}
+                    <Label htmlFor="cfSendToken">
+                      API Token{cfSendConfigured && t("adm.1115")}
                     </Label>
                     <Input
-                      id="postaKey"
+                      id="cfSendToken"
                       type="password"
-                      value={postaKey}
-                      onChange={(e) => setPostaKey(e.target.value)}
-                      placeholder={postaConfigured ? t("adm.1116") : t("adm.1117")}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="postaFrom">{t("adm.706")}</Label>
-                    <Input
-                      id="postaFrom"
-                      value={postaFrom}
-                      onChange={(e) => setPostaFrom(e.target.value)}
-                      placeholder="Doulor Cloud <DoulorCloud@foxmail.com>"
+                      value={cfSendToken}
+                      onChange={(e) => setCfSendToken(e.target.value)}
+                      placeholder={cfSendConfigured ? t("adm.1116") : t("adm.1117")}
                       className="font-mono text-xs"
                     />
                     <p className="text-xs text-muted-foreground">
-                      {t("adm.707")}
-                      {t("adm.708")}
-                      {t("adm.709")}
+                      {t("adm.705")}
+                      {cfSendTokenSource === "worker" && t("adm.1313")}
                     </p>
+                    {cfSendApiStale && (
+                      <p className="text-xs text-amber-600 dark:text-amber-500">
+                        {t("adm.1321")}
+                      </p>
+                    )}
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="cfSendFrom">{t("adm.706")}</Label>
+                      <Input
+                        id="cfSendFrom"
+                        value={cfSendFrom}
+                        onChange={(e) => setCfSendFrom(e.target.value)}
+                        placeholder="no-reply@doulor.cn"
+                        className="font-mono text-xs"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="cfSendFromName">{t("adm.718")}</Label>
+                      <Input
+                        id="cfSendFromName"
+                        value={cfSendFromName}
+                        onChange={(e) => setCfSendFromName(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {t("adm.707")}
+                    {t("adm.708")}
+                  </p>
+                  <div className="space-y-2">
+                    <Label htmlFor="cfSendCap">{t("adm.1319")}</Label>
+                    <Input
+                      id="cfSendCap"
+                      type="number"
+                      min={0}
+                      value={cfSendCap}
+                      onChange={(e) => setCfSendCap(e.target.value)}
+                      className="font-mono text-xs"
+                    />
+                    <p className="text-xs text-muted-foreground">{t("adm.1320")}</p>
                   </div>
                 </div>
 
@@ -9075,6 +9176,79 @@ export default function AdminPage() {
                   </p>
                   <BrevoQuotaPanel />
                 </div>
+
+                <Separator />
+
+                {/* 逐通道自检：走整链时失败的通道不留痕迹，这里每条通道单独打一发 */}
+                <div className="space-y-3 rounded-md border p-3">
+                  <p className="text-sm font-medium">{t("adm.1314")}</p>
+                  <p className="text-xs text-muted-foreground">{t("adm.1315")}</p>
+                  <div className="flex gap-2">
+                    <Input
+                      id="mailTestTo"
+                      value={mailTestTo}
+                      onChange={(e) => setMailTestTo(e.target.value)}
+                      placeholder="you@example.com"
+                      className="font-mono text-xs"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0"
+                      disabled={mailTestBusy || !mailTestTo.trim()}
+                      onClick={() => void handleMailChannelTest()}
+                    >
+                      {mailTestBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                      {t("adm.1316")}
+                    </Button>
+                  </div>
+                  {mailTestResults.length > 0 && (
+                    <ul className="space-y-1">
+                      {mailTestResults.map((r) => (
+                        <li
+                          key={r.channel}
+                          className="rounded-md border px-2.5 py-1.5 text-xs"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-mono">{r.channel}</span>
+                            <span
+                              className={
+                                r.ok ? "text-emerald-600" : "text-destructive font-medium"
+                              }
+                            >
+                              {r.ok ? t("adm.1317") : t("adm.1318")}
+                            </span>
+                          </div>
+                          {!r.ok && r.error && (
+                            <p className="mt-1 break-all text-muted-foreground">{r.error}</p>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t("adm.mailExt.title")}</CardTitle>
+                <CardDescription>{t("adm.mailExt.desc")}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <Label htmlFor="mailboxExternalDailyLimit">
+                  {t("adm.mailExt.label")}
+                </Label>
+                <Input
+                  id="mailboxExternalDailyLimit"
+                  type="number"
+                  min={0}
+                  className="w-32"
+                  value={mailboxExternalDailyLimit}
+                  onChange={(e) => setMailboxExternalDailyLimit(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">{t("adm.mailExt.hint")}</p>
               </CardContent>
             </Card>
 
@@ -9448,6 +9622,14 @@ export default function AdminPage() {
                   <div className="space-y-0.5">
                     <p className="text-sm font-medium">{t(f.label)}</p>
                     <p className="text-xs text-muted-foreground">{t(f.desc)}</p>
+                    {/* doulor 是 ADMIN_ONLY_FEATURES：用这个码**注册**能拿到它，
+                        但拿券兑换时会被结构性剔除（vouchers.ts），两条路结果不同。
+                        与其让人事后发现，不如在这里说清楚。 */}
+                    {f.key === "doulor" && (
+                      <p className="text-xs text-amber-600 dark:text-amber-500">
+                        {t("adm.doulorInviteNote")}
+                      </p>
+                    )}
                   </div>
                   <Switch
                     checked={invitePerms[f.key]}

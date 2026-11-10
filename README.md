@@ -111,8 +111,9 @@
   同请求内后续查询可被就近副本服务。
 - **R2**：不用绑定，走 S3 兼容 REST API（自实现 SigV4 签名），因此可以跨 Cloudflare 账号使用；
   支持多桶、平台桶 / 用户桶分离、预签名直传与直链反代。
-- **邮件**：收信走 Email Routing → Email Worker；发信是三级通道（Brevo API → 自建 Posta 队列 → Cloudflare Send Email），
-  任一道额度耗尽自动降级切换。
+- **邮件**：收信走 Email Routing → Email Worker；发信是两级通道（Brevo API → Cloudflare Email Sending / `cf-send`），
+  任一环失败自动降级；CF 的 `cf-routing` 绑定只用于「已验证收件地址」白名单（免费不限量）；
+  CF 发信用量由本地计数卡在上限内，**不允许产生超额账单**；站内邮箱也支持对外发信，与系统通知共用这份额度。
 
 ---
 
@@ -124,7 +125,7 @@
 | 后端 | Cloudflare Workers（ES Modules）、D1、R2（S3 API）、Workers 静态资产 |
 | 测试 | Vitest + `@cloudflare/vitest-plugin`（miniflare 内跑真实 Worker + D1）、Playwright（真浏览器走查） |
 | 质量护栏 | 自研静态检查：路由↔实现一致性、设置项是否真被服务端读取、死代码、i18n 键完整性 |
-| 邮件 | Cloudflare Email Routing（收）、Brevo / Posta / Cloudflare Send Email（发） |
+| 邮件 | Cloudflare Email Routing（收）、Brevo / Cloudflare Email Sending / Email Routing 绑定（发） |
 | AI 网关 | 自建 NewAPI（集群部署，多节点共享库） |
 
 ---
@@ -197,8 +198,15 @@ site-worker.js           前端站点的 Worker 入口（HTTPS 跳转 + 安全�
 
 ### 7. 邮箱
 - 收信：Cloudflare Email Routing 的 catch-all → Email Worker → 解析入库（按收件人分配邮箱）；
-- 发信：三级通道自动降级（Brevo 免费额度 → 自建 Posta 异步队列 → Cloudflare Send Email）；
-  按剩余额度剔除已耗尽的上游并轮转，避免「死 Key 吃掉整封邮件」；
+- 发信：两级通道自动降级（Brevo → Cloudflare Email Sending `cf-send`）；
+  Brevo 按剩余额度剔除已耗尽的上游并轮转，避免「死 Key 吃掉整封邮件」；
+  任一条通道失败都会继续往后走，全部失败才报错（出现过额度类失败则以「额度用尽」收尾，
+  公告群发据此暂停而非把收件人记成失败）。自建的 Posta 网关已于 2026-11-08 下线；
+- CF 发信有**月度预算闸**：本地计数 `mail_send_usage` + 设置项 `cf_send_monthly_cap`（默认 2,900），
+  到量即停用 CF 并回退，宁可不发也不产生超额账单；面板在「Cloudflare 额度」里看进度。
+  `cf-routing`（`send_email` 绑定）只服务 `mail_cf_targets` 白名单 —— 发已验证地址免费且不限量；
+- 站内邮箱可对外发信（走同一条通道链、共用上面的额度），每人每天有上限
+  （`mailbox_external_daily_limit`，0 = 关闭），且只允许从已完成发信认证的主域名发出；
 - 临时分享箱：随机地址、可设过期时间，投递失败会写回错误状态。
 
 ### 8. 质量护栏（`npm run check`）
@@ -288,7 +296,7 @@ npm test                         # Vitest（在 miniflare 里跑真实 Worker + 
 - **09-26**：活动系统（认证码 / 抽奖、到点自动开奖）、OAuth 身份提供方（本站可作为 IdP）上线；
   「捐献自动审核」确立最高原则：**自动判定不了的一律转人工**。
 - **09-27 ~ 09-28**：自定义称号系统、消息中心与深链、活动分享页；邮件三通道（Brevo → Posta → Cloudflare）与群发分批；
-  定时发布（公告 / 活动到点上线）；成就体系。
+  定时发布（公告 / 活动到点上线）；成就体系。（Posta 已于 11-08 下线，换成 Cloudflare Email Sending。）
 - **09-29**：积分商城完善（5 种交付方式）、订阅套餐体系与中转站订阅同步。
 - **09-30**：用户量一夜之间从 300 涨到 800，迎来第一次真实的容量危机 ——
   当天完成了：轮询降频（聊天 2s→5s、收件箱 5s→15s，且页面不可见时暂停）、

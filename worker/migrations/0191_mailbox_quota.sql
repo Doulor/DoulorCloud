@@ -1,0 +1,15 @@
+-- 0191_mailbox_quota.sql
+-- 积分商城：邮箱数量扩容（2026-11-04 站长要求）
+--
+-- 背景：普通用户的邮箱上限一直是硬编码的 3 个（handlers/email.ts 的
+-- MAX_MAILBOXES_PER_USER），站长要在商城里卖「邮箱数量」——
+-- 即「基础 3 个 + 买到多少再加多少」。
+--
+-- 为什么不做成全局设置项：这是一笔 **per-user** 的账。买过的人应当永久保留，
+-- 改一次全局设置不能把所有买过的人都改掉。与 users.invite_quota_bonus
+-- （邀请码额度）完全同一套口径，直接照抄那一列的形状。
+--
+-- 注意：**不设过期**。邮箱是长期资源，不像租期那样能回收 —— 到期既没法
+-- 「收回已占用的名额」，也没法判断用户用了多少，做成租用只剩个日期好看
+-- （与 points-shop.ts 的 RENTAL_DELIVERIES 口径一致：mailbox_quota 不可租用）。
+ALTER TABLE users ADD COLUMN mailbox_quota_bonus INTEGER NOT NULL DEFAULT 0;

@@ -10,7 +10,7 @@ import { requireUser, toPublicUser, clearedSessionCookie, type UserRow } from ".
 import { uuid, hashToken } from "../crypto"
 import { cfDeleteDestination } from "../cloudflare"
 import { purgeUserExternalResources } from "../user-cleanup"
-import { sendMail, renderMail } from "../mailer"
+import { sendMail, renderMail, siteUrl } from "../mailer"
 import { isReservedName } from "../reserved-names"
 import { audit, getSetting } from "../settings"
 import { guardRateLimit } from "../ratelimit"
@@ -217,18 +217,20 @@ export async function verifyRealEmail(env: Env, request: Request): Promise<Respo
     .bind(user.id, await hashToken(code), expiresAt, now)
     .run()
 
-  // 发验证码邮件（走多通道路由：Posta/Brevo/CF）
-  const { text, html } = renderMail("验证你的邮箱", [
-    `你的验证码是：${code}`,
-    "验证码 10 分钟内有效，请勿泄露给他人。",
-    "如果这不是你本人的操作，请忽略本邮件。",
-  ])
+  // 发验证码邮件（走多通道路由：Brevo / CF Send / CF Routing）
+  const rendered = renderMail(
+    "验证你的邮箱",
+    [
+      "请在设置页输入下面的验证码，完成邮箱验证。",
+      "验证码 10 分钟内有效，请勿泄露给他人。如果这不是你本人的操作，请忽略本邮件。",
+    ],
+    { code, preheader: `邮箱验证码：${code}` }
+  )
   try {
     await sendMail(env, {
       to: email,
       subject: "【Doulor Cloud】邮箱验证码",
-      text,
-      html,
+      ...rendered,
     })
   } catch (err) {
     console.error("发送验证码邮件失败:", email, err)
@@ -439,18 +441,19 @@ export async function changeRealEmail(env: Env, request: Request): Promise<Respo
       .bind(user.id, next, await hashToken(code), expiresAt, now)
       .run()
 
-    const { text, html } = renderMail("确认新的账号邮箱", [
-      `你的验证码是：${code}`,
-      `提交后，你的账号邮箱将改为 ${next}。`,
-      "验证码 10 分钟内有效，请勿泄露给他人。",
-      "如果这不是你本人的操作，请忽略本邮件。",
-    ])
+    const rendered = renderMail(
+      "确认新的账号邮箱",
+      [
+        `提交下面的验证码后，你的账号邮箱将改为 ${next}。`,
+        "验证码 10 分钟内有效，请勿泄露给他人。如果这不是你本人的操作，请忽略本邮件。",
+      ],
+      { code, preheader: `修改邮箱验证码：${code}` }
+    )
     try {
       await sendMail(env, {
         to: next,
         subject: "【Doulor Cloud】修改邮箱验证码",
-        text,
-        html,
+        ...rendered,
       })
     } catch (err) {
       console.error("发送改邮箱验证码失败:", next, err)
@@ -585,17 +588,24 @@ export async function requestDeleteCode(env: Env, request: Request): Promise<Res
     .bind(user.id, await hashToken(code), expiresAt, now)
     .run()
 
-  const { text, html } = renderMail("注销账号验证码", [
-    `你的注销验证码是：${code}`,
-    "验证码 10 分钟内有效。注销后账号及全部数据将被永久删除，无法恢复。",
-    "如果这不是你本人的操作，请立即修改密码。",
-  ])
+  const rendered = renderMail(
+    "注销账号验证码",
+    [
+      "你正在申请注销 Doulor Cloud 账号。验证码 10 分钟内有效。",
+      "注销后账号及全部数据将被永久删除，无法恢复。",
+      "如果这不是你本人的操作，请立即修改密码。",
+    ],
+    {
+      code,
+      preheader: `注销验证码：${code}`,
+      action: { label: "不是我，去修改密码", url: siteUrl("/dashboard/settings?tab=security") },
+    }
+  )
   try {
     await sendMail(env, {
       to: email,
       subject: "【Doulor Cloud】注销账号验证码",
-      text,
-      html,
+      ...rendered,
     })
   } catch (err) {
     console.error("发送注销验证码失败:", email, err)

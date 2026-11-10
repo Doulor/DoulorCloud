@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --config wrangler.toml",
-    "deploy": "wrangler deploy --config wrangler.toml --name doulor-mail-api",
+    "deploy": "npm run db:migrate && wrangler deploy --config wrangler.toml --name doulor-mail-api",
     "db:init": "wrangler d1 execute doulor-mail --file=./schema.sql",
+    "db:migrate": "wrangler d1 migrations apply doulor-mail --remote --config wrangler.toml",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

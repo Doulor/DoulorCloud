@@ -149,6 +149,39 @@ describe("私信聊天申请门槛：不得误伤既有会话", () => {
     }
   })
 
+  // 2026-11-05 站长要求：管理员主动联系用户（发中奖通知、售后跟进）不能被卡。
+  it("发件人是管理员 / 站长：连发都被放行，且不落申请记录", async () => {
+    for (const role of ["admin", "superadmin", "root"] as const) {
+      const user = await makeUser()
+      const admin = await makeUser({ role })
+      expect((await send(admin, user.username, "第一条")).status).toBe(201)
+      expect((await send(admin, user.username, "第二条")).status).toBe(201)
+      expect((await send(admin, user.username, "第三条")).status).toBe(201)
+
+      // 不落 request 行 ⇒ 对方不会看到「聊天申请」待办，管理员也不需要谁点头
+      const row = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM dm_contacts WHERE owner_id = ? AND peer_id = ?"
+      )
+        .bind(user.id, admin.id)
+        .first<{ c: number }>()
+      expect(Number(row?.c ?? 0)).toBe(0)
+    }
+  })
+
+  it("管理员之前被拒绝过，仍然能继续发（管理通道不被拉黑）", async () => {
+    const user = await makeUser()
+    const admin = await makeUser({ role: "superadmin" })
+    const now = new Date().toISOString()
+    await env.DB.prepare(
+      "INSERT INTO dm_contacts (owner_id, peer_id, status, created_at, updated_at) VALUES (?, ?, 'declined', ?, ?)"
+    )
+      .bind(admin.id, user.id, now, now)
+      .run()
+
+    expect((await send(admin, user.username, "系统通知：你中奖了")).status).toBe(201)
+    expect((await send(admin, user.username, "补充说明")).status).toBe(201)
+  })
+
   it("双方有订单关系：免申请（买家卖家本就该能直接联系）", async () => {
     const seller = await makeUser()
     const buyer = await makeUser()

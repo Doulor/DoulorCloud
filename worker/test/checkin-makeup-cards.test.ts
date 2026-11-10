@@ -220,7 +220,10 @@ describe("POST /api/checkin/makeup —— 补签卡扣减的并发安全", () =>
 
   it("卡数足够时并发补不同日期：应全部成功，不误拒也不漏扣", async () => {
     const u = await makeUser()
-    const N = 8
+    // N 取 7 而不是 8：补签窗口是「最近 7 天」（2026-11-04 起），
+    // 第 8 天会被 MAKEUP_OUT_OF_WINDOW 合法拒绝 —— 那条口径由
+    // checkin-makeup-window.test.ts 单独钉，这里只测并发扣卡。
+    const N = 7
     await setCards(u.id, N)
 
     const today = siteToday()

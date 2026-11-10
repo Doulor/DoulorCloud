@@ -59,7 +59,7 @@ async function requestCode(u: TestUser): Promise<string> {
   )
   expect(res.status).toBe(200)
   const raw = BREVO_BODY.at(-1) ?? ""
-  const m = /注销验证码是：(\d{6})/.exec(raw)
+  const m = /验证码：(\d{6})/.exec(raw)
   expect(m, "邮件正文应包含 6 位注销验证码").not.toBeNull()
   return m![1]
 }

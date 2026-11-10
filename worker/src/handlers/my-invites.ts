@@ -25,6 +25,7 @@ import {
   type QuotaFeature,
 } from "../quotas"
 import { grantInvitePoints } from "../points"
+import { getSettingNumber } from "../settings"
 import type { Env } from "../env"
 
 /** 注册后允许补填邀请码的天数（见 claimMyInvite） */
@@ -94,13 +95,27 @@ export async function listMyInvites(env: Env, request: Request): Promise<Respons
     .bind(user.id)
     .all<{ granted_at: string; plan_id: number; invitee: string }>()
 
+  // 两档邀请奖励套餐的 id（站长可配）：WorkBuddy/小浣熊/Qoder 走前者，其他 AI 渠道走后者。
+  // 只为把 planId 归类成短名，不在后端决定金额文案。
+  const [wbPlanId, aiPlanId] = await Promise.all([
+    getSettingNumber(env, "invite_reward_plan_id").catch(() => 2),
+    getSettingNumber(env, "invite_reward_ai_plan_id").catch(() => 3),
+  ])
+
   return json({
     quota,
     invites: (rows.results ?? []).map(toPublicInvite),
     // 邀请奖励记录（有效邀请）：每笔 = 一个被邀请人解锁了 AI 权限
+    //
+    // ⚠️ 前端要显示「发的是哪个套餐」。此前只回 planId，前端就把文案写死成
+    //    「+¥200/天」—— 而 WorkBuddy 走的是 invite_reward_plan_id（默认 2，
+    //    ¥500/天），只有其他 AI 渠道走 invite_reward_ai_plan_id（默认 3，¥200/天），
+    //    于是 wb 那笔被少报了一半以上。这里按两个设置项把 planId 归类成短名，
+    //    具体金额由前端按短名出词条（金额本身仍是站长可配的，前端不写死）。
     rewards: (rewardRows.results ?? []).map((r) => ({
       invitee: r.invitee,
       planId: r.plan_id,
+      plan: r.plan_id === wbPlanId ? "wb" : r.plan_id === aiPlanId ? "ai" : "other",
       grantedAt: r.granted_at,
     })),
     // 前端据此渲染权限勾选项与余额

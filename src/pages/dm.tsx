@@ -1017,9 +1017,18 @@ export default function DmPage() {
     <div>
       <PageHeader title={t("dmsg.title")} description={t("dmsg.desc")} />
 
-      <div className="grid gap-4 lg:grid-cols-[20rem_1fr]">
+      {/*
+        ⚠️ 移动端横向溢出的根因（2026-11-08 站长反馈「右边界跑到屏幕外」）：
+        grid 的 `1fr` 其实是 `minmax(auto, 1fr)`，auto 最小值 = 网格项的 min-content。
+        `aside` 的 min-content 由会话行里**不换行的长昵称/长用户名**决定（实测 411px），
+        于是整列被撑到 411，360px 手机上整页横向溢出 66px、
+        390px 手机上溢出 21px，聊天区右边框直接跑出屏幕。
+        修法：左列 `min-w-0`（允许网格项缩到内容以下），右列用 `minmax(0,1fr)` 兜住；
+        列表内部本来就有 `min-w-0 flex-1` + `truncate`，宽度一旦给定就会自己省略号截断。
+      */}
+      <div className="grid gap-4 lg:grid-cols-[20rem_minmax(0,1fr)]">
         {/* 左：会话列表 + 找人 */}
-        <aside className="space-y-3">
+        <aside className="min-w-0 space-y-3">
           {/* 公共聊天室固定入口（用户反馈 2026-10-03）：始终钉在列表最上面 */}
           <button
             type="button"
@@ -1178,7 +1187,7 @@ export default function DmPage() {
           2026-10-02 排查「进入会话停在最上面」的真正断点就在这里。
         */}
         {/* relative：「回到底部」悬浮钮锚在这里，不随消息内容滚走 */}
-        <section className="relative flex max-h-[calc(100vh-10rem)] min-h-[28rem] flex-col overflow-hidden rounded-lg border">
+        <section className="relative flex min-w-0 max-h-[calc(100vh-10rem)] min-h-[28rem] flex-col overflow-hidden rounded-lg border">
           {showChat ? (
             <div className="flex-1 overflow-hidden p-4">
               <ChatPage embedded />
@@ -1192,10 +1201,16 @@ export default function DmPage() {
             </div>
           ) : (
             <>
+              {/*
+                头部这一行同样要能「缩」：用户名最长 64 字符，不截断的话
+                min-content 会把这一行撑到比 section 还宽 —— 右边的「查看个人空间」
+                就被挤出可视区（右侧被 `overflow-hidden` 裁掉，等于消失）。
+                名字 `min-w-0 truncate`，其余元素 `shrink-0`，宽度不够时只让名字省略。
+              */}
               <div className="flex items-center gap-2 border-b px-4 py-2.5">
                 <Link
                   to="/dashboard/dm"
-                  className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground lg:hidden"
+                  className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground hover:text-foreground lg:hidden"
                 >
                   <ArrowLeft className="h-3.5 w-3.5" />
                   {t("dmsg.list")}
@@ -1206,14 +1221,14 @@ export default function DmPage() {
                   hasAvatar={peer?.hasAvatar ?? false}
                   className="h-7 w-7"
                 />
-                <span className="text-sm font-medium">{peerName}</span>
+                <span className="min-w-0 truncate text-sm font-medium">{peerName}</span>
                 {/* 对端「正在输入」：list 轮询顺带下发，过期自动消失 */}
                 {peerTyping && (
-                  <span className="animate-pulse text-xs text-primary">{t("dmsg.typing")}</span>
+                  <span className="shrink-0 animate-pulse text-xs text-primary">{t("dmsg.typing")}</span>
                 )}
                 <Link
                   to={`/space/${encodeURIComponent(peerName)}`}
-                  className="ml-auto text-xs text-muted-foreground hover:text-foreground"
+                  className="ml-auto shrink-0 text-xs text-muted-foreground hover:text-foreground"
                 >
                   {t("lay.viewSpace")}
                 </Link>
@@ -1377,7 +1392,7 @@ export default function DmPage() {
                 <StickerPanel onPick={insertEmoji} />
                 <Input
                   ref={inputRef}
-                  className="flex-1"
+                  className="min-w-0 flex-1"
                   placeholder={t("dmsg.inputPlaceholder")}
                   value={text}
                   maxLength={2000}

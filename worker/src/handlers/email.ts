@@ -5,9 +5,10 @@ import { requireUser, type UserRow, isPrivileged } from "../auth"
 import { isApiRequest } from "../api-source"
 import { cfDeleteEmailRule } from "../cloudflare"
 import { sendMail, renderMail } from "../mailer"
+import { signMailImages } from "../mail-images"
 import { guardRateLimit } from "../ratelimit"
 import { isAdminApiRequest } from "../api-source"
-import { audit, getSettingNumber, siteOffsetHours, siteDayString } from "../settings"
+import { audit, getSetting, getSettingNumber, siteOffsetHours, siteDayString } from "../settings"
 import {
   pickRootDomain,
   isOwnDomain,
@@ -23,6 +24,25 @@ import type { Env } from "../env"
 const MAX_MAILBOXES_PER_USER = 3
 /** 管理员「不限」哨兵值（前端见到显示「不限」） */
 const ADMIN_UNLIMITED_MAILBOXES = 999999
+
+/**
+ * 某个用户当前的邮箱数量上限 = 基础 3 个 + 商城里买到的扩容。
+ *
+ * 扩容记在 `users.mailbox_quota_bonus`（迁移 0191），购买走积分商城的
+ * `mailbox_quota` 交付方式，一次性买断、不过期。
+ *
+ * ⚠️ 列表页（显示「已用 / 上限」）与创建接口（真正拦人的那条）**必须共用**
+ * 这一个函数。两处各算一遍，迟早出现「列表说还能建、创建却报超限」这种
+ * 自相矛盾 —— 而且这种不一致用户会直接当成 bug 报上来。
+ */
+export function mailboxLimitFor(user: {
+  role: string
+  mailbox_quota_bonus?: number | null
+}): number {
+  if (isPrivileged(user.role)) return ADMIN_UNLIMITED_MAILBOXES
+  const bonus = Math.max(0, Math.trunc(Number(user.mailbox_quota_bonus) || 0))
+  return MAX_MAILBOXES_PER_USER + bonus
+}
 
 /**
  * 临时邮箱：额度**独立**，不占用 MAX_MAILBOXES_PER_USER 的 3 个名额。
@@ -65,6 +85,11 @@ interface MessageRow {
   from_address: string
   subject: string
   text_body: string
+  /**
+   * 消毒后的 HTML 正文（0194 迁移新增）。
+   * 只有 HTML 版本的邮件才有；历史邮件与纯文本邮件为 null，前端回落到纯文本视图。
+   */
+  html_body?: string | null
   read: number
   received_at: string
   /** 原邮件的 RFC Message-ID（0029 迁移新增），用于同一封邮件去重落库 */
@@ -205,12 +230,21 @@ async function loadVerifiedTargets(env: Env, userId: string): Promise<Set<string
   return set
 }
 
-function toPublicMessage(row: MessageRow) {
+/**
+ * 出参转换。
+ *
+ * `bodyHtml` 里的图片此时还是消毒器写下的 `data-mail-src`（浏览器不会加载）。
+ * 这里才换成**签名的代理地址** —— 签名放在读取时，换 SESSION_SECRET 后
+ * 历史邮件里的图片不会跟着失效（见 mail-images.ts 的说明）。
+ */
+async function toPublicMessage(env: Env, row: MessageRow) {
   return {
     id: row.id,
     from: row.from_address,
     subject: row.subject,
     body: row.text_body,
+    // 前端据此决定默认用富文本还是纯文本视图（为空就只能是纯文本）
+    bodyHtml: row.html_body ? await signMailImages(env, row.html_body) : null,
     read: row.read === 1,
     receivedAt: row.received_at,
   }
@@ -299,7 +333,8 @@ export async function listMailboxes(env: Env, request: Request): Promise<Respons
     )
   }
   // 邮箱数量上限（管理员/站长不限，999999 作为哨兵值，前端显示「不限」）
-  const limit = isPrivileged(user.role) ? ADMIN_UNLIMITED_MAILBOXES : MAX_MAILBOXES_PER_USER
+  // 普通用户 = 基础 3 + 商城买到的扩容，见 mailboxLimitFor。
+  const limit = mailboxLimitFor(user)
   // 临时邮箱额度独立计算。直接数上面已查出的行，不再多打一次 D1 查询。
   const tempUsed = (rows.results ?? []).filter((r) => r.is_temp === 1).length
   const tempLimit =
@@ -364,10 +399,10 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
    * 并发再多也只有名额内的能插进去；`meta.changes === 0` 即超限。
    * 「⚠️ 必须带 is_temp = 0」这条口径原样保留 —— 临时邮箱有自己的额度，不能挤占这 3 个名额。
    */
-  const mailboxLimit =
-    isAdminApiRequest(request) || isPrivileged(user.role)
-      ? ADMIN_UNLIMITED_MAILBOXES
-      : MAX_MAILBOXES_PER_USER
+  // 上限与列表页同一个来源（基础 3 + 商城扩容）；管理端 API 调用照旧不限
+  const mailboxLimit = isAdminApiRequest(request)
+    ? ADMIN_UNLIMITED_MAILBOXES
+    : mailboxLimitFor(user)
 
   const ins = await env.DB.prepare(
     `INSERT INTO mailboxes (id, user_id, address, forwarding_to, source, created_at)
@@ -387,7 +422,7 @@ export async function createMailbox(env: Env, request: Request): Promise<Respons
     .run()
 
   if ((ins.meta?.changes ?? 0) === 0) {
-    throw new ApiError(400, `每个用户最多 ${MAX_MAILBOXES_PER_USER} 个邮箱`, "LIMIT_REACHED")
+    throw new ApiError(400, `每个用户最多 ${mailboxLimit} 个邮箱`, "LIMIT_REACHED")
   }
 
   const row = await env.DB.prepare("SELECT * FROM mailboxes WHERE id = ?")
@@ -535,17 +570,19 @@ export async function verifyForwardTarget(env: Env, request: Request): Promise<R
     .bind(user.id, email, await hashToken(code), expiresAt, now)
     .run()
 
-  const { text, html } = renderMail("验证转发目标邮箱", [
-    `用户 ${user.username} 想把 doulor.cn 邮箱的邮件转发到 ${email}。`,
-    `验证码是：${code}`,
-    "验证码 10 分钟内有效。如果不是你本人操作，请忽略本邮件。",
-  ])
+  const rendered = renderMail(
+    "验证转发目标邮箱",
+    [
+      `用户 ${user.username} 想把 doulor.cn 邮箱的邮件转发到 ${email}，请在页面上输入下面的验证码。`,
+      "验证码 10 分钟内有效。如果不是你本人操作，请忽略本邮件。",
+    ],
+    { code, preheader: `转发目标验证码：${code}` }
+  )
   try {
     await sendMail(env, {
       to: email,
       subject: "【Doulor Cloud】转发目标验证码",
-      text,
-      html,
+      ...rendered,
     })
   } catch (err) {
     console.error("发送转发验证码失败:", email, err)
@@ -841,7 +878,7 @@ export async function listMessages(
   const nextCursor =
     messages.length === limit && last ? encodeCursor(last.received_at, last.id) : null
 
-  return json({ messages: messages.map(toPublicMessage), nextCursor })
+  return json({ messages: await Promise.all(messages.map((m) => toPublicMessage(env, m))), nextCursor })
 }
 
 // GET /api/mailbox/:id/messages/:messageId —— 单条消息（含正文，自动标已读）
@@ -875,7 +912,7 @@ export async function getMessage(
     row.read = 1
   }
 
-  return json({ message: toPublicMessage(row) })
+  return json({ message: await toPublicMessage(env, row) })
 }
 
 // POST /api/mailbox/:id/messages/:messageId/read —— 标记已读/未读
@@ -1012,23 +1049,118 @@ const MAX_COMPOSE_CHARS = 20_000
 const SEND_LIMIT_PER_HOUR = 30
 
 /**
- * POST /api/mailbox/:id/send —— 站内互发（只发给本站根域邮箱）。
+ * GET /api/mailbox/latest-unread —— 最新一封**未读**邮件（给系统通知用，不是列表接口）。
  *
- * 与已移除的「对外发信」的最大区别：这条**不出门**。信不需要经过 SMTP 投递，
- * 直接把一行存进收件人的收件箱（复用入站 `email-delivery.ts` 的同一条落库口径），
- * 所以**不需要任何付费的 Cloudflare Email Sending**，立刻可用。
+ * 为什么单独开一个：前端只想知道「有没有新信、谁发的、什么标题」。复用列表接口会连正文
+ * 一起拉，而系统通知每 60 秒轮询一次，白花流量和 D1 行读。
+ *
+ * 返回 `null` 表示没有未读；否则 `{ id, title, body, link, mailbox }` ——
+ * 字段口径与 `/api/notifications/latest` 一致，前端同一套渲染逻辑就能用。
+ *
+ * ⚠️ 只统计**自己的**邮箱（`mailboxes.user_id`），不会漏看别人的信。
+ */
+export async function latestUnreadMail(env: Env, request: Request): Promise<Response> {
+  const user = await requireUser(env, request)
+  const lang = (new URL(request.url).searchParams.get("lang") ?? "zh").toLowerCase()
+  const en = lang.startsWith("en")
+
+  const row = await env.DB.prepare(
+    `SELECT m.id, m.subject, m.from_address, m.received_at, mb.address AS mailbox_address
+       FROM messages m
+       JOIN mailboxes mb ON mb.id = m.mailbox_id
+      WHERE mb.user_id = ? AND m.read = 0
+      ORDER BY m.received_at DESC
+      LIMIT 1`
+  )
+    .bind(user.id)
+    .first<{
+      id: string
+      subject: string
+      from_address: string
+      received_at: string
+      mailbox_address: string
+    }>()
+
+  if (!row) return json(null)
+
+  // from_address 形如 `Name <a@b>` 或裸地址；通知里优先显示人名
+  const raw = String(row.from_address ?? "").trim()
+  const m = /^(.*?)<([^>]+)>\s*$/.exec(raw)
+  const sender = ((m?.[1] ?? "").trim().replace(/^"|"$/g, "") || m?.[2] || raw || "").slice(0, 80)
+  const subject =
+    String(row.subject ?? "").trim().slice(0, 120) || (en ? "(no subject)" : "（无主题）")
+
+  return json({
+    id: `mail:${row.id}`,
+    title: en ? `New mail from ${sender}` : `${sender} 发来一封邮件`,
+    body: subject,
+    link: "/dashboard/email",
+    mailbox: row.mailbox_address,
+    receivedAt: row.received_at,
+  })
+}
+
+/**
+ * 用户手写正文 → HTML 时的转义。
+ *
+ * 用户写的内容**不能**原样插进 HTML：一条 `<a href=钓鱼>` 就能在收件人（可能是站外的人）
+ * 的邮箱里冒充本站。这里只做转义 + `white-space:pre-wrap` 保留换行，不解析任何标记。
+ */
+function escapeComposeHtml(input: string): string {
+  return input
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+}
+
+/**
+ * 可以**对外发信**的发件域名清单。
+ *
+ * 默认 = 本站所有**已启用**的根域（doulor.cn / tyu.me / 7u.nz …）。
+ * 理由：这些域都在 Cloudflare Email Sending 里 Onboard 过，各自带 SPF/DKIM；
+ * 站长 2026-11-09 明确要求「用户可以用任意邮箱发件」。
+ * 设置项 `mailbox_external_domains` 非空时以它为准（逗号分隔），用于「某个域先别外发」。
+ *
+ * ⚠️ 这里只校验"域名属于我们"，**不校验 CF 侧是否真的 Onboard** —— 那边没有只读接口。
+ *    若某个域其实没开通，发信会以 E_SENDER_DOMAIN_NOT_AVAILABLE 失败，链上会自动回退
+ *    到下一个通道；错误信息里已写明"改成已开通域名下的地址"。
+ */
+async function externalSenderDomains(env: Env): Promise<string[]> {
+  const raw = (await getSetting(env, "mailbox_external_domains")).trim()
+  if (raw) {
+    return raw
+      .split(/[\s,;]+/)
+      .map((s) => s.trim().toLowerCase().replace(/^@/, ""))
+      .filter(Boolean)
+  }
+  const rows = await listEnabledRootDomains(env).catch(() => [])
+  const out = rows.map((r) => String(r.name).toLowerCase())
+  if (out.length === 0) {
+    const root = (env.ROOT_DOMAIN ?? "").toLowerCase()
+    if (root) out.push(root)
+  }
+  return out
+}
+
+/**
+ * POST /api/mailbox/:id/send —— 以某个邮箱为发件人写一封信。
+ *
+ * 两条路（2026-11-08 打通对外发信）：
+ *   · **站内**（收件人是本站根域）：不出门，直接往对方收件箱插一行，不花钱、即时到；
+ *   · **站外**：走 `sendMail` 的通道链（Brevo → CF Send），和系统通知**共用同一份额度**
+ *     （CF 那段的月度上限见设置项 `cf_send_monthly_cap`）。
  *
  * 收口设计（务必保持）：
  *   1. 发件邮箱必须是用户自己的（requireMailbox）；
- *   2. 收件地址必须是本站已登记的根域（isOwnDomain）—— 只允许站内互发，
- *      外部地址一律拒绝（否则就成了开放中继）；
- *   3. 收件邮箱必须**已存在** —— 不存在就报错，与入站同口径（不静默吞信）；
- *   4. 发件地址由服务端从邮箱推导，**绝不接受前端传入**（否则可伪造发件人）；
- *   5. 每人每小时 30 封（fail-open 限流）。
- *
- * ⚠️ 不会成环：这是**直接落库**，不走 SMTP 转发，A→B 就是往 B 的收件箱插一行，
- *   不存在「回信又触发发送」的链路。（旧 reply 功能禁回本站域名是为了防 SMTP 转发成环，
- *   与本路径无关。）
+ *   2. 发件地址由服务端从邮箱推导，**绝不接受前端传入**（否则可伪造发件人）；
+ *   3. 站外发信**用用户自己的地址当 From**（显示名也是它）—— 不能让人拿站点的通用
+ *      地址当挡箭牌发垃圾；域名必须在 `externalSenderDomains()` 清单里（都是已 Onboard 的域）；
+ *   4. 站内互发每人每小时 30 封；站外发信每人每天 N 封
+ *      （设置项 mailbox_external_daily_limit，0 = 关闭对外发信）——
+ *      对外发信烧的是本站自己的发信额度，被当成群发出口会连累全站验证码发不出去；
+ *   5. 站内路径保证不成环：直接落库，不走 SMTP 转发。
  */
 export async function sendInternalMessage(
   env: Env,
@@ -1057,8 +1189,71 @@ export async function sendInternalMessage(
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
     throw new ApiError(400, "收件地址格式不正确", "INVALID_INPUT")
   }
+
+  const fromAddress = mailbox.address.toLowerCase()
+
+  // ---- 站外：真正发一封邮件出去（不落本站收件箱）----
   if (!(await isOwnDomain(env, to))) {
-    throw new ApiError(400, "只能发送给本站邮箱", "NOT_INTERNAL")
+    // 发件人必须是**用户自己的邮箱**（2026-11-09 站长要求）：
+    //   · 用站点通用地址发，等于所有人共用一个"官方招牌"，出事查不到是谁、也容易被拿去发垃圾；
+    //   · 用用户自己的地址，收件人一看就知道是谁发的，投诉/封禁能精确到账号。
+    // 前提是这个地址的域名真的做过发信认证 —— 见 externalSenderDomains。
+    const senderDomain = fromAddress.split("@")[1] ?? ""
+    const allowedDomains = await externalSenderDomains(env)
+    if (!senderDomain || !allowedDomains.includes(senderDomain)) {
+      throw new ApiError(
+        400,
+        `这个邮箱所在的域名不能对外发信：${allowedDomains.length ? allowedDomains.map((d) => `@${d}`).join("、") : "（尚未开启）"}`,
+        "SENDER_DOMAIN_NOT_SUPPORTED"
+      )
+    }
+
+    const dailyLimit = await getSettingNumber(env, "mailbox_external_daily_limit").catch(
+      () => 20
+    )
+    if (dailyLimit <= 0) {
+      throw new ApiError(403, "本站暂未开放对外发信", "EXTERNAL_SEND_DISABLED")
+    }
+    if (!isAdminApiRequest(request)) {
+      await guardRateLimit(
+        env,
+        `email:external:${user.id}`,
+        dailyLimit,
+        86_400,
+        "今日对外发信次数已达上限，请明天再试"
+      )
+    }
+
+    try {
+      await sendMail(env, {
+        to,
+        subject: subject || "(无主题)",
+        text,
+        // 用户手写正文：纯文本原样发，HTML 只做换行保留 —— 不能套 renderMail，
+        // 那个模板会加上"请勿回复本邮件"的站点页脚，用户写的信不该有。
+        html: `<div style="white-space:pre-wrap;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;font-size:14px;line-height:1.6">${escapeComposeHtml(
+          text
+        )}</div>`,
+        // 发件人 = 用户自己的邮箱（显示名也用地址本身，收件人一眼看出是谁）。
+        // 域名已在上面的 rootDomain 校验里限制成做过 SPF/DKIM 的主域名，
+        // 所以 CF 侧不会判 E_SENDER_DOMAIN_NOT_AVAILABLE。
+        from: { email: fromAddress, name: fromAddress },
+        replyTo: fromAddress,
+      })
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : String(err)
+      console.error("站外发信失败:", fromAddress, "→", to, msg)
+      throw new ApiError(502, `发送失败：${msg.slice(0, 200)}`, "MAIL_SEND_FAILED")
+    }
+
+    await audit(
+      env,
+      user.id,
+      "email.send_external",
+      `${fromAddress} → ${to}`,
+      request.headers.get("CF-Connecting-IP")
+    )
+    return json({ ok: true, to, external: true })
   }
 
   const target = await env.DB.prepare(

@@ -105,7 +105,7 @@ export interface SiteChannelsInfo {
   quotaLimit: number
   quotaPeriod: "day" | "month" | "total"
   quotaUsed: number
-  /** 原生工具调用开关（站点设置 lab_native_tools；默认关 = 走文本标签协议） */
+  /** 原生工具调用开关（站点设置 lab_native_tools；**默认开**，置 0 才走文本标签协议） */
   nativeTools: boolean
   channels: SiteChannel[]
 }

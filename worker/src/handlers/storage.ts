@@ -32,6 +32,8 @@ import {
   pickBucketForWrite,
   deleteObjectAcrossBuckets,
   deletePrefixAcrossBuckets,
+  // 2026-10-30 网盘「复制 / 剪切」：服务端 CopyObject，文件不经过浏览器
+  copyObject,
 } from "../r2"
 import { audit, formatBytes, getSettingBool, getSettingNumber, getSettings } from "../settings"
 import {
@@ -1062,6 +1064,228 @@ export async function deleteStorageObjects(
   return json({ deleted: keys.length })
 }
 
+/**
+ * 重名文件加序号后缀：`报告.pdf` → `报告 (1).pdf`。
+ *
+ * `n <= 0` 原样返回。`.gitignore` 这种「点开头、没有主名」的名字整体加后缀
+ * （`lastIndexOf(".") <= 0`）—— 否则会变成 `. (1)gitignore` 这种鬼东西。
+ */
+export function withCopySuffix(filename: string, n: number): string {
+  if (n <= 0) return filename
+  const dot = filename.lastIndexOf(".")
+  if (dot <= 0) return `${filename} (${n})`
+  return `${filename.slice(0, dot)} (${n})${filename.slice(dot)}`
+}
+
+/**
+ * POST /api/storage/objects/copy —— 把选中的文件复制 / 移动到某个目录。
+ * body: { keys: string[], destFolder?: string, mode?: "copy" | "move" }
+ *
+ * 设计要点：
+ *   1. **服务端复制**（R2 CopyObject，见 r2.ts::copyObject）—— 文件不经过浏览器，
+ *      也不需要 Worker 带宽；「剪切」= 复制成功后删源。
+ *   2. 目标目录有同名文件时**不覆盖**，自动加 ` (1)` ` (2)` 后缀
+ *      （覆盖是破坏性操作，前端没有确认入口，宁可多一份也别误伤）。
+ *   3. 剪贴板里带的 key 可能是几分钟前选的，期间文件可能已被删 / 被移动 ⇒
+ *      找不到的记进 `missing`，不让整批失败。
+ *   4. 复制会真实占用配额（同一份内容存了两遍），所以先按总量做 per-user 配额与
+ *      桶级容量守卫；移动不改变用量。
+ *   5. 一次最多 200 个，与批量删除一致。
+ */
+export async function copyStorageObjects(
+  env: Env,
+  request: Request
+): Promise<Response> {
+  const user = await requireFeatureUser(env, request, "r2")
+  // 复制同样是 R2 写操作（Class A 计费），跟上传共用同一个限流桶
+  await guardUploadRate(env, user.id)
+  const account = await loadAccount(env, user.id)
+  if (!account) throw new ApiError(404, "尚未开通网盘", "NOT_ENABLED")
+  if (account.enabled !== 1) {
+    throw new ApiError(403, "网盘已关闭，请先启用", "STORAGE_DISABLED")
+  }
+
+  const body = (await request.json().catch(() => ({}))) as {
+    keys?: unknown
+    destFolder?: unknown
+    mode?: unknown
+  }
+  const mode: "copy" | "move" = body.mode === "move" ? "move" : "copy"
+  const rawKeys = Array.isArray(body.keys)
+    ? body.keys.filter((k): k is string => typeof k === "string" && k.length > 0)
+    : []
+  // 去重：剪贴板与勾选可能给出重复 key，重复处理会白烧一次 CopyObject
+  const keys = [...new Set(rawKeys)]
+  if (keys.length === 0) throw new ApiError(400, "请选择要处理的文件", "BAD_REQUEST")
+  if (keys.length > 200) throw new ApiError(400, "一次最多处理 200 个文件", "BAD_REQUEST")
+
+  const destFolder = normalizeFolderPath(body.destFolder ?? "")
+
+  // 目标目录现有的文件名：一次列完，避免在循环里逐个 HEAD
+  const destListing = await listLevel(env, account, destFolder)
+  const taken = new Set(destListing.files.map((f) => f.name))
+
+  interface CopyPlanItem {
+    srcKey: string
+    srcPath: string
+    destKey: string
+    destPath: string
+    bucketId: string
+    size: number
+    contentType: string | null
+  }
+
+  const plan: CopyPlanItem[] = []
+  const missing: string[] = []
+
+  for (const key of keys) {
+    assertKeyOwned(account, key)
+    // 目录（占位对象 `<key>/`）不走这里：目录级的复制/移动需要递归，行为差异太大，
+    // 前端也没有这个入口。真要做时应该单开一个「复制目录」接口。
+    if (key.endsWith(MARKER_SUFFIX)) {
+      throw new ApiError(400, "目录不能复制或移动", "BAD_REQUEST")
+    }
+
+    const srcPath = key.slice(account.prefix.length + 1)
+    const slash = srcPath.lastIndexOf("/")
+    const srcDir = slash >= 0 ? srcPath.slice(0, slash) : ""
+    const baseName = slash >= 0 ? srcPath.slice(slash + 1) : srcPath
+
+    // 跨桶：先定位文件到底在哪个桶，再在**那个桶**里复制（见 r2.ts::copyObject 的说明）
+    const bucketId = await findKeyBucket(env, key, account.bucket_id)
+    const head = bucketId ? await headObject(env, key, bucketId) : null
+    if (!bucketId || !head) {
+      missing.push(srcPath)
+      continue
+    }
+    // 剪切到自己所在的目录：无事可做（不该白加一个 (1) 副本）
+    if (mode === "move" && srcDir === destFolder) continue
+
+    let candidate = baseName
+    let n = 0
+    while (taken.has(candidate) && n < 200) {
+      n += 1
+      candidate = withCopySuffix(baseName, n)
+    }
+    taken.add(candidate)
+
+    const destPath = destFolder ? `${destFolder}/${candidate}` : candidate
+    plan.push({
+      srcKey: key,
+      srcPath,
+      destKey: `${account.prefix}/${destPath}`,
+      destPath,
+      bucketId,
+      size: head.size,
+      contentType: head.contentType,
+    })
+  }
+
+  if (plan.length === 0) {
+    return json({ mode, count: 0, items: [], failed: [], missing })
+  }
+
+  // 复制才额外占空间；移动前后总量不变
+  if (mode === "copy") {
+    const total = plan.reduce((s, p) => s + p.size, 0)
+    if (account.used_bytes + total > account.quota_bytes) {
+      throw new ApiError(
+        400,
+        `存储空间不足（已用 ${account.used_bytes} / ${account.quota_bytes} 字节）`,
+        "QUOTA_EXCEEDED"
+      )
+    }
+    // 桶级共享池：按每个桶实际要新增的字节数分别校验
+    const perBucket = new Map<string, number>()
+    for (const p of plan) perBucket.set(p.bucketId, (perBucket.get(p.bucketId) ?? 0) + p.size)
+    for (const [bucketId, delta] of perBucket) {
+      await assertBucketHasRoom(env, bucketId, delta)
+    }
+  }
+
+  const now = new Date().toISOString()
+  const items: { from: string; to: string }[] = []
+  const failed: { path: string; message: string }[] = []
+  const rows: { key: string; filename: string; size: number; contentType: string | null }[] = []
+  const removedSources: string[] = []
+
+  for (const item of plan) {
+    try {
+      await copyObject(env, item.srcKey, item.destKey, item.bucketId, item.contentType)
+    } catch (err) {
+      console.error("[storage] 复制失败:", item.srcKey, "→", item.destKey, err)
+      failed.push({
+        path: item.srcPath,
+        message: err instanceof ApiError ? err.message : "复制失败",
+      })
+      continue
+    }
+
+    if (mode === "move") {
+      try {
+        await deleteObject(env, item.srcKey, item.bucketId)
+        removedSources.push(item.srcKey)
+      } catch (err) {
+        // 源没删掉 ⇒ 实际变成了「复制」。不能静默：如实告诉用户，账面上多一份。
+        console.error("[storage] 移动后删除源失败:", item.srcKey, err)
+        failed.push({ path: item.srcPath, message: "已复制到目标目录，但源文件未能删除" })
+      }
+    }
+
+    items.push({ from: item.srcPath, to: item.destPath })
+    rows.push({
+      key: item.destKey,
+      filename: item.destPath.slice(item.destPath.lastIndexOf("/") + 1),
+      size: item.size,
+      contentType: item.contentType,
+    })
+  }
+
+  // 写账：登记新 key、删掉已搬走的源行，最后按表重算用量（账实一致的口径与删目录相同）
+  if (rows.length > 0) {
+    const insert = env.DB.prepare(
+      `INSERT INTO storage_objects (id, user_id, r2_key, filename, size, content_type, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(r2_key) DO UPDATE SET size = excluded.size, content_type = excluded.content_type`
+    )
+    const stmts: D1PreparedStatement[] = []
+    for (const r of rows) {
+      stmts.push(
+        insert.bind(uuid(), user.id, r.key, r.filename, r.size, r.contentType ?? null, now)
+      )
+    }
+    for (const srcKey of removedSources) {
+      stmts.push(
+        env.DB.prepare("DELETE FROM storage_objects WHERE r2_key = ? AND user_id = ?").bind(
+          srcKey,
+          user.id
+        )
+      )
+    }
+    stmts.push(
+      env.DB.prepare(
+        `UPDATE storage_accounts
+            SET used_bytes = COALESCE((SELECT SUM(size) FROM storage_objects WHERE user_id = ?), 0),
+                file_count = (SELECT COUNT(*) FROM storage_objects WHERE user_id = ?),
+                updated_at = ?
+          WHERE user_id = ?`
+      ).bind(user.id, user.id, now, user.id)
+    )
+    for (let i = 0; i < stmts.length; i += 40) {
+      await env.DB.batch(stmts.slice(i, i + 40))
+    }
+  }
+
+  await audit(
+    env,
+    user.id,
+    mode === "move" ? "storage.objects.move" : "storage.objects.copy",
+    `${mode === "move" ? "移动" : "复制"} ${items.length} 个文件到 ${destFolder || "根目录"}`
+  )
+
+  return json({ mode, count: items.length, items, failed, missing })
+}
+
 /** GET /api/storage/download?key=xxx —— 鉴权下载（供后台预览） */
 export async function downloadStorageObject(
   env: Env,
@@ -1927,9 +2151,48 @@ async function renderSharePage(
   account: StorageAccountRow
 ): Promise<Response> {
   const urlPrefix = `/s/${token}`
-  const sub = normalizeFolderPath(new URL(request.url).searchParams.get("p") ?? "")
+  const url = new URL(request.url)
+  const sub = normalizeFolderPath(url.searchParams.get("p") ?? "")
   const dirPath = [share.path, sub].filter(Boolean).join("/")
   const level = await listLevel(env, account, dirPath)
+
+  // 排序（2026-10-30 站长要求）：名称 / 大小 / 时间，默认与改前一致（名称升序）。
+  // 目录永远按名称在前 —— 它们的 size / mtime 是占位对象的值，拿来做排序没有意义。
+  const sortParam = url.searchParams.get("sort")
+  const sortKey: "name" | "size" | "time" =
+    sortParam === "size" || sortParam === "time" ? sortParam : "name"
+  const sortDir: "asc" | "desc" = url.searchParams.get("dir") === "desc" ? "desc" : "asc"
+
+  /** 分享页内链接：自动保留当前排序；`relPath` 为空即分享根 */
+  const pageHref = (
+    relPath?: string,
+    over?: { sort?: "name" | "size" | "time"; dir?: "asc" | "desc" }
+  ): string => {
+    const s = over?.sort ?? sortKey
+    const d = over?.dir ?? sortDir
+    const q = new URLSearchParams()
+    if (relPath) q.set("p", relPath)
+    if (s !== "name" || d !== "asc") {
+      q.set("sort", s)
+      q.set("dir", d)
+    }
+    const qs = q.toString()
+    return qs ? `${urlPrefix}?${qs}` : urlPrefix
+  }
+
+  const files = [...level.files]
+  const byName = (a: { name: string }, b: { name: string }) =>
+    a.name.localeCompare(b.name, "zh-Hans-CN")
+  const sign = sortDir === "asc" ? 1 : -1
+  files.sort((a, b) => {
+    if (sortKey === "size") return sign * (a.size - b.size || byName(a, b))
+    if (sortKey === "time") {
+      const at = a.lastModified ?? ""
+      const bt = b.lastModified ?? ""
+      return sign * ((at === bt ? 0 : at < bt ? -1 : 1) || byName(a, b))
+    }
+    return sign * byName(a, b)
+  })
 
   // 站点入口：与 handlers/oauth.ts 的 canonicalOrigin 同一口径（`cloud.<ROOT_DOMAIN>`），
   // 不用请求自身的 Host —— 分享页在 `doulor.cn/s/*` 上也能打开，那时 Host 不是站点首页。
@@ -1938,29 +2201,69 @@ async function renderSharePage(
   const title = shareDisplayName(share)
   const subSegments = sub.split("/").filter(Boolean)
 
-  // 面包屑：分享根 → 各级子目录
-  const crumbs: string[] = [`<span class="cur">${escapeHtml(title)}</span>`]
+  // 面包屑：分享根 → 各级子目录。
+  //
+  // ⚠️ 分享根这一节以前**写死**成 `<span class="cur">`（死文字），于是进了子目录之后
+  // 就再也点不回分享根了 —— 站长 2026-10-30 反馈「A › B 里 A 点不了，回不去 A」。
+  // 现在只有「当前所在这一层」不可点，其余每一层都是链接。
+  const crumbs: string[] = [
+    subSegments.length === 0
+      ? `<span class="cur">${escapeHtml(title)}</span>`
+      : `<a href="${pageHref()}">${escapeHtml(title)}</a>`,
+  ]
   for (let i = 0; i < subSegments.length; i++) {
     const rel = subSegments.slice(0, i + 1).join("/")
     const isLast = i === subSegments.length - 1
     crumbs.push(
       isLast
         ? `<span class="cur">${escapeHtml(subSegments[i])}</span>`
-        : `<a href="${urlPrefix}?p=${encodeURIComponent(rel)}">${escapeHtml(subSegments[i])}</a>`
+        : `<a href="${pageHref(rel)}">${escapeHtml(subSegments[i])}</a>`
     )
   }
+
+  // 工具栏：显式「返回上级」+ 排序切换。
+  // 面包屑虽然能点回去了，但子目录页里最常用的是「上一级」，给个明确的按钮更省事。
+  const parentPath = subSegments.slice(0, -1).join("/")
+  const backLink =
+    subSegments.length === 0
+      ? ""
+      : `<a class="back" href="${pageHref(parentPath || undefined)}">` +
+        `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>` +
+        `返回上级</a>`
+
+  /** 排序链接：点当前列就反向，点别的列用该列的惯用默认方向（名称升序、大小/时间降序） */
+  const sortLink = (col: "name" | "size" | "time", label: string): string => {
+    const active = col === sortKey
+    const nextDir: "asc" | "desc" = active
+      ? sortDir === "asc"
+        ? "desc"
+        : "asc"
+      : col === "name"
+        ? "asc"
+        : "desc"
+    const arrow = active ? (sortDir === "asc" ? " ↑" : " ↓") : ""
+    const cls = active ? ' class="on"' : ""
+    return `<a${cls} href="${pageHref(sub || undefined, { sort: col, dir: nextDir })}">${label}${arrow}</a>`
+  }
+  const sortBar =
+    `<div class="sort"><span>排序</span>` +
+    sortLink("name", "名称") +
+    sortLink("size", "大小") +
+    sortLink("time", "时间") +
+    `</div>`
+  const tools = `<div class="tools">${backLink}${sortBar}</div>`
 
   const rows: string[] = []
   for (const folder of level.folders) {
     const rel = [sub, folder.name].filter(Boolean).join("/")
     rows.push(
-      `<a class="row" href="${urlPrefix}?p=${encodeURIComponent(rel)}">` +
+      `<a class="row" href="${pageHref(rel)}">` +
         `<svg viewBox="0 0 24 24">${SHARE_ICON_FOLDER}</svg>` +
         `<span class="name">${escapeHtml(folder.name)}</span>` +
         `<span class="meta">目录</span></a>`
     )
   }
-  for (const file of level.files) {
+  for (const file of files) {
     const rel = [sub, file.name].filter(Boolean).join("/")
     const href = `${urlPrefix}/f/${encodePathSegments(rel)}`
     rows.push(
@@ -2011,6 +2314,20 @@ h1{margin:0;font-size:1.06rem;font-weight:600;letter-spacing:-.01em}
 .crumbs a:hover{background:var(--hover);color:var(--fg)}
 .crumbs .cur{color:var(--fg);font-weight:500}
 .crumbs .sep{color:var(--muted);opacity:.45;font-size:.8rem}
+.tools{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;
+margin:0 2px 12px;font-size:.8rem}
+.tools .back{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:9px;
+border:1px solid var(--line);color:var(--muted);text-decoration:none;
+transition:background .12s,color .12s}
+.tools .back:hover{background:var(--hover);color:var(--fg)}
+.tools .back>svg{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;
+stroke-linecap:round;stroke-linejoin:round}
+.tools .sort{display:flex;align-items:center;gap:2px;margin-left:auto;color:var(--muted)}
+.tools .sort>span{padding:0 4px;opacity:.7}
+.tools .sort a{padding:4px 8px;border-radius:8px;color:var(--muted);text-decoration:none;
+transition:background .12s,color .12s}
+.tools .sort a:hover{background:var(--hover);color:var(--fg)}
+.tools .sort a.on{background:var(--hover);color:var(--fg);font-weight:500}
 .list{overflow:hidden}
 .row{display:flex;align-items:center;gap:12px;padding:12px 18px;color:inherit;text-decoration:none;
 border-bottom:1px solid var(--line);transition:background .12s}
@@ -2040,6 +2357,7 @@ footer a.gh svg{fill:currentColor;stroke:none}
 <div><h1>${escapeHtml(title)}</h1><p class="sub">共 ${total} 项 · 由 Doulor Cloud 网盘分享</p></div>
 </header>
 <nav class="crumbs">${crumbs.join('<span class="sep">›</span>')}</nav>
+${tools}
 <main class="card list">${list}</main>
 ${moreHint}
 <footer>

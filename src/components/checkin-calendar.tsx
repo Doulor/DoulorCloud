@@ -17,6 +17,18 @@ import { useT } from "@/i18n"
 
 type HistoryDay = { date: string; points: number; isMakeup: boolean }
 
+/**
+ * 补签窗口起点（含）：今天是 11-04、窗口 7 天 → 10-28。
+ *
+ * ⚠️ 窗口大小由**接口下发**（`makeupWindowDays`），前端不写死 7 ——
+ * 否则后端一改口径，日历就又开始点亮补不了的格子、点一次报一次错。
+ */
+function makeupWindowStart(today: string, days: number): string {
+  const d = new Date(`${today}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() - days)
+  return d.toISOString().slice(0, 10)
+}
+
 const WEEKDAYS = ["ck.wd.mon", "ck.wd.tue", "ck.wd.wed", "ck.wd.thu", "ck.wd.fri", "ck.wd.sat", "ck.wd.sun"]
 
 /**
@@ -39,7 +51,12 @@ export function CheckinCalendar({
     const n = new Date()
     return new Date(n.getFullYear(), n.getMonth(), 1)
   })
-  const [data, setData] = React.useState<{ days: HistoryDay[]; today: string; makeupCards: number } | null>(null)
+  const [data, setData] = React.useState<{
+    days: HistoryDay[]
+    today: string
+    makeupCards: number
+    makeupWindowDays: number
+  } | null>(null)
   const [busy, setBusy] = React.useState(false)
   const [pending, setPending] = React.useState<string | null>(null)
 
@@ -69,7 +86,11 @@ export function CheckinCalendar({
     setBusy(true)
     try {
       const res = await checkinApi.makeup(pending)
-      toast.success(t("ck.makeupDone", { streak: res.streak }))
+      toast.success(
+        res.grantedPoints > 0
+          ? t("ck.makeupDoneBonus", { streak: res.streak, points: res.grantedPoints })
+          : t("ck.makeupDone", { streak: res.streak })
+      )
       setPending(null)
       await load()
       onDone?.()
@@ -88,6 +109,8 @@ export function CheckinCalendar({
   for (let d = 1; d <= daysInMonth; d++) cells.push(`${month}-${String(d).padStart(2, "0")}`)
 
   const dayMap = new Map((data?.days ?? []).map((d) => [d.date, d]))
+  // 只有「窗口内」的漏签日才能点：窗口外的老漏签一律灰着不可点（和接口口径一致）
+  const windowStart = data ? makeupWindowStart(data.today, data.makeupWindowDays ?? 7) : ""
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -98,7 +121,10 @@ export function CheckinCalendar({
             {t("ck.calTitle")}
           </DialogTitle>
           <DialogDescription>
-            {t("ck.calDesc", { n: data?.makeupCards ?? 0 })}
+            {t("ck.calDesc", {
+              n: data?.makeupCards ?? 0,
+              d: data?.makeupWindowDays ?? 7,
+            })}
           </DialogDescription>
         </DialogHeader>
 
@@ -129,7 +155,10 @@ export function CheckinCalendar({
             const isPast = data ? date < data.today : false
             const isFuture = data ? date > data.today : false
             const isMakeup = day?.isMakeup
-            const canMakeup = isPast && !day && (data?.makeupCards ?? 0) > 0
+            const canMakeup =
+              isPast && !day && (data?.makeupCards ?? 0) > 0 && date >= windowStart
+            /** 漏签但已超出补签窗口：灰着，点了也没用 */
+            const expiredMiss = isPast && !day && date < windowStart
             const selected = pending === date
 
             return (
@@ -138,12 +167,19 @@ export function CheckinCalendar({
                 type="button"
                 disabled={!canMakeup}
                 onClick={() => setPending(date)}
-                title={day ? `${date}${isMakeup ? ` · ${t("ck.makeupMark")}` : ""}` : date}
+                title={
+                  day
+                    ? `${date}${isMakeup ? ` · ${t("ck.makeupMark")}` : ""}`
+                    : expiredMiss
+                      ? t("ck.makeupExpired", { d: data?.makeupWindowDays ?? 7 })
+                      : date
+                }
                 className={cn(
                   "relative flex h-9 flex-col items-center justify-center rounded-md text-xs transition-colors",
                   day && !isMakeup && "bg-emerald-500 text-white dark:bg-emerald-600",
                   isMakeup && "bg-amber-500 text-white dark:bg-amber-600",
                   !day && isPast && "text-muted-foreground",
+                  expiredMiss && "opacity-40",
                   canMakeup && "cursor-pointer border border-dashed border-muted-foreground/40 hover:bg-accent hover:text-foreground",
                   selected && "ring-2 ring-primary",
                   isFuture && "opacity-30",

@@ -29,7 +29,8 @@ type PoolAcc = {
   userId?: string
   name?: string
   provider?: string
-  available?: boolean
+  /** 面板可能不返回这个字段（autoclaw 3.4.2 起就没了），缺失时按"未知"处理 */
+  available?: boolean | null
   enabled?: boolean
 }
 type StatusResp = { ok?: boolean; accounts?: PoolAcc[]; reason?: string }
@@ -54,6 +55,8 @@ export type HealthResult = {
   invalidated: number
   recovered: number
   byKind?: Record<string, { invalidated: number; recovered: number }>
+  /** 本轮触发熔断的 provider（占比过高，已跳过失效判定） */
+  suspiciousKinds?: Record<string, { dead: number; total: number }>
   skipped?: string
 }
 
@@ -85,6 +88,9 @@ async function fetchPool(env: Env): Promise<{ pool: Map<string, PoolAcc> | null;
 /** 号池里的"可用"口径：既要启用、也要 available */
 function isLive(a: PoolAcc | undefined): boolean {
   if (!a) return false
+  // 字段缺失（不同 provider / 面板版本结构不一致）时不要判死：
+  // 2026-11-07 autoclaw 因为面板不返回 available，被 bool(undefined)=false 全判失效。
+  if (a.available === undefined || a.available === null) return a.enabled !== false
   return a.enabled !== false && a.available !== false
 }
 
@@ -168,6 +174,8 @@ export async function checkDonationHealth(env: Env): Promise<HealthResult> {
 
   const now = Math.floor(Date.now() / 1000)
   const byKind: Record<string, { invalidated: number; recovered: number }> = {}
+  /** 触发熔断的 provider（本轮到「不可用」占比过高，已跳过失效判定） */
+  const suspiciousKinds: Record<string, { dead: number; total: number }> = {}
   let checked = 0
   let invalidated = 0
   let recovered = 0
@@ -183,6 +191,28 @@ export async function checkDonationHealth(env: Env): Promise<HealthResult> {
       continue
     }
 
+    /*
+     * 熔断（2026-11-07）：同一 provider 里「不可用」占比过高时，先怀疑号池/上游
+     * 自身出问题，而不是这一批捐献号同时被封。
+     *
+     * 为什么必须加：11-07 的事故是 agent2api 升级后 autoclaw provider 不再返回
+     * `available` 字段，导致 29/29 账号被判"不可用"，28 条捐献一次性被收走额度。
+     * 这种「全灭」几乎不可能是真封号，而是上游/面板侧的异常。
+     *
+     * 策略：比例 ≥80% 且样本 ≥4 时，本轮**只跳过失效判定**（恢复仍然照做），
+     * 并把情况写进心跳，便于事后确认。宁可晚收一次额度，也不能误伤全部捐献者。
+     */
+    const considered = rows.filter((r) => r.key && pool.has(k.toPoolId(String(r.key))))
+    const deadCount = considered.filter((r) => !isLive(pool.get(k.toPoolId(String(r.key))))).length
+    const suspicious = considered.length >= 4 && deadCount / considered.length >= 0.8
+    if (suspicious) {
+      console.warn(
+        `健康巡检熔断：${k.kind} 有 ${deadCount}/${considered.length} 个账号被判不可用，` +
+          `本轮跳过失效判定（疑似号池/面板异常，而非真实封号）`
+      )
+      suspiciousKinds[k.kind] = { dead: deadCount, total: considered.length }
+    }
+
     const stmts: D1PreparedStatement[] = []
     for (const row of rows) {
       if (!row.key) continue
@@ -191,6 +221,14 @@ export async function checkDonationHealth(env: Env): Promise<HealthResult> {
       checked++
       const live = isLive(pool.get(poolId))
       const label = String(row.label ?? row.key)
+
+      if (!live && row.status === "active" && suspicious) {
+        // 熔断中：只刷新检查时间，不动状态
+        stmts.push(
+          env.DB.prepare(`UPDATE ${k.table} SET last_checked_at = ? WHERE id = ?`).bind(now, row.id)
+        )
+        continue
+      }
 
       if (!live && row.status === "active") {
         stmts.push(
@@ -242,6 +280,7 @@ export async function checkDonationHealth(env: Env): Promise<HealthResult> {
   }
 
   const result: HealthResult = { checked, invalidated, recovered, byKind }
+  if (Object.keys(suspiciousKinds).length > 0) result.suspiciousKinds = suspiciousKinds
   await heartbeat(env, result)
   return result
 }

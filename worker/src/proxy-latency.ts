@@ -23,6 +23,89 @@ import { connect } from "cloudflare:sockets"
 import { assertPublicTcpHost } from "./url-guard"
 import { mapLimit } from "./async-utils"
 
+export interface ProxyNodeProbeTarget {
+  protocol: string
+  server: string
+  port: number
+  servername?: string
+  network?: string
+  path?: string
+  host?: string
+}
+
+export interface WsProbeSocket extends SocketLike {
+  readable: ReadableStream<Uint8Array>
+  writable: WritableStream<Uint8Array>
+  startTls?: (options?: { expectedServerHostname?: string }) => WsProbeSocket
+}
+
+export interface WsProbeConnector {
+  (address: { hostname: string; port: number }, options?: { secureTransport: "on" | "off" | "starttls"; allowHalfOpen?: boolean }): WsProbeSocket
+}
+
+/** 明文 TCP 之外，再验证 TLS + WebSocket 是否是真正的代理入口。 */
+export async function measureWebsocketHandshake(
+  target: ProxyNodeProbeTarget,
+  opts: { timeoutMs?: number; connector?: WsProbeConnector } = {}
+): Promise<{ ok: boolean; latencyMs: number | null; reason: string }> {
+  const timeoutMs = opts.timeoutMs ?? LATENCY_TIMEOUT_MS
+  const hostname = normalizeHost(target.server)
+  if (!hostname || !Number.isFinite(target.port) || target.port <= 0) {
+    return { ok: false, latencyMs: null, reason: "节点缺少地址或端口" }
+  }
+  let publicHost: string
+  try {
+    publicHost = assertPublicTcpHost(hostname)
+  } catch {
+    return { ok: false, latencyMs: null, reason: "节点地址为本机或内网地址" }
+  }
+  const hostHeader = target.host || target.servername || hostname
+  const path = target.path?.startsWith("/") ? target.path : `/${target.path ?? ""}`
+  const started = Date.now()
+  let socket: (ReturnType<WsProbeConnector>) | null = null
+  let timer: ReturnType<typeof setTimeout> | null = null
+  try {
+    // 先 TCP，再用 startTls 指定证书 SNI。
+    // expectedServerHostname 用节点的 servername，不能用 WS Host：
+    // 优选域名（Host）和真实证书域名（SNI）经常不是同一个。
+    socket = (opts.connector ?? ((address) => connect(address, { secureTransport: "off", allowHalfOpen: false })))(
+      { hostname: publicHost, port: target.port },
+      { secureTransport: "off", allowHalfOpen: false }
+    )
+    if (socket.startTls) {
+      socket = socket.startTls({ expectedServerHostname: target.servername || publicHost })
+    }
+    await Promise.race([
+      socket.opened,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("__latency_timeout__")), timeoutMs) }),
+    ])
+    const writer = socket.writable.getWriter()
+    const reader = socket.readable.getReader()
+    const key = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))))
+    const request = `GET ${path} HTTP/1.1\r\nHost: ${hostHeader}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\nUser-Agent: Mozilla/5.0\r\n\r\n`
+    await writer.write(new TextEncoder().encode(request))
+    const response = await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("__latency_timeout__")), timeoutMs) }),
+    ])
+    const text = response.value ? new TextDecoder().decode(response.value) : ""
+    await writer.close().catch(() => undefined)
+    await reader.cancel().catch(() => undefined)
+    const ok = /^HTTP\/1\.[01]\s+101\b/.test(text)
+    return {
+      ok,
+      latencyMs: ok ? Date.now() - started : null,
+      reason: ok ? "" : text.slice(0, 100) || "节点未接受 WebSocket 握手",
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return { ok: false, latencyMs: null, reason: msg === "__latency_timeout__" ? `超时（${Math.round(timeoutMs / 1000)} 秒内没连上）` : "TLS/WebSocket 握手未通过" }
+  } finally {
+    if (timer) clearTimeout(timer)
+    try { await socket?.close() } catch { /* 关闭失败由运行时回收 */ }
+  }
+}
+
 /**
  * 能通过 TCP 握手测速的协议。
  * 这些都是「TCP 承载」的：vless / vmess / trojan / ss / ssr / anytls。

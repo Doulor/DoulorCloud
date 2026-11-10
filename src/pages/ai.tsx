@@ -23,6 +23,7 @@ import { toast } from "sonner"
 import { PageHeader } from "@/components/page-header"
 import { FeatureLockedNotice } from "@/components/feature-locked-notice"
 import { EmptyState } from "@/components/empty-state"
+import { AiDirectEndpoint } from "@/components/ai-direct-endpoint"
 import { FeatureCardsSkeleton, SkeletonList, SkeletonTable } from "@/components/skeletons"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -468,7 +469,8 @@ function RewardSubscriptionsCard({
                 {t("ai.dialog.invite.desc")}
               </p>
               <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
-                <li>{t("ai.dialog.invite.wb")}</li>
+                {/* WorkBuddy / Qoder 反代账号通道 2026-11 已停用（AI 捐献统一走 agent2api 网关），
+                    不再把「绑定反代账号」列为赚额度的方式 —— 用户已经做不到这件事了。 */}
                 <li>{t("ai.dialog.invite.channel")}</li>
               </ul>
               <p className="text-xs text-muted-foreground">{t("ai.dialog.invite.once")}</p>
@@ -1269,6 +1271,9 @@ function OfficialRelayPage() {
                 </Button>
               </div>
             </div>
+
+            {/* 付费直连地址：默认马赛克遮挡，称号「赞助伙伴」直通 / 输认证码解锁 */}
+            <AiDirectEndpoint />
 
             <Separator />
 

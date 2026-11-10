@@ -17,6 +17,7 @@ import { getSettingBool } from "../settings"
 import type { Env } from "../env"
 import { pushToChatGroups } from "./telegram"
 import { pushToQqGroups } from "./qq"
+import { chatUnreadCount } from "../chat-unread"
 
 /**
  * 聊天室门禁：登录 + 总开关打开（管理员放行）。
@@ -158,10 +159,19 @@ export async function listMessages(env: Env, request: Request): Promise<Response
                   m.edited_at, m.forward_from,
                   u.username, u.nickname, u.avatar_key
              FROM chat_messages m JOIN users u ON u.id = m.user_id
-            WHERE m.created_at > ? OR (m.created_at = ? AND m.id > ?)
-               OR m.edited_at > ?
-               OR m.id IN (SELECT message_id FROM message_reactions
-                            WHERE kind = 'chat' AND created_at > ?)
+            WHERE m.id IN (
+                    -- ⚠️ 2026-10-28：写成 UNION 而不是一串 OR。
+                    -- SQLite 的 OR-优化要求每个分支都走索引，而 edited_at /
+                    -- message_reactions(kind, created_at) 当时没有索引 ⇒ 整条语句
+                    -- 退化成全表扫（单次 1.15 万行、单日 2 亿行，全库行读 63%）。
+                    -- 现在四个分支各走各的范围扫描，再按 id 回表取正文。
+                    -- 语义与原来的 OR 完全等价（集合相同、排序与 LIMIT 相同）。
+                    SELECT id FROM chat_messages WHERE created_at > ?
+                    UNION SELECT id FROM chat_messages WHERE created_at = ? AND id > ?
+                    UNION SELECT id FROM chat_messages WHERE edited_at > ?
+                    UNION SELECT message_id FROM message_reactions
+                           WHERE kind = 'chat' AND created_at > ?
+                  )
             ORDER BY m.created_at ASC, m.id ASC LIMIT ?`
         )
           .bind(cursor.createdAt, cursor.createdAt, cursor.id, sinceEdit, sinceEdit, limit)
@@ -864,21 +874,8 @@ export async function presence(env: Env, request: Request): Promise<Response> {
  */
 export async function unreadCount(env: Env, request: Request): Promise<Response> {
   const me = await requireChatUser(env, request)
-
-  const row = await env.DB.prepare("SELECT chat_seen_at FROM users WHERE id = ?")
-    .bind(me.id)
-    .first<{ chat_seen_at: string | null }>()
-
-  const since =
-    row?.chat_seen_at ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-
-  const r = await env.DB.prepare(
-    "SELECT COUNT(*) c FROM chat_messages WHERE created_at > ? AND user_id <> ?"
-  )
-    .bind(since, me.id)
-    .first<{ c: number }>()
-
-  return json({ count: r?.c ?? 0 })
+  // 具体口径与 10 秒进程内缓存都在 chat-unread.ts（/api/attention 共用同一份）
+  return json({ count: await chatUnreadCount(env, me.id) })
 }
 
 /**

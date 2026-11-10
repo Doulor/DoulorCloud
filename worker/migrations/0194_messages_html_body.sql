@@ -1,0 +1,18 @@
+-- 0194_messages_html_body.sql
+-- 收件箱保留邮件原始 HTML（2026-11-08 站长要求：优化阅读体验）
+--
+-- 背景：此前 `messages` 只存 `text_body`，入站时由 `htmlToText` 把 HTML 拍平成
+-- 纯文本，营销邮件 / 验证邮件的排版、按钮、表格全部丢失。现在额外存一份 HTML。
+--
+-- ⚠️ 存进去的是**消毒后**的 HTML（见 worker/src/mail-html.ts），不是原文：
+--    收信路径面向任意发信人，正文完全可控。白名单重建之后再落库，
+--    读出来的数据本身就是干净的，前端即便渲染出错也不会变成注入点。
+--
+-- 这一列可空：迁移前的历史邮件没有 HTML，前端据此回落到纯文本视图。
+-- 也不回填 —— 原文早已丢弃，没有可回填的来源。
+--
+-- ⚠️ 只写在这里、**不能**同时加进 schema.sql：测试与全新部署都是
+--    「先跑 schema.sql 基线、再按序号跑 migrations」，两边都写会撞
+--    `duplicate column name: html_body`（schema.sql 是冻结基线，见
+--    test/apply-migrations.ts 的说明）。
+ALTER TABLE messages ADD COLUMN html_body TEXT;

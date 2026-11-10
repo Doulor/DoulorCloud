@@ -58,6 +58,24 @@ export const SETTING_DEFAULTS = {
    * 空串 = 只显示 donation；缺省 = default（管理员可改成 default,付费 等）。
    */
   newapi_visible_groups: "default",
+  /*
+   * 注：原先这里还有 tip_qr_key / tip_qr_type 两个键，2026-11-07 删除。
+   * 它们是「赞赏码」早期的残留：图片早已改为存在 site_assets（key='tip-qr'），
+   * 这两个设置只剩下 handle 里的一句 updateSettings 写入，**全仓无人读取** ——
+   * 正是 check:settings 要抓的「假开关」。删掉后行为不变（读图本来就只看 site_assets）。
+   */
+  /**
+   * 「付费直连地址」：AI 页「接入信息」里展示，默认被马赛克遮挡。
+   * 只有 ① 持有称号「赞助伙伴」 或 ② 输入正确全局认证码 的人能看到。
+   * 未解锁时后端不返回该地址（不是前端假遮挡）。
+   *
+   * ?? 真实值只存 D1（app_settings 表），**不要写进代码**：
+   *    仓库是公开的，写在这里等于把认证码贴到 GitHub 上。
+   *    这里的空串只是「未配置」的兜底，配置后接口才开放。
+   */
+  ai_direct_base_url: "",
+  /** 「付费直连地址」的全局认证码；空 = 入口关闭（仅称号持有者可见）。真实值存 D1。 */
+  ai_direct_code: "",
   /** NewAPI quota 与美元换算：quota_per_unit */
   newapi_quota_per_unit: "500000",
   /**
@@ -373,11 +391,24 @@ export const SETTING_DEFAULTS = {
    * 默认 20：够正常用，又把「刷一堆一次性地址去注册第三方账号」压住。
    */
   temp_mailbox_refresh_daily_limit: "20",
-  /** frp 内网穿透总开关 */
+  /**
+   * 内网穿透**租用销售**总开关（迁移 0153 之后）。
+   *
+   * ⚠️ 键名带 frp 是历史原因：2026-09-22 它控制的是「能不能提交穿透申请」；
+   * 2026-10-13 申请流程退役、改成积分租用后，它的语义变成「租用能不能下单」
+   * （见 handlers/frp-rental.ts 的 suspended 判断）。关掉后已租用的不受影响。
+   */
   frp_enabled: "1",
   /** frp 核心包下载地址（可由后台替换） */
   frp_core_url: "https://r2data.doulor.cn/Firef%20Frp.zip",
-  /** 管理员接收「新申请」通知的邮箱；为空则不发通知 */
+  /**
+   * 管理员接收「待审」通知的邮箱；为空则不发通知。
+   *
+   * ⚠️ 键名同样是历史遗留：它最初只服务于「内网穿透申请」（2026-09-22 `14cdd39`），
+   * 但 2026-10-13 申请流程整体退役后，这个键被**改成接收所有捐献类型的待审通知**
+   * （见 handlers/donations.ts 里 needsHuman 那一段）。管理面板上的名字已同步改为
+   * 「捐献审核通知邮箱」—— 但键名为了不破坏存量配置没有迁移。
+   */
   frp_admin_notify_email: "",
   /**
    * 管理员接收「新反馈」通知的邮箱；为空则不发通知。
@@ -602,46 +633,107 @@ export const SETTING_DEFAULTS = {
   qoder2api_donation_visible: "1",
 
   /* ---- 出站邮件发送通道（多通道 + 路由）------------------------------
-   * 三种发送方式：CF Email Routing（自带 send_email 绑定）、自建 Posta 网关、
-   * 第三方 Brevo。发信时按下面规则路由（见 mailer.ts 的 sendMail）。
+   * 三种发送方式（2026-11-08 重构后）：
+   *   · `brevo`      —— 第三方 Brevo（Sendinblue）HTTP API，多把 Key 叠加额度；
+   *   · `cf-send`    —— Cloudflare **Email Sending** REST API，可发任意邮箱
+   *                     （需 Onboard 发送域名 + Workers Paid）；
+   *   · `cf-routing` —— Cloudflare **Email Routing** 的 send_email 绑定，免费，
+   *                     但只能发账户内「已验证的 destination address」。
+   * 自建的 Posta 网关已于 2026-11-08 整体下线（站长决定）。
+   * 发信时按下面规则路由（见 mailer.ts 的 sendMail）。
    */
   /**
-   * 普通邮件的发送顺序（逗号分隔），前面的优先，失败向后回退。
-   * 收件人命中 mail_cf_targets 白名单时不走这个顺序，直接走 CF。
+   * 普通邮件的发送顺序（逗号分隔），前面的优先，**失败自动回退下一个**。
+   * 合法取值只有 `brevo` / `cf-send` / `cf-routing`（见 mailer.ts 的 MailTransport）。
+   * 收件人命中 mail_cf_targets 白名单时不走这个顺序，直接走 cf-routing
+   * （已验证地址永远免费、不占额度，见下面的 cf_send_monthly_cap）。
    *
-   * ⚠️ **`posta` 绝不能排在第一位**（2026-09-30 踩过的坑）：
-   *   Posta 是**异步队列** —— HTTP 200 只表示「已排队」，真正的投递失败发生在那之后，
-   *   本站完全看不到。于是 sendMail 会把它当成「已发送」直接 return，
-   *   **后面的 Brevo 永远不会被用到**（当时第二、三把 Brevo Key 明明还有 400+ 额度）。
-   *   那阵子 posta 的上游是一台腾讯免费邮箱（foxmail），它对**非 QQ 域名**的收件人
-   *   一律 550 拒信 —— 结果是「发 QQ 邮箱能收到、其他所有人静默收不到」。
-   *   把 posta 放在 Brevo **之后**就不会遮挡主通道：Brevo 能发就发，发不了才轮到它。
+   * 为什么默认是 `brevo,cf-send`（2026-11-08 站长定调）：
+   *   · Brevo 免费额度**超了只是发不出去，不产生任何费用**；
+   *   · Cloudflare Email Sending 超了 3,000 封/月要按 $0.35/千封**真扣钱**。
+   *   既然本站不能接受意外账单，就先把"免费但会失败"的通道放在前面，CF 只做备用，
+   *   并且由 `cf_send_monthly_cap` 卡死用量（见该键的说明）。
    *
-   * 末尾的 cf 是兜底（未配置 posta/brevo 时仍能发已验证邮箱，向后兼容）。
+   * 为什么默认顺序里**没有 cf-routing**：
+   *   它只是 `send_email` 绑定的另一个入口，**不能发任意收件人**（除非发送域名已 onboard，
+   *   而一旦 onboard 它发出去的信照样计入那 3,000 份额度、照样会扣钱）。
+   *   它唯一真正独立的用处是"发已验证地址免费且不限量" —— 那类收件人已经由
+   *   `mail_cf_targets` 白名单直接接管了，放进回退链只会让每封普通邮件先白失败一次。
+   *   仍然允许管理员手工把它写进顺序里（排错/特殊场景），但不作为默认。
+   *
+   * ⚠️ 兼容：库里可能还存着重构前的 `brevo,posta,cf`。posta 已删除、`cf` 是
+   *   `cf-routing` 的旧名 —— 解析统一走 mailer.ts 的 `normalizeTransportOrder`，
+   *   那里会把含 posta 的旧值整体升级成新的默认链。
    */
-  mail_transport_order: "brevo,posta,cf",
+  mail_transport_order: "brevo,cf-send",
   /**
    * 走 CF Email Routing 发信的收件邮箱白名单（逗号分隔，管理员在面板手动配置）。
    * CF 只能发「已验证 destination」，送达率高且免费 —— 适合「目标固定、量大」的通知
-   * （如发给管理员的捐献/反馈/FRP 申请通知）。命中白名单的邮箱直接走 CF，
+   * （如发给管理员的捐献/反馈/FRP 申请通知）。命中白名单的邮箱直接走 cf-routing，
    * 其余邮箱走上面的 mail_transport_order 顺序。
    */
   mail_cf_targets: "",
   /**
-   * Posta 网关的**基础地址**（不要带路径），如 https://xxx.doulor.cn。
-   * 发信接口固定为 `${posta_url}/api/v1/emails/send`（见 mailer.ts 的 sendViaPosta）。
+   * `cf-send` 通道用的 Cloudflare API Token（**只写不读**，GET 不返回明文）。
+   *
+   * 需要的最小权限：Account → Email Sending → Edit。
+   * 留空则回落到 Worker Secret `CLOUDFLARE_API_TOKEN_SECRET` / 变量 `CLOUDFLARE_API_TOKEN`
+   * （见 mailer.ts 的 resolveCfSendToken）。单独一项的意义是把发信权限从全站那把
+   * 大 Token 里拆出来 —— 发信通道不该因为 DNS/Workers 权限被收紧而一起失效。
    */
-  posta_url: "",
-  /** Posta 的 API key（psk_ 开头，需含 send 权限；只写不读，GET 不返回明文） */
-  posta_key: "",
+  cf_send_token: "",
   /**
-   * Posta 通道的发件人（RFC 5322 显示名格式，如 `Name <addr>`）。
-   * 默认用 QQ 邮箱授权账号 —— QQ SMTP 强制要求信封 MAIL FROM 与登录账号一致
-   * （否则 501 "Mail from address must be same as authorization user"，实测 2026-09-28），
-   * 所以不能填 no-reply@doulor.cn 这类别名。若 Posta 后台换用支持自有域名的
-   * SMTP 服务商，这里同步改成 doulor.cn 的地址即可。
+   * `cf-send` / `cf-routing` 的**月度用量上限（封）**，到量即停用 CF 通道，**不做任何超额扣费**。
+   *
+   * 为什么必须有这道闸（2026-11-08 站长要求）：Cloudflare Email Sending 在 Workers Paid
+   * 下含 3,000 封/月，超出部分按 **$0.35 / 千封** 实打实计费；而本站是"能免费就不花钱"的
+   * 站点，一封计划外账单都不能有。Brevo 那边超了只是发不出去（不扣费），CF 这边会。
+   * 所以 brevo 排第一、CF 排第二，并且 CF 这一段自己数着用：数到上限就如实失败、
+   * 回退到下一个通道，**绝不把信发出去再让账单来兜**。
+   *
+   * 默认 2900（而不是 3000）：计数窗口按 `cf_cycle_day`（与额度面板同一个计费周期
+   * 起始日）划分，但 Cloudflare 的真实账期是"订阅周年"，且面板之外的调用不进这个计数 ——
+   * 留 100 封余量吸收这两处误差。0 = 不设限（**会用出账单**，非必要别设 0）。
+   *
+   * 统计口径：只统计"可能计费"的发送 —— 发往 `mail_cf_targets` 白名单（已验证 destination）
+   * 的信永远免费、不进计数；同一封信无论走 cf-send 还是 cf-routing 都只记一次。
+   * **站内邮箱对外发信与系统通知共用这一份额度**（都走 mailer.ts 的 sendMail）。
    */
-  posta_from: "Doulor Cloud <DoulorCloud@foxmail.com>",
+  cf_send_monthly_cap: "2900",
+  /**
+   * 允许**对外发信**的发件域名（逗号分隔，不带 @）。留空 = 本站所有**已启用**的根域。
+   *
+   * 为什么要有这个开关：每个发信域都必须在 Cloudflare Email Sending 里**单独 Onboard**
+   * （各自要加 SPF/DKIM 记录）。默认全放行是因为本站三个根域（doulor.cn / tyu.me / 7u.nz）
+   * 都已开通；哪天某个域被撤掉、或只是暂时不想让它外发，在这里收口即可，不用改代码。
+   *
+   * ⚠️ 只管"发件人可以用哪个域"，不影响收信；站内互发也不受它约束。
+   */
+  mailbox_external_domains: "",
+  /**
+   * 站内邮箱**对外发信**的每人每日上限（0 = 关闭对外发信）。
+   *
+   * 为什么必须限：对外发信走的是本站自己的 Brevo / Cloudflare 额度，一旦被当成
+   * 群发出口，轻则额度被刷空，重则发信域名被 Brevo / CF 判定滥用而整体停用 ——
+   * 那是全站验证码都发不出去的级别。默认 20 封/天对正常个人通信足够。
+   *
+   * 站内互发（不出门、直接落对方收件箱）不受本项限制，见 SEND_LIMIT_PER_HOUR。
+   */
+  mailbox_external_daily_limit: "20",
+  /**
+   * CF 发件的发件人地址（`cf-send` 与 `cf-routing` **共用**这一项）。
+   *
+   * ⚠️ 域名必须是**在 Cloudflare Email Sending 里 Onboard 过的那个**。
+   *   本站当前是根域 `doulor.cn`（DNS 可见 `include:_spf.mx.cloudflare.net` 与
+   *   `cf2024-1._domainkey` 两条 Cloudflare 记录）。
+   *   若填成未开通的子域（例如曾试过的 `mail.doulor.cn` —— 那是 Brevo 的品牌域），
+   *   CF 会回 `E_SENDER_DOMAIN_NOT_AVAILABLE`，错误信息只说"域名不可用"。
+   *   换域名时要先 Onboard，再改这里，并同步 worker/wrangler.toml 里
+   *   send_email 绑定的 `allowed_sender_addresses`。
+   */
+  cf_send_from: "no-reply@doulor.cn",
+  /** `cf-send` 的发件人显示名 */
+  cf_send_from_name: "Doulor Cloud",
   /**
    * Brevo（Sendinblue）API key —— **支持多把，逗号/换行分隔，额度叠加**（只写不读）。
    *
@@ -655,16 +747,18 @@ export const SETTING_DEFAULTS = {
   /** Brevo 发件人显示名 */
   brevo_sender_name: "Doulor Cloud",
   /**
-   * 公告群发的首选通道（posta / brevo），默认 posta。
+   * 公告群发的首选通道（brevo / cf-send / cf-routing），默认 brevo。
    *
    * 为什么单独一项而不是复用 mail_transport_order：群发 200+ 封会吃满第三方
    * 免费额度（Brevo 免费版 300 封/天），而日常单封通知的量级完全不同。
    * 管理员需要「日常走 A、群发走 B」的能力，所以把群发的主通道独立出来。
    *
-   * 只影响优先级：命中 mail_cf_targets 白名单的仍走 CF；首选通道失败时
+   * 只影响优先级：命中 mail_cf_targets 白名单的仍走 cf-routing；首选通道失败时
    * 依然按 mail_transport_order 回退（见 mailer.ts 的 sendMail opts.prefer）。
+   * 库里若还是重构前的 `posta`，读取侧会按 brevo 处理（见
+   * handlers/announcements.ts 的 preferredAnnouncementTransport）。
    */
-  announcement_mail_transport: "posta",
+  announcement_mail_transport: "brevo",
 
   /* ---- 积分系统 ---------------------------------------------------------
    * 积分是落库的余额（见 points.ts），与「成就点」无关。用途有两个：
@@ -840,6 +934,18 @@ export const SETTING_DEFAULTS = {
    */
   cf_plan: "auto",
   /**
+   * 「CF 额度」面板的**计费周期起始日**：每月几号翻篇（1–28，默认 1 = 自然月）。
+   *
+   * 为什么要这一项：Cloudflare 的「每月包含额度」是按**订阅日**滚动的，不是自然月。
+   * 账号如果每月 18 号扣费，额度也在 18 号翻篇 —— 面板若一律按 1 号起算，
+   * 月初那几天会把上一周期的量算进「本月至今」，占用率虚高，也算不出
+   * 「这个周期还剩多少」。
+   *
+   * ⚠️ 只能 1–28：29/30/31 在小月不存在，口径会一个月一变（2 月没有 30 号）。
+   *    读取时统一过 clampCycleDay() 夹到 1–28。
+   */
+  cf_cycle_day: "1",
+  /**
    * 落地页「下载」区的渠道链接（管理员在设置里配；留空则该渠道不显示按钮）。
    * 网页端 PWA 走 beforeinstallprompt 安装，不用这两个链接。
    */
@@ -882,11 +988,15 @@ export const SETTING_DEFAULTS = {
   lab_shot_plan: "",
   /**
    * 原生工具调用（native function calling）总开关。
-   * "0"（默认）= 走原来的文本标签协议；"1" = 给上游带 tools 参数、按结构化 tool_calls 解析。
-   * ⚠️ 2026-10-10 实测上游全量支持（8/8 模型，流式也支持），但**自定义渠道不保证**
-   *    ⇒ 留这个开关做回滚口子。
+   * "1"（默认）= 给上游带 tools 参数、按结构化 tool_calls 解析；
+   * "0" = 退回原来的文本标签协议。
+   *
+   * 2026-10-10 实测上游全量支持（8/8 模型，流式也支持）。**2026-11 起改为默认开启**：
+   * 标签协议只能表达 13 种工具，而 screenshot（截图自检）/ inspect（页面体检）/ patch
+   * 只存在于原生通道 —— 默认关着时，这三个能力模型既不知道也发不出来。
+   * 开关仍保留：自定义渠道不保证支持 tools，需要回滚时把它置 0 即可。
    */
-  lab_native_tools: "0",
+  lab_native_tools: "1",
   lab_tavily_keys: "",
   /**
    * 走**站点 key** 搜索一次扣多少积分。用户用自己的 key 不扣。

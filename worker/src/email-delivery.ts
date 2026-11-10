@@ -11,13 +11,32 @@
  * 正确处理 RFC 2047 编码主题、quoted-printable/base64、HTML-only 邮件。
  */
 import PostalMime from "postal-mime"
-import { sendMail, renderMail } from "./mailer"
+import { sendMail, renderMail, siteUrl } from "./mailer"
+import { sanitizeMailHtml } from "./mail-html"
 import { isOwnDomain } from "./root-domains"
 import type { Env } from "./env"
 
 const MAX_RAW_BYTES = 2 * 1024 * 1024
 /** 单封信正文入库上限（字符），避免超出 D1 单值限制导致插入失败并触发重投 */
 const MAX_BODY_CHARS = 256 * 1024
+/**
+ * HTML 正文的入库上限（字符）。
+ *
+ * ⚠️ 不能和 `MAX_BODY_CHARS` 一样大。D1 的「单值 / 单行」上限是 **2,000,000 字节**
+ * （developers.cloudflare.com/d1/platform/limits/），而一行里 text_body 与 html_body
+ * 两份正文都要放。最坏情况按 4 字节/字符（emoji）算：
+ *   text 256K×4 = 1.0MB ＋ html 128K×4 = 0.5MB ≈ 1.5MB，留 0.5MB 余量给其余列。
+ * 两边都按 256K 就会顶到 2MB —— 插入失败 ⇒ Email Routing 重投 ⇒ 重复投递，
+ * 所以这里刻意取一半。要调大请先重算这笔账。
+ */
+const MAX_HTML_BODY_CHARS = 128 * 1024
+/**
+ * 送去消毒的 HTML 原文上限。
+ *
+ * 比 `MAX_HTML_BODY_CHARS` 略小：消毒过程会做实体转义（`<` → `&lt;` 不增反减，
+ * 但 `&` → `&amp;` 会让文本节点变长），留一点膨胀空间，避免输出被硬切片切在标签中间。
+ */
+const MAX_HTML_SOURCE_CHARS = 96 * 1024
 /** HTML 转纯文本的输入上限：线性扫描已经很快，这里只是兜底防止无谓开销 */
 const MAX_HTML_CHARS = 512 * 1024
 
@@ -279,6 +298,7 @@ export async function incomingEmail(
   let subject = ""
   let fromAddress = envelopeFrom
   let text = ""
+  let html = ""
   let rfcMessageId: string | null = null
   try {
     const rawBuffer = await readRaw(message.raw, MAX_RAW_BYTES)
@@ -300,8 +320,18 @@ export async function incomingEmail(
         : parsed.from.address
     }
     text = (parsed.text ?? "").trim()
-    if (!text && parsed.html) {
-      text = htmlToText(parsed.html)
+    // 保留一份 HTML 版本供收件箱富文本渲染。
+    // ⚠️ 必须在这里就消毒（见 mail-html.ts）：落库的永远是白名单重建结果，
+    //    读的时候不需要（也不应该）再信任一次。消毒器对畸形输入不抛错，
+    //    不会把「解析失败」变成投递失败（那会导致 Email Routing 重投）。
+    if (parsed.html) {
+      html = sanitizeMailHtml(
+        parsed.html.length > MAX_HTML_SOURCE_CHARS
+          ? parsed.html.slice(0, MAX_HTML_SOURCE_CHARS)
+          : parsed.html
+      )
+      // 只有 HTML 版本的邮件（营销信大多是这种）：纯文本视图用 HTML 转出来兜底
+      if (!text) text = htmlToText(parsed.html)
     }
     // 保存 Message-ID：用于同一封邮件的去重（同 rfc_message_id 不重复落库）。
     // 取不到就留 null。
@@ -340,8 +370,8 @@ export async function incomingEmail(
 
   // 1. 存入收件箱
   await env.DB.prepare(
-    `INSERT INTO messages (id, mailbox_id, from_address, subject, text_body, read, received_at, rfc_message_id)
-     VALUES (?, ?, ?, ?, ?, 0, ?, ?)`
+    `INSERT INTO messages (id, mailbox_id, from_address, subject, text_body, html_body, read, received_at, rfc_message_id)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
   )
     .bind(
       messageId,
@@ -351,6 +381,8 @@ export async function incomingEmail(
       // 必须截断：原文最大 2MB，直接入库会超出 D1 单值上限导致插入失败，
       // 而插入失败会让 Email Routing 重投，形成重复投递
       text.slice(0, MAX_BODY_CHARS),
+      // 消毒后的 HTML 也截断（上面已按 MAX_HTML_BODY_CHARS 取源，这里只是兜底）
+      html ? html.slice(0, MAX_HTML_BODY_CHARS) : null,
       now,
       rfcMessageId ? rfcMessageId.slice(0, 500) : null
     )
@@ -379,18 +411,21 @@ export async function incomingEmail(
     const failures: string[] = []
     for (const target of forwardTargets) {
       try {
-        // 用多通道发信转发（Posta/Brevo/CF），能发任意邮箱，
+        // 用多通道发信转发（Brevo / CF Send / CF Routing），能发任意邮箱，
         // 不再受 Cloudflare「只能转发到已验证 destination」的限制。
         // subject 加 Fwd 前缀、正文附原始发件人，让对方能看出原邮件出处。
-        const { text: fwdText, html: fwdHtml } = renderMail(
+        const fwd = renderMail(
           `Fwd: ${subject || "(无主题)"}`,
-          [`转发自 ${fromAddress}`, "", text || "(无正文)"],
+          [`转发自 ${fromAddress}（收件邮箱 ${recipient}）`, "", text || "(无正文)"],
+          {
+            preheader: `来自 ${fromAddress} 的转发邮件`,
+            action: { label: "管理转发规则", url: siteUrl("/dashboard/email") },
+          },
         )
         await sendMail(env, {
           to: target,
           subject: `Fwd: ${subject || "(无主题)"}`,
-          text: fwdText,
-          html: fwdHtml,
+          ...fwd,
         })
         anyForwarded = true
       } catch (err) {

@@ -25,7 +25,8 @@ import {
 import { audit, getSetting, getSettingBool, getSettingNumber } from "../settings"
 import { clientIp, guardRateLimit } from "../ratelimit"
 import { grantDonationReward } from "../points"
-import { sendMail, renderMail } from "../mailer"
+import { claimDonationQuota } from "../quotas"
+import { sendMail, renderMail, siteUrl } from "../mailer"
 import {
   getWb2ApiCredentialInfo,
   isWb2ApiConfigured,
@@ -327,7 +328,7 @@ export async function loginPoll(env: Env, request: Request): Promise<Response> {
   await guardRateLimit(
     env,
     `wb2api:poll:user:${user.id}`,
-    60,
+    300,
     5 * 60,
     "轮询过于频繁"
   )
@@ -655,6 +656,23 @@ export async function createWb2Binding(
       detail: "WorkBuddy 反代账号捐献奖励",
     })
 
+    /**
+     * 邀请码额度（2026-11-07 站长要求）：反代账号捐献与经典 AI 渠道捐献**同等待遇**，
+     * 首次贡献发 +2 邀请码额度（以及设置允许的模块额度）。
+     *
+     * 占位键用 `ai`（不是 `wb2api`）：两者奖励的都是「AI」这一类资源，
+     * 同一用户一生只拿一次 —— 否则「捐一个经典渠道 +10 个反代账号」能拿 11 份额度，
+     * 等于把「同一类型只发一次」的防刷闸门绕开。
+     *
+     * 失败只记日志：绑定与积分已经落库，额度发不出去不该把它们回滚
+     * （helper 内部会把占位标记撤回，下次捐献还能再拿）。
+     */
+    try {
+      await claimDonationQuota(env, user.id, "ai", "ai")
+    } catch (err) {
+      console.error("发放反代捐献额度失败:", user.id, err)
+    }
+
     // 邀请奖励：还必须「真的从无到有解锁了 AI 权限」
     if (aiGranted) {
       const planId = await getSettingNumber(env, "invite_reward_plan_id")
@@ -666,18 +684,21 @@ export async function createWb2Binding(
 
   // 通知邮件失败不影响绑定结果（权限已生效，只是少一封告知）
   try {
-    const { text, html } = renderMail("反代账号绑定成功", [
-      `WorkBuddy 账号：${info.nickname ?? info.uid}`,
-      aiGranted
-        ? "已为你解锁「AI 中转站」权限，可到该模块创建 API Key。"
-        : "你的「AI 中转站」权限此前已解锁，本次绑定不影响。",
-      "账号已加入共享池供其他用户使用；如需移除，请在捐献页撤销或联系管理员。",
-    ])
+    const rendered = renderMail(
+      "反代账号绑定成功",
+      [
+        `WorkBuddy 账号：${info.nickname ?? info.uid}`,
+        aiGranted
+          ? "已为你解锁「AI 中转站」权限，可到该模块创建 API Key。"
+          : "你的「AI 中转站」权限此前已解锁，本次绑定不影响。",
+        "账号已加入共享池供其他用户使用；如需移除，请在捐献页撤销或联系管理员。",
+      ],
+      { action: { label: "前往 AI 中转站", url: siteUrl("/dashboard/ai") } }
+    )
     await sendMail(env, {
       to: user.email,
       subject: "【Doulor Cloud】反代账号绑定成功",
-      text,
-      html,
+      ...rendered,
     })
   } catch (err) {
     console.error("反代绑定通知邮件发送失败:", user.email, err)
@@ -1107,6 +1128,14 @@ export async function importWb2ApiAccounts(env: Env, request: Request): Promise<
       detail: "WorkBuddy 反代账号捐献奖励（JSON 导入）",
     })
 
+    // 邀请码额度：与单条绑定同一口径（首次 AI 类贡献 +2，用户级占位只发一次）。
+    // 一批导入 N 个账号也只算**一次**捐献，不会因为批量而多发。
+    try {
+      await claimDonationQuota(env, user.id, "ai", "ai")
+    } catch (err) {
+      console.error("发放反代捐献额度失败（JSON 导入）:", user.id, err)
+    }
+
     // 邀请奖励：口径与 createWb2Binding 一致 —— 必须「真的从无到有解锁了 AI 权限」。
     // `grantInviteReward` 本身按被邀请人去重，故整批调一次与逐条调效果相同。
     if (granted) {
@@ -1121,18 +1150,21 @@ export async function importWb2ApiAccounts(env: Env, request: Request): Promise<
   // 失败不影响绑定结果 —— 权限已生效，只是少一封告知。
   if (bound > 0) {
     try {
-      const { text, html } = renderMail("反代账号绑定成功", [
-        `本次导入已绑定 ${bound} 个 WorkBuddy 账号（新建 ${newlyBound}、恢复 ${revived}）。`,
-        granted
-          ? "已为你解锁「AI 中转站」权限，可到该模块创建 API Key。"
-          : "你的「AI 中转站」权限此前已解锁，本次绑定不影响。",
-        "账号已加入共享池供其他用户使用；如需移除，请在捐献页撤销或联系管理员。",
-      ])
+      const rendered = renderMail(
+        "反代账号绑定成功",
+        [
+          `本次导入已绑定 ${bound} 个 WorkBuddy 账号（新建 ${newlyBound}、恢复 ${revived}）。`,
+          granted
+            ? "已为你解锁「AI 中转站」权限，可到该模块创建 API Key。"
+            : "你的「AI 中转站」权限此前已解锁，本次绑定不影响。",
+          "账号已加入共享池供其他用户使用；如需移除，请在捐献页撤销或联系管理员。",
+        ],
+        { action: { label: "前往 AI 中转站", url: siteUrl("/dashboard/ai") } }
+      )
       await sendMail(env, {
         to: user.email,
         subject: "【Doulor Cloud】反代账号绑定成功",
-        text,
-        html,
+        ...rendered,
       })
     } catch (err) {
       console.error("反代导入绑定通知邮件发送失败:", user.email, err)
@@ -1638,3 +1670,62 @@ export async function wb2apiDonationBlock(
  *     管理端拿到的一直是那一份；
  *   · 留着第二个出口只会出现「改了 A 忘了 B」的漂移。
  */
+
+/**
+ * 后台补完"用户已经授权、但没回到网站"的绑定（2026-10-28 站长要求）。
+ *
+ * 原机制的死穴：绑定结果只在前端轮询时写入 —— 用户授权完直接关页面，
+ * 账号已经进了共享池，但**没有任何绑定记录**，于是他"捐了却什么都没得到"。
+ *
+ * 这里由 cron 每分钟扫一遍 pending 会话，主动向上游要结果并落库：
+ * 用户只要在 WorkBuddy 页面点完授权，剩下的本站自己做完，不需要再回网站。
+ */
+export async function resumePendingWbLogins(env: Env, limit = 15): Promise<{ checked: number; completed: number }> {
+  const now = new Date().toISOString()
+
+  // 先把"过期但还挂着 pending"的会话收尾：上游 state 早已失效，再等也没意义。
+  // 不标失败的话，用户界面会永远转圈（klayzhaov3 今早就是这个状态）。
+  await env.DB.prepare(
+    `UPDATE wb2api_login_sessions
+        SET status = 'failed', message = '登录会话已过期，请重新点「链接绑定」发起一次'
+      WHERE status = 'pending' AND expires_at <= ?`
+  )
+    .bind(now)
+    .run()
+
+  const rows = await env.DB.prepare(
+    `SELECT * FROM wb2api_login_sessions
+      WHERE status = 'pending' AND upstream_state IS NOT NULL AND expires_at > ?
+      ORDER BY created_at DESC LIMIT ?`
+  )
+    .bind(now, limit)
+    .all<SessionRow & { user_id: string }>()
+
+  let completed = 0
+  for (const sess of rows.results ?? []) {
+    try {
+      const user = await env.DB.prepare("SELECT * FROM users WHERE id = ? LIMIT 1")
+        .bind(sess.user_id)
+        .first<UserRow>()
+      if (!user) continue
+      const polled = await wb2Poll(env, sess.upstream_state!)
+      if (!polled.done || !polled.uid) continue
+      // 已完成但没落库的，补一次绑定（completeBinding 内部幂等：同 uid 已绑则跳过）
+      await completeBinding(env, user, sess, {
+        uid: polled.uid,
+        nickname: polled.nickname ?? null,
+        realm: polled.realm ?? "cn",
+        credits: polled.credits,
+        creditsTotal: polled.creditsTotal,
+      })
+      completed += 1
+    } catch (err) {
+      // state 在上游已消失（用户从没授权 / 已过期）→ 标记失败，别让它永远 pending
+      if (err instanceof Wb2StateGoneError) {
+        await failSession(env, sess.id, "登录会话已失效（上游查不到该授权），请重新发起")
+      }
+      // 其它错误（网关超时等）保持 pending，下一轮再试
+    }
+  }
+  return { checked: rows.results?.length ?? 0, completed }
+}

@@ -247,6 +247,20 @@ function randomNumericCode(): string {
   return String(CODE_MIN + (v % CODE_SPAN))
 }
 
+/**
+ * 尽力解析当前用户：登录则返回，未登录/会话失效则 null。
+ *
+ * 用于「公开接口但想知道看的人是谁」的场景（本文件只有 getTempbox 用到）——
+ * 例如告诉前端「这个箱子你能不能删」。
+ */
+async function optionalUser(env: Env, request: Request): Promise<UserRow | null> {
+  try {
+    return await requireUser(env, request)
+  } catch {
+    return null
+  }
+}
+
 /** 校验上传是否被允许；需要登录时返回 user，否则返回 null */
 async function requireUploader(env: Env, request: Request): Promise<UserRow | null> {
   const settings = await getSettings(env)
@@ -647,10 +661,22 @@ export async function getTempbox(
 
   const batch = await assertBatchAlive(env, code)
 
+  /**
+   * 这个箱子「我能删吗」。
+   *
+   * 以前前端无条件渲染删除按钮，但删除接口只允许**创建者/管理员**
+   * （见 deleteTempboxFile / deleteTempbox 里的判断）⇒ 收件人点一下就是 403、
+   * 访客是 401。这里把判定结果下发给前端，按钮只在能删时出现。
+   */
+  const viewer = await optionalUser(env, request)
+  const canDelete =
+    isAnyAdmin(viewer?.role) || (!!viewer && batch.creator_user_id === viewer.id)
+
   // 纯文本批次：不需要 R2
   if (batch.text_content) {
     return json({
       code: batch.code,
+      canDelete,
       expireAt: batch.expire_at,
       remainingMinutes: Math.max(
         0,
@@ -676,6 +702,7 @@ export async function getTempbox(
 
   return json({
     code: batch.code,
+    canDelete,
     expireAt: batch.expire_at,
     remainingMinutes: Math.max(
       0,

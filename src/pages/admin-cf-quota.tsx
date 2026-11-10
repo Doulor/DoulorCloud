@@ -23,6 +23,7 @@ import { AlertTriangle, Check, CircleDollarSign, RefreshCw, Wand2 } from "lucide
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { LoadingBlock } from "@/components/loading-block"
 import { adminApi, errMsg } from "@/services/api"
 import { fmtDateTime, formatBytes, formatBytesShort } from "@/lib/format"
@@ -230,6 +231,92 @@ const PLAN_SOURCE_TEXT: Record<CfPlanSource, string> = {
 }
 
 /** 套餐选择器 —— 自动判定可能落到「无法确认」，必须给手动纠正的入口 */
+/**
+ * 出站邮件（Email Sending）卡片。
+ *
+ * 为什么单独一张而不是塞进上面的分组：那个分组表是 GraphQL 用量驱动、按配额项渲染的，
+ * 而邮件用量是**本站自己的计数**（CF 没有只读的"还剩多少封"接口）。混在一起会让人
+ * 以为这个数字也来自 CF 账单，从而忽略"它只统计本站发出的信"这个前提。
+ *
+ * 这块的用途只有一个：**在超额扣费之前让人看见离上限还有多远**。
+ */
+function MailSendingCard({
+  info,
+  paid,
+}: {
+  info: CfQuotaOverview["emailSending"]
+  paid: boolean
+}) {
+  const { t } = useT()
+  const hasCap = info.cap > 0
+  const percent = hasCap ? Math.min(100, (info.used / info.cap) * 100) : 0
+  // 到量 = 红；超过 80% = 琥珀；其余正常
+  const barClass =
+    info.blocked || percent >= 95
+      ? "bg-destructive"
+      : percent >= 80
+        ? "bg-amber-500"
+        : "bg-emerald-500"
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          {t("cq.mail.title")}
+          {info.blocked && (
+            <Badge variant="outline" className="border-destructive text-destructive">
+              {t("cq.mail.blocked")}
+            </Badge>
+          )}
+        </CardTitle>
+        <CardDescription className="text-xs">
+          {t("cq.mail.desc", { v0: info.period })}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <div className="flex items-end justify-between gap-3">
+          <div className="text-sm">
+            <span className="font-medium">{fmtNum(info.used)}</span>
+            <span className="text-muted-foreground">
+              {" / "}
+              {hasCap ? fmtNum(info.cap) : t("cq.mail.noCap")}
+            </span>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            {t("cq.mail.quota", { v0: fmtNum(info.includedMonthly) })}
+            {info.overageUsd != null && info.overageUsd > 0 && (
+              <span className="ml-2 font-medium text-amber-600 dark:text-amber-500">
+                {t("cq.mail.overage", { v0: fmtUsd(info.overageUsd) })}
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+          <div
+            className={`h-full rounded-full transition-all ${barClass}`}
+            style={{ width: `${hasCap ? percent : 0}%` }}
+          />
+        </div>
+
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          {info.blocked ? t("cq.mail.blockedHint") : t("cq.mail.hint")}
+        </p>
+        {!hasCap && (
+          <p className="text-[11px] leading-relaxed text-amber-600 dark:text-amber-500">
+            {t("cq.mail.noCapHint")}
+          </p>
+        )}
+        {paid && info.overageUsd != null && info.overageUsd > 0 && (
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            {t("cq.mail.overageHint")}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 function PlanPicker({
   current,
   onSaved,
@@ -281,6 +368,94 @@ function PlanPicker({
           </Button>
         )
       })}
+    </div>
+  )
+}
+
+/**
+ * 计费周期起始日选择器。
+ *
+ * 为什么需要这一项：CF 的「每月包含额度」是按**订阅日**滚动，不是自然月 ——
+ * 18 号扣费的账号，额度也在 18 号翻篇。面板若一律按 1 号起算，月初那几天
+ * 会把上一周期的量算进「本周期至今」，占用率虚高。
+ *
+ * 只能 1–28：29/30/31 在小月不存在，会让口径一个月一变。
+ */
+function CyclePicker({
+  current,
+  start,
+  end,
+  onSaved,
+}: {
+  current: number
+  start: string
+  end: string
+  onSaved: (fresh: boolean) => void
+}) {
+  const { t } = useT()
+  const [value, setValue] = React.useState(String(current))
+  const [saving, setSaving] = React.useState(false)
+  // 面板刷新后（如点了「刷新」）同步回服务端的值
+  React.useEffect(() => setValue(String(current)), [current])
+
+  const next = Math.trunc(Number(value))
+  const valid = Number.isFinite(next) && next >= 1 && next <= 28
+  const dirty = valid && next !== current
+
+  const save = async () => {
+    if (!valid) {
+      toast.error(t("cq.err.cycleRange"))
+      return
+    }
+    if (next === current) return
+    setSaving(true)
+    try {
+      await adminApi.updateSettings({ cf_cycle_day: String(next) })
+      toast.success(t("cq.ok.cycleSaved"))
+      onSaved(true)
+    } catch (err) {
+      toast.error(errMsg(err, t("cq.err.saveCycle")))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-xs text-muted-foreground">{t("cq.cycle.label")}</span>
+      <Input
+        type="number"
+        min={1}
+        max={28}
+        step={1}
+        inputMode="numeric"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void save()
+        }}
+        aria-label={t("cq.cycle.label")}
+        className="h-7 w-16 px-2 text-xs tabular-nums"
+      />
+      <Button
+        variant={dirty ? "default" : "outline"}
+        size="sm"
+        className="h-7 px-2.5 text-xs"
+        disabled={saving || !dirty}
+        onClick={() => void save()}
+        title={t("cq.cycle.hint")}
+      >
+        {saving ? (
+          <RefreshCw className="h-3 w-3 animate-spin" />
+        ) : (
+          <Check className="h-3 w-3" />
+        )}
+        {t("cq.cycle.save")}
+      </Button>
+      <span className="font-mono text-[11px] text-muted-foreground">
+        {t("cq.cycle.range", { start, end })}
+      </span>
+      <span className="w-full text-[11px] text-muted-foreground">{t("cq.cycle.hint")}</span>
     </div>
   )
 }
@@ -346,6 +521,14 @@ export function CfQuotaPanel() {
 
       <div className="rounded-md border p-3">
         <PlanPicker current={data.planSetting} onSaved={(f) => void load(f)} />
+        <div className="mt-2.5 border-t pt-2.5">
+          <CyclePicker
+            current={data.cycleDay}
+            start={data.cycleStart}
+            end={data.cycleEnd}
+            onSaved={(f) => void load(f)}
+          />
+        </div>
         <p className="mt-2 text-[11px] text-muted-foreground">
           {t("cq.explain.a")}
           <span className="font-medium text-foreground">{t("cq.explain.day")}</span>
@@ -409,6 +592,8 @@ export function CfQuotaPanel() {
           </CardContent>
         </Card>
       )}
+
+      {data.emailSending && <MailSendingCard info={data.emailSending} paid={paid} />}
 
       {data.warnings.length > 0 && (
         <div className="space-y-2">

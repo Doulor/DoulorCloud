@@ -1039,7 +1039,7 @@ export function DnsAdminPanel() {
                   disabled={subPage >= subPageCount}
                   onClick={() => setSubPage((p) => p + 1)}
                 >
-                  {t("common.next")}
+                  {t("adm.userPageNext")}
                 </Button>
               </div>
             </div>
@@ -1232,7 +1232,7 @@ export function DnsAdminPanel() {
                   disabled={page >= pageCount}
                   onClick={() => setPage((p) => p + 1)}
                 >
-                  {t("common.next")}
+                  {t("adm.userPageNext")}
                 </Button>
               </div>
             </div>
@@ -1380,7 +1380,7 @@ export function DnsAdminPanel() {
                   disabled={findingPage >= findingPageCount}
                   onClick={() => setFindingPage((p) => p + 1)}
                 >
-                  {t("common.next")}
+                  {t("adm.userPageNext")}
                 </Button>
               </div>
             </div>
@@ -1588,6 +1588,13 @@ export function DnsAdminPanel() {
                       // 没有 CF Token 时导入必然失败，直接禁掉比让站长点了再看报错好；
                       // rootInfo 拉不到时（`=== false` 不成立）不禁用，让请求自己去报错。
                       disabled={rootInfo?.hasCfToken === false}
+                      // 禁用时必须说明原因：光变灰会让站长以为界面坏了。
+                      // 这句解释词条一直存在（dns.root.import.noToken），此前没人引用。
+                      title={
+                        rootInfo?.hasCfToken === false
+                          ? t("dns.root.import.noToken")
+                          : undefined
+                      }
                       onClick={() => void openImport()}
                     >
                       <Cloud className="mr-1.5 h-4 w-4" />

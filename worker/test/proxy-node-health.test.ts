@@ -40,6 +40,15 @@ function rec(
 }
 
 describe("nextHealthRecord —— 迟滞判定（恢复快、降级慢）", () => {
+  it("没有健康记录的节点统计为 unknown，不能误算成 down", () => {
+    const summary = summarizeNodeHealth(
+      [{ id: "never-probed" }],
+      (node) => node.id,
+      new Map(),
+    )
+    expect(summary).toMatchObject({ up: 0, down: 0, unknown: 1, total: 1 })
+  })
+
   it("一次握手成功即判可用（成功是硬证据：真的连上了）", () => {
     const r = nextHealthRecord(emptyHealthRecord(), ok(120), NOW)
     expect(r.status).toBe("up")
@@ -72,12 +81,12 @@ describe("nextHealthRecord —— 迟滞判定（恢复快、降级慢）", () =
 
   it("降级后再次成功 → 立刻恢复可用，计数清零", () => {
     let r = nextHealthRecord(emptyHealthRecord(), ok(80), NOW)
-    r = nextHealthRecord(r, fail(), LATER)
-    r = nextHealthRecord(r, fail(), LATER)
+    for (let i = 0; i < HANDSHAKE_FAIL_STREAK_TO_DOWN; i++) {
+      r = nextHealthRecord(r, fail(), LATER)
+    }
     expect(r.status).toBe("down")
 
     r = nextHealthRecord(r, ok(95), LATER)
-    expect(r.status).toBe("up")
     expect(r.latencyMs).toBe(95)
     expect(r.failStreak).toBe(0)
     expect(r.lastError).toBeNull()

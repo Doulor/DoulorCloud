@@ -12,6 +12,7 @@
  *   GET    /api/points/products/:id/purchases —— 商品公示的购买记录（最近 10 条）
  *   POST   /api/points/orders/:id/deliver   —— 卖家标记订单已交付
  *   POST   /api/points/orders/:id/confirm   —— 买家确认收货（结算积分给卖家）
+ *   POST   /api/points/orders/:id/cancel    —— 买家取消「卖家还没发货」的订单（积分原路退回）
  *   POST   /api/points/orders/:id/after-sale          —— 买家申请退款（售后）
  *   DELETE /api/points/orders/:id/after-sale          —— 买家撤销售后申请
  *   POST   /api/points/orders/:id/after-sale/escalate —— 买家申请平台（管理员）介入
@@ -35,7 +36,7 @@
  */
 import { ApiError, json, assertContentLengthWithin, readBodyCapped } from "../http"
 import { requireUser } from "../auth"
-import { requireAdminScope } from "./admin"
+import { requireAdminScope, requireAnyAdminScope } from "./admin"
 import { guardRateLimit } from "../ratelimit"
 import { uuid } from "../crypto"
 import {
@@ -69,6 +70,7 @@ import {
   adminSettleOrder,
   autoConfirmDeliveries,
   buyProduct,
+  buyerCancelOrder,
   cancelAfterSale,
   clearUnusedProductCodes,
   confirmOrder,
@@ -615,6 +617,23 @@ export async function confirmReceipt(env: Env, request: Request, id: string): Pr
   return json({ order })
 }
 
+/**
+ * POST /api/points/orders/:id/cancel —— 买家取消「卖家还没发货」的订单
+ *
+ * 卖家一直不交付时买家的自助出口（积分原路退回）。已交付 / 已结算的单不能走这里，
+ * 那些是纠纷或售后，见 `rejectDelivery` / `requestAfterSale`。
+ *
+ * 与售后申请同一档限流：这条路径会写库 + 给卖家发消息，脚本化调用能刷爆消息列表。
+ */
+export async function cancelMyOrder(env: Env, request: Request, id: string): Promise<Response> {
+  const user = await requireUser(env, request)
+  await guardRateLimit(env, `shop:cancel:user:${user.id}`, 10, 3600, "取消订单过于频繁，请稍后再试")
+  assertContentLengthWithin(request, MAX_JSON_BODY_BYTES, "请求内容过大")
+  const body = (await request.json().catch(() => ({}))) as { reason?: string }
+  const order = await buyerCancelOrder(env, user.id, id, body.reason ?? "")
+  return json({ order })
+}
+
 // ---- 售后（退款）----
 
 /** POST /api/points/orders/:id/after-sale —— 买家申请退款（售后） */
@@ -904,6 +923,22 @@ const ORDER_STATUSES: readonly OrderStatus[] = ["pending", "delivered", "settled
  * 顺带把 `donationRewards`（各档捐献奖励积分数）一起返回：它和兑换比例是同一类
  * 「积分经济旋钮」，管理端在同一个标签页里改，没必要再开一个请求。
  */
+/**
+ * GET /api/admin/points/review-queue —— 用户上架商品的审核队列。
+ *
+ * 为什么单独开这个接口（2026-10-30 站长反馈）：`/admin/points/shop` 要求
+ * `points.official`（官方商品管理），只勾了「审核商品」（`points.review`）的管理员
+ * 请求会被 403，前端拿不到数据就显示「还没有用户上架商品」——权限给了却什么都看不见。
+ *
+ * 这里只要求 `points.review`（兼容 `points.official`），且**只返回用户商品**，
+ * 不下发官方商品、订单与积分经济配置，权限边界不放大。
+ */
+export async function getProductReviewQueue(env: Env, request: Request): Promise<Response> {
+  await requireAnyAdminScope(env, request, ["points.review", "points.official"])
+  const userProducts = await listProducts(env, { scope: "user", limit: 200 })
+  return json({ userProducts })
+}
+
 export async function getShopAdmin(env: Env, request: Request): Promise<Response> {
   await requireAdminScope(env, request, "points.official")
   const url = new URL(request.url)

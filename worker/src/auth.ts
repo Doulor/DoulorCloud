@@ -40,6 +40,11 @@ export interface UserRow {
    * 机制，见 handlers/dns.ts 的 dnsRecordLimit。
    */
   max_dns_records?: number | null
+  /**
+   * 邮箱数量扩容（迁移 0191）：商城 `mailbox_quota` 商品买到的名额，
+   * 上限 = 基础 3 + 本值，见 handlers/email.ts 的 mailboxLimitFor。
+   */
+  mailbox_quota_bonus?: number | null
   created_at: string
   updated_at: string
 }

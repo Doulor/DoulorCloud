@@ -16,14 +16,14 @@ import {
   notWhitelistedGuard,
   type Feature,
 } from "../permissions"
-import { sendMail, renderMail } from "../mailer"
+import { sendMail, renderMail, siteUrl } from "../mailer"
 import { isOwnDomain } from "../root-domains"
 import { wb2apiDonationBlock } from "./wb2api"
 import { qoder2apiDonationBlock } from "./qoder2api"
 // 捐献审核要做「连通性校验」（2026-10-10 站长要求：能用就是有价值）
 import { probeSubscriptionNodeHealth } from "./proxy"
 import {
-  grantQuotaForDonation,
+  claimDonationQuota,
   INVITE_BONUS_PER_DONATION,
   isBasicFeature,
   QUOTA_FEATURE_LABELS,
@@ -689,44 +689,15 @@ async function applyDonationApproval(
   //   取舍（如实记录）：用户捐第二份**真正不同**的资源时不会再拿到第二份奖励。
   //   这是有意的 —— 在无法区分「真·第二份贡献」与「重放同一份资源」之前，
   //   宁可少发，也不能让奖励无界。
+  // 占位与发放的机制（原子占位 / json_valid 兜底 / 失败回滚）见
+  // `quotas.claimDonationQuota` —— 反代通道（wb2api / qoder2api）共用同一份实现。
+  // 这里只决定「发不发」以及「拿哪个 key 占位」。
   let quotaGranted = false
   if (grantRewards) {
-    const keyPath = `$."${app.type}"`
-    // json_valid 兜底：该列可空（历史行），且将来可能被写坏；
-    // `json_extract(NULL, …)` 是 NULL、`json_extract('{坏', …)` 会**抛错**（打成 500）。
-    // 兜成 '{}' 后，NULL / 损坏一律按「没发过」起算 —— 与 parseCounts 的「宁可少算」同一口径。
-    const typesExpr =
-      "CASE WHEN json_valid(donation_quota_types) THEN donation_quota_types ELSE '{}' END"
-    const claimed = await env.DB.prepare(
-      `UPDATE users
-          SET donation_quota_types = json_set(${typesExpr}, ?, 1),
-              updated_at = ?
-        WHERE id = ? AND json_extract(${typesExpr}, ?) IS NULL
-        RETURNING id`
-    )
-      .bind(keyPath, now, app.user_id, keyPath)
-      .first<{ id: string }>()
-
-    if (claimed) {
-      try {
-        // feature 为 null 的类型（目前只有 frp）不再发放模块额度：
-        // 内网穿透已改为积分租用，不存在「可转授额度」这个概念了。
-        // 积分奖励照发（在上面/下面那条路径），所以捐献本身仍然有回报。
-        if (feature !== null) {
-          await grantQuotaForDonation(env, app.user_id, feature)
-          quotaGranted = true
-        }
-      } catch (err) {
-        // 占位成功但发放失败：把标记撤回，保持「占位 == 已发放」的不变式，
-        // 否则该用户会被永久判为「已发过」，而实际一分没拿到。
-        await env.DB.prepare(
-          `UPDATE users SET donation_quota_types = json_remove(${typesExpr}, ?) WHERE id = ?`
-        )
-          .bind(keyPath, app.user_id)
-          .run()
-        throw err
-      }
-    }
+    // feature 为 null 的类型（目前只有 frp）只占位、不发额度：
+    // 内网穿透已改为积分租用，不存在「可转授额度」这个概念了。
+    // 积分奖励照发（在下面那条路径），所以捐献本身仍然有回报。
+    quotaGranted = await claimDonationQuota(env, app.user_id, app.type, feature)
   }
 
   // 捐献奖励积分：**每通过一笔捐献就发一次** —— 这是用户**可重复赚积分**的通道
@@ -930,31 +901,33 @@ async function autoReviewProxyDonation(
    * ⚠️ 一次握手失败**不判死**（本身要连续 2 次失败才算 down，单次多半是抖动）
    * ⇒ 判定为**转人工复核**而不是自动拒绝，与上面「证据不够不下终局结论」同一取向。
    */
+  /** 「真的测过几个节点」。 */
   let liveNodes = 0
-  /**
-   * 「真的测过几个节点」。
-   *
-   * 🔴 2026-10-11 修正：这里原来记的是 `probe.probed - probe.unknown`（剔掉"未知"），
-   * 但健康判定规定**握手失败是弱证据、要连续多轮才降级为 down**，所以一次全新的
-   * 订阅**首次**探测时，所有失败节点都会被归成 `unknown` ⇒ 这个值恒为 0 ⇒
-   * 下面的 `> 0` 条件永远不成立 ⇒ **这道探活闸门从上线起就没关上过**。
-   * 实测：提交一行 `trojan://x@1.2.3.4:443`（1.2.3.4 无任何服务）仍被判
-   * `approved` 并白得 proxy 特性，与未加探活时完全一样。
-   *
-   * 现在只排除**压根没测**的节点（hysteria2 之类走 QUIC/UDP，Worker 建不了连接，
-   * 它们根本不会出现在结果里）—— 保留原注释第 3 条「探不动的协议绝不算失败」，
-   * 但**测过却一个都没连上**必须转到人工，这正是站长 2026-10-10 定的口径
-   * 「能用就是有价值」的反面：连不上就是没价值。
-   */
   let probedNodes = 0
+  const probeNotes: string[] = []
   try {
-    const probe = await probeSubscriptionNodeHealth(
-      env,
-      { id: input.id, url: subUrls[0] },
-      { maxNodes: 2, concurrency: 2 }
-    )
-    liveNodes = probe.up
-    probedNodes = probe.probed
+    // 不能只测第一个链接：多链接捐献里第一个失效、第二个正常时，
+    // 只测第一个会把本来有价值的资源误转人工。
+    // 每个成功解析的订阅最多取 2 个节点，成本有上限，结论按「任一节点可用」计算。
+    for (const candidate of good) {
+      try {
+        const probe = await probeSubscriptionNodeHealth(
+          env,
+          { id: `${input.id}:${candidate.url.slice(0, 48)}`, url: candidate.url },
+          { maxNodes: 2, concurrency: 2, verifyWs: true }
+        )
+        liveNodes += probe.up
+        probedNodes += probe.probed
+        if (probe.up === 0 && probe.probed > 0) probeNotes.push(`${candidate.url} 的实测节点均未连通`)
+      } catch {
+        // 单个链接探活失败，不影响其他链接继续验证
+      } finally {
+        await env.DB.prepare("DELETE FROM proxy_node_health WHERE subscription_id = ?")
+          .bind(`${input.id}:${candidate.url.slice(0, 48)}`)
+          .run()
+          .catch(() => undefined)
+      }
+    }
   } catch {
     // 探活本身失败（订阅站抖动等）不阻断审核：证据不足不下结论
   } finally {
@@ -967,7 +940,7 @@ async function autoReviewProxyDonation(
   if (probedNodes > 0 && liveNodes === 0) {
     const note =
       `系统自动校验未通过：订阅能抓取、也解析出了节点，但**实测没有一个节点连得上**，` +
-      `已转人工复核（如为订阅站抖动，管理员可直接通过）。`
+      `已转人工复核（如为订阅站抖动，管理员可直接通过）。${probeNotes.length ? ` ${probeNotes.join("；")}` : ""}`
     await env.DB.prepare(
       `UPDATE donations SET review_note = ?, reviewed_at = ?, auto_reviewed = 1 WHERE id = ?`
     )
@@ -1507,12 +1480,13 @@ async function notifyDonationResult(
         : approve
           ? "捐献申请已通过"
           : "捐献申请未通过"
-    const { text, html } = renderMail(title, lines.filter(Boolean))
+    const rendered = renderMail(title, lines.filter(Boolean), {
+      action: { label: "查看我的捐献", url: siteUrl("/dashboard/donations") },
+    })
     await sendMail(env, {
       to: app.notify_email,
       subject: `【Doulor Cloud】${title}`,
-      text,
-      html,
+      ...rendered,
     })
 
     // 站内消息：捐献结果同时进「系统消息」，用户不必翻邮箱。
@@ -1636,9 +1610,50 @@ export async function listAllDonations(
     conds.push("d.type = ?")
     binds.push(typeFilter)
   }
+  /**
+   * 状态筛选：前端有**四个桶**，其中两个不是数据库里的 status。
+   *
+   *   pending / approved / rejected —— 真实 status，但 approved/rejected 只算**人工**的
+   *     （COALESCE(auto_reviewed,0) = 0），否则「已通过」会把自动通过的也算进去、与「自动通过」重复；
+   *   autoApproved / autoRejected —— status + auto_reviewed = 1 的组合。
+   *
+   * ⚠️ 2026-10-08 分页改造时只换了数据源、没做这层映射：前端把桶名原样当 status 传，
+   *    后端 `d.status = 'autoApproved'` 永远匹配不到 ⇒ 这两个筛选点了就是空列表。
+   */
+  // 桶 → (状态集合, 是否自动)。必须与前端 donationBucket() 的判定逐字对应：
+  // 那边把「不是 pending / approved 的」一律归到 rejected 侧（含 revoked），
+  // 这里也要把 revoked 算进 rejected / autoRejected，否则两侧计数对不上。
+  // ⚠️ pending 的 auto 必须是 null（= 不看 auto_reviewed）：线上确实存在
+  //    「pending 且 auto_reviewed=1」的单子（自动校验跑过、结论是转人工，见本文件
+  //    那条只写 review_note 不写 status 的 UPDATE）。若像 approved/rejected 那样
+  //    再按 auto 二分，「待审核」会把它们全部漏掉 —— 上线后实测：pending 共 22 条，
+  //    其中 16 条 auto=1、6 条 auto=0，按 auto=0 过滤只剩 6 条，与徽标数（22）对不上。
+  const BUCKETS: Record<string, { statuses: string[]; auto: boolean | null }> = {
+    pending: { statuses: ["pending"], auto: null },
+    approved: { statuses: ["approved"], auto: false },
+    autoApproved: { statuses: ["approved"], auto: true },
+    rejected: { statuses: ["rejected", "revoked"], auto: false },
+    autoRejected: { statuses: ["rejected", "revoked"], auto: true },
+  }
   if (statusFilter) {
-    conds.push("d.status = ?")
-    binds.push(statusFilter)
+    const bucket = BUCKETS[statusFilter]
+    if (bucket) {
+      const statusPlaceholders = bucket.statuses.map(() => "?").join(",")
+      if (bucket.auto === null) {
+        // pending：两种都算，不按 auto_reviewed 二分
+        conds.push(`d.status IN (${statusPlaceholders})`)
+        binds.push(...bucket.statuses)
+      } else {
+        conds.push(
+          `d.status IN (${statusPlaceholders}) AND COALESCE(d.auto_reviewed, 0) = ?`
+        )
+        binds.push(...bucket.statuses, bucket.auto ? 1 : 0)
+      }
+    } else {
+      // 兜底：非已知桶按原样当 status 精确匹配（保留旧行为）
+      conds.push("d.status = ?")
+      binds.push(statusFilter)
+    }
   }
   const where = conds.length ? ` WHERE ${conds.join(" AND ")}` : ""
 
@@ -1656,7 +1671,8 @@ export async function listAllDonations(
       : env.DB.prepare(`SELECT 1 AS x`),
     hasPage
       ? env.DB.prepare(
-          `SELECT type, status, COUNT(*) AS c FROM donations GROUP BY type, status`
+          `SELECT type, status, COALESCE(auto_reviewed, 0) AS auto, COUNT(*) AS c
+               FROM donations GROUP BY type, status, COALESCE(auto_reviewed, 0)`
         )
       : env.DB.prepare(`SELECT NULL AS type, NULL AS status, NULL AS c WHERE 0`),
   ])
@@ -1667,16 +1683,32 @@ export async function listAllDonations(
   for (const r of (groupRes.results ?? []) as unknown as {
     type: string | null
     status: string | null
+    auto: number | null
     c: number | null
   }[]) {
     if (r.type == null) continue
     const typeKey = r.type
+    const status = r.status ?? ""
+    const isAuto = Number(r.auto) === 1
+    // 桶名要跟前端按钮的 key 一致（pending / approved / autoApproved / rejected / autoRejected），
+    // 否则徽标永远显示 0。revoked 归一化到 rejected 侧，与前端 donationBucket() 同口径。
+    const bucket =
+      status === "pending"
+        ? "pending"
+        : status === "approved"
+          ? isAuto
+            ? "autoApproved"
+            : "approved"
+          : isAuto
+            ? "autoRejected"
+            : "rejected"
+    const n = Number(r.c) || 0
     counts[typeKey] = counts[typeKey] ?? {}
-    counts[typeKey][r.status ?? ""] = Number(r.c) || 0
+    counts[typeKey][bucket] = (counts[typeKey][bucket] ?? 0) + n
     counts[""] = counts[""] ?? {}
-    counts[""][r.status ?? ""] = (counts[""][r.status ?? ""] ?? 0) + (Number(r.c) || 0)
-    counts[""][""] = (counts[""][""] ?? 0) + (Number(r.c) || 0)
-    counts[typeKey][""] = (counts[typeKey][""] ?? 0) + (Number(r.c) || 0)
+    counts[""][bucket] = (counts[""][bucket] ?? 0) + n
+    counts[""][""] = (counts[""][""] ?? 0) + n
+    counts[typeKey][""] = (counts[typeKey][""] ?? 0) + n
   }
 
   return json({
@@ -2144,14 +2176,15 @@ export async function createDonation(env: Env, request: Request): Promise<Respon
         type === "ai" || type === "sensenova"
           ? "该申请需要人工复核（自动校验未能完成）。"
           : "",
-        "请到 Doulor Cloud 管理面板「捐献审核」处理。",
       ]
-      const { text, html } = renderMail("新的捐献申请", lines.filter(Boolean))
+      const rendered = renderMail("新的捐献申请", lines.filter(Boolean), {
+        kind: "admin",
+        action: { label: "去审核", url: siteUrl("/dashboard/admin#donations") },
+      })
       await sendMail(env, {
         to: adminEmail,
         subject: `【Doulor Cloud】新的捐献申请（${user.username}）`,
-        text,
-        html,
+        ...rendered,
       })
     } catch (err) {
       console.error("捐献管理员通知失败:", err)

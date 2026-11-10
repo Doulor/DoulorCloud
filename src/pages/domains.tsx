@@ -950,12 +950,17 @@ export default function DomainsPage() {
                         >
                           {sub.fqdn}
                         </button>
+                        {/* 删除子域名 / 加子域名这两个按钮平时是 `hidden`，
+                            只在桌面端鼠标悬停这一行时浮出。Tailwind v4 把
+                            `group-hover:` 整段包在 `@media (hover: hover)` 里，
+                            触屏上永远不成立 ⇒ 手机上根本找不到删除入口，
+                            所以补 `pointer-coarse:*` 让它们常显（同 email.tsx）。 */}
                         {sub.name === "@" ? (
                           <Badge variant="outline">{t("dm.primary")}</Badge>
                         ) : (
                           <button
                             type="button"
-                            className="hidden text-muted-foreground hover:text-destructive group-hover:block"
+                            className="hidden text-muted-foreground hover:text-destructive group-hover:block pointer-coarse:block"
                             onClick={(e) => {
                               e.stopPropagation()
                               void handleDeleteSubdomain(sub)
@@ -974,10 +979,10 @@ export default function DomainsPage() {
                         <span className="shrink-0 text-xs text-muted-foreground">
                           {t("dm.recordCount", { n: sub.recordCount ?? 0 })}
                         </span>
-                        {/* 在一级之下加子子域名 */}
+                        {/* 在一级之下加子子域名（触屏端常显，见上面的说明） */}
                         <button
                           type="button"
-                          className="ml-auto hidden items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground group-hover:inline-flex"
+                          className="ml-auto hidden items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground group-hover:inline-flex pointer-coarse:inline-flex"
                           onClick={(e) => {
                             e.stopPropagation()
                             setParentFor(sub)
@@ -1019,9 +1024,10 @@ export default function DomainsPage() {
                           <span className="shrink-0 text-xs text-muted-foreground">
                             {t("dm.recordCount", { n: child.recordCount ?? 0 })}
                           </span>
+                          {/* 子子域名的删除同样在触屏端常显 */}
                           <button
                             type="button"
-                            className="ml-auto hidden text-muted-foreground hover:text-destructive group-hover:block"
+                            className="ml-auto hidden text-muted-foreground hover:text-destructive group-hover:block pointer-coarse:block"
                             onClick={(e) => {
                               e.stopPropagation()
                               void handleDeleteSubdomain(child)

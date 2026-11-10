@@ -12,9 +12,11 @@ import { authRequest, fetchSelf, makeUser, setSetting } from "./helpers"
 import {
   FREE_LIMITS,
   PAID_LIMITS,
+  clampCycleDay,
   classifyR2Op,
   maxValue,
   overCost,
+  quotaCycleStart,
   sumByAction,
   sumSeriesSince,
   tailDays,
@@ -51,6 +53,34 @@ describe("日期口径", () => {
     // 北京时间 2026-09-26T02:00 = UTC 2026-09-25T18:00 → 仍是 UTC 的 25 日
     expect(utcDay(new Date("2026-09-25T18:00:00Z"))).toBe("2026-09-25")
     expect(utcMonthStart(new Date("2026-09-25T12:00:00Z"))).toBe("2026-09-01")
+  })
+
+  it("计费周期起点：默认 1 号 = 自然月；18 号起算时未到 18 号要回落到上月", () => {
+    // 默认（1 号）⇒ 与旧的自然月口径完全一致
+    expect(quotaCycleStart(new Date("2026-11-05T12:00:00Z"), 1)).toBe("2026-11-01")
+    // 周期从 18 号起算：11-05 还没到 18 号 ⇒ 本周期起点是 10-18
+    expect(quotaCycleStart(new Date("2026-11-05T12:00:00Z"), 18)).toBe("2026-10-18")
+    // 18 号当天就开始新周期（CF 是按扣费日翻篇的）
+    expect(quotaCycleStart(new Date("2026-11-18T00:00:00Z"), 18)).toBe("2026-11-18")
+    expect(quotaCycleStart(new Date("2026-11-30T23:59:00Z"), 18)).toBe("2026-11-18")
+    // 跨年：2027-01-03 的 18 号周期从 2026-12-18 开始
+    expect(quotaCycleStart(new Date("2027-01-03T00:00:00Z"), 18)).toBe("2026-12-18")
+    // 最长 31 天（起始日夹在 1–28）—— 不会撞 GraphQL 的 32 天窗口上限
+    expect(quotaCycleStart(new Date("2026-03-27T00:00:00Z"), 28)).toBe("2026-02-28")
+    expect(quotaCycleStart(new Date("2026-08-31T00:00:00Z"), 1)).toBe("2026-08-01")
+  })
+
+  it("起始日夹到 1–28（29/30/31 在小月不存在，口径会一个月一变）", () => {
+    expect(clampCycleDay(1)).toBe(1)
+    expect(clampCycleDay(18)).toBe(18)
+    expect(clampCycleDay(28)).toBe(28)
+    expect(clampCycleDay(31)).toBe(28)
+    expect(clampCycleDay(0)).toBe(1)
+    expect(clampCycleDay(-5)).toBe(1)
+    expect(clampCycleDay("18")).toBe(18)
+    expect(clampCycleDay("abc")).toBe(1)
+    expect(clampCycleDay(Number.NaN)).toBe(1)
+    expect(clampCycleDay(18.9)).toBe(18)
   })
 })
 
@@ -531,5 +561,57 @@ describe("计费辅助函数", () => {
     expect(tailDays(series, 10).length).toBe(3)
     expect(maxValue(series)).toBe(999)
     expect(maxValue([])).toBe(0)
+  })
+})
+
+
+// 计费周期起始日（设置项 cf_cycle_day）：改成 18 号后，面板的「本月至今」
+// 必须从 18 号算起，而不是自然月 1 号 —— 否则月初会把上一周期的量算进来。
+describe("计费周期起始日（cf_cycle_day）", () => {
+  afterEach(async () => {
+    // 设置写在共享的 app_settings 里，跑完必须还原，否则污染其它用例
+    await setSetting("cf_cycle_day", "1")
+    await setSetting("cf_plan", "auto")
+  })
+
+  it("默认 1 号：周期起点就是自然月 1 号", async () => {
+    stubCf()
+    const admin = await makeUser({ role: "admin" })
+    const res = await fetchSelf(authRequest(admin, "/admin/cloudflare/quota?fresh=1"))
+    expect(res.status).toBe(200)
+    const data = (await res.json()) as Record<string, unknown>
+
+    expect(data.cycleDay).toBe(1)
+    expect(data.cycleStart).toBe(`${utcDay().slice(0, 7)}-01`)
+    expect(data.cycleEnd).toBe(utcDay())
+  })
+
+  it("改成 18 号：周期起点跟着走，且周期内合计只算 18 号之后的天", async () => {
+    await setSetting("cf_cycle_day", "18")
+    await setSetting("cf_plan", "paid")
+    stubCf()
+    const admin = await makeUser({ role: "admin" })
+    const res = await fetchSelf(authRequest(admin, "/admin/cloudflare/quota?fresh=1"))
+    expect(res.status).toBe(200)
+    const data = (await res.json()) as Record<string, unknown>
+
+    const today = utcDay()
+    const cycleStart = quotaCycleStart(new Date(), 18)
+    expect(data.cycleDay).toBe(18)
+    expect(data.cycleStart).toBe(cycleStart)
+    expect(data.cycleEnd).toBe(today)
+
+    // 打桩数据只有「昨天 1000 + 今天 4000」两条：昨天是否落在本周期内，
+    // 取决于今天离周期起点多远 —— 写死会让用例在 18/19 号附近必红。
+    const yesterday = new Date(Date.now() - 86400_000).toISOString().slice(0, 10)
+    const expected = yesterday >= cycleStart ? 5000 : 4000
+    const w = findItem(data, "workers.requests")
+    expect(w.scope).toBe("month")
+    expect(w.used).toBe(expected)
+
+    // 卡片上的口径说明必须写明「18 号起算」，不能还写自然月
+    const period = String((w as unknown as { period: string }).period)
+    expect(period).toContain("18 日")
+    expect(period).toContain(cycleStart)
   })
 })

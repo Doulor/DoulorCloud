@@ -112,8 +112,10 @@ async function loadPeersByIds(env: Env, ids: string[]): Promise<Map<string, Peer
  * 能不能给对方发消息（2026-10-01 站长要求：陌生人私信要先申请、对方同意后才能发）。
  *
  * 免申请（不落 dm_contacts 表）：
- *   ① 收件人是管理员 / 站长 —— 给管理团队发消息不该被拦；
- *   ② 双方有订单关系 —— 买家卖家本来就该能直接联系（站长确认：免）。
+ *   ① 发件人是管理员 / 站长 —— 管理团队要主动联系用户（通知中奖、售后跟进、
+ *      核实情况），不该被「只能发一条、等对方同意」卡住（2026-11-05 站长要求）；
+ *   ② 收件人是管理员 / 站长 —— 给管理团队发消息不该被拦；
+ *   ③ 双方有订单关系 —— 买家卖家本来就该能直接联系（站长确认：免）。
  *
  * 其余情况按 dm_contacts 关系判断：
  *   · 任一方向 accepted → 自由发；
@@ -128,11 +130,16 @@ type SendGate =
 
 async function checkSendGate(
   env: Env,
-  me: { id: string },
+  me: { id: string; role: string },
   peer: PeerRow
 ): Promise<SendGate> {
   // ⚠️ 用 isAnyAdmin（root / superadmin / 白名单 admin），不是 isPrivileged ——
   //    注释说的「管理员 / 站长」包含自定义白名单管理员（同 feedback.ts 的徽章判据）。
+  //
+  // 发件人是管理员 / 站长：完全不受聊天申请限制（2026-11-05 站长要求）。
+  // 也**不落** request 记录 —— 管理员主动找人不是「申请」，对方不该被要求点同意，
+  // 更不该在对方拒绝后把管理员挡在外面（管理团队必须始终能通知到人）。
+  if (isAnyAdmin(me.role)) return { ok: true, needRequestRow: false }
   if (isAnyAdmin(peer.role)) return { ok: true, needRequestRow: false }
 
   const order = await env.DB.prepare(
@@ -723,7 +730,8 @@ export async function sendDm(env: Env, request: Request): Promise<Response> {
     }
   }
 
-  // 陌生人的第一条消息 = 聊天申请；对方同意前只能发这一条
+  // 陌生人的第一条消息 = 聊天申请；对方同意前只能发这一条。
+  // 管理员 / 站长发出的不受此限（checkSendGate 里直接放行，也不落申请记录）。
   const gate = await checkSendGate(env, me, peer)
   if (!gate.ok) throw new ApiError(403, gate.message, gate.code)
 

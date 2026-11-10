@@ -1,5 +1,5 @@
 import * as React from "react"
-import { ChevronRight, Cloud, Copy, ExternalLink, Eye, EyeOff, Folder, FolderPlus, Globe, HardDrive, Home, Link2, Loader2, Power, RefreshCw, ScrollText, Share2, Trash2, Upload, X } from "lucide-react"
+import { ArrowDown, ArrowUp, ArrowUpRight, ChevronRight, ClipboardPaste, Cloud, Copy, Eye, EyeOff, Folder, FolderPlus, Globe, HardDrive, Home, Link2, Loader2, Power, RefreshCw, Scissors, ScrollText, Share2, Trash2, Upload, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/page-header"
@@ -117,8 +117,75 @@ export default function StoragePage() {
   const [folderOpen, setFolderOpen] = React.useState(false)
   const [folderName, setFolderName] = React.useState("")
   const fileInputRef = React.useRef<HTMLInputElement>(null)
-  /** 多选：批量删除用（存 key） */
+  /** 多选：批量删除 / 复制 / 剪切用（存 key） */
   const [selected, setSelected] = React.useState<Set<string>>(new Set())
+  /**
+   * 剪贴板：记下「复制 / 剪切了哪几个文件」，粘到当前目录时才真正搬。
+   * 只存 key，真正的搬运交给服务端（R2 CopyObject，不走浏览器流量）。
+   * 刷新列表 / 切目录都不清空 —— 用户可能想连贴几个目录。
+   */
+  const [clipboard, setClipboard] = React.useState<{
+    mode: "copy" | "move"
+    keys: string[]
+  } | null>(null)
+  /** 文件排序：名称 / 大小 / 上传时间（点表头切换，同列再点反向） */
+  const [sortKey, setSortKey] = React.useState<"name" | "size" | "time">("name")
+  const [sortDir, setSortDir] = React.useState<"asc" | "desc">("asc")
+
+  /**
+   * 排好序的文件列表。
+   *
+   * 目录不参与排序：它们的 size / 时间来自零字节占位对象，拿来做排序依据毫无意义，
+   * 所以固定「目录在前、按名称」。
+   * 同值时用名称做次级排序 —— 否则同一尺寸/同一秒上传的文件每次刷新顺序都在跳。
+   */
+  const sortedObjects = React.useMemo(() => {
+    const sign = sortDir === "asc" ? 1 : -1
+    const byName = (a: StorageObject, b: StorageObject) =>
+      a.filename.localeCompare(b.filename, "zh-Hans-CN")
+    return [...objects].sort((a, b) => {
+      if (sortKey === "size") return sign * (a.size - b.size || byName(a, b))
+      if (sortKey === "time") {
+        const at = a.lastModified ?? ""
+        const bt = b.lastModified ?? ""
+        return sign * ((at === bt ? 0 : at < bt ? -1 : 1) || byName(a, b))
+      }
+      return sign * byName(a, b)
+    })
+  }, [objects, sortKey, sortDir])
+
+  /** 表头排序按钮：点当前列反向，点别的列用该列的惯用默认方向 */
+  const sortHeader = (col: "name" | "size" | "time", label: string) => {
+    const active = sortKey === col
+    const nextDir: "asc" | "desc" = active
+      ? sortDir === "asc"
+        ? "desc"
+        : "asc"
+      : col === "name"
+        ? "asc"
+        : "desc"
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          setSortKey(col)
+          setSortDir(nextDir)
+        }}
+        title={t("st.sort.hint")}
+        className={`inline-flex cursor-pointer items-center gap-1 rounded-md px-1 py-0.5 transition-colors hover:text-foreground ${
+          active ? "text-foreground" : "text-muted-foreground"
+        }`}
+      >
+        {label}
+        {active &&
+          (sortDir === "asc" ? (
+            <ArrowUp className="h-3.5 w-3.5" />
+          ) : (
+            <ArrowDown className="h-3.5 w-3.5" />
+          ))}
+      </button>
+    )
+  }
 
   /** 拉取概览与文件列表；silent 用于上传/删除后刷新，避免整页 loading 闪烁 */
   // 无权限（403 FEATURE_NOT_PERMITTED）：整页显示提示 + 捐献入口
@@ -519,6 +586,57 @@ export default function StoragePage() {
       await load(true)
     } catch (err) {
       toast.error(err instanceof HttpError ? err.message : t("em.err.delete"))
+    }
+  }
+
+  // ---- 复制 / 剪切 / 粘贴 ----
+  //
+  // 交互照资源管理器：勾选 → 「复制」或「剪切」→ 进目标目录 → 「粘贴到此处」。
+  // 真正搬动在粘贴时由服务端做（R2 CopyObject），所以「剪切」不是立即删除，
+  // 目标目录可以后悔 —— 不粘贴就什么都不会变。
+
+  /** 把所选的 key 放进剪贴板（只记下来，不动文件） */
+  const handleClipboardCopy = (mode: "copy" | "move") => {
+    const keys = [...selected].filter((k) => objects.some((o) => o.key === k))
+    if (keys.length === 0) return
+    setClipboard({ mode, keys })
+    toast.success(
+      mode === "move"
+        ? t("st.clip.okCut", { n: keys.length })
+        : t("st.clip.okCopied", { n: keys.length })
+    )
+  }
+
+  /** 把剪贴板里的文件贴到当前目录 */
+  const handlePaste = async () => {
+    if (!clipboard || clipboard.keys.length === 0 || busy) return
+    setBusy(true)
+    try {
+      const res = await storageApi.copyObjects({
+        keys: clipboard.keys,
+        destFolder: path || undefined,
+        mode: clipboard.mode,
+      })
+      if (res.count > 0) {
+        toast.success(
+          res.mode === "move"
+            ? t("st.ok.moved", { n: res.count })
+            : t("st.ok.copied", { n: res.count })
+        )
+      } else if (res.failed.length === 0 && res.missing.length === 0) {
+        toast.success(t("st.ok.nothingToDo"))
+      }
+      if (res.failed.length > 0) toast.error(t("st.err.copyFailed", { n: res.failed.length }))
+      if (res.missing.length > 0) toast.error(t("st.err.copyMissing", { n: res.missing.length }))
+
+      // 剪切且全部成功 ⇒ 剪贴板已空；复制则保留，方便连续粘到多个目录
+      if (res.mode === "move" && res.failed.length === 0) setClipboard(null)
+      setSelected(new Set())
+      await load(true)
+    } catch (err) {
+      toast.error(err instanceof HttpError ? err.message : t("st.err.paste"))
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -987,15 +1105,35 @@ export default function StoragePage() {
             </CardTitle>
             <div className="flex items-center gap-2">
               {selected.size > 0 && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-destructive hover:text-destructive"
-                  onClick={() => void handleDeleteSelected()}
-                >
-                  <Trash2 className="h-4 w-4" />
-                  {t("st.list.deleteSelected", { n: selected.size })}
-                </Button>
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleClipboardCopy("copy")}
+                    disabled={busy}
+                  >
+                    <Copy className="h-4 w-4" />
+                    {t("st.clip.copy")}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleClipboardCopy("move")}
+                    disabled={busy}
+                  >
+                    <Scissors className="h-4 w-4" />
+                    {t("st.clip.cut")}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-destructive hover:text-destructive"
+                    onClick={() => void handleDeleteSelected()}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    {t("st.list.deleteSelected", { n: selected.size })}
+                  </Button>
+                </>
               )}
               <Button variant="outline" size="sm" onClick={() => setFolderOpen(true)}>
                 <FolderPlus className="h-4 w-4" />
@@ -1035,6 +1173,39 @@ export default function StoragePage() {
                 )
               })}
             </div>
+
+            {/* 剪贴板提示条：有复制/剪切的内容时一直显示，粘到哪个目录跟着面包屑走 */}
+            {clipboard && (
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed bg-muted/40 px-3 py-2">
+                <ClipboardPaste className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 text-xs text-muted-foreground">
+                  {t(clipboard.mode === "move" ? "st.clip.barCut" : "st.clip.barCopy", {
+                    n: clipboard.keys.length,
+                    dir: path || t("st.clip.rootDir"),
+                  })}
+                </span>
+                <Button
+                  size="sm"
+                  onClick={() => void handlePaste()}
+                  disabled={busy || clipboard.keys.length === 0}
+                >
+                  {busy ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ClipboardPaste className="h-4 w-4" />
+                  )}
+                  {t("st.clip.paste")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setClipboard(null)}
+                  disabled={busy}
+                >
+                  {t("st.clip.cancel")}
+                </Button>
+              </div>
+            )}
 
             {listingTruncated && (
               <p className="text-xs text-muted-foreground">{t("st.list.truncated")}</p>
@@ -1105,14 +1276,14 @@ export default function StoragePage() {
                         aria-label={t("st.list.selectAll")}
                       />
                     </TableHead>
-                    <TableHead>{t("st.list.col.name")}</TableHead>
-                    <TableHead>{t("st.list.col.size")}</TableHead>
-                    <TableHead>{t("st.list.col.uploaded")}</TableHead>
+                    <TableHead>{sortHeader("name", t("st.list.col.name"))}</TableHead>
+                    <TableHead>{sortHeader("size", t("st.list.col.size"))}</TableHead>
+                    <TableHead>{sortHeader("time", t("st.list.col.uploaded"))}</TableHead>
                     <TableHead className="w-32" />
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {objects.map((o) => {
+                  {sortedObjects.map((o) => {
                     const link = directLinkFor(o.path)
                     return (
                       <TableRow key={o.key}>
@@ -1153,7 +1324,7 @@ export default function StoragePage() {
                               title={t("st.list.openLink")}
                             >
                               <a href={link} target="_blank" rel="noreferrer">
-                                <ExternalLink className="h-4 w-4" />
+                                <ArrowUpRight className="h-4 w-4" />
                               </a>
                             </Button>
                             <Button
@@ -1221,7 +1392,7 @@ export default function StoragePage() {
                     title={t("st.list.openLink")}
                   >
                     <a href={s.url} target="_blank" rel="noreferrer">
-                      <ExternalLink className="h-4 w-4" />
+                      <ArrowUpRight className="h-4 w-4" />
                     </a>
                   </Button>
                   <Button

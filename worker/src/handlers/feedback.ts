@@ -17,7 +17,8 @@ import { requireAdminScope, resolveAdminScope } from "./admin"
 import { uuid } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
 import { getSetting, audit as recordAudit } from "../settings"
-import { sendMail, renderMail } from "../mailer"
+import { sendMail, renderMail, siteUrl } from "../mailer"
+import { unsubscribeUrl } from "../mail-unsubscribe"
 import { applyPoints } from "../points"
 import { isStorageConfigured, putObject, getObject, deleteObject, getPlatformBucketId } from "../r2"
 import { hardenUserContentResponse } from "../content-type"
@@ -442,16 +443,17 @@ export async function createFeedback(env: Env, request: Request): Promise<Respon
         `分类：${FEEDBACK_CATEGORY_LABELS[parseCategory(body.category)] ?? "其他"}`,
         `标题：${title}`,
         `内容：${text}`,
-        "请到 Doulor Cloud 管理面板「反馈」处理。",
       ]
-      const { text: mailText, html } = renderMail("新的用户反馈", lines)
+      const rendered = renderMail("新的用户反馈", lines, {
+        kind: "admin",
+        action: { label: "去处理反馈", url: siteUrl("/dashboard/admin#feedback") },
+      })
       for (const to of recipients) {
         try {
           await sendMail(env, {
             to,
             subject: `【Doulor Cloud】新的用户反馈（${user.username}）`,
-            text: mailText,
-            html,
+            ...rendered,
           })
         } catch (err) {
           console.error("反馈管理员通知失败:", to, err)
@@ -734,18 +736,20 @@ export async function replyMyFeedback(env: Env, request: Request): Promise<Respo
     const target = (await getSetting(env, "feedback_admin_notify_email")).trim()
     if (target) {
       const recipients = target.split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean)
-      const { text: mailText, html } = renderMail("反馈有新回复", [
-        `用户 ${user.username} 对反馈「${existing.title}」追加了回复：`,
-        text,
-        "请到管理面板「反馈」查看并继续处理。",
-      ])
+      const rendered = renderMail(
+        "反馈有新回复",
+        [`用户 ${user.username} 对反馈「${existing.title}」追加了回复：`, text],
+        {
+          kind: "admin",
+          action: { label: "去处理反馈", url: siteUrl("/dashboard/admin#feedback") },
+        }
+      )
       for (const to of recipients) {
         try {
           await sendMail(env, {
             to,
             subject: `【Doulor Cloud】反馈「${existing.title}」有新回复`,
-            text: mailText,
-            html,
+            ...rendered,
           })
         } catch (err) {
           console.error("反馈追加回复通知管理员失败:", to, err)
@@ -1004,20 +1008,26 @@ export async function replyFeedback(env: Env, request: Request): Promise<Respons
       .bind(existing.user_id)
       .first<{ email: string; notify_enabled: number }>()
     if (author && author.notify_enabled === 1 && author.email) {
-      const { text, html } = renderMail("你的反馈有新回复", [
-        `你在 Doulor Cloud 提交的反馈「${existing.title}」收到了管理员的回复：`,
-        reply,
-        // 只有真的发出去（不是幂等命中）才提奖励，否则会重复告诉用户
-        ...(reward && !reward.duplicated
-          ? [`另外，感谢你的反馈，已赠送 ${reward.amount} 积分（当前余额 ${reward.balance}）。`]
-          : []),
-        "可到控制台「反馈」页查看并继续回复。",
-      ])
+      const rendered = renderMail(
+        "你的反馈有新回复",
+        [
+          `你在 Doulor Cloud 提交的反馈「${existing.title}」收到了管理员的回复：`,
+          reply,
+          // 只有真的发出去（不是幂等命中）才提奖励，否则会重复告诉用户
+          ...(reward && !reward.duplicated
+            ? [`另外，感谢你的反馈，已赠送 ${reward.amount} 积分（当前余额 ${reward.balance}）。`]
+            : []),
+        ],
+        {
+          kind: "notification",
+          action: { label: "查看并回复", url: siteUrl("/dashboard/feedback") },
+          unsubscribeUrl: await unsubscribeUrl(env, existing.user_id, "personal"),
+        }
+      )
       await sendMail(env, {
         to: author.email,
         subject: `【Doulor Cloud】你的反馈「${existing.title}」有新回复`,
-        text,
-        html,
+        ...rendered,
       })
     }
   } catch (err) {

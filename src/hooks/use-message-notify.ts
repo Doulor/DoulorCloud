@@ -1,6 +1,12 @@
 import * as React from "react"
 
 import { notificationApi } from "@/services/api"
+import {
+  isUserWatching,
+  notifyPermission,
+  requestNotifyPermission,
+  showSystemNotification,
+} from "@/lib/web-notify"
 import { useT } from "@/i18n"
 
 /** 轮询间隔。与侧边栏消息铃铛一致（都是 1 分钟）。 */
@@ -12,8 +18,7 @@ const SEEN_KEY = "doulor-notified-id"
 export type NotifyPermission = "unsupported" | "default" | "granted" | "denied"
 
 function readPermission(): NotifyPermission {
-  if (typeof window === "undefined" || !("Notification" in window)) return "unsupported"
-  return Notification.permission as NotifyPermission
+  return notifyPermission() as NotifyPermission
 }
 
 /**
@@ -42,24 +47,22 @@ export function useMessageNotify() {
     let stopped = false
 
     const tick = async () => {
-      // 用户正看着页面就不打扰
-      if (!document.hidden) return
+      // 用户正看着页面就不打扰（WebView 里 page visibility 有时不更新，
+      // 再叠一个 hasFocus 判断：App 切后台时 focus 一定是丢的）
+      if (isUserWatching()) return
       try {
         const item = await notificationApi.latest(lang)
         if (stopped || !item) return
         if (localStorage.getItem(SEEN_KEY) === item.id) return
         localStorage.setItem(SEEN_KEY, item.id)
 
-        const n = new Notification(item.title, {
+        // 走统一的发送入口：Android 上 `new Notification()` 会抛 Illegal constructor，
+        // 必须用 Service Worker 的 showNotification（见 src/lib/web-notify.ts）
+        await showSystemNotification(item.title, {
           body: item.body,
-          icon: "/favicon.png?v=2",
           tag: item.id,
+          url: item.link || "/dashboard/messages",
         })
-        n.onclick = () => {
-          window.focus()
-          window.location.assign(item.link || "/dashboard/messages")
-          n.close()
-        }
       } catch {
         // 通知失败不该打扰用户（权限被系统撤销、App 侧能力未开启等）
       }
@@ -75,17 +78,9 @@ export function useMessageNotify() {
 
   /** 申请权限。必须由用户点击触发，否则浏览器会直接拒绝。 */
   const request = React.useCallback(async () => {
-    if (!("Notification" in window)) {
-      setPermission("unsupported")
-      return "unsupported" as NotifyPermission
-    }
-    try {
-      const res = await Notification.requestPermission()
-      setPermission(res as NotifyPermission)
-      return res as NotifyPermission
-    } catch {
-      return readPermission()
-    }
+    const res = (await requestNotifyPermission()) as NotifyPermission
+    setPermission(res)
+    return res
   }, [])
 
   return { permission, request }

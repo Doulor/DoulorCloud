@@ -43,6 +43,19 @@ function setAuto(user: TestUser, enabled: boolean): Promise<Response> {
   )
 }
 
+/**
+ * 直接落库打开自动签到。
+ *
+ * 为什么不走接口：自动签到有「成就点数 ≥ 36（名人）」的门槛（2026-10-29 加），
+ * 用例里新建的账号成就点为 0，调接口必然 403。这些用例测的是**状态契约**
+ * （today / autoCheckin 的回显），不是那道门槛 —— 门槛本身在下面单独断言。
+ */
+async function forceAuto(user: TestUser, enabled: boolean): Promise<void> {
+  await env.DB.prepare("UPDATE users SET auto_checkin = ? WHERE id = ?")
+    .bind(enabled ? 1 : 0, user.id)
+    .run()
+}
+
 function checkin(user: TestUser): Promise<Response> {
   return fetchSelf(authRequest(user, "/api/checkin", { method: "POST" }))
 }
@@ -69,9 +82,13 @@ describe("GET /api/checkin —— 自动签到依赖的状态契约", () => {
     expect(b1.checkedIn).toBe(false)
     expect(b1.autoCheckin).toBe(false)
 
-    // 打开自动签到后，状态接口应如实回显（前端据此决定要不要自动签）
-    const set = await setAuto(u, true)
-    expect(set.status).toBe(200)
+    // 成就点不够时开门就被拒（2026-10-29 的规则：自动签到需「名人」36 点）
+    const denied = await setAuto(u, true)
+    expect(denied.status).toBe(403)
+    expect((await denied.json<{ code: string }>()).code).toBe("ACHIEVEMENT_TOO_LOW")
+
+    // 已解锁的用户打开开关后，状态接口应如实回显（前端据此决定要不要自动签）
+    await forceAuto(u, true)
     const b2 = await (await status(u)).json<StatusBody>()
     expect(b2.autoCheckin).toBe(true)
     // today 不因开关或签到而变：它是「当前站点日」，前端按天判定就靠它
@@ -80,7 +97,7 @@ describe("GET /api/checkin —— 自动签到依赖的状态契约", () => {
 
   it("签到后 today 不变、checkedIn 变 true；重复签返回 409（前端据此记为已完成）", async () => {
     const u = await makeUser()
-    await setAuto(u, true)
+    await forceAuto(u, true)
 
     const before = await (await status(u)).json<StatusBody>()
     expect(before.checkedIn).toBe(false)

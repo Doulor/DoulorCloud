@@ -37,7 +37,9 @@ import { ApiError, json } from "../http"
 import { requireUser, isAnyAdmin } from "../auth"
 import { callCloudflare } from "../cloudflare"
 import { fetchWithTimeout } from "../async-utils"
-import { getSetting } from "../settings"
+import { getSetting, getSettingNumber } from "../settings"
+// 出站邮件的用量只能由本站自己数（CF 没有只读接口），口径见 mailer.ts 的 cfMailBudget
+import { cfMailBudget } from "../mailer"
 import type { Env } from "../env"
 
 /** 历史窗口天数（前端画小柱状图用） */
@@ -46,6 +48,14 @@ const HISTORY_DAYS = 14
 const CACHE_MS = 60_000
 /** 调 Cloudflare GraphQL 的超时（与 cloudflare.ts 的 CF_API_TIMEOUT_MS 一致） */
 const CF_API_TIMEOUT_MS = 15_000
+/**
+ * 单次 GraphQL 查询能覆盖的最大天数。
+ *
+ * CF 的硬限制是「4 周 4 天」（= 32 天）；一个计费周期最长 31 天（起始日夹在
+ * 1–28），本来就够用，但**一旦超限整条查询会报错**（表现为「用量全读不到」），
+ * 所以这里显式收在 31 天，宁可少读一天也不要把面板读空。
+ */
+const MAX_WINDOW_DAYS = 31
 
 /**
  * 免费额度（2026-09-25 逐条核对 Cloudflare 官方文档，来源见每条注释）。
@@ -216,9 +226,36 @@ export function utcDay(at: Date = new Date()): string {
   return at.toISOString().slice(0, 10)
 }
 
-/** 本月第一天（`YYYY-MM-01`）—— R2 / Pages 的额度按月算 */
+/** 本月第一天（`YYYY-MM-01`）—— 自然月口径（保留给「周期从 1 号起算」的情况与测试） */
 export function utcMonthStart(at: Date = new Date()): string {
   return `${at.toISOString().slice(0, 7)}-01`
+}
+
+/** 计费周期起始日夹到 1–28（29/30/31 在小月不存在，会让口径一个月一变） */
+export function clampCycleDay(day: number | string): number {
+  const n = Math.trunc(Number(day))
+  if (!Number.isFinite(n)) return 1
+  return Math.min(28, Math.max(1, n))
+}
+
+/**
+ * 当前**计费周期**的起点（`YYYY-MM-DD`，UTC）。
+ *
+ * CF 的「每月包含额度」按订阅日滚动，不是自然月：18 号扣费的账号，额度也在
+ * 18 号翻篇。所以周期起点 = 「本月或上月的第 cycleDay 天」中 ≤ 今天的那个。
+ *
+ *   cycleDay = 1  → 就是自然月（与旧口径完全一致）
+ *   cycleDay = 18 → 今天是 11-05 则起点是 10-18；今天是 11-20 则起点是 11-18
+ */
+export function quotaCycleStart(at: Date = new Date(), cycleDay = 1): string {
+  const day = clampCycleDay(cycleDay)
+  const y = at.getUTCFullYear()
+  const m = at.getUTCMonth()
+  const iso = (yy: number, mm: number) =>
+    `${yy}-${String(mm + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`
+  if (at.getUTCDate() >= day) return iso(y, m)
+  const prev = new Date(Date.UTC(y, m - 1, 1))
+  return iso(prev.getUTCFullYear(), prev.getUTCMonth())
 }
 
 /** 把 `[{dimensions:{date},sum:{x}}]` 摊平成按天序列，日期升序 */
@@ -346,13 +383,41 @@ export interface CfQuotaOverview {
   planSetting: string
   /** 判定过程的一句人话解释 */
   planNote: string
-  /** 付费版：本月（截至现在）估算的**总费用**，含 $5 订阅底价 */
+  /** 计费周期起始日（每月几号翻篇，1–28；1 = 自然月） */
+  cycleDay: number
+  /** 本计费周期起点（`YYYY-MM-DD`，UTC） */
+  cycleStart: string
+  /** 本计费周期截止（= 今天，UTC） */
+  cycleEnd: string
+  /** 付费版：本周期（截至现在）估算的**总费用**，含 $5 订阅底价 */
   estimatedCostUsd: number | null
   /** 付费版：费用拆解（订阅 + 各项超量），供 UI 列明细 */
   costBreakdown: { label: string; detail: string; usd: number }[]
   /** 图形化概览用的几项（按占用率从高到低） */
   highlights: QuotaHighlight[]
   groups: QuotaGroup[]
+  /**
+   * 出站邮件（Email Sending）本账期用量。
+   *
+   * ⚠️ 这一项**不是** CF 的 GraphQL 用量数据：Cloudflare 没有提供"这个月还剩多少封"
+   * 的只读接口，所以用的是**本站自己的计数**（`mail_send_usage` 表，见 mailer.ts 的
+   * cfMailBudget）。它只统计本站发出的信；同账号下别的系统发的不会进来（默认上限
+   * 3,000 里留了 100 封余量就是为这个）。站内邮箱对外发信与系统通知共用这一份。
+   */
+  emailSending: {
+    /** 本账期已计费封数 */
+    used: number
+    /** 自设上限（0 = 不限，会出账单） */
+    cap: number
+    /** 计费窗口 YYYY-MM */
+    period: string
+    /** 是否已到上限（到量后不再走 CF） */
+    blocked: boolean
+    /** 套餐含的免费额度（封/账期） */
+    includedMonthly: number
+    /** 付费版：按当前用量估算的超额费用（$），免费版为 null */
+    overageUsd: number | null
+  }
   /** 整体性提醒（例如分析数据整体读不到时给一条统一的处置建议） */
   warnings: string[]
 }
@@ -436,21 +501,28 @@ interface AnalyticsBundle {
  * 拉分析数据。拆成 3 条查询：GraphQL 里一个字段出错整条查询就废，
  * 拆开才能做到「KV 读不到不影响 Workers 的显示」。
  */
-async function fetchAnalytics(env: Env, accountId: string): Promise<{
+async function fetchAnalytics(
+  env: Env,
+  accountId: string,
+  cycleStart: string
+): Promise<{
   data: AnalyticsBundle
   errors: Partial<Record<keyof AnalyticsBundle, string>>
 }> {
   const now = new Date()
   const until = utcDay(now)
-  const monthStart = utcMonthStart(now)
-  // 窗口取「最近 HISTORY_DAYS 天」与「本自然月」中更早的那个：
-  // 付费版的额度是**月**口径，只看最近 14 天算不出「本月至今」。
-  // 多拉的那些天由 tailDays() 在展示层裁掉，不影响柱状图。
+  // 窗口取「最近 HISTORY_DAYS 天」与「本计费周期起点」中更早的那个：
+  // 付费版的额度是**按月**口径，只看最近 14 天算不出「本周期至今」。
+  // 多拉的那些天由 cycleHistory() 在展示层裁掉，不影响柱状图。
   const fortnightAgo = new Date(now.getTime() - (HISTORY_DAYS - 1) * 86400_000)
     .toISOString()
     .slice(0, 10)
-  const since = fortnightAgo < monthStart ? fortnightAgo : monthStart
-  const vars = { since, until, monthStart }
+  const earliest = new Date(now.getTime() - (MAX_WINDOW_DAYS - 1) * 86400_000)
+    .toISOString()
+    .slice(0, 10)
+  const wanted = fortnightAgo < cycleStart ? fortnightAgo : cycleStart
+  const since = wanted < earliest ? earliest : wanted
+  const vars = { since, until, cycleStart }
 
   const data: AnalyticsBundle = {
     workers: [],
@@ -493,7 +565,7 @@ async function fetchAnalytics(env: Env, accountId: string): Promise<{
         ["r2StorageAdaptiveGroups", "r2Storage"],
         ["r2OperationsAdaptiveGroups", "r2Ops"],
       ],
-      query: `query ($acct: String!, $since: String!, $until: String!, $monthStart: String!) {
+      query: `query ($acct: String!, $since: String!, $until: String!, $cycleStart: String!) {
         viewer { accounts(filter: {accountTag: $acct}) {
           kvOperationsAdaptiveGroups(limit: 400, filter: {date_geq: $since, date_leq: $until}) {
             sum { requests } dimensions { actionType date }
@@ -504,7 +576,7 @@ async function fetchAnalytics(env: Env, accountId: string): Promise<{
           r2StorageAdaptiveGroups(limit: 100, filter: {date_geq: $since, date_leq: $until}) {
             max { payloadSize metadataSize } dimensions { date }
           }
-          r2OperationsAdaptiveGroups(limit: 300, filter: {date_geq: $monthStart, date_leq: $until}) {
+          r2OperationsAdaptiveGroups(limit: 300, filter: {date_geq: $cycleStart, date_leq: $until}) {
             sum { requests } dimensions { actionType }
           }
         } }
@@ -648,7 +720,7 @@ async function detectPlan(
 }
 
 /** REST 侧的计数/体积。每一项独立失败，只写进 errors */
-async function fetchResources(env: Env, accountId: string): Promise<{
+async function fetchResources(env: Env, accountId: string, cycleStart: string): Promise<{
   counts: {
     workersScripts: number | null
     d1Bytes: number | null
@@ -709,7 +781,8 @@ async function fetchResources(env: Env, accountId: string): Promise<{
 
         // 只对「最近有部署」的项目去数部署次数：把 6 个项目全拉一遍没必要，
         // 而且每个项目一次请求（子请求额度要省着用）。
-        const monthStart = utcMonthStart()
+        // 与面板的计费周期口径一致（原来是自然月 1 号），否则「本月构建」会跨周期算错
+        const monthStart = cycleStart
         const candidates = projects.filter(
           (p) => (p.latest_deployment?.created_on ?? "") >= monthStart
         )
@@ -750,7 +823,6 @@ async function fetchResources(env: Env, accountId: string): Promise<{
 // ---- 组装 ----
 
 const dayPeriod = "每天 00:00 UTC 重置"
-const monthPeriod = "每月重置（自然月，按订阅日推算）"
 const stockPeriod = "不重置（存量）"
 
 const GIB = 1024 ** 3
@@ -772,11 +844,25 @@ export function maxValue(series: { value: number }[]): number {
 export async function collectQuota(env: Env, accountId: string): Promise<CfQuotaOverview> {
   const now = new Date()
   const today = utcDay(now)
-  const monthStart = utcMonthStart(now)
+
+  // 计费周期起始日（设置项 cf_cycle_day，1–28，默认 1 = 自然月）。
+  // 读设置失败（表还没建等）不该让整个面板 500，回落 1。
+  const cycleDay = clampCycleDay(await getSettingNumber(env, "cf_cycle_day").catch(() => 1))
+  const cycleStart = quotaCycleStart(now, cycleDay)
+
+  /** 柱状图只画**本周期内**的天：跨周期的老数据画进来会让人误读「这个周期用爆了」 */
+  const cycleHistory = (series: { date: string; value: number }[]) =>
+    tailDays(series.filter((p) => p.date >= cycleStart), HISTORY_DAYS)
+
+  /** 付费版每张卡片上的口径说明：写清「从每月几号起算、本周期是哪一段」 */
+  const monthPeriod =
+    cycleDay === 1
+      ? `每月 1 日起算（自然月；本周期 ${cycleStart} → ${today}）`
+      : `每月 ${cycleDay} 日起算（计费周期；${cycleStart} → ${today}）`
 
   const [analytics, resources] = await Promise.all([
-    fetchAnalytics(env, accountId),
-    fetchResources(env, accountId),
+    fetchAnalytics(env, accountId, cycleStart),
+    fetchResources(env, accountId, cycleStart),
   ])
   const { data, errors } = analytics
   const { counts } = resources
@@ -983,13 +1069,13 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
           key: "workers.requests",
           label: paid ? "本月请求数" : "今日请求数",
           today: errors.workers ? null : valueOnDate(data.workers, "requests", today),
-          mtd: errors.workers ? null : sumSeriesSince(workersSeries, monthStart),
+          mtd: errors.workers ? null : sumSeriesSince(workersSeries, cycleStart),
           limitFreePerDay: FREE_LIMITS.workersRequestsPerDay,
           limitPaidPerMonth: PAID_LIMITS.workersRequestsPerMonth,
           rate: { per: 1_000_000, usd: PAID_RATES.workersRequests },
           overageNote: "月含 1000 万次，超出后 $0.30 / 百万次",
           paidNote: "升级后：每月含 1000 万次、无每日上限，超出 $0.30/百万次",
-          history: tailDays(workersSeries, HISTORY_DAYS),
+          history: cycleHistory(workersSeries),
           error: errors.workers,
         }),
         stockItem({
@@ -1015,13 +1101,13 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
           label: paid ? "本月行读" : "今日行读",
           unit: "rows",
           today: errors.d1 ? null : valueOnDate(data.d1, "rowsRead", today),
-          mtd: errors.d1 ? null : sumSeriesSince(d1ReadSeries, monthStart),
+          mtd: errors.d1 ? null : sumSeriesSince(d1ReadSeries, cycleStart),
           limitFreePerDay: FREE_LIMITS.d1RowsReadPerDay,
           limitPaidPerMonth: PAID_LIMITS.d1RowsReadPerMonth,
           rate: { per: 1_000_000, usd: PAID_RATES.d1RowsRead },
           overageNote: "月含 250 亿行，超出后 $0.001 / 百万行",
           paidNote: "升级后：每月含 250 亿行、无每日上限",
-          history: tailDays(d1ReadSeries, HISTORY_DAYS),
+          history: cycleHistory(d1ReadSeries),
           error: errors.d1,
         }),
         flowItem({
@@ -1029,13 +1115,13 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
           label: paid ? "本月行写" : "今日行写",
           unit: "rows",
           today: errors.d1 ? null : valueOnDate(data.d1, "rowsWritten", today),
-          mtd: errors.d1 ? null : sumSeriesSince(d1WriteSeries, monthStart),
+          mtd: errors.d1 ? null : sumSeriesSince(d1WriteSeries, cycleStart),
           limitFreePerDay: FREE_LIMITS.d1RowsWrittenPerDay,
           limitPaidPerMonth: PAID_LIMITS.d1RowsWrittenPerMonth,
           rate: { per: 1_000_000, usd: PAID_RATES.d1RowsWritten },
           overageNote: "月含 5000 万行，超出后 $1.00 / 百万行",
           paidNote: "升级后：每月含 5000 万行、无每日上限",
-          history: tailDays(d1WriteSeries, HISTORY_DAYS),
+          history: cycleHistory(d1WriteSeries),
           error: errors.d1,
         }),
         stockItem({
@@ -1138,26 +1224,26 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
           key: "kv.reads",
           label: paid ? "本月键读取" : "今日键读取",
           today: errors.kvOps ? null : sumByAction(data.kvOps, { date: today, actions: ["read"] }),
-          mtd: errors.kvOps ? null : sumByAction(data.kvOps, { since: monthStart, actions: ["read"] }),
+          mtd: errors.kvOps ? null : sumByAction(data.kvOps, { since: cycleStart, actions: ["read"] }),
           limitFreePerDay: FREE_LIMITS.kvReadsPerDay,
           limitPaidPerMonth: PAID_LIMITS.kvReadsPerMonth,
           rate: { per: 1_000_000, usd: PAID_RATES.kvReads },
           overageNote: "月含 1000 万次，超出后 $0.50 / 百万次",
           paidNote: "升级后：每月含 1000 万次读",
-          history: tailDays(kvReadSeries, HISTORY_DAYS),
+          history: cycleHistory(kvReadSeries),
           error: errors.kvOps,
         }),
         flowItem({
           key: "kv.writes",
           label: paid ? "本月键写入" : "今日键写入",
           today: errors.kvOps ? null : sumByAction(data.kvOps, { date: today, actions: ["write"] }),
-          mtd: errors.kvOps ? null : sumByAction(data.kvOps, { since: monthStart, actions: ["write"] }),
+          mtd: errors.kvOps ? null : sumByAction(data.kvOps, { since: cycleStart, actions: ["write"] }),
           limitFreePerDay: FREE_LIMITS.kvWritesPerDay,
           limitPaidPerMonth: PAID_LIMITS.kvWritesPerMonth,
           rate: { per: 1_000_000, usd: PAID_RATES.kvOps },
           overageNote: "月含 100 万次，超出后 $5.00 / 百万次",
           paidNote: "升级后：每月含 100 万次写",
-          history: tailDays(kvWriteSeries, HISTORY_DAYS),
+          history: cycleHistory(kvWriteSeries),
           error: errors.kvOps,
         }),
         flowItem({
@@ -1166,26 +1252,26 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
           today: errors.kvOps ? null : sumByAction(data.kvOps, { date: today, actions: ["delete"] }),
           mtd: errors.kvOps
             ? null
-            : sumByAction(data.kvOps, { since: monthStart, actions: ["delete"] }),
+            : sumByAction(data.kvOps, { since: cycleStart, actions: ["delete"] }),
           limitFreePerDay: FREE_LIMITS.kvDeletesPerDay,
           limitPaidPerMonth: PAID_LIMITS.kvDeletesPerMonth,
           rate: { per: 1_000_000, usd: PAID_RATES.kvOps },
           overageNote: "月含 100 万次，超出后 $5.00 / 百万次",
           paidNote: "升级后：每月含 100 万次删除",
-          history: tailDays(kvDeleteSeries, HISTORY_DAYS),
+          history: cycleHistory(kvDeleteSeries),
           error: errors.kvOps,
         }),
         flowItem({
           key: "kv.lists",
           label: paid ? "本月列表请求" : "今日列表请求",
           today: errors.kvOps ? null : sumByAction(data.kvOps, { date: today, actions: ["list"] }),
-          mtd: errors.kvOps ? null : sumByAction(data.kvOps, { since: monthStart, actions: ["list"] }),
+          mtd: errors.kvOps ? null : sumByAction(data.kvOps, { since: cycleStart, actions: ["list"] }),
           limitFreePerDay: FREE_LIMITS.kvListsPerDay,
           limitPaidPerMonth: PAID_LIMITS.kvListsPerMonth,
           rate: { per: 1_000_000, usd: PAID_RATES.kvOps },
           overageNote: "月含 100 万次，超出后 $5.00 / 百万次",
           paidNote: "升级后：每月含 100 万次列表",
-          history: tailDays(kvListSeries, HISTORY_DAYS),
+          history: cycleHistory(kvListSeries),
           error: errors.kvOps,
         }),
         stockItem({
@@ -1228,7 +1314,7 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
             scope: "day" as const,
             limitKind: paid ? ("included" as const) : ("hard" as const),
             period: dayPeriod,
-            history: tailDays(aiSeries, HISTORY_DAYS),
+            history: cycleHistory(aiSeries),
             error: errors.aiNeurons,
             costUsd: cost > 0 ? cost : undefined,
             overageNote: "每天免费 10,000 neurons，超出后 $0.011 / 千 neurons",
@@ -1303,6 +1389,25 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
     estimatedCostUsd = costBreakdown.reduce((s, x) => s + x.usd, 0)
   }
 
+  // ---- 出站邮件（Email Sending）----
+  // 数据来源是本站计数（CF 没有只读的"剩余封数"接口）。超量单价 $0.35/千封，
+  // 免费额度 3,000 封/账期，与 Cloudflare 官方定价页一致。
+  const mailBudget = await cfMailBudget(env)
+  const EMAIL_INCLUDED = 3000
+  const EMAIL_OVERAGE_PER_1K = 0.35
+  const emailOverage =
+    paid && mailBudget.used > EMAIL_INCLUDED
+      ? ((mailBudget.used - EMAIL_INCLUDED) / 1000) * EMAIL_OVERAGE_PER_1K
+      : 0
+  if (paid && emailOverage > 0) {
+    costBreakdown.push({
+      label: "出站邮件超额",
+      detail: `本账期已发 ${mailBudget.used} 封，超出套餐含的 ${EMAIL_INCLUDED} 封`,
+      usd: Number(emailOverage.toFixed(4)),
+    })
+    estimatedCostUsd = costBreakdown.reduce((s, x) => s + x.usd, 0)
+  }
+
   return {
     generatedAt: new Date().toISOString(),
     accountId,
@@ -1310,10 +1415,21 @@ export async function collectQuota(env: Env, accountId: string): Promise<CfQuota
     planSource: planInfo.source,
     planSetting: (await getSetting(env, "cf_plan")).trim().toLowerCase() || "auto",
     planNote: planInfo.note,
+    cycleDay,
+    cycleStart,
+    cycleEnd: today,
     estimatedCostUsd,
     costBreakdown,
     highlights,
     groups,
+    emailSending: {
+      used: mailBudget.used,
+      cap: mailBudget.cap,
+      period: mailBudget.period,
+      blocked: mailBudget.blocked,
+      includedMonthly: EMAIL_INCLUDED,
+      overageUsd: paid ? Number(emailOverage.toFixed(4)) : null,
+    },
     warnings,
   }
 }

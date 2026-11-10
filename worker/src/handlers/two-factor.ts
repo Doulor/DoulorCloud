@@ -23,7 +23,7 @@ import { ApiError, json } from "../http"
 import { requireUser, isPrivileged } from "../auth"
 import { hashToken, uuid, timingSafeEqual, encryptSecret, decryptSecret } from "../crypto"
 import { guardRateLimit } from "../ratelimit"
-import { sendMail, renderMail } from "../mailer"
+import { sendMail, renderMail, siteUrl } from "../mailer"
 import { audit as recordAudit } from "../settings"
 import {
   generateRecoveryCode,
@@ -771,15 +771,19 @@ export async function sendLoginCodeMail(
   const rendered = renderMail(
     "登录验证码",
     [
-      `你正在登录 Doulor Cloud，验证码是：${code}`,
+      "你正在登录 Doulor Cloud，请在登录页输入下面的验证码。",
       `验证码 ${CODE_TTL_MS / 60000} 分钟内有效。如果这不是你本人的操作，说明有人已经知道了你的密码，请立刻修改密码。`,
     ],
-    code
+    {
+      code,
+      preheader: `登录验证码：${code}`,
+      // 此时收件人多半没登录（被盗的正是登录这一步），所以指向「忘记密码」而不是设置页
+      action: { label: "不是我，立即重置密码", url: siteUrl("/forgot-password") },
+    }
   )
   await sendMail(env, {
     to,
     subject: "Doulor Cloud 登录验证码",
-    text: rendered.text,
-    html: rendered.html,
+    ...rendered,
   })
 }

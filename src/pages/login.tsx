@@ -234,12 +234,9 @@ export default function LoginPage() {
       <AuthShell
         title={t("login.bannedTitle")}
         description={t("login.bannedDesc")}
-        footer={
-          <>
-            {t("login.registerInstead")}
-            <AuthFooterLink to="/register" label={t("nav.register")} />
-          </>
-        }
+        // 封禁页不引导「换个账号注册」——那等于在封禁提示里教人换马甲，
+        // 与本页的申诉入口诉求相反。只给一个回首页的出口。
+        footer={<AuthFooterLink to="/" label={t("nf.backHome")} />}
       >
         <div className="space-y-4">
           <div className="flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
@@ -478,101 +475,9 @@ export default function LoginPage() {
 
       <TermsDialog open={termsOpen} onOpenChange={setTermsOpen} />
 
-      <Diagnostics />
+      {/* 这里原本挂着一个「环境检测」折叠面板（HTTPS / Cookie / localStorage 三项探针）。
+          它是 2026-10-01 为排查一次线上登录失败临时加的排障工具，但挂在**人人可见的登录页**上；
+          而 finishLogin() 里已经有 cookie 校验（失败会明确报 log.cookieFail），功能重复，故移除。 */}
     </AuthShell>
-  )
-}
-
-/**
- * 环境自检。
- * 手机浏览器往往没有开发者工具，登录失败时无法排查。
- * 这里直接暴露关键前提：能否写 Cookie、是否 https、是否无痕模式。
- * 默认折叠，点击展开。
- */
-function Diagnostics() {
-  const { t } = useT()
-  const [open, setOpen] = React.useState(false)
-  const [cookieOk, setCookieOk] = React.useState<boolean | null>(null)
-
-  React.useEffect(() => {
-    try {
-      // HttpOnly cookie 由服务端下发，JS 只能验证「非 HttpOnly」的写入能力。
-      // 若连这个都写不进去，说明站点数据被完全禁止。
-      document.cookie = "__doulor_probe=1; Path=/; SameSite=Lax"
-      const ok = document.cookie.includes("__doulor_probe=1")
-      setCookieOk(ok)
-      // 清理探针
-      document.cookie = "__doulor_probe=; Path=/; Max-Age=0"
-    } catch {
-      setCookieOk(false)
-    }
-  }, [])
-
-  const isHttps = window.location.protocol === "https:"
-  const hasStorage = (() => {
-    try {
-      window.localStorage.setItem("__probe", "1")
-      window.localStorage.removeItem("__probe")
-      return true
-    } catch {
-      return false
-    }
-  })()
-
-  const allGood = cookieOk === true && isHttps && hasStorage
-
-  return (
-    <div className="mt-6 border-t pt-4">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full text-left text-xs text-muted-foreground hover:text-foreground"
-      >
-        {allGood ? t("lg.diag.ok") : t("lg.diag.bad")} · {open ? t("lg.collapse") : t("lg.expand")}
-      </button>
-      {open && (
-        <dl className="mt-3 space-y-1.5 text-xs">
-          <DiagRow label={t("lg.diag.https")} ok={isHttps} hint={isHttps ? "" : t("lg.diag.httpsHint")} />
-          <DiagRow
-            label={t("lg.diag.cookie")}
-            ok={cookieOk === true}
-            hint={cookieOk === true ? "" : t("lg.diag.cookieHint")}
-          />
-          <DiagRow
-            label={t("lg.diag.storage")}
-            ok={hasStorage}
-            hint={hasStorage ? "" : t("lg.diag.storageHint")}
-          />
-          <div className="pt-1 text-muted-foreground">
-            {t("lg.diag.domain")}<span className="font-mono">{window.location.host}</span>
-          </div>
-          {!allGood && (
-            <p className="pt-2 text-muted-foreground">
-              {t("lg.diag.tip")}
-            </p>
-          )}
-        </dl>
-      )}
-    </div>
-  )
-}
-
-function DiagRow({
-  label,
-  ok,
-  hint,
-}: {
-  label: string
-  ok: boolean
-  hint: string
-}) {
-  const { t } = useT()
-  return (
-    <div className="flex items-start justify-between gap-3">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className={ok ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}>
-        {ok ? t("lg.diag.rowOk") : t("lg.diag.rowBad", { hint: hint ? ` (${hint})` : "" })}
-      </dd>
-    </div>
   )
 }

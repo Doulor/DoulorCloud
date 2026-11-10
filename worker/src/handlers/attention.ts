@@ -13,7 +13,9 @@
  *                 feedback（待处理反馈）、donations（待审核捐献）、
  *                 pointProducts（用户商品待审核）、
  *                 eventClaims（活动奖励待人工发放）、
- *                 frpApplications（内网穿透申请待审核）、appeals（封禁申诉待处理）
+ *                 frpApplications（内网穿透申请待审核）、
+ *                 oauthApps（用户自助创建的 OAuth 应用待审核，2026-10-30 起）、
+ *                 appeals（封禁申诉待处理）
  *
  * 2026-10-02 调整（站长要求）：**DNS 解析与「风险账户」不再挂角标** ——
  * 前者是扫描出来的体检报告、后者是自动观察名单，都不是「等你逐条动手」的队列，
@@ -30,12 +32,31 @@
 import { json } from "../http"
 import { requireUser, isPrivileged } from "../auth"
 import { countPendingAppeals } from "./moderation"
+import { chatUnreadCount } from "../chat-unread"
 import type { Env } from "../env"
 
 /** 从没打开过时回落的窗口（与社区角标一致） */
 const FALLBACK_WINDOW_MS = 24 * 60 * 60 * 1000
 
 type CountRow = { c?: number }
+
+/**
+ * 用户自助创建的 OAuth 应用里**待审核**的条数（2026-10-30 站长要求挂角标）。
+ *
+ * ⚠️ 与 countPendingAppeals 同样的理由：`oauth_clients.review_status` 是后加的列，
+ *    放进上面的 batch 会让整条 `/api/attention` 在迁移漏执行时 500，
+ *    连带侧边栏与管理入口的角标一起挂掉。所以单独查、吞异常退化为 0。
+ */
+async function countPendingOauthApps(env: Env): Promise<number> {
+  try {
+    const row = await env.DB.prepare(
+      "SELECT COUNT(*) c FROM oauth_clients WHERE review_status = 'pending'"
+    ).first<CountRow>()
+    return Number(row?.c ?? 0)
+  } catch {
+    return 0
+  }
+}
 
 /** GET /api/attention —— 当前用户需要关注的计数汇总 */
 export async function getAttention(env: Env, request: Request): Promise<Response> {
@@ -49,20 +70,20 @@ export async function getAttention(env: Env, request: Request): Promise<Response
 
   const fallback = new Date(Date.now() - FALLBACK_WINDOW_MS).toISOString()
   const communitySince = seen?.community_seen_at ?? fallback
-  const chatSince = seen?.chat_seen_at ?? fallback
 
   const privileged = isPrivileged(me.role)
+
+  // ⚠️ 聊天室角标**不放进这个 batch**：它是本端点里最贵的一条（要扫「我看过之后」
+  //    的全部消息，实测单次 5 千行、每天 4.9 千次 ≈ 2.4 千万行）。改由 chat-unread.ts
+  //    统一实现并走 10 秒进程内缓存，与 /api/chat/unread 共享同一份结果。
+  const chatCount = seen?.chat_dnd ? 0 : chatUnreadCount(env, me.id)
 
   const stmts = [
     // 0) 社区：我看过之后、别人发的、未删除的帖子
     env.DB.prepare(
       "SELECT COUNT(*) c FROM posts WHERE created_at > ? AND deleted_at IS NULL AND user_id <> ?"
     ).bind(communitySince, me.id),
-    // 1) 聊天室：我看过之后、别人发的消息
-    env.DB.prepare(
-      "SELECT COUNT(*) c FROM chat_messages WHERE created_at > ? AND user_id <> ?"
-    ).bind(chatSince, me.id),
-    // 2) 反馈：管理员回复过、但我还没读
+    // 1) 反馈：管理员回复过、但我还没读
     env.DB.prepare(
       "SELECT COUNT(*) c FROM feedback WHERE user_id = ? AND admin_reply IS NOT NULL AND user_read = 0"
     ).bind(me.id),
@@ -70,20 +91,20 @@ export async function getAttention(env: Env, request: Request): Promise<Response
 
   if (privileged) {
     stmts.push(
-      // 3) 待处理反馈
+      // 2) 待处理反馈
       env.DB.prepare("SELECT COUNT(*) c FROM feedback WHERE status = 'pending'"),
-      // 4) 待审核捐献
+      // 3) 待审核捐献
       env.DB.prepare("SELECT COUNT(*) c FROM donations WHERE status = 'pending'"),
-      // 5) 用户上传的商品待审核（官方商品建的时候就是 approved，不会进这个数）
+      // 4) 用户上传的商品待审核（官方商品建的时候就是 approved，不会进这个数）
       env.DB.prepare("SELECT COUNT(*) c FROM point_products WHERE review_status = 'pending'"),
-      // 6) 活动奖励里「自动发放失败、要人工发」的（如用户还没绑中转站）
+      // 5) 活动奖励里「自动发放失败、要人工发」的（如用户还没绑中转站）
       env.DB.prepare("SELECT COUNT(*) c FROM event_claims WHERE reward_status = 'manual'"),
-      // 7) 内网穿透申请待审核（frp_applications 是迁移 0009 的老表，进 batch 安全）
+      // 6) 内网穿透申请待审核（frp_applications 是迁移 0009 的老表，进 batch 安全）
       env.DB.prepare("SELECT COUNT(*) c FROM frp_applications WHERE status = 'pending'")
     )
   }
 
-  const rows = await env.DB.batch(stmts)
+  const [rows, chat] = await Promise.all([env.DB.batch(stmts), chatCount])
   const at = (i: number) => Number((rows[i]?.results?.[0] as CountRow | undefined)?.c ?? 0)
 
   let admin: {
@@ -93,28 +114,32 @@ export async function getAttention(env: Env, request: Request): Promise<Response
     pointProducts: number
     eventClaims: number
     frpApplications: number
+    /** 待审核的用户自助 OAuth 应用（2026-10-30） */
+    oauthApps: number
     appeals: number
   } | null = null
 
   if (privileged) {
-    const feedback = at(3)
-    const donations = at(4)
-    const pointProducts = at(5)
-    const eventClaims = at(6)
-    const frpApplications = at(7)
+    const feedback = at(2)
+    const donations = at(3)
+    const pointProducts = at(4)
+    const eventClaims = at(5)
+    const frpApplications = at(6)
     // ⚠️ 封禁申诉那张表是 2026-10-02 才加的（迁移 0096），**不进上面的 batch**：
     //    一旦线上漏执行迁移，batch 里带上它会让**整个** `/api/attention` 500 ——
     //    侧边栏角标与后台管理入口一起挂掉。countPendingAppeals 内部吞异常返回 0，
     //    表没建好时退化成「没有待办」。
     const appeals = await countPendingAppeals(env)
+    const oauthApps = await countPendingOauthApps(env)
     admin = {
       total:
-        feedback + donations + pointProducts + eventClaims + frpApplications + appeals,
+        feedback + donations + pointProducts + eventClaims + frpApplications + oauthApps + appeals,
       feedback,
       donations,
       pointProducts,
       eventClaims,
       frpApplications,
+      oauthApps,
       appeals,
     }
   }
@@ -122,8 +147,8 @@ export async function getAttention(env: Env, request: Request): Promise<Response
   return json({
     community: at(0),
     // 免打扰开启时聊天角标恒为 0（服务端算，跨设备一致）
-    chat: seen?.chat_dnd ? 0 : at(1),
-    feedback: at(2),
+    chat,
+    feedback: at(1),
     admin,
   })
 }

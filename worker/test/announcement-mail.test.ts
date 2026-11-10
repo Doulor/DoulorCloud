@@ -16,10 +16,10 @@ import { makeUser, authRequest, fetchSelf, setSetting } from "./helpers"
 import { runAnnouncementMailJob, resumeAnnouncementMails } from "../src/handlers/announcements"
 import { uuid } from "../src/crypto"
 
-/** 打桩出站 fetch：记录发往 Posta / Brevo 的发信请求；failFor 里的地址两个通道都失败 */
+/** 打桩出站 fetch：记录发往 CF Send / Brevo 的发信请求；failFor 里的地址两个通道都失败 */
 let mailCalls: { channel: string; to: string }[] = []
 let failFor = new Set<string>()
-/** quotaFor 里的地址 → Posta 返回「今日额度用尽」（HTTP 400 + max_emails 报码） */
+/** quotaFor 里的地址 → CF Send 返回「被限流」（HTTP 429 + 10004） */
 let quotaFor = new Set<string>()
 let restoreFetch: (() => void) | null = null
 
@@ -38,15 +38,29 @@ function stubMail(): void {
       }
     })()
 
-    if (url.includes("posta.test")) {
-      // Posta 契约：to 是收件人地址数组（见 mailer-posta.test.ts）
-      const to = String((body.to as string[] | undefined)?.[0] ?? "")
+    if (url.includes("/email/sending/send")) {
+      // cf-send 契约：to 是具名地址数组 [{ address }]（见 mailer-cfsend.test.ts）
+      const to = String((body.to as { address?: string }[] | undefined)?.[0]?.address ?? "")
       if (quotaFor.has(to)) {
-        return new Response('{"code":"max_emails_per_day_exceeded"}', { status: 400 })
+        return new Response(
+          JSON.stringify({
+            success: false,
+            errors: [{ code: 10004, message: "email.sending.error.throttled" }],
+          }),
+          { status: 429 }
+        )
       }
       if (failFor.has(to)) return new Response("boom", { status: 500 })
-      mailCalls.push({ channel: "posta", to })
-      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      mailCalls.push({ channel: "cf-send", to })
+      return new Response(
+        JSON.stringify({
+          success: true,
+          errors: [],
+          messages: [],
+          result: { delivered: [to], permanent_bounces: [], queued: [] },
+        }),
+        { status: 200 }
+      )
     }
     if (url.includes("api.brevo.com")) {
       const to = ((body.to as { email: string }[] | undefined)?.[0]?.email) ?? ""
@@ -66,10 +80,12 @@ function stubMail(): void {
 
 beforeEach(async () => {
   stubMail()
-  await setSetting("posta_url", "https://posta.test/api/send")
-  await setSetting("posta_key", "test-key")
-  // 只留 posta：brevo 未配置时回退会直接 503，让「失败」用例的语义更清楚
-  await setSetting("mail_transport_order", "posta")
+  // 只留 cf-send：brevo 未配置，让「失败」用例的语义更清楚
+  await setSetting("mail_transport_order", "cf-send")
+  // 群发首选也钉成 cf-send（默认值现在是 brevo），否则每封都要先空跑一次 brevo
+  await setSetting("announcement_mail_transport", "cf-send")
+  await setSetting("cf_send_token", "")
+  await setSetting("cf_send_from", "no-reply@doulor.cn")
   // 把上一轮遗留的「推送中」公告收尾，避免被 resumeAnnouncementMails 捞起来干扰
   await env.DB.prepare(
     "UPDATE announcements SET mail_status='done' WHERE mail_status='sending'"
