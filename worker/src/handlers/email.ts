@@ -19,6 +19,7 @@ import {
 } from "../root-domains"
 import { userPermissions } from "../permissions"
 import { encodeCursor, decodeCursor } from "../community-logic"
+import { sanitizeNotifyText } from "../notify-text"
 import type { Env } from "../env"
 
 const MAX_MAILBOXES_PER_USER = 3
@@ -490,6 +491,50 @@ function generateVerifyCode(): string {
   return String(100000 + (v % SPAN))
 }
 
+/* ---- 转发目标地址策略（渗透测试 finding #4，2026-11-10）----
+ *
+ * 文案消毒（finding #3）已抽到 `../notify-text`：轮询通知与 Web Push 两条通道
+ * 必须共用同一套规则，否则只修一条、另一条仍是伪造入口。
+ */
+
+/**
+ * 不允许作为转发目标的「职务 / 高价值」地址 localpart（finding #4，2026-11-10）。
+ *
+ * 背景：`verifyForwardTarget` 会以**官方发件人**（DoulorCloud@doulor.cn，DKIM d=doulor.cn）
+ * 向任意地址发验证码。打到 postmaster@ / abuse@ 这类职务地址上时，等于让攻击者
+ * 借我们的域名给别人的运维、安全、注册邮箱发信 —— 一封信就能开一张工单、一条投诉，
+ * 严重时把我们的发信域名拉进黑名单。这类地址本来也不可能是真实用户要转发的私人邮箱。
+ */
+const FORWARD_BLOCKED_LOCALPARTS = new Set([
+  "postmaster",
+  "abuse",
+  "security",
+  "hostmaster",
+  "webmaster",
+  "admin",
+  "administrator",
+  "root",
+  "noreply",
+  "no-reply",
+])
+
+/**
+ * 邮件模板里展示的收件地址掩码：`victim@example.com` → `v***@e***.com`。
+ *
+ * 为什么模板里不能出现完整目标地址（finding #4，2026-11-10）：这封信是**发给外部人**的，
+ * 而完整地址只会出现在"攻击者想让它出现"的场合（拿平台域名给自己的目标地址背书）。
+ * 收件人自己知道自己的地址，掩码足够他判断"这说的是不是我的邮箱"。
+ */
+function maskEmailForMail(email: string): string {
+  const at = email.lastIndexOf("@")
+  if (at <= 0) return "***"
+  const local = email.slice(0, at)
+  const labels = email.slice(at + 1).split(".")
+  const tld = labels.length > 1 ? labels[labels.length - 1] : ""
+  const head = labels[0]?.charAt(0) ?? ""
+  return `${local.charAt(0)}***@${head}***${tld ? `.${tld}` : ""}`
+}
+
 // POST /api/mailbox/forward-verify —— 发起 / 确认转发目标验证
 export async function verifyForwardTarget(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
@@ -502,6 +547,12 @@ export async function verifyForwardTarget(env: Env, request: Request): Promise<R
 
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new ApiError(400, "邮箱格式不正确", "INVALID_EMAIL")
+  }
+  // 职务 / 高价值地址直接拒（finding #4，2026-11-10）：见 FORWARD_BLOCKED_LOCALPARTS 的说明。
+  // 放在格式校验之后、isOwnDomain 之前 —— 这里判的是"这个地址能不能当转发目标"，
+  // 与是否本站域名是两件互不覆盖的事。
+  if (FORWARD_BLOCKED_LOCALPARTS.has(email.slice(0, email.indexOf("@")))) {
+    throw new ApiError(400, "不能转发到该地址", "INVALID_EMAIL")
   }
   if (await isOwnDomain(env, email)) {
     throw new ApiError(400, "不能转发到本站域名邮箱", "INVALID_EMAIL")
@@ -548,15 +599,29 @@ export async function verifyForwardTarget(env: Env, request: Request): Promise<R
   }
 
   // 发起验证：生成验证码发到目标邮箱。限流防轰炸。
+  //
+  // 两层限流（finding #4，2026-11-10）：
+  //   1. **用户维度** 5 次/小时（管理员旁路）—— 从 10 次收紧，防「一个账号换着地址刷」；
+  //   2. **收件地址维度** 3 次/小时，**跨账号全局生效** —— 防「注册一堆小号轮着轰同一个地址」。
+  //      这一条绝对不能放进 isAdminApiRequest 的旁路里：被轰炸的是**别人的**邮箱，
+  //      而管理员会话也可能是被盗的，没有任何理由给它免死金牌。
+  //      确认分支（action === "confirm"）不加冷却 —— 那只是回填验证码，不发信。
   if (!isAdminApiRequest(request)) {
     await guardRateLimit(
       env,
       `forward-verify:user:${user.id}`,
-      10,
+      5,
       3600,
       "转发验证请求过于频繁，请稍后再试"
     )
   }
+  await guardRateLimit(
+    env,
+    `forward-verify:target:${email}`,
+    3,
+    3600,
+    "该邮箱收到的转发验证码过多，请稍后再试"
+  )
 
   const code = generateVerifyCode()
   const now = new Date().toISOString()
@@ -570,11 +635,18 @@ export async function verifyForwardTarget(env: Env, request: Request): Promise<R
     .bind(user.id, email, await hashToken(code), expiresAt, now)
     .run()
 
+  // 正文加固（finding #4，2026-11-10）：
+  //   · 用户名是调用方可控的，先消毒再限 24 字符（renderMail 还会再转义一层）；
+  //   · 目标地址做掩码，**正文里不出现完整地址**；
+  //   · 追加一段，明确"没发起过就忽略、官方不会索要验证码"——收件人可能是被牵连的第三方。
+  const shownUser = sanitizeNotifyText(user.username, 24) || "该用户"
+  const shownTarget = maskEmailForMail(email)
   const rendered = renderMail(
     "验证转发目标邮箱",
     [
-      `用户 ${user.username} 想把 doulor.cn 邮箱的邮件转发到 ${email}，请在页面上输入下面的验证码。`,
+      `用户 ${shownUser} 想把 doulor.cn 邮箱的邮件转发到 ${shownTarget}，请在页面上输入下面的验证码。`,
       "验证码 10 分钟内有效。如果不是你本人操作，请忽略本邮件。",
+      "如果你不认识这个用户，也没有发起过转发设置，请直接忽略本邮件。Doulor Cloud 不会向你索要任何验证码。",
     ],
     { code, preheader: `转发目标验证码：${code}` }
   )
@@ -1058,6 +1130,9 @@ const SEND_LIMIT_PER_HOUR = 30
  * 字段口径与 `/api/notifications/latest` 一致，前端同一套渲染逻辑就能用。
  *
  * ⚠️ 只统计**自己的**邮箱（`mailboxes.user_id`），不会漏看别人的信。
+ *
+ * 🔒 **title 永远是固定文案**（2026-11-10 渗透测试 finding #3 修复）：邮件内容只出现在
+ *    消毒后的 `body` 里。改回去等于把"系统通知"的标题交给任何能给该邮箱发信的人。
  */
 export async function latestUnreadMail(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
@@ -1086,14 +1161,26 @@ export async function latestUnreadMail(env: Env, request: Request): Promise<Resp
   // from_address 形如 `Name <a@b>` 或裸地址；通知里优先显示人名
   const raw = String(row.from_address ?? "").trim()
   const m = /^(.*?)<([^>]+)>\s*$/.exec(raw)
-  const sender = ((m?.[1] ?? "").trim().replace(/^"|"$/g, "") || m?.[2] || raw || "").slice(0, 80)
+  const senderRaw = (m?.[1] ?? "").trim().replace(/^"|"$/g, "") || m?.[2] || raw || ""
+
+  // 🛡️ finding #3（2026-11-10，Web Notification 内容伪造）：
+  //    修复前 `title` 是 `${sender} 发来一封邮件`、`body` 是 Subject —— 也就是说
+  //    **通知的标题和正文完全由外部发信人控制**。任何能给受害者平台邮箱直投 SMTP
+  //    的人都能弹一条 "Doulor Cloud Security Center 发来一封邮件" 做通知钓鱼。
+  //    现在：title 是**固定文案**（不含任何邮件内容），邮件内容只出现在 body 里，
+  //    且先消毒再截断。前端 `src/lib/web-notify.ts` 还有一份同规则的纵深防御。
+  const title = en ? "New mail · Doulor Cloud" : "新邮件提醒 · Doulor Cloud"
+  const sender =
+    sanitizeNotifyText(senderRaw, 60) || (en ? "Unknown sender" : "未知发件人")
   const subject =
-    String(row.subject ?? "").trim().slice(0, 120) || (en ? "(no subject)" : "（无主题）")
+    sanitizeNotifyText(String(row.subject ?? ""), 120) || (en ? "(no subject)" : "（无主题）")
+  // 合计上限 ~160：通知正文在手机上只显示两三行，再长也是被系统截掉
+  const body = `${sender}${en ? ": " : "："}${subject}`.slice(0, 160)
 
   return json({
     id: `mail:${row.id}`,
-    title: en ? `New mail from ${sender}` : `${sender} 发来一封邮件`,
-    body: subject,
+    title,
+    body,
     link: "/dashboard/email",
     mailbox: row.mailbox_address,
     receivedAt: row.received_at,

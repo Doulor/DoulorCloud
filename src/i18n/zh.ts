@@ -379,7 +379,10 @@ export const zh = {
   "s2fa.title": "二次认证",
   "s2fa.stepUpLabel": "当前验证码",
   "s2fa.stepUpPlaceholder": "动态码 / 恢复码 / 邮箱码",
-  "s2fa.stepUpHint": "改动二次认证设置前要先确认身份：关认证器要输认证器动态码（或恢复码），关邮箱验证要输邮箱验证码。",
+  "s2fa.stepUpHint": "改动二次认证设置前要先确认身份：关闭某一种方式要输该方式的验证码（或恢复码）；新增验证方式（绑定认证器 / 开启邮箱验证）还要额外输入账户密码。",
+  "s2fa.passwordLabel": "账户密码",
+  "s2fa.passwordPlaceholder": "当前登录密码",
+  "s2fa.passwordHint": "账号还没有开启二次认证时，开启任意一种方式都必须先输入账户密码 —— 只凭登录状态不足以新增第二因子。",
   "s2fa.stepUpSend": "发送邮箱验证码",
   "s2fa.stepUpResend": "重新发送",
   "s2fa.stepUpSent": "验证码已发到你的邮箱",
@@ -561,7 +564,25 @@ export const zh = {
   "settings.notify.diag.permission": "权限",
   "settings.notify.diag.sw": "Service Worker",
   "settings.notify.diag.ctor": "Notification 构造器",
+  "settings.notify.diag.bridge": "原生桥接",
   "settings.notify.diag.path": "实际通道",
+  "settings.notify.webviewBlocked":
+    "这个 App 的 WebView 不会把通知权限交给网页：点了不弹框、权限一直停在 default。要真正收到系统通知，需要 App 壳子提供原生通知接口（或把网页当 PWA 用系统浏览器打开）。",
+  "settings.notify.appDenied":
+    "App 的通知权限还没开 —— 已经帮你打开系统设置，请允许「本应用」发送通知",
+  "settings.notify.stateAppNeeded": "需要在本 App 里授权通知",
+  "settings.notify.openSettings": "打开系统通知设置",
+  "settings.notify.noSettings":
+    "这个 App 没有提供跳转系统设置的入口，请手动到 系统设置 → 通知 → 找到本应用 → 允许通知",
+  "settings.notify.push.label": "即时推送",
+  "settings.notify.push.on": "已开启（服务端推，页面关着也能收）",
+  "settings.notify.push.off": "未订阅（点「开启通知」可建立，之后即时到达）",
+  "settings.notify.push.denied": "需要先允许通知权限",
+  "settings.notify.push.unsupported": "当前环境不支持（将退回 60 秒轮询）",
+  "settings.notify.always": "即使我正在用也提醒",
+  "settings.notify.alwaysHint":
+    "默认只在你切到后台/锁屏时提醒。某些 App 的 WebView 不上报页面可见性，会导致永远不提醒 —— 打开这一项可绕过该判断（代价：你盯着页面时也会弹）。",
+  "settings.notify.diag.appPerm": "App 权限",
   "settings.notify.note":
     "只在你不看这个页面的时候提醒你。App 或浏览器被完全关掉时收不到 —— 这是网页通知的固有限制，需要有原生推送才能突破。",
 

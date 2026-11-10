@@ -2,6 +2,7 @@ import * as React from "react"
 
 import { notificationApi } from "@/services/api"
 import {
+  currentNotifyEnabled,
   isUserWatching,
   notifyPermission,
   requestNotifyPermission,
@@ -38,12 +39,66 @@ function readPermission(): NotifyPermission {
  * ⚠️ 页面被关掉/被系统冻结时收不到 —— 浏览器端没有 Service Worker 就没有后台推送，
  *    App 端退到后台时 WebView 的 JS 同样会被冻结。要「关着也能收」只能走原生推送。
  */
-export function useMessageNotify() {
-  const { lang } = useT()
+
+/**
+ * 只管**权限**（申请 / 读状态），不做任何轮询。
+ *
+ * 为什么要把权限和播报拆开：设置页那张卡只需要权限与测试按钮，不该顺带起一个轮询；
+ * 播报交给挂在全局布局上的 `MessageNotifyWatcher`。两处都轮询的话，同一时刻会并发
+ * 拉两次接口、还可能各弹一条。
+ */
+export function useNotifyPermission() {
   const [permission, setPermission] = React.useState<NotifyPermission>(() => readPermission())
 
+  // 切回前台时重读一次（用户可能在系统设置里改过）
   React.useEffect(() => {
-    if (permission !== "granted") return
+    const onVisible = () => {
+      if (!document.hidden) setPermission(readPermission())
+    }
+    document.addEventListener("visibilitychange", onVisible)
+    return () => document.removeEventListener("visibilitychange", onVisible)
+  }, [])
+
+  const request = React.useCallback(async () => {
+    const res = (await requestNotifyPermission()) as NotifyPermission
+    setPermission(res)
+    return res
+  }, [])
+
+  return { permission, request }
+}
+
+/**
+ * 挂着就轮询"最新一条未读通知"，用户不在看页面时弹系统通知。
+ * 只在 `MessageNotifyWatcher`（全局布局）里用一次。
+ */
+export function useMessageNotify() {
+  const { lang } = useT()
+
+  /**
+   * 真实可用性（桥接优先）。
+   *
+   * 🔴 2026-11-10 修：以前判 `permission === "granted"`，而 App 的 WebView 里网页权限
+   *    恒为 `denied`，于是这段轮询从没启动过 —— 站内消息永远不弹。与邮件那条同一个坑。
+   */
+  const [ready, setReady] = React.useState(false)
+  React.useEffect(() => {
+    let alive = true
+    const check = () => {
+      void currentNotifyEnabled().then((v) => {
+        if (alive) setReady(v)
+      })
+    }
+    check()
+    document.addEventListener("visibilitychange", check)
+    return () => {
+      alive = false
+      document.removeEventListener("visibilitychange", check)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (!ready) return
     let stopped = false
 
     const tick = async () => {
@@ -54,15 +109,14 @@ export function useMessageNotify() {
         const item = await notificationApi.latest(lang)
         if (stopped || !item) return
         if (localStorage.getItem(SEEN_KEY) === item.id) return
-        localStorage.setItem(SEEN_KEY, item.id)
 
-        // 走统一的发送入口：Android 上 `new Notification()` 会抛 Illegal constructor，
-        // 必须用 Service Worker 的 showNotification（见 src/lib/web-notify.ts）
-        await showSystemNotification(item.title, {
+        // 先发、成功了才记「已弹过」（失败时别把这封/这条永久吞掉）
+        const res = await showSystemNotification(item.title, {
           body: item.body,
           tag: item.id,
           url: item.link || "/dashboard/messages",
         })
+        if (res.ok) localStorage.setItem(SEEN_KEY, item.id)
       } catch {
         // 通知失败不该打扰用户（权限被系统撤销、App 侧能力未开启等）
       }
@@ -74,14 +128,17 @@ export function useMessageNotify() {
       stopped = true
       window.clearInterval(timer)
     }
-  }, [permission, lang])
+  }, [ready, lang])
+}
 
-  /** 申请权限。必须由用户点击触发，否则浏览器会直接拒绝。 */
-  const request = React.useCallback(async () => {
-    const res = (await requestNotifyPermission()) as NotifyPermission
-    setPermission(res)
-    return res
-  }, [])
-
-  return { permission, request }
+/**
+ * 挂在 DashboardLayout 上的常驻哨兵：让**任何页面**都能收到站内消息/通知的系统通知。
+ *
+ * 为什么必须常驻：之前这套轮询只写在设置页那张卡片里 —— 也就是说只有"人在设置页"
+ * 的时候才会播报，站内消息几乎永远弹不出来。站长 2026-11-10 追问"消息中心能不能也收到"
+ * 才发现这个空档。
+ */
+export function MessageNotifyWatcher(): null {
+  useMessageNotify()
+  return null
 }

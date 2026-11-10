@@ -13,6 +13,8 @@
 import PostalMime from "postal-mime"
 import { sendMail, renderMail, siteUrl } from "./mailer"
 import { sanitizeMailHtml } from "./mail-html"
+import { pushToUser } from "./web-push"
+import { sanitizeNotifyText } from "./notify-text"
 import { isOwnDomain } from "./root-domains"
 import type { Env } from "./env"
 
@@ -387,6 +389,33 @@ export async function incomingEmail(
       rfcMessageId ? rfcMessageId.slice(0, 500) : null
     )
     .run()
+
+  // 1.5 Web Push：新邮件入库后立刻推给该用户的所有设备（2026-11-10）
+  //
+  // 为什么放在入库之后、且包一层 catch：推送是"锦上添花"，绝不能因为推送失败
+  // 影响收信本身（Email Routing 是按异常重投的，抛错会造成重复投递）。
+  // 收件人关掉通知 / 没有订阅时，pushToUser 内部直接返回 0，开销只有一次 SELECT。
+  try {
+    // 🔒 2026-11-10 渗透测试 finding#3：Web Push 与轮询接口（/api/mailbox/latest-unread）
+    // 必须同一口径 —— **标题固定**，正文只放消毒后的「发件人：主题」。
+    // 否则任意能给用户邮箱直投 SMTP 的人，只是换了一条通道，照样能伪造
+    // "Doulor Cloud 安全中心发来一封邮件"这种系统通知。
+    const pushBody = [
+      sanitizeNotifyText(fromAddress, 60),
+      sanitizeNotifyText(subject, 120),
+    ]
+      .filter(Boolean)
+      .join("：")
+      .slice(0, 160)
+    await pushToUser(env, mailbox.user_id, {
+      title: "新邮件提醒 · Doulor Cloud",
+      body: pushBody || "（无主题）",
+      url: "/dashboard/email",
+      tag: `mail-${messageId}`,
+    })
+  } catch (err) {
+    console.error("Web Push（新邮件）失败:", err)
+  }
 
 
   // 2. 转发（仅已验证的 destination 可用；失败不影响入库）

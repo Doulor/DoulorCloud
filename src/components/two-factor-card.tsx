@@ -45,9 +45,19 @@ export function TwoFactorCard() {
   /** 二次验证（改动 2FA 设置前的身份确认）：验证码本身 + 邮箱码的挑战 id */
   const [stepCode, setStepCode] = React.useState("")
   const [stepChallenge, setStepChallenge] = React.useState("")
+  /**
+   * 账户密码（2026-11-10 渗透测试 finding#1/#5 起，**新增因子时必须**）：
+   * 会话 cookie 本身不足以开启一个新的第二因子 —— 否则偷到会话的人可以无码开启
+   * 邮箱验证（响应直接给 10 个恢复码）、或直接把认证器换成自己的，形成持久后门。
+   */
+  const [accountPassword, setAccountPassword] = React.useState("")
 
   /** TOTP 配置中的临时数据（未确认前不落库，所以只存在前端） */
-  const [setup, setSetup] = React.useState<{ secret: string; otpauthUrl: string } | null>(null)
+  const [setup, setSetup] = React.useState<{
+    secret: string
+    otpauthUrl: string
+    setupToken: string
+  } | null>(null)
   const [code, setCode] = React.useState("")
   /** 刚生成/确认后的恢复码明文 —— 只在内存里，刷新即消失（库里只有哈希） */
   const [recoveryCodes, setRecoveryCodes] = React.useState<string[] | null>(null)
@@ -78,11 +88,15 @@ export function TwoFactorCard() {
 
   /**
    * 二次验证载荷（2026-10-10 起，服务端要求改动 2FA 设置前先证明是本人）。
-   * 账号还没开启任何 2FA 时是空对象 —— 服务端会放行（首次开启属于「加固」不是「拆锁」）。
+   *
+   * 2026-11-10（finding#1/#5）起多带一个 `password`：
+   *   · 账号还没有任何 2FA 时，新增因子**只能**靠账户密码证明身份（没有已开启的方式可验）；
+   *   · 账号已有 2FA 时，密码和验证码都要 —— 只拿到会话的人过不了密码，只拿到密码的人过不了验证码。
    */
   const stepUpPayload = () => ({
     code: stepCode.trim() || undefined,
     challengeId: stepChallenge || undefined,
+    password: accountPassword.trim() || undefined,
   })
 
   /** 把验证码发到邮箱（仅在已开启邮箱方式时可用） */
@@ -113,9 +127,12 @@ export function TwoFactorCard() {
   }
 
   const confirmTotp = async () => {
+    if (!setup) return
     setBusy(true)
     try {
-      const res = await twoFactorApi.confirmTotp(code.trim())
+      // ⚠️ 必须带回 start 下发的票据：服务端据此确认这串密钥是「本人通过身份验证后
+      //    生成的」，否则偷到会话的人拿自己生成的密钥也能把认证器换掉（finding#1）。
+      const res = await twoFactorApi.confirmTotp(code.trim(), setup.setupToken)
       setRecoveryCodes(res.recoveryCodes)
       setSetup(null)
       setCode("")
@@ -201,37 +218,60 @@ export function TwoFactorCard() {
 
       <CardContent className="space-y-4">
         {/*
-          二次验证区块（2026-10-10 渗透 finding#8/#9 修复）：
-          账号已开启 2FA 时，改动任何 2FA 设置都必须先验证「已开启的方式」——
-          否则偷到会话 cookie 的人就能静默拆掉第二因子 / 换成自己的认证器。
-          规则由站长定：关 TOTP 验 TOTP 码或恢复码、关邮箱验邮箱码、其余验任一已开启方式。
+          身份确认区块：
+          · 2026-10-10 渗透 finding#8/#9 —— 账号已开启 2FA 时，改动任何 2FA 设置都必须
+            先验证「已开启的方式」，否则偷到会话 cookie 的人就能静默拆掉第二因子 / 换成
+            自己的认证器。规则由站长定：关 TOTP 验 TOTP 码或恢复码、关邮箱验邮箱码、
+            其余验任一已开启方式。
+          · 2026-11-10 渗透 finding#1/#5 —— **新增因子**（开启邮箱验证 / 绑定或重配认证器）
+            还必须在会话之外确认账户密码：账号本来没开 2FA 时，会话 cookie 是唯一门槛的话，
+            攻击者就能无码开启并领走 10 个恢复码（恢复码又能当 step-up 码用），
+            从而把「劫持到的会话」升级成「持有第二因子」的持久后门。
         */}
-        {status?.enabled && (
+        {status && (
           <div className="space-y-2 rounded-md border bg-muted/40 p-3">
-            <Label htmlFor="s2fa-stepup" className="text-xs">
-              {t("s2fa.stepUpLabel")}
+            <Label htmlFor="s2fa-password" className="text-xs">
+              {t("s2fa.passwordLabel")}
             </Label>
-            <div className="flex flex-wrap items-center gap-2">
-              <Input
-                id="s2fa-stepup"
-                value={stepCode}
-                onChange={(e) => setStepCode(e.target.value)}
-                placeholder={t("s2fa.stepUpPlaceholder")}
-                className="h-8 w-44 font-mono text-xs"
-                autoComplete="one-time-code"
-              />
-              {status.emailEnabled && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() => void requestStepUpCode()}
-                >
-                  {stepChallenge ? t("s2fa.stepUpResend") : t("s2fa.stepUpSend")}
-                </Button>
-              )}
-            </div>
-            <p className="text-[11px] text-muted-foreground">{t("s2fa.stepUpHint")}</p>
+            <Input
+              id="s2fa-password"
+              type="password"
+              value={accountPassword}
+              onChange={(e) => setAccountPassword(e.target.value)}
+              placeholder={t("s2fa.passwordPlaceholder")}
+              className="h-8 max-w-60 text-xs"
+              autoComplete="current-password"
+            />
+            {status.enabled && (
+              <>
+                <Label htmlFor="s2fa-stepup" className="text-xs">
+                  {t("s2fa.stepUpLabel")}
+                </Label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    id="s2fa-stepup"
+                    value={stepCode}
+                    onChange={(e) => setStepCode(e.target.value)}
+                    placeholder={t("s2fa.stepUpPlaceholder")}
+                    className="h-8 w-44 font-mono text-xs"
+                    autoComplete="one-time-code"
+                  />
+                  {status.emailEnabled && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => void requestStepUpCode()}
+                    >
+                      {stepChallenge ? t("s2fa.stepUpResend") : t("s2fa.stepUpSend")}
+                    </Button>
+                  )}
+                </div>
+              </>
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              {status.enabled ? t("s2fa.stepUpHint") : t("s2fa.passwordHint")}
+            </p>
           </div>
         )}
         {!status ? (

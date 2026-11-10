@@ -6,6 +6,7 @@ import * as stickerHandlers from "./handlers/stickers"
 import * as dnsHandlers from "./handlers/dns"
 import * as dnsRentalHandlers from "./handlers/dns-rental"
 import * as emailHandlers from "./handlers/email"
+import * as pushHandlers from "./handlers/push"
 import * as subdomainHandlers from "./handlers/subdomains"
 import * as adminHandlers from "./handlers/admin"
 import * as adminLabHandlers from "./handlers/admin-lab"
@@ -2502,6 +2503,26 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     method: "GET",
     handle: () =>
       emailHandlers.latestUnreadMail(env, request),
+  },
+
+  // ---- Web Push（服务端推送，取代轮询的"即时"路径）----
+  {
+    kind: "exact",
+    path: "/push/public-key",
+    method: "GET",
+    handle: () => pushHandlers.getPushPublicKey(env),
+  },
+  {
+    kind: "exact",
+    path: "/push/subscribe",
+    method: "POST",
+    handle: () => pushHandlers.subscribePush(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/push/unsubscribe",
+    method: "POST",
+    handle: () => pushHandlers.unsubscribePush(env, request),
   },
 
   {

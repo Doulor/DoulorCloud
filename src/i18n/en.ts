@@ -385,7 +385,10 @@ export const en: Record<MessageKey, string> = {
   "s2fa.title": "Two-factor authentication",
   "s2fa.stepUpLabel": "Current verification code",
   "s2fa.stepUpPlaceholder": "TOTP / recovery / email code",
-  "s2fa.stepUpHint": "Confirm your identity before changing two-factor settings: turning off the authenticator needs a TOTP code (or a recovery code); turning off email verification needs an email code.",
+  "s2fa.stepUpHint": "Confirm your identity before changing two-factor settings: turning a method off needs its code (or a recovery code); adding a new method (authenticator app / email code) also needs your account password.",
+  "s2fa.passwordLabel": "Account password",
+  "s2fa.passwordPlaceholder": "Your current password",
+  "s2fa.passwordHint": "While two-factor is off, enabling any method requires your account password — being signed in is not enough to add a second factor.",
   "s2fa.stepUpSend": "Send email code",
   "s2fa.stepUpResend": "Resend",
   "s2fa.stepUpSent": "Code sent to your email",
@@ -568,7 +571,25 @@ export const en: Record<MessageKey, string> = {
   "settings.notify.diag.permission": "Permission",
   "settings.notify.diag.sw": "Service Worker",
   "settings.notify.diag.ctor": "Notification constructor",
+  "settings.notify.diag.bridge": "Native bridge",
   "settings.notify.diag.path": "Path used",
+  "settings.notify.webviewBlocked":
+    "This app's WebView never hands notification permission to the page: no prompt appears and permission stays at “default”. Real system notifications need a native bridge from the app shell (or open the site as a PWA in the system browser).",
+  "settings.notify.appDenied":
+    "The app doesn't have notification permission yet — the system settings were opened for you; please allow notifications for this app",
+  "settings.notify.stateAppNeeded": "Needs notification permission in this app",
+  "settings.notify.openSettings": "Open system notification settings",
+  "settings.notify.noSettings":
+    "This app doesn't expose a shortcut to system settings. Go to Settings → Notifications → this app → allow notifications.",
+  "settings.notify.push.label": "Instant push",
+  "settings.notify.push.on": "On (server-pushed; arrives even with the page closed)",
+  "settings.notify.push.off": "Not subscribed (tap “Turn on notifications” to enable instant delivery)",
+  "settings.notify.push.denied": "Notification permission required first",
+  "settings.notify.push.unsupported": "Not supported here (falls back to 60s polling)",
+  "settings.notify.always": "Notify me even while I'm using it",
+  "settings.notify.alwaysHint":
+    "By default we only notify while you're in the background or the screen is off. Some app WebViews never report page visibility, which means you'd never be notified — turn this on to bypass that check (the trade-off: it also pops while you're looking at the page).",
+  "settings.notify.diag.appPerm": "App permission",
   "settings.notify.note":
     "You're only notified while you're not looking at this page. If the app or browser is fully closed, nothing arrives — that's a limitation of web notifications and needs native push to overcome.",
   // —— Global error boundary ——

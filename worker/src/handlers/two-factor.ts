@@ -20,8 +20,15 @@
  * 5. **任何方式都不能把管理员彻底锁死** —— 见 `evaluateTwoFactorGate` 的宽限逻辑。
  */
 import { ApiError, json } from "../http"
-import { requireUser, isPrivileged } from "../auth"
-import { hashToken, uuid, timingSafeEqual, encryptSecret, decryptSecret } from "../crypto"
+import { requireUser, isPrivileged, type UserRow } from "../auth"
+import {
+  hashToken,
+  uuid,
+  timingSafeEqual,
+  encryptSecret,
+  decryptSecret,
+  verifyPassword,
+} from "../crypto"
 import { guardRateLimit } from "../ratelimit"
 import { sendMail, renderMail, siteUrl } from "../mailer"
 import { audit as recordAudit } from "../settings"
@@ -41,6 +48,13 @@ export const MAX_CHALLENGE_ATTEMPTS = 5
 export const CHALLENGE_TTL_MS = 10 * 60 * 1000
 /** 恢复码张数 */
 const RECOVERY_CODE_COUNT = 10
+/**
+ * TOTP 配置票据（`setupToken`）的有效期。
+ *
+ * 扫码 → 输动态码通常是几十秒的事；给 15 分钟足够慢手操作，
+ * 又不至于让一张泄漏的票据长期可用。
+ */
+const TOTP_SETUP_TTL_MS = 15 * 60 * 1000
 
 /** 强制要求 2FA 的角色。管理员与站长都在内。 */
 const ENFORCED_ROLES = ["admin", "root"] as const
@@ -384,35 +398,31 @@ export async function getTwoFactorSettings(env: Env, request: Request): Promise<
 /**
  * POST /api/settings/2fa/totp/start —— 生成密钥并返回二维码链接。
  *
- * ⚠️ 此时**不落库**：用户还没证明自己扫成功了。密钥先放在响应里，
- * 等 `/totp/confirm` 带着正确的动态码回来才写库 ——
- * 否则「扫了但没配对」也会把账号标成已开启，下次登录直接进不去。
+ * ⚠️ 此时**不落库**：用户还没证明自己扫成功了。密钥放在响应里（连同签名过的
+ * `setupToken`），等 `/totp/confirm` 带着正确的动态码 + 票据回来才写库。
+ *
+ * 🔴 2026-11-10 渗透测试 finding#1/#5 修复，这里改了两处：
+ *   1. **新增因子必须先证明是本人**：原来账号 2FA 关着时只凭会话 cookie 就放行，
+ *      于是「偷到 cookie → 无码开启邮箱 2FA 领走 10 个恢复码 → 用恢复码过 step-up
+ *      起 TOTP → confirm 绑上攻击者自己的认证器」这条持久后门链成立。
+ *      现在 `assertReauthForNewFactor` 要求账户密码（2FA 已开时再加一个当前验证码）。
+ *   2. **不再把未确认的密钥写进 user_2fa**：原来是「start 就置 totp_confirmed=0」，
+ *      用户点了「重新配置」又放弃（或网络中断）时，已确认的 TOTP 会被打成未确认 ——
+ *      对只开了 TOTP 的账号等于**静默关掉 2FA**（之后登录只再要密码）。
+ *      现在密钥只放在 `setupToken` 里，confirm 成功才落库；放弃则旧密钥原样有效。
  */
 export async function startTotpSetup(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
   await guardRateLimit(env, `2fa-setup:${user.id}`, 10, 60, "操作过于频繁")
 
-  // 账号已有 2FA 时，「重新配置 TOTP」等于把第二因子换成另一台设备
-  // ⇒ 必须先证明是本人（否则偷到会话的人就能把受害者的认证器顶掉）。
   const body = (await request.json().catch(() => ({}))) as {
     code?: string
     challengeId?: string
+    password?: string
   }
-  await assertTwoFactorStepUp(env, user.id, body, "any")
+  await assertReauthForNewFactor(env, user, body)
 
   const secret = generateTotpSecret()
-  const enc = await encryptSecret(secret, requireSecret(env))
-  const now = new Date().toISOString()
-  // 先以「未确认」状态写入（totp_confirmed = 0），confirm 时再置 1
-  await env.DB.prepare(
-    `INSERT INTO user_2fa (user_id, totp_secret, totp_confirmed, email_enabled, created_at, updated_at)
-     VALUES (?, ?, 0, 0, ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET totp_secret = excluded.totp_secret,
-       totp_confirmed = 0, updated_at = excluded.updated_at`
-  )
-    .bind(user.id, enc, now, now)
-    .run()
-
   return json({
     secret,
     // 前端用 qrcode 库把这个链接画成二维码
@@ -421,26 +431,31 @@ export async function startTotpSetup(env: Env, request: Request): Promise<Respon
       account: user.username,
       issuer: "Doulor Cloud",
     }),
+    // confirm 必须原样带回：它证明这串密钥是**这次已通过身份验证的 start** 发出的
+    setupToken: await issueTotpSetupTicket(env, user.id, secret),
   })
 }
 
-/** POST /api/settings/2fa/totp/confirm {code} —— 验证动态码并正式启用，同时发放恢复码 */
+/** POST /api/settings/2fa/totp/confirm {code, setupToken} —— 验证动态码并正式启用，同时发放恢复码 */
 export async function confirmTotpSetup(env: Env, request: Request): Promise<Response> {
   const user = await requireUser(env, request)
-  const body = (await request.json().catch(() => ({}))) as { code?: string }
+  const body = (await request.json().catch(() => ({}))) as {
+    code?: string
+    setupToken?: string
+  }
   const code = String(body.code ?? "").trim()
   if (!code) throw new ApiError(400, "请输入认证器上的 6 位数字", "INVALID_INPUT")
 
-  const row = await env.DB.prepare(
-    `SELECT totp_secret FROM user_2fa WHERE user_id = ?`
-  )
-    .bind(user.id)
-    .first<{ totp_secret: string | null }>()
-  if (!row?.totp_secret) throw new ApiError(400, "请先开始设置", "INVALID_INPUT")
+  // 6 位码不能无限猜：每账号 10 次 / 10 分钟（正常用户一两次就输对）
+  await guardRateLimit(env, `2fa-confirm:${user.id}`, 10, 600, "尝试次数过多，请稍后再试")
+
+  // ⚠️ 密钥只能来自**本人**刚通过身份验证的那次 start（票据里带 userId + 过期时间）。
+  //    不能让客户端自己指定密钥 —— 否则偷到会话的人用自己算的密钥 + 自己算的码
+  //    就能把认证器换成他的（这正是 finding#1 的利用链）。
+  const secret = await readTotpSetupTicket(env, user.id, String(body.setupToken ?? ""))
 
   let ok = false
   try {
-    const secret = await decryptSecret(row.totp_secret, requireSecret(env))
     ok = await verifyTotp(secret, code)
   } catch {
     ok = false
@@ -448,16 +463,84 @@ export async function confirmTotpSetup(env: Env, request: Request): Promise<Resp
   if (!ok) throw new ApiError(400, "验证码不正确，请确认手机时间是否准确", "INVALID_CODE")
 
   const now = new Date().toISOString()
+  // 只有 confirm 成功才落库：全新插入，或把旧密钥替换成这次的新密钥。
+  // `email_enabled` 不在 UPDATE 列表里 —— 开 TOTP 不该动邮箱方式。
   await env.DB.prepare(
-    `UPDATE user_2fa SET totp_confirmed = 1, updated_at = ? WHERE user_id = ?`
+    `INSERT INTO user_2fa (user_id, totp_secret, totp_confirmed, email_enabled, created_at, updated_at)
+     VALUES (?, ?, 1, 0, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET totp_secret = excluded.totp_secret,
+       totp_confirmed = 1, updated_at = excluded.updated_at`
   )
-    .bind(now, user.id)
+    .bind(user.id, await encryptSecret(secret, requireSecret(env)), now, now)
     .run()
 
   // 开启成功时发一批恢复码（只在这一次明文返回，之后库里只有哈希）
   const codes = await regenerateRecoveryCodesFor(env, user.id)
   await recordAudit(env, user.id, "2fa.totp.enable", "开启 TOTP 二次认证")
   return json({ ok: true, recoveryCodes: codes })
+}
+
+/**
+ * TOTP 配置票据：把「这次 start 已通过身份验证」这件事签名带出去。
+ *
+ * 为什么不复用 `user_2fa` 里的「未确认密钥」：那会破坏已确认因子的状态机
+ * （上面 startTotpSetup 的第 2 条说明）。这里用 AES-GCM（密钥仍取 SESSION_SECRET）
+ * 把 `{purpose, uid, secret, exp}` 整体加密 —— 客户端改不了 userId、改不了过期时间，
+ * 任何改动都会在解密时直接失败（GCM 自带完整性校验）。
+ */
+interface TotpSetupTicket {
+  /** 固定用途标记：防止别的密文被当票据重放 */
+  purpose: "totp-setup"
+  /** 票据持有者（= start 时的登录用户） */
+  uid: string
+  /** 本次生成的 TOTP 密钥（明文只在这张票据里，库里没有未确认的副本） */
+  secret: string
+  /** 过期时间（毫秒时间戳） */
+  exp: number
+}
+
+async function issueTotpSetupTicket(
+  env: Env,
+  userId: string,
+  secret: string
+): Promise<string> {
+  const ticket: TotpSetupTicket = {
+    purpose: "totp-setup",
+    uid: userId,
+    secret,
+    exp: Date.now() + TOTP_SETUP_TTL_MS,
+  }
+  return encryptSecret(JSON.stringify(ticket), requireSecret(env))
+}
+
+async function readTotpSetupTicket(
+  env: Env,
+  userId: string,
+  token: string
+): Promise<string> {
+  if (!token) {
+    throw new ApiError(400, "请先开始设置认证器", "INVALID_INPUT")
+  }
+  let ticket: Partial<TotpSetupTicket>
+  try {
+    ticket = JSON.parse(await decryptSecret(token, requireSecret(env))) as Partial<TotpSetupTicket>
+  } catch {
+    // 解密失败（被篡改 / SESSION_SECRET 换过）与格式错误的处理必须一致：
+    // 不告诉对方具体原因，统一让他重新走一遍 start（只要几十秒）。
+    throw new ApiError(400, "配置已失效，请重新开始设置", "SETUP_EXPIRED")
+  }
+  const fresh =
+    typeof ticket?.exp === "number" && ticket.exp >= Date.now()
+  if (
+    ticket?.purpose !== "totp-setup" ||
+    ticket.uid !== userId ||
+    typeof ticket.secret !== "string" ||
+    !ticket.secret ||
+    !fresh
+  ) {
+    throw new ApiError(400, "配置已失效，请重新开始设置", "SETUP_EXPIRED")
+  }
+  return ticket.secret
 }
 
 /** 生成一批新恢复码，旧的作废。返回明文（仅此一次） */
@@ -508,15 +591,25 @@ export async function setEmailTwoFactor(env: Env, request: Request): Promise<Res
     enabled?: boolean
     code?: string
     challengeId?: string
+    password?: string
   }
   const enabled = Boolean(body.enabled)
 
   /**
    * 二次验证（站长 2026-10-10 定的口径）：
    *   · 关闭邮箱方式 ⇒ 只认**邮箱验证码**（或恢复码）——「关哪个验哪个」；
-   *   · 开启邮箱方式 ⇒ 账号已有别的 2FA 时认任一已开启方式；账号本来没开 ⇒ 放行（首次加固）。
+   *   · 开启邮箱方式 ⇒ 账号已有别的 2FA 时认任一已开启方式，**并且**要验账户密码。
+   *
+   * 🔴 2026-11-10 渗透测试 finding#1/#5：原来「账号本来没开 2FA ⇒ 直接放行（首次加固）」
+   * 被利用成提权链 —— 劫持到会话的人无码开启邮箱验证，响应里直接领走 10 个恢复码，
+   * 而恢复码又能当 step-up 码用（起 TOTP / 关设置），会话就此升级成「持有第二因子」。
+   * 「加固方向」同样需要一个独立于会话的凭据，所以这里改走 `assertReauthForNewFactor`。
    */
-  await assertTwoFactorStepUp(env, user.id, body, enabled ? "any" : "email")
+  if (enabled) {
+    await assertReauthForNewFactor(env, user, body)
+  } else {
+    await assertTwoFactorStepUp(env, user.id, body, "email")
+  }
 
   // 开启前必须邮箱已验证 —— 否则码会发到一个不属于他的地址，等于没验
   if (enabled && user.email_verified !== 1) {
@@ -589,8 +682,9 @@ export async function setEmailTwoFactor(env: Env, request: Request): Promise<Res
  * 恢复码三档都放行：它本来就是「所有方式的最后退路」，少这一条会让
  * 丢了认证器的人被彻底锁死（10-04 ventus 那次就是被这个坑到的）。
  *
- * ⚠️ 账号**当前还没有任何 2FA** 时直接放行 —— 此时没有「已开启的方式」可验，
- * 而这是从「无」到「有」的加固方向，不构成「拆锁」。
+ * ⚠️ 账号**当前还没有任何 2FA** 时本函数直接放行 —— 此时没有「已开启的方式」可验。
+ * 但「新增因子」类的操作**不能**只靠这条放行：它们要再走 `assertReauthForNewFactor`
+ * 补一道账户密码（2026-11-10 finding#1/#5，见该函数注释）。
  */
 async function assertTwoFactorStepUp(
   env: Env,
@@ -615,6 +709,41 @@ async function assertTwoFactorStepUp(
 
   if (!(viaTotp || viaEmail || viaRecovery)) {
     throw new ApiError(400, "验证码不正确", "INVALID_CODE")
+  }
+}
+
+/**
+ * 「新增一个第二因子」之前的重新认证（2026-11-10 渗透测试 finding#1/#5）。
+ *
+ * 为什么不复用上面的 `assertTwoFactorStepUp`：它在账号**还没有任何 2FA** 时直接放行
+ * （「从无到有属于加固」）。可渗透测试把这条放行利用成了提权链：
+ *   只有会话 cookie ⇒ POST /2fa/email {enabled:true} 无码开启并领走 10 个恢复码
+ *   ⇒ 恢复码能当 step-up 码 ⇒ 起 TOTP ⇒ confirm 绑上攻击者自己的认证器 ⇒ 永久后门。
+ * 也就是说「加固方向」本身也需要一个**独立于会话**的凭据，否则等于没有门槛。
+ *
+ * 现在的口径：
+ *   · 账号当前**没有** 2FA ⇒ 验当前账户密码（会话劫持者不知道密码）；
+ *   · 账号当前**已有** 2FA ⇒ 密码 + 任一已开启方式的验证码
+ *     （只有密码的人过不了第二步；只有会话的人过不了第一步）。
+ *
+ * ⚠️ 密码校验本身也要限流：否则这个接口会变成「拿着会话爆破口令」的新入口。
+ */
+async function assertReauthForNewFactor(
+  env: Env,
+  user: UserRow,
+  input: { code?: unknown; challengeId?: unknown; password?: unknown }
+): Promise<void> {
+  const password = String(input.password ?? "")
+  if (!password) {
+    throw new ApiError(400, "请输入当前账户密码，以确认是你本人在操作", "NEED_PASSWORD")
+  }
+  await guardRateLimit(env, `2fa-reauth:${user.id}`, 10, 900, "密码尝试次数过多，请稍后再试")
+  if (!(await verifyPassword(password, user.password_hash))) {
+    throw new ApiError(400, "账户密码不正确", "INVALID_PASSWORD")
+  }
+  const state = await loadTwoFactorState(env, user.id)
+  if (state.enabled) {
+    await assertTwoFactorStepUp(env, user.id, input, "any")
   }
 }
 

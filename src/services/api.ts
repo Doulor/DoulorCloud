@@ -3381,6 +3381,29 @@ export const dmApi = {
     }),
 }
 
+/**
+ * Web Push 订阅（服务端推，取代轮询的"即时"路径）。
+ * 订阅与当前登录用户绑定，端点由浏览器生成后上报。
+ */
+export const pushApi = {
+  /** VAPID 公钥（订阅时作为 applicationServerKey） */
+  publicKey: () => request<{ key: string }>("/push/public-key"),
+  subscribe: (payload: {
+    endpoint: string
+    keys: { p256dh: string; auth: string }
+    ua?: string
+  }) =>
+    request<{ ok: boolean }>("/push/subscribe", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  unsubscribe: (endpoint: string) =>
+    request<{ ok: boolean }>("/push/unsubscribe", {
+      method: "POST",
+      body: JSON.stringify({ endpoint }),
+    }),
+}
+
 export const notificationApi = {
   /** 消息列表；category 可选（system/site/social/event），不传 = 全部 */
   list: (params?: { category?: MessageCategory; limit?: number }) => {
@@ -4083,10 +4106,15 @@ export const chatUploadApi = {
 /**
  * 改动 2FA 设置时的「二次验证」载荷（2026-10-10 起服务端强制要求）。
  * `challengeId` 只在用**邮箱验证码**时才需要 —— 由 `twoFactorApi.sendStepUpCode()` 换回。
+ *
+ * 🔴 2026-11-10 渗透测试 finding#1/#5 后新增 `password`：**新增因子**（开启邮箱验证、
+ *    绑定/重配认证器）必须在会话之外再证明一次身份 —— 账号还没有任何 2FA 时没有
+ *    「已开启的方式」可验，只能验账户密码；已有 2FA 时密码与验证码都要。
  */
 export interface TwoFactorStepUp {
   code?: string
   challengeId?: string
+  password?: string
 }
 
 export const twoFactorApi = {
@@ -4116,24 +4144,32 @@ export const twoFactorApi = {
       maskedEmail: string
     }>("/settings/2fa"),
 
-  /** 开始配置 TOTP：拿到密钥与 otpauth 链接（前端画二维码） */
+  /** 开始配置 TOTP：拿到密钥、otpauth 链接（前端画二维码）与绑定票据 */
   /**
    * 改动 2FA 设置时的「二次验证」载荷（2026-10-10 起服务端强制）：
    *   · `code`        —— 当前可用的验证码（认证器动态码 / 恢复码 / 邮箱验证码）
    *   · `challengeId` —— 用**邮箱验证码**时必须带上（由 `sendStepUpCode()` 换回）
-   * 账号还没开启任何 2FA 时（首次开启）不需要传。
+   *   · `password`    —— 当前账户密码（2026-11-10 起：**开启/新增因子必须带**）
    */
   startTotp: (stepUp?: TwoFactorStepUp) =>
-    request<{ secret: string; otpauthUrl: string }>("/settings/2fa/totp/start", {
-      method: "POST",
-      body: JSON.stringify(stepUp ?? {}),
-    }),
+    request<{ secret: string; otpauthUrl: string; setupToken: string }>(
+      "/settings/2fa/totp/start",
+      {
+        method: "POST",
+        body: JSON.stringify(stepUp ?? {}),
+      }
+    ),
 
-  /** 用认证器上的一次动态码确认，成功则返回恢复码（仅此一次明文） */
-  confirmTotp: (code: string) =>
+  /**
+   * 用认证器上的一次动态码确认，成功则返回恢复码（仅此一次明文）。
+   *
+   * `setupToken` 是 `startTotp` 下发的那张票据 —— 服务端据此确认「这串密钥是本人
+   * 通过身份验证后生成的」，客户端不能自己指定密钥（2026-11-10 finding#1/#5）。
+   */
+  confirmTotp: (code: string, setupToken: string) =>
     request<{ ok: boolean; recoveryCodes: string[] }>("/settings/2fa/totp/confirm", {
       method: "POST",
-      body: JSON.stringify({ code }),
+      body: JSON.stringify({ code, setupToken }),
     }),
 
   /** 单独关闭 TOTP（需验 TOTP 动态码或恢复码；被强制的角色不允许） */

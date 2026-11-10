@@ -602,19 +602,40 @@ export async function login(env: Env, request: Request, ctx?: ExecutionContext):
     LOGIN_WINDOW_SECONDS,
     "登录尝试过于频繁"
   )
-  await guardRateLimit(
-    env,
-    `login:id:${normalizeKeyPart(identifier)}`,
-    LOGIN_IDENTIFIER_LIMIT,
-    LOGIN_WINDOW_SECONDS,
-    "该账号登录尝试过于频繁"
-  )
-
+  // 账号维度必须**先解析出用户行**才有意义（见下面 finding#2 的说明），
+  // 所以查询提到限流之前：IP 维度 → 查用户 → 账号维度 → 校验口令。
   const user = await env.DB.prepare(
     "SELECT * FROM users WHERE username = ? COLLATE NOCASE OR email = ? COLLATE NOCASE LIMIT 1"
   )
     .bind(identifier, identifier)
     .first<UserRow>()
+
+  /**
+   * 账号维度限流：按**解析后的账户**计数，不再按提交的字符串
+   * （2026-11-10 渗透测试 finding#2）。
+   *
+   * 根因：一个账户有用户名与注册邮箱两个可登录标识（上面那条 SELECT 两者都认），
+   * 而旧实现按 identifier 原串分桶（`login:id:<原串>`）⇒ 两个标识落在两个桶里。
+   * 攻击者用用户名把账号桶打到 429 之后，改用该账户的注册邮箱就能接着试口令，
+   * 同一账户的尝试次数凭空翻倍（还能两个标识交替放大），账号维度限流形同虚设。
+   *
+   * 修法：用户存在 ⇒ `login:uid:<id>`，本次提交的是用户名还是邮箱都进同一个桶；
+   * 用户不存在 ⇒ 仍退回 `login:id:<规范化后的串>`，不能让匿名者拿不存在的标识
+   * 无限刷（那等于给探测用户名/邮箱是否注册留了个永不 429 的口子）。
+   *
+   * 每次请求**只记一个**桶：已知用户时不再补记一遍 identifier 桶，否则同一次尝试
+   * 被算两次（等于把阈值悄悄减半），还多一次 D1 写。
+   *
+   * 位置不能挪到校验口令之后：锁住期间即使口令正确也照样 429，
+   * 账号层锁不因密码正确而放行（与改动前语义一致）。
+   */
+  await guardRateLimit(
+    env,
+    user ? `login:uid:${user.id}` : `login:id:${normalizeKeyPart(identifier)}`,
+    LOGIN_IDENTIFIER_LIMIT,
+    LOGIN_WINDOW_SECONDS,
+    "该账号登录尝试过于频繁"
+  )
 
   if (!user || !(await verifyPassword(password, user.password_hash))) {
     throw new ApiError(401, "用户名或密码错误", "INVALID_CREDENTIALS")

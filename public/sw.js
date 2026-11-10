@@ -101,9 +101,34 @@ self.addEventListener("fetch", (event) => {
  * 顺带接上 `push`：以后上真正的 Web Push（VAPID）时，服务端推来的消息由这里展示，
  * 不需要再改前端。
  */
+/* ---- 通知文案消毒 / 跳转白名单（渗透测试 finding#3，2026-11-10）-------------
+ *
+ * 与 Worker 侧 `worker/src/notify-text.ts`、页面侧 `src/lib/web-notify.ts` 同一套规则：
+ * 服务端已经消毒过，这里再兜一次 —— 推送载荷是"从网络进来的数据"，而 SW 是最后
+ * 一道能拦住伪造通知的关口（标题被伪造成"官方安全提醒"就是一条钓鱼弹窗）。
+ */
+function sanitizeNotifyText(input, max) {
+  const cleaned = String(input == null ? "" : input)
+    .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g, "")
+    .replace(/[<>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+  return cleaned.slice(0, Math.max(0, parseInt(max, 10) || 0))
+}
+
+/** 点通知的跳转目标：只接受站内绝对路径（`//evil.com`、`/\evil.com`、`javascript:` 一律回退） */
+function safeInternalUrl(url) {
+  const raw = String(url == null ? "" : url).trim()
+  if (raw.charAt(0) !== "/") return "/dashboard"
+  if (raw.indexOf("//") === 0 || raw.indexOf("/\\") === 0) return "/dashboard"
+  if (/[\u0000-\u001F\u007F]/.test(raw)) return "/dashboard"
+  return raw
+}
+
 self.addEventListener("notificationclick", (event) => {
   event.notification.close()
-  const target = (event.notification.data && event.notification.data.url) || "/dashboard"
+  const target = safeInternalUrl(event.notification.data && event.notification.data.url)
   event.waitUntil(
     self.clients
       .matchAll({ type: "window", includeUncontrolled: true })
@@ -127,13 +152,14 @@ self.addEventListener("push", (event) => {
   } catch {
     payload = { body: event.data ? event.data.text() : "" }
   }
-  const title = payload.title || "Doulor Cloud"
+  // 🔒 标题固定兜底、正文消毒、跳转白名单 —— 见上面的规则说明
+  const title = sanitizeNotifyText(payload.title, 120) || "新邮件提醒 · Doulor Cloud"
   event.waitUntil(
     self.registration.showNotification(title, {
-      body: payload.body || "",
+      body: sanitizeNotifyText(payload.body, 200),
       icon: "/favicon.png?v=2",
       tag: payload.tag,
-      data: { url: payload.url || "/dashboard" },
+      data: { url: safeInternalUrl(payload.url) },
     })
   )
 })

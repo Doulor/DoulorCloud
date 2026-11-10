@@ -63,7 +63,16 @@ export async function listDonationChannels(env: Env, request: Request): Promise<
   )
   const acLive = await q("SELECT COUNT(*) AS n FROM autoclaw_donations WHERE user_id = ? AND status = 'active'")
 
+  // 2026-11-10 站长要求恢复：WorkBuddy / Qoder2API 两条通道的入口重新开放，
+  // 状态卡也重新统计它们（表结构没变，status='removed' 是墓碑，不算捐过）。
+  const wb = await q("SELECT COUNT(*) AS n FROM wb2api_bindings WHERE user_id = ? AND status <> 'removed'")
+  const wbLive = await q("SELECT COUNT(*) AS n FROM wb2api_bindings WHERE user_id = ? AND status = 'active'")
+  const qd = await q("SELECT COUNT(*) AS n FROM qoder2api_bindings WHERE user_id = ? AND status <> 'removed'")
+  const qdLive = await q("SELECT COUNT(*) AS n FROM qoder2api_bindings WHERE user_id = ? AND status = 'active'")
+
   const rows: ChannelStatusRow[] = [
+    { key: "workbuddy", label: "WorkBuddy", count: wb, activeCount: wbLive, open: wb > 0, yuanPerDay: await num("quota_yuan_per_wb", 200) },
+    { key: "qoder", label: "Qoder", count: qd, activeCount: qdLive, open: qd > 0, yuanPerDay: await num("quota_yuan_per_qoder", 200) },
     { key: "raccoon", label: "小浣熊", count: rc, activeCount: rcLive, open: rc > 0, yuanPerDay: await num("quota_yuan_per_raccoon", 200) },
     { key: "autoclaw", label: "AutoClaw", count: ac, activeCount: acLive, open: ac > 0, yuanPerDay: await num("quota_yuan_per_autoclaw", 200) },
   ]

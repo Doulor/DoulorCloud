@@ -1,9 +1,13 @@
-// 2FA 设置的「二次验证」（step-up）回归测试。
+// 2FA 设置的「二次认证」（step-up）回归测试。
 //
 // 背景（2026-10-10 渗透测试 finding#8/#9）：逐方法的 2FA 开关原先**只凭会话 cookie**
 // 就能调用 —— 偷到 cookie 的人可以静默把受害者的第二因子拆掉、或者换成自己的认证器。
 // 站长定的规则：改动 2FA 设置时必须验证**已开启的方式** ——
 //   关 TOTP → 认 TOTP 动态码或恢复码；关邮箱 → 认邮箱验证码；两者都开 → 关哪个验哪个。
+//
+// 2026-11-10 渗透测试 finding#1/#5 又补了一条：**新增因子**（开启邮箱验证 / 绑定认证器）
+// 还需要账户密码 —— 账号本来没有 2FA 时，「已开启的方式」一个都不存在，只靠会话
+// 等于没有门槛，攻击者可以无码开启并领走恢复码，再拿恢复码当 step-up 码绑自己的认证器。
 //
 // ⚠️ 这里用**恢复码**来验证「可以关」的路径：它不需要在测试里实现 TOTP 算法。
 import { describe, it, expect } from "vitest"
@@ -86,8 +90,12 @@ describe("2FA 改动需要二次验证（finding#8/#9）", () => {
 
   it("只开邮箱验证：不带码关不掉", async () => {
     const u = await makeUser()
-    // 首次开启（账号还没有任何 2FA）⇒ 不需要二次验证
-    const on = await post(u, "/api/settings/2fa/email", { enabled: true })
+    // 首次开启（账号还没有任何 2FA）⇒ 走「账户密码」这一层重新认证
+    // （2026-11-10 渗透 finding#1/#5：原来只凭会话 cookie 就能无码开启）。
+    const on = await post(u, "/api/settings/2fa/email", {
+      enabled: true,
+      password: "pass1234",
+    })
     expect(on.status).toBe(200)
 
     // 关闭时必须验邮箱验证码（测试里拿不到邮箱码 ⇒ 必然是「请输入验证码」）
@@ -96,13 +104,20 @@ describe("2FA 改动需要二次验证（finding#8/#9）", () => {
     expect(await codeOf(off)).toBe("INVALID_INPUT")
   })
 
-  it("首次开启 TOTP 不需要二次验证（账号本来就没开 2FA）", async () => {
+  it("首次开启 TOTP 也要账户密码，且 start / confirm 之间靠票据串起来", async () => {
     const u = await makeUser()
-    const res = await post(u, "/api/settings/2fa/totp/start", {})
+
+    // 只凭会话（旧行为）⇒ 现在必须被拦
+    const denied = await post(u, "/api/settings/2fa/totp/start", {})
+    expect(denied.status).toBe(400)
+    expect(await codeOf(denied)).toBe("NEED_PASSWORD")
+
+    // 带上账户密码 ⇒ 200 + 密钥 + 绑定票据（finding#1：confirm 必须带这张票据）
+    const res = await post(u, "/api/settings/2fa/totp/start", { password: "pass1234" })
     expect(res.status).toBe(200)
-    expect(await (res.json() as Promise<{ secret?: string }>)).toMatchObject({
-      secret: expect.any(String),
-    })
+    const body = (await res.json()) as { secret?: string; setupToken?: string }
+    expect(body.secret).toEqual(expect.any(String))
+    expect(body.setupToken).toEqual(expect.any(String))
   })
 
   it("邮箱码必须带 challengeId 才算数（不能凭空传个数字过关）", async () => {

@@ -377,8 +377,14 @@ describe("恢复码与开启状态", () => {
     const u = await makeUser({})
     await seedStrandedRecovery(u.id)
 
+    // ⚠️ 2026-11-10 渗透 finding#1/#5 起，**开启**邮箱验证要验账户密码
+    //    （只凭会话 cookie 不够 —— 否则劫持会话就能无码开启并领走恢复码）。
     const res = await fetchSelf(
-      authRequest(u, "/api/settings/2fa/email", jsonInit({ enabled: true }))
+      authRequest(
+        u,
+        "/api/settings/2fa/email",
+        jsonInit({ enabled: true, password: "pass1234" })
+      )
     )
     expect(res.status).toBe(200)
     const body = await res.json<{ recoveryCodes?: string[] }>()
@@ -393,7 +399,11 @@ describe("恢复码与开启状态", () => {
   it("关掉最后一个方式 → 恢复码一并作废", async () => {
     const u = await makeUser({})
     const on = await fetchSelf(
-      authRequest(u, "/api/settings/2fa/email", jsonInit({ enabled: true }))
+      authRequest(
+        u,
+        "/api/settings/2fa/email",
+        jsonInit({ enabled: true, password: "pass1234" })
+      )
     )
     expect(on.status).toBe(200)
     const onBody = await on.json<{ recoveryCodes?: string[] }>()
@@ -441,11 +451,16 @@ describe("恢复码与开启状态", () => {
     // 开邮箱：TOTP 的码还在用，不该被换掉
     // ⚠️ 2026-10-10 起改 2FA 设置要 step-up 验证码；账号此时已开着 TOTP，
     //    所以带一个当前认证器码（真实用户就是这么操作的）。
+    // ⚠️ 2026-11-10 起「新增因子」还要账户密码（finding#1/#5）。
     const on = await fetchSelf(
       authRequest(
         u,
         "/api/settings/2fa/email",
-        jsonInit({ enabled: true, code: await currentTotp(secret) })
+        jsonInit({
+          enabled: true,
+          code: await currentTotp(secret),
+          password: "pass1234",
+        })
       )
     )
     expect(on.status).toBe(200)

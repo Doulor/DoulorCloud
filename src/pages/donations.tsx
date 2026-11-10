@@ -1058,17 +1058,23 @@ export default function DonationPage() {
               {/* 顶部：四个渠道的开通状态（绿=已开通 / 红=未开通） */}
               <ChannelStatusCard />
               {/*
-                2026-11 起 AI 捐献**全部走 agent2api 网关**，下面两张卡已停用：
-                  · WorkBuddy（wb2api）通道
-                  · Qoder2API（qoder2api）通道
-                它们曾经各自维护一套「登录自家网关 → 把账号塞进号池」的流程，
-                网关统一到 agent2api 之后就没有意义了。
-
-                这里只**撤掉入口**、不删实现：存量绑定还挂在 wb2api_bindings 上，
-                管理员仍需要「管理面板 → 捐献通道」去查看与摘除（否则那些用户
-                的 ai 权限会没法回收）。等存量清空后可以把这两个组件连同
-                wb2apiApi / qoder2apiApi 一起删掉。
+                2026-11-10 站长要求恢复：WorkBuddy(wb2api) 与 Qoder2API(qoder2api)
+                两条捐献通道的入口**重新开放**。它们各自维护一套「登录自家网关 →
+                把账号塞进号池」的流程，存量绑定仍在 wb2api_bindings /
+                qoder2api_bindings 上，因此卡片与后端接口都是现成的。
               */}
+              <Wb2ApiDonationCard
+                block={data?.wb2api}
+                aiUnlocked={perms?.ai ?? false}
+                grantsPermission={grantPermissions?.wb2api !== false}
+                onDone={() => void load()}
+              />
+              <Qoder2ApiDonationCard
+                block={data?.qoder2api}
+                aiUnlocked={perms?.ai ?? false}
+                grantsPermission={grantPermissions?.qoder2api !== false}
+                onDone={() => void load()}
+              />
               <RaccoonDonationCard onDone={() => void load()} />
               <AutoclawDonationCard />
               <SenseNovaDonationCard
