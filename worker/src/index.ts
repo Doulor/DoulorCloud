@@ -15,6 +15,8 @@ import * as diag4Handlers from "./handlers/diag4"
 import * as subdomainHandlers from "./handlers/subdomains"
 import * as adminHandlers from "./handlers/admin"
 import * as adminFeatureHandlers from "./handlers/admin-features"
+import * as adminD1AuditHandlers from "./handlers/admin-d1-audit"
+import { createCollector, d1AuditActive, recordD1AuditSample, withAuditDb } from "./d1-audit"
 import {
   assertPublicPathEnabled,
   assertRouteEnabled,
@@ -2103,6 +2105,13 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/features",
     method: "GET",
     handle: () => adminFeatureHandlers.publicFeatureStates(env, request),
+  },
+  // D1 行读审计（诊断）：按路由 / SQL 指纹聚合采样结果
+  {
+    kind: "exact",
+    path: "/admin/d1-audit",
+    method: "GET",
+    handle: () => adminD1AuditHandlers.getD1Audit(env, request),
   },
 
   // ================= 管理端 · AI 实验室配置 =================
@@ -5754,7 +5763,31 @@ function withD1ReadReplication(env: Env): Env {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    /**
+     * D1 行读审计（2026-11-17，默认关闭）。
+     *
+     * 这里拿的是**未加读复制会话**的原始 DB，用于请求结束后在 waitUntil 里落样本；
+     * 采样开关/包装见 d1-audit.ts。关闭时（默认）只多一次缓存命中判断。
+     */
+    const auditBaseDb = env.DB
     env = withD1ReadReplication(env)
+    let auditCollector: ReturnType<typeof createCollector> | null = null
+    try {
+      const auditState = await d1AuditActive(env)
+      if (auditState.on && auditState.sample) {
+        let auditPath = ""
+        try {
+          auditPath = new URL(request.url).pathname
+        } catch {
+          /* 路径解析失败就给空串，样本照采 */
+        }
+        auditCollector = createCollector(auditPath, request.method)
+        env = withAuditDb(env, auditCollector)
+      }
+    } catch {
+      // 诊断链路任何异常都不影响请求本身
+      auditCollector = null
+    }
     // ⚠️ 入口必做的安全动作：剥掉客户端传来的内部标记头。
     // `X-Doulor-Api-Source` / `X-Doulor-Api-Admin` 只允许 Worker 内部
     // （public-api 的 runAs）注入；不剥的话，任何人自己加一个
@@ -5959,6 +5992,10 @@ export default {
       }
       console.error(`Unhandled error [${request.method} ${pathForLog}]:`, err)
       return json({ error: "服务器内部错误", code: "INTERNAL" }, 500)
+    } finally {
+      if (auditCollector) {
+        ctx.waitUntil(recordD1AuditSample(auditBaseDb, auditCollector).catch(() => {}))
+      }
     }
   },
   // Email Workers 入站路由：Cloudflare Email Routing 转发到此

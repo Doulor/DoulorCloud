@@ -1248,6 +1248,17 @@ export const SETTING_DEFAULTS = {
   qq_enabled: "1",
   /** 访问统计（前端 PV 上报；关掉只影响新增数据） */
   analytics_enabled: "1",
+  /**
+   * D1 行读审计（2026-11-17，诊断用，默认关）。
+   *
+   * 开启后在 fetch 入口按 `d1_audit_sample_percent` 采样请求，把「路由 + 查询数 +
+   * 行读/行写 + 最贵那条 SQL」写入 d1_audit_samples（保留 7 天，maintenance 清理）。
+   * 用途：定位「日均 1.57 亿行读」到底花在哪些查询上（Cloudflare 的 GraphQL 没有 query 级维度）。
+   * ⚠️ 只做诊断，不改变任何业务行为；关闭后立即停止采样。
+   */
+  d1_audit_enabled: "0",
+  /** D1 审计采样率（百分比，1 = 1%）。只在 d1_audit_enabled=1 时生效 */
+  d1_audit_sample_percent: "1",
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS

@@ -630,6 +630,23 @@ export async function runMaintenance(
     console.error("性能样本/诊断日志清理失败（表可能未迁移）:", err)
   }
 
+  // 4e) D1 行读审计样本（0200，7 天保留期）
+  //
+  // 诊断表：只在该功能开启时才有数据。按 7 天整行清，避免诊断数据自己变成
+  // 「未受管的大表」—— 这正是维护说明里反复强调要避免的事。
+  try {
+    if (!dryRun) {
+      await env.DB.prepare(
+        "DELETE FROM d1_audit_samples WHERE created_at < ?"
+      )
+        .bind(daysAgoIso(7))
+        .run()
+    }
+  } catch (err) {
+    // 表未迁移：只记日志，不影响其它清理项
+    console.error("D1 审计样本清理失败（表可能未迁移）:", err)
+  }
+
   // 5) 网盘记账自检（只报告）
   const storageMismatches = await findStorageMismatches(env)
   if (storageMismatches.length > 0) {

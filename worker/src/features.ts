@@ -496,6 +496,16 @@ export const FEATURE_DEFS: FeatureDef[] = [
     costHint: "省：可忽略（单条最大 64KB，写一次）",
     routes: ["/diag-logs"],
   },
+  {
+    id: "d1Audit",
+    settingKey: "d1_audit_enabled",
+    label: "D1 行读审计（诊断）",
+    group: "system",
+    impact:
+      "仅按采样率记录 D1 调用的行读/行写与最贵 SQL（写 d1_audit_samples，保留 7 天）；不改任何业务行为。关闭后立刻停止采样，历史样本到期自动清理。",
+    costHint: "诊断用：采样 1% 时约 1,400 行/天写入，用来定位 D1 行读大头",
+    routes: [],
+  },
 ]
 
 /** id → 定义（构建一次） */
