@@ -61,6 +61,7 @@ export default function DmPage() {
   const { t } = useT()
   /** 功能开关：私信关掉后停掉 5s 轮询（720 请求/小时/人） */
   const { isOn } = useFeatures()
+  const dmOn = isOn("dm")
   const { username: routePeer } = useParams<{ username?: string }>()
   const navigate = useNavigate()
   const { user } = useAuth()
@@ -361,14 +362,14 @@ export default function DmPage() {
   // 轮询：列表 + 当前会话
   React.useEffect(() => {
     if (!user) return
-    if (!isOn("dm")) return
+    if (!dmOn) return
     const offList = setVisibleInterval(() => void loadConversations(), POLL_MS)
     const offMsg = setVisibleInterval(() => void pollMessages(), POLL_MS)
     return () => {
       offList()
       offMsg()
     }
-  }, [user, loadConversations, pollMessages, isOn])
+  }, [user, loadConversations, pollMessages, dmOn])
 
   /**
    * 找到「真正带滚动条的那个元素」。

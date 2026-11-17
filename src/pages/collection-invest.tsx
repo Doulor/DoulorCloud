@@ -221,11 +221,12 @@ export default function CollectionInvestPage() {
 
   /** 功能开关：游戏关掉后不再 3 秒轮询（见下方 effect 的守卫） */
   const { isOn } = useFeatures()
+  const gameOn = isOn("game")
 
   // ---- 状态轮询（同时驱动行情的推进与强平）----
   React.useEffect(() => {
     // 功能开关：游戏关掉后不要再 3 秒一次地打 /state（它还会推进并写库）
-    if (!isOn("game")) return
+    if (!gameOn) return
     aliveRef.current = true
     const tick = async () => {
       try {
@@ -258,7 +259,7 @@ export default function CollectionInvestPage() {
       aliveRef.current = false
       stop()
     }
-  }, [interval, loadCandles, t])
+  }, [interval, loadCandles, t, gameOn])
 
   // ---- 交易记录 / 排行榜（只在看的时候拉，不必跟着 3 秒轮询）----
   React.useEffect(() => {

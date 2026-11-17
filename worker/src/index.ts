@@ -5969,8 +5969,16 @@ export default {
      * 里最容易被忽略的一条：入站邮件由外部触发，入口藏了也照样烧 CPU。
      * 只记一行日志（不含正文与发件人），便于事后核对「关掉期间有没有信被丢」。
      */
-    if (!(await isFeatureEnabled(env, "mail"))) {
-      console.warn("mail_enabled=0，入站邮件已丢弃");
+    let mailOn = true
+    try {
+      mailOn = await isFeatureEnabled(env, "mail")
+    } catch {
+      // 读状态失败 → 按「开」处理（fail-open）；入站邮件是外部触发的，
+      // 这里抛错会让 Email Routing 反复重投，比放行代价大得多。
+      mailOn = true
+    }
+    if (!mailOn) {
+      console.warn("mail_enabled=0，入站邮件已丢弃")
       return
     }
     await incomingEmail(message, env)

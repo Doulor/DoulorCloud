@@ -134,7 +134,7 @@ export const FEATURE_DEFS: FeatureDef[] = [
     group: "mail",
     impact: "不再定时连 IMAP / Outlook 拉信；已拉取的邮件仍在库里可读。",
     costHint: "省：CPU 第一大户（每分钟 2 个账号 × TLS + MIME 解析）+ 行写",
-    routes: ["/mail/accounts", "/mail/oauth", "/push/native"],
+    routes: ["/mail/accounts", "/mail/oauth"],
     jobs: ["mailSync"],
   },
   {
@@ -550,20 +550,37 @@ function isOn(raw: string): boolean {
 /** 读全部功能状态（一次查询 + 10 秒进程内缓存） */
 export async function getFeatureStates(env: Env): Promise<FeatureStates> {
   return cached<FeatureStates>(CACHE_KEY, CACHE_MS, async () => {
-    const rows = await env.DB.prepare("SELECT key, value FROM app_settings").all<{
-      key: string
-      value: string
-    }>()
-    const map = new Map((rows.results ?? []).map((r) => [r.key, r.value]))
-    const out: FeatureStates = {}
-    for (const f of FEATURE_DEFS) {
-      const raw = map.get(f.settingKey)
-      // 缺键直接取 SETTING_DEFAULTS（与 getSettingBool 的回落值逐字一致）。
-      // ⚠️ 不要在这里调 getSettingBool：那是**再查一次库**，而全表已在本函数开头读过了 ——
-      //    新装实例（app_settings 空表）下会变成 36 次多余往返。
-      out[f.id] = isOn(raw === undefined ? SETTING_DEFAULTS[f.settingKey] : raw)
+    try {
+      const rows = await env.DB.prepare("SELECT key, value FROM app_settings").all<{
+        key: string
+        value: string
+      }>()
+      const map = new Map((rows.results ?? []).map((r) => [r.key, r.value]))
+      const out: FeatureStates = {}
+      for (const f of FEATURE_DEFS) {
+        const raw = map.get(f.settingKey)
+        // 缺键直接取 SETTING_DEFAULTS（与 getSettingBool 的回落值逐字一致）。
+        // ⚠️ 不要在这里调 getSettingBool：那是**再查一次库**，而全表已在本函数开头读过了 ——
+        //    新装实例（app_settings 空表）下会变成 36 次多余往返。
+        out[f.id] = isOn(raw === undefined ? SETTING_DEFAULTS[f.settingKey] : raw)
+      }
+      return out
+    } catch (err) {
+      /**
+       * 🔴 失败必须**放行**（2026-11-17 中立性要求）。
+       *
+       * 这条守卫跑在**每个请求**上。如果 D1 抖一下就让 getFeatureStates 抛出，
+       * 结果不是「某个功能关了」，而是**全站 500** —— 等于给站点加了一个新的
+       * 单点故障，而「全部开关打开时行为必须与改造前完全一致」正是本次的硬要求。
+       * 与限流（ratelimit.ts）同一取舍：读不到配置时宁可放行。
+       *
+       * 缓存 10 秒：故障恢复后最多 10 秒即回到真实状态（管理员保存也会主动失效）。
+       */
+      console.error("读取功能开关失败（本次按全开处理）:", err)
+      const all: FeatureStates = {}
+      for (const f of FEATURE_DEFS) all[f.id] = true
+      return all
     }
-    return out
   })
 }
 
@@ -585,7 +602,14 @@ function disabledError(f: FeatureDef): ApiError {
 export async function assertPublicPathEnabled(env: Env, key: PublicPathKey): Promise<void> {
   const f = featureForPublicPath(key)
   if (!f) return
-  if (!(await isFeatureEnabled(env, f.id))) throw disabledError(f)
+  let on = true
+  try {
+    on = await isFeatureEnabled(env, f.id)
+  } catch {
+    // 读状态失败 → 放行（与 getFeatureStates 的 fail-open 同口径，双保险）
+    on = true
+  }
+  if (!on) throw disabledError(f)
 }
 
 /**
@@ -603,7 +627,14 @@ export async function assertRouteEnabled(
   if (!f) return
   const m = method.toUpperCase()
   if (f.exempt?.some((e) => e.path === routePath && e.methods.includes(m))) return
-  if (!(await isFeatureEnabled(env, f.id))) throw disabledError(f)
+  let on = true
+  try {
+    on = await isFeatureEnabled(env, f.id)
+  } catch {
+    // 读状态失败 → 放行（fail-open，见 getFeatureStates 的说明）
+    on = true
+  }
+  if (!on) throw disabledError(f)
 }
 
 /** 管理端改完开关后清缓存，让同一 isolate 立刻生效 */

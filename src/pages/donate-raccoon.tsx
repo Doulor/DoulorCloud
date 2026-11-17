@@ -83,6 +83,7 @@ function buildTokenBookmarklet(): string {
 export default function DonateRaccoonPage() {
   /** 功能开关：捐献关掉后停掉 8s 轮询（每次 1 请求 + 1 查询） */
   const { isOn } = useFeatures()
+  const donationsOn = isOn("donations")
   const [code, setCode] = React.useState("")
   const [expiresIn, setExpiresIn] = React.useState(0)
   const [generating, setGenerating] = React.useState(false)
@@ -147,10 +148,10 @@ export default function DonateRaccoonPage() {
 
   React.useEffect(() => {
     void loadMine()
-  }, [loadMine, isOn])
+  }, [loadMine, donationsOn])
 
   React.useEffect(() => {
-    if (!isOn("donations")) return
+    if (!donationsOn) return
     const tick = () => {
       if (document.visibilityState === "visible") void loadMine()
     }

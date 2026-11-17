@@ -324,3 +324,35 @@ describe("管理端 /admin/features（端到端）", () => {
     expect(body.states.mail).not.toBe(false)
   })
 })
+
+
+describe("公开资源：关掉网盘/名片后入口也失效", () => {
+  beforeEach(async () => {
+    await env.DB.prepare(
+      "DELETE FROM app_settings WHERE key IN ('storage_enabled','profile_enabled')"
+    ).run()
+    invalidateFeatureStates()
+  })
+
+  it("storage_enabled=0 → /dl 与 /s 返回 403 FEATURE_DISABLED", async () => {
+    await setSetting("storage_enabled", "0")
+    invalidateFeatureStates()
+    for (const path of ["/dl/a/b.txt", "/s/token123"]) {
+      const res = await fetchSelf(new Request("https://cloud.doulor.cn" + path))
+      expect(res.status, path).toBe(403)
+      const body = await res.json<{ code: string }>()
+      expect(body.code).toBe("FEATURE_DISABLED")
+    }
+  })
+
+  it("profile_enabled=0 → /profile 与 /p 返回 403 FEATURE_DISABLED", async () => {
+    await setSetting("profile_enabled", "0")
+    invalidateFeatureStates()
+    for (const path of ["/profile/someone", "/p/someone/avatar", "/u/someone/avatar"]) {
+      const res = await fetchSelf(new Request("https://cloud.doulor.cn" + path))
+      expect(res.status, path).toBe(403)
+      const body = await res.json<{ code: string }>()
+      expect(body.code).toBe("FEATURE_DISABLED")
+    }
+  })
+})

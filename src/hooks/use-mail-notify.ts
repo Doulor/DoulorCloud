@@ -38,6 +38,9 @@ export function useMailNotify() {
   const { lang } = useT()
   /** 功能开关：邮箱中心关掉后连这条 60s 轮询也停掉（它本身也是一次请求） */
   const { isOn } = useFeatures()
+  // 取布尔值而不是依赖 isOn 本身：isOn 的引用会在状态加载完成时变化，
+  // 依赖它会让 effect 重跑一次、白白多发一轮 tick（中立性：全开时行为应与原来完全一致）。
+  const mailOn = isOn("mail")
   const [permission, setPermission] = React.useState<NotificationPermission | "unsupported">(
     () => readPermission()
   )
@@ -78,7 +81,7 @@ export function useMailNotify() {
     if (!ready) return
     // APK 内由 FCM 原生推送负责（含应用关闭的场景），这里再弹就是重复通知
     if (isNativeApp()) return
-    if (!isOn("mail")) return
+    if (!mailOn) return
     let stopped = false
 
     const tick = async () => {
@@ -109,7 +112,7 @@ export function useMailNotify() {
       stopped = true
       window.clearInterval(timer)
     }
-  }, [ready, lang, isOn])
+  }, [ready, lang, mailOn])
 
   return { permission }
 }

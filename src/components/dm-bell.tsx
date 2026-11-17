@@ -30,13 +30,14 @@ export function DmBell() {
   const [count, setCount] = React.useState(0)
   /** 功能开关：私信关掉后不再轮询未读数（每次轮询就是一次请求 + 一次查询） */
   const { isOn } = useFeatures()
+  const dmOn = isOn("dm")
 
   React.useEffect(() => {
     if (!user) {
       setCount(0)
       return
     }
-    if (!isOn("dm")) {
+    if (!dmOn) {
       setCount(0)
       return
     }
@@ -64,7 +65,7 @@ export function DmBell() {
       clearInterval(t)
       document.removeEventListener("visibilitychange", onVisible)
     }
-  }, [user, isOn])
+  }, [user, dmOn])
 
   if (!user) return null
 

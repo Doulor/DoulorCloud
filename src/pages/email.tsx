@@ -89,6 +89,7 @@ export default function EmailPage() {
   const { t } = useT()
   /** 功能开关：邮箱中心关掉后停掉收件箱 15s 轮询（每次 1 请求 + 1 查询） */
   const { isOn } = useFeatures()
+  const mailOn = isOn("mail")
   const [searchParams, setSearchParams] = useSearchParams()
   const pendingMailbox = searchParams.get("mailbox")
   const pendingMessage = searchParams.get("message")
@@ -334,7 +335,7 @@ export default function EmailPage() {
 
   React.useEffect(() => {
     if (!selectedMailboxId) return
-    if (!isOn("mail")) return
+    if (!mailOn) return
     const tick = () => {
       if (document.visibilityState !== "visible") return
       void silentRefresh(selectedMailboxId)
@@ -349,7 +350,7 @@ export default function EmailPage() {
       window.clearInterval(timer)
       document.removeEventListener("visibilitychange", onVisibility)
     }
-  }, [selectedMailboxId, silentRefresh, syncMailboxUnread, isOn])
+  }, [selectedMailboxId, silentRefresh, syncMailboxUnread, mailOn])
 
   // 更新本地未读数（邮件已读时）
   /**
