@@ -721,6 +721,20 @@ export const SETTING_DEFAULTS = {
    */
   mailbox_external_daily_limit: "20",
   /**
+   * 每个用户最多接入几个**第三方邮箱**（2026-11-12）。
+   *
+   * 与域名邮箱的 3 个名额**独立**：那边是"平台给的地址"，这边是"用户自己的邮箱"，
+   * 混在一起算会让买过邮箱扩容的用户困惑（他买的不是第三方账号的额度）。
+   * 管理员不受限（见 mail-sync.ts 的 externalQuota）。
+   */
+  /** 允许把第三方邮箱托管到云端的角色（逗号分隔，2026-11-13） */
+  /** 允许通过 Microsoft OAuth 接入的域名（逗号分隔，2026-11-13 站长要求只允许 outlook.com） */
+  mail_outlook_domains: "outlook.com",
+  external_mail_cloud_roles: "root,admin",
+  external_mail_max_per_user: "2",
+  /** 第三方邮箱同步总开关：0 = 全部停止（出问题时的急停阀，不用发版） */
+  external_mail_sync_enabled: "1",
+  /**
    * CF 发件的发件人地址（`cf-send` 与 `cf-routing` **共用**这一项）。
    *
    * ⚠️ 域名必须是**在 Cloudflare Email Sending 里 Onboard 过的那个**。
@@ -1178,6 +1192,62 @@ export const SETTING_DEFAULTS = {
   game_max_impact_bps: "300",
   /** 初始价格（仅在 ensureMarket 首次创建行情时使用）。默认 100 */
   game_base_price: "100",
+  // =========================================================================
+  // 功能总开关（2026-11-16）—— 见 worker/src/features.ts 的注册表
+  //
+  // 这些键**全部由「管理面板 → 功能开关」读写**，语义统一为 1=开 / 0=关。
+  // 关掉后不只是藏入口：index.ts 的 route() 会把该功能的所有接口统一拦成
+  // 403 FEATURE_DISABLED，对应的后台定时任务也会跳过。
+  //
+  // ⚠️ 新增功能时**必须**同时在 features.ts 的 FEATURE_DEFS 里登记
+  //    （id / settingKey / routes / jobs），否则开关只是存了个值、没有任何效果。
+  // =========================================================================
+  /** 邮箱中心（收件箱/读信/入站邮件落库/邮件图片代理） */
+  mail_enabled: "1",
+  /** 子域名（不是 DNS 记录：这里管「能不能新建子域名」） */
+  domains_enabled: "1",
+  /** DNS 解析记录（与每用户的 dns 权限位是两回事：那是「谁能用」，这是「全站开不开」） */
+  dns_enabled: "1",
+  /** AI 实验室（作品编辑/AI 对话/截图自检/作品域名） */
+  lab_enabled: "1",
+  /** 私信 */
+  dm_enabled: "1",
+  /** 个人名片（含 /profile 公开页与 /p 资源） */
+  profile_enabled: "1",
+  /** 个人空间（/space 公开页数据） */
+  space_enabled: "1",
+  /** 自定义表情包 */
+  stickers_enabled: "1",
+  /** 反馈（提交/回复/截图上传；管理端历史仍可看） */
+  feedback_enabled: "1",
+  /** 造物集图片墙 */
+  gallery_enabled: "1",
+  /** 工具箱外链（趣站链接） */
+  fun_links_enabled: "1",
+  /** 成就页与成就奖励 */
+  achievements_enabled: "1",
+  /** 排行榜 */
+  leaderboard_enabled: "1",
+  /** 称号佩戴/展示 */
+  titles_enabled: "1",
+  /** 活动与问卷（领奖兜底/退订复查跟着关） */
+  events_enabled: "1",
+  /** 资源捐献（含小浣熊/自动领取；健康巡检跟着关） */
+  donations_enabled: "1",
+  /** 公告（列表与到点发布） */
+  announcements_enabled: "1",
+  /** 本站作为 OAuth 身份提供方（向第三方签发令牌） */
+  oauth_provider_enabled: "1",
+  /** 公开 API（/v1 与 API Key） */
+  public_api_enabled: "1",
+  /** 推送通知（Web Push / FCM） */
+  push_enabled: "1",
+  /** Telegram 机器人（webhook + 定时提醒） */
+  telegram_enabled: "1",
+  /** QQ 机器人（webhook） */
+  qq_enabled: "1",
+  /** 访问统计（前端 PV 上报；关掉只影响新增数据） */
+  analytics_enabled: "1",
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS

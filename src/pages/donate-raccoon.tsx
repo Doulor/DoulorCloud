@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Textarea } from "@/components/ui/textarea"
 import { fmtTime } from "@/lib/format"
+import { useFeatures } from "@/hooks/use-features"
 
 /**
  * 捐献小浣熊账号（站内页面，2026-10-26 重构）。
@@ -80,6 +81,8 @@ function buildTokenBookmarklet(): string {
 }
 
 export default function DonateRaccoonPage() {
+  /** 功能开关：捐献关掉后停掉 8s 轮询（每次 1 请求 + 1 查询） */
+  const { isOn } = useFeatures()
   const [code, setCode] = React.useState("")
   const [expiresIn, setExpiresIn] = React.useState(0)
   const [generating, setGenerating] = React.useState(false)
@@ -144,9 +147,10 @@ export default function DonateRaccoonPage() {
 
   React.useEffect(() => {
     void loadMine()
-  }, [loadMine])
+  }, [loadMine, isOn])
 
   React.useEffect(() => {
+    if (!isOn("donations")) return
     const tick = () => {
       if (document.visibilityState === "visible") void loadMine()
     }
@@ -307,7 +311,7 @@ export default function DonateRaccoonPage() {
 
             <div className="space-y-1">
 
-              <p className="text-base font-semibold text-emerald-600 dark:text-emerald-400">
+              <p className="text-base font-semibold text-emerald-700 dark:text-emerald-400">
 
                 ✅ 捐献成功！
 
@@ -508,7 +512,7 @@ export default function DonateRaccoonPage() {
                       {expiresMs ? `凭据到期 ${fmtTime(new Date(expiresMs).toISOString())}` : "凭据到期时间未知"}
                     </span>
                     {x.account_id ? (
-                      <span className="text-xs text-muted-foreground/70">ID {x.account_id}</span>
+                      <span className="text-xs text-muted-foreground">ID {x.account_id}</span>
                     ) : null}
                   </div>
                 )

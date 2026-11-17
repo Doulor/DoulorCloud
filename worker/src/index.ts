@@ -6,9 +6,23 @@ import * as stickerHandlers from "./handlers/stickers"
 import * as dnsHandlers from "./handlers/dns"
 import * as dnsRentalHandlers from "./handlers/dns-rental"
 import * as emailHandlers from "./handlers/email"
+import * as mailAccountHandlers from "./handlers/mail-accounts"
+import * as mailOauthHandlers from "./mail-oauth"
+import * as mailSyncJobs from "./mail-sync"
+import { purgeOldTrash } from "./mail-purge"
 import * as pushHandlers from "./handlers/push"
+import * as diag4Handlers from "./handlers/diag4"
 import * as subdomainHandlers from "./handlers/subdomains"
 import * as adminHandlers from "./handlers/admin"
+import * as adminFeatureHandlers from "./handlers/admin-features"
+import {
+  assertPublicPathEnabled,
+  assertRouteEnabled,
+  featureForJob,
+  getFeatureStates,
+  isFeatureEnabled,
+  type FeatureJobKey,
+} from "./features"
 import * as adminLabHandlers from "./handlers/admin-lab"
 import * as labPromptHandlers from "./handlers/lab-prompts"
 import * as labSkillHandlers from "./handlers/lab-skills"
@@ -2068,6 +2082,29 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       adminHandlers.updateSettingsHandler(env, request),
   },
 
+  // ================= 功能开关（2026-11-16） =================
+  // 读：全部功能 + 当前状态 + 关闭后果（管理端）。
+  {
+    kind: "exact",
+    path: "/admin/features",
+    method: "GET",
+    handle: () => adminFeatureHandlers.listFeatureSwitches(env, request),
+  },
+  // 写：批量开关。改完立刻失效进程内缓存，同 isolate 的下一个请求即生效。
+  {
+    kind: "exact",
+    path: "/admin/features",
+    method: "PUT",
+    handle: () => adminFeatureHandlers.updateFeatureSwitches(env, request),
+  },
+  // 公开状态：前端据它隐藏入口、停掉轮询（未登录也要能看到「已关闭」）。
+  {
+    kind: "exact",
+    path: "/features",
+    method: "GET",
+    handle: () => adminFeatureHandlers.publicFeatureStates(env, request),
+  },
+
   // ================= 管理端 · AI 实验室配置 =================
   // 单独一对接口（而不是走 /admin/settings）：这里要处理密钥加密、
   // 渠道增删合并这类有自己的规则，塞进通用设置接口只会让它更难读。
@@ -2472,6 +2509,29 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
   },
 
   {
+    // 清空回收站（2026-11-13）
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)\/messages\/purge-trash$/),
+    methods: ["POST"],
+    handle: (purgeMatch: RegExpMatchArray) =>
+      emailHandlers.purgeTrash(env, request, decodeURIComponent(purgeMatch[1])),
+  },
+
+  {
+    // 从回收站恢复（2026-11-13）
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)\/messages\/([^/]+)\/restore$/),
+    methods: ["POST"],
+    handle: (restoreMatch: RegExpMatchArray) =>
+      emailHandlers.restoreMessage(
+        env,
+        request,
+        decodeURIComponent(restoreMatch[1]),
+        decodeURIComponent(restoreMatch[2])
+      ),
+  },
+
+  {
     kind: "regex",
     match: (routePath: string) => routePath.match(/^\/mailbox\/([^/]+)\/messages\/batch-delete$/),
     methods: ["POST"],
@@ -2505,6 +2565,111 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
       emailHandlers.latestUnreadMail(env, request),
   },
 
+  // 最近 5 分钟内最新邮件的验证码（概览页"一键复制"用）
+  {
+    kind: "exact",
+    path: "/mailbox/recent-code",
+    method: "GET",
+    handle: () =>
+      emailHandlers.recentMailCode(env, request),
+  },
+
+  // ---- 第三方邮箱账号（QQ / Gmail / Outlook / 任意 IMAP）----
+  // 与 /mailbox 分开挂：域名邮箱走 Email Routing，第三方走 IMAP 凭证 + 同步游标，
+  // 两者的生命周期不同（见 handlers/mail-accounts.ts 的头注释）。
+  {
+    // Outlook：微软 OAuth 授权入口与回调（2026-11-13）
+    kind: "exact",
+    path: "/mail/oauth/start",
+    method: "GET",
+    handle: () => mailOauthHandlers.mailOauthStart(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/mail/oauth/callback",
+    method: "GET",
+    handle: () => mailOauthHandlers.mailOauthCallback(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/mail/api-settings",
+    method: "GET",
+    handle: () => mailAccountHandlers.getMailApiSettings(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/mail/api-settings",
+    method: "PUT",
+    handle: () => mailAccountHandlers.updateMailApiSettings(env, request),
+  },
+    {
+    // 保存账号显示顺序（2026-11-13）：设置里拖动卡片的排序结果
+    kind: "exact",
+    path: "/mail/accounts/order",
+    method: "PATCH",
+    handle: () => mailAccountHandlers.reorderAccounts(env, request),
+  },{
+    kind: "exact",
+    path: "/mail/accounts",
+    method: "GET",
+    handle: () => mailAccountHandlers.listExternalAccounts(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/mail/accounts",
+    method: "POST",
+    handle: () => mailAccountHandlers.createExternalAccount(env, request),
+  },
+
+
+  {
+    kind: "exact",
+    path: "/mail/diag/push-native",
+    method: "POST",
+    handle: () => diag4Handlers.diagPushNative(env, request),
+  },
+  {
+    // 自助测试推送（2026-11-13）：给自己发一条通知，返回两个通道各自的成功数
+    kind: "exact",
+    path: "/mail/test-push",
+    method: "POST",
+    handle: () => pushHandlers.sendTestPush(env, request),
+  },
+  {
+    // 用第三方账号发信（2026-11-13，目前只有 Outlook 走 Graph sendMail）
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mail\/accounts\/([^/]+)\/send$/),
+    methods: ["POST"],
+    handle: (sendMatch: RegExpMatchArray) =>
+      mailAccountHandlers.sendFromExternalAccount(
+        env,
+        request,
+        decodeURIComponent(sendMatch[1])
+      ),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mail\/accounts\/([^/]+)\/sync$/),
+    methods: ["POST"],
+    handle: (syncMatch: RegExpMatchArray) =>
+      mailAccountHandlers.syncExternalAccount(
+        env,
+        request,
+        decodeURIComponent(syncMatch[1])
+      ),
+  },
+  {
+    kind: "regex",
+    match: (routePath: string) => routePath.match(/^\/mail\/accounts\/([^/]+)$/),
+    methods: ["DELETE"],
+    handle: (accountMatch: RegExpMatchArray) =>
+      mailAccountHandlers.deleteExternalAccount(
+        env,
+        request,
+        decodeURIComponent(accountMatch[1])
+      ),
+  },
+
   // ---- Web Push（服务端推送，取代轮询的"即时"路径）----
   {
     kind: "exact",
@@ -2523,6 +2688,26 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     path: "/push/unsubscribe",
     method: "POST",
     handle: () => pushHandlers.unsubscribePush(env, request),
+  },
+  {
+    // 原生推送自检：告诉前端「服务端登记了几台设备」
+    kind: "exact",
+    path: "/push/native/status",
+    method: "GET",
+    handle: () => pushHandlers.nativePushStatus(env, request),
+  },
+  {
+    // APK（WebView 不支持 Web Push）用的 FCM token 上报
+    kind: "exact",
+    path: "/push/native",
+    method: "POST",
+    handle: () => pushHandlers.registerNativePush(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/push/native",
+    method: "DELETE",
+    handle: () => pushHandlers.unregisterNativePush(env, request),
   },
 
   {
@@ -3608,6 +3793,26 @@ function buildRoutes(env: Env, request: Request, ctx?: ExecutionContext): RouteR
     handle: (m: RegExpMatchArray) => publicApiHandlers.apiDeleteSubdomain(env, request, decodeURIComponent(m[1])),
   },
   // 邮箱：列表 / 创建 / 删除 / 邮件列表 / 邮件内容 / 回复
+  // 聚合只读（2026-11-12）：给 AI / 自动化客户端一次拿到「整个客户端」的账号与邮件，
+  // 包含用户接入的第三方邮箱（/v1/mailbox 那组只覆盖域名邮箱）。
+  {
+    kind: "exact",
+    path: "/v1/mail/accounts",
+    method: "GET",
+    handle: () => publicApiHandlers.apiListAllAccounts(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/v1/mail/messages",
+    method: "GET",
+    handle: () => publicApiHandlers.apiListAllMessages(env, request),
+  },
+  {
+    kind: "exact",
+    path: "/v1/mail/send",
+    method: "POST",
+    handle: () => publicApiHandlers.apiSendMail(env, request),
+  },
   {
     kind: "exact",
     path: "/v1/mailbox",
@@ -5467,6 +5672,20 @@ async function route(
 
   const routePath = path.startsWith("/api") ? path.slice(4) : path
 
+  /**
+   * 功能总开关（2026-11-16）：**统一在这里拦**，而不是让每个 handler 自己判断。
+   *
+   * 为什么必须前置：全站 600+ 条路由里，各模块历史开关的覆盖程度参差不齐
+   * （有的只在建资源时判断、有的只在前端隐藏入口），逐个补判断既容易漏，
+   * 也会在每个 handler 里重复读设置。放在 dispatch 之前，语义是
+   * 「功能关掉 ⇒ 该功能的所有接口都不可用」，包括以后新增的接口
+   * （只要前缀命中注册表）。
+   *
+   * ⚠️ /admin/* 不在任何功能的前缀里 —— 管理面板必须永远可用，
+   * 否则关掉功能后就再也打不开了。
+   */
+  await assertRouteEnabled(env, routePath, method)
+
   const res = await dispatch(env, request, routePath, method, ctx)
   if (res) return res
 
@@ -5498,11 +5717,13 @@ async function hostedDirectLink(
   // 作品域名优先判：两者各自的表都唯一，不会撞；先判作品更直观。
   // 命中就吐作品内容（多文件作品按路径取），不命中再交给网盘直链。
   if (await labDomainHandlers.isHostedLabHost(env, host)) {
+    await assertPublicPathEnabled(env, "hostedLab")
     return labDomainHandlers.serveHostedLab(env, request, host)
   }
 
   if (!(await storageHandlers.isHostedDirectLinkHost(env, host))) return null
 
+  await assertPublicPathEnabled(env, "hostedLink")
   return storageHandlers.serveHostedDirectLink(env, request, host)
 }
 
@@ -5555,7 +5776,9 @@ export default {
       }
 
       // 公开直链：/dl/<用户名>/<文件名>（无需鉴权）
+      // ⚠️ 功能开关：网盘关掉后**已发出的直链也失效**（否则「关了入口还在烧 R2」）
       if (url.pathname.startsWith("/dl/")) {
+        await assertPublicPathEnabled(env, "directLink")
         return await storageHandlers.serveDirectLink(
           env,
           request,
@@ -5565,6 +5788,7 @@ export default {
 
       // 公开目录分享：/s/<token>（目录页）与 /s/<token>/f/<路径>（文件，无需鉴权）
       if (url.pathname.startsWith("/s/")) {
+        await assertPublicPathEnabled(env, "storageShare")
         return await storageHandlers.serveStorageShare(
           env,
           request,
@@ -5575,12 +5799,14 @@ export default {
       // 公开头像：/u/<username>/avatar（无需鉴权，走平台桶）
       const avatarMatch = url.pathname.match(/^\/u\/([^/]+)\/avatar$/)
       if (avatarMatch) {
+        await assertPublicPathEnabled(env, "avatar")
         return identityHandlers.serveAvatar(env, decodeURIComponent(avatarMatch[1]))
       }
 
       // 社区帖子图片：/c/<postId>/<filename>（公开，走平台桶）
       const communityImgMatch = url.pathname.match(/^\/c\/([^/]+)\/([^/]+)$/)
       if (communityImgMatch) {
+        await assertPublicPathEnabled(env, "communityImage")
         return communityHandlers.serveCommunityImage(
           env,
           decodeURIComponent(communityImgMatch[1]),
@@ -5592,9 +5818,11 @@ export default {
       // 走 dispatch 必然 401，所以在这里先接住，由 handler 内部用
       // X-Telegram-Bot-Api-Secret-Token 校验来源。
       if (url.pathname === "/api/tg/_diag" && (request.method === "GET" || request.method === "POST")) {
+      await assertPublicPathEnabled(env, "tgWebhook")
       return await telegramHandlers.diagWebhook(env, request)
     }
     if ((url.pathname === "/api/tg/webhook" || url.pathname === "/tg/webhook") && request.method === "POST") {
+        await assertPublicPathEnabled(env, "tgWebhook")
         return await telegramHandlers.handleWebhook(env, request)
       }
 
@@ -5604,6 +5832,7 @@ export default {
       // 的两段式 assetMatch 之前，否则 /gallery/<id> 不匹配、会被漏掉。
       const galleryMatch = url.pathname.match(/^\/p\/([^/]+)\/gallery\/([a-z0-9-]+)$/)
       if (galleryMatch && request.method === "GET") {
+        await assertPublicPathEnabled(env, "profileAsset")
         return await profileHandlers.serveGalleryImage(
           env,
           decodeURIComponent(galleryMatch[1]),
@@ -5618,6 +5847,7 @@ export default {
       // 音乐 302（时效签名）在 handler 内部自带 no-store，这里只动 200。
       const assetMatch = url.pathname.match(/^\/p\/([^/]+)\/([a-z-]+)$/)
       if (assetMatch && request.method === "GET") {
+        await assertPublicPathEnabled(env, "profileAsset")
         const res = await profileHandlers.serveAssetByUsername(
           env,
           decodeURIComponent(assetMatch[1]),
@@ -5632,6 +5862,7 @@ export default {
       // 公开名片页：/profile/<slug>
       const pubMatch = url.pathname.match(/^\/profile\/([^/]+)\/?$/)
       if (pubMatch && request.method === "GET") {
+        await assertPublicPathEnabled(env, "profilePage")
         const slug = decodeURIComponent(pubMatch[1])
         const profile = await profileHandlers.loadPublicProfile(env, { slug })
         if (profile) {
@@ -5663,6 +5894,9 @@ export default {
           fqdn: host,
         })
         if (hostProfile) {
+          // 功能开关：名片关掉后，用户自己绑定的名片域也不再对外渲染
+          // （只在**命中名片域**时才拦，不影响其它自定义域）
+          await assertPublicPathEnabled(env, "profilePage")
           ctx.waitUntil(profileHandlers.bumpProfileView(env, hostProfile.slug))
           return new Response(renderProfileHtml(hostProfile), {
             headers: {
@@ -5729,6 +5963,16 @@ export default {
   },
   // Email Workers 入站路由：Cloudflare Email Routing 转发到此
   async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
+    /**
+     * 功能开关（2026-11-16）：邮箱中心关掉后**入站邮件直接丢弃**，
+     * 不再解析 MIME、不再写 D1、不再推送 —— 这正是「关闭功能 = 关闭其消耗」
+     * 里最容易被忽略的一条：入站邮件由外部触发，入口藏了也照样烧 CPU。
+     * 只记一行日志（不含正文与发件人），便于事后核对「关掉期间有没有信被丢」。
+     */
+    if (!(await isFeatureEnabled(env, "mail"))) {
+      console.warn("mail_enabled=0，入站邮件已丢弃");
+      return
+    }
     await incomingEmail(message, env)
   },
   /**
@@ -5751,6 +5995,19 @@ export default {
     ctx: ExecutionContext
   ): Promise<void> {
     /**
+     * 功能总开关（2026-11-16）：后台任务同样要跟着关。
+     *
+     * 为什么不能只拦 HTTP：这些任务由 cron 触发，与「有没有人打开页面」无关 ——
+     * 只藏入口的话，关掉邮箱功能后 IMAP 仍会每分钟连一次，关掉游戏后行情仍在推进。
+     * 这里**一次**读全量状态（10 秒进程内缓存），后面每个任务用 jobOn() 判断。
+     */
+    const featureStates = await getFeatureStates(env)
+    const jobOn = (key: FeatureJobKey): boolean => {
+      const f = featureForJob(key)
+      return !f || featureStates[f.id] !== false
+    }
+
+    /**
      * 小浣熊捐献账号巡检：每 15 分钟（2026-10-27）。
      * 沿用「每分钟」那条 cron 取模触发，不新增触发器。
      * 账号在号池里不可用 → 标 invalid → group-sync 下一轮自动收回该号额度，
@@ -5758,10 +6015,11 @@ export default {
      */
     {
       const t = new Date()
-      if (t.getUTCMinutes() % 1 === 0)
-        ctx.waitUntil(wb2apiHandlers.resumePendingWbLogins(env, 100))
-        ctx.waitUntil(qoder2apiHandlers.resumePendingQoderLogins(env, 100))
-      if (t.getUTCMinutes() % 15 === 0) {
+      if (t.getUTCMinutes() % 1 === 0) {
+        if (jobOn("wb2Resume")) ctx.waitUntil(wb2apiHandlers.resumePendingWbLogins(env, 100))
+        if (jobOn("qoderResume")) ctx.waitUntil(qoder2apiHandlers.resumePendingQoderLogins(env, 100))
+      }
+      if (t.getUTCMinutes() % 15 === 0 && jobOn("donationHealth")) {
         ctx.waitUntil(
           donationHealthHandlers
             .checkDonationHealth(env)
@@ -5771,6 +6029,54 @@ export default {
               }
             })
             .catch((e) => console.error("raccoon health check failed:", e))
+        )
+      }
+    }
+
+    /**
+     * 第三方邮箱增量同步（2026-11-12；2026-11-13 提速）。
+     *
+     * Workers 不能跨请求持有 IMAP 连接（没有 IDLE 可用），只能「定时连一下、拉增量、断开」。
+     *
+     * ⚠️ 原本是**每 5 分钟**一次，而且同步完**不发推送** —— 站长实测"移动端十几分钟
+     * 才收到信"，一半是等 cron、一半是压根没通知（只能靠打开 App 才发现）。现在：
+     *   · cron 每分钟跑（单 tick 仍只处理 2 个账号，CPU 可控）；
+     *   · 单账号成功后写 next_sync_at = now + 60s（SYNC_INTERVAL_MS）做节流；
+     *   · 同步到新信立刻推 Web Push + FCM（见 mail-notify.ts）。
+     */
+    if (jobOn("mailSync")) {
+      ctx.waitUntil(
+        mailSyncJobs
+          .syncDueAccounts(env, 2)
+          .then((r) => {
+            if (r.scanned) console.log("第三方邮箱同步:", JSON.stringify(r))
+          })
+          .catch((err) =>
+            console.warn(
+              "第三方邮箱同步失败:",
+              err instanceof Error ? err.message : err
+            )
+          )
+      )
+    }
+
+    /**
+     * 回收站自动清理：每天 03:00 UTC 一次（2026-11-13）。
+     *
+     * 借用现成的每分钟 cron 判断时间，不新增触发器。规则见 mail-purge.ts：
+     * 进回收站满 30 天的邮件彻底删除 —— 否则软删除等于"永不删除"，回收站无限增长。
+     */
+    {
+      const purgeNow = new Date()
+      if (purgeNow.getUTCHours() === 3 && purgeNow.getUTCMinutes() === 0 && jobOn("trashPurge")) {
+        ctx.waitUntil(
+          purgeOldTrash(env)
+            .then((n) => {
+              if (n > 0) console.log("回收站清理:", n, "封")
+            })
+            .catch((err) =>
+              console.warn("回收站清理失败:", err instanceof Error ? err.message : err)
+            )
         )
       }
     }
@@ -5787,7 +6093,7 @@ export default {
      */
     {
       const t = new Date()
-      if (t.getUTCHours() === 4 && t.getUTCMinutes() === 0) {
+      if (t.getUTCHours() === 4 && t.getUTCMinutes() === 0 && jobOn("eventTgRevoke")) {
         ctx.waitUntil(
           revokeUnsubscribedTgEventClaims(env)
             .then((r) => {
@@ -5798,7 +6104,7 @@ export default {
       }
     }
 
-    if (new Date().getUTCMinutes() % 5 === 0) {
+    if (new Date().getUTCMinutes() % 5 === 0 && jobOn("frpProbe")) {
       ctx.waitUntil(
         probeFrpNodes(env)
           .then((r) => {
@@ -5834,7 +6140,7 @@ export default {
        * 幂等由 `UPDATE ... WHERE reward_status='manual'` 条件保证。
        * 每小时运维里也调了一次（那份负责把笔数写进 stats）。
        */
-      if (new Date(controller.scheduledTime).getUTCMinutes() % 5 === 0) {
+      if (new Date(controller.scheduledTime).getUTCMinutes() % 5 === 0 && jobOn("eventQuotaRetry")) {
         ctx.waitUntil(
           retryPendingQuotaClaims(env).then((r) => {
             if (r.granted > 0) console.warn("自动补发额度奖励:", r.granted, "笔")
@@ -5864,7 +6170,7 @@ export default {
        * `controller.cron` 与 wrangler.toml 一一对应的配置漂移风险。
        * 而且它很轻 —— 只处理「有一键捐献面板信息」的节点，通常只有个位数。
        */
-      if (new Date(controller.scheduledTime).getUTCMinutes() % 5 === 0) {
+      if (new Date(controller.scheduledTime).getUTCMinutes() % 5 === 0 && jobOn("frpReconcile")) {
         ctx.waitUntil(
           reconcileAllNodes(env).then((r) => {
             if (r.failed > 0) console.warn("frp 节点收敛有失败:", JSON.stringify(r))
@@ -5882,7 +6188,7 @@ export default {
        * 搭在每分钟的 tick 上而不是新开 cron：这条极轻（一条按 status 的 UPDATE，
        * 通常 0 行），多一条触发器反而多一份 controller.cron 与配置漂移的风险。
        */
-      if (new Date(controller.scheduledTime).getUTCMinutes() % 15 === 0) {
+      if (new Date(controller.scheduledTime).getUTCMinutes() % 15 === 0 && jobOn("eventClaims")) {
         ctx.waitUntil(
           eventHandlers.reconcileStaleClaims(env).then((r) => {
             if (r.swept > 0) console.warn("活动领奖兜底收敛:", r.swept, "条")
@@ -5905,7 +6211,7 @@ export default {
        * 关停期间不该有任何后台写入。⚠️ 但玩家仍可主动平仓（见 collection.ts），
        * 不能把已经开仓的人锁死在里面。
        */
-      ctx.waitUntil(
+      if (jobOn("gameTick")) ctx.waitUntil(
         (async () => {
           const gameParams = await loadGameParamsForCron(env)
           if (!gameParams.enabled) return
@@ -5932,7 +6238,7 @@ export default {
     )
     // 用户商城自动确认收货：卖家交付满 N 天自动结算给卖家（避免买家一直不点收货，
     // 积分永远卡在托管里）。N 由设置项 shop_auto_confirm_days 控制，0 = 关闭。
-    ctx.waitUntil(
+    if (jobOn("pointsAutoConfirm")) ctx.waitUntil(
       pointHandlers.runAutoConfirmDeliveries(env).then((n) => {
         if (n > 0) console.log("自动确认收货:", n, "笔")
       })
@@ -5954,7 +6260,7 @@ export default {
      * 多消耗配额；挂在已有的那条上，增量只是**一次按索引的 SELECT**
      * （绝大多数情况下返回 0 行就直接结束）。
      */
-    ctx.waitUntil(
+    if (jobOn("frpAutoRenew")) ctx.waitUntil(
       frpRentalHandlers.autoRenewDueRentals(env).then((r) => {
         if (r.renewed > 0 || r.insufficient > 0) {
           console.log("frp 自动续费:", JSON.stringify(r))
@@ -5975,7 +6281,7 @@ export default {
      * 多一条触发器就多一份 `controller.cron` 与 wrangler.toml 一一对应的漂移风险，
      * 而这条增量只是一次按索引的 UPDATE + 一次 SELECT。
      */
-    ctx.waitUntil(
+    if (jobOn("dnsAutoRenew")) ctx.waitUntil(
       dnsRentalHandlers.expireAndAutoRenewDnsRentals(env).then((r) => {
         if (r.expired > 0 || r.renewed > 0 || r.insufficient > 0) {
           console.log("DNS 租约回收/续费:", JSON.stringify(r))
@@ -5986,7 +6292,7 @@ export default {
     // 批量刷新中转站调用次数/额度：排行榜读的是 newapi_accounts.request_count
     // 的本地缓存，只在用户打开中转站页时刷新 —— 不打开就一直是旧的（排行榜
     // 于是「数据不对」）。这里每小时刷一批（从最旧开始，限量防上游限流）。
-    ctx.waitUntil(
+    if (jobOn("newapiSync")) ctx.waitUntil(
       newapiHandlers.syncAllNewapiAccounts(env).then((r) => {
         if (r.failed > 0) console.warn("中转站批量同步有失败项:", JSON.stringify(r))
       })
@@ -6003,7 +6309,7 @@ export default {
        * 三条都走 pushMessage：Bot 未启用 / 推送开关关闭 / 用户没绑定 TG / 用户关掉该类通知，
        * 内部一律直接返回 0，不需要在这里重复判断。
        */
-      if (new Date(controller.scheduledTime).getUTCMinutes() === 23) {
+      if (new Date(controller.scheduledTime).getUTCMinutes() === 23 && jobOn("tgDigest")) {
         ctx.waitUntil(
           (async () => {
             // ① 到期提醒：窗口 3 天，按 expires_at 升序（最急的在前），限量防一次刷爆

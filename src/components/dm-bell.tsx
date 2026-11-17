@@ -5,6 +5,7 @@ import { MessagesSquare } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAuth } from "@/hooks/use-auth"
 import { dmApi } from "@/services/api"
+import { useFeatures } from "@/hooks/use-features"
 import { useT } from "@/i18n"
 
 /** 未读数轮询间隔：与消息铃铛一致（60 秒） */
@@ -27,9 +28,15 @@ export function DmBell() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const [count, setCount] = React.useState(0)
+  /** 功能开关：私信关掉后不再轮询未读数（每次轮询就是一次请求 + 一次查询） */
+  const { isOn } = useFeatures()
 
   React.useEffect(() => {
     if (!user) {
+      setCount(0)
+      return
+    }
+    if (!isOn("dm")) {
       setCount(0)
       return
     }
@@ -57,7 +64,7 @@ export function DmBell() {
       clearInterval(t)
       document.removeEventListener("visibilitychange", onVisible)
     }
-  }, [user])
+  }, [user, isOn])
 
   if (!user) return null
 

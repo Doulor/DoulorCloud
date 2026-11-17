@@ -39,6 +39,7 @@ import { cn } from "@/lib/utils"
 import { fmtMailTime } from "@/lib/format"
 import { emailApi, HttpError } from "@/services/api"
 import { useT } from "@/i18n"
+import { useFeatures } from "@/hooks/use-features"
 import type { Mailbox, MailMessage, RootDomainOption } from "@/types"
 
 /** 邮箱数量上限的兜底值（真实值由后端 GET /api/mailbox 的 limit 返回，
@@ -86,6 +87,8 @@ type View = "list" | "message"
 
 export default function EmailPage() {
   const { t } = useT()
+  /** 功能开关：邮箱中心关掉后停掉收件箱 15s 轮询（每次 1 请求 + 1 查询） */
+  const { isOn } = useFeatures()
   const [searchParams, setSearchParams] = useSearchParams()
   const pendingMailbox = searchParams.get("mailbox")
   const pendingMessage = searchParams.get("message")
@@ -331,6 +334,7 @@ export default function EmailPage() {
 
   React.useEffect(() => {
     if (!selectedMailboxId) return
+    if (!isOn("mail")) return
     const tick = () => {
       if (document.visibilityState !== "visible") return
       void silentRefresh(selectedMailboxId)
@@ -345,7 +349,7 @@ export default function EmailPage() {
       window.clearInterval(timer)
       document.removeEventListener("visibilitychange", onVisibility)
     }
-  }, [selectedMailboxId, silentRefresh, syncMailboxUnread])
+  }, [selectedMailboxId, silentRefresh, syncMailboxUnread, isOn])
 
   // 更新本地未读数（邮件已读时）
   /**
@@ -685,6 +689,19 @@ export default function EmailPage() {
 
   return (
     <div>
+      {/* 2026-11-12：邮箱 App（Doulor Mail）是独立界面，从主站邮箱页给一个入口 */}
+      <a
+        href="/mail"
+        rel="noreferrer"
+        className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-3 transition-colors hover:border-foreground/25">
+        <span className="min-w-0">
+          <span className="block text-[13px] font-medium">打开 Doulor Mail</span>
+          <span className="mt-0.5 block text-[11.5px] text-muted-foreground">
+            应用式收件箱：验证码一键复制、QQ / Gmail / Outlook 统一收发
+          </span>
+        </span>
+        <span className="shrink-0 text-[12px] text-muted-foreground">→</span>
+      </a>
       <PageHeader
         title={t("em.title")}
         description={
@@ -763,15 +780,15 @@ export default function EmailPage() {
                     </p>
                     <p className="mt-0.5 flex items-center gap-1 text-xs">
                       {mb.forwardingTo.length === 0 ? (
-                        <span className="text-muted-foreground/70">{t("em.forward.off")}</span>
+                        <span className="text-muted-foreground">{t("em.forward.off")}</span>
                       ) : mb.lastForwardError ? (
                         <span className="font-medium text-destructive">{t("em.forward.failed")}</span>
                       ) : mb.forwardingVerified?.every((v) => v === true) ? (
-                        <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                        <span className="font-medium text-emerald-700 dark:text-emerald-400">
                           {t("em.forward.on")}
                         </span>
                       ) : (
-                        <span className="font-medium text-amber-600 dark:text-amber-400">
+                        <span className="font-medium text-amber-700 dark:text-amber-400">
                           {t("em.forward.pending")}
                         </span>
                       )}
@@ -948,6 +965,7 @@ export default function EmailPage() {
                         size="sm"
                         disabled={busy || selectedIds.size === 0}
                         onClick={() => void handleBatchDelete()}
+                        aria-label={t("common.delete")}
                       >
                         <Trash2 className="mr-1 h-3.5 w-3.5" />
                         {t("em.batchDelete")}
@@ -1279,11 +1297,11 @@ export default function EmailPage() {
                     >
                       <span className="truncate font-mono">{email}</span>
                       {state === true ? (
-                        <span className="shrink-0 text-emerald-600 dark:text-emerald-400">
+                        <span className="shrink-0 text-emerald-700 dark:text-emerald-400">
                           {t("settings.email.verified")}
                         </span>
                       ) : state === false ? (
-                        <span className="shrink-0 text-amber-600 dark:text-amber-400">
+                        <span className="shrink-0 text-amber-700 dark:text-amber-400">
                           {t("em.forward.pendingShort")}
                         </span>
                       ) : (

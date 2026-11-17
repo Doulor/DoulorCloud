@@ -42,6 +42,7 @@ import {
   AlertCircle,
   BarChart3,
   Gauge,
+  ToggleLeft,
   Globe,
   ArrowLeft,
   ExternalLink,
@@ -65,6 +66,7 @@ import { OAuthAdminPanel } from "./admin-oauth"
 import { ProductReviewPanel } from "@/components/admin-product-review"
 import { AnalyticsPanel } from "./admin-analytics"
 import { CfQuotaPanel } from "./admin-cf-quota"
+import { AdminFeaturesPanel } from "@/components/admin-features"
 import { BrevoQuotaPanel } from "./admin-brevo-quota"
 // 反馈面板同理单独成文件（本文件太大，新增内容尽量外置）
 import { FeedbackPanel } from "./admin-feedback"
@@ -86,6 +88,7 @@ import { EmptyState } from "@/components/empty-state"
 import { NavItem, NavGroup } from "@/components/sub-nav"
 import { SlidingPill } from "@/components/motion/sliding-pill"
 import { AdminApiTab } from "@/components/admin-api-tab"
+import { AdminMailPermissionsCard } from "@/components/admin-mail-permissions-card"
 import { AdminLabTab } from "@/components/admin-lab-tab"
 // 造物集：从「AI 实验室」里独立出来的选项卡（作品列表 / 编辑 / 状态 / 置顶 / 删除）
 import { AdminGalleryTab } from "@/components/admin-gallery-tab"
@@ -362,7 +365,7 @@ function BoolMark({ on, title }: { on: boolean; title?: string }) {
       title={title ?? (on ? tStatic("common.on") : tStatic("common.off"))}
     >
       {on ? (
-        <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+        <CheckCircle2 className="h-4 w-4 text-emerald-700" />
       ) : (
         <XCircle className="h-4 w-4 text-muted-foreground/40" />
       )}
@@ -4375,6 +4378,8 @@ export default function AdminPage() {
                   )}
                 {canSeeTab("analytics") && <NavItem active={activeTab === "analytics"} icon={BarChart3} label={t("adm.236")} onClick={() => handleTabChange("analytics")} />}
                 {canSeeTab("cfQuota") && <NavItem active={activeTab === "cfQuota"} icon={Gauge} label={t("adm.237")} onClick={() => handleTabChange("cfQuota")} />}
+                {/* 功能开关（2026-11-16）：关掉的是整个功能（后端拦截 + 停后台任务），不只是入口 */}
+                {canSeeTab("features") && <NavItem active={activeTab === "features"} icon={ToggleLeft} label={t("ftog.nav")} onClick={() => handleTabChange("features")} />}
                 {canSeeTab("perf") && <NavItem active={activeTab === "perf"} icon={Activity} label={t("perf.tab")} onClick={() => handleTabChange("perf")} />}
           {canSeeTab("telegram") && <NavItem active={activeTab === "telegram"} icon={Bot} label={t("tg.nav")} onClick={() => handleTabChange("telegram")} />}
                 {canSeeTab("audit") && <NavItem active={activeTab === "audit"} icon={ScrollText} label={t("adm.238")} onClick={() => handleTabChange("audit")} />}
@@ -4691,6 +4696,7 @@ export default function AdminPage() {
                         onClick={() => void handleDelete(u)}
                         disabled={busy || u.username === user?.username}
                         title={t("adm.247")}
+                        aria-label={t("common.delete")}
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -4893,6 +4899,7 @@ export default function AdminPage() {
                               className="h-8 w-8 text-muted-foreground hover:text-destructive"
                               onClick={() => void handleDeleteInvite(inv)}
                               title={t("adm.253")}
+                              aria-label={t("common.delete")}
                             >
                               <Trash2 className="h-4 w-4" />
                             </Button>
@@ -5044,6 +5051,7 @@ export default function AdminPage() {
                             size="icon"
                             className="h-8 w-8 text-muted-foreground hover:text-destructive"
                             onClick={() => void handleDeleteNode(n.id)}
+                            aria-label={t("common.delete")}
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
@@ -5166,6 +5174,7 @@ export default function AdminPage() {
                             size="icon"
                             className="h-8 w-8 text-muted-foreground hover:text-destructive"
                             onClick={() => void handleDeleteProxy(s.id)}
+                            aria-label={t("common.delete")}
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
@@ -5248,7 +5257,7 @@ export default function AdminPage() {
                                   <span
                                     className={
                                       remain > 0
-                                        ? "font-semibold text-emerald-600 dark:text-emerald-400"
+                                        ? "font-semibold text-emerald-700 dark:text-emerald-400"
                                         : "text-muted-foreground"
                                     }
                                   >
@@ -5355,6 +5364,7 @@ export default function AdminPage() {
                           className="h-8 w-8 text-muted-foreground hover:text-destructive"
                           onClick={() => void handleRemoveReserved(r.name)}
                           title={t("adm.267")}
+                          aria-label={t("common.delete")}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
@@ -6441,6 +6451,7 @@ export default function AdminPage() {
                             variant="ghost"
                             size="sm"
                             onClick={() => void handleDeleteCommunityPost(p.id)}
+                            aria-label={t("common.delete")}
                           >
                             <Trash2 className="h-4 w-4" />
                             {t("adm.460")}
@@ -6499,7 +6510,7 @@ export default function AdminPage() {
                       <p className="flex items-center gap-1.5">
                         <span className="text-muted-foreground">{t("adm.471")}</span>
                         {newapiCred?.health?.ok ? (
-                          <span className="flex items-center gap-1 text-emerald-600">
+                          <span className="flex items-center gap-1 text-emerald-700">
                             <CheckCircle2 className="h-3.5 w-3.5" />
                             {t("adm.472")}
                           </span>
@@ -6651,6 +6662,7 @@ export default function AdminPage() {
                   <Switch
                     checked={newapiUnlimited}
                     onCheckedChange={setNewapiUnlimited}
+                    aria-label={t("adm.484")}
                   />
                 </div>
                 <div className="flex items-center justify-between rounded-md border p-3">
@@ -6663,6 +6675,7 @@ export default function AdminPage() {
                   <Switch
                     checked={newapiEnabled}
                     onCheckedChange={setNewapiEnabled}
+                    aria-label={t("adm.486")}
                   />
                 </div>
                 <div className="flex justify-end">
@@ -7011,7 +7024,7 @@ export default function AdminPage() {
                 <div className="space-y-2">
                   <Label>{t("adm.prem.listTitle")}</Label>
                   {premDegraded && (
-                    <p className="text-xs text-amber-600 dark:text-amber-500">
+                    <p className="text-xs text-amber-700 dark:text-amber-500">
                       {t("adm.prem.degraded")}
                     </p>
                   )}
@@ -7129,7 +7142,7 @@ export default function AdminPage() {
                       {t("adm.507")}
                     </p>
                   </div>
-                  <Switch checked={wb2apiEnabled} onCheckedChange={setWb2apiEnabled} />
+                  <Switch checked={wb2apiEnabled} onCheckedChange={setWb2apiEnabled} aria-label={t("adm.506")} />
                 </div>
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
@@ -7139,7 +7152,7 @@ export default function AdminPage() {
                   <Switch
                     checked={wb2apiDonationVisible}
                     onCheckedChange={setWb2apiDonationVisible}
-                  />
+                    aria-label={t("adm.508")} />
                 </div>
                 {/* 捐献每日额度单价（2026-10-27）：group-sync 按这些单价算每人每日额度 */}
                 <div className="space-y-2 rounded-md border px-4 py-3">
@@ -7185,7 +7198,7 @@ export default function AdminPage() {
                       value={wb2apiRealm}
                       onValueChange={(v) => setWb2apiRealm(v as "cn" | "global")}
                     >
-                      <SelectTrigger>
+                      <SelectTrigger aria-label={t("adm.514")}>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -7203,14 +7216,14 @@ export default function AdminPage() {
                     <p className="text-sm font-medium">{t("adm.515")}</p>
                     <p className="text-xs text-muted-foreground">{t("adm.wbRealmCnHint")}</p>
                   </div>
-                  <Switch checked={wb2apiRealmCn} onCheckedChange={setWb2apiRealmCn} />
+                  <Switch checked={wb2apiRealmCn} onCheckedChange={setWb2apiRealmCn} aria-label={t("adm.515")} />
                 </div>
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
                     <p className="text-sm font-medium">{t("adm.516")}</p>
                     <p className="text-xs text-muted-foreground">{t("adm.wbRealmGlobalHint")}</p>
                   </div>
-                  <Switch checked={wb2apiRealmGlobal} onCheckedChange={setWb2apiRealmGlobal} />
+                  <Switch checked={wb2apiRealmGlobal} onCheckedChange={setWb2apiRealmGlobal} aria-label={t("adm.516")} />
                 </div>
               </CardContent>
             </Card>
@@ -7263,7 +7276,7 @@ export default function AdminPage() {
                         className={
                           "flex items-start gap-2 text-sm " +
                           (wb2apiConfig.health.ok
-                            ? "text-emerald-600 dark:text-emerald-400"
+                            ? "text-emerald-700 dark:text-emerald-400"
                             : "text-destructive")
                         }
                       >
@@ -7318,9 +7331,9 @@ export default function AdminPage() {
                     <div className="mb-4 flex flex-wrap gap-4 text-sm">
                       <span>{t("adm.1079")}<span className="font-semibold">{wb2apiPool.total}</span>
                       </span>
-                      <span className="text-emerald-600 dark:text-emerald-400">{t("adm.1080")}<span className="font-semibold">{wb2apiPool.healthy}</span>
+                      <span className="text-emerald-700 dark:text-emerald-400">{t("adm.1080")}<span className="font-semibold">{wb2apiPool.healthy}</span>
                       </span>
-                      <span className="text-amber-600 dark:text-amber-400">{t("adm.1081")}<span className="font-semibold">{wb2apiPool.cooling}</span>
+                      <span className="text-amber-700 dark:text-amber-400">{t("adm.1081")}<span className="font-semibold">{wb2apiPool.cooling}</span>
                       </span>
                       <span className="text-muted-foreground">{t("adm.1082")}<span className="font-semibold">{wb2apiPool.disabled}</span>
                       </span>
@@ -7455,7 +7468,7 @@ export default function AdminPage() {
                       {t("adm.538")}
                     </p>
                   </div>
-                  <Switch checked={qoder2apiEnabled} onCheckedChange={setQoder2apiEnabled} />
+                  <Switch checked={qoder2apiEnabled} onCheckedChange={setQoder2apiEnabled} aria-label={t("adm.537")} />
                 </div>
                 {/* 允许用户自选的版本（与 wb 卡的两个开关同款）：关掉的版本在捐献页隐藏 */}
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
@@ -7463,14 +7476,14 @@ export default function AdminPage() {
                     <p className="text-sm font-medium">{t("adm.q2RealmCn")}</p>
                     <p className="text-xs text-muted-foreground">{t("adm.q2RealmCnHint")}</p>
                   </div>
-                  <Switch checked={qoder2apiRealmCn} onCheckedChange={setQoder2apiRealmCn} />
+                  <Switch checked={qoder2apiRealmCn} onCheckedChange={setQoder2apiRealmCn} aria-label={t("adm.q2RealmCn")} />
                 </div>
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
                     <p className="text-sm font-medium">{t("adm.q2RealmIntl")}</p>
                     <p className="text-xs text-muted-foreground">{t("adm.q2RealmIntlHint")}</p>
                   </div>
-                  <Switch checked={qoder2apiRealmIntl} onCheckedChange={setQoder2apiRealmIntl} />
+                  <Switch checked={qoder2apiRealmIntl} onCheckedChange={setQoder2apiRealmIntl} aria-label={t("adm.q2RealmIntl")} />
                 </div>
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
                   <div className="space-y-0.5">
@@ -7480,6 +7493,7 @@ export default function AdminPage() {
                   <Switch
                     checked={qoder2apiDonationVisible}
                     onCheckedChange={setQoder2apiDonationVisible}
+                    aria-label={t("adm.539")}
                   />
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -7509,7 +7523,7 @@ export default function AdminPage() {
                       value={qoder2apiRealm}
                       onValueChange={(v) => setQoder2apiRealm(v)}
                     >
-                      <SelectTrigger id="qoder2apiRealm">
+                      <SelectTrigger id="qoder2apiRealm" aria-label={t("adm.546")}>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -7675,6 +7689,7 @@ export default function AdminPage() {
                               setQoder2apiRevokeAi(false)
                               setQoder2apiRemoving(b)
                             }}
+                            aria-label={t("common.delete")}
                           >
                             <Trash2 className="h-4 w-4" />
                             {t("adm.562")}
@@ -7712,6 +7727,7 @@ export default function AdminPage() {
                   <Switch
                     checked={sensenovaEnabled}
                     onCheckedChange={setSensenovaEnabled}
+                    aria-label={t("adm.569")}
                   />
                 </div>
                 <div className="flex items-center justify-between rounded-md border px-4 py-3">
@@ -7725,6 +7741,7 @@ export default function AdminPage() {
                   <Switch
                     checked={sensenovaDonationVisible}
                     onCheckedChange={setSensenovaDonationVisible}
+                    aria-label={t("adm.571")}
                   />
                 </div>
                 <div className="space-y-2">
@@ -7792,6 +7809,10 @@ export default function AdminPage() {
 
         <TabsContent value="cfQuota">
           <CfQuotaPanel />
+        </TabsContent>
+
+        <TabsContent value="features">
+          <AdminFeaturesPanel />
         </TabsContent>
 
         <TabsContent value="audit">
@@ -7892,7 +7913,7 @@ export default function AdminPage() {
                       <p className="text-sm font-medium">{t("adm.1262")}</p>
                       <p className="text-xs text-muted-foreground">{t("adm.1263")}</p>
                     </div>
-                    <Switch checked={checkinEnabled} onCheckedChange={setCheckinEnabled} />
+                    <Switch checked={checkinEnabled} onCheckedChange={setCheckinEnabled} aria-label={t("adm.1262")} />
                   </div>
 
                   <div className="grid gap-4 sm:grid-cols-2">
@@ -7972,6 +7993,7 @@ export default function AdminPage() {
                     <Switch
                       checked={storageEnabled}
                       onCheckedChange={setStorageEnabled}
+                      aria-label={t("adm.593")}
                     />
                   </div>
 
@@ -8034,6 +8056,7 @@ export default function AdminPage() {
                     <Switch
                       checked={frpEnabled}
                       onCheckedChange={setFrpEnabled}
+                      aria-label={t("adm.608")}
                     />
                   </div>
                 </CardContent>
@@ -8121,6 +8144,7 @@ export default function AdminPage() {
                     <Switch
                       checked={tempboxUploadLogin}
                       onCheckedChange={setTempboxUploadLogin}
+                      aria-label={t("adm.615")}
                     />
                   </div>
                   <div className="flex items-center justify-between rounded-md border p-3">
@@ -8133,6 +8157,7 @@ export default function AdminPage() {
                     <Switch
                       checked={tempboxEnabled}
                       onCheckedChange={setTempboxEnabled}
+                      aria-label={t("adm.617")}
                     />
                   </div>
                 </CardContent>
@@ -8266,10 +8291,10 @@ export default function AdminPage() {
                               type="button"
                               size="sm"
                               variant="ghost"
-                              aria-label={t("common.delete")}
                               onClick={() =>
                                 setPostCategories((list) => list.filter((_, j) => j !== i))
                               }
+                              aria-label={t("common.delete")}
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </Button>
@@ -8289,6 +8314,7 @@ export default function AdminPage() {
                     <Switch
                       checked={communityGuestAccess}
                       onCheckedChange={setCommunityGuestAccess}
+                      aria-label={t("adm.623")}
                     />
                   </div>
                   <div className="flex items-center justify-between rounded-md border p-3">
@@ -8301,6 +8327,7 @@ export default function AdminPage() {
                     <Switch
                       checked={communityEnabled}
                       onCheckedChange={setCommunityEnabled}
+                      aria-label={t("adm.625")}
                     />
                   </div>
                   {/*
@@ -8316,7 +8343,7 @@ export default function AdminPage() {
                         {t("adm.632")}
                       </p>
                     </div>
-                    <Switch checked={chatEnabled} onCheckedChange={setChatEnabled} />
+                    <Switch checked={chatEnabled} onCheckedChange={setChatEnabled} aria-label={t("adm.630")} />
                   </div>
                 </CardContent>
               </Card>
@@ -8366,6 +8393,7 @@ export default function AdminPage() {
                     <Switch
                       checked={openRegistration}
                       onCheckedChange={setOpenRegistration}
+                      aria-label={t("adm.636")}
                     />
                   </div>
                   <div className="space-y-2">
@@ -8581,6 +8609,7 @@ export default function AdminPage() {
                     <Switch
                       checked={donateDefaults.autoList}
                       onCheckedChange={(v) => setDonateDefaults((prev) => ({ ...prev, autoList: v }))}
+                      aria-label={t("adm.frpDonateAutoList")}
                     />
                   </div>
                 </CardContent>
@@ -8740,6 +8769,7 @@ export default function AdminPage() {
                     <Switch
                       checked={inviteRewardEnabled}
                       onCheckedChange={setInviteRewardEnabled}
+                      aria-label={t("adm.662")}
                     />
                   </div>
                   <div className="space-y-2">
@@ -8773,6 +8803,7 @@ export default function AdminPage() {
                       <Switch
                         checked={achievementRewardEnabled}
                         onCheckedChange={setAchievementRewardEnabled}
+                        aria-label={t("adm.666")}
                       />
                     </div>
                     <div className="grid grid-cols-2 gap-3 pt-1">
@@ -8861,7 +8892,7 @@ export default function AdminPage() {
                         {t("adm.680")}
                       </p>
                     </div>
-                    <Switch checked={proxyEnabled} onCheckedChange={setProxyEnabled} />
+                    <Switch checked={proxyEnabled} onCheckedChange={setProxyEnabled} aria-label={t("adm.679")} />
                   </div>
                 </CardContent>
               </Card>
@@ -8882,6 +8913,8 @@ export default function AdminPage() {
 
         <TabsContent value="mail">
           <div className="space-y-6">
+            {/* 第三方邮箱权限（2026-11-13 站长要求放进「邮件」选项卡） */}
+            <AdminMailPermissionsCard />
             {/* 管理员通知邮箱 */}
             <Card>
               <CardHeader>
@@ -8956,7 +8989,7 @@ export default function AdminPage() {
                     {t("adm.693")}
                     {t("adm.694")}
                   </p>
-                  <p className="text-xs text-amber-600 dark:text-amber-500">{t("adm.709")}</p>
+                  <p className="text-xs text-amber-700 dark:text-amber-500">{t("adm.709")}</p>
                   <p className="text-xs text-muted-foreground">{t("adm.1312")}</p>
                 </div>
                 <div className="space-y-2">
@@ -8965,7 +8998,7 @@ export default function AdminPage() {
                     value={announcementMailTransport}
                     onValueChange={setAnnouncementMailTransport}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger aria-label={t("adm.695")}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -9034,7 +9067,7 @@ export default function AdminPage() {
                       {cfSendTokenSource === "worker" && t("adm.1313")}
                     </p>
                     {cfSendApiStale && (
-                      <p className="text-xs text-amber-600 dark:text-amber-500">
+                      <p className="text-xs text-amber-700 dark:text-amber-500">
                         {t("adm.1321")}
                       </p>
                     )}
@@ -9214,7 +9247,7 @@ export default function AdminPage() {
                             <span className="font-mono">{r.channel}</span>
                             <span
                               className={
-                                r.ok ? "text-emerald-600" : "text-destructive font-medium"
+                                r.ok ? "text-emerald-700" : "text-destructive font-medium"
                               }
                             >
                               {r.ok ? t("adm.1317") : t("adm.1318")}
@@ -9626,7 +9659,7 @@ export default function AdminPage() {
                         但拿券兑换时会被结构性剔除（vouchers.ts），两条路结果不同。
                         与其让人事后发现，不如在这里说清楚。 */}
                     {f.key === "doulor" && (
-                      <p className="text-xs text-amber-600 dark:text-amber-500">
+                      <p className="text-xs text-amber-700 dark:text-amber-500">
                         {t("adm.doulorInviteNote")}
                       </p>
                     )}
@@ -9849,7 +9882,7 @@ export default function AdminPage() {
                   value={annDraft.category}
                   onValueChange={(v) => setAnnDraft((d) => ({ ...d, category: v }))}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger aria-label={t("adm.758")}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -9871,6 +9904,7 @@ export default function AdminPage() {
                   <Switch
                     checked={annDraft.pinned}
                     onCheckedChange={(v) => setAnnDraft((d) => ({ ...d, pinned: v }))}
+                    aria-label={t("adm.765")}
                   />
                 </div>
               </div>
@@ -9882,7 +9916,7 @@ export default function AdminPage() {
                 value={annDraft.status}
                 onValueChange={(v) => setAnnDraft((d) => ({ ...d, status: v as AnnouncementStatus }))}
               >
-                <SelectTrigger>
+                <SelectTrigger aria-label={t("adm.767")}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -9913,7 +9947,7 @@ export default function AdminPage() {
                 value={annDraft.popupMode}
                 onValueChange={(v) => setAnnDraft((d) => ({ ...d, popupMode: v as "none" | "once" | "every" }))}
               >
-                <SelectTrigger>
+                <SelectTrigger aria-label={t("adm.773")}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -9937,6 +9971,7 @@ export default function AdminPage() {
               <Switch
                 checked={annDraft.notifyByEmail}
                 onCheckedChange={(v) => setAnnDraft((d) => ({ ...d, notifyByEmail: v }))}
+                aria-label={t("adm.778")}
               />
             </div>
           </div>
@@ -9995,7 +10030,7 @@ export default function AdminPage() {
                   value={eventDraft.status}
                   onValueChange={(v) => setEventDraft((d) => ({ ...d, status: v as EventStatus }))}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger aria-label={t("adm.784")}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -10098,6 +10133,7 @@ export default function AdminPage() {
                           onCheckedChange={(v) =>
                             setEventDraft((d) => ({ ...d, pointsRandom: v }))
                           }
+                          aria-label={t("adm.790")}
                         />
                       </div>
                     )}
@@ -10656,7 +10692,7 @@ export default function AdminPage() {
 
                     {/* 「立刻结算」三档的副作用各不相同，分开提示 */}
                     {isInstantVoteRule(eventDraft.voteRule) && (
-                      <p className="text-xs text-amber-600 dark:text-amber-400">
+                      <p className="text-xs text-amber-700 dark:text-amber-400">
                         {isFixedVoteRule(eventDraft.voteRule)
                           ? t("vote.adm.instantFixedWarn")
                           : t("vote.adm.instantWarn")}
@@ -10681,6 +10717,7 @@ export default function AdminPage() {
                 onCheckedChange={(v) =>
                   setEventDraft((d) => ({ ...d, promoHidden: !v }))
                 }
+                aria-label={t("vote.adm.promo")}
               />
             </div>
           </div>
@@ -10794,6 +10831,7 @@ export default function AdminPage() {
                         size="sm"
                         className="ml-1 h-7 text-destructive hover:text-destructive"
                         onClick={() => void handleDeleteClaim(c)}
+                        aria-label={t("common.delete")}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </Button>
@@ -10827,7 +10865,7 @@ export default function AdminPage() {
                 ) : r2Discovered?.available ? (
                   <>
                     <Select value={r2Pick} onValueChange={handlePickBucket}>
-                      <SelectTrigger>
+                      <SelectTrigger aria-label={t("adm.828")}>
                         <SelectValue placeholder={t("adm.314")} />
                       </SelectTrigger>
                       <SelectContent>
@@ -10864,7 +10902,7 @@ export default function AdminPage() {
                 value={r2Draft.kind}
                 onValueChange={(v) => setR2Draft((d) => ({ ...d, kind: v }))}
               >
-                <SelectTrigger>
+                <SelectTrigger aria-label={t("adm.831")}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -11070,6 +11108,7 @@ export default function AdminPage() {
                         onCheckedChange={(v) =>
                           void handleToggleUserFlag("emailVerified", v)
                         }
+                        aria-label={t("adm.847")}
                       />
                     </div>
 
@@ -11086,6 +11125,7 @@ export default function AdminPage() {
                         onCheckedChange={(v) =>
                           void handleToggleUserFlag("notifyEnabled", v)
                         }
+                        aria-label={t("adm.848")}
                       />
                     </div>
 
@@ -11499,6 +11539,7 @@ export default function AdminPage() {
                           onCheckedChange={(v) =>
                             void handleTogglePermission(f.key, v)
                           }
+                          aria-label={t("adm.872")}
                         />
                       </div>
                     ))}
@@ -11813,7 +11854,7 @@ export default function AdminPage() {
                   value={nodeForm.authMode}
                   onValueChange={(v) => setNodeForm((f) => ({ ...f, authMode: v }))}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger aria-label={t("adm.881")}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -11887,7 +11928,7 @@ export default function AdminPage() {
                   value={nodeForm.status}
                   onValueChange={(v) => setNodeForm((f) => ({ ...f, status: v }))}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger aria-label={t("adm.893")}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -12107,6 +12148,7 @@ export default function AdminPage() {
               <Switch
                 checked={proxyForm.enabled}
                 onCheckedChange={(v) => setProxyForm((f) => ({ ...f, enabled: v }))}
+                aria-label={t("adm.919")}
               />
             </div>
           </div>

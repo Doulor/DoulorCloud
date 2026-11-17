@@ -115,7 +115,7 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
   /** 首屏加载失败（用于区分「加载失败」与「真的还没人发言」） */
   const [failed, setFailed] = React.useState(false)
   /**
-   * 聊天室被管理员关闭（后端 403 CHAT_DISABLED）。
+   * 聊天室被管理员关闭（后端 403 CHAT_DISABLED，或功能开关给出的 403 FEATURE_DISABLED）。
    * 置位后**停止一切轮询与心跳** —— 2026-09-30 额度告急时，关闭状态下的
    * 每次轮询虽然只花 1 行读，但完全不发才是最省的。
    */
@@ -485,7 +485,7 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
       window.setTimeout(() => setAnimOn(true), 400)
     } catch (err) {
       // 管理员关了聊天室：进入「已关闭」状态，effect 会据此停掉所有轮询
-      if (err instanceof HttpError && err.code === "CHAT_DISABLED") {
+      if (err instanceof HttpError && (err.code === "CHAT_DISABLED" || err.code === "FEATURE_DISABLED")) {
         setChatOff(true)
         return
       }
@@ -556,7 +556,7 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
       }
     } catch (err) {
       // 管理员关了聊天室：进入「已关闭」状态，effect 会据此停掉所有轮询
-      if (err instanceof HttpError && err.code === "CHAT_DISABLED") {
+      if (err instanceof HttpError && (err.code === "CHAT_DISABLED" || err.code === "FEATURE_DISABLED")) {
         setChatOff(true)
         return
       }
@@ -1118,7 +1118,7 @@ export default function ChatPage({ embedded = false }: { embedded?: boolean }) {
               <span className="text-xs font-medium text-muted-foreground">
                 {m.nickname || m.username}
               </span>
-              <span className="text-[11px] text-muted-foreground/70">
+              <span className="text-[11px] text-muted-foreground">
                 {relTime(m.createdAt)}
                 {m.editedAt ? ` · ${t("chat.edited")}` : ""}
               </span>

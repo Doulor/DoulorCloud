@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label"
 import { SkeletonCards } from "@/components/skeletons"
 import { useAuth } from "@/hooks/use-auth"
 import { localeOf, useT } from "@/i18n"
+import { useFeatures } from "@/hooks/use-features"
 import { setVisibleInterval } from "@/lib/visible-interval"
 import { cn } from "@/lib/utils"
 import { isAdminRole } from "@/components/collection-nav"
@@ -218,8 +219,13 @@ export default function CollectionInvestPage() {
     setBoardMe(lb.me)
   }, [range])
 
+  /** 功能开关：游戏关掉后不再 3 秒轮询（见下方 effect 的守卫） */
+  const { isOn } = useFeatures()
+
   // ---- 状态轮询（同时驱动行情的推进与强平）----
   React.useEffect(() => {
+    // 功能开关：游戏关掉后不要再 3 秒一次地打 /state（它还会推进并写库）
+    if (!isOn("game")) return
     aliveRef.current = true
     const tick = async () => {
       try {
@@ -563,7 +569,7 @@ export default function CollectionInvestPage() {
         <div className="flex items-end gap-6">
           {/* 鼠标悬停给出「对手盘的钱是哪来的」—— 这句话很长，放在顶栏会撑破布局 */}
           <div className="text-right" title={t("inv.poolHint")}>
-            <p className="text-[11px] uppercase tracking-wide text-muted-foreground/70">
+            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
               {t("inv.pool")}
             </p>
             <p className="text-lg font-medium tabular-nums">{nf(state.pool.balance)}</p>
@@ -572,7 +578,7 @@ export default function CollectionInvestPage() {
             </p>
           </div>
           <div className="text-right">
-            <p className="text-[11px] uppercase tracking-wide text-muted-foreground/70">
+            <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
               {t("inv.balance").replace("{n}", coin)}
             </p>
             <p className="text-lg font-medium tabular-nums">{nf(balance)}</p>
@@ -602,7 +608,7 @@ export default function CollectionInvestPage() {
       </div>
 
       {failed && (
-        <p className="px-1 text-xs text-amber-600 dark:text-amber-400">
+        <p className="px-1 text-xs text-amber-700 dark:text-amber-400">
           {t("col.loadFailedDesc")}
         </p>
       )}
@@ -665,7 +671,7 @@ export default function CollectionInvestPage() {
                 className={cn(
                   "rounded-xl border py-2.5 text-sm font-medium transition-all",
                   side === "long"
-                    ? "border-emerald-500 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                    ? "border-emerald-500 bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
                     : "border-border text-muted-foreground hover:bg-accent/60"
                 )}
               >
@@ -696,7 +702,7 @@ export default function CollectionInvestPage() {
                 <span
                   className={cn(
                     "text-[11px]",
-                    marginMode === "cross" ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"
+                    marginMode === "cross" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"
                   )}
                 >
                   {marginMode === "cross" ? t("inv.modeCrossHint") : t("inv.modeIsolatedHint")}
@@ -859,7 +865,7 @@ export default function CollectionInvestPage() {
               )}
             >
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                <span className="font-medium text-amber-600 dark:text-amber-400">
+                <span className="font-medium text-amber-700 dark:text-amber-400">
                   {t("inv.crossAccount")}
                 </span>
                 <span className="text-muted-foreground">
@@ -876,12 +882,12 @@ export default function CollectionInvestPage() {
                 </span>
                 <span className="text-muted-foreground">
                   {t("inv.crossShortfall")}{" "}
-                  <span className="tabular-nums text-amber-600 dark:text-amber-400">
+                  <span className="tabular-nums text-amber-700 dark:text-amber-400">
                     {nf(state.cross.shortfall)}
                   </span>
                 </span>
               </div>
-              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground/80">
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
                 {t("inv.crossExplain")}
               </p>
             </div>
@@ -889,7 +895,7 @@ export default function CollectionInvestPage() {
           {state.me.positions.length === 0 ? (
             <div className="px-4 py-8 text-center">
               <p className="text-sm text-muted-foreground">{t("inv.noPositions")}</p>
-              <p className="mt-1 text-xs text-muted-foreground/70">{t("inv.noPositionsDesc")}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{t("inv.noPositionsDesc")}</p>
             </div>
           ) : (
             <div className="divide-y">
@@ -1198,7 +1204,7 @@ function Row({ label, value, tone }: { label: string; value: string; tone?: "lon
       <span
         className={cn(
           "tabular-nums",
-          tone === "long" && "text-emerald-600 dark:text-emerald-400",
+          tone === "long" && "text-emerald-700 dark:text-emerald-400",
           tone === "short" && "text-rose-600 dark:text-rose-400"
         )}
       >
@@ -1294,7 +1300,7 @@ function TradeRow({
           className={cn(
             "font-normal",
             long
-              ? "border-emerald-500/50 text-emerald-600 dark:text-emerald-400"
+              ? "border-emerald-500/50 text-emerald-700 dark:text-emerald-400"
               : "border-rose-500/50 text-rose-600 dark:text-rose-400"
           )}
         >
@@ -1318,11 +1324,11 @@ function TradeRow({
               {t("inv.feeShort")} {formatNum(opened.fee, locale)}
             </span>
             {adds > 0 && (
-              <span className="text-[10px] text-muted-foreground/70">
+              <span className="text-[10px] text-muted-foreground">
                 {t("inv.addedTimes", { n: adds })}
               </span>
             )}
-            <span className="text-muted-foreground/70">{shortTime(opened.createdAt, locale)}</span>
+            <span className="text-muted-foreground">{shortTime(opened.createdAt, locale)}</span>
           </span>
         ) : (
           <span className="text-muted-foreground/60">{t("inv.legMissing")}</span>
@@ -1354,7 +1360,7 @@ function TradeRow({
                 {t("inv.breakEven")} {breakEven.toFixed(4)}
               </span>
             )}
-            <span className="text-muted-foreground/70">{shortTime(close.createdAt, locale)}</span>
+            <span className="text-muted-foreground">{shortTime(close.createdAt, locale)}</span>
           </span>
         ) : (
           <span className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-muted-foreground">
@@ -1417,7 +1423,7 @@ function PositionRow({
           variant="outline"
           className={cn(
             "font-normal",
-            long ? "border-emerald-500/50 text-emerald-600 dark:text-emerald-400" : "border-rose-500/50 text-rose-600 dark:text-rose-400"
+            long ? "border-emerald-500/50 text-emerald-700 dark:text-emerald-400" : "border-rose-500/50 text-rose-600 dark:text-rose-400"
           )}
         >
           {long ? t("inv.sideLong") : t("inv.sideShort")} {formatLeverage(p.leverage)}x
@@ -1427,7 +1433,7 @@ function PositionRow({
           className={cn(
             "text-[10px]",
             p.marginMode === "cross"
-              ? "text-amber-600 dark:text-amber-400"
+              ? "text-amber-700 dark:text-amber-400"
               : "text-muted-foreground/60"
           )}
           title={p.marginMode === "cross" ? t("inv.modeCrossDesc") : t("inv.modeIsolatedDesc")}
@@ -1511,7 +1517,7 @@ function Cell({
       <span
         className={cn(
           "block tabular-nums",
-          tone === "warn" && "text-amber-600 dark:text-amber-400"
+          tone === "warn" && "text-amber-700 dark:text-amber-400"
         )}
       >
         {value}

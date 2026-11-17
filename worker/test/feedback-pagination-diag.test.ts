@@ -11,9 +11,9 @@
  *   D. POST /feedback 带 diagLogId：本人日志能挂上（detail 里查得到），
  *      别人的日志 id 被忽略（diagLog 为 null）。
  */
-import { describe, expect, it, beforeAll } from "vitest"
+import { describe, expect, it, beforeAll, beforeEach } from "vitest"
 import { env } from "cloudflare:workers"
-import { fetchSelf, makeUser, authRequest } from "./helpers"
+import { fetchSelf, makeUser, authRequest, setSetting } from "./helpers"
 import { uuid } from "../src/crypto"
 
 async function seedFeedback(userId: string, i: number, extra?: { diagLogId?: string }) {
@@ -38,6 +38,16 @@ async function seedFeedback(userId: string, i: number, extra?: { diagLogId?: str
 let admin: { id: string; username: string; cookie: string }
 let user: { id: string; username: string; cookie: string }
 let other: { id: string; username: string; cookie: string }
+
+/**
+ * 诊断日志上传受功能开关控制（默认关）；本文件测的是「打开后」的行为。
+ *
+ * ⚠️ 必须放 beforeEach：vitest 的 isolatedStorage 每个用例一份库快照，
+ * beforeAll 里写的设置行在用例里读不到（会表现为「设置了却仍 403」）。
+ */
+beforeEach(async () => {
+  await setSetting("diag_log_enabled", "1")
+})
 
 beforeAll(async () => {
   admin = await makeUser({ role: "root" })

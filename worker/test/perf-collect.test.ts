@@ -7,9 +7,9 @@
  *   C. 脏数据防御：page 为空 / 非法值被钳制或丢弃，一律静默 204 不抛错；
  *   D. GET /admin/perf/overview 聚合正确；scope=perf 之外的管理员 403。
  */
-import { describe, expect, it, beforeAll } from "vitest"
+import { describe, expect, it, beforeAll, beforeEach } from "vitest"
 import { env } from "cloudflare:workers"
-import { fetchSelf, makeUser, authRequest } from "./helpers"
+import { fetchSelf, makeUser, authRequest, setSetting } from "./helpers"
 
 let admin: { id: string; username: string; cookie: string }
 let user: { id: string; username: string; cookie: string }
@@ -17,6 +17,15 @@ let user: { id: string; username: string; cookie: string }
 beforeAll(async () => {
   admin = await makeUser({ role: "root" })
   user = await makeUser({})
+})
+
+beforeEach(async () => {
+  // 采集端的**功能开关**默认是关的（perf_collect_enabled=0，见 settings.ts）。
+  // 这条用例测的是「打开后能收」，所以显式打开；关闭时的 403 由 feature-switches 用例守。
+  //
+  // ⚠️ 必须放 beforeEach 而不是 beforeAll：vitest 的 isolatedStorage 会给**每个用例**
+  // 一份独立的库快照，beforeAll 里写的行在用例里读不到（表现为「设置了却仍 403」）。
+  await setSetting("perf_collect_enabled", "1")
 })
 
 /** 给 admin 直写 admin_scope（resolveAdminScope 读的是这列，不是 permissions） */

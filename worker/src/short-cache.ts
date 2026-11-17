@@ -24,6 +24,18 @@ const store = new Map<string, Entry>()
 /** 粗暴上限：isolate 长跑时别把内存吃光（这里本就该是短命数据，清空比 LRU 简单） */
 const MAX_ENTRIES = 5_000
 
+/**
+ * 主动失效（2026-11-16，功能开关用）。
+ *
+ * 为什么需要：功能开关改完必须**立刻**在同一个 isolate 生效 —— 等 10 秒 TTL
+ * 会让管理员以为「点了没反应」，于是重复点、换页面看，反而把设置写来写去。
+ * 只删指定 key；不传 key 时清空（调试用，别在请求路径上调）。
+ */
+export function invalidateCache(key?: string): void {
+  if (key === undefined) store.clear()
+  else store.delete(key)
+}
+
 export async function cached<T>(
   key: string,
   ttlMs: number,

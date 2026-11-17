@@ -1534,6 +1534,54 @@ export const adminApi = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+
+  // ---- 功能开关（2026-11-16）----
+  // 关掉 = 后端把所有入口拦成 403 + 停掉对应后台任务，不只是隐藏前端入口。
+  listFeatures: () => request<FeatureSwitchesResponse>("/admin/features"),
+  updateFeatures: (updates: Record<string, boolean>, note?: string) =>
+    request<{
+      ok: boolean
+      changed: { id: string; label: string; enabled: boolean }[]
+      features: FeatureSwitchItem[]
+    }>("/admin/features", {
+      method: "PUT",
+      body: JSON.stringify({ updates, note }),
+    }),
+}
+
+// ---- 功能开关（2026-11-16）：管理端形状 + 公开状态 ----
+
+/** 一条功能开关（与 worker/src/handlers/admin-features.ts 的 publicDef 对齐） */
+export interface FeatureSwitchItem {
+  id: string
+  label: string
+  group: string
+  settingKey: string
+  /** 关掉之后会发生什么（后端给的原文，前端不重写） */
+  impact: string
+  /** 额度提示：这个开关能省哪一块 */
+  costHint: string
+  enabled: boolean
+  /** 这条开关会拦下多少个接口前缀 */
+  routeCount: number
+  /** 关掉后会停掉几个后台任务 */
+  jobCount: number
+}
+
+export interface FeatureSwitchGroup {
+  key: string
+  label: string
+}
+
+export interface FeatureSwitchesResponse {
+  groups: FeatureSwitchGroup[]
+  features: FeatureSwitchItem[]
+  at: string
+}
+
+/** 公开状态：前端据此隐藏入口、停止轮询（未登录也可读） */
+export const featuresApi = {
+  states: () => request<{ states: Record<string, boolean>; at: string }>("/features"),
 }
 
 // ---- 账户设置（真实邮箱验证 / 改名 / 改邮箱 / 通知开关）----
@@ -2039,10 +2087,20 @@ export const emailApi = {
   // M16：邮件列表改为游标分页。不传 cursor 时行为与修复前一致（第一页 100 条），
   // 但会额外返回 nextCursor —— 非 null 表示还有更旧的邮件可以继续取。
   //   limit：收件箱轮询时传个小值（只关心「有没有新邮件」），不传则后端默认 100。
-  listMessages: (mailboxId: string, cursor?: string | null, limit?: number) => {
+  listMessages: (
+    mailboxId: string,
+    cursor?: string | null,
+    limit?: number,
+    q?: string,
+    folder?: "inbox" | "sent" | "trash"
+  ) => {
     const qs = new URLSearchParams()
     if (cursor) qs.set("cursor", cursor)
     if (limit) qs.set("limit", String(limit))
+    // 服务端文件夹：不传就是 inbox（2026-11-13 加，配合「已发送」）
+    if (folder && folder !== "inbox") qs.set("folder", folder)
+    // 服务端搜索：不传就只按时间倒序返回（2026-11-13）
+    if (q && q.trim()) qs.set("q", q.trim())
     const query = qs.toString()
     return request<{ messages: MailMessage[]; nextCursor: string | null }>(
       `/mailbox/${mailboxId}/messages${query ? `?${query}` : ""}`
@@ -2062,9 +2120,24 @@ export const emailApi = {
   markAllRead: () =>
     request<{ updated: number }>("/mailbox/read-all", { method: "POST" }),
 
-  deleteMessage: (mailboxId: string, messageId: string) =>
-    request<void>(`/mailbox/${mailboxId}/messages/${messageId}`, {
-      method: "DELETE",
+  /**
+   * 删除邮件（2026-11-13 起是「移到回收站」）。
+   * `purge = true` 才真正删掉 —— 回收站里点「彻底删除」时用。
+   */
+  deleteMessage: (mailboxId: string, messageId: string, purge = false) =>
+    request<void>(
+      `/mailbox/${mailboxId}/messages/${messageId}${purge ? "?purge=1" : ""}`,
+      { method: "DELETE" }
+    ),
+
+  /** 清空回收站（2026-11-13，不可恢复） */
+  purgeTrash: (mailboxId: string) =>
+    request<{ deleted: number }>(`/mailbox/${mailboxId}/messages/purge-trash`, { method: "POST" }),
+
+  /** 从回收站恢复（2026-11-13） */
+  restoreMessage: (mailboxId: string, messageId: string) =>
+    request<{ ok: boolean }>(`/mailbox/${mailboxId}/messages/${messageId}/restore`, {
+      method: "POST",
     }),
 
   /** 批量删除邮件（收件箱多选删除） */
@@ -2100,8 +2173,116 @@ export const emailApi = {
       mailbox: string
       receivedAt: string
     } | null>(`/mailbox/latest-unread?lang=${encodeURIComponent(lang)}`),
+
+  /**
+   * 最近 5 分钟内最新一封邮件里的**验证码**（概览页一键复制用）。
+   * 返回 `null` = 现在没有可复制的码（没邮件 / 有邮件但没码），前端整块隐藏。
+   */
+  recentCode: () =>
+    request<{
+      code: string
+      /** 短来源名（「谷歌: 97424」里的「谷歌」） */
+      source: string
+      subject: string
+      from: string
+      mailboxId: string
+      mailboxAddress: string
+      messageId: string
+      receivedAt: string
+    } | null>("/mailbox/recent-code"),
 }
 
+/**
+ * 第三方邮箱账号（2026-11-12）。
+ *
+ * 注意：这类账号在库里也是 `mailboxes` 的一行，所以**读信仍然用 `emailApi`**
+ * （`/mailbox/:id/messages`），这组接口只负责「账号本身的增删与同步」。
+ */
+export interface ExternalMailAccount {
+  /** 显示顺序（2026-11-13）：与域名邮箱混排时的依据 */
+  sortOrder?: number
+  id: string
+  address: string
+  provider: string
+  syncState: "idle" | "syncing" | "error" | "reauth" | "disabled"
+  lastSyncAt: string | null
+  lastError: string | null
+  backlog: number
+  unread: number
+  createdAt: string
+}
+
+export const mailAccountsApi = {
+  list: () => request<{ accounts: ExternalMailAccount[]; canAdd?: boolean }>("/mail/accounts"),
+
+  create: (payload: {
+    provider: string
+    address: string
+    /** 授权码 / 应用专用密码（Outlook 不传，走 OAuth） */
+    secret?: string
+    /** 仅 provider=imap 时需要，形如 imap.example.com:993 */
+    imapServer?: string
+    displayName?: string
+  }) =>
+    request<{
+      account: ExternalMailAccount
+      sync: { status: string; inserted: number; error?: string }
+    }>("/mail/accounts", { method: "POST", body: JSON.stringify(payload) }),
+
+  /**
+   * 保存账号显示顺序（2026-11-13）。
+   * `ids` 的数组下标就是新顺序；服务端写进 `mailboxes.sort_order`，网页和 App 共用。
+   */
+  reorder: (ids: string[]) =>
+    request<{ ok: true; count: number }>("/mail/accounts/order", {
+      method: "PATCH",
+      body: JSON.stringify({ ids }),
+    }),
+  /**
+   * 往回补更早的邮件（2026-11-13）：首次同步只导入了最近 N 封，这里一次再拉 20 封更早的。
+   * 第一次点击可能较快（只补一页），QQ 那种几千封的邮箱需要多点几次，这是有意的：
+   * 单次执行有时间上限，一次拉太多会整轮失败。
+   */
+  syncOlder: (id: string) =>
+    request<{ sync: { status: string; inserted: number; fetched: number; error?: string } }>(
+      `/mail/accounts/${encodeURIComponent(id)}/sync?older=1`,
+      { method: "POST" }
+    ),
+  sync: (id: string) =>
+    request<{
+      sync: { status: string; inserted: number; fetched: number; error?: string }
+    }>(`/mail/accounts/${encodeURIComponent(id)}/sync`, { method: "POST" }),
+
+  /**
+   * 用第三方账号发信（2026-11-13）。
+   * Outlook 走 Graph sendMail，Gmail/QQ/自定义 IMAP 走 SMTP；两种都由服务端判断。
+   */
+  send: (id: string, payload: { to: string; subject: string; text: string }) =>
+    request<{ ok: true }>(`/mail/accounts/${encodeURIComponent(id)}/send`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /** 自助测试推送：返回网页 / 原生两个通道各自的成功数（2026-11-13） */
+  testPush: () => request<{ web: number; native: number }>("/mail/test-push", { method: "POST" }),
+
+  remove: (id: string) =>
+    request<{ ok: boolean }>(`/mail/accounts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+}
+
+/**
+ * 邮箱 API 读写开关（2026-11-12）。状态在云端，网页与 APK 看到的是同一个值。
+ */
+export const mailApiAccessApi = {
+  get: () => request<{ enabled: boolean }>("/mail/api-settings"),
+  set: (enabled: boolean) =>
+    request<{ enabled: boolean }>("/mail/api-settings", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+}
 // ---- 个人名片 ----
 
 export const profileApi = {

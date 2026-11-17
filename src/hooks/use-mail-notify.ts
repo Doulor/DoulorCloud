@@ -8,6 +8,8 @@ import {
   showSystemNotification,
 } from "@/lib/web-notify"
 import { useT } from "@/i18n"
+import { isNativeApp } from "@/lib/mail/native-push"
+import { useFeatures } from "./use-features"
 
 /** 轮询间隔：与站内消息通知一致（1 分钟）。 */
 const POLL_MS = 60_000
@@ -34,6 +36,8 @@ const SEEN_KEY = "doulor-notified-mail"
  */
 export function useMailNotify() {
   const { lang } = useT()
+  /** 功能开关：邮箱中心关掉后连这条 60s 轮询也停掉（它本身也是一次请求） */
+  const { isOn } = useFeatures()
   const [permission, setPermission] = React.useState<NotificationPermission | "unsupported">(
     () => readPermission()
   )
@@ -72,6 +76,9 @@ export function useMailNotify() {
 
   React.useEffect(() => {
     if (!ready) return
+    // APK 内由 FCM 原生推送负责（含应用关闭的场景），这里再弹就是重复通知
+    if (isNativeApp()) return
+    if (!isOn("mail")) return
     let stopped = false
 
     const tick = async () => {
@@ -102,7 +109,7 @@ export function useMailNotify() {
       stopped = true
       window.clearInterval(timer)
     }
-  }, [ready, lang])
+  }, [ready, lang, isOn])
 
   return { permission }
 }

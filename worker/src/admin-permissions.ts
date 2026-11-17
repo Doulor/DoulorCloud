@@ -195,6 +195,10 @@ export const ADMIN_PERMISSIONS: AdminPermCategory[] = [
   { key: "permissions", label: "管理员角色与授权", group: "system" },
   { key: "mail", label: "邮件", group: "system" },
   { key: "settings", label: "全局设置", group: "system" },
+  // 功能开关（2026-11-16）：一键关掉整站某个功能（含其后端入口与后台任务）。
+  // 单独一个 scope 而不并进 settings：这个开关**会让用户当场用不了功能**，
+  // 影响面比「改一个全局参数」大得多，授权面应当可以更窄。
+  { key: "features", label: "功能开关", group: "system" },
   { key: "api", label: "开放 API", group: "system" },
   // 性能监控工具（2026-10-10）：看全站真实用户性能样本（RUM），定位「哪个页面卡」。
   // 单独一个 scope 而不并进 analytics：样本是纯技术排障数据，授予面可以比

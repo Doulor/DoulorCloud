@@ -74,7 +74,9 @@ import { onAttentionChanged } from "@/lib/attention-events"
 import { idlePreload, preloadRoute } from "@/lib/route-preload"
 import { SlidingPill } from "@/components/motion/sliding-pill"
 import { MailNotifyWatcher } from "@/hooks/use-mail-notify"
+import { useFeatures } from "@/hooks/use-features"
 import { MessageNotifyWatcher } from "@/hooks/use-message-notify"
+import { NotifyAutoStart } from "@/lib/notify-autostart"
 import { toast } from "sonner"
 
 /** 角标轮询间隔（社区/聊天室/反馈/管理共用一次请求） */
@@ -105,6 +107,28 @@ const baseNav = [
  * 反馈是给意见），放一起符合直觉；而它比捐献更常用，位置高一点更好点到。
  */
 const settingsNav = { to: "/dashboard/settings", labelKey: "nav.settings", icon: Settings, end: false }
+
+/**
+ * 侧边栏入口 → 功能开关 id（2026-11-16）。
+ *
+ * 没列出的入口（概览 / 域名 / 工具箱 / 设置 / 管理）永远显示 —— 它们是账户底座，
+ * 关掉会让用户找不到「怎么重新打开」的入口。功能被关时这里只是**不渲染入口**，
+ * 真正的拦截在后端（403 FEATURE_DISABLED），前端藏与不藏都不影响额度。
+ */
+const NAV_FEATURE: Record<string, string> = {
+  "/dashboard/email": "mail",
+  "/dashboard/storage": "storage",
+  "/dashboard/ai": "ai",
+  "/dashboard/frp": "frp",
+  "/dashboard/proxy": "proxy",
+  "/dashboard/profile": "profile",
+  "/dashboard/community": "community",
+  "/dashboard/lab": "lab",
+  "/dashboard/gallery": "gallery",
+  "/dashboard/feedback": "feedback",
+  "/dashboard/donations": "donations",
+  "/dashboard/points": "points",
+}
 const adminNav = { to: "/dashboard/admin", labelKey: "nav.admin", icon: ShieldCheck, end: false }
 // 「成就」不再占侧边栏位置，收进右下角账户菜单（排在「个人空间」上方）。
 // 侧边栏底部队列只留更常用的入口，成就属于「偶尔看一眼」的荣誉页。
@@ -317,6 +341,13 @@ export function DashboardLayout({
 
   // root / superadmin / admin 都显示管理入口（admin 权限由白名单逐项控制）
   const isAdmin = user?.role === "admin" || user?.role === "superadmin" || user?.role === "root"
+
+  // 功能开关：关掉的功能连入口一起收起（键见 NAV_FEATURE）
+  const { isOn } = useFeatures()
+  const onFeature = (to: string): boolean => {
+    const id = NAV_FEATURE[to]
+    return !id || isOn(id)
+  }
   // 底部队列（自上而下）：反馈 → 捐献 → 积分与商城 → 管理（仅管理员）→ 设置
   // 即「从下往上」为 设置 → 管理 → 积分与商城 → 捐献 → 反馈，设置紧贴账户信息。
   // 「成就」已移入右下角账户菜单（个人空间上方），不再占侧边栏位置。
@@ -340,7 +371,10 @@ export function DashboardLayout({
    *   · 移动端不做（idlePreload 内部判断 hover 能力），免得替用户花流量。
    */
   React.useEffect(() => {
-    const paths = [...baseNav.map((n) => n.to), ...bottomNav.map((n) => n.to)]
+    const paths = [
+      ...baseNav.filter((n) => onFeature(n.to)).map((n) => n.to),
+      ...bottomNav.filter((n) => onFeature(n.to)).map((n) => n.to),
+    ]
     return idlePreload(paths)
     // bottomNav 只随 isAdmin 变化；baseNav 是模块级常量，永远不变
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -430,7 +464,7 @@ export function DashboardLayout({
               // 本站是黑白灰极简风（主题色均为无彩色），不用大红色，避免突兀。
               item.to === "/dashboard/admin"
                 ? "bg-primary text-primary-foreground"
-                : "bg-muted text-muted-foreground"
+                : "bg-muted text-foreground/80"
             )}
           >
             {badgeFor(item.to) > 99 ? "99+" : badgeFor(item.to)}
@@ -604,6 +638,8 @@ export function DashboardLayout({
       <MailNotifyWatcher />
       {/* 站内消息/通知的系统通知：同样常驻（以前只在设置页那张卡里轮询，等于收不到） */}
       <MessageNotifyWatcher />
+      {/* 通知"默认开启"：首次进站用一次用户手势顺带申请权限 + 建立 Web Push 订阅 */}
+      <NotifyAutoStart />
       {/* 这层刻意不铺 bg-background：底色由 body 提供，云纹背景画在 body 上，
           这里再铺一次不透明色就会把它整块盖住。
           侧边栏用 glass-sidebar（轻度档，与卡片同档）—— 原为不透明的 bg-card。 */}
@@ -682,7 +718,7 @@ export function DashboardLayout({
         {user && user.emailVerified === false && (
           <div className="border-b border-amber-500/30 bg-amber-50 dark:bg-amber-950/40">
             <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 lg:px-8">
-              <Mail className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+              <Mail className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" />
               <p className="min-w-0 flex-1 text-sm text-amber-800 dark:text-amber-200">
                 {t("lay.verifyBanner.a")}
                 <span className="font-mono">{user.email}</span>

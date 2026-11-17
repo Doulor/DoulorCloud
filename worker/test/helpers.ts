@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers"
 import { createSession, sessionCookie } from "../src/auth"
 import { hashPassword, uuid } from "../src/crypto"
 import { ADMIN_PERMISSIONS } from "../src/admin-permissions"
+import { invalidateFeatureStates } from "../src/features"
 
 export interface TestUser {
   id: string
@@ -90,6 +91,9 @@ export function authRequest(
  * 用于测试那些「读库即时生效」的全局开关（如 open_features）。
  */
 export async function setSetting(key: string, value: string): Promise<void> {
+  // 功能开关的状态在 isolates 内缓存 10 秒（见 features.ts）。测试里改完设置必须
+  // 立刻失效，否则「刚关掉的功能」在下一个请求仍然放行，用例会随机失败。
+  invalidateFeatureStates()
   await env.DB.prepare(
     `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
