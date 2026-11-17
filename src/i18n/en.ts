@@ -8911,4 +8911,5 @@ export const en: Record<MessageKey, string> = {
   "ftog.confirmTitle": "Disable “{v0}”?",
   "ftog.confirmDesc": "This applies immediately to all users. Make sure you understand the impact:",
   "ftog.confirmBtn": "Disable",
+  "ftog.defaultOff": "Off by default before",
 }

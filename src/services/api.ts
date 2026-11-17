@@ -1562,6 +1562,8 @@ export interface FeatureSwitchItem {
   /** 额度提示：这个开关能省哪一块 */
   costHint: string
   enabled: boolean
+  /** 改造前的默认状态：false 表示「历史上就是关的」（聊天室 / 性能采集 / 诊断日志） */
+  defaultEnabled: boolean
   /** 这条开关会拦下多少个接口前缀 */
   routeCount: number
   /** 关掉后会停掉几个后台任务 */

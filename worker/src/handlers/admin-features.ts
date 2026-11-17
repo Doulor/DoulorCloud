@@ -23,6 +23,7 @@ import { updateSettings, audit } from "../settings"
 import {
   FEATURE_DEFS,
   FEATURE_GROUPS,
+  defaultEnabledOf,
   featureById,
   getFeatureStates,
   invalidateFeatureStates,
@@ -40,6 +41,8 @@ function publicDef(f: FeatureDef, states: Record<string, boolean>) {
     impact: f.impact,
     costHint: f.costHint,
     enabled: states[f.id] !== false,
+    /** 改造前的默认状态（用于在面板上标注「历史上就是关的」） */
+    defaultEnabled: defaultEnabledOf(f),
     /** 这条开关会拦下多少个接口前缀（给管理员一个「关掉影响面」的直观数字） */
     routeCount: f.routes.length,
     /** 关掉后会停掉几个后台任务 */

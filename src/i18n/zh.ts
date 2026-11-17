@@ -8771,6 +8771,7 @@ export const zh = {
   "ftog.confirmTitle": "确认关闭「{v0}」？",
   "ftog.confirmDesc": "关闭后立即生效，且对所有用户生效。请确认你了解下面的后果：",
   "ftog.confirmBtn": "确认关闭",
+  "ftog.defaultOff": "改造前默认关",
 } as const
 
 export type MessageKey = keyof typeof zh

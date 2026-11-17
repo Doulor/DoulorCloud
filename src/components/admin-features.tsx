@@ -153,6 +153,11 @@ export function AdminFeaturesPanel() {
                         {f.settingKey}
                       </code>
                       {!f.enabled && <Badge variant="destructive">{t("ftog.offBadge")}</Badge>}
+                      {/* 改造前默认就是关的（聊天室/性能采集/诊断日志）：提示管理员
+                          「全部打开」会把它们真正打开，而不是「什么都没变」 */}
+                      {!f.defaultEnabled && (
+                        <Badge variant="outline">{t("ftog.defaultOff")}</Badge>
+                      )}
                     </div>
                     <p className="text-xs leading-relaxed text-muted-foreground">{f.impact}</p>
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">

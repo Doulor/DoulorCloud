@@ -547,6 +547,16 @@ function isOn(raw: string): boolean {
   return raw === "1" || raw.toLowerCase() === "true"
 }
 
+/**
+ * 这个开关在**改造前**的默认状态（读 SETTING_DEFAULTS，不看库）。
+ *
+ * 用途：管理面板要能标出「改造前本来就是关的」那三个（聊天室 / 性能采集 / 诊断日志）——
+ * 否则管理员点「全部打开」会以为「什么都没变」，实际上是把这三项重新打开了。
+ */
+export function defaultEnabledOf(f: FeatureDef): boolean {
+  return isOn(SETTING_DEFAULTS[f.settingKey])
+}
+
 /** 读全部功能状态（一次查询 + 10 秒进程内缓存） */
 export async function getFeatureStates(env: Env): Promise<FeatureStates> {
   return cached<FeatureStates>(CACHE_KEY, CACHE_MS, async () => {
